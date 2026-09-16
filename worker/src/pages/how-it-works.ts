@@ -1,96 +1,94 @@
 /**
- * How it works: where the packages come from, what happens to each one, how
- * the rings move, what a user trusts, and why one Server= line is enough.
+ * How it works — the pool's process, documented where it runs: where every
+ * package comes from (each source, its architectures, its keyring, where it
+ * enters), what happens to it before it reaches a machine, what that
+ * protects a user from, and what the pool does for the people who bring
+ * packages in and the people who decide. The diagram is drawn on the server
+ * (diagrams.ts) and its live lines are filled from /api/v1/stats.
  */
 import { page } from "./layout";
+import { sourcesDiagram } from "./diagrams";
 import type { RunningVersion } from "../meta";
 
-/** Flow diagram in the page's own palette (inline SVG, scales with the column). */
-const DIAGRAM = String.raw`
-<svg viewBox="0 0 1320 560" xmlns="http://www.w3.org/2000/svg" font-family="JetBrains Mono, ui-monospace, monospace" font-size="12">
-  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#8b93b8"/></marker></defs>
-  <style>
-    .box{fill:#1f2230;stroke:#2a2e3f;stroke-width:1.2}.src{fill:#13141c;stroke:#2a2e3f}.green{stroke:#9ece6a}.blue{stroke:#7aa2f7}.amber{stroke:#e0af68}
-    .t{fill:#c0caf5;font-family:Geist,sans-serif;font-weight:600;font-size:15px}.s{fill:#a9b1d6}.d{fill:#8b93b8;font-size:11px}.g{fill:#9ece6a}
-    .ln{fill:none;stroke:#8b93b8;stroke-width:1.4;marker-end:url(#a)}
-  </style>
-  <!-- sources -->
-  <rect class="box src" x="20" y="30" width="300" height="66" rx="3"/><text class="t" x="34" y="52">Arch Linux · x86_64</text><text class="s" x="34" y="72">core · extra · multilib</text><text class="d" x="34" y="88">mirror.omarchy.org · archlinux-keyring</text>
-  <rect class="box src" x="20" y="110" width="300" height="66" rx="3"/><text class="t" x="34" y="132">Arch Linux ARM · aarch64</text><text class="s" x="34" y="152">core · extra · alarm</text><text class="d" x="34" y="168">os.archlinuxarm.org · archlinuxarm-keyring</text>
-  <rect class="box src" x="20" y="190" width="300" height="66" rx="3"/><text class="t" x="34" y="212">Omarchy (OPR) · both</text><text class="s" x="34" y="232">the edge channel, then our gates</text><text class="d" x="34" y="248">pkgs.omarchy.org · Omarchy key</text>
-  <rect class="box src" x="20" y="270" width="300" height="66" rx="3"/><text class="t" x="34" y="292">chaotic-aur · x86_64 <tspan class="d">optional</tspan></text><text class="s" x="34" y="312">prebuilt AUR, unclaimed names only</text><text class="d" x="34" y="328">builds.garudalinux.org · chaotic key</text>
-  <rect class="box src blue" x="20" y="350" width="300" height="66" rx="3"/><text class="t" x="34" y="372">Factory · both</text><text class="s" x="34" y="392">contributors build, maintainers approve</text><text class="d" x="34" y="408">staging → edge as source factory</text>
-  <text class="d" x="20" y="446">upstream, read every three hours · the factory, on approval</text>
-  <path class="ln" d="M320 63 L350 63 L350 140 L378 140"/><path class="ln" d="M320 143 L350 143 L350 140 L378 140"/><path class="ln" d="M320 223 L350 223 L350 140 L378 140"/><path class="ln" d="M320 303 L350 303 L350 140 L378 140"/><path class="ln" d="M320 383 L350 383 L350 140 L378 140"/>
-  <!-- verify -->
-  <rect class="box amber" x="380" y="98" width="250" height="84" rx="3"/><text class="t" x="394" y="124">Verify</text><text class="s" x="394" y="146">sha256 from the upstream db</text><text class="s" x="394" y="164">signature by the project's key</text>
-  <path class="ln" d="M630 140 L658 140"/>
-  <!-- pool + index -->
-  <rect class="box green" x="660" y="34" width="330" height="96" rx="3"/><text class="t" x="674" y="58">Pool · R2</text><text class="s" x="674" y="80">one object per sha256, immutable</text><text class="s" x="674" y="98">the package and its upstream .sig</text><text class="d" x="674" y="118">pool/&lt;source&gt;/&lt;arch&gt;/&lt;filename&gt; · never rewritten</text>
-  <rect class="box blue" x="660" y="150" width="330" height="104" rx="3"/><text class="t" x="674" y="174">Index · D1</text><text class="s" x="674" y="196">manifests, dependencies, provides,</text><text class="s" x="674" y="214">loaded sonames, file lists</text><text class="d" x="674" y="240">releases: append-only pinned selections</text>
-  <!-- security -->
-  <path class="ln" d="M825 254 L825 268"/>
-  <rect class="box amber" x="660" y="270" width="330" height="84" rx="3"/><text class="t" x="674" y="294">Security · every 3 h</text><text class="s" x="674" y="314">Arch + Debian trackers, CISA KEV, EPSS</text><text class="s" x="674" y="332">advisories follow the dependency graph</text><text class="d" x="674" y="348">clean newer version in edge → fast-track</text>
-  <path class="ln" d="M990 312 L1028 312 L1028 229 L1038 229"/>
-  <!-- rings -->
-  <path class="ln" d="M990 202 L1015 202 L1015 189 L1038 189"/>
-  <rect class="box" x="1040" y="40" width="260" height="58" rx="3"/><text class="t" x="1054" y="62">edge</text><text class="s" x="1054" y="84">follows upstream, every 3 h</text>
-  <rect class="box" x="1040" y="120" width="260" height="58" rx="3"/><text class="t" x="1054" y="142">rc</text><text class="s" x="1054" y="164">daily · health + ABI checks</text>
-  <rect class="box green" x="1040" y="200" width="260" height="58" rx="3"/><text class="t" x="1054" y="222">stable <tspan class="g" font-size="11">recommended</tspan></text><text class="s" x="1054" y="244">two green checks · auto rollback</text>
-  <path class="ln" d="M1170 98 L1170 118"/><path class="ln" d="M1170 178 L1170 198"/>
-  <text class="d" x="1040" y="284">a ring = a pinned selection;</text><text class="d" x="1040" y="298">promotion = index write, no bytes copied</text>
-  <text class="d" x="1040" y="330">edge → rc → stable: 48 hours,</text><text class="d" x="1040" y="344">evidence-gated, rolled back on failure</text>
-  <!-- render -->
-  <rect class="box" x="660" y="380" width="330" height="70" rx="3"/><text class="t" x="674" y="404">Render + sign</text><text class="s" x="674" y="424">omarchy-&lt;source&gt;-&lt;ring&gt;.db + .files</text><text class="s" x="674" y="440">per arch, beside the packages</text>
-  <path class="ln" d="M1040 229 L1015 229 L1015 415 L992 415"/>
-  <text class="d" x="660" y="476">the pool's own scheduler decides when; project workers anywhere do the work</text>
-  <!-- user -->
-  <path class="ln" d="M660 415 L640 415 L640 503 L632 503"/>
-  <rect class="box green" x="330" y="470" width="300" height="66" rx="3"/><text class="t" x="344" y="492">Your machine · pacman</text><text class="s" x="344" y="512">[omarchy-core-stable] → pool/core/$arch</text><text class="d" x="344" y="528">plain HTTP · static files · signed dbs</text>
-  <text class="d" x="20" y="494">one Server = line,</text><text class="d" x="20" y="509">both architectures,</text><text class="d" x="20" y="524">the ring you choose</text>
-</svg>`;
-
-const BODY = String.raw`
+function body(pool: string): string {
+  return String.raw`
   <h1>How it works</h1>
-  <p class="lede">Packages come from the projects that build them, are verified, stored once, and served in rings that only move forward on evidence. Nothing is rebuilt or re-signed; what changes is <em>when</em> a package reaches you and <em>what was checked</em> before it did.</p>
+  <p class="lede">Packages come from the projects that build them, are verified against those projects' keys, stored once, and served in rings that only move forward on evidence. Nothing is rebuilt or re-signed; what changes is <em>when</em> a package reaches you and <em>what was checked</em> before it did. The pool verifies and validates — it does not choose whom to believe: no source, not Arch, not Omarchy, not the pool's own factory, reaches <code>rc</code> or <code>stable</code> on its name.</p>
 
-  <div class="chart" style="padding:18px">${DIAGRAM}</div>
+  <div class="chart" style="padding:18px">${sourcesDiagram()}</div>
 
-  <section>
-    <h2>Where the packages come from</h2>
-    <p class="sub">The pool mirrors the repositories below. Every package must carry a signature by a key in that project's keyring; unsigned or mismatching packages never enter.</p>
-    <div class="table-wrap"><table><thead><tr><th>Source</th><th>Architecture</th><th>Repositories</th><th>Verified against</th></tr></thead><tbody>
-      <tr><td>Arch Linux (via the Omarchy mirror)</td><td>x86_64</td><td><code>core</code> <code>extra</code> <code>multilib</code></td><td><code>archlinux-keyring</code></td></tr>
-      <tr><td>Arch Linux ARM</td><td>aarch64</td><td><code>core</code> <code>extra</code> <code>alarm</code></td><td><code>archlinuxarm-keyring</code></td></tr>
-      <tr><td>Omarchy Package Repository (OPR)</td><td>x86_64 · aarch64</td><td><code>omarchy</code> — the OPR's own <code>edge</code> / <code>rc</code> / <code>stable</code> channel goes into the matching ring</td><td>Omarchy's signing key</td></tr>
-      <tr><td>chaotic-aur <span class="muted">(optional)</span></td><td>x86_64</td><td><code>chaotic-aur</code>: prebuilt AUR packages; only names no other source provides, so Arch and the OPR always win</td><td><code>chaotic-keyring</code></td></tr>
-      <tr><td>The factory</td><td>x86_64 · aarch64</td><td><code>factory</code>: what no source above ships — built from PKGBUILDs reviewed in the repository by ephemeral workers that pull tasks from the pool; today, the OPR names that exist only for x86_64, built for aarch64 (<a href="/factory">Factory</a>)</td><td>the pool's own key</td></tr>
+  <section id="sources">
+    <h2>Where every package comes from</h2>
+    <p class="sub">Every three hours a sync reads each source's database, downloads what is new and verifies its signature against that project's keyring — a package that does not verify never enters. It is stored once, in the source's own directory (<code>&lt;source&gt;/&lt;architecture&gt;/&lt;file&gt;</code>): two projects' builds of the same file name are two objects in two directories, and the order of the sections in your <code>pacman.conf</code> decides which one you get, exactly as with any set of mirrors.</p>
+    <div class="table-wrap"><table><thead><tr><th>Source</th><th>Project</th><th>Architecture</th><th>Signed with</th><th>Enters</th><th>Note</th></tr></thead><tbody>
+      <tr><td><code>core</code> <code>extra</code> <code>multilib</code></td><td>Arch Linux, from <code>mirror.omarchy.org</code></td><td>x86_64</td><td><code>archlinux-keyring</code></td><td><code>edge</code></td><td>Arch's released repositories; <code>[testing]</code> is not an input</td></tr>
+      <tr><td><code>core</code> <code>extra</code> <code>alarm</code></td><td>Arch Linux ARM</td><td>aarch64</td><td><code>archlinuxarm-keyring</code></td><td><code>edge</code></td><td></td></tr>
+      <tr><td><code>packages</code></td><td>Omarchy — the OPR, <code>pkgs.omarchy.org</code></td><td>x86_64 · aarch64</td><td>Omarchy's key</td><td><code>edge</code></td><td>the OPR's <code>edge</code> channel only; its <code>rc</code> and <code>stable</code> channels are not an input — the OPR earns <code>rc</code> and <code>stable</code> here like every other source</td></tr>
+      <tr><td><code>asahi</code></td><td>Omarchy for Apple Silicon — maralcbr's fork, one GitHub release per snapshot</td><td>aarch64</td><td>the fork's key</td><td><code>edge</code></td><td>above the OPR in the include: on a Mac, its builds win</td></tr>
+      <tr><td><code>asahi-alarm</code></td><td>Asahi Linux for Arch Linux ARM — kernel, graphics, firmware</td><td>aarch64</td><td><code>asahi-alarm-keyring</code></td><td><code>edge</code></td><td>above everything else, on a Mac</td></tr>
+      <tr><td><code>chaotic</code> <span class="muted">optional</span></td><td>chaotic-aur, prebuilt AUR packages</td><td>x86_64</td><td><code>chaotic-keyring</code></td><td><code>edge</code></td><td>only names no other source provides; on a machine only with <code>--with chaotic</code></td></tr>
+      <tr><td><code>aur</code> <span class="muted">optional</span></td><td>Arch Linux ARM's prebuilt AUR selection</td><td>aarch64</td><td><code>archlinuxarm-keyring</code></td><td><code>edge</code></td><td>the same rule</td></tr>
+      <tr><td><code>factory</code></td><td>the pool's own builds, from contributors' recipes (<a href="/factory">Factory</a>)</td><td>x86_64 · aarch64</td><td>the pool's key</td><td>the <code>lab</code>, then <code>edge</code> on a maintainer's approval</td><td>packages nobody ships yet</td></tr>
     </tbody></table></div>
   </section>
 
-  <section>
+  <section id="stages">
     <h2>What happens to a package</h2>
     <div class="steps">
-      <div class="step"><h3>1. Sync</h3><p>Every hour the upstream database is read and compared with the index by sha256; only what is missing is downloaded. Each file is checked against the upstream checksum and signature, its <code>.PKGINFO</code>, dependencies, <code>provides</code>, file list and the sonames its binaries load are extracted, and the archive plus its <code>.sig</code> are stored in the pool under <code>&lt;arch&gt;/&lt;filename&gt;</code>. A file is never stored twice and never modified.</p></div>
-      <div class="step"><h3>2. Pin</h3><p>The sync then creates a new <b>edge</b> release: an immutable list of exactly which objects the ring serves. Releases are append-only; every ring has a history you can point it back to.</p></div>
-      <div class="step"><h3>3. Promote on evidence</h3><p>When the evidence can exist — right after the sync that changed edge, and every three hours for rc — a real pacman syncs the source ring in a container on x86_64 and on aarch64, and <code>omarchy-cli check</code> runs the ELF-level safety check on every upgrade the ring would apply to a reference system. A gate reads that evidence: the latest checks must be green, checks must not keep failing (three in a day), the soak must be met — green checks in a row since the ring's current release: one for rc, two for stable, about six hours — a recent ABI check must have no blockers, and the security layer must report no regression — a package the next ring serves clean that this one would replace with a version under an open advisory. Only then is the selection copied to the next ring — an index write, no bytes move.</p></div>
-      <div class="step"><h3>4. Render and verify</h3><p>The ring's pacman databases (<code>omarchy-&lt;source&gt;-&lt;ring&gt;.db</code> and <code>.files</code>) are generated from the index, signed with the pool's database key and placed beside the packages. The target ring is health-checked again on both architectures; if that fails, the ring is pointed back at its previous release and re-rendered automatically.</p></div>
+      <div class="step"><h3>1. Sync — every three hours</h3><p>The upstream database is read and compared with the index by sha256; only what is missing is downloaded. Each file is checked against the upstream checksum and signature, its <code>.PKGINFO</code>, dependencies, <code>provides</code>, file list and the sonames its binaries load are extracted, and the archive plus its <code>.sig</code> are stored in the pool under <code>&lt;source&gt;/&lt;arch&gt;/&lt;file&gt;</code>. A file is never stored twice and never modified.</p></div>
+      <div class="step"><h3>2. Pin — <code>edge</code></h3><p>A sync that changed something makes a new <b>edge</b> release: an immutable list of exactly which objects the ring serves, one row per source, name and architecture. Releases are append-only; every ring has a history it can be pointed back to. Edge is what the sources published in the last three hours, signature-verified and nothing else — for CI and developers.</p></div>
+      <div class="step"><h3>3. Promote — on evidence, never on a calendar</h3><p>The sync that changed edge queues the evidence: a real <code>pacman -Sy</code> of the ring in a clean container on x86_64 and on aarch64, a signed download of a sample of every repository, the ELF-level ABI check of every upgrade the ring would apply to a reference system (on x86_64, an Omarchy installation), and the security layer's look for a regression. Green on both architectures, and edge is <b>rc</b> within minutes. rc is checked again every three hours; the second green check in a row makes it <b>stable</b> — about six hours after rc. Both architectures move together (one alone only by a maintainer's hand, when the other is red).</p></div>
+      <div class="step"><h3>4. Render, verify, and roll back on your own</h3><p>The ring's pacman databases (<code>omarchy-&lt;source&gt;-&lt;ring&gt;.db</code> and <code>.files</code>) are generated from the index, signed with the pool's database key and placed beside the packages. A promotion is followed by the same health check on the target ring; if it fails, the ring is pointed back at its previous release and re-rendered before you notice. A ring is a pinned selection: going back is an index write, no bytes move.</p></div>
+      <div class="step"><h3>The lab and the trial</h3><p>Beside the three rings there is a fourth, the <b>lab</b>, where nothing is promised: no sync targets it, no promotion comes from it or goes into it. It is where the factory's builds are tried before anyone decides — a real pacman installs them in a clean container from the lab above edge, and the transcript sits beside the audit — and where any package of the pool can be pinned to be tried in a combination. <code>--ring lab</code> on a machine puts the lab's sections above edge's.</p></div>
+      <div class="step"><h3>The fast lane</h3><p>A fix should not wait for a soak. A factory build the trial installed, and a security fix the security layer has confidence in, go to rc and stable with edge in the same step — recorded as a <code>fast-track</code> in the <a href="/journal?kind=fast-track">journal</a>, with the reason. The fast lane is the evidence's, not anyone's to grant.</p></div>
     </div>
   </section>
 
-  <section>
-    <h2>Security, with the graph</h2>
-    <p class="sub">Every three hours the objects the rings serve are matched against the Arch Security Tracker (exact, Arch's own versions), the Debian Security Tracker (same upstream projects, for what Arch has not triaged yet — with a confidence level, never as a certainty), CISA KEV and EPSS. Because the index knows what every binary loads, an advisory on a library also marks what <em>uses</em> it: the <a href="/security">Security page</a> shows the ring, the package page shows the chain, the graph marks the nodes.</p>
+  <section id="protects">
+    <h2>What protects you</h2>
+    <div class="steps">
+      <div class="step"><h3>Signatures, twice</h3><p>Every package keeps its project's signature, and the pool verified it against that project's keyring when it entered. The pool signs the databases it renders with a key that never leaves the Worker; your <code>pacman.conf</code> trusts that key for the databases and the projects' keys for the packages. The pool cannot alter a package without breaking its signature.</p></div>
+      <div class="step"><h3>A real pacman, before you</h3><p>Every promotion is preceded by an actual <code>pacman -Sy</code> and signed downloads on both architectures in a clean container. The most common breakage — a database that does not sync, a package that does not verify — never reaches rc.</p></div>
+      <div class="step"><h3>The ABI check</h3><p>Every upgrade a ring would apply is checked at the ELF level against a reference system: a library that would leave a binary without the symbol version it needs blocks the promotion. <code>omarchy-cli check</code> runs the same check on your machine before an out-of-band install.</p></div>
+      <div class="step"><h3>The security layer</h3><p>The Arch and Debian security trackers, OSV, CISA KEV and EPSS, matched every three hours against what each ring serves; because the index knows what every binary loads, an advisory on a library also marks what <em>uses</em> it. A promotion that would replace a clean package with a vulnerable one is blocked; a confident fix is pulled forward. The <a href="/security">Security</a> page shows the ring, the package page the chain.</p></div>
+      <div class="step"><h3>Immutable releases, automatic rollback</h3><p>A ring never edits a release; it points at one. A failed health check after a promotion points it back — and the next <code>pacman -Syu</code> sees the restored release.</p></div>
+      <div class="step"><h3>One rule between sources</h3><p>Two projects' builds of one name both stay in the pool; the include's order — Asahi's above the OPR's above Arch's — is the only thing that decides, and it is written in your <code>pacman.conf</code> where you can read it.</p></div>
+      <div class="step"><h3>Nothing skips the gates</h3><p>Not the OPR, not the factory, not a maintainer's own package. The evidence is on the <a href="/pipeline">Pipeline</a> page and in the <a href="/journal">journal</a>, for anyone.</p></div>
+    </div>
   </section>
 
-  <section id="factory">
-    <h2>The factory: packages nobody ships yet</h2>
-    <p class="sub">Three personas, three costs. <b>Users</b> only see the pool: signed databases, health checks, 48 hours from <code>edge</code> to <code>stable</code>, rollback. <b>Contributors</b> have something to package: they register it (a GitHub login and the project's URL — nobody to ask, nothing spent by the project), run the signed <code>omarchy-worker</code> container wherever they like, with their own agent keys, and the build lands in <em>their</em> staging workspace with the PKGBUILD and the log. <b>Maintainers</b> approve staged builds with the evidence in front of them — and never use the contributor's bytes: an approved package is rebuilt from the same recipe on a worker the project trusts, signed by the pool, and enters <code>edge</code> as source <code>factory</code> to take the same 48-hour path as everything else. <em>We do not use what you built, we learn from it</em>: the recipe, the log and the metrics a contributor produced with the same tools (and, if they like, their own agent) make the maintainer's own build faster and its approval surer, so every package users get was checked by two different people — and, when a project worker runs an agent, by a <b>second agent</b> that audits the staged evidence before the maintainer reads it. Nobody approves their own package. New upstream releases of an approved package are built again on the contributor's worker and reviewed again. Who the maintainers are, and how one becomes one, is a file in the repository changed by pull request — see <a href="/docs/governance">Governance</a>. Every stage is on the <a href="/factory">Factory</a> page.</p>
+  <section id="people">
+    <h2>What the pool does for the people who bring packages in, and the people who decide</h2>
+    <div class="cando">
+      <div><h4>for contributors</h4><ul class="yes">
+        <li><b>Ask for a package, on the record.</b> A request is a signed record; the project's agent drafts a recipe from the project's sources.</li>
+        <li><b>Build it at home with the same tools.</b> The same signed worker image, the same conventions, <code>namcap</code>, the same build — on your machine, with your compute. Your build is <em>evidence</em>, never the product: nothing you built is served to anyone.</li>
+        <li><b>A second pair of eyes before a human's.</b> When your build is staged, the pool's agent audits the recipe, the log and the metadata and attaches a report beside it.</li>
+        <li><b>Watch it happen.</b> Your workspace, your packages, your workers and every step of every build on the <a href="/factory">Factory</a> and <a href="/review">Review</a> pages; the journal keeps the record.</li>
+      </ul></div>
+      <div><h4>for maintainers</h4><ul class="yes">
+        <li><b>The evidence in front of you.</b> The contributor's build, the gate's verdict, the audit, the log and the recipe on one row — and <em>Build by the project</em> one press away.</li>
+        <li><b>The project builds it again.</b> A trusted worker with the project's own agent writes the project's recipe from the project's sources, learning from the contributor's evidence; the same gate runs; its own audit is queued.</li>
+        <li><b>The trial installs it before you decide.</b> A real pacman installs the project's build from the lab in a clean container; the transcript sits beside the audit. You approve what installed, not what compiled.</li>
+        <li><b>Nobody decides on their own package</b> — not even the only maintainer. A build the trial installed goes to stable with edge; one it did not waits for the gates like everything else.</li>
+        <li><b>A rollback is one job away</b>, and so is every pipeline step by hand (<code>pkg-repo job …</code>), with a per-job token that can do that and nothing else.</li>
+      </ul></div>
+    </div>
   </section>
 
-  <section>
-    <h2>Why one <code>Server =</code> is enough</h2>
-    <p class="sub">Today an Omarchy machine talks to several repositories, each with its own mirror, cadence and failure modes. Here they are one set of databases per ring, generated from the same index, on both architectures.</p>
+  <section id="behind">
+    <h2>How far behind upstream</h2>
+    <div class="table-wrap"><table><thead><tr><th>Ring</th><th>Behind the source</th><th>Because</th></tr></thead><tbody>
+      <tr><td><code>edge</code></td><td>≤ 3 hours</td><td>the sync's interval</td></tr>
+      <tr><td><code>rc</code></td><td>minutes after edge's checks pass</td><td>the health and ABI checks on both architectures, and the security layer</td></tr>
+      <tr><td><code>stable</code></td><td>≈ 6 hours after rc</td><td>two green health checks in a row, three hours apart</td></tr>
+      <tr><td>a fast-tracked fix</td><td>none</td><td>it goes to stable with edge</td></tr>
+    </tbody></table></div>
+  </section>
+
+  <section id="server">
+    <h2>Why one host is enough</h2>
+    <p class="sub">Today an Omarchy machine talks to several repositories, each with its own mirror, cadence and failure modes. Here they are one set of databases per ring, generated from the same index, on both architectures — one section per source, in the order that decides.</p>
     <div class="howto">
       <div class="arch"><div class="archhead"><span class="archname">before</span></div><pre>[omarchy]
 Server = https://pkgs.omarchy.org/$repo/$arch
@@ -102,59 +100,79 @@ Include = /etc/pacman.d/mirrorlist
 [multilib]
 Include = /etc/pacman.d/mirrorlist</pre></div>
       <div class="arch"><div class="archhead"><span class="archname">with the pool</span></div><pre>[omarchy-packages-stable]
-Server = https://pool.firemanxbr.org/packages/$arch
+Server = ${pool}/packages/$arch
 [omarchy-core-stable]
-Server = https://pool.firemanxbr.org/core/$arch
+Server = ${pool}/core/$arch
 [omarchy-extra-stable]
-Server = https://pool.firemanxbr.org/extra/$arch
+Server = ${pool}/extra/$arch
 [omarchy-multilib-stable]
-Server = https://pool.firemanxbr.org/multilib/$arch
-<span class="c"># one host, a directory per repo, both architectures;
-# change "stable" to "rc" or "edge" to change rings</span></pre></div>
+Server = ${pool}/multilib/$arch
+<span class="c"># one host, a directory per source, both architectures;
+# change "stable" to "rc" or "edge" to change rings;
+# a section appears when the ring serves that source —
+# the exact list for your ring and architecture is on Get started</span></pre></div>
     </div>
   </section>
 
-  <section>
+  <section id="trust">
     <h2>What you trust</h2>
     <p class="sub">Two things, and only two.</p>
     <div class="steps">
-      <div class="step"><h3>The projects' own keys — unchanged</h3><p>Packages are the exact files Arch, Arch Linux ARM and Omarchy built and signed. pacman verifies each package with the keyring you already have (<code>archlinux-keyring</code>, <code>archlinuxarm-keyring</code>, Omarchy's key). The pool cannot alter a package without breaking its signature.</p></div>
+      <div class="step"><h3>The projects' own keys — unchanged</h3><p>Packages are the exact files Arch, Arch Linux ARM, Omarchy and the Asahi projects built and signed. pacman verifies each package with the keyring you already have (<code>archlinux-keyring</code>, <code>archlinuxarm-keyring</code>, Omarchy's key, the Asahi keyrings on a Mac).</p></div>
       <div class="step"><h3>The pool's database key — one import</h3><p>The pacman databases are generated here, so they are signed here — inside the pool's own service, by a key that never leaves it: no build worker, runner or repository holds it. That key signs the databases and the packages the factory builds, nothing else; its public part is in the repository, at the pool root and at <code>/api/v1/signing-key</code>, and with <code>SigLevel = Required DatabaseRequired</code> pacman refuses a database it did not sign.</p></div>
     </div>
   </section>
 
-  <section>
+  <section id="seal">
     <h2>The seal: where every package came from, with proof</h2>
     <p class="sub">A package from the AUR is a recipe someone maintains; a package from a distribution is a file its build farm signed. A package from the pool carries its <b>provenance</b> with it, and every package page shows it.</p>
     <div class="steps">
       <div class="step"><h3>Imported</h3><p>A synced package names its upstream project and repository, and the keyring its signature was verified against the moment it entered the pool — served as built and signed there, never rebuilt.</p></div>
-      <div class="step"><h3>Built by the Omarchy Pool</h3><p>A factory package carries the whole chain: the contributor's build that was the evidence (its worker, its agent, its log), the second agent's audit and verdict, the maintainer who approved it, the recipe a maintainer wrote and merged, the project's build of it on a trusted worker. The chain is also written <b>next to the object in the pool</b> as an attestation — an in-toto statement about that exact file — with the pool's detached signature beside it, so anyone can verify it with the pool's public key and never trust this page.</p></div>
-      <div class="step"><h3>On your machine</h3><p><code>omarchy-cli info &lt;package&gt;</code> prints the seal; <code>omarchy-cli provenance</code> prints one line per package, and as a pacman hook (<code>docs/omarchy-pool.hook</code>) it says, after every install, where what you just installed came from. <code>pacman -Qi</code> shows it too: <code>Packager: omarchy-pool factory</code>, repository <code>omarchy-factory-&lt;ring&gt;</code>.</p></div>
+      <div class="step"><h3>Built by the Omarchy Pool</h3><p>A factory package carries the whole chain: the contributor's build that was the evidence (its worker, its agent, its log), the second agent's audit and verdict, the trial's transcript, the maintainer who approved it, the recipe the project built on a trusted worker. The chain is also written <b>next to the object in the pool</b> as an attestation — an in-toto statement about that exact file — with the pool's detached signature beside it, so anyone can verify it with the pool's public key and never trust this page.</p></div>
+      <div class="step"><h3>On your machine</h3><p><code>omarchy-cli info &lt;package&gt;</code> prints the seal; <code>omarchy-cli provenance</code> prints one line per package, and as a pacman hook it says, after every install, where what you just installed came from. <code>pacman -Qi</code> shows it too: <code>Packager: omarchy-pool factory</code>, repository <code>omarchy-factory-&lt;ring&gt;</code>.</p></div>
     </div>
   </section>
 
-  <section>
+  <section id="pieces">
     <h2>The pieces</h2>
-    <p class="sub">All of it is open source (MIT), released on every merge, and shows its version in the header.</p>
+    <p class="sub">All of it is open source (MIT), released on every merge, and shows its version in the header. The code's own documentation — architecture, runbook, testing — is in the repository, for people working on the pool itself.</p>
     <div class="table-wrap"><table><thead><tr><th>Piece</th><th>What it is</th></tr></thead><tbody>
       <tr><td>Pool</td><td>A Cloudflare R2 bucket with a custom domain. pacman reads packages and databases from it as plain static files; nothing runs in front of them.</td></tr>
       <tr><td>Index</td><td>A D1 (SQLite) database: one row per package object with its manifest, dependency edges, sonames; releases and ring heads; every event the pipeline records.</td></tr>
       <tr><td>API + this site</td><td>One Cloudflare Worker serving <code>/api/v1</code> and these pages.</td></tr>
-      <tr><td>Pipeline</td><td>Jobs the pool queues on its own clock and project workers pull: sync (every 3 h, one release per ring), promote (daily, evidence-gated), health (daily), security (every 3 h), the PKGBUILD reconcile (hourly), GC (weekly); a metrics snapshot every 30 min and the daily cost estimate by the pool itself. GitHub only releases the code (every merge).</td></tr>
-      <tr><td>Factory</td><td>The build queue lives in the index (requests, tasks, leases); workers are containers anywhere — a contributor's laptop for their own packages, machines the project trusts for what maintainers approved — that claim a task, build it in a fresh Arch container and report; the pool signs what a project worker publishes into <code>edge</code>. A lease that expires goes back to the queue.</td></tr>
-      <tr><td>Tools</td><td><code>pkg-repo</code> (publisher: sync, promote, gate, render), <code>pkg-extract</code> (manifests), <code>omarchy-cli</code> (thin client) — Rust, built for both architectures on every release.</td></tr>
+      <tr><td>Pipeline</td><td>Jobs the pool queues on its own clock and project workers pull: sync (every 3 h, one release per ring), the evidence and the promotion it earns (after every sync that changed edge; rc checked every 3 h), health, security (every 3 h), the trial of every review build, GC (weekly); a metrics snapshot every 30 min and the daily cost estimate by the pool itself. GitHub only releases the code (every merge).</td></tr>
+      <tr><td>Factory</td><td>The build queue lives in the index (requests, tasks, leases); workers are containers anywhere — a contributor's laptop for their own packages, machines the project trusts for what maintainers approved — that claim a task, build it in a fresh Arch container and report; the pool signs what a project worker publishes. A lease that expires goes back to the queue.</td></tr>
+      <tr><td>Tools</td><td><code>pkg-repo</code> (the publisher: sync, promote, gate, trial, render, security, gc), <code>pkg-extract</code> (manifests), <code>pkg-check</code> (the ABI check), <code>omarchy-cli</code> (the thin client) — Rust, built for both architectures on every release.</td></tr>
     </tbody></table></div>
   </section>
+`;
+}
+
+/** Fills the diagram's live lines: when each source was last synced and how much of it the pool holds, the pool's size, the rings' heads. */
+const SCRIPT = String.raw`
+  var GROUPS = { "src-arch": [["core", "x86_64"], ["extra", "x86_64"], ["multilib", "x86_64"]], "src-alarm": [["core", "aarch64"], ["extra", "aarch64"], ["alarm", "aarch64"]], "src-opr": [["packages", "x86_64"], ["packages", "aarch64"]], "src-asahi": [["asahi", "aarch64"]], "src-asahi-alarm": [["asahi-alarm", "aarch64"]], "src-optional": [["chaotic", "x86_64"], ["aur", "aarch64"]] };
+  function live(key, text) { document.querySelectorAll('[data-live="' + key + '"]').forEach(function (el) { el.textContent = text; }); }
+  liveStats(function (d) {
+    var cov = d.coverage || [];
+    Object.keys(GROUPS).forEach(function (k) {
+      var rows = cov.filter(function (c) { return GROUPS[k].some(function (g) { return g[0] === c.source && g[1] === c.arch; }); });
+      var n = rows.reduce(function (s, c) { return s + Number(c.indexed || 0); }, 0);
+      var last = rows.map(function (c) { return c.last_sync; }).filter(Boolean).sort().pop();
+      live(k, last ? "synced " + ago(last) + " · " + num(n) + " packages" : n ? num(n) + " packages" : "not synced yet");
+    });
+    live("stored-once", num(d.pool.objects) + " objects · " + bytes(d.pool.bytes));
+    ["edge", "rc", "stable"].forEach(function (n) { var r = d.rings.filter(function (x) { return x.ring === n; })[0]; live(n + "-head", r && r.release ? "#" + r.release.seq + " · " + ago(r.release.created_at) : "no release yet"); });
+  }, 120000);
 `;
 
 export function howItWorksHtml(poolUrl: string, version: RunningVersion): string {
   return page({
     title: "How it works · omarchy-pool",
-    description: "Where the packages come from, how they are verified and stored, how the rings move on evidence, and what a user trusts.",
+    description: "Where every package comes from, what is checked before it reaches you, what protects you, and what the pool does for contributors and maintainers.",
     active: "docs",
     doc: "how-it-works",
-    body: BODY,
-    script: "liveStats(function () {}, 120000);",
+    body: body(poolUrl.replace(/\/$/, "")),
+    script: SCRIPT,
     poolUrl,
     version,
   });

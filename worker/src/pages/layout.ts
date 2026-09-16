@@ -276,10 +276,10 @@ const CSS = String.raw`
   figure.diagram.live-diagram svg { min-width: 820px; }
   figure.diagram figcaption { font-size: 12.5px; color: var(--dim); margin-top: 8px; }
   .d-box { fill: var(--panel-2); stroke: var(--line); stroke-width: 1.2; } .d-box.hi { stroke: var(--green); }
-  .d-box.edge { stroke: var(--edge); } .d-box.rc { stroke: var(--rc); } .d-box.stable { stroke: var(--stable); }
+  .d-box.edge { stroke: var(--edge); } .d-box.rc { stroke: var(--rc); } .d-box.stable { stroke: var(--stable); } .d-box.amber { stroke: var(--amber); }
   .d-box.dimmed { opacity: .45; } .d-l.dimmed { opacity: .35; }
   .d-t { fill: var(--text); font-size: 13px; font-weight: 600; font-family: Geist, "JetBrains Mono", sans-serif; } .d-t.small { font-size: 12.5px; }
-  .d-t.edge { fill: var(--edge); } .d-t.rc { fill: var(--rc); } .d-t.stable { fill: var(--stable); }
+  .d-t.edge { fill: var(--edge); } .d-t.rc { fill: var(--rc); } .d-t.stable { fill: var(--stable); } .d-t.amber { fill: var(--amber); }
   .d-s { fill: var(--dim); font-size: 11px; } .d-s.live { fill: var(--green); font-weight: 500; } .d-s.amber { fill: var(--amber); }
   .d-lab { fill: var(--muted); font-size: 11px; } .d-lab.hi { fill: var(--green); }
   .d-l { stroke: var(--dim); stroke-width: 1.2; fill: none; } .d-l.hi { stroke: var(--green); } .d-l.dash { stroke-dasharray: 4 4; } .d-l.warn { stroke: var(--amber); }
@@ -701,7 +701,7 @@ export type DocKey = "index" | "get-started" | "workers" | "how-it-works" | "gov
 export const DOCS: { key: DocKey; href: string; label: string; blurb: string }[] = [
   { key: "get-started", href: "/docs/get-started", label: "Get started", blurb: "Point pacman at a ring: the key, the Server line, the upgrade." },
   { key: "workers", href: "/docs/workers", label: "Run a worker", blurb: "One image on GitHub Packages, with Docker Desktop or Podman: your own packages, donated compute, the project's builds — the registration decides." },
-  { key: "how-it-works", href: "/docs/how-it-works", label: "How it works", blurb: "The pool, the rings, promotion by evidence, the factory, signing." },
+  { key: "how-it-works", href: "/docs/how-it-works", label: "How it works", blurb: "Where every package comes from, the gates it passes, what protects you — and what the pool does for the people who bring packages in and the people who decide." },
   { key: "governance", href: "/docs/governance", label: "Governance", blurb: "Contributors and maintainers, categories, and how a pull request is the only way to become a maintainer." },
   { key: "api", href: "/api", label: "API", blurb: "Every endpoint the dashboard and the tools use." },
 ];

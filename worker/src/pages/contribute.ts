@@ -59,7 +59,7 @@ const BODY = String.raw`
   <section>
     <div class="charts">
       <div class="chart"><h3>Factory builds <span>14 days</span></h3><div class="sub">per day: contributors' builds staged, the project's published, failed</div><div id="c-builds"></div></div>
-      <div class="chart"><h3>From registration to the rings <span>median</span></h3><div class="sub">time spent at each stage, from the record — the soaks are the schedule</div><div id="c-funnel"></div></div>
+      <div class="chart"><h3>From registration to the rings <span>median</span></h3><div class="sub">time spent at each stage, from the record — the last two are the gates</div><div id="c-funnel"></div></div>
     </div>
   </section>
 
@@ -223,15 +223,15 @@ __CHARTS__
         var owner = owners[a.name];
         return '<div class="land">' + (owner ? avatar(owner, "contributor") : '<span class="avatar">?</span>') + '<div class="n"><span>' + esc(a.name) + ' <span class="v">' + esc(a.version || "") + '</span></span><span class="pill ' + (a.rebuild_status === "done" ? "ok" : "blue") + '">' + (a.rebuild_status === "done" ? "in the rings" : a.rebuild_task ? "building" : "recipe pending") + '</span></div><div class="b">by ' + (owner ? '<a href="/user/' + encodeURIComponent(owner) + '">' + esc(owner) + '</a>' : "—") + ' · approved by <a href="/user/' + encodeURIComponent(a.by) + '">' + esc(a.by) + '</a> · ' + ago(a.created_at) + ' · ' + esc(a.arch) + '</div></div>';
       }).join("") || '<div class="muted">nothing approved yet — <a href="/auth/github?next=/factory">be the first</a></div>';
-      // The funnel: medians from what the record holds (a package's registration, its first staged build, the decision), then the soaks the schedule imposes.
+      // The funnel: medians from what the record holds (a package's registration, its first staged build, the decision), then the gates every package passes.
       var median = function (xs) { if (!xs.length) return null; xs = xs.slice().sort(function (a, b) { return a - b; }); return xs[Math.floor(xs.length / 2)]; };
       var firstStaged = {}; f.tasks.forEach(function (t) { if (t.kind === "build" && t.trust === "community" && (t.status === "staged" || t.status === "done") && t.finished_at) { var k = t.name; if (!firstStaged[k] || t.finished_at < firstStaged[k]) firstStaged[k] = t.finished_at; } });
       var byTask = {}; f.tasks.forEach(function (t) { byTask[t.id] = t; });
       var regToStaged = pkgs.filter(function (p) { return firstStaged[p.name] && p.created_at; }).map(function (p) { return (Date.parse(firstStaged[p.name]) - Date.parse(p.created_at)) / 3600e3; }).filter(function (h) { return h >= 0; });
       var stagedToDecided = apps.filter(function (a) { return byTask[a.task_id] && byTask[a.task_id].finished_at; }).map(function (a) { return (Date.parse(a.created_at) - Date.parse(byTask[a.task_id].finished_at)) / 3600e3; }).filter(function (h) { return h >= 0; });
       var fmtH = function (h) { return h == null ? "—" : h < 1 ? Math.round(h * 60) + " min" : h < 48 ? (Math.round(h * 10) / 10) + " h" : Math.round(h / 24) + " d"; };
-      var stagesF = [["registered → staged", median(regToStaged), "the build, on a worker"], ["staged → decided", median(stagedToDecided), "a maintainer reads the evidence"], ["approved → edge", null, "a maintainer's recipe, merged and built"], ["edge → rc", 24, "promoted daily, after the checks"], ["rc → stable", 24, "the soak"]];
-      var maxH = Math.max(24, median(regToStaged) || 0, median(stagedToDecided) || 0);
+      var stagesF = [["registered → staged", median(regToStaged), "the build, on a worker"], ["staged → decided", median(stagedToDecided), "a maintainer reads the evidence"], ["approved → edge", null, "the project's build, published on approval"], ["edge → rc", 0.5, "minutes, after the checks on both architectures"], ["rc → stable", 6, "two green health checks in a row — or at once, when the trial installed it"]];
+      var maxH = Math.max(6, median(regToStaged) || 0, median(stagedToDecided) || 0);
       $("#c-funnel").innerHTML = '<div class="hrows">' + stagesF.map(function (st) { var human = st[0] === "staged → decided"; return '<div class="hrow" style="grid-template-columns:170px 1fr 56px"><div class="l" title="' + esc(st[2]) + '">' + esc(st[0]) + '</div><div class="bar" data-tip="' + esc(st[0] + ": " + (st[1] == null ? "no measurement yet" : "median " + fmtH(st[1])) + " — " + st[2]) + '"><i style="width:' + (st[1] == null ? 0 : Math.min(100, 100 * st[1] / maxH)) + '%;background:' + (human ? "var(--amber)" : "var(--green)") + '"></i></div><div class="p num">' + fmtH(st[1]) + '</div></div>'; }).join("") + '</div><div class="legend"><span><i style="background:var(--green)"></i>the machines</span><span><i style="background:var(--amber)"></i>a human decides</span></div>';
       endSkeleton();
     }).catch(function () { endSkeleton(); });
