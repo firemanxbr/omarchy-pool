@@ -15,7 +15,7 @@ const BODY = String.raw`
   <div class="hero compact">
     <p class="eyebrow">Workers</p>
     <h1>Three kinds of worker, and whose they are</h1>
-    <p class="lede">The project's take the pool's jobs. The review ones — trusted by a maintainer — build again what a maintainer asked for, and write the audit. A contributor's build their own packages, or whatever is queued when shared. <em>Alive</em> is seen in the last ten minutes. <a href="/docs/workers">Run one →</a></p>
+    <p class="lede">The project's take the pool's jobs. The review ones — trusted on two maintainers' word, never the owner's — build again what a maintainer asked for, and write the audit. A contributor's build their own packages, or whatever is queued when shared. <em>Alive</em> is seen in the last ten minutes. <a href="/docs/workers">Run one →</a></p>
   </div>
 
   <div class="tiles four" id="tiles"></div>
@@ -48,6 +48,13 @@ __CHARTS__
   function kindOf(w) { if (w.side !== "omarchy") return "community"; var r = w.labels && w.labels.role; return r === "review" ? "review" : "project"; }
   var COLOR = { project: "var(--green)", review: "var(--blue)", community: "var(--lilac)" };
   function person(l) { return l ? '<a href="/user/' + encodeURIComponent(l) + '">' + esc(l) + '</a>' : '<span class="muted">—</span>'; }
+  // Who vouched: two maintainers since the two-word rule ("m1, m2"), one before it; a proposal awaiting its second word.
+  function trustedBy(w) {
+    if (w.trust !== "project") return w.trust_proposed_by ? person(w.trust_proposed_by) + ' <span class="pill none" title="proposed for project trust; a second maintainer — not the owner — confirms">awaits a second word</span>' : '<span class="muted">—</span>';
+    var names = (w.trusted_by || "").split(",").map(function (n) { return n.trim(); }).filter(Boolean);
+    if (!names.length) return '<span class="muted">—</span>';
+    return names.map(person).join(", ") + (names.length < 2 ? ' <span class="pill none" title="trusted by one maintainer, before trust took two words">one word</span>' : "");
+  }
   function running(w) { return w.current_task ? '<a class="run" href="/pipeline">#' + w.current_task + '</a>' : '<span class="muted">idle</span>'; }
   function where(w) { return esc(w.labels && w.labels.where ? w.labels.where : (w.hostname || "—")) + (w.version ? ' <span class="muted">pkg-repo ' + esc(w.version) + '</span>' : '') + (w.labels && w.labels.emulated ? ' <span class="pill none" title="the other architecture, emulated on this host">emulated</span>' : ''); }
   function alive(w) { return workerName(w) + (w.alive ? ' <span class="pill ok">alive</span>' : ''); }
@@ -78,7 +85,7 @@ __CHARTS__
     };
     $("#kinds").innerHTML =
       card("project", "Project", kinds.project, "The pool's own jobs — sync, render, promote, health, security, gc — on the host the community keeps. No package of anyone's is built here.", function (ws) { return '<dt>with an agent</dt><dd>' + num(ws.filter(function (w) { return w.agent; }).length) + '</dd>'; }) +
-      card("review", "Review", kinds.review, "The maintainers' side. Trusted by a maintainer: builds again what a maintainer asked for, publishes what is approved, writes the audit. Holds the agent key.", function (ws) { return '<dt>with an agent</dt><dd>' + num(ws.filter(function (w) { return w.agent; }).length) + '</dd>'; }) +
+      card("review", "Review", kinds.review, "The maintainers' side. Trusted on two maintainers' word: builds again what a maintainer asked for, publishes what is approved, writes the audit. Holds the agent key.", function (ws) { return '<dt>with an agent</dt><dd>' + num(ws.filter(function (w) { return w.agent; }).length) + '</dd>'; }) +
       card("community", "Contributors'", kinds.community, "Their own machines, their own agent: their packages only — or, shared, whatever is queued. Evidence for a maintainer, never what users get.", function (ws) { return '<dt>shared · own</dt><dd>' + num(ws.filter(function (w) { return w.mode === "shared"; }).length) + ' · ' + num(ws.filter(function (w) { return w.mode !== "shared"; }).length) + '</dd>'; });
     // The load per worker, the busiest first.
     var ranked = d.workers.filter(function (w) { return w.alive || LOAD[w.id]; }).sort(function (a, b) { return busyOf(b) - busyOf(a); }).slice(0, 10);
@@ -86,10 +93,10 @@ __CHARTS__
     // The three tables.
     var seen = function (ws) { return ws.filter(function (w) { return showAll || w.alive; }); };
     pager("#w-project", seen(kinds.project), function (w) {
-      return '<tr><td>' + alive(w) + '</td><td>' + esc(w.arch) + '</td><td>' + where(w) + '</td><td class="muted">' + esc((w.kinds || []).join(", ") || "—") + '</td><td>' + person(w.trusted_by) + '</td><td>' + running(w) + '</td><td>' + num(w.builds_done) + ' / ' + num(w.builds_failed) + '</td><td class="when">' + ago(w.last_seen) + '</td></tr>';
+      return '<tr><td>' + alive(w) + '</td><td>' + esc(w.arch) + '</td><td>' + where(w) + '</td><td class="muted">' + esc((w.kinds || []).join(", ") || "—") + '</td><td>' + trustedBy(w) + '</td><td>' + running(w) + '</td><td>' + num(w.builds_done) + ' / ' + num(w.builds_failed) + '</td><td class="when">' + ago(w.last_seen) + '</td></tr>';
     }, { empty: showAll ? "no project worker registered" : "no project worker alive — the host is off; pool jobs wait", text: function (w) { return w.id + " " + w.arch + " " + (w.trusted_by || "") + " " + JSON.stringify(w.labels || {}); } });
     pager("#w-review", seen(kinds.review), function (w) {
-      return '<tr><td>' + alive(w) + '</td><td>' + esc(w.arch) + '</td><td>' + where(w) + '</td><td>' + agentCell(w) + '</td><td>' + person(w.trusted_by) + '</td><td>' + running(w) + '</td><td>' + num(w.builds_done) + ' / ' + num(w.builds_failed) + '</td><td class="when">' + ago(w.last_seen) + '</td></tr>';
+      return '<tr><td>' + alive(w) + '</td><td>' + esc(w.arch) + '</td><td>' + where(w) + '</td><td>' + agentCell(w) + '</td><td>' + trustedBy(w) + '</td><td>' + running(w) + '</td><td>' + num(w.builds_done) + ' / ' + num(w.builds_failed) + '</td><td class="when">' + ago(w.last_seen) + '</td></tr>';
     }, { empty: showAll ? "no review worker registered" : "no review worker alive — the project's builds and the audits wait", text: function (w) { return w.id + " " + w.arch + " " + (w.trusted_by || "") + " " + (w.agent || ""); } });
     pager("#w-community", seen(kinds.community), function (w) {
       var what = w.mode === "shared" ? '<span class="pill lilac">shared</span> <span class="muted">whatever is queued</span>' : (w.packages && w.packages.length ? '<span class="muted">' + esc(w.packages.join(", ")) + '</span>' : '<span class="muted">own packages</span>');

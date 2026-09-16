@@ -10,12 +10,19 @@
  *   factory/<name>/<request>/request.json            what the contributor asked for (record.ts, PR A)
  *   factory/<name>/<request>/build-<task>/…          a build's evidence, copied from staging when it is staged (PR C)
  *   factory/<name>/<request>/decision-<n>.json       approve / reject / block, with the maintainer's login (PR D)
+ *   workers/<id>/trust-<time>.json                   who vouched for a worker (contributors.ts, handleTrustWorker)
+ *   <key>.tombstone.json                             a record withdrawn: who, why, what it was (withdrawRecord)
+ *
+ * Written once, never rewritten — but not irremovable: a log that should
+ * not have been public is withdrawn by a maintainer, and a signed tombstone
+ * takes its place. The edge keeps a record a day, not a year, so a
+ * withdrawal is honoured within the day everywhere.
  */
 import type { Env } from "./index";
 import { signingEnabled, detachedSignature } from "./signing";
 import { findLeak } from "./leak";
 
-export const RECORD_CACHE = "public, max-age=31536000, immutable";
+export const RECORD_CACHE = "public, max-age=86400";
 
 export function recordKey(name: string, request: number, file: string): string {
   return `factory/${name}/${request}/${file}`;
@@ -96,4 +103,36 @@ export function vetSummary(vet: unknown): { verdict: string; fails: number; warn
   const failed = checks.filter((c) => c.status === "fail").map((c) => String(c.name ?? "?"));
   const warned = checks.filter((c) => c.status === "warn").map((c) => String(c.name ?? "?"));
   return { verdict: v.verdict === "pass" || v.verdict === "fail" ? v.verdict : "unknown", fails: failed.length, warnings: warned.length, failed, warned };
+}
+
+/**
+ * A record withdrawn: the object and its signature go, and
+ * `<key>.tombstone.json` — signed, written once — says who, why, and what
+ * was there (its sha256 and size, not its bytes). null when there is no
+ * such record. The staging copy of a build's evidence goes with it, so
+ * nothing the pool serves keeps the text.
+ */
+export async function withdrawRecord(env: Env, key: string, by: string, reason: string): Promise<{ tombstone: string; sha256: string; size: number } | null> {
+  const obj = await env.PACKAGES.get(key);
+  if (!obj) return null;
+  const bytes = new Uint8Array(await obj.arrayBuffer());
+  const sha256 = await sha256Hex(bytes);
+  const at = new Date().toISOString();
+  const tombstone = `${key}.tombstone.json`;
+  await putRecord(env, tombstone, { schema: "omarchy-pool/tombstone/1", key, sha256, size: bytes.length, content_type: obj.httpMetadata?.contentType ?? null, withdrawn_by: by, reason, at });
+  await env.PACKAGES.delete([key, `${key}.sig`]);
+  // The staging copy of a build's evidence, when the key is one.
+  const m = key.match(/^factory\/[^/]+\/\d+\/build-(\d+)\/([^/]+)$/);
+  if (m) {
+    const row = await env.DB.prepare("SELECT staged_prefix FROM build_tasks WHERE id = ?").bind(Number(m[1])).first<{ staged_prefix: string | null }>();
+    if (row?.staged_prefix) {
+      const stagingKey = `${row.staged_prefix}${m[2]}`;
+      await env.STAGING.delete(stagingKey);
+      await env.DB.prepare("DELETE FROM staging_objects WHERE key = ?").bind(stagingKey).run();
+    }
+  }
+  await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('withdraw', NULL, 'factory', 'warn', ?, ?)")
+    .bind(`${key} withdrawn from the record by ${by}: ${reason.slice(0, 200)}`, JSON.stringify({ key, by, reason, sha256, size: bytes.length, tombstone }))
+    .run();
+  return { tombstone, sha256, size: bytes.length };
 }

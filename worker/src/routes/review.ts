@@ -36,6 +36,7 @@ interface Staged {
 export async function handleReviewList(env: Env): Promise<Response> {
   const staged = await env.DB.prepare(
     `SELECT t.id, t.name, t.arch, t.version, t.owner, t.status, t.trust, t.params, t.staged_prefix, t.result_sha256, t.result_filename, t.duration_ms, t.finished_at, t.pkgbuild_ref, t.result,
+            t.lease_owner, w.owner AS worker_owner, w.labels AS worker_labels, w.hostname AS worker_hostname, w.trusted_by AS worker_trusted_by,
             p.url, p.detected, p.category,
             (SELECT decision FROM approvals a WHERE a.task_id = t.id ORDER BY a.id DESC LIMIT 1) AS decision,
             (SELECT by FROM approvals a WHERE a.task_id = t.id ORDER BY a.id DESC LIMIT 1) AS decided_by,
@@ -46,17 +47,29 @@ export async function handleReviewList(env: Env): Promise<Response> {
             (SELECT u.result FROM build_tasks u WHERE u.kind = 'trial' AND json_extract(u.params, '$.task') = t.id ORDER BY u.id DESC LIMIT 1) AS trial_result,
             (SELECT u.error FROM build_tasks u WHERE u.kind = 'trial' AND json_extract(u.params, '$.task') = t.id ORDER BY u.id DESC LIMIT 1) AS trial_error
        FROM build_tasks t LEFT JOIN factory_packages p ON p.name = t.name
+                          LEFT JOIN build_workers w ON w.id = t.lease_owner
       WHERE t.kind = 'build' AND t.status = 'staged'
         AND NOT EXISTS (SELECT 1 FROM approvals a WHERE a.task_id = t.id AND a.decision = 'approved')
       ORDER BY t.id DESC LIMIT 100`,
   ).all();
   // A contributor's build that the project is building again, or built: the review row says so.
-  const projectOf = new Map<number, { id: number; status: string; error: string | null }>();
-  const builds = await env.DB.prepare("SELECT id, status, error, params FROM build_tasks WHERE kind = 'build' AND trust = 'project' AND json_extract(params, '$.review') IS NOT NULL AND status IN ('queued', 'leased', 'staged', 'failed', 'done') ORDER BY id").all<{ id: number; status: string; error: string | null; params: string }>();
+  const projectOf = new Map<number, { id: number; status: string; error: string | null; worker: string | null }>();
+  const builds = await env.DB.prepare("SELECT id, status, error, params, lease_owner FROM build_tasks WHERE kind = 'build' AND trust = 'project' AND json_extract(params, '$.review') IS NOT NULL AND status IN ('queued', 'leased', 'staged', 'failed', 'done') ORDER BY id").all<{ id: number; status: string; error: string | null; params: string; lease_owner: string | null }>();
   for (const b of builds.results) {
     const from = Number((JSON.parse(b.params) as { review?: number }).review);
-    if (from) projectOf.set(from, { id: b.id, status: b.status, error: b.error });
+    if (from) projectOf.set(from, { id: b.id, status: b.status, error: b.error, worker: b.lease_owner });
   }
+  // Where the bytes came from: the worker that held the lease, its owner, the host it says it runs on, who vouched for it.
+  const builtBy = (r: Record<string, unknown>) => {
+    if (!r.lease_owner) return null;
+    let where: string | null = null;
+    try {
+      where = (r.worker_labels ? (JSON.parse(r.worker_labels as string) as { where?: string }).where : null) ?? (r.worker_hostname as string | null) ?? null;
+    } catch {
+      where = (r.worker_hostname as string | null) ?? null;
+    }
+    return { worker: r.lease_owner as string, owner: (r.worker_owner as string | null) ?? null, where, trusted_by: (r.worker_trusted_by as string | null) ?? null };
+  };
   return json(
     {
       staged: staged.results.map((r) => ({
@@ -65,7 +78,13 @@ export async function handleReviewList(env: Env): Promise<Response> {
         kind: r.trust === "project" ? "project" : "contributor",
         from: r.trust === "project" && r.params ? ((JSON.parse(r.params as string) as { review?: number }).review ?? null) : null,
         project_build: r.trust === "community" ? (projectOf.get(r.id as number) ?? null) : null,
+        built_by: builtBy(r),
         params: undefined,
+        lease_owner: undefined,
+        worker_owner: undefined,
+        worker_labels: undefined,
+        worker_hostname: undefined,
+        worker_trusted_by: undefined,
         detected: r.detected ? JSON.parse(r.detected as string) : null,
         evidence: { log: `/api/v1/factory/tasks/${r.id}/artifacts/build.log`, pkgbuild: `/api/v1/factory/tasks/${r.id}/artifacts/PKGBUILD`, pkginfo: `/api/v1/factory/tasks/${r.id}/artifacts/PKGINFO`, audit: `/api/v1/factory/tasks/${r.id}/artifacts/audit.md`, tests: `/api/v1/factory/tasks/${r.id}/artifacts/tests.log`, vet: `/api/v1/factory/tasks/${r.id}/artifacts/vet.json`, trial: `/api/v1/factory/tasks/${r.id}/artifacts/trial.log` },
         // The gate (factory/README.md *The gate*): the worker's own checks — checksums, shellcheck, namcap, the file list, the metadata, check(), the smoke test — as vet.json said.

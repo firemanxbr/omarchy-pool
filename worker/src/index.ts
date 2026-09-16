@@ -62,7 +62,7 @@ import {
 } from "./routes/contributors";
 import type { Actor } from "./routes/factory";
 import { jobOf } from "./jobtoken";
-import { handleTrustWorker, handleTrustList, handleNewToken } from "./routes/contributors";
+import { handleTrustWorker, handleTrustList, handleNewToken, handleWithdrawRecord } from "./routes/contributors";
 import { maintainersOf, GOVERNANCE_FILE } from "./governance";
 import { handleQueueJob } from "./jobs";
 import { isMaintainer } from "./routes/contributors";
@@ -244,6 +244,12 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
     if (!c) return json({ error: "a maintainer's contributor token is required" }, 401);
     if (m[1] === "contributors") return m[3] === "block" ? handleBlockContributor(c, m[2], request, env) : handleUnblockContributor(c, m[2], request, env);
     return m[3] === "block" ? handleBlockPackage(c, m[2], request, env) : handleUnblockPackage(c, m[2], request, env);
+  }
+  // Maintainers: a record withdrawn from the public bucket, a signed tombstone in its place.
+  if (method === "POST" && path === "/factory/record/withdraw") {
+    const c = await contributorOf(request, env);
+    if (!c) return json({ error: "a maintainer's contributor token is required" }, 401);
+    return handleWithdrawRecord(c, request, env);
   }
   if ((m = path.match(/^\/factory\/tasks\/(\d+)\/artifacts$/)) && method === "DELETE") {
     const c = await contributorOf(request, env);

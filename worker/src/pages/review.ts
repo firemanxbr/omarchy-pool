@@ -147,6 +147,12 @@ const SCRIPT = String.raw`
     if (!maint()) return t.category ? '<span class="pill none">' + esc(t.category) + '</span>' : '';
     return '<select class="cat" data-category="' + esc(t.name) + '" title="the category a person finds it under">' + (t.category ? '' : '<option value="" selected>category…</option>') + CATEGORIES.map(function (c) { return '<option' + (c === t.category ? ' selected' : '') + '>' + c + '</option>'; }).join("") + '</select>';
   }
+  // Where the bytes came from: the worker that held the lease, whose it is, the host it names, who vouched for it (the project's builds) — the approval sees the machine, not only the evidence.
+  function builtOn(t) {
+    var b = t.built_by; if (!b) return "";
+    var who = b.owner ? b.owner + "'s " : "", word = b.trusted_by ? "trusted on the word of " + b.trusted_by : (t.kind === "project" ? "trusted before trust took two words" : "a community worker");
+    return ' <span class="dim" title="' + esc(who + "worker " + b.worker + (b.where ? " on " + b.where : "") + " — " + word) + '">on ' + esc(b.where || b.worker) + '</span>';
+  }
   function gate(t) {
     var v = t.vet;
     if (!v) return '<span class="dim" title="built before the gate existed">—</span>';
@@ -192,8 +198,8 @@ const SCRIPT = String.raw`
     $("#queue-note").textContent = STAGED.length ? (maint() ? num(forMe) + " waiting for your decision · " : "") + num(STAGED.length) + " staged" : "";
     pager("#staged", STAGED, function (t) {
       var det = t.detected || {}, project = t.kind === "project", pb = t.project_build;
-      var build = project ? '<span class="pill ok" title="the project\'s own build, from a contributor\'s evidence">the project</span> <span class="muted">from #' + esc(String(t.from || "")) + '</span>'
-        : '<span class="muted">evidence · #' + t.id + (t.duration_ms ? ' · ' + Math.round(t.duration_ms / 1000) + ' s' : '') + '</span>' + (pb && (pb.status === "queued" || pb.status === "leased") ? ' <span class="pill blue">building again</span>' : pb && pb.status === "staged" ? ' <span class="pill ok">built again</span>' : '');
+      var build = project ? '<span class="pill ok" title="the project\'s own build, from a contributor\'s evidence">the project</span> <span class="muted">from #' + esc(String(t.from || "")) + '</span>' + builtOn(t)
+        : '<span class="muted">evidence · #' + t.id + (t.duration_ms ? ' · ' + Math.round(t.duration_ms / 1000) + ' s' : '') + '</span>' + builtOn(t) + (pb && (pb.status === "queued" || pb.status === "leased") ? ' <span class="pill blue">building again</span>' : pb && pb.status === "staged" ? ' <span class="pill ok">built again</span>' : '');
       var mine = WHO && t.owner === login, forYou = maint() && !mine && decidable(t);
       return '<tr id="t-' + t.id + '"' + (project ? ' class="project-row"' : '') + (forYou ? ' class="for-you"' : mine ? ' class="mine-row"' : '') + '><td>' + pkg(t.name, t.version) + (det.license ? ' <span class="dim">' + esc(det.license) + '</span>' : '') + (t.url ? ' <a class="run dim" href="' + esc(t.url) + '" title="' + esc(t.url) + '">source</a>' : '') + '<br>' + category(t) + '</td><td>' + esc(t.arch) + '</td>' +
         '<td>' + person(t.owner) + (mine ? ' <span class="pill none">you</span>' : '') + '</td><td>' + build + '</td><td>' + gate(t) + '</td><td>' + audit(t) + '</td><td>' + trial(t) + '</td>' +
