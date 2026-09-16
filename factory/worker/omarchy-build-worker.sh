@@ -177,7 +177,7 @@ prepare_container() {
     grep -q "^$opt" /etc/pacman.conf || sed -i "0,/^\[options\]/s//[options]\n$opt/" /etc/pacman.conf
   done
   pacman-key --init >/dev/null 2>&1 || true
-  pacman -Syu --noconfirm --needed base-devel git namcap jq python pacman-contrib ccache >/dev/null
+  pacman -Syu --noconfirm --needed base-devel git namcap jq python pacman-contrib ccache desktop-file-utils >/dev/null
   install_shellcheck
   # makepkg refuses root; `builder` builds, root installs the dependencies
   # (install_deps) — no sudo anywhere: a setuid sudo does not start under
@@ -375,6 +375,46 @@ vet_add() { # name status detail
   printf '[%s] %-4s %s — %s\n' "$(date -u +%H:%M:%S)" "$status" "$name" "${detail:0:800}" >>"$VET_LOG"
   jq -c --arg n "$name" --arg s "$status" --arg d "${detail:0:2000}" '.checks += [{name:$n,status:$s,detail:$d}]' "$VET_JSON" >"$VET_JSON.tmp" && mv "$VET_JSON.tmp" "$VET_JSON"
 }
+# The executable a launcher in /usr/bin really runs: itself when it is an ELF file; for a shell wrapper,
+# the first absolute path on its `exec` line that is an executable file (then any such path in it).
+# A wrapper whose paths into /opt or /usr/lib exist nowhere runs nothing: MISSING:<path>, and the gate says so.
+real_executable() { # /usr/bin/name → path | MISSING:path
+  local b="$1" c first=""
+  if [[ "$(head -c 2 "$b" 2>/dev/null)" != "#!" ]]; then echo "$b"; return 0; fi
+  for c in $(grep -E '^[[:space:]]*exec[[:space:]]' "$b" | grep -oE '(/[A-Za-z0-9._+@-]+)+') $(grep -oE '(/(opt|usr/lib|usr/share)/[A-Za-z0-9._+@/-]+)' "$b"); do
+    [[ -f "$c" && -x "$c" ]] && { echo "$c"; return 0; }
+    [[ -n "$first" || -e "$c" ]] || first="$c"
+  done
+  if [[ -n "$first" ]]; then echo "MISSING:$first"; else echo "$b"; fi
+}
+# A desktop application: a .desktop entry in the package names this launcher, or the executable it runs links a toolkit.
+is_desktop_app() { # /usr/bin/name real-executable entries
+  local b="$1" exe="$2" entries="$3" e
+  for e in $entries; do
+    [[ "$(sed -n 's/^Exec=//p' "$e" 2>/dev/null | head -1 | awk '{print $1}' | xargs -r basename 2>/dev/null)" == "$(basename "$b")" ]] && return 0
+  done
+  [[ "$exe" != MISSING:* && -f "$exe" ]] && ldd "$exe" 2>/dev/null | grep -qE 'libX11\.so|libwayland-client\.so|libgtk-[34]\.so|libQt[56]Gui\.so|libEGL\.so' && return 0
+  return 1
+}
+# What a start would have proved, without a display: the executable exists, its libraries resolve, the entry is valid.
+# Prints the summary and returns 0, or prints the reason and returns 1.
+desktop_app_checks() { # /usr/bin/name real-executable entries
+  local b="$1" exe="$2" entries="$3" missing e bad
+  [[ "$exe" != MISSING:* ]] || { echo "the launcher points at ${exe#MISSING:}, which does not exist"; return 1; }
+  [[ -f "$exe" && -x "$exe" ]] || { echo "the launcher runs $exe, which is not an executable file"; return 1; }
+  missing="$(ldd "$exe" 2>&1 | grep -E 'not found' | awk '{print $1}' | head -4 | tr '\n' ' ')"
+  [[ -z "$missing" ]] || { echo "libraries not found for $exe: $missing"; return 1; }
+  for e in $entries; do
+    if command -v desktop-file-validate >/dev/null 2>&1; then
+      bad="$(desktop-file-validate "$e" 2>&1 | grep -E 'error' | head -2 | tr '\n' ' ')"
+      [[ -z "$bad" ]] || { echo "$(basename "$e"): $bad"; return 1; }
+    fi
+    local x; x="$(sed -n 's/^Exec=//p' "$e" | head -1 | awk '{print $1}')"
+    [[ -z "$x" ]] || command -v "$x" >/dev/null 2>&1 || [[ -x "$x" ]] || { echo "$(basename "$e") runs $x, which is not on the path"; return 1; }
+  done
+  echo "runs $exe, every library resolves$( [[ -n "$entries" ]] && echo ", $(wc -w <<<"$entries") desktop entry(ies) valid" || echo ", no desktop entry")"
+  return 0
+}
 vet_package() { # name → 0 pass (maybe warnings), 5 fail; writes vet.json and tests.log
   local name="$1" pkgs=(/build/out/*.pkg.tar.zst) out fails
   echo '{"schema":"omarchy-pool/vet/1","verdict":"pending","checks":[]}' >"$VET_JSON"; : >"$VET_LOG"
@@ -396,10 +436,13 @@ vet_package() { # name → 0 pass (maybe warnings), 5 fail; writes vet.json and 
   elif grep -qE "^PKGBUILD.* W: " <<<"$out"; then vet_add namcap-pkgbuild warn "$(grep -E ' W: ' <<<"$out" | head -4 | tr '\n' ' ')"
   else vet_add namcap-pkgbuild pass "clean"; fi
   # 4. namcap on every built package: dependencies the ELF scan finds, permissions, paths, srcdir leaks, the licence.
+  # Machine-readable (-m): the rule's id, not its sentence — the two exemptions below name ids, and without -m
+  # they never matched (every Electron app failed on ELF files under /opt, 2026-09-16). glibc and gcc-libs are
+  # always there; ELF under /opt is where a self-contained application lives (skills: Desktop apps).
   local p e w
   for p in "${pkgs[@]}"; do
-    out="$(as_builder namcap -i "$p" 2>&1 || true)"
-    e="$(grep -E ' E: ' <<<"$out" | grep -vE 'E: (dependency-detected-not-included (glibc|gcc-libs)|elffile-not-in-allowed-dirs.*/opt/)' | head -6 | tr '\n' ' ')"
+    out="$(as_builder namcap -m -i "$p" 2>&1 || true)"
+    e="$(grep -E ' E: ' <<<"$out" | grep -vE 'E: (dependency-detected-not-included (glibc|gcc-libs)|elffile-not-in-allowed-dirs.*opt/)' | head -6 | tr '\n' ' ')"
     w="$(grep -E ' W: ' <<<"$out" | head -6 | tr '\n' ' ')"
     if [[ -n "$e" ]]; then vet_add "namcap-package:$(basename "$p")" fail "$e"
     elif [[ -n "$w" ]]; then vet_add "namcap-package:$(basename "$p")" warn "$w"
@@ -427,13 +470,27 @@ vet_package() { # name → 0 pass (maybe warnings), 5 fail; writes vet.json and 
   if grep -qE '^check\(\)' /build/pkg/PKGBUILD; then vet_add check pass "check() runs the upstream tests"
   elif grep -qiE '^#.*(no test|check\(\)|tests? (need|require|are)|upstream has no)' /build/pkg/PKGBUILD; then vet_add check warn "no check(): $(grep -iE '^#.*(no test|check\(\)|tests?|upstream has no)' /build/pkg/PKGBUILD | head -1)"
   else vet_add check warn "no check() and no comment saying why"; fi
-  # 8. the smoke test: install here, start every binary the package puts in /usr/bin.
+  # 8. the smoke test: install here, start every binary the package puts in /usr/bin. A desktop application
+  # cannot start in this container (no display, no D-Bus: Electron dies with 139 whatever the package), so
+  # for one the gate checks what a start would have proved instead — the executable behind the wrapper
+  # exists, ldd resolves every library, the .desktop entry is valid (skills: Desktop apps) — and still
+  # tries --version for the record. A command-line binary must start.
   if pacman -U --noconfirm "${pkgs[@]}" >>"$VET_LOG" 2>&1; then
-    local bins started=0 broken=""
+    local bins started=0 desktop=0 broken="" b
     bins="$(for p in "${pkgs[@]}"; do pacman -Qlp "$p" 2>/dev/null | awk '$2 ~ /^\/usr\/bin\/[^\/]+$/ {print $2}'; done | sort -u)"
+    local entries; entries="$(for p in "${pkgs[@]}"; do pacman -Qlp "$p" 2>/dev/null | awk '$2 ~ /^\/usr\/share\/applications\/.*\.desktop$/ {print $2}'; done | sort -u)"
     for b in $bins; do
       [[ -x "$b" ]] || continue
-      local code
+      local code exe
+      exe="$(real_executable "$b")"
+      if is_desktop_app "$b" "$exe" "$entries"; then
+        desktop=$((desktop + 1))
+        local why; why="$(desktop_app_checks "$b" "$exe" "$entries")" || { broken+="$b ($why) "; continue; }
+        timeout 10 "$b" --version >/build/smoke.out 2>&1; code=$?
+        if grep -qE 'error while loading shared libraries|cannot open shared object' /build/smoke.out; then broken+="$b (exit $code: $(head -c 160 /build/smoke.out | tr '\n' ' ')) "; continue; fi
+        printf '    %s: desktop app — %s; --version → exit %s (not counted: no display here)\n' "$b" "$why" "$code" >>"$VET_LOG"
+        continue
+      fi
       timeout 10 "$b" --version >/build/smoke.out 2>&1; code=$?
       if (( code == 126 || code == 127 || code >= 129 )) || grep -qE 'error while loading shared libraries|cannot open shared object|No such file or directory' /build/smoke.out; then
         timeout 10 "$b" --help >/build/smoke.out 2>&1; code=$?
@@ -445,7 +502,7 @@ vet_package() { # name → 0 pass (maybe warnings), 5 fail; writes vet.json and 
     done
     if [[ -n "$broken" ]]; then vet_add smoke fail "installed, but a binary does not start: $broken"
     elif [[ -z "$bins" ]]; then vet_add smoke pass "installed; nothing in /usr/bin to start (a library, data, or a desktop app elsewhere)"
-    else vet_add smoke pass "installed; $started binary(ies) in /usr/bin started"; fi
+    else vet_add smoke pass "installed; $started binary(ies) in /usr/bin started$( (( desktop > 0 )) && echo ", $desktop desktop app(s) checked without a display: libraries resolve, desktop entry valid")"; fi
   else vet_add smoke fail "pacman -U refused the package: $(tail -n 3 "$VET_LOG" | tr '\n' ' ')"; fi
   fails="$(jq -r '[.checks[] | select(.status == "fail")] | length' "$VET_JSON")"
   local warns; warns="$(jq -r '[.checks[] | select(.status == "warn")] | length' "$VET_JSON")"

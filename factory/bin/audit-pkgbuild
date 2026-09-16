@@ -58,13 +58,14 @@ def ask(pkgbuild, log, pkginfo, tests=None):
     # The budget covers the model's thinking too (Gemini counts it against
     # the output): 12 000 left a block verdict on brave-origin-bin cut
     # mid-finding, and a cut report is no report.
-    text, model = agent.complete(open(RULES).read(), user, max_tokens=32000)
+    rules = open(RULES).read() + agent.skills_text()
+    text, model = agent.complete(rules, user, max_tokens=32000)
     report = parse(text)
     if report is None:
         # Once more, with the answer in front of it: the same report, as JSON.
         print("audit: the answer was not a JSON report; asking again", file=sys.stderr)
         again = user + "\n\nYour previous answer was not valid JSON:\n" + text[:3000] + "\n\nReturn the same report as strict JSON (double quotes, no comments, no prose), nothing else."
-        text, model = agent.complete(open(RULES).read(), again, max_tokens=32000)
+        text, model = agent.complete(rules, again, max_tokens=32000)
         report = parse(text)
     if report is None:
         sys.exit("the model did not return a JSON report:\n" + text[:500])

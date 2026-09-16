@@ -18,12 +18,18 @@ import contributing from "../docs/contributing.md";
 import proofOfConcept from "../docs/proof-of-concept.md";
 import openWork from "../docs/open-work.md";
 import omarchyCliMcp from "../docs/omarchy-cli-mcp.md";
+import whatWeTest from "../docs/what-we-test.md";
+// The skills the agents read (factory/skills), spliced into the What we test chapter: one text, two readers.
+import skillEveryPackage from "../../../factory/skills/general/every-package.md";
+import skillDesktopApps from "../../../factory/skills/groups/desktop-apps.md";
+import skillPrebuiltBinaries from "../../../factory/skills/groups/prebuilt-binaries.md";
 
 export type DocKey =
   | "index"
   | "get-started"
   | "workers"
   | "how-it-works"
+  | "what-we-test"
   | "governance"
   | "security"
   | "glossary"
@@ -74,8 +80,17 @@ export interface MdChapter {
   group: DocGroup;
 }
 
+/** The skills, the general ones first, where the chapter's marker stands — the same files every agent reads (factory/bin/agent.py, skills_text). */
+export const SKILLS: { file: string; text: string }[] = [
+  { file: "factory/skills/general/every-package.md", text: skillEveryPackage },
+  { file: "factory/skills/groups/desktop-apps.md", text: skillDesktopApps },
+  { file: "factory/skills/groups/prebuilt-binaries.md", text: skillPrebuiltBinaries },
+];
+const WHAT_WE_TEST = whatWeTest.replace("<!-- skills -->", SKILLS.map((s) => s.text.trim()).join("\n\n"));
+
 export const MD_CHAPTERS: MdChapter[] = [
   { key: "omarchy-cli-mcp", label: "omarchy-cli as an MCP server", text: omarchyCliMcp, from: "docs", group: "pool" },
+  { key: "what-we-test", label: "What we test", text: WHAT_WE_TEST, from: ".", group: "pool" },
   { key: "architecture", label: "Architecture", text: architecture, from: "docs", group: "code" },
   { key: "runbook", label: "Runbook", text: runbook, from: "docs", group: "code" },
   { key: "testing", label: "Testing", text: testing, from: "docs", group: "code" },
@@ -213,7 +228,7 @@ const POOL_CHAPTERS: DocChapter[] = [
 /** The whole map: the pool's chapters, then the code's — with the markdown chapters placed where they read. */
 export const DOCS_TREE: DocChapter[] = (() => {
   const md = new Map(MD_CHAPTERS.map((c) => [c.key, mdChapter(c)]));
-  const pool = POOL_CHAPTERS.flatMap((c) => (c.key === "get-started" ? [c, md.get("omarchy-cli-mcp")!] : [c]));
+  const pool = POOL_CHAPTERS.flatMap((c) => (c.key === "get-started" ? [c, md.get("omarchy-cli-mcp")!] : c.key === "how-it-works" ? [c, md.get("what-we-test")!] : [c]));
   const code = MD_CHAPTERS.filter((c) => c.group === "code").map((c) => md.get(c.key)!);
   return [...pool, ...code];
 })();
