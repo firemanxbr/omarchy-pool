@@ -1,6 +1,6 @@
 /**
  * The Factory: the door for contributors. How a package gets in (drawn as the
- * assembly line it is), the three ways to bring one, what landed lately —
+ * assembly line it is), the three steps, what landed lately —
  * and, signed in, the contributor's own workspace: packages, workers,
  * builds. Everything here is the public API (`/api/v1/factory/*`) called
  * with the contributor token, kept in this browser only.
@@ -16,14 +16,14 @@ const BODY = String.raw`
   <div class="hero">
     <p class="eyebrow">For contributors</p>
     <h1>Package what you love. The factory builds it, a maintainer checks it.</h1>
-    <p class="lede">Request a package, build it on the workers the project shares or on one of your own, and a maintainer learns from <em>your</em> build — the recipe, the log, the metrics — to make the one users get. A GitHub account is the only thing asked; every request is on the record, signed by the pool.</p>
+    <p class="lede">Request a package and build it — on the shared workers or on your own. Your build is the evidence; the project makes the one users get, and a maintainer approves it. A GitHub account is all that is asked.</p>
     <div class="cta-row" id="signin">
       <a class="btn" id="oauth-link" href="/auth/github?next=/factory">${GITHUB_ICON} Sign in with GitHub</a>
       <a class="btn ghost" href="#ways">How it works</a>
       <span class="hint">No permission needed. A worker of your own is optional.</span>
     </div>
-    <details id="token-alt"><summary class="sub" style="cursor:pointer">Without a browser sign-in (scripts, CI): a GitHub token, used once</summary>
-      <p class="sub">Paste a <a href="https://github.com/settings/personal-access-tokens/new">fine-grained token</a> with <b>no permissions</b> (or the output of <code>gh auth token</code>): the pool reads your login with it and never stores it; you get a contributor token for the API, kept in this browser.</p>
+    <details id="token-alt"><summary class="sub" style="cursor:pointer">Scripts and CI: sign in with a GitHub token instead</summary>
+      <p class="sub">A <a href="https://github.com/settings/personal-access-tokens/new">fine-grained token</a> with <b>no permissions</b>, or <code>gh auth token</code>: read once for your login, never stored.</p>
       <form class="searchbar" id="signin-form" onsubmit="return false">
         <input type="password" id="gh-token" placeholder="github_pat_… or gho_…" autocomplete="off" style="flex:1;min-width:280px">
         <button type="submit" id="signin-btn" class="btn ghost">Sign in with a token</button>
@@ -32,38 +32,38 @@ const BODY = String.raw`
     <p class="sub" id="signin-state"></p>
   </div>
 
-  <div class="tiles" id="tiles"></div>
+  <div class="tiles five" id="tiles"></div>
 
-  <section>
-    <div class="h2row"><h2>How a package gets in</h2><a class="more-link" href="/docs/governance">Governance: contributors and maintainers →</a></div>
-    <p class="sub">Nobody knows better than you how your software should be built. The maintainer learns it from you — and writes the recipe the project builds; nothing you built is copied.</p>
-    <figure class="diagram">${factoryDiagram()}<figcaption>Your build is evidence, never what users install: the project's agent makes the package again on a worker the project trusts, a maintainer approves it, the pool signs it, and your name goes on the record. Every step is written once to the record.</figcaption></figure>
+  <section id="how">
+    <div class="h2row"><h2>How a package gets in</h2><a class="more-link" href="/docs/how-it-works#people">What the pool does for you →</a></div>
+    <p class="sub">Nobody knows better than you how your software should be built. The project learns it from your build and makes its own; nothing you built is copied.</p>
+    <figure class="diagram">${factoryDiagram()}<figcaption>Your build is evidence, never what users install. Every step is written once to the record and signed by the pool.</figcaption></figure>
   </section>
 
   <section id="ways">
     <h2>Three steps, two of them yours</h2>
     <p class="sub">Every package takes the same road; you choose where your build runs.</p>
     <div class="ways">
-      <div class="way"><div class="tag"><span>1 · Request</span><span>GitHub sign-in</span></div><h3>Ask for it, on the record</h3><p>The project's URL (a GitHub repository or its release tarball — for a project elsewhere, its home page and the release), a name, one line of description, the licence, and four things you confirm. The pool checks it, writes it once to the record and signs it.</p><div class="go"><a class="btn ghost" href="/request">Request a package</a></div></div>
-      <div class="way"><div class="tag"><span>2 · Build</span><span>evidence</span></div><h3>Build it — here or at home</h3><p>Press <b>Build</b>: a worker the project shares, with the project's agent, writes the PKGBUILD and builds it. Queue too long, or an agent of your own you prefer? Run the signed image on your machine: it builds only your packages. Either way the result is evidence, never a package users get.</p><div class="go"><a class="btn ghost" href="/docs/workers">Run a worker of my own →</a></div></div>
-      <div class="way"><div class="tag"><span>3 · Review</span><span>a maintainer</span></div><h3>The project makes its own</h3><p>A maintainer reads your evidence and has the project's agent, on a worker the project trusts, write and build the package again with everything it learned — then approves what users get, or rejects with a note you see here.</p><div class="go"><a class="btn ghost" href="/docs/governance">The rules →</a></div></div>
+      <div class="way"><div class="tag"><span>1 · Request</span><span>GitHub sign-in</span></div><h3>Ask for it, on the record</h3><p>The project's URL, a name, the licence — checked, written once to the record, signed.</p><div class="go"><a class="btn ghost" href="/request">Request a package</a></div></div>
+      <div class="way"><div class="tag"><span>2 · Build</span><span>evidence</span></div><h3>Build it — here or at home</h3><p>Press <b>Build</b> for a shared worker, or run the signed image on your machine: your packages only, your agent.</p><div class="go"><a class="btn ghost" href="/docs/workers">Run a worker of my own →</a></div></div>
+      <div class="way"><div class="tag"><span>3 · Review</span><span>a maintainer</span></div><h3>The project makes its own</h3><p>A trusted worker builds it again from your evidence, a real pacman installs it, a maintainer approves — never their own.</p><div class="go"><a class="btn ghost" href="/docs/governance">The rules →</a></div></div>
     </div>
   </section>
 
   <section>
     <div class="h2row"><h2>Landed lately</h2><a class="more-link" href="/review">Every decision →</a></div>
-    <p class="sub">Contributed by people like you, rebuilt and approved by a maintainer.</p>
+    <p class="sub">Brought by contributors, built again by the project, approved by a maintainer.</p>
     <div class="landed" id="landed"><div class="muted">loading…</div></div>
   </section>
 
   <section>
     <div class="charts">
-      <div class="chart"><h3>Factory builds <span>14 days</span></h3><div class="sub">per day: contributors' builds staged, the project's published, failed</div><div id="c-builds"></div></div>
-      <div class="chart"><h3>From registration to the rings <span>median</span></h3><div class="sub">time spent at each stage, from the record — the last two are the gates</div><div id="c-funnel"></div></div>
+      <div class="chart"><h3>Factory builds <span>14 days</span></h3><div class="sub">per day: staged, published, failed</div><div id="c-builds"></div></div>
+      <div class="chart"><h3>From request to the rings <span>median</span></h3><div class="sub">time at each stage, from the record</div><div id="c-funnel"></div></div>
     </div>
   </section>
 
-  <div class="gate" id="gate"><div><div class="lock">private area · contributors</div><h3 style="margin-top:6px">Your workspace</h3><p>Sign in with GitHub to request packages, run a worker, follow your builds and get your public profile.</p><ul><li>your packages and their stage</li><li>your workers, live</li><li>every build with its evidence</li><li>a CLI token</li></ul></div><a class="btn" href="/auth/github?next=/factory">${GITHUB_ICON} Sign in with GitHub</a></div>
+  <div class="gate" id="gate"><div><div class="lock">private area · contributors</div><h3 style="margin-top:6px">Your workspace</h3><p>Sign in to request packages, run a worker and follow your builds.</p><ul><li>your packages and their stage</li><li>your workers, live</li><li>every build with its evidence</li><li>a CLI token</li></ul></div><a class="btn" href="/auth/github?next=/factory">${GITHUB_ICON} Sign in with GitHub</a></div>
 
   <div id="signed" hidden>
     <div class="private-head" id="workspace"><span class="lock">private</span><h2>Your workspace</h2><span class="muted" id="ws-who"></span><span class="right"><a class="more-link" href="/pipeline#throughput">Where your builds sit in the queue →</a><a class="more-link" id="ws-profile" href="/factory">Your public profile →</a></span></div>
@@ -74,7 +74,7 @@ const BODY = String.raw`
         <div class="table-wrap" style="border:0"><table id="my-packages"><thead><tr><th>Package</th><th>Project</th><th>Arches</th><th>Version · licence</th><th>Stage</th><th>Detail</th><th></th></tr></thead><tbody></tbody></table></div>
       </div>
       <div class="panel"><h3>Your workers <button type="button" id="w-toggle">+ register one</button></h3>
-        <p class="sub" style="margin:0 0 10px;font-size:12.5px">Optional: builds happen on the shared workers otherwise. Register one, run the signed image with the token it gives you — shown once — and your builds skip the queue; it builds only your packages, with your agent. <a href="/docs/workers">Run a worker →</a></p>
+        <p class="sub" style="margin:0 0 10px;font-size:12.5px">Optional — the shared workers build for you otherwise. Register one and run the signed image with the token it gives you, shown once: your packages only, your agent. <a href="/docs/workers">Run a worker →</a></p>
         <form id="worker-form" class="form" onsubmit="return false" hidden>
           <label>Name <input type="text" id="w-name" placeholder="laptop" required></label>
           <label>Architecture <select id="w-arch"><option>x86_64</option><option>aarch64</option></select></label>
@@ -82,7 +82,7 @@ const BODY = String.raw`
         </form>
         <div id="w-new" hidden><p class="sub">Your worker token, shown once. Run one of these wherever the worker lives (podman or docker):</p><pre id="w-cmd"></pre></div>
         <div class="table-wrap" style="border:0"><table id="my-workers"><thead><tr><th>Worker</th><th>Arch</th><th>Mode</th><th>Agent</th><th>Last seen</th><th>Building</th><th>Done / failed</th><th></th></tr></thead><tbody></tbody></table></div>
-        <p class="sub" style="margin:12px 0 0;font-size:12.5px">Scripts and CI use a contributor token (<code>Authorization: Bearer omc_…</code>): <button type="button" class="small-btn" id="cli-token">Generate a token</button> <span class="dim">shown once; it replaces the previous one, your workers keep theirs</span></p>
+        <p class="sub" style="margin:12px 0 0;font-size:12.5px">Scripts and CI use a contributor token (<code>Authorization: Bearer omc_…</code>): <button type="button" class="small-btn" id="cli-token">Generate a token</button> <span class="dim">shown once; replaces the previous one, your workers keep theirs</span></p>
         <pre id="cli-token-out" hidden></pre>
       </div>
     </div>
@@ -151,10 +151,10 @@ __CHARTS__
       setTiles("#ws-tiles", [
         ["Your packages", num(pk.length), num(pk.filter(function (p) { return p.status === "approved"; }).length) + " in the rings · " + num(pk.filter(function (p) { return p.status === "waiting" || p.status === "registered"; }).length) + " waiting or building"],
         ["Your builds", num(tk.length), num(tk.filter(function (t) { return t.status === "staged" || t.status === "done"; }).length) + " succeeded · " + num(tk.filter(function (t) { return t.status === "failed"; }).length) + " failed"],
-        ["Your workers", num(ws.filter(function (w) { return !w.revoked_at; }).length), num(ws.filter(function (w) { return w.last_seen && Date.now() - Date.parse(w.last_seen) < 600000; }).length) + " online · shared workers build for you otherwise", ws.some(function (w) { return w.last_seen && Date.now() - Date.parse(w.last_seen) < 600000; }) ? "ok" : ""],
-        ["Staging used", (st.bytes / 1048576).toFixed(1) + " MB", "of " + (st.quota_bytes / 1073741824).toFixed(0) + " GB · evidence expires after 30 days"]
+        ["Your workers", num(ws.filter(function (w) { return !w.revoked_at; }).length), num(ws.filter(function (w) { return w.last_seen && Date.now() - Date.parse(w.last_seen) < 600000; }).length) + " online · the shared ones otherwise", ws.some(function (w) { return w.last_seen && Date.now() - Date.parse(w.last_seen) < 600000; }) ? "ok" : ""],
+        ["Staging used", (st.bytes / 1048576).toFixed(1) + " MB", "of " + (st.quota_bytes / 1073741824).toFixed(0) + " GB · expires after 30 days"]
       ]);
-      $("#quota").textContent = "Staging: " + (st.bytes / 1048576).toFixed(1) + " MB of " + (st.quota_bytes / 1073741824).toFixed(0) + " GB used · objects expire after 30 days · a task waits until a worker of its architecture (yours, or a shared one) picks it up.";
+      $("#quota").textContent = "Staging: " + (st.bytes / 1048576).toFixed(1) + " MB of " + (st.quota_bytes / 1073741824).toFixed(0) + " GB · evidence expires after 30 days";
       endSkeleton();
     }).catch(function (e) { $("#signin-state").textContent = "could not load your data: " + e; endSkeleton(); });
   }
@@ -212,9 +212,9 @@ __CHARTS__
       var approved = apps.filter(function (a) { return a.decision === "approved"; });
       var waits = staged.map(function (s) { return Date.now() - Date.parse(s.finished_at || s.created_at || 0); }).filter(function (x) { return x > 0; }).sort(function (a, b) { return a - b; });
       setTiles("#tiles", [
-        ["Community packages", num(pkgs.filter(function (p) { return p.status === "approved" || p.status === "published"; }).length), "approved into the rings, from " + num(Object.keys(pkgs.reduce(function (o, p) { o[p.owner] = 1; return o; }, {})).length) + " contributors"],
+        ["Community packages", num(pkgs.filter(function (p) { return p.status === "approved" || p.status === "published"; }).length), "in the rings, from " + num(Object.keys(pkgs.reduce(function (o, p) { o[p.owner] = 1; return o; }, {})).length) + " contributors"],
         ["Waiting for review", num(staged.length), waits.length ? "oldest " + ago(new Date(Date.now() - waits[waits.length - 1]).toISOString()).replace(" ago", "") : "nothing staged right now", staged.length ? "warn" : ""],
-        ["Shared workers online", num(shared.length), num(shared.filter(function (w) { return w.side === "community"; }).length) + " community · " + num(shared.filter(function (w) { return w.side === "omarchy"; }).length) + " project — for everyone", shared.length ? "ok" : ""],
+        ["Shared workers online", num(shared.length), num(shared.filter(function (w) { return w.side === "community"; }).length) + " community · " + num(shared.filter(function (w) { return w.side === "omarchy"; }).length) + " project", shared.length ? "ok" : ""],
         ["Builds this week", num(builds7.length), num(builds7.filter(function (t) { return t.status === "staged"; }).length) + " staged · " + num(builds7.filter(function (t) { return t.status === "done"; }).length) + " published · " + num(builds7.filter(function (t) { return t.status === "failed"; }).length) + " failed"],
         ["Requested, not built yet", num(pkgs.filter(function (p) { return p.status === "registered"; }).length), "on the record, waiting for a Build"]
       ]);
@@ -223,16 +223,16 @@ __CHARTS__
         var owner = owners[a.name];
         return '<div class="land">' + (owner ? avatar(owner, "contributor") : '<span class="avatar">?</span>') + '<div class="n"><span>' + esc(a.name) + ' <span class="v">' + esc(a.version || "") + '</span></span><span class="pill ' + (a.rebuild_status === "done" ? "ok" : "blue") + '">' + (a.rebuild_status === "done" ? "in the rings" : a.rebuild_task ? "building" : "recipe pending") + '</span></div><div class="b">by ' + (owner ? '<a href="/user/' + encodeURIComponent(owner) + '">' + esc(owner) + '</a>' : "—") + ' · approved by <a href="/user/' + encodeURIComponent(a.by) + '">' + esc(a.by) + '</a> · ' + ago(a.created_at) + ' · ' + esc(a.arch) + '</div></div>';
       }).join("") || '<div class="muted">nothing approved yet — <a href="/auth/github?next=/factory">be the first</a></div>';
-      // The funnel: medians from what the record holds (a package's registration, its first staged build, the decision), then the gates every package passes.
+      // The funnel: medians from what the record holds (a package's request, its first staged build, the decision), then the gates every package passes.
       var median = function (xs) { if (!xs.length) return null; xs = xs.slice().sort(function (a, b) { return a - b; }); return xs[Math.floor(xs.length / 2)]; };
       var firstStaged = {}; f.tasks.forEach(function (t) { if (t.kind === "build" && t.trust === "community" && (t.status === "staged" || t.status === "done") && t.finished_at) { var k = t.name; if (!firstStaged[k] || t.finished_at < firstStaged[k]) firstStaged[k] = t.finished_at; } });
       var byTask = {}; f.tasks.forEach(function (t) { byTask[t.id] = t; });
       var regToStaged = pkgs.filter(function (p) { return firstStaged[p.name] && p.created_at; }).map(function (p) { return (Date.parse(firstStaged[p.name]) - Date.parse(p.created_at)) / 3600e3; }).filter(function (h) { return h >= 0; });
       var stagedToDecided = apps.filter(function (a) { return byTask[a.task_id] && byTask[a.task_id].finished_at; }).map(function (a) { return (Date.parse(a.created_at) - Date.parse(byTask[a.task_id].finished_at)) / 3600e3; }).filter(function (h) { return h >= 0; });
       var fmtH = function (h) { return h == null ? "—" : h < 1 ? Math.round(h * 60) + " min" : h < 48 ? (Math.round(h * 10) / 10) + " h" : Math.round(h / 24) + " d"; };
-      var stagesF = [["registered → staged", median(regToStaged), "the build, on a worker"], ["staged → decided", median(stagedToDecided), "a maintainer reads the evidence"], ["approved → edge", null, "the project's build, published on approval"], ["edge → rc", 0.5, "minutes, after the checks on both architectures"], ["rc → stable", 6, "two green health checks in a row — or at once, when the trial installed it"]];
+      var stagesF = [["requested → staged", median(regToStaged), "your build, on a worker"], ["staged → decided", median(stagedToDecided), "a maintainer reads the evidence"], ["edge → rc", 0.5, "minutes, after the checks on both architectures"], ["rc → stable", 6, "two green health checks in a row — or at once, when the trial installed it"]];
       var maxH = Math.max(6, median(regToStaged) || 0, median(stagedToDecided) || 0);
-      $("#c-funnel").innerHTML = '<div class="hrows">' + stagesF.map(function (st) { var human = st[0] === "staged → decided"; return '<div class="hrow" style="grid-template-columns:170px 1fr 56px"><div class="l" title="' + esc(st[2]) + '">' + esc(st[0]) + '</div><div class="bar" data-tip="' + esc(st[0] + ": " + (st[1] == null ? "no measurement yet" : "median " + fmtH(st[1])) + " — " + st[2]) + '"><i style="width:' + (st[1] == null ? 0 : Math.min(100, 100 * st[1] / maxH)) + '%;background:' + (human ? "var(--amber)" : "var(--green)") + '"></i></div><div class="p num">' + fmtH(st[1]) + '</div></div>'; }).join("") + '</div><div class="legend"><span><i style="background:var(--green)"></i>the machines</span><span><i style="background:var(--amber)"></i>a human decides</span></div>';
+      $("#c-funnel").innerHTML = '<div class="hrows">' + stagesF.map(function (st) { var human = st[0] === "staged → decided"; return '<div class="hrow" style="grid-template-columns:160px 1fr 56px"><div class="l" title="' + esc(st[2]) + '">' + esc(st[0]) + '</div><div class="bar" data-tip="' + esc(st[0] + ": " + (st[1] == null ? "no measurement yet" : "median " + fmtH(st[1])) + " — " + st[2]) + '"><i style="width:' + (st[1] == null ? 0 : Math.min(100, 100 * st[1] / maxH)) + '%;background:' + (human ? "var(--amber)" : "var(--green)") + '"></i></div><div class="p num">' + fmtH(st[1]) + '</div></div>'; }).join("") + '</div><div class="legend"><span><i style="background:var(--green)"></i>the machines</span><span><i style="background:var(--amber)"></i>a human decides</span></div>';
       endSkeleton();
     }).catch(function () { endSkeleton(); });
   }
