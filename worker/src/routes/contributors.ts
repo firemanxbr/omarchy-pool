@@ -6,6 +6,7 @@ import { providedBy } from "./factory";
 import { cookieOf } from "./auth";
 import { putRecord, recordKey, recordUrl } from "../record";
 import { version } from "../meta";
+import { isTextEvidence, STAGING_DAYS, STAGING_QUOTA_BYTES } from "../staging";
 
 /**
  * Contributors: anyone with a GitHub identity. No permission needed to
@@ -26,7 +27,7 @@ import { version } from "../meta";
  * and never stored; a fine-grained token with no permissions is enough.
  */
 
-const STAGING_QUOTA_BYTES = 2 * 1024 * 1024 * 1024; // per contributor
+// The staging quota (STAGING_QUOTA_BYTES) and its lifecycle live in staging.ts.
 const QUEUED_QUOTA = 10; // tasks queued or building per contributor
 
 async function stagingBytesUsed(env: Env, owner: string, exceptKey?: string): Promise<number> {
@@ -36,12 +37,15 @@ async function stagingBytesUsed(env: Env, owner: string, exceptKey?: string): Pr
   return row?.bytes ?? 0;
 }
 
-/** 413 when this upload would put a contributor over 2 GB. Project staging has no quota. */
+/** 413 when this upload would put a contributor over the quota. Project staging has no quota. */
 async function quotaRefusal(env: Env, space: string, extra: number, exceptKey?: string): Promise<Response | null> {
   if (space === "@project") return null;
   const used = await stagingBytesUsed(env, space, exceptKey);
   if (used + extra > STAGING_QUOTA_BYTES) {
-    return json({ error: `staging quota of ${STAGING_QUOTA_BYTES} bytes reached for ${space}; older builds expire after 30 days` }, 413);
+    return json(
+      { error: `staging quota of ${STAGING_QUOTA_BYTES} bytes reached for ${space} (${used} used); drop a build you no longer need with DELETE /api/v1/factory/tasks/<id>/artifacts — the pool frees superseded, rejected and published builds itself, the rest after ${STAGING_DAYS} days`, used, quota_bytes: STAGING_QUOTA_BYTES },
+      413,
+    );
   }
   return null;
 }
@@ -543,7 +547,7 @@ export async function handleStagingList(taskId: number, env: Env): Promise<Respo
 
 /**
  * The owner (or a maintainer) drops a community task's staging objects so
- * they stop counting toward the 2 GB quota. Refused while the task is
+ * they stop counting toward the quota. Refused while the task is
  * queued or leased: a worker may still be writing. Refused, too, while the
  * project builds from it: its worker reads the PKGBUILD, the log and the
  * audit from here. A staged build whose evidence is gone is cancelled — it
@@ -580,19 +584,13 @@ export async function handleStagingDelete(c: Contributor, taskId: number, env: E
   return json({ task: taskId, deleted: keys.length });
 }
 
-/** Text evidence of a community build: build.log and PKGBUILD are public; packages are for maintainers. */
-/** The evidence anyone may read: the recipe, the log, the metadata, the audit. Packages themselves are for maintainers. */
-function isTextEvidence(filename: string): boolean {
-  return filename.endsWith(".log") || filename === "PKGBUILD" || filename === "PKGINFO" || filename.endsWith(".json") || filename.endsWith(".md");
-}
-
 export async function handleStagingGet(taskId: number, filename: string, env: Env, maintainer: boolean): Promise<Response> {
   const row = await env.DB.prepare("SELECT key FROM staging_objects WHERE task_id = ? AND key LIKE ?").bind(taskId, `%/${filename}`).first<{ key: string }>();
   if (!row) return json({ error: "no such object" }, 404);
   const isText = isTextEvidence(filename);
   if (!isText && !maintainer) return json({ error: "packages in staging are for maintainers; the log and the PKGBUILD are public" }, 403);
   const obj = await env.STAGING.get(row.key);
-  if (!obj) return json({ error: "gone (staging objects expire after 30 days)" }, 404);
+  if (!obj) return json({ error: `gone (packages of decided builds are reclaimed; staging expires after ${STAGING_DAYS} days; the text evidence is on the record)` }, 404);
   return new Response(obj.body, { headers: { "content-type": isText ? "text/plain; charset=utf-8" : "application/octet-stream", "cache-control": "no-store" } });
 }
 

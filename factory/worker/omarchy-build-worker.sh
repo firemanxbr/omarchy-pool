@@ -442,7 +442,20 @@ container_worker() {
   task="$body"
   id="$(jq -r .task.id <<<"$task")"; name="$(jq -r .task.name <<<"$task")"; ref="$(jq -r .task.pkgbuild_ref <<<"$task")"
   log "task $id: $name for $ARCH ($ref)"
-  heartbeat_loop "$id" & local beat=$!; disown "$beat"
+  # The owner's workspace is full: nothing this build produces can land.
+  # Say so now — the task fails with the reason on the dashboard — instead
+  # of building for an hour into a 413 (2026-09-16, four tasks did).
+  if [[ "$(jq -r 'if .staging == null then "ok" elif .staging.bytes >= .staging.quota_bytes then "full" else "ok" end' <<<"$task")" == full ]]; then
+    local used quota; used="$(jq -r .staging.bytes <<<"$task")"; quota="$(jq -r .staging.quota_bytes <<<"$task")"
+    log "task $id: the owner's staging is full ($used of $quota bytes); not building"
+    api POST "/factory/tasks/$id/fail" "$(jq -n --arg e "staging quota reached ($used of $quota bytes): drop a build with DELETE /api/v1/factory/tasks/<id>/artifacts, or wait — superseded, rejected and published builds are reclaimed by the pool" '{error:$e,final:true}')" >/dev/null || true
+    exit 1
+  fi
+  # The heartbeat keeps the lease while the build runs. It dies with this
+  # shell, whichever way the shell goes: an upload that failed under
+  # `set -e` used to leave it running, and the lease with it, for hours.
+  heartbeat_loop "$id" & BEAT=$!; disown "$BEAT"
+  trap 'kill "${BEAT:-}" 2>/dev/null || true' EXIT
   local started=$SECONDS status=0
   set +e
   ( set -e; build_with_retries "$name" "$ref" ) > /build/build.log 2>&1
@@ -450,7 +463,7 @@ container_worker() {
   set -e
   local took=$(( (SECONDS - started) * 1000 )) tail; tail="$(tail -n 80 /build/build.log | jq -Rs .)"
   if [[ $status -ne 0 ]]; then
-    kill "$beat" 2>/dev/null || true
+    kill "$BEAT" 2>/dev/null || true
     local err
     if (( status == 5 )); then err="the gate: $(jq -r '[.checks[] | select(.status == "fail") | .name + ": " + .detail] | join("; ")' "$VET_JSON" 2>/dev/null | head -c 400)"
     else err="$(grep -m1 -E '^(==> ERROR|error|Error|fatal)' /build/build.log || tail -n1 /build/build.log)"; fi
@@ -475,34 +488,67 @@ container_worker() {
   sha="$(sha256 "$main")"; filename="$(basename "$main")"
   version="$(tar -xOf "$main" .PKGINFO 2>/dev/null | awk -F' = ' '$1=="pkgver"{print $2}')"
   log "task $id: built $filename in $((took / 1000)) s; uploading to staging"
-  for p in "${pkgs[@]}"; do upload_staging "$id" "$p" "$(basename "$p")"; done
-  upload_staging "$id" /build/pkg/PKGBUILD PKGBUILD
-  upload_staging "$id" /build/build.log build.log
-  upload_staging "$id" "$VET_JSON" vet.json && upload_staging "$id" "$VET_LOG" tests.log
-  tar -xOf "$main" .PKGINFO > /build/PKGINFO && upload_staging "$id" /build/PKGINFO PKGINFO || true
-  kill "$beat" 2>/dev/null || true
+  # An upload that fails — the quota, most likely — is reported as the
+  # build's failure, with the pool's answer as the reason, and is final: a
+  # fresh container would build the same bytes into the same 413. Before,
+  # `set -e` ended the script here with nothing reported and the lease
+  # alive under the orphaned heartbeat.
+  set +e
+  stage_result "$id" "$main" "${pkgs[@]}" 2>/build/upload.err
+  status=$?
+  set -e
+  if (( status != 0 )); then
+    local why; why="$(tr -d '\n' </build/upload.err | tail -c 400)"
+    log "task $id: staging failed — $why"
+    api POST "/factory/tasks/$id/fail" "$(jq -n --arg e "staging: ${why:0:500}" --argjson d "$took" --argjson t "$tail" '{error:$e,duration_ms:$d,log_tail:$t,final:true}')" >/dev/null || true
+    exit 1
+  fi
+  kill "$BEAT" 2>/dev/null || true
   api POST "/factory/tasks/$id/complete" "$(jq -n --arg s "$sha" --arg f "$filename" --arg v "$version" --argjson d "$took" --argjson t "$tail" '{sha256:$s,filename:$f,version:$v,duration_ms:$d,log_tail:$t}')" >/dev/null
   log "task $id: staged — a maintainer takes it from here"
 }
 
-# Upload one file to the task's staging workspace: one PUT up to 90 MB, multipart above.
+# The result into the task's staging workspace: the evidence first — the
+# recipe, the log, the gate, the metadata — and the packages last. A
+# workspace at its quota then stops the upload where the bytes are, and what
+# stays behind is a log and a recipe, not a package no task will complete.
+stage_result() { # task-id main-package packages...
+  local id="$1" main="$2"; shift 2
+  upload_staging "$id" /build/pkg/PKGBUILD PKGBUILD || return 1
+  upload_staging "$id" /build/build.log build.log || return 1
+  if [[ -f "$VET_JSON" ]]; then
+    upload_staging "$id" "$VET_JSON" vet.json || return 1
+    [[ -f "$VET_LOG" ]] && { upload_staging "$id" "$VET_LOG" tests.log || return 1; }
+  fi
+  if tar -xOf "$main" .PKGINFO > /build/PKGINFO 2>/dev/null; then upload_staging "$id" /build/PKGINFO PKGINFO || return 1; fi
+  local p
+  for p in "$@"; do upload_staging "$id" "$p" "$(basename "$p")" || return 1; done
+}
+
+# Upload one file to the task's staging workspace: one PUT up to 90 MB,
+# multipart above. On a refusal the pool's answer goes to stderr — the
+# quota message says what to do — and the function fails.
 upload_staging() { # task-id file name
-  local id="$1" file="$2" name="$3" size; size="$(wc -c <"$file" | tr -d ' ')"
+  local id="$1" file="$2" name="$3" size body=/build/upload.body; size="$(wc -c <"$file" | tr -d ' ')"
+  local auth="authorization: Bearer $OMARCHY_WORKER_TOKEN"
   if (( size <= 90 * 1024 * 1024 )); then
-    curl -sS --fail-with-body --max-time 900 -X PUT "$OMARCHY_API/api/v1/factory/tasks/$id/artifacts/$name" -H "authorization: Bearer $OMARCHY_WORKER_TOKEN" \
-      -H "content-type: application/octet-stream" --data-binary "@$file" -o /dev/null
-    return
+    curl -sS --fail-with-body --max-time 900 -X PUT "$OMARCHY_API/api/v1/factory/tasks/$id/artifacts/$name" -H "$auth" \
+      -H "content-type: application/octet-stream" --data-binary "@$file" -o "$body" || { echo "PUT $name: $(head -c 400 "$body")" >&2; return 1; }
+    return 0
   fi
   local base="$OMARCHY_API/api/v1/factory/tasks/$id/artifacts/$name/multipart" up parts=() n=0 etag
-  up="$(curl -sS --fail-with-body -X POST "$base?action=create" -H "authorization: Bearer $OMARCHY_WORKER_TOKEN" | jq -r .upload_id)"
+  curl -sS --fail-with-body -X POST "$base?action=create" -H "$auth" -o "$body" || { echo "multipart create $name: $(head -c 400 "$body")" >&2; return 1; }
+  up="$(jq -r .upload_id "$body")"
   rm -rf /build/parts && mkdir -p /build/parts && split -b 64m -d -a 4 "$file" /build/parts/p
   for part in /build/parts/p*; do
     n=$((n + 1))
-    etag="$(curl -sS --fail-with-body -X POST "$base?action=part&part=$n&upload_id=$up" -H "authorization: Bearer $OMARCHY_WORKER_TOKEN" --data-binary "@$part" | jq -r .etag)"
+    curl -sS --fail-with-body -X POST "$base?action=part&part=$n&upload_id=$up" -H "$auth" --data-binary "@$part" -o "$body" \
+      || { echo "multipart part $n of $name: $(head -c 400 "$body")" >&2; curl -sS -X POST "$base?action=abort&upload_id=$up" -H "$auth" -o /dev/null || true; rm -rf /build/parts; return 1; }
+    etag="$(jq -r .etag "$body")"
     parts+=("{\"partNumber\":$n,\"etag\":\"$etag\"}")
   done
-  curl -sS --fail-with-body -X POST "$base?action=complete&upload_id=$up" -H "authorization: Bearer $OMARCHY_WORKER_TOKEN" -H "content-type: application/json" \
-    --data "{\"parts\":[$(IFS=,; echo "${parts[*]}")]}" -o /dev/null
+  curl -sS --fail-with-body -X POST "$base?action=complete&upload_id=$up" -H "$auth" -H "content-type: application/json" \
+    --data "{\"parts\":[$(IFS=,; echo "${parts[*]}")]}" -o "$body" || { echo "multipart complete $name: $(head -c 400 "$body")" >&2; rm -rf /build/parts; return 1; }
   rm -rf /build/parts
 }
 

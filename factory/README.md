@@ -224,11 +224,16 @@ PKGBUILD (`pkgname=(a b c)`) builds; only the base's `depends`,
 `makedepends` and `checkdepends` are installed, as `makepkg --syncdeps`
 would.
 
-Limits: 10 tasks queued or building and 2 GB of staging per contributor;
-drop superseded staging with `DELETE /api/v1/factory/tasks/<id>/artifacts`
+Limits: 10 tasks queued or building and 5 GB of staging per contributor
+(a single PUT and a multipart upload honour the same cap). The pool gives
+the space back itself: the packages of a build it is done with —
+superseded by a newer one, rejected, failed for good, published — are
+reclaimed at once, the recipe and the log stay; everything expires after
+30 days. Drop a build early with `DELETE /api/v1/factory/tasks/<id>/artifacts`
 (refused while queued or leased, or while the project builds from it; a staged
-build is cancelled). Multipart uploads honour the same cap.
-Staging objects expire after 30 days. A worker token is revocable
+build is cancelled). Your worker fails a task at claim time when your
+workspace is full, and reports an upload the pool refused as the build's
+failure — the reason is on the Factory page. A worker token is revocable
 (`DELETE /factory/workers/<id>`); registering again replaces your contributor
 token. `cosign verify ghcr.io/firemanxbr/omarchy-worker:latest
 --certificate-identity-regexp github.com/firemanxbr/omarchy-pool

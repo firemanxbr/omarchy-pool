@@ -1,5 +1,6 @@
 import { json, type Env } from "../index";
 import { isMaintainer, type Contributor } from "./contributors";
+import { reclaimStagingPackages } from "../staging";
 
 /**
  * Review: what maintainers do with staged builds (docs/GOVERNANCE.md).
@@ -202,6 +203,8 @@ export async function handleReject(c: Contributor, id: number, request: Request,
     .run();
   await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = ? WHERE id = ?").bind(`rejected by ${c.login}: ${b.note.slice(0, 500)}`, id).run();
   await cancelPendingAudit(env, id);
+  // The note and the evidence are the record of a rejection; the package is not.
+  await reclaimStagingPackages(env, [id]);
   await env.DB.prepare("UPDATE factory_packages SET status = 'registered', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?")
     .bind(`rejected by ${c.login}: ${b.note.slice(0, 200)}`, t.name)
     .run();
