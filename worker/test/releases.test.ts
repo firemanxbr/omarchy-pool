@@ -112,12 +112,24 @@ describe("POST /releases", () => {
     expect(r1.status).toBe(201);
     expect(r1.json.release.seq).toBe(1);
     expect(r1.json.package_count).toBe(3);
+    // The listing is kept at the edge under its release (the CLI's status, list and search read a whole ring on every
+    // machine): the same head again is a hit; a new release is a miss at once, never the old head served stale.
+    const pool = (p: string) => worker.fetch(new Request(API + p), env, createExecutionContext());
+    const first = await pool("/releases/edge?fields=summary");
+    expect([first.headers.get("x-pool-cache"), ((await first.json()) as any).release.id]).toEqual(["miss", r1.json.release.id]);
+    expect((await pool("/releases/edge?fields=summary")).headers.get("x-pool-cache")).toBe("hit");
     // The next one starts from the head: the base is copied, the add replaces nothing here.
     const r2 = await call("POST", "/releases", { ring: "edge", add: [shas["curl-x86"], shas["xz-arm"]] }, edge);
     expect(r2.status).toBe(201);
     expect(r2.json.release.parent_id).toBe(r1.json.release.id);
     expect(r2.json.package_count).toBe(5);
+    const again = await pool("/releases/edge?fields=summary");
+    expect(again.headers.get("x-pool-cache")).toBe("miss");
+    // …and the head read once more is that hit — under the new release's key, the old one is never served again.
+    const twice = await pool("/releases/edge?fields=summary");
+    expect([twice.headers.get("x-pool-cache"), ((await twice.json()) as any).release.id]).toEqual(["hit", r2.json.release.id]);
     const head = await call("GET", "/releases/edge?fields=summary");
+    expect(head.status).toBe(200);
     expect(head.json.release.id).toBe(r2.json.release.id);
     expect(head.json.packages.map((p: any) => `${p.name}/${p.arch}`).sort()).toEqual(["curl/x86_64", "xz/aarch64", "xz/x86_64", "zlib/aarch64", "zlib/x86_64"]);
     // curl is served now: what it embeds is what the security job asks OSV about.

@@ -59,7 +59,7 @@ jobs:
             (if .guard then "\n> ⚠️ **Over the guard (US$ 40): the jobs that write are paused** until the estimate is back under it — the cap is US$ 50.\n" else "" end) +
             "\n| Item | Used | Included | So far | Projected |\n|---|---:|---:|---:|---:|\n" +
             ([.lines[] | "| \(.item) | \(.used | if . > 1e6 then (./1e6 | floor | tostring) + " M" else (. * 100 | round / 100 | tostring) end) \(.unit) | \(.included | if . > 1e6 then (./1e6 | floor | tostring) + " M" else tostring end) | \(.month_to_date_usd | usd) | \(.projected_usd | usd) |"] | join("\n")) +
-            "\n\nBudget: the card is capped at US$ 30; Cloudflare e-mails at US$ 10, 20 and 28 of actual charges; the pool pauses writing jobs at a projected US$ 25."
+            "\n\nBudget (worker/src/cost.ts): this report warns from a projected US$ 25; the pool pauses the jobs that write at a projected US$ 40 and resumes within three hours of the estimate heading back; US$ 50 is the cap, never more."
           ' cost.json)"
           gh issue comment "$n" --body "$body"
       - name: Warn when the projection reaches the line

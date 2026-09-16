@@ -1,5 +1,5 @@
 import { signingEnabled, detachedSignature } from "../signing";
-import { isRing, json, type Env, type Ring } from "../index";
+import { edgeHit, edgeStore, isRing, json, type Env, type Ring } from "../index";
 import { artifactKey, isRepoArch, REPO_ARCHES, SHORT } from "../r2";
 import { REPO_ORDER, sourceOfRepo } from "../meta";
 import { releaseManifests, releaseSummary, releaseSources, ringHead, ringMembers, releaseMembers, ensureCheckpoint, CHECKPOINT_EVERY, type ManifestDetail, type ReleaseRow } from "../db";
@@ -267,6 +267,21 @@ export async function handleGetRelease(ring: string, url: URL, env: Env): Promis
     ? await env.DB.prepare("SELECT * FROM releases WHERE id = ? AND ring = ?").bind(Number(pinned), ring).first<ReleaseRow>()
     : await ringHead(env, ring);
   if (!release) return json({ error: pinned ? `release ${pinned} is not a ${ring} release` : `ring ${ring} has no release yet` }, 404);
+  const artifacts = await env.DB.prepare(
+    "SELECT repo, arch, kind, size, created_at FROM release_artifacts WHERE release_id = ?",
+  )
+    .bind(release.id)
+    .all<{ created_at: string }>();
+  // The listing is cached at the edge under the release it is of — with its
+  // artifacts, which a render adds after the release exists — never under
+  // the URL: the head moves with a sync or a promotion and the key moves
+  // with it, so a new release is never served stale. Every `omarchy-cli
+  // status`, `list` and `search` on every machine reads a whole ring's
+  // summary (32 000 rows of D1 a call); a hit costs the head's row and the
+  // artifacts' few, and reads no manifest.
+  const cacheKey = new Request(`${url.origin}/api/v1/releases/${ring}/listing?release=${release.id}@${release.created_at}&artifacts=${artifacts.results.length}@${artifacts.results.map((a) => a.created_at).sort().pop() ?? ""}&${url.searchParams.toString()}`);
+  const hit = await edgeHit(cacheKey);
+  if (hit) return hit;
 
   // How many the release holds, for this architecture: the release row
   // knows (its count and its per-source slices are computed once, when it
@@ -297,14 +312,9 @@ export async function handleGetRelease(ring: string, url: URL, env: Env): Promis
       413,
     );
   }
-  const artifacts = await env.DB.prepare(
-    "SELECT repo, arch, kind, size, created_at FROM release_artifacts WHERE release_id = ?",
-  )
-    .bind(release.id)
-    .all();
   const packages = await releaseManifests(env, release.id, detail, { arch, offset, limit, after });
   const last = packages.length && limit && packages.length === limit ? (packages[packages.length - 1] as { name: string; repo_arch: string; source: string }) : null;
-  return json({
+  const res = json({
     release,
     ...(await releaseSummary(env, release.id)),
     artifacts: artifacts.results,
@@ -315,6 +325,11 @@ export async function handleGetRelease(ring: string, url: URL, env: Env): Promis
     page: { arch, offset: after ? null : offset, after: afterParam ?? null, limit: limit || null, returned: packages.length, total, next: last ? `${last.name}/${last.repo_arch}/${last.source}` : null },
     packages,
   });
+  // Stored under the release's key for five minutes (the answer itself says
+  // nothing about caching: the URL is not the key, so cachedApi must not keep it).
+  await edgeStore(cacheKey, res.clone(), 300);
+  res.headers.set("x-pool-cache", "miss");
+  return res;
 }
 
 /** The release's package count, for one architecture or all — from its row when the row carries it. */
