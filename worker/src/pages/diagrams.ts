@@ -193,10 +193,11 @@ export function archDiagram(): string {
   s += darrow(1145, 136, 1145, 170) + dlab(1145, 186, ["served to every pacman -Syu"]);
   s += darrow(465, 180, 465, 215);
   s += '<rect class="d-queue" x="300" y="215" width="700" height="30"/><text class="d-t small" x="314" y="234">job queue</text><text class="d-s live" x="400" y="234" data-live="queue">…</text>';
-  for (const x of [410, 670, 930]) s += darrow(x, 300, x, 245, "", true) + dlab(x + 10, 276, ["claim · report"], "start");
+  // Each box is as wide as its longest line (dbox widens to the text), so the three stand apart.
+  for (const x of [410, 680, 960]) s += darrow(x, 300, x, 245, "", true) + dlab(x + 10, 276, ["claim · report"], "start");
   s += dbox({ x: 300, y: 300, w: 220, h: 70, title: "Pool workers", lines: ["the project's host · trusted", { text: "…", cls: "live", live: "w-pool" }] });
-  s += dbox({ x: 560, y: 300, w: 220, h: 70, title: "Review workers", lines: ["rebuilds + audits · agent via a proxy", { text: "…", cls: "live", live: "w-review" }] });
-  s += dbox({ x: 820, y: 300, w: 220, h: 70, title: "Community workers", lines: ["a broker + a builder, anyone's", { text: "…", cls: "live", live: "w-community" }] });
+  s += dbox({ x: 545, y: 300, w: 270, h: 70, title: "Review workers", lines: ["rebuilds + audits · agent via a proxy", { text: "…", cls: "live", live: "w-review" }] });
+  s += dbox({ x: 840, y: 300, w: 240, h: 70, title: "Community workers", lines: ["a broker + a builder, anyone's", { text: "…", cls: "live", live: "w-community" }] });
   s += dbox({ x: 20, y: 300, w: 200, h: 70, title: "GitHub", lines: ["OAuth · MAINTAINERS.toml", "releases · worker image"] });
   s += dline([220, 320, 260, 320, 260, 150], "dash") + darrow(260, 150, 300, 150, "dash") + dlab(266, 270, ["who may approve"], "start");
   return s + "</svg>";
