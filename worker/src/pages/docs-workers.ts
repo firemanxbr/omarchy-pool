@@ -49,31 +49,31 @@ const BODY = String.raw`
   <section id="contributor">
     <h2>As a contributor: your own packages</h2>
     <div class="steps">
-      <div class="step"><h3>1. Start it</h3><p>One container is one task: it asks the pool for a build of yours, builds it, uploads the package, the PKGBUILD and the log to your staging workspace, and exits. The restart policy starts the next one.</p>
-<pre># Docker Desktop
-docker run -d --name omarchy-worker --restart unless-stopped --stop-timeout 10800 \
-  -e OMARCHY_WORKER_TOKEN=&lt;omw_…&gt; -e GITHUB_TOKEN=&lt;github_pat_…, no permissions&gt; \
+      <div class="step"><h3>1. Start it</h3><p>Two containers on a network of their own. The <b>broker</b> holds what is yours — the worker token, your agent's key, a GitHub token — and only receives, processes and answers. The <b>builder</b> beside it is born with nothing: it asks the broker for a build of yours, builds it, uploads the package, the PKGBUILD and the log to your staging workspace through the broker, and exits; the restart policy starts the next one. Simplest with <a href="${REPO_URL}/blob/main/factory/image/compose.yml">compose.yml</a>:</p>
+<pre>OMARCHY_WORKER_TOKEN=&lt;omw_…&gt; GITHUB_TOKEN=&lt;github_pat_…, no permissions&gt; docker compose up -d
+# podman compose works the same</pre>
+      <p>By hand, the same two (Docker Desktop; <code>podman</code> works the same):</p>
+<pre>docker network create omarchy-worker
+docker run -d --name omarchy-broker --restart unless-stopped --network omarchy-worker \
+  -e OMARCHY_WORKER_ROLE=broker -e OMARCHY_WORKER_TOKEN=&lt;omw_…&gt; -e GITHUB_TOKEN=&lt;github_pat_…, no permissions&gt; \
   ${IMG}:latest
-
-# Podman
-podman run -d --name omarchy-worker --restart unless-stopped --stop-timeout 10800 \
-  -e OMARCHY_WORKER_TOKEN=&lt;omw_…&gt; -e GITHUB_TOKEN=&lt;github_pat_…, no permissions&gt; \
+docker run -d --name omarchy-worker --restart unless-stopped --stop-timeout 10800 --network omarchy-worker \
+  -e OMARCHY_BROKER=http://omarchy-broker:8790 \
   ${IMG}:latest</pre>
-      <p>Or keep the settings in a file with <a href="${REPO_URL}/blob/main/factory/image/compose.yml">compose.yml</a>: <code>OMARCHY_WORKER_TOKEN=… GITHUB_TOKEN=… docker compose up -d</code> (<code>podman compose</code> works the same).</p>
-      <p><b>GITHUB_TOKEN</b>: the worker reads GitHub's API for every package it builds — the release, the files. Without a token GitHub allows 60 requests an hour from your address, and a queue of ten builds is ten failures; a <a href="https://github.com/settings/personal-access-tokens/new">fine-grained token</a> with <em>no permissions at all</em> gives 5000. Make one for this — never <code>gh auth token</code>, which is your account with write access to your repositories (see <a href="#secrets">what a build can see</a>). <b>--stop-timeout</b> (compose: <code>stop_grace_period</code>): a stop lets the build finish and report; killed mid-build, the task waits half an hour for its lease to expire. Change the settings between builds, not during one.</p></div>
+      <p><b>GITHUB_TOKEN</b> (on the broker): the drafter reads GitHub's API for every package it builds — the release, the files — through the broker. Without a token GitHub allows 60 requests an hour from your address, and a queue of ten builds is ten failures; a <a href="https://github.com/settings/personal-access-tokens/new">fine-grained token</a> with <em>no permissions at all</em> gives 5000. Make one for this — never <code>gh auth token</code>, which is your account with write access to your repositories (see <a href="#secrets">what a build can see</a>). <b>--stop-timeout</b> (compose: <code>stop_grace_period</code>): a stop lets the build finish and report; killed mid-build, the task waits half an hour for its lease to expire. Change the settings between builds, not during one.</p></div>
       <div class="step"><h3>2. Give it work</h3><p>On <a href="/factory">the Factory</a>, request a package (the project's URL, a description, the licence, the checklist) and press <b>Build</b>. Your worker picks it up within a minute; the <em>Your builds</em> table follows it, and the <em>A worker of yours</em> table shows it alive. When the build is staged, a maintainer sees it on <a href="/review">Review</a>.</p></div>
-      <div class="step"><h3>3. Donate the machine, bring your agent</h3><p>Two switches, both yours to flip:</p>
-<pre># also build other contributors' packages (their bumps after 14 days, package requests at once)
+      <div class="step"><h3>3. Donate the machine, bring your agent</h3><p>Two switches, both yours to flip — the first on the builder, the second on the broker (compose: the same variables in the environment or a <code>.env</code> file):</p>
+<pre># the builder: also build other contributors' packages (their bumps after 14 days, package requests at once)
   -e WORKER_SHARED=1
 
-# an agent drafts and corrects PKGBUILDs on this machine, with your key — the pool never holds one;
+# the broker: an agent drafts and corrects PKGBUILDs, with your key — the pool never holds one, the builder never sees it;
 # one of these is enough (Anthropic, OpenAI, Gemini, xAI), FACTORY_MODEL picks the model
   -e ANTHROPIC_API_KEY=sk-…      # or OPENAI_API_KEY / GEMINI_API_KEY / XAI_API_KEY
   -e FACTORY_MODEL=claude-sonnet-5
 
 # or your Claude subscription instead of a key (see "A Claude subscription as the agent" below)
   -e CLAUDE_CODE_OAUTH_TOKEN=…    # what 'claude setup-token' printed on your machine</pre>
-      <p>The Factory page shows which agent each worker reported (<code>anthropic/claude-sonnet-5</code>, <code>claude-code/claude-sonnet-5</code>, <code>openai/gpt-5</code>, …); the key itself never leaves your machine.</p>
+      <p>The Factory page shows which agent each worker reported (<code>anthropic/claude-sonnet-5</code>, <code>claude-code/claude-sonnet-5</code>, <code>openai/gpt-5</code>, …); the key itself never leaves the broker.</p>
       <p>A shared worker with an agent is what turns a <em>package request</em> (the <a href="/request">request page</a>) into a first PKGBUILD and a first build; without one, requests wait. What your agent produces is evidence like any other build: a maintainer reads it before anything reaches users.</p></div>
       <div class="step"><h3>4. Watch it</h3><p>In <b>Docker Desktop</b>, <em>Containers</em> lists <code>omarchy-worker</code> with its state and a <em>Logs</em> tab; in <b>Podman Desktop</b>, the same under <em>Containers</em>. On the command line: <code>docker logs -f omarchy-worker</code> / <code>podman logs -f omarchy-worker</code>. The container exits after each task (that is by design) and the restart policy brings it back.</p>
       <div class="shot">Screenshot to add: Docker Desktop → Containers, the running <code>omarchy-worker</code> and its Logs tab; Podman Desktop → Containers, the same.</div></div>
@@ -127,9 +127,9 @@ podman run -d --name omarchy-worker --restart unless-stopped --security-opt labe
 <pre>claude setup-token</pre>
       <p>It opens the browser for a one-time consent and prints a long-lived token (<code>sk-ant-oat01-…</code>). That token is your subscription: keep it like a password, revoke it from your Claude account when a machine is lost. The worker never needs your login, only this.</p></div>
       <div class="step"><h3>2. Give it to the worker</h3>
-<pre># a contributor's worker (docker works the same)
-podman run -d --name omarchy-worker --restart unless-stopped --stop-timeout 10800 \
-  -e OMARCHY_WORKER_TOKEN=&lt;omw_…&gt; -e GITHUB_TOKEN=&lt;github_pat_…, no permissions&gt; \
+<pre># a contributor's broker — the builder beside it never sees the token (docker works the same)
+podman run -d --name omarchy-broker --restart unless-stopped --network omarchy-worker \
+  -e OMARCHY_WORKER_ROLE=broker -e OMARCHY_WORKER_TOKEN=&lt;omw_…&gt; -e GITHUB_TOKEN=&lt;github_pat_…, no permissions&gt; \
   -e CLAUDE_CODE_OAUTH_TOKEN=&lt;sk-ant-oat01-…&gt; \
   ${IMG}:latest
 
@@ -141,7 +141,7 @@ CLAUDE_CODE_OAUTH_TOKEN=… OMARCHY_WORKER_TOKEN=… podman compose up -d
 # API key sits in the same file
 CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-…
 FACTORY_PROVIDER=claude-code</pre>
-      <p>At start the worker installs Claude Code for its architecture (the official installer, checksum verified, into the container's home — about 200 MB, once per container; the image does not ship it) and reports <code>claude-code/claude-sonnet-5</code> as its agent on the Factory page. <code>FACTORY_MODEL</code> picks another model (<code>claude-opus-5</code>); <code>FACTORY_REASONING=low</code> keeps a draft or an audit from thinking longer than it needs. A binary of your own, mounted at <code>/usr/local/bin/claude</code> or named by <code>CLAUDE_CODE_BIN</code>, skips the install.</p></div>
+      <p>At start the broker installs Claude Code for its architecture (the official installer, checksum verified, into the container's home — about 200 MB, once per container; the image does not ship it) and reports <code>claude-code/claude-sonnet-5</code> as its agent on the Factory page. <code>FACTORY_MODEL</code> picks another model (<code>claude-opus-5</code>); <code>FACTORY_REASONING=low</code> keeps a draft or an audit from thinking longer than it needs. A binary of your own, mounted at <code>/usr/local/bin/claude</code> or named by <code>CLAUDE_CODE_BIN</code>, skips the install.</p></div>
       <div class="step"><h3>3. What it does, exactly</h3><p>Every completion is one process: <code>claude -p --tools "" --max-turns 1 --no-session-persistence --output-format json --model … --system-prompt …</code>, the PKGBUILD and the log on stdin, in an empty directory. No tool is available to the model — it cannot read a file, run a command or reach the network; it answers, and the worker reads the answer. The token goes to the child process; an <code>ANTHROPIC_API_KEY</code> in the same environment is withheld from it, so choosing the subscription means the subscription.</p></div>
       <div class="step"><h3>4. What it costs, and whose rules</h3><p>Nothing on top of the subscription — and the subscription's limits apply: each draft and each audit is a message in the same five-hour and weekly windows as your own use of Claude, and a worker that hits the limit fails the task (<em>You've hit your limit</em>, back in the queue for the next window; the pool retries an audit three times). Your agreement with Anthropic is what allows this use: read their consumer terms on automated and shared use before you put the token on a shared worker or a project host — the API key (<code>ANTHROPIC_API_KEY</code>, a workspace with a spending limit in the Console) is the plain path, and switching is one variable.</p></div>
     </div>
@@ -151,9 +151,9 @@ FACTORY_PROVIDER=claude-code</pre>
     <h2>What a build can see</h2>
     <p>A build is somebody else's code — the recipe, and the build system of the project it packages — and its log is public: on the API while the build is in staging, on the record once it is staged. So the rule the worker keeps, on your machine and on the project's: <b>the build sees nothing the log cannot show.</b></p>
     <div class="steps">
-      <div class="step"><h3>What the worker holds</h3><p>Its token, your agent's key, your <code>GITHUB_TOKEN</code>. They are read once when the container starts and taken out of the environment every child inherits; the agent and the drafter get the key for the moment they run, and nothing else does — not <code>makepkg</code>, not the PKGBUILD it sources, not the upstream's build. The build user starts from an empty environment. A PKGBUILD that prints <code>env</code> prints <code>PATH</code> and <code>HOME</code>.</p></div>
+      <div class="step"><h3>What the broker holds, and the builder does not</h3><p>The worker's token, your agent's key, your <code>GITHUB_TOKEN</code> live in the broker, a container that runs no build: it passes the pool's calls for the one task it claimed (the job token the pool hands out stays with it), answers the agent in the Anthropic shape over whichever provider you gave it, and reads GitHub. The builder is born with nothing — <code>OMARCHY_BROKER</code> and a label — and dies after a task; a variable of yours set on it by mistake is dropped at start and said so. Inside the builder, the build user starts from an empty environment anyway, and a worker started the old way, with the token on it, keeps the token out of every child's environment and lends the key to the drafter alone. A PKGBUILD that prints <code>env</code> prints <code>PATH</code> and <code>HOME</code>.</p></div>
       <div class="step"><h3>What the pool checks anyway</h3><p>Every log, recipe and report uploaded to staging is read for what looks like a secret — the pool's tokens, agents' keys, GitHub's, a private key, a credential in a URL, a dump of the worker's variables — and refused if it carries one: the build fails with the kind and the line (never the match), and nothing reaches the record. That is for the worker the pool does not run; if it fires on yours, the container has something in its environment the worker did not put there — fix the container, queue the build again.</p></div>
-      <div class="step"><h3>What you decide</h3><p>Give the worker a <code>GITHUB_TOKEN</code> made for it, with no permissions — not your account's. Keep <code>WORKER_SHARED</code> off unless you mean to run strangers' recipes on this machine; on, give it no key you would mind losing. Do not mount your home or a directory of yours into it: it needs none. Caches, when you mount one, are kept per package inside — a build reads only what an earlier build of the same package wrote.</p></div>
+      <div class="step"><h3>What you decide</h3><p>Give the broker a <code>GITHUB_TOKEN</code> made for it, with no permissions — not your account's. Keep <code>WORKER_SHARED</code> off unless you mean to run strangers' recipes on this machine; on, give the broker no key you would mind losing. Do not mount your home or a directory of yours into the builder: it needs none. Caches, when you mount one, are kept per package inside — a build reads only what an earlier build of the same package wrote.</p></div>
     </div>
   </section>
 

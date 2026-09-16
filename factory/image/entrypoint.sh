@@ -31,10 +31,20 @@
 #   community  a shared community worker: builds anyone's community
 #              packages, drafts PKGBUILDs for package requests with its
 #              owner's agent key (WORKER_SHARED=1 is implied).
-#   agent      no worker at all: the agent served over HTTP on :8790
-#              (factory/bin/agent-proxy) for a sibling container that
-#              cannot run it — the emulated x86_64 community worker, where
-#              Claude Code's binary dies under qemu. Needs no token.
+#   broker     no build here: the one process on this host that holds the
+#              credentials (factory/bin/broker, :8790) — the worker's token,
+#              the agent's key, GITHUB_TOKEN — and only receives, processes
+#              and answers: the pool's calls for the one task it claimed,
+#              the agent, GitHub read-only. A community builder runs beside
+#              it with OMARCHY_BROKER=http://broker:8790 and nothing else.
+#              `agent` is the same role without a worker token: the agent
+#              and GitHub served to build containers that cannot run the
+#              agent themselves (the project's review builds; the emulated
+#              x86_64 worker, where Claude Code's binary dies under qemu).
+#
+# OMARCHY_BROKER makes this container a builder: it holds no token and no
+# key, asks the broker who it is, builds one task and exits (SECURITY.md,
+# *Isolation*; /docs/workers#secrets).
 #
 # A role reports itself in the worker's labels ("role"), so the Factory page
 # shows what each container is for. Extra arguments go to `pkg-repo work`
@@ -43,17 +53,39 @@
 set -euo pipefail
 : "${OMARCHY_API:=https://pkgs.firemanxbr.org}"
 role="${OMARCHY_WORKER_ROLE:-}"
-case "$role" in ""|pool|review|community|agent) ;; *) echo "omarchy-worker: OMARCHY_WORKER_ROLE must be pool, review, community or agent (or unset)" >&2; exit 2 ;; esac
-if [[ "$role" == agent ]]; then
-  # The agent alone, for the containers that cannot run it. Claude Code is
-  # installed below the same way a worker installs it; then the proxy.
+case "$role" in ""|pool|review|community|agent|broker) ;; *) echo "omarchy-worker: OMARCHY_WORKER_ROLE must be pool, review, community, broker or agent (or unset)" >&2; exit 2 ;; esac
+if [[ "$role" == broker || "$role" == agent ]]; then
+  # The broker: the credentials stay here. Claude Code is installed the
+  # same way a worker installs it when the subscription token is the agent.
   if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" && -z "${CLAUDE_CODE_BIN:-}" ]] && ! command -v claude >/dev/null 2>&1 && [[ ! -x "$HOME/.local/bin/claude" ]]; then
-    curl -fsSL https://claude.ai/install.sh | bash >/dev/null 2>&1 || echo "omarchy-worker: Claude Code did not install; the proxy will answer 502 until it does" >&2
+    curl -fsSL https://claude.ai/install.sh | bash >/dev/null 2>&1 || echo "omarchy-worker: Claude Code did not install; the broker will answer 502 to the agent's calls until it does" >&2
   fi
   export PATH="$HOME/.local/bin:$PATH"
-  exec python3 /usr/local/lib/omarchy-factory/bin/agent-proxy
+  exec python3 /usr/local/lib/omarchy-factory/bin/broker
 fi
-: "${OMARCHY_WORKER_TOKEN:?OMARCHY_WORKER_TOKEN is required: register a worker on the Contributors page}"
+if [[ -n "${OMARCHY_BROKER:-}" ]]; then
+  # A builder behind a broker: no token, no key — ask the broker who this
+  # worker is. The broker may still be starting (installing the agent).
+  OMARCHY_BROKER="${OMARCHY_BROKER%/}"
+  for k in OMARCHY_WORKER_TOKEN FACTORY_TOKEN ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY XAI_API_KEY GITHUB_TOKEN; do
+    [[ -n "${!k:-}" ]] && echo "omarchy-worker: $k is set on a builder behind a broker; it belongs on the broker — ignoring it" >&2 && unset "$k"
+  done
+  self=""; for _ in $(seq 1 40); do
+    self="$(curl -sS --fail-with-body --max-time 30 "$OMARCHY_BROKER/pool/factory/workers/self" 2>&1)" && break
+    echo "omarchy-worker: waiting for the broker at $OMARCHY_BROKER: $self" >&2; self=""; sleep 15
+  done
+  [[ -n "$self" ]] || { echo "omarchy-worker: no broker answered at $OMARCHY_BROKER in ten minutes" >&2; exit 2; }
+  id="$(jq -r .id <<<"$self")"; trust="$(jq -r .trust <<<"$self")"; arch="$(jq -r .arch <<<"$self")"; owner="$(jq -r '.owner // ""' <<<"$self")"
+  host_arch="$(uname -m)"; [[ "$host_arch" == arm64 ]] && host_arch=aarch64
+  [[ "$trust" == community ]] || { echo "omarchy-worker: $id is project-trusted; a project worker runs pkg-repo work with the runtime's socket, not behind a broker (docs: /docs/workers#project)" >&2; exit 2; }
+  [[ "$arch" == "$host_arch" ]] || { echo "omarchy-worker: $id is registered for $arch but this machine is $host_arch" >&2; exit 2; }
+  [[ "$role" == community ]] && export WORKER_SHARED=1
+  labels="$(jq -cn --argjson l "${WORKER_LABELS:-"{}"}" --arg r "$role" 'if $r == "" then $l else $l + {role: $r} end')"
+  export WORKER_LABELS="$labels" WORKER_ID="$id"
+  echo "omarchy-worker: $id — ${owner:-?}'s builder ($arch) behind the broker at $OMARCHY_BROKER; one task per container${WORKER_SHARED:+, shared}" >&2
+  exec omarchy-build-worker --container
+fi
+: "${OMARCHY_WORKER_TOKEN:?OMARCHY_WORKER_TOKEN is required: register a worker on the Contributors page (or OMARCHY_BROKER, the broker that holds it)}"
 
 self="$(curl -sS --fail-with-body --max-time 30 "$OMARCHY_API/api/v1/factory/workers/self" -H "authorization: Bearer $OMARCHY_WORKER_TOKEN" 2>&1)" \
   || { echo "omarchy-worker: the pool did not accept this token: $self" >&2; exit 2; }

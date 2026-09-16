@@ -32,11 +32,13 @@ docker info >/dev/null 2>&1 || { log "docker is not reachable: $(docker info 2>&
 
 docker compose pull --quiet 2>&1 | grep -viE "pulled|pulling|^\s*$" || true
 changed=0
-# Community workers first (one task per container, quick to drain), the
-# review pair next, the pool pair last: the pool's own jobs pause least.
+# The brokers first (no build to drain; a builder mid-task takes its lease
+# up again through the new one), the community builders next (one task per
+# container, quick to drain), the review pair, the pool pair last: the
+# pool's own jobs pause least.
 # Only the services the active profiles enable (compose.yml: `emulated`).
 enabled="$(docker compose config --services 2>/dev/null | tr '\n' ' ')"
-for svc in agent-proxy community-x86_64 community-aarch64 review-x86_64 review-aarch64 pool-x86_64 pool-aarch64; do
+for svc in agent-proxy broker-community-x86_64 broker-community-aarch64 community-x86_64 community-aarch64 review-x86_64 review-aarch64 pool-x86_64 pool-aarch64; do
   [[ " $enabled " == *" $svc "* ]] || continue
   # Pull again before each service: a drain can take hours (a pool worker
   # finishes its sync first) and the image that was newest at the start may

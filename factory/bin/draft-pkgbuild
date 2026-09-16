@@ -17,14 +17,16 @@ import argparse, json, os, re, sys, time, urllib.request, urllib.error, base64
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import agent  # noqa: E402
 
-GH = "https://api.github.com"
+# GitHub's API — or the broker's read-only path to it (GITHUB_API, set by the
+# worker when a broker holds the token; then no token is here to send).
+GH = os.environ.get("GITHUB_API", "https://api.github.com").rstrip("/")
 FILES = ["Cargo.toml", "Cargo.lock", "go.mod", "package.json", "pyproject.toml", "setup.py", "CMakeLists.txt",
          "meson.build", "Makefile", "configure.ac", "configure", "build.zig", "Gemfile", "mix.exs", "CMakePresets.json"]
 
 
 def gh(path, raw=False):
     req = urllib.request.Request(GH + path, headers={"accept": "application/vnd.github+json", "user-agent": "omarchy-pool-factory"})
-    if os.environ.get("GITHUB_TOKEN"):
+    if os.environ.get("GITHUB_TOKEN") and not os.environ.get("GITHUB_API"):
         req.add_header("authorization", "Bearer " + os.environ["GITHUB_TOKEN"])
     try:
         with urllib.request.urlopen(req, timeout=30) as r:

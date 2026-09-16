@@ -1,0 +1,325 @@
+#!/usr/bin/env python3
+"""The broker: the one process on a worker host that holds credentials.
+
+It only receives, processes and answers. Beside it, on a private network,
+a builder is born with nothing — no token, no key — builds one task and
+dies; whatever the recipe or the upstream's build does with `env` or
+`curl`, there is nothing to take (SECURITY.md, *Isolation*; /docs/workers
+#secrets). Three things pass through, each on its own path:
+
+    the pool     ANY  /pool/<path>      → $OMARCHY_API/api/v1/<path> with the worker's token
+                                          (OMARCHY_WORKER_TOKEN), for the calls a build needs:
+                                          workers/self, claim, then heartbeat, artifacts, complete
+                                          and fail for the ONE task this broker claimed — one
+                                          task at a time, another task's id is a 403. The job
+                                          token the pool hands out at claim and heartbeat is
+                                          stripped from the answer: the builder holds nothing
+    the agent    POST /v1/messages      → agent.complete() over whichever provider the environment
+                                          names (factory/bin/agent.py) — the Anthropic Messages shape
+                                          in and out, so the builder speaks to it as FACTORY_PROVIDER=
+                                          anthropic, ANTHROPIC_BASE_URL=http://broker:8790 and any key
+                 GET  /health           → the probe, plus who the agent really is ("agent": provider/model)
+    GitHub       GET  /github/<path>    → https://api.github.com/<path> with GITHUB_TOKEN (read-only)
+
+Without OMARCHY_WORKER_TOKEN the pool path is off and this is the agent
+proxy the project's review builds use (the aarch64 host serves the agent
+to build containers that cannot run it — Claude Code's binary dies under
+qemu). Without an agent key the agent path answers 503. The compose network
+is the only caller; nothing here is reachable from outside the host.
+
+One completion at a time, in order — the agent is one subscription; at most
+BROKER_AGENT_CALLS (60) per task, so a runaway recipe cannot spend it.
+"""
+import calendar
+import json
+import os
+import re
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import agent  # noqa: E402
+
+LOCK = threading.Lock()
+PORT = int(os.environ.get("AGENT_PROXY_PORT", os.environ.get("BROKER_PORT", "8790")))
+POOL = os.environ.get("OMARCHY_API", "https://pkgs.firemanxbr.org").rstrip("/") + "/api/v1"
+GITHUB = "https://api.github.com"
+LEASE_SECONDS = 30 * 60
+AGENT_CALLS = int(os.environ.get("BROKER_AGENT_CALLS", "60"))
+UPSTREAM_TIMEOUT = int(os.environ.get("BROKER_UPSTREAM_TIMEOUT", "900"))
+
+
+def worker_token():
+    return os.environ.get("OMARCHY_WORKER_TOKEN") or os.environ.get("FACTORY_TOKEN") or ""
+
+
+class Held:
+    """The one task this broker's worker holds: its id and how long the
+    lease runs (the claim says; every heartbeat extends it). A builder that
+    died mid-task leaves the lease to expire, as the pool does."""
+
+    def __init__(self):
+        self.task = None
+        self.until = 0.0
+        self.agent_calls = 0
+
+    def current(self):
+        if self.task is not None and time.time() >= self.until:
+            sys.stderr.write(f"broker: task {self.task}'s lease expired here; forgetting it\n")
+            self.task, self.until, self.agent_calls = None, 0.0, 0
+        return self.task
+
+    def take(self, task, lease_expires_at):
+        self.task, self.agent_calls = task, 0
+        self.extend(lease_expires_at)
+
+    def extend(self, lease_expires_at=None):
+        until = time.time() + LEASE_SECONDS
+        if lease_expires_at:
+            try:
+                until = calendar.timegm(time.strptime(lease_expires_at[:19], "%Y-%m-%dT%H:%M:%S"))
+            except ValueError:
+                pass
+        self.until = until
+
+    def release(self):
+        self.task, self.until, self.agent_calls = None, 0.0, 0
+
+
+HELD = Held()
+SELF = {"id": None}
+
+
+def worker_id():
+    """This worker's id, from the pool (once)."""
+    if SELF["id"] is None and worker_token():
+        try:
+            req = urllib.request.Request(POOL + "/factory/workers/self", headers={"authorization": "Bearer " + worker_token()})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                SELF["id"] = json.load(r).get("id")
+        except (urllib.error.URLError, OSError, ValueError):
+            return None
+    return SELF["id"]
+
+
+def adopt(task):
+    """A broker that restarted mid-build holds nothing, and the builder's next
+    call names a task: the pool says whose lease it is. Ours — leased to this
+    worker, not yet over — is taken up again; anyone else's is not."""
+    me = worker_id()
+    if not me:
+        return False
+    try:
+        with urllib.request.urlopen(POOL + f"/factory/tasks/{task}", timeout=30) as r:
+            row = json.load(r).get("task") or {}
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+    if row.get("status") == "leased" and row.get("lease_owner") == me:
+        HELD.take(task, row.get("lease_expires_at"))
+        sys.stderr.write(f"broker: adopted task {task} (leased to {me} by the pool)\n")
+        return True
+    return False
+
+# The pool's routes a build needs, and nothing else: (method, regex, pinned) — pinned means group 1 must be the held task's id.
+POOL_ROUTES = [
+    ("GET", re.compile(r"^factory/workers/self$"), False),
+    ("POST", re.compile(r"^factory/claim$"), False),
+    ("POST", re.compile(r"^factory/tasks/(\d+)/heartbeat$"), True),
+    ("POST", re.compile(r"^factory/tasks/(\d+)/complete$"), True),
+    ("POST", re.compile(r"^factory/tasks/(\d+)/fail$"), True),
+    ("PUT", re.compile(r"^factory/tasks/(\d+)/artifacts/[A-Za-z0-9][A-Za-z0-9._:+-]{0,200}$"), True),
+    ("POST", re.compile(r"^factory/tasks/(\d+)/artifacts/[A-Za-z0-9][A-Za-z0-9._:+-]{0,200}/multipart$"), True),
+]
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "omarchy-broker/1"
+    protocol_version = "HTTP/1.1"
+
+    def _send(self, status, body, content_type="application/json"):
+        self.send_response(status)
+        self.send_header("content-type", content_type)
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json(self, status, body):
+        self._send(status, json.dumps(body).encode())
+
+    def _body(self):
+        n = int(self.headers.get("content-length", "0") or 0)
+        return self.rfile.read(n) if n else b""
+
+    def log_message(self, fmt, *args):  # one line per request, to stderr, no client noise
+        sys.stderr.write("broker: " + (fmt % args) + "\n")
+
+    # ------------------------------------------------------------ routes --
+    def do_GET(self):  # noqa: N802
+        path = urllib.parse.urlsplit(self.path).path
+        if path == "/health":
+            return self.health()
+        if path.startswith("/github/"):
+            return self.github()
+        if path.startswith("/pool/"):
+            return self.pool("GET")
+        return self._json(404, {"error": "GET /health, GET /github/<path>, or /pool/<path>"})
+
+    def do_POST(self):  # noqa: N802
+        path = urllib.parse.urlsplit(self.path).path
+        if path == "/v1/messages":
+            return self.messages()
+        if path.startswith("/pool/"):
+            return self.pool("POST")
+        self._body()
+        return self._json(404, {"error": "POST /v1/messages or /pool/<path>"})
+
+    def do_PUT(self):  # noqa: N802
+        if urllib.parse.urlsplit(self.path).path.startswith("/pool/"):
+            return self.pool("PUT")
+        self._body()
+        return self._json(404, {"error": "PUT /pool/<path>"})
+
+    # ------------------------------------------------------------- agent --
+    def health(self):
+        found = agent.provider() if agent.available() else None
+        body = {"ok": False, "agent": "", "task": HELD.current(), "pool": bool(worker_token())}
+        if not found:
+            body["error"] = "no agent key on the broker"
+            return self._json(200 if worker_token() else 503, body)
+        with LOCK:
+            ok, detail = agent.probe()
+        name, p = found
+        body.update({"ok": ok, **detail, "agent": detail.get("agent") or f"{name}/{detail.get('model') or agent.model_for(name, p)}"})
+        return self._json(200 if ok else 503, body)
+
+    def messages(self):
+        try:
+            body = json.loads(self._body() or b"{}")
+        except json.JSONDecodeError:
+            return self._json(400, {"type": "error", "error": {"type": "invalid_request_error", "message": "body is not JSON"}})
+        if not agent.available():
+            return self._json(503, {"type": "error", "error": {"type": "api_error", "message": "no agent key on the broker"}})
+        if HELD.current() is not None:
+            if HELD.agent_calls >= AGENT_CALLS:
+                return self._json(429, {"type": "error", "error": {"type": "rate_limit_error", "message": f"the broker answers at most {AGENT_CALLS} completions per task"}})
+            HELD.agent_calls += 1
+        system = body.get("system") or ""
+        if isinstance(system, list):  # the API also accepts a list of text blocks
+            system = "\n".join(b.get("text", "") for b in system if isinstance(b, dict))
+        user = ""
+        for m in body.get("messages") or []:
+            if m.get("role") == "user":
+                c = m.get("content")
+                user = c if isinstance(c, str) else "\n".join(b.get("text", "") for b in c if isinstance(b, dict))
+        max_tokens = int(body.get("max_tokens") or 4000)
+        with LOCK:
+            try:
+                text, model = agent.complete(system, user, max_tokens=max_tokens, timeout=int(os.environ.get("AGENT_PROXY_TIMEOUT", "600")))
+            except SystemExit as e:
+                return self._json(502, {"type": "error", "error": {"type": "api_error", "message": str(e)[:1000]}})
+        # `agent` is not the API's: it says who really answered, for the probe behind this broker.
+        return self._json(200, {"id": "msg_broker", "type": "message", "role": "assistant", "model": model, "stop_reason": "end_turn",
+                                "agent": f"{agent.provider()[0]}/{model}",
+                                "content": [{"type": "text", "text": text}], "usage": {"input_tokens": 0, "output_tokens": 0}})
+
+    # ------------------------------------------------------------ github --
+    def github(self):
+        split = urllib.parse.urlsplit(self.path)
+        url = GITHUB + split.path[len("/github"):] + (("?" + split.query) if split.query else "")
+        headers = {"accept": self.headers.get("accept", "application/vnd.github+json"), "user-agent": "omarchy-pool-broker"}
+        token = os.environ.get("GITHUB_TOKEN")
+        if token:
+            headers["authorization"] = "Bearer " + token
+        return self.forward(urllib.request.Request(url, headers=headers, method="GET"), timeout=60)
+
+    # -------------------------------------------------------------- pool --
+    def pool(self, method):
+        split = urllib.parse.urlsplit(self.path)
+        rel = split.path[len("/pool/"):]
+        body = self._body()
+        if not worker_token():
+            return self._json(503, {"error": "this broker holds no worker token; it serves the agent and GitHub only"})
+        for m, rx, pinned in POOL_ROUTES:
+            match = rx.match(rel)
+            if m != method or not match:
+                continue
+            if pinned:
+                held = HELD.current()
+                if held is None and adopt(int(match.group(1))):
+                    held = HELD.current()
+                if held is None or int(match.group(1)) != held:
+                    return self._json(403, {"error": f"the broker passes only the pool's calls for the task it claimed" + (f" ({held})" if held is not None else " (none held)")})
+            elif rel == "factory/claim":
+                held = HELD.current()
+                if held is not None:
+                    return self._json(409, {"error": f"the broker holds task {held} until its lease ends; one task at a time"})
+            headers = {"authorization": "Bearer " + worker_token(), "content-type": self.headers.get("content-type", "application/json")}
+            url = POOL + "/" + rel + (("?" + split.query) if split.query else "")
+            req = urllib.request.Request(url, data=body if body else None, headers=headers, method=method)
+            status, ctype, out = self.upstream(req, UPSTREAM_TIMEOUT)
+            # What the pool said back changes what this broker holds — and
+            # the job token it hands out at claim and heartbeat stays here.
+            if status == 200 and rel == "factory/claim":
+                try:
+                    answer = json.loads(out)
+                    HELD.take(int(answer["task"]["id"]), answer.get("lease_expires_at"))
+                    out = self.without_token(answer)
+                    sys.stderr.write(f"broker: holding task {HELD.task}\n")
+                except (ValueError, KeyError, TypeError):
+                    pass
+            elif status == 200 and pinned and rel.endswith("/heartbeat"):
+                try:
+                    answer = json.loads(out)
+                    HELD.extend(answer.get("lease_expires_at"))
+                    out = self.without_token(answer)
+                except (ValueError, AttributeError):
+                    HELD.extend()
+            elif pinned and (rel.endswith("/complete") or rel.endswith("/fail")) and status < 500:
+                sys.stderr.write(f"broker: task {HELD.task} {'done' if rel.endswith('/complete') else 'failed'} ({status}); released\n")
+                HELD.release()
+            return self._send(status, out, ctype)
+        return self._json(403, {"error": "the broker passes only the pool's calls a build needs: workers/self, claim, and the held task's heartbeat, artifacts, complete and fail"})
+
+    @staticmethod
+    def without_token(answer):
+        for k in ("token", "token_expires_at"):
+            answer.pop(k, None)
+        return json.dumps(answer).encode()
+
+    # ---------------------------------------------------------- upstream --
+    def upstream(self, req, timeout):
+        """(status, content-type, body) — an HTTP error is an answer too."""
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.status, r.headers.get("content-type", "application/octet-stream"), r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers.get("content-type", "application/json") if e.headers else "application/json", e.read()
+        except (urllib.error.URLError, OSError, TimeoutError) as e:
+            return 502, "application/json", json.dumps({"error": f"upstream: {e}"}).encode()
+
+    def forward(self, req, timeout):
+        status, ctype, out = self.upstream(req, timeout)
+        return self._send(status, out, ctype)
+
+
+def main():
+    have_agent = agent.provider() if agent.available() else None
+    serves = []
+    if worker_token():
+        serves.append("the pool for one task at a time (/pool)")
+    if have_agent:
+        serves.append(f"the agent {have_agent[0]}/{agent.model_for(*have_agent)} (/v1/messages, at most {AGENT_CALLS} per task)")
+    serves.append("GitHub read-only (/github" + (", with a token)" if os.environ.get("GITHUB_TOKEN") else ", 60 requests an hour)"))
+    if not worker_token() and not have_agent:
+        print("broker: neither OMARCHY_WORKER_TOKEN nor an agent key in the environment; serving GitHub only", file=sys.stderr)
+    print(f"broker: serving {'; '.join(serves)} on :{PORT}", file=sys.stderr)
+    ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+
+
+if __name__ == "__main__":
+    main()

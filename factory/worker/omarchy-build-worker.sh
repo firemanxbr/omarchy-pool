@@ -4,11 +4,14 @@
 # Two modes, both inside a container, never on a host by hand:
 #
 #   --container  the Omarchy Packaging image (a contributor's worker): claims
-#                one community task with the worker's own token, builds it
-#                right here, uploads the result to the contributor's staging
-#                workspace and exits; a wrapper (compose restart) starts the
-#                next container. No key, no publish credential: community
-#                results never touch the pool.
+#                one community task, builds it right here, uploads the result
+#                to the contributor's staging workspace and exits; a wrapper
+#                (compose restart) starts the next container. No key, no
+#                publish credential: community results never touch the pool.
+#                With OMARCHY_BROKER it holds no token either: the broker
+#                beside it (factory/bin/broker) holds the worker's token, the
+#                agent's key and GitHub's, and passes the pool's calls for
+#                the one task it claimed — this container is born with nothing.
 #   --inside     called by `pkg-repo work` (a project worker) in a FRESH Arch
 #                container per task (x86_64: archlinux:base-devel, aarch64:
 #                menci/archlinuxarm:base-devel): fetch the PKGBUILD at the
@@ -20,8 +23,9 @@
 # never reach the build: hold_secrets, below):
 #   OMARCHY_API            https://pkgs.firemanxbr.org
 #   OMARCHY_POOL           https://pool.firemanxbr.org (builds can depend on earlier factory builds)
+#   OMARCHY_BROKER         http://broker:8790 — the broker that holds the credentials; then none of the next three is needed here
 #   OMARCHY_WORKER_TOKEN   this worker's token (POST /factory/workers, shown once); FACTORY_TOKEN is an accepted alias
-#   WORKER_ID              the registered worker id (shown with the token)
+#   WORKER_ID              the registered worker id (shown with the token; the image reads it from the broker)
 #   WORKER_LABELS          JSON shown on the Factory page, e.g. {"where":"laptop"}
 #   WORKER_SHARED          1 = build anyone's community packages (donated compute); default: the owner's only
 #   ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, XAI_API_KEY, CLAUDE_CODE_OAUTH_TOKEN
@@ -56,7 +60,9 @@ with_secrets() { # command... — run with the agent's keys in its environment
 # The agent this worker runs, as "<provider>/<model>" (the same choice
 # factory/bin/agent.py makes), or "" without a key — reported at claim time
 # so the Factory page can show it; the key itself never leaves this machine.
+BROKER_AGENT=""  # what the broker's /health says its agent is (provider/model), in broker mode
 agent_label() {
+  if [[ -n "${OMARCHY_BROKER:-}" ]]; then echo "$BROKER_AGENT"; return; fi
   local p k m
   for p in anthropic:ANTHROPIC_API_KEY:claude-sonnet-5 claude-code:CLAUDE_CODE_OAUTH_TOKEN:claude-sonnet-5 openai:OPENAI_API_KEY:gpt-5 gemini:GEMINI_API_KEY:gemini-3.6-flash xai:XAI_API_KEY:grok-4; do
     k="${p#*:}"; k="${k%%:*}"; m="${p##*:}"
@@ -73,8 +79,30 @@ agent_label() {
 # — only to a worker whose agent is ok (docs/GOVERNANCE.md, *Workers*).
 AGENT_STATUS=""; AGENT_ERROR=""; AGENT_CHECKED=0
 agent_probe() {
-  [[ -n "$(agent_label)" ]] || { AGENT_STATUS=""; AGENT_ERROR=""; return; }
   local out
+  if [[ -n "${OMARCHY_BROKER:-}" ]]; then
+    # The broker probes its own agent and says who it is; a broker without
+    # an agent is a worker without one. It may still be starting (installing
+    # the agent): a while, not a verdict.
+    local tries=0
+    while :; do
+      out="$(curl -sS --max-time 180 "$OMARCHY_BROKER/health" 2>/dev/null || true)"
+      [[ -n "$out" ]] && break
+      tries=$((tries + 1)); (( tries < 20 )) || break
+      sleep 15
+    done
+    BROKER_AGENT="$(jq -r '.agent // ""' <<<"$out" 2>/dev/null || true)"
+    if [[ -z "$BROKER_AGENT" ]]; then AGENT_STATUS=""; AGENT_ERROR=""
+    elif [[ "$(jq -r '.ok' <<<"$out" 2>/dev/null)" == true ]]; then
+      AGENT_STATUS=ok; AGENT_ERROR=""; log "agent $BROKER_AGENT, through the broker: ok ($(jq -r '.ms // "?"' <<<"$out") ms)"
+    else
+      AGENT_STATUS=error; AGENT_ERROR="$(jq -r '.error // "no answer"' <<<"$out" 2>/dev/null || echo "no answer")"
+      log "agent $BROKER_AGENT, through the broker: NOT ready — ${AGENT_ERROR:0:200}"
+    fi
+    AGENT_CHECKED=$(date +%s)
+    return
+  fi
+  [[ -n "$(agent_label)" ]] || { AGENT_STATUS=""; AGENT_ERROR=""; return; }
   if out="$(with_secrets timeout 120 python3 /build/pool/factory/bin/agent.py --probe 2>/dev/null)"; then
     AGENT_STATUS=ok; AGENT_ERROR=""
     log "agent $(agent_label): ok ($(jq -r '.ms' <<<"$out" 2>/dev/null || echo ?) ms)"
@@ -441,8 +469,10 @@ inside() {
 # the result to the contributor's staging workspace and exits. No signing
 # key, no publish token: community results never touch the pool directly.
 container_worker() {
-  OMARCHY_WORKER_TOKEN="${OMARCHY_WORKER_TOKEN:-${FACTORY_TOKEN:-}}"
-  : "${OMARCHY_WORKER_TOKEN:?OMARCHY_WORKER_TOKEN (a worker token from POST /factory/workers) is required}"
+  if [[ -z "${OMARCHY_BROKER:-}" ]]; then
+    OMARCHY_WORKER_TOKEN="${OMARCHY_WORKER_TOKEN:-${FACTORY_TOKEN:-}}"
+    : "${OMARCHY_WORKER_TOKEN:?OMARCHY_WORKER_TOKEN (a worker token from POST /factory/workers) is required, or OMARCHY_BROKER (the broker that holds it)}"
+  fi
   : "${WORKER_ID:?WORKER_ID (from POST /factory/workers) is required}"
   ARCH="$(uname -m)"; [[ "$ARCH" == arm64 ]] && ARCH=aarch64
   log "container worker $WORKER_ID ($ARCH) preparing"
@@ -559,24 +589,24 @@ stage_result() { # task-id main-package packages...
 # quota message says what to do — and the function fails.
 upload_staging() { # task-id file name
   local id="$1" file="$2" name="$3" size body=/build/upload.body; size="$(wc -c <"$file" | tr -d ' ')"
-  local auth="authorization: Bearer $OMARCHY_WORKER_TOKEN"
+  local -a auth; pool_auth
   if (( size <= 90 * 1024 * 1024 )); then
-    curl -sS --fail-with-body --max-time 900 -X PUT "$OMARCHY_API/api/v1/factory/tasks/$id/artifacts/$name" -H "$auth" \
+    curl -sS --fail-with-body --max-time 900 -X PUT "$(pool_url "/factory/tasks/$id/artifacts/$name")" "${auth[@]}" \
       -H "content-type: application/octet-stream" --data-binary "@$file" -o "$body" || { echo "PUT $name: $(head -c 400 "$body")" >&2; return 1; }
     return 0
   fi
-  local base="$OMARCHY_API/api/v1/factory/tasks/$id/artifacts/$name/multipart" up parts=() n=0 etag
-  curl -sS --fail-with-body -X POST "$base?action=create" -H "$auth" -o "$body" || { echo "multipart create $name: $(head -c 400 "$body")" >&2; return 1; }
+  local base up parts=() n=0 etag; base="$(pool_url "/factory/tasks/$id/artifacts/$name/multipart")"
+  curl -sS --fail-with-body -X POST "$base?action=create" "${auth[@]}" -o "$body" || { echo "multipart create $name: $(head -c 400 "$body")" >&2; return 1; }
   up="$(jq -r .upload_id "$body")"
   rm -rf /build/parts && mkdir -p /build/parts && split -b 64m -d -a 4 "$file" /build/parts/p
   for part in /build/parts/p*; do
     n=$((n + 1))
-    curl -sS --fail-with-body -X POST "$base?action=part&part=$n&upload_id=$up" -H "$auth" --data-binary "@$part" -o "$body" \
-      || { echo "multipart part $n of $name: $(head -c 400 "$body")" >&2; curl -sS -X POST "$base?action=abort&upload_id=$up" -H "$auth" -o /dev/null || true; rm -rf /build/parts; return 1; }
+    curl -sS --fail-with-body -X POST "$base?action=part&part=$n&upload_id=$up" "${auth[@]}" --data-binary "@$part" -o "$body" \
+      || { echo "multipart part $n of $name: $(head -c 400 "$body")" >&2; curl -sS -X POST "$base?action=abort&upload_id=$up" "${auth[@]}" -o /dev/null || true; rm -rf /build/parts; return 1; }
     etag="$(jq -r .etag "$body")"
     parts+=("{\"partNumber\":$n,\"etag\":\"$etag\"}")
   done
-  curl -sS --fail-with-body -X POST "$base?action=complete&upload_id=$up" -H "$auth" -H "content-type: application/json" \
+  curl -sS --fail-with-body -X POST "$base?action=complete&upload_id=$up" "${auth[@]}" -H "content-type: application/json" \
     --data "{\"parts\":[$(IFS=,; echo "${parts[*]}")]}" -o "$body" || { echo "multipart complete $name: $(head -c 400 "$body")" >&2; rm -rf /build/parts; return 1; }
   rm -rf /build/parts
 }
@@ -586,12 +616,23 @@ upload_staging() { # task-id file name
 : "${OMARCHY_POOL:=https://pool.firemanxbr.org}"
 : "${IDLE_EXIT:=0}"
 : "${MAX_TASKS:=0}"
+# The pool's calls go to the broker when there is one (it adds the worker's
+# token and passes only what a build needs), straight to the pool with the
+# token otherwise. pool_auth fills the caller's `auth` array.
+pool_url() { if [[ -n "${OMARCHY_BROKER:-}" ]]; then echo "${OMARCHY_BROKER%/}/pool$1"; else echo "$OMARCHY_API/api/v1$1"; fi; }
+pool_auth() { auth=(); [[ -n "${OMARCHY_BROKER:-}" ]] || auth=(-H "authorization: Bearer $OMARCHY_WORKER_TOKEN"); }
 api() { # method path [json]
   local method="$1" path="$2" body="${3:-}"
-  curl -sS --fail-with-body --max-time 60 -X "$method" "$OMARCHY_API/api/v1$path" \
-    -H "authorization: Bearer $OMARCHY_WORKER_TOKEN" -H "content-type: application/json" \
+  local -a auth; pool_auth
+  curl -sS --fail-with-body --max-time 60 -X "$method" "$(pool_url "$path")" \
+    "${auth[@]}" -H "content-type: application/json" \
     ${body:+--data "$body"} -w '\n%{http_code}'
 }
+# With a broker, the agent is spoken to in the Anthropic shape at the
+# broker's address (any key; it never reads it) and GitHub through it.
+if [[ -n "${OMARCHY_BROKER:-}" ]]; then
+  export FACTORY_PROVIDER=anthropic ANTHROPIC_BASE_URL="${OMARCHY_BROKER%/}" ANTHROPIC_API_KEY=via-broker GITHUB_API="${OMARCHY_BROKER%/}/github"
+fi
 sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
 
 hold_secrets
