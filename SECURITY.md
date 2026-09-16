@@ -69,7 +69,8 @@ secret). Everything travels in the `Authorization` header over TLS only.
 - **Contributor results never touch the pool.** They land in
   `omarchy-factory-staging` under `staging/<login>/<package>/<task>/`,
   through the pool (the key is derived from the task, never given),
-  with quotas (2 GB, 10 tasks) and a 30-day lifecycle. Logs and PKGBUILDs
+  with quotas (5 GB, 10 tasks) and a 30-day lifecycle the pool enforces
+  itself (packages of decided builds are reclaimed at once). Logs and PKGBUILDs
   are public; packages are readable by maintainers.
 - **Approved packages are rebuilt by the project** from the same PKGBUILD
   (`pkgbuild_ref = staging:<task>`) on a project-trusted worker before they

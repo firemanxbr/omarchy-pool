@@ -5,6 +5,7 @@ import type { WorkerIdentity } from "./contributors";
 import { issueJobToken, scopesFor, type JobClaims } from "../jobtoken";
 import { isCategory } from "../categories";
 import { recordEvidence, vetSummary } from "../record";
+import { reclaimStagingPackages, STAGING_QUOTA_BYTES } from "../staging";
 
 /**
  * The factory's brain. Cloudflare is the source of truth for package
@@ -163,7 +164,10 @@ export async function handleEnqueue(request: Request, env: Env): Promise<Respons
 
 export async function handleCancelTask(id: number, env: Env): Promise<Response> {
   const res = await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', finished_at = ? WHERE id = ? AND status IN ('queued', 'leased')").bind(now(), id).run();
-  return res.meta.changes ? json({ task: id, status: "cancelled" }) : json({ error: "task is not queued or leased" }, 409);
+  if (!res.meta.changes) return json({ error: "task is not queued or leased" }, 409);
+  // What a leased worker had already staged: the lease is void, its next PUT is refused, the packages go.
+  await reclaimStagingPackages(env, [id]);
+  return json({ task: id, status: "cancelled" });
 }
 
 // ---------- workers ----------
@@ -295,6 +299,12 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   const params = task.params ? (JSON.parse(task.params) as Record<string, unknown>) : {};
   const expires = Math.floor(Date.now() / 1000) + LEASE_MINUTES * 60;
   const token = await issueJobToken(env, { t: task.id, k: task.kind, s: scopesFor(task.kind, task.id, task.trust, params), e: expires, w: workerId });
+  // A contributor's build lands in their workspace: how full it is travels
+  // with the claim, so a worker whose owner is at the quota fails the task
+  // at once instead of building for an hour into a 413.
+  const staging = task.trust === "community" && task.kind === "build" && task.owner
+    ? { bytes: (await env.DB.prepare("SELECT COALESCE(SUM(size), 0) AS bytes FROM staging_objects WHERE owner = ?").bind(task.owner).first<{ bytes: number }>())?.bytes ?? 0, quota_bytes: STAGING_QUOTA_BYTES }
+    : null;
   return json({
     task: { ...task, params },
     token,
@@ -304,6 +314,7 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
     pkgbuild_path: task.kind === "build" && !(task.pkgbuild_ref.includes(":") || task.pkgbuild_ref.startsWith("draft")) ? `factory/pkgbuilds/${task.name}` : null,
     // Where a staged result goes — a contributor's build, or the project's review build: PUT these back with the job token.
     upload: task.trust === "community" || params.review !== undefined ? `/api/v1/factory/tasks/${task.id}/artifacts/<filename>` : null,
+    staging,
   });
 }
 
@@ -358,6 +369,11 @@ export async function handleComplete(id: number, request: Request, env: Env, act
           .bind(`${res.version ?? p.version ?? ""} for ${p.arch} built by the project (task ${built}), approved, signed, in edge`, task.name),
         env.DB.prepare("UPDATE build_tasks SET status = 'done', result_sha256 = COALESCE(?, result_sha256), publish = 1 WHERE id = ? AND status = 'staged'").bind(res.sha256 ?? null, built),
       ]);
+      // The package is in the pool: its staging copy, and the contributor's
+      // build the project learned from, give their bytes back. The text
+      // evidence of both stays, and is on the record anyway.
+      const from = await env.DB.prepare("SELECT json_extract(params, '$.review') AS review FROM build_tasks WHERE id = ?").bind(built).first<{ review: number | null }>();
+      await reclaimStagingPackages(env, [built, from?.review ?? null]);
       if (res.sha256) {
         try {
           await writeAttestation(env, res.sha256);
@@ -405,7 +421,8 @@ export async function handleComplete(id: number, request: Request, env: Env, act
     await env.DB.prepare("UPDATE build_workers SET last_seen = ?, current_task = NULL, builds_done = builds_done + 1 WHERE id = ?").bind(now(), who).run();
     // A newer build of the same package and architecture supersedes the
     // staged ones before it: one row per package in the review queue, the
-    // audits of the old ones cancelled with them (their evidence stays).
+    // audits of the old ones cancelled with them. Their text evidence stays;
+    // their packages give the contributor's quota back.
     const older = await env.DB.prepare("SELECT id FROM build_tasks WHERE kind = 'build' AND trust = ? AND status = 'staged' AND name = ? AND arch = ? AND id < ?")
       .bind(task.trust, task.name, task.arch, id)
       .all<{ id: number }>();
@@ -415,6 +432,7 @@ export async function handleComplete(id: number, request: Request, env: Env, act
         env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = 'the build it audited was superseded' WHERE kind = 'audit' AND status = 'queued' AND json_extract(params, '$.task') = ?").bind(o.id),
       ]);
     }
+    await reclaimStagingPackages(env, older.results.map((o) => o.id));
     await env.DB.prepare("UPDATE factory_packages SET status = 'staged', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?")
       .bind(review !== undefined ? `${b.version ?? ""} for ${task.arch} built by the project (task ${id}), gate ${vet?.verdict ?? "n/a"}${vet?.warnings ? " with " + vet.warnings + " warning(s)" : ""}; waiting for a maintainer's approval` : `${b.version ?? ""} built for ${task.arch} by ${who}; waiting for a maintainer`, task.name).run();
     await event(env, "build", "ok", review !== undefined
@@ -499,6 +517,9 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
     .bind(exhausted ? "failed" : "queued", exhausted ? now() : null, (b.error ?? "build failed").slice(0, 2000), (b.log_tail ?? "").slice(-4000), b.duration_ms ?? null, exhausted ? task.lease_owner : null, id)
     .run();
   await env.DB.prepare("UPDATE build_workers SET last_seen = ?, current_task = NULL, builds_failed = builds_failed + 1 WHERE id = ?").bind(now(), who).run();
+  // A build that failed for good may have staged its package before the
+  // gate or the quota stopped it: the log and the recipe stay, the package goes.
+  if (exhausted && task.kind === "build") await reclaimStagingPackages(env, [id]);
   if (task.trust === "community" && exhausted) {
     await env.DB.prepare("UPDATE factory_packages SET status = 'registered', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(`build failed on ${who}: ${(b.error ?? "").slice(0, 160)}`, task.name).run();
   } else if (review !== undefined && exhausted) {
@@ -521,6 +542,10 @@ export async function requeueExpiredLeases(env: Env): Promise<number> {
       .bind(exhausted ? "failed" : "queued", exhausted ? now() : null, error, exhausted ? t.lease_owner : null, t.id)
       .run();
     await env.DB.prepare("UPDATE build_workers SET current_task = NULL WHERE id = ? AND current_task = ?").bind(t.lease_owner, t.id).run();
+    // The worker that died mid-upload leaves the package it landed behind
+    // — 2026-09-16, four of them at 720 MB. Out of attempts, it goes; queued
+    // again, the next lease writes over the same key and it counts once.
+    if (exhausted && t.kind === "build") await reclaimStagingPackages(env, [t.id]);
     // The package follows its task, as it does when the worker reports the
     // failure itself: back to waiting (queued again) or to registered with
     // the reason. Left at "building", obsidian showed a build in progress

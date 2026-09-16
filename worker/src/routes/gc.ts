@@ -1,4 +1,5 @@
 import { json, RINGS, type Env } from "../index";
+import { sweepStaging } from "../staging";
 
 /**
  * Retention: a package is protected while a ring serves it, while any of
@@ -118,5 +119,9 @@ export async function handleGc(url: URL, env: Env): Promise<Response> {
     `DELETE FROM cve_meta WHERE updated_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-90 days')
        AND NOT EXISTS (SELECT 1 FROM advisories a, json_each(a.cves) j WHERE j.value = cve_meta.cve)`,
   ).run();
-  return json({ keep, deleted: victims.length, objects_kept_for_another_row: objectsKept, bytes, remaining: packages.length - victims.length, protected_releases: protectedReleases, kept_checkpoints: keptCheckpoints, membership_rows_pruned: pruned.meta.changes ?? 0, delta_rows_pruned: deltasPruned, cve_meta_pruned: cves.meta.changes ?? 0 });
+  // Staging (staging.ts): what is past its 30 days goes with its rows, so a
+  // contributor's quota never counts objects the bucket already dropped;
+  // the packages of finished builds a transition missed go too.
+  const staging = await sweepStaging(env);
+  return json({ keep, deleted: victims.length, objects_kept_for_another_row: objectsKept, bytes, remaining: packages.length - victims.length, protected_releases: protectedReleases, kept_checkpoints: keptCheckpoints, membership_rows_pruned: pruned.meta.changes ?? 0, delta_rows_pruned: deltasPruned, cve_meta_pruned: cves.meta.changes ?? 0, staging });
 }

@@ -124,7 +124,7 @@ __CHARTS__
     if (t.kind === "sync") return "upstream " + num(r.upstream_total) + " · uploaded " + num(r.uploaded) + " · removed " + num(r.removed) + (r.failed ? " · failed " + num(r.failed) : "") + (r.release ? " · release " + r.release[0] : " · unchanged");
     if (t.kind === "promote") return r.verdict === "promoted" ? "promoted, release " + r.release_id : r.verdict === "blocked" ? "blocked: " + (r.reasons || []).join("; ") : r.verdict === "rolled-back" ? "rolled back to " + r.to : r.verdict === "skip" ? "nothing to promote" : JSON.stringify(r);
     if (t.kind === "health") return r.ok ? "healthy" : "unhealthy";
-    if (t.kind === "gc") return "kept the last " + r.keep + " releases per ring";
+    if (t.kind === "gc") return "kept the last " + r.keep + " releases per ring" + (r.staging && (r.staging.expired || r.staging.reclaimed) ? " · staging: " + num(r.staging.expired) + " expired, " + num(r.staging.reclaimed) + " packages reclaimed" : "");
     if (t.kind === "render") return "rendered " + (r.repos || []).join(", ");
     return JSON.stringify(r).slice(0, 90);
   }

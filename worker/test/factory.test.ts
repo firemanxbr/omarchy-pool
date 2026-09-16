@@ -14,6 +14,7 @@ import worker from "../src/index";
 import { sha256Hex } from "../src/routes/contributors";
 import { requeueExpiredLeases, workerReady } from "../src/routes/factory";
 import { packageKey } from "../src/r2";
+import { STAGING_QUOTA_BYTES, sweepStaging } from "../src/staging";
 
 const API = "http://pool.test/api/v1";
 
@@ -209,6 +210,10 @@ describe("a community build, its audit and the review", () => {
     for (const f of ["PKGBUILD", "build.log", "PKGINFO", "mine-1.0-2-aarch64.pkg.tar.zst"]) await call("PUT", `/factory/tasks/${again}/artifacts/${f}`, undefined, c.json.token, `evidence ${f}`);
     expect((await call("POST", `/factory/tasks/${again}/complete`, { sha256: "d".repeat(64), filename: "mine-1.0-2-aarch64.pkg.tar.zst", version: "1.0-2" }, c.json.token)).json.status).toBe("staged");
     expect(await env.DB.prepare("SELECT status, error FROM build_tasks WHERE id = ?").bind(task).first()).toMatchObject({ status: "cancelled", error: `superseded by task ${again} (1.0-2)` });
+    // The superseded build's package gave the quota back on the spot; its recipe and log stay (and are on the record).
+    expect(await env.STAGING.head(`staging/alice/mine/${task}/mine-1.0-1-aarch64.pkg.tar.zst`)).toBeNull();
+    expect(await env.STAGING.head(`staging/alice/mine/${task}/PKGBUILD`)).not.toBeNull();
+    expect((await env.DB.prepare("SELECT key FROM staging_objects WHERE task_id = ? ORDER BY key").bind(task).all<{ key: string }>()).results.map((r) => r.key.split("/").pop())).toEqual(["PKGBUILD", "PKGINFO", "audit.json", "audit.md", "build.log", "tests.log", "vet.json"]);
     const staged = (await call("GET", "/factory/review")).json.staged.filter((t: any) => t.name === "mine");
     expect(staged.map((t: any) => t.id)).toEqual([again]);
     // The rest of the story continues with the build that stands.
@@ -307,6 +312,11 @@ describe("a community build, its audit and the review", () => {
     expect(done.json).toMatchObject({ status: "done" });
     expect(await env.DB.prepare("SELECT status FROM factory_packages WHERE name = 'mine'").first()).toMatchObject({ status: "published" });
     expect(await env.DB.prepare("SELECT status, result_sha256 FROM build_tasks WHERE id = ?").bind(projectTask).first()).toMatchObject({ status: "done", result_sha256: s });
+    // In the pool: the staging copies of the package — the project's, and the contributor's it learned from — are gone; both recipes stay.
+    expect(await env.STAGING.head(`staging/@project/mine/${projectTask}/mine-1.0-1-aarch64.pkg.tar.zst`)).toBeNull();
+    expect(await env.STAGING.head(`staging/alice/mine/${task}/mine-1.0-2-aarch64.pkg.tar.zst`)).toBeNull();
+    expect(await env.STAGING.head(`staging/@project/mine/${projectTask}/PKGBUILD`)).not.toBeNull();
+    expect(await env.STAGING.head(`staging/alice/mine/${task}/PKGBUILD`)).not.toBeNull();
     // The seal: the project's own build and recipe, learned from the contributor's, approved by m2.
     const seal = (await call("GET", `/packages/${s}/provenance`)).json;
     expect(seal).toMatchObject({ origin: "factory", seal: "built by the Omarchy Pool", name: "mine", version: "1.0-1" });
@@ -432,21 +442,29 @@ describe("a package request", () => {
 });
 
 describe("staging quota", () => {
-  it("a PUT and a multipart create are refused once the contributor is over 2 GB; the owner can drop superseded staging", async () => {
+  it("a PUT and a multipart create are refused once the contributor is over the quota; a failed build gives its package back; the owner drops the rest", async () => {
     await env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind) VALUES ('pad', 'aarch64', '1-1', 'https://github.com/alice/recipes@HEAD:pad/PKGBUILD', 'contributor', 100, 0, 'community', 'alice', 'build')`).run();
     const c = await call("POST", "/factory/claim", { arch: "aarch64" }, "omw_w3");
     expect(c.status).toBe(200);
     const id = c.json.task.id;
     const job = c.json.token as string;
-    await env.DB.prepare("INSERT INTO staging_objects (key, owner, task_id, size) VALUES (?, 'alice', ?, ?)").bind(`staging/alice/pad/${id}/pad.bin`, id, 2147483648).run();
-    expect((await call("PUT", `/factory/tasks/${id}/artifacts/PKGBUILD`, undefined, job, "pkgname=pad\n")).status).toBe(413);
+    // How full the owner's workspace is travels with the claim: the worker fails fast at the quota instead of building into a 413.
+    expect(c.json.staging).toMatchObject({ quota_bytes: STAGING_QUOTA_BYTES });
+    expect(typeof c.json.staging.bytes).toBe("number");
+    await env.DB.prepare("INSERT INTO staging_objects (key, owner, task_id, size) VALUES (?, 'alice', ?, ?), (?, 'alice', ?, 1)").bind(`staging/alice/pad/${id}/pad.bin`, id, STAGING_QUOTA_BYTES, `staging/alice/pad/${id}/build.log`, id).run();
+    const full = await call("PUT", `/factory/tasks/${id}/artifacts/PKGBUILD`, undefined, job, "pkgname=pad\n");
+    expect(full.status).toBe(413);
+    expect(full.json).toMatchObject({ quota_bytes: STAGING_QUOTA_BYTES });
+    expect(full.json.error).toMatch(/DELETE \/api\/v1\/factory\/tasks\/<id>\/artifacts/);
     expect((await call("POST", `/factory/tasks/${id}/artifacts/pad-1-1-aarch64.pkg.tar.zst/multipart?action=create`, {}, job)).status).toBe(413);
     // The object that fills the quota is the one being uploaded again (a lease that died half-way): it does not count against itself.
     const again = await call("POST", `/factory/tasks/${id}/artifacts/pad.bin/multipart?action=create`, {}, job);
     expect(again.status, JSON.stringify(again.json)).toBe(201);
     expect((await call("POST", `/factory/tasks/${id}/artifacts/pad.bin/multipart?action=abort&upload_id=${again.json.upload_id}`, {}, job)).status).toBe(200);
     expect((await call("DELETE", `/factory/tasks/${id}/artifacts`, undefined, "omc_alice")).status).toBe(409);
+    // Failed for good: the package it had landed goes at once; the log stays for the owner (and the record).
     expect((await call("POST", `/factory/tasks/${id}/fail`, { error: "quota", final: true }, job)).status).toBe(200);
+    expect((await env.DB.prepare("SELECT key FROM staging_objects WHERE task_id = ?").bind(id).all<{ key: string }>()).results.map((r) => r.key)).toEqual([`staging/alice/pad/${id}/build.log`]);
     const gone = await call("DELETE", `/factory/tasks/${id}/artifacts`, undefined, "omc_alice");
     expect(gone.status, JSON.stringify(gone.json)).toBe(200);
     expect(gone.json.deleted).toBe(1);
@@ -461,7 +479,7 @@ describe("staging quota", () => {
     const job = c.json.token as string;
     // One byte short of 2 GiB elsewhere, and a stale row for the key about to be written: the upload itself is what overflows.
     const before = (await env.DB.prepare("SELECT COALESCE(SUM(size), 0) AS bytes FROM staging_objects WHERE owner = 'alice'").first<{ bytes: number }>())!.bytes;
-    const pad = 2147483648 - before - 1;
+    const pad = STAGING_QUOTA_BYTES - before - 1;
     await env.DB.prepare("INSERT INTO staging_objects (key, owner, task_id, size) VALUES (?, 'alice', ?, ?), (?, 'alice', ?, 1)")
       .bind(`staging/alice/pad/${id}/pad.bin`, id, pad, `staging/alice/pad/${id}/big.bin`, id)
       .run();
@@ -506,6 +524,37 @@ describe("staging quota", () => {
     expect(await env.DB.prepare("SELECT status, error FROM build_tasks WHERE id = ?").bind(audit!.id).first()).toMatchObject({ status: "cancelled", error: "the build it audited was dropped" });
     expect(await env.DB.prepare("SELECT status, detail FROM factory_packages WHERE name = 'pad'").first()).toMatchObject({ status: "registered", detail: "staging dropped by alice" });
     expect((await call("GET", "/factory/review")).json.staged.filter((t: any) => t.name === "pad")).toHaveLength(0);
+  });
+
+  it("a rejection keeps the note and the evidence, not the package", async () => {
+    await env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind) VALUES ('pad', 'aarch64', '1-4', 'https://github.com/alice/recipes@HEAD:pad/PKGBUILD', 'contributor', 100, 0, 'community', 'alice', 'build')`).run();
+    const c = await call("POST", "/factory/claim", { arch: "aarch64" }, "omw_w3");
+    expect(c.status).toBe(200);
+    const id = c.json.task.id;
+    for (const f of ["PKGBUILD", "build.log", "pad-1-4-aarch64.pkg.tar.zst"]) await call("PUT", `/factory/tasks/${id}/artifacts/${f}`, undefined, c.json.token, `evidence ${f}`);
+    expect((await call("POST", `/factory/tasks/${id}/complete`, { sha256: "a".repeat(64), filename: "pad-1-4-aarch64.pkg.tar.zst", version: "1-4" }, c.json.token)).json.status).toBe("staged");
+    expect((await call("POST", `/factory/tasks/${id}/reject`, { note: "the source is not the upstream's" }, "omc_m2")).status).toBe(200);
+    expect(await env.STAGING.head(`staging/alice/pad/${id}/pad-1-4-aarch64.pkg.tar.zst`)).toBeNull();
+    expect(await env.STAGING.head(`staging/alice/pad/${id}/build.log`)).not.toBeNull();
+    expect((await env.DB.prepare("SELECT key FROM staging_objects WHERE task_id = ? ORDER BY key").bind(id).all<{ key: string }>()).results.map((r) => r.key.split("/").pop())).toEqual(["PKGBUILD", "build.log"]);
+  });
+
+  it("the weekly sweep drops what is past 30 days, rows and objects, and the packages of finished builds a transition missed", async () => {
+    // A build finished long ago, whose rows a lifecycle rule would have orphaned; a cancelled one (a block cancels in bulk) still holding its package.
+    const old = (await env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status) VALUES ('pad', 'aarch64', '0-1', 'x', 'contributor', 100, 0, 'community', 'alice', 'build', 'cancelled') RETURNING id`).first<{ id: number }>())!.id;
+    const bulk = (await env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status) VALUES ('pad', 'aarch64', '0-2', 'x', 'contributor', 100, 0, 'community', 'alice', 'build', 'cancelled') RETURNING id`).first<{ id: number }>())!.id;
+    for (const [t, f] of [[old, "PKGBUILD"], [old, "pad-0-1-aarch64.pkg.tar.zst"], [bulk, "PKGBUILD"], [bulk, "pad-0-2-aarch64.pkg.tar.zst"]] as [number, string][]) {
+      await env.STAGING.put(`staging/alice/pad/${t}/${f}`, `bytes of ${f}`);
+      await env.DB.prepare("INSERT INTO staging_objects (key, owner, task_id, size, uploaded_at) VALUES (?, 'alice', ?, 10, ?)").bind(`staging/alice/pad/${t}/${f}`, t, t === old ? "2026-08-01T00:00:00.000Z" : "2026-09-16T00:00:00.000Z").run();
+    }
+    const swept = await sweepStaging(env);
+    expect(swept).toMatchObject({ expired: 2, expired_bytes: 20, reclaimed: 1, reclaimed_bytes: 10 });
+    expect(await env.STAGING.head(`staging/alice/pad/${old}/PKGBUILD`)).toBeNull();
+    expect(await env.STAGING.head(`staging/alice/pad/${bulk}/pad-0-2-aarch64.pkg.tar.zst`)).toBeNull();
+    expect(await env.STAGING.head(`staging/alice/pad/${bulk}/PKGBUILD`)).not.toBeNull();
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM staging_objects WHERE task_id IN (?, ?)").bind(old, bulk).first<{ n: number }>())!.n).toBe(1);
+    // Nothing else of alice's was finished with a package still in staging.
+    expect(await sweepStaging(env)).toMatchObject({ expired: 0, reclaimed: 0 });
   });
 });
 
