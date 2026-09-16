@@ -78,7 +78,7 @@ __CHARTS__
     var pool = d.pool, refAny = pool.referenced_by_any_release || {}, rec = pool.reclaimable || { objects: 0, bytes: 0 };
     var ringBytes = d.rings.reduce(function (x, r) { return x + (r.bytes || 0); }, 0);
     var pending = Math.max(0, (pool.objects || 0) - (refAny.objects || 0));
-    var lastSyncEv = latest(d.events, "sync"), synced = (d.coverage || []).filter(function (c) { return c.upstream_total != null; }).length, expected = (d.coverage || []).length;
+    var lastSyncEv = newest(d.latest, "sync"), synced = (d.coverage || []).filter(function (c) { return c.upstream_total != null; }).length, expected = (d.coverage || []).length;
     var sec = d.security || {}, secEv = latest(d.latest, "security");
     var now = new Date(), utcH = now.getUTCHours() + now.getUTCMinutes() / 60;
     // Promotion is by evidence: the gate's last word per step, not a clock.
@@ -170,7 +170,7 @@ __CHARTS__
   function render(d) {
     var RINGS = ["stable", "rc", "edge"], ARCHES = ["x86_64", "aarch64"];
     var problems = problemsOf(d);
-    var lastSync = latest(d.events, "sync");
+    var lastSync = newest(d.latest, "sync");
     var healthRows = [];
     RINGS.forEach(function (ring) {
       var r = d.rings.filter(function (x) { return x.ring === ring; })[0] || {};

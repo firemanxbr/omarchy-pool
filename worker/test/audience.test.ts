@@ -13,7 +13,7 @@ const ip = (n: number) => Array.from({ length: n }, (_, i) => ({ count: 3, dimen
 const analytics = {
   data: { viewer: { zones: [{
     totals: [{ count: 1234, sum: { edgeResponseBytes: 5_000_000_000 }, avg: { sampleInterval: 1 } }],
-    all: ip(300), stable: ip(210), rc: ip(60), edge: ip(45), x86_64: ip(250), aarch64: ip(55),
+    all: ip(300), stable: ip(210), rc: ip(60), edge: ip(45), lab: ip(2), x86_64: ip(250), aarch64: ip(55),
   }] } },
 };
 const answer = (body: unknown) => (async () => new Response(JSON.stringify(body), { status: 200 })) as unknown as typeof fetch;
@@ -23,7 +23,7 @@ const withZone = { ...env, CLOUDFLARE_ANALYTICS_TOKEN: "t", CLOUDFLARE_ZONE_ID: 
 describe("the audience", () => {
   it("counts distinct addresses per ring and per architecture for one day", async () => {
     const a = await measureAudience(withZone, "2026-09-13", answer(analytics));
-    expect(a).toEqual({ day: "2026-09-13", machines: 300, by_ring: { stable: 210, rc: 60, edge: 45 }, by_arch: { x86_64: 250, aarch64: 55 }, requests: 1234, bytes: 5_000_000_000, sampled: false });
+    expect(a).toEqual({ day: "2026-09-13", machines: 300, by_ring: { stable: 210, rc: 60, edge: 45, lab: 2 }, by_arch: { x86_64: 250, aarch64: 55 }, requests: 1234, bytes: 5_000_000_000, sampled: false });
   });
 
   it("says what a token without the zone permission is missing", async () => {
