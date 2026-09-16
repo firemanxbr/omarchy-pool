@@ -319,10 +319,12 @@ describe("a community build, its audit and the review", () => {
     // The publish job: a project worker takes it; its token may read the staged package (a maintainer's privilege otherwise).
     const pub = await env.DB.prepare("SELECT kind, trust, params FROM build_tasks WHERE id = ?").bind(other.json.publish).first<{ kind: string; trust: string; params: string }>();
     expect(pub).toMatchObject({ kind: "publish", trust: "project" });
-    expect(JSON.parse(pub!.params)).toMatchObject({ task: projectTask, files: ["mine-1.0-1-aarch64.pkg.tar.zst"], by: "m2" });
+    // The trial installed it: the publish job carries that, and its token opens rc and stable — the fast lane.
+    expect(JSON.parse(pub!.params)).toMatchObject({ task: projectTask, files: ["mine-1.0-1-aarch64.pkg.tar.zst"], by: "m2", trial: "ok" });
     const c = await call("POST", "/factory/claim", { arch: "aarch64", kinds: ["publish"] }, "omw_w1");
     expect(c.status).toBe(200);
     expect(c.json.task.id).toBe(other.json.publish);
+    expect((await jobOf(new Request(API, { headers: { authorization: `Bearer ${c.json.token}` } }), env))!.s).toEqual(expect.arrayContaining(["release:edge", "release:rc", "release:stable", "artifacts:*:stable"]));
     const ctx = createExecutionContext();
     const pk = await worker.fetch(new Request(`${API}/factory/tasks/${projectTask}/artifacts/mine-1.0-1-aarch64.pkg.tar.zst`, { headers: { authorization: `Bearer ${c.json.token}` } }), env, ctx);
     expect(pk.status).toBe(200);

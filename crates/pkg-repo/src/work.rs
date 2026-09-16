@@ -783,17 +783,67 @@ fn publish_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
         })
         .unwrap_or(&pkgs[0]);
     let manifest = pkg_extract::extract_manifest(main)?;
+    let fast = if s(&task.params, "trial") == "ok" {
+        fast_lane(opts, job, task, built, &pkgs, &manifest, &mut rendered)?
+    } else {
+        Vec::new()
+    };
     let _ = std::fs::remove_dir_all(&dir);
     Ok(Outcome {
         summary: format!(
-            "{} {} — the project's build {built}, approved — published into edge for {} ({})",
+            "{} {} — the project's build {built}, approved — published into edge{} for {} ({})",
             manifest.name,
             manifest.version,
+            if fast.is_empty() {
+                String::new()
+            } else {
+                format!(", fast-tracked to {}", fast.join(" and "))
+            },
             task.arch,
             rendered.join(", ")
         ),
-        result: serde_json::json!({ "sha256": manifest.sha256, "filename": manifest.filename, "version": manifest.version, "rendered": rendered, "task": built }),
+        result: serde_json::json!({ "sha256": manifest.sha256, "filename": manifest.filename, "version": manifest.version, "rendered": rendered, "task": built, "fast_track": fast }),
     })
+}
+
+/// The fast lane: a build a real pacman installed from the lab (the trial
+/// said ok, and the brain gave this token rc and stable) goes to rc and
+/// stable with edge, the same objects — the maintainer decided the build,
+/// the evidence decides the speed. Recorded as a fast-track.
+fn fast_lane(
+    opts: &WorkOptions,
+    job: &Api,
+    task: &Task,
+    built: i64,
+    pkgs: &[PathBuf],
+    manifest: &pkg_manifest::PackageManifest,
+    rendered: &mut Vec<String>,
+) -> Result<Vec<String>> {
+    let shas: Vec<String> = pkgs
+        .iter()
+        .filter_map(|p| pkg_extract::extract_manifest(p).ok().map(|m| m.sha256))
+        .collect();
+    let mut fast = Vec::new();
+    for ring in ["rc", "stable"] {
+        let created = job.create_release(&ReleaseRequest {
+            ring,
+            add: &shas,
+            remove_arch: Some(&task.arch),
+            note: Some(&format!(
+                "fast-track: factory task {built}, {} {} — approved, the trial installed it",
+                manifest.name, manifest.version
+            )),
+            ..ReleaseRequest::default()
+        })?;
+        rendered.extend(ops::render(job, ring, &task.arch, opts.sign.as_deref())?);
+        fast.push(format!("{ring}#{}", created.release.seq));
+    }
+    job.post_event(&serde_json::json!({
+        "kind": "fast-track", "ring": "stable", "source": "factory", "status": "ok",
+        "summary": format!("{} {} fast-tracked to rc and stable for {}: approved by {}, installed by the trial", manifest.name, manifest.version, task.arch, s(&task.params, "by")),
+        "payload": { "task": built, "name": manifest.name, "version": manifest.version, "sha256": manifest.sha256, "arch": task.arch, "releases": fast, "by": s(&task.params, "by") },
+    }))?;
+    Ok(fast)
 }
 
 /// The trial of the project's review build: its packages from staging into

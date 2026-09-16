@@ -102,7 +102,12 @@ PKGBUILD reviewed and merged ──▶ pool: package_requests / build_tasks (D1)
    packages with the job's token, publishes them into `edge` as source
    `factory` (the pool signs), renders, and the brain marks the
    registration `published`, links the approval to the build and writes
-   the seal next to the object. The project's own recipes (in
+   the seal next to the object. **The fast lane:** when the trial installed
+   the build (its verdict was `ok`), the publish job pins the same objects
+   into `rc` and `stable` as well, renders them, and records a `fast-track`
+   — the maintainer decided the build, the evidence decides the speed; a
+   build whose trial did not run or did not pass reaches `rc` and `stable`
+   by promotion like everything else. The project's own recipes (in
    `factory/pkgbuilds`) take the `enqueue` door without a staged build.
 8. **After that: bumps are evidence too.** Once a day the brain asks GitHub
    for each approved package's latest release and queues a community build
