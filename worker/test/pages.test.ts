@@ -49,13 +49,15 @@ describe("dashboard pages", () => {
     expect(pipeline).toContain('data-live="verified-today"');
     expect(pipeline).toContain("sponsor@firemanxbr.org");
     expect(pipeline).toContain('id="staged"');
-    // Review reads the same for everyone and acts for maintainers; the Workers page lists both sides.
+    // Review reads the same for everyone and acts for maintainers; the Workers page has the three kinds, and the Pipeline no longer lists them.
     const review = await (await get("/review")).text();
     expect(review).toContain('id="mine"');
     expect(review).toContain('data-approve');
     const workers = await (await get("/workers")).text();
-    expect(workers).toContain('id="cworkers"');
+    for (const kind of ["w-project", "w-review", "w-community"]) expect(workers).toContain(`id="${kind}"`);
     expect(workers).toContain('href="/docs/workers"');
+    expect(pipeline).not.toContain('id="cworkers"');
+    expect(pipeline).toContain('href="/workers"');
   });
 
   it("the documentation hub carries the five stages and the old chapter addresses still redirect", async () => {

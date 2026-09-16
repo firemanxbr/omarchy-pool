@@ -415,7 +415,8 @@ const CSS = String.raw`
   .flow .st.hum { border-color: var(--amber); } .flow .st.hum .k { color: var(--amber); } .flow .st.you { border-color: var(--green); } .flow .ar { display: grid; place-items: center; color: var(--dim); padding: 0 8px; font-size: 18px; }
   .roles-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); gap: 16px; }
   .role { border: 1px solid var(--line); background: var(--panel); padding: 16px 18px; display: grid; gap: 8px; align-content: start; border-top: 3px solid var(--line); }
-  .role.pool { border-top-color: var(--green); } .role.review { border-top-color: var(--blue); } .role.shared { border-top-color: var(--lilac); } .role.own { border-top-color: var(--dim); }
+  .role.k-project { border-top-color: var(--green); } .role.k-review { border-top-color: var(--blue); } .role.k-contrib { border-top-color: var(--lilac); }
+  .role .u { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; font-size: 12px; }
   .role h3 { display: flex; justify-content: space-between; align-items: baseline; } .role h3 span { font-family: "JetBrains Mono", monospace; font-size: 12px; font-weight: 400; color: var(--dim); } .role p { margin: 0; font-size: 12.5px; color: var(--muted); }
   .role .kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; font-size: 12.5px; } .role .kv dt { color: var(--dim); } .role .kv dd { margin: 0; text-align: right; }
   .maint-list { display: grid; gap: 8px; } .maint-list .m { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; font-size: 13px; }
