@@ -15,7 +15,7 @@ async function get(path: string): Promise<Response> {
   return res;
 }
 
-const PAGES = ["/", "/factory", "/contribute", "/review", "/pipeline", "/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/governance", "/packages", "/package/zlib", "/security", "/status", "/journal", "/workers", "/request", "/user/someone", "/people", "/api", "/diff"];
+const PAGES = ["/", "/factory", "/contribute", "/review", "/pipeline", "/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/governance", "/docs/security", "/docs/glossary", "/docs/architecture", "/docs/runbook", "/docs/testing", "/docs/migration", "/docs/factory", "/docs/worker-host", "/docs/security-model", "/docs/contributing", "/docs/proof-of-concept", "/docs/open-work", "/docs/omarchy-cli-mcp", "/packages", "/package/zlib", "/security", "/status", "/journal", "/workers", "/request", "/user/someone", "/people", "/api", "/diff"];
 
 describe("dashboard pages", () => {
   it("every page is served with the shared frame and no placeholder left behind", async () => {
@@ -60,9 +60,20 @@ describe("dashboard pages", () => {
     expect(pipeline).toContain('href="/workers"');
   });
 
-  it("the documentation hub carries the five stages and the old chapter addresses still redirect", async () => {
-    const docs = await (await get("/docs")).text();
-    for (const stage of ["sync", "pin", "promote", "render", "serve"]) expect(docs).toContain(`data-stage="${stage}"`);
+  it("every docs page carries the same shell — the map with every chapter's sections, the search — and the stages are on How it works", async () => {
+    const { DOCS_TREE } = await import("../src/pages/docs-tree");
+    for (const path of ["/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/governance", "/docs/security", "/docs/glossary", "/api", "/docs/architecture", "/docs/runbook"]) {
+      const html = await (await get(path)).text();
+      expect(html, path).toContain('id="docs-q"');
+      for (const c of DOCS_TREE) for (const sec of c.secs) expect(html, `${path}: ${c.key}#${sec.id}`).toContain(`href="${c.href}#${sec.id}"`);
+    }
+    // Every section the map names is an anchor on its page.
+    for (const c of DOCS_TREE) {
+      const html = await (await get(c.href)).text();
+      for (const sec of c.secs) expect(html, `${c.href} has no #${sec.id}`).toMatch(new RegExp(`id="${sec.id}"`));
+    }
+    const how = await (await get("/docs/how-it-works")).text();
+    for (const stage of ["sync", "pin", "promote", "render", "serve"]) expect(how).toContain(`data-stage="${stage}"`);
     const res = await get("/how-it-works");
     expect(res.status).toBe(301);
     expect(res.headers.get("location")).toBe("http://pool.test/docs/how-it-works");

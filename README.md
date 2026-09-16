@@ -1,117 +1,67 @@
-# omarchy-pool
+<p align="center">
+  <img src="docs/omarchy-pool-logo.svg" alt="omarchy-pool" width="96">
+</p>
 
-One package repository for [Omarchy](https://omarchy.org): every Arch Linux,
-Arch Linux ARM, Omarchy (OPR) and Asahi package — and the ones its own factory
-builds — verified against its project's signing key, stored once in an
-**immutable pool**, and served in three **rings** that move on evidence:
-`edge` follows the sources within hours, `rc` is what passed a real pacman, an
-ABI check and the security layer on both architectures, `stable` is what stayed
-healthy in `rc` through two checks in a row — with **automatic rollback** when
-a promotion fails its checks. Packages stay unmodified `makepkg` output; pacman
-reads generated, signed databases as plain static files; a **thin client** adds
-release awareness and an ELF-level safety check; a **security layer** matches
-public advisories to what each ring serves and fast-tracks fixes.
+<h1 align="center">omarchy-pool</h1>
 
-**Live:** https://omarchy-pool.firemanxbr.org · packages and databases at
-https://pool.firemanxbr.org · API at https://pkgs.firemanxbr.org/api/v1
+<p align="center">
+  <a href="https://omarchy.org/"><img src="docs/built-for-omarchy.svg" alt="built for Omarchy" height="20"></a><br>
+  <sub>a community pool — not official Omarchy</sub>
+</p>
+
+<p align="center">
+  One package repository for <a href="https://omarchy.org/">Omarchy</a>: every Arch Linux, Arch Linux ARM, Omarchy (OPR) and Asahi package — and the ones its own factory builds — verified against its project's key, stored once, and served in rings that only move forward on evidence.
+</p>
+
+<p align="center">
+  <a href="https://omarchy-pool.firemanxbr.org"><b>Dashboard</b></a> ·
+  <a href="https://omarchy-pool.firemanxbr.org/docs"><b>Documentation</b></a> ·
+  <a href="https://omarchy-pool.firemanxbr.org/docs/get-started">Get started</a> ·
+  <a href="https://omarchy-pool.firemanxbr.org/factory">Bring a package</a> ·
+  <a href="https://omarchy-pool.firemanxbr.org/docs/contributing">Contribute to the code</a>
+</p>
+
+---
 
 ## Use it
 
-Three steps, generated for your ring and architecture on
-[Get started](https://omarchy-pool.firemanxbr.org/docs/get-started):
+One command, once per machine, on x86_64 or aarch64 — no account:
 
 ```bash
-# 1. trust the key that signs the databases (packages keep their upstream signatures)
-curl -O https://pool.firemanxbr.org/omarchy-staging.pub.asc
-sudo pacman-key --add omarchy-staging.pub.asc && sudo pacman-key --lsign-key staging@firemanxbr.org
-
-# 2. /etc/pacman.conf — one host for every repository and both architectures
-[omarchy-packages-stable]
-SigLevel = Required DatabaseRequired
-Server = https://pool.firemanxbr.org/packages/$arch
-[omarchy-core-stable]
-SigLevel = Required DatabaseRequired
-Server = https://pool.firemanxbr.org/core/$arch
-[omarchy-extra-stable]
-SigLevel = Required DatabaseRequired
-Server = https://pool.firemanxbr.org/extra/$arch
-[omarchy-multilib-stable]
-SigLevel = Required DatabaseRequired
-Server = https://pool.firemanxbr.org/multilib/$arch
-
-# 3.
-omarchy update          # or, off Omarchy: sudo pacman -Syu
+curl -fsSL https://omarchy-pool.firemanxbr.org/setup | sudo bash -s -- --ring stable
 ```
 
-Change `stable` to `rc` or `edge` to change rings. The optional
-`[omarchy-chaotic-<ring>]` adds prebuilt AUR packages (x86_64).
+Then `omarchy update`. `stable` is what passed a real pacman, an ABI check and the security layer on both architectures and stayed healthy through two checks in a row; `rc` and `edge` are closer to upstream; the `lab` is where the factory's builds are tried. [Which ring is for me? →](https://omarchy-pool.firemanxbr.org/docs/get-started#which-ring)
 
-The thin client ships with every [release](https://github.com/firemanxbr/omarchy-pool/releases):
+## Bring a package
 
-```bash
-omarchy-cli status                    # what the ring would change on this machine
-omarchy-cli check <pkg>               # ABI safety check before an out-of-band install (exit 2 if unsafe), and the hooks pacman would run
-omarchy-cli upgrade                   # pacman -U from the pool, then pin the release
-omarchy-cli security                  # installed packages with open advisories, and where the fix is
-omarchy-cli upgrade --security-only
-omarchy-cli mcp                       # the same answers as MCP tools for an assistant (stdio, read-only)
-```
+Anyone who signs in with GitHub can ask for a package nobody ships yet and build it at home with the same tools maintainers use. Your build is evidence — the project builds it again, a real pacman installs it in the lab, and a maintainer who is not you approves it. [The factory →](https://omarchy-pool.firemanxbr.org/factory) · [Run a worker →](https://omarchy-pool.firemanxbr.org/docs/workers)
 
-## How it works
+## Contribute to the code
 
-The process is documented where it runs, on the dashboard:
-[How it works](https://omarchy-pool.firemanxbr.org/docs/how-it-works) — where
-every package comes from (each source, its architectures, its keyring, where it
-enters), what is checked before it reaches a machine, what protects users, and
-what the pool does for contributors and maintainers;
-[Governance](https://omarchy-pool.firemanxbr.org/docs/governance) — who decides
-what. The documents below are the code's own, for people working on the pool
-itself.
-
-| | |
-|---|---|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | design, API, pipeline, security |
-| [docs/RUNBOOK.md](docs/RUNBOOK.md) | operating it: jobs, promotions, keys, costs, the kill switch, the scheduler, known limits |
-| [docs/GOVERNANCE.md](docs/GOVERNANCE.md) | contributors and maintainers, categories, how a pull request is the only way to become a maintainer |
-| [SECURITY.md](SECURITY.md) | the trust model: who holds what, per-job tokens, the key that never leaves the pool, what a build can never touch |
-| [docs/TESTING.md](docs/TESTING.md) | how every piece is verified, locally and in CI |
-| [docs/MIGRATION.md](docs/MIGRATION.md) | moving the whole thing to another Cloudflare account and GitHub organisation |
-| [docs/omarchy-cli-mcp.md](docs/omarchy-cli-mcp.md) | the thin client as an MCP server: the tools and their shapes |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | pull requests, releases, versions |
-| [TODO.md](TODO.md) | open work, and findings to report upstream |
-| [poc/](poc/) | the proof of concept this grew out of: the three questions, the evidence, the benchmarks, the parked native engine |
-
-## Layout
-
-```
-crates/
-  pkg-manifest/   shared types, dependency rules, Arch-compatible vercmp, the build version
-  pkg-extract/    .pkg.tar.{zst,xz} inspection → PackageManifest (lib + binary)
-  pkg-repo/       the publisher: sync, publish, promote, gate, fast-track, render, security, gc
-  pkg-check/      the ABI safety check (ELF symbol versions against a system)
-  omarchy-cli/    the thin client
-worker/           Cloudflare Worker (TypeScript): index API, dashboard pages, the scheduler (jobs, governance, requests, bumps, cost); D1 migrations
-tests/            end-to-end scripts (real pacman), health check, ABI gate, keyring fetcher, pinned images
-docs/             architecture, runbook, governance, testing, migration, diagrams, the signing key's public part
-factory/          the factory: the governance file, the worker script and image, the project's own recipes (a tenant; moves out later)
-poc/              the proof of concept: results, benchmarks, parked crates
-.github/          CI, E2E, Release (every merge), Sync, Promote, Health, Security, Metrics, GC, Factory
-```
-
-## Releases
-
-Every merge into `main` is a release: [`release.yml`](.github/workflows/release.yml)
-re-runs CI and E2E, tags the next version (`v0.0.1`, `v0.0.2`, … — patch by default,
-`release:minor` / `release:major` labels bump the rest), builds the binaries for
-x86_64 and aarch64, publishes a GitHub release and deploys the worker. The dashboard
-header and `/api/v1/version` show what is running. See [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## Development
+This repository is where the code lives and is released: every merge into `main` is a release, deployed to the dashboard and shipped as binaries for both architectures. The documentation lives on the dashboard — [every chapter, one map, one search](https://omarchy-pool.firemanxbr.org/docs) — and its source is under [`worker/src/docs/`](worker/src/docs/), so a change to the code and a change to what it says are the same pull request.
 
 ```bash
 cargo build --workspace && cargo test --workspace && cargo clippy --workspace --all-targets
 cd worker && npm install && npm run typecheck && npm test
 tests/e2e-worker.sh          # real pacman through a local worker (docker or podman)
+```
+
+Start with [Contributing](https://omarchy-pool.firemanxbr.org/docs/contributing), then [Architecture](https://omarchy-pool.firemanxbr.org/docs/architecture), the [Runbook](https://omarchy-pool.firemanxbr.org/docs/runbook), [Testing](https://omarchy-pool.firemanxbr.org/docs/testing) and [Open work](https://omarchy-pool.firemanxbr.org/docs/open-work). Who decides what is in [Governance](https://omarchy-pool.firemanxbr.org/docs/governance); the [security model](https://omarchy-pool.firemanxbr.org/docs/security-model) says where the keys live. To report a vulnerability privately, see [SECURITY.md](SECURITY.md).
+
+```
+crates/
+  pkg-manifest/   shared types, dependency rules, Arch-compatible vercmp, the build version
+  pkg-extract/    .pkg.tar.{zst,xz} inspection → PackageManifest (lib + binary)
+  pkg-repo/       the publisher: sync, publish, promote, gate, trial, render, security, gc
+  pkg-check/      the ABI safety check (ELF symbol versions against a system)
+  omarchy-cli/    the thin client
+worker/           the Cloudflare Worker: the API, the dashboard and its documentation (src/docs), the scheduler; D1 migrations
+tests/            end-to-end scripts (real pacman), health check, ABI gate, the trial, keyring fetcher, pinned images
+factory/          the factory: the governance file, the worker script and image, the broker, the project's own recipes
+docs/             what the code and the releases ship: the signing key's public part, the pacman hook, the config example, the logo
+poc/              the proof of concept's benchmarks and parked crates
+.github/          CI, E2E, Release (every merge), the cost report
 ```
 
 ## License

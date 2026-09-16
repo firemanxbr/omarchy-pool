@@ -46,7 +46,7 @@ const BODY = String.raw`
   <div class="tiles six" id="tiles"></div>
 
   <section>
-    <div class="h2row"><h2>How it runs</h2><a class="more-link" href="${REPO_URL}/blob/main/factory/README.md">The factory in detail →</a></div>
+    <div class="h2row"><h2>How it runs</h2><a class="more-link" href="/docs/factory">The factory in detail →</a></div>
     <p class="sub">One brain queues, workers claim with a lease, objects land on R2, rings are rendered and signed. Live numbers on the mechanism.</p>
     <figure class="diagram">${archDiagram()}<figcaption>Every job runs on a registered worker. Contributors' builds are evidence; the review worker rebuilds what a maintainer approves. A lease that expires puts the task back in the queue. <a href="/workers">Every worker, by kind →</a></figcaption></figure>
   </section>
@@ -90,7 +90,7 @@ const BODY = String.raw`
 
   <section>
     <div class="h2row"><h2>Cost, in the open</h2><span class="hint">Cloudflare, estimated once a day from its analytics</span></div>
-    <p class="sub">D1 rows read and written are most of the bill. The guard pauses the jobs that write at US$ 25 of a US$ 30 cap; the daily report says why.</p>
+    <p class="sub">D1 rows read and written are most of the bill. Estimated every three hours; the guard pauses the jobs that write at US$ 40, the cap is US$ 50; the daily report says why.</p>
     <div class="budget" id="budget"><div><div class="k">this month</div><b>…</b></div><div><div class="k">projected</div><b>…</b></div><div class="bar"><i style="width:0"></i><em style="left:83.3%"></em></div></div>
     <div class="sponsor"><div><p><b>Help keep it running.</b> The pool runs on one pocket: the brain on Cloudflare, one machine building for both architectures, and the agent tokens that draft and audit PKGBUILDs. More hardware means shorter queues; more tokens mean every build gets an audit.</p><div class="needs"><span class="pill lilac">an aarch64 builder</span><span class="pill lilac">an x86_64 builder</span><span class="pill lilac">agent tokens</span><span class="pill lilac">a mirror in another region</span></div></div>
     <div class="side"><a class="mail" href="mailto:sponsor@firemanxbr.org">sponsor@firemanxbr.org</a><span class="promise">Every contribution shows up on this page, and the code stays open source — that is the deal.</span></div></div>
@@ -321,11 +321,11 @@ __CHARTS__
     });
   }
 
-  // ---- the bill, estimated once a day from Cloudflare's analytics (cost.ts)
+  // ---- the bill, estimated every three hours from Cloudflare's analytics (cost.ts)
   function renderCost() {
     fetch("/api/v1/cost").then(function (r) { return r.ok ? r.json() : null; }).then(function (c) {
-      var el = $("#budget"); if (!c) { el.innerHTML = '<div><div class="k">this month</div><b>—</b> <span class="dim">no estimate yet (daily, 06:30 UTC)</span></div>'; return; }
-      var cap = 30, color = c.status === "error" ? "var(--red)" : c.status === "warn" ? "var(--amber)" : "var(--green)";
+      var el = $("#budget"); if (!c) { el.innerHTML = '<div><div class="k">this month</div><b>—</b> <span class="dim">no estimate yet (every three hours)</span></div>'; return; }
+      var cap = (c.lines_usd && c.lines_usd.cap) || 50, color = c.status === "error" ? "var(--red)" : c.status === "warn" ? "var(--amber)" : "var(--green)";
       el.innerHTML = '<div><div class="k">' + esc(c.month) + ', so far</div><b style="color:' + color + '">US$ ' + Number(c.month_to_date_usd).toFixed(2) + '</b> <span class="dim">of a US$ ' + cap + ' hard cap</span></div><div><div class="k">projected</div><b>US$ ' + Number(c.projected_usd).toFixed(2) + '</b> <span class="dim">' + (c.guard ? "over the guard: jobs that write are paused" : "guard at US$ 25") + '</span></div><div class="bar"><i style="width:' + Math.min(100, 100 * Number(c.projected_usd) / cap) + '%;background:' + color + '"></i><em style="left:83.3%"></em></div>';
     }).catch(function () {});
   }

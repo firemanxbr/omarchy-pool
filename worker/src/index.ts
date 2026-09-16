@@ -64,6 +64,7 @@ import type { Actor } from "./routes/factory";
 import { jobOf } from "./jobtoken";
 import { handleTrustWorker, handleTrustList, handleNewToken, handleWithdrawRecord } from "./routes/contributors";
 import { maintainersOf, GOVERNANCE_FILE } from "./governance";
+import { BUDGET_CAP_USD, BUDGET_GUARD_USD, BUDGET_WARN_USD } from "./cost";
 import { handleQueueJob } from "./jobs";
 import { isMaintainer } from "./routes/contributors";
 import { handleReviewList, handleApprove, handleReject, handleApprovals, handleProjectBuild } from "./routes/review";
@@ -87,6 +88,10 @@ import { handleRelayout } from "./routes/relayout";
 import { overviewHtml } from "./pages/overview";
 import { getStartedHtml } from "./pages/get-started";
 import { howItWorksHtml } from "./pages/how-it-works";
+import { docsSecurityHtml } from "./pages/docs-security";
+import { glossaryHtml } from "./pages/glossary";
+import { docHtml, mdChapterAt } from "./pages/doc";
+import { DIAGRAMS } from "./pages/diagram-files";
 import { statusHtml } from "./pages/status";
 import { journalHtml } from "./pages/journal";
 import { apiDocsHtml } from "./pages/api-docs";
@@ -194,6 +199,13 @@ export default {
       if (path === "/docs/get-started") return html(getStartedHtml(env.POOL_URL, version(env)));
       if (path === "/docs/workers") return html(docsWorkersHtml(env.POOL_URL, version(env)));
       if (path === "/docs/how-it-works") return html(howItWorksHtml(env.POOL_URL, version(env)));
+      if (path === "/docs/security") return html(docsSecurityHtml(env.POOL_URL, version(env)));
+      if (path === "/docs/glossary") return html(glossaryHtml(env.POOL_URL, version(env)));
+      // The chapters written in markdown, and the diagrams they embed.
+      const md = mdChapterAt(path);
+      if (md) return html(docHtml(md, env.POOL_URL, version(env)));
+      const diagram = /^\/docs\/diagrams\/([a-z0-9-]+)\.svg$/.exec(path);
+      if (diagram && DIAGRAMS[diagram[1]]) return new Response(DIAGRAMS[diagram[1]], { headers: { "content-type": "image/svg+xml; charset=utf-8", "cache-control": "public, max-age=3600" } });
       if (path === "/docs/governance") return html(governanceHtml(env.POOL_URL, version(env)));
       if (path === "/get-started" || path === "/how-it-works" || path === "/governance") {
         url.pathname = `/docs${path}`;
@@ -375,10 +387,14 @@ async function api(method: string, path: string, url: URL, request: Request, env
   if (method === "GET" && path === "/version") return json(version(env), 200, { "cache-control": "public, max-age=30" });
   if (method === "GET" && path === "/status") return handleServiceStatus(env);
   if (method === "GET" && path === "/cost") {
-    const row = await env.DB.prepare("SELECT created_at, status, payload FROM events WHERE kind = 'cost' ORDER BY id DESC LIMIT 1").first<{ created_at: string; status: string; payload: string }>();
+    // The latest estimate (every three hours, settings.cost_latest; the
+    // journal line is daily) and the live guard — a maintainer may have
+    // lifted it, so it is the setting, not the estimate's verdict.
+    const latest = await env.DB.prepare("SELECT value FROM settings WHERE key = 'cost_latest'").first<{ value: string }>();
+    const row = latest ? null : await env.DB.prepare("SELECT created_at, status, payload FROM events WHERE kind = 'cost' ORDER BY id DESC LIMIT 1").first<{ created_at: string; status: string; payload: string }>();
     const guard = await env.DB.prepare("SELECT value FROM settings WHERE key = 'cost_guard'").first<{ value: string }>();
-    // `guard` is the live setting (a maintainer may have lifted it), not the estimate's verdict.
-    return json(row ? { estimated_at: row.created_at, status: row.status, ...JSON.parse(row.payload), guard: guard?.value ?? null } : { error: "no estimate yet" }, row ? 200 : 404, { "cache-control": "public, max-age=300" });
+    const est = latest ? (JSON.parse(latest.value) as Record<string, unknown>) : row ? { estimated_at: row.created_at, status: row.status, ...JSON.parse(row.payload) } : null;
+    return json(est ? { ...est, guard: guard?.value ?? null, lines_usd: { warn: BUDGET_WARN_USD, guard: BUDGET_GUARD_USD, cap: BUDGET_CAP_USD } } : { error: "no estimate yet" }, est ? 200 : 404, { "cache-control": "public, max-age=300" });
   }
   if (method === "GET" && path === "/signing-key") {
     const k = await publicKey(env);

@@ -5,6 +5,7 @@
  * string with a <script> that reads /api/v1/stats.
  */
 import type { RunningVersion } from "../meta";
+import { DOCS_TREE, GLOSSARY, type DocKey } from "./docs-tree";
 import { RING_TEXT } from "../meta";
 
 export const GITHUB_ICON =
@@ -78,13 +79,7 @@ const CSS = String.raw`
   .searchbar input:focus { outline: none; border-color: var(--green); }
   .searchbar .choice { margin: 0; }
   .crumbs { color: var(--dim); font-size: 13px; margin: 0 0 6px; } .crumbs a { color: var(--muted); text-decoration: none; }
-  .docs-bar { display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 13.5px; margin: -8px 0 22px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
-  .docs-bar a { color: var(--muted); text-decoration: none; padding: 2px 0; border-bottom: 1px solid transparent; }
-  .docs-bar a:hover { color: var(--text); } .docs-bar a.on { color: var(--text); border-bottom-color: var(--green); }
-  .docs-bar a:first-child { color: var(--dim); } .docs-bar a:first-child::after { content: " ›"; }
-  .doc-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 16px; }
-  .doc-cards a { display: block; border: 1px solid var(--line); background: var(--panel); padding: 18px 20px; text-decoration: none; color: var(--text); }
-  .doc-cards a:hover { border-color: var(--green); } .doc-cards h3 { margin: 0 0 6px; } .doc-cards p { color: var(--muted); font-size: 14px; margin: 0; }
+  .gloss-list { display: grid; grid-template-columns: max-content 1fr; gap: 10px 18px; max-width: 900px; } .gloss-list dt { font-family: Geist, sans-serif; font-weight: 600; font-size: 14px; } .gloss-list dt a { color: var(--text); text-decoration: none; } .gloss-list dt:target a { color: var(--green); } .gloss-list dd { margin: 0; color: var(--muted); font-size: 13.5px; }
   .shot { border: 1px solid var(--line); background: var(--panel-2); padding: 14px 16px; color: var(--dim); font-size: 13px; margin: 8px 0 14px; }
   .meta { display: flex; flex-wrap: wrap; gap: 6px 10px; font-size: 13px; color: var(--muted); margin: 10px 0 36px; }
   .meta .sep { color: var(--line); }
@@ -245,7 +240,7 @@ const CSS = String.raw`
   .btn svg { width: 16px; height: 16px; fill: currentColor; }
   .hint { font-size: 13px; color: var(--dim); }
   .h2row { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; flex-wrap: wrap; margin-bottom: 4px; } .h2row h2 { margin: 0; }
-  .more-link { font-size: 13px; color: var(--green); text-decoration: none; } .more-link:hover { text-decoration: underline; }
+  .more-link { font-size: 13px; color: var(--green); text-decoration: none; } .more-link:hover { text-decoration: underline; } button.more-link { background: none; border: 0; padding: 0; cursor: pointer; font: inherit; font-size: 13px; }
   .sub a, .lede a { color: var(--green); text-decoration: none; } .sub a:hover, .lede a:hover { text-decoration: underline; }
   .tile .v.ok { color: var(--green); } .tile .v.warn { color: var(--amber); }
   .tiles.six { grid-template-columns: repeat(auto-fit, minmax(min(172px, 100%), 1fr)); }
@@ -276,7 +271,7 @@ const CSS = String.raw`
   figure.diagram.live-diagram svg { min-width: 820px; }
   figure.diagram figcaption { font-size: 12.5px; color: var(--dim); margin-top: 8px; }
   .d-box { fill: var(--panel-2); stroke: var(--line); stroke-width: 1.2; } .d-box.hi { stroke: var(--green); }
-  .d-box.edge { stroke: var(--edge); } .d-box.rc { stroke: var(--rc); } .d-box.stable { stroke: var(--stable); } .d-box.amber { stroke: var(--amber); }
+  .d-box.edge { stroke: var(--edge); } .d-box.rc { stroke: var(--rc); } .d-box.stable { stroke: var(--stable); } .d-box.amber { stroke: var(--amber); } .d-box.dim { stroke: var(--dim); }
   .d-box.dimmed { opacity: .45; } .d-l.dimmed { opacity: .35; }
   .d-t { fill: var(--text); font-size: 13px; font-weight: 600; font-family: Geist, "JetBrains Mono", sans-serif; } .d-t.small { font-size: 12.5px; }
   .d-t.edge { fill: var(--edge); } .d-t.rc { fill: var(--rc); } .d-t.stable { fill: var(--stable); } .d-t.amber { fill: var(--amber); }
@@ -353,8 +348,13 @@ const CSS = String.raw`
   .person { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); background: var(--panel); padding: 5px 10px 5px 5px; text-decoration: none; color: var(--text); font-size: 13px; max-width: 100%; } .person:hover { border-color: var(--green); } .person > b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .person .r { color: var(--dim); font-size: 11.5px; }
   .landed { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); gap: 12px; }
   .land { border: 1px solid var(--line); background: var(--panel); padding: 12px 14px; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; align-items: center; }
-  .land .avatar { grid-row: span 2; } .land .n { font-weight: 500; display: flex; justify-content: space-between; gap: 8px; align-items: baseline; } .land .n .v { color: var(--dim); font-size: 12px; }
+  .land .avatar { grid-row: span 3; } .land .n { font-weight: 500; display: flex; justify-content: space-between; gap: 8px; align-items: baseline; } .land .n .v { color: var(--dim); font-size: 12px; } .land .n a { color: var(--text); text-decoration: none; } .land .n a:hover { color: var(--green); }
   .land .b { font-size: 12.5px; color: var(--dim); } .land .b a { color: var(--muted); text-decoration: none; }
+  /* Where a landed package is today: the four rings, lit as it reaches them. */
+  .land .rings { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+  .rb { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; border: 1px solid var(--line); padding: 2px 7px; color: var(--dim); opacity: .5; font-style: normal; }
+  .rb svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .rb.on { opacity: 1; } .rb.lab.on { color: var(--lab); border-color: var(--lab); } .rb.edge.on { color: var(--edge); border-color: var(--edge); } .rb.rc.on { color: var(--rc); border-color: var(--rc); } .rb.stable.on { color: var(--stable); border-color: var(--stable); }
   .community { display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px; align-items: start; }
   .community .box { border: 1px solid var(--line); background: var(--panel); padding: 18px 20px; display: grid; gap: 12px; align-content: start; } .community .box p { margin: 0; font-size: 13.5px; color: var(--muted); }
   .community .stats { display: flex; gap: 22px; flex-wrap: wrap; } .community .stats a { color: inherit; text-decoration: none; } .community .stats a:hover b { color: var(--green); } .community .stats > * b { display: block; font-family: Geist, sans-serif; font-size: 24px; font-weight: 600; line-height: 1.1; } .community .stats > * span { font-size: 12px; color: var(--dim); letter-spacing: .06em; text-transform: uppercase; }
@@ -368,6 +368,7 @@ const CSS = String.raw`
   .gate { border: 1px dashed var(--line); background: var(--panel); padding: 24px; display: grid; grid-template-columns: 1fr auto; gap: 18px 28px; align-items: center; }
   .gate h3 { margin-bottom: 6px; } .gate p { margin: 0; color: var(--muted); font-size: 13.5px; max-width: 70ch; }
   .gate ul { margin: 8px 0 0; padding: 0; list-style: none; font-size: 13px; color: var(--muted); display: flex; gap: 6px 18px; flex-wrap: wrap; } .gate ul li::before { content: "▸ "; color: var(--green); }
+  .gate .cta { display: grid; gap: 8px; justify-items: center; } .gate .cta .hint { text-align: center; max-width: 26ch; }
   .gate .lock, .private-head .lock { font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); }
   .private-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; border-top: 1px solid var(--line); padding-top: 28px; margin-bottom: 18px; }
   .private-head .lock { border: 1px solid var(--line); padding: 2px 8px; } .private-head h2 { margin: 0; } .private-head .right { margin-left: auto; display: flex; gap: 12px; align-items: center; }
@@ -472,9 +473,27 @@ const CSS = String.raw`
   .docs { display: grid; grid-template-columns: 230px 1fr; gap: 24px; align-items: start; }
   .docs-side { position: sticky; top: 16px; display: grid; gap: 10px; }
   .docs-side input { background: var(--bg-deep); border: 1px solid var(--line); color: var(--text); padding: 8px 10px; font: inherit; font-size: 13.5px; width: 100%; } .docs-side input:focus { outline: none; border-color: var(--green); }
-  .docs-nav { display: grid; gap: 2px; } .docs-nav button { text-align: left; background: transparent; border: 0; border-left: 2px solid transparent; color: var(--muted); padding: 6px 10px; font: inherit; font-size: 13.5px; cursor: pointer; display: flex; justify-content: space-between; gap: 8px; }
-  .docs-nav button:hover { color: var(--text); } .docs-nav button.on { color: var(--text); border-left-color: var(--green); background: var(--panel); } .docs-nav button small { color: var(--dim); font-size: 11px; }
+  .docs-home { display: block; font-family: Geist, sans-serif; font-weight: 600; font-size: 14px; color: var(--muted); text-decoration: none; padding: 2px 10px 6px; } .docs-home.on, .docs-home:hover { color: var(--text); }
+  .docs-nav { display: grid; gap: 2px; } .docs-nav details { border-left: 2px solid transparent; } .docs-nav details[open] { border-left-color: var(--green); background: var(--panel); }
+  .docs-nav summary { list-style: none; cursor: pointer; display: flex; justify-content: space-between; align-items: baseline; gap: 8px; padding: 6px 10px; font-size: 13.5px; color: var(--muted); } .docs-nav summary::-webkit-details-marker { display: none; }
+  .docs-nav summary::before { content: "›"; color: var(--dim); font-size: 13px; width: 8px; transition: transform .12s; } .docs-nav details[open] > summary::before { transform: rotate(90deg); }
+  .docs-nav summary a { color: inherit; text-decoration: none; flex: 1; } .docs-nav summary:hover, .docs-nav summary a.on { color: var(--text); } .docs-nav summary small { color: var(--dim); font-size: 11px; }
+  .docs-nav ul { list-style: none; margin: 0 0 6px; padding: 0 0 0 10px; display: grid; gap: 1px; } .docs-nav li a { display: block; padding: 3px 10px; font-size: 12.5px; color: var(--dim); text-decoration: none; border-left: 1px solid var(--line); } .docs-nav li a:hover { color: var(--text); border-left-color: var(--muted); }
+  .docs-hits { display: grid; gap: 6px; } .docs-hits .hit { display: block; text-decoration: none; color: inherit; padding: 10px 12px; } .docs-hits .hit.none { color: var(--dim); font-size: 13px; cursor: default; }
+  .docs-hits .hit b { font-size: 13.5px; } .docs-hits .hit span:last-child { display: block; font-size: 12px; color: var(--dim); margin-top: 2px; }
+  .docs-group { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); padding: 12px 10px 4px; }
+  .md h2 { margin: 30px 0 8px; } .md h3 { margin: 22px 0 6px; } .md h4 { margin: 16px 0 4px; font-size: 14px; } .md .anchor { color: inherit; text-decoration: none; } .md .anchor:hover::after { content: " #"; color: var(--dim); }
+  .md p, .md li { color: var(--muted); font-size: 14px; line-height: 1.6; max-width: 82ch; } .md ul, .md ol { padding-left: 22px; margin: 0 0 12px; } .md li { margin: 3px 0; } .md li > ul, .md li > ol { margin: 4px 0 0; }
+  .md pre { background: var(--bg-deep); border: 1px solid var(--line); padding: 12px 14px; overflow-x: auto; margin: 0 0 14px; font-size: 12.5px; line-height: 1.5; } .md code { color: var(--text); }
+  .md blockquote { border-left: 2px solid var(--line); margin: 0 0 12px; padding: 2px 14px; color: var(--muted); } .md hr { border: 0; border-top: 1px solid var(--line); margin: 20px 0; }
+  .md .table-wrap { margin: 0 0 14px; } .md table td, .md table th { vertical-align: top; } .md strong { color: var(--text); }
+  .doc-figure { margin: 0 0 16px; background: #fff; border: 1px solid var(--line); padding: 10px; } .doc-figure img { display: block; width: 100%; max-width: 1100px; height: auto; margin: 0 auto; }
   .docs-hint { font-size: 12px; color: var(--dim); padding: 0 10px; } .docs-main { min-width: 0; }
+  .docs-main > h1:first-child { margin-top: 2px; }
+  .doc-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 14px; }
+  .doc-card { border: 1px solid var(--line); background: var(--panel); padding: 16px 18px; display: grid; gap: 8px; align-content: start; } .doc-card h3 { margin: 0; } .doc-card h3 a { color: var(--text); text-decoration: none; } .doc-card h3 a:hover { color: var(--green); }
+  .doc-card p { margin: 0; font-size: 13.5px; color: var(--muted); } .doc-secs { display: flex; flex-wrap: wrap; gap: 4px 6px; margin-top: 4px; }
+  .doc-secs a { font-size: 12px; color: var(--dim); text-decoration: none; border: 1px solid var(--line); padding: 2px 8px; } .doc-secs a:hover { color: var(--text); border-color: var(--muted); }
   .docs-main h2 { margin-bottom: 4px; } .docs-main h3 { margin: 22px 0 8px; } .docs-main p { color: var(--muted); font-size: 14px; max-width: 78ch; margin: 0 0 10px; } .docs-main p code, .docs-main li code { color: var(--text); }
   .docs-main ul { margin: 0 0 12px; padding-left: 18px; color: var(--muted); font-size: 13.5px; }
   .doc-sec { border: 1px solid var(--line); background: var(--panel); padding: 18px 20px; margin-bottom: 16px; } .doc-sec h3:first-child { margin-top: 0; }
@@ -497,7 +516,7 @@ const CSS = String.raw`
   .timeline { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; } .timeline div { border: 1px solid var(--line); background: var(--panel-2); padding: 12px 14px; font-size: 13px; color: var(--muted); } .timeline b { display: block; color: var(--text); margin-bottom: 4px; }
   @media (max-width: 900px) {
     .community, .two, .profile-head, .live-grid, .docs, .cando, .start-grid, .pk-grid, .open-grid { grid-template-columns: 1fr; }
-    .docs-side { position: static; } .stepper { grid-template-columns: repeat(2, 1fr); } .timeline { grid-template-columns: 1fr; }
+    .docs-side { position: static; } .stepper { grid-template-columns: repeat(2, 1fr); } .timeline { grid-template-columns: 1fr; } .gloss-list { grid-template-columns: 1fr; }
     .gate, .sponsor { grid-template-columns: 1fr; } .rrow { grid-template-columns: 1fr auto; } .rrow .s, .rrow .go { grid-column: 1 / -1; } .rrow .go { justify-self: start; } .sponsor .side { justify-items: start; } .sponsor .promise { text-align: left; }
     .heat .r, .heat .days { grid-template-columns: 80px repeat(14, 1fr); }
   }
@@ -715,24 +734,68 @@ const LICENSE_URL = "https://github.com/firemanxbr/omarchy-pool/blob/main/LICENS
 const BUILT_FOR_OMARCHY =
   '<svg viewBox="0 0 156 20" width="156" height="20" role="img" aria-label="built for Omarchy"><rect width="86" height="20" fill="#2a2e3f"/><rect x="86" width="70" height="20" fill="#9ece6a"/><rect x="6" y="5" width="10" height="10" fill="#9ece6a"/><rect x="9" y="8" width="4" height="4" fill="#2a2e3f"/><text x="21" y="14" font-family="JetBrains Mono, monospace" font-size="10.5" fill="#c0caf5">built for</text><text x="121" y="14" text-anchor="middle" font-family="Geist, sans-serif" font-size="11" font-weight="700" fill="#0c0e10">Omarchy</text></svg>';
 
-export type DocKey = "index" | "get-started" | "workers" | "how-it-works" | "governance" | "api";
+export type { DocKey } from "./docs-tree";
 
-/** The documentation's chapters, in reading order; every docs page carries this bar. */
-export const DOCS: { key: DocKey; href: string; label: string; blurb: string }[] = [
-  { key: "get-started", href: "/docs/get-started", label: "Get started", blurb: "Point pacman at a ring: the key, the Server line, the upgrade." },
-  { key: "workers", href: "/docs/workers", label: "Run a worker", blurb: "One image on GitHub Packages, with Docker Desktop or Podman: your own packages, donated compute, the project's builds — the registration decides." },
-  { key: "how-it-works", href: "/docs/how-it-works", label: "How it works", blurb: "Where every package comes from, the gates it passes, what protects you — and what the pool does for the people who bring packages in and the people who decide." },
-  { key: "governance", href: "/docs/governance", label: "Governance", blurb: "Contributors and maintainers, categories, and how a pull request is the only way to become a maintainer." },
-  { key: "api", href: "/api", label: "API", blurb: "Every endpoint the dashboard and the tools use." },
-];
-
-function docsBar(current: DocKey | undefined): string {
-  if (!current) return "";
-  const items = [{ key: "index" as DocKey, href: "/docs", label: "Documentation" }, ...DOCS].map(
-    (d) => `<a href="${d.href}"${d.key === current ? ' class="on"' : ""}>${d.label}</a>`,
-  );
-  return `<nav class="docs-bar" aria-label="Documentation">${items.join("")}</nav>`;
+/**
+ * The documentation's shell: every docs page — the index, a chapter — is
+ * the same layout, the map beside the text. The sidebar carries the search
+ * and the chapters; the current one is open on its sections, the others
+ * open on a click; a section is a link to its anchor on its chapter's
+ * page. The search (docsSearch, below) matches chapters, sections and the
+ * glossary and answers with links, so a reader never leaves the shell.
+ */
+function docsShell(current: DocKey, body: string): string {
+  const tree = DOCS_TREE.map((c, i) => {
+    const on = c.key === current;
+    const label = i > 0 && c.group === "code" && DOCS_TREE[i - 1].group !== "code" ? '<div class="docs-group">For people working on the pool</div>' : "";
+    const secs = c.key === "glossary"
+      ? GLOSSARY.map(([term]) => `<li><a href="${c.href}#${termId(term)}">${escapeHtml(term)}</a></li>`)
+      : c.secs.map((sec) => `<li><a href="${c.href}#${sec.id}">${escapeHtml(sec.title)}</a></li>`);
+    return `${label}<details${on ? " open" : ""}><summary><a href="${c.href}"${on ? ' class="on"' : ""}>${escapeHtml(c.label)}</a>${secs.length ? `<small>${secs.length}</small>` : ""}</summary><ul>${secs.join("")}</ul></details>`;
+  });
+  return `<div class="docs">
+  <aside class="docs-side">
+    <a class="docs-home${current === "index" ? " on" : ""}" href="/docs">Documentation</a>
+    <input type="search" id="docs-q" placeholder="search the docs…" aria-label="search the docs" autocomplete="off">
+    <div class="docs-hits" id="docs-hits" hidden></div>
+    <nav class="docs-nav" id="docs-nav" aria-label="Chapters">${tree.join("")}</nav>
+    <div class="docs-hint">Packages, Security, Status, Journal, Review and the API are pages of their own — linked from the footer.</div>
+  </aside>
+  <div class="docs-main">
+${body}
+  </div>
+</div>`;
 }
+
+/** The anchor of a glossary term on the Glossary page. */
+export function termId(term: string): string {
+  return "term-" + term.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+
+/** The search over the map, on every docs page: chapters, sections, the glossary — each hit a link. */
+const DOCS_SEARCH = String.raw`
+  (function () {
+    var q = $("#docs-q"), hits = $("#docs-hits"), nav = $("#docs-nav"); if (!q || !hits || !nav) return;
+    var TREE = __DOCS_TREE__, GLOSSARY = __GLOSSARY__;
+    var items = [];
+    TREE.forEach(function (c) {
+      items.push({ ch: c.label, title: c.label, text: c.blurb, href: c.href });
+      c.secs.forEach(function (s) { items.push({ ch: c.label, title: s.title, text: s.blurb, href: c.href + "#" + s.id }); });
+    });
+    GLOSSARY.forEach(function (g) { items.push({ ch: "Glossary", title: g[0], text: g[1], href: "/docs/glossary#" + g[2] }); });
+    function hl(t, needle) { var i = t.toLowerCase().indexOf(needle); return i < 0 ? esc(t) : esc(t.slice(0, i)) + "<mark>" + esc(t.slice(i, i + needle.length)) + "</mark>" + esc(t.slice(i + needle.length)); }
+    q.oninput = function () {
+      var needle = q.value.trim().toLowerCase();
+      if (!needle) { hits.hidden = true; nav.hidden = false; return; }
+      var found = items.filter(function (it) { return (it.ch + " " + it.title + " " + it.text).toLowerCase().indexOf(needle) >= 0; }).slice(0, 12);
+      hits.innerHTML = found.length
+        ? found.map(function (it) { return '<a class="hit" href="' + it.href + '"><span class="ch">' + esc(it.ch) + '</span><b>' + hl(it.title, needle) + '</b><span>' + hl(it.text, needle) + '</span></a>'; }).join("")
+        : '<div class="hit none">nothing in the docs says “' + esc(q.value.trim()) + '”</div>';
+      hits.hidden = false; nav.hidden = true;
+    };
+    q.onkeydown = function (e) { if (e.key === "Escape") { q.value = ""; q.oninput(); } };
+  })();
+`;
 
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] ?? c);
@@ -746,8 +809,11 @@ export function page(o: PageOptions): string {
     : `<span class="ver" title="local build">${tag}</span>`;
   const nav = NAV.map((n) => `<a href="${n.href}"${n.key === o.active ? ' class="active"' : ""}>${n.label}${n.sub ? `<small>${n.sub}</small>` : ""}</a>`).join("\n    ");
   const more = MORE.map((m) => `<a href="${m.href}">${m.label}</a>`).join("");
-  const docs = docsBar(o.doc);
+  const body = o.doc ? docsShell(o.doc, o.body) : o.body;
   const pool = o.poolUrl.replace(/\/$/, "");
+  const docsSearch = o.doc
+    ? DOCS_SEARCH.replace("__DOCS_TREE__", JSON.stringify(DOCS_TREE.map((c) => ({ label: c.label, blurb: c.blurb, href: c.href, secs: c.secs })))).replace("__GLOSSARY__", JSON.stringify(GLOSSARY.map(([t, d]) => [t, d, termId(t)])))
+    : "";
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -770,12 +836,11 @@ export function page(o: PageOptions): string {
       ${nav}
     </nav>
   </div>
-  <span class="account"><a id="account" href="/auth/github?next=${escapeHtml(o.active === "pipeline" ? "/pipeline" : o.active === "review" ? "/review" : "/factory")}" title="contributors and maintainers sign in with GitHub">Sign in</a><a id="signout" href="/auth/logout" hidden title="sign out of the dashboard on this browser">sign out</a></span>
+  <span class="account"><a id="account" href="/auth/github?next=${escapeHtml(o.active === "pipeline" ? "/pipeline" : o.active === "review" ? "/review" : "/me")}" title="contributors and maintainers sign in with GitHub">Sign in</a><a id="signout" href="/auth/logout" hidden title="sign out of the dashboard on this browser">sign out</a></span>
 </header>
 
 <main>
-${docs}
-${o.body}
+${body}
 </main>
 
 <footer>
@@ -789,6 +854,7 @@ ${o.body}
   document.querySelectorAll("footer .more a").forEach(function (a) { if (a.getAttribute("href") === location.pathname) a.classList.add("active"); });
 ${HELPERS.split("__POOL_URL__").join(pool).split("__RINGS_TEXT__").join(JSON.stringify(RING_TEXT))}
 ${o.script ?? ""}
+${docsSearch}
 })();
 </script>
 </body>

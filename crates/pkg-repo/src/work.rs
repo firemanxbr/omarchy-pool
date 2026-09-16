@@ -1375,7 +1375,7 @@ fn build_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
     }
     // No GITHUB_TOKEN in there: the drafter reads GitHub through the broker
     // (GITHUB_API in OMARCHY_BUILD_ENV, factory/bin/broker) — the build
-    // container is born with nothing (SECURITY.md, *Isolation*).
+    // container is born with nothing (/docs/security-model, *Isolation*).
     // A package cache shared by every build container on this host
     // (OMARCHY_PKG_CACHE, one directory per architecture): pacman downloads
     // a dependency once, not once per build.
@@ -1487,7 +1487,7 @@ fn build_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
             result: serde_json::json!({ "sha256": manifest.sha256, "filename": manifest.filename, "version": manifest.version, "review": from }),
         });
     }
-    // The pool signs what it stores (SECURITY.md); a local key only covers
+    // The pool signs what it stores (/docs/security-model); a local key only covers
     // a pool that has none.
     if let Some(key) = &opts.sign {
         if !job.signing()? {
@@ -1622,6 +1622,9 @@ fn audit_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
     })
 }
 
+/// How long a health or ABI check counts as evidence (gate.rs).
+const ABI_MAX_AGE_HOURS: u32 = 24;
+
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
@@ -1673,9 +1676,15 @@ fn promote_job(
     if !forced {
         // Evidence: health and ABI of the source ring, both architectures. The
         // scripts record events; the gate reads them. Failures are evidence too.
+        // The health check is the soak and runs every time; the ABI verdict of
+        // an unchanged release stands (gate.rs) and is not paid for again.
         for arch in &arches {
             let _ = script(opts, token, "tests/health-check.sh", &[&from, arch]);
-            let _ = script(opts, token, "tests/abi-gate.sh", &[&from, arch]);
+            if gate::abi_evidence_stands(job, &from, arch, ABI_MAX_AGE_HOURS).unwrap_or(false) {
+                eprintln!("abi: {from} {arch}: the current release's verdict stands, not repeated");
+            } else {
+                let _ = script(opts, token, "tests/abi-gate.sh", &[&from, arch]);
+            }
         }
     }
     let report = if forced {
@@ -1691,7 +1700,7 @@ fn promote_job(
                 to: &to,
                 arches: &arches,
                 soak_checks,
-                max_age_hours: 24,
+                max_age_hours: ABI_MAX_AGE_HOURS,
                 dry_run: false,
             },
         )?
@@ -1792,7 +1801,7 @@ fn promote_job(
     }
 }
 
-/// The public vulnerability feeds the security layer reads (SECURITY.md).
+/// The public vulnerability feeds the security layer reads (/docs/security-model).
 const FEEDS: [(&str, &str); 4] = [
     (
         "arch.json",

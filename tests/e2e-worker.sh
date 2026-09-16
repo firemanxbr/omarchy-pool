@@ -64,7 +64,7 @@ step "Fresh local worker on :$PORT"
 rm -rf "$E2E" && mkdir -p "$E2E"
 cd "$ROOT/worker"
 WRANGLER_STATE="$E2E/wrangler-state"
-# The pool holds the signing key (SECURITY.md): the throwaway key goes in as
+# The pool holds the signing key (/docs/security-model): the throwaway key goes in as
 # the Worker secret, armored on one dotenv line.
 SIGNING_KEY="$(gpg --batch --armor --export-secret-keys "$KEYID" | awk '{printf "%s\\n", $0}')"
 printf 'JOB_TOKEN_SECRET=%s\nSIGNING_KEY="%s"\n' "$JOB_SECRET" "$SIGNING_KEY" > "$E2E/.dev.vars"
@@ -203,7 +203,7 @@ dash_body=$(curl -s "$OMARCHY_API/")
 grep -q "tested before they reach you" <<<"$dash_body" || {
   echo "dashboard not served; response head:"; head -c 600 <<<"$dash_body"; echo
   echo "--- worker log tail ---"; tail -20 "$E2E/wrangler.log"; exit 1; }
-for p in /docs /docs/get-started /docs/workers /docs/how-it-works /docs/governance /status /api /contribute /factory; do
+for p in /docs /docs/get-started /docs/workers /docs/how-it-works /docs/governance /docs/security /docs/glossary /docs/architecture /docs/runbook /docs/factory /status /api /contribute /factory; do
   body=$(curl -s "$OMARCHY_API$p"); grep -q "omarchy-pool" <<<"$body" || { echo "page $p not served"; exit 1; }
 done
 # The old addresses of the documentation chapters redirect into the section.
@@ -229,10 +229,11 @@ grep -q '"state":"online"' <<<"$status_body" || { echo "service status not onlin
 grep -q '"signing":true' <<<"$status_body" || { echo "status does not report signing: $status_body"; exit 1; }
 # A cached API answer tells the browser to keep it no longer than our own
 # expiry (the platform rewrites the stored copy's cache-control to hours).
-curl -s -o /dev/null "$OMARCHY_API/api/v1/stats"; hit_headers=$(curl -s -D - -o /dev/null "$OMARCHY_API/api/v1/stats")
+miss_headers=$(curl -s -D - -o /dev/null "$OMARCHY_API/api/v1/stats"); hit_headers=$(curl -s -D - -o /dev/null "$OMARCHY_API/api/v1/stats")
 grep -qi "x-pool-cache: hit" <<<"$hit_headers" || { echo "second /stats was not served from the cache: $hit_headers"; exit 1; }
-ma=$(grep -i "^cache-control:" <<<"$hit_headers" | grep -o 'max-age=[0-9]*' | cut -d= -f2)
-[[ -n "$ma" && "$ma" -le 30 ]] || { echo "a cache hit must not extend the browser's max-age: $hit_headers"; exit 1; }
+max_age() { grep -i "^cache-control:" <<<"$1" | grep -o 'max-age=[0-9]*' | cut -d= -f2; }
+ma=$(max_age "$hit_headers"); own=$(max_age "$miss_headers")
+[[ -n "$ma" && -n "$own" && "$ma" -le "$own" ]] || { echo "a cache hit must not extend the browser's max-age past the answer's own ($own): $hit_headers"; exit 1; }
 echo "databases, signatures, package blobs, Range requests, stats, pages, security and service status OK"
 
 step "Factory: enqueue, claim with a lease, fail → requeue, complete after publish"

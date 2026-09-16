@@ -87,7 +87,7 @@ export async function handleReviewList(env: Env): Promise<Response> {
         worker_trusted_by: undefined,
         detected: r.detected ? JSON.parse(r.detected as string) : null,
         evidence: { log: `/api/v1/factory/tasks/${r.id}/artifacts/build.log`, pkgbuild: `/api/v1/factory/tasks/${r.id}/artifacts/PKGBUILD`, pkginfo: `/api/v1/factory/tasks/${r.id}/artifacts/PKGINFO`, audit: `/api/v1/factory/tasks/${r.id}/artifacts/audit.md`, tests: `/api/v1/factory/tasks/${r.id}/artifacts/tests.log`, vet: `/api/v1/factory/tasks/${r.id}/artifacts/vet.json`, trial: `/api/v1/factory/tasks/${r.id}/artifacts/trial.log` },
-        // The gate (factory/README.md *The gate*): the worker's own checks — checksums, shellcheck, namcap, the file list, the metadata, check(), the smoke test — as vet.json said.
+        // The gate (/docs/factory *The gate*): the worker's own checks — checksums, shellcheck, namcap, the file list, the metadata, check(), the smoke test — as vet.json said.
         vet: vetOf(r.result as string | null),
         // The second agent's report (docs/GOVERNANCE.md): a verdict a
         // maintainer reads, never one the pool acts on.
@@ -261,9 +261,27 @@ export async function handleReject(c: Contributor, id: number, request: Request,
   return json({ task: id, decision: "rejected", by: c.login });
 }
 
+/**
+ * The decisions, newest first — and, for each approval, the rings that
+ * serve the package today (`rings`), so a page can show how far it got.
+ * One query over the factory's packages in the four rings: the ring table's
+ * key is (ring, package_id), so every factory package costs four seeks.
+ */
 export async function handleApprovals(env: Env): Promise<Response> {
-  const rows = await env.DB.prepare(
-    `SELECT a.*, r.status AS rebuild_status, r.result_filename AS rebuild_result FROM approvals a LEFT JOIN build_tasks r ON r.id = a.rebuild_task ORDER BY a.id DESC LIMIT 100`,
-  ).all();
-  return json({ approvals: rows.results }, 200, { "cache-control": "public, max-age=30" });
+  const [rows, served] = await Promise.all([
+    env.DB.prepare(
+      `SELECT a.*, r.status AS rebuild_status, r.result_filename AS rebuild_result FROM approvals a LEFT JOIN build_tasks r ON r.id = a.rebuild_task ORDER BY a.id DESC LIMIT 100`,
+    ).all(),
+    env.DB.prepare(
+      `SELECT rp.ring, p.name, p.repo_arch AS arch FROM packages p JOIN ring_packages rp ON rp.package_id = p.id AND rp.ring IN ('lab', 'edge', 'rc', 'stable') WHERE p.source = 'factory'`,
+    ).all<{ ring: string; name: string; arch: string }>(),
+  ]);
+  const order = ["lab", "edge", "rc", "stable"];
+  const rings = new Map<string, string[]>();
+  for (const s of served.results) {
+    const k = `${s.name}\t${s.arch}`;
+    rings.set(k, [...(rings.get(k) ?? []), s.ring].sort((a, b) => order.indexOf(a) - order.indexOf(b)));
+  }
+  const approvals = (rows.results as { name: string; arch: string }[]).map((a) => ({ ...a, rings: rings.get(`${a.name}\t${a.arch}`) ?? [] }));
+  return json({ approvals }, 200, { "cache-control": "public, max-age=30" });
 }

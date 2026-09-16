@@ -1,7 +1,7 @@
 name: Cost report
 
 # Every morning: the pool's own estimate of this month's Cloudflare bill
-# (GET /api/v1/cost — computed daily by the brain from Cloudflare's
+# (GET /api/v1/cost — computed every three hours by the brain from Cloudflare's
 # analytics, src/cost.ts) posted as a comment on the "Cost report" issue, so
 # GitHub e-mails it to whoever watches the issue. The run FAILS when the
 # projection reaches the warning line, which is one more e-mail. No secret
@@ -21,7 +21,7 @@ env:
   OMARCHY_API: ${{ vars.OMARCHY_API }}
   GH_TOKEN: ${{ github.token }}
   GH_REPO: ${{ github.repository }}
-  WARN_USD: "15"
+  WARN_USD: "25"
 
 jobs:
   report:
@@ -50,13 +50,13 @@ jobs:
           if [[ -z "$n" ]]; then
             gh label create cost-report --description "the daily Cloudflare bill estimate" --color 0e8a16 2>/dev/null || true
             n="$(gh issue create --title "Cost report: this month's Cloudflare bill, estimated daily" --label cost-report \
-                  --body "One comment a day from the Cost report workflow: what this account's Cloudflare bill looks like so far this month and where it is heading, as the pool estimates it (docs/RUNBOOK.md, Costs). Subscribe to this issue to get it by e-mail." | grep -o '[0-9]*$')"
+                  --body "One comment a day from the Cost report workflow: what this account's Cloudflare bill looks like so far this month and where it is heading, as the pool estimates it (the runbook, /docs/runbook.md, Costs). Subscribe to this issue to get it by e-mail." | grep -o '[0-9]*$')"
           fi
           body="$(jq -r --arg warn "$WARN_USD" '
             def usd: "US$ " + (. | tostring);
             "**\(.month)** — day \(.day_of_month) of \(.days_in_month) · estimated \(.estimated_at)\n\n" +
             "| | |\n|---|---|\n| So far | **\(.month_to_date_usd | usd)** |\n| Projected for the month | **\(.projected_usd | usd)** |\n" +
-            (if .guard then "\n> ⚠️ **Over the guard (US$ 25): the jobs that write are paused** until the estimate is back under it.\n" else "" end) +
+            (if .guard then "\n> ⚠️ **Over the guard (US$ 40): the jobs that write are paused** until the estimate is back under it — the cap is US$ 50.\n" else "" end) +
             "\n| Item | Used | Included | So far | Projected |\n|---|---:|---:|---:|---:|\n" +
             ([.lines[] | "| \(.item) | \(.used | if . > 1e6 then (./1e6 | floor | tostring) + " M" else (. * 100 | round / 100 | tostring) end) \(.unit) | \(.included | if . > 1e6 then (./1e6 | floor | tostring) + " M" else tostring end) | \(.month_to_date_usd | usd) | \(.projected_usd | usd) |"] | join("\n")) +
             "\n\nBudget: the card is capped at US$ 30; Cloudflare e-mails at US$ 10, 20 and 28 of actual charges; the pool pauses writing jobs at a projected US$ 25."

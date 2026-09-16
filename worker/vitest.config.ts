@@ -22,6 +22,9 @@ export default defineConfig(async () => {
         },
       }),
     ],
-    test: { setupFiles: ["./test/setup.ts"] },
+    // A release test writes a few releases through a real D1 and took 5.8 s on
+    // a slow hosted runner (2026-09-16, release v0.0.160's CI): the 5 s default
+    // is a hosted runner's bad minute away from failing a release for nothing.
+    test: { setupFiles: ["./test/setup.ts"], testTimeout: 30_000 },
   };
 });

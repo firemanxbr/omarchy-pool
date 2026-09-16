@@ -8,7 +8,7 @@ const BODY = String.raw`
   <h1>API</h1>
   <p class="lede">Everything this site shows comes from a small JSON API at <code>https://pkgs.firemanxbr.org/api/v1</code>. Reads need no authentication and allow cross-origin requests; writes need the per-job token a worker gets when it claims a task — there is no shared secret — or, on the factory's own routes, a maintainer's token.</p>
 
-  <section>
+  <section id="read">
     <h2>Read</h2>
     <div class="table-wrap"><table><thead><tr><th>Endpoint</th><th>What it returns</th></tr></thead><tbody>
       <tr><td><code>GET /version</code></td><td>The running release, its commit and when it was deployed.</td></tr>
@@ -27,11 +27,11 @@ const BODY = String.raw`
       <tr><td><code>GET /security?ring=&amp;arch=</code></td><td>Packages in the ring with an open advisory: severity, confidence (exact / name-version / name-only), CVEs, exploited-in-the-wild and EPSS, rings already serving a clean version, how many packages it exposes. <code>GET /package/:name</code> carries the same per package plus what it is exposed through.</td></tr>
       <tr><td><code>GET /events?kind=&amp;limit=</code></td><td>The journal: sync, gate, promote, render, health, abi, rollback, deploy, gc, metrics.</td></tr>
       <tr><td><code>GET /pool/unreferenced?keep=3</code></td><td>What retention would delete now.</td></tr>
-      <tr><td><code>GET /cost</code></td><td>The month's estimated bill, line by line (D1, R2, Workers), the projection and the guard's state. Estimated daily at 06:30 UTC.</td></tr>
+      <tr><td><code>GET /cost</code></td><td>The month's estimated bill, line by line (D1, R2, Workers), the projection and the guard's state. Estimated every three hours; the lines: warn at US$ 25, pause at US$ 40, cap US$ 50.</td></tr>
     </tbody></table></div>
   </section>
 
-  <section>
+  <section id="factory">
     <h2>The factory (read)</h2>
     <p class="sub">What the Factory, Contributors, Review and profile pages show. Public, cached briefly.</p>
     <div class="table-wrap"><table><thead><tr><th>Endpoint</th><th>What it returns</th></tr></thead><tbody>
@@ -46,7 +46,7 @@ const BODY = String.raw`
     </tbody></table></div>
   </section>
 
-  <section>
+  <section id="examples">
     <h2>Examples</h2>
     <div class="steps">
       <div class="step"><h3>Which version of a package does each ring serve?</h3>
@@ -66,9 +66,9 @@ curl -s  https://pool.firemanxbr.org/core/x86_64/omarchy-core-stable.db | tar -t
     </div>
   </section>
 
-  <section>
+  <section id="write-jobs">
     <h2>Write (jobs only)</h2>
-    <p class="sub">Bearer <code>omj.…</code>: the per-job token issued at <code>POST /factory/claim</code>, scoped to what that task needs (<code>pool:write</code>, <code>release:&lt;ring&gt;</code>, <code>artifacts:*:&lt;ring&gt;</code>, <code>security:write</code>, <code>gc</code>, <code>events</code>) and valid for its lease. Used by <code>pkg-repo work</code>; documented in <a href="https://github.com/firemanxbr/omarchy-pool/blob/main/SECURITY.md">SECURITY.md</a>. A maintainer queues one of these jobs by hand with <code>POST /factory/jobs</code>.</p>
+    <p class="sub">Bearer <code>omj.…</code>: the per-job token issued at <code>POST /factory/claim</code>, scoped to what that task needs (<code>pool:write</code>, <code>release:&lt;ring&gt;</code>, <code>artifacts:*:&lt;ring&gt;</code>, <code>security:write</code>, <code>gc</code>, <code>events</code>) and valid for its lease. Used by <code>pkg-repo work</code>; documented in <a href="/docs/security-model">the security model</a>. A maintainer queues one of these jobs by hand with <code>POST /factory/jobs</code>.</p>
     <div class="table-wrap"><table><thead><tr><th>Endpoint</th><th>What it does</th></tr></thead><tbody>
       <tr><td><code>PUT /pool/:sha256?filename=&amp;arch=</code> · <code>/sig</code> · <code>/multipart</code></td><td>Store a package object (integrity-checked, never overwritten) and its upstream signature.</td></tr>
       <tr><td><code>POST /pool/:sha256/sign?filename=&amp;arch=</code></td><td>The pool signs a package it built (source <em>factory</em>) with its own key; the key never leaves the service.</td></tr>
@@ -80,7 +80,7 @@ curl -s  https://pool.firemanxbr.org/core/x86_64/omarchy-core-stable.db | tar -t
     </tbody></table></div>
   </section>
 
-  <section>
+  <section id="write-people">
     <h2>Write (people)</h2>
     <p class="sub">Bearer <code>omc_…</code> (a contributor token from your profile) or the browser session after <em>Sign in with GitHub</em>. Nothing here touches the pool directly: maintainers queue jobs and approve builds; workers do the work with per-job tokens.</p>
     <div class="table-wrap"><table><thead><tr><th>Endpoint</th><th>Who</th><th>What it does</th></tr></thead><tbody>

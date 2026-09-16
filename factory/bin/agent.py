@@ -2,7 +2,7 @@
 
 One function, `complete(system, user, max_tokens)`, over the provider the
 environment names. The key is the worker owner's, in the container's
-environment; the pool and GitHub hold none (SECURITY.md).
+environment; the pool and GitHub hold none (/docs/security-model).
 
     provider     key                      model (FACTORY_MODEL overrides)   endpoint (…_BASE_URL overrides)
     anthropic    ANTHROPIC_API_KEY        claude-sonnet-5                   https://api.anthropic.com  (Messages API)
