@@ -125,7 +125,7 @@ rc_arch=$(curl -s "$OMARCHY_API/api/v1/releases/rc?fields=summary&arch=x86_64");
 # The diff between two releases: the rollback dropped xz, the promotion put it back.
 diff_out=$("$PKG_REPO" diff --ring stable); grep -q "^+ xz 5.8.4-1 (x86_64)" <<<"$diff_out" || { echo "diff does not show xz coming back: $diff_out"; exit 1; }
 diff_json=$("$PKG_REPO" diff --ring stable --json); python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["counts"]["added"]==1 and d["counts"]["removed"]==0 and d["from"]["id"] < d["to"]["id"], d["counts"]' <<<"$diff_json" || { echo "diff --json is off"; exit 1; }
-rel_json=$("$PKG_REPO" releases --all --json); python3 -c 'import json,sys; d=json.load(sys.stdin); assert set(d)=={"edge","rc","stable"} and d["stable"]["releases"][0]["is_head"]==1, list(d)' <<<"$rel_json" || { echo "releases --all --json is off"; exit 1; }
+rel_json=$("$PKG_REPO" releases --all --json); python3 -c 'import json,sys; d=json.load(sys.stdin); assert set(d)=={"edge","rc","stable","lab"} and d["stable"]["releases"][0]["is_head"]==1, list(d)' <<<"$rel_json" || { echo "releases --all --json is off"; exit 1; }
 dpage=$(curl -s "$OMARCHY_API/diff?ring=stable"); grep -q "Release diff" <<<"$dpage" || { echo "diff page not served"; exit 1; }
 
 step "Render databases for stable (the pool signs them)"

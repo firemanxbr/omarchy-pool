@@ -223,7 +223,7 @@ const CSS = String.raw`
     section { margin-bottom: 32px; }
   }
   /* ---- the three doors: heroes, diagrams, cards, live pieces (v2 of the dashboard) ---- */
-  :root { --lilac: #bb9af7; --edge: var(--lilac); --rc: var(--blue); --stable: var(--green); }
+  :root { --lilac: #bb9af7; --edge: var(--lilac); --rc: var(--blue); --stable: var(--green); --lab: var(--amber); }
   @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
   h1, h2, h3 { text-wrap: balance; }
   header .brand { white-space: nowrap; } header .account { flex: none; } header nav { gap: 18px; }

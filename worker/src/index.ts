@@ -134,8 +134,20 @@ export interface Env {
 }
 
 
-export const RINGS = ["edge", "rc", "stable"] as const;
+/**
+ * The rings. edge, rc and stable are the promise: a package enters edge
+ * signature-verified and reaches rc and stable by evidence, whichever
+ * source built it. lab is the fourth, beside them, where nothing is
+ * promised and nothing is promoted from: the factory's builds land there
+ * first and a real pacman tries them against edge (the trial job), any
+ * object of the pool can be pinned there to be tried in a combination,
+ * and only a maintainer's approval takes a build from there to edge. No
+ * sync targets it; `--ring lab` on a machine is the lab above the edge.
+ */
+export const RINGS = ["edge", "rc", "stable", "lab"] as const;
 export type Ring = (typeof RINGS)[number];
+/** The rings a package is promoted through, in order. */
+export const PROMOTED_RINGS = ["edge", "rc", "stable"] as const;
 
 export function isRing(s: string): s is Ring {
   return (RINGS as readonly string[]).includes(s);

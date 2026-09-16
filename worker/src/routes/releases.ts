@@ -42,14 +42,18 @@ interface CreateRelease {
  */
 export async function handleCreateRelease(request: Request, env: Env): Promise<Response> {
   const body = (await request.json()) as CreateRelease;
-  if (!isRing(body.ring)) return json({ error: "ring must be edge, rc or stable" }, 400);
+  if (!isRing(body.ring)) return json({ error: "ring must be edge, rc, stable or lab" }, 400);
   const ring: Ring = body.ring;
   let source: ReleaseRow | null = null;
   if (body.from_release_id !== undefined && body.from_release_id !== null) {
     source = await env.DB.prepare("SELECT * FROM releases WHERE id = ?").bind(body.from_release_id).first<ReleaseRow>();
     if (!source) return json({ error: `release ${body.from_release_id} does not exist` }, 404);
+    // A rollback stays inside its ring; nothing of the lab's history is a base for a promised ring.
+    if (source.ring === "lab" && ring !== "lab") return json({ error: "a lab release is never the base of another ring: the lab is tried, not promoted" }, 400);
   } else if (body.from_ring !== undefined && body.from_ring !== null) {
     if (!isRing(body.from_ring)) return json({ error: "from_ring must be edge, rc or stable" }, 400);
+    // Promotion is the promise's path; the lab is beside it, never on it.
+    if (body.from_ring === "lab" || ring === "lab") return json({ error: "the lab is never promoted from or into: a build reaches edge by a maintainer's approval (the publish job)" }, 400);
     source = await ringHead(env, body.from_ring);
     if (!source) return json({ error: `ring ${body.from_ring} has no release to promote` }, 409);
   }

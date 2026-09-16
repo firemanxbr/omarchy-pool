@@ -116,11 +116,11 @@ pub fn run(cli: Cli) -> Result<i32> {
     if let Some(arch) = cli.arch {
         config.arch = arch;
     }
-    // The index serves three rings; a typo here would otherwise surface as
-    // "ring x has no release" from the API.
-    if !["edge", "rc", "stable"].contains(&config.ring.as_str()) {
+    // The index serves three rings and the lab; a typo here would otherwise
+    // surface as "ring x has no release" from the API.
+    if !["edge", "rc", "stable", "lab"].contains(&config.ring.as_str()) {
         bail!(
-            "ring must be edge, rc or stable (got '{}'; --ring, or `ring` in {})",
+            "ring must be edge, rc, stable or lab (got '{}'; --ring, or `ring` in {})",
             config.ring,
             cli.config.display()
         );

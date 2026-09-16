@@ -318,7 +318,7 @@ describe("GET /stats", () => {
   it("describes the rings and the pool without a metrics snapshot yet", async () => {
     const s = await call("GET", "/stats");
     expect(s.status).toBe(200);
-    expect(s.json.rings.map((r: any) => r.ring)).toEqual(["edge", "rc", "stable"]);
+    expect(s.json.rings.map((r: any) => r.ring)).toEqual(["edge", "rc", "stable", "lab"]);
     expect(s.json.rings.find((r: any) => r.ring === "stable").package_count).toBe(5);
     expect(s.json.pool.objects).toBeGreaterThanOrEqual(6);
   });
@@ -470,5 +470,38 @@ describe("one row per source", () => {
     const r2 = await call("POST", "/releases", { ring: "edge", remove: ["mesa"], remove_arch: "aarch64" }, edge);
     expect(r2.status).toBe(201);
     expect(await rows()).toEqual([]);
+  });
+});
+
+describe("the lab", () => {
+  it("takes any object of the pool, is never promoted from or into, and its include is the lab above edge", async () => {
+    const lab = await job(["release:lab", "artifacts:*:lab"]);
+    // A build to try: the factory's, pinned into the lab, plus an edge object in a combination.
+    const trial = await index("factory", "x86_64", { name: "trialtool", version: "0.1-1", arch: "x86_64", requires: ["zlib"] }, pool);
+    const r = await call("POST", "/releases", { ring: "lab", add: [trial, shas["zlib-x86"]], note: "trial: trialtool 0.1-1" }, lab);
+    expect(r.status, JSON.stringify(r.json)).toBe(201);
+    expect(r.json.package_count).toBe(2);
+    expect((await call("GET", "/releases/lab?fields=summary")).json.packages.map((p: any) => `${p.source}/${p.name}`).sort()).toEqual(["core/zlib", "factory/trialtool"]);
+    // Nothing of the lab reaches a promised ring by promotion, and no ring is promoted into it.
+    expect((await call("POST", "/releases", { ring: "edge", from_ring: "lab" }, edge)).status).toBe(400);
+    expect((await call("POST", "/releases", { ring: "lab", from_ring: "edge" }, lab)).status).toBe(400);
+    expect((await call("POST", "/releases", { ring: "edge", from_release_id: r.json.release.id }, edge)).status).toBe(400);
+    // The edge ring does not know trialtool.
+    expect((await call("GET", "/releases/edge?fields=summary&arch=x86_64")).json.packages.some((p: any) => p.name === "trialtool")).toBe(false);
+    // Its databases live in the source's directory like any ring's; the include puts them above edge's.
+    const art = await env.DB.prepare("SELECT r2_key FROM release_artifacts WHERE release_id = ? AND kind = 'db'").bind(r.json.release.id).all<{ r2_key: string }>();
+    expect(art.results.length).toBe(0); // rendered by the worker, not here
+    await env.DB.prepare("INSERT INTO release_artifacts (release_id, repo, arch, kind, r2_key, size) VALUES (?, 'omarchy-factory-lab', 'x86_64', 'db', 'factory/x86_64/omarchy-factory-lab.db', 1), (?, 'omarchy-core-lab', 'x86_64', 'db', 'core/x86_64/omarchy-core-lab.db', 1)").bind(r.json.release.id, r.json.release.id).run();
+    const edgeHead = (await call("GET", "/releases/edge?fields=summary")).json.release;
+    await env.DB.prepare("INSERT OR IGNORE INTO release_artifacts (release_id, repo, arch, kind, r2_key, size) VALUES (?, 'omarchy-core-edge', 'x86_64', 'db', 'core/x86_64/omarchy-core-edge.db', 1)").bind(edgeHead.id).run();
+    const req = new Request(`${API}/pacman.conf?ring=lab&arch=x86_64`);
+    const ctx = createExecutionContext();
+    const inc = await (await worker.fetch(req, env, ctx)).text();
+    await waitOnExecutionContext(ctx);
+    const order = ["[omarchy-factory-lab]", "[omarchy-core-lab]", "[omarchy-core-edge]"].map((s) => inc.indexOf(s));
+    expect(order.every((i) => i >= 0)).toBe(true);
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+    expect(inc).toContain("Server = http://pool.test/factory/$arch");
+    expect(inc).toContain("the lab above edge");
   });
 });

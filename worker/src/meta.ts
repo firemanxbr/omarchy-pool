@@ -46,7 +46,7 @@ export function sourceRank(source: string): number {
 
 /** The source a rendered repository lists: `omarchy-<source>-<ring>` → `<source>`; null for any other name. */
 export function sourceOfRepo(repo: string): string | null {
-  const m = repo.match(/^omarchy-(.+)-(edge|rc|stable)$/);
+  const m = repo.match(/^omarchy-(.+)-(edge|rc|stable|lab)$/);
   return m ? m[1] : null;
 }
 

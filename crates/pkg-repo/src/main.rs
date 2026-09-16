@@ -193,7 +193,7 @@ enum Command {
         /// The ring; with --all, every ring.
         #[arg(long, required_unless_present = "all")]
         ring: Option<String>,
-        /// Every ring at once (edge, rc, stable).
+        /// Every ring at once (edge, rc, stable, lab).
         #[arg(long)]
         all: bool,
         /// Machine-readable: the API's rows as JSON, one object per ring.
@@ -496,7 +496,7 @@ fn main() -> Result<()> {
             json,
         } => {
             let rings: Vec<String> = if all {
-                ["edge", "rc", "stable"]
+                ["edge", "rc", "stable", "lab"]
                     .iter()
                     .map(|r| (*r).to_owned())
                     .collect()

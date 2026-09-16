@@ -170,7 +170,8 @@ export async function handleSecurity(url: URL, env: Env): Promise<Response> {
   // about) is only clean elsewhere when that object was scanned for them
   // too; one indexed before the scan existed has no components and no
   // advisories, and knows nothing (smolvm 1.15.0 "clean" in rc, 2026-09-14).
-  const otherHeads = await Promise.all(RINGS.filter((r) => r !== ring).map(async (r) => ({ ring: r as Ring, head: await ringHead(env, r) })));
+  // The lab is not a ring a fix can be "in": nothing there is promised.
+  const otherHeads = await Promise.all(RINGS.filter((r) => r !== ring && r !== "lab").map(async (r) => ({ ring: r as Ring, head: await ringHead(env, r) })));
   const fixedElsewhere = new Map<string, { ring: string; version: string }[]>();
   if (vulnerable.length) {
     const withComponents = new Set(

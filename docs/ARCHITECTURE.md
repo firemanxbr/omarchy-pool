@@ -36,7 +36,7 @@ Promoting a release copies and re-uploads most of that data, so a bump takes
 * **Index** — Cloudflare D1. Every package with its full metadata (from `.PKGINFO`
   plus the ELF soname graph extracted by `pkg-extract`) and every release.
 * **Releases** — a release is a pinned selection of package ids for one ring
-  (`edge`, `rc`, `stable`). Promotion creates a new release for the target ring that
+  (`edge`, `rc`, `stable` — and `lab`, below). Promotion creates a new release for the target ring that
   points at the same selection: an index write, no bytes move. Rollback is the same
   write pointing at an earlier selection; history is append-only. Stored as
   **deltas**: what a ring serves now lives in one table (`ring_packages`), a
@@ -138,6 +138,31 @@ One workflow remains on GitHub besides CI and the release: `factory-update.yml`
 maintainer). No worker runs on GitHub: the project's six run on its own
 host (RUNBOOK, *The Studio host*).
 Operations, trust model and the kill switch are in [RUNBOOK.md](RUNBOOK.md).
+
+#### The lab: tried before it is promised
+
+`edge`, `rc` and `stable` are the promise: whichever source built a package,
+it enters `edge` signature-verified and reaches `rc` and `stable` by evidence
+— the same gates for Arch's packages, Arch Linux ARM's, the Asahi fork's, the
+OPR's and the factory's. **Zero trust**: the pool verifies and validates; it
+does not choose whom to believe. The **lab** is the fourth ring, beside the
+three and never on their path: nothing in it is promised, no sync targets it,
+no promotion comes from it or goes into it (`POST /releases` refuses both).
+What it is for:
+
+* the factory's builds land there first — the review build of an approved
+  package publishes into the lab, and the `trial` job installs it with a real
+  pacman in a clean container against `edge`, runs the hooks, checks the ABI,
+  and records the transcript beside the audit for the maintainer who decides;
+* any object the pool holds can be pinned there, from any source, to be tried
+  in a combination (the Asahi fork's `mesa` under `edge`'s `hyprland`, say);
+* a machine that wants to try it is one command away: `--ring lab` writes the
+  lab's sections **above** `edge`'s, so what is being tried wins by order and
+  its dependencies resolve from `edge`; a lab with no release yet is `edge`.
+
+A build leaves the lab for `edge` by a maintainer's approval (the `publish`
+job), never by promotion; retention keeps the lab's last releases like any
+ring's.
 
 #### Promotion by evidence, not by calendar
 
