@@ -38,7 +38,7 @@ please do not file a public issue for it.
 | Contributor token `omc_…` | one person (GitHub identity read once, never stored) | register packages under their name, queue community builds, register and revoke their workers, read their own state | write to the pool, claim jobs, approve | live |
 | Worker token `omw_…` | one machine, registered by a contributor | claim tasks its trust allows (community: its owner's or shared builds; project: pool jobs too); heartbeat | write to the pool or staging directly | live |
 | Job token `omj.…` | the worker running one task, for the lease | the routes that task needs — e.g. `sync`: upload objects, index, create a release in one ring, store that ring's databases; community `build`: upload to that task's staging folder | anything outside its scopes (403, journaled); anything after the lease (30 min, renewed by heartbeat) | live |
-| Maintainer role | a contributor listed under a group in `factory/MAINTAINERS.toml` on `main` (applied by the brain every ten minutes) | promote a worker to project trust; approve or reject staged builds of their groups (recorded); queue any pool job by hand (`POST /factory/jobs`); enqueue, cancel, remove a registration; review the group's PKGBUILDs and governance pull requests | write to the pool with their own token (a job does); operate as a worker; grant a role | live |
+| Maintainer role | a contributor listed under a group in `factory/MAINTAINERS.toml` on `main` (applied by the brain every ten minutes) | propose or confirm a worker's project trust (two of them), take it back alone; withdraw a record from the public bucket (a signed tombstone says why); approve or reject staged builds (recorded); queue any pool job by hand (`POST /factory/jobs`); enqueue, cancel, remove a registration; review the group's PKGBUILDs and governance pull requests | write to the pool with their own token (a job does); operate as a worker; grant a role | live |
 | Session cookie `oms_…` | one person's browser, after Sign in with GitHub | what that person's contributor token can, from the dashboard's pages | — | live; separate from the CLI token, so signing in never invalidates a worker; *sign out* (in the header of every page) invalidates it on the server, not only in that browser |
 | Signing key (OpenPGP) | the pool's Worker only (`SIGNING_KEY` secret, `worker/src/signing.ts`) | sign the databases it stores and the packages the factory builds (`POST /pool/:sha256/sign`) | — | live; no worker, runner or repository holds it |
 | `CLOUDFLARE_API_TOKEN` | the release workflow on GitHub | deploy the Worker, apply migrations, record the deploy | — | live; with the two hosted-worker tokens, all GitHub holds |
@@ -56,7 +56,7 @@ secret). Everything travels in the `Authorization` header over TLS only.
 |---|---|---|
 | Contributor | register packages, run community workers | GitHub account |
 | Community worker | community builds of its owner's packages; anyone's only when started with `--shared` / `WORKER_SHARED=1`; results go to a separate staging bucket in the owner's workspace | registered by its owner |
-| Project worker | pool jobs (sync, render, promote, health, security, gc) and the rebuild of approved packages — never a build without evidence and review | a maintainer sets `trust = project` on the worker (`POST /factory/workers/:id/trust`) |
+| Project worker | pool jobs (sync, render, promote, health, security, gc) and the rebuild of approved packages — never a build without evidence and review | two maintainers' word (`POST /factory/workers/:id/trust`): one proposes, another confirms, never the worker's owner; the trust is a signed record under `workers/<id>/`; one maintainer takes it back. The Review page names the worker and host behind every build |
 | Maintainer | approve staged builds of their groups, promote workers, review governance | listed in `factory/MAINTAINERS.toml`, merged with another maintainer's review |
 | Agent key | drafts and corrects PKGBUILDs on a community worker; audits staged builds on a project worker | the worker owner's own key — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` or `XAI_API_KEY` — set in the container's environment; the pool and GitHub hold none. The worker reports only the provider and model name (`anthropic/claude-sonnet-5`) for the Factory page. An audit's report is evidence a maintainer reads, never something the pool acts on |
 
@@ -87,6 +87,12 @@ secret). Everything travels in the `Authorization` header over TLS only.
   is a 422 with the kind and the line, never the match, a `leak` event, and
   a failed build. The record runs the same check before it copies anything.
   This is the pool's check on the worker it does not run.
+- **A record is written once, and can be withdrawn.** A maintainer takes a
+  log or a report off the public bucket with a reason (`POST
+  /factory/record/withdraw`); its signature and its staging copy go with it,
+  and a signed `<key>.tombstone.json` says who, why and what was there (its
+  hash and size, not its bytes). The edge caches a record a day, not a year,
+  so a withdrawal is honoured everywhere within the day.
 - **Contributor results never touch the pool.** They land in
   `omarchy-factory-staging` under `staging/<login>/<package>/<task>/`,
   through the pool (the key is derived from the task, never given),
@@ -134,8 +140,10 @@ check, and the security layer's advisories.
    task.~~ — live (`factory/bin/broker`; the contributor image runs as a
    pair, the Studio's community workers too; the review builds reach the
    agent and GitHub through the proxy and get no token).
-6. **Who trusts whom.** A worker becomes `project` on two maintainers' word,
-   never its owner's alone; `publish`, `promote` and `trial` go only to such
-   workers; the Review page names the worker and host behind every build of
-   the project's. A record can be withdrawn: a signed tombstone says who and
-   why, and text evidence is cached a day, not a year.
+6. ~~**Who trusts whom.** A worker becomes `project` on two maintainers' word,
+   never its owner's alone; the Review page names the worker and host behind
+   every build. A record can be withdrawn: a signed tombstone says who and
+   why, and the record is cached a day, not a year.~~ — live. (The six
+   workers on the Studio were trusted before the rule, on one word; the
+   Workers page says so, and a maintainer can set one back and have it
+   proposed again.)

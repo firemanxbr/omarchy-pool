@@ -113,7 +113,9 @@ at `GET /api/v1/factory/maintainers`.
 - Settles each package's category (*Categories, not groups*).
 - Reviews pull requests touching `factory/pkgbuilds/` (a new recipe of the
   project's own, a version bump).
-- Trusts workers as project workers (`POST /factory/workers/:id/trust`).
+- Vouches for a worker as a project worker (`POST /factory/workers/:id/trust`)
+  — with a second maintainer: one proposes, another confirms, never the
+  worker's owner; the trust is a signed record. One maintainer takes it back.
 - Blocks a contributor or a package when the evidence says so, with the
   reason on the record (*Blocking*, below).
 - Reviews governance pull requests: this file's changes.
@@ -201,9 +203,9 @@ extended to packages — a sole maintainer's own packages wait.
   There is no technical difference between a contributor's container and a
   maintainer's; the registration behind the token decides. Community trust
   (every registration starts here) builds the owner's packages inside the
-  container and never sees a package in review; project trust (a
-  maintainer's decision on the registration) runs the pool's jobs and the
-  rebuild of approved packages in fresh sibling containers. A maintainer
+  container and never sees a package in review; project trust (two
+  maintainers' word on the registration, never its owner's) runs the pool's
+  jobs and the rebuild of approved packages in fresh sibling containers. A maintainer
   who also contributes registers a second, untrusted worker.
 - A registered worker builds **its owner's packages** and nothing else.
   Donating compute to everyone's builds is a maintainer's call: the

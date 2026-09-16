@@ -4,7 +4,7 @@ import { CATEGORIES, isCategory } from "../categories";
 import { isRepoArch } from "../r2";
 import { providedBy } from "./factory";
 import { cookieOf } from "./auth";
-import { putRecord, recordKey, recordUrl } from "../record";
+import { putRecord, recordKey, recordUrl, withdrawRecord } from "../record";
 import { version } from "../meta";
 import { isTextEvidence, STAGING_DAYS, STAGING_QUOTA_BYTES } from "../staging";
 import { findLeak, leakMessage } from "../leak";
@@ -645,24 +645,67 @@ export async function handleSetCategory(c: Contributor, name: string, request: R
   return json({ package: name, category: b.category, was: pkg.category, by: c.login });
 }
 
-/** A maintainer promotes a worker to project trust (or back): a recorded action, revocable. */
+/**
+ * Project trust on two maintainers' word (SECURITY.md, *Trust levels*). The
+ * first maintainer proposes; a second — never the same person, never the
+ * worker's owner — confirms, and trusted_by names both. Back to community
+ * is one maintainer's call (taking trust away is always easy). Each step is
+ * an event, and the trust itself a signed record under
+ * workers/<id>/trust-<time>.json, so anyone can read who vouched for the
+ * machine that publishes.
+ */
 export async function handleTrustWorker(c: Contributor, id: string, request: Request, env: Env): Promise<Response> {
   if (!isMaintainer(c)) return json({ error: "a maintainer's token is required" }, 403);
   const b = (await request.json()) as { trust?: string };
   const trust = b.trust === "project" ? "project" : "community";
-  const res = await env.DB.prepare("UPDATE build_workers SET trust = ?, trusted_by = ?, trusted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND revoked_at IS NULL")
-    .bind(trust, c.login, id)
-    .run();
-  if (!res.meta.changes) return json({ error: "no such worker (or revoked)" }, 404);
-  await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('trust', NULL, 'factory', 'ok', ?, ?)")
-    .bind(`worker ${id} set to ${trust} trust by ${c.login}`, JSON.stringify({ worker: id, trust, by: c.login }))
-    .run();
-  return json({ worker: id, trust, by: c.login });
+  const w = await env.DB.prepare("SELECT id, owner, trust, trusted_by, trust_proposed_by FROM build_workers WHERE id = ? AND revoked_at IS NULL")
+    .bind(id)
+    .first<{ id: string; owner: string | null; trust: string; trusted_by: string | null; trust_proposed_by: string | null }>();
+  if (!w) return json({ error: "no such worker (or revoked)" }, 404);
+  const now = new Date().toISOString();
+  const event = (summary: string, payload: Record<string, unknown>) =>
+    env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('trust', NULL, 'factory', 'ok', ?, ?)").bind(summary, JSON.stringify(payload)).run();
+  if (trust === "community") {
+    if (w.trust === "community" && !w.trust_proposed_by) return json({ worker: id, trust: "community", unchanged: true });
+    await env.DB.prepare("UPDATE build_workers SET trust = 'community', trusted_by = NULL, trusted_at = NULL, trust_proposed_by = NULL, trust_proposed_at = NULL WHERE id = ?").bind(id).run();
+    await event(`worker ${id} set to community trust by ${c.login}${w.trust === "project" ? ` (was project, trusted by ${w.trusted_by ?? "?"})` : " (a proposal withdrawn)"}`, { worker: id, trust: "community", by: c.login, was: w.trust, trusted_by: w.trusted_by });
+    await putRecord(env, `workers/${id}/trust-${now}.json`, { schema: "omarchy-pool/worker-trust/1", worker: id, owner: w.owner, trust: "community", by: c.login, was: { trust: w.trust, trusted_by: w.trusted_by }, at: now }).catch(() => null);
+    return json({ worker: id, trust: "community", by: c.login });
+  }
+  if (w.trust === "project") return json({ worker: id, trust: "project", trusted_by: w.trusted_by, unchanged: true });
+  if (w.owner === c.login) return json({ error: "a maintainer does not trust their own worker; two other maintainers do" }, 403);
+  if (!w.trust_proposed_by || w.trust_proposed_by === c.login) {
+    await env.DB.prepare("UPDATE build_workers SET trust_proposed_by = ?, trust_proposed_at = ? WHERE id = ?").bind(c.login, now, id).run();
+    if (w.trust_proposed_by !== c.login) await event(`worker ${id} proposed for project trust by ${c.login}; a second maintainer confirms`, { worker: id, proposed_by: c.login, owner: w.owner });
+    return json({ worker: id, trust: "community", proposed_by: c.login, awaiting: "a second maintainer's word — not the owner's, not yours" }, 202);
+  }
+  const by = `${w.trust_proposed_by}, ${c.login}`;
+  await env.DB.prepare("UPDATE build_workers SET trust = 'project', trusted_by = ?, trusted_at = ?, trust_proposed_by = NULL, trust_proposed_at = NULL WHERE id = ?").bind(by, now, id).run();
+  await event(`worker ${id} set to project trust on the word of ${by}`, { worker: id, trust: "project", by, owner: w.owner });
+  const record = await putRecord(env, `workers/${id}/trust-${now}.json`, { schema: "omarchy-pool/worker-trust/1", worker: id, owner: w.owner, trust: "project", proposed_by: w.trust_proposed_by, confirmed_by: c.login, at: now }).catch(() => null);
+  return json({ worker: id, trust: "project", trusted_by: by, record: record ? recordUrl(env, record.key) : null });
 }
 
-/** Workers the project trusts and the people who may approve: the dashboard's trust page. */
 export async function handleTrustList(env: Env): Promise<Response> {
-  const workers = await env.DB.prepare("SELECT id, owner, arch, mode, trust, trusted_by, trusted_at, agent, last_seen, revoked_at FROM build_workers WHERE trust = 'project' OR owner IS NULL ORDER BY trust DESC, last_seen DESC LIMIT 100").all();
+  const workers = await env.DB.prepare("SELECT id, owner, arch, mode, trust, trusted_by, trusted_at, trust_proposed_by, trust_proposed_at, agent, last_seen, revoked_at FROM build_workers WHERE trust = 'project' OR trust_proposed_by IS NOT NULL OR owner IS NULL ORDER BY trust DESC, last_seen DESC LIMIT 100").all();
   const people = await env.DB.prepare("SELECT login, name, role, last_seen FROM contributors WHERE role = 'maintainer' ORDER BY login").all();
   return json({ workers: workers.results, maintainers: people.results, listed: await maintainersOf(env), source: GOVERNANCE_FILE }, 200, { "cache-control": "public, max-age=30" });
+}
+
+/**
+ * POST /factory/record/withdraw {key, reason} — a maintainer takes a record
+ * off the public bucket: a log that carried what it should not have, a
+ * report with someone's data in it. A signed tombstone takes its place
+ * (record.ts, withdrawRecord); the reason is required and goes on it.
+ */
+export async function handleWithdrawRecord(c: Contributor, request: Request, env: Env): Promise<Response> {
+  if (!isMaintainer(c)) return json({ error: "a maintainer's token is required" }, 403);
+  const b = (await request.json().catch(() => ({}))) as { key?: unknown; reason?: unknown };
+  const key = typeof b.key === "string" ? b.key.replace(/^\/+/, "") : "";
+  const reason = typeof b.reason === "string" ? b.reason.trim() : "";
+  if (!/^(factory|workers)\/[A-Za-z0-9@._+/-]+$/.test(key) || key.endsWith(".sig") || key.endsWith(".tombstone.json")) return json({ error: "key must name a record under factory/ or workers/ (not a signature, not a tombstone)" }, 400);
+  if (reason.length < 8) return json({ error: "a reason is required (why this record is withdrawn — it goes on the tombstone)" }, 400);
+  const done = await withdrawRecord(env, key, c.login, reason);
+  if (!done) return json({ error: "no such record" }, 404);
+  return json({ withdrawn: key, by: c.login, ...done, tombstone_url: recordUrl(env, done.tombstone) });
 }

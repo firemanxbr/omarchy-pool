@@ -444,8 +444,11 @@ export async function handleComplete(id: number, request: Request, env: Env, act
     // The gate (vet.json, the worker's own verdict) travels with the task; a failing gate never stages — the worker reports it as a failure.
     const vet = await vetOf(env, prefix);
     if (vet?.verdict === "fail") return json({ error: `the gate failed (${vet.failed.join(", ")}); report the build as failed, not complete` }, 409);
+    // The lease ends with the status; who held it stays on the row — the
+    // Review page names the worker behind every build (built_by), the seal
+    // and the load per worker read it later.
     await env.DB.prepare(
-      "UPDATE build_tasks SET status = 'staged', finished_at = ?, result_sha256 = ?, result_filename = ?, result_version = ?, version = COALESCE(version, ?), duration_ms = ?, log_tail = ?, staged_prefix = ?, result = ?, lease_owner = NULL, lease_expires_at = NULL WHERE id = ?",
+      "UPDATE build_tasks SET status = 'staged', finished_at = ?, result_sha256 = ?, result_filename = ?, result_version = ?, version = COALESCE(version, ?), duration_ms = ?, log_tail = ?, staged_prefix = ?, result = ?, lease_expires_at = NULL WHERE id = ?",
     )
       .bind(now(), b.sha256, b.filename, b.version ?? null, b.version ?? null, b.duration_ms ?? null, tail, prefix, vet ? JSON.stringify({ vet }) : null, id)
       .run();

@@ -751,3 +751,79 @@ describe("the log's tail and the error line", () => {
     expect((await call("GET", `/factory/tasks/${c2.json.task.id}`)).json.task.log_tail).toBe("==> build()\n==> ERROR: A failure occurred in build().");
   });
 });
+
+describe("who trusts whom", () => {
+  it("project trust takes two maintainers' word — never the owner's, never the same person twice — and one word takes it back; each step an event, the trust a signed record", async () => {
+    // alice's community worker w3; m1 proposes, m2 confirms.
+    expect((await call("POST", "/factory/workers/w3/trust", { trust: "project" }, "omc_alice")).status).toBe(403);
+    const first = await call("POST", "/factory/workers/w3/trust", { trust: "project" }, "omc_m1");
+    expect(first.status).toBe(202);
+    expect(first.json).toMatchObject({ worker: "w3", trust: "community", proposed_by: "m1" });
+    const again = await call("POST", "/factory/workers/w3/trust", { trust: "project" }, "omc_m1");
+    expect(again.status).toBe(202); // the same person, still one word
+    expect((await env.DB.prepare("SELECT trust, trust_proposed_by FROM build_workers WHERE id = 'w3'").first())).toMatchObject({ trust: "community", trust_proposed_by: "m1" });
+    expect((await call("GET", "/factory/trust")).json.workers.find((w: any) => w.id === "w3")).toMatchObject({ trust: "community", trust_proposed_by: "m1" });
+    const second = await call("POST", "/factory/workers/w3/trust", { trust: "project" }, "omc_m2");
+    expect(second.status).toBe(200);
+    expect(second.json).toMatchObject({ worker: "w3", trust: "project", trusted_by: "m1, m2" });
+    expect(second.json.record).toMatch(/\/workers\/w3\/trust-/);
+    expect((await env.DB.prepare("SELECT trust, trusted_by, trust_proposed_by FROM build_workers WHERE id = 'w3'").first())).toMatchObject({ trust: "project", trusted_by: "m1, m2", trust_proposed_by: null });
+    const records = await env.PACKAGES.list({ prefix: "workers/w3/trust-" });
+    expect(records.objects.length).toBe(1);
+    expect(JSON.parse(await (await env.PACKAGES.get(records.objects[0].key))!.text())).toMatchObject({ schema: "omarchy-pool/worker-trust/1", worker: "w3", trust: "project", proposed_by: "m1", confirmed_by: "m2" });
+    const events = (await env.DB.prepare("SELECT summary FROM events WHERE kind = 'trust' AND payload LIKE '%\"w3\"%' ORDER BY id").all<{ summary: string }>()).results.map((e) => e.summary);
+    expect(events).toEqual(["worker w3 proposed for project trust by m1; a second maintainer confirms", "worker w3 set to project trust on the word of m1, m2"]);
+    // Already trusted: nothing changes. Back to community: one maintainer's call.
+    expect((await call("POST", "/factory/workers/w3/trust", { trust: "project" }, "omc_m1")).json).toMatchObject({ unchanged: true, trusted_by: "m1, m2" });
+    expect((await call("POST", "/factory/workers/w3/trust", { trust: "community" }, "omc_m2")).json).toMatchObject({ worker: "w3", trust: "community", by: "m2" });
+    expect((await env.DB.prepare("SELECT trust, trusted_by FROM build_workers WHERE id = 'w3'").first())).toMatchObject({ trust: "community", trusted_by: null });
+    // A maintainer's own worker: not by them.
+    await env.DB.prepare("INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, last_seen) VALUES ('w4', 'aarch64', 'm1', ?, 'dedicated', 'community', '2000-01-01T00:00:00Z')").bind(await sha256Hex("omw_w4")).run();
+    const own = await call("POST", "/factory/workers/w4/trust", { trust: "project" }, "omc_m1");
+    expect(own.status).toBe(403);
+    expect(own.json.error).toMatch(/their own worker/);
+    expect((await call("POST", "/factory/workers/w4/trust", { trust: "project" }, "omc_m2")).status).toBe(202);
+  });
+
+  it("the Review page names the worker behind every staged build; a record can be withdrawn by a maintainer, with a signed tombstone in its place", async () => {
+    // A build staged by alice's worker w3 (registered "where": "her laptop") keeps who built it.
+    await env.DB.prepare("UPDATE build_workers SET labels = '{\"where\":\"her laptop\"}' WHERE id = 'w3'").run();
+    await env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind) VALUES ('whence', 'aarch64', '1-1', 'https://github.com/alice/recipes@HEAD:whence/PKGBUILD', 'contributor', 100, 0, 'community', 'alice', 'build')`).run();
+    const c = await call("POST", "/factory/claim", { arch: "aarch64" }, "omw_w3");
+    expect(c.status).toBe(200);
+    for (const f of ["PKGBUILD", "build.log", "whence-1-1-aarch64.pkg.tar.zst"]) await call("PUT", `/factory/tasks/${c.json.task.id}/artifacts/${f}`, undefined, c.json.token, `evidence ${f}`);
+    expect((await call("POST", `/factory/tasks/${c.json.task.id}/complete`, { sha256: "a".repeat(64), filename: "whence-1-1-aarch64.pkg.tar.zst", version: "1-1" }, c.json.token)).status).toBe(200);
+    const staged = (await call("GET", "/factory/review")).json.staged as any[];
+    const withWorker = staged.filter((t) => t.built_by);
+    expect(withWorker.map((t) => t.id)).toEqual([c.json.task.id]);
+    expect(withWorker[0].built_by).toEqual({ worker: "w3", owner: "alice", where: "her laptop", trusted_by: null });
+    for (const t of staged) expect(t).not.toHaveProperty("worker_labels");
+    // A record that should not be public: withdrawn, its signature and staging copy with it.
+    const task = withWorker[0].id as number;
+    const prefix = withWorker[0].staged_prefix as string;
+    const key = `factory/${withWorker[0].name}/9/build-${task}/build.log`;
+    await env.PACKAGES.put(key, "==> a log with something in it\n");
+    await env.PACKAGES.put(`${key}.sig`, "sig");
+    await env.STAGING.put(`${prefix}build.log`, "==> a log with something in it\n");
+    await env.DB.prepare("INSERT OR REPLACE INTO staging_objects (key, owner, task_id, size) VALUES (?, ?, ?, 31)").bind(`${prefix}build.log`, withWorker[0].owner, task).run();
+    expect((await call("POST", "/factory/record/withdraw", { key, reason: "a token in the log" }, "omc_alice")).status).toBe(403);
+    expect((await call("POST", "/factory/record/withdraw", { key, reason: "short" }, "omc_m1")).status).toBe(400);
+    expect((await call("POST", "/factory/record/withdraw", { key: "packages/x.pkg.tar.zst", reason: "not a record at all" }, "omc_m1")).status).toBe(400);
+    expect((await call("POST", "/factory/record/withdraw", { key: "factory/nothing/1/build-1/build.log", reason: "there is no such thing" }, "omc_m1")).status).toBe(404);
+    const gone = await call("POST", "/factory/record/withdraw", { key, reason: "the log carried a token of the worker's" }, "omc_m1");
+    expect(gone.status).toBe(200);
+    expect(gone.json).toMatchObject({ withdrawn: key, by: "m1", tombstone: `${key}.tombstone.json`, size: 31 });
+    expect(await env.PACKAGES.get(key)).toBeNull();
+    expect(await env.PACKAGES.get(`${key}.sig`)).toBeNull();
+    expect(await env.STAGING.get(`${prefix}build.log`)).toBeNull();
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM staging_objects WHERE key = ?").bind(`${prefix}build.log`).first()).toMatchObject({ n: 0 });
+    const stone = JSON.parse(await (await env.PACKAGES.get(`${key}.tombstone.json`))!.text());
+    expect(stone).toMatchObject({ schema: "omarchy-pool/tombstone/1", key, withdrawn_by: "m1", reason: "the log carried a token of the worker's", size: 31 });
+    expect(stone.sha256).toMatch(/^[0-9a-f]{64}$/);
+    const ev = await env.DB.prepare("SELECT summary FROM events WHERE kind = 'withdraw' ORDER BY id DESC LIMIT 1").first<{ summary: string }>();
+    expect(ev?.summary).toBe(`${key} withdrawn from the record by m1: the log carried a token of the worker's`);
+    // Withdrawn once: the tombstone is a record, written once too.
+    expect((await call("POST", "/factory/record/withdraw", { key, reason: "again, for the test" }, "omc_m1")).status).toBe(404);
+    expect((await call("POST", "/factory/record/withdraw", { key: `${key}.tombstone.json`, reason: "a tombstone is not withdrawn" }, "omc_m1")).status).toBe(400);
+  });
+});

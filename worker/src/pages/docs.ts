@@ -69,7 +69,7 @@ const SCRIPT = String.raw`
     ["POST", "/api/v1/factory/tasks/:id/build", "maintainer", "Have the project build a contributor's staged package again: a review worker, the project's agent, its own recipe from the request and the evidence (review:<id>), the gate, staged for approval. Never your own package."],
     ["POST", "/api/v1/factory/tasks/:id/approve", "maintainer", "Approve the project's staged build — never your own package. The decision is recorded and a publish job carries the package into edge. A contributor's build cannot be approved: POST /api/v1/factory/tasks/:id/build has the project build it first."],
     ["POST", "/api/v1/factory/tasks/:id/reject", "maintainer", "Send it back with a note the contributor sees."],
-    ["POST", "/api/v1/factory/trust", "maintainer", "Trust a worker for the project's jobs."],
+    ["POST", "/api/v1/factory/workers/:id/trust", "maintainer", "Vouch for a worker as the project's — the second maintainer's word makes it so; never the owner's."],
     ["POST", "/api/v1/factory/packages/:name/category", "maintainer", "Settle a package's category — one of the fixed list; the agent's proposal is what it replaces."],
     ["POST", "/api/v1/factory/contributors/:login/block", "maintainer", "Block a contributor with a reason: their workers revoked, their tasks cancelled, their packages out of the rings, their projects closed to new accounts. /unblock by another maintainer."],
     ["POST", "/api/v1/factory/packages/:name/block", "maintainer", "Block a package with a reason: out of every ring, its tasks cancelled, its project URL refused. /unblock by another maintainer."],
