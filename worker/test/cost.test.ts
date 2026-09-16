@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { estimateCost, PRICES } from "../src/cost";
+import { BUDGET_CAP_USD, BUDGET_GUARD_USD, BUDGET_WARN_USD, estimateCost, estimateSlot, PRICES } from "../src/cost";
 import type { Env } from "../src/index";
 
 // Cloudflare's analytics for a month like September 2026 so far, stubbed.
-// The month so far, and the last six hours (the rate the projection uses).
+// The month so far, and the last day (the rate the projection uses): 1 B
+// rows read in it.
 const analytics = {
   data: { viewer: {
     month: [{
@@ -13,9 +14,9 @@ const analytics = {
       w: [{ sum: { requests: 132_000 }, quantiles: { cpuTimeP50: 1700 }, dimensions: { scriptName: "omarchy-repo" } }],
     }],
     recent: [{
-      d1: [{ sum: { rowsRead: 250_000_000, rowsWritten: 200_000 }, dimensions: { databaseId: "x" } }],
-      r2o: [{ sum: { requests: 500 }, dimensions: { actionType: "PutObject" } }, { sum: { requests: 2_000 }, dimensions: { actionType: "HeadObject" } }],
-      w: [{ sum: { requests: 4_000 }, quantiles: { cpuTimeP50: 1700 }, dimensions: { scriptName: "omarchy-repo" } }],
+      d1: [{ sum: { rowsRead: 1_000_000_000, rowsWritten: 800_000 }, dimensions: { databaseId: "x" } }],
+      r2o: [{ sum: { requests: 2_000 }, dimensions: { actionType: "PutObject" } }, { sum: { requests: 8_000 }, dimensions: { actionType: "HeadObject" } }],
+      w: [{ sum: { requests: 16_000 }, quantiles: { cpuTimeP50: 1700 }, dimensions: { scriptName: "omarchy-repo" } }],
     }],
   } },
 };
@@ -50,6 +51,30 @@ describe("the bill", () => {
     const f = (async () => new Response(JSON.stringify(heavy), { status: 200 })) as unknown as typeof fetch;
     const est = await estimateCost({ ...env, CLOUDFLARE_D1_ID: undefined } as unknown as Env, new Date("2026-09-13T16:00:00Z"), f);
     expect(est.guard).toBe(true);
-    expect(est.month_to_date_usd).toBeGreaterThan(25);
+    expect(est.month_to_date_usd).toBeGreaterThan(BUDGET_GUARD_USD);
+  });
+
+  it("does not read a burst as the month's pace: a day of it weighs a day", async () => {
+    // The relayout's last hours, 2026-09-16: 400 M rows in the last day, on
+    // top of 24.8 B for the month — 200 M over the included 25 B by the end
+    // of the day, then 400 M × 14 days ≈ 5.6 B more: US$ 5.8, under the warning line.
+    const burst = JSON.parse(JSON.stringify(analytics));
+    burst.data.viewer.month[0].d1[0].sum.rowsRead = 24_800_000_000;
+    burst.data.viewer.recent[0].d1[0].sum.rowsRead = 400_000_000;
+    const f = (async () => new Response(JSON.stringify(burst), { status: 200 })) as unknown as typeof fetch;
+    const est = await estimateCost({ ...env, CLOUDFLARE_D1_ID: undefined } as unknown as Env, new Date("2026-09-16T06:30:00Z"), f);
+    const reads = est.lines.find((l) => l.item === "D1 rows read")!;
+    expect(reads.projected_usd).toBeCloseTo(5.5, 0);
+    expect(est.projected_usd).toBeLessThan(BUDGET_WARN_USD);
+    expect(est.guard).toBe(false);
+  });
+
+  it("estimates once per three-hour slot, and the lines are in order", () => {
+    expect(estimateSlot(new Date("2026-09-16T06:30:00Z"))).toBe("2026-09-16/2");
+    expect(estimateSlot(new Date("2026-09-16T08:59:00Z"))).toBe("2026-09-16/2");
+    expect(estimateSlot(new Date("2026-09-16T09:00:00Z"))).toBe("2026-09-16/3");
+    expect(BUDGET_WARN_USD).toBeLessThan(BUDGET_GUARD_USD);
+    expect(BUDGET_GUARD_USD).toBeLessThan(BUDGET_CAP_USD);
+    expect(BUDGET_CAP_USD).toBe(50);
   });
 });

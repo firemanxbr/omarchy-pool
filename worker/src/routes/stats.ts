@@ -3,6 +3,13 @@ import { json, RINGS, type Env } from "../index";
 import { EXPECTED_SOURCES, version } from "../meta";
 import { ringHead, releaseSources, releaseSummary } from "../db";
 
+/** The security job's journal line says how many advisories it matched, and when. */
+export function advisoriesKnown(payload: Record<string, unknown>, at: string): { updated_at: string; advisories: number } {
+  const n = (k: string) => (typeof payload[k] === "number" ? (payload[k] as number) : 0);
+  const at2 = typeof payload.run_at === "string" ? payload.run_at : at;
+  return { updated_at: at2, advisories: n("arch_advisories") + n("debian_advisories") + n("osv_advisories") };
+}
+
 /** Everything the dashboard shows, in one round trip. */
 export async function handleStats(env: Env): Promise<Response> {
   const rings = [];
@@ -51,10 +58,11 @@ export async function handleStats(env: Env): Promise<Response> {
 
   // Activity: everything but the half-hourly metrics snapshots.
   const events = await env.DB.prepare("SELECT * FROM events WHERE kind != 'metrics' ORDER BY id DESC LIMIT 40").all();
+  // The latest event of every kind, source and ring: one row per group in
+  // latest_events (a trigger keeps it, migration 0027) instead of a GROUP BY
+  // over every event ever recorded, on every poll of this page.
   const lastByKind = await env.DB.prepare(
-    `SELECT e.* FROM events e JOIN (SELECT kind, COALESCE(source, '') AS src, COALESCE(ring, '') AS rg, MAX(id) AS id
-                                     FROM events GROUP BY kind, COALESCE(source, ''), COALESCE(ring, '')) m ON m.id = e.id
-      ORDER BY e.kind, e.source, e.ring`,
+    "SELECT e.* FROM latest_events l JOIN events e ON e.id = l.id ORDER BY e.kind, e.source, e.ring",
   ).all();
 
   const parse = (r: Record<string, unknown>) => ({ ...r, payload: r.payload ? JSON.parse(r.payload as string) : null });
@@ -150,7 +158,10 @@ export async function handleStats(env: Env): Promise<Response> {
        FROM events WHERE kind = 'metrics' AND created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days') ORDER BY id`,
   ).all();
   const latestMetrics = await env.DB.prepare("SELECT payload, created_at FROM events WHERE kind = 'metrics' ORDER BY id DESC LIMIT 1").first<{ payload: string; created_at: string }>();
-  const securityData = await env.DB.prepare("SELECT MAX(updated_at) AS updated_at, COUNT(*) AS advisories FROM advisories").first<{ updated_at: string | null; advisories: number }>();
+  // What the security layer knows: from its last run's journal line (one
+  // row, by index), not a count over the advisories table on every poll.
+  const securityRun = await env.DB.prepare("SELECT created_at, payload FROM events WHERE kind = 'security' AND status != 'error' ORDER BY id DESC LIMIT 1").first<{ created_at: string; payload: string }>();
+  const securityData = securityRun ? advisoriesKnown(JSON.parse(securityRun.payload) as Record<string, unknown>, securityRun.created_at) : null;
   // The audience: one row per day, the last 30 (audience.ts). Nothing per request is ever kept.
   const audience = await env.DB.prepare("SELECT payload FROM events WHERE kind = 'audience' ORDER BY id DESC LIMIT 30").all<{ payload: string }>();
 
@@ -180,7 +191,9 @@ export async function handleStats(env: Env): Promise<Response> {
       latest: lastByKind.results.map(parse),
     },
     200,
-    { "cache-control": "public, max-age=30" },
+    // A minute at the edge: the dashboards poll every 20–60 s from every
+    // location, and every miss is forty D1 queries.
+    { "cache-control": "public, max-age=60" },
   );
 }
 

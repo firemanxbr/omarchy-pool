@@ -1,3 +1,4 @@
+import { advisoriesKnown } from "./stats";
 import { isRing, json, RINGS, type Env, type Ring } from "../index";
 import { isRepoArch } from "../r2";
 import { ringHead, ringMembers } from "../db";
@@ -244,18 +245,21 @@ export async function handleSecurity(url: URL, env: Env): Promise<Response> {
 
   const totals: Record<string, number> = { packages: vulnerable.length, exposed: exposedTotal, kev: vulnerable.filter((v) => v.kev).length };
   for (const s of SEVERITIES) totals[s] = vulnerable.filter((v) => v.worst === s).length;
-  const lastRun = await env.DB.prepare("SELECT MAX(updated_at) AS at, COUNT(*) AS n FROM advisories").first<{ at: string | null; n: number }>();
+  const lastRun = await env.DB.prepare("SELECT created_at, payload FROM events WHERE kind = 'security' AND status != 'error' ORDER BY id DESC LIMIT 1").first<{ created_at: string; payload: string }>();
+  const known = lastRun ? advisoriesKnown(JSON.parse(lastRun.payload) as Record<string, unknown>, lastRun.created_at) : null;
   return json(
     {
       ring,
       arch,
       release_id: head.id,
-      updated_at: lastRun?.at ?? null,
-      advisories_total: lastRun?.n ?? 0,
+      updated_at: known?.updated_at ?? null,
+      advisories_total: known?.advisories ?? 0,
       totals,
       vulnerable: vulnerable.map((v) => ({ ...v, id: undefined, fixed_in: fixedElsewhere.get(v.name) ?? [], exposure: exposure.get(v.name) ?? { declared: 0, loads: 0 } })),
     },
     200,
-    { "cache-control": "public, max-age=600" },
+    // Half an hour at the edge: the layer runs every three hours, and every
+    // miss walks the ring's members twice on both architectures.
+    { "cache-control": "public, max-age=1800" },
   );
 }
