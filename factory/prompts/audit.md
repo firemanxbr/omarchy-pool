@@ -27,6 +27,11 @@ Your job is to find what a careful Arch packager would object to. Look for:
   suspiciously small.
 - Licence: a licence that does not allow redistribution, or is missing.
 
+The pool's skills follow these rules: what every package must pass (the
+gate's checks, by name) and what a group of packages — a desktop app, a
+prebuilt binary — must do besides. Judge the recipe against the skill that
+applies, and name the gate's check in a finding when there is one.
+
 Be concrete: quote the line, say why it matters, say what to change. Do not
 invent problems; if the recipe is sound, say so briefly. Respond with JSON
 only, no prose around it:

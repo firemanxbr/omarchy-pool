@@ -85,7 +85,7 @@ function body(pool: string): string {
         <li><b>Watch it happen.</b> Your workspace, your packages, your workers and every step of every build on the <a href="/factory">Factory</a> and <a href="/review">Review</a> pages; the journal keeps the record.</li>
       </ul></div>
       <div><h4>for maintainers</h4><ul class="yes">
-        <li><b>The evidence in front of you.</b> The contributor's build, the gate's verdict, the audit, the log and the recipe on one row — and <em>Build by the project</em> one press away.</li>
+        <li><b>The evidence in front of you.</b> The contributor's build, the gate's verdict, the audit, the log and the recipe on one row — and <em>Build by the project</em> one press away. What the gate checks and what the agents are told is one page: <a href="/docs/what-we-test">What we test</a>.</li>
         <li><b>The project builds it again.</b> A trusted worker with the project's own agent writes the project's recipe from the project's sources, learning from the contributor's evidence; the same gate runs; its own audit is queued.</li>
         <li><b>The trial installs it before you decide.</b> A real pacman installs the project's build from the lab in a clean container; the transcript sits beside the audit. You approve what installed, not what compiled.</li>
         <li><b>Nobody decides on their own package</b> — not even the only maintainer. A build the trial installed goes to stable with edge; one it did not waits for the gates like everything else.</li>

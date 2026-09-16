@@ -15,7 +15,7 @@ async function get(path: string): Promise<Response> {
   return res;
 }
 
-const PAGES = ["/", "/factory", "/contribute", "/review", "/pipeline", "/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/governance", "/docs/security", "/docs/glossary", "/docs/architecture", "/docs/runbook", "/docs/testing", "/docs/migration", "/docs/factory", "/docs/worker-host", "/docs/security-model", "/docs/contributing", "/docs/proof-of-concept", "/docs/open-work", "/docs/omarchy-cli-mcp", "/packages", "/package/zlib", "/security", "/status", "/journal", "/workers", "/request", "/user/someone", "/people", "/api", "/diff"];
+const PAGES = ["/", "/factory", "/contribute", "/review", "/pipeline", "/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/what-we-test", "/docs/governance", "/docs/security", "/docs/glossary", "/docs/architecture", "/docs/runbook", "/docs/testing", "/docs/migration", "/docs/factory", "/docs/worker-host", "/docs/security-model", "/docs/contributing", "/docs/proof-of-concept", "/docs/open-work", "/docs/omarchy-cli-mcp", "/packages", "/package/zlib", "/security", "/status", "/journal", "/workers", "/request", "/user/someone", "/people", "/api", "/diff"];
 
 describe("dashboard pages", () => {
   it("every page is served with the shared frame and no placeholder left behind", async () => {
@@ -74,6 +74,14 @@ describe("dashboard pages", () => {
     }
     const how = await (await get("/docs/how-it-works")).text();
     for (const stage of ["sync", "pin", "promote", "render", "serve"]) expect(how).toContain(`data-stage="${stage}"`);
+    // What we test is the skills the agents read (factory/skills), one text: the general one, then the groups, then the log.
+    const { SKILLS } = await import("../src/pages/docs-tree");
+    const test = await (await get("/docs/what-we-test")).text();
+    expect(SKILLS.map((k) => k.file)).toEqual(["factory/skills/general/every-package.md", "factory/skills/groups/desktop-apps.md", "factory/skills/groups/prebuilt-binaries.md"]);
+    for (const id of ["why-we-test-the-way-we-test", "every-package", "desktop-apps", "prebuilt-binaries", "how-this-page-grows", "what-we-learned"]) expect(test, id).toContain(`id="${id}"`);
+    expect(test.indexOf('id="every-package"')).toBeLessThan(test.indexOf('id="desktop-apps"'));
+    expect(test).toContain("ozone-platform-hint=auto");
+    expect(test).not.toContain("<!-- skills -->");
     const res = await get("/how-it-works");
     expect(res.status).toBe(301);
     expect(res.headers.get("location")).toBe("http://pool.test/docs/how-it-works");

@@ -51,6 +51,32 @@ KEYS = [p["key"] for p in PROVIDERS.values()]
 BEHIND = {"agent": ""}
 
 
+# The skills: what the pool checks on every package and what each group of
+# packages must do besides (factory/skills/general, factory/skills/groups),
+# the same text the dashboard shows at /docs/what-we-test. Every agent that
+# drafts or audits a recipe reads them after its own rules, so a finding
+# names the check the gate has and a recipe follows the conventions the
+# gate enforces. In the image they sit beside the prompts.
+SKILLS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "skills")
+
+
+def skills_text():
+    """Every skill, the general ones first, each under its own heading; empty when the directory is not there (an old checkout)."""
+    out = []
+    for group in ("general", "groups"):
+        d = os.path.join(SKILLS, group)
+        if not os.path.isdir(d):
+            continue
+        for name in sorted(os.listdir(d)):
+            if name.endswith(".md"):
+                with open(os.path.join(d, name), errors="replace") as f:
+                    out.append(f.read().strip())
+    if not out:
+        return ""
+    return ("\n\n# The pool's skills\n\nWhat every package must pass, then what each group of packages must do besides. "
+            "Apply the general skill always and a group's skill when its first paragraph says it applies.\n\n" + "\n\n".join(out) + "\n")
+
+
 def model_for(name, p):
     """The model: FACTORY_MODEL, unless it plainly belongs to another
     provider — a switch to claude-code with FACTORY_MODEL=gemini-3.6-flash

@@ -45,6 +45,11 @@ Rules, all of them:
 - Begin the file with `# Maintainer: omarchy-pool factory <https://github.com/firemanxbr/omarchy-pool>`
   and a second comment line `# Requested from: <project url>`.
 
+The pool's skills follow these rules: what every package must pass (the
+gate's checks, by name) and what a group of packages — a desktop app, a
+prebuilt binary — must do besides. Where a skill applies, its conventions
+are part of these rules.
+
 When the message carries a previous PKGBUILD and the build log that failed,
 return a corrected PKGBUILD that addresses that failure and keeps everything
 else; if the failure is not fixable from the PKGBUILD (upstream does not

@@ -263,7 +263,7 @@ def evidence_text(d):
 
 
 def draft(a, previous, log, hint, request=None, evidence=None):
-    rules = open(os.path.join(os.path.dirname(__file__), "..", "prompts", "pkgbuild.md")).read()
+    rules = open(os.path.join(os.path.dirname(__file__), "..", "prompts", "pkgbuild.md")).read() + agent.skills_text()
     facts = {k: v for k, v in a.items() if k not in ("files", "readme")}
     user = "Project facts (native_deps_hint: Arch packages behind the -sys crates in Cargo.lock):\n" + json.dumps(facts, indent=1) + "\n\n"
     if request:
