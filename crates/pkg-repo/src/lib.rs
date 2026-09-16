@@ -16,6 +16,7 @@ pub mod security;
 pub mod sign;
 pub mod sync;
 pub mod syncdb;
+pub mod usage;
 pub mod verify;
 pub mod work;
 

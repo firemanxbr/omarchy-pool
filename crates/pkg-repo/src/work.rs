@@ -251,6 +251,8 @@ pub fn run(opts: &WorkOptions) -> Result<()> {
     let hostname = hostname();
     let version = pkg_manifest::BUILD_VERSION;
     let agent = agent_label();
+    // What the machine uses, averaged on the worker's own clock; the claim reports it.
+    let usage = crate::usage::Sampler::start(opts.work_dir.clone());
     eprintln!(
         "worker ({}) ready — {} — asking {} for {}{}",
         opts.arch,
@@ -294,6 +296,7 @@ pub fn run(opts: &WorkOptions) -> Result<()> {
             "arch": opts.arch, "hostname": hostname, "version": version, "labels": opts.labels, "kinds": opts.kinds, "shared": opts.shared,
             "agent": if probe.label.is_empty() { agent.clone().unwrap_or_default() } else { probe.label.clone() },
             "agent_status": probe.status, "agent_error": probe.error, "agent_checked_at": probe.checked_iso,
+            "usage": usage.report(),
         });
         let claimed = match claimer.post_json_as(&opts.worker_token, "/factory/claim", &body) {
             Ok(Some(v)) => serde_json::from_value::<Claimed>(v).context("claim response")?,
