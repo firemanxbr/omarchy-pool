@@ -76,8 +76,15 @@ export const RULES: Rule[] = [
   { workflow: "sync", every: 180, job: { kind: "sync", params: {} } },
   { workflow: "security", every: 180, job: { kind: "security", params: {} } },
   { workflow: "enqueue", every: 60, job: { kind: "enqueue", params: {} } },
-  { workflow: "promote", at: { hour: 6, minute: 0 }, inputs: { from: "edge", to: "rc", note: "daily rc" }, job: { kind: "promote", params: { from: "edge", to: "rc", note: "daily rc" } } },
-  { workflow: "promote", at: { hour: 9, minute: 0 }, inputs: { from: "rc", to: "stable", note: "daily stable" }, job: { kind: "promote", params: { from: "rc", to: "stable", note: "daily stable" } } },
+  // Promotion is by evidence, when the evidence is there — not by the
+  // calendar (2026-09-16). edge → rc is queued by the sync that changed
+  // edge (routes/factory.ts, the last sync of the tick); this rule is the
+  // safety net for a tick whose syncs never completed. rc → stable is
+  // attempted every three hours: each attempt records a fresh health of
+  // rc, and the gate promotes on the second green one in a row since rc's
+  // release (soak_checks 2, gate.rs) — about six hours after edge → rc.
+  { workflow: "promote", every: 720, job: { kind: "promote", params: { from: "edge", to: "rc", note: "by evidence" } } },
+  { workflow: "promote", every: 180, job: { kind: "promote", params: { from: "rc", to: "stable", note: "by evidence" } } },
   { workflow: "health", at: { hour: 8, minute: 30 }, job: { kind: "health", params: {} } },
   { workflow: "factory-update.yml", at: { hour: 5, minute: 45 } },
   { workflow: "gc", at: { hour: 4, minute: 0, weekday: 0 }, job: { kind: "gc", params: {} } },

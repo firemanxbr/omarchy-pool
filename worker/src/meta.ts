@@ -26,6 +26,39 @@ export function version(env: Env): RunningVersion {
 }
 
 /**
+ * What each ring is, said once: the Pool page's cards, the Docs, Get
+ * started and the status tiles read it from here (layout.ts hands it to
+ * every page script as RINGS_TEXT). Promotion is by evidence, when the
+ * evidence is there (scheduler.ts, gate.rs) — the words say so.
+ */
+export const RING_TEXT: Record<string, { title: string; text: string; lag: string; desc: string }> = {
+  stable: {
+    title: "Recommended for daily use",
+    text: "What <b>rc</b> served through two green checks in a row — promoted the moment the second passed.",
+    lag: "≈ 6 h after rc, on evidence",
+    desc: "Recommended. What rc served through two green checks in a row, promoted on evidence — about six hours after rc — and rolled back automatically if a check fails.",
+  },
+  rc: {
+    title: "For testers",
+    text: "<b>edge</b>, right after a real pacman and an ABI check passed on both architectures.",
+    lag: "minutes after edge's checks pass",
+    desc: "Edge, promoted the moment a real pacman and an ABI check passed on both architectures. For testers.",
+  },
+  edge: {
+    title: "For CI and developers",
+    text: "What upstream published in the last three hours, signature-verified.",
+    lag: "≤ 3 h behind upstream",
+    desc: "What upstream published in the last three hours, signature-verified only. For CI and developers.",
+  },
+  lab: {
+    title: "For trying a build",
+    text: "The factory's builds before anyone decides, above <b>edge</b>. Nothing here is promised.",
+    lag: "not a promise",
+    desc: "The lab: a build the project made, tried by a real pacman, served above edge. Nothing here is promised or promoted; a maintainer's approval sends it to edge.",
+  },
+};
+
+/**
  * The order of the sources in the pacman include (routes/setup.ts), which
  * is priority: pacman takes a package from the first repository that has
  * it. Omarchy's own packages (the OPR) and the factory's builds come first

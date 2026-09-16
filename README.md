@@ -61,7 +61,7 @@ omarchy-cli mcp                       # the same answers as MCP tools for an ass
 Read [How it works](https://omarchy-pool.firemanxbr.org/docs/how-it-works) on the
 dashboard, or [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design:
 the pool and index, the release model, promotion by evidence (health + ABI gate,
-one-day soak, automatic rollback), the sources, the security layer, the pipeline.
+promotion by evidence within hours, automatic rollback), the sources, the security layer, the pipeline.
 Packages nobody ships yet come through the factory: contributors build them
 with the same tools maintainers use (one signed worker image for everyone,
 the owner's own agent if they like — Anthropic, OpenAI, Gemini or xAI), a

@@ -42,9 +42,9 @@ struct GateArgs {
     /// Architectures that need evidence (repeatable).
     #[arg(long = "arch", default_values_t = ["x86_64".to_owned(), "aarch64".to_owned()])]
     arches: Vec<String>,
-    /// Days without a failed health check of `--from` required first.
-    #[arg(long, default_value_t = 0)]
-    soak_days: u32,
+    /// Green health checks of `--from` in a row since its current release, required first.
+    #[arg(long, default_value_t = 1)]
+    soak_checks: u32,
     /// The latest health check of `--from` must be younger than this.
     #[arg(long, default_value_t = 24)]
     max_age_hours: u32,
@@ -686,7 +686,7 @@ fn run_gate(remote: &Remote, args: &GateArgs) -> Result<()> {
             from: &args.from,
             to: &args.to,
             arches: &args.arches,
-            soak_days: args.soak_days,
+            soak_checks: args.soak_checks,
             max_age_hours: args.max_age_hours,
             dry_run: args.dry_run,
         },

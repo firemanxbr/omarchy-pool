@@ -206,7 +206,7 @@ pkg-repo job security
 ```
 
 From then on the scheduler keeps it current: the sync every three hours, the
-daily promotions (06:00 and 09:00 UTC), the security run every three hours,
+promotions by evidence (after each sync, and every three hours for stable), the security run every three hours,
 the metrics snapshot every thirty minutes.
 
 To keep the old index history instead (releases, journal, security data), export

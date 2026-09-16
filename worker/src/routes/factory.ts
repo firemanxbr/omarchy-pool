@@ -377,6 +377,21 @@ export async function handleComplete(id: number, request: Request, env: Env, act
       .run();
     await env.DB.prepare("UPDATE build_workers SET last_seen = ?, current_task = NULL, builds_done = builds_done + 1 WHERE id = ?").bind(now(), who).run();
     const p = task.params ? (JSON.parse(task.params) as Record<string, string>) : {};
+    // Promotion by evidence, when the evidence can exist: the last sync of
+    // a tick queues edge → rc (the promote job records the health and ABI
+    // of edge on both architectures, then the gate decides). Not while
+    // another sync of the tick still runs, and never twice.
+    if (task.kind === "sync") {
+      const others = await env.DB.prepare("SELECT COUNT(*) AS n FROM build_tasks WHERE kind = 'sync' AND status IN ('queued', 'leased') AND id != ?").bind(id).first<{ n: number }>();
+      const pending = await env.DB.prepare("SELECT COUNT(*) AS n FROM build_tasks WHERE kind = 'promote' AND status IN ('queued', 'leased') AND json_extract(params, '$.from') = 'edge' AND json_extract(params, '$.to') = 'rc'").first<{ n: number }>();
+      if (!others?.n && !pending?.n) {
+        const params = JSON.stringify({ from: "edge", to: "rc", note: "by evidence, after the sync" });
+        const pid = (await env.DB.prepare(
+          `INSERT INTO build_tasks (name, arch, pkgbuild_ref, reason, priority, status, publish, trust, kind, params) VALUES ('promote', 'x86_64', '-', ?, 50, 'queued', 1, 'project', 'promote', ?) RETURNING id`,
+        ).bind(`sync ${id} done`, params).first<{ id: number }>())?.id ?? 0;
+        await event(env, "dispatch", "ok", `promote edge → rc queued as task ${pid} — the sync changed edge; the evidence decides`, { task: pid, after: id });
+      }
+    }
     const label = task.kind === "audit" || task.kind === "trial" ? `${p.name} (task ${p.task})` : task.kind === "publish" ? `${p.name} ${p.version ?? ""} (${p.arch})` : [p.source, p.arch, p.ring, p.from && p.to ? `${p.from} → ${p.to}` : null].filter(Boolean).join("/");
     if (task.kind === "publish" && p.task) {
       // The project's approved build is in the pool: the registration is published, the build's row says so, the seal is written next to the object.
