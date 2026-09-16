@@ -77,14 +77,15 @@ export const CHARTS = String.raw`  // ---- tiny SVG charts (no library; the page
     var lastSyncEv = latest(d.events, "sync"), synced = (d.coverage || []).filter(function (c) { return c.upstream_total != null; }).length, expected = (d.coverage || []).length;
     var sec = d.security || {}, secEv = latest(d.latest, "security");
     var now = new Date(), utcH = now.getUTCHours() + now.getUTCMinutes() / 60;
-    var nextRc = utcH < 6 ? 6 - utcH : 30 - utcH, nextStable = utcH < 9 ? 9 - utcH : 33 - utcH;
-    var fmtH = function (h) { return h < 1 ? Math.round(h * 60) + " min" : Math.floor(h) + " h " + Math.round((h % 1) * 60) + " min"; };
+    // Promotion is by evidence: the gate's last word per step, not a clock.
+    var gateRc = latest(d.latest, "gate", "rc", "edge"), gateStable = latest(d.latest, "gate", "stable", "rc");
+    var gateWord = function (g) { if (!g) return "no attempt yet"; var v = (g.payload && g.payload.verdict) || (g.status === "ok" ? "promote" : g.status === "warn" ? "skip" : "block"); return (v === "promote" ? "promoted" : v === "skip" ? "nothing new" : "blocked") + " " + ago(g.created_at); };
     var tiles = [
       ["Jobs running now", a ? num(a.running) : "—", a ? "pool jobs leased or queued" + (w ? " · " + num(w.alive) + " worker(s) alive, " + num(w.busy) + " busy" : "") : "no metrics snapshot yet"],
       ["Jobs, 7 days", a ? num(a.runs) : "—", a ? num(a.failures) + " failed · " + num(a.runs - a.failures - a.running) + " succeeded" : ""],
       ["Worker minutes, 7 days", a ? num(a.minutes) : "—", "on the project's workers, both architectures"],
       ["Sources", synced + " / " + expected, lastSyncEv ? "last sync " + ago(lastSyncEv.created_at) + " · every 3 hours" : "no sync yet"],
-      ["Next promotion", "edge → rc in " + fmtH(nextRc), "rc → stable in " + fmtH(nextStable) + " · 06:00 and 09:00 UTC daily"],
+      ["Promotion, by evidence", "edge → rc: " + gateWord(gateRc), "rc → stable: " + gateWord(gateStable) + " · after every sync, then every 3 h; two green checks make stable"],
       ["Security data", sec.updated_at ? ago(sec.updated_at) : "never", num(sec.advisories) + " advisories · Arch + Debian trackers, KEV, EPSS · every 3 h" + (secEv && secEv.status !== "ok" ? " · last run " + secEv.status : "")],
       ["Stored once", bytes(pool.bytes), num(pool.objects) + " objects, one per sha256"],
       ["Served by the rings", bytes(ringBytes), "what three copied trees would hold"],

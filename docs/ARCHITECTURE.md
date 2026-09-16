@@ -117,7 +117,7 @@ host (RUNBOOK, *The Studio host*).
 | Job | Schedule | What it does |
 |---|---|---|
 | `sync` | every 3 hours, one task per architecture, one release per ring | `pkg-repo sync` for every source in its table — Arch `core`/`extra`/`multilib` (x86_64, from `mirror.omarchy.org`), Arch Linux ARM `core`/`extra`/`alarm` (aarch64), chaotic-aur (x86_64, optional repo, `--defer-to` the others so Arch and the OPR own any shared name) into `edge`; the OPR's `edge` channel into `edge` too — its `rc` and `stable` channels are not an input: the OPR reaches `rc` and `stable` by the pool's evidence like every source (until 2026-09-16 they were synced straight into the matching rings, the one source that skipped the gates); a filename the pool already holds with different bytes keeps the stored object, noted in the journal — every package's upstream signature verified against that project's keyring before it enters the pool; then render the rings that changed (a sync that changes nothing creates no release; a release scoped to one architecture keeps the other's databases and artifact rows from its parent — `unchanged_arches` in the response — so an aarch64 sync no longer re-renders the 15k-package x86_64 `extra`) |
-| `promote` | daily: edge→rc 06:00 UTC, rc→stable 09:00 UTC (one-day soak); or manual, whole or one architecture (`arch`) | evidence-driven (below): fresh health + ABI of the source ring on both architectures → gate → index write → the OPR channel of the target ring aligned (`packages` comes from the OPR's matching channel, not from the source ring) → render → health of the target → automatic rollback if that fails |
+| `promote` | by evidence: edge→rc queued by the last sync of a tick (a 12-hourly safety net behind it), rc→stable attempted every 3 hours; or manual, whole or one architecture (`arch`) | evidence-driven (below): fresh health + ABI of the source ring on both architectures → gate → index write → the OPR channel of the target ring aligned (`packages` comes from the OPR's matching channel, not from the source ring) → render → health of the target → automatic rollback if that fails |
 | `health` | daily, per ring and architecture | real pacman per ring and architecture: `-Sy`, list, a sample per repository downloaded and signature-verified (the first, the last, a few at random; eight for the OPR) → `health` event |
 | `gc` | weekly | delete pool objects the last 3 releases of every ring do not reference (7-day grace for imports in flight); prune the membership of releases outside retention and CVE metadata no advisory has mentioned for 90 days |
 | `security` | every 3 hours | `pkg-repo security`: the Arch Security Tracker (exact matches on Arch's versions), the Debian Security Tracker (same upstream projects, only for CVEs Arch has no advisory for, `name-version` when Debian names a fixed version newer than ours, `name-only` while still open; names whose versions are an order of magnitude apart are treated as different projects), CISA KEV and EPSS, matched with the real `vercmp` against every object the rings serve and stored in the index; OSV for what the served packages embed (`package_components`: the Go modules and crates.io crates a statically linked binary was built with — one `querybatch` per 1000 components, records cached, each hit an exact advisory against the Arch package that embeds it, `fixed` naming the module's fixed version); then the **fast-track**: a package with a confident open advisory (exact or name-version, medium or worse, or exploited in the wild) in `rc`/`stable` whose clean newer version `edge` already serves is pulled in as one release without the soak, rendered, health-checked on both architectures and rolled back if that fails |
@@ -169,8 +169,11 @@ ring's.
 
 ![Promotion gates](diagrams/promotion-gates.svg)
 
-A promotion happens when the recorded evidence says the source ring is good,
-and is undone automatically when the target ring turns out not to be:
+A promotion happens when the recorded evidence says the source ring is good
+— and is attempted when that evidence can exist: the sync that changed
+`edge` queues `edge → rc` (routes/factory.ts), `rc → stable` is attempted
+every three hours (scheduler.ts) — and is undone automatically when the
+target ring turns out not to be:
 
 1. **Evidence.** On both architectures, a real pacman syncs the source ring and
    downloads a signed sample of every repository (`health` event), and
@@ -182,13 +185,14 @@ and is undone automatically when the target ring turns out not to be:
    installed from `stable` into a container and cached for a week
    (`tests/omarchy-rootfs.sh`, ~900 packages) — what users actually have.
 2. **Gate** (`pkg-repo gate`). Per architecture: the latest health of the source
-   ring is recent and not an error; health inside the soak window did not
-   keep failing (one day into `rc` and one into `stable`: edge is upstream in
-   real time, rc a day behind, stable a day behind rc — a failure the next
-   check recovered from stays in the report as evidence, three inside the
-   window block) and the source ring's content has
-   been there that long (the age of its last promotion; syncs of the OPR channel
-   do not reset it); a recent ABI check found no blocker; and the security
+   ring is recent and not an error; health did not keep failing (three
+   errors in a day block — a failure the next check recovered from stays in
+   the report as evidence); the **soak** is met — `soak_checks` green health
+   checks in a row recorded since the source ring's current release: one
+   for `edge → rc` (the check the promote job just ran), two for `rc →
+   stable` (the attempt three hours earlier and this one), so `stable` is
+   about six hours behind `rc` and never waits for a calendar; a recent ABI
+   check found no blocker; and the security
    layer reports no **regression** — a package the target serves clean today
    that the source would replace with a version under an open advisory the
    tracker is sure about (exact match, medium or worse, or exploited in the

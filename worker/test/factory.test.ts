@@ -364,6 +364,35 @@ describe("a community build, its audit and the review", () => {
 
 });
 
+describe("promotion by evidence", () => {
+  it("the last sync of a tick queues edge → rc, once; the promote itself decides", async () => {
+    const pending = async () => (await env.DB.prepare("SELECT COUNT(*) AS n FROM build_tasks WHERE kind = 'promote' AND status = 'queued' AND json_extract(params, '$.to') = 'rc'").first<{ n: number }>())!.n;
+    const before = await pending();
+    const sync = async (arch: string) =>
+      (await env.DB.prepare(`INSERT INTO build_tasks (name, arch, pkgbuild_ref, reason, priority, status, publish, trust, kind, params) VALUES ('sync', ?, '-', 'test', 50, 'queued', 1, 'project', 'sync', ?) RETURNING id`).bind(arch, JSON.stringify({ arch, sources: "[]" })).first<{ id: number }>())!.id;
+    const a = await sync("aarch64"), b = await sync("aarch64");
+    const ca = await call("POST", "/factory/claim", { arch: "aarch64", kinds: ["sync"] }, "omw_w1");
+    expect(ca.json.task.id).toBe(a);
+    const cb = await call("POST", "/factory/claim", { arch: "aarch64", kinds: ["sync"] }, "omw_w2");
+    expect(cb.json.task.id).toBe(b);
+    // The first sync done while the other still runs: nothing queued yet.
+    expect((await call("POST", `/factory/tasks/${a}/complete`, { result: { arch: "aarch64" }, duration_ms: 1000 }, ca.json.token)).json).toMatchObject({ status: "done" });
+    expect(await pending()).toBe(before);
+    // The last one: edge → rc queued, by evidence.
+    expect((await call("POST", `/factory/tasks/${b}/complete`, { result: { arch: "aarch64" }, duration_ms: 1000 }, cb.json.token)).json).toMatchObject({ status: "done" });
+    expect(await pending()).toBe(before + 1);
+    const promote = await env.DB.prepare("SELECT params, reason FROM build_tasks WHERE kind = 'promote' AND status = 'queued' ORDER BY id DESC LIMIT 1").first<{ params: string; reason: string }>();
+    expect(JSON.parse(promote!.params)).toMatchObject({ from: "edge", to: "rc" });
+    expect(promote!.reason).toBe(`sync ${b} done`);
+    // Another sync done while that promote still waits: not a second one.
+    const c = await sync("aarch64");
+    const cc = await call("POST", "/factory/claim", { arch: "aarch64", kinds: ["sync"] }, "omw_w1");
+    expect(cc.json.task.id).toBe(c);
+    await call("POST", `/factory/tasks/${c}/complete`, { result: {}, duration_ms: 1000 }, cc.json.token);
+    expect(await pending()).toBe(before + 1);
+  });
+});
+
 describe("a recipe's failure", () => {
   it("fails at once when the worker says it is final, and the package says why; the infrastructure's is retried", async () => {
     await env.DB.batch([

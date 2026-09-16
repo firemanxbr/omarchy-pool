@@ -25,7 +25,7 @@ const BODY = String.raw`
       <pre><span class="copy" data-copy="setup">copy</span><span id="setup-cmd"></span></pre>
       <p>What it does, and nothing else: trusts the key that signs the pool's databases (step 2); writes <code>/etc/pacman.d/omarchy-pool.conf</code> with the repositories the ring serves right now (step 3 — asked to the pool at run time, so it is never stale); adds one line to <code>/etc/pacman.conf</code>, above <code>[core]</code>, once: <code>Include = /etc/pacman.d/omarchy-pool.conf</code>; runs <code>pacman -Sy</code> and tells you to run the upgrade — <code>omarchy update</code> on an Omarchy install (its pacman hook refuses a bare <code>pacman -Syu</code>), <code>sudo pacman -Syu</code> elsewhere. It keeps a backup (<code>pacman.conf.bak-omarchy-pool</code>), it never upgrades on its own, and it never touches your other repositories.</p>
       <p><b>Why an <code>Include</code>, above <code>[core]</code>.</b> pacman takes a package from the first repository that has it, in file order. What you keep above the line — an Asahi <code>[omarchy]</code> or <code>[asahi-alarm]</code> on a Mac, a repository of your own — keeps priority; the pool serves core, extra, multilib, alarm, the OPR and the factory's builds from the ring; Arch's own mirrors below the line stay as the fallback for the rare package the pool does not have yet, and for repositories it does not mirror (<code>[aur]</code> on Arch Linux ARM). Switching rings rewrites the include file only: <code>--ring rc</code>, <code>--ring edge</code>; <code>--remove</code> deletes it and takes the line out. <a href="/setup">The script, in full →</a></p>
-      <p><b>The first upgrade.</b> Usually "nothing to do": <em>stable</em> is about two days behind upstream, and pacman never downgrades what a mirror already gave you. From then on the upgrades come through the ring when it promotes them.</p>
+      <p><b>The first upgrade.</b> Usually "nothing to do": <em>stable</em> is hours behind upstream, and pacman never downgrades what a mirror already gave you. From then on the upgrades come through the ring when it promotes them.</p>
     </div>
 
     <div class="step">
@@ -58,11 +58,7 @@ const BODY = String.raw`
 
 const SCRIPT = String.raw`
   var RINGS = ["stable", "rc", "edge"], ARCHES = ["x86_64", "aarch64"];
-  var DESC = {
-    stable: "Recommended. What rc served for a day without a failed check; about two days behind Arch, rolled back automatically if a promotion fails.",
-    rc: "Yesterday's edge, promoted after a real pacman and an ABI check passed on both architectures. For testers.",
-    edge: "What upstream published in the last hour, signature-verified only. For CI and developers."
-  };
+  var DESC = {}; Object.keys(RINGS_TEXT).forEach(function (r) { DESC[r] = RINGS_TEXT[r].desc; });
   var q = new URLSearchParams(location.search);
   var ring = RINGS.indexOf(q.get("ring")) >= 0 ? q.get("ring") : "stable";
   var arch = ARCHES.indexOf(q.get("arch")) >= 0 ? q.get("arch") : "x86_64";

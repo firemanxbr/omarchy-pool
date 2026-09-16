@@ -52,6 +52,6 @@ describe("pulled jobs", () => {
     const health = RULES.find((r) => r.job?.kind === "health")!;
     expect(jobsOf(health)).toHaveLength(6);
     const promote = RULES.find((r) => r.job?.kind === "promote" && r.job.params.to === "stable")!;
-    expect(jobsOf(promote)).toEqual([{ kind: "promote", params: { from: "rc", to: "stable", note: "daily stable" }, arch: "x86_64" }]);
+    expect(jobsOf(promote)).toEqual([{ kind: "promote", params: { from: "rc", to: "stable", note: "by evidence" }, arch: "x86_64" }]);
   });
 });

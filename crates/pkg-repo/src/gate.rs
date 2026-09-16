@@ -5,12 +5,14 @@
 //! events (a real pacman syncing the ring) and `abi` events (the ELF-level
 //! safety check of the upgrades the ring would apply to a reference system).
 //! For every architecture the latest health of `from` must be recent and not
-//! an error, no health of `from` inside the soak window may have failed, and
-//! a recent ABI check must not have found blockers. The soak also means age:
-//! the last promotion into `from` must be at least `soak_days` old, so what
-//! reaches `stable` has been served by `rc` that long (syncs of the OPR
-//! channel into the ring do not reset the clock). A ring with nothing
-//! rendered for an architecture (`warn`) is not evidence against it. The
+//! an error, health of `from` must not keep failing (three errors in a day),
+//! and a recent ABI check must not have found blockers. The soak is counted
+//! in checks, not days: `soak_checks` consecutive green health checks of
+//! `from` recorded since its current head was made — the promotion into
+//! `rc` needs the one the promote job just ran; `stable` needs one more,
+//! from the attempt three hours before (2026-09-16: evidence accelerates,
+//! the calendar does not). A ring with nothing rendered for an architecture
+//! (`warn`) is not evidence against it. The
 //! security layer is evidence too: a package `to` serves clean that `from`
 //! would replace with a version under an open advisory (exact match,
 //! medium or worse, or exploited in the wild) blocks the promotion — the
@@ -26,8 +28,9 @@ pub struct GateOptions<'a> {
     pub from: &'a str,
     pub to: &'a str,
     pub arches: &'a [String],
-    /// Days without a failed health check of `from` required before promoting.
-    pub soak_days: u32,
+    /// Consecutive green health checks of `from`, per architecture, recorded
+    /// since its current head was made, required before promoting.
+    pub soak_checks: u32,
     /// The latest health check of `from` must be younger than this.
     pub max_age_hours: u32,
     /// Decide and print, but record no `gate` event.
@@ -61,6 +64,8 @@ pub struct ArchEvidence {
     pub latest_age_hours: Option<f64>,
     pub checks_in_window: usize,
     pub errors_in_window: usize,
+    /// Green health checks of `from` in a row since its current head was made.
+    pub greens_since_head: usize,
     /// Status of the latest recent `abi` check of `from`, if any was recorded.
     pub abi_status: Option<String>,
     /// Packages `to` serves clean that `from` would replace with a version under an open advisory.
@@ -78,9 +83,9 @@ pub struct GateReport {
 }
 
 /// Pure decision: `events` are `health` and `abi` events (any ring), `now`
-/// unix seconds, `from_promoted_at` when the content of `from` last arrived
-/// there by promotion (unix seconds; `None` when `from` was never promoted
-/// into, e.g. `edge`), `security` the regressions per architecture
+/// unix seconds, `from_head_at` when the current head of `from` was made
+/// (unix seconds; only checks after it count towards the soak — `None`
+/// counts them all), `security` the regressions per architecture
 /// (`security::security_regressions`, one list per entry of `opts.arches`).
 #[must_use]
 pub fn evaluate(
@@ -88,18 +93,15 @@ pub fn evaluate(
     now: i64,
     from_head: Option<u64>,
     to_source: Option<u64>,
-    from_promoted_at: Option<i64>,
+    from_head_at: Option<i64>,
     security: &[Vec<String>],
     opts: &GateOptions<'_>,
 ) -> GateReport {
     let mut reasons = Vec::new();
     let mut evidence = Vec::new();
-    let window = i64::from(opts.soak_days) * 86_400;
+    // Flapping is judged over a day, whatever the soak.
+    let window = 86_400;
     let max_age = i64::from(opts.max_age_hours) * 3_600;
-
-    if let Some(reason) = soak_age_reason(now, from_promoted_at, opts) {
-        reasons.push(reason);
-    }
 
     for (i, arch) in opts.arches.iter().enumerate() {
         let regressions = security.get(i).map_or(&[][..], Vec::as_slice);
@@ -149,20 +151,19 @@ pub fn evaluate(
         // hiccup, and that blocks.
         if errors >= FLAPPING {
             reasons.push(format!(
-                "{arch}: {errors} failed health check(s) of {} in the last {} day(s)",
-                opts.from, opts.soak_days
+                "{arch}: {errors} failed health check(s) of {} in the last day",
+                opts.from
+            ));
+        }
+        let greens = greens_since(&of_arch, from_head_at);
+        if greens < opts.soak_checks as usize {
+            reasons.push(format!(
+                "{arch}: {greens} of {} green health check(s) of {} since its current release",
+                opts.soak_checks, opts.from
             ));
         }
         // ABI: the latest recent check decides; an old or missing one is not evidence.
-        let abi = events
-            .iter()
-            .filter(|e| {
-                e.kind == "abi"
-                    && e.ring.as_deref() == Some(opts.from)
-                    && e.source.as_deref() == Some(arch.as_str())
-                    && parse_iso8601(&e.created_at).is_some_and(|t| now - t <= max_age)
-            })
-            .max_by_key(|e| e.id);
+        let abi = latest_abi(events, opts.from, arch, now, max_age);
         if let Some(e) = abi.filter(|e| e.status == "error") {
             reasons.push(format!(
                 "{arch}: ABI check of {} failed — {}",
@@ -176,6 +177,7 @@ pub fn evaluate(
             latest_age_hours: latest_age.map(|s| s as f64 / 3600.0),
             checks_in_window: in_window.len(),
             errors_in_window: errors,
+            greens_since_head: greens,
             abi_status: abi.map(|e| e.status.clone()),
             security_regressions: regressions.len(),
         });
@@ -200,27 +202,6 @@ pub fn evaluate(
     GateReport { verdict, evidence }
 }
 
-/// Soak = age: what is in `from` must have been there for the whole window.
-fn soak_age_reason(
-    now: i64,
-    from_promoted_at: Option<i64>,
-    opts: &GateOptions<'_>,
-) -> Option<String> {
-    let window = i64::from(opts.soak_days) * 86_400;
-    let at = from_promoted_at?;
-    let age = now - at;
-    if window == 0 || age >= window {
-        return None;
-    }
-    #[allow(clippy::cast_precision_loss)] // hours, display only
-    Some(format!(
-        "{}'s content is {:.1} h old; the soak needs {} day(s)",
-        opts.from,
-        age as f64 / 3600.0,
-        opts.soak_days
-    ))
-}
-
 /// Fetches the evidence, decides, records a `gate` event and prints the report.
 pub fn run(api: &Api, opts: &GateOptions<'_>) -> Result<GateReport, RepoError> {
     let mut events = api.events("health", 200)?;
@@ -233,7 +214,10 @@ pub fn run(api: &Api, opts: &GateOptions<'_>) -> Result<GateReport, RepoError> {
         .map(|r| r.id);
     let to_source = last_promotion_source(&api.history(opts.to)?.releases);
     let from_history = api.history(opts.from)?.releases;
-    let from_promoted_at = last_promotion(&from_history).and_then(|r| parse_iso8601(&r.created_at));
+    let from_head_at = from_history
+        .iter()
+        .find(|r| r.is_head != 0)
+        .and_then(|r| parse_iso8601(&r.created_at));
     let now = now_unix();
     // The security layer's view of `from`, per architecture: what a
     // promotion would carry into `to` that `to` serves clean today.
@@ -249,7 +233,7 @@ pub fn run(api: &Api, opts: &GateOptions<'_>) -> Result<GateReport, RepoError> {
         now,
         from_head,
         to_source,
-        from_promoted_at,
+        from_head_at,
         &security,
         opts,
     );
@@ -276,13 +260,14 @@ pub fn run(api: &Api, opts: &GateOptions<'_>) -> Result<GateReport, RepoError> {
     println!("{summary}");
     for e in &report.evidence {
         println!(
-            "  {:<8} health {} ({}) · {} check(s) in {} day(s), {} failed · abi {} · security regressions {}",
+            "  {:<8} health {} ({}) · {} green in a row since the release (soak {}) · {} check(s) in a day, {} failed · abi {} · security regressions {}",
             e.arch,
             e.latest_status.as_deref().unwrap_or("none"),
             e.latest_age_hours
                 .map_or("n/a".to_owned(), |h| format!("{h:.1} h ago")),
+            e.greens_since_head,
+            opts.soak_checks,
             e.checks_in_window,
-            opts.soak_days,
             e.errors_in_window,
             e.abi_status.as_deref().unwrap_or("not checked"),
             e.security_regressions
@@ -299,17 +284,48 @@ pub fn run(api: &Api, opts: &GateOptions<'_>) -> Result<GateReport, RepoError> {
         "summary": summary,
         "payload": {
             "from": opts.from, "to": opts.to, "from_head": from_head, "to_source": to_source,
-            "soak_days": opts.soak_days, "max_age_hours": opts.max_age_hours,
+            "soak_checks": opts.soak_checks, "max_age_hours": opts.max_age_hours, "from_head_at": from_head_at,
             "verdict": match &report.verdict { Verdict::Promote => "promote", Verdict::Skip(_) => "skip", Verdict::Block(_) => "block" },
             "reasons": match &report.verdict { Verdict::Block(r) => r.clone(), _ => Vec::new() },
             "evidence": report.evidence.iter().map(|e| serde_json::json!({
                 "arch": e.arch, "latest_status": e.latest_status, "latest_age_hours": e.latest_age_hours,
-                "checks_in_window": e.checks_in_window, "errors_in_window": e.errors_in_window,
+                "checks_in_window": e.checks_in_window, "errors_in_window": e.errors_in_window, "greens_since_head": e.greens_since_head,
                 "abi_status": e.abi_status, "security_regressions": e.security_regressions,
             })).collect::<Vec<_>>(),
         }
     }))?;
     Ok(report)
+}
+
+/// The latest `abi` check of `ring`/`arch` young enough to be evidence.
+fn latest_abi<'a>(
+    events: &'a [Event],
+    ring: &str,
+    arch: &str,
+    now: i64,
+    max_age: i64,
+) -> Option<&'a Event> {
+    events
+        .iter()
+        .filter(|e| {
+            e.kind == "abi"
+                && e.ring.as_deref() == Some(ring)
+                && e.source.as_deref() == Some(arch)
+                && parse_iso8601(&e.created_at).is_some_and(|t| now - t <= max_age)
+        })
+        .max_by_key(|e| e.id)
+}
+
+/// The soak: green health checks in a row, newest first, made after the
+/// head of `from` — of this content, not of what the ring served before it.
+fn greens_since(newest_first: &[&Event], head_at: Option<i64>) -> usize {
+    newest_first
+        .iter()
+        .take_while(|e| {
+            head_at.is_none_or(|at| parse_iso8601(&e.created_at).is_some_and(|t| t > at))
+                && e.status != "error"
+        })
+        .count()
 }
 
 /// The last promotion into a ring: walk from the head through releases
@@ -400,7 +416,7 @@ mod tests {
             from: "rc",
             to: "stable",
             arches,
-            soak_days: soak,
+            soak_checks: soak,
             max_age_hours: 24,
             dry_run: true,
         }
@@ -431,7 +447,7 @@ mod tests {
             Some(7),
             None,
             &[],
-            &opts(&arches, 3),
+            &opts(&arches, 1),
         );
         assert_eq!(r.verdict, Verdict::Promote);
     }
@@ -444,7 +460,7 @@ mod tests {
             ev(2, "rc", "aarch64", "warn", "2026-09-12T06:01:00Z"),
         ];
         assert_eq!(
-            evaluate(&events, NOW, Some(10), None, None, &[], &opts(&arches, 3)).verdict,
+            evaluate(&events, NOW, Some(10), None, None, &[], &opts(&arches, 1)).verdict,
             Verdict::Promote
         );
     }
@@ -457,7 +473,7 @@ mod tests {
             ev(2, "rc", "aarch64", "error", "2026-09-12T06:01:00Z"),
         ];
         let Verdict::Block(reasons) =
-            evaluate(&failed, NOW, Some(10), None, None, &[], &opts(&arches, 3)).verdict
+            evaluate(&failed, NOW, Some(10), None, None, &[], &opts(&arches, 1)).verdict
         else {
             panic!("expected block")
         };
@@ -470,7 +486,7 @@ mod tests {
             ev(2, "rc", "aarch64", "ok", "2026-09-12T06:01:00Z"),
         ];
         let Verdict::Block(reasons) =
-            evaluate(&stale, NOW, Some(10), None, None, &[], &opts(&arches, 3)).verdict
+            evaluate(&stale, NOW, Some(10), None, None, &[], &opts(&arches, 1)).verdict
         else {
             panic!("expected block")
         };
@@ -478,7 +494,7 @@ mod tests {
 
         let missing = vec![ev(1, "rc", "x86_64", "ok", "2026-09-12T06:00:00Z")];
         assert!(matches!(
-            evaluate(&missing, NOW, Some(10), None, None, &[], &opts(&arches, 3)).verdict,
+            evaluate(&missing, NOW, Some(10), None, None, &[], &opts(&arches, 1)).verdict,
             Verdict::Block(_)
         ));
     }
@@ -488,10 +504,10 @@ mod tests {
         let arches = vec!["x86_64".to_owned()];
         let events = vec![
             ev(3, "rc", "x86_64", "ok", "2026-09-12T06:00:00Z"),
-            ev(2, "rc", "x86_64", "error", "2026-09-11T06:00:00Z"), // 1 day ago
-            ev(1, "rc", "x86_64", "error", "2026-09-01T06:00:00Z"), // 11 days ago
+            ev(2, "rc", "x86_64", "error", "2026-09-11T19:00:00Z"), // 12 h ago: in the day
+            ev(1, "rc", "x86_64", "error", "2026-09-11T06:00:00Z"), // 25 h ago: forgotten
         ];
-        let r = evaluate(&events, NOW, Some(10), None, None, &[], &opts(&arches, 3));
+        let r = evaluate(&events, NOW, Some(10), None, None, &[], &opts(&arches, 1));
         assert_eq!(r.evidence[0].errors_in_window, 1);
         assert_eq!(
             r.verdict,
@@ -502,19 +518,13 @@ mod tests {
         let flapping = vec![
             ev(6, "rc", "x86_64", "ok", "2026-09-12T06:00:00Z"),
             ev(5, "rc", "x86_64", "error", "2026-09-12T05:00:00Z"),
-            ev(4, "rc", "x86_64", "error", "2026-09-11T18:00:00Z"),
-            ev(3, "rc", "x86_64", "ok", "2026-09-11T12:00:00Z"),
-            ev(2, "rc", "x86_64", "error", "2026-09-11T06:00:00Z"),
+            ev(4, "rc", "x86_64", "error", "2026-09-12T02:00:00Z"),
+            ev(3, "rc", "x86_64", "ok", "2026-09-11T23:00:00Z"),
+            ev(2, "rc", "x86_64", "error", "2026-09-11T20:00:00Z"),
         ];
-        let r = evaluate(&flapping, NOW, Some(10), None, None, &[], &opts(&arches, 3));
+        let r = evaluate(&flapping, NOW, Some(10), None, None, &[], &opts(&arches, 1));
         assert_eq!(r.evidence[0].errors_in_window, 3);
         assert!(matches!(r.verdict, Verdict::Block(_)));
-        let r = evaluate(&events, NOW, Some(10), None, None, &[], &opts(&arches, 0));
-        assert_eq!(
-            r.evidence[0].errors_in_window, 0,
-            "a zero-day window only sees the latest"
-        );
-        assert_eq!(r.verdict, Verdict::Promote);
     }
 
     #[test]
@@ -537,44 +547,73 @@ mod tests {
     }
 
     #[test]
-    fn soak_requires_the_source_content_to_be_old_enough() {
+    fn soak_counts_green_checks_since_the_source_head() {
         let arches = vec!["x86_64".to_owned()];
-        let events = vec![ev(1, "rc", "x86_64", "ok", "2026-09-12T06:00:00Z")];
-        // promoted into rc one hour ago: too fresh for a 3-day soak
+        let head_at = NOW - 4 * 3600; // rc's head was promoted four hours ago
+                                      // Two checks since the head, both green: a soak of two is met — the
+                                      // one from before the head does not count.
+        let events = vec![
+            ev(3, "rc", "x86_64", "ok", "2026-09-12T06:00:00Z"),
+            ev(2, "rc", "x86_64", "ok", "2026-09-12T04:00:00Z"),
+            ev(1, "rc", "x86_64", "ok", "2026-09-12T01:00:00Z"), // before the head
+        ];
         let r = evaluate(
             &events,
             NOW,
             Some(10),
             None,
-            Some(NOW - 3600),
+            Some(head_at),
             &[],
-            &opts(&arches, 3),
+            &opts(&arches, 2),
         );
+        assert_eq!(r.evidence[0].greens_since_head, 2);
+        assert_eq!(r.verdict, Verdict::Promote);
+        // Only one since the head: the second is still to come (three hours later).
+        let one = vec![
+            ev(3, "rc", "x86_64", "ok", "2026-09-12T06:00:00Z"),
+            ev(1, "rc", "x86_64", "ok", "2026-09-12T01:00:00Z"),
+        ];
+        let r = evaluate(
+            &one,
+            NOW,
+            Some(10),
+            None,
+            Some(head_at),
+            &[],
+            &opts(&arches, 2),
+        );
+        assert_eq!(r.evidence[0].greens_since_head, 1);
         assert!(
-            matches!(&r.verdict, Verdict::Block(reasons) if reasons[0].contains("soak needs 3 day")),
+            matches!(&r.verdict, Verdict::Block(reasons) if reasons[0].contains("1 of 2 green health check(s) of rc")),
             "{:?}",
             r.verdict
         );
-        // promoted four days ago: fine
+        // A failure since the head breaks the run: the greens before it do not count.
+        let broken = vec![
+            ev(4, "rc", "x86_64", "ok", "2026-09-12T06:00:00Z"),
+            ev(3, "rc", "x86_64", "error", "2026-09-12T05:00:00Z"),
+            ev(2, "rc", "x86_64", "ok", "2026-09-12T04:00:00Z"),
+        ];
         let r = evaluate(
-            &events,
+            &broken,
             NOW,
             Some(10),
             None,
-            Some(NOW - 4 * 86_400),
+            Some(head_at),
             &[],
-            &opts(&arches, 3),
+            &opts(&arches, 2),
         );
-        assert_eq!(r.verdict, Verdict::Promote);
-        // no soak requested (into rc): age is irrelevant
+        assert_eq!(r.evidence[0].greens_since_head, 1);
+        assert!(matches!(r.verdict, Verdict::Block(_)));
+        // A soak of one is the check the promote job just ran (edge → rc).
         let r = evaluate(
-            &events,
+            &one,
             NOW,
             Some(10),
             None,
-            Some(NOW - 60),
+            Some(head_at),
             &[],
-            &opts(&arches, 0),
+            &opts(&arches, 1),
         );
         assert_eq!(r.verdict, Verdict::Promote);
     }

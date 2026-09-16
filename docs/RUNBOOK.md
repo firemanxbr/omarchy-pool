@@ -11,7 +11,7 @@ time; there is no shared secret. Humans operate the pipeline by queueing jobs
 | Index API | https://pkgs.firemanxbr.org/api/v1/stats |
 | Pool (static, what pacman reads) | https://pool.firemanxbr.org/`<source>`/x86_64/ · `/aarch64/` — `core/`, `extra/`, `packages/` (the OPR), `asahi/`, `factory/`, … |
 | Signing key | `docs/omarchy-staging.pub.asc` · https://pool.firemanxbr.org/omarchy-staging.pub.asc · https://pkgs.firemanxbr.org/api/v1/signing-key (expires 2027-09-12); the private key is the Worker secret `SIGNING_KEY` — nowhere else |
-| Jobs (pulled by project workers) | Sync (every 3 h, one task per architecture) · Promote (edge→rc 06:00 UTC, rc→stable 09:00 UTC after a one-day soak, evidence-gated, auto-rollback) · Health (daily, both arches) · Security (every 3 h, with fast-track) · GC (Sundays) · Metrics snapshot (every 30 min, by the brain itself) · Release (GitHub, every merge into `main`) |
+| Jobs (pulled by project workers) | Sync (every 3 h, one task per architecture) · Promote (by evidence: edge→rc right after the sync that changed edge, rc→stable on the second green check in a row, attempted every 3 h; auto-rollback) · Health (daily, both arches) · Security (every 3 h, with fast-track) · GC (Sundays) · Metrics snapshot (every 30 min, by the brain itself) · Release (GitHub, every merge into `main`) |
 | Running version | https://pkgs.firemanxbr.org/api/v1/version · the chip in the dashboard header |
 
 ## Trust model
@@ -47,7 +47,7 @@ follows it:
 pkg-repo job sync --param arch=x86_64                                  # every source of the architecture, one release per ring
 pkg-repo job sync --param source=packages --param arch=x86_64 --param ring=rc   # one source
 pkg-repo job promote --param from=edge --param to=rc --param note="…"
-pkg-repo job promote --param from=rc --param to=stable --param note="…"        # evidence-gated, one-day soak
+pkg-repo job promote --param from=rc --param to=stable --param note="…"        # evidence-gated: two green checks of rc in a row (--param soak_checks=1 for one)
 pkg-repo job promote --param from=rc --param to=stable --param force=yes       # emergency: skips the gate (the target's health still rolls back)
 pkg-repo job promote --param from=rc --param to=stable --param arch=aarch64    # one architecture only: its evidence, its gate, its rows; x86_64 keeps what stable serves
 pkg-repo job rollback --param ring=stable --param to=<release id>              # then renders both architectures (or the overview's roll back button)
@@ -74,7 +74,7 @@ path: the evidence is the reviewer, and a maintainer who disagrees rolls back.
 ```bash
 # the same decisions by hand
 pkg-repo fast-track --ring stable --from edge --dry-run        # security fixes edge has and stable lacks (exit 3: none)
-pkg-repo gate --from rc --to stable --soak-days 1 --dry-run   # exit 0 promote, 3 nothing new, 1 blocked
+pkg-repo gate --from rc --to stable --soak-checks 2 --dry-run   # exit 0 promote, 3 nothing new, 1 blocked
 pkg-repo head --ring stable                                    # current release id (rollback target)
 pkg-repo diff --ring stable                                    # what the head changed against its parent (+ − ↑)
 pkg-repo diff --ring rc --from 41 --to 45 --arch aarch64 --json  # any two releases inside retention
@@ -139,8 +139,8 @@ GitHub's cron is best-effort (on 2026-09-12 it delayed the hourly sync by an
 hour and never started the half-hourly metrics), so the pool has its own
 clock: a Cloudflare cron trigger on the Worker (`src/scheduler.ts`, every
 ten minutes). Intervals for sync (3 h) and security (3 h), the PKGBUILD
-reconcile (`enqueue`, hourly); daily slots for promote (06:00 edge→rc,
-09:00 rc→stable), health (08:30) and the Sunday GC — each queued as a
+reconcile (`enqueue`, hourly); promote by evidence (edge→rc queued by the
+sync, rc→stable every 3 h), daily slots for health (08:30) and the Sunday GC — each queued as a
 pulled job (below) when due and never doubled while one is queued or
 running. The metrics snapshot (30 min), the governance sync (10 min), the
 update check (05:45) and the cost estimate (06:30) it does itself. One thing still starts on GitHub, by

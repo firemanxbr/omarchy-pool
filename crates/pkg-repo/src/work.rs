@@ -1578,11 +1578,17 @@ fn promote_job(
     let from = s(&task.params, "from");
     let to = s(&task.params, "to");
     let note = s(&task.params, "note");
-    let soak_days = u32::try_from(
+    // The soak, in green health checks of `from` since its current release:
+    // one for edge → rc (the check this job runs), two for rc → stable (the
+    // one before, three hours earlier, and this one) unless the task says.
+    let soak_checks = u32::try_from(
         task.params
-            .get("soak_days")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(1),
+            .get("soak_checks")
+            .and_then(|v| {
+                v.as_u64()
+                    .or_else(|| v.as_str().and_then(|x| x.parse().ok()))
+            })
+            .unwrap_or(if to == "stable" { 2 } else { 1 }),
     )
     .unwrap_or(1);
     // One architecture only (`arch`): its evidence, its gate, its rows, its
@@ -1622,7 +1628,7 @@ fn promote_job(
                 from: &from,
                 to: &to,
                 arches: &arches,
-                soak_days,
+                soak_checks,
                 max_age_hours: 24,
                 dry_run: false,
             },

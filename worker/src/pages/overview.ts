@@ -108,16 +108,8 @@ const BODY = String.raw`
 const SCRIPT = String.raw`
   skeletonTiles("#tiles", 6);
 __CHARTS__
-  var RING_INFO = {
-    stable: { title: "Recommended for daily use", text: "What <b>rc</b> served for a day without a failed check.", lag: "≈ 2 days behind Arch" },
-    rc: { title: "For testers", text: "Yesterday's <b>edge</b>, after a real pacman and an ABI check on both architectures.", lag: "≈ 1 day behind Arch" },
-    edge: { title: "For CI and developers", text: "What upstream published in the last three hours, signature-verified.", lag: "≤ 3 hours behind Arch" }
-  };
-  var DESC = {
-    stable: "Recommended. What rc served for a day without a failed check — about two days behind Arch.",
-    rc: "Yesterday's edge, after a real pacman and an ABI check on both architectures. For testers.",
-    edge: "What upstream published in the last three hours, signature-verified. For CI and developers."
-  };
+  var RING_INFO = RINGS_TEXT;
+  var DESC = {}; Object.keys(RINGS_TEXT).forEach(function (r) { DESC[r] = RINGS_TEXT[r].desc; });
   var RINGS = ["stable", "rc", "edge"], ARCHES = ["x86_64", "aarch64"];
   var q = new URLSearchParams(location.search);
   var ring = RINGS.indexOf(q.get("ring")) >= 0 ? q.get("ring") : "stable";
