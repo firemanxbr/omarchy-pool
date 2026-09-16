@@ -199,7 +199,31 @@ function agentReport(b: { agent_status?: unknown; agent_error?: unknown; agent_c
   return { status, error: status === "error" && typeof b.agent_error === "string" ? b.agent_error.slice(0, 300) : null, checked_at: typeof b.agent_checked_at === "string" && b.agent_checked_at ? b.agent_checked_at : null };
 }
 
-async function touchWorker(env: Env, w: { worker: string; arch: string; hostname?: string; labels?: unknown; version?: string; mode?: string; agent?: string | null; kinds?: string[]; probe?: AgentReport }, currentTask: number | null): Promise<void> {
+/**
+ * What the worker says of its machine with the claim: an average it keeps
+ * of the host's CPU, its memory and the work directory's disk, in percent,
+ * with the sizes behind them and the minutes the average covers. Anything
+ * malformed is dropped, never a claim refused over it.
+ */
+export interface Usage { cpu: number; ram: number; disk: number; cores?: number; ram_gb?: number; disk_gb?: number; minutes?: number }
+
+export function usageReport(u: unknown): Usage | null {
+  if (!u || typeof u !== "object") return null;
+  const o = u as Record<string, unknown>;
+  const pct = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : null);
+  const cpu = pct(o.cpu), ram = pct(o.ram), disk = pct(o.disk);
+  if (cpu === null || ram === null || disk === null) return null;
+  const size = (v: unknown, digits: number) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? Number(v.toFixed(digits)) : undefined);
+  const out: Usage = { cpu, ram, disk };
+  const cores = size(o.cores, 0), ram_gb = size(o.ram_gb, 1), disk_gb = size(o.disk_gb, 0), minutes = size(o.minutes, 0);
+  if (cores !== undefined) out.cores = cores;
+  if (ram_gb !== undefined) out.ram_gb = ram_gb;
+  if (disk_gb !== undefined) out.disk_gb = disk_gb;
+  if (minutes !== undefined) out.minutes = minutes;
+  return out;
+}
+
+async function touchWorker(env: Env, w: { worker: string; arch: string; hostname?: string; labels?: unknown; version?: string; mode?: string; agent?: string | null; kinds?: string[]; probe?: AgentReport; usage?: Usage | null }, currentTask: number | null): Promise<void> {
   // The agent is what the worker says it runs ("<provider>/<model>"): a
   // worker that reports none ("" or null) clears it, one that says nothing
   // (an older client) keeps what it last reported. The probe's answer
@@ -208,18 +232,32 @@ async function touchWorker(env: Env, w: { worker: string; arch: string; hostname
   // pattern refused it, and every Studio worker showed no agent (2026-09-15).
   const agent = w.agent === undefined ? undefined : typeof w.agent === "string" && /^[a-z0-9-]+\/[A-Za-z0-9._:-]{1,60}$/.test(w.agent) ? w.agent : null;
   await env.DB.prepare(
-    `INSERT INTO build_workers (id, arch, hostname, labels, version, last_seen, current_task, agent, kinds, agent_status, agent_error, agent_checked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO build_workers (id, arch, hostname, labels, version, last_seen, current_task, agent, kinds, agent_status, agent_error, agent_checked_at, usage, usage_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT (id) DO UPDATE SET arch = excluded.arch, hostname = COALESCE(excluded.hostname, hostname), labels = COALESCE(excluded.labels, labels),
        version = COALESCE(excluded.version, version), last_seen = excluded.last_seen, current_task = excluded.current_task, mode = COALESCE(?, mode),
        agent = CASE WHEN ? THEN excluded.agent ELSE agent END, kinds = COALESCE(excluded.kinds, kinds),
        agent_status = CASE WHEN ? THEN excluded.agent_status ELSE agent_status END, agent_error = CASE WHEN ? THEN excluded.agent_error ELSE agent_error END,
-       agent_checked_at = CASE WHEN ? THEN excluded.agent_checked_at ELSE agent_checked_at END`,
+       agent_checked_at = CASE WHEN ? THEN excluded.agent_checked_at ELSE agent_checked_at END,
+       usage = COALESCE(excluded.usage, usage), usage_at = CASE WHEN excluded.usage IS NULL THEN usage_at ELSE excluded.usage_at END`,
   )
     .bind(
       w.worker, w.arch, w.hostname ?? null, w.labels ? JSON.stringify(w.labels) : null, w.version ?? null, now(), currentTask, agent ?? null,
       w.kinds ? JSON.stringify(w.kinds) : null, w.probe?.status ?? null, w.probe?.error ?? null, w.probe?.checked_at ?? null,
+      w.usage ? JSON.stringify(w.usage) : null, w.usage ? now() : null,
       w.mode ?? null, agent === undefined ? 0 : 1, w.probe === undefined ? 0 : 1, w.probe === undefined ? 0 : 1, w.probe === undefined ? 0 : 1,
     )
+    .run();
+}
+
+/**
+ * The worker row after a task: the lease is over, the counter moves, and the
+ * row remembers what it just did — the Workers page reads the last task
+ * there, one row per worker, not from build_tasks.
+ */
+async function workerFinished(env: Env, who: string, task: TaskRow, status: "done" | "staged" | "failed", version?: string | null): Promise<void> {
+  const last = JSON.stringify({ id: task.id, kind: task.kind, name: task.name, version: version ?? task.version ?? null, status, at: now() });
+  await env.DB.prepare(`UPDATE build_workers SET last_seen = ?, current_task = NULL, ${status === "failed" ? "builds_failed = builds_failed + 1" : "builds_done = builds_done + 1"}, last_task = ? WHERE id = ?`)
+    .bind(now(), last, who)
     .run();
 }
 
@@ -239,10 +277,11 @@ const ALL_KINDS = ["build", "sync", "promote", "rollback", "render", "health", "
 const ANY_ARCH_KINDS = "'metrics', 'gc', 'security', 'promote', 'audit', 'verify', 'relayout'";
 
 export async function handleClaim(request: Request, env: Env, actor: Actor): Promise<Response> {
-  const b = (await request.json()) as { arch?: string; hostname?: string; labels?: unknown; version?: string; kinds?: unknown; shared?: unknown; agent?: unknown; agent_status?: unknown; agent_error?: unknown; agent_checked_at?: unknown };
+  const b = (await request.json()) as { arch?: string; hostname?: string; labels?: unknown; version?: string; kinds?: unknown; shared?: unknown; agent?: unknown; agent_status?: unknown; agent_error?: unknown; agent_checked_at?: unknown; usage?: unknown };
   if (!b.arch || !isRepoArch(b.arch)) return json({ error: "arch (x86_64|aarch64) is required" }, 400);
   if (actor.kind === "job") return json({ error: "a job token cannot claim; use the worker token" }, 403);
   const probe = agentReport(b);
+  const usage = usageReport(b.usage);
   // A worker is its registration: id, owner, trust and what it may build.
   const workerId = actor.w.id;
   if (actor.w.arch !== b.arch) return json({ error: `this worker is registered for ${actor.w.arch}` }, 400);
@@ -291,7 +330,7 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   )
     .bind(workerId, plusMinutes(LEASE_MINUTES), now(), b.arch, ...binds)
     .first<TaskRow>();
-  await touchWorker(env, { worker: workerId, arch: b.arch, hostname: b.hostname, labels: b.labels, version: b.version, mode: trust === "community" ? (shared ? "shared" : "dedicated") : undefined, agent: b.agent === undefined ? undefined : typeof b.agent === "string" ? b.agent : null, kinds, probe }, task?.id ?? null);
+  await touchWorker(env, { worker: workerId, arch: b.arch, hostname: b.hostname, labels: b.labels, version: b.version, mode: trust === "community" ? (shared ? "shared" : "dedicated") : undefined, agent: b.agent === undefined ? undefined : typeof b.agent === "string" ? b.agent : null, kinds, probe, usage }, task?.id ?? null);
   if (!task) return new Response(null, { status: 204 });
   if (task.trust === "community" && task.kind === "build") {
     await env.DB.prepare("UPDATE factory_packages SET status = 'building', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(`building on ${workerId} (${task.arch})`, task.name).run();
@@ -375,7 +414,7 @@ export async function handleComplete(id: number, request: Request, env: Env, act
     await env.DB.prepare("UPDATE build_tasks SET status = 'done', finished_at = ?, duration_ms = ?, log_tail = ?, result = ?, lease_expires_at = NULL WHERE id = ?")
       .bind(now(), b.duration_ms ?? null, tail, b.result ? JSON.stringify(b.result) : null, id)
       .run();
-    await env.DB.prepare("UPDATE build_workers SET last_seen = ?, current_task = NULL, builds_done = builds_done + 1 WHERE id = ?").bind(now(), who).run();
+    await workerFinished(env, who, task, "done");
     const p = task.params ? (JSON.parse(task.params) as Record<string, string>) : {};
     // Promotion by evidence, when the evidence can exist: the last sync of
     // a tick queues edge → rc (the promote job records the health and ABI
@@ -454,7 +493,7 @@ export async function handleComplete(id: number, request: Request, env: Env, act
       .run();
     // The evidence outlives staging: on the record, signed.
     await recordEvidence(env, task.name, await requestOf(env, task.name), id, prefix);
-    await env.DB.prepare("UPDATE build_workers SET last_seen = ?, current_task = NULL, builds_done = builds_done + 1 WHERE id = ?").bind(now(), who).run();
+    await workerFinished(env, who, task, "staged", b.version);
     // A newer build of the same package and architecture supersedes the
     // staged ones before it: one row per package in the review queue, the
     // audits of the old ones cancelled with them. Their text evidence stays;
@@ -515,7 +554,7 @@ export async function handleComplete(id: number, request: Request, env: Env, act
   )
     .bind(now(), indexed.sha256, b.filename, b.version ?? null, b.duration_ms ?? null, tail, id)
     .run();
-  await env.DB.prepare("UPDATE build_workers SET last_seen = ?, current_task = NULL, builds_done = builds_done + 1 WHERE id = ?").bind(now(), who).run();
+  await workerFinished(env, who, task, "done", b.version);
   if (task.publish !== 0) {
     // What users get. A contributor's registration of this name is now
     // published, and the approval that led here keeps the task — the seal
@@ -567,7 +606,7 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
   )
     .bind(exhausted ? "failed" : "queued", exhausted ? now() : null, error, tail, b.duration_ms ?? null, exhausted ? task.lease_owner : null, id)
     .run();
-  await env.DB.prepare("UPDATE build_workers SET last_seen = ?, current_task = NULL, builds_failed = builds_failed + 1 WHERE id = ?").bind(now(), who).run();
+  await workerFinished(env, who, task, "failed");
   // A build that failed for good may have staged its package before the
   // gate or the quota stopped it: the log and the recipe stay, the package goes.
   if (exhausted && task.kind === "build") await reclaimStagingPackages(env, [id]);
@@ -622,7 +661,7 @@ export async function handleFactory(env: Env, url?: URL): Promise<Response> {
     "SELECT * FROM build_workers WHERE revoked_at IS NULL ORDER BY (last_seen > ?) DESC, last_seen DESC LIMIT 200",
   )
     .bind(new Date(Date.now() - WORKER_ALIVE_MINUTES * 60000).toISOString())
-    .all<{ last_seen: string; labels: string | null; owner: string | null; trust: string; packages: string | null; kinds: string | null; agent: string | null; agent_status: string | null }>();
+    .all<{ last_seen: string; labels: string | null; owner: string | null; trust: string; packages: string | null; kinds: string | null; agent: string | null; agent_status: string | null; usage: string | null; last_task: string | null }>();
   const tasks = await env.DB.prepare("SELECT * FROM build_tasks ORDER BY CASE status WHEN 'leased' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, id DESC LIMIT ?").bind(limit).all<TaskRow>();
   const alive = Date.now() - WORKER_ALIVE_MINUTES * 60000;
   return json(
@@ -640,6 +679,9 @@ export async function handleFactory(env: Env, url?: URL): Promise<Response> {
         // Ready for what it declares: alive, and its agent answered when the work needs one (workerReady).
         ready: workerReady(w, alive),
         kinds: w.kinds ? JSON.parse(w.kinds) : null,
+        // What the machine uses (the worker's own average, with the claim) and the last task it finished (with the completion).
+        usage: w.usage ? JSON.parse(w.usage) : null,
+        last_task: w.last_task ? JSON.parse(w.last_task) : null,
         // omarchy: runs for the project (trusted; owner NULL is an old hosted registration) · community: a contributor's
         side: w.trust === "project" || w.owner === null ? "omarchy" : "community",
       })),

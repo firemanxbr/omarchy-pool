@@ -62,7 +62,8 @@ describe("claims and leases", () => {
     const id = q.json.tasks[0].id ?? q.json.tasks[0];
     // The community worker never sees a project build.
     expect((await call("POST", "/factory/claim", { arch: "aarch64" }, "omw_w3")).status).toBe(204);
-    const c = await call("POST", "/factory/claim", { arch: "aarch64", hostname: "test", agent: "openai/gpt-5" }, "omw_w1");
+    // The claim carries what the machine uses — the worker's own average; a malformed one is dropped, not refused.
+    const c = await call("POST", "/factory/claim", { arch: "aarch64", hostname: "test", agent: "openai/gpt-5", version: "v0.0.1", usage: { cpu: 12.4, ram: 40, disk: 61, cores: 8, ram_gb: 16, disk_gb: 200.4, minutes: 60 } }, "omw_w1");
     expect(c.status).toBe(200);
     expect(c.json.task.id).toBe(id);
     expect(c.json.task.status).toBe("leased");
@@ -76,14 +77,18 @@ describe("claims and leases", () => {
     expect(hb.json.token).toMatch(/^omj\./);
     // What the worker reported it runs shows on the Factory list; the key never travels.
     const fac = await call("GET", "/factory");
-    expect(fac.json.workers.find((w: any) => w.id === "w1").agent).toBe("openai/gpt-5");
-    expect(fac.json.workers.find((w: any) => w.id === "w1").current_task).toBe(id);
-    // Fail: back in the queue behind its peers, attempts counted.
+    expect(fac.json.workers.find((w: any) => w.id === "w1")).toMatchObject({ agent: "openai/gpt-5", current_task: id, version: "v0.0.1", usage: { cpu: 12, ram: 40, disk: 61, cores: 8, ram_gb: 16, disk_gb: 200, minutes: 60 }, last_task: null });
+    expect(fac.json.workers.find((w: any) => w.id === "w1").usage_at).toBeTruthy();
+    // Fail: back in the queue behind its peers, attempts counted — and the worker's row remembers the attempt.
     const f = await call("POST", `/factory/tasks/${id}/fail`, { error: "boom" }, hb.json.token);
     expect(f.json).toMatchObject({ status: "queued", attempts: 1 });
+    // (GET /factory is edge-cached by URL for ten seconds: a different limit is a different key.)
+    expect((await call("GET", "/factory?limit=11")).json.workers.find((w: any) => w.id === "w1").last_task).toMatchObject({ id, kind: "build", name: "tool", version: "1.0-1", status: "failed" });
     // The other project worker takes it; completing needs the package in the pool first.
-    const c2 = await call("POST", "/factory/claim", { arch: "aarch64" }, "omw_w2");
+    // A claim with nothing usable as usage keeps what the row had (nothing yet); the claim itself is fine.
+    const c2 = await call("POST", "/factory/claim", { arch: "aarch64", usage: { cpu: "high" } }, "omw_w2");
     expect(c2.json.task.id).toBe(id);
+    expect((await call("GET", "/factory?limit=12")).json.workers.find((w: any) => w.id === "w2").usage).toBeNull();
     expect((await call("POST", `/factory/tasks/${id}/complete`, { sha256: "0".repeat(64), filename: "nope" }, c2.json.token)).status).toBe(409);
     const filename = "tool-1.0-1-aarch64.pkg.tar.zst";
     const bytes = new TextEncoder().encode("fake tool");
@@ -93,6 +98,7 @@ describe("claims and leases", () => {
     expect(idx.status, JSON.stringify(idx.json)).toBe(201);
     const done = await call("POST", `/factory/tasks/${id}/complete`, { sha256: sha, filename, version: "1.0-1", duration_ms: 1200 }, c2.json.token);
     expect(done.json).toMatchObject({ task: id, status: "done" });
+    expect((await call("GET", "/factory?limit=13")).json.workers.find((w: any) => w.id === "w2")).toMatchObject({ builds_done: 1, last_task: { id, kind: "build", name: "tool", version: "1.0-1", status: "done" } });
     // The job token dies with the task.
     expect((await call("POST", `/factory/tasks/${id}/heartbeat`, {}, c2.json.token)).status).toBe(409);
     const built = await call("GET", "/factory/built");
