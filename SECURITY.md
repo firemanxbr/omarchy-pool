@@ -62,10 +62,24 @@ secret). Everything travels in the `Authorization` header over TLS only.
 
 ## Isolation
 
-- **Builds run in a fresh container per task** that sees the PKGBUILD and
-  the network and nothing else — no tokens, no keys, no access to the
-  container runtime. The worker process outside the container holds the
-  job token.
+- **The build sees nothing the log cannot show.** A build is somebody
+  else's code — the recipe and the upstream's build system — and its log is
+  public. A project worker starts a fresh container per task that holds no
+  worker token (the process outside does); a community worker builds inside
+  its own container, so the script takes its token, the agent's key and
+  `GITHUB_TOKEN` out of the environment at start, lends the keys to the agent
+  and the drafter alone, and starts the build user from an empty environment
+  (`factory/worker/omarchy-build-worker.sh`, *hold_secrets*, *as_builder*).
+  Build caches are kept per trust on the host and per package inside: a
+  build reads only what an earlier build of the same package, on the same
+  side, wrote.
+- **A log that carries a secret is refused.** Text evidence uploaded to
+  staging is read whole and checked for the shapes of the pool's tokens,
+  agents' keys, GitHub's and the clouds' tokens, private keys, credentials
+  in URLs and a dump of the worker's variables (`worker/src/leak.ts`); a hit
+  is a 422 with the kind and the line, never the match, a `leak` event, and
+  a failed build. The record runs the same check before it copies anything.
+  This is the pool's check on the worker it does not run.
 - **Contributor results never touch the pool.** They land in
   `omarchy-factory-staging` under `staging/<login>/<package>/<task>/`,
   through the pool (the key is derived from the task, never given),
@@ -106,3 +120,14 @@ check, and the security layer's advisories.
 2. ~~Signing inside the pool's Worker: the key becomes a Worker secret; `publish` and `render` stop signing on workers; the GitHub secret is deleted~~ — live (v0.0.49). A client's `.sig` for a database is superseded; a package signature must match the stored bytes.
 3. ~~Retire `FACTORY_TOKEN`~~ — gone (v0.0.50). ~~The pipeline's last workflows become jobs~~ — done (v0.0.51). ~~Retire the publish token~~ — gone (v0.0.56): writes need a per-job token; maintainers act by queueing jobs (`POST /factory/jobs`) and on the factory's own routes with their contributor token; the PKGBUILD reconcile (`enqueue`) and package requests (issues, read by the brain) left GitHub with it. GitHub keeps only the release (`CLOUDFLARE_API_TOKEN`) and the scheduler's dispatch token for the two workflows it still starts.
 4. ~~Phase 2: maintainers by area, approval as a recorded action, rebuild at approval on project workers~~ — live (v0.0.42). A promotion gate for the `factory` source is unnecessary: nothing unapproved enters `edge`.
+5. **The broker.** One process per host holds the credentials — the worker's
+   token, the agent's key, GitHub's — and only receives, processes and
+   answers: the pool's calls for the one task it claimed, the agent, GitHub
+   in read-only. The builder beside it is born with nothing and dies after a
+   task; `agent-proxy` on the project's host is the first half of it. Until
+   then, *hold_secrets* above is the line.
+6. **Who trusts whom.** A worker becomes `project` on two maintainers' word,
+   never its owner's alone; `publish`, `promote` and `trial` go only to such
+   workers; the Review page names the worker and host behind every build of
+   the project's. A record can be withdrawn: a signed tombstone says who and
+   why, and text evidence is cached a day, not a year.

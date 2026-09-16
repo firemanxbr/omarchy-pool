@@ -7,6 +7,7 @@ import { cookieOf } from "./auth";
 import { putRecord, recordKey, recordUrl } from "../record";
 import { version } from "../meta";
 import { isTextEvidence, STAGING_DAYS, STAGING_QUOTA_BYTES } from "../staging";
+import { findLeak, leakMessage } from "../leak";
 
 /**
  * Contributors: anyone with a GitHub identity. No permission needed to
@@ -439,6 +440,8 @@ export async function handleListPackages(env: Env): Promise<Response> {
 // ---------- staging uploads (worker token, own task only) ----------
 
 const SINGLE_PUT_MAX = 90 * 1024 * 1024;
+/** Text evidence is read whole before it is stored — to be checked for what a public log must not carry (leak.ts). A log past this is not one anyone reads. */
+const TEXT_EVIDENCE_MAX = 32 * 1024 * 1024;
 
 export function stagingKey(owner: string, name: string, task: number, filename: string): string {
   return `staging/${owner}/${name}/${task}/${filename}`;
@@ -489,7 +492,22 @@ export async function handleStagingPut(taskId: number, filename: string, request
   if (refused) return refused;
   if (len > SINGLE_PUT_MAX) return json({ error: "above 90 MB use /multipart" }, 413);
   if (!request.body) return json({ error: "empty body" }, 400);
-  const obj = await env.STAGING.put(key, request.body, { httpMetadata: { contentType: isTextEvidence(filename) ? "text/plain; charset=utf-8" : "application/octet-stream" } });
+  let body: ReadableStream | string = request.body;
+  if (isTextEvidence(filename)) {
+    // The log, the recipe, the reports are public the moment they land:
+    // nothing that looks like a secret goes in (leak.ts). The refusal says
+    // what kind and where, never what.
+    if (len > TEXT_EVIDENCE_MAX) return json({ error: `${filename} is above ${TEXT_EVIDENCE_MAX} bytes; text evidence that large is not evidence anyone reads — trim the log` }, 413);
+    body = new TextDecoder().decode(await request.arrayBuffer()); // the worker sends octet-stream; the file is text
+    const leak = findLeak(body);
+    if (leak) {
+      await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('leak', NULL, 'factory', 'warn', ?, ?)")
+        .bind(`task ${task.id} (${task.name}): ${filename} refused — it carried what looks like ${leak.kind}`, JSON.stringify({ task: task.id, name: task.name, file: filename, kind: leak.kind, line: leak.line, worker: w.id }))
+        .run();
+      return json({ error: leakMessage(filename, leak), kind: leak.kind, line: leak.line }, 422);
+    }
+  }
+  const obj = await env.STAGING.put(key, body, { httpMetadata: { contentType: isTextEvidence(filename) ? "text/plain; charset=utf-8" : "application/octet-stream" } });
   await env.DB.prepare("INSERT OR REPLACE INTO staging_objects (key, owner, task_id, size) VALUES (?, ?, ?, ?)").bind(key, space, task.id, obj?.size ?? len).run();
   return json({ key, size: obj?.size ?? len }, 201);
 }
@@ -500,6 +518,8 @@ export async function handleStagingMultipart(taskId: number, filename: string, u
   if (!task || !space) return json({ error: "no such staging task" }, 404);
   if (task.status !== "leased" || task.lease_owner !== w.id) return json({ error: "the lease is not yours" }, 409);
   if (!/^[A-Za-z0-9][A-Za-z0-9._:+-]{0,200}$/.test(filename) || AUDIT_FILES.includes(filename)) return json({ error: "bad filename" }, 400);
+  // Text evidence is checked whole at the single PUT (leak.ts); a multipart upload of it would go around that.
+  if (isTextEvidence(filename)) return json({ error: `${filename} is text evidence: one PUT, up to ${TEXT_EVIDENCE_MAX} bytes` }, 400);
   const key = stagingKey(space, task.name, task.id, filename);
   const action = url.searchParams.get("action");
   if (action === "create") {

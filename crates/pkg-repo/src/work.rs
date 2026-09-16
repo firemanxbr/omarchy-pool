@@ -523,16 +523,16 @@ fn pkg_cache_dir(arch: &str) -> Result<Option<PathBuf>> {
     cache_dir("OMARCHY_PKG_CACHE", arch)
 }
 
-/// `$<var>/<arch>`, created, when the variable names a directory on the
+/// `$<var>/<sub>`, created, when the variable names a directory on the
 /// host to share with the build containers.
-fn cache_dir(var: &str, arch: &str) -> Result<Option<PathBuf>> {
+fn cache_dir(var: &str, sub: &str) -> Result<Option<PathBuf>> {
     let Some(root) = std::env::var_os(var) else {
         return Ok(None);
     };
     if root.is_empty() {
         return Ok(None);
     }
-    let dir = PathBuf::from(root).join(arch);
+    let dir = PathBuf::from(root).join(sub);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {var} {}", dir.display()))?;
     Ok(Some(dir))
 }
@@ -1305,6 +1305,10 @@ fn build_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
             run.arg("--network").arg(net);
         }
     }
+    // GitHub's API for the drafter inside (the release, the files): a
+    // fine-grained token with no permissions. Root's environment only —
+    // the script lends it to the drafter and to nothing else (hold_secrets);
+    // the build user starts from an empty one.
     if let Ok(token) = std::env::var("GITHUB_TOKEN") {
         if !token.is_empty() {
             run.arg("-e").arg("GITHUB_TOKEN");
@@ -1317,10 +1321,13 @@ fn build_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
         run.arg("-v")
             .arg(format!("{}:/var/cache/pacman/pkg", cache.display()));
     }
-    // Build caches that outlive the container (OMARCHY_BUILD_CACHE, one
-    // directory per architecture): cargo's registry, Go's module and build
-    // caches, ccache — a Rust or Go package rebuilds in minutes, not tens.
-    if let Some(cache) = cache_dir("OMARCHY_BUILD_CACHE", &task.arch)? {
+    // Build caches that outlive the container (OMARCHY_BUILD_CACHE): cargo's
+    // registry, Go's module and build caches, ccache — a Rust or Go package
+    // rebuilds in minutes, not tens. Under `project/<arch>`: what the
+    // project's builds write, only the project's builds read — a community
+    // container on the same host mounts `community/<arch>` (factory/host/
+    // compose.yml) — and inside, the script keeps one directory per package.
+    if let Some(cache) = cache_dir("OMARCHY_BUILD_CACHE", &format!("project/{}", task.arch))? {
         run.arg("-v")
             .arg(format!("{}:/build/cache", cache.display()));
     }

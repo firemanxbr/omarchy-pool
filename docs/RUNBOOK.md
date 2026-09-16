@@ -210,8 +210,11 @@ USB enclosure — the Asahi kernel has no Thunderbolt tunnelling, so the NVMe
 slot of a Thunderbolt dock is invisible to it): `work/<service>` (the same
 path inside the project workers), `cache/pacman/<arch>` (one package cache
 per architecture, mounted into every build container: `OMARCHY_PKG_CACHE`),
-`cache/build/<arch>` (cargo, Go and ccache caches every build container
-mounts at `/build/cache`: `OMARCHY_BUILD_CACHE`),
+`cache/build/project/<arch>` and `cache/build/community/<arch>` (cargo, Go
+and ccache caches the build containers mount at `/build/cache`:
+`OMARCHY_BUILD_CACHE` for the project's, the compose file's volume for the
+community's — a stranger's build never writes what the project's build
+reads; inside, one directory per package),
 `etc/` (the six worker tokens and `agent.env`, mode 600, never in the
 repository). Day to day, on the host:
 

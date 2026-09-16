@@ -13,6 +13,7 @@
  */
 import type { Env } from "./index";
 import { signingEnabled, detachedSignature } from "./signing";
+import { findLeak } from "./leak";
 
 export const RECORD_CACHE = "public, max-age=31536000, immutable";
 
@@ -70,6 +71,16 @@ export async function recordEvidence(env: Env, name: string, request: number | n
     if (!obj) continue;
     const bytes = new Uint8Array(await obj.arrayBuffer());
     if (bytes.length > 8 * 1024 * 1024) continue; // evidence is text; a package is not evidence
+    // The record is public, signed and kept: what looks like a secret never
+    // reaches it (leak.ts) — the PUT refused it already; this is for what
+    // got into staging another way. An event says which file stayed behind.
+    const leak = findLeak(new TextDecoder().decode(bytes));
+    if (leak) {
+      await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('leak', NULL, 'factory', 'warn', ?, ?)")
+        .bind(`task ${task} (${name}): ${file} kept off the record — it carries what looks like ${leak.kind}`, JSON.stringify({ task, name, file, kind: leak.kind, line: leak.line, request }))
+        .run();
+      continue;
+    }
     const type = file.endsWith(".json") ? "application/json" : "text/plain; charset=utf-8";
     await putRecordBytes(env, key, bytes, type);
     copied.push(file);

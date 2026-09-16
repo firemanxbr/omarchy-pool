@@ -651,3 +651,72 @@ describe("blocking", () => {
     expect((await call("GET", "/factory/blocks")).json.contributors).toEqual([]);
   });
 });
+
+describe("what a public log must not carry", () => {
+  it("a token, a key or the worker's own environment in text evidence is refused at the PUT with the kind and the line, never the match; the record never receives it; the public list shows no token hash", async () => {
+    await env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind) VALUES ('leaky', 'aarch64', '1-1', 'https://github.com/alice/recipes@HEAD:leaky/PKGBUILD', 'contributor', 100, 0, 'community', 'alice', 'build')`).run();
+    const c = await call("POST", "/factory/claim", { arch: "aarch64" }, "omw_w3");
+    expect(c.status).toBe(200);
+    const id = c.json.task.id;
+    const job = c.json.token as string;
+    const secret = "omw_" + "Q".repeat(40);
+    const put = await call("PUT", `/factory/tasks/${id}/artifacts/build.log`, undefined, job, `==> Making package: leaky 1-1\nOMARCHY_WORKER_TOKEN=${secret}\n==> done\n`);
+    expect(put.status).toBe(422);
+    expect(put.json).toMatchObject({ kind: "the worker's environment", line: 2 });
+    expect(JSON.stringify(put.json)).not.toContain(secret);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM staging_objects WHERE task_id = ?").bind(id).first<{ n: number }>()).toMatchObject({ n: 0 });
+    const ev = await env.DB.prepare("SELECT summary, payload FROM events WHERE kind = 'leak' ORDER BY id DESC LIMIT 1").first<{ summary: string; payload: string }>();
+    expect(ev?.summary).toMatch(/build\.log refused/);
+    expect(ev?.payload).not.toContain(secret);
+    // The other shapes, the same door.
+    for (const [text, kind] of [
+      ["curl -H 'authorization: Bearer " + "a".repeat(40) + "' https://x", "a bearer token"],
+      ["git clone https://x-access-token:" + "b".repeat(30) + "@github.com/o/r", "a credential in a URL"],
+      ["-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----", "a private key block"],
+      ["export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-" + "c".repeat(60), "an Anthropic key"],
+      ["token: ghp_" + "d".repeat(36), "a GitHub token"],
+    ] as const) {
+      const r = await call("PUT", `/factory/tasks/${id}/artifacts/tests.log`, undefined, job, text);
+      expect(r.status, text).toBe(422);
+      expect(r.json.kind, text).toBe(kind);
+    }
+    // A clean log, and the things logs legitimately say, go in.
+    for (const text of ["==> Making package: leaky 1-1\nGITHUB_TOKEN=\nsk-ant is a prefix\nhttps://user@github.com/o/r\nAuthorization: Bearer <token>\n", "pkgname=leaky\nsource=(\"https://github.com/o/r/archive/v1.tar.gz\")\n"]) {
+      expect((await call("PUT", `/factory/tasks/${id}/artifacts/build.log`, undefined, job, text)).status).toBe(201);
+    }
+    // Text evidence has one door: a multipart upload of it is not started.
+    expect((await call("POST", `/factory/tasks/${id}/artifacts/build.log/multipart?action=create`, {}, job)).status).toBe(400);
+    // The hash of a worker's token is not on the public list.
+    const list = await call("GET", "/factory");
+    expect(list.status).toBe(200);
+    expect(list.json.workers.length).toBeGreaterThan(0);
+    for (const w of list.json.workers) expect(w).not.toHaveProperty("token_hash");
+  });
+});
+
+describe("the log's tail and the error line", () => {
+  it("are withheld — never stored, never served — when they carry what looks like a secret; the completion stands and an event says so", async () => {
+    await env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind) VALUES ('tail', 'aarch64', '1-1', 'https://github.com/alice/recipes@HEAD:tail/PKGBUILD', 'contributor', 100, 0, 'community', 'alice', 'build')`).run();
+    const c = await call("POST", "/factory/claim", { arch: "aarch64" }, "omw_w3");
+    expect(c.status).toBe(200);
+    const id = c.json.task.id;
+    const secret = "ghp_" + "Z".repeat(36);
+    const f = await call("POST", `/factory/tasks/${id}/fail`, { error: `exit 4: curl -H 'authorization: Bearer ${secret}' failed`, log_tail: `==> build()\nGITHUB_TOKEN=${secret}\n==> ERROR: A failure occurred in build().`, final: true }, c.json.token);
+    expect(f.status).toBe(200);
+    const t = (await call("GET", `/factory/tasks/${id}`)).json.task;
+    expect(t.status).toBe("failed");
+    expect(JSON.stringify(t)).not.toContain(secret);
+    expect(t.error).toMatch(/^\[error withheld: it carried what looks like a bearer token/);
+    expect(t.log_tail).toMatch(/^\[log_tail withheld: it carried what looks like the worker's environment/);
+    const pkg = await env.DB.prepare("SELECT detail FROM factory_packages WHERE name = 'tail'").first<{ detail: string }>();
+    if (pkg) expect(pkg.detail).not.toContain(secret);
+    const events = await env.DB.prepare("SELECT summary, payload FROM events WHERE kind = 'leak' AND payload LIKE ? ORDER BY id").bind(`%"task":${id},%`).all<{ summary: string; payload: string }>();
+    expect(events.results.map((e) => e.summary)).toEqual([`task ${id}: log_tail withheld — it carried what looks like the worker's environment`, `task ${id}: error withheld — it carried what looks like a bearer token`]);
+    for (const e of events.results) expect(e.payload).not.toContain(secret);
+    // A clean tail is kept as it was.
+    await env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind) VALUES ('tail2', 'aarch64', '1-1', 'https://github.com/alice/recipes@HEAD:tail2/PKGBUILD', 'contributor', 100, 0, 'community', 'alice', 'build')`).run();
+    const c2 = await call("POST", "/factory/claim", { arch: "aarch64" }, "omw_w3");
+    await call("POST", `/factory/tasks/${c2.json.task.id}/fail`, { error: "exit 4: ==> ERROR: A failure occurred in build().", log_tail: "==> build()\n==> ERROR: A failure occurred in build().", final: true }, c2.json.token);
+    expect((await call("GET", `/factory/tasks/${c2.json.task.id}`)).json.task.log_tail).toBe("==> build()\n==> ERROR: A failure occurred in build().");
+  });
+});

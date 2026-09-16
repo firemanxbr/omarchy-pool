@@ -36,7 +36,9 @@ services:
       FACTORY_MODEL: ${FACTORY_MODEL:-}
       # GitHub's API: the release, the files of every package it builds. Without
       # a token: 60 requests an hour from your address. A fine-grained token
-      # with no permissions at all is enough (`gh auth token` works).
+      # with no permissions at all, made for this worker — never `gh auth
+      # token`, which is your account. What the worker holds — this, the
+      # agent's key, its own token — the build never sees (/docs/workers#secrets).
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       # Project workers only: a directory with the SAME path on the host and in the container.
       # OMARCHY_WORK_DIR: ${HOME}/omarchy-worker
