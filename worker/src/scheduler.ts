@@ -46,9 +46,12 @@ export const SYNC_SOURCES: { source: string; arch: string; ring: string; base_ur
   { source: "core", arch: "x86_64", ring: "edge", base_url: "https://mirror.omarchy.org/core/os/x86_64", db_name: "core", keyring: "archlinux" },
   { source: "multilib", arch: "x86_64", ring: "edge", base_url: "https://mirror.omarchy.org/multilib/os/x86_64", db_name: "multilib", keyring: "archlinux" },
   { source: "extra", arch: "x86_64", ring: "edge", base_url: "https://mirror.omarchy.org/extra/os/x86_64", db_name: "extra", keyring: "archlinux" },
+  // The OPR enters the way every project does: its newest channel into
+  // edge, and rc and stable by the pool's own evidence. Its rc and stable
+  // channels used to be synced straight into the matching rings — the one
+  // source that skipped the gates, and the rebuild-per-channel collisions
+  // in every sync's journal line (zero trust, 2026-09-16).
   { source: "packages", arch: "x86_64", ring: "edge", base_url: "https://pkgs.omarchy.org/edge/x86_64", db_name: "omarchy", keyring: "omarchy" },
-  { source: "packages", arch: "x86_64", ring: "rc", base_url: "https://pkgs.omarchy.org/rc/x86_64", db_name: "omarchy", keyring: "omarchy" },
-  { source: "packages", arch: "x86_64", ring: "stable", base_url: "https://pkgs.omarchy.org/stable/x86_64", db_name: "omarchy", keyring: "omarchy" },
   { source: "chaotic", arch: "x86_64", ring: "edge", base_url: "https://builds.garudalinux.org/repos/chaotic-aur/x86_64", db_name: "chaotic-aur", keyring: "chaotic", defer_to: "core,extra,multilib,packages,factory" },
   { source: "core", arch: "aarch64", ring: "edge", base_url: "http://os.archlinuxarm.org/aarch64/core", db_name: "core", keyring: "archlinuxarm" },
   { source: "alarm", arch: "aarch64", ring: "edge", base_url: "http://os.archlinuxarm.org/aarch64/alarm", db_name: "alarm", keyring: "archlinuxarm" },
