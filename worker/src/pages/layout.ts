@@ -120,7 +120,7 @@ const CSS = String.raw`
   .ring .name { font-family: Geist, sans-serif; font-size: 20px; font-weight: 600; }
   .ring .rel { color: var(--muted); font-size: 13px; }
   button.small { font-size: 12px; padding: 2px 8px; margin-left: 6px; }
-  .pill { display: inline-block; font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; padding: 2px 8px; border: 1px solid var(--line); color: var(--muted); }
+  .pill { display: inline-block; font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; padding: 2px 8px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
   .pill.ok { color: var(--green); border-color: var(--green); }
   .pill.warn { color: var(--amber); border-color: var(--amber); }
   .pill.error { color: var(--red); border-color: var(--red); }
@@ -367,15 +367,16 @@ const CSS = String.raw`
   .private-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; border-top: 1px solid var(--line); padding-top: 28px; margin-bottom: 18px; }
   .private-head .lock { border: 1px solid var(--line); padding: 2px 8px; } .private-head h2 { margin: 0; } .private-head .right { margin-left: auto; display: flex; gap: 12px; align-items: center; }
   .two { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; }
-  /* Review: yours first — two groups of cards (waiting, decided) — then the one table everyone reads and maintainers act on. */
+  /* Review: yours first — two groups of one-line rows (waiting, decided) — then the one table everyone reads and maintainers act on. */
   .notice { border: 1px solid var(--line); background: var(--panel); padding: 12px 16px; font-size: 13.5px; color: var(--muted); margin: 0 0 16px; } .notice.warn { border-color: var(--amber); } .notice b { color: var(--text); }
-  .rgroups { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 16px 24px; margin-bottom: 44px; }
-  .rgroup h3 { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 10px; } .rgroup h3 .dim { font-size: 12px; font-weight: 400; font-family: "JetBrains Mono", monospace; }
-  .rcards { display: grid; gap: 10px; }
-  .rcard { border: 1px solid var(--line); border-left-width: 3px; background: var(--panel); padding: 12px 14px; display: grid; gap: 4px; }
-  .rcard.act { border-left-color: var(--amber); } .rcard.ok { border-left-color: var(--green); }
-  .rcard .n { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; } .rcard .s { font-size: 13px; color: var(--muted); } .rcard .s b { color: var(--text); font-weight: 500; }
-  .rcard .go { font-size: 12.5px; color: var(--green); text-decoration: none; justify-self: start; } .rcard .go:hover { text-decoration: underline; }
+  .rgroups { display: grid; gap: 22px; margin-bottom: 44px; }
+  .rgroup h3 { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 8px; } .rgroup h3 .dim { font-size: 12px; font-weight: 400; font-family: "JetBrains Mono", monospace; }
+  .rrows { display: grid; gap: 1px; background: var(--line); border: 1px solid var(--line); }
+  .rrow { background: var(--panel); padding: 9px 14px; display: grid; grid-template-columns: minmax(160px, 1fr) auto minmax(0, 2.6fr) auto; gap: 6px 14px; align-items: center; font-size: 13px; box-shadow: inset 3px 0 0 var(--line); }
+  .rrow.act { box-shadow: inset 3px 0 0 var(--amber); } .rrow.ok { box-shadow: inset 3px 0 0 var(--green); }
+  .rrow .n { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .rrow .s { color: var(--muted); min-width: 0; } .rrow .s .pill { margin-right: 4px; }
+  .rrow .go { font-size: 12.5px; color: var(--green); text-decoration: none; white-space: nowrap; justify-self: end; } .rrow .go:hover { text-decoration: underline; }
+  .rrows > p { background: var(--panel); padding: 10px 14px; }
   table.reader .decision { display: none; } tr.for-you td:first-child { box-shadow: inset 3px 0 0 var(--amber); } tr.mine-row td:first-child { box-shadow: inset 3px 0 0 var(--line); }
   details.tool { border: 1px solid var(--line); background: var(--panel); padding: 12px 16px; } details.tool summary { cursor: pointer; font-weight: 500; } details.tool summary .dim { font-weight: 400; font-size: 12.5px; margin-left: 8px; } details.tool[open] summary { margin-bottom: 12px; }
   #mine-queue { margin: 0 0 18px; } #mine-queue b { color: var(--text); } #mine-queue a { color: var(--green); text-decoration: none; }
@@ -483,7 +484,7 @@ const CSS = String.raw`
   @media (max-width: 900px) {
     .community, .two, .profile-head, .live-grid, .docs, .cando, .start-grid, .pk-grid, .open-grid { grid-template-columns: 1fr; }
     .docs-side { position: static; } .stepper { grid-template-columns: repeat(2, 1fr); } .timeline { grid-template-columns: 1fr; }
-    .gate, .sponsor { grid-template-columns: 1fr; } .sponsor .side { justify-items: start; } .sponsor .promise { text-align: left; }
+    .gate, .sponsor { grid-template-columns: 1fr; } .rrow { grid-template-columns: 1fr auto; } .rrow .s, .rrow .go { grid-column: 1 / -1; } .rrow .go { justify-self: start; } .sponsor .side { justify-items: start; } .sponsor .promise { text-align: left; }
     .heat .r, .heat .days { grid-template-columns: 80px repeat(14, 1fr); }
   }
   .live-grid > * { min-width: 0; } .ticker .row > span { min-width: 0; overflow-wrap: anywhere; }

@@ -25,8 +25,8 @@ const BODY = String.raw`
     <p class="notice warn" id="mine-blocked" hidden></p>
     <p class="sub" id="mine-queue" hidden></p>
     <div class="rgroups">
-      <div class="rgroup" id="g-waiting"><h3>Waiting for a maintainer <span class="dim">nothing to do on your side</span></h3><div class="rcards" id="mine-waiting"></div></div>
-      <div class="rgroup" id="g-decided"><h3>Decided <span class="dim">what a maintainer said</span></h3><div class="rcards" id="mine-decided"></div></div>
+      <div class="rgroup" id="g-waiting"><h3>Waiting for a maintainer <span class="dim">nothing to do on your side</span></h3><div class="rrows" id="mine-waiting"></div></div>
+      <div class="rgroup" id="g-decided"><h3>Decided <span class="dim">what a maintainer said</span></h3><div class="rrows" id="mine-decided"></div></div>
     </div>
   </div>
 
@@ -39,8 +39,8 @@ const BODY = String.raw`
   <section id="brake" hidden>
     <details class="tool"><summary>The brake <span class="dim">block a contributor or a package, with the reason on the record — another maintainer lifts it</span></summary>
       <form id="block-form" class="searchbar"><input id="block-what" placeholder="contributor login, or package name" required> <input id="block-why" placeholder="why — the record and the contributor see this" required minlength="4"> <button type="submit">Block</button></form>
-      <div class="two"><div class="table-wrap"><table id="blocked-people"><thead><tr><th>Contributor</th><th>Since</th><th>By</th><th>Reason</th><th></th></tr></thead><tbody></tbody></table></div>
-      <div class="table-wrap"><table id="blocked-packages"><thead><tr><th>Package</th><th>Owner</th><th>Since</th><th>By</th><th>Reason</th><th></th></tr></thead><tbody></tbody></table></div></div>
+      <div class="two"><div><div class="table-wrap"><table id="blocked-people"><thead><tr><th>Contributor</th><th>Since</th><th>By</th><th>Reason</th><th></th></tr></thead><tbody></tbody></table></div></div>
+      <div><div class="table-wrap"><table id="blocked-packages"><thead><tr><th>Package</th><th>Owner</th><th>Since</th><th>By</th><th>Reason</th><th></th></tr></thead><tbody></tbody></table></div></div></div>
     </details>
   </section>
 
@@ -96,10 +96,11 @@ const SCRIPT = String.raw`
     ]);
   }
 
-  // ---- yours: one card per package of yours in the flow — waiting first, then decided
-  function card(cls, name, version, arch, line, link) {
-    return '<div class="rcard ' + cls + '"><div class="n">' + pkg(name, version) + '<span class="pill none">' + esc(arch) + '</span></div><div class="s">' + line + '</div>' + (link ? '<a class="go" href="' + esc(link[0]) + '">' + link[1] + '</a>' : '') + '</div>';
+  // ---- yours: one line per package of yours in the flow — waiting first, then decided
+  function row(cls, name, version, arch, state, line, link) {
+    return '<div class="rrow ' + cls + '"><div class="n">' + pkg(name, version) + '</div><span class="pill none">' + esc(arch) + '</span><div class="s">' + state + ' ' + line + '</div>' + (link ? '<a class="go" href="' + esc(link[0]) + '">' + link[1] + '</a>' : '<span></span>') + '</div>';
   }
+  function short(t, n) { t = String(t || ""); return t.length > n ? '<span title="' + esc(t) + '">' + esc(t.slice(0, n - 1)) + '…</span>' : esc(t); }
   function renderMine() {
     if (!WHO) return;
     var waiting = [], decided = [];
@@ -108,17 +109,17 @@ const SCRIPT = String.raw`
     $("#mine-blocked").hidden = !meBlocked;
     if (meBlocked) $("#mine-blocked").innerHTML = '<b>You are blocked</b> since ' + ago(meBlocked.blocked_at) + ' by ' + person(meBlocked.blocked_by) + ': ' + esc(meBlocked.blocked_reason || "") + ' — nothing of yours gets in until another maintainer lifts it.';
     (BLOCKS.packages || []).filter(function (b) { return b.owner === login; }).forEach(function (b) {
-      decided.push(card("act", b.name, null, "all", '<span class="pill error">blocked</span> ' + ago(b.blocked_at) + ' by ' + person(b.blocked_by) + ': ' + esc(b.blocked_reason || ""), ["/docs/governance", "What a block means →"]));
+      decided.push(row("act", b.name, null, "all", '<span class="pill error">blocked</span>', ago(b.blocked_at) + ' by ' + person(b.blocked_by) + ': ' + short(b.blocked_reason, 90), ["/docs/governance", "What a block means →"]));
     });
     // Staged builds of yours, one card per package and architecture: the project's build when there is one, your own otherwise.
     var seen = {};
     STAGED.filter(function (t) { return t.owner === login; }).sort(function (a, b) { return (b.kind === "project") - (a.kind === "project"); }).forEach(function (t) {
       var key = t.name + "/" + t.arch; if (seen[key]) return; seen[key] = true;
       var pb = t.project_build;
-      if (t.kind === "project") waiting.push(card("", t.name, t.version, t.arch, 'The project built it again from your evidence (#' + t.id + ', from your build #' + esc(String(t.from || "")) + ') — <b>waiting for a maintainer\'s approval</b>.', [t.evidence.log, "The project's build log →"]));
-      else if (pb && (pb.status === "queued" || pb.status === "leased")) waiting.push(card("", t.name, t.version, t.arch, 'A maintainer read your build #' + t.id + ' and <b>the project is building it again</b> (#' + pb.id + ').', [t.evidence.log, "Your build log →"]));
-      else if (pb && pb.status === "failed") waiting.push(card("", t.name, t.version, t.arch, 'The project\'s build #' + pb.id + ' from your evidence <b>failed</b>' + (pb.error ? ': ' + esc(pb.error.slice(0, 120)) : '') + ' — a maintainer decides what is next.', [t.evidence.log, "Your build log →"]));
-      else waiting.push(card("", t.name, t.version, t.arch, 'Your build #' + t.id + ' is staged with its evidence — <b>waiting for a maintainer</b> to read it' + (t.audit && t.audit.status === "done" && t.audit.verdict ? ' · audit <span class="pill ' + (t.audit.verdict === "ok" ? "ok" : t.audit.verdict === "warn" ? "warn" : "error") + '">' + esc(t.audit.verdict) + '</span>' : t.audit && t.audit.status === "queued" ? ' · audit waiting' : '') + '.', [t.evidence.log, "Your build log →"]));
+      if (t.kind === "project") waiting.push(row("", t.name, t.version, t.arch, '<span class="pill ok">built again</span>', 'the project\'s #' + t.id + ' (from your #' + esc(String(t.from || "")) + ') waits for approval', [t.evidence.log, "The project's log →"]));
+      else if (pb && (pb.status === "queued" || pb.status === "leased")) waiting.push(row("", t.name, t.version, t.arch, '<span class="pill blue">building again</span>', 'the project is building it again (#' + pb.id + '), from your #' + t.id, [t.evidence.log, "Your log →"]));
+      else if (pb && pb.status === "failed") waiting.push(row("", t.name, t.version, t.arch, '<span class="pill error" title="' + esc(pb.error || "") + '">failed</span>', 'the project\'s #' + pb.id + ' (from your #' + t.id + ') failed — a maintainer decides', [t.evidence.log, "Your log →"]));
+      else waiting.push(row("", t.name, t.version, t.arch, '<span class="pill warn">staged</span>', 'your build #' + t.id + ' waits for a maintainer' + (t.audit && t.audit.status === "done" && t.audit.verdict ? ' · audit <span class="pill ' + (t.audit.verdict === "ok" ? "ok" : t.audit.verdict === "warn" ? "warn" : "error") + '">' + esc(t.audit.verdict) + '</span>' : t.audit && t.audit.status === "queued" ? ' · audit waiting' : ''), [t.evidence.log, "Your log →"]));
     });
     // Decided: the record's latest word on each package of yours (a rejection carries the note; an approval, the ring).
     var mine = {}; ((MINE && MINE.packages) || []).forEach(function (p) { mine[p.name] = p; });
@@ -126,8 +127,8 @@ const SCRIPT = String.raw`
     APPROVALS.forEach(function (a) { if (mine[a.name] && !last[a.name + "/" + a.arch]) last[a.name + "/" + a.arch] = a; });
     Object.keys(last).forEach(function (k) {
       var a = last[k], p = mine[a.name];
-      if (a.decision === "rejected") decided.push(card("act", a.name, a.version, a.arch, '<span class="pill error">rejected</span> ' + ago(a.created_at) + ' by ' + person(a.by) + ': ' + esc(a.note || "") + ' — <b>fix it and build again</b>.', ["/factory", "Build it again →"]));
-      else decided.push(card("ok", a.name, a.version, a.arch, '<span class="pill ok">approved</span> ' + ago(a.created_at) + ' by ' + person(a.by) + (a.note ? ': ' + esc(a.note) : '') + (p && p.status === "published" ? ' — <b>in edge</b>, signed by the pool.' : ' — the project\'s build is on its way into edge.'), p && p.status === "published" ? ["/package/" + encodeURIComponent(a.name) + "?ring=edge&arch=" + a.arch, "The package →"] : null));
+      if (a.decision === "rejected") decided.push(row("act", a.name, a.version, a.arch, '<span class="pill error">rejected</span>', ago(a.created_at) + ' by ' + person(a.by) + ': ' + short(a.note, 110), ["/factory", "Fix it, build again →"]));
+      else decided.push(row("ok", a.name, a.version, a.arch, '<span class="pill ok">approved</span>', ago(a.created_at) + ' by ' + person(a.by) + (p && p.status === "published" ? ' — in edge, signed by the pool' : ' — the project\'s build is on its way into edge') + (a.note ? ' · ' + short(a.note, 80) : ''), p && p.status === "published" ? ["/package/" + encodeURIComponent(a.name) + "?ring=edge&arch=" + a.arch, "The package →"] : null));
     });
     $("#mine-waiting").innerHTML = waiting.join("") || '<p class="sub" style="margin:0">Nothing of yours waiting. <a href="/request">Request a package →</a></p>';
     $("#mine-decided").innerHTML = decided.join("") || '<p class="sub" style="margin:0">No decision on a package of yours yet.</p>';
