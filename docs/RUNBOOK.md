@@ -52,7 +52,7 @@ pkg-repo job promote --param from=rc --param to=stable --param force=yes       #
 pkg-repo job promote --param from=rc --param to=stable --param arch=aarch64    # one architecture only: its evidence, its gate, its rows; x86_64 keeps what stable serves
 pkg-repo job rollback --param ring=stable --param to=<release id>              # then renders both architectures (or the overview's roll back button)
 pkg-repo job rollback --param ring=stable --param to=<release id> --param arch=x86_64   # that architecture only
-pkg-repo job render --param ring=stable --param arch=x86_64
+pkg-repo job render --param ring=stable --param arch=x86_64                     # any ring, the lab included
 pkg-repo job health --param ring=stable --param arch=aarch64
 pkg-repo job security
 pkg-repo job enqueue                                                   # the PKGBUILDs on main → the queue, now

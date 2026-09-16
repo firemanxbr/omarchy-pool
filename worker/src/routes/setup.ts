@@ -20,12 +20,22 @@ import { UNMOVED } from "./relayout";
 
 export async function pacmanInclude(env: Env, ring: string, arch: string, withOptional: Set<string>, setupUrl: string): Promise<string | null> {
   if (!isRing(ring) || !isRepoArch(arch)) return null;
-  const head = await ringHead(env, ring);
+  // The lab's include is the lab above the edge: what is being tried wins
+  // by section order, its dependencies resolve from edge. A lab with no
+  // release yet is the edge alone.
+  const heads = ring === "lab" ? [await ringHead(env, "lab"), await ringHead(env, "edge")] : [await ringHead(env, ring)];
+  const head = heads.find((h) => h !== null) ?? null;
   if (!head) return null;
-  const dbs = await env.DB.prepare("SELECT repo, r2_key FROM release_artifacts WHERE release_id = ? AND kind = 'db' AND arch = ? ORDER BY repo").bind(head.id, arch).all<{ repo: string; r2_key: string }>();
+  const dbs: { repo: string; r2_key: string }[] = [];
+  for (const h of heads) {
+    if (!h) continue;
+    const rows = await env.DB.prepare("SELECT repo, r2_key FROM release_artifacts WHERE release_id = ? AND kind = 'db' AND arch = ? ORDER BY repo").bind(h.id, arch).all<{ repo: string; r2_key: string }>();
+    const sourceOf = (repo: string) => sourceOfRepo(repo) ?? repo;
+    dbs.push(...rows.results.sort((a, b) => sourceRank(sourceOf(a.repo)) - sourceRank(sourceOf(b.repo)) || a.repo.localeCompare(b.repo)));
+  }
   const pool = env.POOL_URL.replace(/\/$/, "");
   const sourceOf = (repo: string) => sourceOfRepo(repo) ?? repo;
-  const repos = dbs.results.sort((a, b) => sourceRank(sourceOf(a.repo)) - sourceRank(sourceOf(b.repo)) || a.repo.localeCompare(b.repo));
+  const repos = dbs;
   // A section's Server is the directory its database is in — a source's own
   // (`<source>/<arch>`), where its packages are. While a relayout is still
   // moving objects out of the flat `<arch>/` directory, that one is named
@@ -33,7 +43,9 @@ export async function pacmanInclude(env: Env, ring: string, arch: string, withOp
   // is still found. The line goes when the last object has moved.
   const moving = await env.DB.prepare(`SELECT 1 FROM packages WHERE ${UNMOVED} LIMIT 1`).first();
   const lines = [
-    `# omarchy-pool — ring ${ring}, ${arch}. Generated from what the ring serves (release #${head.seq}).`,
+    ring === "lab"
+      ? `# omarchy-pool — the lab above edge, ${arch}. Nothing here is promised: what the lab holds (release #${heads[0]?.seq ?? "none yet"}) over what edge serves (release #${heads[1]?.seq ?? "none"}).`
+      : `# omarchy-pool — ring ${ring}, ${arch}. Generated from what the ring serves (release #${head.seq}).`,
     `# Included from /etc/pacman.conf above [core]; the mirrors below it are the fallback.`,
     `# ${setupUrl} rewrites this file; edit /etc/pacman.conf, not this.`,
     "",

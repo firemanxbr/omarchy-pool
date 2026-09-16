@@ -3,7 +3,7 @@
 #
 #   curl -fsSL __API__/setup | sudo bash -s -- --ring stable
 #
-# Options: --ring stable|rc|edge (default stable) · --with chaotic (optional sources) · --remove (undo)
+# Options: --ring stable|rc|edge|lab (default stable; lab = the lab's builds above edge, for trying them) · --with chaotic (optional sources) · --remove (undo)
 #
 # What it does, and nothing else:
 #   1. trusts the key that signs the pool's databases (once);
@@ -21,11 +21,11 @@ while [[ $# -gt 0 ]]; do
     --ring) RING="$2"; shift 2 ;;
     --with) WITH="$2"; shift 2 ;;
     --remove) REMOVE=1; shift ;;
-    -h|--help) echo "usage: curl -fsSL __API__/setup | sudo bash -s -- [--ring stable|rc|edge] [--with chaotic] [--remove]"; exit 0 ;;
+    -h|--help) echo "usage: curl -fsSL __API__/setup | sudo bash -s -- [--ring stable|rc|edge|lab] [--with chaotic] [--remove]"; exit 0 ;;
     *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
-[[ "$RING" == stable || "$RING" == rc || "$RING" == edge ]] || { echo "--ring must be stable, rc or edge" >&2; exit 2; }
+[[ "$RING" == stable || "$RING" == rc || "$RING" == edge || "$RING" == lab ]] || { echo "--ring must be stable, rc, edge or lab" >&2; exit 2; }
 [[ "$(id -u)" -eq 0 ]] || { echo "run it with sudo:  curl -fsSL __API__/setup | sudo bash -s -- --ring $RING" >&2; exit 1; }
 ARCH="$(uname -m)"; [[ "$ARCH" == arm64 ]] && ARCH=aarch64
 [[ "$ARCH" == x86_64 || "$ARCH" == aarch64 ]] || { echo "the pool serves x86_64 and aarch64; this machine is $ARCH" >&2; exit 1; }
