@@ -1,15 +1,16 @@
 # omarchy-pool
 
-One package repository for [Omarchy](https://omarchy.org): every Arch Linux, Arch
-Linux ARM and Omarchy (OPR) package, verified against its project's signing key,
-stored once in an **immutable pool**, and served in three **rings** —
-`edge` follows upstream within hours, `rc` is what passed a real pacman and an ABI
-check on both architectures a day later, `stable` is what stayed healthy in `rc`
-for another day — with **automatic rollback** when a promotion fails its checks.
-Packages stay unmodified `makepkg` output; pacman reads generated, signed
-databases as plain static files; a **thin client** adds release awareness and an
-ELF-level safety check; a **security layer** matches public advisories to what
-each ring serves and fast-tracks fixes.
+One package repository for [Omarchy](https://omarchy.org): every Arch Linux,
+Arch Linux ARM, Omarchy (OPR) and Asahi package — and the ones its own factory
+builds — verified against its project's signing key, stored once in an
+**immutable pool**, and served in three **rings** that move on evidence:
+`edge` follows the sources within hours, `rc` is what passed a real pacman, an
+ABI check and the security layer on both architectures, `stable` is what stayed
+healthy in `rc` through two checks in a row — with **automatic rollback** when
+a promotion fails its checks. Packages stay unmodified `makepkg` output; pacman
+reads generated, signed databases as plain static files; a **thin client** adds
+release awareness and an ELF-level safety check; a **security layer** matches
+public advisories to what each ring serves and fast-tracks fixes.
 
 **Live:** https://omarchy-pool.firemanxbr.org · packages and databases at
 https://pool.firemanxbr.org · API at https://pkgs.firemanxbr.org/api/v1
@@ -58,23 +59,14 @@ omarchy-cli mcp                       # the same answers as MCP tools for an ass
 
 ## How it works
 
-Read [How it works](https://omarchy-pool.firemanxbr.org/docs/how-it-works) on the
-dashboard, or [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design:
-the pool and index, the release model, promotion by evidence (health + ABI gate,
-promotion by evidence within hours, automatic rollback), the sources, the security layer, the pipeline.
-Packages nobody ships yet come through the factory: contributors build them
-with the same tools maintainers use (one signed worker image for everyone,
-the owner's own agent if they like — Anthropic, OpenAI, Gemini or xAI), a
-second agent audits the staged evidence, maintainers write the recipe the
-project builds and attests, never their own — *we do not use what you
-built, we learn from it*
-([docs/GOVERNANCE.md](docs/GOVERNANCE.md)). Every package carries its
-**seal**: where the exact object came from and the proof — the upstream
-project and keyring for a synced package; for a factory package the whole
-chain (evidence build, audit, approval, the maintainer's recipe, the
-project's build) and a signed attestation
-next to the object in the pool (`GET /api/v1/packages/<sha256>/provenance`,
-the package page, `omarchy-cli info`, a pacman hook).
+The process is documented where it runs, on the dashboard:
+[How it works](https://omarchy-pool.firemanxbr.org/docs/how-it-works) — where
+every package comes from (each source, its architectures, its keyring, where it
+enters), what is checked before it reaches a machine, what protects users, and
+what the pool does for contributors and maintainers;
+[Governance](https://omarchy-pool.firemanxbr.org/docs/governance) — who decides
+what. The documents below are the code's own, for people working on the pool
+itself.
 
 | | |
 |---|---|
