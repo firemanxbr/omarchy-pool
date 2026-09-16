@@ -297,6 +297,66 @@ pub fn run(api: &Api, opts: &GateOptions<'_>) -> Result<GateReport, RepoError> {
     Ok(report)
 }
 
+/// Does an ABI verdict for the current release of `ring` on `arch` already
+/// stand? A release is immutable, so its check gives the same answer until
+/// the reference image moves (re-pinned daily): a verdict younger than
+/// `max_age_hours` and made since the head was created holds, and the
+/// promotion attempt need not pay for it again — with promotion tried after
+/// every sync and every three hours (2026-09-16), the check was the
+/// pipeline's largest read of the index. An incomplete check (an error
+/// without blockers) is not a verdict and is repeated.
+pub fn abi_evidence_stands(
+    api: &Api,
+    ring: &str,
+    arch: &str,
+    max_age_hours: u32,
+) -> Result<bool, RepoError> {
+    let head_at = api
+        .history(ring)?
+        .releases
+        .iter()
+        .find(|r| r.is_head != 0)
+        .and_then(|r| parse_iso8601(&r.created_at));
+    let Some(head_at) = head_at else {
+        return Ok(false);
+    };
+    let events = api.events("abi", 200)?;
+    Ok(abi_verdict_stands(
+        &events,
+        ring,
+        arch,
+        head_at,
+        now_unix(),
+        i64::from(max_age_hours) * 3_600,
+    ))
+}
+
+/// Pure part of [`abi_evidence_stands`]: an `abi` event of `ring`/`arch`
+/// that is a verdict (green, or blockers counted), made after the head was
+/// created and less than `max_age` seconds ago.
+fn abi_verdict_stands(
+    events: &[Event],
+    ring: &str,
+    arch: &str,
+    head_at: i64,
+    now: i64,
+    max_age: i64,
+) -> bool {
+    events.iter().any(|e| {
+        let verdict = e.status == "ok"
+            || e.payload
+                .as_ref()
+                .and_then(|p| p.get("blockers"))
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|b| b > 0);
+        verdict
+            && e.kind == "abi"
+            && e.ring.as_deref() == Some(ring)
+            && e.source.as_deref() == Some(arch)
+            && parse_iso8601(&e.created_at).is_some_and(|t| t > head_at && now - t < max_age)
+    })
+}
+
 /// The latest `abi` check of `ring`/`arch` young enough to be evidence.
 fn latest_abi<'a>(
     events: &'a [Event],
@@ -423,6 +483,57 @@ mod tests {
     }
 
     const NOW: i64 = 1_789_197_600; // 2026-09-12T07:20:00Z
+
+    #[test]
+    fn an_abi_verdict_for_the_current_release_stands_once() {
+        // The head was made at 06:00; a green check at 06:30 stands for the
+        // attempts that follow, an older one (before the head) or one of the
+        // other architecture does not, an incomplete check (error, no
+        // blockers) does not, blockers counted is a verdict too.
+        let head_at = NOW - 4_800; // 06:00
+        let day = 24 * 3_600;
+        let green = kind_ev("abi", 1, "rc", "x86_64", "ok", "2026-09-12T06:30:00Z");
+        let stale = kind_ev("abi", 2, "rc", "x86_64", "ok", "2026-09-12T05:30:00Z");
+        let other = kind_ev("abi", 3, "rc", "aarch64", "ok", "2026-09-12T06:30:00Z");
+        let health = kind_ev("health", 4, "rc", "x86_64", "ok", "2026-09-12T06:30:00Z");
+        let mut incomplete = kind_ev("abi", 5, "rc", "x86_64", "error", "2026-09-12T06:40:00Z");
+        incomplete.payload = Some(serde_json::json!({ "blockers": 0, "failed_batches": 2 }));
+        let mut blocked = kind_ev("abi", 6, "rc", "x86_64", "error", "2026-09-12T06:50:00Z");
+        blocked.payload = Some(serde_json::json!({ "blockers": 3 }));
+        assert!(abi_verdict_stands(
+            std::slice::from_ref(&green),
+            "rc",
+            "x86_64",
+            head_at,
+            NOW,
+            day
+        ));
+        assert!(!abi_verdict_stands(
+            &[stale, other, health, incomplete],
+            "rc",
+            "x86_64",
+            head_at,
+            NOW,
+            day
+        ));
+        assert!(abi_verdict_stands(
+            &[blocked],
+            "rc",
+            "x86_64",
+            head_at,
+            NOW,
+            day
+        ));
+        // A day later the same verdict is too old: the reference image may have moved.
+        assert!(!abi_verdict_stands(
+            &[green],
+            "rc",
+            "x86_64",
+            head_at,
+            NOW + day,
+            day
+        ));
+    }
 
     #[test]
     fn iso8601_matches_known_epochs() {

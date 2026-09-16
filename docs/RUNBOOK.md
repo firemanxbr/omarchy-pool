@@ -551,9 +551,21 @@ rendered artifact to find the newest (an index now), the stats page
 grouping every event ever recorded to find the latest per kind (a table
 kept by a trigger now, `latest_events`), and the half-hourly snapshot
 recounting the whole pool when nothing had changed (it reuses the previous
-one now). What still reads in bulk is the jobs' own paging through a
-ring's manifests (the render and the health check), a few million rows a
-run.
+one now). The jobs' own reads were the next two, and they scale with how often the
+gates run — promotion is attempted after every sync and every three hours
+now: the ABI gate's dependency closure (`/api/v1/graph`) read the ring's
+providers for every edge, 20–45 million rows a call, because the planner
+probed `package_provides` through an automatic index on `declared`; the
+plan is pinned (`CROSS JOIN … INDEXED BY`) and a call reads the ring once
+plus the edges. A page of a release's manifests (what a render and a
+health check page through, 500 at a time) started from the release's
+members — all of them, sorted, per page, 73k rows for 500; it walks the
+`(name, repo_arch, source)` index from the cursor now and asks per row
+whether the package is in the release. And the ABI verdict of an
+unchanged release stands for a day: an attempt three hours later does not
+repeat it (`gate::abi_evidence_stands`); the health check, which is the
+soak, runs every time. `test/graph.test.ts` measures both queries' rows
+read, so a planner regression fails CI.
 
 **Who uses it.** Once a day (00:30 UTC) the brain counts yesterday's
 audience from the same analytics: the distinct client addresses that
