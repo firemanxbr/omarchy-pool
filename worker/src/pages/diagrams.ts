@@ -181,8 +181,8 @@ export function archDiagram(): string {
   s += '<rect class="d-queue" x="300" y="215" width="700" height="30"/><text class="d-t small" x="314" y="234">job queue</text><text class="d-s live" x="400" y="234" data-live="queue">…</text>';
   for (const x of [410, 670, 930]) s += darrow(x, 300, x, 245, "", true) + dlab(x + 10, 276, ["claim · report"], "start");
   s += dbox({ x: 300, y: 300, w: 220, h: 70, title: "Pool workers", lines: ["the project's host · trusted", { text: "…", cls: "live", live: "w-pool" }] });
-  s += dbox({ x: 560, y: 300, w: 220, h: 70, title: "Review worker", lines: ["rebuilds + audits · agent key", { text: "…", cls: "live", live: "w-review" }] });
-  s += dbox({ x: 820, y: 300, w: 220, h: 70, title: "Community workers", lines: ["owned by contributors", { text: "…", cls: "live", live: "w-community" }] });
+  s += dbox({ x: 560, y: 300, w: 220, h: 70, title: "Review workers", lines: ["rebuilds + audits · agent via a proxy", { text: "…", cls: "live", live: "w-review" }] });
+  s += dbox({ x: 820, y: 300, w: 220, h: 70, title: "Community workers", lines: ["a broker + a builder, anyone's", { text: "…", cls: "live", live: "w-community" }] });
   s += dbox({ x: 20, y: 300, w: 200, h: 70, title: "GitHub", lines: ["OAuth · MAINTAINERS.toml", "releases · worker image"] });
   s += dline([220, 320, 260, 320, 260, 150], "dash") + darrow(260, 150, 300, 150, "dash") + dlab(266, 270, ["who may approve"], "start");
   return s + "</svg>";

@@ -109,10 +109,15 @@ Every row below is a **pulled job**: the Worker's cron queues it in
 per-job token, and a maintainer queues the same by hand (`pkg-repo job`).
 Nothing of the pipeline runs on GitHub Actions. The project's workers are
 three roles of one image ([factory/README.md](../factory/README.md) *Three
-roles*): *pool* workers take the rows below, *review* workers the `build`
-of approved packages and the `audit`, shared *community* workers the
-contributors' builds — two of each, one per architecture, on the project's
-host (RUNBOOK, *The Studio host*).
+roles*): *pool* workers take the rows below, *review* workers the project's
+`build` and the `audit`, shared *community* workers the contributors' builds
+— two of each, one per architecture, on the project's host (RUNBOOK, *The
+Studio host*). A community worker is a pair: a **broker** that holds the
+worker's token, the agent key and a GitHub token and only receives,
+processes and answers, and a **builder** born with nothing that builds one
+task and dies (`factory/bin/broker`; SECURITY.md, *Isolation*). A project
+worker is its own broker: the build containers it starts hold nothing and
+reach the agent through `agent-proxy`.
 
 | Job | Schedule | What it does |
 |---|---|---|
@@ -126,7 +131,8 @@ host (RUNBOOK, *The Studio host*).
 | `verify` | weekly (Saturday 03:00 UTC), or by hand | does what the pool serves verify? Every OPR object of every ring and architecture downloaded and checked: the bytes are the ones the index names, the `.sig` beside them is Omarchy's signature of those bytes. What is wrong is repaired — the right signature from the upstream channel that still serves the bytes, the ring re-pinned to the object the pool actually holds (indexed from the bytes if the index never saw them), rendered — and what no channel serves any more is reported for a replacement (`verify` event, `pkg-repo verify --repair`) |
 | `trial` | when the project's review build is staged, or by hand (`pkg-repo job trial --param task=<build>`) | the build into the lab and a real pacman on it: the staged packages go into the pool under the factory's directory, pinned into the `lab` ring (never a promised one), the lab rendered; then `tests/trial.sh` runs a clean container of that architecture with the include of `--ring lab` — the lab's sections above `edge`'s — and installs the packages for real (dependencies from `edge`, hooks run, `pacman -Qkk` on the files), checking each came from the lab. The transcript is attached to the evidence (`trial.log`), a `trial` event records it, the Review page shows *installs* or what stopped it. Evidence for the maintainer, never a decision. A pool worker's job |
 | `audit` | when a community build is staged | the second agent ([GOVERNANCE.md](GOVERNANCE.md#the-second-agent)): a project worker whose owner set an agent key (Anthropic, OpenAI, Gemini or xAI) reads the staged PKGBUILD, log and `.PKGINFO`, asks its model for a structured review (`factory/bin/audit-pkgbuild`, `factory/prompts/audit.md`) and attaches `audit.json` / `audit.md` to the evidence; the Review page shows the verdict. A review worker's job |
-| `build` | on approval, on merge, on a new upstream release | a package built in a fresh container: community trust on a contributor's worker into their staging workspace, project trust on a trusted worker into `edge` |
+| `build` | on a request, on a new upstream release, on merge, and when a maintainer presses *Build by the project* | a package built in a fresh container through the gate (checksums, shellcheck, namcap ×2, files, metadata, `check()`, smoke): community trust on a contributor's or a shared worker into the owner's staging workspace as evidence; project trust (`review:<task>`) on a worker two maintainers vouched for, the project's agent writing its own recipe from that evidence, into `staging/@project/` for the audit, the trial and the approval |
+| `publish` | on approval | carries the project's approved build into `edge` as source `factory`, signed by the pool; when the trial passed, into rc and stable too (the fast lane) |
 | audience (`src/audience.ts`) | once a day, 00:30 UTC | taken by the Worker itself from the zone's request analytics: distinct addresses that fetched a ring database the day before, per ring and per architecture, as an `audience` event — the Pool page's *machines on the pool*; nothing per request is kept |
 | metrics snapshot (`src/metrics.ts`) | every 30 minutes | taken by the Worker itself, no job: the pool's jobs of the last 7 days (runs, failures, worker minutes, per kind), builds, workers alive, pool totals and ring sizes, as a `metrics` event; the dashboard's charts and jobs table read from it |
 | worker cron trigger | every 10 minutes | the pool's own scheduler: queues the jobs above when due, requeues expired leases, applies `factory/MAINTAINERS.toml`, reads the OPR's recipe repository for provenance (05:15, `src/provenance.ts`: per package, Omarchy's own or AUR-synced, the upstream AUR commit, the last commit), checks upstreams for bumps (05:45), estimates the bill (06:30), logs pool jobs waiting for a project worker; see RUNBOOK |

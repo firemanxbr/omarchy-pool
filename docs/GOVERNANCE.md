@@ -156,11 +156,14 @@ why; `GET /api/v1/factory/blocks` lists what is in force.
 
 ## The project's workers
 
-Machines maintainers trust. They only do what a maintainer would: the
-pool's jobs (sync, promote, health, security, gc), the audit of a staged
-build and the build of the recipes on `main`. They never build from a
+Machines two maintainers vouched for — never the owner's word alone, the
+trust a signed record, one maintainer enough to take it back. They only do
+what a maintainer would: the pool's jobs (sync, promote, health, security,
+gc), the audit of a staged build, the project's own build of a reviewed
+package and the build of the recipes on `main`. They never build from a
 contributor's staged artifact, and never pull a new package that has no
-evidence and no review yet — that is a contributor's worker's job.
+evidence and no review yet — that is a contributor's worker's job. The
+Review page names the worker and the host behind every build.
 
 The project runs them as two roles of the same image, and a third for the
 community (`OMARCHY_WORKER_ROLE`, [factory/README.md](../factory/README.md)
@@ -168,9 +171,11 @@ community (`OMARCHY_WORKER_ROLE`, [factory/README.md](../factory/README.md)
 **review** worker takes the maintainers' work and nothing else — the
 build of the recipes maintainers merge and the audit of every staged build
 (the second agent); a shared **community** worker builds contributors' packages and
-drafts package requests with an agent key its owner brought. The split
-keeps the maintainers' agent and the contributors' agent apart, and a
-container that is not a review worker never audits.
+drafts package requests with an agent key its owner brought — as a pair:
+a **broker** that holds the token and the key and runs no build, and a
+**builder** born with nothing (SECURITY.md, *Isolation*). The split keeps
+the maintainers' agent and the contributors' agent apart, and a container
+that is not a review worker never audits.
 
 ## Becoming a maintainer
 
@@ -224,17 +229,22 @@ extended to packages — a sole maintainer's own packages wait.
   answered, and the People page shows each worker's agent and whether it
   answers. The pool's own jobs (sync, promote, health, security, gc) need
   no agent and are not gated by one.
-- **Agent keys stay with the worker's owner.** A worker that drafts or
-  corrects PKGBUILDs with an agent (community trust), or audits staged
-  builds for the maintainers (project trust), gets the owner's key in its
-  environment when it starts — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
-  `GEMINI_API_KEY` or `XAI_API_KEY`, whichever provider they use
-  (`factory/bin/agent.py`; `FACTORY_MODEL` picks the model). The worker
-  reports *which* agent it runs (`anthropic/claude-sonnet-5`,
-  `openai/gpt-5`, …) so the Factory page can show it; the key itself never
-  travels. The pool holds no agent key and GitHub runs no agent — nothing
-  of the pipeline runs there; what an agent produces is evidence like any
-  other build, reviewed by a maintainer before it reaches anyone.
+- **Agent keys stay with the worker's owner — and out of the build.** A
+  worker that drafts or corrects PKGBUILDs with an agent (community trust),
+  or audits staged builds for the maintainers (project trust), gets the
+  owner's key — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`,
+  `XAI_API_KEY` or a Claude subscription's `CLAUDE_CODE_OAUTH_TOKEN`
+  (`factory/bin/agent.py`; `FACTORY_MODEL` picks the model) — on the
+  **broker**, the one process on the host that holds credentials and runs
+  no build; the builder speaks to it in the Anthropic Messages shape and
+  never sees the key. The worker reports *which* agent really answers
+  (`claude-code/claude-sonnet-5`, `openai/gpt-5`, …) so the Factory page
+  can show it. The pool holds no agent key and GitHub runs no agent —
+  nothing of the pipeline runs there; what an agent produces is evidence
+  like any other build, reviewed by a maintainer before it reaches anyone.
+  A build is somebody else's code and its log is public: *the build sees
+  nothing the log cannot show*, and the pool refuses a log that carries
+  what looks like a secret.
 - **Package requests** are made on the dashboard, on the record; the
   build a contributor asks for goes to the project's shared community
   workers (the project's agent) or to the contributor's own worker (their

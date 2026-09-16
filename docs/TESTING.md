@@ -80,7 +80,8 @@ the network. Two kinds of tests live there:
 |---|---|
 | `releases.test.ts` | the release logic through the Worker's own `fetch`: manifests indexed into the pool, `POST /releases` — first release, adds on top of the head, replace-by-name within a source and architecture (another source's build of the name stays; `remove_from` drops one source's, `remove` every source's), `remove` / `remove_arch`, promote `edge → rc → stable` by copying the source head, rollback to an earlier release (lineage, history, `is_head`), the scopes each ring needs; the diff between releases; `unchanged_arches`; `GET /releases/:ring` paged in `(name, arch, source)` order (keyset cursor with the source, the older two-part cursor still accepted) with `release_id` pinning, `arch=`, `include=files`; `GET /graph?arch=` (declared dependencies and provides, per architecture); `GET /stats` before any metrics snapshot; the delta model — a release writes only its delta, checkpoints every 24th, an old release read by id is reconstructed, retention keeps the checkpoint a rollback inside it needs and prunes the rest (410 beyond); the lab — any object pinned into it, never promoted from or into (400), its include the lab's sections above edge's |
 | `relayout.test.ts` | the one-time move to one directory per source (`routes/relayout.ts`): objects copied with their signature and attestation and R2 checking the row's sha256, rows pointed at `<source>/<arch>/<filename>`, a null key backfilled, a row whose bytes the pool never held marked `ghost/…`, purge refused while anything is left to move and then emptying the flat directories; the upload, index, signature and `/packages/known` routes speaking the new layout — a filename is one object per source, another source's build of it another object |
-| `factory.test.ts` | the factory's brain (the trial included: queued for the project's build only, on its architecture, a community worker never takes it, its token reads the staged package and writes the lab and nothing promised, `trial.log` beside the evidence, the verdict on the Review row); claims with worker tokens (own architecture only, project vs community), leases and per-job tokens, heartbeat, fail → requeue, complete after the package is indexed, the agent a worker reports; a community build staging its evidence (the builder cannot write `audit.*`, the package is for maintainers, the rest is public), the audit queued and taken only by a project worker declaring the kind, the report attached and its verdict on `/factory/review`; approvals — a contributor cannot, a maintainer cannot approve their own package while another maintainer exists, the rebuild queued at project trust, the record and the profile's track record |
+| `factory.test.ts` | the factory's brain (the trial included: queued for the project's build only, on its architecture, a community worker never takes it, its token reads the staged package and writes the lab and nothing promised, `trial.log` beside the evidence, the verdict on the Review row); claims with worker tokens (own architecture only, project vs community), leases and per-job tokens, heartbeat, fail → requeue, complete after the package is indexed, the agent a worker reports; a community build staging its evidence (the builder cannot write `audit.*`, the package is for maintainers, the rest is public), the audit queued and taken only by a project worker declaring the kind, the report attached and its verdict on `/factory/review`; approvals — a contributor cannot, a maintainer cannot approve their own package while another maintainer exists, the rebuild queued at project trust, the record and the profile's track record; what a public log must not carry (a token, a key or the worker's environment in text evidence is a 422 with the kind and the line, never the match; the record never receives it; the log's tail and the error line withheld at complete/fail; multipart closed for text evidence); who trusts whom (a proposal, the second word, never the owner's, the signed record, back at one word); the worker behind every staged build on Review; a record withdrawn with its signature and staging copy, the tombstone's fields |
+| `leak.test.ts` | the shapes a public log must not carry (`src/leak.ts`): each kind, the first hit's line, and the ordinary things a log says that are not one |
 | `pages.test.ts` | the dashboard's pages through the Worker's fetch handler: every door and detail page served, the three doors in the navigation, the footer badge, the Pool's headline, the Factory's forms, the Pipeline's live hooks, the docs' five stages, no template placeholder left behind, the old chapter addresses still redirecting |
 | `audience.test.ts` | one day of the zone's request analytics becomes one number per ring and per architecture; recorded once as an `audience` event; a token without *Zone · Analytics · Read* is reported once for the day, then quiet |
 | `provenance.test.ts` | the OPR provenance scan against a stubbed GitHub: origin per package from the tree and `.omarchy/package.json`, only changed packages fetched again, packages gone from the repository dropped, the per-ring counts |
@@ -309,6 +310,28 @@ omarchy-cli --ring stable --root <rootfs> upgrade --security-only --dry-run
 The candidate rule (confident match, medium or worse or exploited in the wild,
 a clean newer version in the source ring) is unit-tested with the rest of the
 security module.
+
+## The broker, and the worker script's secrets
+
+`python3 tests/broker.py` (CI) runs `factory/bin/broker` against a fake
+pool and a fake agent: the worker's token added to the pool's calls and a
+user agent of its own (Cloudflare answers urllib's default with 403), the
+job token stripped from claim and heartbeat, one task at a time (a second
+claim 409, another task's id 403), a restarted broker adopting the task the
+pool says is leased to its worker, `complete` releasing the hold, the agent
+cap per task, who really answered (`agent`) for the probe, GitHub read-only
+with the token, and the pool path off without a worker token.
+`python3 tests/agent-claude-code.py` runs the claude-code provider against
+a fake `claude`.
+
+What the build sees is checked by hand in the worker image (SECURITY.md,
+*Isolation*): `hold_secrets` leaves a child with no secret, `as_builder`
+gives the build user seven variables and no read of `/proc/1/environ`,
+`with_secrets` lends the agent its keys with nothing in an argv; a builder
+started with `OMARCHY_BROKER` drops a token set on it by mistake and starts
+the build with zero secrets. `factory/worker/omarchy-build-worker.sh` is
+sourced up to its dispatch line for that (`sed '/^hold_secrets$/,$d'`), in
+`docker run --rm ghcr.io/firemanxbr/omarchy-worker:aarch64` with fake values.
 
 ## The agent without a key
 

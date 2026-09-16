@@ -31,7 +31,7 @@ const BODY = String.raw`
     <div class="h2row"><h2>Every worker</h2><label class="dim" style="font-size:13px"><input type="checkbox" id="all-workers"> show workers not seen recently</label></div>
     <div class="panel" style="margin-top:12px"><h3>Project <span class="dim" style="font-size:12px;font-weight:400">the pool's own jobs, on the host the community keeps</span></h3>
       <div class="table-wrap" style="border:0"><table id="w-project"><thead><tr><th>Worker</th><th>Arch</th><th>Where</th><th>Jobs</th><th>Trusted by</th><th>Running</th><th>Done / failed</th><th>Last seen</th></tr></thead><tbody></tbody></table></div></div>
-    <div class="panel" style="margin-top:16px"><h3>Review <span class="dim" style="font-size:12px;font-weight:400">the maintainers' side: builds again, publishes, audits — with the agent key</span></h3>
+    <div class="panel" style="margin-top:16px"><h3>Review <span class="dim" style="font-size:12px;font-weight:400">the maintainers' side: builds again, publishes, audits — the agent through a proxy that holds the key</span></h3>
       <div class="table-wrap" style="border:0"><table id="w-review"><thead><tr><th>Worker</th><th>Arch</th><th>Where</th><th>Agent</th><th>Trusted by</th><th>Building</th><th>Done / failed</th><th>Last seen</th></tr></thead><tbody></tbody></table></div></div>
     <div class="panel" style="margin-top:16px"><h3>Contributors' <span class="dim" style="font-size:12px;font-weight:400">their own machines: their packages, or whatever is queued when shared</span></h3>
       <div class="table-wrap" style="border:0"><table id="w-community"><thead><tr><th>Worker</th><th>Owner</th><th>Arch</th><th>Builds</th><th>Agent</th><th>Building</th><th>Done / failed</th><th>Last seen</th></tr></thead><tbody></tbody></table></div></div>
@@ -85,7 +85,7 @@ __CHARTS__
     };
     $("#kinds").innerHTML =
       card("project", "Project", kinds.project, "The pool's own jobs — sync, render, promote, health, security, gc — on the host the community keeps. No package of anyone's is built here.", function (ws) { return '<dt>with an agent</dt><dd>' + num(ws.filter(function (w) { return w.agent; }).length) + '</dd>'; }) +
-      card("review", "Review", kinds.review, "The maintainers' side. Trusted on two maintainers' word: builds again what a maintainer asked for, publishes what is approved, writes the audit. Holds the agent key.", function (ws) { return '<dt>with an agent</dt><dd>' + num(ws.filter(function (w) { return w.agent; }).length) + '</dd>'; }) +
+      card("review", "Review", kinds.review, "The maintainers' side. Trusted on two maintainers' word: builds again what a maintainer asked for, publishes what is approved, writes the audit. Reaches the agent through a proxy; the key is never on a worker that builds.", function (ws) { return '<dt>with an agent</dt><dd>' + num(ws.filter(function (w) { return w.agent; }).length) + '</dd>'; }) +
       card("community", "Contributors'", kinds.community, "Their own machines, their own agent: their packages only — or, shared, whatever is queued. Evidence for a maintainer, never what users get.", function (ws) { return '<dt>shared · own</dt><dd>' + num(ws.filter(function (w) { return w.mode === "shared"; }).length) + ' · ' + num(ws.filter(function (w) { return w.mode !== "shared"; }).length) + '</dd>'; });
     // The load per worker, the busiest first.
     var ranked = d.workers.filter(function (w) { return w.alive || LOAD[w.id]; }).sort(function (a, b) { return busyOf(b) - busyOf(a); }).slice(0, 10);
@@ -119,7 +119,7 @@ __CHARTS__
 export function workersHtml(poolUrl: string, version: RunningVersion): string {
   return page({
     title: "Workers · omarchy-pool",
-    description: "Every worker building for the pool, by kind — the project's, the review ones a maintainer trusts, the contributors' — alive or gone, how busy, what it built.",
+    description: "Every worker building for the pool, by kind — the project's, the review ones two maintainers vouched for, the contributors' — alive or gone, how busy, what it built.",
     active: "none",
     body: BODY,
     script: SCRIPT.replace("__CHARTS__", CHARTS),
