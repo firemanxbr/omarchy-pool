@@ -184,17 +184,22 @@ curl -s -X POST $API/factory/workers -H "authorization: Bearer $OMC" -H 'content
 # 4. Queue the build(s).
 curl -s -X POST $API/factory/packages/project/build -H "authorization: Bearer $OMC"
 
-# 5. Run the worker: the project's signed image, one fresh container per task.
-#    GITHUB_TOKEN: the worker reads GitHub's API for every package (the release, the files) — without one,
-#    60 requests an hour from your address; a fine-grained token with no permissions is enough.
+# 5. Run the worker: the project's signed image, two containers — the broker holds the token, your agent's
+#    key and GITHUB_TOKEN and only receives, processes and answers; the builder beside it is born with
+#    nothing, builds one task in a fresh container and exits (/docs/workers#secrets).
+#    GITHUB_TOKEN: the drafter reads GitHub's API for every package (the release, the files) through the
+#    broker — without one, 60 requests an hour from your address; a fine-grained token with no permissions.
 #    the agent key (ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY or XAI_API_KEY — or CLAUDE_CODE_OAUTH_TOKEN,
-#    a Claude subscription through Claude Code) is *yours*, on your machine: the pool never holds one.
-#    A worker is ready only when its agent answers the probe (agent.py --probe): no agent, no build.
+#    a Claude subscription through Claude Code) is *yours*, on the broker: the pool never holds one.
+#    A worker is ready only when its agent answers the probe (the broker's /health): no agent, no draft.
 OMARCHY_WORKER_TOKEN=omw_… GITHUB_TOKEN=github_pat_… ANTHROPIC_API_KEY=sk-… \
   podman compose -f factory/image/compose.yml up -d        # or docker compose; a stop waits for the build (3 h)
-#    or, one task by hand (--stop-timeout: a stop lets the build finish instead of killing it):
-podman run -d --name omarchy-worker --restart unless-stopped --stop-timeout 10800 \
-  -e OMARCHY_WORKER_TOKEN=omw_… -e GITHUB_TOKEN=github_pat_… ghcr.io/firemanxbr/omarchy-worker:latest
+#    or by hand (--stop-timeout: a stop lets the build finish instead of killing it):
+podman network create omarchy-worker
+podman run -d --name omarchy-broker --restart unless-stopped --network omarchy-worker \
+  -e OMARCHY_WORKER_ROLE=broker -e OMARCHY_WORKER_TOKEN=omw_… -e GITHUB_TOKEN=github_pat_… ghcr.io/firemanxbr/omarchy-worker:latest
+podman run -d --name omarchy-worker --restart unless-stopped --stop-timeout 10800 --network omarchy-worker \
+  -e OMARCHY_BROKER=http://omarchy-broker:8790 ghcr.io/firemanxbr/omarchy-worker:latest
 
 # 6. Follow it.
 curl -s $API/factory/me -H "authorization: Bearer $OMC"       # your packages, workers, tasks, staging quota

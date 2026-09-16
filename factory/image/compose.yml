@@ -1,48 +1,76 @@
-# A worker: `docker compose up -d` (or podman compose). Every restart is a
-# new container from the signed image. A contributor's worker builds one
-# task per container; a maintainer's (a registration the project trusted)
-# also needs the runtime's socket — see the commented lines and /docs/workers.
+# A contributor's worker: two containers, `docker compose up -d` (or
+# podman compose). The broker holds everything that is yours — the worker
+# token, your agent's key, a GitHub token — and only receives, processes and
+# answers; the builder beside it is born with nothing, builds one task in a
+# fresh container and exits (the restart policy starts the next one). Whatever
+# a recipe or an upstream's build does with `env` or `curl`, there is nothing
+# in the builder to take (/docs/workers#secrets). The two share a network of
+# their own; nothing here is reachable from outside this machine.
+#
+# A maintainer's project worker is one container with the runtime's socket
+# instead — see `project` at the end and /docs/workers#project.
 services:
+  broker:
+    image: ghcr.io/firemanxbr/omarchy-worker:latest
+    restart: unless-stopped
+    environment:
+      OMARCHY_WORKER_ROLE: broker
+      OMARCHY_WORKER_TOKEN: ${OMARCHY_WORKER_TOKEN:?the worker token from the Contributors page, shown once}
+      # Optional: your own agent — one key is enough (your key, your cost). The
+      # builder drafts and corrects PKGBUILDs with it, through the broker;
+      # the key never leaves this container. FACTORY_MODEL picks the model.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      XAI_API_KEY: ${XAI_API_KEY:-}
+      # Or a Claude subscription instead of a key: the token `claude setup-token`
+      # prints on your machine. The broker installs Claude Code at start and
+      # runs it in print mode (docs: /docs/workers#claude-code). Your
+      # subscription, your terms, your rate limits.
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      FACTORY_PROVIDER: ${FACTORY_PROVIDER:-}
+      FACTORY_MODEL: ${FACTORY_MODEL:-}
+      # GitHub's API: the release, the files of every package the builder
+      # drafts. Without a token: 60 requests an hour from your address. A
+      # fine-grained token with no permissions at all, made for this worker —
+      # never `gh auth token`, which is your account.
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+    networks: [worker]
+
   worker:
     image: ghcr.io/firemanxbr/omarchy-worker:latest
     restart: unless-stopped
+    depends_on: [broker]
     # A stop is a drain: the worker finishes the task it holds, claims no
     # new one and exits. Without the grace period `compose down` kills the
     # build after ten seconds and the pool waits half an hour for the lease
     # to expire before anyone else may take it.
     stop_grace_period: 3h
     environment:
-      OMARCHY_WORKER_TOKEN: ${OMARCHY_WORKER_TOKEN:?the worker token from the Contributors page, shown once}
+      OMARCHY_BROKER: http://broker:8790
       WORKER_LABELS: '{"where":"${WHERE:-my-machine}"}'
       # 1 = also build other contributors' packages (donated compute); default: yours only.
+      # On, this machine runs strangers' recipes: give the broker no key you would mind losing.
       WORKER_SHARED: ${WORKER_SHARED:-0}
-      # Optional role — pool, review or community (docs: /docs/workers#roles):
-      # narrows the container to one kind of work; the project's own hosts
-      # run two of each (factory/host/compose.yml).
-      OMARCHY_WORKER_ROLE: ${OMARCHY_WORKER_ROLE:-}
-      # Optional: your own agent — one key is enough (your key, your cost). A
-      # contributor's worker drafts and corrects PKGBUILDs with it; a project
-      # worker audits staged builds. FACTORY_MODEL picks the model.
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      XAI_API_KEY: ${XAI_API_KEY:-}
-      # Or a Claude subscription instead of a key: the token `claude setup-token`
-      # prints on your machine. The worker installs Claude Code at start and
-      # runs it in print mode (docs: /docs/workers#claude-code). Your
-      # subscription, your terms, your rate limits.
-      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
-      FACTORY_PROVIDER: ${FACTORY_PROVIDER:-}
-      FACTORY_MODEL: ${FACTORY_MODEL:-}
-      # GitHub's API: the release, the files of every package it builds. Without
-      # a token: 60 requests an hour from your address. A fine-grained token
-      # with no permissions at all, made for this worker — never `gh auth
-      # token`, which is your account. What the worker holds — this, the
-      # agent's key, its own token — the build never sees (/docs/workers#secrets).
-      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
-      # Project workers only: a directory with the SAME path on the host and in the container.
-      # OMARCHY_WORK_DIR: ${HOME}/omarchy-worker
-    # Project workers only: the runtime's socket, and that directory.
-    # volumes:
-    #   - /var/run/docker.sock:/var/run/docker.sock
-    #   - ${HOME}/omarchy-worker:${HOME}/omarchy-worker
+    networks: [worker]
+
+  # A maintainer's project worker (a registration the project trusted): the
+  # pool's jobs and the project's builds, each in a fresh sibling container
+  # through the runtime's socket — it is its own broker, the build containers
+  # it starts hold nothing. Uncomment, set OMARCHY_WORKER_TOKEN to that
+  # registration's token, and start it alone: `docker compose up -d project`.
+  # project:
+  #   image: ghcr.io/firemanxbr/omarchy-worker:latest
+  #   restart: unless-stopped
+  #   stop_grace_period: 3h
+  #   environment:
+  #     OMARCHY_WORKER_TOKEN: ${OMARCHY_WORKER_TOKEN:?}
+  #     OMARCHY_WORKER_ROLE: ${OMARCHY_WORKER_ROLE:-}   # pool or review (docs: /docs/workers#roles)
+  #     OMARCHY_WORK_DIR: ${HOME}/omarchy-worker         # the SAME path on the host and in the container
+  #     WORKER_LABELS: '{"where":"${WHERE:-my-machine}"}'
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock
+  #     - ${HOME}/omarchy-worker:${HOME}/omarchy-worker
+
+networks:
+  worker: {}

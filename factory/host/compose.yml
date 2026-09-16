@@ -9,14 +9,21 @@
 # Everything lives under POOL_ROOT (.env, written by setup.sh): the work
 # directories (the same path on the host and inside a project worker, so the
 # sibling build containers it starts can mount subdirectories), one pacman
-# package cache and one build cache (cargo, Go, ccache) per architecture
-# shared by every build, and etc/ with the
-# secrets — a worker token per service (register.sh writes them) and the
-# agent key the review and community workers use (etc/agent.env, yours).
+# package cache per architecture, one build cache (cargo, Go, ccache) per
+# trust and architecture, and etc/ with the secrets — a worker token per
+# worker (register.sh writes them) and the agent key (etc/agent.env, yours).
+#
+# Where the secrets live, and where they do not (SECURITY.md, *Isolation*):
+# the agent key and GITHUB_TOKEN are read by three containers that run no
+# build — agent-proxy, and the two community brokers, which also hold their
+# builder's worker token. The community builders hold nothing and reach
+# their broker over a network of their own; the review workers hold their
+# token and the runtime's socket, and their build containers hold nothing,
+# reaching agent-proxy over the `review` network.
 #
 # The host is aarch64: the pool and review workers run natively (an x86_64
 # pool job is only a label; an x86_64 rebuild starts an emulated sibling
-# container), the x86_64 community worker is itself an emulated container.
+# container), the x86_64 community builder is itself an emulated container.
 
 # A stop is a drain: the worker finishes the task it holds, claims no new
 # one and exits (SIGTERM); the grace period is what the longest build may
@@ -53,33 +60,66 @@ services:
   review-x86_64:
     <<: *project
     profiles: [emulated]
-    env_file: [etc/agent.env, etc/review-x86_64.env]
+    env_file: [etc/review-x86_64.env]
+    depends_on: [agent-proxy]
+    networks: [default, review]
     environment:
       OMARCHY_WORKER_ROLE: review
       OMARCHY_WORK_DIR: ${POOL_ROOT:-/srv/omarchy-pool}/work/review-x86_64
-      # The project's review builds run the agent inside a fresh build
-      # container: it reaches the agent-proxy on the compose network.
-      OMARCHY_BUILD_ENV: "FACTORY_PROVIDER=anthropic,ANTHROPIC_BASE_URL=http://agent-proxy:8790,ANTHROPIC_API_KEY=via-agent-proxy"
-      OMARCHY_BUILD_NETWORK: ${COMPOSE_PROJECT_NAME:-omarchy-pool}_default
+      # The audits here, and the agent inside the review builds, go through
+      # agent-proxy — the key stays there; the build containers are started
+      # on the `review` network, where agent-proxy is all there is to reach,
+      # and read GitHub through it too.
+      FACTORY_PROVIDER: anthropic
+      ANTHROPIC_BASE_URL: http://agent-proxy:8790
+      ANTHROPIC_API_KEY: via-agent-proxy
+      OMARCHY_BUILD_ENV: "FACTORY_PROVIDER=anthropic,ANTHROPIC_BASE_URL=http://agent-proxy:8790,ANTHROPIC_API_KEY=via-agent-proxy,GITHUB_API=http://agent-proxy:8790/github"
+      OMARCHY_BUILD_NETWORK: ${COMPOSE_PROJECT_NAME:-omarchy-pool}_review
       OMARCHY_PKG_CACHE: ${POOL_ROOT:-/srv/omarchy-pool}/cache/pacman
       OMARCHY_BUILD_CACHE: ${POOL_ROOT:-/srv/omarchy-pool}/cache/build
       WORKER_LABELS: '{"where":"${WHERE:-omarchy-studio}","emulated":true}'
   review-aarch64:
     <<: *project
-    env_file: [etc/agent.env, etc/review-aarch64.env]
+    env_file: [etc/review-aarch64.env]
+    depends_on: [agent-proxy]
+    networks: [default, review]
     environment:
       OMARCHY_WORKER_ROLE: review
       OMARCHY_WORK_DIR: ${POOL_ROOT:-/srv/omarchy-pool}/work/review-aarch64
-      # The project's review builds run the agent inside a fresh build
-      # container: it reaches the agent-proxy on the compose network.
-      OMARCHY_BUILD_ENV: "FACTORY_PROVIDER=anthropic,ANTHROPIC_BASE_URL=http://agent-proxy:8790,ANTHROPIC_API_KEY=via-agent-proxy"
-      OMARCHY_BUILD_NETWORK: ${COMPOSE_PROJECT_NAME:-omarchy-pool}_default
+      # The audits here, and the agent inside the review builds, go through
+      # agent-proxy — the key stays there; the build containers are started
+      # on the `review` network, where agent-proxy is all there is to reach,
+      # and read GitHub through it too.
+      FACTORY_PROVIDER: anthropic
+      ANTHROPIC_BASE_URL: http://agent-proxy:8790
+      ANTHROPIC_API_KEY: via-agent-proxy
+      OMARCHY_BUILD_ENV: "FACTORY_PROVIDER=anthropic,ANTHROPIC_BASE_URL=http://agent-proxy:8790,ANTHROPIC_API_KEY=via-agent-proxy,GITHUB_API=http://agent-proxy:8790/github"
+      OMARCHY_BUILD_NETWORK: ${COMPOSE_PROJECT_NAME:-omarchy-pool}_review
       OMARCHY_PKG_CACHE: ${POOL_ROOT:-/srv/omarchy-pool}/cache/pacman
       OMARCHY_BUILD_CACHE: ${POOL_ROOT:-/srv/omarchy-pool}/cache/build
       WORKER_LABELS: '{"where":"${WHERE:-omarchy-studio}"}'
 
-  # A community worker builds inside its own container, one task per
-  # container (the restart policy starts the next one); no socket, no work
+  # The agent and GitHub for the review workers (their audits) and for the
+  # build containers they start (the project's review builds): a broker
+  # with no worker token (factory/bin/broker, OMARCHY_WORKER_ROLE=agent),
+  # native — Claude Code's binary dies under qemu — reached in the Anthropic
+  # Messages shape agent.py already knows, with a key that is a placeholder
+  # it never reads. Only on the `review` network.
+  agent-proxy:
+    image: ghcr.io/firemanxbr/omarchy-worker:aarch64
+    restart: unless-stopped
+    env_file: [etc/agent.env]
+    environment:
+      OMARCHY_WORKER_ROLE: agent
+    networks: [review]
+    logging: *logging
+
+  # A community worker is a pair: the broker holds the worker's token, the
+  # agent key and GITHUB_TOKEN and only receives, processes and answers —
+  # the pool's calls for the one task it claimed, the agent, GitHub
+  # read-only; the builder beside it holds nothing, builds one task in its
+  # own container (the restart policy starts the next one) and reaches the
+  # broker over a network the two have to themselves. No socket, no work
   # directory — the package cache of its architecture (pacman checks every
   # file against the signed database) and a build cache of its own:
   # cache/build/community/<arch>, never the project's (cache/build/project/
@@ -93,19 +133,16 @@ services:
   # libldap fail to map a segment. Off by default here: x86_64 build tasks
   # wait for an x86_64 worker (any x86_64 machine with docker and these two
   # services' env files). COMPOSE_PROFILES=emulated in .env turns them on.
-  # Claude Code's binary dies under qemu (it is a Bun executable), so the
-  # emulated worker has no agent of its own: `agent-proxy` runs the agent
-  # natively beside it (the aarch64 image, OMARCHY_WORKER_ROLE=agent, the
-  # same subscription token) and the worker speaks to it over the compose
-  # network in the Anthropic Messages shape agent.py already knows —
-  # FACTORY_PROVIDER=anthropic, ANTHROPIC_BASE_URL=http://agent-proxy:8790.
-  # The key is a placeholder the proxy never reads; nothing is published.
-  agent-proxy:
+  # The x86_64 pair's broker runs natively (the aarch64 image): the agent
+  # never runs under qemu.
+  broker-community-x86_64:
+    profiles: [emulated]
     image: ghcr.io/firemanxbr/omarchy-worker:aarch64
     restart: unless-stopped
-    env_file: [etc/agent.env]
+    env_file: [etc/agent.env, etc/community-x86_64.env]
     environment:
-      OMARCHY_WORKER_ROLE: agent
+      OMARCHY_WORKER_ROLE: broker
+    networks: [community-x86_64]
     logging: *logging
   community-x86_64:
     profiles: [emulated]
@@ -113,27 +150,42 @@ services:
     platform: linux/amd64
     restart: unless-stopped
     stop_grace_period: 3h
-    depends_on: [agent-proxy]
-    env_file: [etc/agent.env, etc/community-x86_64.env]
+    depends_on: [broker-community-x86_64]
     environment:
       OMARCHY_WORKER_ROLE: community
-      FACTORY_PROVIDER: anthropic
-      ANTHROPIC_BASE_URL: http://agent-proxy:8790
-      ANTHROPIC_API_KEY: via-agent-proxy
-      WORKER_LABELS: '{"where":"${WHERE:-omarchy-studio}","emulated":true,"agent":"via agent-proxy"}'
+      OMARCHY_BROKER: http://broker-community-x86_64:8790
+      WORKER_LABELS: '{"where":"${WHERE:-omarchy-studio}","emulated":true}'
     volumes:
       - ${POOL_ROOT:-/srv/omarchy-pool}/cache/pacman/x86_64:/var/cache/pacman/pkg
       - ${POOL_ROOT:-/srv/omarchy-pool}/cache/build/community/x86_64:/build/cache
+    networks: [community-x86_64]
+    logging: *logging
+  broker-community-aarch64:
+    image: ghcr.io/firemanxbr/omarchy-worker:aarch64
+    restart: unless-stopped
+    env_file: [etc/agent.env, etc/community-aarch64.env]
+    environment:
+      OMARCHY_WORKER_ROLE: broker
+    networks: [community-aarch64]
     logging: *logging
   community-aarch64:
     image: ghcr.io/firemanxbr/omarchy-worker:aarch64
     restart: unless-stopped
     stop_grace_period: 3h
-    env_file: [etc/agent.env, etc/community-aarch64.env]
+    depends_on: [broker-community-aarch64]
     environment:
       OMARCHY_WORKER_ROLE: community
+      OMARCHY_BROKER: http://broker-community-aarch64:8790
       WORKER_LABELS: '{"where":"${WHERE:-omarchy-studio}"}'
     volumes:
       - ${POOL_ROOT:-/srv/omarchy-pool}/cache/pacman/aarch64:/var/cache/pacman/pkg
       - ${POOL_ROOT:-/srv/omarchy-pool}/cache/build/community/aarch64:/build/cache
+    networks: [community-aarch64]
     logging: *logging
+
+# One network per pair, and one for the review side: a builder reaches its
+# broker and the internet, nothing else of the host's.
+networks:
+  review: {}
+  community-x86_64: {}
+  community-aarch64: {}

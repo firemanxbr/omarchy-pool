@@ -166,12 +166,15 @@ __CHARTS__
       if (d.error) { $("#pkg-state").textContent = d.error; return; }
       $("#w-new").hidden = false;
       $("#w-cmd").textContent =
-        "# keep it running: one task per container, the restart brings the next (docker works the same);\n" +
-        "# --stop-timeout lets a stop wait for the build; GITHUB_TOKEN (a fine-grained token with no permissions) lifts GitHub's 60 requests an hour\n" +
-        "podman run -d --name omarchy-worker --restart unless-stopped --stop-timeout 10800 \\\n  -e OMARCHY_WORKER_TOKEN=" + d.token + " -e GITHUB_TOKEN=<github_pat_…, no permissions> \\\n  ghcr.io/firemanxbr/omarchy-worker:latest\n\n" +
-        "# or with compose (" + REPO + "/blob/main/factory/image/compose.yml)\n" +
+        "# two containers: the broker holds the token (and your agent's key, and a GITHUB_TOKEN — a fine-grained one with no permissions),\n" +
+        "# the builder beside it is born with nothing, builds one task and exits; the restart brings the next. With compose\n" +
+        "# (" + REPO + "/blob/main/factory/image/compose.yml; docker works the same):\n" +
         "OMARCHY_WORKER_TOKEN=" + d.token + " GITHUB_TOKEN=<github_pat_…, no permissions> podman compose -f compose.yml up -d\n\n" +
-        "# -e ANTHROPIC_API_KEY=… (or OPENAI_API_KEY, GEMINI_API_KEY, XAI_API_KEY, CLAUDE_CODE_OAUTH_TOKEN: your key) — the agent that writes the PKGBUILD; without one that answers, the worker is not ready";
+        "# or by hand\n" +
+        "podman network create omarchy-worker\n" +
+        "podman run -d --name omarchy-broker --restart unless-stopped --network omarchy-worker \\\n  -e OMARCHY_WORKER_ROLE=broker -e OMARCHY_WORKER_TOKEN=" + d.token + " -e GITHUB_TOKEN=<github_pat_…, no permissions> \\\n  ghcr.io/firemanxbr/omarchy-worker:latest\n" +
+        "podman run -d --name omarchy-worker --restart unless-stopped --stop-timeout 10800 --network omarchy-worker \\\n  -e OMARCHY_BROKER=http://omarchy-broker:8790 \\\n  ghcr.io/firemanxbr/omarchy-worker:latest\n\n" +
+        "# on the broker: -e ANTHROPIC_API_KEY=… (or OPENAI_API_KEY, GEMINI_API_KEY, XAI_API_KEY, CLAUDE_CODE_OAUTH_TOKEN: your key) — the agent that writes the PKGBUILD; without one that answers, the worker is not ready";
       $("#worker-form").reset(); refresh();
     }).catch(function (e) { $("#w-btn").disabled = false; $("#pkg-state").textContent = "failed: " + e; });
     return false;

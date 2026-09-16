@@ -143,6 +143,9 @@ pub struct Outcome {
 struct AgentProbe {
     status: String,
     error: String,
+    /// Who really answered, as the probe says (`agent`): behind a broker the
+    /// environment names `anthropic/…` while Claude Code answers.
+    label: String,
     checked_at: Option<std::time::Instant>,
     checked_iso: String,
 }
@@ -173,11 +176,23 @@ fn probe_agent(opts: &WorkOptions) -> AgentProbe {
     match out {
         Ok(o) if o.status.success() => {
             "ok".clone_into(&mut p.status);
-            let ms = serde_json::from_slice::<serde_json::Value>(&o.stdout)
-                .ok()
+            let v = serde_json::from_slice::<serde_json::Value>(&o.stdout).ok();
+            let ms = v
+                .as_ref()
                 .and_then(|v| v.get("ms").and_then(serde_json::Value::as_u64))
                 .unwrap_or(0);
-            eprintln!("agent: ok ({ms} ms)");
+            v.as_ref()
+                .and_then(|v| v.get("agent").and_then(|a| a.as_str()))
+                .unwrap_or_default()
+                .clone_into(&mut p.label);
+            eprintln!(
+                "agent: ok ({ms} ms{})",
+                if p.label.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {}", p.label)
+                }
+            );
         }
         Ok(o) => {
             "error".clone_into(&mut p.status);
@@ -277,7 +292,7 @@ pub fn run(opts: &WorkOptions) -> Result<()> {
         }
         let body = serde_json::json!({
             "arch": opts.arch, "hostname": hostname, "version": version, "labels": opts.labels, "kinds": opts.kinds, "shared": opts.shared,
-            "agent": agent.clone().unwrap_or_default(),
+            "agent": if probe.label.is_empty() { agent.clone().unwrap_or_default() } else { probe.label.clone() },
             "agent_status": probe.status, "agent_error": probe.error, "agent_checked_at": probe.checked_iso,
         });
         let claimed = match claimer.post_json_as(&opts.worker_token, "/factory/claim", &body) {
@@ -1305,15 +1320,9 @@ fn build_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
             run.arg("--network").arg(net);
         }
     }
-    // GitHub's API for the drafter inside (the release, the files): a
-    // fine-grained token with no permissions. Root's environment only —
-    // the script lends it to the drafter and to nothing else (hold_secrets);
-    // the build user starts from an empty one.
-    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
-        if !token.is_empty() {
-            run.arg("-e").arg("GITHUB_TOKEN");
-        }
-    }
+    // No GITHUB_TOKEN in there: the drafter reads GitHub through the broker
+    // (GITHUB_API in OMARCHY_BUILD_ENV, factory/bin/broker) — the build
+    // container is born with nothing (SECURITY.md, *Isolation*).
     // A package cache shared by every build container on this host
     // (OMARCHY_PKG_CACHE, one directory per architecture): pacman downloads
     // a dependency once, not once per build.

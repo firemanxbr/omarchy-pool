@@ -11,7 +11,7 @@ a machine to the project can use the same three files.
 | `setup.sh` | run once with `sudo`: the directory tree (a btrfs subvolume where `/` is btrfs), docker + compose + user-mode emulation for the other architecture, the docker group, the env files to fill in |
 | `register.sh` | registers the six workers with the pool under a maintainer's token, trusts the four project ones, writes each worker token into `etc/<service>.env` — prints only the ids |
 | `rollout.sh` | a rolling upgrade to the image the latest release published, one worker at a time: a stop is a *drain* (SIGTERM — the worker finishes the task it holds, claims nothing new, exits; `stop_grace_period: 3h`), then the new container starts; the other five keep working. `--check` only reports. A systemd user timer runs it every 15 minutes |
-| `compose.yml` | the six services (two of them, `community-x86_64` and `review-x86_64`, under the `emulated` profile: off unless `COMPOSE_PROFILES=emulated` is in `.env` — see *x86_64 builds* below): `pool-*`, `review-*` (project trust, the runtime's socket, a work directory at the same path on both sides, the shared package cache), `community-*` (community trust, shared, one task per container); the x86_64 community worker is an emulated container on an aarch64 host |
+| `compose.yml` | nine services (three of them, `community-x86_64`, its broker and `review-x86_64`, under the `emulated` profile: off unless `COMPOSE_PROFILES=emulated` is in `.env` — see *x86_64 builds* below): `pool-*`, `review-*` (project trust, the runtime's socket, a work directory at the same path on both sides, the shared package cache; their audits and build containers reach the agent through `agent-proxy` on the `review` network), `broker-community-*` + `community-*` (community trust, shared: the broker holds the token, the agent key and `GITHUB_TOKEN` and only receives, processes and answers; the builder beside it holds nothing, one task per container, on a network the two have to themselves); the x86_64 community builder is an emulated container on an aarch64 host, its broker native |
 
 ```
 POOL_ROOT (/srv/omarchy-pool)
@@ -19,7 +19,7 @@ POOL_ROOT (/srv/omarchy-pool)
 ├── compose.yml
 ├── register.sh
 ├── rollout.sh
-├── etc/                 mode 700; secrets, yours: one worker token per service, agent.env with the agent key
+├── etc/                 mode 700; secrets, yours: one worker token per worker, agent.env with the agent key — read by the brokers, agent-proxy and the review workers' tokens only; no builder reads etc/
 ├── work/<service>/      OMARCHY_WORK_DIR of each project worker (task dirs, the clone of this repository, the ABI references)
 ├── cache/pacman/<arch>/ one pacman package cache per architecture, mounted into every build container (OMARCHY_PKG_CACHE)
 └── cache/build/       cargo registry, Go module and build caches, ccache — /build/cache in the build containers (OMARCHY_BUILD_CACHE),
@@ -67,5 +67,5 @@ calls on them. Any x86_64 machine with docker becomes the x86_64 build
 host in minutes: copy `compose.yml`, `.env`, `etc/agent.env`,
 `etc/community-x86_64.env` and `etc/review-x86_64.env` there, drop the
 `profiles:` lines (they are native there), `docker compose up -d
-community-x86_64 review-x86_64`. `COMPOSE_PROFILES=emulated` in `.env`
+broker-community-x86_64 community-x86_64 review-x86_64`. `COMPOSE_PROFILES=emulated` in `.env`
 turns the emulated pair on here regardless, for C-only packages.

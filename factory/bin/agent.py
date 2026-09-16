@@ -45,6 +45,10 @@ PROVIDERS = {
     "xai": {"key": "XAI_API_KEY", "model": "grok-4", "family": "grok", "base": "https://api.x.ai/v1", "base_env": "XAI_BASE_URL", "api": "openai"},
 }
 KEYS = [p["key"] for p in PROVIDERS.values()]
+# Who answered the last anthropic-shaped completion, when it was a broker
+# (factory/bin/broker) speaking for another provider: "claude-code/…". The
+# probe reports it, so the Factory page names the agent that really runs.
+BEHIND = {"agent": ""}
 
 
 def model_for(name, p):
@@ -120,6 +124,7 @@ def complete(system, user, max_tokens=4000, timeout=300):
                                      headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"})
         with _open(req, timeout) as r:
             out = json.load(r)
+        BEHIND["agent"] = out.get("agent") or ""
         return "".join(c.get("text", "") for c in out.get("content", [])), out.get("model", model)
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     effort = os.environ.get("FACTORY_REASONING")
@@ -197,7 +202,7 @@ def probe(timeout=90):
     except Exception as e:  # noqa: BLE001 — whatever the provider threw is the finding
         return False, {"provider": name, "error": f"{type(e).__name__}: {str(e)[:300]}", "ms": int((time.time() - started) * 1000)}
     ok = bool((text or "").strip())
-    return ok, {"provider": name, "model": model, "ms": int((time.time() - started) * 1000), **({} if ok else {"error": "empty answer"})}
+    return ok, {"provider": name, "model": model, "agent": BEHIND["agent"] or f"{name}/{model}", "ms": int((time.time() - started) * 1000), **({} if ok else {"error": "empty answer"})}
 
 
 if __name__ == "__main__":
