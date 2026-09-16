@@ -260,12 +260,13 @@ export async function runScheduler(env: Env, now = new Date()): Promise<string[]
       log.push(`metrics: ${String(e)}`);
     }
   }
-  // The bill: estimated once a day after 06:30 UTC; the guard pauses the
-  // jobs that write when the month heads over budget (cost.ts).
-  if (now.getUTCHours() * 60 + now.getUTCMinutes() >= 6 * 60 + 30 && env.CLOUDFLARE_ANALYTICS_TOKEN) {
+  // The bill: estimated every three hours (one journal line a day, after
+  // 06:30 UTC); the guard pauses the jobs that write when the month heads
+  // over budget, and lifts within three hours of it heading back (cost.ts).
+  if (env.CLOUDFLARE_ANALYTICS_TOKEN) {
     try {
       const c = await dailyCost(env, now);
-      if (c !== "cost: estimated today") log.push(c);
+      if (c !== "cost: estimated this slot") log.push(c);
     } catch (e) {
       log.push(`cost: ${String(e)}`);
     }

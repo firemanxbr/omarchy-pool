@@ -24,19 +24,39 @@ export async function anyTwice(env: Env, ring: string): Promise<{ names: number;
   return { names: all?.names ?? 0, objects: all?.objects ?? 0, bytes: all?.bytes ?? 0, twice: dup?.twice ?? 0, extra_bytes: dup?.extra_bytes ?? 0 };
 }
 
-export async function snapshotMetrics(env: Env, now = new Date()): Promise<string> {
-  const last = await env.DB.prepare("SELECT created_at FROM events WHERE kind = 'metrics' ORDER BY id DESC LIMIT 1").first<{ created_at: string }>();
-  if (last && now.getTime() - Date.parse(last.created_at) < (EVERY_MINUTES - 1) * 60000) return "metrics: on time";
-  const since = new Date(now.getTime() - 7 * 86400000).toISOString();
-  const alive = new Date(now.getTime() - 10 * 60000).toISOString();
+/** The pool-wide part of a snapshot: what the scans below produce, reused while nothing changed. */
+interface PoolBlock {
+  pool: Record<string, unknown>;
+  rings: { ring: string; packages: number; bytes: number }[];
+  provenance: Record<string, unknown>;
+  any: Record<string, unknown>;
+}
 
+/**
+ * Has anything changed what the pool holds or what the rings pin since
+ * `since`? A sync, a promotion, a rollback, a fast-track, a publish, the
+ * relayout or a GC all leave a journal line; without one the scans below
+ * would only recount what the previous snapshot counted.
+ */
+async function poolChangedSince(env: Env, since: string): Promise<boolean> {
+  const row = await env.DB.prepare(
+    `SELECT 1 AS yes FROM events
+      WHERE created_at > ?1 AND (kind IN ('sync', 'promote', 'rollback', 'fast-track', 'gc', 'relayout', 'publish')
+         OR (kind = 'job' AND json_extract(payload, '$.kind') IN ('publish', 'trial', 'gc', 'relayout', 'sync', 'promote', 'rollback')))
+      LIMIT 1`,
+  ).bind(since).first<{ yes: number }>();
+  return !!row;
+}
+
+/** The scans over the packages table and the rings: the one place they run. */
+async function scanPool(env: Env): Promise<PoolBlock> {
   const pool = await env.DB.prepare("SELECT COUNT(*) AS objects, COALESCE(SUM(size_download), 0) AS bytes, COUNT(DISTINCT name) AS names FROM packages").first<{ objects: number; bytes: number; names: number }>();
   const bySource = await env.DB.prepare(
     "SELECT source, repo_arch AS arch, COUNT(*) AS objects, COALESCE(SUM(size_download), 0) AS bytes FROM packages GROUP BY source, repo_arch ORDER BY repo_arch, source",
   ).all<{ source: string; arch: string; objects: number; bytes: number }>();
   const referenced = await env.DB.prepare("SELECT COALESCE(SUM(size_download), 0) AS bytes FROM packages WHERE released = 1").first<{ bytes: number }>();
-  // What the three heads pin (distinct objects): the one place this join runs.
-  const heads = await env.DB.prepare(
+  // What the heads pin (distinct objects): the one place this join runs.
+  const headsPinned = await env.DB.prepare(
     `SELECT COUNT(*) AS objects, COALESCE(SUM(size_download), 0) AS bytes FROM packages
       WHERE id IN (SELECT package_id FROM ring_packages)`,
   ).first<{ objects: number; bytes: number }>();
@@ -51,11 +71,45 @@ export async function snapshotMetrics(env: Env, now = new Date()): Promise<strin
         AND id NOT IN (SELECT package_id FROM release_packages)
         AND created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days')`,
   ).first<{ objects: number; bytes: number }>();
-  const rings = await env.DB.prepare(
-    `SELECT h.ring, COUNT(*) AS packages, COALESCE(SUM(p.size_download), 0) AS bytes
-       FROM ring_packages rp JOIN packages p ON p.id = rp.package_id JOIN ring_heads h ON h.ring = rp.ring
-      GROUP BY h.ring ORDER BY h.ring`,
-  ).all<{ ring: string; packages: number; bytes: number }>();
+  // What each ring serves: the head's stored summary (db.ts), three columns
+  // per ring, instead of a join over every member of every ring.
+  const heads = await env.DB.prepare("SELECT h.ring, r.package_count AS packages, r.bytes FROM ring_heads h JOIN releases r ON r.id = h.release_id ORDER BY h.ring")
+    .all<{ ring: string; packages: number | null; bytes: number | null }>();
+  const rings = heads.results.map((r) => ({ ring: r.ring, packages: r.packages ?? 0, bytes: r.bytes ?? 0 }));
+  return {
+    pool: {
+      objects: pool?.objects ?? 0,
+      bytes: pool?.bytes ?? 0,
+      names: pool?.names ?? 0,
+      by_source: bySource.results,
+      released_bytes: referenced?.bytes ?? 0,
+      referenced_objects: headsPinned?.objects ?? 0,
+      referenced_bytes: headsPinned?.bytes ?? 0,
+      reclaimable_bytes: reclaimable?.bytes ?? 0,
+      reclaimable_objects: reclaimable?.objects ?? 0,
+    },
+    rings,
+    // OPR recipes by origin, per ring: the AUR-synced count is the one to drive to zero.
+    provenance: { stable: await provenanceCounts(env, "stable"), rc: await provenanceCounts(env, "rc"), edge: await provenanceCounts(env, "edge") },
+    // Architecture-independent packages a ring stores twice: Arch Linux ARM
+    // rebuilds and re-signs `any` packages, so the same name and version is
+    // one object per architecture directory. What that costs the pool.
+    any: { stable: await anyTwice(env, "stable"), edge: await anyTwice(env, "edge") },
+  };
+}
+
+export async function snapshotMetrics(env: Env, now = new Date()): Promise<string> {
+  const last = await env.DB.prepare("SELECT created_at, payload FROM events WHERE kind = 'metrics' ORDER BY id DESC LIMIT 1").first<{ created_at: string; payload: string }>();
+  if (last && now.getTime() - Date.parse(last.created_at) < (EVERY_MINUTES - 1) * 60000) return "metrics: on time";
+  const since = new Date(now.getTime() - 7 * 86400000).toISOString();
+  const alive = new Date(now.getTime() - 10 * 60000).toISOString();
+
+  // The pool-wide numbers are scans over a hundred thousand rows; between
+  // two syncs they cannot change, so a snapshot taken while nothing moved
+  // carries the previous one's (D1 bills every row read).
+  const previous = last ? (JSON.parse(last.payload) as Partial<PoolBlock>) : null;
+  const reuse = previous?.pool && previous.rings && previous.provenance && previous.any && !(await poolChangedSince(env, last!.created_at));
+  const block: PoolBlock = reuse ? (previous as PoolBlock) : await scanPool(env);
 
   // The pool's own jobs (sync, promote, health, security, gc…) and the
   // factory's builds over the last seven days, plus what is in flight now.
@@ -103,29 +157,13 @@ export async function snapshotMetrics(env: Env, now = new Date()): Promise<strin
       project: workers.results.find((w) => w.trust === "project")?.alive ?? 0,
       community: workers.results.find((w) => w.trust === "community")?.alive ?? 0,
     },
-    pool: {
-      objects: pool?.objects ?? 0,
-      bytes: pool?.bytes ?? 0,
-      names: pool?.names ?? 0,
-      by_source: bySource.results,
-      released_bytes: referenced?.bytes ?? 0,
-      referenced_objects: heads?.objects ?? 0,
-      referenced_bytes: heads?.bytes ?? 0,
-      reclaimable_bytes: reclaimable?.bytes ?? 0,
-      reclaimable_objects: reclaimable?.objects ?? 0,
-    },
-    rings: rings.results,
-    // OPR recipes by origin, per ring: the AUR-synced count is the one to drive to zero.
-    provenance: { stable: await provenanceCounts(env, "stable"), rc: await provenanceCounts(env, "rc"), edge: await provenanceCounts(env, "edge") },
-    // Architecture-independent packages a ring stores twice: Arch Linux ARM
-    // rebuilds and re-signs `any` packages, so the same name and version is
-    // one object per architecture directory. What that costs the pool.
-    any: { stable: await anyTwice(env, "stable"), edge: await anyTwice(env, "edge") },
+    ...block,
+    pool_scanned: !reuse,
     version: version(env).version,
   };
   // Snapshots are worth 90 days of history; the charts read 7.
   await env.DB.prepare("DELETE FROM events WHERE kind = 'metrics' AND created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-90 days')").run();
-  const summary = `${payload.jobs.runs} jobs in 7 days, ${payload.jobs.running} running, ${payload.jobs.minutes} worker-minutes · ${payload.workers.alive} worker(s) alive · pool ${payload.pool.objects} objects`;
+  const summary = `${payload.jobs.runs} jobs in 7 days, ${payload.jobs.running} running, ${payload.jobs.minutes} worker-minutes · ${payload.workers.alive} worker(s) alive · pool ${String(payload.pool.objects)} objects${reuse ? " (unchanged)" : ""}`;
   await env.DB.prepare("INSERT INTO events (kind, status, summary, payload) VALUES ('metrics', 'ok', ?, ?)").bind(summary, JSON.stringify(payload)).run();
   return `metrics: snapshot recorded — ${summary}`;
 }

@@ -27,7 +27,7 @@ const BODY = String.raw`
       <tr><td><code>GET /security?ring=&amp;arch=</code></td><td>Packages in the ring with an open advisory: severity, confidence (exact / name-version / name-only), CVEs, exploited-in-the-wild and EPSS, rings already serving a clean version, how many packages it exposes. <code>GET /package/:name</code> carries the same per package plus what it is exposed through.</td></tr>
       <tr><td><code>GET /events?kind=&amp;limit=</code></td><td>The journal: sync, gate, promote, render, health, abi, rollback, deploy, gc, metrics.</td></tr>
       <tr><td><code>GET /pool/unreferenced?keep=3</code></td><td>What retention would delete now.</td></tr>
-      <tr><td><code>GET /cost</code></td><td>The month's estimated bill, line by line (D1, R2, Workers), the projection and the guard's state. Estimated daily at 06:30 UTC.</td></tr>
+      <tr><td><code>GET /cost</code></td><td>The month's estimated bill, line by line (D1, R2, Workers), the projection and the guard's state. Estimated every three hours; the lines: warn at US$ 25, pause at US$ 40, cap US$ 50.</td></tr>
     </tbody></table></div>
   </section>
 

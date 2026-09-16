@@ -23,9 +23,18 @@ export const PRICES = {
   r2_class_b: { included: 10_000_000, per_million: 0.36 },
 };
 
-/** The line the guard trips at, and the line the daily report warns at. */
-export const BUDGET_GUARD_USD = 25;
-export const BUDGET_WARN_USD = 15;
+/**
+ * The budget, three lines. The cap is the month's ceiling, agreed with the
+ * project's sponsor (2026-09-16: US$ 50, not a dollar more); the guard is
+ * where the brain stops creating the jobs that write, leaving room under
+ * the cap for what the projection gets wrong; the warning is where the
+ * report starts saying so.
+ */
+export const BUDGET_CAP_USD = 50;
+export const BUDGET_GUARD_USD = 40;
+export const BUDGET_WARN_USD = 25;
+/** How often the month is estimated and the guard reconsidered. */
+export const ESTIMATE_EVERY_HOURS = 3;
 
 const CLASS_A = new Set(["PutObject", "CopyObject", "CompleteMultipartUpload", "CreateMultipartUpload", "UploadPart", "ListObjects", "PutBucket", "DeleteObject", "PutBucketLifecycleConfiguration", "ListBuckets"]);
 
@@ -68,7 +77,11 @@ interface Analytics {
   w?: { sum: { requests: number }; quantiles: { cpuTimeP50: number }; dimensions: { scriptName: string } }[];
 }
 
-const RATE_WINDOW_HOURS = 6;
+// The rate the projection extends over the days left: the last day. Six
+// hours was too twitchy — the relayout's last hours (2026-09-16, 03:30–05:30
+// UTC) were read as the month's pace, US$ 26 was projected, and the guard
+// paused the pipeline for a day over a bill that was heading for US$ 15.
+const RATE_WINDOW_HOURS = 24;
 
 function usageOf(a: Analytics): Usage {
   return {
@@ -84,8 +97,8 @@ function usageOf(a: Analytics): Usage {
 /**
  * The estimate for the current month: what the analytics say was used so
  * far, priced; and a projection that adds the *current* rate — the last
- * six hours, scaled — for the days left, so a fix shows in the next
- * estimate instead of being averaged with the expensive days before it.
+ * day, scaled — for the days left, so a fix shows in the next estimate
+ * instead of being averaged with the expensive days before it.
  */
 export async function estimateCost(env: Env, now = new Date(), fetcher: typeof fetch = fetch): Promise<CostEstimate> {
   if (!env.CLOUDFLARE_ANALYTICS_TOKEN) throw new Error("CLOUDFLARE_ANALYTICS_TOKEN is not set");
@@ -158,27 +171,36 @@ export async function costGuard(env: Env): Promise<string | null> {
   return row?.value ?? null;
 }
 
+/** The slot a moment falls in: the day and the three-hour block, so one estimate is taken per block. */
+export function estimateSlot(now: Date): string {
+  return `${now.toISOString().slice(0, 10)}/${Math.floor(now.getUTCHours() / ESTIMATE_EVERY_HOURS)}`;
+}
+
 /**
- * The daily cost job: estimate, record a `cost` event (the dashboard's tile
- * and the daily report read the latest), raise or lower the guard.
+ * The cost job, every three hours: estimate, keep the latest estimate where
+ * the dashboard reads it (settings.cost_latest), raise or lower the guard
+ * the moment the projection crosses the line — not the next morning. One
+ * `cost` journal line a day (the first estimate after 06:30 UTC, what the
+ * daily report reads), plus one whenever the guard goes up or comes down.
  */
 export async function dailyCost(env: Env, now = new Date(), fetcher: typeof fetch = fetch): Promise<string> {
-  const day = now.toISOString().slice(0, 10);
+  const slot = estimateSlot(now);
   const last = await env.DB.prepare("SELECT value FROM settings WHERE key = 'cost_checked'").first<{ value: string }>();
-  if (last?.value === day) return "cost: estimated today";
+  if (last?.value === slot) return "cost: estimated this slot";
   const est = await estimateCost(env, now, fetcher);
   const guardBefore = await costGuard(env);
   const status = est.guard ? "error" : est.projected_usd >= BUDGET_WARN_USD ? "warn" : "ok";
-  const summary = `Cloudflare, ${est.month}: US$ ${est.month_to_date_usd.toFixed(2)} so far, US$ ${est.projected_usd.toFixed(2)} projected${est.guard ? ` — over the US$ ${BUDGET_GUARD_USD} guard: jobs that write are paused` : ""}`;
-  const stmts = [
-    env.DB.prepare("INSERT INTO events (kind, status, summary, payload) VALUES ('cost', ?, ?, ?)").bind(status, summary, JSON.stringify(est)),
-    env.DB.prepare("INSERT INTO settings (key, value) VALUES ('cost_checked', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')").bind(day),
-  ];
-  if (est.guard && !guardBefore) {
-    stmts.push(env.DB.prepare("INSERT INTO settings (key, value) VALUES ('cost_guard', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')").bind(summary));
-  } else if (!est.guard && guardBefore) {
-    stmts.push(env.DB.prepare("DELETE FROM settings WHERE key = 'cost_guard'"));
-  }
+  const summary = `Cloudflare, ${est.month}: US$ ${est.month_to_date_usd.toFixed(2)} so far, US$ ${est.projected_usd.toFixed(2)} projected${est.guard ? ` — over the US$ ${BUDGET_GUARD_USD} guard: jobs that write are paused` : guardBefore ? " — back under the guard: the jobs that write resume" : ""}`;
+  const upsert = (key: string, value: string) =>
+    env.DB.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')").bind(key, value);
+  // The day's journal line: the first estimate at or after 06:00 UTC (block 2).
+  const day = slot.slice(0, 10), block = Number(slot.slice(11)), lastBlock = last?.value.startsWith(day) ? Number(last.value.slice(11)) : -1;
+  const dailyLine = lastBlock < 2 && block >= 2;
+  const flips = est.guard !== !!guardBefore;
+  const stmts = [upsert("cost_checked", slot), upsert("cost_latest", JSON.stringify({ estimated_at: now.toISOString(), status, ...est }))];
+  if (dailyLine || flips) stmts.push(env.DB.prepare("INSERT INTO events (kind, status, summary, payload) VALUES ('cost', ?, ?, ?)").bind(status, summary, JSON.stringify(est)));
+  if (est.guard && !guardBefore) stmts.push(upsert("cost_guard", summary));
+  else if (!est.guard && guardBefore) stmts.push(env.DB.prepare("DELETE FROM settings WHERE key = 'cost_guard'"));
   await env.DB.batch(stmts);
   return `cost: ${summary}`;
 }

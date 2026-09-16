@@ -143,7 +143,7 @@ reconcile (`enqueue`, hourly); promote by evidence (edge→rc queued by the
 sync, rc→stable every 3 h), daily slots for health (08:30) and the Sunday GC — each queued as a
 pulled job (below) when due and never doubled while one is queued or
 running. The metrics snapshot (30 min), the governance sync (10 min), the
-update check (05:45) and the cost estimate (06:30) it does itself. One thing still starts on GitHub, by
+update check (05:45) and the cost estimate (every three hours) it does itself. One thing still starts on GitHub, by
 dispatch: `factory-update.yml` (05:45, pull requests for the project's own
 recipes). Each dispatch is a `dispatch` line in the journal and needs the
 worker secret `GITHUB_TOKEN` (fine-grained, this repository, *Actions: read
@@ -527,19 +527,33 @@ What keeps the bill near US$ 10:
   cheap the interval could go back to hourly (`scheduler.ts` RULES); what
   an hourly sync still costs is the rows it reads to diff against upstream.
 
-**Watching it.** Once a day (06:30 UTC) the brain estimates the month's
-bill from Cloudflare's own analytics — what was used so far, priced, plus
-the *current* rate (the last six hours, scaled) for the days left, so a fix
-shows in the next estimate instead of being averaged with the expensive
-days before it (`src/cost.ts`; secret
-`CLOUDFLARE_ANALYTICS_TOKEN`, an API token with *Account Analytics: Read*
-and *D1: Read*) and records a `cost` journal line; `GET /api/v1/cost` has
-the breakdown and the Pipeline page shows the projection. `cost-report.yml`
+**Watching it.** Every three hours the brain estimates the month's bill
+from Cloudflare's own analytics — what was used so far, priced, plus the
+*current* rate (the last day, scaled) for the days left, so a fix shows in
+the next estimate instead of being averaged with the expensive days before
+it (`src/cost.ts`; secret `CLOUDFLARE_ANALYTICS_TOKEN`, an API token with
+*Account Analytics: Read* and *D1: Read*). The latest estimate is
+`settings.cost_latest` — `GET /api/v1/cost` has the breakdown and the
+Pipeline page shows the projection — and one `cost` journal line a day
+(the first estimate after 06:00 UTC) keeps the history. `cost-report.yml`
 (06:45 UTC) posts it as a comment on the *Cost report* issue — GitHub
 e-mails it to whoever watches the issue — and fails the run at a projected
-US$ 15, which is one more e-mail. Cloudflare's own budget notifications
+US$ 25, which is one more e-mail. Cloudflare's own budget notifications
 e-mail at actual charges of US$ 10, 20 and 28 (*Notifications → Billing →
 Usage based billing*; the API token cannot create them).
+
+**What the rows cost.** `wrangler d1 insights omarchy-repo --time-period 1d
+--sort-by reads --limit 40` lists the queries by rows read — the one
+measurement that matters, since D1 bills rows read (25 billion a month
+included, then US$ 0.001 per million). On 2026-09-16 the pool read 414
+million rows a day; the three biggest were the service status sorting every
+rendered artifact to find the newest (an index now), the stats page
+grouping every event ever recorded to find the latest per kind (a table
+kept by a trigger now, `latest_events`), and the half-hourly snapshot
+recounting the whole pool when nothing had changed (it reuses the previous
+one now). What still reads in bulk is the jobs' own paging through a
+ring's manifests (the render and the health check), a few million rows a
+run.
 
 **Who uses it.** Once a day (00:30 UTC) the brain counts yesterday's
 audience from the same analytics: the distinct client addresses that
@@ -553,11 +567,13 @@ dashboard says *about*. It needs `CLOUDFLARE_ZONE_ID` (wrangler.toml) and
 the analytics token to also carry *Zone · Analytics · Read* on the zone;
 without it the day is skipped and the scheduler log says so once a day.
 
-**The guard.** At a projected or actual US$ 25 the brain sets
+**The guard.** Three lines (`src/cost.ts`): the report warns at a
+projected US$ 25; at a projected or actual **US$ 40** the brain sets
 `settings.cost_guard` and the scheduler stops creating the jobs that write
-(sync, promote, render, security, enqueue) until the next daily estimate is
-back under the line; health, gc and metrics keep running, the pool keeps
-serving. The header of every page says so. To lift it by hand:
+(sync, promote, render, security, enqueue) until an estimate — the next is
+at most three hours away — is back under the line; **US$ 50** is the
+month's cap, agreed with the sponsor, never to be raised. Health, gc and
+metrics keep running, the pool keeps serving. The header of every page says so. To lift it by hand:
 `npx wrangler d1 execute omarchy-repo --remote --command "DELETE FROM settings WHERE key = 'cost_guard'"`.
 
 ## Known limits
