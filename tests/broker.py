@@ -49,7 +49,7 @@ class FakePool(BaseHTTPRequestHandler):
     def record(self):
         n = int(self.headers.get("content-length", "0") or 0)
         body = self.rfile.read(n) if n else b""
-        pool_seen.append({"method": self.command, "path": self.path, "auth": self.headers.get("authorization"), "body": body, "type": self.headers.get("content-type")})
+        pool_seen.append({"method": self.command, "path": self.path, "auth": self.headers.get("authorization"), "body": body, "type": self.headers.get("content-type"), "ua": self.headers.get("user-agent")})
         return body
 
     def do_GET(self):  # noqa: N802
@@ -171,6 +171,8 @@ assert pool_seen[-1]["auth"] == "Bearer github_pat_THE_HOSTS" and pool_seen[-1][
 status, out = call("GET", "/pool/factory/workers/self")
 assert status == 200 and out["id"] == "w9", out
 assert pool_seen[-1]["auth"] == "Bearer omw_THE_WORKERS", pool_seen[-1]
+# Cloudflare fronts the pool: a request that does not say who it is (urllib's default agent) is a 403 "error code: 1010".
+assert pool_seen[-1]["ua"].startswith("omarchy-broker/"), pool_seen[-1]
 
 # 7. Nothing else passes: not another route, not the wrong method.
 status, out = call("GET", "/pool/factory")
