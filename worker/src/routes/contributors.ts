@@ -495,8 +495,11 @@ export async function handleStagingMultipart(taskId: number, filename: string, u
   const key = stagingKey(space, task.name, task.id, filename);
   const action = url.searchParams.get("action");
   if (action === "create") {
-    // Same cap as a single PUT: do not start an upload that already cannot fit.
-    const refused = await quotaRefusal(env, space, 1);
+    // Same cap as a single PUT: do not start an upload that already cannot
+    // fit. What this key holds now — a lease that died after the package
+    // landed and before the PKGBUILD did — is what the upload replaces, so
+    // it does not count against itself.
+    const refused = await quotaRefusal(env, space, 1, key);
     if (refused) return refused;
     const mp = await env.STAGING.createMultipartUpload(key);
     return json({ upload_id: mp.uploadId, key }, 201);
@@ -515,7 +518,11 @@ export async function handleStagingMultipart(taskId: number, filename: string, u
     const obj = await mp.complete(b.parts);
     const refused = await quotaRefusal(env, space, obj.size, key);
     if (refused) {
+      // complete() has already overwritten whatever the key held: the
+      // object goes, and so does the row that described the old one, or
+      // the quota keeps counting bytes that are not there.
       await env.STAGING.delete(key);
+      await env.DB.prepare("DELETE FROM staging_objects WHERE key = ?").bind(key).run();
       return refused;
     }
     await env.DB.prepare("INSERT OR REPLACE INTO staging_objects (key, owner, task_id, size) VALUES (?, ?, ?, ?)").bind(key, space, task.id, obj.size).run();
@@ -537,8 +544,11 @@ export async function handleStagingList(taskId: number, env: Env): Promise<Respo
 /**
  * The owner (or a maintainer) drops a community task's staging objects so
  * they stop counting toward the 2 GB quota. Refused while the task is
- * queued or leased: a worker may still be writing. A staged build whose
- * evidence is gone is cancelled — it is no longer something to review.
+ * queued or leased: a worker may still be writing. Refused, too, while the
+ * project builds from it: its worker reads the PKGBUILD, the log and the
+ * audit from here. A staged build whose evidence is gone is cancelled — it
+ * is no longer something to review — and the package and the pending audit
+ * follow it, as they do on a rejection.
  */
 export async function handleStagingDelete(c: Contributor, taskId: number, env: Env): Promise<Response> {
   const task = await env.DB.prepare("SELECT id, name, owner, status, trust FROM build_tasks WHERE id = ?").bind(taskId).first<{ id: number; name: string; owner: string | null; status: string; trust: string }>();
@@ -546,12 +556,26 @@ export async function handleStagingDelete(c: Contributor, taskId: number, env: E
   if (task.trust !== "community") return json({ error: "only a contributor's staging can be dropped this way" }, 400);
   if (task.owner !== c.login && !isMaintainer(c)) return json({ error: "not yours (or not a maintainer)" }, 403);
   if (task.status === "queued" || task.status === "leased") return json({ error: `task ${taskId} is ${task.status}; wait for the worker to finish or the lease to expire` }, 409);
+  const projectBuild = await env.DB.prepare("SELECT id, status FROM build_tasks WHERE kind = 'build' AND trust = 'project' AND json_extract(params, '$.review') = ? AND status IN ('queued', 'leased')")
+    .bind(taskId)
+    .first<{ id: number; status: string }>();
+  if (projectBuild) return json({ error: `the project is building from task ${taskId} (task ${projectBuild.id} is ${projectBuild.status}); its worker reads this evidence — wait for it` }, 409);
   const rows = await env.DB.prepare("SELECT key FROM staging_objects WHERE task_id = ?").bind(taskId).all<{ key: string }>();
   const keys = rows.results.map((r) => r.key);
   if (keys.length) await env.STAGING.delete(keys);
   await env.DB.prepare("DELETE FROM staging_objects WHERE task_id = ?").bind(taskId).run();
   if (task.status === "staged") {
-    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = ? WHERE id = ?").bind(`staging dropped by ${c.login}`, taskId).run();
+    await env.DB.batch([
+      env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = ? WHERE id = ?").bind(`staging dropped by ${c.login}`, taskId),
+      env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = 'the build it audited was dropped' WHERE kind = 'audit' AND status = 'queued' AND json_extract(params, '$.task') = ?").bind(taskId),
+      // Back to registered, unless another staged build of the package — the
+      // contributor's for another architecture, or the project's — still waits.
+      env.DB.prepare(
+        `UPDATE factory_packages SET status = 'registered', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+           WHERE name = ? AND status = 'staged'
+             AND NOT EXISTS (SELECT 1 FROM build_tasks t WHERE t.kind = 'build' AND t.status = 'staged' AND t.name = factory_packages.name AND t.id != ?)`,
+      ).bind(`staging dropped by ${c.login}`, task.name, taskId),
+    ]);
   }
   return json({ task: taskId, deleted: keys.length });
 }
