@@ -22,7 +22,9 @@ POOL_ROOT (/srv/omarchy-pool)
 ├── etc/                 mode 700; secrets, yours: one worker token per service, agent.env with the agent key
 ├── work/<service>/      OMARCHY_WORK_DIR of each project worker (task dirs, the clone of this repository, the ABI references)
 ├── cache/pacman/<arch>/ one pacman package cache per architecture, mounted into every build container (OMARCHY_PKG_CACHE)
-└── cache/build/<arch>/  cargo registry, Go module and build caches, ccache — /build/cache in every build container (OMARCHY_BUILD_CACHE)
+└── cache/build/       cargo registry, Go module and build caches, ccache — /build/cache in the build containers (OMARCHY_BUILD_CACHE),
+    ├── project/<arch>/    the review workers' builds (what the project publishes reads only what the project wrote)
+    └── community/<arch>/  the community containers' builds; inside both, one directory per package
 ```
 
 Install, from a checkout of this repository on the host (or copy the three

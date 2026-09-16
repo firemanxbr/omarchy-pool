@@ -80,7 +80,12 @@ services:
 
   # A community worker builds inside its own container, one task per
   # container (the restart policy starts the next one); no socket, no work
-  # directory — only the package cache of its architecture.
+  # directory — the package cache of its architecture (pacman checks every
+  # file against the signed database) and a build cache of its own:
+  # cache/build/community/<arch>, never the project's (cache/build/project/
+  # <arch>, where the review workers' build containers keep theirs). What a
+  # stranger's build writes to cargo's registry or ccache, only a stranger's
+  # build reads — and inside, one directory per package.
   #
   # The `emulated` profile: x86_64 *builds* on an aarch64 host run under
   # user-mode emulation, and on a 16K-page kernel (Asahi) that cannot load
@@ -118,7 +123,7 @@ services:
       WORKER_LABELS: '{"where":"${WHERE:-omarchy-studio}","emulated":true,"agent":"via agent-proxy"}'
     volumes:
       - ${POOL_ROOT:-/srv/omarchy-pool}/cache/pacman/x86_64:/var/cache/pacman/pkg
-      - ${POOL_ROOT:-/srv/omarchy-pool}/cache/build/x86_64:/build/cache
+      - ${POOL_ROOT:-/srv/omarchy-pool}/cache/build/community/x86_64:/build/cache
     logging: *logging
   community-aarch64:
     image: ghcr.io/firemanxbr/omarchy-worker:aarch64
@@ -130,5 +135,5 @@ services:
       WORKER_LABELS: '{"where":"${WHERE:-omarchy-studio}"}'
     volumes:
       - ${POOL_ROOT:-/srv/omarchy-pool}/cache/pacman/aarch64:/var/cache/pacman/pkg
-      - ${POOL_ROOT:-/srv/omarchy-pool}/cache/build/aarch64:/build/cache
+      - ${POOL_ROOT:-/srv/omarchy-pool}/cache/build/community/aarch64:/build/cache
     logging: *logging

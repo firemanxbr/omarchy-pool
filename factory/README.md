@@ -164,9 +164,9 @@ waits in your staging workspace.
 API=https://pkgs.firemanxbr.org/api/v1
 
 # 1. Who you are — a GitHub token is used once to read your login and never stored
-#    (a fine-grained token with no permissions is enough; `gh auth token` works).
+#    (a fine-grained token with no permissions, made for this; never `gh auth token`).
 curl -s -X POST $API/factory/register -H 'content-type: application/json' \
-  -d "{\"github_token\":\"$(gh auth token)\"}"
+  -d "{\"github_token\":\"github_pat_…\"}"
 #    → {"login":"you","token":"omc_…"}   keep it: export OMC=omc_…
 
 # 2. Request the package: the pool checks nobody ships it, that the source answers, and writes the request to the record.
@@ -190,11 +190,11 @@ curl -s -X POST $API/factory/packages/project/build -H "authorization: Bearer $O
 #    the agent key (ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY or XAI_API_KEY — or CLAUDE_CODE_OAUTH_TOKEN,
 #    a Claude subscription through Claude Code) is *yours*, on your machine: the pool never holds one.
 #    A worker is ready only when its agent answers the probe (agent.py --probe): no agent, no build.
-OMARCHY_WORKER_TOKEN=omw_… GITHUB_TOKEN="$(gh auth token)" ANTHROPIC_API_KEY=sk-… \
+OMARCHY_WORKER_TOKEN=omw_… GITHUB_TOKEN=github_pat_… ANTHROPIC_API_KEY=sk-… \
   podman compose -f factory/image/compose.yml up -d        # or docker compose; a stop waits for the build (3 h)
 #    or, one task by hand (--stop-timeout: a stop lets the build finish instead of killing it):
 podman run -d --name omarchy-worker --restart unless-stopped --stop-timeout 10800 \
-  -e OMARCHY_WORKER_TOKEN=omw_… -e GITHUB_TOKEN="$(gh auth token)" ghcr.io/firemanxbr/omarchy-worker:latest
+  -e OMARCHY_WORKER_TOKEN=omw_… -e GITHUB_TOKEN=github_pat_… ghcr.io/firemanxbr/omarchy-worker:latest
 
 # 6. Follow it.
 curl -s $API/factory/me -H "authorization: Bearer $OMC"       # your packages, workers, tasks, staging quota

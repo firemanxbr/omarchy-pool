@@ -16,7 +16,8 @@
 #                as a plain user, leave the packages for the host, which
 #                publishes them with the task's per-job token; the pool signs.
 #
-# Environment (secrets come from the operator, never from the task):
+# Environment (secrets come from the operator, never from the task — and
+# never reach the build: hold_secrets, below):
 #   OMARCHY_API            https://pkgs.firemanxbr.org
 #   OMARCHY_POOL           https://pool.firemanxbr.org (builds can depend on earlier factory builds)
 #   OMARCHY_WORKER_TOKEN   this worker's token (POST /factory/workers, shown once); FACTORY_TOKEN is an accepted alias
@@ -34,6 +35,23 @@ set -euo pipefail
 REPO_URL="https://github.com/firemanxbr/omarchy-pool"
 
 log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
+
+# What this worker holds — its token, the agent's key, GitHub's — stays out
+# of the environment every child inherits. `export -n` keeps them as shell
+# variables for api() and agent_label(); with_secrets lends the agent's
+# key and GitHub's — never the worker's token — to the one process that
+# needs them (the agent, the drafter), exported inside a subshell so they
+# never show in an argv either. Nothing else sees them: not makepkg, not
+# the PKGBUILD it sources for --printsrcinfo, updpkgsums and namcap, not
+# the upstream's build system — a build is somebody else's code, and its
+# log is public (worker/src/leak.ts checks it anyway).
+AGENT_VARS=(ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY XAI_API_KEY CLAUDE_CODE_OAUTH_TOKEN GITHUB_TOKEN)
+SECRET_VARS=(OMARCHY_WORKER_TOKEN FACTORY_TOKEN "${AGENT_VARS[@]}")
+hold_secrets() { local v; for v in "${SECRET_VARS[@]}"; do [[ -n "${!v+x}" ]] && export -n "$v"; done; return 0; }
+with_secrets() { # command... — run with the agent's keys in its environment
+  local v
+  ( for v in "${AGENT_VARS[@]}"; do [[ -n "${!v:-}" ]] && export "$v"; done; exec "$@" )
+}
 
 # The agent this worker runs, as "<provider>/<model>" (the same choice
 # factory/bin/agent.py makes), or "" without a key — reported at claim time
@@ -57,7 +75,7 @@ AGENT_STATUS=""; AGENT_ERROR=""; AGENT_CHECKED=0
 agent_probe() {
   [[ -n "$(agent_label)" ]] || { AGENT_STATUS=""; AGENT_ERROR=""; return; }
   local out
-  if out="$(timeout 120 python3 /build/pool/factory/bin/agent.py --probe 2>/dev/null)"; then
+  if out="$(with_secrets timeout 120 python3 /build/pool/factory/bin/agent.py --probe 2>/dev/null)"; then
     AGENT_STATUS=ok; AGENT_ERROR=""
     log "agent $(agent_label): ok ($(jq -r '.ms' <<<"$out" 2>/dev/null || echo ?) ms)"
   else
@@ -106,9 +124,11 @@ prepare_container() {
   mkdir -p /etc/makepkg.conf.d
   printf 'MAKEFLAGS="-j%s"\nNINJAFLAGS="-j%s"\nBUILDENV=(!distcc color ccache check !sign)\n' "$(nproc)" "$(nproc)" > /etc/makepkg.conf.d/omarchy-pool.conf
   # Caches that outlive the container when the operator mounts /build/cache
-  # (a directory per architecture on the host: cargo's registry, Go's module
-  # and build caches, ccache's objects); a fresh directory otherwise.
-  install -d -o builder -g builder /build/cache /build/cache/cargo /build/cache/go /build/cache/go/mod /build/cache/go/build /build/cache/ccache
+  # (one directory per trust and architecture on the host; a fresh directory
+  # otherwise). Inside it, one directory per package (run_makepkg): what a
+  # build writes to cargo's registry, Go's module and build caches or
+  # ccache's objects is read by a later build of the same package only.
+  install -d -o builder -g builder /build/cache
   # The pool's tooling and key, at main.
   rm -rf /build/pool && git clone -q --depth 1 "$REPO_URL" /build/pool
 }
@@ -154,7 +174,7 @@ fetch_pkgbuild() { # name ref → /build/pkg holds the PKGBUILD directory
       curl -sSf --max-time 60 "${OMARCHY_API:-https://pkgs.firemanxbr.org}/api/v1/factory/tasks/$from/artifacts/$f" -o "/build/evidence/$f" 2>/dev/null || rm -f "/build/evidence/$f"
     done
     ls -la /build/evidence
-    GITHUB_TOKEN="${GITHUB_TOKEN:-}" python3 /build/pool/factory/bin/draft-pkgbuild --url "${review_url:-$OMARCHY_REVIEW_URL}" --name "$name" --out /build/pkg --evidence /build/evidence \
+    with_secrets python3 /build/pool/factory/bin/draft-pkgbuild --url "${review_url:-$OMARCHY_REVIEW_URL}" --name "$name" --out /build/pkg --evidence /build/evidence \
       ${review_source:+--source "$review_source"} ${review_version:+--version "$review_version"} ${review_desc:+--description "$review_desc"} ${review_license:+--license "$review_license"}
   elif [[ "$ref" == bump:* ]]; then
     # A new upstream release of an approved package: the PKGBUILD a
@@ -172,7 +192,7 @@ fetch_pkgbuild() { # name ref → /build/pkg holds the PKGBUILD directory
     spec="${ref#draft:}"; url="${spec%@*}"
     echo "==> Drafting a PKGBUILD for $url ($( [[ -n "$(agent_label)" ]] && echo "with the contributor's agent, $(agent_label)" || echo "template; set an agent key on the worker for an agent-written draft"))"
     mkdir -p /build/pkg
-    GITHUB_TOKEN="${GITHUB_TOKEN:-}" python3 /build/pool/factory/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg
+    with_secrets python3 /build/pool/factory/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg
   elif [[ "$ref" == *@*:* ]]; then
     local url rest tag path
     url="${ref%%@*}"; rest="${ref#*@}"; tag="${rest%%:*}"; path="${rest#*:}"
@@ -198,7 +218,11 @@ fetch_pkgbuild() { # name ref → /build/pkg holds the PKGBUILD directory
   [[ -f /build/pkg/PKGBUILD ]] || { echo "no PKGBUILD found for $ref"; exit 3; }
 }
 
-as_builder() { runuser -u builder -- "$@"; }
+# The build user starts from an empty environment — an allowlist, not what
+# root happens to have (runuser alone hands over everything but HOME, SHELL,
+# USER and LOGNAME). The caches and makepkg's own variables are set by the
+# caller on the command line.
+as_builder() { runuser -u builder -- env -i PATH="$PATH" HOME=/home/builder USER=builder LOGNAME=builder SHELL=/bin/bash TERM="${TERM:-dumb}" LANG="${LANG:-C.UTF-8}" "$@"; }
 
 # Extends the task's lease while the build runs (every five minutes; the
 # lease is thirty): a build longer than the lease is not handed to another
@@ -226,8 +250,13 @@ install_deps() {
   pacman -S --needed --noconfirm --asdeps -- $deps
 }
 
-run_makepkg() { # → /build/out/*.pkg.tar.zst
+run_makepkg() { # name → /build/out/*.pkg.tar.zst
+  local name="$1" cache
   rm -rf /build/out; mkdir -p /build/out && chown -R builder:builder /build/pkg /build/out
+  # This package's own caches (see prepare_container); the name is a path component.
+  [[ "$name" =~ ^[A-Za-z0-9@._+-]+$ && "$name" != .* ]] || { echo "refusing package name '$name'" >&2; return 3; }
+  cache="/build/cache/$name"
+  install -d -o builder -g builder "$cache" "$cache/cargo" "$cache/go" "$cache/go/mod" "$cache/go/build" "$cache/ccache"
   # A drafted PKGBUILD carries SKIP checksums; fill them in — every SKIP
   # that is not a VCS source's, local files included (the gate refuses a
   # SKIP left behind).
@@ -242,7 +271,7 @@ run_makepkg() { # → /build/out/*.pkg.tar.zst
   install_deps
   # zst whatever the image's makepkg.conf says (Arch Linux ARM defaults to xz).
   (cd /build/pkg && as_builder env PKGDEST=/build/out PKGEXT=.pkg.tar.zst PACKAGER="omarchy-pool factory <https://github.com/firemanxbr/omarchy-pool>" \
-    CARGO_HOME=/build/cache/cargo CARGO_BUILD_JOBS="$(nproc)" GOMODCACHE=/build/cache/go/mod GOCACHE=/build/cache/go/build GOFLAGS=-modcacherw CCACHE_DIR=/build/cache/ccache \
+    CARGO_HOME="$cache/cargo" CARGO_BUILD_JOBS="$(nproc)" GOMODCACHE="$cache/go/mod" GOCACHE="$cache/go/build" GOFLAGS=-modcacherw CCACHE_DIR="$cache/ccache" \
     makepkg --noconfirm --clean --cleanbuild --nosign)
 }
 
@@ -368,7 +397,7 @@ build_with_retries() { # name ref
   [[ ( "$ref" == draft:* || "$ref" == review:* ) && -n "$(agent_label)" ]] && max=3
   fetch_pkgbuild "$name" "$ref"
   while :; do
-    if run_makepkg > /build/attempt.log 2>&1; then
+    if run_makepkg "$name" > /build/attempt.log 2>&1; then
       cat /build/attempt.log
       vet_package "$name" && return 0
       # The gate failed: one more turn of the drafter, with the verdict as the log, when there is an agent.
@@ -382,11 +411,11 @@ build_with_retries() { # name ref
     echo "==> Attempt $attempt: correcting the PKGBUILD from the log"
     cp /build/pkg/PKGBUILD /build/PKGBUILD.prev
     if [[ "$ref" == review:* ]]; then
-      python3 /build/pool/factory/bin/draft-pkgbuild --url "${review_url:-$OMARCHY_REVIEW_URL}" --name "$name" --out /build/pkg --evidence /build/evidence --previous /build/PKGBUILD.prev --log /build/attempt.log \
+      with_secrets python3 /build/pool/factory/bin/draft-pkgbuild --url "${review_url:-$OMARCHY_REVIEW_URL}" --name "$name" --out /build/pkg --evidence /build/evidence --previous /build/PKGBUILD.prev --log /build/attempt.log \
         ${review_source:+--source "$review_source"} ${review_version:+--version "$review_version"} ${review_desc:+--description "$review_desc"} ${review_license:+--license "$review_license"} || return 4
     else
       local url; url="${ref#draft:}"; url="${url%@*}"
-      python3 /build/pool/factory/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg --previous /build/PKGBUILD.prev --log /build/attempt.log || return 4
+      with_secrets python3 /build/pool/factory/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg --previous /build/PKGBUILD.prev --log /build/attempt.log || return 4
     fi
   done
 }
@@ -565,6 +594,7 @@ api() { # method path [json]
 }
 sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
 
+hold_secrets
 case "${1:-}" in
   --inside) inside ;;
   --container) container_worker ;;

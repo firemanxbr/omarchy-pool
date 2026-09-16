@@ -168,9 +168,9 @@ __CHARTS__
       $("#w-cmd").textContent =
         "# keep it running: one task per container, the restart brings the next (docker works the same);\n" +
         "# --stop-timeout lets a stop wait for the build; GITHUB_TOKEN (a fine-grained token with no permissions) lifts GitHub's 60 requests an hour\n" +
-        "podman run -d --name omarchy-worker --restart unless-stopped --stop-timeout 10800 \\\n  -e OMARCHY_WORKER_TOKEN=" + d.token + " -e GITHUB_TOKEN=\"$(gh auth token)\" \\\n  ghcr.io/firemanxbr/omarchy-worker:latest\n\n" +
+        "podman run -d --name omarchy-worker --restart unless-stopped --stop-timeout 10800 \\\n  -e OMARCHY_WORKER_TOKEN=" + d.token + " -e GITHUB_TOKEN=<github_pat_…, no permissions> \\\n  ghcr.io/firemanxbr/omarchy-worker:latest\n\n" +
         "# or with compose (" + REPO + "/blob/main/factory/image/compose.yml)\n" +
-        "OMARCHY_WORKER_TOKEN=" + d.token + " GITHUB_TOKEN=\"$(gh auth token)\" podman compose -f compose.yml up -d\n\n" +
+        "OMARCHY_WORKER_TOKEN=" + d.token + " GITHUB_TOKEN=<github_pat_…, no permissions> podman compose -f compose.yml up -d\n\n" +
         "# -e ANTHROPIC_API_KEY=… (or OPENAI_API_KEY, GEMINI_API_KEY, XAI_API_KEY, CLAUDE_CODE_OAUTH_TOKEN: your key) — the agent that writes the PKGBUILD; without one that answers, the worker is not ready";
       $("#worker-form").reset(); refresh();
     }).catch(function (e) { $("#w-btn").disabled = false; $("#pkg-state").textContent = "failed: " + e; });

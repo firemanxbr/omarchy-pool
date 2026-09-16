@@ -52,15 +52,15 @@ const BODY = String.raw`
       <div class="step"><h3>1. Start it</h3><p>One container is one task: it asks the pool for a build of yours, builds it, uploads the package, the PKGBUILD and the log to your staging workspace, and exits. The restart policy starts the next one.</p>
 <pre># Docker Desktop
 docker run -d --name omarchy-worker --restart unless-stopped --stop-timeout 10800 \
-  -e OMARCHY_WORKER_TOKEN=&lt;omw_…&gt; -e GITHUB_TOKEN="$(gh auth token)" \
+  -e OMARCHY_WORKER_TOKEN=&lt;omw_…&gt; -e GITHUB_TOKEN=&lt;github_pat_…, no permissions&gt; \
   ${IMG}:latest
 
 # Podman
 podman run -d --name omarchy-worker --restart unless-stopped --stop-timeout 10800 \
-  -e OMARCHY_WORKER_TOKEN=&lt;omw_…&gt; -e GITHUB_TOKEN="$(gh auth token)" \
+  -e OMARCHY_WORKER_TOKEN=&lt;omw_…&gt; -e GITHUB_TOKEN=&lt;github_pat_…, no permissions&gt; \
   ${IMG}:latest</pre>
       <p>Or keep the settings in a file with <a href="${REPO_URL}/blob/main/factory/image/compose.yml">compose.yml</a>: <code>OMARCHY_WORKER_TOKEN=… GITHUB_TOKEN=… docker compose up -d</code> (<code>podman compose</code> works the same).</p>
-      <p><b>GITHUB_TOKEN</b>: the worker reads GitHub's API for every package it builds — the release, the files. Without a token GitHub allows 60 requests an hour from your address, and a queue of ten builds is ten failures; a fine-grained token with <em>no permissions at all</em> gives 5000. <b>--stop-timeout</b> (compose: <code>stop_grace_period</code>): a stop lets the build finish and report; killed mid-build, the task waits half an hour for its lease to expire. Change the settings between builds, not during one.</p></div>
+      <p><b>GITHUB_TOKEN</b>: the worker reads GitHub's API for every package it builds — the release, the files. Without a token GitHub allows 60 requests an hour from your address, and a queue of ten builds is ten failures; a <a href="https://github.com/settings/personal-access-tokens/new">fine-grained token</a> with <em>no permissions at all</em> gives 5000. Make one for this — never <code>gh auth token</code>, which is your account with write access to your repositories (see <a href="#secrets">what a build can see</a>). <b>--stop-timeout</b> (compose: <code>stop_grace_period</code>): a stop lets the build finish and report; killed mid-build, the task waits half an hour for its lease to expire. Change the settings between builds, not during one.</p></div>
       <div class="step"><h3>2. Give it work</h3><p>On <a href="/factory">the Factory</a>, request a package (the project's URL, a description, the licence, the checklist) and press <b>Build</b>. Your worker picks it up within a minute; the <em>Your builds</em> table follows it, and the <em>A worker of yours</em> table shows it alive. When the build is staged, a maintainer sees it on <a href="/review">Review</a>.</p></div>
       <div class="step"><h3>3. Donate the machine, bring your agent</h3><p>Two switches, both yours to flip:</p>
 <pre># also build other contributors' packages (their bumps after 14 days, package requests at once)
@@ -129,7 +129,7 @@ podman run -d --name omarchy-worker --restart unless-stopped --security-opt labe
       <div class="step"><h3>2. Give it to the worker</h3>
 <pre># a contributor's worker (docker works the same)
 podman run -d --name omarchy-worker --restart unless-stopped --stop-timeout 10800 \
-  -e OMARCHY_WORKER_TOKEN=&lt;omw_…&gt; -e GITHUB_TOKEN="$(gh auth token)" \
+  -e OMARCHY_WORKER_TOKEN=&lt;omw_…&gt; -e GITHUB_TOKEN=&lt;github_pat_…, no permissions&gt; \
   -e CLAUDE_CODE_OAUTH_TOKEN=&lt;sk-ant-oat01-…&gt; \
   ${IMG}:latest
 
@@ -144,6 +144,16 @@ FACTORY_PROVIDER=claude-code</pre>
       <p>At start the worker installs Claude Code for its architecture (the official installer, checksum verified, into the container's home — about 200 MB, once per container; the image does not ship it) and reports <code>claude-code/claude-sonnet-5</code> as its agent on the Factory page. <code>FACTORY_MODEL</code> picks another model (<code>claude-opus-5</code>); <code>FACTORY_REASONING=low</code> keeps a draft or an audit from thinking longer than it needs. A binary of your own, mounted at <code>/usr/local/bin/claude</code> or named by <code>CLAUDE_CODE_BIN</code>, skips the install.</p></div>
       <div class="step"><h3>3. What it does, exactly</h3><p>Every completion is one process: <code>claude -p --tools "" --max-turns 1 --no-session-persistence --output-format json --model … --system-prompt …</code>, the PKGBUILD and the log on stdin, in an empty directory. No tool is available to the model — it cannot read a file, run a command or reach the network; it answers, and the worker reads the answer. The token goes to the child process; an <code>ANTHROPIC_API_KEY</code> in the same environment is withheld from it, so choosing the subscription means the subscription.</p></div>
       <div class="step"><h3>4. What it costs, and whose rules</h3><p>Nothing on top of the subscription — and the subscription's limits apply: each draft and each audit is a message in the same five-hour and weekly windows as your own use of Claude, and a worker that hits the limit fails the task (<em>You've hit your limit</em>, back in the queue for the next window; the pool retries an audit three times). Your agreement with Anthropic is what allows this use: read their consumer terms on automated and shared use before you put the token on a shared worker or a project host — the API key (<code>ANTHROPIC_API_KEY</code>, a workspace with a spending limit in the Console) is the plain path, and switching is one variable.</p></div>
+    </div>
+  </section>
+
+  <section id="secrets">
+    <h2>What a build can see</h2>
+    <p>A build is somebody else's code — the recipe, and the build system of the project it packages — and its log is public: on the API while the build is in staging, on the record once it is staged. So the rule the worker keeps, on your machine and on the project's: <b>the build sees nothing the log cannot show.</b></p>
+    <div class="steps">
+      <div class="step"><h3>What the worker holds</h3><p>Its token, your agent's key, your <code>GITHUB_TOKEN</code>. They are read once when the container starts and taken out of the environment every child inherits; the agent and the drafter get the key for the moment they run, and nothing else does — not <code>makepkg</code>, not the PKGBUILD it sources, not the upstream's build. The build user starts from an empty environment. A PKGBUILD that prints <code>env</code> prints <code>PATH</code> and <code>HOME</code>.</p></div>
+      <div class="step"><h3>What the pool checks anyway</h3><p>Every log, recipe and report uploaded to staging is read for what looks like a secret — the pool's tokens, agents' keys, GitHub's, a private key, a credential in a URL, a dump of the worker's variables — and refused if it carries one: the build fails with the kind and the line (never the match), and nothing reaches the record. That is for the worker the pool does not run; if it fires on yours, the container has something in its environment the worker did not put there — fix the container, queue the build again.</p></div>
+      <div class="step"><h3>What you decide</h3><p>Give the worker a <code>GITHUB_TOKEN</code> made for it, with no permissions — not your account's. Keep <code>WORKER_SHARED</code> off unless you mean to run strangers' recipes on this machine; on, give it no key you would mind losing. Do not mount your home or a directory of yours into it: it needs none. Caches, when you mount one, are kept per package inside — a build reads only what an earlier build of the same package wrote.</p></div>
     </div>
   </section>
 
