@@ -77,7 +77,7 @@ pub fn agent_label() -> Option<String> {
 pub fn default_kinds() -> Vec<String> {
     let mut kinds: Vec<String> = [
         "build", "sync", "render", "promote", "health", "security", "enqueue", "rollback", "gc",
-        "verify", "relayout", "publish",
+        "verify", "relayout", "publish", "trial",
     ]
     .iter()
     .map(|k| (*k).to_owned())
@@ -502,6 +502,7 @@ fn execute(opts: &WorkOptions, task: &Task, token: &Arc<Mutex<String>>) -> Resul
         "audit" => audit_job(opts, &job, task),
         "verify" => verify_job(opts, &job, task),
         "relayout" => relayout_job(opts, token),
+        "trial" => trial_job(opts, &job, task, token),
         other => Err(anyhow!("this worker does not run '{other}' jobs")),
     }
 }
@@ -778,6 +779,121 @@ fn publish_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
         ),
         result: serde_json::json!({ "sha256": manifest.sha256, "filename": manifest.filename, "version": manifest.version, "rendered": rendered, "task": built }),
     })
+}
+
+/// The trial of the project's review build: its packages from staging into
+/// the pool under the factory's directory and pinned into the lab (never a
+/// promised ring), the lab rendered, then a real pacman in a clean
+/// container installs them from the lab above edge (tests/trial.sh) —
+/// hooks run, files verified — and the transcript goes beside the build's
+/// other evidence (trial.log) for the maintainer who decides. The same
+/// objects reach edge later by the publish job, already in the pool.
+fn trial_job(
+    opts: &WorkOptions,
+    job: &Api,
+    task: &Task,
+    token: &Arc<Mutex<String>>,
+) -> Result<Outcome> {
+    let built = task
+        .params
+        .get("task")
+        .and_then(serde_json::Value::as_i64)
+        .ok_or_else(|| anyhow!("trial: params.task names the project's build"))?;
+    let files: Vec<String> = task
+        .params
+        .get("files")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    anyhow::ensure!(
+        !files.is_empty(),
+        "trial: params.files lists the staged packages"
+    );
+    let dir = opts.work_dir.join(format!("trial-{}", task.id));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    let mut pkgs = Vec::new();
+    for f in &files {
+        anyhow::ensure!(
+            f.ends_with(".pkg.tar.zst") && !f.contains('/'),
+            "trial: {f} is not a package file name"
+        );
+        let dest = dir.join(f);
+        job.download_as_self(
+            &format!("{}/api/v1/factory/tasks/{built}/artifacts/{f}", job.base()),
+            &dest,
+        )
+        .with_context(|| format!("fetching {f} of the project's build {built}"))?;
+        pkgs.push(dest);
+    }
+    pkgs.sort();
+    let names: Vec<String> = pkgs
+        .iter()
+        .filter_map(|p| pkg_extract::extract_manifest(p).ok().map(|m| m.name))
+        .collect();
+    anyhow::ensure!(!names.is_empty(), "trial: no package could be read");
+    ops::publish(
+        job,
+        "lab",
+        "factory",
+        &task.arch,
+        Some(&format!(
+            "trial of factory task {built}: {} — into the lab, not promised",
+            task.name
+        )),
+        &pkgs,
+    )?;
+    let rendered = ops::render(job, "lab", &task.arch, opts.sign.as_deref())?;
+    let _ = std::fs::remove_dir_all(&dir);
+    let log = opts.work_dir.join("tmp").join(format!("trial-{built}.log"));
+    let mut args: Vec<&str> = vec![&task.arch];
+    let built_s = built.to_string();
+    args.push(&built_s);
+    args.extend(names.iter().map(String::as_str));
+    let ok = script(opts, token, "tests/trial.sh", &args)?;
+    let transcript = std::fs::read(&log).unwrap_or_default();
+    if !transcript.is_empty() {
+        job.put_bytes(
+            &format!("/factory/tasks/{built}/artifacts/trial.log"),
+            &transcript,
+        )
+        .with_context(|| format!("attaching trial.log to staged task {built}"))?;
+    }
+    let _ = std::fs::remove_file(&log);
+    let verdict = String::from_utf8_lossy(&transcript)
+        .lines()
+        .rev()
+        .find_map(|l| l.strip_prefix("TRIAL="))
+        .unwrap_or(if ok { "ok" } else { "failed" })
+        .to_owned();
+    let result = serde_json::json!({ "verdict": verdict, "packages": names, "task": built, "rendered": rendered });
+    if ok {
+        Ok(Outcome {
+            summary: format!(
+                "trial of {} ({}): installed from the lab above edge on {}, hooks ran, files verified",
+                task.name,
+                names.join(", "),
+                task.arch
+            ),
+            result,
+        })
+    } else {
+        // A failed trial is a verdict, not a broken job: the task completes
+        // with it so the Review page shows it; the transcript says why.
+        Ok(Outcome {
+            summary: format!(
+                "trial of {} ({}) on {}: {verdict} — see trial.log",
+                task.name,
+                names.join(", "),
+                task.arch
+            ),
+            result,
+        })
+    }
 }
 
 /// The keyrings a sync task names: one per source of the batch, or the single source's.

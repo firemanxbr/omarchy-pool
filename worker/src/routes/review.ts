@@ -41,7 +41,10 @@ export async function handleReviewList(env: Env): Promise<Response> {
             (SELECT by FROM approvals a WHERE a.task_id = t.id ORDER BY a.id DESC LIMIT 1) AS decided_by,
             (SELECT u.status FROM build_tasks u WHERE u.kind = 'audit' AND json_extract(u.params, '$.task') = t.id ORDER BY u.id DESC LIMIT 1) AS audit_status,
             (SELECT u.result FROM build_tasks u WHERE u.kind = 'audit' AND json_extract(u.params, '$.task') = t.id ORDER BY u.id DESC LIMIT 1) AS audit_result,
-            (SELECT u.error FROM build_tasks u WHERE u.kind = 'audit' AND json_extract(u.params, '$.task') = t.id ORDER BY u.id DESC LIMIT 1) AS audit_error
+            (SELECT u.error FROM build_tasks u WHERE u.kind = 'audit' AND json_extract(u.params, '$.task') = t.id ORDER BY u.id DESC LIMIT 1) AS audit_error,
+            (SELECT u.status FROM build_tasks u WHERE u.kind = 'trial' AND json_extract(u.params, '$.task') = t.id ORDER BY u.id DESC LIMIT 1) AS trial_status,
+            (SELECT u.result FROM build_tasks u WHERE u.kind = 'trial' AND json_extract(u.params, '$.task') = t.id ORDER BY u.id DESC LIMIT 1) AS trial_result,
+            (SELECT u.error FROM build_tasks u WHERE u.kind = 'trial' AND json_extract(u.params, '$.task') = t.id ORDER BY u.id DESC LIMIT 1) AS trial_error
        FROM build_tasks t LEFT JOIN factory_packages p ON p.name = t.name
       WHERE t.kind = 'build' AND t.status = 'staged'
         AND NOT EXISTS (SELECT 1 FROM approvals a WHERE a.task_id = t.id AND a.decision = 'approved')
@@ -64,13 +67,15 @@ export async function handleReviewList(env: Env): Promise<Response> {
         project_build: r.trust === "community" ? (projectOf.get(r.id as number) ?? null) : null,
         params: undefined,
         detected: r.detected ? JSON.parse(r.detected as string) : null,
-        evidence: { log: `/api/v1/factory/tasks/${r.id}/artifacts/build.log`, pkgbuild: `/api/v1/factory/tasks/${r.id}/artifacts/PKGBUILD`, pkginfo: `/api/v1/factory/tasks/${r.id}/artifacts/PKGINFO`, audit: `/api/v1/factory/tasks/${r.id}/artifacts/audit.md`, tests: `/api/v1/factory/tasks/${r.id}/artifacts/tests.log`, vet: `/api/v1/factory/tasks/${r.id}/artifacts/vet.json` },
+        evidence: { log: `/api/v1/factory/tasks/${r.id}/artifacts/build.log`, pkgbuild: `/api/v1/factory/tasks/${r.id}/artifacts/PKGBUILD`, pkginfo: `/api/v1/factory/tasks/${r.id}/artifacts/PKGINFO`, audit: `/api/v1/factory/tasks/${r.id}/artifacts/audit.md`, tests: `/api/v1/factory/tasks/${r.id}/artifacts/tests.log`, vet: `/api/v1/factory/tasks/${r.id}/artifacts/vet.json`, trial: `/api/v1/factory/tasks/${r.id}/artifacts/trial.log` },
         // The gate (factory/README.md *The gate*): the worker's own checks — checksums, shellcheck, namcap, the file list, the metadata, check(), the smoke test — as vet.json said.
         vet: vetOf(r.result as string | null),
         // The second agent's report (docs/GOVERNANCE.md): a verdict a
         // maintainer reads, never one the pool acts on.
         audit: auditOf(r.audit_status as string | null, r.audit_result as string | null, r.audit_error as string | null),
-        audit_status: undefined, audit_result: undefined, audit_error: undefined, result: undefined,
+        // The trial (the lab): a real pacman installed the project's build from the lab above edge — or could not; the transcript is the evidence.
+        trial: trialOf(r.trial_status as string | null, r.trial_result as string | null, r.trial_error as string | null),
+        audit_status: undefined, audit_result: undefined, audit_error: undefined, trial_status: undefined, trial_result: undefined, trial_error: undefined, result: undefined,
       })),
     },
     200,
@@ -103,9 +108,22 @@ function auditOf(status: string | null, result: string | null, error: string | n
   }
 }
 
-/** A decision on the build ends the audit that has not started (the report of one that ran stays as evidence). */
+/** The trial as the Review page shows it: its state while pending, the verdict once done (`ok`, or what stopped it). */
+function trialOf(status: string | null, result: string | null, error: string | null): { status: string; verdict?: string; packages?: string[]; error?: string } {
+  if (!status) return { status: "none" };
+  if (status !== "done") return { status, error: error ?? undefined };
+  try {
+    const r = JSON.parse(result ?? "{}") as { verdict?: string; packages?: string[] };
+    return { status: "done", verdict: r.verdict ?? "unknown", packages: r.packages };
+  } catch {
+    return { status: "done", error: "unreadable result" };
+  }
+}
+
+/** A decision on the build ends the audit and the trial that have not started (the reports of those that ran stay as evidence). */
 async function cancelPendingAudit(env: Env, taskId: number): Promise<void> {
   await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = 'the build was decided before the audit ran' WHERE kind = 'audit' AND status = 'queued' AND json_extract(params, '$.task') = ?").bind(taskId).run();
+  await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = 'the build was decided before the trial ran' WHERE kind = 'trial' AND status = 'queued' AND json_extract(params, '$.task') = ?").bind(taskId).run();
 }
 
 function canReview(c: Contributor): boolean {

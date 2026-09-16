@@ -462,21 +462,25 @@ function stagingOwner(task: { trust: string; owner: string | null; params: strin
  */
 /** What the audit job may add to a staged build's evidence, and nothing else. */
 const AUDIT_FILES = ["audit.json", "audit.md"];
+/** What the trial job adds: the transcript of the real pacman that installed the build from the lab. */
+const TRIAL_FILES = ["trial.log"];
 
 export async function handleStagingPut(taskId: number, filename: string, request: Request, env: Env, w: WorkerIdentity): Promise<Response> {
   const task = await env.DB.prepare("SELECT id, name, owner, status, lease_owner, trust, params FROM build_tasks WHERE id = ?").bind(taskId).first<{ id: number; name: string; owner: string; status: string; lease_owner: string; trust: string; params: string | null }>();
   if (!task) return json({ error: "no such task" }, 404);
   const space = stagingOwner(task);
   if (!space) return json({ error: "project tasks publish to the pool, not to staging" }, 400);
-  if (w.job === "audit") {
-    // The second agent's report, next to the evidence it read: only once
-    // the build is staged (its own worker is done), only the report files.
-    if (task.status !== "staged") return json({ error: `task ${taskId} is ${task.status}; the audit reports on a staged build` }, 409);
-    if (!AUDIT_FILES.includes(filename)) return json({ error: `an audit uploads ${AUDIT_FILES.join(" and ")}` }, 400);
+  if (w.job === "audit" || w.job === "trial") {
+    // The second agent's report, or the trial's transcript, next to the
+    // evidence: only once the build is staged (its own worker is done),
+    // only that job's files.
+    const allowed = w.job === "audit" ? AUDIT_FILES : TRIAL_FILES;
+    if (task.status !== "staged") return json({ error: `task ${taskId} is ${task.status}; the ${w.job} reports on a staged build` }, 409);
+    if (!allowed.includes(filename)) return json({ error: `a ${w.job} uploads ${allowed.join(" and ")}` }, 400);
   } else {
     if (task.status !== "leased" || task.lease_owner !== w.id) return json({ error: "the lease is not yours" }, 409);
     // The builder never writes the report about its own build.
-    if (AUDIT_FILES.includes(filename)) return json({ error: `${filename} is written by the audit job, not by the build` }, 403);
+    if (AUDIT_FILES.includes(filename) || TRIAL_FILES.includes(filename)) return json({ error: `${filename} is written by the audit or trial job, not by the build` }, 403);
   }
   if (!/^[A-Za-z0-9][A-Za-z0-9._:+-]{0,200}$/.test(filename)) return json({ error: "bad filename" }, 400);
   const len = Number(request.headers.get("content-length") ?? 0);

@@ -87,7 +87,14 @@ PKGBUILD reviewed and merged ──▶ pool: package_requests / build_tasks (D1)
    project's own recipe from the project's sources; the same gate runs;
    the packages, the recipe, the log, the gate go to the project's staging
    space (`staging/@project/…`) and the evidence to the record; its own
-   audit is queued. Nothing is published yet.
+   audit is queued — and its **trial**: a pool worker of that architecture
+   puts the package into the pool under the factory's directory and pins it
+   into the **lab** (the fourth ring: nothing there is promised or
+   promoted), renders the lab, and a real pacman in a clean container
+   installs it from the lab above `edge` (`tests/trial.sh`): dependencies
+   from `edge`, hooks run, files verified. The transcript goes beside the
+   evidence (`trial.log`); the Review page shows *installs* or what stopped
+   it. Nothing is published yet.
 7. **A maintainer approves the project's build.** With the project's
    evidence in front of them (the Review page shows both rows), a
    maintainer — not the owner — approves. The approval is the decision on

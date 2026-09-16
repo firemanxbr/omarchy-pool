@@ -80,7 +80,7 @@ the network. Two kinds of tests live there:
 |---|---|
 | `releases.test.ts` | the release logic through the Worker's own `fetch`: manifests indexed into the pool, `POST /releases` — first release, adds on top of the head, replace-by-name within a source and architecture (another source's build of the name stays; `remove_from` drops one source's, `remove` every source's), `remove` / `remove_arch`, promote `edge → rc → stable` by copying the source head, rollback to an earlier release (lineage, history, `is_head`), the scopes each ring needs; the diff between releases; `unchanged_arches`; `GET /releases/:ring` paged in `(name, arch, source)` order (keyset cursor with the source, the older two-part cursor still accepted) with `release_id` pinning, `arch=`, `include=files`; `GET /graph?arch=` (declared dependencies and provides, per architecture); `GET /stats` before any metrics snapshot; the delta model — a release writes only its delta, checkpoints every 24th, an old release read by id is reconstructed, retention keeps the checkpoint a rollback inside it needs and prunes the rest (410 beyond); the lab — any object pinned into it, never promoted from or into (400), its include the lab's sections above edge's |
 | `relayout.test.ts` | the one-time move to one directory per source (`routes/relayout.ts`): objects copied with their signature and attestation and R2 checking the row's sha256, rows pointed at `<source>/<arch>/<filename>`, a null key backfilled, a row whose bytes the pool never held marked `ghost/…`, purge refused while anything is left to move and then emptying the flat directories; the upload, index, signature and `/packages/known` routes speaking the new layout — a filename is one object per source, another source's build of it another object |
-| `factory.test.ts` | the factory's brain: claims with worker tokens (own architecture only, project vs community), leases and per-job tokens, heartbeat, fail → requeue, complete after the package is indexed, the agent a worker reports; a community build staging its evidence (the builder cannot write `audit.*`, the package is for maintainers, the rest is public), the audit queued and taken only by a project worker declaring the kind, the report attached and its verdict on `/factory/review`; approvals — a contributor cannot, a maintainer cannot approve their own package while another maintainer exists, the rebuild queued at project trust, the record and the profile's track record |
+| `factory.test.ts` | the factory's brain (the trial included: queued for the project's build only, on its architecture, a community worker never takes it, its token reads the staged package and writes the lab and nothing promised, `trial.log` beside the evidence, the verdict on the Review row); claims with worker tokens (own architecture only, project vs community), leases and per-job tokens, heartbeat, fail → requeue, complete after the package is indexed, the agent a worker reports; a community build staging its evidence (the builder cannot write `audit.*`, the package is for maintainers, the rest is public), the audit queued and taken only by a project worker declaring the kind, the report attached and its verdict on `/factory/review`; approvals — a contributor cannot, a maintainer cannot approve their own package while another maintainer exists, the rebuild queued at project trust, the record and the profile's track record |
 | `pages.test.ts` | the dashboard's pages through the Worker's fetch handler: every door and detail page served, the three doors in the navigation, the footer badge, the Pool's headline, the Factory's forms, the Pipeline's live hooks, the docs' five stages, no template placeholder left behind, the old chapter addresses still redirecting |
 | `audience.test.ts` | one day of the zone's request analytics becomes one number per ring and per architecture; recorded once as an `audience` event; a token without *Zone · Analytics · Read* is reported once for the day, then quiet |
 | `provenance.test.ts` | the OPR provenance scan against a stubbed GitHub: origin per package from the tree and `.omarchy/package.json`, only changed packages fetched again, packages gone from the repository dropped, the per-ring counts |
@@ -213,6 +213,27 @@ to the current digests (commit the diff).
 ```bash
 OMARCHY_API=… OMARCHY_POOL=… OMARCHY_TOKEN=… tests/health-check.sh stable
 ```
+
+The include the check writes is the pool's own (`/api/v1/pacman.conf`), so
+each section's `Server` is the directory its database is in; every project's
+keyring the caller fetched (`OMARCHY_KEYRINGS`) is imported and trusted, the
+way `pacman-key --populate` would.
+
+## The trial
+
+```bash
+OMARCHY_API=… OMARCHY_POOL=… OMARCHY_TOKEN=… OMARCHY_KEYRINGS=… tests/trial.sh aarch64 <staged build> <package>…
+```
+
+What the `trial` job runs once the project's review build sits in the lab: a
+clean container of the architecture with the include of `--ring lab` — the
+lab's sections above `edge`'s — checks each named package would come from a
+lab section, installs them for real (`pacman -S`, dependencies from `edge`,
+hooks run), verifies their files (`pacman -Qkk`), and ends with a `TRIAL=`
+line (`ok`, `sync-failed`, `not-from-lab`, `install-failed`, `files-differ`).
+Posts a `trial` event either way and writes the transcript to
+`$OMARCHY_WORK_DIR/tmp/trial-<build>.log`, which the job attaches to the build's
+evidence as `trial.log`.
 
 Second argument selects the architecture (`x86_64` default, `aarch64` uses the Arch
 Linux ARM image on an ARM host). Reads the ring's rendered repos from

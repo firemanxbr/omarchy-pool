@@ -14,6 +14,7 @@ import worker from "../src/index";
 import { sha256Hex } from "../src/routes/contributors";
 import { requeueExpiredLeases, workerReady } from "../src/routes/factory";
 import { packageKey } from "../src/r2";
+import { jobOf } from "../src/jobtoken";
 import { STAGING_QUOTA_BYTES, sweepStaging } from "../src/staging";
 
 const API = "http://pool.test/api/v1";
@@ -273,8 +274,34 @@ describe("a community build, its audit and the review", () => {
     expect(await env.PACKAGES.head(`factory/mine/${req}/build-${projectTask}/PKGBUILD`)).not.toBeNull();
     expect(await env.DB.prepare("SELECT status FROM build_tasks WHERE kind = 'audit' AND json_extract(params, '$.task') = ?").bind(projectTask).first()).toMatchObject({ status: "queued" });
     const rows = (await call("GET", "/factory/review")).json.staged;
-    expect(rows.find((x: any) => x.id === projectTask)).toMatchObject({ kind: "project", from: task, owner: "m1", vet: { verdict: "pass" } });
-    expect(rows.find((x: any) => x.id === task)).toMatchObject({ project_build: { id: projectTask, status: "staged" } });
+    expect(rows.find((x: any) => x.id === projectTask)).toMatchObject({ kind: "project", from: task, owner: "m1", vet: { verdict: "pass" }, trial: { status: "queued" } });
+    expect(rows.find((x: any) => x.id === task)).toMatchObject({ project_build: { id: projectTask, status: "staged" }, trial: { status: "none" } });
+    // The trial: queued for the project's build only, for its architecture; its worker reads the staged package and writes the lab, never a promised ring.
+    const trial = await env.DB.prepare("SELECT id, arch, params FROM build_tasks WHERE kind = 'trial' AND json_extract(params, '$.task') = ?").bind(projectTask).first<{ id: number; arch: string; params: string }>();
+    expect(trial).toMatchObject({ arch: "aarch64" });
+    expect(JSON.parse(trial!.params)).toMatchObject({ task: projectTask, name: "mine", files: ["mine-1.0-1-aarch64.pkg.tar.zst"] });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM build_tasks WHERE kind = 'trial' AND json_extract(params, '$.task') = ?").bind(task).first()).toMatchObject({ n: 0 });
+    expect((await call("POST", "/factory/claim", { arch: "aarch64", kinds: ["trial"] }, "omw_w3")).status).toBe(204); // community trust: builds only
+    const tc = await call("POST", "/factory/claim", { arch: "aarch64", kinds: ["trial"] }, "omw_w1");
+    expect(tc.status).toBe(200);
+    expect(tc.json.task.id).toBe(trial!.id);
+    const scopes = (await jobOf(new Request(API, { headers: { authorization: `Bearer ${tc.json.token}` } }), env))!.s;
+    expect(scopes).toEqual(expect.arrayContaining([`staging:${projectTask}`, "pool:write", "release:lab", "artifacts:*:lab"]));
+    expect(scopes.some((x: string) => x.startsWith("release:") && x !== "release:lab")).toBe(false);
+    const tctx = createExecutionContext();
+    expect((await worker.fetch(new Request(`${API}/factory/tasks/${projectTask}/artifacts/mine-1.0-1-aarch64.pkg.tar.zst`, { headers: { authorization: `Bearer ${tc.json.token}` } }), env, tctx)).status).toBe(200);
+    await waitOnExecutionContext(tctx);
+    // The transcript goes beside the evidence; the verdict on the row.
+    expect((await call("PUT", `/factory/tasks/${projectTask}/artifacts/trial.log`, undefined, tc.json.token, "== pacman -S mine\nTRIAL=ok")).status).toBe(201);
+    expect((await call("POST", `/factory/tasks/${trial!.id}/complete`, { result: { verdict: "ok", packages: ["mine"], task: projectTask }, duration_ms: 30000 }, tc.json.token)).json).toMatchObject({ status: "done" });
+    const tried = (await call("GET", "/factory/review")).json.staged.find((x: any) => x.id === projectTask);
+    expect(tried.trial).toEqual({ status: "done", verdict: "ok", packages: ["mine"] });
+    expect(tried.evidence.trial).toBe(`/api/v1/factory/tasks/${projectTask}/artifacts/trial.log`);
+    const tctx2 = createExecutionContext();
+    const tl = await worker.fetch(new Request(`http://pool.test${tried.evidence.trial}`), env, tctx2);
+    expect(tl.status).toBe(200);
+    expect(await tl.text()).toContain("TRIAL=ok");
+    await waitOnExecutionContext(tctx2);
   });
 
   it("a maintainer — never the owner, no exception — approves the project's build; a publish job carries it into the pool; the seal tells the chain", async () => {

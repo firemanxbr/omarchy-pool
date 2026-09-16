@@ -32,7 +32,7 @@ const BODY = String.raw`
 
   <section id="queue">
     <div class="h2row"><h2>In review</h2><span class="dim" id="queue-note" style="font-size:13px"></span></div>
-    <div class="table-wrap"><table id="staged" class="reader"><thead><tr><th>Package</th><th>Arch</th><th>Brought by</th><th>Build</th><th>Gate</th><th>Audit</th><th>Evidence</th><th>Since</th><th class="decision">Decision</th></tr></thead><tbody></tbody></table></div>
+    <div class="table-wrap"><table id="staged" class="reader"><thead><tr><th>Package</th><th>Arch</th><th>Brought by</th><th>Build</th><th>Gate</th><th>Audit</th><th>Trial</th><th>Evidence</th><th>Since</th><th class="decision">Decision</th></tr></thead><tbody></tbody></table></div>
     <p class="sub" id="legend" hidden>Gate: the worker's own checks. Audit: the project's second agent — <span class="pill ok">ok</span> nothing to change · <span class="pill warn">warn</span> approve with the findings in mind · <span class="pill error">block</span> not as is. Evidence, never a decision; the category under the name is settled here.</p>
   </section>
 
@@ -165,6 +165,19 @@ const SCRIPT = String.raw`
     if (a.status === "done") return '<span class="pill none">unreadable</span>';
     return '<span class="muted">—</span>';
   }
+  // The trial: a real pacman installed the project's build from the lab above edge in a clean container — or what stopped it; the transcript is beside the evidence.
+  function trial(t) {
+    var a = t.trial || { status: "none" };
+    if (a.status === "done" && a.verdict) {
+      var ok = a.verdict === "ok";
+      return '<span class="pill ' + (ok ? "ok" : "error") + '">' + (ok ? "installs" : esc(a.verdict)) + '</span> <a class="run" href="' + t.evidence.trial + '" title="the lab above edge: pacman -S, hooks, files">transcript</a>';
+    }
+    if (a.status === "queued") return '<span class="muted">waiting</span>';
+    if (a.status === "leased") return '<span class="muted">installing</span>';
+    if (a.status === "failed") return '<span class="pill none" title="' + esc(a.error || "") + '">did not run</span>';
+    if (a.status === "done") return '<span class="pill none">unreadable</span>';
+    return '<span class="muted" title="only the project\'s build is tried">—</span>';
+  }
   function decision(t) {
     if (!maint()) return '';
     if (t.owner === login) return '<span class="muted" title="conflict of interest: nobody decides on their own package">yours — another maintainer</span>';
@@ -183,7 +196,7 @@ const SCRIPT = String.raw`
         : '<span class="muted">evidence · #' + t.id + (t.duration_ms ? ' · ' + Math.round(t.duration_ms / 1000) + ' s' : '') + '</span>' + (pb && (pb.status === "queued" || pb.status === "leased") ? ' <span class="pill blue">building again</span>' : pb && pb.status === "staged" ? ' <span class="pill ok">built again</span>' : '');
       var mine = WHO && t.owner === login, forYou = maint() && !mine && decidable(t);
       return '<tr id="t-' + t.id + '"' + (project ? ' class="project-row"' : '') + (forYou ? ' class="for-you"' : mine ? ' class="mine-row"' : '') + '><td>' + pkg(t.name, t.version) + (det.license ? ' <span class="dim">' + esc(det.license) + '</span>' : '') + (t.url ? ' <a class="run dim" href="' + esc(t.url) + '" title="' + esc(t.url) + '">source</a>' : '') + '<br>' + category(t) + '</td><td>' + esc(t.arch) + '</td>' +
-        '<td>' + person(t.owner) + (mine ? ' <span class="pill none">you</span>' : '') + '</td><td>' + build + '</td><td>' + gate(t) + '</td><td>' + audit(t) + '</td>' +
+        '<td>' + person(t.owner) + (mine ? ' <span class="pill none">you</span>' : '') + '</td><td>' + build + '</td><td>' + gate(t) + '</td><td>' + audit(t) + '</td><td>' + trial(t) + '</td>' +
         '<td><a class="run" href="' + t.evidence.pkgbuild + '">PKGBUILD</a> <a class="run" href="' + t.evidence.log + '">log</a> <a class="run" href="' + t.evidence.pkginfo + '">PKGINFO</a></td>' +
         '<td class="when">' + ago(t.finished_at) + '</td><td class="decision">' + decision(t) + '</td></tr>';
     }, { empty: "nothing waiting for review", text: function (t) { return [t.id, t.name, t.version, t.arch, t.owner, t.kind, t.category].join(" "); } });
