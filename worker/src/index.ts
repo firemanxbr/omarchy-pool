@@ -38,7 +38,7 @@
  *   POST /api/v1/pool/gc?keep=3&limit=200          delete it (objects, then rows)
  *   POST /api/v1/pool/relayout?phase=copy|purge     the one-time move to <source>/<arch>/ (the relayout job)
  *   GET  /                                         the dashboard: the Pool (users), /factory (contributors), /pipeline (everyone, live),
- *                                                  /docs, and the detail pages /packages /package/:name /security /status /journal /review /user/:login
+ *                                                  /docs, and the detail pages /packages /package/:name /security /status /journal /workers /review /user/:login
  *   GET  /pool/<source>/<arch>/<file>              fallback static origin (dev)
  *   GET  /setup                                    the one-command setup script (curl … | sudo bash -s -- --ring stable)
  *   GET  /api/v1/pacman.conf?ring=&arch=&with=     the pacman.d include a ring serves right now
@@ -75,6 +75,7 @@ import { reviewHtml } from "./pages/review";
 import { requestHtml } from "./pages/request";
 import { governanceHtml } from "./pages/governance";
 import { docsHtml } from "./pages/docs";
+import { docsWorkersHtml } from "./pages/docs-workers";
 import { workersHtml } from "./pages/workers";
 import { userHtml } from "./pages/user";
 import { peopleHtml } from "./pages/people";
@@ -179,7 +180,7 @@ export default {
       // Documentation: one section, its chapters under /docs; the old addresses redirect.
       if (path === "/docs" || path === "/docs/") return html(docsHtml(env.POOL_URL, version(env)));
       if (path === "/docs/get-started") return html(getStartedHtml(env.POOL_URL, version(env)));
-      if (path === "/docs/workers") return html(workersHtml(env.POOL_URL, version(env)));
+      if (path === "/docs/workers") return html(docsWorkersHtml(env.POOL_URL, version(env)));
       if (path === "/docs/how-it-works") return html(howItWorksHtml(env.POOL_URL, version(env)));
       if (path === "/docs/governance") return html(governanceHtml(env.POOL_URL, version(env)));
       if (path === "/get-started" || path === "/how-it-works" || path === "/governance") {
@@ -188,6 +189,7 @@ export default {
       }
       if (path === "/status") return html(statusHtml(env.POOL_URL, version(env)));
       if (path === "/journal") return html(journalHtml(env.POOL_URL, version(env)));
+      if (path === "/workers") return html(workersHtml(env.POOL_URL, version(env)));
       if (path === "/diff") return html(diffHtml(env.POOL_URL, version(env)));
       if (path === "/api" || path === "/api/") return html(apiDocsHtml(env.POOL_URL, version(env)));
       if (path === "/packages") return html(packagesHtml(env.POOL_URL, version(env)));
