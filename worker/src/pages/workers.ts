@@ -41,12 +41,12 @@ const BODY = String.raw`
   <section style="margin-top:44px">
     <div class="h2row"><h2>Every worker</h2><label class="dim" style="font-size:13px"><input type="checkbox" id="all-workers"> show workers not seen recently</label></div>
     <div class="panel" style="margin-top:12px"><h3>Project <span class="dim" style="font-size:12px;font-weight:400">the pool's own jobs — sync, render, promote, health, security, gc — on the host a maintainer keeps</span></h3>
-      <div class="table-wrap" style="border:0"><table id="w-project" class="wtable"><thead><tr><th>Worker</th><th>Status</th><th>Arch</th><th>Version</th><th>Maintainer</th><th title="what the machine uses: an average the worker keeps and reports with its claims">CPU · RAM · Disk</th><th>Done / failed</th><th>Last job</th><th>Last seen</th></tr></thead><tbody></tbody></table></div></div>
+      <div class="table-wrap" style="border:0"><table id="w-project" class="wtable"><thead><tr><th>Worker</th><th>Status</th><th>Arch</th><th>Version</th><th>Maintainer</th><th title="what the machine uses: an average the worker keeps and reports with its claims">CPU · RAM · Disk</th><th>Done / failed</th><th>Last job</th></tr></thead><tbody></tbody></table></div></div>
     <div class="panel" style="margin-top:16px"><h3>Review <span class="dim" style="font-size:12px;font-weight:400">the maintainers' side: builds again, publishes, audits — the agent through a proxy that holds the key</span></h3>
-      <div class="table-wrap" style="border:0"><table id="w-review" class="wtable"><thead><tr><th>Worker</th><th>Status</th><th>Arch</th><th>Version</th><th>Maintainer</th><th>Agent</th><th title="what the machine uses: an average the worker keeps and reports with its claims">CPU · RAM · Disk</th><th>Done / failed</th><th>Last reviewed</th><th>Last seen</th></tr></thead><tbody></tbody></table></div></div>
+      <div class="table-wrap" style="border:0"><table id="w-review" class="wtable"><thead><tr><th>Worker</th><th>Status</th><th>Arch</th><th>Version</th><th>Maintainer</th><th>Agent</th><th title="what the machine uses: an average the worker keeps and reports with its claims">CPU · RAM · Disk</th><th>Done / failed</th><th>Last reviewed</th></tr></thead><tbody></tbody></table></div></div>
     <div class="panel" style="margin-top:16px"><h3>Contributors <span class="dim" style="font-size:12px;font-weight:400">their own machines: their packages, or whatever is queued when shared</span></h3>
-      <div class="table-wrap" style="border:0"><table id="w-community" class="wtable"><thead><tr><th>Worker</th><th>Status</th><th>Owner</th><th>Arch</th><th>Version</th><th title="shared: builds whatever is queued · own: the owner's packages only">Mode</th><th>Agent</th><th title="what the machine uses: an average the worker keeps and reports with its claims">CPU · RAM · Disk</th><th>Done / failed</th><th>Last build</th><th>Last seen</th></tr></thead><tbody></tbody></table></div></div>
-    <p class="dim" style="font-size:12px;margin:10px 0 0">${ICON.native} native &nbsp; ${ICON.emu} emulated, the other architecture under qemu &nbsp; ${ICON.shared} shared &nbsp; ${ICON.own} own packages only &nbsp; <span class="pill ok">idle</span> waiting &nbsp; <span class="pill blue">building</span> a task in hand &nbsp; <span class="pill error">failed</span> alive but not ready: its agent did not answer &nbsp; <span class="pill none">offline</span> not seen in ten minutes</p>
+      <div class="table-wrap" style="border:0"><table id="w-community" class="wtable"><thead><tr><th>Worker</th><th>Status</th><th>Owner</th><th>Arch</th><th>Version</th><th title="shared: builds whatever is queued · own: the owner's packages only">Mode</th><th>Agent</th><th title="what the machine uses: an average the worker keeps and reports with its claims">CPU · RAM · Disk</th><th>Done / failed</th><th>Last build</th></tr></thead><tbody></tbody></table></div></div>
+    <p class="dim" style="font-size:12px;margin:10px 0 0;display:flex;gap:6px 18px;flex-wrap:wrap;align-items:center"><span>${ICON.native} native</span><span>${ICON.emu} emulated</span><span>${ICON.shared} shared</span><span>${ICON.own} own packages</span><span><span class="pill ok">idle</span> waiting</span><span><span class="pill blue">building</span> a task in hand</span><span><span class="pill error">failed</span> its agent does not answer</span><span><span class="pill none">offline</span> not seen in ten minutes</span></p>
   </section>
 
   <div class="gate"><div><h3>Run one of your own</h3><p>The signed image, Docker Desktop or Podman, a token from your <a href="/factory">workspace</a>: it builds only your packages, with your agent, and your builds skip the queue. Share it, and it takes whatever is queued.</p></div><a class="btn ghost" href="/docs/workers">Run a worker →</a></div>
@@ -55,24 +55,28 @@ const BODY = String.raw`
 const SCRIPT = String.raw`
 __CHARTS__
   var FACTORY = null, STATS = null;
-  skeletonTiles("#tiles", 4); skeletonRows("#w-project", 9, 2); skeletonRows("#w-review", 10, 2); skeletonRows("#w-community", 11, 2);
+  skeletonTiles("#tiles", 4); skeletonRows("#w-project", 8, 2); skeletonRows("#w-review", 9, 2); skeletonRows("#w-community", 10, 2);
   var ICON = __ICON__;
   // The kind: project (pool jobs) and review are the project's, told apart by the role the worker reported (OMARCHY_WORKER_ROLE); everything else is a contributor's.
   function kindOf(w) { if (w.side !== "omarchy") return "community"; var r = w.labels && w.labels.role; return r === "review" ? "review" : "project"; }
   var COLOR = { project: "var(--green)", review: "var(--blue)", community: "var(--lilac)" };
-  function person(l) { return l ? '<a href="/user/' + encodeURIComponent(l) + '">' + esc(l) + '</a>' : '<span class="muted">—</span>'; }
+  // The person who keeps the worker, as the dashboard draws people: two letters, the login on hover, the profile behind it.
+  function person(l) { return l ? avatar(l) : '<span class="muted" title="a registration from before owners: the project\'s">—</span>'; }
   // The id, whole: two workers of one host share a name, never an id. Where it runs, what it declares and who vouched stay on hover.
   function wid(w) {
     var names = (w.trusted_by || "").split(",").map(function (n) { return n.trim(); }).filter(Boolean);
     var tip = [w.labels && w.labels.where ? "on " + w.labels.where : "", w.hostname && w.hostname !== "?" ? "host " + w.hostname : "", w.kinds && w.kinds.length ? "takes: " + w.kinds.join(", ") : "", names.length ? "trusted by " + names.join(", ") : w.trust_proposed_by ? "proposed for project trust by " + w.trust_proposed_by + ", awaiting a second maintainer's word" : ""].filter(Boolean).join(" · ");
-    return '<span class="mono wid" title="' + esc(tip) + '">' + esc(w.id) + '</span>';
+    // An id past fifty characters (a long login, a long "where") keeps its ends — the random suffix is what tells two apart.
+    var id = String(w.id || ""), shown = id.length > 48 ? id.slice(0, 27) + "…" + id.slice(-17) : id;
+    return '<span class="mono wid" title="' + esc([id, tip].filter(Boolean).join(" · ")) + '">' + esc(shown) + '</span>';
   }
-  // The state, one word in its own column: building (a task in hand), failed (alive, but not ready for what it declares — its agent did not answer), idle, or offline (not seen in ten minutes; only with the box ticked).
+  // The state, one word in its own column: building (a task in hand), failed (alive, but not ready for what it declares — its agent did not answer), idle, or offline (not seen in ten minutes, with how long; only with the box ticked). When it was last seen is on hover.
   function status(w) {
-    if (!w.alive) return '<span class="pill none" title="not seen in the last ten minutes">offline</span>';
-    if (w.current_task) return '<a class="pill blue" href="/pipeline" title="task #' + w.current_task + ', on the Pipeline">building</a>';
-    if (!w.ready) return '<span class="pill error" title="' + esc(w.agent_error ? "the agent did not answer: " + w.agent_error : "not ready for the work it declares") + '">failed</span>';
-    return '<span class="pill ok" title="alive, nothing in hand">idle</span>';
+    var seen = "seen " + ago(w.last_seen);
+    if (!w.alive) return '<span class="pill none" title="not seen in the last ten minutes">offline · ' + esc(ago(w.last_seen).replace(" ago", "")) + '</span>';
+    if (w.current_task) return '<a class="pill blue" href="/pipeline" title="task #' + w.current_task + ', on the Pipeline · ' + esc(seen) + '">building</a>';
+    if (!w.ready) return '<span class="pill error" title="' + esc((w.agent_error ? "its agent did not answer: " + w.agent_error : !w.agent ? "no agent: a contributor's builds and the audits need one that answers" : "not ready for the work it declares") + " · " + seen) + '">failed</span>';
+    return '<span class="pill ok" title="' + esc("alive, nothing in hand · " + seen) + '">idle</span>';
   }
   // The release the worker runs (the image's tag); an older image says only "container".
   function version(w) { return w.version && w.version !== "container" ? '<span class="mono" title="the release this worker\'s image was built from">' + esc(w.version) + '</span>' : '<span class="muted" title="an image from before the version was reported">—</span>'; }
@@ -137,13 +141,13 @@ __CHARTS__
     var counts = function (w) { return num(w.builds_done) + ' / ' + num(w.builds_failed); };
     var text = function (w) { return [w.id, w.owner, w.arch, w.version, w.mode, w.agent, w.trusted_by, w.last_task && w.last_task.name, JSON.stringify(w.labels || {})].join(" "); };
     pager("#w-project", seen(kinds.project), function (w) {
-      return '<tr><td>' + wid(w) + '</td><td>' + status(w) + '</td><td>' + arch(w, false) + '</td><td>' + version(w) + '</td><td>' + person(w.owner) + '</td><td>' + usage(w) + '</td><td>' + counts(w) + '</td><td>' + last(w) + '</td><td class="when">' + ago(w.last_seen) + '</td></tr>';
+      return '<tr><td>' + wid(w) + '</td><td>' + status(w) + '</td><td>' + arch(w, false) + '</td><td>' + version(w) + '</td><td>' + person(w.owner) + '</td><td>' + usage(w) + '</td><td>' + counts(w) + '</td><td>' + last(w) + '</td></tr>';
     }, { empty: showAll ? "no project worker registered" : "no project worker alive — the host is off; pool jobs wait", text: text });
     pager("#w-review", seen(kinds.review), function (w) {
-      return '<tr><td>' + wid(w) + '</td><td>' + status(w) + '</td><td>' + arch(w, true) + '</td><td>' + version(w) + '</td><td>' + person(w.owner) + '</td><td>' + agent(w) + '</td><td>' + usage(w) + '</td><td>' + counts(w) + '</td><td>' + last(w) + '</td><td class="when">' + ago(w.last_seen) + '</td></tr>';
+      return '<tr><td>' + wid(w) + '</td><td>' + status(w) + '</td><td>' + arch(w, true) + '</td><td>' + version(w) + '</td><td>' + person(w.owner) + '</td><td>' + agent(w) + '</td><td>' + usage(w) + '</td><td>' + counts(w) + '</td><td>' + last(w) + '</td></tr>';
     }, { empty: showAll ? "no review worker registered" : "no review worker alive — the project's builds and the audits wait", text: text });
     pager("#w-community", seen(kinds.community), function (w) {
-      return '<tr><td>' + wid(w) + '</td><td>' + status(w) + '</td><td>' + person(w.owner) + '</td><td>' + arch(w, true) + '</td><td>' + version(w) + '</td><td>' + mode(w) + '</td><td>' + agent(w) + '</td><td>' + usage(w) + '</td><td>' + counts(w) + '</td><td>' + last(w) + '</td><td class="when">' + ago(w.last_seen) + '</td></tr>';
+      return '<tr><td>' + wid(w) + '</td><td>' + status(w) + '</td><td>' + person(w.owner) + '</td><td>' + arch(w, true) + '</td><td>' + version(w) + '</td><td>' + mode(w) + '</td><td>' + agent(w) + '</td><td>' + usage(w) + '</td><td>' + counts(w) + '</td><td>' + last(w) + '</td></tr>';
     }, { empty: showAll ? "no contributor's worker registered yet" : "no contributor's worker alive right now", text: text });
     endSkeleton();
   }
