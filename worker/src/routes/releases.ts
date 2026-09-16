@@ -304,17 +304,25 @@ export async function handleGetRelease(ring: string, url: URL, env: Env): Promis
     .all();
   const packages = await releaseManifests(env, release.id, detail, { arch, offset, limit, after });
   const last = packages.length && limit && packages.length === limit ? (packages[packages.length - 1] as { name: string; repo_arch: string; source: string }) : null;
-  return json({
-    release,
-    ...(await releaseSummary(env, release.id)),
-    artifacts: artifacts.results,
-    // A ring holds every source's build of a name; a client that installs
-    // by itself takes the first in this order, as pacman takes the first
-    // repository of the include that has the name.
-    source_order: REPO_ORDER,
-    page: { arch, offset: after ? null : offset, after: afterParam ?? null, limit: limit || null, returned: packages.length, total, next: last ? `${last.name}/${last.repo_arch}/${last.source}` : null },
-    packages,
-  });
+  // Five minutes at the edge: the ring's head changes with a sync or a
+  // promotion (every few hours), while every `omarchy-cli status`, `list`
+  // and `search` on every machine reads the whole summary — 32 000 rows of
+  // D1 a call before this, none on a hit. A pinned release never changes.
+  return json(
+    {
+      release,
+      ...(await releaseSummary(env, release.id)),
+      artifacts: artifacts.results,
+      // A ring holds every source's build of a name; a client that installs
+      // by itself takes the first in this order, as pacman takes the first
+      // repository of the include that has the name.
+      source_order: REPO_ORDER,
+      page: { arch, offset: after ? null : offset, after: afterParam ?? null, limit: limit || null, returned: packages.length, total, next: last ? `${last.name}/${last.repo_arch}/${last.source}` : null },
+      packages,
+    },
+    200,
+    { "cache-control": "public, max-age=300" },
+  );
 }
 
 /** The release's package count, for one architecture or all — from its row when the row carries it. */

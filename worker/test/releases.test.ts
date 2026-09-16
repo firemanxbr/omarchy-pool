@@ -13,10 +13,16 @@ import { packageKey } from "../src/r2";
 
 const API = "http://pool.test/api/v1";
 
+// GET responses that say `public, max-age` are kept in the edge cache by URL
+// (index.ts, cachedApi) — the release listings among them since they cost
+// 32 000 rows a call. These tests read a ring right after changing it, so
+// every GET carries a parameter no handler reads, and is its own cache key.
+let fresh = 0;
 async function call(method: string, path: string, body?: unknown, token?: string): Promise<{ status: number; json: any }> {
   const headers: Record<string, string> = {};
   if (body !== undefined) headers["content-type"] = "application/json";
   if (token) headers.authorization = `Bearer ${token}`;
+  if (method === "GET") path += (path.includes("?") ? "&" : "?") + "fresh=" + ++fresh;
   const req = new Request(API + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
   const ctx = createExecutionContext();
   const res = await worker.fetch(req, env, ctx);
@@ -118,7 +124,10 @@ describe("POST /releases", () => {
     expect(r2.json.release.parent_id).toBe(r1.json.release.id);
     expect(r2.json.package_count).toBe(5);
     const head = await call("GET", "/releases/edge?fields=summary");
+    expect(head.status).toBe(200);
     expect(head.json.release.id).toBe(r2.json.release.id);
+    // The listing is cacheable at the edge (five minutes): the CLI's status, list and search read it on every machine.
+    expect((await worker.fetch(new Request(API + "/releases/edge?fields=summary&cacheable=1"), env, createExecutionContext())).headers.get("cache-control")).toBe("public, max-age=300");
     expect(head.json.packages.map((p: any) => `${p.name}/${p.arch}`).sort()).toEqual(["curl/x86_64", "xz/aarch64", "xz/x86_64", "zlib/aarch64", "zlib/x86_64"]);
     // curl is served now: what it embeds is what the security job asks OSV about.
     const comps = (await call("GET", "/security/components?after=release")).json.components; // a fresh key: cached five minutes
