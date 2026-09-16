@@ -44,6 +44,19 @@ export async function releaseMembers(env: Env, releaseId: number): Promise<strin
 }
 
 /**
+ * The same membership as a predicate on `${alias}.id`, for a query that
+ * walks an index of `packages` and asks, row by row, whether the package is
+ * in the release — a point lookup on the membership's primary key, instead
+ * of a 30k-row selection materialized for every page.
+ */
+export async function releaseMemberPredicate(env: Env, releaseId: number, alias: string): Promise<string> {
+  const head = await env.DB.prepare("SELECT ring FROM ring_heads WHERE release_id = ?").bind(releaseId).first<{ ring: Ring }>();
+  if (head) return `EXISTS (SELECT 1 FROM ring_packages m WHERE m.ring = '${head.ring}' AND m.package_id = ${alias}.id)`;
+  await ensureCheckpoint(env, releaseId);
+  return `EXISTS (SELECT 1 FROM release_packages m WHERE m.release_id = ${Math.floor(releaseId)} AND m.package_id = ${alias}.id)`;
+}
+
+/**
  * Reconstructs a release that is not a checkpoint — the nearest checkpoint
  * behind it, then each delta up to it — and writes its membership into
  * release_packages so the SQL that reads a release by id works on it. A
@@ -137,23 +150,27 @@ export async function releaseManifests(
   const after = window.after ?? null;
   const page = window.limit ? ` LIMIT ${Math.floor(window.limit)}${after ? "" : ` OFFSET ${Math.floor(window.offset ?? 0)}`}` : "";
   const keyset = after ? (after.source === null ? " AND (p.name, p.repo_arch) > (?2, ?3)" : " AND (p.name, p.repo_arch, p.source) > (?2, ?3, ?4)") : "";
-  const where = `WHERE (?1 IS NULL OR p.repo_arch = ?1)${keyset} ORDER BY p.name, p.repo_arch, p.source`;
+  // The page is a walk of the (name, repo_arch, source) index from the
+  // cursor, each row asked whether it is in the release (a point lookup).
+  // Left to the planner, the query started from the release's members —
+  // every one of them, sorted, for every page: 73k rows read per 500
+  // returned, and a render of one architecture read the ring 38 times over.
+  const from = `packages p INDEXED BY idx_packages_name_repo_arch_source`;
+  const where = `WHERE (?1 IS NULL OR p.repo_arch = ?1)${keyset} AND ${await releaseMemberPredicate(env, releaseId, "p")} ORDER BY p.name, p.repo_arch, p.source`;
   const binds = after ? (after.source === null ? [arch, after.name, after.repoArch] : [arch, after.name, after.repoArch, after.source]) : [arch];
-  const members = await releaseMembers(env, releaseId);
   if (detail === "summary") {
     // Enough for status / list / search: ~100 bytes per package instead of ~800.
     const rows = await env.DB.prepare(
       `SELECT p.name, p.version, p.arch, p.repo_arch, p.filename, p.sha256, p.size_download, p.size_installed, p.source,
               json_extract(p.manifest_json, '$.description') AS description
-         FROM ${members} rp JOIN packages p ON p.id = rp.package_id ${where}${page}`,
+         FROM ${from} ${where}${page}`,
     )
       .bind(...binds)
       .all();
     return rows.results;
   }
   const rows = await env.DB.prepare(
-    `SELECT p.id, p.manifest_json, p.source, p.repo_arch FROM ${members} rp
-       JOIN packages p ON p.id = rp.package_id ${where}${page}`,
+    `SELECT p.id, p.manifest_json, p.source, p.repo_arch FROM ${from} ${where}${page}`,
   )
     .bind(...binds)
     .all<{ id: number; manifest_json: string; source: string; repo_arch: string }>();
