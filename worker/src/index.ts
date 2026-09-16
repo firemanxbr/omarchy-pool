@@ -58,7 +58,7 @@ import {
 import { authorize, authorizeRelease, authorizeArtifacts, authorizeJobOrMaintainer, maintainerOf } from "./auth";
 import {
   contributorOf, workerOf, handleRegister, handleMe, handleRequestPackage, handleDeletePackage, handleSetCategory, handleBuildPackage, handleRegisterWorker,
-  handleRevokeWorker, handleListPackages, handleStagingPut, handleStagingMultipart, handleStagingList, handleStagingGet,
+  handleRevokeWorker, handleListPackages, handleStagingPut, handleStagingMultipart, handleStagingList, handleStagingGet, handleStagingDelete,
 } from "./routes/contributors";
 import type { Actor } from "./routes/factory";
 import { jobOf } from "./jobtoken";
@@ -231,6 +231,11 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
     if (m[1] === "contributors") return m[3] === "block" ? handleBlockContributor(c, m[2], request, env) : handleUnblockContributor(c, m[2], request, env);
     return m[3] === "block" ? handleBlockPackage(c, m[2], request, env) : handleUnblockPackage(c, m[2], request, env);
   }
+  if ((m = path.match(/^\/factory\/tasks\/(\d+)\/artifacts$/)) && method === "DELETE") {
+    const c = await contributorOf(request, env);
+    if (!c) return json({ error: "a contributor token is required (POST /factory/register with a GitHub token)" }, 401);
+    return handleStagingDelete(c, Number(m[1]), env);
+  }
   if (path === "/factory/packages" || path.startsWith("/factory/packages/") || path === "/factory/workers" || path.startsWith("/factory/workers/")) {
     const c = await contributorOf(request, env);
     if (!c) return json({ error: "a contributor token is required (POST /factory/register with a GitHub token)" }, 401);
@@ -331,7 +336,7 @@ function html(body: string): Response {
 function cors(): HeadersInit {
   return {
     "access-control-allow-origin": "*",
-    "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+    "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS",
     "access-control-allow-headers": "authorization, content-type",
   };
 }
