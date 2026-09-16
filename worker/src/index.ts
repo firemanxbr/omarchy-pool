@@ -332,31 +332,45 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
  */
 async function cachedApi(method: string, path: string, url: URL, request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   if (method !== "GET") return api(method, path, url, request, env);
-  const cache = caches.default;
   const key = new Request(url.toString(), { method: "GET" });
-  const hit = await cache.match(key);
-  // The platform may rewrite cache-control on stored responses, so the
-  // expiry we mean travels in a header of our own.
-  const expires = Number(hit?.headers.get("x-pool-expires") ?? 0);
-  if (hit && expires > Date.now()) {
-    const res = new Response(hit.body, hit);
-    res.headers.set("x-pool-cache", "hit");
-    // The stored copy carries the platform's rewritten cache-control (hours),
-    // which a browser would honour: the dashboard then shows a four-hour-old
-    // pool. What the client may keep is what is left of our own expiry.
-    res.headers.set("cache-control", `public, max-age=${Math.max(1, Math.ceil((expires - Date.now()) / 1000))}`);
-    res.headers.delete("age");
-    return res;
-  }
+  const hit = await edgeHit(key);
+  if (hit) return hit;
   const res = await api(method, path, url, request, env);
+  // A handler with a key of its own has said hit or miss already, and what
+  // it served is never kept under the URL — its key moves, the URL does not.
+  if (res.headers.has("x-pool-cache")) return res;
   const maxAge = Number(/max-age=(\d+)/.exec(res.headers.get("cache-control") ?? "")?.[1] ?? 0);
-  if (res.ok && (res.headers.get("cache-control") ?? "").includes("public") && maxAge > 0) {
-    const stored = new Response(res.clone().body, res);
-    stored.headers.set("x-pool-expires", String(Date.now() + maxAge * 1000));
-    ctx.waitUntil(cache.put(key, stored));
-  }
+  if (res.ok && (res.headers.get("cache-control") ?? "").includes("public") && maxAge > 0) ctx.waitUntil(edgeStore(key, res.clone(), maxAge));
   res.headers.set("x-pool-cache", "miss");
   return res;
+}
+
+/**
+ * The edge cache by a key of the caller's — the URL for cachedApi, something
+ * better where a handler knows one (a release listing is its release's, not
+ * its URL's: the head moves, the key moves with it). The platform may rewrite
+ * cache-control on stored responses, so the expiry we mean travels in a
+ * header of our own; a hit says so and tells the client what is left of it.
+ */
+export async function edgeHit(key: Request): Promise<Response | null> {
+  const hit = await caches.default.match(key);
+  const expires = Number(hit?.headers.get("x-pool-expires") ?? 0);
+  if (!hit || expires <= Date.now()) return null;
+  const res = new Response(hit.body, hit);
+  res.headers.set("x-pool-cache", "hit");
+  // The stored copy carries the platform's rewritten cache-control (hours),
+  // which a browser would honour: the dashboard then shows a four-hour-old
+  // pool. What the client may keep is what is left of our own expiry.
+  res.headers.set("cache-control", `public, max-age=${Math.max(1, Math.ceil((expires - Date.now()) / 1000))}`);
+  res.headers.delete("age");
+  return res;
+}
+
+export async function edgeStore(key: Request, res: Response, maxAge: number): Promise<void> {
+  const stored = new Response(res.body, res);
+  stored.headers.set("cache-control", `public, max-age=${maxAge}`);
+  stored.headers.set("x-pool-expires", String(Date.now() + maxAge * 1000));
+  await caches.default.put(key, stored);
 }
 
 function html(body: string): Response {
