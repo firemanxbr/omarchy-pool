@@ -26,6 +26,11 @@ describe("job tokens", () => {
     expect(scopesFor("build", 7, "community", {})).not.toContain("pool:write");
     expect(scopesFor("promote", 8, "project", { from: "rc", to: "stable" })).toEqual(["task:8", "events", "release:stable", "artifacts:*:stable"]);
     expect(scopesFor("gc", 9, "project", {})).toEqual(["task:9", "events", "gc"]);
+    // The publish job writes edge; with the trial's ok it writes rc and stable too (the fast lane), and nothing else opens them.
+    expect(scopesFor("publish", 13, "project", { task: 5 })).toEqual(["task:13", "events", "staging:5", "pool:write", "release:edge", "artifacts:*:edge"]);
+    expect(scopesFor("publish", 13, "project", { task: 5, trial: "ok" })).toEqual(expect.arrayContaining(["release:rc", "artifacts:*:rc", "release:stable", "artifacts:*:stable"]));
+    expect(scopesFor("publish", 13, "project", { task: 5, trial: "install-failed" })).not.toContain("release:stable");
+    expect(scopesFor("trial", 14, "project", { task: 5 })).toEqual(["task:14", "events", "staging:5", "pool:write", "release:lab", "artifacts:*:lab"]);
     expect(scopesFor("sync", 10, "project", { ring: "rc" })).toContain("release:rc");
     // A scheduled sync names its sources, each with a ring: the OPR's rc and
     // stable channels need their rings' scopes too (task 120, 2026-09-14).

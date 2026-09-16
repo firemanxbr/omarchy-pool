@@ -120,6 +120,12 @@ function trialOf(status: string | null, result: string | null, error: string | n
   }
 }
 
+/** The latest trial of a staged build: its status, result and error, as trialOf reads them. */
+async function latestTrial(env: Env, taskId: number): Promise<[string | null, string | null, string | null]> {
+  const r = await env.DB.prepare("SELECT status, result, error FROM build_tasks WHERE kind = 'trial' AND json_extract(params, '$.task') = ? ORDER BY id DESC LIMIT 1").bind(taskId).first<{ status: string; result: string | null; error: string | null }>();
+  return r ? [r.status, r.result, r.error] : [null, null, null];
+}
+
 /** A decision on the build ends the audit and the trial that have not started (the reports of those that ran stay as evidence). */
 async function cancelPendingAudit(env: Env, taskId: number): Promise<void> {
   await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = 'the build was decided before the audit ran' WHERE kind = 'audit' AND status = 'queued' AND json_extract(params, '$.task') = ?").bind(taskId).run();
@@ -191,10 +197,14 @@ export async function handleApprove(c: Contributor, id: number, request: Request
   // this approval to the build (the seal and the track record read it).
   const files = (await env.DB.prepare("SELECT key FROM staging_objects WHERE task_id = ? AND key LIKE '%.pkg.tar.zst'").bind(id).all<{ key: string }>()).results.map((r) => r.key.slice(r.key.lastIndexOf("/") + 1));
   if (!files.length) return json({ error: "the project's build left no package in staging" }, 409);
+  // The fast lane: a build a real pacman installed from the lab (the trial's
+  // verdict) goes to rc and stable with edge — the publish job's token gets
+  // those rings only then. Evidence decides the speed; the maintainer decided the build.
+  const trial = trialOf(...(await latestTrial(env, id)));
   const publish = await env.DB.prepare(
     `INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, params) VALUES (?, ?, ?, '-', ?, 20, 1, 'project', NULL, 'publish', ?) RETURNING id`,
   )
-    .bind(t.name, t.arch, t.version, `approved by ${c.login}`, JSON.stringify({ task: id, name: t.name, arch: t.arch, version: t.version, files, by: c.login }))
+    .bind(t.name, t.arch, t.version, `approved by ${c.login}`, JSON.stringify({ task: id, name: t.name, arch: t.arch, version: t.version, files, by: c.login, trial: trial.status === "done" ? (trial.verdict ?? "unknown") : trial.status }))
     .first<{ id: number }>();
   await env.DB.prepare(`INSERT INTO approvals (task_id, name, arch, version, decision, by, note, rebuild_task) VALUES (?, ?, ?, ?, 'approved', ?, ?, ?)`)
     .bind(id, t.name, t.arch, t.version, c.login, b.note ?? null, id)

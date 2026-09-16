@@ -90,9 +90,11 @@ export function scopesFor(kind: string, id: number, trust: string, params: Recor
       else s.push("pool:write", `release:${ring}`, `artifacts:*:${ring}`);
       break;
     case "publish":
-      // The project's approved build, from staging into the pool: reads the staged package (staging:<task>), writes edge.
+      // The project's approved build, from staging into the pool: reads the staged package (staging:<task>), writes edge —
+      // and rc and stable too when the trial installed it (the fast lane): the token says which rings the evidence opened.
       if (typeof params.task === "number" || typeof params.task === "string") s.push(`staging:${params.task}`);
       s.push("pool:write", "release:edge", "artifacts:*:edge");
+      if (params.trial === "ok") s.push("release:rc", "artifacts:*:rc", "release:stable", "artifacts:*:stable");
       break;
     case "trial":
       // The project's build into the lab — never a promised ring — and its transcript beside the evidence.

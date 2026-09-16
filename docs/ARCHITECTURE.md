@@ -163,7 +163,11 @@ What it is for:
 
 A build leaves the lab for `edge` by a maintainer's approval (the `publish`
 job), never by promotion; retention keeps the lab's last releases like any
-ring's.
+ring's. **The fast lane:** a build the trial installed goes to `rc` and
+`stable` with `edge` — the publish job's token opens those rings only when
+the trial's verdict was `ok`, and a `fast-track` event records it — as a
+security fix does (the security layer's own fast-track). The maintainer
+decided the build; the evidence decides the speed.
 
 #### Promotion by evidence, not by calendar
 
