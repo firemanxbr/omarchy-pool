@@ -50,6 +50,11 @@ PORT = int(os.environ.get("AGENT_PROXY_PORT", os.environ.get("BROKER_PORT", "879
 POOL = os.environ.get("OMARCHY_API", "https://pkgs.firemanxbr.org").rstrip("/") + "/api/v1"
 GITHUB = "https://api.github.com"
 LEASE_SECONDS = 30 * 60
+# Cloudflare fronts the pool and answers a request without a browser-like
+# or named user agent with 403 "error code: 1010" — urllib's default
+# (Python-urllib/3.x) is one (2026-09-16, the first broker on the Studio).
+# Every request from here says who it is.
+USER_AGENT = "omarchy-broker/1 (+https://github.com/firemanxbr/omarchy-pool)"
 AGENT_CALLS = int(os.environ.get("BROKER_AGENT_CALLS", "60"))
 UPSTREAM_TIMEOUT = int(os.environ.get("BROKER_UPSTREAM_TIMEOUT", "900"))
 
@@ -99,7 +104,7 @@ def worker_id():
     """This worker's id, from the pool (once)."""
     if SELF["id"] is None and worker_token():
         try:
-            req = urllib.request.Request(POOL + "/factory/workers/self", headers={"authorization": "Bearer " + worker_token()})
+            req = urllib.request.Request(POOL + "/factory/workers/self", headers={"authorization": "Bearer " + worker_token(), "user-agent": USER_AGENT})
             with urllib.request.urlopen(req, timeout=30) as r:
                 SELF["id"] = json.load(r).get("id")
         except (urllib.error.URLError, OSError, ValueError):
@@ -115,7 +120,7 @@ def adopt(task):
     if not me:
         return False
     try:
-        with urllib.request.urlopen(POOL + f"/factory/tasks/{task}", timeout=30) as r:
+        with urllib.request.urlopen(urllib.request.Request(POOL + f"/factory/tasks/{task}", headers={"user-agent": USER_AGENT}), timeout=30) as r:
             row = json.load(r).get("task") or {}
     except (urllib.error.URLError, OSError, ValueError):
         return False
@@ -231,7 +236,7 @@ class Handler(BaseHTTPRequestHandler):
     def github(self):
         split = urllib.parse.urlsplit(self.path)
         url = GITHUB + split.path[len("/github"):] + (("?" + split.query) if split.query else "")
-        headers = {"accept": self.headers.get("accept", "application/vnd.github+json"), "user-agent": "omarchy-pool-broker"}
+        headers = {"accept": self.headers.get("accept", "application/vnd.github+json"), "user-agent": USER_AGENT}
         token = os.environ.get("GITHUB_TOKEN")
         if token:
             headers["authorization"] = "Bearer " + token
@@ -258,7 +263,7 @@ class Handler(BaseHTTPRequestHandler):
                 held = HELD.current()
                 if held is not None:
                     return self._json(409, {"error": f"the broker holds task {held} until its lease ends; one task at a time"})
-            headers = {"authorization": "Bearer " + worker_token(), "content-type": self.headers.get("content-type", "application/json")}
+            headers = {"authorization": "Bearer " + worker_token(), "content-type": self.headers.get("content-type", "application/json"), "user-agent": USER_AGENT}
             url = POOL + "/" + rel + (("?" + split.query) if split.query else "")
             req = urllib.request.Request(url, data=body if body else None, headers=headers, method=method)
             status, ctype, out = self.upstream(req, UPSTREAM_TIMEOUT)
