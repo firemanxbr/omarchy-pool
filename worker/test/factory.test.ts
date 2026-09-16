@@ -693,3 +693,30 @@ describe("what a public log must not carry", () => {
     for (const w of list.json.workers) expect(w).not.toHaveProperty("token_hash");
   });
 });
+
+describe("the log's tail and the error line", () => {
+  it("are withheld — never stored, never served — when they carry what looks like a secret; the completion stands and an event says so", async () => {
+    await env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind) VALUES ('tail', 'aarch64', '1-1', 'https://github.com/alice/recipes@HEAD:tail/PKGBUILD', 'contributor', 100, 0, 'community', 'alice', 'build')`).run();
+    const c = await call("POST", "/factory/claim", { arch: "aarch64" }, "omw_w3");
+    expect(c.status).toBe(200);
+    const id = c.json.task.id;
+    const secret = "ghp_" + "Z".repeat(36);
+    const f = await call("POST", `/factory/tasks/${id}/fail`, { error: `exit 4: curl -H 'authorization: Bearer ${secret}' failed`, log_tail: `==> build()\nGITHUB_TOKEN=${secret}\n==> ERROR: A failure occurred in build().`, final: true }, c.json.token);
+    expect(f.status).toBe(200);
+    const t = (await call("GET", `/factory/tasks/${id}`)).json.task;
+    expect(t.status).toBe("failed");
+    expect(JSON.stringify(t)).not.toContain(secret);
+    expect(t.error).toMatch(/^\[error withheld: it carried what looks like a bearer token/);
+    expect(t.log_tail).toMatch(/^\[log_tail withheld: it carried what looks like the worker's environment/);
+    const pkg = await env.DB.prepare("SELECT detail FROM factory_packages WHERE name = 'tail'").first<{ detail: string }>();
+    if (pkg) expect(pkg.detail).not.toContain(secret);
+    const events = await env.DB.prepare("SELECT summary, payload FROM events WHERE kind = 'leak' AND payload LIKE ? ORDER BY id").bind(`%"task":${id},%`).all<{ summary: string; payload: string }>();
+    expect(events.results.map((e) => e.summary)).toEqual([`task ${id}: log_tail withheld — it carried what looks like the worker's environment`, `task ${id}: error withheld — it carried what looks like a bearer token`]);
+    for (const e of events.results) expect(e.payload).not.toContain(secret);
+    // A clean tail is kept as it was.
+    await env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind) VALUES ('tail2', 'aarch64', '1-1', 'https://github.com/alice/recipes@HEAD:tail2/PKGBUILD', 'contributor', 100, 0, 'community', 'alice', 'build')`).run();
+    const c2 = await call("POST", "/factory/claim", { arch: "aarch64" }, "omw_w3");
+    await call("POST", `/factory/tasks/${c2.json.task.id}/fail`, { error: "exit 4: ==> ERROR: A failure occurred in build().", log_tail: "==> build()\n==> ERROR: A failure occurred in build().", final: true }, c2.json.token);
+    expect((await call("GET", `/factory/tasks/${c2.json.task.id}`)).json.task.log_tail).toBe("==> build()\n==> ERROR: A failure occurred in build().");
+  });
+});

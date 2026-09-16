@@ -6,6 +6,7 @@ import { issueJobToken, scopesFor, type JobClaims } from "../jobtoken";
 import { isCategory } from "../categories";
 import { recordEvidence, vetSummary } from "../record";
 import { reclaimStagingPackages, STAGING_QUOTA_BYTES } from "../staging";
+import { findLeak } from "../leak";
 
 /**
  * The factory's brain. Cloudflare is the source of truth for package
@@ -345,17 +346,34 @@ export async function handleHeartbeat(id: number, env: Env, actor: Actor): Promi
   return json({ task: id, lease_expires_at: until, token, token_expires_at: new Date(expires * 1000).toISOString() });
 }
 
+/**
+ * The tail of the log and the error line travel with complete/fail into the
+ * row, and out through GET /factory/tasks/:id — a public place the PUT check
+ * (leak.ts) does not see. What looks like a secret in them is withheld, with
+ * a note in its place and a `leak` event; the completion itself stands.
+ */
+async function withheld(env: Env, id: number, field: string, text: string | undefined): Promise<string> {
+  const t = text ?? "";
+  const leak = findLeak(t);
+  if (!leak) return t;
+  await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('leak', NULL, 'factory', 'warn', ?, ?)")
+    .bind(`task ${id}: ${field} withheld — it carried what looks like ${leak.kind}`, JSON.stringify({ task: id, field, kind: leak.kind, line: leak.line }))
+    .run();
+  return `[${field} withheld: it carried what looks like ${leak.kind}; the worker's environment must hold nothing the build can see — /docs/workers#secrets]`;
+}
+
 export async function handleComplete(id: number, request: Request, env: Env, actor: Actor): Promise<Response> {
   const b = (await request.json()) as { sha256?: string; filename?: string; version?: string; duration_ms?: number; log_tail?: string; result?: unknown; summary?: string };
   const task = await owned(env, id, actor);
   if (task instanceof Response) return task;
   const who = workerName(actor);
+  const tail = (await withheld(env, id, "log_tail", b.log_tail)).slice(-4000);
   if (task.kind !== "build") {
     // A pool job: what it did is its result; the journal gets one line.
     // The lease ends with the status; who held it stays on the row — the
     // journal, the seal and the load per worker read it later.
     await env.DB.prepare("UPDATE build_tasks SET status = 'done', finished_at = ?, duration_ms = ?, log_tail = ?, result = ?, lease_expires_at = NULL WHERE id = ?")
-      .bind(now(), b.duration_ms ?? null, (b.log_tail ?? "").slice(-4000), b.result ? JSON.stringify(b.result) : null, id)
+      .bind(now(), b.duration_ms ?? null, tail, b.result ? JSON.stringify(b.result) : null, id)
       .run();
     await env.DB.prepare("UPDATE build_workers SET last_seen = ?, current_task = NULL, builds_done = builds_done + 1 WHERE id = ?").bind(now(), who).run();
     const p = task.params ? (JSON.parse(task.params) as Record<string, string>) : {};
@@ -414,7 +432,7 @@ export async function handleComplete(id: number, request: Request, env: Env, act
     await env.DB.prepare(
       "UPDATE build_tasks SET status = 'staged', finished_at = ?, result_sha256 = ?, result_filename = ?, result_version = ?, version = COALESCE(version, ?), duration_ms = ?, log_tail = ?, staged_prefix = ?, result = ?, lease_owner = NULL, lease_expires_at = NULL WHERE id = ?",
     )
-      .bind(now(), b.sha256, b.filename, b.version ?? null, b.version ?? null, b.duration_ms ?? null, (b.log_tail ?? "").slice(-4000), prefix, vet ? JSON.stringify({ vet }) : null, id)
+      .bind(now(), b.sha256, b.filename, b.version ?? null, b.version ?? null, b.duration_ms ?? null, tail, prefix, vet ? JSON.stringify({ vet }) : null, id)
       .run();
     // The evidence outlives staging: on the record, signed.
     await recordEvidence(env, task.name, await requestOf(env, task.name), id, prefix);
@@ -477,7 +495,7 @@ export async function handleComplete(id: number, request: Request, env: Env, act
   await env.DB.prepare(
     "UPDATE build_tasks SET status = 'done', finished_at = ?, result_sha256 = ?, result_filename = ?, result_version = ?, duration_ms = ?, log_tail = ?, lease_expires_at = NULL WHERE id = ?",
   )
-    .bind(now(), indexed.sha256, b.filename, b.version ?? null, b.duration_ms ?? null, (b.log_tail ?? "").slice(-4000), id)
+    .bind(now(), indexed.sha256, b.filename, b.version ?? null, b.duration_ms ?? null, tail, id)
     .run();
   await env.DB.prepare("UPDATE build_workers SET last_seen = ?, current_task = NULL, builds_done = builds_done + 1 WHERE id = ?").bind(now(), who).run();
   if (task.publish !== 0) {
@@ -509,6 +527,8 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
   const task = await owned(env, id, actor);
   if (task instanceof Response) return task;
   const who = workerName(actor);
+  const tail = (await withheld(env, id, "log_tail", b.log_tail)).slice(-4000);
+  const error = (await withheld(env, id, "error", b.error ?? "build failed")).slice(0, 2000);
   // Retries are for the infrastructure (a download, a mirror, a container
   // killed), not for the recipe: a PKGBUILD that failed to build fails the
   // same way three times, each in a fresh container — the first
@@ -527,19 +547,19 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
   await env.DB.prepare(
     `UPDATE build_tasks SET status = ?, finished_at = ?, error = ?, log_tail = ?, duration_ms = ?, lease_owner = ?, lease_expires_at = NULL, priority = priority + 10 WHERE id = ?`,
   )
-    .bind(exhausted ? "failed" : "queued", exhausted ? now() : null, (b.error ?? "build failed").slice(0, 2000), (b.log_tail ?? "").slice(-4000), b.duration_ms ?? null, exhausted ? task.lease_owner : null, id)
+    .bind(exhausted ? "failed" : "queued", exhausted ? now() : null, error, tail, b.duration_ms ?? null, exhausted ? task.lease_owner : null, id)
     .run();
   await env.DB.prepare("UPDATE build_workers SET last_seen = ?, current_task = NULL, builds_failed = builds_failed + 1 WHERE id = ?").bind(now(), who).run();
   // A build that failed for good may have staged its package before the
   // gate or the quota stopped it: the log and the recipe stay, the package goes.
   if (exhausted && task.kind === "build") await reclaimStagingPackages(env, [id]);
   if (task.trust === "community" && exhausted) {
-    await env.DB.prepare("UPDATE factory_packages SET status = 'registered', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(`build failed on ${who}: ${(b.error ?? "").slice(0, 160)}`, task.name).run();
+    await env.DB.prepare("UPDATE factory_packages SET status = 'registered', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(`build failed on ${who}: ${error.slice(0, 160)}`, task.name).run();
   } else if (review !== undefined && exhausted) {
     // The project's build failed: the contributor's stays staged, and the review row says what the project ran into.
-    await env.DB.prepare("UPDATE factory_packages SET detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(`the project's build (task ${id}) failed on ${who}: ${(b.error ?? "").slice(0, 160)}`, task.name).run();
+    await env.DB.prepare("UPDATE factory_packages SET detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(`the project's build (task ${id}) failed on ${who}: ${error.slice(0, 160)}`, task.name).run();
   }
-  await event(env, "build", exhausted ? "error" : "warn", `${task.name} for ${task.arch} failed on ${who} (attempt ${task.attempts}/${task.max_attempts})${b.final ? " — the recipe's, not retried" : exhausted ? " — giving up" : " — back in the queue"}: ${(b.error ?? "").slice(0, 120)}`, { task: id, arch: task.arch, worker: who, attempts: task.attempts, exhausted, final: b.final === true });
+  await event(env, "build", exhausted ? "error" : "warn", `${task.name} for ${task.arch} failed on ${who} (attempt ${task.attempts}/${task.max_attempts})${b.final ? " — the recipe's, not retried" : exhausted ? " — giving up" : " — back in the queue"}: ${error.slice(0, 120)}`, { task: id, arch: task.arch, worker: who, attempts: task.attempts, exhausted, final: b.final === true });
   return json({ task: id, status: exhausted ? "failed" : "queued", attempts: task.attempts });
 }
 
