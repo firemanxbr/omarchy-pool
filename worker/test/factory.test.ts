@@ -362,6 +362,16 @@ describe("a community build, its audit and the review", () => {
     const statement = JSON.parse(await (await env.PACKAGES.get(packageKey("factory", "aarch64", `${filename}.provenance.json`)))!.text());
     expect(statement._type).toBe("https://in-toto.io/Statement/v1");
     expect(statement.predicate.approval.by).toBe("m2");
+    // The decisions say how far the package got: no ring yet, then the rings that serve it, in order.
+    const decided = (await call("GET", "/factory/approvals")).json.approvals.find((a: { name: string }) => a.name === "mine");
+    expect(decided).toMatchObject({ decision: "approved", by: "m2", rings: [] });
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO ring_packages (ring, package_id) SELECT 'edge', id FROM packages WHERE sha256 = ?").bind(s),
+      env.DB.prepare("INSERT INTO ring_packages (ring, package_id) SELECT 'lab', id FROM packages WHERE sha256 = ?").bind(s),
+    ]);
+    // (A query string past the edge cache, which keeps the answer for 30 s.)
+    expect((await call("GET", "/factory/approvals?now=1")).json.approvals.find((a: { name: string }) => a.name === "mine").rings).toEqual(["lab", "edge"]);
+    await env.DB.prepare("DELETE FROM ring_packages WHERE package_id IN (SELECT id FROM packages WHERE sha256 = ?)").bind(s).run();
   });
 
 });

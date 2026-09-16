@@ -245,7 +245,7 @@ const CSS = String.raw`
   .btn svg { width: 16px; height: 16px; fill: currentColor; }
   .hint { font-size: 13px; color: var(--dim); }
   .h2row { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; flex-wrap: wrap; margin-bottom: 4px; } .h2row h2 { margin: 0; }
-  .more-link { font-size: 13px; color: var(--green); text-decoration: none; } .more-link:hover { text-decoration: underline; }
+  .more-link { font-size: 13px; color: var(--green); text-decoration: none; } .more-link:hover { text-decoration: underline; } button.more-link { background: none; border: 0; padding: 0; cursor: pointer; font: inherit; font-size: 13px; }
   .sub a, .lede a { color: var(--green); text-decoration: none; } .sub a:hover, .lede a:hover { text-decoration: underline; }
   .tile .v.ok { color: var(--green); } .tile .v.warn { color: var(--amber); }
   .tiles.six { grid-template-columns: repeat(auto-fit, minmax(min(172px, 100%), 1fr)); }
@@ -276,7 +276,7 @@ const CSS = String.raw`
   figure.diagram.live-diagram svg { min-width: 820px; }
   figure.diagram figcaption { font-size: 12.5px; color: var(--dim); margin-top: 8px; }
   .d-box { fill: var(--panel-2); stroke: var(--line); stroke-width: 1.2; } .d-box.hi { stroke: var(--green); }
-  .d-box.edge { stroke: var(--edge); } .d-box.rc { stroke: var(--rc); } .d-box.stable { stroke: var(--stable); } .d-box.amber { stroke: var(--amber); }
+  .d-box.edge { stroke: var(--edge); } .d-box.rc { stroke: var(--rc); } .d-box.stable { stroke: var(--stable); } .d-box.amber { stroke: var(--amber); } .d-box.dim { stroke: var(--dim); }
   .d-box.dimmed { opacity: .45; } .d-l.dimmed { opacity: .35; }
   .d-t { fill: var(--text); font-size: 13px; font-weight: 600; font-family: Geist, "JetBrains Mono", sans-serif; } .d-t.small { font-size: 12.5px; }
   .d-t.edge { fill: var(--edge); } .d-t.rc { fill: var(--rc); } .d-t.stable { fill: var(--stable); } .d-t.amber { fill: var(--amber); }
@@ -353,8 +353,13 @@ const CSS = String.raw`
   .person { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); background: var(--panel); padding: 5px 10px 5px 5px; text-decoration: none; color: var(--text); font-size: 13px; max-width: 100%; } .person:hover { border-color: var(--green); } .person > b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .person .r { color: var(--dim); font-size: 11.5px; }
   .landed { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); gap: 12px; }
   .land { border: 1px solid var(--line); background: var(--panel); padding: 12px 14px; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; align-items: center; }
-  .land .avatar { grid-row: span 2; } .land .n { font-weight: 500; display: flex; justify-content: space-between; gap: 8px; align-items: baseline; } .land .n .v { color: var(--dim); font-size: 12px; }
+  .land .avatar { grid-row: span 3; } .land .n { font-weight: 500; display: flex; justify-content: space-between; gap: 8px; align-items: baseline; } .land .n .v { color: var(--dim); font-size: 12px; } .land .n a { color: var(--text); text-decoration: none; } .land .n a:hover { color: var(--green); }
   .land .b { font-size: 12.5px; color: var(--dim); } .land .b a { color: var(--muted); text-decoration: none; }
+  /* Where a landed package is today: the four rings, lit as it reaches them. */
+  .land .rings { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+  .rb { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; border: 1px solid var(--line); padding: 2px 7px; color: var(--dim); opacity: .5; font-style: normal; }
+  .rb svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .rb.on { opacity: 1; } .rb.lab.on { color: var(--lab); border-color: var(--lab); } .rb.edge.on { color: var(--edge); border-color: var(--edge); } .rb.rc.on { color: var(--rc); border-color: var(--rc); } .rb.stable.on { color: var(--stable); border-color: var(--stable); }
   .community { display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px; align-items: start; }
   .community .box { border: 1px solid var(--line); background: var(--panel); padding: 18px 20px; display: grid; gap: 12px; align-content: start; } .community .box p { margin: 0; font-size: 13.5px; color: var(--muted); }
   .community .stats { display: flex; gap: 22px; flex-wrap: wrap; } .community .stats a { color: inherit; text-decoration: none; } .community .stats a:hover b { color: var(--green); } .community .stats > * b { display: block; font-family: Geist, sans-serif; font-size: 24px; font-weight: 600; line-height: 1.1; } .community .stats > * span { font-size: 12px; color: var(--dim); letter-spacing: .06em; text-transform: uppercase; }
@@ -368,6 +373,7 @@ const CSS = String.raw`
   .gate { border: 1px dashed var(--line); background: var(--panel); padding: 24px; display: grid; grid-template-columns: 1fr auto; gap: 18px 28px; align-items: center; }
   .gate h3 { margin-bottom: 6px; } .gate p { margin: 0; color: var(--muted); font-size: 13.5px; max-width: 70ch; }
   .gate ul { margin: 8px 0 0; padding: 0; list-style: none; font-size: 13px; color: var(--muted); display: flex; gap: 6px 18px; flex-wrap: wrap; } .gate ul li::before { content: "▸ "; color: var(--green); }
+  .gate .cta { display: grid; gap: 8px; justify-items: center; } .gate .cta .hint { text-align: center; max-width: 26ch; }
   .gate .lock, .private-head .lock { font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); }
   .private-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; border-top: 1px solid var(--line); padding-top: 28px; margin-bottom: 18px; }
   .private-head .lock { border: 1px solid var(--line); padding: 2px 8px; } .private-head h2 { margin: 0; } .private-head .right { margin-left: auto; display: flex; gap: 12px; align-items: center; }
@@ -762,7 +768,7 @@ export function page(o: PageOptions): string {
       ${nav}
     </nav>
   </div>
-  <span class="account"><a id="account" href="/auth/github?next=${escapeHtml(o.active === "pipeline" ? "/pipeline" : o.active === "review" ? "/review" : "/factory")}" title="contributors and maintainers sign in with GitHub">Sign in</a><a id="signout" href="/auth/logout" hidden title="sign out of the dashboard on this browser">sign out</a></span>
+  <span class="account"><a id="account" href="/auth/github?next=${escapeHtml(o.active === "pipeline" ? "/pipeline" : o.active === "review" ? "/review" : "/me")}" title="contributors and maintainers sign in with GitHub">Sign in</a><a id="signout" href="/auth/logout" hidden title="sign out of the dashboard on this browser">sign out</a></span>
 </header>
 
 <main>

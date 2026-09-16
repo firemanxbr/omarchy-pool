@@ -11,7 +11,7 @@ import { sha256Hex } from "./contributors";
  * page scripts.
  *
  *   GET /auth/github            → GitHub (state in a short-lived cookie)
- *   GET /auth/github/callback   → cookie omc, redirect to ?next (same origin)
+ *   GET /auth/github/callback   → cookie omc, redirect to ?next (same origin; /me = the person's own page)
  *   GET /auth/me                → {login, role} or 401
  *   GET|POST /auth/logout       → session invalidated, cookie cleared
  *
@@ -34,7 +34,7 @@ function safeNext(url: URL): string {
 }
 
 export async function handleAuthStart(url: URL, env: Env): Promise<Response> {
-  if (!env.GITHUB_OAUTH_CLIENT_ID) return json({ error: "sign-in with GitHub is not configured (GITHUB_OAUTH_CLIENT_ID); use a token on the Contributors page" }, 501);
+  if (!env.GITHUB_OAUTH_CLIENT_ID) return json({ error: "sign-in with GitHub is not configured (GITHUB_OAUTH_CLIENT_ID); POST /api/v1/factory/register with a GitHub token instead" }, 501);
   const state = crypto.randomUUID();
   const redirect = `${url.origin}/auth/github/callback`;
   const gh = new URL("https://github.com/login/oauth/authorize");
@@ -71,7 +71,7 @@ export async function handleAuthCallback(url: URL, request: Request, env: Env): 
   crypto.getRandomValues(b);
   // A browser session (oms_): separate from the CLI / worker token (omc_),
   // which signing in must not replace. A first sign-in registers the
-  // contributor with a token they can replace from the Contributors page.
+  // contributor with a token they can replace from their own page.
   const token = `oms_${[...b].map((x) => x.toString(16).padStart(2, "0")).join("")}`;
   const role = await roleFor(env, u.login);
   await env.DB.prepare(
@@ -81,7 +81,8 @@ export async function handleAuthCallback(url: URL, request: Request, env: Env): 
   )
     .bind(u.login, u.name ?? null, u.avatar_url ?? null, await sha256Hex(`unset:${crypto.randomUUID()}`), await sha256Hex(token), role)
     .run();
-  const headers = new Headers({ location: next });
+  // `next=/me` lands on the person's own page — the workspace — once the login is known.
+  const headers = new Headers({ location: next === "/me" ? `/user/${encodeURIComponent(u.login)}` : next });
   headers.append("set-cookie", cookie("omc", token, 30 * 86400, url.protocol === "https:"));
   headers.append("set-cookie", cookie("omc_state", "", 0, url.protocol === "https:"));
   return new Response(null, { status: 302, headers });

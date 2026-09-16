@@ -109,41 +109,54 @@ export function ringsDiagram(hi?: Stage): string {
 
 /**
  * The factory as an assembly line: stations above, the belt below. Packages
- * ride the belt and change colour at each station — grey registered, blue
- * built, amber staged for review, green approved. The people on the floor,
- * and the agents beside them.
+ * ride the belt and change colour at each station — grey requested, blue
+ * built, amber staged for review, green approved — and the stations wear the
+ * same colours, so the line reads as progress. One package in five is
+ * stopped at the maintainer: not everything passes. The people on the
+ * floor, and the agents beside them.
  */
 export function factoryDiagram(): string {
-  let s = svgo(1260, 330, "An assembly line: a contributor requests a package on the record, it is built on the workers the project shares or on their own, the evidence is staged and audited, the project's agent makes the package again on a trusted worker, a real pacman installs it in the lab and a maintainer approves it into the rings. Packages ride a conveyor belt below the stations.");
+  let s = svgo(1340, 330, "An assembly line: a contributor requests a package on the record, it is built on the workers the project shares or on their own, the evidence is staged and audited, the pool's agent makes the package again on a trusted worker, a real pacman installs it in the lab and a maintainer approves it into the rings — or stops it. Packages ride a conveyor belt below the stations.");
   // Every box is at least as wide as its longest line (dbox widens to the
-  // text), so the widths here are the real ones and the arrows land between
-  // the boxes, never under them; the two workers sit side by side inside
-  // "your choice" with room to spare.
-  s += dbox({ x: 20, y: 40, w: 160, h: 70, title: "You", big: true, lines: ["a GitHub account", "nothing else asked"] });
-  s += darrow(180, 75, 225, 75) + dlab(202, 63, ["request"]);
-  s += dbox({ x: 225, y: 40, w: 185, h: 70, title: "The request", lines: ["URL · name · licence", "on the record, signed"] });
-  s += darrow(410, 75, 455, 75) + dlab(432, 63, ["build"]);
-  s += '<rect class="d-box" x="455" y="20" width="322" height="110"/><text class="d-t" x="616" y="40" text-anchor="middle">Build — your choice</text>';
-  s += dbox({ x: 463, y: 50, w: 150, h: 70, title: "Shared workers", lines: ["the project's agent", { text: "online now", cls: "live", live: "shared-online" }], tcls: "small" });
-  s += dbox({ x: 619, y: 50, w: 150, h: 70, title: "Your worker", lines: ["at home, your agent", "your packages only"], tcls: "small" });
-  s += darrow(777, 75, 822, 75) + dlab(799, 63, ["staged"]);
-  s += dbox({ x: 822, y: 40, w: 180, h: 70, title: "Evidence", lines: ["PKGBUILD · log · audit", "never what users get"] });
-  s += darrow(1002, 75, 1047, 75) + dlab(1024, 63, ["review"]);
-  s += dbox({ x: 1047, y: 40, w: 190, h: 70, title: "The project", lines: ["its agent makes it again", "a real pacman installs it"], cls: "hi" });
-  const drops: [number, string, string][] = [[317, "requested", "#8b93b8"], [616, "built", "#7aa2f7"], [850, "staged", "#e0af68"], [1142, "approved", "#9ece6a"]];
+  // text), so the widths here are the real ones; the arrows are long enough
+  // for their label to stand clear of both boxes.
+  s += dbox({ x: 20, y: 40, w: 160, h: 70, title: "Contributor", big: true, lines: ["a GitHub account", "nothing else asked"] });
+  s += darrow(180, 75, 245, 75) + dlab(212, 63, ["request"]);
+  s += dbox({ x: 245, y: 40, w: 185, h: 70, title: "The request", cls: "dim", lines: ["URL · name · licence", "on the record, signed"] });
+  s += darrow(430, 75, 495, 75) + dlab(462, 63, ["build"]);
+  s += '<rect class="d-box rc" x="495" y="20" width="322" height="110"/><text class="d-t" x="656" y="40" text-anchor="middle">Build — your choice</text>';
+  s += dbox({ x: 503, y: 50, w: 150, h: 70, title: "Shared workers", cls: "rc", lines: ["the project's agent", { text: "online now", cls: "live", live: "shared-online" }], tcls: "small" });
+  s += dbox({ x: 659, y: 50, w: 150, h: 70, title: "Your worker", cls: "rc", lines: ["at home, your agent", "your packages only"], tcls: "small" });
+  s += darrow(817, 75, 882, 75) + dlab(849, 63, ["staged"]);
+  s += dbox({ x: 882, y: 40, w: 180, h: 70, title: "Evidence", cls: "amber", lines: ["PKGBUILD · log · audit", "never what users get"] });
+  s += darrow(1062, 75, 1127, 75) + dlab(1094, 63, ["review"]);
+  s += dbox({ x: 1127, y: 40, w: 190, h: 70, title: "Pool", big: true, cls: "hi", lines: ["its agent makes it again", "a real pacman installs it"] });
+  // The drops: where a package on the belt changes colour. Labels and figures stand clear of the lines.
+  const drops: [number, string, string][] = [[337, "requested", "#8b93b8"], [656, "built", "#7aa2f7"], [895, "staged", "#e0af68"], [1222, "approved", "#9ece6a"]];
   for (const d of drops) s += dline([d[0], d[1] === "built" ? 130 : 110, d[0], 214], "dash") + `<text class="d-lab" x="${d[0] + 8}" y="176" style="fill:${d[2]}">${d[1]}</text>`;
   const person = (x: number, color: number | string, values: string, dur: number, extra = "") =>
     `<g transform="translate(${x} 142)"><circle cx="0" cy="0" r="8" fill="none" stroke="${color}" stroke-width="1.5"/><path d="M-14 30 Q0 12 14 30" fill="none" stroke="${color}" stroke-width="1.5"/>${extra}<animateTransform attributeName="transform" type="translate" values="${values}" dur="${dur}s" repeatCount="indefinite"/></g>`;
   const agent = (x: number, begin: number) =>
     `<g transform="translate(${x} 142)"><rect x="-9" y="-7" width="18" height="15" rx="3" fill="none" stroke="#bb9af7" stroke-width="1.5"/><circle cx="-4" cy="0" r="1.7" fill="#bb9af7"/><circle cx="4" cy="0" r="1.7" fill="#bb9af7"/><line x1="0" y1="-7" x2="0" y2="-12" stroke="#bb9af7" stroke-width="1.5"/><circle cx="0" cy="-14" r="2" fill="#bb9af7"><animate attributeName="opacity" values="1;0.2;1" dur="1.2s" begin="${begin}s" repeatCount="indefinite"/></circle><path d="M-13 30 L-13 16 Q-13 12 -9 12 L9 12 Q13 12 13 16 L13 30" fill="none" stroke="#bb9af7" stroke-width="1.5"/></g>`;
-  s += person(520, "#7aa2f7", "520 142;520 139;520 142", 1.4) + dlab(520, 190, ["contributor", "asks, on the record"]);
-  s += agent(740, 0) + dlab(740, 190, ["agent", "writes and builds"]);
-  s += agent(925, 0.6) + dlab(925, 190, ["second agent", "audits the evidence"]);
-  s += person(1068, "#9ece6a", "1068 142;1065 142;1068 142;1071 142;1068 142", 2.4, '<circle cx="18" cy="6" r="5" fill="none" stroke="#9ece6a" stroke-width="1.5"/><line x1="22" y1="10" x2="28" y2="16" stroke="#9ece6a" stroke-width="1.5"/>') + dlab(1068, 190, ["maintainer", "reads, then approves"]);
-  s += '<rect x="20" y="222" width="1220" height="32" fill="#13141c" stroke="#2a2e3f"/><line x1="20" y1="222" x2="1240" y2="222" stroke="#8b93b8" stroke-width="1.5" stroke-dasharray="10 8"><animate attributeName="stroke-dashoffset" from="36" to="0" dur="1s" repeatCount="indefinite"/></line>';
-  for (let x = 55; x < 1240; x += 70) s += `<g transform="translate(${x} 238)"><circle r="8" fill="#1f2230" stroke="#2a2e3f"/><line x1="-8" y1="0" x2="8" y2="0" stroke="#8b93b8"/><line x1="0" y1="-8" x2="0" y2="8" stroke="#8b93b8"/><animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="4s" repeatCount="indefinite" additive="sum"/></g>`;
-  for (let i = 0; i < 5; i++) s += `<g><rect x="-7" y="-14" width="14" height="14" fill="#8b93b8" stroke="#1a1b26" stroke-width="1.2"><animate attributeName="fill" values="#8b93b8;#8b93b8;#7aa2f7;#7aa2f7;#e0af68;#e0af68;#9ece6a;#9ece6a" keyTimes="0;0.48;0.49;0.68;0.69;0.92;0.93;1" dur="14s" begin="${i * 2.8}s" repeatCount="indefinite"/></rect><rect x="-3" y="-10" width="6" height="6" fill="#1a1b26"/><animateMotion dur="14s" begin="${i * 2.8}s" repeatCount="indefinite" path="M30 222 L1230 222"/></g>`;
-  s += dlab(20, 296, ["the factory floor"], "start") + '<text x="1240" y="296" text-anchor="end" font-size="13" font-weight="600" font-family="Geist, sans-serif"><tspan fill="#8b93b8">off the belt → </tspan><tspan fill="#bb9af7">edge</tspan><tspan fill="#8b93b8"> → </tspan><tspan fill="#7aa2f7">rc</tspan><tspan fill="#8b93b8"> → </tspan><tspan fill="#9ece6a">stable</tspan><tspan fill="#8b93b8">, signed by the pool</tspan></text>';
+  s += person(540, "#7aa2f7", "540 142;540 139;540 142", 1.4) + dlab(540, 190, ["contributor", "asks, on the record"]);
+  s += agent(780, 0) + dlab(780, 190, ["agent", "writes and builds"]);
+  s += agent(1008, 0.6) + dlab(1008, 190, ["second agent", "audits the evidence"]);
+  s += person(1148, "#9ece6a", "1148 142;1145 142;1148 142;1151 142;1148 142", 2.4, '<circle cx="18" cy="6" r="5" fill="none" stroke="#9ece6a" stroke-width="1.5"/><line x1="22" y1="10" x2="28" y2="16" stroke="#9ece6a" stroke-width="1.5"/>') + dlab(1148, 190, ["maintainer", "reads, then decides"]);
+  s += '<rect x="20" y="222" width="1300" height="32" fill="#13141c" stroke="#2a2e3f"/><line x1="20" y1="222" x2="1320" y2="222" stroke="#8b93b8" stroke-width="1.5" stroke-dasharray="10 8"><animate attributeName="stroke-dashoffset" from="36" to="0" dur="1s" repeatCount="indefinite"/></line>';
+  for (let x = 55; x < 1320; x += 70) s += `<g transform="translate(${x} 238)"><circle r="8" fill="#1f2230" stroke="#2a2e3f"/><line x1="-8" y1="0" x2="8" y2="0" stroke="#8b93b8"/><line x1="0" y1="-8" x2="0" y2="8" stroke="#8b93b8"/><animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="4s" repeatCount="indefinite" additive="sum"/></g>`;
+  // Five packages, one every 3.2 s, at the belt's speed: the colour changes
+  // under the drops. The third is stopped at the maintainer — it turns red,
+  // gets its mark and leaves the belt; the others ride off the end, approved.
+  const T = 16;
+  for (let i = 0; i < 5; i++) {
+    const begin = `begin="${(i * 3.2).toFixed(1)}s" repeatCount="indefinite"`, stopped = i === 2;
+    const fill = stopped ? "#8b93b8;#8b93b8;#7aa2f7;#7aa2f7;#e0af68;#e0af68;#f7768e;#f7768e" : "#8b93b8;#8b93b8;#7aa2f7;#7aa2f7;#e0af68;#e0af68;#9ece6a;#9ece6a";
+    s += `<g><rect x="-7" y="-14" width="14" height="14" fill="#8b93b8" stroke="#1a1b26" stroke-width="1.2"><animate attributeName="fill" values="${fill}" keyTimes="0;0.42;0.43;0.58;0.59;0.80;0.81;1" dur="${T}s" ${begin}/></rect><rect x="-3" y="-10" width="6" height="6" fill="#1a1b26"/>` +
+      (stopped
+        ? `<text x="0" y="-19" text-anchor="middle" font-size="13" font-weight="700" fill="#f7768e" opacity="0">✕<animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.81;0.83;0.95;1" dur="${T}s" ${begin}/></text><animate attributeName="opacity" values="1;1;1;0" keyTimes="0;0.81;0.95;1" dur="${T}s" ${begin}/><animateMotion dur="${T}s" ${begin} calcMode="linear" keyPoints="0;1;1" keyTimes="0;0.81;1" path="M30 222 L1222 222"/>`
+        : `<animate attributeName="opacity" values="1;1;0;0" keyTimes="0;0.87;0.875;1" dur="${T}s" ${begin}/><animateMotion dur="${T}s" ${begin} calcMode="linear" keyPoints="0;1;1" keyTimes="0;0.87;1" path="M30 222 L1310 222"/>`) + "</g>";
+  }
+  s += dlab(20, 296, ["the factory floor"], "start") + '<text x="1320" y="296" text-anchor="end" font-size="13" font-weight="600" font-family="Geist, sans-serif"><tspan fill="#8b93b8">off the belt → </tspan><tspan fill="#bb9af7">edge</tspan><tspan fill="#8b93b8"> → </tspan><tspan fill="#7aa2f7">rc</tspan><tspan fill="#8b93b8"> → </tspan><tspan fill="#9ece6a">stable</tspan><tspan fill="#8b93b8">, signed by the pool</tspan></text>';
   return s + "</svg>";
 }
 
