@@ -70,29 +70,41 @@ export type Stage = "sync" | "pin" | "promote" | "render" | "serve";
  */
 export function ringsDiagram(hi?: Stage): string {
   const H = (k: Stage) => (hi ? (hi === k ? " hi" : " dimmed") : "");
-  let s = svgo(1280, 250, "Five sources feed the pool — Arch Linux, Arch Linux ARM, the OPR's edge channel, the Asahi projects and the pool's own factory — verified and stored once, then promoted through the edge, rc and stable rings on evidence; a ring rolls back by itself when a health check fails.");
+  let s = "";
   const src: [string, string][] = [["Arch Linux", "core · extra · multilib"], ["Arch Linux ARM", "core · extra · alarm"], ["Omarchy", "the OPR's edge channel"], ["Asahi", "the fork · asahi-alarm"], ["Factory", "built here, by the pool"]];
   src.forEach((r, i) => {
     const y = 22 + i * 46;
-    s += dbox({ x: 20, y, w: 190, h: 38, title: r[0], lines: [r[1]], cls: (i === 4 ? "hi" : "") + H("sync") });
-    s += dline([210, y + 19, 250, y + 19], H("sync"));
+    s += dbox({ x: 20, y, w: 180, h: 38, title: r[0], lines: [r[1]], cls: (i === 4 ? "hi" : "") + H("sync") });
+    s += dline([200, y + 19, 240, y + 19], H("sync"));
   });
-  s += dline([250, 41, 250, 225], H("sync")) + darrow(250, 132, 300, 132, H("sync"));
-  s += dbox({ x: 300, y: 92, w: 190, h: 80, title: "Pool", big: true, lines: ["signature-verified", "stored once on R2"], cls: "hi" + (hi && hi !== "sync" && hi !== "pin" ? " dimmed" : "") });
-  s += darrow(490, 132, 590, 132, H("pin")) + dlab(540, 120, ["≤ 3 h"], "middle", hi === "pin" ? "hi" : "");
-  s += dbox({ x: 590, y: 102, w: 140, h: 60, title: "edge", big: true, tcls: "edge", lines: ["follows upstream"], cls: "edge" + (hi && hi !== "pin" && hi !== "promote" && hi !== "render" ? " dimmed" : "") });
-  s += darrow(730, 132, 850, 132, H("promote")) + dlab(790, 96, ["real pacman", "+ ABI + security", "on both arches"], "middle", hi === "promote" ? "hi" : "");
-  s += dbox({ x: 850, y: 102, w: 150, h: 60, title: "rc", big: true, tcls: "rc", lines: ["both architectures"], cls: "rc" + (hi && hi !== "promote" && hi !== "render" ? " dimmed" : "") });
-  s += darrow(1000, 132, 1110, 132, H("promote")) + dlab(1055, 108, ["two green checks", "in a row · ≈ 6 h"], "middle", hi === "promote" ? "hi" : "");
-  s += dbox({ x: 1110, y: 102, w: 150, h: 60, title: "stable", big: true, tcls: "stable", lines: ["what you run"], cls: "stable" + (hi && hi !== "promote" && hi !== "render" && hi !== "serve" ? " dimmed" : "") });
-  s += dpath("M1150 102 C1150 48, 1220 48, 1220 102", "warn" + (hi && hi !== "promote" ? " dimmed" : ""), true) + dlab(1185, 24, ["rolls back by itself", "if a health check fails"]);
-  s += dlab(660, 190, ["for CI and developers"]) + dlab(925, 190, ["for testers"]) + dlab(1185, 190, ["recommended · pacman -Syu"], "middle", hi === "serve" ? "hi" : "");
-  if (hi === "render") s += dlab(790, 228, ["render: one signed database per ring and architecture, checked by a real pacman before it is served"], "middle", "hi");
+  s += dline([240, 41, 240, 225], H("sync")) + darrow(240, 132, 290, 132, H("sync"));
+  // Box widths are at least what their longest line needs (dbox widens a box
+  // to its text), so the gaps below are real; the gate labels sit above the
+  // row of boxes, where a wider font cannot push them into a box.
+  s += dbox({ x: 290, y: 92, w: 160, h: 80, title: "Pool", big: true, lines: ["signature-verified", "stored once on R2"], cls: "hi" + (hi && hi !== "sync" && hi !== "pin" ? " dimmed" : "") });
+  s += darrow(450, 132, 500, 132, H("pin")) + dlab(475, 120, ["≤ 3 h"], "middle", hi === "pin" ? "hi" : "");
+  s += dbox({ x: 500, y: 102, w: 165, h: 60, title: "edge", big: true, tcls: "edge", lines: ["follows upstream", "for CI and developers"], cls: "edge" + (hi && hi !== "pin" && hi !== "promote" && hi !== "render" ? " dimmed" : "") });
+  s += darrow(665, 132, 815, 132, H("promote")) + dlab(740, 62, ["real pacman", "+ ABI + security", "on both arches"], "middle", hi === "promote" ? "hi" : "");
+  s += dbox({ x: 815, y: 102, w: 150, h: 60, title: "rc", big: true, tcls: "rc", lines: ["both architectures", "for testers"], cls: "rc" + (hi && hi !== "promote" && hi !== "render" ? " dimmed" : "") });
+  s += darrow(965, 132, 1115, 132, H("promote")) + dlab(1040, 75, ["two green checks", "in a row · ≈ 6 h"], "middle", hi === "promote" ? "hi" : "");
+  s += dbox({ x: 1115, y: 102, w: 150, h: 60, title: "stable", big: true, tcls: "stable", lines: ["what you run", "recommended"], cls: "stable" + (hi && hi !== "promote" && hi !== "render" && hi !== "serve" ? " dimmed" : "") });
+  s += dpath("M1155 102 C1155 48, 1225 48, 1225 102", "warn" + (hi && hi !== "promote" ? " dimmed" : ""), true) + dlab(1190, 24, ["rolls back by itself", "if a health check fails"]);
+  // The lab, beside the rings: the factory's builds are pinned there first and
+  // installed by a real pacman (the trial); a maintainer's approval sends them to edge.
+  const L = hi && hi !== "pin" ? " dimmed" : "";
+  s += dpath("M450 152 L475 152 L475 215 L500 215", "dash" + L, true);
+  s += dbox({ x: 500, y: 192, w: 165, h: 46, title: "lab", tcls: "amber", cls: "amber" + L, lines: ["tried, never promised"] });
+  s += dpath("M620 192 L620 162", "dash" + L, true) + dlab(628, 182, ["approved"], "start");
+  s += dlab(690, 220, ["the factory's builds, installed by a real pacman before anyone decides"], "start");
+  if (hi === "render") s += dlab(640, 254, ["render: one signed database per ring and architecture, checked by a real pacman before it is served"], "middle", "hi");
+  // The marks ride under the boxes: visible on the arrows, covered inside a box, never across its text.
+  let dots = "";
   if (!hi) {
-    const tail = " L250 132 L300 132 L490 132 L590 132 L730 132 L850 132 L1000 132 L1110 132 L1185 132";
-    s += dot("M210 41 L250 41" + tail, "#9ece6a", 10, 0) + dot("M210 133 L250 133" + tail, "#9ece6a", 10, 3.3) + dot("M210 225 L250 225" + tail, "#9ece6a", 10, 6.6);
+    const tail = " L240 132 L290 132 L450 132 L500 132 L665 132 L815 132 L965 132 L1115 132 L1190 132";
+    dots += dot("M200 41 L240 41" + tail, "#9ece6a", 10, 0) + dot("M200 133 L240 133" + tail, "#9ece6a", 10, 3.3) + dot("M200 225 L240 225" + tail, "#9ece6a", 10, 6.6);
+    dots += dot("M450 152 L475 152 L475 215 L500 215 L620 215 L620 162", "#e0af68", 6, 1.5);
   }
-  return s + "</svg>";
+  return svgo(1280, 262, "Five sources feed the pool — Arch Linux, Arch Linux ARM, the OPR's edge channel, the Asahi projects and the pool's own factory — verified and stored once, then promoted through the edge, rc and stable rings on evidence; a ring rolls back by itself when a health check fails. Beside them the lab, where the factory's builds are installed by a real pacman before a maintainer approves them into edge.") + dots + s + "</svg>";
 }
 
 /**
@@ -136,7 +148,8 @@ export function factoryDiagram(): string {
  * security feeds are matched against every ring, a confident fix skips the soak.
  */
 export function liveDiagram(): string {
-  let s = svgo(1300, 420, "Packages move from five sources — Arch Linux, Arch Linux ARM, the OPR's edge channel, the Asahi projects and the factory — through the pool into the edge, rc and stable rings, while five security feeds are matched against every ring every three hours and confident fixes are fast-tracked from edge to stable.", "live");
+  let s = "";
+  const HEAD = svgo(1300, 420, "Packages move from five sources — Arch Linux, Arch Linux ARM, the OPR's edge channel, the Asahi projects and the factory — through the pool into the edge, rc and stable rings, while five security feeds are matched against every ring every three hours and confident fixes are fast-tracked from edge to stable.", "live");
   ["Arch Linux", "Arch Linux ARM", "Omarchy OPR · edge", "Asahi", "Factory"].forEach((t, i) => {
     const y = 40 + i * 37;
     s += dbox({ x: 20, y, w: 190, h: 30, title: t }) + dline([210, y + 15, 250, y + 15]);
@@ -158,12 +171,13 @@ export function liveDiagram(): string {
   s += dbox({ x: 300, y: 289, w: 200, h: 100, title: "Security scan", big: true, lines: [{ text: "advisories known: …", cls: "live", live: "advisories" }, { text: "open in stable: …", cls: "amber", live: "open-stable" }, "every 3 h, every ring"] });
   s += dline([500, 339, 560, 339, 560, 230, 1200, 230]) + darrow(670, 230, 670, 157) + darrow(935, 230, 935, 157) + darrow(1200, 230, 1200, 157);
   s += dlab(580, 248, ["matches open advisories against what each ring serves"], "start");
+  // The marks ride under the boxes: visible on the arrows, covered inside a box, never across its text.
   const pkg = "M230 55 L250 55 L250 127 L300 127 L500 127 L600 127 L740 127 L860 127 L1010 127 L1120 127 L1200 127";
-  s += dot(pkg, "#9ece6a", 9, 0) + dot(pkg, "#9ece6a", 9, 3) + dot(pkg, "#9ece6a", 9, 6);
-  s += dot("M230 275 L250 275 L250 339 L300 339", "#e0af68", 3, 0.5) + dot("M230 371 L250 371 L250 339 L300 339", "#e0af68", 3, 2);
-  s += dot("M500 339 L560 339 L560 230 L670 230 L670 157", "#e0af68", 4, 1) + dot("M500 339 L560 339 L560 230 L935 230 L935 157", "#e0af68", 5, 2.3) + dot("M500 339 L560 339 L560 230 L1200 230 L1200 157", "#e0af68", 6, 0.2);
-  s += dot("M670 97 C670 40, 1200 40, 1200 97", "#9ece6a", 5, 4);
-  return s + "</svg>";
+  let dots = dot(pkg, "#9ece6a", 9, 0) + dot(pkg, "#9ece6a", 9, 3) + dot(pkg, "#9ece6a", 9, 6);
+  dots += dot("M230 275 L250 275 L250 339 L300 339", "#e0af68", 3, 0.5) + dot("M230 371 L250 371 L250 339 L300 339", "#e0af68", 3, 2);
+  dots += dot("M500 339 L560 339 L560 230 L670 230 L670 157", "#e0af68", 4, 1) + dot("M500 339 L560 339 L560 230 L935 230 L935 157", "#e0af68", 5, 2.3) + dot("M500 339 L560 339 L560 230 L1200 230 L1200 157", "#e0af68", 6, 0.2);
+  dots += dot("M670 97 C670 40, 1200 40, 1200 97", "#9ece6a", 5, 4);
+  return HEAD + dots + s + "</svg>";
 }
 
 /** What maintainers operate: the brain, the queue, the three worker roles, R2, the rings, GitHub. */
@@ -197,7 +211,8 @@ export function archDiagram(): string {
  * filled by the page from /api/v1/stats.
  */
 export function sourcesDiagram(): string {
-  let s = svgo(1330, 560, "Arch Linux, Arch Linux ARM, the OPR's edge channel, Omarchy for Apple Silicon, Asahi Linux and, optionally, the prebuilt AUR selections feed the pool; every package is verified against its project's keyring and stored once, then moves from edge to rc on a real pacman, an ABI check and the security layer, and from rc to stable after two green health checks in a row; a failed check rolls a ring back. The factory's builds go to the lab, where a real pacman installs them before a maintainer approves them into edge — and, when the trial installed them, into stable with it.");
+  let s = "";
+  const HEAD = svgo(1330, 560, "Arch Linux, Arch Linux ARM, the OPR's edge channel, Omarchy for Apple Silicon, Asahi Linux and, optionally, the prebuilt AUR selections feed the pool; every package is verified against its project's keyring and stored once, then moves from edge to rc on a real pacman, an ABI check and the security layer, and from rc to stable after two green health checks in a row; a failed check rolls a ring back. The factory's builds go to the lab, where a real pacman installs them before a maintainer approves them into edge — and, when the trial installed them, into stable with it.");
   const src: [string, string, string, string][] = [
     ["Arch Linux · x86_64", "core · extra · multilib", "archlinux-keyring", "src-arch"],
     ["Arch Linux ARM · aarch64", "core · extra · alarm", "archlinuxarm-keyring", "src-alarm"],
@@ -211,15 +226,15 @@ export function sourcesDiagram(): string {
     s += dbox({ x: 20, y, w: 220, h: 64, title: r[0], tcls: "small", lines: [r[1], r[2], { text: "…", cls: "live", live: r[3] }] }) + dline([240, y + 32, 270, y + 32]);
   });
   s += dline([270, 46, 270, 386]) + darrow(270, 198, 300, 198);
-  s += dbox({ x: 300, y: 168, w: 160, h: 60, title: "Verify", cls: "amber", tcls: "amber", lines: ["the project's signature", "against its keyring · sha256"] });
+  s += dbox({ x: 300, y: 168, w: 160, h: 60, title: "Verify", cls: "amber", tcls: "amber", lines: ["the project's signature", "against its keyring"] });
   s += darrow(460, 198, 500, 198);
   s += dbox({ x: 500, y: 158, w: 210, h: 80, title: "Pool", big: true, cls: "hi", lines: ["stored once, immutable", "<source>/<arch>/<file>", { text: "…", cls: "live", live: "stored-once" }] });
   s += darrow(710, 198, 760, 198) + dlab(735, 186, ["≤ 3 h"]);
-  s += dbox({ x: 760, y: 160, w: 150, h: 76, title: "edge", big: true, tcls: "edge", cls: "edge", lines: ["for CI and developers", { text: "…", cls: "live", live: "edge-head" }] });
+  s += dbox({ x: 760, y: 160, w: 150, h: 76, title: "edge", big: true, tcls: "edge", cls: "edge", lines: ["for CI, developers", { text: "…", cls: "live", live: "edge-head" }] });
   s += darrow(910, 198, 960, 198);
   s += dbox({ x: 960, y: 160, w: 150, h: 76, title: "rc", big: true, tcls: "rc", cls: "rc", lines: ["for testers", { text: "…", cls: "live", live: "rc-head" }] });
   s += darrow(1110, 198, 1160, 198);
-  s += dbox({ x: 1160, y: 160, w: 150, h: 76, title: "stable", big: true, tcls: "stable", cls: "stable", lines: ["recommended · what you run", { text: "…", cls: "live", live: "stable-head" }] });
+  s += dbox({ x: 1160, y: 160, w: 150, h: 76, title: "stable", big: true, tcls: "stable", cls: "stable", lines: ["what you run", { text: "…", cls: "live", live: "stable-head" }] });
   // The rollback loop: a failed check after a promotion points the ring back.
   s += dpath("M1235 160 C1235 100, 1085 100, 1085 160", "warn dash", true) + dlab(1160, 92, ["a failed health check after a promotion", "points the ring back — automatic"]);
   // The evidence, and the two gates it feeds.
@@ -234,8 +249,8 @@ export function sourcesDiagram(): string {
   s += dbox({ x: 630, y: 470, w: 250, h: 60, title: "A maintainer approves", tcls: "amber", cls: "amber", lines: ["never their own package", "what installed, not what compiled"] });
   s += darrow(785, 470, 785, 240) + dlab(775, 366, ["approved", "→ edge"], "end");
   s += dpath("M880 510 L1290 510 L1290 240", "hi dash", true) + dlab(1085, 502, ["the fast lane: the trial installed it → stable with edge"], "middle", "hi");
+  // The marks ride under the boxes: visible on the arrows, covered inside a box, never across its text.
   const tail = " L270 198 L300 198 L460 198 L500 198 L710 198 L760 198 L910 198 L960 198 L1110 198 L1160 198 L1235 198";
-  s += dot("M240 46 L270 46" + tail, "#9ece6a", 10, 0) + dot("M240 250 L270 250" + tail, "#9ece6a", 10, 4);
-  s += dot("M280 500 L320 500 L590 500 L630 500 L785 500 L785 240", "#e0af68", 8, 2);
-  return s + "</svg>";
+  const dots = dot("M240 46 L270 46" + tail, "#9ece6a", 10, 0) + dot("M240 250 L270 250" + tail, "#9ece6a", 10, 4) + dot("M280 500 L320 500 L590 500 L630 500 L785 500 L785 240", "#e0af68", 8, 2);
+  return HEAD + dots + s + "</svg>";
 }

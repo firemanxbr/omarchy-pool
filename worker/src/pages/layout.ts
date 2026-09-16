@@ -285,7 +285,11 @@ const CSS = String.raw`
   .d-l { stroke: var(--dim); stroke-width: 1.2; fill: none; } .d-l.hi { stroke: var(--green); } .d-l.dash { stroke-dasharray: 4 4; } .d-l.warn { stroke: var(--amber); }
   .d-queue { fill: var(--bg-deep); stroke: var(--line); } .d-chip { fill: var(--panel-2); stroke: var(--line); }
 
-  .rings .ring { border-top: 3px solid var(--line); gap: 10px; } .ring.stable { border-top-color: var(--stable); } .ring.rc { border-top-color: var(--rc); } .ring.edge { border-top-color: var(--edge); }
+  .rings .ring { border-top: 3px solid var(--line); gap: 10px; } .ring.stable { border-top-color: var(--stable); } .ring.rc { border-top-color: var(--rc); } .ring.edge { border-top-color: var(--edge); } .ring.lab { border-top-color: var(--lab); }
+  .pill.lab { color: var(--amber); border-color: var(--amber); }
+  /* The lab is the fourth ring, not a fourth choice: one slim row under the three, its parts side by side. */
+  .rings .ring.lab { grid-column: 1 / -1; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 10px 22px; padding: 14px 20px; }
+  .rings .ring.lab .head { flex: 0 0 auto; } .rings .ring.lab .desc { flex: 1 1 320px; } .rings .ring.lab .cta { margin-top: 0; flex: 0 0 auto; gap: 18px; }
   .ring .health { display: flex; gap: 8px; flex-wrap: wrap; } .ring .lag { font-size: 12px; color: var(--dim); } .ring .desc b { color: var(--text); } .ring .head .rel { white-space: nowrap; font-size: 12px; } .ring .cta a { white-space: nowrap; }
   .features { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); gap: 16px; }
   .feature { border: 1px solid var(--line); background: var(--panel); padding: 18px 20px; display: grid; gap: 8px; align-content: start; }
@@ -309,7 +313,7 @@ const CSS = String.raw`
   .cov-row .bar { height: 8px; width: auto; background: var(--panel-2); border: 1px solid var(--line); position: relative; display: block; } .cov-row .bar i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--green); } .cov-row .bar i.partial { background: var(--amber); }
   .cov-row .p { text-align: right; color: var(--muted); white-space: nowrap; }
   .open-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 16px; }
-  .ring-heads { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); margin: 12px 0 10px; }
+  .ring-heads { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); margin: 12px 0 10px; }
   .ring-head { background: var(--panel-2); padding: 8px 10px; display: grid; gap: 1px; text-decoration: none; color: inherit; min-width: 0; } .ring-head:hover { background: var(--panel); }
   .ring-head .k { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; } .ring-head b { font-family: Geist, sans-serif; font-size: 20px; font-weight: 600; line-height: 1.15; } .ring-head .s { font-size: 11.5px; color: var(--dim); line-height: 1.4; }
   .feed a.row { text-decoration: none; color: inherit; cursor: pointer; }
@@ -531,8 +535,16 @@ const HELPERS = String.raw`
   // for six (a long import holds the pipeline's queue, so small sources wait),
   // or a ring whose latest health check failed. The header pill and the
   // status page use the same list.
+  // The newest event of a kind across d.latest (one per kind, source and
+  // ring) — the 40-event window of d.events fills with job lines and can
+  // miss a sync that happened an hour ago.
+  function newest(list, kind) {
+    var best = null;
+    (list || []).forEach(function (e) { if (e.kind === kind && (!best || e.created_at > best.created_at)) best = e; });
+    return best;
+  }
   function problemsOf(d) {
-    var sync = latest(d.events || [], "sync"), why = [];
+    var sync = newest(d.latest, "sync"), why = [];
     if (!sync || Date.now() - Date.parse(sync.created_at) > 4 * 3600e3) why.push("no sync for " + (sync ? ago(sync.created_at).replace(" ago", "") : "ever"));
     var late = (d.coverage || []).filter(function (c) { return c.last_sync && Date.now() - Date.parse(c.last_sync) > 9 * 3600e3; });
     if (late.length) why.push(late.length + " source(s) not synced for 9 h");

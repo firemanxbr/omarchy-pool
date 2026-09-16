@@ -171,7 +171,7 @@ __CHARTS__
   function renderLive(d) {
     var today = new Date().toISOString().slice(0, 10), S = d.series || {};
     var imp = (S.imports_daily || []).filter(function (r) { return r.day === today; }).reduce(function (n, r) { return n + Number(r.packages || 0); }, 0);
-    var lastSync = latest(d.events, "sync"), fast = (d.events || []).filter(function (e) { return e.kind === "fast-track"; }), rb = (d.events || []).filter(function (e) { return e.kind === "rollback"; });
+    var lastSync = newest(d.latest, "sync"), fast = (d.events || []).filter(function (e) { return e.kind === "fast-track"; }), rb = (d.events || []).filter(function (e) { return e.kind === "rollback"; });
     var promos = (d.events || []).filter(function (e) { return e.kind === "promote" && e.status === "ok" && e.created_at.slice(0, 10) === today; });
     live("verified-today", "verified today: " + num(imp)); live("stored-once", "stored once: " + num(d.pool.objects));
     live("advisories", "advisories known: " + num((d.security || {}).advisories || 0));

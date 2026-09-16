@@ -68,3 +68,23 @@ describe("dashboard pages", () => {
     expect(res.headers.get("location")).toBe("http://pool.test/docs/how-it-works");
   });
 });
+
+// The diagrams size a box to its text; a line longer than planned widens the
+// box into its neighbour, and the labels between them end up on a border.
+describe("diagrams", () => {
+  it("draws no two boxes over each other", async () => {
+    const { ringsDiagram, sourcesDiagram, liveDiagram, archDiagram } = await import("../src/pages/diagrams");
+    for (const [name, svg] of [["rings", ringsDiagram()], ["rings/promote", ringsDiagram("promote")], ["sources", sourcesDiagram()], ["live", liveDiagram()], ["arch", archDiagram()]] as const) {
+      const boxes = [...svg.matchAll(/<rect class="d-box[^"]*" x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)"/g)].map((m) => m.slice(1, 5).map(Number));
+      const [w] = /viewBox="0 0 (\d+) (\d+)"/.exec(svg)!.slice(1).map(Number);
+      expect(boxes.length, name).toBeGreaterThan(3);
+      for (const b of boxes) expect(b[0] + b[2], `${name}: a box past the right edge`).toBeLessThanOrEqual(w);
+      for (let i = 0; i < boxes.length; i++)
+        for (let j = i + 1; j < boxes.length; j++) {
+          const [a, b] = [boxes[i], boxes[j]];
+          const apart = a[0] + a[2] <= b[0] || b[0] + b[2] <= a[0] || a[1] + a[3] <= b[1] || b[1] + b[3] <= a[1];
+          expect(apart, `${name}: boxes at ${a.join(",")} and ${b.join(",")} overlap`).toBe(true);
+        }
+    }
+  });
+});

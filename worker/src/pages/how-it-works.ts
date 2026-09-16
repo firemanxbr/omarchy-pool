@@ -170,7 +170,7 @@ const SCRIPT = String.raw`
       var rows = cov.filter(function (c) { return GROUPS[k].some(function (g) { return g[0] === c.source && g[1] === c.arch; }); });
       var n = rows.reduce(function (s, c) { return s + Number(c.indexed || 0); }, 0);
       var last = rows.map(function (c) { return c.last_sync; }).filter(Boolean).sort().pop();
-      live(k, last ? "synced " + ago(last) + " · " + num(n) + " packages" : n ? num(n) + " packages" : "not synced yet");
+      live(k, last ? ago(last) + " · " + num(n) + " packages" : n ? num(n) + " packages" : "not synced yet");
     });
     live("stored-once", num(d.pool.objects) + " objects · " + bytes(d.pool.bytes));
     ["edge", "rc", "stable"].forEach(function (n) { var r = d.rings.filter(function (x) { return x.ring === n; })[0]; live(n + "-head", r && r.release ? "#" + r.release.seq + " · " + ago(r.release.created_at) : "no release yet"); });

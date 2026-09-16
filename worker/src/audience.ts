@@ -1,7 +1,7 @@
 /**
  * Who uses the pool: the machines that fetched a ring's database, counted
  * once a day from Cloudflare's zone analytics — distinct client addresses on
- * the pool's host for `/<arch>/omarchy-*-<ring>.db` over one UTC day. No
+ * the pool's host for `/<source>/<arch>/omarchy-*-<ring>.db` over one UTC day. No
  * accounts, no cookies, nothing kept per request: one number per day, per
  * ring and per architecture, as an `audience` event. An address is a machine
  * most of the time; a NAT hides several and a laptop on the move counts
@@ -29,7 +29,7 @@ export interface Audience {
 export const AUDIENCE_LIMIT = 10000;
 
 interface Rows { count?: number; sum?: { edgeResponseBytes?: number }; avg?: { sampleInterval?: number }; dimensions?: { clientIP?: string } }
-interface Zone { all?: Rows[]; stable?: Rows[]; rc?: Rows[]; edge?: Rows[]; x86_64?: Rows[]; aarch64?: Rows[]; totals?: Rows[] }
+interface Zone { all?: Rows[]; stable?: Rows[]; rc?: Rows[]; edge?: Rows[]; lab?: Rows[]; x86_64?: Rows[]; aarch64?: Rows[]; totals?: Rows[] }
 
 /** One day of the pool's audience, from the zone's request analytics. */
 export async function measureAudience(env: Env, day: string, fetcher: typeof fetch = fetch): Promise<Audience> {
@@ -47,8 +47,9 @@ export async function measureAudience(env: Env, day: string, fetcher: typeof fet
     ${ips("%-stable.db", "stable")}
     ${ips("%-rc.db", "rc")}
     ${ips("%-edge.db", "edge")}
-    ${ips("/x86_64/%.db", "x86_64")}
-    ${ips("/aarch64/%.db", "aarch64")}
+    ${ips("%-lab.db", "lab")}
+    ${ips("%/x86_64/%.db", "x86_64")}
+    ${ips("%/aarch64/%.db", "aarch64")}
   } } }`;
   const res = await fetcher("https://api.cloudflare.com/client/v4/graphql", {
     method: "POST",
@@ -66,7 +67,7 @@ export async function measureAudience(env: Env, day: string, fetcher: typeof fet
   return {
     day,
     machines: n(z.all),
-    by_ring: { stable: n(z.stable), rc: n(z.rc), edge: n(z.edge) },
+    by_ring: { stable: n(z.stable), rc: n(z.rc), edge: n(z.edge), lab: n(z.lab) },
     by_arch: { x86_64: n(z.x86_64), aarch64: n(z.aarch64) },
     requests: t?.count ?? 0,
     bytes: t?.sum?.edgeResponseBytes ?? 0,

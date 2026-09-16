@@ -14,8 +14,8 @@ const SEARCH_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11"
 const BODY = String.raw`
   <div class="hero">
     <p class="eyebrow">For Omarchy users</p>
-    <h1>Arch, Arch Linux ARM and Omarchy packages, tested before they reach you</h1>
-    <p class="lede">One <code>Server =</code> line. Every package is verified against its project's key, stored once, and promoted through three rings on evidence — a real <code>pacman</code>, an ABI check, a day of health — never on a promise.</p>
+    <h1>Arch, Arch Linux ARM, Omarchy and Asahi packages, tested before they reach you</h1>
+    <p class="lede">One host. Every package is verified against its project's key, stored once, and promoted through three rings on evidence — a real <code>pacman</code>, an ABI check, two green health checks — never on a promise.</p>
     <div class="cta-row">
       <a class="btn" href="#get-started">Get started</a>
       <span class="hint">No account, no sign-up. Just your Omarchy.</span>
@@ -31,13 +31,13 @@ const BODY = String.raw`
 
   <section id="how">
     <div class="h2row"><h2>From upstream to your machine</h2><a class="more-link" href="/docs/how-it-works">The full story, stage by stage →</a></div>
-    <p class="sub">Same packages, three levels of proof. A ring that fails a health check rolls back on its own.</p>
+    <p class="sub">Same packages, three levels of proof — and the lab beside them, where the factory's builds are installed by a real pacman before anyone decides. A ring that fails a health check rolls back on its own.</p>
     <figure class="diagram">${ringsDiagram()}<figcaption>Packages keep the signature of the project that built them; the only key you add signs the databases and what the factory builds.</figcaption></figure>
   </section>
 
   <section id="rings-section">
     <div class="h2row"><h2>Pick a ring</h2><a class="more-link" href="/docs#get-started/switching">Switching rings, going back →</a></div>
-    <p class="sub">Each ring is a complete, signed set of pacman databases over the same packages.</p>
+    <p class="sub">Each ring is a complete, signed set of pacman databases over the same packages. The lab is the fourth: nothing there is promised or promoted.</p>
     <div class="rings" id="rings"></div>
   </section>
 
@@ -46,7 +46,7 @@ const BODY = String.raw`
     <p class="sub">Open source, in the open: every decision, build and rollback is on the record.</p>
     <div class="features">
       <div class="feature"><div class="ic"><svg viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 5-3.5 8.5-7 10-3.5-1.5-7-5-7-10V6l7-3z"/><path d="M9 12l2 2 4-4"/></svg></div><h3>Verified, then signed</h3><p>Every upstream package checked against its project's own key before it is stored.</p><div class="proof" id="proof-verified">…</div></div>
-      <div class="feature"><div class="ic"><svg viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3"/><path d="M7 15h10"/></svg></div><h3>Tested before you</h3><p>A real pacman sync and an ABI check on x86_64 and aarch64, then a day in <code>rc</code>.</p><div class="proof" id="proof-tested">…</div></div>
+      <div class="feature"><div class="ic"><svg viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3"/><path d="M7 15h10"/></svg></div><h3>Tested before you</h3><p>A real pacman sync and an ABI check on x86_64 and aarch64, then two green health checks in <code>rc</code>.</p><div class="proof" id="proof-tested">…</div></div>
       <div class="feature"><div class="ic"><svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.3-5.7"/><path d="M4 4v5h5"/></svg></div><h3>Rolls back by itself</h3><p>A promotion that fails its health check is undone before your next <code>pacman -Syu</code>.</p><div class="proof" id="proof-rollback">…</div></div>
       <div class="feature"><div class="ic"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="9" r="2.5"/><path d="M3 19c0-3 3-5 6-5s6 2 6 5"/><path d="M15 15c2.5 0 5 1.5 5 4"/></svg></div><h3>Made by the community</h3><p>Packages nobody ships come from contributors' recipes, rebuilt and approved by maintainers. Open source, on GitHub.</p><a href="/factory">Bring a package →</a></div>
     </div>
@@ -61,7 +61,7 @@ const BODY = String.raw`
         <div class="choice" id="pick-ring"></div>
         <p id="ring-desc" style="margin:0 0 12px;font-size:13.5px"></p>
         <pre><span class="copy" data-copy="setup">copy</span><span id="setup-cmd"></span></pre>
-        <p style="margin:10px 0 0;font-size:13px">Then <code>sudo pacman -Syu</code>. <a href="/setup">Read the script first →</a></p>
+        <p style="margin:10px 0 0;font-size:13px">Then <code>omarchy update</code> — off Omarchy, <code>sudo pacman -Syu</code>. <a href="/setup">Read the script first →</a></p>
       </div>
       <aside class="cli-card">
         <h3>omarchy-cli <span class="dim" style="font-size:12px;font-weight:400">optional</span></h3>
@@ -110,7 +110,7 @@ const SCRIPT = String.raw`
 __CHARTS__
   var RING_INFO = RINGS_TEXT;
   var DESC = {}; Object.keys(RINGS_TEXT).forEach(function (r) { DESC[r] = RINGS_TEXT[r].desc; });
-  var RINGS = ["stable", "rc", "edge"], ARCHES = ["x86_64", "aarch64"];
+  var RINGS = ["stable", "rc", "edge", "lab"], ARCHES = ["x86_64", "aarch64"];
   var q = new URLSearchParams(location.search);
   var ring = RINGS.indexOf(q.get("ring")) >= 0 ? q.get("ring") : "stable";
   var arch = ARCHES.indexOf(q.get("arch")) >= 0 ? q.get("arch") : "x86_64";
@@ -139,10 +139,12 @@ __CHARTS__
     data = d;
     var stable = d.rings.filter(function (r) { return r.ring === "stable"; })[0] || {};
     var byArch = function (r, arch) { return (r.sources || []).filter(function (s) { return s.arch === arch; }).reduce(function (n, s) { return n + s.packages; }, 0); };
-    var lastSync = latest(d.events, "sync");
+    var lastSync = newest(d.latest, "sync");
     // The factory is not a mirror: what it builds has no upstream to be short of.
     var mirrors = (d.coverage || []).filter(function (c) { return c.source !== "factory"; });
-    var missing = mirrors.filter(function (c) { return c.upstream_total == null; }).map(function (c) { return c.source; });
+    // A source is a name (core, asahi, chaotic…), whatever the architectures it serves; it is mirrored when at least one of them has synced.
+    var names = [], synced = {}; mirrors.forEach(function (c) { if (names.indexOf(c.source) < 0) names.push(c.source); if (c.upstream_total != null) synced[c.source] = true; });
+    var missing = names.filter(function (n) { return !synced[n]; }), optionalNames = names.filter(function (n) { return mirrors.some(function (c) { return c.source === n && c.optional; }); });
     var S = d.series || {}, today = new Date().toISOString().slice(0, 10);
     var imp = (S.imports_daily || []).filter(function (r) { return r.day === today; })[0];
     var sh = latest(d.latest, "health", "stable", "x86_64"), sha = latest(d.latest, "health", "stable", "aarch64");
@@ -151,9 +153,9 @@ __CHARTS__
     setTiles("#tiles", [
       ["Packages in stable", num(stable.package_count), num(byArch(stable, "x86_64")) + " x86_64 · " + num(byArch(stable, "aarch64")) + " aarch64", "", "/packages?ring=stable"],
       ["Stable release", stable.release ? "#" + stable.release.seq : "—", stable.release ? ago(stable.release.created_at) + " · health " + (sh ? sh.status : "n/a") + " / " + (sha ? sha.status : "n/a") : "no release yet", "", "/journal#releases"],
-      ["Sources mirrored", (mirrors.length - missing.length) + " / " + mirrors.length, missing.length ? "not yet: " + missing.join(", ") : "Arch · Arch Linux ARM · Omarchy · Asahi", "", "/status"],
-      ["Open advisories in stable", '<span id="t-sec">…</span>', '<span id="t-sec-s">matching the five feeds…</span>', "", "/security"],
-      ["Machines on the pool", y ? "≈ " + num(y.machines) + (y.machines >= 10000 ? "+" : "") : "—", y ? "yesterday · " + ["stable", "rc", "edge"].map(function (r) { return r + " " + num((y.by_ring || {})[r] || 0); }).join(" · ") + " · " + num(y.requests) + " fetches" : "counted once a day", "", "/pipeline"],
+      ["Sources mirrored", (names.length - missing.length) + " / " + names.length, missing.length ? "not yet: " + missing.join(", ") : "Arch · Arch Linux ARM · Omarchy · Asahi" + (optionalNames.length ? " · " + optionalNames.join(", ") + " optional" : ""), "", "/status"],
+      ["Open advisories in stable", '<span id="t-sec">…</span>', '<span id="t-sec-s">matching the five feeds, on both architectures…</span>', "", "/security"],
+      ["Machines on the pool", y ? "≈ " + num(y.machines) + (y.machines >= 10000 ? "+" : "") : "—", y ? "yesterday · " + RINGS.filter(function (r) { return r !== "lab" || (y.by_ring || {}).lab; }).map(function (r) { return r + " " + num((y.by_ring || {})[r] || 0); }).join(" · ") + " · " + num(y.requests) + " fetches" : "counted once a day", "", "/pipeline"],
       ["Into edge today", imp ? "+" + num(imp.packages) : "+0", (imp ? bytes(imp.bytes) + " · " + num(imp.runs) + " syncs" : "no sync yet today") + (lastSync ? " · last " + ago(lastSync.created_at) : ""), "", "/journal?kind=sync"]
     ]);
     drawStart();
@@ -161,6 +163,10 @@ __CHARTS__
     $("#rings").innerHTML = RINGS.map(function (name) {
       var r = d.rings.filter(function (x) { return x.ring === name; })[0] || { ring: name, sources: [], artifacts: [] };
       var rel = r.release, info = RING_INFO[name];
+      // The lab: one slim row under the three — no health check (every build in it was installed by the trial, one by one), nothing promised.
+      if (name === "lab") return '<div class="ring lab"><div class="head"><span class="name">lab <span class="pill lab">not a promise</span></span></div>' +
+        '<div class="desc"><b>' + info.title + '.</b> ' + info.text + ' Every build in it was installed by a real pacman first — the trial.</div>' +
+        '<div class="cta"><span class="lag">' + (rel ? 'release #' + rel.seq + ' · ' + ago(rel.created_at) + ' · ' + num(r.package_count) + ' pkgs' : 'empty right now') + '</span><a href="#get-started" data-ring="lab">Try the lab →</a></div></div>';
       var health = ARCHES.map(function (a) { var h = latest(d.latest, "health", name, a); return h ? '<span class="pill ' + h.status + '">' + a + ' · ' + h.status + '</span>' : '<span class="pill none">' + a + ' · no check yet</span>'; }).join("");
       return '<div class="ring ' + name + '"><div class="head"><span class="name">' + name + (name === "stable" ? ' <span class="pill rec">recommended</span>' : '') + '</span><span class="rel">' + num(r.package_count) + ' pkgs · ' + bytes(r.bytes) + '</span></div>' +
         '<div class="desc"><b>' + info.title + '.</b> ' + info.text + '</div><div class="health">' + health + '</div>' +
@@ -195,12 +201,13 @@ __CHARTS__
 
     var fast = (d.events || []).filter(function (e) { return e.kind === "fast-track" && e.status === "ok"; }).slice(0, 3);
     if (!$("#c-sec").innerHTML) $("#c-sec").innerHTML = '<div class="empty loading">Loading</div>';
-    busy(fetch("/api/v1/security?ring=stable&arch=x86_64")).then(function (r) { return r.json(); }).then(function (s) {
-      var t = s.totals || {};
-      $("#sec-when").textContent = s.updated_at ? ago(s.updated_at) : "no scan yet";
-      var ts = $("#t-sec"), tss = $("#t-sec-s");
-      if (ts) { ts.textContent = num(t.packages || 0); ts.parentElement.classList.toggle("ok", !(t.kev || 0) && !(t.critical || 0) && !(t.high || 0)); ts.parentElement.classList.toggle("warn", !!((t.kev || 0) + (t.critical || 0) + (t.high || 0))); }
-      if (tss) tss.textContent = num(t.kev || 0) + " exploited in the wild · " + num((t.critical || 0) + (t.high || 0)) + " high · " + num(t.medium || 0) + " medium" + (s.updated_at ? " · " + ago(s.updated_at) : "");
+    // The tile counts both architectures (a package with an open advisory on either); the chart below is x86_64, the reference system.
+    busy(Promise.all(ARCHES.map(function (a) { return fetch("/api/v1/security?ring=stable&arch=" + a).then(function (r) { return r.json(); }); }))).then(function (both) {
+      var s = both[0], t = s.totals || {}, ta = both[1].totals || {};
+      $("#sec-when").textContent = s.updated_at ? ago(s.updated_at) + " · x86_64" : "no scan yet";
+      var ts = $("#t-sec"), tss = $("#t-sec-s"), kev = (t.kev || 0) + (ta.kev || 0), high = (t.critical || 0) + (t.high || 0) + (ta.critical || 0) + (ta.high || 0);
+      if (ts) { ts.textContent = num(t.packages || 0) + " · " + num(ta.packages || 0); ts.parentElement.classList.toggle("ok", !kev && !high); ts.parentElement.classList.toggle("warn", !!(kev + high)); }
+      if (tss) tss.textContent = "x86_64 · aarch64 · " + num(kev) + " exploited in the wild · " + num(high) + " high · " + num((t.medium || 0) + (ta.medium || 0)) + " medium" + (s.updated_at ? " · " + ago(s.updated_at) : "");
       var rows = [["exploited in the wild (KEV)", t.kev || 0, "var(--red)"], ["critical + high", (t.critical || 0) + (t.high || 0), "var(--red)"], ["medium", t.medium || 0, "var(--amber)"], ["low / unknown", (t.low || 0) + (t.unknown || 0), "var(--dim)"]];
       var max = Math.max.apply(null, rows.map(function (r) { return r[1]; })) || 1;
       $("#c-sec").innerHTML = hrows(rows.map(function (r) { return [r[0], "", Math.round(100 * r[1] / max), r[2], num(r[1])]; }), 190) +
@@ -212,17 +219,17 @@ __CHARTS__
     $("#mc-spark").innerHTML = m14.length >= 2 ? area(m14.map(function (a) { return { t: Date.parse(a.day + "T12:00:00Z"), v: a.machines }; }), function (v) { return num(Math.round(v)); }) : '<div class="empty">counted once a day — the line needs two days</div>';
     if (y) {
       $("#mc-days").textContent = m14.length + " days" + (y.sampled ? " · sampled" : "");
-      $("#mc-split").innerHTML = RINGS.map(function (r) { return '<div><b style="color:var(--' + r + ')">' + num((y.by_ring || {})[r] || 0) + '</b>' + r + '</div>'; }).join("") + ARCHES.map(function (a) { return '<div><b>' + num((y.by_arch || {})[a] || 0) + '</b>' + a + '</div>'; }).join("");
+      $("#mc-split").innerHTML = RINGS.filter(function (r) { return r !== "lab" || (y.by_ring || {}).lab; }).map(function (r) { return '<div><b style="color:var(--' + r + ')">' + num((y.by_ring || {})[r] || 0) + '</b>' + r + '</div>'; }).join("") + ARCHES.map(function (a) { return '<div><b>' + num((y.by_arch || {})[a] || 0) + '</b>' + a + '</div>'; }).join("");
     }
     drawFeed(d.events || []);
     drawRings(d);
   }
 
-  // The rings: what each one serves right now, then the last releases across all three — a promotion, a sync, a rollback each make one.
+  // The rings: what each one serves right now, then the last releases across all four — a promotion, a sync, a rollback, a trial each make one.
   function drawRings(d) {
     $("#open-heads").innerHTML = RINGS.map(function (name) {
       var r = d.rings.filter(function (x) { return x.ring === name; })[0] || {}, rel = r.release;
-      return '<a href="/diff?ring=' + name + '" class="ring-head"><span class="k" style="color:var(--' + name + ')">' + name + '</span><b>' + (rel ? "#" + rel.seq : "—") + '</b><span class="s">' + (rel ? ago(rel.created_at) + " · " + num(r.package_count) + " pkgs" : "no release yet") + '</span></a>';
+      return '<a href="/diff?ring=' + name + '" class="ring-head"><span class="k" style="color:var(--' + name + ')">' + name + '</span><b>' + (rel ? "#" + rel.seq : "—") + '</b><span class="s">' + (rel ? ago(rel.created_at) + " · " + num(r.package_count) + " pkgs" : name === "lab" ? "empty · not a promise" : "no release yet") + '</span></a>';
     }).join("");
     var rows = (d.releases || []).slice(0, 6);
     $("#open-releases").innerHTML = rows.map(function (r) {
