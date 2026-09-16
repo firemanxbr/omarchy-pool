@@ -204,10 +204,17 @@ add_pool_repos() { # arch pool
   # — on top of the image's own mirrors. The pool's key verifies the
   # databases; the packages are then checked against the sha256 those signed
   # databases carry, so their upstream signatures need no keyring here.
-  local arch="$1" pool="$2" added=0 repo
+  # Each repo lives under its source directory (packages/, factory/), the
+  # same layout pacman.conf names; the old flat $pool/$arch/$repo.db 404s.
+  local arch="$1" pool="$2" added=0 repo dir
   for repo in omarchy-packages-edge omarchy-factory-edge; do
-    if ! grep -q "^\[$repo\]" /etc/pacman.conf && curl -sfI --max-time 20 "$pool/$arch/$repo.db" >/dev/null; then
-      printf '\n[%s]\nSigLevel = DatabaseRequired DatabaseTrustedOnly PackageNever\nServer = %s/$arch\n' "$repo" "$pool" >> /etc/pacman.conf
+    case "$repo" in
+      omarchy-packages-*) dir=packages ;;
+      omarchy-factory-*) dir=factory ;;
+      *) dir=packages ;;
+    esac
+    if ! grep -q "^\[$repo\]" /etc/pacman.conf && curl -sfI --max-time 20 "$pool/$dir/$arch/$repo.db" >/dev/null; then
+      printf '\n[%s]\nSigLevel = DatabaseRequired DatabaseTrustedOnly PackageNever\nServer = %s/%s/$arch\n' "$repo" "$pool" "$dir" >> /etc/pacman.conf
       added=1
     fi
   done
