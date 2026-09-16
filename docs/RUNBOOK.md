@@ -242,19 +242,28 @@ says so.
 ## Maintainers: reviewing contributed builds
 
 The **Review** page lists staged builds (a contributor's package built on
-their worker, with PKGBUILD, log and PKGINFO). A maintainer — a login
-listed in `factory/MAINTAINERS.toml`, signed in with GitHub — has the
-project build it, then approves or rejects the project's build:
+their worker or a shared one, with PKGBUILD, log, the gate's verdict and
+the audit — and the worker and host behind it). A maintainer — a login
+listed in `factory/MAINTAINERS.toml`, signed in with GitHub — never
+decides on their own package, and never on a contributor's bytes:
 
-- **Approve** records the decision (`approvals`, with your login and note)
-  and queues a **project build** of the staged PKGBUILD (`pkgbuild_ref =
-  staging:<task>`, trust `project`). A review worker (`pkg-repo work`)
-  builds it in a fresh container, signs it, publishes
-  it into `edge` as source `factory` and renders; from there the package
-  follows the rings like any other. The contributor's bytes are never
-  served.
+- **Build by the project** queues a project build (`pkgbuild_ref =
+  review:<task>`, trust `project`): a review worker (`pkg-repo work`)
+  starts a fresh container that holds nothing, where the project's agent
+  writes its own recipe with the request's facts and the contributor's
+  evidence as the lesson, builds it through the same gate and stages it
+  under `staging/@project/`; a second agent audits it, and the trial
+  installs it with a real pacman from the lab.
+- **Approve** the project's build (a contributor's cannot be approved)
+  records the decision (`approvals`, with your login and note) and queues a
+  `publish` job that carries it into `edge` as source `factory` — and, when
+  the trial passed, into rc and stable with it (the fast lane). The pool
+  signs; from there the package follows the rings like any other.
 - **Reject** needs a note; the package returns to *registered* with the
   note in its detail, the staged objects expire with the rest.
+- **Withdraw a record** (`POST /api/v1/factory/record/withdraw {key,
+  reason}`) when a log or a report must leave the public bucket: a signed
+  tombstone takes its place, the staging copy goes with it.
 
 **Sign in with GitHub** (the header's *Sign in*) is the GitHub OAuth App
 `omarchy-pool` (registered under the GitHub account that runs the staging

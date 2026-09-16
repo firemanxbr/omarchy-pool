@@ -73,7 +73,7 @@ itself.
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | design, API, pipeline, security |
 | [docs/RUNBOOK.md](docs/RUNBOOK.md) | operating it: jobs, promotions, keys, costs, the kill switch, the scheduler, known limits |
 | [docs/GOVERNANCE.md](docs/GOVERNANCE.md) | contributors and maintainers, categories, how a pull request is the only way to become a maintainer |
-| [SECURITY.md](SECURITY.md) | the trust model: who holds what, per-job tokens, the key that never leaves the pool |
+| [SECURITY.md](SECURITY.md) | the trust model: who holds what, per-job tokens, the key that never leaves the pool, what a build can never touch |
 | [docs/TESTING.md](docs/TESTING.md) | how every piece is verified, locally and in CI |
 | [docs/MIGRATION.md](docs/MIGRATION.md) | moving the whole thing to another Cloudflare account and GitHub organisation |
 | [docs/omarchy-cli-mcp.md](docs/omarchy-cli-mcp.md) | the thin client as an MCP server: the tools and their shapes |

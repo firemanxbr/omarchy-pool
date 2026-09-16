@@ -320,13 +320,18 @@ of that same image, `OMARCHY_WORKER_ROLE` set (`factory/image/entrypoint.sh`;
 the dashboard's *Run a worker* page, *The three roles*): **pool** — a
 project-trusted registration that takes only the pool's jobs (sync, render,
 promote, rollback, health, security, enqueue, gc, verify); **review** — a
-project-trusted registration that takes only the maintainers' work, the
-build of the recipes on `main` and the audit of staged builds, with an
-agent key; **community** — a community registration, shared, that builds anyone's
-registered packages and drafts PKGBUILDs for package requests with an agent
-key. A role narrows what the trust allows and the container refuses a
-registration that does not match. Two of each, one per architecture, run on
-the project's own host (`factory/host/`, RUNBOOK *The Studio host*).
+project-trusted registration that takes only the maintainers' work — the
+project's own build of a reviewed package, the build of the recipes on
+`main` and the audit of staged builds — reaching the agent through
+`agent-proxy`; **community** — a community registration, shared, that builds
+anyone's registered packages and drafts PKGBUILDs for package requests, as a
+**broker** (the token, the agent key, `GITHUB_TOKEN`; runs no build) beside
+a **builder** born with nothing; **broker** itself is a role
+(`OMARCHY_WORKER_ROLE=broker`, `agent` without a worker token). A role
+narrows what the trust allows and the container refuses a registration that
+does not match; project trust takes two maintainers' word. Two of each,
+one per architecture, plus the brokers, run on the project's own host
+(`factory/host/`, RUNBOOK *The Studio host*).
 
 **Whose compute.** Contributors build on their own workers (or a shared
 community worker someone else runs); project builds — the recipes in

@@ -9,6 +9,7 @@
 import { page } from "./layout";
 import { sourcesDiagram } from "./diagrams";
 import type { RunningVersion } from "../meta";
+import { REPO_URL } from "../meta";
 
 function body(pool: string): string {
   return String.raw`
@@ -54,6 +55,17 @@ function body(pool: string): string {
       <div class="step"><h3>Immutable releases, automatic rollback</h3><p>A ring never edits a release; it points at one. A failed health check after a promotion points it back — and the next <code>pacman -Syu</code> sees the restored release.</p></div>
       <div class="step"><h3>One rule between sources</h3><p>Two projects' builds of one name both stay in the pool; the include's order — Asahi's above the OPR's above Arch's — is the only thing that decides, and it is written in your <code>pacman.conf</code> where you can read it.</p></div>
       <div class="step"><h3>Nothing skips the gates</h3><p>Not the OPR, not the factory, not a maintainer's own package. The evidence is on the <a href="/pipeline">Pipeline</a> page and in the <a href="/journal">journal</a>, for anyone.</p></div>
+    </div>
+  </section>
+
+  <section id="never">
+    <h2>What a build can never touch</h2>
+    <p class="sub">A build is somebody else's code — the recipe and the upstream's build system — and its log is public, on the API while it is in staging and on the record once it is staged. The rule, kept the same way on the project's host, a contributor's and a maintainer's: <b>the build sees nothing the log cannot show</b> — the public log is the proof, not the risk.</p>
+    <div class="steps">
+      <div class="step"><h3>The broker</h3><p>One process per host holds the credentials — the worker's token, the agent's key, a GitHub token — and only receives, processes and answers: the pool's calls for the one task it claimed, the agent, GitHub read-only. It runs no build. The project's review builds reach the agent the same way, through a proxy. <a href="/docs/workers#secrets">What the broker holds →</a></p></div>
+      <div class="step"><h3>The builder</h3><p>Born with nothing but the broker's address, builds one task and dies. Inside it the build user starts from an empty environment; a variable set on it by mistake is dropped at start and said so. <code>env</code> in a PKGBUILD prints <code>PATH</code> and <code>HOME</code>. <a href="/docs/workers">Run a worker →</a></p></div>
+      <div class="step"><h3>The pool's check</h3><p>For the worker the pool does not run: every log, recipe and report uploaded is read for what looks like a secret — the pool's tokens, agents' keys, GitHub's, a private key, a credential in a URL — and refused at the door with the kind and the line, never the match. The record never receives one. <a href="${REPO_URL}/blob/main/SECURITY.md">SECURITY.md →</a></p></div>
+      <div class="step"><h3>Two words on a worker, a tombstone on a record</h3><p>A worker becomes the project's on two maintainers' word, never its owner's alone; the Review page names the worker and host behind every build. A record is written once and can be withdrawn by a maintainer with a reason — a signed tombstone takes its place. The signing key itself lives inside the pool's Worker; no worker, runner or repository holds it. <a href="/workers">Workers →</a></p></div>
     </div>
   </section>
 
