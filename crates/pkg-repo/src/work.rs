@@ -1372,7 +1372,7 @@ fn build_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
     }
     // No GITHUB_TOKEN in there: the drafter reads GitHub through the broker
     // (GITHUB_API in OMARCHY_BUILD_ENV, factory/bin/broker) — the build
-    // container is born with nothing (SECURITY.md, *Isolation*).
+    // container is born with nothing (/docs/security-model, *Isolation*).
     // A package cache shared by every build container on this host
     // (OMARCHY_PKG_CACHE, one directory per architecture): pacman downloads
     // a dependency once, not once per build.
@@ -1484,7 +1484,7 @@ fn build_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
             result: serde_json::json!({ "sha256": manifest.sha256, "filename": manifest.filename, "version": manifest.version, "review": from }),
         });
     }
-    // The pool signs what it stores (SECURITY.md); a local key only covers
+    // The pool signs what it stores (/docs/security-model); a local key only covers
     // a pool that has none.
     if let Some(key) = &opts.sign {
         if !job.signing()? {
@@ -1798,7 +1798,7 @@ fn promote_job(
     }
 }
 
-/// The public vulnerability feeds the security layer reads (SECURITY.md).
+/// The public vulnerability feeds the security layer reads (/docs/security-model).
 const FEEDS: [(&str, &str); 4] = [
     (
         "arch.json",

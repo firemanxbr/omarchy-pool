@@ -2,7 +2,7 @@ name: Benchmark
 
 # Current promotion mechanics (rsync + repo-add) versus the index, measured on a
 # native x86_64 runner so repo-add is not slowed down by emulation.
-# Historical (proof-of-concept evidence, poc/RESULTS.md); run by hand.
+# Historical (proof-of-concept evidence, /docs/proof-of-concept); run by hand.
 on:
   workflow_dispatch:
 

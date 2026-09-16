@@ -46,7 +46,7 @@ const BODY = String.raw`
   <div class="tiles six" id="tiles"></div>
 
   <section>
-    <div class="h2row"><h2>How it runs</h2><a class="more-link" href="${REPO_URL}/blob/main/factory/README.md">The factory in detail →</a></div>
+    <div class="h2row"><h2>How it runs</h2><a class="more-link" href="/docs/factory">The factory in detail →</a></div>
     <p class="sub">One brain queues, workers claim with a lease, objects land on R2, rings are rendered and signed. Live numbers on the mechanism.</p>
     <figure class="diagram">${archDiagram()}<figcaption>Every job runs on a registered worker. Contributors' builds are evidence; the review worker rebuilds what a maintainer approves. A lease that expires puts the task back in the queue. <a href="/workers">Every worker, by kind →</a></figcaption></figure>
   </section>

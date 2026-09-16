@@ -7,7 +7,9 @@
  * (diagrams.ts) and its live lines are filled from /api/v1/stats.
  */
 import { page } from "./layout";
-import { sourcesDiagram } from "./diagrams";
+import { ringsDiagram, sourcesDiagram, type Stage } from "./diagrams";
+
+const STAGES: Stage[] = ["sync", "pin", "promote", "render", "serve"];
 import type { RunningVersion } from "../meta";
 import { REPO_URL } from "../meta";
 
@@ -35,6 +37,10 @@ function body(pool: string): string {
 
   <section id="stages">
     <h2>What happens to a package</h2>
+    <p class="sub">Five stages. Click one — the picture lights it up.</p>
+    <div class="stepper" id="stepper"></div>
+    <figure class="diagram" id="stage-figure"></figure>
+    <div hidden id="stage-art">${STAGES.map((st) => `<div data-stage="${st}">${ringsDiagram(st)}</div>`).join("")}</div>
     <div class="steps">
       <div class="step"><h3>1. Sync — every three hours</h3><p>The upstream database is read and compared with the index by sha256; only what is missing is downloaded. Each file is checked against the upstream checksum and signature, its <code>.PKGINFO</code>, dependencies, <code>provides</code>, file list and the sonames its binaries load are extracted, and the archive plus its <code>.sig</code> are stored in the pool under <code>&lt;source&gt;/&lt;arch&gt;/&lt;file&gt;</code>. A file is never stored twice and never modified.</p></div>
       <div class="step"><h3>2. Pin — <code>edge</code></h3><p>A sync that changed something makes a new <b>edge</b> release: an immutable list of exactly which objects the ring serves, one row per source, name and architecture. Releases are append-only; every ring has a history it can be pointed back to. Edge is what the sources published in the last three hours, signature-verified and nothing else — for CI and developers.</p></div>
@@ -64,7 +70,7 @@ function body(pool: string): string {
     <div class="steps">
       <div class="step"><h3>The broker</h3><p>One process per host holds the credentials — the worker's token, the agent's key, a GitHub token — and only receives, processes and answers: the pool's calls for the one task it claimed, the agent, GitHub read-only. It runs no build. The project's review builds reach the agent the same way, through a proxy. <a href="/docs/workers#secrets">What the broker holds →</a></p></div>
       <div class="step"><h3>The builder</h3><p>Born with nothing but the broker's address, builds one task and dies. Inside it the build user starts from an empty environment; a variable set on it by mistake is dropped at start and said so. <code>env</code> in a PKGBUILD prints <code>PATH</code> and <code>HOME</code>. <a href="/docs/workers">Run a worker →</a></p></div>
-      <div class="step"><h3>The pool's check</h3><p>For the worker the pool does not run: every log, recipe and report uploaded is read for what looks like a secret — the pool's tokens, agents' keys, GitHub's, a private key, a credential in a URL — and refused at the door with the kind and the line, never the match. The record never receives one. <a href="${REPO_URL}/blob/main/SECURITY.md">SECURITY.md →</a></p></div>
+      <div class="step"><h3>The pool's check</h3><p>For the worker the pool does not run: every log, recipe and report uploaded is read for what looks like a secret — the pool's tokens, agents' keys, GitHub's, a private key, a credential in a URL — and refused at the door with the kind and the line, never the match. The record never receives one. <a href="/docs/security-model">the security model →</a></p></div>
       <div class="step"><h3>Two words on a worker, a tombstone on a record</h3><p>A worker becomes the project's on two maintainers' word, never its owner's alone; the Review page names the worker and host behind every build. A record is written once and can be withdrawn by a maintainer with a reason — a signed tombstone takes its place. The signing key itself lives inside the pool's Worker; no worker, runner or repository holds it. <a href="/workers">Workers →</a></p></div>
     </div>
   </section>
@@ -160,8 +166,17 @@ Server = ${pool}/multilib/$arch
 `;
 }
 
-/** Fills the diagram's live lines: when each source was last synced and how much of it the pool holds, the pool's size, the rings' heads. */
+/** Fills the diagram's live lines: when each source was last synced and how much of it the pool holds, the pool's size, the rings' heads. And the stepper: one stage lit at a time. */
 const SCRIPT = String.raw`
+  var STAGE_TEXT = { sync: ["Sync", "every 3 h", "Every source's database is read, every new package downloaded and verified against that project's keyring, then stored once in the source's own directory. Superseded versions stay until retention runs, so a rollback always has its bytes."], pin: ["Pin", "→ edge", "A sync that changed something makes a new edge release: an immutable list of the exact objects the ring serves. Edge is signature-verified and nothing else — what the sources published, one to three hours later. The factory's builds are pinned in the lab first."], promote: ["Promote", "on evidence", "The sync that changed edge queues the gate: a real pacman syncs edge and the ABI check looks for a symbol version a promotion would break, on x86_64 and aarch64 — green on both, and edge is rc within minutes. rc is checked again every three hours; the second green check in a row makes it stable. Nothing waits for a calendar; a failed health check rolls the ring back on its own."], render: ["Render & verify", "signed DBs", "Each release is rendered into pacman databases per source and architecture and signed with the pool's key; a real pacman then syncs them before they are served."], serve: ["Serve", "omarchy update", "Static objects behind an edge cache: the databases, the packages, the signatures. One host, one section per source, the ring's name in it."] };
+  var stage = "sync";
+  function drawStage() {
+    $("#stepper").innerHTML = Object.keys(STAGE_TEXT).map(function (k) { return '<button type="button" data-stage="' + k + '" class="' + (stage === k ? "on" : "") + '">' + STAGE_TEXT[k][0] + '<small>' + STAGE_TEXT[k][1] + '</small></button>'; }).join("");
+    $("#stepper").querySelectorAll("button").forEach(function (b) { b.onclick = function () { stage = b.getAttribute("data-stage"); drawStage(); }; });
+    var art = document.querySelector('#stage-art [data-stage="' + stage + '"]'), t = STAGE_TEXT[stage];
+    $("#stage-figure").innerHTML = (art ? art.innerHTML : "") + '<figcaption><b style="color:var(--text)">' + t[0] + '.</b> ' + t[2] + '</figcaption>';
+  }
+  drawStage();
   var GROUPS = { "src-arch": [["core", "x86_64"], ["extra", "x86_64"], ["multilib", "x86_64"]], "src-alarm": [["core", "aarch64"], ["extra", "aarch64"], ["alarm", "aarch64"]], "src-opr": [["packages", "x86_64"], ["packages", "aarch64"]], "src-asahi": [["asahi", "aarch64"]], "src-asahi-alarm": [["asahi-alarm", "aarch64"]], "src-optional": [["chaotic", "x86_64"], ["aur", "aarch64"]] };
   function live(key, text) { document.querySelectorAll('[data-live="' + key + '"]').forEach(function (el) { el.textContent = text; }); }
   liveStats(function (d) {

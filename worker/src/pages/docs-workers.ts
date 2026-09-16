@@ -14,7 +14,7 @@ const BODY = String.raw`
   <h1>Run a worker</h1>
   <p class="lede">Every build for the pool happens on a worker somebody runs — a contributor's laptop for their own packages, a machine a maintainer trusts for the project's work — and every worker runs the <b>same image</b>: <code>${IMG}</code>, Arch Linux, built for x86_64 and aarch64 on GitHub Packages and signed. There is no technical difference between a contributor's container and a maintainer's; the <b>registration behind the token</b> decides what it may do. Nothing you run holds a key: the pool signs what it publishes, and your token only asks for work.</p>
 
-  <section>
+  <section id="registration">
     <h2>What the registration decides</h2>
     <div class="table-wrap"><table><thead><tr><th>Your registration</th><th>What the container does</th><th>What it needs</th></tr></thead><tbody>
       <tr><td><b>community</b> trust — every registration starts here</td><td>builds <em>your</em> registered packages, one task per container, right inside it, into your staging workspace as evidence for a maintainer. With <code>WORKER_SHARED=1</code> it also builds other contributors' packages (donated compute), with your agent key (<code>ANTHROPIC_API_KEY</code>, <code>OPENAI_API_KEY</code>, <code>GEMINI_API_KEY</code> or <code>XAI_API_KEY</code>) your agent drafts and corrects PKGBUILDs. It never sees a package in review or approved.</td><td>the token</td></tr>
@@ -37,7 +37,7 @@ const BODY = String.raw`
     <p class="sub">Two of each — one per architecture — is what the project runs on its own host (RUNBOOK, <em>The Studio host</em>): x86_64 pool jobs are only a label and run natively on any machine; x86_64 <em>builds</em> on an aarch64 host run under user-mode emulation, correct but slower. Without a role the trust decides everything: a project worker takes pool jobs, rebuilds and audits alike; a community worker builds its owner's packages.</p>
   </section>
 
-  <section>
+  <section id="before">
     <h2>Before you start</h2>
     <div class="steps">
       <div class="step"><h3>A container runtime</h3><p><b>Docker Desktop</b> on macOS, Windows or Linux, or <b>Podman</b> — the <code>podman</code> command, or <a href="https://podman-desktop.io/">Podman Desktop</a> with its graphical window. Every command below is shown for both; they differ only in the first word. Give the runtime at least 2 CPUs and 4 GB of memory (Docker Desktop: <em>Settings → Resources</em>; Podman on macOS: <code>podman machine set --cpus 4 --memory 8192</code>); a browser-class package needs far more.</p></div>
@@ -157,7 +157,7 @@ FACTORY_PROVIDER=claude-code</pre>
     </div>
   </section>
 
-  <section>
+  <section id="running">
     <h2>Keeping it running</h2>
     <div class="steps">
       <div class="step"><h3>Update</h3><p>The image follows the pool's releases. <code>docker pull ${IMG}:latest</code> (or <code>podman pull</code>), then remove and recreate the container with the same command; a contributor's worker only needs the pull, the next container starts from the new image.</p></div>

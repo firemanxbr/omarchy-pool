@@ -64,7 +64,7 @@ step "Fresh local worker on :$PORT"
 rm -rf "$E2E" && mkdir -p "$E2E"
 cd "$ROOT/worker"
 WRANGLER_STATE="$E2E/wrangler-state"
-# The pool holds the signing key (SECURITY.md): the throwaway key goes in as
+# The pool holds the signing key (/docs/security-model): the throwaway key goes in as
 # the Worker secret, armored on one dotenv line.
 SIGNING_KEY="$(gpg --batch --armor --export-secret-keys "$KEYID" | awk '{printf "%s\\n", $0}')"
 printf 'JOB_TOKEN_SECRET=%s\nSIGNING_KEY="%s"\n' "$JOB_SECRET" "$SIGNING_KEY" > "$E2E/.dev.vars"
@@ -203,7 +203,7 @@ dash_body=$(curl -s "$OMARCHY_API/")
 grep -q "tested before they reach you" <<<"$dash_body" || {
   echo "dashboard not served; response head:"; head -c 600 <<<"$dash_body"; echo
   echo "--- worker log tail ---"; tail -20 "$E2E/wrangler.log"; exit 1; }
-for p in /docs /docs/get-started /docs/workers /docs/how-it-works /docs/governance /status /api /contribute /factory; do
+for p in /docs /docs/get-started /docs/workers /docs/how-it-works /docs/governance /docs/security /docs/glossary /docs/architecture /docs/runbook /docs/factory /status /api /contribute /factory; do
   body=$(curl -s "$OMARCHY_API$p"); grep -q "omarchy-pool" <<<"$body" || { echo "page $p not served"; exit 1; }
 done
 # The old addresses of the documentation chapters redirect into the section.

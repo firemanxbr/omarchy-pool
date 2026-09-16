@@ -50,7 +50,7 @@ jobs:
           if [[ -z "$n" ]]; then
             gh label create cost-report --description "the daily Cloudflare bill estimate" --color 0e8a16 2>/dev/null || true
             n="$(gh issue create --title "Cost report: this month's Cloudflare bill, estimated daily" --label cost-report \
-                  --body "One comment a day from the Cost report workflow: what this account's Cloudflare bill looks like so far this month and where it is heading, as the pool estimates it (docs/RUNBOOK.md, Costs). Subscribe to this issue to get it by e-mail." | grep -o '[0-9]*$')"
+                  --body "One comment a day from the Cost report workflow: what this account's Cloudflare bill looks like so far this month and where it is heading, as the pool estimates it (the runbook, /docs/runbook.md, Costs). Subscribe to this issue to get it by e-mail." | grep -o '[0-9]*$')"
           fi
           body="$(jq -r --arg warn "$WARN_USD" '
             def usd: "US$ " + (. | tostring);

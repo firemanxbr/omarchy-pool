@@ -286,7 +286,7 @@ ten minutes (`worker/src/governance.ts`) and sets each contributor's role
 from it — every change a `role` line in the journal. Changing the file
 is a pull request another maintainer approves (`.github/CODEOWNERS` is
 generated from it by `factory/bin/check-governance --write`; CI checks they
-agree). See [GOVERNANCE.md](GOVERNANCE.md). `GET /api/v1/factory/maintainers`
+agree). See [Governance](https://omarchy-pool.firemanxbr.org/docs/governance). `GET /api/v1/factory/maintainers`
 and `/factory/approvals` are the public record. What a package is about is
 its *category*, proposed by the project's agent at audit and settled by a
 maintainer (`POST /factory/packages/<name>/category`).

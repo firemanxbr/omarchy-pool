@@ -1,5 +1,5 @@
 # The project's own host — two workers of each role, one per architecture
-# (docs/RUNBOOK.md, *The Studio host*; the roles: /docs/workers#roles).
+# (/docs/runbook, *The Studio host*; the roles: /docs/workers#roles).
 #
 #   docker compose up -d            start
 #   ./rollout.sh                    a rolling upgrade to the latest image, one worker at a time
@@ -13,7 +13,7 @@
 # trust and architecture, and etc/ with the secrets — a worker token per
 # worker (register.sh writes them) and the agent key (etc/agent.env, yours).
 #
-# Where the secrets live, and where they do not (SECURITY.md, *Isolation*):
+# Where the secrets live, and where they do not (/docs/security-model, *Isolation*):
 # the agent key and GITHUB_TOKEN are read by three containers that run no
 # build — agent-proxy, and the two community brokers, which also hold their
 # builder's worker token. The community builders hold nothing and reach

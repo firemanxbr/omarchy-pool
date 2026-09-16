@@ -4,7 +4,7 @@
 It only receives, processes and answers. Beside it, on a private network,
 a builder is born with nothing — no token, no key — builds one task and
 dies; whatever the recipe or the upstream's build does with `env` or
-`curl`, there is nothing to take (SECURITY.md, *Isolation*; /docs/workers
+`curl`, there is nothing to take (/docs/security-model, *Isolation*; /docs/workers
 #secrets). Three things pass through, each on its own path:
 
     the pool     ANY  /pool/<path>      → $OMARCHY_API/api/v1/<path> with the worker's token

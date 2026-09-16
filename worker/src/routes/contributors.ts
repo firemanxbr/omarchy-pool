@@ -395,7 +395,7 @@ export async function handleBuildPackage(c: Contributor, name: string, request: 
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('enqueue', NULL, 'factory', 'ok', ?, ?)")
     .bind(`${name}${version ? " " + version : ""}: ${ids.length} community build(s) queued by ${c.login} for ${arches.join(", ")} — results go to staging`, JSON.stringify({ name, owner: c.login, arches, tasks: ids, pkgbuild_ref: ref }))
     .run();
-  return json({ tasks: ids, arches, pkgbuild_ref: ref, note: "A worker of yours claims these (dedicated: your packages only; shared: anyone's). Start one with the Omarchy Packaging image (factory/README.md)." }, 201);
+  return json({ tasks: ids, arches, pkgbuild_ref: ref, note: "A worker of yours claims these (dedicated: your packages only; shared: anyone's). Start one with the Omarchy Packaging image (/docs/workers)." }, 201);
 }
 
 export async function handleRegisterWorker(c: Contributor, request: Request, env: Env): Promise<Response> {
@@ -646,7 +646,7 @@ export async function handleSetCategory(c: Contributor, name: string, request: R
 }
 
 /**
- * Project trust on two maintainers' word (SECURITY.md, *Trust levels*). The
+ * Project trust on two maintainers' word (/docs/security-model, *Trust levels*). The
  * first maintainer proposes; a second — never the same person, never the
  * worker's owner — confirms, and trusted_by names both. Back to community
  * is one maintainer's call (taking trust away is always easy). Each step is
