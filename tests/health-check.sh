@@ -82,7 +82,10 @@ pacman-key --lsign-key staging@firemanxbr.org >/dev/null 2>&1
 for f in /repo/*.gpg; do
   [[ -f "$f" ]] || continue
   pacman-key --add "$f" >/dev/null 2>&1
-  for k in $(gpg --no-default-keyring --keyring "$f" --with-colons --list-keys 2>/dev/null | awk -F: '$1=="pub"{print $5}'); do pacman-key --lsign-key "$k" >/dev/null 2>&1 || true; done
+  # The primary fingerprints in the file, read without a keyring (the mount
+  # is read-only and a legacy keyring file misleads --keyring): lsigned, as
+  # populate would from a keyring package's trusted list.
+  for k in $(gpg --batch --with-colons --import-options show-only --import "$f" 2>/dev/null | awk -F: '$1=="pub"{p=1;next} $1=="sub"{p=0} $1=="fpr" && p {print $10; p=0}'); do pacman-key --lsign-key "$k" >/dev/null 2>&1 || true; done
 done
 pacman --config /repo/pacman.conf -Sy
 total=0
