@@ -94,6 +94,11 @@ export function scopesFor(kind: string, id: number, trust: string, params: Recor
       if (typeof params.task === "number" || typeof params.task === "string") s.push(`staging:${params.task}`);
       s.push("pool:write", "release:edge", "artifacts:*:edge");
       break;
+    case "trial":
+      // The project's build into the lab — never a promised ring — and its transcript beside the evidence.
+      if (typeof params.task === "number" || typeof params.task === "string") s.push(`staging:${params.task}`);
+      s.push("pool:write", "release:lab", "artifacts:*:lab");
+      break;
     case "sync": {
       // One task syncs every source of an architecture, each into its own
       // ring (the OPR's edge/rc/stable channels): a scope per ring named.

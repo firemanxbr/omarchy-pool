@@ -69,6 +69,14 @@ export async function handleQueueJob(c: Contributor, request: Request, env: Env)
       // The one-time move of every object into its source's directory (routes/relayout.ts).
       job = { kind: "relayout", params: {}, arch: "x86_64" };
       break;
+    case "trial": {
+      // The trial of a staged project build again, by hand: its package into the lab, a real pacman installs it.
+      const t = /^\d+$/.test(s("task")) ? await env.DB.prepare("SELECT id, name, arch, version, result_filename, trust, status FROM build_tasks WHERE id = ? AND kind = 'build'").bind(Number(s("task"))).first<{ id: number; name: string; arch: string; version: string | null; result_filename: string | null; trust: string; status: string }>() : null;
+      if (!t) return json({ error: "trial needs task, a staged build's id" }, 400);
+      if (t.trust !== "project" || t.status !== "staged" || !t.result_filename) return json({ error: `task ${t.id} is not a staged build of the project's (${t.trust}, ${t.status}); only the project's builds are tried` }, 409);
+      job = { kind: "trial", params: { task: String(t.id), name: t.name, arch: t.arch, version: t.version ?? "", files: JSON.stringify([t.result_filename]) }, arch: t.arch };
+      break;
+    }
     case "security":
     case "enqueue":
       job = { kind: b.kind, params: {}, arch: ARCHES.includes(b.arch ?? "") ? (b.arch as string) : "x86_64" };
@@ -83,7 +91,7 @@ export async function handleQueueJob(c: Contributor, request: Request, env: Env)
       break;
     }
     default:
-      return json({ error: "kind must be one of sync, promote, rollback, render, health, security, enqueue, gc, verify, relayout" }, 400);
+      return json({ error: "kind must be one of sync, promote, rollback, render, health, security, enqueue, gc, verify, relayout, trial" }, 400);
   }
   const id = await createJob(env, job, `queued by ${c.login}`);
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('dispatch', ?, ?, 'ok', ?, ?)")

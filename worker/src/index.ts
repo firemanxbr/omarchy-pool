@@ -404,10 +404,10 @@ async function api(method: string, path: string, url: URL, request: Request, env
   }
   if ((m = path.match(/^\/factory\/tasks\/(\d+)\/artifacts$/)) && method === "GET") return handleStagingList(Number(m[1]), env);
   if ((m = path.match(/^\/factory\/tasks\/(\d+)\/artifacts\/([A-Za-z0-9][A-Za-z0-9._:+-]{0,200})$/)) && method === "GET") {
-    // A package in staging is for maintainers — and for the publish job that carries the project's build into the pool (its token names the task).
+    // A package in staging is for maintainers — and for the publish job that carries the project's build into the pool, and the trial that tries it in the lab (their tokens name the task).
     const c = await contributorOf(request, env);
     const job = c ? null : await jobOf(request, env);
-    return handleStagingGet(Number(m[1]), m[2], env, (!!c && isMaintainer(c)) || (!!job && job.k === "publish" && job.s.includes(`staging:${m[1]}`)));
+    return handleStagingGet(Number(m[1]), m[2], env, (!!c && isMaintainer(c)) || (!!job && (job.k === "publish" || job.k === "trial") && job.s.includes(`staging:${m[1]}`)));
   }
   if ((m = path.match(/^\/factory\/tasks\/(\d+)$/)) && method === "GET") return handleTask(Number(m[1]), env);
   if (path.startsWith("/factory/") && (method === "POST" || method === "PUT" || method === "DELETE" || method === "PATCH")) {
