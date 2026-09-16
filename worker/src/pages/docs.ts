@@ -59,6 +59,7 @@ const SCRIPT = String.raw`
     ["POST", "/api/v1/factory/register", "contributor", "Sign in once with a GitHub token that has no permissions; a contributor token comes back."],
     ["POST", "/api/v1/factory/packages", "contributor", "Request a package: the project's URL (a GitHub repository or release tarball; a home page plus source and version otherwise), name, one-line description, SPDX licence, architectures, and the checklist confirmed. Written once to the record (factory/<name>/<id>/request.json in the pool bucket, signed)."],
     ["POST", "/api/v1/factory/packages/:name/build", "contributor", "Queue a build of a requested package for its architectures."],
+    ["DELETE", "/api/v1/factory/tasks/:id/artifacts", "contributor", "Drop that task's staging objects (the owner's, or a maintainer's). Frees the 2 GB quota. Refused while queued or leased. A staged build is cancelled."],
     ["POST", "/api/v1/factory/workers", "contributor", "Register a worker; its token comes back once."],
     ["POST", "/api/v1/factory/token", "contributor", "A new contributor token for scripts; it replaces the previous one."],
     ["POST", "/api/v1/factory/claim", "worker", "Claim the next task of the worker's architecture and role; a lease and a per-job token come back."],

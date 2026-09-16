@@ -431,6 +431,26 @@ describe("a package request", () => {
   });
 });
 
+describe("staging quota", () => {
+  it("a PUT and a multipart create are refused once the contributor is over 2 GB; the owner can drop superseded staging", async () => {
+    await env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind) VALUES ('pad', 'aarch64', '1-1', 'https://github.com/alice/recipes@HEAD:pad/PKGBUILD', 'contributor', 100, 0, 'community', 'alice', 'build')`).run();
+    const c = await call("POST", "/factory/claim", { arch: "aarch64" }, "omw_w3");
+    expect(c.status).toBe(200);
+    const id = c.json.task.id;
+    const job = c.json.token as string;
+    await env.DB.prepare("INSERT INTO staging_objects (key, owner, task_id, size) VALUES (?, 'alice', ?, ?)").bind(`staging/alice/pad/${id}/pad.bin`, id, 2147483648).run();
+    expect((await call("PUT", `/factory/tasks/${id}/artifacts/PKGBUILD`, undefined, job, "pkgname=pad\n")).status).toBe(413);
+    expect((await call("POST", `/factory/tasks/${id}/artifacts/pad-1-1-aarch64.pkg.tar.zst/multipart?action=create`, {}, job)).status).toBe(413);
+    expect((await call("DELETE", `/factory/tasks/${id}/artifacts`, undefined, "omc_alice")).status).toBe(409);
+    expect((await call("POST", `/factory/tasks/${id}/fail`, { error: "quota", final: true }, job)).status).toBe(200);
+    const gone = await call("DELETE", `/factory/tasks/${id}/artifacts`, undefined, "omc_alice");
+    expect(gone.status, JSON.stringify(gone.json)).toBe(200);
+    expect(gone.json.deleted).toBe(1);
+    expect((await env.DB.prepare("SELECT COALESCE(SUM(size), 0) AS bytes FROM staging_objects WHERE task_id = ?").bind(id).first<{ bytes: number }>())!.bytes).toBe(0);
+    expect((await call("DELETE", `/factory/tasks/${id}/artifacts`, undefined, "omc_m2")).json.deleted).toBe(0);
+  });
+});
+
 describe("blocking", () => {
   const checklist = { official: true, license: true, unshipped: true, evidence: true };
   it("a maintainer blocks a package: it leaves every ring it is in, its builds stop, its project is refused; another maintainer lifts it", async () => {
