@@ -595,6 +595,7 @@ export async function handleFactory(env: Env, url?: URL): Promise<Response> {
       counts: counts.results,
       workers: workers.results.map((w) => ({
         ...w,
+        token_hash: undefined, // the hash of a worker's token is the pool's to compare, nobody's to see
         labels: w.labels ? JSON.parse(w.labels) : null,
         packages: w.packages ? JSON.parse(w.packages) : null,
         alive: Date.parse(w.last_seen) > alive,
