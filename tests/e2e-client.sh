@@ -136,7 +136,7 @@ s=by[4]["result"]["structuredContent"]; assert s["ring"]=="stable" and s["head"]
 ' <<<"$mcp_out" || { echo "the MCP server is off: $mcp_out"; exit 1; }
 # A typo in the ring is refused before any request.
 bad_ring="$("$CLI" "${CLI_ARGS[@]}" --root "$ROOT/target/rootfs-current" --ring stabel status 2>&1 || true)"
-grep -q "ring must be edge, rc or stable" <<<"$bad_ring" || { echo "a bad ring must be refused: $bad_ring"; exit 1; }
+grep -q "ring must be edge, rc, stable or lab" <<<"$bad_ring" || { echo "a bad ring must be refused: $bad_ring"; exit 1; }
 "$CLI" "${CLI_ARGS[@]}" --root "$ROOT/target/rootfs-current" install xz --dry-run | grep -q '^Would run: pacman -U' || { echo "dry-run did not produce a pacman -U command"; exit 1; }
 
 step "check on the January 2021 system (expected: BLOCKED, exit 2)"
