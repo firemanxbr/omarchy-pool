@@ -61,6 +61,10 @@ with_secrets() { # command... — run with the agent's keys in its environment
 # factory/bin/agent.py makes), or "" without a key — reported at claim time
 # so the Factory page can show it; the key itself never leaves this machine.
 BROKER_AGENT=""  # what the broker's /health says its agent is (provider/model), in broker mode
+# The release this image was built from (the Containerfile sets OMARCHY_IMAGE
+# from the tag; pkg-repo in the image says the same), so the Workers page
+# shows a version, not the word "container". Outside the image: unknown.
+image_version() { echo "${OMARCHY_IMAGE:-$(pkg-repo --version 2>/dev/null | awk '{ print $2 }')}" | grep . || echo container; }
 agent_label() {
   if [[ -n "${OMARCHY_BROKER:-}" ]]; then echo "$BROKER_AGENT"; return; fi
   local p k m
@@ -117,6 +121,39 @@ agent_probe_if_due() {
   (( $(date +%s) - AGENT_CHECKED >= every )) && agent_probe
   return 0
 }
+
+# What this machine uses, for the claim: the host's CPU (a delta of
+# /proc/stat between two claims), its memory (/proc/meminfo) and the disk
+# under /build (df), each kept as one sample per claim over the last two
+# hours of claims (an hour of idling) and reported as the average — the
+# Workers page says how loaded the machine is, from the claim the worker
+# makes anyway. Not Linux: no usage, the page shows a dash.
+USAGE_CPU=(); USAGE_RAM=(); USAGE_DISK=(); USAGE_CORES=0; USAGE_RAM_GB=0; USAGE_DISK_GB=0; CPU_PREV=""
+usage_sample() {
+  local s cpu ram disk busy total
+  [[ -r /proc/stat && -r /proc/meminfo ]] || return 0
+  s="$(awk -v prev="$CPU_PREV" '
+    FILENAME == "/proc/stat" && $1 == "cpu" { busy = $2 + $3 + $4 + $7 + $8 + $9; total = busy + $5 + $6 }
+    FILENAME == "/proc/stat" && $1 ~ /^cpu[0-9]/ { cores++ }
+    /^MemTotal:/ { mt = $2 } /^MemAvailable:/ { ma = $2 }
+    END { split(prev, p, " "); cpu = (p[2] != "" && total > p[2]) ? 100 * (busy - p[1]) / (total - p[2]) : -1
+          printf "%d %d %.0f %d %.0f %.1f\n", busy, total, cpu, (cores ? cores : 1), (mt ? 100 * (mt - ma) / mt : -1), mt / 1048576 }' /proc/stat /proc/meminfo 2>/dev/null)" || return 0
+  read -r busy total cpu USAGE_CORES ram USAGE_RAM_GB <<<"$s"
+  CPU_PREV="$busy $total"
+  read -r disk USAGE_DISK_GB <<<"$(df -kP /build 2>/dev/null | awk 'NR == 2 && $2 + 0 > 0 { printf "%.0f %.0f\n", 100 * $3 / ($3 + $4), $2 / 1048576 }')" || true
+  [[ "$cpu" -ge 0 && "$ram" -ge 0 && -n "${disk:-}" ]] || return 0
+  USAGE_CPU+=("$cpu"); USAGE_RAM+=("$ram"); USAGE_DISK+=("$disk")
+  if (( ${#USAGE_CPU[@]} > 240 )); then USAGE_CPU=("${USAGE_CPU[@]:1}"); USAGE_RAM=("${USAGE_RAM[@]:1}"); USAGE_DISK=("${USAGE_DISK[@]:1}"); fi
+  return 0
+}
+usage_json() { # → the claim's "usage", or null before the first full sample
+  local n=${#USAGE_CPU[@]}
+  (( n > 0 )) || { echo null; return 0; }
+  jq -cn --argjson cpu "$(mean "${USAGE_CPU[@]}")" --argjson ram "$(mean "${USAGE_RAM[@]}")" --argjson disk "$(mean "${USAGE_DISK[@]}")" \
+    --argjson cores "$USAGE_CORES" --argjson ram_gb "$USAGE_RAM_GB" --argjson disk_gb "$USAGE_DISK_GB" --argjson minutes "$(( (n + 1) / 2 ))" \
+    '{cpu: $cpu, ram: $ram, disk: $disk, cores: $cores, ram_gb: $ram_gb, disk_gb: $disk_gb, minutes: $minutes}'
+}
+mean() { printf '%s\n' "$@" | awk '{ s += $1 } END { printf "%.1f", (NR ? s / NR : 0) }'; }
 
 # ---------------------------------------------------------------- inside ---
 # Runs as root in a fresh Arch container with /task mounted: /task/meta.sh
@@ -487,7 +524,8 @@ container_worker() {
   while :; do
     if [[ "$DRAIN" == 1 ]]; then log "draining: nothing claimed since the stop signal; exiting"; exit 0; fi
     agent_probe_if_due
-    out="$(api POST /factory/claim "$(jq -n --arg a "$ARCH" --arg h "$(hostname -s 2>/dev/null || echo ?)" --arg v "container" --arg g "$(agent_label)" --arg as "$AGENT_STATUS" --arg ae "$AGENT_ERROR" --arg ac "$( (( AGENT_CHECKED > 0 )) && date -u -d "@$AGENT_CHECKED" +%Y-%m-%dT%H:%M:%SZ || echo "")" --argjson l "${WORKER_LABELS:-"{}"}" --argjson s "$( [[ "${WORKER_SHARED:-0}" == 1 ]] && echo true || echo false)" '{arch:$a,hostname:$h,version:$v,labels:$l,shared:$s,agent:$g,agent_status:$as,agent_error:$ae,agent_checked_at:$ac}')")" \
+    usage_sample
+    out="$(api POST /factory/claim "$(jq -n --arg a "$ARCH" --arg h "$(hostname -s 2>/dev/null || echo ?)" --arg v "$(image_version)" --arg g "$(agent_label)" --arg as "$AGENT_STATUS" --arg ae "$AGENT_ERROR" --arg ac "$( (( AGENT_CHECKED > 0 )) && date -u -d "@$AGENT_CHECKED" +%Y-%m-%dT%H:%M:%SZ || echo "")" --argjson l "${WORKER_LABELS:-"{}"}" --argjson s "$( [[ "${WORKER_SHARED:-0}" == 1 ]] && echo true || echo false)" --argjson u "$(usage_json)" '{arch:$a,hostname:$h,version:$v,labels:$l,shared:$s,agent:$g,agent_status:$as,agent_error:$ae,agent_checked_at:$ac,usage:$u}')")" \
       || { log "claim failed: ${out##*$'\n'}"; sleep 60; continue; }
     code="${out##*$'\n'}"; body="${out%$'\n'*}"
     if [[ "$code" == "204" ]]; then
