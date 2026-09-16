@@ -1,7 +1,7 @@
 /**
  * The dashboard's pages, served by the Worker's own fetch handler: every
  * door and every detail page answers, carries the shared frame (the three
- * doors in the navigation, the footer), keeps the text the e2e script and
+ * doors in the navigation, the footer with the docs and the licence), keeps the text the e2e script and
  * the old addresses rely on, and leaves no template placeholder behind.
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
@@ -15,7 +15,7 @@ async function get(path: string): Promise<Response> {
   return res;
 }
 
-const PAGES = ["/", "/factory", "/contribute", "/pipeline", "/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/governance", "/packages", "/package/zlib", "/security", "/status", "/journal", "/review", "/request", "/user/someone", "/people", "/api", "/diff"];
+const PAGES = ["/", "/factory", "/contribute", "/review", "/pipeline", "/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/governance", "/packages", "/package/zlib", "/security", "/status", "/journal", "/workers", "/request", "/user/someone", "/people", "/api", "/diff"];
 
 describe("dashboard pages", () => {
   it("every page is served with the shared frame and no placeholder left behind", async () => {
@@ -24,7 +24,10 @@ describe("dashboard pages", () => {
       expect(res.status, path).toBe(200);
       const html = await res.text();
       expect(html, path).toContain("omarchy-pool");
-      for (const door of ['href="/"', 'href="/factory"', 'href="/pipeline"', 'href="/docs"']) expect(html, `${path} nav`).toContain(door);
+      // The four doors in the header; the documentation, the workers and the licence in the footer.
+      expect(html, `${path} nav`).toMatch(/<header>[\s\S]*href="\/"[\s\S]*href="\/factory"[\s\S]*href="\/review"[\s\S]*href="\/pipeline"[\s\S]*<\/header>/);
+      expect(html, `${path} header`).not.toMatch(/<header>[\s\S]*(href="\/docs"|id="status")[\s\S]*<\/header>/);
+      expect(html, `${path} footer`).toMatch(/<footer>[\s\S]*href="\/workers"[\s\S]*href="\/docs"[\s\S]*href="\/api"[\s\S]*blob\/main\/LICENSE[\s\S]*<\/footer>/);
       expect(html, path).toContain("built for Omarchy");
       expect(html, path).not.toMatch(/__[A-Z_]+__/);
       expect(html, path).not.toContain("${");
@@ -46,6 +49,15 @@ describe("dashboard pages", () => {
     expect(pipeline).toContain('data-live="verified-today"');
     expect(pipeline).toContain("sponsor@firemanxbr.org");
     expect(pipeline).toContain('id="staged"');
+    // Review reads the same for everyone and acts for maintainers; the Workers page has the three kinds, and the Pipeline no longer lists them.
+    const review = await (await get("/review")).text();
+    expect(review).toContain('id="mine"');
+    expect(review).toContain('data-approve');
+    const workers = await (await get("/workers")).text();
+    for (const kind of ["w-project", "w-review", "w-community"]) expect(workers).toContain(`id="${kind}"`);
+    expect(workers).toContain('href="/docs/workers"');
+    expect(pipeline).not.toContain('id="cworkers"');
+    expect(pipeline).toContain('href="/workers"');
   });
 
   it("the documentation hub carries the five stages and the old chapter addresses still redirect", async () => {

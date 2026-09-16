@@ -3,8 +3,9 @@
  * the buttons differ. A living picture of what is being verified, promoted
  * and checked right now (the journal, as it happens); how fast maintainers
  * decide and where a contributor's build sits in the queue; and, for the
- * people who run it, the operations: the queue, the workers by role, the
- * charts, the ring heads, the journal, what it costs — and how to help.
+ * people who run it, the operations: the queue, the charts, the ring
+ * heads, the journal, what it costs — and how to help. The workers
+ * themselves have a page of their own (/workers), by kind.
  */
 import { page } from "./layout";
 import { CHARTS } from "./charts";
@@ -47,7 +48,7 @@ const BODY = String.raw`
   <section>
     <div class="h2row"><h2>How it runs</h2><a class="more-link" href="${REPO_URL}/blob/main/factory/README.md">The factory in detail →</a></div>
     <p class="sub">One brain queues, workers claim with a lease, objects land on R2, rings are rendered and signed. Live numbers on the mechanism.</p>
-    <figure class="diagram">${archDiagram()}<figcaption>Every job runs on a registered worker. Contributors' builds are evidence; the review worker rebuilds what a maintainer approves. A lease that expires puts the task back in the queue.</figcaption></figure>
+    <figure class="diagram">${archDiagram()}<figcaption>Every job runs on a registered worker. Contributors' builds are evidence; the review worker rebuilds what a maintainer approves. A lease that expires puts the task back in the queue. <a href="/workers">Every worker, by kind →</a></figcaption></figure>
   </section>
 
   <section>
@@ -55,20 +56,6 @@ const BODY = String.raw`
     <p class="sub">Evidence, not packages. Approve queues a rebuild on the review worker; reject sends a note back.</p>
     <p class="sub" id="rq-state" hidden></p>
     <div class="table-wrap"><table id="staged"><thead><tr><th>#</th><th>Package</th><th>Arch</th><th>Built by</th><th>Evidence</th><th>Audit</th><th>Waiting</th><th>Decision</th></tr></thead><tbody></tbody></table></div>
-  </section>
-
-  <section>
-    <div class="h2row"><h2>Workers by role</h2><a class="more-link" href="/docs/workers">The three roles →</a></div>
-    <p class="sub">One image, four kinds of worker. Alive means seen in the last ten minutes; building means holding a lease right now. <label style="margin-left:8px"><input type="checkbox" id="all-workers"> show workers not seen recently</label></p>
-    <div class="roles-grid" id="roles"></div>
-    <div class="charts" style="margin-top:16px">
-      <div class="chart"><h3>Load per worker <span>24 h</span></h3><div class="sub">share of the last day each worker spent holding a lease — the tooltip has what it did</div><div id="c-perworker"></div></div>
-      <div class="chart"><h3>Worker minutes <span>per day</span></h3><div class="sub">time the project's workers spent on pool jobs</div><div id="c-minutes"></div></div>
-    </div>
-    <div class="two" style="margin-top:16px">
-      <div class="panel"><h3>Omarchy workers <span class="dim" style="font-size:12px;font-weight:400">the project's host</span></h3><div class="table-wrap" style="border:0"><table id="workers"><thead><tr><th>Worker</th><th>Role</th><th>Arch</th><th>Where</th><th>Trust</th><th>Agent</th><th>Building</th><th>Done / failed</th><th>Last seen</th></tr></thead><tbody></tbody></table></div></div>
-      <div class="panel"><h3>Community workers <span class="dim" style="font-size:12px;font-weight:400">contributors' own</span></h3><div class="table-wrap" style="border:0"><table id="cworkers"><thead><tr><th>Worker</th><th>Role</th><th>Owner</th><th>Arch</th><th>Mode</th><th>Agent</th><th>Building</th><th>Done / failed</th><th>Last seen</th></tr></thead><tbody></tbody></table></div></div>
-    </div>
   </section>
 
   <section>
@@ -141,24 +128,6 @@ __CHARTS__
   }
   function renderTables(d) {
     loadRegistry();
-    var showAll = $("#all-workers").checked;
-    var ws = d.workers.filter(function (w) { return showAll || w.alive; });
-    // The role a worker reported in its labels (OMARCHY_WORKER_ROLE: pool, review, community), or what the trust implies.
-    function roleCell(w) {
-      var r = w.labels && w.labels.role;
-      if (r === "pool" || r === "review" || r === "community") return '<span class="pill">' + esc(r) + '</span>';
-      return '<span class="muted">' + (w.trust === "project" ? "pool + review" : "own packages") + '</span>';
-    }
-    pager("#workers", ws.filter(function (w) { return w.side === "omarchy"; }), function (w) {
-      var where = w.labels && w.labels.where ? w.labels.where : (w.hostname || "—");
-      return '<tr><td>' + workerName(w) + (w.alive ? ' <span class="pill ok">alive</span>' : '') + '</td><td>' + roleCell(w) + '</td><td>' + esc(w.arch) + '</td><td>' + esc(where) + (w.version ? ' <span class="muted">pkg-repo ' + esc(w.version) + '</span>' : '') + '</td>' +
-        '<td>' + (w.trust === "project" ? 'project' + (w.trusted_by ? ' <span class="muted">by ' + esc(w.trusted_by) + '</span>' : '') : '<span class="muted">—</span>') + '</td><td>' + agentCell(w) + '</td>' +
-        '<td>' + (w.current_task ? '#' + w.current_task : '<span class="muted">idle</span>') + '</td><td>' + num(w.builds_done) + ' / ' + num(w.builds_failed) + '</td><td>' + ago(w.last_seen) + '</td></tr>';
-    }, { empty: showAll ? "no Omarchy worker registered" : "no Omarchy worker alive — the project's host is off; pool jobs wait", text: function (w) { return w.id + " " + w.arch + " " + (w.trusted_by || "") + " " + JSON.stringify(w.labels || {}); } });
-    pager("#cworkers", ws.filter(function (w) { return w.side === "community"; }), function (w) {
-      return '<tr><td>' + workerName(w) + (w.alive ? ' <span class="pill ok">alive</span>' : '') + '</td><td>' + roleCell(w) + '</td><td>' + esc(w.owner || "") + '</td><td>' + esc(w.arch) + '</td><td>' + esc(w.mode) + (w.packages && w.packages.length ? ' <span class="muted">' + esc(w.packages.join(", ")) + '</span>' : '') + '</td><td>' + agentCell(w) + '</td>' +
-        '<td>' + (w.current_task ? '#' + w.current_task : '<span class="muted">idle</span>') + '</td><td>' + num(w.builds_done) + ' / ' + num(w.builds_failed) + '</td><td>' + ago(w.last_seen) + '</td></tr>';
-    }, { empty: showAll ? "no community worker registered yet" : "no community worker alive right now", text: function (w) { return w.id + " " + (w.owner || "") + " " + w.arch + " " + w.mode; } });
     pager("#tasks", d.tasks, function (t) {
       var result = t.status === "staged"
         ? '<span class="mono">' + esc(t.result_filename || "") + '</span> <a class="run" href="/api/v1/factory/tasks/' + t.id + '/artifacts/build.log">log</a> <a class="run" href="/api/v1/factory/tasks/' + t.id + '/artifacts/PKGBUILD">PKGBUILD</a>'
@@ -177,7 +146,7 @@ __CHARTS__
   function can() { return ME_ROLE === "maintainer"; }
   function live(key, text) { document.querySelectorAll('[data-live="' + key + '"]').forEach(function (el) { el.textContent = text; }); }
   function roleOf(w) { var r = w.labels && w.labels.role; if (r === "pool" || r === "review" || r === "community") return r; return w.trust === "project" ? "pool" : "community"; }
-  skeletonTiles("#tiles", 6); skeletonRows("#staged", 8, 2); skeletonRows("#events", 7, 6); skeletonRows("#tasks", 8, 4); skeletonRows("#workers", 9, 2); skeletonRows("#cworkers", 9, 2); skeletonRows("#registry", 8, 2); // ---- the state row: the service (measured now) and the pipeline (from the journal)
+  skeletonTiles("#tiles", 6); skeletonRows("#staged", 8, 2); skeletonRows("#events", 7, 6); skeletonRows("#tasks", 8, 4); skeletonRows("#registry", 8, 2); // ---- the state row: the service (measured now) and the pipeline (from the journal)
   function renderState(d) {
     fetch("/api/v1/status", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (st) { live("api", "API up · index " + (st.index.ok ? st.index.ms + " ms" : "down") + " · pool " + (st.pool.ok ? st.pool.ms + " ms" : "down")); }).catch(function () { live("api", "API not answering"); });
     // A ring's pill is the worse of its two architectures' latest health checks.
@@ -277,16 +246,16 @@ __CHARTS__
     }).catch(function (e) { b.disabled = false; alert("failed: " + e); });
   });
 
-  // ---- operations: tiles, the diagram's numbers, workers by role
+  // ---- operations: tiles, the diagram's numbers (the workers themselves are on /workers)
   function renderOps(d) {
     var count = function (st, arch) { return d.counts.filter(function (c) { return c.status === st && (!arch || c.arch === arch); }).reduce(function (n, c) { return n + c.n; }, 0); };
-    var alive = d.workers.filter(function (w) { return w.alive; }), busyW = alive.filter(function (w) { return w.current_task; });
+    var alive = d.workers.filter(function (w) { return w.alive; });
     var failed24 = d.tasks.filter(function (t) { return t.status === "failed" && Date.now() - Date.parse(t.finished_at || t.created_at) < 86400e3; });
     var m = STATS && STATS.metrics, a = m && (m.jobs || m.actions);
     setTiles("#tiles", [
       ["Queued", num(count("queued")), num(count("queued", "x86_64")) + " x86_64 · " + num(count("queued", "aarch64")) + " aarch64", count("queued") ? "warn" : ""],
       ["Building", num(count("leased")), "lease " + d.lease_minutes + " min, extended by heartbeats"],
-      ["Workers alive", num(alive.length) + " / " + num(d.workers.length), num(alive.filter(function (w) { return w.side === "omarchy"; }).length) + " omarchy · " + num(alive.filter(function (w) { return w.side === "community"; }).length) + " community", alive.length ? "ok" : "warn"],
+      ["Workers alive", num(alive.length) + " / " + num(d.workers.length), num(alive.filter(function (w) { return w.side === "omarchy"; }).length) + " the project's · " + num(alive.filter(function (w) { return w.side === "community"; }).length) + " contributors'", alive.length ? "ok" : "warn", "/workers"],
       ["Waiting for review", num(STAGED.length), STAGED.length ? "oldest " + ago(STAGED.slice().sort(function (x, y) { return Date.parse(x.finished_at || 0) - Date.parse(y.finished_at || 0); })[0].finished_at).replace(" ago", "") : "nothing staged", STAGED.length ? "warn" : ""],
       ["Failed · 24 h", num(failed24.length), failed24.length ? esc(failed24[0].name || failed24[0].kind) + " " + esc(failed24[0].arch || "") : "nothing failed"],
       ["Worker minutes · 7 d", a ? num(a.minutes) : "—", a ? "≈ " + num(Math.round(a.minutes / 7)) + " per day, the project's workers" : "no metrics snapshot yet"]
@@ -294,21 +263,8 @@ __CHARTS__
     live("queue", "queued " + num(count("queued")) + " · leased " + num(count("leased")) + " · per-job tokens · an expired lease goes back in the queue");
     var roles = { pool: [], review: [], shared: [], own: [] };
     d.workers.forEach(function (w) { var r = roleOf(w); if (w.side === "omarchy") roles[r === "review" ? "review" : "pool"].push(w); else roles[w.mode === "shared" ? "shared" : "own"].push(w); });
-    var sum = function (ws, k) { return ws.reduce(function (n, w) { return n + Number(w[k] || 0); }, 0); };
     var line = function (ws) { var al = ws.filter(function (w) { return w.alive; }), bz = al.filter(function (w) { return w.current_task; }); return num(al.length) + " alive · " + num(bz.length) + " building" + (ws.length > al.length ? " · " + num(ws.length - al.length) + " gone" : ""); };
     live("w-pool", line(roles.pool)); live("w-review", line(roles.review)); live("w-community", line(roles.shared.concat(roles.own)));
-    // The load: what each worker did in the last day, from the stats series (finished tasks by duration, a running one by its start).
-    var LOAD = {}; ((STATS && STATS.series && STATS.series.workers_daily) || []).forEach(function (r) { LOAD[r.worker] = { ms: Number(r.ms || 0) + Number(r.running_ms || 0), done: Number(r.done || 0) }; });
-    var busyOf = function (w) { var l = LOAD[w.id]; return l ? Math.min(100, Math.round(100 * l.ms / 86400000)) : 0; };
-    var card = function (cls, name, ws, blurb) {
-      var al = ws.filter(function (w) { return w.alive; }), bz = al.filter(function (w) { return w.current_task; }), col = { pool: "var(--green)", review: "var(--blue)", shared: "var(--lilac)", own: "var(--dim)" }[cls];
-      var busy = al.length ? Math.round(al.reduce(function (n, w) { return n + busyOf(w); }, 0) / al.length) : 0;
-      return '<div class="role ' + cls + '"><h3>' + name + '<span>' + num(ws.length) + (ws.length === 1 ? " worker" : " workers") + '</span></h3><p>' + blurb + '</p><div class="u"><span class="dim">busy · 24 h</span><div class="bar" style="height:10px;background:var(--panel-2);border:1px solid var(--line);position:relative;display:block" data-tip="' + esc(name + ": " + busy + "% of the last day with a lease, across " + al.length + " alive worker(s) · " + bz.length + " building now") + '"><i style="position:absolute;left:0;top:0;bottom:0;width:' + busy + '%;background:' + col + '"></i></div><b class="num">' + busy + '%</b></div>' +
-        '<dl class="kv"><dt>alive</dt><dd>' + num(al.length) + ' of ' + num(ws.length) + '</dd><dt>done · failed</dt><dd>' + num(sum(ws, "builds_done")) + ' · ' + num(sum(ws, "builds_failed")) + '</dd><dt>x86_64 · aarch64</dt><dd>' + num(al.filter(function (w) { return w.arch === "x86_64"; }).length) + ' · ' + num(al.filter(function (w) { return w.arch === "aarch64"; }).length) + '</dd><dt>with an agent</dt><dd>' + num(ws.filter(function (w) { return w.agent; }).length) + '</dd></dl></div>';
-    };
-    $("#roles").innerHTML = card("pool", "Pool", roles.pool, "The pool's own jobs: sync, promote, health, security, gc. Trusted, on the host the community keeps.") + card("review", "Review", roles.review, "Rebuilds what maintainers approve and writes the audit. Holds the agent key.") + card("shared", "Community · shared", roles.shared, "Contributors' machines donated to everyone's community builds.") + card("own", "Community · own", roles.own, "A contributor's machine building only their packages. Their own queue, no waiting.");
-    var ranked = d.workers.filter(function (w) { return w.alive || LOAD[w.id]; }).sort(function (a, b) { return busyOf(b) - busyOf(a); }).slice(0, 10);
-    $("#c-perworker").innerHTML = ranked.length ? '<div class="hrows">' + ranked.map(function (w) { var role = roleOf(w) === "review" ? "review" : w.side === "omarchy" ? "pool" : (w.mode === "shared" ? "shared" : "own"), col = { pool: "var(--green)", review: "var(--blue)", shared: "var(--lilac)", own: "var(--dim)" }[role], l = LOAD[w.id] || { ms: 0, done: 0 }; return '<div class="hrow" style="grid-template-columns:150px 1fr 56px"><div class="l">' + workerName(w) + ' <small>' + role + ' · ' + esc(w.arch) + '</small></div><div class="bar" data-tip="' + esc(w.id + ": " + busyOf(w) + "% of the last day with a lease · " + num(l.done) + " task(s) finished, " + Math.round(l.ms / 60000) + " min" + (w.current_task ? " · building #" + w.current_task + " now" : "") + " · " + num(w.builds_done) + " done / " + num(w.builds_failed) + " failed all time") + '"><i style="width:' + busyOf(w) + '%;background:' + col + '"></i></div><div class="p num">' + busyOf(w) + '%</div></div>'; }).join("") + '</div><div class="legend"><span><i style="background:var(--green)"></i>pool</span><span><i style="background:var(--blue)"></i>review</span><span><i style="background:var(--lilac)"></i>community · shared</span><span><i style="background:var(--dim)"></i>community · own</span></div>' : '<div class="empty">no worker alive, nothing leased in the last day</div>';
     $("#ops-who").textContent = can() ? ME_LOGIN + " · you can approve, trust and roll back" : "read-only — approving, trusting and rolling back need the maintainer role";
   }
 
@@ -341,10 +297,9 @@ __CHARTS__
   // ---- the charts, from /api/v1/stats
   function renderCharts(d) {
     var S = d.series || {}, days14 = lastDays(14), days7 = lastDays(7);
-    var jd = S.jobs_daily || [], byD = {}, minutes = {};
-    jd.forEach(function (r) { var x = byD[r.day] = byD[r.day] || { done: 0, failed: 0, waiting: 0 }; if (r.status === "done") x.done += Number(r.n); else if (r.status === "failed" || r.status === "cancelled") x.failed += Number(r.n); else x.waiting += Number(r.n); minutes[r.day] = (minutes[r.day] || 0) + Number(r.ms || 0) / 60000; });
+    var jd = S.jobs_daily || [], byD = {};
+    jd.forEach(function (r) { var x = byD[r.day] = byD[r.day] || { done: 0, failed: 0, waiting: 0 }; if (r.status === "done") x.done += Number(r.n); else if (r.status === "failed" || r.status === "cancelled") x.failed += Number(r.n); else x.waiting += Number(r.n); });
     $("#c-jobs").innerHTML = stacked(days7, [{ name: "done", color: C.green, values: days7.map(function (x) { return (byD[x] || {}).done || 0; }) }, { name: "waiting", color: C.amber, values: days7.map(function (x) { return (byD[x] || {}).waiting || 0; }) }, { name: "failed", color: C.red, values: days7.map(function (x) { return (byD[x] || {}).failed || 0; }) }], { label: "Pool jobs per day over seven days", empty: "no job yet — the pool queues them on schedule and project workers pull them" });
-    $("#c-minutes").innerHTML = stacked(days7, [{ name: "minutes", color: C.blue, values: days7.map(function (x) { return Math.round(minutes[x] || 0); }) }], { label: "Worker minutes per day over seven days", empty: "no job yet" });
     $("#c-health").innerHTML = heatGrid(S.health);
     var byDay = {}; (S.imports_daily || []).forEach(function (r) { byDay[r.day] = r; });
     $("#c-imports").innerHTML = stacked(days14, [{ name: "imported", color: C.green, values: days14.map(function (x) { return byDay[x] ? Number(byDay[x].packages) : 0; }) }], { label: "Packages imported per day over fourteen days", empty: "no sync yet" });
@@ -394,13 +349,12 @@ __CHARTS__
   loadFeed(); setInterval(loadFeed, 20000);
   renderCost(); renderPromos(); setInterval(renderPromos, 300000);
   liveStats(function (d) { STATS = d; renderState(d); renderLive(d); renderRings(d); renderCharts(d); if (FACTORY) renderOps(FACTORY); }, 60000);
-  $("#all-workers").onchange = function () { if (FACTORY) renderTables(FACTORY); };
 `;
 
 export function pipelineHtml(poolUrl: string, version: RunningVersion): string {
   return page({
     title: "Pipeline · omarchy-pool",
-    description: "The pipeline as it runs: what is verified, promoted and checked right now, how fast maintainers decide, the workers, the charts, the cost.",
+    description: "The pipeline as it runs: what is verified, promoted and checked right now, how fast maintainers decide, the charts, the cost.",
     active: "pipeline",
     body: BODY,
     script: SCRIPT.replace("__CHARTS__", CHARTS).replace("__REPO_URL__", REPO_URL),

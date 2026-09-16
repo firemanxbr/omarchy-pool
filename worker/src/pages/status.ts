@@ -16,7 +16,7 @@ const BODY = String.raw`
 
   <section>
     <h2>Service</h2>
-    <p class="sub">Measured right now by the API: can it reach the index and the pool. This is what <em>online</em> in the header means.</p>
+    <p class="sub">Measured right now by the API: can it reach the index and the pool.</p>
     <div class="svc" id="service"></div>
   </section>
 
