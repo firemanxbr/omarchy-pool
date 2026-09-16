@@ -66,8 +66,11 @@ __CHARTS__
   function wid(w) {
     var names = (w.trusted_by || "").split(",").map(function (n) { return n.trim(); }).filter(Boolean);
     var tip = [w.labels && w.labels.where ? "on " + w.labels.where : "", w.hostname && w.hostname !== "?" ? "host " + w.hostname : "", w.kinds && w.kinds.length ? "takes: " + w.kinds.join(", ") : "", names.length ? "trusted by " + names.join(", ") : w.trust_proposed_by ? "proposed for project trust by " + w.trust_proposed_by + ", awaiting a second maintainer's word" : ""].filter(Boolean).join(" · ");
-    // An id past fifty characters (a long login, a long "where") keeps its ends — the random suffix is what tells two apart.
-    var id = String(w.id || ""), shown = id.length > 48 ? id.slice(0, 27) + "…" + id.slice(-17) : id;
+    // Shown without the owner's prefix (the owner has a column) and never past 32 characters: whole segments go
+    // from after the first, so the tail — role, arch, the random suffix that tells two apart — stays; the whole id is on hover and in the filter.
+    var id = String(w.id || ""), shown = w.owner && id.indexOf(w.owner + "-") === 0 ? id.slice(w.owner.length + 1) : id, parts = shown.split("-");
+    while (shown.length > 32 && parts.length > 3) { parts.splice(1, 1); shown = parts[0] + "-…-" + parts.slice(1).join("-"); }
+    if (shown.length > 32) shown = shown.slice(0, 18) + "…" + shown.slice(-13);
     return '<span class="mono wid" title="' + esc([id, tip].filter(Boolean).join(" · ")) + '">' + esc(shown) + '</span>';
   }
   // The state, one word in its own column: building (a task in hand), failed (alive, but not ready for what it declares — its agent did not answer), idle, or offline (not seen in ten minutes, with how long; only with the box ticked). When it was last seen is on hover.
@@ -104,6 +107,18 @@ __CHARTS__
     var pkg = l.kind === "build" || l.kind === "audit" || l.kind === "publish" || l.kind === "trial";
     return '<span class="last" title="' + esc(tip) + '"><i class="dot ' + (l.status === "failed" ? "error" : "ok") + '"></i>' + (pkg ? '<a href="/package/' + encodeURIComponent(l.name) + '">' + esc(l.name) + '</a>' + (l.version ? ' <span class="v mono">' + esc(l.version) + '</span>' : '') : '<span class="mono">' + esc(l.name) + '</span> <span class="v">' + ago(l.at) + '</span>') + '</span>';
   }
+  // What each kind finished per day over the last week, from the stats series: the pool's jobs are the
+  // project's (jobs_daily, by kind), the project's builds with the publishes and audits are the review side's,
+  // a contributor's builds are theirs (builds_daily, by trust). Only finished tasks count: done or staged, and failed.
+  var POOL_KINDS = { sync: 1, render: 1, promote: 1, rollback: 1, health: 1, security: 1, enqueue: 1, gc: 1, verify: 1, relayout: 1, metrics: 1, trial: 1 };
+  function perDay() {
+    var days = lastDays(7), zero = function () { var o = {}; days.forEach(function (d) { o[d] = { done: 0, failed: 0 }; }); return o; };
+    var P = { project: zero(), review: zero(), community: zero() }, S = (STATS && STATS.series) || {};
+    var add = function (k, day, status, n) { var o = P[k][day]; if (!o) return; if (status === "failed") o.failed += n; else if (status === "done" || status === "staged") o.done += n; };
+    (S.jobs_daily || []).forEach(function (r) { add(POOL_KINDS[r.kind] ? "project" : "review", r.day, r.status, Number(r.n || 0)); });
+    (S.builds_daily || []).forEach(function (r) { add(r.trust === "community" ? "community" : "review", r.day, r.status, Number(r.n || 0)); });
+    return { days: days, P: P };
+  }
   // The load: what each worker did in the last day, from the stats series (finished tasks by duration, a running one by its start).
   function loadOf() { var L = {}; ((STATS && STATS.series && STATS.series.workers_daily) || []).forEach(function (r) { L[r.worker] = { ms: Number(r.ms || 0) + Number(r.running_ms || 0), done: Number(r.done || 0) }; }); return L; }
   function render() {
@@ -121,18 +136,21 @@ __CHARTS__
       ["Load · 24 h", load + "%", "of the last day with a lease, across the alive ones"],
       ["Worker minutes · 7 d", a ? num(a.minutes) : "—", a ? "≈ " + num(Math.round(a.minutes / 7)) + " per day, the project's workers" : "no metrics snapshot yet"]
     ]);
-    // One card per kind: what it is for, how busy, how many.
-    var sum = function (ws, k) { return ws.reduce(function (n, w) { return n + Number(w[k] || 0); }, 0); };
-    var card = function (cls, name, ws, blurb, extra) {
+    // One card per kind: one line on what it is for, the tasks it finished per day over a week (the Pool page's growth line, in the kind's colour), four numbers.
+    var PD = perDay(), CH = { project: C.green, review: C.blue, community: C.lilac };
+    var card = function (cls, name, ws, blurb) {
       var alv = ws.filter(function (w) { return w.alive; }), busyW = alv.filter(function (w) { return w.current_task; });
       var busy = alv.length ? Math.round(alv.reduce(function (n, w) { return n + busyOf(w); }, 0) / alv.length) : 0;
-      return '<div class="role k-' + (cls === "community" ? "contrib" : cls) + '"><h3>' + name + '<span>' + num(ws.length) + (ws.length === 1 ? " worker" : " workers") + '</span></h3><p>' + blurb + '</p><div class="u"><span class="dim">busy · 24 h</span><div class="bar" style="height:10px;background:var(--panel-2);border:1px solid var(--line);position:relative;display:block" data-tip="' + esc(name + ": " + busy + "% of the last day with a lease, across " + alv.length + " alive worker(s) · " + busyW.length + " building now") + '"><i style="position:absolute;left:0;top:0;bottom:0;width:' + busy + '%;background:' + COLOR[cls] + '"></i></div><b class="num">' + busy + '%</b></div>' +
-        '<dl class="kv"><dt>alive</dt><dd>' + num(alv.length) + ' of ' + num(ws.length) + '</dd><dt>done · failed</dt><dd>' + num(sum(ws, "builds_done")) + ' · ' + num(sum(ws, "builds_failed")) + '</dd><dt>x86_64 · aarch64</dt><dd>' + num(alv.filter(function (w) { return w.arch === "x86_64"; }).length) + ' · ' + num(alv.filter(function (w) { return w.arch === "aarch64"; }).length) + '</dd>' + extra(ws) + '</dl></div>';
+      var pd = PD.P[cls], pts = PD.days.map(function (d) { return { t: Date.parse(d), v: pd[d].done + pd[d].failed }; });
+      var done7 = PD.days.reduce(function (n, d) { return n + pd[d].done; }, 0), failed7 = PD.days.reduce(function (n, d) { return n + pd[d].failed; }, 0);
+      return '<div class="role k-' + (cls === "community" ? "contrib" : cls) + '"><h3>' + name + '<span>' + num(ws.length) + (ws.length === 1 ? " worker" : " workers") + '</span></h3><p>' + blurb + '</p>' +
+        '<div class="kchart" data-tip="' + esc(name + ": tasks finished per day, the last seven days · " + num(done7) + " done, " + num(failed7) + " failed") + '">' + (STATS ? area(pts, num, 96, CH[cls]) : '<div class="empty loading">Loading</div>') + '</div>' +
+        '<div class="mini four"><div><b>' + num(alv.length) + ' of ' + num(ws.length) + '</b>alive</div><div data-tip="' + esc(busy + "% of the last day with a lease, across " + alv.length + " alive worker(s) · " + busyW.length + " building now") + '"><b>' + busy + '%</b>busy 24h</div><div><b>' + num(done7) + '</b>done 7d</div><div><b>' + num(failed7) + '</b>failed 7d</div></div></div>';
     };
     $("#kinds").innerHTML =
-      card("project", "Project", kinds.project, "The pool's own jobs — sync, render, promote, health, security, gc — on the host the community keeps. No package of anyone's is built here.", function (ws) { return '<dt>with an agent</dt><dd>' + num(ws.filter(function (w) { return w.agent; }).length) + '</dd>'; }) +
-      card("review", "Review", kinds.review, "The maintainers' side. Trusted on two maintainers' word: builds again what a maintainer asked for, publishes what is approved, writes the audit. Reaches the agent through a proxy; the key is never on a worker that builds.", function (ws) { return '<dt>with an agent</dt><dd>' + num(ws.filter(function (w) { return w.agent; }).length) + '</dd>'; }) +
-      card("community", "Contributors", kinds.community, "Their own machines, their own agent: their packages only — or, shared, whatever is queued. Evidence for a maintainer, never what users get.", function (ws) { return '<dt>shared · own</dt><dd>' + num(ws.filter(function (w) { return w.mode === "shared"; }).length) + ' · ' + num(ws.filter(function (w) { return w.mode !== "shared"; }).length) + '</dd>'; });
+      card("project", "Project", kinds.project, "The pool's own jobs, on the host a maintainer keeps.") +
+      card("review", "Review", kinds.review, "Rebuilds, publishes and audits, on two maintainers' word.") +
+      card("community", "Contributors", kinds.community, "Their machines: their packages, or whatever is queued when shared.");
     // The load per worker, the busiest first.
     var ranked = d.workers.filter(function (w) { return w.alive || LOAD[w.id]; }).sort(function (a, b) { return busyOf(b) - busyOf(a); }).slice(0, 10);
     $("#c-perworker").innerHTML = ranked.length ? '<div class="hrows">' + ranked.map(function (w) { var k = kindOf(w), l = LOAD[w.id] || { ms: 0, done: 0 }; return '<div class="hrow" style="grid-template-columns:150px 1fr 56px"><div class="l">' + workerName(w) + ' <small>' + (k === "community" ? (w.mode === "shared" ? "shared" : "own") : k) + ' · ' + esc(w.arch) + '</small></div><div class="bar" data-tip="' + esc(w.id + ": " + busyOf(w) + "% of the last day with a lease · " + num(l.done) + " task(s) finished, " + Math.round(l.ms / 60000) + " min" + (w.current_task ? " · building #" + w.current_task + " now" : "") + " · " + num(w.builds_done) + " done / " + num(w.builds_failed) + " failed all time") + '"><i style="width:' + busyOf(w) + '%;background:' + COLOR[k] + '"></i></div><div class="p num">' + busyOf(w) + '%</div></div>'; }).join("") + '</div><div class="legend"><span><i style="background:var(--green)"></i>project</span><span><i style="background:var(--blue)"></i>review</span><span><i style="background:var(--lilac)"></i>contributors</span></div>' : '<div class="empty">no worker alive, nothing leased in the last day</div>';

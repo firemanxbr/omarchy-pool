@@ -302,7 +302,7 @@ const CSS = String.raw`
   .way .tag { font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); display: flex; justify-content: space-between; } .way p { margin: 0; font-size: 13.5px; color: var(--muted); } .way .go { margin-top: 6px; }
   .start-grid { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 16px; align-items: stretch; }
   .start-cmd h3 { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
-  .mini.five { grid-template-columns: repeat(5, 1fr); }
+  .mini.five { grid-template-columns: repeat(5, 1fr); } .mini.four { grid-template-columns: repeat(4, 1fr); }
   .people-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); font-size: 12.5px; }
   .people-row .person { padding: 3px 8px 3px 3px; font-size: 12.5px; } .people-row .person .avatar { width: 22px; height: 22px; font-size: 10px; }
   .people-row a:not(.person) { margin-left: auto; }
@@ -424,6 +424,7 @@ const CSS = String.raw`
   .role .u { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; font-size: 12px; }
   .role h3 { display: flex; justify-content: space-between; align-items: baseline; } .role h3 span { font-family: "JetBrains Mono", monospace; font-size: 12px; font-weight: 400; color: var(--dim); } .role p { margin: 0; font-size: 12.5px; color: var(--muted); }
   .role .kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; font-size: 12.5px; } .role .kv dt { color: var(--dim); } .role .kv dd { margin: 0; text-align: right; }
+  .role .kchart { margin-top: 4px; } .role .kchart svg { display: block; width: 100%; overflow: visible; } .role .mini { margin-top: 8px; gap: 6px; font-size: 10.5px; letter-spacing: .04em; white-space: nowrap; } .role .mini b { font-size: 16px; }
   /* The worker tables: the id whole and on one line, a state word in its own column, icons for what a word would only repeat, the machine's usage as three small meters. */
   .wtable { font-size: 12.5px; } .wtable .avatar { width: 24px; height: 24px; font-size: 10.5px; } .wtable td { white-space: nowrap; padding-left: 6px; padding-right: 6px; } .wtable th { padding-left: 6px; padding-right: 6px; white-space: normal; line-height: 1.25; vertical-align: bottom; } .wtable .wid { font-size: 11.5px; } .wtable .pill { vertical-align: middle; font-size: 10.5px; padding: 2px 7px; } .wtable a.pill { text-decoration: none; }
   .ic { display: inline-block; width: 14px; height: 14px; vertical-align: -3px; color: var(--muted); } .ic.emu { color: var(--amber); } .ic.shared { color: var(--lilac); } .ic + .ic { margin-left: 2px; }

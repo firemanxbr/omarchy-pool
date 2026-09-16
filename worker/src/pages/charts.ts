@@ -5,7 +5,7 @@
  * data-tip; the layout's tooltip shows it.
  */
 export const CHARTS = String.raw`  // ---- tiny SVG charts (no library; the page has no build step) ----
-  var C = { green: "#9ece6a", amber: "#e0af68", red: "#f7768e", blue: "#7aa2f7", dim: "#414868", grid: "#2a2e3f", text: "#8b93b8" };
+  var C = { green: "#9ece6a", amber: "#e0af68", red: "#f7768e", blue: "#7aa2f7", lilac: "#bb9af7", dim: "#414868", grid: "#2a2e3f", text: "#8b93b8" };
   // The viewBox is the drawing; the SVG scales uniformly with its column
   // (no preserveAspectRatio="none": stretched text overflowed its space).
   function svg(w, h, body) { return '<svg viewBox="0 0 ' + w + ' ' + h + '" width="100%" style="display:block;height:auto" font-family="JetBrains Mono, ui-monospace, monospace" font-size="11" fill="' + C.text + '">' + body + '</svg>'; }
@@ -27,16 +27,16 @@ export const CHARTS = String.raw`  // ---- tiny SVG charts (no library; the page
     body += '<text x="' + left + '" y="11" font-size="10">max ' + esc(fmt(max)) + '</text>';
     return svg(W, H, body);
   }
-  function area(points, fmt, height) { // points: [{t: ms, v}]; height in the 360-wide viewBox, 150 unless the card has room
+  function area(points, fmt, height, color) { // points: [{t: ms, v}]; height in the 360-wide viewBox, 150 unless the card has room; green unless told
     if (points.length < 2) return '<div class="empty">' + (points.length ? 'one snapshot so far — the line needs two' : 'collecting snapshots') + '</div>';
-    var W = 360, H = height || 150, top = 16, bottom = 20, left = 6, right = 6;
+    var W = 360, H = height || 150, top = 16, bottom = 20, left = 6, right = 6, col = color || C.green;
     var vs = points.map(function (p) { return p.v; }), max = Math.max.apply(null, vs) || 1, min = Math.min.apply(null, vs);
     var t0 = points[0].t, t1 = points[points.length - 1].t || t0 + 1;
     var lo = min === max ? 0 : min;
     var X = function (t) { return left + (W - left - right) * (t - t0) / (t1 - t0 || 1); }, Y = function (v) { return H - bottom - (H - top - bottom) * (v - lo) / (max - lo || 1); };
     var pts = points.map(function (p) { return X(p.t).toFixed(1) + "," + Y(p.v).toFixed(1); }).join(" ");
-    var body = '<polygon points="' + X(t0).toFixed(1) + ',' + (H - bottom) + ' ' + pts + ' ' + X(t1).toFixed(1) + ',' + (H - bottom) + '" fill="' + C.green + '" fill-opacity="0.15"/>';
-    body += '<polyline points="' + pts + '" fill="none" stroke="' + C.green + '" stroke-width="1.5"/>';
+    var body = '<polygon points="' + X(t0).toFixed(1) + ',' + (H - bottom) + ' ' + pts + ' ' + X(t1).toFixed(1) + ',' + (H - bottom) + '" fill="' + col + '" fill-opacity="0.15"/>';
+    body += '<polyline points="' + pts + '" fill="none" stroke="' + col + '" stroke-width="1.5"/>';
     body += '<text x="' + left + '" y="11" font-size="10">' + esc(fmt(max)) + '</text><text x="' + left + '" y="' + (H - bottom - 3) + '" font-size="10">' + esc(fmt(lo)) + '</text>';
     body += '<text x="' + left + '" y="' + (H - 6) + '" font-size="10">' + esc(new Date(t0).toUTCString().slice(5, 16)) + '</text><text x="' + (W - right) + '" y="' + (H - 6) + '" text-anchor="end" font-size="10">' + esc(new Date(t1).toUTCString().slice(5, 16)) + '</text>';
     return svg(W, H, body);
