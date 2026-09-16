@@ -611,8 +611,8 @@ verify against the old public key until each package is rebuilt (a
 ## Add a source or an architecture
 
 A source is one row of `SYNC_SOURCES` in `worker/src/scheduler.ts`: source
-name, arch, **ring** (`edge` for anything promotion should carry forward;
-the OPR's own channels go straight into the matching ring), the directory
+name, arch, **ring** (`edge` — every source enters there and promotion
+carries it forward; no source is synced straight into `rc` or `stable`), the directory
 holding the `.db`, the db name, the keyring `tests/fetch-keyrings.sh`
 produces, and the sources it defers to (`chaotic` defers to
 `core,extra,multilib,packages,factory`: a name one of them serves is never
