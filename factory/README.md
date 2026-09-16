@@ -225,7 +225,10 @@ PKGBUILD (`pkgname=(a b c)`) builds; only the base's `depends`,
 would.
 
 Limits: 10 tasks queued or building and 2 GB of staging per contributor;
-staging objects expire after 30 days. A worker token is revocable
+drop superseded staging with `DELETE /api/v1/factory/tasks/<id>/artifacts`
+(refused while queued or leased, or while the project builds from it; a staged
+build is cancelled). Multipart uploads honour the same cap.
+Staging objects expire after 30 days. A worker token is revocable
 (`DELETE /factory/workers/<id>`); registering again replaces your contributor
 token. `cosign verify ghcr.io/firemanxbr/omarchy-worker:latest
 --certificate-identity-regexp github.com/firemanxbr/omarchy-pool

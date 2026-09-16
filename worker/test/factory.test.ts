@@ -431,6 +431,84 @@ describe("a package request", () => {
   });
 });
 
+describe("staging quota", () => {
+  it("a PUT and a multipart create are refused once the contributor is over 2 GB; the owner can drop superseded staging", async () => {
+    await env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind) VALUES ('pad', 'aarch64', '1-1', 'https://github.com/alice/recipes@HEAD:pad/PKGBUILD', 'contributor', 100, 0, 'community', 'alice', 'build')`).run();
+    const c = await call("POST", "/factory/claim", { arch: "aarch64" }, "omw_w3");
+    expect(c.status).toBe(200);
+    const id = c.json.task.id;
+    const job = c.json.token as string;
+    await env.DB.prepare("INSERT INTO staging_objects (key, owner, task_id, size) VALUES (?, 'alice', ?, ?)").bind(`staging/alice/pad/${id}/pad.bin`, id, 2147483648).run();
+    expect((await call("PUT", `/factory/tasks/${id}/artifacts/PKGBUILD`, undefined, job, "pkgname=pad\n")).status).toBe(413);
+    expect((await call("POST", `/factory/tasks/${id}/artifacts/pad-1-1-aarch64.pkg.tar.zst/multipart?action=create`, {}, job)).status).toBe(413);
+    // The object that fills the quota is the one being uploaded again (a lease that died half-way): it does not count against itself.
+    const again = await call("POST", `/factory/tasks/${id}/artifacts/pad.bin/multipart?action=create`, {}, job);
+    expect(again.status, JSON.stringify(again.json)).toBe(201);
+    expect((await call("POST", `/factory/tasks/${id}/artifacts/pad.bin/multipart?action=abort&upload_id=${again.json.upload_id}`, {}, job)).status).toBe(200);
+    expect((await call("DELETE", `/factory/tasks/${id}/artifacts`, undefined, "omc_alice")).status).toBe(409);
+    expect((await call("POST", `/factory/tasks/${id}/fail`, { error: "quota", final: true }, job)).status).toBe(200);
+    const gone = await call("DELETE", `/factory/tasks/${id}/artifacts`, undefined, "omc_alice");
+    expect(gone.status, JSON.stringify(gone.json)).toBe(200);
+    expect(gone.json.deleted).toBe(1);
+    expect((await env.DB.prepare("SELECT COALESCE(SUM(size), 0) AS bytes FROM staging_objects WHERE task_id = ?").bind(id).first<{ bytes: number }>())!.bytes).toBe(0);
+    expect((await call("DELETE", `/factory/tasks/${id}/artifacts`, undefined, "omc_m2")).json.deleted).toBe(0);
+  });
+
+  it("a multipart complete that overflows leaves neither the object nor a row behind", async () => {
+    await env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind) VALUES ('pad', 'aarch64', '1-2', 'https://github.com/alice/recipes@HEAD:pad/PKGBUILD', 'contributor', 100, 0, 'community', 'alice', 'build')`).run();
+    const c = await call("POST", "/factory/claim", { arch: "aarch64" }, "omw_w3");
+    const id = c.json.task.id;
+    const job = c.json.token as string;
+    // One byte short of 2 GiB elsewhere, and a stale row for the key about to be written: the upload itself is what overflows.
+    const before = (await env.DB.prepare("SELECT COALESCE(SUM(size), 0) AS bytes FROM staging_objects WHERE owner = 'alice'").first<{ bytes: number }>())!.bytes;
+    const pad = 2147483648 - before - 1;
+    await env.DB.prepare("INSERT INTO staging_objects (key, owner, task_id, size) VALUES (?, 'alice', ?, ?), (?, 'alice', ?, 1)")
+      .bind(`staging/alice/pad/${id}/pad.bin`, id, pad, `staging/alice/pad/${id}/big.bin`, id)
+      .run();
+    const up = await call("POST", `/factory/tasks/${id}/artifacts/big.bin/multipart?action=create`, {}, job);
+    expect(up.status, JSON.stringify(up.json)).toBe(201);
+    const part = await call("POST", `/factory/tasks/${id}/artifacts/big.bin/multipart?action=part&part=1&upload_id=${up.json.upload_id}`, undefined, job, "x".repeat(16));
+    expect(part.status, JSON.stringify(part.json)).toBe(200);
+    const done = await call("POST", `/factory/tasks/${id}/artifacts/big.bin/multipart?action=complete&upload_id=${up.json.upload_id}`, { parts: [{ partNumber: 1, etag: part.json.etag }] }, job);
+    expect(done.status, JSON.stringify(done.json)).toBe(413);
+    expect(await env.STAGING.head(`staging/alice/pad/${id}/big.bin`)).toBeNull();
+    expect((await env.DB.prepare("SELECT COALESCE(SUM(size), 0) AS bytes FROM staging_objects WHERE owner = 'alice'").first<{ bytes: number }>())!.bytes).toBe(before + pad);
+    await env.DB.prepare("DELETE FROM staging_objects WHERE task_id = ?").bind(id).run();
+    await call("POST", `/factory/tasks/${id}/fail`, { error: "quota", final: true }, job);
+  });
+
+  it("dropping a staged build cancels it with its audit and sends the package back — never from under the project's build", async () => {
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO factory_packages (name, owner, url, arches, status) VALUES ('pad', 'alice', 'https://github.com/alice/pad', '["aarch64"]', 'building')`),
+      env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind) VALUES ('pad', 'aarch64', '1-3', 'draft:https://github.com/alice/pad@latest', 'contributor', 100, 0, 'community', 'alice', 'build')`),
+    ]);
+    const c = await call("POST", "/factory/claim", { arch: "aarch64", agent: "openai/gpt-5", agent_status: "ok" }, "omw_w3");
+    expect(c.status).toBe(200);
+    const id = c.json.task.id;
+    for (const f of ["PKGBUILD", "build.log", "pad-1-3-aarch64.pkg.tar.zst"]) await call("PUT", `/factory/tasks/${id}/artifacts/${f}`, undefined, c.json.token, `evidence ${f}`);
+    const st = await call("POST", `/factory/tasks/${id}/complete`, { sha256: "f".repeat(64), filename: "pad-1-3-aarch64.pkg.tar.zst", version: "1-3" }, c.json.token);
+    expect(st.json?.status, JSON.stringify({ claim: c.json, complete: st.json })).toBe("staged");
+    expect((await env.DB.prepare("SELECT status FROM factory_packages WHERE name = 'pad'").first())!.status).toBe("staged");
+    const audit = await env.DB.prepare("SELECT id FROM build_tasks WHERE kind = 'audit' AND status = 'queued' AND json_extract(params, '$.task') = ?").bind(id).first<{ id: number }>();
+    expect(audit).not.toBeNull();
+    // The project builds from it: its worker reads this evidence, so the owner waits.
+    const asked = await call("POST", `/factory/tasks/${id}/build`, { note: "reads well" }, "omc_m2");
+    expect(asked.status, JSON.stringify(asked.json)).toBe(200);
+    const refused = await call("DELETE", `/factory/tasks/${id}/artifacts`, undefined, "omc_alice");
+    expect(refused.status).toBe(409);
+    expect(refused.json.error).toMatch(new RegExp(`task ${asked.json.task} is queued`));
+    await env.DB.prepare("UPDATE build_tasks SET status = 'failed' WHERE id = ?").bind(asked.json.task).run();
+    const gone = await call("DELETE", `/factory/tasks/${id}/artifacts`, undefined, "omc_alice");
+    expect(gone.status, JSON.stringify(gone.json)).toBe(200);
+    expect(gone.json.deleted).toBe(3);
+    expect(await env.STAGING.head(`staging/alice/pad/${id}/PKGBUILD`)).toBeNull();
+    expect(await env.DB.prepare("SELECT status, error FROM build_tasks WHERE id = ?").bind(id).first()).toMatchObject({ status: "cancelled", error: "staging dropped by alice" });
+    expect(await env.DB.prepare("SELECT status, error FROM build_tasks WHERE id = ?").bind(audit!.id).first()).toMatchObject({ status: "cancelled", error: "the build it audited was dropped" });
+    expect(await env.DB.prepare("SELECT status, detail FROM factory_packages WHERE name = 'pad'").first()).toMatchObject({ status: "registered", detail: "staging dropped by alice" });
+    expect((await call("GET", "/factory/review")).json.staged.filter((t: any) => t.name === "pad")).toHaveLength(0);
+  });
+});
+
 describe("blocking", () => {
   const checklist = { official: true, license: true, unshipped: true, evidence: true };
   it("a maintainer blocks a package: it leaves every ring it is in, its builds stop, its project is refused; another maintainer lifts it", async () => {
