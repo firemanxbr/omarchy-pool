@@ -5,7 +5,7 @@ members = [
     "crates/pkg-extract",
     "crates/pkg-repo",
     "crates/pkg-check",
-    # Kept building and tested, but not on the product path: see poc/README.md.
+    # Kept building and tested, but not on the product path: see /docs/proof-of-concept on the dashboard.
     "poc/crates/pkg-store",
     "poc/crates/pkg-hooks",
     "crates/omarchy-cli",

@@ -11,7 +11,7 @@ nothing. Workers are ephemeral, live anywhere, and pull.
 
 Contributors and maintainers use the same tools; maintainers never ship a
 contributor's bytes — *we do not use what you built, we learn from it*
-([docs/GOVERNANCE.md](../docs/GOVERNANCE.md)). A contributor's build is
+([Governance](https://omarchy-pool.firemanxbr.org/docs/governance)). A contributor's build is
 evidence: the recipe, the log, the manifest that let a maintainer rebuild,
 verify and attest the package faster and approve it with more confidence.
 
@@ -258,7 +258,7 @@ token. `cosign verify ghcr.io/firemanxbr/omarchy-worker:latest
 the image is the project's.
 
 Who approves, and how one becomes a maintainer, is
-[docs/GOVERNANCE.md](../docs/GOVERNANCE.md): a file in this repository,
+[Governance](https://omarchy-pool.firemanxbr.org/docs/governance): a file in this repository,
 `factory/MAINTAINERS.toml`, changed by pull requests other maintainers review.
 
 ## Sizing a package before committing to it

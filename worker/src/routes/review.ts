@@ -87,7 +87,7 @@ export async function handleReviewList(env: Env): Promise<Response> {
         worker_trusted_by: undefined,
         detected: r.detected ? JSON.parse(r.detected as string) : null,
         evidence: { log: `/api/v1/factory/tasks/${r.id}/artifacts/build.log`, pkgbuild: `/api/v1/factory/tasks/${r.id}/artifacts/PKGBUILD`, pkginfo: `/api/v1/factory/tasks/${r.id}/artifacts/PKGINFO`, audit: `/api/v1/factory/tasks/${r.id}/artifacts/audit.md`, tests: `/api/v1/factory/tasks/${r.id}/artifacts/tests.log`, vet: `/api/v1/factory/tasks/${r.id}/artifacts/vet.json`, trial: `/api/v1/factory/tasks/${r.id}/artifacts/trial.log` },
-        // The gate (factory/README.md *The gate*): the worker's own checks — checksums, shellcheck, namcap, the file list, the metadata, check(), the smoke test — as vet.json said.
+        // The gate (/docs/factory *The gate*): the worker's own checks — checksums, shellcheck, namcap, the file list, the metadata, check(), the smoke test — as vet.json said.
         vet: vetOf(r.result as string | null),
         // The second agent's report (docs/GOVERNANCE.md): a verdict a
         // maintainer reads, never one the pool acts on.

@@ -324,7 +324,7 @@ install_shellcheck() {
 
 # ------------------------------------------------------------------ gate ---
 # What every package must pass before it is evidence, on both sides of the
-# review (docs/GOVERNANCE.md, factory/README.md *The gate*): real checksums,
+# review (/docs/governance, /docs/factory *The gate*): real checksums,
 # a PKGBUILD shellcheck and namcap accept, a built package namcap accepts,
 # a sane file list, metadata that says what it is, a licence file where
 # Arch wants one, and a smoke test — installed in this fresh container,

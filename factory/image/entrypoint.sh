@@ -43,7 +43,7 @@
 #              x86_64 worker, where Claude Code's binary dies under qemu).
 #
 # OMARCHY_BROKER makes this container a builder: it holds no token and no
-# key, asks the broker who it is, builds one task and exits (SECURITY.md,
+# key, asks the broker who it is, builds one task and exits (/docs/security-model,
 # *Isolation*; /docs/workers#secrets).
 #
 # A role reports itself in the worker's labels ("role"), so the Factory page

@@ -1,4 +1,29 @@
-# POC results
+# Proof of concept (September 2026)
+
+omarchy-pool started as a proof of concept for the Omarchy repository migration,
+built to answer three questions from the packaging team:
+
+1. Can an **immutable package pool plus an index** cleanly represent complete releases?
+2. Can **valid, signed pacman databases** be generated from that index?
+3. Does a **thin Omarchy client** give enough control to justify becoming part of the system?
+
+All three were answered with evidence — [RESULTS.md](RESULTS.md) — and the design
+then became the staging environment described in the top-level README. This
+directory keeps what belonged to the proof and not to the product:
+
+| | |
+|---|---|
+| [`RESULTS.md`](RESULTS.md) | the answers, the measurements, the first full-scale import |
+| [`bench/`](bench/) | the benchmarks behind them: the index model at scale (`bench-promotion.sh`, `seed.py`) and today's rsync + repo-add mechanics at the same package count (`bench-current.sh`); `.github/workflows/bench.yml` runs them by hand |
+| [`diagrams/`](diagrams/) | the benchmark chart and the transaction lifecycle of the native engine |
+| [`crates/pkg-store`](crates/pkg-store) | a native install engine — redb state store plus a journaled, crash-safe filesystem transaction — built and tested, never wired in because the thin client did not need it |
+| [`crates/pkg-hooks`](crates/pkg-hooks) | libalpm `.hook` parser and trigger matching — `omarchy-cli check` previews the hooks pacman would run; running them stays with pacman |
+
+The crates stay in the Cargo workspace so CI keeps them compiling; nothing in
+`worker/`, `crates/` or the pipeline depends on them.
+
+
+## Results
 
 Evidence for the three questions in the repository migration outline. Everything
 below is reproducible with the scripts in `tests/` (see [TESTING.md](../docs/TESTING.md))
@@ -9,7 +34,7 @@ the real Arch `core`/`extra`/`multilib` packages from the Omarchy mirror: sync i
 the pool, promotion `edge → rc → stable`, signed databases per source and ring at
 `https://pool.firemanxbr.org/x86_64/`, and a daily health check with a real pacman.
 
-## 1. Can the immutable pool and index cleanly represent complete releases?
+### 1. Can the immutable pool and index cleanly represent complete releases?
 
 **Yes.**
 
@@ -35,7 +60,7 @@ the pool, promotion `edge → rc → stable`, signed databases per source and ri
   creates a new release whose selection equals an earlier one (4 ms in the local
   run; history stays append-only), then `render` republishes the databases.
 
-## 2. Can we generate valid, signed pacman databases from it?
+### 2. Can we generate valid, signed pacman databases from it?
 
 **Yes, and pacman cannot tell the difference.**
 
@@ -59,7 +84,7 @@ Verified with **pacman 7.1.0** in an `archlinux:base` container using
 The database served by the worker is byte-identical to one rendered locally from
 the same manifests (deterministic output, same SHA-256).
 
-## 3. Does a thin client give enough control to justify becoming load-bearing?
+### 3. Does a thin client give enough control to justify becoming load-bearing?
 
 **Yes for the cases that matter; it never bypasses pacman.**
 
@@ -92,7 +117,7 @@ shared libraries on disk) and drives `pacman -U` with URLs from the release.
 * Everything the client knows is available as `--json`, which is the shape an MCP
   server would expose.
 
-## Benchmark: today's mechanics versus the index
+### Benchmark: today's mechanics versus the index
 
 ![Release promotion at 275 GB — today vs pool + index](diagrams/benchmark-promotion.svg)
 
@@ -128,7 +153,7 @@ The index cost depends on the number of packages in the selection, not on their
 size; storage figures follow from the model (one object per sha256) rather than a
 275 GB measurement.
 
-## Running at full scale
+### Running at full scale
 
 The staging environment mirrors every upstream repository, not a slice. The first
 complete import of Arch `extra` (x86_64) on 2026-09-12, one GitHub-hosted runner,
@@ -159,7 +184,7 @@ What broke at that size, and what changed:
 Live numbers, the coverage of every source and the pipeline's own metrics are on
 the dashboard.
 
-## What is not covered by the POC
+### What is not covered by the POC
 
 * The ABI gate checks the upgrades a ring would apply to the official base image,
   not to every real installation; `omarchy-cli check` does that on the machine.
@@ -168,7 +193,7 @@ the dashboard.
 * `pkg-store` (a native, journaled install engine) exists and is tested but is not
   wired into the client — the thin client did not need it.
 
-## Reproduce
+### Reproduce
 
 ```bash
 tests/e2e-pacman.sh   # local file:// mirror, pacman in a container

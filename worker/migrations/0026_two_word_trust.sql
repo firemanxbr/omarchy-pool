@@ -1,4 +1,4 @@
--- Project trust on two maintainers' word (SECURITY.md, *Trust levels*): the
+-- Project trust on two maintainers' word (/docs/security-model, *Trust levels*): the
 -- first maintainer proposes, a second — never the worker's owner, never the
 -- same person — confirms, and trusted_by names both. Until then the
 -- proposal waits here. Workers trusted before this rule keep their trust

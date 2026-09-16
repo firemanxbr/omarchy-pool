@@ -88,6 +88,10 @@ import { handleRelayout } from "./routes/relayout";
 import { overviewHtml } from "./pages/overview";
 import { getStartedHtml } from "./pages/get-started";
 import { howItWorksHtml } from "./pages/how-it-works";
+import { docsSecurityHtml } from "./pages/docs-security";
+import { glossaryHtml } from "./pages/glossary";
+import { docHtml, mdChapterAt } from "./pages/doc";
+import { DIAGRAMS } from "./pages/diagram-files";
 import { statusHtml } from "./pages/status";
 import { journalHtml } from "./pages/journal";
 import { apiDocsHtml } from "./pages/api-docs";
@@ -195,6 +199,13 @@ export default {
       if (path === "/docs/get-started") return html(getStartedHtml(env.POOL_URL, version(env)));
       if (path === "/docs/workers") return html(docsWorkersHtml(env.POOL_URL, version(env)));
       if (path === "/docs/how-it-works") return html(howItWorksHtml(env.POOL_URL, version(env)));
+      if (path === "/docs/security") return html(docsSecurityHtml(env.POOL_URL, version(env)));
+      if (path === "/docs/glossary") return html(glossaryHtml(env.POOL_URL, version(env)));
+      // The chapters written in markdown, and the diagrams they embed.
+      const md = mdChapterAt(path);
+      if (md) return html(docHtml(md, env.POOL_URL, version(env)));
+      const diagram = /^\/docs\/diagrams\/([a-z0-9-]+)\.svg$/.exec(path);
+      if (diagram && DIAGRAMS[diagram[1]]) return new Response(DIAGRAMS[diagram[1]], { headers: { "content-type": "image/svg+xml; charset=utf-8", "cache-control": "public, max-age=3600" } });
       if (path === "/docs/governance") return html(governanceHtml(env.POOL_URL, version(env)));
       if (path === "/get-started" || path === "/how-it-works" || path === "/governance") {
         url.pathname = `/docs${path}`;
