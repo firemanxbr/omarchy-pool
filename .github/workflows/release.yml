@@ -1,14 +1,18 @@
 name: Release
 
-# Every merge into main becomes a release. CI and E2E run again on the merged
-# commit, the next version is derived from the last tag (patch by default; the
-# merged pull request's label `release:minor` or `release:major` bumps the
-# other numbers), binaries are built for both architectures, a GitHub release
-# is published with generated notes and the worker is deployed carrying that
-# version. Versions start at v0.0.1 and grow one step at a time.
+# A release is decided, not implied by a merge (2026-09-17): main takes the
+# pull requests as they are ready — from one session or three — and a
+# maintainer cuts one release that carries them all, from the Actions page
+# or `gh workflow run release.yml` (`-f bump=minor|major` for a bigger step).
+# CI and E2E run again on main's head, the next version is derived from the
+# last tag (patch by default; the head commit's pull request label
+# `release:minor` or `release:major`, or the bump given, moves the other
+# numbers), binaries are built for both architectures, a GitHub release is
+# published with notes from every pull request since the last tag, the worker
+# image is pushed for both architectures and the worker is deployed carrying
+# that version — every worker follows it. Versions start at v0.0.1 and grow
+# one step at a time. A merge alone changes nothing that runs.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       bump:

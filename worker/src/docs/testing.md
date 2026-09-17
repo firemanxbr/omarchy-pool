@@ -16,9 +16,9 @@ CI (`.github/workflows/ci.yml`) runs exactly these on x86_64 **and** arm64 runne
 plus the worker typecheck and its tests, on every pull request. The three end-to-end scripts
 below also run in GitHub Actions (`.github/workflows/e2e.yml`) on native x86_64
 runners, where the Arch container needs no emulation. Both are required checks on
-`main`, and `release.yml` runs them once more on the merged commit before it tags a
-version and deploys the worker — so what is running is always a commit that passed
-them twice.
+`main`, and `release.yml` — run when a maintainer decides, not by the merge — runs
+them once more on main's head before it tags a version and deploys the worker, so
+what is running is always a commit that passed them twice.
 
 ## Rust crates
 
@@ -365,7 +365,8 @@ already serves the source's head is a skip. `cargo test -p pkg-repo gate` and
 The staging worker runs at `https://pkgs.firemanxbr.org` (index API + dashboard at
 `https://omarchy-pool.firemanxbr.org`) with a real D1 database and an R2 bucket
 whose custom domain `https://pool.firemanxbr.org` serves packages and databases
-statically. Deploying is what a merge into `main` does (`release.yml`, see
+statically. Deploying is what a release does (`release.yml`, cut by a maintainer with
+`gh workflow run release.yml` once the merges it should carry are in; see
 [RUNBOOK.md](RUNBOOK.md#releasing-the-pool-itself)); by hand, for a hotfix or a
 rollback to an earlier tag:
 
