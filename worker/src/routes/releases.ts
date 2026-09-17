@@ -155,16 +155,31 @@ export async function handleCreateRelease(request: Request, env: Env): Promise<R
   // An architecture the request could not have touched — the base copied
   // from the parent, every add and remove scoped to the other one by
   // remove_arch — serves exactly what the parent served: its databases
-  // are already rendered, at the live keys. The parent's artifact rows
-  // carry over, and the caller is told not to render it again (a sync of
-  // an aarch64 source no longer re-renders the 15k-package x86_64 extra).
+  // are already rendered, at the live keys. The artifact rows carry over
+  // from the nearest ancestor that has them — the parent, or, when the
+  // parent is the other architecture's release of the same tick and its
+  // render is still running, the one before it (edge#267 was created 20 s
+  // after edge#266 and carried no aarch64 database at all: aarch64 went
+  // unserved for three hours and the health check blocked the gate for a
+  // day, 2026-09-17) — and the caller is told not to render it again (a
+  // sync of an aarch64 source no longer re-renders the 15k-package x86_64
+  // extra). A render that lands on the ancestor later reaches this
+  // release too (handlePutArtifact).
   const untouched = (body.remove ?? []).length === 0 && removeFrom.length === 0 && added.length === 0;
   const scoped = parent && base?.id === parent.id ? removeArch : onlyArch !== null && (untouched || removeArch === onlyArch) ? onlyArch : null;
   const unchanged: string[] = parent && scoped !== null ? REPO_ARCHES.filter((a) => a !== scoped) : [];
   if (unchanged.length) {
     stmts.push(
       env.DB.prepare(
-        `INSERT OR IGNORE INTO release_artifacts (release_id, repo, arch, kind, r2_key, size) SELECT ${rel}, repo, arch, kind, r2_key, size FROM release_artifacts WHERE release_id = ?3 AND arch IN (SELECT value FROM json_each(?4))`,
+        `WITH RECURSIVE anc(id, depth) AS (
+           SELECT ?3, 0
+           UNION ALL SELECT r.parent_id, anc.depth + 1 FROM releases r JOIN anc ON r.id = anc.id WHERE r.parent_id IS NOT NULL AND anc.depth < 12
+         ), cand AS (
+           SELECT ra.repo, ra.arch, ra.kind, ra.r2_key, ra.size, anc.depth FROM release_artifacts ra JOIN anc ON anc.id = ra.release_id
+            WHERE ra.arch IN (SELECT value FROM json_each(?4))
+         ), best AS (SELECT repo, arch, kind, MIN(depth) AS depth FROM cand GROUP BY repo, arch, kind)
+         INSERT OR IGNORE INTO release_artifacts (release_id, repo, arch, kind, r2_key, size)
+         SELECT ${rel}, c.repo, c.arch, c.kind, c.r2_key, c.size FROM cand c JOIN best b ON b.repo = c.repo AND b.arch = c.arch AND b.kind = c.kind AND b.depth = c.depth`,
       ).bind(ring, seq, parent!.id, JSON.stringify(unchanged)),
     );
   }
@@ -418,5 +433,22 @@ export async function handlePutArtifact(
   )
     .bind(releaseId, repo, arch, kind, keys[0], bytes.byteLength)
     .run();
+  // A release made from this one while this render ran — the other
+  // architecture's sync of the same tick — carried nothing for this
+  // architecture; it serves this database from now on. Its own render, if
+  // it has one, replaces the row (the upsert above); a row it already has
+  // stays (INSERT OR IGNORE). Three generations down is more than a tick makes.
+  const rows: [string, string, number][] = [[kind, keys[0], bytes.byteLength], ...(keys[1] ? [[`${kind}.sig`, keys[1], 0] as [string, string, number]] : [])];
+  for (const [k, r2Key, size] of rows) {
+    await env.DB.prepare(
+      `WITH RECURSIVE kin(id, depth) AS (
+         SELECT id, 1 FROM releases WHERE parent_id = ?1
+         UNION ALL SELECT r.id, kin.depth + 1 FROM releases r JOIN kin ON r.parent_id = kin.id WHERE kin.depth < 3
+       )
+       INSERT OR IGNORE INTO release_artifacts (release_id, repo, arch, kind, r2_key, size) SELECT kin.id, ?2, ?3, ?4, ?5, ?6 FROM kin`,
+    )
+      .bind(releaseId, repo, arch, k, r2Key, size)
+      .run();
+  }
   return json({ release_id: releaseId, repo, arch, kind, keys, size: bytes.byteLength }, 201);
 }
