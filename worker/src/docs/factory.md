@@ -300,9 +300,10 @@ pkg-repo work --worker-token omw_… --arch x86_64 --labels '{"where":"laptop","
 `--idle-exit 300` makes a worker exit after five minutes without work;
 `--once` makes it one-shot; SIGTERM (`docker stop`) drains it — the task in
 hand runs to its end and is reported, nothing new is claimed, exit 0 — so
-a container can be replaced without losing work. A build container gets `[omarchy-factory-edge]`
-in its `pacman.conf` once that database exists, so a package can depend on
-an earlier factory build. `OMARCHY_PKG_CACHE=/path` on the host shares one
+a container can be replaced without losing work. A build container gets `[omarchy-packages-edge]`
+and `[omarchy-factory-edge]` in its `pacman.conf` — each one when the pool
+serves that database for the architecture — so a package can depend on the
+OPR or on an earlier factory build. `OMARCHY_PKG_CACHE=/path` on the host shares one
 pacman package cache (a directory per architecture) with every build
 container it starts, so a dependency downloads once; `OMARCHY_BUILD_CACHE`
 likewise mounts a build cache at `/build/cache` — cargo's registry, Go's
