@@ -18,7 +18,7 @@
 #   status    what runs here, and what the pool thinks of it
 #   logs      follow the builder's log (logs broker|updater|project for another)
 #   update    pull now and replace what changed, one service at a time
-#   share     on|off — build everyone's queue, or yours only
+#   share     on|off — build everyone's queue, or yours only (the pool keeps it; the page has the same switch)
 #   stop      drain and stop (a build in hand finishes first, up to three hours)
 #   remove    stop and delete the files here (the registration stays; revoke it on your page)
 #
@@ -174,7 +174,7 @@ cmd_status() {
   compose ps --format 'table {{.Service}}\t{{.Status}}\t{{.Image}}' 2>/dev/null || true
   local self; self="$(curl -fsS --max-time 30 "$API/api/v1/factory/workers/self" -H "authorization: Bearer $(env_get OMARCHY_WORKER_TOKEN)" 2>/dev/null || true)"
   if [[ -n "$self" ]]; then
-    jq -r '"the pool: \(.id) · \(.trust) · \(.arch)" + (if .mode then " · \(.mode)" else "" end)' <<<"$self" 2>/dev/null || say "the pool: $self"
+    jq -r '"the pool: \(.id) · \(.trust) · \(.arch)" + (if .mode then " · " + (if .mode == "shared" then "shared (everyone\u0027s queue)" else "own packages only" end) + (if .mode_by then " — set from the brain" else "" end) else "" end)' <<<"$self" 2>/dev/null || say "the pool: $self"
   else
     say "the pool did not answer for this token"
   fi
@@ -188,10 +188,17 @@ cmd_status() {
 
 cmd_logs() { find_runtime; local svc="${1:-}"; if [[ -z "$svc" ]]; then svc=worker; [[ "$(env_get COMPOSE_PROFILES)" == project ]] && svc=project; fi; compose logs -f --tail 100 "$svc"; }
 cmd_update() { find_runtime; fetch_compose; say "pulling and replacing what changed (a build in hand finishes first)"; compose run --rm --no-deps updater --once; }
+# The mode is the brain's: set through the worker's token, it holds from the
+# next claim (within the minute), nothing restarts — the page shows the same
+# switch. The .env keeps it too, for a set started again from scratch.
 cmd_share() {
-  find_runtime
-  case "${1:-}" in on) env_set WORKER_SHARED 1 ;; off) env_set WORKER_SHARED 0 ;; *) die "share on|off" ;; esac
-  compose up -d --no-deps worker >/dev/null && say "shared: ${1}"
+  local mode
+  case "${1:-}" in on) mode=shared ;; off) mode=dedicated ;; *) die "share on|off" ;; esac
+  [[ -f "$DIR/.env" ]] || die "nothing here ($DIR): omarchy-worker start --token omw_… first"
+  local r; r="$(curl -fsS --max-time 30 -X POST "$API/api/v1/factory/workers/self/mode" -H "authorization: Bearer $(env_get OMARCHY_WORKER_TOKEN)" -H "content-type: application/json" -d "{\"mode\":\"$mode\"}" 2>&1)" \
+    || die "the pool did not take it: ${r:0:300}"
+  env_set WORKER_SHARED "$( [[ "$mode" == shared ]] && echo 1 || echo 0 )"
+  say "$(jq -r '.note // ("mode: " + .mode)' <<<"$r" 2>/dev/null || echo "mode: $mode")"
 }
 # down with every profile: what a switch may have left behind goes too.
 cmd_stop() { find_runtime; say "draining: a build in hand finishes first (up to three hours)"; compose --profile '*' down; }

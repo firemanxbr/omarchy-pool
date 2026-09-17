@@ -1219,3 +1219,55 @@ describe("every worker follows the latest image", () => {
     }
   });
 });
+
+describe("workers follow the brain", () => {
+  it("the mode is the registration's once set from the page or the worker's own token: the claim uses it, whatever the container says, from the next claim", async () => {
+    // w3 (alice's, dedicated) starts with WORKER_SHARED=1: the flag is the first word.
+    expect((await call("POST", "/factory/claim", { arch: "aarch64", shared: true }, "omw_w3")).status).toBe(204);
+    expect(await env.DB.prepare("SELECT mode, mode_by FROM build_workers WHERE id = 'w3'").first()).toEqual({ mode: "shared", mode_by: null });
+    // A stranger cannot set it; its owner can; a project worker has no such mode.
+    expect((await call("POST", "/factory/workers/w3/mode", { mode: "dedicated" }, "omc_m2")).status).toBe(200); // m2 is a maintainer
+    expect((await call("POST", "/factory/workers/w1/mode", { mode: "shared" }, "omc_m1")).status).toBe(409);
+    expect((await call("POST", "/factory/workers/w3/mode", { mode: "sometimes" }, "omc_alice")).status).toBe(400);
+    const own = await call("POST", "/factory/workers/w3/mode", { mode: "dedicated" }, "omc_alice");
+    expect(own.json).toMatchObject({ id: "w3", mode: "dedicated", by: "alice", note: expect.stringMatching(/its owner's packages only/) });
+    // The container still says shared; the brain says own packages: a stranger's queued build is not for it.
+    await env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, created_at) VALUES ('theirs', 'aarch64', '1', 'abc123', 'contributor', 100, 0, 'community', 'bob', 'build', 'queued', strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-10 minutes'))").run();
+    expect((await call("POST", "/factory/claim", { arch: "aarch64", shared: true }, "omw_w3")).status).toBe(204);
+    expect(await env.DB.prepare("SELECT mode, mode_by FROM build_workers WHERE id = 'w3'").first()).toEqual({ mode: "dedicated", mode_by: "alice" });
+    // The worker's own command line flips it through its token: the next claim takes the stranger's build.
+    const viaToken = await call("POST", "/factory/workers/self/mode", { mode: "shared" }, "omw_w3");
+    expect(viaToken.json).toMatchObject({ mode: "shared", by: "worker" });
+    expect(await env.DB.prepare("SELECT mode_by FROM build_workers WHERE id = 'w3'").first()).toEqual({ mode_by: "worker" });
+    const c = await call("POST", "/factory/claim", { arch: "aarch64", shared: false }, "omw_w3");
+    expect(c.status, JSON.stringify(c.json)).toBe(200);
+    expect(c.json.task.name).toBe("theirs");
+    expect((await call("GET", "/factory/workers/self", undefined, "omw_w3")).json).toMatchObject({ mode: "shared", mode_by: "worker" });
+    await call("POST", `/factory/tasks/${c.json.task.id}/fail`, { error: "test over", final: true }, "omw_w3");
+    await call("POST", "/factory/workers/self/mode", { mode: "dedicated" }, "omw_w3");
+  });
+  it("the worker's own log rides with the claim — kept to the last kilobytes, a line that looks like a secret dropped — and is read by its owner and the maintainers only", async () => {
+    await call("POST", "/factory/claim", { arch: "aarch64", log: "[10:00:00] container worker w3 (aarch64) preparing\n[10:00:02] agent ok\n" }, "omw_w3");
+    await call("POST", "/factory/claim", { arch: "aarch64", log: "[10:00:32] update required: this worker runs v0.0.1\n" }, "omw_w3");
+    await call("POST", "/factory/claim", { arch: "aarch64" }, "omw_w3"); // nothing new: the tail stays
+    const mine = await call("GET", "/factory/workers/w3/log", undefined, "omc_alice");
+    expect(mine.status).toBe(200);
+    expect(mine.json.log).toBe("[10:00:00] container worker w3 (aarch64) preparing\n[10:00:02] agent ok\n[10:00:32] update required: this worker runs v0.0.1\n");
+    expect(mine.json.at).toBeTruthy();
+    expect((await call("GET", "/factory/workers/w3/log", undefined, "omc_m1")).status).toBe(200);
+    expect((await call("GET", "/factory/workers/w3/log", undefined, "omc_nobody")).status).toBe(401);
+    expect((await call("GET", "/factory/workers/w3/log", undefined, "omc_carol")).status).toBe(403);
+    // A secret in a line: the chunk is not kept, a word about it is.
+    await call("POST", "/factory/claim", { arch: "aarch64", log: "[10:01:00] env: OMARCHY_WORKER_TOKEN=omw_abcdefghijklmnopqrstuvwxyz0123456789abcdef\n" }, "omw_w3");
+    const after = (await call("GET", "/factory/workers/w3/log", undefined, "omc_alice")).json.log;
+    expect(after).not.toContain("omw_abcdefghij");
+    expect(after).toMatch(/dropped: one looked like/);
+    // Bounded: a chunk is its last 4 KB, the history its last 8 KB.
+    await call("POST", "/factory/claim", { arch: "aarch64", log: "x".repeat(5000) + "\n" }, "omw_w3");
+    await call("POST", "/factory/claim", { arch: "aarch64", log: "y".repeat(5000) + "\n" }, "omw_w3");
+    const bounded = (await call("GET", "/factory/workers/w3/log", undefined, "omc_alice")).json.log;
+    expect(bounded.length).toBeLessThanOrEqual(8192);
+    expect(bounded.endsWith("y".repeat(4095) + "\n")).toBe(true);
+    expect(bounded).toContain("x".repeat(4095) + "\n");
+  });
+});
