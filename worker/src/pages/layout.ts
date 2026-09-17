@@ -514,7 +514,8 @@ const CSS = String.raw`
   .md pre { background: var(--bg-deep); border: 1px solid var(--line); padding: 12px 14px; overflow-x: auto; margin: 0 0 14px; font-size: 12.5px; line-height: 1.5; } .md code { color: var(--text); }
   .md blockquote { border-left: 2px solid var(--line); margin: 0 0 12px; padding: 2px 14px; color: var(--muted); } .md hr { border: 0; border-top: 1px solid var(--line); margin: 20px 0; }
   .md .table-wrap { margin: 0 0 14px; } .md table td, .md table th { vertical-align: top; } .md strong { color: var(--text); }
-  .doc-figure { margin: 0 0 16px; background: #fff; border: 1px solid var(--line); padding: 10px; } .doc-figure img { display: block; width: 100%; max-width: 1100px; height: auto; margin: 0 auto; }
+  .md figure.diagram { margin: 6px 0 16px; } .md figure.diagram figcaption { max-width: 82ch; line-height: 1.5; }
+  .doc-figure { margin: 0 0 16px; background: var(--panel); border: 1px solid var(--line); padding: 10px; } .doc-figure img { display: block; width: 100%; max-width: 1100px; height: auto; margin: 0 auto; }
   .docs-hint { font-size: 12px; color: var(--dim); padding: 0 10px; } .docs-main { min-width: 0; }
   .docs-main > h1:first-child { margin-top: 2px; }
   .doc-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 14px; }

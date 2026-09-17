@@ -4,15 +4,17 @@
  * through the pipeline), and the architecture maintainers operate. Boxes are
  * sized from their text so nothing overflows; arrows are orthogonal and
  * labels sit beside a segment, never across one. A text with `live` carries
- * data-live="key": the page script fills it from the API.
+ * data-live="key": the page script fills it from the API. The helpers are
+ * shared with the documentation's figures (doc-diagrams.ts), so every
+ * picture on the dashboard is drawn the same way.
  */
 
-const CW = 6.6; // px per character at 11 px mono
+export const CW = 6.6; // px per character at 11 px mono
 
-interface Line { text: string; cls?: "live" | "amber"; live?: string }
-interface Box { x: number; y: number; w: number; h: number; title: string; lines?: (string | Line)[]; cls?: string; tcls?: string; big?: boolean }
+export interface Line { text: string; cls?: "live" | "amber"; live?: string }
+export interface Box { x: number; y: number; w: number; h: number; title: string; lines?: (string | Line)[]; cls?: string; tcls?: string; big?: boolean }
 
-function esc(s: string): string {
+export function esc(s: string): string {
   return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] ?? c);
 }
 function lineOf(l: string | Line): Line {
@@ -21,7 +23,7 @@ function lineOf(l: string | Line): Line {
 function fits(w: number, texts: string[]): number {
   return Math.max(w, ...texts.map((t) => Math.ceil(t.length * CW + 24)));
 }
-function dbox(o: Box): string {
+export function dbox(o: Box): string {
   const lines = (o.lines ?? []).map(lineOf);
   const w = fits(o.w, lines.map((l) => l.text).concat([o.title]));
   const block = 13 + (lines.length ? 18 + 14 * (lines.length - 1) : 0);
@@ -38,27 +40,27 @@ function dbox(o: Box): string {
 function marker(cls?: string): string {
   return cls && cls.includes("hi") ? "arw-g" : cls && cls.includes("warn") ? "arw-a" : "arw";
 }
-function darrow(x1: number, y1: number, x2: number, y2: number, cls = "", both = false): string {
+export function darrow(x1: number, y1: number, x2: number, y2: number, cls = "", both = false): string {
   return `<line class="d-l ${cls}" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" marker-end="url(#${marker(cls)})"${both ? ` marker-start="url(#${marker(cls)})"` : ""}/>`;
 }
-function dline(pts: number[], cls = ""): string {
+export function dline(pts: number[], cls = ""): string {
   return `<polyline class="d-l ${cls}" points="${pts.join(" ")}"/>`;
 }
-function dpath(d: string, cls = "", arrow = false): string {
+export function dpath(d: string, cls = "", arrow = false): string {
   return `<path class="d-l ${cls}" d="${d}"${arrow ? ` marker-end="url(#${marker(cls)})"` : ""}/>`;
 }
-function dlab(x: number, y: number, lines: string[], anchor = "middle", cls = ""): string {
+export function dlab(x: number, y: number, lines: string[], anchor = "middle", cls = ""): string {
   return lines.map((l, i) => `<text class="d-lab ${cls}" x="${x}" y="${y + i * 13}" text-anchor="${anchor}">${esc(l)}</text>`).join("");
 }
 /** A mark that rides a path (SMIL; the page pauses it under prefers-reduced-motion). */
-function dot(path: string, color: string, dur: number, begin: number): string {
+export function dot(path: string, color: string, dur: number, begin: number): string {
   return `<circle r="4" fill="${color}" stroke="#1a1b26" stroke-width="1.5"><animateMotion dur="${dur}s" begin="${begin}s" repeatCount="indefinite" path="${path}"/></circle>`;
 }
 const DEFS =
   '<defs><marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#8b93b8"/></marker>' +
   '<marker id="arw-g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#9ece6a"/></marker>' +
   '<marker id="arw-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#e0af68"/></marker></defs>';
-function svgo(w: number, h: number, label: string, cls = ""): string {
+export function svgo(w: number, h: number, label: string, cls = ""): string {
   return `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="${esc(label)}"${cls ? ` class="${cls}"` : ""}>${DEFS}`;
 }
 

@@ -13,11 +13,11 @@ routes = [
 ]
 
 # The setup script (src/setup.sh) is served as text: `curl …/setup | sudo bash`;
-# the documentation's chapters (src/docs/*.md) and their diagrams are bundled
-# the same way and rendered by the dashboard.
+# the documentation's chapters (src/docs/*.md) are bundled the same way and
+# rendered by the dashboard (their diagrams are drawn there, pages/doc-diagrams.ts).
 [[rules]]
 type = "Text"
-globs = ["**/*.sh", "**/*.md", "**/*.svg"]
+globs = ["**/*.sh", "**/*.md"]
 fallthrough = true
 
 [observability]

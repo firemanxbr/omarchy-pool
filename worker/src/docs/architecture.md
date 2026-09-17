@@ -20,7 +20,7 @@ Promoting a release copies and re-uploads most of that data, so a bump takes
 
 ## The publishing layer
 
-![Publishing layer](diagrams/publishing-layer.svg)
+![Every source feeds one publishing layer: a package is stored once and indexed once, the rings are selections of the index, and pacman reads the databases beside the packages — one release model, one retention model.](diagram:publishing-layer)
 
 * **Pool** — Cloudflare R2, one directory per source (`<source>/<arch>/<filename>`,
   `worker/src/r2.ts`), the way the mirrors lay out `extra/os/x86_64/`. A package is
@@ -61,7 +61,7 @@ Promoting a release copies and re-uploads most of that data, so a bump takes
   it from the artifact's key) — and the only thing that differs between rings is the
   repository name. No worker, no redirect on the read path.
 
-![Release promotion](diagrams/release-promotion.svg)
+![A promotion is an index write: the target ring points at the same selection and its databases are rendered again. No package file moves; a rollback is the same write pointing back.](diagram:release-promotion)
 
 ### Index schema (D1)
 
@@ -177,7 +177,7 @@ decided the build; the evidence decides the speed.
 
 #### Promotion by evidence, not by calendar
 
-![Promotion gates](diagrams/promotion-gates.svg)
+![The promote job — edge → rc right after the sync that changed edge, rc → stable on the second green check in a row, attempted every three hours. Evidence in, a gate event out, and the target ring checked again before the promotion stands.](diagram:promotion-gates)
 
 A promotion happens when the recorded evidence says the source ring is good
 — and is attempted when that evidence can exist: the sync that changed
@@ -223,7 +223,7 @@ target ring turns out not to be:
 Stable moves without a human: the evidence is the reviewer, and a maintainer
 who disagrees queues a rollback.
 
-![Release pipeline](diagrams/release-pipeline.svg)
+![release.yml — every merge into main is a release; versions start at v0.0.1 and grow one step at a time, and the dashboard shows what runs.](diagram:release-pipeline)
 
 #### Security: advisories with confidence, exposure through the graph
 
@@ -304,7 +304,7 @@ runs `pacman -Sy` and `pacman -Sp <pkg>` against the generated database. See
 
 ## Thin client (`crates/omarchy-cli`)
 
-![Thin client install](diagrams/thin-client-install.svg)
+![The client decides; pacman still performs the installation.](diagram:thin-client-install)
 
 The client drives pacman rather than replacing it. What it adds:
 

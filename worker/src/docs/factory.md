@@ -15,17 +15,7 @@ contributor's bytes — *we do not use what you built, we learn from it*
 evidence: the recipe, the log, the manifest that let a maintainer rebuild,
 verify and attest the package faster and approve it with more confidence.
 
-```
-PKGBUILD reviewed and merged ──▶ pool: package_requests / build_tasks (D1)
-                                     ▲            │ claim (lease 30 min)
-                                     │ heartbeat  ▼
-                          worker: clean Arch container, anywhere
-                          fetch PKGBUILD at commit → makepkg
-                          → pkg-repo publish --source factory --ring edge (the pool signs)
-                          → pkg-repo render edge → complete / fail
-                                                       │
-                                     lease expired? ◀──┘ back in the queue (scheduler cron)
-```
+![The pool is the brain; workers are ephemeral, live anywhere and pull. A contributor's build is evidence, staged for the audit and the trial; the pool's own build of an approved package is what reaches the rings.](diagram:factory-loop)
 
 ## A package's life
 

@@ -15,12 +15,13 @@ directory keeps what belonged to the proof and not to the product:
 |---|---|
 | [`RESULTS.md`](RESULTS.md) | the answers, the measurements, the first full-scale import |
 | [`bench/`](bench/) | the benchmarks behind them: the index model at scale (`bench-promotion.sh`, `seed.py`) and today's rsync + repo-add mechanics at the same package count (`bench-current.sh`); `.github/workflows/bench.yml` runs them by hand |
-| [`diagrams/`](diagrams/) | the benchmark chart and the transaction lifecycle of the native engine |
 | [`crates/pkg-store`](crates/pkg-store) | a native install engine — redb state store plus a journaled, crash-safe filesystem transaction — built and tested, never wired in because the thin client did not need it |
 | [`crates/pkg-hooks`](crates/pkg-hooks) | libalpm `.hook` parser and trigger matching — `omarchy-cli check` previews the hooks pacman would run; running them stays with pacman |
 
 The crates stay in the Cargo workspace so CI keeps them compiling; nothing in
 `worker/`, `crates/` or the pipeline depends on them.
+
+![pkg-store's transaction, the native engine built for the proof and never wired in: a failure or a crash before Commit replays the journal in reverse; after it, cleanup finishes on the next start.](diagram:transaction-lifecycle)
 
 
 ## Results
@@ -119,7 +120,7 @@ shared libraries on disk) and drives `pacman -U` with URLs from the release.
 
 ### Benchmark: today's mechanics versus the index
 
-![Release promotion at 275 GB — today vs pool + index](diagrams/benchmark-promotion.svg)
+![Release promotion at 275 GB — today's mechanics against the pool + index, on a log scale. The extrapolation is linear in bytes from the measured 1,000-package tree; the index's cost depends on the package count, not on bytes.](diagram:benchmark-promotion)
 
 Two scripts, both run on a native x86_64 GitHub Actions runner
 (`.github/workflows/bench.yml`) with the tools production uses today:
