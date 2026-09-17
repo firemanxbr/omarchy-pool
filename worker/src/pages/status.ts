@@ -49,7 +49,7 @@ const BODY = String.raw`
 
   <section>
     <div class="h2row"><h2>The pipeline, in numbers</h2><a class="more-link" href="/pipeline">Watch it run →</a></div>
-    <p class="sub">The pool's own jobs, pulled by workers with a per-job credential; a snapshot every 30 minutes records what ran, what is running now and the worker minutes.</p>
+    <p class="sub">The pool's own jobs, pulled by workers with a per-job credential; a snapshot every 30 minutes records what ran and what is running now.</p>
     <div class="tiles" id="systiles"></div>
     <div class="charts">
       <div class="chart"><h3>Pool growth <span>7 days</span></h3><div class="sub">bytes stored once, from the metrics snapshots</div><div id="c-pool"></div></div>
@@ -75,9 +75,12 @@ const SCRIPT = String.raw`
   // The hours a source may go without a sync before it is late: the shell's one number (LATE_MS), the one the pipeline pill counts with, so the sentence over the table and the pill never name two.
   $("#late-after").textContent = Math.round(LATE_MS / 3600e3);
 __CHARTS__
+  // The workers as every other page counts them — the shell's workerCounts over the live listing, not the snapshot's count from up to half an hour ago: read once per poll, the tile drawn again when it answers.
+  var WC = null;
+  function loadWorkers(d) { fetch("/api/v1/factory?limit=10").then(function (r) { return r.json(); }).then(function (f) { WC = workerCounts(f.workers); renderSystem(d); }).catch(function () {}); }
   function renderSystem(d) {
     // Snapshots before v0.0.51 measured GitHub Actions ("actions"); now the pool's own jobs.
-    var m = d.metrics, a = m && (m.jobs || m.actions), w = m && m.workers;
+    var m = d.metrics, a = m && (m.jobs || m.actions), wm = workerMinutes(d.series, 7);
     var pool = d.pool, refAny = pool.referenced_by_any_release || {}, rec = pool.reclaimable || { objects: 0, bytes: 0 };
     var ringBytes = d.rings.reduce(function (x, r) { return x + (r.bytes || 0); }, 0);
     var pending = Math.max(0, (pool.objects || 0) - (refAny.objects || 0));
@@ -88,11 +91,12 @@ __CHARTS__
     var gateRc = latest(d.latest, "gate", "rc", "edge"), gateStable = latest(d.latest, "gate", "stable", "rc");
     var gateWord = function (g) { if (!g) return "no attempt yet"; var v = (g.payload && g.payload.verdict) || (g.status === "ok" ? "promote" : g.status === "warn" ? "skip" : "block"); return (v === "promote" ? "promoted" : v === "skip" ? "nothing new" : "blocked") + " " + ago(g.created_at); };
     var tiles = [
-      ["Jobs running now", a ? num(a.running) : "—", a ? "pool jobs leased or queued" + (w ? " · " + num(w.alive) + " worker(s) alive, " + num(w.busy) + " busy" : "") : "no metrics snapshot yet"],
+      ["Jobs running now", a ? num(a.running) : "—", (a ? "pool jobs leased or queued" : "no metrics snapshot yet") + (WC ? " · " + num(WC.alive) + " worker(s) alive, " + num(WC.building) + " building" : "")],
       ["Jobs, 7 days", a ? num(a.runs) : "—", a ? num(a.failures) + " failed · " + num(a.runs - a.failures - a.running) + " succeeded" : ""],
-      ["Worker minutes, 7 days", a ? num(a.minutes) : "—", "on the project's workers, both architectures"],
+      // The sum of the chart below (workerMinutes over jobs_daily), the number the Workers page and the Pipeline say — not the snapshot's.
+      ["Worker minutes, 7 days", num(wm.total), "on the project's workers, both architectures"],
       // Every coverage row, per architecture, the factory's among them (it builds, it never syncs) — the Pool's tile counts sources by name and leaves those out, and says so too.
-      ["Sources synced", synced + " / " + expected, "per architecture, the factory's rows among them · " + (lastSyncEv ? "last sync " + ago(lastSyncEv.created_at) + " · every 3 hours" : "no sync yet")],
+      ["Sources synced", synced + " / " + expected, "rows per architecture · " + (lastSyncEv ? "last sync " + ago(lastSyncEv.created_at) + " · every 3 hours" : "no sync yet")],
       ["Promotion, by evidence", "edge → rc: " + gateWord(gateRc), "rc → stable: " + gateWord(gateStable) + " · after every sync, then every 3 h; two green checks make stable"],
       ["Security data", sec.updated_at ? ago(sec.updated_at) : "never", num(sec.advisories) + " advisories · Arch + Debian trackers, KEV, EPSS · every 3 h" + (secEv && secEv.status !== "ok" ? " · last run " + secEv.status : "")],
       ["Stored once", bytes(pool.bytes), num(pool.objects) + " objects, one per sha256"],
@@ -135,7 +139,8 @@ __CHARTS__
     // The shell's builds per day (staged, published, failed), as one bar a day here: red on a day more builds failed than got through.
     var builds = buildsByDay(S, 14);
     $("#c-builds").innerHTML = bars(builds.labels.map(function (dd, i) { var staged = builds.days[i].staged, published = builds.days[i].published, failed = builds.days[i].failed; return { label: dd.slice(5), value: staged + published + failed, color: failed > published + staged ? C.red : C.green, title: dd + ": " + staged + " staged, " + published + " published, " + failed + " failed" }; }), function (v) { return v + " build(s)"; });
-    $("#c-minutes").innerHTML = bars(lastDays(7).map(function (dd) { var r = byD[dd]; return { label: dd.slice(5), value: r ? Math.round(r.ms / 60000) : 0, color: C.blue, title: dd + ": " + (r ? Math.round(r.ms / 60000) + " min in " + r.runs + " jobs, " + r.failures + " failed" : "no jobs") }; }), function (v) { return v + " min"; });
+    // The minutes per day are the shell's one sum (workerMinutes), the tile above its total; the jobs and failures of the day ride the tooltip.
+    $("#c-minutes").innerHTML = bars(wm.labels.map(function (dd, i) { var r = byD[dd]; return { label: dd.slice(5), value: wm.values[i], color: C.blue, title: dd + ": " + (r ? wm.values[i] + " min in " + r.runs + " jobs, " + r.failures + " failed" : "no jobs") }; }), function (v) { return v + " min"; });
 
     // One row per job kind: what the journal's latest entry says, and the week's totals.
     var kinds = Object.keys(byKind).sort().map(function (k) { var v = byKind[k], l = (d.latest || []).filter(function (e) { return e.kind === k; }).sort(function (x, y) { return Date.parse(y.created_at) - Date.parse(x.created_at); })[0]; return { kind: k, last: l, runs: v.done + v.failed + v.waiting, failed: v.failed, running: v.waiting, minutes: Math.round(v.ms / 60000) }; });
@@ -173,6 +178,7 @@ __CHARTS__
 
   function render(d) {
     var RINGS = ["stable", "rc", "edge"], ARCHES = ["x86_64", "aarch64"];
+    loadWorkers(d);
     var problems = problemsOf(d);
     var lastSync = newest(d.latest, "sync");
     var healthRows = [];
@@ -344,17 +350,19 @@ export const STATUS_COMPONENTS = (_F: Fixture): Component[] => [
     id: "status.system-tiles",
     page: "/status",
     anchor: ['id="systiles"'],
-    script: ['setTiles("#systiles"', "m.jobs || m.actions", '"Jobs running now"', '"Sources synced"', '"per architecture, the factory\'s rows among them · "', '"Promotion, by evidence"', 'latest(d.latest, "gate", "rc", "edge")', "pool.referenced_by_any_release", "pool.reclaimable", "sec.updated_at"],
+    // The workers alive and building are the shell's workerCounts over the live listing (loadWorkers), the same as every other page; the worker minutes the shell's workerMinutes over the series the chart below draws.
+    script: ['setTiles("#systiles"', "m.jobs || m.actions", '"Jobs running now"', "workerCounts(f.workers)", "WC.alive", "WC.building", '"Worker minutes, 7 days", num(wm.total)', "workerMinutes(d.series, 7)", '"Sources synced"', '"rows per architecture · "', '"Promotion, by evidence"', 'latest(d.latest, "gate", "rc", "edge")', "pool.referenced_by_any_release", "pool.reclaimable", "sec.updated_at"],
     reads: [
       {
         path: "/api/v1/stats",
         fields: [
-          "metrics.recorded_at", "metrics.jobs.running", "metrics.jobs.runs", "metrics.jobs.failures", "metrics.jobs.minutes", "metrics.workers.alive", "metrics.workers.busy",
+          "metrics.recorded_at", "metrics.jobs.running", "metrics.jobs.runs", "metrics.jobs.failures", "series.jobs_daily",
           "pool.objects", "pool.bytes", "pool.referenced_by_any_release.objects", "pool.reclaimable.objects", "pool.reclaimable.bytes",
           "rings.0.bytes", "coverage.0.upstream_total", "latest.0.kind", "latest.0.status", "latest.0.created_at",
           "security.updated_at", "security.advisories",
         ],
       },
+      { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.alive", "workers.0.current_task", "workers.0.revoked_at"] },
     ],
     visible: EVERYONE,
   },
@@ -407,7 +415,7 @@ export const STATUS_COMPONENTS = (_F: Fixture): Component[] => [
     id: "status.chart-minutes",
     page: "/status",
     anchor: ['id="c-minutes"', "<h3>Worker minutes <span>per day</span></h3>"],
-    script: ['"#c-minutes"', "S.jobs_daily", "byD[r.day]", "r.ms / 60000", '" min"'],
+    script: ['"#c-minutes"', "wm.labels", "wm.values[i]", "byD[r.day]", '" min"'],
     reads: [{ path: "/api/v1/stats", fields: ["series.jobs_daily", "series.jobs_daily.0.day", "series.jobs_daily.0.status", "series.jobs_daily.0.n", "series.jobs_daily.0.ms"] }],
     visible: EVERYONE,
   },

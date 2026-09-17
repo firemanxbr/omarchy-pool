@@ -88,7 +88,7 @@ const BODY = String.raw`
   </section>
 
   <section>
-    <div class="h2row"><h2>Cost, in the open</h2><span class="hint">Cloudflare, estimated once a day from its analytics</span></div>
+    <div class="h2row"><h2>Cost, in the open</h2><span class="hint">Cloudflare, estimated every three hours from its analytics</span></div>
     <p class="sub">D1 rows read and written are most of the bill. Estimated every three hours; the report warns from US$ <span data-live="cost-warn">…</span>, the guard pauses the jobs that write at US$ <span data-live="cost-guard">…</span>, the cap is US$ <span data-live="cost-cap">…</span>; the daily report says why.</p>
     <div class="budget" id="budget"><div><div class="k">this month</div><b>…</b></div><div><div class="k">projected</div><b>…</b></div><div class="bar"><i style="width:0"></i></div></div>
     <div class="sponsor"><div><p><b>Help keep it running.</b> The pool runs on one pocket: the brain on Cloudflare, one machine building for both architectures, and the agent tokens that draft and audit PKGBUILDs. More hardware means shorter queues; more tokens mean every build gets an audit.</p><div class="needs"><span class="pill lilac">an aarch64 builder</span><span class="pill lilac">an x86_64 builder</span><span class="pill lilac">agent tokens</span><span class="pill lilac">a mirror in another region</span></div></div>
@@ -122,7 +122,7 @@ __CHARTS__
   }
   function renderTables(d) {
     loadRegistry();
-    // The worker a task ran on is drawn as every table draws one (the shell's wtId, the whole id and its host on hover): the listing's row where it still has one, its id and the task's owner where the record no longer lists it.
+    // The worker a task ran on is drawn as every table draws one (the shell's wtId, the whole id and its host on hover): the listing's row where it still has one, the bare id whole where the record no longer lists it — no owner guessed.
     var byId = {}; (d.workers || []).forEach(function (w) { byId[w.id] = w; });
     pager("#tasks", d.tasks, function (t) {
       var result = t.status === "staged"
@@ -134,7 +134,7 @@ __CHARTS__
       var what = t.kind && t.kind !== "build" ? '<b>' + esc(t.kind) + '</b> <span class="muted">' + esc(paramsLabel(t)) + '</span>' : '<b>' + esc(t.name) + '</b>' + (t.version ? ' <span class="mono muted">' + esc(t.version) + '</span>' : '');
       return '<tr><td><a href="/build/' + t.id + '" title="the task, whole: what happened, the worker, the evidence">' + t.id + '</a></td><td>' + what + '</td><td>' + esc(t.arch) + '</td>' +
         '<td>' + taskPill(t.status) + (t.trust === "community" ? ' <span class="pill none" title="a contributor\'s build: goes to staging, a maintainer approves">' + esc(t.owner || "community") + '</span>' : '') + (t.publish === 0 && t.trust !== "community" ? ' <span class="pill none" title="built and measured, never published">dry run</span>' : '') + (t.attempts > 1 ? ' <span class="muted">attempt ' + t.attempts + '/' + t.max_attempts + '</span>' : '') + '</td><td>' + esc(t.reason) + '</td>' +
-        '<td>' + (t.lease_owner ? wtId(byId[t.lease_owner] || { id: t.lease_owner, owner: t.owner }) : '<span class="muted">—</span>') + '</td><td>' + (dur(t.duration_ms) || "—") + '</td><td>' + result + '</td></tr>';
+        '<td>' + (t.lease_owner ? wtId(byId[t.lease_owner] || t.lease_owner) : '<span class="muted">—</span>') + '</td><td>' + (dur(t.duration_ms) || "—") + '</td><td>' + result + '</td></tr>';
     }, { empty: "nothing queued or built yet", text: function (t) { return [t.id, t.kind, t.name, t.arch, t.status, t.reason, t.lease_owner, t.owner, paramsLabel(t)].join(" "); } });
   }
   var API = "/api/v1/factory";
@@ -179,7 +179,8 @@ __CHARTS__
       y ? ["machines on the pool, " + y.day, "≈ " + num(y.machines), "ok"] : ["promotions today", num(promos.length), ""], ["fast-tracks, recent journal", num(fast.length), ""], ["rollbacks, recent journal", num(rb.length), rb.length ? "warn" : "ok"]
     ];
     $("#counters").innerHTML = cells.map(function (c) { return '<div><b class="' + c[2] + '">' + c[1] + '</b><span>' + c[0] + '</span></div>'; }).join("");
-    fetch("/api/v1/security?ring=stable&arch=x86_64").then(function (r) { return r.json(); }).then(function (s) { var t = s.totals || {}; live("open-stable", "open in stable: " + num(t.packages || 0) + " · exploited: " + num(t.kev || 0)); live("kev", num(t.kev || 0)); }).catch(function () { live("open-stable", "open in stable: no scan yet"); live("kev", "—"); });
+    // Open in stable as the Security page says it: the shell's one rule at the page's default confidence (advisoriesAt, advisoryCounts), the number the Pool's tile says too.
+    fetch("/api/v1/security?ring=stable&arch=x86_64").then(function (r) { return r.json(); }).then(function (s) { var t = advisoryCounts(advisoriesAt(s)); live("open-stable", "open in stable: " + num(t.packages) + " · exploited: " + num(t.kev) + " · " + confWord()); live("kev", num(t.kev)); }).catch(function () { live("open-stable", "open in stable: no scan yet"); live("kev", "—"); });
   }
 
   // ---- review throughput: arrivals, decisions, who decides, and a contributor's place in the queue
@@ -194,9 +195,10 @@ __CHARTS__
     $("#flow").innerHTML =
       '<div class="st"><span class="k">arrived this week</span><b>' + num(arrived) + '</b><span class="s">packages registered</span></div><div class="ar">→</div>' +
       '<div class="st"><span class="k">building</span><b>' + num(building) + '</b><span class="s">on contributors\' and shared workers</span></div><div class="ar">→</div>' +
-      '<div class="st hum"><span class="k">waiting for review</span><b>' + num(review.waiting) + '</b><span class="s">' + (review.oldest_ms ? "oldest " + ago(new Date(Date.now() - review.oldest_ms).toISOString()).replace(" ago", "") : "nothing waiting") + '</span></div><div class="ar">→</div>' +
+      '<div class="st hum"><span class="k">waiting for review</span><b>' + num(review.waiting) + '</b><span class="s">' + (review.oldest_ms ? "oldest " + span(review.oldest_ms) : "nothing waiting") + '</span></div><div class="ar">→</div>' +
       '<div class="st"><span class="k">approved this week</span><b>' + num(approved7) + '</b><span class="s">' + num(back7) + ' sent back with a note</span></div><div class="ar">→</div>' +
-      '<div class="st you"><span class="k">in the rings</span><b>' + num(pkgs.filter(function (p) { return p.status === "approved"; }).length) + '</b><span class="s">community packages, total</span></div>';
+      // In the rings: the registry's own word (landed), the number the Factory's, the Pool's and People's tiles say.
+      '<div class="st you"><span class="k">in the rings</span><b>' + num(pkgs.filter(function (p) { return p.landed; }).length) + '</b><span class="s">community packages, total</span></div>';
     var ap = bucket(weeks, apps.filter(function (a) { return a.standing; }), function (a) { return a.created_at; }), rj = bucket(weeks, apps.filter(function (a) { return !a.standing; }), function (a) { return a.created_at; });
     var labels = weeks.map(function (w) { return w.slice(5); });
     $("#c-decisions").innerHTML = stacked(labels, [{ name: "approved", color: C.green, values: ap }, { name: "sent back", color: C.amber, values: rj }], { label: "Decisions per week over eight weeks", full: true, empty: "no decision yet" });
@@ -231,14 +233,15 @@ __CHARTS__
     // The workers as the shell counts them (workerCounts): alive is the listing's word, the project's are the project and review kinds, the rest a contributor's.
     var wc = workerCounts(d.workers);
     var failed24 = d.tasks.filter(function (t) { return t.status === "failed" && Date.now() - Date.parse(t.finished_at || t.created_at) < 86400e3; });
-    var m = STATS && STATS.metrics, a = m && (m.jobs || m.actions);
+    // Worker minutes: the sum of the series the Status and Workers pages chart (workerMinutes over jobs_daily), not the metrics snapshot beside it.
+    var wm = STATS ? workerMinutes(STATS.series, 7) : null;
     setTiles("#tiles", [
       ["Queued", num(count("queued")), num(count("queued", "x86_64")) + " x86_64 · " + num(count("queued", "aarch64")) + " aarch64", count("queued") ? "warn" : ""],
       ["Building", num(count("leased")), "lease " + d.lease_minutes + " min, extended by heartbeats"],
       ["Workers alive", num(wc.alive) + " / " + num(wc.registered), num(wc.byKind.project.alive + wc.byKind.review.alive) + " the project's · " + num(wc.byKind.community.alive) + " contributors'", wc.alive ? "ok" : "warn", "/workers"],
-      ["Waiting for review", num(REVIEW.waiting), REVIEW.oldest_ms ? "oldest " + ago(new Date(Date.now() - REVIEW.oldest_ms).toISOString()).replace(" ago", "") : "nothing waiting", REVIEW.waiting ? "warn" : ""],
+      ["Waiting for review", num(REVIEW.waiting), REVIEW.oldest_ms ? "oldest " + span(REVIEW.oldest_ms) : "nothing waiting", REVIEW.waiting ? "warn" : ""],
       ["Failed · 24 h", num(failed24.length), failed24.length ? esc(failed24[0].name || failed24[0].kind) + " " + esc(failed24[0].arch || "") : "nothing failed"],
-      ["Worker minutes · 7 d", a ? num(a.minutes) : "—", a ? "≈ " + num(Math.round(a.minutes / 7)) + " per day, the project's workers" : "no metrics snapshot yet"]
+      ["Worker minutes · 7 d", wm ? num(wm.total) : "—", wm ? "≈ " + num(Math.round(wm.total / 7)) + " per day, the project's workers" : ""]
     ]);
     live("queue", "queued " + num(count("queued")) + " · leased " + num(count("leased")) + " · per-job tokens · an expired lease goes back in the queue");
     var roles = { pool: [], review: [], shared: [], own: [] };
@@ -372,10 +375,10 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.live-diagram",
     page: "/pipeline",
     anchor: ['class="diagram live-diagram"', 'data-live="verified-today"', 'data-live="stored-once"', 'data-live="edge-head"', 'data-live="rc-head"', 'data-live="stable-head"', 'data-live="advisories"', 'data-live="open-stable"'],
-    script: ['live("verified-today"', 'live("stored-once"', 'live("advisories"', 'live("open-stable"', 'n + "-head"', '"/api/v1/security?ring=stable&arch=x86_64"'],
+    script: ['live("verified-today"', 'live("stored-once"', 'live("advisories"', 'live("open-stable"', 'n + "-head"', '"/api/v1/security?ring=stable&arch=x86_64"', "advisoryCounts(advisoriesAt(s))", "confWord()"],
     reads: [
       { path: "/api/v1/stats", fields: ["series.imports_daily", "pool.objects", "rings.2.release.seq", "rings.2.release.created_at", "security.advisories"] },
-      { path: `/api/v1/security?ring=stable&arch=${F.arch}`, fields: ["totals.packages", "totals.kev"] },
+      { path: `/api/v1/security?ring=stable&arch=${F.arch}`, fields: ["vulnerable", "vulnerable.0.advisories.0.match", "vulnerable.0.advisories.0.kev"] },
     ],
     visible: EVERYONE,
     drawn: "live",
@@ -395,7 +398,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     script: ['$("#counters")', 'live("kev"', "d.audience", 'e.kind === "fast-track"', 'e.kind === "rollback"', 'e.kind === "promote" && e.status === "ok"'],
     reads: [
       { path: "/api/v1/stats", fields: ["series.imports_daily", "security.advisories", "audience", "events"] },
-      { path: `/api/v1/security?ring=stable&arch=${F.arch}`, fields: ["totals.kev"] },
+      { path: `/api/v1/security?ring=stable&arch=${F.arch}`, fields: ["vulnerable"] },
     ],
     visible: EVERYONE,
   },
@@ -404,9 +407,9 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.throughput-flow",
     page: "/pipeline",
     anchor: ['id="throughput"', 'id="flow"'],
-    script: ['$("#flow")', 'API + "/packages"', 'API + "/approvals"', 'API + "/review"', "a.standing &&", "!a.standing &&", 't.status === "leased" && t.trust === "community"', "review.waiting", "review.oldest_ms", 'class="k">waiting for review</span>'],
+    script: ['$("#flow")', 'API + "/packages"', 'API + "/approvals"', 'API + "/review"', "a.standing &&", "!a.standing &&", 't.status === "leased" && t.trust === "community"', "review.waiting", "review.oldest_ms", 'class="k">waiting for review</span>', "p.landed", 'class="k">in the rings</span>'],
     reads: [
-      { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.created_at", "packages.0.updated_at", "packages.0.status"] },
+      { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.created_at", "packages.0.updated_at", "packages.0.status", "packages.0.landed"] },
       { path: "/api/v1/factory?limit=100", fields: ["tasks", "tasks.0.kind", "tasks.0.status", "tasks.0.trust"] },
       { path: "/api/v1/factory/approvals", fields: ["approvals", "approvals.0.standing", "approvals.0.created_at"] },
       { path: "/api/v1/factory/review", fields: ["staged", "waiting", "oldest_ms"] },
@@ -470,11 +473,11 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.operations-tiles",
     page: "/pipeline",
     anchor: ['class="tiles six"', 'id="tiles"'],
-    script: ['setTiles("#tiles"', "workerCounts(d.workers)", "wc.byKind.project.alive + wc.byKind.review.alive", "wc.byKind.community.alive", '"Waiting for review"', "REVIEW.waiting", "REVIEW.oldest_ms", '"Failed · 24 h"', "d.lease_minutes", "m.jobs || m.actions"],
+    script: ['setTiles("#tiles"', "workerCounts(d.workers)", "wc.byKind.project.alive + wc.byKind.review.alive", "wc.byKind.community.alive", '"Waiting for review"', "REVIEW.waiting", "REVIEW.oldest_ms", '"Failed · 24 h"', "d.lease_minutes", '"Worker minutes · 7 d", wm ? num(wm.total)', "workerMinutes(STATS.series, 7)"],
     reads: [
       { path: "/api/v1/factory?limit=100", fields: ["counts", "counts.0.status", "counts.0.arch", "counts.0.n", "lease_minutes", "workers", "workers.0.alive", "workers.0.ready", "workers.0.current_task", "workers.0.revoked_at", "workers.0.side", "workers.0.labels", "tasks.0.status", "tasks.0.finished_at", "tasks.0.created_at", "tasks.0.name", "tasks.0.kind", "tasks.0.arch"] },
       { path: "/api/v1/factory/review", fields: ["staged", "waiting", "oldest_ms"] },
-      { path: "/api/v1/stats", fields: ["metrics"] },
+      { path: "/api/v1/stats", fields: ["series.jobs_daily"] },
     ],
     visible: EVERYONE,
   },
@@ -582,7 +585,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.tasks-table",
     page: "/pipeline",
     anchor: ['id="tasks"'],
-    script: ['pager("#tasks"', 'href="/build/', "/artifacts/build.log", "/artifacts/PKGBUILD", 'pkgHref(t.name, "edge", t.arch)', "wtId(byId[t.lease_owner] || { id: t.lease_owner, owner: t.owner })", "t.result_filename", "jobResult(t)", "t.max_attempts"],
+    script: ['pager("#tasks"', 'href="/build/', "/artifacts/build.log", "/artifacts/PKGBUILD", 'pkgHref(t.name, "edge", t.arch)', "wtId(byId[t.lease_owner] || t.lease_owner)", "t.result_filename", "jobResult(t)", "t.max_attempts"],
     reads: [
       { path: "/api/v1/factory?limit=100", fields: ["workers.0.id", "workers.0.owner", "tasks.0.id", "tasks.0.kind", "tasks.0.name", "tasks.0.version", "tasks.0.arch", "tasks.0.status", "tasks.0.trust", "tasks.0.owner", "tasks.0.publish", "tasks.0.attempts", "tasks.0.max_attempts", "tasks.0.reason", "tasks.0.lease_owner", "tasks.0.duration_ms", "tasks.0.result_filename", "tasks.0.result", "tasks.0.error", "tasks.0.params"] },
       { path: `/api/v1/factory/tasks/${F.contributorTask}/artifacts/build.log`, json: false },

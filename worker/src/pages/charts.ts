@@ -116,6 +116,12 @@ export const CHARTS = String.raw`  // ---- tiny SVG charts (no library; the page
     var labels = lastDays(days || 14), counts = labels.map(function (d) { return by[d] || { staged: 0, published: 0, failed: 0 }; }), of = function (k) { return counts.map(function (c) { return c[k]; }); };
     return { labels: labels, days: counts, series: [{ name: "staged", color: C.blue, values: of("staged") }, { name: "published", color: C.green, values: of("published") }, { name: "failed", color: C.red, values: of("failed") }] };
   }
+  // The minutes the project's workers spent on pool jobs, from the stats series (jobs_daily: {day, kind, status, n, ms}, grouped by the day the job finished), over the last days: labels and values for a chart, and total for the tile beside it — the tile and the chart's bars are one sum, not a snapshot beside a series.
+  function workerMinutes(series, days) {
+    var by = {}; ((series || {}).jobs_daily || []).forEach(function (r) { by[r.day] = (by[r.day] || 0) + Number(r.ms || 0) / 60000; });
+    var labels = lastDays(days || 7), values = labels.map(function (d) { return Math.round(by[d] || 0); });
+    return { labels: labels, values: values, total: values.reduce(function (n, v) { return n + v; }, 0) };
+  }
   // Fourteen days of health per ring and architecture, worst result per day, as html cells.
   function heatGrid(health) {
     var days = lastDays(14), cells = {}, RINGS = ["stable", "rc", "edge"], ARCHES = ["x86_64", "aarch64"];

@@ -98,7 +98,8 @@ export async function handleUser(login: string, env: Env): Promise<Response> {
       name: person.name,
       avatar_url: person.avatar_url,
       github: `https://github.com/${person.login}`,
-      role: person.role,
+      // The role from the one set the shell reads (GET /factory/maintainers, maintainersOf): listed is a maintainer, anyone else a contributor. contributors.role is the sync's copy of the same list; a login listed before its first sign-in, or a sync that failed between its two writes, must not give this page a second answer.
+      role: listed.some((m) => m.login === login) ? "maintainer" : "contributor",
       blocked: person.blocked_at ? { at: person.blocked_at, by: person.blocked_by, reason: person.blocked_reason } : null,
       maintainer_since: listed.find((m) => m.login === login)?.since ?? null,
       since: person.created_at,

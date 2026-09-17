@@ -12,17 +12,23 @@
  * and the lab chip is drawn from it, no page types the budget's lines or an
  * hour of its own, and the Status page's pill and table are late by the one
  * constant — the served script's functions run here over the server's rows.
+ * The second audit (the review of this branch) found three more said two
+ * ways — community packages "in the rings", the worker minutes of the week,
+ * open advisories in stable — and the last block pins each to one source:
+ * the registry's `landed`, one sum over jobs_daily, one count at the
+ * Security page's confidence; and one ring for one build, one word for an
+ * approval that stands, on every page that draws them.
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import worker, { RINGS, RINGS_BY_STABILITY } from "../src/index";
-import { RING_TEXT } from "../src/meta";
+import { LATE_AFTER_HOURS, RING_TEXT } from "../src/meta";
 import { waitsForMaintainer, stands } from "../src/routes/review";
 import { maintenanceOf } from "../src/routes/users";
-import { LATE_AFTER_HOURS } from "../src/routes/stats";
+import { landed } from "../src/routes/contributors";
 import { allComponents } from "../src/pages/components";
 import { HELPERS } from "../src/pages/layout";
-import { scriptOf, seedDashboard, type Fixture } from "./fixture";
+import { ownScriptOf, scriptOf, seedDashboard, type Fixture } from "./fixture";
 
 let F: Fixture;
 
@@ -131,9 +137,9 @@ describe("the maintainer set, the late mark and the budget lines are the server'
     expect(r.json.maintainers.map((m: { login: string }) => m.login)).toEqual([F.m1, F.m2]);
   });
 
-  it("a source is late by one constant, marked on its coverage row and named at the top of /stats", async () => {
+  it("a source is late by one constant, marked on its coverage row — the number lives in meta.ts and nowhere in the answer", async () => {
     let s = (await call("GET", "/stats")).json;
-    expect(s.late_after_hours).toBe(LATE_AFTER_HOURS);
+    expect(s.late_after_hours).toBeUndefined();
     const core = () => s.coverage.find((c: { source: string; arch: string }) => c.source === "core" && c.arch === F.arch);
     expect(core()).toMatchObject({ last_sync: expect.any(String), late: false });
     await env.DB.prepare("UPDATE events SET created_at = ? WHERE kind = 'sync' AND source = 'core'").bind(new Date(Date.now() - (LATE_AFTER_HOURS + 1) * 3600e3).toISOString()).run();
@@ -161,12 +167,11 @@ async function page(path: string): Promise<string> {
   return res.text();
 }
 
-// A page's own statements: page() splices HELPERS whole, so what follows its last lines is the page's (as test/pages.test.ts reads it).
-const shellEnd = HELPERS.slice(-120);
+// A page's own statements (the fixture's ownScriptOf): what follows the shell's last lines, the shell proved spliced whole.
 function ownScript(html: string): string {
-  const script = scriptOf(html), at = script.indexOf(shellEnd);
-  expect(at, "the shell is spliced whole").toBeGreaterThan(0);
-  return script.slice(at + shellEnd.length);
+  const own = ownScriptOf(html);
+  expect(own, "the shell is spliced whole").not.toBeNull();
+  return own!;
 }
 
 // A function of the served script, by name, as text: the proofs below run the shell's rule over the server's rows instead of reading the code and trusting it. The shell's functions are one line each.
@@ -229,7 +234,10 @@ describe("the pages read the one answer instead of counting their own", () => {
     // The Pipeline's budget panel fills its three slots from the answer, with and without an estimate.
     const pipeline = ownScript(await page("/pipeline"));
     for (const slot of ["cost-warn", "cost-guard", "cost-cap"]) expect(pipeline).toContain(`live("${slot}", num(usd.${slot.slice(5)}))`);
-    expect(HELPERS).toContain(`var LATE_MS = ${LATE_AFTER_HOURS} * 3600e3;`);
+    // The shell types no hour either: the constant is spliced in from meta.ts, and the served value is the server's.
+    expect(HELPERS).toContain("var LATE_MS = __LATE_AFTER_HOURS__ * 3600e3;");
+    expect(HELPERS).not.toMatch(/var LATE_MS = \d/);
+    expect(scriptOf(await page("/status"))).toContain(`var LATE_MS = ${LATE_AFTER_HOURS} * 3600e3;`);
   });
 
   it("the Status page's pill and its sources table are late by the one constant: the served rule, run over the server's rows", async () => {
@@ -251,5 +259,103 @@ describe("the pages read the one answer instead of counting their own", () => {
     const pill = new Function("d", [served(script, "LATE_MS"), served(script, "lateSync"), "function ago() { return 'a while ago'; }", newest, problemsOf, "return problemsOf(d);"].join("\n"));
     expect(pill(stats)).toContain(`${marked.filter(Boolean).length} source(s) not synced for ${LATE_AFTER_HOURS} h`);
     expect(Math.round(new Function(served(script, "LATE_MS") + " return LATE_MS / 3600e3;")())).toBe(LATE_AFTER_HOURS);
+  });
+});
+
+describe("three more facts, one source each", () => {
+  it("community packages \"in the rings\" is the registry's own `landed`, read by the Pool, the Factory, the Pipeline and People", async () => {
+    const pkgs = (await call("GET", "/factory/packages")).json.packages as { name: string; status: string; landed: boolean }[];
+    // The server's rule on every row: ours published, hers registered — and mine, whose approval was withdrawn above, back to staged and not landed.
+    for (const p of pkgs) expect(p.landed, p.name).toBe(landed(p.status));
+    expect(pkgs.filter((p) => p.landed).map((p) => p.name)).toEqual([F.publishedPkg]);
+    expect(pkgs.find((p) => p.name === F.factoryPkg)).toMatchObject({ status: "staged", landed: false });
+    const components = allComponents(F);
+    for (const [path, id] of [["/", "pool.open-stats"], ["/factory", "factory.tiles"], ["/pipeline", "pipeline.throughput-flow"], ["/people", "people.tiles"]] as const) {
+      const own = ownScript(await page(path));
+      expect(own, `${path} reads landed`).toContain("p.landed");
+      expect(own, `${path} still types the status words`).not.toMatch(/status === "approved" \|\| p\.status === "published"|status === "approved"; \}\)\.length/);
+      const c = components.find((x) => x.id === id);
+      expect(c?.script, id).toContain("p.landed");
+      expect(c?.reads?.some((r) => r.path === "/api/v1/factory/packages" && r.fields?.includes("packages.0.landed")), `${id} reads landed`).toBe(true);
+    }
+  });
+
+  it("the worker minutes of the week are one sum over jobs_daily — the tile and the chart's bars — on the Workers page, the Pipeline and Status", async () => {
+    const stats = (await call("GET", "/stats")).json;
+    for (const path of ["/workers", "/pipeline", "/status"]) {
+      const html = await page(path), script = scriptOf(html), own = ownScript(html);
+      expect(own, `${path} reads the snapshot's minutes`).not.toMatch(/\ba\.minutes\b|metrics\.jobs\.minutes/);
+      expect(own, `${path} sums the series through the shell`).toMatch(/workerMinutes\((?:STATS|d)\.series, 7\)/);
+      // The served sum, run over the server's series, is the series summed.
+      const fn = /^  function workerMinutes\(series, days\) \{[\s\S]*?\n  \}$/m.exec(script)![0], lastDays = /^  function lastDays\(n\) [^\n]*$/m.exec(script)![0];
+      const wm = new Function("series", [lastDays, fn, "return workerMinutes(series, 7);"].join("\n"))(stats.series) as { total: number; values: number[] };
+      const days = new Set(wm.values.map((_: number, i: number) => new Date(Date.now() - (6 - i) * 86400000).toISOString().slice(0, 10)));
+      const expected = Math.round((stats.series.jobs_daily as { day: string; ms: number }[]).filter((r) => days.has(r.day)).reduce((n, r) => n + Number(r.ms || 0) / 60000, 0));
+      expect(Math.abs(wm.total - expected)).toBeLessThanOrEqual(wm.values.length);
+    }
+  });
+
+  it("open advisories in stable are counted at the Security page's default confidence on the Pool and the Pipeline, through the shell's one rule", async () => {
+    const report = (await call("GET", `/security?ring=stable&arch=${F.arch}`)).json;
+    const html = await page("/"), script = scriptOf(html);
+    const fns = ["SEC_CONFS", "confOk", "advisoriesAt", "advisoryCounts"].map((n) => (n === "SEC_CONFS" ? /^  var SEC_CONFS = [^\n]*$/m : new RegExp(`^  function ${n}\\([\\s\\S]*?\\n  \\}$`, "m")).exec(script)![0]);
+    const count = new Function("d", "conf", [...fns, "return advisoryCounts(advisoriesAt(d, conf));"].join("\n"));
+    // At any confidence the shell's count is the report's own totals; at the default it is the Security page's first tile — the fixture's one match is exact, so both agree here, and the rule is one function either way.
+    const all = count(report, "all"), dflt = count(report);
+    expect(all.packages).toBe(report.totals.packages);
+    expect(all.kev).toBe(report.totals.kev);
+    expect(dflt.packages).toBe((report.vulnerable as { advisories: { match: string }[] }[]).filter((v) => v.advisories.some((a) => a.match === "exact" || a.match === "name-version")).length);
+    for (const path of ["/", "/pipeline"]) {
+      const own = ownScript(await page(path));
+      expect(own, `${path} reads the report's totals for the number`).not.toMatch(/totals\.packages|t\.packages \|\| 0/);
+      expect(own, `${path} counts through the shell`).toContain("advisoryCounts(advisoriesAt(s))");
+      expect(own, `${path} names the confidence`).toContain("confWord()");
+    }
+    // The Pool's tile lands the reader on the Security page at that default.
+    expect(ownScript(html)).toContain('"/security?ring=stable&arch=x86_64"');
+    expect(ownScript(await page("/security"))).toContain("SEC_CONF");
+  });
+
+  it("a build nobody decided yet links its package on the lab from Review, from its own page and from a person's builds table — one ringOfBuild", async () => {
+    const script = scriptOf(await page("/"));
+    const rule = new Function("status", "rings", [/^  var RINGS_TEXT = [^\n]*$/m.exec(script)![0], /^  function ringName\([^\n]*$/m.exec(script)![0], /^  function servedRing\([^\n]*$/m.exec(script)![0], /^  function ringOfBuild\([^\n]*$/m.exec(script)![0], "return ringOfBuild(status, rings);"].join("\n"));
+    expect(rule("staged", [])).toBe("lab");
+    expect(rule("staged", null)).toBe("lab");
+    expect(rule("done", ["lab", "edge", "stable"])).toBe("stable");
+    expect(rule("staged", ["lab"])).toBe("lab");
+    expect(rule("failed", [])).toBeNull();
+    // servedRing takes the server's rows too, in any order, and hands the row back.
+    expect(rule("done", [{ ring: "edge", arch: "x86_64" }, { ring: "rc", arch: "x86_64" }])).toBe("rc");
+    for (const [path, literal] of [[`/build/${F.projectTask}`, "pkgHref(t.name, ringOfBuild(t.status, T.rings), t.arch)"], [`/user/${F.owner}`, "pkgHref(t.name, ringOfBuild(t.status, null), t.arch)"], ["/review", 'pkg(t.name, t.version, "lab", t.arch)']] as const) {
+      expect(ownScript(await page(path)), path).toContain(literal);
+    }
+  });
+
+  it("a task's approval carries `standing`, and no page derives it from decision and withdrawn_at", async () => {
+    const whole = (await call("GET", `/factory/tasks/${F.projectTask}`)).json;
+    expect(whole.approval).toMatchObject({ decision: "approved", standing: stands(whole.approval) });
+    const story = (await call("GET", `/factory/packages/${F.factoryPkg}/story`)).json;
+    for (const c of story.chains) if (c.approval) expect(c.approval.standing).toBe(stands(c.approval));
+    for (const path of [`/build/${F.projectTask}`, `/user/${F.owner}`, "/review", "/pipeline", "/factory"]) {
+      expect(scriptOf(await page(path)), path).not.toMatch(/decision === "approved" && !\w+\.withdrawn_at/);
+    }
+  });
+
+  it("a person's role on their page is the maintainer set's word", async () => {
+    expect((await call("GET", `/users/${F.m1}`)).json).toMatchObject({ role: "maintainer", maintainer_since: expect.any(String) });
+    expect((await call("GET", `/users/${F.owner}`)).json).toMatchObject({ role: "contributor", maintainer_since: null });
+  });
+});
+
+describe("nothing waiting", () => {
+  it("answers `waiting` 0 and `oldest_ms` null once every staged row is decided — the last thing this file does to the fixture", async () => {
+    // Rejecting the project's build hands alice's evidence behind it back to a maintainer (project_build gone), so the queue empties in two rounds.
+    let after = (await call("GET", "/factory/review?round=0")).json;
+    for (let round = 1; after.waiting && round <= 3; round++) {
+      for (const t of after.staged.filter(waitsForMaintainer)) expect((await call("POST", `/factory/tasks/${t.id}/reject`, "m1", { note: "cleared by the test, one by one" })).status, `reject #${t.id}`).toBe(200);
+      after = (await call("GET", `/factory/review?round=${round}`)).json;
+    }
+    expect(after.staged.filter(waitsForMaintainer)).toEqual([]);
+    expect(after).toMatchObject({ waiting: 0, oldest_ms: null });
   });
 });

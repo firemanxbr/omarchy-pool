@@ -4,7 +4,8 @@ import { requestChecks } from "../request";
 import { contributorOf, isMaintainer, MAINTAINER_DECIDES, SIGN_IN, type Contributor } from "./contributors";
 import { reclaimStagingPackages } from "../staging";
 import { pullFromRings } from "./blocks";
-import { chains, chainOf, storyRows, type Approval } from "./story";
+import { chains, chainOf, storyRows, stands, type Approval } from "./story";
+export { stands };
 import { putRecord, recordUrl } from "../record";
 
 /**
@@ -202,7 +203,9 @@ export async function handleReviewList(env: Env, request: Request): Promise<Resp
   // project's row is the one to decide; a failed project build hands it
   // back). The same rule the Review page highlights a row by (decidable),
   // so the count and the rows agree. `oldest_ms` is the age of the oldest
-  // of them, from when it was staged; null when nothing waits.
+  // of them, from when it was staged; null when nothing waits. Both are
+  // counted over the hundred newest staged rows the list shows (LIMIT above):
+  // past a hundred, the oldest is the first left out.
   const waiting = rows.filter(waitsForMaintainer);
   const ages = waiting.map((t) => Date.now() - Date.parse((t as { finished_at?: string | null }).finished_at ?? "")).filter((ms) => Number.isFinite(ms) && ms > 0);
   return json(
@@ -357,7 +360,7 @@ function refused(v: Verdict): Response | null {
 async function standingApproval(env: Env, name: string, id: number): Promise<Approval | null> {
   const story = await storyRows(env, name);
   const chain = chainOf(chains(story.tasks, story.approvals, story.pkg, story.request), id);
-  return chain?.approval && chain.approval.decision === "approved" ? chain.approval : null;
+  return chain?.approval?.standing ? chain.approval : null;
 }
 
 /** The facts about one task, read for a decision on it: five indexed reads, one of them the package's story. */
@@ -547,7 +550,3 @@ export async function handleApprovals(env: Env): Promise<Response> {
   return json({ approvals }, 200, { "cache-control": "public, max-age=30" });
 }
 
-/** An approval that stands: signed as approved and not taken back — the rule every page reads, never `decision` alone. */
-export function stands(a: { decision: string; withdrawn_at: string | null }): boolean {
-  return a.decision === "approved" && a.withdrawn_at === null;
-}

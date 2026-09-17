@@ -126,7 +126,7 @@ export function factoryDiagram(): string {
   s += darrow(430, 75, 495, 75) + dlab(462, 63, ["build"]);
   // A group: the one box the overlap test lets others sit inside.
   s += '<rect class="d-box d-group rc" x="495" y="20" width="322" height="110"/><text class="d-t" x="656" y="40" text-anchor="middle">Build — your choice</text>';
-  s += dbox({ x: 503, y: 50, w: 150, h: 70, title: "Shared workers", cls: "rc", lines: ["the project's agent", { text: "online now", cls: "live", live: "shared-online" }], tcls: "small" });
+  s += dbox({ x: 503, y: 50, w: 150, h: 70, title: "Shared workers", cls: "rc", lines: ["the project's agent", { text: "alive now", cls: "live", live: "shared-online" }], tcls: "small" });
   s += dbox({ x: 659, y: 50, w: 150, h: 70, title: "Your worker", cls: "rc", lines: ["at home, your agent", "your packages only"], tcls: "small" });
   s += darrow(817, 75, 882, 75) + dlab(849, 63, ["staged"]);
   s += dbox({ x: 882, y: 40, w: 180, h: 70, title: "Evidence", cls: "amber", lines: ["PKGBUILD · log · audit", "never what users get"] });

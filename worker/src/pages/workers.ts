@@ -72,13 +72,14 @@ __CHARTS__
     d.workers.forEach(function (w) { kinds[wtKind(w)].push(w); });
     // The numbers are the shell's (workerCounts: registered, alive, building, and the same per kind); the rows behind them stay here for the load and the task ids.
     var wc = workerCounts(d.workers), al = d.workers.filter(function (w) { return w.alive; }), bz = al.filter(function (w) { return w.current_task; });
-    var m = STATS && STATS.metrics, a = m && (m.jobs || m.actions);
+    // Worker minutes: the sum of the series the chart below draws (workerMinutes over jobs_daily), the number the Status page and the Pipeline say — not the metrics snapshot.
+    var wm = STATS ? workerMinutes(STATS.series, 7) : null;
     var load = al.length ? Math.round(al.reduce(function (n, w) { return n + busyOf(w); }, 0) / al.length) : 0;
     setTiles("#tiles", [
       ["Alive", num(wc.alive) + " / " + num(wc.registered), num(wc.byKind.project.alive) + " project · " + num(wc.byKind.review.alive) + " review · " + num(wc.byKind.community.alive) + " contributors", wc.alive ? "ok" : "warn"],
       ["Building now", num(wc.building), wc.building ? bz.map(function (w) { return "#" + w.current_task; }).join(" · ") : "every worker idle"],
       ["Load · 24 h", load + "%", "of the last day with a lease, across the alive ones"],
-      ["Worker minutes · 7 d", a ? num(a.minutes) : "—", a ? "≈ " + num(Math.round(a.minutes / 7)) + " per day, the project's workers" : "no metrics snapshot yet"]
+      ["Worker minutes · 7 d", wm ? num(wm.total) : "—", wm ? "≈ " + num(Math.round(wm.total / 7)) + " per day, the project's workers" : ""]
     ]);
     // One card per kind: one line on what it is for, the tasks it finished per day over a week (the Pool page's growth line, in the kind's colour), four numbers.
     var PD = perDay();
@@ -109,11 +110,10 @@ __CHARTS__
     pager("#w-community", seen(kinds.community), function (w) { return workerRow(w, "community"); }, { empty: showAll ? "no contributor's worker registered yet" : "no contributor's worker alive right now", text: wtText });
     endSkeleton();
   }
-  // Worker minutes per day, from the jobs series.
+  // Worker minutes per day, the shell's one sum over the jobs series (workerMinutes) — the tile above is its total.
   function renderMinutes(d) {
-    var days7 = lastDays(7), minutes = {};
-    ((d.series || {}).jobs_daily || []).forEach(function (r) { minutes[r.day] = (minutes[r.day] || 0) + Number(r.ms || 0) / 60000; });
-    $("#c-minutes").innerHTML = stacked(days7, [{ name: "minutes", color: C.blue, values: days7.map(function (x) { return Math.round(minutes[x] || 0); }) }], { label: "Worker minutes per day over seven days", empty: "no job yet" });
+    var wm = workerMinutes(d.series, 7);
+    $("#c-minutes").innerHTML = stacked(wm.labels, [{ name: "minutes", color: C.blue, values: wm.values }], { label: "Worker minutes per day over seven days", empty: "no job yet" });
   }
   function load() { busy(fetch("/api/v1/factory?limit=10")).then(function (r) { return r.json(); }).then(function (d) { FACTORY = d; render(); }).catch(function () { endSkeleton(); }); }
   $("#all-workers").onchange = render;
@@ -156,10 +156,10 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     page: "/workers",
     anchor: ['id="tiles"'],
     // The counts are the shell's (workerCounts over the listing), the same the Pool's and the People page's tiles say.
-    script: ['"#tiles"', "workerCounts(d.workers)", '"Alive"', "wc.alive", "wc.registered", "wc.byKind.project.alive", '"Building now"', "wc.building", '"Load · 24 h"', '"Worker minutes · 7 d"', "m.jobs || m.actions"],
+    script: ['"#tiles"', "workerCounts(d.workers)", '"Alive"', "wc.alive", "wc.registered", "wc.byKind.project.alive", '"Building now"', "wc.building", '"Load · 24 h"', '"Worker minutes · 7 d", wm ? num(wm.total)', "workerMinutes(STATS.series, 7)"],
     reads: [
       { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.alive", "workers.0.ready", "workers.0.current_task", "workers.0.revoked_at", "workers.0.side", "workers.0.labels"] },
-      { path: "/api/v1/stats", fields: ["series.workers_daily", "metrics.jobs.minutes"] },
+      { path: "/api/v1/stats", fields: ["series.workers_daily", "series.jobs_daily"] },
     ],
     visible: EVERYONE,
   },
@@ -196,7 +196,7 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     id: "workers.minutes-chart",
     page: "/workers",
     anchor: ['id="c-minutes"'],
-    script: ['"#c-minutes"', "renderMinutes", "jobs_daily", "r.ms"],
+    script: ['"#c-minutes"', "renderMinutes", "workerMinutes(d.series, 7)", "wm.values"],
     reads: [{ path: "/api/v1/stats", fields: ["series.jobs_daily.0.day", "series.jobs_daily.0.ms"] }],
     visible: EVERYONE,
   },

@@ -104,7 +104,7 @@ const SCRIPT = String.raw`
   busy(fetch("/api/v1/factory/maintainers")).then(function (r) { return r.json(); }).then(function (d) {
     $("#synced").textContent = d.synced_at ? "(" + ago(d.synced_at) + ")" : "(not yet)";
     pager("#maintainers-table", d.maintainers || [], function (m) {
-      return '<tr><td>' + avatarIcon(m.login, "maintainer") + ' <a href="/user/' + encodeURIComponent(m.login) + '"><b>' + esc(m.login) + '</b></a></td><td>' + ago(m.since) + '</td></tr>';
+      return '<tr><td>' + avatarIcon(m.login, "maintainer") + ' <a href="' + userHref(m.login) + '"><b>' + esc(m.login) + '</b></a></td><td>' + ago(m.since) + '</td></tr>';
     }, { empty: "nobody applied yet — the pool reads factory/MAINTAINERS.toml on main every ten minutes" });
   }).catch(function () { endSkeleton(); });
   busy(fetch("/api/v1/events?kind=role&limit=50")).then(function (r) { return r.json(); }).then(function (d) {
@@ -161,7 +161,7 @@ export const GOVERNANCE_COMPONENTS = (_F: Fixture): Component[] => {
       id: "governance.maintainers-table",
       page,
       anchor: ['id="maintainers"', "<h2>The maintainers</h2>", 'id="maintainers-table"', "<th>Maintainer</th><th>Since</th>"],
-      script: [`"${maintainers}"`, '"#maintainers-table"', "d.maintainers", 'avatarIcon(m.login, "maintainer")', 'href="/user/', "ago(m.since)"],
+      script: [`"${maintainers}"`, '"#maintainers-table"', "d.maintainers", 'avatarIcon(m.login, "maintainer")', "userHref(m.login)", "ago(m.since)"],
       reads: [{ path: maintainers, fields: ["maintainers", "maintainers.0.login", "maintainers.0.since"] }],
       visible: EVERYONE,
     },

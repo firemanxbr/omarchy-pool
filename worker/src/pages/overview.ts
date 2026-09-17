@@ -81,7 +81,7 @@ const BODY = String.raw`
 
   <section>
     <div class="h2row"><h2>Coverage</h2><a class="more-link" href="/status">Every source, every number →</a></div>
-    <p class="sub">Share of what each upstream serves that edge already pins, on both architectures. The optional sources yield to the others and are not counted; the factory builds, it does not mirror.</p>
+    <p class="sub">Share of what each upstream serves that edge already pins, on both architectures. The optional sources and the factory are not counted.</p>
     <div class="coverage-box"><div class="cov" id="c-coverage"></div></div>
   </section>
 
@@ -154,7 +154,7 @@ __CHARTS__
       ["Packages in stable", num(stable.package_count), num(byArch(stable, "x86_64")) + " x86_64 · " + num(byArch(stable, "aarch64")) + " aarch64", "", "/packages?ring=stable"],
       ["Stable release", stable.release ? "#" + stable.release.seq : "—", stable.release ? ago(stable.release.created_at) + " · health " + (sh ? sh.status : "n/a") + " / " + (sha ? sha.status : "n/a") : "no release yet", "", "/journal#releases"],
       ["Sources mirrored", (src.names.length - src.missing.length) + " / " + src.names.length, (src.missing.length ? "not yet: " + src.missing.join(", ") : "Arch · Arch Linux ARM · Omarchy · Asahi") + (src.optional.length ? " · " + src.optional.join(", ") + " optional, not counted" : ""), "", "/status"],
-      ["Open advisories in stable", '<span id="t-sec">…</span>', '<span id="t-sec-s">matching the five feeds, on both architectures…</span>', "", "/security"],
+      ["Open advisories in stable", '<span id="t-sec">…</span>', '<span id="t-sec-s">matching the five feeds, on both architectures…</span>', "", "/security?ring=stable&arch=x86_64"],
       ["Machines on the pool", y ? "≈ " + num(y.machines) + (y.machines >= 10000 ? "+" : "") : "—", y ? "yesterday · " + RINGS.filter(function (r) { return r !== "lab" || (y.by_ring || {}).lab; }).map(function (r) { return r + " " + num((y.by_ring || {})[r] || 0); }).join(" · ") + " · " + num(y.requests) + " fetches" : "counted once a day", "", "/pipeline"],
       ["Into edge today", imp ? "+" + num(imp.packages) : "+0", (imp ? bytes(imp.bytes) + " · " + num(imp.runs) + " syncs" : "no sync yet today") + (lastSync ? " · last " + ago(lastSync.created_at) : ""), "", "/journal?kind=sync"]
     ]);
@@ -203,14 +203,14 @@ __CHARTS__
 
     var fast = (d.events || []).filter(function (e) { return e.kind === "fast-track" && e.status === "ok"; }).slice(0, 3);
     if (!$("#c-sec").innerHTML) $("#c-sec").innerHTML = '<div class="empty loading">Loading</div>';
-    // The tile counts both architectures (a package with an open advisory on either); the chart below is x86_64, the reference system.
+    // The tile counts both architectures, per architecture, as the Security page it links to counts its first tile: the shell's one rule (advisoriesAt, advisoryCounts) at the page's default confidence (SEC_CONF), said in the subtitle — so the number here is the number there. The chart below is x86_64, the reference system, counted the same way.
     busy(Promise.all(ARCHES.map(function (a) { return fetch("/api/v1/security?ring=stable&arch=" + a).then(function (r) { return r.json(); }); }))).then(function (both) {
-      var s = both[0], t = s.totals || {}, ta = both[1].totals || {};
-      $("#sec-when").textContent = s.updated_at ? ago(s.updated_at) + " · x86_64" : "no scan yet";
-      var ts = $("#t-sec"), tss = $("#t-sec-s"), kev = (t.kev || 0) + (ta.kev || 0), high = (t.critical || 0) + (t.high || 0) + (ta.critical || 0) + (ta.high || 0);
-      if (ts) { ts.textContent = num(t.packages || 0) + " · " + num(ta.packages || 0); ts.parentElement.classList.toggle("ok", !kev && !high); ts.parentElement.classList.toggle("warn", !!(kev + high)); }
-      if (tss) tss.textContent = "x86_64 · aarch64 · " + num(kev) + " exploited in the wild · " + num(high) + " high · " + num((t.medium || 0) + (ta.medium || 0)) + " medium" + (s.updated_at ? " · " + ago(s.updated_at) : "");
-      var rows = [["exploited in the wild (KEV)", t.kev || 0, "var(--red)"], ["critical + high", (t.critical || 0) + (t.high || 0), "var(--red)"], ["medium", t.medium || 0, "var(--amber)"], ["low / unknown", (t.low || 0) + (t.unknown || 0), "var(--dim)"]];
+      var s = both[0], t = advisoryCounts(advisoriesAt(s)), ta = advisoryCounts(advisoriesAt(both[1]));
+      $("#sec-when").textContent = s.updated_at ? ago(s.updated_at) + " · x86_64 · " + confWord() : "no scan yet";
+      var ts = $("#t-sec"), tss = $("#t-sec-s"), kev = t.kev + ta.kev, high = t.critical + t.high + ta.critical + ta.high;
+      if (ts) { ts.textContent = num(t.packages) + " · " + num(ta.packages); ts.parentElement.classList.toggle("ok", !kev && !high); ts.parentElement.classList.toggle("warn", !!(kev + high)); }
+      if (tss) tss.textContent = "x86_64 · aarch64 · " + num(kev) + " exploited in the wild · " + num(high) + " high · " + num(t.medium + ta.medium) + " medium · " + confWord() + (s.updated_at ? " · " + ago(s.updated_at) : "");
+      var rows = [["exploited in the wild (KEV)", t.kev, "var(--red)"], ["critical + high", t.rest.critical + t.rest.high, "var(--red)"], ["medium", t.rest.medium, "var(--amber)"], ["low / unknown", t.rest.low + t.rest.unknown, "var(--dim)"]];
       var max = Math.max.apply(null, rows.map(function (r) { return r[1]; })) || 1;
       $("#c-sec").innerHTML = hrows(rows.map(function (r) { return [r[0], "", Math.round(100 * r[1] / max), r[2], num(r[1])]; }), 190) +
         (fast.length ? '<div class="mini-list"><div class="k">latest fast-tracks</div>' + fast.map(function (e) { return '<div><span class="dot ok"></span><b>' + esc(e.summary) + '</b> <span class="dim">· ' + ago(e.created_at) + '</span></div>'; }).join("") + '</div>' : '') +
@@ -261,9 +261,11 @@ __CHARTS__
     fetch("/api/v1/factory").then(function (r) { return r.json(); }).catch(function () { return { workers: [] }; })
   ]).then(function (res) {
     var pkgs = res[0].packages || [], maintainers = res[1] || {}, workers = res[2].workers || [], wc = workerCounts(workers);
-    var contributors = {}; pkgs.forEach(function (p) { if (p.owner && !maintainers[p.owner]) contributors[p.owner] = true; });
-    workers.forEach(function (w) { if (w.owner && !maintainers[w.owner]) contributors[w.owner] = true; });
-    var landed = pkgs.filter(function (p) { return p.status === "approved" || p.status === "published"; }).length;
+    var contributors = {}, isM = function (l) { return Object.prototype.hasOwnProperty.call(maintainers, l); };
+    pkgs.forEach(function (p) { if (p.owner && !isM(p.owner)) contributors[p.owner] = true; });
+    workers.forEach(function (w) { if (w.owner && !isM(w.owner)) contributors[w.owner] = true; });
+    // Landed is the registry's own word (landed: approved or published, said once on the server) — the Factory, the Pipeline and People count the same flag.
+    var landed = pkgs.filter(function (p) { return p.landed; }).length;
     var people = Object.keys(maintainers).map(function (m) { return [m, "maintainer"]; }).concat(Object.keys(contributors).map(function (c) { return [c, "contributor"]; }));
     var chips = people.map(function (p) { return personChip(p[0], p[1]); }).join("");
     $("#cc-people").innerHTML = (chips || '<span class="muted">be the first</span>') + '<span class="dim">' + num(wc.alive) + ' workers alive</span><a href="/factory">Bring a package →</a>';
@@ -352,7 +354,8 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       id: "pool.tiles",
       page: "/",
       anchor: ['<div class="tiles six" id="tiles">'],
-      script: ['skeletonTiles("#tiles", 6)', 'setTiles("#tiles"', '"#t-sec"', '"#t-sec-s"', "package_count", "imports_daily", '"/api/v1/security?ring=stable&arch="', "sourcesOf(d)", '"Sources mirrored"', '" optional, not counted"'],
+      // The advisories tile counts at the Security page's default confidence, through the shell's rule, and lands the reader on that page at that default.
+      script: ['skeletonTiles("#tiles", 6)', 'setTiles("#tiles"', '"#t-sec"', '"#t-sec-s"', "package_count", "imports_daily", '"/api/v1/security?ring=stable&arch="', "advisoryCounts(advisoriesAt(s))", "confWord()", '"/security?ring=stable&arch=x86_64"', "sourcesOf(d)", '"Sources mirrored"', '" optional, not counted"'],
       reads: [
         {
           path: stats,
@@ -363,8 +366,8 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
             "audience.0.machines", "audience.0.by_ring", "audience.0.requests",
           ],
         },
-        { path: security(F.arch), fields: ["totals.packages", "totals.kev", "totals.critical", "totals.high", "totals.medium", "updated_at"] },
-        { path: security("aarch64"), fields: ["totals.packages", "totals.kev", "totals.critical", "totals.high", "totals.medium"] },
+        { path: security(F.arch), fields: ["vulnerable", "vulnerable.0.advisories.0.match", "vulnerable.0.advisories.0.severity", "vulnerable.0.advisories.0.kev", "updated_at"] },
+        { path: security("aarch64"), fields: ["vulnerable"] },
       ],
       visible: EVERYONE,
     },
@@ -418,10 +421,10 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       id: "pool.chart-security",
       page: "/",
       anchor: ['id="sec-when"', 'id="c-sec"'],
-      script: ['"#c-sec"', '"#sec-when"', '"/api/v1/security?ring=stable&arch="', "s.totals", 'e.kind === "fast-track"', "hrows("],
+      script: ['"#c-sec"', '"#sec-when"', '"/api/v1/security?ring=stable&arch="', "advisoryCounts(advisoriesAt(s))", "t.rest.critical + t.rest.high", 'e.kind === "fast-track"', "hrows("],
       reads: [
-        { path: security(F.arch), fields: ["updated_at", "totals.kev", "totals.critical", "totals.high", "totals.medium", "totals.low", "totals.unknown", "totals.packages"] },
-        { path: security("aarch64"), fields: ["totals"] },
+        { path: security(F.arch), fields: ["updated_at", "vulnerable", "vulnerable.0.advisories.0.match", "vulnerable.0.advisories.0.severity", "vulnerable.0.advisories.0.kev"] },
+        { path: security("aarch64"), fields: ["vulnerable"] },
         { path: stats, fields: ["events", "events.0.kind", "events.0.status", "events.0.summary", "events.0.created_at"] },
       ],
       visible: EVERYONE,
@@ -451,9 +454,9 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       id: "pool.open-stats",
       page: "/",
       anchor: ['<div class="tiles four" id="open-stats">'],
-      script: ['setTiles("#open-stats"', '"/people#contributors"', '"/people#maintainers"', '"/people#workers"', '"/packages?q=factory"', 'p.status === "approved" || p.status === "published"', '"Workers alive", num(wc.alive), num(wc.registered) + " registered"'],
+      script: ['setTiles("#open-stats"', '"/people#contributors"', '"/people#maintainers"', '"/people#workers"', '"/packages?q=factory"', "p.landed", '"Workers alive", num(wc.alive), num(wc.registered) + " registered"'],
       reads: [
-        { path: "/api/v1/factory/packages", fields: ["packages.0.owner", "packages.0.status"] },
+        { path: "/api/v1/factory/packages", fields: ["packages.0.owner", "packages.0.status", "packages.0.landed"] },
         { path: "/api/v1/factory/maintainers", fields: ["maintainers.0.login"] },
         { path: "/api/v1/factory", fields: ["workers", "workers.0.owner", "workers.0.alive", "workers.0.revoked_at"] },
       ],
@@ -496,7 +499,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
         "<h2>From upstream to your machine</h2>", 'href="/docs/how-it-works"',
         "<h2>Pick a ring</h2>", "<h2>Why the pool</h2>",
         "<h2>Get started</h2>", 'href="/docs/get-started">',
-        "<h2>Coverage</h2>", 'href="/status">Every source, every number', "The optional sources yield to the others and are not counted; the factory builds, it does not mirror.",
+        "<h2>Coverage</h2>", 'href="/status">Every source, every number', "The optional sources and the factory are not counted.",
         "<h2>Made in the open</h2>",
       ],
       visible: EVERYONE,

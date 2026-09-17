@@ -1,6 +1,6 @@
 import { signingEnabled } from "../signing";
 import { json, RINGS, type Env } from "../index";
-import { EXPECTED_SOURCES, version } from "../meta";
+import { EXPECTED_SOURCES, LATE_AFTER_HOURS, version } from "../meta";
 import { ringHead, releaseSources, releaseSummary } from "../db";
 
 /** The security job's journal line says how many advisories it matched, and when. */
@@ -9,15 +9,6 @@ export function advisoriesKnown(payload: Record<string, unknown>, at: string): {
   const at2 = typeof payload.run_at === "string" ? payload.run_at : at;
   return { updated_at: at2, advisories: n("arch_advisories") + n("debian_advisories") + n("osv_advisories") };
 }
-
-/**
- * A source is late when its last sync is older than this. One number for
- * the Status page's headline, its table and the shell's problem list: the
- * headline said nine hours while the table marked rows late at six, on the
- * same page (2026-09-18). The shell's nine won — a long import of one
- * source makes the others wait their turn, and six flagged them for it.
- */
-export const LATE_AFTER_HOURS = 9;
 
 /** Everything the dashboard shows, in one round trip. */
 export async function handleStats(env: Env): Promise<Response> {
@@ -185,7 +176,6 @@ export async function handleStats(env: Env): Promise<Response> {
       provenance: snapPayload.provenance ?? null,
       any: snapPayload.any ?? null,
       coverage,
-      late_after_hours: LATE_AFTER_HOURS,
       series: {
         imports_daily: importsDaily.results,
         sync_runs: syncRuns.results,

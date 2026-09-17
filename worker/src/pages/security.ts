@@ -23,7 +23,7 @@ const BODY = String.raw`
 
   <div class="tiles" id="tiles"></div>
   <div class="charts" style="margin-bottom:32px">
-    <div class="chart"><h3>Open advisories per ring <span id="sc-arch"></span></h3><div class="sub">a package once, at the confidence picked — exploited first, then its worst severity; edge catches fixes first, stable last</div><div id="sc-chart"><div class="empty">reading the three rings' reports — a few seconds…</div></div></div>
+    <div class="chart"><h3>Open advisories per ring <span id="sc-arch"></span></h3><div class="sub">by severity, a package once — edge catches fixes first, stable last</div><div id="sc-chart"><div class="empty">reading the three rings' reports — a few seconds…</div></div></div>
     <div class="chart"><h3>The feeds <span id="sc-feeds-when"></span></h3><div class="sub">what each one contributes to this ring's report</div><div class="feeds" id="sc-feeds"></div></div>
   </div>
 
@@ -36,32 +36,16 @@ const BODY = String.raw`
 
 const SCRIPT = String.raw`
 __CHARTS__
-  var RINGS = ["stable", "rc", "edge"], ARCHES = ["x86_64", "aarch64"], CONF = ["all", "exact + name-version", "exact"];
+  var RINGS = ["stable", "rc", "edge"], ARCHES = ["x86_64", "aarch64"];
   var q = new URLSearchParams(location.search);
   var ring = RINGS.indexOf(q.get("ring")) >= 0 ? q.get("ring") : "stable";
   var arch = ARCHES.indexOf(q.get("arch")) >= 0 ? q.get("arch") : "x86_64";
-  var conf = CONF.indexOf(q.get("conf")) >= 0 ? q.get("conf") : "exact + name-version";
-  function confOk(m) { return conf === "all" || m === "exact" || (conf === "exact + name-version" && m === "name-version"); }
-  // What counts, one way for the tiles, the table and the per-ring chart: a package counts at the confidence picked when one of its advisories passes the picker, under the worst severity of those, exploited when one of those is in KEV. At "all" these are the report's own totals; the picker narrows every number on the page the same way, and each says at which confidence.
-  function openAt(d) {
-    return (d.vulnerable || []).map(function (v) {
-      var advs = v.advisories.filter(function (a) { return confOk(a.match); });
-      if (!advs.length) return null;
-      var sev = advs.reduce(function (w, a) { var order = ["critical", "high", "medium", "low", "unknown"]; return order.indexOf(a.severity) < order.indexOf(w) ? a.severity : w; }, "unknown");
-      return { v: v, advs: advs, worst: sev, kev: advs.some(function (a) { return a.kev; }), epss: advs.reduce(function (m, a) { return a.epss != null && a.epss > m ? a.epss : m; }, 0) };
-    }).filter(Boolean);
-  }
-  // The counts of what counts: packages, exploited, one per severity (a package under its worst), and in rest the severities of the not exploited — so a stack that draws the exploited first holds each package once.
-  function countOf(rows) {
-    var c = { packages: rows.length, kev: 0, critical: 0, high: 0, medium: 0, low: 0, unknown: 0, rest: { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 } };
-    rows.forEach(function (r) { c[r.worst]++; if (r.kev) c.kev++; else c.rest[r.worst]++; });
-    return c;
-  }
-  function confWord() { return conf === "all" ? "any confidence" : conf; }
+  // The confidence picked, the shell's default (SEC_CONF) unless the query says: the tiles, the table and the per-ring chart count by the shell's one rule at it (advisoriesAt, advisoryCounts) — the rule the Pool's and the Pipeline's numbers count by too — and each says at which confidence.
+  var conf = SEC_CONFS.indexOf(q.get("conf")) >= 0 ? q.get("conf") : SEC_CONF;
   function draw() {
     pick("#pick-ring", RINGS, ring, function (v) { ring = v; load(); }, { url: "ring" });
     pick("#pick-arch", ARCHES, arch, function (v) { arch = v; load(); }, { url: "arch" });
-    pick("#pick-conf", CONF, conf, function (v) { conf = v; load(); }, { url: "conf" });
+    pick("#pick-conf", SEC_CONFS, conf, function (v) { conf = v; load(); }, { url: "conf" });
   }
   // The feeds: what each tracker contributed to this ring's report — matches, exploited, and the last refresh.
   var FEEDS = [["arch", "Arch Security Tracker", "exact matches on Arch's own versions"], ["debian", "Debian Security Tracker", "the same upstream, Debian's fixed version compared to ours"], ["osv", "OSV", "Go modules and crates inside static binaries"], ["kev", "CISA KEV", "exploited in the wild — always fast-tracked"], ["epss", "EPSS", "likelihood of exploitation, orders the list"]];
@@ -71,11 +55,11 @@ __CHARTS__
     $("#sc-feeds-when").textContent = d.updated_at ? "refreshed " + ago(d.updated_at) : "no run yet";
     $("#sc-feeds").innerHTML = FEEDS.map(function (f) { var n = f[0] === "kev" ? kev : f[0] === "epss" ? epss : (count[f[0]] || 0); return '<div class="feed"><b>' + f[1] + '</b><span>' + f[2] + '</span><span class="dim"><b class="num">' + num(n) + '</b> ' + (f[0] === "kev" ? "exploited" : f[0] === "epss" ? "scored" : "matched") + ' in ' + ring + '</span></div>'; }).join("");
   }
-  // Open advisories per ring, counted as the tiles count (openAt, countOf) at the confidence picked: the report on screen reused for its ring, the other two read once each.
+  // Open advisories per ring, counted as the tiles count (the shell's advisoriesAt, advisoryCounts) at the confidence picked: the report on screen reused for its ring, the other two read once each.
   function renderPerRing(d) {
-    $("#sc-arch").textContent = arch + " · " + confWord();
+    $("#sc-arch").textContent = arch + " · " + confWord(conf);
     Promise.all(RINGS.map(function (r) { return r === ring ? Promise.resolve(d) : fetch("/api/v1/security?ring=" + r + "&arch=" + arch).then(function (x) { return x.json(); }).catch(function () { return {}; }); })).then(function (reports) {
-      var tot = reports.map(function (x) { return countOf(openAt(x)); });
+      var tot = reports.map(function (x) { return advisoryCounts(advisoriesAt(x, conf)); });
       $("#sc-chart").innerHTML = stacked(["edge", "rc", "stable"], [{ name: "exploited", color: C.red, values: [2, 1, 0].map(function (i) { return tot[i].kev; }) }, { name: "critical + high", color: C.amber, values: [2, 1, 0].map(function (i) { return tot[i].rest.critical + tot[i].rest.high; }) }, { name: "medium", color: C.blue, values: [2, 1, 0].map(function (i) { return tot[i].rest.medium; }) }, { name: "low / unknown", color: C.dim, values: [2, 1, 0].map(function (i) { return tot[i].rest.low + tot[i].rest.unknown; }) }], { label: "Open advisories per ring by severity", full: true, empty: "no open advisory in any ring" });
     });
   }
@@ -84,14 +68,14 @@ __CHARTS__
     $("#updated").textContent = "Loading " + ring + " · " + arch + " — the report covers every package the ring serves, this takes a few seconds…";
     skeletonTiles("#tiles", 5); skeletonRows("#vuln", 7, 6);
     busy(fetch("/api/v1/security?ring=" + ring + "&arch=" + arch)).then(function (r) { return r.json(); }).then(function (d) {
-      var rows = openAt(d), c = countOf(rows);
+      var rows = advisoriesAt(d, conf), c = advisoryCounts(rows);
       setTiles("#tiles", [
-        ["Packages with open advisories", num(c.packages), "of what " + ring + " serves for " + arch + " · " + confWord()],
+        ["Packages with open advisories", num(c.packages), "of what " + ring + " serves for " + arch + " · " + confWord(conf)],
         ["Critical / high", num(c.critical) + " / " + num(c.high), num(c.medium) + " medium · " + num(c.low) + " low · " + num(c.unknown) + " unknown"],
         ["Exploited in the wild", num(c.kev), "CISA KEV"],
         ["Fix available in another ring", num(rows.filter(function (r) { return r.v.fixed_in.length; }).length), "fast-track candidates"],
         // The report's own number, whatever the picker: exposure follows the confident advisories (exact, name-version), never a name-only one.
-        ["Packages exposed", num(d.totals && d.totals.exposed || 0), "depend on, or load a library of, a package with a confident advisory — exact or name-version, whatever the picker"]
+        ["Packages exposed", num(d.totals && d.totals.exposed || 0), "depend on, or load a library of, a package with a confident advisory"]
       ]);
       $("#updated").textContent = (d.updated_at ? "Advisories refreshed " + ago(d.updated_at) + " · " : "No security run recorded yet · ") + num(d.advisories_total) + " advisories in the index";
       renderFeeds(d); renderPerRing(d);
@@ -129,8 +113,8 @@ export function securityHtml(poolUrl: string, version: RunningVersion): string {
  * tiles, the feeds card and the table; the per-ring chart reuses it for the
  * ring on screen and reads the same endpoint once for each other ring, and
  * the arch picker asks it for the other architecture. The tiles, the table
- * and the chart count by one rule (openAt) at the confidence picked, and
- * say so. Nothing here changes with the role and nothing writes: the
+ * and the chart count by the shell's one rule (advisoriesAt) at the
+ * confidence picked, and say so. Nothing here changes with the role and nothing writes: the
  * endpoints that write advisories take the pipeline's job token.
  */
 export const SECURITY_COMPONENTS = (F: Fixture): Component[] => {
@@ -146,7 +130,7 @@ export const SECURITY_COMPONENTS = (F: Fixture): Component[] => {
       id: "security.pickers",
       page: "/security",
       anchor: ['id="pick-ring"', 'id="pick-arch"', 'id="pick-conf"'],
-      script: ['pick("#pick-ring"', 'pick("#pick-arch"', 'pick("#pick-conf"', 'RINGS = ["stable", "rc", "edge"]', 'ARCHES = ["x86_64", "aarch64"]', 'CONF = ["all", "exact + name-version", "exact"]', '{ url: "ring" }', '{ url: "arch" }', '{ url: "conf" }'],
+      script: ['pick("#pick-ring"', 'pick("#pick-arch"', 'pick("#pick-conf"', 'RINGS = ["stable", "rc", "edge"]', 'ARCHES = ["x86_64", "aarch64"]', 'SEC_CONFS.indexOf(q.get("conf")) >= 0 ? q.get("conf") : SEC_CONF', 'pick("#pick-conf", SEC_CONFS', '{ url: "ring" }', '{ url: "arch" }', '{ url: "conf" }'],
       reads: [{ path: "/api/v1/security?ring=stable&arch=aarch64", fields: ["ring", "arch", "vulnerable", "totals.packages"] }],
       visible: EVERYONE,
     },
@@ -162,11 +146,11 @@ export const SECURITY_COMPONENTS = (F: Fixture): Component[] => {
       id: "security.tiles",
       page: "/security",
       anchor: ['id="tiles"'],
-      // The tiles count what openAt() keeps at the confidence picked — the rule the table and the per-ring chart count by — and name the confidence; exposed is the report's own, said so.
+      // The tiles count what the shell's advisoriesAt() keeps at the confidence picked — the one rule the table, the per-ring chart, the Pool and the Pipeline count by — and name the confidence; exposed is the report's own.
       script: [
-        'fetch("/api/v1/security?ring=" + ring + "&arch=" + arch)', 'skeletonTiles("#tiles", 5)', 'setTiles("#tiles"', "confOk(a.match)", "openAt(d), c = countOf(rows)", "confWord()",
+        'fetch("/api/v1/security?ring=" + ring + "&arch=" + arch)', 'skeletonTiles("#tiles", 5)', 'setTiles("#tiles"', "advisoriesAt(d, conf), c = advisoryCounts(rows)", "confWord(conf)",
         '"Packages with open advisories"', '"Critical / high"', '"Exploited in the wild"', '"Fix available in another ring"', '"Packages exposed"',
-        "r.v.fixed_in.length", "d.totals.exposed", "whatever the picker",
+        "r.v.fixed_in.length", "d.totals.exposed", "with a confident advisory",
       ],
       reads: [{ path: report, fields: ["vulnerable", "vulnerable.0.advisories.0.match", "vulnerable.0.advisories.0.severity", "vulnerable.0.advisories.0.kev", "vulnerable.0.advisories.0.epss", "vulnerable.0.fixed_in", "totals.exposed"] }],
       visible: EVERYONE,
@@ -174,10 +158,10 @@ export const SECURITY_COMPONENTS = (F: Fixture): Component[] => {
     {
       id: "security.per-ring-chart",
       page: "/security",
-      // The chart counts each ring's report as the tiles count the one on screen (countOf over openAt, at the confidence picked, the report on screen reused), a package once: exploited first, the rest by worst severity.
-      anchor: ['<h3>Open advisories per ring <span id="sc-arch"></span></h3>', 'id="sc-chart"', "a package once, at the confidence picked — exploited first, then its worst severity"],
+      // The chart counts each ring's report as the tiles count the one on screen (the shell's advisoryCounts over advisoriesAt, at the confidence picked, the report on screen reused), a package once: exploited first, the rest by worst severity.
+      anchor: ['<h3>Open advisories per ring <span id="sc-arch"></span></h3>', 'id="sc-chart"', "by severity, a package once — edge catches fixes first, stable last"],
       script: [
-        'fetch("/api/v1/security?ring=" + r + "&arch=" + arch)', "r === ring ? Promise.resolve(d)", '"#sc-chart"', '"#sc-arch"', 'stacked(["edge", "rc", "stable"]', "countOf(openAt(x))",
+        'fetch("/api/v1/security?ring=" + r + "&arch=" + arch)', "r === ring ? Promise.resolve(d)", '"#sc-chart"', '"#sc-arch"', 'stacked(["edge", "rc", "stable"]', "advisoryCounts(advisoriesAt(x, conf))",
         "tot[i].kev", "tot[i].rest.critical", "tot[i].rest.high", "tot[i].rest.medium", "tot[i].rest.low", "tot[i].rest.unknown",
         '"Open advisories per ring by severity"', '"no open advisory in any ring"',
       ],

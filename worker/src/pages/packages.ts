@@ -266,7 +266,7 @@ const PACKAGE_SCRIPT = String.raw`
       var parts = [];
       if (f.owner) parts.push("brought by " + personLink(f.owner));
       if (f.category) parts.push('<span class="pill none">' + esc(f.category) + '</span>');
-      if (f.maintainers && f.maintainers.length) parts.push("maintained by " + f.maintainers.map(function (l) { return personLink(l); }).join(", "));
+      if (f.maintainers && f.maintainers.length) parts.push("maintained by " + f.maintainers.map(personLink).join(", "));
       if (f.approved_by) parts.push("approved by " + personLink(f.approved_by) + (f.approved_version ? " at " + esc(f.approved_version) : "") + " " + ago(f.approved_at));
       $("#maint").innerHTML = parts.join(" · ") + ' · <span class="muted">built and signed by the project; the contributor\'s build was the evidence</span>';
     } else if (mt.packager) {
@@ -300,16 +300,17 @@ const PACKAGE_SCRIPT = String.raw`
   // Who made it — the people, always: the contributor who brought the recipe, the
   // maintainer who rebuilt and approved it, the agents that drafted and audited;
   // for an upstream package, who packaged it there and that the pool mirrors it as is.
-  // The card's word (contributor, maintainer) is the half of the work; the icon's
-  // colour is the person's role from the maintainer set the shell reads — a
-  // maintainer who brought a package is green on both, not a guessed contributor.
+  // The card's caption is what the person did (brought by, approved by); the
+  // icon alone carries the role, from the maintainer set the shell reads — a
+  // maintainer who brought a package is green and captioned by the work, not
+  // called a contributor under a maintainer's icon.
   function renderWho(d, p) {
     var mt = d.maintenance || {}, f = mt.factory, c = (d.seal && d.seal.chain) || {}, cards = [];
     var card = function (av, k, b, s, href) { return (href ? '<a class="whoc" href="' + href + '">' : '<div class="whoc">') + av + '<div><div class="k">' + k + '</div><b>' + b + '</b><span>' + s + '</span></div>' + (href ? '</a>' : '</div>'); };
     if (f) {
       var sb = c.source_build || {};
-      cards.push(f.owner ? card(avatar(f.owner, null, "lg"), "contributor", esc(f.owner), "brought the recipe" + (sb.worker ? " · built it on " + esc(sb.worker) : ""), "/user/" + encodeURIComponent(f.owner)) : card('<span class="avatar lg">?</span>', "contributor", "unknown", "registered before the record kept owners"));
-      cards.push(f.approved_by ? card(avatar(f.approved_by, null, "lg"), "maintainer", esc(f.approved_by), "rebuilt it from the recipe on a trusted worker, approved it " + ago(f.approved_at), "/user/" + encodeURIComponent(f.approved_by)) : '<div class="whoc wait"><span class="avatar lg" style="border-color:var(--amber);color:var(--amber)">?</span><div><div class="k">maintainer</div><b>waiting for review</b><span>a maintainer decides' + (f.maintainers && f.maintainers.length ? ": " + f.maintainers.map(esc).join(", ") : "") + '</span></div></div>');
+      cards.push(f.owner ? card(avatar(f.owner, null, "lg"), "brought by", esc(f.owner), "brought the recipe" + (sb.worker ? " · built it on " + esc(sb.worker) : ""), userHref(f.owner)) : card('<span class="avatar lg">?</span>', "brought by", "unknown", "registered before the record kept owners"));
+      cards.push(f.approved_by ? card(avatar(f.approved_by, null, "lg"), "approved by", esc(f.approved_by), "rebuilt it from the recipe on a trusted worker, approved it " + ago(f.approved_at), userHref(f.approved_by)) : '<div class="whoc wait"><span class="avatar lg" style="border-color:var(--amber);color:var(--amber)">?</span><div><div class="k">approved by</div><b>waiting for review</b><span>a maintainer decides' + (f.maintainers && f.maintainers.length ? ": " + f.maintainers.map(esc).join(", ") : "") + '</span></div></div>');
       var au = c.audit;
       cards.push(card('<span class="avatar lg" style="border-color:var(--lilac);color:var(--lilac)">ai</span>', "agents", (sb.agent ? "drafted" : "no draft") + " · " + (au && au.verdict ? "audit " + esc(au.verdict) : au && au.status ? "audit " + esc(au.status) : "no audit"), (sb.agent ? "PKGBUILD drafted on the contributor\'s worker with " + esc(sb.agent) + "; " : "") + (au && au.agent ? "audit written on the review worker with " + esc(au.agent) + " — " : "") + "evidence, never a decision"));
     } else {
@@ -680,7 +681,7 @@ export const PACKAGE_COMPONENTS = (F: Fixture): Component[] => {
       id: "package.who-cards",
       page,
       anchor: ['id="who-section"', 'id="who"'],
-      script: ['"#who"', "renderWho", "mt.factory", 'avatar(f.owner, null, "lg")', 'avatar(f.approved_by, null, "lg")', "c.source_build", "sb.agent", "au.verdict", "p.source"],
+      script: ['"#who"', "renderWho", "mt.factory", 'avatar(f.owner, null, "lg"), "brought by"', 'avatar(f.approved_by, null, "lg"), "approved by"', "userHref(f.owner)", "c.source_build", "sb.agent", "au.verdict", "p.source"],
       reads: [
         { path: pkg, fields: ["maintenance.packager", "package.source", "seal.chain"] },
         { path: built, fields: ["maintenance.factory.owner", "maintenance.factory.approved_by", "maintenance.factory.approved_at", "maintenance.factory.maintainers", "seal.chain.source_build.worker", "seal.chain.source_build.agent", "seal.chain.audit.verdict", "seal.chain.audit.agent"] },

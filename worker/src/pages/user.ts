@@ -125,7 +125,7 @@ const SCRIPT = String.raw`
   var OPEN = {}, LATEST = {}, FACTORY = null, STORIES = {};
   // Share and Token at the top, for everyone: the link to this page is anyone's to post (it is public, everything on it is on the record anyway — no door, so no gate), the token the owner's to mint — POST /factory/token mints the caller's own, whoever's page the button is on, which is why nobody else's is live.
   function renderTop() {
-    var url = location.origin + "/user/" + encodeURIComponent(login);
+    var url = location.origin + userHref(login);
     $("#share-btn").innerHTML = SHARE_BTN + ' ' + gate(TOKEN_BTN, may("token"), reason("token"));
     $("#share-open").onclick = function () { ask({ title: "Share " + (isOwner(login) ? "your" : "this") + " profile", text: "This page is public — what it shows is what the pool recorded: packages, builds, decisions. Post the link wherever you like: a GitHub profile, LinkedIn, a blog.", value: url, copy: "Copy the link", confirm: null, cancel: "Close" }); };
     $("#token-open").onclick = function () {
@@ -207,8 +207,8 @@ const SCRIPT = String.raw`
         var acts = registered.indexOf(a) >= 0 ? buildBtn(name, a, running ? "a build is running" : pkg.blocked_at ? blockedWhy(name, pkg) : null, queued ? "name a worker, or take it out of the queue" : "this architecture only") : '';
         return archPanel(a, mine, nextStep(st, mine[0]), acts);
       }).join("");
-      // The package's page on the most stable ring that serves it and that ring's architecture — the story's rings put in the server's order (RINGS_TEXT), the shell's one address; a package in no ring yet opens on the shell's default.
-      var served = (st.rings || []).slice().sort(function (x, y) { return Object.keys(RINGS_TEXT).indexOf(x.ring) - Object.keys(RINGS_TEXT).indexOf(y.ring); })[0];
+      // The package's page on the most stable ring that serves it and that ring's architecture — the shell's servedRing over the story's rows, the shell's one address; a package in no ring yet opens on the shell's default.
+      var served = servedRing(st.rings);
       return head + requestBlock(st.request, may("request"), name, renewable, whyNot, reason("request")) + panels
         + '<p class="sub" style="margin:4px 0 0"><a href="' + pkgHref(name, served && served.ring, served && served.arch) + '">The package\'s page →</a>' + (st.rings && st.rings.length ? ' · in <b>' + esc(st.rings.map(function (r) { return r.ring + " (" + r.arch + ")"; }).join(", ")) + '</b>' : '') + '</p>';
   }
@@ -247,7 +247,7 @@ const SCRIPT = String.raw`
         'Or build it yourself first: <a href="/docs/workers">run the same image at home</a> with your own agent key; what passes there is what you queue here.',
       ]);
     };
-    if (a && a.decision === "approved") return 'Approved by ' + personLink(a.by) + ' ' + ago(a.created_at) + (rings.length ? ' — in <b>' + esc(rings.join(" · ")) + '</b>, signed by the pool; it earns rc and stable like every synced package.' : ' — the publish job carries it into edge.');
+    if (a && a.standing) return 'Approved by ' + personLink(a.by) + ' ' + ago(a.created_at) + (rings.length ? ' — in <b>' + esc(rings.join(" · ")) + '</b>, signed by the pool; it earns rc and stable like every synced package.' : ' — the publish job carries it into edge.');
     if (c.withdrawn) return 'The approval by ' + personLink(c.withdrawn.by) + ' was withdrawn by ' + personLink(c.withdrawn.withdrawn_by) + ': ' + esc(c.withdrawn.withdrawn_reason || '') + ' — another maintainer decides; ' + (own ? 'nothing to do on your side.' : 'nothing to do on the contributor\'s side.');
     if (a && a.decision === "rejected") return 'Rejected by ' + personLink(a.by) + ': <b>' + esc(a.note || '') + '</b>' + (own && cc ? again('the note above says what to change') : ' — the contributor fixes it and builds again.');
     if (pb && (pb.status === "queued" || pb.status === "leased")) return 'The project is building it again (<a href="/build/' + pb.id + '">#' + pb.id + '</a>) on a trusted worker, with the project\'s agent — then the trial, then a maintainer decides.' + (own ? ' Nothing on your side.' : '');
@@ -259,7 +259,7 @@ const SCRIPT = String.raw`
       var q = cc.queue ? '<b>' + cc.queue.position + ' of ' + cc.queue.total + '</b> in the shared queue for ' + esc(arch) : 'in the shared queue for ' + esc(arch);
       return 'Queued (<a href="/build/' + cc.id + '">#' + cc.id + '</a>) — ' + q + ': the best idle shared worker takes it' + (where ? ' — ' + esc(where.state) : '') + (own ? '; a worker of yours takes it at once. Press <b>Build ' + esc(arch) + '</b> to name a worker or to take it out of the queue.' : '.') + ' This page follows it.';
     }
-    if (cc && cc.status === "leased") return 'Building (<a href="/build/' + cc.id + '">#' + cc.id + '</a>) on ' + (cc.lease_owner ? wtId({ id: cc.lease_owner, owner: cc.owner }) : 'a worker') + (emulated ? ' — emulated' : '') + ' — this page follows it.';
+    if (cc && cc.status === "leased") return 'Building (<a href="/build/' + cc.id + '">#' + cc.id + '</a>) on ' + (cc.lease_owner ? wtId(cc.lease_owner) : 'a worker') + (emulated ? ' — emulated' : '') + ' — this page follows it.';
     if (cc && cc.status === "failed") return 'The build failed (<a href="/build/' + cc.id + '">#' + cc.id + '</a>)' + (cc.error ? ' — <b>' + esc(String(cc.error).slice(0, 160)) + '</b>' : '') + (own ? again(cc.attempts > 1 ? 'the agent tried ' + cc.attempts + ' times inside this build' : '') : ' — the contributor fixes it.');
     if (cc && cc.status === "cancelled") return 'Superseded (<a href="/build/' + cc.id + '">#' + cc.id + '</a>)' + (cc.error ? ' — ' + esc(String(cc.error).slice(0, 140)) : '') + '.';
     if (cc && cc.status === "staged") {
@@ -292,7 +292,8 @@ const SCRIPT = String.raw`
     setTiles("#tiles", [
       ["Packages", num(d.packages.length), "registered under this name"],
       ["Builds", num(c.total), num(c.staged) + " staged · " + num(c.published) + " published · " + num(c.failed) + " failed"],
-      ["Approvals", num(d.approvals.length), d.role === "maintainer" ? num(d.approved_packages.length) + " package(s) let into the pool" : "not a maintainer"],
+      // Every decision on the record under this name — approvals standing or withdrawn, rejections — as the Pipeline's "decisions per maintainer" counts them; how many stand is the subtitle's.
+      ["Decisions", num(d.approvals.length), d.role === "maintainer" ? num(d.approved_packages.length) + " package(s) let into the pool" : "not a maintainer"],
       ["Workers", num(wc.registered), num(wc.alive) + " alive now"]
     ]);
     // Sixteen weeks of what the record holds under this name: builds, decisions, packages touched.
@@ -326,9 +327,9 @@ const SCRIPT = String.raw`
       return '<tr class="pkrow" data-pkg="' + esc(p.name) + '"><td><button type="button" class="expand" data-expand="' + esc(p.name) + '" title="' + (open ? "close" : "the story, and what comes next") + '">' + (open ? "▾" : "▸") + '</button></td><td><a href="' + pkgHref(p.name, null, arches[0]) + '"><b>' + esc(p.name) + '</b></a></td><td>' + (p.category ? pillHtml("none", p.category) : '<span class="dim">—</span>') + '</td><td>' + (p.url ? '<a href="' + esc(p.url) + '">' + esc(p.url.replace(/^https?:\/\/(www\.)?(github\.com\/)?/, "")) + '</a>' : '<span class="dim">—</span>') + '</td><td class="arches">' + per + '</td><td>' + taskPill(p.status) + '</td><td class="muted stands" title="' + esc(p.detail || "") + '">' + esc(p.detail || "") + '</td></tr>'
         + (open ? '<tr class="pkopen" data-pkg="' + esc(p.name) + '"><td colspan="7"><div class="pkstory" data-story="' + esc(p.name) + '">' + (STORIES[p.name] ? storyHtml(p.name, STORIES[p.name]) : '<div class="muted">loading the story…</div>') + '</div></td></tr>' : '');
     }, { empty: "no package registered", after: function () { Object.keys(OPEN).forEach(function (n) { if (OPEN[n]) story(n); }); }, text: function (p) { return [p.name, p.category, p.status, p.detail].join(" "); } });
-    // ---- builds: the number is the build's page; the package's name its page on the build's architecture (a build says no ring: the shell's default); the worker that held it; the evidence, public, for whoever reads
+    // ---- builds: the number is the build's page; the package's name its page on the build's architecture and the ring the build is about (ringOfBuild: the lab for a staged one, the shell's default for the rest — the ring Review and the build's page link too); the worker that held it, the bare id whole where the listing has no row (no owner guessed); the evidence, public, for whoever reads
     pager("#builds", d.builds, function (t) {
-      return '<tr><td><a href="/build/' + t.id + '" title="the build, whole">' + t.id + '</a></td><td><a href="' + pkgHref(t.name, null, t.arch) + '"><b>' + esc(t.name) + '</b></a>' + (t.version ? ' <span class="mono muted">' + esc(t.version) + '</span>' : '') + '</td><td>' + esc(t.arch) + '</td><td>' + taskPill(t.status) + (t.queue ? ' <span class="dim" title="in the shared queue for ' + esc(t.arch) + '">' + t.queue.position + ' of ' + t.queue.total + '</span>' : '') + '</td><td>' + esc(t.reason || "") + (t.trust === "project" ? ' ' + pillHtml("ok", "the project", "the project's own build, from a contributor's evidence") : '') + '</td><td>' + (t.lease_owner ? wtId({ id: t.lease_owner, owner: t.lease_owner.indexOf(login + "-") === 0 ? login : (t.lease_owner.split("-")[0] || null) }) : t.pinned_to && t.status === "queued" ? '<span class="muted" title="asked for this worker only">waiting for ' + esc(wtShort(t.pinned_to)) + '</span>' : '<span class="muted">—</span>') + '</td><td>' + (dur(t.duration_ms) || "—") + '</td><td class="when">' + ago(t.created_at) + '</td><td>' + evidence(t) + '</td></tr>';
+      return '<tr><td><a href="/build/' + t.id + '" title="the build, whole">' + t.id + '</a></td><td><a href="' + pkgHref(t.name, ringOfBuild(t.status, null), t.arch) + '"><b>' + esc(t.name) + '</b></a>' + (t.version ? ' <span class="mono muted">' + esc(t.version) + '</span>' : '') + '</td><td>' + esc(t.arch) + '</td><td>' + taskPill(t.status) + (t.queue ? ' <span class="dim" title="in the shared queue for ' + esc(t.arch) + '">' + t.queue.position + ' of ' + t.queue.total + '</span>' : '') + '</td><td>' + esc(t.reason || "") + (t.trust === "project" ? ' ' + pillHtml("ok", "the project", "the project's own build, from a contributor's evidence") : '') + '</td><td>' + (t.lease_owner ? wtId(t.lease_owner) : t.pinned_to && t.status === "queued" ? '<span class="muted" title="asked for this worker only">waiting for ' + esc(wtShort(t.pinned_to)) + '</span>' : '<span class="muted">—</span>') + '</td><td>' + (dur(t.duration_ms) || "—") + '</td><td class="when">' + ago(t.created_at) + '</td><td>' + evidence(t) + '</td></tr>';
     }, { empty: "nothing built yet", text: function (t) { return [t.id, t.name, t.version, t.arch, t.status, t.reason, t.lease_owner].join(" "); } });
     // ---- approvals: last, with the build behind each
     if (d.approvals.length || d.role === "maintainer") {
@@ -338,7 +339,7 @@ const SCRIPT = String.raw`
         var standing = a.standing;
         var where = standing ? (a.rings && a.rings.length ? a.rings.map(function (r) { return pillHtml(r === "stable" ? "ok" : r === "rc" ? "blue" : r === "edge" ? "lilac" : "warn", r); }).join(" ") : '<span class="muted" title="approved, not served: the publish job did not run, or a later release dropped it">not served</span>') : '<span class="muted">—</span>';
         var act = ' ' + withdrawBtn(a, standing);
-        return '<tr><td class="when">' + ago(a.created_at) + '</td><td><a href="' + pkgHref(a.name, a.rings && a.rings[a.rings.length - 1], a.arch) + '">' + esc(a.name) + '</a> <span class="mono muted">' + esc(a.version || "") + '</span> <a class="dim" href="/build/' + a.task_id + '">#' + a.task_id + '</a></td><td>' + esc(a.arch) + '</td><td>' + (a.withdrawn_at ? taskPill("withdrawn", "withdrawn " + ago(a.withdrawn_at) + " by " + a.withdrawn_by + ": " + (a.withdrawn_reason || "")) : taskPill(a.decision)) + '</td><td>' + where + act + '</td><td class="muted">' + esc(a.withdrawn_at ? (a.withdrawn_reason || "") : (a.note || "")) + '</td></tr>';
+        return '<tr><td class="when">' + ago(a.created_at) + '</td><td><a href="' + pkgHref(a.name, servedRing(a.rings), a.arch) + '">' + esc(a.name) + '</a> <span class="mono muted">' + esc(a.version || "") + '</span> <a class="dim" href="/build/' + a.task_id + '">#' + a.task_id + '</a></td><td>' + esc(a.arch) + '</td><td>' + (a.withdrawn_at ? taskPill("withdrawn", "withdrawn " + ago(a.withdrawn_at) + " by " + a.withdrawn_by + ": " + (a.withdrawn_reason || "")) : taskPill(a.decision)) + '</td><td>' + where + act + '</td><td class="muted">' + esc(a.withdrawn_at ? (a.withdrawn_reason || "") : (a.note || "")) + '</td></tr>';
       }, { empty: "no decision yet" });
     }
     renderWorkers();
@@ -529,7 +530,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       id: "user.tiles",
       page,
       anchor: ['id="tiles"'],
-      script: ['"#tiles"', "d.build_counts", "d.approved_packages.length", "workerCounts(d.workers)", "wc.registered", "wc.alive"],
+      script: ['"#tiles"', "d.build_counts", '"Decisions", num(d.approvals.length)', "d.approved_packages.length", "workerCounts(d.workers)", "wc.registered", "wc.alive"],
       reads: [{ path: profile, fields: ["packages", "build_counts.total", "build_counts.staged", "build_counts.published", "build_counts.failed", "approvals", "approved_packages", "workers", "workers.0.revoked_at", "workers.0.alive"] }],
       visible: EVERYONE,
     },
@@ -609,9 +610,9 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       id: "user.story-next-step",
       page,
       anchor: ['id="packages"'],
-      script: ["function nextStep(", "cc.pinned_to", "cc.shared_after", "cc.queue", "audit.result.verdict", '"A request on the record"', "whereOptions(FACTORY.workers, arch, login, false)", "personLink(a.by)"],
+      script: ["function nextStep(", "cc.pinned_to", "cc.shared_after", "cc.queue", "audit.result.verdict", '"A request on the record"', "whereOptions(FACTORY.workers, arch, login, false)", "a && a.standing", "personLink(a.by)"],
       reads: [
-        { path: story, fields: ["chains.0.contributor.status", "chains.0.contributor.pinned_to", "chains.0.contributor.shared_after", "chains.0.contributor.attempts", "chains.0.contributor.pkgbuild_ref", "chains.0.contributor.version", "chains.0.contributor.error", "chains.0.contributor.result.vet.verdict", "chains.0.audit", "chains.0.score.items", "request.complete", "request.version", "rings"] },
+        { path: story, fields: ["chains.0.approval", "chains.0.contributor.status", "chains.0.contributor.pinned_to", "chains.0.contributor.shared_after", "chains.0.contributor.attempts", "chains.0.contributor.pkgbuild_ref", "chains.0.contributor.version", "chains.0.contributor.error", "chains.0.contributor.result.vet.verdict", "chains.0.audit", "chains.0.score.items", "request.complete", "request.version", "rings"] },
         { path: factory, fields: ["workers.0.id", "workers.0.alive", "workers.0.labels"] },
         // The people it names — who decided, who withdrew — are the shell's, their role from the maintainer set it reads once per page.
         { path: "/api/v1/factory/maintainers", fields: ["maintainers", "maintainers.0.login"] },
@@ -623,7 +624,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       id: "user.story-footer",
       page,
       anchor: ['id="packages"'],
-      script: ["pkgHref(name, served && served.ring, served && served.arch)", "Object.keys(RINGS_TEXT).indexOf(x.ring)", "st.rings.map"],
+      script: ["pkgHref(name, served && served.ring, served && served.arch)", "servedRing(st.rings)", "st.rings.map"],
       reads: [{ path: story, fields: ["rings"] }],
       visible: EVERYONE,
     },
@@ -648,7 +649,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       id: "user.builds-table",
       page,
       anchor: ['id="builds"', "<th>Evidence</th>"],
-      script: ['pager("#builds"', "pkgHref(t.name, null, t.arch)", "t.lease_owner", "t.pinned_to", "dur(t.duration_ms)", "t.queue", '/artifacts/build.log">log', '/artifacts/PKGBUILD">PKGBUILD', "evidence(t)"],
+      script: ['pager("#builds"', "pkgHref(t.name, ringOfBuild(t.status, null), t.arch)", "wtId(t.lease_owner)", "t.pinned_to", "dur(t.duration_ms)", "t.queue", '/artifacts/build.log">log', '/artifacts/PKGBUILD">PKGBUILD', "evidence(t)"],
       reads: [
         { path: profile, fields: ["builds.0.id", "builds.0.name", "builds.0.version", "builds.0.arch", "builds.0.status", "builds.0.reason", "builds.0.trust", "builds.0.lease_owner", "builds.0.pinned_to", "builds.0.duration_ms", "builds.0.created_at"] },
         { path: evidence(F.contributorTask, "build.log"), json: false },
@@ -722,7 +723,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       id: "user.approvals-table",
       page: `/user/${F.m2}`,
       anchor: ['id="approvals-section"', 'id="approvals"'],
-      script: ['"#approvals-section"', 'pager("#approvals"', "var standing = a.standing", "a.withdrawn_at", "a.rings", "pkgHref(a.name, a.rings && a.rings[a.rings.length - 1], a.arch)", "withdrawBtn(a, standing)", 'may("withdraw") && standing', '"nothing standing to withdraw"', "data-withdraw", '"/tasks/" + wid + "/withdraw"'],
+      script: ['"#approvals-section"', 'pager("#approvals"', "var standing = a.standing", "a.withdrawn_at", "a.rings", "pkgHref(a.name, servedRing(a.rings), a.arch)", "withdrawBtn(a, standing)", 'may("withdraw") && standing', '"nothing standing to withdraw"', "data-withdraw", '"/tasks/" + wid + "/withdraw"'],
       reads: [{ path: `/api/v1/users/${F.m2}`, fields: ["role", "approvals.0.task_id", "approvals.0.name", "approvals.0.arch", "approvals.0.version", "approvals.0.decision", "approvals.0.standing", "approvals.0.note", "approvals.0.created_at", "approvals.0.withdrawn_at", "approvals.0.rings", "approved_packages.0"] }],
       // The fixture's one approval was taken back by the build page's manifest, which walks before this one: nothing stands to withdraw.
       acts: [{ method: "POST", path: `/api/v1/factory/tasks/${F.projectTask}/withdraw`, body: { note: "the source is not the upstream's" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 404 } }],

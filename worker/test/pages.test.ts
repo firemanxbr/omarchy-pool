@@ -13,7 +13,7 @@ import worker from "../src/index";
 import { allComponents } from "../src/pages/components";
 import { HELPERS, MORE, NAV } from "../src/pages/layout";
 import { CHARTS } from "../src/pages/charts";
-import { scriptOf, seedDashboard, type Fixture } from "./fixture";
+import { ownScriptOf, scriptOf, seedDashboard, type Fixture } from "./fixture";
 // The router's own source, as text (Vite's ?raw): the routed pages are read from it, so a page added to index.ts without a way in fails here by name.
 import routerSource from "../src/index.ts?raw";
 
@@ -24,12 +24,11 @@ async function get(path: string, cookie?: string): Promise<Response> {
   return res;
 }
 
-// The page's own script is what follows the shell: page() splices HELPERS whole, so its last lines mark where the page's statements begin — a check on what a page draws must not read the shell's workerRow, avatar or personLink as the page's.
-const shellEnd = HELPERS.slice(-120);
+// The page's own script (the fixture's ownScriptOf), the shell proved spliced whole.
 function ownScript(html: string): string {
-  const script = scriptOf(html), at = script.indexOf(shellEnd);
-  expect(at, "the shell is spliced whole").toBeGreaterThan(0);
-  return script.slice(at + shellEnd.length);
+  const own = ownScriptOf(html);
+  expect(own, "the shell is spliced whole").not.toBeNull();
+  return own!;
 }
 
 // The pages are served over the fixture's data (test/fixture.ts): the package, the build and the person exist.
@@ -288,10 +287,10 @@ describe("dashboard pages", () => {
     const fixed = [...routerSource.matchAll(/path === "(\/[^"]*)"[^\n]*return html\(/g)].map((m) => m[1]);
     // The chapters written in markdown are one route (mdChapterAt); the fixture's examples of the parametric pages stand for their kind.
     const families: Record<string, string> = { "/build/": `/build/${F.projectTask}`, "/user/": `/user/${F.owner}`, "/package/": `/package/${F.pkg}` };
-    // What writes a family's address in a page's own script: a hand-written href, or the shell's renderer of it — a package's page has one address (pkgHref), a person one renderer (personLink, personChip, avatar, avatarIcon, and the worker row's owner through wtPerson).
+    // What writes a family's address in a page's own script: a hand-written href for a build, or the shell's one writer of it — a package's page has one address (pkgHref), a person one (userHref, and the renderers that write it: personLink, personChip, avatar, avatarIcon, and the worker row's owner through wtPerson).
     const writes: Record<string, RegExp> = {
       "/build/": /href=\\?["']\/build\//,
-      "/user/": /href=\\?["']\/user\/|\b(?:personLink|personChip|avatar|avatarIcon|wtPerson|workerRow)\(/,
+      "/user/": /\b(?:userHref|personLink|personChip|avatar|avatarIcon|wtPerson|workerRow)\(/,
       "/package/": /\bpkgHref\(/,
     };
     const routed = new Set<string>([...fixed, ...PAGES, ...Object.values(families)]);

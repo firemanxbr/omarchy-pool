@@ -29,6 +29,17 @@ export function version(env: Env): RunningVersion {
 }
 
 /**
+ * A source is late when its last sync is older than this. One number for
+ * the Status page's headline, its table and the shell's problem list: the
+ * headline said nine hours while the table marked rows late at six, on the
+ * same page (2026-09-18). The shell's nine won — a long import of one
+ * source makes the others wait their turn, and six flagged them for it.
+ * /api/v1/stats marks each coverage row `late` by it, and layout.ts hands
+ * it to every page script as LATE_MS, so the pages hold no copy.
+ */
+export const LATE_AFTER_HOURS = 9;
+
+/**
  * What each ring is, said once: the Pool page's cards, the Docs, Get
  * started and the status tiles read it from here (layout.ts hands it to
  * every page script as RINGS_TEXT). Promotion is by evidence, when the
