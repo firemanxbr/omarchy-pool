@@ -630,7 +630,11 @@ export async function handleComplete(id: number, request: Request, env: Env, act
   if (task.publish !== 0) {
     // What users get. A contributor's registration of this name is now
     // published, and the approval that led here keeps the task — the seal
-    // and the track record follow that link (docs/GOVERNANCE.md).
+    // and the track record follow that link (docs/GOVERNANCE.md). The link
+    // is history — which approval asked for this build — so it reads
+    // `decision` alone, a withdrawn approval included: an approval taken
+    // back since still asked; approve sets rebuild_task at once (#182), so
+    // this finds the approvals from before that flow, newest first.
     const answered = await env.DB.prepare("SELECT id FROM approvals WHERE name = ? AND arch = ? AND decision = 'approved' AND rebuild_task IS NULL ORDER BY id DESC LIMIT 1").bind(task.name, task.arch).first<{ id: number }>();
     await env.DB.batch([
       env.DB.prepare("UPDATE factory_packages SET status = 'published', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?")

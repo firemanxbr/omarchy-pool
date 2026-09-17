@@ -528,14 +528,22 @@ export async function handleReject(c: Contributor, id: number, request: Request,
  * and whether it stands (`standing`: approved and not withdrawn), so no
  * page counts a withdrawn approval as landed by reading `decision` alone
  * (#178 made an approval withdrawable; felix was "landed" on the Factory
- * and "withdrawn" on Review at once, 2026-09-17).
+ * and "withdrawn" on Review at once, 2026-09-17). An approval that stands
+ * and no ring serves is on its way only while its publish job is: the row
+ * carries the newest publish job of the approved build (`publish_status` —
+ * queued, leased, done, failed, cancelled; null before #182's flow) and the
+ * package's `blocked_at`, so a page says "publishing" of a job that is
+ * queued, not of a failed one or a blocked package.
  * One query over the factory's packages in the four rings: the ring table's
- * key is (ring, package_id), so every factory package costs four seeks.
+ * key is (ring, package_id), so every factory package costs four seeks; the
+ * publish job is found by the build's name, arch and id (idx_build_tasks_name).
  */
 export async function handleApprovals(env: Env): Promise<Response> {
   const [rows, served] = await Promise.all([
     env.DB.prepare(
-      `SELECT a.*, r.status AS rebuild_status, r.result_filename AS rebuild_result FROM approvals a LEFT JOIN build_tasks r ON r.id = a.rebuild_task ORDER BY a.id DESC LIMIT 100`,
+      `SELECT a.*, r.status AS rebuild_status, r.result_filename AS rebuild_result, fp.blocked_at,
+              (SELECT p.status FROM build_tasks p WHERE p.name = a.name AND p.arch = a.arch AND p.id > a.task_id AND p.kind = 'publish' AND json_extract(p.params, '$.task') = a.task_id ORDER BY p.id DESC LIMIT 1) AS publish_status
+         FROM approvals a LEFT JOIN build_tasks r ON r.id = a.rebuild_task LEFT JOIN factory_packages fp ON fp.name = a.name ORDER BY a.id DESC LIMIT 100`,
     ).all(),
     env.DB.prepare(
       `SELECT rp.ring, p.name, p.repo_arch AS arch FROM packages p JOIN ring_packages rp ON rp.package_id = p.id AND rp.ring IN (${ringsSql(RINGS)}) WHERE p.source = 'factory'`,

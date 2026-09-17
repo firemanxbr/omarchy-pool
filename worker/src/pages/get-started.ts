@@ -4,24 +4,32 @@
  * the optional thin client. `?ring=stable&arch=x86_64` preselects. The
  * sections by hand are the API's own words: the page is served with the
  * include GET /api/v1/pacman.conf answers for the picked ring and
- * architecture (getStartedSample, rendered by the same function), and the
- * script asks the same route again whenever the pick or the optional
- * sources change — nothing on the page derives the include itself.
+ * architecture — fetched by the router through the API's own edge cache at
+ * the address the script asks (sampleUrl), so the page and its script share
+ * one stored answer and a docs page bots crawl costs D1 once per colo per
+ * two minutes, not per view — and the script asks the same route again
+ * whenever the pick or the optional sources change; nothing on the page
+ * derives the include itself.
  */
 import { page } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
 import { escapeHtml } from "../html";
-import { pacmanInclude } from "../routes/setup";
 import type { Env } from "../index";
 import type { RunningVersion } from "../meta";
 
-/** The ring and the architecture the page opens on: the address's, else stable on x86_64 — the script's own rule. */
-const picked = (url: URL) => ({ ring: url.searchParams.get("ring") ?? "stable", arch: url.searchParams.get("arch") ?? "x86_64" });
+/** The ring and the architecture the page opens on: the address's, else the pool's default ring (the API's own fallback) on x86_64 — the script's rule too, spliced from here. */
+export interface Pick { ring: string; arch: string; defaultRing: string }
+export function picked(url: URL, env: Env): Pick {
+  return { ring: url.searchParams.get("ring") ?? env.DEFAULT_RING, arch: url.searchParams.get("arch") ?? "x86_64", defaultRing: env.DEFAULT_RING };
+}
 
-/** The include the page is served with, for the pick the address makes: what the API answers, at request time; null when the ring has no release for the architecture (or the pick is not one). */
-export function getStartedSample(env: Env, url: URL): Promise<string | null> {
-  const { ring, arch } = picked(url);
-  return pacmanInclude(env, ring, arch, new Set(), `${url.origin}/setup`);
+/** The API route for the pick, spelled as the script spells its fetch (`?ring=&arch=&with=`), so the edge cache's key is the same for both. */
+export function sampleUrl(url: URL, pick: Pick): URL {
+  const u = new URL("/api/v1/pacman.conf", url.origin);
+  u.searchParams.set("ring", pick.ring);
+  u.searchParams.set("arch", pick.arch);
+  u.searchParams.set("with", "");
+  return u;
 }
 
 /** The include as the page shows it: the API's text, each section's name in bold; without one, the script's own words for a ring that serves nothing yet. */
@@ -83,7 +91,8 @@ const body = (sample: string | null) => String.raw`
   </div>
 `;
 
-const SCRIPT = String.raw`
+/** The page's script: the default ring is the pool's (the API's fallback), and when the page was served with the include for the pick, the script knows it has that answer already. */
+const script = (pick: Pick, served: boolean) => String.raw`
   var RINGS = ["stable", "rc", "edge", "lab"], ARCHES = ["x86_64", "aarch64"];
   // Three questions, one recommendation — the ring the command below uses.
   var QUIZ = [["rely", "This machine matters to me — I cannot afford a broken morning."], ["early", "I want to see problems before everyone else does."], ["ci", "This is a CI runner or a throwaway VM."], ["build", "I am trying a build of the factory before it is approved."]], quiz = {};
@@ -96,12 +105,12 @@ const SCRIPT = String.raw`
   }
   var DESC = {}; Object.keys(RINGS_TEXT).forEach(function (r) { DESC[r] = RINGS_TEXT[r].desc; });
   var q = new URLSearchParams(location.search);
-  var ring = RINGS.indexOf(q.get("ring")) >= 0 ? q.get("ring") : "stable";
+  var ring = RINGS.indexOf(q.get("ring")) >= 0 ? q.get("ring") : ${JSON.stringify(pick.defaultRing)};
   var arch = ARCHES.indexOf(q.get("arch")) >= 0 ? q.get("arch") : "x86_64";
   var data = null, optional = {};
 
-  // The sections are the API's: /api/v1/pacman.conf for the pick and the optional sources switched on, asked again only when one of them changes (the served page already carries the answer for the address's pick); a late answer to an earlier pick is dropped.
-  var confKey = "", confSeq = 0;
+  // The sections are the API's: /api/v1/pacman.conf for the pick and the optional sources switched on, asked again only when one of them changes; the served page carries the answer for the address's pick, so confKey starts as that pick and the first draw asks nothing — unless the ring had no release, when the first draw asks and writes the words for it. A late answer to an earlier pick is dropped.
+  var confKey = ${served ? JSON.stringify(`${pick.ring}|${pick.arch}|`) : '""'}, confSeq = 0;
   function drawConf() {
     var withOptional = Object.keys(optional).filter(function (k) { return optional[k]; }).sort();
     var key = ring + "|" + arch + "|" + withOptional.join(",");
@@ -137,7 +146,7 @@ const SCRIPT = String.raw`
   liveStats(function (d) { data = d; draw(); }, 120000);
 `;
 
-export function getStartedHtml(poolUrl: string, version: RunningVersion, sample: string | null): string {
+export function getStartedHtml(poolUrl: string, version: RunningVersion, pick: Pick, sample: string | null): string {
   return page({
     path: "/docs/get-started",
     title: "Get started · omarchy-pool",
@@ -145,7 +154,7 @@ export function getStartedHtml(poolUrl: string, version: RunningVersion, sample:
     active: "docs",
     doc: "get-started",
     body: body(sample),
-    script: SCRIPT,
+    script: script(pick, sample !== null),
     poolUrl,
     version,
   });

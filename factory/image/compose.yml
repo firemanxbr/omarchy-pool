@@ -27,7 +27,7 @@ services:
     profiles: [community]
     environment:
       OMARCHY_WORKER_ROLE: broker
-      OMARCHY_WORKER_TOKEN: ${OMARCHY_WORKER_TOKEN:?the worker token from the Contributors page, shown once}
+      OMARCHY_WORKER_TOKEN: ${OMARCHY_WORKER_TOKEN:?the worker token from your page (/user/<login>), shown once}
       # Optional: your own agent — one key is enough (your key, your cost). The
       # builder drafts and corrects PKGBUILDs with it, through the broker;
       # the key never leaves this container. FACTORY_MODEL picks the model.
@@ -98,7 +98,7 @@ services:
     stop_grace_period: 3h
     security_opt: [label=disable]
     environment:
-      OMARCHY_WORKER_TOKEN: ${OMARCHY_WORKER_TOKEN:?the worker token from the Contributors page, shown once}
+      OMARCHY_WORKER_TOKEN: ${OMARCHY_WORKER_TOKEN:?the worker token from your page (/user/<login>), shown once}
       OMARCHY_WORKER_ROLE: ${OMARCHY_WORKER_ROLE:-}   # pool or review (docs: /docs/workers#roles)
       OMARCHY_WORK_DIR: ${OMARCHY_WORK_DIR:-${OMARCHY_WORKER_DIR}/work}   # the SAME path on the host and in the container
       WORKER_LABELS: '{"where":"${WHERE:-my-machine}"}'

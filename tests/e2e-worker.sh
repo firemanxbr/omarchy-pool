@@ -311,7 +311,7 @@ python3 -c 'import json,sys; d=json.load(sys.stdin); t=[t for t in d["staged"] i
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/claim" "${w3[@]}" -d '{"arch":"aarch64","kinds":["audit"]}')" == 204 ]] || { echo "a community worker never audits"; exit 1; }
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/claim" "${w1[@]}" -d '{"arch":"aarch64","kinds":["audit"],"agent":"anthropic/claude-sonnet-5","agent_status":"error","agent_error":"no answer"}')" == 204 ]] || { echo "the second agent must answer the probe before it audits"; exit 1; }
 au=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/claim" "${w1[@]}" -d '{"arch":"aarch64","kinds":["audit"],"agent":"anthropic/claude-sonnet-5","agent_status":"ok"}'); grep -q '"kind":"audit"' <<<"$au" && grep -q "\"task\":$c3_id" <<<"$au" || { echo "the project worker did not get the audit: $au"; exit 1; }
-# What the worker said it runs shows on the Factory page; the key itself never travels.
+# What the worker said it runs shows on the Workers page; the key itself never travels.
 facw=$(curl -s "$OMARCHY_API/api/v1/factory?limit=10&after=agent")
 python3 -c 'import json,sys; w=[w for w in json.load(sys.stdin)["workers"] if w["id"]=="w1"][0]; assert w["agent"]=="anthropic/claude-sonnet-5", w' <<<"$facw" || { echo "the worker's agent is not listed"; exit 1; }
 au_id=$(jq -r .task.id <<<"$au"); auj=(-H "authorization: Bearer $(jq -r .token <<<"$au")")

@@ -10,8 +10,9 @@
 import { page } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
 import { escapeHtml } from "../html";
-import type { RunningVersion } from "../meta";
+import { JOURNAL_KINDS, LATE_AFTER_HOURS, type RunningVersion } from "../meta";
 import { BUDGET_CAP_USD, BUDGET_GUARD_USD, BUDGET_WARN_USD, ESTIMATE_CADENCE } from "../cost";
+import { JOB_KINDS } from "../jobs";
 
 /** A row of the reference: the routes it documents, who may call them (the people table), what they do. */
 interface Row {
@@ -26,7 +27,7 @@ const READ: Row[] = [
   { routes: ["GET /version"], text: "The running release, its commit and when it was deployed." },
   { routes: ["GET /signing-key"], text: "The pool's public signing key (fingerprint, user id, armored) — what <code>pacman-key --add</code> imports." },
   { routes: ["GET /status"], text: "Service check, measured now: index (D1) and pool (R2) reachable, with timings. 503 when one is not. What <em>online</em> in the header means." },
-  { routes: ["GET /stats"], text: "Everything the overview shows in one response: rings, coverage (a source's row says <code>late</code> when its last sync is older than the pool's one threshold, nine hours), pool totals, chart series, the latest metrics snapshot, recent journal entries, OPR recipes by origin per ring (<code>provenance</code>), <code>any</code> packages stored once per architecture and what that costs (<code>any</code>). Cached 60 s." },
+  { routes: ["GET /stats"], text: `Everything the overview shows in one response: rings, coverage (a source's row says <code>late</code> when its last sync is older than the pool's one threshold, ${LATE_AFTER_HOURS} hours), pool totals, chart series, the latest metrics snapshot, recent journal entries, OPR recipes by origin per ring (<code>provenance</code>), <code>any</code> packages stored once per architecture and what that costs (<code>any</code>). Cached 60 s.` },
   { routes: ["GET /pacman.conf?ring=&arch=&with="], text: "The pacman.d include for a ring and an architecture — one section per database the ring serves right now, in the include's order; <code>with=</code> names the optional sources to keep. What <a href=\"/setup\">the setup script</a> writes, and what Get started shows." },
   { routes: ["GET /releases/:ring?fields=summary&arch="], text: "The ring's current release and a light row per package (name, version, arch, filename, sha256, sizes, description). This is what <code>omarchy-cli status</code> reads." },
   { routes: ["GET /releases/:ring?arch=&limit=&after=&release_id="], text: "Full manifests, paged (≤ 1000 per request; above 2000 packages paging is required): <code>page.next</code> names the row the next page starts after — pass it as <code>after=</code> (keyset; <code>offset=</code> still works). Add <code>include=files</code> for file lists. <code>release_id</code> pins a release across pages." },
@@ -38,7 +39,7 @@ const READ: Row[] = [
   { routes: ["GET /graph?ring=&arch=&targets=a,b"], text: "Dependency closure of the targets within the ring's release: the manifests <code>omarchy-cli check</code> evaluates." },
   { routes: ["GET /security/components"], text: "What the rings' packages embed — Go modules and crates.io crates from the binaries' build information — with the sha256 of every served object that embeds each; what the security job asks OSV about." },
   { routes: ["GET /security?ring=&arch="], text: "Packages in the ring with an open advisory: severity, confidence (exact / name-version / name-only), CVEs, exploited-in-the-wild and EPSS, rings already serving a clean version, how many packages it exposes. <code>GET /package/:name</code> carries the same per package plus what it is exposed through." },
-  { routes: ["GET /events?kind=&limit="], text: "The journal: sync, gate, promote, render, health, abi, rollback, deploy, gc, metrics." },
+  { routes: ["GET /events?kind=&limit="], text: `The journal, one line per ${JOURNAL_KINDS.filter((k) => k !== "all").join(", ")}; <code>kind=</code> filters to one. The <code>metrics</code> snapshot rides the same table and is a number, not a line.` },
   { routes: ["GET /pool/unreferenced?keep=3"], text: "What retention would delete now." },
   { routes: ["GET /cost"], text: `The month's estimated bill, line by line (D1, R2, Workers), the projection and the guard's state. Estimated ${ESTIMATE_CADENCE}; the lines: warn at US$ ${BUDGET_WARN_USD}, pause at US$ ${BUDGET_GUARD_USD}, cap US$ ${BUDGET_CAP_USD}.` },
 ];
@@ -77,7 +78,7 @@ const WRITE_PEOPLE: Row[] = [
   { routes: ["POST /factory/workers", "DELETE /factory/workers/:id", "POST /factory/workers/:id/mode", "POST /factory/workers/self/mode"], who: "contributor", text: "Register a worker (the token is shown once), revoke it, set whether it builds everyone's queue or its owner's packages only — from the page, or the worker itself through its token (<code>omarchy-worker share on|off</code>)." },
   { routes: ["POST /factory/tasks/:id/build", "POST /factory/tasks/:id/approve", "POST /factory/tasks/:id/reject", "POST /factory/tasks/:id/withdraw"], who: "maintainer", text: "Have the project build a contributor's staged package again (its agent, a trusted worker, its own recipe); approve the project's build into edge — the decision on the record, a publish job; send either back with a note; or take a standing approval back, the reason on the record. Never your own package — a withdrawal excepted: undoing is not deciding. A refusal answers the reason <code>can</code> gives." },
   { routes: ["POST /factory/packages/:name/category"], who: "maintainer", text: "Settle the package's category (<a href=\"/docs/governance#categories\">one of the list</a>) — at review or any time after; a <code>category</code> line in the journal says who and from what." },
-  { routes: ["POST /factory/jobs"], who: "maintainer", text: "Queue a pool job by hand (sync, promote, rollback, render, health, security, gc, enqueue) — what <code>pkg-repo job</code> calls." },
+  { routes: ["POST /factory/jobs"], who: "maintainer", text: `Queue a pool job by hand (${JOB_KINDS.join(", ")}) — what <code>pkg-repo job</code> calls.` },
   { routes: ["POST /factory/workers/:id/trust"], who: "maintainer", text: "Project trust on two maintainers' word: the first call proposes (<code>202</code>), a second maintainer's — never the same person's; the owner's counts as the second word, never the first — confirms; <code>{\"trust\":\"community\"}</code> takes it back at one word. Each step an event; the trust a signed record under <code>workers/&lt;id&gt;/</code>." },
   { routes: ["POST /factory/record/withdraw"], who: "maintainer", text: "<code>{key, reason}</code> — a record taken off the public bucket (a log that carried what it should not have); its signature and staging copy go with it, and a signed <code>&lt;key&gt;.tombstone.json</code> says who, why and what was there." },
   { routes: ["POST /factory/contributors/:login/block", "POST /factory/contributors/:login/unblock", "POST /factory/packages/:name/block", "POST /factory/packages/:name/unblock"], who: "maintainer", text: "The brake, with a reason on the record: a blocked contributor gets nothing more in (workers revoked, tasks cancelled, packages out of the rings, their projects closed to new accounts); a blocked package leaves every ring. Lifting is by another maintainer." },
@@ -104,7 +105,7 @@ ${rows(READ)}
 
   <section id="factory">
     <h2>The factory (read)</h2>
-    <p class="sub">What the Factory, Contributors, Review and profile pages show. Public, cached briefly.</p>
+    <p class="sub">What the factory's pages — Factory, Pipeline, Workers, People, Review, a person's — show. Public, cached briefly.</p>
     <div class="table-wrap"><table><thead><tr><th>Endpoint</th><th>What it returns</th></tr></thead><tbody>
 ${rows(FACTORY_READ)}
     </tbody></table></div>

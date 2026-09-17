@@ -8,7 +8,7 @@
  */
 import { page } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
-import type { RunningVersion } from "../meta";
+import { JOURNAL_KINDS, type RunningVersion } from "../meta";
 
 const BODY = String.raw`
   <div class="hero compact">
@@ -29,19 +29,6 @@ const BODY = String.raw`
   </section>
 `;
 
-/**
- * Every kind of line the journal serves, for the filter's chips and for
- * `?kind=`: the pool's jobs as the CLI posts them (sync, gate, promote,
- * fast-track, health, abi, security, render, publish, verify, rollback,
- * relayout, gc), what the Worker writes on its own (deploy, cost, audience,
- * provenance, dispatch, job, build, enqueue) and what people do on the
- * record (request, review, approve, withdraw, trust, role, block, category,
- * bump, worker, leak). A page that links `/journal?kind=<k>` names one of
- * these — pages.test.ts reads every such link against this list — and a
- * kind missing here is a filter that falls back to all without a word.
- * The metrics snapshot is left out: it is a number, not a line.
- */
-export const JOURNAL_KINDS = ["all", "sync", "gate", "promote", "fast-track", "health", "abi", "security", "render", "publish", "verify", "rollback", "relayout", "gc", "deploy", "cost", "audience", "provenance", "dispatch", "job", "build", "enqueue", "request", "review", "approve", "withdraw", "trust", "role", "block", "category", "bump", "worker", "leak"];
 
 const SCRIPT = String.raw`
   skeletonRows("#events", 7, 8); skeletonRows("#releases", 9, 4);

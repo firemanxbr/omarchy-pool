@@ -14,8 +14,12 @@ const PROMISED: readonly string[] = PROMOTED_RINGS;
 const ALL_RINGS: readonly string[] = RINGS;
 const ARCHES = ["x86_64", "aarch64"];
 
+/** The jobs a maintainer may queue by hand — the switch below, one case each; the API page's row and `pkg-repo job`'s refusal name this list. */
+export const JOB_KINDS = ["sync", "promote", "rollback", "render", "health", "security", "enqueue", "gc", "verify", "relayout", "trial"] as const;
+
 export async function handleQueueJob(c: Contributor, request: Request, env: Env): Promise<Response> {
   const b = (await request.json()) as { kind?: string; params?: Record<string, unknown>; arch?: string };
+  if (!(JOB_KINDS as readonly string[]).includes(b.kind ?? "")) return json({ error: `kind must be one of ${JOB_KINDS.join(", ")}` }, 400);
   const p = b.params ?? {};
   const s = (k: string) => (typeof p[k] === "string" ? (p[k] as string) : "");
   let job: { kind: string; params: Record<string, string>; arch: string };
@@ -93,7 +97,8 @@ export async function handleQueueJob(c: Contributor, request: Request, env: Env)
       break;
     }
     default:
-      return json({ error: "kind must be one of sync, promote, rollback, render, health, security, enqueue, gc, verify, relayout, trial" }, 400);
+      // Unreachable: the kind was checked against JOB_KINDS above; lists.test.ts holds the cases to that list.
+      return json({ error: `kind must be one of ${JOB_KINDS.join(", ")}` }, 400);
   }
   const id = await createJob(env, job, `queued by ${c.login}`);
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('dispatch', ?, ?, 'ok', ?, ?)")

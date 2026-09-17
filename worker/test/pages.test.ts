@@ -13,8 +13,8 @@ import worker from "../src/index";
 import { allComponents } from "../src/pages/components";
 import { HELPERS, MORE, NAV, termId } from "../src/pages/layout";
 import { DOCS_TREE, GLOSSARY } from "../src/pages/docs-tree";
-import { JOURNAL_KINDS } from "../src/pages/journal";
 import { CHARTS } from "../src/pages/charts";
+import { JOURNAL_KINDS } from "../src/meta";
 import { ownScriptOf, scriptOf, seedDashboard, type Fixture } from "./fixture";
 // The router's own source, as text (Vite's ?raw): the routed pages are read from it, so a page added to index.ts without a way in fails here by name.
 import routerSource from "../src/index.ts?raw";
@@ -123,6 +123,7 @@ describe("dashboard pages", () => {
     chapters.set("/docs/glossary", new Set(GLOSSARY.map(([term]) => termId(term))));
     const FORBIDDEN: [RegExp, string][] = [
       [/Factory page/, "/factory is the assembly line (#169): workers and agents are on /workers, staged builds on /review, a person's record on /user/<login>, the queue on /pipeline"],
+      [/Contributors page|Contributors,? Review/, "there is no Contributors page: the people are on /people, a person's record on /user/<login>, the workers on /workers"],
       [/Trust table/, "there is no trust table: a maintainer trusts a worker through the API, and who did is in the worker id's tooltip on /workers"],
       [/recipe pending|waiting for the recipe/, "the recipe-on-main flow is retired (#182): an approval carries the project's build (rebuild_task), always"],
       [/press (?:<b>)?Build(?:<\/b>)? on your page|picks it up within a minute/, "a request builds by itself in the shared queue, the best idle worker first (#182); the owner's Build is for a worker of their own or a re-run"],
@@ -153,7 +154,7 @@ describe("dashboard pages", () => {
     const journal = ownScript(await (await get("/journal")).text());
     expect(journal).toContain(`var KINDS = ${JSON.stringify(JOURNAL_KINDS)}`);
     expect(journal).toContain('KINDS.indexOf(qs.get("kind")) >= 0 ? qs.get("kind") : "all"');
-    for (const k of ["role", "withdraw", "review", "request", "audience", "fast-track", "build", "promote", "rollback", "sync"]) expect(JOURNAL_KINDS, k).toContain(k);
+    for (const k of ["role", "withdraw", "review", "request", "audience", "fast-track", "trial", "build", "promote", "rollback", "sync"]) expect(JOURNAL_KINDS, k).toContain(k);
   });
 
   // Every name a page's script uses is declared somewhere in that script (the shell's helpers, the charts, the page's own) or is the browser's — parsed, not grepped: a helper moved out of one page and dropped from another is a ReferenceError the tests would not otherwise see (the Workers page lost perDay() and COLOR that way, 2026-09-17).

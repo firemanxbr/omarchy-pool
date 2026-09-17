@@ -311,7 +311,7 @@ enum Command {
         /// Code) — the worker owner's key, never the pool's.
         #[arg(long = "kind")]
         kinds: Vec<String>,
-        /// Free JSON shown on the Factory page, e.g. {"where":"droplet-1"}.
+        /// Free JSON shown on the Workers page (the id's tooltip), e.g. {"where":"droplet-1"}.
         #[arg(long, default_value = "{}")]
         labels: String,
         /// Do one task and exit.
@@ -651,7 +651,7 @@ fn main() -> Result<()> {
             });
             let queued = api(&remote)?.post_json("/factory/jobs", &body)?;
             println!(
-                "queued as task {} ({} — a project worker runs it; the Factory page follows it)",
+                "queued as task {} ({} — a project worker runs it; the Pipeline follows it)",
                 queued["task"],
                 queued["job"]["kind"].as_str().unwrap_or(&kind)
             );

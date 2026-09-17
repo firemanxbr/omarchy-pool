@@ -1,7 +1,7 @@
 /**
  * /request — the package request, on a page of its own: nothing to look at
  * but the four fields and the four confirmations. Linked from the footer
- * and from the Factory page's first way; a contributor lands here to ask
+ * and from the Factory's first way; a contributor lands here to ask
  * for one thing. The page is the same for whoever opens it: the form is
  * served for everyone, its fields grey with the sign-in as the reason
  * until whoami answers with a person, live then — signed in with GitHub
@@ -14,9 +14,10 @@ import { page, servedGrey, GITHUB_ICON } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 import { CHECKLIST } from "../request";
+import { escapeHtml } from "../html";
 
-/** A confirmation as the form asks it: the checklist's sentence (src/request.ts, the one text) as a line — capitalised, a full stop. */
-const asLine = (s: string) => `${s.charAt(0).toUpperCase()}${s.slice(1)}.`;
+/** A confirmation as the form asks it: the checklist's sentence (src/request.ts, the one text) as a line — capitalised, a full stop, escaped as the chapter's copy is by the markdown renderer. */
+const asLine = (s: string) => escapeHtml(`${s.charAt(0).toUpperCase()}${s.slice(1)}.`);
 
 /**
  * The form's fields are one template drawn twice: served grey for everyone

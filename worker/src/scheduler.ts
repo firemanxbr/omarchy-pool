@@ -194,7 +194,7 @@ export function isDue(rule: Rule, runs: RunSummary[], now: Date): { due: boolean
  * Per architecture: what is queued for a project worker, and how many are
  * alive and idle. Nothing starts a worker: GitHub runs CI and the release
  * only, so when no project worker is alive the jobs wait and the log says
- * so (the Factory page too).
+ * so (the Workers page too).
  */
 export async function factoryDemand(env: Env, now = new Date()): Promise<{ arch: string; queued: number; alive: number; pool: number }[]> {
   // "alive" here means alive *and idle*: a worker busy with a nine-hour

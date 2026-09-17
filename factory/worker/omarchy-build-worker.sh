@@ -26,7 +26,7 @@
 #   OMARCHY_BROKER         http://broker:8790 — the broker that holds the credentials; then none of the next three is needed here
 #   OMARCHY_WORKER_TOKEN   this worker's token (POST /factory/workers, shown once); FACTORY_TOKEN is an accepted alias
 #   WORKER_ID              the registered worker id (shown with the token; the image reads it from the broker)
-#   WORKER_LABELS          JSON shown on the Factory page, e.g. {"where":"laptop"}
+#   WORKER_LABELS          JSON shown on the Workers page (the id's tooltip), e.g. {"where":"laptop"}
 #   WORKER_SHARED          1 = build anyone's community packages (donated compute); default: the owner's only
 #   ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, XAI_API_KEY, CLAUDE_CODE_OAUTH_TOKEN
 #                          the worker owner's agent key, if any (one is enough): drafts and corrects PKGBUILDs
@@ -69,7 +69,7 @@ with_secrets() { # command... — run with the agent's keys in its environment
 
 # The agent this worker runs, as "<provider>/<model>" (the same choice
 # factory/bin/agent.py makes), or "" without a key — reported at claim time
-# so the Factory page can show it; the key itself never leaves this machine.
+# so the Workers page can show it; the key itself never leaves this machine.
 BROKER_AGENT=""  # what the broker's /health says its agent is (provider/model), in broker mode
 # The release this image was built from (the Containerfile sets OMARCHY_IMAGE
 # from the tag; pkg-repo in the image says the same), so the Workers page

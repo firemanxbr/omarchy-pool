@@ -75,11 +75,11 @@ export function isRing(s: string): s is Ring {
 }
 
 /**
- * A ring list as a SQL `IN (…)` fragment, `'lab', 'edge', 'rc', 'stable'`,
- * to splice into a query. The values are the constants above, never a
- * caller's input: a name that is not plain lowercase letters throws
- * rather than reaching the query, so the fragment can only ever be the
- * rings' own names.
+ * A ring list as a SQL `IN (…)` fragment in the list's own order (an IN
+ * list has none) — `'edge', 'rc', 'stable', 'lab'` for RINGS — to splice
+ * into a query. The values are the constants above, never a caller's
+ * input: a name that is not plain lowercase letters throws rather than
+ * reaching the query, so the fragment can only ever be the rings' own names.
  */
 export function ringsSql(rings: readonly Ring[]): string {
   for (const r of rings) if (!/^[a-z]+$/.test(r)) throw new Error(`not a ring name: ${r}`);
@@ -144,17 +144,52 @@ export function sourceRank(source: string): number {
   return i < 0 ? REPO_ORDER.length : i;
 }
 
+/** A rendered repository's name, `omarchy-<source>-<ring>`, with the rings' own names — built once: sourceOfRepo runs in sort comparators. */
+const REPO_NAME = new RegExp(`^omarchy-(.+)-(${RINGS.join("|")})$`);
 /** The source a rendered repository lists: `omarchy-<source>-<ring>` → `<source>`; null for any other name. */
 export function sourceOfRepo(repo: string): string | null {
-  const m = repo.match(new RegExp(`^omarchy-(.+)-(${RINGS.join("|")})$`));
+  const m = repo.match(REPO_NAME);
   return m ? m[1] : null;
 }
+
+/**
+ * Every kind of line the journal serves — the filter's chips, `?kind=`,
+ * and the API page's row on GET /events read this one list: the pool's
+ * jobs as the CLI posts them (sync, gate, promote, fast-track, health,
+ * trial, abi, security, render, publish, verify, rollback, relayout, gc),
+ * what the Worker writes on its own (deploy, cost, audience, provenance,
+ * dispatch, job, build, enqueue) and what people do on the record
+ * (request, review, approve, withdraw, trust, role, block, category, bump,
+ * worker, leak). A page that links `/journal?kind=<k>` names one of these
+ * — pages.test.ts reads every such link against this list — and a kind
+ * missing here is a filter that falls back to all without a word. The
+ * metrics snapshot is left out: it is a number, not a line.
+ */
+export const JOURNAL_KINDS = ["all", "sync", "gate", "promote", "fast-track", "health", "trial", "abi", "security", "render", "publish", "verify", "rollback", "relayout", "gc", "deploy", "cost", "audience", "provenance", "dispatch", "job", "build", "enqueue", "request", "review", "approve", "withdraw", "trust", "role", "block", "category", "bump", "worker", "leak"];
+
+/**
+ * The projects the pool takes packages from, by the host a sync reads, each
+ * with the keyring its packages verify against — one keyring per upstream,
+ * said once: How it works' table and its sources figure draw it from here.
+ * A source whose upstream is not listed does not typecheck.
+ */
+export const UPSTREAMS = {
+  "mirror.omarchy.org": { keyring: "archlinux-keyring" },
+  "os.archlinuxarm.org": { keyring: "archlinuxarm-keyring" },
+  "pkgs.omarchy.org": { keyring: "Omarchy's key" },
+  "github.com/maralcbr/omarchy-pkgs": { keyring: "the fork's key" },
+  "github.com/asahi-alarm/asahi-alarm": { keyring: "asahi-alarm-keyring" },
+  "builds.garudalinux.org": { keyring: "chaotic-keyring" },
+  "the factory": { keyring: "the pool's key" },
+} as const;
+export type Upstream = keyof typeof UPSTREAMS;
 
 /**
  * Every upstream repository the pipeline mirrors (the SOURCES table of
  * SYNC_SOURCES in scheduler.ts), so the dashboard can show what has not been synced yet.
  */
-export const EXPECTED_SOURCES: { source: string; arch: string; upstream: string; optional?: boolean; title: string }[] = [
+export interface ExpectedSource { source: string; arch: string; upstream: Upstream; optional?: boolean; title: string }
+export const EXPECTED_SOURCES: ExpectedSource[] = [
   { source: "core", arch: "x86_64", upstream: "mirror.omarchy.org", title: "Arch Linux core" },
   { source: "extra", arch: "x86_64", upstream: "mirror.omarchy.org", title: "Arch Linux extra" },
   { source: "multilib", arch: "x86_64", upstream: "mirror.omarchy.org", title: "Arch Linux multilib" },

@@ -18,6 +18,7 @@ import contributing from "../docs/contributing.md";
 import proofOfConcept from "../docs/proof-of-concept.md";
 import openWork from "../docs/open-work.md";
 import { CHECKLIST } from "../request";
+import { ESTIMATE_CADENCE } from "../cost";
 import omarchyCliMcp from "../docs/omarchy-cli-mcp.md";
 import whatWeTest from "../docs/what-we-test.md";
 // The skills the agents read (factory/skills), spliced into the What we test chapter: one text, two readers.
@@ -88,14 +89,17 @@ export const SKILLS: { file: string; text: string }[] = [
   { file: "factory/skills/groups/prebuilt-binaries.md", text: skillPrebuiltBinaries },
 ];
 const WHAT_WE_TEST = whatWeTest.replace("<!-- skills -->", SKILLS.map((s) => s.text.trim()).join("\n\n"));
-/** The four confirmations where the factory chapter names them: the request form's own sentences (CHECKLIST, src/request.ts), never a paraphrase. */
-const FACTORY = factory.replace("<!-- checklist -->", Object.values(CHECKLIST).join("; "));
+/** The four confirmations where the factory chapter names them: the request form's own sentences (CHECKLIST, src/request.ts), never a paraphrase — one item each, nested under the step (markdown.ts nests a list by its indent). */
+const FACTORY = factory.replace("<!-- checklist -->", Object.values(CHECKLIST).map((s) => `   - ${s}`).join("\n"));
+
+/** The cost estimate's cadence where the runbook names it: cost.ts's word (ESTIMATE_CADENCE), the API page's and the Pipeline's. */
+const RUNBOOK = runbook.replace(/<!-- estimate-cadence -->/g, ESTIMATE_CADENCE);
 
 export const MD_CHAPTERS: MdChapter[] = [
   { key: "omarchy-cli-mcp", label: "omarchy-cli as an MCP server", text: omarchyCliMcp, from: "docs", group: "pool" },
   { key: "what-we-test", label: "What we test", text: WHAT_WE_TEST, from: ".", group: "pool" },
   { key: "architecture", label: "Architecture", text: architecture, from: "docs", group: "code" },
-  { key: "runbook", label: "Runbook", text: runbook, from: "docs", group: "code" },
+  { key: "runbook", label: "Runbook", text: RUNBOOK, from: "docs", group: "code" },
   { key: "testing", label: "Testing", text: testing, from: "docs", group: "code" },
   { key: "migration", label: "Migration", text: migration, from: "docs", group: "code" },
   { key: "factory", label: "The factory", text: FACTORY, from: "factory", group: "code" },

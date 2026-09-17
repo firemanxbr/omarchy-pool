@@ -806,7 +806,7 @@ pub fn fast_track(api: &Api, opts: &FastTrackOptions<'_>) -> Result<FastTrackRep
         created.release.id, created.release.seq
     );
     api.post_event(&serde_json::json!({
-        "kind": "fasttrack",
+        "kind": "fast-track",
         "ring": opts.ring,
         "source": opts.from,
         "status": "ok",

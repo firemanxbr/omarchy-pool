@@ -8,45 +8,42 @@
  */
 import { page } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
-import { ringsDiagram, sourcesDiagram, type Stage } from "./diagrams";
+import { ringsDiagram, sourceBoxes, sourcesDiagram, type Stage } from "./diagrams";
 
 const STAGES: Stage[] = ["sync", "pin", "promote", "render", "serve"];
 import type { RunningVersion } from "../meta";
-import { EXPECTED_SOURCES, REPO_URL } from "../meta";
+import { EXPECTED_SOURCES, REPO_URL, UPSTREAMS, type ExpectedSource } from "../meta";
 import { DOCS_TREE } from "./docs-tree";
 import { escapeHtml } from "../html";
 
 /**
- * What the page adds to the sources the code names: the keyring an
- * upstream's packages verify against, and a word on where a source sits.
- * The rows themselves are EXPECTED_SOURCES (meta.ts) — a source added there
- * gets a row here with these cells empty, never a row typed by hand.
+ * A word on where a source sits, beside the row EXPECTED_SOURCES gives it
+ * (meta.ts; the keyring is UPSTREAMS', per upstream) — keyed by upstream
+ * where the note is about the project (Arch's [testing]), by source where
+ * it is about the section's place in the include.
  */
-const SIGNED_BY: Record<string, string> = {
-  "mirror.omarchy.org": "<code>archlinux-keyring</code>",
-  "os.archlinuxarm.org": "<code>archlinuxarm-keyring</code>",
-  "pkgs.omarchy.org": "Omarchy's key",
-  "github.com/maralcbr/omarchy-pkgs": "the fork's key",
-  "github.com/asahi-alarm/asahi-alarm": "<code>asahi-alarm-keyring</code>",
-  "builds.garudalinux.org": "<code>chaotic-keyring</code>",
-  "the factory": "the pool's key",
+const UPSTREAM_NOTES: Partial<Record<keyof typeof UPSTREAMS, string>> = {
+  "mirror.omarchy.org": "the released repositories; <code>[testing]</code> is not an input",
 };
 const SOURCE_NOTES: Record<string, string> = {
-  core: "the released repositories; <code>[testing]</code> is not an input",
   packages: "the OPR's <code>edge</code> channel only; its <code>rc</code> and <code>stable</code> channels are not an input — the OPR earns <code>rc</code> and <code>stable</code> here like every other source",
   asahi: "above the OPR in the include: on a Mac, its builds win",
   "asahi-alarm": "above everything else, on a Mac",
   factory: "packages nobody ships yet",
 };
 
+/** A keyring as the table shows it: a package's name in code, a project's key in words. */
+const keyringOf = (e: ExpectedSource) => { const k = UPSTREAMS[e.upstream].keyring; return /-keyring$/.test(k) ? `<code>${k}</code>` : escapeHtml(k); };
+
 /** One row per source and architecture of EXPECTED_SOURCES, in its order: the source, what it is, the architecture, its keyring, where it enters. */
 function sourceRows(): string {
   return EXPECTED_SOURCES.map((e) => {
     const enters = e.source === "factory" ? "the <code>lab</code>, then <code>edge</code> on a maintainer's approval" : "<code>edge</code>";
     const optional = e.optional ? ` <span class="muted">optional</span>` : "";
-    const note = [e.optional ? `only names no other source provides; on a machine only with <code>--with ${escapeHtml(e.source)}</code>` : "", SOURCE_NOTES[e.source] ?? ""].filter(Boolean).join("; ");
+    // An optional source's title already says it carries only names no other source provides; the note says how to switch it on.
+    const note = [e.optional ? `on a machine only with <code>--with ${escapeHtml(e.source)}</code>` : "", UPSTREAM_NOTES[e.upstream] ?? "", SOURCE_NOTES[e.source] ?? ""].filter(Boolean).join("; ");
     const project = e.source === "factory" ? `${escapeHtml(e.title)} (<a href="/factory">Factory</a>)` : `${escapeHtml(e.title)} — <code>${escapeHtml(e.upstream)}</code>`;
-    return `      <tr><td><code>${escapeHtml(e.source)}</code>${optional}</td><td>${project}</td><td>${escapeHtml(e.arch)}</td><td>${SIGNED_BY[e.upstream] ?? ""}</td><td>${enters}</td><td>${note}</td></tr>`;
+    return `      <tr><td><code>${escapeHtml(e.source)}</code>${optional}</td><td>${project}</td><td>${escapeHtml(e.arch)}</td><td>${keyringOf(e)}</td><td>${enters}</td><td>${note}</td></tr>`;
   }).join("\n");
 }
 
@@ -206,7 +203,8 @@ const SCRIPT = String.raw`
     $("#stage-figure").innerHTML = (art ? art.innerHTML : "") + '<figcaption><b style="color:var(--text)">' + t[0] + '.</b> ' + t[2] + '</figcaption>';
   }
   drawStage();
-  var GROUPS = { "src-arch": [["core", "x86_64"], ["extra", "x86_64"], ["multilib", "x86_64"]], "src-alarm": [["core", "aarch64"], ["extra", "aarch64"], ["alarm", "aarch64"]], "src-opr": [["packages", "x86_64"], ["packages", "aarch64"]], "src-asahi": [["asahi", "aarch64"]], "src-asahi-alarm": [["asahi-alarm", "aarch64"]], "src-optional": [["chaotic", "x86_64"], ["aur", "aarch64"]] };
+  // The figure's boxes, each with the (source, architecture) rows of coverage it sums — the same grouping the server drew the boxes from (sourceBoxes, diagrams.ts).
+  var GROUPS = ${JSON.stringify(Object.fromEntries(sourceBoxes().map((b) => [b.id, b.entries.map((e) => [e.source, e.arch])])))};
   liveStats(function (d) {
     var cov = d.coverage || [];
     Object.keys(GROUPS).forEach(function (k) {
@@ -269,9 +267,9 @@ export const HOW_IT_WORKS_COMPONENTS = (_F: Fixture): Component[] => {
       anchor: [
         '<div class="chart" style="padding:18px">',
         'aria-label="Arch Linux, Arch Linux ARM, the OPR\'s edge channel',
-        ...["src-arch", "src-alarm", "src-opr", "src-asahi", "src-asahi-alarm", "src-optional", "stored-once", "edge-head", "rc-head", "stable-head"].map((k) => `data-live="${k}"`),
+        ...[...sourceBoxes().map((b) => b.id), "stored-once", "edge-head", "rc-head", "stable-head"].map((k) => `data-live="${k}"`),
       ],
-      script: ["liveStats(", '"/api/v1/stats"', '"src-arch"', '"src-optional"', 'live(k, ', 'live("stored-once"', "d.coverage", "c.indexed", "c.last_sync", "d.pool.objects", "d.pool.bytes", "d.rings", '"-head"', "r.release.seq", "r.release.created_at"],
+      script: ["liveStats(", '"/api/v1/stats"', '"src-arch"', '"src-chaotic"', 'live(k, ', 'live("stored-once"', "d.coverage", "c.indexed", "c.last_sync", "d.pool.objects", "d.pool.bytes", "d.rings", '"-head"', "r.release.seq", "r.release.created_at"],
       reads: [
         {
           path: "/api/v1/stats",

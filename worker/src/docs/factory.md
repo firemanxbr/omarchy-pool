@@ -23,16 +23,17 @@ verify and attest the package faster and approve it with more confidence.
    dashboard: the project's URL (a GitHub repository or its release tarball
    — for a project elsewhere, its home page and the release's source and
    version), a name, one line of description, the licence (SPDX), the
-   architectures, and four things they confirm — <!-- checklist --> — as
-   the form asks them. The pool checks all of it — a blocked contributor,
-   a name or a project already in the pool, an upstream that ships the
-   name, a source that does not answer — and only then writes the request
-   **once** to the record, `factory/<name>/<id>/request.json` in the pool
-   bucket with the pool's detached signature, public and immutable
-   (`worker/src/record.ts`). Nothing about a request lives on GitHub.
-   The build starts by itself, in the shared queue: the best idle shared
-   worker of the architecture — anyone's, with its owner's agent — or one
-   of the contributor's own, at once.
+   architectures, and four things they confirm. The pool checks all of
+   it — a blocked contributor, a name or a project already in the pool,
+   an upstream that ships the name, a source that does not answer — and
+   only then writes the request **once** to the record,
+   `factory/<name>/<id>/request.json` in the pool bucket with the pool's
+   detached signature, public and immutable (`worker/src/record.ts`).
+   Nothing about a request lives on GitHub. The build starts by itself,
+   in the shared queue: the best idle shared worker of the architecture
+   — anyone's, with its owner's agent — or one of the contributor's own,
+   at once. The four things, as the form asks them:
+<!-- checklist -->
 2. **Does someone ship it already?** The pool is asked first. If Arch, Arch
    Linux ARM or the OPR ship the name for an architecture it enters the pool's
    cycle as it is; the factory refuses to build that architecture
@@ -119,8 +120,11 @@ verify and attest the package faster and approve it with more confidence.
    worker that dies mid-build loses its lease and the task is requeued by the
    pool's scheduler within ten minutes.
 
-The asker's own page follows a request through every stage
-(`requested → drafting → validating → review → approved`); the
+The asker's own page follows a request per architecture, in the
+registration's own words: `registered`, then `waiting` or `building`,
+`staged` when the worker hands the evidence in, a maintainer's decision
+(`approved`, `rejected`) and `published` once the project's build is in
+edge — `unmaintained` after 30 days without a build; the
 [Pipeline](../../../../pipeline) lists every request and where it stands.
 
 ## The gate

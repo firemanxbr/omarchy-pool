@@ -142,7 +142,7 @@ ten minutes). Intervals for sync (3 h) and security (3 h); promote by evidence (
 sync, rc→stable every 3 h), daily slots for health (08:30) and the Sunday GC — each queued as a
 pulled job (below) when due and never doubled while one is queued or
 running. The metrics snapshot (30 min), the governance sync (10 min), the
-update check (05:45) and the cost estimate (every three hours) it does itself. Nothing starts on GitHub by
+update check (05:45) and the cost estimate (<!-- estimate-cadence -->) it does itself. Nothing starts on GitHub by
 dispatch any more: since 2026-09-17 the pool's operation — requests,
 builds, bumps, promotion — does not go through GitHub Actions, issues or
 pull requests, so a GitHub outage stops the code from changing and nothing
@@ -571,7 +571,7 @@ What keeps the bill near US$ 10:
   cheap the interval could go back to hourly (`scheduler.ts` RULES); what
   an hourly sync still costs is the rows it reads to diff against upstream.
 
-**Watching it.** Every three hours the brain estimates the month's bill
+**Watching it.** The brain estimates the month's bill <!-- estimate-cadence -->
 from Cloudflare's own analytics — what was used so far, priced, plus the
 *current* rate (the last day, scaled) for the days left, so a fix shows in
 the next estimate instead of being averaged with the expensive days before

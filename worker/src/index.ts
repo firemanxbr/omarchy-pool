@@ -90,7 +90,7 @@ import { handleServiceStatus, handleStats } from "./routes/stats";
 import { handleGc, handleUnreferenced } from "./routes/gc";
 import { handleRelayout } from "./routes/relayout";
 import { overviewHtml } from "./pages/overview";
-import { getStartedHtml, getStartedSample } from "./pages/get-started";
+import { getStartedHtml, picked, sampleUrl } from "./pages/get-started";
 import { howItWorksHtml } from "./pages/how-it-works";
 import { docsSecurityHtml } from "./pages/docs-security";
 import { glossaryHtml } from "./pages/glossary";
@@ -202,7 +202,12 @@ export default {
       }
       // Documentation: one section, its chapters under /docs; the old addresses redirect.
       if (path === "/docs" || path === "/docs/") return html(docsHtml(env.POOL_URL, version(env)));
-      if (path === "/docs/get-started") return html(getStartedHtml(env.POOL_URL, version(env), await getStartedSample(env, url)));
+      if (path === "/docs/get-started") {
+        // The include is the API's answer for the pick, through the API's edge cache under the address the script fetches: one stored answer for the page and its script, pacmanInclude's reads paid once per colo per two minutes, not per view.
+        const pick = picked(url, env);
+        const res = await cachedApi("GET", "/pacman.conf", sampleUrl(url, pick), request, env, ctx);
+        return html(getStartedHtml(env.POOL_URL, version(env), pick, res.ok ? await res.text() : null));
+      }
       if (path === "/docs/workers") return html(docsWorkersHtml(env.POOL_URL, version(env)));
       if (path === "/docs/how-it-works") return html(howItWorksHtml(env.POOL_URL, version(env)));
       if (path === "/docs/security") return html(docsSecurityHtml(env.POOL_URL, version(env)));
