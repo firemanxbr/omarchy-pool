@@ -370,6 +370,20 @@ install_shellcheck() {
 # `warn` is for the audit and the maintainer to weigh. The checks follow
 # the ones the omarchy-aur-factory (Adam Jacob) runs; none is skipped.
 VET_JSON=/build/vet.json; VET_LOG=/build/tests.log
+# What the build cost this container, from its own cgroup (v2): CPU seconds
+# and the memory high-water mark since it started, the disk the sources,
+# the package and the cache took, wall time — resources.json beside the
+# evidence, so a build's page can say what it took, not only how long.
+RES_JSON=/build/resources.json; RES_T0=0; RES_CPU0=0
+resources_begin() { RES_T0=$(date +%s); RES_CPU0=$(awk '/^usage_usec/ { print $2 }' /sys/fs/cgroup/cpu.stat 2>/dev/null || echo 0); }
+resources_end() {
+  local t1 cpu1 peak disk
+  t1=$(date +%s); cpu1=$(awk '/^usage_usec/ { print $2 }' /sys/fs/cgroup/cpu.stat 2>/dev/null || echo 0)
+  peak=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo 0)
+  disk=$(du -sm /build/pkg /build/out /build/cache 2>/dev/null | awk '{ s += $1 } END { print s + 0 }')
+  jq -cn --argjson wall "$((t1 - RES_T0))" --argjson cpu "$(( (cpu1 - RES_CPU0) / 1000000 ))" --argjson peak "$(( peak / 1048576 ))" --argjson disk "${disk:-0}" --argjson cores "$(nproc)" \
+    '{schema: "omarchy-pool/resources/1", wall_s: $wall, cpu_s: $cpu, ram_peak_mb: $peak, disk_mb: $disk, cores: $cores}' > "$RES_JSON" 2>/dev/null || true
+}
 vet_add() { # name status detail
   local name="$1" status="$2" detail="$3"
   printf '[%s] %-4s %s — %s\n' "$(date -u +%H:%M:%S)" "$status" "$name" "${detail:0:800}" >>"$VET_LOG"
@@ -514,7 +528,13 @@ vet_package() { # name → 0 pass (maybe warnings), 5 fail; writes vet.json and 
 
 # Build with the drafter correcting itself from the log — the contributor's
 # agent doing the heavy lifting, on the contributor's machine.
-build_with_retries() { # name ref
+build_with_retries() { # name ref — the build and the gate, with what they cost measured around them (resources.json)
+  resources_begin
+  local rc=0; build_attempts "$@" || rc=$?
+  resources_end
+  return $rc
+}
+build_attempts() { # name ref
   local name="$1" ref="$2" attempt=1 max=1
   [[ ( "$ref" == draft:* || "$ref" == review:* ) && -n "$(agent_label)" ]] && max=3
   fetch_pkgbuild "$name" "$ref"
@@ -552,6 +572,7 @@ inside() {
   build_with_retries "$name" "$ref" || status=$?
   # The gate's verdict travels with the result, pass or fail.
   mkdir -p /task/out; [[ -f "$VET_JSON" ]] && cp "$VET_JSON" "$VET_LOG" /task/out/ 2>/dev/null
+  [[ -f "$RES_JSON" ]] && cp "$RES_JSON" /task/out/ 2>/dev/null
   (( status == 0 )) || exit "$status"
   cp /build/out/*.pkg.tar.zst /task/out/ && cp /build/pkg/PKGBUILD /task/out/PKGBUILD && ls /task/out
 }
@@ -633,6 +654,7 @@ container_worker() {
     upload_staging "$id" /build/build.log build.log || true
     [[ -f /build/pkg/PKGBUILD ]] && upload_staging "$id" /build/pkg/PKGBUILD PKGBUILD || true
     [[ -f "$VET_JSON" ]] && upload_staging "$id" "$VET_JSON" vet.json && upload_staging "$id" "$VET_LOG" tests.log || true
+    [[ -f "$RES_JSON" ]] && upload_staging "$id" "$RES_JSON" resources.json || true
     api POST "/factory/tasks/$id/fail" "$(jq -n --arg e "exit $status: ${err:0:500}" --argjson d "$took" --argjson t "$tail" --argjson f "$final" '{error:$e,duration_ms:$d,log_tail:$t,final:$f}')" >/dev/null || true
     exit 1
   fi
@@ -674,6 +696,7 @@ stage_result() { # task-id main-package packages...
     upload_staging "$id" "$VET_JSON" vet.json || return 1
     [[ -f "$VET_LOG" ]] && { upload_staging "$id" "$VET_LOG" tests.log || return 1; }
   fi
+  [[ -f "$RES_JSON" ]] && { upload_staging "$id" "$RES_JSON" resources.json || true; }
   if tar -xOf "$main" .PKGINFO > /build/PKGINFO 2>/dev/null; then upload_staging "$id" /build/PKGINFO PKGINFO || return 1; fi
   local p
   for p in "$@"; do upload_staging "$id" "$p" "$(basename "$p")" || return 1; done

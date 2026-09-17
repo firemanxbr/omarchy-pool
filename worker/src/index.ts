@@ -73,6 +73,9 @@ import { handleAuthStart, handleAuthCallback, handleLogout } from "./routes/auth
 import { handleSignPool } from "./routes/pool";
 import { signingEnabled, publicKey } from "./signing";
 import { reviewHtml } from "./pages/review";
+import { buildHtml } from "./pages/build";
+import { handlePackageStory } from "./routes/story";
+import { icon } from "./pages/icons";
 import { requestHtml } from "./pages/request";
 import { governanceHtml } from "./pages/governance";
 import { docsHtml } from "./pages/docs";
@@ -115,6 +118,8 @@ export interface Env {
   /** Set by the Release workflow at deploy time (`wrangler deploy --var`); "dev" otherwise. */
   POOL_VERSION?: string;
   POOL_COMMIT?: string;
+  /** Page views: a GA4 measurement id (G-XXXXXXX) or a Cloudflare Web Analytics token (32 hex); empty or unset = no script on any page. */
+  ANALYTICS?: string;
   POOL_DEPLOYED_AT?: string;
   /** Fine-grained GitHub token (Actions: read and write) for the pool's own scheduler. */
   GITHUB_TOKEN?: string;
@@ -227,6 +232,9 @@ export default {
       const user = path.match(/^\/user\/([A-Za-z0-9-]{1,39})$/);
       if (user) return html(userHtml(user[1], env.POOL_URL, version(env)));
       if (path.startsWith("/package/")) return html(packageHtml(decodeURIComponent(path.slice("/package/".length)), env.POOL_URL, version(env)));
+      if (/^\/build\/\d+$/.test(path)) return html(buildHtml(Number(path.slice("/build/".length)), env.POOL_URL, version(env)));
+      const ic = icon(path);
+      if (ic) return ic;
       return json({ error: "not found" }, 404);
     } catch (err) {
       console.error(err);
@@ -446,6 +454,7 @@ async function api(method: string, path: string, url: URL, request: Request, env
     return handleStagingGet(Number(m[1]), m[2], env, (!!c && isMaintainer(c)) || (!!job && (job.k === "publish" || job.k === "trial") && job.s.includes(`staging:${m[1]}`)));
   }
   if ((m = path.match(/^\/factory\/tasks\/(\d+)$/)) && method === "GET") return handleTask(Number(m[1]), env);
+  if ((m = path.match(/^\/factory\/packages\/([A-Za-z0-9@._+-]+)\/story$/)) && method === "GET") return handlePackageStory(m[1], env);
   if (path.startsWith("/factory/") && (method === "POST" || method === "PUT" || method === "DELETE" || method === "PATCH")) {
     const r = await factoryRoutes(method, path, url, request, env);
     if (r) return r;

@@ -15,7 +15,7 @@ async function get(path: string): Promise<Response> {
   return res;
 }
 
-const PAGES = ["/", "/factory", "/contribute", "/review", "/pipeline", "/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/what-we-test", "/docs/governance", "/docs/security", "/docs/glossary", "/docs/architecture", "/docs/runbook", "/docs/testing", "/docs/migration", "/docs/factory", "/docs/worker-host", "/docs/security-model", "/docs/contributing", "/docs/proof-of-concept", "/docs/open-work", "/docs/omarchy-cli-mcp", "/packages", "/package/zlib", "/security", "/status", "/journal", "/workers", "/request", "/user/someone", "/people", "/api", "/diff"];
+const PAGES = ["/", "/factory", "/contribute", "/review", "/pipeline", "/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/what-we-test", "/docs/governance", "/docs/security", "/docs/glossary", "/docs/architecture", "/docs/runbook", "/docs/testing", "/docs/migration", "/docs/factory", "/docs/worker-host", "/docs/security-model", "/docs/contributing", "/docs/proof-of-concept", "/docs/open-work", "/docs/omarchy-cli-mcp", "/packages", "/package/zlib", "/build/1", "/security", "/status", "/journal", "/workers", "/request", "/user/someone", "/people", "/api", "/diff"];
 
 describe("dashboard pages", () => {
   it("every page is served with the shared frame and no placeholder left behind", async () => {
@@ -74,11 +74,23 @@ describe("dashboard pages", () => {
     }
     const how = await (await get("/docs/how-it-works")).text();
     for (const stage of ["sync", "pin", "promote", "render", "serve"]) expect(how).toContain(`data-stage="${stage}"`);
+    // The mark, as the files a browser asks for by name — and the head names them; no page-view script unless the deployment names one.
+    for (const [path, type] of [["/favicon.ico", "image/x-icon"], ["/favicon.svg", "image/svg+xml"], ["/apple-touch-icon.png", "image/png"], ["/icon-192.png", "image/png"], ["/icon-512.png", "image/png"], ["/site.webmanifest", "application/manifest+json"]]) {
+      const res = await get(path);
+      expect(res.status, path).toBe(200);
+      expect(res.headers.get("content-type"), path).toBe(type);
+      expect((await res.arrayBuffer()).byteLength, path).toBeGreaterThan(50);
+    }
+    const png = new Uint8Array(await (await get("/apple-touch-icon.png")).arrayBuffer());
+    expect([...png.slice(0, 4)]).toEqual([0x89, 0x50, 0x4e, 0x47]);
+    expect(how).toContain('<link rel="apple-touch-icon" href="/apple-touch-icon.png">');
+    expect(how).not.toContain("googletagmanager");
+    expect(how).not.toContain("cloudflareinsights");
     // What we test is the skills the agents read (factory/skills), one text: the general one, then the groups, then the log.
     const { SKILLS } = await import("../src/pages/docs-tree");
     const test = await (await get("/docs/what-we-test")).text();
     expect(SKILLS.map((k) => k.file)).toEqual(["factory/skills/general/every-package.md", "factory/skills/groups/desktop-apps.md", "factory/skills/groups/prebuilt-binaries.md"]);
-    for (const id of ["why-we-test-the-way-we-test", "every-package", "desktop-apps", "prebuilt-binaries", "how-this-page-grows", "what-we-learned"]) expect(test, id).toContain(`id="${id}"`);
+    for (const id of ["why-we-test-the-way-we-test", "every-package", "desktop-apps", "prebuilt-binaries", "who-does-what", "the-score", "how-this-page-grows", "what-we-learned"]) expect(test, id).toContain(`id="${id}"`);
     expect(test.indexOf('id="every-package"')).toBeLessThan(test.indexOf('id="desktop-apps"'));
     expect(test).toContain("ozone-platform-hint=auto");
     expect(test).not.toContain("<!-- skills -->");

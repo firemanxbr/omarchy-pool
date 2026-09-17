@@ -127,6 +127,12 @@ const PACKAGE_BODY = String.raw`
   <div class="meta" id="meta"></div>
   <p class="sub" id="maint" style="margin-top:6px" hidden></p>
 
+  <section id="factory-section" hidden>
+    <div class="h2row"><h2>From the factory <span id="factory-badge"></span></h2><span class="hint">not synced from a source: built here, twice, and decided</span></div>
+    <p class="sub" id="factory-lede"></p>
+    <div class="fchain" id="factory-chain"></div>
+  </section>
+
   <section id="who-section">
     <div class="h2row"><h2>Who made it</h2><span class="hint">the work on the record</span></div>
     <div class="who" id="who"><div class="muted">…</div></div>
@@ -234,7 +240,7 @@ const PACKAGE_SCRIPT = String.raw`
       ["Required by", num((d.required_by || []).length), (d.required_by || []).length > 100 ? "an advisory here exposes many" : "in " + esc(d.shown_ring)],
       ["Security", own0.length ? num(own0.length) + " open" : "clean", own0.length ? esc(own0.map(function (a) { return a.severity; }).join(", ")) : "no open advisory on this version", own0.length ? "warn" : "ok"]
     ]);
-    $("#pg-ring").innerHTML = ["stable", "rc", "edge"].map(function (r) { return '<a class="' + (r === d.shown_ring ? "on" : "") + '" href="/package/' + encodeURIComponent(d.name) + '?ring=' + r + '&arch=' + arch + '" style="display:inline-block;background:' + (r === d.shown_ring ? "var(--green)" : "var(--panel-2)") + ';color:' + (r === d.shown_ring ? "var(--green-ink)" : "var(--muted)") + ';border:1px solid ' + (r === d.shown_ring ? "var(--green)" : "var(--line)") + ';padding:5px 12px;font-size:13px;text-decoration:none">' + r + '</a>'; }).join("");
+    $("#pg-ring").innerHTML = ["stable", "rc", "edge"].concat(d.rings.some(function (r) { return r.ring === "lab"; }) || d.shown_ring === "lab" ? ["lab"] : []).map(function (r) { return '<a class="' + (r === d.shown_ring ? "on" : "") + '" href="/package/' + encodeURIComponent(d.name) + '?ring=' + r + '&arch=' + arch + '" style="display:inline-block;background:' + (r === d.shown_ring ? "var(--green)" : "var(--panel-2)") + ';color:' + (r === d.shown_ring ? "var(--green-ink)" : "var(--muted)") + ';border:1px solid ' + (r === d.shown_ring ? "var(--green)" : "var(--line)") + ';padding:5px 12px;font-size:13px;text-decoration:none">' + r + '</a>'; }).join("");
     $("#pg-arch").innerHTML = ["x86_64", "aarch64"].map(function (a) { return '<a href="/package/' + encodeURIComponent(d.name) + '?ring=' + d.shown_ring + '&arch=' + a + '" style="display:inline-block;background:' + (a === arch ? "var(--green)" : "var(--panel-2)") + ';color:' + (a === arch ? "var(--green-ink)" : "var(--muted)") + ';border:1px solid ' + (a === arch ? "var(--green)" : "var(--line)") + ';padding:5px 12px;font-size:13px;text-decoration:none">' + a + '</a>'; }).join("");
     $("#meta").innerHTML = [
       m.url ? '<a href="' + esc(m.url) + '">' + esc(m.url.replace(/^https?:\/\//, "")) + '</a>' : "",
@@ -372,7 +378,7 @@ const PACKAGE_SCRIPT = String.raw`
       if (r.status >= 500) throw new Error("index busy (HTTP " + r.status + ")");
       return r.json();
     }).then(function (d) {
-      if (d.error) { endSkeleton(); $("#desc").textContent = d.error; $("#graph").innerHTML = ""; $("#who-section").hidden = true; $("#pg-tiles").innerHTML = ""; return; }
+      if (d.error) { endSkeleton(); if ($("#factory-section").hidden) $("#desc").textContent = d.error; $("#graph").innerHTML = ""; $("#who-section").hidden = true; $("#pg-tiles").innerHTML = ""; ["#sec-section", "#seal-section"].forEach(function (id) { var el = $(id); if (el) el.hidden = true; }); return; }
       render(d); endSkeleton();
     }).catch(function (e) {
       if (attempt < 4) { $("#desc").textContent = "The index is busy (" + e.message + "); retrying…"; setTimeout(function () { loadPackage(attempt + 1); }, 4000 * attempt); }
@@ -380,6 +386,39 @@ const PACKAGE_SCRIPT = String.raw`
     });
   }
   loadPackage(1);
+  // The factory's story of this package, when it has one: a package that came from a source has none and the section stays hidden.
+  // A factory package not in any ring yet (a contributor's build is evidence, never in the pool) still gets its story: the page is the package's, wherever it is.
+  function person(l) { return l ? '<a href="/user/' + encodeURIComponent(l) + '">' + esc(l) + '</a>' : '<span class="muted">—</span>'; }
+  function pillOf(cls, text, title) { return '<span class="pill ' + cls + '"' + (title ? ' title="' + esc(title) + '"' : '') + '>' + esc(text) + '</span>'; }
+  fetch("/api/v1/factory/packages/" + encodeURIComponent(name) + "/story").then(function (r) { return r.ok ? r.json() : null; }).then(function (st) {
+    if (!st || !st.chains) return;
+    var sec = $("#factory-section"); sec.hidden = false;
+    var pkg = st.package || {}, rings = (st.rings || []).filter(function (r) { return r.arch === arch; }).map(function (r) { return r.ring; });
+    var onlyLab = rings.length === 1 && rings[0] === "lab", none = !rings.length;
+    var cls = st.class ? { A: "ok", B: "ok", C: "warn", D: "error" }[st.class] : "none";
+    $("#factory-badge").innerHTML = (none ? pillOf("lilac", "not in the pool yet", "a contributor's build is evidence; the project's build enters the lab") : onlyLab ? pillOf("lab", "in the lab", "the fourth ring: the project's build, tried by a real pacman, waiting for a maintainer — not promised, not promoted") : pillOf("ok", "in " + rings.join(" · "))) + (st.class ? ' ' + pillOf(cls, "class " + st.class, st.score.points + "/100 — What we test → The score") : '');
+    if (none) {
+      $("#desc").className = "lede"; $("#desc").innerHTML = esc(pkg.description || "") + (pkg.description ? ' — ' : '') + 'not in any ring for ' + esc(arch) + ' yet: a contributor\'s build is evidence, never in the pool; the project\'s build enters the lab.';
+      $("#pg-tiles").innerHTML = ""; $("#who-section").hidden = true;
+    }
+    $("#factory-lede").innerHTML = (pkg.owner ? 'Requested by ' + person(pkg.owner) + (pkg.created_at ? ' ' + ago(pkg.created_at) : '') + (pkg.project ? ' from <a href="' + esc(pkg.project) + '">' + esc(String(pkg.project).replace(/^https?:\/\/(www\.)?/, "")) + '</a>' : '') + (pkg.license ? ' · ' + esc(pkg.license) : '') + (pkg.category ? ' · ' + esc(pkg.category) : '') + '. ' : '')
+      + (pkg.blocked_at ? pillOf("error", "blocked") + ' ' + ago(pkg.blocked_at) + ' by ' + person(pkg.blocked_by) + ': ' + esc(pkg.blocked_reason || '') + '. ' : '')
+      + 'A package from the factory is built by its contributor as evidence, built again by the project on a trusted worker, tried by a real pacman in the lab and decided by a maintainer — never the contributor, never the person who brought it. Only then does it enter edge and earn rc and stable like every synced package. <a href="/docs/what-we-test#who-does-what">Who does what →</a>';
+    var chains = st.chains.slice(0, 6);
+    $("#factory-chain").innerHTML = chains.length ? chains.map(function (c) {
+      var sc = c.score, cc = c.contributor, pb = c.project, a = c.approval;
+      var step = function (state, title, detail) { return '<div class="fstep ' + state + '"><i class="dot ' + (state === "ok" ? "ok" : state === "bad" ? "error" : state === "warn" ? "warn" : "") + '"></i><div><b>' + title + '</b><span>' + detail + '</span></div></div>'; };
+      var vet = cc && cc.result && cc.result.vet, audit = c.audit, pvet = pb && pb.result && pb.result.vet, trial = c.trial;
+      return '<div class="fchainrow"><div class="fhead"><span>' + (cc ? person(cc.owner) + '\'s build <a href="/build/' + cc.id + '">#' + cc.id + '</a> · ' + esc(cc.version || '') + ' · ' + esc(cc.arch) : 'the project\'s build <a href="/build/' + pb.id + '">#' + pb.id + '</a> · ' + esc(pb.version || '') + ' · ' + esc(pb.arch)) + '</span>' + pillOf({ A: "ok", B: "ok", C: "warn", D: "error" }[sc.class], "class " + sc.class + " · " + sc.points + "/100", "with the maintainer's half green: " + sc.projected) + '</div><div class="fsteps">'
+        + (cc ? step(cc.status === "staged" || cc.status === "done" ? "ok" : cc.status === "failed" ? "bad" : "", "Built by the contributor", (cc.status === "staged" || cc.status === "done" ? "succeeded" : cc.status) + (cc.finished_at ? ' · ' + ago(cc.finished_at) : '') + (cc.attempts > 1 ? ' · ' + cc.attempts + ' attempts' : '')) : '')
+        + (cc ? step(vet ? (vet.verdict === "pass" ? (vet.warnings ? "warn" : "ok") : "bad") : "", "The gate", vet ? (vet.verdict === "pass" ? (vet.warnings ? vet.warnings + " warning(s)" : "clean") : vet.fails + " failed") : "not run") : '')
+        + (cc ? step(audit && audit.status === "done" ? ({ ok: "ok", warn: "warn", block: "bad" }[audit.result && audit.result.verdict] || "ok") : "", "The audit", audit ? (audit.status === "done" ? (audit.result && audit.result.verdict || "done") + (audit.result && audit.result.model ? ' · ' + esc(audit.result.model) : '') : audit.status) : "not yet") : '')
+        + step(pb ? (pb.status === "staged" || pb.status === "done" ? "ok" : pb.status === "failed" ? "bad" : "") : "", "Built again by the project", pb ? '<a href="/build/' + pb.id + '">#' + pb.id + '</a> · ' + (pb.status === "staged" || pb.status === "done" ? "succeeded" : pb.status) + (pvet ? ' · gate ' + (pvet.verdict === "pass" ? (pvet.warnings ? pvet.warnings + " warning(s)" : "clean") : "failed") : '') : (sc.ready ? "ready: a maintainer asks for it" : "after the contributor's half"))
+        + step(trial && trial.status === "done" ? (trial.result && trial.result.verdict === "ok" ? "ok" : "bad") : "", "Tried in the lab", trial ? (trial.status === "done" ? (trial.result && trial.result.verdict === "ok" ? "a real pacman installed it" : "could not: " + esc(trial.result && trial.result.verdict || "")) : trial.status) : "not yet")
+        + step(a ? (a.decision === "approved" ? "ok" : "bad") : "", "Decided", a ? esc(a.decision) + ' by ' + person(a.by) + ' ' + ago(a.created_at) + (a.note ? ' — ' + esc(a.note) : '') : (pb && pb.status === "staged" ? "waiting for a maintainer — never the owner" : "not yet"))
+        + '</div></div>';
+    }).join("") : '<p class="sub" style="margin:0">Requested; no build yet.</p>';
+  }).catch(function () {});
   liveStats(function () {}, 120000);
 `;
 

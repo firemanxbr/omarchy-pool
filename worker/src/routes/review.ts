@@ -1,4 +1,5 @@
 import { json, type Env } from "../index";
+import { scoreChain } from "../score";
 import { isMaintainer, type Contributor } from "./contributors";
 import { reclaimStagingPackages } from "../staging";
 
@@ -35,9 +36,9 @@ interface Staged {
 
 export async function handleReviewList(env: Env): Promise<Response> {
   const staged = await env.DB.prepare(
-    `SELECT t.id, t.name, t.arch, t.version, t.owner, t.status, t.trust, t.params, t.staged_prefix, t.result_sha256, t.result_filename, t.duration_ms, t.finished_at, t.pkgbuild_ref, t.result,
+    `SELECT t.id, t.name, t.arch, t.version, t.owner, t.status, t.trust, t.params, t.staged_prefix, t.result_sha256, t.result_filename, t.duration_ms, t.finished_at, t.pkgbuild_ref, t.result, t.attempts,
             t.lease_owner, w.owner AS worker_owner, w.labels AS worker_labels, w.hostname AS worker_hostname, w.trusted_by AS worker_trusted_by,
-            p.url, p.detected, p.category,
+            p.url, p.detected, p.category, p.license AS request_license, p.source AS request_source,
             (SELECT decision FROM approvals a WHERE a.task_id = t.id ORDER BY a.id DESC LIMIT 1) AS decision,
             (SELECT by FROM approvals a WHERE a.task_id = t.id ORDER BY a.id DESC LIMIT 1) AS decided_by,
             (SELECT u.status FROM build_tasks u WHERE u.kind = 'audit' AND json_extract(u.params, '$.task') = t.id ORDER BY u.id DESC LIMIT 1) AS audit_status,
@@ -50,15 +51,64 @@ export async function handleReviewList(env: Env): Promise<Response> {
                           LEFT JOIN build_workers w ON w.id = t.lease_owner
       WHERE t.kind = 'build' AND t.status = 'staged'
         AND NOT EXISTS (SELECT 1 FROM approvals a WHERE a.task_id = t.id AND a.decision = 'approved')
+        -- a contributor's evidence whose project build was approved has served: nothing left to decide on it
+        AND NOT EXISTS (SELECT 1 FROM approvals a JOIN build_tasks r ON r.id = a.task_id WHERE a.decision = 'approved' AND r.name = t.name AND json_extract(r.params, '$.review') = t.id)
       ORDER BY t.id DESC LIMIT 100`,
   ).all();
   // A contributor's build that the project is building again, or built: the review row says so.
-  const projectOf = new Map<number, { id: number; status: string; error: string | null; worker: string | null }>();
-  const builds = await env.DB.prepare("SELECT id, status, error, params, lease_owner FROM build_tasks WHERE kind = 'build' AND trust = 'project' AND json_extract(params, '$.review') IS NOT NULL AND status IN ('queued', 'leased', 'staged', 'failed', 'done') ORDER BY id").all<{ id: number; status: string; error: string | null; params: string; lease_owner: string | null }>();
+  const projectOf = new Map<number, { id: number; status: string; error: string | null; worker: string | null; attempts: number; result: string | null; trial_status: string | null; trial_result: string | null }>();
+  const builds = await env.DB.prepare(
+    `SELECT id, status, error, params, lease_owner, attempts, result,
+            (SELECT u.status FROM build_tasks u WHERE u.kind = 'trial' AND u.name = b.name AND json_extract(u.params, '$.task') = b.id ORDER BY u.id DESC LIMIT 1) AS trial_status,
+            (SELECT u.result FROM build_tasks u WHERE u.kind = 'trial' AND u.name = b.name AND json_extract(u.params, '$.task') = b.id ORDER BY u.id DESC LIMIT 1) AS trial_result
+       FROM build_tasks b WHERE kind = 'build' AND trust = 'project' AND json_extract(params, '$.review') IS NOT NULL AND status IN ('queued', 'leased', 'staged', 'failed', 'done') ORDER BY id`,
+  ).all<{ id: number; status: string; error: string | null; params: string; lease_owner: string | null; attempts: number; result: string | null; trial_status: string | null; trial_result: string | null }>();
   for (const b of builds.results) {
     const from = Number((JSON.parse(b.params) as { review?: number }).review);
-    if (from) projectOf.set(from, { id: b.id, status: b.status, error: b.error, worker: b.lease_owner });
+    if (from) projectOf.set(from, { id: b.id, status: b.status, error: b.error, worker: b.lease_owner, attempts: b.attempts, result: b.result, trial_status: b.trial_status, trial_result: b.trial_result });
   }
+  // The contributor's build behind each of the project's rows in the list (its gate, its audit, its attempts): the score needs both halves.
+  const fromIds = staged.results.map((r) => (r.trust === "project" && r.params ? (JSON.parse(r.params as string) as { review?: number }).review : null)).filter((x): x is number => typeof x === "number");
+  const fromRows = new Map<number, { id: number; attempts: number; status: string; result: string | null; audit_status: string | null; audit_result: string | null }>();
+  if (fromIds.length) {
+    const rows = await env.DB.prepare(
+      `SELECT t.id, t.attempts, t.status, t.result,
+              (SELECT u.status FROM build_tasks u WHERE u.kind = 'audit' AND u.name = t.name AND json_extract(u.params, '$.task') = t.id ORDER BY u.id DESC LIMIT 1) AS audit_status,
+              (SELECT u.result FROM build_tasks u WHERE u.kind = 'audit' AND u.name = t.name AND json_extract(u.params, '$.task') = t.id ORDER BY u.id DESC LIMIT 1) AS audit_result
+         FROM build_tasks t WHERE t.id IN (${fromIds.map(() => "?").join(", ")})`,
+    ).bind(...fromIds).all<{ id: number; attempts: number; status: string; result: string | null; audit_status: string | null; audit_result: string | null }>();
+    for (const r of rows.results) fromRows.set(r.id, r);
+  }
+  // The chain's score (score.ts) from what the row and its other half carry; `ready` = the contributor's half is complete, a maintainer's time is well spent.
+  const scoreOf = (r: Record<string, unknown>) => {
+    const audit = (st: string | null, res: string | null) => { const a = auditOf(st, res, null); return st ? { status: a.status, verdict: a.verdict ?? null, high: a.high, findings: a.findings } : null; };
+    const trial = (st: string | null, res: string | null) => { const t = trialOf(st, res, null); return st ? { status: t.status, verdict: t.verdict ?? null } : null; };
+    const request = { license: (r.request_license as string | null) ?? null, source: (r.request_source as string | null) ?? null };
+    if (r.trust === "project") {
+      const from = r.params ? (JSON.parse(r.params as string) as { review?: number }).review : undefined;
+      const c = from ? fromRows.get(from) : undefined;
+      return scoreChain({ contributor: c ? { attempts: c.attempts, status: c.status } : null, vet: c ? vetOf(c.result) : null, audit: c ? audit(c.audit_status, c.audit_result) : null, request, project: { status: r.status as string, attempts: r.attempts as number }, projectVet: vetOf(r.result as string | null), trial: trial(r.trial_status as string | null, r.trial_result as string | null), approval: null, category: (r.category as string | null) ?? null });
+    }
+    const pb = projectOf.get(r.id as number);
+    return scoreChain({ contributor: { attempts: r.attempts as number, status: r.status as string }, vet: vetOf(r.result as string | null), audit: audit(r.audit_status as string | null, r.audit_result as string | null), request, project: pb ? { status: pb.status, attempts: pb.attempts } : null, projectVet: pb ? vetOf(pb.result) : null, trial: pb ? trial(pb.trial_status, pb.trial_result) : null, approval: null, category: (r.category as string | null) ?? null });
+  };
+  // A build of a version a maintainer already approved — the same name,
+  // version and architecture, an earlier task — is nothing to decide: the
+  // package is in the pool or on its way. The row says so (`already`), the
+  // page keeps it out of the count and offers to drop it (felix 2.16.1 was
+  // built again three days after its approval and sat as "waiting", 2026-09-16).
+  const names = [...new Set(staged.results.map((r) => r.name as string))];
+  const prior = names.length
+    ? (await env.DB.prepare(
+        `SELECT a.task_id, a.name, a.arch, a.version, a.by, a.created_at, a.rebuild_task, r.status AS rebuild_status
+           FROM approvals a LEFT JOIN build_tasks r ON r.id = a.rebuild_task
+          WHERE a.decision = 'approved' AND a.name IN (${names.map(() => "?").join(", ")}) ORDER BY a.id DESC`,
+      ).bind(...names).all<{ task_id: number; name: string; arch: string; version: string | null; by: string; created_at: string; rebuild_task: number | null; rebuild_status: string | null }>()).results
+    : [];
+  const already = (r: Record<string, unknown>) => {
+    const a = prior.find((x) => x.name === r.name && x.arch === r.arch && x.version === r.version && x.task_id !== r.id && x.rebuild_task !== r.id);
+    return a ? { task: a.task_id, by: a.by, at: a.created_at, rebuild_task: a.rebuild_task, rebuild_status: a.rebuild_status } : null;
+  };
   // Where the bytes came from: the worker that held the lease, its owner, the host it says it runs on, who vouched for it.
   const builtBy = (r: Record<string, unknown>) => {
     if (!r.lease_owner) return null;
@@ -77,8 +127,11 @@ export async function handleReviewList(env: Env): Promise<Response> {
         // contributor: evidence, a maintainer has the project build it · project: the project's own build, a maintainer approves it
         kind: r.trust === "project" ? "project" : "contributor",
         from: r.trust === "project" && r.params ? ((JSON.parse(r.params as string) as { review?: number }).review ?? null) : null,
-        project_build: r.trust === "community" ? (projectOf.get(r.id as number) ?? null) : null,
+        project_build: r.trust === "community" ? (() => { const pb = projectOf.get(r.id as number); return pb ? { id: pb.id, status: pb.status, error: pb.error, worker: pb.worker } : null; })() : null,
         built_by: builtBy(r),
+        already: already(r),
+        // The class the chain has today and the one it reaches with the maintainer's half green; ready = the contributor's half is complete.
+        score: (() => { const sc = scoreOf(r); return { points: sc.points, class: sc.class, projected: sc.projected, ready: sc.ready }; })(),
         params: undefined,
         lease_owner: undefined,
         worker_owner: undefined,
@@ -94,7 +147,7 @@ export async function handleReviewList(env: Env): Promise<Response> {
         audit: auditOf(r.audit_status as string | null, r.audit_result as string | null, r.audit_error as string | null),
         // The trial (the lab): a real pacman installed the project's build from the lab above edge — or could not; the transcript is the evidence.
         trial: trialOf(r.trial_status as string | null, r.trial_result as string | null, r.trial_error as string | null),
-        audit_status: undefined, audit_result: undefined, audit_error: undefined, trial_status: undefined, trial_result: undefined, trial_error: undefined, result: undefined,
+        audit_status: undefined, audit_result: undefined, audit_error: undefined, trial_status: undefined, trial_result: undefined, trial_error: undefined, result: undefined, attempts: undefined, request_license: undefined, request_source: undefined,
       })),
     },
     200,

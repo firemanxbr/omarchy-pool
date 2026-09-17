@@ -36,6 +36,59 @@ page, is the log.
 
 <!-- skills -->
 
+## Who does what
+
+Two people are behind every package the factory ships, and neither does
+the other's part.
+
+**The contributor** — anyone signed in, a maintainer included — requests
+the package on the record (the project, the licence, the source) from the
+dashboard or through the API, and brings **a build that passes the gate**
+on their own worker: the recipe, the log, the manifest, the gate's verdict
+and the second agent's audit are the evidence, staged in their workspace.
+A build that fails, or fails the gate, is the contributor's to fix; it
+never reaches a maintainer's queue. When the evidence is complete the
+build is *ready for a maintainer*, and only then is a maintainer's time
+asked for.
+
+**The maintainer** never uses the contributor's bytes. They read the
+evidence, have the project build the recipe again on a trusted worker
+with the project's agent, watch that build pass the same gate, see a real
+pacman install it from the lab (the trial), and decide — approve with a
+note, or reject with the reason, which sends it back to the contributor.
+A maintainer who brought the package is its contributor: **nobody decides
+on their own package**, whatever their role, so two people are always
+between a recipe and the rings.
+
+Until the maintainer decides, the project's build sits in the lab: pinned,
+tried, visible on the package's page under *From the factory*, never
+promised and never promoted. Approved, it enters edge and earns rc and
+stable on the same evidence as every synced package. A maintainer can
+still block it later — the reason on the record, another maintainer lifts
+it — and it leaves every ring at once.
+
+## The score
+
+Every chain — a contributor's build, the project's build of it, the
+decision — earns points, fifty for each half, from what the pool recorded:
+
+| The contributor's half | points | The maintainer's half | points |
+|---|---:|---|---:|
+| A request on the record: licence and source named | 5 | The project built it again (−3 per extra attempt, at least 6) | 15 |
+| A build that succeeds (−3 per extra attempt, at least 4) | 15 | The project's gate: clean 10, with warnings 7 | 10 |
+| The gate: clean 15, with warnings 10, failed 0 | 15 | The trial installed it | 15 |
+| The audit: ok 15, warn 10 (5 with a high finding), block 0 | 15 | A decision with a note (3 without) | 5 |
+| | | The category settled | 5 |
+
+The **class** is the score today: **A** from 90, **B** from 75, **C**
+from 55, **D** below. Beside it the dashboard shows the class the chain
+reaches with the maintainer's half green — what a maintainer is told
+before starting. A package's class is that of its latest approved chain
+(or its latest chain, before any decision); the same rules rank every
+package in the factory, and nothing here decides anything: the number
+ranks, people approve. The rules are `worker/src/score.ts`, one function,
+tested.
+
 ## How this page grows
 
 A skill is a markdown file in the repository: `factory/skills/general/` for
