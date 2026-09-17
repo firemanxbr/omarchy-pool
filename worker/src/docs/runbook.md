@@ -138,22 +138,24 @@ advisory id shown on the package page; the `same_project` heuristic in
 GitHub's cron is best-effort (on 2026-09-12 it delayed the hourly sync by an
 hour and never started the half-hourly metrics), so the pool has its own
 clock: a Cloudflare cron trigger on the Worker (`src/scheduler.ts`, every
-ten minutes). Intervals for sync (3 h) and security (3 h), the PKGBUILD
-reconcile (`enqueue`, hourly); promote by evidence (edge→rc queued by the
+ten minutes). Intervals for sync (3 h) and security (3 h); promote by evidence (edge→rc queued by the
 sync, rc→stable every 3 h), daily slots for health (08:30) and the Sunday GC — each queued as a
 pulled job (below) when due and never doubled while one is queued or
 running. The metrics snapshot (30 min), the governance sync (10 min), the
-update check (05:45) and the cost estimate (every three hours) it does itself. One thing still starts on GitHub, by
-dispatch: `factory-update.yml` (05:45, pull requests for the project's own
-recipes). Each dispatch is a `dispatch` line in the journal and needs the
-worker secret `GITHUB_TOKEN` (fine-grained, this repository, *Actions: read
-and write*):
+update check (05:45) and the cost estimate (every three hours) it does itself. Nothing starts on GitHub by
+dispatch any more: since 2026-09-17 the pool's operation — requests,
+builds, bumps, promotion — does not go through GitHub Actions, issues or
+pull requests, so a GitHub outage stops the code from changing and nothing
+else (sign-in, the governance file and the worker image stay on GitHub, by
+choice). The worker secret `GITHUB_TOKEN` (fine-grained, this repository,
+read-only) only raises the rate limit of the reads the pool still makes —
+the governance file, upstream releases for the bumps, provenance:
 
 ```bash
 cd worker && npx wrangler secret put GITHUB_TOKEN < ~/.cache/omarchy-cli-poc/github-token
 ```
 
-Without the secret the jobs still run; only that dispatch stops.
+Without the secret everything still runs, at GitHub's anonymous rate limit.
 
 ## Pulled jobs (the pool without GitHub)
 
@@ -388,27 +390,27 @@ re-pinned the 5 objects (rc#18, stable#8) and every OPR object verified.
 
 ## The factory
 
-What no upstream ships is built from `factory/pkgbuilds` by workers that pull
-tasks from the pool ([factory/README.md](../factory/README.md)). Day to day:
+What no upstream ships is built by workers that pull tasks from the pool
+([factory/README.md](../factory/README.md)). Every package comes in the
+same door — a request on the dashboard; the repository holds no recipes
+but the sizing ones (`factory/sizing/`, benchmarks). Day to day:
 
 - **Add a package**: sign in and request it on `/request` (the project's
   URL, a description, the licence, the checklist — written once to the
-  public record), press *Build*, and a maintainer reviews the staged build
-  (docs/GOVERNANCE.md). Without a worker of your own, a *shared* community
-  worker whose owner runs an agent takes the drafted build
-  (`draft:<url>@latest`); the request shows on the Factory page until then.
-  The project's own recipes live flat in `factory/pkgbuilds/<name>/`: a
-  pull request a maintainer reviews; the merge queues the build (the hourly
-  `enqueue` job, or `pkg-repo job enqueue` right away).
-- **Rebuild**: `curl -X POST $API/factory/enqueue` with a maintainer's token
-  (`{"name","pkgbuild_ref":"<commit>","version","arches"}`;
-  `override` builds even a name upstream ships), or approve a staged build
-  again on the Review page.
-- **A failed task**: the Factory page shows the error and the log tail
-  (`GET /api/v1/factory/tasks/:id` has the full tail). Fix the PKGBUILD in a
-  pull request; merging queues it again.
-- **Workers**: contributors' builds run on their workers; project builds
-  (approvals, `factory/pkgbuilds`) on project-trusted workers — today the
+  public record); the build starts by itself in the shared queue — the
+  best idle shared worker of the architecture, or a worker of your own at
+  once — and a maintainer reviews the staged build (docs/GOVERNANCE.md).
+  The person's page says where the build stands.
+- **Rebuild**: press *Build* on the person's page (the queue, or a worker
+  of yours), or `POST $API/factory/packages/<name>/build`; a maintainer's
+  `POST $API/factory/enqueue` (`{"name","pkgbuild_ref":"<commit>","version","arches"}`)
+  queues a sizing recipe.
+- **A failed task**: the person's page says what stopped it and how to fix
+  it (the build's page has the whole log); *Build* again starts from that
+  build's PKGBUILD and log.
+- **Workers**: contributors' builds run on their own and on the shared
+  workers; project builds (the rebuild of what a maintainer reviews) on
+  project-trusted workers — today the
   Mac (`pkg-repo work`, one process per architecture). No GitHub runner
   builds packages; a queued build waits for a project worker. Workers
   hold no key: the pool signs what they publish.
@@ -467,14 +469,14 @@ tasks from the pool ([factory/README.md](../factory/README.md)). Day to day:
     `DELETE /factory/packages/<name>/builds/<id>`.) A
     maintainer reviews the staged build like the first one. **30 days**
     without a build and the package is *unmaintained* (Factory page badge,
-    `bump` journal line): no more bumps until its owner builds again, or a
-    maintainer removes the registration (`DELETE /factory/packages/<name>`)
-    so someone else can take it;
-  - a recipe in `factory/pkgbuilds/<name>/`: `factory-update.yml` (daily,
-    05:45 UTC from the scheduler) bumps `pkgver`, refreshes checksums and
-    opens one pull request per package for a maintainer to review — never auto-merged; the merge queues the build. It relies on the
-    repository setting *Actions may create pull requests*. Packages without
-    a GitHub `url=` (vi) are bumped by hand.
+    `bump` journal line): no more bumps until its owner builds again, or
+    someone else requests the name and takes it over (the registration
+    becomes theirs; the package stays served until their build is decided).
+    A maintainer's `DELETE /factory/packages/<name>` is not that: it takes
+    the package out of every ring with the registration, on the record;
+  - there is no second path: the project's own recipes left the repository
+    on 2026-09-17 (hey-cli and vi became registered packages); the daily
+    bump above is the only one, and it never opens a pull request.
 - **Contributors' builds** land in the `omarchy-factory-staging` bucket
   (`staging/<login>/<package>/<task>/`, lifecycle rule: 30 days), listed on
   the Factory page with their PKGBUILD and log; the packages themselves are

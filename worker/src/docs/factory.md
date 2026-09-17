@@ -31,9 +31,9 @@ verify and attest the package faster and approve it with more confidence.
    **once** to the record, `factory/<name>/<id>/request.json` in the pool
    bucket with the pool's detached signature, public and immutable
    (`worker/src/record.ts`). Nothing about a request lives on GitHub.
-   Then **Build**: a worker the project shares (the project's agent) or
-   one of the contributor's own (their agent) — a contributor's worker
-   builds only its owner's packages.
+   The build starts by itself, in the shared queue: the best idle shared
+   worker of the architecture — anyone's, with its owner's agent — or one
+   of the contributor's own, at once.
 2. **Does someone ship it already?** The pool is asked first. If Arch, Arch
    Linux ARM or the OPR ship the name for an architecture it enters the pool's
    cycle as it is; the factory refuses to build that architecture
@@ -97,17 +97,18 @@ verify and attest the package faster and approve it with more confidence.
    into `rc` and `stable` as well, renders them, and records a `fast-track`
    — the maintainer decided the build, the evidence decides the speed; a
    build whose trial did not run or did not pass reaches `rc` and `stable`
-   by promotion like everything else. The project's own recipes (in
-   `factory/pkgbuilds`) take the `enqueue` door without a staged build.
+   by promotion like everything else. Only the sizing recipes
+   (`factory/sizing`, benchmarks) take the `enqueue` door without a staged
+   build; every package comes in through a request.
 8. **After that: bumps are evidence too.** Once a day the brain asks GitHub
    for each approved package's latest release and queues a community build
    from the contributor's staged PKGBUILD with `pkgver` moved to the tag
    (`bump:<task>@<tag>`) — for the owner's worker first, for any `--shared`
    worker after 14 days — and a maintainer reviews it like the first time.
    30 days without a build and the package is *unmaintained* until someone
-   takes it (docs/GOVERNANCE.md). Recipes in `factory/pkgbuilds/` are bumped
-   by `factory-update.yml`: one pull request per package, reviewed, never
-   auto-merged.
+   takes it (docs/GOVERNANCE.md). There is no second path: the project's own
+   recipes left the repository on 2026-09-17, and nothing in the factory's
+   operation goes through GitHub Actions, issues or pull requests.
 9. **A worker builds it.** Any worker of that architecture claims the task,
    holds a lease, builds in its fresh container, publishes the result
    into `edge` as source `factory` — the pool signs it with its own key —
@@ -260,9 +261,8 @@ maintainer queues it with `publish:false` —
 (`override` when an upstream source ships the name). The worker keeps the
 result under its work directory; the Factory page shows the task with a
 *dry run* pill and how long it took. `factory/sizing/` holds recipes kept
-only for this (chromium, from Arch Linux ARM): the worker looks there when
-`factory/pkgbuilds/<name>/` has none, and the `enqueue` job never queues
-them.
+only for this (chromium, from Arch Linux ARM): the only recipes left in
+the repository, and the `enqueue` job never queues them.
 
 ## Run a worker
 
@@ -325,9 +325,8 @@ one per architecture, plus the brokers, run on the project's own host
 (`factory/host/`, RUNBOOK *The Studio host*).
 
 **Whose compute.** Contributors build on their own workers (or a shared
-community worker someone else runs); project builds — the recipes in
-`factory/pkgbuilds`, the maintainers' own and the ones written from
-contributors' evidence — run on machines the project trusts. No GitHub runner ever builds a package: the project's compute is
+community worker someone else runs); project builds — the ones written
+from contributors' evidence — run on machines the project trusts. No GitHub runner ever builds a package: the project's compute is
 not for building everyone's software, and GitHub Actions runs CI and the
 release only — no worker, not even for the pool's own jobs: when the
 project's host is down they wait, and the Factory page says so.
@@ -347,7 +346,7 @@ The factory touches the pool through four things, all versioned in the API:
 Nothing in the pool knows how a package is built, where a worker runs or what a
 PKGBUILD looks like; nothing in the factory knows how rings, rendering or
 promotion work. Moving the factory to its own repository means moving
-`factory/`, `factory-update.yml`, the `worker-image` jobs of `release.yml` and the issue form, and
+`factory/`, the `worker-image` jobs of `release.yml` and the issue form, and
 pointing the repository name in the worker script, `reconcile.rs`,
 `governance.ts` and `requests.ts` at the new home; the pool keeps
 `worker/src/routes/factory.ts` (the queue) and the `factory` source.
@@ -382,14 +381,11 @@ factory/
   image/Containerfile             the one worker image (Arch, both architectures, signed, built by the release workflow); image/entrypoint.sh
                                   reads the registration and runs the contributor's or the project's half; image/compose.yml runs it
   bin/pkgbuild-meta               PKGBUILD → arches and version, without executing it as you
-  pkgbuilds/<name>/               the project's reviewed recipes, owned by every maintainer (CODEOWNERS)
-  sizing/<name>/                  recipes kept for dry runs only (never queued)
-.github/workflows/factory-update.yml    daily: pull requests bumping the project's own recipes (reviewed, never auto-merged)
+  sizing/<name>/                  recipes kept for dry runs only (never queued) — the only recipes in the repository
   bin/agent.py                    the owner's agent, whichever provider: Anthropic, OpenAI, Gemini, xAI (by the key set)
   bin/draft-pkgbuild              project URL → PKGBUILD (the agent, or a template), checksums left to updpkgsums
   prompts/pkgbuild.md             the packaging rules the drafter follows
   bin/audit-pkgbuild              the second agent: staged PKGBUILD + log + .PKGINFO → audit.json / audit.md
   prompts/audit.md                what the auditor looks for, and the report's shape
-  bin/check-updates               which PKGBUILDs are behind their GitHub upstream
-.github/CODEOWNERS                      every maintainer owns the governance file and the recipes
+.github/CODEOWNERS                      every maintainer owns the governance file and the sizing recipes
 ```

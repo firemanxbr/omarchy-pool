@@ -9,15 +9,16 @@ import { costGuard, dailyCost } from "./cost";
 import { dailyAudience } from "./audience";
 
 /**
- * The pool's own scheduler. GitHub's cron is best-effort — on 2026-09-12 it
- * delayed the hourly sync by an hour and never started the half-hourly
- * metrics — so a Cloudflare cron trigger checks every ten minutes when each
- * workflow last ran and dispatches the ones that are overdue. GitHub's own
- * schedules stay in the workflow files; whichever fires first wins, and a
- * run already queued or in progress is never doubled.
+ * The pool's own scheduler: a Cloudflare cron trigger, every ten minutes,
+ * queues the pool's jobs (sync, promote, health, security, gc, verify) for
+ * the project's workers when they are due, and never doubles one queued or
+ * running. It began as a dispatcher of GitHub workflows (GitHub's cron is
+ * best-effort: on 2026-09-12 it delayed the hourly sync by an hour); since
+ * 2026-09-17 nothing is dispatched on GitHub any more — the dispatch path
+ * stays for a rule without a job, should one return.
  *
- * Needs the GITHUB_TOKEN secret (fine-grained, Actions: read and write on
- * the repository). Without it the trigger logs and does nothing.
+ * GITHUB_TOKEN (fine-grained, read-only) only raises the rate limit of the
+ * reads the pool makes; without it everything still runs, anonymously.
  */
 
 const REPO = "firemanxbr/omarchy-pool";
@@ -75,7 +76,6 @@ export const RULES: Rule[] = [
   // ring (cost review, 2026-09-13).
   { workflow: "sync", every: 180, job: { kind: "sync", params: {} } },
   { workflow: "security", every: 180, job: { kind: "security", params: {} } },
-  { workflow: "enqueue", every: 60, job: { kind: "enqueue", params: {} } },
   // Promotion is by evidence, when the evidence is there — not by the
   // calendar (2026-09-16). edge → rc is queued by the sync that changed
   // edge (routes/factory.ts, the last sync of the tick); this rule is the
@@ -86,7 +86,6 @@ export const RULES: Rule[] = [
   { workflow: "promote", every: 720, job: { kind: "promote", params: { from: "edge", to: "rc", note: "by evidence" } } },
   { workflow: "promote", every: 180, job: { kind: "promote", params: { from: "rc", to: "stable", note: "by evidence" } } },
   { workflow: "health", at: { hour: 8, minute: 30 }, job: { kind: "health", params: {} } },
-  { workflow: "factory-update.yml", at: { hour: 5, minute: 45 } },
   { workflow: "gc", at: { hour: 4, minute: 0, weekday: 0 }, job: { kind: "gc", params: {} } },
   // Does what the pool serves verify? Every OPR object, once a week, repaired when not.
   { workflow: "verify", at: { hour: 3, minute: 0, weekday: 6 }, job: { kind: "verify", params: {} } },
@@ -307,12 +306,13 @@ export async function runScheduler(env: Env, now = new Date()): Promise<string[]
     }
   }
   if (!env.GITHUB_TOKEN) {
-    log.push("GITHUB_TOKEN not set; scheduler idle");
+    log.push("GITHUB_TOKEN not set; nothing to dispatch on GitHub (the jobs above ran)");
     return log;
   }
-  // What still starts on GitHub by dispatch: the rules without a job (the
-  // recipe bumps). A job kind left out of JOB_KINDS simply does not run —
-  // the workflows that once did are gone.
+  // Nothing starts on GitHub by dispatch any more (the recipe bumps went with
+  // factory/pkgbuilds, 2026-09-17: the pool bumps registered packages
+  // itself, updates.ts); the loop stays for a rule without a job, should
+  // one return. A job kind left out of JOB_KINDS simply does not run.
   const cache = new Map<string, RunSummary[]>();
   for (const rule of RULES) {
     if (rule.job) {

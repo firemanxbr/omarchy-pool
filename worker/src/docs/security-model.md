@@ -43,7 +43,7 @@ please do not file a public issue for it.
 | Signing key (OpenPGP) | the pool's Worker only (`SIGNING_KEY` secret, `worker/src/signing.ts`) | sign the databases it stores and the packages the factory builds (`POST /pool/:sha256/sign`) | — | live; no worker, runner or repository holds it |
 | `CLOUDFLARE_API_TOKEN` | the release workflow on GitHub | deploy the Worker, apply migrations, record the deploy | — | live; all GitHub holds (no hosted worker: Actions runs CI and the release only) |
 | `CLOUDFLARE_ANALYTICS_TOKEN` on the Worker | the daily cost estimate and the daily audience count | read the account's analytics, the zone's request analytics and the D1 file size | write anything | live |
-| `GITHUB_TOKEN` on the Worker | the scheduler, the update check, the provenance reads | dispatch `factory-update.yml` (the daily bump check); a higher rate limit reading GitHub for releases and provenance | write to the repository | live |
+| `GITHUB_TOKEN` on the Worker | the scheduler, the update check, the provenance reads | read run history; a higher rate limit reading GitHub for releases and provenance (nothing is dispatched since 2026-09-17) | write to the repository | live |
 | The broker's environment (`OMARCHY_WORKER_TOKEN`, an agent key, `GITHUB_TOKEN`) | one container per worker host that runs no build (`factory/bin/broker`); on the project's host also `agent-proxy`, without a worker token | the pool's calls for the one task it claimed, the agent, GitHub read-only | be read by a build: the builder beside it holds nothing | live |
 
 Tokens are 192-bit random values shown once and stored as SHA-256 hashes;

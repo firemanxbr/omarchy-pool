@@ -1,9 +1,10 @@
 //! The `enqueue` job: reconciles the PKGBUILDs on `main` with what the
 //! factory has built. Every (package, architecture, version) under
 //! `factory/pkgbuilds/<name>/` without a task yet is queued at that
-//! commit — the merge of a reviewed PKGBUILD is what a maintainer decided,
-//! this only tells the brain. It replaced factory-enqueue.yml: no GitHub
-//! secret, a per-job token instead.
+//! commit. Since 2026-09-17 the repository holds no such recipes — every
+//! package is requested on the dashboard and built by the pool — so the
+//! job finds nothing and the scheduler no longer runs it; it stays for a
+//! maintainer's `pkg-repo job enqueue`, should recipes ever return.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

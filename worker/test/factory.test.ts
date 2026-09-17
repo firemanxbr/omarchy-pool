@@ -68,7 +68,7 @@ describe("claims and leases", () => {
     expect(c.json.task.id).toBe(id);
     expect(c.json.task.status).toBe("leased");
     expect(c.json.token).toMatch(/^omj\./);
-    expect(c.json.pkgbuild_path).toBe("factory/pkgbuilds/tool");
+    expect(c.json.pkgbuild_path).toBe("factory/sizing/tool"); // a task made after the project's recipes left the repository
     // The task is leased: nobody else gets it; the job token heartbeats and moves the lease.
     expect((await call("POST", "/factory/claim", { arch: "aarch64" }, "omw_w2")).status).toBe(204);
     expect((await call("POST", `/factory/tasks/${id}/heartbeat`, {}, "omw_w2")).status).toBe(409);
@@ -1072,5 +1072,30 @@ describe("who trusts whom", () => {
     // Withdrawn once: the tombstone is a record, written once too.
     expect((await call("POST", "/factory/record/withdraw", { key, reason: "again, for the test" }, "omc_m1")).status).toBe(404);
     expect((await call("POST", "/factory/record/withdraw", { key: `${key}.tombstone.json`, reason: "a tombstone is not withdrawn" }, "omc_m1")).status).toBe(400);
+  });
+});
+
+describe("removing a registration", () => {
+  it("never leaves a package behind in a ring: the owner is refused while it is served, a maintainer's removal pulls it and says so in the journal", async () => {
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO factory_packages (name, owner, url, arches, status) VALUES ('ringed', 'alice', 'https://ringed.example', '[\"aarch64\"]', 'staged')"),
+      env.DB.prepare("INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES ('ringed-1', 'ringed', '1-1', 'aarch64', 'ringed-1-1-aarch64.pkg.tar.zst', 1, 1, 1, '{}', 'factory', 'factory/aarch64/ringed-1-1-aarch64.pkg.tar.zst', 'aarch64')"),
+    ]);
+    const pid = (await env.DB.prepare("SELECT id FROM packages WHERE name = 'ringed'").first<{ id: number }>())!.id;
+    await env.DB.prepare("INSERT INTO ring_packages (ring, package_id) VALUES ('edge', ?)").bind(pid).run();
+    // alice, its owner: not while it stands in edge (felix, 2026-09-17: the registration left, the package stayed in edge).
+    const mine = await call("DELETE", "/factory/packages/ringed", undefined, "omc_alice");
+    expect(mine.status).toBe(409);
+    expect(mine.json.error).toMatch(/in edge: a maintainer withdraws the approval or blocks it first/);
+    expect(await env.DB.prepare("SELECT name FROM factory_packages WHERE name = 'ringed'").first()).toEqual({ name: "ringed" });
+    // m1, a maintainer: the registration goes, and the package leaves edge with it — a release without it, render jobs queued, a journal line.
+    const theirs = await call("DELETE", "/factory/packages/ringed", undefined, "omc_m1");
+    expect(theirs.status, JSON.stringify(theirs.json)).toBe(200);
+    expect(theirs.json).toMatchObject({ deleted: "ringed", by: "m1", rings: [{ ring: "edge", release: expect.any(Number) }] });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM ring_packages WHERE package_id = ?").bind(pid).first()).toEqual({ n: 0 });
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM build_tasks WHERE kind = 'render' AND status = 'queued' AND json_extract(params, '$.ring') = 'edge'").first<{ n: number }>())!.n).toBeGreaterThan(0);
+    expect(await env.DB.prepare("SELECT summary FROM events WHERE kind = 'request' AND summary LIKE 'ringed: registration removed%' ORDER BY id DESC LIMIT 1").first()).toMatchObject({ summary: expect.stringMatching(/removed by m1 — it leaves edge/) });
+    // Gone: a second removal finds nothing.
+    expect((await call("DELETE", "/factory/packages/ringed", undefined, "omc_m1")).status).toBe(404);
   });
 });

@@ -18,6 +18,11 @@ import { version } from "../meta";
 import { detachedSignature, publicKey, signingEnabled } from "../signing";
 
 const REPO_URL = "https://github.com/firemanxbr/omarchy-pool";
+/** Where a <commit> recipe lived in the repository when the build was made: the project's own under factory/pkgbuilds until 2026-09-17, the sizing ones alone since. */
+export const RECIPES_LEFT_AT = "2026-09-17T00:00:00Z";
+export function recipesDir(createdAt: string | undefined): string {
+  return createdAt && createdAt < RECIPES_LEFT_AT ? "factory/pkgbuilds" : "factory/sizing";
+}
 const PREDICATE_TYPE = "https://omarchy-pool.firemanxbr.org/provenance/v1";
 
 /** Which project's keyring the sync verified a source's packages against (crates/pkg-repo, tests/fetch-keyrings.sh). */
@@ -109,9 +114,10 @@ export async function factoryChain(env: Env, sha256: string): Promise<Record<str
   }
   if (!staged && !review) {
     recipe.repository = REPO_URL;
-    recipe.path = `factory/pkgbuilds/${build.name}/PKGBUILD`;
+    // The project's own recipes lived in factory/pkgbuilds until 2026-09-17; since then the repository holds the sizing recipes only.
+    recipe.path = `${recipesDir((build as { created_at?: string }).created_at)}/${build.name}/PKGBUILD`;
     recipe.commit = ref;
-    recipe.pkgbuild = `${REPO_URL}/blob/${ref}/factory/pkgbuilds/${build.name}/PKGBUILD`;
+    recipe.pkgbuild = `${REPO_URL}/blob/${ref}/${recipe.path}`;
   }
   return {
     builder: { worker: builder.worker, trust: "project" },

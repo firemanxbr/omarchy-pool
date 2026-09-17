@@ -29,6 +29,11 @@ LABEL org.opencontainers.image.source="https://github.com/firemanxbr/omarchy-poo
 # pacman's download sandbox needs privileges a container build does not have.
 RUN sed -i '0,/^\[options\]/s//[options]\nDisableSandboxSyscalls\nDisableSandboxFilesystem/' /etc/pacman.conf \
  && pacman -Syu --noconfirm --needed git curl jq python libarchive gnupg bash ca-certificates sudo namcap pacman-contrib && pacman -Scc --noconfirm
+# shellcheck for the gate, in the image: Arch ships it, Arch Linux ARM does not — a build must never download it (the gate warns without it, but never waits on GitHub).
+RUN set -eu; if pacman -S --noconfirm --needed shellcheck >/dev/null 2>&1; then pacman -Scc --noconfirm; else \
+      v=v0.11.0; case "${ARCH}" in x86_64) sum=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198 ;; aarch64) sum=12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588 ;; esac; \
+      curl -fsSL -o /tmp/sc.tar.xz "https://github.com/koalaman/shellcheck/releases/download/$v/shellcheck-$v.linux.${ARCH}.tar.xz"; \
+      echo "$sum  /tmp/sc.tar.xz" | sha256sum -c -; tar -xJf /tmp/sc.tar.xz -C /tmp; install -m755 "/tmp/shellcheck-$v/shellcheck" /usr/local/bin/shellcheck; rm -rf /tmp/sc.tar.xz "/tmp/shellcheck-$v"; fi
 # The docker CLI, static: it talks to whatever Docker-compatible socket is mounted at /var/run/docker.sock (project mode).
 RUN curl -fsSL "https://download.docker.com/linux/static/stable/${ARCH}/docker-${DOCKER_CLI}.tgz" | tar -xz --strip-components=1 -C /usr/local/bin docker/docker
 # The pool's tools, from the release this image is tagged with (project mode).
@@ -44,6 +49,8 @@ COPY factory/image/entrypoint.sh /usr/local/bin/omarchy-worker
 COPY factory/bin/draft-pkgbuild factory/bin/pkgbuild-meta factory/bin/audit-pkgbuild factory/bin/agent.py factory/bin/broker /usr/local/lib/omarchy-factory/bin/
 COPY factory/prompts/pkgbuild.md factory/prompts/audit.md /usr/local/lib/omarchy-factory/prompts/
 COPY factory/skills /usr/local/lib/omarchy-factory/skills/
+# The pool's public key: a build verifies the pool's databases against it without cloning anything.
+COPY docs/omarchy-staging.pub.asc /usr/local/lib/omarchy-factory/omarchy-staging.pub.asc
 RUN chmod 755 /usr/local/bin/omarchy-build-worker /usr/local/bin/omarchy-worker /usr/local/lib/omarchy-factory/bin/* && mkdir -p /build /task /var/lib/omarchy-worker
 # OMARCHY_IMAGE: the release this image is, reported with every claim (the Workers page shows it).
 ENV OMARCHY_API=https://pkgs.firemanxbr.org OMARCHY_POOL=https://pool.firemanxbr.org \

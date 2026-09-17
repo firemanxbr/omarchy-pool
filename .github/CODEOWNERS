@@ -1,8 +1,7 @@
 # Generated from factory/MAINTAINERS.toml by factory/bin/check-governance --write;
 # CI fails when the two disagree. Every maintainer owns the governance file,
-# this one and the project's recipes. With main requiring a code-owner review,
+# this one and the sizing recipes. With main requiring a code-owner review,
 # a change here is a decision another maintainer approves.
 factory/MAINTAINERS.toml  @firemanxbr @maralcbr
 .github/CODEOWNERS        @firemanxbr @maralcbr
-factory/pkgbuilds/        @firemanxbr @maralcbr
 factory/sizing/           @firemanxbr @maralcbr

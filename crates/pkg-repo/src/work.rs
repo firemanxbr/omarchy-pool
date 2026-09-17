@@ -577,24 +577,52 @@ fn repo_dir(opts: &WorkOptions) -> Result<PathBuf> {
     if dir.join("tests").is_dir() && fresh {
         return Ok(dir);
     }
-    let _ = std::fs::remove_dir_all(&dir);
-    let status = Command::new("git")
+    // A fresh clone lands beside the old checkout and replaces it only once
+    // it is whole: when GitHub does not answer, the checkout the worker has
+    // — the same release's scripts — carries on, and the pool says so. The
+    // pool's rule since 2026-09-17: builds go on when GitHub is down.
+    let fresh_dir = opts.work_dir.join("repo.new");
+    let _ = std::fs::remove_dir_all(&fresh_dir);
+    let mut ok = Command::new("git")
         .args([
             "clone", "-q", "--depth", "1", "--branch", &git_ref, REPO_URL,
         ])
-        .arg(&dir)
+        .arg(&fresh_dir)
         .status()
-        .context("git clone")?;
-    if !status.success() {
+        .is_ok_and(|s| s.success());
+    if !ok {
         // A dev build's version has no tag; main is what it was built from.
-        let status = Command::new("git")
+        let _ = std::fs::remove_dir_all(&fresh_dir);
+        ok = Command::new("git")
             .args(["clone", "-q", "--depth", "1", REPO_URL])
-            .arg(&dir)
-            .status()?;
-        anyhow::ensure!(status.success(), "could not clone {REPO_URL}");
+            .arg(&fresh_dir)
+            .status()
+            .is_ok_and(|s| s.success());
     }
-    std::fs::write(&stamp, git_ref)?;
-    Ok(dir)
+    if ok {
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::rename(&fresh_dir, &dir).context("moving the fresh checkout into place")?;
+        std::fs::write(&stamp, git_ref)?;
+        return Ok(dir);
+    }
+    let _ = std::fs::remove_dir_all(&fresh_dir);
+    // Only this release's own checkout goes on: another release's scripts
+    // are the v0.0.116 incident again (nineteen audits died on an old
+    // agent.py, 2026-09-15). A rollout during an outage cannot happen
+    // anyway — the image comes from the same place.
+    let have = std::fs::read_to_string(&stamp).unwrap_or_default();
+    if dir.join("tests").is_dir() && have.trim() == git_ref {
+        eprintln!("warning: could not clone {REPO_URL}; going on with the checkout of {git_ref} the worker has");
+        return Ok(dir);
+    }
+    anyhow::bail!(
+        "could not clone {REPO_URL}, and the checkout here is {} — not this release's ({git_ref})",
+        if have.trim().is_empty() {
+            "missing"
+        } else {
+            have.trim()
+        }
+    )
 }
 
 /// The keyring files the sync verifies against, refreshed daily by the pipeline's own script.
@@ -621,7 +649,17 @@ fn keyrings_for(opts: &WorkOptions, required: &[String]) -> Result<PathBuf> {
         .arg(&dir)
         .status()
         .context("fetch-keyrings.sh")?;
-    anyhow::ensure!(status.success(), "fetching the upstream keyrings failed");
+    if !status.success() {
+        // The keyrings come from GitHub (omarchy-iso, asahi-alarm): when it
+        // does not answer, yesterday's keyrings verify today's packages as
+        // well as they did yesterday — the sync goes on, and says so. Only
+        // a keyring the worker never had stops it.
+        if present("archlinux") && required.iter().all(|k| present(k)) {
+            eprintln!("warning: the upstream keyrings could not be refreshed; going on with the ones here");
+            return Ok(dir);
+        }
+        anyhow::bail!("fetching the upstream keyrings failed, and a required one is not here yet");
+    }
     std::fs::write(&stamp, "")?;
     Ok(dir)
 }
@@ -1371,6 +1409,15 @@ fn build_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
         "-v",
     ])
     .arg(format!("{}:/task", dir.display()));
+    // The release's own checkout — the drafter, the auditor's tooling, the
+    // prompts, the skills, the pool's key — rides into the plain Arch
+    // container read-only, so a build clones nothing: builds go on when
+    // GitHub does not answer (2026-09-17), and the script and its tooling
+    // are always the same release.
+    run.arg("-v")
+        .arg(format!("{}:/pool:ro", repo.display()))
+        .arg("-e")
+        .arg("OMARCHY_FACTORY_LIB=/pool/factory");
     // What the operator hands every build container: the agent's address
     // (OMARCHY_BUILD_ENV, comma-separated KEY=VALUE — the agent-proxy on the
     // Studio, where Claude Code cannot run under qemu) and the network it
