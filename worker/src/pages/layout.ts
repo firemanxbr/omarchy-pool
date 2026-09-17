@@ -713,8 +713,9 @@ const HELPERS = String.raw`
       var ta = d.querySelector("textarea"), se = d.querySelector("select"), form = d.querySelector("form"), done = function (v) { d.close(); d.remove(); resolve(v); };
       var answer = function (extra) { var v = ta ? ta.value.trim() : ""; var out = se || o.alt || extra ? { note: v, pick: se ? se.value : "" } : v; if (extra && typeof out === "object") out.alt = true; return out; };
       d.querySelector(".cancel").onclick = function () { done(null); };
-      d.addEventListener("cancel", function (ev) { ev.preventDefault(); done(null); });
-      d.addEventListener("click", function (ev) { if (ev.target === d) done(null); });
+      // A sticky dialog (a token shown once) closes by its buttons only — not by a tap beside it, not by Escape.
+      d.addEventListener("cancel", function (ev) { ev.preventDefault(); if (!o.sticky) done(null); });
+      d.addEventListener("click", function (ev) { if (ev.target === d && !o.sticky) done(null); });
       var cp = d.querySelector(".take"); if (cp) cp.onclick = function () { navigator.clipboard.writeText(o.value).then(function () { cp.textContent = "Copied"; setTimeout(function () { cp.textContent = o.copy || "Copy"; }, 1500); }); };
       var al = d.querySelector(".alt"); if (al) al.onclick = function () { done(answer(true)); };
       form.onsubmit = function (ev) {
@@ -728,19 +729,22 @@ const HELPERS = String.raw`
   }
   // The workers a build may go to, as the choice in the Build dialog, from the factory listing (/api/v1/factory): for a contributor's build, theirs and the ones the project shares; for the project's build, the project's own that build. The first option leaves it to the rule.
   // The choice of worker in the Build dialog, from the factory listing (/api/v1/factory): for a contributor's build, the shared queue (any shared worker, the best idle one first, the asker's own at once) or one of the asker's own workers; for the project's build, one of the project's; queue is where the build already stands, when it does.
-  function whereOptions(workers, arch, login, forProject, needsAgent, queue) {
+  function whereOptions(workers, arch, login, forProject, needsAgent, queue, pinnedTo) {
     if (needsAgent === undefined) needsAgent = true;
     var can = (workers || []).filter(function (w) { return w.arch === arch && !w.revoked_at && (forProject ? (w.side === "omarchy" && (!w.kinds || w.kinds.indexOf("build") >= 0)) : (w.side !== "omarchy" && (w.owner === login || w.mode === "shared"))); });
     // A drafted build (the project's always) goes only to a worker whose agent answered: pinned to another it would wait forever.
     var fit = function (w) { return w.alive && (!needsAgent || w.agent_status === "ok"); };
     var word = function (w) { return (w.owner && w.owner !== login ? w.owner + "'s " : forProject ? "" : "your ") + wtShort(w.id) + " · " + (w.alive ? (w.current_task ? "building" : "idle") : "offline") + " · " + (w.labels && w.labels.emulated ? "emulated" : "native") + (w.agent ? " · " + w.agent + (w.agent_status !== "ok" ? " (not answering)" : "") : " · no agent"); };
     var mine = can.filter(function (w) { return w.owner === login && !forProject; }), shared = can.filter(function (w) { return w.mode === "shared" && !forProject; }), project = forProject ? can : [];
-    var idle = shared.filter(function (w) { return fit(w) && !w.current_task; }), native = idle.filter(function (w) { return !(w.labels && w.labels.emulated); });
+    var online = shared.filter(fit), idle = online.filter(function (w) { return !w.current_task; }), native = idle.filter(function (w) { return !(w.labels && w.labels.emulated); });
+    var state = idle.length ? idle.length + " idle now, " + native.length + " native" : online.length ? "all " + online.length + " online busy" : shared.length ? "none of " + shared.length + " online" : "no shared worker for " + arch;
     var opts = [];
-    if (forProject) opts.push({ value: "", text: "Any of the project's workers for " + arch + (project.length ? "" : " (none is registered)"), selected: true });
-    else opts.push({ value: "", text: "The queue — the best idle shared worker takes it" + (queue ? " (yours is " + queue.position + " of " + queue.total + ")" : "") + " · " + (idle.length ? idle.length + " idle now, " + native.length + " native" : shared.length ? "all " + shared.length + " busy" : "no shared worker for " + arch), selected: true });
-    mine.concat(project).forEach(function (w) { opts.push({ value: w.id, text: word(w), disabled: !fit(w) }); });
-    return { label: "Worker", options: opts, count: can.length, native: native.length, idle: idle.length, shared: shared.length, mine: mine.length };
+    if (forProject) opts.push({ value: "", text: "Any of the project's workers for " + arch + (project.length ? "" : " (none is registered)"), selected: !pinnedTo });
+    else opts.push({ value: "", text: "The queue — the best idle shared worker takes it" + (queue ? " (yours is " + queue.position + " of " + queue.total + ")" : "") + " · " + state, selected: !pinnedTo });
+    // A build already asked for one worker keeps that choice unless changed.
+    mine.concat(project).forEach(function (w) { opts.push({ value: w.id, text: word(w), disabled: !fit(w) && w.id !== pinnedTo, selected: w.id === pinnedTo }); });
+    if (pinnedTo && !opts.some(function (o) { return o.value === pinnedTo; })) opts.push({ value: pinnedTo, text: wtShort(pinnedTo) + " · as asked", selected: true });
+    return { label: "Worker", options: opts, count: can.length, native: native.length, idle: idle.length, online: online.length, shared: shared.length, mine: mine.length, state: state };
   }
   function wtShort(id) { var parts = String(id).split("-"); return parts.length > 3 ? parts.slice(-3).join("-") : id; }
 

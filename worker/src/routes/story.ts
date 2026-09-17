@@ -25,7 +25,10 @@ export interface TaskBrief {
   lease_owner: string | null;
   /** The worker this build was asked for, when it was: only that one claims it. */
   pinned_to?: string | null;
-  /** A queued build's place in the shared queue of its architecture (none when it waits for one worker). */
+  priority?: number;
+  /** A bump's: until then only the owner's worker takes it. */
+  shared_after?: string | null;
+  /** A queued build's place in the shared queue of its architecture (none when it waits for one worker, or for the owner's until shared_after). */
   queue?: { position: number; total: number } | null;
   /** Where the recipe came from (draft:, <url>@<tag>:<path>, bump:<task>@<tag>, review:<task>). */
   pkgbuild_ref?: string | null;
@@ -53,7 +56,7 @@ export interface Chain {
   score: Score;
 }
 
-const TASK_COLS = "id, kind, status, trust, owner, arch, version, attempts, lease_owner, pinned_to, pkgbuild_ref, created_at, started_at, finished_at, duration_ms, error, params, result";
+const TASK_COLS = "id, kind, status, trust, owner, arch, version, attempts, lease_owner, pinned_to, pkgbuild_ref, priority, shared_after, created_at, started_at, finished_at, duration_ms, error, params, result";
 
 function brief(r: Record<string, unknown>): TaskBrief {
   const parse = (s: unknown) => { try { return s ? (JSON.parse(s as string) as Record<string, unknown>) : null; } catch { return null; } };
@@ -131,7 +134,7 @@ export function chains(tasks: TaskBrief[], approvals: Approval[], pkg: Record<st
 /** A queued community build knows its place in the shared queue (the page says "3 of 7"); one asked for a worker waits for that worker instead. */
 export async function placeInQueue(env: Env, tasks: TaskBrief[]): Promise<void> {
   for (const t of tasks) {
-    if (t.kind === "build" && t.trust === "community" && t.status === "queued") t.queue = t.pinned_to ? null : await queuePosition(env, t);
+    if (t.kind === "build" && t.trust === "community" && t.status === "queued") t.queue = await queuePosition(env, t);
   }
 }
 

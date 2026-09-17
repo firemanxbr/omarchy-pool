@@ -47,11 +47,15 @@ const IDLE_SEEN_MINUTES = 2;
  * architecture: its position among the builds any shared worker may take
  * (not pinned, not waiting for shared_after), and how many there are.
  */
-export async function queuePosition(env: Env, task: { id: number; arch: string }): Promise<{ position: number; total: number }> {
+export async function queuePosition(env: Env, task: { id: number; arch: string; priority?: number; shared_after?: string | null; pinned_to?: string | null }): Promise<{ position: number; total: number } | null> {
+  // Not in the shared queue: asked for one worker, or a bump still the owner's worker's (shared_after ahead).
+  if (task.pinned_to || (task.shared_after && task.shared_after > now())) return null;
+  const pr = task.priority ?? 100;
+  // The claim takes by priority, then by id: the place counts the same way.
   const r = await env.DB.prepare(
-    `SELECT SUM(CASE WHEN id < ? THEN 1 ELSE 0 END) AS ahead, COUNT(*) AS total FROM build_tasks
+    `SELECT SUM(CASE WHEN priority < ? OR (priority = ? AND id < ?) THEN 1 ELSE 0 END) AS ahead, COUNT(*) AS total FROM build_tasks
       WHERE status = 'queued' AND kind = 'build' AND trust = 'community' AND arch = ? AND pinned_to IS NULL AND (shared_after IS NULL OR shared_after <= ?)`,
-  ).bind(task.id, task.arch, now()).first<{ ahead: number | null; total: number }>();
+  ).bind(pr, pr, task.id, task.arch, now()).first<{ ahead: number | null; total: number }>();
   return { position: (r?.ahead ?? 0) + 1, total: Math.max(r?.total ?? 0, (r?.ahead ?? 0) + 1) };
 }
 

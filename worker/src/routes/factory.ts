@@ -324,13 +324,20 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
       // memory — is alive and idle, this one leaves the queue's newest builds
       // to it (its owner's are its own). After three minutes anyone takes
       // them: a worker that is alive but never claims holds nobody up.
-      if (await betterIdleWorker(env, workerId, b.arch, { emulated: !!(b.labels && typeof b.labels === "object" && (b.labels as Record<string, unknown>).emulated), cores: usage?.cores ?? 0, ram: usage?.ram_gb ?? 0 }, probe?.status === "ok")) {
-        scope += ` AND (owner = ? OR created_at <= ?)`;
-        binds.push(actor.w.owner ?? "-", new Date(Date.now() - FIRST_PICK_MINUTES * 60000).toISOString());
+      // (A fresh container's first claim carries no usage yet: what this worker last reported stands in.)
+      let mine = { emulated: !!(b.labels && typeof b.labels === "object" && (b.labels as Record<string, unknown>).emulated), cores: usage?.cores ?? 0, ram: usage?.ram_gb ?? 0 };
+      if (!usage) {
+        const last = await env.DB.prepare("SELECT labels, usage FROM build_workers WHERE id = ?").bind(workerId).first<{ labels: string | null; usage: string | null }>();
+        try { const u = last?.usage ? (JSON.parse(last.usage) as { cores?: number; ram_gb?: number }) : {}; const l = last?.labels ? (JSON.parse(last.labels) as { emulated?: boolean }) : {}; mine = { emulated: mine.emulated || !!l.emulated, cores: u.cores ?? 0, ram: u.ram_gb ?? 0 }; } catch { /* as reported now */ }
+      }
+      if (await betterIdleWorker(env, workerId, b.arch, mine, probe?.status === "ok")) {
+        scope += ` AND (owner = ? OR pinned_to = ? OR created_at <= ?)`;
+        binds.push(actor.w.owner ?? "-", workerId, new Date(Date.now() - FIRST_PICK_MINUTES * 60000).toISOString());
       }
     } else {
-      scope += ` AND owner = ?`;
-      binds.push(actor.w.owner ?? "-");
+      // A dedicated worker takes its owner's builds — and one somebody asked for it by name while it was shared.
+      scope += ` AND (owner = ? OR pinned_to = ?)`;
+      binds.push(actor.w.owner ?? "-", workerId);
     }
   }
   // One statement claims the next queued task of this architecture: D1

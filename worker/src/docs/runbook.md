@@ -457,8 +457,8 @@ tasks from the pool ([factory/README.md](../factory/README.md)). Day to day:
     asks GitHub for each approved package's latest release and queues a
     community build from the approved PKGBUILD with `pkgver` moved to the
     tag (`bump:<task>@<tag>`, `updpkgsums` in the worker). The owner's
-    worker has **14 days**; then a worker a maintainer shares (`--shared`)
-    may build it. (A contributor's request is different: it lands in the
+    worker has **14 days**; then any shared worker (`WORKER_SHARED=1`,
+    anyone's) may build it. (A contributor's request is different: it lands in the
     shared queue at once — any shared worker, the best idle one first for
     three minutes, the owner's own at any time — and a build asked for one
     worker — `worker` in `POST /factory/packages/<name>/build`, `pinned_to`

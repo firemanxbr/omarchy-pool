@@ -345,9 +345,11 @@ toolchains_start() {
   local emulated t
   emulated="$(jq -r '.emulated // false' <<<"${WORKER_LABELS:-"{}"}" 2>/dev/null || echo false)"
   [[ "$emulated" == true ]] || return 0
+  local probe
   for t in rustc cargo clang gcc go node python3 zig; do
     command -v "$t" >/dev/null 2>&1 || continue
-    if ! "$t" --version >/dev/null 2>&1; then
+    case "$t" in go|zig) probe=version ;; *) probe=--version ;; esac
+    if ! "$t" "$probe" >/dev/null 2>&1; then
       echo "==> $t cannot start on this worker: emulated $(uname -m) under qemu on a $(getconf PAGESIZE 2>/dev/null || echo ?)-byte-page host — a native worker is needed for this package" >&2
       return 6
     fi

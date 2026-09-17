@@ -97,9 +97,9 @@ can be ready while the other failed). The tools, in the order to try them:
    a queued build can be taken out and put back from the same dialog —
    nothing puts it back by itself. A build that ran *emulated* (x86_64
    under qemu on an aarch64 host) may need nothing but a native worker: a
-   toolchain that cannot start there fails the build at once, with the
-   reason, before any drafting. Revoking a worker frees the builds asked
-   for it.
+   toolchain that cannot start there fails the build as soon as it is
+   installed, with the reason — before any correction turn of the drafter.
+   Revoking a worker frees the builds asked for it.
 4. **Build it at home first.** The same image runs on any machine with
    the contributor's own agent key (*Workers* in the docs): what passes
    there is what they queue here.

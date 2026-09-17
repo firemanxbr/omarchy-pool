@@ -179,9 +179,10 @@ curl -s -X POST $API/factory/packages -H "authorization: Bearer $OMC" -H 'conten
   -d '{"url":"https://github.com/you/project","description":"What it does, one line","license":"MIT",
        "checklist":{"official":true,"license":true,"unshipped":true,"evidence":true}}'
 #    optional: "name", "arches"; for a project not on GitHub: "source" (the release tarball) and "version"
-#    → {"package":…,"request":{"id":12,"record":"https://pool.firemanxbr.org/factory/<name>/12/request.json",…}}
+#    → {"package":…,"request":{"id":12,"record":"https://pool.firemanxbr.org/factory/<name>/12/request.json",…},
+#       "build":{"tasks":[57],"queue":{"aarch64":{"position":2,"total":3}},…}}   — queued at once, in the shared queue
 
-# 3. Register a worker. It builds your packages, and only yours (donating compute is a maintainer's call).
+# 3. Register a worker (optional: the request above is already in the shared queue). It builds your packages at once; started with WORKER_SHARED=1 it builds everyone's queue too.
 curl -s -X POST $API/factory/workers -H "authorization: Bearer $OMC" -H 'content-type: application/json' \
   -d '{"name":"laptop","arch":"aarch64"}'
 #    → {"worker":"you-laptop-ab12","token":"omw_…"}   shown once

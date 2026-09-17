@@ -57,10 +57,10 @@ jobs:
             # updpkgsums downloads the sources and rewrites the sha256sums arrays.
             docker run --rm -v "$PWD/$dir:/pkg" -w /pkg docker.io/library/archlinux:base-devel bash -c '
               sed -i -e "s/^#\?DisableSandboxSyscalls/DisableSandboxSyscalls/" -e "s/^#\?DisableSandboxFilesystem/DisableSandboxFilesystem/" /etc/pacman.conf
-              pacman -Sy --noconfirm --needed pacman-contrib >/dev/null && useradd -m b && chown -R b /pkg && sudo -u b updpkgsums' 2>&1 | tail -3
-            # Only the recipe goes on the record: updpkgsums leaves the downloaded sources beside it (hey-cli 1.5.0 carried two tarballs into its pull request, 2026-09-17).
+              pacman -Sy --noconfirm --needed pacman-contrib >/dev/null && useradd -m b && chown -R b /pkg && sudo -u b updpkgsums
+              # Only the recipe goes on the record: the sources updpkgsums downloaded go here, where root can remove them (hey-cli 1.5.0 carried two tarballs into its pull request, 2026-09-17).
+              find /pkg -mindepth 1 -maxdepth 1 ! -name PKGBUILD -exec rm -rf {} +' 2>&1 | tail -3
             git add "$dir/PKGBUILD" && git commit -q -m "factory: $name $current → $latest" -m "Automatic bump of an approved package after an upstream release." || { echo "$pkg: nothing changed"; continue; }
-            git clean -fdq -- "$dir"
             git push -q -f origin "$branch"
             url="$(gh pr create --base main --head "$branch" --title "factory: $name $current → $latest" \
               --body "Upstream released **$latest** (this PKGBUILD had $current). pkgver bumped, pkgrel reset, checksums refreshed with updpkgsums. Opened by the Factory update workflow for a maintainer to review; the merge queues the build.")"
