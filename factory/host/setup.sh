@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # setup.sh — prepares an Arch Linux host (Omarchy, Arch Linux ARM, Arch) to
-# run the project's six workers (compose.yml beside this script; RUNBOOK,
+# run the project's eight workers (compose.yml beside this script; RUNBOOK,
 # *The Studio host*). Run once, as root:
 #
 #   sudo ./setup.sh [POOL_ROOT]          default POOL_ROOT: /srv/omarchy-pool
@@ -119,7 +119,7 @@ cat <<NEXT
 
 Done. Next, as $user (log in again so the docker group applies):
   1. put your agent key in $root/etc/agent.env
-  2. register the six workers and trust the project's four:
+  2. register the eight workers and trust the project's six:
        OMARCHY_CONTRIBUTOR_TOKEN=omc_… $root/register.sh        (a maintainer's token; from the profile page, shown once)
   3. cd $root && docker compose pull && docker compose up -d
   4. systemctl --user enable --now omarchy-pool-rollout.timer     (rolling upgrades from then on)

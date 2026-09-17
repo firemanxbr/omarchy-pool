@@ -187,15 +187,17 @@ job tokens.
 ## The Studio host
 
 The project's workers run on one machine — `omarchy-studio`, a Mac Studio
-on Arch Linux ARM (Asahi), 12 cores, 32 GB, on around the clock — as six
-containers of the worker image, two of each role, one per architecture
+on Arch Linux ARM (Asahi), 12 cores, 32 GB, on around the clock — as eight
+worker containers of the image: two pool, four review (two pairs, since
+2026-09-17: an audit waited 23 minutes on average behind builds and the
+pool's jobs), two community, one per architecture each
 ([factory/host/](../factory/host/README.md); the roles:
 [factory/README.md](../factory/README.md) *Three roles*):
 
 | Service | Registration | Takes |
 |---|---|---|
 | `pool-x86_64`, `pool-aarch64` | project trust | the pool's jobs: sync, render, promote, rollback, health, security, enqueue, gc, verify, relayout, trial |
-| `review-x86_64`, `review-aarch64` | project trust, an agent key | the build of the recipes on `main`, the audit of staged builds |
+| `review-x86_64`, `review-aarch64`, `review2-x86_64`, `review2-aarch64` | project trust, an agent key | the project's builds from staged evidence, the audit of staged builds — two pairs, so an audit does not wait for a build |
 | `community-x86_64`, `community-aarch64` | community, shared, an agent key | contributors' requested packages, with the project's agent |
 | `broker-community-{x86_64,aarch64}` | `etc/agent.env` + the builder's token | the broker (`factory/bin/broker`): the worker token, the agent key and `GITHUB_TOKEN` for the builder beside it, which holds nothing; the pool's calls for the one task it claimed, the agent, GitHub read-only |
 | `agent-proxy` | `etc/agent.env` — no worker token | the agent and GitHub, natively, over HTTP for the review workers' audits and their build containers (the `review` network): Claude Code's binary dies under qemu, so the emulated worker asks this one (`FACTORY_PROVIDER=anthropic`, `ANTHROPIC_BASE_URL=http://agent-proxy:8790`; `factory/bin/agent-proxy`) |
@@ -218,12 +220,12 @@ and ccache caches the build containers mount at `/build/cache`:
 `OMARCHY_BUILD_CACHE` for the project's, the compose file's volume for the
 community's — a stranger's build never writes what the project's build
 reads; inside, one directory per package),
-`etc/` (the six worker tokens and `agent.env`, mode 600, never in the
+`etc/` (the eight worker tokens and `agent.env`, mode 600, never in the
 repository). Day to day, on the host:
 
 ```bash
 cd /srv/omarchy-pool
-docker compose ps                                # six up?
+docker compose ps                                # eleven up (eight workers, two brokers, the agent proxy)?
 docker compose logs -f --tail 50 pool-aarch64    # one of them
 ./rollout.sh                                     # a rolling upgrade to the latest image (a user timer runs it every 15 min)
 ```
