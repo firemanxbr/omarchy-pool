@@ -40,7 +40,6 @@ export function slug(title: string): string {
   );
 }
 
-
 /** A heading's text without its markup: what the anchor and the map use. */
 function plain(s: string): string {
   return s.replace(/`/g, "").replace(/\*\*?/g, "").replace(/\[([^\]]+)\]\([^)]*\)/g, "$1");

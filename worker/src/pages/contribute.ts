@@ -98,7 +98,7 @@ __CHARTS__
       var stagesF = [["requested → staged", median(regToStaged), "your build, on a worker"], ["staged → decided", median(stagedToDecided), "a maintainer reads the evidence"], ["edge → rc", 0.5, "minutes, after the checks on both architectures"], ["rc → stable", 6, "two green health checks in a row — or at once, when the trial installed it"]];
       var maxH = Math.max(6, median(regToStaged) || 0, median(stagedToDecided) || 0);
       // A row per stage: the label carries what the stage is as its title, the bar is the stage's share of the longest one, the value its median; the stage a human decides is amber.
-      $("#c-funnel").innerHTML = hrows(stagesF.map(function (st) { var human = st[0] === "staged → decided"; return ['<span title="' + esc(st[2]) + '">' + esc(st[0]) + '</span>', "", st[1] == null ? 0 : Math.min(100, 100 * st[1] / maxH), human ? "var(--amber)" : "var(--green)", fmtH(st[1])]; }), { w: 160, html: true }) + '<div class="legend"><span><i style="background:var(--green)"></i>the machines</span><span><i style="background:var(--amber)"></i>a human decides</span></div>';
+      $("#c-funnel").innerHTML = hrows(stagesF.map(function (st) { var human = st[0] === "staged → decided"; return ['<span title="' + esc(st[2]) + '">' + esc(st[0]) + '</span>', "", st[1] == null ? 0 : Math.min(100, 100 * st[1] / maxH), human ? "var(--amber)" : "var(--green)", fmtH(st[1]), st[0] + ": " + (st[1] == null ? "no measurement yet" : "median " + fmtH(st[1])) + " — " + st[2]]; }), { w: 160, html: true }) + '<div class="legend"><span><i style="background:var(--green)"></i>the machines</span><span><i style="background:var(--amber)"></i>a human decides</span></div>';
       endSkeleton();
     }).catch(function () { endSkeleton(); });
   }

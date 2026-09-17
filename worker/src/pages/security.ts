@@ -70,8 +70,8 @@ __CHARTS__
       var rows = (d.vulnerable || []).map(function (v) {
         var advs = v.advisories.filter(function (a) { return confOk(a.match); });
         if (!advs.length) return null;
-        var worst = advs.reduce(function (w, a) { var order = ["critical", "high", "medium", "low", "unknown"]; return order.indexOf(a.severity) < order.indexOf(w) ? a.severity : w; }, "unknown");
-        return { v: v, advs: advs, worst: worst, kev: advs.some(function (a) { return a.kev; }), epss: advs.reduce(function (m, a) { return a.epss != null && a.epss > m ? a.epss : m; }, 0) };
+        var sev = advs.reduce(function (w, a) { var order = ["critical", "high", "medium", "low", "unknown"]; return order.indexOf(a.severity) < order.indexOf(w) ? a.severity : w; }, "unknown");
+        return { v: v, advs: advs, worst: sev, kev: advs.some(function (a) { return a.kev; }), epss: advs.reduce(function (m, a) { return a.epss != null && a.epss > m ? a.epss : m; }, 0) };
       }).filter(Boolean);
       var count = function (s) { return rows.filter(function (r) { return r.worst === s; }).length; };
       setTiles("#tiles", [

@@ -90,64 +90,104 @@ describe("dashboard pages", () => {
     }
   });
 
-  // One shell: a helper two pages need lives in HELPERS (a chart primitive in CHARTS), and a page declares only what it alone draws. The copies drifted when they lived on the pages — four colour maps for one build status, five pick() rows, three ways to say how long a build took — so a page that declares a name the shell declares (the copy coming back), or one of its own twice, fails here by the page's name; so does a page that polls /api/v1/stats every two minutes to render nothing.
+  // One shell: a helper two pages need lives in HELPERS (a chart primitive in CHARTS), and a page declares only what it alone draws. The copies drifted when they lived on the pages — four colour maps for one build status, five pick() rows, three ways to say how long a build took — so a page that declares a name the shell declares (the copy coming back, at its top or inside the function that draws), assigns over one, or declares one of its own twice, fails here by the page's name; so does a page that polls /api/v1/stats every two minutes to render nothing, and a page that draws a chart primitive without CHARTS. The shell is checked first, by its own name: a page is never blamed for a name HELPERS declares twice.
   it("a page declares only what it alone draws — no helper the shell has, no name twice, no poll for nothing", async () => {
     const acorn = await import("acorn");
     type N = Record<string, any>;
-    // The names a function scope declares: function declarations and var/let/const declarators, through blocks and loops, not into a nested function.
-    const declared = (body: N[]): string[] => {
-      const out: string[] = [];
-      const names = (pat: N): void => {
-        if (!pat) return;
-        if (pat.type === "Identifier") out.push(pat.name);
-        else if (pat.type === "ObjectPattern") pat.properties.forEach((q: N) => names(q.value ?? q.argument));
-        else if (pat.type === "ArrayPattern") pat.elements.forEach(names);
-        else if (pat.type === "AssignmentPattern") names(pat.left);
-        else if (pat.type === "RestElement") names(pat.argument);
-      };
-      const walk = (n: unknown): void => {
-        if (!n || typeof n !== "object") return;
-        if (Array.isArray(n)) { n.forEach(walk); return; }
-        const node = n as N;
-        if (!node.type) return;
-        if (node.type === "FunctionDeclaration") { names(node.id); return; }
-        if (node.type === "FunctionExpression" || node.type === "ArrowFunctionExpression" || node.type === "ClassDeclaration" || node.type === "ClassExpression") return;
-        if (node.type === "VariableDeclaration") { node.declarations.forEach((d: N) => { names(d.id); walk(d.init); }); return; }
-        for (const k of Object.keys(node)) if (k !== "type" && k !== "start" && k !== "end") walk(node[k]);
-      };
-      walk(body);
+    const FN = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"]);
+    // One walk for every check: visit(node, parent, key) returns false to go no deeper at that node.
+    const walk = (n: unknown, visit: (node: N, parent: N | null, key: string | null) => boolean | void, parent: N | null = null, key: string | null = null): void => {
+      if (!n || typeof n !== "object") return;
+      if (Array.isArray(n)) { n.forEach((x) => walk(x, visit, parent, key)); return; }
+      const node = n as N;
+      if (!node.type) return;
+      if (visit(node, parent, key) === false) return;
+      for (const k of Object.keys(node)) if (k !== "type" && k !== "start" && k !== "end") walk(node[k], visit, node, k);
+    };
+    const names = (pat: N, out: string[] = []): string[] => {
+      if (!pat) return out;
+      if (pat.type === "Identifier") out.push(pat.name);
+      else if (pat.type === "ObjectPattern") pat.properties.forEach((q: N) => names(q.value ?? q.argument, out));
+      else if (pat.type === "ArrayPattern") pat.elements.forEach((e: N) => names(e, out));
+      else if (pat.type === "AssignmentPattern") names(pat.left, out);
+      else if (pat.type === "RestElement") names(pat.argument, out);
       return out;
     };
+    // Every name the statements declare — function declarations, var/let/const declarators, parameters — with the function it sits in (null for the scope itself; an anonymous function goes by the named one around it) and whether it is a loop's own counter (the ES5 pages redeclare `var i` per loop).
+    type Decl = { name: string; inside: string | null; loop: boolean };
+    const declarations = (body: N[]): Decl[] => {
+      const out: Decl[] = [];
+      const scan = (n: unknown, inside: string | null, parent: N | null, key: string | null): void => {
+        if (!n || typeof n !== "object") return;
+        if (Array.isArray(n)) { n.forEach((x) => scan(x, inside, parent, key)); return; }
+        const node = n as N;
+        if (!node.type) return;
+        if (node.type === "FunctionDeclaration") names(node.id).forEach((name) => out.push({ name, inside, loop: false }));
+        if (FN.has(node.type)) {
+          const within = node.id ? node.id.name : inside || "an anonymous function";
+          node.params.forEach((p: N) => names(p).forEach((name) => out.push({ name, inside: within, loop: false })));
+          scan(node.body, within, node, "body");
+          return;
+        }
+        if (node.type === "ClassDeclaration") { names(node.id).forEach((name) => out.push({ name, inside, loop: false })); return; }
+        if (node.type === "VariableDeclaration") {
+          const loop = !!parent && ((parent.type === "ForStatement" && key === "init") || ((parent.type === "ForInStatement" || parent.type === "ForOfStatement") && key === "left"));
+          node.declarations.forEach((d: N) => { names(d.id).forEach((name) => out.push({ name, inside, loop })); scan(d.init, inside, d, "init"); });
+          return;
+        }
+        for (const k of Object.keys(node)) if (k !== "type" && k !== "start" && k !== "end") scan(node[k], inside, node, k);
+      };
+      scan(body, null, null, null);
+      return out;
+    };
+    const top = (ds: Decl[]): string[] => ds.filter((d) => d.inside === null && !d.loop).map((d) => d.name);
+    const dupes = (a: string[]): string[] => [...new Set(a.filter((x, i) => a.indexOf(x) !== i))];
     const program = (code: string): N[] => (acorn.parse(code, { ecmaVersion: 2020, sourceType: "script" }) as unknown as N).body;
-    const shell = new Set(declared(program(HELPERS))), charts = new Set(declared(program(CHARTS)));
-    expect(shell.has("pillHtml") && shell.has("whoami") && shell.has("pick") && charts.has("stacked")).toBe(true);
+    // The shell first, by its own name: page() splices HELPERS whole, so a name it declared twice would fail every page.
+    const helpers = program(HELPERS), charts = program(CHARTS);
+    const shellNames = top(declarations(helpers)), chartNames = top(declarations(charts));
+    expect(dupes(shellNames), "HELPERS declares a name twice").toEqual([]);
+    expect(dupes(chartNames), "CHARTS declares a name twice").toEqual([]);
+    expect(shellNames.filter((n) => chartNames.includes(n)), "HELPERS and CHARTS share a name").toEqual([]);
+    const shell = new Set(shellNames);
+    expect(shell.has("pillHtml") && shell.has("whoami") && shell.has("pick") && chartNames.includes("stacked")).toBe(true);
+    // The primitives a page draws only through CHARTS — a page that does not splice CHARTS and declares one of these has copied it.
+    const CHART_ONLY = ["bars", "area", "heat", "hbars", "stacked", "lines", "hrows", "heatGrid", "buildsByDay", "worst", "lastDays"];
     const problems: string[] = [];
     for (const path of PAGES) {
       const code = scriptOf(await (await get(path)).text());
       if (!code.trim()) continue;
-      // page() wraps the shell and the page's script in one function: its body is the scope the page shares with the shell.
-      const iife = program(code)[0]?.expression?.callee?.body?.body;
+      // page() wraps the footer's line, the shell, then the page's script in one function: the page's own statements are what follows the shell's, less CHARTS where the page splices it.
+      const iife: N[] | undefined = program(code)[0]?.expression?.callee?.body?.body;
       expect(iife, `${path}: the page's script is not one IIFE`).toBeDefined();
-      const has = new Set([...shell, ...(code.includes(CHARTS) ? charts : [])]);
-      const count = new Map<string, number>();
-      for (const name of declared(iife)) count.set(name, (count.get(name) ?? 0) + 1);
-      for (const [name, n] of count) {
-        if (has.has(name) && n > 1) problems.push(`${path} declares the shell's ${name} again`);
-        else if (!has.has(name) && n > 1) problems.push(`${path} declares ${name} ${n} times`);
+      const cs = code.indexOf(CHARTS), withCharts = cs >= 0;
+      const own = iife!.slice(1 + helpers.length).filter((st) => !(withCharts && st.start >= cs && st.end <= cs + CHARTS.length));
+      const has = new Set([...shell, ...(withCharts ? chartNames : [])]);
+      const decls = declarations(own);
+      for (const d of decls) {
+        if (d.inside !== null) { if (has.has(d.name)) problems.push(`${path} shadows the shell's ${d.name} inside ${d.inside}`); }
+        else if (has.has(d.name)) problems.push(`${path} declares the shell's ${d.name} again`);
+        else if (!withCharts && CHART_ONLY.includes(d.name)) problems.push(`${path} draws ${d.name} without CHARTS`);
       }
-      // liveStats(function () {}, …): the two-minute poll of /api/v1/stats that renders nothing.
-      const calls = (n: unknown): void => {
-        if (!n || typeof n !== "object") return;
-        if (Array.isArray(n)) { n.forEach(calls); return; }
-        const node = n as N;
-        if (!node.type) return;
-        if (node.type === "CallExpression" && node.callee.type === "Identifier" && node.callee.name === "liveStats") {
-          const fn = node.arguments[0];
-          if (fn && (fn.type === "FunctionExpression" || fn.type === "ArrowFunctionExpression") && fn.body.type === "BlockStatement" && fn.body.body.length === 0) problems.push(`${path} polls the stats to render nothing`);
+      for (const name of dupes(top(decls))) problems.push(`${path} declares ${name} ${top(decls).filter((n) => n === name).length} times`);
+      // A page's top-level functions by name, for the poll check below.
+      const fns = new Map<string, N>();
+      for (const st of own) if (st.type === "FunctionDeclaration" && st.id) fns.set(st.id.name, st);
+      // A function that renders nothing: no statement, or a bare return.
+      const empty = (fn: N | undefined): boolean => !!fn && FN.has(fn.type) && fn.body.type === "BlockStatement" && fn.body.body.every((st: N) => st.type === "ReturnStatement" && !st.argument);
+      walk(own, (node) => {
+        // `pick = function () {…}` or `window.dur = …`: the copy back without a declaration.
+        if (node.type === "AssignmentExpression") {
+          const l = node.left;
+          const name = l.type === "Identifier" ? l.name : l.type === "MemberExpression" && !l.computed && l.object.type === "Identifier" && (l.object.name === "window" || l.object.name === "globalThis") ? l.property.name : null;
+          if (name && has.has(name)) problems.push(`${path} reassigns the shell's ${name}`);
         }
-        for (const k of Object.keys(node)) if (k !== "type" && k !== "start" && k !== "end") calls(node[k]);
-      };
-      calls(iife);
+        // liveStats(function () {}, …), or liveStats(noop, …): the two-minute poll of /api/v1/stats that renders nothing.
+        if (node.type === "CallExpression" && node.callee.type === "Identifier" && node.callee.name === "liveStats") {
+          const arg = node.arguments[0];
+          if (arg && empty(arg.type === "Identifier" ? fns.get(arg.name) : arg)) problems.push(`${path} polls the stats to render nothing`);
+        }
+      });
     }
     expect(problems, problems.join("\n")).toEqual([]);
   });

@@ -125,7 +125,6 @@ const CSS = String.raw`
   dialog.ask.wide { width: min(880px, 94vw); } dialog.ask pre.block { max-height: 60vh; overflow: auto; margin: 0; background: var(--bg-deep); border: 1px solid var(--line); padding: 10px 12px; font: 12px/1.5 "JetBrains Mono", monospace; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
   .pill.error { color: var(--red); border-color: var(--red); }
   .pill.none { color: var(--dim); }
-  button[disabled], select[disabled], input[disabled], a.disabled { opacity: .45; cursor: not-allowed; }
   .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 13.5px; }
   .kv dt { color: var(--dim); }
   .kv dd { margin: 0; }
@@ -661,38 +660,24 @@ export const HELPERS = String.raw`
     }
     draw();
   }
-  // Who is signed in (the omc cookie), as the page's controls ask it: me is /auth/me's answer as it came (null for nobody), login and role its two words, maint whether a maintainer, owns(login) whether that person is the viewer. The anonymous identity until the answer, and for nobody.
-  function identity(me) { return { me: me || null, login: me ? me.login : "", role: me ? me.role : "", maint: !!me && me.role === "maintainer", owns: function (l) { return !!me && !!l && me.login === l; } }; }
-  var ME = null, WHO = identity(null);
-  function isMaintainer() { return !!(WHO && WHO.role === "maintainer"); }
-  function isOwner(login) { return !!(WHO && login && WHO.login === login); }
-  // The header shows the login and the role; sign out is on every page: the cookie is cleared by /auth/logout, the older local-storage token (a CLI token pasted into the page) with it.
+  // Who is signed in (the omc cookie), as the page's controls ask it: me is /auth/me's answer as it came (null for nobody), login and role its two words. The anonymous identity until the answer, and for nobody.
+  function identity(me) { return { me: me || null, login: me ? me.login : "", role: me ? me.role : "" }; }
+  var WHO = identity(null);
+  function isMaintainer() { return WHO.role === "maintainer"; }
+  function isOwner(login) { return !!login && WHO.login === login; }
+  // The header shows the login and the role; sign out is on every page: /auth/logout clears the cookie.
   function accountChip(me) {
     var a = $("#account"); if (!a) return;
     a.innerHTML = '<span class="avatar' + (me.role === "maintainer" ? " m" : "") + '">' + esc(String(me.login).slice(0, 2)) + '</span><b>' + esc(me.login) + '</b>'; a.href = "/user/" + encodeURIComponent(me.login); a.title = esc(me.login) + " · " + esc(me.role) + " — signed in with GitHub as " + me.login + (me.areas && me.areas.length ? " (" + me.areas.join(", ") + ")" : "");
-    var out = $("#signout"); if (out) { out.hidden = false; out.onclick = function () { try { localStorage.removeItem("omc_token"); localStorage.removeItem("omc_login"); } catch (e) {} location.href = "/auth/logout"; return false; }; }
+    var out = $("#signout"); if (out) { out.hidden = false; }
   }
-  // One fetch of /auth/me per page: the shell asks first, and every whoami(cb) a page makes gets the same answer — from the fetch in flight, or at once from what it said.
+  // One fetch of /auth/me per page: the shell asks first, and every whoami(cb) a page makes gets the same answer — from the fetch in flight, or from what it said. A fetch that fails, or a header that throws, still answers every page: nobody.
+  var whoAnswer = null;
   function whoami(cb) {
-    whoami.waiting = whoami.waiting || [];
-    if (cb) whoami.waiting.push(cb);
-    if (whoami.answered) { var now = whoami.waiting; whoami.waiting = []; now.forEach(function (f) { f(ME); }); return; }
-    if (whoami.started) return;
-    whoami.started = true;
-    fetch("/auth/me", { cache: "no-store" }).then(function (r) { return r.ok ? r.json() : null; }).then(function (me) { ME = me; WHO = identity(me); if (me) accountChip(me); }, function () {}).then(function () { whoami.answered = true; whoami(); });
+    whoAnswer = whoAnswer || fetch("/auth/me", { cache: "no-store" }).then(function (r) { return r.ok ? r.json() : null; }).then(function (me) { WHO = identity(me); if (me) accountChip(me); }).catch(function () {});
+    if (cb) whoAnswer.then(function () { cb(WHO.me); });
   }
   whoami();
-  // A control that is not this viewer's — a button, a select, an input, a link — kept on the page with why on hover: disabled and aria-disabled (class "disabled" and tabindex -1 on a link), the pointer events kept so the title shows. ok returns the control as it is. Nothing calls it yet: the pages take it up one by one (the front-end consistency series, B2), drawing every control and gating it rather than drawing it for some.
-  function gate(html, ok, why) {
-    if (ok) return html;
-    var title = ' title="' + esc(why || "not yours to do") + '"';
-    return String(html).replace(/<(button|select|input|textarea|a)\b([^>]*)>/, function (m, tag, attrs) {
-      attrs = attrs.replace(/\s+title="[^"]*"/, "");
-      if (tag !== "a") return '<' + tag + attrs + ' disabled aria-disabled="true"' + title + '>';
-      attrs = /\sclass="/.test(attrs) ? attrs.replace(/\sclass="/, ' class="disabled ') : attrs + ' class="disabled"';
-      return '<a' + attrs + ' aria-disabled="true" tabindex="-1"' + title + '>';
-    });
-  }
   // SMIL animations (the diagrams) stop when the viewer asked for less motion.
   if (window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches) document.querySelectorAll("svg").forEach(function (s) { if (s.pauseAnimations) s.pauseAnimations(); });
   // Charts and bars carry their value in data-tip; one fixed box follows the pointer.
@@ -816,7 +801,7 @@ export const HELPERS = String.raw`
   }
   function wtArch(w, icon) { return esc(w.arch) + (icon ? ' ' + (w.labels && w.labels.emulated ? WICON.emu.replace('aria-label', 'title="emulated: the other architecture, under qemu on this host" aria-label') : WICON.native.replace('aria-label', 'title="native" aria-label')) : ''); }
   // The worker's own log, for its owner and the maintainers (the pool answers 403 to anyone else): an icon that opens the tail.
-  function wtLog(w) { return ME && (ME.role === "maintainer" || (w.owner && ME.login === w.owner)) ? ' <button type="button" class="iconbtn" data-wlog="' + esc(w.id) + '" title="its own log — the lines between tasks, as it sent them">' + WICON.log + '</button>' : ''; }
+  function wtLog(w) { return isMaintainer() || isOwner(w.owner) ? ' <button type="button" class="iconbtn" data-wlog="' + esc(w.id) + '" title="its own log — the lines between tasks, as it sent them">' + WICON.log + '</button>' : ''; }
   document.addEventListener("click", function (ev) {
     var b = ev.target.closest ? ev.target.closest("button[data-wlog]") : null; if (!b) return;
     var id = b.getAttribute("data-wlog");
@@ -883,9 +868,10 @@ export const HELPERS = String.raw`
   // The copy chips beside a command (.copy with data-copy="key"): map is { key: "#selector" }, the text of that element goes to the clipboard, the chip says so for a moment — and says when the browser refused (no permission, plain http).
   function copyChips(map) {
     document.querySelectorAll(".copy[data-copy]").forEach(function (b) {
+      // The chip's own word is what comes back — read once here, not at the click: a second press within the moment would bring "copied" back for good.
+      var was = b.textContent, sel = map[b.getAttribute("data-copy")];
       b.onclick = function () {
-        var el = $(map[b.getAttribute("data-copy")] || ""); if (!el) return;
-        var was = b.textContent;
+        var el = sel ? $(sel) : null; if (!el) return;
         navigator.clipboard.writeText(el.textContent).then(function () { b.textContent = "copied"; }, function () { b.textContent = "could not copy"; }).then(function () { setTimeout(function () { b.textContent = was; }, 1500); });
       };
     });
@@ -903,8 +889,8 @@ export const HELPERS = String.raw`
     return '<tr><td><span class="dot ' + esc(e.status) + '"></span>' + esc(e.status) + '</td><td><span class="kind">' + esc(e.kind) + '</span></td><td>' + esc(e.ring || "") + '</td><td>' + esc(e.source || "") + '</td><td>' + (run ? '<a class="run" href="' + esc(run) + '" title="open the run">' + esc(e.summary) + '</a>' : esc(e.summary)) + diff + '</td><td class="num">' + dur(e.duration_ms) + '</td><td class="when" title="' + esc(e.created_at) + '">' + ago(e.created_at) + '</td></tr>';
   }
   // Roll a ring back to a release: asked in the dashboard's dialog, posted once as a pool job, the answer written to #rb-state where the page has one. Resolves with the job's answer, null when cancelled.
-  function askRollback(ring, to, seq) {
-    return ask({ title: "Roll " + ring + " back to release " + to + "?", text: (seq ? "Release #" + esc(seq) + ": the ring serves it" : "The ring serves that release") + " again at once; the journal keeps why.", input: "required", confirm: "Roll back", danger: true }).then(function (note) {
+  function askRollback(ring, to) {
+    return ask({ title: "Roll " + ring + " back to release " + to + "?", text: "The ring serves that release again at once; the journal keeps why.", input: "required", confirm: "Roll back", danger: true }).then(function (note) {
       if (note === null) return null;
       return api("POST", "/api/v1/factory/jobs", { kind: "rollback", params: { ring: ring, to: to, note: note } }).then(function (j) {
         var el = $("#rb-state"); if (el) { el.hidden = false; el.innerHTML = j.error ? pillHtml("error", "refused") + ' ' + esc(j.error) : pillHtml("ok", "queued") + ' rollback of <b>' + esc(ring) + '</b> to release ' + esc(to) + ' is task #' + esc(j.task || "?") + ' — a project worker runs it, the journal records it'; }
@@ -912,11 +898,11 @@ export const HELPERS = String.raw`
       });
     });
   }
-  // The rollback button (data-rollback="<release id>" data-ring="<ring>", data-seq for the number shown) is the shell's: the click stops here, so a page binding the same button asks nobody twice — and a button whose job was queued stays disabled: enabled again it queued the job twice (the Journal and the Pipeline both did).
+  // The rollback button (data-rollback="<release id>" data-ring="<ring>") is the shell's: the click stops here, so a page binding the same button asks nobody twice — and a button whose job was queued stays disabled: enabled again it queued the job twice (the Journal and the Pipeline both did).
   document.addEventListener("click", function (ev) {
     var b = ev.target.closest ? ev.target.closest("button[data-rollback]") : null; if (!b) return;
     ev.stopImmediatePropagation(); b.disabled = true;
-    askRollback(b.getAttribute("data-ring"), b.getAttribute("data-rollback"), b.getAttribute("data-seq")).then(function (j) { if (j === null || j.error) b.disabled = false; }, function (e) { b.disabled = false; toast("failed: " + esc(String(e)), "error"); });
+    askRollback(b.getAttribute("data-ring"), b.getAttribute("data-rollback")).then(function (j) { if (j === null || j.error) b.disabled = false; }, function (e) { b.disabled = false; toast("failed: " + esc(String(e)), "error"); });
   });
   // One chain of the factory's story (routes/story.ts) as a row of steps: built by the contributor → the gate → the audit → built again by the project → tried in the lab → decided. The package page and a person's page draw the same row.
   function chainRow(c) {
@@ -924,7 +910,7 @@ export const HELPERS = String.raw`
     var sc = c.score, cc = c.contributor, pb = c.project, a = c.approval;
       var step = function (state, title, detail) { return '<div class="fstep ' + state + '"><i class="dot ' + (state === "ok" ? "ok" : state === "bad" ? "error" : state === "warn" ? "warn" : "") + '"></i><div><b>' + title + '</b><span>' + detail + '</span></div></div>'; };
       var vet = cc && cc.result && cc.result.vet, audit = c.audit, pvet = pb && pb.result && pb.result.vet, trial = c.trial;
-      return '<div class="fchainrow"><div class="fhead"><span>' + (cc ? personLink(cc.owner) + '\'s build <a href="/build/' + cc.id + '">#' + cc.id + '</a> · ' + esc(cc.version || '') + ' · ' + esc(cc.arch) : 'the project\'s build <a href="/build/' + pb.id + '">#' + pb.id + '</a> · ' + esc(pb.version || '') + ' · ' + esc(pb.arch)) + '</span>' + classPill(sc, null, "with the maintainer's half green: " + sc.projected) + '</div><div class="fsteps">'
+      return '<div class="fchainrow"><div class="fhead"><span>' + (cc ? personLink(cc.owner) + '\'s build <a href="/build/' + cc.id + '">#' + cc.id + '</a> · ' + esc(cc.version || '') + ' · ' + esc(cc.arch) : 'the project\'s build <a href="/build/' + pb.id + '">#' + pb.id + '</a> · ' + esc(pb.version || '') + ' · ' + esc(pb.arch)) + '</span>' + classPill(sc) + '</div><div class="fsteps">'
         + (cc ? step(cc.status === "staged" || cc.status === "done" ? "ok" : cc.status === "failed" ? "bad" : "", "Built by the contributor", (cc.status === "staged" || cc.status === "done" ? "succeeded" : cc.status) + (cc.finished_at ? ' · ' + ago(cc.finished_at) : '') + (cc.attempts > 1 ? ' · ' + cc.attempts + ' attempts' : '')) : '')
         + (cc ? step(vet ? (vet.verdict === "pass" ? (vet.warnings ? "warn" : "ok") : "bad") : "", "The gate", vet ? (vet.verdict === "pass" ? (vet.warnings ? vet.warnings + " warning(s)" : "clean") : vet.fails + " failed") : "not run") : '')
         + (cc ? step(audit && audit.status === "done" ? ({ ok: "ok", warn: "warn", block: "bad" }[audit.result && audit.result.verdict] || "ok") : "", "The audit", audit ? (audit.status === "done" ? (audit.result && audit.result.verdict || "done") + (audit.result && audit.result.model ? ' · ' + esc(audit.result.model) : '') : audit.status) : "not yet") : '')
