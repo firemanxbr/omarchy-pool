@@ -54,20 +54,30 @@ const SCRIPT = String.raw`
   $("#json-link").href = API + "/tasks/" + ID; $("#json-link").textContent = API + "/tasks/" + ID;
   skeletonTiles("#tiles", 6);
 
-  // Who is looking is the shell's WHO (the omc cookie, one fetch of /auth/me per page); the page draws again once it is known, since the request's renew link and the staging packages' links are grey for whoever is not the owner or a maintainer. The decisions do not wait for it: their rights come from the server (CAN, below).
-  whoami(function () { if (T) { render(); renderStaging(); } });
+  // Who is looking is the shell's WHO (the omc cookie, one fetch of /auth/me per page); the page draws again once it is known, since the staging packages' links are grey for whoever is not a maintainer and the request's renew link falls back on it until the owner's rights land. The decisions do not wait for it: their rights come from the server (CAN, below).
+  whoami(function () { if (T) { render(); renderStaging(); loadOwnerCan(); } });
 
+  // The task and what this reader may decide on it, read together and drawn once: the first paint carries the buttons in the right state, no grey "not now" before the rights land — the same first draw as a person's page.
   function load() {
-    api("GET", API + "/tasks/" + ID).then(function (d) {
+    return Promise.all([api("GET", API + "/tasks/" + ID), loadCan()]).then(function (r) {
+      var d = r[0];
       if (d.error) { $("#title").textContent = "No such task"; $("#lede").textContent = d.error; endSkeleton(); return; }
-      T = d; render(); loadEvidence();
+      T = d; render(); loadEvidence(); loadOwnerCan();
     }).catch(function () { endSkeleton(); });
   }
-  // What this reader may decide on this build, and why not, as the server would answer the POST — read for everyone (nobody signed in gets four noes and "sign in with GitHub"), never cached: GET /factory/tasks/:id/can is the caller's own answer, while the task itself is public and cached for all.
-  var CAN = null;
+  // What this reader may decide on this build, and why not, as the server would answer the POST — read for everyone (nobody signed in gets four noes and "sign in with GitHub"), never cached: GET /factory/tasks/:id/can is the caller's own answer, while the task itself is public and cached for all. Until it lands the four buttons say so, and when it cannot be read they say that — a grey with no reason is the one thing this page never draws.
+  function noes(why) { return { approve: false, reject: false, build: false, withdraw: false, why: { approve: why, reject: why, build: why, withdraw: why } }; }
+  var CAN = noes("reading what you may do here…");
   function loadCan() {
-    api("GET", API + "/tasks/" + ID + "/can").then(function (d) { CAN = d.can || null; if (T) renderActions(); }).catch(function () {});
+    return api("GET", API + "/tasks/" + ID + "/can").then(function (d) { CAN = d.can || noes(d.error || "could not read what you may do here — reload"); }).catch(function () { CAN = noes("could not read what you may do here — reload"); });
   }
+  // Whether this reader may renew the request, and why not, is the registration's owner's rights on their own page (GET /users/<owner>/can, no-store: the block rides there, the same word the person's page greys Renew with); the owner as the shell knows them stands in until it lands. Read once, and only where Renew is drawn (a request not complete) for somebody signed in — nobody's answer is the sign-in, which the shell says by itself, and every read is a D1 bill.
+  var OCAN = null;
+  function loadOwnerCan() {
+    var owner = ownerOf(); if (!T.request || T.request.complete || !owner || !WHO.me || OCAN) return;
+    api("GET", "/api/v1/users/" + encodeURIComponent(owner) + "/can").then(function (d) { if (d.__status === 200 && d.can) { OCAN = d.can; renderChecklist(); } }).catch(function () {});
+  }
+  function ownerOf() { return (T.package || {}).owner || T.task.owner; }
 
   // ---- the head: what it is, in a line and five tiles
   function render() {
@@ -106,9 +116,10 @@ const SCRIPT = String.raw`
     var sc = T.score, el = $("#who-section"); if (!sc) { el.hidden = true; return; }
     el.hidden = false;
     var c = T.chain || {};
-    // The request the chain rests on, checked as the form checks it today; "Renew the request" is on it for everyone when a line is not green — live for the registration's owner (the package's, as the server names it; the task's owner is the same person on a contributor's build and nobody's on the project's) while a renewal is taken, grey with why otherwise.
-    var pkgSt = (T.package || {}).status, owner = (T.package || {}).owner || T.task.owner;
-    $("#ckreq").innerHTML = T.request ? requestBlock(T.request, isOwner(owner), T.task.name, !!T.request.renewable, T.request.busy ? "renew it once build #" + T.request.busy + " is done" : pkgSt === "approved" || pkgSt === "published" ? "in the pool as it was; new releases come as bumps, built from the approved recipe" : "renew it once nothing of it is being built", orSignIn("only " + owner + " renews the request")) : "";
+    // The request the chain rests on, checked as the form checks it today; "Renew the request" is on it for everyone when a line is not green — live for the registration's owner (the package's, as the server names it; the task's owner is the same person on a contributor's build and nobody's on the project's) while a renewal is taken, grey with why otherwise: the state's word for the owner, the server's (can.request on the owner's page — a block included) for the role, the shell's guess at it until that lands.
+    var pkgSt = (T.package || {}).status, owner = ownerOf();
+    var own = OCAN ? OCAN.request === true : isOwner(owner), why = OCAN ? (OCAN.why.request || "") : orSignIn("only " + owner + " requests here");
+    $("#ckreq").innerHTML = T.request ? requestBlock(T.request, own, T.task.name, !!T.request.renewable, T.request.busy ? "renew it once build #" + T.request.busy + " is done" : pkgSt === "approved" || pkgSt === "published" ? "in the pool as it was; new releases come as bumps, built from the approved recipe" : "renew it once nothing of it is being built", why) : "";
     $("#cklist").innerHTML = ckColumn(sc, "contributor", "The contributor's half", c.contributor ? personLink(c.contributor.owner) + (c.contributor.id !== T.task.id ? ' · build <a href="/build/' + c.contributor.id + '">#' + c.contributor.id + '</a>' : '') : 'nobody yet')
       + ckColumn(sc, "maintainer", "The maintainer's half", c.project ? 'the project\'s build <a href="/build/' + c.project.id + '">#' + c.project.id + '</a>' + (c.approval ? ' · decided by ' + personLink(c.approval.by) : c.withdrawn ? ' · the approval by ' + personLink(c.withdrawn.by) + ' was withdrawn' : ' · not decided') : 'not started' + (sc.ready ? ' — ready to begin' : ''));
   }
@@ -127,7 +138,7 @@ const SCRIPT = String.raw`
     }
     el.innerHTML = decisionCell({ id: t.id, name: t.name, version: t.version, arch: t.arch, can: CAN, approval: a }) + (beside.length ? " " + beside.join(" ") : "");
   }
-  onDecided(function () { load(); loadCan(); });
+  onDecided(function () { load(); });
 
   // ---- the timeline: every step with its time, in order
   function renderTimeline() {
@@ -175,15 +186,17 @@ const SCRIPT = String.raw`
 
   // ---- the evidence, read in place
   var TEXT = { "vet.json": "The gate", "audit.json": "The audit", "trial.log": "The trial", PKGBUILD: "The recipe", "build.log": "The build log", "tests.log": "The gate's transcript", PKGINFO: "The manifest", "audit.md": "The audit, as written", "resources.json": null };
+  // The packages in staging: the evidence that is not public (the binaries the worker uploaded).
+  function bins() { return (T.evidence || []).filter(function (e) { return !e.public; }); }
   function loadEvidence() {
-    var ev = T.evidence || [], text = ev.filter(function (e) { return e.public; }), bins = ev.filter(function (e) { return !e.public; });
+    var ev = T.evidence || [], text = ev.filter(function (e) { return e.public; });
     if (!ev.length) { $("#evidence").innerHTML = '<p class="sub" style="margin:0">' + (T.task.kind === "build" ? 'Nothing staged for this build' + (T.task.log_tail ? ' — the log\'s tail the worker reported:</p><pre style="white-space:pre-wrap;margin-top:10px">' + esc(T.task.log_tail) + '</pre>' : '.</p>') : (T.task.log_tail ? 'The log\'s tail the worker reported:</p><pre style="white-space:pre-wrap;margin-top:10px">' + esc(T.task.log_tail) + '</pre>' : 'A pool job leaves its result on the task, not files.</p>')); return; }
     var order = ["vet.json", "audit.json", "trial.log", "PKGBUILD", "build.log", "tests.log", "PKGINFO", "audit.md"];
     text.sort(function (a, b) { return (order.indexOf(a.name) + 1 || 99) - (order.indexOf(b.name) + 1 || 99); });
     var html = text.filter(function (e) { return e.name !== "resources.json" && e.name !== "audit.md"; }).map(function (e) {
       return '<details class="ev" id="ev-' + esc(e.name.replace(/[^a-z0-9]/gi, "-")) + '"' + (e.name === "vet.json" || e.name === "audit.json" ? " open" : "") + '><summary><b>' + esc(TEXT[e.name] || e.name) + '</b> <span class="mono dim">' + esc(e.name) + '</span> <span class="dim">' + bytes(e.size) + '</span> <a class="run" href="' + esc(e.url) + '" onclick="event.stopPropagation()">raw ↗</a></summary><div class="body"><div class="muted">loading…</div></div></details>';
     }).join("");
-    if (bins.length) html += '<p class="sub" id="staging" style="margin-top:12px"></p>';
+    if (bins().length) html += '<p class="sub" id="staging" style="margin-top:12px"></p>';
     $("#evidence").innerHTML = html; renderStaging();
     text.forEach(function (e) {
       if (e.name === "audit.md") return;
@@ -201,7 +214,7 @@ const SCRIPT = String.raw`
   // The packages in staging (the binaries the worker uploaded), named for everyone and served to a maintainer's session alone — the publish job reads them with a token of its own. So the name is a link for a maintainer and the same link grey, with why, for anyone else (the dashboard's rule); drawn again once whoami says who is looking.
   function renderStaging() {
     var el = $("#staging"); if (!el) return;
-    el.innerHTML = 'Packages in staging (for maintainers and the publish job): ' + (T.evidence || []).filter(function (e) { return !e.public; }).map(function (b) { return gate('<a class="mono" href="' + esc(b.url) + '">' + esc(b.name) + '</a>', isMaintainer(), orSignIn("packages in staging are for maintainers")) + ' <span class="dim">' + bytes(b.size) + '</span>'; }).join(" · ");
+    el.innerHTML = 'Packages in staging (for maintainers and the publish job): ' + bins().map(function (b) { return gate('<a class="mono" href="' + esc(b.url) + '">' + esc(b.name) + '</a>', isMaintainer(), orSignIn("packages in staging are for maintainers")) + ' <span class="dim">' + bytes(b.size) + '</span>'; }).join(" · ");
   }
   function renderEvidence(name, body) {
     if (name === "vet.json") {
@@ -227,7 +240,7 @@ const SCRIPT = String.raw`
     var a = ev.target.closest ? ev.target.closest("a[data-all]") : null; if (!a) return;
     ev.preventDefault(); var box = a.closest(".body"); box.querySelector("pre.log").hidden = true; box.querySelector("pre.full").hidden = false; a.parentElement.hidden = true;
   });
-  load(); loadCan();
+  load();
 `;
 
 export function buildHtml(id: number, poolUrl: string, version: RunningVersion): string {
@@ -328,7 +341,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       page,
       anchor: ['id="acts"'],
       script: [
-        '"#acts"', "decisionCell({ id: t.id, name: t.name, version: t.version, arch: t.arch, can: CAN, approval: a })", 'API + "/tasks/" + ID + "/can"', "onDecided(function () { load(); loadCan(); })",
+        '"#acts"', "decisionCell({ id: t.id, name: t.name, version: t.version, arch: t.arch, can: CAN, approval: a })", 'API + "/tasks/" + ID + "/can"', "onDecided(function () { load(); })", 'Promise.all([api("GET", API + "/tasks/" + ID), loadCan()])', 'noes("reading what you may do here…")', '"could not read what you may do here — reload"',
         'if (t.kind !== "build") { el.innerHTML = ""; return; }', "T.project_builds[0]", '"not ready"', "Approved by ",
       ],
       reads: [
@@ -364,15 +377,19 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
+      // Renew the request for everyone: live for the registration's owner while a renewal is taken, grey with the state's word for them and the server's for anyone else — the owner's rights on their own page, the same answer the person's page greys it with.
       id: "build.request-block",
       page,
       anchor: ['id="ckreq"'],
-      script: ['"#ckreq"', "requestBlock(T.request", "isOwner(owner)", 'orSignIn("only " + owner + " renews the request")', "T.request.renewable", "T.request.busy", 'pkgSt === "approved" || pkgSt === "published"'],
+      script: ['"#ckreq"', "requestBlock(T.request", "function loadOwnerCan(", "T.request.complete || !owner || !WHO.me || OCAN", "OCAN.request === true", "OCAN.why.request", 'orSignIn("only " + owner + " requests here")', "T.request.renewable", "T.request.busy", 'pkgSt === "approved" || pkgSt === "published"'],
       reads: [
         {
           path: task,
           fields: ["request.id", "request.record", "request.signature", "request.version", "request.created_at", "request.complete", "request.checks", "request.checks.0.item", "request.checks.0.note", "request.checks.0.ok", "request.renewable", "request.busy", "package.status", "package.owner", "task.owner", "task.name"],
         },
+        { path: `/api/v1/users/${F.owner}/can`, fields: ["login", "can.request", "can.why.request"] },
+        { path: `/api/v1/users/${F.owner}/can`, as: "contributor", fields: ["login", "can.request", "can.why.request"] },
+        { path: `/api/v1/users/${F.owner}/can`, as: "owner", fields: ["login", "can.request"] },
       ],
       visible: EVERYONE,
     },

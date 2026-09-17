@@ -191,18 +191,18 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // The icon on a worker's row that opens its own log: its owner's and the maintainers' to read.
+    // The icon on every worker's row that opens its own log: live for its owner and the maintainers, grey with the pool's refusal for everyone else.
     id: "shell.worker-log",
     page: "/",
     anchor: [],
-    script: ["data-wlog", '"/log"', "d.log"],
+    script: ["data-wlog", '"/log"', "d.log", "function wtLog(w) { return ' ' + gate("],
     reads: [
       { path: `/api/v1/factory/workers/${F.worker}/log`, status: 401 },
       { path: `/api/v1/factory/workers/${F.worker}/log`, as: "contributor", status: 403 },
       { path: `/api/v1/factory/workers/${F.communityWorker}/log`, as: "owner", fields: ["id", "log", "at"] },
       { path: `/api/v1/factory/workers/${F.worker}/log`, as: "maintainer", fields: ["id", "log", "at"] },
     ],
-    visible: ["owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     // The rollback button a maintainer sees on a release (the Journal, the Pipeline) is the shell's: it asks, posts the job once and leaves the button disabled.

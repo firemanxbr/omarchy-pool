@@ -63,7 +63,7 @@ import {
 } from "./routes/contributors";
 import type { Actor } from "./routes/factory";
 import { jobOf } from "./jobtoken";
-import { handleTrustWorker, handleTrustList, handleNewToken, handleWithdrawRecord, handleWorkerMode, handleWorkerLog } from "./routes/contributors";
+import { handleTrustWorker, handleTrustList, handleNewToken, handleWithdrawRecord, handleWorkerMode, handleWorkerLog, SIGN_IN } from "./routes/contributors";
 import { maintainersOf, GOVERNANCE_FILE } from "./governance";
 import { BUDGET_CAP_USD, BUDGET_GUARD_USD, BUDGET_WARN_USD } from "./cost";
 import { handleQueueJob } from "./jobs";
@@ -262,7 +262,7 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
   // Maintainers: the brake — a contributor or a package blocked, or the block lifted by another maintainer.
   if ((m = path.match(/^\/factory\/(contributors|packages)\/([A-Za-z0-9@._+-]+)\/(block|unblock)$/)) && method === "POST") {
     const c = await contributorOf(request, env);
-    if (!c) return json({ error: "a maintainer's contributor token is required" }, 401);
+    if (!c) return nobody();
     if (m[1] === "contributors") return m[3] === "block" ? handleBlockContributor(c, m[2], request, env) : handleUnblockContributor(c, m[2], request, env);
     return m[3] === "block" ? handleBlockPackage(c, m[2], request, env) : handleUnblockPackage(c, m[2], request, env);
   }
@@ -274,7 +274,7 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
   }
   if ((m = path.match(/^\/factory\/tasks\/(\d+)\/artifacts$/)) && method === "DELETE") {
     const c = await contributorOf(request, env);
-    if (!c) return json({ error: "a contributor token is required (POST /factory/register with a GitHub token)" }, 401);
+    if (!c) return nobody();
     return handleStagingDelete(c, Number(m[1]), env);
   }
   // A worker sets its own mode through its token (omarchy-worker share on|off): the brain keeps it from then on.
@@ -284,7 +284,7 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
   }
   if (path === "/factory/packages" || path.startsWith("/factory/packages/") || path === "/factory/workers" || path.startsWith("/factory/workers/")) {
     const c = await contributorOf(request, env);
-    if (!c) return json({ error: "a contributor token is required (POST /factory/register with a GitHub token)" }, 401);
+    if (!c) return nobody();
     if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)\/mode$/)) && method === "POST") return handleWorkerMode(c, m[1], request, env);
     if (method === "POST" && path === "/factory/packages") return handleRequestPackage(c, request, env);
     if ((m = path.match(/^\/factory\/packages\/([a-z0-9@._+-]+)\/build$/)) && method === "POST") return handleBuildPackage(c, m[1], request, env);
@@ -300,18 +300,18 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
   // maintainers (governance.ts); a signed-in contributor may mint a CLI token.
   if (method === "POST" && path === "/factory/token") {
     const c = await contributorOf(request, env);
-    return c ? handleNewToken(c, env) : json({ error: "sign in first" }, 401);
+    return c ? handleNewToken(c, env) : nobody();
   }
   // Maintainers: have the project build a staged package, approve or reject a staged build.
   // Nobody at the door reads the same words the predicate gives a page (decisions() in routes/review.ts): the refusal is the button's title.
   if ((m = path.match(/^\/factory\/tasks\/(\d+)\/withdraw$/)) && method === "POST") {
     const c = await contributorOf(request, env);
-    if (!c) return json({ error: "sign in with GitHub" }, 401);
+    if (!c) return nobody();
     return handleWithdraw(c, Number(m[1]), request, env);
   }
   if ((m = path.match(/^\/factory\/tasks\/(\d+)\/(approve|reject|build)$/)) && method === "POST") {
     const c = await contributorOf(request, env);
-    if (!c) return json({ error: "sign in with GitHub" }, 401);
+    if (!c) return nobody();
     return m[2] === "approve" ? handleApprove(c, Number(m[1]), request, env) : m[2] === "build" ? handleProjectBuild(c, Number(m[1]), request, env) : handleReject(c, Number(m[1]), request, env);
   }
   // Workers: registered ones only (own token), or a job's token. There is
@@ -552,6 +552,11 @@ async function api(method: string, path: string, url: URL, request: Request, env
     return (await authorizeArtifacts(request, env, Number(m[1]))) ?? handlePutArtifact(Number(m[1]), m[2], url, request, env);
   }
   return json({ error: "not found" }, 404);
+}
+
+/** Nobody at a door the dashboard greys: the refusal is the predicate's own first word (SIGN_IN — the title of every grey control for nobody signed in), the way in for a script beside it. */
+function nobody(): Response {
+  return json({ error: SIGN_IN, hint: "a contributor token (POST /factory/register with a GitHub token) as Authorization: Bearer, or the dashboard's session" }, 401);
 }
 
 export function json(body: unknown, status = 200, extra: Record<string, string> = {}): Response {

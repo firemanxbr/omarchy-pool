@@ -588,6 +588,24 @@ export const WORKER_ICONS = {
 };
 
 /**
+ * What the shell's gate(html, false, why) writes, for a page that serves a
+ * control grey before its script runs: every button, select, input and
+ * textarea in it disabled with the reason in its title, every link
+ * class="disabled" with its href set aside — the same attributes, so the
+ * served control and the one the script draws again are one
+ * (decision-cell.test.ts holds the two to each other).
+ */
+export function servedGrey(html: string, why: string): string {
+  const tip = ` aria-disabled="true" title="${escapeHtml(why)}"`;
+  return html.replace(/<(button|select|input|textarea|a)\b([^>]*)>/g, (_m, tag: string, attrs: string) => {
+    attrs = attrs.replace(/\s*\/$/, "").replace(/\s+(title|aria-disabled|tabindex)="[^"]*"/g, "").replace(/\s+disabled(="[^"]*")?(?=[\s>]|$)/g, "");
+    if (tag !== "a") return `<${tag}${attrs} disabled${tip}>`;
+    attrs = attrs.replace(/\shref="/, ' data-href="');
+    return `<a${/\sclass="/.test(attrs) ? attrs.replace(/\sclass="/, ' class="disabled ') : attrs + ' class="disabled"'} tabindex="-1"${tip}>`;
+  });
+}
+
+/**
  * The shell: the helpers every page script runs after, spliced by page()
  * before the page's own script. A helper two pages need lives here (a chart
  * primitive in charts.ts CHARTS); a page declares only what it alone draws
@@ -815,8 +833,8 @@ export const HELPERS = String.raw`
     return '<span class="mono" title="the release this worker\'s image was built from">' + esc(w.version) + '</span>';
   }
   function wtArch(w, icon) { return esc(w.arch) + (icon ? ' ' + (w.labels && w.labels.emulated ? WICON.emu.replace('aria-label', 'title="emulated: the other architecture, under qemu on this host" aria-label') : WICON.native.replace('aria-label', 'title="native" aria-label')) : ''); }
-  // The worker's own log, for its owner and the maintainers (the pool answers 403 to anyone else): an icon that opens the tail.
-  function wtLog(w) { return isMaintainer() || isOwner(w.owner) ? ' <button type="button" class="iconbtn" data-wlog="' + esc(w.id) + '" title="its own log — the lines between tasks, as it sent them">' + WICON.log + '</button>' : ''; }
+  // The worker's own log, an icon on every row that opens the tail: live for its owner and the maintainers, grey with the pool's own refusal (403 to anyone else, in these words) for everyone else — the dashboard's rule, never an icon dropped by role.
+  function wtLog(w) { return ' ' + gate('<button type="button" class="iconbtn" data-wlog="' + esc(w.id) + '" title="its own log — the lines between tasks, as it sent them">' + WICON.log + '</button>', isMaintainer() || isOwner(w.owner), orSignIn("the worker\'s log is its owner\'s and the maintainers\' to read")); }
   document.addEventListener("click", function (ev) {
     var b = ev.target.closest ? ev.target.closest("button[data-wlog]") : null; if (!b) return;
     var id = b.getAttribute("data-wlog");
