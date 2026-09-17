@@ -75,7 +75,6 @@ export const RULES: Rule[] = [
   // ring (cost review, 2026-09-13).
   { workflow: "sync", every: 180, job: { kind: "sync", params: {} } },
   { workflow: "security", every: 180, job: { kind: "security", params: {} } },
-  { workflow: "enqueue", every: 60, job: { kind: "enqueue", params: {} } },
   // Promotion is by evidence, when the evidence is there — not by the
   // calendar (2026-09-16). edge → rc is queued by the sync that changed
   // edge (routes/factory.ts, the last sync of the tick); this rule is the
@@ -86,7 +85,6 @@ export const RULES: Rule[] = [
   { workflow: "promote", every: 720, job: { kind: "promote", params: { from: "edge", to: "rc", note: "by evidence" } } },
   { workflow: "promote", every: 180, job: { kind: "promote", params: { from: "rc", to: "stable", note: "by evidence" } } },
   { workflow: "health", at: { hour: 8, minute: 30 }, job: { kind: "health", params: {} } },
-  { workflow: "factory-update.yml", at: { hour: 5, minute: 45 } },
   { workflow: "gc", at: { hour: 4, minute: 0, weekday: 0 }, job: { kind: "gc", params: {} } },
   // Does what the pool serves verify? Every OPR object, once a week, repaired when not.
   { workflow: "verify", at: { hour: 3, minute: 0, weekday: 6 }, job: { kind: "verify", params: {} } },
@@ -310,9 +308,10 @@ export async function runScheduler(env: Env, now = new Date()): Promise<string[]
     log.push("GITHUB_TOKEN not set; scheduler idle");
     return log;
   }
-  // What still starts on GitHub by dispatch: the rules without a job (the
-  // recipe bumps). A job kind left out of JOB_KINDS simply does not run —
-  // the workflows that once did are gone.
+  // Nothing starts on GitHub by dispatch any more (the recipe bumps went with
+  // factory/pkgbuilds, 2026-09-17: the pool bumps registered packages
+  // itself, updates.ts); the loop stays for a rule without a job, should
+  // one return. A job kind left out of JOB_KINDS simply does not run.
   const cache = new Map<string, RunSummary[]>();
   for (const rule of RULES) {
     if (rule.job) {

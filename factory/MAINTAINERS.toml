@@ -3,8 +3,8 @@
 # This file is the governance record. Every login listed here is a
 # maintainer: they have the project build what contributors stage, approve
 # the project's builds into the rings, trust workers, block what must not
-# come in, settle each package's category and review changes to
-# factory/pkgbuilds/. Everyone else who signs in is a contributor. There is
+# come in and settle each package's category. Everyone else who signs in
+# is a contributor. There is
 # no other role, no areas, and no other way to become a maintainer.
 #
 # Changing this file — a new maintainer, a departure — is a decision people

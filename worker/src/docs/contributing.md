@@ -8,9 +8,10 @@ Everything in the repository — code, documentation, commit messages — is in 
 2. Open a pull request. CI (fmt, clippy, tests, worker typecheck, the governance
    check, on x86_64 and aarch64) and E2E (real pacman through a local worker)
    must pass. Keep [docs/TESTING.md](docs/TESTING.md) in step with what you
-   change. A change to `factory/MAINTAINERS.toml`, `CODEOWNERS` or
-   `factory/pkgbuilds/` also needs a review from a maintainer other than the
-   author ([docs/GOVERNANCE.md](docs/GOVERNANCE.md)).
+   change. A change to `factory/MAINTAINERS.toml` or `CODEOWNERS` also needs
+   a review from a maintainer other than the author
+   ([docs/GOVERNANCE.md](docs/GOVERNANCE.md)). Packages are never pull
+   requests: they are requested on the dashboard and built by the pool.
 3. Pull requests are squash-merged; the title becomes the commit message and the
    release note, so write it as one clear sentence: `Render databases per
    architecture`, `Fix Range handling for full responses`.

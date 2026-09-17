@@ -3,6 +3,7 @@ import { maintainersOf, roleFor, GOVERNANCE_FILE } from "../governance";
 import { CATEGORIES, isCategory } from "../categories";
 import { isRepoArch } from "../r2";
 import { providedBy } from "./factory";
+import { pullFromRings } from "./blocks";
 import { queuePosition } from "../queue";
 import { cookieOf } from "./auth";
 import { putRecord, recordKey, recordUrl, withdrawRecord } from "../record";
@@ -356,17 +357,29 @@ export async function handleRequestPackage(c: Contributor, request: Request, env
   return json({ package: row, request: { id: req.id, record: recordUrl(env, record.key), signature: record.signed ? recordUrl(env, `${record.key}.sig`) : null, sha256: record.sha256 }, skipped: upstream, build: queuedNow instanceof Response ? { error: (await queuedNow.json<{ error: string }>()).error } : queuedNow, next: `queued: the shared workers build it into your staging workspace (a worker of yours takes it at once); follow it on /user/${c.login}` }, byName ? 200 : 201);
 }
 
-/** The owner frees the name (unless approved or published); a maintainer frees any, an unmaintained one included. */
+/**
+ * The owner frees the name — never out from under a ring: a package that
+ * stands in edge, rc or stable by a standing approval is a maintainer's to
+ * withdraw or block first (felix left its registration behind in edge,
+ * 2026-09-17). A maintainer frees any name, an unmaintained one included,
+ * and a package still served leaves every ring with it — render jobs for
+ * the project's workers, a line in the journal.
+ */
 export async function handleDeletePackage(c: Contributor, name: string, env: Env): Promise<Response> {
   const pkg = await env.DB.prepare("SELECT owner, status FROM factory_packages WHERE name = ?").bind(name).first<{ owner: string; status: string }>();
   if (!pkg) return json({ error: "not registered" }, 404);
   const mine = pkg.owner === c.login && pkg.status !== "approved" && pkg.status !== "published";
   if (!mine && !isMaintainer(c)) return json({ error: "not yours, or already approved (a maintainer can remove it)" }, 403);
+  const served = (await env.DB.prepare("SELECT DISTINCT rp.ring FROM ring_packages rp JOIN packages p ON p.id = rp.package_id WHERE p.name = ? AND p.source = 'factory' AND rp.ring IN ('edge', 'rc', 'stable')").bind(name).all<{ ring: string }>()).results.map((r) => r.ring);
+  if (served.length && !isMaintainer(c)) return json({ error: `${name} is in ${served.join(", ")}: a maintainer withdraws the approval or blocks it first — the registration cannot leave a package behind in a ring` }, 409);
+  const rings = served.length ? await pullFromRings(env, name, `registration removed by ${c.login}`) : [];
   await env.DB.batch([
     env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = ? WHERE name = ? AND trust = 'community' AND status = 'queued'").bind(`registration removed by ${c.login}`, name),
     env.DB.prepare("DELETE FROM factory_packages WHERE name = ?").bind(name),
+    env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('request', NULL, 'factory', 'warn', ?, ?)")
+      .bind(`${name}: registration removed by ${c.login}${rings.length ? ` — it leaves ${rings.map((r) => r.ring).join(", ")} (render jobs queued)` : ""}`, JSON.stringify({ name, by: c.login, owner: pkg.owner, rings })),
   ]);
-  return json({ deleted: name, by: c.login });
+  return json({ deleted: name, by: c.login, rings });
 }
 
 /**

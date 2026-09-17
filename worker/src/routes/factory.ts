@@ -370,7 +370,7 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
     token_expires_at: new Date(expires * 1000).toISOString(),
     lease_minutes: LEASE_MINUTES,
     repo: "https://github.com/firemanxbr/omarchy-pool",
-    pkgbuild_path: task.kind === "build" && !(task.pkgbuild_ref.includes(":") || task.pkgbuild_ref.startsWith("draft")) ? `factory/pkgbuilds/${task.name}` : null,
+    pkgbuild_path: task.kind === "build" && !(task.pkgbuild_ref.includes(":") || task.pkgbuild_ref.startsWith("draft")) ? `factory/sizing/${task.name}` : null,
     // Where a staged result goes — a contributor's build, or the project's review build: PUT these back with the job token.
     upload: task.trust === "community" || params.review !== undefined ? `/api/v1/factory/tasks/${task.id}/artifacts/<filename>` : null,
     staging,

@@ -37,6 +37,8 @@
 set -euo pipefail
 
 REPO_URL="https://github.com/firemanxbr/omarchy-pool"
+# Where the pool's tooling lives in the image (factory_lib below).
+FACTORY_LIB="${OMARCHY_FACTORY_LIB:-/usr/local/lib/omarchy-factory}"
 
 log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 
@@ -107,7 +109,8 @@ agent_probe() {
     return
   fi
   [[ -n "$(agent_label)" ]] || { AGENT_STATUS=""; AGENT_ERROR=""; return; }
-  if out="$(with_secrets timeout 120 python3 /build/pool/factory/bin/agent.py --probe 2>/dev/null)"; then
+  factory_lib
+  if out="$(with_secrets timeout 120 python3 "$FACTORY_LIB"/bin/agent.py --probe 2>/dev/null)"; then
     AGENT_STATUS=ok; AGENT_ERROR=""
     log "agent $(agent_label): ok ($(jq -r '.ms' <<<"$out" 2>/dev/null || echo ?) ms)"
   else
@@ -160,7 +163,7 @@ mean() { printf '%s\n' "$@" | awk '{ s += $1 } END { printf "%.1f", (NR ? s / NR
 # (name, ref, arch, pool), /task/out for the result. Logs to stdout.
 #
 # `ref` says where the PKGBUILD comes from:
-#   <commit>                   factory/pkgbuilds/<name> (or factory/sizing/<name>) in omarchy-pool at that commit
+#   <commit>                   factory/sizing/<name> in omarchy-pool at that commit (the sizing recipes, the only ones left there)
 #   <url>@<tag>:<path>         the contributor's own repository at a tag (path is the PKGBUILD or its directory)
 #   draft:<url>@<tag|latest>   drafted here by factory/bin/draft-pkgbuild (the contributor's agent key, if any)
 #   bump:<task>@<tag>          the PKGBUILD approved in <task>, pkgver moved to <tag>, checksums refreshed (a community build: evidence)
@@ -194,8 +197,22 @@ prepare_container() {
   # build writes to cargo's registry, Go's module and build caches or
   # ccache's objects is read by a later build of the same package only.
   install -d -o builder -g builder /build/cache
-  # The pool's tooling and key, at main.
+  factory_lib
+}
+
+# The pool's tooling — the drafter, the auditor, agent.py, the prompts, the
+# skills — and its public key come with the image (/usr/local/lib/omarchy-
+# factory, the release this image is). A build used to clone the repository
+# for them: every build depended on GitHub answering, and the pool's rule
+# is that builds go on when GitHub does not (2026-09-17). The clone is the
+# fallback for an image without them — a plain Arch container on a hosted
+# runner — and nothing else.
+factory_lib() {
+  if [[ -x "$FACTORY_LIB/bin/draft-pkgbuild" && -f "$FACTORY_LIB/omarchy-staging.pub.asc" ]]; then return 0; fi
+  echo "==> No factory tooling in this image ($FACTORY_LIB); cloning $REPO_URL for it" >&2
   rm -rf /build/pool && git clone -q --depth 1 "$REPO_URL" /build/pool
+  FACTORY_LIB=/build/pool/factory
+  [[ -f "$FACTORY_LIB/omarchy-staging.pub.asc" ]] || cp /build/pool/docs/omarchy-staging.pub.asc "$FACTORY_LIB/omarchy-staging.pub.asc"
 }
 
 add_pool_repos() { # arch pool
@@ -219,8 +236,8 @@ add_pool_repos() { # arch pool
     fi
   done
   if [[ $added == 1 ]]; then
-    pacman-key --add /build/pool/docs/omarchy-staging.pub.asc >/dev/null 2>&1
-    local poolkey; poolkey="$(gpg --homedir /etc/pacman.d/gnupg --with-colons --show-keys /build/pool/docs/omarchy-staging.pub.asc 2>/dev/null | awk -F: '$1=="fpr"{print $10; exit}')"
+    pacman-key --add "$FACTORY_LIB/omarchy-staging.pub.asc" >/dev/null 2>&1
+    local poolkey; poolkey="$(gpg --homedir /etc/pacman.d/gnupg --with-colons --show-keys "$FACTORY_LIB/omarchy-staging.pub.asc" 2>/dev/null | awk -F: '$1=="fpr"{print $10; exit}')"
     pacman-key --lsign-key "$poolkey" >/dev/null 2>&1
     pacman -Sy >/dev/null
   fi
@@ -246,7 +263,7 @@ fetch_pkgbuild() { # name ref → /build/pkg holds the PKGBUILD directory
       curl -sSf --max-time 60 "${OMARCHY_API:-https://pkgs.firemanxbr.org}/api/v1/factory/tasks/$from/artifacts/$f" -o "/build/evidence/$f" 2>/dev/null || rm -f "/build/evidence/$f"
     done
     ls -la /build/evidence
-    with_secrets python3 /build/pool/factory/bin/draft-pkgbuild --url "${review_url:-$OMARCHY_REVIEW_URL}" --name "$name" --out /build/pkg --evidence /build/evidence \
+    with_secrets python3 "$FACTORY_LIB"/bin/draft-pkgbuild --url "${review_url:-$OMARCHY_REVIEW_URL}" --name "$name" --out /build/pkg --evidence /build/evidence \
       ${review_source:+--source "$review_source"} ${review_version:+--version "$review_version"} ${review_desc:+--description "$review_desc"} ${review_license:+--license "$review_license"} ${BUILD_HINT:+--hint="$BUILD_HINT"}
   elif [[ "$ref" == bump:* ]]; then
     # A new upstream release of an approved package: the PKGBUILD a
@@ -279,9 +296,9 @@ fetch_pkgbuild() { # name ref → /build/pkg holds the PKGBUILD directory
     fi
     if [[ -s /build/PKGBUILD.prev ]]; then
       echo "==> The lesson: the PKGBUILD of build $LESSON_TASK$( [[ -s /build/lesson.log ]] && echo " and what stopped it" )${BUILD_HINT:+; the hint from the person who asked: $BUILD_HINT}"
-      with_secrets python3 /build/pool/factory/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg --previous /build/PKGBUILD.prev $( [[ -s /build/lesson.log ]] && echo "--log /build/lesson.log" ) ${BUILD_HINT:+--hint="$BUILD_HINT"}
+      with_secrets python3 "$FACTORY_LIB"/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg --previous /build/PKGBUILD.prev $( [[ -s /build/lesson.log ]] && echo "--log /build/lesson.log" ) ${BUILD_HINT:+--hint="$BUILD_HINT"}
     else
-      with_secrets python3 /build/pool/factory/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg ${BUILD_HINT:+--hint="$BUILD_HINT"}
+      with_secrets python3 "$FACTORY_LIB"/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg ${BUILD_HINT:+--hint="$BUILD_HINT"}
     fi
   elif [[ "$ref" == *@*:* ]]; then
     local url rest tag path
@@ -297,10 +314,9 @@ fetch_pkgbuild() { # name ref → /build/pkg holds the PKGBUILD directory
     git -C /build/src remote add origin "$REPO_URL"
     git -C /build/src fetch -q --depth 1 origin "$ref"
     git -C /build/src checkout -q FETCH_HEAD
-    # The project's recipes, or a sizing recipe (measured by hand, never queued by reconcile).
-    local from="/build/src/factory/pkgbuilds/$name"
-    [[ -f "$from/PKGBUILD" ]] || from="/build/src/factory/sizing/$name"
-    [[ -f "$from/PKGBUILD" ]] || { echo "no PKGBUILD at factory/pkgbuilds/$name (or factory/sizing/$name) in $ref"; exit 3; }
+    # A sizing recipe (measured by hand, never queued): the only recipes the repository still holds.
+    local from="/build/src/factory/sizing/$name"
+    [[ -f "$from/PKGBUILD" ]] || { echo "no PKGBUILD at factory/sizing/$name in $ref"; exit 3; }
     # Build outside the checkout: build tools walk up the tree (cargo finds the
     # pool's own workspace Cargo.toml above factory/).
     cp -a "$from" /build/pkg
@@ -607,11 +623,11 @@ build_attempts() { # name ref
     echo "==> Attempt $attempt: correcting the PKGBUILD from the log"
     cp /build/pkg/PKGBUILD /build/PKGBUILD.prev
     if [[ "$ref" == review:* ]]; then
-      with_secrets python3 /build/pool/factory/bin/draft-pkgbuild --url "${review_url:-$OMARCHY_REVIEW_URL}" --name "$name" --out /build/pkg --evidence /build/evidence --previous /build/PKGBUILD.prev --log /build/attempt.log \
+      with_secrets python3 "$FACTORY_LIB"/bin/draft-pkgbuild --url "${review_url:-$OMARCHY_REVIEW_URL}" --name "$name" --out /build/pkg --evidence /build/evidence --previous /build/PKGBUILD.prev --log /build/attempt.log \
         ${review_source:+--source "$review_source"} ${review_version:+--version "$review_version"} ${review_desc:+--description "$review_desc"} ${review_license:+--license "$review_license"} ${BUILD_HINT:+--hint="$BUILD_HINT"} || return 4
     else
       local url; url="${ref#draft:}"; url="${url%@*}"
-      with_secrets python3 /build/pool/factory/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg --previous /build/PKGBUILD.prev --log /build/attempt.log ${BUILD_HINT:+--hint="$BUILD_HINT"} || return 4
+      with_secrets python3 "$FACTORY_LIB"/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg --previous /build/PKGBUILD.prev --log /build/attempt.log ${BUILD_HINT:+--hint="$BUILD_HINT"} || return 4
     fi
   done
 }

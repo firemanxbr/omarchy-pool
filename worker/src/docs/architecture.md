@@ -140,10 +140,11 @@ reach the agent through `agent-proxy`.
 | `release.yml` | every merge into `main` | CI + E2E again on the merged commit, next version from the last tag (`v0.0.1`, `v0.0.2`, …), binaries for both architectures, GitHub release, `wrangler deploy` carrying `POOL_VERSION` — the dashboard shows what is running |
 
 Every step posts an event; https://omarchy-pool.firemanxbr.org renders them.
-One workflow remains on GitHub besides CI and the release: `factory-update.yml`
-(pull requests bumping the project's own recipes, reviewed by a
-maintainer). No worker runs on GitHub: the project's six run on its own
-host (RUNBOOK, *The Studio host*).
+Nothing of the pool's operation runs on GitHub besides CI and the release
+(since 2026-09-17: no recipe pull requests, no dispatched workflows — a
+GitHub outage stops the code from changing and nothing else). No worker
+runs on GitHub: the project's six run on its own host (RUNBOOK, *The
+Studio host*).
 Operations, trust model and the kill switch are in [RUNBOOK.md](RUNBOOK.md).
 
 #### The lab: tried before it is promised

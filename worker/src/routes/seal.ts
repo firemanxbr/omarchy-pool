@@ -109,9 +109,9 @@ export async function factoryChain(env: Env, sha256: string): Promise<Record<str
   }
   if (!staged && !review) {
     recipe.repository = REPO_URL;
-    recipe.path = `factory/pkgbuilds/${build.name}/PKGBUILD`;
+    recipe.path = `factory/sizing/${build.name}/PKGBUILD`;
     recipe.commit = ref;
-    recipe.pkgbuild = `${REPO_URL}/blob/${ref}/factory/pkgbuilds/${build.name}/PKGBUILD`;
+    recipe.pkgbuild = `${REPO_URL}/blob/${ref}/factory/sizing/${build.name}/PKGBUILD`;
   }
   return {
     builder: { worker: builder.worker, trust: "project" },

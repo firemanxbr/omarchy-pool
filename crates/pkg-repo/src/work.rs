@@ -577,24 +577,45 @@ fn repo_dir(opts: &WorkOptions) -> Result<PathBuf> {
     if dir.join("tests").is_dir() && fresh {
         return Ok(dir);
     }
-    let _ = std::fs::remove_dir_all(&dir);
-    let status = Command::new("git")
+    // A fresh clone lands beside the old checkout and replaces it only once
+    // it is whole: when GitHub does not answer, the checkout the worker has
+    // — the same release's scripts — carries on, and the pool says so. The
+    // pool's rule since 2026-09-17: builds go on when GitHub is down.
+    let fresh_dir = opts.work_dir.join("repo.new");
+    let _ = std::fs::remove_dir_all(&fresh_dir);
+    let mut ok = Command::new("git")
         .args([
             "clone", "-q", "--depth", "1", "--branch", &git_ref, REPO_URL,
         ])
-        .arg(&dir)
+        .arg(&fresh_dir)
         .status()
-        .context("git clone")?;
-    if !status.success() {
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
         // A dev build's version has no tag; main is what it was built from.
-        let status = Command::new("git")
+        let _ = std::fs::remove_dir_all(&fresh_dir);
+        ok = Command::new("git")
             .args(["clone", "-q", "--depth", "1", REPO_URL])
-            .arg(&dir)
-            .status()?;
-        anyhow::ensure!(status.success(), "could not clone {REPO_URL}");
+            .arg(&fresh_dir)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
     }
-    std::fs::write(&stamp, git_ref)?;
-    Ok(dir)
+    if ok {
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::rename(&fresh_dir, &dir).context("moving the fresh checkout into place")?;
+        std::fs::write(&stamp, git_ref)?;
+        return Ok(dir);
+    }
+    let _ = std::fs::remove_dir_all(&fresh_dir);
+    if dir.join("tests").is_dir() {
+        eprintln!(
+            "warning: could not clone {REPO_URL}; going on with the checkout from {} (this binary is {version})",
+            std::fs::read_to_string(&stamp).unwrap_or_default().trim()
+        );
+        return Ok(dir);
+    }
+    anyhow::bail!("could not clone {REPO_URL}, and there is no checkout to go on with")
 }
 
 /// The keyring files the sync verifies against, refreshed daily by the pipeline's own script.
