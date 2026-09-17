@@ -191,7 +191,7 @@ const SCRIPT = String.raw`
   function klass(t) {
     var sc = t.score; if (!sc) return '<span class="muted">—</span>';
     var cls = { A: "ok", B: "ok", C: "warn", D: "error" }[sc.class] || "none";
-    return '<span class="pill ' + cls + '" title="' + esc(sc.points + "/100 today · with the maintainer's half green: " + sc.projected) + '">' + esc(sc.class) + '</span>' + (sc.class !== sc.projected ? ' <span class="dim" title="with the maintainer\'s half green">→ ' + esc(sc.projected) + '</span>' : '') + (!sc.ready && t.kind !== "project" ? ' <span class="pill none" title="a build that passed the gate, audited — then a maintainer">not ready</span>' : '');
+    return '<span class="pill ' + cls + '" title="' + esc(sc.points + "/100 today · with the maintainer's half green: " + sc.projected) + '">' + esc(sc.class) + '</span>' + (sc.class !== sc.projected ? ' <span class="dim" title="with the maintainer\'s half green">→ ' + esc(sc.projected) + '</span>' : '') + (!sc.ready && t.kind !== "project" ? ' <span class="pill none" title="a request as the form asks today, a build that passed the gate, audited — then a maintainer">not ready</span>' : '');
   }
   function decision(t) {
     if (!maint()) return '';
