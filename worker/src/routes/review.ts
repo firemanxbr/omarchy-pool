@@ -50,6 +50,8 @@ export async function handleReviewList(env: Env): Promise<Response> {
                           LEFT JOIN build_workers w ON w.id = t.lease_owner
       WHERE t.kind = 'build' AND t.status = 'staged'
         AND NOT EXISTS (SELECT 1 FROM approvals a WHERE a.task_id = t.id AND a.decision = 'approved')
+        -- a contributor's evidence whose project build was approved has served: nothing left to decide on it
+        AND NOT EXISTS (SELECT 1 FROM approvals a JOIN build_tasks r ON r.id = a.task_id WHERE a.decision = 'approved' AND r.name = t.name AND json_extract(r.params, '$.review') = t.id)
       ORDER BY t.id DESC LIMIT 100`,
   ).all();
   // A contributor's build that the project is building again, or built: the review row says so.
