@@ -28,25 +28,39 @@ trap 'rm -rf "$WORK"' EXIT
 ms() { python3 -c "import time; print(int(time.time()*1000))"; }
 started=$(ms)
 
-repos=$(curl -sf "$OMARCHY_API/api/v1/stats" | python3 -c '
+post() { # status summary payload
+  "$PKG_REPO" event --kind health --ring "$RING" --source "$ARCH" --status "$1" --summary "$2" \
+    --duration-ms $(( $(ms) - started )) --payload "$3" >/dev/null 2>&1 || true
+}
+
+# The ring's databases as the pool lists them, and the repositories exactly
+# as the pool hands them to users (the include of routes/setup.ts: each
+# database's directory — a source's own, <source>/<arch>; the optional
+# sources, chaotic, are not in it). Both come from the head release's
+# artifact rows, and both answers sit in the edge cache (a minute, two
+# minutes): a check that runs right after a sync, a promotion or a
+# fast-track created the head read snapshots from before its render — "no
+# database is served" for edge x86_64 three seconds after five were
+# rendered, an include with no [section] for rc that pacman called "no
+# usable package repositories", a security fix rolled back on it
+# (2026-09-17). So: fresh reads, and again every fifteen seconds until the
+# head's databases are there — a render takes a minute or two — before
+# the ring is called unserved.
+repos=""; include=""
+for try in $(seq 1 12); do
+  bust="t=$(date +%s)$try"
+  repos=$(curl -sf --max-time 20 "$OMARCHY_API/api/v1/stats?$bust" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 for r in d["rings"]:
     if r["ring"] == sys.argv[1]:
         print(" ".join(sorted({a["repo"] for a in r["artifacts"] if a["kind"] == "db" and a["arch"] == sys.argv[2] and "-chaotic-" not in a["repo"]})))
 ' "$RING" "$ARCH")
-
-post() { # status summary payload
-  "$PKG_REPO" event --kind health --ring "$RING" --source "$ARCH" --status "$1" --summary "$2" \
-    --duration-ms $(( $(ms) - started )) --payload "$3" >/dev/null 2>&1 || true
-}
-
-# The repositories exactly as the pool hands them to users: the include
-# (routes/setup.ts) names each database's directory — a source's own,
-# <source>/<arch>, and the flat one beside it while a relayout still moves
-# objects out of it. The optional sources (chaotic) are not in it.
-include=$(curl -sf --max-time 20 "$OMARCHY_API/api/v1/pacman.conf?ring=$RING&arch=$ARCH") || include=""
-if [[ -z "$include" || -z "$repos" ]]; then
+  include=$(curl -sf --max-time 20 "$OMARCHY_API/api/v1/pacman.conf?ring=$RING&arch=$ARCH&$bust") || include=""
+  if [[ -n "$repos" && -n "$include" ]] && grep -q '^\[' <<<"$include"; then break; fi
+  echo "$RING $ARCH: no database listed yet (try $try of 12); the render may still be writing"; sleep 15
+done
+if [[ -z "$include" || -z "$repos" ]] || ! grep -q '^\[' <<<"$include"; then
   post error "$RING $ARCH: no database is served" '{}'
   echo "$RING $ARCH: nothing served"; exit 1
 fi
