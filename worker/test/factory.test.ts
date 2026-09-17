@@ -1098,4 +1098,19 @@ describe("removing a registration", () => {
     // Gone: a second removal finds nothing.
     expect((await call("DELETE", "/factory/packages/ringed", undefined, "omc_m1")).status).toBe(404);
   });
+  it("a maintainer's page says where each standing approval stands — the rings that serve the package — so it can be taken back from there", async () => {
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES ('stood-1', 'stood', '1-1', 'aarch64', 'stood-1-1-aarch64.pkg.tar.zst', 1, 1, 1, '{}', 'factory', 'factory/aarch64/stood-1-1-aarch64.pkg.tar.zst', 'aarch64')"),
+      env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status) VALUES ('stood', 'aarch64', '1', 'draft:https://stood.example@1', 'contributor', 100, 0, 'community', 'alice', 'build', 'staged')"),
+    ]);
+    const pid = (await env.DB.prepare("SELECT id FROM packages WHERE name = 'stood'").first<{ id: number }>())!.id;
+    const tid = (await env.DB.prepare("SELECT id FROM build_tasks WHERE name = 'stood'").first<{ id: number }>())!.id;
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO ring_packages (ring, package_id) VALUES ('edge', ?), ('rc', ?)").bind(pid, pid),
+      env.DB.prepare("INSERT INTO approvals (task_id, name, arch, version, decision, by, note) VALUES (?, 'stood', 'aarch64', '1', 'approved', 'm2', 'fine')").bind(tid),
+    ]);
+    const page = await call("GET", "/users/m2?t=stood");
+    expect(page.status).toBe(200);
+    expect(page.json.approvals.find((a: any) => a.name === "stood")).toMatchObject({ decision: "approved", rings: ["edge", "rc"] });
+  });
 });

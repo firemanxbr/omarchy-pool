@@ -61,8 +61,8 @@ const BODY = String.raw`
 
   <section id="approvals-section" hidden>
     <h2>Approvals</h2>
-    <p class="sub">Decisions this maintainer signed: what they let into the pool, what they sent back, what they took back.</p>
-    <div class="table-wrap"><table id="approvals"><thead><tr><th>When</th><th>Package</th><th>Arch</th><th>Decision</th><th>Note</th></tr></thead><tbody></tbody></table></div>
+    <p class="sub">Decisions this maintainer signed: what they let into the pool — and where it stands today, ring by ring — what they sent back, what they took back. A standing approval is taken back from here: the package leaves every ring, another maintainer decides.</p>
+    <div class="table-wrap"><table id="approvals"><thead><tr><th>When</th><th>Package</th><th>Arch</th><th>Decision</th><th>Where it stands</th><th>Note</th></tr></thead><tbody></tbody></table></div>
   </section>
 `;
 
@@ -255,8 +255,12 @@ const SCRIPT = String.raw`
     // ---- approvals: last, with the build behind each
     if (d.approvals.length || d.role === "maintainer") {
       $("#approvals-section").hidden = false;
+      // A standing approval is a package in the pool — its rings say where — and this maintainer's to take back from here: it leaves every ring, another maintainer decides.
       pager("#approvals", d.approvals, function (a) {
-        return '<tr><td class="when">' + ago(a.created_at) + '</td><td><a href="/package/' + encodeURIComponent(a.name) + '?ring=lab&arch=' + esc(a.arch) + '">' + esc(a.name) + '</a> <span class="mono muted">' + esc(a.version || "") + '</span> <a class="dim" href="/build/' + a.task_id + '">#' + a.task_id + '</a></td><td>' + esc(a.arch) + '</td><td>' + (a.withdrawn_at ? '<span class="pill none" title="' + esc("withdrawn " + ago(a.withdrawn_at) + " by " + a.withdrawn_by + ": " + (a.withdrawn_reason || "")) + '">withdrawn</span>' : pill(a.decision)) + '</td><td class="muted">' + esc(a.withdrawn_at ? (a.withdrawn_reason || "") : (a.note || "")) + '</td></tr>';
+        var standing = a.decision === "approved" && !a.withdrawn_at;
+        var where = standing ? (a.rings && a.rings.length ? a.rings.map(function (r) { return '<span class="pill ' + (r === "stable" ? "ok" : r === "rc" ? "blue" : r === "edge" ? "lilac" : "warn") + '">' + esc(r) + '</span>'; }).join(" ") : '<span class="muted" title="approved, not served: the publish job did not run, or a later release dropped it">not served</span>') : '<span class="muted">—</span>';
+        var act = standing && own ? ' <button type="button" class="small-btn" data-withdraw="' + a.task_id + '" data-name="' + esc(a.name + " " + (a.version || "")) + '" title="take the approval back: the package leaves every ring, another maintainer decides — the reason goes on the record">Withdraw</button>' : '';
+        return '<tr><td class="when">' + ago(a.created_at) + '</td><td><a href="/package/' + encodeURIComponent(a.name) + '?ring=lab&arch=' + esc(a.arch) + '">' + esc(a.name) + '</a> <span class="mono muted">' + esc(a.version || "") + '</span> <a class="dim" href="/build/' + a.task_id + '">#' + a.task_id + '</a></td><td>' + esc(a.arch) + '</td><td>' + (a.withdrawn_at ? '<span class="pill none" title="' + esc("withdrawn " + ago(a.withdrawn_at) + " by " + a.withdrawn_by + ": " + (a.withdrawn_reason || "")) + '">withdrawn</span>' : pill(a.decision)) + '</td><td>' + where + act + '</td><td class="muted">' + esc(a.withdrawn_at ? (a.withdrawn_reason || "") : (a.note || "")) + '</td></tr>';
       }, { empty: "no decision yet" });
     }
     renderWorkers();
@@ -296,6 +300,15 @@ const SCRIPT = String.raw`
   document.addEventListener("click", function (ev) {
     var x = ev.target.closest ? ev.target.closest("button[data-expand]") : null;
     if (x) { var n = x.getAttribute("data-expand"); OPEN[n] = !OPEN[n]; load(); return; }
+    var w = ev.target.closest ? ev.target.closest("button[data-withdraw]") : null;
+    if (w) {
+      var wid = w.getAttribute("data-withdraw"), wname = w.getAttribute("data-name");
+      ask({ title: "Withdraw the approval of " + wname, text: "The approval stays on the record and is void from now on; the package leaves every ring it reached — a release without it, the databases rendered again by the project's workers; another maintainer decides on the build.", input: "required", placeholder: "why take it back", confirm: "Withdraw", danger: true }).then(function (note) {
+        if (note === null) return; w.disabled = true;
+        call("POST", "/tasks/" + wid + "/withdraw", { note: note }).then(function (r) { if (r.error) { toast(esc(r.error), "error"); w.disabled = false; } else toast("Withdrawn — " + esc(wname) + " leaves " + esc((r.rings || []).map(function (x) { return x.ring; }).join(", ") || "no ring") + "; another maintainer decides."); load(); });
+      });
+      return;
+    }
     var b = ev.target.closest ? ev.target.closest("button[data-build],button[data-remove],button[data-revoke]") : null; if (!b) return;
     if (b.hasAttribute("data-build")) {
       var name = b.getAttribute("data-build"), arch = b.getAttribute("data-arch");
