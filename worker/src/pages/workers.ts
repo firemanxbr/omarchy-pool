@@ -11,7 +11,7 @@
  * a chapter of the docs.
  */
 import { page } from "./layout";
-import type { Component, Fixture } from "./components";
+import { EVERYONE, type Component, type Fixture } from "./components";
 import { CHARTS } from "./charts";
 import type { RunningVersion } from "../meta";
 
@@ -146,7 +146,7 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     id: "workers.hero",
     page: "/workers",
     anchor: ["<h1>Three kinds of worker, and whose they are</h1>", '<a href="/docs/workers">Run one →</a>'],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "workers.tiles",
@@ -157,7 +157,7 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
       { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.alive", "workers.0.current_task", "workers.0.side"] },
       { path: "/api/v1/stats", fields: ["series.workers_daily", "metrics.jobs.minutes"] },
     ],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "workers.kind-cards",
@@ -175,7 +175,7 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
         ],
       },
     ],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "workers.load-per-worker",
@@ -186,7 +186,7 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
       { path: "/api/v1/stats", fields: ["series.workers_daily.0.worker", "series.workers_daily.0.ms", "series.workers_daily.0.running_ms", "series.workers_daily.0.done"] },
       { path: "/api/v1/factory?limit=10", fields: ["workers.0.id", "workers.0.arch", "workers.0.mode", "workers.0.alive", "workers.0.current_task", "workers.0.builds_done", "workers.0.builds_failed"] },
     ],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "workers.minutes-chart",
@@ -194,7 +194,7 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     anchor: ['id="c-minutes"'],
     script: ['"#c-minutes"', "renderMinutes", "jobs_daily", "r.ms"],
     reads: [{ path: "/api/v1/stats", fields: ["series.jobs_daily.0.day", "series.jobs_daily.0.ms"] }],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "workers.table",
@@ -214,7 +214,7 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
         ],
       },
     ],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "workers.log",
@@ -236,12 +236,12 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     page: "/workers",
     anchor: ['id="wt-legend"'],
     script: ['"#wt-legend"', "WT_LEGEND"],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "workers.run-one-gate",
     page: "/workers",
     anchor: ["<h3>Run one of your own</h3>", '<a href="/factory">workspace</a>', '<a class="btn ghost" href="/docs/workers">Run a worker →</a>'],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
 ];

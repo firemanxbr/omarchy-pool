@@ -101,8 +101,9 @@ What a page is made of is declared next to its template: each module in
 `components.test.ts` walks all of them. The rule is simple and it is the
 test: **a visible thing on a page is a manifest entry, or it is not on the
 page** — an element without an entry has nothing proving it is still there;
-and **a new `fetch` in a page script must be declared** by the component that
-draws its answer, or the reverse check names the page and the path. Delete
+and **a new `fetch` in a page script must be declared** by a component on
+that page — whether the path is a literal or built from `API`, an id and a
+name — or the reverse check names the page and the path. Delete
 the route, the element or the field a component lives on and the test fails
 by the component's name. A manifest binds its paths to the fixture's ids —
 the package, the person, the project's build — never to a pattern like

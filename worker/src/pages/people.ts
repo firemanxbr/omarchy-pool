@@ -5,7 +5,7 @@
  * Pool's "Made in the open" numbers; each name leads to its profile.
  */
 import { page } from "./layout";
-import type { Component, Fixture, Role } from "./components";
+import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 
 const BODY = String.raw`
@@ -98,13 +98,11 @@ export function peopleHtml(poolUrl: string, version: RunningVersion): string {
 }
 
 /**
- * What /people is made of, for test/components.test.ts — see components.ts.
+ * What /people is made of.
  * The page is role-blind: four public reads, no act, and the same tiles,
  * chips and table for everyone. The section ids are the targets the Pool's
  * "Made in the open" tiles link to, so each section head keeps its anchor.
  */
-const EVERYONE: Role[] = ["anonymous", "contributor", "owner", "maintainer"];
-
 export const PEOPLE_COMPONENTS = (_F: Fixture): Component[] => [
   {
     id: "people.hero",

@@ -10,7 +10,8 @@
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import worker from "../src/index";
-import { seedDashboard, type Fixture } from "./fixture";
+import { allComponents } from "../src/pages/components";
+import { scriptOf, seedDashboard, type Fixture } from "./fixture";
 
 async function get(path: string): Promise<Response> {
   const ctx = createExecutionContext();
@@ -52,8 +53,7 @@ describe("dashboard pages", () => {
     const acorn = await import("acorn");
     for (const path of PAGES) {
       const html = await (await get(path)).text();
-      const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map((m) => m[1]).filter((c) => !/^\s*$/.test(c) && !/googletagmanager|beacon\.min\.js/.test(c));
-      const code = scripts.join("\n;\n");
+      const code = scriptOf(html);
       if (!code.trim()) continue;
       const ast = acorn.parse(code, { ecmaVersion: 2020, sourceType: "script" }) as unknown as Record<string, unknown>;
       const declared = new Set<string>(), used = new Set<string>();
@@ -130,17 +130,24 @@ describe("dashboard pages", () => {
 
 // The diagrams size a box to its text; a line longer than planned widens the
 // box into its neighbour, and the labels between them end up on a border. A
-// box drawn inside another is a group (the Factory's "Build — your choice"
-// holds the two kinds of worker), not two boxes over each other.
+// box drawn inside a group (`d-group`: the Factory's "Build — your choice"
+// holds the two kinds of worker) is not two boxes over each other. Which
+// diagrams exist is what the manifests claim with `drawn`: a figure claimed
+// by no page, or a page claiming one nobody draws, fails here.
 // The documentation's figures are drawn the same way and checked the same way.
 describe("diagrams", () => {
   it("draws no two boxes over each other", async () => {
     const { ringsDiagram, sourcesDiagram, liveDiagram, archDiagram, factoryDiagram } = await import("../src/pages/diagrams");
     const { DOC_DIAGRAMS } = await import("../src/pages/doc-diagrams");
-    const drawn: [string, string][] = [["rings", ringsDiagram()], ["rings/promote", ringsDiagram("promote")], ["sources", sourcesDiagram()], ["live", liveDiagram()], ["arch", archDiagram()], ["factory", factoryDiagram()]];
-    for (const [name, draw] of Object.entries(DOC_DIAGRAMS)) drawn.push([`docs/${name}`, draw()]);
-    for (const [name, svg] of drawn) {
-      const boxes = [...svg.matchAll(/<rect class="d-box[^"]*" x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)"/g)].map((m) => m.slice(1, 5).map(Number));
+    const draw: Record<string, () => string> = { rings: ringsDiagram, "rings/promote": () => ringsDiagram("promote"), sources: sourcesDiagram, live: liveDiagram, arch: archDiagram, factory: factoryDiagram };
+    for (const [name, fn] of Object.entries(DOC_DIAGRAMS)) draw[`docs/${name}`] = fn;
+    const claimed = new Set(allComponents(F).map((c) => c.drawn).filter((k): k is string => k !== undefined));
+    expect([...claimed].sort()).toEqual(Object.keys(draw).sort());
+    for (const name of claimed) {
+      const svg = draw[name]();
+      const rects = [...svg.matchAll(/<rect class="(d-box[^"]*)" x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)"/g)];
+      const boxes = rects.map((m) => m.slice(2, 6).map(Number));
+      const group = (i: number) => /\bd-group\b/.test(rects[i][1]);
       const [w] = /viewBox="0 0 (\d+) (\d+)"/.exec(svg)!.slice(1).map(Number);
       if (name === "docs/benchmark-promotion") {
         // The one chart: bars, not boxes — inside the viewBox, in the palette's two fills.
@@ -156,7 +163,7 @@ describe("diagrams", () => {
           const [a, b] = [boxes[i], boxes[j]];
           const apart = a[0] + a[2] <= b[0] || b[0] + b[2] <= a[0] || a[1] + a[3] <= b[1] || b[1] + b[3] <= a[1];
           const inside = (x: number[], y: number[]) => x[0] >= y[0] && x[1] >= y[1] && x[0] + x[2] <= y[0] + y[2] && x[1] + x[3] <= y[1] + y[3];
-          expect(apart || inside(a, b) || inside(b, a), `${name}: boxes at ${a.join(",")} and ${b.join(",")} overlap`).toBe(true);
+          expect(apart || (group(j) && inside(a, b)) || (group(i) && inside(b, a)), `${name}: boxes at ${a.join(",")} and ${b.join(",")} overlap`).toBe(true);
         }
     }
   });

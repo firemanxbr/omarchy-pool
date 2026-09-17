@@ -7,7 +7,7 @@
  * record, then the build is one press away.
  */
 import { page, GITHUB_ICON } from "./layout";
-import type { Component, Fixture, Role } from "./components";
+import { EVERYONE, SIGNED_IN, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 
 const BODY = String.raw`
@@ -112,10 +112,15 @@ export function requestHtml(poolUrl: string, version: RunningVersion): string {
   });
 }
 
-/** What /request is made of, for test/components.test.ts — see components.ts. */
+/**
+ * What /request is made of: the sign-in gate, the form with its optional
+ * fields, the licence list and the checklist, and what follows a submit.
+ * Every act is the same POST to /factory/packages, sent as the form would
+ * send it — whole, short of a field, short of a confirmation — so the
+ * handler is proved to check what the form asks; the renew mode sends the
+ * fixture's package request again as its owner.
+ */
 export const REQUEST_COMPONENTS = (F: Fixture): Component[] => {
-  const everyone: Role[] = ["anonymous", "contributor", "owner", "maintainer"];
-  const signedIn: Role[] = ["contributor", "owner", "maintainer"];
   // The four confirmations as the template's boxes name them (data-check), not the server's CHECKLIST: a fifth
   // sentence added on one side alone makes the request answer 400 here.
   const confirmed = { official: true, license: true, unshipped: true, evidence: true };
@@ -135,7 +140,7 @@ export const REQUEST_COMPONENTS = (F: Fixture): Component[] => {
       id: "request.hero",
       page: "/request",
       anchor: ['<p class="eyebrow" id="eyebrow">Package request</p>', '<h1 id="h1">Ask for a package, on the record</h1>', '<p class="lede" id="lede">', 'href="/docs/governance">What happens after →</a>'],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "request.signin-gate",
@@ -159,7 +164,7 @@ export const REQUEST_COMPONENTS = (F: Fixture): Component[] => {
       script: ['var API = "/api/v1/factory"', 'call("POST", "/packages", body)', '$("#pkg-form").onsubmit', 'arches.push("x86_64")', 'arches.push("aarch64")', "checklist: checklist", 'if ($("#pkg-name").value.trim()) body.name'],
       // Anyone signed in asks; the name is then the asker's: the same request by anyone else is refused.
       acts: [{ method: "POST", path: "/api/v1/factory/packages", body: theirs, expect: { anonymous: 401, contributor: 201, owner: 409, maintainer: 409 } }],
-      visible: signedIn,
+      visible: SIGNED_IN,
     },
     {
       id: "request.form-more",
@@ -175,13 +180,13 @@ export const REQUEST_COMPONENTS = (F: Fixture): Component[] => {
           expect: { anonymous: 401, contributor: 400, owner: 400, maintainer: 400 },
         },
       ],
-      visible: signedIn,
+      visible: SIGNED_IN,
     },
     {
       id: "request.licence-datalist",
       page: "/request",
       anchor: ['list="spdx"', '<datalist id="spdx">', "<option>MIT</option>", "<option>GPL-3.0-or-later</option>", "<option>custom:proprietary</option>"],
-      visible: signedIn,
+      visible: SIGNED_IN,
     },
     {
       id: "request.checklist",
@@ -190,14 +195,14 @@ export const REQUEST_COMPONENTS = (F: Fixture): Component[] => {
       script: ['querySelectorAll("input[data-check]")', 'checklist[i.getAttribute("data-check")] = i.checked'],
       // One box left unticked and the request is refused, whoever asks, before the name or the project is looked at.
       acts: [{ method: "POST", path: "/api/v1/factory/packages", body: { ...theirs, checklist: { ...confirmed, evidence: false } }, expect: { anonymous: 401, contributor: 400, owner: 400, maintainer: 400 } }],
-      visible: signedIn,
+      visible: SIGNED_IN,
     },
     {
       id: "request.submit-state",
       page: "/request",
       anchor: ['<button type="submit" id="pkg-btn">Request</button>', '<p class="sub" id="pkg-state"></p>'],
       script: ['$("#pkg-btn").disabled = true', '"Checking the pool, the project and the source…"', '$("#pkg-state").textContent = d.error', '"failed: " + e'],
-      visible: signedIn,
+      visible: SIGNED_IN,
     },
     {
       id: "request.done",
@@ -208,13 +213,13 @@ export const REQUEST_COMPONENTS = (F: Fixture): Component[] => {
         '\'<a href="/build/\' + t + \'">#\' + t + \'</a>\'', 'd.build.queue[a].position + " of " + d.build.queue[a].total', "d.build.error",
         "'/user/' + encodeURIComponent(ME.login)", "Your page →", '$("#pkg-form").reset()',
       ],
-      visible: signedIn,
+      visible: SIGNED_IN,
     },
     {
       id: "request.workspace-link",
       page: "/request",
       anchor: ["Requested before?", 'href="/factory#gate">Your workspace</a>'],
-      visible: signedIn,
+      visible: SIGNED_IN,
     },
     {
       id: "request.renew-mode",
@@ -235,7 +240,7 @@ export const REQUEST_COMPONENTS = (F: Fixture): Component[] => {
       // refused while the approval stands (the package is in the pool) and taken once an act before this one withdrew it — the last act
       // here, as it cancels the queued builds of the name and queues its own.
       acts: [{ method: "POST", path: "/api/v1/factory/packages", body: renewal, expect: { anonymous: 401, contributor: 409, maintainer: 409, owner: [200, 409] } }],
-      visible: signedIn,
+      visible: SIGNED_IN,
     },
   ];
 };

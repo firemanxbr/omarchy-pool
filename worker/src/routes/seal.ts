@@ -198,6 +198,6 @@ export async function writeAttestation(env: Env, sha256: string): Promise<boolea
 
 export async function handleProvenance(sha256: string, env: Env): Promise<Response> {
   const seal = await sealOf(env, sha256);
-  if (!seal) return json({ error: "not found" }, 404);
+  if (!seal) return json({ error: "no seal for this object" }, 404);
   return json(seal, 200, { "cache-control": "public, max-age=60" });
 }

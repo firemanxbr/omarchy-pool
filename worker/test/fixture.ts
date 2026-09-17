@@ -37,7 +37,7 @@
  * ran the trial, and m2 approved it. `ours` went the whole way: w1 took the
  * publish job, put the object in the pool and released it into edge — its
  * page has the seal's chain and the Who cards' factory branch. `mine`
- * (F.contributorTask, F.projectTask, F.approval) stops before that: its
+ * (F.contributorTask, F.projectTask) stops before that: its
  * publish job sits in the queue, so its project build is still staged with
  * its evidence — what the build page, the review and the person's page
  * show. Three later community builds of `mine` are staged and undecided:
@@ -59,6 +59,9 @@ import { sha256Hex } from "../src/routes/contributors";
 import type { Fixture } from "../src/pages/components";
 
 export type { Fixture };
+
+/** The inline scripts of a served page, joined: what the page runs, for the tests that read it (components.test.ts, pages.test.ts). */
+export const scriptOf = (html: string): string => [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map((m) => m[1]).join("\n");
 
 const API = "http://pool.test/api/v1";
 
@@ -125,7 +128,6 @@ async function index(env: Env, source: string, arch: string, p: Pkg, token: stri
 
 export async function seedDashboard(env: Env): Promise<Fixture> {
   const arch = "x86_64";
-  const h = (t: string) => sha256Hex(t);
 
   // The pool signs in the tests too: a key of its own, made here (signing.test.ts makes one the same way).
   env.SIGNING_KEY = (await openpgp.generateKey({ type: "curve25519", userIDs: [{ name: "Pool Test", email: "test@omarchy.invalid" }], format: "armored" })).privateKey;
@@ -151,10 +153,10 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
   await env.DB.batch([
     env.DB.prepare(`INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, trusted_by, last_seen) VALUES
       ('w1', ?, 'm1', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z'),
-      ('w3', ?, 'alice', ?, 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z')`).bind(arch, await h("omw_w1"), arch, await h("omw_w3")),
+      ('w3', ?, 'alice', ?, 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z')`).bind(arch, await sha256Hex("omw_w1"), arch, await sha256Hex("omw_w3")),
     env.DB.prepare(`INSERT INTO factory_maintainers (login) VALUES ('m1'), ('m2')`),
     env.DB.prepare(`INSERT INTO contributors (login, token_hash, session_hash, role) VALUES ('m1', ?, ?, 'maintainer'), ('m2', ?, ?, 'maintainer'), ('alice', ?, ?, 'contributor'), ('bob', ?, ?, 'contributor'), ('carol', ?, ?, 'contributor')`)
-      .bind(await h("omc_m1"), await h("oms_m1"), await h("omc_m2"), await h("oms_m2"), await h("omc_alice"), await h("oms_alice"), await h("omc_bob"), await h("oms_bob"), await h("omc_carol"), await h("oms_carol")),
+      .bind(await sha256Hex("omc_m1"), await sha256Hex("oms_m1"), await sha256Hex("omc_m2"), await sha256Hex("oms_m2"), await sha256Hex("omc_alice"), await sha256Hex("oms_alice"), await sha256Hex("omc_bob"), await sha256Hex("oms_bob"), await sha256Hex("omc_carol"), await sha256Hex("oms_carol")),
   ]);
 
   // alice's request: registered, its record on the pool, one build queued for x86_64.
@@ -195,7 +197,7 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
    * stages, audits and tries it, m2 approves. The publish job is queued.
    */
   const story = async (name: string, version: string) => {
-    const requestId = await request(name, version, "omc_alice");
+    await request(name, version, "omc_alice");
     const claimed = must(await call(env, "POST", "/factory/claim", { arch, ...agent }, "omw_w3"), 200, `w3 claims ${name}`).json;
     if (claimed.task.name !== name) throw new Error(`fixture: w3 claimed ${claimed.task.name}, not ${name}`);
     const contributorTask = claimed.task.id as number;
@@ -213,8 +215,7 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
     must(await call(env, "PUT", `/factory/tasks/${projectTask}/artifacts/trial.log`, undefined, trial.token, `== pacman -S ${name}\nTRIAL=ok`), 201, `trial.log of ${name}`);
     must(await call(env, "POST", `/factory/tasks/${trial.task.id}/complete`, { result: { verdict: "ok", packages: [name], task: projectTask }, duration_ms: 30000 }, trial.token), 200, `complete the trial of ${name}`);
     const publish = must(await call(env, "POST", `/factory/tasks/${projectTask}/approve`, { note: "looks right" }, "omc_m2"), 200, `approve ${name}`).json.publish as number;
-    const approval = (await env.DB.prepare("SELECT id FROM approvals WHERE task_id = ? AND decision = 'approved'").bind(projectTask).first<{ id: number }>())!.id;
-    return { request: requestId, contributorTask, projectTask, approval, publish, sha };
+    return { contributorTask, projectTask, publish, sha };
   };
 
   // `ours` goes the whole way: w1 takes the publish job, puts the object in the pool, indexes and releases it into edge (factory.test.ts).
@@ -264,8 +265,8 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
     env.DB.prepare("INSERT INTO events (kind, status, summary, payload) VALUES ('audience', 'ok', ?, ?)")
       .bind(`${today}: about 300 machines`, JSON.stringify({ day: today, machines: 300, by_ring: { stable: 210, rc: 60, edge: 30 }, by_arch: { x86_64: 300 }, requests: 1234, bytes: 5_000_000, sampled: false })),
   ]);
-  const event = (await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('promote', 'stable', ?, 'ok', 'stable: 2 packages from core', ?) RETURNING id")
-    .bind(arch, JSON.stringify({ release_id: release, from_release_id: previousRelease, note: "xz 5.8.5, zstd in, bzip2 out", arch })).first<{ id: number }>())!.id;
+  await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('promote', 'stable', ?, 'ok', 'stable: 2 packages from core', ?)")
+    .bind(arch, JSON.stringify({ release_id: release, from_release_id: previousRelease, note: "xz 5.8.5, zstd in, bzip2 out", arch })).run();
   await env.DB.prepare("INSERT INTO settings (key, value) VALUES ('cost_latest', ?)").bind(JSON.stringify({ estimated_at: "2026-09-16T12:00:00Z", status: "ok", month: "2026-09", month_to_date_usd: 8.86, projected_usd: 17.5 })).run();
 
   // One advisory on zlib, matched on the object stable serves.
@@ -280,9 +281,9 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
   return {
     arch, pkg: "zlib", pkg2: "xz", release, previousRelease, sha: zlib,
     contributor: "bob", owner: "alice", m1: "m1", m2: "m2",
-    factoryPkg: "mine", request: mine.request, publishedPkg: "ours", worker: "w1", communityWorker: "w3",
-    contributorTask: mine.contributorTask, projectTask: mine.projectTask, approval: mine.approval, stagedTask, disposableTask, spareTask,
-    blockedContributor: "carol", blockedPkg: "hers", event, advisory,
+    factoryPkg: "mine", publishedPkg: "ours", worker: "w1", communityWorker: "w3",
+    contributorTask: mine.contributorTask, projectTask: mine.projectTask, stagedTask, disposableTask, spareTask,
+    blockedContributor: "carol", blockedPkg: "hers",
     sessions: { contributor: "oms_bob", owner: "oms_alice", maintainer: "oms_m2" },
   };
 }

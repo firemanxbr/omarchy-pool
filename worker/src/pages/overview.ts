@@ -5,7 +5,7 @@
  * needed here; the details live one link away (Status, Journal, Packages).
  */
 import { page } from "./layout";
-import type { Component, Fixture, Role } from "./components";
+import { EVERYONE, type Component, type Fixture } from "./components";
 import { CHARTS } from "./charts";
 import { ringsDiagram } from "./diagrams";
 import type { RunningVersion } from "../meta";
@@ -320,15 +320,13 @@ export function overviewHtml(poolUrl: string, version: RunningVersion): string {
 }
 
 /**
- * What / is made of, for test/components.test.ts — see components.ts. The
- * door is public end to end: nothing on it changes with the role, every read
+ * What / is made of. The door is public end to end: nothing on it changes with the role, every read
  * is an anonymous GET, and there is no act. Almost everything draws from
  * /api/v1/stats, so each unit declares that read with the fields it takes
  * from it; the rings of that answer come in RINGS order (edge, rc, stable,
  * lab), so `rings.2` is stable, the ring the fixture released.
  */
 export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
-  const everyone: Role[] = ["anonymous", "contributor", "owner", "maintainer"];
   const stats = "/api/v1/stats";
   const security = (arch: string) => `/api/v1/security?ring=stable&arch=${arch}`;
   return [
@@ -336,7 +334,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       id: "pool.hero",
       page: "/",
       anchor: ['class="hero"', 'class="eyebrow"', "tested before they reach you", 'href="#get-started"'],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "pool.search",
@@ -347,7 +345,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
         { path: `/api/v1/search?q=${F.pkg}&ring=stable&arch=${F.arch}&limit=9`, fields: ["packages", "packages.0.name", "packages.0.version", "packages.0.source", "packages.0.description"] },
         { path: `/packages?q=${F.pkg}`, json: false },
       ],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "pool.tiles",
@@ -367,13 +365,13 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
         { path: security(F.arch), fields: ["totals.packages", "totals.kev", "totals.critical", "totals.high", "totals.medium", "updated_at"] },
         { path: security("aarch64"), fields: ["totals.packages", "totals.kev", "totals.critical", "totals.high", "totals.medium"] },
       ],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "pool.how-diagram",
       page: "/",
       anchor: ['id="how"', '<figure class="diagram">', 'aria-label="Five sources feed the pool'],
-      visible: everyone,
+      visible: EVERYONE,
       drawn: "rings",
     },
     {
@@ -382,7 +380,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="rings-section"', '<div class="rings" id="rings">'],
       script: ['"#rings"', "a[data-ring]", "RING_INFO[name]", 'latest(d.latest, "health", name, a)', "info.lag"],
       reads: [{ path: stats, fields: ["rings", "rings.0.ring", "rings.0.package_count", "rings.0.bytes", "rings.0.release", "rings.2.release.seq", "rings.2.release.created_at", "latest"] }],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "pool.why-features",
@@ -390,7 +388,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['class="features"', 'id="proof-verified"', 'id="proof-tested"', 'id="proof-rollback"', 'href="/factory">Bring a package'],
       script: ['"#proof-verified"', '"#proof-tested"', '"#proof-rollback"', "d.pool.objects", "d.pool.names", 'e.kind === "rollback"'],
       reads: [{ path: stats, fields: ["pool.objects", "pool.names", "rings.2.release.seq", "events", "events.0.kind", "events.0.created_at", "events.0.ring"] }],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "pool.get-started-step",
@@ -398,14 +396,14 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="get-started"', 'id="pick-ring"', 'id="ring-desc"', 'data-copy="setup"', 'id="setup-cmd"', 'href="/setup"'],
       script: ['pick("pick-ring", RINGS, ring', '"#ring-desc"', '"#setup-cmd"', "DESC[ring]", "/setup | sudo bash -s -- --ring ", '"data-copy"'],
       reads: [{ path: "/setup", json: false }],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "pool.cli-card",
       page: "/",
       anchor: ['class="cli-card"', 'data-copy="cli"', 'id="cli-cmd"', 'id="cli-note"', 'href="/docs/get-started#cli"'],
       script: ['"#cli-cmd"', '"#cli-note"', "omarchy-cli --ring "],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "pool.chart-pool-growth",
@@ -413,7 +411,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="c-pool"', 'id="c-pool-mini"'],
       script: ['"#c-pool"', '"#c-pool-mini"', "S.metrics", "d.pool.bytes", "area("],
       reads: [{ path: stats, fields: ["series.metrics.0.created_at", "series.metrics.0.bytes", "series.metrics.0.objects", "pool.objects", "pool.bytes"] }],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "pool.chart-security",
@@ -425,7 +423,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
         { path: security("aarch64"), fields: ["totals"] },
         { path: stats, fields: ["events", "events.0.kind", "events.0.status", "events.0.summary", "events.0.created_at"] },
       ],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "pool.chart-machines",
@@ -433,7 +431,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="mc-days"', 'id="mc-spark"', 'id="mc-split"'],
       script: ['"#mc-spark"', '"#mc-split"', '"#mc-days"', "d.audience", "y.by_ring", "y.by_arch", "y.sampled"],
       reads: [{ path: stats, fields: ["audience", "audience.0.day", "audience.0.machines", "audience.0.by_ring", "audience.0.by_arch", "audience.0.sampled"] }],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "pool.people-row",
@@ -445,7 +443,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
         { path: "/api/v1/factory/maintainers", fields: ["maintainers", "maintainers.0.login"] },
         { path: "/api/v1/factory", fields: ["workers", "workers.0.owner", "workers.0.alive"] },
       ],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "pool.open-stats",
@@ -457,7 +455,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
         { path: "/api/v1/factory/maintainers", fields: ["maintainers.0.login"] },
         { path: "/api/v1/factory", fields: ["workers", "workers.0.owner", "workers.0.alive"] },
       ],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "pool.feed-journal",
@@ -465,7 +463,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="open-journal"', 'href="/journal">Full journal'],
       script: ['"#open-journal"', "drawFeed(", 'data-id="', "e.summary", "e.status", "seenEvents"],
       reads: [{ path: stats, fields: ["events", "events.0.id", "events.0.kind", "events.0.status", "events.0.summary", "events.0.created_at"] }],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "pool.ring-heads",
@@ -473,7 +471,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="open-heads"', 'id="open-releases"', 'href="/journal#releases"'],
       script: ['"#open-heads"', '"#open-releases"', 'href="/diff?ring=', "d.releases", "r.source_id", "r.note"],
       reads: [{ path: stats, fields: ["rings.0.ring", "rings.0.release", "rings.0.package_count", "releases", "releases.0.id", "releases.0.ring", "releases.0.seq", "releases.0.source_id", "releases.0.note", "releases.0.created_at"] }],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "pool.coverage",
@@ -481,13 +479,13 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['class="coverage-box"', 'id="c-coverage"'],
       script: ['"#c-coverage"', "c.upstream_total", "c.indexed", "c.optional", 'data-tip="'],
       reads: [{ path: stats, fields: ["coverage", "coverage.0.source", "coverage.0.arch", "coverage.0.optional", "coverage.0.upstream_total", "coverage.0.indexed"] }],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "pool.sponsor",
       page: "/",
       anchor: ['class="sponsor compact"', 'href="/pipeline">Pipeline</a>', 'href="mailto:sponsor@firemanxbr.org"'],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "pool.section-heads",
@@ -499,7 +497,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
         "<h2>Coverage</h2>", 'href="/status">Every source, every number',
         "<h2>Made in the open</h2>",
       ],
-      visible: everyone,
+      visible: EVERYONE,
     },
   ];
 };

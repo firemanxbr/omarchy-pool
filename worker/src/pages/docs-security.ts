@@ -4,7 +4,7 @@
  * advisory per ring — is the Security page (/security).
  */
 import { page } from "./layout";
-import type { Component, Fixture } from "./components";
+import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 
 const FEEDS: [string, string, string][] = [
@@ -82,13 +82,12 @@ export function docsSecurityHtml(poolUrl: string, version: RunningVersion): stri
  */
 export const DOCS_SECURITY_COMPONENTS = (_F: Fixture): Component[] => {
   const page = "/docs/security";
-  const everyone: Component["visible"] = ["anonymous", "contributor", "owner", "maintainer"];
   return [
     {
       id: "docs-security.lede",
       page,
       anchor: ["<h1>Security</h1>", '<p class="lede">Public advisories matched against what each ring serves', '<a href="/security">Every advisory, per ring →</a>'],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       // The section keeps id="feeds" for the map (docs-tree.ts); the buttons are the script's, drawn into the .srcs row from the inlined list.
@@ -96,51 +95,51 @@ export const DOCS_SECURITY_COMPONENTS = (_F: Fixture): Component[] => {
       page,
       anchor: ['<section id="feeds">', "<h2>The five feeds</h2>", 'class="srcs"'],
       script: ["var FEEDS = ", "function drawFeeds()", 'data-feed="', 'getAttribute("data-feed")'],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "docs-security.feed-text",
       page,
       anchor: ['id="feed-text"'],
       script: ['$("#feed-text")', "FEEDS[feed]", 'class="pill none"'],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "docs-security.confidence-table",
       page,
       anchor: ['<section id="confidence">', "<th>Confidence</th><th>Means</th>", '<span class="pill error">exact</span>', '<span class="pill warn">name-version</span>', '<span class="pill none">name-only</span>'],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "docs-security.clean-means-examined",
       page,
       anchor: ["Clean must mean examined"],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "docs-security.exposure",
       page,
       anchor: ['<section id="exposure">', "<h2>Exposure through the graph</h2>", '<a href="/security">Security</a>', "<code>omarchy-cli security</code>"],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "docs-security.fast-track",
       page,
       anchor: ['<section id="fast-track">', "<h2>The fast-track</h2>", '<a href="/journal?kind=fast-track">journal</a>'],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "docs-security.shell-nav",
       page,
       anchor: ['id="docs-nav"', '<details open><summary><a href="/docs/security" class="on">Security</a>', 'href="/docs/security#feeds"', 'href="/docs/security#confidence"', 'href="/docs/security#exposure"', 'href="/docs/security#fast-track"'],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "docs-security.shell-search",
       page,
       anchor: ['id="docs-q"', 'id="docs-hits"'],
       script: ['$("#docs-q")', "q.oninput = function", '"/docs/glossary#"'],
-      visible: everyone,
+      visible: EVERYONE,
     },
   ];
 };

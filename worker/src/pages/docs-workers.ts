@@ -5,7 +5,7 @@
  * running the project's work.
  */
 import { page } from "./layout";
-import type { Component, Fixture, Role } from "./components";
+import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 import { DASHBOARD_HOST, REPO_URL } from "../meta";
 
@@ -183,9 +183,9 @@ export function docsWorkersHtml(poolUrl: string, version: RunningVersion): strin
 }
 
 /**
- * What /docs/workers is made of, for test/components.test.ts — see
- * components.ts. A chapter is prose: every section, table and step card
- * gets its anchor and nothing changes with the role. Three things reach
+ * What /docs/workers is made of. A chapter is prose: every section, table
+ * and step card gets its anchor and nothing changes with the role. Three
+ * things reach
  * past the page and are checked as such: the one command the contributor
  * step tells the reader to curl is served by the Worker, with the compose
  * file beside it; the trust call the maintainer section names is routed
@@ -195,8 +195,6 @@ export function docsWorkersHtml(poolUrl: string, version: RunningVersion): strin
  * entries. The "Screenshot to add" box in step 4 is an authoring note,
  * not a component: it has no anchor here, so removing it breaks nothing.
  */
-const EVERYONE: Role[] = ["anonymous", "contributor", "owner", "maintainer"];
-
 export const DOCS_WORKERS_COMPONENTS = (F: Fixture): Component[] => [
   {
     id: "docs-workers.docs-sidebar",

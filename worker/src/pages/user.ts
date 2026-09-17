@@ -7,7 +7,7 @@
  * is the public API (`/api/v1/factory/*`) with the browser session.
  */
 import { page } from "./layout";
-import type { Component, Fixture, Role } from "./components";
+import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 import { REPO_URL } from "../meta";
 
@@ -420,14 +420,13 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
   const story = `/api/v1/factory/packages/${F.factoryPkg}/story`;
   const factory = "/api/v1/factory?limit=10";
   const evidence = (task: number, file: string) => `/api/v1/factory/tasks/${task}/artifacts/${file}`;
-  const everyone: Role[] = ["anonymous", "contributor", "owner", "maintainer"];
   return [
     {
       id: "user.crumbs",
       page,
       anchor: ['class="crumbs"', 'href="/factory">Factory', 'id="crumb"'],
       script: ['"#crumb"', 'location.pathname.split("/")[2]'],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "user.profile-head",
@@ -435,7 +434,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="avatar"', 'id="title"'],
       script: ['"#avatar"', '"#title"', 'd.login.slice(0, 2)', 'd.role === "maintainer"'],
       reads: [{ path: profile, fields: ["login", "name", "role"] }],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "user.identity-line",
@@ -446,7 +445,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
         { path: profile, fields: ["role", "blocked", "maintainer_since", "since", "last_seen", "github", "login"] },
         { path: `/api/v1/users/${F.m2}`, fields: ["role", "maintainer_since"] },
       ],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "user.tiles",
@@ -454,7 +453,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="tiles"'],
       script: ['"#tiles"', "d.build_counts", "d.approved_packages.length", "w.revoked_at", "w.alive"],
       reads: [{ path: profile, fields: ["packages", "build_counts.total", "build_counts.staged", "build_counts.published", "build_counts.failed", "approvals", "approved_packages", "workers", "workers.0.revoked_at", "workers.0.alive"] }],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "user.activity-chart",
@@ -465,7 +464,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
         { path: profile, fields: ["builds.0.created_at", "packages.0.updated_at"] },
         { path: `/api/v1/users/${F.m2}`, fields: ["approvals.0.created_at"] },
       ],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "user.score-panel",
@@ -473,7 +472,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['href="/docs/governance">the formula', 'id="score"', 'id="score-f"'],
       script: ['"#score"', '"#score-f"', "rec.score"],
       reads: [{ path: profile, fields: ["record.score"] }],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "user.record-section",
@@ -481,7 +480,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="record-section"', 'id="record"'],
       script: ['"#record-section"', 'pager("#record"', "rec.contributed", "rec.maintained", "m.rebuilds_failed"],
       reads: [{ path: profile, fields: ["record.contributed.approved", "record.contributed.staged", "record.contributed.bumps", "record.contributed.donated", "record.contributed.rejected", "record.maintained.approvals", "record.maintained.rejections", "record.maintained.rebuilds_failed", "record.score"] }],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "user.packages-table",
@@ -489,7 +488,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="pk-request"', 'href="/request"', 'id="packages"'],
       script: ['pager("#packages"', '"#pk-request"', "data-expand", 'JSON.parse(p.arches', "p.detail", 'byPkg[p.name + "/" + a]', "data-story"],
       reads: [{ path: profile, fields: ["packages.0.name", "packages.0.category", "packages.0.url", "packages.0.arches", "packages.0.status", "packages.0.detail", "builds.0.name", "builds.0.arch", "builds.0.status", "builds.0.id"] }],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       // The open row's first line, with Build all and Remove for the owner; the Remove dialog is this entry's.
@@ -498,9 +497,9 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="packages"'],
       script: ['"/api/v1/factory/packages/"', '"/story"', "pkg.blocked_at", '"request incomplete"', "acts-inline", "data-build", "data-remove", '"Remove the registration of "', 'call("DELETE", "/packages/" + encodeURIComponent(rm))'],
       reads: [{ path: story, fields: ["package.arches", "package.status", "package.blocked_at", "request.arches", "request.complete", "request.renewable", "chains", "chains.0.contributor.arch", "chains.0.contributor.status", "chains.0.project", "chains.0.approval", "chains.0.score.ready"] }],
-      // The owner is refused either way: 403 while the package is approved, 409 once a manifest before this one withdrew the approval and the project's build is under review again. A maintainer's removal would take the package with it, so none is sent.
-      acts: [{ method: "DELETE", path: `/api/v1/factory/packages/${F.factoryPkg}`, expect: { anonymous: 401, contributor: 403, owner: [403, 409] } }],
-      visible: everyone,
+      // The owner is refused: by now a manifest before this one rejected one of the community's builds, which put the registration back to `registered`, and the project's build of it is still staged for a decision — the owner waits for the maintainers (409). A maintainer's removal would take the package with it, so none is sent.
+      acts: [{ method: "DELETE", path: `/api/v1/factory/packages/${F.factoryPkg}`, expect: { anonymous: 401, contributor: 403, owner: 409 } }],
+      visible: EVERYONE,
     },
     {
       id: "user.story-request-block",
@@ -508,7 +507,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="packages"'],
       script: ["requestBlock(st.request, own, name, renewable, whyNot)", "st.request.renewable", "st.request.busy", '"renew it once build #"'],
       reads: [{ path: story, fields: ["request.id", "request.record", "request.signature", "request.version", "request.created_at", "request.complete", "request.checks", "request.checks.0.item", "request.checks.0.ok", "request.checks.0.note", "request.renewable", "request.busy", "request.arches"] }],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "user.story-arch-panel",
@@ -523,7 +522,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
         { path: evidence(F.projectTask, "build.log"), json: false },
         { path: evidence(F.projectTask, "trial.log"), json: false },
       ],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "user.story-next-step",
@@ -534,7 +533,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
         { path: story, fields: ["chains.0.contributor.status", "chains.0.contributor.pinned_to", "chains.0.contributor.shared_after", "chains.0.contributor.attempts", "chains.0.contributor.pkgbuild_ref", "chains.0.contributor.version", "chains.0.contributor.error", "chains.0.contributor.result.vet.verdict", "chains.0.audit", "chains.0.score.items", "request.complete", "request.version", "rings"] },
         { path: factory, fields: ["workers.0.id", "workers.0.alive", "workers.0.labels"] },
       ],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "user.story-footer",
@@ -542,7 +541,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="packages"'],
       script: ['?ring=lab">The package', "st.rings.map"],
       reads: [{ path: story, fields: ["rings"] }],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       // Build <arch> and Build all open it; it chooses where the build runs, posts it, or takes the waiting one out of the queue.
@@ -570,7 +569,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
         { path: evidence(F.contributorTask, "build.log"), json: false },
         { path: evidence(F.contributorTask, "PKGBUILD"), json: false },
       ],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "user.staging-quota",
@@ -620,14 +619,14 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
         { method: "POST", path: `/api/v1/factory/workers/${F.communityWorker}/mode`, body: { mode: "dedicated" }, expect: { anonymous: 401, contributor: 403, maintainer: 200, owner: 200 } },
         { method: "DELETE", path: `/api/v1/factory/workers/${F.communityWorker}`, expect: { anonymous: 401, contributor: 404, owner: 200 } },
       ],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "user.workers-legend",
       page,
       anchor: ['id="wt-legend"'],
       script: ['"#wt-legend"', "WT_LEGEND"],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       // Shown on a maintainer's page; Withdraw is the owner's button and the maintainer's act, with its dialog.
@@ -636,9 +635,9 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="approvals-section"', 'id="approvals"'],
       script: ['"#approvals-section"', 'pager("#approvals"', 'a.decision === "approved"', "a.withdrawn_at", "a.rings", "data-withdraw", '"/tasks/" + wid + "/withdraw"'],
       reads: [{ path: `/api/v1/users/${F.m2}`, fields: ["role", "approvals.0.task_id", "approvals.0.name", "approvals.0.arch", "approvals.0.version", "approvals.0.decision", "approvals.0.note", "approvals.0.created_at", "approvals.0.withdrawn_at", "approvals.0.rings", "approved_packages.0"] }],
-      // The fixture's one approval: 404 once a manifest before this one took it back.
-      acts: [{ method: "POST", path: `/api/v1/factory/tasks/${F.projectTask}/withdraw`, body: { note: "the source is not the upstream's" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: [200, 404] } }],
-      visible: everyone,
+      // The fixture's one approval was taken back by the build page's manifest, which walks before this one: nothing stands to withdraw.
+      acts: [{ method: "POST", path: `/api/v1/factory/tasks/${F.projectTask}/withdraw`, body: { note: "the source is not the upstream's" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 404 } }],
+      visible: EVERYONE,
     },
     {
       id: "user.not-found-state",
@@ -646,7 +645,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="line"'],
       script: ["d.__status !== 200", 'd.error || "not found"', '"could not load: "'],
       reads: [{ path: "/api/v1/users/nobody", status: 404, fields: ["error"] }],
-      visible: everyone,
+      visible: EVERYONE,
     },
   ];
 };

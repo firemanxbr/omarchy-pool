@@ -4,7 +4,7 @@
  * ring depends on it.
  */
 import { page } from "./layout";
-import type { Component, Fixture } from "./components";
+import { EVERYONE, type Component, type Fixture } from "./components";
 import { CHARTS } from "./charts";
 import type { RunningVersion } from "../meta";
 
@@ -119,7 +119,7 @@ export function securityHtml(poolUrl: string, version: RunningVersion): string {
 }
 
 /**
- * What /security is made of, for test/components.test.ts — see components.ts.
+ * What /security is made of.
  * One report, `GET /api/v1/security?ring=&arch=`, feeds the status line, the
  * tiles, the feeds card and the table; the per-ring chart reads the same
  * endpoint once per ring, and the arch picker asks it for the other
@@ -133,7 +133,7 @@ export const SECURITY_COMPONENTS = (F: Fixture): Component[] => {
       id: "security.hero",
       page: "/security",
       anchor: ['<p class="eyebrow">Security</p>', "<h1>What a ring serves that has an open advisory — and how sure we are</h1>", "The feeds and the confidences, explained →</a>"],
-      visible: ["anonymous", "contributor", "owner", "maintainer"],
+      visible: EVERYONE,
     },
     {
       id: "security.pickers",
@@ -141,7 +141,7 @@ export const SECURITY_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="pick-ring"', 'id="pick-arch"', 'id="pick-conf"'],
       script: ['"pick-ring"', '"pick-arch"', '"pick-conf"', 'RINGS = ["stable", "rc", "edge"]', 'ARCHES = ["x86_64", "aarch64"]', 'CONF = ["all", "exact + name-version", "exact"]', "history.replaceState"],
       reads: [{ path: "/api/v1/security?ring=stable&arch=aarch64", fields: ["ring", "arch", "vulnerable", "totals.packages"] }],
-      visible: ["anonymous", "contributor", "owner", "maintainer"],
+      visible: EVERYONE,
     },
     {
       id: "security.updated-line",
@@ -149,7 +149,7 @@ export const SECURITY_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="updated"'],
       script: ['"#updated"', '"Advisories refreshed "', '"No security run recorded yet · "', "d.advisories_total", '" advisories in the index"'],
       reads: [{ path: report, fields: ["updated_at", "advisories_total"] }],
-      visible: ["anonymous", "contributor", "owner", "maintainer"],
+      visible: EVERYONE,
     },
     {
       id: "security.tiles",
@@ -161,7 +161,7 @@ export const SECURITY_COMPONENTS = (F: Fixture): Component[] => {
         "r.v.fixed_in.length", "d.totals.exposed",
       ],
       reads: [{ path: report, fields: ["vulnerable", "vulnerable.0.advisories.0.match", "vulnerable.0.advisories.0.severity", "vulnerable.0.advisories.0.kev", "vulnerable.0.advisories.0.epss", "vulnerable.0.fixed_in", "totals.exposed"] }],
-      visible: ["anonymous", "contributor", "owner", "maintainer"],
+      visible: EVERYONE,
     },
     {
       id: "security.per-ring-chart",
@@ -178,7 +178,7 @@ export const SECURITY_COMPONENTS = (F: Fixture): Component[] => {
         { path: `/api/v1/security?ring=rc&arch=${F.arch}`, fields: ["ring", "arch", "vulnerable", "totals"] },
         { path: `/api/v1/security?ring=edge&arch=${F.arch}`, fields: ["ring", "arch", "vulnerable", "totals"] },
       ],
-      visible: ["anonymous", "contributor", "owner", "maintainer"],
+      visible: EVERYONE,
     },
     {
       id: "security.feeds-card",
@@ -186,13 +186,13 @@ export const SECURITY_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['<h3>The feeds <span id="sc-feeds-when"></span></h3>', 'id="sc-feeds"'],
       script: ['"#sc-feeds"', '"#sc-feeds-when"', '"Arch Security Tracker"', '"Debian Security Tracker"', '"OSV"', '"CISA KEV"', '"EPSS"', "count[a.tracker]", "a.epss != null", '"refreshed "'],
       reads: [{ path: report, fields: ["updated_at", "vulnerable.0.advisories.0.tracker", "vulnerable.0.advisories.0.kev", "vulnerable.0.advisories.0.epss"] }],
-      visible: ["anonymous", "contributor", "owner", "maintainer"],
+      visible: EVERYONE,
     },
     {
       id: "security.vuln-section-intro",
       page: "/security",
       anchor: ["<h2>Packages with open advisories</h2>", "<b>exact</b>", "<b>name-version</b>", "<b>name-only</b>", "<b>Fixed in</b>"],
-      visible: ["anonymous", "contributor", "owner", "maintainer"],
+      visible: EVERYONE,
     },
     {
       id: "security.vuln-table",
@@ -215,7 +215,7 @@ export const SECURITY_COMPONENTS = (F: Fixture): Component[] => {
           ],
         },
       ],
-      visible: ["anonymous", "contributor", "owner", "maintainer"],
+      visible: EVERYONE,
     },
   ];
 };

@@ -5,7 +5,7 @@
  * never the page around it.
  */
 import { page } from "./layout";
-import type { Component, Fixture } from "./components";
+import { EVERYONE, type Component, type Fixture } from "./components";
 import { DOCS_TREE, GLOSSARY, MD_CHAPTERS, chapterOf, type DocKey, type MdChapter } from "./docs-tree";
 import { termId } from "./layout";
 import type { RunningVersion } from "../meta";
@@ -87,15 +87,13 @@ const FIGURES: [key: string, chapter: DocKey, label: string][] = [
 ];
 
 /**
- * What /docs and the markdown chapters are made of, for
- * test/components.test.ts — see components.ts. Nothing here reads the API:
+ * What /docs and the markdown chapters are made of. Nothing here reads the API:
  * the index and every chapter are rendered on the server, the same bytes
  * for every role, so the entries are anchors — the index's cards and the
  * shell around them, and per chapter its title, its sections, what other
  * pages link to, the links it resolves and the figures it draws.
  */
 export const DOCS_COMPONENTS = (_F: Fixture): Component[] => {
-  const everyone: Component["visible"] = ["anonymous", "contributor", "owner", "maintainer"];
   const cardTitle = (c: (typeof DOCS_TREE)[number]) => `<h3><a href="${c.href}">${c.label} →</a></h3>`;
   const chapter = (c: MdChapter): Component => ({
     id: `doc.${c.key}`,
@@ -109,33 +107,33 @@ export const DOCS_COMPONENTS = (_F: Fixture): Component[] => {
       ...chapterOf(c.key)!.secs.map((s) => `<h2 id="${s.id}"><a class="anchor" href="#${s.id}">`),
       ...(CHAPTER_ANCHORS[c.key] ?? []),
     ],
-    visible: everyone,
+    visible: EVERYONE,
   });
   return [
     {
       id: "docs.hero",
       page: "/docs",
       anchor: ['<p class="eyebrow">Documentation</p>', "<h1>The pool, chapter by chapter</h1>", `href="${REPO_URL}">GitHub</a>`],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "docs.pool-cards",
       page: "/docs",
       // One card per chapter of the pool's group, its title a link; a section chip carries the blurb as its tooltip, a glossary chip is a term.
       anchor: ['<div class="doc-cards">', ...DOCS_TREE.filter((c) => c.group === "pool").map(cardTitle), 'href="/docs/get-started#which-ring" title="', 'href="/api#read" title="', 'href="/docs/glossary#term-ring">ring</a>'],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "docs.code-heading",
       page: "/docs",
       anchor: [">For people working on the pool</h2>"],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "docs.code-cards",
       page: "/docs",
       anchor: [...DOCS_TREE.filter((c) => c.group === "code").map(cardTitle), 'href="/docs/proof-of-concept#results" title="'],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "docs.shell",
@@ -156,7 +154,7 @@ export const DOCS_COMPONENTS = (_F: Fixture): Component[] => {
         'class="docs-hint"',
       ],
       script: ['var q = $("#docs-q"), hits = $("#docs-hits"), nav = $("#docs-nav")', 'var TREE = [{"label":"', '"/docs/glossary#" + g[2]', "nothing in the docs says", 'e.key === "Escape"'],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "docs.routes",
@@ -169,15 +167,15 @@ export const DOCS_COMPONENTS = (_F: Fixture): Component[] => {
         { path: "/how-it-works", status: 301, json: false },
         { path: "/governance", status: 301, json: false },
       ],
-      visible: everyone,
+      visible: EVERYONE,
     },
     ...MD_CHAPTERS.map(chapter),
     ...FIGURES.map(([key, page, label]): Component => ({
       id: `fig.${key}`,
       page: `/docs/${page}`,
       anchor: [`role="img" aria-label="${label}`],
-      drawn: key,
-      visible: everyone,
+      drawn: `docs/${key}`,
+      visible: EVERYONE,
     })),
   ];
 };

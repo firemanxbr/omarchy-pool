@@ -23,6 +23,12 @@
  * `wtId`) belong to the acorn walk, and a component that uses them names
  * only what it draws. Static prose — a hero, a docs chapter's text — gets an
  * anchor and nothing else, so a template edit that drops it still fails.
+ *
+ * Adding a page: export its list below its `<name>Html()` and spread it
+ * into `allComponents` — an entry that is not in the whole is never
+ * checked. The test also reads the page the other way: a `fetch()` in its
+ * script whose path no entry on that page (or the shell) claims fails by
+ * the page's name, so a new read or act is declared the day it is written.
  */
 import { MORE } from "./layout";
 import { OVERVIEW_COMPONENTS } from "./overview";
@@ -50,6 +56,10 @@ import { GLOSSARY_COMPONENTS } from "./glossary";
 
 /** Who is looking: nobody signed in, a contributor who owns nothing here, the contributor who owns the fixture's package and worker, a maintainer. */
 export type Role = "anonymous" | "contributor" | "owner" | "maintainer";
+/** What renders for anyone who opens the page. */
+export const EVERYONE: Role[] = ["anonymous", "contributor", "owner", "maintainer"];
+/** What a session unlocks, whoever holds it. */
+export const SIGNED_IN: Role[] = ["contributor", "owner", "maintainer"];
 
 export interface Read {
   /** Concrete path on the fixture (`/api/v1/package/${F.pkg}?ring=stable&arch=x86_64`): the test GETs exactly this. */
@@ -81,15 +91,15 @@ export interface Component {
   id: string;
   /** The page the test GETs, concrete: "/package/zlib", `/build/${F.projectTask}`. */
   page: string;
-  /** Literal(s) the served HTML must contain: 'id="graph"'. */
+  /** Literal(s) the served HTML must contain: 'id="graph"'. Empty for a piece of the shell's script that draws into no element of its own. */
   anchor: string | string[];
   /** Literal(s) the page's inline script must contain: '"/api/v1/package/"', "#graph", "required_by". */
   script?: string[];
   reads?: Read[];
   acts?: Act[];
-  /** Who the component renders for — documentation now, the headless smoke's checklist later. */
+  /** Who the component renders for. */
   visible: Role[];
-  /** A server-drawn diagram's key, for the overlap test ("factory"). */
+  /** A server-drawn diagram's key ("factory", "docs/factory-loop"): the overlap test in test/pages.test.ts draws exactly the keys the manifests claim. */
   drawn?: string;
 }
 
@@ -121,8 +131,6 @@ export interface Fixture {
   factoryPkg: string;
   /** "ours", alice's other package, the whole way: published by the project into edge, so `/api/v1/package/ours?ring=edge` has the factory branch and the seal's chain. */
   publishedPkg: string;
-  /** The package request's id (`package_requests`), the record's number. */
-  request: number;
   /** "w1", the project's worker (m1's): built the project's build, wrote the audit. */
   worker: string;
   /** "w3", alice's community worker: built her evidence. */
@@ -131,8 +139,6 @@ export interface Fixture {
   contributorTask: number;
   /** The project's build of it, staged with its evidence and gate, its trial done, approved by m2 — the one `/build/<id>` and `/factory/tasks/<id>?whole=1` show whole. */
   projectTask: number;
-  /** The approval's row id. */
-  approval: number;
   /** A later staged community build of `mine`, undecided: probe "build by the project" and "approve" (409: a contributor's build) on it. */
   stagedTask: number;
   /** Another one, to reject: an act that changes the fixture runs on this row. */
@@ -143,15 +149,15 @@ export interface Fixture {
   blockedContributor: string;
   /** "hers", carol's package, blocked by m1 before she was. */
   blockedPkg: string;
-  /** One journal event's id. */
-  event: number;
-  /** The advisory on zlib ("arch:AVG-9999:zlib"), matched on the pool's object: `/api/v1/security` has a row. */
-  advisory: string;
   /** The browser's cookie value (`omc=<value>`) per role; the CLI token of a login is `omc_<login>`, its session `oms_<login>`. */
   sessions: Record<Exclude<Role, "anonymous">, string>;
 }
 
-/** The frame every page carries: the account, the footer's links, the mark. */
+/**
+ * The frame every page carries: the account, the footer's links, the mark —
+ * and the two fetches the shell's script makes on every page, the stats
+ * poll and the worker's log, so a page's own entries need not claim them.
+ */
 export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
   {
     id: "shell.account",
@@ -163,28 +169,57 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
       { path: "/auth/me", as: "contributor", fields: ["login", "role"] },
       { path: "/auth/me", as: "maintainer", fields: ["login", "role"] },
     ],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "shell.footer-more",
     page: "/",
     anchor: MORE.map((m) => `href="${m.href}"`),
     script: ['footer .more a'],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
-    id: "shell.icons",
+    // liveStats(): the poll behind every page's tiles and charts, and the service check it runs first — which fetches only when the header has a pill, which no page has today.
+    id: "shell.live-stats",
+    page: "/",
+    anchor: [],
+    script: ["function liveStats(", '"/api/v1/stats"', "function serviceStatus(", '"/api/v1/status"', "pipelineFrom(d)"],
+    reads: [
+      { path: "/api/v1/stats", fields: ["generated_at", "version", "rings", "pool", "series", "metrics", "latest"] },
+      { path: "/api/v1/status", fields: ["ok", "state", "index.ok", "pool.ok"] },
+    ],
+    visible: EVERYONE,
+  },
+  {
+    // The icon on a worker's row that opens its own log: its owner's and the maintainers' to read.
+    id: "shell.worker-log",
+    page: "/",
+    anchor: [],
+    script: ["data-wlog", '"/log"', "d.log"],
+    reads: [
+      { path: `/api/v1/factory/workers/${F.worker}/log`, status: 401 },
+      { path: `/api/v1/factory/workers/${F.worker}/log`, as: "contributor", status: 403 },
+      { path: `/api/v1/factory/workers/${F.communityWorker}/log`, as: "owner", fields: ["id", "log", "at"] },
+      { path: `/api/v1/factory/workers/${F.worker}/log`, as: "maintainer", fields: ["id", "log", "at"] },
+    ],
+    visible: ["owner", "maintainer"],
+  },
+  {
+    // The mark, as the head names it and as browsers ask for it by name (icons.ts).
+    id: "icons.favicons",
     page: "/",
     anchor: ['<link rel="icon" href="/favicon.ico"', '<link rel="icon" href="/favicon.svg"', '<link rel="apple-touch-icon" href="/apple-touch-icon.png">', '<link rel="manifest" href="/site.webmanifest">'],
     reads: [
       { path: "/favicon.ico", json: false },
+      { path: "/favicon.png", json: false },
       { path: "/favicon.svg", json: false },
       { path: "/apple-touch-icon.png", json: false },
+      { path: "/apple-touch-icon-precomposed.png", json: false },
       { path: "/icon-192.png", json: false },
       { path: "/icon-512.png", json: false },
       { path: "/site.webmanifest", json: false },
     ],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
 ];
 

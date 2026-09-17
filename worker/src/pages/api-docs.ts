@@ -2,7 +2,7 @@
  * API: the endpoints a script, an agent or omarchy-cli uses, with examples.
  */
 import { page } from "./layout";
-import type { Component, Fixture } from "./components";
+import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 
 const BODY = String.raw`
@@ -111,7 +111,7 @@ export function apiDocsHtml(poolUrl: string, version: RunningVersion): string {
 }
 
 /**
- * What /api is made of, for test/components.test.ts — see components.ts.
+ * What /api is made of.
  * The page is a reference: its tables are rows of claims about routes, so
  * each table's entry reads or acts through every endpoint its rows name,
  * on the fixture — a row about a route that is gone, or that answers
@@ -123,7 +123,6 @@ export function apiDocsHtml(poolUrl: string, version: RunningVersion): string {
  * page's to prove.
  */
 export const API_DOCS_COMPONENTS = (F: Fixture): Component[] => {
-  const everyone: Component["visible"] = ["anonymous", "contributor", "owner", "maintainer"];
   const stable = `ring=stable&arch=${F.arch}`;
   const noSession = { anonymous: 401, contributor: 401, maintainer: 401 } as const;
   const stagedPackage = `${F.factoryPkg}-1.0-1-${F.arch}.pkg.tar.zst`;
@@ -132,14 +131,14 @@ export const API_DOCS_COMPONENTS = (F: Fixture): Component[] => {
       id: "api.hero",
       page: "/api",
       anchor: ["<h1>API</h1>", '<p class="lede">Everything this site shows comes from a small JSON API'],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "api.docs-search",
       page: "/api",
       anchor: ['id="docs-q"', 'id="docs-hits"'],
       script: ['$("#docs-q")', '$("#docs-hits")', '$("#docs-nav")', 'class="hit"'],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "api.docs-chapters",
@@ -149,7 +148,7 @@ export const API_DOCS_COMPONENTS = (F: Fixture): Component[] => {
         '<details open><summary><a href="/api" class="on">API</a><small>5</small></summary>',
         'href="/api#read"', 'href="/api#factory"', 'href="/api#examples"', 'href="/api#write-jobs"', 'href="/api#write-people"',
       ],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "api.read-table",
@@ -197,7 +196,7 @@ export const API_DOCS_COMPONENTS = (F: Fixture): Component[] => {
         { path: "/api/v1/pool/unreferenced?keep=3", fields: ["keep", "grace_days", "protected_releases", "kept_checkpoints", "count", "bytes", "packages"] },
         { path: "/api/v1/cost", fields: ["estimated_at", "status", "month", "month_to_date_usd", "projected_usd", "guard", "lines_usd.warn", "lines_usd.guard", "lines_usd.cap"] },
       ],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "api.factory-read-table",
@@ -239,7 +238,7 @@ export const API_DOCS_COMPONENTS = (F: Fixture): Component[] => {
         { path: "/api/v1/factory/me", status: 401 },
         { path: "/api/v1/factory/me", as: "owner", fields: ["contributor.login", "packages", "packages.0.name", "workers", "workers.0.id", "tasks", "tasks.0.id", "staging.bytes", "staging.quota_bytes"] },
       ],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "api.examples",
@@ -254,7 +253,7 @@ export const API_DOCS_COMPONENTS = (F: Fixture): Component[] => {
         { path: "/api/v1/releases/stable/history", fields: ["releases.0"] },
         { path: "/api/v1/stats", fields: ["latest", "latest.0.kind", "latest.0.ring", "latest.0.source", "latest.0.status", "latest.0.created_at"] },
       ],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "api.write-jobs-table",
@@ -280,7 +279,7 @@ export const API_DOCS_COMPONENTS = (F: Fixture): Component[] => {
         { method: "POST", path: "/api/v1/pool/relayout", expect: noSession },
         { method: "PUT", path: `/api/v1/factory/tasks/${F.stagedTask}/artifacts/build.log`, expect: noSession },
       ],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "api.write-people-table",
@@ -318,7 +317,7 @@ export const API_DOCS_COMPONENTS = (F: Fixture): Component[] => {
         { method: "POST", path: `/api/v1/factory/packages/${F.factoryPkg}/block`, expect: { anonymous: 401, contributor: 403, maintainer: 400 } },
         { method: "POST", path: `/api/v1/factory/packages/${F.factoryPkg}/unblock`, expect: { anonymous: 401, contributor: 403, maintainer: 400 } },
       ],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "api.stats-poll",
@@ -326,7 +325,7 @@ export const API_DOCS_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="progress"'],
       script: ["liveStats(function () {}, 120000)", '"/api/v1/stats"', 'busy(fetch('],
       reads: [{ path: "/api/v1/stats" }],
-      visible: everyone,
+      visible: EVERYONE,
     },
   ];
 };

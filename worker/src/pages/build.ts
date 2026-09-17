@@ -9,7 +9,7 @@
  * Review. A pool job (sync, health, …) gets the same page, shorter.
  */
 import { page } from "./layout";
-import type { Component, Fixture, Role } from "./components";
+import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 
 const BODY = String.raw`
@@ -263,8 +263,7 @@ export function buildHtml(id: number, poolUrl: string, version: RunningVersion):
 }
 
 /**
- * What /build/<id> is made of, for test/components.test.ts — see
- * components.ts. One read feeds nearly the whole page, GET
+ * What /build/<id> is made of. One read feeds nearly the whole page, GET
  * /api/v1/factory/tasks/<id>, so each part names the fields of it that it
  * draws; the evidence panels read one file each. The page is the project's
  * build (F.projectTask) — staged, audited, tried, approved — so the head,
@@ -280,7 +279,6 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
   const page = `/build/${F.projectTask}`;
   const task = `/api/v1/factory/tasks/${F.projectTask}`;
   const pkg = `${task}/artifacts/${F.factoryPkg}-1.0-1-${F.arch}.pkg.tar.zst`;
-  const everyone: Role[] = ["anonymous", "contributor", "owner", "maintainer"];
   return [
     {
       id: "build.crumbs",
@@ -288,7 +286,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['<a href="/review">Review</a>', 'id="crumb"'],
       script: ['"#crumb"', '"#" + t.id'],
       reads: [{ path: task, fields: ["task.kind", "task.name", "task.id"] }],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "build.title",
@@ -296,7 +294,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="title"'],
       script: ['"#title"', "document.title", '<a href="/package/', "T.rings[0]"],
       reads: [{ path: task, fields: ["task.kind", "task.name", "task.version", "task.id", "task.arch", "rings"] }],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "build.badges",
@@ -304,7 +302,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="badges"'],
       script: ['"#badges"', "statusPill(t.status)", "sc.ready", '"ready for a maintainer"', '"not ready"'],
       reads: [{ path: task, fields: ["task.arch", "task.status", "task.kind", "task.trust", "score.ready"] }],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "build.lede",
@@ -317,7 +315,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
           fields: ["task.kind", "task.trust", "task.name", "task.version", "task.arch", "task.owner", "task.status", "task.finished_at", "task.lease_owner", "task.params", "worker.id", "worker.owner", "from.id", "from.owner", "approval.decision", "approval.withdrawn_at"],
         },
       ],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "build.tiles",
@@ -339,7 +337,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
         // A failed build keeps no verdict on its row: the tile reads the file the worker staged.
         { path: `${task}/artifacts/vet.json`, json: false },
       ],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "build.actions",
@@ -372,8 +370,8 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
         // The rejection itself, on the row made for it; 409 once another page's manifest rejected it first.
         { method: "POST", path: `/api/v1/factory/tasks/${F.disposableTask}/reject`, body: { note: "the source is not the upstream's" }, expect: { maintainer: [200, 409] } },
         { method: "POST", path: `/api/v1/factory/tasks/${F.stagedTask}/build`, body: {}, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: [200, 409] } },
-        // Void from here on: 404 once a manifest before this one took it back.
-        { method: "POST", path: `${task}/withdraw`, body: { note: "approved before the trial was read" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: [200, 404] } },
+        // The first withdraw in the walk takes the fixture's one approval back; the person's page asks again and gets 404.
+        { method: "POST", path: `${task}/withdraw`, body: { note: "approved before the trial was read" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 200 } },
       ],
       visible: ["maintainer"],
     },
@@ -383,7 +381,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="who-section"', "two people behind every package the factory ships", 'href="/docs/what-we-test#the-score"'],
       script: ['$("#who-section")', "if (!sc) { el.hidden = true; return; }"],
       reads: [{ path: task, fields: ["score"] }],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "build.request-block",
@@ -396,7 +394,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
           fields: ["request.id", "request.record", "request.signature", "request.version", "request.created_at", "request.complete", "request.checks", "request.checks.0.item", "request.checks.0.note", "request.checks.0.ok", "request.renewable", "request.busy", "package.status", "task.owner", "task.name"],
         },
       ],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "build.score-columns",
@@ -409,7 +407,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
           fields: ["score.items", "score.items.0.who", "score.items.0.item", "score.items.0.points", "score.items.0.max", "score.items.0.state", "score.items.0.note", "score.ready", "chain.contributor.id", "chain.contributor.owner", "chain.project.id", "chain.approval.by", "chain.withdrawn", "task.id"],
         },
       ],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "build.timeline",
@@ -438,7 +436,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
           ],
         },
       ],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "build.build-kv",
@@ -451,7 +449,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
           fields: ["worker.id", "worker.owner", "worker.labels", "worker.trust", "worker.trusted_by", "worker.version", "worker.agent", "task.lease_owner", "task.kind", "task.pkgbuild_ref", "task.attempts", "task.max_attempts", "task.lease_expires_at", "task.duration_ms", "task.result_filename", "task.result_sha256", "task.result", "task.publish", "task.trust"],
         },
       ],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "build.resources",
@@ -459,7 +457,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="res-panel"', 'id="res"', 'class="mini four"'],
       script: ['"#res-panel"', '"#res"', '"resources.json"', "r.wall_s", "r.cpu_s", "r.ram_peak_mb", "r.disk_mb"],
       reads: [{ path: `${task}/artifacts/resources.json`, json: false }],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "build.evidence-list",
@@ -467,7 +465,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="evidence-section"', 'id="ev-note"', 'id="evidence"'],
       script: ['"#evidence"', "e.public", 'class="ev"', "raw ↗", "fetch(e.url)", '"audit.md"', "Nothing staged for this build", "T.task.log_tail"],
       reads: [{ path: task, fields: ["evidence", "evidence.0.name", "evidence.0.size", "evidence.0.uploaded_at", "evidence.0.url", "evidence.0.public", "task.kind", "task.log_tail"] }],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "build.staging-packages",
@@ -481,7 +479,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
         { path: pkg, as: "owner", status: 403, fields: ["error"] },
         { path: pkg, as: "maintainer", json: false },
       ],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "build.gate-table",
@@ -489,7 +487,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="evidence"'],
       script: ['name === "vet.json"', 'class="ev-table"', "v.checks", "c.status", "c.detail", "v.verdict", 'href="/docs/what-we-test"'],
       reads: [{ path: `${task}/artifacts/vet.json`, json: false }],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "build.audit-table",
@@ -497,7 +495,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="evidence"'],
       script: ['name === "audit.json"', "a.findings", "a.summary", "a.model", "a.category", "x.severity", "x.where", "x.fix", "No finding."],
       reads: [{ path: `${task}/artifacts/audit.json`, json: false }],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "build.recipe-code",
@@ -505,7 +503,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="evidence"'],
       script: ['name === "PKGBUILD"', 'class="code"', 'class="ln"'],
       reads: [{ path: `${task}/artifacts/PKGBUILD`, json: false }],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "build.manifest-kv",
@@ -513,7 +511,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="evidence"'],
       script: ['name === "PKGINFO"', 'indexOf(" = ")', 'class="kv"'],
       reads: [{ path: `${task}/artifacts/PKGINFO`, json: false }],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "build.log-view",
@@ -525,7 +523,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
         { path: `${task}/artifacts/tests.log`, json: false },
         { path: `${task}/artifacts/trial.log`, json: false },
       ],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "build.json-link",
@@ -533,7 +531,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="json-link"', ">/api/v1/factory/tasks/…</a>"],
       script: ['"#json-link"', 'API + "/tasks/" + ID'],
       reads: [{ path: task, fields: ["task.id"] }],
-      visible: everyone,
+      visible: EVERYONE,
     },
     {
       id: "build.not-found",
@@ -541,7 +539,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="title"', 'id="lede"'],
       script: ['"No such task"', "d.error", "endSkeleton()"],
       reads: [{ path: "/api/v1/factory/tasks/0", status: 404, fields: ["error"] }],
-      visible: everyone,
+      visible: EVERYONE,
     },
   ];
 };

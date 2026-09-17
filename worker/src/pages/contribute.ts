@@ -6,7 +6,7 @@
  * GitHub" lands.
  */
 import { page } from "./layout";
-import type { Component, Fixture } from "./components";
+import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 import { GITHUB_ICON } from "./layout";
 import { CHARTS } from "./charts";
@@ -123,7 +123,7 @@ export function factoryHtml(poolUrl: string, version: RunningVersion): string {
 }
 
 /**
- * What /factory is made of, for test/components.test.ts — see components.ts.
+ * What /factory is made of.
  * The page is public and the same for everyone: the tiles, the assembly
  * line's one live number, Landed lately and the funnel share one
  * Promise.all over four factory reads; the builds chart polls /stats; only
@@ -135,14 +135,14 @@ export const FACTORY_COMPONENTS = (_F: Fixture): Component[] => [
     id: "factory.hero",
     page: "/factory",
     anchor: ['<p class="eyebrow">For contributors</p>', "Package what you love. The factory builds it, a maintainer checks it."],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     // The old address still serves this page (index.ts): the hero and the way in, at /contribute.
     id: "factory.contribute",
     page: "/contribute",
     anchor: ['<p class="eyebrow">For contributors</p>', 'href="/request"'],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "factory.tiles",
@@ -154,13 +154,13 @@ export const FACTORY_COMPONENTS = (_F: Fixture): Component[] => [
       { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.name", "packages.0.owner", "packages.0.status"] },
       { path: "/api/v1/factory/review", fields: ["staged", "staged.0.finished_at"] },
     ],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "factory.how-header",
     page: "/factory",
     anchor: ['id="how"', "<h2>How a package gets in</h2>", 'href="/docs/how-it-works#people"'],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "factory.assembly-line",
@@ -168,14 +168,14 @@ export const FACTORY_COMPONENTS = (_F: Fixture): Component[] => [
     anchor: ['<figure class="diagram">', 'viewBox="0 0 1340 330"', 'aria-label="An assembly line:', 'data-live="shared-online"'],
     script: ['[data-live="shared-online"]', '" online now"', 'w.side === "omarchy" || w.mode === "shared"'],
     reads: [{ path: "/api/v1/factory", fields: ["workers", "workers.0.alive", "workers.0.side", "workers.0.mode", "workers.0.update"] }],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
     drawn: "factory",
   },
   {
     id: "factory.ways",
     page: "/factory",
     anchor: ['id="ways"', "<h2>Three steps, two of them yours</h2>", 'href="/request"', 'href="/docs/workers"', 'href="/docs/governance"'],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "factory.landed",
@@ -186,7 +186,7 @@ export const FACTORY_COMPONENTS = (_F: Fixture): Component[] => [
       { path: "/api/v1/factory/approvals", fields: ["approvals", "approvals.0.decision", "approvals.0.name", "approvals.0.version", "approvals.0.arch", "approvals.0.by", "approvals.0.created_at", "approvals.0.rings", "approvals.0.rebuild_status", "approvals.0.rebuild_task"] },
       { path: "/api/v1/factory/packages", fields: ["packages.0.name", "packages.0.owner"] },
     ],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "factory.builds-chart",
@@ -194,7 +194,7 @@ export const FACTORY_COMPONENTS = (_F: Fixture): Component[] => [
     anchor: ["Factory builds <span>14 days</span>", 'id="c-builds"'],
     script: ['"/api/v1/stats"', "liveStats(", '"#c-builds"', "builds_daily", 'r.status === "staged"', '"Factory builds per day over fourteen days"'],
     reads: [{ path: "/api/v1/stats", fields: ["series.builds_daily", "series.builds_daily.0.day", "series.builds_daily.0.status", "series.builds_daily.0.n"] }],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "factory.funnel-chart",
@@ -206,7 +206,7 @@ export const FACTORY_COMPONENTS = (_F: Fixture): Component[] => [
       { path: "/api/v1/factory/packages", fields: ["packages.0.name", "packages.0.created_at"] },
       { path: "/api/v1/factory/approvals", fields: ["approvals.0.task_id", "approvals.0.created_at"] },
     ],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "factory.gate",
@@ -221,6 +221,6 @@ export const FACTORY_COMPONENTS = (_F: Fixture): Component[] => [
       { path: "/auth/me", as: "owner", fields: ["login"] },
       { path: "/auth/me", as: "maintainer", fields: ["login"] },
     ],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
 ];

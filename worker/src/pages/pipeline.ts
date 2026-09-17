@@ -8,7 +8,7 @@
  * themselves have a page of their own (/workers), by kind.
  */
 import { page } from "./layout";
-import type { Component, Fixture } from "./components";
+import { EVERYONE, SIGNED_IN, type Component, type Fixture } from "./components";
 import { CHARTS } from "./charts";
 import { archDiagram, liveDiagram } from "./diagrams";
 import type { RunningVersion } from "../meta";
@@ -368,7 +368,7 @@ export function pipelineHtml(poolUrl: string, version: RunningVersion): string {
 }
 
 /**
- * What /pipeline is made of, for test/components.test.ts — see components.ts.
+ * What /pipeline is made of.
  * Ten sections, one entry per unit that reads or acts: the state row and the
  * living system (the journal, as it happens), the review throughput, the
  * operations, the review queue and its buttons, six charts, the two tables,
@@ -383,7 +383,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.hero",
     page: "/pipeline",
     anchor: ['class="hero compact"', "The pipeline, as it runs right now"],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "pipeline.state-row",
@@ -394,13 +394,13 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
       { path: "/api/v1/stats", fields: ["rings", "rings.2.ring", "rings.2.release.seq", "latest", "coverage", "version.version"] },
       { path: "/api/v1/status", fields: ["index.ok", "index.ms", "pool.ok", "pool.ms"] },
     ],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "pipeline.section-links",
     page: "/pipeline",
     anchor: ['id="live"', 'id="throughput"', 'href="/docs/governance"', 'href="/docs/factory"', 'href="/workers"', 'href="/review"', 'href="/status"', 'href="/factory"', 'href="/journal"'],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "pipeline.live-diagram",
@@ -411,7 +411,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
       { path: "/api/v1/stats", fields: ["series.imports_daily", "pool.objects", "rings.2.release.seq", "rings.2.release.created_at", "security.advisories"] },
       { path: `/api/v1/security?ring=stable&arch=${F.arch}`, fields: ["totals.packages", "totals.kev"] },
     ],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
     drawn: "live",
   },
   {
@@ -420,7 +420,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     anchor: ['class="ticker"', 'id="feed"'],
     script: ['"/api/v1/events?limit=12"', '$("#feed")', 'e.kind !== "metrics"', "e.payload.ci.run_url"],
     reads: [{ path: "/api/v1/events?limit=12", fields: ["events", "events.0.id", "events.0.kind", "events.0.status", "events.0.ring", "events.0.source", "events.0.summary", "events.0.created_at", "events.0.payload"] }],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "pipeline.counters",
@@ -431,7 +431,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
       { path: "/api/v1/stats", fields: ["series.imports_daily", "security.advisories", "audience", "events"] },
       { path: `/api/v1/security?ring=stable&arch=${F.arch}`, fields: ["totals.kev"] },
     ],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "pipeline.throughput-flow",
@@ -444,7 +444,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
       { path: "/api/v1/factory/approvals", fields: ["approvals", "approvals.0.decision", "approvals.0.created_at"] },
       { path: "/api/v1/factory/review", fields: ["staged", "staged.0.finished_at"] },
     ],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "pipeline.decisions-chart",
@@ -452,7 +452,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     anchor: ['id="c-decisions"'],
     script: ['$("#c-decisions")', 'name: "approved"', 'name: "sent back"', "a.created_at"],
     reads: [{ path: "/api/v1/factory/approvals", fields: ["approvals.0.decision", "approvals.0.created_at"] }],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "pipeline.arrivals-chart",
@@ -463,7 +463,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
       { path: "/api/v1/factory/packages", fields: ["packages.0.created_at", "packages.0.updated_at"] },
       { path: "/api/v1/factory/approvals", fields: ["approvals.0.decision", "approvals.0.created_at"] },
     ],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "pipeline.deciders",
@@ -471,7 +471,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     anchor: ['id="deciders"'],
     script: ['$("#deciders")', "by[a.by]", 'href="/user/', 'avatar(n, "maintainer")'],
     reads: [{ path: "/api/v1/factory/approvals", fields: ["approvals.0.by"] }],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "pipeline.queue-position",
@@ -482,7 +482,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
       { path: "/auth/me", as: "owner", fields: ["login"] },
       { path: "/api/v1/factory/review", fields: ["staged.0.owner", "staged.0.name", "staged.0.version", "staged.0.arch", "staged.0.finished_at", "staged.0.audit.status"] },
     ],
-    visible: ["contributor", "owner", "maintainer"],
+    visible: SIGNED_IN,
   },
   {
     id: "pipeline.operations-hint",
@@ -490,7 +490,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     anchor: ['id="operations"', 'id="ops-who"'],
     script: ['$("#ops-who")', 'ME_ROLE === "maintainer"', "you can approve, trust and roll back", "read-only — approving, trusting and rolling back need the maintainer role"],
     reads: [{ path: "/auth/me", as: "maintainer", fields: ["login", "role"] }],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "pipeline.operations-tiles",
@@ -502,7 +502,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
       { path: "/api/v1/factory/review", fields: ["staged", "staged.0.finished_at"] },
       { path: "/api/v1/stats", fields: ["metrics"] },
     ],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "pipeline.arch-diagram",
@@ -514,7 +514,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
       { path: "/api/v1/status", fields: ["index.ok", "index.ms", "pool.ok", "pool.ms"] },
       { path: "/api/v1/factory?limit=100", fields: ["counts", "workers.0.side", "workers.0.labels", "workers.0.trust", "workers.0.mode", "workers.0.alive", "workers.0.current_task"] },
     ],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
     drawn: "arch",
   },
   {
@@ -529,7 +529,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
       { path: `/api/v1/factory/tasks/${F.contributorTask}/artifacts/build.log`, json: false },
       { path: `/api/v1/factory/tasks/${F.contributorTask}/artifacts/PKGINFO`, json: false },
     ],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "pipeline.review-decision-buttons",
@@ -551,7 +551,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     anchor: ['id="c-jobs"'],
     script: ['$("#c-jobs")', "S.jobs_daily", 'r.status === "done"'],
     reads: [{ path: "/api/v1/stats", fields: ["series.jobs_daily", "series.jobs_daily.0.day", "series.jobs_daily.0.status", "series.jobs_daily.0.n"] }],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "pipeline.promotions-chart",
@@ -563,7 +563,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
       { path: "/api/v1/events?kind=rollback&limit=200", fields: ["events"] },
       { path: "/api/v1/events?kind=fast-track&limit=200", fields: ["events"] },
     ],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "pipeline.health-heatgrid",
@@ -571,7 +571,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     anchor: ['id="c-health"'],
     script: ['$("#c-health")', "heatGrid(S.health)"],
     reads: [{ path: "/api/v1/stats", fields: ["series.health"] }],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "pipeline.imports-chart",
@@ -579,7 +579,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     anchor: ['id="c-imports"'],
     script: ['$("#c-imports")', "S.imports_daily", "byDay[x].packages"],
     reads: [{ path: "/api/v1/stats", fields: ["series.imports_daily"] }],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "pipeline.sync-chart",
@@ -587,7 +587,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     anchor: ['id="c-sync"'],
     script: ['$("#c-sync")', "S.sync_runs", "r.bytes && r.duration_ms"],
     reads: [{ path: "/api/v1/stats", fields: ["series.sync_runs"] }],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "pipeline.builds-chart",
@@ -595,7 +595,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     anchor: ['id="c-builds"'],
     script: ['$("#c-builds")', "S.builds_daily", 'r.status === "staged"'],
     reads: [{ path: "/api/v1/stats", fields: ["series.builds_daily", "series.builds_daily.0.day", "series.builds_daily.0.status", "series.builds_daily.0.n"] }],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "pipeline.tasks-table",
@@ -607,7 +607,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
       { path: `/api/v1/factory/tasks/${F.contributorTask}/artifacts/build.log`, json: false },
       { path: `/api/v1/factory/tasks/${F.contributorTask}/artifacts/PKGBUILD`, json: false },
     ],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "pipeline.registry-table",
@@ -615,7 +615,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     anchor: ['id="registry"'],
     script: ['fetch("/api/v1/factory/packages")', 'pager("#registry"', "p.staged_builds", '"/request.json"', "det.latest_tag"],
     reads: [{ path: "/api/v1/factory/packages", fields: ["packages.0.name", "packages.0.request_id", "packages.0.project", "packages.0.url", "packages.0.owner", "packages.0.arches", "packages.0.release", "packages.0.license", "packages.0.status", "packages.0.staged_builds", "packages.0.detail", "packages.0.updated_at", "packages.0.category", "packages.0.detected"] }],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "pipeline.ring-heads",
@@ -623,14 +623,14 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     anchor: ['id="heads"'],
     script: ['$("#heads")', "rel.parent_id", 'href="/diff?ring=', "r.package_count", "x.is_head"],
     reads: [{ path: "/api/v1/stats", fields: ["rings.2.ring", "rings.2.release.id", "rings.2.release.seq", "rings.2.release.created_at", "rings.2.release.parent_id", "rings.2.package_count", "rings.2.bytes", "latest", "releases", "releases.0.ring", "releases.0.id", "releases.0.seq", "releases.0.is_head"] }],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "pipeline.rollback-action",
     page: "/pipeline",
     anchor: ['id="heads"', 'id="rb-state"'],
     script: ["data-rollback", 'API + "/jobs"', 'kind: "rollback"', '$("#rb-state")', '"Roll back"'],
-    // The page posts the release id as the button's attribute, a string. The fixture's one release is the head, so the job queued here points stable at what it already serves; no worker runs it — the route and the gate are what is proved.
+    // Queued, never run: no worker claims it in the tests, so what stable serves does not change. `to` is a string, as the button's attribute sends it.
     acts: [{ method: "POST", path: "/api/v1/factory/jobs", body: { kind: "rollback", params: { ring: "stable", to: String(F.previousRelease), note: "the fixture's rollback" } }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 201 } }],
     visible: ["maintainer"],
   },
@@ -640,7 +640,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     anchor: ['id="events"'],
     script: ['pager("#events"', "e.payload.release_id", "dur(e.duration_ms)", 'e.kind === "promote"'],
     reads: [{ path: "/api/v1/stats", fields: ["events", "events.0.status", "events.0.kind", "events.0.ring", "events.0.source", "events.0.summary", "events.0.payload", "events.0.duration_ms", "events.0.created_at"] }],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "pipeline.budget",
@@ -648,12 +648,12 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     anchor: ['id="budget"'],
     script: ['fetch("/api/v1/cost")', '$("#budget")', "c.month_to_date_usd", "c.projected_usd", "c.lines_usd.cap", "c.guard"],
     reads: [{ path: "/api/v1/cost", fields: ["month", "month_to_date_usd", "projected_usd", "status", "guard", "lines_usd.cap"] }],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "pipeline.sponsor",
     page: "/pipeline",
     anchor: ['class="sponsor"', "Help keep it running.", 'href="mailto:sponsor@firemanxbr.org"'],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
 ];

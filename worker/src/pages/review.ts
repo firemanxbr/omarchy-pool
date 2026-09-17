@@ -7,7 +7,7 @@
  * the project builds the recipe again from the evidence (docs/GOVERNANCE.md).
  */
 import { page } from "./layout";
-import type { Component, Fixture } from "./components";
+import { EVERYONE, SIGNED_IN, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 import { CATEGORIES } from "../categories";
 
@@ -325,11 +325,11 @@ export function reviewHtml(poolUrl: string, version: RunningVersion): string {
  * read is one of the page's four public lists (/factory/review,
  * /factory/approvals, /factory/blocks, /factory?limit=10) or what a session
  * unlocks (/auth/me, /factory/me); every act is a maintainer's — the
- * decisions on the fixture's staged builds, the category, the brake — and
- * the brake's acts land on rows the handler refuses (a maintainer, a pool
- * package, a login and a package nobody blocked) so nothing in the fixture
- * changes: the block that goes through and the lift by the other maintainer
- * wait for a fixture that seeds a blocked contributor and a blocked package.
+ * decisions on the fixture's staged builds, the category, the brake. The
+ * brake's form lands on rows the handler refuses (a maintainer, a pool
+ * package), so nothing is blocked by the tests; the two blocked tables lift
+ * what the fixture seeded — carol and her package, blocked by m1 — as m2,
+ * the other maintainer, once the reads that draw those rows have run.
  */
 export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
   {
@@ -341,7 +341,7 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
       { path: "/auth/me", status: 401 },
       { path: "/auth/me", as: "owner", fields: ["login", "role"] },
     ],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "review.tiles",
@@ -352,7 +352,7 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
       { path: "/api/v1/factory/review", fields: ["staged", "staged.0.kind", "staged.0.finished_at"] },
       { path: "/api/v1/factory/approvals", fields: ["approvals", "approvals.0.created_at", "approvals.0.decision"] },
     ],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "review.yours-head",
@@ -363,7 +363,7 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
       { path: "/auth/me", as: "owner", fields: ["login", "role"] },
       { path: "/auth/me", as: "maintainer", fields: ["login", "role"] },
     ],
-    visible: ["contributor", "owner", "maintainer"],
+    visible: SIGNED_IN,
   },
   {
     id: "review.yours-blocked",
@@ -387,7 +387,7 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     anchor: ['id="g-waiting"', 'id="mine-waiting"'],
     script: ['$("#mine-waiting")', '$("#g-waiting")', "t.project_build", "t.already.task", ">built again<", "t.audit.verdict"],
     reads: [{ path: "/api/v1/factory/review", fields: ["staged.0.id", "staged.0.owner", "staged.0.name", "staged.0.version", "staged.0.arch", "staged.0.kind", "staged.0.from", "staged.0.project_build", "staged.0.already", "staged.0.audit.status"] }],
-    visible: ["contributor", "owner", "maintainer"],
+    visible: SIGNED_IN,
   },
   {
     id: "review.yours-decided",
@@ -400,7 +400,7 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
       { path: "/api/v1/factory/me", as: "contributor", fields: ["contributor.login", "packages"] },
       { path: "/api/v1/factory/blocks", fields: ["packages", "packages.0.owner", "packages.0.name", "packages.0.blocked_at", "packages.0.blocked_by", "packages.0.blocked_reason"] },
     ],
-    visible: ["contributor", "owner", "maintainer"],
+    visible: SIGNED_IN,
   },
   {
     id: "review.queue-head",
@@ -408,7 +408,7 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     anchor: ['<section id="queue">', 'id="queue-note"'],
     script: ['$("#queue-note")', '" staged"', "of a version already approved"],
     reads: [{ path: "/api/v1/factory/review", fields: ["staged", "staged.0.already", "staged.0.owner", "staged.0.score.ready"] }],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "review.staged-table",
@@ -429,7 +429,7 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
       { path: `/api/v1/factory/tasks/${F.projectTask}/artifacts/audit.md`, json: false },
       { path: `/api/v1/factory/tasks/${F.projectTask}/artifacts/trial.log`, json: false },
     ],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "review.category-select",
@@ -438,7 +438,7 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     script: ["select[data-category]", 'data-category="', '"/packages/"', '"/category"', "CATEGORIES.map("],
     reads: [{ path: "/api/v1/factory/review", fields: ["staged.0.category", "staged.0.name"] }],
     acts: [{ method: "POST", path: `/api/v1/factory/packages/${F.factoryPkg}/category`, body: { category: CATEGORIES[0] }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 200 } }],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "review.decision-buttons",
@@ -489,7 +489,8 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     anchor: ['id="blocked-people"'],
     script: ['pager("#blocked-people"', 'data-unblock="contributors"', "b.blocked_by !== login"],
     reads: [{ path: "/api/v1/factory/blocks", fields: ["contributors", "contributors.0.login", "contributors.0.blocked_at", "contributors.0.blocked_by", "contributors.0.blocked_reason"] }],
-    acts: [{ method: "POST", path: `/api/v1/factory/contributors/${F.contributor}/unblock`, body: { reason: "lifted by the tests" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 409 } }],
+    // m2 lifts what m1 set; m1's own lift would be 403, and a login nobody blocked 409.
+    acts: [{ method: "POST", path: `/api/v1/factory/contributors/${F.blockedContributor}/unblock`, body: { reason: "lifted by the tests" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 200 } }],
     visible: ["maintainer"],
   },
   {
@@ -498,7 +499,7 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     anchor: ['id="blocked-packages"'],
     script: ['pager("#blocked-packages"', 'data-unblock="packages"', '"unblock"'],
     reads: [{ path: "/api/v1/factory/blocks", fields: ["packages", "packages.0.name", "packages.0.owner", "packages.0.blocked_at", "packages.0.blocked_by", "packages.0.blocked_reason"] }],
-    acts: [{ method: "POST", path: `/api/v1/factory/packages/${F.factoryPkg}/unblock`, body: { reason: "lifted by the tests" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 409 } }],
+    acts: [{ method: "POST", path: `/api/v1/factory/packages/${F.blockedPkg}/unblock`, body: { reason: "lifted by the tests" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 200 } }],
     visible: ["maintainer"],
   },
   {
@@ -507,7 +508,7 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     anchor: ['id="decisions"', "<h2>Decided lately</h2>", 'href="/journal"'],
     script: ['pager("#decisions"', "a.rebuild_task", "a.rebuild_status", "a.rebuild_result", "a.withdrawn_reason"],
     reads: [{ path: "/api/v1/factory/approvals", fields: ["approvals", "approvals.0.created_at", "approvals.0.name", "approvals.0.version", "approvals.0.arch", "approvals.0.task_id", "approvals.0.decision", "approvals.0.by", "approvals.0.note", "approvals.0.withdrawn_at", "approvals.0.withdrawn_by", "approvals.0.withdrawn_reason", "approvals.0.rebuild_task", "approvals.0.rebuild_status", "approvals.0.rebuild_result"] }],
-    visible: ["anonymous", "contributor", "owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "review.decide-dialogs",
