@@ -7,7 +7,9 @@
  * role what the manifest says. The other way round too: an endpoint a
  * page script fetches with nobody claiming it. Deleting the route, the
  * element or the field a component lives on fails here by name; the acorn
- * walk in pages.test.ts covers the script's own names.
+ * walk in pages.test.ts covers the script's own names. Every check is a
+ * soft assertion: one run names every component the broken thing was
+ * holding up, not the first.
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -62,22 +64,33 @@ describe("every component the pages declare", () => {
     for (const c of COMPONENTS) {
       const html = await served(c.page);
       const script = scriptOf(html);
-      for (const a of [c.anchor].flat()) expect(html, `${c.id}: anchor ${a} on ${c.page}`).toContain(a);
-      for (const s of c.script ?? []) expect(script, `${c.id}: script literal ${s} on ${c.page}`).toContain(s);
+      for (const a of [c.anchor].flat()) expect.soft(html, `${c.id}: anchor ${a} on ${c.page}`).toContain(a);
+      for (const s of c.script ?? []) expect.soft(script, `${c.id}: script literal ${s} on ${c.page}`).toContain(s);
     }
   });
+
+  /** The one body a missing route gives (index.ts); a routed read that has nothing to say says something else. */
+  const routed = (res: { status: number; text: string }): "routed" | "unrouted" => (res.status === 404 && /^\{"error":"not found"\}$/.test(res.text) ? "unrouted" : "routed");
 
   it("reads endpoints that are routed and answer JSON with the fields it draws", async () => {
     for (const c of COMPONENTS) {
       for (const r of c.reads ?? []) {
         const res = await call("GET", r.path, r.as);
-        expect(res.status, `${c.id}: GET ${r.path} as ${r.as ?? "anonymous"} → ${res.text.slice(0, 120)}`).toBe(r.status ?? 200);
+        if (routed(res) === "unrouted") {
+          expect.soft("unrouted", `${c.id}: GET ${r.path} is unrouted`).toBe("routed");
+          continue;
+        }
+        if (res.status !== (r.status ?? 200)) {
+          expect.soft(res.status, `${c.id}: GET ${r.path} as ${r.as ?? "anonymous"} → ${res.text.slice(0, 120)}`).toBe(r.status ?? 200);
+          continue;
+        }
         if (r.json === false) continue;
-        expect(res.type, `${c.id}: ${r.path} is not JSON`).toMatch(/^application\/json/);
+        if (!/^application\/json/.test(res.type)) {
+          expect.soft(res.type, `${c.id}: ${r.path} is not JSON`).toMatch(/^application\/json/);
+          continue;
+        }
         const body = JSON.parse(res.text);
-        // The one body a missing route gives (index.ts); a routed read that has nothing says something else.
-        expect(body.error, `${c.id}: ${r.path} is unrouted`).not.toBe("not found");
-        for (const f of r.fields ?? []) expect(at(body, f), `${c.id}: ${r.path} lacks ${f} in ${res.text.slice(0, 200)}`).not.toBeUndefined();
+        for (const f of r.fields ?? []) expect.soft(at(body, f), `${c.id}: ${r.path} lacks ${f} in ${res.text.slice(0, 200)}`).not.toBeUndefined();
       }
     }
   });
@@ -87,35 +100,33 @@ describe("every component the pages declare", () => {
       for (const a of c.acts ?? []) {
         // The route exists for this method: whatever it answers without a session, it is not the generic 404.
         const probe = await call(a.method, a.path);
-        expect(probe.status === 404 && /"not found"/.test(probe.text), `${c.id}: ${a.method} ${a.path} is unrouted`).toBe(false);
+        if (routed(probe) === "unrouted") {
+          expect.soft("unrouted", `${c.id}: ${a.method} ${a.path} is unrouted`).toBe("routed");
+          continue;
+        }
         // …and not for another method: the method is part of the route.
         const wrong = await call("PATCH", a.path, "maintainer");
-        expect(wrong.status, `${c.id}: PATCH ${a.path} should be 404`).toBe(404);
+        expect.soft(wrong.status, `${c.id}: PATCH ${a.path} should be 404`).toBe(404);
         for (const [role, want] of Object.entries(a.expect) as [Role, number | number[]][]) {
           const res = await call(a.method, a.path, role, a.body ?? {});
-          expect([want].flat(), `${c.id}: ${a.method} ${a.path} as ${role} → ${res.status} ${res.text.slice(0, 120)}`).toContain(res.status);
+          expect.soft([want].flat(), `${c.id}: ${a.method} ${a.path} as ${role} → ${res.status} ${res.text.slice(0, 120)}`).toContain(res.status);
         }
       }
     }
   });
 
   it("declares every endpoint the page scripts fetch", async () => {
-    // The pages whose manifest holds the shell's entries or the worked examples only, while the rest of their
-    // components are being written: the reverse check waits for them. A page leaves this list with its complete
-    // manifest, and the list goes when every page has declared.
-    const PARTIAL = new Set(["/", `/package/${F.pkg}`, "/workers", "/review"]);
     // Drift the other way: a fetch("/api/v1/…") in a page with no component claiming it. The claimed paths are
     // compared without their query and with the fixture's ids and names replaced, so a script's prefix matches.
-    const bound = new RegExp(`/(${[F.pkg, F.pkg2, F.contributor, F.owner, F.m1, F.m2, F.factoryPkg, F.worker, F.communityWorker].join("|")})(/|$)`, "g");
+    const bound = new RegExp(`/(${[F.pkg, F.pkg2, F.contributor, F.owner, F.m1, F.m2, F.blockedContributor, F.factoryPkg, F.publishedPkg, F.blockedPkg, F.worker, F.communityWorker].join("|")})(/|$)`, "g");
     const claimed = new Set(
       COMPONENTS.flatMap((c) => [...(c.reads ?? []).map((r) => r.path.split("?")[0]), ...(c.acts ?? []).map((a) => a.path)]).map((p) => p.replace(/\/\d+(\/|$)/g, "/N$1").replace(bound, "/X$2")),
     );
     for (const page of new Set(COMPONENTS.map((c) => c.page))) {
-      if (PARTIAL.has(page)) continue;
       const script = scriptOf(await served(page));
       for (const m of script.matchAll(/"(\/api\/v1\/[a-z0-9/_-]+|\/auth\/me)/g)) {
         const hit = [...claimed].some((p) => p.startsWith(m[1].replace(/\/$/, "")));
-        expect(hit, `${page}: the script fetches ${m[1]} and no component declares it`).toBe(true);
+        expect.soft(hit, `${page}: the script fetches ${m[1]} and no component declares it`).toBe(true);
       }
     }
   });

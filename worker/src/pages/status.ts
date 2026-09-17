@@ -236,5 +236,208 @@ export function statusHtml(poolUrl: string, version: RunningVersion): string {
   });
 }
 
-/** What /status is made of, for test/components.test.ts — see components.ts. */
-export const STATUS_COMPONENTS = (_F: Fixture): Component[] => [];
+/**
+ * What /status is made of, for test/components.test.ts — see components.ts.
+ * Everything here reads /api/v1/stats but the service check (/api/v1/status)
+ * and the bill (/api/v1/cost); nothing changes with the role, and the page
+ * has no action of its own — the pagers' filter and page size are the
+ * shell's. renderSystem, renderProvenance, renderAny and renderCoverage are
+ * also shipped inside CHARTS, so a literal from them is matched twice.
+ */
+export const STATUS_COMPONENTS = (_F: Fixture): Component[] => [
+  {
+    id: "status.hero",
+    page: "/status",
+    anchor: ["<h1>Is it up, is it keeping up, is every ring healthy</h1>", 'id="headline"'],
+    script: ['"#headline"', "problemsOf(d)", "Pipeline keeping up.", "liveStats(render, 60000)"],
+    reads: [{ path: "/api/v1/stats", fields: ["latest", "latest.0.kind", "latest.0.status", "latest.0.created_at", "latest.0.ring", "latest.0.source", "coverage.0.last_sync"] }],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "status.service",
+    page: "/status",
+    anchor: ["<h2>Service</h2>", 'id="service"'],
+    script: ['"/api/v1/status"', '"#service"', "s.index.ok", "s.pool.ok", "s.signing", "setInterval(renderService, 60000)"],
+    reads: [{ path: "/api/v1/status", fields: ["checked_at", "index.ok", "index.ms", "pool.ok", "pool.ms", "signing"] }],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "status.pipeline-pill",
+    page: "/status",
+    anchor: ['id="pipeline-state"'],
+    script: ['"#pipeline-state"', "pipelineFrom(d)"],
+    reads: [{ path: "/api/v1/stats", fields: ["latest.0.kind", "latest.0.status", "latest.0.created_at", "coverage.0.last_sync"] }],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "status.pipeline-tiles",
+    page: "/status",
+    anchor: ['id="tiles"'],
+    script: ['"#tiles"', '"Stable"', '"Last sync"', '"Incidents"', "stable.release.seq"],
+    reads: [{ path: "/api/v1/stats", fields: ["rings.2.ring", "rings.2.release.seq", "rings.2.release.created_at", "latest.0.kind", "latest.0.created_at", "latest.0.summary", "events", "events.0.kind", "events.0.status"] }],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "status.rings-table",
+    page: "/status",
+    anchor: ['id="rings"', "<th>Health</th>", "<th>Databases</th>"],
+    script: ['"#rings tbody"', 'latest(d.latest, "health", ring, arch)', 'a.kind === "db"', "r.sources", "no rings yet"],
+    reads: [
+      {
+        path: "/api/v1/stats",
+        fields: [
+          "rings.2.ring", "rings.2.release.seq", "rings.2.release.created_at", "rings.2.sources.0.arch",
+          "rings.2.artifacts.0.kind", "rings.2.artifacts.0.arch", "rings.2.artifacts.0.repo",
+          "latest.0.kind", "latest.0.status", "latest.0.created_at", "latest.0.ring", "latest.0.source",
+        ],
+      },
+    ],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "status.sources-table",
+    page: "/status",
+    anchor: ['id="sources"', "<th>Last sync</th>", "<th>Result</th>"],
+    script: ['"#sources tbody"', "c.last_sync", "isLate", '<span class="pill warn">late</span>'],
+    reads: [{ path: "/api/v1/stats", fields: ["coverage", "coverage.0.source", "coverage.0.arch", "coverage.0.last_sync", "coverage.0.last_status", "coverage.0.upstream_total", "coverage.0.indexed", "coverage.0.missing"] }],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "status.coverage-table",
+    page: "/status",
+    anchor: ['id="coverage"', '<th class="num">In stable</th>', "<th>Progress</th>"],
+    script: ['pager("#coverage"', "c.pinned_stable", "c.upstream_total", "not synced yet"],
+    reads: [
+      {
+        path: "/api/v1/stats",
+        fields: ["coverage.0.source", "coverage.0.arch", "coverage.0.upstream", "coverage.0.upstream_total", "coverage.0.indexed", "coverage.0.missing", "coverage.0.pinned_stable", "coverage.0.bytes", "coverage.0.last_sync", "coverage.0.last_status"],
+      },
+    ],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "status.provenance-note",
+    page: "/status",
+    anchor: ['id="provenance" hidden'],
+    script: ['"#provenance"', "d.provenance && d.provenance.stable", "pv.aur", "pv.unknown"],
+    reads: [{ path: "/api/v1/stats", fields: ["provenance.stable.packages", "provenance.stable.local", "provenance.stable.aur", "provenance.stable.unknown"] }],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "status.any-note",
+    page: "/status",
+    anchor: ['id="any" hidden'],
+    script: ['"#any"', "d.any && d.any.stable", "a.twice", "a.extra_bytes"],
+    reads: [{ path: "/api/v1/stats", fields: ["any.stable.names", "any.stable.objects", "any.stable.bytes", "any.stable.twice", "any.stable.extra_bytes"] }],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "status.numbers-heading",
+    page: "/status",
+    anchor: ["<h2>The pipeline, in numbers</h2>", '<a class="more-link" href="/pipeline">Watch it run →</a>'],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "status.system-tiles",
+    page: "/status",
+    anchor: ['id="systiles"'],
+    script: ['"#systiles"', "m.jobs || m.actions", '"Jobs running now"', '"Promotion, by evidence"', 'latest(d.latest, "gate", "rc", "edge")', "pool.referenced_by_any_release", "pool.reclaimable", "sec.updated_at"],
+    reads: [
+      {
+        path: "/api/v1/stats",
+        fields: [
+          "metrics.recorded_at", "metrics.jobs.running", "metrics.jobs.runs", "metrics.jobs.failures", "metrics.jobs.minutes", "metrics.workers.alive", "metrics.workers.busy",
+          "pool.objects", "pool.bytes", "pool.referenced_by_any_release.objects", "pool.reclaimable.objects", "pool.reclaimable.bytes",
+          "rings.0.bytes", "coverage.0.upstream_total", "latest.0.kind", "latest.0.status", "latest.0.created_at",
+          "security.updated_at", "security.advisories",
+        ],
+      },
+    ],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "status.bill-tile",
+    page: "/status",
+    anchor: ['id="systiles"'],
+    script: ['"/api/v1/cost"', '"Estimated bill"', "c.projected_usd", "c.month_to_date_usd", "c.estimated_at", "c.guard", "over budget: writing jobs paused"],
+    reads: [{ path: "/api/v1/cost", fields: ["status", "projected_usd", "month", "month_to_date_usd", "estimated_at", "guard"] }],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "status.chart-pool",
+    page: "/status",
+    anchor: ['id="c-pool"', "<h3>Pool growth <span>7 days</span></h3>"],
+    script: ['"#c-pool"', "S.metrics", "r.bytes", "objects now"],
+    reads: [{ path: "/api/v1/stats", fields: ["series.metrics", "series.metrics.0.created_at", "series.metrics.0.bytes", "series.metrics.0.objects"] }],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "status.chart-imports",
+    page: "/status",
+    anchor: ['id="c-imports"', "<h3>Imports per day <span>14 days</span></h3>"],
+    script: ['"#c-imports"', "S.imports_daily", "r.packages", "r.runs"],
+    reads: [{ path: "/api/v1/stats", fields: ["series.imports_daily", "series.imports_daily.0.day", "series.imports_daily.0.packages", "series.imports_daily.0.bytes", "series.imports_daily.0.runs"] }],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "status.chart-health",
+    page: "/status",
+    anchor: ['id="c-health"', "<h3>Health <span>14 days</span></h3>"],
+    script: ['"#c-health"', "S.health", "h.ring", "h.arch", "worst(cells[k], h.status)"],
+    reads: [{ path: "/api/v1/stats", fields: ["series.health", "series.health.0.ring", "series.health.0.arch", "series.health.0.created_at", "series.health.0.status"] }],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "status.chart-sync",
+    page: "/status",
+    anchor: ['id="c-sync"', "<h3>Sync throughput <span>last runs</span></h3>"],
+    script: ['"#c-sync"', "S.sync_runs", "r.duration_ms", "r.uploaded", "r.concurrency"],
+    reads: [
+      {
+        path: "/api/v1/stats",
+        fields: ["series.sync_runs", "series.sync_runs.0.source", "series.sync_runs.0.arch", "series.sync_runs.0.status", "series.sync_runs.0.bytes", "series.sync_runs.0.duration_ms", "series.sync_runs.0.uploaded", "series.sync_runs.0.concurrency", "series.sync_runs.0.created_at"],
+      },
+    ],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "status.chart-minutes",
+    page: "/status",
+    anchor: ['id="c-minutes"', "<h3>Worker minutes <span>per day</span></h3>"],
+    script: ['"#c-minutes"', "S.jobs_daily", "byD[r.day]", "r.ms / 60000", '" min"'],
+    reads: [{ path: "/api/v1/stats", fields: ["series.jobs_daily", "series.jobs_daily.0.day", "series.jobs_daily.0.status", "series.jobs_daily.0.n", "series.jobs_daily.0.ms"] }],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "status.chart-jobs",
+    page: "/status",
+    anchor: ['id="c-jobs"', "<h3>Pool jobs <span>7 days</span></h3>"],
+    script: ['"#c-jobs"', "hbars(", "byKind[r.kind]", 'r.status === "done"', "queued / running"],
+    reads: [{ path: "/api/v1/stats", fields: ["series.jobs_daily.0.kind", "series.jobs_daily.0.status", "series.jobs_daily.0.n", "series.jobs_daily.0.ms"] }],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "status.chart-builds",
+    page: "/status",
+    anchor: ['id="c-builds"', "<h3>Factory builds <span>14 days</span></h3>"],
+    script: ['"#c-builds"', "S.builds_daily", 'r.status === "staged"', "d.published", '" build(s)"'],
+    reads: [{ path: "/api/v1/stats", fields: ["series.builds_daily", "series.builds_daily.0.day", "series.builds_daily.0.status", "series.builds_daily.0.n"] }],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "status.workflows-table",
+    page: "/status",
+    anchor: ['id="workflows"', "<th>Job</th>", '<th class="num">Runs 7d</th>'],
+    script: ['pager("#workflows"', "e.kind === k", "w.running", "w.minutes", "no jobs yet"],
+    reads: [{ path: "/api/v1/stats", fields: ["series.jobs_daily.0.kind", "series.jobs_daily.0.status", "series.jobs_daily.0.n", "series.jobs_daily.0.ms", "latest.0.kind", "latest.0.status", "latest.0.created_at"] }],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "status.incidents-table",
+    page: "/status",
+    anchor: ["<h2>Incidents</h2>", 'id="incidents"'],
+    script: ['"#incidents tbody"', 'e.kind === "rollback"', 'e.payload.verdict === "block"', "e.summary", "none in the last 40 journal entries"],
+    reads: [{ path: "/api/v1/stats", fields: ["events", "events.0.kind", "events.0.status", "events.0.ring", "events.0.summary", "events.0.created_at", "events.0.payload"] }],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+];

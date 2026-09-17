@@ -5,7 +5,7 @@
  * running the project's work.
  */
 import { page } from "./layout";
-import type { Component, Fixture } from "./components";
+import type { Component, Fixture, Role } from "./components";
 import type { RunningVersion } from "../meta";
 import { DASHBOARD_HOST, REPO_URL } from "../meta";
 
@@ -182,5 +182,255 @@ export function docsWorkersHtml(poolUrl: string, version: RunningVersion): strin
   });
 }
 
-/** What /docs/workers is made of, for test/components.test.ts — see components.ts. */
-export const DOCS_WORKERS_COMPONENTS = (_F: Fixture): Component[] => [];
+/**
+ * What /docs/workers is made of, for test/components.test.ts — see
+ * components.ts. A chapter is prose: every section, table and step card
+ * gets its anchor and nothing changes with the role. Three things reach
+ * past the page and are checked as such: the one command the contributor
+ * step tells the reader to curl is served by the Worker, with the compose
+ * file beside it; the trust call the maintainer section names is routed
+ * and a maintainer's alone (asked for the trust the project's worker
+ * already has, so the fixture stays as it was); and the docs search
+ * carries this chapter's map. The header and the footer are the shell's
+ * entries. The "Screenshot to add" box in step 4 is an authoring note,
+ * not a component: it has no anchor here, so removing it breaks nothing.
+ */
+const EVERYONE: Role[] = ["anonymous", "contributor", "owner", "maintainer"];
+
+export const DOCS_WORKERS_COMPONENTS = (F: Fixture): Component[] => [
+  {
+    id: "docs-workers.docs-sidebar",
+    page: "/docs/workers",
+    anchor: [
+      '<a class="docs-home" href="/docs">Documentation</a>',
+      '<nav class="docs-nav" id="docs-nav" aria-label="Chapters">',
+      '<details open><summary><a href="/docs/workers" class="on">Run a worker</a><small>8</small></summary>',
+      'href="/docs/workers#registration"', 'href="/docs/workers#roles"', 'href="/docs/workers#before"', 'href="/docs/workers#contributor"',
+      'href="/docs/workers#project"', 'href="/docs/workers#claude-code"', 'href="/docs/workers#secrets"', 'href="/docs/workers#running"',
+      '<div class="docs-group">For people working on the pool</div>',
+      '<div class="docs-hint">',
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "docs-workers.docs-search",
+    page: "/docs/workers",
+    anchor: ['<input type="search" id="docs-q"', '<div class="docs-hits" id="docs-hits" hidden>'],
+    script: [
+      'var q = $("#docs-q"), hits = $("#docs-hits"), nav = $("#docs-nav")',
+      'c.secs.forEach(function (s)',
+      '"/docs/glossary#" + g[2]',
+      '"href":"/docs/workers","secs":[{"id":"registration","title":"What the registration decides"',
+      'nothing in the docs says',
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "docs-workers.title-lede",
+    page: "/docs/workers",
+    anchor: ["<h1>Run a worker</h1>", '<p class="lede">', `<code>${IMG}</code>`, "<b>registration behind the token</b>"],
+    visible: EVERYONE,
+  },
+  {
+    id: "docs-workers.registration-table",
+    page: "/docs/workers",
+    anchor: [
+      '<section id="registration">', "<h2>What the registration decides</h2>",
+      "<th>Your registration</th><th>What the container does</th><th>What it needs</th>",
+      "<td><b>community</b> trust", "<td><b>project</b> trust", "<code>WORKER_SHARED=1</code>",
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "docs-workers.tags-and-cosign",
+    page: "/docs/workers",
+    anchor: [
+      "<code>latest</code> is a multi-architecture manifest", "<code>x86_64</code> and <code>aarch64</code> pin one",
+      `<pre>cosign verify ${IMG}:latest`, "--certificate-oidc-issuer https://token.actions.githubusercontent.com",
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "docs-workers.roles-table",
+    page: "/docs/workers",
+    anchor: [
+      '<section id="roles">', "<h2>The three roles</h2>", "<code>OMARCHY_WORKER_ROLE</code>",
+      "<th>Role</th><th>Registration</th><th>What it does</th><th>Agent key</th>",
+      "<td><b>pool</b></td><td>project trust</td>", "<td><b>review</b></td><td>project trust</td>", "<td><b>community</b></td><td>community registration</td>",
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "docs-workers.before-steps",
+    page: "/docs/workers",
+    anchor: [
+      '<section id="before">', "<h2>Before you start</h2>",
+      "<h3>A container runtime</h3>", 'href="https://podman-desktop.io/"',
+      "<h3>Which architecture you build</h3>", "the image refuses a mismatch",
+      "<h3>An account, a worker registration</h3>", "Revoke it on the same page",
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "docs-workers.contributor-start",
+    page: "/docs/workers",
+    anchor: [
+      '<section id="contributor">', "<h2>As a contributor: your own packages</h2>", "<h3>1. Start it</h3>",
+      `<pre>curl -fsSLo omarchy-worker https://${DASHBOARD_HOST}/omarchy-worker &amp;&amp; chmod +x omarchy-worker`,
+      "./omarchy-worker start --token &lt;omw_…&gt; --github-token",
+      `href="${REPO_URL}/blob/main/factory/image/compose.yml"`, "<code>/omarchy-worker/compose.yml</code>",
+      "COMPOSE_PROFILES=community", "docker compose up -d",
+      'href="https://github.com/settings/personal-access-tokens/new"', 'href="#secrets"', "<code>stop_grace_period: 3h</code>",
+    ],
+    reads: [
+      { path: "/omarchy-worker", json: false },
+      { path: "/omarchy-worker/compose.yml", json: false },
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "docs-workers.contributor-work",
+    page: "/docs/workers",
+    anchor: ["<h3>2. Give it work</h3>", '<a href="/request">Request a package</a>', "press <b>Build</b> on your page", '<a href="/review">Review</a>'],
+    visible: EVERYONE,
+  },
+  {
+    id: "docs-workers.contributor-share-agent",
+    page: "/docs/workers",
+    anchor: [
+      "<h3>3. Donate the machine, bring your agent</h3>", "<b>Share</b> / <b>Own only</b> on your page",
+      "./omarchy-worker start --shared", "./omarchy-worker share on | off",
+      "./omarchy-worker start --anthropic-key sk-… --model claude-sonnet-5", "ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, XAI_API_KEY, FACTORY_MODEL",
+      "./omarchy-worker start --claude-token …", "CLAUDE_CODE_OAUTH_TOKEN",
+      'the <a href="/request">request page</a>', "the best idle shared worker of the architecture",
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "docs-workers.contributor-watch",
+    page: "/docs/workers",
+    anchor: ["<h3>4. Watch it</h3>", "<code>./omarchy-worker status</code>", "<code>./omarchy-worker logs</code>", 'the log icon beside its id on the <a href="/workers">Workers</a> page'],
+    visible: EVERYONE,
+  },
+  {
+    id: "docs-workers.project-intro",
+    page: "/docs/workers",
+    anchor: [
+      '<section id="project">', "<h2>As a maintainer: the pool's jobs and approved rebuilds</h2>",
+      "<code>POST /api/v1/factory/workers/&lt;id&gt;/trust</code>", "the <b>same path</b> on your machine and inside the container",
+    ],
+    acts: [
+      { method: "POST", path: `/api/v1/factory/workers/${F.worker}/trust`, body: { trust: "project" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 200 } },
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "docs-workers.project-command",
+    page: "/docs/workers",
+    anchor: ["<h3>0. One command</h3>", "<pre>./omarchy-worker start --token &lt;omw_…&gt; --project --role review", "--work-dir for the working directory"],
+    visible: EVERYONE,
+  },
+  {
+    id: "docs-workers.project-docker",
+    page: "/docs/workers",
+    anchor: [
+      "<h3>1. Docker Desktop, by hand</h3>", 'href="#update"',
+      "docker run -d --name omarchy-worker --restart unless-stopped", "-v /var/run/docker.sock:/var/run/docker.sock",
+      '-e OMARCHY_WORK_DIR="$HOME/omarchy-worker"', "-e OMARCHY_WORKER_TOKEN=&lt;omw_…&gt;", `${IMG}:latest --labels '{"where":"my-machine"}'`,
+      "On Windows, use a path Docker Desktop shares",
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "docs-workers.project-podman",
+    page: "/docs/workers",
+    anchor: [
+      "<h3>2. Podman</h3>", "systemctl --user enable --now podman.socket",
+      "podman run -d --name omarchy-worker --restart unless-stopped --security-opt label=disable",
+      "-v /run/user/$UID/podman/podman.sock:/var/run/docker.sock", "-v /run/podman/podman.sock:/var/run/docker.sock",
+      "<code>--security-opt label=disable</code> lets the container use the socket on SELinux hosts", "<em>operation not supported</em>",
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "docs-workers.project-binary",
+    page: "/docs/workers",
+    anchor: ["<h3>3. Or without a container</h3>", `href="${REPO_URL}/releases/latest"`, "<code>pkg-repo work --worker-token omw_… --arch aarch64</code>", "the pool refuses it 45 minutes after the next one is deployed"],
+    visible: EVERYONE,
+  },
+  {
+    id: "docs-workers.project-options",
+    page: "/docs/workers",
+    anchor: [
+      "<h3>4. Options</h3>", "<code>pkg-repo work</code>",
+      "<pre>--kind build --kind health", "--idle-exit 300", "--once", `--labels '{"where":"…"}'`,
+      'CPU, memory and the work directory\'s disk', '<a href="/workers">the Workers page</a>', "A project worker never builds a contributor's package",
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "docs-workers.project-second-agent",
+    page: "/docs/workers",
+    anchor: ["<h3>5. The second agent</h3>", '<a href="#claude-code">below</a>', "<code>-e FACTORY_MODEL=…</code>", '<a href="/docs/what-we-test">What we test</a>', "<em>waiting</em>"],
+    visible: EVERYONE,
+  },
+  {
+    id: "docs-workers.claude-code-intro",
+    page: "/docs/workers",
+    anchor: ['<section id="claude-code">', "<h2>A Claude subscription as the agent</h2>", "<b>Claude Code in print mode</b>", "<code>claude -p</code>"],
+    visible: EVERYONE,
+  },
+  {
+    id: "docs-workers.claude-code-token",
+    page: "/docs/workers",
+    anchor: ["<h3>1. A token, on your machine</h3>", "<pre>claude setup-token</pre>", "<code>sk-ant-oat01-…</code>", "keep it like a password"],
+    visible: EVERYONE,
+  },
+  {
+    id: "docs-workers.claude-code-give",
+    page: "/docs/workers",
+    anchor: [
+      "<h3>2. Give it to the worker</h3>",
+      "podman run -d --name omarchy-broker --restart unless-stopped --network omarchy-worker", "-e OMARCHY_WORKER_ROLE=broker", "-e CLAUDE_CODE_OAUTH_TOKEN=&lt;sk-ant-oat01-…&gt;",
+      "CLAUDE_CODE_OAUTH_TOKEN=… OMARCHY_WORKER_TOKEN=… podman compose up -d", "FACTORY_PROVIDER=claude-code",
+      "<code>claude-code/claude-sonnet-5</code>", "<code>FACTORY_REASONING=low</code>", "<code>CLAUDE_CODE_BIN</code>",
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "docs-workers.claude-code-exactly",
+    page: "/docs/workers",
+    anchor: ["<h3>3. What it does, exactly</h3>", '<code>claude -p --tools "" --max-turns 1 --no-session-persistence --output-format json --model … --system-prompt …</code>', "an <code>ANTHROPIC_API_KEY</code> in the same environment is withheld from it"],
+    visible: EVERYONE,
+  },
+  {
+    id: "docs-workers.claude-code-cost",
+    page: "/docs/workers",
+    anchor: ["<h3>4. What it costs, and whose rules</h3>", "<em>You've hit your limit</em>", "the pool retries an audit three times", "read their consumer terms on automated and shared use"],
+    visible: EVERYONE,
+  },
+  {
+    id: "docs-workers.secrets",
+    page: "/docs/workers",
+    anchor: [
+      '<section id="secrets">', "<h2>What a build can see</h2>", "<b>the build sees nothing the log cannot show.</b>",
+      "<h3>What the broker holds, and the builder does not</h3>", "<code>OMARCHY_BROKER</code> and a label",
+      "<h3>What the pool checks anyway</h3>", "the build fails with the kind and the line (never the match)",
+      "<h3>What you decide</h3>", "Keep <code>WORKER_SHARED</code> off",
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "docs-workers.running",
+    page: "/docs/workers",
+    anchor: [
+      '<section id="running">', "<h2>Keeping it running</h2>",
+      '<div class="step" id="update"><h3>Update — every worker follows the latest image</h3>', "refused at the claim (<code>426</code>)", '<span class="pill warn">outdated</span>',
+      "<code>OMARCHY_WORKER_ROLE=updater</code>", "<code>omarchy-worker update</code> runs one round now", "<code>factory/host/rollout.sh</code>",
+      "<h3>Stop, remove, revoke</h3>", "<code>./omarchy-worker remove</code>",
+      "<h3>Disk</h3>", "<code>docker system prune</code> / <code>podman system prune</code>",
+      "<h3>Something is off</h3>", "<em>the pool did not accept this token</em>", "<em>registered for aarch64 but this machine is x86_64</em>", "<em>mount its socket</em>",
+    ],
+    visible: EVERYONE,
+  },
+];

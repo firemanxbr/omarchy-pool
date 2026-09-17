@@ -9,7 +9,7 @@
  * Review. A pool job (sync, health, …) gets the same page, shorter.
  */
 import { page } from "./layout";
-import type { Component, Fixture } from "./components";
+import type { Component, Fixture, Role } from "./components";
 import type { RunningVersion } from "../meta";
 
 const BODY = String.raw`
@@ -262,5 +262,286 @@ export function buildHtml(id: number, poolUrl: string, version: RunningVersion):
   });
 }
 
-/** What /build/<id> is made of, for test/components.test.ts — see components.ts. */
-export const BUILD_COMPONENTS = (_F: Fixture): Component[] => [];
+/**
+ * What /build/<id> is made of, for test/components.test.ts — see
+ * components.ts. One read feeds nearly the whole page, GET
+ * /api/v1/factory/tasks/<id>, so each part names the fields of it that it
+ * draws; the evidence panels read one file each. The page is the project's
+ * build (F.projectTask) — staged, audited, tried, approved — so the head,
+ * the timeline, the chain and every evidence file have something to show;
+ * the branches a contributor's build draws are read on F.contributorTask.
+ * The decision block's acts go where its buttons post: the role gates on
+ * this build, where nobody but a maintainer gets through and nothing
+ * changes; the decisions on the rows the fixture made for deciding; the
+ * withdrawal last, because it is the one act that changes what every
+ * manifest after this one finds — the approval is void from there on.
+ */
+export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
+  const page = `/build/${F.projectTask}`;
+  const task = `/api/v1/factory/tasks/${F.projectTask}`;
+  const pkg = `${task}/artifacts/${F.factoryPkg}-1.0-1-${F.arch}.pkg.tar.zst`;
+  const everyone: Role[] = ["anonymous", "contributor", "owner", "maintainer"];
+  return [
+    {
+      id: "build.crumbs",
+      page,
+      anchor: ['<a href="/review">Review</a>', 'id="crumb"'],
+      script: ['"#crumb"', '"#" + t.id'],
+      reads: [{ path: task, fields: ["task.kind", "task.name", "task.id"] }],
+      visible: everyone,
+    },
+    {
+      id: "build.title",
+      page,
+      anchor: ['id="title"'],
+      script: ['"#title"', "document.title", '<a href="/package/', "T.rings[0]"],
+      reads: [{ path: task, fields: ["task.kind", "task.name", "task.version", "task.id", "task.arch", "rings"] }],
+      visible: everyone,
+    },
+    {
+      id: "build.badges",
+      page,
+      anchor: ['id="badges"'],
+      script: ['"#badges"', "statusPill(t.status)", "sc.ready", '"ready for a maintainer"', '"not ready"'],
+      reads: [{ path: task, fields: ["task.arch", "task.status", "task.kind", "task.trust", "score.ready"] }],
+      visible: everyone,
+    },
+    {
+      id: "build.lede",
+      page,
+      anchor: ['id="lede"'],
+      script: ['"#lede"', "T.worker.owner", "T.from.owner", "T.approval.withdrawn_at", "t.lease_owner"],
+      reads: [
+        {
+          path: task,
+          fields: ["task.kind", "task.trust", "task.name", "task.version", "task.arch", "task.owner", "task.status", "task.finished_at", "task.lease_owner", "task.params", "worker.id", "worker.owner", "from.id", "from.owner", "approval.decision", "approval.withdrawn_at"],
+        },
+      ],
+      visible: everyone,
+    },
+    {
+      id: "build.tiles",
+      page,
+      anchor: ['id="tiles"', 'class="tiles six"'],
+      script: ['skeletonTiles("#tiles", 6)', 'setTiles("#tiles"', '"Gate"', '"Audit"', '"Trial"', '"Decision"', '"Class"', '"In the rings"', "vet.verdict", "sc.projected", "T.task.result.vet"],
+      reads: [
+        {
+          path: task,
+          fields: [
+            "task.result.vet.verdict", "task.result.vet.fails", "task.result.vet.warnings",
+            "audit.0.status", "audit.0.result.verdict", "audit.0.result.findings", "audit.0.result.model",
+            "trial.0.status", "trial.0.result.verdict",
+            "approval.decision", "approval.by", "approval.created_at", "approval.withdrawn_at", "approval.withdrawn_by",
+            "score.class", "score.points", "score.max", "score.projected", "rings",
+            "task.status", "task.error", "task.finished_at", "task.duration_ms", "task.attempts", "task.max_attempts", "task.priority", "task.created_at", "task.reason",
+          ],
+        },
+        // A failed build keeps no verdict on its row: the tile reads the file the worker staged.
+        { path: `${task}/artifacts/vet.json`, json: false },
+      ],
+      visible: everyone,
+    },
+    {
+      id: "build.actions",
+      page,
+      anchor: ['id="acts"', 'id="state"'],
+      script: [
+        '"#acts"', '"#state"', 'WHO.role === "maintainer"', 'API + "/me"',
+        'data-do="approve"', 'data-do="reject"', 'data-do="build"', 'data-do="withdraw"',
+        '"/api/v1/factory?limit=10"', "whereOptions(ws, t.arch, login, true)", 'API + "/tasks/" + ID + "/" + what',
+        "T.project_builds[0]", "d.publish", "d.task", "d.rings",
+      ],
+      reads: [
+        // Who is reading: the cookie's session, or a CLI token when the cookie says nobody.
+        { path: "/auth/me", as: "maintainer", fields: ["login", "role"] },
+        { path: "/api/v1/factory/me", as: "owner", fields: ["contributor.login", "contributor.role"] },
+        // The project's build: a standing approval draws "Withdraw the approval".
+        { path: task, fields: ["task.kind", "task.status", "task.owner", "task.trust", "approval.decision", "approval.by", "approval.created_at", "approval.withdrawn_at", "score.ready", "project_builds"] },
+        // A contributor's build: the project's build of it is what gets approved.
+        { path: `/api/v1/factory/tasks/${F.contributorTask}`, fields: ["task.trust", "task.status", "task.owner", "score.ready", "project_builds.0.id", "project_builds.0.status", "project_builds.0.error"] },
+        // The workers the "Build by the project" dialog offers.
+        {
+          path: "/api/v1/factory?limit=10",
+          fields: ["workers", "workers.0.id", "workers.0.arch", "workers.0.revoked_at", "workers.0.side", "workers.0.kinds", "workers.0.owner", "workers.0.mode", "workers.0.alive", "workers.0.agent", "workers.0.agent_status", "workers.0.current_task", "workers.0.labels", "workers.0.update"],
+        },
+      ],
+      acts: [
+        { method: "POST", path: `${task}/approve`, body: { note: "reads well" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: [200, 409] } },
+        // The gates of a rejection on this build: nobody but a maintainer is let through, so it stays as it is.
+        { method: "POST", path: `${task}/reject`, body: { note: "the source is not the upstream's" }, expect: { anonymous: 401, contributor: 403, owner: 403 } },
+        // The rejection itself, on the row made for it; 409 once another page's manifest rejected it first.
+        { method: "POST", path: `/api/v1/factory/tasks/${F.disposableTask}/reject`, body: { note: "the source is not the upstream's" }, expect: { maintainer: [200, 409] } },
+        { method: "POST", path: `/api/v1/factory/tasks/${F.stagedTask}/build`, body: {}, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: [200, 409] } },
+        // Void from here on: 404 once a manifest before this one took it back.
+        { method: "POST", path: `${task}/withdraw`, body: { note: "approved before the trial was read" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: [200, 404] } },
+      ],
+      visible: ["maintainer"],
+    },
+    {
+      id: "build.who-section",
+      page,
+      anchor: ['id="who-section"', "two people behind every package the factory ships", 'href="/docs/what-we-test#the-score"'],
+      script: ['$("#who-section")', "if (!sc) { el.hidden = true; return; }"],
+      reads: [{ path: task, fields: ["score"] }],
+      visible: everyone,
+    },
+    {
+      id: "build.request-block",
+      page,
+      anchor: ['id="ckreq"'],
+      script: ['"#ckreq"', "requestBlock(T.request", "T.task.owner === login", "T.request.renewable", "T.request.busy", 'pkgSt === "approved" || pkgSt === "published"'],
+      reads: [
+        {
+          path: task,
+          fields: ["request.id", "request.record", "request.signature", "request.version", "request.created_at", "request.complete", "request.checks", "request.checks.0.item", "request.checks.0.note", "request.checks.0.ok", "request.renewable", "request.busy", "package.status", "task.owner", "task.name"],
+        },
+      ],
+      visible: everyone,
+    },
+    {
+      id: "build.score-columns",
+      page,
+      anchor: ['id="cklist"', 'class="cklist"'],
+      script: ['"#cklist"', 'ckColumn(sc, "contributor"', 'ckColumn(sc, "maintainer"', "c.contributor.owner", "c.project.id", "c.approval.by", "c.withdrawn.by"],
+      reads: [
+        {
+          path: task,
+          fields: ["score.items", "score.items.0.who", "score.items.0.item", "score.items.0.points", "score.items.0.max", "score.items.0.state", "score.items.0.note", "score.ready", "chain.contributor.id", "chain.contributor.owner", "chain.project.id", "chain.approval.by", "chain.withdrawn", "task.id"],
+        },
+      ],
+      visible: everyone,
+    },
+    {
+      id: "build.timeline",
+      page,
+      anchor: ['id="timeline"', 'class="tl"'],
+      script: [
+        '"#timeline"', "T.package.request_id", "p.review !== undefined", "p.task !== undefined", "t.pkgbuild_ref",
+        "T.audit.slice().reverse()", "T.trial.slice().reverse()", "T.project_builds.slice().reverse()", "T.publish.slice().reverse()",
+        "a.rebuild_task", "a.withdrawn_reason", "vet.warned", "vet.failed",
+      ],
+      reads: [
+        {
+          path: task,
+          fields: [
+            "package.request_id", "package.owner", "package.project", "package.created_at",
+            "from.id", "from.owner", "from.version", "from.finished_at",
+            "task.params.review", "task.reason", "task.pkgbuild_ref", "task.created_at", "task.started_at", "task.status", "task.lease_owner", "task.attempts", "task.max_attempts",
+            "task.finished_at", "task.duration_ms", "task.error", "task.result_filename",
+            "task.result.vet.verdict", "task.result.vet.warnings", "task.result.vet.warned", "task.result.vet.failed",
+            "audit.0.id", "audit.0.status", "audit.0.result.verdict", "audit.0.result.summary", "audit.0.result.model", "audit.0.error", "audit.0.finished_at", "audit.0.started_at",
+            "trial.0.id", "trial.0.status", "trial.0.result.verdict", "trial.0.error", "trial.0.finished_at", "trial.0.started_at",
+            "project_builds",
+            "approval.decision", "approval.by", "approval.note", "approval.withdrawn_at", "approval.withdrawn_by", "approval.withdrawn_reason", "approval.rebuild_task", "approval.rebuild_status", "approval.created_at",
+            "publish.0.id", "publish.0.status", "publish.0.error", "publish.0.finished_at", "publish.0.started_at",
+            "rings", "task.name", "task.arch",
+          ],
+        },
+      ],
+      visible: everyone,
+    },
+    {
+      id: "build.build-kv",
+      page,
+      anchor: ['id="build-kv"', 'class="kv"'],
+      script: ['"#build-kv"', 'row("Worker"', 'row("Recipe"', 'row("Package"', 'row("Publish"', "w.trusted_by", "w.labels.where", "t.lease_expires_at", "t.result_sha256"],
+      reads: [
+        {
+          path: task,
+          fields: ["worker.id", "worker.owner", "worker.labels", "worker.trust", "worker.trusted_by", "worker.version", "worker.agent", "task.lease_owner", "task.kind", "task.pkgbuild_ref", "task.attempts", "task.max_attempts", "task.lease_expires_at", "task.duration_ms", "task.result_filename", "task.result_sha256", "task.result", "task.publish", "task.trust"],
+        },
+      ],
+      visible: everyone,
+    },
+    {
+      id: "build.resources",
+      page,
+      anchor: ['id="res-panel"', 'id="res"', 'class="mini four"'],
+      script: ['"#res-panel"', '"#res"', '"resources.json"', "r.wall_s", "r.cpu_s", "r.ram_peak_mb", "r.disk_mb"],
+      reads: [{ path: `${task}/artifacts/resources.json`, json: false }],
+      visible: everyone,
+    },
+    {
+      id: "build.evidence-list",
+      page,
+      anchor: ['id="evidence-section"', 'id="ev-note"', 'id="evidence"'],
+      script: ['"#evidence"', "e.public", 'class="ev"', "raw ↗", "fetch(e.url)", '"audit.md"', "Nothing staged for this build", "T.task.log_tail"],
+      reads: [{ path: task, fields: ["evidence", "evidence.0.name", "evidence.0.size", "evidence.0.uploaded_at", "evidence.0.url", "evidence.0.public", "task.kind", "task.log_tail"] }],
+      visible: everyone,
+    },
+    {
+      id: "build.staging-packages",
+      page,
+      anchor: ['id="evidence"'],
+      script: ["Packages in staging (for maintainers and the publish job)", "!e.public"],
+      reads: [
+        { path: task, fields: ["evidence.0.public"] },
+        // The package itself is named for everyone and served to a maintainer only.
+        { path: pkg, status: 403, fields: ["error"] },
+        { path: pkg, as: "owner", status: 403, fields: ["error"] },
+        { path: pkg, as: "maintainer", json: false },
+      ],
+      visible: everyone,
+    },
+    {
+      id: "build.gate-table",
+      page,
+      anchor: ['id="evidence"'],
+      script: ['name === "vet.json"', 'class="ev-table"', "v.checks", "c.status", "c.detail", "v.verdict", 'href="/docs/what-we-test"'],
+      reads: [{ path: `${task}/artifacts/vet.json`, json: false }],
+      visible: everyone,
+    },
+    {
+      id: "build.audit-table",
+      page,
+      anchor: ['id="evidence"'],
+      script: ['name === "audit.json"', "a.findings", "a.summary", "a.model", "a.category", "x.severity", "x.where", "x.fix", "No finding."],
+      reads: [{ path: `${task}/artifacts/audit.json`, json: false }],
+      visible: everyone,
+    },
+    {
+      id: "build.recipe-code",
+      page,
+      anchor: ['id="evidence"'],
+      script: ['name === "PKGBUILD"', 'class="code"', 'class="ln"'],
+      reads: [{ path: `${task}/artifacts/PKGBUILD`, json: false }],
+      visible: everyone,
+    },
+    {
+      id: "build.manifest-kv",
+      page,
+      anchor: ['id="evidence"'],
+      script: ['name === "PKGINFO"', 'indexOf(" = ")', 'class="kv"'],
+      reads: [{ path: `${task}/artifacts/PKGINFO`, json: false }],
+      visible: everyone,
+    },
+    {
+      id: "build.log-view",
+      page,
+      anchor: ['id="evidence"'],
+      script: ['"build.log"', '"tests.log"', '"trial.log"', "lines.slice(-200)", 'data-all="1"', 'class="log full"', "a[data-all]"],
+      reads: [
+        { path: `${task}/artifacts/build.log`, json: false },
+        { path: `${task}/artifacts/tests.log`, json: false },
+        { path: `${task}/artifacts/trial.log`, json: false },
+      ],
+      visible: everyone,
+    },
+    {
+      id: "build.json-link",
+      page,
+      anchor: ['id="json-link"', ">/api/v1/factory/tasks/…</a>"],
+      script: ['"#json-link"', 'API + "/tasks/" + ID'],
+      reads: [{ path: task, fields: ["task.id"] }],
+      visible: everyone,
+    },
+    {
+      id: "build.not-found",
+      page,
+      anchor: ['id="title"', 'id="lede"'],
+      script: ['"No such task"', "d.error", "endSkeleton()"],
+      reads: [{ path: "/api/v1/factory/tasks/0", status: 404, fields: ["error"] }],
+      visible: everyone,
+    },
+  ];
+};

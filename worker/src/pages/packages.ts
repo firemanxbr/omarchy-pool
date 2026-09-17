@@ -435,26 +435,376 @@ export function packageHtml(name: string, poolUrl: string, version: RunningVersi
   });
 }
 
-/** What /packages is made of, for test/components.test.ts — see components.ts. */
-export const PACKAGES_COMPONENTS = (_F: Fixture): Component[] => [];
-
-/** What /package/<name> is made of: the dependency graph and the file list, each with the read it draws from. */
-export const PACKAGE_COMPONENTS = (F: Fixture): Component[] => [
+/**
+ * What /packages is made of: the search box and the table it fills, the
+ * panel a row opens, the stable tiles and the two cards under them. Every
+ * read is a public GET and nothing on the page changes with the role — the
+ * header's account chip is the shell's. The stable ring is the third of
+ * RINGS (index.ts: edge, rc, stable, lab), so its slice of /api/v1/stats is
+ * `rings.2`; the fixture's stable is one release with no parent, so the
+ * diff is asked for that release alone, as the endpoint answers it when
+ * `from` is left out.
+ */
+export const PACKAGES_COMPONENTS = (F: Fixture): Component[] => [
   {
-    id: "package.graph",
-    page: `/package/${F.pkg}`,
-    anchor: ['id="graph-card"', 'id="graph"'],
-    script: ['"/api/v1/package/"', '"#graph"', "required_by", "depends", "links"],
-    reads: [{ path: `/api/v1/package/${F.pkg}?ring=stable&arch=${F.arch}`, fields: ["name", "shown_ring", "required_by", "depends", "links", "security.exposed", "rings"] }],
+    id: "packages.hero",
+    page: "/packages",
+    anchor: ['<p class="eyebrow">Packages</p>', "Every package the pool serves, in every ring"],
     visible: ["anonymous", "contributor", "owner", "maintainer"],
   },
   {
-    id: "package.files",
-    page: `/package/${F.pkg}`,
-    anchor: ['id="load-files"', 'id="files"'],
-    script: ['"#load-files"', '"#files"', '"/files?ring="'],
-    reads: [{ path: `/api/v1/package/${F.pkg}/files?ring=stable&arch=${F.arch}`, fields: ["files"] }],
+    id: "packages.search-box",
+    page: "/packages",
+    anchor: ['id="search"', 'id="q"', 'type="search"', 'id="hint"'],
+    script: ['"/api/v1/search?q="', '"&limit=100"', '"#q"', '"#hint"', "d.packages"],
+    reads: [{ path: `/api/v1/search?q=${F.pkg}&ring=stable&arch=${F.arch}&limit=100`, fields: ["ring", "arch", "query", "packages"] }],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "packages.ring-arch-pickers",
+    page: "/packages",
+    anchor: ['id="pick-ring"', 'id="pick-arch"'],
+    script: ['RINGS = ["stable", "rc", "edge"]', 'ARCHES = ["x86_64", "aarch64"]', '"pick-ring"', '"pick-arch"', 'data-v="'],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "packages.results-table",
+    page: "/packages",
+    anchor: ['id="results"', "<th>By</th>", 'class="pk-results"'],
+    script: ['"#results"', 'data-name="', 'class="pkname"', "size_download", '"/api/v1/factory/packages"', "OWNERS[p.name]", '"/api/v1/factory/approvals"', "APPROVERS[a.name]"],
+    reads: [
+      { path: `/api/v1/search?q=${F.pkg}&ring=stable&arch=${F.arch}&limit=100`, fields: ["packages.0.name", "packages.0.version", "packages.0.source", "packages.0.description", "packages.0.size_download"] },
+      { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.name", "packages.0.owner"] },
+      { path: "/api/v1/factory/approvals", fields: ["approvals", "approvals.0.name", "approvals.0.decision", "approvals.0.by"] },
+    ],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "packages.detail-panel",
+    page: "/packages",
+    anchor: ['id="pk-detail"', "Pick a package"],
+    script: ['"#pk-detail"', '"/api/v1/package/"', "d.shown_ring", "size_installed", "d.depends", "d.links", "d.required_by", "security.advisories", "security.exposed", "sudo pacman -S ", "Open "],
+    reads: [
+      {
+        path: `/api/v1/package/${F.pkg}?ring=stable&arch=${F.arch}`,
+        fields: ["name", "shown_ring", "package.source", "package.size_download", "package.size_installed", "manifest.description", "rings.0.ring", "rings.0.version", "depends", "links", "required_by", "required_by.0.name", "security.advisories.0.status", "security.advisories.0.cves.0", "security.exposed"],
+      },
+    ],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "packages.detail-who-row",
+    page: "/packages",
+    anchor: ['id="pk-detail"'],
+    script: ['class="whorow', "mt.factory", "f.owner", "f.approved_by", "mt.packager", "brought by", "approved by", "waiting for a maintainer", "packaged upstream"],
+    reads: [{ path: `/api/v1/package/${F.pkg}?ring=stable&arch=${F.arch}`, fields: ["maintenance", "maintenance.packager"] }],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "packages.stat-tiles",
+    page: "/packages",
+    anchor: ['id="pk-tiles"', 'class="tiles five"'],
+    script: ['"#pk-tiles"', "package_count", '"Packages in stable"', '"From Arch"', '"From Arch Linux ARM"', '"From Omarchy"', '"Built here"', 'x.source === "factory"'],
+    reads: [{ path: "/api/v1/stats", fields: ["rings", "rings.2.ring", "rings.2.package_count", "rings.2.sources", "rings.2.sources.0.source", "rings.2.sources.0.arch", "rings.2.sources.0.packages"] }],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "packages.sources-chart",
+    page: "/packages",
+    anchor: ['id="pk-src-ring"', 'id="pk-sources"', "Packages per source"],
+    script: ['"#pk-src-ring"', '"#pk-sources"', "hrows(", "r0.sources", "x.packages"],
+    reads: [{ path: "/api/v1/stats", fields: ["rings.2.sources.0.source", "rings.2.sources.0.arch", "rings.2.sources.0.packages"] }],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "packages.last-stable-diff",
+    page: "/packages",
+    anchor: ['id="pk-diff-when"', 'id="pk-diff"', "What the last stable changed"],
+    script: ['"/api/v1/releases/stable/diff?from="', '"#pk-diff"', '"#pk-diff-when"', "d.releases", "r.is_head", "head.parent_id", "df.upgraded", "df.added", "df.removed", 'href="/diff?ring=stable&from=', 'href="/journal"'],
+    reads: [
+      { path: "/api/v1/stats", fields: ["releases", "releases.0.ring", "releases.0.is_head", "releases.0.parent_id", "releases.0.id", "releases.0.seq", "releases.0.created_at"] },
+      { path: `/api/v1/releases/stable/diff?to=${F.release}`, fields: ["to.id", "from", "upgraded", "added", "added.0.name", "removed"] },
+    ],
     visible: ["anonymous", "contributor", "owner", "maintainer"],
   },
 ];
+
+/**
+ * What /package/<name> is made of. The page is role-blind and never writes:
+ * everything is drawn from three GETs — the package in its ring and
+ * architecture, the factory's story of it, and the file list on demand.
+ * The fixture's zlib is the page (xz requires it, the advisory is on it);
+ * xz is the other end of the same edges — it declares zlib and loads its
+ * library, so it is exposed through it; `ours` in edge is what a factory
+ * package's page reads (the Who cards' factory branch, the seal's chain),
+ * and `mine`'s story — decided, not yet in the pool — is the factory
+ * section.
+ */
+export const PACKAGE_COMPONENTS = (F: Fixture): Component[] => {
+  const page = `/package/${F.pkg}`;
+  const pkg = `/api/v1/package/${F.pkg}?ring=stable&arch=${F.arch}`;
+  const pkg2 = `/api/v1/package/${F.pkg2}?ring=stable&arch=${F.arch}`;
+  const built = `/api/v1/package/${F.publishedPkg}?ring=edge&arch=${F.arch}`;
+  const story = `/api/v1/factory/packages/${F.factoryPkg}/story`;
+  const shipped = `/api/v1/factory/packages/${F.publishedPkg}/story`;
+  const everyone: Component["visible"] = ["anonymous", "contributor", "owner", "maintainer"];
+  return [
+    {
+      id: "package.crumbs",
+      page,
+      anchor: ['class="crumbs"', 'href="/packages"', 'id="crumb"'],
+      script: ['"#crumb"', "location.pathname"],
+      visible: everyone,
+    },
+    {
+      id: "package.title",
+      page,
+      anchor: ['id="title"'],
+      script: ['"#title"'],
+      visible: everyone,
+    },
+    {
+      id: "package.ring-arch-pickers",
+      page,
+      anchor: ['id="pg-ring"', 'id="pg-arch"'],
+      script: ['"#pg-ring"', '"#pg-arch"', "d.shown_ring", '"lab"'],
+      reads: [{ path: pkg, fields: ["name", "shown_ring", "arch", "rings.0.ring"] }],
+      visible: everyone,
+    },
+    {
+      id: "package.lede",
+      page,
+      anchor: ['id="desc"'],
+      script: ['"#desc"', "m.description", "pkg.description", "d.error"],
+      reads: [
+        { path: pkg, fields: ["manifest.description"] },
+        { path: story, fields: ["package.description", "rings"] },
+        // A name in no ring: the page writes the answer's error where the description goes.
+        { path: `/api/v1/package/not-a-package?ring=stable&arch=${F.arch}`, status: 404, fields: ["error"] },
+      ],
+      visible: everyone,
+    },
+    {
+      id: "package.tiles",
+      page,
+      anchor: ['id="pg-tiles"'],
+      script: ['"#pg-tiles"', "p.size_download", "p.size_installed", "release_seq", "own0.length"],
+      reads: [{ path: pkg, fields: ["package.version", "package.size_download", "package.size_installed", "rings.0.release_seq", "shown_ring", "arch", "depends", "links", "required_by", "security.advisories.0.severity", "security.advisories.0.status"] }],
+      visible: everyone,
+    },
+    {
+      id: "package.meta-row",
+      page,
+      anchor: ['id="meta"'],
+      script: ['"#meta"', "m.url", "m.licenses", "m.pkginfo.base", "m.pkginfo.builddate", "m.pkginfo.packager", "p.has_signature", "d.pool_url"],
+      reads: [{ path: pkg, fields: ["name", "manifest.url", "manifest.licenses", "manifest.pkginfo.base", "manifest.pkginfo.builddate", "manifest.pkginfo.packager", "package.source", "package.has_signature", "package.size_download", "package.size_installed", "pool_url"] }],
+      visible: everyone,
+    },
+    {
+      // Hidden in the template and never un-hidden: the script writes it on every render, nobody sees it.
+      id: "package.maint-line",
+      page,
+      anchor: ['id="maint" style="margin-top:6px" hidden'],
+      script: ['"#maint"', "mt.factory", "mt.packager", "d.provenance"],
+      reads: [
+        { path: pkg, fields: ["maintenance.packager", "provenance", "package.source"] },
+        { path: built, fields: ["maintenance.factory.owner", "maintenance.factory.category", "maintenance.factory.maintainers", "maintenance.factory.approved_by", "maintenance.factory.approved_version", "maintenance.factory.approved_at"] },
+      ],
+      visible: [],
+    },
+    {
+      id: "package.factory-badge",
+      page,
+      anchor: ['id="factory-section"', 'id="factory-badge"'],
+      script: ['"/api/v1/factory/packages/"', '"/story"', '"#factory-section"', '"#factory-badge"', "st.chains", "st.class", "st.score.points", "not in the pool yet"],
+      reads: [
+        { path: story, fields: ["name", "chains", "rings", "class", "score.points"] },
+        // The badge names the rings once the package is in the pool.
+        { path: shipped, fields: ["rings.0.ring", "rings.0.arch"] },
+        // A package from a source has no story: the section stays hidden on the 404.
+        { path: `/api/v1/factory/packages/${F.pkg}/story`, status: 404, fields: ["error"] },
+      ],
+      visible: everyone,
+    },
+    {
+      id: "package.factory-lede",
+      page,
+      anchor: ['id="factory-lede"'],
+      script: ['"#factory-lede"', "pkg.owner", "pkg.created_at", "pkg.project", "pkg.blocked_at", 'href="/docs/what-we-test#who-does-what"'],
+      reads: [{ path: story, fields: ["package.owner", "package.created_at", "package.project", "package.license", "package.category", "package.blocked_at", "package.blocked_by", "package.blocked_reason"] }],
+      visible: everyone,
+    },
+    {
+      // The chains are newest first: mine's first is one of the undecided rows the acts use, so the decided chain —
+      // project build, audit, trial, approval — is read on ours, whose one chain went the whole way.
+      id: "package.factory-chains",
+      page,
+      anchor: ['id="factory-chain"'],
+      script: ['"#factory-chain"', "chainRow(c)", "st.chains.slice(0, 6)", "Requested; no build yet."],
+      reads: [
+        {
+          path: story,
+          fields: [
+            "chains.0.contributor.id", "chains.0.contributor.owner", "chains.0.contributor.version", "chains.0.contributor.arch", "chains.0.contributor.status", "chains.0.contributor.finished_at", "chains.0.contributor.attempts",
+            "chains.0.contributor.result.vet.verdict", "chains.0.contributor.result.vet.warnings", "chains.0.contributor.result.vet.fails",
+            "chains.0.project", "chains.0.audit", "chains.0.trial", "chains.0.approval", "chains.0.withdrawn",
+            "chains.0.score.class", "chains.0.score.points", "chains.0.score.projected", "chains.0.score.ready",
+          ],
+        },
+        {
+          path: shipped,
+          fields: [
+            "chains.0.project.id", "chains.0.project.status", "chains.0.project.version", "chains.0.project.arch", "chains.0.project.result.vet.verdict",
+            "chains.0.audit.status", "chains.0.audit.result.verdict", "chains.0.audit.result.model",
+            "chains.0.trial.status", "chains.0.trial.result.verdict",
+            "chains.0.approval.decision", "chains.0.approval.by", "chains.0.approval.created_at", "chains.0.approval.note",
+            "chains.0.publish.status",
+          ],
+        },
+      ],
+      visible: everyone,
+    },
+    {
+      id: "package.who-cards",
+      page,
+      anchor: ['id="who-section"', 'id="who"'],
+      script: ['"#who"', "renderWho", "mt.factory", "f.approved_by", "c.source_build", "sb.agent", "au.verdict", "p.source"],
+      reads: [
+        { path: pkg, fields: ["maintenance.packager", "package.source", "seal.chain"] },
+        { path: built, fields: ["maintenance.factory.owner", "maintenance.factory.approved_by", "maintenance.factory.approved_at", "maintenance.factory.maintainers", "seal.chain.source_build.worker", "seal.chain.source_build.agent", "seal.chain.audit.verdict", "seal.chain.audit.agent"] },
+      ],
+      visible: everyone,
+    },
+    {
+      id: "package.seal-pill",
+      page,
+      anchor: ['id="seal-section"', 'id="seal-pill"'],
+      script: ['"#seal-pill"', "seal.origin", "seal.seal", "built by the Omarchy Pool"],
+      reads: [
+        { path: pkg, fields: ["seal.origin", "seal.seal"] },
+        { path: built, fields: ["seal.origin", "seal.seal"] },
+      ],
+      visible: everyone,
+    },
+    {
+      id: "package.seal-facts",
+      page,
+      anchor: ['id="seal"'],
+      script: ['"#seal"', "renderSeal", "seal.upstream", "seal.attestation", "c.source_build.evidence.log", "c.audit.report", 'href="/api/v1/packages/', "this seal as JSON"],
+      reads: [
+        { path: pkg, fields: ["seal.origin", "seal.source", "seal.indexed_at", "seal.upstream.project", "seal.upstream.keyring", "seal.upstream.signature", "seal.upstream.verified", "seal.signature", "seal.chain", "seal.attestation", "seal.object", "seal.filename", "seal.sha256"] },
+        {
+          path: built,
+          fields: [
+            "seal.chain.build.task", "seal.chain.build.finished_at", "seal.chain.build.duration_ms", "seal.chain.build.attempts", "seal.chain.builder.worker",
+            "seal.chain.recipe.pkgbuild",
+            "seal.chain.source_build.task", "seal.chain.source_build.owner", "seal.chain.source_build.worker", "seal.chain.source_build.agent", "seal.chain.source_build.evidence.log", "seal.chain.source_build.evidence.pkginfo",
+            "seal.chain.audit.verdict", "seal.chain.audit.summary", "seal.chain.audit.agent", "seal.chain.audit.report",
+            "seal.chain.approval.by", "seal.chain.approval.at", "seal.chain.approval.note",
+            "seal.signature", "seal.attestation.statement", "seal.attestation.signature", "seal.object", "seal.filename", "seal.sha256",
+          ],
+        },
+        // The links the facts carry: the seal as JSON, and the evidence the chain names — public text in the staging space.
+        { path: `/api/v1/packages/${F.sha}/provenance`, fields: ["origin", "seal", "summary", "upstream.project", "object", "filename", "sha256"] },
+        { path: `/api/v1/factory/tasks/${F.contributorTask}/artifacts/PKGBUILD`, json: false },
+        { path: `/api/v1/factory/tasks/${F.contributorTask}/artifacts/build.log`, json: false },
+        { path: `/api/v1/factory/tasks/${F.contributorTask}/artifacts/PKGINFO`, json: false },
+        { path: `/api/v1/factory/tasks/${F.projectTask}/artifacts/audit.md`, json: false },
+      ],
+      visible: everyone,
+    },
+    {
+      id: "package.security-badge",
+      page,
+      anchor: ['id="sec-section"', 'id="sec-badge"'],
+      script: ['"#sec-badge"', "open.length", "exposed via ", "no open advisory"],
+      reads: [{ path: pkg, fields: ["security.advisories", "security.advisories.0.status", "security.exposed"] }],
+      visible: everyone,
+    },
+    {
+      id: "package.security-own",
+      page,
+      anchor: ['id="sec-own"'],
+      script: ['"#sec-own"', "advLine", "a.cves.join", "a.match", "a.fixed", "a.kev", "a.epss", "a.summary", "fixed in this version"],
+      reads: [{ path: pkg, fields: ["package.version", "security.advisories.0.id", "security.advisories.0.severity", "security.advisories.0.status", "security.advisories.0.cves", "security.advisories.0.match", "security.advisories.0.fixed", "security.advisories.0.kev", "security.advisories.0.epss", "security.advisories.0.summary", "security.advisories.0.url"] }],
+      visible: everyone,
+    },
+    {
+      id: "package.security-exposed",
+      page,
+      anchor: ['id="sec-exposed"'],
+      script: ['"#sec-exposed"', "e.via", "e.declared", "e.sonames", "e.advisory.severity", "e.advisory.cves", "e.advisory.match"],
+      reads: [{ path: pkg2, fields: ["security.exposed.0.via", "security.exposed.0.declared", "security.exposed.0.sonames", "security.exposed.0.advisory.severity", "security.exposed.0.advisory.url", "security.exposed.0.advisory.cves", "security.exposed.0.advisory.match"] }],
+      visible: everyone,
+    },
+    {
+      id: "package.rings-table",
+      page,
+      anchor: ['id="rings"', 'id="arch-label"'],
+      script: ['"#rings tbody"', '"#arch-label"', "row.version", "row.release_seq", "row.source", "row.sha256", "row.size_download"],
+      reads: [{ path: pkg, fields: ["shown_ring", "arch", "rings.0.ring", "rings.0.version", "rings.0.release_seq", "rings.0.source", "rings.0.sha256", "rings.0.size_download"] }],
+      visible: everyone,
+    },
+    {
+      // Left: what requires the page's package (zlib's side); right: what it declares and loads (xz's side), with the providers that carry an advisory.
+      id: "package.graph",
+      page,
+      anchor: ['id="graph-card"', 'id="graph"'],
+      script: ['"/api/v1/package/"', '"#graph"', "required_by", "depends", "links", "vulnProviders", "x.provider.name"],
+      reads: [
+        { path: pkg, fields: ["name", "shown_ring", "required_by", "required_by.0.name", "required_by.0.version", "required_by.0.declared", "required_by.0.sonames", "depends", "links", "security.exposed", "security.advisories.0.status", "rings"] },
+        { path: pkg2, fields: ["name", "depends.0.name", "depends.0.provider.name", "links.0.soname", "links.0.provider.name", "security.exposed.0.via", "security.exposed.0.advisory.cves"] },
+      ],
+      visible: everyone,
+    },
+    {
+      id: "package.depends-list",
+      page,
+      anchor: ['id="deps"'],
+      script: ['"#deps"', "x.provider.version", "no declared dependencies"],
+      reads: [{ path: pkg2, fields: ["depends.0.name", "depends.0.provider.name", "depends.0.provider.version"] }],
+      visible: everyone,
+    },
+    {
+      id: "package.links-list",
+      page,
+      anchor: ['id="links"'],
+      script: ['"#links"', "x.soname", "not in this ring"],
+      reads: [{ path: pkg2, fields: ["links.0.soname", "links.0.provider.name"] }],
+      visible: everyone,
+    },
+    {
+      id: "package.required-by-list",
+      page,
+      anchor: ['id="rb"', 'id="rb-count"'],
+      script: ['"#rb"', '"#rb-count"', "x.declared", "x.sonames", ">= 400"],
+      reads: [{ path: pkg, fields: ["required_by", "required_by.0.name", "required_by.0.declared", "required_by.0.sonames"] }],
+      visible: everyone,
+    },
+    {
+      id: "package.provides-list",
+      page,
+      anchor: ['id="provides"'],
+      script: ['"#provides"', "m.provides", "only itself"],
+      reads: [{ path: pkg, fields: ["name", "manifest.provides"] }],
+      visible: everyone,
+    },
+    {
+      id: "package.components-table",
+      page,
+      anchor: ['id="components-section"', 'id="components-count"', 'id="components"'],
+      script: ['"#components-section"', '"#components-count"', 'pager("#components"', "x.ecosystem", "x.name", "x.version"],
+      reads: [{ path: pkg, fields: ["manifest.components", "manifest.components.0.ecosystem", "manifest.components.0.name", "manifest.components.0.version"] }],
+      visible: everyone,
+    },
+    {
+      id: "package.files",
+      page,
+      anchor: ['id="load-files"', 'id="files"'],
+      script: ['"#load-files"', '"#files"', '"/files?ring="', "d.files"],
+      reads: [{ path: `/api/v1/package/${F.pkg}/files?ring=stable&arch=${F.arch}`, fields: ["name", "ring", "arch", "files"] }],
+      visible: everyone,
+    },
+  ];
+};
 

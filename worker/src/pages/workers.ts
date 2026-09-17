@@ -132,18 +132,116 @@ export function workersHtml(poolUrl: string, version: RunningVersion): string {
   });
 }
 
-/** What /workers is made of: the three tables are one component — the same read, three anchors — with the week's series behind the charts. */
-export const WORKERS_COMPONENTS = (_F: Fixture): Component[] => [
+/**
+ * What /workers is made of. Two reads feed the whole page: the factory
+ * listing (every worker, its row) and the stats (the week's series behind
+ * the tiles, the cards and the two charts). The three tables are one
+ * component — the same read, three anchors — and the checkbox above them
+ * is their filter, not a read of its own. The log icon in a row is the one
+ * thing here that changes with the viewer: its read answers the owner and
+ * the maintainers, and refuses everyone else by name.
+ */
+export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
   {
-    id: "workers.table",
+    id: "workers.hero",
     page: "/workers",
-    anchor: ['id="w-project"', 'id="w-review"', 'id="w-community"', 'id="wt-legend"', 'id="all-workers"'],
-    script: ['"/api/v1/factory?limit=10"', '"#w-project"', '"#w-review"', '"#w-community"', "workers_daily", "jobs_daily", "builds_daily"],
+    anchor: ["<h1>Three kinds of worker, and whose they are</h1>", '<a href="/docs/workers">Run one →</a>'],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "workers.tiles",
+    page: "/workers",
+    anchor: ['id="tiles"'],
+    script: ['"#tiles"', '"Alive"', '"Building now"', '"Load · 24 h"', '"Worker minutes · 7 d"', "m.jobs || m.actions"],
     reads: [
-      { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.id", "workers.0.arch", "workers.0.trust", "workers.0.mode", "workers.0.ready", "workers.0.agent", "workers.0.usage", "workers.0.last_task", "workers.0.builds_done", "tasks", "counts"] },
-      { path: "/api/v1/stats", fields: ["series.workers_daily", "series.jobs_daily", "series.builds_daily"] },
+      { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.alive", "workers.0.current_task", "workers.0.side"] },
+      { path: "/api/v1/stats", fields: ["series.workers_daily", "metrics.jobs.minutes"] },
     ],
     visible: ["anonymous", "contributor", "owner", "maintainer"],
   },
+  {
+    id: "workers.kind-cards",
+    page: "/workers",
+    anchor: ['id="kinds"'],
+    script: ['"#kinds"', "POOL_KINDS", 'class="kchart"', 'class="mini four"', "builds_daily"],
+    reads: [
+      { path: "/api/v1/factory?limit=10", fields: ["workers.0.side", "workers.0.labels", "workers.0.alive", "workers.0.current_task"] },
+      {
+        path: "/api/v1/stats",
+        fields: [
+          "series.jobs_daily.0.day", "series.jobs_daily.0.kind", "series.jobs_daily.0.status", "series.jobs_daily.0.n",
+          "series.builds_daily.0.day", "series.builds_daily.0.trust", "series.builds_daily.0.status", "series.builds_daily.0.n",
+          "series.workers_daily.0.worker", "series.workers_daily.0.ms",
+        ],
+      },
+    ],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "workers.load-per-worker",
+    page: "/workers",
+    anchor: ['id="c-perworker"'],
+    script: ['"#c-perworker"', "workers_daily", "running_ms", 'class="hrows"', "builds_failed"],
+    reads: [
+      { path: "/api/v1/stats", fields: ["series.workers_daily.0.worker", "series.workers_daily.0.ms", "series.workers_daily.0.running_ms", "series.workers_daily.0.done"] },
+      { path: "/api/v1/factory?limit=10", fields: ["workers.0.id", "workers.0.arch", "workers.0.mode", "workers.0.alive", "workers.0.current_task", "workers.0.builds_done", "workers.0.builds_failed"] },
+    ],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "workers.minutes-chart",
+    page: "/workers",
+    anchor: ['id="c-minutes"'],
+    script: ['"#c-minutes"', "renderMinutes", "jobs_daily", "r.ms"],
+    reads: [{ path: "/api/v1/stats", fields: ["series.jobs_daily.0.day", "series.jobs_daily.0.ms"] }],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "workers.table",
+    page: "/workers",
+    anchor: ['id="w-project"', 'id="w-review"', 'id="w-community"', 'id="all-workers"'],
+    script: ['"/api/v1/factory?limit=10"', '"#w-project"', '"#w-review"', '"#w-community"', '"#all-workers"', "showAll", "WT_HEAD.project", "workerRow(w"],
+    reads: [
+      {
+        path: "/api/v1/factory?limit=10",
+        fields: [
+          "workers", "workers.0.id", "workers.0.owner", "workers.0.side", "workers.0.trust", "workers.0.labels", "workers.0.hostname", "workers.0.kinds", "workers.0.trusted_by", "workers.0.trust_proposed_by",
+          "workers.0.alive", "workers.0.last_seen", "workers.0.current_task", "workers.0.ready", "workers.0.update.required", "workers.0.update.latest",
+          "workers.0.arch", "workers.0.version", "workers.0.mode", "workers.0.packages",
+          "workers.0.agent", "workers.0.agent_status", "workers.0.agent_checked_at", "workers.0.agent_error",
+          "workers.0.usage", "workers.0.usage_at", "workers.0.builds_done", "workers.0.builds_failed",
+          "workers.0.last_task", "workers.0.last_task.id", "workers.0.last_task.kind", "workers.0.last_task.name", "workers.0.last_task.status", "workers.0.last_task.at",
+        ],
+      },
+    ],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "workers.log",
+    page: "/workers",
+    anchor: ['id="w-project"', 'id="w-community"'],
+    script: ["data-wlog", '"/api/v1/factory/workers/"', '"/log"', "ME.login === w.owner", "whoami(function () { load(); })"],
+    reads: [
+      { path: `/api/v1/factory/workers/${F.worker}/log`, status: 401 },
+      { path: `/api/v1/factory/workers/${F.worker}/log`, as: "contributor", status: 403 },
+      { path: `/api/v1/factory/workers/${F.worker}/log`, as: "owner", status: 403 },
+      { path: `/api/v1/factory/workers/${F.communityWorker}/log`, as: "owner", fields: ["id", "log", "at"] },
+      { path: `/api/v1/factory/workers/${F.worker}/log`, as: "maintainer", fields: ["id", "log", "at"] },
+      { path: `/api/v1/factory/workers/${F.communityWorker}/log`, as: "maintainer", fields: ["id", "log", "at"] },
+    ],
+    visible: ["owner", "maintainer"],
+  },
+  {
+    id: "workers.legend",
+    page: "/workers",
+    anchor: ['id="wt-legend"'],
+    script: ['"#wt-legend"', "WT_LEGEND"],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "workers.run-one-gate",
+    page: "/workers",
+    anchor: ["<h3>Run one of your own</h3>", '<a href="/factory">workspace</a>', '<a class="btn ghost" href="/docs/workers">Run a worker →</a>'],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
 ];
-

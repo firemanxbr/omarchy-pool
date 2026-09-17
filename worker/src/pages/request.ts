@@ -7,7 +7,7 @@
  * record, then the build is one press away.
  */
 import { page, GITHUB_ICON } from "./layout";
-import type { Component, Fixture } from "./components";
+import type { Component, Fixture, Role } from "./components";
 import type { RunningVersion } from "../meta";
 
 const BODY = String.raw`
@@ -113,4 +113,129 @@ export function requestHtml(poolUrl: string, version: RunningVersion): string {
 }
 
 /** What /request is made of, for test/components.test.ts — see components.ts. */
-export const REQUEST_COMPONENTS = (_F: Fixture): Component[] => [];
+export const REQUEST_COMPONENTS = (F: Fixture): Component[] => {
+  const everyone: Role[] = ["anonymous", "contributor", "owner", "maintainer"];
+  const signedIn: Role[] = ["contributor", "owner", "maintainer"];
+  // The four confirmations as the template's boxes name them (data-check), not the server's CHECKLIST: a fifth
+  // sentence added on one side alone makes the request answer 400 here.
+  const confirmed = { official: true, license: true, unshipped: true, evidence: true };
+  // bob's request, as the form sends it: a project that is not on GitHub (the tests run without the network),
+  // so the release is named by hand — the "Not on GitHub?" fields.
+  const theirs = {
+    url: "https://theirs.example", name: "theirs", source: "https://theirs.example/theirs-1.0.tar.gz", version: "1.0",
+    description: "Theirs, the package the form asks for in the tests", license: "MIT", arches: [F.arch], checklist: confirmed,
+  };
+  // alice's request, renewed from the record: the story's fields, sent back.
+  const renewal = {
+    url: "https://mine.example", name: F.factoryPkg, source: "https://mine.example/mine-1.0.tar.gz", version: "1.0",
+    description: "Mine, a small tool for the tests", license: "MIT", arches: [F.arch], checklist: confirmed,
+  };
+  return [
+    {
+      id: "request.hero",
+      page: "/request",
+      anchor: ['<p class="eyebrow" id="eyebrow">Package request</p>', '<h1 id="h1">Ask for a package, on the record</h1>', '<p class="lede" id="lede">', 'href="/docs/governance">What happens after →</a>'],
+      visible: everyone,
+    },
+    {
+      id: "request.signin-gate",
+      page: "/request",
+      anchor: ['<div id="gate" class="gate">', '<div class="lock">GitHub sign-in</div>', "Who is asking", 'href="/auth/github?next=/request"', "Sign in with GitHub"],
+      script: ['"/auth/me"', "whoami(function (me)", "if (!me) return;", '$("#gate").hidden = true; $("#ask").hidden = false;'],
+      reads: [
+        // Signed out, the button starts the sign-in (the redirect to GitHub, `next=/request` kept for the callback); signed in, the gate hides and the form shows.
+        { path: "/auth/github?next=/request", status: 302, json: false },
+        { path: "/auth/me", status: 401 },
+        { path: "/auth/me", as: "contributor", fields: ["login", "role"] },
+        { path: "/auth/me", as: "owner", fields: ["login", "role"] },
+        { path: "/auth/me", as: "maintainer", fields: ["login", "role"] },
+      ],
+      visible: ["anonymous"],
+    },
+    {
+      id: "request.form",
+      page: "/request",
+      anchor: ['<section id="ask" hidden>', '<form id="pkg-form" class="form" onsubmit="return false">', 'id="pkg-url"', 'id="pkg-name"', 'pattern="[a-z0-9@._+-]+"', 'id="pkg-desc"', 'minlength="8" maxlength="120"', 'id="pkg-license"', 'id="pkg-x86" checked', 'id="pkg-arm" checked'],
+      script: ['var API = "/api/v1/factory"', 'call("POST", "/packages", body)', '$("#pkg-form").onsubmit', 'arches.push("x86_64")', 'arches.push("aarch64")', "checklist: checklist", 'if ($("#pkg-name").value.trim()) body.name'],
+      // Anyone signed in asks; the name is then the asker's: the same request by anyone else is refused.
+      acts: [{ method: "POST", path: "/api/v1/factory/packages", body: theirs, expect: { anonymous: 401, contributor: 201, owner: 409, maintainer: 409 } }],
+      visible: signedIn,
+    },
+    {
+      id: "request.form-more",
+      page: "/request",
+      anchor: ['<details class="form-more"><summary>Not on GitHub? The release itself</summary>', 'id="pkg-source"', 'id="pkg-version"'],
+      script: ['body.source = $("#pkg-source").value.trim()', 'body.version = $("#pkg-version").value.trim()', 'document.querySelector(".form-more").open = true'],
+      // A project that is not on GitHub has no tag to read: without these two fields the request is refused before anything is written.
+      acts: [
+        {
+          method: "POST",
+          path: "/api/v1/factory/packages",
+          body: { url: "https://elsewhere.example", name: "elsewhere", description: "Elsewhere, a release the form must be told about", license: "MIT", arches: [F.arch], checklist: confirmed },
+          expect: { anonymous: 401, contributor: 400, owner: 400, maintainer: 400 },
+        },
+      ],
+      visible: signedIn,
+    },
+    {
+      id: "request.licence-datalist",
+      page: "/request",
+      anchor: ['list="spdx"', '<datalist id="spdx">', "<option>MIT</option>", "<option>GPL-3.0-or-later</option>", "<option>custom:proprietary</option>"],
+      visible: signedIn,
+    },
+    {
+      id: "request.checklist",
+      page: "/request",
+      anchor: ['<div class="checklist" id="pkg-checklist">', 'data-check="official"', 'data-check="license"', 'data-check="unshipped"', 'data-check="evidence"'],
+      script: ['querySelectorAll("input[data-check]")', 'checklist[i.getAttribute("data-check")] = i.checked'],
+      // One box left unticked and the request is refused, whoever asks, before the name or the project is looked at.
+      acts: [{ method: "POST", path: "/api/v1/factory/packages", body: { ...theirs, checklist: { ...confirmed, evidence: false } }, expect: { anonymous: 401, contributor: 400, owner: 400, maintainer: 400 } }],
+      visible: signedIn,
+    },
+    {
+      id: "request.submit-state",
+      page: "/request",
+      anchor: ['<button type="submit" id="pkg-btn">Request</button>', '<p class="sub" id="pkg-state"></p>'],
+      script: ['$("#pkg-btn").disabled = true', '"Checking the pool, the project and the source…"', '$("#pkg-state").textContent = d.error', '"failed: " + e'],
+      visible: signedIn,
+    },
+    {
+      id: "request.done",
+      page: "/request",
+      anchor: ['<div id="done" class="done" hidden></div>'],
+      script: [
+        '$("#done").innerHTML', "esc(d.package.name)", "esc(d.request.record)", "d.request.signature", "det.build_system", "d.skipped", "d.build.tasks",
+        '\'<a href="/build/\' + t + \'">#\' + t + \'</a>\'', 'd.build.queue[a].position + " of " + d.build.queue[a].total', "d.build.error",
+        "'/user/' + encodeURIComponent(ME.login)", "Your page →", '$("#pkg-form").reset()',
+      ],
+      visible: signedIn,
+    },
+    {
+      id: "request.workspace-link",
+      page: "/request",
+      anchor: ["Requested before?", 'href="/factory#gate">Your workspace</a>'],
+      visible: signedIn,
+    },
+    {
+      id: "request.renew-mode",
+      page: `/request?renew=${F.factoryPkg}`,
+      anchor: ['id="eyebrow"', 'id="h1"', 'id="lede"', 'id="pkg-btn"'],
+      script: [
+        'new URLSearchParams(location.search).get("renew")', "if (RENEW) prefill(RENEW)", '"/api/v1/factory/packages/" + encodeURIComponent(name) + "/story?t=" + Date.now()', "if (!st || !st.package) return;",
+        '"Renew the request for " + name', "q.checks.filter(function (c) { return !c.ok; })", "esc(c.item)", "esc(c.note)", "p.project || p.url", "p.description", "p.license",
+        "q.arches && q.arches.length ? q.arches : (p.arches || [])", 'q.version && q.version !== "unknown"', "p.source && p.source !== p.project",
+      ],
+      reads: [
+        {
+          path: `/api/v1/factory/packages/${F.factoryPkg}/story?t=0`,
+          fields: ["package", "package.project", "package.url", "package.description", "package.license", "package.source", "package.arches", "request", "request.checks", "request.checks.0.ok", "request.checks.0.item", "request.checks.0.note", "request.arches", "request.version"],
+        },
+      ],
+      // The record is public and the form asks nothing about ownership: the server refuses the name to anyone but alice. Her own renewal is
+      // refused while the approval stands (the package is in the pool) and taken once an act before this one withdrew it — the last act
+      // here, as it cancels the queued builds of the name and queues its own.
+      acts: [{ method: "POST", path: "/api/v1/factory/packages", body: renewal, expect: { anonymous: 401, contributor: 409, maintainer: 409, owner: [200, 409] } }],
+      visible: signedIn,
+    },
+  ];
+};

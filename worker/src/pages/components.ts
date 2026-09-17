@@ -104,8 +104,10 @@ export interface Fixture {
   pkg: string;
   /** "xz", indexed beside it; it declares zlib and loads libz.so.1, so `/api/v1/package/xz` has `depends` and `links`. */
   pkg2: string;
-  /** The stable release's id. */
+  /** The stable head's id: the second stable release, whose diff against F.previousRelease has an upgrade, an addition and a removal. */
   release: number;
+  /** The first stable release, the head's parent: what a rollback goes back to. */
+  previousRelease: number;
   /** The sha256 of the pool's zlib object: `/api/v1/packages/<sha>` and its provenance, the security match. */
   sha: string;
   /** "bob": a contributor with nothing of his own — what a signed-in stranger sees. */
@@ -115,8 +117,10 @@ export interface Fixture {
   /** "m1" and "m2", the maintainers; m2 asked for the project's build and approved it. */
   m1: string;
   m2: string;
-  /** "mine", alice's package: requested, built by her worker, built again by the project, approved. */
+  /** "mine", alice's package: requested, built by her worker, built again by the project, approved — its publish job waits. */
   factoryPkg: string;
+  /** "ours", alice's other package, the whole way: published by the project into edge, so `/api/v1/package/ours?ring=edge` has the factory branch and the seal's chain. */
+  publishedPkg: string;
   /** The package request's id (`package_requests`), the record's number. */
   request: number;
   /** "w1", the project's worker (m1's): built the project's build, wrote the audit. */
@@ -133,6 +137,12 @@ export interface Fixture {
   stagedTask: number;
   /** Another one, to reject: an act that changes the fixture runs on this row. */
   disposableTask: number;
+  /** A third, for a second page whose act rejects a row of its own. */
+  spareTask: number;
+  /** "carol", blocked by m1: the brake's table has a row, and m2 is the other maintainer who could lift it. */
+  blockedContributor: string;
+  /** "hers", carol's package, blocked by m1 before she was. */
+  blockedPkg: string;
   /** One journal event's id. */
   event: number;
   /** The advisory on zlib ("arch:AVG-9999:zlib"), matched on the pool's object: `/api/v1/security` has a row. */
