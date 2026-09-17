@@ -43,13 +43,11 @@ const SCRIPT = String.raw`
     busy(fetch("/api/v1/events?limit=200", { cache: "no-store" })).then(function (r) { return r.json(); }).then(function (d) { EVENTS = (d.events || []).filter(function (e) { return e.kind !== "metrics"; }); drawEvents(); endSkeleton(); }).catch(function () { endSkeleton(); });
   }
   function drawReleases(d) {
-    var heads = {}; (d.releases || []).forEach(function (r) { if (r.is_head) heads[r.ring] = r.id; });
     pager("#releases", d.releases, function (r) {
       var diff = r.parent_id ? '<a class="run" href="/diff?ring=' + r.ring + '&from=' + r.parent_id + '&to=' + r.id + '">diff</a>' : '';
-      // The last cell reads the same for every viewer. The head says so — there is nothing to roll it back to. Every other row carries the button; who may not press it sees it grey with the reason: anyone but a maintainer, and a maintainer while the ring's head is outside these rows.
-      var rb = r.is_head ? ' <span class="pill ok" style="margin-left:8px" title="what ' + esc(r.ring) + ' serves now — nothing to roll back to">head</span>'
-        : gate(' <button type="button" class="small-btn" data-rollback="' + r.id + '" data-ring="' + r.ring + '" title="point ' + r.ring + ' back at release ' + r.id + '" style="margin-left:8px">roll back</button>', isMaintainer() && heads[r.ring], isMaintainer() ? "the head of " + r.ring + " is not in this list" : "a maintainer rolls back");
-      return '<tr><td>' + r.id + (r.is_head ? ' <span class="pill ok">head</span>' : '') + '</td><td><span style="color:var(--' + r.ring + ')">' + r.ring + '</span></td><td>#' + r.seq + '</td><td class="num">' + num(r.package_count) + '</td><td class="dim">' + (r.parent_id || '—') + '</td><td class="dim">' + (r.source_id || '—') + '</td><td class="muted">' + esc(r.note || '') + '</td><td class="when" title="' + esc(r.created_at) + '">' + ago(r.created_at) + '</td><td style="white-space:nowrap">' + diff + rb + '</td></tr>';
+      // The last cell reads the same for every viewer: every row but the head carries the button, and who may not press it sees it grey with the reason — the server's own rule, a maintainer's (POST /factory/jobs checks the role and the ring, nothing about the head). The head row says so by its pill — there is nothing to roll it back to.
+      var rb = r.is_head ? '' : gate(' <button type="button" class="small-btn" data-rollback="' + r.id + '" data-ring="' + r.ring + '" title="point ' + r.ring + ' back at release ' + r.id + '" style="margin-left:8px">roll back</button>', isMaintainer(), orSignIn("a maintainer rolls back"));
+      return '<tr><td>' + r.id + (r.is_head ? ' <span class="pill ok" title="what ' + esc(r.ring) + ' serves now — nothing to roll back to">head</span>' : '') + '</td><td><span style="color:var(--' + r.ring + ')">' + r.ring + '</span></td><td>#' + r.seq + '</td><td class="num">' + num(r.package_count) + '</td><td class="dim">' + (r.parent_id || '—') + '</td><td class="dim">' + (r.source_id || '—') + '</td><td class="muted">' + esc(r.note || '') + '</td><td class="when" title="' + esc(r.created_at) + '">' + ago(r.created_at) + '</td><td style="white-space:nowrap">' + diff + rb + '</td></tr>';
     }, { empty: 'no releases yet', n: 25 });
   }
   // The releases are drawn again once the viewer is known: the rollback button is grey until then, and stays grey for everyone but a maintainer. Its press is the shell's (askRollback), which asks, posts the job once and writes #rb-state.
@@ -126,11 +124,11 @@ export const JOURNAL_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // The button is the page's, drawn on every release that is not the head for every viewer — grey with the reason in its title for anyone but a maintainer, and for a maintainer whose ring head is outside the rows (gate); the head's cell says head. What a press does is the shell's (shell.rollback asks, posts once, writes #rb-state). The act is claimed here too: from this page it is a maintainer's, and the fixture proves who may.
+    // The button is the page's, drawn on every release that is not the head for every viewer — grey with the reason in its title for anyone but a maintainer (gate); the head row says head. What a press does is the shell's (shell.rollback asks, posts once, writes #rb-state). The act is claimed here too: from this page it is a maintainer's, and the fixture proves who may.
     id: "journal.rollback-button",
     page: "/journal",
     anchor: ['id="releases"', 'id="rb-state"'],
-    script: ['data-rollback="', 'data-ring="', 'isMaintainer() && heads[r.ring]', '"the head of " + r.ring + " is not in this list"', '"a maintainer rolls back"', '>head</span>', 'whoami(function (me) { if (me && LAST) drawReleases(LAST); })'],
+    script: ['data-rollback="', 'data-ring="', 'isMaintainer(), orSignIn("a maintainer rolls back")', '>head</span>', 'whoami(function (me) { if (me && LAST) drawReleases(LAST); })'],
     reads: [{ path: "/auth/me", as: "maintainer", fields: ["role"] }],
     acts: [
       {

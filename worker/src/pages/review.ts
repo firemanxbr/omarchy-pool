@@ -4,7 +4,7 @@
  * packages in the flow (waiting, then decided), a maintainer's queue. The
  * evidence (PKGBUILD, log, PKGINFO, the gate, the audit) is public; deciding
  * needs the maintainer role, never on one's own package, and copies nothing:
- * the project builds the recipe again from the evidence (docs/GOVERNANCE.md).
+ * the project builds the recipe again from the evidence (/docs/governance).
  *
  * The page is the same for every role: the Yours block, the queue line, the
  * legend, the brake with its two tables and the Decision column are drawn for
@@ -18,16 +18,24 @@ import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 import { CATEGORIES } from "../categories";
 
-/** Why the brake's form is grey for everyone but a maintainer: served on its inputs and button with the attributes gate() writes, taken off by a maintainer's session. */
+/**
+ * The brake's form is one template drawn twice: served grey for everyone —
+ * its inputs and button carry the attributes the shell's gate() writes,
+ * the reason in their title — and drawn again through gate() once whoami
+ * answers, so a maintainer's session is what makes it live. The hero's
+ * sign-in hint is the same shape: served live, gated for a signed-in person.
+ */
 const BLOCK_WHY = "a maintainer blocks; another maintainer lifts";
+const BLOCK_FORM = `<input id="block-what" placeholder="contributor login, or package name" required> <input id="block-why" placeholder="why — the record and the contributor see this" required minlength="4"> <button type="submit">Block</button>`;
 const GATED = ` disabled aria-disabled="true" title="${BLOCK_WHY}"`;
+const WHO_HINT = `Contributors and maintainers: <a href="/auth/github?next=/review">sign in with GitHub</a> to see yours first.`;
 
 const BODY = String.raw`
   <div class="hero compact">
     <p class="eyebrow">Review</p>
     <h1>What is waiting for a maintainer, and what was decided</h1>
     <p class="lede">A contributor's build is evidence. The project builds it again on a worker it trusts, and a maintainer approves <em>that</em> build — never their own package. <a href="/docs/governance">The rules →</a></p>
-    <p class="hint" id="who">Contributors and maintainers: <a href="/auth/github?next=/review">sign in with GitHub</a> to see yours first.</p>
+    <p class="hint" id="who">${WHO_HINT}</p>
   </div>
 
   <div class="tiles four" id="tiles"></div>
@@ -50,7 +58,7 @@ const BODY = String.raw`
 
   <section id="brake">
     <details class="tool"><summary>The brake <span class="dim">block a contributor or a package, with the reason on the record — another maintainer lifts it</span></summary>
-      <form id="block-form" class="searchbar"><input id="block-what" placeholder="contributor login, or package name" required${GATED}> <input id="block-why" placeholder="why — the record and the contributor see this" required minlength="4"${GATED}> <button type="submit"${GATED}>Block</button></form>
+      <form id="block-form" class="searchbar">${BLOCK_FORM.replace(/<(input|button)\b/g, `<$1${GATED}`)}</form>
       <div class="two"><div><div class="table-wrap"><table id="blocked-people"><thead><tr><th>Contributor</th><th>Since</th><th>By</th><th>Reason</th><th></th></tr></thead><tbody></tbody></table></div></div>
       <div><div class="table-wrap"><table id="blocked-packages"><thead><tr><th>Package</th><th>Owner</th><th>Since</th><th>By</th><th>Reason</th><th></th></tr></thead><tbody></tbody></table></div></div></div>
     </details>
@@ -71,15 +79,13 @@ const SCRIPT = String.raw`
 
   // ---- who: the shell's WHO (the omc cookie, one fetch of /auth/me per page). The page is the same for whoever answers; what changes is the name on the Yours block, where its link goes, the gates on the controls — and a signed-in person's own packages, read from /me.
   whoami(function (me) {
-    if (me) { $("#mine-who").textContent = WHO.login + " · " + (WHO.role || "contributor"); $("#mine-ws").href = "/user/" + encodeURIComponent(WHO.login); brakeForm(); privateLoad(); }
+    if (me) { $("#mine-who").textContent = WHO.login + " · " + (WHO.role || "contributor"); $("#mine-ws").href = "/user/" + encodeURIComponent(WHO.login); privateLoad(); }
+    // The two controls served in the HTML, drawn again for whoever is looking: the sign-in hint stays, its link grey for a person already in; the brake's form is a maintainer's.
+    $("#who").innerHTML = gate(${JSON.stringify(WHO_HINT)}, !WHO.me, "signed in as " + WHO.login);
+    $("#block-form").innerHTML = gate(${JSON.stringify(BLOCK_FORM)}, isMaintainer(), orSignIn(${JSON.stringify(BLOCK_WHY)}));
     if (DRAWN) renderStaged();
     renderMine(); renderBlocks();
   });
-  // The brake's form is served the way nobody may use it — its inputs and button grey, the reason in their title, the attributes gate() writes; a maintainer's session takes them off. The one control the page gates in place: the form is in the served HTML, not drawn.
-  function brakeForm() {
-    if (!isMaintainer()) return;
-    $("#block-form").querySelectorAll("[disabled]").forEach(function (el) { el.disabled = false; el.removeAttribute("aria-disabled"); el.removeAttribute("title"); });
-  }
   // What a session unlocks: the reader's own packages, for the Decided list.
   function privateLoad() { api("GET", API + "/me").then(function (d) { if (!d.error) { MINE = d; renderMine(); } }).catch(function () {}); }
 
@@ -103,9 +109,9 @@ const SCRIPT = String.raw`
   function short(t, n) { t = String(t || ""); return t.length > n ? '<span title="' + esc(t) + '">' + esc(t.slice(0, n - 1)) + '…</span>' : esc(t); }
   function renderMine() {
     queueLine();
-    // Nobody signed in: the block is there, with one line in each list for where their packages would be.
+    // Nobody signed in: the block is there, with one line in each list for where their packages would be — and the way to request one, as for everyone.
     if (!WHO.me) {
-      $("#mine-waiting").innerHTML = '<p class="sub" style="margin:0"><a href="/auth/github?next=/review">Sign in with GitHub</a> to see your packages here.</p>';
+      $("#mine-waiting").innerHTML = '<p class="sub" style="margin:0">Nothing of yours here — <a href="/auth/github?next=/review">sign in with GitHub</a> to see your packages. <a href="/request">Request a package →</a></p>';
       $("#mine-decided").innerHTML = '<p class="sub" style="margin:0">What a maintainer said about them, once you are signed in.</p>';
       return;
     }
@@ -144,7 +150,7 @@ const SCRIPT = String.raw`
   }
   // One line for everyone: what waits for a maintainer — for you, as one — what the project is building, what is yours (the reader's own wait for another maintainer).
   function queueLine() {
-    var forMe = shown().filter(function (t) { return !isOwner(t.owner) && decidable(t); }), inFlight = STAGED.filter(function (t) { return t.kind !== "project" && t.project_build && (t.project_build.status === "queued" || t.project_build.status === "leased"); }), own = shown().filter(function (t) { return isOwner(t.owner) && !t.already; });
+    var forMe = shown().filter(forMaintainer), inFlight = STAGED.filter(function (t) { return t.kind !== "project" && t.project_build && (t.project_build.status === "queued" || t.project_build.status === "leased"); }), own = shown().filter(function (t) { return isOwner(t.owner) && !t.already; });
     $("#mine-queue").innerHTML = '<b>' + num(forMe.length) + '</b> waiting for ' + (isMaintainer() ? "your decision" : "a maintainer") + ' <a href="#queue">↓</a> · <b>' + num(inFlight.length) + '</b> the project is building · <b>' + num(own.length) + '</b> yours — ' + (isMaintainer() ? "another" : "a") + ' maintainer decides';
   }
   // One row per package and architecture: a contributor's build the project
@@ -154,15 +160,16 @@ const SCRIPT = String.raw`
   // stays reachable from the project's row and on the build's own page.
   function folded(t) { var pb = t.project_build; return t.kind !== "project" && !!pb && pb.status === "staged" && STAGED.some(function (p) { return p.id === pb.id; }); }
   function shown() { return STAGED.filter(function (t) { return !folded(t); }); }
-  // A staged build a maintainer can act on now: the project's (approve), or a contributor's the project is not already building — and not a build of a version already approved (nothing to decide: drop it).
-  // Ready or nothing to decide — the project's build included: its chain's contributor half (the request, the gate, the audit) must be complete before a maintainer's time is asked.
-  function decidable(t) { var pb = t.project_build; return !t.already && (!t.score || t.score.ready) && (t.kind === "project" || !pb || pb.status === "failed"); }
+  // Counted and highlighted, never gated: a row a maintainer's time is asked for now — nothing already decided, the project not already building it. The buttons read the row's can, and this reads the same as they do: a chain whose contributor's half is not complete says so in its Class cell, and is still a maintainer's to decide.
+  function decidable(t) { var pb = t.project_build; return !t.already && (t.kind === "project" || !pb || pb.status === "failed"); }
+  // What waits for a maintainer, as this reader counts it: a maintainer's own rows are another maintainer's; a contributor's own rows wait like the rest.
+  function forMaintainer(t) { return (!isMaintainer() || !isOwner(t.owner)) && decidable(t); }
   function taskLink(id, text) { return '<a href="/build/' + id + '">' + (text || "#" + id) + '</a>'; }
 
   // ---- in review: the same table for everyone, the Decision column included — a control the reader may not use is grey, with why
   // The category under the name: the same select for everyone, a maintainer's to change.
   function category(t) {
-    return gate('<select class="cat" data-category="' + esc(t.name) + '" title="the category a person finds it under">' + (t.category ? '' : '<option value="" selected>category…</option>') + CATEGORIES.map(function (c) { return '<option' + (c === t.category ? ' selected' : '') + '>' + c + '</option>'; }).join("") + '</select>', isMaintainer(), "a maintainer sets the category");
+    return gate('<select class="cat" data-category="' + esc(t.name) + '" title="the category a person finds it under">' + (t.category ? '' : '<option value="" selected>category…</option>') + CATEGORIES.map(function (c) { return '<option' + (c === t.category ? ' selected' : '') + '>' + c + '</option>'; }).join("") + '</select>', isMaintainer(), orSignIn("a maintainer sets the category"));
   }
   // Where the bytes came from: the worker that held the lease, whose it is, the host it names, who vouched for it (the project's builds) — the approval sees the machine, not only the evidence.
   function builtOn(t) {
@@ -183,7 +190,8 @@ const SCRIPT = String.raw`
   function renderStaged() {
     var rows = shown();
     // The note beside the heading reads the same for everyone, as the queue line does: what waits for a maintainer — for you, as one.
-    var forMe = rows.filter(function (t) { return !isOwner(t.owner) && decidable(t); }).length, redundant = rows.filter(function (t) { return t.already; }).length;
+    var rows = shown();
+    var forMe = rows.filter(forMaintainer).length, redundant = rows.filter(function (t) { return t.already; }).length;
     $("#queue-note").textContent = rows.length ? num(forMe) + " waiting for " + (isMaintainer() ? "your decision" : "a maintainer") + " · " + num(rows.length) + " staged" + (redundant ? " · " + num(redundant) + " of a version already approved" : "") : "";
     pager("#staged", rows, function (t) {
       var det = t.detected || {}, project = t.kind === "project", pb = t.project_build;
@@ -214,7 +222,7 @@ const SCRIPT = String.raw`
     });
   }
   // The brake's record, for everyone: the two tables, a Lift on every row — another maintainer's than the one who blocked.
-  function lift(kind, what, b) { return gate('<button type="button" data-unblock="' + kind + '" data-what="' + esc(what) + '">Lift</button>', isMaintainer() && !isOwner(b.blocked_by), isMaintainer() ? "another maintainer lifts it" : "a maintainer lifts it"); }
+  function lift(kind, what, b) { return gate('<button type="button" data-unblock="' + kind + '" data-what="' + esc(what) + '">Lift</button>', isMaintainer() && !isOwner(b.blocked_by), isMaintainer() ? "another maintainer lifts it" : orSignIn("a maintainer lifts it")); }
   function renderBlocks() {
     if (!BLOCKS) return;
     pager("#blocked-people", (BLOCKS.contributors || []), function (b) {
@@ -292,9 +300,11 @@ export function reviewHtml(poolUrl: string, version: RunningVersion): string {
  */
 export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
   {
+    // The hint is served live and drawn again for whoever answers: the same sentence, its link grey for a person already signed in.
     id: "review.hero",
     page: "/review",
     anchor: ['<p class="eyebrow">Review</p>', 'id="who"', 'href="/auth/github?next=/review"', "sign in with GitHub</a> to see yours first"],
+    script: ['$("#who").innerHTML = gate(', '"signed in as " + WHO.login'],
     reads: [
       { path: "/auth/me", status: 401 },
       { path: "/auth/me", as: "owner", fields: ["login", "role"] },
@@ -338,8 +348,8 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     id: "review.yours-queue-line",
     page: "/review",
     anchor: ['<p class="sub" id="mine-queue">'],
-    script: ['$("#mine-queue")', "function queueLine()", '"your decision" : "a maintainer"', "function decidable(t)"],
-    reads: [{ path: "/api/v1/factory/review", fields: ["staged.0.owner", "staged.0.kind", "staged.0.already", "staged.0.score.ready", "staged.0.project_build"] }],
+    script: ['$("#mine-queue")', "function queueLine()", '"your decision" : "a maintainer"', "function decidable(t)", "function forMaintainer(t)"],
+    reads: [{ path: "/api/v1/factory/review", fields: ["staged.0.owner", "staged.0.kind", "staged.0.already", "staged.0.project_build"] }],
     visible: EVERYONE,
   },
   {
@@ -347,7 +357,7 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     id: "review.yours-waiting",
     page: "/review",
     anchor: ['id="g-waiting"', 'id="mine-waiting"'],
-    script: ['$("#mine-waiting")', "Nothing of yours waiting", "to see your packages here", "t.project_build", "t.already.task", ">built again<", "t.audit.verdict"],
+    script: ['$("#mine-waiting")', "Nothing of yours waiting", "Nothing of yours here", 'href="/request"', "t.project_build", "t.already.task", ">built again<", "t.audit.verdict"],
     reads: [{ path: "/api/v1/factory/review", fields: ["staged.0.id", "staged.0.owner", "staged.0.name", "staged.0.version", "staged.0.arch", "staged.0.kind", "staged.0.from", "staged.0.project_build", "staged.0.already", "staged.0.audit.status"] }],
     visible: EVERYONE,
   },
@@ -369,7 +379,7 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     page: "/review",
     anchor: ['<section id="queue">', 'id="queue-note"'],
     script: ['$("#queue-note")', '" waiting for "', '" staged"', "of a version already approved"],
-    reads: [{ path: "/api/v1/factory/review", fields: ["staged", "staged.0.already", "staged.0.owner", "staged.0.score.ready"] }],
+    reads: [{ path: "/api/v1/factory/review", fields: ["staged", "staged.0.already", "staged.0.owner"] }],
     visible: EVERYONE,
   },
   {
@@ -398,18 +408,18 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     id: "review.category-select",
     page: "/review",
     anchor: ['id="staged"'],
-    script: ["select[data-category]", 'data-category="', '"a maintainer sets the category"', '"/packages/"', '"/category"', "CATEGORIES.map("],
+    script: ["select[data-category]", 'data-category="', 'orSignIn("a maintainer sets the category")', '"/packages/"', '"/category"', "CATEGORIES.map("],
     reads: [{ path: "/api/v1/factory/review", fields: ["staged.0.category", "staged.0.name"] }],
     acts: [{ method: "POST", path: `/api/v1/factory/packages/${F.factoryPkg}/category`, body: { category: CATEGORIES[0] }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 200 } }],
     visible: EVERYONE,
   },
   {
-    // The shell's Decision cell on every row, from the row's can: the buttons every role sees, enabled where the server would say yes; the page draws again once a decision landed.
+    // The shell's Decision cell on every row, from the row's can: the buttons every role sees, enabled where the server would say yes — Withdraw where the row says an approval stands; the page draws again once a decision landed.
     id: "review.decision-buttons",
     page: "/review",
     anchor: ['id="staged"', 'class="decision"'],
     script: ["decisionCell(t)", "onDecided(function () { load(); })", "project build #", "pb.status === \"failed\""],
-    reads: [{ path: "/api/v1/factory/review", fields: ["staged", "staged.0.id", "staged.0.name", "staged.0.version", "staged.0.arch", "staged.0.kind", "staged.0.owner", "staged.0.already", "staged.0.project_build", "staged.0.can.approve", "staged.0.can.reject", "staged.0.can.build", "staged.0.can.withdraw", "staged.0.can.why"] }],
+    reads: [{ path: "/api/v1/factory/review", fields: ["staged", "staged.0.id", "staged.0.name", "staged.0.version", "staged.0.arch", "staged.0.kind", "staged.0.owner", "staged.0.already", "staged.0.standing", "staged.0.project_build", "staged.0.can.approve", "staged.0.can.reject", "staged.0.can.build", "staged.0.can.withdraw", "staged.0.can.why"] }],
     acts: [
       { method: "POST", path: `/api/v1/factory/tasks/${F.projectTask}/approve`, body: { note: "reads well" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: [200, 409] } },
       { method: "POST", path: `/api/v1/factory/tasks/${F.stagedTask}/build`, body: {}, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: [200, 409] } },
@@ -433,11 +443,11 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // Served grey with the reason for everyone; a maintainer's session takes the gate off.
+    // Served grey with the reason for everyone, drawn again through the shell's gate once whoami answers: live for a maintainer, the sign-in for nobody.
     id: "review.brake-form",
     page: "/review",
     anchor: ['id="block-form"', 'id="block-what"', 'id="block-why"', 'minlength="4"', `title="${BLOCK_WHY}"`],
-    script: ['$("#block-form")', "function brakeForm()", '"/api/v1/users/"', 'r.status === 200 ? "contributors" : "packages"', '"/block"'],
+    script: ['$("#block-form").innerHTML = gate(', `orSignIn(${JSON.stringify(BLOCK_WHY)})`, '"/api/v1/users/"', 'r.status === 200 ? "contributors" : "packages"', '"/block"'],
     reads: [
       { path: `/api/v1/users/${F.owner}`, fields: ["login"] },
       { path: `/api/v1/users/${F.factoryPkg}`, status: 404 },
@@ -453,7 +463,7 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     id: "review.blocked-people-table",
     page: "/review",
     anchor: ['id="blocked-people"'],
-    script: ['pager("#blocked-people"', 'lift("contributors"', "function lift(kind, what, b)", "isMaintainer() && !isOwner(b.blocked_by)", '"another maintainer lifts it"', '"a maintainer lifts it"'],
+    script: ['pager("#blocked-people"', 'lift("contributors"', "function lift(kind, what, b)", "isMaintainer() && !isOwner(b.blocked_by)", '"another maintainer lifts it"', 'orSignIn("a maintainer lifts it")'],
     reads: [{ path: "/api/v1/factory/blocks", fields: ["contributors", "contributors.0.login", "contributors.0.blocked_at", "contributors.0.blocked_by", "contributors.0.blocked_reason"] }],
     // m2 lifts what m1 set; m1's own lift would be 403, and a login nobody blocked 409.
     acts: [{ method: "POST", path: `/api/v1/factory/contributors/${F.blockedContributor}/unblock`, body: { reason: "lifted by the tests" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 200 } }],

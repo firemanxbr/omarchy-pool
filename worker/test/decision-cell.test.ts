@@ -97,7 +97,7 @@ describe("the Decision cell is the same buttons for every viewer, grey with the 
     try {
       const b = buttons(shell().decisionCell(await row(F.stagedTask, "alice")));
       expect(b.map((x) => [x.what, x.disabled])).toEqual([["approve", true], ["reject", true], ["build", true]]);
-      expect(b[0].title).toMatch(/Have the project build it first/); // a contributor's build: the kind comes before the owner
+      expect(b[0].title).toMatch(/have the project build it first/); // a contributor's build: the kind comes before the owner
       expect(b[1].title).toBe(OWNER(F.factoryPkg));
       expect(b[2].title).toBe(OWNER(F.factoryPkg));
       // The project's build of her package: Approve and Reject are the owner's to leave alone; Withdraw, undoing, is not deciding.
@@ -116,26 +116,35 @@ describe("the Decision cell is the same buttons for every viewer, grey with the 
   it("m1, a maintainer, on a contributor's staged build: Reject and Build live, Approve grey until the project has built it", async () => {
     const b = buttons(shell().decisionCell(await row(F.stagedTask, "m1")));
     expect(b.map((x) => [x.what, x.disabled])).toEqual([["approve", true], ["reject", false], ["build", false]]);
-    expect(b[0].title).toBe(`a contributor's build is evidence, never what users get. Have the project build it first (POST /factory/tasks/${F.stagedTask}/build), then approve the project's build`);
+    expect(b[0].title).toBe("a contributor's build is evidence, never what users get — have the project build it first, then approve the project's build");
     expect(b[1].title).toBeNull();
     expect(b[2].title).toBeNull();
   });
 
-  it("m1 on the project's approved build: Approve grey (already approved), Reject live, Build grey (the project's own), Withdraw live", async () => {
+  it("m1 on the project's approved build: Approve grey (already approved), Reject grey (withdraw first), Build grey (the project's own), Withdraw live", async () => {
     const b = buttons(shell().decisionCell(await buildRow(F.projectTask, "m1")));
     expect(b.map((x) => [x.what, x.disabled, x.title])).toEqual([
       ["approve", true, "already approved"],
-      ["reject", false, null],
+      ["reject", true, "already approved — withdraw the approval first"],
       ["build", true, "the project's own build; the project builds from a contributor's staged build"],
       ["withdraw", false, "take the approval back: the package leaves every ring, another maintainer decides — the reason goes on the record"],
     ]);
   });
 
-  it("gate() leaves a control alone when ok and disables every control in it with the reason otherwise — a link too, and a title already there gives way", () => {
+  it("a list row that carries a standing approval draws Withdraw as the build's page does — the same cell whichever page reads it", async () => {
+    // The fixture's lists hold no such row (a chain approved leaves the review); the row is a build's page's, with `standing` where the list would put it.
+    const t = await buildRow(F.projectTask, "m1");
+    const asList = { id: t.id, name: t.name, version: t.version, arch: t.arch, can: t.can, standing: true };
+    expect(buttons(shell().decisionCell(asList)).map((x) => x.what)).toEqual(["approve", "reject", "build", "withdraw"]);
+    expect(buttons(shell().decisionCell({ ...asList, standing: false })).map((x) => x.what)).toEqual(["approve", "reject", "build"]);
+  });
+
+  it("gate() leaves a control alone when ok and disables every control in it with the reason otherwise — a link loses its href too, and a title already there gives way", () => {
     const { gate } = shell();
     const html = '<button type="button" title="press">Go</button> <a class="run" href="/x">there</a> <select><option>a</option></select>';
     expect(gate(html, true, "never shown")).toBe(html);
     const grey = gate(html, false, 'a maintainer "decides"');
-    expect(grey).toBe('<button type="button" disabled aria-disabled="true" title="a maintainer &quot;decides&quot;">Go</button> <a class="disabled run" href="/x" tabindex="-1" aria-disabled="true" title="a maintainer &quot;decides&quot;">there</a> <select disabled aria-disabled="true" title="a maintainer &quot;decides&quot;"><option>a</option></select>');
+    expect(grey).toBe('<button type="button" disabled aria-disabled="true" title="a maintainer &quot;decides&quot;">Go</button> <a class="disabled run" data-href="/x" tabindex="-1" aria-disabled="true" title="a maintainer &quot;decides&quot;">there</a> <select disabled aria-disabled="true" title="a maintainer &quot;decides&quot;"><option>a</option></select>');
+    expect(grey).not.toContain(' href="');
   });
 });

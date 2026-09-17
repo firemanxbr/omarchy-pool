@@ -919,18 +919,21 @@ export const HELPERS = String.raw`
     ev.stopImmediatePropagation(); b.disabled = true;
     askRollback(b.getAttribute("data-ring"), b.getAttribute("data-rollback")).then(function (j) { if (j === null || j.error) b.disabled = false; }, function (e) { b.disabled = false; toast("failed: " + esc(String(e)), "error"); });
   });
-  // ---- a control gated by role. The dashboard's rule: every role sees every control, the same for all; what a role cannot do is the same control disabled, grey, with the reason in its title — never hidden, never absent, never a sentence in its place. ok true returns the control as given; false marks every button, select, input and textarea in it disabled (aria-disabled, title = why, an existing title replaced) and every link class="disabled" with tabindex -1, which the click handler below stops. The reason is the server's where it has one (can.why on a review row, on GET /factory/tasks/:id/can), so a grey button is one the POST would refuse in the same words.
+  // ---- a control gated by role. The dashboard's rule: every role sees every control, the same for all; what a role cannot do is the same control disabled, grey, with the reason in its title — never hidden, never absent, never a sentence in its place. ok true returns the control as given; false marks every button, select, input and textarea in it disabled (aria-disabled, title = why, an existing title replaced) and every link class="disabled" with tabindex -1 and its href moved to data-href — a link without an href is followed by nothing, not a middle click, not "open in a new tab", not a drag — and the click handler below stops the rest. The reason is the server's where it has one (can.why on a review row, on GET /factory/tasks/:id/can), so a grey button is one the POST would refuse in the same words.
   function gate(html, ok, why) {
     if (ok) return html;
     return html.replace(/<(button|select|input|textarea|a)\b([^>]*)>/g, function (m, tag, attrs) {
       attrs = attrs.replace(/\s*\/$/, "").replace(/\s+(title|aria-disabled|tabindex)="[^"]*"/g, "").replace(/\s+disabled(="[^"]*")?(?=[\s>]|$)/g, "");
       var tip = ' aria-disabled="true" title="' + esc(why) + '"';
       if (tag !== "a") return "<" + tag + attrs + " disabled" + tip + ">";
+      attrs = attrs.replace(/\shref="/, ' data-href="');
       return "<a" + (/\sclass="/.test(attrs) ? attrs.replace(/\sclass="/, ' class="disabled ') : attrs + ' class="disabled"') + ' tabindex="-1"' + tip + ">";
     });
   }
   // A gated link goes nowhere: caught first (capture), before any page's handler on the same click.
   document.addEventListener("click", function (ev) { var a = ev.target.closest ? ev.target.closest("a.disabled") : null; if (a) { ev.preventDefault(); ev.stopImmediatePropagation(); } }, true);
+  // The reason a page gives its own gate, for whoever is looking: nobody signed in reads the sign-in first, as the server's own first refusal is the 401 — the same word on every grey control of a page, the Decision cell's included.
+  function orSignIn(why) { return WHO.me ? why : "sign in with GitHub"; }
 
   // ---- the three verdicts on a staged build, as Review's table reads them: the gate (the worker's own checks on the build), the audit (the project's second agent), the trial (a real pacman installing the project's build in the lab). The pill, then the evidence as a link when the row has one (href: t.evidence.tests / .audit / .trial) — what warned or failed, the findings, the transcript — and as a word when it has none.
   function gatePill(v, href) {
@@ -964,11 +967,11 @@ export const HELPERS = String.raw`
     return '<span class="muted" title="only the project\'s build is tried">—</span>';
   }
 
-  // ---- the Decision cell of a build, the same for every viewer: Approve, Reject (Drop, its note preset, on a build of a version already approved — t.already), Build by the project, and Withdraw the approval when one stands on the row (t.approval, as a build's page reads it) — each enabled where t.can says so and grey with t.can.why in its title otherwise. t is a row of GET /factory/review, or { id, name, version, arch, can, already, approval } put together from a task and GET /factory/tasks/:id/can. A row nobody can act on shows the same buttons, all grey. The buttons carry the task id (data-approve="12" …) and the click is the shell's (below): the page registers onDecided(fn) to draw again.
+  // ---- the Decision cell of a build, the same for every viewer: Approve, Reject (Drop, its note preset, on a build of a version already approved — t.already), Build by the project, and Withdraw the approval when one stands on the row (t.standing, as the review list says it; t.approval, as a build's page reads it) — each enabled where t.can says so and grey with t.can.why in its title otherwise. t is a row of GET /factory/review, or { id, name, version, arch, can, already, approval } put together from a task and GET /factory/tasks/:id/can. A row nobody can act on shows the same buttons, all grey. The buttons carry the task id (data-approve="12" …) and the click is the shell's (below): the page registers onDecided(fn) to draw again.
   function decisionCell(t) {
     var c = t.can || { why: {} }, why = c.why || {}, id = t.id;
     var btn = function (what, text, extra) { return gate('<button type="button" data-' + what + '="' + id + '"' + (extra || "") + '>' + text + '</button>', !!c[what], why[what] || "not now"); };
-    var standing = !!(t.approval && t.approval.decision === "approved" && !t.approval.withdrawn_at);
+    var standing = t.standing === true || !!(t.approval && t.approval.decision === "approved" && !t.approval.withdrawn_at);
     var label = t.name ? t.name + (t.version ? " " + t.version : "") + " (build #" + id + ")" : "build #" + id;
     return '<span class="decide" data-task="' + id + '" data-label="' + esc(label) + '" data-arch="' + esc(t.arch || "") + '">'
       + btn("approve", "Approve")

@@ -303,14 +303,15 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
     return c ? handleNewToken(c, env) : json({ error: "sign in first" }, 401);
   }
   // Maintainers: have the project build a staged package, approve or reject a staged build.
+  // Nobody at the door reads the same words the predicate gives a page (decisions() in routes/review.ts): the refusal is the button's title.
   if ((m = path.match(/^\/factory\/tasks\/(\d+)\/withdraw$/)) && method === "POST") {
     const c = await contributorOf(request, env);
-    if (!c) return json({ error: "a maintainer's contributor token is required" }, 401);
+    if (!c) return json({ error: "sign in with GitHub" }, 401);
     return handleWithdraw(c, Number(m[1]), request, env);
   }
   if ((m = path.match(/^\/factory\/tasks\/(\d+)\/(approve|reject|build)$/)) && method === "POST") {
     const c = await contributorOf(request, env);
-    if (!c) return json({ error: "a maintainer's contributor token is required" }, 401);
+    if (!c) return json({ error: "sign in with GitHub" }, 401);
     return m[2] === "approve" ? handleApprove(c, Number(m[1]), request, env) : m[2] === "build" ? handleProjectBuild(c, Number(m[1]), request, env) : handleReject(c, Number(m[1]), request, env);
   }
   // Workers: registered ones only (own token), or a job's token. There is

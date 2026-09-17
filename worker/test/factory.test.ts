@@ -231,7 +231,7 @@ describe("a community build, its audit and the review", () => {
     // Nothing of the contributor's is ever what users get: the approval is refused outright.
     const refused = await call("POST", `/factory/tasks/${task}/approve`, {}, "omc_m2");
     expect(refused.status).toBe(409);
-    expect(refused.json.error).toMatch(/Have the project build it first/);
+    expect(refused.json.error).toMatch(/have the project build it first/);
     expect((await call("POST", `/factory/tasks/${task}/build`, {}, "omc_alice")).status).toBe(403);
     // The owner is who requested the package (the registration), not who happened to build it.
     await env.DB.prepare("UPDATE factory_packages SET owner = 'm1' WHERE name = 'mine'").run();

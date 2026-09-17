@@ -75,7 +75,7 @@ describe("what a caller may do on a staged build", () => {
       const r = await review(who);
       for (const t of r.json.staged) {
         expect(t.can, `${who} on ${t.id}`).toMatchObject({ approve: false, reject: true, build: true, withdraw: false });
-        expect(t.can.why.approve).toMatch(/Have the project build it first/);
+        expect(t.can.why.approve).toMatch(/have the project build it first/);
         expect(t.can.why.withdraw).toBe("nothing standing to withdraw");
         expect(Object.keys(t.can.why).sort()).toEqual(["approve", "withdraw"]);
         expect(await canOf(t.id, who)).toEqual(t.can);
@@ -83,15 +83,20 @@ describe("what a caller may do on a staged build", () => {
     }
   });
 
-  it("the project's build approved by m2: already approved for any maintainer, its approval there to withdraw; its contributor's half says the project is on it", async () => {
+  it("the project's build approved by m2: already approved for any maintainer, nothing to reject beside a standing approval, its approval there to withdraw; its contributor's half says the project is on it", async () => {
     for (const who of ["m1", "m2"] as const) {
       const p = await canOf(F.projectTask, who);
-      expect(p).toMatchObject({ approve: false, reject: true, build: false, withdraw: true });
-      expect(p.why).toEqual({ approve: "already approved", build: "the project's own build; the project builds from a contributor's staged build" });
+      expect(p).toMatchObject({ approve: false, reject: false, build: false, withdraw: true });
+      expect(p.why).toEqual({ approve: "already approved", reject: "already approved — withdraw the approval first", build: "the project's own build; the project builds from a contributor's staged build" });
+      // The contributor's half stays staged after the publish; it is decided all the same.
       const c = await canOf(F.contributorTask, who);
-      expect(c).toMatchObject({ approve: false, reject: true, build: false, withdraw: true });
+      expect(c).toMatchObject({ approve: false, reject: false, build: false, withdraw: true });
       expect(c.why.build).toBe(`the project is already on it: task ${F.projectTask} is staged`);
-      expect(c.why.approve).toMatch(/Have the project build it first/);
+      expect(c.why.reject).toBe("already approved — withdraw the approval first");
+      expect(c.why.approve).toMatch(/have the project build it first/);
+      const rj = await call("POST", `/factory/tasks/${F.contributorTask}/reject`, who, { note: "a rejection beside a standing approval" });
+      expect(rj.status).toBe(409);
+      expect(rj.json.error).toBe(c.why.reject);
     }
   });
 
@@ -102,7 +107,7 @@ describe("what a caller may do on a staged build", () => {
       for (const t of (await review("alice")).json.staged) {
         expect(t.can, `alice on ${t.id}`).toMatchObject({ approve: false, reject: false, build: false, withdraw: false });
         expect(t.can.why).toMatchObject({ reject: OWNER(F.factoryPkg), build: OWNER(F.factoryPkg) });
-        expect(t.can.why.approve).toMatch(/Have the project build it first/); // a contributor's build: that comes before the owner
+        expect(t.can.why.approve).toMatch(/have the project build it first/); // a contributor's build: that comes before the owner
         const reject = await call("POST", `/factory/tasks/${t.id}/reject`, "alice", { note: "my own, rejected" });
         expect(reject.status).toBe(403);
         expect(reject.json.error).toBe(t.can.why.reject);
@@ -132,8 +137,7 @@ describe("what a caller may do on a staged build", () => {
           const res = await call("POST", `/factory/tasks/${id}/${d}`, who, d === "approve" || d === "build" ? {} : note);
           expect(res.status === 200, `${who || "nobody"} ${d} on ${id}: can ${c[d]} (${c.why[d] ?? "-"}), POST ${res.status} ${JSON.stringify(res.json)}`).toBe(c[d]);
           if (res.status === 200) allowed++;
-          else if (who) expect(res.json.error, `${who} ${d} on ${id}`).toBe(c.why[d]);
-          else expect(res.status).toBe(401); // the door's own 401: no session at all
+          else expect(res.json.error, `${who || "nobody"} ${d} on ${id}`).toBe(c.why[d]); // nobody too: the door answers the predicate's sentence
         }
       }
     }
@@ -153,21 +157,42 @@ describe("what a caller may do on a staged build", () => {
     expect((await call("GET", "/factory/tasks/999999/can", "m1")).status).toBe(404);
   });
 
-  it("the approval withdrawn by a maintainer: approve is theirs again, then already approved once more", async () => {
+  it("the approval withdrawn by a maintainer: approve and reject are theirs again, then already approved once more", async () => {
     const before = await canOf(F.projectTask, "m1");
-    expect(before).toMatchObject({ approve: false, withdraw: true });
+    expect(before).toMatchObject({ approve: false, reject: false, withdraw: true });
     const wd = await call("POST", `/factory/tasks/${F.projectTask}/withdraw`, "m1", { note: "taken back by the test" });
     expect(wd.status, JSON.stringify(wd.json)).toBe(200);
     const after = await canOf(F.projectTask, "m1");
     expect(after).toMatchObject({ approve: true, reject: true, build: false, withdraw: false });
     expect(after.why.withdraw).toBe("nothing standing to withdraw");
-    expect((await review("m1")).json.staged.find((t: any) => t.id === F.projectTask)?.can).toEqual(after);
+    const listed = (await review("m1")).json.staged.find((t: any) => t.id === F.projectTask);
+    expect(listed?.can).toEqual(after);
+    expect(listed?.standing).toBe(false);
     // The one who approved may not be the owner; m1 is not, and approves.
     const ap = await call("POST", `/factory/tasks/${F.projectTask}/approve`, "m1", { note: "approved by the test" });
     expect(ap.status, JSON.stringify(ap.json)).toBe(200);
     const again = await canOf(F.projectTask, "m2");
-    expect(again).toMatchObject({ approve: false, withdraw: true });
-    expect(again.why.approve).toBe("already approved");
+    expect(again).toMatchObject({ approve: false, reject: false, withdraw: true });
+    expect(again.why).toMatchObject({ approve: "already approved", reject: "already approved — withdraw the approval first" });
     expect((await call("POST", `/factory/tasks/${F.projectTask}/approve`, "m2", {})).json.error).toBe("already approved");
+  });
+
+  it("a project's build the sweep emptied: approve is refused before the click, with the reason the POST answers", async () => {
+    // The approval withdrawn, the build is a maintainer's to approve — until its package is gone from staging (staging.ts sweeps objects past STAGING_DAYS, the row stays staged).
+    expect((await call("POST", `/factory/tasks/${F.projectTask}/withdraw`, "m2", { note: "taken back once more by the test" })).status).toBe(200);
+    expect((await canOf(F.projectTask, "m1")).approve).toBe(true);
+    await env.DB.prepare("UPDATE staging_objects SET key = key || '.swept' WHERE task_id = ? AND key LIKE '%.pkg.tar.zst'").bind(F.projectTask).run();
+    try {
+      const c = await canOf(F.projectTask, "m1");
+      expect(c).toMatchObject({ approve: false, reject: true, build: false, withdraw: false });
+      expect(c.why.approve).toBe("the project's build left no package in staging");
+      expect((await review("m1")).json.staged.find((t: any) => t.id === F.projectTask)?.can).toEqual(c);
+      const ap = await call("POST", `/factory/tasks/${F.projectTask}/approve`, "m1", { note: "approving what is not there" });
+      expect(ap.status).toBe(409);
+      expect(ap.json.error).toBe(c.why.approve);
+    } finally {
+      await env.DB.prepare("UPDATE staging_objects SET key = substr(key, 1, length(key) - 6) WHERE task_id = ? AND key LIKE '%.pkg.tar.zst.swept'").bind(F.projectTask).run();
+    }
+    expect((await canOf(F.projectTask, "m1")).approve).toBe(true);
   });
 });

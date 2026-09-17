@@ -53,9 +53,8 @@ const BODY = String.raw`
 
   <section>
     <div class="h2row"><h2>Review queue</h2><a class="more-link" href="/review">Decisions, trust, the audit →</a></div>
-    <p class="sub">Evidence, not packages. Approve queues a rebuild on the review worker; reject sends a note back.</p>
-    <p class="sub" id="rq-state" hidden></p>
-    <div class="table-wrap"><table id="staged"><thead><tr><th>#</th><th>Package</th><th>Arch</th><th>Built by</th><th>Evidence</th><th>Audit</th><th>Waiting</th><th>Decision</th></tr></thead><tbody></tbody></table></div>
+    <p class="sub">Evidence, not packages. Build by the project queues a rebuild on the review worker; approve publishes the project's build; reject sends a note back.</p>
+    <div class="table-wrap"><table id="staged"><thead><tr><th>#</th><th>Package</th><th>Arch</th><th>Built by</th><th>Evidence</th><th>Audit</th><th>Waiting</th><th class="decision">Decision</th></tr></thead><tbody></tbody></table></div>
   </section>
 
   <section>
@@ -212,7 +211,7 @@ __CHARTS__
       : card("", me && me.login ? "none of your builds is waiting for a decision right now" : '<a href="/auth/github?next=/pipeline">sign in with GitHub</a> to see where yours sits');
   }
 
-  // ---- the review queue: what is staged, with the audit (the shell's auditPill) and the Decision cell (the shell's decisionCell) — the same buttons for every reader, live where the row's can says so and grey with the server's reason otherwise. The click, the dialogs and the post are the shell's; the page draws again once a decision landed and keeps one line about it under the table, the toast gone.
+  // ---- the review queue: what is staged, with the audit (the shell's auditPill) and the Decision cell (the shell's decisionCell) — the same buttons for every reader, live where the row's can says so and grey with the server's reason otherwise. The click, the dialogs, the post and the toast that says what happened are the shell's; the page only draws again once a decision landed, as Review does.
   function renderStaged(staged) {
     pager("#staged", staged, function (s) {
       var ev = s.evidence || {};
@@ -221,11 +220,7 @@ __CHARTS__
         '<td class="decision">' + decisionCell(s) + '</td></tr>';
     }, { empty: "nothing staged — every contributor build has been decided", n: 10 });
   }
-  onDecided(function (what, id, d) {
-    var el = $("#rq-state"); el.hidden = false;
-    el.innerHTML = pillHtml("ok", what === "approve" ? "approved" : what === "build" ? "building again" : what === "withdraw" ? "withdrawn" : "rejected") + ' build <a href="/build/' + id + '">#' + id + '</a>' + (what === "approve" && d.publish ? ' — publish job <a href="/build/' + d.publish + '">#' + d.publish + '</a>' : what === "build" && d.task ? ' — the project builds it as task <a href="/build/' + d.task + '">#' + d.task + '</a>' : "");
-    loadAll();
-  });
+  onDecided(function () { loadAll(); });
 
   // ---- operations: tiles, the diagram's numbers (the workers themselves are on /workers)
   function renderOps(d) {
@@ -257,7 +252,7 @@ __CHARTS__
     $("#heads").innerHTML = ["stable", "rc", "edge"].map(function (n) {
       var r = d.rings.filter(function (x) { return x.ring === n; })[0] || {}, rel = r.release, h = ["x86_64", "aarch64"].map(function (a) { var e = latest(d.latest, "health", n, a); return a + " " + (e ? e.status : "—"); }).join(" · ");
       var prev = (d.releases || []).filter(function (x) { return x.ring === n && !x.is_head; })[0];
-      return '<div class="headc ' + n + '"><div class="n"><b>' + n + '</b><span class="dim">' + (rel ? "#" + rel.seq + " · " + ago(rel.created_at) : "no release") + '</span></div><div class="m">' + num(r.package_count || 0) + ' packages · ' + bytes(r.bytes || 0) + ' · ' + h + '</div><div class="acts">' + (rel && rel.parent_id ? '<a class="small-btn" href="/diff?ring=' + n + '&from=' + rel.parent_id + '&to=' + rel.id + '">diff</a>' : "") + (prev ? gate('<button type="button" class="small-btn" data-rollback="' + prev.id + '" data-ring="' + n + '" title="point ' + n + ' back at release ' + prev.id + '">roll back to #' + prev.seq + '</button>', isMaintainer(), "a maintainer rolls back") : "") + '</div></div>';
+      return '<div class="headc ' + n + '"><div class="n"><b>' + n + '</b><span class="dim">' + (rel ? "#" + rel.seq + " · " + ago(rel.created_at) : "no release") + '</span></div><div class="m">' + num(r.package_count || 0) + ' packages · ' + bytes(r.bytes || 0) + ' · ' + h + '</div><div class="acts">' + (rel && rel.parent_id ? '<a class="small-btn" href="/diff?ring=' + n + '&from=' + rel.parent_id + '&to=' + rel.id + '">diff</a>' : "") + (prev ? gate('<button type="button" class="small-btn" data-rollback="' + prev.id + '" data-ring="' + n + '" title="point ' + n + ' back at release ' + prev.id + '">roll back to #' + prev.seq + '</button>', isMaintainer(), orSignIn("a maintainer rolls back")) : "") + '</div></div>';
     }).join("");
     pager("#events", d.events, eventRow, { empty: "nothing yet", n: 10 });
   }
@@ -489,7 +484,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
   {
     id: "pipeline.review-queue-table",
     page: "/pipeline",
-    anchor: ['id="staged"', "<th>Decision</th>"],
+    anchor: ['id="staged"', '<th class="decision">Decision</th>'],
     script: ['pager("#staged"', "s.evidence", "ev.pkgbuild", "auditPill(s.audit)", '<td class="decision">'],
     // The evidence links point at the artifacts of a staged build; the fixture's undecided rows were written without any, so the links are read on the contributor's build.
     reads: [
@@ -503,12 +498,12 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
   {
     id: "pipeline.review-decision-buttons",
     page: "/pipeline",
-    anchor: ['id="staged"', 'id="rq-state"'],
-    // The cell is the shell's decisionCell, drawn from the row's `can` for whoever reads: every button for every reader, live where the server would answer 200 and grey with its reason where it would refuse. The click, the four dialogs and the post are the shell's (shell.decide); the page draws again through onDecided and keeps one line about the decision under the table.
-    script: ["decisionCell(s)", "onDecided(function (what, id, d)", '$("#rq-state")', "the project builds it as task"],
-    // `can` rides the no-store list, for nobody (all false, "sign in with GitHub") and for a maintainer alike; `already` names the approval a build of an approved version repeats (null on the fixture's rows).
+    anchor: ['id="staged"', '<td class="decision">'],
+    // The cell is the shell's decisionCell, drawn from the row's `can` for whoever reads: every button for every reader, live where the server would answer 200 and grey with its reason where it would refuse. The click, the four dialogs, the post and the toast are the shell's (shell.decide); the page draws again through onDecided.
+    script: ["decisionCell(s)", "onDecided(function () { loadAll(); })"],
+    // `can` rides the no-store list, for nobody (all false, "sign in with GitHub") and for a maintainer alike; `already` names the approval a build of an approved version repeats (null on the fixture's rows); `standing` says an approval stands on the chain, so Withdraw is drawn.
     reads: [
-      { path: "/api/v1/factory/review", fields: ["staged.0.can.approve", "staged.0.can.reject", "staged.0.can.build", "staged.0.can.withdraw", "staged.0.can.why", "staged.0.already"] },
+      { path: "/api/v1/factory/review", fields: ["staged.0.can.approve", "staged.0.can.reject", "staged.0.can.build", "staged.0.can.withdraw", "staged.0.can.why", "staged.0.already", "staged.0.standing"] },
       { path: "/api/v1/factory/review", as: "maintainer", fields: ["staged.0.can.approve", "staged.0.can.reject", "staged.0.can.build", "staged.0.can.withdraw", "staged.0.can.why"] },
     ],
     // Approve is drawn on every staged row here, but only the project's build can be approved — the fixture's is
@@ -605,7 +600,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     page: "/pipeline",
     anchor: ['id="heads"', 'id="rb-state"'],
     // The page draws the button on every ring card with a release before the head, for everyone — live for a maintainer, grey with the reason for anyone else; the click, the dialog and the post are the shell's (shell.rollback).
-    script: ['gate(\'<button type="button" class="small-btn" data-rollback="', "roll back to #", '"a maintainer rolls back"'],
+    script: ['gate(\'<button type="button" class="small-btn" data-rollback="', "roll back to #", 'orSignIn("a maintainer rolls back")'],
     // Queued, never run: no worker claims it in the tests, so what stable serves does not change. `to` is a string, as the button's attribute sends it.
     acts: [{ method: "POST", path: "/api/v1/factory/jobs", body: { kind: "rollback", params: { ring: "stable", to: String(F.previousRelease), note: "the fixture's rollback" } }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 201 } }],
     visible: EVERYONE,
