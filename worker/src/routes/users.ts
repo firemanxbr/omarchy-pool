@@ -102,7 +102,13 @@ export async function handleUser(login: string, env: Env): Promise<Response> {
       packages: packages.results,
       builds: await Promise.all(builds.results.map(async (b) => (b.status === "queued" && b.trust === "community" ? { ...b, queue: await queuePosition(env, b as { id: number; arch: string; priority?: number; shared_after?: string | null; pinned_to?: string | null }) } : b))),
       build_counts: counts ?? { staged: 0, published: 0, failed: 0, total: 0 },
-      approvals: approvals.results,
+      // A standing approval says where the package stands today: the rings that serve it, from the factory's rows in each ring.
+      approvals: await Promise.all((approvals.results as { name: string; arch: string; decision: string; withdrawn_at: string | null }[]).map(async (a) => {
+        if (a.decision !== "approved" || a.withdrawn_at) return a;
+        const rings = (await env.DB.prepare("SELECT DISTINCT rp.ring FROM ring_packages rp JOIN packages p ON p.id = rp.package_id WHERE p.name = ? AND p.repo_arch = ? AND p.source = 'factory' AND rp.ring IN ('lab', 'edge', 'rc', 'stable')").bind(a.name, a.arch).all<{ ring: string }>()).results.map((r) => r.ring);
+        const order = ["lab", "edge", "rc", "stable"];
+        return { ...a, rings: rings.sort((x, y) => order.indexOf(x) - order.indexOf(y)) };
+      })),
       approved_packages: approvedNames,
       record,
       workers: (workers.results as { last_seen: string }[]).map((w) => ({ ...w, alive: w.last_seen > alive })),
