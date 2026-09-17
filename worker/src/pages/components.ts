@@ -214,6 +214,24 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     visible: ["maintainer"],
   },
   {
+    // A control gated by role (gate): the same control for everyone, disabled with why in its title for the role that may not use it; the CSS that greys it and the click that stops a gated link are the shell's.
+    id: "shell.gate",
+    page: "/",
+    anchor: ["button[disabled], select[disabled], input[disabled], textarea[disabled], a.disabled {", ".decide {"],
+    script: ["function gate(", 'aria-disabled="true"', 'closest("a.disabled")', "function gatePill(", "function auditPill(", "function trialPill("],
+    visible: EVERYONE,
+  },
+  {
+    // The Decision cell (decisionCell) and its click: the four decisions on a staged build post through the shell, and the dialog for the project's build reads the project's workers first. The act is claimed by the roles that change nothing; the maintainer's are the pages' (Review's decision buttons, a build's page).
+    id: "shell.decide",
+    page: "/",
+    anchor: [],
+    script: ["function decisionCell(", "function decideDialog(", "function onDecided(", ".decide button[data-approve]", '"/api/v1/factory/tasks/" + id + "/" + what', '"/api/v1/factory?limit=10"', "whereOptions(ws"],
+    reads: [{ path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.id", "workers.0.arch", "workers.0.side", "workers.0.kinds", "workers.0.alive", "workers.0.agent_status", "workers.0.labels"] }],
+    acts: [{ method: "POST", path: `/api/v1/factory/tasks/${F.stagedTask}/withdraw`, body: { note: "the shell's withdraw, from the fixture" }, expect: { anonymous: 401, contributor: 403, owner: 403 } }],
+    visible: EVERYONE,
+  },
+  {
     // The mark, as the head names it and as browsers ask for it by name (icons.ts).
     id: "icons.favicons",
     page: "/",

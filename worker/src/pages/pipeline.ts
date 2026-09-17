@@ -211,13 +211,7 @@ __CHARTS__
     } else $("#queue-pos").innerHTML = '<p class="sub" style="margin:14px 0 0;font-size:12.5px">Signed-in contributors see where their own builds sit in this queue.</p>';
   }
 
-  // ---- the review queue: what is staged, with the audit; maintainers decide here or on /review
-  function auditPill(a) {
-    if (!a || a.status === "none") return '<span class="pill none">none</span>';
-    if (a.status !== "done") return '<span class="pill none">' + esc(a.status) + '</span>';
-    var v = a.verdict === "pass" ? "ok" : a.verdict === "fail" ? "error" : "warn";
-    return '<span class="pill ' + v + '" title="' + esc(a.summary || "") + '">' + esc(a.verdict || "done") + '</span>' + (a.high ? ' <span class="muted">' + a.high + ' high</span>' : '');
-  }
+  // ---- the review queue: what is staged, with the audit (the shell's auditPill); maintainers decide here or on /review
   function renderStaged(staged) {
     pager("#staged", staged, function (s) {
       var ev = s.evidence || {};

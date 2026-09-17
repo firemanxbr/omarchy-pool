@@ -192,6 +192,25 @@ describe("dashboard pages", () => {
     expect(problems, problems.join("\n")).toEqual([]);
   });
 
+  // The dashboard's rule for roles: every role sees every section and every control, the same for all; what a role cannot do is a disabled control with the reason in its title — never hidden, never absent, never a sentence in its place. So the sections that exist for everyone are never served `hidden`; the attribute stays for what does not exist yet (a result line before a POST, an empty group). The list is the sections the redesign names per page — Review's Yours block, a maintainer's queue line, the audit legend, the brake; the Pipeline's queue-position card, its Operations hint; the Journal's releases with the rollback column — and a build's page (#acts), a person's page (#pk-request, #w-toggle, #w-own) and the request (#ask) join it as they pass.
+  it("serves the sections everyone gets without hidden — a role that cannot act sees the control grey, never nothing", async () => {
+    const ALWAYS: Record<string, string[]> = {
+      "/review": ["mine", "mine-queue", "legend", "brake", "staged"],
+      "/pipeline": ["queue-pos", "ops-who", "staged", "heads"],
+      "/journal": ["releases"],
+    };
+    const problems: string[] = [];
+    for (const [path, ids] of Object.entries(ALWAYS)) {
+      const html = await (await get(path)).text();
+      for (const id of ids) {
+        const tag = new RegExp(`<[a-z]+\\b[^>]*\\bid="${id}"[^>]*>`).exec(html);
+        if (!tag) problems.push(`${path}: #${id} is not served`);
+        else if (/\shidden(?=[\s>=])/.test(tag[0])) problems.push(`${path}: #${id} is served hidden`);
+      }
+    }
+    expect(problems, problems.join("\n")).toEqual([]);
+  });
+
   it("every docs page carries the same shell — the map with every chapter's sections, the search — and the stages are on How it works", async () => {
     const { DOCS_TREE } = await import("../src/pages/docs-tree");
     for (const path of ["/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/governance", "/docs/security", "/docs/glossary", "/api", "/docs/architecture", "/docs/runbook"]) {
