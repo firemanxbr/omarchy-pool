@@ -83,11 +83,20 @@ decision — earns points, fifty for each half, from what the pool recorded:
 
 | The contributor's half | points | The maintainer's half | points |
 |---|---:|---|---:|
-| A request on the record: licence and source named | 5 | The project built it again (−3 per extra attempt, at least 6) | 15 |
+| A request on the record: licence and source named, as the form asks today (2 when it predates the checklist — renew it) | 5 | The project built it again (−3 per extra attempt, at least 6) | 15 |
 | A build that succeeds (−3 per extra attempt, at least 4) | 15 | The project's gate: clean 10, with warnings 7 | 10 |
 | The gate: clean 15, with warnings 10, failed 0 | 15 | The trial installed it | 15 |
 | The audit: ok 15, warn 10 (5 with a high finding), block 0 | 15 | A decision with a note (3 without) | 5 |
 | | | The category settled | 5 |
+
+A chain is **ready** for a maintainer when the contributor's half is
+complete: a build that succeeded, the gate passed, the audit answered —
+and the request as the form would take it today. A request the pool wrote
+from a registration made before the form existed confirmed nothing; the
+contributor renews it from their page (the same form, filled from the
+record) and the build is ready again. Each architecture is its own chain:
+one can be ready while the other failed, and a person's page shows them
+one by one.
 
 The **class** is the score today: **A** from 90, **B** from 75, **C**
 from 55, **D** below. Beside it the dashboard shows the class the chain
@@ -132,3 +141,16 @@ maintainer merges it like any other change to the process.
   `.desktop` entry is valid — while a command-line binary must still start.
   The *Desktop apps* and *Prebuilt binaries* skills were written from the
   recipe that passed.
+- **2026-09-17 — the request predates the form.** The first packages were
+  registered before the request form existed; the pool wrote their
+  records from what it had, with an empty checklist and often an unknown
+  version, and the score gave them the full five points for "a request on
+  the record" — so a package could read *ready for a maintainer* on a
+  request nobody had confirmed. The request is now checked the way the
+  form checks it, one function for the story, for Review and for the
+  page: an incomplete one earns two points, is not ready, and says what to
+  put right; the contributor renews it from their page. A package's status
+  was also one word for two architectures, each built on a worker of its
+  own — *registered* after a failed x86_64 build hid an aarch64 build
+  waiting for a maintainer. A person's page now shows each architecture as
+  its own chain.

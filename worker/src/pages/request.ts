@@ -11,9 +11,9 @@ import type { RunningVersion } from "../meta";
 
 const BODY = String.raw`
   <div class="hero compact">
-    <p class="eyebrow">Package request</p>
-    <h1>Ask for a package, on the record</h1>
-    <p class="lede">Four fields, four confirmations. The pool checks it, writes it once with its signature, and you press <b>Build</b>. <a href="/docs/governance">What happens after →</a></p>
+    <p class="eyebrow" id="eyebrow">Package request</p>
+    <h1 id="h1">Ask for a package, on the record</h1>
+    <p class="lede" id="lede">Four fields, four confirmations. The pool checks it, writes it once with its signature, and you press <b>Build</b>. <a href="/docs/governance">What happens after →</a></p>
   </div>
 
   <div id="gate" class="gate"><div><div class="lock">GitHub sign-in</div><h3 style="margin-top:6px">Who is asking</h3><p>A request carries your GitHub login — it is on the record, next to the package. Nothing else is asked, no permission is needed.</p></div><a class="btn" href="/auth/github?next=/request">${GITHUB_ICON} Sign in with GitHub</a></div>
@@ -50,9 +50,25 @@ const SCRIPT = String.raw`
   function call(method, path, body) {
     return busy(fetch(API + path, { method: method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined })).then(function (r) { return r.json().then(function (d) { d.__status = r.status; return d; }); });
   }
+  // A renewal (?renew=<name>, from the package's row on your page): the same form, filled from the record — the confirmations are yours to tick again.
+  var RENEW = new URLSearchParams(location.search).get("renew");
+  function prefill(name) {
+    fetch("/api/v1/factory/packages/" + encodeURIComponent(name) + "/story?t=" + Date.now()).then(function (r) { return r.ok ? r.json() : null; }).then(function (st) {
+      if (!st || !st.package) return;
+      var p = st.package, q = st.request || {};
+      $("#eyebrow").textContent = "Renew the request"; $("#h1").textContent = "Renew the request for " + name; $("#pkg-btn").textContent = "Renew the request";
+      $("#lede").innerHTML = "The fields as the record has them; put right what the checks marked, confirm the four lines, and the pool writes a new request — the old one stays on the record. " + (q.checks ? q.checks.filter(function (c) { return !c.ok; }).map(function (c) { return '<span class="pill warn">' + esc(c.item) + '</span> ' + esc(c.note); }).join(" · ") : "");
+      $("#pkg-url").value = p.source && q.version && q.version !== "unknown" && /github\.com\/[^/]+\/[^/]+\/archive\//.test(p.source) ? p.source : (p.project || p.url || "");
+      $("#pkg-name").value = name; $("#pkg-desc").value = p.description || ""; $("#pkg-license").value = p.license || "";
+      var arches = q.arches && q.arches.length ? q.arches : (p.arches || []);
+      $("#pkg-x86").checked = arches.indexOf("x86_64") >= 0; $("#pkg-arm").checked = arches.indexOf("aarch64") >= 0;
+      if (p.project && !/github\.com/.test(p.project)) { $("#pkg-source").value = p.source && p.source !== p.project ? p.source : ""; $("#pkg-version").value = q.version && q.version !== "unknown" ? q.version : ""; document.querySelector(".form-more").open = true; }
+    }).catch(function () {});
+  }
   whoami(function (me) {
     if (!me) return;
     $("#gate").hidden = true; $("#ask").hidden = false;
+    if (RENEW) prefill(RENEW);
     var u = $("#pkg-url"); if (u && u.focus) u.focus();
   });
   $("#pkg-form").onsubmit = function () {
@@ -71,7 +87,7 @@ const SCRIPT = String.raw`
       $("#done").hidden = false;
       $("#done").innerHTML = '<b>' + esc(d.package.name) + ' ' + esc(d.package.release || "") + '</b> is on the record: <a href="' + esc(d.request.record) + '">request #' + d.request.id + '</a>' + (d.request.signature ? ' (<a href="' + esc(d.request.signature) + '">signature</a>)' : '') + (det.build_system ? ' · ' + esc(det.build_system) : '') +
         (d.skipped && d.skipped.length ? '<br><span class="dim">' + esc(d.skipped.map(function (s) { return s.arch + " skipped: " + s.source + " ships " + s.version; }).join(" · ")) + '</span>' : '') +
-        '<div class="cta-row" style="margin-top:12px"><button type="button" id="build-now" data-name="' + esc(d.package.name) + '">Build it now</button><a class="btn ghost" href="/factory#gate">Your workspace →</a></div>';
+        '<div class="cta-row" style="margin-top:12px"><button type="button" id="build-now" data-name="' + esc(d.package.name) + '">Build it now</button><a class="btn ghost" href="' + (ME && ME.login ? '/user/' + encodeURIComponent(ME.login) : '/factory#gate') + '">Your page →</a></div>';
       $("#pkg-form").reset();
       $("#build-now").onclick = function () {
         var b = $("#build-now"); b.disabled = true;

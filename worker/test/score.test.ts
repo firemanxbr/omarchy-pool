@@ -36,6 +36,13 @@ describe("the score", () => {
     expect(scoreChain({ ...green, contributor: { attempts: 3, status: "failed" } }).ready).toBe(false);
     expect(scoreChain({ ...green, audit: { status: "queued" } }).ready).toBe(false);
   });
+  it("a request the form would not take today — the checklist never confirmed, the version unknown — earns 2 of 5 and is not ready until renewed", () => {
+    const s = scoreChain({ ...green, project: null, projectVet: null, trial: null, approval: null, category: null, request: { license: "MIT", source: "https://x/y.tar.gz", complete: false } });
+    expect(s.items.find((i) => i.item === "A request on the record")).toMatchObject({ points: 2, max: 5, state: "done", note: expect.stringMatching(/renew/) });
+    expect(s).toMatchObject({ points: 47, ready: false });
+    expect(scoreChain({ ...green, request: { license: "MIT", source: "https://x/y.tar.gz", complete: true } }).ready).toBe(true);
+    expect(scoreChain({ ...green, request: { license: "MIT", source: "https://x/y.tar.gz", complete: null } }).ready).toBe(true);
+  });
   it("the classes", () => {
     expect([100, 90, 89, 75, 74, 55, 54, 0].map(classOf)).toEqual(["A", "A", "B", "B", "C", "C", "D", "D"]);
   });

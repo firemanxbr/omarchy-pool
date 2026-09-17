@@ -22,8 +22,8 @@ export interface ChainInput {
   vet: { verdict: string; fails: number; warnings: number } | null;
   /** The second agent's report on it. */
   audit: { status: string; verdict?: string | null; high?: number; findings?: number } | null;
-  /** The request on the record: a licence and a source named. */
-  request: { license: string | null; source: string | null } | null;
+  /** The request on the record: a licence and a source named; `complete` when the form would accept it today (request.ts) — false for one that predates the checklist, null when not looked at. */
+  request: { license: string | null; source: string | null; complete?: boolean | null } | null;
   /** The project's build of it, its gate and its trial. */
   project: { status: string; attempts: number } | null;
   projectVet: { verdict: string; fails: number; warnings: number } | null;
@@ -72,7 +72,9 @@ export function scoreChain(c: ChainInput): Score {
   // ---- the contributor's half (50)
   const built = c.contributor && ["staged", "done"].includes(c.contributor.status);
   const attempts = c.contributor?.attempts ?? 0;
-  add("contributor", "A request on the record", c.request && c.request.license && c.request.source ? 5 : 0, 5, c.request ? "done" : "pending", c.request ? (c.request.license && c.request.source ? "licence and source named" : "the licence or the source is missing") : "no request yet");
+  const named = !!(c.request && c.request.license && c.request.source);
+  const incomplete = named && c.request?.complete === false;
+  add("contributor", "A request on the record", named ? (incomplete ? 2 : 5) : 0, 5, c.request ? "done" : "pending", c.request ? (named ? (incomplete ? "licence and source named, but the request is incomplete — renew it" : "licence and source named") : "the licence or the source is missing") : "no request yet");
   add("contributor", "A build that succeeds", built ? Math.max(4, 15 - 3 * Math.max(0, attempts - 1)) : 0, 15, c.contributor ? (built || c.contributor.status === "failed" || c.contributor.status === "cancelled" ? "done" : "pending") : "pending", c.contributor ? (built ? (attempts <= 1 ? "first attempt" : `${attempts} attempts`) : c.contributor.status === "failed" ? "the build failed" : c.contributor.status) : "no build yet");
   add("contributor", "The gate passed", c.vet ? (c.vet.verdict === "pass" ? (c.vet.warnings ? 10 : 15) : 0) : 0, 15, c.vet ? "done" : "pending", c.vet ? (c.vet.verdict === "pass" ? (c.vet.warnings ? `${c.vet.warnings} warning(s)` : "clean") : `${c.vet.fails} check(s) failed`) : built ? "no verdict on the record (built before the gate)" : "not run yet");
   const auditDone = c.audit?.status === "done";
@@ -92,6 +94,7 @@ export function scoreChain(c: ChainInput): Score {
   const max = items.reduce((n, i) => n + i.max, 0);
   const contributorPts = items.filter((i) => i.who === "contributor").reduce((n, i) => n + i.points, 0);
   const projected = classOf(contributorPts + 50);
-  const ready = !!(built && c.vet?.verdict === "pass" && (auditDone || c.audit?.status === "failed"));
+  // Ready for a maintainer: built, through the gate, audited — and the request as the form would take it today (an incomplete one is the contributor's to renew).
+  const ready = !!(built && c.vet?.verdict === "pass" && (auditDone || c.audit?.status === "failed") && !incomplete);
   return { points, max, class: classOf(points), projected, ready, items };
 }

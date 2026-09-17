@@ -562,6 +562,28 @@ describe("a package request", () => {
     const record = JSON.parse(await (await env.PACKAGES.get(`factory/older/${pkg!.request_id}/request.json`))!.text());
     expect(record).toMatchObject({ migrated: { pkgbuild_of_task: task }, version: "v9", source: "https://github.com/upstream/older/archive/refs/tags/v9.tar.gz" });
     expect(await backfillRequests(env)).toBe("");
+    // The story checks the request as the form checks it today: a migrated record confirmed nothing, so the package is not ready for a maintainer until its owner renews it — from the page, the same form filled from the record.
+    const story = await call("GET", "/factory/packages/older/story");
+    expect(story.status).toBe(200);
+    expect(story.json.request).toMatchObject({ id: pkg!.request_id, version: "v9", migrated: true, complete: false, record: `${env.POOL_URL}/factory/older/${pkg!.request_id}/request.json`, arches: ["aarch64"] });
+    expect(story.json.request.checks.map((c: any) => [c.key, c.ok])).toEqual([["project", true], ["source", true], ["description", true], ["license", true], ["checklist", false], ["record", true]]);
+    expect(story.json.request.checks.find((c: any) => c.key === "checklist").note).toMatch(/before the request form/);
+    expect(story.json.package.arches).toEqual(["aarch64"]);
+    expect(story.json.chains[0].score.items.find((i: any) => i.item === "A request on the record")).toMatchObject({ points: 2 });
+    // Review sees the same: the staged build is not ready, and says why in the score.
+    const row = (await call("GET", "/factory/review")).json.staged.find((x: any) => x.name === "older");
+    expect(row.score).toMatchObject({ ready: false });
+    // The owner renews it while it is staged (nothing is being built): a new request, complete, and the same package is ready again.
+    const body = { name: "older", url: "https://older.example", source: "https://older.example/older-9.tar.gz", version: "9", description: "An older tool", license: "Apache-2.0", arches: ["aarch64"], checklist: { official: true, license: true, unshipped: true, evidence: true } };
+    const renewed = await call("POST", "/factory/packages", body, "omc_alice");
+    expect(renewed.status, JSON.stringify(renewed.json)).toBe(200);
+    expect(renewed.json.request.id).toBeGreaterThan(pkg!.request_id);
+    const after = (await call("GET", "/factory/packages/older/story?t=renewed")).json; // past the edge cache, as the page reads its own
+    expect(after.request).toMatchObject({ id: renewed.json.request.id, migrated: false, complete: true });
+    expect(after.chains[0].score.items.find((i: any) => i.item === "A request on the record")).toMatchObject({ points: 5 });
+    // A build in flight keeps the request as it is: the queued task carries its reference.
+    await env.DB.prepare("UPDATE factory_packages SET status = 'building' WHERE name = 'older'").run();
+    expect((await call("POST", "/factory/packages", body, "omc_alice")).status).toBe(409);
   });
 });
 

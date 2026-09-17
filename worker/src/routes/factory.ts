@@ -7,7 +7,7 @@ import { isCategory } from "../categories";
 import { recordEvidence, vetSummary } from "../record";
 import { isTextEvidence, reclaimStagingPackages, STAGING_QUOTA_BYTES } from "../staging";
 import { findLeak } from "../leak";
-import { chains, chainOf, storyRows, type Chain } from "./story";
+import { chains, chainOf, storyRows, requestView, type Chain } from "./story";
 
 /**
  * The factory's brain. Cloudflare is the source of truth for package
@@ -760,10 +760,11 @@ export async function handleTask(id: number, env: Env): Promise<Response> {
     env.DB.prepare("SELECT key, size, uploaded_at FROM staging_objects WHERE task_id = ? ORDER BY key").bind(task.id).all<{ key: string; size: number; uploaded_at: string }>(),
   ]);
   // The chain this task is in — the contributor's build, the project's, the audit, the trial, the decision — and its score (score.ts), from the package's story.
-  let chain: Chain | null = null;
+  let chain: Chain | null = null, request: ReturnType<typeof requestView> = null;
   if (isBuild || task.kind === "audit" || task.kind === "trial" || task.kind === "publish") {
     const story = await storyRows(env, task.name);
-    chain = chainOf(chains(story.tasks, story.approvals, story.pkg), task.id);
+    chain = chainOf(chains(story.tasks, story.approvals, story.pkg, story.request), task.id);
+    request = requestView(env, story.pkg, story.request);
   }
   // The rings that serve this package today, from the factory's rows in each ring.
   const rings = isBuild
@@ -784,6 +785,7 @@ export async function handleTask(id: number, env: Env): Promise<Response> {
       score: chain?.score ?? null,
       rings: rings.sort((a, b) => order.indexOf(a) - order.indexOf(b)),
       package: pkg,
+      request,
       evidence: objects.results.map((o) => {
         const name = o.key.split("/").pop() ?? o.key;
         return { name, size: o.size, uploaded_at: o.uploaded_at, url: `/api/v1/factory/tasks/${task.id}/artifacts/${encodeURIComponent(name)}`, public: isTextEvidence(name) };

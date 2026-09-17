@@ -1,5 +1,6 @@
 import { json, type Env } from "../index";
 import { scoreChain } from "../score";
+import { requestChecks } from "../request";
 import { isMaintainer, type Contributor } from "./contributors";
 import { reclaimStagingPackages } from "../staging";
 import { pullFromRings } from "./blocks";
@@ -41,7 +42,8 @@ export async function handleReviewList(env: Env): Promise<Response> {
   const staged = await env.DB.prepare(
     `SELECT t.id, t.name, t.arch, t.version, t.owner, t.status, t.trust, t.params, t.staged_prefix, t.result_sha256, t.result_filename, t.duration_ms, t.finished_at, t.pkgbuild_ref, t.result, t.attempts,
             t.lease_owner, w.owner AS worker_owner, w.labels AS worker_labels, w.hostname AS worker_hostname, w.trusted_by AS worker_trusted_by,
-            p.url, p.detected, p.category, p.license AS request_license, p.source AS request_source,
+            p.url, p.detected, p.category, p.license AS request_license, p.source AS request_source, p.project AS request_project, p.description AS request_description,
+            q.id AS request_id, q.version AS request_version, q.checklist AS request_checklist, q.migrated AS request_migrated, q.record AS request_record, q.sha256 AS request_sha256, q.created_at AS request_created_at,
             (SELECT decision FROM approvals a WHERE a.task_id = t.id ORDER BY a.id DESC LIMIT 1) AS decision,
             (SELECT by FROM approvals a WHERE a.task_id = t.id ORDER BY a.id DESC LIMIT 1) AS decided_by,
             (SELECT u.status FROM build_tasks u WHERE u.kind = 'audit' AND json_extract(u.params, '$.task') = t.id ORDER BY u.id DESC LIMIT 1) AS audit_status,
@@ -51,6 +53,7 @@ export async function handleReviewList(env: Env): Promise<Response> {
             (SELECT u.result FROM build_tasks u WHERE u.kind = 'trial' AND json_extract(u.params, '$.task') = t.id ORDER BY u.id DESC LIMIT 1) AS trial_result,
             (SELECT u.error FROM build_tasks u WHERE u.kind = 'trial' AND json_extract(u.params, '$.task') = t.id ORDER BY u.id DESC LIMIT 1) AS trial_error
        FROM build_tasks t LEFT JOIN factory_packages p ON p.name = t.name
+                          LEFT JOIN package_requests q ON q.id = p.request_id
                           LEFT JOIN build_workers w ON w.id = t.lease_owner
       WHERE t.kind = 'build' AND t.status = 'staged'
         AND NOT EXISTS (SELECT 1 FROM approvals a WHERE a.task_id = t.id AND a.decision = 'approved' AND a.withdrawn_at IS NULL)
@@ -86,7 +89,12 @@ export async function handleReviewList(env: Env): Promise<Response> {
   const scoreOf = (r: Record<string, unknown>) => {
     const audit = (st: string | null, res: string | null) => { const a = auditOf(st, res, null); return st ? { status: a.status, verdict: a.verdict ?? null, high: a.high, findings: a.findings } : null; };
     const trial = (st: string | null, res: string | null) => { const t = trialOf(st, res, null); return st ? { status: t.status, verdict: t.verdict ?? null } : null; };
-    const request = { license: (r.request_license as string | null) ?? null, source: (r.request_source as string | null) ?? null };
+    // The request as the form would take it today (request.ts): an incomplete one — the checklist never confirmed, the version unknown — is not ready.
+    const req = requestChecks(
+      { project: (r.request_project as string | null) ?? null, source: (r.request_source as string | null) ?? null, description: (r.request_description as string | null) ?? null, license: (r.request_license as string | null) ?? null, detected: (r.detected as string | null) ?? null },
+      r.request_id ? { id: r.request_id as number, version: (r.request_version as string) ?? "", checklist: (r.request_checklist as string | null) ?? null, migrated: (r.request_migrated as number) ?? 0, record: (r.request_record as string) ?? "", sha256: (r.request_sha256 as string) ?? "", created_at: (r.request_created_at as string) ?? "" } : null,
+    );
+    const request = { license: (r.request_license as string | null) ?? null, source: (r.request_source as string | null) ?? null, complete: req.complete };
     if (r.trust === "project") {
       const from = r.params ? (JSON.parse(r.params as string) as { review?: number }).review : undefined;
       const c = from ? fromRows.get(from) : undefined;
@@ -313,7 +321,7 @@ export async function handleWithdraw(c: Contributor, id: number, request: Reques
   const t = await env.DB.prepare("SELECT name FROM build_tasks WHERE id = ?").bind(id).first<{ name: string }>();
   if (!t) return json({ error: "no such task" }, 404);
   const story = await storyRows(env, t.name);
-  const chain = chainOf(chains(story.tasks, story.approvals, story.pkg), id);
+  const chain = chainOf(chains(story.tasks, story.approvals, story.pkg, story.request), id);
   const found = chain?.approval && chain.approval.decision === "approved" ? chain.approval : null;
   if (!found) return json({ error: `no standing approval on task ${id}` }, 404);
   const a = { ...found, name: t.name };

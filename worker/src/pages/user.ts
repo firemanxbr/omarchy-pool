@@ -36,7 +36,7 @@ const BODY = String.raw`
 
   <section>
     <div class="h2row"><h2>Packages</h2><a class="more-link" id="pk-request" href="/request" hidden>+ request one →</a></div>
-    <p class="sub">Registered by this contributor: the name is theirs, their worker builds it as evidence, the project builds it again, <b>another</b> maintainer decides — a maintainer who brings a package is its contributor. Open a row for the story and the next step.</p>
+    <p class="sub">Registered by this contributor: the name is theirs, their worker builds it as evidence, the project builds it again, <b>another</b> maintainer decides — a maintainer who brings a package is its contributor. Open a row: the request as the form checks it, then each architecture on its own — its build, the gate, the audit, the score, whether it is ready for a maintainer.</p>
     <div class="table-wrap"><table id="packages" class="pk"><thead><tr><th></th><th>Package</th><th>Category</th><th>Project</th><th>Arches</th><th>Stage</th><th>Where it stands</th></tr></thead><tbody></tbody></table></div>
   </section>
 
@@ -107,35 +107,62 @@ const SCRIPT = String.raw`
     $("#w-none").hidden = any; $("#wt-legend").innerHTML = any ? WT_LEGEND : "";
   }
   function loadWorkers() { return fetch("/api/v1/factory?limit=10" + (own ? "&t=" + Date.now() : "")).then(function (r) { return r.json(); }).then(function (d) { FACTORY = d; renderWorkers(); }).catch(function () {}); }
-  // A package's story (routes/story.ts), in its open row: the chains, the class, and the one line that says what comes next — for whoever is looking.
+  // A package's story (routes/story.ts), in its open row: the request as the form checks it today, then one panel per architecture — each is built on a worker of its own and can be ready while the other failed — with its latest chain, the two halves of the score with their evidence, and the one line that says whose turn it is.
   function story(name) {
     var el = $("#story-" + name.replace(/[^a-z0-9]/gi, "-")); if (!el) return;
+    if (STORIES[name]) el.innerHTML = storyHtml(name, STORIES[name]); // what was drawn stays while the fresh one loads: no flicker on the refresh
     fetch("/api/v1/factory/packages/" + encodeURIComponent(name) + "/story" + (own ? "?t=" + Date.now() : "")).then(function (r) { return r.ok ? r.json() : null; }).then(function (st) {
       if (!st) { el.innerHTML = '<div class="muted">no story yet</div>'; return; }
       STORIES[name] = st;
-      var chains = st.chains.slice(0, 4), latest = chains[0];
-      var next = nextStep(st, latest);
-      var busyNow = latest && ((latest.contributor && (latest.contributor.status === "queued" || latest.contributor.status === "leased")) || (latest.project && (latest.project.status === "queued" || latest.project.status === "leased")));
-      el.innerHTML = '<div class="pknext">' + next + (own ? '<span class="acts-inline">' + (busyNow ? '<button type="button" disabled title="a build is in flight">Build</button>' : '<button type="button" data-build="' + esc(name) + '">Build</button>') + ' <button type="button" class="ghost" data-remove="' + esc(name) + '" title="remove the registration">Remove</button></span>' : '') + '</div>' + (chains.length ? chains.map(function (c) { return chainRow(c); }).join("") : '<p class="sub" style="margin:0">Requested; no build yet.</p>') + '<p class="sub" style="margin:10px 0 0"><a href="/package/' + encodeURIComponent(name) + '?ring=lab">The package\'s page →</a>' + (latest && latest.contributor ? ' · <a href="/build/' + latest.contributor.id + '">the latest build, whole →</a>' : '') + '</p>';
-    }).catch(function () { el.innerHTML = '<div class="muted">could not load the story</div>'; });
+      el.innerHTML = storyHtml(name, st);
+    }).catch(function () { if (!STORIES[name]) el.innerHTML = '<div class="muted">could not load the story</div>'; });
   }
-  // What comes next, in one line, from the latest chain: whose turn it is and what for.
+  function storyHtml(name, st) {
+      var pkg = st.package || {}, arches = (pkg.arches && pkg.arches.length ? pkg.arches : (st.request && st.request.arches) || []).slice();
+      var archOf = function (c) { return (c.contributor || c.project || {}).arch; };
+      st.chains.forEach(function (c) { var a = archOf(c); if (a && arches.indexOf(a) < 0) arches.push(a); });
+      var inFlight = function (c) { return c && ((c.contributor && (c.contributor.status === "queued" || c.contributor.status === "leased")) || (c.project && (c.project.status === "queued" || c.project.status === "leased"))); };
+      var anyBusy = st.chains.some(inFlight);
+      var head = '<div class="pknext">' + (pkg.blocked_at ? pillHtml("error", "blocked") + ' ' + ago(pkg.blocked_at) + ' by ' + personLink(pkg.blocked_by) + ': ' + esc(pkg.blocked_reason || '') + ' — another maintainer lifts it.' : summary(st, arches))
+        + (own ? '<span class="acts-inline">' + (anyBusy ? '<button type="button" disabled title="a build is in flight">Build all</button>' : '<button type="button" data-build="' + esc(name) + '" title="every architecture the request names">Build all</button>') + ' <button type="button" class="ghost" data-remove="' + esc(name) + '" title="remove the registration">Remove</button></span>' : '') + '</div>';
+      var panels = arches.map(function (a) {
+        var mine = st.chains.filter(function (c) { return archOf(c) === a; });
+        var acts = own && !pkg.blocked_at ? (inFlight(mine[0]) ? '<button type="button" class="small-btn" disabled title="a build is in flight">Build ' + esc(a) + '</button>' : '<button type="button" class="small-btn" data-build="' + esc(name) + '" data-arch="' + esc(a) + '" title="this architecture only">Build ' + esc(a) + '</button>') : '';
+        return archPanel(a, mine, nextStep(st, mine[0]), acts);
+      }).join("");
+      return head + requestBlock(st.request, own, name) + panels
+        + '<p class="sub" style="margin:4px 0 0"><a href="/package/' + encodeURIComponent(name) + '?ring=lab">The package\'s page →</a>' + (st.rings && st.rings.length ? ' · in <b>' + esc(st.rings.map(function (r) { return r.ring + " (" + r.arch + ")"; }).join(", ")) + '</b>' : '') + '</p>';
+  }
+  // The package in one line: what each architecture waits for, and the request when it is not what the form asks today.
+  function summary(st, arches) {
+    var parts = arches.map(function (a) {
+      var c = st.chains.filter(function (x) { return (x.contributor || x.project || {}).arch === a; })[0], s2 = chainState(c);
+      return '<b class="mono">' + esc(a) + '</b> ' + pillHtml(s2.cls, s2.text);
+    });
+    var req = st.request && !st.request.complete ? ' <span class="dim">·</span> ' + pillHtml("warn", "request incomplete", "the form would not take it today — a maintainer's time is not asked yet") + (own ? ' <span class="dim">renew it below</span>' : '') : '';
+    return parts.join(' <span class="dim">·</span> ') + req;
+  }
+  // What comes next for one architecture, in one line, from its latest chain: whose turn it is and what for.
   function nextStep(st, c) {
-    var pkg = st.package || {}, rings = (st.rings || []).map(function (r) { return r.ring; });
-    if (pkg.blocked_at) return pillHtml("error", "blocked") + ' ' + ago(pkg.blocked_at) + ' by ' + personLink(pkg.blocked_by) + ': ' + esc(pkg.blocked_reason || '') + ' — another maintainer lifts it.';
-    if (!c) return pillHtml("none", "requested") + ' No build yet — ' + (own ? 'press <b>Build</b>: your worker (or a shared one) builds it as evidence.' : 'the contributor\'s worker builds it first.');
+    var pkg = st.package || {}, rings = (st.rings || []).filter(function (r) { return !c || r.arch === (c.contributor || c.project || {}).arch; }).map(function (r) { return r.ring; });
+    var incomplete = st.request && !st.request.complete;
+    if (!c) return 'No build yet — ' + (own ? 'press <b>Build</b>: your worker (or a shared one) builds it as evidence.' : 'the contributor\'s worker builds it first.');
     var cc = c.contributor, pb = c.project, a = c.approval, sc = c.score;
-    if (a && a.decision === "approved") return pillHtml("ok", "approved") + ' by ' + personLink(a.by) + ' ' + ago(a.created_at) + (rings.length ? ' — in <b>' + esc(rings.join(" · ")) + '</b>, signed by the pool; it earns rc and stable like every synced package.' : ' — the publish job carries it into edge.') + ' Class ' + esc(sc.class) + '.';
-    if (c.withdrawn) return pillHtml("warn", "approval withdrawn") + ' by ' + personLink(c.withdrawn.withdrawn_by) + ': ' + esc(c.withdrawn.withdrawn_reason || '') + ' — another maintainer decides; ' + (own ? 'nothing to do on your side.' : 'nothing to do on the contributor\'s side.');
-    if (a && a.decision === "rejected") return pillHtml("error", "rejected") + ' by ' + personLink(a.by) + ': ' + esc(a.note || '') + ' — ' + (own ? 'fix the recipe and press <b>Build</b> again.' : 'the contributor fixes it and builds again.');
-    if (pb && (pb.status === "queued" || pb.status === "leased")) return pillHtml("blue", "the project is building it") + ' <a href="/build/' + pb.id + '">#' + pb.id + '</a> on a trusted worker, with the project\'s agent — then the trial, then a maintainer decides.';
-    if (pb && pb.status === "staged") return pillHtml("ok", "built again by the project") + ' <a href="/build/' + pb.id + '">#' + pb.id + '</a> waits for ' + (own ? '<b>another</b> maintainer\'s approval (you brought it)' : 'a maintainer\'s approval — never the one who brought it') + '. Class today ' + esc(sc.class) + ', ' + esc(sc.projected) + ' with the maintainer\'s half green.';
-    if (pb && pb.status === "failed") return pillHtml("error", "the project\'s build failed") + ' <a href="/build/' + pb.id + '">#' + pb.id + '</a>' + (pb.error ? ' — ' + esc(String(pb.error).slice(0, 140)) : '') + ' — a maintainer reads it and decides.';
-    if (cc && (cc.status === "queued" || cc.status === "leased")) return pillHtml("blue", cc.status === "leased" ? "building" : "queued") + ' <a href="/build/' + cc.id + '">#' + cc.id + '</a>' + (own ? ' on your worker (or a shared one) — this page follows it.' : ' on the contributor\'s worker.');
-    if (cc && cc.status === "failed") return pillHtml("error", "the build failed") + ' <a href="/build/' + cc.id + '">#' + cc.id + '</a>' + (cc.error ? ' — ' + esc(String(cc.error).slice(0, 140)) : '') + ' — ' + (own ? 'read the log, fix the recipe, press <b>Build</b> again.' : 'the contributor fixes it.');
-    if (cc && cc.status === "cancelled") return pillHtml("none", "superseded") + ' <a href="/build/' + cc.id + '">#' + cc.id + '</a>' + (cc.error ? ' — ' + esc(String(cc.error).slice(0, 140)) : '') + '.';
-    if (cc && cc.status === "staged") return (sc.ready ? pillHtml("ok", "ready for a maintainer") + ' <a href="/build/' + cc.id + '">#' + cc.id + '</a> passed the gate' + (c.audit && c.audit.status === "done" ? ', audited' : '') + ' — ' + (own ? '<b>another</b> maintainer (you brought it)' : 'a maintainer who did not bring it') + ' has the project build it again. Class ' + esc(sc.class) + ' → ' + esc(sc.projected) + '.' : pillHtml("warn", "not ready yet") + ' <a href="/build/' + cc.id + '">#' + cc.id + '</a> is staged; ' + (c.audit && c.audit.status !== "done" ? 'the audit is ' + esc(c.audit.status) : 'the gate did not pass') + ' — nothing for a maintainer yet.');
-    return pillHtml("none", cc ? cc.status : "—");
+    if (a && a.decision === "approved") return 'Approved by ' + personLink(a.by) + ' ' + ago(a.created_at) + (rings.length ? ' — in <b>' + esc(rings.join(" · ")) + '</b>, signed by the pool; it earns rc and stable like every synced package.' : ' — the publish job carries it into edge.');
+    if (c.withdrawn) return 'The approval by ' + personLink(c.withdrawn.withdrawn_by) + ' was withdrawn: ' + esc(c.withdrawn.withdrawn_reason || '') + ' — another maintainer decides; ' + (own ? 'nothing to do on your side.' : 'nothing to do on the contributor\'s side.');
+    if (a && a.decision === "rejected") return 'Rejected by ' + personLink(a.by) + ': ' + esc(a.note || '') + ' — ' + (own ? 'fix the recipe and build again.' : 'the contributor fixes it and builds again.');
+    if (pb && (pb.status === "queued" || pb.status === "leased")) return 'The project is building it again (<a href="/build/' + pb.id + '">#' + pb.id + '</a>) on a trusted worker, with the project\'s agent — then the trial, then a maintainer decides.';
+    if (pb && pb.status === "staged") return 'Built again by the project (<a href="/build/' + pb.id + '">#' + pb.id + '</a>): it waits for ' + (own ? '<b>another</b> maintainer\'s approval (you brought it)' : 'a maintainer\'s approval — never the one who brought it') + '. Class today ' + esc(sc.class) + ', ' + esc(sc.projected) + ' with the maintainer\'s half green.';
+    if (pb && pb.status === "failed") return 'The project\'s build failed (<a href="/build/' + pb.id + '">#' + pb.id + '</a>)' + (pb.error ? ' — ' + esc(String(pb.error).slice(0, 140)) : '') + ' — a maintainer reads it and decides.';
+    if (cc && (cc.status === "queued" || cc.status === "leased")) return (cc.status === "leased" ? 'Building' : 'Queued') + ' (<a href="/build/' + cc.id + '">#' + cc.id + '</a>)' + (own ? ' on your worker, or a shared one — this page follows it.' : ' on the contributor\'s worker.');
+    if (cc && cc.status === "failed") return 'The build failed (<a href="/build/' + cc.id + '">#' + cc.id + '</a>)' + (cc.error ? ' — ' + esc(String(cc.error).slice(0, 140)) : '') + ' — ' + (own ? 'read the log, fix the recipe, build again.' : 'the contributor fixes it.');
+    if (cc && cc.status === "cancelled") return 'Superseded (<a href="/build/' + cc.id + '">#' + cc.id + '</a>)' + (cc.error ? ' — ' + esc(String(cc.error).slice(0, 140)) : '') + '.';
+    if (cc && cc.status === "staged") {
+      if (sc.ready) return '<a href="/build/' + cc.id + '">#' + cc.id + '</a> passed the gate' + (c.audit && c.audit.status === "done" ? ', audited' : '') + ' — ' + (own ? '<b>another</b> maintainer (you brought it)' : 'a maintainer who did not bring it') + ' has the project build it again. Class ' + esc(sc.class) + ' → ' + esc(sc.projected) + '.';
+      var why = incomplete ? 'the request is not what the form asks today' + (own ? ' — <b>renew it</b> above' : '') : c.audit && c.audit.status !== "done" ? 'the audit is ' + esc(c.audit.status) : c.contributor.result && c.contributor.result.vet ? 'the gate did not pass' : 'no gate verdict on the record';
+      return '<a href="/build/' + cc.id + '">#' + cc.id + '</a> is staged, but ' + why + ' — nothing for a maintainer yet.';
+    }
+    return esc(cc ? cc.status : "—");
   }
   function load() {
   // Past the edge cache when it is yours: a Build or a Revoke shows at once.
@@ -182,10 +209,10 @@ const SCRIPT = String.raw`
     LATEST = byPkg;
     pager("#packages", d.packages, function (p) {
       var arches = []; try { arches = JSON.parse(p.arches || "[]"); } catch (e) {}
-      var per = arches.map(function (a) { var b = byPkg[p.name + "/" + a]; return '<span class="arch-st" title="' + esc(a + ": " + (b ? b.status + (b.status === "leased" ? " (building)" : "") + " · #" + b.id : "no build yet")) + '">' + esc(a) + ' ' + (b ? pill(b.status) : '<span class="pill none">—</span>') + '</span>'; }).join(" ");
+      var per = arches.map(function (a) { var b = byPkg[p.name + "/" + a]; return '<span class="arch-st" title="' + esc(a + ": " + (b ? b.status + (b.status === "leased" ? " (building)" : "") + " · #" + b.id : "no build yet")) + '">' + esc(a) + ' ' + (b ? pill(b.status) : '<span class="pill none">—</span>') + '</span>'; }).join("");
       var open = OPEN[p.name];
-      return '<tr class="pkrow" data-pkg="' + esc(p.name) + '"><td><button type="button" class="expand" data-expand="' + esc(p.name) + '" title="' + (open ? "close" : "the story, and what comes next") + '">' + (open ? "▾" : "▸") + '</button></td><td><a href="/package/' + encodeURIComponent(p.name) + '?ring=lab"><b>' + esc(p.name) + '</b></a></td><td>' + (p.category ? '<span class="pill none">' + esc(p.category) + '</span>' : '<span class="dim">—</span>') + '</td><td>' + (p.url ? '<a href="' + esc(p.url) + '">' + esc(p.url.replace(/^https?:\/\/(www\.)?(github\.com\/)?/, "")) + '</a>' : '<span class="dim">—</span>') + '</td><td>' + per + '</td><td>' + pill(p.status) + '</td><td class="muted">' + esc(p.detail || "") + '</td></tr>'
-        + (open ? '<tr class="pkopen" data-pkg="' + esc(p.name) + '"><td colspan="7"><div class="pkstory" id="story-' + esc(p.name.replace(/[^a-z0-9]/gi, "-")) + '"><div class="muted">loading the story…</div></div></td></tr>' : '');
+      return '<tr class="pkrow" data-pkg="' + esc(p.name) + '"><td><button type="button" class="expand" data-expand="' + esc(p.name) + '" title="' + (open ? "close" : "the story, and what comes next") + '">' + (open ? "▾" : "▸") + '</button></td><td><a href="/package/' + encodeURIComponent(p.name) + '?ring=lab"><b>' + esc(p.name) + '</b></a></td><td>' + (p.category ? '<span class="pill none">' + esc(p.category) + '</span>' : '<span class="dim">—</span>') + '</td><td>' + (p.url ? '<a href="' + esc(p.url) + '">' + esc(p.url.replace(/^https?:\/\/(www\.)?(github\.com\/)?/, "")) + '</a>' : '<span class="dim">—</span>') + '</td><td class="arches">' + per + '</td><td>' + pill(p.status) + '</td><td class="muted stands" title="' + esc(p.detail || "") + '">' + esc(p.detail || "") + '</td></tr>'
+        + (open ? '<tr class="pkopen" data-pkg="' + esc(p.name) + '"><td colspan="7"><div class="pkstory" id="story-' + esc(p.name.replace(/[^a-z0-9]/gi, "-")) + '">' + (STORIES[p.name] ? storyHtml(p.name, STORIES[p.name]) : '<div class="muted">loading the story…</div>') + '</div></td></tr>' : '');
     }, { empty: "no package registered", after: function () { Object.keys(OPEN).forEach(function (n) { if (OPEN[n]) story(n); }); }, text: function (p) { return [p.name, p.category, p.status, p.detail].join(" "); } });
     // ---- builds: the number is the build's page; the worker that held it
     pager("#builds", d.builds, function (t) {
@@ -227,10 +254,10 @@ const SCRIPT = String.raw`
     if (x) { var n = x.getAttribute("data-expand"); OPEN[n] = !OPEN[n]; load(); return; }
     var b = ev.target.closest ? ev.target.closest("button[data-build],button[data-remove],button[data-revoke]") : null; if (!b) return;
     if (b.hasAttribute("data-build")) {
-      var name = b.getAttribute("data-build");
-      ask({ title: "Build " + name + "?", text: "Your worker — or a shared one — builds it from the recipe, runs the gate and stages the result as evidence; the second agent audits it. Every architecture the registration names.", confirm: "Build" }).then(function (go) {
+      var name = b.getAttribute("data-build"), arch = b.getAttribute("data-arch");
+      ask({ title: "Build " + name + (arch ? " for " + arch : "") + "?", text: "Your worker — or a shared one — builds it from the recipe, runs the gate and stages the result as evidence; the second agent audits it. " + (arch ? "This architecture only." : "Every architecture the request names."), confirm: "Build" }).then(function (go) {
         if (go === null) return; b.disabled = true;
-        call("POST", "/packages/" + encodeURIComponent(name) + "/build", {}).then(function (r) { if (r.error) toast(esc(r.error), "error"); else toast("Queued " + (r.tasks || []).length + " build(s): " + esc((r.arches || []).join(", ")) + " — this page follows them."); OPEN[name] = true; load(); });
+        call("POST", "/packages/" + encodeURIComponent(name) + "/build", arch ? { arches: [arch] } : {}).then(function (r) { if (r.error) toast(esc(r.error), "error"); else toast("Queued " + (r.tasks || []).length + " build(s): " + esc((r.arches || []).join(", ")) + " — this page follows them."); OPEN[name] = true; load(); });
       });
     }
     else if (b.hasAttribute("data-remove")) {

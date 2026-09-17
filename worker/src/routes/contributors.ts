@@ -8,6 +8,7 @@ import { putRecord, recordKey, recordUrl, withdrawRecord } from "../record";
 import { version } from "../meta";
 import { isTextEvidence, STAGING_DAYS, STAGING_QUOTA_BYTES } from "../staging";
 import { findLeak, leakMessage } from "../leak";
+import { CHECKLIST, LICENSE } from "../request";
 
 /**
  * Contributors: anyone with a GitHub identity. No permission needed to
@@ -225,15 +226,7 @@ export function parseProjectUrl(raw: string): { project: string; github: { owner
   }
 }
 
-/** SPDX identifier or expression; `custom:` is what Arch writes for the rest. */
-const LICENSE = /^(custom:[A-Za-z0-9._+-]+|[A-Za-z0-9._+-]+(?:\s+(?:OR|AND|WITH)\s+[A-Za-z0-9._+-]+)*)$/;
-/** What the contributor confirms with the request; every item, or no request. */
-export const CHECKLIST: Record<string, string> = {
-  official: "the URL is the project's own repository or its official release — not a fork, not a mirror",
-  license: "the licence is the one the project declares (an SPDX identifier)",
-  unshipped: "no upstream the pool mirrors ships this package already, and nobody else requested it",
-  evidence: "my build is evidence a maintainer learns from, never what users get; the pool may reject or block it",
-};
+export { CHECKLIST } from "../request";
 
 /** Does the source answer? GitHub tarballs redirect to codeload; a HEAD that lands on 200 is enough. */
 async function sourceAnswers(source: string, fetcher: typeof fetch = fetch): Promise<string | null> {
@@ -291,7 +284,7 @@ export async function handleRequestPackage(c: Contributor, request: Request, env
   const byProject = await env.DB.prepare("SELECT name, owner, status, blocked_at, blocked_reason FROM factory_packages WHERE project = ? AND name != ?").bind(parsed.project, name).first<{ name: string; owner: string; status: string; blocked_at: string | null; blocked_reason: string | null }>();
   if (byProject?.blocked_at) return json({ error: `${parsed.project} is blocked by a maintainer as ${byProject.name}: ${byProject.blocked_reason ?? ""}`.trim() }, 403);
   if (byProject) return json({ error: `${parsed.project} is already in the pool as ${byProject.name} (${byProject.status}, requested by ${byProject.owner})` }, 409);
-  if (byName && !["registered", "rejected", "unmaintained"].includes(byName.status)) return json({ error: `${name} is ${byName.status}; a request can be renewed once it is rejected or unmaintained — press Build to build it again` }, 409);
+  if (byName && !["registered", "rejected", "unmaintained", "staged"].includes(byName.status)) return json({ error: `${name} is ${byName.status}; a request can be renewed once nothing of it is being built, or once it is rejected or unmaintained` }, 409);
   const upstream = (await providedBy(env, name)).filter((p) => !["factory", "chaotic"].includes(p.source) && arches.includes(p.arch));
   if (upstream.length === arches.length) {
     return json({ error: `${upstream[0].source} already ships ${name} (${upstream.map((u) => `${u.version} for ${u.arch}`).join(", ")}); install it from the pool`, provided: upstream }, 409);

@@ -22,6 +22,7 @@ const BODY = String.raw`
   <section id="who-section" hidden>
     <div class="h2row"><h2>Who does what</h2><span class="hint">two people behind every package the factory ships</span></div>
     <p class="sub">The contributor brings the request and a build that passes the gate; only then is a maintainer's time well spent. The maintainer has the project build it again, reads the evidence, tries it and decides — never on their own package. Each half is fifty points; the class is the score today, the projection is with the maintainer's half green. <a href="/docs/what-we-test#the-score">The rules →</a></p>
+    <div id="ckreq"></div>
     <div class="cklist" id="cklist"></div>
   </section>
 
@@ -107,16 +108,11 @@ const SCRIPT = String.raw`
   function renderChecklist() {
     var sc = T.score, el = $("#who-section"); if (!sc) { el.hidden = true; return; }
     el.hidden = false;
-    var col = function (who, title, lede) {
-      var items = sc.items.filter(function (i) { return i.who === who; }), pts = items.reduce(function (n, i) { return n + i.points; }, 0);
-      return '<div class="ckcol ' + who + '"><h3>' + title + ' <span class="num">' + pts + '<span class="dim">/50</span></span></h3><p class="dim">' + lede + '</p><ul>' + items.map(function (i) {
-        var mark = i.state === "pending" ? '<i class="ck pending" title="still to come">○</i>' : i.points === i.max ? '<i class="ck ok">✓</i>' : i.points > 0 ? '<i class="ck part">✓</i>' : '<i class="ck bad">✗</i>';
-        return '<li>' + mark + '<div><b>' + esc(i.item) + '</b> <span class="dim">' + esc(i.note) + '</span></div><span class="num pts">' + i.points + '<span class="dim">/' + i.max + '</span></span></li>';
-      }).join("") + '</ul></div>';
-    };
     var c = T.chain || {};
-    $("#cklist").innerHTML = col("contributor", "The contributor's half", c.contributor ? person(c.contributor.owner) + (c.contributor.id !== T.task.id ? ' · build <a href="/build/' + c.contributor.id + '">#' + c.contributor.id + '</a>' : '') : 'nobody yet')
-      + col("maintainer", "The maintainer's half", c.project ? 'the project\'s build <a href="/build/' + c.project.id + '">#' + c.project.id + '</a>' + (c.approval ? ' · decided by ' + person(c.approval.by) : c.withdrawn ? ' · the approval by ' + person(c.withdrawn.by) + ' was withdrawn' : ' · not decided') : 'not started' + (sc.ready ? ' — ready to begin' : ''));
+    // The request the chain rests on, checked as the form checks it today; the contributor renews it from here when a line is not green.
+    $("#ckreq").innerHTML = T.request ? requestBlock(T.request, !!(login && T.task.owner === login), T.task.name) : "";
+    $("#cklist").innerHTML = ckColumn(sc, "contributor", "The contributor's half", c.contributor ? person(c.contributor.owner) + (c.contributor.id !== T.task.id ? ' · build <a href="/build/' + c.contributor.id + '">#' + c.contributor.id + '</a>' : '') : 'nobody yet')
+      + ckColumn(sc, "maintainer", "The maintainer's half", c.project ? 'the project\'s build <a href="/build/' + c.project.id + '">#' + c.project.id + '</a>' + (c.approval ? ' · decided by ' + person(c.approval.by) : c.withdrawn ? ' · the approval by ' + person(c.withdrawn.by) + ' was withdrawn' : ' · not decided') : 'not started' + (sc.ready ? ' — ready to begin' : ''));
   }
 
   // ---- a maintainer decides here as on Review; the owner never on their own package

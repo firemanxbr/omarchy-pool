@@ -449,6 +449,11 @@ const CSS = String.raw`
   .cklist { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: 16px; } .ckcol { border: 1px solid var(--line); background: var(--panel); padding: 14px 16px; border-top: 3px solid var(--line); } .ckcol.contributor { border-top-color: var(--lilac); } .ckcol.maintainer { border-top-color: var(--green); }
   .ckcol h3 { display: flex; justify-content: space-between; align-items: baseline; margin: 0; } .ckcol h3 .num { font-family: Geist, sans-serif; font-size: 20px; font-weight: 600; } .ckcol p { margin: 4px 0 10px; font-size: 12.5px; } .ckcol ul { list-style: none; margin: 0; padding: 0; } .ckcol li { display: grid; grid-template-columns: 18px 1fr auto; gap: 8px; align-items: start; padding: 7px 0; border-top: 1px solid var(--line); font-size: 13px; } .ckcol li .pts { font-size: 12.5px; white-space: nowrap; }
   .ck { font-style: normal; font-weight: 700; } .ck.ok { color: var(--green); } .ck.part { color: var(--amber); } .ck.bad { color: var(--red); } .ck.pending { color: var(--dim); }
+  .pkreq { border: 1px solid var(--line); background: var(--panel); padding: 12px 14px; margin: 0 0 12px; } .pkreq.incomplete { border-left: 3px solid var(--amber); } .pkreq-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: 13px; } .pkreq-head .btn.small { margin-left: auto; padding: 4px 10px; font-size: 12px; }
+  .pkreq-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(400px, 100%), 1fr)); gap: 4px 24px; } .pkreq-list li { display: grid; grid-template-columns: 16px 1fr; gap: 6px; font-size: 12.5px; align-items: start; min-width: 0; } .pkreq-list li div { overflow-wrap: anywhere; }
+  .pkarch { border: 1px solid var(--line); background: var(--bg-deep); padding: 12px 14px; margin: 0 0 12px; } .pkarch-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: 13px; } .pkarch-head .arch-name { font-family: "JetBrains Mono", monospace; font-weight: 700; font-size: 14px; } .pkarch-head .acts-inline { margin-left: auto; }
+  .pkarch .pknext-line { margin: 8px 0 10px; font-size: 13px; color: var(--muted); } .pkarch .cklist { gap: 12px; } .pkarch .ckcol { padding: 10px 12px; } .pkarch .ckcol h3 { font-size: 14px; } .pkarch .ckcol h3 .num { font-size: 16px; } .pkarch .ckcol li { font-size: 12.5px; padding: 5px 0; }
+  table.pk td.stands { max-width: 360px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } table.pk td.arches { white-space: nowrap; }
   .tile .v .dim { font-weight: 400; }
   .fchainrow { border: 1px solid var(--line); background: var(--panel); margin-top: 10px; } .fhead { display: flex; justify-content: space-between; gap: 10px; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--line); font-size: 13px; }
   .fsteps { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr)); gap: 1px; background: var(--line); } .fstep { background: var(--panel); padding: 10px 12px; display: grid; grid-template-columns: 14px 1fr; gap: 6px; align-items: start; font-size: 12.5px; } .fstep .dot { margin: 4px 0 0; } .fstep b { display: block; font-size: 12.5px; } .fstep span { color: var(--muted); }
@@ -794,6 +799,75 @@ const HELPERS = String.raw`
         + step(trial && trial.status === "done" ? (trial.result && trial.result.verdict === "ok" ? "ok" : "bad") : "", "Tried in the lab", trial ? (trial.status === "done" ? (trial.result && trial.result.verdict === "ok" ? "a real pacman installed it" : "could not: " + esc(trial.result && trial.result.verdict || "")) : trial.status) : "not yet")
         + step(a ? (a.decision === "approved" ? "ok" : "bad") : c.withdrawn ? "warn" : "", "Decided", a ? esc(a.decision) + ' by ' + personLink(a.by) + ' ' + ago(a.created_at) + (a.note ? ' — ' + esc(a.note) : '') : c.withdrawn ? 'the approval by ' + personLink(c.withdrawn.by) + ' was withdrawn ' + ago(c.withdrawn.withdrawn_at) + ' by ' + personLink(c.withdrawn.withdrawn_by) + ': ' + esc(c.withdrawn.withdrawn_reason || '') + ' — another maintainer decides' : (pb && pb.status === "staged" ? "waiting for a maintainer — never the owner" : "not yet"))
         + '</div></div>';
+  }
+  // One half of the score (score.ts) as a column of checks: the mark, the item, its note, the points — a build's page draws the two halves, a person's page draws them per architecture. extra(item) adds the evidence link that proves an item.
+  function ckColumn(sc, who, title, lede, extra) {
+    var items = sc.items.filter(function (i) { return i.who === who; }), pts = items.reduce(function (n, i) { return n + i.points; }, 0);
+    return '<div class="ckcol ' + who + '"><h3>' + title + ' <span class="num">' + pts + '<span class="dim">/50</span></span></h3><p class="dim">' + lede + '</p><ul>' + items.map(function (i) {
+      var mark = i.state === "pending" ? '<i class="ck pending" title="still to come">○</i>' : i.points === i.max ? '<i class="ck ok">✓</i>' : i.points > 0 ? '<i class="ck part">✓</i>' : '<i class="ck bad">✗</i>';
+      var more = extra ? extra(i) : "";
+      return '<li>' + mark + '<div><b>' + esc(i.item) + '</b> <span class="dim">' + esc(i.note) + '</span>' + (more ? ' ' + more : '') + '</div><span class="num pts">' + i.points + '<span class="dim">/' + i.max + '</span></span></li>';
+    }).join("") + '</ul></div>';
+  }
+  // The request on the record (request.ts), as the form checks it today: six lines, each green or not, and the way to put it right when it is the reader's own.
+  function requestBlock(q, own, name) {
+    if (!q) return '<div class="pkreq"><b>The request</b> <span class="dim">none on the record</span></div>';
+    var bad = q.checks.filter(function (c) { return !c.ok; }).length;
+    return '<div class="pkreq' + (q.complete ? '' : ' incomplete') + '"><div class="pkreq-head"><b>The request</b> '
+      + (q.id ? '<a href="' + esc(q.record) + '" title="request.json, written once, signed by the pool">#' + q.id + '</a>' + (q.signature ? ' <a class="dim" href="' + esc(q.signature) + '">sig</a>' : '') : '') + (q.version ? ' · ' + esc(q.version) : '') + (q.created_at ? ' · ' + ago(q.created_at) : '')
+      + ' ' + (q.complete ? pillHtml("ok", "complete", "what the form asks today, all on the record") : pillHtml("warn", bad + " to put right", "the form would not take it today"))
+      + (own && !q.complete ? ' <a class="btn small" href="/request?renew=' + encodeURIComponent(name) + '" title="the same form, filled from the record; the confirmations are yours to tick">Renew the request</a>' : '')
+      + '</div><ul class="pkreq-list">' + q.checks.map(function (c) { return '<li><i class="ck ' + (c.ok ? 'ok">✓' : 'bad">✗') + '</i><div><b>' + esc(c.item) + '</b> <span class="dim">' + esc(c.note) + '</span></div></li>'; }).join("") + '</ul></div>';
+  }
+  // A chain's state in one word and its colour — the pill an architecture wears.
+  function chainState(c) {
+    if (!c) return { cls: "none", text: "no build yet" };
+    var cc = c.contributor, pb = c.project, a = c.approval, sc = c.score;
+    if (a && a.decision === "approved") return { cls: "ok", text: "approved" };
+    if (c.withdrawn) return { cls: "warn", text: "approval withdrawn" };
+    if (a && a.decision === "rejected") return { cls: "error", text: "rejected" };
+    if (pb && (pb.status === "queued" || pb.status === "leased")) return { cls: "blue", text: "the project is building it" };
+    if (pb && pb.status === "staged") return { cls: "ok", text: "built again by the project" };
+    if (pb && pb.status === "failed") return { cls: "error", text: "the project's build failed" };
+    if (cc && (cc.status === "queued")) return { cls: "blue", text: "queued" };
+    if (cc && (cc.status === "leased")) return { cls: "blue", text: "building" };
+    if (cc && cc.status === "failed") return { cls: "error", text: "the build failed" };
+    if (cc && cc.status === "cancelled") return { cls: "none", text: "superseded" };
+    if (cc && cc.status === "staged") return sc.ready ? { cls: "ok", text: "ready for a maintainer" } : { cls: "warn", text: "not ready yet" };
+    return { cls: "none", text: cc ? cc.status : "—" };
+  }
+  // The evidence a chain's step left, as links beside the checklist's items (the artifacts of the build the item is about).
+  function ckEvidence(c) {
+    var art = function (t, file, text) { return t ? '<a class="run" href="/api/v1/factory/tasks/' + t.id + '/artifacts/' + file + '">' + text + '</a>' : ''; };
+    var cc = c.contributor, pb = c.project, tr = c.trial;
+    return function (i) {
+      if (i.item === "A build that succeeds") return cc ? art(cc, "build.log", "log") + (cc.status === "staged" || cc.status === "done" ? ' ' + art(cc, "PKGBUILD", "PKGBUILD") : '') : '';
+      if (i.item === "The gate passed") return cc && cc.result && cc.result.vet ? art(cc, "tests.log", "tests") + ' ' + art(cc, "vet.json", "vet.json") : '';
+      if (i.item === "The audit") return c.audit && c.audit.status === "done" ? art(cc, "audit.md", "report") : '';
+      if (i.item === "The project built it again") return pb ? art(pb, "build.log", "log") : '';
+      if (i.item === "The project's gate") return pb && pb.result && pb.result.vet ? art(pb, "tests.log", "tests") : '';
+      if (i.item === "The trial installed it") return tr && tr.status === "done" ? art(pb, "trial.log", "transcript") : '';
+      return '';
+    };
+  }
+  // One architecture of a package: its latest chain — the state, the class, the build and the worker that held it, the two halves of the score with their evidence, the earlier builds — and the one line that says whose turn it is (next is the page's own wording); acts is the page's buttons for this architecture.
+  function archPanel(arch, chainsOfArch, next, acts) {
+    var c = chainsOfArch[0], st = chainState(c);
+    var head = '<div class="pkarch-head"><span class="arch-name">' + esc(arch) + '</span> ' + pillHtml(st.cls, st.text);
+    if (c) {
+      var sc = c.score, cc = c.contributor, pb = c.project, t = cc || pb;
+      var cls = { A: "ok", B: "ok", C: "warn", D: "error" }[sc.class] || "none";
+      head += ' ' + pillHtml(cls, "class " + sc.class + " · " + sc.points + "/100", "today; with the maintainer's half green: " + sc.projected) + (sc.class !== sc.projected ? ' <span class="dim">→ ' + esc(sc.projected) + '</span>' : '');
+      head += ' <span class="dim">·</span> <a href="/build/' + t.id + '">#' + t.id + '</a>' + (t.version ? ' <span class="dim">' + esc(t.version) + '</span>' : '') + (t.lease_owner ? ' <span class="dim">on</span> ' + wtId({ id: t.lease_owner, owner: t.owner }) : '') + (t.finished_at ? ' <span class="dim">· ' + ago(t.finished_at) + '</span>' : t.started_at ? ' <span class="dim">· started ' + ago(t.started_at) + '</span>' : '') + (t.duration_ms ? ' <span class="dim">· ' + Math.round(t.duration_ms / 1000) + ' s</span>' : '');
+    }
+    head += (acts ? '<span class="acts-inline">' + acts + '</span>' : '') + '</div>';
+    if (!c) return '<section class="pkarch">' + head + '<p class="sub" style="margin:8px 0 0">' + next + '</p></section>';
+    var ev = ckEvidence(c), cc2 = c.contributor;
+    var earlier = chainsOfArch.slice(1, 6).map(function (x) { var s2 = chainState(x), t2 = x.contributor || x.project; return '<a href="/build/' + t2.id + '" title="' + esc(s2.text) + ' · class ' + esc(x.score.class) + '">#' + t2.id + '</a> <span class="dim">' + esc(s2.text) + '</span>'; });
+    return '<section class="pkarch">' + head + '<p class="pknext-line">' + next + '</p><div class="cklist">'
+      + ckColumn(c.score, "contributor", "The contributor's half", cc2 ? personLink(cc2.owner) + ' · build <a href="/build/' + cc2.id + '">#' + cc2.id + '</a>' : 'nobody yet', ev)
+      + ckColumn(c.score, "maintainer", "The maintainer's half", c.project ? 'the project\'s build <a href="/build/' + c.project.id + '">#' + c.project.id + '</a>' + (c.approval ? ' · decided by ' + personLink(c.approval.by) : c.withdrawn ? ' · the approval by ' + personLink(c.withdrawn.by) + ' was withdrawn' : ' · not decided') : 'not started' + (c.score.ready ? ' — ready to begin' : ''), ev)
+      + '</div>' + (earlier.length ? '<p class="sub" style="margin:8px 0 0">Earlier: ' + earlier.join(' · ') + '</p>' : '') + '</section>';
   }
   function personChip(login, role, extra) { return '<a class="person" href="/user/' + encodeURIComponent(login) + '" title="' + esc(login) + ' · ' + esc(role) + '">' + avatarIcon(login, role) + '<b>' + esc(login) + '</b>' + (extra ? ' <span class="r">' + extra + '</span>' : '') + '</a>'; }
   function tile(k, v, s, cls) { return '<div class="tile"><div class="k">' + k + '</div><div class="v num' + (cls ? " " + cls : "") + '">' + v + '</div><div class="s">' + s + '</div></div>'; }
