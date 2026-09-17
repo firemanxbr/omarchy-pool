@@ -284,9 +284,12 @@ fetch_pkgbuild() { # name ref → /build/pkg holds the PKGBUILD directory
     sed -i -e "s/^pkgver=.*/pkgver=${ver//\//\\/}/" -e "s/^pkgrel=.*/pkgrel=1/" /build/pkg/PKGBUILD
     chown -R builder:builder /build/pkg && (cd /build/pkg && as_builder updpkgsums) || echo "updpkgsums failed; the build will tell"
   elif [[ "$ref" == draft:* ]]; then
-    local spec url
-    spec="${ref#draft:}"; url="${spec%@*}"
-    echo "==> Drafting a PKGBUILD for $url ($( [[ -n "$(agent_label)" ]] && echo "with the contributor's agent, $(agent_label)" || echo "template; set an agent key on the worker for an agent-written draft"))"
+    local spec url tag ver_arg=()
+    spec="${ref#draft:}"; url="${spec%@*}"; tag="${spec#*@}"
+    # The request names the version (draft:<url>@<tag>): the recipe is of that release, not of whatever GitHub
+    # calls latest today (omarchy-cli was asked at v0.0.168 and drafted at 0.0.175, 2026-09-17).
+    [[ -n "$tag" && "$tag" != latest && "$tag" != "$spec" ]] && ver_arg=(--version "$tag")
+    echo "==> Drafting a PKGBUILD for $url${ver_arg[*]:+ at $tag} ($( [[ -n "$(agent_label)" ]] && echo "with the contributor's agent, $(agent_label)" || echo "template; set an agent key on the worker for an agent-written draft"))"
     mkdir -p /build/pkg
     # A build asked after a failed one starts from that one's lesson: its
     # PKGBUILD and its log (public evidence), the way a second attempt
@@ -303,9 +306,9 @@ fetch_pkgbuild() { # name ref → /build/pkg holds the PKGBUILD directory
     fi
     if [[ -s /build/PKGBUILD.prev ]]; then
       echo "==> The lesson: the PKGBUILD of build $LESSON_TASK$( [[ -s /build/lesson.log ]] && echo " and what stopped it" )${BUILD_HINT:+; the hint from the person who asked: $BUILD_HINT}"
-      with_secrets python3 "$FACTORY_LIB"/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg --previous /build/PKGBUILD.prev $( [[ -s /build/lesson.log ]] && echo "--log /build/lesson.log" ) ${BUILD_HINT:+--hint="$BUILD_HINT"}
+      with_secrets python3 "$FACTORY_LIB"/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg "${ver_arg[@]}" --previous /build/PKGBUILD.prev $( [[ -s /build/lesson.log ]] && echo "--log /build/lesson.log" ) ${BUILD_HINT:+--hint="$BUILD_HINT"}
     else
-      with_secrets python3 "$FACTORY_LIB"/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg ${BUILD_HINT:+--hint="$BUILD_HINT"}
+      with_secrets python3 "$FACTORY_LIB"/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg "${ver_arg[@]}" ${BUILD_HINT:+--hint="$BUILD_HINT"}
     fi
   elif [[ "$ref" == *@*:* ]]; then
     local url rest tag path
@@ -535,6 +538,16 @@ vet_package() { # name → 0 pass (maybe warnings), 5 fail; writes vet.json and 
     elif [[ -n "$w" ]]; then vet_add "namcap-package:$(basename "$p")" warn "$w"
     else vet_add "namcap-package:$(basename "$p")" pass "clean"; fi
   done
+  # 4b. a recipe that compiles nothing (no build(): a prebuilt binary) has no debug info of its own: makepkg's
+  # default debug option then makes a -debug split of dangling build-id symlinks that namcap fails on, and
+  # an agent reads "dangling-symlink" and looks in the wrong place (omarchy-cli-bin, 2026-09-17). The rule
+  # is options=('!debug'); the gate says so (skills: Prebuilt binaries).
+  if ! grep -qE '^build\(\)' /build/pkg/PKGBUILD; then
+    for p in "${pkgs[@]}"; do
+      [[ "$(basename "$p")" == *-debug-* ]] || continue
+      vet_add "prebuilt-debug:$(basename "$p")" fail "a -debug split of a package that compiled nothing — set options=('!debug') in the PKGBUILD (a prebuilt binary carries no debug info of ours)"
+    done
+  fi
   # 5. the file list: standard paths only, no libtool archives, not empty.
   for p in "${pkgs[@]}"; do
     out="$(pacman -Qlp "$p" 2>/dev/null | awk '{print $2}')"
@@ -633,8 +646,9 @@ build_attempts() { # name ref
       with_secrets python3 "$FACTORY_LIB"/bin/draft-pkgbuild --url "${review_url:-$OMARCHY_REVIEW_URL}" --name "$name" --out /build/pkg --evidence /build/evidence --previous /build/PKGBUILD.prev --log /build/attempt.log \
         ${review_source:+--source "$review_source"} ${review_version:+--version "$review_version"} ${review_desc:+--description "$review_desc"} ${review_license:+--license "$review_license"} ${BUILD_HINT:+--hint="$BUILD_HINT"} || return 4
     else
-      local url; url="${ref#draft:}"; url="${url%@*}"
-      with_secrets python3 "$FACTORY_LIB"/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg --previous /build/PKGBUILD.prev --log /build/attempt.log ${BUILD_HINT:+--hint="$BUILD_HINT"} || return 4
+      local url spec tag ver_arg=(); spec="${ref#draft:}"; url="${spec%@*}"; tag="${spec#*@}"
+      [[ -n "$tag" && "$tag" != latest && "$tag" != "$spec" ]] && ver_arg=(--version "$tag")
+      with_secrets python3 "$FACTORY_LIB"/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg "${ver_arg[@]}" --previous /build/PKGBUILD.prev --log /build/attempt.log ${BUILD_HINT:+--hint="$BUILD_HINT"} || return 4
     fi
   done
 }
