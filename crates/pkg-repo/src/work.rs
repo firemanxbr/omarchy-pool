@@ -22,6 +22,7 @@ use serde::Deserialize;
 use crate::client::{Api, ReleaseRequest};
 use crate::gate::{self, GateOptions, Verdict};
 use crate::ops;
+use crate::RepoError;
 use crate::security::{self, FastTrackOptions, SecurityOptions};
 use crate::sync::SyncOptions;
 
@@ -307,6 +308,18 @@ pub fn run(opts: &WorkOptions) -> Result<()> {
                     return Ok(());
                 }
                 sleep_unless(POLL, &is_draining);
+                continue;
+            }
+            // 426: this binary is behind the pool's release past the rollout's
+            // grace — every worker follows the latest image, and the pool hands
+            // this one nothing until the updater (or its owner) replaces it.
+            Err(RepoError::Api { status: 426, body }) => {
+                let why = serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|v| v["error"].as_str().map(str::to_owned))
+                    .unwrap_or(body);
+                eprintln!("update required: {why}");
+                sleep_unless(Duration::from_secs(300), &is_draining);
                 continue;
             }
             Err(e) => {

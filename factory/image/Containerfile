@@ -36,6 +36,12 @@ RUN set -eu; if pacman -S --noconfirm --needed shellcheck >/dev/null 2>&1; then 
       echo "$sum  /tmp/sc.tar.xz" | sha256sum -c -; tar -xJf /tmp/sc.tar.xz -C /tmp; install -m755 "/tmp/shellcheck-$v/shellcheck" /usr/local/bin/shellcheck; rm -rf /tmp/sc.tar.xz "/tmp/shellcheck-$v"; fi
 # The docker CLI, static: it talks to whatever Docker-compatible socket is mounted at /var/run/docker.sock (project mode).
 RUN curl -fsSL "https://download.docker.com/linux/static/stable/${ARCH}/docker-${DOCKER_CLI}.tgz" | tar -xz --strip-components=1 -C /usr/local/bin docker/docker
+# The compose plugin, pinned by checksum: the updater role (factory/bin/omarchy-rollout) recreates a compose
+# project's services from the new image through the same socket — every worker follows the latest image.
+ARG COMPOSE=v5.5.1
+RUN set -eu; case "$ARCH" in x86_64) sum=db1889184726840f75c4f9c001048430d4f25b3be3cb084d3ddd762bc0aed576 ;; aarch64) sum=732e3a84c1a0f67256ce80bc2598a24546b10ca05f9faa97efceb1171ece2ef7 ;; esac; \
+    curl -fsSL -o /tmp/docker-compose "https://github.com/docker/compose/releases/download/${COMPOSE}/docker-compose-linux-${ARCH}"; \
+    echo "$sum  /tmp/docker-compose" | sha256sum -c -; install -Dm755 /tmp/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose; rm -f /tmp/docker-compose
 # The pool's tools, from the release this image is tagged with (project mode).
 RUN set -eu; name="omarchy-pool-${POOL_RELEASE}-${ARCH}-linux"; \
     curl -fsSL -o /tmp/tools.tgz "https://github.com/firemanxbr/omarchy-pool/releases/download/${POOL_RELEASE}/${name}.tar.gz"; \
@@ -46,7 +52,7 @@ RUN set -eu; name="omarchy-pool-${POOL_RELEASE}-${ARCH}-linux"; \
 # with an agent key); pacman runs at first start of a build.
 COPY factory/worker/omarchy-build-worker.sh /usr/local/bin/omarchy-build-worker
 COPY factory/image/entrypoint.sh /usr/local/bin/omarchy-worker
-COPY factory/bin/draft-pkgbuild factory/bin/pkgbuild-meta factory/bin/audit-pkgbuild factory/bin/agent.py factory/bin/broker /usr/local/lib/omarchy-factory/bin/
+COPY factory/bin/draft-pkgbuild factory/bin/pkgbuild-meta factory/bin/audit-pkgbuild factory/bin/agent.py factory/bin/broker factory/bin/omarchy-rollout /usr/local/lib/omarchy-factory/bin/
 COPY factory/prompts/pkgbuild.md factory/prompts/audit.md /usr/local/lib/omarchy-factory/prompts/
 COPY factory/skills /usr/local/lib/omarchy-factory/skills/
 # The pool's public key: a build verifies the pool's databases against it without cloning anything.

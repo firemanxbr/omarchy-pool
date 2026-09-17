@@ -63,8 +63,20 @@ export async function pacmanInclude(env: Env, ring: string, arch: string, withOp
 }
 
 import SETUP_SH from "../setup.sh";
+import WORKER_SH from "../omarchy-worker.sh";
+import WORKER_COMPOSE from "../../../factory/image/compose.yml";
 
 /** The script, with this deployment's addresses in it. */
 export function setupScript(apiBase: string, pool: string): string {
   return SETUP_SH.split("__API__").join(apiBase).split("__POOL__").join(pool);
+}
+
+/** One command to run a worker (src/omarchy-worker.sh), with this deployment's address in it. */
+export function workerCli(apiBase: string): string {
+  return WORKER_SH.split("__API__").join(apiBase);
+}
+
+/** The compose file the command writes — the one in the repository, factory/image/compose.yml, served here so the two never differ. */
+export function workerCompose(): string {
+  return WORKER_COMPOSE;
 }

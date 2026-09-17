@@ -3,14 +3,18 @@
 # latest release published: what Kubernetes calls a rolling update, at the
 # size of one host.
 #
-# For each service whose image changed, one at a time: stop the running
-# container — SIGTERM, which the worker takes as *drain*: it finishes the
-# task it holds, reports it, claims nothing new and exits (up to the
-# compose file's stop_grace_period) — and start one from the new image.
-# The other five keep working meanwhile; no task is ever killed, none is
-# handed to another worker by an expired lease. Nothing to do when nothing
-# changed, so a timer may run this every few minutes (setup.sh installs
-# one: omarchy-pool-rollout.timer, every 15 minutes).
+# Every service whose image (or configuration) changed is replaced in one
+# `up`: compose stops each running container — SIGTERM, which the worker
+# takes as *drain*: it finishes the task it holds, reports it, claims
+# nothing new and exits (up to the compose file's stop_grace_period) — and
+# starts one from the new image, each on its own clock. The unchanged ones
+# keep working; no task is ever killed, none is handed to another worker by
+# an expired lease, and none idles on the old image while another drains
+# (the pool refuses an outdated worker 45 minutes after a deploy —
+# worker/src/update.ts; contributors' sets have the same in the updater,
+# factory/bin/omarchy-rollout). Nothing to do when nothing changed, so a
+# timer runs this every few minutes (setup.sh installs one:
+# omarchy-pool-rollout.timer, every 15 minutes).
 #
 #   ./rollout.sh            upgrade what changed
 #   ./rollout.sh --check    say what would change, change nothing
@@ -31,27 +35,24 @@ fi
 docker info >/dev/null 2>&1 || { log "docker is not reachable: $(docker info 2>&1 | tail -n1)"; exit 1; }
 
 docker compose pull --quiet 2>&1 | grep -viE "pulled|pulling|^\s*$" || true
-changed=0
-# The brokers first (no build to drain; a builder mid-task takes its lease
-# up again through the new one), the community builders next (one task per
-# container, quick to drain), the review pair, the pool pair last: the
-# pool's own jobs pause least.
+# What changed is replaced in ONE `up`: compose stops and recreates the
+# services together, each draining under its own stop_grace_period, so no
+# worker idles on the old image while another drains for hours — the pool
+# hands nothing to an outdated worker 45 minutes after a deploy
+# (worker/src/update.ts), and pool-aarch64 once waited three hours on the
+# old image for pool-x86_64's drain (2026-09-15).
 # Only the services the active profiles enable (compose.yml: `emulated`).
 enabled="$(docker compose config --services 2>/dev/null | tr '\n' ' ')"
+replace=(); old_images=()
+config="$(docker compose config --format json 2>/dev/null || echo '{}')"
 for svc in agent-proxy broker-community-x86_64 broker-community-aarch64 community-x86_64 community-aarch64 review-x86_64 review-aarch64 pool-x86_64 pool-aarch64; do
   [[ " $enabled " == *" $svc "* ]] || continue
-  # Pull again before each service: a drain can take hours (a pool worker
-  # finishes its sync first) and the image that was newest at the start may
-  # be several releases old by the time the last service is reached —
-  # pool-aarch64 ran v0.0.103 while the rest ran v0.0.116 (2026-09-15).
-  docker compose pull --quiet "$svc" 2>&1 | grep -viE "pulled|pulling|^\s*$" || true
-  image="$(docker compose config --format json | jq -r ".services[\"$svc\"].image")"
+  image="$(jq -r ".services[\"$svc\"].image" <<<"$config")"
   wanted="$(docker image inspect -f '{{.Id}}' "$image" 2>/dev/null || true)"
   cid="$(docker compose ps -q "$svc" 2>/dev/null | head -1)"
   if [[ -z "$cid" ]]; then
     log "$svc: not running; starting"
-    (( check )) || docker compose up -d --no-deps --no-build "$svc" >/dev/null 2>&1
-    changed=1; continue
+    replace+=("$svc"); continue
   fi
   running="$(docker inspect -f '{{.Image}}' "$cid")"
   # The image, and the service's configuration: an environment or a volume
@@ -61,14 +62,17 @@ for svc in agent-proxy broker-community-x86_64 broker-community-aarch64 communit
   wanted_cfg="$(docker compose config --hash "$svc" 2>/dev/null | awk '{print $2}')"
   running_cfg="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.config-hash"}}' "$cid" 2>/dev/null || true)"
   [[ "$running" == "$wanted" && ( -z "$wanted_cfg" || "$running_cfg" == "$wanted_cfg" ) ]] && continue
-  task="$(docker logs --tail 40 "$cid" 2>&1 | grep -oE '^task [0-9]+: [^(]*\(attempt' | tail -1 | sed 's/ (attempt$//' || true)"
+  task="$(docker logs --tail 40 "$cid" 2>&1 | grep -oE '^(\[[0-9:]+\] )?task [0-9]+: [^(]*\(' | tail -1 | sed -E 's/^\[[0-9:]+\] //; s/ ?\($//' || true)"
   log "$svc: ${running:7:12} → ${wanted:7:12}$( [[ "$running_cfg" != "$wanted_cfg" && -n "$wanted_cfg" ]] && echo " (configuration changed)")${task:+ (draining: $task)}"
-  changed=1
-  (( check )) && continue
-  # up -d recreates a container whose image changed: stop (drain), remove, start.
-  docker compose up -d --no-deps --no-build "$svc" >/dev/null 2>&1 \
-    && log "$svc: running $(docker inspect -f '{{.Image}}' "$(docker compose ps -q "$svc")" | cut -c8-19)" \
-    || log "$svc: FAILED to replace — docker compose logs $svc"
+  old_images+=("$running"); replace+=("$svc")
 done
-(( changed )) || log "nothing to roll out: every service runs the latest image"
-(( check )) || docker image prune -f >/dev/null 2>&1 || true
+if (( ${#replace[@]} == 0 )); then log "nothing to roll out: every service runs the latest image"; exit 0; fi
+(( check )) && exit 0
+# up -d recreates a container whose image changed: stop (drain), remove, start — all of them at once.
+if docker compose up -d --no-deps --no-build "${replace[@]}" >/dev/null 2>&1; then
+  for svc in "${replace[@]}"; do log "$svc: running $(docker inspect -f '{{.Image}}' "$(docker compose ps -q "$svc" | head -1)" 2>/dev/null | cut -c8-19)"; done
+else
+  log "FAILED to replace ${replace[*]} — docker compose logs"
+fi
+# Only what this run replaced goes.
+for img in "${old_images[@]}"; do docker image rm "$img" >/dev/null 2>&1 || true; done

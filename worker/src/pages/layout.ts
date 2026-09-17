@@ -119,6 +119,7 @@ const CSS = String.raw`
   .pill { display: inline-block; font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; padding: 2px 8px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
   .pill.ok { color: var(--green); border-color: var(--green); }
   .pill.warn { color: var(--amber); border-color: var(--amber); }
+  .mono.warn { color: var(--amber); }
   .pill.error { color: var(--red); border-color: var(--red); }
   .pill.none { color: var(--dim); }
   .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 13.5px; }
@@ -736,8 +737,10 @@ const HELPERS = String.raw`
     if (needsAgent === undefined) needsAgent = true;
     var can = (workers || []).filter(function (w) { return w.arch === arch && !w.revoked_at && (forProject ? (w.side === "omarchy" && (!w.kinds || w.kinds.indexOf("build") >= 0)) : (w.side !== "omarchy" && (w.owner === login || w.mode === "shared"))); });
     // A drafted build (the project's always) goes only to a worker whose agent answered: pinned to another it would wait forever.
-    var fit = function (w) { return w.alive && (!needsAgent || w.agent_status === "ok"); };
-    var word = function (w) { return (w.owner && w.owner !== login ? w.owner + "'s " : forProject ? "" : "your ") + wtShort(w.id) + " · " + (w.alive ? (w.current_task ? "building" : "idle") : "offline") + " · " + (w.labels && w.labels.emulated ? "emulated" : "native") + (w.agent ? " · " + w.agent + (w.agent_status !== "ok" ? " (not answering)" : "") : " · no agent"); };
+    // An outdated worker (behind the latest image past the grace) is handed nothing: pinned to it a build would wait until it updates.
+    var stale = function (w) { return !!(w.update && w.update.required); };
+    var fit = function (w) { return w.alive && !stale(w) && (!needsAgent || w.agent_status === "ok"); };
+    var word = function (w) { return (w.owner && w.owner !== login ? w.owner + "'s " : forProject ? "" : "your ") + wtShort(w.id) + " · " + (w.alive ? (stale(w) ? "outdated — update it" : w.current_task ? "building" : "idle") : "offline") + " · " + (w.labels && w.labels.emulated ? "emulated" : "native") + (w.agent ? " · " + w.agent + (w.agent_status !== "ok" ? " (not answering)" : "") : " · no agent"); };
     var mine = can.filter(function (w) { return w.owner === login && !forProject; }), shared = can.filter(function (w) { return w.mode === "shared" && !forProject; }), project = forProject ? can : [];
     var online = shared.filter(fit), idle = online.filter(function (w) { return !w.current_task; }), native = idle.filter(function (w) { return !(w.labels && w.labels.emulated); });
     var state = idle.length ? idle.length + " idle now, " + native.length + " native" : online.length ? "all " + online.length + " online busy" : shared.length ? "none of " + shared.length + " online" : "no shared worker for " + arch;
@@ -777,10 +780,16 @@ const HELPERS = String.raw`
     if (w.revoked_at) return '<span class="pill none" title="revoked ' + esc(ago(w.revoked_at)) + '">revoked</span>';
     if (!w.alive) return '<span class="pill none" title="not seen in the last ten minutes">offline · ' + esc(ago(w.last_seen).replace(" ago", "")) + '</span>';
     if (w.current_task) return '<a class="pill blue" href="/build/' + w.current_task + '" title="task #' + w.current_task + ' · ' + esc(seen) + '">building</a>';
+    if (w.update && w.update.required) return '<a class="pill warn" href="/docs/workers#update" title="' + esc("its image is " + w.update.yours + ", the pool is at " + w.update.latest + ": every worker follows the latest image — it is handed nothing until it updates · " + seen) + '">outdated</a>';
     if (!w.ready) return '<span class="pill error" title="' + esc((w.agent_error ? "its agent did not answer: " + w.agent_error : !w.agent ? "no agent: a contributor's builds and the audits need one that answers" : "not ready for the work it declares") + " · " + seen) + '">failed</span>';
     return '<span class="pill ok" title="' + esc("alive, nothing in hand · " + seen) + '">idle</span>';
   }
-  function wtVersion(w) { return w.version && w.version !== "container" ? '<span class="mono" title="the release this worker\'s image was built from">' + esc(w.version) + '</span>' : '<span class="muted" title="an image from before the version was reported">—</span>'; }
+  function wtVersion(w) {
+    if (!w.version || w.version === "container") return '<span class="muted" title="an image from before the version was reported">—</span>';
+    var u = w.update;
+    if (u && u.outdated) return '<span class="mono ' + (u.required ? 'warn' : 'muted') + '" title="' + esc("the pool is at " + u.latest + (u.required ? ": handed nothing until it updates" : ": the rollout's grace, updating")) + '">' + esc(w.version) + (u.behind ? ' · ' + u.behind + ' behind' : ' · behind') + '</span>';
+    return '<span class="mono" title="the release this worker\'s image was built from">' + esc(w.version) + '</span>';
+  }
   function wtArch(w, icon) { return esc(w.arch) + (icon ? ' ' + (w.labels && w.labels.emulated ? WICON.emu.replace('aria-label', 'title="emulated: the other architecture, under qemu on this host" aria-label') : WICON.native.replace('aria-label', 'title="native" aria-label')) : ''); }
   function wtMode(w) { return w.mode === "shared" ? WICON.shared.replace('aria-label', 'title="shared: builds whatever is queued, anyone\'s" aria-label') : WICON.own.replace('aria-label', 'title="' + esc(w.packages && w.packages.length ? "own packages: " + w.packages.join(", ") : "the owner\'s packages only") + '" aria-label'); }
   var WT_PROV = { anthropic: "A", "claude-code": "CC", openai: "OA", gemini: "G", xai: "X" };
@@ -818,7 +827,7 @@ const HELPERS = String.raw`
       : [wtId(w), wtStatus(w), wtPerson(w.owner), wtArch(w, true), wtVersion(w), wtMode(w), wtAgent(w), wtUsage(w), wtCounts(w), wtLast(w)];
     return '<tr><td>' + cells.join('</td><td>') + '</td>' + (extra ? '<td>' + extra + '</td>' : '') + '</tr>';
   }
-  var WT_LEGEND = '<p class="dim wt-legend">' + '<span>' + WICON.native + ' native</span><span>' + WICON.emu + ' emulated</span><span>' + WICON.shared + ' shared</span><span>' + WICON.own + ' own packages</span><span><span class="pill ok">idle</span> waiting</span><span><span class="pill blue">building</span> a task in hand</span><span><span class="pill error">failed</span> its agent does not answer</span><span><span class="pill none">offline</span> not seen in ten minutes</span></p>';
+  var WT_LEGEND = '<p class="dim wt-legend">' + '<span>' + WICON.native + ' native</span><span>' + WICON.emu + ' emulated</span><span>' + WICON.shared + ' shared</span><span>' + WICON.own + ' own packages</span><span><span class="pill ok">idle</span> waiting</span><span><span class="pill blue">building</span> a task in hand</span><span><span class="pill error">failed</span> its agent does not answer</span><span><span class="pill warn">outdated</span> behind the latest image, handed nothing</span><span><span class="pill none">offline</span> not seen in ten minutes</span></p>';
   // A person's login as a link to their page; a pill with a title. Shared by the pages that tell a package's story.
   function personLink(l) { return l ? '<a href="/user/' + encodeURIComponent(l) + '">' + esc(l) + '</a>' : '<span class="muted">—</span>'; }
   function pillHtml(cls, text, title) { return '<span class="pill ' + cls + '"' + (title ? ' title="' + esc(title) + '"' : '') + '>' + esc(text) + '</span>'; }

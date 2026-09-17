@@ -50,7 +50,7 @@ const BODY = String.raw`
         <label>Architecture <select id="w-arch"><option>x86_64</option><option>aarch64</option></select></label>
         <button type="submit" id="w-btn">Register worker</button>
       </form>
-      <div id="w-new" hidden><p class="sub">Your worker token, shown once. Run one of these wherever the worker lives (podman or docker):</p><pre id="w-cmd"></pre></div>
+      <div id="w-new" hidden><p class="sub">Your worker token, shown once. One command wherever the worker lives (docker or podman):</p><pre id="w-cmd"></pre></div>
     </div>
     <div class="panel" id="wp-community" hidden><h3>Contributor's <span class="dim" style="font-size:12px;font-weight:400">their own machines: their packages, or whatever is queued when shared</span></h3><div class="table-wrap" style="border:0"><table id="w-community" class="wtable"><thead><tr></tr></thead><tbody></tbody></table></div></div>
     <div class="panel" id="wp-review" style="margin-top:16px" hidden><h3>Review <span class="dim" style="font-size:12px;font-weight:400">the maintainers' side: builds again, publishes, audits</span></h3><div class="table-wrap" style="border:0"><table id="w-review" class="wtable"><thead><tr></tr></thead><tbody></tbody></table></div></div>
@@ -360,15 +360,17 @@ const SCRIPT = String.raw`
       if (d.error) { toast(esc(d.error), "error"); return; }
       $("#w-new").hidden = false;
       $("#w-cmd").textContent =
-        "# two containers: the broker holds the token (and your agent's key, and a GITHUB_TOKEN — a fine-grained one with no permissions),\n" +
-        "# the builder beside it is born with nothing, builds one task and exits; the restart brings the next. With compose\n" +
-        "# (" + REPO + "/blob/main/factory/image/compose.yml; docker works the same):\n" +
-        "OMARCHY_WORKER_TOKEN=" + d.token + " GITHUB_TOKEN=<github_pat_…, no permissions> podman compose -f compose.yml up -d\n\n" +
-        "# or by hand\n" +
-        "podman network create omarchy-worker\n" +
-        "podman run -d --name omarchy-broker --restart unless-stopped --network omarchy-worker \\\n  -e OMARCHY_WORKER_ROLE=broker -e OMARCHY_WORKER_TOKEN=" + d.token + " -e GITHUB_TOKEN=<github_pat_…, no permissions> \\\n  ghcr.io/firemanxbr/omarchy-worker:latest\n" +
-        "podman run -d --name omarchy-worker --restart unless-stopped --stop-timeout 10800 --network omarchy-worker \\\n  -e OMARCHY_BROKER=http://omarchy-broker:8790 \\\n  ghcr.io/firemanxbr/omarchy-worker:latest\n\n" +
-        "# on the broker: -e ANTHROPIC_API_KEY=… (or OPENAI_API_KEY, GEMINI_API_KEY, XAI_API_KEY, CLAUDE_CODE_OAUTH_TOKEN: your key) — the agent that writes the PKGBUILD; without one that answers, the worker is not ready";
+        "# one command, wherever the worker lives (docker or podman, with compose): it writes the compose file and a .env,\n" +
+        "# pulls the signed image and starts the set — the broker that holds this token, the builder born with nothing,\n" +
+        "# and the updater that keeps both on the pool's latest image (every worker follows it; one behind is handed nothing).\n" +
+        "curl -fsSLo omarchy-worker " + location.origin + "/omarchy-worker && chmod +x omarchy-worker\n" +
+        "./omarchy-worker start --token " + d.token + "\n\n" +
+        "# everyone's queue too, a name for the machine, GitHub's API through the broker (a fine-grained token with no permissions):\n" +
+        "./omarchy-worker start --token " + d.token + " --shared --where laptop --github-token github_pat_…\n" +
+        "# your agent, on the broker, one of: --anthropic-key sk-… · --openai-key … · --gemini-key … · --xai-key … · --claude-token <claude setup-token>\n" +
+        "# then: ./omarchy-worker status · logs · share on|off · update · stop\n" +
+        "# the compose file it writes, for a hand-run set: " + location.origin + "/omarchy-worker/compose.yml\n" +
+        "#   (.env beside it: OMARCHY_WORKER_TOKEN, COMPOSE_PROFILES=community, OMARCHY_WORKER_DIR=<this directory's absolute path>; the updater included)";
       $("#worker-form").reset(); $("#worker-form").hidden = true; load(); loadWorkers();
     }).catch(function (e) { $("#w-btn").disabled = false; toast("failed: " + esc(String(e)), "error"); });
     return false;

@@ -1,18 +1,30 @@
-# A contributor's worker: two containers, `docker compose up -d` (or
-# podman compose). The broker holds everything that is yours — the worker
-# token, your agent's key, a GitHub token — and only receives, processes and
-# answers; the builder beside it is born with nothing, builds one task in a
-# fresh container and exits (the restart policy starts the next one). Whatever
-# a recipe or an upstream's build does with `env` or `curl`, there is nothing
-# in the builder to take (/docs/workers#secrets). The two share a network of
-# their own; nothing here is reachable from outside this machine.
+# A contributor's worker: three containers, `COMPOSE_PROFILES=community
+# docker compose up -d` (or podman compose) — or one command,
+# `omarchy-worker start --token omw_…`, which writes this file and its .env
+# for you (/docs/workers). The broker
+# holds everything that is yours — the worker token, your agent's key, a
+# GitHub token — and only receives, processes and answers; the builder beside
+# it is born with nothing, builds one task in a fresh container and exits
+# (the restart policy starts the next one). Whatever a recipe or an
+# upstream's build does with `env` or `curl`, there is nothing in the builder
+# to take (/docs/workers#secrets). The two share a network of their own;
+# nothing here is reachable from outside this machine. The updater keeps
+# both on the pool's latest image: every worker follows it — the pool hands
+# nothing to one that is behind — so the updater is part of the set, not an
+# option.
 #
 # A maintainer's project worker is one container with the runtime's socket
 # instead — see `project` at the end and /docs/workers#project.
+#
+# .env, beside this file: OMARCHY_WORKER_TOKEN, OMARCHY_WORKER_DIR (this
+# directory's absolute path — the updater mounts it at the same path, as the
+# project worker does its work directory), and the options below.
+name: ${COMPOSE_PROJECT_NAME:-omarchy-worker}
 services:
   broker:
     image: ghcr.io/firemanxbr/omarchy-worker:latest
     restart: unless-stopped
+    profiles: [community]
     environment:
       OMARCHY_WORKER_ROLE: broker
       OMARCHY_WORKER_TOKEN: ${OMARCHY_WORKER_TOKEN:?the worker token from the Contributors page, shown once}
@@ -40,6 +52,7 @@ services:
   worker:
     image: ghcr.io/firemanxbr/omarchy-worker:latest
     restart: unless-stopped
+    profiles: [community]
     depends_on: [broker]
     # A stop is a drain: the worker finishes the task it holds, claims no
     # new one and exits. Without the grace period `compose down` kills the
@@ -54,23 +67,44 @@ services:
       WORKER_SHARED: ${WORKER_SHARED:-0}
     networks: [worker]
 
+  # Every worker follows the latest image: every fifteen minutes the updater
+  # pulls it and, one service at a time, replaces what changed — a stop is a
+  # drain, the build in hand finishes first — itself last. It holds no token
+  # and no key; it needs the runtime's socket and this directory (the compose
+  # file and .env it recreates the services from).
+  updater:
+    image: ghcr.io/firemanxbr/omarchy-worker:latest
+    restart: unless-stopped
+    environment:
+      OMARCHY_WORKER_ROLE: updater
+      COMPOSE_DIR: "${OMARCHY_WORKER_DIR:?the absolute path of this directory — omarchy-worker writes it to .env, by hand OMARCHY_WORKER_DIR=$PWD}"
+    # The runtime's socket: docker's, or podman's (rootless Linux:
+    # /run/user/<uid>/podman/podman.sock; the podman machine: /run/podman/podman.sock).
+    security_opt: [label=disable]
+    volumes:
+      - ${OMARCHY_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+      - ${OMARCHY_WORKER_DIR}:${OMARCHY_WORKER_DIR}:ro
+
   # A maintainer's project worker (a registration the project trusted): the
   # pool's jobs and the project's builds, each in a fresh sibling container
   # through the runtime's socket — it is its own broker, the build containers
-  # it starts hold nothing. Uncomment, set OMARCHY_WORKER_TOKEN to that
-  # registration's token, and start it alone: `docker compose up -d project`.
-  # project:
-  #   image: ghcr.io/firemanxbr/omarchy-worker:latest
-  #   restart: unless-stopped
-  #   stop_grace_period: 3h
-  #   environment:
-  #     OMARCHY_WORKER_TOKEN: ${OMARCHY_WORKER_TOKEN:?}
-  #     OMARCHY_WORKER_ROLE: ${OMARCHY_WORKER_ROLE:-}   # pool or review (docs: /docs/workers#roles)
-  #     OMARCHY_WORK_DIR: ${HOME}/omarchy-worker         # the SAME path on the host and in the container
-  #     WORKER_LABELS: '{"where":"${WHERE:-my-machine}"}'
-  #   volumes:
-  #     - /var/run/docker.sock:/var/run/docker.sock
-  #     - ${HOME}/omarchy-worker:${HOME}/omarchy-worker
+  # it starts hold nothing. The `project` profile instead of `community`
+  # (COMPOSE_PROFILES in .env; `omarchy-worker start --project` sets it),
+  # with that registration's token.
+  project:
+    image: ghcr.io/firemanxbr/omarchy-worker:latest
+    restart: unless-stopped
+    profiles: [project]
+    stop_grace_period: 3h
+    security_opt: [label=disable]
+    environment:
+      OMARCHY_WORKER_TOKEN: ${OMARCHY_WORKER_TOKEN:?the worker token from the Contributors page, shown once}
+      OMARCHY_WORKER_ROLE: ${OMARCHY_WORKER_ROLE:-}   # pool or review (docs: /docs/workers#roles)
+      OMARCHY_WORK_DIR: ${OMARCHY_WORK_DIR:-${OMARCHY_WORKER_DIR}/work}   # the SAME path on the host and in the container
+      WORKER_LABELS: '{"where":"${WHERE:-my-machine}"}'
+    volumes:
+      - ${OMARCHY_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+      - ${OMARCHY_WORK_DIR:-${OMARCHY_WORKER_DIR}/work}:${OMARCHY_WORK_DIR:-${OMARCHY_WORKER_DIR}/work}
 
 networks:
   worker: {}

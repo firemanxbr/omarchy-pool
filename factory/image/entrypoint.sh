@@ -53,7 +53,16 @@
 set -euo pipefail
 : "${OMARCHY_API:=https://pkgs.firemanxbr.org}"
 role="${OMARCHY_WORKER_ROLE:-}"
-case "$role" in ""|pool|review|community|agent|broker) ;; *) echo "omarchy-worker: OMARCHY_WORKER_ROLE must be pool, review, community, broker or agent (or unset)" >&2; exit 2 ;; esac
+case "$role" in ""|pool|review|community|agent|broker|updater) ;; *) echo "omarchy-worker: OMARCHY_WORKER_ROLE must be pool, review, community, broker, agent or updater (or unset)" >&2; exit 2 ;; esac
+# The updater: the compose project (COMPOSE_DIR, mounted at the same path)
+# follows the latest image through the runtime's socket
+# (factory/bin/omarchy-rollout) — every fifteen minutes as a service, once
+# with --once (omarchy-worker update), what changed replaced together,
+# itself last. No token, no key.
+if [[ "$role" == updater ]]; then
+  [[ -S /var/run/docker.sock ]] || { echo "omarchy-worker: the updater needs the runtime's socket at /var/run/docker.sock" >&2; exit 2; }
+  exec /usr/local/lib/omarchy-factory/bin/omarchy-rollout "${@:---loop}"
+fi
 if [[ "$role" == broker || "$role" == agent ]]; then
   # The broker: the credentials stay here. Claude Code is installed the
   # same way a worker installs it when the subscription token is the agent.

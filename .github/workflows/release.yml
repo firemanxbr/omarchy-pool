@@ -207,7 +207,10 @@ jobs:
 
   deploy:
     name: Deploy worker
-    needs: [version, publish]
+    # After the images: the Worker's deploy time starts the 45-minute grace after which
+    # the pool refuses workers on the previous image (worker/src/update.ts) — the image
+    # they must pull has to exist first, on both architectures and under :latest.
+    needs: [version, publish, worker-image-manifest]
     runs-on: ubuntu-latest
     environment:
       name: pool

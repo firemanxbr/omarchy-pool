@@ -6,6 +6,8 @@
  * shared worker for a few minutes, then to any that qualifies.
  */
 import type { Env } from "./index";
+import { version as running } from "./meta";
+import { updateState } from "./update";
 
 const now = () => new Date().toISOString();
 
@@ -25,10 +27,13 @@ function workerRank(w: { emulated: boolean; cores: number; ram: number }): [numb
  */
 export async function betterIdleWorker(env: Env, me: string, arch: string, mine: { emulated: boolean; cores: number; ram: number }, myAgentOk: boolean): Promise<boolean> {
   const rows = await env.DB.prepare(
-    "SELECT id, labels, usage, agent_status FROM build_workers WHERE arch = ? AND trust = 'community' AND mode = 'shared' AND revoked_at IS NULL AND current_task IS NULL AND last_seen > ? AND id != ?",
-  ).bind(arch, new Date(Date.now() - IDLE_SEEN_MINUTES * 60000).toISOString(), me).all<{ id: string; labels: string | null; usage: string | null; agent_status: string | null }>();
+    "SELECT id, labels, usage, agent_status, version FROM build_workers WHERE arch = ? AND trust = 'community' AND mode = 'shared' AND revoked_at IS NULL AND current_task IS NULL AND last_seen > ? AND id != ?",
+  ).bind(arch, new Date(Date.now() - IDLE_SEEN_MINUTES * 60000).toISOString(), me).all<{ id: string; labels: string | null; usage: string | null; agent_status: string | null; version: string | null }>();
   const my = workerRank(mine);
+  const pool = running(env);
   for (const r of rows.results) {
+    // A worker the pool hands nothing to (behind the latest image) keeps no first pick either.
+    if (updateState(r.version, pool).required) continue;
     // A worker whose agent does not answer cannot draft: it is never "better" for a queue of drafted builds when mine can.
     if (myAgentOk && r.agent_status !== "ok") continue;
     let labels: Record<string, unknown> = {}, usage: Record<string, unknown> = {};

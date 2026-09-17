@@ -17,7 +17,7 @@ routes = [
 # rendered by the dashboard (their diagrams are drawn there, pages/doc-diagrams.ts).
 [[rules]]
 type = "Text"
-globs = ["**/*.sh", "**/*.md"]
+globs = ["**/*.sh", "**/*.md", "**/*.yml"]
 fallthrough = true
 
 [observability]

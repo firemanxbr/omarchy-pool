@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# omarchy-rollout — every worker follows the pool's latest image. A rolling
+# upgrade of a compose project's services, the way the Studio's
+# factory/host/rollout.sh does it, from inside the image: the `updater`
+# service of a contributor's or a maintainer's compose file runs this with
+# the runtime's socket and the project directory mounted at /compose.
+#
+# For each service whose image (or configuration) changed, one at a time:
+# stop the running container — SIGTERM, which a worker takes as *drain*: it
+# finishes the task it holds, reports it, claims nothing new and exits, up
+# to the compose file's stop_grace_period — and start one from the new
+# image. The brokers first (nothing to drain; a builder mid-task takes its
+# lease up again through the new one), the builders next, the project
+# workers last, and the updater itself at the very end: replacing it ends
+# this run, and the next container carries on.
+#
+#   omarchy-rollout --once      upgrade what changed, once (also with no argument)
+#   omarchy-rollout --check     say what would change, change nothing
+#   omarchy-rollout --loop      every ROLLOUT_EVERY seconds (900), forever
+#
+# What changed is replaced in one go — compose stops and recreates the
+# services together, each draining under its own stop_grace_period — so a
+# worker never idles on the old image while another drains for hours (the
+# pool refuses an outdated worker 45 minutes after a deploy). The updater
+# replaces itself last, through a one-off container that outlives it: a
+# container cannot recreate itself from inside.
+#
+# The pool hands nothing to a worker behind its release for longer than
+# the rollout's grace (worker/src/update.ts), so a worker without this
+# beside it idles with "outdated" on the Workers page until someone
+# updates it by hand.
+set -euo pipefail
+log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
+: "${COMPOSE_DIR:=/compose}"
+: "${ROLLOUT_EVERY:=900}"
+: "${ROLLOUT_SELF:=updater}"
+mode=once
+case "${1:-}" in --check) mode=check ;; --loop) mode=loop ;; --once|"") ;; *) echo "usage: omarchy-rollout [--once|--check|--loop]" >&2; exit 2 ;; esac
+
+# The order services are named in (the log reads in it): the brokers,
+# the builders, the project workers; the updater last, on its own. Services
+# the file names that this list does not come after the known ones.
+ORDER=(agent-proxy broker broker-community-x86_64 broker-community-aarch64 worker community-x86_64 community-aarch64 review-x86_64 review-aarch64 pool-x86_64 pool-aarch64 project)
+
+# compose reads the project's .env and nothing of this container's own
+# environment: the image sets OMARCHY_WORKER_ROLE, OMARCHY_WORK_DIR and the
+# like for itself, and interpolated into the file they would turn the
+# maintainer's project worker into a second updater (found in review).
+compose() { env -i PATH="$PATH" HOME="${HOME:-/root}" DOCKER_HOST="${DOCKER_HOST:-}" DOCKER_CONFIG="${DOCKER_CONFIG:-}" docker compose --project-directory "$COMPOSE_DIR" "$@"; }
+
+rollout() { # → 0 changed something, 1 nothing to do, 2 docker unreachable
+  local check="$1"
+  docker info >/dev/null 2>&1 || { log "docker is not reachable through the socket: $(docker info 2>&1 | tail -n1)"; return 2; }
+  [[ -f "$COMPOSE_DIR/compose.yml" || -f "$COMPOSE_DIR/compose.yaml" || -f "$COMPOSE_DIR/docker-compose.yml" ]] || { log "no compose file in $COMPOSE_DIR — mount the project directory there"; return 2; }
+  local enabled ordered=() svc self_changed=0 replace=() old_images=()
+  enabled="$(compose config --services 2>/dev/null | tr '\n' ' ')"
+  [[ -n "${enabled// /}" ]] || { log "the compose file names no service"; return 2; }
+  for svc in "${ORDER[@]}"; do [[ " $enabled " == *" $svc "* ]] && ordered+=("$svc"); done
+  for svc in $enabled; do [[ " ${ordered[*]} " == *" $svc "* || "$svc" == "$ROLLOUT_SELF" ]] || ordered+=("$svc"); done
+  [[ " $enabled " == *" $ROLLOUT_SELF "* ]] && ordered+=("$ROLLOUT_SELF")
+  compose pull --quiet 2>&1 | grep -viE "pulled|pulling|^\s*$" || true
+  local config; config="$(compose config --format json 2>/dev/null || echo '{}')"
+  for svc in "${ordered[@]}"; do
+    local image wanted cid running wanted_cfg running_cfg task
+    image="$(jq -r ".services[\"$svc\"].image" <<<"$config")"
+    wanted="$(docker image inspect -f '{{.Id}}' "$image" 2>/dev/null || true)"
+    cid="$(compose ps -q "$svc" 2>/dev/null | head -1)"
+    if [[ -z "$cid" ]]; then
+      log "$svc: not running; starting"
+      [[ "$svc" == "$ROLLOUT_SELF" ]] && self_changed=1 || replace+=("$svc"); continue
+    fi
+    running="$(docker inspect -f '{{.Image}}' "$cid")"
+    # The image, and the service's configuration: an environment or a
+    # volume changed in the compose file is a container to replace too.
+    wanted_cfg="$(compose config --hash "$svc" 2>/dev/null | awk '{print $2}')"
+    running_cfg="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.config-hash"}}' "$cid" 2>/dev/null || true)"
+    [[ "$running" == "$wanted" && ( -z "$wanted_cfg" || "$running_cfg" == "$wanted_cfg" ) ]] && continue
+    # The task the container holds, from its own log: "task 42: felix for aarch64 (draft:…)" (a builder) or "… (attempt 1/3)" (pkg-repo).
+    task="$(docker logs --tail 40 "$cid" 2>&1 | grep -oE '^(\[[0-9:]+\] )?task [0-9]+: [^(]*\(' | tail -1 | sed -E 's/^\[[0-9:]+\] //; s/ ?\($//' || true)"
+    log "$svc: ${running:7:12} → ${wanted:7:12}$( [[ "$running_cfg" != "$wanted_cfg" && -n "$wanted_cfg" ]] && echo " (configuration changed)")${task:+ (draining: $task)}"
+    old_images+=("$running")
+    if [[ "$svc" == "$ROLLOUT_SELF" ]]; then self_changed=1; else replace+=("$svc"); fi
+  done
+  if (( ${#replace[@]} == 0 && self_changed == 0 )); then log "nothing to roll out: every service runs the latest image"; return 1; fi
+  [[ "$check" == 1 ]] && return 0
+  if (( ${#replace[@]} )); then
+    # One call for all of them: compose stops and recreates them together,
+    # each draining under its own grace, none idling refused meanwhile.
+    if compose up -d --no-deps --no-build "${replace[@]}" >/dev/null 2>&1; then
+      for svc in "${replace[@]}"; do log "$svc: running $(docker inspect -f '{{.Image}}' "$(compose ps -q "$svc" | head -1)" 2>/dev/null | cut -c8-19)"; done
+    else
+      log "FAILED to replace ${replace[*]} — docker compose logs"
+    fi
+  fi
+  # Only what this run replaced goes; a contributor's other images are theirs.
+  local img; for img in "${old_images[@]}"; do docker image rm "$img" >/dev/null 2>&1 || true; done
+  if (( self_changed )); then
+    # Last: this container — through a one-off that outlives it. compose
+    # stops this one first when recreating it, and a client stopped
+    # mid-recreate leaves the new container created and never started.
+    log "$ROLLOUT_SELF: replacing itself through a one-off; the next container carries on"
+    compose run -d --rm --no-deps --entrypoint sh "$ROLLOUT_SELF" -c "sleep 2; env -i PATH=\"\$PATH\" HOME=/root DOCKER_HOST=\"\${DOCKER_HOST:-}\" docker compose --project-directory \"$COMPOSE_DIR\" up -d --no-deps --no-build $ROLLOUT_SELF" >/dev/null 2>&1 \
+      || log "$ROLLOUT_SELF: FAILED to start the one-off that replaces it — docker compose up -d $ROLLOUT_SELF"
+  fi
+  return 0
+}
+
+case "$mode" in
+  check) rollout 1 || [[ $? -eq 1 ]] ;;
+  once) rollout 0 || [[ $? -eq 1 ]] ;;
+  loop)
+    log "updater: every $ROLLOUT_EVERY s, the services of $COMPOSE_DIR follow the latest image"
+    while :; do
+      rollout 0 || true
+      sleep "$ROLLOUT_EVERY"
+    done
+    ;;
+esac

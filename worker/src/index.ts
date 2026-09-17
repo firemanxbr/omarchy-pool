@@ -41,6 +41,7 @@
  *                                                  /docs, and the detail pages /packages /package/:name /security /status /journal /workers /review /user/:login
  *   GET  /pool/<source>/<arch>/<file>              fallback static origin (dev)
  *   GET  /setup                                    the one-command setup script (curl … | sudo bash -s -- --ring stable)
+ *   GET  /omarchy-worker · /omarchy-worker/compose.yml   one command to run a worker (src/omarchy-worker.sh) and the compose file it writes
  *   GET  /api/v1/pacman.conf?ring=&arch=&with=     the pacman.d include a ring serves right now
  */
 
@@ -104,7 +105,7 @@ import { pipelineHtml } from "./pages/pipeline";
 import { factoryHtml as factoryPageHtml } from "./pages/contribute";
 import { DASHBOARD_HOST, LEGACY_DASHBOARD_HOST, version } from "./meta";
 import { handleStatic } from "./routes/static";
-import { pacmanInclude, setupScript } from "./routes/setup";
+import { pacmanInclude, setupScript, workerCli, workerCompose } from "./routes/setup";
 import { runScheduler } from "./scheduler";
 
 export interface Env {
@@ -190,6 +191,9 @@ export default {
       if (path === "/" || path === "/index.html") return html(overviewHtml(env.POOL_URL, version(env)));
       // One command to join a ring: the script, read by people before they pipe it into sudo.
       if (path === "/setup" || path === "/setup.sh") return new Response(setupScript(url.origin, env.POOL_URL.replace(/\/$/, "")), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300" } });
+      // One command to run a worker: the script (read before it is run) and the compose file it writes.
+      if (path === "/omarchy-worker" || path === "/omarchy-worker.sh") return new Response(workerCli(url.origin), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300" } });
+      if (path === "/omarchy-worker/compose.yml") return new Response(workerCompose(), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300" } });
       // Sign in with GitHub: cookie session for the dashboard's pages.
       if (path === "/auth/github" && method === "GET") return handleAuthStart(url, env);
       if (path === "/auth/github/callback" && method === "GET") return handleAuthCallback(url, request, env);
