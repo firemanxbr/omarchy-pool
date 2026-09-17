@@ -6,12 +6,18 @@
  * for a tag newer than what was approved, queues a community build from
  * the approved PKGBUILD with pkgver moved to the tag (`bump:<task>@<tag>`).
  *
+ * "Approved" is an approval that stands (standsSql, the rule every route
+ * reads): a withdrawn one counts for nothing, so a package whose only
+ * approval was taken back gets no bump and no bump starts from a
+ * withdrawn recipe. Before 2026-09-18 this read `decision` alone.
+ *
  * The owner's worker has fourteen days; after that a donated (--shared)
  * worker may build it. Thirty days without a build and the package is
  * unmaintained: no more bumps until its owner (or a maintainer, by removing
  * the registration for someone else) takes it up again.
  */
 import type { Env } from "./index";
+import { standsSql } from "./routes/story";
 
 const SHARED_AFTER_DAYS = 14;
 const UNMAINTAINED_AFTER_DAYS = 30;
@@ -67,7 +73,7 @@ export async function checkUpdates(env: Env, now = new Date(), fetcher: typeof f
   const pkgs = await env.DB.prepare(
     `SELECT p.name, p.owner, p.url, p.arches, p.status FROM factory_packages p
       WHERE p.status != 'unmaintained' AND p.blocked_at IS NULL AND p.url LIKE 'https://github.com/%'
-        AND EXISTS (SELECT 1 FROM approvals a WHERE a.name = p.name AND a.decision = 'approved')`,
+        AND EXISTS (SELECT 1 FROM approvals a WHERE a.name = p.name AND ${standsSql("a.")})`,
   ).all<Pkg>();
   let checked = 0;
   for (const p of pkgs.results) {
@@ -81,8 +87,8 @@ export async function checkUpdates(env: Env, now = new Date(), fetcher: typeof f
     checked++;
     if (!tag) continue;
     const want = pkgverOf(tag);
-    // What was approved last: its version and the task whose PKGBUILD to start from.
-    const approved = await env.DB.prepare("SELECT task_id, version FROM approvals WHERE name = ? AND decision = 'approved' ORDER BY id DESC LIMIT 1").bind(p.name).first<{ task_id: number; version: string | null }>();
+    // What was approved last and still stands: its version and the task whose PKGBUILD to start from.
+    const approved = await env.DB.prepare(`SELECT task_id, version FROM approvals WHERE name = ? AND ${standsSql()} ORDER BY id DESC LIMIT 1`).bind(p.name).first<{ task_id: number; version: string | null }>();
     if (!approved) continue;
     const have = (approved.version ?? "").replace(/^\d+:/, "").replace(/-\d+$/, "");
     if (have === want) continue;

@@ -17,6 +17,7 @@ import securityModel from "../docs/security-model.md";
 import contributing from "../docs/contributing.md";
 import proofOfConcept from "../docs/proof-of-concept.md";
 import openWork from "../docs/open-work.md";
+import { CHECKLIST } from "../request";
 import omarchyCliMcp from "../docs/omarchy-cli-mcp.md";
 import whatWeTest from "../docs/what-we-test.md";
 // The skills the agents read (factory/skills), spliced into the What we test chapter: one text, two readers.
@@ -87,6 +88,8 @@ export const SKILLS: { file: string; text: string }[] = [
   { file: "factory/skills/groups/prebuilt-binaries.md", text: skillPrebuiltBinaries },
 ];
 const WHAT_WE_TEST = whatWeTest.replace("<!-- skills -->", SKILLS.map((s) => s.text.trim()).join("\n\n"));
+/** The four confirmations where the factory chapter names them: the request form's own sentences (CHECKLIST, src/request.ts), never a paraphrase. */
+const FACTORY = factory.replace("<!-- checklist -->", Object.values(CHECKLIST).join("; "));
 
 export const MD_CHAPTERS: MdChapter[] = [
   { key: "omarchy-cli-mcp", label: "omarchy-cli as an MCP server", text: omarchyCliMcp, from: "docs", group: "pool" },
@@ -95,7 +98,7 @@ export const MD_CHAPTERS: MdChapter[] = [
   { key: "runbook", label: "Runbook", text: runbook, from: "docs", group: "code" },
   { key: "testing", label: "Testing", text: testing, from: "docs", group: "code" },
   { key: "migration", label: "Migration", text: migration, from: "docs", group: "code" },
-  { key: "factory", label: "The factory", text: factory, from: "factory", group: "code" },
+  { key: "factory", label: "The factory", text: FACTORY, from: "factory", group: "code" },
   { key: "worker-host", label: "The worker host", text: workerHost, from: "factory/host", group: "code" },
   { key: "security-model", label: "Security model", text: securityModel, from: ".", group: "code" },
   { key: "contributing", label: "Contributing", text: contributing, from: ".", group: "code" },

@@ -5,9 +5,10 @@ import { isRepoArch } from "../r2";
 import { providedBy } from "./factory";
 import { pullFromRings } from "./blocks";
 import { queuePosition } from "../queue";
+import { standsSql } from "./story";
 import { cookieOf } from "./auth";
 import { putRecord, recordKey, recordUrl, withdrawRecord } from "../record";
-import { version } from "../meta";
+import { version, RINGS, ringsSql, sortRings } from "../meta";
 import { isTextEvidence, reclaimStagingPackages, STAGING_DAYS, STAGING_QUOTA_BYTES } from "../staging";
 import { findLeak, leakMessage } from "../leak";
 import { CHECKLIST, LICENSE, sourceHasPath } from "../request";
@@ -267,14 +268,13 @@ export async function registrationsOf(env: Env, by: { owner: string } | { name: 
   ).all<{ name: string; owner: string; status: string }>()).results;
   if (!rows.length) return [];
   const names = JSON.stringify(rows.map((r) => r.name));
-  const order = ["lab", "edge", "rc", "stable"];
   const [served, reviewing] = await Promise.all([
-    env.DB.prepare("SELECT DISTINCT p.name, rp.ring FROM ring_packages rp JOIN packages p ON p.id = rp.package_id WHERE p.name IN (SELECT value FROM json_each(?)) AND p.source = 'factory' AND rp.ring IN ('lab', 'edge', 'rc', 'stable')").bind(names).all<{ name: string; ring: string }>(),
+    env.DB.prepare(`SELECT DISTINCT p.name, rp.ring FROM ring_packages rp JOIN packages p ON p.id = rp.package_id WHERE p.name IN (SELECT value FROM json_each(?)) AND p.source = 'factory' AND rp.ring IN (${ringsSql(RINGS)})`).bind(names).all<{ name: string; ring: string }>(),
     env.DB.prepare("SELECT name, id, status FROM build_tasks WHERE name IN (SELECT value FROM json_each(?)) AND kind = 'build' AND trust = 'project' AND status IN ('queued', 'leased', 'staged') ORDER BY id DESC").bind(names).all<{ name: string; id: number; status: string }>(),
   ]);
   return rows.map((r) => ({
     ...r,
-    served: served.results.filter((s) => s.name === r.name).map((s) => s.ring).sort((x, y) => order.indexOf(x) - order.indexOf(y)),
+    served: sortRings(served.results.filter((s) => s.name === r.name).map((s) => s.ring)),
     reviewing: reviewing.results.find((t) => t.name === r.name) ?? null,
   }));
 }
@@ -472,7 +472,7 @@ export async function handleRequestPackage(c: Contributor, request: Request, env
   if (byProject) return json({ error: `${parsed.project} is already in the pool as ${byProject.name} (${byProject.status}, requested by ${byProject.owner})` }, 409);
   if (byName && !["registered", "waiting", "rejected", "unmaintained", "staged"].includes(byName.status)) return json({ error: `${name} is ${byName.status}; a request can be renewed while it is registered, waiting, staged, rejected or unmaintained — not while it is being built, and not once it is in the pool` }, 409);
   // A package in the pool passes through 'waiting' and 'staged' with every bump: the standing approval, not the status, says it is in the pool — its record stays as it was, new releases come as bumps.
-  const inPool = byName ? await env.DB.prepare("SELECT id FROM approvals WHERE name = ? AND decision = 'approved' AND withdrawn_at IS NULL LIMIT 1").bind(name).first<{ id: number }>() : null;
+  const inPool = byName ? await env.DB.prepare(`SELECT id FROM approvals WHERE name = ? AND ${standsSql()} LIMIT 1`).bind(name).first<{ id: number }>() : null;
   if (inPool) return json({ error: `${name} is in the pool (approval #${inPool.id}); its record stays as it was — new releases come as bumps, built from the approved recipe` }, 409);
   // The package's status is one word for every architecture and every kind of build: the builds themselves say whether one runs (the project's included).
   const running = byName ? await env.DB.prepare("SELECT id, status, trust FROM build_tasks WHERE name = ? AND kind = 'build' AND status = 'leased' ORDER BY id DESC LIMIT 1").bind(name).first<{ id: number; status: string; trust: string }>() : null;

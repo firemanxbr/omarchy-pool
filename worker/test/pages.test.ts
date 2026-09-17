@@ -11,7 +11,9 @@ import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:
 import { beforeAll, describe, expect, it } from "vitest";
 import worker from "../src/index";
 import { allComponents } from "../src/pages/components";
-import { HELPERS, MORE, NAV } from "../src/pages/layout";
+import { HELPERS, MORE, NAV, termId } from "../src/pages/layout";
+import { DOCS_TREE, GLOSSARY } from "../src/pages/docs-tree";
+import { JOURNAL_KINDS } from "../src/pages/journal";
 import { CHARTS } from "../src/pages/charts";
 import { ownScriptOf, scriptOf, seedDashboard, type Fixture } from "./fixture";
 // The router's own source, as text (Vite's ?raw): the routed pages are read from it, so a page added to index.ts without a way in fails here by name.
@@ -113,6 +115,45 @@ describe("dashboard pages", () => {
     expect(docs).toContain('here.indexOf(href + "/") === 0');
     expect(docs).toContain('href === "/packages" && here.indexOf("/package/") === 0');
     expect(docs).toContain('href === "/journal" && here === "/diff"');
+  });
+
+  // The app is the truth and the text follows. Three rules over every served page, the markdown chapters included, and the pages' own scripts: (a) a link into the documentation lands — its path is a chapter of DOCS_TREE (or the index) and its fragment one of that chapter's sections, or a glossary term; the four `/docs#chapter/section` links written against the old one-page docs landed at the top of /docs for a day; (b) no page says what the app no longer does — the phrases below each name a page or a flow that moved, with why; (c) a `/journal?kind=<k>` link filters, because k is one of the journal's kinds — `kind=role` fell back to all for a day.
+  it("links the documentation where it is, says nothing the app no longer does, and links journal kinds the filter has", async () => {
+    const chapters = new Map(DOCS_TREE.map((c) => [c.href, new Set(c.secs.map((sec) => sec.id))]));
+    chapters.set("/docs/glossary", new Set(GLOSSARY.map(([term]) => termId(term))));
+    const FORBIDDEN: [RegExp, string][] = [
+      [/Factory page/, "/factory is the assembly line (#169): workers and agents are on /workers, staged builds on /review, a person's record on /user/<login>, the queue on /pipeline"],
+      [/Trust table/, "there is no trust table: a maintainer trusts a worker through the API, and who did is in the worker id's tooltip on /workers"],
+      [/recipe pending|waiting for the recipe/, "the recipe-on-main flow is retired (#182): an approval carries the project's build (rebuild_task), always"],
+      [/press (?:<b>)?Build(?:<\/b>)? on your page|picks it up within a minute/, "a request builds by itself in the shared queue, the best idle worker first (#182); the owner's Build is for a worker of their own or a re-run"],
+      [/rebuilds what a maintainer approves|[Aa]pprove queues a rebuild/, "approve queues a publish of the project's build; Build by the project is the separate action, and the one that queues a rebuild"],
+      [/approve, trust and roll back|approving, trusting and rolling back/, "no page has a trust control: trust is through the API"],
+      [/href="\/docs#/, "the docs index has no ids: a chapter's page carries the anchors (DOCS_TREE)"],
+      [/under a group in <code>factory\/MAINTAINERS\.toml/, "one list, no groups"],
+    ];
+    const problems: string[] = [];
+    for (const path of PAGES) {
+      const html = await (await get(path)).text();
+      // (a) the served HTML's links, scripts set aside: what a reader can press.
+      const body = html.replace(/<script[\s\S]*?<\/script>/g, "");
+      for (const m of body.matchAll(/href="(\/docs(?:\/[a-z-]+)?)(?:#([^"]*))?"/g)) {
+        const [, chapter, frag] = m;
+        if (chapter === "/docs") { if (frag) problems.push(`${path}: href="/docs#${frag}" — the index has no anchors`); continue; }
+        const secs = chapters.get(chapter);
+        if (!secs) { problems.push(`${path}: href="${chapter}" is no chapter of DOCS_TREE`); continue; }
+        if (frag && !secs.has(frag)) problems.push(`${path}: href="${chapter}#${frag}" — no such section (${[...secs].join(", ")})`);
+      }
+      // (b) the whole page, script included: a pill's word is as much a claim as a paragraph.
+      for (const [re, why] of FORBIDDEN) { const hit = re.exec(html); if (hit) problems.push(`${path} says "${hit[0]}" — ${why}`); }
+      // (c) every journal link, in HTML or script.
+      for (const m of html.matchAll(/\/journal\?kind=([a-z-]+)/g)) if (!JOURNAL_KINDS.includes(m[1])) problems.push(`${path} links /journal?kind=${m[1]}, a kind the journal's filter lacks (${JOURNAL_KINDS.join(", ")})`);
+    }
+    expect(problems, problems.join("\n")).toEqual([]);
+    // The journal's chips are the same list, and `?kind=` picks one of them rather than falling back to all.
+    const journal = ownScript(await (await get("/journal")).text());
+    expect(journal).toContain(`var KINDS = ${JSON.stringify(JOURNAL_KINDS)}`);
+    expect(journal).toContain('KINDS.indexOf(qs.get("kind")) >= 0 ? qs.get("kind") : "all"');
+    for (const k of ["role", "withdraw", "review", "request", "audience", "fast-track", "build", "promote", "rollback", "sync"]) expect(JOURNAL_KINDS, k).toContain(k);
   });
 
   // Every name a page's script uses is declared somewhere in that script (the shell's helpers, the charts, the page's own) or is the browser's — parsed, not grepped: a helper moved out of one page and dropped from another is a ReferenceError the tests would not otherwise see (the Workers page lost perDay() and COLOR that way, 2026-09-17).

@@ -40,6 +40,59 @@ export function version(env: Env): RunningVersion {
 export const LATE_AFTER_HOURS = 9;
 
 /**
+ * The rings. edge, rc and stable are the promise: a package enters edge
+ * signature-verified and reaches rc and stable by evidence, whichever
+ * source built it. lab is the fourth, beside them, where nothing is
+ * promised and nothing is promoted from: the factory's builds land there
+ * first and a real pacman tries them against edge (the trial job), any
+ * object of the pool can be pinned there to be tried in a combination,
+ * and only a maintainer's approval takes a build from there to edge. No
+ * sync targets it; `--ring lab` on a machine is the lab above the edge.
+ *
+ * This is the one list. index.ts re-exports it for the routes; the SQL
+ * that asks "which rings serve this package" is written from it through
+ * ringsSql(), the order a served list is read in is sortRings(), so a ring
+ * added here is in every query and every order the server writes. Five
+ * routes typed the four names by hand before (2026-09-18).
+ */
+export const RINGS = ["edge", "rc", "stable", "lab"] as const;
+export type Ring = (typeof RINGS)[number];
+/** The rings a package is promoted through, in order. */
+export const PROMOTED_RINGS = ["edge", "rc", "stable"] as const;
+/**
+ * The same rings from the most stable down — stable, rc, edge, then the
+ * lab, which is below edge and promised nothing — the order a reader
+ * picks a ring in and the order the package page falls back through when
+ * the asked ring does not serve the package. Derived, so it cannot drift
+ * from RINGS; the ring texts (RING_TEXT) keep this order too.
+ */
+export const RINGS_BY_STABILITY: readonly Ring[] = [...[...PROMOTED_RINGS].reverse(), ...RINGS.filter((r) => !(PROMOTED_RINGS as readonly string[]).includes(r))];
+/** The order a package climbs — lab, edge, rc, stable — the order the rings that serve a package are listed in. Derived from RINGS_BY_STABILITY, read the other way. */
+export const RINGS_UPWARD: readonly Ring[] = [...RINGS_BY_STABILITY].reverse();
+
+export function isRing(s: string): s is Ring {
+  return (RINGS as readonly string[]).includes(s);
+}
+
+/**
+ * A ring list as a SQL `IN (…)` fragment, `'lab', 'edge', 'rc', 'stable'`,
+ * to splice into a query. The values are the constants above, never a
+ * caller's input: a name that is not plain lowercase letters throws
+ * rather than reaching the query, so the fragment can only ever be the
+ * rings' own names.
+ */
+export function ringsSql(rings: readonly Ring[]): string {
+  for (const r of rings) if (!/^[a-z]+$/.test(r)) throw new Error(`not a ring name: ${r}`);
+  return rings.map((r) => `'${r}'`).join(", ");
+}
+
+/** The rings that serve a package, in the order a package climbs (RINGS_UPWARD). A name that is no ring sorts last. */
+export function sortRings<T extends string>(rings: T[]): T[] {
+  const at = (r: string) => { const i = (RINGS_UPWARD as readonly string[]).indexOf(r); return i < 0 ? RINGS_UPWARD.length : i; };
+  return [...rings].sort((a, b) => at(a) - at(b));
+}
+
+/**
  * What each ring is, said once: the Pool page's cards, the Docs, Get
  * started and the status tiles read it from here (layout.ts hands it to
  * every page script as RINGS_TEXT). Promotion is by evidence, when the
@@ -93,7 +146,7 @@ export function sourceRank(source: string): number {
 
 /** The source a rendered repository lists: `omarchy-<source>-<ring>` → `<source>`; null for any other name. */
 export function sourceOfRepo(repo: string): string | null {
-  const m = repo.match(/^omarchy-(.+)-(edge|rc|stable|lab)$/);
+  const m = repo.match(new RegExp(`^omarchy-(.+)-(${RINGS.join("|")})$`));
   return m ? m[1] : null;
 }
 

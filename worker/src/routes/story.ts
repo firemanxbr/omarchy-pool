@@ -8,6 +8,7 @@
  * registration; the rest is assembled here.
  */
 import { json, type Env } from "../index";
+import { RINGS, ringsSql } from "../meta";
 import { scoreChain, type Score } from "../score";
 import { requestChecks, type RequestRow, type RequestChecks } from "../request";
 import { recordUrl } from "../record";
@@ -46,6 +47,11 @@ export interface Approval { id: number; task_id: number; decision: string; by: s
 /** An approval that stands: signed as approved and not taken back — the rule every page reads, never `decision` alone. Every approval the server hands out carries it as `standing`. */
 export function stands(a: { decision: string; withdrawn_at: string | null }): boolean {
   return a.decision === "approved" && a.withdrawn_at === null;
+}
+
+/** The same rule as a SQL condition on an approvals row, for the queries that ask the index which approvals stand; `alias` is the row's alias with its dot (`a.`) or nothing. The scheduler's bumps read `decision` alone once and queued a build from a withdrawn recipe (2026-09-18). */
+export function standsSql(alias = ""): string {
+  return `${alias}decision = 'approved' AND ${alias}withdrawn_at IS NULL`;
 }
 
 export interface Chain {
@@ -162,7 +168,7 @@ export async function handlePackageStory(name: string, env: Env): Promise<Respon
   if (!pkg && !tasks.length) return json({ error: `${name} is not a factory package` }, 404);
   await placeInQueue(env, tasks);
   const all = chains(tasks, approvals, pkg, request);
-  const rings = (await env.DB.prepare("SELECT DISTINCT rp.ring, p.repo_arch AS arch FROM packages p JOIN ring_packages rp ON rp.package_id = p.id AND rp.ring IN ('lab', 'edge', 'rc', 'stable') WHERE p.source = 'factory' AND p.name = ?").bind(name).all<{ ring: string; arch: string }>()).results;
+  const rings = (await env.DB.prepare(`SELECT DISTINCT rp.ring, p.repo_arch AS arch FROM packages p JOIN ring_packages rp ON rp.package_id = p.id AND rp.ring IN (${ringsSql(RINGS)}) WHERE p.source = 'factory' AND p.name = ?`).bind(name).all<{ ring: string; arch: string }>()).results;
   const decided = all.find((c) => c.approval?.standing) ?? null;
   const current = decided ?? all[0] ?? null;
   return json(

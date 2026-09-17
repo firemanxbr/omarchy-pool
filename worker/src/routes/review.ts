@@ -1,10 +1,11 @@
 import { json, type Env } from "../index";
+import { RINGS, ringsSql, sortRings } from "../meta";
 import { scoreChain } from "../score";
 import { requestChecks } from "../request";
 import { contributorOf, isMaintainer, MAINTAINER_DECIDES, SIGN_IN, type Contributor } from "./contributors";
 import { reclaimStagingPackages } from "../staging";
 import { pullFromRings } from "./blocks";
-import { chains, chainOf, storyRows, stands, type Approval } from "./story";
+import { chains, chainOf, storyRows, stands, standsSql, type Approval } from "./story";
 export { stands };
 import { putRecord, recordUrl } from "../record";
 
@@ -63,9 +64,9 @@ export async function handleReviewList(env: Env, request: Request): Promise<Resp
                           LEFT JOIN package_requests q ON q.id = p.request_id
                           LEFT JOIN build_workers w ON w.id = t.lease_owner
       WHERE t.kind = 'build' AND t.status = 'staged'
-        AND NOT EXISTS (SELECT 1 FROM approvals a WHERE a.task_id = t.id AND a.decision = 'approved' AND a.withdrawn_at IS NULL)
+        AND NOT EXISTS (SELECT 1 FROM approvals a WHERE a.task_id = t.id AND ${standsSql("a.")})
         -- a contributor's evidence whose project build was approved has served: nothing left to decide on it
-        AND NOT EXISTS (SELECT 1 FROM approvals a JOIN build_tasks r ON r.id = a.task_id WHERE a.decision = 'approved' AND a.withdrawn_at IS NULL AND r.name = t.name AND json_extract(r.params, '$.review') = t.id)
+        AND NOT EXISTS (SELECT 1 FROM approvals a JOIN build_tasks r ON r.id = a.task_id WHERE ${standsSql("a.")} AND r.name = t.name AND json_extract(r.params, '$.review') = t.id)
       ORDER BY t.id DESC LIMIT 100`,
   ).all();
   // A contributor's build that the project is building again, or built: the review row says so.
@@ -120,7 +121,7 @@ export async function handleReviewList(env: Env, request: Request): Promise<Resp
     ? (await env.DB.prepare(
         `SELECT a.task_id, a.name, a.arch, a.version, a.by, a.created_at, a.rebuild_task, r.status AS rebuild_status
            FROM approvals a LEFT JOIN build_tasks r ON r.id = a.rebuild_task
-          WHERE a.decision = 'approved' AND a.withdrawn_at IS NULL AND a.name IN (${names.map(() => "?").join(", ")}) ORDER BY a.id DESC`,
+          WHERE ${standsSql("a.")} AND a.name IN (${names.map(() => "?").join(", ")}) ORDER BY a.id DESC`,
       ).bind(...names).all<{ task_id: number; name: string; arch: string; version: string | null; by: string; created_at: string; rebuild_task: number | null; rebuild_status: string | null }>()).results
     : [];
   const already = (r: Record<string, unknown>) => {
@@ -367,7 +368,7 @@ async function standingApproval(env: Env, name: string, id: number): Promise<App
 async function factsOf(env: Env, t: Decidable & { owner: string | null }): Promise<Facts & { approval: Approval | null }> {
   const [owner, already, inFlight, approval, packaged] = await Promise.all([
     ownerOf(env, t.name, t.owner),
-    env.DB.prepare("SELECT id FROM approvals WHERE task_id = ? AND decision = 'approved' AND withdrawn_at IS NULL").bind(t.id).first(),
+    env.DB.prepare(`SELECT id FROM approvals WHERE task_id = ? AND ${standsSql()}`).bind(t.id).first(),
     env.DB.prepare("SELECT id, status FROM build_tasks WHERE kind = 'build' AND trust = 'project' AND json_extract(params, '$.review') = ? AND status IN ('queued', 'leased', 'staged')").bind(t.id).first<{ id: number; status: string }>(),
     standingApproval(env, t.name, t.id),
     t.trust === "project" ? env.DB.prepare("SELECT 1 AS one FROM staging_objects WHERE task_id = ? AND key LIKE '%.pkg.tar.zst' LIMIT 1").bind(t.id).first() : Promise.resolve(true),
@@ -537,14 +538,13 @@ export async function handleApprovals(env: Env): Promise<Response> {
       `SELECT a.*, r.status AS rebuild_status, r.result_filename AS rebuild_result FROM approvals a LEFT JOIN build_tasks r ON r.id = a.rebuild_task ORDER BY a.id DESC LIMIT 100`,
     ).all(),
     env.DB.prepare(
-      `SELECT rp.ring, p.name, p.repo_arch AS arch FROM packages p JOIN ring_packages rp ON rp.package_id = p.id AND rp.ring IN ('lab', 'edge', 'rc', 'stable') WHERE p.source = 'factory'`,
+      `SELECT rp.ring, p.name, p.repo_arch AS arch FROM packages p JOIN ring_packages rp ON rp.package_id = p.id AND rp.ring IN (${ringsSql(RINGS)}) WHERE p.source = 'factory'`,
     ).all<{ ring: string; name: string; arch: string }>(),
   ]);
-  const order = ["lab", "edge", "rc", "stable"];
   const rings = new Map<string, string[]>();
   for (const s of served.results) {
     const k = `${s.name}\t${s.arch}`;
-    rings.set(k, [...(rings.get(k) ?? []), s.ring].sort((a, b) => order.indexOf(a) - order.indexOf(b)));
+    rings.set(k, sortRings([...(rings.get(k) ?? []), s.ring]));
   }
   const approvals = (rows.results as { name: string; arch: string; decision: string; withdrawn_at: string | null }[]).map((a) => ({ ...a, standing: stands(a), rings: rings.get(`${a.name}\t${a.arch}`) ?? [] }));
   return json({ approvals }, 200, { "cache-control": "public, max-age=30" });

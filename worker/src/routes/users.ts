@@ -1,10 +1,11 @@
 import { json, type Env } from "../index";
 import { updateState } from "../update";
-import { version as running } from "../meta";
+import { version as running, RINGS, ringsSql, sortRings } from "../meta";
 import { queuePosition } from "../queue";
 import { maintainersOf } from "../governance";
 import { registrationsOf, rights, workersOf, workspace, type Contributor } from "./contributors";
 import { stands } from "./review";
+import { standsSql } from "./story";
 
 /**
  * A person's public page: what they contribute and what they maintain,
@@ -24,7 +25,10 @@ interface TrackRecord {
  * The track record, from the record the pool keeps anyway — approvals,
  * staged builds, bumps, donated builds. The score is one number with a
  * formula anyone can check (docs/GOVERNANCE.md): it says how much work a
- * person has done here, not who they are.
+ * person has done here, not who they are. The record counts every
+ * approval signed, a withdrawn one included: it is history — the decision
+ * was made and stays on the record — not a claim that the approval
+ * stands. What stands is `standing` on each row and maintenanceOf().
  */
 export function scoreOf(r: Omit<TrackRecord, "score">): number {
   const c = r.contributed, m = r.maintained;
@@ -110,9 +114,8 @@ export async function handleUser(login: string, env: Env): Promise<Response> {
       // Every approval says whether it stands (`standing`, as GET /factory/approvals says it), and a standing one where the package is today: the rings that serve it, from the factory's rows in each ring.
       approvals: await Promise.all((approvals.results as { name: string; arch: string; decision: string; withdrawn_at: string | null }[]).map(async (a) => {
         if (!stands(a)) return { ...a, standing: false };
-        const rings = (await env.DB.prepare("SELECT DISTINCT rp.ring FROM ring_packages rp JOIN packages p ON p.id = rp.package_id WHERE p.name = ? AND p.repo_arch = ? AND p.source = 'factory' AND rp.ring IN ('lab', 'edge', 'rc', 'stable')").bind(a.name, a.arch).all<{ ring: string }>()).results.map((r) => r.ring);
-        const order = ["lab", "edge", "rc", "stable"];
-        return { ...a, standing: true, rings: rings.sort((x, y) => order.indexOf(x) - order.indexOf(y)) };
+        const rings = (await env.DB.prepare(`SELECT DISTINCT rp.ring FROM ring_packages rp JOIN packages p ON p.id = rp.package_id WHERE p.name = ? AND p.repo_arch = ? AND p.source = 'factory' AND rp.ring IN (${ringsSql(RINGS)})`).bind(a.name, a.arch).all<{ ring: string }>()).results.map((r) => r.ring);
+        return { ...a, standing: true, rings: sortRings(rings) };
       })),
       approved_packages: approvedNames,
       record,
@@ -148,7 +151,7 @@ export async function maintenanceOf(env: Env, name: string, source: string, pack
   const out: Record<string, unknown> = { packager: packager ?? null };
   if (source !== "factory") return out;
   const pkg = await env.DB.prepare(`SELECT owner, category, url, status FROM factory_packages WHERE name = ?`).bind(name).first<{ owner: string; category: string | null; url: string; status: string }>();
-  const approval = await env.DB.prepare("SELECT by, version, arch, created_at, task_id FROM approvals WHERE name = ? AND decision = 'approved' AND withdrawn_at IS NULL ORDER BY id DESC LIMIT 1")
+  const approval = await env.DB.prepare(`SELECT by, version, arch, created_at, task_id FROM approvals WHERE name = ? AND ${standsSql()} ORDER BY id DESC LIMIT 1`)
     .bind(name)
     .first<{ by: string; version: string | null; arch: string; created_at: string; task_id: number }>();
   out.factory = {

@@ -6,7 +6,7 @@
  */
 import type { Env } from "./index";
 import { provenanceCounts } from "./provenance";
-import { version } from "./meta";
+import { version, PROMOTED_RINGS } from "./meta";
 
 const EVERY_MINUTES = 30;
 
@@ -90,7 +90,7 @@ async function scanPool(env: Env): Promise<PoolBlock> {
     },
     rings,
     // OPR recipes by origin, per ring: the AUR-synced count is the one to drive to zero.
-    provenance: { stable: await provenanceCounts(env, "stable"), rc: await provenanceCounts(env, "rc"), edge: await provenanceCounts(env, "edge") },
+    provenance: Object.fromEntries(await Promise.all(PROMOTED_RINGS.map(async (ring) => [ring, await provenanceCounts(env, ring)]))),
     // Architecture-independent packages a ring stores twice: Arch Linux ARM
     // rebuilds and re-signs `any` packages, so the same name and version is
     // one object per architecture directory. What that costs the pool.

@@ -10,7 +10,7 @@ import { findLeak } from "../leak";
 import { chains, chainOf, storyRows, requestView, placeInQueue, stands, type Chain } from "./story";
 import { betterIdleWorker, FIRST_PICK_MINUTES } from "../queue";
 import { updateMessage, updateState } from "../update";
-import { version as running } from "../meta";
+import { version as running, RINGS, ringsSql, sortRings } from "../meta";
 
 /**
  * The factory's brain. Cloudflare is the source of truth for package
@@ -844,9 +844,8 @@ export async function handleTask(id: number, env: Env): Promise<Response> {
   }
   // The rings that serve this package today, from the factory's rows in each ring.
   const rings = isBuild
-    ? (await env.DB.prepare("SELECT rp.ring FROM packages p JOIN ring_packages rp ON rp.package_id = p.id AND rp.ring IN ('lab', 'edge', 'rc', 'stable') WHERE p.source = 'factory' AND p.name = ? AND p.repo_arch = ?").bind(task.name, task.arch).all<{ ring: string }>()).results.map((r) => r.ring)
+    ? sortRings((await env.DB.prepare(`SELECT rp.ring FROM packages p JOIN ring_packages rp ON rp.package_id = p.id AND rp.ring IN (${ringsSql(RINGS)}) WHERE p.source = 'factory' AND p.name = ? AND p.repo_arch = ?`).bind(task.name, task.arch).all<{ ring: string }>()).results.map((r) => r.ring))
     : [];
-  const order = ["lab", "edge", "rc", "stable"];
   return json(
     {
       task: { ...task, params, result: parse(task) },
@@ -860,7 +859,7 @@ export async function handleTask(id: number, env: Env): Promise<Response> {
       approval: approval ? { ...approval, standing: stands(approval as { decision: string; withdrawn_at: string | null }) } : null,
       chain,
       score: chain?.score ?? null,
-      rings: rings.sort((a, b) => order.indexOf(a) - order.indexOf(b)),
+      rings,
       package: pkg,
       request,
       evidence: objects.results.map((o) => {

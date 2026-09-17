@@ -1,13 +1,33 @@
 /**
  * Get started: the exact pacman configuration for a ring and an architecture,
  * generated from what the ring serves right now, plus the database key and
- * the optional thin client. `?ring=stable&arch=x86_64` preselects.
+ * the optional thin client. `?ring=stable&arch=x86_64` preselects. The
+ * sections by hand are the API's own words: the page is served with the
+ * include GET /api/v1/pacman.conf answers for the picked ring and
+ * architecture (getStartedSample, rendered by the same function), and the
+ * script asks the same route again whenever the pick or the optional
+ * sources change — nothing on the page derives the include itself.
  */
 import { page } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
+import { escapeHtml } from "../html";
+import { pacmanInclude } from "../routes/setup";
+import type { Env } from "../index";
 import type { RunningVersion } from "../meta";
 
-const BODY = String.raw`
+/** The ring and the architecture the page opens on: the address's, else stable on x86_64 — the script's own rule. */
+const picked = (url: URL) => ({ ring: url.searchParams.get("ring") ?? "stable", arch: url.searchParams.get("arch") ?? "x86_64" });
+
+/** The include the page is served with, for the pick the address makes: what the API answers, at request time; null when the ring has no release for the architecture (or the pick is not one). */
+export function getStartedSample(env: Env, url: URL): Promise<string | null> {
+  const { ring, arch } = picked(url);
+  return pacmanInclude(env, ring, arch, new Set(), `${url.origin}/setup`);
+}
+
+/** The include as the page shows it: the API's text, each section's name in bold; without one, the script's own words for a ring that serves nothing yet. */
+const confHtml = (sample: string | null) => (sample ? escapeHtml(sample).replace(/^\[(.+)\]$/gm, "[<b>$1</b>]") : '<span class="c"># loading what the ring serves…</span>');
+
+const body = (sample: string | null) => String.raw`
   <h1>Get started</h1>
   <p class="lede">One command — or three steps by hand: trust the key that signs the databases, point pacman at a ring, upgrade. Packages keep the signatures of the project that built them (Arch, Arch Linux ARM, Omarchy, the Asahi projects) — the only new key you trust signs the databases and what the pool builds itself.</p>
 
@@ -43,9 +63,9 @@ const BODY = String.raw`
 
     <div class="step" id="conf">
       <h3>3. Configure pacman, by hand</h3>
-      <p>Save the sections below as <code>/etc/pacman.d/omarchy-pool.conf</code> (<code>sudo nvim</code>, or <code>curl -o</code> from <code>/api/v1/pacman.conf?ring=…&amp;arch=…</code>), then add <code>Include = /etc/pacman.d/omarchy-pool.conf</code> to <code>/etc/pacman.conf</code> above <code>[core]</code>. The list is generated from what the ring serves right now.</p>
+      <p>Save the sections below as <code>/etc/pacman.d/omarchy-pool.conf</code> (<code>sudo nvim</code>, or <code>curl -o</code> from <code>/api/v1/pacman.conf?ring=…&amp;arch=…</code> — the same text), then add <code>Include = /etc/pacman.d/omarchy-pool.conf</code> to <code>/etc/pacman.conf</code> above <code>[core]</code>. The list is what the ring serves right now.</p>
       <div class="choice" id="optional"></div>
-      <pre><span class="copy" data-copy="conf">copy</span><span id="conf-text"></span></pre>
+      <pre><span class="copy" data-copy="conf">copy</span><span id="conf-text">${confHtml(sample)}</span></pre>
       <p>Then:</p>
       <pre><span class="copy" data-copy="up">copy</span><span id="up-cmd">omarchy update</span>   <span class="c"># off Omarchy: sudo pacman -Syu</span></pre>
     </div>
@@ -80,28 +100,33 @@ const SCRIPT = String.raw`
   var arch = ARCHES.indexOf(q.get("arch")) >= 0 ? q.get("arch") : "x86_64";
   var data = null, optional = {};
 
+  // The sections are the API's: /api/v1/pacman.conf for the pick and the optional sources switched on, asked again only when one of them changes (the served page already carries the answer for the address's pick); a late answer to an earlier pick is dropped.
+  var confKey = "", confSeq = 0;
+  function drawConf() {
+    var withOptional = Object.keys(optional).filter(function (k) { return optional[k]; }).sort();
+    var key = ring + "|" + arch + "|" + withOptional.join(",");
+    if (key === confKey) return;
+    confKey = key;
+    var seq = ++confSeq;
+    fetch("/api/v1/pacman.conf?ring=" + ring + "&arch=" + arch + "&with=" + withOptional.join(",")).then(function (r) { return r.ok ? r.text() : null; }).then(function (t) {
+      if (seq !== confSeq) return;
+      $("#conf-text").innerHTML = t ? esc(t).replace(/^\[(.+)\]$/gm, "[<b>$1</b>]") : '<span class="c"># ' + ring + ' has no databases for ' + arch + ' yet — check the overview</span>';
+    }).catch(function () {});
+  }
+
   function draw() {
     pick("#pick-ring", RINGS, ring, function (v) { ring = v; draw(); }, { url: "ring" });
     pick("#pick-arch", ARCHES, arch, function (v) { arch = v; draw(); }, { url: "arch" });
     $("#ring-desc").textContent = DESC[ring];
     $("#key-cmd").innerHTML = 'curl -O ' + POOL + '/omarchy-staging.pub.asc\nsudo pacman-key --add omarchy-staging.pub.asc &amp;&amp; sudo pacman-key --lsign-key staging@firemanxbr.org';
     $("#setup-cmd").innerHTML = 'curl -fsSL ' + location.origin + '/setup | sudo bash -s -- --ring ' + ring;
-    var r = data ? data.rings.filter(function (x) { return x.ring === ring; })[0] : null;
     var cov = data ? data.coverage || [] : [];
     var optionalSources = cov.filter(function (c) { return c.optional && c.arch === arch; });
     $("#optional").innerHTML = optionalSources.map(function (c) {
       return '<button type="button" class="' + (optional[c.source] ? "on" : "") + '" data-v="' + esc(c.source) + '" title="' + esc(c.title || "") + '">' + (optional[c.source] ? "✓ " : "+ ") + esc(c.source) + '</button>';
     }).join("") + (optionalSources.length ? '<span class="muted" style="font-size:12.5px;align-self:center">optional repositories — off unless you switch them on</span>' : '');
     $("#optional").querySelectorAll("button").forEach(function (b) { b.onclick = function () { var v = b.getAttribute("data-v"); optional[v] = !optional[v]; draw(); }; });
-    var dbs = r ? (r.artifacts || []).filter(function (a) {
-      if (a.kind !== "db" || a.arch !== arch) return false;
-      var src = a.repo.replace(/^omarchy-/, "").replace(new RegExp("-" + ring + "$"), "");
-      var opt = cov.filter(function (c) { return c.source === src && c.arch === arch; })[0];
-      return !(opt && opt.optional) || optional[src];
-    }) : [];
-    $("#conf-text").innerHTML = dbs.length
-      ? dbs.map(function (a) { return "[<b>" + esc(a.repo) + "</b>]\nSigLevel = Required DatabaseRequired\nServer = " + POOL + "/" + esc(a.repo.replace(/^omarchy-/, "").replace(new RegExp("-" + ring + "$"), "")) + "/$arch"; }).join("\n\n")
-      : (data ? '<span class="c"># ' + ring + ' has no databases for ' + arch + ' yet — check the overview</span>' : '<span class="c"># loading what ' + ring + ' serves…</span>');
+    drawConf();
     $("#cli-cmd").innerHTML = 'curl -sL https://github.com/firemanxbr/omarchy-pool/releases/latest/download/omarchy-pool-' + (data && data.version && data.version.version !== "dev" ? data.version.version : "vX.Y.Z") + '-' + arch + '-linux.tar.gz | tar xz\n' +
       'sudo install -m 755 omarchy-pool-*/omarchy-cli /usr/local/bin/\n' +
       'omarchy-cli --ring ' + ring + ' status';
@@ -112,14 +137,14 @@ const SCRIPT = String.raw`
   liveStats(function (d) { data = d; draw(); }, 120000);
 `;
 
-export function getStartedHtml(poolUrl: string, version: RunningVersion): string {
+export function getStartedHtml(poolUrl: string, version: RunningVersion, sample: string | null): string {
   return page({
     path: "/docs/get-started",
     title: "Get started · omarchy-pool",
     description: "Point pacman at the omarchy-pool: the database key, the repository sections for a ring, and the optional omarchy-cli.",
     active: "docs",
     doc: "get-started",
-    body: BODY,
+    body: body(sample),
     script: SCRIPT,
     poolUrl,
     version,
@@ -128,10 +153,10 @@ export function getStartedHtml(poolUrl: string, version: RunningVersion): string
 
 /**
  * What /docs/get-started is made of. Nothing here changes with the role
- * and nothing writes:
- * the page's one network call is the stats, every 120 s, for the ring's
- * databases, the optional sources and the running version; the rest is
- * drawn from the query string and the helpers the shell inlines.
+ * and nothing writes: the page reads the stats, every 120 s, for the
+ * optional sources and the running version, and the include from
+ * /api/v1/pacman.conf when the pick changes; the rest is drawn from the
+ * query string and the helpers the shell inlines.
  */
 export const GET_STARTED_COMPONENTS = (F: Fixture): Component[] => {
   const page = "/docs/get-started";
@@ -196,16 +221,14 @@ export const GET_STARTED_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // The sections are the ring's databases in the stats answer — the rings come in RINGS order (index.ts), the page's
-      // default ring is the third — and the paragraph names the include the API serves as the curl -o alternative.
+      // The sections are the API's include: served with the page for the address's pick (stable, x86_64 here — the
+      // fixture's stable release has a database) and fetched again by the script when the pick or the optional
+      // sources change; the paragraph names the same route as the curl -o alternative.
       id: "docs-get-started.conf-by-hand",
       page,
-      anchor: ['id="conf"', 'data-copy="conf"', 'id="conf-text"', 'data-copy="up"', 'id="up-cmd"', "/api/v1/pacman.conf?ring=…&amp;arch=…"],
-      script: ['$("#conf-text")', "data.rings.filter", 'a.kind !== "db" || a.arch !== arch', "SigLevel = Required DatabaseRequired", "has no databases for", "liveStats(function (d) { data = d; draw(); }, 120000)"],
-      reads: [
-        { path: stats, fields: ["rings", "rings.2.ring", "rings.2.release", "rings.2.artifacts", "rings.2.artifacts.0.kind", "rings.2.artifacts.0.arch", "rings.2.artifacts.0.repo"] },
-        { path: `/api/v1/pacman.conf?ring=stable&arch=${F.arch}`, json: false },
-      ],
+      anchor: ['id="conf"', 'data-copy="conf"', `id="conf-text"># omarchy-pool — ring stable, ${F.arch}.`, "[<b>omarchy-core-stable</b>]\nSigLevel = Required DatabaseRequired", 'data-copy="up"', 'id="up-cmd"', "/api/v1/pacman.conf?ring=…&amp;arch=…"],
+      script: ['$("#conf-text")', 'fetch("/api/v1/pacman.conf?ring=" + ring + "&arch=" + arch + "&with=" + withOptional.join(","))', "has no databases for", "liveStats(function (d) { data = d; draw(); }, 120000)"],
+      reads: [{ path: `/api/v1/pacman.conf?ring=stable&arch=${F.arch}`, json: false }],
       visible: EVERYONE,
     },
     {

@@ -5,11 +5,13 @@
  * a per-job token. No credential of the maintainer's touches the pool.
  */
 import { json, type Env } from "./index";
+import { PROMOTED_RINGS, RINGS } from "./meta";
 import { createJob, SYNC_SOURCES, syncJobFor } from "./scheduler";
 import type { Contributor } from "./routes/contributors";
 
-const PROMISED = ["edge", "rc", "stable"];
-const RINGS = [...PROMISED, "lab"];
+// The rings are meta.ts's; the messages name them from the list, so a ring added there is named here.
+const PROMISED: readonly string[] = PROMOTED_RINGS;
+const ALL_RINGS: readonly string[] = RINGS;
 const ARCHES = ["x86_64", "aarch64"];
 
 export async function handleQueueJob(c: Contributor, request: Request, env: Env): Promise<Response> {
@@ -33,7 +35,7 @@ export async function handleQueueJob(c: Contributor, request: Request, env: Env)
     }
     case "promote": {
       const from = s("from"), to = s("to");
-      if (!PROMISED.includes(from) || !PROMISED.includes(to) || from === to) return json({ error: "promote needs from and to (edge, rc, stable — the lab is never promoted)" }, 400);
+      if (!PROMISED.includes(from) || !PROMISED.includes(to) || from === to) return json({ error: `promote needs from and to (${PROMISED.join(", ")} — the lab is never promoted)` }, 400);
       const params: Record<string, string> = { from, to, note: s("note") || `manual ${from} → ${to} by ${c.login}` };
       if (s("force") === "yes") params.force = "yes"; // skips the evidence and the gate; the target's health still decides
       if (s("arch")) {
@@ -46,7 +48,7 @@ export async function handleQueueJob(c: Contributor, request: Request, env: Env)
     }
     case "rollback": {
       const ring = s("ring"), to = s("to");
-      if (!RINGS.includes(ring) || !/^\d+$/.test(to)) return json({ error: "rollback needs ring (edge, rc, stable, lab) and to (a release id of that ring)" }, 400);
+      if (!ALL_RINGS.includes(ring) || !/^\d+$/.test(to)) return json({ error: `rollback needs ring (${ALL_RINGS.join(", ")}) and to (a release id of that ring)` }, 400);
       const params: Record<string, string> = { ring, to, note: s("note") || `rollback to release ${to} by ${c.login}` };
       if (s("arch")) {
         if (!ARCHES.includes(s("arch"))) return json({ error: "arch must be x86_64 or aarch64" }, 400);
@@ -58,7 +60,7 @@ export async function handleQueueJob(c: Contributor, request: Request, env: Env)
     case "render":
     case "health": {
       const ring = s("ring"), arch = s("arch") || "x86_64";
-      if (!RINGS.includes(ring) || !ARCHES.includes(arch)) return json({ error: `${b.kind} needs ring (edge, rc, stable, lab) and arch (x86_64, aarch64)` }, 400);
+      if (!ALL_RINGS.includes(ring) || !ARCHES.includes(arch)) return json({ error: `${b.kind} needs ring (${ALL_RINGS.join(", ")}) and arch (x86_64, aarch64)` }, 400);
       job = { kind: b.kind, params: { ring, arch }, arch };
       break;
     }
@@ -84,7 +86,7 @@ export async function handleQueueJob(c: Contributor, request: Request, env: Env)
     case "verify": {
       // Every ring and architecture by default; repair=no only reports.
       const params: Record<string, string> = {};
-      if (s("ring")) { if (!PROMISED.includes(s("ring"))) return json({ error: "ring must be edge, rc or stable (the lab holds no OPR object to verify)" }, 400); params.ring = s("ring"); }
+      if (s("ring")) { if (!PROMISED.includes(s("ring"))) return json({ error: `ring must be one of ${PROMISED.join(", ")} (the lab holds no OPR object to verify)` }, 400); params.ring = s("ring"); }
       if (s("arch")) { if (!ARCHES.includes(s("arch"))) return json({ error: "arch must be x86_64 or aarch64" }, 400); params.arch = s("arch"); }
       if (s("repair") === "no") params.repair = "no";
       job = { kind: "verify", params, arch: "x86_64" };

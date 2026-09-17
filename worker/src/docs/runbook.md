@@ -39,8 +39,8 @@ time; there is no shared secret. Humans operate the pipeline by queueing jobs
 ## Everyday operations
 
 Everything the scheduler does can be queued by hand by a maintainer
-(`OMARCHY_API` and `OMARCHY_TOKEN=omc_…` set — the token from the Contributors
-page); a project worker runs it with a per-job token and the Factory page
+(`OMARCHY_API` and `OMARCHY_TOKEN=omc_…` set — the token from your own
+page); a project worker runs it with a per-job token and the Pipeline
 follows it:
 
 ```bash
@@ -180,7 +180,7 @@ the worker's own token only claims. No pipeline step runs on GitHub any
 more: the workflows that did are gone, and a run by hand is a job. GitHub
 Actions runs CI and the release only — there is no hosted worker: when
 pool jobs wait and no project worker is alive, they wait, the scheduler
-log and the Factory page say so, and *The Studio host* (below) is where
+log and the Workers page say so, and *The Studio host* (below) is where
 to look. Worker secret: `JOB_TOKEN_SECRET` (any random string) signs the
 job tokens.
 
@@ -254,7 +254,7 @@ journal line per release — until it updates. Contributors' sets carry an
 last), written and started by `omarchy-worker start`; a set without one
 idles until its owner pulls by hand.
 
-The Factory page shows them by role; the laptop runs nothing any more,
+The Workers page lists them by role; the laptop runs nothing any more,
 and GitHub Actions runs CI and the release only — there is no hosted
 fallback worker: when the host is down, pool jobs wait, and the dashboard
 says so.
@@ -297,8 +297,8 @@ token is used once, to read the login). Its client id is
 app's page (*Generate a new client secret*, set, then delete the old one).
 The logo is `docs/omarchy-pool-logo.png`.
 The session is an HttpOnly cookie on the dashboard's origin; the pages call
-the API same-origin. Without the app, the Factory page still accepts a
-GitHub token used once.
+the API same-origin. Without the app, `POST /api/v1/factory/register`
+still accepts a GitHub token used once.
 
 Roles come from the repository, not from an API: `factory/MAINTAINERS.toml`
 lists the maintainers (one list, no areas), the brain reads `main` every
@@ -477,9 +477,8 @@ but the sizing ones (`factory/sizing/`, benchmarks). Day to day:
   keys, `FACTORY_MODEL` the model — defaults `claude-sonnet-5`, `gpt-5`,
   `gemini-3.6-flash`, `grok-4`; `FACTORY_REASONING=low` keeps a reasoning
   model's answers inside the budget — the Studio sets it, and a reply cut
-  short is retried once with four times the budget). The Factory page's
-  *Agent* column shows what
-  each worker reported. The report lands next to the evidence
+  short is retried once with four times the budget). The Workers page
+  shows the agent each worker reported. The report lands next to the evidence
   (`/api/v1/factory/tasks/<id>/artifacts/audit.md`) and the Review page
   shows the verdict; *waiting* in that column means no such worker is
   running. It is advice for the maintainer; nothing acts on it. A build
@@ -498,8 +497,8 @@ but the sizing ones (`factory/sizing/`, benchmarks). Day to day:
     the owner takes a queued build out with
     `DELETE /factory/packages/<name>/builds/<id>`.) A
     maintainer reviews the staged build like the first one. **30 days**
-    without a build and the package is *unmaintained* (Factory page badge,
-    `bump` journal line): no more bumps until its owner builds again, or
+    without a build and the package is *unmaintained* (the pill on its
+    owner's page, `bump` journal line): no more bumps until its owner builds again, or
     someone else requests the name and takes it over (the registration
     becomes theirs; the package stays served until their build is decided).
     A maintainer's `DELETE /factory/packages/<name>` is not that: it takes
@@ -509,7 +508,7 @@ but the sizing ones (`factory/sizing/`, benchmarks). Day to day:
     bump above is the only one, and it never opens a pull request.
 - **Contributors' builds** land in the `omarchy-factory-staging` bucket
   (`staging/<login>/<package>/<task>/`, lifecycle rule: 30 days), listed on
-  the Factory page with their PKGBUILD and log; the packages themselves are
+  the Review page with their PKGBUILD and log; the packages themselves are
   readable by maintainers (`GET /api/v1/factory/tasks/:id/artifacts/<file>`).
   Quotas per contributor: 10 tasks queued or building, 5 GB staged; a
   single PUT and a multipart upload honour the same cap. A package above
