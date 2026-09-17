@@ -371,6 +371,18 @@ curl -fsSL https://pkgs.firemanxbr.org/setup | sudo bash -s -- --ring stable
 Its old include keeps working until the purge; after, its `Server =
 …/$arch` lines name a directory that is gone.
 
+One consumer of the pool does not read the include: the build worker's
+own `add_pool_repos` (`factory/worker/omarchy-build-worker.sh`), which
+probes the edge databases and writes its own two sections — the OPR and
+the factory's earlier builds, with the worker's `SigLevel`. The relayout
+(#138) did not touch it, and a failed probe says nothing, so from the
+purge (2026-09-16 08:31 UTC) to v0.0.171 (2026-09-17 12:01 UTC) every
+build container ran without those two repositories: a dependency on
+either failed at `install_deps` as the recipe's fault. #175 (maralcbr)
+pointed it at the source directories. The lesson: what the pool serves
+has one description, the include; anything that writes `Server =` lines
+by hand is a copy that drifts.
+
 ## When what the pool serves does not verify
 
 The pool holds one object per `<source>/<arch>/<filename>` and never
