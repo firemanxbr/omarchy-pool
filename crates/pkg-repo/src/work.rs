@@ -615,7 +615,14 @@ fn repo_dir(opts: &WorkOptions) -> Result<PathBuf> {
         eprintln!("warning: could not clone {REPO_URL}; going on with the checkout of {git_ref} the worker has");
         return Ok(dir);
     }
-    anyhow::bail!("could not clone {REPO_URL}, and the checkout here is {} — not this release's ({git_ref})", if have.trim().is_empty() { "missing" } else { have.trim() })
+    anyhow::bail!(
+        "could not clone {REPO_URL}, and the checkout here is {} — not this release's ({git_ref})",
+        if have.trim().is_empty() {
+            "missing"
+        } else {
+            have.trim()
+        }
+    )
 }
 
 /// The keyring files the sync verifies against, refreshed daily by the pipeline's own script.
