@@ -114,7 +114,8 @@ __CHARTS__
   }
   function load() { busy(fetch("/api/v1/factory?limit=10")).then(function (r) { return r.json(); }).then(function (d) { FACTORY = d; render(); }).catch(function () { endSkeleton(); }); }
   $("#all-workers").onchange = render;
-  load(); setInterval(load, 20000);
+  // Who is looking decides what the rows show (the log icon is the owner's and the maintainers'): the session first, then the rows.
+  whoami(function () { load(); }); setInterval(load, 20000);
   liveStats(function (d) { STATS = d; renderMinutes(d); render(); }, 60000);
 `;
 

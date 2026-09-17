@@ -41,7 +41,14 @@ REPO_URL="https://github.com/firemanxbr/omarchy-pool"
 FACTORY_LIB="${OMARCHY_FACTORY_LIB:-/usr/local/lib/omarchy-factory}"
 POOL_KEY=""
 
-log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
+# The worker's own log: stderr, and a file the claim carries to the pool —
+# the lines since the last claim, for the owner and the maintainers to read
+# on the dashboard (the Workers page, the person's page). A build's own
+# output goes to build.log and staging, never here.
+WORKER_LOG="${WORKER_LOG:-/build/worker.log}"
+log() { local line; line="$(printf '[%s] %s' "$(date -u +%H:%M:%S)" "$*")"; printf '%s\n' "$line" >&2; { printf '%s\n' "$line" >> "$WORKER_LOG"; } 2>/dev/null || true; }
+# What the claim carries and forgets: the last 4 KB of the file, then an empty file.
+log_chunk() { [[ -s "$WORKER_LOG" ]] || { echo ""; return 0; }; tail -c 4096 "$WORKER_LOG" 2>/dev/null || true; : > "$WORKER_LOG"; }
 
 # What this worker holds — its token, the agent's key, GitHub's — stays out
 # of the environment every child inherits. `export -n` keeps them as shell
@@ -697,7 +704,7 @@ container_worker() {
     if [[ "$DRAIN" == 1 ]]; then log "draining: nothing claimed since the stop signal; exiting"; exit 0; fi
     agent_probe_if_due
     usage_sample
-    out="$(api POST /factory/claim "$(jq -n --arg a "$ARCH" --arg h "$(hostname -s 2>/dev/null || echo ?)" --arg v "$(image_version)" --arg g "$(agent_label)" --arg as "$AGENT_STATUS" --arg ae "$AGENT_ERROR" --arg ac "$( (( AGENT_CHECKED > 0 )) && date -u -d "@$AGENT_CHECKED" +%Y-%m-%dT%H:%M:%SZ || echo "")" --argjson l "${WORKER_LABELS:-"{}"}" --argjson s "$( [[ "${WORKER_SHARED:-0}" == 1 ]] && echo true || echo false)" --argjson u "$(usage_json)" '{arch:$a,hostname:$h,version:$v,labels:$l,shared:$s,agent:$g,agent_status:$as,agent_error:$ae,agent_checked_at:$ac,usage:$u}')")" \
+    out="$(api POST /factory/claim "$(jq -n --arg a "$ARCH" --arg h "$(hostname -s 2>/dev/null || echo ?)" --arg v "$(image_version)" --arg g "$(agent_label)" --arg as "$AGENT_STATUS" --arg ae "$AGENT_ERROR" --arg ac "$( (( AGENT_CHECKED > 0 )) && date -u -d "@$AGENT_CHECKED" +%Y-%m-%dT%H:%M:%SZ || echo "")" --argjson l "${WORKER_LABELS:-"{}"}" --argjson s "$( [[ "${WORKER_SHARED:-0}" == 1 ]] && echo true || echo false)" --argjson u "$(usage_json)" --arg lg "$(log_chunk)" '{arch:$a,hostname:$h,version:$v,labels:$l,shared:$s,agent:$g,agent_status:$as,agent_error:$ae,agent_checked_at:$ac,usage:$u,log:$lg}')")" \
       || { code="${out##*$'\n'}"; body="${out%$'\n'*}"
            # 426: this image is behind the pool's release past the rollout's grace — every worker follows the
            # latest image, and the pool hands this one nothing until the updater (or its owner) replaces it.
