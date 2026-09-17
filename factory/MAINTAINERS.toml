@@ -9,15 +9,18 @@
 #
 # Changing this file — a new maintainer, a departure — is a decision people
 # make, in a pull request that at least one *other* maintainer approves
-# (CODEOWNERS + branch protection; never auto-merged). The pool reads main
-# every ten minutes and applies it.
+# (CODEOWNERS + the rule on main: one approval, never the author's own;
+# never auto-merged). The pool reads main every ten minutes and applies it.
 #
-# Nobody is above this file: no owner, no superuser. The project belongs to
-# its maintainers and contributors. This is a community pool — nothing in
-# it is official Omarchy.
+# Nobody is above this file. The repository's admin can merge a pull
+# request alone — GitHub records the bypass on it for everyone to see —
+# and the project's rule is that it never happens here. The project
+# belongs to its maintainers and contributors. This is a community pool —
+# nothing in it is official Omarchy.
 #
-# Bootstrap: while there is a single maintainer, that maintainer merges the
-# first promotion alone; GitHub records the bypassed review.
+# Bootstrap: while there was a single maintainer, that maintainer merged
+# the first promotion alone; GitHub recorded the bypassed review
+# (2026-09-17).
 
 # maralcbr: the pool's first contributor (2026-09-15), twenty-odd packages
 # requested and built on workers of his own, two of them shared with
