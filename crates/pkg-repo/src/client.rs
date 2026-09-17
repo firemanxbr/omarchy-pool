@@ -768,6 +768,7 @@ impl Api {
                 let resp = self
                     .http
                     .put(self.url(&path))
+                    .timeout(upload_timeout(len))
                     .bearer_auth(&self.token)
                     .header("content-type", "application/octet-stream")
                     .header("content-length", len)
@@ -787,7 +788,10 @@ impl Api {
             Ok(Self::check(resp)?.json()?)
         })?;
         let upload_id = created.upload_id.as_str();
-        let uploaded = (|| -> Result<Vec<serde_json::Value>, RepoError> {
+        // The parts, then the complete — and whatever fails after the
+        // create, the upload is abandoned, so the bucket keeps no half of a
+        // package nobody completes.
+        let uploaded = (|| -> Result<(), RepoError> {
             let mut f = std::fs::File::open(file)?;
             let mut parts = Vec::new();
             let mut part_number = 1u32;
@@ -814,6 +818,7 @@ impl Api {
                             ("part", &part),
                             ("upload_id", upload_id),
                         ])
+                        .timeout(upload_timeout(n as u64))
                         .bearer_auth(&self.token)
                         .body(chunk.clone())
                         .send()?;
@@ -822,32 +827,26 @@ impl Api {
                 parts.push(serde_json::json!({ "partNumber": done.part, "etag": done.etag }));
                 part_number += 1;
             }
-            Ok(parts)
-        })();
-        let parts = match uploaded {
-            Ok(parts) => parts,
-            Err(e) => {
-                // A part that would not go: the upload is abandoned, so the
-                // bucket keeps no half of a package nobody completes.
-                let _ = self
+            with_retry("staging_multipart_complete", || {
+                let resp = self
                     .http
                     .post(&base)
-                    .query(&[("action", "abort"), ("upload_id", upload_id)])
+                    .query(&[("action", "complete"), ("upload_id", upload_id)])
                     .bearer_auth(&self.token)
-                    .send();
-                return Err(e);
-            }
-        };
-        with_retry("staging_multipart_complete", || {
-            let resp = self
+                    .json(&serde_json::json!({ "parts": parts }))
+                    .send()?;
+                Self::check(resp).map(|_| ())
+            })
+        })();
+        if uploaded.is_err() {
+            let _ = self
                 .http
                 .post(&base)
-                .query(&[("action", "complete"), ("upload_id", upload_id)])
+                .query(&[("action", "abort"), ("upload_id", upload_id)])
                 .bearer_auth(&self.token)
-                .json(&serde_json::json!({ "parts": parts }))
-                .send()?;
-            Self::check(resp).map(|_| ())
-        })
+                .send();
+        }
+        uploaded
     }
 
     /// `PUT` a JSON body to an authenticated endpoint, retrying on 5xx.
@@ -989,6 +988,15 @@ impl Api {
     }
 }
 
+/// How long one upload request may take: the client's ten minutes would
+/// cut a 64 MB part on a link under 110 KB/s and retry it three times
+/// more, forty minutes into a certain failure. Two minutes plus what the
+/// body needs at 50 KB/s — a slow home uplink finishes, a dead one is
+/// noticed within the hour.
+fn upload_timeout(len: u64) -> Duration {
+    Duration::from_secs(120 + len / (50 * 1024))
+}
+
 fn read_full(r: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
     let mut filled = 0;
     while filled < buf.len() {
@@ -1017,9 +1025,14 @@ mod tests {
     }
 
     /// A one-thread HTTP/1.1 server that records every request and answers
-    /// what the staging endpoints answer. `fail_part` makes that part 500
-    /// on every attempt (the client's retries then give up).
-    fn staging_server(fail_part: Option<u32>) -> (String, Arc<Mutex<Vec<Seen>>>) {
+    /// what the staging endpoints answer. `fail_part` makes that part answer
+    /// `fail_status` on every attempt; `fail_complete` does the same to the
+    /// complete.
+    fn staging_server(
+        fail_part: Option<u32>,
+        fail_complete: bool,
+        fail_status: &'static str,
+    ) -> (String, Arc<Mutex<Vec<Seen>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -1056,7 +1069,7 @@ mod tests {
                     ("201 Created", r#"{"upload_id":"u1","key":"k"}"#.to_owned())
                 } else if target.contains("action=part") {
                     if part == fail_part {
-                        ("500 Internal Server Error", r#"{"error":"no"}"#.to_owned())
+                        (fail_status, r#"{"error":"no"}"#.to_owned())
                     } else {
                         (
                             "200 OK",
@@ -1067,6 +1080,8 @@ mod tests {
                             ),
                         )
                     }
+                } else if target.contains("action=complete") && fail_complete {
+                    (fail_status, r#"{"error":"no"}"#.to_owned())
                 } else if target.contains("action=complete") || target.contains("action=abort") {
                     ("200 OK", r#"{"key":"k","size":0}"#.to_owned())
                 } else {
@@ -1097,7 +1112,7 @@ mod tests {
 
     #[test]
     fn a_small_artifact_is_one_put() {
-        let (base, seen) = staging_server(None);
+        let (base, seen) = staging_server(None, false, "500 Internal Server Error");
         let api = Api::new(&base, "t").unwrap();
         let f = file_of(b"0123456789");
         api.stage_file_sized(7, "a.pkg.tar.zst", f.path(), 10, 4)
@@ -1114,7 +1129,7 @@ mod tests {
 
     #[test]
     fn a_large_artifact_goes_in_parts_and_completes() {
-        let (base, seen) = staging_server(None);
+        let (base, seen) = staging_server(None, false, "500 Internal Server Error");
         let api = Api::new(&base, "t").unwrap();
         let f = file_of(b"0123456789A");
         api.stage_file_sized(7, "big.pkg.tar.zst", f.path(), 10, 4)
@@ -1144,9 +1159,35 @@ mod tests {
         );
     }
 
+    /// A refusal the pool means (the lease is not yours): no retry, the
+    /// upload is abandoned at once.
     #[test]
     fn a_part_that_will_not_go_aborts_the_upload() {
-        let (base, seen) = staging_server(Some(2));
+        let (base, seen) = staging_server(Some(2), false, "409 Conflict");
+        let api = Api::new(&base, "t").unwrap();
+        let f = file_of(b"0123456789A");
+        let err = api
+            .stage_file_sized(7, "big.pkg.tar.zst", f.path(), 10, 4)
+            .unwrap_err();
+        assert!(matches!(err, RepoError::Api { status: 409, .. }), "{err}");
+        let seen = seen.lock().unwrap();
+        let targets: Vec<&str> = seen.iter().map(|s| s.target.as_str()).collect();
+        assert_eq!(
+            targets,
+            [
+                "/api/v1/factory/tasks/7/artifacts/big.pkg.tar.zst/multipart?action=create",
+                "/api/v1/factory/tasks/7/artifacts/big.pkg.tar.zst/multipart?action=part&part=1&upload_id=u1",
+                "/api/v1/factory/tasks/7/artifacts/big.pkg.tar.zst/multipart?action=part&part=2&upload_id=u1",
+                "/api/v1/factory/tasks/7/artifacts/big.pkg.tar.zst/multipart?action=abort&upload_id=u1",
+            ]
+        );
+    }
+
+    /// A pool that keeps answering 500: the part is retried `ATTEMPTS`
+    /// times (with the backoff — this is the slow test), then the abort.
+    #[test]
+    fn a_part_the_pool_cannot_take_is_retried_then_aborted() {
+        let (base, seen) = staging_server(Some(2), false, "500 Internal Server Error");
         let api = Api::new(&base, "t").unwrap();
         let f = file_of(b"0123456789A");
         let err = api
@@ -1154,11 +1195,40 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, RepoError::Api { status: 500, .. }), "{err}");
         let seen = seen.lock().unwrap();
-        let last = seen.last().unwrap();
-        assert_eq!(
-            last.target,
-            "/api/v1/factory/tasks/7/artifacts/big.pkg.tar.zst/multipart?action=abort&upload_id=u1"
-        );
+        let tries = seen.iter().filter(|s| s.target.contains("part=2&")).count();
+        assert_eq!(tries, ATTEMPTS as usize);
+        assert_eq!(seen.len(), 3 + ATTEMPTS as usize);
+        assert!(seen
+            .last()
+            .unwrap()
+            .target
+            .ends_with("action=abort&upload_id=u1"));
         assert!(!seen.iter().any(|s| s.target.contains("action=complete")));
+    }
+
+    /// The complete refused: the same abort — no half of a package stays.
+    #[test]
+    fn a_complete_that_will_not_go_aborts_the_upload() {
+        let (base, seen) = staging_server(None, true, "409 Conflict");
+        let api = Api::new(&base, "t").unwrap();
+        let f = file_of(b"0123456789A");
+        let err = api
+            .stage_file_sized(7, "big.pkg.tar.zst", f.path(), 10, 4)
+            .unwrap_err();
+        assert!(matches!(err, RepoError::Api { status: 409, .. }), "{err}");
+        let seen = seen.lock().unwrap();
+        let targets: Vec<&str> = seen.iter().map(|s| s.target.as_str()).collect();
+        assert_eq!(targets.len(), 6);
+        assert!(targets[4].ends_with("action=complete&upload_id=u1"));
+        assert!(targets[5].ends_with("action=abort&upload_id=u1"));
+    }
+
+    #[test]
+    fn an_upload_gets_the_time_its_body_needs() {
+        assert_eq!(upload_timeout(0), Duration::from_secs(120));
+        assert_eq!(
+            upload_timeout(PART_SIZE),
+            Duration::from_secs(120 + 64 * 1024 / 50)
+        );
     }
 }
