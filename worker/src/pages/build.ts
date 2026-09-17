@@ -15,9 +15,15 @@ const BODY = String.raw`
   <p class="crumbs"><a href="/review">Review</a> / <span id="crumb">build</span></p>
   <div class="h2row" style="align-items:center;gap:12px;flex-wrap:wrap"><h1 id="title" style="max-width:none">…</h1><div id="badges" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"></div></div>
   <p class="lede" id="lede"></p>
-  <div class="tiles five" id="tiles"></div>
+  <div class="tiles six" id="tiles"></div>
   <div id="acts" class="acts" hidden></div>
   <p class="sub" id="state" hidden></p>
+
+  <section id="who-section" hidden>
+    <div class="h2row"><h2>Who does what</h2><span class="hint">two people behind every package the factory ships</span></div>
+    <p class="sub">The contributor brings the request and a build that passes the gate; only then is a maintainer's time well spent. The maintainer has the project build it again, reads the evidence, tries it and decides — never on their own package. Each half is fifty points; the class is the score today, the projection is with the maintainer's half green. <a href="/docs/what-we-test#the-score">The rules →</a></p>
+    <div class="cklist" id="cklist"></div>
+  </section>
 
   <div class="two" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(360px,100%),1fr));gap:16px">
     <section style="margin:0">
@@ -50,7 +56,7 @@ const SCRIPT = String.raw`
   function pill(cls, text, title) { return '<span class="pill ' + cls + '"' + (title ? ' title="' + esc(title) + '"' : '') + '>' + esc(text) + '</span>'; }
   function statusPill(st) { return pill({ queued: "none", leased: "blue", staged: "warn", done: "ok", failed: "error", cancelled: "none" }[st] || "none", st === "leased" ? "building" : st); }
   $("#json-link").href = API + "/tasks/" + ID; $("#json-link").textContent = API + "/tasks/" + ID;
-  skeletonTiles("#tiles", 5);
+  skeletonTiles("#tiles", 6);
 
   whoami(function (me) {
     if (me) { WHO = me; login = me.login; signedIn = true; }
@@ -70,8 +76,10 @@ const SCRIPT = String.raw`
     var t = T.task, isBuild = t.kind === "build", project = isBuild && t.trust === "project", p = t.params || {};
     document.title = (isBuild ? t.name + " " + (t.version || "") + " · build #" + t.id : t.kind + " #" + t.id) + " · omarchy-pool";
     $("#crumb").textContent = (isBuild ? t.name + " " : t.kind + " ") + "#" + t.id;
-    $("#title").innerHTML = isBuild ? esc(t.name) + ' <span class="mono muted" style="font-size:.7em">' + esc(t.version || "") + '</span>' : esc(t.kind) + ' <span class="mono muted" style="font-size:.7em">#' + t.id + '</span>';
-    $("#badges").innerHTML = pill("none", t.arch) + statusPill(t.status) + (isBuild ? pill(project ? "ok" : "lilac", project ? "the project" : "evidence", project ? "built by the project on a trusted worker, from a contributor's evidence" : "a contributor's build: evidence for a maintainer, never what users get") : "") + (t.publish === 0 && !isBuild ? "" : "");
+    var sc = T.score;
+    $("#title").innerHTML = isBuild ? '<a href="/package/' + encodeURIComponent(t.name) + '?ring=' + (T.rings[0] || "lab") + '&arch=' + esc(t.arch) + '" title="the package, as Packages shows it — with where it came from">' + esc(t.name) + '</a> <span class="mono muted" style="font-size:.7em">' + esc(t.version || "") + '</span>' : esc(t.kind) + ' <span class="mono muted" style="font-size:.7em">#' + t.id + '</span>';
+    $("#badges").innerHTML = pill("none", t.arch) + statusPill(t.status) + (isBuild ? pill(project ? "ok" : "lilac", project ? "the project" : "evidence", project ? "built by the project on a trusted worker, from a contributor's evidence" : "a contributor's build: evidence for a maintainer, never what users get") : "")
+      + (isBuild && sc ? (sc.ready ? pill("ok", "ready for a maintainer", "the contributor's half is complete: a build that passed the gate, audited") : t.status === "staged" || t.status === "leased" || t.status === "queued" ? pill("warn", "not ready", "the contributor's half is not complete yet") : "") : "");
     var built = T.worker ? (T.worker.owner ? T.worker.owner + "'s worker " : "worker ") + T.worker.id : (t.lease_owner || (t.finished_at ? "a worker the record no longer names" : "no worker yet"));
     $("#lede").innerHTML = (isBuild
       ? (project ? 'The project built <b>' + esc(t.name) + '</b> ' + esc(t.version || '') + ' for ' + esc(t.arch) + (T.from ? ' from the evidence in <a href="/build/' + T.from.id + '">#' + T.from.id + '</a> (' + person(T.from.owner) + '\'s build)' : '') : person(t.owner) + ' built <b>' + esc(t.name) + '</b> ' + esc(t.version || '') + ' for ' + esc(t.arch) + ' on ' + esc(built))
@@ -83,7 +91,8 @@ const SCRIPT = String.raw`
       ["Audit", audit && audit.status === "done" && audit.result ? String(audit.result.verdict || "done") : audit ? audit.status : "—", audit && audit.result ? num((audit.result.findings || []).length) + " finding(s)" + (audit.result.model ? " · " + audit.result.model : "") : audit ? "the second agent" : project ? "audited on the contributor's build" : "no audit yet", audit && audit.result ? ({ ok: "ok", warn: "warn", block: "bad" }[audit.result.verdict] || "") : ""],
       ["Trial", trial && trial.status === "done" && trial.result ? (trial.result.verdict === "ok" ? "installs" : String(trial.result.verdict)) : trial ? trial.status : "—", trial ? "a real pacman, from the lab" : project ? "not tried yet" : "only the project's build is tried", trial && trial.result ? (trial.result.verdict === "ok" ? "ok" : "bad") : ""],
       ["Decision", a ? a.decision : (t.status === "staged" ? "waiting" : "—"), a ? "by " + a.by + " · " + ago(a.created_at) : t.status === "staged" ? "a maintainer, never the owner" : "nothing to decide", a ? (a.decision === "approved" ? "ok" : "bad") : (t.status === "staged" ? "warn" : "")],
-      ["In the rings", T.rings.length ? T.rings.join(" · ") : "—", T.rings.length ? "what users get" : "not in the pool", T.rings.length ? "ok" : ""]
+      ["Class", sc ? sc.class + ' <span class="dim" style="font-size:.5em">' + sc.points + '/' + sc.max + '</span>' : "—", sc ? (sc.class === sc.projected ? "with the maintainer's half green: the same" : "with the maintainer's half green: " + sc.projected) : "no chain", sc ? { A: "ok", B: "ok", C: "warn", D: "bad" }[sc.class] : ""],
+      ["In the rings", T.rings.length ? T.rings.join(" · ") : "—", T.rings.length ? (T.rings.length === 1 && T.rings[0] === "lab" ? "the lab: not promised, not promoted" : "what users get") : "not in the pool", T.rings.length ? (T.rings.length === 1 && T.rings[0] === "lab" ? "warn" : "ok") : ""]
     ]); else setTiles("#tiles", [
       ["Status", t.status, t.error ? "failed: see the log" : t.finished_at ? "finished " + ago(t.finished_at) : "", t.status === "done" ? "ok" : t.status === "failed" ? "bad" : ""],
       ["Duration", secs(t.duration_ms), "wall time on the worker"],
@@ -91,15 +100,31 @@ const SCRIPT = String.raw`
       ["Priority", num(t.priority), "lower runs first"],
       ["Created", ago(t.created_at), t.reason || ""]
     ]);
-    renderActions(); renderTimeline(); renderBuild();
+    renderActions(); renderTimeline(); renderBuild(); renderChecklist();
     endSkeleton();
+  }
+  // ---- who does what: the two halves, item by item, with the points each earned
+  function renderChecklist() {
+    var sc = T.score, el = $("#who-section"); if (!sc) { el.hidden = true; return; }
+    el.hidden = false;
+    var col = function (who, title, lede) {
+      var items = sc.items.filter(function (i) { return i.who === who; }), pts = items.reduce(function (n, i) { return n + i.points; }, 0);
+      return '<div class="ckcol ' + who + '"><h3>' + title + ' <span class="num">' + pts + '<span class="dim">/50</span></span></h3><p class="dim">' + lede + '</p><ul>' + items.map(function (i) {
+        var mark = i.state === "pending" ? '<i class="ck pending" title="still to come">○</i>' : i.points === i.max ? '<i class="ck ok">✓</i>' : i.points > 0 ? '<i class="ck part">✓</i>' : '<i class="ck bad">✗</i>';
+        return '<li>' + mark + '<div><b>' + esc(i.item) + '</b> <span class="dim">' + esc(i.note) + '</span></div><span class="num pts">' + i.points + '<span class="dim">/' + i.max + '</span></span></li>';
+      }).join("") + '</ul></div>';
+    };
+    var c = T.chain || {};
+    $("#cklist").innerHTML = col("contributor", "The contributor's half", c.contributor ? person(c.contributor.owner) + (c.contributor.id !== T.task.id ? ' · build <a href="/build/' + c.contributor.id + '">#' + c.contributor.id + '</a>' : '') : 'nobody yet')
+      + col("maintainer", "The maintainer's half", c.project ? 'the project\'s build <a href="/build/' + c.project.id + '">#' + c.project.id + '</a>' + (c.approval ? ' · decided by ' + person(c.approval.by) : ' · not decided') : 'not started' + (sc.ready ? ' — ready to begin' : ''));
   }
 
   // ---- a maintainer decides here as on Review; the owner never on their own package
   function renderActions() {
     var t = T.task, el = $("#acts"); el.hidden = true; el.innerHTML = "";
     if (!maint() || t.kind !== "build" || t.status !== "staged" || T.approval) return;
-    if (t.owner === login) { el.hidden = false; el.innerHTML = '<span class="muted">Yours — another maintainer decides (nobody decides on their own package).</span>'; return; }
+    if (t.owner === login) { el.hidden = false; el.innerHTML = '<span class="muted">Yours — another maintainer decides (nobody decides on their own package; a maintainer who brings a package is a contributor here).</span>'; return; }
+    if (T.score && !T.score.ready) { el.hidden = false; el.innerHTML = pill("warn", "not ready") + ' <span class="muted">the contributor\'s half is not complete — nothing for a maintainer yet.</span>'; return; }
     var pb = T.project_builds[0], project = t.trust === "project";
     var b = project ? '<button type="button" data-do="approve">Approve</button> <button type="button" data-do="reject">Reject</button>'
       : pb && (pb.status === "queued" || pb.status === "leased") ? '<span class="muted">the project is building it (<a href="/build/' + pb.id + '">#' + pb.id + '</a>)</span> <button type="button" data-do="reject">Reject</button>'

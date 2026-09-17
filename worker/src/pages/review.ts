@@ -32,7 +32,7 @@ const BODY = String.raw`
 
   <section id="queue">
     <div class="h2row"><h2>In review</h2><span class="dim" id="queue-note" style="font-size:13px"></span></div>
-    <div class="table-wrap"><table id="staged" class="reader"><thead><tr><th>Package</th><th>Arch</th><th>Brought by</th><th>Build</th><th>Gate</th><th>Audit</th><th>Trial</th><th>Evidence</th><th>Since</th><th class="decision">Decision</th></tr></thead><tbody></tbody></table></div>
+    <div class="table-wrap"><table id="staged" class="reader"><thead><tr><th>Package</th><th>Arch</th><th>Brought by</th><th>Build</th><th>Gate</th><th>Audit</th><th>Trial</th><th title="the chain's score today → with the maintainer's half green (What we test → The score)">Class</th><th>Since</th><th class="decision">Decision</th></tr></thead><tbody></tbody></table></div>
     <p class="sub" id="legend" hidden>Gate: the worker's own checks. Audit: the project's second agent — <span class="pill ok">ok</span> nothing to change · <span class="pill warn">warn</span> approve with the findings in mind · <span class="pill error">block</span> not as is. Evidence, never a decision; the category under the name is settled here.</p>
   </section>
 
@@ -141,7 +141,7 @@ const SCRIPT = String.raw`
     }
   }
   // A staged build a maintainer can act on now: the project's (approve), or a contributor's the project is not already building — and not a build of a version already approved (nothing to decide: drop it).
-  function decidable(t) { var pb = t.project_build; return !t.already && (t.kind === "project" || !pb || pb.status === "failed"); }
+  function decidable(t) { var pb = t.project_build; return !t.already && (!t.score || t.score.ready || t.kind === "project") && (t.kind === "project" || !pb || pb.status === "failed"); }
   function taskLink(id, text) { return '<a href="/build/' + id + '">' + (text || "#" + id) + '</a>'; }
 
   // ---- in review: the same table for everyone; the decision column for maintainers
@@ -186,9 +186,16 @@ const SCRIPT = String.raw`
     if (a.status === "done") return '<span class="pill none">unreadable</span>';
     return '<span class="muted" title="only the project\'s build is tried">—</span>';
   }
+  // The class today, the projection on hover; a chain whose contributor's half is not complete says so — a maintainer's time is not asked yet.
+  function klass(t) {
+    var sc = t.score; if (!sc) return '<span class="muted">—</span>';
+    var cls = { A: "ok", B: "ok", C: "warn", D: "error" }[sc.class] || "none";
+    return '<span class="pill ' + cls + '" title="' + esc(sc.points + "/100 today · with the maintainer's half green: " + sc.projected) + '">' + esc(sc.class) + '</span>' + (sc.class !== sc.projected ? ' <span class="dim" title="with the maintainer\'s half green">→ ' + esc(sc.projected) + '</span>' : '') + (!sc.ready && t.kind !== "project" ? ' <span class="pill none" title="a build that passed the gate, audited — then a maintainer">not ready</span>' : '');
+  }
   function decision(t) {
     if (!maint()) return '';
     if (t.already) return '<span class="muted" title="the same name, version and architecture were approved as build #' + t.already.task + '">already approved</span> <button type="button" data-reject="' + t.id + '" data-note="a build of a version already approved (#' + t.already.task + ')">Drop</button>';
+    if (t.score && !t.score.ready && t.kind !== "project") return '<span class="muted" title="the contributor\'s half is not complete">not ready — the contributor\'s turn</span>';
     if (t.owner === login) return '<span class="muted" title="conflict of interest: nobody decides on their own package">yours — another maintainer</span>';
     var pb = t.project_build;
     if (t.kind === "project") return '<button type="button" data-approve="' + t.id + '">Approve</button> <button type="button" data-reject="' + t.id + '">Reject</button>';
@@ -205,11 +212,11 @@ const SCRIPT = String.raw`
         : '<span class="muted">evidence · ' + taskLink(t.id) + (t.duration_ms ? ' · ' + Math.round(t.duration_ms / 1000) + ' s' : '') + '</span>' + builtOn(t) + (pb && (pb.status === "queued" || pb.status === "leased") ? ' <span class="pill blue">building again</span>' : pb && pb.status === "staged" ? ' <span class="pill ok">built again</span>' : '')
         + (t.already ? ' <span class="pill none" title="approved ' + esc(ago(t.already.at)) + ' by ' + esc(t.already.by) + ' as build #' + t.already.task + (t.already.rebuild_task ? '; the project\'s build #' + t.already.rebuild_task + ' ' + esc(t.already.rebuild_status || '') : '') + ' — nothing to decide">already approved</span>' : '');
       var mine = WHO && t.owner === login, forYou = maint() && !mine && decidable(t);
-      return '<tr id="t-' + t.id + '"' + (project ? ' class="project-row"' : '') + (forYou ? ' class="for-you"' : mine ? ' class="mine-row"' : '') + '><td>' + taskLink(t.id, pkg(t.name, t.version)) + (det.license ? ' <span class="dim">' + esc(det.license) + '</span>' : '') + (t.url ? ' <a class="run dim" href="' + esc(t.url) + '" title="' + esc(t.url) + '">source</a>' : '') + '<br>' + category(t) + '</td><td>' + esc(t.arch) + '</td>' +
+      return '<tr id="t-' + t.id + '"' + (project ? ' class="project-row"' : '') + (forYou ? ' class="for-you"' : mine ? ' class="mine-row"' : '') + '><td><a href="/package/' + encodeURIComponent(t.name) + '?ring=lab&arch=' + esc(t.arch) + '" title="the package as Packages shows it — in the lab, where the factory\'s builds start">' + pkg(t.name, t.version) + '</a>' + (det.license ? ' <span class="dim">' + esc(det.license) + '</span>' : '') + (t.url ? ' <a class="run dim" href="' + esc(t.url) + '" title="' + esc(t.url) + '">source</a>' : '') + '<br>' + category(t) + '</td><td>' + esc(t.arch) + '</td>' +
         '<td>' + person(t.owner) + (mine ? ' <span class="pill none">you</span>' : '') + '</td><td>' + build + '</td><td>' + gate(t) + '</td><td>' + audit(t) + '</td><td>' + trial(t) + '</td>' +
-        '<td><a class="run" href="' + t.evidence.pkgbuild + '">PKGBUILD</a> <a class="run" href="' + t.evidence.log + '">log</a> <a class="run" href="' + t.evidence.pkginfo + '">PKGINFO</a></td>' +
+        '<td>' + klass(t) + '</td>' +
         '<td class="when">' + ago(t.finished_at) + '</td><td class="decision">' + decision(t) + '</td></tr>';
-    }, { empty: "nothing waiting for review", text: function (t) { return [t.id, t.name, t.version, t.arch, t.owner, t.kind, t.category].join(" "); } });
+    }, { empty: "nothing waiting for review", text: function (t) { return [t.id, t.name, t.version, t.arch, t.owner, t.kind, t.category, t.score && t.score.class].join(" "); } });
     endSkeleton();
   }
   function renderDecisions() {

@@ -7,6 +7,7 @@ import { isCategory } from "../categories";
 import { recordEvidence, vetSummary } from "../record";
 import { isTextEvidence, reclaimStagingPackages, STAGING_QUOTA_BYTES } from "../staging";
 import { findLeak } from "../leak";
+import { chains, chainOf, storyRows, type Chain } from "./story";
 
 /**
  * The factory's brain. Cloudflare is the source of truth for package
@@ -758,6 +759,12 @@ export async function handleTask(id: number, env: Env): Promise<Response> {
     env.DB.prepare("SELECT name, owner, url, status, category, request_id, description, license, project, created_at FROM factory_packages WHERE name = ?").bind(task.name).first(),
     env.DB.prepare("SELECT key, size, uploaded_at FROM staging_objects WHERE task_id = ? ORDER BY key").bind(task.id).all<{ key: string; size: number; uploaded_at: string }>(),
   ]);
+  // The chain this task is in — the contributor's build, the project's, the audit, the trial, the decision — and its score (score.ts), from the package's story.
+  let chain: Chain | null = null;
+  if (isBuild || task.kind === "audit" || task.kind === "trial" || task.kind === "publish") {
+    const story = await storyRows(env, task.name);
+    chain = chainOf(chains(story.tasks, story.approvals, story.pkg), task.id);
+  }
   // The rings that serve this package today, from the factory's rows in each ring.
   const rings = isBuild
     ? (await env.DB.prepare("SELECT rp.ring FROM packages p JOIN ring_packages rp ON rp.package_id = p.id AND rp.ring IN ('lab', 'edge', 'rc', 'stable') WHERE p.source = 'factory' AND p.name = ? AND p.repo_arch = ?").bind(task.name, task.arch).all<{ ring: string }>()).results.map((r) => r.ring)
@@ -773,6 +780,8 @@ export async function handleTask(id: number, env: Env): Promise<Response> {
       project_builds: projectBuilds?.results.map(brief) ?? [],
       publish: publishes?.results.map(brief) ?? [],
       approval,
+      chain,
+      score: chain?.score ?? null,
       rings: rings.sort((a, b) => order.indexOf(a) - order.indexOf(b)),
       package: pkg,
       evidence: objects.results.map((o) => {

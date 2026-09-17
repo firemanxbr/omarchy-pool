@@ -90,7 +90,7 @@ describe("dashboard pages", () => {
     const { SKILLS } = await import("../src/pages/docs-tree");
     const test = await (await get("/docs/what-we-test")).text();
     expect(SKILLS.map((k) => k.file)).toEqual(["factory/skills/general/every-package.md", "factory/skills/groups/desktop-apps.md", "factory/skills/groups/prebuilt-binaries.md"]);
-    for (const id of ["why-we-test-the-way-we-test", "every-package", "desktop-apps", "prebuilt-binaries", "how-this-page-grows", "what-we-learned"]) expect(test, id).toContain(`id="${id}"`);
+    for (const id of ["why-we-test-the-way-we-test", "every-package", "desktop-apps", "prebuilt-binaries", "who-does-what", "the-score", "how-this-page-grows", "what-we-learned"]) expect(test, id).toContain(`id="${id}"`);
     expect(test.indexOf('id="every-package"')).toBeLessThan(test.indexOf('id="desktop-apps"'));
     expect(test).toContain("ozone-platform-hint=auto");
     expect(test).not.toContain("<!-- skills -->");

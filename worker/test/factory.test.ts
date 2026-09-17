@@ -334,12 +334,24 @@ describe("a community build, its audit and the review", () => {
     expect(whole.json.evidence.find((e: any) => e.name === "PKGBUILD")).toMatchObject({ public: true, url: `/api/v1/factory/tasks/${projectTask}/artifacts/PKGBUILD` });
     expect(whole.json.evidence.find((e: any) => e.name.endsWith(".pkg.tar.zst")).public).toBe(false);
     expect(whole.json.publish[0]).toMatchObject({ kind: "publish", status: "queued" });
+    // The chain and its score: the maintainer's half green (50), the contributor's with no gate, an audit still queued and a bare registration (15) — class C, and not "ready" because the audit never answered.
+    expect(whole.json.chain).toMatchObject({ contributor: { id: task }, project: { id: projectTask }, approval: { by: "m2" } });
+    expect(whole.json.score).toMatchObject({ points: 65, max: 100, class: "C", ready: false });
+    expect(whole.json.score.items.filter((i: any) => i.who === "maintainer").reduce((n: number, i: any) => n + i.points, 0)).toBe(50);
+    // The package's story: every chain with its class, the rings, for the package page — and a synced package has none.
+    const story = await call("GET", "/factory/packages/mine/story");
+    expect(story.status).toBe(200);
+    expect(story.json).toMatchObject({ name: "mine", class: "C", package: { owner: "m1" } });
+    expect(story.json.chains.find((c: any) => c.project && c.project.id === projectTask)).toMatchObject({ contributor: { id: task }, score: { points: 65 } });
+    expect((await call("GET", "/factory/packages/zlib/story")).status).toBe(404);
     // A later build of the same name, version and architecture is nothing to decide: Review says so and keeps it out of the count.
     const again = await env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, status, publish, trust, owner, kind, finished_at) VALUES ('mine', 'aarch64', '1.0-2', 'draft:x', 'built again', 100, 'staged', 0, 'community', 'alice', 'build', ?) RETURNING id").bind(new Date().toISOString()).first<{ id: number }>();
     try {
       const review = await call("GET", "/factory/review?already=1");
       const row = review.json.staged.find((r: any) => r.id === again!.id);
       expect(row.already).toMatchObject({ task: projectTask, by: "m2", rebuild_task: projectTask });
+      // A build with no gate and no audit yet is not ready: the class column says D, the contributor's turn.
+      expect(row.score).toMatchObject({ class: "D", ready: false });
       expect(review.json.staged.filter((r: any) => r.id !== again!.id).every((r: any) => r.already === null)).toBe(true);
     } finally {
       await env.DB.prepare("DELETE FROM build_tasks WHERE id = ?").bind(again!.id).run();

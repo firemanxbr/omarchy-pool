@@ -74,6 +74,7 @@ import { handleSignPool } from "./routes/pool";
 import { signingEnabled, publicKey } from "./signing";
 import { reviewHtml } from "./pages/review";
 import { buildHtml } from "./pages/build";
+import { handlePackageStory } from "./routes/story";
 import { icon } from "./pages/icons";
 import { requestHtml } from "./pages/request";
 import { governanceHtml } from "./pages/governance";
@@ -453,6 +454,7 @@ async function api(method: string, path: string, url: URL, request: Request, env
     return handleStagingGet(Number(m[1]), m[2], env, (!!c && isMaintainer(c)) || (!!job && (job.k === "publish" || job.k === "trial") && job.s.includes(`staging:${m[1]}`)));
   }
   if ((m = path.match(/^\/factory\/tasks\/(\d+)$/)) && method === "GET") return handleTask(Number(m[1]), env);
+  if ((m = path.match(/^\/factory\/packages\/([A-Za-z0-9@._+-]+)\/story$/)) && method === "GET") return handlePackageStory(m[1], env);
   if (path.startsWith("/factory/") && (method === "POST" || method === "PUT" || method === "DELETE" || method === "PATCH")) {
     const r = await factoryRoutes(method, path, url, request, env);
     if (r) return r;
