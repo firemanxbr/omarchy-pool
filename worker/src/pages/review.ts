@@ -76,11 +76,11 @@ const SCRIPT = String.raw`
 
   // ---- the tiles: what is in review, and how much was decided this week
   function renderTiles() {
-    var contrib = STAGED.filter(function (t) { return t.kind !== "project"; }), proj = STAGED.filter(function (t) { return t.kind === "project"; });
+    var rows = shown(), contrib = rows.filter(function (t) { return t.kind !== "project"; }), proj = rows.filter(function (t) { return t.kind === "project"; });
     var week = APPROVALS.filter(function (a) { return Date.now() - Date.parse(a.created_at) < 7 * 86400e3; });
-    var oldest = STAGED.slice().sort(function (x, y) { return Date.parse(x.finished_at || 0) - Date.parse(y.finished_at || 0); })[0];
+    var oldest = rows.slice().sort(function (x, y) { return Date.parse(x.finished_at || 0) - Date.parse(y.finished_at || 0); })[0];
     setTiles("#tiles", [
-      ["In review", num(STAGED.length), oldest ? "oldest " + ago(oldest.finished_at).replace(" ago", "") : "nothing waiting", STAGED.length ? "warn" : "ok"],
+      ["In review", num(rows.length), oldest ? "oldest " + ago(oldest.finished_at).replace(" ago", "") : "nothing waiting", rows.length ? "warn" : "ok"],
       ["Contributors' builds", num(contrib.length), "evidence: a maintainer has the project build it again"],
       ["The project's builds", num(proj.length), "waiting for a maintainer's approval into edge"],
       ["Decided · 7 d", num(week.length), num(week.filter(function (a) { return a.decision === "approved"; }).length) + " approved · " + num(week.filter(function (a) { return a.decision === "rejected"; }).length) + " rejected"]
@@ -128,10 +128,17 @@ const SCRIPT = String.raw`
     $("#g-waiting").hidden = isMaintainer() && !waiting.length; $("#g-decided").hidden = isMaintainer() && !decided.length;
     // A maintainer's own line: what waits for them, what the project is building, what is theirs (another maintainer decides).
     if (isMaintainer()) {
-      var forMe = STAGED.filter(function (t) { return !isOwner(t.owner) && decidable(t); }), inFlight = STAGED.filter(function (t) { return t.kind !== "project" && t.project_build && (t.project_build.status === "queued" || t.project_build.status === "leased"); }), own = STAGED.filter(function (t) { return isOwner(t.owner) && !t.already; });
+      var forMe = shown().filter(function (t) { return !isOwner(t.owner) && decidable(t); }), inFlight = STAGED.filter(function (t) { return t.kind !== "project" && t.project_build && (t.project_build.status === "queued" || t.project_build.status === "leased"); }), own = shown().filter(function (t) { return isOwner(t.owner) && !t.already; });
       $("#mine-queue").innerHTML = '<b>' + num(forMe.length) + '</b> waiting for your decision <a href="#queue">↓</a> · <b>' + num(inFlight.length) + '</b> the project is building · <b>' + num(own.length) + '</b> yours — another maintainer decides';
     }
   }
+  // One row per package and architecture: a contributor's build the project
+  // has built again and staged is represented by the project's row, which
+  // says "from #<theirs>" — two rows of the same name, version and
+  // architecture read as two packages (bitwarden, 2026-09-17). The evidence
+  // stays reachable from the project's row and on the build's own page.
+  function folded(t) { var pb = t.project_build; return t.kind !== "project" && !!pb && pb.status === "staged" && STAGED.some(function (p) { return p.id === pb.id; }); }
+  function shown() { return STAGED.filter(function (t) { return !folded(t); }); }
   // A staged build a maintainer can act on now: the project's (approve), or a contributor's the project is not already building — and not a build of a version already approved (nothing to decide: drop it).
   // Ready or nothing to decide — the project's build included: its chain's contributor half (the request, the gate, the audit) must be complete before a maintainer's time is asked.
   function decidable(t) { var pb = t.project_build; return !t.already && (!t.score || t.score.ready) && (t.kind === "project" || !pb || pb.status === "failed"); }
@@ -197,9 +204,10 @@ const SCRIPT = String.raw`
     return (pb && pb.status === "failed" ? '<span class="pill error" title="' + esc(pb.error || "") + '">project build #' + pb.id + ' failed</span> ' : '') + '<button type="button" data-build="' + t.id + '">Build by the project</button> <button type="button" data-reject="' + t.id + '">Reject</button>';
   }
   function renderStaged() {
-    var forMe = isMaintainer() ? STAGED.filter(function (t) { return !isOwner(t.owner) && decidable(t); }).length : 0, redundant = STAGED.filter(function (t) { return t.already; }).length;
-    $("#queue-note").textContent = STAGED.length ? (isMaintainer() ? num(forMe) + " waiting for your decision · " : "") + num(STAGED.length) + " staged" + (redundant ? " · " + num(redundant) + " of a version already approved" : "") : "";
-    pager("#staged", STAGED, function (t) {
+    var rows = shown();
+    var forMe = isMaintainer() ? rows.filter(function (t) { return !isOwner(t.owner) && decidable(t); }).length : 0, redundant = rows.filter(function (t) { return t.already; }).length;
+    $("#queue-note").textContent = rows.length ? (isMaintainer() ? num(forMe) + " waiting for your decision · " : "") + num(rows.length) + " staged" + (redundant ? " · " + num(redundant) + " of a version already approved" : "") : "";
+    pager("#staged", rows, function (t) {
       var det = t.detected || {}, project = t.kind === "project", pb = t.project_build;
       var build = project ? '<span class="pill ok" title="the project\'s own build, from a contributor\'s evidence">the project</span> <span class="muted">' + taskLink(t.id) + ' from ' + taskLink(t.from) + '</span>' + builtOn(t)
         : '<span class="muted">evidence · ' + taskLink(t.id) + (t.duration_ms ? ' · ' + Math.round(t.duration_ms / 1000) + ' s' : '') + '</span>' + builtOn(t) + (pb && (pb.status === "queued" || pb.status === "leased") ? ' <span class="pill blue">building again</span>' : pb && pb.status === "staged" ? ' <span class="pill ok">built again</span>' : '')
