@@ -137,7 +137,7 @@ reach the agent through `agent-proxy`.
 | metrics snapshot (`src/metrics.ts`) | every 30 minutes | taken by the Worker itself, no job: the pool's jobs of the last 7 days (runs, failures, worker minutes, per kind), builds, workers alive, pool totals and ring sizes, as a `metrics` event; the dashboard's charts and jobs table read from it |
 | worker cron trigger | every 10 minutes | the pool's own scheduler: queues the jobs above when due, requeues expired leases, applies `factory/MAINTAINERS.toml`, reads the OPR's recipe repository for provenance (05:15, `src/provenance.ts`: per package, Omarchy's own or AUR-synced, the upstream AUR commit, the last commit), checks upstreams for bumps (05:45), estimates the bill (06:30), logs pool jobs waiting for a project worker; see RUNBOOK |
 | `ci.yml`, `e2e.yml` | every pull request | fmt, clippy, tests and the worker typecheck on x86_64 and aarch64; real pacman end to end through a local worker |
-| `release.yml` | every merge into `main` | CI + E2E again on the merged commit, next version from the last tag (`v0.0.1`, `v0.0.2`, …), binaries for both architectures, GitHub release, `wrangler deploy` carrying `POOL_VERSION` — the dashboard shows what is running |
+| `release.yml` | when a maintainer decides (`gh workflow run release.yml`, or the Actions page) — main takes merges as they are ready, one release carries them all | CI + E2E again on main's head, next version from the last tag (`v0.0.1`, `v0.0.2`, …), binaries for both architectures, GitHub release with notes from every pull request since the last tag, the worker image, `wrangler deploy` carrying `POOL_VERSION` — the dashboard shows what is running |
 
 Every step posts an event; https://omarchy-pool.firemanxbr.org renders them.
 Nothing of the pool's operation runs on GitHub besides CI and the release
@@ -224,7 +224,7 @@ target ring turns out not to be:
 Stable moves without a human: the evidence is the reviewer, and a maintainer
 who disagrees queues a rollback.
 
-![release.yml — every merge into main is a release; versions start at v0.0.1 and grow one step at a time, and the dashboard shows what runs.](diagram:release-pipeline)
+![release.yml — merges land on main as they are ready; a maintainer cuts the release that carries them; versions start at v0.0.1 and grow one step at a time, and the dashboard shows what runs.](diagram:release-pipeline)
 
 #### Security: advisories with confidence, exposure through the graph
 

@@ -147,14 +147,14 @@ export function promotionGatesDiagram(): string {
  * the by-hand bump and the worker image built from the same release.
  */
 export function releasePipelineDiagram(): string {
-  let s = svgo(1280, 228, "A pull request that ci.yml and e2e.yml passed is squash-merged into main; release.yml runs both again on the merged commit, takes the next version from the last tag — one patch step, or minor and major by the pull request's label, or a bump chosen by hand through workflow_dispatch — builds pkg-repo, omarchy-cli and pkg-extract on x86_64 and aarch64 runners, publishes a GitHub release with notes from the merged pull requests, the tarballs and omarchy-staging.pub.asc, then migrates and deploys the worker with POOL_VERSION and checks that /api/v1/version answers it. The dashboard shows what runs; the worker image on ghcr.io is built from the same release, for both architectures, signed with cosign.");
+  let s = svgo(1280, 228, "A pull request that ci.yml and e2e.yml passed is squash-merged into main, as are the next ones; when a maintainer decides, release.yml runs both again on main's head, takes the next version from the last tag — one patch step, or minor and major by the pull request's label, or a bump chosen by hand through workflow_dispatch — builds pkg-repo, omarchy-cli and pkg-extract on x86_64 and aarch64 runners, publishes a GitHub release with notes from the merged pull requests, the tarballs and omarchy-staging.pub.asc, then migrates and deploys the worker with POOL_VERSION and checks that /api/v1/version answers it. The dashboard shows what runs; the worker image on ghcr.io is built from the same release, for both architectures, signed with cosign.");
   // Every box is at least as wide as its longest line (dbox widens to the
   // text), so the x positions below are the real ones: five stations across
   // the width, 50 px between them, 120 px for the first arrow and its label.
   const Y = 20, H = 94, MID = Y + H / 2;
   s += dbox({ x: 20, y: Y, w: 196, h: H, title: "Pull request", big: true, cls: "amber", tcls: "amber", lines: ["ci.yml · e2e.yml must pass", "x86_64 · aarch64", "fmt · clippy · tests · tsc", "real pacman, end to end"] });
-  s += darrow(216, MID, 336, MID) + dlab(276, MID - 25, ["squash merge", "into main"]);
-  s += dbox({ x: 336, y: Y, w: 216, h: H, title: "Next version", big: true, lines: ["ci · e2e again on main", "last v* tag + one patch", "release:minor · release:major"] });
+  s += darrow(216, MID, 336, MID) + dlab(276, MID - 25, ["merged; released", "when decided"]);
+  s += dbox({ x: 336, y: Y, w: 216, h: H, title: "Next version", big: true, lines: ["gh workflow run release.yml", "ci · e2e again on main", "last v* tag + one patch"] });
   s += darrow(552, MID, 602, MID);
   s += dbox({ x: 602, y: Y, w: 183, h: H, title: "Build", big: true, lines: ["x86_64 · aarch64 runners", "pkg-repo · omarchy-cli", "pkg-extract", "a tarball + sha256 each"] });
   s += darrow(785, MID, 835, MID);
