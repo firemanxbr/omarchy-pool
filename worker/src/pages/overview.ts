@@ -179,11 +179,13 @@ __CHARTS__
     // bar says how much it holds, not only that it is full. A source an
     // architecture does not have (alarm, asahi: aarch64; multilib: x86_64)
     // says so instead of showing an empty bar.
+    // Each cell names its architecture (data-arch): on a phone the row folds
+    // to one line per architecture and the name is drawn before the count.
     var covCell = function (c, a, other) {
-      if (!c) return '<div></div><div class="p dim">' + other + ' only</div>';
+      if (!c) return '<div></div><div class="p dim" data-arch="' + a + '">' + other + ' only</div>';
       var up = c.upstream_total, pct = up ? Math.min(100, Math.round(1000 * c.indexed / up) / 10) : 0;
       var label = up == null ? "not synced yet" : num(c.indexed) + "/" + num(up) + ' <span class="dim">·</span> ' + pct + "%";
-      return '<div class="bar" data-tip="' + esc(c.source + " " + a + " · " + num(c.indexed) + " of " + num(up || 0)) + '"><i class="' + (pct >= 100 ? "" : "partial") + '" style="width:' + pct + '%"></i></div><div class="p num">' + label + '</div>';
+      return '<div class="bar" data-tip="' + esc(c.source + " " + a + " · " + num(c.indexed) + " of " + num(up || 0)) + '"><i class="' + (pct >= 100 ? "" : "partial") + '" style="width:' + pct + '%"></i></div><div class="p num" data-arch="' + a + '">' + label + '</div>';
     };
     $("#c-coverage").innerHTML = '<div class="cov-row head"><div></div><div class="k">x86_64</div><div></div><div class="k">aarch64</div><div></div></div>' +
       covNames.map(function (n) { return '<div class="cov-row"><div class="l">' + esc(n) + '</div>' + covCell(covBy[n].x86_64, "x86_64", "aarch64") + covCell(covBy[n].aarch64, "aarch64", "x86_64") + '</div>'; }).join("");

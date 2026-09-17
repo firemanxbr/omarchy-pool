@@ -313,6 +313,17 @@ const CSS = String.raw`
   .cov-row .l { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .cov-row .bar { height: 8px; width: auto; background: var(--panel-2); border: 1px solid var(--line); position: relative; display: block; } .cov-row .bar i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--green); } .cov-row .bar i.partial { background: var(--amber); }
   .cov-row .p { text-align: right; color: var(--muted); white-space: nowrap; }
+  /* A phone: 96 + 156 + 156 px of columns do not fit in 340 — the source on a
+     line of its own, then one line per architecture, named before its count
+     (the head row would have nothing to head). The text leaked out of the box
+     on a smartphone, 2026-09-17. */
+  @media (max-width: 640px) {
+    .cov { gap: 12px; }
+    .cov-row { grid-template-columns: minmax(0, 1fr) auto; row-gap: 4px; }
+    .cov-row.head { display: none; }
+    .cov-row .l { grid-column: 1 / -1; }
+    .cov-row .p.num::before { content: attr(data-arch) " · "; color: var(--muted); }
+  }
   .open-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 16px; }
   .ring-heads { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); margin: 12px 0 10px; }
   .ring-head { background: var(--panel-2); padding: 8px 10px; display: grid; gap: 1px; text-decoration: none; color: inherit; min-width: 0; } .ring-head:hover { background: var(--panel); }
