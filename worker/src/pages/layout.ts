@@ -640,8 +640,12 @@ export const HELPERS = String.raw`
       setStatus(s.ok ? "online" : "degraded", s.ok ? "API, index (" + s.index.ms + " ms) and pool (" + s.pool.ms + " ms) answering" : why.join(" · "));
     }).catch(function (e) { setStatus("offline", "API not answering: " + e); });
   }
+  // A source is late when its last sync is older than this — nine hours, since a long import holds the pipeline's queue and small sources wait behind it. One number: /api/v1/stats marks the coverage row with it (late, late_after_hours), and the Status page's table reads it through lateSync().
+  var LATE_MS = 9 * 3600e3;
+  // Whether a coverage row is late: the server's word when it sent one, else the same rule over last_sync. A source never synced is not late, it is missing — the sync line says so.
+  function lateSync(c) { return typeof c.late === "boolean" ? c.late : !!c.last_sync && Date.now() - Date.parse(c.last_sync) > LATE_MS; }
   // What is wrong, if anything: no sync for four hours (they run every three), a source not synced
-  // for six (a long import holds the pipeline's queue, so small sources wait),
+  // for nine (LATE_MS: a long import holds the pipeline's queue, so small sources wait),
   // or a ring whose latest health check failed. The header pill and the
   // status page use the same list.
   // The newest event of a kind across d.latest (one per kind, source and
@@ -655,8 +659,8 @@ export const HELPERS = String.raw`
   function problemsOf(d) {
     var sync = newest(d.latest, "sync"), why = [];
     if (!sync || Date.now() - Date.parse(sync.created_at) > 4 * 3600e3) why.push("no sync for " + (sync ? ago(sync.created_at).replace(" ago", "") : "ever"));
-    var late = (d.coverage || []).filter(function (c) { return c.last_sync && Date.now() - Date.parse(c.last_sync) > 9 * 3600e3; });
-    if (late.length) why.push(late.length + " source(s) not synced for 9 h");
+    var late = (d.coverage || []).filter(lateSync);
+    if (late.length) why.push(late.length + " source(s) not synced for " + Math.round(LATE_MS / 3600e3) + " h");
     (d.latest || []).forEach(function (e) { if (e.kind === "health" && e.status === "error") why.push(e.ring + " " + (e.source || "x86_64") + " failed its health check"); });
     return why;
   }
@@ -715,6 +719,22 @@ export const HELPERS = String.raw`
     if (cb) whoAnswer.then(function () { cb(WHO.me); });
   }
   whoami();
+  // The maintainer set, read once per page from the one list the pool keeps (GET /api/v1/factory/maintainers, cached at the edge): null until it answers, then login → since. The first person drawn without a role starts the read; a page that wants the roles known before it draws waits on maintainerSet(cb) as it waits on whoami(cb). A read that fails leaves the set empty, and every person is a contributor until the next page load.
+  var MAINTAINERS = null, maintainersAnswer = null;
+  function maintainerSet(cb) {
+    maintainersAnswer = maintainersAnswer || fetch("/api/v1/factory/maintainers").then(function (r) { return r.ok ? r.json() : { maintainers: [] }; }).catch(function () { return { maintainers: [] }; }).then(function (d) { MAINTAINERS = {}; (d.maintainers || []).forEach(function (m) { MAINTAINERS[m.login] = m.since || true; }); markRoles(); });
+    if (cb) maintainersAnswer.then(function () { cb(MAINTAINERS); });
+  }
+  // The role of a login, the set's word: maintainer when listed, contributor when not, "" while the set is still on its way (the read starts here if nothing did).
+  function roleOf(login) { if (!MAINTAINERS) { maintainerSet(); return ""; } return MAINTAINERS[login] ? "maintainer" : "contributor"; }
+  // A person drawn before the set answered carries data-who; once it answers, each is marked as the set says — green and titled for a maintainer — so the order of two fetches never decides a colour.
+  function markRoles() {
+    document.querySelectorAll("[data-who]").forEach(function (el) {
+      var login = el.getAttribute("data-who"), role = roleOf(login), icon = el.classList.contains("avatar") ? el : el.querySelector(".avatar");
+      if (icon) icon.classList.toggle("m", role === "maintainer");
+      el.title = login + (role ? " · " + role : "");
+    });
+  }
   // SMIL animations (the diagrams) stop when the viewer asked for less motion.
   if (window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches) document.querySelectorAll("svg").forEach(function (s) { if (s.pauseAnimations) s.pauseAnimations(); });
   // Charts and bars carry their value in data-tip; one fixed box follows the pointer.
@@ -728,10 +748,11 @@ export const HELPERS = String.raw`
       tip.style.left = x + "px"; tip.style.top = y + "px";
     });
   })();
-  // A person, as an icon: two letters, green for a maintainer. No photos anywhere on the dashboard.
-  function avatar(login, role, cls) { return '<a class="avatar ' + (cls || "") + (role === "maintainer" ? " m" : "") + '" href="/user/' + encodeURIComponent(login) + '" title="' + esc(login) + (role ? " · " + esc(role) : "") + '">' + esc(String(login).slice(0, 2)) + '</a>'; }
+  // A person, as an icon: two letters, green for a maintainer. No photos anywhere on the dashboard. The role is the maintainer set's unless the caller knows it (the session's own, a row that says who signed); drawn without one, the icon carries data-who and is marked when the set answers.
+  function whoAttr(login, role) { return role ? ' title="' + esc(login) + ' · ' + esc(role) + '"' : ' data-who="' + esc(login) + '" title="' + esc(login) + (roleOf(login) ? " · " + roleOf(login) : "") + '"'; }
+  function avatar(login, role, cls) { var r = role || roleOf(login); return '<a class="avatar ' + (cls || "") + (r === "maintainer" ? " m" : "") + '" href="/user/' + encodeURIComponent(login) + '"' + whoAttr(login, role) + '>' + esc(String(login).slice(0, 2)) + '</a>'; }
   // The same icon with no link of its own — for inside a link (a chip), where a nested anchor would split.
-  function avatarIcon(login, role) { return '<span class="avatar' + (role === "maintainer" ? " m" : "") + '">' + esc(String(login).slice(0, 2)) + '</span>'; }
+  function avatarIcon(login, role) { return '<span class="avatar' + ((role || roleOf(login)) === "maintainer" ? " m" : "") + '">' + esc(String(login).slice(0, 2)) + '</span>'; }
   // A person as a chip: the icon carries the role (green = maintainer), the whole chip is the link to the profile.
   // A worker's id is "<owner>-<name>-<arch>-<4 random>" (POST /factory/workers): the tables
   // show the name — the owner and the architecture have columns of their own — and keep the id on hover.
@@ -810,6 +831,13 @@ export const HELPERS = String.raw`
   // ---- the worker tables (the Workers page, a person's page): the same row for the same kind of worker everywhere.
   // The kind: project (pool jobs) and review are the project's, told apart by the role the worker reported; everything else is a contributor's.
   function wtKind(w) { if (w.side !== "omarchy") return "community"; var r = w.labels && w.labels.role; return r === "review" ? "review" : "project"; }
+  // The numbers every tile that counts workers says, counted once: registered (not revoked), alive (a heartbeat in the last ten minutes, the listing's word), ready (alive and, where the work needs one, an agent that answered — the listing's ready), building (alive with a task in hand); and the same four per kind in byKind.project, .review and .community.
+  function workerCounts(ws) {
+    var count = function (list) { var kept = list.filter(function (w) { return !w.revoked_at; }), alive = kept.filter(function (w) { return w.alive; }); return { registered: kept.length, alive: alive.length, ready: alive.filter(function (w) { return w.ready; }).length, building: alive.filter(function (w) { return w.current_task; }).length }; };
+    var all = count(ws || []); all.byKind = {};
+    ["project", "review", "community"].forEach(function (k) { all.byKind[k] = count((ws || []).filter(function (w) { return wtKind(w) === k; })); });
+    return all;
+  }
   function wtPerson(l) { return l ? avatar(l) : '<span class="muted" title="a registration from before owners: the project\'s">—</span>'; }
   // The id without the owner's prefix (the owner has a column), never past 32 characters: whole segments go from after the first, the tail — role, arch, the random suffix — stays; the whole id on hover.
   function wtId(w) {
@@ -895,8 +923,10 @@ export const HELPERS = String.raw`
   // What the pager's filter searches on a worker's row: its id, owner, arch, version, mode, agent, who trusted it, its last task, its labels.
   function wtText(w) { return [w.id, w.owner, w.arch, w.version, w.mode, w.agent, w.trusted_by, w.last_task && w.last_task.name, JSON.stringify(w.labels || {})].join(" "); }
   var WT_LEGEND = '<p class="dim wt-legend">' + '<span>' + WICON.native + ' native</span><span>' + WICON.emu + ' emulated</span><span>' + WICON.shared + ' shared</span><span>' + WICON.own + ' own packages</span><span><span class="pill ok">idle</span> waiting</span><span><span class="pill blue">building</span> a task in hand</span><span><span class="pill error">failed</span> its agent does not answer</span><span><span class="pill warn">outdated</span> behind the latest image, handed nothing</span><span><span class="pill none">offline</span> not seen in ten minutes</span><span>' + WICON.log + ' its own log (its owner, the maintainers)</span></p>';
-  // A person's login as a link to their page; a pill with a title. Shared by the pages that tell a package's story.
-  function personLink(l) { return l ? '<a href="/user/' + encodeURIComponent(l) + '">' + esc(l) + '</a>' : '<span class="muted">—</span>'; }
+  // A person's login as a link to their page, the role on hover from the set (or the caller's word); a pill with a title. Shared by the pages that tell a package's story.
+  function personLink(l, role) { return l ? '<a href="/user/' + encodeURIComponent(l) + '"' + whoAttr(l, role) + '>' + esc(l) + '</a>' : '<span class="muted">—</span>'; }
+  // The one address of a package's page: the ring and the architecture always ride the query, so a link from a row says which ring the row is about and the page opens on it instead of its default. An unknown ring — or none — is the most stable one (the first of RINGS_TEXT, the server's order); an architecture of "all", or none, is x86_64, as the page itself assumes.
+  function pkgHref(name, ring, arch) { return "/package/" + encodeURIComponent(name) + "?ring=" + encodeURIComponent(ring && RINGS_TEXT[ring] ? ring : Object.keys(RINGS_TEXT)[0]) + "&arch=" + encodeURIComponent(arch && arch !== "all" ? arch : "x86_64"); }
   function pillHtml(cls, text, title) { return '<span class="pill ' + cls + '"' + (title ? ' title="' + esc(title) + '"' : '') + '>' + esc(text) + '</span>'; }
   // One build status, one colour, on every page: queued grey, building blue, staged and done green, failed and rejected red, cancelled and withdrawn grey. A package's own words (registered, waiting, approved, unmaintained) wear the same pills.
   var TASK_PILL = { queued: "none", leased: "blue", building: "blue", staged: "ok", done: "ok", failed: "error", rejected: "error", cancelled: "none", withdrawn: "none", registered: "none", requested: "none", waiting: "warn", drafting: "blue", validating: "blue", review: "warn", approved: "ok", unmaintained: "warn" };
@@ -1134,7 +1164,7 @@ export const HELPERS = String.raw`
       + ckColumn(c.score, "maintainer", "The maintainer's half", c.project ? 'the project\'s build <a href="/build/' + c.project.id + '">#' + c.project.id + '</a>' + (c.approval ? ' · decided by ' + personLink(c.approval.by) : c.withdrawn ? ' · the approval by ' + personLink(c.withdrawn.by) + ' was withdrawn' : ' · not decided') : 'not started' + (c.score.ready ? ' — ready to begin' : ''), ev)
       + '</div>' + (earlier.length ? '<p class="sub" style="margin:8px 0 0">Earlier: ' + earlier.join(' · ') + '</p>' : '') + '</section>';
   }
-  function personChip(login, role, extra) { return '<a class="person" href="/user/' + encodeURIComponent(login) + '" title="' + esc(login) + ' · ' + esc(role) + '">' + avatarIcon(login, role) + '<b>' + esc(login) + '</b>' + (extra ? ' <span class="r">' + extra + '</span>' : '') + '</a>'; }
+  function personChip(login, role, extra) { return '<a class="person" href="/user/' + encodeURIComponent(login) + '"' + whoAttr(login, role) + '>' + avatarIcon(login, role) + '<b>' + esc(login) + '</b>' + (extra ? ' <span class="r">' + extra + '</span>' : '') + '</a>'; }
   // A tile with a fifth element is a link: the number, and the page that proves it.
   function setTiles(sel, list) { var el = $(sel); if (!el) return; list.forEach(function (t, i) { var cell = el.children[i], tag = t[4] ? "A" : "DIV"; if (!cell || cell.tagName !== tag) { var made = document.createElement(tag); made.className = "tile"; if (cell) { made.innerHTML = cell.innerHTML; el.replaceChild(made, cell); } else el.appendChild(made); cell = made; } if (t[4]) cell.href = t[4]; setTile(cell, '<div class="k">' + t[0] + '</div><div class="v num' + (t[3] ? " " + t[3] : "") + '">' + t[1] + '</div><div class="s">' + t[2] + '</div>'); }); while (el.children.length > list.length) el.removeChild(el.lastChild); }
   // Every fetch a page starts goes through busy(): the bar at the top stays
