@@ -102,10 +102,18 @@ export const CHARTS = String.raw`  // ---- tiny SVG charts (no library; the page
     labels.forEach(function (lab, i) { if (n <= 8 || i % 2 === 1) out += '<text class="ax" x="' + xs(i) + '" y="' + (H - 6) + '" text-anchor="middle">' + esc(shortDay(lab)) + '</text>'; });
     return out + '</svg><div class="legend">' + series.map(function (s) { return '<span><i style="background:' + s.color + '"></i>' + esc(s.name) + '</span>'; }).join("") + '</div>';
   }
-  // rows: [[label, small, percent, color?]] — a labelled bar per row, percent of a full bar.
-  function hrows(rows, w) {
+  // rows: [[label, small, percent, color?, shown?]] — a labelled bar per row, percent of a full bar. opts is the label column's width in px, or { w, html }: html when the label and its small print are markup the page escaped itself (a worker's name with its tooltip).
+  function hrows(rows, opts) {
     if (!rows.length) return '<div class="empty">nothing yet</div>';
-    return '<div class="hrows">' + rows.map(function (r) { var full = r[2] >= 100; return '<div class="hrow"' + (w ? ' style="grid-template-columns:' + w + 'px 1fr 52px"' : "") + '><div class="l">' + esc(r[0]) + (r[1] ? ' <small>' + esc(r[1]) + '</small>' : "") + '</div><div class="bar" data-tip="' + esc(r[0] + (r[1] ? " " + r[1] : "") + " · " + (r[4] || r[2] + "%")) + '"><i class="' + (full ? "" : "partial") + '" style="width:' + Math.min(100, r[2]) + '%' + (r[3] ? ";background:" + r[3] : "") + '"></i></div><div class="p num">' + (r[4] || r[2] + "%") + '</div></div>'; }).join("") + '</div>';
+    opts = typeof opts === "number" ? { w: opts } : opts || {};
+    var text = function (t) { return opts.html ? String(t == null ? "" : t).replace(/<[^>]*>/g, "") : t; }, mark = function (t) { return opts.html ? t : esc(t); };
+    return '<div class="hrows">' + rows.map(function (r) { var full = r[2] >= 100; return '<div class="hrow"' + (opts.w ? ' style="grid-template-columns:' + opts.w + 'px 1fr 52px"' : "") + '><div class="l">' + mark(r[0]) + (r[1] ? ' <small>' + mark(r[1]) + '</small>' : "") + '</div><div class="bar" data-tip="' + esc(text(r[0]) + (r[1] ? " " + text(r[1]) : "") + " · " + (r[4] || r[2] + "%")) + '"><i class="' + (full ? "" : "partial") + '" style="width:' + Math.min(100, r[2]) + '%' + (r[3] ? ";background:" + r[3] : "") + '"></i></div><div class="p num">' + (r[4] || r[2] + "%") + '</div></div>'; }).join("") + '</div>';
+  }
+  // The factory's builds per day from the stats series (builds_daily: {day, status, n}), as the labels and series stacked() draws: staged blue, published (done) green, failed red, over the last days.
+  function buildsByDay(series, days) {
+    var by = {}; ((series || {}).builds_daily || []).forEach(function (r) { var x = by[r.day] = by[r.day] || { staged: 0, published: 0, failed: 0 }; if (r.status === "staged") x.staged += Number(r.n); else if (r.status === "done") x.published += Number(r.n); else if (r.status === "failed") x.failed += Number(r.n); });
+    var labels = lastDays(days || 14), of = function (k) { return labels.map(function (d) { return (by[d] || {})[k] || 0; }); };
+    return { labels: labels, series: [{ name: "staged", color: C.blue, values: of("staged") }, { name: "published", color: C.green, values: of("published") }, { name: "failed", color: C.red, values: of("failed") }] };
   }
   // Fourteen days of health per ring and architecture, worst result per day, as html cells.
   function heatGrid(health) {

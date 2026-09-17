@@ -11,6 +11,8 @@ import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:
 import { beforeAll, describe, expect, it } from "vitest";
 import worker from "../src/index";
 import { allComponents } from "../src/pages/components";
+import { HELPERS } from "../src/pages/layout";
+import { CHARTS } from "../src/pages/charts";
 import { scriptOf, seedDashboard, type Fixture } from "./fixture";
 
 async function get(path: string): Promise<Response> {
@@ -86,6 +88,68 @@ describe("dashboard pages", () => {
       const missing = [...used].filter((name) => !declared.has(name) && !GLOBALS.has(name)).sort();
       expect(missing, `${path} uses undeclared: ${missing.join(", ")}`).toEqual([]);
     }
+  });
+
+  // One shell: a helper two pages need lives in HELPERS (a chart primitive in CHARTS), and a page declares only what it alone draws. The copies drifted when they lived on the pages — four colour maps for one build status, five pick() rows, three ways to say how long a build took — so a page that declares a name the shell declares (the copy coming back), or one of its own twice, fails here by the page's name; so does a page that polls /api/v1/stats every two minutes to render nothing.
+  it("a page declares only what it alone draws — no helper the shell has, no name twice, no poll for nothing", async () => {
+    const acorn = await import("acorn");
+    type N = Record<string, any>;
+    // The names a function scope declares: function declarations and var/let/const declarators, through blocks and loops, not into a nested function.
+    const declared = (body: N[]): string[] => {
+      const out: string[] = [];
+      const names = (pat: N): void => {
+        if (!pat) return;
+        if (pat.type === "Identifier") out.push(pat.name);
+        else if (pat.type === "ObjectPattern") pat.properties.forEach((q: N) => names(q.value ?? q.argument));
+        else if (pat.type === "ArrayPattern") pat.elements.forEach(names);
+        else if (pat.type === "AssignmentPattern") names(pat.left);
+        else if (pat.type === "RestElement") names(pat.argument);
+      };
+      const walk = (n: unknown): void => {
+        if (!n || typeof n !== "object") return;
+        if (Array.isArray(n)) { n.forEach(walk); return; }
+        const node = n as N;
+        if (!node.type) return;
+        if (node.type === "FunctionDeclaration") { names(node.id); return; }
+        if (node.type === "FunctionExpression" || node.type === "ArrowFunctionExpression" || node.type === "ClassDeclaration" || node.type === "ClassExpression") return;
+        if (node.type === "VariableDeclaration") { node.declarations.forEach((d: N) => { names(d.id); walk(d.init); }); return; }
+        for (const k of Object.keys(node)) if (k !== "type" && k !== "start" && k !== "end") walk(node[k]);
+      };
+      walk(body);
+      return out;
+    };
+    const program = (code: string): N[] => (acorn.parse(code, { ecmaVersion: 2020, sourceType: "script" }) as unknown as N).body;
+    const shell = new Set(declared(program(HELPERS))), charts = new Set(declared(program(CHARTS)));
+    expect(shell.has("pillHtml") && shell.has("whoami") && shell.has("pick") && charts.has("stacked")).toBe(true);
+    const problems: string[] = [];
+    for (const path of PAGES) {
+      const code = scriptOf(await (await get(path)).text());
+      if (!code.trim()) continue;
+      // page() wraps the shell and the page's script in one function: its body is the scope the page shares with the shell.
+      const iife = program(code)[0]?.expression?.callee?.body?.body;
+      expect(iife, `${path}: the page's script is not one IIFE`).toBeDefined();
+      const has = new Set([...shell, ...(code.includes(CHARTS) ? charts : [])]);
+      const count = new Map<string, number>();
+      for (const name of declared(iife)) count.set(name, (count.get(name) ?? 0) + 1);
+      for (const [name, n] of count) {
+        if (has.has(name) && n > 1) problems.push(`${path} declares the shell's ${name} again`);
+        else if (!has.has(name) && n > 1) problems.push(`${path} declares ${name} ${n} times`);
+      }
+      // liveStats(function () {}, …): the two-minute poll of /api/v1/stats that renders nothing.
+      const calls = (n: unknown): void => {
+        if (!n || typeof n !== "object") return;
+        if (Array.isArray(n)) { n.forEach(calls); return; }
+        const node = n as N;
+        if (!node.type) return;
+        if (node.type === "CallExpression" && node.callee.type === "Identifier" && node.callee.name === "liveStats") {
+          const fn = node.arguments[0];
+          if (fn && (fn.type === "FunctionExpression" || fn.type === "ArrowFunctionExpression") && fn.body.type === "BlockStatement" && fn.body.body.length === 0) problems.push(`${path} polls the stats to render nothing`);
+        }
+        for (const k of Object.keys(node)) if (k !== "type" && k !== "start" && k !== "end") calls(node[k]);
+      };
+      calls(iife);
+    }
+    expect(problems, problems.join("\n")).toEqual([]);
   });
 
   it("every docs page carries the same shell — the map with every chapter's sections, the search — and the stages are on How it works", async () => {

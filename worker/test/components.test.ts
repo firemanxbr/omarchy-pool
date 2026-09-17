@@ -139,12 +139,13 @@ function pathVariables(script: string): Map<string, string> {
   return vars;
 }
 
-/** The paths a page's script fetches, as shapes — through `fetch(…)`, and through the page's `call(method, path)` helper where it has one. */
+/** The paths a page's script fetches, as shapes — through `fetch(…)`, through the shell's `api(method, path)` (a whole path), and through the page's `call(method, path)` helper where it still has one (a path under its `API`). */
 function fetched(script: string): string[] {
   const vars = pathVariables(script);
   const api = vars.get("API") ?? "";
   const shapes: string[] = [];
   for (const m of script.matchAll(/\bfetch\(/g)) shapes.push(shapeOf(script.slice(m.index! + m[0].length, endOfExpression(script, m.index! + m[0].length)), vars));
+  for (const m of script.matchAll(/\bapi\("(?:GET|POST|PUT|DELETE)",\s*/g)) shapes.push(shapeOf(script.slice(m.index! + m[0].length, endOfExpression(script, m.index! + m[0].length)), vars));
   for (const m of script.matchAll(/\bcall\("(?:GET|POST|PUT|DELETE)",\s*/g)) shapes.push(api + shapeOf(script.slice(m.index! + m[0].length, endOfExpression(script, m.index! + m[0].length)), vars));
   // A shape that is not a path of this origin (an evidence file's URL) says nothing; `API + path` is the helper itself, whose callers are read above.
   return shapes.filter((s) => s.startsWith("/") && s !== `${api}X`);

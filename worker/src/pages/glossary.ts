@@ -3,15 +3,13 @@ import { page, termId } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
 import { GLOSSARY } from "./docs-tree";
 import type { RunningVersion } from "../meta";
+import { escapeHtml } from "../html";
 
-function esc(s: string): string {
-  return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] ?? c);
-}
 
 const BODY = String.raw`
   <h1>Glossary</h1>
   <p class="lede">The words on these pages, one line each.</p>
-  <dl class="gloss-list">${GLOSSARY.map(([term, text]) => `<dt id="${termId(term)}"><a href="#${termId(term)}">${esc(term)}</a></dt><dd>${esc(text)}</dd>`).join("")}</dl>
+  <dl class="gloss-list">${GLOSSARY.map(([term, text]) => `<dt id="${termId(term)}"><a href="#${termId(term)}">${escapeHtml(term)}</a></dt><dd>${escapeHtml(text)}</dd>`).join("")}</dl>
 `;
 
 export function glossaryHtml(poolUrl: string, version: RunningVersion): string {
@@ -48,7 +46,7 @@ export const GLOSSARY_COMPONENTS = (_F: Fixture): Component[] => {
       // Every term is an anchor the sidebar, the docs index and the search link to; a renamed term moves it.
       id: "glossary.list",
       page,
-      anchor: ['<dl class="gloss-list">', ...GLOSSARY.map(([term]) => `<dt id="${termId(term)}"><a href="#${termId(term)}">${esc(term)}</a></dt>`)],
+      anchor: ['<dl class="gloss-list">', ...GLOSSARY.map(([term]) => `<dt id="${termId(term)}"><a href="#${termId(term)}">${escapeHtml(term)}</a></dt>`)],
       visible: EVERYONE,
     },
   ];

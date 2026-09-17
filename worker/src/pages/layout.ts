@@ -7,6 +7,7 @@
 import type { RunningVersion } from "../meta";
 import { DOCS_TREE, GLOSSARY, type DocKey } from "./docs-tree";
 import { RING_TEXT } from "../meta";
+import { escapeHtml } from "../html";
 
 export const GITHUB_ICON =
   '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>';
@@ -124,6 +125,7 @@ const CSS = String.raw`
   dialog.ask.wide { width: min(880px, 94vw); } dialog.ask pre.block { max-height: 60vh; overflow: auto; margin: 0; background: var(--bg-deep); border: 1px solid var(--line); padding: 10px 12px; font: 12px/1.5 "JetBrains Mono", monospace; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
   .pill.error { color: var(--red); border-color: var(--red); }
   .pill.none { color: var(--dim); }
+  button[disabled], select[disabled], input[disabled], a.disabled { opacity: .45; cursor: not-allowed; }
   .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 13.5px; }
   .kv dt { color: var(--dim); }
   .kv dd { margin: 0; }
@@ -562,7 +564,6 @@ const CSS = String.raw`
   }
 `;
 
-/** Helpers shared by every page script; runs before the page's own script. */
 /** The icons the worker tables use instead of a word: a chip for the architecture (dashed when emulated), arrows for a shared worker, one person for an owner's own. */
 export const WORKER_ICONS = {
   native: '<svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-label="native"><rect x="4" y="4" width="8" height="8"/><path d="M6 1v3M10 1v3M6 12v3M10 12v3M1 6h3M1 10h3M12 6h3M12 10h3"/></svg>',
@@ -572,7 +573,13 @@ export const WORKER_ICONS = {
   log: '<svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-label="log"><path d="M3 2h7l3 3v9H3z"/><path d="M5 7h6M5 9.5h6M5 12h4"/></svg>',
 };
 
-const HELPERS = String.raw`
+/**
+ * The shell: the helpers every page script runs after, spliced by page()
+ * before the page's own script. A helper two pages need lives here (a chart
+ * primitive in charts.ts CHARTS); a page declares only what it alone draws
+ * — test/pages.test.ts fails a page that declares a name the shell has.
+ */
+export const HELPERS = String.raw`
   var POOL = "__POOL_URL__";
   var RINGS_TEXT = __RINGS_TEXT__;
   var WICON = __WICON__;
@@ -654,27 +661,38 @@ const HELPERS = String.raw`
     }
     draw();
   }
-  // The agent a worker reports ("<provider>/<model>"), or a dash: the key never leaves the worker, only its name does.
-  function agentCell(w) {
-    if (!w.agent) return '<span class="muted">—</span>';
-    var i = w.agent.indexOf("/");
-    return '<span class="mono" title="' + esc(w.agent) + '">' + esc(i > 0 ? w.agent.slice(i + 1) : w.agent) + '</span>' + (i > 0 ? ' <span class="muted">' + esc(w.agent.slice(0, i)) + '</span>' : '');
+  // Who is signed in (the omc cookie), as the page's controls ask it: me is /auth/me's answer as it came (null for nobody), login and role its two words, maint whether a maintainer, owns(login) whether that person is the viewer. The anonymous identity until the answer, and for nobody.
+  function identity(me) { return { me: me || null, login: me ? me.login : "", role: me ? me.role : "", maint: !!me && me.role === "maintainer", owns: function (l) { return !!me && !!l && me.login === l; } }; }
+  var ME = null, WHO = identity(null);
+  function isMaintainer() { return !!(WHO && WHO.role === "maintainer"); }
+  function isOwner(login) { return !!(WHO && login && WHO.login === login); }
+  // The header shows the login and the role; sign out is on every page: the cookie is cleared by /auth/logout, the older local-storage token (a CLI token pasted into the page) with it.
+  function accountChip(me) {
+    var a = $("#account"); if (!a) return;
+    a.innerHTML = '<span class="avatar' + (me.role === "maintainer" ? " m" : "") + '">' + esc(String(me.login).slice(0, 2)) + '</span><b>' + esc(me.login) + '</b>'; a.href = "/user/" + encodeURIComponent(me.login); a.title = esc(me.login) + " · " + esc(me.role) + " — signed in with GitHub as " + me.login + (me.areas && me.areas.length ? " (" + me.areas.join(", ") + ")" : "");
+    var out = $("#signout"); if (out) { out.hidden = false; out.onclick = function () { try { localStorage.removeItem("omc_token"); localStorage.removeItem("omc_login"); } catch (e) {} location.href = "/auth/logout"; return false; }; }
   }
-  // Who is signed in (the omc cookie): the header shows the login and role.
-  var ME = null;
+  // One fetch of /auth/me per page: the shell asks first, and every whoami(cb) a page makes gets the same answer — from the fetch in flight, or at once from what it said.
   function whoami(cb) {
-    fetch("/auth/me", { cache: "no-store" }).then(function (r) { return r.ok ? r.json() : null; }).then(function (me) {
-      ME = me; var a = $("#account"); if (!a) return;
-      if (me) {
-        a.innerHTML = '<span class="avatar' + (me.role === "maintainer" ? " m" : "") + '">' + esc(String(me.login).slice(0, 2)) + '</span><b>' + esc(me.login) + '</b>'; a.href = "/user/" + encodeURIComponent(me.login); a.title = esc(me.login) + " · " + esc(me.role) + " — signed in with GitHub as " + me.login + (me.areas && me.areas.length ? " (" + me.areas.join(", ") + ")" : "");
-        // Sign out is on every page: the cookie is cleared by /auth/logout,
-        // the older local-storage token (a CLI token pasted into the page) with it.
-        var out = $("#signout"); if (out) { out.hidden = false; out.onclick = function () { try { localStorage.removeItem("omc_token"); localStorage.removeItem("omc_login"); } catch (e) {} location.href = "/auth/logout"; return false; }; }
-      }
-      if (cb) cb(me);
-    }).catch(function () { if (cb) cb(null); });
+    whoami.waiting = whoami.waiting || [];
+    if (cb) whoami.waiting.push(cb);
+    if (whoami.answered) { var now = whoami.waiting; whoami.waiting = []; now.forEach(function (f) { f(ME); }); return; }
+    if (whoami.started) return;
+    whoami.started = true;
+    fetch("/auth/me", { cache: "no-store" }).then(function (r) { return r.ok ? r.json() : null; }).then(function (me) { ME = me; WHO = identity(me); if (me) accountChip(me); }, function () {}).then(function () { whoami.answered = true; whoami(); });
   }
   whoami();
+  // A control that is not this viewer's — a button, a select, an input, a link — kept on the page with why on hover: disabled and aria-disabled (class "disabled" and tabindex -1 on a link), the pointer events kept so the title shows. ok returns the control as it is. Nothing calls it yet: the pages take it up one by one (the front-end consistency series, B2), drawing every control and gating it rather than drawing it for some.
+  function gate(html, ok, why) {
+    if (ok) return html;
+    var title = ' title="' + esc(why || "not yours to do") + '"';
+    return String(html).replace(/<(button|select|input|textarea|a)\b([^>]*)>/, function (m, tag, attrs) {
+      attrs = attrs.replace(/\s+title="[^"]*"/, "");
+      if (tag !== "a") return '<' + tag + attrs + ' disabled aria-disabled="true"' + title + '>';
+      attrs = /\sclass="/.test(attrs) ? attrs.replace(/\sclass="/, ' class="disabled ') : attrs + ' class="disabled"';
+      return '<a' + attrs + ' aria-disabled="true" tabindex="-1"' + title + '>';
+    });
+  }
   // SMIL animations (the diagrams) stop when the viewer asked for less motion.
   if (window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches) document.querySelectorAll("svg").forEach(function (s) { if (s.pauseAnimations) s.pauseAnimations(); });
   // Charts and bars carry their value in data-tip; one fixed box follows the pointer.
@@ -847,13 +865,65 @@ const HELPERS = String.raw`
   // A person's login as a link to their page; a pill with a title. Shared by the pages that tell a package's story.
   function personLink(l) { return l ? '<a href="/user/' + encodeURIComponent(l) + '">' + esc(l) + '</a>' : '<span class="muted">—</span>'; }
   function pillHtml(cls, text, title) { return '<span class="pill ' + cls + '"' + (title ? ' title="' + esc(title) + '"' : '') + '>' + esc(text) + '</span>'; }
+  // One build status, one colour, on every page: queued grey, building blue, staged and done green, failed and rejected red, cancelled and withdrawn grey. A package's own words (registered, waiting, approved, unmaintained) wear the same pills.
+  var TASK_PILL = { queued: "none", leased: "blue", building: "blue", staged: "ok", done: "ok", failed: "error", rejected: "error", cancelled: "none", withdrawn: "none", registered: "none", requested: "none", waiting: "warn", drafting: "blue", validating: "blue", review: "warn", approved: "ok", unmaintained: "warn" };
+  function taskPill(status, title) { return pillHtml(TASK_PILL[status] || "none", status === "leased" ? "building" : status, title); }
+  // An advisory's severity: critical and high red, medium amber, low blue, unknown grey.
+  function sevPill(s) { return pillHtml({ critical: "error", high: "error", medium: "warn", low: "blue", unknown: "none" }[s] || "none", s); }
+  // A build's class (score.ts): A and B green, C amber, D red — the pill says the class and the points, the hover what the maintainer's half would make of it; text and title replace those where a row has room for the letter only.
+  var CLASS_CLS = { A: "ok", B: "ok", C: "warn", D: "error" };
+  function classPill(sc, text, title) { return pillHtml(CLASS_CLS[sc.class] || "none", text || "class " + sc.class + " · " + sc.points + "/100", title || "today; with the maintainer's half green: " + sc.projected); }
+  // A row of choices, one lit (the rings, the architectures, a journal's kinds): values are the words, current the one on, on(value) what a press does. opts.url names the query parameter the choice is written to, so the address carries it.
+  function pick(sel, values, current, on, opts) {
+    opts = opts || {}; var el = $(sel); if (!el) return;
+    el.innerHTML = values.map(function (v) { return '<button type="button" class="' + (v === current ? "on" : "") + '" data-v="' + esc(v) + '">' + esc(v) + '</button>'; }).join("");
+    el.querySelectorAll("button").forEach(function (b) { b.onclick = function () { var v = b.getAttribute("data-v"); if (opts.url) { var q = new URLSearchParams(location.search); q.set(opts.url, v); history.replaceState(null, "", "?" + q); } on(v); }; });
+  }
+  // The copy chips beside a command (.copy with data-copy="key"): map is { key: "#selector" }, the text of that element goes to the clipboard, the chip says so for a moment — and says when the browser refused (no permission, plain http).
+  function copyChips(map) {
+    document.querySelectorAll(".copy[data-copy]").forEach(function (b) {
+      b.onclick = function () {
+        var el = $(map[b.getAttribute("data-copy")] || ""); if (!el) return;
+        var was = b.textContent;
+        navigator.clipboard.writeText(el.textContent).then(function () { b.textContent = "copied"; }, function () { b.textContent = "could not copy"; }).then(function () { setTimeout(function () { b.textContent = was; }, 1500); });
+      };
+    });
+  }
+  // One call to the API, JSON in and JSON out: the answer's body whatever the status — an error's message is in it — with the status on it as __status, so a page tells refused from done; the progress bar runs while it is in flight.
+  function api(method, path, body) {
+    return busy(fetch(path, { method: method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined })).then(function (r) { return r.json().catch(function () { return { error: "HTTP " + r.status }; }).then(function (d) { d.__status = r.status; return d; }); });
+  }
+  // A figure in the prose (a diagram's label, a sentence's number): every element with data-live="key" says text.
+  function live(key, text) { document.querySelectorAll('[data-live="' + key + '"]').forEach(function (el) { el.textContent = text; }); }
+  // One line of the journal (/api/v1/events), the same on the Journal and the Pipeline: the status, the kind, the ring and the source, the summary linked to the run that produced it and to the diff of the release it made, how long it took, when.
+  function eventRow(e) {
+    var run = e.payload && e.payload.ci && e.payload.ci.run_url, rid = e.payload && e.payload.release_id, diff = "";
+    if (rid && e.ring && (e.kind === "promote" || e.kind === "rollback" || e.kind === "sync" || e.kind === "fast-track")) diff = ' <a class="run" href="/diff?ring=' + esc(e.ring) + '&to=' + rid + '" title="what release ' + rid + ' changed">diff</a>';
+    return '<tr><td><span class="dot ' + esc(e.status) + '"></span>' + esc(e.status) + '</td><td><span class="kind">' + esc(e.kind) + '</span></td><td>' + esc(e.ring || "") + '</td><td>' + esc(e.source || "") + '</td><td>' + (run ? '<a class="run" href="' + esc(run) + '" title="open the run">' + esc(e.summary) + '</a>' : esc(e.summary)) + diff + '</td><td class="num">' + dur(e.duration_ms) + '</td><td class="when" title="' + esc(e.created_at) + '">' + ago(e.created_at) + '</td></tr>';
+  }
+  // Roll a ring back to a release: asked in the dashboard's dialog, posted once as a pool job, the answer written to #rb-state where the page has one. Resolves with the job's answer, null when cancelled.
+  function askRollback(ring, to, seq) {
+    return ask({ title: "Roll " + ring + " back to release " + to + "?", text: (seq ? "Release #" + esc(seq) + ": the ring serves it" : "The ring serves that release") + " again at once; the journal keeps why.", input: "required", confirm: "Roll back", danger: true }).then(function (note) {
+      if (note === null) return null;
+      return api("POST", "/api/v1/factory/jobs", { kind: "rollback", params: { ring: ring, to: to, note: note } }).then(function (j) {
+        var el = $("#rb-state"); if (el) { el.hidden = false; el.innerHTML = j.error ? pillHtml("error", "refused") + ' ' + esc(j.error) : pillHtml("ok", "queued") + ' rollback of <b>' + esc(ring) + '</b> to release ' + esc(to) + ' is task #' + esc(j.task || "?") + ' — a project worker runs it, the journal records it'; }
+        return j;
+      });
+    });
+  }
+  // The rollback button (data-rollback="<release id>" data-ring="<ring>", data-seq for the number shown) is the shell's: the click stops here, so a page binding the same button asks nobody twice — and a button whose job was queued stays disabled: enabled again it queued the job twice (the Journal and the Pipeline both did).
+  document.addEventListener("click", function (ev) {
+    var b = ev.target.closest ? ev.target.closest("button[data-rollback]") : null; if (!b) return;
+    ev.stopImmediatePropagation(); b.disabled = true;
+    askRollback(b.getAttribute("data-ring"), b.getAttribute("data-rollback"), b.getAttribute("data-seq")).then(function (j) { if (j === null || j.error) b.disabled = false; }, function (e) { b.disabled = false; toast("failed: " + esc(String(e)), "error"); });
+  });
   // One chain of the factory's story (routes/story.ts) as a row of steps: built by the contributor → the gate → the audit → built again by the project → tried in the lab → decided. The package page and a person's page draw the same row.
   function chainRow(c) {
 
     var sc = c.score, cc = c.contributor, pb = c.project, a = c.approval;
       var step = function (state, title, detail) { return '<div class="fstep ' + state + '"><i class="dot ' + (state === "ok" ? "ok" : state === "bad" ? "error" : state === "warn" ? "warn" : "") + '"></i><div><b>' + title + '</b><span>' + detail + '</span></div></div>'; };
       var vet = cc && cc.result && cc.result.vet, audit = c.audit, pvet = pb && pb.result && pb.result.vet, trial = c.trial;
-      return '<div class="fchainrow"><div class="fhead"><span>' + (cc ? personLink(cc.owner) + '\'s build <a href="/build/' + cc.id + '">#' + cc.id + '</a> · ' + esc(cc.version || '') + ' · ' + esc(cc.arch) : 'the project\'s build <a href="/build/' + pb.id + '">#' + pb.id + '</a> · ' + esc(pb.version || '') + ' · ' + esc(pb.arch)) + '</span>' + pillHtml({ A: "ok", B: "ok", C: "warn", D: "error" }[sc.class], "class " + sc.class + " · " + sc.points + "/100", "with the maintainer's half green: " + sc.projected) + '</div><div class="fsteps">'
+      return '<div class="fchainrow"><div class="fhead"><span>' + (cc ? personLink(cc.owner) + '\'s build <a href="/build/' + cc.id + '">#' + cc.id + '</a> · ' + esc(cc.version || '') + ' · ' + esc(cc.arch) : 'the project\'s build <a href="/build/' + pb.id + '">#' + pb.id + '</a> · ' + esc(pb.version || '') + ' · ' + esc(pb.arch)) + '</span>' + classPill(sc, null, "with the maintainer's half green: " + sc.projected) + '</div><div class="fsteps">'
         + (cc ? step(cc.status === "staged" || cc.status === "done" ? "ok" : cc.status === "failed" ? "bad" : "", "Built by the contributor", (cc.status === "staged" || cc.status === "done" ? "succeeded" : cc.status) + (cc.finished_at ? ' · ' + ago(cc.finished_at) : '') + (cc.attempts > 1 ? ' · ' + cc.attempts + ' attempts' : '')) : '')
         + (cc ? step(vet ? (vet.verdict === "pass" ? (vet.warnings ? "warn" : "ok") : "bad") : "", "The gate", vet ? (vet.verdict === "pass" ? (vet.warnings ? vet.warnings + " warning(s)" : "clean") : vet.fails + " failed") : "not run") : '')
         + (cc ? step(audit && audit.status === "done" ? ({ ok: "ok", warn: "warn", block: "bad" }[audit.result && audit.result.verdict] || "ok") : "", "The audit", audit ? (audit.status === "done" ? (audit.result && audit.result.verdict || "done") + (audit.result && audit.result.model ? ' · ' + esc(audit.result.model) : '') : audit.status) : "not yet") : '')
@@ -919,8 +989,7 @@ const HELPERS = String.raw`
     var head = '<div class="pkarch-head"><span class="arch-name">' + esc(arch) + '</span> ' + pillHtml(st.cls, st.text);
     if (c) {
       var sc = c.score, cc = c.contributor, pb = c.project, t = cc || pb;
-      var cls = { A: "ok", B: "ok", C: "warn", D: "error" }[sc.class] || "none";
-      head += ' ' + pillHtml(cls, "class " + sc.class + " · " + sc.points + "/100", "today; with the maintainer's half green: " + sc.projected) + (sc.class !== sc.projected ? ' <span class="dim">→ ' + esc(sc.projected) + '</span>' : '');
+      head += ' ' + classPill(sc) + (sc.class !== sc.projected ? ' <span class="dim">→ ' + esc(sc.projected) + '</span>' : '');
       head += ' <span class="dim">·</span> <a href="/build/' + t.id + '">#' + t.id + '</a>' + (t.version ? ' <span class="dim">' + esc(t.version) + '</span>' : '') + (t.lease_owner ? ' <span class="dim">on</span> ' + wtId({ id: t.lease_owner, owner: t.owner }) : '') + (t.finished_at ? ' <span class="dim">· ' + ago(t.finished_at) + '</span>' : t.started_at ? ' <span class="dim">· started ' + ago(t.started_at) + '</span>' : '') + (t.duration_ms ? ' <span class="dim">· ' + Math.round(t.duration_ms / 1000) + ' s</span>' : '');
     }
     head += (acts ? '<span class="acts-inline">' + acts + '</span>' : '') + '</div>';
@@ -933,7 +1002,6 @@ const HELPERS = String.raw`
       + '</div>' + (earlier.length ? '<p class="sub" style="margin:8px 0 0">Earlier: ' + earlier.join(' · ') + '</p>' : '') + '</section>';
   }
   function personChip(login, role, extra) { return '<a class="person" href="/user/' + encodeURIComponent(login) + '" title="' + esc(login) + ' · ' + esc(role) + '">' + avatarIcon(login, role) + '<b>' + esc(login) + '</b>' + (extra ? ' <span class="r">' + extra + '</span>' : '') + '</a>'; }
-  function tile(k, v, s, cls) { return '<div class="tile"><div class="k">' + k + '</div><div class="v num' + (cls ? " " + cls : "") + '">' + v + '</div><div class="s">' + s + '</div></div>'; }
   // A tile with a fifth element is a link: the number, and the page that proves it.
   function setTiles(sel, list) { var el = $(sel); if (!el) return; list.forEach(function (t, i) { var cell = el.children[i], tag = t[4] ? "A" : "DIV"; if (!cell || cell.tagName !== tag) { var made = document.createElement(tag); made.className = "tile"; if (cell) { made.innerHTML = cell.innerHTML; el.replaceChild(made, cell); } else el.appendChild(made); cell = made; } if (t[4]) cell.href = t[4]; setTile(cell, '<div class="k">' + t[0] + '</div><div class="v num' + (t[3] ? " " + t[3] : "") + '">' + t[1] + '</div><div class="s">' + t[2] + '</div>'); }); while (el.children.length > list.length) el.removeChild(el.lastChild); }
   // Every fetch a page starts goes through busy(): the bar at the top stays
@@ -1070,10 +1138,6 @@ const DOCS_SEARCH = String.raw`
     q.onkeydown = function (e) { if (e.key === "Escape") { q.value = ""; q.oninput(); } };
   })();
 `;
-
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] ?? c);
-}
 
 /**
  * The page-view counter, when the deployment names one (ANALYTICS): Google

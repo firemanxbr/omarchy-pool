@@ -8,18 +8,16 @@ import { page } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
 import { DOCS_TREE, GLOSSARY, MD_CHAPTERS, chapterOf, type DocKey, type MdChapter } from "./docs-tree";
 import { termId } from "./layout";
+import { escapeHtml } from "../html";
 import type { RunningVersion } from "../meta";
 import { REPO_URL } from "../meta";
 
-function esc(s: string): string {
-  return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] ?? c);
-}
 
 const card = (c: (typeof DOCS_TREE)[number]) => {
   const secs = c.key === "glossary"
-    ? GLOSSARY.map(([term]) => `<a href="${c.href}#${termId(term)}">${esc(term)}</a>`)
-    : c.secs.map((s) => `<a href="${c.href}#${s.id}" title="${esc(s.blurb)}">${esc(s.title)}</a>`);
-  return `<div class="doc-card"><h3><a href="${c.href}">${esc(c.label)} →</a></h3><p>${esc(c.blurb)}</p><div class="doc-secs">${secs.join("")}</div></div>`;
+    ? GLOSSARY.map(([term]) => `<a href="${c.href}#${termId(term)}">${escapeHtml(term)}</a>`)
+    : c.secs.map((s) => `<a href="${c.href}#${s.id}" title="${escapeHtml(s.blurb)}">${escapeHtml(s.title)}</a>`);
+  return `<div class="doc-card"><h3><a href="${c.href}">${escapeHtml(c.label)} →</a></h3><p>${escapeHtml(c.blurb)}</p><div class="doc-secs">${secs.join("")}</div></div>`;
 };
 const POOL = DOCS_TREE.filter((c) => c.group === "pool").map(card).join("");
 const CODE = DOCS_TREE.filter((c) => c.group === "code").map(card).join("");

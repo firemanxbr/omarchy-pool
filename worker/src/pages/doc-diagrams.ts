@@ -4,7 +4,8 @@
  * image files. A chapter embeds one as `![caption](diagram:<name>)`; the
  * name is a key of DOC_DIAGRAMS and the caption becomes the figure's.
  */
-import { dbox, darrow, dline, dpath, dlab, dot, svgo, esc } from "./diagrams";
+import { dbox, darrow, dline, dpath, dlab, dot, svgo } from "./diagrams";
+import { escapeHtml } from "../html";
 
 /**
  * The publishing layer: every source feeds pkg-extract; the archive is stored
@@ -319,10 +320,10 @@ export function factoryLoopDiagram(): string {
   s += darrow(260, Y, 310, Y);
   // The pool holds the queue: a container box with the queue strip inside it.
   s += `<rect class="d-box hi" x="310" y="${T}" width="260" height="${H}"/>`;
-  s += `<text class="d-t" x="440" y="${T + 24}" text-anchor="middle" font-size="15">${esc("The pool")}</text>`;
-  s += `<text class="d-s" x="440" y="${T + 42}" text-anchor="middle">${esc("the brain · a Cloudflare Worker")}</text>`;
-  s += `<text class="d-s" x="440" y="${T + 56}" text-anchor="middle">${esc("queues and signs · never builds")}</text>`;
-  s += `<rect class="d-queue" x="320" y="${T + 64}" width="240" height="24"/><text class="d-t small" x="440" y="${T + 81}" text-anchor="middle">${esc("build_tasks in D1 · ≤ 3 attempts")}</text>`;
+  s += `<text class="d-t" x="440" y="${T + 24}" text-anchor="middle" font-size="15">${escapeHtml("The pool")}</text>`;
+  s += `<text class="d-s" x="440" y="${T + 42}" text-anchor="middle">${escapeHtml("the brain · a Cloudflare Worker")}</text>`;
+  s += `<text class="d-s" x="440" y="${T + 56}" text-anchor="middle">${escapeHtml("queues and signs · never builds")}</text>`;
+  s += `<rect class="d-queue" x="320" y="${T + 64}" width="240" height="24"/><text class="d-t small" x="440" y="${T + 81}" text-anchor="middle">${escapeHtml("build_tasks in D1 · ≤ 3 attempts")}</text>`;
   s += darrow(570, Y, 670, Y, "", true) + dlab(620, Y - 12, ["claim"]) + dlab(620, Y + 16, ["report"]);
   s += dbox({ x: 670, y: T, w: 240, h: H, title: "A worker, anywhere", lines: ["registered · ephemeral · pulls", "claims a task · a 30 min lease", "a heartbeat every 5 min"] });
   // An expired lease: the loop over the top, back into the queue.
