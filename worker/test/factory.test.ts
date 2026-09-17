@@ -1003,6 +1003,13 @@ describe("who trusts whom", () => {
   it("project trust takes two maintainers' word — never the owner's, never the same person twice — and one word takes it back; each step an event, the trust a signed record", async () => {
     // alice's community worker w3; m1 proposes, m2 confirms.
     expect((await call("POST", "/factory/workers/w3/trust", { trust: "project" }, "omc_alice")).status).toBe(403);
+    // A maintainer's own worker: they never propose it, but may confirm another maintainer's proposal (the Studio's workers, with two maintainers in the project).
+    await env.DB.prepare("INSERT OR IGNORE INTO build_workers (id, arch, owner, token_hash, mode, trust, last_seen) VALUES ('m1own', 'aarch64', 'm1', ?, 'dedicated', 'community', '2000-01-01T00:00:00Z')").bind(await sha256Hex("omw_m1own")).run();
+    expect((await call("POST", "/factory/workers/m1own/trust", { trust: "project" }, "omc_m1")).status).toBe(403);
+    expect((await call("POST", "/factory/workers/m1own/trust", { trust: "project" }, "omc_m2")).status).toBe(202);
+    const owned = await call("POST", "/factory/workers/m1own/trust", { trust: "project" }, "omc_m1");
+    expect(owned.status, JSON.stringify(owned.json)).toBe(200);
+    expect(owned.json).toMatchObject({ worker: "m1own", trust: "project", trusted_by: "m2, m1" });
     const first = await call("POST", "/factory/workers/w3/trust", { trust: "project" }, "omc_m1");
     expect(first.status).toBe(202);
     expect(first.json).toMatchObject({ worker: "w3", trust: "community", proposed_by: "m1" });

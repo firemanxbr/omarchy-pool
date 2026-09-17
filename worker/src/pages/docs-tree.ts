@@ -247,7 +247,7 @@ export const GLOSSARY: [string, string][] = [
   ["OPR", "The Omarchy Package Repository: Omarchy's own packages; its edge channel is a source of the pool, and it earns rc and stable here like every other source."],
   ["ABI check", "Before a promotion: does anything the ring serves load a library whose symbol versions the promotion would change? If so, the promotion is blocked."],
   ["lease", "A worker's claim on a task: it holds the lease while it builds and heartbeats; an expired lease puts the task back in the queue."],
-  ["trust", "Two maintainers' word on a worker's registration — one proposes, another confirms, never the owner — that lets it run the project's jobs and rebuilds; one maintainer takes it back."],
+  ["trust", "Two maintainers' word on a worker's registration — one proposes, another confirms; the owner never proposes their own, but may confirm — that lets it run the project's jobs and rebuilds; one maintainer takes it back."],
   ["the broker", "The one process on a worker's host that holds the token and the agent key and runs no build; the builder beside it is born with nothing and speaks to it."],
   ["category", "What a package is about, for a person browsing the pool — one of a fixed list; proposed by the project's agent, settled by a maintainer."],
   ["the seal", "A package's provenance, served with it: the project and keyring for a synced package; the whole chain and a signed attestation for a factory one."],

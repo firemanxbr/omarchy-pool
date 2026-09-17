@@ -854,11 +854,16 @@ export async function handleTrustWorker(c: Contributor, id: string, request: Req
     return json({ worker: id, trust: "community", by: c.login });
   }
   if (w.trust === "project") return json({ worker: id, trust: "project", trusted_by: w.trusted_by, unchanged: true });
-  if (w.owner === c.login) return json({ error: "a maintainer does not trust their own worker; two other maintainers do" }, 403);
+  // The owner never gives the first word — someone else vouches for their
+  // machine — but may give the second, once another maintainer has: two
+  // maintainers' word, never the owner's alone. With two maintainers in
+  // the project (2026-09-17), the rule as "two others" left the Studio's
+  // own workers with nobody to trust them.
+  if (w.owner === c.login && !w.trust_proposed_by) return json({ error: "a maintainer does not propose their own worker; another maintainer proposes it, and then the owner (or a third) confirms" }, 403);
   if (!w.trust_proposed_by || w.trust_proposed_by === c.login) {
     await env.DB.prepare("UPDATE build_workers SET trust_proposed_by = ?, trust_proposed_at = ? WHERE id = ?").bind(c.login, now, id).run();
     if (w.trust_proposed_by !== c.login) await event(`worker ${id} proposed for project trust by ${c.login}; a second maintainer confirms`, { worker: id, proposed_by: c.login, owner: w.owner });
-    return json({ worker: id, trust: "community", proposed_by: c.login, awaiting: "a second maintainer's word — not the owner's, not yours" }, 202);
+    return json({ worker: id, trust: "community", proposed_by: c.login, awaiting: "a second maintainer's word — the owner's counts, yours again does not" }, 202);
   }
   const by = `${w.trust_proposed_by}, ${c.login}`;
   await env.DB.prepare("UPDATE build_workers SET trust = 'project', trusted_by = ?, trusted_at = ?, trust_proposed_by = NULL, trust_proposed_at = NULL WHERE id = ?").bind(by, now, id).run();
