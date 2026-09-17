@@ -50,7 +50,7 @@ export PATH="$tmp/bin:$PATH"
 out="$("$tmp/omarchy-worker" start --token omw_test123 --shared --where laptop --github-token github_pat_x --claude-token sk-ant-oat01-x)"
 d="$HOME/.config/omarchy-worker"; real="$(cd "$d" && pwd -P)"
 [[ -f "$d/compose.yml" && -f "$d/.env" ]] || { echo "start writes compose.yml and .env in $d"; exit 1; }
-[[ "$(stat -f %Lp "$d/.env" 2>/dev/null || stat -c %a "$d/.env")" == 600 ]] || { echo ".env holds the token: mode 600"; exit 1; }
+[[ "$(stat -c %a "$d/.env" 2>/dev/null || stat -f %Lp "$d/.env")" == 600 ]] || { echo ".env holds the token: mode 600"; exit 1; }
 # Values single-quoted, compose's way (a # or a $ in a value means nothing); the directory by its real path.
 for kv in "OMARCHY_WORKER_TOKEN='omw_test123'" "OMARCHY_WORKER_DIR='$real'" "OMARCHY_SOCKET='/var/run/docker.sock'" "COMPOSE_PROFILES='community'" "COMPOSE_PROJECT_NAME='omarchy-worker'" "WORKER_SHARED='1'" "WHERE='laptop'" "GITHUB_TOKEN='github_pat_x'" "CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-x'"; do
   grep -qxF "$kv" "$d/.env" || { echo "missing in .env: $kv — $(cat "$d/.env")"; exit 1; }

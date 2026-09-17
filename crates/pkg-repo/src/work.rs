@@ -22,9 +22,9 @@ use serde::Deserialize;
 use crate::client::{Api, ReleaseRequest};
 use crate::gate::{self, GateOptions, Verdict};
 use crate::ops;
-use crate::RepoError;
 use crate::security::{self, FastTrackOptions, SecurityOptions};
 use crate::sync::SyncOptions;
+use crate::RepoError;
 
 pub const REPO_URL: &str = "https://github.com/firemanxbr/omarchy-pool";
 const HEARTBEAT: Duration = Duration::from_secs(300);
