@@ -19,7 +19,7 @@ const BODY = String.raw`
   <div class="hero compact">
     <p class="eyebrow">Workers</p>
     <h1>Three kinds of worker, and whose they are</h1>
-    <p class="lede">The project's take the pool's jobs. The review ones — trusted on two maintainers' word, never the owner's — build again what a maintainer asked for, and write the audit. A contributor's build their own packages, or whatever is queued when shared. Every worker by its id, its state in one word, and what its machine uses. <a href="/docs/workers">Run one →</a></p>
+    <p class="lede">The project's take the pool's jobs. The review ones — trusted on two maintainers' word, never the owner's alone — build again what a maintainer asked for, and write the audit. A contributor's build their own packages, or whatever is queued when shared. Every worker by its id, its state in one word, and what its machine uses. <a href="/docs/workers">Run one →</a></p>
   </div>
 
   <div class="tiles four" id="tiles"></div>
