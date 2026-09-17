@@ -8,7 +8,7 @@ import { queuePosition } from "../queue";
 import { cookieOf } from "./auth";
 import { putRecord, recordKey, recordUrl, withdrawRecord } from "../record";
 import { version } from "../meta";
-import { isTextEvidence, STAGING_DAYS, STAGING_QUOTA_BYTES } from "../staging";
+import { isTextEvidence, reclaimStagingPackages, STAGING_DAYS, STAGING_QUOTA_BYTES } from "../staging";
 import { findLeak, leakMessage } from "../leak";
 import { CHECKLIST, LICENSE, sourceHasPath } from "../request";
 
@@ -378,16 +378,29 @@ export async function handleDeletePackage(c: Contributor, name: string, env: Env
   const reviewing = await env.DB.prepare("SELECT id, status FROM build_tasks WHERE name = ? AND kind = 'build' AND trust = 'project' AND status IN ('queued', 'leased', 'staged') ORDER BY id DESC LIMIT 1").bind(name).first<{ id: number; status: string }>();
   if (reviewing && !isMaintainer(c)) return json({ error: `${name} is under review: the project's build #${reviewing.id} is ${reviewing.status} — a maintainer decides first` }, 409);
   const rings = served.length ? await pullFromRings(env, name, `registration removed by ${c.login}`) : [];
+  // Every build of it stops: the owner's own — queued, running, or staged
+  // and waiting for a maintainer — and, when a maintainer removes it, the
+  // project's builds and publish jobs with them, so nothing re-enters a
+  // ring behind no registration. A staged build that outlived its
+  // registration stayed on Review as "waiting for a maintainer" and on the
+  // Pipeline as a build in the queue (felix #447, 2026-09-17); its queued
+  // audit goes with it, and its package leaves staging now — the recipe,
+  // the log and the reports stay, as the record of any build the pool is
+  // done with.
+  const stopping = (await env.DB.prepare(isMaintainer(c)
+    ? "SELECT id FROM build_tasks WHERE name = ? AND kind IN ('build', 'publish') AND status IN ('queued', 'leased', 'staged')"
+    : "SELECT id FROM build_tasks WHERE name = ? AND trust = 'community' AND kind = 'build' AND owner = ? AND status IN ('queued', 'leased', 'staged')")
+    .bind(...(isMaintainer(c) ? [name] : [name, c.login])).all<{ id: number }>()).results.map((r) => r.id);
+  const why = `registration removed by ${c.login}`;
   await env.DB.batch([
-    // Every build of it stops — the owner's queued ones; a maintainer's removal takes the project's builds and publish jobs with it, so nothing re-enters a ring behind no registration.
-    env.DB.prepare(isMaintainer(c)
-      ? "UPDATE build_tasks SET status = 'cancelled', error = ? WHERE name = ? AND kind IN ('build', 'publish') AND status IN ('queued', 'leased', 'staged')"
-      : "UPDATE build_tasks SET status = 'cancelled', error = ? WHERE name = ? AND trust = 'community' AND kind = 'build' AND status = 'queued'").bind(`registration removed by ${c.login}`, name),
+    env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = ?, lease_expires_at = NULL WHERE id IN (SELECT value FROM json_each(?))").bind(why, JSON.stringify(stopping)),
+    env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = 'the build it audited was cancelled with its registration' WHERE kind = 'audit' AND status = 'queued' AND json_extract(params, '$.task') IN (SELECT value FROM json_each(?))").bind(JSON.stringify(stopping)),
     env.DB.prepare("DELETE FROM factory_packages WHERE name = ?").bind(name),
     env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('request', NULL, 'factory', 'warn', ?, ?)")
-      .bind(`${name}: registration removed by ${c.login}${rings.length ? ` — it leaves ${rings.map((r) => r.ring).join(", ")} (render jobs queued)` : ""}`, JSON.stringify({ name, by: c.login, owner: pkg.owner, rings })),
+      .bind(`${name}: ${why}${stopping.length ? ` — ${stopping.length} build(s) cancelled` : ""}${rings.length ? ` — it leaves ${rings.map((r) => r.ring).join(", ")} (render jobs queued)` : ""}`, JSON.stringify({ name, by: c.login, owner: pkg.owner, rings, cancelled: stopping })),
   ]);
-  return json({ deleted: name, by: c.login, rings });
+  await reclaimStagingPackages(env, stopping);
+  return json({ deleted: name, by: c.login, rings, cancelled: stopping });
 }
 
 /**

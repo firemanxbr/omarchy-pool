@@ -240,7 +240,11 @@ superseded by a newer one, rejected, failed for good, published — are
 reclaimed at once, the recipe and the log stay; everything expires after
 30 days. Drop a build early with `DELETE /api/v1/factory/tasks/<id>/artifacts`
 (refused while queued or leased, or while the project builds from it; a staged
-build is cancelled). Your worker fails a task at claim time when your
+build is cancelled). *Remove* on your page takes the registration and
+every build of it — queued, running, or staged and waiting for a
+maintainer — with its queued audit: the packages leave staging, the
+recipe, the log and the reports stay on the record, and anyone can
+register the name again. Your worker fails a task at claim time when your
 workspace is full, and reports an upload the pool refused as the build's
 failure — the reason is on the Factory page. A worker token is revocable
 (`DELETE /factory/workers/<id>`); registering again replaces your contributor
