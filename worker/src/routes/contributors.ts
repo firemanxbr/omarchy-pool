@@ -579,6 +579,9 @@ export async function handleWorkerMode(by: { login: string; maintainer: boolean 
   if (w.trust !== "community") return json({ error: "a project worker takes the project's work; it has no shared or own mode" }, 409);
   const who = "worker" in by ? "worker" : by.login;
   if ("worker" in by ? by.worker !== w.id : !(by.maintainer || by.login === w.owner)) return json({ error: "not yours" }, 403);
+  // Sharing is the owner's word alone (governance): a maintainer may take a
+  // worker out of the queue, never put someone's machine in it.
+  if (b.mode === "shared" && !("worker" in by) && by.login !== w.owner) return json({ error: "sharing is the owner's word alone: a maintainer can set a worker to its owner's packages, not share it" }, 403);
   await env.DB.prepare("UPDATE build_workers SET mode = ?, mode_by = ? WHERE id = ?").bind(b.mode, who, id).run();
   return json({ id, mode: b.mode, by: who, note: b.mode === "shared" ? "from its next claim it builds whatever is queued, anyone's" : "from its next claim it builds its owner's packages only" });
 }

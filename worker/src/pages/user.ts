@@ -272,6 +272,8 @@ const SCRIPT = String.raw`
   load().then(function () {
     // Your own page: the workspace — the buttons on the tables, a worker to register, the quota, a token for scripts, the place to sign out.
     whoami(function (me) {
+      // Who is looking decides what the worker rows show (the log icon is the owner's and the maintainers'): drawn again now that it is known.
+      if (me && me.login !== login) renderWorkers();
       if (!me || me.login !== login) return;
       own = true;
       var url = location.origin + "/user/" + encodeURIComponent(login);

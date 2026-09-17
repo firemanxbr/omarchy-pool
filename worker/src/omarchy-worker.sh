@@ -3,7 +3,7 @@
 #
 #   curl -fsSLo omarchy-worker __API__/omarchy-worker && chmod +x omarchy-worker
 #   ./omarchy-worker start --token omw_…            # your packages, on this machine
-#   ./omarchy-worker start --token omw_… --shared   # and everyone's queue
+#   ./omarchy-worker start --token omw_… --shared   # and everyone's queue (the pool keeps the mode; share on|off and the page's Share flip it)
 #
 # It finds the container runtime you have (docker or podman, with compose),
 # writes the compose file and a .env beside itself (~/.config/omarchy-worker
@@ -138,6 +138,8 @@ cmd_start() {
     mkdir -p "$wd"
   fi
   [[ -n "$shared" ]] && env_set WORKER_SHARED "$shared"
+  # --shared / --own: the pool keeps the mode from here on (the page's Share / Own only is the same switch); the .env flag alone is only the first word.
+  [[ -n "$shared" ]] && tell_mode "$( [[ "$shared" == 1 ]] && echo shared || echo dedicated )" || true
   [[ -n "$where" ]] && env_set WHERE "$where"
   [[ -n "$gh" ]] && env_set GITHUB_TOKEN "$gh"
   [[ -n "$anthropic" ]] && env_set ANTHROPIC_API_KEY "$anthropic"
@@ -174,7 +176,7 @@ cmd_status() {
   compose ps --format 'table {{.Service}}\t{{.Status}}\t{{.Image}}' 2>/dev/null || true
   local self; self="$(curl -fsS --max-time 30 "$API/api/v1/factory/workers/self" -H "authorization: Bearer $(env_get OMARCHY_WORKER_TOKEN)" 2>/dev/null || true)"
   if [[ -n "$self" ]]; then
-    jq -r '"the pool: \(.id) · \(.trust) · \(.arch)" + (if .mode then " · " + (if .mode == "shared" then "shared (everyone\u0027s queue)" else "own packages only" end) + (if .mode_by then " — set from the brain" else "" end) else "" end)' <<<"$self" 2>/dev/null || say "the pool: $self"
+    jq -r '"the pool: \(.id) · \(.trust) · \(.arch)" + (if .trust == "community" and .mode then " · " + (if .mode == "shared" then "shared (everyone\u0027s queue)" else "own packages only" end) + (if .mode_by then " — set from the brain" else "" end) elif .trust == "project" then " · the project\u0027s work" else "" end)' <<<"$self" 2>/dev/null || say "the pool: $self"
   else
     say "the pool did not answer for this token"
   fi
@@ -191,14 +193,20 @@ cmd_update() { find_runtime; fetch_compose; say "pulling and replacing what chan
 # The mode is the brain's: set through the worker's token, it holds from the
 # next claim (within the minute), nothing restarts — the page shows the same
 # switch. The .env keeps it too, for a set started again from scratch.
+# The mode, told to the pool through the worker's token: it holds from the next claim, and the pool says what it did (or why not).
+tell_mode() { # shared|dedicated
+  local mode="$1" out code body
+  out="$(curl -sS --max-time 30 -w '\n%{http_code}' -X POST "$API/api/v1/factory/workers/self/mode" -H "authorization: Bearer $(env_get OMARCHY_WORKER_TOKEN)" -H "content-type: application/json" -d "{\"mode\":\"$mode\"}" 2>&1)" || { say "the pool did not answer about the mode: ${out:0:200}"; return 1; }
+  code="${out##*$'\n'}"; body="${out%$'\n'*}"
+  if [[ "$code" == 200 ]]; then say "$(jq -r '.note // ("mode: " + .mode)' <<<"$body" 2>/dev/null || echo "mode: $mode")"; return 0; fi
+  say "the pool did not take the mode ($code): $(jq -r '.error // empty' <<<"$body" 2>/dev/null || echo "${body:0:200}")"; return 1
+}
 cmd_share() {
   local mode
   case "${1:-}" in on) mode=shared ;; off) mode=dedicated ;; *) die "share on|off" ;; esac
   [[ -f "$DIR/.env" ]] || die "nothing here ($DIR): omarchy-worker start --token omw_… first"
-  local r; r="$(curl -fsS --max-time 30 -X POST "$API/api/v1/factory/workers/self/mode" -H "authorization: Bearer $(env_get OMARCHY_WORKER_TOKEN)" -H "content-type: application/json" -d "{\"mode\":\"$mode\"}" 2>&1)" \
-    || die "the pool did not take it: ${r:0:300}"
+  tell_mode "$mode" || exit 1
   env_set WORKER_SHARED "$( [[ "$mode" == shared ]] && echo 1 || echo 0 )"
-  say "$(jq -r '.note // ("mode: " + .mode)' <<<"$r" 2>/dev/null || echo "mode: $mode")"
 }
 # down with every profile: what a switch may have left behind goes too.
 cmd_stop() { find_runtime; say "draining: a build in hand finishes first (up to three hours)"; compose --profile '*' down; }

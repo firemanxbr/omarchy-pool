@@ -1225,7 +1225,8 @@ describe("workers follow the brain", () => {
     // w3 (alice's, dedicated) starts with WORKER_SHARED=1: the flag is the first word.
     expect((await call("POST", "/factory/claim", { arch: "aarch64", shared: true }, "omw_w3")).status).toBe(204);
     expect(await env.DB.prepare("SELECT mode, mode_by FROM build_workers WHERE id = 'w3'").first()).toEqual({ mode: "shared", mode_by: null });
-    // A stranger cannot set it; its owner can; a project worker has no such mode.
+    // A stranger cannot set it; its owner can; a maintainer may take it out of the queue, never put it in (sharing is the owner's word); a project worker has no such mode.
+    expect((await call("POST", "/factory/workers/w3/mode", { mode: "shared" }, "omc_m2")).status).toBe(403);
     expect((await call("POST", "/factory/workers/w3/mode", { mode: "dedicated" }, "omc_m2")).status).toBe(200); // m2 is a maintainer
     expect((await call("POST", "/factory/workers/w1/mode", { mode: "shared" }, "omc_m1")).status).toBe(409);
     expect((await call("POST", "/factory/workers/w3/mode", { mode: "sometimes" }, "omc_alice")).status).toBe(400);

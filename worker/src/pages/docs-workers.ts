@@ -62,7 +62,7 @@ docker compose up -d           # podman compose works the same</pre>
       <div class="step"><h3>2. Give it work</h3><p><a href="/request">Request a package</a> (the project's URL, a description, the licence, the checklist) and press <b>Build</b> on your page. Your worker picks it up within a minute; the <em>Builds</em> table follows it, and the <em>Workers</em> table shows it alive. When the build is staged, a maintainer sees it on <a href="/review">Review</a>.</p></div>
       <div class="step"><h3>3. Donate the machine, bring your agent</h3><p>Two switches, both yours to flip — the first on the builder, the second on the broker (options of <code>omarchy-worker start</code>; by hand, the same names in <code>.env</code>). The first is the pool's to keep: <b>Share</b> / <b>Own only</b> on your page (or <code>omarchy-worker share on|off</code>) sets the registration's mode, and from the worker's next claim — within the minute, nothing restarts — that is what counts, whatever the container was started with; the container's flag is only the first word.</p>
 <pre># the builder: also build other contributors' packages (their bumps after 14 days, package requests at once)
-./omarchy-worker start --shared            # or: ./omarchy-worker share on | off  (.env: WORKER_SHARED=1)
+./omarchy-worker start --shared            # or: ./omarchy-worker share on | off, or Share on your page — the pool keeps it (.env's WORKER_SHARED is only the first word)
 
 # the broker: an agent drafts and corrects PKGBUILDs, with your key — the pool never holds one, the builder never sees it;
 # one of these is enough (Anthropic, OpenAI, Gemini, xAI), --model picks the model

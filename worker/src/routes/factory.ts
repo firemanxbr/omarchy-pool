@@ -239,7 +239,7 @@ function workerLog(v: unknown): string {
   if (typeof v !== "string" || !v) return "";
   const text = v.length > WORKER_LOG_CHUNK ? v.slice(-WORKER_LOG_CHUNK) : v;
   const leak = findLeak(text);
-  return leak ? `[${text.split("\n").length} line(s) dropped: one looked like ${leak.kind}]\n` : text.endsWith("\n") ? text : text + "\n";
+  return leak ? `[${text.replace(/\n$/, "").split("\n").length} line(s) dropped: one looked like ${leak.kind}]\n` : text.endsWith("\n") ? text : text + "\n";
 }
 
 async function touchWorker(env: Env, w: { worker: string; arch: string; hostname?: string; labels?: unknown; version?: string; mode?: string; agent?: string | null; kinds?: string[]; probe?: AgentReport; usage?: Usage | null; log?: string }, currentTask: number | null): Promise<void> {
