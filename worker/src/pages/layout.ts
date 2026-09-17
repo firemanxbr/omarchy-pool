@@ -1041,15 +1041,15 @@ export const HELPERS = String.raw`
       return '<li>' + mark + '<div><b>' + esc(i.item) + '</b> <span class="dim">' + esc(i.note) + '</span>' + (more ? ' ' + more : '') + '</div><span class="num pts">' + i.points + '<span class="dim">/' + i.max + '</span></span></li>';
     }).join("") + '</ul></div>';
   }
-  // The request on the record (request.ts), as the form checks it today: six lines, each green or not, and the way to put it right when it is the reader's own.
-  function requestBlock(q, own, name, renewable, whyNot) {
+  // The request on the record (request.ts), as the form checks it today: six lines, each green or not, and the way to put it right — "Renew the request", drawn for every reader once a line is not green (the dashboard's rule: the same control for all), live for the owner (own) while a renewal is taken (renewable: nothing of it is being built), grey with the reason in its title otherwise — the state's for the owner (whyNot: "renew it once build #12 is done"), the role's for everyone else (why: "only alice renews the request"; the sign-in for nobody).
+  function requestBlock(q, own, name, renewable, whyNot, why) {
     if (!q) return '<div class="pkreq"><b>The request</b> <span class="dim">none on the record</span></div>';
     var bad = q.checks.filter(function (c) { return !c.ok; }).length;
     if (renewable === undefined) renewable = true;
     return '<div class="pkreq' + (q.complete ? '' : ' incomplete') + '"><div class="pkreq-head"><b>The request</b> '
       + (q.id ? '<a href="' + esc(q.record) + '" title="request.json, written once, signed by the pool">#' + q.id + '</a>' + (q.signature ? ' <a class="dim" href="' + esc(q.signature) + '">sig</a>' : '') : '') + (q.version ? ' · ' + esc(q.version) : '') + (q.created_at ? ' · ' + ago(q.created_at) : '')
       + ' ' + (q.complete ? pillHtml("ok", "complete", "what the form asks today, all on the record") : pillHtml("warn", bad + " to put right", "the form would not take it today"))
-      + (own && !q.complete ? (renewable ? ' <a class="btn small" href="/request?renew=' + encodeURIComponent(name) + '" title="the same form, filled from the record; the confirmations are yours to tick">Renew the request</a>' : ' <span class="dim" style="margin-left:auto">' + esc(whyNot || "renew it once nothing of it is being built") + '</span>') : '')
+      + (q.complete ? '' : ' ' + gate('<a class="btn small" href="/request?renew=' + encodeURIComponent(name) + '" title="the same form, filled from the record; the confirmations are yours to tick">Renew the request</a>', !!own && !!renewable, own ? (whyNot || "renew it once nothing of it is being built") : (why || orSignIn("only its owner renews the request"))))
       + '</div><ul class="pkreq-list">' + q.checks.map(function (c) { return '<li><i class="ck ' + (c.ok ? 'ok">✓' : 'bad">✗') + '</i><div><b>' + esc(c.item) + '</b> <span class="dim">' + esc(c.note) + '</span></div></li>'; }).join("") + '</ul></div>';
   }
   // A chain's state in one word and its colour — the pill an architecture wears.

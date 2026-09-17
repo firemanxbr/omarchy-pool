@@ -6,7 +6,9 @@
  * transcript, the recipe, the log, the manifest — with the raw file one
  * click away and the same thing as JSON for a tool
  * (GET /api/v1/factory/tasks/<id>). A maintainer decides here as on
- * Review. A pool job (sync, health, …) gets the same page, shorter.
+ * Review, and everyone sees the same four buttons — grey, with the reason,
+ * for whoever may not press them. A pool job (sync, health, …) gets the
+ * same page, shorter.
  */
 import { page } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
@@ -17,8 +19,7 @@ const BODY = String.raw`
   <div class="h2row" style="align-items:center;gap:12px;flex-wrap:wrap"><h1 id="title" style="max-width:none">…</h1><div id="badges" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"></div></div>
   <p class="lede" id="lede"></p>
   <div class="tiles six" id="tiles"></div>
-  <div id="acts" class="acts" hidden></div>
-  <p class="sub" id="state" hidden></p>
+  <div id="acts" class="acts"></div>
 
   <section id="who-section" hidden>
     <div class="h2row"><h2>Who does what</h2><span class="hint">two people behind every package the factory ships</span></div>
@@ -53,14 +54,19 @@ const SCRIPT = String.raw`
   $("#json-link").href = API + "/tasks/" + ID; $("#json-link").textContent = API + "/tasks/" + ID;
   skeletonTiles("#tiles", 6);
 
-  // Who is looking is the shell's WHO (the omc cookie, one fetch of /auth/me per page); the page draws again once it is known, since the decision block and the request's renew link depend on it.
-  whoami(function () { if (T) render(); });
+  // Who is looking is the shell's WHO (the omc cookie, one fetch of /auth/me per page); the page draws again once it is known, since the request's renew link and the staging packages' links are grey for whoever is not the owner or a maintainer. The decisions do not wait for it: their rights come from the server (CAN, below).
+  whoami(function () { if (T) { render(); renderStaging(); } });
 
   function load() {
     api("GET", API + "/tasks/" + ID).then(function (d) {
       if (d.error) { $("#title").textContent = "No such task"; $("#lede").textContent = d.error; endSkeleton(); return; }
       T = d; render(); loadEvidence();
     }).catch(function () { endSkeleton(); });
+  }
+  // What this reader may decide on this build, and why not, as the server would answer the POST — read for everyone (nobody signed in gets four noes and "sign in with GitHub"), never cached: GET /factory/tasks/:id/can is the caller's own answer, while the task itself is public and cached for all.
+  var CAN = null;
+  function loadCan() {
+    api("GET", API + "/tasks/" + ID + "/can").then(function (d) { CAN = d.can || null; if (T) renderActions(); }).catch(function () {});
   }
 
   // ---- the head: what it is, in a line and five tiles
@@ -100,49 +106,28 @@ const SCRIPT = String.raw`
     var sc = T.score, el = $("#who-section"); if (!sc) { el.hidden = true; return; }
     el.hidden = false;
     var c = T.chain || {};
-    // The request the chain rests on, checked as the form checks it today; the contributor renews it from here when a line is not green.
-    var pkgSt = (T.package || {}).status;
-    $("#ckreq").innerHTML = T.request ? requestBlock(T.request, isOwner(T.task.owner), T.task.name, !!T.request.renewable, T.request.busy ? "renew it once build #" + T.request.busy + " is done" : pkgSt === "approved" || pkgSt === "published" ? "in the pool as it was; new releases come as bumps, built from the approved recipe" : "renew it once nothing of it is being built") : "";
+    // The request the chain rests on, checked as the form checks it today; "Renew the request" is on it for everyone when a line is not green — live for the registration's owner (the package's, as the server names it; the task's owner is the same person on a contributor's build and nobody's on the project's) while a renewal is taken, grey with why otherwise.
+    var pkgSt = (T.package || {}).status, owner = (T.package || {}).owner || T.task.owner;
+    $("#ckreq").innerHTML = T.request ? requestBlock(T.request, isOwner(owner), T.task.name, !!T.request.renewable, T.request.busy ? "renew it once build #" + T.request.busy + " is done" : pkgSt === "approved" || pkgSt === "published" ? "in the pool as it was; new releases come as bumps, built from the approved recipe" : "renew it once nothing of it is being built", orSignIn("only " + owner + " renews the request")) : "";
     $("#cklist").innerHTML = ckColumn(sc, "contributor", "The contributor's half", c.contributor ? personLink(c.contributor.owner) + (c.contributor.id !== T.task.id ? ' · build <a href="/build/' + c.contributor.id + '">#' + c.contributor.id + '</a>' : '') : 'nobody yet')
       + ckColumn(sc, "maintainer", "The maintainer's half", c.project ? 'the project\'s build <a href="/build/' + c.project.id + '">#' + c.project.id + '</a>' + (c.approval ? ' · decided by ' + personLink(c.approval.by) : c.withdrawn ? ' · the approval by ' + personLink(c.withdrawn.by) + ' was withdrawn' : ' · not decided') : 'not started' + (sc.ready ? ' — ready to begin' : ''));
   }
 
-  // ---- a maintainer decides here as on Review; the owner never on their own package
+  // ---- the decision on this build, for everyone: the shell's Decision cell — Approve, Reject, Build by the project, Withdraw the approval where one stands — the same four buttons for every reader, live where the server's can says so and grey with its reason in the title otherwise (the dashboard's rule: never hidden, never a sentence in its place). The owner rule, the state of the chain and what is already done are the predicate's on the server, read through CAN, not a copy on the page; the click, the dialogs, the post and the toast are the shell's, and the page draws again once a decision landed. Beside the cell, what no button says: who approved and when; the project's build in flight, staged or failed; a chain whose contributor's half is not complete — a pill and a sentence, not a gate, since a rejection is the server's to allow on it. A pool job (sync, health, …) is nobody's to decide, so its row is empty for everyone.
   function renderActions() {
-    var t = T.task, el = $("#acts"); el.hidden = true; el.innerHTML = "";
-    var standing = T.approval && !T.approval.withdrawn_at && T.approval.decision === "approved";
-    if (isMaintainer() && t.kind === "build" && standing) { el.hidden = false; el.innerHTML = '<span class="muted">Approved by ' + personLink(T.approval.by) + ' ' + ago(T.approval.created_at) + '.</span> <button type="button" data-do="withdraw" title="take the approval back: the package leaves every ring, another maintainer decides — the reason goes on the record">Withdraw the approval</button>'; return; }
-    if (!isMaintainer() || t.kind !== "build" || t.status !== "staged" || standing) return;
-    if (isOwner(t.owner)) { el.hidden = false; el.innerHTML = '<span class="muted">Yours — another maintainer decides (nobody decides on their own package; a maintainer who brings a package is a contributor here).</span>'; return; }
-    if (T.score && !T.score.ready) { el.hidden = false; el.innerHTML = pillHtml("warn", "not ready") + ' <span class="muted">the contributor\'s half is not complete — nothing for a maintainer yet.</span>'; return; }
-    var pb = T.project_builds[0], project = t.trust === "project";
-    var b = project ? '<button type="button" data-do="approve">Approve</button> <button type="button" data-do="reject">Reject</button>'
-      : pb && (pb.status === "queued" || pb.status === "leased") ? '<span class="muted">the project is building it (<a href="/build/' + pb.id + '">#' + pb.id + '</a>)</span> <button type="button" data-do="reject">Reject</button>'
-      : pb && pb.status === "staged" ? '<span class="muted">the project\'s build <a href="/build/' + pb.id + '">#' + pb.id + '</a> is what gets approved</span> <button type="button" data-do="reject">Reject</button>'
-      : (pb && pb.status === "failed" ? pillHtml("error", "project build #" + pb.id + " failed", pb.error || "") + " " : "") + '<button type="button" data-do="build">Build by the project</button> <button type="button" data-do="reject">Reject</button>';
-    el.hidden = false; el.innerHTML = b;
+    var t = T.task, el = $("#acts"), a = T.approval;
+    if (t.kind !== "build") { el.innerHTML = ""; return; }
+    var standing = !!(a && a.decision === "approved" && !a.withdrawn_at), pb = T.project_builds[0], sc = T.score, beside = [];
+    if (standing) beside.push('<span class="muted">Approved by ' + personLink(a.by) + ' ' + ago(a.created_at) + '.</span>');
+    else if (t.status === "staged") {
+      if (pb && (pb.status === "queued" || pb.status === "leased")) beside.push('<span class="muted">the project is building it (<a href="/build/' + pb.id + '">#' + pb.id + '</a>)</span>');
+      else if (pb && pb.status === "staged") beside.push('<span class="muted">the project\'s build <a href="/build/' + pb.id + '">#' + pb.id + '</a> is what gets approved</span>');
+      else if (pb && pb.status === "failed") beside.push(pillHtml("error", "project build #" + pb.id + " failed", pb.error || ""));
+      if (sc && !sc.ready) beside.push(pillHtml("warn", "not ready") + ' <span class="muted">the contributor\'s half is not complete — nothing for a maintainer yet.</span>');
+    }
+    el.innerHTML = decisionCell({ id: t.id, name: t.name, version: t.version, arch: t.arch, can: CAN, approval: a }) + (beside.length ? " " + beside.join(" ") : "");
   }
-  document.addEventListener("click", function (ev) {
-    var b = ev.target.closest ? ev.target.closest("button[data-do]") : null; if (!b) return;
-    var what = b.getAttribute("data-do"), t = T.task, name = t.name + " " + (t.version || "");
-    // Where the project builds is the maintainer's call: the project's workers for this architecture (the native one, not the emulated one), read when the dialog opens.
-    var asked = what === "build"
-      ? fetch("/api/v1/factory?limit=10").then(function (r) { return r.json(); }).then(function (d) { return d.workers || []; }).catch(function () { return []; }).then(function (ws) { return ask({ title: "Have the project build " + name + " again", text: "A trusted review worker builds the recipe again with the project's agent — the contributor's bytes are never used.", select: whereOptions(ws, t.arch, WHO.login, true), input: "optional", placeholder: "a hint for the project's agent (optional)", confirm: "Build by the project" }); })
-      : ask(what === "reject" ? { title: "Reject " + name, text: "The contributor reads the note and builds again. The rejection is on the record.", input: "required", placeholder: "what is wrong, in a line or two", confirm: "Reject", danger: true }
-      : what === "withdraw" ? { title: "Withdraw the approval of " + name, text: "The approval stays on the record and is void from now on; the package leaves every ring it reached; another maintainer decides.", input: "required", placeholder: "why take it back", confirm: "Withdraw", danger: true }
-      : { title: "Approve " + name, text: "The project's build goes into edge, signed by the pool; the approval is on the record with your name.", input: "optional", confirm: "Approve" });
-    asked.then(function (got) {
-      if (got === null) return;
-      var note = got && typeof got === "object" ? got.note : got, body = { note: note };
-      if (got && typeof got === "object" && got.pick) body.worker = got.pick;
-      api("POST", API + "/tasks/" + ID + "/" + what, body).then(function (d) {
-        var s = $("#state"); s.hidden = false;
-        s.innerHTML = d.error ? pillHtml("error", "refused") + " " + esc(d.error) : pillHtml(what === "withdraw" ? "warn" : "ok", what === "approve" ? "approved" : what === "build" ? "queued" : what === "withdraw" ? "withdrawn" : "rejected") + " " + (what === "approve" ? "the project's build goes into edge (publish job #" + d.publish + ")" : what === "build" ? "the project is building it: task <a href=\"/build/" + d.task + "\">#" + d.task + "</a>" : what === "withdraw" ? "the approval is void; the package leaves " + esc((d.rings || []).map(function (r) { return r.ring; }).join(", ") || "no ring") + " — another maintainer decides" : "the contributor sees the note");
-        toast(d.error ? esc(d.error) : s.textContent, d.error ? "error" : what === "withdraw" ? "warn" : "ok");
-        load();
-      });
-    });
-  });
+  onDecided(function () { load(); loadCan(); });
 
   // ---- the timeline: every step with its time, in order
   function renderTimeline() {
@@ -171,7 +156,8 @@ const SCRIPT = String.raw`
   function renderBuild() {
     var t = T.task, w = T.worker, kv = [];
     var row = function (k, v) { if (v) kv.push('<dt>' + k + '</dt><dd>' + v + '</dd>'); };
-    row("Worker", w ? '<span class="mono">' + esc(w.id) + '</span>' + (w.owner ? ' · ' + personLink(w.owner) : '') + (w.labels && w.labels.where ? ' · on ' + esc(w.labels.where) : '') + (w.trust === "project" ? ' · ' + pillHtml("ok", "project trust", w.trusted_by ? "trusted on the word of " + w.trusted_by : "") : ' · ' + pillHtml("lilac", "community")) + (w.version && w.version !== "container" ? ' · ' + pillHtml("none", w.version, "the release the worker's image is") : '') : (t.lease_owner ? '<span class="mono">' + esc(t.lease_owner) + '</span> <span class="muted">(gone)</span>' : '<span class="muted">none yet</span>'));
+    // The worker as every table names it — the shell's wtId (the id without the owner's prefix, the whole of it on hover) and wtVersion (the release its image is, and whether it is behind) — so a worker reads the same here as on the Workers page and a person's.
+    row("Worker", w ? wtId(w) + (w.owner ? ' · ' + personLink(w.owner) : '') + (w.labels && w.labels.where ? ' · on ' + esc(w.labels.where) : '') + (w.trust === "project" ? ' · ' + pillHtml("ok", "project trust", w.trusted_by ? "trusted on the word of " + w.trusted_by : "") : ' · ' + pillHtml("lilac", "community")) + ' · ' + wtVersion(w) : (t.lease_owner ? '<span class="mono">' + esc(t.lease_owner) + '</span> <span class="muted">(gone)</span>' : '<span class="muted">none yet</span>'));
     if (w && w.agent) row("Agent", '<span class="mono">' + esc(w.agent) + '</span>');
     row("Recipe", t.kind === "build" ? '<span class="mono">' + esc(String(t.pkgbuild_ref || "")) + '</span>' : null);
     row("Attempts", num(t.attempts) + ' of ' + num(t.max_attempts) + (t.lease_expires_at ? ' · lease until ' + esc(t.lease_expires_at.slice(11, 16)) + ' UTC' : ''));
@@ -197,8 +183,8 @@ const SCRIPT = String.raw`
     var html = text.filter(function (e) { return e.name !== "resources.json" && e.name !== "audit.md"; }).map(function (e) {
       return '<details class="ev" id="ev-' + esc(e.name.replace(/[^a-z0-9]/gi, "-")) + '"' + (e.name === "vet.json" || e.name === "audit.json" ? " open" : "") + '><summary><b>' + esc(TEXT[e.name] || e.name) + '</b> <span class="mono dim">' + esc(e.name) + '</span> <span class="dim">' + bytes(e.size) + '</span> <a class="run" href="' + esc(e.url) + '" onclick="event.stopPropagation()">raw ↗</a></summary><div class="body"><div class="muted">loading…</div></div></details>';
     }).join("");
-    if (bins.length) html += '<p class="sub" style="margin-top:12px">Packages in staging (for maintainers and the publish job): ' + bins.map(function (b) { return '<span class="mono">' + esc(b.name) + '</span> <span class="dim">' + bytes(b.size) + '</span>'; }).join(" · ") + '</p>';
-    $("#evidence").innerHTML = html;
+    if (bins.length) html += '<p class="sub" id="staging" style="margin-top:12px"></p>';
+    $("#evidence").innerHTML = html; renderStaging();
     text.forEach(function (e) {
       if (e.name === "audit.md") return;
       fetch(e.url).then(function (r) { return r.text(); }).then(function (body) {
@@ -211,6 +197,11 @@ const SCRIPT = String.raw`
         el.innerHTML = renderEvidence(e.name, body);
       }).catch(function () {});
     });
+  }
+  // The packages in staging (the binaries the worker uploaded), named for everyone and served to a maintainer's session alone — the publish job reads them with a token of its own. So the name is a link for a maintainer and the same link grey, with why, for anyone else (the dashboard's rule); drawn again once whoami says who is looking.
+  function renderStaging() {
+    var el = $("#staging"); if (!el) return;
+    el.innerHTML = 'Packages in staging (for maintainers and the publish job): ' + (T.evidence || []).filter(function (e) { return !e.public; }).map(function (b) { return gate('<a class="mono" href="' + esc(b.url) + '">' + esc(b.name) + '</a>', isMaintainer(), orSignIn("packages in staging are for maintainers")) + ' <span class="dim">' + bytes(b.size) + '</span>'; }).join(" · ");
   }
   function renderEvidence(name, body) {
     if (name === "vet.json") {
@@ -236,7 +227,7 @@ const SCRIPT = String.raw`
     var a = ev.target.closest ? ev.target.closest("a[data-all]") : null; if (!a) return;
     ev.preventDefault(); var box = a.closest(".body"); box.querySelector("pre.log").hidden = true; box.querySelector("pre.full").hidden = false; a.parentElement.hidden = true;
   });
-  load();
+  load(); loadCan();
 `;
 
 export function buildHtml(id: number, poolUrl: string, version: RunningVersion): string {
@@ -258,11 +249,14 @@ export function buildHtml(id: number, poolUrl: string, version: RunningVersion):
  * build (F.projectTask) — staged, audited, tried, approved — so the head,
  * the timeline, the chain and every evidence file have something to show;
  * the branches a contributor's build draws are read on F.contributorTask.
- * The decision block's acts go where its buttons post: the role gates on
- * this build, where nobody but a maintainer gets through and nothing
- * changes; the decisions on the rows the fixture made for deciding; the
- * withdrawal last, because it is the one act that changes what every
- * manifest after this one finds — the approval is void from there on.
+ * The decision block is drawn for every role from the task and the caller's
+ * own GET /factory/tasks/<id>/can, so its reads ask that answer as nobody,
+ * a contributor, the owner and a maintainer; its acts go where its buttons
+ * post: the role gates on this build, where nobody but a maintainer gets
+ * through and nothing changes; the decisions on the rows the fixture made
+ * for deciding; the withdrawal last, because it is the one act that changes
+ * what every manifest after this one finds — the approval is void from
+ * there on.
  */
 export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
   const page = `/build/${F.projectTask}`;
@@ -329,27 +323,25 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
+      // The shell's Decision cell, for everyone: the four buttons drawn from the task and the caller's own `can`, live where the server would say yes and grey with its reason otherwise; the page draws again once a decision landed.
       id: "build.actions",
       page,
-      anchor: ['id="acts"', 'id="state"'],
+      anchor: ['id="acts"'],
       script: [
-        '"#acts"', '"#state"', 'isMaintainer() && t.kind === "build" && standing', "isOwner(t.owner)",
-        'data-do="approve"', 'data-do="reject"', 'data-do="build"', 'data-do="withdraw"',
-        '"/api/v1/factory?limit=10"', "whereOptions(ws, t.arch, WHO.login, true)", 'api("POST", API + "/tasks/" + ID + "/" + what, body)',
-        "T.project_builds[0]", "d.publish", "d.task", "d.rings",
+        '"#acts"', "decisionCell({ id: t.id, name: t.name, version: t.version, arch: t.arch, can: CAN, approval: a })", 'API + "/tasks/" + ID + "/can"', "onDecided(function () { load(); loadCan(); })",
+        'if (t.kind !== "build") { el.innerHTML = ""; return; }', "T.project_builds[0]", '"not ready"', "Approved by ",
       ],
       reads: [
-        // Who is reading: the cookie's session, as the shell's whoami answers it.
-        { path: "/auth/me", as: "maintainer", fields: ["login", "role"] },
-        // The project's build: a standing approval draws "Withdraw the approval".
-        { path: task, fields: ["task.kind", "task.status", "task.owner", "task.trust", "approval.decision", "approval.by", "approval.created_at", "approval.withdrawn_at", "score.ready", "project_builds"] },
-        // A contributor's build: the project's build of it is what gets approved.
-        { path: `/api/v1/factory/tasks/${F.contributorTask}`, fields: ["task.trust", "task.status", "task.owner", "score.ready", "project_builds.0.id", "project_builds.0.status", "project_builds.0.error"] },
-        // The workers the "Build by the project" dialog offers.
-        {
-          path: "/api/v1/factory?limit=10",
-          fields: ["workers", "workers.0.id", "workers.0.arch", "workers.0.revoked_at", "workers.0.side", "workers.0.kinds", "workers.0.owner", "workers.0.mode", "workers.0.alive", "workers.0.agent", "workers.0.agent_status", "workers.0.current_task", "workers.0.labels", "workers.0.update"],
-        },
+        // The project's build: a standing approval draws "Withdraw the approval"; the project's build of a contributor's is what the note beside the cell names.
+        { path: task, fields: ["task.id", "task.kind", "task.name", "task.version", "task.arch", "task.status", "task.trust", "approval.decision", "approval.by", "approval.created_at", "approval.withdrawn_at", "score.ready", "project_builds"] },
+        { path: `/api/v1/factory/tasks/${F.contributorTask}`, fields: ["task.trust", "task.status", "score.ready", "project_builds.0.id", "project_builds.0.status", "project_builds.0.error"] },
+        // What each reader may do on it, and why not — the caller's own answer, never cached: nobody gets four noes and the sign-in, a contributor and the owner "a maintainer decides", a maintainer the state of the chain (here: already approved, so Withdraw alone).
+        { path: `${task}/can`, fields: ["task", "can.approve", "can.reject", "can.build", "can.withdraw", "can.why.approve", "can.why.reject", "can.why.build", "can.why.withdraw"] },
+        { path: `${task}/can`, as: "contributor", fields: ["task", "can.approve", "can.reject", "can.build", "can.withdraw", "can.why.approve", "can.why.withdraw"] },
+        { path: `${task}/can`, as: "owner", fields: ["task", "can.approve", "can.reject", "can.build", "can.withdraw", "can.why.approve", "can.why.withdraw"] },
+        { path: `${task}/can`, as: "maintainer", fields: ["task", "can.approve", "can.reject", "can.build", "can.withdraw", "can.why.approve"] },
+        { path: `/api/v1/factory/tasks/${F.stagedTask}/can`, as: "maintainer", fields: ["task", "can.approve", "can.reject", "can.build", "can.withdraw", "can.why"] },
+        // The workers the "Build by the project" dialog offers are the shell's read (shell.decide), as the dialog is.
       ],
       acts: [
         { method: "POST", path: `${task}/approve`, body: { note: "reads well" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: [200, 409] } },
@@ -361,7 +353,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
         // The first withdraw in the walk takes the fixture's one approval back; the person's page asks again and gets 404.
         { method: "POST", path: `${task}/withdraw`, body: { note: "approved before the trial was read" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 200 } },
       ],
-      visible: ["maintainer"],
+      visible: EVERYONE,
     },
     {
       id: "build.who-section",
@@ -375,11 +367,11 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       id: "build.request-block",
       page,
       anchor: ['id="ckreq"'],
-      script: ['"#ckreq"', "requestBlock(T.request", "isOwner(T.task.owner)", "T.request.renewable", "T.request.busy", 'pkgSt === "approved" || pkgSt === "published"'],
+      script: ['"#ckreq"', "requestBlock(T.request", "isOwner(owner)", 'orSignIn("only " + owner + " renews the request")', "T.request.renewable", "T.request.busy", 'pkgSt === "approved" || pkgSt === "published"'],
       reads: [
         {
           path: task,
-          fields: ["request.id", "request.record", "request.signature", "request.version", "request.created_at", "request.complete", "request.checks", "request.checks.0.item", "request.checks.0.note", "request.checks.0.ok", "request.renewable", "request.busy", "package.status", "task.owner", "task.name"],
+          fields: ["request.id", "request.record", "request.signature", "request.version", "request.created_at", "request.complete", "request.checks", "request.checks.0.item", "request.checks.0.note", "request.checks.0.ok", "request.renewable", "request.busy", "package.status", "package.owner", "task.owner", "task.name"],
         },
       ],
       visible: EVERYONE,
@@ -430,11 +422,11 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       id: "build.build-kv",
       page,
       anchor: ['id="build-kv"', 'class="kv"'],
-      script: ['"#build-kv"', 'row("Worker"', 'row("Recipe"', 'row("Package"', 'row("Publish"', "w.trusted_by", "w.labels.where", "t.lease_expires_at", "t.result_sha256"],
+      script: ['"#build-kv"', 'row("Worker"', "wtId(w)", "wtVersion(w)", 'row("Recipe"', 'row("Package"', 'row("Publish"', "w.trusted_by", "w.labels.where", "t.lease_expires_at", "t.result_sha256"],
       reads: [
         {
           path: task,
-          fields: ["worker.id", "worker.owner", "worker.labels", "worker.trust", "worker.trusted_by", "worker.version", "worker.agent", "task.lease_owner", "task.kind", "task.pkgbuild_ref", "task.attempts", "task.max_attempts", "task.lease_expires_at", "task.duration_ms", "task.result_filename", "task.result_sha256", "task.result", "task.publish", "task.trust"],
+          fields: ["worker.id", "worker.owner", "worker.labels", "worker.trust", "worker.trusted_by", "worker.version", "worker.hostname", "worker.agent", "task.lease_owner", "task.kind", "task.pkgbuild_ref", "task.attempts", "task.max_attempts", "task.lease_expires_at", "task.duration_ms", "task.result_filename", "task.result_sha256", "task.result", "task.publish", "task.trust"],
         },
       ],
       visible: EVERYONE,
@@ -456,12 +448,13 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
+      // The packages the worker uploaded: named for everyone, a link for a maintainer and the same link grey with why for anyone else.
       id: "build.staging-packages",
       page,
       anchor: ['id="evidence"'],
-      script: ["Packages in staging (for maintainers and the publish job)", "!e.public"],
+      script: ["Packages in staging (for maintainers and the publish job)", 'id="staging"', "function renderStaging()", "!e.public", 'orSignIn("packages in staging are for maintainers")'],
       reads: [
-        { path: task, fields: ["evidence.0.public"] },
+        { path: task, fields: ["evidence.0.public", "evidence.0.name", "evidence.0.size", "evidence.0.url"] },
         // The package itself is named for everyone and served to a maintainer only.
         { path: pkg, status: 403, fields: ["error"] },
         { path: pkg, as: "owner", status: 403, fields: ["error"] },
