@@ -185,6 +185,17 @@ maintainer merges it like any other change to the process.
   `.desktop` entry is valid — while a command-line binary must still start.
   The *Desktop apps* and *Prebuilt binaries* skills were written from the
   recipe that passed.
+- **2026-09-17 — a prebuilt binary's debug split, and the version a draft
+  is of.** omarchy-cli's first x86_64 build (a `-bin` recipe from the
+  release tarball) built and failed the gate on namcap's
+  *dangling-symlink* in `omarchy-cli-bin-debug`: makepkg's default
+  `debug` option makes a `-debug` split of build-id symlinks for a package
+  that compiled nothing. The agent read the symptom, not the cause. The
+  gate now names the rule — `options=('!debug')` for a recipe without
+  `build()` [prebuilt-debug] — and the skill says so first. The same day
+  the drafter was found building GitHub's latest tag instead of the
+  release the request names (asked at v0.0.168, drafted at 0.0.175): a
+  drafted build now carries the request's version.
 - **2026-09-17 — rustc under emulation.** Four x86_64 builds of felix
   failed the same way on the Studio's emulated worker, three drafter
   attempts each, the agent "correcting" a PKGBUILD that was never the

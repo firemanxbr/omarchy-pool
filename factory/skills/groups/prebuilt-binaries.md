@@ -18,9 +18,12 @@ archive lost, `chrome-sandbox` to `4755`, `Exec=` in a bundled `.desktop`
 rewritten to the wrapper. Nothing is compiled; `makedepends` is empty or
 names only the tool that unpacks.
 
-**Do not strip what you did not build.** `options=('!strip')` when the
-vendor's binaries carry their own symbols or signatures, and say why; the
-same for `!debug`. An unstripped ELF is a namcap warning, not an error.
+**Nothing to debug, nothing to strip.** Always `options=('!debug')`: the
+recipe compiled nothing, so makepkg's default `debug` option would only
+make a `-debug` split of dangling build-id symlinks, which the gate fails
+[prebuilt-debug]. Add `!strip` when the vendor's binaries carry their own
+symbols or signatures, and say why. An unstripped ELF is a namcap warning,
+not an error.
 
 **Libraries.** The gate runs `ldd` on the real executable: every shared
 library resolves, or the package fails. What resolves through the system
