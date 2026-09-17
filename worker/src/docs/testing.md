@@ -402,8 +402,8 @@ have their own layouts: `--base-url http://os.archlinuxarm.org/aarch64/core --ar
 `--base-url https://pkgs.omarchy.org/edge/x86_64 --db-name omarchy --source packages`.
 
 The scheduler queues exactly these as jobs (sync every 3 h, promote daily,
-health daily, security every 3 h, gc weekly, enqueue hourly); project workers
-run them. No GitHub workflow writes to the pool.
+health daily, security every 3 h, gc weekly, verify weekly); project workers
+run them. No GitHub workflow writes to the pool, and none is dispatched.
 
 To validate with pacman, use the same container recipe as the local scripts with
 

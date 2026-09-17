@@ -282,7 +282,9 @@ export async function handleRequestPackage(c: Contributor, request: Request, env
   // Who has this name, who has this project.
   const byName = await env.DB.prepare("SELECT owner, status, project, release, blocked_at, blocked_reason FROM factory_packages WHERE name = ?").bind(name).first<{ owner: string; status: string; project: string | null; release: string | null; blocked_at: string | null; blocked_reason: string | null }>();
   if (byName?.blocked_at) return json({ error: `${name} is blocked by a maintainer: ${byName.blocked_reason ?? ""}`.trim() }, 403);
-  if (byName && byName.owner !== c.login) return json({ error: `${name} is ${byName.status}, requested by ${byName.owner}` }, 409);
+  // An unmaintained name (thirty days without a build) is anyone's to take over: the registration becomes theirs, the package stays served until their build is decided.
+  if (byName && byName.owner !== c.login && byName.status !== "unmaintained") return json({ error: `${name} is ${byName.status}, requested by ${byName.owner}` }, 409);
+  const takeover = byName && byName.owner !== c.login ? byName.owner : null;
   const byProject = await env.DB.prepare("SELECT name, owner, status, blocked_at, blocked_reason FROM factory_packages WHERE project = ? AND name != ?").bind(parsed.project, name).first<{ name: string; owner: string; status: string; blocked_at: string | null; blocked_reason: string | null }>();
   if (byProject?.blocked_at) return json({ error: `${parsed.project} is blocked by a maintainer as ${byProject.name}: ${byProject.blocked_reason ?? ""}`.trim() }, 403);
   if (byProject) return json({ error: `${parsed.project} is already in the pool as ${byProject.name} (${byProject.status}, requested by ${byProject.owner})` }, 409);
@@ -341,7 +343,7 @@ export async function handleRequestPackage(c: Contributor, request: Request, env
   const row = await env.DB.prepare(
     `INSERT INTO factory_packages (name, owner, url, arches, release, pkgbuild_path, detected, request_id, project, source, description, license, status, detail)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'registered', ?)
-     ON CONFLICT (name) DO UPDATE SET url = excluded.url, arches = excluded.arches, release = excluded.release, pkgbuild_path = excluded.pkgbuild_path, detected = excluded.detected,
+     ON CONFLICT (name) DO UPDATE SET owner = excluded.owner, url = excluded.url, arches = excluded.arches, release = excluded.release, pkgbuild_path = excluded.pkgbuild_path, detected = excluded.detected,
        request_id = excluded.request_id, project = excluded.project, source = excluded.source, description = excluded.description, license = excluded.license,
        status = ?, detail = excluded.detail, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') RETURNING *`,
   )
@@ -349,7 +351,7 @@ export async function handleRequestPackage(c: Contributor, request: Request, env
     .bind(name, c.login, parsed.project, JSON.stringify(build), tag, detected.has_pkgbuild ? "PKGBUILD" : null, JSON.stringify(detected), req.id, parsed.project, source, description, license, byName?.status === "staged" ? `request renewed as #${req.id} (${tag}) by ${c.login}; the staged build stands` : `requested ${tag} by ${c.login}; press Build to build it`, byName?.status === "staged" ? "staged" : "registered")
     .first();
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('request', NULL, 'factory', 'ok', ?, ?)")
-    .bind(`${name} ${tag} requested by ${c.login} from ${parsed.project} (${license}; ${build.join(", ")}) — record ${req.id}`, JSON.stringify({ request: req.id, name, owner: c.login, project: parsed.project, source, version: tag, license, arches: build, skipped: upstream, record: recordUrl(env, record.key) }))
+    .bind(`${name} ${tag} requested by ${c.login} from ${parsed.project} (${license}; ${build.join(", ")}) — record ${req.id}${takeover ? ` — taken over from ${takeover}, who left it unmaintained` : ""}`, JSON.stringify({ request: req.id, name, owner: c.login, project: parsed.project, source, version: tag, license, arches: build, skipped: upstream, record: recordUrl(env, record.key), taken_over_from: takeover }))
     .run();
   // The build starts by itself: into the shared queue, the best idle shared worker first, the contributor's own worker at once. A renewal that keeps the version of a staged build keeps that build: nothing to queue.
   const keepsStaged = byName?.status === "staged" && (byName.release ?? "") === tag;
@@ -370,11 +372,17 @@ export async function handleDeletePackage(c: Contributor, name: string, env: Env
   if (!pkg) return json({ error: "not registered" }, 404);
   const mine = pkg.owner === c.login && pkg.status !== "approved" && pkg.status !== "published";
   if (!mine && !isMaintainer(c)) return json({ error: "not yours, or already approved (a maintainer can remove it)" }, 403);
-  const served = (await env.DB.prepare("SELECT DISTINCT rp.ring FROM ring_packages rp JOIN packages p ON p.id = rp.package_id WHERE p.name = ? AND p.source = 'factory' AND rp.ring IN ('edge', 'rc', 'stable')").bind(name).all<{ ring: string }>()).results.map((r) => r.ring);
+  const served = (await env.DB.prepare("SELECT DISTINCT rp.ring FROM ring_packages rp JOIN packages p ON p.id = rp.package_id WHERE p.name = ? AND p.source = 'factory' AND rp.ring IN ('lab', 'edge', 'rc', 'stable')").bind(name).all<{ ring: string }>()).results.map((r) => r.ring);
   if (served.length && !isMaintainer(c)) return json({ error: `${name} is in ${served.join(", ")}: a maintainer withdraws the approval or blocks it first — the registration cannot leave a package behind in a ring` }, 409);
+  // The project's build of it — queued, running, or staged for a decision — is a maintainer's review in progress: the owner waits for it.
+  const reviewing = await env.DB.prepare("SELECT id, status FROM build_tasks WHERE name = ? AND kind = 'build' AND trust = 'project' AND status IN ('queued', 'leased', 'staged') ORDER BY id DESC LIMIT 1").bind(name).first<{ id: number; status: string }>();
+  if (reviewing && !isMaintainer(c)) return json({ error: `${name} is under review: the project's build #${reviewing.id} is ${reviewing.status} — a maintainer decides first` }, 409);
   const rings = served.length ? await pullFromRings(env, name, `registration removed by ${c.login}`) : [];
   await env.DB.batch([
-    env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = ? WHERE name = ? AND trust = 'community' AND status = 'queued'").bind(`registration removed by ${c.login}`, name),
+    // Every build of it stops — the owner's queued ones; a maintainer's removal takes the project's builds and publish jobs with it, so nothing re-enters a ring behind no registration.
+    env.DB.prepare(isMaintainer(c)
+      ? "UPDATE build_tasks SET status = 'cancelled', error = ? WHERE name = ? AND kind IN ('build', 'publish') AND status IN ('queued', 'leased', 'staged')"
+      : "UPDATE build_tasks SET status = 'cancelled', error = ? WHERE name = ? AND trust = 'community' AND kind = 'build' AND status = 'queued'").bind(`registration removed by ${c.login}`, name),
     env.DB.prepare("DELETE FROM factory_packages WHERE name = ?").bind(name),
     env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('request', NULL, 'factory', 'warn', ?, ?)")
       .bind(`${name}: registration removed by ${c.login}${rings.length ? ` — it leaves ${rings.map((r) => r.ring).join(", ")} (render jobs queued)` : ""}`, JSON.stringify({ name, by: c.login, owner: pkg.owner, rings })),

@@ -31,9 +31,9 @@ verify and attest the package faster and approve it with more confidence.
    **once** to the record, `factory/<name>/<id>/request.json` in the pool
    bucket with the pool's detached signature, public and immutable
    (`worker/src/record.ts`). Nothing about a request lives on GitHub.
-   Then **Build**: a worker the project shares (the project's agent) or
-   one of the contributor's own (their agent) — a contributor's worker
-   builds only its owner's packages.
+   The build starts by itself, in the shared queue: the best idle shared
+   worker of the architecture — anyone's, with its owner's agent — or one
+   of the contributor's own, at once.
 2. **Does someone ship it already?** The pool is asked first. If Arch, Arch
    Linux ARM or the OPR ship the name for an architecture it enters the pool's
    cycle as it is; the factory refuses to build that architecture

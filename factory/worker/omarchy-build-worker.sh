@@ -37,8 +37,9 @@
 set -euo pipefail
 
 REPO_URL="https://github.com/firemanxbr/omarchy-pool"
-# Where the pool's tooling lives in the image (factory_lib below).
+# Where the pool's tooling lives — the image, or a checkout mounted by the project worker (factory_lib below sets POOL_KEY).
 FACTORY_LIB="${OMARCHY_FACTORY_LIB:-/usr/local/lib/omarchy-factory}"
+POOL_KEY=""
 
 log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 
@@ -181,7 +182,8 @@ prepare_container() {
   done
   pacman-key --init >/dev/null 2>&1 || true
   pacman -Syu --noconfirm --needed base-devel git namcap jq python pacman-contrib ccache desktop-file-utils >/dev/null
-  install_shellcheck
+  # shellcheck is the gate's, not the build's: without it the gate says so (a warning) and the build goes on — never a build lost to a download.
+  install_shellcheck || echo "==> shellcheck is not available here; the gate will say so" >&2
   # makepkg refuses root; `builder` builds, root installs the dependencies
   # (install_deps) — no sudo anywhere: a setuid sudo does not start under
   # user-mode emulation (an x86_64 build on an aarch64 host).
@@ -208,11 +210,14 @@ prepare_container() {
 # fallback for an image without them — a plain Arch container on a hosted
 # runner — and nothing else.
 factory_lib() {
-  if [[ -x "$FACTORY_LIB/bin/draft-pkgbuild" && -f "$FACTORY_LIB/omarchy-staging.pub.asc" ]]; then return 0; fi
-  echo "==> No factory tooling in this image ($FACTORY_LIB); cloning $REPO_URL for it" >&2
+  # The key sits beside the tooling in the image, or in docs/ of a checkout mounted read-only (the project's build containers).
+  if [[ -x "$FACTORY_LIB/bin/draft-pkgbuild" ]]; then
+    if [[ -f "$FACTORY_LIB/omarchy-staging.pub.asc" ]]; then POOL_KEY="$FACTORY_LIB/omarchy-staging.pub.asc"; return 0; fi
+    if [[ -f "$FACTORY_LIB/../docs/omarchy-staging.pub.asc" ]]; then POOL_KEY="$FACTORY_LIB/../docs/omarchy-staging.pub.asc"; return 0; fi
+  fi
+  echo "==> No factory tooling at $FACTORY_LIB; cloning $REPO_URL for it (a build should not need GitHub — mount the checkout or use the image)" >&2
   rm -rf /build/pool && git clone -q --depth 1 "$REPO_URL" /build/pool
-  FACTORY_LIB=/build/pool/factory
-  [[ -f "$FACTORY_LIB/omarchy-staging.pub.asc" ]] || cp /build/pool/docs/omarchy-staging.pub.asc "$FACTORY_LIB/omarchy-staging.pub.asc"
+  FACTORY_LIB=/build/pool/factory; POOL_KEY=/build/pool/docs/omarchy-staging.pub.asc
 }
 
 add_pool_repos() { # arch pool
@@ -236,8 +241,8 @@ add_pool_repos() { # arch pool
     fi
   done
   if [[ $added == 1 ]]; then
-    pacman-key --add "$FACTORY_LIB/omarchy-staging.pub.asc" >/dev/null 2>&1
-    local poolkey; poolkey="$(gpg --homedir /etc/pacman.d/gnupg --with-colons --show-keys "$FACTORY_LIB/omarchy-staging.pub.asc" 2>/dev/null | awk -F: '$1=="fpr"{print $10; exit}')"
+    pacman-key --add "$POOL_KEY" >/dev/null 2>&1
+    local poolkey; poolkey="$(gpg --homedir /etc/pacman.d/gnupg --with-colons --show-keys "$POOL_KEY" 2>/dev/null | awk -F: '$1=="fpr"{print $10; exit}')"
     pacman-key --lsign-key "$poolkey" >/dev/null 2>&1
     pacman -Sy >/dev/null
   fi

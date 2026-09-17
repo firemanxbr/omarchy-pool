@@ -1,5 +1,5 @@
 import { json, type Env } from "../index";
-import { writeAttestation } from "./seal";
+import { writeAttestation, recipesDir } from "./seal";
 import { isRepoArch } from "../r2";
 import type { WorkerIdentity } from "./contributors";
 import { issueJobToken, scopesFor, type JobClaims } from "../jobtoken";
@@ -370,7 +370,7 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
     token_expires_at: new Date(expires * 1000).toISOString(),
     lease_minutes: LEASE_MINUTES,
     repo: "https://github.com/firemanxbr/omarchy-pool",
-    pkgbuild_path: task.kind === "build" && !(task.pkgbuild_ref.includes(":") || task.pkgbuild_ref.startsWith("draft")) ? `factory/sizing/${task.name}` : null,
+    pkgbuild_path: task.kind === "build" && !(task.pkgbuild_ref.includes(":") || task.pkgbuild_ref.startsWith("draft")) ? `${recipesDir(task.created_at)}/${task.name}` : null,
     // Where a staged result goes — a contributor's build, or the project's review build: PUT these back with the job token.
     upload: task.trust === "community" || params.review !== undefined ? `/api/v1/factory/tasks/${task.id}/artifacts/<filename>` : null,
     staging,
@@ -725,9 +725,8 @@ export async function pruneWorkers(env: Env): Promise<number> {
 
 /**
  * Every (name, arch, version) the factory has a task for, with the latest
- * status. The enqueue workflow reconciles the PKGBUILDs on main against
- * this, so a merge nobody's push event announced (a bot's auto-merge, a
- * deploy race) is still built within the hour.
+ * status. The enqueue job (by hand, for the sizing recipes) reconciles the
+ * recipes on main against this.
  */
 export async function handleBuilt(env: Env): Promise<Response> {
   const rows = await env.DB.prepare(

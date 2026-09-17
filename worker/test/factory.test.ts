@@ -68,7 +68,7 @@ describe("claims and leases", () => {
     expect(c.json.task.id).toBe(id);
     expect(c.json.task.status).toBe("leased");
     expect(c.json.token).toMatch(/^omj\./);
-    expect(c.json.pkgbuild_path).toBe("factory/sizing/tool");
+    expect(c.json.pkgbuild_path).toBe("factory/sizing/tool"); // a task made after the project's recipes left the repository
     // The task is leased: nobody else gets it; the job token heartbeats and moves the lease.
     expect((await call("POST", "/factory/claim", { arch: "aarch64" }, "omw_w2")).status).toBe(204);
     expect((await call("POST", `/factory/tasks/${id}/heartbeat`, {}, "omw_w2")).status).toBe(409);

@@ -9,15 +9,16 @@ import { costGuard, dailyCost } from "./cost";
 import { dailyAudience } from "./audience";
 
 /**
- * The pool's own scheduler. GitHub's cron is best-effort — on 2026-09-12 it
- * delayed the hourly sync by an hour and never started the half-hourly
- * metrics — so a Cloudflare cron trigger checks every ten minutes when each
- * workflow last ran and dispatches the ones that are overdue. GitHub's own
- * schedules stay in the workflow files; whichever fires first wins, and a
- * run already queued or in progress is never doubled.
+ * The pool's own scheduler: a Cloudflare cron trigger, every ten minutes,
+ * queues the pool's jobs (sync, promote, health, security, gc, verify) for
+ * the project's workers when they are due, and never doubles one queued or
+ * running. It began as a dispatcher of GitHub workflows (GitHub's cron is
+ * best-effort: on 2026-09-12 it delayed the hourly sync by an hour); since
+ * 2026-09-17 nothing is dispatched on GitHub any more — the dispatch path
+ * stays for a rule without a job, should one return.
  *
- * Needs the GITHUB_TOKEN secret (fine-grained, Actions: read and write on
- * the repository). Without it the trigger logs and does nothing.
+ * GITHUB_TOKEN (fine-grained, read-only) only raises the rate limit of the
+ * reads the pool makes; without it everything still runs, anonymously.
  */
 
 const REPO = "firemanxbr/omarchy-pool";
@@ -305,7 +306,7 @@ export async function runScheduler(env: Env, now = new Date()): Promise<string[]
     }
   }
   if (!env.GITHUB_TOKEN) {
-    log.push("GITHUB_TOKEN not set; scheduler idle");
+    log.push("GITHUB_TOKEN not set; nothing to dispatch on GitHub (the jobs above ran)");
     return log;
   }
   // Nothing starts on GitHub by dispatch any more (the recipe bumps went with

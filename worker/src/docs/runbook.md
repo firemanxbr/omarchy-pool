@@ -138,8 +138,7 @@ advisory id shown on the package page; the `same_project` heuristic in
 GitHub's cron is best-effort (on 2026-09-12 it delayed the hourly sync by an
 hour and never started the half-hourly metrics), so the pool has its own
 clock: a Cloudflare cron trigger on the Worker (`src/scheduler.ts`, every
-ten minutes). Intervals for sync (3 h) and security (3 h), the PKGBUILD
-reconcile (`enqueue`, hourly); promote by evidence (edge→rc queued by the
+ten minutes). Intervals for sync (3 h) and security (3 h); promote by evidence (edge→rc queued by the
 sync, rc→stable every 3 h), daily slots for health (08:30) and the Sunday GC — each queued as a
 pulled job (below) when due and never doubled while one is queued or
 running. The metrics snapshot (30 min), the governance sync (10 min), the
@@ -149,13 +148,14 @@ builds, bumps, promotion — does not go through GitHub Actions, issues or
 pull requests, so a GitHub outage stops the code from changing and nothing
 else (sign-in, the governance file and the worker image stay on GitHub, by
 choice). The worker secret `GITHUB_TOKEN` (fine-grained, this repository,
-*Actions: read*) is what the scheduler reads run history with:
+read-only) only raises the rate limit of the reads the pool still makes —
+the governance file, upstream releases for the bumps, provenance:
 
 ```bash
 cd worker && npx wrangler secret put GITHUB_TOKEN < ~/.cache/omarchy-cli-poc/github-token
 ```
 
-Without the secret the jobs still run; only that dispatch stops.
+Without the secret everything still runs, at GitHub's anonymous rate limit.
 
 ## Pulled jobs (the pool without GitHub)
 
@@ -469,9 +469,11 @@ but the sizing ones (`factory/sizing/`, benchmarks). Day to day:
     `DELETE /factory/packages/<name>/builds/<id>`.) A
     maintainer reviews the staged build like the first one. **30 days**
     without a build and the package is *unmaintained* (Factory page badge,
-    `bump` journal line): no more bumps until its owner builds again, or a
-    maintainer removes the registration (`DELETE /factory/packages/<name>`)
-    so someone else can take it;
+    `bump` journal line): no more bumps until its owner builds again, or
+    someone else requests the name and takes it over (the registration
+    becomes theirs; the package stays served until their build is decided).
+    A maintainer's `DELETE /factory/packages/<name>` is not that: it takes
+    the package out of every ring with the registration, on the record;
   - there is no second path: the project's own recipes left the repository
     on 2026-09-17 (hey-cli and vi became registered packages); the daily
     bump above is the only one, and it never opens a pull request.
