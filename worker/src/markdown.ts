@@ -2,9 +2,11 @@
  * The documentation's markdown, rendered by the dashboard. A small, exact
  * subset — what the chapters use: headings (with anchors), paragraphs,
  * emphasis, code spans and fenced blocks, links and images, ordered and
- * unordered lists (nested by indent), tables, quotes, rules. Nothing else
- * is interpreted; text is escaped. `outline` reads the same headings for
- * the map beside the text (docs-tree.ts).
+ * unordered lists (nested by indent), tables, quotes, rules. An image whose
+ * target is `diagram:<name>` is a figure the dashboard draws on the server
+ * (pages/doc-diagrams.ts), its text the caption. Nothing else is
+ * interpreted; text is escaped. `outline` reads the same headings for the
+ * map beside the text (docs-tree.ts).
  */
 
 export interface Heading {
@@ -18,6 +20,8 @@ export interface RenderOptions {
   link?: (href: string) => string;
   /** Rendered headings drop the document's own title (level 1); the page draws it. */
   skipTitle?: boolean;
+  /** The figure drawn for `![caption](diagram:<name>)`, as inline SVG; a name nothing draws leaves the image as written, which the tests catch. */
+  figure?: (name: string) => string | undefined;
 }
 
 /** The sentinel that keeps a code span out of the inline passes: a character no document contains. */
@@ -236,7 +240,8 @@ export function renderMarkdown(md: string, opts: RenderOptions = {}): string {
     const img = /^!\[([^\]]*)\]\(([^)\s]+)\)\s*$/.exec(line);
     if (img) {
       flush();
-      out.push(`<figure class="doc-figure"><img src="${esc(link(img[2]))}" alt="${esc(img[1])}"></figure>`);
+      const drawn = img[2].startsWith("diagram:") ? opts.figure?.(img[2].slice("diagram:".length)) : undefined;
+      out.push(drawn ? `<figure class="diagram">${drawn}<figcaption>${inline(img[1], link)}</figcaption></figure>` : `<figure class="doc-figure"><img src="${esc(link(img[2]))}" alt="${esc(img[1])}"></figure>`);
       i++;
       continue;
     }

@@ -1,11 +1,13 @@
 /**
  * A chapter written in markdown (src/docs/*.md), rendered inside the docs
  * shell. Links written for the repository still land: another chapter's
- * file becomes that chapter, a diagram becomes the one the dashboard
- * serves, a source file becomes its page on GitHub, a dashboard path stays.
+ * file becomes that chapter, a source file becomes its page on GitHub, a
+ * dashboard path stays. Its figures are drawn on the server, in the
+ * dashboard's own style (doc-diagrams.ts).
  */
 import { page } from "./layout";
 import { MD_CHAPTERS, type MdChapter } from "./docs-tree";
+import { DOC_DIAGRAMS } from "./doc-diagrams";
 import { renderMarkdown } from "../markdown";
 import { REPO_URL } from "../meta";
 import type { RunningVersion } from "../meta";
@@ -48,14 +50,13 @@ export function resolveLink(from: string, href: string): string {
   const tail = frag ? `#${frag}` : "";
   const chapter = FILES[path];
   if (chapter) return chapter.includes("#") && frag ? chapter.replace(/#.*$/, tail) : chapter + (chapter.includes("#") ? "" : tail);
-  if (/\.svg$/.test(path)) return `/docs/diagrams/${path.split("/").pop()}`;
   // A path written from a page of the dashboard (../../review from factory/host): the dashboard's own page.
   if (!path.includes("/") && !/\./.test(path) && from !== ".") return `/${path}`;
   return `${REPO_URL}/${/\.[a-z0-9]+$/i.test(path) ? "blob" : "tree"}/main/${path}${tail}`;
 }
 
 export function docHtml(chapter: MdChapter, poolUrl: string, version: RunningVersion): string {
-  const body = `<h1>${chapter.label}</h1>\n<div class="md">${renderMarkdown(chapter.text, { skipTitle: true, link: (h) => resolveLink(chapter.from, h) })}</div>`;
+  const body = `<h1>${chapter.label}</h1>\n<div class="md">${renderMarkdown(chapter.text, { skipTitle: true, link: (h) => resolveLink(chapter.from, h), figure: (name) => DOC_DIAGRAMS[name]?.() })}</div>`;
   return page({
     title: `${chapter.label} · Documentation · omarchy-pool`,
     description: chapter.text.split("\n").find((l) => l.trim() && !l.startsWith("#"))?.slice(0, 160) ?? chapter.label,

@@ -70,7 +70,7 @@ export interface DocChapter {
  * A chapter written in markdown (src/docs/*.md), rendered by the dashboard
  * (markdown.ts, pages/doc.ts). `from` is the directory the file lived in
  * when its relative links were written, so they still resolve: to another
- * chapter, to a diagram the dashboard serves, or to the code on GitHub.
+ * chapter or to the code on GitHub.
  */
 export interface MdChapter {
   key: DocKey;

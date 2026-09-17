@@ -144,12 +144,23 @@ describe("dashboard pages", () => {
 
 // The diagrams size a box to its text; a line longer than planned widens the
 // box into its neighbour, and the labels between them end up on a border.
+// The documentation's figures are drawn the same way and checked the same way.
 describe("diagrams", () => {
   it("draws no two boxes over each other", async () => {
     const { ringsDiagram, sourcesDiagram, liveDiagram, archDiagram } = await import("../src/pages/diagrams");
-    for (const [name, svg] of [["rings", ringsDiagram()], ["rings/promote", ringsDiagram("promote")], ["sources", sourcesDiagram()], ["live", liveDiagram()], ["arch", archDiagram()]] as const) {
+    const { DOC_DIAGRAMS } = await import("../src/pages/doc-diagrams");
+    const drawn: [string, string][] = [["rings", ringsDiagram()], ["rings/promote", ringsDiagram("promote")], ["sources", sourcesDiagram()], ["live", liveDiagram()], ["arch", archDiagram()]];
+    for (const [name, draw] of Object.entries(DOC_DIAGRAMS)) drawn.push([`docs/${name}`, draw()]);
+    for (const [name, svg] of drawn) {
       const boxes = [...svg.matchAll(/<rect class="d-box[^"]*" x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)"/g)].map((m) => m.slice(1, 5).map(Number));
       const [w] = /viewBox="0 0 (\d+) (\d+)"/.exec(svg)!.slice(1).map(Number);
+      if (name === "docs/benchmark-promotion") {
+        // The one chart: bars, not boxes — inside the viewBox, in the palette's two fills.
+        const bars = [...svg.matchAll(/<rect x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)" fill="var\(--(?:dim|green)\)"/g)].map((m) => m.slice(1, 5).map(Number)).filter((b) => b[3] > 8); // not the legend's swatches
+        expect(bars.length, name).toBe(5);
+        for (const b of bars) expect(b[0] + b[2], `${name}: a bar past the right edge`).toBeLessThanOrEqual(w);
+        continue;
+      }
       expect(boxes.length, name).toBeGreaterThan(3);
       for (const b of boxes) expect(b[0] + b[2], `${name}: a box past the right edge`).toBeLessThanOrEqual(w);
       for (let i = 0; i < boxes.length; i++)

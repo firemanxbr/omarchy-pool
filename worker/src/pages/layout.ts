@@ -273,6 +273,8 @@ const CSS = String.raw`
   .d-box { fill: var(--panel-2); stroke: var(--line); stroke-width: 1.2; } .d-box.hi { stroke: var(--green); }
   .d-box.edge { stroke: var(--edge); } .d-box.rc { stroke: var(--rc); } .d-box.stable { stroke: var(--stable); } .d-box.amber { stroke: var(--amber); } .d-box.dim { stroke: var(--dim); }
   .d-box.dimmed { opacity: .45; } .d-l.dimmed { opacity: .35; }
+  /* No ligatures in a diagram: JetBrains Mono fuses "-<" into one glyph, and omarchy-<source>-<ring>.db loses a bracket. */
+  .d-t, .d-s, .d-lab { font-variant-ligatures: none; }
   .d-t { fill: var(--text); font-size: 13px; font-weight: 600; font-family: Geist, "JetBrains Mono", sans-serif; } .d-t.small { font-size: 12.5px; }
   .d-t.edge { fill: var(--edge); } .d-t.rc { fill: var(--rc); } .d-t.stable { fill: var(--stable); } .d-t.amber { fill: var(--amber); }
   .d-s { fill: var(--dim); font-size: 11px; } .d-s.live { fill: var(--green); font-weight: 500; } .d-s.amber { fill: var(--amber); }
@@ -514,7 +516,8 @@ const CSS = String.raw`
   .md pre { background: var(--bg-deep); border: 1px solid var(--line); padding: 12px 14px; overflow-x: auto; margin: 0 0 14px; font-size: 12.5px; line-height: 1.5; } .md code { color: var(--text); }
   .md blockquote { border-left: 2px solid var(--line); margin: 0 0 12px; padding: 2px 14px; color: var(--muted); } .md hr { border: 0; border-top: 1px solid var(--line); margin: 20px 0; }
   .md .table-wrap { margin: 0 0 14px; } .md table td, .md table th { vertical-align: top; } .md strong { color: var(--text); }
-  .doc-figure { margin: 0 0 16px; background: #fff; border: 1px solid var(--line); padding: 10px; } .doc-figure img { display: block; width: 100%; max-width: 1100px; height: auto; margin: 0 auto; }
+  .md figure.diagram { margin: 6px 0 16px; } .md figure.diagram figcaption { max-width: 82ch; line-height: 1.5; }
+  .doc-figure { margin: 0 0 16px; background: var(--panel); border: 1px solid var(--line); padding: 10px; } .doc-figure img { display: block; width: 100%; max-width: 1100px; height: auto; margin: 0 auto; }
   .docs-hint { font-size: 12px; color: var(--dim); padding: 0 10px; } .docs-main { min-width: 0; }
   .docs-main > h1:first-child { margin-top: 2px; }
   .doc-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 14px; }
