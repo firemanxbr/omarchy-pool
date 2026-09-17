@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# rollout.sh — a rolling upgrade of the six workers to the image the pool's
+# rollout.sh — a rolling upgrade of the host's workers to the image the pool's
 # latest release published: what Kubernetes calls a rolling update, at the
 # size of one host.
 #
@@ -45,8 +45,14 @@ docker compose pull --quiet 2>&1 | grep -viE "pulled|pulling|^\s*$" || true
 enabled="$(docker compose config --services 2>/dev/null | tr '\n' ' ')"
 replace=(); old_images=()
 config="$(docker compose config --format json 2>/dev/null || echo '{}')"
-for svc in agent-proxy broker-community-x86_64 broker-community-aarch64 community-x86_64 community-aarch64 review-x86_64 review-aarch64 pool-x86_64 pool-aarch64; do
-  [[ " $enabled " == *" $svc "* ]] || continue
+# In this order — what drains fastest first — then any other service the
+# file names (a second review pair, whatever comes next), in the file's order.
+ordered=()
+for svc in agent-proxy broker-community-x86_64 broker-community-aarch64 community-x86_64 community-aarch64 review-x86_64 review-aarch64 review2-x86_64 review2-aarch64 pool-x86_64 pool-aarch64; do
+  [[ " $enabled " == *" $svc "* ]] && ordered+=("$svc")
+done
+for svc in $enabled; do [[ " ${ordered[*]} " == *" $svc "* ]] || ordered+=("$svc"); done
+for svc in "${ordered[@]}"; do
   image="$(jq -r ".services[\"$svc\"].image" <<<"$config")"
   wanted="$(docker image inspect -f '{{.Id}}' "$image" 2>/dev/null || true)"
   cid="$(docker compose ps -q "$svc" 2>/dev/null | head -1)"

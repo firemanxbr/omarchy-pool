@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# register.sh — registers this host's six workers with the pool and trusts
-# the project's four (pool and review), writing each worker token into
-# etc/<service>.env beside this script; nothing is printed but the ids.
+# register.sh — registers this host's eight workers with the pool and trusts
+# the project's six (pool, review and the second review pair), writing each
+# worker token into etc/<service>.env beside this script; nothing is printed
+# but the ids.
 #
 #   OMARCHY_CONTRIBUTOR_TOKEN=omc_… ./register.sh        a maintainer's token (profile page)
 #
@@ -22,14 +23,14 @@ me="$(api GET /factory/me)" || { echo "the pool did not accept the contributor t
 login="$(jq -r .contributor.login <<<"$me")"; role="$(jq -r .contributor.role <<<"$me")"
 [[ "$role" == maintainer ]] || { echo "$login is a $role; a maintainer's token is needed to trust the project's workers" >&2; exit 2; }
 
-for svc in pool-x86_64 pool-aarch64 review-x86_64 review-aarch64 community-x86_64 community-aarch64; do
-  f="$here/etc/$svc.env"; role="${svc%-*}"; arch="${svc##*-}"
+for svc in pool-x86_64 pool-aarch64 review-x86_64 review-aarch64 review2-x86_64 review2-aarch64 community-x86_64 community-aarch64; do
+  f="$here/etc/$svc.env"; role="${svc%-*}"; role="${role%2}"; arch="${svc##*-}"
   if [[ -f "$f" ]] && grep -qE '^OMARCHY_WORKER_TOKEN=omw_' "$f"; then
     prev="$(sed -n 's/^# worker: //p' "$f" | head -1)"
     echo "$svc: already registered ($prev); skipping"
     continue
   fi
-  body="$(jq -n --arg n "$where-$role-$arch" --arg a "$arch" --arg w "$where" --arg r "$role" '{name: $n, arch: $a, labels: {where: $w, role: $r}}')"
+  body="$(jq -n --arg n "$where-${svc%-*}-$arch" --arg a "$arch" --arg w "$where" --arg r "$role" '{name: $n, arch: $a, labels: {where: $w, role: $r}}')"
   reg="$(api POST /factory/workers "$body")" || { echo "$svc: registration failed: $reg" >&2; exit 1; }
   id="$(jq -r .worker <<<"$reg")"; token="$(jq -r .token <<<"$reg")"
   umask 077

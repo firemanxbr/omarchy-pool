@@ -98,6 +98,51 @@ services:
       OMARCHY_PKG_CACHE: ${POOL_ROOT:-/srv/omarchy-pool}/cache/pacman
       OMARCHY_BUILD_CACHE: ${POOL_ROOT:-/srv/omarchy-pool}/cache/build
       WORKER_LABELS: '{"where":"${WHERE:-omarchy-studio}"}'
+  # A second review pair: audits and the project's builds in parallel — an
+  # audit waited 23 minutes on average behind builds and the pool's jobs
+  # (2026-09-16/17); the host has the room (12 cores, 32 GB). Same shape,
+  # own registration and working directory.
+  review2-x86_64:
+    <<: *project
+    profiles: [emulated]
+    env_file: [etc/review2-x86_64.env]
+    depends_on: [agent-proxy]
+    networks: [default, review]
+    environment:
+      OMARCHY_WORKER_ROLE: review
+      OMARCHY_WORK_DIR: ${POOL_ROOT:-/srv/omarchy-pool}/work/review2-x86_64
+      # The audits here, and the agent inside the review builds, go through
+      # agent-proxy — the key stays there; the build containers are started
+      # on the `review` network, where agent-proxy is all there is to reach,
+      # and read GitHub through it too.
+      FACTORY_PROVIDER: anthropic
+      ANTHROPIC_BASE_URL: http://agent-proxy:8790
+      ANTHROPIC_API_KEY: via-agent-proxy
+      OMARCHY_BUILD_ENV: "FACTORY_PROVIDER=anthropic,ANTHROPIC_BASE_URL=http://agent-proxy:8790,ANTHROPIC_API_KEY=via-agent-proxy,GITHUB_API=http://agent-proxy:8790/github"
+      OMARCHY_BUILD_NETWORK: ${COMPOSE_PROJECT_NAME:-omarchy-pool}_review
+      OMARCHY_PKG_CACHE: ${POOL_ROOT:-/srv/omarchy-pool}/cache/pacman
+      OMARCHY_BUILD_CACHE: ${POOL_ROOT:-/srv/omarchy-pool}/cache/build
+      WORKER_LABELS: '{"where":"${WHERE:-omarchy-studio}","emulated":true}'
+  review2-aarch64:
+    <<: *project
+    env_file: [etc/review2-aarch64.env]
+    depends_on: [agent-proxy]
+    networks: [default, review]
+    environment:
+      OMARCHY_WORKER_ROLE: review
+      OMARCHY_WORK_DIR: ${POOL_ROOT:-/srv/omarchy-pool}/work/review2-aarch64
+      # The audits here, and the agent inside the review builds, go through
+      # agent-proxy — the key stays there; the build containers are started
+      # on the `review` network, where agent-proxy is all there is to reach,
+      # and read GitHub through it too.
+      FACTORY_PROVIDER: anthropic
+      ANTHROPIC_BASE_URL: http://agent-proxy:8790
+      ANTHROPIC_API_KEY: via-agent-proxy
+      OMARCHY_BUILD_ENV: "FACTORY_PROVIDER=anthropic,ANTHROPIC_BASE_URL=http://agent-proxy:8790,ANTHROPIC_API_KEY=via-agent-proxy,GITHUB_API=http://agent-proxy:8790/github"
+      OMARCHY_BUILD_NETWORK: ${COMPOSE_PROJECT_NAME:-omarchy-pool}_review
+      OMARCHY_PKG_CACHE: ${POOL_ROOT:-/srv/omarchy-pool}/cache/pacman
+      OMARCHY_BUILD_CACHE: ${POOL_ROOT:-/srv/omarchy-pool}/cache/build
+      WORKER_LABELS: '{"where":"${WHERE:-omarchy-studio}"}'
 
   # The agent and GitHub for the review workers (their audits) and for the
   # build containers they start (the project's review builds): a broker
