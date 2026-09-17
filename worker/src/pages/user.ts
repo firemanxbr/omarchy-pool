@@ -36,25 +36,19 @@ const BODY = String.raw`
 
   <section>
     <div class="h2row"><h2>Packages</h2><a class="more-link" id="pk-request" href="/request" hidden>+ request one →</a></div>
-    <p class="sub">Registered by this contributor: the name is theirs, their worker builds it, a maintainer reviews it.</p>
-    <p class="notice" id="pkg-state" hidden></p>
-    <div class="table-wrap"><table id="packages"><thead><tr><th>Package</th><th>Category</th><th>Project</th><th>Arches</th><th>Stage</th><th>Detail</th></tr></thead><tbody></tbody></table></div>
-  </section>
-
-  <section id="approvals-section" hidden>
-    <h2>Approvals</h2>
-    <p class="sub">Decisions this maintainer signed: what they let into the pool, and what they sent back.</p>
-    <div class="table-wrap"><table id="approvals"><thead><tr><th>When</th><th>Package</th><th>Arch</th><th>Decision</th><th>Note</th></tr></thead><tbody></tbody></table></div>
+    <p class="sub">Registered by this contributor: the name is theirs, their worker builds it as evidence, the project builds it again, <b>another</b> maintainer decides — a maintainer who brings a package is its contributor. Open a row for the story and the next step.</p>
+    <div class="table-wrap"><table id="packages" class="pk"><thead><tr><th></th><th>Package</th><th>Category</th><th>Project</th><th>Arches</th><th>Stage</th><th>Where it stands</th></tr></thead><tbody></tbody></table></div>
   </section>
 
   <section>
     <div class="h2row"><h2>Builds</h2><span class="dim" id="quota" style="font-size:12px"></span></div>
-    <p class="sub">On this contributor's workers — evidence for a maintainer, never what users get directly.</p>
-    <div class="table-wrap"><table id="builds"><thead><tr><th>#</th><th>Package</th><th>Arch</th><th>Status</th><th>Why</th><th>Took</th><th>When</th></tr></thead><tbody></tbody></table></div>
+    <p class="sub">On this contributor's workers — evidence for a maintainer, never what users get directly. The number opens the build, whole.</p>
+    <div class="table-wrap"><table id="builds"><thead><tr><th>#</th><th>Package</th><th>Arch</th><th>Status</th><th>Why</th><th>Worker</th><th>Took</th><th>When</th></tr></thead><tbody></tbody></table></div>
   </section>
 
   <section>
     <div class="h2row"><h2>Workers</h2><button type="button" class="more-link" id="w-toggle" hidden>+ register one</button></div>
+    <p class="sub">The machines under this name, as the <a href="/workers">Workers</a> page shows them — their own (a contributor's), the review ones and the pool's, when this person keeps them.</p>
     <div id="w-own" hidden>
       <p class="sub" style="margin:0 0 10px;font-size:12.5px">Optional — the shared workers build for you otherwise. Register one and run the signed image with the token it gives you, shown once: your packages only, your agent. <a href="/docs/workers">Run a worker →</a></p>
       <form id="worker-form" class="form" onsubmit="return false" hidden>
@@ -64,16 +58,26 @@ const BODY = String.raw`
       </form>
       <div id="w-new" hidden><p class="sub">Your worker token, shown once. Run one of these wherever the worker lives (podman or docker):</p><pre id="w-cmd"></pre></div>
     </div>
-    <div class="table-wrap"><table id="workers"><thead><tr><th>Worker</th><th>Arch</th><th>Trust</th><th>Mode</th><th>Agent</th><th>Last seen</th><th>Done / failed</th></tr></thead><tbody></tbody></table></div>
+    <div class="panel" id="wp-community" hidden><h3>Contributor's <span class="dim" style="font-size:12px;font-weight:400">their own machines: their packages, or whatever is queued when shared</span></h3><div class="table-wrap" style="border:0"><table id="w-community" class="wtable"><thead><tr></tr></thead><tbody></tbody></table></div></div>
+    <div class="panel" id="wp-review" style="margin-top:16px" hidden><h3>Review <span class="dim" style="font-size:12px;font-weight:400">the maintainers' side: builds again, publishes, audits</span></h3><div class="table-wrap" style="border:0"><table id="w-review" class="wtable"><thead><tr></tr></thead><tbody></tbody></table></div></div>
+    <div class="panel" id="wp-project" style="margin-top:16px" hidden><h3>Project <span class="dim" style="font-size:12px;font-weight:400">the pool's own jobs, on the host this maintainer keeps</span></h3><div class="table-wrap" style="border:0"><table id="w-project" class="wtable"><thead><tr></tr></thead><tbody></tbody></table></div></div>
+    <p class="sub" id="w-none" hidden style="margin:0">No worker registered under this name.</p>
+    <div id="wt-legend"></div>
+  </section>
+
+  <section id="approvals-section" hidden>
+    <h2>Approvals</h2>
+    <p class="sub">Decisions this maintainer signed: what they let into the pool, what they sent back, what they took back.</p>
+    <div class="table-wrap"><table id="approvals"><thead><tr><th>When</th><th>Package</th><th>Arch</th><th>Decision</th><th>Note</th></tr></thead><tbody></tbody></table></div>
   </section>
 `;
 
 const SCRIPT = String.raw`
   var login = decodeURIComponent(location.pathname.split("/")[2] || "");
   $("#crumb").textContent = login;
-  skeletonTiles("#tiles", 4); skeletonRows("#packages", 6, 2); skeletonRows("#builds", 7, 3); skeletonRows("#workers", 7, 1);
+  skeletonTiles("#tiles", 4); skeletonRows("#packages", 7, 2); skeletonRows("#builds", 8, 3);
   function pill(s) {
-    var c = { leased: "var(--blue)", queued: "var(--amber)", done: "var(--green)", staged: "var(--green)", failed: "var(--red)", cancelled: "var(--dim)", registered: "var(--dim)", waiting: "var(--amber)", building: "var(--blue)", approved: "var(--green)", rejected: "var(--red)", unmaintained: "var(--red)" }[s] || "var(--dim)";
+    var c = { leased: "var(--blue)", queued: "var(--amber)", done: "var(--green)", staged: "var(--green)", failed: "var(--red)", cancelled: "var(--dim)", registered: "var(--dim)", waiting: "var(--amber)", building: "var(--blue)", withdrawn: "var(--dim)", approved: "var(--green)", rejected: "var(--red)", unmaintained: "var(--red)" }[s] || "var(--dim)";
     return '<span class="pill" style="color:' + c + ';border-color:' + c + '">' + esc(s === "leased" ? "building" : s) + '</span>';
   }
   function took(ms) { if (ms == null) return "—"; var s = Math.round(ms / 1000); return s < 60 ? s + " s" : Math.floor(s / 60) + " min"; }
@@ -82,10 +86,56 @@ const SCRIPT = String.raw`
   function call(method, path, body) {
     return busy(fetch(API + path, { method: method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined })).then(function (r) { return r.json().then(function (d) { d.__status = r.status; return d; }); });
   }
-  function note(t) { var el = $("#pkg-state"); el.hidden = !t; el.textContent = t || ""; }
   function evidence(t) {
     var log = '<a class="run" href="' + API + '/tasks/' + t.id + '/artifacts/build.log">log</a>';
     return t.status === "staged" ? log + ' <a class="run" href="' + API + '/tasks/' + t.id + '/artifacts/PKGBUILD">PKGBUILD</a>' : t.status === "failed" ? log : "";
+  }
+  var OPEN = {}, LATEST = {}, FACTORY = null, STORIES = {};
+  // The workers under this name, from the same listing the Workers page reads — the same rows, by kind, in the order that reads for a person: theirs, the review ones, the pool's.
+  function renderWorkers() {
+    if (!FACTORY) return;
+    var mine = FACTORY.workers.filter(function (w) { return w.owner === login; });
+    var kinds = { community: [], review: [], project: [] };
+    mine.forEach(function (w) { kinds[wtKind(w)].push(w); });
+    var any = false;
+    ["community", "review", "project"].forEach(function (k) {
+      var panel = $("#wp-" + k), rows = kinds[k];
+      panel.hidden = !rows.length; if (!rows.length) return; any = true;
+      $("#w-" + k + " thead tr").innerHTML = WT_HEAD[k] + (own ? "<th></th>" : "");
+      pager("#w-" + k, rows, function (w) { return workerRow(w, k, own ? (w.revoked_at ? '' : '<button type="button" class="small-btn" data-revoke="' + esc(w.id) + '" title="revoke this worker\'s token">Revoke</button>') : null); }, { empty: "", text: function (w) { return [w.id, w.arch, w.version, w.agent].join(" "); } });
+    });
+    $("#w-none").hidden = any; $("#wt-legend").innerHTML = any ? WT_LEGEND : "";
+  }
+  function loadWorkers() { return fetch("/api/v1/factory?limit=10" + (own ? "&t=" + Date.now() : "")).then(function (r) { return r.json(); }).then(function (d) { FACTORY = d; renderWorkers(); }).catch(function () {}); }
+  // A package's story (routes/story.ts), in its open row: the chains, the class, and the one line that says what comes next — for whoever is looking.
+  function story(name) {
+    var el = $("#story-" + name.replace(/[^a-z0-9]/gi, "-")); if (!el) return;
+    fetch("/api/v1/factory/packages/" + encodeURIComponent(name) + "/story" + (own ? "?t=" + Date.now() : "")).then(function (r) { return r.ok ? r.json() : null; }).then(function (st) {
+      if (!st) { el.innerHTML = '<div class="muted">no story yet</div>'; return; }
+      STORIES[name] = st;
+      var chains = st.chains.slice(0, 4), latest = chains[0];
+      var next = nextStep(st, latest);
+      var busyNow = latest && ((latest.contributor && (latest.contributor.status === "queued" || latest.contributor.status === "leased")) || (latest.project && (latest.project.status === "queued" || latest.project.status === "leased")));
+      el.innerHTML = '<div class="pknext">' + next + (own ? '<span class="acts-inline">' + (busyNow ? '<button type="button" disabled title="a build is in flight">Build</button>' : '<button type="button" data-build="' + esc(name) + '">Build</button>') + ' <button type="button" class="ghost" data-remove="' + esc(name) + '" title="remove the registration">Remove</button></span>' : '') + '</div>' + (chains.length ? chains.map(function (c) { return chainRow(c); }).join("") : '<p class="sub" style="margin:0">Requested; no build yet.</p>') + '<p class="sub" style="margin:10px 0 0"><a href="/package/' + encodeURIComponent(name) + '?ring=lab">The package\'s page →</a>' + (latest && latest.contributor ? ' · <a href="/build/' + latest.contributor.id + '">the latest build, whole →</a>' : '') + '</p>';
+    }).catch(function () { el.innerHTML = '<div class="muted">could not load the story</div>'; });
+  }
+  // What comes next, in one line, from the latest chain: whose turn it is and what for.
+  function nextStep(st, c) {
+    var pkg = st.package || {}, rings = (st.rings || []).map(function (r) { return r.ring; });
+    if (pkg.blocked_at) return pillHtml("error", "blocked") + ' ' + ago(pkg.blocked_at) + ' by ' + personLink(pkg.blocked_by) + ': ' + esc(pkg.blocked_reason || '') + ' — another maintainer lifts it.';
+    if (!c) return pillHtml("none", "requested") + ' No build yet — ' + (own ? 'press <b>Build</b>: your worker (or a shared one) builds it as evidence.' : 'the contributor\'s worker builds it first.');
+    var cc = c.contributor, pb = c.project, a = c.approval, sc = c.score;
+    if (a && a.decision === "approved") return pillHtml("ok", "approved") + ' by ' + personLink(a.by) + ' ' + ago(a.created_at) + (rings.length ? ' — in <b>' + esc(rings.join(" · ")) + '</b>, signed by the pool; it earns rc and stable like every synced package.' : ' — the publish job carries it into edge.') + ' Class ' + esc(sc.class) + '.';
+    if (c.withdrawn) return pillHtml("warn", "approval withdrawn") + ' by ' + personLink(c.withdrawn.withdrawn_by) + ': ' + esc(c.withdrawn.withdrawn_reason || '') + ' — another maintainer decides; ' + (own ? 'nothing to do on your side.' : 'nothing to do on the contributor\'s side.');
+    if (a && a.decision === "rejected") return pillHtml("error", "rejected") + ' by ' + personLink(a.by) + ': ' + esc(a.note || '') + ' — ' + (own ? 'fix the recipe and press <b>Build</b> again.' : 'the contributor fixes it and builds again.');
+    if (pb && (pb.status === "queued" || pb.status === "leased")) return pillHtml("blue", "the project is building it") + ' <a href="/build/' + pb.id + '">#' + pb.id + '</a> on a trusted worker, with the project\'s agent — then the trial, then a maintainer decides.';
+    if (pb && pb.status === "staged") return pillHtml("ok", "built again by the project") + ' <a href="/build/' + pb.id + '">#' + pb.id + '</a> waits for a maintainer\'s approval' + (own ? ' — <b>another</b> maintainer: you brought it' : ' — never the one who brought it') + '. Class today ' + esc(sc.class) + ', ' + esc(sc.projected) + ' with the maintainer\'s half green.';
+    if (pb && pb.status === "failed") return pillHtml("error", "the project\'s build failed") + ' <a href="/build/' + pb.id + '">#' + pb.id + '</a>' + (pb.error ? ' — ' + esc(String(pb.error).slice(0, 140)) : '') + ' — a maintainer reads it and decides.';
+    if (cc && (cc.status === "queued" || cc.status === "leased")) return pillHtml("blue", cc.status === "leased" ? "building" : "queued") + ' <a href="/build/' + cc.id + '">#' + cc.id + '</a>' + (own ? ' on your worker (or a shared one) — this page follows it.' : ' on the contributor\'s worker.');
+    if (cc && cc.status === "failed") return pillHtml("error", "the build failed") + ' <a href="/build/' + cc.id + '">#' + cc.id + '</a>' + (cc.error ? ' — ' + esc(String(cc.error).slice(0, 140)) : '') + ' — ' + (own ? 'read the log, fix the recipe, press <b>Build</b> again.' : 'the contributor fixes it.');
+    if (cc && cc.status === "cancelled") return pillHtml("none", "superseded") + ' <a href="/build/' + cc.id + '">#' + cc.id + '</a>' + (cc.error ? ' — ' + esc(String(cc.error).slice(0, 140)) : '') + '.';
+    if (cc && cc.status === "staged") return (sc.ready ? pillHtml("ok", "ready for a maintainer") + ' <a href="/build/' + cc.id + '">#' + cc.id + '</a> passed the gate' + (c.audit && c.audit.status === "done" ? ', audited' : '') + ' — a maintainer' + (own ? ' (<b>another</b> one: you brought it)' : ' who did not bring it') + ' has the project build it again. Class ' + esc(sc.class) + ' → ' + esc(sc.projected) + '.' : pillHtml("warn", "not ready yet") + ' <a href="/build/' + cc.id + '">#' + cc.id + '</a> is staged; ' + (c.audit && c.audit.status !== "done" ? 'the audit is ' + esc(c.audit.status) : 'the gate did not pass') + ' — nothing for a maintainer yet.');
+    return pillHtml("none", cc ? cc.status : "—");
   }
   function load() {
   // Past the edge cache when it is yours: a Build or a Revoke shows at once.
@@ -127,26 +177,32 @@ const SCRIPT = String.raw`
         return '<tr><td>' + contributed + '</td><td>' + maintained + '</td><td class="num">' + num(r.score) + '</td></tr>';
       });
     }
+    // ---- packages: one row each, the stage from the latest builds per architecture, a row that opens into the story and the next step
+    var byPkg = {}; d.builds.forEach(function (b) { var k = b.name + "/" + b.arch; if (!byPkg[k]) byPkg[k] = b; });
+    LATEST = byPkg;
     pager("#packages", d.packages, function (p) {
       var arches = []; try { arches = JSON.parse(p.arches || "[]"); } catch (e) {}
-      var act = own ? '<td style="white-space:nowrap"><button type="button" data-build="' + esc(p.name) + '">Build</button> <button type="button" data-remove="' + esc(p.name) + '" title="remove the registration">✕</button></td>' : '';
-      return '<tr><td><a href="/package/' + encodeURIComponent(p.name) + '"><b>' + esc(p.name) + '</b></a></td><td>' + (p.category ? '<span class="pill none">' + esc(p.category) + '</span>' : '<span class="dim">—</span>') + '</td><td>' + (p.url ? '<a href="' + esc(p.url) + '">' + esc(p.url.replace(/^https?:\/\/(www\.)?github\.com\//, "")) + '</a>' : '') + '</td><td>' + esc(arches.join(", ")) + '</td><td>' + pill(p.status) + '</td><td>' + esc(p.detail || "") + '</td>' + act + '</tr>';
-    }, { empty: "no package registered" });
+      var per = arches.map(function (a) { var b = byPkg[p.name + "/" + a]; return '<span class="arch-st" title="' + esc(a + ": " + (b ? b.status + (b.status === "leased" ? " (building)" : "") + " · #" + b.id : "no build yet")) + '">' + esc(a) + ' ' + (b ? pill(b.status) : '<span class="pill none">—</span>') + '</span>'; }).join(" ");
+      var open = OPEN[p.name];
+      return '<tr class="pkrow" data-pkg="' + esc(p.name) + '"><td><button type="button" class="expand" data-expand="' + esc(p.name) + '" title="' + (open ? "close" : "the story, and what comes next") + '">' + (open ? "▾" : "▸") + '</button></td><td><a href="/package/' + encodeURIComponent(p.name) + '?ring=lab"><b>' + esc(p.name) + '</b></a></td><td>' + (p.category ? '<span class="pill none">' + esc(p.category) + '</span>' : '<span class="dim">—</span>') + '</td><td>' + (p.url ? '<a href="' + esc(p.url) + '">' + esc(p.url.replace(/^https?:\/\/(www\.)?(github\.com\/)?/, "")) + '</a>' : '<span class="dim">—</span>') + '</td><td>' + per + '</td><td>' + pill(p.status) + '</td><td class="muted">' + esc(p.detail || "") + '</td></tr>'
+        + (open ? '<tr class="pkopen" data-pkg="' + esc(p.name) + '"><td colspan="7"><div class="pkstory" id="story-' + esc(p.name.replace(/[^a-z0-9]/gi, "-")) + '"><div class="muted">loading the story…</div></div></td></tr>' : '');
+    }, { empty: "no package registered", after: function () { Object.keys(OPEN).forEach(function (n) { if (OPEN[n]) story(n); }); }, text: function (p) { return [p.name, p.category, p.status, p.detail].join(" "); } });
+    // ---- builds: the number is the build's page; the worker that held it
+    pager("#builds", d.builds, function (t) {
+      return '<tr><td><a href="/build/' + t.id + '" title="the build, whole">' + t.id + '</a></td><td><a href="/package/' + encodeURIComponent(t.name) + '?ring=lab&arch=' + esc(t.arch) + '"><b>' + esc(t.name) + '</b></a>' + (t.version ? ' <span class="mono muted">' + esc(t.version) + '</span>' : '') + '</td><td>' + esc(t.arch) + '</td><td>' + pill(t.status) + '</td><td>' + esc(t.reason || "") + (t.trust === "project" ? ' <span class="pill ok" title="the project\'s own build, from a contributor\'s evidence">the project</span>' : '') + '</td><td>' + (t.lease_owner ? wtId({ id: t.lease_owner, owner: t.lease_owner.indexOf(login + "-") === 0 ? login : (t.lease_owner.split("-")[0] || null) }) : '<span class="muted">—</span>') + '</td><td>' + took(t.duration_ms) + '</td><td class="when">' + ago(t.created_at) + '</td>' + (own ? '<td>' + evidence(t) + '</td>' : '') + '</tr>';
+    }, { empty: "nothing built yet", text: function (t) { return [t.id, t.name, t.version, t.arch, t.status, t.reason, t.lease_owner].join(" "); } });
+    // ---- approvals: last, with the build behind each
     if (d.approvals.length || d.role === "maintainer") {
       $("#approvals-section").hidden = false;
       pager("#approvals", d.approvals, function (a) {
-        return '<tr><td class="when">' + ago(a.created_at) + '</td><td><a href="/package/' + encodeURIComponent(a.name) + '">' + esc(a.name) + '</a> <span class="mono muted">' + esc(a.version || "") + '</span></td><td>' + esc(a.arch) + '</td><td>' + pill(a.decision) + '</td><td>' + esc(a.note || "") + '</td></tr>';
+        return '<tr><td class="when">' + ago(a.created_at) + '</td><td><a href="/package/' + encodeURIComponent(a.name) + '?ring=lab&arch=' + esc(a.arch) + '">' + esc(a.name) + '</a> <span class="mono muted">' + esc(a.version || "") + '</span> <a class="dim" href="/build/' + a.task_id + '">#' + a.task_id + '</a></td><td>' + esc(a.arch) + '</td><td>' + (a.withdrawn_at ? '<span class="pill none" title="' + esc("withdrawn " + ago(a.withdrawn_at) + " by " + a.withdrawn_by + ": " + (a.withdrawn_reason || "")) + '">withdrawn</span>' : pill(a.decision)) + '</td><td class="muted">' + esc(a.withdrawn_at ? (a.withdrawn_reason || "") : (a.note || "")) + '</td></tr>';
       }, { empty: "no decision yet" });
     }
-    pager("#builds", d.builds, function (t) {
-      return '<tr><td>' + t.id + '</td><td><b>' + esc(t.name) + '</b>' + (t.version ? ' <span class="mono muted">' + esc(t.version) + '</span>' : '') + '</td><td>' + esc(t.arch) + '</td><td>' + pill(t.status) + '</td><td>' + esc(t.reason || "") + '</td><td>' + took(t.duration_ms) + '</td><td class="when">' + ago(t.finished_at || t.created_at) + '</td>' + (own ? '<td>' + evidence(t) + '</td>' : '') + '</tr>';
-    }, { empty: "nothing built yet" });
-    pager("#workers", d.workers, function (w) {
-      return '<tr><td>' + workerName(w) + (w.revoked_at ? ' <span class="pill none">revoked</span>' : w.alive ? ' <span class="pill ok">alive</span>' : '') + '</td><td>' + esc(w.arch) + '</td><td>' + esc(w.trust) + '</td><td>' + esc(w.mode) + '</td><td>' + agentCell(w) + '</td><td class="when">' + ago(w.last_seen) + '</td><td>' + num(w.builds_done) + ' / ' + num(w.builds_failed) + '</td>' + (own ? '<td>' + (w.revoked_at ? '' : '<button type="button" data-revoke="' + esc(w.id) + '">Revoke</button>') + '</td>' : '') + '</tr>';
-    }, { empty: "no worker registered" });
+    renderWorkers();
     endSkeleton();
   }).catch(function (e) { $("#line").textContent = "could not load: " + e; endSkeleton(); });
   }
+  loadWorkers();
   load().then(function () {
     // Your own page: the workspace — the buttons on the tables, a worker to register, the quota, a token for scripts, the place to sign out.
     whoami(function (me) {
@@ -156,8 +212,10 @@ const SCRIPT = String.raw`
       $("#share").hidden = false; $("#share-url").textContent = url; $("#share-btn").innerHTML = '<a class="btn" href="#share">Share your profile</a>';
       $("#copy-link").onclick = function () { navigator.clipboard.writeText(url).then(function () { $("#copy-link").textContent = "copied"; setTimeout(function () { $("#copy-link").textContent = "copy"; }, 1500); }); };
       $("#pk-request").hidden = false; $("#w-toggle").hidden = false; $("#w-own").hidden = false;
-      $("#packages thead tr").insertAdjacentHTML("beforeend", "<th></th>"); $("#workers thead tr").insertAdjacentHTML("beforeend", "<th></th>"); $("#builds thead tr").insertAdjacentHTML("beforeend", "<th>Evidence</th>");
-      load(); quota();
+      $("#builds thead tr").insertAdjacentHTML("beforeend", "<th>Evidence</th>");
+      load(); loadWorkers(); quota();
+      // Your own page follows the work: a build you queued shows as queued, then building, then staged — no reload.
+      setInterval(function () { load(); loadWorkers(); }, 15000);
     });
   });
   function quota() {
@@ -165,10 +223,30 @@ const SCRIPT = String.raw`
   }
   // Buttons inside paged tables: one delegated handler survives re-renders.
   document.addEventListener("click", function (ev) {
+    var x = ev.target.closest ? ev.target.closest("button[data-expand]") : null;
+    if (x) { var n = x.getAttribute("data-expand"); OPEN[n] = !OPEN[n]; load(); return; }
     var b = ev.target.closest ? ev.target.closest("button[data-build],button[data-remove],button[data-revoke]") : null; if (!b) return;
-    if (b.hasAttribute("data-build")) { b.disabled = true; call("POST", "/packages/" + encodeURIComponent(b.getAttribute("data-build")) + "/build", {}).then(function (r) { note(r.error || ("queued " + (r.tasks || []).length + " build(s): " + (r.arches || []).join(", ") + " — start your worker if it is not running")); load(); }); }
-    else if (b.hasAttribute("data-remove")) { if (!confirm("Remove the registration of " + b.getAttribute("data-remove") + "?")) return; call("DELETE", "/packages/" + encodeURIComponent(b.getAttribute("data-remove"))).then(function (r) { note(r.error || ("removed " + r.deleted)); load(); }); }
-    else if (b.hasAttribute("data-revoke")) { call("DELETE", "/workers/" + encodeURIComponent(b.getAttribute("data-revoke"))).then(load); }
+    if (b.hasAttribute("data-build")) {
+      var name = b.getAttribute("data-build");
+      ask({ title: "Build " + name + "?", text: "Your worker — or a shared one — builds it from the recipe, runs the gate and stages the result as evidence; the second agent audits it. Every architecture the registration names.", confirm: "Build" }).then(function (go) {
+        if (go === null) return; b.disabled = true;
+        call("POST", "/packages/" + encodeURIComponent(name) + "/build", {}).then(function (r) { if (r.error) toast(esc(r.error), "error"); else toast("Queued " + (r.tasks || []).length + " build(s): " + esc((r.arches || []).join(", ")) + " — this page follows them."); OPEN[name] = true; load(); });
+      });
+    }
+    else if (b.hasAttribute("data-remove")) {
+      var rm = b.getAttribute("data-remove");
+      ask({ title: "Remove the registration of " + rm + "?", text: "Its builds stop; the evidence on the record stays. Anyone can register the name again.", confirm: "Remove", danger: true }).then(function (go) {
+        if (go === null) return;
+        call("DELETE", "/packages/" + encodeURIComponent(rm)).then(function (r) { if (r.error) toast(esc(r.error), "error"); else toast("Removed " + esc(rm) + "."); delete OPEN[rm]; load(); });
+      });
+    }
+    else if (b.hasAttribute("data-revoke")) {
+      var wid = b.getAttribute("data-revoke");
+      ask({ title: "Revoke " + wid + "?", text: "Its token stops working at once; a build it holds finishes on its own. Register a new one for a new token.", confirm: "Revoke", danger: true }).then(function (go) {
+        if (go === null) return;
+        call("DELETE", "/workers/" + encodeURIComponent(wid)).then(function (r) { if (r.error) toast(esc(r.error), "error"); else toast("Revoked."); load(); loadWorkers(); });
+      });
+    }
   });
   $("#w-toggle").onclick = function () { $("#worker-form").hidden = !$("#worker-form").hidden; };
   $("#worker-form").onsubmit = function () {
@@ -176,7 +254,7 @@ const SCRIPT = String.raw`
     $("#w-btn").disabled = true;
     call("POST", "/workers", body).then(function (d) {
       $("#w-btn").disabled = false;
-      if (d.error) { note(d.error); return; }
+      if (d.error) { toast(esc(d.error), "error"); return; }
       $("#w-new").hidden = false;
       $("#w-cmd").textContent =
         "# two containers: the broker holds the token (and your agent's key, and a GITHUB_TOKEN — a fine-grained one with no permissions),\n" +
@@ -188,14 +266,14 @@ const SCRIPT = String.raw`
         "podman run -d --name omarchy-broker --restart unless-stopped --network omarchy-worker \\\n  -e OMARCHY_WORKER_ROLE=broker -e OMARCHY_WORKER_TOKEN=" + d.token + " -e GITHUB_TOKEN=<github_pat_…, no permissions> \\\n  ghcr.io/firemanxbr/omarchy-worker:latest\n" +
         "podman run -d --name omarchy-worker --restart unless-stopped --stop-timeout 10800 --network omarchy-worker \\\n  -e OMARCHY_BROKER=http://omarchy-broker:8790 \\\n  ghcr.io/firemanxbr/omarchy-worker:latest\n\n" +
         "# on the broker: -e ANTHROPIC_API_KEY=… (or OPENAI_API_KEY, GEMINI_API_KEY, XAI_API_KEY, CLAUDE_CODE_OAUTH_TOKEN: your key) — the agent that writes the PKGBUILD; without one that answers, the worker is not ready";
-      $("#worker-form").reset(); $("#worker-form").hidden = true; load();
-    }).catch(function (e) { $("#w-btn").disabled = false; note("failed: " + e); });
+      $("#worker-form").reset(); $("#worker-form").hidden = true; load(); loadWorkers();
+    }).catch(function (e) { $("#w-btn").disabled = false; toast("failed: " + esc(String(e)), "error"); });
     return false;
   };
   $("#cli-token").onclick = function () {
     $("#cli-token").disabled = true;
-    call("POST", "/token", {}).then(function (d) { $("#cli-token").disabled = false; if (d.error) { note(d.error); return; } $("#cli-token-out").hidden = false; $("#cli-token-out").textContent = "export OMARCHY_CONTRIBUTOR_TOKEN=" + d.token + "\n# " + d.note; })
-      .catch(function (e) { $("#cli-token").disabled = false; note("failed: " + e); });
+    call("POST", "/token", {}).then(function (d) { $("#cli-token").disabled = false; if (d.error) { toast(esc(d.error), "error"); return; } $("#cli-token-out").hidden = false; $("#cli-token-out").textContent = "export OMARCHY_CONTRIBUTOR_TOKEN=" + d.token + "\n# " + d.note; })
+      .catch(function (e) { $("#cli-token").disabled = false; toast("failed: " + esc(String(e)), "error"); });
   };
   liveStats(function () {}, 120000);
 `;

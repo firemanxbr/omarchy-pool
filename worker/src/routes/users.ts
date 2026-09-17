@@ -65,7 +65,7 @@ export async function handleUser(login: string, env: Env): Promise<Response> {
   const [packages, builds, counts, approvals, workers, listed, record] = await Promise.all([
     env.DB.prepare(`SELECT name, category, url, arches, status, detail, updated_at FROM factory_packages WHERE owner = ? ORDER BY name`).bind(login).all(),
     env.DB.prepare(
-      `SELECT id, name, arch, version, status, reason, created_at, finished_at, duration_ms FROM build_tasks
+      `SELECT id, name, arch, version, status, reason, created_at, finished_at, duration_ms, lease_owner, trust FROM build_tasks
         WHERE owner = ? AND kind = 'build' ORDER BY id DESC LIMIT 50`,
     )
       .bind(login)
