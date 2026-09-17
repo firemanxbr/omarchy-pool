@@ -221,3 +221,20 @@ maintainer merges it like any other change to the process.
   own — *registered* after a failed x86_64 build hid an aarch64 build
   waiting for a maintainer. A person's page now shows each architecture as
   its own chain.
+- **2026-09-17 — a worker that died without a word.** omarchy-cli's
+  aarch64 build was claimed five times by the Studio's community worker
+  and reported nothing five times: each lease expired half an hour later,
+  the pool queued the build again, the same worker took it and died the
+  same way — a day lost to a package that built fine on the first native
+  worker of another contributor. The drafter had named the package
+  `omarchy-cli-bin` (a prebuilt binary, as the skill says) while the
+  task was named `omarchy-cli`; the worker looked for its package with
+  `ls` and a glob that matched nothing, and under `nullglob` the pattern
+  vanished, `ls` listed the working directory instead, and `attempt.log`
+  became the "package" — `tar` on it ended the shell with status 2,
+  before any call to the pool. Two things followed: the worker takes the
+  task's own package from the globs themselves (`<name>-…`, then
+  `<name>-bin-…`, then whatever makepkg wrote, or fails the build when
+  there is none), and the shell has *last words* — whatever ends it while
+  it holds a task is reported to the pool at once, with the command that
+  did it, so a death costs a minute on the dashboard, not a day of leases.

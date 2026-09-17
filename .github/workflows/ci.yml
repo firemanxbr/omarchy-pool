@@ -68,3 +68,6 @@ jobs:
       - name: The worker's edge repos, against the pool's source directories
         working-directory: .
         run: bash tests/worker-pool-repos.sh
+      - name: The worker's own package and its last words
+        working-directory: .
+        run: bash tests/worker-main-package.sh
