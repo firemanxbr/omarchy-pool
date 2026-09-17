@@ -56,7 +56,7 @@ const SCRIPT = String.raw`
   liveStats(function (d) { LAST = d; drawReleases(d); }, 60000);
 `;
 
-export function journalHtml(poolUrl: string, version: RunningVersion): string {
+export function journalHtml(poolUrl: string, version: RunningVersion, path = "/journal"): string {
   return page({
     title: "Journal · omarchy-pool",
     description: "Everything the pipeline did, newest first, and every ring's append-only history.",
@@ -65,6 +65,7 @@ export function journalHtml(poolUrl: string, version: RunningVersion): string {
     script: SCRIPT,
     poolUrl,
     version,
+    path,
   });
 }
 

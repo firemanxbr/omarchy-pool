@@ -267,7 +267,7 @@ const SCRIPT = String.raw`
   setInterval(function () { load(); if (WHO.me) privateLoad(); }, 60000);
 `;
 
-export function reviewHtml(poolUrl: string, version: RunningVersion): string {
+export function reviewHtml(poolUrl: string, version: RunningVersion, path = "/review"): string {
   return page({
     title: "Review · omarchy-pool",
     description: "What is waiting for a maintainer and what was decided; signed in, your packages first.",
@@ -276,6 +276,7 @@ export function reviewHtml(poolUrl: string, version: RunningVersion): string {
     script: SCRIPT,
     poolUrl,
     version,
+    path,
   });
 }
 

@@ -203,10 +203,13 @@ dash_body=$(curl -s "$OMARCHY_API/")
 grep -q "tested before they reach you" <<<"$dash_body" || {
   echo "dashboard not served; response head:"; head -c 600 <<<"$dash_body"; echo
   echo "--- worker log tail ---"; tail -20 "$E2E/wrangler.log"; exit 1; }
-for p in /docs /docs/get-started /docs/workers /docs/how-it-works /docs/governance /docs/security /docs/glossary /docs/architecture /docs/runbook /docs/factory /status /api /contribute /factory; do
+for p in /docs /docs/get-started /docs/workers /docs/how-it-works /docs/governance /docs/security /docs/glossary /docs/architecture /docs/runbook /docs/factory /status /api /factory /people /request; do
   body=$(curl -s "$OMARCHY_API$p"); grep -q "omarchy-pool" <<<"$body" || { echo "page $p not served"; exit 1; }
 done
-# The old addresses of the documentation chapters redirect into the section.
+# The old addresses of the documentation chapters redirect into the section; the old addresses of two doors redirect to the door, and /me to the sign-in until a session says whose page it is.
+[[ "$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$OMARCHY_API/contribute")" == "301 $OMARCHY_API/factory" ]] || { echo "/contribute must redirect to /factory"; exit 1; }
+[[ "$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$OMARCHY_API/index.html")" == "301 $OMARCHY_API/" ]] || { echo "/index.html must redirect to /"; exit 1; }
+[[ "$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$OMARCHY_API/me")" == "302 $OMARCHY_API/auth/github?next=/me" ]] || { echo "/me must send a stranger to the sign-in"; exit 1; }
 [[ "$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$OMARCHY_API/how-it-works")" == "301 $OMARCHY_API/docs/how-it-works" ]] || { echo "/how-it-works must redirect to /docs/how-it-works"; exit 1; }
 gpage=$(curl -s "$OMARCHY_API/governance" -L); grep -q "Becoming a maintainer" <<<"$gpage" || { echo "governance page not served"; exit 1; }
 search_body=$(curl -s "$OMARCHY_API/api/v1/search?q=zlib&ring=stable")

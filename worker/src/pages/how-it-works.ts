@@ -192,7 +192,7 @@ const SCRIPT = String.raw`
   }, 120000);
 `;
 
-export function howItWorksHtml(poolUrl: string, version: RunningVersion): string {
+export function howItWorksHtml(poolUrl: string, version: RunningVersion, path = "/docs/how-it-works"): string {
   return page({
     title: "How it works · omarchy-pool",
     description: "Where every package comes from, what is checked before it reaches you, what protects you, and what the pool does for contributors and maintainers.",
@@ -202,6 +202,7 @@ export function howItWorksHtml(poolUrl: string, version: RunningVersion): string
     script: SCRIPT,
     poolUrl,
     version,
+    path,
   });
 }
 

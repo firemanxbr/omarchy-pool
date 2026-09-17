@@ -300,7 +300,7 @@ __CHARTS__
   })();
 `;
 
-export function overviewHtml(poolUrl: string, version: RunningVersion): string {
+export function overviewHtml(poolUrl: string, version: RunningVersion, path = "/"): string {
   return page({
     title: "omarchy-pool",
     description: "One package repository for Omarchy: Arch, Arch Linux ARM and Omarchy packages, verified, served in rings and rolled back automatically.",
@@ -309,6 +309,7 @@ export function overviewHtml(poolUrl: string, version: RunningVersion): string {
     script: SCRIPT.replace("__CHARTS__", CHARTS),
     poolUrl,
     version,
+    path,
   });
 }
 

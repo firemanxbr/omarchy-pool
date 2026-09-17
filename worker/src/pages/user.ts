@@ -439,6 +439,7 @@ const SCRIPT = String.raw`
 
 export function userHtml(login: string, poolUrl: string, version: RunningVersion): string {
   return page({
+    path: `/user/${login}`,
     title: `${login} · omarchy-pool`,
     description: `What ${login} contributes to and maintains in the pool.`,
     active: "factory",

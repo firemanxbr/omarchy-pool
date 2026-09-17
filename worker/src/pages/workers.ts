@@ -125,7 +125,7 @@ __CHARTS__
   liveStats(function (d) { STATS = d; renderMinutes(d); render(); }, 60000);
 `;
 
-export function workersHtml(poolUrl: string, version: RunningVersion): string {
+export function workersHtml(poolUrl: string, version: RunningVersion, path = "/workers"): string {
   return page({
     title: "Workers · omarchy-pool",
     description: "Every worker building for the pool, by kind — the project's, the review ones two maintainers vouched for, the contributors' — alive or gone, how busy, what it built.",
@@ -134,6 +134,7 @@ export function workersHtml(poolUrl: string, version: RunningVersion): string {
     script: SCRIPT.replace("__CHARTS__", CHARTS),
     poolUrl,
     version,
+    path,
   });
 }
 

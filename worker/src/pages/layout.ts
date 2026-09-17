@@ -1167,6 +1167,14 @@ export interface PageOptions {
   script?: string;
   poolUrl: string;
   version: RunningVersion;
+  /**
+   * The path this page is served at ("/workers", "/build/12"): the header's
+   * Sign in carries it as `next`, so signing in returns the reader to the
+   * page they pressed it on. A page with one route passes its own; a page
+   * with a parameter builds it from the parameter, unencoded — the frame
+   * encodes it once, as a query value.
+   */
+  path: string;
 }
 
 /** Four doors — use it, contribute to it, maintain it, watch it run. Everything else, the documentation included, is one link away in the footer. */
@@ -1177,16 +1185,38 @@ export const NAV: { key: PageOptions["active"]; href: string; label: string; sub
   { key: "pipeline", href: "/pipeline", label: "Pipeline", sub: "live" },
 ];
 
-/** The detail pages and the documentation, pushed to the side: linked from the footer and from the doors. */
+/**
+ * The detail pages and the documentation, pushed to the side: linked from
+ * the footer and from the doors. Every page with a route of its own is here
+ * or in NAV, so no page is reached only through another page's content —
+ * what the pool serves first (packages, their security, its status and its
+ * history), then who runs it (workers, people), then the way in (a request),
+ * then what explains it (the docs, the API). The footer lights the entry
+ * whose path the reader is on or under, so a package's page lights Packages
+ * and a chapter lights Docs.
+ */
 export const MORE: { href: string; label: string }[] = [
   { href: "/packages", label: "Packages" },
   { href: "/security", label: "Security" },
   { href: "/status", label: "Status" },
   { href: "/journal", label: "Journal" },
   { href: "/workers", label: "Workers" },
+  { href: "/people", label: "People" },
+  { href: "/request", label: "Request" },
   { href: "/docs", label: "Docs" },
   { href: "/api", label: "API" },
 ];
+
+/**
+ * The line under the docs map that says where the rest is, written from
+ * MORE so it cannot name a page the footer does not link (it once
+ * said Review was in the footer): "Packages, Security, … and the API are
+ * pages of their own — linked from the footer; the four doors are the header."
+ */
+export function docsHint(): string {
+  const rest = MORE.filter((m) => m.href !== "/docs").map((m) => (m.label === "API" ? "the API" : m.label));
+  return `${rest.slice(0, -1).join(", ")} and ${rest[rest.length - 1]} are pages of their own — linked from the footer; the four doors are the header.`;
+}
 
 const LICENSE_URL = "https://github.com/firemanxbr/omarchy-pool/blob/main/LICENSE";
 
@@ -1219,7 +1249,7 @@ function docsShell(current: DocKey, body: string): string {
     <input type="search" id="docs-q" placeholder="search the docs…" aria-label="search the docs" autocomplete="off">
     <div class="docs-hits" id="docs-hits" hidden></div>
     <nav class="docs-nav" id="docs-nav" aria-label="Chapters">${tree.join("")}</nav>
-    <div class="docs-hint">Packages, Security, Status, Journal, Review and the API are pages of their own — linked from the footer.</div>
+    <div class="docs-hint">${docsHint()}</div>
   </aside>
   <div class="docs-main">
 ${body}
@@ -1270,6 +1300,11 @@ function analyticsTag(v: RunningVersion): string {
   return "";
 }
 
+/** A path as the value of `next`: what would end the value or change it in a query (a `+` reads as a space there, an `&` as the next parameter) is encoded, the slashes are kept so the address reads as the page. */
+function nextOf(path: string): string {
+  return encodeURIComponent(path).replace(/%2F/g, "/");
+}
+
 export function page(o: PageOptions): string {
   const v = o.version;
   const tag = escapeHtml(v.version);
@@ -1309,7 +1344,7 @@ export function page(o: PageOptions): string {
       ${nav}
     </nav>
   </div>
-  <span class="account"><a id="account" href="/auth/github?next=${escapeHtml(o.active === "pipeline" ? "/pipeline" : o.active === "review" ? "/review" : "/me")}" title="contributors and maintainers sign in with GitHub">Sign in</a><a id="signout" href="/auth/logout" hidden title="sign out of the dashboard on this browser">sign out</a></span>
+  <span class="account"><a id="account" href="/auth/github?next=${escapeHtml(nextOf(o.path))}" title="contributors and maintainers sign in with GitHub">Sign in</a><a id="signout" href="/auth/logout" hidden title="sign out of the dashboard on this browser">sign out</a></span>
 </header>
 
 <main>
@@ -1324,7 +1359,8 @@ ${body}
 
 <script>
 (function () {
-  document.querySelectorAll("footer .more a").forEach(function (a) { if (a.getAttribute("href") === location.pathname) a.classList.add("active"); });
+  // The footer lights the entry the reader is on or under: /package/<name> is Packages, /docs/<chapter> is Docs; a build lights nothing here, its door is Review.
+  document.querySelectorAll("footer .more a").forEach(function (a) { var href = a.getAttribute("href"), here = location.pathname; if (here === href || here.indexOf(href + "/") === 0 || (href === "/packages" && here.indexOf("/package/") === 0)) a.classList.add("active"); });
 ${HELPERS.split("__POOL_URL__").join(pool).split("__RINGS_TEXT__").join(JSON.stringify(RING_TEXT)).split("__WICON__").join(JSON.stringify(WORKER_ICONS))}
 ${o.script ?? ""}
 ${docsSearch}

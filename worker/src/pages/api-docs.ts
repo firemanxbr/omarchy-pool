@@ -99,7 +99,7 @@ curl -s  https://pool.firemanxbr.org/core/x86_64/omarchy-core-stable.db | tar -t
   </section>
 `;
 
-export function apiDocsHtml(poolUrl: string, version: RunningVersion): string {
+export function apiDocsHtml(poolUrl: string, version: RunningVersion, path = "/api"): string {
   return page({
     title: "API · omarchy-pool",
     description: "The omarchy-pool JSON API: rings, releases, packages, dependency graph, journal.",
@@ -108,6 +108,7 @@ export function apiDocsHtml(poolUrl: string, version: RunningVersion): string {
     body: BODY,
     poolUrl,
     version,
+    path,
   });
 }
 

@@ -401,7 +401,7 @@ const PACKAGE_SCRIPT = String.raw`
   }).catch(function () {});
 `;
 
-export function packagesHtml(poolUrl: string, version: RunningVersion): string {
+export function packagesHtml(poolUrl: string, version: RunningVersion, path = "/packages"): string {
   return page({
     title: "Packages · omarchy-pool",
     description: "Search the packages a ring serves; versions per ring, dependencies, what loads them, files.",
@@ -410,11 +410,13 @@ export function packagesHtml(poolUrl: string, version: RunningVersion): string {
     script: SEARCH_SCRIPT.replace("__CHARTS__", CHARTS),
     poolUrl,
     version,
+    path,
   });
 }
 
 export function packageHtml(name: string, poolUrl: string, version: RunningVersion): string {
   return page({
+    path: `/package/${name}`,
     title: `${name} · omarchy-pool`,
     description: `${name}: versions per ring, dependencies, what loads it, files.`,
     active: "none",

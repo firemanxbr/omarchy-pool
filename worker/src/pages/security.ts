@@ -98,7 +98,7 @@ __CHARTS__
   load();
 `;
 
-export function securityHtml(poolUrl: string, version: RunningVersion): string {
+export function securityHtml(poolUrl: string, version: RunningVersion, path = "/security"): string {
   return page({
     title: "Security · omarchy-pool",
     description: "Open advisories on what each ring serves, with confidence levels, exploitation data and what they expose through dependencies.",
@@ -107,6 +107,7 @@ export function securityHtml(poolUrl: string, version: RunningVersion): string {
     script: SCRIPT.replace("__CHARTS__", CHARTS),
     poolUrl,
     version,
+    path,
   });
 }
 

@@ -28,9 +28,15 @@ export function cookieOf(request: Request, name: string): string | null {
   return m ? decodeURIComponent(m[1]) : null;
 }
 
+/**
+ * Where the sign-in comes back to: a path on this origin, as the header's
+ * Sign in names the page it was pressed on. A second slash or a backslash
+ * after the first would read as another host in a Location header, so
+ * those fall back to the Factory, as does no path at all.
+ */
 function safeNext(url: URL): string {
   const next = url.searchParams.get("next") ?? "/factory";
-  return next.startsWith("/") && !next.startsWith("//") ? next : "/factory";
+  return /^\/(?![\/\\])/.test(next) ? next : "/factory";
 }
 
 export async function handleAuthStart(url: URL, env: Env): Promise<Response> {

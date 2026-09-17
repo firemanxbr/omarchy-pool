@@ -160,11 +160,14 @@ export interface Fixture {
  */
 export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
   {
+    // The header's Sign in carries the page it is pressed on as `next`, so the sign-in comes back to it; /me is the reader's own page, a redirect that needs the session to know where.
     id: "shell.account",
     page: "/",
-    anchor: ['id="account"', 'id="signout"', 'href="/auth/logout"'],
+    anchor: ['id="account"', 'href="/auth/github?next=/"', 'id="signout"', 'href="/auth/logout"'],
     script: ['"/auth/me"', "#account", "#signout", "me.role"],
     reads: [
+      { path: "/auth/github?next=/", status: 302, json: false },
+      { path: "/me", status: 302, json: false },
       { path: "/auth/me", status: 401 },
       { path: "/auth/me", as: "contributor", fields: ["login", "role"] },
       { path: "/auth/me", as: "maintainer", fields: ["login", "role"] },
@@ -172,10 +175,11 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
+    // Every page with a route of its own that is not a door: the footer is where a reader finds People and the Request, not only a page's content.
     id: "shell.footer-more",
     page: "/",
-    anchor: MORE.map((m) => `href="${m.href}"`),
-    script: ['footer .more a'],
+    anchor: [...MORE.map((m) => `href="${m.href}"`), 'href="/people"', 'href="/request"'],
+    script: ['footer .more a', 'href === "/packages" && here.indexOf("/package/") === 0'],
     visible: EVERYONE,
   },
   {

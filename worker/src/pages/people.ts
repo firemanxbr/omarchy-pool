@@ -85,7 +85,7 @@ const SCRIPT = String.raw`
   });
 `;
 
-export function peopleHtml(poolUrl: string, version: RunningVersion): string {
+export function peopleHtml(poolUrl: string, version: RunningVersion, path = "/people"): string {
   return page({
     title: "People · omarchy-pool",
     description: "The maintainers, contributors and workers of the Omarchy pool — everyone on the record.",
@@ -94,6 +94,7 @@ export function peopleHtml(poolUrl: string, version: RunningVersion): string {
     script: SCRIPT,
     poolUrl,
     version,
+    path,
   });
 }
 

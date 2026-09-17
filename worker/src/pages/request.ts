@@ -96,7 +96,7 @@ const SCRIPT = String.raw`
   };
 `;
 
-export function requestHtml(poolUrl: string, version: RunningVersion): string {
+export function requestHtml(poolUrl: string, version: RunningVersion, path = "/request"): string {
   return page({
     title: "Request a package · omarchy-pool",
     description: "Ask the Omarchy Pool for a package: the project's URL, a name, a description, the licence — checked, written once to the record, signed.",
@@ -105,6 +105,7 @@ export function requestHtml(poolUrl: string, version: RunningVersion): string {
     script: SCRIPT,
     poolUrl,
     version,
+    path,
   });
 }
 

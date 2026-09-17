@@ -109,7 +109,7 @@ __CHARTS__
   }, 120000);
 `;
 
-export function factoryHtml(poolUrl: string, version: RunningVersion): string {
+export function factoryHtml(poolUrl: string, version: RunningVersion, path = "/factory"): string {
   return page({
     title: "Factory · omarchy-pool",
     description: "Bring a package: request it, build it on your worker or the community's, follow it to a maintainer's approval and into the rings.",
@@ -118,6 +118,7 @@ export function factoryHtml(poolUrl: string, version: RunningVersion): string {
     script: SCRIPT.replace("__CHARTS__", CHARTS),
     poolUrl,
     version,
+    path,
   });
 }
 
@@ -134,13 +135,6 @@ export const FACTORY_COMPONENTS = (_F: Fixture): Component[] => [
     id: "factory.hero",
     page: "/factory",
     anchor: ['<p class="eyebrow">For contributors</p>', "Package what you love. The factory builds it, a maintainer checks it."],
-    visible: EVERYONE,
-  },
-  {
-    // The old address still serves this page (index.ts): the hero and the way in, at /contribute.
-    id: "factory.contribute",
-    page: "/contribute",
-    anchor: ['<p class="eyebrow">For contributors</p>', 'href="/request"'],
     visible: EVERYONE,
   },
   {

@@ -11,13 +11,13 @@ import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:
 import { beforeAll, describe, expect, it } from "vitest";
 import worker from "../src/index";
 import { allComponents } from "../src/pages/components";
-import { HELPERS } from "../src/pages/layout";
+import { HELPERS, MORE, NAV } from "../src/pages/layout";
 import { CHARTS } from "../src/pages/charts";
 import { scriptOf, seedDashboard, type Fixture } from "./fixture";
 
-async function get(path: string): Promise<Response> {
+async function get(path: string, cookie?: string): Promise<Response> {
   const ctx = createExecutionContext();
-  const res = await worker.fetch(new Request(`http://pool.test${path}`), env, ctx);
+  const res = await worker.fetch(new Request(`http://pool.test${path}`, cookie ? { headers: { cookie: `omc=${cookie}` } } : undefined), env, ctx);
   await waitOnExecutionContext(ctx);
   return res;
 }
@@ -27,7 +27,7 @@ let F: Fixture;
 let PAGES: string[];
 beforeAll(async () => {
   F = await seedDashboard(env);
-  PAGES = ["/", "/factory", "/contribute", "/review", "/pipeline", "/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/what-we-test", "/docs/governance", "/docs/security", "/docs/glossary", "/docs/architecture", "/docs/runbook", "/docs/testing", "/docs/migration", "/docs/factory", "/docs/worker-host", "/docs/security-model", "/docs/contributing", "/docs/proof-of-concept", "/docs/open-work", "/docs/omarchy-cli-mcp", "/packages", `/package/${F.pkg}`, `/build/${F.projectTask}`, "/security", "/status", "/journal", "/workers", "/request", `/user/${F.owner}`, "/people", "/api", "/diff"];
+  PAGES = ["/", "/factory", "/review", "/pipeline", "/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/what-we-test", "/docs/governance", "/docs/security", "/docs/glossary", "/docs/architecture", "/docs/runbook", "/docs/testing", "/docs/migration", "/docs/factory", "/docs/worker-host", "/docs/security-model", "/docs/contributing", "/docs/proof-of-concept", "/docs/open-work", "/docs/omarchy-cli-mcp", "/packages", `/package/${F.pkg}`, `/build/${F.projectTask}`, "/security", "/status", "/journal", "/workers", "/request", `/user/${F.owner}`, "/people", "/api", "/diff"];
 });
 
 describe("dashboard pages", () => {
@@ -37,16 +37,64 @@ describe("dashboard pages", () => {
       expect(res.status, path).toBe(200);
       const html = await res.text();
       expect(html, path).toContain("omarchy-pool");
-      // The four doors in the header; the documentation, the workers and the licence in the footer.
+      // The four doors in the header; every other page — the workers, the people, the request, the documentation — and the licence in the footer: no page is reached only through another page's content.
       expect(html, `${path} nav`).toMatch(/<header>[\s\S]*href="\/"[\s\S]*href="\/factory"[\s\S]*href="\/review"[\s\S]*href="\/pipeline"[\s\S]*<\/header>/);
       expect(html, `${path} header`).not.toMatch(/<header>[\s\S]*(href="\/docs"|id="status")[\s\S]*<\/header>/);
-      expect(html, `${path} footer`).toMatch(/<footer>[\s\S]*href="\/workers"[\s\S]*href="\/docs"[\s\S]*href="\/api"[\s\S]*blob\/main\/LICENSE[\s\S]*<\/footer>/);
-      // The request has a page of its own, reached from the Factory and a person's page — never from the frame.
-      expect(html, `${path} links the request from its frame`).not.toMatch(/<(header|footer)[\s\S]*?href="\/request"[\s\S]*?<\/\1>/);
+      expect(html, `${path} footer`).toMatch(/<footer>[\s\S]*href="\/workers"[\s\S]*href="\/people"[\s\S]*href="\/request"[\s\S]*href="\/docs"[\s\S]*href="\/api"[\s\S]*blob\/main\/LICENSE[\s\S]*<\/footer>/);
+      for (const m of MORE) expect(html, `${path} footer lacks ${m.label}`).toMatch(new RegExp(`<footer>[\\s\\S]*href="${m.href}"[\\s\\S]*</footer>`));
+      // The header's Sign in comes back to the page it was pressed on.
+      expect(html, `${path} sign-in return`).toContain(`id="account" href="/auth/github?next=${path}"`);
       expect(html, path).toContain("built for Omarchy");
       expect(html, path).not.toMatch(/__[A-Z_]+__/);
       expect(html, path).not.toContain("${");
     }
+  });
+
+  // The pages nothing linked: /me is the reader's own page — a session decides where, the sign-in comes back to it without one; the two old addresses of a door are one redirect each, so a bookmark lands and no page has two addresses. The sign-in return is a same-origin path or the Factory: a second slash or a backslash after the first would name another host in the Location header.
+  it("routes /me to the reader's own page or the sign-in, and the old addresses to their page", async () => {
+    let res = await get("/me");
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/auth/github?next=/me");
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    res = await get("/me", F.sessions.owner);
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe(`/user/${F.owner}`);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    res = await get("/me", F.sessions.maintainer);
+    expect(res.headers.get("location")).toBe(`/user/${F.m2}`);
+    for (const [from, to] of [["/contribute", "/factory"], ["/index.html", "/"]]) {
+      res = await get(from);
+      expect(res.status, from).toBe(301);
+      expect(res.headers.get("location"), from).toBe(`http://pool.test${to}`);
+    }
+    expect((await get("/factory")).status).toBe(200);
+    // The sign-in start keeps `next` for the callback in its state cookie: a page's path stays, another host does not.
+    for (const [next, kept] of [["/workers", "/workers"], [`/build/${F.projectTask}`, `/build/${F.projectTask}`], ["//evil.example", "/factory"], ["/\\evil.example", "/factory"], ["https://evil.example/", "/factory"]]) {
+      res = await get(`/auth/github?next=${encodeURIComponent(next)}`);
+      expect(res.status, next).toBe(302);
+      expect(res.headers.get("set-cookie"), next).toContain(`:${encodeURIComponent(kept)};`);
+    }
+  });
+
+  // The header's Sign in names the page it is on, a build's page and a package's included — so a maintainer who signs in from a build lands on the build, not on Review. The docs sidebar's hint is written from MORE, so it names every page the footer links and no other.
+  it("sends the sign-in back to the page it was pressed on, and the docs hint names the footer's pages", async () => {
+    for (const path of ["/workers", `/build/${F.projectTask}`, `/package/${F.pkg}`, `/user/${F.owner}`, "/docs/runbook", "/request"]) {
+      const html = await (await get(path)).text();
+      expect(html, path).toContain(`<a id="account" href="/auth/github?next=${path}" title=`);
+      expect(html, path).not.toContain("next=/me");
+    }
+    // The one place `next=/me` stays: the Factory gate's way to the reader's own page, whoever they turn out to be.
+    const factory = await (await get("/factory")).text();
+    expect(factory).toContain('id="gate-btn" href="/auth/github?next=/me"');
+    expect(factory).toContain('id="account" href="/auth/github?next=/factory"');
+    const docs = await (await get("/docs")).text();
+    const hint = /<div class="docs-hint">([^<]*)<\/div>/.exec(docs)?.[1] ?? "";
+    for (const m of MORE) if (m.href !== "/docs") expect(hint, m.label).toContain(m.label);
+    expect(hint).toContain("the four doors are the header");
+    for (const n of NAV) expect(hint, n.label).not.toContain(n.label);
+    // The footer lights the entry the reader is on or under: the page's script says so for a chapter and for a package.
+    expect(docs).toContain('here.indexOf(href + "/") === 0');
+    expect(docs).toContain('href === "/packages" && here.indexOf("/package/") === 0');
   });
 
   // Every name a page's script uses is declared somewhere in that script (the shell's helpers, the charts, the page's own) or is the browser's — parsed, not grepped: a helper moved out of one page and dropped from another is a ReferenceError the tests would not otherwise see (the Workers page lost perDay() and COLOR that way, 2026-09-17).

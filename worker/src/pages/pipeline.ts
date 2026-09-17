@@ -313,7 +313,7 @@ __CHARTS__
   liveStats(function (d) { STATS = d; renderState(d); renderLive(d); renderRings(d); renderCharts(d); if (FACTORY) renderOps(FACTORY); }, 60000);
 `;
 
-export function pipelineHtml(poolUrl: string, version: RunningVersion): string {
+export function pipelineHtml(poolUrl: string, version: RunningVersion, path = "/pipeline"): string {
   return page({
     title: "Pipeline · omarchy-pool",
     description: "The pipeline as it runs: what is verified, promoted and checked right now, how fast maintainers decide, the charts, the cost.",
@@ -322,6 +322,7 @@ export function pipelineHtml(poolUrl: string, version: RunningVersion): string {
     script: SCRIPT.replace("__CHARTS__", CHARTS),
     poolUrl,
     version,
+    path,
   });
 }
 
