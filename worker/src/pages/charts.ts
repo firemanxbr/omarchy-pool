@@ -102,12 +102,12 @@ export const CHARTS = String.raw`  // ---- tiny SVG charts (no library; the page
     labels.forEach(function (lab, i) { if (n <= 8 || i % 2 === 1) out += '<text class="ax" x="' + xs(i) + '" y="' + (H - 6) + '" text-anchor="middle">' + esc(shortDay(lab)) + '</text>'; });
     return out + '</svg><div class="legend">' + series.map(function (s) { return '<span><i style="background:' + s.color + '"></i>' + esc(s.name) + '</span>'; }).join("") + '</div>';
   }
-  // rows: [[label, small, percent, color?, shown?]] — a labelled bar per row, percent of a full bar. opts is the label column's width in px, or { w, html }: html when the label and its small print are markup the page escaped itself (a worker's name with its tooltip).
+  // rows: [[label, small, percent, color?, shown?, tip?]] — a labelled bar per row, percent of a full bar. The bar's tooltip is the label and the value unless the row brings its own (what a worker did in the day). opts is the label column's width in px, or { w, html }: html when the label and its small print are markup the page escaped itself (a worker's name with its tooltip).
   function hrows(rows, opts) {
     if (!rows.length) return '<div class="empty">nothing yet</div>';
     opts = typeof opts === "number" ? { w: opts } : opts || {};
     var text = function (t) { return opts.html ? String(t == null ? "" : t).replace(/<[^>]*>/g, "") : t; }, mark = function (t) { return opts.html ? t : esc(t); };
-    return '<div class="hrows">' + rows.map(function (r) { var full = r[2] >= 100; return '<div class="hrow"' + (opts.w ? ' style="grid-template-columns:' + opts.w + 'px 1fr 52px"' : "") + '><div class="l">' + mark(r[0]) + (r[1] ? ' <small>' + mark(r[1]) + '</small>' : "") + '</div><div class="bar" data-tip="' + esc(text(r[0]) + (r[1] ? " " + text(r[1]) : "") + " · " + (r[4] || r[2] + "%")) + '"><i class="' + (full ? "" : "partial") + '" style="width:' + Math.min(100, r[2]) + '%' + (r[3] ? ";background:" + r[3] : "") + '"></i></div><div class="p num">' + (r[4] || r[2] + "%") + '</div></div>'; }).join("") + '</div>';
+    return '<div class="hrows">' + rows.map(function (r) { var full = r[2] >= 100; return '<div class="hrow"' + (opts.w ? ' style="grid-template-columns:' + opts.w + 'px 1fr 52px"' : "") + '><div class="l">' + mark(r[0]) + (r[1] ? ' <small>' + mark(r[1]) + '</small>' : "") + '</div><div class="bar" data-tip="' + esc(r[5] || text(r[0]) + (r[1] ? " " + text(r[1]) : "") + " · " + (r[4] || r[2] + "%")) + '"><i class="' + (full ? "" : "partial") + '" style="width:' + Math.min(100, r[2]) + '%' + (r[3] ? ";background:" + r[3] : "") + '"></i></div><div class="p num">' + (r[4] || r[2] + "%") + '</div></div>'; }).join("") + '</div>';
   }
   // The factory's builds per day from the stats series (builds_daily: {day, status, n}), as the labels and series stacked() draws: staged blue, published (done) green, failed red, over the last days.
   function buildsByDay(series, days) {

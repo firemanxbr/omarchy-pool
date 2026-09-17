@@ -79,14 +79,14 @@ __CHARTS__
         ["Builds this week", num(builds7.length), num(builds7.filter(function (t) { return t.status === "staged"; }).length) + " staged · " + num(builds7.filter(function (t) { return t.status === "done"; }).length) + " published · " + num(builds7.filter(function (t) { return t.status === "failed"; }).length) + " failed", "", "/journal?kind=build"],
         ["Requested, not built yet", num(pkgs.filter(function (p) { return p.status === "registered"; }).length), "on the record, waiting for a Build", "", "/review"]
       ]);
-      document.querySelectorAll('[data-live="shared-online"]').forEach(function (el) { el.textContent = num(shared.length) + " online now"; });
+      live("shared-online", num(shared.length) + " online now");
       // Where each one is today: the four rings as badges, lit as the package reaches them.
       var RING_ICON = { lab: '<path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3"/>', edge: '<path d="M13 2L4 14h7l-1 8 9-12h-7z"/>', rc: '<circle cx="12" cy="12" r="9"/><path d="M8 12l3 3 5-6"/>', stable: '<path d="M12 3l7 3v5c0 5-3.5 8.5-7 10-3.5-1.5-7-5-7-10V6l7-3z"/><path d="M9 12l2 2 4-4"/>' };
       var ringBadges = function (rings) { return '<span class="rings">' + ["lab", "edge", "rc", "stable"].map(function (r) { var on = rings.indexOf(r) >= 0; return '<i class="rb ' + r + (on ? " on" : "") + '" title="' + (on ? "in " + r : "not in " + r + " yet") + '"><svg viewBox="0 0 24 24" aria-hidden="true">' + RING_ICON[r] + '</svg>' + r + '</i>'; }).join("") + '</span>'; };
       $("#landed").innerHTML = approved.slice(0, 6).map(function (a) {
         var owner = owners[a.name], rings = a.rings || [];
-        var state = rings.length ? "" : '<span class="pill blue">' + (a.rebuild_status === "done" ? "publishing" : a.rebuild_task ? "building" : "recipe pending") + '</span>';
-        return '<div class="land">' + (owner ? avatar(owner, "contributor") : '<span class="avatar">?</span>') + '<div class="n"><span><a href="/package/' + encodeURIComponent(a.name) + '">' + esc(a.name) + '</a> <span class="v">' + esc(a.version || "") + '</span></span>' + state + '</div><div class="b">by ' + (owner ? '<a href="/user/' + encodeURIComponent(owner) + '">' + esc(owner) + '</a>' : "—") + ' · approved by <a href="/user/' + encodeURIComponent(a.by) + '">' + esc(a.by) + '</a> · ' + ago(a.created_at) + ' · ' + esc(a.arch) + '</div>' + ringBadges(rings) + '</div>';
+        var state = rings.length ? "" : pillHtml("blue", a.rebuild_status === "done" ? "publishing" : a.rebuild_task ? "building" : "recipe pending");
+        return '<div class="land">' + (owner ? avatar(owner, "contributor") : '<span class="avatar">?</span>') + '<div class="n"><span><a href="/package/' + encodeURIComponent(a.name) + '">' + esc(a.name) + '</a> <span class="v">' + esc(a.version || "") + '</span></span>' + state + '</div><div class="b">by ' + personLink(owner) + ' · approved by ' + personLink(a.by) + ' · ' + ago(a.created_at) + ' · ' + esc(a.arch) + '</div>' + ringBadges(rings) + '</div>';
       }).join("") || '<div class="muted">nothing approved yet — <a href="/request">be the first</a></div>';
       // The funnel: medians from what the record holds (a package's request, its first staged build, the decision), then the gates every package passes.
       var median = function (xs) { if (!xs.length) return null; xs = xs.slice().sort(function (a, b) { return a - b; }); return xs[Math.floor(xs.length / 2)]; };
@@ -97,16 +97,15 @@ __CHARTS__
       var fmtH = function (h) { return h == null ? "—" : h < 1 ? Math.round(h * 60) + " min" : h < 48 ? (Math.round(h * 10) / 10) + " h" : Math.round(h / 24) + " d"; };
       var stagesF = [["requested → staged", median(regToStaged), "your build, on a worker"], ["staged → decided", median(stagedToDecided), "a maintainer reads the evidence"], ["edge → rc", 0.5, "minutes, after the checks on both architectures"], ["rc → stable", 6, "two green health checks in a row — or at once, when the trial installed it"]];
       var maxH = Math.max(6, median(regToStaged) || 0, median(stagedToDecided) || 0);
-      $("#c-funnel").innerHTML = '<div class="hrows">' + stagesF.map(function (st) { var human = st[0] === "staged → decided"; return '<div class="hrow" style="grid-template-columns:160px 1fr 56px"><div class="l" title="' + esc(st[2]) + '">' + esc(st[0]) + '</div><div class="bar" data-tip="' + esc(st[0] + ": " + (st[1] == null ? "no measurement yet" : "median " + fmtH(st[1])) + " — " + st[2]) + '"><i style="width:' + (st[1] == null ? 0 : Math.min(100, 100 * st[1] / maxH)) + '%;background:' + (human ? "var(--amber)" : "var(--green)") + '"></i></div><div class="p num">' + fmtH(st[1]) + '</div></div>'; }).join("") + '</div><div class="legend"><span><i style="background:var(--green)"></i>the machines</span><span><i style="background:var(--amber)"></i>a human decides</span></div>';
+      // A row per stage: the label carries what the stage is as its title, the bar is the stage's share of the longest one, the value its median; the stage a human decides is amber.
+      $("#c-funnel").innerHTML = hrows(stagesF.map(function (st) { var human = st[0] === "staged → decided"; return ['<span title="' + esc(st[2]) + '">' + esc(st[0]) + '</span>', "", st[1] == null ? 0 : Math.min(100, 100 * st[1] / maxH), human ? "var(--amber)" : "var(--green)", fmtH(st[1])]; }), { w: 160, html: true }) + '<div class="legend"><span><i style="background:var(--green)"></i>the machines</span><span><i style="background:var(--amber)"></i>a human decides</span></div>';
       endSkeleton();
     }).catch(function () { endSkeleton(); });
   }
   publicLoad();
   liveStats(function (d) {
-    var bd = (d.series || {}).builds_daily || [], byDay = {};
-    bd.forEach(function (r) { var x = byDay[r.day] = byDay[r.day] || { staged: 0, published: 0, failed: 0 }; if (r.status === "staged") x.staged += Number(r.n); else if (r.status === "done") x.published += Number(r.n); else if (r.status === "failed") x.failed += Number(r.n); });
-    var days = lastDays(14);
-    $("#c-builds").innerHTML = stacked(days, [{ name: "staged", color: C.blue, values: days.map(function (x) { return (byDay[x] || {}).staged || 0; }) }, { name: "published", color: C.green, values: days.map(function (x) { return (byDay[x] || {}).published || 0; }) }, { name: "failed", color: C.red, values: days.map(function (x) { return (byDay[x] || {}).failed || 0; }) }], { label: "Factory builds per day over fourteen days", empty: "no build yet" });
+    var b = buildsByDay(d.series, 14);
+    $("#c-builds").innerHTML = stacked(b.labels, b.series, { label: "Factory builds per day over fourteen days", empty: "no build yet" });
   }, 120000);
 `;
 
@@ -166,7 +165,7 @@ export const FACTORY_COMPONENTS = (_F: Fixture): Component[] => [
     id: "factory.assembly-line",
     page: "/factory",
     anchor: ['<figure class="diagram">', 'viewBox="0 0 1340 330"', 'aria-label="An assembly line:', 'data-live="shared-online"'],
-    script: ['[data-live="shared-online"]', '" online now"', 'w.side === "omarchy" || w.mode === "shared"'],
+    script: ['live("shared-online"', '" online now"', 'w.side === "omarchy" || w.mode === "shared"'],
     reads: [{ path: "/api/v1/factory", fields: ["workers", "workers.0.alive", "workers.0.side", "workers.0.mode", "workers.0.update"] }],
     visible: EVERYONE,
     drawn: "factory",
@@ -192,7 +191,7 @@ export const FACTORY_COMPONENTS = (_F: Fixture): Component[] => [
     id: "factory.builds-chart",
     page: "/factory",
     anchor: ["Factory builds <span>14 days</span>", 'id="c-builds"'],
-    script: ['"/api/v1/stats"', "liveStats(", '"#c-builds"', "builds_daily", 'r.status === "staged"', '"Factory builds per day over fourteen days"'],
+    script: ['"/api/v1/stats"', "liveStats(", '"#c-builds"', "buildsByDay(d.series, 14)", '"Factory builds per day over fourteen days"'],
     reads: [{ path: "/api/v1/stats", fields: ["series.builds_daily", "series.builds_daily.0.day", "series.builds_daily.0.status", "series.builds_daily.0.n"] }],
     visible: EVERYONE,
   },

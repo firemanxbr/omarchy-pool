@@ -50,11 +50,12 @@ __CHARTS__
   var FACTORY = null, STATS = null;
   skeletonTiles("#tiles", 4); skeletonRows("#w-project", 8, 2); skeletonRows("#w-review", 9, 2); skeletonRows("#w-community", 10, 2);
   $("#w-project thead tr").innerHTML = WT_HEAD.project; $("#w-review thead tr").innerHTML = WT_HEAD.review; $("#w-community thead tr").innerHTML = WT_HEAD.community; $("#wt-legend").innerHTML = WT_LEGEND;
-  function kindOf(w) { return wtKind(w); }
-  var COLOR = { project: "var(--green)", review: "var(--blue)", community: "var(--lilac)" };
+  // The kind's colour on every chart of the page: the card's line, the bar per worker, the legend.
+  var COLOR = { project: C.green, review: C.blue, community: C.lilac };
   // What each kind finished per day over the last week, from the stats series: the pool's jobs are the
   // project's (jobs_daily, by kind), the project's builds with the publishes and audits are the review side's,
   // a contributor's builds are theirs (builds_daily, by trust). Only finished tasks count: done or staged, and failed.
+  // Not the shell's buildsByDay: that splits one series by status, this splits two series by kind.
   var POOL_KINDS = { sync: 1, render: 1, promote: 1, rollback: 1, health: 1, security: 1, enqueue: 1, gc: 1, verify: 1, relayout: 1, metrics: 1, trial: 1 };
   function perDay() {
     var days = lastDays(7), zero = function () { var o = {}; days.forEach(function (d) { o[d] = { done: 0, failed: 0 }; }); return o; };
@@ -71,7 +72,7 @@ __CHARTS__
     var showAll = $("#all-workers").checked, LOAD = loadOf();
     var busyOf = function (w) { var l = LOAD[w.id]; return l ? Math.min(100, Math.round(100 * l.ms / 86400000)) : 0; };
     var kinds = { project: [], review: [], community: [] };
-    d.workers.forEach(function (w) { kinds[kindOf(w)].push(w); });
+    d.workers.forEach(function (w) { kinds[wtKind(w)].push(w); });
     var al = d.workers.filter(function (w) { return w.alive; }), bz = al.filter(function (w) { return w.current_task; });
     var m = STATS && STATS.metrics, a = m && (m.jobs || m.actions);
     var load = al.length ? Math.round(al.reduce(function (n, w) { return n + busyOf(w); }, 0) / al.length) : 0;
@@ -82,23 +83,27 @@ __CHARTS__
       ["Worker minutes · 7 d", a ? num(a.minutes) : "—", a ? "≈ " + num(Math.round(a.minutes / 7)) + " per day, the project's workers" : "no metrics snapshot yet"]
     ]);
     // One card per kind: one line on what it is for, the tasks it finished per day over a week (the Pool page's growth line, in the kind's colour), four numbers.
-    var PD = perDay(), CH = { project: C.green, review: C.blue, community: C.lilac };
+    var PD = perDay();
     var card = function (cls, name, ws, blurb) {
       var alv = ws.filter(function (w) { return w.alive; }), busyW = alv.filter(function (w) { return w.current_task; });
       var busy = alv.length ? Math.round(alv.reduce(function (n, w) { return n + busyOf(w); }, 0) / alv.length) : 0;
       var pd = PD.P[cls], pts = PD.days.map(function (d) { return { t: Date.parse(d), v: pd[d].done + pd[d].failed }; });
       var done7 = PD.days.reduce(function (n, d) { return n + pd[d].done; }, 0), failed7 = PD.days.reduce(function (n, d) { return n + pd[d].failed; }, 0);
       return '<div class="role k-' + (cls === "community" ? "contrib" : cls) + '"><h3>' + name + '<span>' + num(ws.length) + (ws.length === 1 ? " worker" : " workers") + '</span></h3><p>' + blurb + '</p>' +
-        '<div class="kchart" data-tip="' + esc(name + ": tasks finished per day, the last seven days · " + num(done7) + " done, " + num(failed7) + " failed") + '">' + (STATS ? area(pts, num, 96, CH[cls]) : '<div class="empty loading">Loading</div>') + '</div>' +
+        '<div class="kchart" data-tip="' + esc(name + ": tasks finished per day, the last seven days · " + num(done7) + " done, " + num(failed7) + " failed") + '">' + (STATS ? area(pts, num, 96, COLOR[cls]) : '<div class="empty loading">Loading</div>') + '</div>' +
         '<div class="mini four"><div><b>' + num(alv.length) + ' of ' + num(ws.length) + '</b>alive</div><div data-tip="' + esc(busy + "% of the last day with a lease, across " + alv.length + " alive worker(s) · " + busyW.length + " building now") + '"><b>' + busy + '%</b>busy 24h</div><div><b>' + num(done7) + '</b>done 7d</div><div><b>' + num(failed7) + '</b>failed 7d</div></div></div>';
     };
     $("#kinds").innerHTML =
       card("project", "Project", kinds.project, "The pool's own jobs, on the host a maintainer keeps.") +
       card("review", "Review", kinds.review, "Rebuilds, publishes and audits, on two maintainers' word.") +
       card("community", "Contributors", kinds.community, "Their machines: their packages, or whatever is queued when shared.");
-    // The load per worker, the busiest first.
+    // The load per worker, the busiest first: the name with the kind and the architecture, the bar in the kind's colour, and what it did in the tooltip.
     var ranked = d.workers.filter(function (w) { return w.alive || LOAD[w.id]; }).sort(function (a, b) { return busyOf(b) - busyOf(a); }).slice(0, 10);
-    $("#c-perworker").innerHTML = ranked.length ? '<div class="hrows">' + ranked.map(function (w) { var k = kindOf(w), l = LOAD[w.id] || { ms: 0, done: 0 }; return '<div class="hrow" style="grid-template-columns:150px 1fr 56px"><div class="l">' + workerName(w) + ' <small>' + (k === "community" ? (w.mode === "shared" ? "shared" : "own") : k) + ' · ' + esc(w.arch) + '</small></div><div class="bar" data-tip="' + esc(w.id + ": " + busyOf(w) + "% of the last day with a lease · " + num(l.done) + " task(s) finished, " + Math.round(l.ms / 60000) + " min" + (w.current_task ? " · building #" + w.current_task + " now" : "") + " · " + num(w.builds_done) + " done / " + num(w.builds_failed) + " failed all time") + '"><i style="width:' + busyOf(w) + '%;background:' + COLOR[k] + '"></i></div><div class="p num">' + busyOf(w) + '%</div></div>'; }).join("") + '</div><div class="legend"><span><i style="background:var(--green)"></i>project</span><span><i style="background:var(--blue)"></i>review</span><span><i style="background:var(--lilac)"></i>contributors</span></div>' : '<div class="empty">no worker alive, nothing leased in the last day</div>';
+    $("#c-perworker").innerHTML = ranked.length ? hrows(ranked.map(function (w) {
+      var k = wtKind(w), l = LOAD[w.id] || { ms: 0, done: 0 };
+      return [workerName(w), (k === "community" ? (w.mode === "shared" ? "shared" : "own") : k) + " · " + esc(w.arch), busyOf(w), COLOR[k], null,
+        w.id + ": " + busyOf(w) + "% of the last day with a lease · " + num(l.done) + " task(s) finished, " + Math.round(l.ms / 60000) + " min" + (w.current_task ? " · building #" + w.current_task + " now" : "") + " · " + num(w.builds_done) + " done / " + num(w.builds_failed) + " failed all time"];
+    }), { w: 150, html: true }) + '<div class="legend"><span><i style="background:' + COLOR.project + '"></i>project</span><span><i style="background:' + COLOR.review + '"></i>review</span><span><i style="background:' + COLOR.community + '"></i>contributors</span></div>' : '<div class="empty">no worker alive, nothing leased in the last day</div>';
     // The three tables.
     var seen = function (ws) { return ws.filter(function (w) { return showAll || w.alive; }); };
     var text = function (w) { return [w.id, w.owner, w.arch, w.version, w.mode, w.agent, w.trusted_by, w.last_task && w.last_task.name, JSON.stringify(w.labels || {})].join(" "); };
@@ -181,7 +186,7 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     id: "workers.load-per-worker",
     page: "/workers",
     anchor: ['id="c-perworker"'],
-    script: ['"#c-perworker"', "workers_daily", "running_ms", 'class="hrows"', "builds_failed"],
+    script: ['"#c-perworker"', "workers_daily", "running_ms", "hrows(ranked", "builds_failed"],
     reads: [
       { path: "/api/v1/stats", fields: ["series.workers_daily.0.worker", "series.workers_daily.0.ms", "series.workers_daily.0.running_ms", "series.workers_daily.0.done"] },
       { path: "/api/v1/factory?limit=10", fields: ["workers.0.id", "workers.0.arch", "workers.0.mode", "workers.0.alive", "workers.0.current_task", "workers.0.builds_done", "workers.0.builds_failed"] },

@@ -173,14 +173,12 @@ const SCRIPT = String.raw`
   var STAGE_TEXT = { sync: ["Sync", "every 3 h", "Every source's database is read, every new package downloaded and verified against that project's keyring, then stored once in the source's own directory. Superseded versions stay until retention runs, so a rollback always has its bytes."], pin: ["Pin", "→ edge", "A sync that changed something makes a new edge release: an immutable list of the exact objects the ring serves. Edge is signature-verified and nothing else — what the sources published, one to three hours later. The factory's builds are pinned in the lab first."], promote: ["Promote", "on evidence", "The sync that changed edge queues the gate: a real pacman syncs edge and the ABI check looks for a symbol version a promotion would break, on x86_64 and aarch64 — green on both, and edge is rc within minutes. rc is checked again every three hours; the second green check in a row makes it stable. Nothing waits for a calendar; a failed health check rolls the ring back on its own."], render: ["Render & verify", "signed DBs", "Each release is rendered into pacman databases per source and architecture and signed with the pool's key; a real pacman then syncs them before they are served."], serve: ["Serve", "omarchy update", "Static objects behind an edge cache: the databases, the packages, the signatures. One host, one section per source, the ring's name in it."] };
   var stage = "sync";
   function drawStage() {
-    $("#stepper").innerHTML = Object.keys(STAGE_TEXT).map(function (k) { return '<button type="button" data-stage="' + k + '" class="' + (stage === k ? "on" : "") + '">' + STAGE_TEXT[k][0] + '<small>' + STAGE_TEXT[k][1] + '</small></button>'; }).join("");
-    $("#stepper").querySelectorAll("button").forEach(function (b) { b.onclick = function () { stage = b.getAttribute("data-stage"); drawStage(); }; });
+    pick("#stepper", Object.keys(STAGE_TEXT), stage, function (v) { stage = v; drawStage(); }, { label: function (k) { return esc(STAGE_TEXT[k][0]) + '<small>' + esc(STAGE_TEXT[k][1]) + '</small>'; } });
     var art = document.querySelector('#stage-art [data-stage="' + stage + '"]'), t = STAGE_TEXT[stage];
     $("#stage-figure").innerHTML = (art ? art.innerHTML : "") + '<figcaption><b style="color:var(--text)">' + t[0] + '.</b> ' + t[2] + '</figcaption>';
   }
   drawStage();
   var GROUPS = { "src-arch": [["core", "x86_64"], ["extra", "x86_64"], ["multilib", "x86_64"]], "src-alarm": [["core", "aarch64"], ["extra", "aarch64"], ["alarm", "aarch64"]], "src-opr": [["packages", "x86_64"], ["packages", "aarch64"]], "src-asahi": [["asahi", "aarch64"]], "src-asahi-alarm": [["asahi-alarm", "aarch64"]], "src-optional": [["chaotic", "x86_64"], ["aur", "aarch64"]] };
-  function live(key, text) { document.querySelectorAll('[data-live="' + key + '"]').forEach(function (el) { el.textContent = text; }); }
   liveStats(function (d) {
     var cov = d.coverage || [];
     Object.keys(GROUPS).forEach(function (k) {
@@ -244,7 +242,7 @@ export const HOW_IT_WORKS_COMPONENTS = (_F: Fixture): Component[] => {
         'aria-label="Arch Linux, Arch Linux ARM, the OPR\'s edge channel',
         ...["src-arch", "src-alarm", "src-opr", "src-asahi", "src-asahi-alarm", "src-optional", "stored-once", "edge-head", "rc-head", "stable-head"].map((k) => `data-live="${k}"`),
       ],
-      script: ["liveStats(", '"/api/v1/stats"', '"src-arch"', '"src-optional"', 'data-live="', "d.coverage", "c.indexed", "c.last_sync", '"stored-once"', "d.pool.objects", "d.pool.bytes", "d.rings", '"-head"', "r.release.seq", "r.release.created_at"],
+      script: ["liveStats(", '"/api/v1/stats"', '"src-arch"', '"src-optional"', 'live(k, ', 'live("stored-once"', "d.coverage", "c.indexed", "c.last_sync", "d.pool.objects", "d.pool.bytes", "d.rings", '"-head"', "r.release.seq", "r.release.created_at"],
       reads: [
         {
           path: "/api/v1/stats",
@@ -271,7 +269,7 @@ export const HOW_IT_WORKS_COMPONENTS = (_F: Fixture): Component[] => {
       id: "how-it-works.stepper",
       page,
       anchor: ['id="stages"', "Five stages. Click one", 'id="stepper"'],
-      script: ['$("#stepper")', "STAGE_TEXT", 'data-stage="', 'b.getAttribute("data-stage")', ...STAGES.map((st) => `${st}: [`)],
+      script: ['pick("#stepper", Object.keys(STAGE_TEXT), stage', "<small>", ...STAGES.map((st) => `${st}: [`)],
       visible: EVERYONE,
     },
     {

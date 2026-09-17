@@ -41,18 +41,12 @@ __CHARTS__
   var ring = RINGS.indexOf(q.get("ring")) >= 0 ? q.get("ring") : "stable";
   var arch = ARCHES.indexOf(q.get("arch")) >= 0 ? q.get("arch") : "x86_64";
   var conf = CONF.indexOf(q.get("conf")) >= 0 ? q.get("conf") : "exact + name-version";
-  function pick(id, values, current, onpick) {
-    $("#" + id).innerHTML = values.map(function (v) { return '<button type="button" class="' + (v === current ? "on" : "") + '" data-v="' + v + '">' + v + '</button>'; }).join("");
-    $("#" + id).querySelectorAll("button").forEach(function (b) { b.onclick = function () { onpick(b.getAttribute("data-v")); }; });
-  }
-  function sev(s) { var c = { critical: "var(--red)", high: "var(--red)", medium: "var(--amber)", low: "var(--blue)", unknown: "var(--dim)" }[s] || "var(--dim)"; return '<span class="pill" style="color:' + c + ';border-color:' + c + '">' + s + '</span>'; }
   function confOk(m) { return conf === "all" || m === "exact" || (conf === "exact + name-version" && m === "name-version"); }
   function draw() {
-    pick("pick-ring", RINGS, ring, function (v) { ring = v; sync(); load(); });
-    pick("pick-arch", ARCHES, arch, function (v) { arch = v; sync(); load(); });
-    pick("pick-conf", CONF, conf, function (v) { conf = v; sync(); load(); });
+    pick("#pick-ring", RINGS, ring, function (v) { ring = v; load(); }, { url: "ring" });
+    pick("#pick-arch", ARCHES, arch, function (v) { arch = v; load(); }, { url: "arch" });
+    pick("#pick-conf", CONF, conf, function (v) { conf = v; load(); }, { url: "conf" });
   }
-  function sync() { history.replaceState(null, "", "?ring=" + ring + "&arch=" + arch + "&conf=" + encodeURIComponent(conf)); }
   // The feeds: what each tracker contributed to this ring's report — matches, exploited, and the last refresh.
   var FEEDS = [["arch", "Arch Security Tracker", "exact matches on Arch's own versions"], ["debian", "Debian Security Tracker", "the same upstream, Debian's fixed version compared to ours"], ["osv", "OSV", "Go modules and crates inside static binaries"], ["kev", "CISA KEV", "exploited in the wild — always fast-tracked"], ["epss", "EPSS", "likelihood of exploitation, orders the list"]];
   function renderFeeds(d) {
@@ -80,19 +74,18 @@ __CHARTS__
         return { v: v, advs: advs, worst: worst, kev: advs.some(function (a) { return a.kev; }), epss: advs.reduce(function (m, a) { return a.epss != null && a.epss > m ? a.epss : m; }, 0) };
       }).filter(Boolean);
       var count = function (s) { return rows.filter(function (r) { return r.worst === s; }).length; };
-      var tiles = [
+      setTiles("#tiles", [
         ["Packages with open advisories", num(rows.length), "of what " + ring + " serves for " + arch],
         ["Critical / high", num(count("critical")) + " / " + num(count("high")), num(count("medium")) + " medium · " + num(count("low")) + " low · " + num(count("unknown")) + " unknown"],
         ["Exploited in the wild", num(rows.filter(function (r) { return r.kev; }).length), "CISA KEV"],
         ["Fix available in another ring", num(rows.filter(function (r) { return r.v.fixed_in.length; }).length), "fast-track candidates"],
         ["Packages exposed", num(d.totals && d.totals.exposed || 0), "depend on, or load a library of, a package with a confident advisory"]
-      ];
-      tiles.forEach(function (t, i) { var el = $("#tiles"), cell = el.children[i]; if (!cell) { cell = document.createElement("div"); cell.className = "tile"; el.appendChild(cell); } setTile(cell, '<div class="k">' + t[0] + '</div><div class="v num">' + t[1] + '</div><div class="s">' + t[2] + '</div>'); });
+      ]);
       $("#updated").textContent = (d.updated_at ? "Advisories refreshed " + ago(d.updated_at) + " · " : "No security run recorded yet · ") + num(d.advisories_total) + " advisories in the index";
       renderFeeds(d); renderPerRing();
       pager("#vuln", rows, function (r) {
         var v = r.v;
-        return '<tr><td>' + sev(r.worst) + (r.kev ? ' <span class="pill error" title="in CISA KEV">exploited</span>' : '') + (r.epss >= 0.1 ? ' <span class="pill warn" title="EPSS ' + (r.epss * 100).toFixed(0) + '%">epss ' + (r.epss * 100).toFixed(0) + '%</span>' : '') + '</td>' +
+        return '<tr><td>' + sevPill(r.worst) + (r.kev ? ' ' + pillHtml("error", "exploited", "in CISA KEV") : '') + (r.epss >= 0.1 ? ' ' + pillHtml("warn", "epss " + (r.epss * 100).toFixed(0) + "%", "EPSS " + (r.epss * 100).toFixed(0) + "%") : '') + '</td>' +
           '<td><a href="/package/' + encodeURIComponent(v.name) + '?ring=' + ring + '&arch=' + arch + '"><b>' + esc(v.name) + '</b></a> <span class="src">' + esc(v.source) + '</span></td><td class="mono">' + esc(v.version) + '</td>' +
           '<td>' + r.advs.map(function (a) { return '<a class="run" href="' + esc(a.url) + '">' + esc(a.id.replace(/^(arch|debian|osv):/, "").replace(/:[^:]*$/, "")) + '</a>' + (a.fixed ? ' <span class="muted">fixed in ' + esc(a.fixed) + '</span>' : ''); }).join("<br>") + '</td>' +
           '<td>' + [...new Set(r.advs.map(function (a) { return a.match; }))].join(", ") + '</td>' +
@@ -103,7 +96,6 @@ __CHARTS__
     }).catch(function (e) { $("#updated").textContent = "failed: " + e; endSkeleton(); });
   }
   load();
-  liveStats(function () {}, 120000);
 `;
 
 export function securityHtml(poolUrl: string, version: RunningVersion): string {
@@ -139,7 +131,7 @@ export const SECURITY_COMPONENTS = (F: Fixture): Component[] => {
       id: "security.pickers",
       page: "/security",
       anchor: ['id="pick-ring"', 'id="pick-arch"', 'id="pick-conf"'],
-      script: ['"pick-ring"', '"pick-arch"', '"pick-conf"', 'RINGS = ["stable", "rc", "edge"]', 'ARCHES = ["x86_64", "aarch64"]', 'CONF = ["all", "exact + name-version", "exact"]', "history.replaceState"],
+      script: ['pick("#pick-ring"', 'pick("#pick-arch"', 'pick("#pick-conf"', 'RINGS = ["stable", "rc", "edge"]', 'ARCHES = ["x86_64", "aarch64"]', 'CONF = ["all", "exact + name-version", "exact"]', '{ url: "ring" }', '{ url: "arch" }', '{ url: "conf" }'],
       reads: [{ path: "/api/v1/security?ring=stable&arch=aarch64", fields: ["ring", "arch", "vulnerable", "totals.packages"] }],
       visible: EVERYONE,
     },
@@ -156,7 +148,7 @@ export const SECURITY_COMPONENTS = (F: Fixture): Component[] => {
       page: "/security",
       anchor: ['id="tiles"'],
       script: [
-        'fetch("/api/v1/security?ring=" + ring + "&arch=" + arch)', 'skeletonTiles("#tiles", 5)', "confOk(a.match)",
+        'fetch("/api/v1/security?ring=" + ring + "&arch=" + arch)', 'skeletonTiles("#tiles", 5)', 'setTiles("#tiles"', "confOk(a.match)",
         '"Packages with open advisories"', '"Critical / high"', '"Exploited in the wild"', '"Fix available in another ring"', '"Packages exposed"',
         "r.v.fixed_in.length", "d.totals.exposed",
       ],
@@ -199,7 +191,7 @@ export const SECURITY_COMPONENTS = (F: Fixture): Component[] => {
       page: "/security",
       anchor: ['id="vuln"', "<th>Severity</th><th>Package</th><th>Version</th><th>Advisories</th><th>Confidence</th><th>Exposes</th><th>Fixed in</th>"],
       script: [
-        'skeletonRows("#vuln", 7, 6)', 'pager("#vuln", rows', "sev(r.worst)", '"in CISA KEV"', "r.epss >= 0.1", "encodeURIComponent(v.name)",
+        'skeletonRows("#vuln", 7, 6)', 'pager("#vuln", rows', "sevPill(r.worst)", '"in CISA KEV"', "r.epss >= 0.1", "encodeURIComponent(v.name)",
         "a.id.replace(/^(arch|debian|osv):/", "a.fixed", "a.match", "v.exposure.declared", "v.exposure.loads", "v.fixed_in.map", "f.ring", "f.version",
         "nothing with an open advisory at this confidence level",
       ],

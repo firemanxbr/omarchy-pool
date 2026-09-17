@@ -68,8 +68,8 @@ const SCRIPT = String.raw`
   // Three questions, one recommendation — the ring the command below uses.
   var QUIZ = [["rely", "This machine matters to me — I cannot afford a broken morning."], ["early", "I want to see problems before everyone else does."], ["ci", "This is a CI runner or a throwaway VM."], ["build", "I am trying a build of the factory before it is approved."]], quiz = {};
   function drawQuiz() {
-    $("#quiz").innerHTML = QUIZ.map(function (r) { return '<div class="q"><span>' + r[1] + '</span><span class="yn"><button type="button" data-q="' + r[0] + '" data-v="1" class="' + (quiz[r[0]] === true ? "on" : "") + '">yes</button><button type="button" data-q="' + r[0] + '" data-v="0" class="' + (quiz[r[0]] === false ? "on" : "") + '">no</button></span></div>'; }).join("");
-    $("#quiz").querySelectorAll("button").forEach(function (b) { b.onclick = function () { quiz[b.getAttribute("data-q")] = b.getAttribute("data-v") === "1"; drawQuiz(); }; });
+    $("#quiz").innerHTML = QUIZ.map(function (r) { return '<div class="q"><span>' + r[1] + '</span><span class="yn" id="q-' + r[0] + '"></span></div>'; }).join("");
+    QUIZ.forEach(function (r) { pick("#q-" + r[0], ["yes", "no"], quiz[r[0]] === true ? "yes" : quiz[r[0]] === false ? "no" : null, function (v) { quiz[r[0]] = v === "yes"; drawQuiz(); }); });
     var rec = quiz.build ? "lab" : quiz.ci ? "edge" : quiz.early ? "rc" : "stable", answered = Object.keys(quiz).length > 0;
     $("#quiz-answer").innerHTML = answered ? '<b style="color:var(--' + rec + ')">' + rec + '</b> — ' + esc(DESC[rec]) + ' <a href="#ring" data-rec="' + rec + '" style="color:var(--green);text-decoration:none">Use ' + rec + ' below →</a>' : '<span class="dim">answer what applies; stable is the answer when nothing does.</span>';
     var a = $("#quiz-answer a"); if (a) a.onclick = function () { ring = a.getAttribute("data-rec"); draw(); };
@@ -80,13 +80,9 @@ const SCRIPT = String.raw`
   var arch = ARCHES.indexOf(q.get("arch")) >= 0 ? q.get("arch") : "x86_64";
   var data = null, optional = {};
 
-  function pick(id, values, current, onpick) {
-    $("#" + id).innerHTML = values.map(function (v) { return '<button class="' + (v === current ? "on" : "") + '" data-v="' + v + '">' + v + '</button>'; }).join("");
-    $("#" + id).querySelectorAll("button").forEach(function (b) { b.onclick = function () { onpick(b.getAttribute("data-v")); }; });
-  }
   function draw() {
-    pick("pick-ring", RINGS, ring, function (v) { ring = v; history.replaceState(null, "", "?ring=" + ring + "&arch=" + arch); draw(); });
-    pick("pick-arch", ARCHES, arch, function (v) { arch = v; history.replaceState(null, "", "?ring=" + ring + "&arch=" + arch); draw(); });
+    pick("#pick-ring", RINGS, ring, function (v) { ring = v; draw(); }, { url: "ring" });
+    pick("#pick-arch", ARCHES, arch, function (v) { arch = v; draw(); }, { url: "arch" });
     $("#ring-desc").textContent = DESC[ring];
     $("#key-cmd").innerHTML = 'curl -O ' + POOL + '/omarchy-staging.pub.asc\nsudo pacman-key --add omarchy-staging.pub.asc &amp;&amp; sudo pacman-key --lsign-key staging@firemanxbr.org';
     $("#setup-cmd").innerHTML = 'curl -fsSL ' + location.origin + '/setup | sudo bash -s -- --ring ' + ring;
@@ -110,12 +106,7 @@ const SCRIPT = String.raw`
       'sudo install -m 755 omarchy-pool-*/omarchy-cli /usr/local/bin/\n' +
       'omarchy-cli --ring ' + ring + ' status';
   }
-  document.querySelectorAll(".copy").forEach(function (b) {
-    b.onclick = function () {
-      var id = { setup: "#setup-cmd", key: "#key-cmd", conf: "#conf-text", up: "#up-cmd", cli: "#cli-cmd" }[b.getAttribute("data-copy")];
-      navigator.clipboard.writeText($(id).textContent).then(function () { b.textContent = "copied"; setTimeout(function () { b.textContent = "copy"; }, 1500); });
-    };
-  });
+  copyChips({ setup: "#setup-cmd", key: "#key-cmd", conf: "#conf-text", up: "#up-cmd", cli: "#cli-cmd" });
   draw();
   drawQuiz();
   liveStats(function (d) { data = d; draw(); }, 120000);
@@ -162,17 +153,19 @@ export const GET_STARTED_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
+      // Each question's yes/no is the shell's pick(), drawn into the row's own span.
       id: "docs-get-started.quiz",
       page,
       anchor: ['id="which-ring"', 'id="quiz"', 'id="quiz-answer"'],
-      script: ["var QUIZ = ", '$("#quiz")', '$("#quiz-answer")', 'data-q="', 'data-rec="', 'quiz.build ? "lab"', "RINGS_TEXT[r].desc"],
+      script: ["var QUIZ = ", '$("#quiz")', '$("#quiz-answer")', 'pick("#q-" + r[0], ["yes", "no"]', 'data-rec="', 'quiz.build ? "lab"', "RINGS_TEXT[r].desc"],
       visible: EVERYONE,
     },
     {
+      // Two rows of the shell's pick(); the choice goes to the address as ?ring= and ?arch=, which the page reads back on load.
       id: "docs-get-started.ring-picker",
       page,
       anchor: ['id="ring"', 'id="pick-ring"', 'id="pick-arch"', 'id="ring-desc"'],
-      script: ['RINGS = ["stable", "rc", "edge", "lab"]', 'ARCHES = ["x86_64", "aarch64"]', 'pick("pick-ring"', 'pick("pick-arch"', '$("#ring-desc")', 'q.get("ring")', 'q.get("arch")', "history.replaceState"],
+      script: ['RINGS = ["stable", "rc", "edge", "lab"]', 'ARCHES = ["x86_64", "aarch64"]', 'pick("#pick-ring"', 'pick("#pick-arch"', '{ url: "ring" }', '{ url: "arch" }', '$("#ring-desc")', 'q.get("ring")', 'q.get("arch")'],
       visible: EVERYONE,
     },
     {
@@ -229,11 +222,11 @@ export const GET_STARTED_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // One handler for the five chips, bound once at load: the map from a chip to the text it copies.
+      // The five chips are the shell's copyChips(), bound once at load; the page's part is the map from a chip to the text it copies.
       id: "docs-get-started.copy-chips",
       page,
       anchor: ['data-copy="setup"', 'data-copy="key"', 'data-copy="conf"', 'data-copy="up"', 'data-copy="cli"'],
-      script: ['querySelectorAll(".copy")', '{ setup: "#setup-cmd", key: "#key-cmd", conf: "#conf-text", up: "#up-cmd", cli: "#cli-cmd" }', "navigator.clipboard.writeText", '"copied"'],
+      script: ['copyChips({ setup: "#setup-cmd", key: "#key-cmd", conf: "#conf-text", up: "#up-cmd", cli: "#cli-cmd" })'],
       visible: EVERYONE,
     },
   ];

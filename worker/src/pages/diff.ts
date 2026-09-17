@@ -34,7 +34,7 @@ const SCRIPT = String.raw`
   skeletonTiles("#tiles", 4); skeletonRows("#upgraded", 5, 4); skeletonRows("#added", 4, 2); skeletonRows("#removed", 4, 2);
   var url = "/api/v1/releases/" + encodeURIComponent(ring) + "/diff?" + (from ? "from=" + encodeURIComponent(from) + "&" : "") + (to ? "to=" + encodeURIComponent(to) + "&" : "") + (arch ? "arch=" + encodeURIComponent(arch) : "");
   var pkg = function (p) { return '<a href="/package/' + encodeURIComponent(p.name) + '"><b>' + esc(p.name) + '</b></a>'; };
-  busy(fetch(url)).then(function (r) { return r.json().then(function (d) { d.__status = r.status; return d; }); }).then(function (d) {
+  api("GET", url).then(function (d) {
     if (d.__status !== 200) { $("#line").textContent = d.error || "not found"; endSkeleton(); return; }
     var f = d.from ? "release " + d.from.id + " (#" + d.from.seq + ")" : "nothing";
     document.title = ring + " " + (d.from ? d.from.id : "") + " → " + d.to.id + " · omarchy-pool";
@@ -42,14 +42,12 @@ const SCRIPT = String.raw`
     $("#title").textContent = ring + ": " + f + " → release " + d.to.id + " (#" + d.to.seq + ")" + (arch ? " · " + arch : "");
     $("#line").innerHTML = 'Created ' + ago(d.to.created_at) + (d.to.note ? ' — <em>' + esc(d.to.note) + '</em>' : '') + (d.from ? '; the older one ' + ago(d.from.created_at) + (d.from.note ? ' — <em>' + esc(d.from.note) + '</em>' : '') : '') + '. <a class="run" href="' + esc(url) + '">JSON</a>';
     var c = d.counts;
-    $("#tiles").innerHTML = [["Upgraded", c.upgraded, "same name, another object"], ["Added", c.added, "new (name, arch) pairs"], ["Removed", c.removed, "gone from the selection"], ["Packages", num(c.after), "was " + num(c.before)]]
-      .map(function (t) { return '<div class="tile"><div class="k">' + t[0] + '</div><div class="v num">' + num(t[1]) + '</div><div class="s">' + t[2] + '</div></div>'; }).join("");
+    setTiles("#tiles", [["Upgraded", num(c.upgraded), "same name, another object"], ["Added", num(c.added), "new (name, arch) pairs"], ["Removed", num(c.removed), "gone from the selection"], ["Packages", num(c.after), "was " + num(c.before)]]);
     pager("#upgraded", d.upgraded, function (p) { return '<tr><td>' + pkg(p) + '</td><td>' + esc(p.arch) + '</td><td class="mono">' + esc(p.from) + '</td><td class="mono">' + esc(p.to) + '</td><td><span class="src">' + esc(p.source || "") + '</span></td></tr>'; }, { empty: "nothing upgraded" });
     pager("#added", d.added, function (p) { return '<tr><td>' + pkg(p) + '</td><td>' + esc(p.arch) + '</td><td class="mono">' + esc(p.version) + '</td><td><span class="src">' + esc(p.source || "") + '</span></td></tr>'; }, { empty: "nothing added" });
     pager("#removed", d.removed, function (p) { return '<tr><td>' + pkg(p) + '</td><td>' + esc(p.arch) + '</td><td class="mono">' + esc(p.version) + '</td><td><span class="src">' + esc(p.source || "") + '</span></td></tr>'; }, { empty: "nothing removed" });
     endSkeleton();
   }).catch(function (e) { $("#line").textContent = "failed: " + e; endSkeleton(); });
-  liveStats(function () {}, 120000);
 `;
 
 export function diffHtml(poolUrl: string, version: RunningVersion): string {
@@ -119,7 +117,7 @@ export const DIFF_COMPONENTS = (F: Fixture): Component[] => {
       id: "diff.stat-tiles",
       page,
       anchor: ['<div class="tiles" id="tiles">'],
-      script: ['skeletonTiles("#tiles", 4)', '$("#tiles")', '["Upgraded", c.upgraded', '["Added", c.added', '["Removed", c.removed', '["Packages", num(c.after), "was " + num(c.before)]'],
+      script: ['skeletonTiles("#tiles", 4)', 'setTiles("#tiles"', '["Upgraded", num(c.upgraded)', '["Added", num(c.added)', '["Removed", num(c.removed)', '["Packages", num(c.after), "was " + num(c.before)]'],
       reads: [{ path: head, fields: ["counts.upgraded", "counts.added", "counts.removed", "counts.after", "counts.before"] }],
       visible: EVERYONE,
     },

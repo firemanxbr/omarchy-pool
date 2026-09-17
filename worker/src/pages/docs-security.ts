@@ -47,11 +47,10 @@ const BODY = String.raw`
 `;
 
 const SCRIPT = String.raw`
-  var FEEDS = ${JSON.stringify(FEEDS)}, feed = 0;
+  var FEEDS = ${JSON.stringify(FEEDS)}, NAMES = FEEDS.map(function (x) { return x[0]; }), feed = NAMES[0];
   function drawFeeds() {
-    $("#feeds").innerHTML = FEEDS.map(function (x, i) { return '<button type="button" data-feed="' + i + '" class="' + (feed === i ? "on" : "") + '">' + esc(x[0]) + '</button>'; }).join("");
-    $("#feeds").querySelectorAll("button").forEach(function (b) { b.onclick = function () { feed = Number(b.getAttribute("data-feed")); drawFeeds(); }; });
-    var f = FEEDS[feed];
+    pick("#feeds", NAMES, feed, function (v) { feed = v; drawFeeds(); });
+    var f = FEEDS[NAMES.indexOf(feed)];
     $("#feed-text").innerHTML = '<b style="color:var(--text)">' + esc(f[0]) + '.</b> ' + esc(f[1]) + ' <span class="pill none">' + esc(f[2]) + '</span>';
   }
   drawFeeds();
@@ -90,18 +89,18 @@ export const DOCS_SECURITY_COMPONENTS = (_F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // The section keeps id="feeds" for the map (docs-tree.ts); the buttons are the script's, drawn into the .srcs row from the inlined list.
+      // The section keeps id="feeds" for the map (docs-tree.ts); the buttons are the shell's pick(), drawn into the .srcs row from the inlined list, the feed's name the choice.
       id: "docs-security.feed-picker",
       page,
       anchor: ['<section id="feeds">', "<h2>The five feeds</h2>", 'class="srcs"'],
-      script: ["var FEEDS = ", "function drawFeeds()", 'data-feed="', 'getAttribute("data-feed")'],
+      script: ["var FEEDS = ", "function drawFeeds()", 'pick("#feeds", NAMES, feed'],
       visible: EVERYONE,
     },
     {
       id: "docs-security.feed-text",
       page,
       anchor: ['id="feed-text"'],
-      script: ['$("#feed-text")', "FEEDS[feed]", 'class="pill none"'],
+      script: ['$("#feed-text")', "FEEDS[NAMES.indexOf(feed)]", 'class="pill none"'],
       visible: EVERYONE,
     },
     {

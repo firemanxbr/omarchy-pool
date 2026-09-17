@@ -104,7 +104,6 @@ export function apiDocsHtml(poolUrl: string, version: RunningVersion): string {
     active: "docs",
     doc: "api",
     body: BODY,
-    script: "liveStats(function () {}, 120000);",
     poolUrl,
     version,
   });
@@ -317,14 +316,6 @@ export const API_DOCS_COMPONENTS = (F: Fixture): Component[] => {
         { method: "POST", path: `/api/v1/factory/packages/${F.factoryPkg}/block`, expect: { anonymous: 401, contributor: 403, maintainer: 400 } },
         { method: "POST", path: `/api/v1/factory/packages/${F.factoryPkg}/unblock`, expect: { anonymous: 401, contributor: 403, maintainer: 400 } },
       ],
-      visible: EVERYONE,
-    },
-    {
-      id: "api.stats-poll",
-      page: "/api",
-      anchor: ['id="progress"'],
-      script: ["liveStats(function () {}, 120000)", '"/api/v1/stats"', 'busy(fetch('],
-      reads: [{ path: "/api/v1/stats" }],
       visible: EVERYONE,
     },
   ];

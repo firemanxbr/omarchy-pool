@@ -52,36 +52,26 @@ const BODY = String.raw`
 `;
 
 const SCRIPT = String.raw`
-  var API = "/api/v1/factory", token = null, login = null, signedIn = false, WHO = null, CATEGORIES = ${JSON.stringify(CATEGORIES)};
+  var API = "/api/v1/factory", CATEGORIES = ${JSON.stringify(CATEGORIES)};
   var STAGED = [], APPROVALS = [], BLOCKS = { contributors: [], packages: [] }, MINE = null;
-  try { token = localStorage.getItem("omc_token"); login = localStorage.getItem("omc_login"); } catch (e) {}
-  // The sign-in cookie authenticates same-origin calls by itself; a token
-  // from the Factory's fallback form travels as a bearer header instead.
-  function headers() { var h = { "content-type": "application/json" }; if (token && !signedIn) h["authorization"] = "Bearer " + token; return h; }
-  function maint() { return !!(WHO && WHO.role === "maintainer"); }
-  function person(l) { return l ? '<a href="/user/' + encodeURIComponent(l) + '">' + esc(l) + '</a>' : '<span class="muted">—</span>'; }
   function pkg(name, version, arch) { return '<a href="/package/' + encodeURIComponent(name) + '?ring=lab' + (arch && arch !== "all" ? '&arch=' + esc(arch) : '') + '" title="the package as Packages shows it — where it is, and the factory\'s story of it"><b>' + esc(name) + '</b></a>' + (version ? ' <span class="mono muted">' + esc(version) + '</span>' : ''); }
   skeletonTiles("#tiles", 4); skeletonRows("#staged", 8, 3); skeletonRows("#decisions", 7, 3);
 
-  // ---- who: the cookie (whoami), or the Factory's token, then the private block
+  // ---- who: the shell's WHO (the omc cookie, one fetch of /auth/me per page) — signed in, the private block; nobody, the hint to sign in
   whoami(function (me) {
-    if (me) { WHO = me; login = me.login; signedIn = true; return signed(); }
-    if (!token) { $("#who").innerHTML = 'Contributors and maintainers: <a href="/auth/github?next=/review">sign in with GitHub</a> to see yours first.'; return; }
-    busy(fetch(API + "/me", { headers: headers() })).then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
-      if (!d || !d.contributor) { $("#who").innerHTML = 'Contributors and maintainers: <a href="/auth/github?next=/review">sign in with GitHub</a> to see yours first.'; return; }
-      WHO = d.contributor; login = WHO.login; MINE = d; signed();
-    }).catch(function () {});
+    if (me) return signed();
+    $("#who").innerHTML = 'Contributors and maintainers: <a href="/auth/github?next=/review">sign in with GitHub</a> to see yours first.';
   });
   function signed() {
     $("#who").textContent = "";
-    $("#mine").hidden = false; $("#mine-who").textContent = login + " · " + (WHO.role || "contributor");
-    if (maint()) { $("#brake").hidden = false; $("#legend").hidden = false; $("#staged").classList.remove("reader"); $("#mine-queue").hidden = false; }
+    $("#mine").hidden = false; $("#mine-who").textContent = WHO.login + " · " + (WHO.role || "contributor");
+    if (isMaintainer()) { $("#brake").hidden = false; $("#legend").hidden = false; $("#staged").classList.remove("reader"); $("#mine-queue").hidden = false; }
     renderStaged(); renderMine(); privateLoad();
   }
   // What only a signed-in person sees: their packages (/me) and the brake (blocks) — the latter is public, but only matters here.
   function privateLoad() {
-    busy(fetch(API + "/me", { headers: headers() })).then(function (r) { return r.ok ? r.json() : null; }).then(function (d) { if (d) { MINE = d; renderMine(); } }).catch(function () {});
-    busy(fetch(API + "/blocks")).then(function (r) { return r.json(); }).then(function (d) { BLOCKS = d; renderMine(); if (maint()) renderBlocks(); }).catch(function () {});
+    api("GET", API + "/me").then(function (d) { if (!d.error) { MINE = d; renderMine(); } }).catch(function () {});
+    api("GET", API + "/blocks").then(function (d) { BLOCKS = d; renderMine(); if (isMaintainer()) renderBlocks(); }).catch(function () {});
   }
 
   // ---- the tiles: what is in review, and how much was decided this week
@@ -103,23 +93,23 @@ const SCRIPT = String.raw`
   }
   function short(t, n) { t = String(t || ""); return t.length > n ? '<span title="' + esc(t) + '">' + esc(t.slice(0, n - 1)) + '…</span>' : esc(t); }
   function renderMine() {
-    if (!WHO) return;
+    if (!WHO.me) return;
     var waiting = [], decided = [];
     // Blocked: the brake on you, or on a package of yours — the first thing to see.
-    var meBlocked = (BLOCKS.contributors || []).filter(function (b) { return b.login === login; })[0];
+    var meBlocked = (BLOCKS.contributors || []).filter(function (b) { return isOwner(b.login); })[0];
     $("#mine-blocked").hidden = !meBlocked;
-    if (meBlocked) $("#mine-blocked").innerHTML = '<b>You are blocked</b> since ' + ago(meBlocked.blocked_at) + ' by ' + person(meBlocked.blocked_by) + ': ' + esc(meBlocked.blocked_reason || "") + ' — nothing of yours gets in until another maintainer lifts it.';
-    (BLOCKS.packages || []).filter(function (b) { return b.owner === login; }).forEach(function (b) {
-      decided.push(row("act", b.name, null, "all", '<span class="pill error">blocked</span>', ago(b.blocked_at) + ' by ' + person(b.blocked_by) + ': ' + short(b.blocked_reason, 90), ["/docs/governance", "What a block means →"]));
+    if (meBlocked) $("#mine-blocked").innerHTML = '<b>You are blocked</b> since ' + ago(meBlocked.blocked_at) + ' by ' + personLink(meBlocked.blocked_by) + ': ' + esc(meBlocked.blocked_reason || "") + ' — nothing of yours gets in until another maintainer lifts it.';
+    (BLOCKS.packages || []).filter(function (b) { return isOwner(b.owner); }).forEach(function (b) {
+      decided.push(row("act", b.name, null, "all", '<span class="pill error">blocked</span>', ago(b.blocked_at) + ' by ' + personLink(b.blocked_by) + ': ' + short(b.blocked_reason, 90), ["/docs/governance", "What a block means →"]));
     });
     // Staged builds of yours, one card per package and architecture: the project's build when there is one, your own otherwise.
     var seen = {};
-    STAGED.filter(function (t) { return t.owner === login; }).sort(function (a, b) { return (b.kind === "project") - (a.kind === "project"); }).forEach(function (t) {
+    STAGED.filter(function (t) { return isOwner(t.owner); }).sort(function (a, b) { return (b.kind === "project") - (a.kind === "project"); }).forEach(function (t) {
       var key = t.name + "/" + t.arch; if (seen[key]) return; seen[key] = true;
       var pb = t.project_build;
       if (t.kind === "project") waiting.push(row("", t.name, t.version, t.arch, '<span class="pill ok">built again</span>', 'the project\'s ' + taskLink(t.id) + ' (from your ' + taskLink(t.from) + ') waits for approval', ["/build/" + t.id, "The build →"]));
       else if (pb && (pb.status === "queued" || pb.status === "leased")) waiting.push(row("", t.name, t.version, t.arch, '<span class="pill blue">building again</span>', 'the project is building it again (' + taskLink(pb.id) + '), from your ' + taskLink(t.id), ["/build/" + t.id, "Your build →"]));
-      else if (pb && pb.status === "failed") waiting.push(row("", t.name, t.version, t.arch, '<span class="pill error" title="' + esc(pb.error || "") + '">failed</span>', 'the project\'s ' + taskLink(pb.id) + ' (from your ' + taskLink(t.id) + ') failed — a maintainer decides', ["/build/" + pb.id, "The project's build →"]));
+      else if (pb && pb.status === "failed") waiting.push(row("", t.name, t.version, t.arch, taskPill("failed", pb.error), 'the project\'s ' + taskLink(pb.id) + ' (from your ' + taskLink(t.id) + ') failed — a maintainer decides', ["/build/" + pb.id, "The project's build →"]));
       else if (t.already) waiting.push(row("", t.name, t.version, t.arch, '<span class="pill none">already approved</span>', 'your build ' + taskLink(t.id) + ' is of a version approved ' + ago(t.already.at) + ' as ' + taskLink(t.already.task) + ' — nothing to decide', ["/build/" + t.id, "The build →"]));
       else waiting.push(row("", t.name, t.version, t.arch, '<span class="pill warn">staged</span>', 'your build ' + taskLink(t.id) + ' waits for a maintainer' + (t.audit && t.audit.status === "done" && t.audit.verdict ? ' · audit <span class="pill ' + (t.audit.verdict === "ok" ? "ok" : t.audit.verdict === "warn" ? "warn" : "error") + '">' + esc(t.audit.verdict) + '</span>' : t.audit && t.audit.status === "queued" ? ' · audit waiting' : ''), ["/build/" + t.id, "Your build →"]));
     });
@@ -129,16 +119,16 @@ const SCRIPT = String.raw`
     APPROVALS.forEach(function (a) { if (mine[a.name] && !last[a.name + "/" + a.arch]) last[a.name + "/" + a.arch] = a; });
     Object.keys(last).forEach(function (k) {
       var a = last[k], p = mine[a.name];
-      if (a.withdrawn_at) decided.push(row("act", a.name, a.version, a.arch, '<span class="pill none">withdrawn</span>', 'the approval by ' + person(a.by) + ' was withdrawn ' + ago(a.withdrawn_at) + ' by ' + person(a.withdrawn_by) + ': ' + short(a.withdrawn_reason, 100) + ' — another maintainer decides', ["/build/" + a.task_id, "The build →"]));
-      else if (a.decision === "rejected") decided.push(row("act", a.name, a.version, a.arch, '<span class="pill error">rejected</span>', ago(a.created_at) + ' by ' + person(a.by) + ': ' + short(a.note, 110), ["/factory", "Fix it, build again →"]));
-      else { var inRings = a.rings && a.rings.length ? a.rings : (p && p.status === "published" ? ["edge"] : []); decided.push(row("ok", a.name, a.version, a.arch, '<span class="pill ok">approved</span>', ago(a.created_at) + ' by ' + person(a.by) + (inRings.length ? ' — in ' + inRings.join(" · ") + ', signed by the pool' : ' — the project\'s build is on its way into edge') + (a.note ? ' · ' + short(a.note, 80) : ''), inRings.length ? ["/package/" + encodeURIComponent(a.name) + "?ring=" + inRings[inRings.length - 1] + "&arch=" + a.arch, "The package →"] : ["/build/" + a.task_id, "The build →"])); }
+      if (a.withdrawn_at) decided.push(row("act", a.name, a.version, a.arch, taskPill("withdrawn"), 'the approval by ' + personLink(a.by) + ' was withdrawn ' + ago(a.withdrawn_at) + ' by ' + personLink(a.withdrawn_by) + ': ' + short(a.withdrawn_reason, 100) + ' — another maintainer decides', ["/build/" + a.task_id, "The build →"]));
+      else if (a.decision === "rejected") decided.push(row("act", a.name, a.version, a.arch, taskPill("rejected"), ago(a.created_at) + ' by ' + personLink(a.by) + ': ' + short(a.note, 110), ["/factory", "Fix it, build again →"]));
+      else { var inRings = a.rings && a.rings.length ? a.rings : (p && p.status === "published" ? ["edge"] : []); decided.push(row("ok", a.name, a.version, a.arch, taskPill("approved"), ago(a.created_at) + ' by ' + personLink(a.by) + (inRings.length ? ' — in ' + inRings.join(" · ") + ', signed by the pool' : ' — the project\'s build is on its way into edge') + (a.note ? ' · ' + short(a.note, 80) : ''), inRings.length ? ["/package/" + encodeURIComponent(a.name) + "?ring=" + inRings[inRings.length - 1] + "&arch=" + a.arch, "The package →"] : ["/build/" + a.task_id, "The build →"])); }
     });
     $("#mine-waiting").innerHTML = waiting.join("") || '<p class="sub" style="margin:0">Nothing of yours waiting. <a href="/request">Request a package →</a></p>';
     $("#mine-decided").innerHTML = decided.join("") || '<p class="sub" style="margin:0">No decision on a package of yours yet.</p>';
-    $("#g-waiting").hidden = maint() && !waiting.length; $("#g-decided").hidden = maint() && !decided.length;
+    $("#g-waiting").hidden = isMaintainer() && !waiting.length; $("#g-decided").hidden = isMaintainer() && !decided.length;
     // A maintainer's own line: what waits for them, what the project is building, what is theirs (another maintainer decides).
-    if (maint()) {
-      var forMe = STAGED.filter(function (t) { return t.owner !== login && decidable(t); }), inFlight = STAGED.filter(function (t) { return t.kind !== "project" && t.project_build && (t.project_build.status === "queued" || t.project_build.status === "leased"); }), own = STAGED.filter(function (t) { return t.owner === login && !t.already; });
+    if (isMaintainer()) {
+      var forMe = STAGED.filter(function (t) { return !isOwner(t.owner) && decidable(t); }), inFlight = STAGED.filter(function (t) { return t.kind !== "project" && t.project_build && (t.project_build.status === "queued" || t.project_build.status === "leased"); }), own = STAGED.filter(function (t) { return isOwner(t.owner) && !t.already; });
       $("#mine-queue").innerHTML = '<b>' + num(forMe.length) + '</b> waiting for your decision <a href="#queue">↓</a> · <b>' + num(inFlight.length) + '</b> the project is building · <b>' + num(own.length) + '</b> yours — another maintainer decides';
     }
   }
@@ -149,7 +139,7 @@ const SCRIPT = String.raw`
 
   // ---- in review: the same table for everyone; the decision column for maintainers
   function category(t) {
-    if (!maint()) return t.category ? '<span class="pill none">' + esc(t.category) + '</span>' : '';
+    if (!isMaintainer()) return t.category ? '<span class="pill none">' + esc(t.category) + '</span>' : '';
     return '<select class="cat" data-category="' + esc(t.name) + '" title="the category a person finds it under">' + (t.category ? '' : '<option value="" selected>category…</option>') + CATEGORIES.map(function (c) { return '<option' + (c === t.category ? ' selected' : '') + '>' + c + '</option>'; }).join("") + '</select>';
   }
   // Where the bytes came from: the worker that held the lease, whose it is, the host it names, who vouched for it (the project's builds) — the approval sees the machine, not only the evidence.
@@ -158,7 +148,8 @@ const SCRIPT = String.raw`
     var who = b.owner ? b.owner + "'s " : "", word = b.trusted_by ? "trusted on the word of " + b.trusted_by : (t.kind === "project" ? "trusted before trust took two words" : "a community worker");
     return ' <span class="dim" title="' + esc(who + "worker " + b.worker + (b.where ? " on " + b.where : "") + " — " + word) + '">on ' + esc(b.where || b.worker) + '</span>';
   }
-  function gate(t) {
+  // The gate's verdict: the worker's own checks on the build, with what warned or failed beside the pill (the shell's gate() is a control gated).
+  function gateVerdict(t) {
     var v = t.vet;
     if (!v) return '<span class="dim" title="built before the gate existed">—</span>';
     if (v.verdict === "pass") return '<span class="pill ok">pass</span> <a class="run" href="' + t.evidence.tests + '" title="' + esc((v.warned || []).join(", ")) + '">' + (v.warnings ? v.warnings + ' warning' + (v.warnings === 1 ? '' : 's') : 'clean') + '</a>';
@@ -192,14 +183,13 @@ const SCRIPT = String.raw`
   // The class today, the projection on hover; a chain whose contributor's half is not complete says so — a maintainer's time is not asked yet.
   function klass(t) {
     var sc = t.score; if (!sc) return '<span class="muted">—</span>';
-    var cls = { A: "ok", B: "ok", C: "warn", D: "error" }[sc.class] || "none";
-    return '<span class="pill ' + cls + '" title="' + esc(sc.points + "/100 today · with the maintainer's half green: " + sc.projected) + '">' + esc(sc.class) + '</span>' + (sc.class !== sc.projected ? ' <span class="dim" title="with the maintainer\'s half green">→ ' + esc(sc.projected) + '</span>' : '') + (!sc.ready ? ' <span class="pill none" title="a request as the form asks today, a build that passed the gate, audited — then a maintainer">not ready</span>' : '');
+    return classPill(sc, sc.class, sc.points + "/100 today · with the maintainer's half green: " + sc.projected) + (sc.class !== sc.projected ? ' <span class="dim" title="with the maintainer\'s half green">→ ' + esc(sc.projected) + '</span>' : '') + (!sc.ready ? ' <span class="pill none" title="a request as the form asks today, a build that passed the gate, audited — then a maintainer">not ready</span>' : '');
   }
   function decision(t) {
-    if (!maint()) return '';
+    if (!isMaintainer()) return '';
     if (t.already) return '<span class="muted" title="the same name, version and architecture were approved as build #' + t.already.task + '">already approved</span> <button type="button" data-reject="' + t.id + '" data-note="a build of a version already approved (#' + t.already.task + ')">Drop</button>';
     if (t.score && !t.score.ready) return '<span class="muted" title="the contributor\'s half is not complete: a request as the form asks, a build through the gate, an audit">not ready — the contributor\'s turn</span>';
-    if (t.owner === login) return '<span class="muted" title="conflict of interest: nobody decides on their own package">yours — another maintainer</span>';
+    if (isOwner(t.owner)) return '<span class="muted" title="conflict of interest: nobody decides on their own package">yours — another maintainer</span>';
     var pb = t.project_build;
     if (t.kind === "project") return '<button type="button" data-approve="' + t.id + '">Approve</button> <button type="button" data-reject="' + t.id + '">Reject</button>';
     if (pb && (pb.status === "queued" || pb.status === "leased")) return '<span class="muted">the project is building it (#' + pb.id + ')</span> <button type="button" data-reject="' + t.id + '">Reject</button>';
@@ -207,16 +197,16 @@ const SCRIPT = String.raw`
     return (pb && pb.status === "failed" ? '<span class="pill error" title="' + esc(pb.error || "") + '">project build #' + pb.id + ' failed</span> ' : '') + '<button type="button" data-build="' + t.id + '">Build by the project</button> <button type="button" data-reject="' + t.id + '">Reject</button>';
   }
   function renderStaged() {
-    var forMe = maint() ? STAGED.filter(function (t) { return t.owner !== login && decidable(t); }).length : 0, redundant = STAGED.filter(function (t) { return t.already; }).length;
-    $("#queue-note").textContent = STAGED.length ? (maint() ? num(forMe) + " waiting for your decision · " : "") + num(STAGED.length) + " staged" + (redundant ? " · " + num(redundant) + " of a version already approved" : "") : "";
+    var forMe = isMaintainer() ? STAGED.filter(function (t) { return !isOwner(t.owner) && decidable(t); }).length : 0, redundant = STAGED.filter(function (t) { return t.already; }).length;
+    $("#queue-note").textContent = STAGED.length ? (isMaintainer() ? num(forMe) + " waiting for your decision · " : "") + num(STAGED.length) + " staged" + (redundant ? " · " + num(redundant) + " of a version already approved" : "") : "";
     pager("#staged", STAGED, function (t) {
       var det = t.detected || {}, project = t.kind === "project", pb = t.project_build;
       var build = project ? '<span class="pill ok" title="the project\'s own build, from a contributor\'s evidence">the project</span> <span class="muted">' + taskLink(t.id) + ' from ' + taskLink(t.from) + '</span>' + builtOn(t)
         : '<span class="muted">evidence · ' + taskLink(t.id) + (t.duration_ms ? ' · ' + Math.round(t.duration_ms / 1000) + ' s' : '') + '</span>' + builtOn(t) + (pb && (pb.status === "queued" || pb.status === "leased") ? ' <span class="pill blue">building again</span>' : pb && pb.status === "staged" ? ' <span class="pill ok">built again</span>' : '')
         + (t.already ? ' <span class="pill none" title="approved ' + esc(ago(t.already.at)) + ' by ' + esc(t.already.by) + ' as build #' + t.already.task + (t.already.rebuild_task ? '; the project\'s build #' + t.already.rebuild_task + ' ' + esc(t.already.rebuild_status || '') : '') + ' — nothing to decide">already approved</span>' : '');
-      var mine = WHO && t.owner === login, forYou = maint() && !mine && decidable(t);
+      var mine = isOwner(t.owner), forYou = isMaintainer() && !mine && decidable(t);
       return '<tr id="t-' + t.id + '"' + (project ? ' class="project-row"' : '') + (forYou ? ' class="for-you"' : mine ? ' class="mine-row"' : '') + '><td>' + pkg(t.name, t.version, t.arch) + (det.license ? ' <span class="dim">' + esc(det.license) + '</span>' : '') + (t.url ? ' <a class="run dim" href="' + esc(t.url) + '" title="' + esc(t.url) + '">source</a>' : '') + '<br>' + category(t) + '</td><td>' + esc(t.arch) + '</td>' +
-        '<td>' + person(t.owner) + (mine ? ' <span class="pill none">you</span>' : '') + '</td><td>' + build + '</td><td>' + gate(t) + '</td><td>' + audit(t) + '</td><td>' + trial(t) + '</td>' +
+        '<td>' + personLink(t.owner) + (mine ? ' <span class="pill none">you</span>' : '') + '</td><td>' + build + '</td><td>' + gateVerdict(t) + '</td><td>' + audit(t) + '</td><td>' + trial(t) + '</td>' +
         '<td>' + klass(t) + '</td>' +
         '<td class="when">' + ago(t.finished_at) + '</td><td class="decision">' + decision(t) + '</td></tr>';
     }, { empty: "nothing waiting for review", text: function (t) { return [t.id, t.name, t.version, t.arch, t.owner, t.kind, t.category, t.score && t.score.class].join(" "); } });
@@ -224,7 +214,7 @@ const SCRIPT = String.raw`
   }
   function renderDecisions() {
     pager("#decisions", APPROVALS, function (a) {
-      return '<tr><td class="when">' + ago(a.created_at) + '</td><td>' + pkg(a.name, a.version, a.arch) + ' <span class="dim">' + taskLink(a.task_id) + '</span></td><td>' + esc(a.arch) + '</td><td>' + (a.withdrawn_at ? '<span class="pill none" title="' + esc("approved by " + a.by + ", withdrawn " + ago(a.withdrawn_at) + " by " + a.withdrawn_by + ": " + (a.withdrawn_reason || "")) + '">withdrawn</span>' : '<span class="pill ' + (a.decision === "approved" ? "ok" : "error") + '">' + esc(a.decision) + '</span>') + '</td><td>' + person(a.by) + (a.withdrawn_at ? ' <span class="dim">· withdrawn by ' + person(a.withdrawn_by) + '</span>' : '') + '</td><td class="muted">' + esc(a.withdrawn_at ? (a.withdrawn_reason || "") : (a.note || "")) + '</td><td>' + (a.rebuild_task ? taskLink(a.rebuild_task) + ' ' + esc(a.rebuild_status || "") + (a.rebuild_result ? ' <span class="mono">' + esc(a.rebuild_result) + '</span>' : '') : (a.decision === "approved" ? '<span class="dim">waiting for the recipe on main</span>' : '—')) + '</td></tr>';
+      return '<tr><td class="when">' + ago(a.created_at) + '</td><td>' + pkg(a.name, a.version, a.arch) + ' <span class="dim">' + taskLink(a.task_id) + '</span></td><td>' + esc(a.arch) + '</td><td>' + (a.withdrawn_at ? taskPill("withdrawn", "approved by " + a.by + ", withdrawn " + ago(a.withdrawn_at) + " by " + a.withdrawn_by + ": " + (a.withdrawn_reason || "")) : taskPill(a.decision)) + '</td><td>' + personLink(a.by) + (a.withdrawn_at ? ' <span class="dim">· withdrawn by ' + personLink(a.withdrawn_by) + '</span>' : '') + '</td><td class="muted">' + esc(a.withdrawn_at ? (a.withdrawn_reason || "") : (a.note || "")) + '</td><td>' + (a.rebuild_task ? taskLink(a.rebuild_task) + ' ' + esc(a.rebuild_status || "") + (a.rebuild_result ? ' <span class="mono">' + esc(a.rebuild_result) + '</span>' : '') : (a.decision === "approved" ? '<span class="dim">waiting for the recipe on main</span>' : '—')) + '</td></tr>';
     }, { empty: "no decision yet", text: function (a) { return [a.name, a.version, a.arch, a.decision, a.by, a.note].join(" "); } });
     endSkeleton();
   }
@@ -237,12 +227,12 @@ const SCRIPT = String.raw`
     var asked = given ? Promise.resolve(given) : what === "reject"
       ? ask({ title: "Reject build #" + id, text: "The contributor reads the note and builds again. The rejection is on the record.", input: "required", placeholder: "what is wrong, in a line or two", confirm: "Reject", danger: true })
       : what === "approve" ? ask({ title: "Approve build #" + id, text: "The project's build goes into edge, signed by the pool; the approval is on the record with your name.", input: "optional", confirm: "Approve" })
-      : projectWorkers().then(function (ws) { return ask({ title: "Have the project build #" + id + " again", text: "A trusted review worker builds the recipe again with the project's agent — the contributor's bytes are never used. The result shows here when it is staged.", select: whereOptions(ws, row ? row.arch : "x86_64", login, true), input: "optional", placeholder: "a hint for the project's agent (optional)", confirm: "Build by the project" }); });
+      : projectWorkers().then(function (ws) { return ask({ title: "Have the project build #" + id + " again", text: "A trusted review worker builds the recipe again with the project's agent — the contributor's bytes are never used. The result shows here when it is staged.", select: whereOptions(ws, row ? row.arch : "x86_64", WHO.login, true), input: "optional", placeholder: "a hint for the project's agent (optional)", confirm: "Build by the project" }); });
     asked.then(function (got) {
       if (got === null) return;
       var body = { note: got && typeof got === "object" ? got.note : got };
       if (got && typeof got === "object" && got.pick) body.worker = got.pick;
-      busy(fetch(API + "/tasks/" + id + "/" + what, { method: "POST", headers: headers(), body: JSON.stringify(body) })).then(function (r) { return r.json(); }).then(function (d) {
+      api("POST", API + "/tasks/" + id + "/" + what, body).then(function (d) {
         if (d.error) toast(esc(d.error), "error");
         else toast(what === "approve" ? "Approved — the project's build goes into edge (publish job <a href=\"/build/" + d.publish + "\">#" + d.publish + "</a>)." : what === "build" ? "The project is building it: task <a href=\"/build/" + d.task + "\">#" + d.task + "</a>, on " + (d.pinned_to ? esc(wtShort(d.pinned_to)) : "a review worker") + " with the project's agent." : given ? "Dropped." : "Rejected — the contributor sees the note.");
         load();
@@ -252,20 +242,20 @@ const SCRIPT = String.raw`
   function block(kind, what, lift) {
     ask(lift ? { title: "Lift the block on " + what, text: "The record keeps why.", input: "required", confirm: "Lift it" } : { title: "Block " + what, text: "The record and the contributor see this.", input: "required", confirm: "Block", danger: true }).then(function (why) {
       if (why === null) return;
-      busy(fetch(API + "/" + kind + "/" + encodeURIComponent(what) + "/" + (lift ? "unblock" : "block"), { method: "POST", headers: headers(), body: JSON.stringify({ reason: why }) })).then(function (r) { return r.json(); }).then(function (d) { if (d.error) toast(esc(d.error), "error"); else toast(lift ? "Lifted." : "Blocked."); load(); });
+      api("POST", API + "/" + kind + "/" + encodeURIComponent(what) + "/" + (lift ? "unblock" : "block"), { reason: why }).then(function (d) { if (d.error) toast(esc(d.error), "error"); else toast(lift ? "Lifted." : "Blocked."); load(); });
     });
   }
   function renderBlocks() {
     pager("#blocked-people", (BLOCKS.contributors || []), function (b) {
-      return '<tr><td><b>' + person(b.login) + '</b></td><td class="when">' + ago(b.blocked_at) + '</td><td>' + person(b.blocked_by) + '</td><td>' + esc(b.blocked_reason || "") + '</td><td>' + (b.blocked_by !== login ? '<button type="button" data-unblock="contributors" data-what="' + esc(b.login) + '">Lift</button>' : '') + '</td></tr>';
+      return '<tr><td><b>' + personLink(b.login) + '</b></td><td class="when">' + ago(b.blocked_at) + '</td><td>' + personLink(b.blocked_by) + '</td><td>' + esc(b.blocked_reason || "") + '</td><td>' + (!isOwner(b.blocked_by) ? '<button type="button" data-unblock="contributors" data-what="' + esc(b.login) + '">Lift</button>' : '') + '</td></tr>';
     }, { empty: "no contributor blocked" });
     pager("#blocked-packages", (BLOCKS.packages || []), function (b) {
-      return '<tr><td><b>' + esc(b.name) + '</b></td><td>' + person(b.owner) + '</td><td class="when">' + ago(b.blocked_at) + '</td><td>' + person(b.blocked_by) + '</td><td>' + esc(b.blocked_reason || "") + '</td><td>' + (b.blocked_by !== login ? '<button type="button" data-unblock="packages" data-what="' + esc(b.name) + '">Lift</button>' : '') + '</td></tr>';
+      return '<tr><td><b>' + esc(b.name) + '</b></td><td>' + personLink(b.owner) + '</td><td class="when">' + ago(b.blocked_at) + '</td><td>' + personLink(b.blocked_by) + '</td><td>' + esc(b.blocked_reason || "") + '</td><td>' + (!isOwner(b.blocked_by) ? '<button type="button" data-unblock="packages" data-what="' + esc(b.name) + '">Lift</button>' : '') + '</td></tr>';
     }, { empty: "no package blocked" });
   }
   document.addEventListener("change", function (ev) {
     var s = ev.target.closest ? ev.target.closest("select[data-category]") : null; if (!s || !s.value) return;
-    busy(fetch(API + "/packages/" + encodeURIComponent(s.getAttribute("data-category")) + "/category", { method: "POST", headers: headers(), body: JSON.stringify({ category: s.value }) })).then(function (r) { return r.json(); }).then(function (d) { if (d.error) { toast(esc(d.error), "error"); load(); } });
+    api("POST", API + "/packages/" + encodeURIComponent(s.getAttribute("data-category")) + "/category", { category: s.value }).then(function (d) { if (d.error) { toast(esc(d.error), "error"); load(); } });
   });
   document.addEventListener("click", function (ev) {
     var u = ev.target.closest ? ev.target.closest("button[data-unblock]") : null;
@@ -281,7 +271,7 @@ const SCRIPT = String.raw`
     busy(fetch("/api/v1/users/" + encodeURIComponent(what))).then(function (r) { return r.status === 200 ? "contributors" : "packages"; }).then(function (kind) {
       ask({ title: "Block " + (kind === "contributors" ? "contributor " : "package ") + what + "?", text: (kind === "contributors" ? "Their builds stop and their packages leave the rings" : "Its builds stop and it leaves the rings") + "; another maintainer lifts it. The reason: <i>" + esc(why) + "</i>", confirm: "Block", danger: true }).then(function (go) {
         if (go === null) return;
-        busy(fetch(API + "/" + kind + "/" + encodeURIComponent(what) + "/block", { method: "POST", headers: headers(), body: JSON.stringify({ reason: why }) })).then(function (r) { return r.json(); }).then(function (d) {
+        api("POST", API + "/" + kind + "/" + encodeURIComponent(what) + "/block", { reason: why }).then(function (d) {
           if (d.error) toast(esc(d.error), "error"); else { toast("Blocked."); $("#block-what").value = ""; $("#block-why").value = ""; }
           load();
         });
@@ -291,16 +281,13 @@ const SCRIPT = String.raw`
 
   // ---- the public lists, then whatever is private
   function load() {
-    busy(Promise.all([
-      fetch(API + "/review").then(function (r) { return r.json(); }),
-      fetch(API + "/approvals").then(function (r) { return r.json(); })
-    ])).then(function (rs) {
+    Promise.all([api("GET", API + "/review"), api("GET", API + "/approvals")]).then(function (rs) {
       STAGED = rs[0].staged || []; APPROVALS = rs[1].approvals || [];
       renderTiles(); renderStaged(); renderDecisions(); renderMine();
     }).catch(function () { endSkeleton(); });
   }
   load();
-  setInterval(function () { load(); if (WHO) privateLoad(); }, 60000);
+  setInterval(function () { load(); if (WHO.me) privateLoad(); }, 60000);
 `;
 
 export function reviewHtml(poolUrl: string, version: RunningVersion): string {
@@ -487,7 +474,7 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     id: "review.blocked-people-table",
     page: "/review",
     anchor: ['id="blocked-people"'],
-    script: ['pager("#blocked-people"', 'data-unblock="contributors"', "b.blocked_by !== login"],
+    script: ['pager("#blocked-people"', 'data-unblock="contributors"', "!isOwner(b.blocked_by)"],
     reads: [{ path: "/api/v1/factory/blocks", fields: ["contributors", "contributors.0.login", "contributors.0.blocked_at", "contributors.0.blocked_by", "contributors.0.blocked_reason"] }],
     // m2 lifts what m1 set; m1's own lift would be 403, and a login nobody blocked 409.
     acts: [{ method: "POST", path: `/api/v1/factory/contributors/${F.blockedContributor}/unblock`, body: { reason: "lifted by the tests" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 200 } }],

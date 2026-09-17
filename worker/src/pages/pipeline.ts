@@ -12,7 +12,6 @@ import { EVERYONE, SIGNED_IN, type Component, type Fixture } from "./components"
 import { CHARTS } from "./charts";
 import { archDiagram, liveDiagram } from "./diagrams";
 import type { RunningVersion } from "../meta";
-import { REPO_URL } from "../meta";
 
 const BODY = String.raw`
   <div class="hero compact">
@@ -101,10 +100,6 @@ const BODY = String.raw`
 const SCRIPT = String.raw`
 __CHARTS__
 
-  function statusPill(s) {
-    var c = { leased: "var(--blue)", queued: "var(--amber)", done: "var(--green)", staged: "var(--green)", failed: "var(--red)", cancelled: "var(--dim)", requested: "var(--amber)", registered: "var(--dim)", waiting: "var(--amber)", building: "var(--blue)", drafting: "var(--blue)", validating: "var(--blue)", review: "var(--amber)", approved: "var(--green)", rejected: "var(--dim)", unmaintained: "var(--dim)" }[s] || "var(--dim)";
-    return '<span class="pill" style="color:' + c + ';border-color:' + c + '">' + esc(s === "leased" ? "building" : s) + '</span>';
-  }
   function paramsLabel(t) { var p = {}; try { p = typeof t.params === "string" ? JSON.parse(t.params || "{}") : (t.params || {}); } catch (e) {} return [p.source, p.from && p.to ? p.from + " → " + p.to : null, p.ring].filter(Boolean).join(" · "); }
   // A pool job's result, in words: what it did rather than its JSON.
   function jobResult(t) {
@@ -116,14 +111,13 @@ __CHARTS__
     if (t.kind === "render") return "rendered " + (r.repos || []).join(", ");
     return JSON.stringify(r).slice(0, 90);
   }
-  function took(ms) { if (ms == null) return "—"; var s = Math.round(ms / 1000); return s < 60 ? s + " s" : Math.floor(s / 60) + " min " + (s % 60) + " s"; }
   function loadRegistry() {
     busy(fetch("/api/v1/factory/packages")).then(function (r) { return r.json(); }).then(function (d) {
       pager("#registry", d.packages || [], function (p) {
         var det = p.detected || {};
         var home = p.project || p.url;
         return '<tr><td><b>' + esc(p.name) + '</b>' + (p.request_id ? ' <a class="src" href="' + esc(POOL + "/factory/" + p.name + "/" + p.request_id + "/request.json") + '" title="the request, on the record">#' + p.request_id + '</a>' : '') + '</td><td><a href="' + esc(home) + '">' + esc(home.replace(/^https?:\/\/(www\.)?(github\.com\/)?/, "")) + '</a></td><td>' + esc(p.owner) + '</td><td>' + esc((p.arches || []).join(", ")) + '</td>' +
-          '<td>' + esc([p.release || det.latest_tag, p.license || det.license].filter(Boolean).join(" · ")) + '</td><td>' + statusPill(p.status) + (p.staged_builds ? ' <span class="muted">' + p.staged_builds + ' staged</span>' : '') + '</td><td>' + esc(p.detail || "") + '</td><td>' + ago(p.updated_at) + '</td></tr>';
+          '<td>' + esc([p.release || det.latest_tag, p.license || det.license].filter(Boolean).join(" · ")) + '</td><td>' + taskPill(p.status) + (p.staged_builds ? ' <span class="muted">' + p.staged_builds + ' staged</span>' : '') + '</td><td>' + esc(p.detail || "") + '</td><td>' + ago(p.updated_at) + '</td></tr>';
       }, { empty: 'no package requested yet — <a href="/factory">be the first</a>', text: function (p) { return [p.name, p.category, p.owner, p.url, p.status].join(" "); } });
     }).catch(function () { $("#registry tbody").innerHTML = ""; });
   }
@@ -138,15 +132,12 @@ __CHARTS__
         : (t.error ? '<span class="muted" title="' + esc(t.error) + '">' + esc(t.error.slice(0, 90)) + '</span>' : '<span class="muted">—</span>');
       var what = t.kind && t.kind !== "build" ? '<b>' + esc(t.kind) + '</b> <span class="muted">' + esc(paramsLabel(t)) + '</span>' : '<b>' + esc(t.name) + '</b>' + (t.version ? ' <span class="mono muted">' + esc(t.version) + '</span>' : '');
       return '<tr><td><a href="/build/' + t.id + '" title="the task, whole: what happened, the worker, the evidence">' + t.id + '</a></td><td>' + what + '</td><td>' + esc(t.arch) + '</td>' +
-        '<td>' + statusPill(t.status) + (t.trust === "community" ? ' <span class="pill none" title="a contributor\'s build: goes to staging, a maintainer approves">' + esc(t.owner || "community") + '</span>' : '') + (t.publish === 0 && t.trust !== "community" ? ' <span class="pill none" title="built and measured, never published">dry run</span>' : '') + (t.attempts > 1 ? ' <span class="muted">attempt ' + t.attempts + '/' + t.max_attempts + '</span>' : '') + '</td><td>' + esc(t.reason) + '</td>' +
-        '<td class="mono">' + esc(t.lease_owner || "") + '</td><td>' + took(t.duration_ms) + '</td><td>' + result + '</td></tr>';
+        '<td>' + taskPill(t.status) + (t.trust === "community" ? ' <span class="pill none" title="a contributor\'s build: goes to staging, a maintainer approves">' + esc(t.owner || "community") + '</span>' : '') + (t.publish === 0 && t.trust !== "community" ? ' <span class="pill none" title="built and measured, never published">dry run</span>' : '') + (t.attempts > 1 ? ' <span class="muted">attempt ' + t.attempts + '/' + t.max_attempts + '</span>' : '') + '</td><td>' + esc(t.reason) + '</td>' +
+        '<td class="mono">' + esc(t.lease_owner || "") + '</td><td>' + dur(t.duration_ms) + '</td><td>' + result + '</td></tr>';
     }, { empty: "nothing queued or built yet", text: function (t) { return [t.id, t.kind, t.name, t.arch, t.status, t.reason, t.lease_owner, t.owner, paramsLabel(t)].join(" "); } });
   }
-  var API = "/api/v1/factory", REPO = "__REPO_URL__";
-  var ME_ROLE = null, ME_LOGIN = null, FACTORY = null, STATS = null, STAGED = [];
-  function can() { return ME_ROLE === "maintainer"; }
-  function live(key, text) { document.querySelectorAll('[data-live="' + key + '"]').forEach(function (el) { el.textContent = text; }); }
-  function roleOf(w) { var r = w.labels && w.labels.role; if (r === "pool" || r === "review" || r === "community") return r; return w.trust === "project" ? "pool" : "community"; }
+  var API = "/api/v1/factory";
+  var FACTORY = null, STATS = null, STAGED = [];
   skeletonTiles("#tiles", 6); skeletonRows("#staged", 8, 2); skeletonRows("#events", 7, 6); skeletonRows("#tasks", 8, 4); skeletonRows("#registry", 8, 2); // ---- the state row: the service (measured now) and the pipeline (from the journal)
   function renderState(d) {
     fetch("/api/v1/status", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (st) { live("api", "API up · index " + (st.index.ok ? st.index.ms + " ms" : "down") + " · pool " + (st.pool.ok ? st.pool.ms + " ms" : "down")); }).catch(function () { live("api", "API not answering"); });
@@ -232,7 +223,7 @@ __CHARTS__
       var ev = s.evidence || {};
       return '<tr><td class="dim">' + s.id + '</td><td><b>' + esc(s.name) + '</b> <span class="dim">' + esc(s.version || "") + '</span></td><td>' + esc(s.arch) + '</td><td>' + (s.owner ? avatar(s.owner) + ' <a class="run" href="/user/' + encodeURIComponent(s.owner) + '">' + esc(s.owner) + '</a>' : "—") + '</td>' +
         '<td><a class="run" href="' + esc(ev.pkgbuild || "#") + '">PKGBUILD</a> · <a class="run" href="' + esc(ev.log || "#") + '">log</a> · <a class="run" href="' + esc(ev.pkginfo || "#") + '">.PKGINFO</a></td><td>' + auditPill(s.audit) + '</td><td class="when">' + ago(s.finished_at) + '</td>' +
-        '<td style="white-space:nowrap">' + (can() ? '<button type="button" class="ok" data-approve="' + s.id + '">approve</button> <button type="button" class="no" data-reject="' + s.id + '">reject</button>' : '<span class="dim">a maintainer decides</span>') + '</td></tr>';
+        '<td style="white-space:nowrap">' + (isMaintainer() ? '<button type="button" class="ok" data-approve="' + s.id + '">approve</button> <button type="button" class="no" data-reject="' + s.id + '">reject</button>' : '<span class="dim">a maintainer decides</span>') + '</td></tr>';
     }, { empty: "nothing staged — every contributor build has been decided", n: 10 });
   }
   document.addEventListener("click", function (ev) {
@@ -264,40 +255,23 @@ __CHARTS__
     ]);
     live("queue", "queued " + num(count("queued")) + " · leased " + num(count("leased")) + " · per-job tokens · an expired lease goes back in the queue");
     var roles = { pool: [], review: [], shared: [], own: [] };
-    d.workers.forEach(function (w) { var r = roleOf(w); if (w.side === "omarchy") roles[r === "review" ? "review" : "pool"].push(w); else roles[w.mode === "shared" ? "shared" : "own"].push(w); });
+    // The diagram's three lines: the project's build workers (wtKind "project") are the pool's line, the review worker its own, a contributor's shared and own workers one line together.
+    d.workers.forEach(function (w) { var k = wtKind(w); roles[k === "community" ? (w.mode === "shared" ? "shared" : "own") : k === "review" ? "review" : "pool"].push(w); });
     var line = function (ws) { var al = ws.filter(function (w) { return w.alive; }), bz = al.filter(function (w) { return w.current_task; }); return num(al.length) + " alive · " + num(bz.length) + " building" + (ws.length > al.length ? " · " + num(ws.length - al.length) + " gone" : ""); };
     live("w-pool", line(roles.pool)); live("w-review", line(roles.review)); live("w-community", line(roles.shared.concat(roles.own)));
-    $("#ops-who").textContent = can() ? ME_LOGIN + " · you can approve, trust and roll back" : "read-only — approving, trusting and rolling back need the maintainer role";
+    $("#ops-who").textContent = isMaintainer() ? WHO.login + " · you can approve, trust and roll back" : "read-only — approving, trusting and rolling back need the maintainer role";
   }
 
-  // ---- ring heads, the journal, rollback (a job a project worker runs)
+  // ---- ring heads and the journal; the roll-back button is the shell's (askRollback asks, posts the job once, writes #rb-state)
   function renderRings(d) {
     var heads = {}; (d.releases || []).forEach(function (r) { if (r.is_head) heads[r.ring] = r; });
     $("#heads").innerHTML = ["stable", "rc", "edge"].map(function (n) {
       var r = d.rings.filter(function (x) { return x.ring === n; })[0] || {}, rel = r.release, h = ["x86_64", "aarch64"].map(function (a) { var e = latest(d.latest, "health", n, a); return a + " " + (e ? e.status : "—"); }).join(" · ");
       var prev = (d.releases || []).filter(function (x) { return x.ring === n && !x.is_head; })[0];
-      return '<div class="headc ' + n + '"><div class="n"><b>' + n + '</b><span class="dim">' + (rel ? "#" + rel.seq + " · " + ago(rel.created_at) : "no release") + '</span></div><div class="m">' + num(r.package_count || 0) + ' packages · ' + bytes(r.bytes || 0) + ' · ' + h + '</div><div class="acts">' + (rel && rel.parent_id ? '<a class="small-btn" href="/diff?ring=' + n + '&from=' + rel.parent_id + '&to=' + rel.id + '">diff</a>' : "") + (can() && prev ? '<button type="button" class="small-btn" data-rollback="' + prev.id + '" data-ring="' + n + '" title="point ' + n + ' back at release ' + prev.id + '">roll back to #' + prev.seq + '</button>' : "") + '</div></div>';
+      return '<div class="headc ' + n + '"><div class="n"><b>' + n + '</b><span class="dim">' + (rel ? "#" + rel.seq + " · " + ago(rel.created_at) : "no release") + '</span></div><div class="m">' + num(r.package_count || 0) + ' packages · ' + bytes(r.bytes || 0) + ' · ' + h + '</div><div class="acts">' + (rel && rel.parent_id ? '<a class="small-btn" href="/diff?ring=' + n + '&from=' + rel.parent_id + '&to=' + rel.id + '">diff</a>' : "") + (isMaintainer() && prev ? '<button type="button" class="small-btn" data-rollback="' + prev.id + '" data-ring="' + n + '" title="point ' + n + ' back at release ' + prev.id + '">roll back to #' + prev.seq + '</button>' : "") + '</div></div>';
     }).join("");
-    pager("#events", d.events, function (e) {
-      var run = e.payload && e.payload.ci && e.payload.ci.run_url, rid = e.payload && e.payload.release_id, diff = "";
-      if (rid && e.ring && (e.kind === "promote" || e.kind === "rollback" || e.kind === "sync" || e.kind === "fast-track")) diff = ' <a class="run" href="/diff?ring=' + esc(e.ring) + '&to=' + rid + '" title="what release ' + rid + ' changed">diff</a>';
-      return '<tr><td><span class="dot ' + e.status + '"></span>' + e.status + '</td><td><span class="kind">' + esc(e.kind) + '</span></td><td>' + esc(e.ring || "") + '</td><td>' + esc(e.source || "") + '</td><td>' + (run ? '<a class="run" href="' + esc(run) + '">' + esc(e.summary) + '</a>' : esc(e.summary)) + diff + '</td><td class="num">' + dur(e.duration_ms) + '</td><td class="when" title="' + esc(e.created_at) + '">' + ago(e.created_at) + '</td></tr>';
-    }, { empty: "nothing yet", n: 10 });
+    pager("#events", d.events, eventRow, { empty: "nothing yet", n: 10 });
   }
-  document.addEventListener("click", function (ev) {
-    var b = ev.target.closest ? ev.target.closest("button[data-rollback]") : null; if (!b) return;
-    var ring = b.getAttribute("data-ring"), to = b.getAttribute("data-rollback");
-    ask({ title: "Roll " + ring + " back to release " + to + "?", text: "The ring serves that release again at once; the journal keeps why.", input: "required", confirm: "Roll back", danger: true }).then(function (note) {
-    if (note === null) return;
-    b.disabled = true;
-    busy(fetch(API + "/jobs", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ kind: "rollback", params: { ring: ring, to: to, note: note } }) })).then(function (r) { return r.json(); }).then(function (j) {
-      var el = $("#rb-state"); el.hidden = false;
-      el.innerHTML = j.error ? '<span class="pill error">refused</span> ' + esc(j.error) : '<span class="pill ok">queued</span> rollback of <b>' + esc(ring) + '</b> to release ' + esc(to) + ' is task #' + esc(j.task || "?") + ' — a project worker runs it, the journal records it';
-      b.disabled = false;
-    }).catch(function (e) { b.disabled = false; toast("failed: " + esc(String(e)), "error"); });
-    });
-  });
-
   // ---- the charts, from /api/v1/stats
   function renderCharts(d) {
     var S = d.series || {}, days14 = lastDays(14), days7 = lastDays(7);
@@ -309,9 +283,8 @@ __CHARTS__
     $("#c-imports").innerHTML = stacked(days14, [{ name: "imported", color: C.green, values: days14.map(function (x) { return byDay[x] ? Number(byDay[x].packages) : 0; }) }], { label: "Packages imported per day over fourteen days", empty: "no sync yet" });
     var runs = (S.sync_runs || []).slice().reverse().filter(function (r) { return r.bytes && r.duration_ms; });
     $("#c-sync").innerHTML = bars(runs.map(function (r) { var mbs = Number(r.bytes) / 1048576 / (Number(r.duration_ms) / 1000); return { label: r.source.slice(0, 5) + (r.arch === "aarch64" ? "/arm" : ""), value: Math.round(mbs * 10) / 10, color: r.status === "error" ? C.red : C.blue, title: r.source + " " + r.arch + " " + ago(r.created_at) + ": " + (Math.round(mbs * 10) / 10) + " MB/s, " + bytes(r.bytes) + " in " + dur(r.duration_ms) }; }), function (v) { return v + " MB/s"; });
-    var bd = S.builds_daily || [], bb = {};
-    bd.forEach(function (r) { var x = bb[r.day] = bb[r.day] || { staged: 0, published: 0, failed: 0 }; if (r.status === "staged") x.staged += Number(r.n); else if (r.status === "done") x.published += Number(r.n); else if (r.status === "failed") x.failed += Number(r.n); });
-    $("#c-builds").innerHTML = stacked(days14, [{ name: "staged", color: C.blue, values: days14.map(function (x) { return (bb[x] || {}).staged || 0; }) }, { name: "published", color: C.green, values: days14.map(function (x) { return (bb[x] || {}).published || 0; }) }, { name: "failed", color: C.red, values: days14.map(function (x) { return (bb[x] || {}).failed || 0; }) }], { label: "Factory builds per day over fourteen days", empty: "no build yet" });
+    var builds = buildsByDay(d.series, 14);
+    $("#c-builds").innerHTML = stacked(builds.labels, builds.series, { label: "Factory builds per day over fourteen days", empty: "no build yet" });
   }
 
   // ---- promotions per day: what the promote, rollback and fast-track jobs recorded
@@ -348,7 +321,8 @@ __CHARTS__
       endSkeleton();
     }).catch(function () { endSkeleton(); });
   }
-  whoami(function (me) { if (me) { ME_ROLE = me.role; ME_LOGIN = me.login; } loadAll(); });
+  // The first load waits for /auth/me, so a maintainer's buttons are there from the first draw.
+  whoami(function () { loadAll(); });
   setInterval(loadAll, 30000);
   loadFeed(); setInterval(loadFeed, 20000);
   renderCost(); renderPromos(); setInterval(renderPromos, 300000);
@@ -361,7 +335,7 @@ export function pipelineHtml(poolUrl: string, version: RunningVersion): string {
     description: "The pipeline as it runs: what is verified, promoted and checked right now, how fast maintainers decide, the charts, the cost.",
     active: "pipeline",
     body: BODY,
-    script: SCRIPT.replace("__CHARTS__", CHARTS).replace("__REPO_URL__", REPO_URL),
+    script: SCRIPT.replace("__CHARTS__", CHARTS),
     poolUrl,
     version,
   });
@@ -488,7 +462,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.operations-hint",
     page: "/pipeline",
     anchor: ['id="operations"', 'id="ops-who"'],
-    script: ['$("#ops-who")', 'ME_ROLE === "maintainer"', "you can approve, trust and roll back", "read-only — approving, trusting and rolling back need the maintainer role"],
+    script: ['$("#ops-who")', "isMaintainer() ? WHO.login", "you can approve, trust and roll back", "read-only — approving, trusting and rolling back need the maintainer role"],
     reads: [{ path: "/auth/me", as: "maintainer", fields: ["login", "role"] }],
     visible: EVERYONE,
   },
@@ -508,7 +482,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.arch-diagram",
     page: "/pipeline",
     anchor: ['data-live="last-sync"', 'data-live="api"', 'data-live="pool-size"', 'data-live="heads"', 'data-live="queue"', 'data-live="w-pool"', 'data-live="w-review"', 'data-live="w-community"', 'href="/workers"'],
-    script: ['live("last-sync"', 'live("api"', 'live("pool-size"', 'live("heads"', 'live("queue"', 'live("w-pool"', 'live("w-review"', 'live("w-community"', "roleOf(w)"],
+    script: ['live("last-sync"', 'live("api"', 'live("pool-size"', 'live("heads"', 'live("queue"', 'live("w-pool"', 'live("w-review"', 'live("w-community"', "wtKind(w)"],
     reads: [
       { path: "/api/v1/stats", fields: ["latest", "pool.objects", "pool.bytes", "rings.2.release.seq"] },
       { path: "/api/v1/status", fields: ["index.ok", "index.ms", "pool.ok", "pool.ms"] },
@@ -593,7 +567,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.builds-chart",
     page: "/pipeline",
     anchor: ['id="c-builds"'],
-    script: ['$("#c-builds")', "S.builds_daily", 'r.status === "staged"'],
+    script: ['$("#c-builds")', "buildsByDay(d.series, 14)", '"Factory builds per day over fourteen days"'],
     reads: [{ path: "/api/v1/stats", fields: ["series.builds_daily", "series.builds_daily.0.day", "series.builds_daily.0.status", "series.builds_daily.0.n"] }],
     visible: EVERYONE,
   },
@@ -629,7 +603,8 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.rollback-action",
     page: "/pipeline",
     anchor: ['id="heads"', 'id="rb-state"'],
-    script: ["data-rollback", 'API + "/jobs"', 'kind: "rollback"', '$("#rb-state")', '"Roll back"'],
+    // The page draws the button for a maintainer, on the release before the head; the click, the dialog and the post are the shell's (shell.rollback).
+    script: ['data-rollback="', "isMaintainer() && prev", "roll back to #"],
     // Queued, never run: no worker claims it in the tests, so what stable serves does not change. `to` is a string, as the button's attribute sends it.
     acts: [{ method: "POST", path: "/api/v1/factory/jobs", body: { kind: "rollback", params: { ring: "stable", to: String(F.previousRelease), note: "the fixture's rollback" } }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 201 } }],
     visible: ["maintainer"],
@@ -638,7 +613,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.journal-table",
     page: "/pipeline",
     anchor: ['id="events"'],
-    script: ['pager("#events"', "e.payload.release_id", "dur(e.duration_ms)", 'e.kind === "promote"'],
+    script: ['pager("#events", d.events, eventRow', 'empty: "nothing yet", n: 10'],
     reads: [{ path: "/api/v1/stats", fields: ["events", "events.0.status", "events.0.kind", "events.0.ring", "events.0.source", "events.0.summary", "events.0.payload", "events.0.duration_ms", "events.0.created_at"] }],
     visible: EVERYONE,
   },

@@ -873,10 +873,11 @@ export const HELPERS = String.raw`
   // A build's class (score.ts): A and B green, C amber, D red — the pill says the class and the points, the hover what the maintainer's half would make of it; text and title replace those where a row has room for the letter only.
   var CLASS_CLS = { A: "ok", B: "ok", C: "warn", D: "error" };
   function classPill(sc, text, title) { return pillHtml(CLASS_CLS[sc.class] || "none", text || "class " + sc.class + " · " + sc.points + "/100", title || "today; with the maintainer's half green: " + sc.projected); }
-  // A row of choices, one lit (the rings, the architectures, a journal's kinds): values are the words, current the one on, on(value) what a press does. opts.url names the query parameter the choice is written to, so the address carries it.
+  // A row of choices, one lit (the rings, the architectures, a journal's kinds): values are the words, current the one on, on(value) what a press does. opts.url names the query parameter the choice is written to, so the address carries it; opts.label(value) is a button's own markup where the word is not what it shows (a stage's name over its rhythm).
   function pick(sel, values, current, on, opts) {
     opts = opts || {}; var el = $(sel); if (!el) return;
-    el.innerHTML = values.map(function (v) { return '<button type="button" class="' + (v === current ? "on" : "") + '" data-v="' + esc(v) + '">' + esc(v) + '</button>'; }).join("");
+    var label = opts.label || esc;
+    el.innerHTML = values.map(function (v) { return '<button type="button" class="' + (v === current ? "on" : "") + '" data-v="' + esc(v) + '">' + label(v) + '</button>'; }).join("");
     el.querySelectorAll("button").forEach(function (b) { b.onclick = function () { var v = b.getAttribute("data-v"); if (opts.url) { var q = new URLSearchParams(location.search); q.set(opts.url, v); history.replaceState(null, "", "?" + q); } on(v); }; });
   }
   // The copy chips beside a command (.copy with data-copy="key"): map is { key: "#selector" }, the text of that element goes to the clipboard, the chip says so for a moment — and says when the browser refused (no permission, plain http).
