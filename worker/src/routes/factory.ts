@@ -752,7 +752,7 @@ export async function handleTask(id: number, env: Env): Promise<Response> {
     isBuild ? rel("publish", "task", task.id) : null,
     isBuild
       ? env.DB.prepare(
-          `SELECT a.id, a.task_id, a.decision, a.by, a.note, a.rebuild_task, a.created_at, r.status AS rebuild_status, r.result_filename AS rebuild_result
+          `SELECT a.id, a.task_id, a.decision, a.by, a.note, a.rebuild_task, a.created_at, a.withdrawn_at, a.withdrawn_by, a.withdrawn_reason, r.status AS rebuild_status, r.result_filename AS rebuild_result
              FROM approvals a LEFT JOIN build_tasks r ON r.id = a.rebuild_task WHERE a.task_id = ? OR a.rebuild_task = ? ORDER BY a.id DESC LIMIT 1`,
         ).bind(task.id, task.id).first()
       : null,

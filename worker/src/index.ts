@@ -67,7 +67,7 @@ import { maintainersOf, GOVERNANCE_FILE } from "./governance";
 import { BUDGET_CAP_USD, BUDGET_GUARD_USD, BUDGET_WARN_USD } from "./cost";
 import { handleQueueJob } from "./jobs";
 import { isMaintainer } from "./routes/contributors";
-import { handleReviewList, handleApprove, handleReject, handleApprovals, handleProjectBuild } from "./routes/review";
+import { handleReviewList, handleApprove, handleReject, handleApprovals, handleProjectBuild, handleWithdraw } from "./routes/review";
 import { handleBlockContributor, handleUnblockContributor, handleBlockPackage, handleUnblockPackage, handleBlocks } from "./routes/blocks";
 import { handleAuthStart, handleAuthCallback, handleLogout } from "./routes/auth";
 import { handleSignPool } from "./routes/pool";
@@ -295,6 +295,11 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
     return c ? handleNewToken(c, env) : json({ error: "sign in first" }, 401);
   }
   // Maintainers: have the project build a staged package, approve or reject a staged build.
+  if ((m = path.match(/^\/factory\/tasks\/(\d+)\/withdraw$/)) && method === "POST") {
+    const c = await contributorOf(request, env);
+    if (!c) return json({ error: "a maintainer's contributor token is required" }, 401);
+    return handleWithdraw(c, Number(m[1]), request, env);
+  }
   if ((m = path.match(/^\/factory\/tasks\/(\d+)\/(approve|reject|build)$/)) && method === "POST") {
     const c = await contributorOf(request, env);
     if (!c) return json({ error: "a maintainer's contributor token is required" }, 401);

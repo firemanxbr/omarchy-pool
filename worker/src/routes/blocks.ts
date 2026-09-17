@@ -77,7 +77,7 @@ export async function handleUnblockContributor(c: Contributor, login: string, re
  * the record and GC's retention keep the history — it is simply no longer
  * served.
  */
-async function pullFromRings(env: Env, name: string, note: string): Promise<{ ring: string; release: number | null }[]> {
+export async function pullFromRings(env: Env, name: string, note: string): Promise<{ ring: string; release: number | null }[]> {
   const rings = (await env.DB.prepare("SELECT DISTINCT rp.ring FROM ring_packages rp JOIN packages p ON p.id = rp.package_id WHERE p.name = ? AND p.source = 'factory'").bind(name).all<{ ring: string }>()).results.map((r) => r.ring);
   const out: { ring: string; release: number | null }[] = [];
   for (const ring of rings) {
