@@ -95,8 +95,7 @@ const SCRIPT = String.raw`
   var ROLES = { contributor: ["Contributor", [["register any package, no permission needed", "have every request built in the shared queue, the best idle shared worker first — a worker of your own takes yours at once, and shared it helps everyone", "get every build as evidence, publicly", "a public profile and a score"], ["ship bytes to users directly", "approve anything, including their own"]]], maintainer: ["Maintainer", [["read a staged build with the evidence in front of them, and reject it or have the project build it again", "approve or reject the project's build — the approval is the decision, on the record with a name", "settle each package's category", "vouch for a worker as a project worker — with a second maintainer, never the owner", "block a contributor or a package, with the reason on the record — another maintainer lifts it", "roll a ring back, and run any pipeline step by hand", "review and merge pull requests — never their own; propose a new maintainer"], ["use anything a contributor built — not the package, not the PKGBUILD: the project builds what its agent wrote", "approve their own package, even as the only maintainer", "be named anywhere but factory/MAINTAINERS.toml"]]], workers: ["The project's workers", [["claim tasks of their role and architecture with a lease", "run the pool's jobs, the audit of a staged build, the project's builds of reviewed packages and of the recipes on main", "write the audit when their owner set an agent key"], ["build from a contributor's staged artifact", "pull a new package that has no evidence and no review yet", "decide anything — the audit is evidence, never a verdict", "hold the pool's signing key: signing happens in the brain"]]] };
   var role = "contributor";
   function drawRoles() {
-    $("#role-tabs").innerHTML = Object.keys(ROLES).map(function (k) { return '<button type="button" data-role="' + k + '" class="' + (role === k ? "on" : "") + '">' + ROLES[k][0] + '</button>'; }).join("");
-    $("#role-tabs").querySelectorAll("button").forEach(function (b) { b.onclick = function () { role = b.getAttribute("data-role"); drawRoles(); }; });
+    pick("#role-tabs", Object.keys(ROLES), role, function (v) { role = v; drawRoles(); }, { label: function (k) { return esc(ROLES[k][0]); } });
     var r = ROLES[role][1];
     $("#role-lists").innerHTML = '<div><h4>does</h4><ul class="yes">' + r[0].map(function (x) { return "<li>" + esc(x) + "</li>"; }).join("") + '</ul></div><div><h4>never</h4><ul class="no">' + r[1].map(function (x) { return "<li>" + esc(x) + "</li>"; }).join("") + '</ul></div>';
   }
@@ -111,7 +110,6 @@ const SCRIPT = String.raw`
   busy(fetch("/api/v1/events?kind=role&limit=50")).then(function (r) { return r.json(); }).then(function (d) {
     pager("#roles-table", d.events || [], function (e) { return '<tr><td class="when">' + ago(e.created_at) + '</td><td>' + esc(e.summary) + '</td></tr>'; }, { empty: "no role change recorded yet" });
   }).catch(function () { endSkeleton(); });
-  liveStats(function () {}, 120000);
 `;
 
 export function governanceHtml(poolUrl: string, version: RunningVersion): string {
@@ -173,11 +171,11 @@ export const GOVERNANCE_COMPONENTS = (_F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // The tabs and the lists are the script's: the served section is a heading over two empty divs.
+      // The tabs are the shell's pick() over the roles' keys, each button saying the role's name; the lists are the script's: the served section is a heading over two empty divs.
       id: "governance.role-tabs",
       page,
       anchor: ['id="roles"', "<h2>What each role does</h2>", '<div class="tabs" id="role-tabs"></div>'],
-      script: ["var ROLES = { contributor: [", 'var role = "contributor"', '"#role-tabs"', 'data-role="', "drawRoles()"],
+      script: ["var ROLES = { contributor: [", 'var role = "contributor"', 'pick("#role-tabs", Object.keys(ROLES), role', "ROLES[k][0]", "drawRoles()"],
       visible: EVERYONE,
     },
     {

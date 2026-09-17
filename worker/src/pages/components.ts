@@ -205,6 +205,15 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     visible: ["owner", "maintainer"],
   },
   {
+    // The rollback button a maintainer sees on a release (the Journal, the Pipeline) is the shell's: it asks, posts the job once and leaves the button disabled.
+    id: "shell.rollback",
+    page: "/",
+    anchor: [],
+    script: ["function askRollback(", 'button[data-rollback]', '"/api/v1/factory/jobs"', 'kind: "rollback", params: { ring: ring, to: to, note: note }', "#rb-state"],
+    acts: [{ method: "POST", path: "/api/v1/factory/jobs", body: { kind: "rollback", params: { ring: "stable", to: String(F.previousRelease), note: "the shell's rollback, from the fixture" } }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 201 } }],
+    visible: ["maintainer"],
+  },
+  {
     // The mark, as the head names it and as browsers ask for it by name (icons.ts).
     id: "icons.favicons",
     page: "/",

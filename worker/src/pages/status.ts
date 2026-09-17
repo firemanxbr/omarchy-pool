@@ -98,7 +98,7 @@ __CHARTS__
       ["Snapshot", m ? ago(m.recorded_at) : "never", m ? "the pool measures itself every 30 minutes" : "no snapshot yet"],
       ["Estimated bill", "…", "Cloudflare, this month"]
     ];
-    tiles.forEach(function (t, i) { var el = $("#systiles"), cell = el.children[i]; if (!cell) { cell = document.createElement("div"); cell.className = "tile"; el.appendChild(cell); } setTile(cell, '<div class="k">' + t[0] + '</div><div class="v num">' + t[1] + '</div><div class="s">' + t[2] + '</div>'); });
+    setTiles("#systiles", tiles);
     // The bill, estimated once a day from Cloudflare's analytics (cost.ts); the guard pauses writing jobs over budget.
     fetch("/api/v1/cost").then(function (r) { return r.ok ? r.json() : null; }).then(function (c) {
       var cell = $("#systiles").children[tiles.length - 1]; if (!cell) return;
@@ -129,9 +129,9 @@ __CHARTS__
       var dd = byD[r.day] = byD[r.day] || { runs: 0, failures: 0, ms: 0 }; dd.runs += Number(r.n); if (r.status === "failed") dd.failures += Number(r.n); dd.ms += Number(r.ms || 0); });
     $("#c-jobs").innerHTML = hbars(Object.keys(byKind).sort(function (a, b) { return (byKind[b].done + byKind[b].failed) - (byKind[a].done + byKind[a].failed); }).map(function (k) { var v = byKind[k]; return { label: k, note: num(v.done + v.failed + v.waiting) + " · " + Math.round(v.ms / 60000) + " min", parts: [{ v: v.done, color: C.green, name: "done" }, { v: v.failed, color: C.red, name: "failed" }, { v: v.waiting, color: C.blue, name: "waiting" }] }; })) +
       '<div class="legend"><span><i style="background:' + C.green + '"></i>done</span><span><i style="background:' + C.red + '"></i>failed</span><span><i style="background:' + C.blue + '"></i>queued / running</span></div>';
-    var bd = S.builds_daily || [], byDay = {};
-    bd.forEach(function (r) { var d = byDay[r.day] = byDay[r.day] || { staged: 0, published: 0, failed: 0 }; if (r.status === "staged") d.staged += Number(r.n); else if (r.status === "done") d.published += Number(r.n); else if (r.status === "failed") d.failed += Number(r.n); });
-    $("#c-builds").innerHTML = bars(lastDays(14).map(function (dd) { var d = byDay[dd] || { staged: 0, published: 0, failed: 0 }; var t = d.staged + d.published + d.failed; return { label: dd.slice(5), value: t, color: d.failed > d.published + d.staged ? C.red : C.green, title: dd + ": " + d.staged + " staged, " + d.published + " published, " + d.failed + " failed" }; }), function (v) { return v + " build(s)"; });
+    // The shell's builds per day (staged, published, failed), as one bar a day here: red on a day more builds failed than got through.
+    var builds = buildsByDay(S, 14);
+    $("#c-builds").innerHTML = bars(builds.labels.map(function (dd, i) { var staged = builds.days[i].staged, published = builds.days[i].published, failed = builds.days[i].failed; return { label: dd.slice(5), value: staged + published + failed, color: failed > published + staged ? C.red : C.green, title: dd + ": " + staged + " staged, " + published + " published, " + failed + " failed" }; }), function (v) { return v + " build(s)"; });
     $("#c-minutes").innerHTML = bars(lastDays(7).map(function (dd) { var r = byD[dd]; return { label: dd.slice(5), value: r ? Math.round(r.ms / 60000) : 0, color: C.blue, title: dd + ": " + (r ? Math.round(r.ms / 60000) + " min in " + r.runs + " jobs, " + r.failures + " failed" : "no jobs") }; }), function (v) { return v + " min"; });
 
     // One row per job kind: what the journal's latest entry says, and the week's totals.
@@ -163,7 +163,7 @@ __CHARTS__
     pager("#coverage", cov, function (c) {
       var pending = c.upstream_total == null, pct = pctOf(c.indexed, c.upstream_total);
       return '<tr><td title="' + esc(c.upstream || "") + '">' + esc(c.source) + '</td><td>' + esc(c.arch) + '</td><td class="num">' + (pending ? '—' : num(c.upstream_total)) + '</td><td class="num">' + num(c.indexed) + '</td><td class="num">' + (pending ? '—' : c.missing ? '<span style="color:var(--amber)">' + num(c.missing) + '</span>' : '0') + '</td><td class="num">' + num(c.pinned_stable) + '</td>' +
-        '<td>' + (pending ? '<span class="pill none">not synced yet</span>' : '<span class="bar"><i class="' + (pct < 100 ? 'partial' : '') + '" style="width:' + pct + '%"></i></span><span class="pct">' + pct + '%</span>') + '</td><td class="num">' + bytes(c.bytes) + '</td><td class="when" title="' + esc(c.last_sync || "") + '">' + (pending ? '—' : ago(c.last_sync) + (c.last_status !== "ok" ? ' <span class="pill ' + c.last_status + '">' + c.last_status + '</span>' : '')) + '</td></tr>';
+        '<td>' + (pending ? pillHtml("none", "not synced yet") : '<span class="bar"><i class="' + (pct < 100 ? 'partial' : '') + '" style="width:' + pct + '%"></i></span><span class="pct">' + pct + '%</span>') + '</td><td class="num">' + bytes(c.bytes) + '</td><td class="when" title="' + esc(c.last_sync || "") + '">' + (pending ? '—' : ago(c.last_sync) + (c.last_status !== "ok" ? ' ' + pillHtml(c.last_status, c.last_status) : '')) + '</td></tr>';
     }, { n: 25 });
   }
 
@@ -179,14 +179,14 @@ __CHARTS__
         var h = latest(d.latest, "health", ring, arch);
         var dbs = (r.artifacts || []).filter(function (a) { return a.kind === "db" && a.arch === arch; });
         if (!dbs.length && !(r.sources || []).some(function (s) { return s.arch === arch; })) return;
-        healthRows.push('<tr><td>' + ring + '</td><td>' + arch + '</td><td>' + (h ? '<span class="pill ' + h.status + '">' + h.status + '</span>' : '<span class="pill none">none</span>') + '</td><td class="when">' + (h ? ago(h.created_at) : "—") + '</td><td>' + (r.release ? "#" + r.release.seq : "—") + '</td><td class="when">' + (r.release ? ago(r.release.created_at) : "—") + '</td><td>' + (dbs.length ? dbs.map(function (a) { return '<code>' + esc(a.repo) + '</code>'; }).join(" ") : '<span class="muted">not rendered</span>') + '</td></tr>');
+        healthRows.push('<tr><td>' + ring + '</td><td>' + arch + '</td><td>' + (h ? pillHtml(h.status, h.status) : pillHtml("none", "none")) + '</td><td class="when">' + (h ? ago(h.created_at) : "—") + '</td><td>' + (r.release ? "#" + r.release.seq : "—") + '</td><td class="when">' + (r.release ? ago(r.release.created_at) : "—") + '</td><td>' + (dbs.length ? dbs.map(function (a) { return '<code>' + esc(a.repo) + '</code>'; }).join(" ") : '<span class="muted">not rendered</span>') + '</td></tr>');
       });
     });
     $("#rings tbody").innerHTML = healthRows.join("") || '<tr><td colspan="7" class="muted">no rings yet</td></tr>';
 
     $("#sources tbody").innerHTML = (d.coverage || []).map(function (c) {
       var isLate = c.last_sync && Date.now() - Date.parse(c.last_sync) > 6 * 3600e3;
-      return '<tr><td>' + esc(c.source) + '</td><td>' + esc(c.arch) + '</td><td class="when">' + (c.last_sync ? ago(c.last_sync) + (isLate ? ' <span class="pill warn">late</span>' : '') : '<span class="pill none">never</span>') + '</td><td>' + (c.last_status ? '<span class="pill ' + c.last_status + '">' + c.last_status + '</span>' : '—') + '</td><td class="num">' + (c.upstream_total == null ? "—" : num(c.upstream_total)) + '</td><td class="num">' + num(c.indexed) + '</td><td class="num">' + (c.missing == null ? "—" : num(c.missing)) + '</td></tr>';
+      return '<tr><td>' + esc(c.source) + '</td><td>' + esc(c.arch) + '</td><td class="when">' + (c.last_sync ? ago(c.last_sync) + (isLate ? ' ' + pillHtml("warn", "late") : '') : pillHtml("none", "never")) + '</td><td>' + (c.last_status ? pillHtml(c.last_status, c.last_status) : '—') + '</td><td class="num">' + (c.upstream_total == null ? "—" : num(c.upstream_total)) + '</td><td class="num">' + num(c.indexed) + '</td><td class="num">' + (c.missing == null ? "—" : num(c.missing)) + '</td></tr>';
     }).join("");
 
     var incidents = d.events.filter(function (e) { return e.kind === "rollback" || e.status === "error" || (e.kind === "gate" && e.payload && e.payload.verdict === "block"); });
@@ -199,13 +199,12 @@ __CHARTS__
       ? '<span style="color:var(--amber)">Pipeline behind:</span> ' + esc(problems.join("; ")) + '. The rings keep serving what they have; the journal below shows what the pipeline is doing about it.'
       : '<span style="color:var(--green)">Pipeline keeping up.</span> Every source synced recently, every ring passed its latest health check.';
     var stable = d.rings.filter(function (r) { return r.ring === "stable"; })[0] || {};
-    var tiles = [
+    renderCoverage(d); renderSystem(d); endSkeleton();
+    setTiles("#tiles", [
       ["Stable", stable.release ? "#" + stable.release.seq : "—", stable.release ? "moved " + ago(stable.release.created_at) : "no release"],
       ["Last sync", lastSync ? ago(lastSync.created_at) : "never", lastSync ? esc(lastSync.summary) : ""],
       ["Incidents", num(incidents.length), "in the last 40 journal entries"]
-    ];
-    renderCoverage(d); renderSystem(d); endSkeleton();
-    tiles.forEach(function (t, i) { var el = $("#tiles"), cell = el.children[i]; if (!cell) { cell = document.createElement("div"); cell.className = "tile"; el.appendChild(cell); } setTile(cell, '<div class="k">' + t[0] + '</div><div class="v num">' + t[1] + '</div><div class="s">' + t[2] + '</div>'); });
+    ]);
   }
   function renderService() {
     fetch("/api/v1/status", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (s) {
@@ -272,7 +271,7 @@ export const STATUS_COMPONENTS = (_F: Fixture): Component[] => [
     id: "status.pipeline-tiles",
     page: "/status",
     anchor: ['id="tiles"'],
-    script: ['"#tiles"', '"Stable"', '"Last sync"', '"Incidents"', "stable.release.seq"],
+    script: ['setTiles("#tiles"', '"Stable"', '"Last sync"', '"Incidents"', "stable.release.seq"],
     reads: [{ path: "/api/v1/stats", fields: ["rings.2.ring", "rings.2.release.seq", "rings.2.release.created_at", "latest.0.kind", "latest.0.created_at", "latest.0.summary", "events", "events.0.kind", "events.0.status"] }],
     visible: EVERYONE,
   },
@@ -297,7 +296,7 @@ export const STATUS_COMPONENTS = (_F: Fixture): Component[] => [
     id: "status.sources-table",
     page: "/status",
     anchor: ['id="sources"', "<th>Last sync</th>", "<th>Result</th>"],
-    script: ['"#sources tbody"', "c.last_sync", "isLate", '<span class="pill warn">late</span>'],
+    script: ['"#sources tbody"', "c.last_sync", "isLate", 'pillHtml("warn", "late")'],
     reads: [{ path: "/api/v1/stats", fields: ["coverage", "coverage.0.source", "coverage.0.arch", "coverage.0.last_sync", "coverage.0.last_status", "coverage.0.upstream_total", "coverage.0.indexed", "coverage.0.missing"] }],
     visible: EVERYONE,
   },
@@ -340,7 +339,7 @@ export const STATUS_COMPONENTS = (_F: Fixture): Component[] => [
     id: "status.system-tiles",
     page: "/status",
     anchor: ['id="systiles"'],
-    script: ['"#systiles"', "m.jobs || m.actions", '"Jobs running now"', '"Promotion, by evidence"', 'latest(d.latest, "gate", "rc", "edge")', "pool.referenced_by_any_release", "pool.reclaimable", "sec.updated_at"],
+    script: ['setTiles("#systiles"', "m.jobs || m.actions", '"Jobs running now"', '"Promotion, by evidence"', 'latest(d.latest, "gate", "rc", "edge")', "pool.referenced_by_any_release", "pool.reclaimable", "sec.updated_at"],
     reads: [
       {
         path: "/api/v1/stats",
@@ -419,7 +418,7 @@ export const STATUS_COMPONENTS = (_F: Fixture): Component[] => [
     id: "status.chart-builds",
     page: "/status",
     anchor: ['id="c-builds"', "<h3>Factory builds <span>14 days</span></h3>"],
-    script: ['"#c-builds"', "S.builds_daily", 'r.status === "staged"', "d.published", '" build(s)"'],
+    script: ['"#c-builds"', "buildsByDay(S, 14)", "failed > published + staged", '" build(s)"'],
     reads: [{ path: "/api/v1/stats", fields: ["series.builds_daily", "series.builds_daily.0.day", "series.builds_daily.0.status", "series.builds_daily.0.n"] }],
     visible: EVERYONE,
   },

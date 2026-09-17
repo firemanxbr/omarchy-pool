@@ -8,6 +8,7 @@
  * interpreted; text is escaped. `outline` reads the same headings for the
  * map beside the text (docs-tree.ts).
  */
+import { escapeHtml } from "./html";
 
 export interface Heading {
   level: number;
@@ -39,10 +40,6 @@ export function slug(title: string): string {
   );
 }
 
-function esc(s: string): string {
-  return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] ?? c);
-}
-
 /** A heading's text without its markup: what the anchor and the map use. */
 function plain(s: string): string {
   return s.replace(/`/g, "").replace(/\*\*?/g, "").replace(/\[([^\]]+)\]\([^)]*\)/g, "$1");
@@ -52,12 +49,12 @@ function plain(s: string): string {
 function inline(text: string, link: (h: string) => string): string {
   const codes: string[] = [];
   let s = text.replace(/`([^`]+)`/g, (_, c: string) => {
-    codes.push(`<code>${esc(c)}</code>`);
+    codes.push(`<code>${escapeHtml(c)}</code>`);
     return `${HOLD}${codes.length - 1}${HOLD}`;
   });
-  s = esc(s);
-  s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_, alt: string, src: string) => `<img src="${esc(link(src))}" alt="${alt}">`);
-  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label: string, href: string) => `<a href="${esc(link(href))}">${label}</a>`);
+  s = escapeHtml(s);
+  s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_, alt: string, src: string) => `<img src="${escapeHtml(link(src))}" alt="${alt}">`);
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label: string, href: string) => `<a href="${escapeHtml(link(href))}">${label}</a>`);
   s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   s = s.replace(/(^|[^\w*])\*([^*\n]+)\*(?=[^\w*]|$)/g, "$1<em>$2</em>");
   return s.replace(HOLD_RE, (_, i: string) => codes[Number(i)]);
@@ -193,7 +190,7 @@ export function renderMarkdown(md: string, opts: RenderOptions = {}): string {
       i++;
       while (i < lines.length && !/^```/.test(lines[i])) code.push(lines[i++]);
       i++;
-      out.push(`<pre><code${lang ? ` class="lang-${esc(lang)}"` : ""}>${esc(code.join("\n"))}</code></pre>`);
+      out.push(`<pre><code${lang ? ` class="lang-${escapeHtml(lang)}"` : ""}>${escapeHtml(code.join("\n"))}</code></pre>`);
       continue;
     }
     const h = /^(#{1,4})\s+(.+?)\s*#*\s*$/.exec(line);
@@ -241,7 +238,7 @@ export function renderMarkdown(md: string, opts: RenderOptions = {}): string {
     if (img) {
       flush();
       const drawn = img[2].startsWith("diagram:") ? opts.figure?.(img[2].slice("diagram:".length)) : undefined;
-      out.push(drawn ? `<figure class="diagram">${drawn}<figcaption>${inline(img[1], link)}</figcaption></figure>` : `<figure class="doc-figure"><img src="${esc(link(img[2]))}" alt="${esc(img[1])}"></figure>`);
+      out.push(drawn ? `<figure class="diagram">${drawn}<figcaption>${inline(img[1], link)}</figcaption></figure>` : `<figure class="doc-figure"><img src="${escapeHtml(link(img[2]))}" alt="${escapeHtml(img[1])}"></figure>`);
       i++;
       continue;
     }

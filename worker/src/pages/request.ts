@@ -47,10 +47,6 @@ const BODY = String.raw`
 `;
 
 const SCRIPT = String.raw`
-  var API = "/api/v1/factory";
-  function call(method, path, body) {
-    return busy(fetch(API + path, { method: method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined })).then(function (r) { return r.json().then(function (d) { d.__status = r.status; return d; }); });
-  }
   // A renewal (?renew=<name>, from the package's row on your page): the same form, filled from the record — the confirmations are yours to tick again.
   var RENEW = new URLSearchParams(location.search).get("renew");
   function prefill(name) {
@@ -84,7 +80,7 @@ const SCRIPT = String.raw`
     if ($("#pkg-source").value.trim()) body.source = $("#pkg-source").value.trim();
     if ($("#pkg-version").value.trim()) body.version = $("#pkg-version").value.trim();
     $("#pkg-btn").disabled = true; $("#pkg-state").textContent = "Checking the pool, the project and the source…"; $("#done").hidden = true;
-    call("POST", "/packages", body).then(function (d) {
+    api("POST", "/api/v1/factory/packages", body).then(function (d) {
       $("#pkg-btn").disabled = false;
       if (d.error) { $("#pkg-state").textContent = d.error; return; }
       $("#pkg-state").textContent = "";
@@ -92,8 +88,8 @@ const SCRIPT = String.raw`
       $("#done").hidden = false;
       $("#done").innerHTML = '<b>' + esc(d.package.name) + ' ' + esc(d.package.release || "") + '</b> is on the record: <a href="' + esc(d.request.record) + '">request #' + d.request.id + '</a>' + (d.request.signature ? ' (<a href="' + esc(d.request.signature) + '">signature</a>)' : '') + (det.build_system ? ' · ' + esc(det.build_system) : '') +
         (d.skipped && d.skipped.length ? '<br><span class="dim">' + esc(d.skipped.map(function (s) { return s.arch + " skipped: " + s.source + " ships " + s.version; }).join(" · ")) + '</span>' : '') +
-        (d.build && d.build.tasks && d.build.tasks.length ? '<br>' + pillHtml("blue", "queued") + ' build ' + d.build.tasks.map(function (t) { return '<a href="/build/' + t + '">#' + t + '</a>'; }).join(", ") + ' for ' + esc((d.build.arches || []).join(", ")) + (d.build.queue ? ' — ' + esc(Object.keys(d.build.queue).map(function (a) { return a + ": " + d.build.queue[a].position + " of " + d.build.queue[a].total + " in the shared queue"; }).join(" · ")) : '') + '. The best idle shared worker takes it, a worker of yours at once; your page follows it.' : d.build && d.build.error ? '<br>' + pillHtml("warn", "not queued") + ' ' + esc(d.build.error) : '') +
-        '<div class="cta-row" style="margin-top:12px"><a class="btn" href="' + (ME && ME.login ? '/user/' + encodeURIComponent(ME.login) : '/factory#gate') + '">Your page →</a></div>';
+        (d.build && d.build.tasks && d.build.tasks.length ? '<br>' + taskPill("queued") + ' build ' + d.build.tasks.map(function (t) { return '<a href="/build/' + t + '">#' + t + '</a>'; }).join(", ") + ' for ' + esc((d.build.arches || []).join(", ")) + (d.build.queue ? ' — ' + esc(Object.keys(d.build.queue).map(function (a) { return a + ": " + d.build.queue[a].position + " of " + d.build.queue[a].total + " in the shared queue"; }).join(" · ")) : '') + '. The best idle shared worker takes it, a worker of yours at once; your page follows it.' : d.build && d.build.error ? '<br>' + pillHtml("warn", "not queued") + ' ' + esc(d.build.error) : '') +
+        '<div class="cta-row" style="margin-top:12px"><a class="btn" href="' + (WHO.login ? '/user/' + encodeURIComponent(WHO.login) : '/factory#gate') + '">Your page →</a></div>';
       $("#pkg-form").reset();
     }).catch(function (e) { $("#pkg-btn").disabled = false; $("#pkg-state").textContent = "failed: " + e; });
     return false;
@@ -161,7 +157,7 @@ export const REQUEST_COMPONENTS = (F: Fixture): Component[] => {
       id: "request.form",
       page: "/request",
       anchor: ['<section id="ask" hidden>', '<form id="pkg-form" class="form" onsubmit="return false">', 'id="pkg-url"', 'id="pkg-name"', 'pattern="[a-z0-9@._+-]+"', 'id="pkg-desc"', 'minlength="8" maxlength="120"', 'id="pkg-license"', 'id="pkg-x86" checked', 'id="pkg-arm" checked'],
-      script: ['var API = "/api/v1/factory"', 'call("POST", "/packages", body)', '$("#pkg-form").onsubmit', 'arches.push("x86_64")', 'arches.push("aarch64")', "checklist: checklist", 'if ($("#pkg-name").value.trim()) body.name'],
+      script: ['api("POST", "/api/v1/factory/packages", body)', '$("#pkg-form").onsubmit', 'arches.push("x86_64")', 'arches.push("aarch64")', "checklist: checklist", 'if ($("#pkg-name").value.trim()) body.name'],
       // Anyone signed in asks; the name is then the asker's: the same request by anyone else is refused.
       acts: [{ method: "POST", path: "/api/v1/factory/packages", body: theirs, expect: { anonymous: 401, contributor: 201, owner: 409, maintainer: 409 } }],
       visible: SIGNED_IN,
@@ -209,9 +205,9 @@ export const REQUEST_COMPONENTS = (F: Fixture): Component[] => {
       page: "/request",
       anchor: ['<div id="done" class="done" hidden></div>'],
       script: [
-        '$("#done").innerHTML', "esc(d.package.name)", "esc(d.request.record)", "d.request.signature", "det.build_system", "d.skipped", "d.build.tasks",
+        '$("#done").innerHTML', "esc(d.package.name)", "esc(d.request.record)", "d.request.signature", "det.build_system", "d.skipped", "d.build.tasks", 'taskPill("queued")',
         '\'<a href="/build/\' + t + \'">#\' + t + \'</a>\'', 'd.build.queue[a].position + " of " + d.build.queue[a].total', "d.build.error",
-        "'/user/' + encodeURIComponent(ME.login)", "Your page →", '$("#pkg-form").reset()',
+        "'/user/' + encodeURIComponent(WHO.login)", "Your page →", '$("#pkg-form").reset()',
       ],
       visible: SIGNED_IN,
     },

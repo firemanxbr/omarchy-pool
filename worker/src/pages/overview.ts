@@ -116,24 +116,15 @@ __CHARTS__
   var ring = RINGS.indexOf(q.get("ring")) >= 0 ? q.get("ring") : "stable";
   var arch = ARCHES.indexOf(q.get("arch")) >= 0 ? q.get("arch") : "x86_64";
   var data = null, optional = {};
-  function pick(id, values, current, onpick) {
-    $("#" + id).innerHTML = values.map(function (v) { return '<button type="button" class="' + (v === current ? "on" : "") + '" data-v="' + v + '">' + v + '</button>'; }).join("");
-    $("#" + id).querySelectorAll("button").forEach(function (b) { b.onclick = function () { onpick(b.getAttribute("data-v")); }; });
-  }
   // The pacman configuration, generated from what the ring serves right now (the same as /docs/get-started).
   function drawStart() {
-    pick("pick-ring", RINGS, ring, function (v) { ring = v; drawStart(); });
+    pick("#pick-ring", RINGS, ring, function (v) { ring = v; drawStart(); });
     $("#ring-desc").textContent = DESC[ring];
     $("#setup-cmd").innerHTML = 'curl -fsSL ' + location.origin + '/setup | sudo bash -s -- --ring ' + ring;
     $("#cli-cmd").innerHTML = 'sudo pacman -S omarchy-cli\nomarchy-cli --ring ' + ring + ' status';
     $("#cli-note").innerHTML = 'Not on your ring yet? <a href="/docs/get-started#cli">The release tarball →</a>';
   }
-  document.querySelectorAll(".copy").forEach(function (b) {
-    b.onclick = function () {
-      var id = { setup: "#setup-cmd", cli: "#cli-cmd" }[b.getAttribute("data-copy")];
-      navigator.clipboard.writeText($(id).textContent).then(function () { b.textContent = "copied"; setTimeout(function () { b.textContent = "copy"; }, 1500); });
-    };
-  });
+  copyChips({ setup: "#setup-cmd", cli: "#cli-cmd" });
   drawStart();
 
   function render(d) {
@@ -267,12 +258,12 @@ __CHARTS__
     var people = Object.keys(maintainers).map(function (m) { return [m, "maintainer"]; }).concat(Object.keys(contributors).map(function (c) { return [c, "contributor"]; }));
     var chips = people.map(function (p) { return personChip(p[0], p[1]); }).join("");
     $("#cc-people").innerHTML = (chips || '<span class="muted">be the first</span>') + '<span class="dim">' + num(workers.filter(function (w) { return w.alive; }).length) + ' workers online</span><a href="/factory">Bring a package →</a>';
-    var t = function (href, k, v, s) { return '<a class="tile" href="' + href + '"><div class="k">' + k + '</div><div class="v num">' + v + '</div><div class="s">' + s + '</div></a>'; };
-    $("#open-stats").innerHTML =
-      t("/people#contributors", "Contributors", num(Object.keys(contributors).length), "anyone with a package or a worker") +
-      t("/people#maintainers", "Maintainers", num(Object.keys(maintainers).length), "named in MAINTAINERS.toml") +
-      t("/people#workers", "Workers online", num(workers.filter(function (w) { return w.alive; }).length), num(workers.length) + " registered") +
-      t("/packages?q=factory", "Community packages", num(landed), "approved, built by the project");
+    setTiles("#open-stats", [
+      ["Contributors", num(Object.keys(contributors).length), "anyone with a package or a worker", "", "/people#contributors"],
+      ["Maintainers", num(Object.keys(maintainers).length), "named in MAINTAINERS.toml", "", "/people#maintainers"],
+      ["Workers online", num(workers.filter(function (w) { return w.alive; }).length), num(workers.length) + " registered", "", "/people#workers"],
+      ["Community packages", num(landed), "approved, built by the project", "", "/packages?q=factory"]
+    ]);
   });
   liveStats(render, 60000);
 
@@ -394,7 +385,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       id: "pool.get-started-step",
       page: "/",
       anchor: ['id="get-started"', 'id="pick-ring"', 'id="ring-desc"', 'data-copy="setup"', 'id="setup-cmd"', 'href="/setup"'],
-      script: ['pick("pick-ring", RINGS, ring', '"#ring-desc"', '"#setup-cmd"', "DESC[ring]", "/setup | sudo bash -s -- --ring ", '"data-copy"'],
+      script: ['pick("#pick-ring", RINGS, ring', '"#ring-desc"', '"#setup-cmd"', "DESC[ring]", "/setup | sudo bash -s -- --ring ", 'copyChips({ setup: "#setup-cmd", cli: "#cli-cmd" })'],
       reads: [{ path: "/setup", json: false }],
       visible: EVERYONE,
     },
@@ -449,7 +440,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       id: "pool.open-stats",
       page: "/",
       anchor: ['<div class="tiles four" id="open-stats">'],
-      script: ['"#open-stats"', '"/people#contributors"', '"/people#maintainers"', '"/people#workers"', '"/packages?q=factory"', 'p.status === "approved" || p.status === "published"'],
+      script: ['setTiles("#open-stats"', '"/people#contributors"', '"/people#maintainers"', '"/people#workers"', '"/packages?q=factory"', 'p.status === "approved" || p.status === "published"'],
       reads: [
         { path: "/api/v1/factory/packages", fields: ["packages.0.owner", "packages.0.status"] },
         { path: "/api/v1/factory/maintainers", fields: ["maintainers.0.login"] },

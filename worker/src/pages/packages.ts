@@ -45,13 +45,9 @@ __CHARTS__
     if (p.source === "factory") { var o = OWNERS[p.name], a = APPROVERS[p.name]; return '<span class="by">' + (o ? avatar(o, "contributor") : "") + (a ? avatar(a, "maintainer") : "") + '</span>' + (!o && !a ? '<span class="dim">the pool</span>' : ""); }
     return '<span class="dim" style="font-size:12px">' + (p.source === "alarm" ? "Arch Linux ARM" : p.source === "packages" ? "Omarchy" : p.source === "chaotic" ? "Chaotic-AUR" : "Arch Linux") + '</span>';
   }
-  function pick(id, values, current, onpick) {
-    $("#" + id).innerHTML = values.map(function (v) { return '<button type="button" class="' + (v === current ? "on" : "") + '" data-v="' + v + '">' + v + '</button>'; }).join("");
-    $("#" + id).querySelectorAll("button").forEach(function (b) { b.onclick = function () { onpick(b.getAttribute("data-v")); }; });
-  }
   function sync() {
-    pick("pick-ring", RINGS, ring, function (v) { ring = v; sync(); run(); });
-    pick("pick-arch", ARCHES, arch, function (v) { arch = v; sync(); run(); });
+    pick("#pick-ring", RINGS, ring, function (v) { ring = v; sync(); run(); });
+    pick("#pick-arch", ARCHES, arch, function (v) { arch = v; sync(); run(); });
     var term = $("#q").value.trim();
     history.replaceState(null, "", "?q=" + encodeURIComponent(term) + "&ring=" + ring + "&arch=" + arch);
   }
@@ -257,13 +253,13 @@ const PACKAGE_SCRIPT = String.raw`
     // Who stands behind it: upstream's packager, or — for what the factory
     // built — the contributor who brought it, its category, the maintainers and
     // the maintainer who approved it, each with a public page.
-    var mt = d.maintenance || {}, f = mt.factory, person = function (l) { return '<a href="/user/' + encodeURIComponent(l) + '">' + esc(l) + '</a>'; };
+    var mt = d.maintenance || {}, f = mt.factory;
     if (f) {
       var parts = [];
-      if (f.owner) parts.push("brought by " + person(f.owner));
+      if (f.owner) parts.push("brought by " + personLink(f.owner));
       if (f.category) parts.push('<span class="pill none">' + esc(f.category) + '</span>');
-      if (f.maintainers && f.maintainers.length) parts.push("maintained by " + f.maintainers.map(person).join(", "));
-      if (f.approved_by) parts.push("approved by " + person(f.approved_by) + (f.approved_version ? " at " + esc(f.approved_version) : "") + " " + ago(f.approved_at));
+      if (f.maintainers && f.maintainers.length) parts.push("maintained by " + f.maintainers.map(personLink).join(", "));
+      if (f.approved_by) parts.push("approved by " + personLink(f.approved_by) + (f.approved_version ? " at " + esc(f.approved_version) : "") + " " + ago(f.approved_at));
       $("#maint").innerHTML = parts.join(" · ") + ' · <span class="muted">built and signed by the project; the contributor\'s build was the evidence</span>';
     } else if (mt.packager) {
       $("#maint").innerHTML = 'Packaged upstream by ' + esc(mt.packager.replace(/<.*>/, "").trim()) + ' (' + esc(p.source) + '); the pool serves the file as built and signed there.';
@@ -316,16 +312,15 @@ const PACKAGE_SCRIPT = String.raw`
   // The seal: one pill, then the facts — each a link to the evidence it names.
   function renderSeal(seal, p) {
     if (!seal) { $("#seal-pill").innerHTML = ""; $("#seal").innerHTML = '<li class="muted">no seal for this object</li>'; return; }
-    var person = function (l) { return '<a href="/user/' + encodeURIComponent(l) + '">' + esc(l) + '</a>'; };
     var items = [];
     if (seal.origin === "factory") {
       $("#seal-pill").innerHTML = '<span class="pill rec">built by the Omarchy Pool</span>';
       var c = seal.chain || {};
       if (c.build) items.push('Rebuilt by the project on <span class="mono">' + esc((c.builder && c.builder.worker) || "a trusted worker") + '</span>' + (c.build.finished_at ? ' ' + ago(c.build.finished_at) : '') + (c.build.duration_ms ? ' in ' + Math.round(c.build.duration_ms / 60000) + ' min' : '') + ' — task #' + c.build.task + (c.build.attempts > 1 ? ' (attempt ' + c.build.attempts + ')' : ''));
       if (c.recipe) items.push('Recipe: ' + (c.recipe.commit ? '<a class="mono" href="' + esc(c.recipe.pkgbuild) + '">' + esc(c.recipe.path) + '</a> at <span class="mono">' + esc(c.recipe.commit.slice(0, 7)) + '</span>' : '<a href="' + esc(c.recipe.pkgbuild || '#') + '">the PKGBUILD</a> the contributor\'s build staged' + (c.recipe.from ? ' (<span class="mono">' + esc(c.recipe.from) + '</span>)' : '')));
-      if (c.source_build) items.push('Evidence: build #' + c.source_build.task + (c.source_build.owner ? ' by ' + person(c.source_build.owner) : '') + ' on <span class="mono">' + esc(c.source_build.worker || '?') + '</span>' + (c.source_build.agent ? ' with <span class="mono">' + esc(c.source_build.agent) + '</span>' : '') + ' — <a href="' + esc(c.source_build.evidence.log) + '">log</a>, <a href="' + esc(c.source_build.evidence.pkginfo) + '">.PKGINFO</a>');
+      if (c.source_build) items.push('Evidence: build #' + c.source_build.task + (c.source_build.owner ? ' by ' + personLink(c.source_build.owner) : '') + ' on <span class="mono">' + esc(c.source_build.worker || '?') + '</span>' + (c.source_build.agent ? ' with <span class="mono">' + esc(c.source_build.agent) + '</span>' : '') + ' — <a href="' + esc(c.source_build.evidence.log) + '">log</a>, <a href="' + esc(c.source_build.evidence.pkginfo) + '">.PKGINFO</a>');
       if (c.audit) items.push('Audit: ' + (c.audit.verdict ? '<span class="pill ' + (c.audit.verdict === "pass" ? "ok" : c.audit.verdict === "fail" ? "error" : "warn") + '">' + esc(c.audit.verdict) + '</span> ' + esc(c.audit.summary || '') + (c.audit.agent ? ' <span class="muted">(' + esc(c.audit.agent) + ')</span>' : '') + (c.audit.report ? ' — <a href="' + esc(c.audit.report) + '">report</a>' : '') : '<span class="muted">' + esc(c.audit.status || c.audit.error || 'none') + '</span>'));
-      if (c.approval) items.push('Approved by ' + person(c.approval.by) + ' ' + ago(c.approval.at) + (c.approval.note ? ' — “' + esc(c.approval.note) + '”' : ''));
+      if (c.approval) items.push('Approved by ' + personLink(c.approval.by) + ' ' + ago(c.approval.at) + (c.approval.note ? ' — “' + esc(c.approval.note) + '”' : ''));
       if (seal.signature) items.push('Signed by the pool, key <span class="mono">' + esc(seal.signature.fingerprint.slice(-16)) + '</span> — <a href="' + esc(seal.signature.object) + '">signature</a>');
       if (seal.attestation) items.push('<b>Attestation</b>: <a href="' + esc(seal.attestation.statement) + '">provenance.json</a>' + (seal.attestation.signature ? ' + <a href="' + esc(seal.attestation.signature) + '">.sig</a> — an in-toto statement about this exact object (sha256 ' + esc(seal.sha256.slice(0, 12)) + '…), the pool\'s detached signature beside it' : ''));
       else items.push('<span class="muted">No attestation yet: written when the project\'s build completes (builds before the seal existed have none).</span>');
@@ -339,7 +334,6 @@ const PACKAGE_SCRIPT = String.raw`
     $("#seal").innerHTML = items.map(function (x) { return '<li>' + x + '</li>'; }).join('');
   }
 
-  function sevPill(s) { var c = { critical: "var(--red)", high: "var(--red)", medium: "var(--amber)", low: "var(--blue)", unknown: "var(--dim)" }[s] || "var(--dim)"; return '<span class="pill" style="color:' + c + ';border-color:' + c + '">' + s + '</span>'; }
   function advLine(a) {
     return '<li>' + sevPill(a.severity) + ' <a class="run" href="' + esc(a.url) + '">' + esc(a.cves.join(", ") || a.id) + '</a> <span class="muted">' + esc(a.match) + (a.fixed ? ' · fixed in ' + esc(a.fixed) : '') + (a.kev ? ' · <span style="color:var(--red)">exploited in the wild</span>' : '') + (a.epss != null && a.epss >= 0.1 ? ' · EPSS ' + (a.epss * 100).toFixed(0) + '%' : '') + '</span>' + (a.summary ? '<div class="muted" style="font-size:12.5px">' + esc(a.summary.length > 160 ? a.summary.slice(0, 159) + "…" : a.summary) + '</div>' : '') + '</li>';
   }
@@ -389,26 +383,22 @@ const PACKAGE_SCRIPT = String.raw`
   loadPackage(1);
   // The factory's story of this package, when it has one: a package that came from a source has none and the section stays hidden.
   // A factory package not in any ring yet (a contributor's build is evidence, never in the pool) still gets its story: the page is the package's, wherever it is.
-  function person(l) { return personLink(l); }
-  function pillOf(cls, text, title) { return pillHtml(cls, text, title); }
   fetch("/api/v1/factory/packages/" + encodeURIComponent(name) + "/story").then(function (r) { return r.ok ? r.json() : null; }).then(function (st) {
     if (!st || !st.chains) return;
     var sec = $("#factory-section"); sec.hidden = false;
     var pkg = st.package || {}, rings = (st.rings || []).filter(function (r) { return r.arch === arch; }).map(function (r) { return r.ring; });
     var onlyLab = rings.length === 1 && rings[0] === "lab", none = !rings.length;
-    var cls = st.class ? { A: "ok", B: "ok", C: "warn", D: "error" }[st.class] : "none";
-    $("#factory-badge").innerHTML = (none ? pillOf("lilac", "not in the pool yet", "a contributor's build is evidence; the project's build enters the lab") : onlyLab ? pillOf("lab", "in the lab", "the fourth ring: the project's build, tried by a real pacman, waiting for a maintainer — not promised, not promoted") : pillOf("ok", "in " + rings.join(" · "))) + (st.class ? ' ' + pillOf(cls, "class " + st.class, st.score.points + "/100 — What we test → The score") : '');
+    $("#factory-badge").innerHTML = (none ? pillHtml("lilac", "not in the pool yet", "a contributor's build is evidence; the project's build enters the lab") : onlyLab ? pillHtml("lab", "in the lab", "the fourth ring: the project's build, tried by a real pacman, waiting for a maintainer — not promised, not promoted") : pillHtml("ok", "in " + rings.join(" · "))) + (st.class ? ' ' + classPill(st.score, "class " + st.class, st.score.points + "/100 — What we test → The score") : '');
     if (none) {
       $("#desc").className = "lede"; $("#desc").innerHTML = esc(pkg.description || "") + (pkg.description ? ' — ' : '') + 'not in any ring for ' + esc(arch) + ' yet: a contributor\'s build is evidence, never in the pool; the project\'s build enters the lab.';
       $("#pg-tiles").innerHTML = ""; $("#who-section").hidden = true;
     }
-    $("#factory-lede").innerHTML = (pkg.owner ? 'Requested by ' + person(pkg.owner) + (pkg.created_at ? ' ' + ago(pkg.created_at) : '') + (pkg.project ? ' from <a href="' + esc(pkg.project) + '">' + esc(String(pkg.project).replace(/^https?:\/\/(www\.)?/, "")) + '</a>' : '') + (pkg.license ? ' · ' + esc(pkg.license) : '') + (pkg.category ? ' · ' + esc(pkg.category) : '') + '. ' : '')
-      + (pkg.blocked_at ? pillOf("error", "blocked") + ' ' + ago(pkg.blocked_at) + ' by ' + person(pkg.blocked_by) + ': ' + esc(pkg.blocked_reason || '') + '. ' : '')
+    $("#factory-lede").innerHTML = (pkg.owner ? 'Requested by ' + personLink(pkg.owner) + (pkg.created_at ? ' ' + ago(pkg.created_at) : '') + (pkg.project ? ' from <a href="' + esc(pkg.project) + '">' + esc(String(pkg.project).replace(/^https?:\/\/(www\.)?/, "")) + '</a>' : '') + (pkg.license ? ' · ' + esc(pkg.license) : '') + (pkg.category ? ' · ' + esc(pkg.category) : '') + '. ' : '')
+      + (pkg.blocked_at ? pillHtml("error", "blocked") + ' ' + ago(pkg.blocked_at) + ' by ' + personLink(pkg.blocked_by) + ': ' + esc(pkg.blocked_reason || '') + '. ' : '')
       + 'A package from the factory is built by its contributor as evidence, built again by the project on a trusted worker, tried by a real pacman in the lab and decided by a maintainer — never the contributor, never the person who brought it. Only then does it enter edge and earn rc and stable like every synced package. <a href="/docs/what-we-test#who-does-what">Who does what →</a>';
     var chains = st.chains.slice(0, 6);
     $("#factory-chain").innerHTML = chains.length ? chains.map(function (c) { return chainRow(c); }).join("") : '<p class="sub" style="margin:0">Requested; no build yet.</p>';
   }).catch(function () {});
-  liveStats(function () {}, 120000);
 `;
 
 export function packagesHtml(poolUrl: string, version: RunningVersion): string {
@@ -464,7 +454,7 @@ export const PACKAGES_COMPONENTS = (F: Fixture): Component[] => [
     id: "packages.ring-arch-pickers",
     page: "/packages",
     anchor: ['id="pick-ring"', 'id="pick-arch"'],
-    script: ['RINGS = ["stable", "rc", "edge"]', 'ARCHES = ["x86_64", "aarch64"]', '"pick-ring"', '"pick-arch"', 'data-v="'],
+    script: ['RINGS = ["stable", "rc", "edge"]', 'ARCHES = ["x86_64", "aarch64"]', 'pick("#pick-ring"', 'pick("#pick-arch"'],
     visible: EVERYONE,
   },
   {
@@ -615,7 +605,7 @@ export const PACKAGE_COMPONENTS = (F: Fixture): Component[] => {
       id: "package.factory-badge",
       page,
       anchor: ['id="factory-section"', 'id="factory-badge"'],
-      script: ['"/api/v1/factory/packages/"', '"/story"', '"#factory-section"', '"#factory-badge"', "st.chains", "st.class", "st.score.points", "not in the pool yet"],
+      script: ['"/api/v1/factory/packages/"', '"/story"', '"#factory-section"', '"#factory-badge"', "st.chains", "st.class", "classPill(st.score", "st.score.points", "not in the pool yet"],
       reads: [
         { path: story, fields: ["name", "chains", "rings", "class", "score.points"] },
         // The badge names the rings once the package is in the pool.

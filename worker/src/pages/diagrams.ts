@@ -8,15 +8,13 @@
  * shared with the documentation's figures (doc-diagrams.ts), so every
  * picture on the dashboard is drawn the same way.
  */
+import { escapeHtml } from "../html";
 
 export const CW = 6.6; // px per character at 11 px mono
 
 export interface Line { text: string; cls?: "live" | "amber"; live?: string }
 export interface Box { x: number; y: number; w: number; h: number; title: string; lines?: (string | Line)[]; cls?: string; tcls?: string; big?: boolean }
 
-export function esc(s: string): string {
-  return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] ?? c);
-}
 function lineOf(l: string | Line): Line {
   return typeof l === "string" ? { text: l } : l;
 }
@@ -30,10 +28,10 @@ export function dbox(o: Box): string {
   let top = o.y + (o.h - block) / 2 + 11;
   const cx = o.x + w / 2;
   let s = `<rect class="d-box ${o.cls ?? ""}" x="${o.x}" y="${o.y}" width="${w}" height="${o.h}"/>`;
-  s += `<text class="d-t ${o.tcls ?? ""}" x="${cx}" y="${top}" text-anchor="middle"${o.big ? ' font-size="15"' : ""}>${esc(o.title)}</text>`;
+  s += `<text class="d-t ${o.tcls ?? ""}" x="${cx}" y="${top}" text-anchor="middle"${o.big ? ' font-size="15"' : ""}>${escapeHtml(o.title)}</text>`;
   lines.forEach((l, i) => {
     top += i === 0 ? 18 : 14;
-    s += `<text class="d-s${l.cls ? " " + l.cls : ""}" x="${cx}" y="${top}" text-anchor="middle"${l.live ? ` data-live="${l.live}"` : ""}>${esc(l.text)}</text>`;
+    s += `<text class="d-s${l.cls ? " " + l.cls : ""}" x="${cx}" y="${top}" text-anchor="middle"${l.live ? ` data-live="${l.live}"` : ""}>${escapeHtml(l.text)}</text>`;
   });
   return s;
 }
@@ -50,7 +48,7 @@ export function dpath(d: string, cls = "", arrow = false): string {
   return `<path class="d-l ${cls}" d="${d}"${arrow ? ` marker-end="url(#${marker(cls)})"` : ""}/>`;
 }
 export function dlab(x: number, y: number, lines: string[], anchor = "middle", cls = ""): string {
-  return lines.map((l, i) => `<text class="d-lab ${cls}" x="${x}" y="${y + i * 13}" text-anchor="${anchor}">${esc(l)}</text>`).join("");
+  return lines.map((l, i) => `<text class="d-lab ${cls}" x="${x}" y="${y + i * 13}" text-anchor="${anchor}">${escapeHtml(l)}</text>`).join("");
 }
 /** A mark that rides a path (SMIL; the page pauses it under prefers-reduced-motion). */
 export function dot(path: string, color: string, dur: number, begin: number): string {
@@ -61,7 +59,7 @@ const DEFS =
   '<marker id="arw-g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#9ece6a"/></marker>' +
   '<marker id="arw-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#e0af68"/></marker></defs>';
 export function svgo(w: number, h: number, label: string, cls = ""): string {
-  return `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="${esc(label)}"${cls ? ` class="${cls}"` : ""}>${DEFS}`;
+  return `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="${escapeHtml(label)}"${cls ? ` class="${cls}"` : ""}>${DEFS}`;
 }
 
 export type Stage = "sync" | "pin" | "promote" | "render" | "serve";
@@ -185,7 +183,7 @@ export function liveDiagram(): string {
   s += dpath("M670 97 C670 40, 1200 40, 1200 97", "hi dash", true) + dlab(935, 34, ["fast-track: a confident fix in edge skips the soak"], "middle", "hi");
   ["Arch Security Tracker", "Debian Security Tracker", "OSV · Go modules, crates", "CISA KEV · exploited", "EPSS · likelihood"].forEach((t, i) => {
     const y = 262 + i * 32;
-    s += `<rect class="d-chip" x="20" y="${y}" width="190" height="26"/><text class="d-s" x="115" y="${y + 17}" text-anchor="middle" style="fill:#a9b1d6">${esc(t)}</text>` + dline([210, y + 13, 250, y + 13]);
+    s += `<rect class="d-chip" x="20" y="${y}" width="190" height="26"/><text class="d-s" x="115" y="${y + 17}" text-anchor="middle" style="fill:#a9b1d6">${escapeHtml(t)}</text>` + dline([210, y + 13, 250, y + 13]);
   });
   s += dline([250, 275, 250, 403]) + darrow(250, 339, 300, 339);
   s += dbox({ x: 300, y: 289, w: 200, h: 100, title: "Security scan", big: true, lines: [{ text: "advisories known: …", cls: "live", live: "advisories" }, { text: "open in stable: …", cls: "amber", live: "open-stable" }, "every 3 h, every ring"] });
