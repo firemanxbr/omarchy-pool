@@ -241,8 +241,10 @@ add_pool_repos() { # arch pool
     fi
   done
   if [[ $added == 1 ]]; then
-    pacman-key --add "$POOL_KEY" >/dev/null 2>&1
-    local poolkey; poolkey="$(gpg --homedir /etc/pacman.d/gnupg --with-colons --show-keys "$POOL_KEY" 2>/dev/null | awk -F: '$1=="fpr"{print $10; exit}')"
+    # The pool's key: where factory_lib found it — the image, a mounted checkout — or, called on its own, the clone's.
+    local key="${POOL_KEY:-}"; [[ -n "$key" ]] || key=/build/pool/docs/omarchy-staging.pub.asc
+    pacman-key --add "$key" >/dev/null 2>&1
+    local poolkey; poolkey="$(gpg --homedir /etc/pacman.d/gnupg --with-colons --show-keys "$key" 2>/dev/null | awk -F: '$1=="fpr"{print $10; exit}')"
     pacman-key --lsign-key "$poolkey" >/dev/null 2>&1
     pacman -Sy >/dev/null
   fi
