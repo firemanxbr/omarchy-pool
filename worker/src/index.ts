@@ -58,7 +58,7 @@ import {
 import { authorize, authorizeRelease, authorizeArtifacts, authorizeJobOrMaintainer, maintainerOf } from "./auth";
 import {
   contributorOf, workerOf, handleRegister, handleMe, handleRequestPackage, handleDeletePackage, handleSetCategory, handleBuildPackage, handleRegisterWorker,
-  handleRevokeWorker, handleListPackages, handleStagingPut, handleStagingMultipart, handleStagingList, handleStagingGet, handleStagingDelete,
+  handleRevokeWorker, handleDequeueBuild, handleListPackages, handleStagingPut, handleStagingMultipart, handleStagingList, handleStagingGet, handleStagingDelete,
 } from "./routes/contributors";
 import type { Actor } from "./routes/factory";
 import { jobOf } from "./jobtoken";
@@ -284,6 +284,7 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
     if ((m = path.match(/^\/factory\/packages\/([a-z0-9@._+-]+)$/)) && method === "DELETE") return handleDeletePackage(c, m[1], env);
     if ((m = path.match(/^\/factory\/packages\/([a-z0-9@._+-]+)\/category$/)) && method === "POST") return handleSetCategory(c, m[1], request, env);
     if (method === "POST" && path === "/factory/workers") return handleRegisterWorker(c, request, env);
+    if ((m = path.match(/^\/factory\/packages\/([A-Za-z0-9@._+-]+)\/builds\/(\d+)$/)) && method === "DELETE") return handleDequeueBuild(c, m[1], Number(m[2]), env);
     if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)$/)) && method === "DELETE") return handleRevokeWorker(c, m[1], env);
     if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)\/trust$/)) && method === "POST") return handleTrustWorker(c, m[1], request, env);
     return null;

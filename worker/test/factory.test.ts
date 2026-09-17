@@ -537,10 +537,17 @@ describe("a package request", () => {
     // The same project under another name, or the same name by someone else, is refused; the owner may renew their own.
     expect((await call("POST", "/factory/packages", { ...body, name: "htop2" }, "omc_alice")).status).toBe(409);
     expect((await call("POST", "/factory/packages", body, "omc_m2")).status).toBe(409);
+    // The build starts by itself, into the shared queue: one task per architecture the request names, its place in the queue in the answer.
+    expect(r.json.build).toMatchObject({ tasks: [expect.any(Number)], arches: ["aarch64"], pinned_to: null, queue: { aarch64: { position: expect.any(Number), total: expect.any(Number) } } });
+    expect(await env.DB.prepare("SELECT status, shared_after, pinned_to FROM build_tasks WHERE id = ?").bind(r.json.build.tasks[0]).first()).toEqual({ status: "queued", shared_after: null, pinned_to: null });
     const renewed = await call("POST", "/factory/packages", { ...body, version: "3.5.4", source: body.source.replace("3.5.3", "3.5.4") }, "omc_alice");
     expect(renewed.status).toBe(200);
     expect(renewed.json.request.id).toBeGreaterThan(r.json.request.id);
     expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM package_requests WHERE name = 'htop'").first<{ n: number }>())!.n).toBe(2);
+    // The old request's queued build leaves the queue; the renewed request queues its own.
+    expect(await env.DB.prepare("SELECT status, error FROM build_tasks WHERE id = ?").bind(r.json.build.tasks[0]).first()).toMatchObject({ status: "cancelled", error: expect.stringMatching(/renewed/) });
+    expect(renewed.json.build.tasks[0]).toBeGreaterThan(r.json.build.tasks[0]);
+    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE name = 'htop' AND status = 'queued'").run();
     // A blocked contributor requests nothing and builds nothing.
     await env.DB.prepare("UPDATE contributors SET blocked_at = '2026-09-15T00:00:00Z', blocked_by = 'm1', blocked_reason = 'spam' WHERE login = 'alice'").run();
     expect((await call("POST", "/factory/packages", { ...body, name: "htop3", url: "https://htop.dev/x" }, "omc_alice")).status).toBe(403);
@@ -585,20 +592,26 @@ describe("a package request", () => {
     expect(renewed.json.package).toMatchObject({ status: "staged", detail: expect.stringMatching(/renewed as #\d+ \(9\) by alice; the staged build stands/) });
     const after = (await call("GET", "/factory/packages/older/story?t=renewed")).json; // past the edge cache, as the page reads its own
     expect(after.request).toMatchObject({ id: renewed.json.request.id, migrated: false, complete: true });
-    expect(after.chains[0].score).toMatchObject({ ready: true });
-    expect(after.chains[0].score.items.find((i: any) => i.item === "A request on the record")).toMatchObject({ points: 5 });
+    const stagedChain = after.chains.find((x: any) => x.contributor && x.contributor.id === task);
+    expect(stagedChain.score).toMatchObject({ ready: true });
+    expect(stagedChain.score.items.find((i: any) => i.item === "A request on the record")).toMatchObject({ points: 5 });
+    // The renewal queued a build of its own; it stands in the shared queue with a place.
+    expect(after.chains[0].contributor).toMatchObject({ status: "queued", queue: { position: expect.any(Number), total: expect.any(Number) } });
+    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE name = 'older' AND status = 'queued'").run();
     expect((await call("GET", "/factory/review?t=after")).json.staged.find((x: any) => x.name === "older").score).toMatchObject({ ready: true });
     // A request that names another version than the staged build is not that build's: the contributor builds again.
     const other = await call("POST", "/factory/packages", { ...body, version: "10", source: "https://older.example/older-10.tar.gz" }, "omc_alice");
     expect(other.status).toBe(200);
+    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE name = 'older' AND status = 'queued'").run();
     const moved = (await call("GET", "/factory/packages/older/story?t=moved")).json;
-    expect(moved.chains[0].score).toMatchObject({ ready: false });
-    expect(moved.chains[0].score.items.find((i: any) => i.item === "A request on the record")).toMatchObject({ points: 2, note: expect.stringMatching(/names 10, this build is 9 — build again/) });
+    const stale = moved.chains.find((x: any) => x.contributor && x.contributor.id === task);
+    expect(stale.score).toMatchObject({ ready: false });
+    expect(stale.score.items.find((i: any) => i.item === "A request on the record")).toMatchObject({ points: 2, note: expect.stringMatching(/names 10, this build is 9 — build again/) });
     // A build in flight — the project's included, whose lease never touches the package's status — keeps the request as it is.
     await env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, params) VALUES ('older', 'aarch64', '9', 'review:${task}', 'project build', 30, 0, 'project', 'alice', 'build', 'leased', '{"review":${task}}')`).run();
     const busy = await call("POST", "/factory/packages", body, "omc_alice");
     expect(busy.status).toBe(409);
-    expect(busy.json.error).toMatch(/being built \(task \d+ is leased, the project's\)/);
+    expect(busy.json.error).toMatch(/being built \(task \d+, the project.s\)/);
     await env.DB.prepare("DELETE FROM build_tasks WHERE name = 'older' AND trust = 'project' AND status = 'leased'").run();
     // In the pool, the record is what it was: the next version's request goes through the form.
     await env.DB.prepare("UPDATE factory_packages SET status = 'published' WHERE name = 'older'").run();
@@ -609,28 +622,43 @@ describe("a package request", () => {
 describe("where a build runs", () => {
   const checklist = { official: true, license: true, unshipped: true, evidence: true };
   const req = (name: string) => ({ name, url: `https://${name}.example`, source: `https://${name}.example/${name}-1.tar.gz`, version: "1", description: "A tool for the test", license: "MIT", arches: ["aarch64"], checklist });
-  it("a contributor with no worker for the architecture is built by the project's shared workers at once; one with a worker waits for it first", async () => {
-    // carol has no worker; m1's w5 is a community worker shared by a maintainer (the claim says so).
+  it("a request lands in the shared queue at once — any contributor's shared worker takes it, the owner's own worker too — and says where it stands; the owner takes it out and puts it back", async () => {
+    // carol has no worker; w5 is a community worker shared by carol's fellow contributor dave — sharing is anyone's to offer.
     await env.DB.batch([
-      env.DB.prepare("INSERT INTO contributors (login, token_hash, role) VALUES ('carol', ?, 'contributor')").bind(await sha256Hex("omc_carol")),
-      env.DB.prepare("INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, last_seen) VALUES ('w5', 'aarch64', 'm1', ?, 'shared', 'community', '2000-01-01T00:00:00Z')").bind(await sha256Hex("omw_w5")),
+      env.DB.prepare("INSERT INTO contributors (login, token_hash, role) VALUES ('carol', ?, 'contributor'), ('dave', ?, 'contributor')").bind(await sha256Hex("omc_carol"), await sha256Hex("omc_dave")),
+      env.DB.prepare("INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, last_seen) VALUES ('w5', 'aarch64', 'dave', ?, 'shared', 'community', '2000-01-01T00:00:00Z')").bind(await sha256Hex("omw_w5")),
     ]);
-    expect((await call("POST", "/factory/packages", req("noworker"), "omc_carol")).status).toBe(201);
-    const q = await call("POST", "/factory/packages/noworker/build", {}, "omc_carol");
-    expect(q.status, JSON.stringify(q.json)).toBe(201);
-    expect(await env.DB.prepare("SELECT shared_after, pinned_to FROM build_tasks WHERE id = ?").bind(q.json.tasks[0]).first()).toEqual({ shared_after: null, pinned_to: null });
-    // alice has w3: hers first, the shared ones after 14 days.
-    expect((await call("POST", "/factory/packages", req("hasworker"), "omc_alice")).status).toBe(201);
-    const a = await call("POST", "/factory/packages/hasworker/build", {}, "omc_alice");
-    expect(a.status).toBe(201);
-    const row = await env.DB.prepare("SELECT shared_after, pinned_to FROM build_tasks WHERE id = ?").bind(a.json.tasks[0]).first<{ shared_after: string | null; pinned_to: string | null }>();
-    expect(row!.pinned_to).toBeNull();
-    expect(row!.shared_after).not.toBeNull();
-    // Asked for the shared workers at once instead: the waiting task is re-routed, not duplicated.
-    const again = await call("POST", "/factory/packages/hasworker/build", { worker: "shared" }, "omc_alice");
-    expect(again.json.tasks).toEqual(a.json.tasks);
-    expect(await env.DB.prepare("SELECT shared_after FROM build_tasks WHERE id = ?").bind(a.json.tasks[0]).first()).toEqual({ shared_after: null });
-    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE name IN ('noworker', 'hasworker') AND status = 'queued'").run();
+    const made = await call("POST", "/factory/packages", req("noworker"), "omc_carol");
+    expect(made.status).toBe(201);
+    const first = made.json.build.tasks[0];
+    expect(await env.DB.prepare("SELECT status, shared_after, pinned_to FROM build_tasks WHERE id = ?").bind(first).first()).toEqual({ status: "queued", shared_after: null, pinned_to: null });
+    // Its place: the queue of its architecture, among the builds any shared worker may take.
+    const story = (await call("GET", "/factory/packages/noworker/story?t=queued")).json;
+    expect(story.chains[0].contributor.queue).toEqual({ position: expect.any(Number), total: expect.any(Number) });
+    expect(story.chains[0].contributor.queue.position).toBeLessThanOrEqual(story.chains[0].contributor.queue.total);
+    // Out of the queue by its owner (nobody else), and nothing puts it back by itself.
+    expect((await call("DELETE", `/factory/packages/noworker/builds/${first}`, undefined, "omc_alice")).status).toBe(403);
+    expect((await call("DELETE", `/factory/packages/noworker/builds/${first}`, undefined, "omc_carol")).json).toMatchObject({ task: first, status: "cancelled" });
+    expect(await env.DB.prepare("SELECT status FROM factory_packages WHERE name = 'noworker'").first()).toEqual({ status: "registered" });
+    expect((await call("DELETE", `/factory/packages/noworker/builds/${first}`, undefined, "omc_carol")).status).toBe(409);
+    // Back in, by the Build button — the queue again, or a worker.
+    const back = await call("POST", "/factory/packages/noworker/build", {}, "omc_carol");
+    expect(back.status).toBe(201);
+    expect(back.json.tasks[0]).toBeGreaterThan(first);
+    expect(back.json.queue.aarch64).toEqual({ position: expect.any(Number), total: expect.any(Number) });
+    // dave's shared worker takes carol's build; a dedicated worker (w3, alice's) never does.
+    expect((await call("POST", "/factory/claim", { arch: "aarch64", agent: "claude-code/claude-sonnet-5", agent_status: "ok" }, "omw_w3")).status).toBe(204);
+    const c = await call("POST", "/factory/claim", { arch: "aarch64", shared: true, agent: "claude-code/claude-sonnet-5", agent_status: "ok" }, "omw_w5");
+    expect(c.status).toBe(200);
+    expect(c.json.task.id).toBe(back.json.tasks[0]);
+    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE name = 'noworker' AND status IN ('queued', 'leased')").run();
+    // alice's own request: her own worker w3 takes it at once as well.
+    const mine = await call("POST", "/factory/packages", req("hasworker"), "omc_alice");
+    expect(mine.status).toBe(201);
+    const c3 = await call("POST", "/factory/claim", { arch: "aarch64", agent: "claude-code/claude-sonnet-5", agent_status: "ok" }, "omw_w3");
+    expect(c3.status).toBe(200);
+    expect(c3.json.task.id).toBe(mine.json.build.tasks[0]);
+    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE name = 'hasworker' AND status IN ('queued', 'leased')").run();
   });
   it("a build asked for one worker is claimed by that worker only; a worker that is not theirs and not shared is refused; a hint and the last failed build travel with it", async () => {
     // alice's failed build of hasworker is the lesson for the next one; she asks for w5 (shared by m1), with a hint.
@@ -668,6 +696,29 @@ describe("where a build runs", () => {
     const after = await call("POST", "/factory/packages/hasworker/build", { arches: ["aarch64"] }, "omc_alice");
     expect(after.json.lessons).toEqual({ aarch64: gated });
     await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE name = 'hasworker' AND status IN ('queued', 'leased')").run();
+  });
+  it("the best idle shared worker has first pick — native over emulated, then cores — for three minutes; then any shared worker takes the build", async () => {
+    // w7: dave's second shared worker, native, 12 cores, idle and just seen; w5 claims as emulated with 4 cores.
+    await env.DB.prepare("INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, last_seen, labels, usage, agent_status, current_task) VALUES ('w7', 'aarch64', 'dave', ?, 'shared', 'community', ?, '{\"where\":\"big\"}', '{\"cpu\":1,\"ram\":1,\"disk\":1,\"cores\":12,\"ram_gb\":32}', 'ok', NULL)").bind(await sha256Hex("omw_w7"), new Date().toISOString()).run();
+    await env.DB.prepare("UPDATE build_workers SET revoked_at = NULL WHERE id = 'w5'").run();
+    const made = await call("POST", "/factory/packages/noworker/build", {}, "omc_carol");
+    expect(made.status).toBe(201);
+    const id = made.json.tasks[0];
+    const emu = { arch: "aarch64", shared: true, labels: { emulated: true }, usage: { cpu: 1, ram: 1, disk: 1, cores: 4, ram_gb: 16 }, agent: "claude-code/claude-sonnet-5", agent_status: "ok" };
+    expect((await call("POST", "/factory/claim", emu, "omw_w5")).status).toBe(204); // w7 is better and idle: first pick is its
+    // w7 busy (a task in hand): the emulated one takes it after all.
+    await env.DB.prepare("UPDATE build_workers SET current_task = 1 WHERE id = 'w7'").run();
+    const c = await call("POST", "/factory/claim", emu, "omw_w5");
+    expect(c.status).toBe(200);
+    expect(c.json.task.id).toBe(id);
+    await env.DB.prepare("UPDATE build_tasks SET status = 'queued', lease_owner = NULL, created_at = ? WHERE id = ?").bind(new Date(Date.now() - 4 * 60000).toISOString(), id).run();
+    await env.DB.prepare("UPDATE build_workers SET current_task = NULL, last_seen = ? WHERE id = 'w7'").bind(new Date().toISOString()).run();
+    // Older than three minutes: w7 idle or not, the build is anyone's.
+    const c2 = await call("POST", "/factory/claim", emu, "omw_w5");
+    expect(c2.status).toBe(200);
+    expect(c2.json.task.id).toBe(id);
+    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE name = 'noworker' AND status IN ('queued', 'leased')").run();
+    await env.DB.prepare("UPDATE build_workers SET revoked_at = '2026-01-01T00:00:00Z' WHERE id = 'w7'").run();
   });
   it("a maintainer names the project's worker for the project's build — one that builds this architecture", async () => {
     await env.DB.batch([

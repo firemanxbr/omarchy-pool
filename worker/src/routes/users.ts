@@ -1,4 +1,5 @@
 import { json, type Env } from "../index";
+import { queuePosition } from "../queue";
 import { maintainersOf } from "../governance";
 
 /**
@@ -99,7 +100,7 @@ export async function handleUser(login: string, env: Env): Promise<Response> {
       since: person.created_at,
       last_seen: person.last_seen,
       packages: packages.results,
-      builds: builds.results,
+      builds: await Promise.all(builds.results.map(async (b) => (b.status === "queued" && b.trust === "community" && !b.pinned_to ? { ...b, queue: await queuePosition(env, b as { id: number; arch: string }) } : b))),
       build_counts: counts ?? { staged: 0, published: 0, failed: 0, total: 0 },
       approvals: approvals.results,
       approved_packages: approvedNames,

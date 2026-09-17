@@ -7,7 +7,8 @@ import { isCategory } from "../categories";
 import { recordEvidence, vetSummary } from "../record";
 import { isTextEvidence, reclaimStagingPackages, STAGING_QUOTA_BYTES } from "../staging";
 import { findLeak } from "../leak";
-import { chains, chainOf, storyRows, requestView, type Chain } from "./story";
+import { chains, chainOf, storyRows, requestView, placeInQueue, type Chain } from "./story";
+import { betterIdleWorker, FIRST_PICK_MINUTES } from "../queue";
 
 /**
  * The factory's brain. Cloudflare is the source of truth for package
@@ -297,11 +298,11 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   // by accident. Community results never reach the pool either way.
   const wanted = (Array.isArray(b.kinds) ? b.kinds.filter((k): k is string => typeof k === "string" && ALL_KINDS.includes(k)) : trust === "project" ? ALL_KINDS : ["build"]);
   const kinds = trust === "project" ? wanted : ["build"];
-  // Donating a worker to everyone's builds is a maintainer's call: a
-  // contributor's worker builds its owner's packages, --shared or not
-  // (docs/GOVERNANCE.md, *Workers, compute and agents*).
-  const owner = actor.w.owner ? await env.DB.prepare("SELECT role FROM contributors WHERE login = ?").bind(actor.w.owner).first<{ role: string }>() : null;
-  const shared = trust === "community" && b.shared === true && owner?.role === "maintainer";
+  // A worker started with --shared donates its compute to everyone's
+  // requests — any contributor's, since 2026-09-17: the shared workers are
+  // the queue a request lands in. Community results never reach the pool
+  // either way; a dedicated worker builds its owner's packages only.
+  const shared = trust === "community" && b.shared === true;
   // A build asked for one worker (pinned_to) is claimed by that worker only; the rest is anyone's that qualifies.
   let scope = `kind IN (SELECT value FROM json_each(?)) AND (pinned_to IS NULL OR pinned_to = ?)`;
   const binds: unknown[] = [JSON.stringify(kinds), workerId];
@@ -318,6 +319,15 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
     if (shared) {
       scope += ` AND (owner = ? OR shared_after IS NULL OR shared_after <= ?)`;
       binds.push(actor.w.owner ?? "-", now());
+      // The best idle worker has first pick: while a better shared worker of
+      // this architecture — native over emulated, then more cores, then more
+      // memory — is alive and idle, this one leaves the queue's newest builds
+      // to it (its owner's are its own). After three minutes anyone takes
+      // them: a worker that is alive but never claims holds nobody up.
+      if (await betterIdleWorker(env, workerId, b.arch, { emulated: !!(b.labels && typeof b.labels === "object" && (b.labels as Record<string, unknown>).emulated), cores: usage?.cores ?? 0, ram: usage?.ram_gb ?? 0 }, probe?.status === "ok")) {
+        scope += ` AND (owner = ? OR created_at <= ?)`;
+        binds.push(actor.w.owner ?? "-", new Date(Date.now() - FIRST_PICK_MINUTES * 60000).toISOString());
+      }
     } else {
       scope += ` AND owner = ?`;
       binds.push(actor.w.owner ?? "-");
@@ -764,6 +774,7 @@ export async function handleTask(id: number, env: Env): Promise<Response> {
   let chain: Chain | null = null, request: ReturnType<typeof requestView> = null;
   if (isBuild || task.kind === "audit" || task.kind === "trial" || task.kind === "publish") {
     const story = await storyRows(env, task.name);
+    await placeInQueue(env, story.tasks);
     chain = chainOf(chains(story.tasks, story.approvals, story.pkg, story.request), task.id);
     request = requestView(env, story.pkg, story.request, story.tasks);
   }

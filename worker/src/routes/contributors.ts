@@ -3,6 +3,7 @@ import { maintainersOf, roleFor, GOVERNANCE_FILE } from "../governance";
 import { CATEGORIES, isCategory } from "../categories";
 import { isRepoArch } from "../r2";
 import { providedBy } from "./factory";
+import { queuePosition } from "../queue";
 import { cookieOf } from "./auth";
 import { putRecord, recordKey, recordUrl, withdrawRecord } from "../record";
 import { version } from "../meta";
@@ -284,10 +285,11 @@ export async function handleRequestPackage(c: Contributor, request: Request, env
   const byProject = await env.DB.prepare("SELECT name, owner, status, blocked_at, blocked_reason FROM factory_packages WHERE project = ? AND name != ?").bind(parsed.project, name).first<{ name: string; owner: string; status: string; blocked_at: string | null; blocked_reason: string | null }>();
   if (byProject?.blocked_at) return json({ error: `${parsed.project} is blocked by a maintainer as ${byProject.name}: ${byProject.blocked_reason ?? ""}`.trim() }, 403);
   if (byProject) return json({ error: `${parsed.project} is already in the pool as ${byProject.name} (${byProject.status}, requested by ${byProject.owner})` }, 409);
-  if (byName && !["registered", "rejected", "unmaintained", "staged"].includes(byName.status)) return json({ error: `${name} is ${byName.status}; a request can be renewed while it is registered, staged, rejected or unmaintained — not while it is being built, and not once it is in the pool` }, 409);
-  // The package's status is one word for every architecture and every kind of build: the builds themselves say whether one is in flight (the project's included).
-  const inFlight = byName ? await env.DB.prepare("SELECT id, status, trust FROM build_tasks WHERE name = ? AND kind = 'build' AND status IN ('queued', 'leased') ORDER BY id DESC LIMIT 1").bind(name).first<{ id: number; status: string; trust: string }>() : null;
-  if (inFlight) return json({ error: `${name} is being built (task ${inFlight.id} is ${inFlight.status}${inFlight.trust === "project" ? ", the project's" : ""}); renew the request once it is done` }, 409);
+  if (byName && !["registered", "waiting", "rejected", "unmaintained", "staged"].includes(byName.status)) return json({ error: `${name} is ${byName.status}; a request can be renewed while it is registered, waiting, staged, rejected or unmaintained — not while it is being built, and not once it is in the pool` }, 409);
+  // The package's status is one word for every architecture and every kind of build: the builds themselves say whether one runs (the project's included). A build still waiting in the queue is the old request's: it leaves the queue, and the renewed request queues its own.
+  const running = byName ? await env.DB.prepare("SELECT id, status, trust FROM build_tasks WHERE name = ? AND kind = 'build' AND status = 'leased' ORDER BY id DESC LIMIT 1").bind(name).first<{ id: number; status: string; trust: string }>() : null;
+  if (running) return json({ error: `${name} is being built (task ${running.id}${running.trust === "project" ? ", the project's" : ""}); renew the request once it is done` }, 409);
+  if (byName) await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = ?, finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ? AND kind = 'build' AND trust = 'community' AND status = 'queued'").bind(`superseded: the request was renewed by ${c.login}`, name).run();
   const upstream = (await providedBy(env, name)).filter((p) => !["factory", "chaotic"].includes(p.source) && arches.includes(p.arch));
   if (upstream.length === arches.length) {
     return json({ error: `${upstream[0].source} already ships ${name} (${upstream.map((u) => `${u.version} for ${u.arch}`).join(", ")}); install it from the pool`, provided: upstream }, 409);
@@ -344,7 +346,9 @@ export async function handleRequestPackage(c: Contributor, request: Request, env
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('request', NULL, 'factory', 'ok', ?, ?)")
     .bind(`${name} ${tag} requested by ${c.login} from ${parsed.project} (${license}; ${build.join(", ")}) — record ${req.id}`, JSON.stringify({ request: req.id, name, owner: c.login, project: parsed.project, source, version: tag, license, arches: build, skipped: upstream, record: recordUrl(env, record.key) }))
     .run();
-  return json({ package: row, request: { id: req.id, record: recordUrl(env, record.key), signature: record.signed ? recordUrl(env, `${record.key}.sig`) : null, sha256: record.sha256 }, skipped: upstream, next: `POST /api/v1/factory/packages/${name}/build queues it; a worker of yours, or one the project shares, builds it into your staging workspace.` }, byName ? 200 : 201);
+  // The build starts by itself: into the shared queue, the best idle shared worker first, the contributor's own worker at once.
+  const queuedNow = await queueBuilds(env, c, name, {});
+  return json({ package: row, request: { id: req.id, record: recordUrl(env, record.key), signature: record.signed ? recordUrl(env, `${record.key}.sig`) : null, sha256: record.sha256 }, skipped: upstream, build: queuedNow instanceof Response ? { error: (await queuedNow.json<{ error: string }>()).error } : queuedNow, next: `queued: the shared workers build it into your staging workspace (a worker of yours takes it at once); follow it on /user/${c.login}` }, byName ? 200 : 201);
 }
 
 /** The owner frees the name (unless approved or published); a maintainer frees any, an unmaintained one included. */
@@ -362,61 +366,59 @@ export async function handleDeletePackage(c: Contributor, name: string, env: Env
 
 /**
  * Which workers may build for a contributor, per architecture (the claim's
- * rule, read the other way round): their own, and the ones a maintainer
- * shares — never the project's, which take the project's builds only.
+ * rule, read the other way round): their own, and the ones anyone shares —
+ * never the project's, which take the project's builds only.
  */
 export async function buildersFor(env: Env, login: string, arch: string): Promise<{ id: string; owner: string | null; mode: string | null; arch: string }[]> {
   const rows = await env.DB.prepare(
-    `SELECT w.id, w.owner, w.mode, w.arch FROM build_workers w LEFT JOIN contributors c ON c.login = w.owner
-      WHERE w.revoked_at IS NULL AND w.trust = 'community' AND w.arch = ? AND (w.owner = ? OR (w.mode = 'shared' AND c.role = 'maintainer'))`,
+    "SELECT id, owner, mode, arch FROM build_workers WHERE revoked_at IS NULL AND trust = 'community' AND arch = ? AND (owner = ? OR mode = 'shared')",
   ).bind(arch, login).all<{ id: string; owner: string | null; mode: string | null; arch: string }>();
   return rows.results;
 }
 
+export interface QueueAsk { arches?: string[]; worker?: string | null; hint?: string | null; reason?: string; release?: string }
+export interface Queued { tasks: number[]; building: { task: number; arch: string; on: string | null }[]; arches: string[]; pkgbuild_ref: string; pinned_to: string | null; lessons: Record<string, number>; hint: string | null; queue: Record<string, { position: number; total: number }> }
+
 /**
- * Queue community builds of a registered package: results go to staging,
- * never to the pool. Where it runs is the asker's call — `worker` names
- * one of theirs or one the project shares (that worker only, at once),
- * `"shared"` asks the project's shared workers at once, nothing leaves it
- * to the rule: theirs first, the shared ones after 14 days — or at once
- * when they have no worker for that architecture. A build that follows a
- * failed one carries it as the lesson (`params.lesson`): the drafter
- * starts from that PKGBUILD and its log instead of from nothing; `hint`
- * is the contributor's own word to the agent.
+ * Queue community builds of a registered package — the request does it the
+ * moment the record is written, the Build button does it again. Results go
+ * to staging, never to the pool. A build lands in the shared queue: any
+ * shared worker of the architecture may take it, the best idle one first
+ * (handleClaim), the owner's own worker always; `worker` names one of
+ * theirs (or one anyone shares) and the build waits for that worker only.
+ * A build that follows an ended one carries it as the lesson
+ * (`params.lesson`): the drafter starts from that PKGBUILD and what stopped
+ * it; `hint` is the asker's own word to the agent. Asked again while it
+ * waits, the build takes the choice made now.
  */
-export async function handleBuildPackage(c: Contributor, name: string, request: Request, env: Env): Promise<Response> {
-  const blocked = blockedResponse(c);
-  if (blocked) return blocked;
-  const b = (await request.json().catch(() => ({}))) as { arches?: unknown; reason?: string; release?: string; worker?: unknown; hint?: unknown };
+export async function queueBuilds(env: Env, c: Contributor, name: string, ask: QueueAsk): Promise<Queued | Response> {
   const pkg = await env.DB.prepare("SELECT * FROM factory_packages WHERE name = ? AND owner = ?").bind(name, c.login).first<{ name: string; arches: string; url: string; release: string | null; pkgbuild_path: string | null; detected: string | null; blocked_at: string | null; blocked_reason: string | null }>();
   if (!pkg) return json({ error: "request the package first (POST /factory/packages)" }, 404);
   if (pkg.blocked_at) return json({ error: `${name} is blocked by a maintainer: ${pkg.blocked_reason ?? ""}`.trim() }, 403);
   const queued = await env.DB.prepare("SELECT COUNT(*) AS n FROM build_tasks WHERE owner = ? AND status IN ('queued', 'leased')").bind(c.login).first<{ n: number }>();
   if ((queued?.n ?? 0) >= QUEUED_QUOTA) return json({ error: `you have ${queued?.n} tasks queued or building; the limit is ${QUEUED_QUOTA}` }, 429);
-  const wanted = (Array.isArray(b.arches) ? b.arches : JSON.parse(pkg.arches)) as string[];
-  const arches = wanted.filter((a) => isRepoArch(a) && (JSON.parse(pkg.arches) as string[]).includes(a));
-  if (!arches.length) return json({ error: `arches must name one the request has: ${(JSON.parse(pkg.arches) as string[]).join(", ")}` }, 400);
-  const hint = typeof b.hint === "string" && b.hint.trim() ? b.hint.trim().slice(0, 600) : null;
-  // Where it runs.
-  const where = typeof b.worker === "string" && b.worker.trim() ? b.worker.trim() : null;
+  const registered = JSON.parse(pkg.arches) as string[];
+  const wanted = Array.isArray(ask.arches) && ask.arches.length ? ask.arches : registered;
+  const arches = wanted.filter((a) => isRepoArch(a) && registered.includes(a));
+  if (!arches.length) return json({ error: `arches must name one the request has: ${registered.join(", ")}` }, 400);
+  const hint = typeof ask.hint === "string" && ask.hint.trim() ? ask.hint.trim().slice(0, 600) : null;
+  // Where it runs: the shared queue, or one worker.
+  const where = typeof ask.worker === "string" && ask.worker.trim() && ask.worker.trim() !== "shared" && ask.worker.trim() !== "queue" ? ask.worker.trim() : null;
   let pinned: string | null = null;
-  if (where && where !== "shared") {
+  if (where) {
     if (arches.length !== 1) return json({ error: "a worker builds one architecture: ask for that architecture alone" }, 400);
     const ok = (await buildersFor(env, c.login, arches[0])).find((w) => w.id === where);
-    if (!ok) return json({ error: `${where} is not a worker of yours for ${arches[0]}, nor one the project shares` }, 403);
+    if (!ok) return json({ error: `${where} is not a worker of yours for ${arches[0]}, nor one anyone shares` }, 403);
     pinned = ok.id;
   }
   const detected = pkg.detected ? (JSON.parse(pkg.detected) as { latest_tag?: string }) : {};
-  const tag = b.release ?? pkg.release ?? detected.latest_tag ?? null;
+  const tag = ask.release ?? pkg.release ?? detected.latest_tag ?? null;
   const ref = pkg.pkgbuild_path ? `${pkg.url}@${tag ?? "HEAD"}:${pkg.pkgbuild_path}` : `draft:${pkg.url}@${tag ?? "latest"}`;
   const version = tag ? tag.replace(/^v/, "").replace(/-/g, "_") : null;
   const ids: number[] = [];
   const building: { task: number; arch: string; on: string | null }[] = [];
   const lessons: Record<string, number> = {};
   for (const arch of arches) {
-    // Theirs first; the shared ones at once when they have no worker for this architecture (or asked for them), after 14 days otherwise.
-    const mine = await env.DB.prepare("SELECT COUNT(*) AS n FROM build_workers WHERE owner = ? AND arch = ? AND revoked_at IS NULL AND trust = 'community'").bind(c.login, arch).first<{ n: number }>();
-    const atOnce = pinned !== null || where === "shared" || (mine?.n ?? 0) === 0;
     // The last build of this architecture that ended — failed, rejected (cancelled), or staged and stopped by the gate or the audit — is the lesson the drafter starts from: its PKGBUILD, its log, the gate's, the audit's.
     const last = await env.DB.prepare("SELECT id, status FROM build_tasks WHERE name = ? AND arch = ? AND kind = 'build' AND trust = 'community' AND status NOT IN ('queued', 'leased') AND pkgbuild_ref LIKE 'draft:%' ORDER BY id DESC LIMIT 1").bind(name, arch).first<{ id: number; status: string }>();
     const params: Record<string, unknown> = {};
@@ -425,9 +427,9 @@ export async function handleBuildPackage(c: Contributor, name: string, request: 
     const dup = await env.DB.prepare("SELECT id, status, lease_owner FROM build_tasks WHERE name = ? AND arch = ? AND pkgbuild_ref = ? AND status IN ('queued', 'leased') LIMIT 1").bind(name, arch, ref).first<{ id: number; status: string; lease_owner: string | null }>();
     if (dup) {
       if (dup.status === "queued") {
-        // Asked again while it waits: where it goes, the hint and the lesson are what was asked now — the default choice unpins it.
-        await env.DB.prepare("UPDATE build_tasks SET pinned_to = ?, shared_after = ?, params = ? WHERE id = ? AND status = 'queued'")
-          .bind(pinned, atOnce ? null : new Date(Date.now() + 14 * 86400000).toISOString(), Object.keys(params).length ? JSON.stringify(params) : null, dup.id).run();
+        // Asked again while it waits: where it goes, the hint and the lesson are what was asked now — the queue when nothing was named.
+        await env.DB.prepare("UPDATE build_tasks SET pinned_to = ?, shared_after = NULL, params = ? WHERE id = ? AND status = 'queued'")
+          .bind(pinned, Object.keys(params).length ? JSON.stringify(params) : null, dup.id).run();
         ids.push(dup.id);
       } else {
         building.push({ task: dup.id, arch, on: dup.lease_owner });
@@ -435,21 +437,56 @@ export async function handleBuildPackage(c: Contributor, name: string, request: 
       continue;
     }
     const row = await env.DB.prepare(
-      `INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, shared_after, pinned_to, params) VALUES (?, ?, ?, ?, ?, 100, 0, 'community', ?, ${atOnce ? "NULL" : "strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+14 days')"}, ?, ?) RETURNING id`,
+      `INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, shared_after, pinned_to, params) VALUES (?, ?, ?, ?, ?, 100, 0, 'community', ?, NULL, ?, ?) RETURNING id`,
     )
-      .bind(name, arch, version, ref, b.reason ?? "contributor", c.login, pinned, Object.keys(params).length ? JSON.stringify(params) : null)
+      .bind(name, arch, version, ref, ask.reason ?? "contributor", c.login, pinned, Object.keys(params).length ? JSON.stringify(params) : null)
       .first<{ id: number }>();
     if (row) ids.push(row.id);
   }
-  // Everything asked for is already building: nothing queued, nothing to say but that.
-  if (!ids.length) return json({ tasks: [], building, arches, note: `already building: ${building.map((b) => `#${b.task} (${b.arch}${b.on ? ` on ${b.on}` : ""})`).join(", ")} — ask again when it ends` }, 200);
-  const queuedArches = arches.filter((a) => !building.some((b) => b.arch === a));
+  const queue: Record<string, { position: number; total: number }> = {};
+  for (const id of ids) {
+    const t = await env.DB.prepare("SELECT id, arch, pinned_to FROM build_tasks WHERE id = ?").bind(id).first<{ id: number; arch: string; pinned_to: string | null }>();
+    if (t && !t.pinned_to) queue[t.arch] = await queuePosition(env, t);
+  }
+  const out: Queued = { tasks: ids, building, arches: arches.filter((a) => !building.some((b) => b.arch === a)), pkgbuild_ref: ref, pinned_to: pinned, lessons, hint, queue };
+  if (!ids.length) return out;
   await env.DB.prepare("UPDATE factory_packages SET status = 'waiting', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ? AND status != 'building'")
-    .bind(`waiting for a worker (${queuedArches.join(", ")})${pinned ? ` — ${pinned}` : where === "shared" ? " — the project's shared workers" : ""}`, name).run();
+    .bind(`in the queue (${out.arches.join(", ")})${pinned ? ` — for ${pinned}` : ""}`, name).run();
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('enqueue', NULL, 'factory', 'ok', ?, ?)")
-    .bind(`${name}${version ? " " + version : ""}: ${ids.length} community build(s) queued by ${c.login} for ${queuedArches.join(", ")}${pinned ? ` on ${pinned}` : where === "shared" ? " on the project's shared workers" : ""} — results go to staging`, JSON.stringify({ name, owner: c.login, arches: queuedArches, tasks: ids, pkgbuild_ref: ref, pinned_to: pinned, shared: where === "shared", lessons, hint, building }))
+    .bind(`${name}${version ? " " + version : ""}: ${ids.length} community build(s) queued by ${c.login} for ${out.arches.join(", ")}${pinned ? ` on ${pinned}` : " — the shared queue"} — results go to staging`, JSON.stringify({ name, owner: c.login, arches: out.arches, tasks: ids, pkgbuild_ref: ref, pinned_to: pinned, lessons, hint, building, queue }))
     .run();
-  return json({ tasks: ids, building, arches: queuedArches, pkgbuild_ref: ref, pinned_to: pinned, lessons, hint, note: pinned ? `${pinned} builds these; nothing else claims them.` : where === "shared" ? "The project's shared workers take these at once." : "A worker of yours claims these first; the project's shared workers otherwise. Start one with the Omarchy Packaging image (/docs/workers)." }, 201);
+  return out;
+}
+
+/** POST /factory/packages/:name/build — the Build button: the same queue the request used, with the asker's choice of worker and hint. */
+export async function handleBuildPackage(c: Contributor, name: string, request: Request, env: Env): Promise<Response> {
+  const blocked = blockedResponse(c);
+  if (blocked) return blocked;
+  const b = (await request.json().catch(() => ({}))) as { arches?: unknown; reason?: string; release?: string; worker?: unknown; hint?: unknown };
+  const out = await queueBuilds(env, c, name, { arches: Array.isArray(b.arches) ? (b.arches as string[]) : undefined, worker: typeof b.worker === "string" ? b.worker : null, hint: typeof b.hint === "string" ? b.hint : null, reason: b.reason, release: b.release });
+  if (out instanceof Response) return out;
+  if (!out.tasks.length) return json({ ...out, note: `already building: ${out.building.map((x) => `#${x.task} (${x.arch}${x.on ? ` on ${x.on}` : ""})`).join(", ")} — ask again when it ends` }, 200);
+  return json({ ...out, note: out.pinned_to ? `${out.pinned_to} builds these; nothing else claims them.` : "In the shared queue: the best idle shared worker takes it, or a worker of yours at once." }, 201);
+}
+
+/**
+ * DELETE /factory/packages/:name/builds/:id — the owner takes their own
+ * queued build out of the queue (a build that runs is not stopped: the
+ * worker finishes, the evidence stays). Nothing puts it back by itself:
+ * the Build button does, with the asker's choice.
+ */
+export async function handleDequeueBuild(c: Contributor, name: string, id: number, env: Env): Promise<Response> {
+  const t = await env.DB.prepare("SELECT id, name, arch, owner, status, trust FROM build_tasks WHERE id = ?").bind(id).first<{ id: number; name: string; arch: string; owner: string | null; status: string; trust: string }>();
+  if (!t || t.name !== name) return json({ error: "no such build of this package" }, 404);
+  if (t.owner !== c.login || t.trust !== "community") return json({ error: "not your build" }, 403);
+  if (t.status !== "queued") return json({ error: `build #${id} is ${t.status}; only a queued build leaves the queue` }, 409);
+  await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = ?, finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status = 'queued'").bind(`taken out of the queue by ${c.login}`, id).run();
+  const left = await env.DB.prepare("SELECT COUNT(*) AS n FROM build_tasks WHERE name = ? AND kind = 'build' AND status IN ('queued', 'leased')").bind(name).first<{ n: number }>();
+  if (!left?.n) await env.DB.prepare("UPDATE factory_packages SET status = 'registered', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ? AND status = 'waiting'").bind(`out of the queue (${t.arch}) by ${c.login}; press Build to queue it again`, name).run();
+  await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('enqueue', NULL, 'factory', 'ok', ?, ?)")
+    .bind(`${name} (${t.arch}): build ${id} taken out of the queue by ${c.login}`, JSON.stringify({ name, task: id, arch: t.arch, by: c.login }))
+    .run();
+  return json({ task: id, status: "cancelled", by: c.login });
 }
 
 export async function handleRegisterWorker(c: Contributor, request: Request, env: Env): Promise<Response> {

@@ -88,15 +88,18 @@ can be ready while the other failed). The tools, in the order to try them:
    agent gets three attempts, each from the last log. (A package whose
    repository ships its own PKGBUILD is built as it is, with no drafting:
    the fix is made there, tagged, and the request renewed with the tag.)
-3. **Choose where it runs.** The same dialog lists the workers that can
-   take it: the contributor's own, and the ones the project shares. A
-   build that ran *emulated* (x86_64 under qemu on an aarch64 host) may
-   need nothing but a native worker. A build asked for one worker goes to
-   that worker only and waits for it; a contributor with no worker for the
-   architecture is built by the project's shared workers at once, one with
-   a worker by theirs first and by the shared ones after 14 days. A build
-   already waiting takes the choice made when it is asked for again;
-   revoking a worker frees the builds asked for it.
+3. **Choose the worker.** A request lands in the **shared queue** the
+   moment its record is written — every contributor's shared worker takes
+   from it, the best idle one of the architecture first (native before
+   emulated, then the most cores), the others after three minutes; the
+   page says where a build stands ("3 of 7"). The Build dialog offers the
+   queue or one of the contributor's own workers, which takes it at once;
+   a queued build can be taken out and put back from the same dialog —
+   nothing puts it back by itself. A build that ran *emulated* (x86_64
+   under qemu on an aarch64 host) may need nothing but a native worker: a
+   toolchain that cannot start there fails the build at once, with the
+   reason, before any drafting. Revoking a worker frees the builds asked
+   for it.
 4. **Build it at home first.** The same image runs on any machine with
    the contributor's own agent key (*Workers* in the docs): what passes
    there is what they queue here.
@@ -182,6 +185,18 @@ maintainer merges it like any other change to the process.
   `.desktop` entry is valid — while a command-line binary must still start.
   The *Desktop apps* and *Prebuilt binaries* skills were written from the
   recipe that passed.
+- **2026-09-17 — rustc under emulation.** Four x86_64 builds of felix
+  failed the same way on the Studio's emulated worker, three drafter
+  attempts each, the agent "correcting" a PKGBUILD that was never the
+  problem: `rustc` cannot start there. The host's kernel (Asahi) uses
+  16 KB pages; qemu-user can only place a file mapping on a 16 KB
+  boundary, and `libedit.so.0` — pulled by rustc through libLLVM — asks
+  for its data segment at a 4 KB one (`mmap … = EFAULT`, "failed to map
+  segment"). gcc, python, git, bsdtar and cargo itself start; rustc and
+  rustup's own toolchain do not. Two things followed: an emulated worker
+  now probes every toolchain a recipe installs and fails the build at once
+  when one cannot start, and the shared queue hands a build to a native
+  worker first whenever one is idle.
 - **2026-09-17 — the request predates the form.** The first packages were
   registered before the request form existed; the pool wrote their
   records from what it had, with an empty checklist and often an unknown
