@@ -8,6 +8,7 @@
  * themselves have a page of their own (/workers), by kind.
  */
 import { page } from "./layout";
+import { EVERYONE, SIGNED_IN, type Component, type Fixture } from "./components";
 import { CHARTS } from "./charts";
 import { archDiagram, liveDiagram } from "./diagrams";
 import type { RunningVersion } from "../meta";
@@ -365,3 +366,294 @@ export function pipelineHtml(poolUrl: string, version: RunningVersion): string {
     version,
   });
 }
+
+/**
+ * What /pipeline is made of.
+ * Ten sections, one entry per unit that reads or acts: the state row and the
+ * living system (the journal, as it happens), the review throughput, the
+ * operations, the review queue and its buttons, six charts, the two tables,
+ * the ring heads with roll back, the journal, the bill. The stable ring is
+ * the third of RINGS (edge, rc, stable, lab) and the one the fixture
+ * released, so a release's fields are read at `rings.2`. Everything the page
+ * reads is public; a session changes the queue-position card, the
+ * operations hint and the two rows of buttons.
+ */
+export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
+  {
+    id: "pipeline.hero",
+    page: "/pipeline",
+    anchor: ['class="hero compact"', "The pipeline, as it runs right now"],
+    visible: EVERYONE,
+  },
+  {
+    id: "pipeline.state-row",
+    page: "/pipeline",
+    anchor: ['class="state-row"', 'id="state"'],
+    script: ['$("#state")', 'fetch("/api/v1/status"', "problemsOf(d)", "d.version && d.version.version"],
+    reads: [
+      { path: "/api/v1/stats", fields: ["rings", "rings.2.ring", "rings.2.release.seq", "latest", "coverage", "version.version"] },
+      { path: "/api/v1/status", fields: ["index.ok", "index.ms", "pool.ok", "pool.ms"] },
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "pipeline.section-links",
+    page: "/pipeline",
+    anchor: ['id="live"', 'id="throughput"', 'href="/docs/governance"', 'href="/docs/factory"', 'href="/workers"', 'href="/review"', 'href="/status"', 'href="/factory"', 'href="/journal"'],
+    visible: EVERYONE,
+  },
+  {
+    id: "pipeline.live-diagram",
+    page: "/pipeline",
+    anchor: ['class="diagram live-diagram"', 'data-live="verified-today"', 'data-live="stored-once"', 'data-live="edge-head"', 'data-live="rc-head"', 'data-live="stable-head"', 'data-live="advisories"', 'data-live="open-stable"'],
+    script: ['live("verified-today"', 'live("stored-once"', 'live("advisories"', 'live("open-stable"', 'n + "-head"', '"/api/v1/security?ring=stable&arch=x86_64"'],
+    reads: [
+      { path: "/api/v1/stats", fields: ["series.imports_daily", "pool.objects", "rings.2.release.seq", "rings.2.release.created_at", "security.advisories"] },
+      { path: `/api/v1/security?ring=stable&arch=${F.arch}`, fields: ["totals.packages", "totals.kev"] },
+    ],
+    visible: EVERYONE,
+    drawn: "live",
+  },
+  {
+    id: "pipeline.live-feed",
+    page: "/pipeline",
+    anchor: ['class="ticker"', 'id="feed"'],
+    script: ['"/api/v1/events?limit=12"', '$("#feed")', 'e.kind !== "metrics"', "e.payload.ci.run_url"],
+    reads: [{ path: "/api/v1/events?limit=12", fields: ["events", "events.0.id", "events.0.kind", "events.0.status", "events.0.ring", "events.0.source", "events.0.summary", "events.0.created_at", "events.0.payload"] }],
+    visible: EVERYONE,
+  },
+  {
+    id: "pipeline.counters",
+    page: "/pipeline",
+    anchor: ['id="counters"', 'href="/journal"'],
+    script: ['$("#counters")', 'live("kev"', "d.audience", 'e.kind === "fast-track"', 'e.kind === "rollback"', 'e.kind === "promote" && e.status === "ok"'],
+    reads: [
+      { path: "/api/v1/stats", fields: ["series.imports_daily", "security.advisories", "audience", "events"] },
+      { path: `/api/v1/security?ring=stable&arch=${F.arch}`, fields: ["totals.kev"] },
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "pipeline.throughput-flow",
+    page: "/pipeline",
+    anchor: ['id="throughput"', 'id="flow"'],
+    script: ['$("#flow")', 'API + "/packages"', 'API + "/approvals"', 'API + "/review"', 'a.decision === "approved"', 't.status === "leased" && t.trust === "community"', "s.finished_at"],
+    reads: [
+      { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.created_at", "packages.0.updated_at", "packages.0.status"] },
+      { path: "/api/v1/factory?limit=100", fields: ["tasks", "tasks.0.kind", "tasks.0.status", "tasks.0.trust"] },
+      { path: "/api/v1/factory/approvals", fields: ["approvals", "approvals.0.decision", "approvals.0.created_at"] },
+      { path: "/api/v1/factory/review", fields: ["staged", "staged.0.finished_at"] },
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "pipeline.decisions-chart",
+    page: "/pipeline",
+    anchor: ['id="c-decisions"'],
+    script: ['$("#c-decisions")', 'name: "approved"', 'name: "sent back"', "a.created_at"],
+    reads: [{ path: "/api/v1/factory/approvals", fields: ["approvals.0.decision", "approvals.0.created_at"] }],
+    visible: EVERYONE,
+  },
+  {
+    id: "pipeline.arrivals-chart",
+    page: "/pipeline",
+    anchor: ['id="c-arrivals"'],
+    script: ['$("#c-arrivals")', 'name: "arrived"', 'name: "decided"', "p.created_at || p.updated_at"],
+    reads: [
+      { path: "/api/v1/factory/packages", fields: ["packages.0.created_at", "packages.0.updated_at"] },
+      { path: "/api/v1/factory/approvals", fields: ["approvals.0.decision", "approvals.0.created_at"] },
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "pipeline.deciders",
+    page: "/pipeline",
+    anchor: ['id="deciders"'],
+    script: ['$("#deciders")', "by[a.by]", 'href="/user/', 'avatar(n, "maintainer")'],
+    reads: [{ path: "/api/v1/factory/approvals", fields: ["approvals.0.by"] }],
+    visible: EVERYONE,
+  },
+  {
+    id: "pipeline.queue-position",
+    page: "/pipeline",
+    anchor: ['id="queue-pos"'],
+    script: ['$("#queue-pos")', "me && me.login", "x.s.owner === me.login", "your build in the queue", "x.s.audit.verdict || x.s.audit.status"],
+    reads: [
+      { path: "/auth/me", as: "owner", fields: ["login"] },
+      { path: "/api/v1/factory/review", fields: ["staged.0.owner", "staged.0.name", "staged.0.version", "staged.0.arch", "staged.0.finished_at", "staged.0.audit.status"] },
+    ],
+    visible: SIGNED_IN,
+  },
+  {
+    id: "pipeline.operations-hint",
+    page: "/pipeline",
+    anchor: ['id="operations"', 'id="ops-who"'],
+    script: ['$("#ops-who")', 'ME_ROLE === "maintainer"', "you can approve, trust and roll back", "read-only — approving, trusting and rolling back need the maintainer role"],
+    reads: [{ path: "/auth/me", as: "maintainer", fields: ["login", "role"] }],
+    visible: EVERYONE,
+  },
+  {
+    id: "pipeline.operations-tiles",
+    page: "/pipeline",
+    anchor: ['class="tiles six"', 'id="tiles"'],
+    script: ['setTiles("#tiles"', '"Waiting for review"', '"Failed · 24 h"', "d.lease_minutes", 'w.side === "omarchy"', "m.jobs || m.actions"],
+    reads: [
+      { path: "/api/v1/factory?limit=100", fields: ["counts", "counts.0.status", "counts.0.arch", "counts.0.n", "lease_minutes", "workers", "workers.0.alive", "workers.0.side", "tasks.0.status", "tasks.0.finished_at", "tasks.0.created_at", "tasks.0.name", "tasks.0.kind", "tasks.0.arch"] },
+      { path: "/api/v1/factory/review", fields: ["staged", "staged.0.finished_at"] },
+      { path: "/api/v1/stats", fields: ["metrics"] },
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "pipeline.arch-diagram",
+    page: "/pipeline",
+    anchor: ['data-live="last-sync"', 'data-live="api"', 'data-live="pool-size"', 'data-live="heads"', 'data-live="queue"', 'data-live="w-pool"', 'data-live="w-review"', 'data-live="w-community"', 'href="/workers"'],
+    script: ['live("last-sync"', 'live("api"', 'live("pool-size"', 'live("heads"', 'live("queue"', 'live("w-pool"', 'live("w-review"', 'live("w-community"', "roleOf(w)"],
+    reads: [
+      { path: "/api/v1/stats", fields: ["latest", "pool.objects", "pool.bytes", "rings.2.release.seq"] },
+      { path: "/api/v1/status", fields: ["index.ok", "index.ms", "pool.ok", "pool.ms"] },
+      { path: "/api/v1/factory?limit=100", fields: ["counts", "workers.0.side", "workers.0.labels", "workers.0.trust", "workers.0.mode", "workers.0.alive", "workers.0.current_task"] },
+    ],
+    visible: EVERYONE,
+    drawn: "arch",
+  },
+  {
+    id: "pipeline.review-queue-table",
+    page: "/pipeline",
+    anchor: ['id="staged"', "<th>Decision</th>"],
+    script: ['pager("#staged"', "s.evidence", "ev.pkgbuild", "auditPill(s.audit)", "a maintainer decides"],
+    // The evidence links point at the artifacts of a staged build; the fixture's undecided rows were written without any, so the links are read on the contributor's build.
+    reads: [
+      { path: "/api/v1/factory/review", fields: ["staged.0.id", "staged.0.name", "staged.0.version", "staged.0.arch", "staged.0.owner", "staged.0.evidence.pkgbuild", "staged.0.evidence.log", "staged.0.evidence.pkginfo", "staged.0.audit.status", "staged.0.finished_at"] },
+      { path: `/api/v1/factory/tasks/${F.contributorTask}/artifacts/PKGBUILD`, json: false },
+      { path: `/api/v1/factory/tasks/${F.contributorTask}/artifacts/build.log`, json: false },
+      { path: `/api/v1/factory/tasks/${F.contributorTask}/artifacts/PKGINFO`, json: false },
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "pipeline.review-decision-buttons",
+    page: "/pipeline",
+    anchor: ['id="staged"', 'id="rq-state"'],
+    script: ["data-approve", "data-reject", 'API + "/tasks/" + id + "/" + (approve ? "approve" : "reject")', '$("#rq-state")', '"Approve build #"', '"Reject build #"'],
+    // Approve is offered on every staged row here, but only the project's build can be approved — the fixture's is
+    // already approved, so a maintainer meets "already approved". Reject on a row of this page's own: the Review's
+    // buttons reject F.disposableTask before these run, and a cancelled row answers 409 to every role.
+    acts: [
+      { method: "POST", path: `/api/v1/factory/tasks/${F.projectTask}/approve`, body: { note: "reads well" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: [200, 409] } },
+      { method: "POST", path: `/api/v1/factory/tasks/${F.spareTask}/reject`, body: { note: "the source is not the upstream's" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 200 } },
+    ],
+    visible: ["maintainer"],
+  },
+  {
+    id: "pipeline.jobs-chart",
+    page: "/pipeline",
+    anchor: ['id="c-jobs"'],
+    script: ['$("#c-jobs")', "S.jobs_daily", 'r.status === "done"'],
+    reads: [{ path: "/api/v1/stats", fields: ["series.jobs_daily", "series.jobs_daily.0.day", "series.jobs_daily.0.status", "series.jobs_daily.0.n"] }],
+    visible: EVERYONE,
+  },
+  {
+    id: "pipeline.promotions-chart",
+    page: "/pipeline",
+    anchor: ['id="c-promos"'],
+    script: ['$("#c-promos")', '"/api/v1/events?kind="', '["promote", "rollback", "fast-track"]', "e.created_at.slice(0, 10)"],
+    reads: [
+      { path: "/api/v1/events?kind=promote&limit=200", fields: ["events", "events.0.created_at", "events.0.status"] },
+      { path: "/api/v1/events?kind=rollback&limit=200", fields: ["events"] },
+      { path: "/api/v1/events?kind=fast-track&limit=200", fields: ["events"] },
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "pipeline.health-heatgrid",
+    page: "/pipeline",
+    anchor: ['id="c-health"'],
+    script: ['$("#c-health")', "heatGrid(S.health)"],
+    reads: [{ path: "/api/v1/stats", fields: ["series.health"] }],
+    visible: EVERYONE,
+  },
+  {
+    id: "pipeline.imports-chart",
+    page: "/pipeline",
+    anchor: ['id="c-imports"'],
+    script: ['$("#c-imports")', "S.imports_daily", "byDay[x].packages"],
+    reads: [{ path: "/api/v1/stats", fields: ["series.imports_daily"] }],
+    visible: EVERYONE,
+  },
+  {
+    id: "pipeline.sync-chart",
+    page: "/pipeline",
+    anchor: ['id="c-sync"'],
+    script: ['$("#c-sync")', "S.sync_runs", "r.bytes && r.duration_ms"],
+    reads: [{ path: "/api/v1/stats", fields: ["series.sync_runs"] }],
+    visible: EVERYONE,
+  },
+  {
+    id: "pipeline.builds-chart",
+    page: "/pipeline",
+    anchor: ['id="c-builds"'],
+    script: ['$("#c-builds")', "S.builds_daily", 'r.status === "staged"'],
+    reads: [{ path: "/api/v1/stats", fields: ["series.builds_daily", "series.builds_daily.0.day", "series.builds_daily.0.status", "series.builds_daily.0.n"] }],
+    visible: EVERYONE,
+  },
+  {
+    id: "pipeline.tasks-table",
+    page: "/pipeline",
+    anchor: ['id="tasks"'],
+    script: ['pager("#tasks"', 'href="/build/', "/artifacts/build.log", "/artifacts/PKGBUILD", "t.result_filename", "jobResult(t)", "t.max_attempts"],
+    reads: [
+      { path: "/api/v1/factory?limit=100", fields: ["tasks.0.id", "tasks.0.kind", "tasks.0.name", "tasks.0.version", "tasks.0.arch", "tasks.0.status", "tasks.0.trust", "tasks.0.owner", "tasks.0.publish", "tasks.0.attempts", "tasks.0.max_attempts", "tasks.0.reason", "tasks.0.lease_owner", "tasks.0.duration_ms", "tasks.0.result_filename", "tasks.0.result", "tasks.0.error", "tasks.0.params"] },
+      { path: `/api/v1/factory/tasks/${F.contributorTask}/artifacts/build.log`, json: false },
+      { path: `/api/v1/factory/tasks/${F.contributorTask}/artifacts/PKGBUILD`, json: false },
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "pipeline.registry-table",
+    page: "/pipeline",
+    anchor: ['id="registry"'],
+    script: ['fetch("/api/v1/factory/packages")', 'pager("#registry"', "p.staged_builds", '"/request.json"', "det.latest_tag"],
+    reads: [{ path: "/api/v1/factory/packages", fields: ["packages.0.name", "packages.0.request_id", "packages.0.project", "packages.0.url", "packages.0.owner", "packages.0.arches", "packages.0.release", "packages.0.license", "packages.0.status", "packages.0.staged_builds", "packages.0.detail", "packages.0.updated_at", "packages.0.category", "packages.0.detected"] }],
+    visible: EVERYONE,
+  },
+  {
+    id: "pipeline.ring-heads",
+    page: "/pipeline",
+    anchor: ['id="heads"'],
+    script: ['$("#heads")', "rel.parent_id", 'href="/diff?ring=', "r.package_count", "x.is_head"],
+    reads: [{ path: "/api/v1/stats", fields: ["rings.2.ring", "rings.2.release.id", "rings.2.release.seq", "rings.2.release.created_at", "rings.2.release.parent_id", "rings.2.package_count", "rings.2.bytes", "latest", "releases", "releases.0.ring", "releases.0.id", "releases.0.seq", "releases.0.is_head"] }],
+    visible: EVERYONE,
+  },
+  {
+    id: "pipeline.rollback-action",
+    page: "/pipeline",
+    anchor: ['id="heads"', 'id="rb-state"'],
+    script: ["data-rollback", 'API + "/jobs"', 'kind: "rollback"', '$("#rb-state")', '"Roll back"'],
+    // Queued, never run: no worker claims it in the tests, so what stable serves does not change. `to` is a string, as the button's attribute sends it.
+    acts: [{ method: "POST", path: "/api/v1/factory/jobs", body: { kind: "rollback", params: { ring: "stable", to: String(F.previousRelease), note: "the fixture's rollback" } }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 201 } }],
+    visible: ["maintainer"],
+  },
+  {
+    id: "pipeline.journal-table",
+    page: "/pipeline",
+    anchor: ['id="events"'],
+    script: ['pager("#events"', "e.payload.release_id", "dur(e.duration_ms)", 'e.kind === "promote"'],
+    reads: [{ path: "/api/v1/stats", fields: ["events", "events.0.status", "events.0.kind", "events.0.ring", "events.0.source", "events.0.summary", "events.0.payload", "events.0.duration_ms", "events.0.created_at"] }],
+    visible: EVERYONE,
+  },
+  {
+    id: "pipeline.budget",
+    page: "/pipeline",
+    anchor: ['id="budget"'],
+    script: ['fetch("/api/v1/cost")', '$("#budget")', "c.month_to_date_usd", "c.projected_usd", "c.lines_usd.cap", "c.guard"],
+    reads: [{ path: "/api/v1/cost", fields: ["month", "month_to_date_usd", "projected_usd", "status", "guard", "lines_usd.cap"] }],
+    visible: EVERYONE,
+  },
+  {
+    id: "pipeline.sponsor",
+    page: "/pipeline",
+    anchor: ['class="sponsor"', "Help keep it running.", 'href="mailto:sponsor@firemanxbr.org"'],
+    visible: EVERYONE,
+  },
+];

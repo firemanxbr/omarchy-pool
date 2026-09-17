@@ -5,6 +5,7 @@
  * Pool's "Made in the open" numbers; each name leads to its profile.
  */
 import { page } from "./layout";
+import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 
 const BODY = String.raw`
@@ -95,3 +96,95 @@ export function peopleHtml(poolUrl: string, version: RunningVersion): string {
     version,
   });
 }
+
+/**
+ * What /people is made of.
+ * The page is role-blind: four public reads, no act, and the same tiles,
+ * chips and table for everyone. The section ids are the targets the Pool's
+ * "Made in the open" tiles link to, so each section head keeps its anchor.
+ */
+export const PEOPLE_COMPONENTS = (_F: Fixture): Component[] => [
+  {
+    id: "people.hero",
+    page: "/people",
+    anchor: ["<h1>People</h1>", 'href="/docs/governance">How one becomes a maintainer →</a>'],
+    visible: EVERYONE,
+  },
+  {
+    id: "people.tiles",
+    page: "/people",
+    anchor: ['id="tiles"'],
+    script: ['skeletonTiles("#tiles", 4)', 'setTiles("#tiles"', '"Workers ready"', '"Community packages"', 'w.side === "omarchy"'],
+    reads: [
+      { path: "/api/v1/factory/maintainers", fields: ["maintainers", "maintainers.0.login"] },
+      { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.owner", "packages.0.status"] },
+      { path: "/api/v1/factory", fields: ["workers", "workers.0.owner", "workers.0.alive", "workers.0.ready", "workers.0.side"] },
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "people.maintainers-head",
+    page: "/people",
+    anchor: ['<section id="maintainers">', "factory/MAINTAINERS.toml"],
+    visible: EVERYONE,
+  },
+  {
+    id: "people.maintainers-list",
+    page: "/people",
+    anchor: ['id="maintainers-list"'],
+    script: ['"/api/v1/factory/maintainers"', '"#maintainers-list"', "m.since", 'personChip(m, "maintainer"'],
+    reads: [{ path: "/api/v1/factory/maintainers", fields: ["maintainers", "maintainers.0.login", "maintainers.0.since"] }],
+    visible: EVERYONE,
+  },
+  {
+    id: "people.contributors-head",
+    page: "/people",
+    anchor: ['<section id="contributors">', 'href="/factory">Bring a package →</a>'],
+    visible: EVERYONE,
+  },
+  {
+    id: "people.contributors-list",
+    page: "/people",
+    anchor: ['id="contributors-list"'],
+    script: ['"/api/v1/factory/packages"', '"/api/v1/factory"', '"#contributors-list"', 'p.status === "approved" || p.status === "published"', 'personChip(c, "contributor"'],
+    reads: [
+      { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.owner", "packages.0.status"] },
+      { path: "/api/v1/factory", fields: ["workers", "workers.0.owner"] },
+      { path: "/api/v1/factory/maintainers", fields: ["maintainers", "maintainers.0.login"] },
+      { path: "/api/v1/factory/blocks", fields: ["contributors"] },
+    ],
+    visible: EVERYONE,
+  },
+  {
+    // The pill sits inside a contributor's chip; its row is the block, from the one read the list does not draw itself.
+    id: "people.contributor-blocked-pill",
+    page: "/people",
+    anchor: ['id="contributors-list"'],
+    script: ['"/api/v1/factory/blocks"', "blocked[b.login] = b.blocked_reason", '>blocked</span>'],
+    reads: [{ path: "/api/v1/factory/blocks", fields: ["contributors", "contributors.0.login", "contributors.0.blocked_reason"] }],
+    visible: EVERYONE,
+  },
+  {
+    id: "people.workers-head",
+    page: "/people",
+    anchor: ['<section id="workers">', 'href="/docs/workers">Run one →</a>', "<em>Ready</em> means a heartbeat in the last ten minutes"],
+    visible: EVERYONE,
+  },
+  {
+    id: "people.workers-table",
+    page: "/people",
+    anchor: ['id="workers-table"', "<th>Ready</th><th>Now</th><th>Last seen</th><th>Done / failed</th>"],
+    script: ['"/api/v1/factory"', '"#workers-table tbody"', "w.agent_status", "w.current_task", "w.builds_failed", 'colspan="9"'],
+    reads: [
+      {
+        path: "/api/v1/factory",
+        fields: [
+          "workers", "workers.0.id", "workers.0.owner", "workers.0.arch", "workers.0.labels", "workers.0.side", "workers.0.kinds",
+          "workers.0.agent", "workers.0.agent_status", "workers.0.agent_checked_at", "workers.0.agent_error",
+          "workers.0.alive", "workers.0.ready", "workers.0.current_task", "workers.0.last_seen", "workers.0.builds_done", "workers.0.builds_failed",
+        ],
+      },
+    ],
+    visible: EVERYONE,
+  },
+];

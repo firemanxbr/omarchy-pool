@@ -2,6 +2,7 @@
  * API: the endpoints a script, an agent or omarchy-cli uses, with examples.
  */
 import { page } from "./layout";
+import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 
 const BODY = String.raw`
@@ -108,3 +109,223 @@ export function apiDocsHtml(poolUrl: string, version: RunningVersion): string {
     version,
   });
 }
+
+/**
+ * What /api is made of.
+ * The page is a reference: its tables are rows of claims about routes, so
+ * each table's entry reads or acts through every endpoint its rows name,
+ * on the fixture — a row about a route that is gone, or that answers
+ * another shape, fails here by the table's name. A row's anchor is its
+ * endpoint's code, not the hint text beside it. The write tables act with
+ * the roles the rows refuse, with a body the handler stops at the door, or
+ * on a row the fixture has already decided, so the fixture leaves this page
+ * as it came; what a decision does is the Review page's and the person's
+ * page's to prove.
+ */
+export const API_DOCS_COMPONENTS = (F: Fixture): Component[] => {
+  const stable = `ring=stable&arch=${F.arch}`;
+  const noSession = { anonymous: 401, contributor: 401, maintainer: 401 } as const;
+  const stagedPackage = `${F.factoryPkg}-1.0-1-${F.arch}.pkg.tar.zst`;
+  return [
+    {
+      id: "api.hero",
+      page: "/api",
+      anchor: ["<h1>API</h1>", '<p class="lede">Everything this site shows comes from a small JSON API'],
+      visible: EVERYONE,
+    },
+    {
+      id: "api.docs-search",
+      page: "/api",
+      anchor: ['id="docs-q"', 'id="docs-hits"'],
+      script: ['$("#docs-q")', '$("#docs-hits")', '$("#docs-nav")', 'class="hit"'],
+      visible: EVERYONE,
+    },
+    {
+      id: "api.docs-chapters",
+      page: "/api",
+      anchor: [
+        'id="docs-nav"',
+        '<details open><summary><a href="/api" class="on">API</a><small>5</small></summary>',
+        'href="/api#read"', 'href="/api#factory"', 'href="/api#examples"', 'href="/api#write-jobs"', 'href="/api#write-people"',
+      ],
+      visible: EVERYONE,
+    },
+    {
+      id: "api.read-table",
+      page: "/api",
+      anchor: [
+        'id="read"',
+        "<code>GET /version</code>", "<code>GET /signing-key</code>", "<code>GET /status</code>", "<code>GET /stats</code>",
+        "<code>GET /releases/:ring?fields=summary", "<code>GET /releases/:ring?arch=", "<code>GET /releases/:ring/history</code>", "<code>GET /releases/:ring/diff?",
+        "<code>GET /packages/:sha256</code>", "<code>GET /search?", "<code>GET /package/:name?", "<code>/files</code>", "<code>GET /graph?",
+        "<code>GET /security/components</code>", "<code>GET /security?", "<code>GET /events?", "<code>GET /pool/unreferenced?", "<code>GET /cost</code>",
+      ],
+      reads: [
+        { path: "/api/v1/version", fields: ["version", "commit", "deployed_at", "release_url", "commit_url"] },
+        { path: "/api/v1/signing-key", fields: ["fingerprint", "user", "armored"] },
+        { path: "/api/v1/status", fields: ["ok", "state", "api.ok", "index.ok", "index.ms", "pool.ok", "pool.ms", "signing", "checked_at"] },
+        {
+          path: "/api/v1/stats",
+          fields: ["rings", "rings.0.ring", "rings.0.release", "coverage", "pool.objects", "pool.bytes", "series.imports_daily", "series.health", "metrics", "events", "latest", "provenance", "any"],
+        },
+        {
+          path: `/api/v1/releases/stable?fields=summary&arch=${F.arch}`,
+          fields: ["release.id", "release.ring", "packages", "packages.0.name", "packages.0.version", "packages.0.arch", "packages.0.filename", "packages.0.sha256", "packages.0.size_download", "packages.0.size_installed", "packages.0.description"],
+        },
+        { path: `/api/v1/releases/stable?arch=${F.arch}&limit=1&release_id=${F.release}`, fields: ["release.id", "page.limit", "page.returned", "page.total", "page.next", "packages", "packages.0.name"] },
+        { path: `/api/v1/releases/stable?arch=${F.arch}&limit=1&after=${F.pkg2}/${F.arch}/core`, fields: ["page.after", "packages", "packages.0.name"] },
+        { path: "/api/v1/releases/stable/history", fields: ["ring", "releases", "releases.0.id", "releases.0.seq", "releases.0.parent_id", "releases.0.source_id", "releases.0.is_head"] },
+        { path: `/api/v1/releases/stable/diff?arch=${F.arch}`, fields: ["ring", "from", "to.id", "counts.added", "counts.removed", "counts.upgraded", "added", "removed", "upgraded"] },
+        { path: `/api/v1/packages/${F.sha}`, fields: ["name", "version", "arch", "sha256", "filename", "size_download", "size_installed", "provides", "requires"] },
+        { path: `/api/v1/search?q=${F.pkg}&${stable}&limit=10`, fields: ["ring", "arch", "release_id", "query", "packages", "packages.0.name", "packages.0.version", "packages.0.description"] },
+        {
+          path: `/api/v1/package/${F.pkg}?${stable}`,
+          fields: ["name", "shown_ring", "rings", "package.version", "package.sha256", "manifest", "depends", "links", "required_by", "security.advisories", "security.exposed", "provenance", "pool_url"],
+        },
+        { path: `/api/v1/package/${F.pkg}/files?${stable}`, fields: ["name", "ring", "arch", "files"] },
+        { path: `/api/v1/graph?${stable}&targets=${F.pkg2}`, fields: ["ring", "arch", "release_id", "source_order", "packages", "packages.0.name", "missing_targets", "truncated"] },
+        { path: "/api/v1/security/components", fields: ["components"] },
+        {
+          path: `/api/v1/security?${stable}`,
+          fields: [
+            "ring", "arch", "totals.packages", "totals.exposed", "totals.kev", "vulnerable", "vulnerable.0.name", "vulnerable.0.worst", "vulnerable.0.kev", "vulnerable.0.epss",
+            "vulnerable.0.fixed_in", "vulnerable.0.exposure", "vulnerable.0.advisories.0.cves", "vulnerable.0.advisories.0.match",
+          ],
+        },
+        { path: "/api/v1/events?kind=promote&limit=12", fields: ["events", "events.0.id", "events.0.kind", "events.0.ring", "events.0.source", "events.0.status", "events.0.summary", "events.0.payload", "events.0.created_at"] },
+        { path: "/api/v1/pool/unreferenced?keep=3", fields: ["keep", "grace_days", "protected_releases", "kept_checkpoints", "count", "bytes", "packages"] },
+        { path: "/api/v1/cost", fields: ["estimated_at", "status", "month", "month_to_date_usd", "projected_usd", "guard", "lines_usd.warn", "lines_usd.guard", "lines_usd.cap"] },
+      ],
+      visible: EVERYONE,
+    },
+    {
+      id: "api.factory-read-table",
+      page: "/api",
+      anchor: [
+        'id="factory"',
+        "<code>GET /factory?", "<code>GET /factory/packages</code>", "<code>/built</code>", "<code>/tasks/:id</code>", "<code>GET /factory/review</code>",
+        "<code>GET /factory/tasks/:id/artifacts/", "<code>GET /factory/approvals</code>", "<code>/maintainers</code>", "<code>/trust</code>", "<code>/blocks</code>",
+        "<code>GET /users/:login</code>", "<code>GET /factory/workers/self</code>", "<code>GET /factory/me</code>",
+      ],
+      reads: [
+        {
+          path: "/api/v1/factory?limit=10",
+          fields: ["generated_at", "lease_minutes", "limit", "counts", "workers", "workers.0.id", "workers.0.owner", "workers.0.trust", "workers.0.mode", "workers.0.agent", "workers.0.current_task", "tasks", "tasks.0.id", "tasks.0.kind", "tasks.0.status"],
+        },
+        { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.name", "packages.0.owner", "packages.0.status", "packages.0.arches", "packages.0.staged_builds"] },
+        { path: "/api/v1/factory/built", fields: ["built", "built.0.name", "built.0.arch", "built.0.version", "built.0.status", "built.0.id"] },
+        {
+          path: `/api/v1/factory/tasks/${F.projectTask}`,
+          fields: ["task.id", "task.kind", "task.status", "task.name", "task.log_tail", "worker", "from", "audit", "trial", "publish", "approval", "chain", "score", "package", "evidence", "evidence.0.name", "evidence.0.url", "evidence.0.public"],
+        },
+        {
+          path: "/api/v1/factory/review",
+          fields: ["staged", "staged.0.id", "staged.0.kind", "staged.0.owner", "staged.0.evidence.pkgbuild", "staged.0.evidence.log", "staged.0.evidence.pkginfo", "staged.0.evidence.audit", "staged.0.vet", "staged.0.audit.status", "staged.0.trial"],
+        },
+        { path: `/api/v1/factory/tasks/${F.projectTask}/artifacts/PKGBUILD`, json: false },
+        { path: `/api/v1/factory/tasks/${F.projectTask}/artifacts/${stagedPackage}`, status: 403 },
+        { path: `/api/v1/factory/tasks/${F.projectTask}/artifacts/${stagedPackage}`, as: "maintainer", json: false },
+        { path: "/api/v1/factory/approvals", fields: ["approvals", "approvals.0.id", "approvals.0.task_id", "approvals.0.name", "approvals.0.decision", "approvals.0.by", "approvals.0.rings"] },
+        { path: "/api/v1/factory/maintainers", fields: ["maintainers", "maintainers.0.login", "maintainers.0.since", "source", "synced_at"] },
+        { path: "/api/v1/factory/trust", fields: ["workers", "workers.0.id", "workers.0.trust", "workers.0.trusted_by", "maintainers", "listed", "source"] },
+        { path: "/api/v1/factory/blocks", fields: ["contributors", "packages"] },
+        {
+          path: `/api/v1/users/${F.owner}`,
+          fields: ["login", "role", "github", "packages", "packages.0.name", "builds", "builds.0.id", "build_counts.total", "approvals", "approved_packages", "record", "workers", "workers.0.id"],
+        },
+        { path: "/api/v1/factory/workers/self", status: 401 },
+        { path: "/api/v1/factory/workers/self", as: "maintainer", status: 401 },
+        { path: "/api/v1/factory/me", status: 401 },
+        { path: "/api/v1/factory/me", as: "owner", fields: ["contributor.login", "packages", "packages.0.name", "workers", "workers.0.id", "tasks", "tasks.0.id", "staging.bytes", "staging.quota_bytes"] },
+      ],
+      visible: EVERYONE,
+    },
+    {
+      id: "api.examples",
+      page: "/api",
+      anchor: [
+        'id="examples"',
+        "<h3>Which version of a package does each ring serve?</h3>", "<h3>What changed in stable today?</h3>", "<h3>Is the pool healthy right now?</h3>", "<h3>The static side (what pacman reads)</h3>",
+      ],
+      reads: [
+        { path: `/api/v1/releases/stable?fields=summary&arch=${F.arch}`, fields: ["packages.0.name", "packages.0.version"] },
+        { path: "/api/v1/events?kind=promote", fields: ["events.0"] },
+        { path: "/api/v1/releases/stable/history", fields: ["releases.0"] },
+        { path: "/api/v1/stats", fields: ["latest", "latest.0.kind", "latest.0.ring", "latest.0.source", "latest.0.status", "latest.0.created_at"] },
+      ],
+      visible: EVERYONE,
+    },
+    {
+      id: "api.write-jobs-table",
+      page: "/api",
+      anchor: [
+        'id="write-jobs"',
+        "<code>POST /factory/claim</code>",
+        "<code>PUT /pool/:sha256?", "<code>/sig</code>", "<code>/multipart</code>", "<code>POST /pool/:sha256/sign?",
+        "<code>POST /packages?", "<code>POST /packages/known</code>", "<code>POST /releases</code>", "<code>PUT /releases/:id/artifacts/:kind?",
+        "<code>POST /events</code>", "<code>POST /pool/gc</code>", "<code>POST /pool/relayout</code>", "<code>PUT /factory/tasks/:id/artifacts/",
+      ],
+      acts: [
+        { method: "POST", path: "/api/v1/factory/claim", expect: noSession },
+        { method: "PUT", path: `/api/v1/pool/${F.sha}`, expect: noSession },
+        { method: "PUT", path: `/api/v1/pool/${F.sha}/sig`, expect: noSession },
+        { method: "POST", path: `/api/v1/pool/${F.sha}/multipart`, expect: noSession },
+        { method: "POST", path: `/api/v1/pool/${F.sha}/sign`, expect: noSession },
+        { method: "POST", path: "/api/v1/packages", expect: noSession },
+        { method: "POST", path: "/api/v1/releases", body: { ring: "stable" }, expect: noSession },
+        { method: "PUT", path: `/api/v1/releases/${F.release}/artifacts/db`, expect: noSession },
+        { method: "POST", path: "/api/v1/events", expect: { anonymous: 401, contributor: 403, maintainer: 400 } },
+        { method: "POST", path: "/api/v1/pool/gc", expect: noSession },
+        { method: "POST", path: "/api/v1/pool/relayout", expect: noSession },
+        { method: "PUT", path: `/api/v1/factory/tasks/${F.stagedTask}/artifacts/build.log`, expect: noSession },
+      ],
+      visible: EVERYONE,
+    },
+    {
+      id: "api.write-people-table",
+      page: "/api",
+      anchor: [
+        'id="write-people"',
+        "<code>POST /factory/packages</code>", "<code>/packages/:name/build</code>", "<code>DELETE /packages/:name</code>", "<code>DELETE /factory/tasks/:id/artifacts</code>",
+        "<code>POST /factory/workers</code>", "<code>DELETE /workers/:id</code>",
+        "<code>POST /factory/tasks/:id/build</code>", "<code>/approve</code>", "<code>/reject</code>",
+        "<code>POST /factory/jobs</code>", "<code>POST /factory/workers/:id/trust</code>", "<code>POST /factory/record/withdraw</code>",
+        "<code>POST /factory/contributors/:login/{block,unblock}</code>", "<code>/packages/:name/{block,unblock}</code>",
+        "<code>GET /auth/github</code>", "<code>/auth/me</code>", "<code>/auth/logout</code>",
+      ],
+      reads: [
+        { path: "/auth/github?next=/api", status: 302, json: false },
+        { path: "/auth/me", status: 401 },
+        { path: "/auth/me", as: "contributor", fields: ["login", "name", "avatar_url", "role"] },
+        { path: "/auth/logout", status: 302, json: false },
+      ],
+      acts: [
+        { method: "POST", path: "/api/v1/factory/packages", expect: { anonymous: 401, contributor: 400 } },
+        { method: "POST", path: `/api/v1/factory/packages/${F.factoryPkg}/build`, expect: { anonymous: 401, contributor: 404 } },
+        { method: "DELETE", path: `/api/v1/factory/packages/${F.factoryPkg}`, expect: { anonymous: 401, contributor: 403 } },
+        { method: "DELETE", path: `/api/v1/factory/tasks/${F.contributorTask}/artifacts`, expect: { anonymous: 401, contributor: 403 } },
+        { method: "POST", path: "/api/v1/factory/workers", expect: { anonymous: 401, contributor: 400 } },
+        { method: "DELETE", path: `/api/v1/factory/workers/${F.communityWorker}`, expect: { anonymous: 401, contributor: 404 } },
+        { method: "POST", path: `/api/v1/factory/tasks/${F.stagedTask}/build`, expect: { anonymous: 401, contributor: 403, owner: 403 } },
+        { method: "POST", path: `/api/v1/factory/tasks/${F.projectTask}/approve`, body: { note: "reads well" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: [200, 409] } },
+        { method: "POST", path: `/api/v1/factory/tasks/${F.stagedTask}/reject`, body: { note: "the source is not the upstream's" }, expect: { anonymous: 401, contributor: 403, owner: 403 } },
+        { method: "POST", path: "/api/v1/factory/jobs", expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 400 } },
+        { method: "POST", path: `/api/v1/factory/workers/${F.worker}/trust`, body: { trust: "project" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 200 } },
+        { method: "POST", path: "/api/v1/factory/record/withdraw", expect: { anonymous: 401, contributor: 403, maintainer: 400 } },
+        { method: "POST", path: `/api/v1/factory/contributors/${F.contributor}/block`, expect: { anonymous: 401, contributor: 403, maintainer: 400 } },
+        { method: "POST", path: `/api/v1/factory/contributors/${F.contributor}/unblock`, expect: { anonymous: 401, contributor: 403, maintainer: 400 } },
+        { method: "POST", path: `/api/v1/factory/packages/${F.factoryPkg}/block`, expect: { anonymous: 401, contributor: 403, maintainer: 400 } },
+        { method: "POST", path: `/api/v1/factory/packages/${F.factoryPkg}/unblock`, expect: { anonymous: 401, contributor: 403, maintainer: 400 } },
+      ],
+      visible: EVERYONE,
+    },
+    {
+      id: "api.stats-poll",
+      page: "/api",
+      anchor: ['id="progress"'],
+      script: ["liveStats(function () {}, 120000)", '"/api/v1/stats"', 'busy(fetch('],
+      reads: [{ path: "/api/v1/stats" }],
+      visible: EVERYONE,
+    },
+  ];
+};

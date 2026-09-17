@@ -548,7 +548,7 @@ export async function handleDequeueBuild(c: Contributor, name: string, id: numbe
 export async function handleRegisterWorker(c: Contributor, request: Request, env: Env): Promise<Response> {
   const blocked = blockedResponse(c);
   if (blocked) return blocked;
-  const b = (await request.json()) as { name?: string; arch?: string; labels?: unknown };
+  const b = (await request.json().catch(() => ({}))) as { name?: string; arch?: string; labels?: unknown };
   if (!b.arch || !isRepoArch(b.arch)) return json({ error: "arch (x86_64|aarch64) is required" }, 400);
   // A worker builds its owner's packages. Donating it to anyone's is decided
   // where it runs (--shared / WORKER_SHARED=1), never here, so a registration

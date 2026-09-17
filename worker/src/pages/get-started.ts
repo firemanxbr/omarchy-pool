@@ -4,6 +4,7 @@
  * the optional thin client. `?ring=stable&arch=x86_64` preselects.
  */
 import { page } from "./layout";
+import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 
 const BODY = String.raw`
@@ -132,3 +133,108 @@ export function getStartedHtml(poolUrl: string, version: RunningVersion): string
     version,
   });
 }
+
+/**
+ * What /docs/get-started is made of. Nothing here changes with the role
+ * and nothing writes:
+ * the page's one network call is the stats, every 120 s, for the ring's
+ * databases, the optional sources and the running version; the rest is
+ * drawn from the query string and the helpers the shell inlines.
+ */
+export const GET_STARTED_COMPONENTS = (F: Fixture): Component[] => {
+  const page = "/docs/get-started";
+  const stats = "/api/v1/stats";
+  return [
+    {
+      // The docs shell every chapter carries, with this one open and its summary link lit.
+      id: "docs-get-started.docs-shell",
+      page,
+      anchor: ['class="docs-home"', 'id="docs-q"', 'id="docs-hits"', 'id="docs-nav"', '<details open><summary><a href="/docs/get-started" class="on">Get started</a>', 'class="docs-hint"'],
+      script: ['$("#docs-q")', '$("#docs-hits")', '$("#docs-nav")', '"/docs/glossary#"'],
+      visible: EVERYONE,
+    },
+    {
+      // The chapter's old address still lands here.
+      id: "docs-get-started.hero",
+      page,
+      anchor: ["<h1>Get started</h1>", '<p class="lede">One command — or three steps by hand'],
+      reads: [{ path: "/get-started", status: 301, json: false }],
+      visible: EVERYONE,
+    },
+    {
+      id: "docs-get-started.quiz",
+      page,
+      anchor: ['id="which-ring"', 'id="quiz"', 'id="quiz-answer"'],
+      script: ["var QUIZ = ", '$("#quiz")', '$("#quiz-answer")', 'data-q="', 'data-rec="', 'quiz.build ? "lab"', "RINGS_TEXT[r].desc"],
+      visible: EVERYONE,
+    },
+    {
+      id: "docs-get-started.ring-picker",
+      page,
+      anchor: ['id="ring"', 'id="pick-ring"', 'id="pick-arch"', 'id="ring-desc"'],
+      script: ['RINGS = ["stable", "rc", "edge", "lab"]', 'ARCHES = ["x86_64", "aarch64"]', 'pick("pick-ring"', 'pick("pick-arch"', '$("#ring-desc")', 'q.get("ring")', 'q.get("arch")', "history.replaceState"],
+      visible: EVERYONE,
+    },
+    {
+      // The command pipes /setup into sudo, and the paragraph links the script to read first: the script is the read.
+      id: "docs-get-started.one-command",
+      page,
+      anchor: ['id="command"', 'data-copy="setup"', 'id="setup-cmd"', '<a href="/setup">The script, in full →</a>'],
+      script: ['$("#setup-cmd")', "/setup | sudo bash -s -- --ring "],
+      reads: [{ path: "/setup", json: false }],
+      visible: EVERYONE,
+    },
+    {
+      // The key file is on the pool's host, not a route of the Worker: the command's text is what the test can hold.
+      id: "docs-get-started.key",
+      page,
+      anchor: ['id="key"', 'data-copy="key"', 'id="key-cmd"'],
+      script: ['$("#key-cmd")', "/omarchy-staging.pub.asc", "pacman-key --lsign-key staging@firemanxbr.org"],
+      visible: EVERYONE,
+    },
+    {
+      // One toggle per optional source of the architecture, from the coverage; empty until the stats arrive.
+      id: "docs-get-started.optional-toggles",
+      page,
+      anchor: ['id="optional"'],
+      script: ['$("#optional")', "data.coverage", "c.optional && c.arch === arch", "c.title", "optional[v] = !optional[v]"],
+      reads: [{ path: stats, fields: ["coverage", "coverage.0.source", "coverage.0.arch", "coverage.0.optional", "coverage.0.title"] }],
+      visible: EVERYONE,
+    },
+    {
+      // The sections are the ring's databases in the stats answer — the rings come in RINGS order (index.ts), the page's
+      // default ring is the third — and the paragraph names the include the API serves as the curl -o alternative.
+      id: "docs-get-started.conf-by-hand",
+      page,
+      anchor: ['id="conf"', 'data-copy="conf"', 'id="conf-text"', 'data-copy="up"', 'id="up-cmd"', "/api/v1/pacman.conf?ring=…&amp;arch=…"],
+      script: ['$("#conf-text")', "data.rings.filter", 'a.kind !== "db" || a.arch !== arch', "SigLevel = Required DatabaseRequired", "has no databases for", "liveStats(function (d) { data = d; draw(); }, 120000)"],
+      reads: [
+        { path: stats, fields: ["rings", "rings.2.ring", "rings.2.release", "rings.2.artifacts", "rings.2.artifacts.0.kind", "rings.2.artifacts.0.arch", "rings.2.artifacts.0.repo"] },
+        { path: `/api/v1/pacman.conf?ring=stable&arch=${F.arch}`, json: false },
+      ],
+      visible: EVERYONE,
+    },
+    {
+      id: "docs-get-started.cli",
+      page,
+      anchor: ['id="cli"', 'data-copy="cli"', 'id="cli-cmd"', 'href="https://github.com/firemanxbr/omarchy-pool/releases"'],
+      script: ['$("#cli-cmd")', "releases/latest/download/omarchy-pool-", 'data.version.version !== "dev"', '"vX.Y.Z"', "omarchy-cli --ring "],
+      reads: [{ path: stats, fields: ["version", "version.version"] }],
+      visible: EVERYONE,
+    },
+    {
+      id: "docs-get-started.switching",
+      page,
+      anchor: ['id="switching"', "<h3>Switching rings, going back</h3>"],
+      visible: EVERYONE,
+    },
+    {
+      // One handler for the five chips, bound once at load: the map from a chip to the text it copies.
+      id: "docs-get-started.copy-chips",
+      page,
+      anchor: ['data-copy="setup"', 'data-copy="key"', 'data-copy="conf"', 'data-copy="up"', 'data-copy="cli"'],
+      script: ['querySelectorAll(".copy")', '{ setup: "#setup-cmd", key: "#key-cmd", conf: "#conf-text", up: "#up-cmd", cli: "#cli-cmd" }', "navigator.clipboard.writeText", '"copied"'],
+      visible: EVERYONE,
+    },
+  ];
+};

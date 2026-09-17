@@ -82,10 +82,32 @@ the network. Two kinds of tests live there:
 | `relayout.test.ts` | the one-time move to one directory per source (`routes/relayout.ts`): objects copied with their signature and attestation and R2 checking the row's sha256, rows pointed at `<source>/<arch>/<filename>`, a null key backfilled, a row whose bytes the pool never held marked `ghost/…`, purge refused while anything is left to move and then emptying the flat directories; the upload, index, signature and `/packages/known` routes speaking the new layout — a filename is one object per source, another source's build of it another object |
 | `factory.test.ts` | the factory's brain (the trial included: queued for the project's build only, on its architecture, a community worker never takes it, its token reads the staged package and writes the lab and nothing promised, `trial.log` beside the evidence, the verdict on the Review row); claims with worker tokens (own architecture only, project vs community), leases and per-job tokens, heartbeat, fail → requeue, complete after the package is indexed, the agent a worker reports; a community build staging its evidence (the builder cannot write `audit.*`, the package is for maintainers, the rest is public), the audit queued and taken only by a project worker declaring the kind, the report attached and its verdict on `/factory/review`; approvals — a contributor cannot, a maintainer cannot approve their own package while another maintainer exists, the rebuild queued at project trust, the record and the profile's track record; what a public log must not carry (a token, a key or the worker's environment in text evidence is a 422 with the kind and the line, never the match; the record never receives it; the log's tail and the error line withheld at complete/fail; multipart closed for text evidence); who trusts whom (a proposal, the second word, never the owner's, the signed record, back at one word); the worker behind every staged build on Review; a record withdrawn with its signature and staging copy, the tombstone's fields |
 | `leak.test.ts` | the shapes a public log must not carry (`src/leak.ts`): each kind, the first hit's line, and the ordinary things a log says that are not one |
-| `pages.test.ts` | the dashboard's pages through the Worker's fetch handler: every door and detail page served, the three doors in the navigation, the footer badge, the Pool's headline, the Factory's forms, the Pipeline's live hooks, the docs' five stages, no template placeholder left behind, the old chapter addresses still redirecting |
+| `pages.test.ts` | the dashboard's pages through the Worker's fetch handler, over the fixture: every door and detail page served with the shared frame, no page script using a name it does not declare (parsed with acorn, not grepped), no template placeholder left behind, the docs shell with every chapter's sections, the old chapter addresses still redirecting, the diagrams drawing no two boxes over each other |
+| `components.test.ts` | what each page is made of, against the served dashboard: every component's anchor in its page's HTML and its literals in the page's script, every read routed and answering JSON with the fields the page draws, every act routed with its method — and with no other — and answering per role what the manifest says, and the other way round: no fetch in a page script that nobody declares |
 | `audience.test.ts` | one day of the zone's request analytics becomes one number per ring and per architecture; recorded once as an `audience` event; a token without *Zone · Analytics · Read* is reported once for the day, then quiet |
 | `provenance.test.ts` | the OPR provenance scan against a stubbed GitHub: origin per package from the tree and `.omarchy/package.json`, only changed packages fetched again, packages gone from the repository dropped, the per-ring counts |
 | `jobtoken`, `scheduler`, `governance`, `updates`, `metrics`, `cost`, `signing` | the pure functions: tokens and scopes, the scheduler's rules, the governance file, bump detection, the metrics snapshot shape, the bill estimate, OpenPGP signing |
+
+Both page tests run over one fixture (`test/fixture.ts`): a dashboard's
+worth of data seeded through the Worker's own endpoints — two packages in
+stable and a fix in edge, an advisory, a contributor's package built, audited,
+rebuilt by the project, tried and approved, another one published, a blocked
+contributor, one journal line of every kind, the metrics snapshot — so the
+pages are served over something and every path a test hits is concrete.
+
+What a page is made of is declared next to its template: each module in
+`src/pages/` exports its components (`PACKAGE_COMPONENTS` below
+`packageHtml()`; the shape is in `src/pages/components.ts`), and
+`components.test.ts` walks all of them. The rule is simple and it is the
+test: **a visible thing on a page is a manifest entry, or it is not on the
+page** — an element without an entry has nothing proving it is still there;
+and **a new `fetch` in a page script must be declared** by a component on
+that page — whether the path is a literal or built from `API`, an id and a
+name — or the reverse check names the page and the path. Delete
+the route, the element or the field a component lives on and the test fails
+by the component's name. A manifest binds its paths to the fixture's ids —
+the package, the person, the project's build — never to a pattern like
+`/tasks/:id`, so the test can hit every one of them.
 
 The end-to-end script below covers the same paths with real containers and
 real pacman; the unit tests are what a pull request runs in seconds.

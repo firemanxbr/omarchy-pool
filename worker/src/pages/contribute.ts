@@ -6,6 +6,7 @@
  * GitHub" lands.
  */
 import { page } from "./layout";
+import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 import { GITHUB_ICON } from "./layout";
 import { CHARTS } from "./charts";
@@ -120,3 +121,106 @@ export function factoryHtml(poolUrl: string, version: RunningVersion): string {
     version,
   });
 }
+
+/**
+ * What /factory is made of.
+ * The page is public and the same for everyone: the tiles, the assembly
+ * line's one live number, Landed lately and the funnel share one
+ * Promise.all over four factory reads; the builds chart polls /stats; only
+ * the gate asks who is signed in, and changes its button. Nothing here
+ * posts — every action is a link to another page.
+ */
+export const FACTORY_COMPONENTS = (_F: Fixture): Component[] => [
+  {
+    id: "factory.hero",
+    page: "/factory",
+    anchor: ['<p class="eyebrow">For contributors</p>', "Package what you love. The factory builds it, a maintainer checks it."],
+    visible: EVERYONE,
+  },
+  {
+    // The old address still serves this page (index.ts): the hero and the way in, at /contribute.
+    id: "factory.contribute",
+    page: "/contribute",
+    anchor: ['<p class="eyebrow">For contributors</p>', 'href="/request"'],
+    visible: EVERYONE,
+  },
+  {
+    id: "factory.tiles",
+    page: "/factory",
+    anchor: ['class="tiles five"', 'id="tiles"'],
+    script: ['"/api/v1/factory"', '"/api/v1/factory/packages"', '"/api/v1/factory/review"', '"#tiles"', '"Community packages"', '"Waiting for review"', '"Shared workers online"', '"Builds this week"', '"Requested, not built yet"', '"/packages?q=factory"', '"/journal?kind=build"'],
+    reads: [
+      { path: "/api/v1/factory", fields: ["workers", "workers.0.id", "workers.0.alive", "workers.0.side", "workers.0.mode", "workers.0.update", "tasks", "tasks.0.kind", "tasks.0.status", "tasks.0.created_at"] },
+      { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.name", "packages.0.owner", "packages.0.status"] },
+      { path: "/api/v1/factory/review", fields: ["staged", "staged.0.finished_at"] },
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "factory.how-header",
+    page: "/factory",
+    anchor: ['id="how"', "<h2>How a package gets in</h2>", 'href="/docs/how-it-works#people"'],
+    visible: EVERYONE,
+  },
+  {
+    id: "factory.assembly-line",
+    page: "/factory",
+    anchor: ['<figure class="diagram">', 'viewBox="0 0 1340 330"', 'aria-label="An assembly line:', 'data-live="shared-online"'],
+    script: ['[data-live="shared-online"]', '" online now"', 'w.side === "omarchy" || w.mode === "shared"'],
+    reads: [{ path: "/api/v1/factory", fields: ["workers", "workers.0.alive", "workers.0.side", "workers.0.mode", "workers.0.update"] }],
+    visible: EVERYONE,
+    drawn: "factory",
+  },
+  {
+    id: "factory.ways",
+    page: "/factory",
+    anchor: ['id="ways"', "<h2>Three steps, two of them yours</h2>", 'href="/request"', 'href="/docs/workers"', 'href="/docs/governance"'],
+    visible: EVERYONE,
+  },
+  {
+    id: "factory.landed",
+    page: "/factory",
+    anchor: ["<h2>Landed lately</h2>", 'href="/review"', 'id="landed"'],
+    script: ['"/api/v1/factory/approvals"', '"#landed"', 'a.decision === "approved"', "a.rebuild_status", "a.rebuild_task", 'class="rb ', "/package/' + encodeURIComponent(a.name)"],
+    reads: [
+      { path: "/api/v1/factory/approvals", fields: ["approvals", "approvals.0.decision", "approvals.0.name", "approvals.0.version", "approvals.0.arch", "approvals.0.by", "approvals.0.created_at", "approvals.0.rings", "approvals.0.rebuild_status", "approvals.0.rebuild_task"] },
+      { path: "/api/v1/factory/packages", fields: ["packages.0.name", "packages.0.owner"] },
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "factory.builds-chart",
+    page: "/factory",
+    anchor: ["Factory builds <span>14 days</span>", 'id="c-builds"'],
+    script: ['"/api/v1/stats"', "liveStats(", '"#c-builds"', "builds_daily", 'r.status === "staged"', '"Factory builds per day over fourteen days"'],
+    reads: [{ path: "/api/v1/stats", fields: ["series.builds_daily", "series.builds_daily.0.day", "series.builds_daily.0.status", "series.builds_daily.0.n"] }],
+    visible: EVERYONE,
+  },
+  {
+    id: "factory.funnel-chart",
+    page: "/factory",
+    anchor: ["From request to the rings <span>median</span>", 'id="c-funnel"'],
+    script: ['"#c-funnel"', '"requested → staged"', '"staged → decided"', "firstStaged", "byTask[a.task_id]", "p.created_at"],
+    reads: [
+      { path: "/api/v1/factory", fields: ["tasks", "tasks.0.id", "tasks.0.kind", "tasks.0.trust", "tasks.0.status", "tasks.0.name", "tasks.0.finished_at"] },
+      { path: "/api/v1/factory/packages", fields: ["packages.0.name", "packages.0.created_at"] },
+      { path: "/api/v1/factory/approvals", fields: ["approvals.0.task_id", "approvals.0.created_at"] },
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "factory.gate",
+    page: "/factory",
+    anchor: ['id="gate"', "private area · contributors", 'id="gate-btn"', 'href="/auth/github?next=/me"', "Sign in with GitHub", 'id="gate-hint"'],
+    script: ['"/auth/me"', '"#gate-btn"', '"#gate-hint"', '"/user/" + encodeURIComponent(me.login)', '"Your page →"'],
+    reads: [
+      // Signed out, the button starts the sign-in (the redirect to GitHub, `next=/me` kept for the callback); signed in, it leads to the person's page.
+      { path: "/auth/github?next=/me", status: 302, json: false },
+      { path: "/auth/me", status: 401 },
+      { path: "/auth/me", as: "contributor", fields: ["login"] },
+      { path: "/auth/me", as: "owner", fields: ["login"] },
+      { path: "/auth/me", as: "maintainer", fields: ["login"] },
+    ],
+    visible: EVERYONE,
+  },
+];

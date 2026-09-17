@@ -128,7 +128,7 @@ export async function handlePostPackage(url: URL, request: Request, env: Env): P
 
 export async function handleGetPackage(sha256: string, env: Env): Promise<Response> {
   const row = await env.DB.prepare("SELECT manifest_json FROM packages WHERE sha256 = ?").bind(sha256).first<{ manifest_json: string }>();
-  if (!row) return json({ error: "not found" }, 404);
+  if (!row) return json({ error: "no package with this sha256" }, 404);
   return new Response(row.manifest_json, { headers: { "content-type": "application/json" } });
 }
 

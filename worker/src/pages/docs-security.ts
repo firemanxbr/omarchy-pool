@@ -4,6 +4,7 @@
  * advisory per ring — is the Security page (/security).
  */
 import { page } from "./layout";
+import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 
 const FEEDS: [string, string, string][] = [
@@ -68,3 +69,77 @@ export function docsSecurityHtml(poolUrl: string, version: RunningVersion): stri
     version,
   });
 }
+
+/**
+ * What /docs/security is made of. A chapter: nothing here fetches — the
+ * feeds are inlined into the script, the rest is served — and nothing
+ * changes with the viewer, so every entry is an anchor on the served text,
+ * the two the script draws carry their literals, and the links out are
+ * anchors too: the page's job is to point at the live view. The last two
+ * entries are the docs shell as this chapter shows it — itself open in the
+ * map with its four sections, and the search, which runs after this page's
+ * script in the same closure and so depends on the script getting through.
+ */
+export const DOCS_SECURITY_COMPONENTS = (_F: Fixture): Component[] => {
+  const page = "/docs/security";
+  return [
+    {
+      id: "docs-security.lede",
+      page,
+      anchor: ["<h1>Security</h1>", '<p class="lede">Public advisories matched against what each ring serves', '<a href="/security">Every advisory, per ring →</a>'],
+      visible: EVERYONE,
+    },
+    {
+      // The section keeps id="feeds" for the map (docs-tree.ts); the buttons are the script's, drawn into the .srcs row from the inlined list.
+      id: "docs-security.feed-picker",
+      page,
+      anchor: ['<section id="feeds">', "<h2>The five feeds</h2>", 'class="srcs"'],
+      script: ["var FEEDS = ", "function drawFeeds()", 'data-feed="', 'getAttribute("data-feed")'],
+      visible: EVERYONE,
+    },
+    {
+      id: "docs-security.feed-text",
+      page,
+      anchor: ['id="feed-text"'],
+      script: ['$("#feed-text")', "FEEDS[feed]", 'class="pill none"'],
+      visible: EVERYONE,
+    },
+    {
+      id: "docs-security.confidence-table",
+      page,
+      anchor: ['<section id="confidence">', "<th>Confidence</th><th>Means</th>", '<span class="pill error">exact</span>', '<span class="pill warn">name-version</span>', '<span class="pill none">name-only</span>'],
+      visible: EVERYONE,
+    },
+    {
+      id: "docs-security.clean-means-examined",
+      page,
+      anchor: ["Clean must mean examined"],
+      visible: EVERYONE,
+    },
+    {
+      id: "docs-security.exposure",
+      page,
+      anchor: ['<section id="exposure">', "<h2>Exposure through the graph</h2>", '<a href="/security">Security</a>', "<code>omarchy-cli security</code>"],
+      visible: EVERYONE,
+    },
+    {
+      id: "docs-security.fast-track",
+      page,
+      anchor: ['<section id="fast-track">', "<h2>The fast-track</h2>", '<a href="/journal?kind=fast-track">journal</a>'],
+      visible: EVERYONE,
+    },
+    {
+      id: "docs-security.shell-nav",
+      page,
+      anchor: ['id="docs-nav"', '<details open><summary><a href="/docs/security" class="on">Security</a>', 'href="/docs/security#feeds"', 'href="/docs/security#confidence"', 'href="/docs/security#exposure"', 'href="/docs/security#fast-track"'],
+      visible: EVERYONE,
+    },
+    {
+      id: "docs-security.shell-search",
+      page,
+      anchor: ['id="docs-q"', 'id="docs-hits"'],
+      script: ['$("#docs-q")', "q.oninput = function", '"/docs/glossary#"'],
+      visible: EVERYONE,
+    },
+  ];
+};

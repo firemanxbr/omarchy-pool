@@ -7,6 +7,7 @@
  * the project builds the recipe again from the evidence (docs/GOVERNANCE.md).
  */
 import { page } from "./layout";
+import { EVERYONE, SIGNED_IN, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 import { CATEGORIES } from "../categories";
 
@@ -313,3 +314,208 @@ export function reviewHtml(poolUrl: string, version: RunningVersion): string {
     version,
   });
 }
+
+/**
+ * What /review is made of, top to bottom: the hero with its sign-in hint,
+ * the four tiles, the Yours block a signed-in person gets (the head, the
+ * blocked notice, a maintainer's queue line, the waiting and decided
+ * lists), the In review table with the category and the decision cell, the
+ * audit legend, the brake (the form and the two blocked tables), the
+ * Decided lately table, and the dialogs the decisions ask through. Every
+ * read is one of the page's four public lists (/factory/review,
+ * /factory/approvals, /factory/blocks, /factory?limit=10) or what a session
+ * unlocks (/auth/me, /factory/me); every act is a maintainer's — the
+ * decisions on the fixture's staged builds, the category, the brake. The
+ * brake's form lands on rows the handler refuses (a maintainer, a pool
+ * package), so nothing is blocked by the tests; the two blocked tables lift
+ * what the fixture seeded — carol and her package, blocked by m1 — as m2,
+ * the other maintainer, once the reads that draw those rows have run.
+ */
+export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
+  {
+    id: "review.hero",
+    page: "/review",
+    anchor: ['<p class="eyebrow">Review</p>', 'id="who"', 'href="/auth/github?next=/review"'],
+    script: ['$("#who")', "/auth/github?next=/review", "sign in with GitHub"],
+    reads: [
+      { path: "/auth/me", status: 401 },
+      { path: "/auth/me", as: "owner", fields: ["login", "role"] },
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "review.tiles",
+    page: "/review",
+    anchor: ['id="tiles"'],
+    script: ['skeletonTiles("#tiles", 4)', 'setTiles("#tiles"', '"In review"', '"Decided · 7 d"', "x.finished_at", 'a.decision === "approved"'],
+    reads: [
+      { path: "/api/v1/factory/review", fields: ["staged", "staged.0.kind", "staged.0.finished_at"] },
+      { path: "/api/v1/factory/approvals", fields: ["approvals", "approvals.0.created_at", "approvals.0.decision"] },
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "review.yours-head",
+    page: "/review",
+    anchor: ['id="mine"', 'id="mine-who"', 'id="mine-ws"'],
+    script: ['$("#mine")', '$("#mine-who")', "WHO.role"],
+    reads: [
+      { path: "/auth/me", as: "owner", fields: ["login", "role"] },
+      { path: "/auth/me", as: "maintainer", fields: ["login", "role"] },
+    ],
+    visible: SIGNED_IN,
+  },
+  {
+    id: "review.yours-blocked",
+    page: "/review",
+    anchor: ['id="mine-blocked"'],
+    script: ['$("#mine-blocked")', "<b>You are blocked</b>", "BLOCKS.contributors", "meBlocked.blocked_reason"],
+    reads: [{ path: "/api/v1/factory/blocks", fields: ["contributors", "contributors.0.login", "contributors.0.blocked_at", "contributors.0.blocked_by", "contributors.0.blocked_reason"] }],
+    visible: ["contributor", "owner"],
+  },
+  {
+    id: "review.yours-queue-line",
+    page: "/review",
+    anchor: ['id="mine-queue"'],
+    script: ['$("#mine-queue")', "waiting for your decision", "function decidable(t)"],
+    reads: [{ path: "/api/v1/factory/review", fields: ["staged.0.owner", "staged.0.kind", "staged.0.already", "staged.0.score.ready", "staged.0.project_build"] }],
+    visible: ["maintainer"],
+  },
+  {
+    id: "review.yours-waiting",
+    page: "/review",
+    anchor: ['id="g-waiting"', 'id="mine-waiting"'],
+    script: ['$("#mine-waiting")', '$("#g-waiting")', "t.project_build", "t.already.task", ">built again<", "t.audit.verdict"],
+    reads: [{ path: "/api/v1/factory/review", fields: ["staged.0.id", "staged.0.owner", "staged.0.name", "staged.0.version", "staged.0.arch", "staged.0.kind", "staged.0.from", "staged.0.project_build", "staged.0.already", "staged.0.audit.status"] }],
+    visible: SIGNED_IN,
+  },
+  {
+    id: "review.yours-decided",
+    page: "/review",
+    anchor: ['id="g-decided"', 'id="mine-decided"'],
+    script: ['$("#mine-decided")', '$("#g-decided")', "MINE.packages", "a.withdrawn_at", "a.rings", "BLOCKS.packages"],
+    reads: [
+      { path: "/api/v1/factory/approvals", fields: ["approvals.0.name", "approvals.0.arch", "approvals.0.version", "approvals.0.decision", "approvals.0.by", "approvals.0.note", "approvals.0.created_at", "approvals.0.withdrawn_at", "approvals.0.withdrawn_by", "approvals.0.withdrawn_reason", "approvals.0.rings", "approvals.0.task_id"] },
+      { path: "/api/v1/factory/me", as: "owner", fields: ["contributor.login", "packages", "packages.0.name", "packages.0.status"] },
+      { path: "/api/v1/factory/me", as: "contributor", fields: ["contributor.login", "packages"] },
+      { path: "/api/v1/factory/blocks", fields: ["packages", "packages.0.owner", "packages.0.name", "packages.0.blocked_at", "packages.0.blocked_by", "packages.0.blocked_reason"] },
+    ],
+    visible: SIGNED_IN,
+  },
+  {
+    id: "review.queue-head",
+    page: "/review",
+    anchor: ['<section id="queue">', 'id="queue-note"'],
+    script: ['$("#queue-note")', '" staged"', "of a version already approved"],
+    reads: [{ path: "/api/v1/factory/review", fields: ["staged", "staged.0.already", "staged.0.owner", "staged.0.score.ready"] }],
+    visible: EVERYONE,
+  },
+  {
+    id: "review.staged-table",
+    page: "/review",
+    anchor: ['id="staged"', 'class="reader"', "<th>Gate</th><th>Audit</th><th>Trial</th>"],
+    script: ['pager("#staged"', "t.evidence.tests", "t.evidence.audit", "t.evidence.trial", "t.built_by", "sc.projected", '"project-row"', '"mine-row"'],
+    reads: [
+      {
+        path: "/api/v1/factory/review",
+        fields: [
+          "staged", "staged.0.id", "staged.0.name", "staged.0.version", "staged.0.arch", "staged.0.owner", "staged.0.kind", "staged.0.from", "staged.0.url", "staged.0.detected", "staged.0.category", "staged.0.duration_ms", "staged.0.finished_at",
+          "staged.0.project_build", "staged.0.built_by", "staged.0.built_by.worker", "staged.0.built_by.owner", "staged.0.built_by.where", "staged.0.built_by.trusted_by", "staged.0.already",
+          "staged.0.vet.verdict", "staged.0.vet.warnings", "staged.0.vet.warned", "staged.0.vet.failed", "staged.0.audit.status", "staged.0.trial.status",
+          "staged.0.score.points", "staged.0.score.class", "staged.0.score.projected", "staged.0.score.ready", "staged.0.evidence.tests", "staged.0.evidence.audit", "staged.0.evidence.trial",
+        ],
+      },
+      { path: `/api/v1/factory/tasks/${F.projectTask}/artifacts/tests.log`, json: false },
+      { path: `/api/v1/factory/tasks/${F.projectTask}/artifacts/audit.md`, json: false },
+      { path: `/api/v1/factory/tasks/${F.projectTask}/artifacts/trial.log`, json: false },
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "review.category-select",
+    page: "/review",
+    anchor: ['id="staged"'],
+    script: ["select[data-category]", 'data-category="', '"/packages/"', '"/category"', "CATEGORIES.map("],
+    reads: [{ path: "/api/v1/factory/review", fields: ["staged.0.category", "staged.0.name"] }],
+    acts: [{ method: "POST", path: `/api/v1/factory/packages/${F.factoryPkg}/category`, body: { category: CATEGORIES[0] }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 200 } }],
+    visible: EVERYONE,
+  },
+  {
+    id: "review.decision-buttons",
+    page: "/review",
+    anchor: ['id="staged"', 'class="decision"'],
+    script: ["data-approve", "data-reject", "data-build", '"/tasks/" + id + "/" + what'],
+    reads: [{ path: "/api/v1/factory/review", fields: ["staged", "staged.0.id", "staged.0.kind", "staged.0.owner", "staged.0.trust", "staged.0.audit", "staged.0.project_build"] }],
+    acts: [
+      { method: "POST", path: `/api/v1/factory/tasks/${F.projectTask}/approve`, body: { note: "reads well" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: [200, 409] } },
+      { method: "POST", path: `/api/v1/factory/tasks/${F.stagedTask}/build`, body: {}, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: [200, 409] } },
+      { method: "POST", path: `/api/v1/factory/tasks/${F.disposableTask}/reject`, body: { note: "the source is not the upstream's" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 200 } },
+    ],
+    visible: ["maintainer"],
+  },
+  {
+    id: "review.legend",
+    page: "/review",
+    anchor: ['id="legend"'],
+    script: ['$("#legend")'],
+    visible: ["maintainer"],
+  },
+  {
+    id: "review.brake",
+    page: "/review",
+    anchor: ['<section id="brake" hidden>', '<details class="tool">'],
+    script: ['$("#brake")', "function renderBlocks()", '"/blocks"'],
+    reads: [{ path: "/api/v1/factory/blocks", fields: ["contributors", "packages"] }],
+    visible: ["maintainer"],
+  },
+  {
+    id: "review.brake-form",
+    page: "/review",
+    anchor: ['id="block-form"', 'id="block-what"', 'id="block-why"', 'minlength="4"'],
+    script: ['$("#block-form")', '"/api/v1/users/"', 'r.status === 200 ? "contributors" : "packages"', '"/block"'],
+    reads: [
+      { path: `/api/v1/users/${F.owner}`, fields: ["login"] },
+      { path: `/api/v1/users/${F.factoryPkg}`, status: 404 },
+    ],
+    acts: [
+      { method: "POST", path: `/api/v1/factory/contributors/${F.m1}/block`, body: { reason: "typed into the brake by the tests" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 409 } },
+      { method: "POST", path: `/api/v1/factory/packages/${F.pkg}/block`, body: { reason: "typed into the brake by the tests" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 404 } },
+    ],
+    visible: ["maintainer"],
+  },
+  {
+    id: "review.blocked-people-table",
+    page: "/review",
+    anchor: ['id="blocked-people"'],
+    script: ['pager("#blocked-people"', 'data-unblock="contributors"', "b.blocked_by !== login"],
+    reads: [{ path: "/api/v1/factory/blocks", fields: ["contributors", "contributors.0.login", "contributors.0.blocked_at", "contributors.0.blocked_by", "contributors.0.blocked_reason"] }],
+    // m2 lifts what m1 set; m1's own lift would be 403, and a login nobody blocked 409.
+    acts: [{ method: "POST", path: `/api/v1/factory/contributors/${F.blockedContributor}/unblock`, body: { reason: "lifted by the tests" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 200 } }],
+    visible: ["maintainer"],
+  },
+  {
+    id: "review.blocked-packages-table",
+    page: "/review",
+    anchor: ['id="blocked-packages"'],
+    script: ['pager("#blocked-packages"', 'data-unblock="packages"', '"unblock"'],
+    reads: [{ path: "/api/v1/factory/blocks", fields: ["packages", "packages.0.name", "packages.0.owner", "packages.0.blocked_at", "packages.0.blocked_by", "packages.0.blocked_reason"] }],
+    acts: [{ method: "POST", path: `/api/v1/factory/packages/${F.blockedPkg}/unblock`, body: { reason: "lifted by the tests" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 200 } }],
+    visible: ["maintainer"],
+  },
+  {
+    id: "review.decisions-table",
+    page: "/review",
+    anchor: ['id="decisions"', "<h2>Decided lately</h2>", 'href="/journal"'],
+    script: ['pager("#decisions"', "a.rebuild_task", "a.rebuild_status", "a.rebuild_result", "a.withdrawn_reason"],
+    reads: [{ path: "/api/v1/factory/approvals", fields: ["approvals", "approvals.0.created_at", "approvals.0.name", "approvals.0.version", "approvals.0.arch", "approvals.0.task_id", "approvals.0.decision", "approvals.0.by", "approvals.0.note", "approvals.0.withdrawn_at", "approvals.0.withdrawn_by", "approvals.0.withdrawn_reason", "approvals.0.rebuild_task", "approvals.0.rebuild_status", "approvals.0.rebuild_result"] }],
+    visible: EVERYONE,
+  },
+  {
+    id: "review.decide-dialogs",
+    page: "/review",
+    anchor: ["dialog.ask {", "#toasts {"],
+    script: ['"/api/v1/factory?limit=10"', '"Approve build #"', '"Reject build #"', '"Have the project build #"', "whereOptions(ws", "d.publish", "d.pinned_to"],
+    reads: [{ path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.id", "workers.0.arch", "workers.0.owner", "workers.0.mode", "workers.0.side", "workers.0.kinds", "workers.0.alive", "workers.0.agent", "workers.0.agent_status", "workers.0.current_task", "workers.0.labels", "workers.0.update", "workers.0.revoked_at"] }],
+    visible: ["maintainer"],
+  },
+];

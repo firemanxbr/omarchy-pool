@@ -4,6 +4,7 @@
  * and status; a signed-in maintainer rolls a ring back from here.
  */
 import { page } from "./layout";
+import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 
 const BODY = String.raw`
@@ -83,3 +84,77 @@ export function journalHtml(poolUrl: string, version: RunningVersion): string {
     version,
   });
 }
+
+/**
+ * What /journal is made of: the events table and its search and chips over
+ * one read of the journal, the ring history over the stats, and the
+ * rollback button — the page's one act, a maintainer's.
+ */
+export const JOURNAL_COMPONENTS = (F: Fixture): Component[] => [
+  {
+    id: "journal.hero",
+    page: "/journal",
+    anchor: ['<p class="eyebrow">Journal</p>', "<h1>Everything the pipeline did, newest first</h1>"],
+    visible: EVERYONE,
+  },
+  {
+    id: "journal.search",
+    page: "/journal",
+    anchor: ['id="q"', 'aria-label="filter the journal"'],
+    script: ['$("#q").oninput', '[e.kind, e.ring, e.source, e.summary].join(" ")'],
+    visible: EVERYONE,
+  },
+  {
+    id: "journal.filter-chips",
+    page: "/journal",
+    anchor: ['id="pick-kind"', 'id="pick-status"'],
+    script: ['pick("pick-kind", KINDS, kind', 'pick("pick-status", STATUSES, status', 'qs.get("kind")', 'data-v="'],
+    visible: EVERYONE,
+  },
+  {
+    id: "journal.events-table",
+    page: "/journal",
+    anchor: ['id="events"', 'id="count"'],
+    script: ['"/api/v1/events?limit=200"', 'pager("#events"', 'e.kind !== "metrics"', "e.payload.release_id", "'&to=' + rid", "dur(e.duration_ms)", "ago(e.created_at)", '"#count"'],
+    reads: [
+      {
+        path: "/api/v1/events?limit=200",
+        fields: ["events", "events.0.kind", "events.0.status", "events.0.ring", "events.0.source", "events.0.summary", "events.0.duration_ms", "events.0.created_at", "events.0.payload"],
+      },
+      // A promotion is the row the diff link is drawn on: it needs the release's id in its payload.
+      { path: "/api/v1/events?kind=promote&limit=200", fields: ["events.0.kind", "events.0.payload.release_id"] },
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "journal.ring-history-lede",
+    page: "/journal",
+    anchor: ["<h2>Ring history</h2>", "head is what is served · parent the previous head · from what a promotion or rollback copied", "A signed-in maintainer can roll back to any row still inside retention."],
+    visible: EVERYONE,
+  },
+  {
+    id: "journal.releases-table",
+    page: "/journal",
+    anchor: ['id="releases"'],
+    script: ['pager("#releases"', "liveStats(function (d) { LAST = d; drawReleases(d); }", "r.is_head", "r.package_count", "'&from=' + r.parent_id + '&to=' + r.id", "r.source_id"],
+    reads: [{ path: "/api/v1/stats", fields: ["releases", "releases.0.id", "releases.0.ring", "releases.0.seq", "releases.0.package_count", "releases.0.parent_id", "releases.0.source_id", "releases.0.note", "releases.0.created_at", "releases.0.is_head"] }],
+    visible: EVERYONE,
+  },
+  {
+    id: "journal.rollback-button",
+    page: "/journal",
+    anchor: ['id="releases"', 'id="rb-state"'],
+    script: ['data-rollback="', 'ME && ME.role === "maintainer" && !r.is_head && heads[r.ring]', '"/api/v1/factory/jobs"', 'kind: "rollback", params: { ring: ring, to: to, note: note }', 'ask({ title: "Roll " + ring + " back to release " + to + "?"', 'input: "required"', '"#rb-state"', "j.task"],
+    reads: [{ path: "/auth/me", as: "maintainer", fields: ["role"] }],
+    acts: [
+      {
+        // Queued, never run: no worker claims it in the tests, so what stable serves does not change. `to` is a string, as the button's attribute sends it.
+        method: "POST",
+        path: "/api/v1/factory/jobs",
+        body: { kind: "rollback", params: { ring: "stable", to: String(F.previousRelease), note: "the fixture's ring, back where it was" } },
+        expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 201 },
+      },
+    ],
+    visible: ["maintainer"],
+  },
+];

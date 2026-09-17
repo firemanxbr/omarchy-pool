@@ -4,6 +4,7 @@
  * ring depends on it.
  */
 import { page } from "./layout";
+import { EVERYONE, type Component, type Fixture } from "./components";
 import { CHARTS } from "./charts";
 import type { RunningVersion } from "../meta";
 
@@ -116,3 +117,105 @@ export function securityHtml(poolUrl: string, version: RunningVersion): string {
     version,
   });
 }
+
+/**
+ * What /security is made of.
+ * One report, `GET /api/v1/security?ring=&arch=`, feeds the status line, the
+ * tiles, the feeds card and the table; the per-ring chart reads the same
+ * endpoint once per ring, and the arch picker asks it for the other
+ * architecture. Nothing here changes with the role and nothing writes: the
+ * endpoints that write advisories take the pipeline's job token.
+ */
+export const SECURITY_COMPONENTS = (F: Fixture): Component[] => {
+  const report = `/api/v1/security?ring=stable&arch=${F.arch}`;
+  return [
+    {
+      id: "security.hero",
+      page: "/security",
+      anchor: ['<p class="eyebrow">Security</p>', "<h1>What a ring serves that has an open advisory — and how sure we are</h1>", "The feeds and the confidences, explained →</a>"],
+      visible: EVERYONE,
+    },
+    {
+      id: "security.pickers",
+      page: "/security",
+      anchor: ['id="pick-ring"', 'id="pick-arch"', 'id="pick-conf"'],
+      script: ['"pick-ring"', '"pick-arch"', '"pick-conf"', 'RINGS = ["stable", "rc", "edge"]', 'ARCHES = ["x86_64", "aarch64"]', 'CONF = ["all", "exact + name-version", "exact"]', "history.replaceState"],
+      reads: [{ path: "/api/v1/security?ring=stable&arch=aarch64", fields: ["ring", "arch", "vulnerable", "totals.packages"] }],
+      visible: EVERYONE,
+    },
+    {
+      id: "security.updated-line",
+      page: "/security",
+      anchor: ['id="updated"'],
+      script: ['"#updated"', '"Advisories refreshed "', '"No security run recorded yet · "', "d.advisories_total", '" advisories in the index"'],
+      reads: [{ path: report, fields: ["updated_at", "advisories_total"] }],
+      visible: EVERYONE,
+    },
+    {
+      id: "security.tiles",
+      page: "/security",
+      anchor: ['id="tiles"'],
+      script: [
+        'fetch("/api/v1/security?ring=" + ring + "&arch=" + arch)', 'skeletonTiles("#tiles", 5)', "confOk(a.match)",
+        '"Packages with open advisories"', '"Critical / high"', '"Exploited in the wild"', '"Fix available in another ring"', '"Packages exposed"',
+        "r.v.fixed_in.length", "d.totals.exposed",
+      ],
+      reads: [{ path: report, fields: ["vulnerable", "vulnerable.0.advisories.0.match", "vulnerable.0.advisories.0.severity", "vulnerable.0.advisories.0.kev", "vulnerable.0.advisories.0.epss", "vulnerable.0.fixed_in", "totals.exposed"] }],
+      visible: EVERYONE,
+    },
+    {
+      id: "security.per-ring-chart",
+      page: "/security",
+      anchor: ['<h3>Open advisories per ring <span id="sc-arch"></span></h3>', 'id="sc-chart"'],
+      script: [
+        'fetch("/api/v1/security?ring=" + r + "&arch=" + arch)', '"#sc-chart"', '"#sc-arch"', 'stacked(["edge", "rc", "stable"]',
+        "tot[i].kev", "tot[i].critical", "tot[i].high", "tot[i].medium", "tot[i].low", "tot[i].unknown",
+        '"Open advisories per ring by severity"', '"no open advisory in any ring"',
+      ],
+      reads: [
+        { path: report, fields: ["totals.kev", "totals.critical", "totals.high", "totals.medium", "totals.low", "totals.unknown"] },
+        // A ring without a release answers the empty envelope; the chart draws it as zero.
+        { path: `/api/v1/security?ring=rc&arch=${F.arch}`, fields: ["ring", "arch", "vulnerable", "totals"] },
+        { path: `/api/v1/security?ring=edge&arch=${F.arch}`, fields: ["ring", "arch", "vulnerable", "totals"] },
+      ],
+      visible: EVERYONE,
+    },
+    {
+      id: "security.feeds-card",
+      page: "/security",
+      anchor: ['<h3>The feeds <span id="sc-feeds-when"></span></h3>', 'id="sc-feeds"'],
+      script: ['"#sc-feeds"', '"#sc-feeds-when"', '"Arch Security Tracker"', '"Debian Security Tracker"', '"OSV"', '"CISA KEV"', '"EPSS"', "count[a.tracker]", "a.epss != null", '"refreshed "'],
+      reads: [{ path: report, fields: ["updated_at", "vulnerable.0.advisories.0.tracker", "vulnerable.0.advisories.0.kev", "vulnerable.0.advisories.0.epss"] }],
+      visible: EVERYONE,
+    },
+    {
+      id: "security.vuln-section-intro",
+      page: "/security",
+      anchor: ["<h2>Packages with open advisories</h2>", "<b>exact</b>", "<b>name-version</b>", "<b>name-only</b>", "<b>Fixed in</b>"],
+      visible: EVERYONE,
+    },
+    {
+      id: "security.vuln-table",
+      page: "/security",
+      anchor: ['id="vuln"', "<th>Severity</th><th>Package</th><th>Version</th><th>Advisories</th><th>Confidence</th><th>Exposes</th><th>Fixed in</th>"],
+      script: [
+        'skeletonRows("#vuln", 7, 6)', 'pager("#vuln", rows', "sev(r.worst)", '"in CISA KEV"', "r.epss >= 0.1", "encodeURIComponent(v.name)",
+        "a.id.replace(/^(arch|debian|osv):/", "a.fixed", "a.match", "v.exposure.declared", "v.exposure.loads", "v.fixed_in.map", "f.ring", "f.version",
+        "nothing with an open advisory at this confidence level",
+      ],
+      reads: [
+        {
+          path: report,
+          fields: [
+            "vulnerable.0.name", "vulnerable.0.version", "vulnerable.0.source",
+            "vulnerable.0.advisories.0.id", "vulnerable.0.advisories.0.url", "vulnerable.0.advisories.0.fixed", "vulnerable.0.advisories.0.match",
+            "vulnerable.0.advisories.0.severity", "vulnerable.0.advisories.0.kev", "vulnerable.0.advisories.0.epss",
+            "vulnerable.0.exposure.declared", "vulnerable.0.exposure.loads",
+            "vulnerable.0.fixed_in", "vulnerable.0.fixed_in.0.ring", "vulnerable.0.fixed_in.0.version",
+          ],
+        },
+      ],
+      visible: EVERYONE,
+    },
+  ];
+};

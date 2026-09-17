@@ -1,12 +1,17 @@
 /**
  * The dashboard's pages, served by the Worker's own fetch handler: every
- * door and every detail page answers, carries the shared frame (the three
- * doors in the navigation, the footer with the docs and the licence), keeps the text the e2e script and
- * the old addresses rely on, and leaves no template placeholder behind.
+ * door and every detail page answers, carries the shared frame (the four
+ * doors in the navigation, the footer with the docs and the licence), uses
+ * no name its script does not declare, and leaves no template placeholder
+ * behind; the docs pages carry the same shell, and the diagrams draw no two
+ * boxes over each other. What each page is made of is its manifest
+ * (src/pages/components.ts), checked by components.test.ts.
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import worker from "../src/index";
+import { allComponents } from "../src/pages/components";
+import { scriptOf, seedDashboard, type Fixture } from "./fixture";
 
 async function get(path: string): Promise<Response> {
   const ctx = createExecutionContext();
@@ -15,7 +20,13 @@ async function get(path: string): Promise<Response> {
   return res;
 }
 
-const PAGES = ["/", "/factory", "/contribute", "/review", "/pipeline", "/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/what-we-test", "/docs/governance", "/docs/security", "/docs/glossary", "/docs/architecture", "/docs/runbook", "/docs/testing", "/docs/migration", "/docs/factory", "/docs/worker-host", "/docs/security-model", "/docs/contributing", "/docs/proof-of-concept", "/docs/open-work", "/docs/omarchy-cli-mcp", "/packages", "/package/zlib", "/build/1", "/security", "/status", "/journal", "/workers", "/request", "/user/someone", "/people", "/api", "/diff"];
+// The pages are served over the fixture's data (test/fixture.ts): the package, the build and the person exist.
+let F: Fixture;
+let PAGES: string[];
+beforeAll(async () => {
+  F = await seedDashboard(env);
+  PAGES = ["/", "/factory", "/contribute", "/review", "/pipeline", "/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/what-we-test", "/docs/governance", "/docs/security", "/docs/glossary", "/docs/architecture", "/docs/runbook", "/docs/testing", "/docs/migration", "/docs/factory", "/docs/worker-host", "/docs/security-model", "/docs/contributing", "/docs/proof-of-concept", "/docs/open-work", "/docs/omarchy-cli-mcp", "/packages", `/package/${F.pkg}`, `/build/${F.projectTask}`, "/security", "/status", "/journal", "/workers", "/request", `/user/${F.owner}`, "/people", "/api", "/diff"];
+});
 
 describe("dashboard pages", () => {
   it("every page is served with the shared frame and no placeholder left behind", async () => {
@@ -28,6 +39,8 @@ describe("dashboard pages", () => {
       expect(html, `${path} nav`).toMatch(/<header>[\s\S]*href="\/"[\s\S]*href="\/factory"[\s\S]*href="\/review"[\s\S]*href="\/pipeline"[\s\S]*<\/header>/);
       expect(html, `${path} header`).not.toMatch(/<header>[\s\S]*(href="\/docs"|id="status")[\s\S]*<\/header>/);
       expect(html, `${path} footer`).toMatch(/<footer>[\s\S]*href="\/workers"[\s\S]*href="\/docs"[\s\S]*href="\/api"[\s\S]*blob\/main\/LICENSE[\s\S]*<\/footer>/);
+      // The request has a page of its own, reached from the Factory and a person's page — never from the frame.
+      expect(html, `${path} links the request from its frame`).not.toMatch(/<(header|footer)[\s\S]*?href="\/request"[\s\S]*?<\/\1>/);
       expect(html, path).toContain("built for Omarchy");
       expect(html, path).not.toMatch(/__[A-Z_]+__/);
       expect(html, path).not.toContain("${");
@@ -40,8 +53,7 @@ describe("dashboard pages", () => {
     const acorn = await import("acorn");
     for (const path of PAGES) {
       const html = await (await get(path)).text();
-      const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map((m) => m[1]).filter((c) => !/^\s*$/.test(c) && !/googletagmanager|beacon\.min\.js/.test(c));
-      const code = scripts.join("\n;\n");
+      const code = scriptOf(html);
       if (!code.trim()) continue;
       const ast = acorn.parse(code, { ecmaVersion: 2020, sourceType: "script" }) as unknown as Record<string, unknown>;
       const declared = new Set<string>(), used = new Set<string>();
@@ -74,32 +86,6 @@ describe("dashboard pages", () => {
       const missing = [...used].filter((name) => !declared.has(name) && !GLOBALS.has(name)).sort();
       expect(missing, `${path} uses undeclared: ${missing.join(", ")}`).toEqual([]);
     }
-  });
-
-  it("the Pool keeps its headline, the Factory serves the contributors, the Pipeline draws the living system", async () => {
-    expect(await (await get("/")).text()).toContain("tested before they reach you");
-    const factory = await (await get("/factory")).text();
-    expect(factory).toContain("Sign in with GitHub");
-    expect(factory).toContain('href="/request"');
-    expect(await (await get("/contribute")).text()).toContain('href="/request"');
-    // The request has a page of its own: the form, the checklist, nothing else — and no link to it in the header or the footer.
-    const request = await (await get("/request")).text();
-    expect(request).toContain('id="pkg-form"');
-    expect(request).toContain('data-check="evidence"');
-    expect(request).not.toMatch(/<(header|footer)[\s\S]*?href="\/request"[\s\S]*?<\/\1>/);
-    const pipeline = await (await get("/pipeline")).text();
-    expect(pipeline).toContain('data-live="verified-today"');
-    expect(pipeline).toContain("sponsor@firemanxbr.org");
-    expect(pipeline).toContain('id="staged"');
-    // Review reads the same for everyone and acts for maintainers; the Workers page has the three kinds, and the Pipeline no longer lists them.
-    const review = await (await get("/review")).text();
-    expect(review).toContain('id="mine"');
-    expect(review).toContain('data-approve');
-    const workers = await (await get("/workers")).text();
-    for (const kind of ["w-project", "w-review", "w-community"]) expect(workers).toContain(`id="${kind}"`);
-    expect(workers).toContain('href="/docs/workers"');
-    expect(pipeline).not.toContain('id="cworkers"');
-    expect(pipeline).toContain('href="/workers"');
   });
 
   it("every docs page carries the same shell — the map with every chapter's sections, the search — and the stages are on How it works", async () => {
@@ -143,16 +129,25 @@ describe("dashboard pages", () => {
 });
 
 // The diagrams size a box to its text; a line longer than planned widens the
-// box into its neighbour, and the labels between them end up on a border.
+// box into its neighbour, and the labels between them end up on a border. A
+// box drawn inside a group (`d-group`: the Factory's "Build — your choice"
+// holds the two kinds of worker) is not two boxes over each other. Which
+// diagrams exist is what the manifests claim with `drawn`: a figure claimed
+// by no page, or a page claiming one nobody draws, fails here.
 // The documentation's figures are drawn the same way and checked the same way.
 describe("diagrams", () => {
   it("draws no two boxes over each other", async () => {
-    const { ringsDiagram, sourcesDiagram, liveDiagram, archDiagram } = await import("../src/pages/diagrams");
+    const { ringsDiagram, sourcesDiagram, liveDiagram, archDiagram, factoryDiagram } = await import("../src/pages/diagrams");
     const { DOC_DIAGRAMS } = await import("../src/pages/doc-diagrams");
-    const drawn: [string, string][] = [["rings", ringsDiagram()], ["rings/promote", ringsDiagram("promote")], ["sources", sourcesDiagram()], ["live", liveDiagram()], ["arch", archDiagram()]];
-    for (const [name, draw] of Object.entries(DOC_DIAGRAMS)) drawn.push([`docs/${name}`, draw()]);
-    for (const [name, svg] of drawn) {
-      const boxes = [...svg.matchAll(/<rect class="d-box[^"]*" x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)"/g)].map((m) => m.slice(1, 5).map(Number));
+    const draw: Record<string, () => string> = { rings: ringsDiagram, "rings/promote": () => ringsDiagram("promote"), sources: sourcesDiagram, live: liveDiagram, arch: archDiagram, factory: factoryDiagram };
+    for (const [name, fn] of Object.entries(DOC_DIAGRAMS)) draw[`docs/${name}`] = fn;
+    const claimed = new Set(allComponents(F).map((c) => c.drawn).filter((k): k is string => k !== undefined));
+    expect([...claimed].sort()).toEqual(Object.keys(draw).sort());
+    for (const name of claimed) {
+      const svg = draw[name]();
+      const rects = [...svg.matchAll(/<rect class="(d-box[^"]*)" x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)"/g)];
+      const boxes = rects.map((m) => m.slice(2, 6).map(Number));
+      const group = (i: number) => /\bd-group\b/.test(rects[i][1]);
       const [w] = /viewBox="0 0 (\d+) (\d+)"/.exec(svg)!.slice(1).map(Number);
       if (name === "docs/benchmark-promotion") {
         // The one chart: bars, not boxes — inside the viewBox, in the palette's two fills.
@@ -167,7 +162,8 @@ describe("diagrams", () => {
         for (let j = i + 1; j < boxes.length; j++) {
           const [a, b] = [boxes[i], boxes[j]];
           const apart = a[0] + a[2] <= b[0] || b[0] + b[2] <= a[0] || a[1] + a[3] <= b[1] || b[1] + b[3] <= a[1];
-          expect(apart, `${name}: boxes at ${a.join(",")} and ${b.join(",")} overlap`).toBe(true);
+          const inside = (x: number[], y: number[]) => x[0] >= y[0] && x[1] >= y[1] && x[0] + x[2] <= y[0] + y[2] && x[1] + x[3] <= y[1] + y[3];
+          expect(apart || (group(j) && inside(a, b)) || (group(i) && inside(b, a)), `${name}: boxes at ${a.join(",")} and ${b.join(",")} overlap`).toBe(true);
         }
     }
   });

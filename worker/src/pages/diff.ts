@@ -4,6 +4,7 @@
  * rollback line in the journal points at. Reads GET /releases/:ring/diff.
  */
 import { page } from "./layout";
+import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 
 const BODY = String.raw`
@@ -62,3 +63,89 @@ export function diffHtml(poolUrl: string, version: RunningVersion): string {
     version,
   });
 }
+
+/**
+ * What /diff is made of.
+ * One read feeds the whole page: the ring's head against its parent, as
+ * /diff with no ids opens it (the overview's ring cards); each component
+ * names the fields it draws from that answer. The lede also carries the
+ * API's errors, so it declares the two the URL can provoke — a ring and
+ * an architecture the pool does not have.
+ */
+export const DIFF_COMPONENTS = (F: Fixture): Component[] => {
+  const page = "/diff";
+  const head = "/api/v1/releases/stable/diff";
+  return [
+    {
+      id: "diff.crumbs",
+      page,
+      anchor: ['class="crumbs"', '<a href="/">Overview</a>', 'id="crumb"'],
+      script: ['$("#crumb")', 'd.from.id : "∅"', "d.to.id"],
+      reads: [{ path: head, fields: ["from.id", "to.id"] }],
+      visible: EVERYONE,
+    },
+    {
+      id: "diff.title",
+      page,
+      anchor: ['<h1 id="title">Release diff</h1>'],
+      script: ['$("#title")', "document.title", "d.from.seq", "d.to.seq", '(arch ? " · " + arch : "")'],
+      reads: [
+        { path: head, fields: ["from.id", "from.seq", "to.id", "to.seq"] },
+        { path: `${head}?to=${F.release}&arch=${F.arch}`, fields: ["to.id", "arch"] },
+      ],
+      visible: EVERYONE,
+    },
+    {
+      id: "diff.lede",
+      page,
+      anchor: ['<p class="lede" id="line">'],
+      script: ['$("#line")', "ago(d.to.created_at)", "d.to.note", "ago(d.from.created_at)", "d.from.note", 'd.error || "not found"', '"failed: " + e'],
+      reads: [
+        { path: head, fields: ["to.created_at", "to.note", "from.created_at", "from.note"] },
+        { path: "/api/v1/releases/nope/diff", status: 404, fields: ["error"] },
+        { path: `${head}?arch=mips`, status: 400, fields: ["error"] },
+      ],
+      visible: EVERYONE,
+    },
+    {
+      id: "diff.json-link",
+      page,
+      anchor: ['id="line"'],
+      script: ["esc(url)", '">JSON</a>'],
+      reads: [{ path: head }],
+      visible: EVERYONE,
+    },
+    {
+      id: "diff.stat-tiles",
+      page,
+      anchor: ['<div class="tiles" id="tiles">'],
+      script: ['skeletonTiles("#tiles", 4)', '$("#tiles")', '["Upgraded", c.upgraded', '["Added", c.added', '["Removed", c.removed', '["Packages", num(c.after), "was " + num(c.before)]'],
+      reads: [{ path: head, fields: ["counts.upgraded", "counts.added", "counts.removed", "counts.after", "counts.before"] }],
+      visible: EVERYONE,
+    },
+    {
+      id: "diff.upgraded-section",
+      page,
+      anchor: ["<h2>Upgraded</h2>", "a downgrade shows here too, the versions tell", 'id="upgraded"', "<th>From</th><th>To</th>"],
+      script: ['skeletonRows("#upgraded", 5, 4)', 'pager("#upgraded", d.upgraded', 'href="/package/', "esc(p.from)", "esc(p.to)", '"nothing upgraded"'],
+      reads: [{ path: head, fields: ["upgraded", "upgraded.0.name", "upgraded.0.arch", "upgraded.0.from", "upgraded.0.to", "upgraded.0.source"] }],
+      visible: EVERYONE,
+    },
+    {
+      id: "diff.added-section",
+      page,
+      anchor: ["<h2>Added</h2>", 'id="added"', "<th>Version</th>"],
+      script: ['skeletonRows("#added", 4, 2)', 'pager("#added", d.added', "esc(p.version)", '"nothing added"'],
+      reads: [{ path: head, fields: ["added", "added.0.name", "added.0.arch", "added.0.version", "added.0.source"] }],
+      visible: EVERYONE,
+    },
+    {
+      id: "diff.removed-section",
+      page,
+      anchor: ["<h2>Removed</h2>", 'id="removed"'],
+      script: ['skeletonRows("#removed", 4, 2)', 'pager("#removed", d.removed', 'class="src"', '"nothing removed"'],
+      reads: [{ path: head, fields: ["removed", "removed.0.name", "removed.0.arch", "removed.0.version", "removed.0.source"] }],
+      visible: EVERYONE,
+    },
+  ];
+};

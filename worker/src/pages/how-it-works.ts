@@ -7,11 +7,13 @@
  * (diagrams.ts) and its live lines are filled from /api/v1/stats.
  */
 import { page } from "./layout";
+import { EVERYONE, type Component, type Fixture } from "./components";
 import { ringsDiagram, sourcesDiagram, type Stage } from "./diagrams";
 
 const STAGES: Stage[] = ["sync", "pin", "promote", "render", "serve"];
 import type { RunningVersion } from "../meta";
-import { REPO_URL } from "../meta";
+import { EXPECTED_SOURCES, REPO_URL } from "../meta";
+import { DOCS_TREE } from "./docs-tree";
 
 function body(pool: string): string {
   return String.raw`
@@ -204,3 +206,180 @@ export function howItWorksHtml(poolUrl: string, version: RunningVersion): string
     version,
   });
 }
+
+/**
+ * What /docs/how-it-works is made of. A process chapter: prose, tables and
+ * cards that get an anchor each, and one read — the sources diagram's live lines come from
+ * /api/v1/stats (the shell's liveStats, polled every two minutes). The
+ * stepper and the stage figure are the script's, with nothing to fetch.
+ * Where the page copies what the code owns, the anchor is bound to the
+ * code: every source in EXPECTED_SOURCES is a row of the sources table,
+ * the stage keys the script knows are STAGES, the sidebar's sections are
+ * this chapter's in DOCS_TREE. Nothing here changes with the role; the
+ * header's account is the shell's, the docs shell around the chapter is
+ * this page's first entry.
+ */
+export const HOW_IT_WORKS_COMPONENTS = (_F: Fixture): Component[] => {
+  const page = "/docs/how-it-works";
+  const chapter = DOCS_TREE.find((c) => c.key === "how-it-works")!;
+  return [
+    {
+      id: "how-it-works.docs-search",
+      page,
+      anchor: ['class="docs-side"', 'id="docs-q"', 'id="docs-hits"', 'id="docs-nav"', '<details open><summary><a href="/docs/how-it-works" class="on">How it works</a>', ...chapter.secs.map((sec) => `href="/docs/how-it-works#${sec.id}"`)],
+      script: ['"#docs-q"', '"#docs-hits"', '"#docs-nav"'],
+      visible: EVERYONE,
+    },
+    {
+      id: "how-it-works.lede",
+      page,
+      anchor: ["<h1>How it works</h1>", '<p class="lede">'],
+      visible: EVERYONE,
+    },
+    {
+      id: "how-it-works.sources-diagram",
+      page,
+      anchor: [
+        '<div class="chart" style="padding:18px">',
+        'aria-label="Arch Linux, Arch Linux ARM, the OPR\'s edge channel',
+        ...["src-arch", "src-alarm", "src-opr", "src-asahi", "src-asahi-alarm", "src-optional", "stored-once", "edge-head", "rc-head", "stable-head"].map((k) => `data-live="${k}"`),
+      ],
+      script: ["liveStats(", '"/api/v1/stats"', '"src-arch"', '"src-optional"', 'data-live="', "d.coverage", "c.indexed", "c.last_sync", '"stored-once"', "d.pool.objects", "d.pool.bytes", "d.rings", '"-head"', "r.release.seq", "r.release.created_at"],
+      reads: [
+        {
+          path: "/api/v1/stats",
+          // The stable ring is the third of RINGS and the fixture's only release: its head has a seq and a date; edge is `rings.0`, with none.
+          fields: ["coverage", "coverage.0.source", "coverage.0.arch", "coverage.0.indexed", "coverage.0.last_sync", "pool.objects", "pool.bytes", "rings", "rings.0.ring", "rings.2.ring", "rings.2.release.seq", "rings.2.release.created_at"],
+        },
+      ],
+      visible: EVERYONE,
+      drawn: "sources",
+    },
+    {
+      id: "how-it-works.sources-table",
+      page,
+      anchor: [
+        'id="sources"',
+        "<th>Signed with</th>",
+        "<th>Enters</th>",
+        'href="/factory"',
+        ...[...new Set(EXPECTED_SOURCES.map((e) => `<code>${e.source}</code>`))],
+      ],
+      visible: EVERYONE,
+    },
+    {
+      id: "how-it-works.stepper",
+      page,
+      anchor: ['id="stages"', "Five stages. Click one", 'id="stepper"'],
+      script: ['$("#stepper")', "STAGE_TEXT", 'data-stage="', 'b.getAttribute("data-stage")', ...STAGES.map((st) => `${st}: [`)],
+      visible: EVERYONE,
+    },
+    {
+      id: "how-it-works.stage-figure",
+      page,
+      anchor: ['id="stage-figure"', 'id="stage-art"', ...STAGES.map((st) => `data-stage="${st}"`)],
+      script: ['$("#stage-figure")', '#stage-art [data-stage="', "art.innerHTML", "<figcaption>", "t[2]"],
+      visible: EVERYONE,
+      drawn: "rings/promote",
+    },
+    {
+      id: "how-it-works.stage-cards",
+      page,
+      anchor: [
+        "<h3>1. Sync — every three hours</h3>",
+        "<h3>2. Pin — <code>edge</code></h3>",
+        "<h3>3. Promote — on evidence, never on a calendar</h3>",
+        "<h3>4. Render, verify, and roll back on your own</h3>",
+        "<h3>The lab and the trial</h3>",
+        "<h3>The fast lane</h3>",
+        'href="/journal?kind=fast-track"',
+      ],
+      visible: EVERYONE,
+    },
+    {
+      id: "how-it-works.protects",
+      page,
+      anchor: [
+        'id="protects"',
+        "<h3>Signatures, twice</h3>",
+        "<h3>A real pacman, before you</h3>",
+        "<h3>The ABI check</h3>",
+        "<h3>The security layer</h3>",
+        "<h3>Immutable releases, automatic rollback</h3>",
+        "<h3>One rule between sources</h3>",
+        "<h3>Nothing skips the gates</h3>",
+        'href="/security"',
+        'href="/pipeline"',
+        'href="/journal"',
+      ],
+      visible: EVERYONE,
+    },
+    {
+      id: "how-it-works.never",
+      page,
+      anchor: [
+        'id="never"',
+        "<h3>The broker</h3>",
+        "<h3>The builder</h3>",
+        "<h3>The pool's check</h3>",
+        "<h3>Two words on a worker, a tombstone on a record</h3>",
+        'href="/docs/workers#secrets"',
+        'href="/docs/workers"',
+        'href="/docs/security-model"',
+        'href="/workers"',
+      ],
+      visible: EVERYONE,
+    },
+    {
+      id: "how-it-works.people",
+      page,
+      anchor: ['id="people"', 'class="cando"', "<h4>for contributors</h4>", "<h4>for maintainers</h4>", 'class="yes"', 'href="/review"', 'href="/docs/what-we-test"'],
+      visible: EVERYONE,
+    },
+    {
+      id: "how-it-works.behind-table",
+      page,
+      anchor: ['id="behind"', "<th>Behind the source</th>", "<td>≤ 3 hours</td>", "<td>a fast-tracked fix</td>"],
+      visible: EVERYONE,
+    },
+    {
+      // The pool's URL is written in on the server: the anchors are the sections' paths, whatever host serves the page.
+      id: "how-it-works.server-howto",
+      page,
+      anchor: ['id="server"', 'class="howto"', '<span class="archname">before</span>', '<span class="archname">with the pool</span>', "[omarchy-packages-stable]", "/packages/$arch", "/core/$arch", "/extra/$arch", "/multilib/$arch", '<span class="c">'],
+      visible: EVERYONE,
+    },
+    {
+      id: "how-it-works.trust",
+      page,
+      anchor: ['id="trust"', "<h3>The projects' own keys — unchanged</h3>", "<h3>The pool's database key — one import</h3>", "<code>/api/v1/signing-key</code>", "<code>SigLevel = Required DatabaseRequired</code>"],
+      visible: EVERYONE,
+    },
+    {
+      id: "how-it-works.seal",
+      page,
+      anchor: ['id="seal"', "<h3>Imported</h3>", "<h3>Built by the Omarchy Pool</h3>", "<h3>On your machine</h3>", "<code>Packager: omarchy-pool factory</code>"],
+      visible: EVERYONE,
+    },
+    {
+      id: "how-it-works.pieces-table",
+      page,
+      anchor: ['id="pieces"', "<th>Piece</th>", "<td>Pool</td>", "<td>Index</td>", "<td>API + this site</td>", "<td>Pipeline</td>", "<td>Factory</td>", "<td>Tools</td>"],
+      visible: EVERYONE,
+    },
+    {
+      // The docs shell's map, as this page serves it: the chapter open with a link per section, each an anchor below.
+      id: "how-it-works.docs-sidebar",
+      page,
+      anchor: [
+        'id="docs-nav"',
+        '<a class="docs-home" href="/docs">',
+        `<details open><summary><a href="${chapter.href}" class="on">${chapter.label}</a><small>${chapter.secs.length}</small></summary>`,
+        ...chapter.secs.map((sec) => `href="${chapter.href}#${sec.id}">${sec.title}</a>`),
+        ...chapter.secs.map((sec) => `<section id="${sec.id}">`),
+        'class="docs-hint"',
+      ],
+      visible: EVERYONE,
+    },
+  ];
+};

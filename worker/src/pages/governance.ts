@@ -5,8 +5,10 @@
  * the maintainers the pool applied from that file.
  */
 import { page } from "./layout";
+import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 import { REPO_URL } from "../meta";
+import { CATEGORIES } from "../categories";
 
 const FILE = `${REPO_URL}/blob/main/factory/MAINTAINERS.toml`;
 
@@ -124,3 +126,113 @@ export function governanceHtml(poolUrl: string, version: RunningVersion): string
     version,
   });
 }
+
+/**
+ * What /docs/governance is made of: a chapter of anchors, with the
+ * maintainers' table and the synced line read from the live list and the
+ * roles table's history from the journal's role lines.
+ */
+export const GOVERNANCE_COMPONENTS = (_F: Fixture): Component[] => {
+  const page = "/docs/governance";
+  const maintainers = "/api/v1/factory/maintainers";
+  return [
+    {
+      id: "governance.docs-shell",
+      page,
+      anchor: ['class="docs-side"', 'id="docs-q"', 'id="docs-hits"', 'id="docs-nav"', '<details open><summary><a href="/docs/governance" class="on">Governance</a>', 'href="/docs/governance#maintainers"', 'href="/docs/governance#record"', 'class="docs-hint"'],
+      script: ['"#docs-q"', '"#docs-hits"', '"#docs-nav"', '"/docs/glossary#" + g[2]'],
+      visible: EVERYONE,
+    },
+    {
+      id: "governance.hero",
+      page,
+      anchor: ["<h1>Governance</h1>", '<p class="lede">Two roles, one file, decisions by pull request.', `href="${FILE}"`],
+      visible: EVERYONE,
+    },
+    {
+      // The answer's synced_at is null until the pool has read the file once; the line says "(not yet)" then.
+      id: "governance.synced-line",
+      page,
+      anchor: ['id="synced"'],
+      script: ['"#synced"', "d.synced_at", '"(not yet)"'],
+      reads: [{ path: maintainers, fields: ["synced_at"] }],
+      visible: EVERYONE,
+    },
+    {
+      id: "governance.maintainers-table",
+      page,
+      anchor: ['id="maintainers"', "<h2>The maintainers</h2>", 'id="maintainers-table"', "<th>Maintainer</th><th>Since</th>"],
+      script: [`"${maintainers}"`, '"#maintainers-table"', "d.maintainers", 'avatarIcon(m.login, "maintainer")', 'href="/user/', "ago(m.since)"],
+      reads: [{ path: maintainers, fields: ["maintainers", "maintainers.0.login", "maintainers.0.since"] }],
+      visible: EVERYONE,
+    },
+    {
+      id: "governance.learn",
+      page,
+      anchor: ['id="learn"', "<h2>We do not use what you built, we learn from it</h2>", '<a href="/review">Review</a>'],
+      visible: EVERYONE,
+    },
+    {
+      // The tabs and the lists are the script's: the served section is a heading over two empty divs.
+      id: "governance.role-tabs",
+      page,
+      anchor: ['id="roles"', "<h2>What each role does</h2>", '<div class="tabs" id="role-tabs"></div>'],
+      script: ["var ROLES = { contributor: [", 'var role = "contributor"', '"#role-tabs"', 'data-role="', "drawRoles()"],
+      visible: EVERYONE,
+    },
+    {
+      id: "governance.role-lists",
+      page,
+      anchor: ['<div class="cando" id="role-lists"></div>'],
+      script: ['"#role-lists"', "ROLES[role][1]", "<h4>does</h4>", '<ul class="yes">', "<h4>never</h4>", '<ul class="no">'],
+      visible: EVERYONE,
+    },
+    {
+      // The list is typed into the prose; anchoring every name in CATEGORIES fails here the day one is added there and not here.
+      id: "governance.categories",
+      page,
+      anchor: ['id="categories"', "<h2>Categories, not groups</h2>", ...CATEGORIES.map((c) => `<code>${c}</code>`), "<h3>The project's agent proposes it</h3>", "<h3>A maintainer settles it</h3>", "<h3>It travels with the package</h3>"],
+      visible: EVERYONE,
+    },
+    {
+      id: "governance.becoming",
+      page,
+      anchor: ['id="becoming"', "<h2>Becoming a maintainer</h2>", "<h3>1. Contribute first</h3>", "<h3>2. A maintainer proposes you</h3>", "<h3>3. Another maintainer approves</h3>", "<h3>Bootstrap, and the one door left</h3>", 'href="/factory"'],
+      visible: EVERYONE,
+    },
+    {
+      id: "governance.workers",
+      page,
+      anchor: ['id="workers"', "<h2>Workers, compute and agents</h2>", "<h3>One image, one command, for everyone</h3>", "<h3>The project's workers, in three roles</h3>", "<h3>Ready is not online</h3>", "<h3>Package requests</h3>", "<code>WORKER_SHARED=1</code>", 'href="/docs/workers"', 'href="/request"'],
+      visible: EVERYONE,
+    },
+    {
+      id: "governance.bumps",
+      page,
+      anchor: ['id="bumps"', "<h2>Bumps and packages nobody builds</h2>", "<code>bump:&lt;task&gt;@&lt;tag&gt;</code>"],
+      visible: EVERYONE,
+    },
+    {
+      id: "governance.blocking",
+      page,
+      anchor: ['id="blocking"', "<h2>Blocking</h2>", "<h3>A contributor</h3>", "<h3>A package</h3>", "<h3>Lifted by another maintainer</h3>", '<a href="/review">Review</a>'],
+      visible: EVERYONE,
+    },
+    {
+      // The formula is the sentence the profile links to as "the formula"; routes/users.ts scoreOf() is the code it mirrors.
+      id: "governance.record-text",
+      page,
+      anchor: ['id="record"', "<h2>The record and the score</h2>", 'href="/journal?kind=role"', "<code>3·let in + staged + bumps + for others − 2·rejected + 2·approvals + rejections − 3·builds failed</code>"],
+      visible: EVERYONE,
+    },
+    {
+      // The role lines applyGovernance (src/governance.ts) writes when the file changes a login's role.
+      id: "governance.roles-table",
+      page,
+      anchor: ['id="roles-table"', "<th>When</th><th>What</th>"],
+      script: ['"/api/v1/events?kind=role&limit=50"', '"#roles-table"', "d.events", "e.created_at", "e.summary", '"no role change recorded yet"'],
+      reads: [{ path: "/api/v1/events?kind=role&limit=50", fields: ["events", "events.0.created_at", "events.0.summary"] }],
+      visible: EVERYONE,
+    },
+  ];
+};
