@@ -237,13 +237,14 @@ __CHARTS__
   document.addEventListener("click", function (ev) {
     var b = ev.target.closest ? ev.target.closest("button[data-approve],button[data-reject]") : null; if (!b) return;
     var id = b.getAttribute("data-approve") || b.getAttribute("data-reject"), approve = b.hasAttribute("data-approve");
-    var note = prompt(approve ? "Approve build #" + id + "? A note for the record (optional):" : "Reject build #" + id + "? The note the contributor will read:", "");
-    if (note === null || (!approve && !note)) return;
+    ask(approve ? { title: "Approve build #" + id, text: "The project's build goes into edge, signed by the pool; the approval is on the record with your name.", input: "optional", confirm: "Approve" } : { title: "Reject build #" + id, text: "The contributor reads the note and builds again. The rejection is on the record.", input: "required", placeholder: "what is wrong, in a line or two", confirm: "Reject", danger: true }).then(function (note) {
+    if (note === null) return;
     b.disabled = true;
     busy(fetch(API + "/tasks/" + id + "/" + (approve ? "approve" : "reject"), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ note: note }) })).then(function (r) { return r.json(); }).then(function (j) {
       var el = $("#rq-state"); el.hidden = false; el.innerHTML = j.error ? '<span class="pill error">refused</span> ' + esc(j.error) : '<span class="pill ok">' + (approve ? "approved" : "rejected") + '</span> build #' + id + (approve && j.rebuild ? ' — the project rebuilds it as task #' + j.rebuild : '');
       loadAll();
-    }).catch(function (e) { b.disabled = false; alert("failed: " + e); });
+    }).catch(function (e) { b.disabled = false; toast("failed: " + esc(String(e)), "error"); });
+    });
   });
 
   // ---- operations: tiles, the diagram's numbers (the workers themselves are on /workers)
@@ -285,13 +286,15 @@ __CHARTS__
   document.addEventListener("click", function (ev) {
     var b = ev.target.closest ? ev.target.closest("button[data-rollback]") : null; if (!b) return;
     var ring = b.getAttribute("data-ring"), to = b.getAttribute("data-rollback");
-    var note = prompt("Roll " + ring + " back to release " + to + "? Say why, for the journal:"); if (!note) return;
+    ask({ title: "Roll " + ring + " back to release " + to + "?", text: "The ring serves that release again at once; the journal keeps why.", input: "required", confirm: "Roll back", danger: true }).then(function (note) {
+    if (note === null) return;
     b.disabled = true;
     busy(fetch(API + "/jobs", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ kind: "rollback", params: { ring: ring, to: to, note: note } }) })).then(function (r) { return r.json(); }).then(function (j) {
       var el = $("#rb-state"); el.hidden = false;
       el.innerHTML = j.error ? '<span class="pill error">refused</span> ' + esc(j.error) : '<span class="pill ok">queued</span> rollback of <b>' + esc(ring) + '</b> to release ' + esc(to) + ' is task #' + esc(j.task || "?") + ' — a project worker runs it, the journal records it';
       b.disabled = false;
-    }).catch(function (e) { b.disabled = false; alert("failed: " + e); });
+    }).catch(function (e) { b.disabled = false; toast("failed: " + esc(String(e)), "error"); });
+    });
   });
 
   // ---- the charts, from /api/v1/stats

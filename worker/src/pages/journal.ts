@@ -58,13 +58,15 @@ const SCRIPT = String.raw`
   document.addEventListener("click", function (ev) {
     var b = ev.target.closest ? ev.target.closest("button[data-rollback]") : null; if (!b) return;
     var ring = b.getAttribute("data-ring"), to = b.getAttribute("data-rollback");
-    var note = prompt("Roll " + ring + " back to release " + to + "? Say why, for the journal:"); if (!note) return;
+    ask({ title: "Roll " + ring + " back to release " + to + "?", text: "The ring serves that release again at once; the journal keeps why.", input: "required", confirm: "Roll back", danger: true }).then(function (note) {
+    if (note === null) return;
     b.disabled = true;
     busy(fetch("/api/v1/factory/jobs", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ kind: "rollback", params: { ring: ring, to: to, note: note } }) })).then(function (r) { return r.json(); }).then(function (j) {
       var el = $("#rb-state"); el.hidden = false;
       el.innerHTML = j.error ? '<span class="pill error">refused</span> ' + esc(j.error) : '<span class="pill ok">queued</span> rollback of <b>' + esc(ring) + '</b> to release ' + esc(to) + ' is task #' + esc(j.task || "?") + ' — a project worker runs it, the journal records it';
       b.disabled = false;
-    }).catch(function (e) { b.disabled = false; alert("failed: " + e); });
+    }).catch(function (e) { b.disabled = false; toast("failed: " + esc(String(e)), "error"); });
+    });
   });
   loadEvents(); setInterval(loadEvents, 60000);
   liveStats(function (d) { LAST = d; drawReleases(d); }, 60000);

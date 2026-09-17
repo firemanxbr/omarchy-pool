@@ -229,17 +229,24 @@ const SCRIPT = String.raw`
 
   // ---- the maintainer's tools: three decisions, the brake, the category
   function decide(id, what, given) {
-    var note = given || (what === "reject" ? prompt("Why? The contributor sees this.") : (prompt("Note for the record (optional)") || ""));
-    if (what === "reject" && !note) return;
-    busy(fetch(API + "/tasks/" + id + "/" + what, { method: "POST", headers: headers(), body: JSON.stringify({ note: note }) })).then(function (r) { return r.json(); }).then(function (d) {
-      alert(d.error ? d.error : what === "approve" ? "Approved — the project's build goes into edge (publish job #" + d.publish + ")." : what === "build" ? "The project is building it: task #" + d.task + " on a review worker, with the project's agent. It shows here when it is staged." : "Rejected");
-      load();
+    var asked = given ? Promise.resolve(given) : ask(what === "reject"
+      ? { title: "Reject build #" + id, text: "The contributor reads the note and builds again. The rejection is on the record.", input: "required", placeholder: "what is wrong, in a line or two", confirm: "Reject", danger: true }
+      : what === "approve" ? { title: "Approve build #" + id, text: "The project's build goes into edge, signed by the pool; the approval is on the record with your name.", input: "optional", confirm: "Approve" }
+      : { title: "Have the project build #" + id + " again", text: "A trusted review worker builds the recipe again with the project's agent — the contributor's bytes are never used. The result shows here when it is staged.", input: "optional", placeholder: "a hint for the project's agent (optional)", confirm: "Build by the project" });
+    asked.then(function (note) {
+      if (note === null) return;
+      busy(fetch(API + "/tasks/" + id + "/" + what, { method: "POST", headers: headers(), body: JSON.stringify({ note: note }) })).then(function (r) { return r.json(); }).then(function (d) {
+        if (d.error) toast(esc(d.error), "error");
+        else toast(what === "approve" ? "Approved — the project's build goes into edge (publish job <a href=\"/build/" + d.publish + "\">#" + d.publish + "</a>)." : what === "build" ? "The project is building it: task <a href=\"/build/" + d.task + "\">#" + d.task + "</a>, on a review worker with the project's agent." : given ? "Dropped." : "Rejected — the contributor sees the note.");
+        load();
+      });
     });
   }
   function block(kind, what, lift) {
-    var why = prompt(lift ? "Why lift it? The record keeps this." : "Why? The record and the contributor see this.");
-    if (!why || why.trim().length < 4) return;
-    busy(fetch(API + "/" + kind + "/" + encodeURIComponent(what) + "/" + (lift ? "unblock" : "block"), { method: "POST", headers: headers(), body: JSON.stringify({ reason: why }) })).then(function (r) { return r.json(); }).then(function (d) { if (d.error) alert(d.error); load(); });
+    ask(lift ? { title: "Lift the block on " + what, text: "The record keeps why.", input: "required", confirm: "Lift it" } : { title: "Block " + what, text: "The record and the contributor see this.", input: "required", confirm: "Block", danger: true }).then(function (why) {
+      if (why === null) return;
+      busy(fetch(API + "/" + kind + "/" + encodeURIComponent(what) + "/" + (lift ? "unblock" : "block"), { method: "POST", headers: headers(), body: JSON.stringify({ reason: why }) })).then(function (r) { return r.json(); }).then(function (d) { if (d.error) toast(esc(d.error), "error"); else toast(lift ? "Lifted." : "Blocked."); load(); });
+    });
   }
   function renderBlocks() {
     pager("#blocked-people", (BLOCKS.contributors || []), function (b) {
@@ -265,10 +272,12 @@ const SCRIPT = String.raw`
     var what = $("#block-what").value.trim(), why = $("#block-why").value.trim();
     if (!what || why.length < 4) return;
     busy(fetch("/api/v1/users/" + encodeURIComponent(what))).then(function (r) { return r.status === 200 ? "contributors" : "packages"; }).then(function (kind) {
-      if (!confirm("Block " + (kind === "contributors" ? "contributor " : "package ") + what + "? Their builds stop and " + (kind === "contributors" ? "their packages leave" : "it leaves") + " the rings; another maintainer lifts it.")) return;
-      busy(fetch(API + "/" + kind + "/" + encodeURIComponent(what) + "/block", { method: "POST", headers: headers(), body: JSON.stringify({ reason: why }) })).then(function (r) { return r.json(); }).then(function (d) {
-        if (d.error) alert(d.error); else { $("#block-what").value = ""; $("#block-why").value = ""; }
-        load();
+      ask({ title: "Block " + (kind === "contributors" ? "contributor " : "package ") + what + "?", text: (kind === "contributors" ? "Their builds stop and their packages leave the rings" : "Its builds stop and it leaves the rings") + "; another maintainer lifts it. The reason: <i>" + esc(why) + "</i>", confirm: "Block", danger: true }).then(function (go) {
+        if (go === null) return;
+        busy(fetch(API + "/" + kind + "/" + encodeURIComponent(what) + "/block", { method: "POST", headers: headers(), body: JSON.stringify({ reason: why }) })).then(function (r) { return r.json(); }).then(function (d) {
+          if (d.error) toast(esc(d.error), "error"); else { toast("Blocked."); $("#block-what").value = ""; $("#block-why").value = ""; }
+          load();
+        });
       });
     });
   });

@@ -436,6 +436,12 @@ const CSS = String.raw`
   .tl li.skel { border: 0; } .acts { margin: -20px 0 28px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; }
   .ev { border: 1px solid var(--line); background: var(--panel); margin-top: 10px; } .ev summary { cursor: pointer; padding: 10px 14px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 13px; list-style: none; } .ev summary::-webkit-details-marker { display: none; } .ev summary::before { content: "▸"; color: var(--dim); } .ev[open] summary::before { content: "▾"; } .ev .body { padding: 0 14px 14px; }
   .ev-table { width: 100%; font-size: 12.5px; } .ev-table th, .ev-table td { padding: 5px 8px; vertical-align: top; } .ev pre.code { white-space: pre; line-height: 1.5; max-height: 640px; overflow: auto; } .ev pre .ln { display: inline-block; width: 3ch; margin-right: 12px; text-align: right; color: var(--dim); user-select: none; }
+  /* Decisions ask in the dashboard: one dialog, and a toast that says what happened. */
+  dialog.ask { border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 0; width: min(520px, calc(100vw - 32px)); box-shadow: 0 24px 60px rgba(0,0,0,.5); } dialog.ask::backdrop { background: rgba(10, 11, 16, .72); }
+  dialog.ask form { padding: 20px 22px; display: grid; gap: 12px; } dialog.ask h3 { margin: 0; font-family: Geist, sans-serif; font-size: 17px; } dialog.ask .t { margin: 0; font-size: 13.5px; color: var(--muted); } dialog.ask textarea { width: 100%; box-sizing: border-box; background: var(--bg-deep); color: var(--text); border: 1px solid var(--line); padding: 8px 10px; font: 13px "JetBrains Mono", monospace; resize: vertical; }
+  dialog.ask .err { margin: 0; font-size: 12.5px; color: var(--red); } dialog.ask .row { display: flex; justify-content: flex-end; gap: 8px; } dialog.ask button.danger { border-color: var(--red); color: var(--red); } dialog.ask button.ghost { color: var(--muted); }
+  #toasts { position: fixed; right: 16px; bottom: 16px; z-index: 90; display: grid; gap: 8px; max-width: min(460px, calc(100vw - 32px)); } .toast { border: 1px solid var(--line); background: var(--panel); padding: 10px 14px; font-size: 13px; border-left: 3px solid var(--green); cursor: pointer; transition: opacity .3s, transform .3s; } .toast.error { border-left-color: var(--red); } .toast.warn { border-left-color: var(--amber); } .toast.out { opacity: 0; transform: translateY(6px); }
+  .wt-legend { font-size: 12px; margin: 10px 0 0; display: flex; gap: 6px 18px; flex-wrap: wrap; align-items: center; }
   .cklist { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: 16px; } .ckcol { border: 1px solid var(--line); background: var(--panel); padding: 14px 16px; border-top: 3px solid var(--line); } .ckcol.contributor { border-top-color: var(--lilac); } .ckcol.maintainer { border-top-color: var(--green); }
   .ckcol h3 { display: flex; justify-content: space-between; align-items: baseline; margin: 0; } .ckcol h3 .num { font-family: Geist, sans-serif; font-size: 20px; font-weight: 600; } .ckcol p { margin: 4px 0 10px; font-size: 12.5px; } .ckcol ul { list-style: none; margin: 0; padding: 0; } .ckcol li { display: grid; grid-template-columns: 18px 1fr auto; gap: 8px; align-items: start; padding: 7px 0; border-top: 1px solid var(--line); font-size: 13px; } .ckcol li .pts { font-size: 12.5px; white-space: nowrap; }
   .ck { font-style: normal; font-weight: 700; } .ck.ok { color: var(--green); } .ck.part { color: var(--amber); } .ck.bad { color: var(--red); } .ck.pending { color: var(--dim); }
@@ -541,9 +547,18 @@ const CSS = String.raw`
 `;
 
 /** Helpers shared by every page script; runs before the page's own script. */
+/** The icons the worker tables use instead of a word: a chip for the architecture (dashed when emulated), arrows for a shared worker, one person for an owner's own. */
+export const WORKER_ICONS = {
+  native: '<svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-label="native"><rect x="4" y="4" width="8" height="8"/><path d="M6 1v3M10 1v3M6 12v3M10 12v3M1 6h3M1 10h3M12 6h3M12 10h3"/></svg>',
+  emu: '<svg class="ic emu" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-label="emulated"><rect x="4" y="4" width="8" height="8" stroke-dasharray="2 1.5"/><path d="M6 1v3M10 1v3M6 12v3M10 12v3M1 6h3M1 10h3M12 6h3M12 10h3"/></svg>',
+  shared: '<svg class="ic shared" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-label="shared"><path d="M2 5h10M9 2l3 3-3 3M14 11H4M7 8l-3 3 3 3"/></svg>',
+  own: '<svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-label="own"><circle cx="8" cy="5" r="3"/><path d="M2 15c0-3.3 2.7-6 6-6s6 2.7 6 6"/></svg>',
+};
+
 const HELPERS = String.raw`
   var POOL = "__POOL_URL__";
   var RINGS_TEXT = __RINGS_TEXT__;
+  var WICON = __WICON__;
   var $ = function (s) { return document.querySelector(s); };
   function esc(s) { return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
   function bytes(n) { n = Number(n || 0); var u = ["B", "KB", "MB", "GB", "TB"], i = 0; while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; } return (i === 0 ? n : n.toFixed(n >= 100 ? 0 : 1)) + " " + u[i]; }
@@ -669,6 +684,95 @@ const HELPERS = String.raw`
     if (w.arch && s.endsWith("-" + w.arch)) s = s.slice(0, -(w.arch.length + 1));
     return '<span class="mono" title="' + esc(id) + '">' + esc(s || id) + '</span>';
   }
+  // ---- decisions ask in the dashboard, never in the browser's own box: one dialog, a note when the action wants one, a promise of the note (null = cancelled).
+  //   ask({ title, text, input: "required" | "optional" | false, placeholder, confirm: "Approve", danger: true })
+  function ask(o) {
+    return new Promise(function (resolve) {
+      var d = document.createElement("dialog"); d.className = "ask";
+      d.innerHTML = '<form method="dialog"><h3></h3><p class="t"></p>' + (o.input ? '<textarea rows="3" placeholder="' + esc(o.placeholder || (o.input === "required" ? "why — it goes on the record" : "a note for the record (optional)")) + '"></textarea><p class="err" hidden></p>' : '') + '<div class="row"><button type="button" class="ghost cancel">Cancel</button><button type="submit" class="' + (o.danger ? "danger" : "") + '">' + esc(o.confirm || "OK") + '</button></div></form>';
+      d.querySelector("h3").textContent = o.title || ""; d.querySelector(".t").innerHTML = o.text || "";
+      document.body.appendChild(d);
+      var ta = d.querySelector("textarea"), form = d.querySelector("form"), done = function (v) { d.close(); d.remove(); resolve(v); };
+      d.querySelector(".cancel").onclick = function () { done(null); };
+      d.addEventListener("cancel", function (ev) { ev.preventDefault(); done(null); });
+      d.addEventListener("click", function (ev) { if (ev.target === d) done(null); });
+      form.onsubmit = function (ev) {
+        ev.preventDefault();
+        var v = ta ? ta.value.trim() : "";
+        if (o.input === "required" && v.length < 4) { d.querySelector(".err").hidden = false; d.querySelector(".err").textContent = "Say why, in a few words — the record keeps it."; ta.focus(); return; }
+        done(v);
+      };
+      d.showModal(); if (ta) ta.focus();
+    });
+  }
+  // A line that says what happened, where the eye is: bottom right, gone in a few seconds (an error stays until clicked).
+  function toast(text, cls) {
+    var box = $("#toasts"); if (!box) { box = document.createElement("div"); box.id = "toasts"; document.body.appendChild(box); }
+    var t = document.createElement("div"); t.className = "toast " + (cls || "ok"); t.innerHTML = text; box.appendChild(t);
+    var go = function () { t.classList.add("out"); setTimeout(function () { t.remove(); }, 300); };
+    t.onclick = go; if (cls !== "error") setTimeout(go, 6000);
+  }
+  // ---- the worker tables (the Workers page, a person's page): the same row for the same kind of worker everywhere.
+  // The kind: project (pool jobs) and review are the project's, told apart by the role the worker reported; everything else is a contributor's.
+  function wtKind(w) { if (w.side !== "omarchy") return "community"; var r = w.labels && w.labels.role; return r === "review" ? "review" : "project"; }
+  function wtPerson(l) { return l ? avatar(l) : '<span class="muted" title="a registration from before owners: the project\'s">—</span>'; }
+  // The id without the owner's prefix (the owner has a column), never past 32 characters: whole segments go from after the first, the tail — role, arch, the random suffix — stays; the whole id on hover.
+  function wtId(w) {
+    var names = (w.trusted_by || "").split(",").map(function (n) { return n.trim(); }).filter(Boolean);
+    var tip = [w.labels && w.labels.where ? "on " + w.labels.where : "", w.hostname && w.hostname !== "?" ? "host " + w.hostname : "", w.kinds && w.kinds.length ? "takes: " + w.kinds.join(", ") : "", names.length ? "trusted by " + names.join(", ") : w.trust_proposed_by ? "proposed for project trust by " + w.trust_proposed_by + ", awaiting a second maintainer's word" : ""].filter(Boolean).join(" · ");
+    var id = String(w.id || ""), shown = w.owner && id.indexOf(w.owner + "-") === 0 ? id.slice(w.owner.length + 1) : id, parts = shown.split("-");
+    while (shown.length > 32 && parts.length > 3) { parts.splice(1, 1); shown = parts[0] + "-…-" + parts.slice(1).join("-"); }
+    if (shown.length > 32) shown = shown.slice(0, 18) + "…" + shown.slice(-13);
+    return '<span class="mono wid" title="' + esc([id, tip].filter(Boolean).join(" · ")) + '">' + esc(shown) + '</span>';
+  }
+  // The state, one word: building (a task in hand), failed (alive but not ready — its agent did not answer), idle, offline (with how long). Seen-when on hover.
+  function wtStatus(w) {
+    var seen = "seen " + ago(w.last_seen);
+    if (w.revoked_at) return '<span class="pill none" title="revoked ' + esc(ago(w.revoked_at)) + '">revoked</span>';
+    if (!w.alive) return '<span class="pill none" title="not seen in the last ten minutes">offline · ' + esc(ago(w.last_seen).replace(" ago", "")) + '</span>';
+    if (w.current_task) return '<a class="pill blue" href="/build/' + w.current_task + '" title="task #' + w.current_task + ' · ' + esc(seen) + '">building</a>';
+    if (!w.ready) return '<span class="pill error" title="' + esc((w.agent_error ? "its agent did not answer: " + w.agent_error : !w.agent ? "no agent: a contributor's builds and the audits need one that answers" : "not ready for the work it declares") + " · " + seen) + '">failed</span>';
+    return '<span class="pill ok" title="' + esc("alive, nothing in hand · " + seen) + '">idle</span>';
+  }
+  function wtVersion(w) { return w.version && w.version !== "container" ? '<span class="mono" title="the release this worker\'s image was built from">' + esc(w.version) + '</span>' : '<span class="muted" title="an image from before the version was reported">—</span>'; }
+  function wtArch(w, icon) { return esc(w.arch) + (icon ? ' ' + (w.labels && w.labels.emulated ? WICON.emu.replace('aria-label', 'title="emulated: the other architecture, under qemu on this host" aria-label') : WICON.native.replace('aria-label', 'title="native" aria-label')) : ''); }
+  function wtMode(w) { return w.mode === "shared" ? WICON.shared.replace('aria-label', 'title="shared: builds whatever is queued, anyone\'s" aria-label') : WICON.own.replace('aria-label', 'title="' + esc(w.packages && w.packages.length ? "own packages: " + w.packages.join(", ") : "the owner\'s packages only") + '" aria-label'); }
+  var WT_PROV = { anthropic: "A", "claude-code": "CC", openai: "OA", gemini: "G", xai: "X" };
+  // The agent, and whether it answers: the dot is the last probe (green answered, red did not, grey never asked), the chip the provider, then the model.
+  function wtAgent(w) {
+    if (!w.agent) return '<span class="muted">—</span>';
+    var i = w.agent.indexOf("/"), prov = i > 0 ? w.agent.slice(0, i) : "", model = i > 0 ? w.agent.slice(i + 1) : w.agent;
+    var st = w.agent_status === "ok" ? "ok" : w.agent_status === "error" ? "error" : "";
+    var tip = w.agent + (st === "ok" ? " · answered " + ago(w.agent_checked_at) : st === "error" ? " · no answer " + ago(w.agent_checked_at) + (w.agent_error ? ": " + w.agent_error : "") : " · not probed yet");
+    return '<span class="agent" title="' + esc(tip) + '"><i class="dot ' + st + '"></i><span class="prov">' + esc(WT_PROV[prov] || prov.slice(0, 2).toUpperCase() || "?") + '</span><span class="mono">' + esc(model.replace(/^claude-/, "")) + '</span></span>';
+  }
+  // What the machine uses: three meters, the worker's own average (with the claim), amber past 70, red past 90.
+  function wtUsage(w) {
+    var u = w.usage; if (!u) return '<span class="muted" title="not reported yet: an image from before usage was reported, or its first minute">—</span>';
+    var tip = "average of the last " + (u.minutes || "?") + " min, reported " + ago(w.usage_at) + " · cpu " + u.cpu + "%" + (u.cores ? " of " + u.cores + " cores" : "") + " · ram " + u.ram + "%" + (u.ram_gb ? " of " + u.ram_gb + " GB" : "") + " · disk " + u.disk + "%" + (u.disk_gb ? " of " + u.disk_gb + " GB" : "");
+    return '<span class="usage" title="' + esc(tip) + '">' + [u.cpu, u.ram, u.disk].map(function (v) { v = Math.round(Number(v) || 0); return '<span class="u1' + (v >= 90 ? " hot" : v >= 70 ? " warn" : "") + '" style="--v:' + v + '%"><b class="num">' + v + '</b><i></i></span>'; }).join("") + '</span>';
+  }
+  // The last task the worker finished — a package (linked, with its version) or a pool job by name — and how it ended.
+  function wtLast(w) {
+    var l = w.last_task; if (!l) return '<span class="muted" title="nothing finished since the pool started keeping this">—</span>';
+    var tip = "task #" + l.id + " · " + l.kind + " " + (l.status === "failed" ? "failed" : l.status) + " " + ago(l.at);
+    var pkg = l.kind === "build" || l.kind === "audit" || l.kind === "publish" || l.kind === "trial";
+    return '<span class="last" title="' + esc(tip) + '"><i class="dot ' + (l.status === "failed" ? "error" : "ok") + '"></i>' + (pkg ? '<a href="/build/' + l.id + '">' + esc(l.name) + '</a>' + (l.version ? ' <span class="v mono">' + esc(l.version) + '</span>' : '') : '<a class="mono" href="/build/' + l.id + '">' + esc(l.name) + '</a> <span class="v">' + ago(l.at) + '</span>') + '</span>';
+  }
+  function wtCounts(w) { return num(w.builds_done) + ' / ' + num(w.builds_failed); }
+  // The header and the row of each kind of table; "extra" is one more cell (a person's own page puts its buttons there).
+  var WT_HEAD = {
+    project: '<th>Worker</th><th>Status</th><th>Arch</th><th>Version</th><th>Maintainer</th><th title="what the machine uses: an average the worker keeps and reports with its claims">CPU · RAM · Disk</th><th>Done / failed</th><th>Last job</th>',
+    review: '<th>Worker</th><th>Status</th><th>Arch</th><th>Version</th><th>Maintainer</th><th>Agent</th><th title="what the machine uses: an average the worker keeps and reports with its claims">CPU · RAM · Disk</th><th>Done / failed</th><th>Last reviewed</th>',
+    community: '<th>Worker</th><th>Status</th><th>Owner</th><th>Arch</th><th>Version</th><th title="shared: builds whatever is queued · own: the owner\'s packages only">Mode</th><th>Agent</th><th title="what the machine uses: an average the worker keeps and reports with its claims">CPU · RAM · Disk</th><th>Done / failed</th><th>Last build</th>'
+  };
+  function workerRow(w, kind, extra) {
+    var cells = kind === "project" ? [wtId(w), wtStatus(w), wtArch(w, false), wtVersion(w), wtPerson(w.owner), wtUsage(w), wtCounts(w), wtLast(w)]
+      : kind === "review" ? [wtId(w), wtStatus(w), wtArch(w, true), wtVersion(w), wtPerson(w.owner), wtAgent(w), wtUsage(w), wtCounts(w), wtLast(w)]
+      : [wtId(w), wtStatus(w), wtPerson(w.owner), wtArch(w, true), wtVersion(w), wtMode(w), wtAgent(w), wtUsage(w), wtCounts(w), wtLast(w)];
+    return '<tr><td>' + cells.join('</td><td>') + '</td>' + (extra ? '<td>' + extra + '</td>' : '') + '</tr>';
+  }
+  var WT_LEGEND = '<p class="dim wt-legend">' + '<span>' + WICON.native + ' native</span><span>' + WICON.emu + ' emulated</span><span>' + WICON.shared + ' shared</span><span>' + WICON.own + ' own packages</span><span><span class="pill ok">idle</span> waiting</span><span><span class="pill blue">building</span> a task in hand</span><span><span class="pill error">failed</span> its agent does not answer</span><span><span class="pill none">offline</span> not seen in ten minutes</span></p>';
   function personChip(login, role, extra) { return '<a class="person" href="/user/' + encodeURIComponent(login) + '" title="' + esc(login) + ' · ' + esc(role) + '">' + avatarIcon(login, role) + '<b>' + esc(login) + '</b>' + (extra ? ' <span class="r">' + extra + '</span>' : '') + '</a>'; }
   function tile(k, v, s, cls) { return '<div class="tile"><div class="k">' + k + '</div><div class="v num' + (cls ? " " + cls : "") + '">' + v + '</div><div class="s">' + s + '</div></div>'; }
   // A tile with a fifth element is a link: the number, and the page that proves it.
@@ -880,7 +984,7 @@ ${body}
 <script>
 (function () {
   document.querySelectorAll("footer .more a").forEach(function (a) { if (a.getAttribute("href") === location.pathname) a.classList.add("active"); });
-${HELPERS.split("__POOL_URL__").join(pool).split("__RINGS_TEXT__").join(JSON.stringify(RING_TEXT))}
+${HELPERS.split("__POOL_URL__").join(pool).split("__RINGS_TEXT__").join(JSON.stringify(RING_TEXT)).split("__WICON__").join(JSON.stringify(WORKER_ICONS))}
 ${o.script ?? ""}
 ${docsSearch}
 })();

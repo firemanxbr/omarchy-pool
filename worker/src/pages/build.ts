@@ -136,12 +136,18 @@ const SCRIPT = String.raw`
   }
   document.addEventListener("click", function (ev) {
     var b = ev.target.closest ? ev.target.closest("button[data-do]") : null; if (!b) return;
-    var what = b.getAttribute("data-do"), note = what === "reject" ? prompt("Why? The contributor sees this.") : what === "withdraw" ? prompt("Why take it back? The record keeps this; the package leaves every ring it is in.") : (prompt("Note for the record (optional)") || "");
-    if ((what === "reject" || what === "withdraw") && !note) return;
-    busy(fetch(API + "/tasks/" + ID + "/" + what, { method: "POST", headers: headers(), body: JSON.stringify({ note: note }) })).then(function (r) { return r.json(); }).then(function (d) {
-      var s = $("#state"); s.hidden = false;
-      s.innerHTML = d.error ? pill("error", "refused") + " " + esc(d.error) : pill(what === "withdraw" ? "warn" : "ok", what === "approve" ? "approved" : what === "build" ? "queued" : what === "withdraw" ? "withdrawn" : "rejected") + " " + (what === "approve" ? "the project's build goes into edge (publish job #" + d.publish + ")" : what === "build" ? "the project is building it: task <a href=\"/build/" + d.task + "\">#" + d.task + "</a>" : what === "withdraw" ? "the approval is void; the package leaves " + esc((d.rings || []).map(function (r) { return r.ring; }).join(", ") || "no ring") + " — another maintainer decides" : "the contributor sees the note");
-      load();
+    var what = b.getAttribute("data-do"), t = T.task, name = t.name + " " + (t.version || "");
+    ask(what === "reject" ? { title: "Reject " + name, text: "The contributor reads the note and builds again. The rejection is on the record.", input: "required", placeholder: "what is wrong, in a line or two", confirm: "Reject", danger: true }
+      : what === "withdraw" ? { title: "Withdraw the approval of " + name, text: "The approval stays on the record and is void from now on; the package leaves every ring it reached; another maintainer decides.", input: "required", placeholder: "why take it back", confirm: "Withdraw", danger: true }
+      : what === "approve" ? { title: "Approve " + name, text: "The project's build goes into edge, signed by the pool; the approval is on the record with your name.", input: "optional", confirm: "Approve" }
+      : { title: "Have the project build " + name + " again", text: "A trusted review worker builds the recipe again with the project's agent — the contributor's bytes are never used.", input: "optional", placeholder: "a hint for the project's agent (optional)", confirm: "Build by the project" }).then(function (note) {
+      if (note === null) return;
+      busy(fetch(API + "/tasks/" + ID + "/" + what, { method: "POST", headers: headers(), body: JSON.stringify({ note: note }) })).then(function (r) { return r.json(); }).then(function (d) {
+        var s = $("#state"); s.hidden = false;
+        s.innerHTML = d.error ? pill("error", "refused") + " " + esc(d.error) : pill(what === "withdraw" ? "warn" : "ok", what === "approve" ? "approved" : what === "build" ? "queued" : what === "withdraw" ? "withdrawn" : "rejected") + " " + (what === "approve" ? "the project's build goes into edge (publish job #" + d.publish + ")" : what === "build" ? "the project is building it: task <a href=\"/build/" + d.task + "\">#" + d.task + "</a>" : what === "withdraw" ? "the approval is void; the package leaves " + esc((d.rings || []).map(function (r) { return r.ring; }).join(", ") || "no ring") + " — another maintainer decides" : "the contributor sees the note");
+        toast(d.error ? esc(d.error) : s.textContent, d.error ? "error" : what === "withdraw" ? "warn" : "ok");
+        load();
+      });
     });
   });
 
