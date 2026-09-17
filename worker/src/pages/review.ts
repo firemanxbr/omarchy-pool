@@ -116,11 +116,11 @@ const SCRIPT = String.raw`
     STAGED.filter(function (t) { return t.owner === login; }).sort(function (a, b) { return (b.kind === "project") - (a.kind === "project"); }).forEach(function (t) {
       var key = t.name + "/" + t.arch; if (seen[key]) return; seen[key] = true;
       var pb = t.project_build;
-      if (t.kind === "project") waiting.push(row("", t.name, t.version, t.arch, '<span class="pill ok">built again</span>', 'the project\'s ' + build(t.id) + ' (from your ' + build(t.from) + ') waits for approval', ["/build/" + t.id, "The build →"]));
-      else if (pb && (pb.status === "queued" || pb.status === "leased")) waiting.push(row("", t.name, t.version, t.arch, '<span class="pill blue">building again</span>', 'the project is building it again (' + build(pb.id) + '), from your ' + build(t.id), ["/build/" + t.id, "Your build →"]));
-      else if (pb && pb.status === "failed") waiting.push(row("", t.name, t.version, t.arch, '<span class="pill error" title="' + esc(pb.error || "") + '">failed</span>', 'the project\'s ' + build(pb.id) + ' (from your ' + build(t.id) + ') failed — a maintainer decides', ["/build/" + pb.id, "The project's build →"]));
-      else if (t.already) waiting.push(row("", t.name, t.version, t.arch, '<span class="pill none">already approved</span>', 'your build ' + build(t.id) + ' is of a version approved ' + ago(t.already.at) + ' as ' + build(t.already.task) + ' — nothing to decide', ["/build/" + t.id, "The build →"]));
-      else waiting.push(row("", t.name, t.version, t.arch, '<span class="pill warn">staged</span>', 'your build ' + build(t.id) + ' waits for a maintainer' + (t.audit && t.audit.status === "done" && t.audit.verdict ? ' · audit <span class="pill ' + (t.audit.verdict === "ok" ? "ok" : t.audit.verdict === "warn" ? "warn" : "error") + '">' + esc(t.audit.verdict) + '</span>' : t.audit && t.audit.status === "queued" ? ' · audit waiting' : ''), ["/build/" + t.id, "Your build →"]));
+      if (t.kind === "project") waiting.push(row("", t.name, t.version, t.arch, '<span class="pill ok">built again</span>', 'the project\'s ' + taskLink(t.id) + ' (from your ' + taskLink(t.from) + ') waits for approval', ["/build/" + t.id, "The build →"]));
+      else if (pb && (pb.status === "queued" || pb.status === "leased")) waiting.push(row("", t.name, t.version, t.arch, '<span class="pill blue">building again</span>', 'the project is building it again (' + taskLink(pb.id) + '), from your ' + taskLink(t.id), ["/build/" + t.id, "Your build →"]));
+      else if (pb && pb.status === "failed") waiting.push(row("", t.name, t.version, t.arch, '<span class="pill error" title="' + esc(pb.error || "") + '">failed</span>', 'the project\'s ' + taskLink(pb.id) + ' (from your ' + taskLink(t.id) + ') failed — a maintainer decides', ["/build/" + pb.id, "The project's build →"]));
+      else if (t.already) waiting.push(row("", t.name, t.version, t.arch, '<span class="pill none">already approved</span>', 'your build ' + taskLink(t.id) + ' is of a version approved ' + ago(t.already.at) + ' as ' + taskLink(t.already.task) + ' — nothing to decide', ["/build/" + t.id, "The build →"]));
+      else waiting.push(row("", t.name, t.version, t.arch, '<span class="pill warn">staged</span>', 'your build ' + taskLink(t.id) + ' waits for a maintainer' + (t.audit && t.audit.status === "done" && t.audit.verdict ? ' · audit <span class="pill ' + (t.audit.verdict === "ok" ? "ok" : t.audit.verdict === "warn" ? "warn" : "error") + '">' + esc(t.audit.verdict) + '</span>' : t.audit && t.audit.status === "queued" ? ' · audit waiting' : ''), ["/build/" + t.id, "Your build →"]));
     });
     // Decided: the record's latest word on each package of yours (a rejection carries the note; an approval, the ring).
     var mine = {}; ((MINE && MINE.packages) || []).forEach(function (p) { mine[p.name] = p; });
@@ -129,7 +129,7 @@ const SCRIPT = String.raw`
     Object.keys(last).forEach(function (k) {
       var a = last[k], p = mine[a.name];
       if (a.decision === "rejected") decided.push(row("act", a.name, a.version, a.arch, '<span class="pill error">rejected</span>', ago(a.created_at) + ' by ' + person(a.by) + ': ' + short(a.note, 110), ["/factory", "Fix it, build again →"]));
-      else decided.push(row("ok", a.name, a.version, a.arch, '<span class="pill ok">approved</span>', ago(a.created_at) + ' by ' + person(a.by) + (p && p.status === "published" ? ' — in edge, signed by the pool' : ' — the project\'s build is on its way into edge') + (a.note ? ' · ' + short(a.note, 80) : ''), p && p.status === "published" ? ["/package/" + encodeURIComponent(a.name) + "?ring=edge&arch=" + a.arch, "The package →"] : null));
+      else { var inRings = a.rings && a.rings.length ? a.rings : (p && p.status === "published" ? ["edge"] : []); decided.push(row("ok", a.name, a.version, a.arch, '<span class="pill ok">approved</span>', ago(a.created_at) + ' by ' + person(a.by) + (inRings.length ? ' — in ' + inRings.join(" · ") + ', signed by the pool' : ' — the project\'s build is on its way into edge') + (a.note ? ' · ' + short(a.note, 80) : ''), inRings.length ? ["/package/" + encodeURIComponent(a.name) + "?ring=" + inRings[inRings.length - 1] + "&arch=" + a.arch, "The package →"] : ["/build/" + a.task_id, "The build →"])); }
     });
     $("#mine-waiting").innerHTML = waiting.join("") || '<p class="sub" style="margin:0">Nothing of yours waiting. <a href="/request">Request a package →</a></p>';
     $("#mine-decided").innerHTML = decided.join("") || '<p class="sub" style="margin:0">No decision on a package of yours yet.</p>';
@@ -142,7 +142,7 @@ const SCRIPT = String.raw`
   }
   // A staged build a maintainer can act on now: the project's (approve), or a contributor's the project is not already building — and not a build of a version already approved (nothing to decide: drop it).
   function decidable(t) { var pb = t.project_build; return !t.already && (t.kind === "project" || !pb || pb.status === "failed"); }
-  function build(id, text) { return '<a href="/build/' + id + '">' + (text || "#" + id) + '</a>'; }
+  function taskLink(id, text) { return '<a href="/build/' + id + '">' + (text || "#" + id) + '</a>'; }
 
   // ---- in review: the same table for everyone; the decision column for maintainers
   function category(t) {
@@ -201,11 +201,11 @@ const SCRIPT = String.raw`
     $("#queue-note").textContent = STAGED.length ? (maint() ? num(forMe) + " waiting for your decision · " : "") + num(STAGED.length) + " staged" + (redundant ? " · " + num(redundant) + " of a version already approved" : "") : "";
     pager("#staged", STAGED, function (t) {
       var det = t.detected || {}, project = t.kind === "project", pb = t.project_build;
-      var build = project ? '<span class="pill ok" title="the project\'s own build, from a contributor\'s evidence">the project</span> <span class="muted">' + build(t.id) + ' from ' + build(t.from) + '</span>' + builtOn(t)
-        : '<span class="muted">evidence · ' + build(t.id) + (t.duration_ms ? ' · ' + Math.round(t.duration_ms / 1000) + ' s' : '') + '</span>' + builtOn(t) + (pb && (pb.status === "queued" || pb.status === "leased") ? ' <span class="pill blue">building again</span>' : pb && pb.status === "staged" ? ' <span class="pill ok">built again</span>' : '')
+      var build = project ? '<span class="pill ok" title="the project\'s own build, from a contributor\'s evidence">the project</span> <span class="muted">' + taskLink(t.id) + ' from ' + taskLink(t.from) + '</span>' + builtOn(t)
+        : '<span class="muted">evidence · ' + taskLink(t.id) + (t.duration_ms ? ' · ' + Math.round(t.duration_ms / 1000) + ' s' : '') + '</span>' + builtOn(t) + (pb && (pb.status === "queued" || pb.status === "leased") ? ' <span class="pill blue">building again</span>' : pb && pb.status === "staged" ? ' <span class="pill ok">built again</span>' : '')
         + (t.already ? ' <span class="pill none" title="approved ' + esc(ago(t.already.at)) + ' by ' + esc(t.already.by) + ' as build #' + t.already.task + (t.already.rebuild_task ? '; the project\'s build #' + t.already.rebuild_task + ' ' + esc(t.already.rebuild_status || '') : '') + ' — nothing to decide">already approved</span>' : '');
       var mine = WHO && t.owner === login, forYou = maint() && !mine && decidable(t);
-      return '<tr id="t-' + t.id + '"' + (project ? ' class="project-row"' : '') + (forYou ? ' class="for-you"' : mine ? ' class="mine-row"' : '') + '><td>' + build(t.id, pkg(t.name, t.version)) + (det.license ? ' <span class="dim">' + esc(det.license) + '</span>' : '') + (t.url ? ' <a class="run dim" href="' + esc(t.url) + '" title="' + esc(t.url) + '">source</a>' : '') + '<br>' + category(t) + '</td><td>' + esc(t.arch) + '</td>' +
+      return '<tr id="t-' + t.id + '"' + (project ? ' class="project-row"' : '') + (forYou ? ' class="for-you"' : mine ? ' class="mine-row"' : '') + '><td>' + taskLink(t.id, pkg(t.name, t.version)) + (det.license ? ' <span class="dim">' + esc(det.license) + '</span>' : '') + (t.url ? ' <a class="run dim" href="' + esc(t.url) + '" title="' + esc(t.url) + '">source</a>' : '') + '<br>' + category(t) + '</td><td>' + esc(t.arch) + '</td>' +
         '<td>' + person(t.owner) + (mine ? ' <span class="pill none">you</span>' : '') + '</td><td>' + build + '</td><td>' + gate(t) + '</td><td>' + audit(t) + '</td><td>' + trial(t) + '</td>' +
         '<td><a class="run" href="' + t.evidence.pkgbuild + '">PKGBUILD</a> <a class="run" href="' + t.evidence.log + '">log</a> <a class="run" href="' + t.evidence.pkginfo + '">PKGINFO</a></td>' +
         '<td class="when">' + ago(t.finished_at) + '</td><td class="decision">' + decision(t) + '</td></tr>';
@@ -214,7 +214,7 @@ const SCRIPT = String.raw`
   }
   function renderDecisions() {
     pager("#decisions", APPROVALS, function (a) {
-      return '<tr><td class="when">' + ago(a.created_at) + '</td><td>' + build(a.task_id, pkg(a.name, a.version)) + '</td><td>' + esc(a.arch) + '</td><td><span class="pill ' + (a.decision === "approved" ? "ok" : "error") + '">' + esc(a.decision) + '</span></td><td>' + person(a.by) + '</td><td class="muted">' + esc(a.note || "") + '</td><td>' + (a.rebuild_task ? build(a.rebuild_task) + ' ' + esc(a.rebuild_status || "") + (a.rebuild_result ? ' <span class="mono">' + esc(a.rebuild_result) + '</span>' : '') : (a.decision === "approved" ? '<span class="dim">waiting for the recipe on main</span>' : '—')) + '</td></tr>';
+      return '<tr><td class="when">' + ago(a.created_at) + '</td><td>' + taskLink(a.task_id, pkg(a.name, a.version)) + '</td><td>' + esc(a.arch) + '</td><td><span class="pill ' + (a.decision === "approved" ? "ok" : "error") + '">' + esc(a.decision) + '</span></td><td>' + person(a.by) + '</td><td class="muted">' + esc(a.note || "") + '</td><td>' + (a.rebuild_task ? taskLink(a.rebuild_task) + ' ' + esc(a.rebuild_status || "") + (a.rebuild_result ? ' <span class="mono">' + esc(a.rebuild_result) + '</span>' : '') : (a.decision === "approved" ? '<span class="dim">waiting for the recipe on main</span>' : '—')) + '</td></tr>';
     }, { empty: "no decision yet", text: function (a) { return [a.name, a.version, a.arch, a.decision, a.by, a.note].join(" "); } });
     endSkeleton();
   }
