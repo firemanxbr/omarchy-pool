@@ -1128,6 +1128,50 @@ describe("removing a registration", () => {
     expect(review.json.staged.some((t: { name: string }) => t.name === "gone")).toBe(false);
     expect(await env.DB.prepare("SELECT summary FROM events WHERE kind = 'request' AND summary LIKE 'gone: registration removed%' ORDER BY id DESC LIMIT 1").first()).toMatchObject({ summary: "gone: registration removed by alice — 2 build(s) cancelled" });
   });
+  it("a maintainer's removal stops the project's builds and publish jobs with the audits and trials queued for them, and a build another person left staged under the name", async () => {
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO factory_packages (name, owner, url, arches, status) VALUES ('taken', 'alice', 'https://taken.example', '[\"aarch64\"]', 'staged')"),
+      // bob's build, staged before alice took the name over (#184): nothing to approve it against once the registration goes.
+      env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, staged_prefix) VALUES ('taken', 'aarch64', '1', 'draft:https://taken.example@1', 'contributor', 100, 0, 'community', 'bob', 'build', 'staged', 'staging/bob/taken/1/')"),
+      env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, staged_prefix) VALUES ('taken', 'aarch64', '2', 'draft:https://taken.example@2', 'contributor', 100, 0, 'community', 'alice', 'build', 'staged', 'staging/alice/taken/2/')"),
+    ]);
+    const bobs = (await env.DB.prepare("SELECT id FROM build_tasks WHERE name = 'taken' AND owner = 'bob'").first<{ id: number }>())!.id;
+    const alices = (await env.DB.prepare("SELECT id FROM build_tasks WHERE name = 'taken' AND owner = 'alice'").first<{ id: number }>())!.id;
+    await env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, kind, status, params, staged_prefix) VALUES ('taken', 'aarch64', '2', ?, 'review', 100, 0, 'project', 'build', 'staged', ?, 'staging/alice/taken/3/')").bind(`review:${alices}`, JSON.stringify({ review: alices })).run();
+    const projects = (await env.DB.prepare("SELECT id FROM build_tasks WHERE name = 'taken' AND trust = 'project' AND kind = 'build'").first<{ id: number }>())!.id;
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, kind, status, params) VALUES ('taken', 'aarch64', '2', 'audit', 'audit', 100, 0, 'project', 'audit', 'queued', ?)").bind(JSON.stringify({ task: projects })),
+      env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, kind, status, params) VALUES ('taken', 'aarch64', '2', 'trial', 'trial', 100, 0, 'project', 'trial', 'queued', ?)").bind(JSON.stringify({ task: projects, files: ["taken-2-1-aarch64.pkg.tar.zst"] })),
+      env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, kind, status, params) VALUES ('taken', 'aarch64', '2', 'publish', 'publish', 100, 1, 'project', 'publish', 'queued', ?)").bind(JSON.stringify({ task: projects })),
+    ]);
+    const publish = (await env.DB.prepare("SELECT id FROM build_tasks WHERE name = 'taken' AND kind = 'publish'").first<{ id: number }>())!.id;
+    await env.STAGING.put(`staging/alice/taken/3/taken-2-1-aarch64.pkg.tar.zst`, "z".repeat(50));
+    await env.DB.prepare("INSERT INTO staging_objects (key, owner, task_id, size) VALUES (?, 'alice', ?, 50)").bind(`staging/alice/taken/3/taken-2-1-aarch64.pkg.tar.zst`, projects).run();
+    const r = await call("DELETE", "/factory/packages/taken", undefined, "omc_m1");
+    expect(r.status, JSON.stringify(r.json)).toBe(200);
+    expect(r.json.cancelled.sort()).toEqual([bobs, alices, projects, publish].sort());
+    for (const id of [bobs, alices, projects, publish]) expect(await env.DB.prepare("SELECT status FROM build_tasks WHERE id = ?").bind(id).first()).toEqual({ status: "cancelled" });
+    expect(await env.DB.prepare("SELECT status, error FROM build_tasks WHERE kind = 'audit' AND json_extract(params, '$.task') = ?").bind(projects).first()).toEqual({ status: "cancelled", error: "the build it audited was cancelled with its registration" });
+    expect(await env.DB.prepare("SELECT status, error FROM build_tasks WHERE kind = 'trial' AND json_extract(params, '$.task') = ?").bind(projects).first()).toEqual({ status: "cancelled", error: "the build it tried was cancelled with its registration" });
+    expect(await env.STAGING.get(`staging/alice/taken/3/taken-2-1-aarch64.pkg.tar.zst`)).toBeNull();
+    expect(await env.DB.prepare("SELECT summary FROM events WHERE kind = 'request' AND summary LIKE 'taken: registration removed%' ORDER BY id DESC LIMIT 1").first()).toMatchObject({ summary: "taken: registration removed by m1 — 3 build(s) and 1 publish job(s) cancelled" });
+  });
+  it("cuts off a build still running: its worker's report and uploads are refused, and the lease is not requeued", async () => {
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO factory_packages (name, owner, url, arches, status) VALUES ('running', 'alice', 'https://running.example', '[\"aarch64\"]', 'building')"),
+      env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, lease_owner, lease_expires_at, started_at) VALUES ('running', 'aarch64', '1', 'draft:https://running.example@1', 'contributor', 100, 0, 'community', 'alice', 'build', 'leased', 'w3', strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+30 minutes'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"),
+    ]);
+    const id = (await env.DB.prepare("SELECT id FROM build_tasks WHERE name = 'running'").first<{ id: number }>())!.id;
+    const r = await call("DELETE", "/factory/packages/running", undefined, "omc_alice");
+    expect(r.status, JSON.stringify(r.json)).toBe(200);
+    expect(r.json.cancelled).toEqual([id]);
+    expect(await env.DB.prepare("SELECT status, lease_expires_at, finished_at IS NOT NULL AS ended FROM build_tasks WHERE id = ?").bind(id).first()).toEqual({ status: "cancelled", lease_expires_at: null, ended: 1 });
+    // The worker, still building: nothing it sends lands, nothing overwrites the reason.
+    expect((await call("POST", `/factory/tasks/${id}/heartbeat`, {}, "omw_w3")).status).toBe(409);
+    expect((await call("POST", `/factory/tasks/${id}/complete`, { sha256: "1111", filename: "running-1-1-aarch64.pkg.tar.zst", version: "1-1" }, "omw_w3")).status).toBe(409);
+    expect((await call("POST", `/factory/tasks/${id}/fail`, { error: "too late" }, "omw_w3")).status).toBe(409);
+    expect(await env.DB.prepare("SELECT status, error FROM build_tasks WHERE id = ?").bind(id).first()).toEqual({ status: "cancelled", error: "registration removed by alice" });
+  });
   it("a maintainer's page says where each standing approval stands — the rings that serve the package — so it can be taken back from there", async () => {
     await env.DB.batch([
       env.DB.prepare("INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES ('stood-1', 'stood', '1-1', 'aarch64', 'stood-1-1-aarch64.pkg.tar.zst', 1, 1, 1, '{}', 'factory', 'factory/aarch64/stood-1-1-aarch64.pkg.tar.zst', 'aarch64')"),
