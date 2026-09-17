@@ -65,3 +65,6 @@ jobs:
       - name: The setup script, against an Asahi-like pacman.conf
         working-directory: .
         run: bash tests/setup-script.sh
+      - name: The worker's edge repos, against the pool's source directories
+        working-directory: .
+        run: bash tests/worker-pool-repos.sh
