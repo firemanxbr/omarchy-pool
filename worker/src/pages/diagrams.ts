@@ -246,8 +246,8 @@ export function sourcesDiagram(): string {
     s += dbox({ x: 20, y, w: 220, h: 64, title: r[0], tcls: "small", lines: [r[1], r[2], { text: "…", cls: "live", live: r[3] }] }) + dline([240, y + 32, 270, y + 32]);
   });
   s += dline([270, 46, 270, 386]) + darrow(270, 198, 300, 198);
-  s += dbox({ x: 300, y: 168, w: 160, h: 60, title: "Verify", cls: "amber", tcls: "amber", lines: ["the project's signature", "against its keyring"] });
-  s += darrow(460, 198, 500, 198);
+  s += dbox({ x: 300, y: 168, w: 176, h: 60, title: "Verify", cls: "amber", tcls: "amber", lines: ["the project's signature", "against its keyring"] });
+  s += darrow(476, 198, 500, 198);
   s += dbox({ x: 500, y: 158, w: 210, h: 80, title: "Pool", big: true, cls: "hi", lines: ["stored once, immutable", "<source>/<arch>/<file>", { text: "…", cls: "live", live: "stored-once" }] });
   s += darrow(710, 198, 760, 198) + dlab(735, 186, ["≤ 3 h"]);
   s += dbox({ x: 760, y: 160, w: 150, h: 76, title: "edge", big: true, tcls: "edge", cls: "edge", lines: ["for CI, developers", { text: "…", cls: "live", live: "edge-head" }] });

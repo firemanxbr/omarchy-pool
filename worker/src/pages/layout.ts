@@ -273,6 +273,8 @@ const CSS = String.raw`
   .d-box { fill: var(--panel-2); stroke: var(--line); stroke-width: 1.2; } .d-box.hi { stroke: var(--green); }
   .d-box.edge { stroke: var(--edge); } .d-box.rc { stroke: var(--rc); } .d-box.stable { stroke: var(--stable); } .d-box.amber { stroke: var(--amber); } .d-box.dim { stroke: var(--dim); }
   .d-box.dimmed { opacity: .45; } .d-l.dimmed { opacity: .35; }
+  /* No ligatures in a diagram: JetBrains Mono fuses "-<" into one glyph, and omarchy-<source>-<ring>.db loses a bracket. */
+  .d-t, .d-s, .d-lab { font-variant-ligatures: none; }
   .d-t { fill: var(--text); font-size: 13px; font-weight: 600; font-family: Geist, "JetBrains Mono", sans-serif; } .d-t.small { font-size: 12.5px; }
   .d-t.edge { fill: var(--edge); } .d-t.rc { fill: var(--rc); } .d-t.stable { fill: var(--stable); } .d-t.amber { fill: var(--amber); }
   .d-s { fill: var(--dim); font-size: 11px; } .d-s.live { fill: var(--green); font-weight: 500; } .d-s.amber { fill: var(--amber); }
