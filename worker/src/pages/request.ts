@@ -1,27 +1,28 @@
 /**
  * /request — the package request, on a page of its own: nothing to look at
- * but the four fields and the four confirmations. Linked from the Factory
- * page, never from the header or the footer; a contributor lands here to
- * ask for one thing. Signed in with GitHub (the session cookie); the
- * request goes to POST /api/v1/factory/packages and comes back with its
- * record, then the build is one press away.
+ * but the four fields and the four confirmations. Linked from the footer
+ * and from the Factory page's first way; a contributor lands here to ask
+ * for one thing. The page is the same for whoever opens it: the form is
+ * served for everyone, its fields grey with the sign-in as the reason
+ * until whoami answers with a person, live then — signed in with GitHub
+ * (the session cookie), the request goes to POST /api/v1/factory/packages
+ * and comes back with its record, and the build is one press away.
  */
-import { page, GITHUB_ICON } from "./layout";
-import { EVERYONE, SIGNED_IN, type Component, type Fixture } from "./components";
+import { page, servedGrey, GITHUB_ICON } from "./layout";
+import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 
-const BODY = String.raw`
-  <div class="hero compact">
-    <p class="eyebrow" id="eyebrow">Package request</p>
-    <h1 id="h1">Ask for a package, on the record</h1>
-    <p class="lede" id="lede">Four fields, four confirmations. The pool checks it, writes it once with its signature, and the build starts by itself — in the shared queue, the best idle worker first. <a href="/docs/governance">What happens after →</a></p>
-  </div>
-
-  <div id="gate" class="gate"><div><div class="lock">GitHub sign-in</div><h3 style="margin-top:6px">Who is asking</h3><p>A request carries your GitHub login — it is on the record, next to the package. Nothing else is asked, no permission is needed.</p></div><a class="btn" href="/auth/github?next=/request">${GITHUB_ICON} Sign in with GitHub</a></div>
-
-  <section id="ask" hidden>
-    <div class="panel request-panel">
-      <form id="pkg-form" class="form" onsubmit="return false">
+/**
+ * The form's fields are one template drawn twice: served grey for everyone
+ * (servedGrey — what the shell's gate() writes, the sign-in as the reason
+ * in every title) and drawn again through gate() once whoami answers, so a
+ * session is what makes them live. The gate above the form is the same
+ * shape the other way: served with the sign-in live, its button grey for a
+ * person already in, whose login the banner then names.
+ */
+const ASK_WHY = "sign in with GitHub to request";
+const SIGN_IN = `<a class="btn" id="gate-btn" href="/auth/github?next=/request">${GITHUB_ICON} Sign in with GitHub</a>`;
+const FIELDS = String.raw`
         <label>Project URL <input type="url" id="pkg-url" placeholder="https://github.com/owner/project — or …/archive/refs/tags/v1.2.3.tar.gz" required autofocus></label>
         <label>Package name <input type="text" id="pkg-name" placeholder="(the repository's name)" pattern="[a-z0-9@._+-]+"></label>
         <label>Description <input type="text" id="pkg-desc" placeholder="one line, what pacman shows" minlength="8" maxlength="120" required></label>
@@ -38,11 +39,24 @@ const BODY = String.raw`
           <label><input type="checkbox" data-check="evidence"> My build is evidence a maintainer learns from, never what users get; the pool may reject or block it.</label>
         </div>
         <button type="submit" id="pkg-btn">Request</button>
-      </form>
+`;
+
+const BODY = String.raw`
+  <div class="hero compact">
+    <p class="eyebrow" id="eyebrow">Package request</p>
+    <h1 id="h1">Ask for a package, on the record</h1>
+    <p class="lede" id="lede">Four fields, four confirmations. The pool checks it, writes it once with its signature, and the build starts by itself — in the shared queue, the best idle worker first. <a href="/docs/governance">What happens after →</a></p>
+  </div>
+
+  <div id="gate" class="gate"><div><div class="lock">GitHub sign-in</div><h3 style="margin-top:6px">Who is asking</h3><p id="gate-who">A request carries your GitHub login — it is on the record, next to the package. Nothing else is asked, no permission is needed.</p></div><div class="cta" id="gate-cta">${SIGN_IN}</div></div>
+
+  <section id="ask">
+    <div class="panel request-panel">
+      <form id="pkg-form" class="form" onsubmit="return false">${servedGrey(FIELDS, ASK_WHY)}</form>
       <p class="sub" id="pkg-state"></p>
       <div id="done" class="done" hidden></div>
     </div>
-    <p class="sub" style="margin-top:14px">Requested before? <a href="/factory#gate">Your workspace</a> has every package, its stage and its evidence.</p>
+    <p class="sub" style="margin-top:14px">Requested before? <a id="ws" href="/auth/github?next=/request">Your workspace</a> has every package, its stage and its evidence.</p>
   </section>
 `;
 
@@ -66,9 +80,13 @@ const SCRIPT = String.raw`
       if ($("#pkg-version").value || $("#pkg-source").value || (p.project && !/github\.com/.test(p.project))) document.querySelector(".form-more").open = true;
     }).catch(function () {});
   }
+  // The same page for whoever is looking; what whoami's answer changes is the state, never what is there. The gate's sign-in is live for nobody and grey for a person in, whom the banner then names; the fields are served grey with the sign-in as the reason and drawn again live for a person; the workspace line is their page, or the sign-in that comes back here.
   whoami(function (me) {
+    $("#gate-cta").innerHTML = gate(${JSON.stringify(SIGN_IN)}, !me, "signed in as " + WHO.login);
+    if (me) $("#gate-who").innerHTML = "Asking as <b>" + esc(WHO.login) + "</b> — on the record, next to the package.";
+    $("#pkg-form").innerHTML = gate(${JSON.stringify(FIELDS)}, !!me, ${JSON.stringify(ASK_WHY)});
+    $("#ws").href = me ? "/user/" + encodeURIComponent(WHO.login) : "/auth/github?next=/request";
     if (!me) return;
-    $("#gate").hidden = true; $("#ask").hidden = false;
     if (RENEW) prefill(RENEW);
     var u = $("#pkg-url"); if (u && u.focus) u.focus();
   });
@@ -110,8 +128,12 @@ export function requestHtml(poolUrl: string, version: RunningVersion, path = "/r
 }
 
 /**
- * What /request is made of: the sign-in gate, the form with its optional
- * fields, the licence list and the checklist, and what follows a submit.
+ * What /request is made of: the gate, the form with its optional fields,
+ * the licence list and the checklist, what follows a submit, the workspace
+ * line. Every piece is served for everyone; who is looking changes only
+ * its state — the fields grey with the sign-in as the reason for nobody,
+ * the gate's button grey for a person in — so every component is
+ * EVERYONE's, and the acts say who the server takes a request from.
  * Every act is the same POST to /factory/packages, sent as the form would
  * send it — whole, short of a field, short of a confirmation — so the
  * handler is proved to check what the form asks; the renew mode sends the
@@ -132,6 +154,8 @@ export const REQUEST_COMPONENTS = (F: Fixture): Component[] => {
     url: "https://mine.example", name: F.factoryPkg, source: "https://mine.example/mine-1.0.tar.gz", version: "1.0",
     description: "Mine, a small tool for the tests", license: "MIT", arches: [F.arch], checklist: confirmed,
   };
+  // What every grey field and the button carry until a person answers: the reason, as the shell writes it.
+  const grey = `disabled aria-disabled="true" title="${ASK_WHY}"`;
   return [
     {
       id: "request.hero",
@@ -142,26 +166,28 @@ export const REQUEST_COMPONENTS = (F: Fixture): Component[] => {
     {
       id: "request.signin-gate",
       page: "/request",
-      anchor: ['<div id="gate" class="gate">', '<div class="lock">GitHub sign-in</div>', "Who is asking", 'href="/auth/github?next=/request"', "Sign in with GitHub"],
-      script: ['"/auth/me"', "whoami(function (me)", "if (!me) return;", '$("#gate").hidden = true; $("#ask").hidden = false;'],
+      // The banner is there for everyone: the sign-in live for nobody, `next=/request` kept for the callback; grey for a person in, whom the banner names.
+      anchor: ['<div id="gate" class="gate">', '<div class="lock">GitHub sign-in</div>', "Who is asking", '<p id="gate-who">', '<div class="cta" id="gate-cta">', 'id="gate-btn" href="/auth/github?next=/request"', "Sign in with GitHub"],
+      script: ['"/auth/me"', "whoami(function (me)", '$("#gate-cta").innerHTML = gate(', '"signed in as " + WHO.login', '"Asking as <b>" + esc(WHO.login) + "</b>'],
       reads: [
-        // Signed out, the button starts the sign-in (the redirect to GitHub, `next=/request` kept for the callback); signed in, the gate hides and the form shows.
+        // Signed out, the button starts the sign-in (the redirect to GitHub, `next=/request` kept for the callback); signed in, /auth/me names who is asking.
         { path: "/auth/github?next=/request", status: 302, json: false },
         { path: "/auth/me", status: 401 },
         { path: "/auth/me", as: "contributor", fields: ["login", "role"] },
         { path: "/auth/me", as: "owner", fields: ["login", "role"] },
         { path: "/auth/me", as: "maintainer", fields: ["login", "role"] },
       ],
-      visible: ["anonymous"],
+      visible: EVERYONE,
     },
     {
       id: "request.form",
       page: "/request",
-      anchor: ['<section id="ask" hidden>', '<form id="pkg-form" class="form" onsubmit="return false">', 'id="pkg-url"', 'id="pkg-name"', 'pattern="[a-z0-9@._+-]+"', 'id="pkg-desc"', 'minlength="8" maxlength="120"', 'id="pkg-license"', 'id="pkg-x86" checked', 'id="pkg-arm" checked'],
-      script: ['api("POST", "/api/v1/factory/packages", body)', '$("#pkg-form").onsubmit', 'arches.push("x86_64")', 'arches.push("aarch64")', "checklist: checklist", 'if ($("#pkg-name").value.trim()) body.name'],
+      // Served grey for everyone — every field disabled with the sign-in as its reason — and drawn again live once a person answers.
+      anchor: ['<section id="ask">', '<form id="pkg-form" class="form" onsubmit="return false">', `id="pkg-url" placeholder="https://github.com/owner/project — or …/archive/refs/tags/v1.2.3.tar.gz" required autofocus ${grey}>`, 'id="pkg-name"', 'pattern="[a-z0-9@._+-]+"', 'id="pkg-desc"', 'minlength="8" maxlength="120"', 'id="pkg-license"', 'id="pkg-x86" checked', 'id="pkg-arm" checked'],
+      script: ['$("#pkg-form").innerHTML = gate(', `"${ASK_WHY}"`, 'api("POST", "/api/v1/factory/packages", body)', '$("#pkg-form").onsubmit', 'arches.push("x86_64")', 'arches.push("aarch64")', "checklist: checklist", 'if ($("#pkg-name").value.trim()) body.name'],
       // Anyone signed in asks; the name is then the asker's: the same request by anyone else is refused.
       acts: [{ method: "POST", path: "/api/v1/factory/packages", body: theirs, expect: { anonymous: 401, contributor: 201, owner: 409, maintainer: 409 } }],
-      visible: SIGNED_IN,
+      visible: EVERYONE,
     },
     {
       id: "request.form-more",
@@ -177,29 +203,30 @@ export const REQUEST_COMPONENTS = (F: Fixture): Component[] => {
           expect: { anonymous: 401, contributor: 400, owner: 400, maintainer: 400 },
         },
       ],
-      visible: SIGNED_IN,
+      visible: EVERYONE,
     },
     {
       id: "request.licence-datalist",
       page: "/request",
       anchor: ['list="spdx"', '<datalist id="spdx">', "<option>MIT</option>", "<option>GPL-3.0-or-later</option>", "<option>custom:proprietary</option>"],
-      visible: SIGNED_IN,
+      visible: EVERYONE,
     },
     {
       id: "request.checklist",
       page: "/request",
-      anchor: ['<div class="checklist" id="pkg-checklist">', 'data-check="official"', 'data-check="license"', 'data-check="unshipped"', 'data-check="evidence"'],
+      anchor: ['<div class="checklist" id="pkg-checklist">', `data-check="official" ${grey}>`, 'data-check="license"', 'data-check="unshipped"', 'data-check="evidence"'],
       script: ['querySelectorAll("input[data-check]")', 'checklist[i.getAttribute("data-check")] = i.checked'],
       // One box left unticked and the request is refused, whoever asks, before the name or the project is looked at.
       acts: [{ method: "POST", path: "/api/v1/factory/packages", body: { ...theirs, checklist: { ...confirmed, evidence: false } }, expect: { anonymous: 401, contributor: 400, owner: 400, maintainer: 400 } }],
-      visible: SIGNED_IN,
+      visible: EVERYONE,
     },
     {
       id: "request.submit-state",
       page: "/request",
-      anchor: ['<button type="submit" id="pkg-btn">Request</button>', '<p class="sub" id="pkg-state"></p>'],
+      // The button is served grey with the sign-in as its reason; pressed, it is disabled again while the POST is in flight — state, both times.
+      anchor: [`<button type="submit" id="pkg-btn" ${grey}>Request</button>`, '<p class="sub" id="pkg-state"></p>'],
       script: ['$("#pkg-btn").disabled = true', '"Checking the pool, the project and the source…"', '$("#pkg-state").textContent = d.error', '"failed: " + e'],
-      visible: SIGNED_IN,
+      visible: EVERYONE,
     },
     {
       id: "request.done",
@@ -210,13 +237,15 @@ export const REQUEST_COMPONENTS = (F: Fixture): Component[] => {
         '\'<a href="/build/\' + t + \'">#\' + t + \'</a>\'', 'd.build.queue[a].position + " of " + d.build.queue[a].total', "d.build.error",
         "'/user/' + encodeURIComponent(WHO.login)", "Your page →", '$("#pkg-form").reset()',
       ],
-      visible: SIGNED_IN,
+      visible: EVERYONE,
     },
     {
       id: "request.workspace-link",
       page: "/request",
-      anchor: ["Requested before?", 'href="/factory#gate">Your workspace</a>'],
-      visible: SIGNED_IN,
+      // Served as the sign-in that comes back here; a person's own page once whoami names them.
+      anchor: ["Requested before?", 'id="ws" href="/auth/github?next=/request">Your workspace</a>'],
+      script: ['$("#ws").href = me ? "/user/" + encodeURIComponent(WHO.login) : "/auth/github?next=/request"'],
+      visible: EVERYONE,
     },
     {
       id: "request.renew-mode",
@@ -237,7 +266,7 @@ export const REQUEST_COMPONENTS = (F: Fixture): Component[] => {
       // refused while the approval stands (the package is in the pool) and taken once an act before this one withdrew it — the last act
       // here, as it cancels the queued builds of the name and queues its own.
       acts: [{ method: "POST", path: "/api/v1/factory/packages", body: renewal, expect: { anonymous: 401, contributor: 409, maintainer: 409, owner: [200, 409] } }],
-      visible: SIGNED_IN,
+      visible: EVERYONE,
     },
   ];
 };

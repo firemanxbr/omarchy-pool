@@ -55,8 +55,8 @@ const BODY = String.raw`
 
 const SCRIPT = String.raw`
 __CHARTS__
-  // Signed in, the gate leads to the person's own page — the workspace.
-  whoami(function (me) { if (!me) return; var b = $("#gate-btn"); b.href = "/user/" + encodeURIComponent(me.login); b.textContent = "Your page →"; $("#gate-hint").hidden = true; });
+  // Signed in, the gate leads to the person's own page — the workspace. The gate is the same for everyone: only the button's words and where it goes change, the hint stays.
+  whoami(function (me) { if (!me) return; var b = $("#gate-btn"); b.href = "/user/" + encodeURIComponent(me.login); b.textContent = "Your page →"; });
   skeletonTiles("#tiles", 5);
   function publicLoad() {
     Promise.all([
@@ -127,7 +127,8 @@ export function factoryHtml(poolUrl: string, version: RunningVersion, path = "/f
  * The page is public and the same for everyone: the tiles, the assembly
  * line's one live number, Landed lately and the funnel share one
  * Promise.all over four factory reads; the builds chart polls /stats; only
- * the gate asks who is signed in, and changes its button. Nothing here
+ * the gate asks who is signed in, and changes its button's words and
+ * target — the gate and its hint are served to everyone. Nothing here
  * posts — every action is a link to another page.
  */
 export const FACTORY_COMPONENTS = (_F: Fixture): Component[] => [
@@ -205,7 +206,7 @@ export const FACTORY_COMPONENTS = (_F: Fixture): Component[] => [
     id: "factory.gate",
     page: "/factory",
     anchor: ['id="gate"', "private area · contributors", 'id="gate-btn"', 'href="/auth/github?next=/me"', "Sign in with GitHub", 'id="gate-hint"'],
-    script: ['"/auth/me"', '"#gate-btn"', '"#gate-hint"', '"/user/" + encodeURIComponent(me.login)', '"Your page →"'],
+    script: ['"/auth/me"', '"#gate-btn"', '"/user/" + encodeURIComponent(me.login)', '"Your page →"'],
     reads: [
       // Signed out, the button starts the sign-in (the redirect to GitHub, `next=/me` kept for the callback); signed in, it leads to the person's page.
       { path: "/auth/github?next=/me", status: 302, json: false },

@@ -1,7 +1,10 @@
 /**
  * The Journal: everything the pipeline did, newest first, and every ring's
  * history — append-only, each row an immutable release. Filters by kind
- * and status; a signed-in maintainer rolls a ring back from here.
+ * and status; a signed-in maintainer rolls a ring back from here. The
+ * history's heading opens the diff of stable's head against the release
+ * before it, so /diff is a hop from this footer page for everyone, script
+ * or not; every row with a parent opens its own.
  */
 import { page } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
@@ -19,7 +22,7 @@ const BODY = String.raw`
     <p class="sub" id="count" style="margin-top:8px;font-size:12.5px"></p>
   </section>
   <section>
-    <div class="h2row"><h2>Ring history</h2><span class="hint">head is what is served · parent the previous head · from what a promotion or rollback copied</span></div>
+    <div class="h2row"><h2>Ring history</h2><span class="hint" style="margin-right:auto">head is what is served · parent the previous head · from what a promotion or rollback copied</span><a class="more-link" id="compare" href="/diff">Compare two releases →</a></div>
     <p class="sub">Pointing a ring at an earlier row is how a rollback works: a job a project worker runs — the index write, both architectures re-rendered, health-checked. A signed-in maintainer can roll back to any row still inside retention.</p>
     <p class="sub" id="rb-state" hidden></p>
     <div class="table-wrap"><table id="releases"><thead><tr><th>Release</th><th>Ring</th><th>Seq</th><th class="num">Packages</th><th>Parent</th><th>From</th><th>Note</th><th>Created</th><th></th></tr></thead><tbody></tbody></table></div>
@@ -43,6 +46,9 @@ const SCRIPT = String.raw`
     busy(fetch("/api/v1/events?limit=200", { cache: "no-store" })).then(function (r) { return r.json(); }).then(function (d) { EVENTS = (d.events || []).filter(function (e) { return e.kind !== "metrics"; }); drawEvents(); endSkeleton(); }).catch(function () { endSkeleton(); });
   }
   function drawReleases(d) {
+    // The heading's link is served as /diff — stable's head against the release before it, which is what the API answers with no ids — and once the stats say which two those are, the address names them, as a row's diff does.
+    var head = d.releases.filter(function (r) { return r.ring === "stable" && r.is_head; })[0];
+    if (head && head.parent_id) $("#compare").href = "/diff?ring=stable&from=" + head.parent_id + "&to=" + head.id;
     pager("#releases", d.releases, function (r) {
       var diff = r.parent_id ? '<a class="run" href="/diff?ring=' + r.ring + '&from=' + r.parent_id + '&to=' + r.id + '">diff</a>' : '';
       // The last cell reads the same for every viewer: every row but the head carries the button, and who may not press it sees it grey with the reason — the server's own rule, a maintainer's (POST /factory/jobs checks the role and the ring, nothing about the head). The head row says so by its pill — there is nothing to roll it back to.
@@ -114,6 +120,18 @@ export const JOURNAL_COMPONENTS = (F: Fixture): Component[] => [
     id: "journal.ring-history-lede",
     page: "/journal",
     anchor: ["<h2>Ring history</h2>", "head is what is served · parent the previous head · from what a promotion or rollback copied", "A signed-in maintainer can roll back to any row still inside retention."],
+    visible: EVERYONE,
+  },
+  {
+    // The heading's one link: /diff as served, which is stable's head against the release before it, and the two ids in the address once the stats have said which they are. It is the same anchor for every viewer — the diff page reads for anyone — and the way /diff is reached from a footer page without a row's script.
+    id: "journal.compare-link",
+    page: "/journal",
+    anchor: ['<a class="more-link" id="compare" href="/diff">Compare two releases →</a>'],
+    script: ['$("#compare").href', 'r.ring === "stable" && r.is_head', '"/diff?ring=stable&from=" + head.parent_id + "&to=" + head.id'],
+    reads: [
+      { path: "/api/v1/stats", fields: ["releases.0.ring", "releases.0.id", "releases.0.parent_id", "releases.0.is_head"] },
+      { path: "/diff", json: false },
+    ],
     visible: EVERYONE,
   },
   {

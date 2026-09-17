@@ -14,6 +14,8 @@ import { allComponents } from "../src/pages/components";
 import { HELPERS, MORE, NAV } from "../src/pages/layout";
 import { CHARTS } from "../src/pages/charts";
 import { scriptOf, seedDashboard, type Fixture } from "./fixture";
+// The router's own source, as text (Vite's ?raw): the routed pages are read from it, so a page added to index.ts without a way in fails here by name.
+import routerSource from "../src/index.ts?raw";
 
 async function get(path: string, cookie?: string): Promise<Response> {
   const ctx = createExecutionContext();
@@ -240,14 +242,17 @@ describe("dashboard pages", () => {
     expect(problems, problems.join("\n")).toEqual([]);
   });
 
-  // The dashboard's rule for roles: every role sees every section and every control, the same for all; what a role cannot do is a disabled control with the reason in its title — never hidden, never absent, never a sentence in its place. So the sections that exist for everyone are never served `hidden`; the attribute stays for what does not exist yet (a result line before a POST, a blocked notice for nobody blocked). The list is the sections the redesign names per page — Review's Yours block, a maintainer's queue line, the audit legend, the brake; the Pipeline's queue-position card, its Operations hint; the Journal's releases with the rollback column — and a build's page (#acts), a person's page (#pk-request, #w-toggle, #w-own) and the request (#ask) join it as they pass.
+  // The dashboard's rule for roles: every role sees every section and every control, the same for all; what a role cannot do is a disabled control with the reason in its title — never hidden, never absent, never a sentence in its place. So the sections that exist for everyone are never served `hidden`; the attribute stays for what does not exist yet (a result line before a POST, a blocked notice for nobody blocked). The list is the sections the redesign names per page — Review's Yours block, a maintainer's queue line, the audit legend, the brake; the Pipeline's queue-position card, its Operations hint; the Journal's releases with the rollback column; a build's page (#acts); a person's page (#pk-request, #w-toggle, #w-own); the request's gate and form (#gate, #ask, #pkg-form); the Factory gate with its hint (#gate-hint, once hidden for a session); the People page's three worker tables and their legend.
   it("serves the sections everyone gets without hidden — a role that cannot act sees the control grey, never nothing", async () => {
     const ALWAYS: Record<string, string[]> = {
       "/review": ["mine", "mine-queue", "legend", "brake", "staged"],
       "/pipeline": ["queue-pos", "ops-who", "staged", "heads"],
-      "/journal": ["releases"],
+      "/journal": ["releases", "compare"],
       [`/build/${F.projectTask}`]: ["acts"],
       [`/user/${F.owner}`]: ["pk-request", "w-toggle", "w-own", "share-btn"],
+      "/request": ["gate", "gate-who", "gate-cta", "gate-btn", "ask", "pkg-form", "pkg-checklist", "pkg-btn", "ws"],
+      "/factory": ["gate", "gate-btn", "gate-hint"],
+      "/people": ["w-project", "w-review", "w-community", "wt-legend"],
     };
     const problems: string[] = [];
     for (const [path, ids] of Object.entries(ALWAYS)) {
@@ -259,6 +264,94 @@ describe("dashboard pages", () => {
       }
     }
     expect(problems, problems.join("\n")).toEqual([]);
+  });
+
+  // No hidden pages: every page index.ts serves as HTML is the header's, the footer's, or one hop from a page that is — a link in the served HTML, not in a script. The routed pages are read from the router's source (a fixed route is `path === "/x"` answered with html(); a page with a parameter — a build, a person, a package — is the fixture's example of it), so a page added without a way in fails here by its address. A page with a parameter is named by a row drawn from data, so its way in is the script of the listing that writes its address (`href="/build/`); that page must itself be in the frame. The redirect aliases are not pages: asserted apart as 301/302 to a routed page.
+  it("reaches every routed page from the header or the footer in at most one hop, and names the shortest way", async () => {
+    const fixed = [...routerSource.matchAll(/path === "(\/[^"]*)"[^\n]*return html\(/g)].map((m) => m[1]);
+    // The chapters written in markdown are one route (mdChapterAt); the fixture's examples of the parametric pages stand for their kind.
+    const families: Record<string, string> = { "/build/": `/build/${F.projectTask}`, "/user/": `/user/${F.owner}`, "/package/": `/package/${F.pkg}` };
+    const routed = new Set<string>([...fixed, ...PAGES, ...Object.values(families)]);
+    for (const p of fixed) expect(PAGES, `${p} is routed but not in PAGES — the served-frame rules would not read it`).toContain(p);
+    const route = (href: string): string | null => {
+      const path = href.replace(/[?#].*$/, "").replace(/\/$/, "") || "/";
+      if (routed.has(path)) return path;
+      for (const [prefix, example] of Object.entries(families)) if (path.startsWith(prefix)) return example;
+      return null;
+    };
+    // The frame is the same on every page, so the header's and the footer's links are read once, from the Pool's.
+    const home = await (await get("/")).text();
+    const frameHtml = (home.match(/<header>[\s\S]*?<\/header>/)?.[0] ?? "") + (home.match(/<footer>[\s\S]*?<\/footer>/)?.[0] ?? "");
+    const frame = [...frameHtml.matchAll(/href="(\/[^"]*)"/g)].map((m) => route(m[1])).filter((p): p is string => !!p);
+    for (const n of NAV) expect(frame, n.label).toContain(n.href);
+    for (const m of MORE) expect(frame, m.label).toContain(m.href);
+    // Breadth first from the frame: a page's own links are its body's, header, footer and scripts set aside; the rows a script draws are the way to a page with a parameter.
+    const via = new Map<string, string>();
+    for (const p of frame) via.set(p, "the frame");
+    for (const p of [...new Set(frame)]) {
+      const html = await (await get(p)).text();
+      const body = html.replace(/<script[\s\S]*?<\/script>/g, "").replace(/<header>[\s\S]*?<\/header>/, "").replace(/<footer>[\s\S]*?<\/footer>/, "");
+      for (const m of body.matchAll(/(?:data-)?href="(\/[^"\/][^"]*)"/g)) { const to = route(m[1]); if (to && !via.has(to)) via.set(to, p); }
+      for (const [prefix, example] of Object.entries(families)) if (!via.has(example) && new RegExp(`href=\\\\?["']${prefix}`).test(scriptOf(html))) via.set(example, `${p} (a row it draws)`);
+    }
+    const unreached = [...routed].filter((p) => !via.has(p)).sort();
+    expect(unreached, `reached only by address: ${unreached.join(", ")}`).toEqual([]);
+    const ways = [...routed].sort().map((p) => `${p} ← ${via.get(p)}${via.get(p) === "the frame" ? "" : " ← the frame"}`);
+    console.log(`the way to every page:\n  ${ways.join("\n  ")}`);
+    // The pages nothing links, on purpose: an alias is a redirect to a page that is reached, never a page of its own.
+    for (const alias of ["/me", "/contribute", "/index.html", "/get-started", "/how-it-works", "/governance"]) {
+      const res = await get(alias);
+      expect([301, 302], alias).toContain(res.status);
+      const to = new URL(res.headers.get("location") ?? "", "http://pool.test").pathname;
+      // /me as nobody is the sign-in, which comes back to it; every other alias lands on a page that is reached.
+      if (alias === "/me") expect(to).toBe("/auth/github");
+      else expect(route(to), `${alias} → ${to} is not a routed page`).not.toBeNull();
+    }
+  });
+
+  // The request as nobody: the gate banner with the sign-in live, and the whole form served — every field, every confirmation and the button grey with the sign-in as the reason — so a person who is not in sees what a request asks, and a person who is sees the same page with its fields live.
+  it("serves the request to nobody as the gate banner and the form with every control grey", async () => {
+    const html = await (await get("/request")).text();
+    expect(html).toContain('<div id="gate" class="gate">');
+    expect(html).toContain('<a class="btn" id="gate-btn" href="/auth/github?next=/request">');
+    expect(html).toContain('<section id="ask">');
+    const form = /<form id="pkg-form" class="form" onsubmit="return false">([\s\S]*?)<\/form>/.exec(html)?.[1] ?? "";
+    const controls = [...form.matchAll(/<(?:input|button|select|textarea)\b[^>]*>/g)].map((m) => m[0]);
+    // Eight fields (two of them for a project not on GitHub), four confirmations, the button.
+    expect(controls.length).toBe(13);
+    for (const c of controls) expect(c).toMatch(/ disabled aria-disabled="true" title="sign in with GitHub to request">$/);
+    expect(form).toContain('id="pkg-url"');
+    expect(form).toContain('data-check="evidence"');
+    expect(form).toContain('<button type="submit" id="pkg-btn" disabled aria-disabled="true" title="sign in with GitHub to request">Request</button>');
+    // Signed in, the page is the same page: the script draws the fields again through the shell's gate(), live for a person, and the workspace line is their page.
+    const script = scriptOf(html);
+    expect(script).toContain('$("#pkg-form").innerHTML = gate(');
+    expect(script).toContain('$("#gate-cta").innerHTML = gate(');
+    expect(script).not.toContain('$("#ask").hidden');
+    expect(html).not.toContain("next=/me");
+  });
+
+  // A worker's row is the shell's wherever it is drawn: the People page and the Workers page write their tables from WT_HEAD and workerRow(), so a worker reads the same on both and there is no second hand-written row to drift.
+  it("draws the People page's worker tables with the shell's head and row, as the Workers page does", async () => {
+    // The page's own script is what follows the shell: page() splices HELPERS whole, so its last lines mark where the page's statements begin (the shell defines workerRow and wtKind, and must not be mistaken for a page calling them).
+    const shellEnd = HELPERS.slice(-120);
+    const own = (html: string) => { const script = scriptOf(html), at = script.indexOf(shellEnd); expect(at, "the shell is spliced whole").toBeGreaterThan(0); return script.slice(at + shellEnd.length); };
+    const people = await (await get("/people")).text(), workers = await (await get("/workers")).text();
+    for (const [name, html] of [["/people", people], ["/workers", workers]] as const) {
+      const script = own(html);
+      expect(script, `${name} head`).toMatch(/WT_HEAD\.(project|review|community)/);
+      expect(script, `${name} row`).toMatch(/workerRow\(w, "(project|review|community)"\)/);
+      expect(script, `${name} legend`).toContain("WT_LEGEND");
+      expect(script, `${name} kind`).toContain("wtKind(w)");
+    }
+    for (const kind of ["project", "review", "community"]) {
+      expect(people).toContain(`id="w-${kind}" class="wtable"`);
+      expect(own(people)).toContain(`workerRow(w, "${kind}")`);
+    }
+    // No hand-written cell is left on the People page: the fields a row shows are the shell's business.
+    for (const cell of ["w.agent_status", "w.builds_failed", 'colspan="9"', "#workers-table"]) expect(own(people), cell).not.toContain(cell);
+    const manifest = allComponents(F).find((c) => c.id === "people.workers-table");
+    expect(manifest?.script).toEqual(expect.arrayContaining(["WT_HEAD.project", 'workerRow(w, "project")', 'workerRow(w, "review")', 'workerRow(w, "community")']));
   });
 
   it("every docs page carries the same shell — the map with every chapter's sections, the search — and the stages are on How it works", async () => {

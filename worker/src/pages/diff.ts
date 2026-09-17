@@ -1,14 +1,16 @@
 /**
  * What changed between two releases of a ring: added, removed, upgraded —
- * the page the ring history's "diff" links open, and what a promotion or
- * rollback line in the journal points at. Reads GET /releases/:ring/diff.
+ * the page the Journal opens, from its ring history's heading and from the
+ * "diff" on every row with a parent, and what a promotion or rollback line
+ * in the journal points at; the Journal is the crumb above it, the footer
+ * page it is one hop from. Reads GET /releases/:ring/diff.
  */
 import { page } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 
 const BODY = String.raw`
-  <p class="crumbs"><a href="/">Overview</a> / <span id="crumb">diff</span></p>
+  <p class="crumbs"><a href="/journal">Journal</a> / <span id="crumb">diff</span></p>
   <h1 id="title">Release diff</h1>
   <p class="lede" id="line">Loading…</p>
   <div class="tiles" id="tiles"></div>
@@ -38,7 +40,7 @@ const SCRIPT = String.raw`
     if (d.__status !== 200) { $("#line").textContent = d.error || "not found"; endSkeleton(); return; }
     var f = d.from ? "release " + d.from.id + " (#" + d.from.seq + ")" : "nothing";
     document.title = ring + " " + (d.from ? d.from.id : "") + " → " + d.to.id + " · omarchy-pool";
-    $("#crumb").textContent = ring + ": " + (d.from ? d.from.id : "∅") + " → " + d.to.id;
+    $("#crumb").textContent = (d.from ? d.from.id : "∅") + " → " + d.to.id;
     $("#title").textContent = ring + ": " + f + " → release " + d.to.id + " (#" + d.to.seq + ")" + (arch ? " · " + arch : "");
     $("#line").innerHTML = 'Created ' + ago(d.to.created_at) + (d.to.note ? ' — <em>' + esc(d.to.note) + '</em>' : '') + (d.from ? '; the older one ' + ago(d.from.created_at) + (d.from.note ? ' — <em>' + esc(d.from.note) + '</em>' : '') : '') + '. <a class="run" href="' + esc(url) + '">JSON</a>';
     var c = d.counts;
@@ -76,9 +78,10 @@ export const DIFF_COMPONENTS = (F: Fixture): Component[] => {
   const head = "/api/v1/releases/stable/diff";
   return [
     {
+      // The crumb's parent is the Journal, the footer page this one is a hop from; the crumb itself is the two releases, the ring being the title's first word.
       id: "diff.crumbs",
       page,
-      anchor: ['class="crumbs"', '<a href="/">Overview</a>', 'id="crumb"'],
+      anchor: ['class="crumbs"', '<a href="/journal">Journal</a>', 'id="crumb"'],
       script: ['$("#crumb")', 'd.from.id : "∅"', "d.to.id"],
       reads: [{ path: head, fields: ["from.id", "to.id"] }],
       visible: EVERYONE,
