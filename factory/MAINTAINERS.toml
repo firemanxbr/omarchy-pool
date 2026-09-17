@@ -19,4 +19,9 @@
 # Bootstrap: while there is a single maintainer, that maintainer merges the
 # first promotion alone; GitHub records the bypassed review.
 
-maintainers = ["firemanxbr"]
+# maralcbr: the pool's first contributor (2026-09-15), twenty-odd packages
+# requested and built on workers of his own, two of them shared with
+# everyone; a second maintainer is what makes the two-person rule real —
+# nobody decides on their own package, so each maintainer decides on the
+# other's. Added 2026-09-17.
+maintainers = ["firemanxbr", "maralcbr"]
