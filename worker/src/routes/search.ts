@@ -1,4 +1,4 @@
-import { isRing, json, RINGS, type Env, type Ring } from "../index";
+import { isRing, json, RINGS, RINGS_BY_STABILITY, type Env, type Ring } from "../index";
 import { isRepoArch } from "../r2";
 import { ringHead, ringMembers } from "../db";
 import { sourceRank } from "../meta";
@@ -12,7 +12,8 @@ import { gunzipJson } from "../gzip";
  * release and one architecture.
  *
  *   GET /search?q=&ring=stable&arch=x86_64&limit=50
- *   GET /package/:name?ring=stable&arch=x86_64
+ *   GET /package/:name?ring=stable&arch=x86_64   any of RINGS, the lab included; `shown_ring` says which ring's
+ *                                                  object the answer is — the asked one, else the most stable that has it
  *   GET /package/:name/files?ring=stable&arch=x86_64
  */
 
@@ -75,8 +76,11 @@ export async function handlePackage(name: string, url: URL, env: Env): Promise<R
   // Where the package is in every ring (for this architecture): one row
   // per source that builds it, in the order of the include — the first is
   // what pacman takes. The page shows the requested ring's object (the
-  // requested source's with `source=`, else the winning one), or the first
-  // ring that has it.
+  // requested source's with `source=`, else the winning one), or — when
+  // the asked ring does not serve it — the most stable ring that does
+  // (RINGS_BY_STABILITY), and says which in `shown_ring`: a link that asks
+  // for the lab of a package that already reached stable lands on the
+  // object people install, not on edge because it came first in RINGS.
   const wantSource = url.searchParams.get("source");
   const heads = await Promise.all(RINGS.map(async (ring) => ({ ring, head: await ringHead(env, ring) })));
   const inRings: { ring: string; release_id: number; release_seq: number; version: string; sha256: string; size_download: number; source: string; filename: string; created_at: string }[] = [];
@@ -97,12 +101,17 @@ export async function handlePackage(name: string, url: URL, env: Env): Promise<R
       inRings.push({ ring, release_id: head.id, release_seq: head.seq, version: row.version, sha256: row.sha256, size_download: row.size_download, source: row.source, filename: row.filename, created_at: row.created_at });
     }
   }
-  const shownRing = rowsByRing.has(s.ring) ? s.ring : inRings[0]?.ring;
+  const shownRing: Ring | undefined = rowsByRing.has(s.ring) ? s.ring : RINGS_BY_STABILITY.find((r) => rowsByRing.has(r));
   const chosen = shownRing ? rowsByRing.get(shownRing) : undefined;
   const pick = chosen ? inRings.find((r) => r.ring === shownRing && r.sha256 === chosen.sha256) : undefined;
-  if (!pick || !chosen) return json({ error: `${name} is not in any ring for ${s.arch}` }, 404);
+  if (!pick || !chosen || !shownRing) return json({ error: `${name} is not in any ring for ${s.arch}` }, 404);
   const head = heads.find((h) => h.ring === pick.ring)?.head;
   if (!head) return json({ error: "ring vanished" }, 500);
+  // The edges — what it depends on, what depends on it, what it is exposed
+  // through — are resolved in the ring the object is shown from, so the
+  // page reads one ring throughout; resolving them in the asked ring drew
+  // stable's object with the lab's (empty) neighbours.
+  const ring = shownRing;
 
   const full = await env.DB.prepare("SELECT manifest_json FROM packages WHERE id = ?").bind(chosen.id).first<{ manifest_json: string }>();
   const manifest = JSON.parse(full?.manifest_json ?? "{}") as {
@@ -135,13 +144,13 @@ export async function handlePackage(name: string, url: URL, env: Env): Promise<R
          SELECT cap.value AS capability, p.name, p.version
            FROM json_each(?1) cap
            CROSS JOIN packages p ON p.name = cap.value AND p.repo_arch = ?2
-           CROSS JOIN ring_packages rp ON rp.ring = '${s.ring}' AND rp.package_id = p.id
+           CROSS JOIN ring_packages rp ON rp.ring = '${ring}' AND rp.package_id = p.id
          UNION ALL
          SELECT cap.value AS capability, p.name, p.version
            FROM json_each(?1) cap
            CROSS JOIN package_provides pv ON pv.capability = cap.value AND (pv.declared = 1 OR cap.value GLOB '*.so.[0-9]*')
            CROSS JOIN packages p ON p.id = pv.package_id AND p.repo_arch = ?2
-           CROSS JOIN ring_packages rp ON rp.ring = '${s.ring}' AND rp.package_id = p.id
+           CROSS JOIN ring_packages rp ON rp.ring = '${ring}' AND rp.package_id = p.id
        )`,
     )
       .bind(JSON.stringify(chunk), s.arch)
@@ -160,7 +169,7 @@ export async function handlePackage(name: string, url: URL, env: Env): Promise<R
     `SELECT DISTINCT p.name, p.version, rq.requirement
        FROM json_each(?1) cap
        CROSS JOIN package_requires rq ON rq.requirement = cap.value AND rq.kind = 'depends'
-       CROSS JOIN ring_packages rp ON rp.ring = '${s.ring}' AND rp.package_id = rq.package_id
+       CROSS JOIN ring_packages rp ON rp.ring = '${ring}' AND rp.package_id = rq.package_id
        CROSS JOIN packages p ON p.id = rq.package_id AND p.repo_arch = ?2 AND p.name != ?3
       ORDER BY p.name LIMIT 400`,
   )
@@ -196,7 +205,7 @@ export async function handlePackage(name: string, url: URL, env: Env): Promise<R
   const providerIds = providerNames.length
     ? (
         await env.DB.prepare(
-          `SELECT p.id, p.name FROM ${ringMembers(s.ring)} rp JOIN packages p ON p.id = rp.package_id
+          `SELECT p.id, p.name FROM ${ringMembers(ring)} rp JOIN packages p ON p.id = rp.package_id
             WHERE p.repo_arch = ?1 AND p.name IN (SELECT value FROM json_each(?2))`,
         )
           .bind(s.arch, JSON.stringify(providerNames))
@@ -216,6 +225,8 @@ export async function handlePackage(name: string, url: URL, env: Env): Promise<R
     {
       name: chosen.name,
       arch: s.arch,
+      // The ring asked for and the ring the object is shown from: equal when the asked ring serves it, else the most stable that does.
+      ring: s.ring,
       shown_ring: pick.ring,
       security: {
         advisories: own.map((a) => ({ id: a.id, tracker: a.tracker, cves: a.cves, severity: a.severity, status: a.object_status, match: a.match, fixed: a.fixed, summary: a.summary, url: a.url, kev: a.kev, epss: a.epss })),

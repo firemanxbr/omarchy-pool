@@ -12,7 +12,8 @@ import { putRecord, recordUrl } from "../record";
  *
  *   GET  /factory/review                    staged builds — the contributors' (evidence) and the project's — with
  *                                           their evidence, the gate and the audit (public, no-store: each row says
- *                                           what the caller may do on it, `can`)
+ *                                           what the caller may do on it, `can`); `waiting` and `oldest_ms` at the
+ *                                           top: how many rows ask for a maintainer's time and the age of the oldest
  *   GET  /factory/tasks/:id/can             what the caller may do on one task — the same `can`, no-store
  *   POST /factory/tasks/:id/build   {note?} a maintainer, never the owner, on a contributor's staged build → the
  *                                           project builds the package again on a review worker with the project's
@@ -23,7 +24,7 @@ import { putRecord, recordUrl } from "../record";
  *   POST /factory/tasks/:id/reject  {note}  a maintainer, never the owner, either kind of staged build → back to registered
  *                                           with the reason
  *   POST /factory/tasks/:id/withdraw {note} any maintainer takes a standing approval back: the package leaves the rings
- *   GET  /factory/approvals                 the record (public)
+ *   GET  /factory/approvals                 the record (public); `standing` on every row — an approval not withdrawn
  */
 
 interface Staged {
@@ -165,41 +166,55 @@ export async function handleReviewList(env: Env, request: Request): Promise<Resp
     };
   };
   const canOf = (r: Record<string, unknown>, f: Facts) => can(decisions(c, { id: r.id as number, name: r.name as string, trust: r.trust as string, status: r.status as string }, f));
+  const rows = staged.results.map((r) => ({
+    ...r,
+    ...(() => { const f = rowFacts(r); return { can: canOf(r, f), standing: f.standing }; })(),
+    // contributor: evidence, a maintainer has the project build it · project: the project's own build, a maintainer approves it
+    kind: r.trust === "project" ? "project" : "contributor",
+    from: r.trust === "project" && r.params ? ((JSON.parse(r.params as string) as { review?: number }).review ?? null) : null,
+    project_build: r.trust === "community" ? (() => { const pb = projectOf.get(r.id as number); return pb ? { id: pb.id, status: pb.status, error: pb.error, worker: pb.worker } : null; })() : null,
+    built_by: builtBy(r),
+    already: already(r),
+    package_owner: undefined,
+    // The class the chain has today and the one it reaches with the maintainer's half green; ready = the contributor's half is complete.
+    score: (() => { const sc = scoreOf(r); return { points: sc.points, class: sc.class, projected: sc.projected, ready: sc.ready }; })(),
+    params: undefined,
+    lease_owner: undefined,
+    worker_owner: undefined,
+    worker_labels: undefined,
+    worker_hostname: undefined,
+    worker_trusted_by: undefined,
+    detected: r.detected ? JSON.parse(r.detected as string) : null,
+    evidence: { log: `/api/v1/factory/tasks/${r.id}/artifacts/build.log`, pkgbuild: `/api/v1/factory/tasks/${r.id}/artifacts/PKGBUILD`, pkginfo: `/api/v1/factory/tasks/${r.id}/artifacts/PKGINFO`, audit: `/api/v1/factory/tasks/${r.id}/artifacts/audit.md`, tests: `/api/v1/factory/tasks/${r.id}/artifacts/tests.log`, vet: `/api/v1/factory/tasks/${r.id}/artifacts/vet.json`, trial: `/api/v1/factory/tasks/${r.id}/artifacts/trial.log` },
+    // The gate (/docs/factory *The gate*): the worker's own checks — checksums, shellcheck, namcap, the file list, the metadata, check(), the smoke test — as vet.json said.
+    vet: vetOf(r.result as string | null),
+    // The second agent's report (docs/GOVERNANCE.md): a verdict a
+    // maintainer reads, never one the pool acts on.
+    audit: auditOf(r.audit_status as string | null, r.audit_result as string | null, r.audit_error as string | null),
+    // The trial (the lab): a real pacman installed the project's build from the lab above edge — or could not; the transcript is the evidence.
+    trial: trialOf(r.trial_status as string | null, r.trial_result as string | null, r.trial_error as string | null),
+    audit_status: undefined, audit_result: undefined, audit_error: undefined, trial_status: undefined, trial_result: undefined, trial_error: undefined, result: undefined, attempts: undefined, request_license: undefined, request_source: undefined,
+  }));
+  // The one number every tile reads — Review's, the Pipeline's, the
+  // Factory's — counted here and nowhere else: the rows a maintainer's time
+  // is asked for now. Not a build of a version already approved, not a
+  // contributor's build the project is building or has built again (the
+  // project's row is the one to decide; a failed project build hands it
+  // back). The same rule the Review page highlights a row by (decidable),
+  // so the count and the rows agree. `oldest_ms` is the age of the oldest
+  // of them, from when it was staged; null when nothing waits.
+  const waiting = rows.filter(waitsForMaintainer);
+  const ages = waiting.map((t) => Date.now() - Date.parse((t as { finished_at?: string | null }).finished_at ?? "")).filter((ms) => Number.isFinite(ms) && ms > 0);
   return json(
-    {
-      staged: staged.results.map((r) => ({
-        ...r,
-        ...(() => { const f = rowFacts(r); return { can: canOf(r, f), standing: f.standing }; })(),
-        // contributor: evidence, a maintainer has the project build it · project: the project's own build, a maintainer approves it
-        kind: r.trust === "project" ? "project" : "contributor",
-        from: r.trust === "project" && r.params ? ((JSON.parse(r.params as string) as { review?: number }).review ?? null) : null,
-        project_build: r.trust === "community" ? (() => { const pb = projectOf.get(r.id as number); return pb ? { id: pb.id, status: pb.status, error: pb.error, worker: pb.worker } : null; })() : null,
-        built_by: builtBy(r),
-        already: already(r),
-        package_owner: undefined,
-        // The class the chain has today and the one it reaches with the maintainer's half green; ready = the contributor's half is complete.
-        score: (() => { const sc = scoreOf(r); return { points: sc.points, class: sc.class, projected: sc.projected, ready: sc.ready }; })(),
-        params: undefined,
-        lease_owner: undefined,
-        worker_owner: undefined,
-        worker_labels: undefined,
-        worker_hostname: undefined,
-        worker_trusted_by: undefined,
-        detected: r.detected ? JSON.parse(r.detected as string) : null,
-        evidence: { log: `/api/v1/factory/tasks/${r.id}/artifacts/build.log`, pkgbuild: `/api/v1/factory/tasks/${r.id}/artifacts/PKGBUILD`, pkginfo: `/api/v1/factory/tasks/${r.id}/artifacts/PKGINFO`, audit: `/api/v1/factory/tasks/${r.id}/artifacts/audit.md`, tests: `/api/v1/factory/tasks/${r.id}/artifacts/tests.log`, vet: `/api/v1/factory/tasks/${r.id}/artifacts/vet.json`, trial: `/api/v1/factory/tasks/${r.id}/artifacts/trial.log` },
-        // The gate (/docs/factory *The gate*): the worker's own checks — checksums, shellcheck, namcap, the file list, the metadata, check(), the smoke test — as vet.json said.
-        vet: vetOf(r.result as string | null),
-        // The second agent's report (docs/GOVERNANCE.md): a verdict a
-        // maintainer reads, never one the pool acts on.
-        audit: auditOf(r.audit_status as string | null, r.audit_result as string | null, r.audit_error as string | null),
-        // The trial (the lab): a real pacman installed the project's build from the lab above edge — or could not; the transcript is the evidence.
-        trial: trialOf(r.trial_status as string | null, r.trial_result as string | null, r.trial_error as string | null),
-        audit_status: undefined, audit_result: undefined, audit_error: undefined, trial_status: undefined, trial_result: undefined, trial_error: undefined, result: undefined, attempts: undefined, request_license: undefined, request_source: undefined,
-      })),
-    },
+    { staged: rows, waiting: waiting.length, oldest_ms: ages.length ? Math.max(...ages) : null },
     200,
     { "cache-control": "no-store" },
   );
+}
+
+/** A row of GET /factory/review that asks for a maintainer's decision now (the Review page's `decidable`). */
+export function waitsForMaintainer(t: { already: unknown; kind: string; project_build: { status: string } | null }): boolean {
+  return !t.already && (t.kind === "project" || !t.project_build || t.project_build.status === "failed");
 }
 
 interface AuditReport { verdict: string; summary: string; findings: { severity: string; area: string }[]; model?: string }
@@ -505,7 +520,11 @@ export async function handleReject(c: Contributor, id: number, request: Request,
 
 /**
  * The decisions, newest first — and, for each approval, the rings that
- * serve the package today (`rings`), so a page can show how far it got.
+ * serve the package today (`rings`), so a page can show how far it got,
+ * and whether it stands (`standing`: approved and not withdrawn), so no
+ * page counts a withdrawn approval as landed by reading `decision` alone
+ * (#178 made an approval withdrawable; felix was "landed" on the Factory
+ * and "withdrawn" on Review at once, 2026-09-17).
  * One query over the factory's packages in the four rings: the ring table's
  * key is (ring, package_id), so every factory package costs four seeks.
  */
@@ -524,6 +543,11 @@ export async function handleApprovals(env: Env): Promise<Response> {
     const k = `${s.name}\t${s.arch}`;
     rings.set(k, [...(rings.get(k) ?? []), s.ring].sort((a, b) => order.indexOf(a) - order.indexOf(b)));
   }
-  const approvals = (rows.results as { name: string; arch: string }[]).map((a) => ({ ...a, rings: rings.get(`${a.name}\t${a.arch}`) ?? [] }));
+  const approvals = (rows.results as { name: string; arch: string; decision: string; withdrawn_at: string | null }[]).map((a) => ({ ...a, standing: stands(a), rings: rings.get(`${a.name}\t${a.arch}`) ?? [] }));
   return json({ approvals }, 200, { "cache-control": "public, max-age=30" });
+}
+
+/** An approval that stands: signed as approved and not taken back — the rule every page reads, never `decision` alone. */
+export function stands(a: { decision: string; withdrawn_at: string | null }): boolean {
+  return a.decision === "approved" && a.withdrawn_at === null;
 }
