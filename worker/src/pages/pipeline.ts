@@ -8,7 +8,7 @@
  * themselves have a page of their own (/workers), by kind.
  */
 import { page } from "./layout";
-import { EVERYONE, SIGNED_IN, type Component, type Fixture } from "./components";
+import { EVERYONE, type Component, type Fixture } from "./components";
 import { CHARTS } from "./charts";
 import { archDiagram, liveDiagram } from "./diagrams";
 import type { RunningVersion } from "../meta";
@@ -17,7 +17,7 @@ const BODY = String.raw`
   <div class="hero compact">
     <p class="eyebrow">For everyone</p>
     <h1>The pipeline, as it runs right now</h1>
-    <p class="lede">What is being verified, promoted and checked for you this very minute; how fast maintainers decide; who is building what, and what it costs. The same page for users, contributors and maintainers — only the buttons differ.</p>
+    <p class="lede">What is being verified, promoted and checked for you this very minute; how fast maintainers decide; who is building what, and what it costs. The same page for users, contributors and maintainers — only which buttons are live differs.</p>
   </div>
   <div class="state-row" id="state"><span class="pill none">checking…</span></div>
 
@@ -203,34 +203,28 @@ __CHARTS__
     var by = {}; apps.forEach(function (a) { by[a.by] = (by[a.by] || 0) + 1; });
     var names = Object.keys(by).sort(function (a, b) { return by[b] - by[a]; }), max = names.length ? by[names[0]] : 1;
     $("#deciders").innerHTML = names.map(function (n) { return '<div class="m">' + avatar(n, "maintainer") + '<div><a class="run" href="/user/' + encodeURIComponent(n) + '">' + esc(n) + '</a><div class="bar" style="margin-top:4px"><i style="width:' + (100 * by[n] / max) + '%"></i></div></div><b class="num">' + num(by[n]) + '</b></div>'; }).join("") || '<div class="muted">no decision on the record yet</div>';
-    // A signed-in contributor: where their staged builds sit, oldest first.
-    if (me && me.login) {
-      var order = staged.slice().sort(function (a, b) { return Date.parse(a.finished_at || 0) - Date.parse(b.finished_at || 0); });
-      var mine = order.map(function (s, i) { return { s: s, pos: i + 1 }; }).filter(function (x) { return x.s.owner === me.login; });
-      $("#queue-pos").innerHTML = mine.length ? mine.slice(0, 2).map(function (x) { return '<div class="queue-pos" style="margin-top:14px"><span class="dim" style="font-size:11.5px;letter-spacing:.06em;text-transform:uppercase">your build in the queue</span><b>' + esc(x.s.name) + ' ' + esc(x.s.version || "") + ' · position ' + x.pos + ' of ' + order.length + '</b><span>' + esc(x.s.arch) + ' · audit ' + esc((x.s.audit && (x.s.audit.verdict || x.s.audit.status)) || "none") + ' · staged ' + ago(x.s.finished_at) + '</span></div>'; }).join("") : '<p class="sub" style="margin:14px 0 0;font-size:12.5px">None of your builds is waiting for a decision right now.</p>';
-    } else $("#queue-pos").innerHTML = '<p class="sub" style="margin:14px 0 0;font-size:12.5px">Signed-in contributors see where their own builds sit in this queue.</p>';
+    // Where the reader's staged builds sit, oldest first — the same card for everyone: a build of theirs and its place, one line that nothing of theirs waits, or one line saying how to sign in and see.
+    var order = staged.slice().sort(function (a, b) { return Date.parse(a.finished_at || 0) - Date.parse(b.finished_at || 0); });
+    var mine = me && me.login ? order.map(function (s, i) { return { s: s, pos: i + 1 }; }).filter(function (x) { return x.s.owner === me.login; }) : [];
+    var card = function (big, small) { return '<div class="queue-pos" style="margin-top:14px"><span class="dim" style="font-size:11.5px;letter-spacing:.06em;text-transform:uppercase">your build in the queue</span>' + (big ? '<b>' + big + '</b>' : "") + '<span>' + small + '</span></div>'; };
+    $("#queue-pos").innerHTML = mine.length
+      ? mine.slice(0, 2).map(function (x) { return card(esc(x.s.name) + ' ' + esc(x.s.version || "") + ' · position ' + x.pos + ' of ' + order.length, esc(x.s.arch) + ' · audit ' + esc((x.s.audit && (x.s.audit.verdict || x.s.audit.status)) || "none") + ' · staged ' + ago(x.s.finished_at)); }).join("")
+      : card("", me && me.login ? "none of your builds is waiting for a decision right now" : '<a href="/auth/github?next=/pipeline">sign in with GitHub</a> to see where yours sits');
   }
 
-  // ---- the review queue: what is staged, with the audit (the shell's auditPill); maintainers decide here or on /review
+  // ---- the review queue: what is staged, with the audit (the shell's auditPill) and the Decision cell (the shell's decisionCell) — the same buttons for every reader, live where the row's can says so and grey with the server's reason otherwise. The click, the dialogs and the post are the shell's; the page draws again once a decision landed and keeps one line about it under the table, the toast gone.
   function renderStaged(staged) {
     pager("#staged", staged, function (s) {
       var ev = s.evidence || {};
       return '<tr><td class="dim">' + s.id + '</td><td><b>' + esc(s.name) + '</b> <span class="dim">' + esc(s.version || "") + '</span></td><td>' + esc(s.arch) + '</td><td>' + (s.owner ? avatar(s.owner) + ' <a class="run" href="/user/' + encodeURIComponent(s.owner) + '">' + esc(s.owner) + '</a>' : "—") + '</td>' +
         '<td><a class="run" href="' + esc(ev.pkgbuild || "#") + '">PKGBUILD</a> · <a class="run" href="' + esc(ev.log || "#") + '">log</a> · <a class="run" href="' + esc(ev.pkginfo || "#") + '">.PKGINFO</a></td><td>' + auditPill(s.audit) + '</td><td class="when">' + ago(s.finished_at) + '</td>' +
-        '<td style="white-space:nowrap">' + (isMaintainer() ? '<button type="button" class="ok" data-approve="' + s.id + '">approve</button> <button type="button" class="no" data-reject="' + s.id + '">reject</button>' : '<span class="dim">a maintainer decides</span>') + '</td></tr>';
+        '<td class="decision">' + decisionCell(s) + '</td></tr>';
     }, { empty: "nothing staged — every contributor build has been decided", n: 10 });
   }
-  document.addEventListener("click", function (ev) {
-    var b = ev.target.closest ? ev.target.closest("button[data-approve],button[data-reject]") : null; if (!b) return;
-    var id = b.getAttribute("data-approve") || b.getAttribute("data-reject"), approve = b.hasAttribute("data-approve");
-    ask(approve ? { title: "Approve build #" + id, text: "The project's build goes into edge, signed by the pool; the approval is on the record with your name.", input: "optional", confirm: "Approve" } : { title: "Reject build #" + id, text: "The contributor reads the note and builds again. The rejection is on the record.", input: "required", placeholder: "what is wrong, in a line or two", confirm: "Reject", danger: true }).then(function (note) {
-    if (note === null) return;
-    b.disabled = true;
-    busy(fetch(API + "/tasks/" + id + "/" + (approve ? "approve" : "reject"), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ note: note }) })).then(function (r) { return r.json(); }).then(function (j) {
-      var el = $("#rq-state"); el.hidden = false; el.innerHTML = j.error ? '<span class="pill error">refused</span> ' + esc(j.error) : '<span class="pill ok">' + (approve ? "approved" : "rejected") + '</span> build #' + id + (approve && j.rebuild ? ' — the project rebuilds it as task #' + j.rebuild : '');
-      loadAll();
-    }).catch(function (e) { b.disabled = false; toast("failed: " + esc(String(e)), "error"); });
-    });
+  onDecided(function (what, id, d) {
+    var el = $("#rq-state"); el.hidden = false;
+    el.innerHTML = pillHtml("ok", what === "approve" ? "approved" : what === "build" ? "building again" : what === "withdraw" ? "withdrawn" : "rejected") + ' build <a href="/build/' + id + '">#' + id + '</a>' + (what === "approve" && d.publish ? ' — publish job <a href="/build/' + d.publish + '">#' + d.publish + '</a>' : what === "build" && d.task ? ' — the project builds it as task <a href="/build/' + d.task + '">#' + d.task + '</a>' : "");
+    loadAll();
   });
 
   // ---- operations: tiles, the diagram's numbers (the workers themselves are on /workers)
@@ -253,16 +247,17 @@ __CHARTS__
     d.workers.forEach(function (w) { var k = wtKind(w); roles[k === "community" ? (w.mode === "shared" ? "shared" : "own") : k === "review" ? "review" : "pool"].push(w); });
     var line = function (ws) { var al = ws.filter(function (w) { return w.alive; }), bz = al.filter(function (w) { return w.current_task; }); return num(al.length) + " alive · " + num(bz.length) + " building" + (ws.length > al.length ? " · " + num(ws.length - al.length) + " gone" : ""); };
     live("w-pool", line(roles.pool)); live("w-review", line(roles.review)); live("w-community", line(roles.shared.concat(roles.own)));
-    $("#ops-who").textContent = isMaintainer() ? WHO.login + " · you can approve, trust and roll back" : "read-only — approving, trusting and rolling back need the maintainer role";
+    // The reader's role, in the hint: what the grey buttons below are waiting for is said once here.
+    $("#ops-who").textContent = isMaintainer() ? WHO.login + " · you can approve, trust and roll back" : WHO.login ? WHO.login + " · contributor — approving, trusting and rolling back are a maintainer's" : "read-only — approving, trusting and rolling back need the maintainer role";
   }
 
-  // ---- ring heads and the journal; the roll-back button is the shell's (askRollback asks, posts the job once, writes #rb-state)
+  // ---- ring heads and the journal; the roll-back button is on every card with a release before the head, for everyone — live for a maintainer, grey with the reason for anyone else — and the click is the shell's (askRollback asks, posts the job once, writes #rb-state)
   function renderRings(d) {
     var heads = {}; (d.releases || []).forEach(function (r) { if (r.is_head) heads[r.ring] = r; });
     $("#heads").innerHTML = ["stable", "rc", "edge"].map(function (n) {
       var r = d.rings.filter(function (x) { return x.ring === n; })[0] || {}, rel = r.release, h = ["x86_64", "aarch64"].map(function (a) { var e = latest(d.latest, "health", n, a); return a + " " + (e ? e.status : "—"); }).join(" · ");
       var prev = (d.releases || []).filter(function (x) { return x.ring === n && !x.is_head; })[0];
-      return '<div class="headc ' + n + '"><div class="n"><b>' + n + '</b><span class="dim">' + (rel ? "#" + rel.seq + " · " + ago(rel.created_at) : "no release") + '</span></div><div class="m">' + num(r.package_count || 0) + ' packages · ' + bytes(r.bytes || 0) + ' · ' + h + '</div><div class="acts">' + (rel && rel.parent_id ? '<a class="small-btn" href="/diff?ring=' + n + '&from=' + rel.parent_id + '&to=' + rel.id + '">diff</a>' : "") + (isMaintainer() && prev ? '<button type="button" class="small-btn" data-rollback="' + prev.id + '" data-ring="' + n + '" title="point ' + n + ' back at release ' + prev.id + '">roll back to #' + prev.seq + '</button>' : "") + '</div></div>';
+      return '<div class="headc ' + n + '"><div class="n"><b>' + n + '</b><span class="dim">' + (rel ? "#" + rel.seq + " · " + ago(rel.created_at) : "no release") + '</span></div><div class="m">' + num(r.package_count || 0) + ' packages · ' + bytes(r.bytes || 0) + ' · ' + h + '</div><div class="acts">' + (rel && rel.parent_id ? '<a class="small-btn" href="/diff?ring=' + n + '&from=' + rel.parent_id + '&to=' + rel.id + '">diff</a>' : "") + (prev ? gate('<button type="button" class="small-btn" data-rollback="' + prev.id + '" data-ring="' + n + '" title="point ' + n + ' back at release ' + prev.id + '">roll back to #' + prev.seq + '</button>', isMaintainer(), "a maintainer rolls back") : "") + '</div></div>';
     }).join("");
     pager("#events", d.events, eventRow, { empty: "nothing yet", n: 10 });
   }
@@ -315,8 +310,8 @@ __CHARTS__
       endSkeleton();
     }).catch(function () { endSkeleton(); });
   }
-  // The first load waits for /auth/me, so a maintainer's buttons are there from the first draw.
-  whoami(function () { loadAll(); });
+  // The first load waits for /auth/me, so every button is live or grey as the reader's rights say from the first draw; the ring cards come from the stats poll, drawn again here when the poll answered first.
+  whoami(function () { loadAll(); if (STATS) renderRings(STATS); });
   setInterval(loadAll, 30000);
   loadFeed(); setInterval(loadFeed, 20000);
   renderCost(); renderPromos(); setInterval(renderPromos, 300000);
@@ -343,8 +338,9 @@ export function pipelineHtml(poolUrl: string, version: RunningVersion): string {
  * the ring heads with roll back, the journal, the bill. The stable ring is
  * the third of RINGS (edge, rc, stable, lab) and the one the fixture
  * released, so a release's fields are read at `rings.2`. Everything the page
- * reads is public; a session changes the queue-position card, the
- * operations hint and the two rows of buttons.
+ * reads is public and every reader gets the same page; a session changes
+ * what the queue-position card and the operations hint say, and which of
+ * the buttons — the Decision cell's, roll back — are live rather than grey.
  */
 export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
   {
@@ -445,19 +441,24 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.queue-position",
     page: "/pipeline",
     anchor: ['id="queue-pos"'],
-    script: ['$("#queue-pos")', "me && me.login", "x.s.owner === me.login", "your build in the queue", "x.s.audit.verdict || x.s.audit.status"],
+    // The same card for everyone: a signed-in person's staged builds and their place in the queue, one line that nothing of theirs waits, or one line saying how to sign in and see.
+    script: ['$("#queue-pos")', "me && me.login", "x.s.owner === me.login", "your build in the queue", "x.s.audit.verdict || x.s.audit.status", "none of your builds is waiting for a decision right now", 'href="/auth/github?next=/pipeline">sign in with GitHub</a> to see where yours sits'],
     reads: [
       { path: "/auth/me", as: "owner", fields: ["login"] },
       { path: "/api/v1/factory/review", fields: ["staged.0.owner", "staged.0.name", "staged.0.version", "staged.0.arch", "staged.0.finished_at", "staged.0.audit.status"] },
     ],
-    visible: SIGNED_IN,
+    visible: EVERYONE,
   },
   {
     id: "pipeline.operations-hint",
     page: "/pipeline",
     anchor: ['id="operations"', 'id="ops-who"'],
-    script: ['$("#ops-who")', "isMaintainer() ? WHO.login", "you can approve, trust and roll back", "read-only — approving, trusting and rolling back need the maintainer role"],
-    reads: [{ path: "/auth/me", as: "maintainer", fields: ["login", "role"] }],
+    // One line naming the reader and the role: a maintainer's, a contributor's, a reader's — so the grey buttons below need no second sentence.
+    script: ['$("#ops-who")', "isMaintainer() ? WHO.login", "you can approve, trust and roll back", "contributor — approving, trusting and rolling back are a maintainer's", "read-only — approving, trusting and rolling back need the maintainer role"],
+    reads: [
+      { path: "/auth/me", as: "maintainer", fields: ["login", "role"] },
+      { path: "/auth/me", as: "contributor", fields: ["login", "role"] },
+    ],
     visible: EVERYONE,
   },
   {
@@ -489,7 +490,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.review-queue-table",
     page: "/pipeline",
     anchor: ['id="staged"', "<th>Decision</th>"],
-    script: ['pager("#staged"', "s.evidence", "ev.pkgbuild", "auditPill(s.audit)", "a maintainer decides"],
+    script: ['pager("#staged"', "s.evidence", "ev.pkgbuild", "auditPill(s.audit)", '<td class="decision">'],
     // The evidence links point at the artifacts of a staged build; the fixture's undecided rows were written without any, so the links are read on the contributor's build.
     reads: [
       { path: "/api/v1/factory/review", fields: ["staged.0.id", "staged.0.name", "staged.0.version", "staged.0.arch", "staged.0.owner", "staged.0.evidence.pkgbuild", "staged.0.evidence.log", "staged.0.evidence.pkginfo", "staged.0.audit.status", "staged.0.finished_at"] },
@@ -503,15 +504,21 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.review-decision-buttons",
     page: "/pipeline",
     anchor: ['id="staged"', 'id="rq-state"'],
-    script: ["data-approve", "data-reject", 'API + "/tasks/" + id + "/" + (approve ? "approve" : "reject")', '$("#rq-state")', '"Approve build #"', '"Reject build #"'],
-    // Approve is offered on every staged row here, but only the project's build can be approved — the fixture's is
+    // The cell is the shell's decisionCell, drawn from the row's `can` for whoever reads: every button for every reader, live where the server would answer 200 and grey with its reason where it would refuse. The click, the four dialogs and the post are the shell's (shell.decide); the page draws again through onDecided and keeps one line about the decision under the table.
+    script: ["decisionCell(s)", "onDecided(function (what, id, d)", '$("#rq-state")', "the project builds it as task"],
+    // `can` rides the no-store list, for nobody (all false, "sign in with GitHub") and for a maintainer alike; `already` names the approval a build of an approved version repeats (null on the fixture's rows).
+    reads: [
+      { path: "/api/v1/factory/review", fields: ["staged.0.can.approve", "staged.0.can.reject", "staged.0.can.build", "staged.0.can.withdraw", "staged.0.can.why", "staged.0.already"] },
+      { path: "/api/v1/factory/review", as: "maintainer", fields: ["staged.0.can.approve", "staged.0.can.reject", "staged.0.can.build", "staged.0.can.withdraw", "staged.0.can.why"] },
+    ],
+    // Approve is drawn on every staged row here, but only the project's build can be approved — the fixture's is
     // already approved, so a maintainer meets "already approved". Reject on a row of this page's own: the Review's
     // buttons reject F.disposableTask before these run, and a cancelled row answers 409 to every role.
     acts: [
       { method: "POST", path: `/api/v1/factory/tasks/${F.projectTask}/approve`, body: { note: "reads well" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: [200, 409] } },
       { method: "POST", path: `/api/v1/factory/tasks/${F.spareTask}/reject`, body: { note: "the source is not the upstream's" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 200 } },
     ],
-    visible: ["maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "pipeline.jobs-chart",
@@ -597,11 +604,11 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.rollback-action",
     page: "/pipeline",
     anchor: ['id="heads"', 'id="rb-state"'],
-    // The page draws the button for a maintainer, on the release before the head; the click, the dialog and the post are the shell's (shell.rollback).
-    script: ['data-rollback="', "isMaintainer() && prev", "roll back to #"],
+    // The page draws the button on every ring card with a release before the head, for everyone — live for a maintainer, grey with the reason for anyone else; the click, the dialog and the post are the shell's (shell.rollback).
+    script: ['gate(\'<button type="button" class="small-btn" data-rollback="', "roll back to #", '"a maintainer rolls back"'],
     // Queued, never run: no worker claims it in the tests, so what stable serves does not change. `to` is a string, as the button's attribute sends it.
     acts: [{ method: "POST", path: "/api/v1/factory/jobs", body: { kind: "rollback", params: { ring: "stable", to: String(F.previousRelease), note: "the fixture's rollback" } }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 201 } }],
-    visible: ["maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "pipeline.journal-table",
