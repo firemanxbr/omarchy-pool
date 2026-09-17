@@ -2,7 +2,7 @@
 # CI fails when the two disagree. Every maintainer owns the governance file,
 # this one and the project's recipes. With main requiring a code-owner review,
 # a change here is a decision another maintainer approves.
-factory/MAINTAINERS.toml  @firemanxbr
-.github/CODEOWNERS        @firemanxbr
-factory/pkgbuilds/        @firemanxbr
-factory/sizing/           @firemanxbr
+factory/MAINTAINERS.toml  @firemanxbr @maralcbr
+.github/CODEOWNERS        @firemanxbr @maralcbr
+factory/pkgbuilds/        @firemanxbr @maralcbr
+factory/sizing/           @firemanxbr @maralcbr
