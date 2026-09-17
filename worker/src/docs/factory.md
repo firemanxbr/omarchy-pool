@@ -367,7 +367,11 @@ POST /factory/tasks/:id/fail        {error, duration_ms?, log_tail?}
 A claim is one `UPDATE … WHERE id = (SELECT … LIMIT 1) RETURNING *`; D1
 serialises writes, so two workers never receive the same task. Only the lease
 owner can heartbeat, complete or fail it (409 otherwise). The scheduler's cron
-requeues leases past `lease_expires_at`.
+requeues leases past `lease_expires_at` — the way out for a worker that
+vanished, not the way a worker reports: the community worker's shell has
+last words, and whatever ends it while it holds a task (a command that fails
+outside the build's subshell, under `set -e`) is posted to `/fail` at once
+with the command and its status, the build's log with it.
 
 ## Layout
 

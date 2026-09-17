@@ -182,7 +182,7 @@ prepare_container() {
   done
   pacman-key --init >/dev/null 2>&1 || true
   pacman -Syu --noconfirm --needed base-devel git namcap jq python pacman-contrib ccache desktop-file-utils >/dev/null
-  # shellcheck is the gate's, not the build's: without it the gate says so (a warning) and the build goes on — never a build lost to a download.
+  # The shellcheck binary is the gate's, not the build's: without it the gate says so (a warning) and the build goes on — never a build lost to a download.
   install_shellcheck || echo "==> shellcheck is not available here; the gate will say so" >&2
   # makepkg refuses root; `builder` builds, root installs the dependencies
   # (install_deps) — no sudo anywhere: a setuid sudo does not start under
@@ -416,7 +416,7 @@ run_makepkg() { # name → /build/out/*.pkg.tar.zst
     makepkg --noconfirm --clean --cleanbuild --nosign)
 }
 
-# shellcheck for the gate: Arch ships it, Arch Linux ARM does not (a
+# The shellcheck binary, for the gate: Arch ships it, Arch Linux ARM does not (a
 # Haskell build), so the static release is fetched, pinned by checksum,
 # when pacman has none. Without it the gate says so and goes on.
 SHELLCHECK_VERSION=v0.11.0
@@ -675,6 +675,7 @@ inside() {
 # the fresh environment — a wrapper restarts a new one per task), uploads
 # the result to the contributor's staging workspace and exits. No signing
 # key, no publish token: community results never touch the pool directly.
+# shellcheck disable=SC2034  # REPORTED is read by the EXIT trap
 container_worker() {
   if [[ -z "${OMARCHY_BROKER:-}" ]]; then
     OMARCHY_WORKER_TOKEN="${OMARCHY_WORKER_TOKEN:-${FACTORY_TOKEN:-}}"
@@ -724,8 +725,15 @@ container_worker() {
   # The heartbeat keeps the lease while the build runs. It dies with this
   # shell, whichever way the shell goes: an upload that failed under
   # `set -e` used to leave it running, and the lease with it, for hours.
+  # And the shell has last words: a command that fails outside the build's
+  # own subshell ends this script under `set -e` — before this, silently.
+  # The task then sat leased for thirty minutes, the cron requeued it, the
+  # same worker took it and died the same way, three times (omarchy-cli on
+  # the Studio, 2026-09-17: a `tar` on the wrong file, exit 2). Now the
+  # pool hears which command it was, at once, and the dashboard shows it.
   heartbeat_loop "$id" & BEAT=$!; disown "$BEAT"
-  trap 'kill "${BEAT:-}" 2>/dev/null || true' EXIT
+  REPORTED=0
+  trap 's=$?; c=$BASH_COMMAND; kill "${BEAT:-}" 2>/dev/null || true; (( REPORTED )) || last_words "$id" "$s" "$c"' EXIT
   local started=$SECONDS status=0
   set +e
   ( set -e; build_with_retries "$name" "$ref" ) > /build/build.log 2>&1
@@ -751,12 +759,19 @@ container_worker() {
     [[ -f /build/pkg/PKGBUILD ]] && upload_staging "$id" /build/pkg/PKGBUILD PKGBUILD || true
     [[ -f "$VET_JSON" ]] && upload_staging "$id" "$VET_JSON" vet.json && upload_staging "$id" "$VET_LOG" tests.log || true
     [[ -f "$RES_JSON" ]] && upload_staging "$id" "$RES_JSON" resources.json || true
+    REPORTED=1
     api POST "/factory/tasks/$id/fail" "$(jq -n --arg e "exit $status: ${err:0:500}" --argjson d "$took" --argjson t "$tail" --argjson f "$final" '{error:$e,duration_ms:$d,log_tail:$t,final:$f}')" >/dev/null || true
     exit 1
   fi
   shopt -s nullglob
   local pkgs=(/build/out/*.pkg.tar.zst) main sha filename version
-  main="$(ls /build/out/"$name"-[0-9]*.pkg.tar.zst 2>/dev/null | head -n1 || true)"; [[ -n "$main" ]] || main="${pkgs[0]}"
+  main="$(main_package "$name" /build/out)"
+  if [[ -z "$main" ]]; then
+    log "task $id: the build ended well but wrote no package"
+    REPORTED=1
+    api POST "/factory/tasks/$id/fail" "$(jq -n --argjson d "$took" --argjson t "$tail" '{error:"exit 0 without a package: makepkg wrote nothing to /build/out",duration_ms:$d,log_tail:$t,final:true}')" >/dev/null || true
+    exit 1
+  fi
   sha="$(sha256 "$main")"; filename="$(basename "$main")"
   version="$(tar -xOf "$main" .PKGINFO 2>/dev/null | awk -F' = ' '$1=="pkgver"{print $2}')"
   log "task $id: built $filename in $((took / 1000)) s; uploading to staging"
@@ -772,12 +787,40 @@ container_worker() {
   if (( status != 0 )); then
     local why; why="$(tr -d '\n' </build/upload.err | tail -c 400)"
     log "task $id: staging failed — $why"
+    REPORTED=1
     api POST "/factory/tasks/$id/fail" "$(jq -n --arg e "staging: ${why:0:500}" --argjson d "$took" --argjson t "$tail" '{error:$e,duration_ms:$d,log_tail:$t,final:true}')" >/dev/null || true
     exit 1
   fi
   kill "$BEAT" 2>/dev/null || true
+  REPORTED=1
   api POST "/factory/tasks/$id/complete" "$(jq -n --arg s "$sha" --arg f "$filename" --arg v "$version" --argjson d "$took" --argjson t "$tail" '{sha256:$s,filename:$f,version:$v,duration_ms:$d,log_tail:$t}')" >/dev/null
   log "task $id: staged — a maintainer takes it from here"
+}
+
+# The shell's last words, from the EXIT trap: the task fails now with the
+# command that ended the script and its status, and the build's log for
+# the record — instead of a lease left to expire. Not final: the next
+# container may be luckier, and a maintainer reads the reason either way.
+last_words() { # task-id status command
+  local id="$1" s="$2" c="$3" tail='""'
+  [[ -s /build/build.log ]] && tail="$(tail -n 80 /build/build.log | jq -Rs .)" || true
+  log "task $id: the worker ended with status $s at: ${c:0:200}"
+  upload_staging "$id" /build/build.log build.log 2>/dev/null || true
+  api POST "/factory/tasks/$id/fail" "$(jq -n --arg e "the worker ended (exit $s) at: ${c:0:400}" --argjson t "$tail" '{error:$e,log_tail:$t,final:false}')" >/dev/null 2>&1 || true
+}
+
+# The task's own package among what makepkg wrote: <name>-<version>… first,
+# a prebuilt binary's <name>-bin-… next (skills/groups/prebuilt-binaries.md),
+# whatever there is last; nothing when the directory holds no package. From
+# the globs themselves, never `ls` with one: under nullglob an unmatched
+# pattern vanished, `ls` listed the working directory instead, and
+# attempt.log was the "package" — `tar` on it ended the shell (omarchy-cli,
+# drafted as omarchy-cli-bin, five times on 2026-09-17).
+main_package() { # name out-dir → path, or nothing
+  local name="$1" out="$2"
+  shopt -s nullglob
+  local named=("$out/$name"-[0-9]*.pkg.tar.zst "$out/$name"-bin-[0-9]*.pkg.tar.zst) all=("$out"/*.pkg.tar.zst)
+  printf '%s\n' "${named[0]:-${all[0]:-}}"
 }
 
 # The result into the task's staging workspace: the evidence first — the
