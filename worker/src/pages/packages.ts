@@ -378,7 +378,7 @@ const PACKAGE_SCRIPT = String.raw`
       if (r.status >= 500) throw new Error("index busy (HTTP " + r.status + ")");
       return r.json();
     }).then(function (d) {
-      if (d.error) { endSkeleton(); $("#desc").textContent = d.error; $("#graph").innerHTML = ""; $("#who-section").hidden = true; $("#pg-tiles").innerHTML = ""; return; }
+      if (d.error) { endSkeleton(); if ($("#factory-section").hidden) $("#desc").textContent = d.error; $("#graph").innerHTML = ""; $("#who-section").hidden = true; $("#pg-tiles").innerHTML = ""; ["#sec-section", "#seal-section"].forEach(function (id) { var el = $(id); if (el) el.hidden = true; }); return; }
       render(d); endSkeleton();
     }).catch(function (e) {
       if (attempt < 4) { $("#desc").textContent = "The index is busy (" + e.message + "); retrying…"; setTimeout(function () { loadPackage(attempt + 1); }, 4000 * attempt); }
@@ -397,8 +397,8 @@ const PACKAGE_SCRIPT = String.raw`
     var onlyLab = rings.length === 1 && rings[0] === "lab", none = !rings.length;
     var cls = st.class ? { A: "ok", B: "ok", C: "warn", D: "error" }[st.class] : "none";
     $("#factory-badge").innerHTML = (none ? pillOf("lilac", "not in the pool yet", "a contributor's build is evidence; the project's build enters the lab") : onlyLab ? pillOf("lab", "in the lab", "the fourth ring: the project's build, tried by a real pacman, waiting for a maintainer — not promised, not promoted") : pillOf("ok", "in " + rings.join(" · "))) + (st.class ? ' ' + pillOf(cls, "class " + st.class, st.score.points + "/100 — What we test → The score") : '');
-    if (none || onlyLab) {
-      $("#desc").className = "lede"; if (!$("#desc").textContent || /not in any ring/.test($("#desc").textContent)) $("#desc").textContent = pkg.description || "";
+    if (none) {
+      $("#desc").className = "lede"; $("#desc").innerHTML = esc(pkg.description || "") + (pkg.description ? ' — ' : '') + 'not in any ring for ' + esc(arch) + ' yet: a contributor\'s build is evidence, never in the pool; the project\'s build enters the lab.';
       $("#pg-tiles").innerHTML = ""; $("#who-section").hidden = true;
     }
     $("#factory-lede").innerHTML = (pkg.owner ? 'Requested by ' + person(pkg.owner) + (pkg.created_at ? ' ' + ago(pkg.created_at) : '') + (pkg.project ? ' from <a href="' + esc(pkg.project) + '">' + esc(String(pkg.project).replace(/^https?:\/\/(www\.)?/, "")) + '</a>' : '') + (pkg.license ? ' · ' + esc(pkg.license) : '') + (pkg.category ? ' · ' + esc(pkg.category) : '') + '. ' : '')
