@@ -227,7 +227,22 @@ export function usageReport(u: unknown): Usage | null {
   return out;
 }
 
-async function touchWorker(env: Env, w: { worker: string; arch: string; hostname?: string; labels?: unknown; version?: string; mode?: string; agent?: string | null; kinds?: string[]; probe?: AgentReport; usage?: Usage | null }, currentTask: number | null): Promise<void> {
+/**
+ * What a worker sends of its own log with a claim: the lines since the last
+ * one, a few kilobytes at most, for its owner and the maintainers to read on
+ * the dashboard. A line that looks like a secret (leak.ts) is not kept: the
+ * chunk is replaced by a word about it.
+ */
+export const WORKER_LOG_CHUNK = 4096;
+export const WORKER_LOG_KEEP = 8192;
+function workerLog(v: unknown): string {
+  if (typeof v !== "string" || !v) return "";
+  const text = v.length > WORKER_LOG_CHUNK ? v.slice(-WORKER_LOG_CHUNK) : v;
+  const leak = findLeak(text);
+  return leak ? `[${text.replace(/\n$/, "").split("\n").length} line(s) dropped: one looked like ${leak.kind}]\n` : text.endsWith("\n") ? text : text + "\n";
+}
+
+async function touchWorker(env: Env, w: { worker: string; arch: string; hostname?: string; labels?: unknown; version?: string; mode?: string; agent?: string | null; kinds?: string[]; probe?: AgentReport; usage?: Usage | null; log?: string }, currentTask: number | null): Promise<void> {
   // The agent is what the worker says it runs ("<provider>/<model>"): a
   // worker that reports none ("" or null) clears it, one that says nothing
   // (an older client) keeps what it last reported. The probe's answer
@@ -236,9 +251,12 @@ async function touchWorker(env: Env, w: { worker: string; arch: string; hostname
   // pattern refused it, and every Studio worker showed no agent (2026-09-15).
   const agent = w.agent === undefined ? undefined : typeof w.agent === "string" && /^[a-z0-9-]+\/[A-Za-z0-9._:-]{1,60}$/.test(w.agent) ? w.agent : null;
   await env.DB.prepare(
-    `INSERT INTO build_workers (id, arch, hostname, labels, version, last_seen, current_task, agent, kinds, agent_status, agent_error, agent_checked_at, usage, usage_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO build_workers (id, arch, hostname, labels, version, last_seen, current_task, agent, kinds, agent_status, agent_error, agent_checked_at, usage, usage_at, log_tail, log_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT (id) DO UPDATE SET arch = excluded.arch, hostname = COALESCE(excluded.hostname, hostname), labels = COALESCE(excluded.labels, labels),
-       version = COALESCE(excluded.version, version), last_seen = excluded.last_seen, current_task = excluded.current_task, mode = COALESCE(?, mode),
+       version = COALESCE(excluded.version, version), last_seen = excluded.last_seen, current_task = excluded.current_task,
+       mode = CASE WHEN mode_by IS NULL THEN COALESCE(?, mode) ELSE mode END,
+       log_tail = CASE WHEN excluded.log_tail IS NULL THEN log_tail ELSE substr(COALESCE(log_tail, '') || excluded.log_tail, -${WORKER_LOG_KEEP}) END,
+       log_at = CASE WHEN excluded.log_tail IS NULL THEN log_at ELSE excluded.log_at END,
        agent = CASE WHEN ? THEN excluded.agent ELSE agent END, kinds = COALESCE(excluded.kinds, kinds),
        agent_status = CASE WHEN ? THEN excluded.agent_status ELSE agent_status END, agent_error = CASE WHEN ? THEN excluded.agent_error ELSE agent_error END,
        agent_checked_at = CASE WHEN ? THEN excluded.agent_checked_at ELSE agent_checked_at END,
@@ -247,7 +265,7 @@ async function touchWorker(env: Env, w: { worker: string; arch: string; hostname
     .bind(
       w.worker, w.arch, w.hostname ?? null, w.labels ? JSON.stringify(w.labels) : null, w.version ?? null, now(), currentTask, agent ?? null,
       w.kinds ? JSON.stringify(w.kinds) : null, w.probe?.status ?? null, w.probe?.error ?? null, w.probe?.checked_at ?? null,
-      w.usage ? JSON.stringify(w.usage) : null, w.usage ? now() : null,
+      w.usage ? JSON.stringify(w.usage) : null, w.usage ? now() : null, w.log || null, w.log ? now() : null,
       w.mode ?? null, agent === undefined ? 0 : 1, w.probe === undefined ? 0 : 1, w.probe === undefined ? 0 : 1, w.probe === undefined ? 0 : 1,
     )
     .run();
@@ -281,11 +299,12 @@ const ALL_KINDS = ["build", "sync", "promote", "rollback", "render", "health", "
 const ANY_ARCH_KINDS = "'metrics', 'gc', 'security', 'promote', 'audit', 'verify', 'relayout'";
 
 export async function handleClaim(request: Request, env: Env, actor: Actor): Promise<Response> {
-  const b = (await request.json()) as { arch?: string; hostname?: string; labels?: unknown; version?: string; kinds?: unknown; shared?: unknown; agent?: unknown; agent_status?: unknown; agent_error?: unknown; agent_checked_at?: unknown; usage?: unknown };
+  const b = (await request.json()) as { arch?: string; hostname?: string; labels?: unknown; version?: string; kinds?: unknown; shared?: unknown; agent?: unknown; agent_status?: unknown; agent_error?: unknown; agent_checked_at?: unknown; usage?: unknown; log?: unknown };
   if (!b.arch || !isRepoArch(b.arch)) return json({ error: "arch (x86_64|aarch64) is required" }, 400);
   if (actor.kind === "job") return json({ error: "a job token cannot claim; use the worker token" }, 403);
   const probe = agentReport(b);
   const usage = usageReport(b.usage);
+  const log = workerLog(b.log);
   // A worker is its registration: id, owner, trust and what it may build.
   const workerId = actor.w.id;
   if (actor.w.arch !== b.arch) return json({ error: `this worker is registered for ${actor.w.arch}` }, 400);
@@ -303,14 +322,17 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   // A worker started with --shared donates its compute to everyone's
   // requests — any contributor's, since 2026-09-17: the shared workers are
   // the queue a request lands in. Community results never reach the pool
-  // either way; a dedicated worker builds its owner's packages only.
-  const shared = trust === "community" && b.shared === true;
+  // either way; a dedicated worker builds its owner's packages only. The
+  // container's flag is the first word; once the mode was set from the
+  // brain — the page, or the worker's own command line — the registration's
+  // mode is what counts, at this claim and every one after.
+  const shared = trust === "community" && (actor.w.mode_by ? actor.w.mode === "shared" : b.shared === true);
   // Every worker follows the latest image (update.ts): one behind past the
   // rollout's grace is touched — alive, and the Workers page says why it
   // idles — told once per release in the journal, and handed nothing.
   const update = updateState(b.version, running(env));
   if (update.required) {
-    await touchWorker(env, { worker: workerId, arch: b.arch, hostname: b.hostname, labels: b.labels, version: b.version, mode: trust === "community" ? (shared ? "shared" : "dedicated") : undefined, agent: b.agent === undefined ? undefined : typeof b.agent === "string" ? b.agent : null, kinds, probe, usage }, null);
+    await touchWorker(env, { worker: workerId, arch: b.arch, hostname: b.hostname, labels: b.labels, version: b.version, mode: trust === "community" ? (shared ? "shared" : "dedicated") : undefined, agent: b.agent === undefined ? undefined : typeof b.agent === "string" ? b.agent : null, kinds, probe, usage, log }, null);
     const told = await env.DB.prepare("SELECT told_update FROM build_workers WHERE id = ?").bind(workerId).first<{ told_update: string | null }>();
     if (told?.told_update !== update.latest) {
       await env.DB.batch([
@@ -367,7 +389,7 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   )
     .bind(workerId, plusMinutes(LEASE_MINUTES), now(), b.arch, ...binds)
     .first<TaskRow>();
-  await touchWorker(env, { worker: workerId, arch: b.arch, hostname: b.hostname, labels: b.labels, version: b.version, mode: trust === "community" ? (shared ? "shared" : "dedicated") : undefined, agent: b.agent === undefined ? undefined : typeof b.agent === "string" ? b.agent : null, kinds, probe, usage }, task?.id ?? null);
+  await touchWorker(env, { worker: workerId, arch: b.arch, hostname: b.hostname, labels: b.labels, version: b.version, mode: trust === "community" ? (shared ? "shared" : "dedicated") : undefined, agent: b.agent === undefined ? undefined : typeof b.agent === "string" ? b.agent : null, kinds, probe, usage, log }, task?.id ?? null);
   if (!task) return new Response(null, { status: 204 });
   if (task.trust === "community" && task.kind === "build") {
     await env.DB.prepare("UPDATE factory_packages SET status = 'building', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(`building on ${workerId} (${task.arch})`, task.name).run();
@@ -711,6 +733,8 @@ export async function handleFactory(env: Env, url?: URL): Promise<Response> {
       workers: workers.results.map((w) => ({
         ...w,
         token_hash: undefined, // the hash of a worker's token is the pool's to compare, nobody's to see
+        log_tail: undefined, // the worker's own log is its owner's and the maintainers' (GET /factory/workers/:id/log), not the listing's
+        log_at: undefined,
         labels: w.labels ? JSON.parse(w.labels) : null,
         packages: w.packages ? JSON.parse(w.packages) : null,
         alive: Date.parse(w.last_seen) > alive,

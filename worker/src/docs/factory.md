@@ -358,7 +358,12 @@ pointing the repository name in the worker script, `reconcile.rs`,
 ### Worker protocol
 
 ```
-POST /factory/claim                 {arch, hostname?, labels?, version?, kinds?, shared?}   Authorization: Bearer omw_… (the registration)
+POST /factory/claim                 {arch, hostname?, labels?, version?, kinds?, shared?, log?}   Authorization: Bearer omw_… (the registration)
+                                    shared: the first word only — once the mode was set from the brain the registration's mode counts:
+                                    POST /factory/workers/self/mode {mode} with this token, or POST /factory/workers/:id/mode with a
+                                    contributor token (the owner; a maintainer may set dedicated, never shared — sharing is the owner's word);
+                                    log: the worker's own lines since its last claim (4 KB a chunk, the last 8 KB kept), for its owner and
+                                    the maintainers: GET /factory/workers/:id/log with a contributor token or the dashboard's session
   200 {task:{id,name,arch,version,pkgbuild_ref,reason,attempts,…}, token: "omj.…", token_expires_at, lease_minutes, repo, pkgbuild_path, upload}
   204 nothing queued for this worker
   426 {error, latest, yours, behind, update}   `version` (the image's release) is behind the pool's past the grace — every

@@ -36,6 +36,9 @@ echo "curl $url" >> "$STUB_LOG"
 out=""; for ((i=1; i<=$#; i++)); do [[ "${!i}" == -o ]] && { j=$((i+1)); out="${!j}"; }; done
 case "$url" in
   */omarchy-worker/compose.yml) printf 'name: ${COMPOSE_PROJECT_NAME:-omarchy-worker}\nservices: {}\n' > "$out" ;;
+  */api/v1/factory/workers/self/mode)
+    if [[ "${STUB_MODE_CODE:-200}" != 200 ]]; then printf '{"error":"a project worker takes the project'"'"'s work; it has no shared or own mode"}\n%s' "$STUB_MODE_CODE"; exit 0; fi
+    printf '{"id":"alice-laptop-ab12","mode":"shared","by":"worker","note":"from its next claim it builds whatever is queued, anyone'"'"'s"}\n200' ;;
   */api/v1/factory/workers/self)
     if [[ "${STUB_SELF_CODE:-200}" != 200 ]]; then printf '{"error":"a worker token is required"}\n%s' "$STUB_SELF_CODE"; exit 0; fi
     printf '{"id":"alice-laptop-ab12","arch":"%s","trust":"community","owner":"alice","mode":"dedicated"}' "$STUB_ARCH"; [[ " $* " == *" -w "* ]] && printf '\n200'; echo ;;
@@ -59,14 +62,24 @@ grep -q "worker alice-laptop-ab12 ($STUB_ARCH) — docker, $real" <<<"$out" || {
 grep -q "docker compose pull" "$STUB_LOG" && grep -q "docker compose up -d --remove-orphans" "$STUB_LOG" || { echo "start pulls and starts: $(cat "$STUB_LOG")"; exit 1; }
 grep -q "running: broker Up 1 second · worker Up 1 second · updater Up 1 second" <<<"$out" || { echo "start reports what runs: $out"; exit 1; }
 
-# start again without --token: the token stays; an option changes the .env only where given; a value with # " $ survives as it is.
+# start again without --token: the token stays; an option changes the .env only where given; a value with # " $ survives as it is;
+# --own tells the pool (the mode is the brain's from then on), not only the .env.
+: > "$STUB_LOG"
 "$tmp/omarchy-worker" start --own --where 'the #1 "box" $HOME' >/dev/null
+grep -q "curl http://pool.test/api/v1/factory/workers/self/mode" "$STUB_LOG" || { echo "start --own tells the pool: $(cat "$STUB_LOG")"; exit 1; }
 grep -qxF "OMARCHY_WORKER_TOKEN='omw_test123'" "$d/.env" && grep -qxF "WORKER_SHARED='0'" "$d/.env" && grep -qxF "WHERE='the #1 \"box\" \$HOME'" "$d/.env" || { echo "a second start keeps the token and the rest, applies the switch, quotes the value: $(cat "$d/.env")"; exit 1; }
 
-# share on: the switch, and the builder restarted alone.
+# share on: the brain is told (the worker's own token), the .env keeps it, nothing restarts.
 : > "$STUB_LOG"
-"$tmp/omarchy-worker" share on >/dev/null
-grep -qxF "WORKER_SHARED='1'" "$d/.env" && grep -q "docker compose up -d --no-deps worker" "$STUB_LOG" || { echo "share on flips the switch and restarts the builder: $(cat "$STUB_LOG")"; exit 1; }
+out="$("$tmp/omarchy-worker" share on)"
+grep -q "curl http://pool.test/api/v1/factory/workers/self/mode" "$STUB_LOG" && grep -qxF "WORKER_SHARED='1'" "$d/.env" || { echo "share on tells the pool and keeps it in .env: $(cat "$STUB_LOG")"; exit 1; }
+grep -q "docker compose up" "$STUB_LOG" && { echo "share on restarts nothing: $(cat "$STUB_LOG")"; exit 1; }
+grep -q "from its next claim it builds whatever is queued" <<<"$out" || { echo "share on says what the pool said: $out"; exit 1; }
+# A refusal keeps the pool's reason.
+export STUB_MODE_CODE=409
+if out="$("$tmp/omarchy-worker" share on 2>&1)"; then echo "a refused mode must fail: $out"; exit 1; fi
+grep -q "the pool did not take the mode (409): a project worker takes the project's work" <<<"$out" || { echo "the pool's reason: $out"; exit 1; }
+unset STUB_MODE_CODE
 
 # A project worker in another directory (--dir after the command works too): the profile, the role, the work directory, a project name of its own.
 "$tmp/omarchy-worker" start --token omw_proj --project --role review --dir "$tmp/proj" >/dev/null
@@ -102,7 +115,7 @@ unset STUB_SELF_CODE
 # status: what runs, what the pool thinks, the image against the pool's release.
 export STUB_ARCH="$(uname -m)"; [[ "$STUB_ARCH" == arm64 ]] && STUB_ARCH=aarch64
 out="$("$tmp/omarchy-worker" status)"
-grep -q "the pool: alice-laptop-ab12 · community · $STUB_ARCH · dedicated" <<<"$out" || { echo "status asks the pool: $out"; exit 1; }
+grep -q "the pool: alice-laptop-ab12 · community · $STUB_ARCH · own packages only" <<<"$out" || { echo "status asks the pool: $out"; exit 1; }
 # No runtime: told what to install. (The stubs answer as an absent or stopped runtime would — a CI runner has a real docker on its PATH.)
 printf '#!/usr/bin/env bash\nexit 1\n' > "$tmp/bin/docker"; cp "$tmp/bin/docker" "$tmp/bin/podman"; chmod +x "$tmp/bin/docker" "$tmp/bin/podman"
 if out="$("$tmp/omarchy-worker" status 2>&1)"; then echo "no runtime must fail: $out"; exit 1; fi

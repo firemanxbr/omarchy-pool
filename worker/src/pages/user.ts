@@ -96,7 +96,8 @@ const SCRIPT = String.raw`
       var panel = $("#wp-" + k), rows = kinds[k];
       panel.hidden = !rows.length; if (!rows.length) return; any = true;
       $("#w-" + k + " thead tr").innerHTML = WT_HEAD[k] + (own ? "<th></th>" : "");
-      pager("#w-" + k, rows, function (w) { return workerRow(w, k, own ? (w.revoked_at ? '' : '<button type="button" class="small-btn" data-revoke="' + esc(w.id) + '" title="revoke this worker\'s token">Revoke</button>') : null); }, { empty: "", text: function (w) { return [w.id, w.arch, w.version, w.agent].join(" "); } });
+      // The owner's row: the mode is the brain's to set — shared (everyone's queue) or own packages only — from the worker's next claim, nothing restarts; and the token is theirs to revoke.
+      pager("#w-" + k, rows, function (w) { return workerRow(w, k, own ? (w.revoked_at ? '' : (k === "community" ? '<button type="button" class="small-btn" data-mode="' + esc(w.id) + '" data-to="' + (w.mode === "shared" ? "dedicated" : "shared") + '" title="' + (w.mode === "shared" ? "build your packages only, from its next claim" : "build everyone\'s queue too, from its next claim") + '">' + (w.mode === "shared" ? "Own only" : "Share") + '</button> ' : '') + '<button type="button" class="small-btn" data-revoke="' + esc(w.id) + '" title="revoke this worker\'s token">Revoke</button>') : null); }, { empty: "", text: function (w) { return [w.id, w.arch, w.version, w.agent].join(" "); } });
     });
     $("#w-none").hidden = any; $("#wt-legend").innerHTML = any ? WT_LEGEND : "";
   }
@@ -271,6 +272,8 @@ const SCRIPT = String.raw`
   load().then(function () {
     // Your own page: the workspace — the buttons on the tables, a worker to register, the quota, a token for scripts, the place to sign out.
     whoami(function (me) {
+      // Who is looking decides what the worker rows show (the log icon is the owner's and the maintainers'): drawn again now that it is known.
+      if (me && me.login !== login) renderWorkers();
       if (!me || me.login !== login) return;
       own = true;
       var url = location.origin + "/user/" + encodeURIComponent(login);
@@ -309,7 +312,7 @@ const SCRIPT = String.raw`
       });
       return;
     }
-    var b = ev.target.closest ? ev.target.closest("button[data-build],button[data-remove],button[data-revoke]") : null; if (!b) return;
+    var b = ev.target.closest ? ev.target.closest("button[data-build],button[data-remove],button[data-revoke],button[data-mode]") : null; if (!b) return;
     if (b.hasAttribute("data-build")) {
       var name = b.getAttribute("data-build"), arch = b.getAttribute("data-arch");
       // Where it runs is the asker's call (one architecture: any of their workers or the project's shared ones; all: the rule, or the shared ones at once); a hint goes to the agent that drafts the recipe.
@@ -342,6 +345,10 @@ const SCRIPT = String.raw`
         if (go === null) return;
         call("DELETE", "/packages/" + encodeURIComponent(rm)).then(function (r) { if (r.error) toast(esc(r.error), "error"); else toast("Removed " + esc(rm) + "."); delete OPEN[rm]; load(); });
       });
+    }
+    else if (b.hasAttribute("data-mode")) {
+      var mid = b.getAttribute("data-mode"), to = b.getAttribute("data-to");
+      call("POST", "/workers/" + encodeURIComponent(mid) + "/mode", { mode: to }).then(function (r) { if (r.error) toast(esc(r.error), "error"); else toast(esc(r.note || ("mode: " + to))); loadWorkers(); });
     }
     else if (b.hasAttribute("data-revoke")) {
       var wid = b.getAttribute("data-revoke");

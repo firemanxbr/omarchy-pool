@@ -22,9 +22,55 @@ use serde::Deserialize;
 use crate::client::{Api, ReleaseRequest};
 use crate::gate::{self, GateOptions, Verdict};
 use crate::ops;
+use crate::RepoError;
+
+/// The worker's own log — the lines between tasks — as the claim carries it
+/// to the pool: the owner and the maintainers read it on the dashboard. A
+/// few kilobytes since the last claim; what a build printed goes to its
+/// log and staging, never here.
+static WORKER_LOG: Mutex<String> = Mutex::new(String::new());
+fn say(line: impl AsRef<str>) {
+    let line = line.as_ref();
+    eprintln!("{line}");
+    let stamp = chrono_stamp();
+    if let Ok(mut log) = WORKER_LOG.lock() {
+        log.push_str(&stamp);
+        log.push(' ');
+        log.push_str(line);
+        log.push('\n');
+        if log.len() > 4096 {
+            let cut = log.len() - 4096;
+            let at = log
+                .char_indices()
+                .map(|(i, _)| i)
+                .find(|&i| i >= cut)
+                .unwrap_or(cut);
+            log.drain(..at);
+        }
+    }
+}
+/// What the claim takes with it, and the buffer forgets.
+fn log_chunk() -> String {
+    WORKER_LOG
+        .lock()
+        .map(|mut l| std::mem::take(&mut *l))
+        .unwrap_or_default()
+}
+/// `[HH:MM:SS]`, the bash worker's stamp, from the wall clock without a date crate.
+fn chrono_stamp() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+        % 86_400;
+    format!(
+        "[{:02}:{:02}:{:02}]",
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60
+    )
+}
 use crate::security::{self, FastTrackOptions, SecurityOptions};
 use crate::sync::SyncOptions;
-use crate::RepoError;
 
 pub const REPO_URL: &str = "https://github.com/firemanxbr/omarchy-pool";
 const HEARTBEAT: Duration = Duration::from_secs(300);
@@ -283,7 +329,9 @@ pub fn run(opts: &WorkOptions) -> Result<()> {
     let mut probe = AgentProbe::default();
     loop {
         if is_draining() {
-            eprintln!("draining: {done} task(s) done, none claimed since the stop signal; exiting");
+            say(format!(
+                "draining: {done} task(s) done, none claimed since the stop signal; exiting"
+            ));
             return Ok(());
         }
         if agent.is_some()
@@ -298,13 +346,14 @@ pub fn run(opts: &WorkOptions) -> Result<()> {
             "agent": if probe.label.is_empty() { agent.clone().unwrap_or_default() } else { probe.label.clone() },
             "agent_status": probe.status, "agent_error": probe.error, "agent_checked_at": probe.checked_iso,
             "usage": usage.report(),
+            "log": log_chunk(),
         });
         let claimed = match claimer.post_json_as(&opts.worker_token, "/factory/claim", &body) {
             Ok(Some(v)) => serde_json::from_value::<Claimed>(v).context("claim response")?,
             Ok(None) => {
                 idle += POLL.as_secs();
                 if opts.idle_exit > 0 && idle >= opts.idle_exit {
-                    eprintln!("no work for {idle}s; exiting");
+                    say(format!("no work for {idle}s; exiting"));
                     return Ok(());
                 }
                 sleep_unless(POLL, &is_draining);
@@ -318,12 +367,12 @@ pub fn run(opts: &WorkOptions) -> Result<()> {
                     .ok()
                     .and_then(|v| v["error"].as_str().map(str::to_owned))
                     .unwrap_or(body);
-                eprintln!("update required: {why}");
+                say(format!("update required: {why}"));
                 sleep_unless(Duration::from_secs(300), &is_draining);
                 continue;
             }
             Err(e) => {
-                eprintln!("claim failed: {e}; retrying in 60 s");
+                say(format!("claim failed: {e}; retrying in 60 s"));
                 sleep_unless(Duration::from_secs(60), &is_draining);
                 continue;
             }
@@ -331,10 +380,10 @@ pub fn run(opts: &WorkOptions) -> Result<()> {
         idle = 0;
         let task = claimed.task;
         let label = task_label(&task);
-        eprintln!(
+        say(format!(
             "task {}: {label} (attempt {}/{})",
             task.id, task.attempts, task.max_attempts
-        );
+        ));
         let token = Arc::new(Mutex::new(claimed.token));
         let stop = Arc::new(Mutex::new(false));
         let beat = heartbeat(opts.api.clone(), task.id, token.clone(), stop.clone());
@@ -367,7 +416,12 @@ fn report(job: &Api, token: &str, task: &Task, outcome: Result<Outcome>, took: u
                 &serde_json::json!({ "summary": o.summary, "result": o.result, "duration_ms": took,
                     "sha256": field("sha256", dash()), "filename": field("filename", dash()), "version": field("version", serde_json::Value::Null) }),
             )?;
-            eprintln!("task {}: done — {} ({} s)", task.id, o.summary, took / 1000);
+            say(format!(
+                "task {}: done — {} ({} s)",
+                task.id,
+                o.summary,
+                took / 1000
+            ));
         }
         Err(e) => {
             let msg = format!("{e:#}");
@@ -379,7 +433,7 @@ fn report(job: &Api, token: &str, task: &Task, outcome: Result<Outcome>, took: u
                 &format!("/factory/tasks/{}/fail", task.id),
                 &serde_json::json!({ "error": msg, "duration_ms": took, "log_tail": msg, "final": last }),
             );
-            eprintln!("task {}: failed — {e:#}", task.id);
+            say(format!("task {}: failed — {e:#}", task.id));
         }
     }
     Ok(())

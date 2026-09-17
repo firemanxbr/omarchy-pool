@@ -107,6 +107,8 @@ export interface WorkerIdentity {
   id: string;
   owner: string | null;
   mode: string;
+  /** Who set the mode: NULL — the worker's own flag applies at each claim; a login — from the page; 'worker' — through its own token (the command line). */
+  mode_by?: string | null;
   packages: string[];
   arch: string;
   /** community: its own or shared builds · project: everything, approved by a maintainer. */
@@ -119,9 +121,9 @@ export interface WorkerIdentity {
 export async function workerOf(request: Request, env: Env): Promise<WorkerIdentity | null> {
   const token = bearer(request);
   if (!token.startsWith("omw_")) return null;
-  const row = await env.DB.prepare("SELECT id, owner, mode, packages, arch, trust FROM build_workers WHERE token_hash = ? AND revoked_at IS NULL")
+  const row = await env.DB.prepare("SELECT id, owner, mode, mode_by, packages, arch, trust FROM build_workers WHERE token_hash = ? AND revoked_at IS NULL")
     .bind(await sha256Hex(token))
-    .first<{ id: string; owner: string | null; mode: string; packages: string | null; arch: string; trust: string }>();
+    .first<{ id: string; owner: string | null; mode: string; mode_by: string | null; packages: string | null; arch: string; trust: string }>();
   return row ? { ...row, packages: row.packages ? JSON.parse(row.packages) : [] } : null;
 }
 
@@ -559,6 +561,37 @@ export async function handleRegisterWorker(c: Contributor, request: Request, env
     .bind(id, b.arch, b.labels ? JSON.stringify(b.labels) : null, c.login, await sha256Hex(token))
     .run();
   return json({ worker: id, token, arch: b.arch, note: "Run the Omarchy Packaging image with WORKER_ID and OMARCHY_WORKER_TOKEN set to these; the token is shown once. It builds your packages; start it with WORKER_SHARED=1 to build anyone's." }, 201);
+}
+
+/**
+ * The mode of a community worker — shared (everyone's queue) or the
+ * owner's packages only — set from the brain: its owner or a maintainer
+ * from the page, the worker itself through its token (`omarchy-worker
+ * share on|off`). From then on the registration's mode is what the claim
+ * uses, whatever the container was started with; it takes effect at the
+ * worker's next claim, within the minute, nothing restarts.
+ */
+export async function handleWorkerMode(by: { login: string; maintainer: boolean } | { worker: string }, id: string, request: Request, env: Env): Promise<Response> {
+  const b = (await request.json().catch(() => ({}))) as { mode?: string };
+  if (b.mode !== "shared" && b.mode !== "dedicated") return json({ error: "mode must be shared or dedicated" }, 400);
+  const w = await env.DB.prepare("SELECT id, owner, trust, mode FROM build_workers WHERE id = ? AND revoked_at IS NULL").bind(id).first<{ id: string; owner: string | null; trust: string; mode: string }>();
+  if (!w) return json({ error: "no such worker" }, 404);
+  if (w.trust !== "community") return json({ error: "a project worker takes the project's work; it has no shared or own mode" }, 409);
+  const who = "worker" in by ? "worker" : by.login;
+  if ("worker" in by ? by.worker !== w.id : !(by.maintainer || by.login === w.owner)) return json({ error: "not yours" }, 403);
+  // Sharing is the owner's word alone (governance): a maintainer may take a
+  // worker out of the queue, never put someone's machine in it.
+  if (b.mode === "shared" && !("worker" in by) && by.login !== w.owner) return json({ error: "sharing is the owner's word alone: a maintainer can set a worker to its owner's packages, not share it" }, 403);
+  await env.DB.prepare("UPDATE build_workers SET mode = ?, mode_by = ? WHERE id = ?").bind(b.mode, who, id).run();
+  return json({ id, mode: b.mode, by: who, note: b.mode === "shared" ? "from its next claim it builds whatever is queued, anyone's" : "from its next claim it builds its owner's packages only" });
+}
+
+/** The worker's own log — the lines between tasks, as it sent them with its claims — for its owner and the maintainers. */
+export async function handleWorkerLog(c: Contributor, id: string, env: Env): Promise<Response> {
+  const w = await env.DB.prepare("SELECT id, owner, log_tail, log_at FROM build_workers WHERE id = ?").bind(id).first<{ id: string; owner: string | null; log_tail: string | null; log_at: string | null }>();
+  if (!w) return json({ error: "no such worker" }, 404);
+  if (!(isMaintainer(c) || (w.owner !== null && w.owner === c.login))) return json({ error: "the worker's log is its owner's and the maintainers' to read" }, 403);
+  return json({ id: w.id, log: w.log_tail ?? "", at: w.log_at }, 200, { "cache-control": "no-store" });
 }
 
 export async function handleRevokeWorker(c: Contributor, id: string, env: Env): Promise<Response> {

@@ -63,7 +63,7 @@ import {
 } from "./routes/contributors";
 import type { Actor } from "./routes/factory";
 import { jobOf } from "./jobtoken";
-import { handleTrustWorker, handleTrustList, handleNewToken, handleWithdrawRecord } from "./routes/contributors";
+import { handleTrustWorker, handleTrustList, handleNewToken, handleWithdrawRecord, handleWorkerMode, handleWorkerLog } from "./routes/contributors";
 import { maintainersOf, GOVERNANCE_FILE } from "./governance";
 import { BUDGET_CAP_USD, BUDGET_GUARD_USD, BUDGET_WARN_USD } from "./cost";
 import { handleQueueJob } from "./jobs";
@@ -277,9 +277,15 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
     if (!c) return json({ error: "a contributor token is required (POST /factory/register with a GitHub token)" }, 401);
     return handleStagingDelete(c, Number(m[1]), env);
   }
+  // A worker sets its own mode through its token (omarchy-worker share on|off): the brain keeps it from then on.
+  if (method === "POST" && path === "/factory/workers/self/mode") {
+    const w = await workerOf(request, env);
+    return w ? handleWorkerMode({ worker: w.id }, w.id, request, env) : json({ error: "a worker token is required" }, 401);
+  }
   if (path === "/factory/packages" || path.startsWith("/factory/packages/") || path === "/factory/workers" || path.startsWith("/factory/workers/")) {
     const c = await contributorOf(request, env);
     if (!c) return json({ error: "a contributor token is required (POST /factory/register with a GitHub token)" }, 401);
+    if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)\/mode$/)) && method === "POST") return handleWorkerMode({ login: c.login, maintainer: isMaintainer(c) }, m[1], request, env);
     if (method === "POST" && path === "/factory/packages") return handleRequestPackage(c, request, env);
     if ((m = path.match(/^\/factory\/packages\/([a-z0-9@._+-]+)\/build$/)) && method === "POST") return handleBuildPackage(c, m[1], request, env);
     if ((m = path.match(/^\/factory\/packages\/([a-z0-9@._+-]+)$/)) && method === "DELETE") return handleDeletePackage(c, m[1], env);
@@ -445,9 +451,14 @@ async function api(method: string, path: string, url: URL, request: Request, env
   if (method === "GET" && path === "/factory/review") return handleReviewList(env);
   if (method === "GET" && path === "/factory/approvals") return handleApprovals(env);
   // A worker asks what its registration is (the image decides its mode from this).
+  // A worker's own log: its owner's and the maintainers' to read (a contributor token, or the dashboard's session).
+  if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)\/log$/)) && method === "GET") {
+    const c = await contributorOf(request, env);
+    return c ? handleWorkerLog(c, m[1], env) : json({ error: "a contributor token is required" }, 401);
+  }
   if (method === "GET" && path === "/factory/workers/self") {
     const w = await workerOf(request, env);
-    return w ? json({ id: w.id, arch: w.arch, trust: w.trust, owner: w.owner, mode: w.mode }, 200, { "cache-control": "no-store" }) : json({ error: "a worker token is required" }, 401);
+    return w ? json({ id: w.id, arch: w.arch, trust: w.trust, owner: w.owner, mode: w.mode, mode_by: w.mode_by ?? null }, 200, { "cache-control": "no-store" }) : json({ error: "a worker token is required" }, 401);
   }
   if (method === "GET" && path === "/factory/me") {
     const c = await contributorOf(request, env);

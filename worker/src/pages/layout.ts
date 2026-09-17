@@ -120,6 +120,8 @@ const CSS = String.raw`
   .pill.ok { color: var(--green); border-color: var(--green); }
   .pill.warn { color: var(--amber); border-color: var(--amber); }
   .mono.warn { color: var(--amber); }
+  .iconbtn { background: none; border: 0; padding: 0 2px; cursor: pointer; color: var(--muted); vertical-align: middle; } .iconbtn:hover { color: var(--text); } .iconbtn .ic { width: 14px; height: 14px; }
+  dialog.ask.wide { width: min(880px, 94vw); } dialog.ask pre.block { max-height: 60vh; overflow: auto; margin: 0; background: var(--bg-deep); border: 1px solid var(--line); padding: 10px 12px; font: 12px/1.5 "JetBrains Mono", monospace; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
   .pill.error { color: var(--red); border-color: var(--red); }
   .pill.none { color: var(--dim); }
   .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 13.5px; }
@@ -567,6 +569,7 @@ export const WORKER_ICONS = {
   emu: '<svg class="ic emu" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-label="emulated"><rect x="4" y="4" width="8" height="8" stroke-dasharray="2 1.5"/><path d="M6 1v3M10 1v3M6 12v3M10 12v3M1 6h3M1 10h3M12 6h3M12 10h3"/></svg>',
   shared: '<svg class="ic shared" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-label="shared"><path d="M2 5h10M9 2l3 3-3 3M14 11H4M7 8l-3 3 3 3"/></svg>',
   own: '<svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-label="own"><circle cx="8" cy="5" r="3"/><path d="M2 15c0-3.3 2.7-6 6-6s6 2.7 6 6"/></svg>',
+  log: '<svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-label="log"><path d="M3 2h7l3 3v9H3z"/><path d="M5 7h6M5 9.5h6M5 12h4"/></svg>',
 };
 
 const HELPERS = String.raw`
@@ -708,11 +711,14 @@ const HELPERS = String.raw`
       var sel = o.select && o.select.options && o.select.options.length ? '<label class="pick"><span>' + esc(o.select.label || "Where") + '</span><select>' + o.select.options.map(function (x) { return '<option value="' + esc(x.value) + '"' + (x.disabled ? ' disabled' : '') + (x.selected ? ' selected' : '') + '>' + esc(x.text) + '</option>'; }).join("") + '</select></label>' : '';
       // A value to take away (a link, a token): shown once, copied with one press.
       var val = o.value !== undefined ? '<div class="val"><code></code><button type="button" class="take">' + esc(o.copy || "Copy") + '</button></div>' : '';
+      // A block of text to read, as it is (a log): monospace, scrolling, never marked up.
+      var pre = o.pre !== undefined ? '<pre class="block"></pre>' : '';
       // A second way out (alt): the other thing this dialog can do — take a build out of the queue while the main button puts it back.
       var alt = o.alt ? '<button type="button" class="alt ' + (o.alt.danger ? "danger" : "ghost") + '">' + esc(o.alt.text) + '</button>' : '';
-      d.innerHTML = '<form method="dialog"><h3></h3><p class="t"></p>' + val + sel + (o.input ? '<textarea rows="3" placeholder="' + esc(o.placeholder || (o.input === "required" ? "why — it goes on the record" : "a note for the record (optional)")) + '"></textarea><p class="err" hidden></p>' : '') + '<div class="row">' + alt + '<span class="grow"></span><button type="button" class="ghost cancel">' + esc(o.cancel || "Cancel") + '</button>' + (o.confirm === null ? '' : '<button type="submit" class="' + (o.danger ? "danger" : "") + '">' + esc(o.confirm || "OK") + '</button>') + '</div></form>';
+      d.innerHTML = '<form method="dialog"><h3></h3><p class="t"></p>' + val + pre + sel + (o.input ? '<textarea rows="3" placeholder="' + esc(o.placeholder || (o.input === "required" ? "why — it goes on the record" : "a note for the record (optional)")) + '"></textarea><p class="err" hidden></p>' : '') + '<div class="row">' + alt + '<span class="grow"></span><button type="button" class="ghost cancel">' + esc(o.cancel || "Cancel") + '</button>' + (o.confirm === null ? '' : '<button type="submit" class="' + (o.danger ? "danger" : "") + '">' + esc(o.confirm || "OK") + '</button>') + '</div></form>';
       d.querySelector("h3").textContent = o.title || ""; d.querySelector(".t").innerHTML = o.text || "";
       if (o.value !== undefined) d.querySelector(".val code").textContent = o.value;
+      if (o.pre !== undefined) { var pr = d.querySelector("pre.block"); pr.textContent = o.pre; d.classList.add("wide"); setTimeout(function () { pr.scrollTop = pr.scrollHeight; }, 0); }
       document.body.appendChild(d);
       var ta = d.querySelector("textarea"), se = d.querySelector("select"), form = d.querySelector("form"), done = function (v) { d.close(); d.remove(); resolve(v); };
       var answer = function (extra) { var v = ta ? ta.value.trim() : ""; var out = se || o.alt || extra ? { note: v, pick: se ? se.value : "" } : v; if (extra && typeof out === "object") out.alt = true; return out; };
@@ -791,6 +797,16 @@ const HELPERS = String.raw`
     return '<span class="mono" title="the release this worker\'s image was built from">' + esc(w.version) + '</span>';
   }
   function wtArch(w, icon) { return esc(w.arch) + (icon ? ' ' + (w.labels && w.labels.emulated ? WICON.emu.replace('aria-label', 'title="emulated: the other architecture, under qemu on this host" aria-label') : WICON.native.replace('aria-label', 'title="native" aria-label')) : ''); }
+  // The worker's own log, for its owner and the maintainers (the pool answers 403 to anyone else): an icon that opens the tail.
+  function wtLog(w) { return ME && (ME.role === "maintainer" || (w.owner && ME.login === w.owner)) ? ' <button type="button" class="iconbtn" data-wlog="' + esc(w.id) + '" title="its own log — the lines between tasks, as it sent them">' + WICON.log + '</button>' : ''; }
+  document.addEventListener("click", function (ev) {
+    var b = ev.target.closest ? ev.target.closest("button[data-wlog]") : null; if (!b) return;
+    var id = b.getAttribute("data-wlog");
+    fetch("/api/v1/factory/workers/" + encodeURIComponent(id) + "/log", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (d) {
+      if (d.error) { toast(esc(d.error), "error"); return; }
+      ask({ title: id, text: d.at ? "its own log, last line " + esc(ago(d.at)) + " — a build's output is on the build's page" : "nothing sent yet — the log arrives with each claim, within the minute", pre: d.log || "", confirm: null, cancel: "Close" });
+    }).catch(function () { toast("could not load the log", "error"); });
+  });
   function wtMode(w) { return w.mode === "shared" ? WICON.shared.replace('aria-label', 'title="shared: builds whatever is queued, anyone\'s" aria-label') : WICON.own.replace('aria-label', 'title="' + esc(w.packages && w.packages.length ? "own packages: " + w.packages.join(", ") : "the owner\'s packages only") + '" aria-label'); }
   var WT_PROV = { anthropic: "A", "claude-code": "CC", openai: "OA", gemini: "G", xai: "X" };
   // The agent, and whether it answers: the dot is the last probe (green answered, red did not, grey never asked), the chip the provider, then the model.
@@ -822,12 +838,12 @@ const HELPERS = String.raw`
     community: '<th>Worker</th><th>Status</th><th>Owner</th><th>Arch</th><th>Version</th><th title="shared: builds whatever is queued · own: the owner\'s packages only">Mode</th><th>Agent</th><th title="what the machine uses: an average the worker keeps and reports with its claims">CPU · RAM · Disk</th><th>Done / failed</th><th>Last build</th>'
   };
   function workerRow(w, kind, extra) {
-    var cells = kind === "project" ? [wtId(w), wtStatus(w), wtArch(w, false), wtVersion(w), wtPerson(w.owner), wtUsage(w), wtCounts(w), wtLast(w)]
-      : kind === "review" ? [wtId(w), wtStatus(w), wtArch(w, true), wtVersion(w), wtPerson(w.owner), wtAgent(w), wtUsage(w), wtCounts(w), wtLast(w)]
-      : [wtId(w), wtStatus(w), wtPerson(w.owner), wtArch(w, true), wtVersion(w), wtMode(w), wtAgent(w), wtUsage(w), wtCounts(w), wtLast(w)];
+    var cells = kind === "project" ? [wtId(w) + wtLog(w), wtStatus(w), wtArch(w, false), wtVersion(w), wtPerson(w.owner), wtUsage(w), wtCounts(w), wtLast(w)]
+      : kind === "review" ? [wtId(w) + wtLog(w), wtStatus(w), wtArch(w, true), wtVersion(w), wtPerson(w.owner), wtAgent(w), wtUsage(w), wtCounts(w), wtLast(w)]
+      : [wtId(w) + wtLog(w), wtStatus(w), wtPerson(w.owner), wtArch(w, true), wtVersion(w), wtMode(w), wtAgent(w), wtUsage(w), wtCounts(w), wtLast(w)];
     return '<tr><td>' + cells.join('</td><td>') + '</td>' + (extra ? '<td>' + extra + '</td>' : '') + '</tr>';
   }
-  var WT_LEGEND = '<p class="dim wt-legend">' + '<span>' + WICON.native + ' native</span><span>' + WICON.emu + ' emulated</span><span>' + WICON.shared + ' shared</span><span>' + WICON.own + ' own packages</span><span><span class="pill ok">idle</span> waiting</span><span><span class="pill blue">building</span> a task in hand</span><span><span class="pill error">failed</span> its agent does not answer</span><span><span class="pill warn">outdated</span> behind the latest image, handed nothing</span><span><span class="pill none">offline</span> not seen in ten minutes</span></p>';
+  var WT_LEGEND = '<p class="dim wt-legend">' + '<span>' + WICON.native + ' native</span><span>' + WICON.emu + ' emulated</span><span>' + WICON.shared + ' shared</span><span>' + WICON.own + ' own packages</span><span><span class="pill ok">idle</span> waiting</span><span><span class="pill blue">building</span> a task in hand</span><span><span class="pill error">failed</span> its agent does not answer</span><span><span class="pill warn">outdated</span> behind the latest image, handed nothing</span><span><span class="pill none">offline</span> not seen in ten minutes</span><span>' + WICON.log + ' its own log (its owner, the maintainers)</span></p>';
   // A person's login as a link to their page; a pill with a title. Shared by the pages that tell a package's story.
   function personLink(l) { return l ? '<a href="/user/' + encodeURIComponent(l) + '">' + esc(l) + '</a>' : '<span class="muted">—</span>'; }
   function pillHtml(cls, text, title) { return '<span class="pill ' + cls + '"' + (title ? ' title="' + esc(title) + '"' : '') + '>' + esc(text) + '</span>'; }
