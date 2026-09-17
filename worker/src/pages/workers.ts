@@ -11,6 +11,7 @@
  * a chapter of the docs.
  */
 import { page } from "./layout";
+import type { Component, Fixture } from "./components";
 import { CHARTS } from "./charts";
 import type { RunningVersion } from "../meta";
 
@@ -130,3 +131,19 @@ export function workersHtml(poolUrl: string, version: RunningVersion): string {
     version,
   });
 }
+
+/** What /workers is made of: the three tables are one component — the same read, three anchors — with the week's series behind the charts. */
+export const WORKERS_COMPONENTS = (_F: Fixture): Component[] => [
+  {
+    id: "workers.table",
+    page: "/workers",
+    anchor: ['id="w-project"', 'id="w-review"', 'id="w-community"', 'id="wt-legend"', 'id="all-workers"'],
+    script: ['"/api/v1/factory?limit=10"', '"#w-project"', '"#w-review"', '"#w-community"', "workers_daily", "jobs_daily", "builds_daily"],
+    reads: [
+      { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.id", "workers.0.arch", "workers.0.trust", "workers.0.mode", "workers.0.ready", "workers.0.agent", "workers.0.usage", "workers.0.last_task", "workers.0.builds_done", "tasks", "counts"] },
+      { path: "/api/v1/stats", fields: ["series.workers_daily", "series.jobs_daily", "series.builds_daily"] },
+    ],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+];
+

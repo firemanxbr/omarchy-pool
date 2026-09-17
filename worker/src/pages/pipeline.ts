@@ -8,6 +8,7 @@
  * themselves have a page of their own (/workers), by kind.
  */
 import { page } from "./layout";
+import type { Component, Fixture } from "./components";
 import { CHARTS } from "./charts";
 import { archDiagram, liveDiagram } from "./diagrams";
 import type { RunningVersion } from "../meta";
@@ -365,3 +366,6 @@ export function pipelineHtml(poolUrl: string, version: RunningVersion): string {
     version,
   });
 }
+
+/** What /pipeline is made of, for test/components.test.ts — see components.ts. */
+export const PIPELINE_COMPONENTS = (_F: Fixture): Component[] => [];

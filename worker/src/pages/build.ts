@@ -9,6 +9,7 @@
  * Review. A pool job (sync, health, …) gets the same page, shorter.
  */
 import { page } from "./layout";
+import type { Component, Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 
 const BODY = String.raw`
@@ -260,3 +261,6 @@ export function buildHtml(id: number, poolUrl: string, version: RunningVersion):
     version,
   });
 }
+
+/** What /build/<id> is made of, for test/components.test.ts — see components.ts. */
+export const BUILD_COMPONENTS = (_F: Fixture): Component[] => [];

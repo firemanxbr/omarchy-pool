@@ -5,6 +5,7 @@
  * Pool's "Made in the open" numbers; each name leads to its profile.
  */
 import { page } from "./layout";
+import type { Component, Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 
 const BODY = String.raw`
@@ -95,3 +96,6 @@ export function peopleHtml(poolUrl: string, version: RunningVersion): string {
     version,
   });
 }
+
+/** What /people is made of, for test/components.test.ts — see components.ts. */
+export const PEOPLE_COMPONENTS = (_F: Fixture): Component[] => [];

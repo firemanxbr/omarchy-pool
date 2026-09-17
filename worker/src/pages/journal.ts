@@ -4,6 +4,7 @@
  * and status; a signed-in maintainer rolls a ring back from here.
  */
 import { page } from "./layout";
+import type { Component, Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 
 const BODY = String.raw`
@@ -83,3 +84,6 @@ export function journalHtml(poolUrl: string, version: RunningVersion): string {
     version,
   });
 }
+
+/** What /journal is made of, for test/components.test.ts — see components.ts. */
+export const JOURNAL_COMPONENTS = (_F: Fixture): Component[] => [];

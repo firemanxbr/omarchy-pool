@@ -7,6 +7,7 @@
  * record, then the build is one press away.
  */
 import { page, GITHUB_ICON } from "./layout";
+import type { Component, Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 
 const BODY = String.raw`
@@ -110,3 +111,6 @@ export function requestHtml(poolUrl: string, version: RunningVersion): string {
     version,
   });
 }
+
+/** What /request is made of, for test/components.test.ts — see components.ts. */
+export const REQUEST_COMPONENTS = (_F: Fixture): Component[] => [];

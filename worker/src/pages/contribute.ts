@@ -6,6 +6,7 @@
  * GitHub" lands.
  */
 import { page } from "./layout";
+import type { Component, Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 import { GITHUB_ICON } from "./layout";
 import { CHARTS } from "./charts";
@@ -120,3 +121,6 @@ export function factoryHtml(poolUrl: string, version: RunningVersion): string {
     version,
   });
 }
+
+/** What /factory is made of, for test/components.test.ts — see components.ts. */
+export const FACTORY_COMPONENTS = (_F: Fixture): Component[] => [];

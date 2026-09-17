@@ -4,6 +4,7 @@
  * the jobs, the charts. The page to open when something looks off.
  */
 import { page } from "./layout";
+import type { Component, Fixture } from "./components";
 import { CHARTS } from "./charts";
 import type { RunningVersion } from "../meta";
 
@@ -234,3 +235,6 @@ export function statusHtml(poolUrl: string, version: RunningVersion): string {
     version,
   });
 }
+
+/** What /status is made of, for test/components.test.ts — see components.ts. */
+export const STATUS_COMPONENTS = (_F: Fixture): Component[] => [];

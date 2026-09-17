@@ -7,6 +7,7 @@
  * is the public API (`/api/v1/factory/*`) with the browser session.
  */
 import { page } from "./layout";
+import type { Component, Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 import { REPO_URL } from "../meta";
 
@@ -396,3 +397,6 @@ export function userHtml(login: string, poolUrl: string, version: RunningVersion
     version,
   });
 }
+
+/** What /user/<login> is made of, for test/components.test.ts — see components.ts. */
+export const USER_COMPONENTS = (_F: Fixture): Component[] => [];

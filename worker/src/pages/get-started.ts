@@ -4,6 +4,7 @@
  * the optional thin client. `?ring=stable&arch=x86_64` preselects.
  */
 import { page } from "./layout";
+import type { Component, Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 
 const BODY = String.raw`
@@ -132,3 +133,6 @@ export function getStartedHtml(poolUrl: string, version: RunningVersion): string
     version,
   });
 }
+
+/** What /docs/get-started is made of, for test/components.test.ts — see components.ts. */
+export const GET_STARTED_COMPONENTS = (_F: Fixture): Component[] => [];

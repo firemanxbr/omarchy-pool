@@ -4,6 +4,7 @@
  * advisory per ring — is the Security page (/security).
  */
 import { page } from "./layout";
+import type { Component, Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 
 const FEEDS: [string, string, string][] = [
@@ -68,3 +69,6 @@ export function docsSecurityHtml(poolUrl: string, version: RunningVersion): stri
     version,
   });
 }
+
+/** What /docs/security is made of, for test/components.test.ts — see components.ts. */
+export const DOCS_SECURITY_COMPONENTS = (_F: Fixture): Component[] => [];

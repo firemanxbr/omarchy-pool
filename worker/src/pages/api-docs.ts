@@ -2,6 +2,7 @@
  * API: the endpoints a script, an agent or omarchy-cli uses, with examples.
  */
 import { page } from "./layout";
+import type { Component, Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 
 const BODY = String.raw`
@@ -108,3 +109,6 @@ export function apiDocsHtml(poolUrl: string, version: RunningVersion): string {
     version,
   });
 }
+
+/** What /api is made of, for test/components.test.ts — see components.ts. */
+export const API_DOCS_COMPONENTS = (_F: Fixture): Component[] => [];

@@ -4,6 +4,7 @@
  * ring depends on it.
  */
 import { page } from "./layout";
+import type { Component, Fixture } from "./components";
 import { CHARTS } from "./charts";
 import type { RunningVersion } from "../meta";
 
@@ -116,3 +117,6 @@ export function securityHtml(poolUrl: string, version: RunningVersion): string {
     version,
   });
 }
+
+/** What /security is made of, for test/components.test.ts — see components.ts. */
+export const SECURITY_COMPONENTS = (_F: Fixture): Component[] => [];

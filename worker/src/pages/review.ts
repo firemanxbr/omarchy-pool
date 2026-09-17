@@ -7,6 +7,7 @@
  * the project builds the recipe again from the evidence (docs/GOVERNANCE.md).
  */
 import { page } from "./layout";
+import type { Component, Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 import { CATEGORIES } from "../categories";
 
@@ -313,3 +314,21 @@ export function reviewHtml(poolUrl: string, version: RunningVersion): string {
     version,
   });
 }
+
+/** What /review is made of: the decision cell — three buttons the script renders into the staged table, each an act only a maintainer, never the owner, gets through. */
+export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
+  {
+    id: "review.decision-buttons",
+    page: "/review",
+    anchor: ['id="staged"', 'class="decision"'],
+    script: ["data-approve", "data-reject", "data-build", '"/tasks/" + id + "/" + what'],
+    reads: [{ path: "/api/v1/factory/review", fields: ["staged", "staged.0.id", "staged.0.kind", "staged.0.owner", "staged.0.trust", "staged.0.audit", "staged.0.project_build"] }],
+    acts: [
+      { method: "POST", path: `/api/v1/factory/tasks/${F.projectTask}/approve`, body: { note: "reads well" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: [200, 409] } },
+      { method: "POST", path: `/api/v1/factory/tasks/${F.stagedTask}/build`, body: {}, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: [200, 409] } },
+      { method: "POST", path: `/api/v1/factory/tasks/${F.disposableTask}/reject`, body: { note: "the source is not the upstream's" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 200 } },
+    ],
+    visible: ["maintainer"],
+  },
+];
+

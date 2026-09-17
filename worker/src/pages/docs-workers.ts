@@ -5,6 +5,7 @@
  * running the project's work.
  */
 import { page } from "./layout";
+import type { Component, Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 import { DASHBOARD_HOST, REPO_URL } from "../meta";
 
@@ -180,3 +181,6 @@ export function docsWorkersHtml(poolUrl: string, version: RunningVersion): strin
     version,
   });
 }
+
+/** What /docs/workers is made of, for test/components.test.ts — see components.ts. */
+export const DOCS_WORKERS_COMPONENTS = (_F: Fixture): Component[] => [];

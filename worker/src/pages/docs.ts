@@ -5,6 +5,7 @@
  * never the page around it.
  */
 import { page } from "./layout";
+import type { Component, Fixture } from "./components";
 import { DOCS_TREE, GLOSSARY } from "./docs-tree";
 import { termId } from "./layout";
 import type { RunningVersion } from "../meta";
@@ -45,3 +46,6 @@ export function docsHtml(poolUrl: string, version: RunningVersion): string {
     version,
   });
 }
+
+/** What /docs is made of, for test/components.test.ts — see components.ts. */
+export const DOCS_COMPONENTS = (_F: Fixture): Component[] => [];

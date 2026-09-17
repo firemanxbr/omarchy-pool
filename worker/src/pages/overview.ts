@@ -5,6 +5,7 @@
  * needed here; the details live one link away (Status, Journal, Packages).
  */
 import { page } from "./layout";
+import type { Component, Fixture } from "./components";
 import { CHARTS } from "./charts";
 import { ringsDiagram } from "./diagrams";
 import type { RunningVersion } from "../meta";
@@ -317,3 +318,6 @@ export function overviewHtml(poolUrl: string, version: RunningVersion): string {
     version,
   });
 }
+
+/** What / is made of, for test/components.test.ts — see components.ts. */
+export const OVERVIEW_COMPONENTS = (_F: Fixture): Component[] => [];

@@ -4,6 +4,7 @@
  * on it, drawn as a graph — with the file list on demand.
  */
 import { page } from "./layout";
+import type { Component, Fixture } from "./components";
 import { CHARTS } from "./charts";
 import type { RunningVersion } from "../meta";
 
@@ -433,3 +434,27 @@ export function packageHtml(name: string, poolUrl: string, version: RunningVersi
     version,
   });
 }
+
+/** What /packages is made of, for test/components.test.ts — see components.ts. */
+export const PACKAGES_COMPONENTS = (_F: Fixture): Component[] => [];
+
+/** What /package/<name> is made of: the dependency graph and the file list, each with the read it draws from. */
+export const PACKAGE_COMPONENTS = (F: Fixture): Component[] => [
+  {
+    id: "package.graph",
+    page: `/package/${F.pkg}`,
+    anchor: ['id="graph-card"', 'id="graph"'],
+    script: ['"/api/v1/package/"', '"#graph"', "required_by", "depends", "links"],
+    reads: [{ path: `/api/v1/package/${F.pkg}?ring=stable&arch=${F.arch}`, fields: ["name", "shown_ring", "required_by", "depends", "links", "security.exposed", "rings"] }],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+  {
+    id: "package.files",
+    page: `/package/${F.pkg}`,
+    anchor: ['id="load-files"', 'id="files"'],
+    script: ['"#load-files"', '"#files"', '"/files?ring="'],
+    reads: [{ path: `/api/v1/package/${F.pkg}/files?ring=stable&arch=${F.arch}`, fields: ["files"] }],
+    visible: ["anonymous", "contributor", "owner", "maintainer"],
+  },
+];
+

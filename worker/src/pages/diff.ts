@@ -4,6 +4,7 @@
  * rollback line in the journal points at. Reads GET /releases/:ring/diff.
  */
 import { page } from "./layout";
+import type { Component, Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 
 const BODY = String.raw`
@@ -62,3 +63,6 @@ export function diffHtml(poolUrl: string, version: RunningVersion): string {
     version,
   });
 }
+
+/** What /diff is made of, for test/components.test.ts — see components.ts. */
+export const DIFF_COMPONENTS = (_F: Fixture): Component[] => [];

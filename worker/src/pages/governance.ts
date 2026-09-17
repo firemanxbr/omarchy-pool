@@ -5,6 +5,7 @@
  * the maintainers the pool applied from that file.
  */
 import { page } from "./layout";
+import type { Component, Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 import { REPO_URL } from "../meta";
 
@@ -124,3 +125,6 @@ export function governanceHtml(poolUrl: string, version: RunningVersion): string
     version,
   });
 }
+
+/** What /docs/governance is made of, for test/components.test.ts — see components.ts. */
+export const GOVERNANCE_COMPONENTS = (_F: Fixture): Component[] => [];

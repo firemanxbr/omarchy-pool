@@ -5,8 +5,9 @@
  * the old addresses rely on, and leaves no template placeholder behind.
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import worker from "../src/index";
+import { seedDashboard, type Fixture } from "./fixture";
 
 async function get(path: string): Promise<Response> {
   const ctx = createExecutionContext();
@@ -15,7 +16,13 @@ async function get(path: string): Promise<Response> {
   return res;
 }
 
-const PAGES = ["/", "/factory", "/contribute", "/review", "/pipeline", "/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/what-we-test", "/docs/governance", "/docs/security", "/docs/glossary", "/docs/architecture", "/docs/runbook", "/docs/testing", "/docs/migration", "/docs/factory", "/docs/worker-host", "/docs/security-model", "/docs/contributing", "/docs/proof-of-concept", "/docs/open-work", "/docs/omarchy-cli-mcp", "/packages", "/package/zlib", "/build/1", "/security", "/status", "/journal", "/workers", "/request", "/user/someone", "/people", "/api", "/diff"];
+// The pages are served over the fixture's data (test/fixture.ts): the package, the build and the person exist.
+let F: Fixture;
+let PAGES: string[];
+beforeAll(async () => {
+  F = await seedDashboard(env);
+  PAGES = ["/", "/factory", "/contribute", "/review", "/pipeline", "/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/what-we-test", "/docs/governance", "/docs/security", "/docs/glossary", "/docs/architecture", "/docs/runbook", "/docs/testing", "/docs/migration", "/docs/factory", "/docs/worker-host", "/docs/security-model", "/docs/contributing", "/docs/proof-of-concept", "/docs/open-work", "/docs/omarchy-cli-mcp", "/packages", `/package/${F.pkg}`, `/build/${F.projectTask}`, "/security", "/status", "/journal", "/workers", "/request", `/user/${F.owner}`, "/people", "/api", "/diff"];
+});
 
 describe("dashboard pages", () => {
   it("every page is served with the shared frame and no placeholder left behind", async () => {

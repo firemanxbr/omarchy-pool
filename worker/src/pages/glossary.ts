@@ -1,5 +1,6 @@
 /** The glossary: the words on these pages, one line each; every term an anchor the search links to. */
 import { page, termId } from "./layout";
+import type { Component, Fixture } from "./components";
 import { GLOSSARY } from "./docs-tree";
 import type { RunningVersion } from "../meta";
 
@@ -24,3 +25,6 @@ export function glossaryHtml(poolUrl: string, version: RunningVersion): string {
     version,
   });
 }
+
+/** What /docs/glossary is made of, for test/components.test.ts — see components.ts. */
+export const GLOSSARY_COMPONENTS = (_F: Fixture): Component[] => [];

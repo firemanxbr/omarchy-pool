@@ -7,6 +7,7 @@
  * (diagrams.ts) and its live lines are filled from /api/v1/stats.
  */
 import { page } from "./layout";
+import type { Component, Fixture } from "./components";
 import { ringsDiagram, sourcesDiagram, type Stage } from "./diagrams";
 
 const STAGES: Stage[] = ["sync", "pin", "promote", "render", "serve"];
@@ -204,3 +205,6 @@ export function howItWorksHtml(poolUrl: string, version: RunningVersion): string
     version,
   });
 }
+
+/** What /docs/how-it-works is made of, for test/components.test.ts — see components.ts. */
+export const HOW_IT_WORKS_COMPONENTS = (_F: Fixture): Component[] => [];
