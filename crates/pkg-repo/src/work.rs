@@ -1520,16 +1520,16 @@ fn build_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
             .output()
             .map(|o| o.stdout)
             .unwrap_or_default();
+        // Streamed from disk, in parts above 90 MB: an Electron app is a
+        // 144 MB package, and a single body that size never reaches the
+        // pool (the edge answers 413 first).
         for p in &pkgs {
             let name = p
                 .file_name()
                 .map(|f| f.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            job.put_bytes(
-                &format!("/factory/tasks/{}/artifacts/{name}", task.id),
-                &std::fs::read(p)?,
-            )
-            .with_context(|| format!("staging {name}"))?;
+            job.stage_file(task.id, &name, p)
+                .with_context(|| format!("staging {name}"))?;
         }
         if !pkginfo.is_empty() {
             job.put_bytes(

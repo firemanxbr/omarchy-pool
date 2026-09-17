@@ -362,6 +362,11 @@ POST /factory/tasks/:id/complete    {sha256, filename, version?, duration_ms?, l
   409 unless the sha256 is in the pool (project) or in staging (community)
 POST /factory/tasks/:id/fail        {error, duration_ms?, log_tail?}
   → {status:"queued"} while attempts < max_attempts, else {status:"failed"}
+PUT  /factory/tasks/:id/artifacts/:name                           (the job token) the evidence and the packages, one body up to 90 MB
+POST /factory/tasks/:id/artifacts/:name/multipart?action=create · part&part=N&upload_id= · complete · abort
+                                                                   a package above 90 MB, in 64 MB parts — the edge refuses a single body
+                                                                   above 100 MB before the pool sees it; both workers upload this way,
+                                                                   the project's review build included (bitwarden, 144 MB, 2026-09-17)
 ```
 
 A claim is one `UPDATE … WHERE id = (SELECT … LIMIT 1) RETURNING *`; D1

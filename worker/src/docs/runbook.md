@@ -482,7 +482,12 @@ but the sizing ones (`factory/sizing/`, benchmarks). Day to day:
   the Factory page with their PKGBUILD and log; the packages themselves are
   readable by maintainers (`GET /api/v1/factory/tasks/:id/artifacts/<file>`).
   Quotas per contributor: 10 tasks queued or building, 5 GB staged; a
-  single PUT and a multipart upload honour the same cap. The pool gives
+  single PUT and a multipart upload honour the same cap. A package above
+  90 MB goes up in 64 MB parts — from the community worker and from the
+  project's review build alike (`pkg-repo`'s `stage_file`); a single body
+  above 100 MB never reaches the pool, the edge answers 413 first
+  (bitwarden's 144 MB review build failed three times that way on
+  2026-09-17). The pool gives
   the space back on its own (`worker/src/staging.ts`): the packages of a
   build it is done with — superseded, rejected, failed for good, published,
   cancelled — go at that moment, their PKGBUILD, log, gate and audit stay

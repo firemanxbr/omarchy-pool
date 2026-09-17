@@ -228,6 +228,18 @@ struct PartDone {
     etag: String,
 }
 
+/// What the staging multipart endpoints answer (`/factory/tasks/:id/artifacts/:name/multipart`).
+#[derive(Debug, Deserialize)]
+struct StagingMultipartCreated {
+    upload_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct StagingPartDone {
+    part: u32,
+    etag: String,
+}
+
 /// Retries transient failures (network errors, 429, 5xx) with backoff.
 fn with_retry<T>(what: &str, mut f: impl FnMut() -> Result<T, RepoError>) -> Result<T, RepoError> {
     let mut delay = Duration::from_millis(800);
@@ -730,6 +742,114 @@ impl Api {
         })
     }
 
+    /// A file into a task's staging workspace: one `PUT` up to
+    /// `SINGLE_PUT_MAX`, the staging multipart endpoints above it — the way
+    /// the community worker's `upload_staging` does. The edge refuses a
+    /// single body above 100 MB before the pool sees it (2026-09-17,
+    /// bitwarden's 144 MB review build: three attempts into a 413).
+    pub fn stage_file(&self, task: u64, name: &str, file: &Path) -> Result<(), RepoError> {
+        self.stage_file_sized(task, name, file, SINGLE_PUT_MAX, PART_SIZE)
+    }
+
+    /// `stage_file` with the two sizes as arguments (the test sends bytes, not megabytes).
+    fn stage_file_sized(
+        &self,
+        task: u64,
+        name: &str,
+        file: &Path,
+        single_max: u64,
+        part_size: u64,
+    ) -> Result<(), RepoError> {
+        let len = std::fs::metadata(file)?.len();
+        let path = format!("/factory/tasks/{task}/artifacts/{name}");
+        if len <= single_max {
+            return with_retry("stage_file", || {
+                let f = std::fs::File::open(file)?;
+                let resp = self
+                    .http
+                    .put(self.url(&path))
+                    .bearer_auth(&self.token)
+                    .header("content-type", "application/octet-stream")
+                    .header("content-length", len)
+                    .body(reqwest::blocking::Body::sized(f, len))
+                    .send()?;
+                Self::check(resp).map(|_| ())
+            });
+        }
+        let base = self.url(&format!("{path}/multipart"));
+        let created: StagingMultipartCreated = with_retry("staging_multipart_create", || {
+            let resp = self
+                .http
+                .post(&base)
+                .query(&[("action", "create")])
+                .bearer_auth(&self.token)
+                .send()?;
+            Ok(Self::check(resp)?.json()?)
+        })?;
+        let upload_id = created.upload_id.as_str();
+        let uploaded = (|| -> Result<Vec<serde_json::Value>, RepoError> {
+            let mut f = std::fs::File::open(file)?;
+            let mut parts = Vec::new();
+            let mut part_number = 1u32;
+            let mut buf = vec![
+                0u8;
+                usize::try_from(part_size).map_err(|_| RepoError::Api {
+                    status: 0,
+                    body: "part size does not fit usize".into()
+                })?
+            ];
+            loop {
+                let n = read_full(&mut f, &mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                let chunk = buf[..n].to_vec();
+                let part = part_number.to_string();
+                let done: StagingPartDone = with_retry("staging_multipart_part", || {
+                    let resp = self
+                        .http
+                        .post(&base)
+                        .query(&[
+                            ("action", "part"),
+                            ("part", &part),
+                            ("upload_id", upload_id),
+                        ])
+                        .bearer_auth(&self.token)
+                        .body(chunk.clone())
+                        .send()?;
+                    Ok(Self::check(resp)?.json()?)
+                })?;
+                parts.push(serde_json::json!({ "partNumber": done.part, "etag": done.etag }));
+                part_number += 1;
+            }
+            Ok(parts)
+        })();
+        let parts = match uploaded {
+            Ok(parts) => parts,
+            Err(e) => {
+                // A part that would not go: the upload is abandoned, so the
+                // bucket keeps no half of a package nobody completes.
+                let _ = self
+                    .http
+                    .post(&base)
+                    .query(&[("action", "abort"), ("upload_id", upload_id)])
+                    .bearer_auth(&self.token)
+                    .send();
+                return Err(e);
+            }
+        };
+        with_retry("staging_multipart_complete", || {
+            let resp = self
+                .http
+                .post(&base)
+                .query(&[("action", "complete"), ("upload_id", upload_id)])
+                .bearer_auth(&self.token)
+                .json(&serde_json::json!({ "parts": parts }))
+                .send()?;
+            Self::check(resp).map(|_| ())
+        })
+    }
+
     /// `PUT` a JSON body to an authenticated endpoint, retrying on 5xx.
     pub fn put_json(
         &self,
@@ -879,4 +999,166 @@ fn read_full(r: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
         filled += n;
     }
     Ok(filled)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+
+    /// One request as the test server saw it: method, path with query, body.
+    #[derive(Debug, Clone)]
+    struct Seen {
+        method: String,
+        target: String,
+        body: Vec<u8>,
+    }
+
+    /// A one-thread HTTP/1.1 server that records every request and answers
+    /// what the staging endpoints answer. `fail_part` makes that part 500
+    /// on every attempt (the client's retries then give up).
+    fn staging_server(fail_part: Option<u32>) -> (String, Arc<Mutex<Vec<Seen>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap() == 0 {
+                    continue;
+                }
+                let mut words = line.split_whitespace();
+                let method = words.next().unwrap_or_default().to_owned();
+                let target = words.next().unwrap_or_default().to_owned();
+                let mut len = 0usize;
+                loop {
+                    let mut h = String::new();
+                    reader.read_line(&mut h).unwrap();
+                    if h.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") {
+                        len = v.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0u8; len];
+                std::io::Read::read_exact(&mut reader, &mut body).unwrap();
+                let part = target
+                    .split('&')
+                    .find_map(|q| q.strip_prefix("part="))
+                    .and_then(|p| p.parse::<u32>().ok());
+                let (status, answer) = if target.contains("action=create") {
+                    ("201 Created", r#"{"upload_id":"u1","key":"k"}"#.to_owned())
+                } else if target.contains("action=part") {
+                    if part == fail_part {
+                        ("500 Internal Server Error", r#"{"error":"no"}"#.to_owned())
+                    } else {
+                        (
+                            "200 OK",
+                            format!(
+                                r#"{{"part":{},"etag":"e{}"}}"#,
+                                part.unwrap(),
+                                part.unwrap()
+                            ),
+                        )
+                    }
+                } else if target.contains("action=complete") || target.contains("action=abort") {
+                    ("200 OK", r#"{"key":"k","size":0}"#.to_owned())
+                } else {
+                    ("201 Created", r#"{"key":"k","size":0}"#.to_owned())
+                };
+                log.lock().unwrap().push(Seen {
+                    method,
+                    target,
+                    body,
+                });
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{answer}",
+                    answer.len()
+                )
+                .unwrap();
+                stream.flush().unwrap();
+            }
+        });
+        (base, seen)
+    }
+
+    fn file_of(bytes: &[u8]) -> tempfile::NamedTempFile {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(bytes).unwrap();
+        f
+    }
+
+    #[test]
+    fn a_small_artifact_is_one_put() {
+        let (base, seen) = staging_server(None);
+        let api = Api::new(&base, "t").unwrap();
+        let f = file_of(b"0123456789");
+        api.stage_file_sized(7, "a.pkg.tar.zst", f.path(), 10, 4)
+            .unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].method, "PUT");
+        assert_eq!(
+            seen[0].target,
+            "/api/v1/factory/tasks/7/artifacts/a.pkg.tar.zst"
+        );
+        assert_eq!(seen[0].body, b"0123456789");
+    }
+
+    #[test]
+    fn a_large_artifact_goes_in_parts_and_completes() {
+        let (base, seen) = staging_server(None);
+        let api = Api::new(&base, "t").unwrap();
+        let f = file_of(b"0123456789A");
+        api.stage_file_sized(7, "big.pkg.tar.zst", f.path(), 10, 4)
+            .unwrap();
+        let seen = seen.lock().unwrap();
+        let targets: Vec<&str> = seen.iter().map(|s| s.target.as_str()).collect();
+        assert_eq!(
+            targets,
+            [
+                "/api/v1/factory/tasks/7/artifacts/big.pkg.tar.zst/multipart?action=create",
+                "/api/v1/factory/tasks/7/artifacts/big.pkg.tar.zst/multipart?action=part&part=1&upload_id=u1",
+                "/api/v1/factory/tasks/7/artifacts/big.pkg.tar.zst/multipart?action=part&part=2&upload_id=u1",
+                "/api/v1/factory/tasks/7/artifacts/big.pkg.tar.zst/multipart?action=part&part=3&upload_id=u1",
+                "/api/v1/factory/tasks/7/artifacts/big.pkg.tar.zst/multipart?action=complete&upload_id=u1",
+            ]
+        );
+        assert!(seen.iter().all(|s| s.method == "POST"));
+        assert_eq!(seen[1].body, b"0123");
+        assert_eq!(seen[2].body, b"4567");
+        assert_eq!(seen[3].body, b"89A");
+        let complete: serde_json::Value = serde_json::from_slice(&seen[4].body).unwrap();
+        assert_eq!(
+            complete,
+            serde_json::json!({ "parts": [
+                { "partNumber": 1, "etag": "e1" }, { "partNumber": 2, "etag": "e2" }, { "partNumber": 3, "etag": "e3" }
+            ] })
+        );
+    }
+
+    #[test]
+    fn a_part_that_will_not_go_aborts_the_upload() {
+        let (base, seen) = staging_server(Some(2));
+        let api = Api::new(&base, "t").unwrap();
+        let f = file_of(b"0123456789A");
+        let err = api
+            .stage_file_sized(7, "big.pkg.tar.zst", f.path(), 10, 4)
+            .unwrap_err();
+        assert!(matches!(err, RepoError::Api { status: 500, .. }), "{err}");
+        let seen = seen.lock().unwrap();
+        let last = seen.last().unwrap();
+        assert_eq!(
+            last.target,
+            "/api/v1/factory/tasks/7/artifacts/big.pkg.tar.zst/multipart?action=abort&upload_id=u1"
+        );
+        assert!(!seen.iter().any(|s| s.target.contains("action=complete")));
+    }
 }
