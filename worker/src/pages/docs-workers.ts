@@ -170,8 +170,9 @@ FACTORY_PROVIDER=claude-code</pre>
   </section>
 `;
 
-export function docsWorkersHtml(poolUrl: string, version: RunningVersion, path = "/docs/workers"): string {
+export function docsWorkersHtml(poolUrl: string, version: RunningVersion): string {
   return page({
+    path: "/docs/workers",
     title: "Run a worker · omarchy-pool",
     description: "The container images on GitHub Packages and how to run them with Docker Desktop or Podman, as a contributor or a maintainer.",
     active: "docs",
@@ -179,7 +180,6 @@ export function docsWorkersHtml(poolUrl: string, version: RunningVersion, path =
     body: BODY,
     poolUrl,
     version,
-    path,
   });
 }
 

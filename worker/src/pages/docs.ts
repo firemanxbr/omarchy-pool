@@ -33,8 +33,9 @@ const BODY = String.raw`
   <div class="doc-cards">${CODE}</div>
 `;
 
-export function docsHtml(poolUrl: string, version: RunningVersion, path = "/docs"): string {
+export function docsHtml(poolUrl: string, version: RunningVersion): string {
   return page({
+    path: "/docs",
     title: "Documentation · omarchy-pool",
     description: "How to use the pool, how to build for it, how it works and who decides what — one map, one search.",
     active: "docs",
@@ -42,7 +43,6 @@ export function docsHtml(poolUrl: string, version: RunningVersion, path = "/docs
     body: BODY,
     poolUrl,
     version,
-    path,
   });
 }
 

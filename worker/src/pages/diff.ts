@@ -52,8 +52,9 @@ const SCRIPT = String.raw`
   }).catch(function (e) { $("#line").textContent = "failed: " + e; endSkeleton(); });
 `;
 
-export function diffHtml(poolUrl: string, version: RunningVersion, path = "/diff"): string {
+export function diffHtml(poolUrl: string, version: RunningVersion): string {
   return page({
+    path: "/diff",
     title: "Release diff · omarchy-pool",
     description: "What changed between two releases of a ring: added, removed, upgraded packages.",
     active: "none",
@@ -61,7 +62,6 @@ export function diffHtml(poolUrl: string, version: RunningVersion, path = "/diff
     script: SCRIPT,
     poolUrl,
     version,
-    path,
   });
 }
 

@@ -24,6 +24,14 @@ async function get(path: string, cookie?: string): Promise<Response> {
   return res;
 }
 
+// The page's own script is what follows the shell: page() splices HELPERS whole, so its last lines mark where the page's statements begin — a check on what a page draws must not read the shell's workerRow, avatar or personLink as the page's.
+const shellEnd = HELPERS.slice(-120);
+function ownScript(html: string): string {
+  const script = scriptOf(html), at = script.indexOf(shellEnd);
+  expect(at, "the shell is spliced whole").toBeGreaterThan(0);
+  return script.slice(at + shellEnd.length);
+}
+
 // The pages are served over the fixture's data (test/fixture.ts): the package, the build and the person exist.
 let F: Fixture;
 let PAGES: string[];
@@ -64,39 +72,48 @@ describe("dashboard pages", () => {
     expect(res.headers.get("cache-control")).toBe("no-store");
     res = await get("/me", F.sessions.maintainer);
     expect(res.headers.get("location")).toBe(`/user/${F.m2}`);
+    // A HEAD — a link checker's — is answered as a GET is, not by whatever follows.
+    const ctx = createExecutionContext();
+    res = await worker.fetch(new Request("http://pool.test/me", { method: "HEAD" }), env, ctx);
+    await waitOnExecutionContext(ctx);
+    expect(res.status).toBe(302);
     for (const [from, to] of [["/contribute", "/factory"], ["/index.html", "/"]]) {
       res = await get(from);
       expect(res.status, from).toBe(301);
       expect(res.headers.get("location"), from).toBe(`http://pool.test${to}`);
     }
     expect((await get("/factory")).status).toBe(200);
-    // The sign-in start keeps `next` for the callback in its state cookie: a page's path stays, another host does not.
-    for (const [next, kept] of [["/workers", "/workers"], [`/build/${F.projectTask}`, `/build/${F.projectTask}`], ["//evil.example", "/factory"], ["/\\evil.example", "/factory"], ["https://evil.example/", "/factory"]]) {
+    // The sign-in start keeps `next` for the callback in its state cookie: a page's path stays, its query too (a renewal's name); another host does not, nor a control character — a newline in the Location would make the callback throw after the session was replaced.
+    for (const [next, kept] of [["/workers", "/workers"], [`/build/${F.projectTask}`, `/build/${F.projectTask}`], ["/request?renew=zlib", "/request?renew=zlib"], ["//evil.example", "/factory"], ["/\\evil.example", "/factory"], ["https://evil.example/", "/factory"], ["/\nevil", "/factory"], ["/x\u0000y", "/factory"]]) {
       res = await get(`/auth/github?next=${encodeURIComponent(next)}`);
       expect(res.status, next).toBe(302);
       expect(res.headers.get("set-cookie"), next).toContain(`:${encodeURIComponent(kept)};`);
     }
   });
 
-  // The header's Sign in names the page it is on, a build's page and a package's included — so a maintainer who signs in from a build lands on the build, not on Review. The docs sidebar's hint is written from MORE, so it names every page the footer links and no other.
+  // The header's Sign in names the page it is on, a build's page and a package's included — so a maintainer who signs in from a build lands on the build, not on Review. The served href is the path; the shell's script rewrites it to the whole address once the query is known, so /request?renew=zlib signs in and comes back to the renewal. The docs sidebar's hint is written from MORE, so it names every page the footer links and no other.
   it("sends the sign-in back to the page it was pressed on, and the docs hint names the footer's pages", async () => {
-    for (const path of ["/workers", `/build/${F.projectTask}`, `/package/${F.pkg}`, `/user/${F.owner}`, "/docs/runbook", "/request"]) {
+    for (const path of ["/workers", `/build/${F.projectTask}`, `/package/${F.pkg}`, `/user/${F.owner}`, "/docs/runbook", "/request", "/review"]) {
       const html = await (await get(path)).text();
       expect(html, path).toContain(`<a id="account" href="/auth/github?next=${path}" title=`);
       expect(html, path).not.toContain("next=/me");
+      expect(scriptOf(html), path).toContain('if (location.search) document.querySelectorAll(\'a[href^="/auth/github?next="]\')');
     }
-    // The one place `next=/me` stays: the Factory gate's way to the reader's own page, whoever they turn out to be.
+    // The one place `next=/me` stays: the Factory gate's way to the reader's own page, whoever they turn out to be. The two workspace links — the Request's, Review's — are /me itself, one href for everyone.
     const factory = await (await get("/factory")).text();
     expect(factory).toContain('id="gate-btn" href="/auth/github?next=/me"');
     expect(factory).toContain('id="account" href="/auth/github?next=/factory"');
+    expect(await (await get("/request")).text()).toContain('<a id="ws" href="/me">Your workspace</a>');
+    expect(await (await get("/review")).text()).toContain('id="mine-ws" href="/me"');
     const docs = await (await get("/docs")).text();
     const hint = /<div class="docs-hint">([^<]*)<\/div>/.exec(docs)?.[1] ?? "";
     for (const m of MORE) if (m.href !== "/docs") expect(hint, m.label).toContain(m.label);
     expect(hint).toContain("the four doors are the header");
     for (const n of NAV) expect(hint, n.label).not.toContain(n.label);
-    // The footer lights the entry the reader is on or under: the page's script says so for a chapter and for a package.
+    // The footer lights the entry the reader is on or under: the page's script says so for a chapter, for a package and for the diff under the Journal.
     expect(docs).toContain('here.indexOf(href + "/") === 0');
     expect(docs).toContain('href === "/packages" && here.indexOf("/package/") === 0');
+    expect(docs).toContain('href === "/journal" && here === "/diff"');
   });
 
   // Every name a page's script uses is declared somewhere in that script (the shell's helpers, the charts, the page's own) or is the browser's — parsed, not grepped: a helper moved out of one page and dropped from another is a ReferenceError the tests would not otherwise see (the Workers page lost perDay() and COLOR that way, 2026-09-17).
@@ -282,17 +299,17 @@ describe("dashboard pages", () => {
     // The frame is the same on every page, so the header's and the footer's links are read once, from the Pool's.
     const home = await (await get("/")).text();
     const frameHtml = (home.match(/<header>[\s\S]*?<\/header>/)?.[0] ?? "") + (home.match(/<footer>[\s\S]*?<\/footer>/)?.[0] ?? "");
-    const frame = [...frameHtml.matchAll(/href="(\/[^"]*)"/g)].map((m) => route(m[1])).filter((p): p is string => !!p);
+    const frame = [...new Set([...frameHtml.matchAll(/href="(\/[^"]*)"/g)].map((m) => route(m[1])).filter((p): p is string => !!p))];
     for (const n of NAV) expect(frame, n.label).toContain(n.href);
     for (const m of MORE) expect(frame, m.label).toContain(m.href);
-    // Breadth first from the frame: a page's own links are its body's, header, footer and scripts set aside; the rows a script draws are the way to a page with a parameter.
+    // Breadth first from the frame: a page's own links are its body's, header, footer and scripts set aside; the rows a page's own script draws are the way to a page with a parameter — its own script, not the shell's, whose workerRow and avatar write a build's and a person's address on every page.
     const via = new Map<string, string>();
     for (const p of frame) via.set(p, "the frame");
-    for (const p of [...new Set(frame)]) {
+    for (const p of frame) {
       const html = await (await get(p)).text();
       const body = html.replace(/<script[\s\S]*?<\/script>/g, "").replace(/<header>[\s\S]*?<\/header>/, "").replace(/<footer>[\s\S]*?<\/footer>/, "");
       for (const m of body.matchAll(/(?:data-)?href="(\/[^"\/][^"]*)"/g)) { const to = route(m[1]); if (to && !via.has(to)) via.set(to, p); }
-      for (const [prefix, example] of Object.entries(families)) if (!via.has(example) && new RegExp(`href=\\\\?["']${prefix}`).test(scriptOf(html))) via.set(example, `${p} (a row it draws)`);
+      for (const [prefix, example] of Object.entries(families)) if (!via.has(example) && new RegExp(`href=\\\\?["']${prefix}`).test(ownScript(html))) via.set(example, `${p} (a row it draws)`);
     }
     const unreached = [...routed].filter((p) => !via.has(p)).sort();
     expect(unreached, `reached only by address: ${unreached.join(", ")}`).toEqual([]);
@@ -319,39 +336,43 @@ describe("dashboard pages", () => {
     const controls = [...form.matchAll(/<(?:input|button|select|textarea)\b[^>]*>/g)].map((m) => m[0]);
     // Eight fields (two of them for a project not on GitHub), four confirmations, the button.
     expect(controls.length).toBe(13);
-    for (const c of controls) expect(c).toMatch(/ disabled aria-disabled="true" title="sign in with GitHub to request">$/);
+    // The reason is the shell's word for nobody — orSignIn's, the server's 401's — not a fourth spelling.
+    for (const c of controls) expect(c).toMatch(/ disabled aria-disabled="true" title="sign in with GitHub">$/);
     expect(form).toContain('id="pkg-url"');
     expect(form).toContain('data-check="evidence"');
-    expect(form).toContain('<button type="submit" id="pkg-btn" disabled aria-disabled="true" title="sign in with GitHub to request">Request</button>');
-    // Signed in, the page is the same page: the script draws the fields again through the shell's gate(), live for a person, and the workspace line is their page.
-    const script = scriptOf(html);
+    expect(form).toContain('<button type="submit" id="pkg-btn" disabled aria-disabled="true" title="sign in with GitHub">Request</button>');
+    // Signed in, the page is the same page: the script draws the fields again through the shell's gate(), live for a person; the workspace line is /me for everyone, rewritten for nobody.
+    const script = ownScript(html);
     expect(script).toContain('$("#pkg-form").innerHTML = gate(');
     expect(script).toContain('$("#gate-cta").innerHTML = gate(');
     expect(script).not.toContain('$("#ask").hidden');
+    expect(script).not.toContain('$("#ws").href');
     expect(html).not.toContain("next=/me");
+    expect(html).not.toContain("/factory#gate");
   });
 
-  // A worker's row is the shell's wherever it is drawn: the People page and the Workers page write their tables from WT_HEAD and workerRow(), so a worker reads the same on both and there is no second hand-written row to drift.
-  it("draws the People page's worker tables with the shell's head and row, as the Workers page does", async () => {
-    // The page's own script is what follows the shell: page() splices HELPERS whole, so its last lines mark where the page's statements begin (the shell defines workerRow and wtKind, and must not be mistaken for a page calling them).
-    const shellEnd = HELPERS.slice(-120);
-    const own = (html: string) => { const script = scriptOf(html), at = script.indexOf(shellEnd); expect(at, "the shell is spliced whole").toBeGreaterThan(0); return script.slice(at + shellEnd.length); };
-    const people = await (await get("/people")).text(), workers = await (await get("/workers")).text();
-    for (const [name, html] of [["/people", people], ["/workers", workers]] as const) {
-      const script = own(html);
-      expect(script, `${name} head`).toMatch(/WT_HEAD\.(project|review|community)/);
-      expect(script, `${name} row`).toMatch(/workerRow\(w, "(project|review|community)"\)/);
-      expect(script, `${name} legend`).toContain("WT_LEGEND");
-      expect(script, `${name} kind`).toContain("wtKind(w)");
+  // A worker's row is the shell's wherever it is drawn. The manifests say which pages draw the worker tables (`shared: "worker-table"`, the legend `"worker-legend"`) — the Workers page, the People page, a person's — and each is proved the same way: the panels served by workerPanels(), the head and the skeleton by wtTables(), every row by workerRow() over wtKind(), the filter by wtText, and no hand-written head, cell or filter left; a page that serves a worker table without claiming the shared name fails here by its address.
+  it("draws every worker table the manifests claim with the shell's panels, head and row, and no other page draws one", async () => {
+    const claims = allComponents(F).filter((c) => c.shared === "worker-table");
+    expect(claims.map((c) => c.page).sort()).toEqual(["/people", `/user/${F.owner}`, "/workers"].sort());
+    for (const c of claims) {
+      const html = await (await get(c.page)).text(), script = ownScript(html);
+      // The served frame: one panel per kind with the shell's table, the legend after them.
+      for (const kind of ["project", "review", "community"]) expect(html, `${c.page}: ${kind}`).toContain(`<table id="w-${kind}" class="wtable"><thead><tr></tr></thead><tbody></tbody></table>`);
+      expect(html, c.page).toContain('<div id="wt-legend"></div>');
+      expect(allComponents(F).some((l) => l.page === c.page && l.shared === "worker-legend"), `${c.page} claims the table and not the legend`).toBe(true);
+      // The page's own script: the head through wtTables(), a row through workerRow() by wtKind(), the filter the shell's.
+      expect(script, `${c.page} head`).toMatch(/wtTables\((true)?\)/);
+      expect(script, `${c.page} row`).toMatch(/workerRow\(w(,|\))/);
+      expect(script, `${c.page} kind`).toContain("wtKind(w)");
+      expect(script, `${c.page} filter`).toContain("text: wtText");
+      for (const hand of ["WT_HEAD", "WT_LEGEND", 'skeletonRows("#w-', 'colspan="9"', "#workers-table", "var text = function", "<th>Worker</th>"]) expect(script, `${c.page} writes ${hand} by hand`).not.toContain(hand);
     }
-    for (const kind of ["project", "review", "community"]) {
-      expect(people).toContain(`id="w-${kind}" class="wtable"`);
-      expect(own(people)).toContain(`workerRow(w, "${kind}")`);
+    // Every page that serves a worker table claims it: a fourth page drawing rows of its own would be caught here.
+    for (const path of PAGES) {
+      const html = await (await get(path)).text();
+      if (/class="wtable"/.test(html)) expect(claims.map((c) => c.page), `${path} serves a worker table and claims no shared component`).toContain(path);
     }
-    // No hand-written cell is left on the People page: the fields a row shows are the shell's business.
-    for (const cell of ["w.agent_status", "w.builds_failed", 'colspan="9"', "#workers-table"]) expect(own(people), cell).not.toContain(cell);
-    const manifest = allComponents(F).find((c) => c.id === "people.workers-table");
-    expect(manifest?.script).toEqual(expect.arrayContaining(["WT_HEAD.project", 'workerRow(w, "project")', 'workerRow(w, "review")', 'workerRow(w, "community")']));
   });
 
   it("every docs page carries the same shell — the map with every chapter's sections, the search — and the stages are on How it works", async () => {

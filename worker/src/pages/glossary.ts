@@ -12,8 +12,9 @@ const BODY = String.raw`
   <dl class="gloss-list">${GLOSSARY.map(([term, text]) => `<dt id="${termId(term)}"><a href="#${termId(term)}">${escapeHtml(term)}</a></dt><dd>${escapeHtml(text)}</dd>`).join("")}</dl>
 `;
 
-export function glossaryHtml(poolUrl: string, version: RunningVersion, path = "/docs/glossary"): string {
+export function glossaryHtml(poolUrl: string, version: RunningVersion): string {
   return page({
+    path: "/docs/glossary",
     title: "Glossary · Documentation · omarchy-pool",
     description: "The words on the omarchy-pool pages, one line each.",
     active: "docs",
@@ -21,7 +22,6 @@ export function glossaryHtml(poolUrl: string, version: RunningVersion, path = "/
     body: BODY,
     poolUrl,
     version,
-    path,
   });
 }
 

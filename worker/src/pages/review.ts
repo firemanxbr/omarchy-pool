@@ -40,7 +40,7 @@ const BODY = String.raw`
   <div class="tiles four" id="tiles"></div>
 
   <div id="mine">
-    <div class="private-head"><h2>Yours</h2><span class="muted" id="mine-who"></span><span class="right"><a class="more-link" id="mine-ws" href="/auth/github?next=/me">Your workspace →</a></span></div>
+    <div class="private-head"><h2>Yours</h2><span class="muted" id="mine-who"></span><span class="right"><a class="more-link" id="mine-ws" href="/me">Your workspace →</a></span></div>
     <p class="notice warn" id="mine-blocked" hidden></p>
     <p class="sub" id="mine-queue"></p>
     <div class="rgroups">
@@ -78,7 +78,7 @@ const SCRIPT = String.raw`
 
   // ---- who: the shell's WHO (the omc cookie, one fetch of /auth/me per page). The page is the same for whoever answers; what changes is the name on the Yours block, where its link goes, the gates on the controls — and a signed-in person's own packages, read from /me.
   whoami(function (me) {
-    if (me) { $("#mine-who").textContent = WHO.login + " · " + (WHO.role || "contributor"); $("#mine-ws").href = "/user/" + encodeURIComponent(WHO.login); privateLoad(); }
+    if (me) { $("#mine-who").textContent = WHO.login + " · " + (WHO.role || "contributor"); privateLoad(); }
     // The two controls served in the HTML, drawn again for whoever is looking: the sign-in hint stays, its link grey for a person already in; the brake's form is a maintainer's.
     $("#who").innerHTML = gate(${JSON.stringify(WHO_HINT)}, !WHO.me, "signed in as " + WHO.login);
     $("#block-form").innerHTML = gate(${JSON.stringify(BLOCK_FORM)}, isMaintainer(), orSignIn(${JSON.stringify(BLOCK_WHY)}));
@@ -267,8 +267,9 @@ const SCRIPT = String.raw`
   setInterval(function () { load(); if (WHO.me) privateLoad(); }, 60000);
 `;
 
-export function reviewHtml(poolUrl: string, version: RunningVersion, path = "/review"): string {
+export function reviewHtml(poolUrl: string, version: RunningVersion): string {
   return page({
+    path: "/review",
     title: "Review · omarchy-pool",
     description: "What is waiting for a maintainer and what was decided; signed in, your packages first.",
     active: "review",
@@ -276,7 +277,6 @@ export function reviewHtml(poolUrl: string, version: RunningVersion, path = "/re
     script: SCRIPT,
     poolUrl,
     version,
-    path,
   });
 }
 
@@ -323,12 +323,13 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // The head for everyone; a session puts its login and role on it and points the workspace link at the person's page (nobody's goes to sign in).
+    // The head for everyone; a session puts its login and role on it. The workspace link is /me for all: the person's own page with a session, the sign-in that comes back to it without one.
     id: "review.yours-head",
     page: "/review",
-    anchor: ['<div id="mine">', 'id="mine-who"', 'id="mine-ws"', 'href="/auth/github?next=/me"'],
-    script: ['$("#mine-who")', "WHO.role", '$("#mine-ws").href = "/user/" + encodeURIComponent(WHO.login)'],
+    anchor: ['<div id="mine">', 'id="mine-who"', 'id="mine-ws"', 'href="/me"'],
+    script: ['$("#mine-who")', "WHO.role"],
     reads: [
+      { path: "/me", status: 302, json: false },
       { path: "/auth/me", status: 401 },
       { path: "/auth/me", as: "owner", fields: ["login", "role"] },
       { path: "/auth/me", as: "maintainer", fields: ["login", "role"] },

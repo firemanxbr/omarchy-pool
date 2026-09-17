@@ -75,7 +75,7 @@ __CHARTS__
       setTiles("#tiles", [
         ["Community packages", num(pkgs.filter(function (p) { return p.status === "approved" || p.status === "published"; }).length), "in the rings, from " + num(Object.keys(pkgs.reduce(function (o, p) { o[p.owner] = 1; return o; }, {})).length) + " contributors", "", "/packages?q=factory"],
         ["Waiting for review", num(staged.length), waits.length ? "oldest " + ago(new Date(Date.now() - waits[waits.length - 1]).toISOString()).replace(" ago", "") : "nothing staged right now", staged.length ? "warn" : "", "/review"],
-        ["Shared workers online", num(shared.length), num(shared.filter(function (w) { return w.side === "community"; }).length) + " community · " + num(shared.filter(function (w) { return w.side === "omarchy"; }).length) + " project", shared.length ? "ok" : "", "/workers"],
+        ["Shared workers alive", num(shared.length), num(shared.filter(function (w) { return w.side === "community"; }).length) + " community · " + num(shared.filter(function (w) { return w.side === "omarchy"; }).length) + " project", shared.length ? "ok" : "", "/workers"],
         ["Builds this week", num(builds7.length), num(builds7.filter(function (t) { return t.status === "staged"; }).length) + " staged · " + num(builds7.filter(function (t) { return t.status === "done"; }).length) + " published · " + num(builds7.filter(function (t) { return t.status === "failed"; }).length) + " failed", "", "/journal?kind=build"],
         ["Requested, not built yet", num(pkgs.filter(function (p) { return p.status === "registered"; }).length), "on the record, waiting for a Build", "", "/review"]
       ]);
@@ -109,8 +109,9 @@ __CHARTS__
   }, 120000);
 `;
 
-export function factoryHtml(poolUrl: string, version: RunningVersion, path = "/factory"): string {
+export function factoryHtml(poolUrl: string, version: RunningVersion): string {
   return page({
+    path: "/factory",
     title: "Factory · omarchy-pool",
     description: "Bring a package: request it, build it on your worker or the community's, follow it to a maintainer's approval and into the rings.",
     active: "factory",
@@ -118,7 +119,6 @@ export function factoryHtml(poolUrl: string, version: RunningVersion, path = "/f
     script: SCRIPT.replace("__CHARTS__", CHARTS),
     poolUrl,
     version,
-    path,
   });
 }
 
@@ -142,7 +142,7 @@ export const FACTORY_COMPONENTS = (_F: Fixture): Component[] => [
     id: "factory.tiles",
     page: "/factory",
     anchor: ['class="tiles five"', 'id="tiles"'],
-    script: ['"/api/v1/factory"', '"/api/v1/factory/packages"', '"/api/v1/factory/review"', '"#tiles"', '"Community packages"', '"Waiting for review"', '"Shared workers online"', '"Builds this week"', '"Requested, not built yet"', '"/packages?q=factory"', '"/journal?kind=build"'],
+    script: ['"/api/v1/factory"', '"/api/v1/factory/packages"', '"/api/v1/factory/review"', '"#tiles"', '"Community packages"', '"Waiting for review"', '"Shared workers alive"', '"Builds this week"', '"Requested, not built yet"', '"/packages?q=factory"', '"/journal?kind=build"'],
     reads: [
       { path: "/api/v1/factory", fields: ["workers", "workers.0.id", "workers.0.alive", "workers.0.side", "workers.0.mode", "workers.0.update", "tasks", "tasks.0.kind", "tasks.0.status", "tasks.0.created_at"] },
       { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.name", "packages.0.owner", "packages.0.status"] },

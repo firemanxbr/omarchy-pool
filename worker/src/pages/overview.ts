@@ -259,11 +259,11 @@ __CHARTS__
     var landed = pkgs.filter(function (p) { return p.status === "approved" || p.status === "published"; }).length;
     var people = Object.keys(maintainers).map(function (m) { return [m, "maintainer"]; }).concat(Object.keys(contributors).map(function (c) { return [c, "contributor"]; }));
     var chips = people.map(function (p) { return personChip(p[0], p[1]); }).join("");
-    $("#cc-people").innerHTML = (chips || '<span class="muted">be the first</span>') + '<span class="dim">' + num(workers.filter(function (w) { return w.alive; }).length) + ' workers online</span><a href="/factory">Bring a package →</a>';
+    $("#cc-people").innerHTML = (chips || '<span class="muted">be the first</span>') + '<span class="dim">' + num(workers.filter(function (w) { return w.alive; }).length) + ' workers alive</span><a href="/factory">Bring a package →</a>';
     setTiles("#open-stats", [
       ["Contributors", num(Object.keys(contributors).length), "anyone with a package or a worker", "", "/people#contributors"],
       ["Maintainers", num(Object.keys(maintainers).length), "named in MAINTAINERS.toml", "", "/people#maintainers"],
-      ["Workers online", num(workers.filter(function (w) { return w.alive; }).length), num(workers.length) + " registered", "", "/people#workers"],
+      ["Workers alive", num(workers.filter(function (w) { return w.alive; }).length), num(workers.length) + " registered", "", "/people#workers"],
       ["Community packages", num(landed), "approved, built by the project", "", "/packages?q=factory"]
     ]);
   });
@@ -300,8 +300,9 @@ __CHARTS__
   })();
 `;
 
-export function overviewHtml(poolUrl: string, version: RunningVersion, path = "/"): string {
+export function overviewHtml(poolUrl: string, version: RunningVersion): string {
   return page({
+    path: "/",
     title: "omarchy-pool",
     description: "One package repository for Omarchy: Arch, Arch Linux ARM and Omarchy packages, verified, served in rings and rolled back automatically.",
     active: "pool",
@@ -309,7 +310,6 @@ export function overviewHtml(poolUrl: string, version: RunningVersion, path = "/
     script: SCRIPT.replace("__CHARTS__", CHARTS),
     poolUrl,
     version,
-    path,
   });
 }
 

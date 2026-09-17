@@ -112,8 +112,9 @@ const SCRIPT = String.raw`
   liveStats(function (d) { data = d; draw(); }, 120000);
 `;
 
-export function getStartedHtml(poolUrl: string, version: RunningVersion, path = "/docs/get-started"): string {
+export function getStartedHtml(poolUrl: string, version: RunningVersion): string {
   return page({
+    path: "/docs/get-started",
     title: "Get started · omarchy-pool",
     description: "Point pacman at the omarchy-pool: the database key, the repository sections for a ring, and the optional omarchy-cli.",
     active: "docs",
@@ -122,7 +123,6 @@ export function getStartedHtml(poolUrl: string, version: RunningVersion, path = 
     script: SCRIPT,
     poolUrl,
     version,
-    path,
   });
 }
 

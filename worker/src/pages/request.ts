@@ -6,7 +6,9 @@
  * served for everyone, its fields grey with the sign-in as the reason
  * until whoami answers with a person, live then — signed in with GitHub
  * (the session cookie), the request goes to POST /api/v1/factory/packages
- * and comes back with its record, and the build is one press away.
+ * and comes back with its record, and the build is one press away. The
+ * workspace line is /me: the reader's own page, or the sign-in that comes
+ * back to it — one link for everyone.
  */
 import { page, servedGrey, GITHUB_ICON } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
@@ -18,10 +20,12 @@ import type { RunningVersion } from "../meta";
  * in every title) and drawn again through gate() once whoami answers, so a
  * session is what makes them live. The gate above the form is the same
  * shape the other way: served with the sign-in live, its button grey for a
- * person already in, whose login the banner then names.
+ * person already in, whose login the banner then names. The reason is the
+ * shell's word for nobody (orSignIn), the same on every grey control of
+ * every page and in the server's 401.
  */
-const ASK_WHY = "sign in with GitHub to request";
-const SIGN_IN = `<a class="btn" id="gate-btn" href="/auth/github?next=/request">${GITHUB_ICON} Sign in with GitHub</a>`;
+const ASK_WHY = "sign in with GitHub";
+const SIGN_IN_BTN = `<a class="btn" id="gate-btn" href="/auth/github?next=/request">${GITHUB_ICON} Sign in with GitHub</a>`;
 const FIELDS = String.raw`
         <label>Project URL <input type="url" id="pkg-url" placeholder="https://github.com/owner/project — or …/archive/refs/tags/v1.2.3.tar.gz" required autofocus></label>
         <label>Package name <input type="text" id="pkg-name" placeholder="(the repository's name)" pattern="[a-z0-9@._+-]+"></label>
@@ -48,7 +52,7 @@ const BODY = String.raw`
     <p class="lede" id="lede">Four fields, four confirmations. The pool checks it, writes it once with its signature, and the build starts by itself — in the shared queue, the best idle worker first. <a href="/docs/governance">What happens after →</a></p>
   </div>
 
-  <div id="gate" class="gate"><div><div class="lock">GitHub sign-in</div><h3 style="margin-top:6px">Who is asking</h3><p id="gate-who">A request carries your GitHub login — it is on the record, next to the package. Nothing else is asked, no permission is needed.</p></div><div class="cta" id="gate-cta">${SIGN_IN}</div></div>
+  <div id="gate" class="gate"><div><div class="lock">GitHub sign-in</div><h3 style="margin-top:6px">Who is asking</h3><p id="gate-who">A request carries your GitHub login — it is on the record, next to the package. Nothing else is asked, no permission is needed.</p></div><div class="cta" id="gate-cta">${SIGN_IN_BTN}</div></div>
 
   <section id="ask">
     <div class="panel request-panel">
@@ -56,7 +60,7 @@ const BODY = String.raw`
       <p class="sub" id="pkg-state"></p>
       <div id="done" class="done" hidden></div>
     </div>
-    <p class="sub" style="margin-top:14px">Requested before? <a id="ws" href="/auth/github?next=/request">Your workspace</a> has every package, its stage and its evidence.</p>
+    <p class="sub" style="margin-top:14px">Requested before? <a id="ws" href="/me">Your workspace</a> has every package, its stage and its evidence.</p>
   </section>
 `;
 
@@ -80,12 +84,12 @@ const SCRIPT = String.raw`
       if ($("#pkg-version").value || $("#pkg-source").value || (p.project && !/github\.com/.test(p.project))) document.querySelector(".form-more").open = true;
     }).catch(function () {});
   }
-  // The same page for whoever is looking; what whoami's answer changes is the state, never what is there. The gate's sign-in is live for nobody and grey for a person in, whom the banner then names; the fields are served grey with the sign-in as the reason and drawn again live for a person; the workspace line is their page, or the sign-in that comes back here.
+  // The same page for whoever is looking; what whoami's answer changes is the state, never what is there. The gate's sign-in is live for nobody — coming back to this address, a renewal's name included — and grey for a person in, whom the banner then names; the fields are served grey with the sign-in as the reason and drawn again live for a person.
   whoami(function (me) {
-    $("#gate-cta").innerHTML = gate(${JSON.stringify(SIGN_IN)}, !me, "signed in as " + WHO.login);
+    $("#gate-cta").innerHTML = gate(${JSON.stringify(SIGN_IN_BTN)}, !me, "signed in as " + WHO.login);
+    if (!me) $("#gate-btn").href = signInHref();
     if (me) $("#gate-who").innerHTML = "Asking as <b>" + esc(WHO.login) + "</b> — on the record, next to the package.";
     $("#pkg-form").innerHTML = gate(${JSON.stringify(FIELDS)}, !!me, ${JSON.stringify(ASK_WHY)});
-    $("#ws").href = me ? "/user/" + encodeURIComponent(WHO.login) : "/auth/github?next=/request";
     if (!me) return;
     if (RENEW) prefill(RENEW);
     var u = $("#pkg-url"); if (u && u.focus) u.focus();
@@ -107,23 +111,23 @@ const SCRIPT = String.raw`
       $("#done").innerHTML = '<b>' + esc(d.package.name) + ' ' + esc(d.package.release || "") + '</b> is on the record: <a href="' + esc(d.request.record) + '">request #' + d.request.id + '</a>' + (d.request.signature ? ' (<a href="' + esc(d.request.signature) + '">signature</a>)' : '') + (det.build_system ? ' · ' + esc(det.build_system) : '') +
         (d.skipped && d.skipped.length ? '<br><span class="dim">' + esc(d.skipped.map(function (s) { return s.arch + " skipped: " + s.source + " ships " + s.version; }).join(" · ")) + '</span>' : '') +
         (d.build && d.build.tasks && d.build.tasks.length ? '<br>' + taskPill("queued") + ' build ' + d.build.tasks.map(function (t) { return '<a href="/build/' + t + '">#' + t + '</a>'; }).join(", ") + ' for ' + esc((d.build.arches || []).join(", ")) + (d.build.queue ? ' — ' + esc(Object.keys(d.build.queue).map(function (a) { return a + ": " + d.build.queue[a].position + " of " + d.build.queue[a].total + " in the shared queue"; }).join(" · ")) : '') + '. The best idle shared worker takes it, a worker of yours at once; your page follows it.' : d.build && d.build.error ? '<br>' + pillHtml("warn", "not queued") + ' ' + esc(d.build.error) : '') +
-        '<div class="cta-row" style="margin-top:12px"><a class="btn" href="' + (WHO.login ? '/user/' + encodeURIComponent(WHO.login) : '/factory#gate') + '">Your page →</a></div>';
+        '<div class="cta-row" style="margin-top:12px"><a class="btn" href="' + (WHO.login ? '/user/' + encodeURIComponent(WHO.login) : '/me') + '">Your page →</a></div>';
       $("#pkg-form").reset();
     }).catch(function (e) { $("#pkg-btn").disabled = false; $("#pkg-state").textContent = "failed: " + e; });
     return false;
   };
 `;
 
-export function requestHtml(poolUrl: string, version: RunningVersion, path = "/request"): string {
+export function requestHtml(poolUrl: string, version: RunningVersion): string {
   return page({
+    path: "/request",
     title: "Request a package · omarchy-pool",
     description: "Ask the Omarchy Pool for a package: the project's URL, a name, a description, the licence — checked, written once to the record, signed.",
-    active: "factory",
+    active: "none",
     body: BODY,
     script: SCRIPT,
     poolUrl,
     version,
-    path,
   });
 }
 
@@ -168,7 +172,7 @@ export const REQUEST_COMPONENTS = (F: Fixture): Component[] => {
       page: "/request",
       // The banner is there for everyone: the sign-in live for nobody, `next=/request` kept for the callback; grey for a person in, whom the banner names.
       anchor: ['<div id="gate" class="gate">', '<div class="lock">GitHub sign-in</div>', "Who is asking", '<p id="gate-who">', '<div class="cta" id="gate-cta">', 'id="gate-btn" href="/auth/github?next=/request"', "Sign in with GitHub"],
-      script: ['"/auth/me"', "whoami(function (me)", '$("#gate-cta").innerHTML = gate(', '"signed in as " + WHO.login', '"Asking as <b>" + esc(WHO.login) + "</b>'],
+      script: ['"/auth/me"', "whoami(function (me)", '$("#gate-cta").innerHTML = gate(', 'if (!me) $("#gate-btn").href = signInHref();', '"signed in as " + WHO.login', '"Asking as <b>" + esc(WHO.login) + "</b>'],
       reads: [
         // Signed out, the button starts the sign-in (the redirect to GitHub, `next=/request` kept for the callback); signed in, /auth/me names who is asking.
         { path: "/auth/github?next=/request", status: 302, json: false },
@@ -242,9 +246,9 @@ export const REQUEST_COMPONENTS = (F: Fixture): Component[] => {
     {
       id: "request.workspace-link",
       page: "/request",
-      // Served as the sign-in that comes back here; a person's own page once whoami names them.
-      anchor: ["Requested before?", 'id="ws" href="/auth/github?next=/request">Your workspace</a>'],
-      script: ['$("#ws").href = me ? "/user/" + encodeURIComponent(WHO.login) : "/auth/github?next=/request"'],
+      // One href for everyone: /me is the person's own page with a session, the sign-in that comes back to it without one — no rewrite, nothing that depends on who is looking.
+      anchor: ["Requested before?", 'id="ws" href="/me">Your workspace</a>'],
+      reads: [{ path: "/me", status: 302, json: false }],
       visible: EVERYONE,
     },
     {

@@ -112,8 +112,9 @@ const SCRIPT = String.raw`
   }).catch(function () { endSkeleton(); });
 `;
 
-export function governanceHtml(poolUrl: string, version: RunningVersion, path = "/docs/governance"): string {
+export function governanceHtml(poolUrl: string, version: RunningVersion): string {
   return page({
+    path: "/docs/governance",
     title: "Governance · omarchy-pool",
     description: "Contributors and maintainers, categories, and how a pull request is the only way to become a maintainer.",
     active: "docs",
@@ -122,7 +123,6 @@ export function governanceHtml(poolUrl: string, version: RunningVersion, path = 
     script: SCRIPT,
     poolUrl,
     version,
-    path,
   });
 }
 

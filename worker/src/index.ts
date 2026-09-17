@@ -210,8 +210,9 @@ export default {
       // The reader's own page: /me is the address the Factory's gate and the
       // sign-in name before the login is known. With a session it is
       // /user/<login>; without one it is the sign-in, which comes back here.
-      // The answer depends on the cookie, so no cache keeps it.
-      if (path === "/me" && method === "GET") {
+      // The answer depends on the cookie, so no cache keeps it; the Location
+      // is relative, as the sign-in's own redirects are.
+      if (path === "/me" && (method === "GET" || method === "HEAD")) {
         const c = await contributorOf(request, env);
         return new Response(null, { status: 302, headers: { location: c ? `/user/${encodeURIComponent(c.login)}` : "/auth/github?next=/me", "cache-control": "no-store" } });
       }

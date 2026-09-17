@@ -22,7 +22,7 @@ const BODY = String.raw`
     <p class="sub" id="count" style="margin-top:8px;font-size:12.5px"></p>
   </section>
   <section>
-    <div class="h2row"><h2>Ring history</h2><span class="hint" style="margin-right:auto">head is what is served · parent the previous head · from what a promotion or rollback copied</span><a class="more-link" id="compare" href="/diff">Compare two releases →</a></div>
+    <div class="h2row"><h2>Ring history</h2><span class="hint">head is what is served · parent the previous head · from what a promotion or rollback copied</span><a class="more-link" id="compare" href="/diff">Compare two releases →</a></div>
     <p class="sub">Pointing a ring at an earlier row is how a rollback works: a job a project worker runs — the index write, both architectures re-rendered, health-checked. A signed-in maintainer can roll back to any row still inside retention.</p>
     <p class="sub" id="rb-state" hidden></p>
     <div class="table-wrap"><table id="releases"><thead><tr><th>Release</th><th>Ring</th><th>Seq</th><th class="num">Packages</th><th>Parent</th><th>From</th><th>Note</th><th>Created</th><th></th></tr></thead><tbody></tbody></table></div>
@@ -62,8 +62,9 @@ const SCRIPT = String.raw`
   liveStats(function (d) { LAST = d; drawReleases(d); }, 60000);
 `;
 
-export function journalHtml(poolUrl: string, version: RunningVersion, path = "/journal"): string {
+export function journalHtml(poolUrl: string, version: RunningVersion): string {
   return page({
+    path: "/journal",
     title: "Journal · omarchy-pool",
     description: "Everything the pipeline did, newest first, and every ring's append-only history.",
     active: "none",
@@ -71,7 +72,6 @@ export function journalHtml(poolUrl: string, version: RunningVersion, path = "/j
     script: SCRIPT,
     poolUrl,
     version,
-    path,
   });
 }
 

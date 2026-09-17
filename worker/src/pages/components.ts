@@ -101,6 +101,14 @@ export interface Component {
   visible: Role[];
   /** A server-drawn diagram's key ("factory", "docs/factory-loop"): the overlap test in test/pages.test.ts draws exactly the keys the manifests claim. */
   drawn?: string;
+  /**
+   * A component the shell draws the same on every page that has it: the
+   * worker tables (workerPanels() served, wtTables() and workerRow() live)
+   * and their legend. A page that claims it is proved to draw it with the
+   * shell's head and row and no hand-written cell (test/pages.test.ts), and
+   * a page that serves a worker table without claiming it fails there.
+   */
+  shared?: "worker-table" | "worker-legend";
 }
 
 /**
@@ -164,7 +172,7 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     id: "shell.account",
     page: "/",
     anchor: ['id="account"', 'href="/auth/github?next=/"', 'id="signout"', 'href="/auth/logout"'],
-    script: ['"/auth/me"', "#account", "#signout", "me.role"],
+    script: ['"/auth/me"', "#account", "#signout", "me.role", "function signInHref()", "location.search"],
     reads: [
       { path: "/auth/github?next=/", status: 302, json: false },
       { path: "/me", status: 302, json: false },
@@ -178,8 +186,8 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     // Every page with a route of its own that is not a door: the footer is where a reader finds People and the Request, not only a page's content.
     id: "shell.footer-more",
     page: "/",
-    anchor: [...MORE.map((m) => `href="${m.href}"`), 'href="/people"', 'href="/request"'],
-    script: ['footer .more a', 'href === "/packages" && here.indexOf("/package/") === 0'],
+    anchor: MORE.map((m) => `href="${m.href}"`),
+    script: ['footer .more a', 'href === "/packages" && here.indexOf("/package/") === 0', 'href === "/journal" && here === "/diff"'],
     visible: EVERYONE,
   },
   {

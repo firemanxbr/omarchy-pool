@@ -223,8 +223,9 @@ __CHARTS__
   liveStats(render, 60000);
 `;
 
-export function statusHtml(poolUrl: string, version: RunningVersion, path = "/status"): string {
+export function statusHtml(poolUrl: string, version: RunningVersion): string {
   return page({
+    path: "/status",
     title: "Status · omarchy-pool",
     description: "Is the pool serving, is it being fed, and did anything go wrong recently.",
     active: "none",
@@ -232,7 +233,6 @@ export function statusHtml(poolUrl: string, version: RunningVersion, path = "/st
     script: SCRIPT.replace("__CHARTS__", CHARTS),
     poolUrl,
     version,
-    path,
   });
 }
 
