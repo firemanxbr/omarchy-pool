@@ -322,6 +322,28 @@ describe("a community build, its audit and the review", () => {
     expect((await call("POST", `/factory/tasks/${projectTask}/approve`, {}, "omc_m2")).status).toBe(409);
     expect(await env.DB.prepare("SELECT task_id, rebuild_task FROM approvals ORDER BY id DESC LIMIT 1").first()).toEqual({ task_id: projectTask, rebuild_task: projectTask });
     expect(await env.DB.prepare("SELECT status FROM factory_packages WHERE name = 'mine'").first()).toMatchObject({ status: "approved" });
+    // The build's page reads one call: the row, the worker that built it, what it came from, its audit and trial, the decision, its evidence.
+    const whole = await call("GET", `/factory/tasks/${projectTask}?whole=1`);
+    expect(whole.status).toBe(200);
+    expect(whole.json.task).toMatchObject({ id: projectTask, kind: "build", trust: "project", status: "staged" });
+    expect(whole.json.from).toMatchObject({ id: task, owner: "alice" });
+    expect(whole.json.approval).toMatchObject({ decision: "approved", by: "m2", note: "looks right" });
+    expect(whole.json.trial[0]).toMatchObject({ kind: "trial", status: "done" });
+    expect(whole.json.worker).toMatchObject({ id: "w1", trust: "project" });
+    expect(whole.json.evidence.map((e: any) => e.name).sort()).toEqual(["PKGBUILD", "PKGINFO", "build.log", "mine-1.0-1-aarch64.pkg.tar.zst", "tests.log", "trial.log", "vet.json"]);
+    expect(whole.json.evidence.find((e: any) => e.name === "PKGBUILD")).toMatchObject({ public: true, url: `/api/v1/factory/tasks/${projectTask}/artifacts/PKGBUILD` });
+    expect(whole.json.evidence.find((e: any) => e.name.endsWith(".pkg.tar.zst")).public).toBe(false);
+    expect(whole.json.publish[0]).toMatchObject({ kind: "publish", status: "queued" });
+    // A later build of the same name, version and architecture is nothing to decide: Review says so and keeps it out of the count.
+    const again = await env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, status, publish, trust, owner, kind, finished_at) VALUES ('mine', 'aarch64', '1.0-2', 'draft:x', 'built again', 100, 'staged', 0, 'community', 'alice', 'build', ?) RETURNING id").bind(new Date().toISOString()).first<{ id: number }>();
+    try {
+      const review = await call("GET", "/factory/review?already=1");
+      const row = review.json.staged.find((r: any) => r.id === again!.id);
+      expect(row.already).toMatchObject({ task: projectTask, by: "m2", rebuild_task: projectTask });
+      expect(review.json.staged.filter((r: any) => r.id !== again!.id).every((r: any) => r.already === null)).toBe(true);
+    } finally {
+      await env.DB.prepare("DELETE FROM build_tasks WHERE id = ?").bind(again!.id).run();
+    }
     // The publish job: a project worker takes it; its token may read the staged package (a maintainer's privilege otherwise).
     const pub = await env.DB.prepare("SELECT kind, trust, params FROM build_tasks WHERE id = ?").bind(other.json.publish).first<{ kind: string; trust: string; params: string }>();
     expect(pub).toMatchObject({ kind: "publish", trust: "project" });

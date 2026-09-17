@@ -1417,7 +1417,7 @@ fn build_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
                 task.id,
                 &dir,
                 &["build.log"],
-                &["PKGBUILD", "vet.json", "tests.log"],
+                &["PKGBUILD", "vet.json", "tests.log", "resources.json"],
             );
         }
         let gate = status.code() == Some(5);
@@ -1476,7 +1476,7 @@ fn build_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
             task.id,
             &dir,
             &["build.log"],
-            &["PKGBUILD", "vet.json", "tests.log"],
+            &["PKGBUILD", "vet.json", "tests.log", "resources.json"],
         );
         let _ = std::fs::remove_dir_all(&dir);
         return Ok(Outcome {

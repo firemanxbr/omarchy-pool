@@ -431,6 +431,11 @@ const CSS = String.raw`
   .ic { display: inline-block; width: 14px; height: 14px; vertical-align: -3px; color: var(--muted); } .ic.emu { color: var(--amber); } .ic.shared { color: var(--lilac); } .ic + .ic { margin-left: 2px; }
   .agent { display: inline-flex; align-items: center; gap: 6px; } .agent .prov { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 3px; border: 1px solid var(--line); background: var(--panel-2); font-family: Geist, sans-serif; font-size: 9.5px; font-weight: 600; letter-spacing: .04em; } .agent .dot { margin-right: 0; }
   .usage { display: inline-grid; grid-template-columns: repeat(3, 28px); gap: 5px; } .usage .u1 { display: grid; gap: 3px; text-align: center; font-size: 12px; line-height: 1; } .usage .u1 i { display: block; height: 3px; background: var(--panel-2); position: relative; } .usage .u1 i::after { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: var(--v); background: var(--green); } .usage .u1.warn i::after { background: var(--amber); } .usage .u1.hot i::after { background: var(--red); }
+  /* A build's page: the timeline, the evidence read in place. */
+  .tl { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 0; } .tl li { display: grid; grid-template-columns: 16px 1fr auto; gap: 8px; align-items: start; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13px; } .tl li .dot { margin: 5px 0 0; } .tl li .d { color: var(--muted); } .tl li .when { font-size: 12px; }
+  .tl li.skel { border: 0; } .acts { margin: -20px 0 28px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; }
+  .ev { border: 1px solid var(--line); background: var(--panel); margin-top: 10px; } .ev summary { cursor: pointer; padding: 10px 14px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 13px; list-style: none; } .ev summary::-webkit-details-marker { display: none; } .ev summary::before { content: "▸"; color: var(--dim); } .ev[open] summary::before { content: "▾"; } .ev .body { padding: 0 14px 14px; }
+  .ev-table { width: 100%; font-size: 12.5px; } .ev-table th, .ev-table td { padding: 5px 8px; vertical-align: top; } .ev pre.code { white-space: pre; line-height: 1.5; max-height: 640px; overflow: auto; } .ev pre .ln { display: inline-block; width: 3ch; margin-right: 12px; text-align: right; color: var(--dim); user-select: none; }
   .last .dot { margin-right: 6px; } .last a, .last .v { display: inline-block; max-width: 96px; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; } .last .v { color: var(--dim); font-size: 11.5px; max-width: 70px; }
   .agent .mono { font-size: 11.5px; max-width: 64px; overflow: hidden; text-overflow: ellipsis; }
   .maint-list { display: grid; gap: 8px; } .maint-list .m { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; font-size: 13px; }
@@ -801,6 +806,19 @@ function escapeHtml(s: string): string {
   return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] ?? c);
 }
 
+/**
+ * The page-view counter, when the deployment names one (ANALYTICS): Google
+ * Analytics 4 for a G-… id — it sets cookies, so the Pool page's "no
+ * cookies" line is only true without it — or Cloudflare Web Analytics for
+ * a beacon token, which sets none. Nothing at all otherwise.
+ */
+function analyticsTag(v: RunningVersion): string {
+  const id = v.analytics;
+  if (/^G-[A-Z0-9]{4,20}$/.test(id)) return `\n<script async src="https://www.googletagmanager.com/gtag/js?id=${id}"></script>\n<script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}gtag('js',new Date());gtag('config','${id}',{anonymize_ip:true});</script>`;
+  if (/^[a-f0-9]{32}$/.test(id)) return `\n<script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "${id}"}'></script>`;
+  return "";
+}
+
 export function page(o: PageOptions): string {
   const v = o.version;
   const tag = escapeHtml(v.version);
@@ -821,7 +839,11 @@ export function page(o: PageOptions): string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(o.title)}</title>
 <meta name="description" content="${escapeHtml(o.description)}">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='5' fill='%239ece6a'/%3E%3Crect x='9' y='9' width='14' height='14' rx='1.5' fill='%230c0e10'/%3E%3Crect x='13' y='13' width='6' height='6' fill='%239ece6a'/%3E%3C/svg%3E">
+<link rel="icon" href="/favicon.ico" sizes="32x32">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="manifest" href="/site.webmanifest">
+<meta name="theme-color" content="#1a1b26">${analyticsTag(v)}
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Geist:wght@500;600;700&display=swap">
 <style>${CSS}</style>

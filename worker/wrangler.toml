@@ -74,6 +74,11 @@ CLOUDFLARE_ZONE_ID = "7f728d9c91b0172b925e2690a3672ffd"
 GITHUB_OAUTH_CLIENT_ID = "Ov23li8tzO3kMFQUFqnQ"
 # Static origin for packages and databases (the R2 bucket's custom domain).
 POOL_URL = "https://pool.firemanxbr.org"
+# Page views on the dashboard, if wanted: a Google Analytics 4 measurement id
+# ("G-XXXXXXXXXX" — sets cookies) or a Cloudflare Web Analytics site token
+# (32 hex characters — sets none; Analytics → Web Analytics in the Cloudflare
+# dashboard, add omarchy-pool.firemanxbr.org). Empty: no script on any page.
+ANALYTICS = ""
 # Overridden by the Release workflow (`wrangler deploy --var POOL_VERSION:v0.0.1 ...`).
 POOL_VERSION = "dev"
 POOL_COMMIT = ""

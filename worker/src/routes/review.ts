@@ -59,6 +59,23 @@ export async function handleReviewList(env: Env): Promise<Response> {
     const from = Number((JSON.parse(b.params) as { review?: number }).review);
     if (from) projectOf.set(from, { id: b.id, status: b.status, error: b.error, worker: b.lease_owner });
   }
+  // A build of a version a maintainer already approved — the same name,
+  // version and architecture, an earlier task — is nothing to decide: the
+  // package is in the pool or on its way. The row says so (`already`), the
+  // page keeps it out of the count and offers to drop it (felix 2.16.1 was
+  // built again three days after its approval and sat as "waiting", 2026-09-16).
+  const names = [...new Set(staged.results.map((r) => r.name as string))];
+  const prior = names.length
+    ? (await env.DB.prepare(
+        `SELECT a.task_id, a.name, a.arch, a.version, a.by, a.created_at, a.rebuild_task, r.status AS rebuild_status
+           FROM approvals a LEFT JOIN build_tasks r ON r.id = a.rebuild_task
+          WHERE a.decision = 'approved' AND a.name IN (${names.map(() => "?").join(", ")}) ORDER BY a.id DESC`,
+      ).bind(...names).all<{ task_id: number; name: string; arch: string; version: string | null; by: string; created_at: string; rebuild_task: number | null; rebuild_status: string | null }>()).results
+    : [];
+  const already = (r: Record<string, unknown>) => {
+    const a = prior.find((x) => x.name === r.name && x.arch === r.arch && x.version === r.version && x.task_id !== r.id && x.rebuild_task !== r.id);
+    return a ? { task: a.task_id, by: a.by, at: a.created_at, rebuild_task: a.rebuild_task, rebuild_status: a.rebuild_status } : null;
+  };
   // Where the bytes came from: the worker that held the lease, its owner, the host it says it runs on, who vouched for it.
   const builtBy = (r: Record<string, unknown>) => {
     if (!r.lease_owner) return null;
@@ -79,6 +96,7 @@ export async function handleReviewList(env: Env): Promise<Response> {
         from: r.trust === "project" && r.params ? ((JSON.parse(r.params as string) as { review?: number }).review ?? null) : null,
         project_build: r.trust === "community" ? (projectOf.get(r.id as number) ?? null) : null,
         built_by: builtBy(r),
+        already: already(r),
         params: undefined,
         lease_owner: undefined,
         worker_owner: undefined,

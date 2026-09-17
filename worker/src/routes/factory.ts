@@ -5,7 +5,7 @@ import type { WorkerIdentity } from "./contributors";
 import { issueJobToken, scopesFor, type JobClaims } from "../jobtoken";
 import { isCategory } from "../categories";
 import { recordEvidence, vetSummary } from "../record";
-import { reclaimStagingPackages, STAGING_QUOTA_BYTES } from "../staging";
+import { isTextEvidence, reclaimStagingPackages, STAGING_QUOTA_BYTES } from "../staging";
 import { findLeak } from "../leak";
 
 /**
@@ -719,7 +719,68 @@ export async function handleBuilt(env: Env): Promise<Response> {
   return json({ built: rows.results }, 200, { "cache-control": "no-store" });
 }
 
+/**
+ * One task, whole — what a build's page shows and what an agent reads in
+ * one call: the row with the log's tail it kept (a pool job has no other
+ * log), the worker that held it and its agent, what it came from and what came of
+ * it (a contributor's build → its audit, its trial, the project's builds
+ * from it; a project build → the contributor's task it answers, its
+ * publish job), the decision on the record with the rings the package is
+ * in today, the package's registration, and every object in its staging
+ * space (the text ones public). The related tasks share the name and the
+ * architecture, so each lookup walks the (name, arch) index, not the table.
+ */
 export async function handleTask(id: number, env: Env): Promise<Response> {
   const task = await env.DB.prepare("SELECT * FROM build_tasks WHERE id = ?").bind(id).first<TaskRow>();
-  return task ? json({ task }) : json({ error: "no such task" }, 404);
+  if (!task) return json({ error: "no such task" }, 404);
+  const params = task.params ? (JSON.parse(task.params) as Record<string, unknown>) : {};
+  const rel = (kind: string, key: string, of: number) =>
+    env.DB.prepare(`SELECT id, kind, status, error, result, lease_owner, started_at, finished_at, duration_ms FROM build_tasks WHERE name = ? AND kind = ? AND json_extract(params, '$.${key}') = ? ORDER BY id DESC LIMIT 5`)
+      .bind(task.name, kind, of)
+      .all<{ id: number; kind: string; status: string; error: string | null; result: string | null; lease_owner: string | null; started_at: string | null; finished_at: string | null; duration_ms: number | null }>();
+  const parse = (r: { result: string | null }) => { try { return r.result ? JSON.parse(r.result) : null; } catch { return null; } };
+  const brief = (r: { id: number; kind: string; status: string; error: string | null; result: string | null; lease_owner: string | null; started_at: string | null; finished_at: string | null; duration_ms: number | null }) => ({ id: r.id, kind: r.kind, status: r.status, error: r.error, result: parse(r), worker: r.lease_owner, started_at: r.started_at, finished_at: r.finished_at, duration_ms: r.duration_ms });
+  const isBuild = task.kind === "build";
+  const from = typeof params.review === "number" ? params.review : typeof params.task === "number" ? params.task : null;
+  const [worker, fromRow, audits, trials, projectBuilds, publishes, approval, pkg, objects] = await Promise.all([
+    task.lease_owner ? env.DB.prepare("SELECT id, owner, trust, trusted_by, agent, labels, hostname, version FROM build_workers WHERE id = ?").bind(task.lease_owner).first<{ id: string; owner: string | null; trust: string; trusted_by: string | null; agent: string | null; labels: string | null; hostname: string | null; version: string | null }>() : null,
+    from ? env.DB.prepare("SELECT id, kind, status, owner, trust, version, finished_at FROM build_tasks WHERE id = ?").bind(from).first() : null,
+    isBuild ? rel("audit", "task", task.id) : null,
+    isBuild ? rel("trial", "task", task.id) : null,
+    isBuild && task.trust === "community" ? rel("build", "review", task.id) : null,
+    isBuild ? rel("publish", "task", task.id) : null,
+    isBuild
+      ? env.DB.prepare(
+          `SELECT a.id, a.task_id, a.decision, a.by, a.note, a.rebuild_task, a.created_at, r.status AS rebuild_status, r.result_filename AS rebuild_result
+             FROM approvals a LEFT JOIN build_tasks r ON r.id = a.rebuild_task WHERE a.task_id = ? OR a.rebuild_task = ? ORDER BY a.id DESC LIMIT 1`,
+        ).bind(task.id, task.id).first()
+      : null,
+    env.DB.prepare("SELECT name, owner, url, status, category, request_id, description, license, project, created_at FROM factory_packages WHERE name = ?").bind(task.name).first(),
+    env.DB.prepare("SELECT key, size, uploaded_at FROM staging_objects WHERE task_id = ? ORDER BY key").bind(task.id).all<{ key: string; size: number; uploaded_at: string }>(),
+  ]);
+  // The rings that serve this package today, from the factory's rows in each ring.
+  const rings = isBuild
+    ? (await env.DB.prepare("SELECT rp.ring FROM packages p JOIN ring_packages rp ON rp.package_id = p.id AND rp.ring IN ('lab', 'edge', 'rc', 'stable') WHERE p.source = 'factory' AND p.name = ? AND p.repo_arch = ?").bind(task.name, task.arch).all<{ ring: string }>()).results.map((r) => r.ring)
+    : [];
+  const order = ["lab", "edge", "rc", "stable"];
+  return json(
+    {
+      task: { ...task, params, result: parse(task) },
+      worker: worker ? { ...worker, labels: worker.labels ? JSON.parse(worker.labels) : null } : null,
+      from: fromRow,
+      audit: audits?.results.map(brief) ?? [],
+      trial: trials?.results.map(brief) ?? [],
+      project_builds: projectBuilds?.results.map(brief) ?? [],
+      publish: publishes?.results.map(brief) ?? [],
+      approval,
+      rings: rings.sort((a, b) => order.indexOf(a) - order.indexOf(b)),
+      package: pkg,
+      evidence: objects.results.map((o) => {
+        const name = o.key.split("/").pop() ?? o.key;
+        return { name, size: o.size, uploaded_at: o.uploaded_at, url: `/api/v1/factory/tasks/${task.id}/artifacts/${encodeURIComponent(name)}`, public: isTextEvidence(name) };
+      }),
+    },
+    200,
+    { "cache-control": "public, max-age=30" },
+  );
 }

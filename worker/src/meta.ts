@@ -10,9 +10,11 @@ export interface RunningVersion {
   deployed_at: string | null;
   release_url: string | null;
   commit_url: string | null;
+  /** The page-view counter every page carries, if this deployment has one (ANALYTICS in wrangler.toml): a GA4 id (G-…) or a Cloudflare Web Analytics token; empty = none. */
+  analytics: string;
 }
 
-/** What is running: the release tag, its commit and when it was deployed. */
+/** What is running: the release tag, its commit and when it was deployed — and what the shell of every page needs to know about this deployment. */
 export function version(env: Env): RunningVersion {
   const v = env.POOL_VERSION || "dev";
   const commit = env.POOL_COMMIT || null;
@@ -22,6 +24,7 @@ export function version(env: Env): RunningVersion {
     deployed_at: env.POOL_DEPLOYED_AT || null,
     release_url: v === "dev" ? null : `${REPO_URL}/releases/tag/${v}`,
     commit_url: commit ? `${REPO_URL}/commit/${commit}` : null,
+    analytics: (env.ANALYTICS || "").trim(),
   };
 }
 

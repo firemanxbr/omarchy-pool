@@ -77,7 +77,7 @@ __CHARTS__
   function status(w) {
     var seen = "seen " + ago(w.last_seen);
     if (!w.alive) return '<span class="pill none" title="not seen in the last ten minutes">offline · ' + esc(ago(w.last_seen).replace(" ago", "")) + '</span>';
-    if (w.current_task) return '<a class="pill blue" href="/pipeline" title="task #' + w.current_task + ', on the Pipeline · ' + esc(seen) + '">building</a>';
+    if (w.current_task) return '<a class="pill blue" href="/build/' + w.current_task + '" title="task #' + w.current_task + ' · ' + esc(seen) + '">building</a>';
     if (!w.ready) return '<span class="pill error" title="' + esc((w.agent_error ? "its agent did not answer: " + w.agent_error : !w.agent ? "no agent: a contributor's builds and the audits need one that answers" : "not ready for the work it declares") + " · " + seen) + '">failed</span>';
     return '<span class="pill ok" title="' + esc("alive, nothing in hand · " + seen) + '">idle</span>';
   }
@@ -105,7 +105,7 @@ __CHARTS__
     var l = w.last_task; if (!l) return '<span class="muted" title="nothing finished since the pool started keeping this">—</span>';
     var tip = "task #" + l.id + " · " + l.kind + " " + (l.status === "failed" ? "failed" : l.status) + " " + ago(l.at);
     var pkg = l.kind === "build" || l.kind === "audit" || l.kind === "publish" || l.kind === "trial";
-    return '<span class="last" title="' + esc(tip) + '"><i class="dot ' + (l.status === "failed" ? "error" : "ok") + '"></i>' + (pkg ? '<a href="/package/' + encodeURIComponent(l.name) + '">' + esc(l.name) + '</a>' + (l.version ? ' <span class="v mono">' + esc(l.version) + '</span>' : '') : '<span class="mono">' + esc(l.name) + '</span> <span class="v">' + ago(l.at) + '</span>') + '</span>';
+    return '<span class="last" title="' + esc(tip) + '"><i class="dot ' + (l.status === "failed" ? "error" : "ok") + '"></i>' + (pkg ? '<a href="/build/' + l.id + '">' + esc(l.name) + '</a>' + (l.version ? ' <span class="v mono">' + esc(l.version) + '</span>' : '') : '<a class="mono" href="/build/' + l.id + '">' + esc(l.name) + '</a> <span class="v">' + ago(l.at) + '</span>') + '</span>';
   }
   // What each kind finished per day over the last week, from the stats series: the pool's jobs are the
   // project's (jobs_daily, by kind), the project's builds with the publishes and audits are the review side's,
