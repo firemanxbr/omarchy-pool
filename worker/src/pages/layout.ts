@@ -718,16 +718,19 @@ const HELPERS = String.raw`
     });
   }
   // The workers a build may go to, as the choice in the Build dialog, from the factory listing (/api/v1/factory): for a contributor's build, theirs and the ones the project shares; for the project's build, the project's own that build. The first option leaves it to the rule.
-  function whereOptions(workers, arch, login, forProject) {
+  function whereOptions(workers, arch, login, forProject, needsAgent) {
+    if (needsAgent === undefined) needsAgent = true;
     var can = (workers || []).filter(function (w) { return w.arch === arch && !w.revoked_at && (forProject ? (w.side === "omarchy" && (!w.kinds || w.kinds.indexOf("build") >= 0)) : (w.side !== "omarchy" && (w.owner === login || w.mode === "shared"))); });
-    var word = function (w) { return (w.owner && w.owner !== login ? w.owner + "'s " : forProject ? "" : "your ") + wtShort(w.id) + " · " + (w.alive ? (w.current_task ? "building" : "idle") : "offline") + " · " + (w.labels && w.labels.emulated ? "emulated" : "native") + (w.agent ? " · " + w.agent : forProject ? "" : " · no agent"); };
+    // A drafted build (the project's always) goes only to a worker whose agent answered: pinned to another it would wait forever.
+    var fit = function (w) { return w.alive && (!needsAgent || w.agent_status === "ok"); };
+    var word = function (w) { return (w.owner && w.owner !== login ? w.owner + "'s " : forProject ? "" : "your ") + wtShort(w.id) + " · " + (w.alive ? (w.current_task ? "building" : "idle") : "offline") + " · " + (w.labels && w.labels.emulated ? "emulated" : "native") + (w.agent ? " · " + w.agent + (w.agent_status !== "ok" ? " (not answering)" : "") : " · no agent"); };
     var mine = can.filter(function (w) { return w.owner === login && !forProject; }), shared = can.filter(function (w) { return w.mode === "shared" && w.owner !== login && !forProject; }), project = forProject ? can : [];
     var opts = [];
     if (forProject) opts.push({ value: "", text: "Any of the project's workers for " + arch + (project.length ? "" : " (none is registered)"), selected: true });
     else opts.push({ value: "", text: mine.length ? "Yours first; the project's shared workers after 14 days" : "The project's shared workers — you have no worker for " + arch, selected: true });
-    if (!forProject && shared.length) opts.push({ value: "shared", text: "The project's shared workers, at once (" + shared.filter(function (w) { return w.alive; }).length + " of " + shared.length + " online)" });
-    mine.concat(shared).concat(project).forEach(function (w) { opts.push({ value: w.id, text: word(w), disabled: !w.alive }); });
-    return { label: "Where", options: opts, count: can.length, native: can.filter(function (w) { return w.alive && !(w.labels && w.labels.emulated); }).length };
+    if (!forProject && shared.length) opts.push({ value: "shared", text: "The project's shared workers, at once (" + shared.filter(fit).length + " of " + shared.length + " ready)" });
+    mine.concat(shared).concat(project).forEach(function (w) { opts.push({ value: w.id, text: word(w), disabled: !fit(w) }); });
+    return { label: "Where", options: opts, count: can.length, native: can.filter(function (w) { return fit(w) && !(w.labels && w.labels.emulated); }).length };
   }
   function wtShort(id) { var parts = String(id).split("-"); return parts.length > 3 ? parts.slice(-3).join("-") : id; }
 

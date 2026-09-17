@@ -110,8 +110,8 @@ const SCRIPT = String.raw`
     el.hidden = false;
     var c = T.chain || {};
     // The request the chain rests on, checked as the form checks it today; the contributor renews it from here when a line is not green.
-    var pkgSt = (T.package || {}).status, busy2 = [T.task].concat(T.project_builds || []).some(function (x) { return x && (x.status === "queued" || x.status === "leased"); });
-    $("#ckreq").innerHTML = T.request ? requestBlock(T.request, !!(login && T.task.owner === login), T.task.name, ["registered", "staged", "rejected", "unmaintained"].indexOf(pkgSt) >= 0 && !busy2, busy2 ? "renew it once the build in flight is done" : pkgSt === "approved" || pkgSt === "published" ? "in the pool as it was: the next version's request goes through the form" : "renew it once nothing of it is being built") : "";
+    var pkgSt = (T.package || {}).status;
+    $("#ckreq").innerHTML = T.request ? requestBlock(T.request, !!(login && T.task.owner === login), T.task.name, !!T.request.renewable, T.request.busy ? "renew it once build #" + T.request.busy + " is done" : pkgSt === "approved" || pkgSt === "published" ? "in the pool as it was; new releases come as bumps, built from the approved recipe" : "renew it once nothing of it is being built") : "";
     $("#cklist").innerHTML = ckColumn(sc, "contributor", "The contributor's half", c.contributor ? person(c.contributor.owner) + (c.contributor.id !== T.task.id ? ' · build <a href="/build/' + c.contributor.id + '">#' + c.contributor.id + '</a>' : '') : 'nobody yet')
       + ckColumn(sc, "maintainer", "The maintainer's half", c.project ? 'the project\'s build <a href="/build/' + c.project.id + '">#' + c.project.id + '</a>' + (c.approval ? ' · decided by ' + person(c.approval.by) : c.withdrawn ? ' · the approval by ' + person(c.withdrawn.by) + ' was withdrawn' : ' · not decided') : 'not started' + (sc.ready ? ' — ready to begin' : ''));
   }

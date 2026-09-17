@@ -240,7 +240,7 @@ fetch_pkgbuild() { # name ref → /build/pkg holds the PKGBUILD directory
     done
     ls -la /build/evidence
     with_secrets python3 /build/pool/factory/bin/draft-pkgbuild --url "${review_url:-$OMARCHY_REVIEW_URL}" --name "$name" --out /build/pkg --evidence /build/evidence \
-      ${review_source:+--source "$review_source"} ${review_version:+--version "$review_version"} ${review_desc:+--description "$review_desc"} ${review_license:+--license "$review_license"}
+      ${review_source:+--source "$review_source"} ${review_version:+--version "$review_version"} ${review_desc:+--description "$review_desc"} ${review_license:+--license "$review_license"} ${BUILD_HINT:+--hint="$BUILD_HINT"}
   elif [[ "$ref" == bump:* ]]; then
     # A new upstream release of an approved package: the PKGBUILD a
     # maintainer approved, with pkgver moved to the tag and pkgrel reset;
@@ -263,14 +263,18 @@ fetch_pkgbuild() { # name ref → /build/pkg holds the PKGBUILD directory
     # failing the same way. The contributor's hint goes with it.
     rm -f /build/PKGBUILD.prev /build/lesson.log
     if [[ -n "${LESSON_TASK:-}" ]]; then
-      curl -sSf --max-time 60 "${OMARCHY_API:-https://pkgs.firemanxbr.org}/api/v1/factory/tasks/$LESSON_TASK/artifacts/PKGBUILD" -o /build/PKGBUILD.prev 2>/dev/null || rm -f /build/PKGBUILD.prev
-      curl -sSf --max-time 60 "${OMARCHY_API:-https://pkgs.firemanxbr.org}/api/v1/factory/tasks/$LESSON_TASK/artifacts/build.log" -o /build/lesson.log 2>/dev/null || rm -f /build/lesson.log
+      local api="${OMARCHY_API:-https://pkgs.firemanxbr.org}" f
+      curl -sSf --max-time 60 "$api/api/v1/factory/tasks/$LESSON_TASK/artifacts/PKGBUILD" -o /build/PKGBUILD.prev 2>/dev/null || rm -f /build/PKGBUILD.prev
+      # The build's log, then the gate's verdict and the audit's report when they exist: what stopped it, whichever step did.
+      for f in build.log tests.log audit.md; do
+        curl -sSf --max-time 60 "$api/api/v1/factory/tasks/$LESSON_TASK/artifacts/$f" 2>/dev/null | { printf '\n==== %s of build %s ====\n' "$f" "$LESSON_TASK"; cat; } >> /build/lesson.log || true
+      done
     fi
-    if [[ -s /build/PKGBUILD.prev && -s /build/lesson.log ]]; then
-      echo "==> The lesson: the PKGBUILD and the log of failed build $LESSON_TASK${BUILD_HINT:+; the hint from the contributor: $BUILD_HINT}"
-      with_secrets python3 /build/pool/factory/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg --previous /build/PKGBUILD.prev --log /build/lesson.log ${BUILD_HINT:+--hint "$BUILD_HINT"}
+    if [[ -s /build/PKGBUILD.prev ]]; then
+      echo "==> The lesson: the PKGBUILD of build $LESSON_TASK$( [[ -s /build/lesson.log ]] && echo " and what stopped it" )${BUILD_HINT:+; the hint from the person who asked: $BUILD_HINT}"
+      with_secrets python3 /build/pool/factory/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg --previous /build/PKGBUILD.prev $( [[ -s /build/lesson.log ]] && echo "--log /build/lesson.log" ) ${BUILD_HINT:+--hint="$BUILD_HINT"}
     else
-      with_secrets python3 /build/pool/factory/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg ${BUILD_HINT:+--hint "$BUILD_HINT"}
+      with_secrets python3 /build/pool/factory/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg ${BUILD_HINT:+--hint="$BUILD_HINT"}
     fi
   elif [[ "$ref" == *@*:* ]]; then
     local url rest tag path
@@ -568,10 +572,10 @@ build_attempts() { # name ref
     cp /build/pkg/PKGBUILD /build/PKGBUILD.prev
     if [[ "$ref" == review:* ]]; then
       with_secrets python3 /build/pool/factory/bin/draft-pkgbuild --url "${review_url:-$OMARCHY_REVIEW_URL}" --name "$name" --out /build/pkg --evidence /build/evidence --previous /build/PKGBUILD.prev --log /build/attempt.log \
-        ${review_source:+--source "$review_source"} ${review_version:+--version "$review_version"} ${review_desc:+--description "$review_desc"} ${review_license:+--license "$review_license"} || return 4
+        ${review_source:+--source "$review_source"} ${review_version:+--version "$review_version"} ${review_desc:+--description "$review_desc"} ${review_license:+--license "$review_license"} ${BUILD_HINT:+--hint="$BUILD_HINT"} || return 4
     else
       local url; url="${ref#draft:}"; url="${url%@*}"
-      with_secrets python3 /build/pool/factory/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg --previous /build/PKGBUILD.prev --log /build/attempt.log ${BUILD_HINT:+--hint "$BUILD_HINT"} || return 4
+      with_secrets python3 /build/pool/factory/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg --previous /build/PKGBUILD.prev --log /build/attempt.log ${BUILD_HINT:+--hint="$BUILD_HINT"} || return 4
     fi
   done
 }

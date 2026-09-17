@@ -79,24 +79,32 @@ can be ready while the other failed). The tools, in the order to try them:
    lists its findings with a fix for each; the PKGBUILD the agent wrote is
    beside them.
 2. **Build again, with the lesson.** The next build of that architecture
-   starts from the failed build's PKGBUILD and log — the drafter corrects
-   instead of starting from nothing — and from a **hint** the contributor
-   writes in the Build dialog: the binary's name, a build flag, a
+   starts from the last build's PKGBUILD and what stopped it — the log,
+   the gate's verdict, the audit's report — whether that build failed,
+   was rejected or was stopped at the gate: the drafter corrects instead
+   of starting from nothing. A **hint** the contributor writes in the
+   Build dialog goes with it: the binary's name, a build flag, a
    dependency, what the recipe should do differently. Inside one build the
-   agent gets three attempts, each from the last log.
+   agent gets three attempts, each from the last log. (A package whose
+   repository ships its own PKGBUILD is built as it is, with no drafting:
+   the fix is made there, tagged, and the request renewed with the tag.)
 3. **Choose where it runs.** The same dialog lists the workers that can
    take it: the contributor's own, and the ones the project shares. A
    build that ran *emulated* (x86_64 under qemu on an aarch64 host) may
    need nothing but a native worker. A build asked for one worker goes to
    that worker only and waits for it; a contributor with no worker for the
    architecture is built by the project's shared workers at once, one with
-   a worker by theirs first and by the shared ones after 14 days.
+   a worker by theirs first and by the shared ones after 14 days. A build
+   already waiting takes the choice made when it is asked for again;
+   revoking a worker frees the builds asked for it.
 4. **Build it at home first.** The same image runs on any machine with
    the contributor's own agent key (*Workers* in the docs): what passes
    there is what they queue here.
 
 A maintainer chooses the same way for the project's build: which of the
-project's workers, native or emulated, and a hint for the project's agent.
+project's workers — one that builds and whose agent answers, native or
+emulated — and the note they write is the hint the project's agent drafts
+with.
 
 An approval can be **withdrawn** by any maintainer, the one who gave it
 included: one that broke the rule (a package approved by the person who
@@ -122,12 +130,14 @@ decision — earns points, fifty for each half, from what the pool recorded:
 
 A chain is **ready** for a maintainer when the contributor's half is
 complete: a build that succeeded, the gate passed, the audit answered —
-and the request as the form would take it today. A request the pool wrote
-from a registration made before the form existed confirmed nothing; the
-contributor renews it from their page (the same form, filled from the
-record) and the build is ready again. Each architecture is its own chain:
-one can be ready while the other failed, and a person's page shows them
-one by one.
+and the request as the form would take it today, naming the version the
+build is of. A request the pool wrote from a registration made before the
+form existed confirmed nothing; the contributor renews it from their page
+(the same form, filled from the record) and the build is ready again. The
+request judges what is still to be decided: a bump — the pool's own build
+of a new release from the approved recipe — and a chain already decided
+are not scored against it. Each architecture is its own chain: one can be
+ready while the other failed, and a person's page shows them one by one.
 
 The **class** is the score today: **A** from 90, **B** from 75, **C**
 from 55, **D** below. Beside it the dashboard shows the class the chain

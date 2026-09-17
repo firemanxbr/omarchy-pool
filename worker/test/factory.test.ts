@@ -648,6 +648,25 @@ describe("where a build runs", () => {
     const c = await call("POST", "/factory/claim", { arch: "aarch64", shared: true, agent: "claude-code/claude-sonnet-5", agent_status: "ok" }, "omw_w5");
     expect(c.status).toBe(200);
     expect(c.json.task).toMatchObject({ id: p.json.tasks[0], params: { lesson: failed, hint: expect.stringMatching(/^the binary/) } });
+    // Asked again while it waits, with the default choice: unpinned, the rule again (hers first); the same task.
+    // (w5 leased it above: a build that runs is not re-routed, nothing new is queued, and the answer says so.)
+    const re = await call("POST", "/factory/packages/hasworker/build", { arches: ["aarch64"] }, "omc_alice");
+    expect(re.status).toBe(200);
+    expect(re.json).toMatchObject({ tasks: [], building: [{ task: p.json.tasks[0], arch: "aarch64", on: "w5" }], note: expect.stringMatching(/^already building/) });
+    await env.DB.prepare("UPDATE build_tasks SET status = 'queued', lease_owner = NULL WHERE id = ?").bind(p.json.tasks[0]).run();
+    const re2 = await call("POST", "/factory/packages/hasworker/build", { arches: ["aarch64"], hint: "try again" }, "omc_alice");
+    expect(re2.status).toBe(201);
+    expect(await env.DB.prepare("SELECT pinned_to, params FROM build_tasks WHERE id = ?").bind(p.json.tasks[0]).first()).toMatchObject({ pinned_to: null, params: expect.stringContaining('"hint":"try again"') });
+    // Pinned again, then the worker is revoked: the build goes back to any worker that qualifies, at once.
+    expect((await call("POST", "/factory/packages/hasworker/build", { arches: ["aarch64"], worker: "w5" }, "omc_alice")).status).toBe(201);
+    expect((await call("DELETE", "/factory/workers/w5", undefined, "omc_m1")).json).toMatchObject({ revoked: "w5", freed: 1 });
+    expect(await env.DB.prepare("SELECT pinned_to, shared_after FROM build_tasks WHERE id = ?").bind(p.json.tasks[0]).first()).toEqual({ pinned_to: null, shared_after: null });
+    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE name = 'hasworker' AND status IN ('queued', 'leased')").run();
+    // A build after a rejection (cancelled) or one the gate stopped (staged) is the lesson too, not only a failed one.
+    await env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, staged_prefix, result) VALUES ('hasworker', 'aarch64', '1', 'draft:https://hasworker.example@1', 'contributor', 100, 0, 'community', 'alice', 'build', 'staged', 'staging/alice/hasworker/9/', '{\"vet\":{\"verdict\":\"fail\",\"fails\":1,\"warnings\":0}}')").run();
+    const gated = (await env.DB.prepare("SELECT id FROM build_tasks WHERE name = 'hasworker' AND status = 'staged' ORDER BY id DESC").first<{ id: number }>())!.id;
+    const after = await call("POST", "/factory/packages/hasworker/build", { arches: ["aarch64"] }, "omc_alice");
+    expect(after.json.lessons).toEqual({ aarch64: gated });
     await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE name = 'hasworker' AND status IN ('queued', 'leased')").run();
   });
   it("a maintainer names the project's worker for the project's build — one that builds this architecture", async () => {
@@ -658,15 +677,20 @@ describe("where a build runs", () => {
     const staged = (await env.DB.prepare("SELECT id FROM build_tasks WHERE name = 'pinme'").first<{ id: number }>())!.id;
     await env.DB.prepare("INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, trusted_by, last_seen) VALUES ('w6', 'aarch64', 'm1', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z')").bind(await sha256Hex("omw_w6")).run();
     expect((await call("POST", `/factory/tasks/${staged}/build`, { worker: "w3" }, "omc_m2")).status).toBe(400); // a contributor's worker never builds for the project
-    const ok = await call("POST", `/factory/tasks/${staged}/build`, { worker: "w1", note: "native, please" }, "omc_m2");
+    expect((await call("POST", `/factory/tasks/${staged}/build`, { worker: "w6" }, "omc_m2")).json.error).toMatch(/no agent that answers/); // pinned to it, the build would wait forever
+    expect((await call("POST", "/factory/claim", { arch: "aarch64", kinds: ["build"], agent: "claude-code/claude-sonnet-5", agent_status: "ok" }, "omw_w6")).status).toBeLessThan(300); // now it builds, with an agent
+    expect((await call("POST", `/factory/tasks/${staged}/build`, { worker: "w1" }, "omc_m2")).json.error).toMatch(/does not take builds/); // w1 declared sync last
+    const ok = await call("POST", `/factory/tasks/${staged}/build`, { worker: "w6", note: "native, please — link against system zlib" }, "omc_m2");
     expect(ok.status, JSON.stringify(ok.json)).toBe(200);
-    expect(ok.json.pinned_to).toBe("w1");
+    expect(ok.json.pinned_to).toBe("w6");
+    // The maintainer's note is the hint the project's agent drafts with.
+    expect(JSON.parse((await env.DB.prepare("SELECT params FROM build_tasks WHERE id = ?").bind(ok.json.task).first<{ params: string }>())!.params)).toMatchObject({ review: staged, note: "native, please — link against system zlib", hint: "native, please — link against system zlib" });
     // Another project worker never gets it (whatever else is queued for it).
-    const other = await call("POST", "/factory/claim", { arch: "aarch64", kinds: ["build"], agent: "claude-code/claude-sonnet-5", agent_status: "ok" }, "omw_w6");
+    const other = await call("POST", "/factory/claim", { arch: "aarch64", kinds: ["build"], agent: "claude-code/claude-sonnet-5", agent_status: "ok" }, "omw_w1");
     if (other.status === 200) expect(other.json.task.id).not.toBe(ok.json.task);
-    const c = await call("POST", "/factory/claim", { arch: "aarch64", kinds: ["build"], agent: "claude-code/claude-sonnet-5", agent_status: "ok" }, "omw_w1");
+    const c = await call("POST", "/factory/claim", { arch: "aarch64", kinds: ["build"], agent: "claude-code/claude-sonnet-5", agent_status: "ok" }, "omw_w6");
     expect(c.status).toBe(200);
-    expect(c.json.task).toMatchObject({ id: ok.json.task, pinned_to: "w1" });
+    expect(c.json.task).toMatchObject({ id: ok.json.task, pinned_to: "w6" });
     await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE name = 'pinme' AND status IN ('queued', 'leased')").run();
   });
 });

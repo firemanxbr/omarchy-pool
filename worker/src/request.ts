@@ -62,8 +62,9 @@ const parse = (s: unknown): Record<string, unknown> => {
   try { return JSON.parse(String(s)) as Record<string, unknown>; } catch { return {}; }
 };
 const https = (s: string | null | undefined): s is string => typeof s === "string" && /^https:\/\/[^\s]+$/.test(s);
-/** A release is a file somewhere under the host, never the host alone (the pool wrote `https://vendor.com` as the source of the first requests). */
-const hasPath = (s: string): boolean => { try { return new URL(s).pathname.replace(/\/+$/, "").length > 0; } catch { return false; } };
+/** A release is a file somewhere under the host, never the host alone (the pool wrote `https://vendor.com` as the source of the first requests); the form asks the same. */
+export const sourceHasPath = (s: string): boolean => { try { return new URL(s).pathname.replace(/\/+$/, "").length > 0; } catch { return false; } };
+const hasPath = sourceHasPath;
 /** A URL as a note reads it: the host and the last path segment — github.com/…/v2.16.1.tar.gz. */
 const tail = (s: string) => {
   const bare = s.replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/+$/, "");

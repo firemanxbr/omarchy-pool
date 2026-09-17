@@ -245,12 +245,17 @@ export async function handleProjectBuild(c: Contributor, id: number, request: Re
   // Where it runs: one of the project's workers that builds this architecture, when the maintainer says which (the native one, not the emulated one).
   let pinned: string | null = null;
   if (typeof b.worker === "string" && b.worker.trim()) {
-    const w = await env.DB.prepare("SELECT id, arch FROM build_workers WHERE id = ? AND revoked_at IS NULL AND trust = 'project'").bind(b.worker.trim()).first<{ id: string; arch: string }>();
+    const w = await env.DB.prepare("SELECT id, arch, kinds, agent_status FROM build_workers WHERE id = ? AND revoked_at IS NULL AND trust = 'project'").bind(b.worker.trim()).first<{ id: string; arch: string; kinds: string | null; agent_status: string | null }>();
     if (!w || w.arch !== t.arch) return json({ error: `${b.worker} is not a project worker for ${t.arch}` }, 400);
+    // The claim gives a review build only to a worker that declares builds and whose agent answered; pinned to another, it would wait forever.
+    const kinds = w.kinds ? (JSON.parse(w.kinds) as string[]) : [];
+    if (kinds.length && !kinds.includes("build")) return json({ error: `${w.id} does not take builds (it declares ${kinds.join(", ")})` }, 400);
+    if (w.agent_status !== "ok") return json({ error: `${w.id} has no agent that answers; the project's build is drafted by one` }, 400);
     pinned = w.id;
   }
   const pkg = await env.DB.prepare("SELECT request_id, project, source, release, description, license FROM factory_packages WHERE name = ?").bind(t.name).first<{ request_id: number | null; project: string | null; source: string | null; release: string | null; description: string | null; license: string | null }>();
-  const params = { review: id, request: pkg?.request_id ?? null, project: pkg?.project ?? null, source: pkg?.source ?? null, version: pkg?.release ?? t.version, description: pkg?.description ?? null, license: pkg?.license ?? null, owner, by: c.login, note: b.note ?? null };
+  // The maintainer's note is on the record and is the hint the project's agent drafts with (the worker reads params.hint).
+  const params = { review: id, request: pkg?.request_id ?? null, project: pkg?.project ?? null, source: pkg?.source ?? null, version: pkg?.release ?? t.version, description: pkg?.description ?? null, license: pkg?.license ?? null, owner, by: c.login, note: b.note ?? null, hint: typeof b.note === "string" && b.note.trim() ? b.note.trim().slice(0, 600) : null };
   const row = await env.DB.prepare(
     `INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, params, pinned_to) VALUES (?, ?, ?, ?, ?, 30, 0, 'project', ?, 'build', ?, ?) RETURNING id`,
   )

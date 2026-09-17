@@ -8,7 +8,7 @@ import { putRecord, recordKey, recordUrl, withdrawRecord } from "../record";
 import { version } from "../meta";
 import { isTextEvidence, STAGING_DAYS, STAGING_QUOTA_BYTES } from "../staging";
 import { findLeak, leakMessage } from "../leak";
-import { CHECKLIST, LICENSE } from "../request";
+import { CHECKLIST, LICENSE, sourceHasPath } from "../request";
 
 /**
  * Contributors: anyone with a GitHub identity. No permission needed to
@@ -308,7 +308,7 @@ export async function handleRequestPackage(c: Contributor, request: Request, env
       return json({ error: `GitHub says ${parsed.project} is ${String(detected.license)}; the request says ${license} — one of them is wrong`, detected_license: detected.license }, 400);
     }
   } else {
-    if (!source || !/^https:\/\/[^\s]+$/.test(source)) return json({ error: "source is required for a project that is not on GitHub: the https URL of the release tarball or artifact" }, 400);
+    if (!source || !/^https:\/\/[^\s]+$/.test(source) || !sourceHasPath(source)) return json({ error: "source is required for a project that is not on GitHub: the https URL of the release tarball or artifact — a file under the host, not its home page" }, 400);
     if (!tag || !/^[A-Za-z0-9._+~-]{1,64}$/.test(tag)) return json({ error: "version is required for a project that is not on GitHub: the release's version or tag" }, 400);
   }
   // Tests run inside workerd without the network (vitest.config.ts): the source is taken as it is.
@@ -411,23 +411,27 @@ export async function handleBuildPackage(c: Contributor, name: string, request: 
   const ref = pkg.pkgbuild_path ? `${pkg.url}@${tag ?? "HEAD"}:${pkg.pkgbuild_path}` : `draft:${pkg.url}@${tag ?? "latest"}`;
   const version = tag ? tag.replace(/^v/, "").replace(/-/g, "_") : null;
   const ids: number[] = [];
+  const building: { task: number; arch: string; on: string | null }[] = [];
   const lessons: Record<string, number> = {};
   for (const arch of arches) {
     // Theirs first; the shared ones at once when they have no worker for this architecture (or asked for them), after 14 days otherwise.
-    const mine = await env.DB.prepare("SELECT COUNT(*) AS n FROM build_workers WHERE owner = ? AND arch = ? AND revoked_at IS NULL").bind(c.login, arch).first<{ n: number }>();
+    const mine = await env.DB.prepare("SELECT COUNT(*) AS n FROM build_workers WHERE owner = ? AND arch = ? AND revoked_at IS NULL AND trust = 'community'").bind(c.login, arch).first<{ n: number }>();
     const atOnce = pinned !== null || where === "shared" || (mine?.n ?? 0) === 0;
-    // The last build that ended, when it failed, is the lesson the drafter starts from.
-    const last = await env.DB.prepare("SELECT id, status FROM build_tasks WHERE name = ? AND arch = ? AND kind = 'build' AND trust = 'community' AND status NOT IN ('queued', 'leased') ORDER BY id DESC LIMIT 1").bind(name, arch).first<{ id: number; status: string }>();
+    // The last build of this architecture that ended — failed, rejected (cancelled), or staged and stopped by the gate or the audit — is the lesson the drafter starts from: its PKGBUILD, its log, the gate's, the audit's.
+    const last = await env.DB.prepare("SELECT id, status FROM build_tasks WHERE name = ? AND arch = ? AND kind = 'build' AND trust = 'community' AND status NOT IN ('queued', 'leased') AND pkgbuild_ref LIKE 'draft:%' ORDER BY id DESC LIMIT 1").bind(name, arch).first<{ id: number; status: string }>();
     const params: Record<string, unknown> = {};
-    if (last?.status === "failed" && ref.startsWith("draft:")) { params.lesson = last.id; lessons[arch] = last.id; }
+    if (last && ref.startsWith("draft:")) { params.lesson = last.id; lessons[arch] = last.id; }
     if (hint) params.hint = hint;
-    const dup = await env.DB.prepare("SELECT id, status FROM build_tasks WHERE name = ? AND arch = ? AND pkgbuild_ref = ? AND status IN ('queued', 'leased') LIMIT 1").bind(name, arch, ref).first<{ id: number; status: string }>();
+    const dup = await env.DB.prepare("SELECT id, status, lease_owner FROM build_tasks WHERE name = ? AND arch = ? AND pkgbuild_ref = ? AND status IN ('queued', 'leased') LIMIT 1").bind(name, arch, ref).first<{ id: number; status: string; lease_owner: string | null }>();
     if (dup) {
-      // Asked again while it waits: the new choice of where, the hint, the lesson replace the old ones.
-      if (dup.status === "queued" && (where || Object.keys(params).length)) {
-        await env.DB.prepare(`UPDATE build_tasks SET ${where ? "pinned_to = ?, shared_after = NULL, " : ""}params = ? WHERE id = ? AND status = 'queued'`).bind(...(where ? [pinned] : []), Object.keys(params).length ? JSON.stringify(params) : null, dup.id).run();
+      if (dup.status === "queued") {
+        // Asked again while it waits: where it goes, the hint and the lesson are what was asked now — the default choice unpins it.
+        await env.DB.prepare("UPDATE build_tasks SET pinned_to = ?, shared_after = ?, params = ? WHERE id = ? AND status = 'queued'")
+          .bind(pinned, atOnce ? null : new Date(Date.now() + 14 * 86400000).toISOString(), Object.keys(params).length ? JSON.stringify(params) : null, dup.id).run();
+        ids.push(dup.id);
+      } else {
+        building.push({ task: dup.id, arch, on: dup.lease_owner });
       }
-      ids.push(dup.id);
       continue;
     }
     const row = await env.DB.prepare(
@@ -437,12 +441,15 @@ export async function handleBuildPackage(c: Contributor, name: string, request: 
       .first<{ id: number }>();
     if (row) ids.push(row.id);
   }
-  await env.DB.prepare("UPDATE factory_packages SET status = 'waiting', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?")
-    .bind(`waiting for a worker (${arches.join(", ")})${pinned ? ` — ${pinned}` : where === "shared" ? " — the project's shared workers" : ""}`, name).run();
+  // Everything asked for is already building: nothing queued, nothing to say but that.
+  if (!ids.length) return json({ tasks: [], building, arches, note: `already building: ${building.map((b) => `#${b.task} (${b.arch}${b.on ? ` on ${b.on}` : ""})`).join(", ")} — ask again when it ends` }, 200);
+  const queuedArches = arches.filter((a) => !building.some((b) => b.arch === a));
+  await env.DB.prepare("UPDATE factory_packages SET status = 'waiting', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ? AND status != 'building'")
+    .bind(`waiting for a worker (${queuedArches.join(", ")})${pinned ? ` — ${pinned}` : where === "shared" ? " — the project's shared workers" : ""}`, name).run();
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('enqueue', NULL, 'factory', 'ok', ?, ?)")
-    .bind(`${name}${version ? " " + version : ""}: ${ids.length} community build(s) queued by ${c.login} for ${arches.join(", ")}${pinned ? ` on ${pinned}` : where === "shared" ? " on the project's shared workers" : ""} — results go to staging`, JSON.stringify({ name, owner: c.login, arches, tasks: ids, pkgbuild_ref: ref, pinned_to: pinned, shared: where === "shared", lessons, hint }))
+    .bind(`${name}${version ? " " + version : ""}: ${ids.length} community build(s) queued by ${c.login} for ${queuedArches.join(", ")}${pinned ? ` on ${pinned}` : where === "shared" ? " on the project's shared workers" : ""} — results go to staging`, JSON.stringify({ name, owner: c.login, arches: queuedArches, tasks: ids, pkgbuild_ref: ref, pinned_to: pinned, shared: where === "shared", lessons, hint, building }))
     .run();
-  return json({ tasks: ids, arches, pkgbuild_ref: ref, pinned_to: pinned, lessons, hint, note: pinned ? `${pinned} builds these; nothing else claims them.` : where === "shared" ? "The project's shared workers take these at once." : "A worker of yours claims these first; the project's shared workers otherwise. Start one with the Omarchy Packaging image (/docs/workers)." }, 201);
+  return json({ tasks: ids, building, arches: queuedArches, pkgbuild_ref: ref, pinned_to: pinned, lessons, hint, note: pinned ? `${pinned} builds these; nothing else claims them.` : where === "shared" ? "The project's shared workers take these at once." : "A worker of yours claims these first; the project's shared workers otherwise. Start one with the Omarchy Packaging image (/docs/workers)." }, 201);
 }
 
 export async function handleRegisterWorker(c: Contributor, request: Request, env: Env): Promise<Response> {
@@ -468,12 +475,15 @@ export async function handleRevokeWorker(c: Contributor, id: string, env: Env): 
   const res = isMaintainer(c)
     ? await env.DB.prepare("UPDATE build_workers SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND revoked_at IS NULL").bind(id).run()
     : await env.DB.prepare("UPDATE build_workers SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND owner = ? AND revoked_at IS NULL").bind(id, c.login).run();
+  let freed = 0;
   if (res.meta.changes) {
+    // A build asked for this worker would wait for it forever: back to the rule, for the shared workers at once.
+    freed = (await env.DB.prepare("UPDATE build_tasks SET pinned_to = NULL, shared_after = NULL WHERE pinned_to = ? AND status = 'queued'").bind(id).run()).meta.changes ?? 0;
     await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('trust', NULL, 'factory', 'warn', ?, ?)")
-      .bind(`worker ${id} revoked by ${c.login}`, JSON.stringify({ worker: id, by: c.login }))
+      .bind(`worker ${id} revoked by ${c.login}${freed ? ` — ${freed} queued build(s) asked for it go to any worker that qualifies` : ""}`, JSON.stringify({ worker: id, by: c.login, freed }))
       .run();
   }
-  return res.meta.changes ? json({ revoked: id }) : json({ error: "not yours (or not a maintainer), or already revoked" }, 404);
+  return res.meta.changes ? json({ revoked: id, freed }) : json({ error: "not yours (or not a maintainer), or already revoked" }, 404);
 }
 
 export async function handleListPackages(env: Env): Promise<Response> {

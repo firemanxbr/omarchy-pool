@@ -1333,6 +1333,18 @@ fn build_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
             }
         }
     }
+    // What the asker put with the build, for the drafter: a build to learn
+    // from (its PKGBUILD and log) and a word from the person who asked.
+    for (var, key) in [("lesson", "lesson"), ("hint", "hint")] {
+        let v = match task.params.get(key) {
+            Some(serde_json::Value::Number(n)) => n.to_string(),
+            _ => s(&task.params, key),
+        };
+        if !v.is_empty() {
+            use std::fmt::Write as _;
+            let _ = writeln!(meta, "{var}={}", shell_quote(&v));
+        }
+    }
     std::fs::write(dir.join("meta.sh"), meta)?;
     std::fs::copy(
         repo.join("factory/worker/omarchy-build-worker.sh"),

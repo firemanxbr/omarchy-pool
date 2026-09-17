@@ -72,12 +72,15 @@ export async function storyRows(env: Env, name: string) {
 }
 
 /** The request as a page shows it: the record's URL, the version, the checks, whether the form would take it today. */
-export function requestView(env: Env, pkg: Record<string, unknown> | null, req: RequestRow | null): (RequestChecks & { id: number | null; version: string | null; record: string | null; signature: string | null; arches: string[]; created_at: string | null }) | null {
+export function requestView(env: Env, pkg: Record<string, unknown> | null, req: RequestRow | null, tasks: TaskBrief[] = []): (RequestChecks & { id: number | null; version: string | null; record: string | null; signature: string | null; arches: string[]; created_at: string | null; busy: number | null; renewable: boolean }) | null {
   if (!pkg) return null;
+  // A renewal is taken while the package is registered, staged, rejected or unmaintained and no build of it — the project's included — is queued or running.
+  const busy = tasks.find((t) => t.kind === "build" && (t.status === "queued" || t.status === "leased"))?.id ?? null;
+  const renewable = ["registered", "staged", "rejected", "unmaintained"].includes(String(pkg.status)) && busy === null;
   const checks = requestChecks({ project: (pkg.project as string | null) ?? null, source: (pkg.source as string | null) ?? null, description: (pkg.description as string | null) ?? null, license: (pkg.license as string | null) ?? null, detected: (pkg.detected as string | null) ?? null }, req);
   let arches: string[] = [];
   try { arches = JSON.parse(String(req?.arches ?? pkg.arches ?? "[]")) as string[]; } catch { arches = []; }
-  return { ...checks, id: req?.id ?? null, version: req?.version ?? null, record: req?.record ? recordUrl(env, req.record) : null, signature: req?.record ? recordUrl(env, `${req.record}.sig`) : null, arches, created_at: req?.created_at ?? null };
+  return { ...checks, id: req?.id ?? null, version: req?.version ?? null, record: req?.record ? recordUrl(env, req.record) : null, signature: req?.record ? recordUrl(env, `${req.record}.sig`) : null, arches, created_at: req?.created_at ?? null, busy, renewable };
 }
 
 /** The chains, newest first: one per contributor's build (a project build with no contributor behind it — the old direct approvals — is a chain of its own). */
@@ -145,7 +148,7 @@ export async function handlePackageStory(name: string, env: Env): Promise<Respon
     {
       name,
       package: pkg ? { ...pkg, arches: (() => { try { return JSON.parse(String(pkg.arches ?? "[]")) as string[]; } catch { return []; } })() } : null,
-      request: requestView(env, pkg, request),
+      request: requestView(env, pkg, request, tasks),
       class: current ? current.score.class : null,
       score: current ? current.score : null,
       rings,

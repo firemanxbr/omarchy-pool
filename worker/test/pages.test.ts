@@ -34,26 +34,45 @@ describe("dashboard pages", () => {
     }
   });
 
-  // Every function a page's script calls is declared somewhere in that script (the shell's helpers, the charts, the page's own) or is the browser's: a helper moved out of one page and dropped from another is a ReferenceError the tests would not otherwise see (the Workers page lost perDay() and COLOR that way, 2026-09-17).
-  it("no page script calls a function it does not have", async () => {
-    const GLOBALS = new Set(["fetch", "setTimeout", "setInterval", "clearTimeout", "clearInterval", "requestAnimationFrame", "encodeURIComponent", "decodeURIComponent", "encodeURI", "parseInt", "parseFloat", "isNaN", "isFinite", "Number", "String", "Boolean", "Array", "Object", "Date", "Promise", "RegExp", "Error", "Map", "Set", "Response", "URLSearchParams", "URL", "Function", "Symbol", "escape", "unescape", "alert", "confirm", "prompt", "Blob", "TextEncoder", "TextDecoder", "Intl", "structuredClone", "queueMicrotask", "matchMedia", "getComputedStyle", "scrollTo", "scrollBy", "open", "close", "atob", "btoa", "AbortController", "IntersectionObserver", "ResizeObserver", "MutationObserver", "CustomEvent", "Event", "FormData", "Headers", "Request", "if", "for", "while", "switch", "catch", "return", "function", "typeof", "new", "else", "do", "in", "of"]);
+  // Every name a page's script uses is declared somewhere in that script (the shell's helpers, the charts, the page's own) or is the browser's — parsed, not grepped: a helper moved out of one page and dropped from another is a ReferenceError the tests would not otherwise see (the Workers page lost perDay() and COLOR that way, 2026-09-17).
+  it("no page script uses a name it does not declare", async () => {
+    const GLOBALS = new Set(["window", "document", "location", "history", "navigator", "console", "fetch", "setTimeout", "setInterval", "clearTimeout", "clearInterval", "requestAnimationFrame", "cancelAnimationFrame", "encodeURIComponent", "decodeURIComponent", "encodeURI", "decodeURI", "parseInt", "parseFloat", "isNaN", "isFinite", "Number", "String", "Boolean", "Array", "Object", "Date", "Promise", "RegExp", "Error", "TypeError", "Map", "Set", "WeakMap", "JSON", "Math", "Response", "Request", "Headers", "URLSearchParams", "URL", "Function", "Symbol", "Infinity", "NaN", "undefined", "escape", "unescape", "alert", "confirm", "prompt", "Blob", "TextEncoder", "TextDecoder", "Intl", "structuredClone", "queueMicrotask", "matchMedia", "getComputedStyle", "scrollTo", "scrollBy", "scrollX", "scrollY", "innerWidth", "innerHeight", "open", "close", "atob", "btoa", "AbortController", "IntersectionObserver", "ResizeObserver", "MutationObserver", "CustomEvent", "Event", "FormData", "localStorage", "sessionStorage", "crypto", "performance", "CSS", "arguments", "this", "Element", "HTMLElement", "Node", "NodeList", "DOMParser", "XMLSerializer", "Image", "Audio", "devicePixelRatio", "self", "globalThis", "gtag", "dataLayer"]);
+    const acorn = await import("acorn");
     for (const path of PAGES) {
       const html = await (await get(path)).text();
-      const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map((m) => m[1]).filter((s) => !/^\s*$/.test(s) && !/gtag|beacon/.test(s.slice(0, 120)));
-      const code = scripts.join("\n");
+      const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map((m) => m[1]).filter((c) => !/^\s*$/.test(c) && !/googletagmanager|beacon\.min\.js/.test(c));
+      const code = scripts.join("\n;\n");
       if (!code.trim()) continue;
-      const declared = new Set<string>();
-      for (const m of code.matchAll(/\bfunction\s+([A-Za-z_$][\w$]*)\s*\(/g)) declared.add(m[1]);
-      for (const m of code.matchAll(/\b(?:var|let|const)\s+([A-Za-z_$][\w$]*)/g)) declared.add(m[1]);
-      for (const m of code.matchAll(/,\s*([A-Za-z_$][\w$]*)\s*=\s*function\b/g)) declared.add(m[1]);
-      for (const m of code.matchAll(/\b([A-Za-z_$][\w$]*)\s*=\s*function\b/g)) declared.add(m[1]);
-      for (const m of code.matchAll(/\bfunction\s*[\w$]*\s*\(([^)]*)\)/g)) m[1].split(",").forEach((a) => declared.add(a.trim()));
-      for (const m of code.matchAll(/\(([^()]*)\)\s*=>/g)) m[1].split(",").forEach((a) => declared.add(a.trim()));
-      const stripped = code.replace(/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"/g, '""').replace(/\/\/[^\n]*/g, "");
-      const called = new Set<string>();
-      for (const m of stripped.matchAll(/(^|[^\w$.])([A-Za-z_$][\w$]*)\s*\(/g)) called.add(m[2]);
-      const missing = [...called].filter((n) => !declared.has(n) && !GLOBALS.has(n));
-      expect(missing, `${path} calls undeclared: ${missing.join(", ")}`).toEqual([]);
+      const ast = acorn.parse(code, { ecmaVersion: 2020, sourceType: "script" }) as unknown as Record<string, unknown>;
+      const declared = new Set<string>(), used = new Set<string>();
+      const pattern = (n: Record<string, unknown> | null | undefined): void => {
+        if (!n) return;
+        const t = n.type as string;
+        if (t === "Identifier") declared.add(n.name as string);
+        else if (t === "ObjectPattern") (n.properties as Record<string, unknown>[]).forEach((p) => pattern((p.value ?? p.argument) as Record<string, unknown>));
+        else if (t === "ArrayPattern") (n.elements as Record<string, unknown>[]).forEach(pattern);
+        else if (t === "AssignmentPattern") pattern(n.left as Record<string, unknown>);
+        else if (t === "RestElement") pattern(n.argument as Record<string, unknown>);
+      };
+      const walk = (n: unknown, parent: Record<string, unknown> | null, key: string | null): void => {
+        if (!n || typeof n !== "object") return;
+        if (Array.isArray(n)) { n.forEach((x) => walk(x, parent, key)); return; }
+        const node = n as Record<string, unknown>, t = node.type as string;
+        if (!t) return;
+        if (t === "FunctionDeclaration" || t === "FunctionExpression" || t === "ArrowFunctionExpression") { if (node.id) pattern(node.id as Record<string, unknown>); (node.params as Record<string, unknown>[]).forEach(pattern); }
+        if (t === "VariableDeclarator") pattern(node.id as Record<string, unknown>);
+        if (t === "CatchClause" && node.param) pattern(node.param as Record<string, unknown>);
+        if (t === "ClassDeclaration" && node.id) pattern(node.id as Record<string, unknown>);
+        if (t === "Identifier") {
+          // A reference, not a property name or a key: `a.b` counts a, `{ b: 1 }` counts nothing, `a[b]` counts both.
+          const isProp = parent && ((parent.type === "MemberExpression" && key === "property" && !parent.computed) || (parent.type === "Property" && key === "key" && !parent.computed) || (parent.type === "MethodDefinition" && key === "key") || (parent.type === "LabeledStatement" || parent.type === "BreakStatement" || parent.type === "ContinueStatement"));
+          if (!isProp) used.add(node.name as string);
+        }
+        for (const k of Object.keys(node)) { if (k === "type" || k === "start" || k === "end") continue; walk(node[k], node, k); }
+      };
+      walk(ast, null, null);
+      const missing = [...used].filter((name) => !declared.has(name) && !GLOBALS.has(name)).sort();
+      expect(missing, `${path} uses undeclared: ${missing.join(", ")}`).toEqual([]);
     }
   });
 

@@ -765,7 +765,7 @@ export async function handleTask(id: number, env: Env): Promise<Response> {
   if (isBuild || task.kind === "audit" || task.kind === "trial" || task.kind === "publish") {
     const story = await storyRows(env, task.name);
     chain = chainOf(chains(story.tasks, story.approvals, story.pkg, story.request), task.id);
-    request = requestView(env, story.pkg, story.request);
+    request = requestView(env, story.pkg, story.request, story.tasks);
   }
   // The rings that serve this package today, from the factory's rows in each ring.
   const rings = isBuild

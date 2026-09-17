@@ -58,11 +58,15 @@ const SCRIPT = String.raw`
       var p = st.package, q = st.request || {};
       $("#eyebrow").textContent = "Renew the request"; $("#h1").textContent = "Renew the request for " + name; $("#pkg-btn").textContent = "Renew the request";
       $("#lede").innerHTML = "The fields as the record has them; put right what the checks marked, confirm the four lines, and the pool writes a new request — the old one stays on the record. " + (q.checks ? q.checks.filter(function (c) { return !c.ok; }).map(function (c) { return '<span class="pill warn">' + esc(c.item) + '</span> ' + esc(c.note); }).join(" · ") : "");
-      $("#pkg-url").value = p.source && q.version && q.version !== "unknown" && /github\.com\/[^/]+\/[^/]+\/archive\//.test(p.source) ? p.source : (p.project || p.url || "");
+      // The project as its home; the version and the source as the record names them (a GitHub project too: otherwise the form would take the latest tag, and the staged build would be of another version).
+      $("#pkg-url").value = p.project || p.url || "";
       $("#pkg-name").value = name; $("#pkg-desc").value = p.description || ""; $("#pkg-license").value = p.license || "";
       var arches = q.arches && q.arches.length ? q.arches : (p.arches || []);
       $("#pkg-x86").checked = arches.indexOf("x86_64") >= 0; $("#pkg-arm").checked = arches.indexOf("aarch64") >= 0;
-      if (p.project && !/github\.com/.test(p.project)) { $("#pkg-source").value = p.source && p.source !== p.project ? p.source : ""; $("#pkg-version").value = q.version && q.version !== "unknown" ? q.version : ""; document.querySelector(".form-more").open = true; }
+      var known = q.version && q.version !== "unknown";
+      $("#pkg-version").value = known ? q.version : "";
+      $("#pkg-source").value = known && p.source && p.source !== p.project ? p.source : "";
+      if ($("#pkg-version").value || $("#pkg-source").value || (p.project && !/github\.com/.test(p.project))) document.querySelector(".form-more").open = true;
     }).catch(function () {});
   }
   whoami(function (me) {

@@ -125,14 +125,16 @@ const SCRIPT = String.raw`
       st.chains.forEach(function (c) { var a = archOf(c); if (a && arches.indexOf(a) < 0) arches.push(a); }); // an architecture the request dropped keeps its story, without a Build
       var inFlight = function (c) { return c && ((c.contributor && (c.contributor.status === "queued" || c.contributor.status === "leased")) || (c.project && (c.project.status === "queued" || c.project.status === "leased"))); };
       var anyBusy = st.chains.some(inFlight);
-      // A renewal is taken while the package is registered, staged, rejected or unmaintained and nothing of it is being built.
-      var renewable = ["registered", "staged", "rejected", "unmaintained"].indexOf(pkg.status) >= 0 && !anyBusy;
-      var whyNot = anyBusy ? "renew it once the build in flight is done" : pkg.status === "approved" || pkg.status === "published" ? "in the pool as it was: the next version's request goes through the form" : "renew it once nothing of it is being built";
+      // A renewal is taken while the package is registered, staged, rejected or unmaintained and nothing of it is being built — the story says (request.renewable, request.busy).
+      var renewable = !!(st.request && st.request.renewable);
+      var whyNot = st.request && st.request.busy ? "renew it once build #" + st.request.busy + " is done" : pkg.status === "approved" || pkg.status === "published" ? "in the pool as it was; new releases come as bumps, built from the approved recipe" : "renew it once nothing of it is being built";
       var head = '<div class="pknext">' + (pkg.blocked_at ? pillHtml("error", "blocked") + ' ' + ago(pkg.blocked_at) + ' by ' + personLink(pkg.blocked_by) + ': ' + esc(pkg.blocked_reason || '') + ' — another maintainer lifts it.' : summary(st, arches))
         + (own ? '<span class="acts-inline">' + (anyBusy ? '<button type="button" disabled title="a build is in flight">Build all</button>' : '<button type="button" data-build="' + esc(name) + '" title="every architecture the request names">Build all</button>') + ' <button type="button" class="ghost" data-remove="' + esc(name) + '" title="remove the registration">Remove</button></span>' : '') + '</div>';
       var panels = arches.map(function (a) {
         var mine = st.chains.filter(function (c) { return archOf(c) === a; });
-        var acts = own && !pkg.blocked_at && registered.indexOf(a) >= 0 ? (inFlight(mine[0]) ? '<button type="button" class="small-btn" disabled title="a build is in flight">Build ' + esc(a) + '</button>' : '<button type="button" class="small-btn" data-build="' + esc(name) + '" data-arch="' + esc(a) + '" title="this architecture only">Build ' + esc(a) + '</button>') : '';
+        var running = mine[0] && ((mine[0].contributor && mine[0].contributor.status === "leased") || (mine[0].project && (mine[0].project.status === "queued" || mine[0].project.status === "leased")));
+        var queued = mine[0] && mine[0].contributor && mine[0].contributor.status === "queued";
+        var acts = own && !pkg.blocked_at && registered.indexOf(a) >= 0 ? (running ? '<button type="button" class="small-btn" disabled title="a build is running">Build ' + esc(a) + '</button>' : '<button type="button" class="small-btn" data-build="' + esc(name) + '" data-arch="' + esc(a) + '" title="' + (queued ? "asked again: where it goes and the hint are what you choose now" : "this architecture only") + '">' + (queued ? "Re-route " : "Build ") + esc(a) + '</button>') : '';
         return archPanel(a, mine, nextStep(st, mine[0]), acts);
       }).join("");
       return head + requestBlock(st.request, own, name, renewable, whyNot) + panels
@@ -144,7 +146,7 @@ const SCRIPT = String.raw`
       var c = st.chains.filter(function (x) { return (x.contributor || x.project || {}).arch === a; })[0], s2 = chainState(c);
       return '<b class="mono">' + esc(a) + '</b> ' + pillHtml(s2.cls, s2.text);
     });
-    var req = st.request && !st.request.complete ? ' <span class="dim">·</span> ' + pillHtml("warn", "request incomplete", "the form would not take it today — a maintainer's time is not asked yet") + (own && ["registered", "staged", "rejected", "unmaintained"].indexOf((st.package || {}).status) >= 0 ? ' <span class="dim">renew it below</span>' : '') : '';
+    var req = st.request && !st.request.complete ? ' <span class="dim">·</span> ' + pillHtml("warn", "request incomplete", "the form would not take it today — a maintainer's time is not asked yet") + (own && st.request.renewable ? ' <span class="dim">renew it below</span>' : '') : '';
     return parts.join(' <span class="dim">·</span> ') + req;
   }
   // What comes next for one architecture, from its latest chain: whose turn it is, what for — and, when it is the reader's own package, how: the evidence to read, the button to press, where the build can run, what to write for the agent.
@@ -153,6 +155,7 @@ const SCRIPT = String.raw`
     var incomplete = st.request && !st.request.complete;
     var art = function (t, f, text) { return '<a class="run" href="/api/v1/factory/tasks/' + t.id + '/artifacts/' + f + '">' + text + '</a>'; };
     var steps = function (items) { return '<ol class="howto">' + items.map(function (x) { return '<li>' + x + '</li>'; }).join("") + '</ol>'; };
+    var drafted = function (t) { return !t || !t.pkgbuild_ref || t.pkgbuild_ref.indexOf("draft:") === 0; };
     if (!c) return 'No build yet — ' + (own ? 'press <b>Build</b>: your worker (or a shared one) builds it as evidence, the gate checks it, the second agent audits it.' : 'the contributor\'s worker builds it first.');
     var cc = c.contributor, pb = c.project, a = c.approval, sc = c.score, arch = (cc || pb).arch;
     var worker = cc && cc.lease_owner && FACTORY ? FACTORY.workers.filter(function (w) { return w.id === cc.lease_owner; })[0] : null;
@@ -160,6 +163,11 @@ const SCRIPT = String.raw`
     var where = FACTORY ? whereOptions(FACTORY.workers, arch, login, false) : null;
     // The three tools a contributor has, in the order to try them.
     var again = function (why) {
+      if (cc && !drafted(cc)) return steps([
+        'Read what stopped it: ' + art(cc, "build.log", "the log") + (cc.status === "failed" ? '' : ', ' + art(cc, "tests.log", "the gate\'s log")) + (why ? ' — ' + why : '') + '.',
+        'The recipe is the project\'s own PKGBUILD (<span class="mono">' + esc(String(cc.pkgbuild_ref).split(":").pop()) + '</span>), built as it is — no agent drafts it: fix it there, tag a release, <b>renew the request</b> with that tag, then press <b>Build ' + esc(arch) + '</b>.',
+        'Choose <b>where</b> in the Build dialog' + (emulated ? ': this one ran <b>emulated</b> — a native worker may be all it needs' : '') + '.',
+      ]);
       return steps([
         'Read what stopped it: ' + art(cc, "build.log", "the log") + (cc.status === "failed" ? '' : ', ' + art(cc, "tests.log", "the gate's log")) + ' and ' + art(cc, "PKGBUILD", "the PKGBUILD") + ' the agent wrote' + (why ? ' — ' + why : '') + '.',
         'Press <b>Build ' + esc(arch) + '</b>: the next build starts from that PKGBUILD and that log (the lesson), not from nothing — and from a <b>hint</b> you write in the dialog: the binary\'s name, a build flag, a dependency, what the recipe should do differently.',
@@ -168,7 +176,7 @@ const SCRIPT = String.raw`
       ]);
     };
     if (a && a.decision === "approved") return 'Approved by ' + personLink(a.by) + ' ' + ago(a.created_at) + (rings.length ? ' — in <b>' + esc(rings.join(" · ")) + '</b>, signed by the pool; it earns rc and stable like every synced package.' : ' — the publish job carries it into edge.');
-    if (c.withdrawn) return 'The approval by ' + personLink(c.withdrawn.withdrawn_by) + ' was withdrawn: ' + esc(c.withdrawn.withdrawn_reason || '') + ' — another maintainer decides; ' + (own ? 'nothing to do on your side.' : 'nothing to do on the contributor\'s side.');
+    if (c.withdrawn) return 'The approval by ' + personLink(c.withdrawn.by) + ' was withdrawn by ' + personLink(c.withdrawn.withdrawn_by) + ': ' + esc(c.withdrawn.withdrawn_reason || '') + ' — another maintainer decides; ' + (own ? 'nothing to do on your side.' : 'nothing to do on the contributor\'s side.');
     if (a && a.decision === "rejected") return 'Rejected by ' + personLink(a.by) + ': <b>' + esc(a.note || '') + '</b>' + (own && cc ? again('the note above says what to change') : ' — the contributor fixes it and builds again.');
     if (pb && (pb.status === "queued" || pb.status === "leased")) return 'The project is building it again (<a href="/build/' + pb.id + '">#' + pb.id + '</a>) on a trusted worker, with the project\'s agent — then the trial, then a maintainer decides.' + (own ? ' Nothing on your side.' : '');
     if (pb && pb.status === "staged") return 'Built again by the project (<a href="/build/' + pb.id + '">#' + pb.id + '</a>): it waits for ' + (own ? '<b>another</b> maintainer\'s approval (you brought it)' : 'a maintainer\'s approval — never the one who brought it') + '. Class today ' + esc(sc.class) + ', ' + esc(sc.projected) + ' with the maintainer\'s half green.';
@@ -185,6 +193,8 @@ const SCRIPT = String.raw`
       if (audit && audit.status === "done" && audit.result && audit.result.verdict === "block") return '<a href="/build/' + cc.id + '">#' + cc.id + '</a> passed the gate, but <b>the audit blocked it</b>: ' + esc(audit.result.summary || '') + (own ? again('the ' + art(cc, "audit.md", "report") + ' lists the findings and the fix for each') : ' — the contributor answers the findings and builds again.');
       if (audit && audit.status !== "done") return '<a href="/build/' + cc.id + '">#' + cc.id + '</a> passed the gate; the audit is ' + esc(audit.status) + ' on the project\'s review worker — nothing to do until it answers.';
       if (audit && audit.status === "failed") return '<a href="/build/' + cc.id + '">#' + cc.id + '</a> passed the gate, but the audit did not run (' + esc(audit.error || '') + ') — ' + (own ? 'press <b>Build ' + esc(arch) + '</b> again: a new build gets a new audit.' : 'the contributor builds again.');
+      var reqItem = (sc.items || []).filter(function (i) { return i.item === "A request on the record"; })[0];
+      if (reqItem && reqItem.points < reqItem.max && st.request && st.request.version) return '<a href="/build/' + cc.id + '">#' + cc.id + '</a> is staged, but the request now names <b>' + esc(st.request.version) + '</b> and this build is ' + esc(cc.version || '?') + ' — ' + (own ? 'press <b>Build ' + esc(arch) + '</b>: the build of that version is the evidence.' : 'the contributor builds that version.');
       return '<a href="/build/' + cc.id + '">#' + cc.id + '</a> is staged, but not ready: ' + (!vet ? 'no gate verdict on the record (built before the gate)' : 'the audit has not answered') + ' — ' + (own ? 'press <b>Build ' + esc(arch) + '</b> again; the gate and the audit run on the new build.' : 'the contributor builds again.');
     }
     return esc(cc ? cc.status : "—");
@@ -281,13 +291,16 @@ const SCRIPT = String.raw`
     if (b.hasAttribute("data-build")) {
       var name = b.getAttribute("data-build"), arch = b.getAttribute("data-arch");
       // Where it runs is the asker's call (one architecture: any of their workers or the project's shared ones; all: the rule, or the shared ones at once); a hint goes to the agent that drafts the recipe.
-      var where = FACTORY ? whereOptions(FACTORY.workers, arch || "x86_64", login, false) : null;
+      var st2 = STORIES[name], det = {}; try { det = JSON.parse((st2 && st2.package && st2.package.detected) || "{}"); } catch (e) {}
+      var drafts = !det.has_pkgbuild; // the project's own PKGBUILD is built as it is: no agent, no hint
+      var where = FACTORY ? whereOptions(FACTORY.workers, arch || "x86_64", login, false, drafts) : null;
       if (where && !arch) where.options = where.options.filter(function (o) { return o.value === "" || o.value === "shared"; });
-      ask({ title: "Build " + name + (arch ? " for " + arch : "") + "?", text: "The worker drafts the recipe with its agent (from the last failed build's PKGBUILD and log, when there is one), builds it, runs the gate and stages the result as evidence; the second agent audits it. " + (arch ? "This architecture only." : "Every architecture the request names."), select: where, input: "optional", placeholder: "a hint for the agent (optional): the binary's name, a build flag, a dependency, what to do differently", confirm: "Build" }).then(function (go) {
+      var queuedNow = st2 && st2.chains.some(function (c) { return c.contributor && c.contributor.status === "queued" && (!arch || c.contributor.arch === arch); });
+      ask({ title: (queuedNow ? "Ask again for " : "Build ") + name + (arch ? " for " + arch : "") + "?", text: (drafts ? "The worker drafts the recipe with its agent — from the last build's PKGBUILD and what stopped it, when there is one — builds it, runs the gate and stages the result as evidence; the second agent audits it. " : "The worker builds the project's own PKGBUILD as it is, runs the gate and stages the result as evidence; the second agent audits it. ") + (arch ? "This architecture only." : "Every architecture the request names.") + (queuedNow ? " The build already queued takes what you choose here." : ""), select: where, input: drafts ? "optional" : false, placeholder: "a hint for the agent (optional): the binary's name, a build flag, a dependency, what to do differently", confirm: queuedNow ? "Ask again" : "Build" }).then(function (go) {
         if (go === null) return; b.disabled = true;
         var body = arch ? { arches: [arch] } : {};
         if (go && typeof go === "object") { if (go.pick) body.worker = go.pick; if (go.note) body.hint = go.note; } else if (go) body.hint = go;
-        call("POST", "/packages/" + encodeURIComponent(name) + "/build", body).then(function (r) { if (r.error) toast(esc(r.error), "error"); else toast("Queued " + (r.tasks || []).length + " build(s): " + esc((r.arches || []).join(", ")) + (r.pinned_to ? " on " + esc(wtShort(r.pinned_to)) : "") + (r.lessons && Object.keys(r.lessons).length ? " — with the last failed build as the lesson" : "") + " — this page follows them."); OPEN[name] = true; load(); });
+        call("POST", "/packages/" + encodeURIComponent(name) + "/build", body).then(function (r) { if (r.error) toast(esc(r.error), "error"); else if (!(r.tasks || []).length) toast(esc(r.note || "nothing queued"), "warn"); else toast((queuedNow ? "Asked again: " : "Queued ") + (r.tasks || []).length + " build(s): " + esc((r.arches || []).join(", ")) + (r.pinned_to ? " on " + esc(wtShort(r.pinned_to)) : "") + (r.lessons && Object.keys(r.lessons).length ? " — from the last build's PKGBUILD and log" : "") + " — this page follows them."); OPEN[name] = true; load(); });
       });
     }
     else if (b.hasAttribute("data-remove")) {
