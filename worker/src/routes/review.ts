@@ -2,6 +2,9 @@ import { json, type Env } from "../index";
 import { scoreChain } from "../score";
 import { isMaintainer, type Contributor } from "./contributors";
 import { reclaimStagingPackages } from "../staging";
+import { pullFromRings } from "./blocks";
+import { chains, chainOf, storyRows } from "./story";
+import { putRecord, recordUrl } from "../record";
 
 /**
  * Review: what maintainers do with staged builds (docs/GOVERNANCE.md).
@@ -50,9 +53,9 @@ export async function handleReviewList(env: Env): Promise<Response> {
        FROM build_tasks t LEFT JOIN factory_packages p ON p.name = t.name
                           LEFT JOIN build_workers w ON w.id = t.lease_owner
       WHERE t.kind = 'build' AND t.status = 'staged'
-        AND NOT EXISTS (SELECT 1 FROM approvals a WHERE a.task_id = t.id AND a.decision = 'approved')
+        AND NOT EXISTS (SELECT 1 FROM approvals a WHERE a.task_id = t.id AND a.decision = 'approved' AND a.withdrawn_at IS NULL)
         -- a contributor's evidence whose project build was approved has served: nothing left to decide on it
-        AND NOT EXISTS (SELECT 1 FROM approvals a JOIN build_tasks r ON r.id = a.task_id WHERE a.decision = 'approved' AND r.name = t.name AND json_extract(r.params, '$.review') = t.id)
+        AND NOT EXISTS (SELECT 1 FROM approvals a JOIN build_tasks r ON r.id = a.task_id WHERE a.decision = 'approved' AND a.withdrawn_at IS NULL AND r.name = t.name AND json_extract(r.params, '$.review') = t.id)
       ORDER BY t.id DESC LIMIT 100`,
   ).all();
   // A contributor's build that the project is building again, or built: the review row says so.
@@ -102,7 +105,7 @@ export async function handleReviewList(env: Env): Promise<Response> {
     ? (await env.DB.prepare(
         `SELECT a.task_id, a.name, a.arch, a.version, a.by, a.created_at, a.rebuild_task, r.status AS rebuild_status
            FROM approvals a LEFT JOIN build_tasks r ON r.id = a.rebuild_task
-          WHERE a.decision = 'approved' AND a.name IN (${names.map(() => "?").join(", ")}) ORDER BY a.id DESC`,
+          WHERE a.decision = 'approved' AND a.withdrawn_at IS NULL AND a.name IN (${names.map(() => "?").join(", ")}) ORDER BY a.id DESC`,
       ).bind(...names).all<{ task_id: number; name: string; arch: string; version: string | null; by: string; created_at: string; rebuild_task: number | null; rebuild_status: string | null }>()).results
     : [];
   const already = (r: Record<string, unknown>) => {
@@ -261,7 +264,7 @@ export async function handleApprove(c: Contributor, id: number, request: Request
   // packages wait for a second one (docs/GOVERNANCE.md).
   const owner = await ownerOf(env, t.name, t.owner);
   if (owner === c.login) return json({ error: `${c.login} brought ${t.name}; another maintainer must approve it — with one maintainer, that maintainer's own packages wait` }, 403);
-  const already = await env.DB.prepare("SELECT id FROM approvals WHERE task_id = ? AND decision = 'approved'").bind(id).first();
+  const already = await env.DB.prepare("SELECT id FROM approvals WHERE task_id = ? AND decision = 'approved' AND withdrawn_at IS NULL").bind(id).first();
   if (already) return json({ error: "already approved" }, 409);
   // The decision, on the record, and the publish job: a project worker
   // carries the staged package into the pool (signed there), renders
@@ -289,6 +292,44 @@ export async function handleApprove(c: Contributor, id: number, request: Request
     .bind(`${t.name} ${t.version ?? ""} (${t.arch}) approved by ${c.login}${b.note ? " — " + b.note.slice(0, 120) : ""}; the project's build ${id} goes into edge (job ${publish?.id})`, JSON.stringify({ task: id, publish: publish?.id, name: t.name, arch: t.arch, by: c.login, owner, note: b.note ?? null }))
     .run();
   return json({ task: id, decision: "approved", by: c.login, publish: publish?.id });
+}
+
+/**
+ * A maintainer takes an approval back — one that broke the rule (a
+ * package approved by the person who brought it, as felix was during the
+ * bootstrap) or one they no longer stand behind. The approval row stays
+ * and is marked void; the package leaves every ring it is in (a release
+ * per ring, rendered again), its registration is evidence again, and the
+ * chain waits for a decision by another maintainer. The reason is on the
+ * record — a signed decision, a journal line — and the contributor sees it.
+ * Any maintainer may, the one who approved included: undoing a mistake is
+ * not deciding on a package.
+ */
+export async function handleWithdraw(c: Contributor, id: number, request: Request, env: Env): Promise<Response> {
+  const b = (await request.json().catch(() => ({}))) as { note?: string };
+  if (!b.note || b.note.trim().length < 4) return json({ error: "a note saying why is required — it goes on the record" }, 400);
+  if (!canReview(c)) return json({ error: "a maintainer is required" }, 403);
+  // The approval that stands on this task's chain — asked by the contributor's build or the project's, it is the same one.
+  const t = await env.DB.prepare("SELECT name FROM build_tasks WHERE id = ?").bind(id).first<{ name: string }>();
+  if (!t) return json({ error: "no such task" }, 404);
+  const story = await storyRows(env, t.name);
+  const chain = chainOf(chains(story.tasks, story.approvals, story.pkg), id);
+  const found = chain?.approval && chain.approval.decision === "approved" ? chain.approval : null;
+  if (!found) return json({ error: `no standing approval on task ${id}` }, 404);
+  const a = { ...found, name: t.name };
+  const at = new Date().toISOString();
+  await env.DB.prepare("UPDATE approvals SET withdrawn_at = ?, withdrawn_by = ?, withdrawn_reason = ? WHERE id = ?").bind(at, c.login, b.note.trim().slice(0, 500), a.id).run();
+  // Out of every ring it reached through this approval; the registration is evidence again.
+  const rings = await pullFromRings(env, a.name, `approval of ${a.name} ${a.version ?? ""} withdrawn by ${c.login}: ${b.note.trim().slice(0, 120)}`);
+  await env.DB.prepare("UPDATE factory_packages SET status = 'staged', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ? AND status IN ('approved', 'published')")
+    .bind(`approval of ${a.version ?? ""} for ${a.arch} withdrawn by ${c.login}: ${b.note.trim().slice(0, 160)} — waits for another maintainer`, a.name)
+    .run();
+  const owner = await ownerOf(env, a.name, null);
+  const record = await putRecord(env, `factory/${a.name}/decisions/${at.replace(/[:.]/g, "-")}-withdrawn.json`, { schema: "omarchy-pool/decision/1", decision: "withdrawn", name: a.name, arch: a.arch, version: a.version, owner, approval: { id: a.id, task: a.task_id, rebuild_task: a.rebuild_task, by: a.by, at: a.created_at, note: a.note }, by: c.login, at, reason: b.note.trim(), rings });
+  await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('withdraw', NULL, 'factory', 'warn', ?, ?)")
+    .bind(`${a.name} ${a.version ?? ""} (${a.arch}): the approval by ${a.by} withdrawn by ${c.login} — ${b.note.trim().slice(0, 120)}${rings.length ? "; pulled from " + rings.map((r) => r.ring).join(", ") : ""}`, JSON.stringify({ name: a.name, arch: a.arch, version: a.version, approval: a.id, task: a.task_id, rebuild_task: a.rebuild_task, approved_by: a.by, by: c.login, reason: b.note.trim(), rings, record: recordUrl(env, record.key) }))
+    .run();
+  return json({ withdrawn: a.id, task: a.task_id, rebuild_task: a.rebuild_task, by: c.login, at, rings, record: recordUrl(env, record.key) });
 }
 
 export async function handleReject(c: Contributor, id: number, request: Request, env: Env): Promise<Response> {

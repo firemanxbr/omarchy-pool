@@ -59,7 +59,7 @@ const SCRIPT = String.raw`
   function headers() { var h = { "content-type": "application/json" }; if (token && !signedIn) h["authorization"] = "Bearer " + token; return h; }
   function maint() { return !!(WHO && WHO.role === "maintainer"); }
   function person(l) { return l ? '<a href="/user/' + encodeURIComponent(l) + '">' + esc(l) + '</a>' : '<span class="muted">—</span>'; }
-  function pkg(name, version) { return '<b>' + esc(name) + '</b>' + (version ? ' <span class="mono muted">' + esc(version) + '</span>' : ''); }
+  function pkg(name, version, arch) { return '<a href="/package/' + encodeURIComponent(name) + '?ring=lab' + (arch && arch !== "all" ? '&arch=' + esc(arch) : '') + '" title="the package as Packages shows it — where it is, and the factory\'s story of it"><b>' + esc(name) + '</b></a>' + (version ? ' <span class="mono muted">' + esc(version) + '</span>' : ''); }
   skeletonTiles("#tiles", 4); skeletonRows("#staged", 8, 3); skeletonRows("#decisions", 7, 3);
 
   // ---- who: the cookie (whoami), or the Factory's token, then the private block
@@ -98,7 +98,7 @@ const SCRIPT = String.raw`
 
   // ---- yours: one line per package of yours in the flow — waiting first, then decided
   function row(cls, name, version, arch, state, line, link) {
-    return '<div class="rrow ' + cls + '"><div class="n">' + pkg(name, version) + '</div><span class="pill none">' + esc(arch) + '</span><div class="s">' + state + ' ' + line + '</div>' + (link ? '<a class="go" href="' + esc(link[0]) + '">' + link[1] + '</a>' : '<span></span>') + '</div>';
+    return '<div class="rrow ' + cls + '"><div class="n">' + pkg(name, version, arch) + '</div><span class="pill none">' + esc(arch) + '</span><div class="s">' + state + ' ' + line + '</div>' + (link ? '<a class="go" href="' + esc(link[0]) + '">' + link[1] + '</a>' : '<span></span>') + '</div>';
   }
   function short(t, n) { t = String(t || ""); return t.length > n ? '<span title="' + esc(t) + '">' + esc(t.slice(0, n - 1)) + '…</span>' : esc(t); }
   function renderMine() {
@@ -128,7 +128,8 @@ const SCRIPT = String.raw`
     APPROVALS.forEach(function (a) { if (mine[a.name] && !last[a.name + "/" + a.arch]) last[a.name + "/" + a.arch] = a; });
     Object.keys(last).forEach(function (k) {
       var a = last[k], p = mine[a.name];
-      if (a.decision === "rejected") decided.push(row("act", a.name, a.version, a.arch, '<span class="pill error">rejected</span>', ago(a.created_at) + ' by ' + person(a.by) + ': ' + short(a.note, 110), ["/factory", "Fix it, build again →"]));
+      if (a.withdrawn_at) decided.push(row("act", a.name, a.version, a.arch, '<span class="pill none">withdrawn</span>', 'the approval by ' + person(a.by) + ' was withdrawn ' + ago(a.withdrawn_at) + ' by ' + person(a.withdrawn_by) + ': ' + short(a.withdrawn_reason, 100) + ' — another maintainer decides', ["/build/" + a.task_id, "The build →"]));
+      else if (a.decision === "rejected") decided.push(row("act", a.name, a.version, a.arch, '<span class="pill error">rejected</span>', ago(a.created_at) + ' by ' + person(a.by) + ': ' + short(a.note, 110), ["/factory", "Fix it, build again →"]));
       else { var inRings = a.rings && a.rings.length ? a.rings : (p && p.status === "published" ? ["edge"] : []); decided.push(row("ok", a.name, a.version, a.arch, '<span class="pill ok">approved</span>', ago(a.created_at) + ' by ' + person(a.by) + (inRings.length ? ' — in ' + inRings.join(" · ") + ', signed by the pool' : ' — the project\'s build is on its way into edge') + (a.note ? ' · ' + short(a.note, 80) : ''), inRings.length ? ["/package/" + encodeURIComponent(a.name) + "?ring=" + inRings[inRings.length - 1] + "&arch=" + a.arch, "The package →"] : ["/build/" + a.task_id, "The build →"])); }
     });
     $("#mine-waiting").innerHTML = waiting.join("") || '<p class="sub" style="margin:0">Nothing of yours waiting. <a href="/request">Request a package →</a></p>';
@@ -212,7 +213,7 @@ const SCRIPT = String.raw`
         : '<span class="muted">evidence · ' + taskLink(t.id) + (t.duration_ms ? ' · ' + Math.round(t.duration_ms / 1000) + ' s' : '') + '</span>' + builtOn(t) + (pb && (pb.status === "queued" || pb.status === "leased") ? ' <span class="pill blue">building again</span>' : pb && pb.status === "staged" ? ' <span class="pill ok">built again</span>' : '')
         + (t.already ? ' <span class="pill none" title="approved ' + esc(ago(t.already.at)) + ' by ' + esc(t.already.by) + ' as build #' + t.already.task + (t.already.rebuild_task ? '; the project\'s build #' + t.already.rebuild_task + ' ' + esc(t.already.rebuild_status || '') : '') + ' — nothing to decide">already approved</span>' : '');
       var mine = WHO && t.owner === login, forYou = maint() && !mine && decidable(t);
-      return '<tr id="t-' + t.id + '"' + (project ? ' class="project-row"' : '') + (forYou ? ' class="for-you"' : mine ? ' class="mine-row"' : '') + '><td><a href="/package/' + encodeURIComponent(t.name) + '?ring=lab&arch=' + esc(t.arch) + '" title="the package as Packages shows it — in the lab, where the factory\'s builds start">' + pkg(t.name, t.version) + '</a>' + (det.license ? ' <span class="dim">' + esc(det.license) + '</span>' : '') + (t.url ? ' <a class="run dim" href="' + esc(t.url) + '" title="' + esc(t.url) + '">source</a>' : '') + '<br>' + category(t) + '</td><td>' + esc(t.arch) + '</td>' +
+      return '<tr id="t-' + t.id + '"' + (project ? ' class="project-row"' : '') + (forYou ? ' class="for-you"' : mine ? ' class="mine-row"' : '') + '><td>' + pkg(t.name, t.version, t.arch) + (det.license ? ' <span class="dim">' + esc(det.license) + '</span>' : '') + (t.url ? ' <a class="run dim" href="' + esc(t.url) + '" title="' + esc(t.url) + '">source</a>' : '') + '<br>' + category(t) + '</td><td>' + esc(t.arch) + '</td>' +
         '<td>' + person(t.owner) + (mine ? ' <span class="pill none">you</span>' : '') + '</td><td>' + build + '</td><td>' + gate(t) + '</td><td>' + audit(t) + '</td><td>' + trial(t) + '</td>' +
         '<td>' + klass(t) + '</td>' +
         '<td class="when">' + ago(t.finished_at) + '</td><td class="decision">' + decision(t) + '</td></tr>';
@@ -221,7 +222,7 @@ const SCRIPT = String.raw`
   }
   function renderDecisions() {
     pager("#decisions", APPROVALS, function (a) {
-      return '<tr><td class="when">' + ago(a.created_at) + '</td><td>' + taskLink(a.task_id, pkg(a.name, a.version)) + '</td><td>' + esc(a.arch) + '</td><td><span class="pill ' + (a.decision === "approved" ? "ok" : "error") + '">' + esc(a.decision) + '</span></td><td>' + person(a.by) + '</td><td class="muted">' + esc(a.note || "") + '</td><td>' + (a.rebuild_task ? taskLink(a.rebuild_task) + ' ' + esc(a.rebuild_status || "") + (a.rebuild_result ? ' <span class="mono">' + esc(a.rebuild_result) + '</span>' : '') : (a.decision === "approved" ? '<span class="dim">waiting for the recipe on main</span>' : '—')) + '</td></tr>';
+      return '<tr><td class="when">' + ago(a.created_at) + '</td><td>' + pkg(a.name, a.version, a.arch) + ' <span class="dim">' + taskLink(a.task_id) + '</span></td><td>' + esc(a.arch) + '</td><td>' + (a.withdrawn_at ? '<span class="pill none" title="' + esc("approved by " + a.by + ", withdrawn " + ago(a.withdrawn_at) + " by " + a.withdrawn_by + ": " + (a.withdrawn_reason || "")) + '">withdrawn</span>' : '<span class="pill ' + (a.decision === "approved" ? "ok" : "error") + '">' + esc(a.decision) + '</span>') + '</td><td>' + person(a.by) + (a.withdrawn_at ? ' <span class="dim">· withdrawn by ' + person(a.withdrawn_by) + '</span>' : '') + '</td><td class="muted">' + esc(a.withdrawn_at ? (a.withdrawn_reason || "") : (a.note || "")) + '</td><td>' + (a.rebuild_task ? taskLink(a.rebuild_task) + ' ' + esc(a.rebuild_status || "") + (a.rebuild_result ? ' <span class="mono">' + esc(a.rebuild_result) + '</span>' : '') : (a.decision === "approved" ? '<span class="dim">waiting for the recipe on main</span>' : '—')) + '</td></tr>';
     }, { empty: "no decision yet", text: function (a) { return [a.name, a.version, a.arch, a.decision, a.by, a.note].join(" "); } });
     endSkeleton();
   }

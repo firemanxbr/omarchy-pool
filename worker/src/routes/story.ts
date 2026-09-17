@@ -29,7 +29,7 @@ export interface TaskBrief {
   result: Record<string, unknown> | null;
 }
 
-export interface Approval { id: number; task_id: number; decision: string; by: string; note: string | null; rebuild_task: number | null; created_at: string; version: string | null; arch: string }
+export interface Approval { id: number; task_id: number; decision: string; by: string; note: string | null; rebuild_task: number | null; created_at: string; version: string | null; arch: string; withdrawn_at: string | null; withdrawn_by: string | null; withdrawn_reason: string | null }
 
 export interface Chain {
   contributor: TaskBrief | null;
@@ -37,7 +37,10 @@ export interface Chain {
   audit: TaskBrief | null;
   trial: TaskBrief | null;
   publish: TaskBrief | null;
+  /** The standing decision; a withdrawn approval is none. */
   approval: Approval | null;
+  /** An approval taken back: on the record, void. */
+  withdrawn: Approval | null;
   score: Score;
 }
 
@@ -52,7 +55,7 @@ function brief(r: Record<string, unknown>): TaskBrief {
 export async function storyRows(env: Env, name: string) {
   const [tasks, approvals, pkg] = await Promise.all([
     env.DB.prepare(`SELECT ${TASK_COLS} FROM build_tasks WHERE name = ? AND kind IN ('build', 'audit', 'trial', 'publish') ORDER BY id DESC LIMIT 120`).bind(name).all<Record<string, unknown>>(),
-    env.DB.prepare("SELECT id, task_id, decision, by, note, rebuild_task, created_at, version, arch FROM approvals WHERE name = ? ORDER BY id DESC LIMIT 40").bind(name).all<Approval>(),
+    env.DB.prepare("SELECT id, task_id, decision, by, note, rebuild_task, created_at, version, arch, withdrawn_at, withdrawn_by, withdrawn_reason FROM approvals WHERE name = ? ORDER BY id DESC LIMIT 40").bind(name).all<Approval>(),
     env.DB.prepare("SELECT name, owner, url, status, detail, category, request_id, description, license, source, project, created_at, updated_at, blocked_at, blocked_by, blocked_reason FROM factory_packages WHERE name = ?").bind(name).first<Record<string, unknown>>(),
   ]);
   return { tasks: tasks.results.map(brief), approvals: approvals.results, pkg };
@@ -72,7 +75,9 @@ export function chains(tasks: TaskBrief[], approvals: Approval[], pkg: Record<st
     const trial = project ? of("trial", "task", project.id) : null;
     const publish = project ? of("publish", "task", project.id) : contributor ? of("publish", "task", contributor.id) : null;
     const ids = [contributor?.id, project?.id].filter((x): x is number => typeof x === "number");
-    const approval = approvals.find((a) => ids.includes(a.task_id) || (a.rebuild_task !== null && ids.includes(a.rebuild_task))) ?? null;
+    const mine = approvals.filter((a) => ids.includes(a.task_id) || (a.rebuild_task !== null && ids.includes(a.rebuild_task)));
+    const approval = mine.find((a) => !a.withdrawn_at) ?? null;
+    const withdrawn = mine.find((a) => a.withdrawn_at) ?? null;
     const auditReport = audit?.result as { verdict?: string; findings?: { severity: string }[] } | null | undefined;
     const score = scoreChain({
       contributor: contributor ? { attempts: contributor.attempts, status: contributor.status } : null,
@@ -85,7 +90,7 @@ export function chains(tasks: TaskBrief[], approvals: Approval[], pkg: Record<st
       approval: approval ? { decision: approval.decision, note: approval.note } : null,
       category,
     });
-    return { contributor, project, audit, trial, publish, approval, score };
+    return { contributor, project, audit, trial, publish, approval, withdrawn, score };
   };
   const out: Chain[] = [];
   const used = new Set<number>();

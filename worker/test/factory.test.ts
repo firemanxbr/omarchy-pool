@@ -356,6 +356,22 @@ describe("a community build, its audit and the review", () => {
     } finally {
       await env.DB.prepare("DELETE FROM build_tasks WHERE id = ?").bind(again!.id).run();
     }
+    // An approval can be taken back by any maintainer, the reason on the record: void from then on, the package leaves the rings, the chain waits for another maintainer.
+    expect((await call("POST", `/factory/tasks/${projectTask}/withdraw`, { note: "no" }, "omc_m2")).status).toBe(400);
+    expect((await call("POST", `/factory/tasks/${projectTask}/withdraw`, { note: "approved by mistake" }, "omc_alice")).status).toBe(403);
+    expect((await call("POST", `/factory/tasks/${task}/withdraw`, { note: "approved by its own contributor during the bootstrap" }, "omc_m1")).json).toMatchObject({ withdrawn: expect.any(Number), task: projectTask, rebuild_task: projectTask, by: "m1", rings: [] });
+    expect((await call("POST", `/factory/tasks/${projectTask}/withdraw`, { note: "again" }, "omc_m1")).status).toBe(404);
+    expect(await env.DB.prepare("SELECT withdrawn_by, withdrawn_reason FROM approvals WHERE task_id = ?").bind(projectTask).first()).toEqual({ withdrawn_by: "m1", withdrawn_reason: "approved by its own contributor during the bootstrap" });
+    expect((await call("GET", `/factory/tasks/${projectTask}?after=withdraw`)).json).toMatchObject({ approval: { withdrawn_by: "m1" }, chain: { approval: null, withdrawn: { by: "m2", withdrawn_by: "m1" } }, score: { items: expect.arrayContaining([expect.objectContaining({ item: "A decision with a note", points: 0, state: "pending" })]) } });
+    expect((await call("GET", "/factory/review?after=withdraw")).json.staged.map((r: any) => r.id)).toContain(projectTask); // the project's build waits again
+    expect((await call("GET", "/factory/approvals?after=withdraw")).json.approvals[0]).toMatchObject({ task_id: projectTask, decision: "approved", withdrawn_by: "m1" });
+    expect(await env.DB.prepare("SELECT status FROM factory_packages WHERE name = 'mine'").first()).toMatchObject({ status: "staged" });
+    expect((await env.DB.prepare("SELECT summary FROM events WHERE kind = 'withdraw' ORDER BY id DESC LIMIT 1").first<{ summary: string }>())!.summary).toContain("withdrawn by m1");
+    // …and approved again, by the other maintainer, for the rest of the story.
+    const back = await call("POST", `/factory/tasks/${projectTask}/approve`, { note: "looks right" }, "omc_m2");
+    expect(back.status, JSON.stringify(back.json)).toBe(200);
+    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE id = ?").bind(other.json.publish).run(); // the first publish job, superseded by this one
+    other.json.publish = back.json.publish;
     // The publish job: a project worker takes it; its token may read the staged package (a maintainer's privilege otherwise).
     const pub = await env.DB.prepare("SELECT kind, trust, params FROM build_tasks WHERE id = ?").bind(other.json.publish).first<{ kind: string; trust: string; params: string }>();
     expect(pub).toMatchObject({ kind: "publish", trust: "project" });

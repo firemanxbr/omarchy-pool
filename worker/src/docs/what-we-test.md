@@ -67,6 +67,15 @@ stable on the same evidence as every synced package. A maintainer can
 still block it later — the reason on the record, another maintainer lifts
 it — and it leaves every ring at once.
 
+An approval can be **withdrawn** by any maintainer, the one who gave it
+included: one that broke the rule (a package approved by the person who
+brought it, as the first package was during the bootstrap), or one a
+maintainer no longer stands behind. The approval stays on the record and
+is void from then on; the package leaves every ring it reached through
+it; the chain is evidence again and waits for another maintainer's
+decision. The reason is a signed decision and a journal line, and the
+contributor sees it on their build's page.
+
 ## The score
 
 Every chain — a contributor's build, the project's build of it, the
