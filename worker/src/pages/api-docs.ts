@@ -38,7 +38,8 @@ const BODY = String.raw`
     <div class="table-wrap"><table><thead><tr><th>Endpoint</th><th>What it returns</th></tr></thead><tbody>
       <tr><td><code>GET /factory?limit=</code></td><td>Workers the pool has heard from (owner, trust, mode, the agent each reported, current task), the queue (every kind: builds, pool jobs, audits), package requests, counts.</td></tr>
       <tr><td><code>GET /factory/packages</code> · <code>/built</code> · <code>/tasks/:id</code></td><td>The registry of packages people brought; what the factory built; one task with its log tail.</td></tr>
-      <tr><td><code>GET /factory/review</code></td><td>Staged community builds waiting for a maintainer, each with links to its evidence (PKGBUILD, log, .PKGINFO, the audit) and the second agent's verdict (<code>ok</code> / <code>warn</code> / <code>block</code>, or <em>queued</em> / <em>failed</em>).</td></tr>
+      <tr><td><code>GET /factory/review</code></td><td>Staged community builds waiting for a maintainer, each with links to its evidence (PKGBUILD, log, .PKGINFO, the audit), the second agent's verdict (<code>ok</code> / <code>warn</code> / <code>block</code>, or <em>queued</em> / <em>failed</em>) and <code>can</code>: what you may do on the row — approve, reject, build, withdraw — and, where not, why. Not cached: the answer is yours.</td></tr>
+      <tr><td><code>GET /factory/tasks/:id/can</code></td><td>The same <code>can</code> for one task: <code>{approve, reject, build, withdraw, why}</code> for whoever asks — every page draws every button and greys the ones you may not press with this reason. Not cached.</td></tr>
       <tr><td><code>GET /factory/tasks/:id/artifacts/&lt;file&gt;</code></td><td>A staged build's evidence: <code>PKGBUILD</code>, <code>build.log</code>, <code>PKGINFO</code>, <code>audit.md</code>, <code>audit.json</code> are public; the package itself is for maintainers.</td></tr>
       <tr><td><code>GET /factory/approvals</code> · <code>/maintainers</code> · <code>/trust</code> · <code>/blocks</code></td><td>The record: every decision with who signed it; the maintainers (from <code>factory/MAINTAINERS.toml</code>, with since when); project-trusted workers; what is blocked now and why.</td></tr>
       <tr><td><code>GET /users/:login</code></td><td>A contributor's or maintainer's public profile: packages, builds, approvals, workers, and the <em>track record</em> (<a href="/docs/governance">Governance</a>).</td></tr>
@@ -87,7 +88,7 @@ curl -s  https://pool.firemanxbr.org/core/x86_64/omarchy-core-stable.db | tar -t
     <div class="table-wrap"><table><thead><tr><th>Endpoint</th><th>Who</th><th>What it does</th></tr></thead><tbody>
       <tr><td><code>POST /factory/packages</code> · <code>/packages/:name/build</code> · <code>DELETE /packages/:name</code> · <code>DELETE /factory/tasks/:id/artifacts</code></td><td>contributor</td><td>Request a package (the project's URL, a description, the licence, the checklist — written once to the record), ask for a build, remove the request, or drop a finished task's staging objects (the 5 GB quota; the pool reclaims superseded, rejected and published builds itself).</td></tr>
       <tr><td><code>POST /factory/workers</code> · <code>DELETE /workers/:id</code></td><td>contributor</td><td>Register a worker (the token is shown once), revoke it.</td></tr>
-      <tr><td><code>POST /factory/tasks/:id/build</code> · <code>/approve</code> · <code>/reject</code></td><td>maintainer</td><td>Have the project build a contributor's staged package again (its agent, a trusted worker, its own recipe); approve the project's build into edge — the decision on the record, a publish job; or send either back with a note. Never your own package.</td></tr>
+      <tr><td><code>POST /factory/tasks/:id/build</code> · <code>/approve</code> · <code>/reject</code> · <code>/withdraw</code></td><td>maintainer</td><td>Have the project build a contributor's staged package again (its agent, a trusted worker, its own recipe); approve the project's build into edge — the decision on the record, a publish job; send either back with a note; or take a standing approval back, the reason on the record. Never your own package — a withdrawal excepted: undoing is not deciding. A refusal answers the reason <code>can</code> gives.</td></tr>
       <tr><td><code>POST /factory/jobs</code></td><td>maintainer</td><td>Queue a pool job by hand (sync, promote, rollback, render, health, security, gc, enqueue) — what <code>pkg-repo job</code> calls.</td></tr>
       <tr><td><code>POST /factory/workers/:id/trust</code></td><td>maintainer</td><td>Project trust on two maintainers' word: the first call proposes (<code>202</code>), a second maintainer's — never the same person's; the owner's counts as the second word, never the first — confirms; <code>{"trust":"community"}</code> takes it back at one word. Each step an event; the trust a signed record under <code>workers/&lt;id&gt;/</code>.</td></tr>
       <tr><td><code>POST /factory/record/withdraw</code></td><td>maintainer</td><td><code>{key, reason}</code> — a record taken off the public bucket (a log that carried what it should not have); its signature and staging copy go with it, and a signed <code>&lt;key&gt;.tombstone.json</code> says who, why and what was there.</td></tr>
@@ -203,7 +204,7 @@ export const API_DOCS_COMPONENTS = (F: Fixture): Component[] => {
       anchor: [
         'id="factory"',
         "<code>GET /factory?", "<code>GET /factory/packages</code>", "<code>/built</code>", "<code>/tasks/:id</code>", "<code>GET /factory/review</code>",
-        "<code>GET /factory/tasks/:id/artifacts/", "<code>GET /factory/approvals</code>", "<code>/maintainers</code>", "<code>/trust</code>", "<code>/blocks</code>",
+        "<code>GET /factory/tasks/:id/can</code>", "<code>GET /factory/tasks/:id/artifacts/", "<code>GET /factory/approvals</code>", "<code>/maintainers</code>", "<code>/trust</code>", "<code>/blocks</code>",
         "<code>GET /users/:login</code>", "<code>GET /factory/workers/self</code>", "<code>GET /factory/me</code>",
       ],
       reads: [
@@ -219,8 +220,10 @@ export const API_DOCS_COMPONENTS = (F: Fixture): Component[] => {
         },
         {
           path: "/api/v1/factory/review",
-          fields: ["staged", "staged.0.id", "staged.0.kind", "staged.0.owner", "staged.0.evidence.pkgbuild", "staged.0.evidence.log", "staged.0.evidence.pkginfo", "staged.0.evidence.audit", "staged.0.vet", "staged.0.audit.status", "staged.0.trial"],
+          fields: ["staged", "staged.0.id", "staged.0.kind", "staged.0.owner", "staged.0.evidence.pkgbuild", "staged.0.evidence.log", "staged.0.evidence.pkginfo", "staged.0.evidence.audit", "staged.0.vet", "staged.0.audit.status", "staged.0.trial", "staged.0.can.approve", "staged.0.can.reject", "staged.0.can.build", "staged.0.can.withdraw", "staged.0.can.why"],
         },
+        { path: `/api/v1/factory/tasks/${F.stagedTask}/can`, fields: ["task", "can.approve", "can.reject", "can.build", "can.withdraw", "can.why.approve"] },
+        { path: `/api/v1/factory/tasks/${F.stagedTask}/can`, as: "maintainer", fields: ["task", "can.approve", "can.reject", "can.build", "can.withdraw", "can.why.approve"] },
         { path: `/api/v1/factory/tasks/${F.projectTask}/artifacts/PKGBUILD`, json: false },
         { path: `/api/v1/factory/tasks/${F.projectTask}/artifacts/${stagedPackage}`, status: 403 },
         { path: `/api/v1/factory/tasks/${F.projectTask}/artifacts/${stagedPackage}`, as: "maintainer", json: false },
@@ -287,7 +290,7 @@ export const API_DOCS_COMPONENTS = (F: Fixture): Component[] => {
         'id="write-people"',
         "<code>POST /factory/packages</code>", "<code>/packages/:name/build</code>", "<code>DELETE /packages/:name</code>", "<code>DELETE /factory/tasks/:id/artifacts</code>",
         "<code>POST /factory/workers</code>", "<code>DELETE /workers/:id</code>",
-        "<code>POST /factory/tasks/:id/build</code>", "<code>/approve</code>", "<code>/reject</code>",
+        "<code>POST /factory/tasks/:id/build</code>", "<code>/approve</code>", "<code>/reject</code>", "<code>/withdraw</code>",
         "<code>POST /factory/jobs</code>", "<code>POST /factory/workers/:id/trust</code>", "<code>POST /factory/record/withdraw</code>",
         "<code>POST /factory/contributors/:login/{block,unblock}</code>", "<code>/packages/:name/{block,unblock}</code>",
         "<code>GET /auth/github</code>", "<code>/auth/me</code>", "<code>/auth/logout</code>",
@@ -308,6 +311,7 @@ export const API_DOCS_COMPONENTS = (F: Fixture): Component[] => {
         { method: "POST", path: `/api/v1/factory/tasks/${F.stagedTask}/build`, expect: { anonymous: 401, contributor: 403, owner: 403 } },
         { method: "POST", path: `/api/v1/factory/tasks/${F.projectTask}/approve`, body: { note: "reads well" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: [200, 409] } },
         { method: "POST", path: `/api/v1/factory/tasks/${F.stagedTask}/reject`, body: { note: "the source is not the upstream's" }, expect: { anonymous: 401, contributor: 403, owner: 403 } },
+        { method: "POST", path: `/api/v1/factory/tasks/${F.stagedTask}/withdraw`, body: { note: "nothing stands on this one" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 404 } },
         { method: "POST", path: "/api/v1/factory/jobs", expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 400 } },
         { method: "POST", path: `/api/v1/factory/workers/${F.worker}/trust`, body: { trust: "project" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 200 } },
         { method: "POST", path: "/api/v1/factory/record/withdraw", expect: { anonymous: 401, contributor: 403, maintainer: 400 } },
