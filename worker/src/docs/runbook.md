@@ -229,12 +229,28 @@ docker compose logs -f --tail 50 pool-aarch64    # one of them
 ```
 
 Upgrades are **rolling**: a pool release publishes a new image, the timer
-notices within fifteen minutes, and `rollout.sh` replaces the six one at a
-time — a stop is a drain (SIGTERM: the worker finishes the task it holds,
-reports it, claims nothing new and exits; the compose file allows three
-hours), then the new container starts while the other five keep working.
-No task is killed and none is handed to another worker by an expired
-lease, which is what `docker compose up -d` on a busy worker did.
+notices within fifteen minutes, and `rollout.sh` replaces what changed in
+one `up` — every stop is a drain (SIGTERM: the worker finishes the task it
+holds, reports it, claims nothing new and exits; the compose file allows
+three hours), each container on its own clock, the new ones starting as
+the old ones end while the unchanged keep working. No task is killed,
+none is handed to another worker by an expired lease (what `docker
+compose up -d` on a busy worker did), and none idles on the old image
+while another drains (what one-at-a-time did: pool-aarch64 waited three
+hours for pool-x86_64's drain on 2026-09-15 — and the pool now refuses an
+outdated worker).
+
+**Every worker follows the latest image** (2026-09-17, after a
+contributor's worker sat ten releases behind for a day, drafting the
+wrong version and linking the wrong objects while looking alive): the
+pool compares the release a worker reports at each claim with its own
+and, past the rollout's grace (`UPDATE_GRACE_MINUTES` = 45 after the
+deploy), hands it nothing — `426`, *outdated* on the Workers page, one
+journal line per release — until it updates. Contributors' sets carry an
+**updater** container of the same image (`OMARCHY_WORKER_ROLE=updater`,
+`factory/bin/omarchy-rollout`: the same rolling replacement, itself
+last), written and started by `omarchy-worker start`; a set without one
+idles until its owner pulls by hand.
 
 The Factory page shows them by role; the laptop runs nothing any more,
 and GitHub Actions runs CI and the release only — there is no hosted

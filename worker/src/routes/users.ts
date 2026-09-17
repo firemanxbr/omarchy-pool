@@ -1,4 +1,6 @@
 import { json, type Env } from "../index";
+import { updateState } from "../update";
+import { version as running } from "../meta";
 import { queuePosition } from "../queue";
 import { maintainersOf } from "../governance";
 
@@ -81,7 +83,7 @@ export async function handleUser(login: string, env: Env): Promise<Response> {
       .bind(login)
       .first<{ staged: number; published: number; failed: number; total: number }>(),
     env.DB.prepare(`SELECT task_id, name, arch, version, decision, note, created_at, withdrawn_at, withdrawn_by, withdrawn_reason FROM approvals WHERE by = ? ORDER BY id DESC LIMIT 50`).bind(login).all(),
-    env.DB.prepare("SELECT id, arch, mode, trust, agent, last_seen, builds_done, builds_failed, revoked_at FROM build_workers WHERE owner = ? ORDER BY last_seen DESC").bind(login).all(),
+    env.DB.prepare("SELECT id, arch, mode, trust, agent, version, last_seen, builds_done, builds_failed, revoked_at FROM build_workers WHERE owner = ? ORDER BY last_seen DESC").bind(login).all(),
     maintainersOf(env),
     recordOf(env, login),
   ]);
@@ -111,7 +113,7 @@ export async function handleUser(login: string, env: Env): Promise<Response> {
       })),
       approved_packages: approvedNames,
       record,
-      workers: (workers.results as { last_seen: string }[]).map((w) => ({ ...w, alive: w.last_seen > alive })),
+      workers: (workers.results as { last_seen: string; version: string | null }[]).map((w) => ({ ...w, alive: w.last_seen > alive, update: updateState(w.version, running(env)) })),
     },
     200,
     { "cache-control": "public, max-age=60" },

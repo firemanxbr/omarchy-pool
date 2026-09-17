@@ -698,7 +698,11 @@ container_worker() {
     agent_probe_if_due
     usage_sample
     out="$(api POST /factory/claim "$(jq -n --arg a "$ARCH" --arg h "$(hostname -s 2>/dev/null || echo ?)" --arg v "$(image_version)" --arg g "$(agent_label)" --arg as "$AGENT_STATUS" --arg ae "$AGENT_ERROR" --arg ac "$( (( AGENT_CHECKED > 0 )) && date -u -d "@$AGENT_CHECKED" +%Y-%m-%dT%H:%M:%SZ || echo "")" --argjson l "${WORKER_LABELS:-"{}"}" --argjson s "$( [[ "${WORKER_SHARED:-0}" == 1 ]] && echo true || echo false)" --argjson u "$(usage_json)" '{arch:$a,hostname:$h,version:$v,labels:$l,shared:$s,agent:$g,agent_status:$as,agent_error:$ae,agent_checked_at:$ac,usage:$u}')")" \
-      || { log "claim failed: ${out##*$'\n'}"; sleep 60; continue; }
+      || { code="${out##*$'\n'}"; body="${out%$'\n'*}"
+           # 426: this image is behind the pool's release past the rollout's grace — every worker follows the
+           # latest image, and the pool hands this one nothing until the updater (or its owner) replaces it.
+           if [[ "$code" == 426 ]]; then log "update required: $(jq -r '.error // .' <<<"$body" 2>/dev/null || echo "$body")"; sleep 300; continue; fi
+           log "claim failed: $code ${body:0:200}"; sleep 60; continue; }
     code="${out##*$'\n'}"; body="${out%$'\n'*}"
     if [[ "$code" == "204" ]]; then
       idle=$((idle + 30))

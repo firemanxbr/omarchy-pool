@@ -6,7 +6,7 @@
  */
 import { page } from "./layout";
 import type { RunningVersion } from "../meta";
-import { REPO_URL } from "../meta";
+import { DASHBOARD_HOST, REPO_URL } from "../meta";
 
 const IMG = "ghcr.io/firemanxbr/omarchy-worker";
 
@@ -49,34 +49,31 @@ const BODY = String.raw`
   <section id="contributor">
     <h2>As a contributor: your own packages</h2>
     <div class="steps">
-      <div class="step"><h3>1. Start it</h3><p>Two containers on a network of their own. The <b>broker</b> holds what is yours — the worker token, your agent's key, a GitHub token — and only receives, processes and answers. The <b>builder</b> beside it is born with nothing: it asks the broker for a build of yours, builds it, uploads the package, the PKGBUILD and the log to your staging workspace through the broker, and exits; the restart policy starts the next one. Simplest with <a href="${REPO_URL}/blob/main/factory/image/compose.yml">compose.yml</a>:</p>
-<pre>OMARCHY_WORKER_TOKEN=&lt;omw_…&gt; GITHUB_TOKEN=&lt;github_pat_…, no permissions&gt; docker compose up -d
-# podman compose works the same</pre>
-      <p>By hand, the same two (Docker Desktop; <code>podman</code> works the same):</p>
-<pre>docker network create omarchy-worker
-docker run -d --name omarchy-broker --restart unless-stopped --network omarchy-worker \
-  -e OMARCHY_WORKER_ROLE=broker -e OMARCHY_WORKER_TOKEN=&lt;omw_…&gt; -e GITHUB_TOKEN=&lt;github_pat_…, no permissions&gt; \
-  ${IMG}:latest
-docker run -d --name omarchy-worker --restart unless-stopped --stop-timeout 10800 --network omarchy-worker \
-  -e OMARCHY_BROKER=http://omarchy-broker:8790 \
-  ${IMG}:latest</pre>
-      <p><b>GITHUB_TOKEN</b> (on the broker): the drafter reads GitHub's API for every package it builds — the release, the files — through the broker. Without a token GitHub allows 60 requests an hour from your address, and a queue of ten builds is ten failures; a <a href="https://github.com/settings/personal-access-tokens/new">fine-grained token</a> with <em>no permissions at all</em> gives 5000. Make one for this — never <code>gh auth token</code>, which is your account with write access to your repositories (see <a href="#secrets">what a build can see</a>). <b>--stop-timeout</b> (compose: <code>stop_grace_period</code>): a stop lets the build finish and report; killed mid-build, the task waits half an hour for its lease to expire. Change the settings between builds, not during one.</p></div>
+      <div class="step"><h3>1. Start it</h3><p>One command, wherever the worker lives — a machine or a VM with Docker or podman (and compose). It writes the compose file and a <code>.env</code> (in <code>~/.config/omarchy-worker</code>, mode 600), pulls the signed image and starts the set: three containers — the broker and the builder on a network of their own, the updater beside them. The <b>broker</b> holds what is yours — the worker token, your agent's key, a GitHub token — and only receives, processes and answers. The <b>builder</b> beside it is born with nothing: it asks the broker for a build of yours, builds it, uploads the package, the PKGBUILD and the log to your staging workspace through the broker, and exits; the restart policy starts the next one. The <b>updater</b> keeps both on the pool's latest image (<a href="#update">every worker follows it</a>).</p>
+<pre>curl -fsSLo omarchy-worker https://${DASHBOARD_HOST}/omarchy-worker &amp;&amp; chmod +x omarchy-worker
+./omarchy-worker start --token &lt;omw_…&gt; --github-token &lt;github_pat_…, no permissions&gt;
+./omarchy-worker status        # what runs here, what the pool thinks of it
+./omarchy-worker logs          # the builder's log (logs broker | updater)
+./omarchy-worker stop          # a drain: the build in hand finishes first</pre>
+      <p>The same set by hand, with <a href="${REPO_URL}/blob/main/factory/image/compose.yml">compose.yml</a> (also served at <code>/omarchy-worker/compose.yml</code>) and a <code>.env</code> beside it; the updater mounts the directory at the same path, so its absolute path goes in:</p>
+<pre>printf 'OMARCHY_WORKER_TOKEN=%s\nGITHUB_TOKEN=%s\nOMARCHY_WORKER_DIR=%s\nCOMPOSE_PROFILES=community\n' omw_… github_pat_… "$PWD" &gt; .env
+docker compose up -d           # podman compose works the same</pre>
+      <p><b>--github-token</b> (on the broker): the drafter reads GitHub's API for every package it builds — the release, the files — through the broker. Without a token GitHub allows 60 requests an hour from your address, and a queue of ten builds is ten failures; a <a href="https://github.com/settings/personal-access-tokens/new">fine-grained token</a> with <em>no permissions at all</em> gives 5000. Make one for this — never <code>gh auth token</code>, which is your account with write access to your repositories (see <a href="#secrets">what a build can see</a>). A stop is a drain (compose: <code>stop_grace_period: 3h</code>): the build in hand finishes and reports; killed mid-build, the task waits half an hour for its lease to expire. Change the settings between builds, not during one.</p></div>
       <div class="step"><h3>2. Give it work</h3><p><a href="/request">Request a package</a> (the project's URL, a description, the licence, the checklist) and press <b>Build</b> on your page. Your worker picks it up within a minute; the <em>Builds</em> table follows it, and the <em>Workers</em> table shows it alive. When the build is staged, a maintainer sees it on <a href="/review">Review</a>.</p></div>
-      <div class="step"><h3>3. Donate the machine, bring your agent</h3><p>Two switches, both yours to flip — the first on the builder, the second on the broker (compose: the same variables in the environment or a <code>.env</code> file):</p>
+      <div class="step"><h3>3. Donate the machine, bring your agent</h3><p>Two switches, both yours to flip — the first on the builder, the second on the broker (options of <code>omarchy-worker start</code>; by hand, the same names in <code>.env</code>):</p>
 <pre># the builder: also build other contributors' packages (their bumps after 14 days, package requests at once)
-  -e WORKER_SHARED=1
+./omarchy-worker start --shared            # or: ./omarchy-worker share on | off  (.env: WORKER_SHARED=1)
 
 # the broker: an agent drafts and corrects PKGBUILDs, with your key — the pool never holds one, the builder never sees it;
-# one of these is enough (Anthropic, OpenAI, Gemini, xAI), FACTORY_MODEL picks the model
-  -e ANTHROPIC_API_KEY=sk-…      # or OPENAI_API_KEY / GEMINI_API_KEY / XAI_API_KEY
-  -e FACTORY_MODEL=claude-sonnet-5
-
+# one of these is enough (Anthropic, OpenAI, Gemini, xAI), --model picks the model
+./omarchy-worker start --anthropic-key sk-… --model claude-sonnet-5   # or --openai-key / --gemini-key / --xai-key
+                                                                      # (.env: ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, XAI_API_KEY, FACTORY_MODEL)
 # or your Claude subscription instead of a key (see "A Claude subscription as the agent" below)
-  -e CLAUDE_CODE_OAUTH_TOKEN=…    # what 'claude setup-token' printed on your machine</pre>
+./omarchy-worker start --claude-token …    # what 'claude setup-token' printed on your machine (.env: CLAUDE_CODE_OAUTH_TOKEN)</pre>
       <p>The Factory page shows which agent each worker reported (<code>anthropic/claude-sonnet-5</code>, <code>claude-code/claude-sonnet-5</code>, <code>openai/gpt-5</code>, …); the key itself never leaves the broker.</p>
       <p>A shared worker with an agent is what turns a <em>package request</em> (the <a href="/request">request page</a>) into a first PKGBUILD and a first build: the request lands in the shared queue the moment its record is written, and the best idle shared worker of the architecture — native before emulated, then the most cores — takes it first; the others after three minutes. Without one, requests wait, and the page says where they stand. What your agent produces is evidence like any other build: a maintainer reads it before anything reaches users.</p></div>
-      <div class="step"><h3>4. Watch it</h3><p>In <b>Docker Desktop</b>, <em>Containers</em> lists <code>omarchy-worker</code> with its state and a <em>Logs</em> tab; in <b>Podman Desktop</b>, the same under <em>Containers</em>. On the command line: <code>docker logs -f omarchy-worker</code> / <code>podman logs -f omarchy-worker</code>. The container exits after each task (that is by design) and the restart policy brings it back.</p>
-      <div class="shot">Screenshot to add: Docker Desktop → Containers, the running <code>omarchy-worker</code> and its Logs tab; Podman Desktop → Containers, the same.</div></div>
+      <div class="step"><h3>4. Watch it</h3><p><code>./omarchy-worker status</code> says what runs here and what the pool thinks of it; <code>./omarchy-worker logs</code> follows the builder (<code>logs broker</code>, <code>logs updater</code> the others). In <b>Docker Desktop</b>, <em>Containers</em> lists the three under the <code>omarchy-worker</code> project, each with a <em>Logs</em> tab; in <b>Podman Desktop</b>, the same under <em>Containers</em>. The builder exits after each task (that is by design) and the restart policy brings it back.</p>
+      <div class="shot">Screenshot to add: Docker Desktop → Containers, the <code>omarchy-worker</code> project and the builder's Logs tab; Podman Desktop → Containers, the same.</div></div>
     </div>
   </section>
 
@@ -84,7 +81,9 @@ docker run -d --name omarchy-worker --restart unless-stopped --stop-timeout 1080
     <h2>As a maintainer: the pool's jobs and approved rebuilds</h2>
     <p class="sub">Once a maintainer trusts the registration (<code>POST /api/v1/factory/workers/&lt;id&gt;/trust</code>; the <em>Trust</em> table on <a href="/review">Review</a> lists it), the same image switches to the project's work. Each build and check runs in a fresh Arch container it starts as a sibling through your runtime — so it needs the runtime's socket, and a working directory that has the <b>same path</b> on your machine and inside the container (the sibling containers mount subdirectories of it).</p>
     <div class="steps">
-      <div class="step"><h3>1. Docker Desktop</h3>
+      <div class="step"><h3>0. One command</h3><p>The same <code>omarchy-worker</code>, with that registration's token and <code>--project</code> (the updater beside it, as for a contributor's):</p>
+<pre>./omarchy-worker start --token &lt;omw_…&gt; --project --role review     # or --role pool; --work-dir for the working directory</pre></div>
+      <div class="step"><h3>1. Docker Desktop, by hand</h3><p>The three steps below run one container without an updater: after every release, <code>docker pull …:latest</code> and recreate it — or the pool refuses it 45 minutes later (<a href="#update">every worker follows the latest image</a>). Step 0 does that for you.</p>
 <pre>mkdir -p "$HOME/omarchy-worker"
 docker run -d --name omarchy-worker --restart unless-stopped \
   -v /var/run/docker.sock:/var/run/docker.sock \
@@ -108,7 +107,7 @@ podman run -d --name omarchy-worker --restart unless-stopped --security-opt labe
   -e OMARCHY_WORKER_TOKEN=&lt;omw_…&gt; \
   ${IMG}:latest</pre>
       <p><code>--security-opt label=disable</code> lets the container use the socket on SELinux hosts (Fedora, the podman machine). Mounting the socket path you see on macOS (<code>…/podman-machine-default-api.sock</code>) fails with <em>operation not supported</em>: it belongs to the host, not the VM — use the VM's path above.</p></div>
-      <div class="step"><h3>3. Or without a container</h3><p>On a Linux host with podman or docker, the release binaries do the same: download <code>omarchy-pool-&lt;version&gt;-&lt;arch&gt;-linux.tar.gz</code> from the <a href="${REPO_URL}/releases/latest">latest release</a> and run <code>pkg-repo work --worker-token omw_… --arch aarch64</code>. Same options as below.</p></div>
+      <div class="step"><h3>3. Or without a container</h3><p>On a Linux host with podman or docker, the release binaries do the same: download <code>omarchy-pool-&lt;version&gt;-&lt;arch&gt;-linux.tar.gz</code> from the <a href="${REPO_URL}/releases/latest">latest release</a> and run <code>pkg-repo work --worker-token omw_… --arch aarch64</code>. Same options as below. The binary is its release's: the pool refuses it 45 minutes after the next one is deployed, until you download that.</p></div>
       <div class="step"><h3>4. Options</h3><p>Anything after the image name goes to <code>pkg-repo work</code>:</p>
 <pre>--kind build --kind health   only these kinds (default: everything a project worker may run)
 --idle-exit 300           exit after five minutes without work (a fallback worker)
@@ -161,8 +160,9 @@ FACTORY_PROVIDER=claude-code</pre>
   <section id="running">
     <h2>Keeping it running</h2>
     <div class="steps">
-      <div class="step"><h3>Update</h3><p>The image follows the pool's releases. <code>docker pull ${IMG}:latest</code> (or <code>podman pull</code>), then remove and recreate the container with the same command; a contributor's worker only needs the pull, the next container starts from the new image.</p></div>
-      <div class="step"><h3>Stop, remove, revoke</h3><p><code>docker rm -f omarchy-worker</code> stops and removes it. The registration stays until you revoke it on your page (or a maintainer does); a revoked token claims nothing, immediately.</p></div>
+      <div class="step" id="update"><h3>Update — every worker follows the latest image</h3><p>The image follows the pool's releases, several a day, and a worker on an old one wastes everyone's time: it drafts the wrong version, links against the wrong objects, misses the rules the rest of the pool keeps. So the pool hands work only to workers on its release: one behind for longer than the rollout's grace (45 minutes after a deploy) is refused at the claim (<code>426</code>), shows <span class="pill warn">outdated</span> on the <a href="/workers">Workers</a> page and on its owner's, and the journal says so once per release. Nothing else changes: the moment it is updated, it works again.</p>
+      <p>The <b>updater</b> is what keeps it there, and it is part of the set, not an option: a container of the same image (<code>OMARCHY_WORKER_ROLE=updater</code>) with the runtime's socket and the compose directory, which every fifteen minutes pulls the image and replaces, one service at a time, what changed — a stop is a drain, the build in hand finishes first — itself last. <code>omarchy-worker start</code> runs it; the compose file has it; <code>omarchy-worker update</code> runs one round now. The project's host (the Studio) does the same with <code>factory/host/rollout.sh</code> on a timer. Without an updater, <code>docker compose pull &amp;&amp; docker compose up -d</code> by hand does it — until the next release.</p></div>
+      <div class="step"><h3>Stop, remove, revoke</h3><p><code>./omarchy-worker stop</code> drains and stops the set (a build in hand finishes first); <code>./omarchy-worker remove</code> stops it and deletes the files here. The registration stays until you revoke it on your page (or a maintainer does); a revoked token claims nothing, immediately.</p></div>
       <div class="step"><h3>Disk</h3><p>Every task builds in a fresh container that is removed afterwards; images and package caches stay. <code>docker system prune</code> / <code>podman system prune</code> reclaims them. A project worker's working directory holds the upstream keyrings, a checkout of the repository and the last builds — safe to delete when the worker is stopped.</p></div>
       <div class="step"><h3>Something is off</h3><p><em>the pool did not accept this token</em>: it was revoked, or mistyped. <em>registered for aarch64 but this machine is x86_64</em>: register a worker for this machine. <em>mount its socket</em>: the registration is project-trusted and needs the runtime's socket (above). <em>permission denied … docker.sock</em>: add <code>--security-opt label=disable</code> (Podman) or check the socket path. <em>No task for a while</em>: a contributor's worker only sees its owner's tasks unless started shared; a project worker only claims once trusted. The Factory page shows every queued task and every worker the pool has heard from.</p></div>
     </div>

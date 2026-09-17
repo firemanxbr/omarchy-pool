@@ -181,23 +181,22 @@ curl -s -X POST $API/factory/workers -H "authorization: Bearer $OMC" -H 'content
 # 4. Queue the build(s).
 curl -s -X POST $API/factory/packages/project/build -H "authorization: Bearer $OMC"
 
-# 5. Run the worker: the project's signed image, two containers — the broker holds the token, your agent's
-#    key and GITHUB_TOKEN and only receives, processes and answers; the builder beside it is born with
-#    nothing, builds one task in a fresh container and exits (/docs/workers#secrets).
+# 5. Run the worker: one command, wherever it lives (docker or podman, with compose). It writes the compose
+#    file and a .env, pulls the project's signed image and starts the set — the broker holds the token, your
+#    agent's key and GITHUB_TOKEN and only receives, processes and answers; the builder beside it is born with
+#    nothing, builds one task in a fresh container and exits (/docs/workers#secrets); the updater keeps both on
+#    the pool's latest image (every worker follows it: /docs/workers#update).
 #    GITHUB_TOKEN: the drafter reads GitHub's API for every package (the release, the files) through the
 #    broker — without one, 60 requests an hour from your address; a fine-grained token with no permissions.
-#    the agent key (ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY or XAI_API_KEY — or CLAUDE_CODE_OAUTH_TOKEN,
-#    a Claude subscription through Claude Code) is *yours*, on the broker: the pool never holds one.
+#    the agent key (--anthropic-key, --openai-key, --gemini-key or --xai-key — or --claude-token, a Claude
+#    subscription through Claude Code) is *yours*, on the broker: the pool never holds one.
 #    A worker is ready only when its agent answers the probe (the broker's /health): no agent, no draft.
-OMARCHY_WORKER_TOKEN=omw_… GITHUB_TOKEN=github_pat_… ANTHROPIC_API_KEY=sk-… \
-  podman compose -f factory/image/compose.yml up -d        # or docker compose; a stop waits for the build (3 h)
-#    or by hand (--stop-timeout: a stop lets the build finish instead of killing it):
-podman network create omarchy-worker
-podman run -d --name omarchy-broker --restart unless-stopped --network omarchy-worker \
-  -e OMARCHY_WORKER_ROLE=broker -e OMARCHY_WORKER_TOKEN=omw_… -e GITHUB_TOKEN=github_pat_… ghcr.io/firemanxbr/omarchy-worker:latest
-podman run -d --name omarchy-worker --restart unless-stopped --stop-timeout 10800 --network omarchy-worker \
-  -e OMARCHY_BROKER=http://omarchy-broker:8790 ghcr.io/firemanxbr/omarchy-worker:latest
-
+curl -fsSLo omarchy-worker https://omarchy-pool.firemanxbr.org/omarchy-worker && chmod +x omarchy-worker
+./omarchy-worker start --token omw_… --github-token github_pat_… --anthropic-key sk-…
+./omarchy-worker status                                  # what runs, what the pool thinks; logs · share on · update · stop
+#    by hand, the same set: the compose file (served at /omarchy-worker/compose.yml) and a .env beside it —
+#    OMARCHY_WORKER_TOKEN, GITHUB_TOKEN, the agent key, COMPOSE_PROFILES=community and OMARCHY_WORKER_DIR=$PWD
+#    (the updater mounts the directory at the same path) — then `docker compose up -d` (podman compose the same).
 # 6. Follow it.
 curl -s $API/factory/me -H "authorization: Bearer $OMC"       # your packages, workers, tasks, staging quota
 ```
@@ -362,6 +361,8 @@ pointing the repository name in the worker script, `reconcile.rs`,
 POST /factory/claim                 {arch, hostname?, labels?, version?, kinds?, shared?}   Authorization: Bearer omw_… (the registration)
   200 {task:{id,name,arch,version,pkgbuild_ref,reason,attempts,…}, token: "omj.…", token_expires_at, lease_minutes, repo, pkgbuild_path, upload}
   204 nothing queued for this worker
+  426 {error, latest, yours, behind, update}   `version` (the image's release) is behind the pool's past the grace — every
+                                               worker follows the latest image: update it and claim again (the worker sleeps 5 min)
 POST /factory/tasks/:id/heartbeat                                 (the job token) → lease extended 30 min, a fresh token
 POST /factory/tasks/:id/complete    {sha256, filename, version?, duration_ms?, log_tail?} · jobs: {result, summary}
   409 unless the sha256 is in the pool (project) or in staging (community)
@@ -393,7 +394,9 @@ factory/
   MAINTAINERS.toml                the governance file: the maintainers, one list (docs/GOVERNANCE.md)
   bin/check-governance            validates it and generates .github/CODEOWNERS from it
   image/Containerfile             the one worker image (Arch, both architectures, signed, built by the release workflow); image/entrypoint.sh
-                                  reads the registration and runs the contributor's or the project's half; image/compose.yml runs it
+                                  reads the registration and runs the contributor's or the project's half, or the updater; image/compose.yml
+                                  runs the set — broker, builder, updater (or a project worker) — as `omarchy-worker start` writes it
+  bin/omarchy-rollout             the updater: the compose set follows the pool's latest image, what changed replaced together, itself last
   bin/pkgbuild-meta               PKGBUILD → arches and version, without executing it as you
   sizing/<name>/                  recipes kept for dry runs only (never queued) — the only recipes in the repository
   bin/agent.py                    the owner's agent, whichever provider: Anthropic, OpenAI, Gemini, xAI (by the key set)

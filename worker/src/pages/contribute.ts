@@ -65,7 +65,7 @@ __CHARTS__
       fetch("/api/v1/factory/review").then(function (r) { return r.json(); }).catch(function () { return { staged: [] }; })
     ]).then(function (res) {
       var f = res[0], pkgs = res[1].packages || [], apps = res[2].approvals || [], staged = res[3].staged || [];
-      var shared = f.workers.filter(function (w) { return w.alive && (w.side === "omarchy" || w.mode === "shared"); });
+      var shared = f.workers.filter(function (w) { return w.alive && !(w.update && w.update.required) && (w.side === "omarchy" || w.mode === "shared"); });
       var owners = {}; pkgs.forEach(function (p) { owners[p.name] = p.owner; });
       var week = Date.now() - 7 * 86400000;
       var builds7 = f.tasks.filter(function (t) { return t.kind === "build" && Date.parse(t.created_at) > week; });

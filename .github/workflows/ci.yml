@@ -71,3 +71,9 @@ jobs:
       - name: The worker's own package and its last words
         working-directory: .
         run: bash tests/worker-main-package.sh
+      - name: The updater, against a stubbed docker
+        working-directory: .
+        run: bash tests/omarchy-rollout.sh
+      - name: The one command to run a worker, against a stubbed docker and pool
+        working-directory: .
+        run: bash tests/omarchy-worker-cli.sh

@@ -9,6 +9,8 @@ import { isTextEvidence, reclaimStagingPackages, STAGING_QUOTA_BYTES } from "../
 import { findLeak } from "../leak";
 import { chains, chainOf, storyRows, requestView, placeInQueue, type Chain } from "./story";
 import { betterIdleWorker, FIRST_PICK_MINUTES } from "../queue";
+import { updateMessage, updateState } from "../update";
+import { version as running } from "../meta";
 
 /**
  * The factory's brain. Cloudflare is the source of truth for package
@@ -303,6 +305,22 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   // the queue a request lands in. Community results never reach the pool
   // either way; a dedicated worker builds its owner's packages only.
   const shared = trust === "community" && b.shared === true;
+  // Every worker follows the latest image (update.ts): one behind past the
+  // rollout's grace is touched — alive, and the Workers page says why it
+  // idles — told once per release in the journal, and handed nothing.
+  const update = updateState(b.version, running(env));
+  if (update.required) {
+    await touchWorker(env, { worker: workerId, arch: b.arch, hostname: b.hostname, labels: b.labels, version: b.version, mode: trust === "community" ? (shared ? "shared" : "dedicated") : undefined, agent: b.agent === undefined ? undefined : typeof b.agent === "string" ? b.agent : null, kinds, probe, usage }, null);
+    const told = await env.DB.prepare("SELECT told_update FROM build_workers WHERE id = ?").bind(workerId).first<{ told_update: string | null }>();
+    if (told?.told_update !== update.latest) {
+      await env.DB.batch([
+        env.DB.prepare("UPDATE build_workers SET told_update = ? WHERE id = ?").bind(update.latest, workerId),
+        env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('worker', NULL, 'factory', 'warn', ?, ?)")
+          .bind(`${workerId}: handed nothing — ${updateMessage(update)}`, JSON.stringify({ worker: workerId, owner: actor.w.owner, yours: update.yours, latest: update.latest, behind: update.behind })),
+      ]);
+    }
+    return json({ error: updateMessage(update), latest: update.latest, yours: update.yours, behind: update.behind, update: "/docs/workers#update" }, 426);
+  }
   // A build asked for one worker (pinned_to) is claimed by that worker only; the rest is anyone's that qualifies.
   let scope = `kind IN (SELECT value FROM json_each(?)) AND (pinned_to IS NULL OR pinned_to = ?)`;
   const binds: unknown[] = [JSON.stringify(kinds), workerId];
@@ -683,6 +701,7 @@ export async function handleFactory(env: Env, url?: URL): Promise<Response> {
     .all<{ last_seen: string; labels: string | null; owner: string | null; trust: string; packages: string | null; kinds: string | null; agent: string | null; agent_status: string | null; usage: string | null; last_task: string | null }>();
   const tasks = await env.DB.prepare("SELECT * FROM build_tasks ORDER BY CASE status WHEN 'leased' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, id DESC LIMIT ?").bind(limit).all<TaskRow>();
   const alive = Date.now() - WORKER_ALIVE_MINUTES * 60000;
+  const pool = running(env);
   return json(
     {
       generated_at: now(),
@@ -697,6 +716,8 @@ export async function handleFactory(env: Env, url?: URL): Promise<Response> {
         alive: Date.parse(w.last_seen) > alive,
         // Ready for what it declares: alive, and its agent answered when the work needs one (workerReady).
         ready: workerReady(w, alive),
+        // Where its image stands against the pool's release (update.ts): behind past the grace, it is handed nothing.
+        update: updateState((w as { version?: string | null }).version, pool),
         kinds: w.kinds ? JSON.parse(w.kinds) : null,
         // What the machine uses (the worker's own average, with the claim) and the last task it finished (with the completion).
         usage: w.usage ? JSON.parse(w.usage) : null,

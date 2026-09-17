@@ -1188,3 +1188,34 @@ describe("removing a registration", () => {
     expect(page.json.approvals.find((a: any) => a.name === "stood")).toMatchObject({ decision: "approved", rings: ["edge", "rc"] });
   });
 });
+
+describe("every worker follows the latest image", () => {
+  it("a worker behind the pool's release past the rollout's grace is handed nothing — 426, alive on the Workers page as outdated, one journal line per release — and keeps no first pick", async () => {
+    // The pool at a release, deployed an hour ago; the test's default POOL_VERSION ("test") never refuses.
+    const was = { version: env.POOL_VERSION, deployed: env.POOL_DEPLOYED_AT };
+    Object.assign(env, { POOL_VERSION: "v0.0.177", POOL_DEPLOYED_AT: new Date(Date.now() - 60 * 60000).toISOString() });
+    try {
+      await env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status) VALUES ('stale', 'aarch64', '1', 'abc123', 'contributor', 100, 0, 'community', 'alice', 'build', 'queued')").run();
+      const old = await call("POST", "/factory/claim", { arch: "aarch64", version: "v0.0.167", hostname: "old-box" }, "omw_w3");
+      expect(old.status).toBe(426);
+      expect(old.json).toMatchObject({ latest: "v0.0.177", yours: "v0.0.167", behind: 10, update: "/docs/workers#update" });
+      expect(old.json.error).toMatch(/10 releases behind/);
+      // Touched: alive, its version on the record, nothing in hand; the journal said it once.
+      const w = await env.DB.prepare("SELECT version, told_update, current_task FROM build_workers WHERE id = 'w3'").first();
+      expect(w).toMatchObject({ version: "v0.0.167", told_update: "v0.0.177", current_task: null });
+      expect((await call("POST", "/factory/claim", { arch: "aarch64", version: "v0.0.167" }, "omw_w3")).status).toBe(426);
+      expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM events WHERE kind = 'worker' AND summary LIKE 'w3: handed nothing%'").first<{ n: number }>())!.n).toBe(1);
+      // A URL of its own: /factory is kept in the edge cache for ten seconds, and an earlier test read it.
+      const listed = (await call("GET", "/factory?limit=41")).json.workers.find((x: { id: string }) => x.id === "w3");
+      expect(listed.update).toMatchObject({ outdated: true, behind: 10, required: true });
+      // Within the grace of a fresh deploy, the same worker works on (the build is still queued).
+      Object.assign(env, { POOL_DEPLOYED_AT: new Date(Date.now() - 5 * 60000).toISOString() });
+      const fresh = await call("POST", "/factory/claim", { arch: "aarch64", version: "v0.0.176" }, "omw_w3");
+      expect(fresh.status, JSON.stringify(fresh.json)).toBe(200);
+      expect(fresh.json.task.name).toBe("stale");
+      await call("POST", `/factory/tasks/${fresh.json.task.id}/fail`, { error: "test over", final: true }, "omw_w3");
+    } finally {
+      Object.assign(env, { POOL_VERSION: was.version, POOL_DEPLOYED_AT: was.deployed });
+    }
+  });
+});
