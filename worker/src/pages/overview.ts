@@ -81,7 +81,7 @@ const BODY = String.raw`
 
   <section>
     <div class="h2row"><h2>Coverage</h2><a class="more-link" href="/status">Every source, every number →</a></div>
-    <p class="sub">Share of what each upstream serves that edge already pins, on both architectures.</p>
+    <p class="sub">Share of what each upstream serves that edge already pins, on both architectures. The optional sources yield to the others and are not counted; the factory builds, it does not mirror.</p>
     <div class="coverage-box"><div class="cov" id="c-coverage"></div></div>
   </section>
 
@@ -127,16 +127,24 @@ __CHARTS__
   copyChips({ setup: "#setup-cmd", cli: "#cli-cmd" });
   drawStart();
 
+  // The sources, counted one way for the tile and the coverage grid: the upstream repositories the pool mirrors, by name whatever the architectures (core, asahi…), a name synced once one of its architectures has. The factory is not one — what it builds has no upstream to be short of — and the optional sources (chaotic, aur) are left out and named: they yield every name another source ships, so their share of the upstream says nothing. The Status page counts every row per architecture instead, the factory's among them, and says so.
+  function sourcesOf(d) {
+    var names = [], synced = {}, optional = [];
+    (d.coverage || []).forEach(function (c) {
+      if (c.source === "factory") return;
+      if (c.optional) { if (optional.indexOf(c.source) < 0) optional.push(c.source); return; }
+      if (names.indexOf(c.source) < 0) names.push(c.source);
+      if (c.upstream_total != null) synced[c.source] = true;
+    });
+    return { names: names, missing: names.filter(function (n) { return !synced[n]; }), optional: optional, rows: (d.coverage || []).filter(function (c) { return names.indexOf(c.source) >= 0; }) };
+  }
+
   function render(d) {
     data = d;
     var stable = d.rings.filter(function (r) { return r.ring === "stable"; })[0] || {};
     var byArch = function (r, arch) { return (r.sources || []).filter(function (s) { return s.arch === arch; }).reduce(function (n, s) { return n + s.packages; }, 0); };
     var lastSync = newest(d.latest, "sync");
-    // The factory is not a mirror: what it builds has no upstream to be short of.
-    var mirrors = (d.coverage || []).filter(function (c) { return c.source !== "factory"; });
-    // A source is a name (core, asahi, chaotic…), whatever the architectures it serves; it is mirrored when at least one of them has synced.
-    var names = [], synced = {}; mirrors.forEach(function (c) { if (names.indexOf(c.source) < 0) names.push(c.source); if (c.upstream_total != null) synced[c.source] = true; });
-    var missing = names.filter(function (n) { return !synced[n]; }), optionalNames = names.filter(function (n) { return mirrors.some(function (c) { return c.source === n && c.optional; }); });
+    var src = sourcesOf(d);
     var S = d.series || {}, today = new Date().toISOString().slice(0, 10);
     var imp = (S.imports_daily || []).filter(function (r) { return r.day === today; })[0];
     var sh = latest(d.latest, "health", "stable", "x86_64"), sha = latest(d.latest, "health", "stable", "aarch64");
@@ -145,7 +153,7 @@ __CHARTS__
     setTiles("#tiles", [
       ["Packages in stable", num(stable.package_count), num(byArch(stable, "x86_64")) + " x86_64 · " + num(byArch(stable, "aarch64")) + " aarch64", "", "/packages?ring=stable"],
       ["Stable release", stable.release ? "#" + stable.release.seq : "—", stable.release ? ago(stable.release.created_at) + " · health " + (sh ? sh.status : "n/a") + " / " + (sha ? sha.status : "n/a") : "no release yet", "", "/journal#releases"],
-      ["Sources mirrored", (names.length - missing.length) + " / " + names.length, missing.length ? "not yet: " + missing.join(", ") : "Arch · Arch Linux ARM · Omarchy · Asahi" + (optionalNames.length ? " · " + optionalNames.join(", ") + " optional" : ""), "", "/status"],
+      ["Sources mirrored", (src.names.length - src.missing.length) + " / " + src.names.length, (src.missing.length ? "not yet: " + src.missing.join(", ") : "Arch · Arch Linux ARM · Omarchy · Asahi") + (src.optional.length ? " · " + src.optional.join(", ") + " optional, not counted" : ""), "", "/status"],
       ["Open advisories in stable", '<span id="t-sec">…</span>', '<span id="t-sec-s">matching the five feeds, on both architectures…</span>', "", "/security"],
       ["Machines on the pool", y ? "≈ " + num(y.machines) + (y.machines >= 10000 ? "+" : "") : "—", y ? "yesterday · " + RINGS.filter(function (r) { return r !== "lab" || (y.by_ring || {}).lab; }).map(function (r) { return r + " " + num((y.by_ring || {})[r] || 0); }).join(" · ") + " · " + num(y.requests) + " fetches" : "counted once a day", "", "/pipeline"],
       ["Into edge today", imp ? "+" + num(imp.packages) : "+0", (imp ? bytes(imp.bytes) + " · " + num(imp.runs) + " syncs" : "no sync yet today") + (lastSync ? " · last " + ago(lastSync.created_at) : ""), "", "/journal?kind=sync"]
@@ -172,8 +180,8 @@ __CHARTS__
     $("#proof-tested").innerHTML = stable.release ? '<b>' + num(stable.release.seq) + '</b> stable releases so far · health ' + (sh ? sh.status : "n/a") + ' / ' + (sha ? sha.status : "n/a") : 'no stable release yet';
     $("#proof-rollback").innerHTML = rollbacks.length ? 'last rollback <b>' + ago(rollbacks[0].created_at) + '</b> · ' + esc(rollbacks[0].ring || "") + ' · automatic' : 'none in the recent journal — <b>0</b> of the last ' + (d.events || []).length + ' events';
 
-    // Coverage: one row per source, the sources both architectures serve first, so core is core on either side.
-    var covBy = {}; mirrors.filter(function (c) { return !c.optional; }).forEach(function (c) { covBy[c.source] = covBy[c.source] || {}; covBy[c.source][c.arch] = c; });
+    // Coverage: one row per source — the same set the tile counts (sourcesOf) — the sources both architectures serve first, so core is core on either side.
+    var covBy = {}; src.rows.forEach(function (c) { covBy[c.source] = covBy[c.source] || {}; covBy[c.source][c.arch] = c; });
     var covNames = Object.keys(covBy).sort(function (a, b) { var na = Object.keys(covBy[a]).length, nb = Object.keys(covBy[b]).length; return nb - na || (a < b ? -1 : 1); });
     // A cell is the count beside the share — 12,905/12,905 · 100% — so a full
     // bar says how much it holds, not only that it is full. A source an
@@ -246,24 +254,23 @@ __CHARTS__
   }
   $("#open-journal").addEventListener("click", function (ev) { var r = ev.target.closest ? ev.target.closest(".row") : null; if (r) r.classList.toggle("open"); });
 
-  // The people: every contributor with a registered package or a worker, every maintainer named in factory/MAINTAINERS.toml.
+  // The people: every contributor with a registered package or a worker, every maintainer in the set the shell reads once (maintainerSet: the one list the pool keeps); the workers counted as every tile counts them (workerCounts).
   Promise.all([
     fetch("/api/v1/factory/packages").then(function (r) { return r.json(); }).catch(function () { return { packages: [] }; }),
-    fetch("/api/v1/factory/maintainers").then(function (r) { return r.json(); }).catch(function () { return { maintainers: [] }; }),
+    new Promise(function (ok) { maintainerSet(ok); }),
     fetch("/api/v1/factory").then(function (r) { return r.json(); }).catch(function () { return { workers: [] }; })
   ]).then(function (res) {
-    var pkgs = res[0].packages || [], listed = res[1].maintainers || [], workers = res[2].workers || [];
-    var maintainers = {}; listed.forEach(function (m) { maintainers[m.login] = true; });
+    var pkgs = res[0].packages || [], maintainers = res[1] || {}, workers = res[2].workers || [], wc = workerCounts(workers);
     var contributors = {}; pkgs.forEach(function (p) { if (p.owner && !maintainers[p.owner]) contributors[p.owner] = true; });
     workers.forEach(function (w) { if (w.owner && !maintainers[w.owner]) contributors[w.owner] = true; });
     var landed = pkgs.filter(function (p) { return p.status === "approved" || p.status === "published"; }).length;
     var people = Object.keys(maintainers).map(function (m) { return [m, "maintainer"]; }).concat(Object.keys(contributors).map(function (c) { return [c, "contributor"]; }));
     var chips = people.map(function (p) { return personChip(p[0], p[1]); }).join("");
-    $("#cc-people").innerHTML = (chips || '<span class="muted">be the first</span>') + '<span class="dim">' + num(workers.filter(function (w) { return w.alive; }).length) + ' workers alive</span><a href="/factory">Bring a package →</a>';
+    $("#cc-people").innerHTML = (chips || '<span class="muted">be the first</span>') + '<span class="dim">' + num(wc.alive) + ' workers alive</span><a href="/factory">Bring a package →</a>';
     setTiles("#open-stats", [
       ["Contributors", num(Object.keys(contributors).length), "anyone with a package or a worker", "", "/people#contributors"],
       ["Maintainers", num(Object.keys(maintainers).length), "named in MAINTAINERS.toml", "", "/people#maintainers"],
-      ["Workers alive", num(workers.filter(function (w) { return w.alive; }).length), num(workers.length) + " registered", "", "/people#workers"],
+      ["Workers alive", num(wc.alive), num(wc.registered) + " registered", "", "/people#workers"],
       ["Community packages", num(landed), "approved, built by the project", "", "/packages?q=factory"]
     ]);
   });
@@ -279,7 +286,7 @@ __CHARTS__
     function show(term, rows) {
       if (!rows.length) { out.innerHTML = '<div class="none">nothing in stable matches “' + esc(term) + '”</div>'; out.hidden = false; return; }
       out.innerHTML = rows.slice(0, 8).map(function (p) {
-        return '<a href="/package/' + encodeURIComponent(p.name) + '?ring=stable&arch=x86_64"><b>' + esc(p.name) + '</b><span class="mono dim">' + esc(p.version) + '</span><span class="src">' + esc(p.source) + '</span><span class="d">' + esc(p.description || "") + '</span></a>';
+        return '<a href="' + pkgHref(p.name, "stable", "x86_64") + '"><b>' + esc(p.name) + '</b><span class="mono dim">' + esc(p.version) + '</span><span class="src">' + esc(p.source) + '</span><span class="d">' + esc(p.description || "") + '</span></a>';
       }).join("") + '<a class="all" href="/packages?q=' + encodeURIComponent(term) + '&ring=stable&arch=x86_64">' + (rows.length >= 9 ? "More results" : "All " + rows.length + " results") + ' — every ring, both architectures →</a>';
       out.hidden = false;
     }
@@ -334,7 +341,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       id: "pool.search",
       page: "/",
       anchor: ['<form class="searchbar" action="/packages" method="get"', 'name="q"', 'id="pool-q"', 'id="pool-suggest"'],
-      script: ['"#pool-q"', '"#pool-suggest"', '"/api/v1/search?q="', '"&ring=stable&arch=x86_64&limit=9"', "d.packages", "p.description"],
+      script: ['"#pool-q"', '"#pool-suggest"', '"/api/v1/search?q="', '"&ring=stable&arch=x86_64&limit=9"', "d.packages", "p.description", 'pkgHref(p.name, "stable", "x86_64")'],
       reads: [
         { path: `/api/v1/search?q=${F.pkg}&ring=stable&arch=${F.arch}&limit=9`, fields: ["packages", "packages.0.name", "packages.0.version", "packages.0.source", "packages.0.description"] },
         { path: `/packages?q=${F.pkg}`, json: false },
@@ -345,7 +352,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       id: "pool.tiles",
       page: "/",
       anchor: ['<div class="tiles six" id="tiles">'],
-      script: ['skeletonTiles("#tiles", 6)', 'setTiles("#tiles"', '"#t-sec"', '"#t-sec-s"', "package_count", "imports_daily", '"/api/v1/security?ring=stable&arch="'],
+      script: ['skeletonTiles("#tiles", 6)', 'setTiles("#tiles"', '"#t-sec"', '"#t-sec-s"', "package_count", "imports_daily", '"/api/v1/security?ring=stable&arch="', "sourcesOf(d)", '"Sources mirrored"', '" optional, not counted"'],
       reads: [
         {
           path: stats,
@@ -431,11 +438,12 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       id: "pool.people-row",
       page: "/",
       anchor: ['id="cc-people"'],
-      script: ['"#cc-people"', '"/api/v1/factory/packages"', '"/api/v1/factory/maintainers"', '"/api/v1/factory"', "personChip(", "w.alive", "m.login", "p.owner"],
+      // The maintainer set is the shell's one read (maintainerSet, GET /api/v1/factory/maintainers), the workers the shell's one count (workerCounts).
+      script: ['"#cc-people"', '"/api/v1/factory/packages"', "maintainerSet(ok)", '"/api/v1/factory"', "personChip(", "workerCounts(workers)", "wc.alive", "p.owner"],
       reads: [
         { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.owner"] },
-        { path: "/api/v1/factory/maintainers", fields: ["maintainers", "maintainers.0.login"] },
-        { path: "/api/v1/factory", fields: ["workers", "workers.0.owner", "workers.0.alive"] },
+        { path: "/api/v1/factory/maintainers", fields: ["maintainers", "maintainers.0.login", "maintainers.0.since"] },
+        { path: "/api/v1/factory", fields: ["workers", "workers.0.owner", "workers.0.alive", "workers.0.revoked_at"] },
       ],
       visible: EVERYONE,
     },
@@ -443,11 +451,11 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       id: "pool.open-stats",
       page: "/",
       anchor: ['<div class="tiles four" id="open-stats">'],
-      script: ['setTiles("#open-stats"', '"/people#contributors"', '"/people#maintainers"', '"/people#workers"', '"/packages?q=factory"', 'p.status === "approved" || p.status === "published"'],
+      script: ['setTiles("#open-stats"', '"/people#contributors"', '"/people#maintainers"', '"/people#workers"', '"/packages?q=factory"', 'p.status === "approved" || p.status === "published"', '"Workers alive", num(wc.alive), num(wc.registered) + " registered"'],
       reads: [
         { path: "/api/v1/factory/packages", fields: ["packages.0.owner", "packages.0.status"] },
         { path: "/api/v1/factory/maintainers", fields: ["maintainers.0.login"] },
-        { path: "/api/v1/factory", fields: ["workers", "workers.0.owner", "workers.0.alive"] },
+        { path: "/api/v1/factory", fields: ["workers", "workers.0.owner", "workers.0.alive", "workers.0.revoked_at"] },
       ],
       visible: EVERYONE,
     },
@@ -471,7 +479,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       id: "pool.coverage",
       page: "/",
       anchor: ['class="coverage-box"', 'id="c-coverage"'],
-      script: ['"#c-coverage"', "c.upstream_total", "c.indexed", "c.optional", 'data-tip="'],
+      script: ['"#c-coverage"', "sourcesOf(", "src.rows", "c.upstream_total", "c.indexed", "c.optional", 'data-tip="'],
       reads: [{ path: stats, fields: ["coverage", "coverage.0.source", "coverage.0.arch", "coverage.0.optional", "coverage.0.upstream_total", "coverage.0.indexed"] }],
       visible: EVERYONE,
     },
@@ -488,7 +496,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
         "<h2>From upstream to your machine</h2>", 'href="/docs/how-it-works"',
         "<h2>Pick a ring</h2>", "<h2>Why the pool</h2>",
         "<h2>Get started</h2>", 'href="/docs/get-started">',
-        "<h2>Coverage</h2>", 'href="/status">Every source, every number',
+        "<h2>Coverage</h2>", 'href="/status">Every source, every number', "The optional sources yield to the others and are not counted; the factory builds, it does not mirror.",
         "<h2>Made in the open</h2>",
       ],
       visible: EVERYONE,

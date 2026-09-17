@@ -70,25 +70,26 @@ __CHARTS__
     var busyOf = function (w) { var l = LOAD[w.id]; return l ? Math.min(100, Math.round(100 * l.ms / 86400000)) : 0; };
     var kinds = { project: [], review: [], community: [] };
     d.workers.forEach(function (w) { kinds[wtKind(w)].push(w); });
-    var al = d.workers.filter(function (w) { return w.alive; }), bz = al.filter(function (w) { return w.current_task; });
+    // The numbers are the shell's (workerCounts: registered, alive, building, and the same per kind); the rows behind them stay here for the load and the task ids.
+    var wc = workerCounts(d.workers), al = d.workers.filter(function (w) { return w.alive; }), bz = al.filter(function (w) { return w.current_task; });
     var m = STATS && STATS.metrics, a = m && (m.jobs || m.actions);
     var load = al.length ? Math.round(al.reduce(function (n, w) { return n + busyOf(w); }, 0) / al.length) : 0;
     setTiles("#tiles", [
-      ["Alive", num(al.length) + " / " + num(d.workers.length), num(kinds.project.filter(function (w) { return w.alive; }).length) + " project · " + num(kinds.review.filter(function (w) { return w.alive; }).length) + " review · " + num(kinds.community.filter(function (w) { return w.alive; }).length) + " contributors", al.length ? "ok" : "warn"],
-      ["Building now", num(bz.length), bz.length ? bz.map(function (w) { return "#" + w.current_task; }).join(" · ") : "every worker idle"],
+      ["Alive", num(wc.alive) + " / " + num(wc.registered), num(wc.byKind.project.alive) + " project · " + num(wc.byKind.review.alive) + " review · " + num(wc.byKind.community.alive) + " contributors", wc.alive ? "ok" : "warn"],
+      ["Building now", num(wc.building), wc.building ? bz.map(function (w) { return "#" + w.current_task; }).join(" · ") : "every worker idle"],
       ["Load · 24 h", load + "%", "of the last day with a lease, across the alive ones"],
       ["Worker minutes · 7 d", a ? num(a.minutes) : "—", a ? "≈ " + num(Math.round(a.minutes / 7)) + " per day, the project's workers" : "no metrics snapshot yet"]
     ]);
     // One card per kind: one line on what it is for, the tasks it finished per day over a week (the Pool page's growth line, in the kind's colour), four numbers.
     var PD = perDay();
     var card = function (cls, name, ws, blurb) {
-      var alv = ws.filter(function (w) { return w.alive; }), busyW = alv.filter(function (w) { return w.current_task; });
+      var k = wc.byKind[cls], alv = ws.filter(function (w) { return w.alive; });
       var busyPct = alv.length ? Math.round(alv.reduce(function (n, w) { return n + busyOf(w); }, 0) / alv.length) : 0;
       var pd = PD.P[cls], pts = PD.days.map(function (d) { return { t: Date.parse(d), v: pd[d].done + pd[d].failed }; });
       var done7 = PD.days.reduce(function (n, d) { return n + pd[d].done; }, 0), failed7 = PD.days.reduce(function (n, d) { return n + pd[d].failed; }, 0);
-      return '<div class="role k-' + (cls === "community" ? "contrib" : cls) + '"><h3>' + name + '<span>' + num(ws.length) + (ws.length === 1 ? " worker" : " workers") + '</span></h3><p>' + blurb + '</p>' +
+      return '<div class="role k-' + (cls === "community" ? "contrib" : cls) + '"><h3>' + name + '<span>' + num(k.registered) + (k.registered === 1 ? " worker" : " workers") + '</span></h3><p>' + blurb + '</p>' +
         '<div class="kchart" data-tip="' + esc(name + ": tasks finished per day, the last seven days · " + num(done7) + " done, " + num(failed7) + " failed") + '">' + (STATS ? area(pts, num, 96, COLOR[cls]) : '<div class="empty loading">Loading</div>') + '</div>' +
-        '<div class="mini four"><div><b>' + num(alv.length) + ' of ' + num(ws.length) + '</b>alive</div><div data-tip="' + esc(busyPct + "% of the last day with a lease, across " + alv.length + " alive worker(s) · " + busyW.length + " building now") + '"><b>' + busyPct + '%</b>busy 24h</div><div><b>' + num(done7) + '</b>done 7d</div><div><b>' + num(failed7) + '</b>failed 7d</div></div></div>';
+        '<div class="mini four"><div><b>' + num(k.alive) + ' of ' + num(k.registered) + '</b>alive</div><div data-tip="' + esc(busyPct + "% of the last day with a lease, across " + k.alive + " alive worker(s) · " + k.building + " building now") + '"><b>' + busyPct + '%</b>busy 24h</div><div><b>' + num(done7) + '</b>done 7d</div><div><b>' + num(failed7) + '</b>failed 7d</div></div></div>';
     };
     $("#kinds").innerHTML =
       card("project", "Project", kinds.project, "The pool's own jobs, on the host a maintainer keeps.") +
@@ -154,9 +155,10 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     id: "workers.tiles",
     page: "/workers",
     anchor: ['id="tiles"'],
-    script: ['"#tiles"', '"Alive"', '"Building now"', '"Load · 24 h"', '"Worker minutes · 7 d"', "m.jobs || m.actions"],
+    // The counts are the shell's (workerCounts over the listing), the same the Pool's and the People page's tiles say.
+    script: ['"#tiles"', "workerCounts(d.workers)", '"Alive"', "wc.alive", "wc.registered", "wc.byKind.project.alive", '"Building now"', "wc.building", '"Load · 24 h"', '"Worker minutes · 7 d"', "m.jobs || m.actions"],
     reads: [
-      { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.alive", "workers.0.current_task", "workers.0.side"] },
+      { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.alive", "workers.0.ready", "workers.0.current_task", "workers.0.revoked_at", "workers.0.side", "workers.0.labels"] },
       { path: "/api/v1/stats", fields: ["series.workers_daily", "metrics.jobs.minutes"] },
     ],
     visible: EVERYONE,
@@ -165,9 +167,9 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     id: "workers.kind-cards",
     page: "/workers",
     anchor: ['id="kinds"'],
-    script: ['"#kinds"', "POOL_KINDS", 'class="kchart"', 'class="mini four"', "builds_daily"],
+    script: ['"#kinds"', "POOL_KINDS", 'class="kchart"', 'class="mini four"', "builds_daily", "wc.byKind[cls]", "k.registered", "k.alive", "k.building"],
     reads: [
-      { path: "/api/v1/factory?limit=10", fields: ["workers.0.side", "workers.0.labels", "workers.0.alive", "workers.0.current_task"] },
+      { path: "/api/v1/factory?limit=10", fields: ["workers.0.side", "workers.0.labels", "workers.0.alive", "workers.0.ready", "workers.0.current_task", "workers.0.revoked_at"] },
       {
         path: "/api/v1/stats",
         fields: [

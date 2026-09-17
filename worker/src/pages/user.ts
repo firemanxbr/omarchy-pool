@@ -207,8 +207,10 @@ const SCRIPT = String.raw`
         var acts = registered.indexOf(a) >= 0 ? buildBtn(name, a, running ? "a build is running" : pkg.blocked_at ? blockedWhy(name, pkg) : null, queued ? "name a worker, or take it out of the queue" : "this architecture only") : '';
         return archPanel(a, mine, nextStep(st, mine[0]), acts);
       }).join("");
+      // The package's page on the most stable ring that serves it and that ring's architecture — the story's rings put in the server's order (RINGS_TEXT), the shell's one address; a package in no ring yet opens on the shell's default.
+      var served = (st.rings || []).slice().sort(function (x, y) { return Object.keys(RINGS_TEXT).indexOf(x.ring) - Object.keys(RINGS_TEXT).indexOf(y.ring); })[0];
       return head + requestBlock(st.request, may("request"), name, renewable, whyNot, reason("request")) + panels
-        + '<p class="sub" style="margin:4px 0 0"><a href="/package/' + encodeURIComponent(name) + '?ring=lab">The package\'s page →</a>' + (st.rings && st.rings.length ? ' · in <b>' + esc(st.rings.map(function (r) { return r.ring + " (" + r.arch + ")"; }).join(", ")) + '</b>' : '') + '</p>';
+        + '<p class="sub" style="margin:4px 0 0"><a href="' + pkgHref(name, served && served.ring, served && served.arch) + '">The package\'s page →</a>' + (st.rings && st.rings.length ? ' · in <b>' + esc(st.rings.map(function (r) { return r.ring + " (" + r.arch + ")"; }).join(", ")) + '</b>' : '') + '</p>';
   }
   // The package in one line: what each architecture waits for, and the request when it is not what the form asks today.
   function summary(st, arches) {
@@ -285,12 +287,13 @@ const SCRIPT = String.raw`
       (d.blocked ? pillHtml("error", "blocked: " + (d.blocked.reason || ""), "by " + (d.blocked.by || "") + ", " + (d.blocked.at || "")) : '') +
       (d.maintainer_since ? pillHtml("none", "since " + ago(d.maintainer_since), "listed in factory/MAINTAINERS.toml") : '') +
       '<span>since ' + esc(String(d.since).slice(0, 10)) + '</span><span class="dim">·</span><span>last seen ' + ago(d.last_seen) + '</span><span class="dim">·</span><a href="' + esc(d.github) + '" style="color:var(--muted);text-decoration:none">github.com/' + esc(d.login) + ' ↗</a>';
-    var c = d.build_counts;
+    // The workers counted as every tile counts them (the shell's workerCounts): registered is not revoked, alive is a heartbeat in ten minutes.
+    var c = d.build_counts, wc = workerCounts(d.workers);
     setTiles("#tiles", [
       ["Packages", num(d.packages.length), "registered under this name"],
       ["Builds", num(c.total), num(c.staged) + " staged · " + num(c.published) + " published · " + num(c.failed) + " failed"],
       ["Approvals", num(d.approvals.length), d.role === "maintainer" ? num(d.approved_packages.length) + " package(s) let into the pool" : "not a maintainer"],
-      ["Workers", num(d.workers.filter(function (w) { return !w.revoked_at; }).length), num(d.workers.filter(function (w) { return w.alive; }).length) + " alive now"]
+      ["Workers", num(wc.registered), num(wc.alive) + " alive now"]
     ]);
     // Sixteen weeks of what the record holds under this name: builds, decisions, packages touched.
     var weeks = []; for (var i = 15; i >= 0; i--) weeks.push(Date.now() - i * 7 * 86400000);
@@ -319,22 +322,23 @@ const SCRIPT = String.raw`
       var arches = []; try { arches = JSON.parse(p.arches || "[]"); } catch (e) {}
       var per = arches.map(function (a) { var b = byPkg[p.name + "/" + a]; return '<span class="arch-st" title="' + esc(a + ": " + (b ? b.status + (b.status === "leased" ? " (building)" : "") + " · #" + b.id : "no build yet")) + '">' + esc(a) + ' ' + (b ? taskPill(b.status) : pillHtml("none", "—")) + '</span>'; }).join("");
       var open = OPEN[p.name];
-      return '<tr class="pkrow" data-pkg="' + esc(p.name) + '"><td><button type="button" class="expand" data-expand="' + esc(p.name) + '" title="' + (open ? "close" : "the story, and what comes next") + '">' + (open ? "▾" : "▸") + '</button></td><td><a href="/package/' + encodeURIComponent(p.name) + '?ring=lab"><b>' + esc(p.name) + '</b></a></td><td>' + (p.category ? pillHtml("none", p.category) : '<span class="dim">—</span>') + '</td><td>' + (p.url ? '<a href="' + esc(p.url) + '">' + esc(p.url.replace(/^https?:\/\/(www\.)?(github\.com\/)?/, "")) + '</a>' : '<span class="dim">—</span>') + '</td><td class="arches">' + per + '</td><td>' + taskPill(p.status) + '</td><td class="muted stands" title="' + esc(p.detail || "") + '">' + esc(p.detail || "") + '</td></tr>'
+      // The name is the package's page (the shell's one address) on the first architecture the request names: a registration says no ring, so the shell's default asks for the most stable, and the server shows the most stable ring that serves it.
+      return '<tr class="pkrow" data-pkg="' + esc(p.name) + '"><td><button type="button" class="expand" data-expand="' + esc(p.name) + '" title="' + (open ? "close" : "the story, and what comes next") + '">' + (open ? "▾" : "▸") + '</button></td><td><a href="' + pkgHref(p.name, null, arches[0]) + '"><b>' + esc(p.name) + '</b></a></td><td>' + (p.category ? pillHtml("none", p.category) : '<span class="dim">—</span>') + '</td><td>' + (p.url ? '<a href="' + esc(p.url) + '">' + esc(p.url.replace(/^https?:\/\/(www\.)?(github\.com\/)?/, "")) + '</a>' : '<span class="dim">—</span>') + '</td><td class="arches">' + per + '</td><td>' + taskPill(p.status) + '</td><td class="muted stands" title="' + esc(p.detail || "") + '">' + esc(p.detail || "") + '</td></tr>'
         + (open ? '<tr class="pkopen" data-pkg="' + esc(p.name) + '"><td colspan="7"><div class="pkstory" data-story="' + esc(p.name) + '">' + (STORIES[p.name] ? storyHtml(p.name, STORIES[p.name]) : '<div class="muted">loading the story…</div>') + '</div></td></tr>' : '');
     }, { empty: "no package registered", after: function () { Object.keys(OPEN).forEach(function (n) { if (OPEN[n]) story(n); }); }, text: function (p) { return [p.name, p.category, p.status, p.detail].join(" "); } });
-    // ---- builds: the number is the build's page; the worker that held it; the evidence, public, for whoever reads
+    // ---- builds: the number is the build's page; the package's name its page on the build's architecture (a build says no ring: the shell's default); the worker that held it; the evidence, public, for whoever reads
     pager("#builds", d.builds, function (t) {
-      return '<tr><td><a href="/build/' + t.id + '" title="the build, whole">' + t.id + '</a></td><td><a href="/package/' + encodeURIComponent(t.name) + '?ring=lab&arch=' + esc(t.arch) + '"><b>' + esc(t.name) + '</b></a>' + (t.version ? ' <span class="mono muted">' + esc(t.version) + '</span>' : '') + '</td><td>' + esc(t.arch) + '</td><td>' + taskPill(t.status) + (t.queue ? ' <span class="dim" title="in the shared queue for ' + esc(t.arch) + '">' + t.queue.position + ' of ' + t.queue.total + '</span>' : '') + '</td><td>' + esc(t.reason || "") + (t.trust === "project" ? ' ' + pillHtml("ok", "the project", "the project's own build, from a contributor's evidence") : '') + '</td><td>' + (t.lease_owner ? wtId({ id: t.lease_owner, owner: t.lease_owner.indexOf(login + "-") === 0 ? login : (t.lease_owner.split("-")[0] || null) }) : t.pinned_to && t.status === "queued" ? '<span class="muted" title="asked for this worker only">waiting for ' + esc(wtShort(t.pinned_to)) + '</span>' : '<span class="muted">—</span>') + '</td><td>' + (dur(t.duration_ms) || "—") + '</td><td class="when">' + ago(t.created_at) + '</td><td>' + evidence(t) + '</td></tr>';
+      return '<tr><td><a href="/build/' + t.id + '" title="the build, whole">' + t.id + '</a></td><td><a href="' + pkgHref(t.name, null, t.arch) + '"><b>' + esc(t.name) + '</b></a>' + (t.version ? ' <span class="mono muted">' + esc(t.version) + '</span>' : '') + '</td><td>' + esc(t.arch) + '</td><td>' + taskPill(t.status) + (t.queue ? ' <span class="dim" title="in the shared queue for ' + esc(t.arch) + '">' + t.queue.position + ' of ' + t.queue.total + '</span>' : '') + '</td><td>' + esc(t.reason || "") + (t.trust === "project" ? ' ' + pillHtml("ok", "the project", "the project's own build, from a contributor's evidence") : '') + '</td><td>' + (t.lease_owner ? wtId({ id: t.lease_owner, owner: t.lease_owner.indexOf(login + "-") === 0 ? login : (t.lease_owner.split("-")[0] || null) }) : t.pinned_to && t.status === "queued" ? '<span class="muted" title="asked for this worker only">waiting for ' + esc(wtShort(t.pinned_to)) + '</span>' : '<span class="muted">—</span>') + '</td><td>' + (dur(t.duration_ms) || "—") + '</td><td class="when">' + ago(t.created_at) + '</td><td>' + evidence(t) + '</td></tr>';
     }, { empty: "nothing built yet", text: function (t) { return [t.id, t.name, t.version, t.arch, t.status, t.reason, t.lease_owner].join(" "); } });
     // ---- approvals: last, with the build behind each
     if (d.approvals.length || d.role === "maintainer") {
       $("#approvals-section").hidden = false;
-      // A standing approval is a package in the pool — its rings say where. Withdraw is on every row for whoever looks: live for a maintainer where an approval stands (it leaves every ring, another maintainer decides), grey with why not — nothing standing on the row, or the role, the server's word.
+      // A standing approval — the row's own standing, the server's word (approved, not withdrawn) — is a package in the pool: its rings say where, from the lab up, and the name opens the package on the most stable of them. Withdraw is on every row for whoever looks: live for a maintainer where an approval stands (it leaves every ring, another maintainer decides), grey with why not — nothing standing on the row, or the role, the server's word.
       pager("#approvals", d.approvals, function (a) {
-        var standing = a.decision === "approved" && !a.withdrawn_at;
+        var standing = a.standing;
         var where = standing ? (a.rings && a.rings.length ? a.rings.map(function (r) { return pillHtml(r === "stable" ? "ok" : r === "rc" ? "blue" : r === "edge" ? "lilac" : "warn", r); }).join(" ") : '<span class="muted" title="approved, not served: the publish job did not run, or a later release dropped it">not served</span>') : '<span class="muted">—</span>';
         var act = ' ' + withdrawBtn(a, standing);
-        return '<tr><td class="when">' + ago(a.created_at) + '</td><td><a href="/package/' + encodeURIComponent(a.name) + '?ring=lab&arch=' + esc(a.arch) + '">' + esc(a.name) + '</a> <span class="mono muted">' + esc(a.version || "") + '</span> <a class="dim" href="/build/' + a.task_id + '">#' + a.task_id + '</a></td><td>' + esc(a.arch) + '</td><td>' + (a.withdrawn_at ? taskPill("withdrawn", "withdrawn " + ago(a.withdrawn_at) + " by " + a.withdrawn_by + ": " + (a.withdrawn_reason || "")) : taskPill(a.decision)) + '</td><td>' + where + act + '</td><td class="muted">' + esc(a.withdrawn_at ? (a.withdrawn_reason || "") : (a.note || "")) + '</td></tr>';
+        return '<tr><td class="when">' + ago(a.created_at) + '</td><td><a href="' + pkgHref(a.name, a.rings && a.rings[a.rings.length - 1], a.arch) + '">' + esc(a.name) + '</a> <span class="mono muted">' + esc(a.version || "") + '</span> <a class="dim" href="/build/' + a.task_id + '">#' + a.task_id + '</a></td><td>' + esc(a.arch) + '</td><td>' + (a.withdrawn_at ? taskPill("withdrawn", "withdrawn " + ago(a.withdrawn_at) + " by " + a.withdrawn_by + ": " + (a.withdrawn_reason || "")) : taskPill(a.decision)) + '</td><td>' + where + act + '</td><td class="muted">' + esc(a.withdrawn_at ? (a.withdrawn_reason || "") : (a.note || "")) + '</td></tr>';
       }, { empty: "no decision yet" });
     }
     renderWorkers();
@@ -521,10 +525,11 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
+      // The Workers tile counts as the shell counts (workerCounts): registered and alive, the listing's words.
       id: "user.tiles",
       page,
       anchor: ['id="tiles"'],
-      script: ['"#tiles"', "d.build_counts", "d.approved_packages.length", "w.revoked_at", "w.alive"],
+      script: ['"#tiles"', "d.build_counts", "d.approved_packages.length", "workerCounts(d.workers)", "wc.registered", "wc.alive"],
       reads: [{ path: profile, fields: ["packages", "build_counts.total", "build_counts.staged", "build_counts.published", "build_counts.failed", "approvals", "approved_packages", "workers", "workers.0.revoked_at", "workers.0.alive"] }],
       visible: EVERYONE,
     },
@@ -560,7 +565,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       id: "user.packages-table",
       page,
       anchor: ['id="pk-request"', 'data-href="/request"', `title="only ${F.owner} requests here"`, 'id="packages"'],
-      script: ['pager("#packages"', '"#pk-request"', 'href=\\"/request\\"', 'gate(REQUEST_LINK, may("request"), reason("request"))', "data-expand", 'JSON.parse(p.arches', "p.detail", 'byPkg[p.name + "/" + a]', "data-story"],
+      script: ['pager("#packages"', '"#pk-request"', 'href=\\"/request\\"', 'gate(REQUEST_LINK, may("request"), reason("request"))', "data-expand", 'JSON.parse(p.arches', "pkgHref(p.name, null, arches[0])", "p.detail", 'byPkg[p.name + "/" + a]', "data-story"],
       reads: [{ path: profile, fields: ["packages.0.name", "packages.0.category", "packages.0.url", "packages.0.arches", "packages.0.status", "packages.0.detail", "builds.0.name", "builds.0.arch", "builds.0.status", "builds.0.id"] }],
       visible: EVERYONE,
     },
@@ -604,18 +609,21 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       id: "user.story-next-step",
       page,
       anchor: ['id="packages"'],
-      script: ["function nextStep(", "cc.pinned_to", "cc.shared_after", "cc.queue", "audit.result.verdict", '"A request on the record"', "whereOptions(FACTORY.workers, arch, login, false)"],
+      script: ["function nextStep(", "cc.pinned_to", "cc.shared_after", "cc.queue", "audit.result.verdict", '"A request on the record"', "whereOptions(FACTORY.workers, arch, login, false)", "personLink(a.by)"],
       reads: [
         { path: story, fields: ["chains.0.contributor.status", "chains.0.contributor.pinned_to", "chains.0.contributor.shared_after", "chains.0.contributor.attempts", "chains.0.contributor.pkgbuild_ref", "chains.0.contributor.version", "chains.0.contributor.error", "chains.0.contributor.result.vet.verdict", "chains.0.audit", "chains.0.score.items", "request.complete", "request.version", "rings"] },
         { path: factory, fields: ["workers.0.id", "workers.0.alive", "workers.0.labels"] },
+        // The people it names — who decided, who withdrew — are the shell's, their role from the maintainer set it reads once per page.
+        { path: "/api/v1/factory/maintainers", fields: ["maintainers", "maintainers.0.login"] },
       ],
       visible: EVERYONE,
     },
     {
+      // The package's page on the most stable ring the story lists, the shell's one address.
       id: "user.story-footer",
       page,
       anchor: ['id="packages"'],
-      script: ['?ring=lab">The package', "st.rings.map"],
+      script: ["pkgHref(name, served && served.ring, served && served.arch)", "Object.keys(RINGS_TEXT).indexOf(x.ring)", "st.rings.map"],
       reads: [{ path: story, fields: ["rings"] }],
       visible: EVERYONE,
     },
@@ -640,7 +648,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       id: "user.builds-table",
       page,
       anchor: ['id="builds"', "<th>Evidence</th>"],
-      script: ['pager("#builds"', "t.lease_owner", "t.pinned_to", "dur(t.duration_ms)", "t.queue", '/artifacts/build.log">log', '/artifacts/PKGBUILD">PKGBUILD', "evidence(t)"],
+      script: ['pager("#builds"', "pkgHref(t.name, null, t.arch)", "t.lease_owner", "t.pinned_to", "dur(t.duration_ms)", "t.queue", '/artifacts/build.log">log', '/artifacts/PKGBUILD">PKGBUILD', "evidence(t)"],
       reads: [
         { path: profile, fields: ["builds.0.id", "builds.0.name", "builds.0.version", "builds.0.arch", "builds.0.status", "builds.0.reason", "builds.0.trust", "builds.0.lease_owner", "builds.0.pinned_to", "builds.0.duration_ms", "builds.0.created_at"] },
         { path: evidence(F.contributorTask, "build.log"), json: false },
@@ -710,12 +718,12 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // Shown on a maintainer's page; Withdraw is on every row for whoever looks — live for a maintainer where an approval stands, grey with why not otherwise — with its dialog.
+      // Shown on a maintainer's page; whether an approval stands is the row's own `standing` (the server's word, never decision alone); Withdraw is on every row for whoever looks — live for a maintainer where an approval stands, grey with why not otherwise — with its dialog; the name opens the package on the most stable ring the row lists.
       id: "user.approvals-table",
       page: `/user/${F.m2}`,
       anchor: ['id="approvals-section"', 'id="approvals"'],
-      script: ['"#approvals-section"', 'pager("#approvals"', 'a.decision === "approved"', "a.withdrawn_at", "a.rings", "withdrawBtn(a, standing)", 'may("withdraw") && standing', '"nothing standing to withdraw"', "data-withdraw", '"/tasks/" + wid + "/withdraw"'],
-      reads: [{ path: `/api/v1/users/${F.m2}`, fields: ["role", "approvals.0.task_id", "approvals.0.name", "approvals.0.arch", "approvals.0.version", "approvals.0.decision", "approvals.0.note", "approvals.0.created_at", "approvals.0.withdrawn_at", "approvals.0.rings", "approved_packages.0"] }],
+      script: ['"#approvals-section"', 'pager("#approvals"', "var standing = a.standing", "a.withdrawn_at", "a.rings", "pkgHref(a.name, a.rings && a.rings[a.rings.length - 1], a.arch)", "withdrawBtn(a, standing)", 'may("withdraw") && standing', '"nothing standing to withdraw"', "data-withdraw", '"/tasks/" + wid + "/withdraw"'],
+      reads: [{ path: `/api/v1/users/${F.m2}`, fields: ["role", "approvals.0.task_id", "approvals.0.name", "approvals.0.arch", "approvals.0.version", "approvals.0.decision", "approvals.0.standing", "approvals.0.note", "approvals.0.created_at", "approvals.0.withdrawn_at", "approvals.0.rings", "approved_packages.0"] }],
       // The fixture's one approval was taken back by the build page's manifest, which walks before this one: nothing stands to withdraw.
       acts: [{ method: "POST", path: `/api/v1/factory/tasks/${F.projectTask}/withdraw`, body: { note: "the source is not the upstream's" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 404 } }],
       visible: EVERYONE,

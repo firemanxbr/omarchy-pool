@@ -6,7 +6,12 @@
  * to stable while Review linked to the lab; a source late at six hours in
  * one table and nine in the headline. This file pins the server's one
  * answer to each, over the fixture (test/fixture.ts), so the pages have one
- * number to read and a page that computes its own fails by name.
+ * number to read and a page that computes its own fails by name. The last
+ * block reads the pages: the three tiles that say "waiting for review" read
+ * the one field, every package address is written by the shell's pkgHref
+ * and the lab chip is drawn from it, no page types the budget's lines or an
+ * hour of its own, and the Status page's pill and table are late by the one
+ * constant — the served script's functions run here over the server's rows.
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -15,7 +20,9 @@ import { RING_TEXT } from "../src/meta";
 import { waitsForMaintainer, stands } from "../src/routes/review";
 import { maintenanceOf } from "../src/routes/users";
 import { LATE_AFTER_HOURS } from "../src/routes/stats";
-import { seedDashboard, type Fixture } from "./fixture";
+import { allComponents } from "../src/pages/components";
+import { HELPERS } from "../src/pages/layout";
+import { scriptOf, seedDashboard, type Fixture } from "./fixture";
 
 let F: Fixture;
 
@@ -143,5 +150,106 @@ describe("the maintainer set, the late mark and the budget lines are the server'
     const none = await call("GET", "/cost?after=forgotten");
     expect(none.status).toBe(404);
     expect(none.json).toEqual({ error: "no estimate yet", lines_usd: lines });
+  });
+});
+
+async function page(path: string): Promise<string> {
+  const ctx = createExecutionContext();
+  const res = await worker.fetch(new Request(`http://pool.test${path}`), env, ctx);
+  await waitOnExecutionContext(ctx);
+  expect(res.status, path).toBe(200);
+  return res.text();
+}
+
+// A page's own statements: page() splices HELPERS whole, so what follows its last lines is the page's (as test/pages.test.ts reads it).
+const shellEnd = HELPERS.slice(-120);
+function ownScript(html: string): string {
+  const script = scriptOf(html), at = script.indexOf(shellEnd);
+  expect(at, "the shell is spliced whole").toBeGreaterThan(0);
+  return script.slice(at + shellEnd.length);
+}
+
+// A function of the served script, by name, as text: the proofs below run the shell's rule over the server's rows instead of reading the code and trusting it. The shell's functions are one line each.
+function served(script: string, name: string): string {
+  const m = new RegExp(`^  (?:function ${name}\\(|var ${name} = )[^\\n]*$`, "m").exec(script);
+  expect(m, `${name} is served`).not.toBeNull();
+  return m![0];
+}
+
+describe("the pages read the one answer instead of counting their own", () => {
+  // The doors that say how much waits for a maintainer: Review, the Pipeline and the Factory.
+  const TILES = { "/review": "review.tiles", "/pipeline": "pipeline.operations-tiles", "/factory": "factory.tiles" } as const;
+
+  it("the Review, Pipeline and Factory tiles say \"waiting for review\" from the review list's own `waiting` and `oldest_ms`, never a count of their own", async () => {
+    const components = allComponents(F);
+    for (const [path, id] of Object.entries(TILES)) {
+      const script = ownScript(await page(path));
+      // The tile's number is the field on the object the list answered, and its age the field beside it.
+      const tile = /"Waiting for review", num\((\w+(?:\.\w+)?)\.waiting\), \1\.oldest_ms/.exec(script);
+      expect(tile, `${path} reads waiting and oldest_ms from one answer`).not.toBeNull();
+      // Nothing on the page counts staged rows for that number.
+      expect(script, `${path} counts staged rows for the tile`).not.toMatch(/"Waiting for review", num\((?!\w+(?:\.\w+)?\.waiting\))/);
+      // The manifest says so: the tile's literal and the field, read from the list.
+      const c = components.find((x) => x.id === id);
+      expect(c?.script, id).toEqual(expect.arrayContaining(['"Waiting for review"', `${tile![1]}.waiting`, `${tile![1]}.oldest_ms`]));
+      expect(c?.reads?.some((r) => r.path === "/api/v1/factory/review" && r.fields?.includes("waiting") && r.fields?.includes("oldest_ms")), `${id} reads waiting from the list`).toBe(true);
+    }
+  });
+
+  it("every package address a page writes goes through pkgHref, and the page asked for the lab draws the lab chip beside the ring shown", async () => {
+    const written: string[] = [];
+    for (const path of ["/", "/factory", "/review", "/pipeline", "/packages", `/package/${F.pkg}`, `/build/${F.projectTask}`, `/user/${F.owner}`, "/people", "/workers", "/security", "/status", "/journal", "/request", "/diff"]) {
+      const script = ownScript(await page(path));
+      // Any string a page's own script starts with the family's prefix is an address written by hand — the shell's footer match on it is the shell's.
+      if (/["']\/package\//.test(script)) written.push(path);
+    }
+    expect(written, `a package address written by hand: ${written.join(", ")}`).toEqual([]);
+    // The page asked for the lab: its script keeps the ring (the lab is one of RINGS_TEXT, the server's order) and asks the API for it; the API shows stable, the most stable ring that has zlib; the chips are drawn from the served script — the lab's own address among them, the shown ring lit.
+    const html = await page(`/package/${F.pkg}?ring=lab`), script = scriptOf(html), own = ownScript(html);
+    expect(own).toContain("RINGS = Object.keys(RINGS_TEXT)");
+    expect(own).not.toMatch(/\["stable", "rc", "edge"\]/);
+    const d = (await call("GET", `/package/${F.pkg}?ring=lab`)).json;
+    expect(d).toMatchObject({ ring: "lab", shown_ring: "stable" });
+    const ringLine = /^  var ring = [^\n]*$/m.exec(own)![0], chipLine = /^    \$\("#pg-ring"\)\.innerHTML = [^\n]*$/m.exec(own)![0];
+    const draw = new Function("q", "d", "$", [served(script, "RINGS_TEXT"), served(script, "pkgHref"), "var RINGS = Object.keys(RINGS_TEXT);", ringLine, "var arch = 'x86_64';", chipLine, "return ring;"].join("\n"));
+    const el = { innerHTML: "" };
+    expect(draw(new URLSearchParams("?ring=lab"), d, () => el)).toBe("lab");
+    const chips = [...el.innerHTML.matchAll(/<a class="([^"]*)" href="([^"]*)"/g)].map((m) => [m[1], m[2]]);
+    expect(chips).toEqual(Object.keys(RING_TEXT).map((r) => [r === "stable" ? "on" : "", `/package/${F.pkg}?ring=${r}&arch=x86_64`]));
+  });
+
+  it("no page types the budget's lines or an hour of its own: the lines ride /cost, the hour is the shell's LATE_MS", async () => {
+    const typed: string[] = [];
+    for (const path of ["/", "/factory", "/review", "/pipeline", "/status", "/workers", "/people", "/security", "/journal"]) {
+      const script = ownScript(await page(path));
+      if (/US\$\s*(?:25|40|50)\b|\b83\.3\b|\b(?:warn|guard|cap)\b[^;\n]{0,24}\b(?:25|40|50)\b/.test(script)) typed.push(`${path} types a budget line`);
+      if (/\b6 \* 3600|\b21600\b|3600e3 \* 6\b|\b9 \* 3600/.test(script)) typed.push(`${path} types an hour`);
+    }
+    expect(typed, typed.join("\n")).toEqual([]);
+    // The Pipeline's budget panel fills its three slots from the answer, with and without an estimate.
+    const pipeline = ownScript(await page("/pipeline"));
+    for (const slot of ["cost-warn", "cost-guard", "cost-cap"]) expect(pipeline).toContain(`live("${slot}", num(usd.${slot.slice(5)}))`);
+    expect(HELPERS).toContain(`var LATE_MS = ${LATE_AFTER_HOURS} * 3600e3;`);
+  });
+
+  it("the Status page's pill and its sources table are late by the one constant: the served rule, run over the server's rows", async () => {
+    const html = await page("/status"), script = scriptOf(html), own = ownScript(html);
+    // The table's row and the sentence over it read the shell's; the page has no threshold and no isLate of its own.
+    expect(own).toContain("lateSync(c)");
+    expect(own).toContain('$("#late-after").textContent = Math.round(LATE_MS / 3600e3)');
+    expect(own).not.toMatch(/function isLate|var isLate|last_sync\) >/);
+    expect(html).toContain('older than <span id="late-after">…</span> hours');
+    // The core sync aged past the constant: the server marks the row, the shell's lateSync agrees with the mark and, the mark withheld, with the same rule over last_sync; problemsOf (the pipeline pill) names the count and the constant.
+    await env.DB.prepare("UPDATE events SET created_at = ? WHERE kind = 'sync' AND source = 'core'").bind(new Date(Date.now() - (LATE_AFTER_HOURS + 1) * 3600e3).toISOString()).run();
+    const stats = (await call("GET", "/stats?after=status-page")).json;
+    const rule = new Function("rows", [served(script, "LATE_MS"), served(script, "lateSync"), "return rows.map(lateSync);"].join("\n"));
+    const marked = stats.coverage.map((c: { late: boolean }) => c.late);
+    expect(marked.filter(Boolean).length).toBeGreaterThan(0);
+    expect(rule(stats.coverage)).toEqual(marked);
+    expect(rule(stats.coverage.map(({ late: _, ...c }: { late: boolean }) => c))).toEqual(marked);
+    const newest = /^  function newest\(list, kind\) \{[\s\S]*?\n  \}$/m.exec(script)![0], problemsOf = /^  function problemsOf\(d\) \{[\s\S]*?\n  \}$/m.exec(script)![0];
+    const pill = new Function("d", [served(script, "LATE_MS"), served(script, "lateSync"), "function ago() { return 'a while ago'; }", newest, problemsOf, "return problemsOf(d);"].join("\n"));
+    expect(pill(stats)).toContain(`${marked.filter(Boolean).length} source(s) not synced for ${LATE_AFTER_HOURS} h`);
+    expect(Math.round(new Function(served(script, "LATE_MS") + " return LATE_MS / 3600e3;")())).toBe(LATE_AFTER_HOURS);
   });
 });

@@ -35,7 +35,7 @@ const BODY = String.raw`
 
   <section>
     <h2>Sources</h2>
-    <p class="sub">Last sync of every upstream repository. A source is late when its last sync is older than six hours (a long import of one source makes the others wait their turn).</p>
+    <p class="sub">Last sync of every upstream repository. A source is late when its last sync is older than <span id="late-after">…</span> hours (a long import of one source makes the others wait their turn).</p>
     <div class="table-wrap"><table id="sources"><thead><tr><th>Source</th><th>Arch</th><th>Last sync</th><th>Result</th><th class="num">Upstream</th><th class="num">In edge</th><th class="num">Missing</th></tr></thead><tbody></tbody></table></div>
   </section>
 
@@ -72,6 +72,8 @@ const BODY = String.raw`
 
 const SCRIPT = String.raw`
   skeletonRows("#coverage", 9, 5); skeletonRows("#workflows", 7, 4); skeletonTiles("#systiles", 8);
+  // The hours a source may go without a sync before it is late: the shell's one number (LATE_MS), the one the pipeline pill counts with, so the sentence over the table and the pill never name two.
+  $("#late-after").textContent = Math.round(LATE_MS / 3600e3);
 __CHARTS__
   function renderSystem(d) {
     // Snapshots before v0.0.51 measured GitHub Actions ("actions"); now the pool's own jobs.
@@ -89,7 +91,8 @@ __CHARTS__
       ["Jobs running now", a ? num(a.running) : "—", a ? "pool jobs leased or queued" + (w ? " · " + num(w.alive) + " worker(s) alive, " + num(w.busy) + " busy" : "") : "no metrics snapshot yet"],
       ["Jobs, 7 days", a ? num(a.runs) : "—", a ? num(a.failures) + " failed · " + num(a.runs - a.failures - a.running) + " succeeded" : ""],
       ["Worker minutes, 7 days", a ? num(a.minutes) : "—", "on the project's workers, both architectures"],
-      ["Sources", synced + " / " + expected, lastSyncEv ? "last sync " + ago(lastSyncEv.created_at) + " · every 3 hours" : "no sync yet"],
+      // Every coverage row, per architecture, the factory's among them (it builds, it never syncs) — the Pool's tile counts sources by name and leaves those out, and says so too.
+      ["Sources synced", synced + " / " + expected, "per architecture, the factory's rows among them · " + (lastSyncEv ? "last sync " + ago(lastSyncEv.created_at) + " · every 3 hours" : "no sync yet")],
       ["Promotion, by evidence", "edge → rc: " + gateWord(gateRc), "rc → stable: " + gateWord(gateStable) + " · after every sync, then every 3 h; two green checks make stable"],
       ["Security data", sec.updated_at ? ago(sec.updated_at) : "never", num(sec.advisories) + " advisories · Arch + Debian trackers, KEV, EPSS · every 3 h" + (secEv && secEv.status !== "ok" ? " · last run " + secEv.status : "")],
       ["Stored once", bytes(pool.bytes), num(pool.objects) + " objects, one per sha256"],
@@ -184,9 +187,9 @@ __CHARTS__
     });
     $("#rings tbody").innerHTML = healthRows.join("") || '<tr><td colspan="7" class="muted">no rings yet</td></tr>';
 
+    // A row is late by the shell's one rule (lateSync: the server's own mark on the row, LATE_MS over last_sync otherwise) — the same rows the pipeline pill and the headline count.
     $("#sources tbody").innerHTML = (d.coverage || []).map(function (c) {
-      var isLate = c.last_sync && Date.now() - Date.parse(c.last_sync) > 6 * 3600e3;
-      return '<tr><td>' + esc(c.source) + '</td><td>' + esc(c.arch) + '</td><td class="when">' + (c.last_sync ? ago(c.last_sync) + (isLate ? ' ' + pillHtml("warn", "late") : '') : pillHtml("none", "never")) + '</td><td>' + (c.last_status ? pillHtml(c.last_status, c.last_status) : '—') + '</td><td class="num">' + (c.upstream_total == null ? "—" : num(c.upstream_total)) + '</td><td class="num">' + num(c.indexed) + '</td><td class="num">' + (c.missing == null ? "—" : num(c.missing)) + '</td></tr>';
+      return '<tr><td>' + esc(c.source) + '</td><td>' + esc(c.arch) + '</td><td class="when">' + (c.last_sync ? ago(c.last_sync) + (lateSync(c) ? ' ' + pillHtml("warn", "late") : '') : pillHtml("none", "never")) + '</td><td>' + (c.last_status ? pillHtml(c.last_status, c.last_status) : '—') + '</td><td class="num">' + (c.upstream_total == null ? "—" : num(c.upstream_total)) + '</td><td class="num">' + num(c.indexed) + '</td><td class="num">' + (c.missing == null ? "—" : num(c.missing)) + '</td></tr>';
     }).join("");
 
     var incidents = d.events.filter(function (e) { return e.kind === "rollback" || e.status === "error" || (e.kind === "gate" && e.payload && e.payload.verdict === "block"); });
@@ -249,7 +252,7 @@ export const STATUS_COMPONENTS = (_F: Fixture): Component[] => [
     page: "/status",
     anchor: ["<h1>Is it up, is it keeping up, is every ring healthy</h1>", 'id="headline"'],
     script: ['"#headline"', "problemsOf(d)", "Pipeline keeping up.", "liveStats(render, 60000)"],
-    reads: [{ path: "/api/v1/stats", fields: ["latest", "latest.0.kind", "latest.0.status", "latest.0.created_at", "latest.0.ring", "latest.0.source", "coverage.0.last_sync"] }],
+    reads: [{ path: "/api/v1/stats", fields: ["latest", "latest.0.kind", "latest.0.status", "latest.0.created_at", "latest.0.ring", "latest.0.source", "coverage.0.last_sync", "coverage.0.late"] }],
     visible: EVERYONE,
   },
   {
@@ -265,7 +268,7 @@ export const STATUS_COMPONENTS = (_F: Fixture): Component[] => [
     page: "/status",
     anchor: ['id="pipeline-state"'],
     script: ['"#pipeline-state"', "pipelineFrom(d)"],
-    reads: [{ path: "/api/v1/stats", fields: ["latest.0.kind", "latest.0.status", "latest.0.created_at", "coverage.0.last_sync"] }],
+    reads: [{ path: "/api/v1/stats", fields: ["latest.0.kind", "latest.0.status", "latest.0.created_at", "coverage.0.last_sync", "coverage.0.late"] }],
     visible: EVERYONE,
   },
   {
@@ -296,9 +299,10 @@ export const STATUS_COMPONENTS = (_F: Fixture): Component[] => [
   {
     id: "status.sources-table",
     page: "/status",
-    anchor: ['id="sources"', "<th>Last sync</th>", "<th>Result</th>"],
-    script: ['"#sources tbody"', "c.last_sync", "isLate", 'pillHtml("warn", "late")'],
-    reads: [{ path: "/api/v1/stats", fields: ["coverage", "coverage.0.source", "coverage.0.arch", "coverage.0.last_sync", "coverage.0.last_status", "coverage.0.upstream_total", "coverage.0.indexed", "coverage.0.missing"] }],
+    // Late is the shell's one rule (lateSync over the server's mark, LATE_MS otherwise): the sentence over the table names the shell's number, the row wears the pill by it.
+    anchor: ['id="sources"', 'id="late-after"', "<th>Last sync</th>", "<th>Result</th>"],
+    script: ['"#late-after"', "Math.round(LATE_MS / 3600e3)", '"#sources tbody"', "c.last_sync", "lateSync(c)", 'pillHtml("warn", "late")'],
+    reads: [{ path: "/api/v1/stats", fields: ["coverage", "coverage.0.source", "coverage.0.arch", "coverage.0.last_sync", "coverage.0.late", "coverage.0.last_status", "coverage.0.upstream_total", "coverage.0.indexed", "coverage.0.missing"] }],
     visible: EVERYONE,
   },
   {
@@ -340,7 +344,7 @@ export const STATUS_COMPONENTS = (_F: Fixture): Component[] => [
     id: "status.system-tiles",
     page: "/status",
     anchor: ['id="systiles"'],
-    script: ['setTiles("#systiles"', "m.jobs || m.actions", '"Jobs running now"', '"Promotion, by evidence"', 'latest(d.latest, "gate", "rc", "edge")', "pool.referenced_by_any_release", "pool.reclaimable", "sec.updated_at"],
+    script: ['setTiles("#systiles"', "m.jobs || m.actions", '"Jobs running now"', '"Sources synced"', '"per architecture, the factory\'s rows among them · "', '"Promotion, by evidence"', 'latest(d.latest, "gate", "rc", "edge")', "pool.referenced_by_any_release", "pool.reclaimable", "sec.updated_at"],
     reads: [
       {
         path: "/api/v1/stats",

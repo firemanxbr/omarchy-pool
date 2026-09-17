@@ -85,14 +85,16 @@ const SCRIPT = String.raw`
     document.title = (isBuild ? t.name + " " + (t.version || "") + " · build #" + t.id : t.kind + " #" + t.id) + " · omarchy-pool";
     $("#crumb").textContent = (isBuild ? t.name + " " : t.kind + " ") + "#" + t.id;
     var sc = T.score;
-    $("#title").innerHTML = isBuild ? '<a href="/package/' + encodeURIComponent(t.name) + '?ring=' + (T.rings[0] || "lab") + '&arch=' + esc(t.arch) + '" title="the package, as Packages shows it — with where it came from">' + esc(t.name) + '</a> <span class="mono muted" style="font-size:.7em">' + esc(t.version || "") + '</span>' : esc(t.kind) + ' <span class="mono muted" style="font-size:.7em">#' + t.id + '</span>';
+    // The package's one address (the shell's pkgHref), on the most stable ring that serves this build's package — T.rings is the server's list from the lab up, so its last is what users get, the lab alone when the project's build is only tried there; the timeline's "the package →" is the same link, and a build in no ring yet falls to the shell's default.
+    $("#title").innerHTML = isBuild ? '<a href="' + pkgHref(t.name, T.rings[T.rings.length - 1], t.arch) + '" title="the package, as Packages shows it — with where it came from">' + esc(t.name) + '</a> <span class="mono muted" style="font-size:.7em">' + esc(t.version || "") + '</span>' : esc(t.kind) + ' <span class="mono muted" style="font-size:.7em">#' + t.id + '</span>';
     $("#badges").innerHTML = pillHtml("none", t.arch) + taskPill(t.status) + (isBuild ? pillHtml(project ? "ok" : "lilac", project ? "the project" : "evidence", project ? "built by the project on a trusted worker, from a contributor's evidence" : "a contributor's build: evidence for a maintainer, never what users get") : "")
       + (isBuild && sc ? (sc.ready ? pillHtml("ok", "ready for a maintainer", "the contributor's half is complete: a build that passed the gate, audited") : t.status === "staged" || t.status === "leased" || t.status === "queued" ? pillHtml("warn", "not ready", "the contributor's half is not complete yet") : "") : "");
-    var built = T.worker ? (T.worker.owner ? T.worker.owner + "'s worker " : "worker ") + T.worker.id : (t.lease_owner || (t.finished_at ? "a worker the record no longer names" : "no worker yet"));
+    // The worker as every table names it — the shell's wtId, its owner the shell's person — so the lede and the kv below read the same machine; a lease the record no longer names stays the words it was.
+    var built = T.worker ? (T.worker.owner ? personLink(T.worker.owner) + "'s worker " : "worker ") + wtId(T.worker) : esc(t.lease_owner || (t.finished_at ? "a worker the record no longer names" : "no worker yet"));
     var vet = t.result && t.result.vet, audit = T.audit[0], trial = T.trial[0], a = T.approval && !T.approval.withdrawn_at ? T.approval : null, wd = T.approval && T.approval.withdrawn_at ? T.approval : null;
     $("#lede").innerHTML = (isBuild
-      ? (project ? 'The project built <b>' + esc(t.name) + '</b> ' + esc(t.version || '') + ' for ' + esc(t.arch) + (T.from ? ' from the evidence in <a href="/build/' + T.from.id + '">#' + T.from.id + '</a> (' + personLink(T.from.owner) + '\'s build)' : '') : personLink(t.owner) + ' built <b>' + esc(t.name) + '</b> ' + esc(t.version || '') + ' for ' + esc(t.arch) + ' on ' + esc(built))
-      : 'A pool job: <b>' + esc(t.kind) + '</b>' + (p && p.from ? ' ' + esc(p.from) + ' → ' + esc(p.to) : '') + ', on ' + esc(built))
+      ? (project ? 'The project built <b>' + esc(t.name) + '</b> ' + esc(t.version || '') + ' for ' + esc(t.arch) + (T.from ? ' from the evidence in <a href="/build/' + T.from.id + '">#' + T.from.id + '</a> (' + personLink(T.from.owner) + '\'s build)' : '') : personLink(t.owner) + ' built <b>' + esc(t.name) + '</b> ' + esc(t.version || '') + ' for ' + esc(t.arch) + ' on ' + built)
+      : 'A pool job: <b>' + esc(t.kind) + '</b>' + (p && p.from ? ' ' + esc(p.from) + ' → ' + esc(p.to) : '') + ', on ' + built)
       + ' · ' + (t.status === "staged" ? (a ? 'decided' : wd ? 'the approval was withdrawn — waiting for another maintainer' : 'waiting for a maintainer') : t.status === "leased" ? 'building now' : t.status === "queued" ? 'queued' : t.status) + (t.finished_at ? ', ' + ago(t.finished_at) : '') + '.';
     if (isBuild) setTiles("#tiles", [
       ["Gate", vet ? (vet.verdict === "pass" ? "pass" : "fail") : "—", vet ? (vet.fails ? vet.fails + " failing" : (vet.warnings ? vet.warnings + " warning" + (vet.warnings === 1 ? "" : "s") : "clean")) : "built before the gate", vet ? (vet.verdict === "pass" ? "ok" : "bad") : ""],
@@ -159,7 +161,7 @@ const SCRIPT = String.raw`
     if (a) add(a.withdrawn_at ? "dim" : a.decision === "approved" ? "ok" : "error", a.decision === "approved" ? "Approved" : "Rejected", 'by ' + personLink(a.by) + (a.note ? ' — ' + esc(a.note) : '') + (a.rebuild_task && a.rebuild_task !== t.id ? ' · the project\'s build <a href="/build/' + a.rebuild_task + '">#' + a.rebuild_task + '</a> ' + esc(a.rebuild_status || '') : ''), a.created_at);
     if (a && a.withdrawn_at) add("warn", "Approval withdrawn", 'by ' + personLink(a.withdrawn_by) + ' — ' + esc(a.withdrawn_reason || '') + ' · the package left the rings; another maintainer decides', a.withdrawn_at);
     T.publish.slice().reverse().forEach(function (b) { add(b.status === "done" ? "ok" : b.status === "failed" ? "error" : "blue", "Published " + (b.status === "done" ? "" : b.status), '<a href="/build/' + b.id + '">#' + b.id + '</a> — into the pool, signed' + (b.error ? ' — ' + esc(b.error) : ''), b.finished_at || b.started_at); });
-    if (T.rings.length) add("ok", "In the rings", T.rings.join(" · ") + ' — <a href="/package/' + encodeURIComponent(t.name) + '?ring=' + T.rings[T.rings.length - 1] + '&arch=' + t.arch + '">the package →</a>', null);
+    if (T.rings.length) add("ok", "In the rings", T.rings.join(" · ") + ' — <a href="' + pkgHref(t.name, T.rings[T.rings.length - 1], t.arch) + '">the package →</a>', null);
     $("#timeline").innerHTML = steps.map(function (s) { return '<li><i class="dot ' + s.cls + '"></i><div><b>' + s.title + '</b> <span class="d">' + s.detail + '</span></div>' + (s.at ? when(s.at) : '<span class="when">now</span>') + '</li>'; }).join("");
   }
 
@@ -286,10 +288,11 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
+      // The package's link is the shell's one address, on the most stable ring the server lists for it.
       id: "build.title",
       page,
       anchor: ['id="title"'],
-      script: ['"#title"', "document.title", '<a href="/package/', "T.rings[0]"],
+      script: ['"#title"', "document.title", "pkgHref(t.name, T.rings[T.rings.length - 1], t.arch)"],
       reads: [{ path: task, fields: ["task.kind", "task.name", "task.version", "task.id", "task.arch", "rings"] }],
       visible: EVERYONE,
     },
@@ -302,15 +305,17 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
+      // The worker is the shell's wtId, the people the shell's personLink — the role from the maintainer set the shell reads once per page.
       id: "build.lede",
       page,
       anchor: ['id="lede"'],
-      script: ['"#lede"', "T.worker.owner", "T.from.owner", "T.approval.withdrawn_at", "t.lease_owner"],
+      script: ['"#lede"', "personLink(T.worker.owner)", "wtId(T.worker)", "T.from.owner", "T.approval.withdrawn_at", "t.lease_owner"],
       reads: [
         {
           path: task,
           fields: ["task.kind", "task.trust", "task.name", "task.version", "task.arch", "task.owner", "task.status", "task.finished_at", "task.lease_owner", "task.params", "worker.id", "worker.owner", "from.id", "from.owner", "approval.decision", "approval.withdrawn_at"],
         },
+        { path: "/api/v1/factory/maintainers", fields: ["maintainers", "maintainers.0.login"] },
       ],
       visible: EVERYONE,
     },
@@ -414,7 +419,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       script: [
         '"#timeline"', "T.package.request_id", "p.review !== undefined", "p.task !== undefined", "t.pkgbuild_ref",
         "T.audit.slice().reverse()", "T.trial.slice().reverse()", "T.project_builds.slice().reverse()", "T.publish.slice().reverse()",
-        "a.rebuild_task", "a.withdrawn_reason", "vet.warned", "vet.failed",
+        "a.rebuild_task", "a.withdrawn_reason", "vet.warned", "vet.failed", "pkgHref(t.name, T.rings[T.rings.length - 1], t.arch)",
       ],
       reads: [
         {

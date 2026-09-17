@@ -283,11 +283,17 @@ describe("dashboard pages", () => {
     expect(problems, problems.join("\n")).toEqual([]);
   });
 
-  // No hidden pages: every page index.ts serves as HTML is the header's, the footer's, or one hop from a page that is — a link in the served HTML, not in a script. The routed pages are read from the router's source (a fixed route is `path === "/x"` answered with html(); a page with a parameter — a build, a person, a package — is the fixture's example of it), so a page added without a way in fails here by its address. A page with a parameter is named by a row drawn from data, so its way in is the script of the listing that writes its address (`href="/build/`); that page must itself be in the frame. The redirect aliases are not pages: asserted apart as 301/302 to a routed page.
+  // No hidden pages: every page index.ts serves as HTML is the header's, the footer's, or one hop from a page that is — a link in the served HTML, not in a script. The routed pages are read from the router's source (a fixed route is `path === "/x"` answered with html(); a page with a parameter — a build, a person, a package — is the fixture's example of it), so a page added without a way in fails here by its address. A page with a parameter is named by a row drawn from data, so its way in is the script of the listing that writes its address — `href="/build/` by hand, or the shell's one renderer of that address called from the page's own script: pkgHref() for a package, personLink() and the avatars for a person; that page must itself be in the frame. The redirect aliases are not pages: asserted apart as 301/302 to a routed page.
   it("reaches every routed page from the header or the footer in at most one hop, and names the shortest way", async () => {
     const fixed = [...routerSource.matchAll(/path === "(\/[^"]*)"[^\n]*return html\(/g)].map((m) => m[1]);
     // The chapters written in markdown are one route (mdChapterAt); the fixture's examples of the parametric pages stand for their kind.
     const families: Record<string, string> = { "/build/": `/build/${F.projectTask}`, "/user/": `/user/${F.owner}`, "/package/": `/package/${F.pkg}` };
+    // What writes a family's address in a page's own script: a hand-written href, or the shell's renderer of it — a package's page has one address (pkgHref), a person one renderer (personLink, personChip, avatar, avatarIcon, and the worker row's owner through wtPerson).
+    const writes: Record<string, RegExp> = {
+      "/build/": /href=\\?["']\/build\//,
+      "/user/": /href=\\?["']\/user\/|\b(?:personLink|personChip|avatar|avatarIcon|wtPerson|workerRow)\(/,
+      "/package/": /\bpkgHref\(/,
+    };
     const routed = new Set<string>([...fixed, ...PAGES, ...Object.values(families)]);
     for (const p of fixed) expect(PAGES, `${p} is routed but not in PAGES — the served-frame rules would not read it`).toContain(p);
     const route = (href: string): string | null => {
@@ -309,7 +315,7 @@ describe("dashboard pages", () => {
       const html = await (await get(p)).text();
       const body = html.replace(/<script[\s\S]*?<\/script>/g, "").replace(/<header>[\s\S]*?<\/header>/, "").replace(/<footer>[\s\S]*?<\/footer>/, "");
       for (const m of body.matchAll(/(?:data-)?href="(\/[^"\/][^"]*)"/g)) { const to = route(m[1]); if (to && !via.has(to)) via.set(to, p); }
-      for (const [prefix, example] of Object.entries(families)) if (!via.has(example) && new RegExp(`href=\\\\?["']${prefix}`).test(ownScript(html))) via.set(example, `${p} (a row it draws)`);
+      for (const [prefix, example] of Object.entries(families)) if (!via.has(example) && writes[prefix].test(ownScript(html))) via.set(example, `${p} (a row it draws)`);
     }
     const unreached = [...routed].filter((p) => !via.has(p)).sort();
     expect(unreached, `reached only by address: ${unreached.join(", ")}`).toEqual([]);
