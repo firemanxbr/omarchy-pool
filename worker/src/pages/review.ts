@@ -142,7 +142,8 @@ const SCRIPT = String.raw`
     }
   }
   // A staged build a maintainer can act on now: the project's (approve), or a contributor's the project is not already building — and not a build of a version already approved (nothing to decide: drop it).
-  function decidable(t) { var pb = t.project_build; return !t.already && (!t.score || t.score.ready || t.kind === "project") && (t.kind === "project" || !pb || pb.status === "failed"); }
+  // Ready or nothing to decide — the project's build included: its chain's contributor half (the request, the gate, the audit) must be complete before a maintainer's time is asked.
+  function decidable(t) { var pb = t.project_build; return !t.already && (!t.score || t.score.ready) && (t.kind === "project" || !pb || pb.status === "failed"); }
   function taskLink(id, text) { return '<a href="/build/' + id + '">' + (text || "#" + id) + '</a>'; }
 
   // ---- in review: the same table for everyone; the decision column for maintainers
@@ -191,12 +192,12 @@ const SCRIPT = String.raw`
   function klass(t) {
     var sc = t.score; if (!sc) return '<span class="muted">—</span>';
     var cls = { A: "ok", B: "ok", C: "warn", D: "error" }[sc.class] || "none";
-    return '<span class="pill ' + cls + '" title="' + esc(sc.points + "/100 today · with the maintainer's half green: " + sc.projected) + '">' + esc(sc.class) + '</span>' + (sc.class !== sc.projected ? ' <span class="dim" title="with the maintainer\'s half green">→ ' + esc(sc.projected) + '</span>' : '') + (!sc.ready && t.kind !== "project" ? ' <span class="pill none" title="a build that passed the gate, audited — then a maintainer">not ready</span>' : '');
+    return '<span class="pill ' + cls + '" title="' + esc(sc.points + "/100 today · with the maintainer's half green: " + sc.projected) + '">' + esc(sc.class) + '</span>' + (sc.class !== sc.projected ? ' <span class="dim" title="with the maintainer\'s half green">→ ' + esc(sc.projected) + '</span>' : '') + (!sc.ready ? ' <span class="pill none" title="a request as the form asks today, a build that passed the gate, audited — then a maintainer">not ready</span>' : '');
   }
   function decision(t) {
     if (!maint()) return '';
     if (t.already) return '<span class="muted" title="the same name, version and architecture were approved as build #' + t.already.task + '">already approved</span> <button type="button" data-reject="' + t.id + '" data-note="a build of a version already approved (#' + t.already.task + ')">Drop</button>';
-    if (t.score && !t.score.ready && t.kind !== "project") return '<span class="muted" title="the contributor\'s half is not complete">not ready — the contributor\'s turn</span>';
+    if (t.score && !t.score.ready) return '<span class="muted" title="the contributor\'s half is not complete: a request as the form asks, a build through the gate, an audit">not ready — the contributor\'s turn</span>';
     if (t.owner === login) return '<span class="muted" title="conflict of interest: nobody decides on their own package">yours — another maintainer</span>';
     var pb = t.project_build;
     if (t.kind === "project") return '<button type="button" data-approve="' + t.id + '">Approve</button> <button type="button" data-reject="' + t.id + '">Reject</button>';
@@ -228,18 +229,30 @@ const SCRIPT = String.raw`
   }
 
   // ---- the maintainer's tools: three decisions, the brake, the category
+  // The project's workers, for the choice of where the project builds (the native one, not the emulated one): read when the dialog opens.
+  function projectWorkers() { return fetch("/api/v1/factory?limit=10").then(function (r) { return r.json(); }).then(function (d) { return d.workers || []; }).catch(function () { return []; }); }
   function decide(id, what, given) {
-    var note = given || (what === "reject" ? prompt("Why? The contributor sees this.") : (prompt("Note for the record (optional)") || ""));
-    if (what === "reject" && !note) return;
-    busy(fetch(API + "/tasks/" + id + "/" + what, { method: "POST", headers: headers(), body: JSON.stringify({ note: note }) })).then(function (r) { return r.json(); }).then(function (d) {
-      alert(d.error ? d.error : what === "approve" ? "Approved — the project's build goes into edge (publish job #" + d.publish + ")." : what === "build" ? "The project is building it: task #" + d.task + " on a review worker, with the project's agent. It shows here when it is staged." : "Rejected");
-      load();
+    var row = STAGED.filter(function (t) { return t.id === Number(id); })[0];
+    var asked = given ? Promise.resolve(given) : what === "reject"
+      ? ask({ title: "Reject build #" + id, text: "The contributor reads the note and builds again. The rejection is on the record.", input: "required", placeholder: "what is wrong, in a line or two", confirm: "Reject", danger: true })
+      : what === "approve" ? ask({ title: "Approve build #" + id, text: "The project's build goes into edge, signed by the pool; the approval is on the record with your name.", input: "optional", confirm: "Approve" })
+      : projectWorkers().then(function (ws) { return ask({ title: "Have the project build #" + id + " again", text: "A trusted review worker builds the recipe again with the project's agent — the contributor's bytes are never used. The result shows here when it is staged.", select: whereOptions(ws, row ? row.arch : "x86_64", login, true), input: "optional", placeholder: "a hint for the project's agent (optional)", confirm: "Build by the project" }); });
+    asked.then(function (got) {
+      if (got === null) return;
+      var body = { note: got && typeof got === "object" ? got.note : got };
+      if (got && typeof got === "object" && got.pick) body.worker = got.pick;
+      busy(fetch(API + "/tasks/" + id + "/" + what, { method: "POST", headers: headers(), body: JSON.stringify(body) })).then(function (r) { return r.json(); }).then(function (d) {
+        if (d.error) toast(esc(d.error), "error");
+        else toast(what === "approve" ? "Approved — the project's build goes into edge (publish job <a href=\"/build/" + d.publish + "\">#" + d.publish + "</a>)." : what === "build" ? "The project is building it: task <a href=\"/build/" + d.task + "\">#" + d.task + "</a>, on " + (d.pinned_to ? esc(wtShort(d.pinned_to)) : "a review worker") + " with the project's agent." : given ? "Dropped." : "Rejected — the contributor sees the note.");
+        load();
+      });
     });
   }
   function block(kind, what, lift) {
-    var why = prompt(lift ? "Why lift it? The record keeps this." : "Why? The record and the contributor see this.");
-    if (!why || why.trim().length < 4) return;
-    busy(fetch(API + "/" + kind + "/" + encodeURIComponent(what) + "/" + (lift ? "unblock" : "block"), { method: "POST", headers: headers(), body: JSON.stringify({ reason: why }) })).then(function (r) { return r.json(); }).then(function (d) { if (d.error) alert(d.error); load(); });
+    ask(lift ? { title: "Lift the block on " + what, text: "The record keeps why.", input: "required", confirm: "Lift it" } : { title: "Block " + what, text: "The record and the contributor see this.", input: "required", confirm: "Block", danger: true }).then(function (why) {
+      if (why === null) return;
+      busy(fetch(API + "/" + kind + "/" + encodeURIComponent(what) + "/" + (lift ? "unblock" : "block"), { method: "POST", headers: headers(), body: JSON.stringify({ reason: why }) })).then(function (r) { return r.json(); }).then(function (d) { if (d.error) toast(esc(d.error), "error"); else toast(lift ? "Lifted." : "Blocked."); load(); });
+    });
   }
   function renderBlocks() {
     pager("#blocked-people", (BLOCKS.contributors || []), function (b) {
@@ -251,7 +264,7 @@ const SCRIPT = String.raw`
   }
   document.addEventListener("change", function (ev) {
     var s = ev.target.closest ? ev.target.closest("select[data-category]") : null; if (!s || !s.value) return;
-    busy(fetch(API + "/packages/" + encodeURIComponent(s.getAttribute("data-category")) + "/category", { method: "POST", headers: headers(), body: JSON.stringify({ category: s.value }) })).then(function (r) { return r.json(); }).then(function (d) { if (d.error) { alert(d.error); load(); } });
+    busy(fetch(API + "/packages/" + encodeURIComponent(s.getAttribute("data-category")) + "/category", { method: "POST", headers: headers(), body: JSON.stringify({ category: s.value }) })).then(function (r) { return r.json(); }).then(function (d) { if (d.error) { toast(esc(d.error), "error"); load(); } });
   });
   document.addEventListener("click", function (ev) {
     var u = ev.target.closest ? ev.target.closest("button[data-unblock]") : null;
@@ -265,10 +278,12 @@ const SCRIPT = String.raw`
     var what = $("#block-what").value.trim(), why = $("#block-why").value.trim();
     if (!what || why.length < 4) return;
     busy(fetch("/api/v1/users/" + encodeURIComponent(what))).then(function (r) { return r.status === 200 ? "contributors" : "packages"; }).then(function (kind) {
-      if (!confirm("Block " + (kind === "contributors" ? "contributor " : "package ") + what + "? Their builds stop and " + (kind === "contributors" ? "their packages leave" : "it leaves") + " the rings; another maintainer lifts it.")) return;
-      busy(fetch(API + "/" + kind + "/" + encodeURIComponent(what) + "/block", { method: "POST", headers: headers(), body: JSON.stringify({ reason: why }) })).then(function (r) { return r.json(); }).then(function (d) {
-        if (d.error) alert(d.error); else { $("#block-what").value = ""; $("#block-why").value = ""; }
-        load();
+      ask({ title: "Block " + (kind === "contributors" ? "contributor " : "package ") + what + "?", text: (kind === "contributors" ? "Their builds stop and their packages leave the rings" : "Its builds stop and it leaves the rings") + "; another maintainer lifts it. The reason: <i>" + esc(why) + "</i>", confirm: "Block", danger: true }).then(function (go) {
+        if (go === null) return;
+        busy(fetch(API + "/" + kind + "/" + encodeURIComponent(what) + "/block", { method: "POST", headers: headers(), body: JSON.stringify({ reason: why }) })).then(function (r) { return r.json(); }).then(function (d) {
+          if (d.error) toast(esc(d.error), "error"); else { toast("Blocked."); $("#block-what").value = ""; $("#block-why").value = ""; }
+          load();
+        });
       });
     });
   });

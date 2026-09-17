@@ -22,6 +22,7 @@ const BODY = String.raw`
   <section id="who-section" hidden>
     <div class="h2row"><h2>Who does what</h2><span class="hint">two people behind every package the factory ships</span></div>
     <p class="sub">The contributor brings the request and a build that passes the gate; only then is a maintainer's time well spent. The maintainer has the project build it again, reads the evidence, tries it and decides — never on their own package. Each half is fifty points; the class is the score today, the projection is with the maintainer's half green. <a href="/docs/what-we-test#the-score">The rules →</a></p>
+    <div id="ckreq"></div>
     <div class="cklist" id="cklist"></div>
   </section>
 
@@ -81,11 +82,11 @@ const SCRIPT = String.raw`
     $("#badges").innerHTML = pill("none", t.arch) + statusPill(t.status) + (isBuild ? pill(project ? "ok" : "lilac", project ? "the project" : "evidence", project ? "built by the project on a trusted worker, from a contributor's evidence" : "a contributor's build: evidence for a maintainer, never what users get") : "")
       + (isBuild && sc ? (sc.ready ? pill("ok", "ready for a maintainer", "the contributor's half is complete: a build that passed the gate, audited") : t.status === "staged" || t.status === "leased" || t.status === "queued" ? pill("warn", "not ready", "the contributor's half is not complete yet") : "") : "");
     var built = T.worker ? (T.worker.owner ? T.worker.owner + "'s worker " : "worker ") + T.worker.id : (t.lease_owner || (t.finished_at ? "a worker the record no longer names" : "no worker yet"));
+    var vet = t.result && t.result.vet, audit = T.audit[0], trial = T.trial[0], a = T.approval && !T.approval.withdrawn_at ? T.approval : null, wd = T.approval && T.approval.withdrawn_at ? T.approval : null;
     $("#lede").innerHTML = (isBuild
       ? (project ? 'The project built <b>' + esc(t.name) + '</b> ' + esc(t.version || '') + ' for ' + esc(t.arch) + (T.from ? ' from the evidence in <a href="/build/' + T.from.id + '">#' + T.from.id + '</a> (' + person(T.from.owner) + '\'s build)' : '') : person(t.owner) + ' built <b>' + esc(t.name) + '</b> ' + esc(t.version || '') + ' for ' + esc(t.arch) + ' on ' + esc(built))
       : 'A pool job: <b>' + esc(t.kind) + '</b>' + (p && p.from ? ' ' + esc(p.from) + ' → ' + esc(p.to) : '') + ', on ' + esc(built))
       + ' · ' + (t.status === "staged" ? (a ? 'decided' : wd ? 'the approval was withdrawn — waiting for another maintainer' : 'waiting for a maintainer') : t.status === "leased" ? 'building now' : t.status === "queued" ? 'queued' : t.status) + (t.finished_at ? ', ' + ago(t.finished_at) : '') + '.';
-    var vet = t.result && t.result.vet, audit = T.audit[0], trial = T.trial[0], a = T.approval && !T.approval.withdrawn_at ? T.approval : null, wd = T.approval && T.approval.withdrawn_at ? T.approval : null;
     if (isBuild) setTiles("#tiles", [
       ["Gate", vet ? (vet.verdict === "pass" ? "pass" : "fail") : "—", vet ? (vet.fails ? vet.fails + " failing" : (vet.warnings ? vet.warnings + " warning" + (vet.warnings === 1 ? "" : "s") : "clean")) : "built before the gate", vet ? (vet.verdict === "pass" ? "ok" : "bad") : ""],
       ["Audit", audit && audit.status === "done" && audit.result ? String(audit.result.verdict || "done") : audit ? audit.status : "—", audit && audit.result ? num((audit.result.findings || []).length) + " finding(s)" + (audit.result.model ? " · " + audit.result.model : "") : audit ? "the second agent" : project ? "audited on the contributor's build" : "no audit yet", audit && audit.result ? ({ ok: "ok", warn: "warn", block: "bad" }[audit.result.verdict] || "") : ""],
@@ -107,16 +108,12 @@ const SCRIPT = String.raw`
   function renderChecklist() {
     var sc = T.score, el = $("#who-section"); if (!sc) { el.hidden = true; return; }
     el.hidden = false;
-    var col = function (who, title, lede) {
-      var items = sc.items.filter(function (i) { return i.who === who; }), pts = items.reduce(function (n, i) { return n + i.points; }, 0);
-      return '<div class="ckcol ' + who + '"><h3>' + title + ' <span class="num">' + pts + '<span class="dim">/50</span></span></h3><p class="dim">' + lede + '</p><ul>' + items.map(function (i) {
-        var mark = i.state === "pending" ? '<i class="ck pending" title="still to come">○</i>' : i.points === i.max ? '<i class="ck ok">✓</i>' : i.points > 0 ? '<i class="ck part">✓</i>' : '<i class="ck bad">✗</i>';
-        return '<li>' + mark + '<div><b>' + esc(i.item) + '</b> <span class="dim">' + esc(i.note) + '</span></div><span class="num pts">' + i.points + '<span class="dim">/' + i.max + '</span></span></li>';
-      }).join("") + '</ul></div>';
-    };
     var c = T.chain || {};
-    $("#cklist").innerHTML = col("contributor", "The contributor's half", c.contributor ? person(c.contributor.owner) + (c.contributor.id !== T.task.id ? ' · build <a href="/build/' + c.contributor.id + '">#' + c.contributor.id + '</a>' : '') : 'nobody yet')
-      + col("maintainer", "The maintainer's half", c.project ? 'the project\'s build <a href="/build/' + c.project.id + '">#' + c.project.id + '</a>' + (c.approval ? ' · decided by ' + person(c.approval.by) : c.withdrawn ? ' · the approval by ' + person(c.withdrawn.by) + ' was withdrawn' : ' · not decided') : 'not started' + (sc.ready ? ' — ready to begin' : ''));
+    // The request the chain rests on, checked as the form checks it today; the contributor renews it from here when a line is not green.
+    var pkgSt = (T.package || {}).status;
+    $("#ckreq").innerHTML = T.request ? requestBlock(T.request, !!(login && T.task.owner === login), T.task.name, !!T.request.renewable, T.request.busy ? "renew it once build #" + T.request.busy + " is done" : pkgSt === "approved" || pkgSt === "published" ? "in the pool as it was; new releases come as bumps, built from the approved recipe" : "renew it once nothing of it is being built") : "";
+    $("#cklist").innerHTML = ckColumn(sc, "contributor", "The contributor's half", c.contributor ? person(c.contributor.owner) + (c.contributor.id !== T.task.id ? ' · build <a href="/build/' + c.contributor.id + '">#' + c.contributor.id + '</a>' : '') : 'nobody yet')
+      + ckColumn(sc, "maintainer", "The maintainer's half", c.project ? 'the project\'s build <a href="/build/' + c.project.id + '">#' + c.project.id + '</a>' + (c.approval ? ' · decided by ' + person(c.approval.by) : c.withdrawn ? ' · the approval by ' + person(c.withdrawn.by) + ' was withdrawn' : ' · not decided') : 'not started' + (sc.ready ? ' — ready to begin' : ''));
   }
 
   // ---- a maintainer decides here as on Review; the owner never on their own package
@@ -136,12 +133,23 @@ const SCRIPT = String.raw`
   }
   document.addEventListener("click", function (ev) {
     var b = ev.target.closest ? ev.target.closest("button[data-do]") : null; if (!b) return;
-    var what = b.getAttribute("data-do"), note = what === "reject" ? prompt("Why? The contributor sees this.") : what === "withdraw" ? prompt("Why take it back? The record keeps this; the package leaves every ring it is in.") : (prompt("Note for the record (optional)") || "");
-    if ((what === "reject" || what === "withdraw") && !note) return;
-    busy(fetch(API + "/tasks/" + ID + "/" + what, { method: "POST", headers: headers(), body: JSON.stringify({ note: note }) })).then(function (r) { return r.json(); }).then(function (d) {
-      var s = $("#state"); s.hidden = false;
-      s.innerHTML = d.error ? pill("error", "refused") + " " + esc(d.error) : pill(what === "withdraw" ? "warn" : "ok", what === "approve" ? "approved" : what === "build" ? "queued" : what === "withdraw" ? "withdrawn" : "rejected") + " " + (what === "approve" ? "the project's build goes into edge (publish job #" + d.publish + ")" : what === "build" ? "the project is building it: task <a href=\"/build/" + d.task + "\">#" + d.task + "</a>" : what === "withdraw" ? "the approval is void; the package leaves " + esc((d.rings || []).map(function (r) { return r.ring; }).join(", ") || "no ring") + " — another maintainer decides" : "the contributor sees the note");
-      load();
+    var what = b.getAttribute("data-do"), t = T.task, name = t.name + " " + (t.version || "");
+    // Where the project builds is the maintainer's call: the project's workers for this architecture (the native one, not the emulated one), read when the dialog opens.
+    var asked = what === "build"
+      ? fetch("/api/v1/factory?limit=10").then(function (r) { return r.json(); }).then(function (d) { return d.workers || []; }).catch(function () { return []; }).then(function (ws) { return ask({ title: "Have the project build " + name + " again", text: "A trusted review worker builds the recipe again with the project's agent — the contributor's bytes are never used.", select: whereOptions(ws, t.arch, login, true), input: "optional", placeholder: "a hint for the project's agent (optional)", confirm: "Build by the project" }); })
+      : ask(what === "reject" ? { title: "Reject " + name, text: "The contributor reads the note and builds again. The rejection is on the record.", input: "required", placeholder: "what is wrong, in a line or two", confirm: "Reject", danger: true }
+      : what === "withdraw" ? { title: "Withdraw the approval of " + name, text: "The approval stays on the record and is void from now on; the package leaves every ring it reached; another maintainer decides.", input: "required", placeholder: "why take it back", confirm: "Withdraw", danger: true }
+      : { title: "Approve " + name, text: "The project's build goes into edge, signed by the pool; the approval is on the record with your name.", input: "optional", confirm: "Approve" });
+    asked.then(function (got) {
+      if (got === null) return;
+      var note = got && typeof got === "object" ? got.note : got, body = { note: note };
+      if (got && typeof got === "object" && got.pick) body.worker = got.pick;
+      busy(fetch(API + "/tasks/" + ID + "/" + what, { method: "POST", headers: headers(), body: JSON.stringify(body) })).then(function (r) { return r.json(); }).then(function (d) {
+        var s = $("#state"); s.hidden = false;
+        s.innerHTML = d.error ? pill("error", "refused") + " " + esc(d.error) : pill(what === "withdraw" ? "warn" : "ok", what === "approve" ? "approved" : what === "build" ? "queued" : what === "withdraw" ? "withdrawn" : "rejected") + " " + (what === "approve" ? "the project's build goes into edge (publish job #" + d.publish + ")" : what === "build" ? "the project is building it: task <a href=\"/build/" + d.task + "\">#" + d.task + "</a>" : what === "withdraw" ? "the approval is void; the package leaves " + esc((d.rings || []).map(function (r) { return r.ring; }).join(", ") || "no ring") + " — another maintainer decides" : "the contributor sees the note");
+        toast(d.error ? esc(d.error) : s.textContent, d.error ? "error" : what === "withdraw" ? "warn" : "ok");
+        load();
+      });
     });
   });
 

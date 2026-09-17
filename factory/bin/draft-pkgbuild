@@ -283,7 +283,7 @@ def draft(a, previous, log, hint, request=None, evidence=None):
     if previous:
         user += "\n--- previous PKGBUILD ---\n" + previous + "\n--- build log tail ---\n" + (log or "")[-6000:] + "\n"
     if hint:
-        user += "\n--- maintainer hint ---\n" + hint + "\n"
+        user += "\n--- a hint from the person who asked for this build ---\n" + hint + "\n"
     user += "\nReturn the PKGBUILD only."
     text, _model = agent.complete(rules, user, max_tokens=12000)
     text = re.sub(r"^```\w*\n|\n```\s*$", "", text.strip())

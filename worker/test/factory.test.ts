@@ -551,9 +551,11 @@ describe("a package request", () => {
   it("gives a registration made before requests existed its record, from the staged PKGBUILD", async () => {
     await env.DB.batch([
       env.DB.prepare(`INSERT INTO factory_packages (name, owner, url, arches, detected, status, created_at) VALUES ('older', 'alice', 'https://github.com/alice/recipes', '["aarch64"]', '{"latest_tag":"v9"}', 'staged', '2026-09-14T10:00:00Z')`),
-      env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, staged_prefix) VALUES ('older', 'aarch64', '1.2-1', 'https://github.com/alice/recipes@HEAD:older/PKGBUILD', 'contributor', 100, 0, 'community', 'alice', 'build', 'staged', 'staging/alice/older/1/')`),
+      // A staged build of the version the record will name, through the gate and audited: only the request keeps it from being ready.
+      env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, staged_prefix, result) VALUES ('older', 'aarch64', '9', 'https://github.com/alice/recipes@HEAD:older/PKGBUILD', 'contributor', 100, 0, 'community', 'alice', 'build', 'staged', 'staging/alice/older/1/', '{"vet":{"verdict":"pass","fails":0,"warnings":0}}')`),
     ]);
     const task = (await env.DB.prepare("SELECT id FROM build_tasks WHERE name = 'older'").first<{ id: number }>())!.id;
+    await env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, params, result) VALUES ('older', 'aarch64', '9', 'audit', 'audit', 50, 0, 'project', NULL, 'audit', 'done', ?, '{"verdict":"ok","findings":[],"model":"test"}')`).bind(JSON.stringify({ task })).run();
     await env.STAGING.put(`staging/alice/older/${task}/PKGBUILD`, "pkgname=older\npkgdesc=\"An older tool\"\nurl=\"https://github.com/upstream/older\"\nlicense=('Apache-2.0')\n");
     const { backfillRequests } = await import("../src/requests");
     expect(await backfillRequests(env)).toMatch(/older → \d+/);
@@ -562,6 +564,134 @@ describe("a package request", () => {
     const record = JSON.parse(await (await env.PACKAGES.get(`factory/older/${pkg!.request_id}/request.json`))!.text());
     expect(record).toMatchObject({ migrated: { pkgbuild_of_task: task }, version: "v9", source: "https://github.com/upstream/older/archive/refs/tags/v9.tar.gz" });
     expect(await backfillRequests(env)).toBe("");
+    // The story checks the request as the form checks it today: a migrated record confirmed nothing, so the package is not ready for a maintainer until its owner renews it — from the page, the same form filled from the record.
+    const story = await call("GET", "/factory/packages/older/story");
+    expect(story.status).toBe(200);
+    expect(story.json.request).toMatchObject({ id: pkg!.request_id, version: "v9", migrated: true, complete: false, record: `${env.POOL_URL}/factory/older/${pkg!.request_id}/request.json`, arches: ["aarch64"] });
+    expect(story.json.request.checks.map((c: any) => [c.key, c.ok])).toEqual([["project", true], ["source", true], ["description", true], ["license", true], ["checklist", false], ["record", true]]);
+    expect(story.json.request.checks.find((c: any) => c.key === "checklist").note).toMatch(/before the request form/);
+    expect(story.json.package.arches).toEqual(["aarch64"]);
+    expect(story.json.chains[0].score).toMatchObject({ ready: false });
+    expect(story.json.chains[0].score.items.find((i: any) => i.item === "A request on the record")).toMatchObject({ points: 2, note: expect.stringMatching(/renew/) });
+    // Review sees the same: the staged build — gate passed, audit ok — is not ready for the request alone, and says why in the score.
+    const row = (await call("GET", "/factory/review?t=before")).json.staged.find((x: any) => x.name === "older");
+    expect(row.score).toMatchObject({ ready: false, points: 47 }); // 50 for the half, less the 3 the request loses
+    // The owner renews it while it is staged (nothing is being built): a new request, complete, and the same package is ready again.
+    const body = { name: "older", url: "https://older.example", source: "https://older.example/older-9.tar.gz", version: "9", description: "An older tool", license: "Apache-2.0", arches: ["aarch64"], checklist: { official: true, license: true, unshipped: true, evidence: true } };
+    const renewed = await call("POST", "/factory/packages", body, "omc_alice");
+    expect(renewed.status, JSON.stringify(renewed.json)).toBe(200);
+    expect(renewed.json.request.id).toBeGreaterThan(pkg!.request_id);
+    // The staged package stays staged; the build stands and is ready now.
+    expect(renewed.json.package).toMatchObject({ status: "staged", detail: expect.stringMatching(/renewed as #\d+ \(9\) by alice; the staged build stands/) });
+    const after = (await call("GET", "/factory/packages/older/story?t=renewed")).json; // past the edge cache, as the page reads its own
+    expect(after.request).toMatchObject({ id: renewed.json.request.id, migrated: false, complete: true });
+    expect(after.chains[0].score).toMatchObject({ ready: true });
+    expect(after.chains[0].score.items.find((i: any) => i.item === "A request on the record")).toMatchObject({ points: 5 });
+    expect((await call("GET", "/factory/review?t=after")).json.staged.find((x: any) => x.name === "older").score).toMatchObject({ ready: true });
+    // A request that names another version than the staged build is not that build's: the contributor builds again.
+    const other = await call("POST", "/factory/packages", { ...body, version: "10", source: "https://older.example/older-10.tar.gz" }, "omc_alice");
+    expect(other.status).toBe(200);
+    const moved = (await call("GET", "/factory/packages/older/story?t=moved")).json;
+    expect(moved.chains[0].score).toMatchObject({ ready: false });
+    expect(moved.chains[0].score.items.find((i: any) => i.item === "A request on the record")).toMatchObject({ points: 2, note: expect.stringMatching(/names 10, this build is 9 — build again/) });
+    // A build in flight — the project's included, whose lease never touches the package's status — keeps the request as it is.
+    await env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, params) VALUES ('older', 'aarch64', '9', 'review:${task}', 'project build', 30, 0, 'project', 'alice', 'build', 'leased', '{"review":${task}}')`).run();
+    const busy = await call("POST", "/factory/packages", body, "omc_alice");
+    expect(busy.status).toBe(409);
+    expect(busy.json.error).toMatch(/being built \(task \d+ is leased, the project's\)/);
+    await env.DB.prepare("DELETE FROM build_tasks WHERE name = 'older' AND trust = 'project' AND status = 'leased'").run();
+    // In the pool, the record is what it was: the next version's request goes through the form.
+    await env.DB.prepare("UPDATE factory_packages SET status = 'published' WHERE name = 'older'").run();
+    expect((await call("POST", "/factory/packages", body, "omc_alice")).json.error).toMatch(/not once it is in the pool/);
+  });
+});
+
+describe("where a build runs", () => {
+  const checklist = { official: true, license: true, unshipped: true, evidence: true };
+  const req = (name: string) => ({ name, url: `https://${name}.example`, source: `https://${name}.example/${name}-1.tar.gz`, version: "1", description: "A tool for the test", license: "MIT", arches: ["aarch64"], checklist });
+  it("a contributor with no worker for the architecture is built by the project's shared workers at once; one with a worker waits for it first", async () => {
+    // carol has no worker; m1's w5 is a community worker shared by a maintainer (the claim says so).
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO contributors (login, token_hash, role) VALUES ('carol', ?, 'contributor')").bind(await sha256Hex("omc_carol")),
+      env.DB.prepare("INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, last_seen) VALUES ('w5', 'aarch64', 'm1', ?, 'shared', 'community', '2000-01-01T00:00:00Z')").bind(await sha256Hex("omw_w5")),
+    ]);
+    expect((await call("POST", "/factory/packages", req("noworker"), "omc_carol")).status).toBe(201);
+    const q = await call("POST", "/factory/packages/noworker/build", {}, "omc_carol");
+    expect(q.status, JSON.stringify(q.json)).toBe(201);
+    expect(await env.DB.prepare("SELECT shared_after, pinned_to FROM build_tasks WHERE id = ?").bind(q.json.tasks[0]).first()).toEqual({ shared_after: null, pinned_to: null });
+    // alice has w3: hers first, the shared ones after 14 days.
+    expect((await call("POST", "/factory/packages", req("hasworker"), "omc_alice")).status).toBe(201);
+    const a = await call("POST", "/factory/packages/hasworker/build", {}, "omc_alice");
+    expect(a.status).toBe(201);
+    const row = await env.DB.prepare("SELECT shared_after, pinned_to FROM build_tasks WHERE id = ?").bind(a.json.tasks[0]).first<{ shared_after: string | null; pinned_to: string | null }>();
+    expect(row!.pinned_to).toBeNull();
+    expect(row!.shared_after).not.toBeNull();
+    // Asked for the shared workers at once instead: the waiting task is re-routed, not duplicated.
+    const again = await call("POST", "/factory/packages/hasworker/build", { worker: "shared" }, "omc_alice");
+    expect(again.json.tasks).toEqual(a.json.tasks);
+    expect(await env.DB.prepare("SELECT shared_after FROM build_tasks WHERE id = ?").bind(a.json.tasks[0]).first()).toEqual({ shared_after: null });
+    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE name IN ('noworker', 'hasworker') AND status = 'queued'").run();
+  });
+  it("a build asked for one worker is claimed by that worker only; a worker that is not theirs and not shared is refused; a hint and the last failed build travel with it", async () => {
+    // alice's failed build of hasworker is the lesson for the next one; she asks for w5 (shared by m1), with a hint.
+    await env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, error) VALUES ('hasworker', 'aarch64', '1', 'draft:https://hasworker.example@1', 'contributor', 100, 0, 'community', 'alice', 'build', 'failed', 'exit 4: no')").run();
+    const failed = (await env.DB.prepare("SELECT id FROM build_tasks WHERE name = 'hasworker' AND status = 'failed'").first<{ id: number }>())!.id;
+    expect((await call("POST", "/factory/packages/hasworker/build", { arches: ["aarch64"], worker: "w1" }, "omc_alice")).status).toBe(403); // the project's, never a contributor's build
+    const p = await call("POST", "/factory/packages/hasworker/build", { worker: "w5", hint: "the binary is called hw; build with make PREFIX=/usr" }, "omc_alice"); // one architecture registered: the worker's
+    expect(p.status, JSON.stringify(p.json)).toBe(201);
+    expect(p.json).toMatchObject({ pinned_to: "w5", lessons: { aarch64: failed } });
+    const task = await env.DB.prepare("SELECT pinned_to, shared_after, params FROM build_tasks WHERE id = ?").bind(p.json.tasks[0]).first<{ pinned_to: string; shared_after: string | null; params: string }>();
+    expect(task).toMatchObject({ pinned_to: "w5", shared_after: null });
+    expect(JSON.parse(task!.params)).toEqual({ lesson: failed, hint: "the binary is called hw; build with make PREFIX=/usr" });
+    // w3 (alice's own) does not get it; w5 does, and the claim hands the params over.
+    expect((await call("POST", "/factory/claim", { arch: "aarch64", agent: "claude-code/claude-sonnet-5", agent_status: "ok" }, "omw_w3")).status).toBe(204);
+    const c = await call("POST", "/factory/claim", { arch: "aarch64", shared: true, agent: "claude-code/claude-sonnet-5", agent_status: "ok" }, "omw_w5");
+    expect(c.status).toBe(200);
+    expect(c.json.task).toMatchObject({ id: p.json.tasks[0], params: { lesson: failed, hint: expect.stringMatching(/^the binary/) } });
+    // Asked again while it waits, with the default choice: unpinned, the rule again (hers first); the same task.
+    // (w5 leased it above: a build that runs is not re-routed, nothing new is queued, and the answer says so.)
+    const re = await call("POST", "/factory/packages/hasworker/build", { arches: ["aarch64"] }, "omc_alice");
+    expect(re.status).toBe(200);
+    expect(re.json).toMatchObject({ tasks: [], building: [{ task: p.json.tasks[0], arch: "aarch64", on: "w5" }], note: expect.stringMatching(/^already building/) });
+    await env.DB.prepare("UPDATE build_tasks SET status = 'queued', lease_owner = NULL WHERE id = ?").bind(p.json.tasks[0]).run();
+    const re2 = await call("POST", "/factory/packages/hasworker/build", { arches: ["aarch64"], hint: "try again" }, "omc_alice");
+    expect(re2.status).toBe(201);
+    expect(await env.DB.prepare("SELECT pinned_to, params FROM build_tasks WHERE id = ?").bind(p.json.tasks[0]).first()).toMatchObject({ pinned_to: null, params: expect.stringContaining('"hint":"try again"') });
+    // Pinned again, then the worker is revoked: the build goes back to any worker that qualifies, at once.
+    expect((await call("POST", "/factory/packages/hasworker/build", { arches: ["aarch64"], worker: "w5" }, "omc_alice")).status).toBe(201);
+    expect((await call("DELETE", "/factory/workers/w5", undefined, "omc_m1")).json).toMatchObject({ revoked: "w5", freed: 1 });
+    expect(await env.DB.prepare("SELECT pinned_to, shared_after FROM build_tasks WHERE id = ?").bind(p.json.tasks[0]).first()).toEqual({ pinned_to: null, shared_after: null });
+    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE name = 'hasworker' AND status IN ('queued', 'leased')").run();
+    // A build after a rejection (cancelled) or one the gate stopped (staged) is the lesson too, not only a failed one.
+    await env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, staged_prefix, result) VALUES ('hasworker', 'aarch64', '1', 'draft:https://hasworker.example@1', 'contributor', 100, 0, 'community', 'alice', 'build', 'staged', 'staging/alice/hasworker/9/', '{\"vet\":{\"verdict\":\"fail\",\"fails\":1,\"warnings\":0}}')").run();
+    const gated = (await env.DB.prepare("SELECT id FROM build_tasks WHERE name = 'hasworker' AND status = 'staged' ORDER BY id DESC").first<{ id: number }>())!.id;
+    const after = await call("POST", "/factory/packages/hasworker/build", { arches: ["aarch64"] }, "omc_alice");
+    expect(after.json.lessons).toEqual({ aarch64: gated });
+    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE name = 'hasworker' AND status IN ('queued', 'leased')").run();
+  });
+  it("a maintainer names the project's worker for the project's build — one that builds this architecture", async () => {
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO factory_packages (name, owner, url, arches, status, project, source, description, license) VALUES ('pinme', 'alice', 'https://pinme.example', '[\"aarch64\"]', 'staged', 'https://pinme.example', 'https://pinme.example/pinme-1.tar.gz', 'A tool for the test', 'MIT')"),
+      env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, staged_prefix) VALUES ('pinme', 'aarch64', '1', 'draft:https://pinme.example@1', 'contributor', 100, 0, 'community', 'alice', 'build', 'staged', 'staging/alice/pinme/1/')"),
+    ]);
+    const staged = (await env.DB.prepare("SELECT id FROM build_tasks WHERE name = 'pinme'").first<{ id: number }>())!.id;
+    await env.DB.prepare("INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, trusted_by, last_seen) VALUES ('w6', 'aarch64', 'm1', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z')").bind(await sha256Hex("omw_w6")).run();
+    expect((await call("POST", `/factory/tasks/${staged}/build`, { worker: "w3" }, "omc_m2")).status).toBe(400); // a contributor's worker never builds for the project
+    expect((await call("POST", `/factory/tasks/${staged}/build`, { worker: "w6" }, "omc_m2")).json.error).toMatch(/no agent that answers/); // pinned to it, the build would wait forever
+    expect((await call("POST", "/factory/claim", { arch: "aarch64", kinds: ["build"], agent: "claude-code/claude-sonnet-5", agent_status: "ok" }, "omw_w6")).status).toBeLessThan(300); // now it builds, with an agent
+    expect((await call("POST", `/factory/tasks/${staged}/build`, { worker: "w1" }, "omc_m2")).json.error).toMatch(/does not take builds/); // w1 declared sync last
+    const ok = await call("POST", `/factory/tasks/${staged}/build`, { worker: "w6", note: "native, please — link against system zlib" }, "omc_m2");
+    expect(ok.status, JSON.stringify(ok.json)).toBe(200);
+    expect(ok.json.pinned_to).toBe("w6");
+    // The maintainer's note is the hint the project's agent drafts with.
+    expect(JSON.parse((await env.DB.prepare("SELECT params FROM build_tasks WHERE id = ?").bind(ok.json.task).first<{ params: string }>())!.params)).toMatchObject({ review: staged, note: "native, please — link against system zlib", hint: "native, please — link against system zlib" });
+    // Another project worker never gets it (whatever else is queued for it).
+    const other = await call("POST", "/factory/claim", { arch: "aarch64", kinds: ["build"], agent: "claude-code/claude-sonnet-5", agent_status: "ok" }, "omw_w1");
+    if (other.status === 200) expect(other.json.task.id).not.toBe(ok.json.task);
+    const c = await call("POST", "/factory/claim", { arch: "aarch64", kinds: ["build"], agent: "claude-code/claude-sonnet-5", agent_status: "ok" }, "omw_w6");
+    expect(c.status).toBe(200);
+    expect(c.json.task).toMatchObject({ id: ok.json.task, pinned_to: "w6" });
+    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE name = 'pinme' AND status IN ('queued', 'leased')").run();
   });
 });
 

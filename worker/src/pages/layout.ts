@@ -436,9 +436,24 @@ const CSS = String.raw`
   .tl li.skel { border: 0; } .acts { margin: -20px 0 28px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; }
   .ev { border: 1px solid var(--line); background: var(--panel); margin-top: 10px; } .ev summary { cursor: pointer; padding: 10px 14px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 13px; list-style: none; } .ev summary::-webkit-details-marker { display: none; } .ev summary::before { content: "▸"; color: var(--dim); } .ev[open] summary::before { content: "▾"; } .ev .body { padding: 0 14px 14px; }
   .ev-table { width: 100%; font-size: 12.5px; } .ev-table th, .ev-table td { padding: 5px 8px; vertical-align: top; } .ev pre.code { white-space: pre; line-height: 1.5; max-height: 640px; overflow: auto; } .ev pre .ln { display: inline-block; width: 3ch; margin-right: 12px; text-align: right; color: var(--dim); user-select: none; }
+  /* Decisions ask in the dashboard: one dialog, and a toast that says what happened. */
+  dialog.ask { border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 0; width: min(520px, calc(100vw - 32px)); box-shadow: 0 24px 60px rgba(0,0,0,.5); } dialog.ask::backdrop { background: rgba(10, 11, 16, .72); }
+  dialog.ask form { padding: 20px 22px; display: grid; gap: 12px; } dialog.ask h3 { margin: 0; font-family: Geist, sans-serif; font-size: 17px; } dialog.ask .t { margin: 0; font-size: 13.5px; color: var(--muted); } dialog.ask textarea { width: 100%; box-sizing: border-box; background: var(--bg-deep); color: var(--text); border: 1px solid var(--line); padding: 8px 10px; font: 13px "JetBrains Mono", monospace; resize: vertical; }
+  dialog.ask .err { margin: 0; font-size: 12.5px; color: var(--red); } dialog.ask label.pick { display: grid; gap: 4px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; } dialog.ask label.pick select { width: 100%; box-sizing: border-box; background: var(--bg-deep); color: var(--text); border: 1px solid var(--line); padding: 7px 10px; font: 13px "JetBrains Mono", monospace; text-transform: none; letter-spacing: 0; } dialog.ask .row { display: flex; justify-content: flex-end; gap: 8px; } dialog.ask button.danger { border-color: var(--red); color: var(--red); } dialog.ask button.ghost { color: var(--muted); }
+  #toasts { position: fixed; right: 16px; bottom: 16px; z-index: 90; display: grid; gap: 8px; max-width: min(460px, calc(100vw - 32px)); } .toast { border: 1px solid var(--line); background: var(--panel); padding: 10px 14px; font-size: 13px; border-left: 3px solid var(--green); cursor: pointer; transition: opacity .3s, transform .3s; } .toast.error { border-left-color: var(--red); } .toast.warn { border-left-color: var(--amber); } .toast.out { opacity: 0; transform: translateY(6px); }
+  /* A person's page: the package rows open into the story and the next step. */
+  table.pk td:first-child { width: 28px; padding-right: 0; } .expand { background: none; border: 0; color: var(--dim); font-size: 14px; cursor: pointer; padding: 2px 6px; } .expand:hover { color: var(--text); }
+  tr.pkopen td { background: var(--bg-deep); padding: 12px 14px 14px; } .pkstory { display: grid; gap: 10px; } .pknext { display: flex; gap: 10px 16px; align-items: center; flex-wrap: wrap; font-size: 13px; } .pknext .acts-inline { margin-left: auto; display: inline-flex; gap: 8px; } .pknext button.ghost { color: var(--muted); }
+  .arch-st { white-space: nowrap; margin-right: 8px; font-size: 12.5px; }
+  .wt-legend { font-size: 12px; margin: 10px 0 0; display: flex; gap: 6px 18px; flex-wrap: wrap; align-items: center; }
   .cklist { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: 16px; } .ckcol { border: 1px solid var(--line); background: var(--panel); padding: 14px 16px; border-top: 3px solid var(--line); } .ckcol.contributor { border-top-color: var(--lilac); } .ckcol.maintainer { border-top-color: var(--green); }
   .ckcol h3 { display: flex; justify-content: space-between; align-items: baseline; margin: 0; } .ckcol h3 .num { font-family: Geist, sans-serif; font-size: 20px; font-weight: 600; } .ckcol p { margin: 4px 0 10px; font-size: 12.5px; } .ckcol ul { list-style: none; margin: 0; padding: 0; } .ckcol li { display: grid; grid-template-columns: 18px 1fr auto; gap: 8px; align-items: start; padding: 7px 0; border-top: 1px solid var(--line); font-size: 13px; } .ckcol li .pts { font-size: 12.5px; white-space: nowrap; }
   .ck { font-style: normal; font-weight: 700; } .ck.ok { color: var(--green); } .ck.part { color: var(--amber); } .ck.bad { color: var(--red); } .ck.pending { color: var(--dim); }
+  .pkreq { border: 1px solid var(--line); background: var(--panel); padding: 12px 14px; margin: 0 0 12px; } .pkreq.incomplete { border-left: 3px solid var(--amber); } .pkreq-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: 13px; } .pkreq-head .btn.small { margin-left: auto; padding: 4px 10px; font-size: 12px; }
+  .pkreq-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(400px, 100%), 1fr)); gap: 4px 24px; } .pkreq-list li { display: grid; grid-template-columns: 16px 1fr; gap: 6px; font-size: 12.5px; align-items: start; min-width: 0; } .pkreq-list li div { overflow-wrap: anywhere; }
+  .pkarch { border: 1px solid var(--line); background: var(--bg-deep); padding: 12px 14px; margin: 0 0 12px; } .pkarch-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: 13px; } .pkarch-head .arch-name { font-family: "JetBrains Mono", monospace; font-weight: 700; font-size: 14px; } .pkarch-head .acts-inline { margin-left: auto; }
+  .pkarch .pknext-line { margin: 8px 0 10px; font-size: 13px; color: var(--muted); } .howto { margin: 6px 0 0; padding-left: 22px; display: block; max-width: 72ch; color: var(--text); } .howto li { font-size: 12.5px; margin: 3px 0; } .howto li::marker { color: var(--green); font-weight: 700; } .pkarch .cklist { gap: 12px; } .pkarch .ckcol { padding: 10px 12px; } .pkarch .ckcol h3 { font-size: 14px; } .pkarch .ckcol h3 .num { font-size: 16px; } .pkarch .ckcol li { font-size: 12.5px; padding: 5px 0; }
+  table.pk td.stands { max-width: 360px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } table.pk td.arches { white-space: nowrap; }
   .tile .v .dim { font-weight: 400; }
   .fchainrow { border: 1px solid var(--line); background: var(--panel); margin-top: 10px; } .fhead { display: flex; justify-content: space-between; gap: 10px; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--line); font-size: 13px; }
   .fsteps { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr)); gap: 1px; background: var(--line); } .fstep { background: var(--panel); padding: 10px 12px; display: grid; grid-template-columns: 14px 1fr; gap: 6px; align-items: start; font-size: 12.5px; } .fstep .dot { margin: 4px 0 0; } .fstep b { display: block; font-size: 12.5px; } .fstep span { color: var(--muted); }
@@ -541,9 +556,18 @@ const CSS = String.raw`
 `;
 
 /** Helpers shared by every page script; runs before the page's own script. */
+/** The icons the worker tables use instead of a word: a chip for the architecture (dashed when emulated), arrows for a shared worker, one person for an owner's own. */
+export const WORKER_ICONS = {
+  native: '<svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-label="native"><rect x="4" y="4" width="8" height="8"/><path d="M6 1v3M10 1v3M6 12v3M10 12v3M1 6h3M1 10h3M12 6h3M12 10h3"/></svg>',
+  emu: '<svg class="ic emu" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-label="emulated"><rect x="4" y="4" width="8" height="8" stroke-dasharray="2 1.5"/><path d="M6 1v3M10 1v3M6 12v3M10 12v3M1 6h3M1 10h3M12 6h3M12 10h3"/></svg>',
+  shared: '<svg class="ic shared" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-label="shared"><path d="M2 5h10M9 2l3 3-3 3M14 11H4M7 8l-3 3 3 3"/></svg>',
+  own: '<svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-label="own"><circle cx="8" cy="5" r="3"/><path d="M2 15c0-3.3 2.7-6 6-6s6 2.7 6 6"/></svg>',
+};
+
 const HELPERS = String.raw`
   var POOL = "__POOL_URL__";
   var RINGS_TEXT = __RINGS_TEXT__;
+  var WICON = __WICON__;
   var $ = function (s) { return document.querySelector(s); };
   function esc(s) { return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
   function bytes(n) { n = Number(n || 0); var u = ["B", "KB", "MB", "GB", "TB"], i = 0; while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; } return (i === 0 ? n : n.toFixed(n >= 100 ? 0 : 1)) + " " + u[i]; }
@@ -608,10 +632,11 @@ const HELPERS = String.raw`
       bar = document.createElement("div"); bar.className = "pager";
       bar.innerHTML = '<input type="search" placeholder="filter this table…" aria-label="filter"> <select aria-label="rows per page"><option>10</option><option>25</option><option>50</option><option>100</option></select> <span class="count"></span>';
       wrap.parentElement.insertBefore(bar, wrap);
-      bar.querySelector("input").oninput = function () { st.q = this.value.toLowerCase(); draw(); };
-      bar.querySelector("select").onchange = function () { st.n = Number(this.value); draw(); };
       bar.querySelector("select").value = String(st.n);
     }
+    // Bound again on every call: a page that refreshes its rows (every 15 s, after a Build) filters the rows it has now, not the first load's.
+    bar.querySelector("input").oninput = function () { st.q = this.value.toLowerCase(); draw(); };
+    bar.querySelector("select").onchange = function () { st.n = Number(this.value); draw(); };
     function text(r) { return (opts.text ? opts.text(r) : JSON.stringify(r)).toLowerCase(); }
     function draw() {
       var f = st.q ? rows.filter(function (r) { return text(r).indexOf(st.q) >= 0; }) : rows;
@@ -668,6 +693,202 @@ const HELPERS = String.raw`
     s = s.replace(/-[a-z0-9]{4}$/, "");
     if (w.arch && s.endsWith("-" + w.arch)) s = s.slice(0, -(w.arch.length + 1));
     return '<span class="mono" title="' + esc(id) + '">' + esc(s || id) + '</span>';
+  }
+  // ---- decisions ask in the dashboard, never in the browser's own box: one dialog, a note when the action wants one, a promise of the note (null = cancelled).
+  //   ask({ title, text, input: "required" | "optional" | false, placeholder, confirm: "Approve", danger: true })
+  // The dashboard's question: a title, a line, a note when the action wants one (input: "required" | "optional"), a choice when there is one (select: { label, options: [{ value, text, disabled, selected }] }), the button. Resolves the note as a string — or, with a select, { note, pick } — and null when cancelled.
+  function ask(o) {
+    return new Promise(function (resolve) {
+      var d = document.createElement("dialog"); d.className = "ask";
+      var sel = o.select && o.select.options && o.select.options.length ? '<label class="pick"><span>' + esc(o.select.label || "Where") + '</span><select>' + o.select.options.map(function (x) { return '<option value="' + esc(x.value) + '"' + (x.disabled ? ' disabled' : '') + (x.selected ? ' selected' : '') + '>' + esc(x.text) + '</option>'; }).join("") + '</select></label>' : '';
+      d.innerHTML = '<form method="dialog"><h3></h3><p class="t"></p>' + sel + (o.input ? '<textarea rows="3" placeholder="' + esc(o.placeholder || (o.input === "required" ? "why — it goes on the record" : "a note for the record (optional)")) + '"></textarea><p class="err" hidden></p>' : '') + '<div class="row"><button type="button" class="ghost cancel">Cancel</button><button type="submit" class="' + (o.danger ? "danger" : "") + '">' + esc(o.confirm || "OK") + '</button></div></form>';
+      d.querySelector("h3").textContent = o.title || ""; d.querySelector(".t").innerHTML = o.text || "";
+      document.body.appendChild(d);
+      var ta = d.querySelector("textarea"), se = d.querySelector("select"), form = d.querySelector("form"), done = function (v) { d.close(); d.remove(); resolve(v); };
+      d.querySelector(".cancel").onclick = function () { done(null); };
+      d.addEventListener("cancel", function (ev) { ev.preventDefault(); done(null); });
+      d.addEventListener("click", function (ev) { if (ev.target === d) done(null); });
+      form.onsubmit = function (ev) {
+        ev.preventDefault();
+        var v = ta ? ta.value.trim() : "";
+        if (o.input === "required" && v.length < 4) { d.querySelector(".err").hidden = false; d.querySelector(".err").textContent = "Say why, in a few words — the record keeps it."; ta.focus(); return; }
+        done(se ? { note: v, pick: se.value } : v);
+      };
+      d.showModal(); if (ta) ta.focus();
+    });
+  }
+  // The workers a build may go to, as the choice in the Build dialog, from the factory listing (/api/v1/factory): for a contributor's build, theirs and the ones the project shares; for the project's build, the project's own that build. The first option leaves it to the rule.
+  function whereOptions(workers, arch, login, forProject, needsAgent) {
+    if (needsAgent === undefined) needsAgent = true;
+    var can = (workers || []).filter(function (w) { return w.arch === arch && !w.revoked_at && (forProject ? (w.side === "omarchy" && (!w.kinds || w.kinds.indexOf("build") >= 0)) : (w.side !== "omarchy" && (w.owner === login || w.mode === "shared"))); });
+    // A drafted build (the project's always) goes only to a worker whose agent answered: pinned to another it would wait forever.
+    var fit = function (w) { return w.alive && (!needsAgent || w.agent_status === "ok"); };
+    var word = function (w) { return (w.owner && w.owner !== login ? w.owner + "'s " : forProject ? "" : "your ") + wtShort(w.id) + " · " + (w.alive ? (w.current_task ? "building" : "idle") : "offline") + " · " + (w.labels && w.labels.emulated ? "emulated" : "native") + (w.agent ? " · " + w.agent + (w.agent_status !== "ok" ? " (not answering)" : "") : " · no agent"); };
+    var mine = can.filter(function (w) { return w.owner === login && !forProject; }), shared = can.filter(function (w) { return w.mode === "shared" && w.owner !== login && !forProject; }), project = forProject ? can : [];
+    var opts = [];
+    if (forProject) opts.push({ value: "", text: "Any of the project's workers for " + arch + (project.length ? "" : " (none is registered)"), selected: true });
+    else opts.push({ value: "", text: mine.length ? "Yours first; the project's shared workers after 14 days" : "The project's shared workers — you have no worker for " + arch, selected: true });
+    if (!forProject && shared.length) opts.push({ value: "shared", text: "The project's shared workers, at once (" + shared.filter(fit).length + " of " + shared.length + " ready)" });
+    mine.concat(shared).concat(project).forEach(function (w) { opts.push({ value: w.id, text: word(w), disabled: !fit(w) }); });
+    return { label: "Where", options: opts, count: can.length, native: can.filter(function (w) { return fit(w) && !(w.labels && w.labels.emulated); }).length };
+  }
+  function wtShort(id) { var parts = String(id).split("-"); return parts.length > 3 ? parts.slice(-3).join("-") : id; }
+
+  // A line that says what happened, where the eye is: bottom right, gone in a few seconds (an error stays until clicked).
+  function toast(text, cls) {
+    var box = $("#toasts"); if (!box) { box = document.createElement("div"); box.id = "toasts"; document.body.appendChild(box); }
+    var t = document.createElement("div"); t.className = "toast " + (cls || "ok"); t.innerHTML = text; box.appendChild(t);
+    var go = function () { t.classList.add("out"); setTimeout(function () { t.remove(); }, 300); };
+    t.onclick = go; if (cls !== "error") setTimeout(go, 6000);
+  }
+  // ---- the worker tables (the Workers page, a person's page): the same row for the same kind of worker everywhere.
+  // The kind: project (pool jobs) and review are the project's, told apart by the role the worker reported; everything else is a contributor's.
+  function wtKind(w) { if (w.side !== "omarchy") return "community"; var r = w.labels && w.labels.role; return r === "review" ? "review" : "project"; }
+  function wtPerson(l) { return l ? avatar(l) : '<span class="muted" title="a registration from before owners: the project\'s">—</span>'; }
+  // The id without the owner's prefix (the owner has a column), never past 32 characters: whole segments go from after the first, the tail — role, arch, the random suffix — stays; the whole id on hover.
+  function wtId(w) {
+    var names = (w.trusted_by || "").split(",").map(function (n) { return n.trim(); }).filter(Boolean);
+    var tip = [w.labels && w.labels.where ? "on " + w.labels.where : "", w.hostname && w.hostname !== "?" ? "host " + w.hostname : "", w.kinds && w.kinds.length ? "takes: " + w.kinds.join(", ") : "", names.length ? "trusted by " + names.join(", ") : w.trust_proposed_by ? "proposed for project trust by " + w.trust_proposed_by + ", awaiting a second maintainer's word" : ""].filter(Boolean).join(" · ");
+    var id = String(w.id || ""), shown = w.owner && id.indexOf(w.owner + "-") === 0 ? id.slice(w.owner.length + 1) : id, parts = shown.split("-");
+    while (shown.length > 32 && parts.length > 3) { parts.splice(1, 1); shown = parts[0] + "-…-" + parts.slice(1).join("-"); }
+    if (shown.length > 32) shown = shown.slice(0, 18) + "…" + shown.slice(-13);
+    return '<span class="mono wid" title="' + esc([id, tip].filter(Boolean).join(" · ")) + '">' + esc(shown) + '</span>';
+  }
+  // The state, one word: building (a task in hand), failed (alive but not ready — its agent did not answer), idle, offline (with how long). Seen-when on hover.
+  function wtStatus(w) {
+    var seen = "seen " + ago(w.last_seen);
+    if (w.revoked_at) return '<span class="pill none" title="revoked ' + esc(ago(w.revoked_at)) + '">revoked</span>';
+    if (!w.alive) return '<span class="pill none" title="not seen in the last ten minutes">offline · ' + esc(ago(w.last_seen).replace(" ago", "")) + '</span>';
+    if (w.current_task) return '<a class="pill blue" href="/build/' + w.current_task + '" title="task #' + w.current_task + ' · ' + esc(seen) + '">building</a>';
+    if (!w.ready) return '<span class="pill error" title="' + esc((w.agent_error ? "its agent did not answer: " + w.agent_error : !w.agent ? "no agent: a contributor's builds and the audits need one that answers" : "not ready for the work it declares") + " · " + seen) + '">failed</span>';
+    return '<span class="pill ok" title="' + esc("alive, nothing in hand · " + seen) + '">idle</span>';
+  }
+  function wtVersion(w) { return w.version && w.version !== "container" ? '<span class="mono" title="the release this worker\'s image was built from">' + esc(w.version) + '</span>' : '<span class="muted" title="an image from before the version was reported">—</span>'; }
+  function wtArch(w, icon) { return esc(w.arch) + (icon ? ' ' + (w.labels && w.labels.emulated ? WICON.emu.replace('aria-label', 'title="emulated: the other architecture, under qemu on this host" aria-label') : WICON.native.replace('aria-label', 'title="native" aria-label')) : ''); }
+  function wtMode(w) { return w.mode === "shared" ? WICON.shared.replace('aria-label', 'title="shared: builds whatever is queued, anyone\'s" aria-label') : WICON.own.replace('aria-label', 'title="' + esc(w.packages && w.packages.length ? "own packages: " + w.packages.join(", ") : "the owner\'s packages only") + '" aria-label'); }
+  var WT_PROV = { anthropic: "A", "claude-code": "CC", openai: "OA", gemini: "G", xai: "X" };
+  // The agent, and whether it answers: the dot is the last probe (green answered, red did not, grey never asked), the chip the provider, then the model.
+  function wtAgent(w) {
+    if (!w.agent) return '<span class="muted">—</span>';
+    var i = w.agent.indexOf("/"), prov = i > 0 ? w.agent.slice(0, i) : "", model = i > 0 ? w.agent.slice(i + 1) : w.agent;
+    var st = w.agent_status === "ok" ? "ok" : w.agent_status === "error" ? "error" : "";
+    var tip = w.agent + (st === "ok" ? " · answered " + ago(w.agent_checked_at) : st === "error" ? " · no answer " + ago(w.agent_checked_at) + (w.agent_error ? ": " + w.agent_error : "") : " · not probed yet");
+    return '<span class="agent" title="' + esc(tip) + '"><i class="dot ' + st + '"></i><span class="prov">' + esc(WT_PROV[prov] || prov.slice(0, 2).toUpperCase() || "?") + '</span><span class="mono">' + esc(model.replace(/^claude-/, "")) + '</span></span>';
+  }
+  // What the machine uses: three meters, the worker's own average (with the claim), amber past 70, red past 90.
+  function wtUsage(w) {
+    var u = w.usage; if (!u) return '<span class="muted" title="not reported yet: an image from before usage was reported, or its first minute">—</span>';
+    var tip = "average of the last " + (u.minutes || "?") + " min, reported " + ago(w.usage_at) + " · cpu " + u.cpu + "%" + (u.cores ? " of " + u.cores + " cores" : "") + " · ram " + u.ram + "%" + (u.ram_gb ? " of " + u.ram_gb + " GB" : "") + " · disk " + u.disk + "%" + (u.disk_gb ? " of " + u.disk_gb + " GB" : "");
+    return '<span class="usage" title="' + esc(tip) + '">' + [u.cpu, u.ram, u.disk].map(function (v) { v = Math.round(Number(v) || 0); return '<span class="u1' + (v >= 90 ? " hot" : v >= 70 ? " warn" : "") + '" style="--v:' + v + '%"><b class="num">' + v + '</b><i></i></span>'; }).join("") + '</span>';
+  }
+  // The last task the worker finished — a package (linked, with its version) or a pool job by name — and how it ended.
+  function wtLast(w) {
+    var l = w.last_task; if (!l) return '<span class="muted" title="nothing finished since the pool started keeping this">—</span>';
+    var tip = "task #" + l.id + " · " + l.kind + " " + (l.status === "failed" ? "failed" : l.status) + " " + ago(l.at);
+    var pkg = l.kind === "build" || l.kind === "audit" || l.kind === "publish" || l.kind === "trial";
+    return '<span class="last" title="' + esc(tip) + '"><i class="dot ' + (l.status === "failed" ? "error" : "ok") + '"></i>' + (pkg ? '<a href="/build/' + l.id + '">' + esc(l.name) + '</a>' + (l.version ? ' <span class="v mono">' + esc(l.version) + '</span>' : '') : '<a class="mono" href="/build/' + l.id + '">' + esc(l.name) + '</a> <span class="v">' + ago(l.at) + '</span>') + '</span>';
+  }
+  function wtCounts(w) { return num(w.builds_done) + ' / ' + num(w.builds_failed); }
+  // The header and the row of each kind of table; "extra" is one more cell (a person's own page puts its buttons there).
+  var WT_HEAD = {
+    project: '<th>Worker</th><th>Status</th><th>Arch</th><th>Version</th><th>Maintainer</th><th title="what the machine uses: an average the worker keeps and reports with its claims">CPU · RAM · Disk</th><th>Done / failed</th><th>Last job</th>',
+    review: '<th>Worker</th><th>Status</th><th>Arch</th><th>Version</th><th>Maintainer</th><th>Agent</th><th title="what the machine uses: an average the worker keeps and reports with its claims">CPU · RAM · Disk</th><th>Done / failed</th><th>Last reviewed</th>',
+    community: '<th>Worker</th><th>Status</th><th>Owner</th><th>Arch</th><th>Version</th><th title="shared: builds whatever is queued · own: the owner\'s packages only">Mode</th><th>Agent</th><th title="what the machine uses: an average the worker keeps and reports with its claims">CPU · RAM · Disk</th><th>Done / failed</th><th>Last build</th>'
+  };
+  function workerRow(w, kind, extra) {
+    var cells = kind === "project" ? [wtId(w), wtStatus(w), wtArch(w, false), wtVersion(w), wtPerson(w.owner), wtUsage(w), wtCounts(w), wtLast(w)]
+      : kind === "review" ? [wtId(w), wtStatus(w), wtArch(w, true), wtVersion(w), wtPerson(w.owner), wtAgent(w), wtUsage(w), wtCounts(w), wtLast(w)]
+      : [wtId(w), wtStatus(w), wtPerson(w.owner), wtArch(w, true), wtVersion(w), wtMode(w), wtAgent(w), wtUsage(w), wtCounts(w), wtLast(w)];
+    return '<tr><td>' + cells.join('</td><td>') + '</td>' + (extra ? '<td>' + extra + '</td>' : '') + '</tr>';
+  }
+  var WT_LEGEND = '<p class="dim wt-legend">' + '<span>' + WICON.native + ' native</span><span>' + WICON.emu + ' emulated</span><span>' + WICON.shared + ' shared</span><span>' + WICON.own + ' own packages</span><span><span class="pill ok">idle</span> waiting</span><span><span class="pill blue">building</span> a task in hand</span><span><span class="pill error">failed</span> its agent does not answer</span><span><span class="pill none">offline</span> not seen in ten minutes</span></p>';
+  // A person's login as a link to their page; a pill with a title. Shared by the pages that tell a package's story.
+  function personLink(l) { return l ? '<a href="/user/' + encodeURIComponent(l) + '">' + esc(l) + '</a>' : '<span class="muted">—</span>'; }
+  function pillHtml(cls, text, title) { return '<span class="pill ' + cls + '"' + (title ? ' title="' + esc(title) + '"' : '') + '>' + esc(text) + '</span>'; }
+  // One chain of the factory's story (routes/story.ts) as a row of steps: built by the contributor → the gate → the audit → built again by the project → tried in the lab → decided. The package page and a person's page draw the same row.
+  function chainRow(c) {
+
+    var sc = c.score, cc = c.contributor, pb = c.project, a = c.approval;
+      var step = function (state, title, detail) { return '<div class="fstep ' + state + '"><i class="dot ' + (state === "ok" ? "ok" : state === "bad" ? "error" : state === "warn" ? "warn" : "") + '"></i><div><b>' + title + '</b><span>' + detail + '</span></div></div>'; };
+      var vet = cc && cc.result && cc.result.vet, audit = c.audit, pvet = pb && pb.result && pb.result.vet, trial = c.trial;
+      return '<div class="fchainrow"><div class="fhead"><span>' + (cc ? personLink(cc.owner) + '\'s build <a href="/build/' + cc.id + '">#' + cc.id + '</a> · ' + esc(cc.version || '') + ' · ' + esc(cc.arch) : 'the project\'s build <a href="/build/' + pb.id + '">#' + pb.id + '</a> · ' + esc(pb.version || '') + ' · ' + esc(pb.arch)) + '</span>' + pillHtml({ A: "ok", B: "ok", C: "warn", D: "error" }[sc.class], "class " + sc.class + " · " + sc.points + "/100", "with the maintainer's half green: " + sc.projected) + '</div><div class="fsteps">'
+        + (cc ? step(cc.status === "staged" || cc.status === "done" ? "ok" : cc.status === "failed" ? "bad" : "", "Built by the contributor", (cc.status === "staged" || cc.status === "done" ? "succeeded" : cc.status) + (cc.finished_at ? ' · ' + ago(cc.finished_at) : '') + (cc.attempts > 1 ? ' · ' + cc.attempts + ' attempts' : '')) : '')
+        + (cc ? step(vet ? (vet.verdict === "pass" ? (vet.warnings ? "warn" : "ok") : "bad") : "", "The gate", vet ? (vet.verdict === "pass" ? (vet.warnings ? vet.warnings + " warning(s)" : "clean") : vet.fails + " failed") : "not run") : '')
+        + (cc ? step(audit && audit.status === "done" ? ({ ok: "ok", warn: "warn", block: "bad" }[audit.result && audit.result.verdict] || "ok") : "", "The audit", audit ? (audit.status === "done" ? (audit.result && audit.result.verdict || "done") + (audit.result && audit.result.model ? ' · ' + esc(audit.result.model) : '') : audit.status) : "not yet") : '')
+        + step(pb ? (pb.status === "staged" || pb.status === "done" ? "ok" : pb.status === "failed" ? "bad" : "") : "", "Built again by the project", pb ? '<a href="/build/' + pb.id + '">#' + pb.id + '</a> · ' + (pb.status === "staged" || pb.status === "done" ? "succeeded" : pb.status) + (pvet ? ' · gate ' + (pvet.verdict === "pass" ? (pvet.warnings ? pvet.warnings + " warning(s)" : "clean") : "failed") : '') : (sc.ready ? "ready: a maintainer asks for it" : "after the contributor's half"))
+        + step(trial && trial.status === "done" ? (trial.result && trial.result.verdict === "ok" ? "ok" : "bad") : "", "Tried in the lab", trial ? (trial.status === "done" ? (trial.result && trial.result.verdict === "ok" ? "a real pacman installed it" : "could not: " + esc(trial.result && trial.result.verdict || "")) : trial.status) : "not yet")
+        + step(a ? (a.decision === "approved" ? "ok" : "bad") : c.withdrawn ? "warn" : "", "Decided", a ? esc(a.decision) + ' by ' + personLink(a.by) + ' ' + ago(a.created_at) + (a.note ? ' — ' + esc(a.note) : '') : c.withdrawn ? 'the approval by ' + personLink(c.withdrawn.by) + ' was withdrawn ' + ago(c.withdrawn.withdrawn_at) + ' by ' + personLink(c.withdrawn.withdrawn_by) + ': ' + esc(c.withdrawn.withdrawn_reason || '') + ' — another maintainer decides' : (pb && pb.status === "staged" ? "waiting for a maintainer — never the owner" : "not yet"))
+        + '</div></div>';
+  }
+  // One half of the score (score.ts) as a column of checks: the mark, the item, its note, the points — a build's page draws the two halves, a person's page draws them per architecture. extra(item) adds the evidence link that proves an item.
+  function ckColumn(sc, who, title, lede, extra) {
+    var items = sc.items.filter(function (i) { return i.who === who; }), pts = items.reduce(function (n, i) { return n + i.points; }, 0);
+    return '<div class="ckcol ' + who + '"><h3>' + title + ' <span class="num">' + pts + '<span class="dim">/50</span></span></h3><p class="dim">' + lede + '</p><ul>' + items.map(function (i) {
+      var mark = i.state === "pending" ? '<i class="ck pending" title="still to come">○</i>' : i.points === i.max ? '<i class="ck ok">✓</i>' : i.points > 0 ? '<i class="ck part">✓</i>' : '<i class="ck bad">✗</i>';
+      var more = extra ? extra(i) : "";
+      return '<li>' + mark + '<div><b>' + esc(i.item) + '</b> <span class="dim">' + esc(i.note) + '</span>' + (more ? ' ' + more : '') + '</div><span class="num pts">' + i.points + '<span class="dim">/' + i.max + '</span></span></li>';
+    }).join("") + '</ul></div>';
+  }
+  // The request on the record (request.ts), as the form checks it today: six lines, each green or not, and the way to put it right when it is the reader's own.
+  function requestBlock(q, own, name, renewable, whyNot) {
+    if (!q) return '<div class="pkreq"><b>The request</b> <span class="dim">none on the record</span></div>';
+    var bad = q.checks.filter(function (c) { return !c.ok; }).length;
+    if (renewable === undefined) renewable = true;
+    return '<div class="pkreq' + (q.complete ? '' : ' incomplete') + '"><div class="pkreq-head"><b>The request</b> '
+      + (q.id ? '<a href="' + esc(q.record) + '" title="request.json, written once, signed by the pool">#' + q.id + '</a>' + (q.signature ? ' <a class="dim" href="' + esc(q.signature) + '">sig</a>' : '') : '') + (q.version ? ' · ' + esc(q.version) : '') + (q.created_at ? ' · ' + ago(q.created_at) : '')
+      + ' ' + (q.complete ? pillHtml("ok", "complete", "what the form asks today, all on the record") : pillHtml("warn", bad + " to put right", "the form would not take it today"))
+      + (own && !q.complete ? (renewable ? ' <a class="btn small" href="/request?renew=' + encodeURIComponent(name) + '" title="the same form, filled from the record; the confirmations are yours to tick">Renew the request</a>' : ' <span class="dim" style="margin-left:auto">' + esc(whyNot || "renew it once nothing of it is being built") + '</span>') : '')
+      + '</div><ul class="pkreq-list">' + q.checks.map(function (c) { return '<li><i class="ck ' + (c.ok ? 'ok">✓' : 'bad">✗') + '</i><div><b>' + esc(c.item) + '</b> <span class="dim">' + esc(c.note) + '</span></div></li>'; }).join("") + '</ul></div>';
+  }
+  // A chain's state in one word and its colour — the pill an architecture wears.
+  function chainState(c) {
+    if (!c) return { cls: "none", text: "no build yet" };
+    var cc = c.contributor, pb = c.project, a = c.approval, sc = c.score;
+    if (a && a.decision === "approved") return { cls: "ok", text: "approved" };
+    if (c.withdrawn) return { cls: "warn", text: "approval withdrawn" };
+    if (a && a.decision === "rejected") return { cls: "error", text: "rejected" };
+    if (pb && (pb.status === "queued" || pb.status === "leased")) return { cls: "blue", text: "the project is building it" };
+    if (pb && pb.status === "staged") return { cls: "ok", text: "built again by the project" };
+    if (pb && pb.status === "failed") return { cls: "error", text: "the project's build failed" };
+    if (cc && (cc.status === "queued")) return { cls: "blue", text: "queued" };
+    if (cc && (cc.status === "leased")) return { cls: "blue", text: "building" };
+    if (cc && cc.status === "failed") return { cls: "error", text: "the build failed" };
+    if (cc && cc.status === "cancelled") return { cls: "none", text: "superseded" };
+    if (cc && cc.status === "staged") return sc.ready ? { cls: "ok", text: "ready for a maintainer" } : { cls: "warn", text: "not ready yet" };
+    return { cls: "none", text: cc ? cc.status : "—" };
+  }
+  // The evidence a chain's step left, as links beside the checklist's items (the artifacts of the build the item is about).
+  function ckEvidence(c) {
+    var art = function (t, file, text) { return t ? '<a class="run" href="/api/v1/factory/tasks/' + t.id + '/artifacts/' + file + '">' + text + '</a>' : ''; };
+    var cc = c.contributor, pb = c.project, tr = c.trial;
+    return function (i) {
+      if (i.item === "A build that succeeds") return cc ? art(cc, "build.log", "log") + (cc.status === "staged" || cc.status === "done" ? ' ' + art(cc, "PKGBUILD", "PKGBUILD") : '') : '';
+      if (i.item === "The gate passed") return cc && cc.result && cc.result.vet ? art(cc, "tests.log", "tests") + ' ' + art(cc, "vet.json", "vet.json") : '';
+      if (i.item === "The audit") return c.audit && c.audit.status === "done" ? art(cc, "audit.md", "report") : '';
+      if (i.item === "The project built it again") return pb ? art(pb, "build.log", "log") : '';
+      if (i.item === "The project's gate") return pb && pb.result && pb.result.vet ? art(pb, "tests.log", "tests") : '';
+      if (i.item === "The trial installed it") return tr && tr.status === "done" ? art(pb, "trial.log", "transcript") : '';
+      return '';
+    };
+  }
+  // One architecture of a package: its latest chain — the state, the class, the build and the worker that held it, the two halves of the score with their evidence, the earlier builds — and the one line that says whose turn it is (next is the page's own wording); acts is the page's buttons for this architecture.
+  function archPanel(arch, chainsOfArch, next, acts) {
+    var c = chainsOfArch[0], st = chainState(c);
+    var head = '<div class="pkarch-head"><span class="arch-name">' + esc(arch) + '</span> ' + pillHtml(st.cls, st.text);
+    if (c) {
+      var sc = c.score, cc = c.contributor, pb = c.project, t = cc || pb;
+      var cls = { A: "ok", B: "ok", C: "warn", D: "error" }[sc.class] || "none";
+      head += ' ' + pillHtml(cls, "class " + sc.class + " · " + sc.points + "/100", "today; with the maintainer's half green: " + sc.projected) + (sc.class !== sc.projected ? ' <span class="dim">→ ' + esc(sc.projected) + '</span>' : '');
+      head += ' <span class="dim">·</span> <a href="/build/' + t.id + '">#' + t.id + '</a>' + (t.version ? ' <span class="dim">' + esc(t.version) + '</span>' : '') + (t.lease_owner ? ' <span class="dim">on</span> ' + wtId({ id: t.lease_owner, owner: t.owner }) : '') + (t.finished_at ? ' <span class="dim">· ' + ago(t.finished_at) + '</span>' : t.started_at ? ' <span class="dim">· started ' + ago(t.started_at) + '</span>' : '') + (t.duration_ms ? ' <span class="dim">· ' + Math.round(t.duration_ms / 1000) + ' s</span>' : '');
+    }
+    head += (acts ? '<span class="acts-inline">' + acts + '</span>' : '') + '</div>';
+    if (!c) return '<section class="pkarch">' + head + '<p class="sub" style="margin:8px 0 0">' + next + '</p></section>';
+    var ev = ckEvidence(c), cc2 = c.contributor;
+    var earlier = chainsOfArch.slice(1, 6).map(function (x) { var s2 = chainState(x), t2 = x.contributor || x.project; return '<a href="/build/' + t2.id + '" title="' + esc(s2.text) + ' · class ' + esc(x.score.class) + '">#' + t2.id + '</a> <span class="dim">' + esc(s2.text) + '</span>'; });
+    return '<section class="pkarch">' + head + '<div class="pknext-line">' + next + '</div><div class="cklist">'
+      + ckColumn(c.score, "contributor", "The contributor's half", cc2 ? personLink(cc2.owner) + ' · build <a href="/build/' + cc2.id + '">#' + cc2.id + '</a>' : 'nobody yet', ev)
+      + ckColumn(c.score, "maintainer", "The maintainer's half", c.project ? 'the project\'s build <a href="/build/' + c.project.id + '">#' + c.project.id + '</a>' + (c.approval ? ' · decided by ' + personLink(c.approval.by) : c.withdrawn ? ' · the approval by ' + personLink(c.withdrawn.by) + ' was withdrawn' : ' · not decided') : 'not started' + (c.score.ready ? ' — ready to begin' : ''), ev)
+      + '</div>' + (earlier.length ? '<p class="sub" style="margin:8px 0 0">Earlier: ' + earlier.join(' · ') + '</p>' : '') + '</section>';
   }
   function personChip(login, role, extra) { return '<a class="person" href="/user/' + encodeURIComponent(login) + '" title="' + esc(login) + ' · ' + esc(role) + '">' + avatarIcon(login, role) + '<b>' + esc(login) + '</b>' + (extra ? ' <span class="r">' + extra + '</span>' : '') + '</a>'; }
   function tile(k, v, s, cls) { return '<div class="tile"><div class="k">' + k + '</div><div class="v num' + (cls ? " " + cls : "") + '">' + v + '</div><div class="s">' + s + '</div></div>'; }
@@ -880,7 +1101,7 @@ ${body}
 <script>
 (function () {
   document.querySelectorAll("footer .more a").forEach(function (a) { if (a.getAttribute("href") === location.pathname) a.classList.add("active"); });
-${HELPERS.split("__POOL_URL__").join(pool).split("__RINGS_TEXT__").join(JSON.stringify(RING_TEXT))}
+${HELPERS.split("__POOL_URL__").join(pool).split("__RINGS_TEXT__").join(JSON.stringify(RING_TEXT)).split("__WICON__").join(JSON.stringify(WORKER_ICONS))}
 ${o.script ?? ""}
 ${docsSearch}
 })();

@@ -17,13 +17,13 @@
 
 export interface ChainInput {
   /** The contributor's build: how many leases it took, how it ended. */
-  contributor: { attempts: number; status: string } | null;
+  contributor: { attempts: number; status: string; version?: string | null; bump?: boolean } | null;
   /** The gate on the contributor's build (vet.json's summary). */
   vet: { verdict: string; fails: number; warnings: number } | null;
   /** The second agent's report on it. */
   audit: { status: string; verdict?: string | null; high?: number; findings?: number } | null;
-  /** The request on the record: a licence and a source named. */
-  request: { license: string | null; source: string | null } | null;
+  /** The request on the record: a licence and a source named; `complete` when the form would accept it today (request.ts) — false for one that predates the checklist, null when not looked at; `version` is the release it names, so a build of another version is not this request's evidence. */
+  request: { license: string | null; source: string | null; complete?: boolean | null; version?: string | null } | null;
   /** The project's build of it, its gate and its trial. */
   project: { status: string; attempts: number } | null;
   projectVet: { verdict: string; fails: number; warnings: number } | null;
@@ -72,7 +72,14 @@ export function scoreChain(c: ChainInput): Score {
   // ---- the contributor's half (50)
   const built = c.contributor && ["staged", "done"].includes(c.contributor.status);
   const attempts = c.contributor?.attempts ?? 0;
-  add("contributor", "A request on the record", c.request && c.request.license && c.request.source ? 5 : 0, 5, c.request ? "done" : "pending", c.request ? (c.request.license && c.request.source ? "licence and source named" : "the licence or the source is missing") : "no request yet");
+  const named = !!(c.request && c.request.license && c.request.source);
+  // A build is this request's evidence when it is of the version the request names: both sides read the same way — no leading v, no pkgrel, dashes as underscores (a task's version is the tag so written, or pkgver-pkgrel from the manifest when no tag was known).
+  const asVersion = (tag: string) => tag.replace(/^[vV]/, "").replace(/-\d+$/, "").replace(/-/g, "_");
+  const stale = !!(named && c.request?.version && c.contributor?.version && c.request.version !== "unknown" && asVersion(c.request.version) !== asVersion(c.contributor.version));
+  // The request judges the chains a maintainer has yet to decide. A bump — the pool's own build of a new release from the approved recipe — is evidence for the maintainer, not for the request; a decided chain is history, and a request renewed since does not rewrite it.
+  const judged = !c.contributor?.bump && !c.approval;
+  const incomplete = judged && (!c.request || !named || c.request.complete === false || stale);
+  add("contributor", "A request on the record", named ? (incomplete ? 2 : 5) : 0, 5, c.request ? "done" : "pending", !c.request ? "no request on the record" : !named ? "the licence or the source is missing" : !judged ? "licence and source named" : c.request.complete === false ? "licence and source named, but the request is incomplete — renew it" : stale ? `the request names ${c.request.version}, this build is ${c.contributor?.version} — build again` : "licence and source named");
   add("contributor", "A build that succeeds", built ? Math.max(4, 15 - 3 * Math.max(0, attempts - 1)) : 0, 15, c.contributor ? (built || c.contributor.status === "failed" || c.contributor.status === "cancelled" ? "done" : "pending") : "pending", c.contributor ? (built ? (attempts <= 1 ? "first attempt" : `${attempts} attempts`) : c.contributor.status === "failed" ? "the build failed" : c.contributor.status) : "no build yet");
   add("contributor", "The gate passed", c.vet ? (c.vet.verdict === "pass" ? (c.vet.warnings ? 10 : 15) : 0) : 0, 15, c.vet ? "done" : "pending", c.vet ? (c.vet.verdict === "pass" ? (c.vet.warnings ? `${c.vet.warnings} warning(s)` : "clean") : `${c.vet.fails} check(s) failed`) : built ? "no verdict on the record (built before the gate)" : "not run yet");
   const auditDone = c.audit?.status === "done";
@@ -92,6 +99,7 @@ export function scoreChain(c: ChainInput): Score {
   const max = items.reduce((n, i) => n + i.max, 0);
   const contributorPts = items.filter((i) => i.who === "contributor").reduce((n, i) => n + i.points, 0);
   const projected = classOf(contributorPts + 50);
-  const ready = !!(built && c.vet?.verdict === "pass" && (auditDone || c.audit?.status === "failed"));
+  // Ready for a maintainer: built, through the gate, audited — and a request as the form would take it today, of this version (an incomplete one is the contributor's to renew; a build of another version is the contributor's to redo).
+  const ready = !!(built && c.vet?.verdict === "pass" && (auditDone || c.audit?.status === "failed") && !incomplete);
   return { points, max, class: classOf(points), projected, ready, items };
 }

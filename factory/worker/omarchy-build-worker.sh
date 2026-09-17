@@ -240,7 +240,7 @@ fetch_pkgbuild() { # name ref → /build/pkg holds the PKGBUILD directory
     done
     ls -la /build/evidence
     with_secrets python3 /build/pool/factory/bin/draft-pkgbuild --url "${review_url:-$OMARCHY_REVIEW_URL}" --name "$name" --out /build/pkg --evidence /build/evidence \
-      ${review_source:+--source "$review_source"} ${review_version:+--version "$review_version"} ${review_desc:+--description "$review_desc"} ${review_license:+--license "$review_license"}
+      ${review_source:+--source "$review_source"} ${review_version:+--version "$review_version"} ${review_desc:+--description "$review_desc"} ${review_license:+--license "$review_license"} ${BUILD_HINT:+--hint="$BUILD_HINT"}
   elif [[ "$ref" == bump:* ]]; then
     # A new upstream release of an approved package: the PKGBUILD a
     # maintainer approved, with pkgver moved to the tag and pkgrel reset;
@@ -257,7 +257,25 @@ fetch_pkgbuild() { # name ref → /build/pkg holds the PKGBUILD directory
     spec="${ref#draft:}"; url="${spec%@*}"
     echo "==> Drafting a PKGBUILD for $url ($( [[ -n "$(agent_label)" ]] && echo "with the contributor's agent, $(agent_label)" || echo "template; set an agent key on the worker for an agent-written draft"))"
     mkdir -p /build/pkg
-    with_secrets python3 /build/pool/factory/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg
+    # A build asked after a failed one starts from that one's lesson: its
+    # PKGBUILD and its log (public evidence), the way a second attempt
+    # inside one task does — instead of drafting from nothing again and
+    # failing the same way. The contributor's hint goes with it.
+    rm -f /build/PKGBUILD.prev /build/lesson.log
+    if [[ -n "${LESSON_TASK:-}" ]]; then
+      local api="${OMARCHY_API:-https://pkgs.firemanxbr.org}" f
+      curl -sSf --max-time 60 "$api/api/v1/factory/tasks/$LESSON_TASK/artifacts/PKGBUILD" -o /build/PKGBUILD.prev 2>/dev/null || rm -f /build/PKGBUILD.prev
+      # The build's log, then the gate's verdict and the audit's report when they exist: what stopped it, whichever step did.
+      for f in build.log tests.log audit.md; do
+        curl -sSf --max-time 60 "$api/api/v1/factory/tasks/$LESSON_TASK/artifacts/$f" 2>/dev/null | { printf '\n==== %s of build %s ====\n' "$f" "$LESSON_TASK"; cat; } >> /build/lesson.log || true
+      done
+    fi
+    if [[ -s /build/PKGBUILD.prev ]]; then
+      echo "==> The lesson: the PKGBUILD of build $LESSON_TASK$( [[ -s /build/lesson.log ]] && echo " and what stopped it" )${BUILD_HINT:+; the hint from the person who asked: $BUILD_HINT}"
+      with_secrets python3 /build/pool/factory/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg --previous /build/PKGBUILD.prev $( [[ -s /build/lesson.log ]] && echo "--log /build/lesson.log" ) ${BUILD_HINT:+--hint="$BUILD_HINT"}
+    else
+      with_secrets python3 /build/pool/factory/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg ${BUILD_HINT:+--hint="$BUILD_HINT"}
+    fi
   elif [[ "$ref" == *@*:* ]]; then
     local url rest tag path
     url="${ref%%@*}"; rest="${ref#*@}"; tag="${rest%%:*}"; path="${rest#*:}"
@@ -554,18 +572,19 @@ build_attempts() { # name ref
     cp /build/pkg/PKGBUILD /build/PKGBUILD.prev
     if [[ "$ref" == review:* ]]; then
       with_secrets python3 /build/pool/factory/bin/draft-pkgbuild --url "${review_url:-$OMARCHY_REVIEW_URL}" --name "$name" --out /build/pkg --evidence /build/evidence --previous /build/PKGBUILD.prev --log /build/attempt.log \
-        ${review_source:+--source "$review_source"} ${review_version:+--version "$review_version"} ${review_desc:+--description "$review_desc"} ${review_license:+--license "$review_license"} || return 4
+        ${review_source:+--source "$review_source"} ${review_version:+--version "$review_version"} ${review_desc:+--description "$review_desc"} ${review_license:+--license "$review_license"} ${BUILD_HINT:+--hint="$BUILD_HINT"} || return 4
     else
       local url; url="${ref#draft:}"; url="${url%@*}"
-      with_secrets python3 /build/pool/factory/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg --previous /build/PKGBUILD.prev --log /build/attempt.log || return 4
+      with_secrets python3 /build/pool/factory/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg --previous /build/PKGBUILD.prev --log /build/attempt.log ${BUILD_HINT:+--hint="$BUILD_HINT"} || return 4
     fi
   done
 }
 
 inside() {
-  local name ref arch pool review_url review_source review_version review_desc review_license
+  local name ref arch pool review_url review_source review_version review_desc review_license lesson hint
   # shellcheck source=/dev/null
   source /task/meta.sh
+  LESSON_TASK="${lesson:-}"; BUILD_HINT="${hint:-}"; export LESSON_TASK BUILD_HINT
   prepare_container
   add_pool_repos "$arch" "$pool"
   local status=0
@@ -616,7 +635,10 @@ container_worker() {
   done
   task="$body"
   id="$(jq -r .task.id <<<"$task")"; name="$(jq -r .task.name <<<"$task")"; ref="$(jq -r .task.pkgbuild_ref <<<"$task")"
-  log "task $id: $name for $ARCH ($ref)"
+  # What the asker put with the build: the failed build to learn from, a word for the agent (fetch_pkgbuild reads both).
+  LESSON_TASK="$(jq -r '.task.params.lesson // empty' <<<"$task")"; export LESSON_TASK
+  BUILD_HINT="$(jq -r '.task.params.hint // empty' <<<"$task")"; export BUILD_HINT
+  log "task $id: $name for $ARCH ($ref)${LESSON_TASK:+, lesson: build $LESSON_TASK}${BUILD_HINT:+, with a hint}"
   # The owner's workspace is full: nothing this build produces can land.
   # Say so now — the task fails with the reason on the dashboard — instead
   # of building for an hour into a 413 (2026-09-16, four tasks did).

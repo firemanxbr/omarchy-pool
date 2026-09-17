@@ -9,6 +9,8 @@
  */
 import { json, type Env } from "../index";
 import { scoreChain, type Score } from "../score";
+import { requestChecks, type RequestRow, type RequestChecks } from "../request";
+import { recordUrl } from "../record";
 
 export interface TaskBrief {
   id: number;
@@ -20,6 +22,10 @@ export interface TaskBrief {
   version: string | null;
   attempts: number;
   lease_owner: string | null;
+  /** The worker this build was asked for, when it was: only that one claims it. */
+  pinned_to?: string | null;
+  /** Where the recipe came from (draft:, <url>@<tag>:<path>, bump:<task>@<tag>, review:<task>). */
+  pkgbuild_ref?: string | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -44,7 +50,7 @@ export interface Chain {
   score: Score;
 }
 
-const TASK_COLS = "id, kind, status, trust, owner, arch, version, attempts, lease_owner, created_at, started_at, finished_at, duration_ms, error, params, result";
+const TASK_COLS = "id, kind, status, trust, owner, arch, version, attempts, lease_owner, pinned_to, pkgbuild_ref, created_at, started_at, finished_at, duration_ms, error, params, result";
 
 function brief(r: Record<string, unknown>): TaskBrief {
   const parse = (s: unknown) => { try { return s ? (JSON.parse(s as string) as Record<string, unknown>) : null; } catch { return null; } };
@@ -56,19 +62,35 @@ export async function storyRows(env: Env, name: string) {
   const [tasks, approvals, pkg] = await Promise.all([
     env.DB.prepare(`SELECT ${TASK_COLS} FROM build_tasks WHERE name = ? AND kind IN ('build', 'audit', 'trial', 'publish') ORDER BY id DESC LIMIT 120`).bind(name).all<Record<string, unknown>>(),
     env.DB.prepare("SELECT id, task_id, decision, by, note, rebuild_task, created_at, version, arch, withdrawn_at, withdrawn_by, withdrawn_reason FROM approvals WHERE name = ? ORDER BY id DESC LIMIT 40").bind(name).all<Approval>(),
-    env.DB.prepare("SELECT name, owner, url, status, detail, category, request_id, description, license, source, project, created_at, updated_at, blocked_at, blocked_by, blocked_reason FROM factory_packages WHERE name = ?").bind(name).first<Record<string, unknown>>(),
+    env.DB.prepare("SELECT name, owner, url, status, detail, category, request_id, description, license, source, project, arches, detected, created_at, updated_at, blocked_at, blocked_by, blocked_reason FROM factory_packages WHERE name = ?").bind(name).first<Record<string, unknown>>(),
   ]);
-  return { tasks: tasks.results.map(brief), approvals: approvals.results, pkg };
+  // The request the registration points at: what the contributor confirmed, the version, the record — the checks read it (request.ts).
+  const request = pkg?.request_id
+    ? await env.DB.prepare("SELECT id, version, checklist, migrated, record, sha256, arches, created_at FROM package_requests WHERE id = ?").bind(pkg.request_id).first<RequestRow>()
+    : null;
+  return { tasks: tasks.results.map(brief), approvals: approvals.results, pkg, request: request ?? null };
+}
+
+/** The request as a page shows it: the record's URL, the version, the checks, whether the form would take it today. */
+export function requestView(env: Env, pkg: Record<string, unknown> | null, req: RequestRow | null, tasks: TaskBrief[] = []): (RequestChecks & { id: number | null; version: string | null; record: string | null; signature: string | null; arches: string[]; created_at: string | null; busy: number | null; renewable: boolean }) | null {
+  if (!pkg) return null;
+  // A renewal is taken while the package is registered, staged, rejected or unmaintained and no build of it — the project's included — is queued or running.
+  const busy = tasks.find((t) => t.kind === "build" && (t.status === "queued" || t.status === "leased"))?.id ?? null;
+  const renewable = ["registered", "staged", "rejected", "unmaintained"].includes(String(pkg.status)) && busy === null;
+  const checks = requestChecks({ project: (pkg.project as string | null) ?? null, source: (pkg.source as string | null) ?? null, description: (pkg.description as string | null) ?? null, license: (pkg.license as string | null) ?? null, detected: (pkg.detected as string | null) ?? null }, req);
+  let arches: string[] = [];
+  try { arches = JSON.parse(String(req?.arches ?? pkg.arches ?? "[]")) as string[]; } catch { arches = []; }
+  return { ...checks, id: req?.id ?? null, version: req?.version ?? null, record: req?.record ? recordUrl(env, req.record) : null, signature: req?.record ? recordUrl(env, `${req.record}.sig`) : null, arches, created_at: req?.created_at ?? null, busy, renewable };
 }
 
 /** The chains, newest first: one per contributor's build (a project build with no contributor behind it — the old direct approvals — is a chain of its own). */
-export function chains(tasks: TaskBrief[], approvals: Approval[], pkg: Record<string, unknown> | null): Chain[] {
+export function chains(tasks: TaskBrief[], approvals: Approval[], pkg: Record<string, unknown> | null, req: RequestRow | null = null): Chain[] {
   const builds = tasks.filter((t) => t.kind === "build");
   const contributors = builds.filter((t) => t.trust === "community");
   const projects = builds.filter((t) => t.trust === "project");
   const of = (kind: string, key: string, id: number) => tasks.find((t) => t.kind === kind && t.params[key] === id) ?? null;
   const vetOf = (t: TaskBrief | null) => (t?.result?.vet as { verdict: string; fails: number; warnings: number } | undefined) ?? null;
-  const request = pkg ? { license: (pkg.license as string | null) ?? null, source: (pkg.source as string | null) ?? null } : null;
+  const request = pkg ? { license: (pkg.license as string | null) ?? null, source: (pkg.source as string | null) ?? null, version: req?.version ?? null, complete: requestChecks({ project: (pkg.project as string | null) ?? null, source: (pkg.source as string | null) ?? null, description: (pkg.description as string | null) ?? null, license: (pkg.license as string | null) ?? null, detected: (pkg.detected as string | null) ?? null }, req).complete } : null;
   const category = (pkg?.category as string | null) ?? null;
   const make = (contributor: TaskBrief | null, project: TaskBrief | null): Chain => {
     const audit = contributor ? of("audit", "task", contributor.id) : null;
@@ -80,7 +102,7 @@ export function chains(tasks: TaskBrief[], approvals: Approval[], pkg: Record<st
     const withdrawn = mine.find((a) => a.withdrawn_at) ?? null;
     const auditReport = audit?.result as { verdict?: string; findings?: { severity: string }[] } | null | undefined;
     const score = scoreChain({
-      contributor: contributor ? { attempts: contributor.attempts, status: contributor.status } : null,
+      contributor: contributor ? { attempts: contributor.attempts, status: contributor.status, version: contributor.version, bump: !!contributor.pkgbuild_ref?.startsWith("bump:") } : null,
       vet: vetOf(contributor),
       audit: audit ? { status: audit.status, verdict: auditReport?.verdict ?? null, high: (auditReport?.findings ?? []).filter((f) => f.severity === "high").length, findings: (auditReport?.findings ?? []).length } : null,
       request,
@@ -116,16 +138,17 @@ export function chainOf(all: Chain[], taskId: number): Chain | null {
  * a package that came from a source has no story, and says so.
  */
 export async function handlePackageStory(name: string, env: Env): Promise<Response> {
-  const { tasks, approvals, pkg } = await storyRows(env, name);
+  const { tasks, approvals, pkg, request } = await storyRows(env, name);
   if (!pkg && !tasks.length) return json({ error: `${name} is not a factory package` }, 404);
-  const all = chains(tasks, approvals, pkg);
+  const all = chains(tasks, approvals, pkg, request);
   const rings = (await env.DB.prepare("SELECT DISTINCT rp.ring, p.repo_arch AS arch FROM packages p JOIN ring_packages rp ON rp.package_id = p.id AND rp.ring IN ('lab', 'edge', 'rc', 'stable') WHERE p.source = 'factory' AND p.name = ?").bind(name).all<{ ring: string; arch: string }>()).results;
   const decided = all.find((c) => c.approval?.decision === "approved") ?? null;
   const current = decided ?? all[0] ?? null;
   return json(
     {
       name,
-      package: pkg,
+      package: pkg ? { ...pkg, arches: (() => { try { return JSON.parse(String(pkg.arches ?? "[]")) as string[]; } catch { return []; } })() } : null,
+      request: requestView(env, pkg, request, tasks),
       class: current ? current.score.class : null,
       score: current ? current.score : null,
       rings,

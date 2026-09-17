@@ -1,5 +1,6 @@
 import { json, type Env } from "../index";
 import { scoreChain } from "../score";
+import { requestChecks } from "../request";
 import { isMaintainer, type Contributor } from "./contributors";
 import { reclaimStagingPackages } from "../staging";
 import { pullFromRings } from "./blocks";
@@ -41,7 +42,8 @@ export async function handleReviewList(env: Env): Promise<Response> {
   const staged = await env.DB.prepare(
     `SELECT t.id, t.name, t.arch, t.version, t.owner, t.status, t.trust, t.params, t.staged_prefix, t.result_sha256, t.result_filename, t.duration_ms, t.finished_at, t.pkgbuild_ref, t.result, t.attempts,
             t.lease_owner, w.owner AS worker_owner, w.labels AS worker_labels, w.hostname AS worker_hostname, w.trusted_by AS worker_trusted_by,
-            p.url, p.detected, p.category, p.license AS request_license, p.source AS request_source,
+            p.url, p.detected, p.category, p.license AS request_license, p.source AS request_source, p.project AS request_project, p.description AS request_description,
+            q.id AS request_id, q.version AS request_version, q.checklist AS request_checklist, q.migrated AS request_migrated, q.record AS request_record, q.sha256 AS request_sha256, q.created_at AS request_created_at,
             (SELECT decision FROM approvals a WHERE a.task_id = t.id ORDER BY a.id DESC LIMIT 1) AS decision,
             (SELECT by FROM approvals a WHERE a.task_id = t.id ORDER BY a.id DESC LIMIT 1) AS decided_by,
             (SELECT u.status FROM build_tasks u WHERE u.kind = 'audit' AND json_extract(u.params, '$.task') = t.id ORDER BY u.id DESC LIMIT 1) AS audit_status,
@@ -51,6 +53,7 @@ export async function handleReviewList(env: Env): Promise<Response> {
             (SELECT u.result FROM build_tasks u WHERE u.kind = 'trial' AND json_extract(u.params, '$.task') = t.id ORDER BY u.id DESC LIMIT 1) AS trial_result,
             (SELECT u.error FROM build_tasks u WHERE u.kind = 'trial' AND json_extract(u.params, '$.task') = t.id ORDER BY u.id DESC LIMIT 1) AS trial_error
        FROM build_tasks t LEFT JOIN factory_packages p ON p.name = t.name
+                          LEFT JOIN package_requests q ON q.id = p.request_id
                           LEFT JOIN build_workers w ON w.id = t.lease_owner
       WHERE t.kind = 'build' AND t.status = 'staged'
         AND NOT EXISTS (SELECT 1 FROM approvals a WHERE a.task_id = t.id AND a.decision = 'approved' AND a.withdrawn_at IS NULL)
@@ -72,28 +75,33 @@ export async function handleReviewList(env: Env): Promise<Response> {
   }
   // The contributor's build behind each of the project's rows in the list (its gate, its audit, its attempts): the score needs both halves.
   const fromIds = staged.results.map((r) => (r.trust === "project" && r.params ? (JSON.parse(r.params as string) as { review?: number }).review : null)).filter((x): x is number => typeof x === "number");
-  const fromRows = new Map<number, { id: number; attempts: number; status: string; result: string | null; audit_status: string | null; audit_result: string | null }>();
+  const fromRows = new Map<number, { id: number; attempts: number; status: string; result: string | null; version: string | null; pkgbuild_ref: string | null; audit_status: string | null; audit_result: string | null }>();
   if (fromIds.length) {
     const rows = await env.DB.prepare(
-      `SELECT t.id, t.attempts, t.status, t.result,
+      `SELECT t.id, t.attempts, t.status, t.result, t.version, t.pkgbuild_ref,
               (SELECT u.status FROM build_tasks u WHERE u.kind = 'audit' AND u.name = t.name AND json_extract(u.params, '$.task') = t.id ORDER BY u.id DESC LIMIT 1) AS audit_status,
               (SELECT u.result FROM build_tasks u WHERE u.kind = 'audit' AND u.name = t.name AND json_extract(u.params, '$.task') = t.id ORDER BY u.id DESC LIMIT 1) AS audit_result
          FROM build_tasks t WHERE t.id IN (${fromIds.map(() => "?").join(", ")})`,
-    ).bind(...fromIds).all<{ id: number; attempts: number; status: string; result: string | null; audit_status: string | null; audit_result: string | null }>();
+    ).bind(...fromIds).all<{ id: number; attempts: number; status: string; result: string | null; version: string | null; pkgbuild_ref: string | null; audit_status: string | null; audit_result: string | null }>();
     for (const r of rows.results) fromRows.set(r.id, r);
   }
   // The chain's score (score.ts) from what the row and its other half carry; `ready` = the contributor's half is complete, a maintainer's time is well spent.
   const scoreOf = (r: Record<string, unknown>) => {
     const audit = (st: string | null, res: string | null) => { const a = auditOf(st, res, null); return st ? { status: a.status, verdict: a.verdict ?? null, high: a.high, findings: a.findings } : null; };
     const trial = (st: string | null, res: string | null) => { const t = trialOf(st, res, null); return st ? { status: t.status, verdict: t.verdict ?? null } : null; };
-    const request = { license: (r.request_license as string | null) ?? null, source: (r.request_source as string | null) ?? null };
+    // The request as the form would take it today (request.ts): an incomplete one — the checklist never confirmed, the version unknown — is not ready.
+    const req = requestChecks(
+      { project: (r.request_project as string | null) ?? null, source: (r.request_source as string | null) ?? null, description: (r.request_description as string | null) ?? null, license: (r.request_license as string | null) ?? null, detected: (r.detected as string | null) ?? null },
+      r.request_id ? { id: r.request_id as number, version: (r.request_version as string) ?? "", checklist: (r.request_checklist as string | null) ?? null, migrated: (r.request_migrated as number) ?? 0, record: (r.request_record as string) ?? "", sha256: (r.request_sha256 as string) ?? "", created_at: (r.request_created_at as string) ?? "" } : null,
+    );
+    const request = { license: (r.request_license as string | null) ?? null, source: (r.request_source as string | null) ?? null, version: (r.request_version as string | null) ?? null, complete: req.complete };
     if (r.trust === "project") {
       const from = r.params ? (JSON.parse(r.params as string) as { review?: number }).review : undefined;
       const c = from ? fromRows.get(from) : undefined;
-      return scoreChain({ contributor: c ? { attempts: c.attempts, status: c.status } : null, vet: c ? vetOf(c.result) : null, audit: c ? audit(c.audit_status, c.audit_result) : null, request, project: { status: r.status as string, attempts: r.attempts as number }, projectVet: vetOf(r.result as string | null), trial: trial(r.trial_status as string | null, r.trial_result as string | null), approval: null, category: (r.category as string | null) ?? null });
+      return scoreChain({ contributor: c ? { attempts: c.attempts, status: c.status, version: c.version, bump: !!c.pkgbuild_ref?.startsWith("bump:") } : null, vet: c ? vetOf(c.result) : null, audit: c ? audit(c.audit_status, c.audit_result) : null, request, project: { status: r.status as string, attempts: r.attempts as number }, projectVet: vetOf(r.result as string | null), trial: trial(r.trial_status as string | null, r.trial_result as string | null), approval: null, category: (r.category as string | null) ?? null });
     }
     const pb = projectOf.get(r.id as number);
-    return scoreChain({ contributor: { attempts: r.attempts as number, status: r.status as string }, vet: vetOf(r.result as string | null), audit: audit(r.audit_status as string | null, r.audit_result as string | null), request, project: pb ? { status: pb.status, attempts: pb.attempts } : null, projectVet: pb ? vetOf(pb.result) : null, trial: pb ? trial(pb.trial_status, pb.trial_result) : null, approval: null, category: (r.category as string | null) ?? null });
+    return scoreChain({ contributor: { attempts: r.attempts as number, status: r.status as string, version: (r.version as string | null) ?? null, bump: String(r.pkgbuild_ref ?? "").startsWith("bump:") }, vet: vetOf(r.result as string | null), audit: audit(r.audit_status as string | null, r.audit_result as string | null), request, project: pb ? { status: pb.status, attempts: pb.attempts } : null, projectVet: pb ? vetOf(pb.result) : null, trial: pb ? trial(pb.trial_status, pb.trial_result) : null, approval: null, category: (r.category as string | null) ?? null });
   };
   // A build of a version a maintainer already approved — the same name,
   // version and architecture, an earlier task — is nothing to decide: the
@@ -225,7 +233,7 @@ async function ownerOf(env: Env, name: string, fallback: string | null): Promise
  * the same gate, staged like any build. Then a maintainer approves *that*.
  */
 export async function handleProjectBuild(c: Contributor, id: number, request: Request, env: Env): Promise<Response> {
-  const b = (await request.json().catch(() => ({}))) as { note?: string };
+  const b = (await request.json().catch(() => ({}))) as { note?: string; worker?: unknown };
   const t = await env.DB.prepare("SELECT * FROM build_tasks WHERE id = ?").bind(id).first<Staged & { trust: string }>();
   if (!t) return json({ error: "no such task" }, 404);
   if (t.trust !== "community" || t.status !== "staged") return json({ error: `task ${id} is ${t.trust === "project" ? "the project's own build" : t.status}; the project builds from a contributor's staged build` }, 409);
@@ -234,12 +242,24 @@ export async function handleProjectBuild(c: Contributor, id: number, request: Re
   if (owner === c.login) return json({ error: `${c.login} brought ${t.name}; another maintainer must review it` }, 403);
   const inFlight = await env.DB.prepare("SELECT id, status FROM build_tasks WHERE kind = 'build' AND trust = 'project' AND json_extract(params, '$.review') = ? AND status IN ('queued', 'leased', 'staged')").bind(id).first<{ id: number; status: string }>();
   if (inFlight) return json({ error: `the project is already on it: task ${inFlight.id} is ${inFlight.status}` }, 409);
+  // Where it runs: one of the project's workers that builds this architecture, when the maintainer says which (the native one, not the emulated one).
+  let pinned: string | null = null;
+  if (typeof b.worker === "string" && b.worker.trim()) {
+    const w = await env.DB.prepare("SELECT id, arch, kinds, agent_status FROM build_workers WHERE id = ? AND revoked_at IS NULL AND trust = 'project'").bind(b.worker.trim()).first<{ id: string; arch: string; kinds: string | null; agent_status: string | null }>();
+    if (!w || w.arch !== t.arch) return json({ error: `${b.worker} is not a project worker for ${t.arch}` }, 400);
+    // The claim gives a review build only to a worker that declares builds and whose agent answered; pinned to another, it would wait forever.
+    const kinds = w.kinds ? (JSON.parse(w.kinds) as string[]) : [];
+    if (kinds.length && !kinds.includes("build")) return json({ error: `${w.id} does not take builds (it declares ${kinds.join(", ")})` }, 400);
+    if (w.agent_status !== "ok") return json({ error: `${w.id} has no agent that answers; the project's build is drafted by one` }, 400);
+    pinned = w.id;
+  }
   const pkg = await env.DB.prepare("SELECT request_id, project, source, release, description, license FROM factory_packages WHERE name = ?").bind(t.name).first<{ request_id: number | null; project: string | null; source: string | null; release: string | null; description: string | null; license: string | null }>();
-  const params = { review: id, request: pkg?.request_id ?? null, project: pkg?.project ?? null, source: pkg?.source ?? null, version: pkg?.release ?? t.version, description: pkg?.description ?? null, license: pkg?.license ?? null, owner, by: c.login, note: b.note ?? null };
+  // The maintainer's note is on the record and is the hint the project's agent drafts with (the worker reads params.hint).
+  const params = { review: id, request: pkg?.request_id ?? null, project: pkg?.project ?? null, source: pkg?.source ?? null, version: pkg?.release ?? t.version, description: pkg?.description ?? null, license: pkg?.license ?? null, owner, by: c.login, note: b.note ?? null, hint: typeof b.note === "string" && b.note.trim() ? b.note.trim().slice(0, 600) : null };
   const row = await env.DB.prepare(
-    `INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, params) VALUES (?, ?, ?, ?, ?, 30, 0, 'project', ?, 'build', ?) RETURNING id`,
+    `INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, params, pinned_to) VALUES (?, ?, ?, ?, ?, 30, 0, 'project', ?, 'build', ?, ?) RETURNING id`,
   )
-    .bind(t.name, t.arch, t.version, `review:${id}`, `project build asked by ${c.login}`, owner, JSON.stringify(params))
+    .bind(t.name, t.arch, t.version, `review:${id}`, `project build asked by ${c.login}`, owner, JSON.stringify(params), pinned)
     .first<{ id: number }>();
   await env.DB.prepare("UPDATE factory_packages SET detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?")
     .bind(`${t.version ?? ""} for ${t.arch}: the project is building it (task ${row?.id}), asked by ${c.login}`, t.name)
@@ -247,7 +267,7 @@ export async function handleProjectBuild(c: Contributor, id: number, request: Re
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('review', NULL, 'factory', 'ok', ?, ?)")
     .bind(`${t.name} ${t.version ?? ""} (${t.arch}): ${c.login} asked the project to build it — task ${row?.id}, from ${owner ?? "?"}'s build ${id}`, JSON.stringify({ task: row?.id, from: id, name: t.name, arch: t.arch, by: c.login, owner, note: b.note ?? null }))
     .run();
-  return json({ task: row?.id, from: id, by: c.login });
+  return json({ task: row?.id, from: id, by: c.login, pinned_to: pinned });
 }
 
 export async function handleApprove(c: Contributor, id: number, request: Request, env: Env): Promise<Response> {
@@ -313,7 +333,7 @@ export async function handleWithdraw(c: Contributor, id: number, request: Reques
   const t = await env.DB.prepare("SELECT name FROM build_tasks WHERE id = ?").bind(id).first<{ name: string }>();
   if (!t) return json({ error: "no such task" }, 404);
   const story = await storyRows(env, t.name);
-  const chain = chainOf(chains(story.tasks, story.approvals, story.pkg), id);
+  const chain = chainOf(chains(story.tasks, story.approvals, story.pkg, story.request), id);
   const found = chain?.approval && chain.approval.decision === "approved" ? chain.approval : null;
   if (!found) return json({ error: `no standing approval on task ${id}` }, 404);
   const a = { ...found, name: t.name };

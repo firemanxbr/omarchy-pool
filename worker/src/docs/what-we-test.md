@@ -67,6 +67,45 @@ stable on the same evidence as every synced package. A maintainer can
 still block it later — the reason on the record, another maintainer lifts
 it — and it leaves every ring at once.
 
+### When a build does not pass
+
+A build that failed, or failed the gate, or was blocked by the audit, is
+the contributor's to fix — and the page says how, on the row of that
+architecture (each architecture is built on a worker of its own, so one
+can be ready while the other failed). The tools, in the order to try them:
+
+1. **Read the evidence.** The log says what stopped it; the gate's log
+   names each failed check, and this page explains it; the audit's report
+   lists its findings with a fix for each; the PKGBUILD the agent wrote is
+   beside them.
+2. **Build again, with the lesson.** The next build of that architecture
+   starts from the last build's PKGBUILD and what stopped it — the log,
+   the gate's verdict, the audit's report — whether that build failed,
+   was rejected or was stopped at the gate: the drafter corrects instead
+   of starting from nothing. A **hint** the contributor writes in the
+   Build dialog goes with it: the binary's name, a build flag, a
+   dependency, what the recipe should do differently. Inside one build the
+   agent gets three attempts, each from the last log. (A package whose
+   repository ships its own PKGBUILD is built as it is, with no drafting:
+   the fix is made there, tagged, and the request renewed with the tag.)
+3. **Choose where it runs.** The same dialog lists the workers that can
+   take it: the contributor's own, and the ones the project shares. A
+   build that ran *emulated* (x86_64 under qemu on an aarch64 host) may
+   need nothing but a native worker. A build asked for one worker goes to
+   that worker only and waits for it; a contributor with no worker for the
+   architecture is built by the project's shared workers at once, one with
+   a worker by theirs first and by the shared ones after 14 days. A build
+   already waiting takes the choice made when it is asked for again;
+   revoking a worker frees the builds asked for it.
+4. **Build it at home first.** The same image runs on any machine with
+   the contributor's own agent key (*Workers* in the docs): what passes
+   there is what they queue here.
+
+A maintainer chooses the same way for the project's build: which of the
+project's workers — one that builds and whose agent answers, native or
+emulated — and the note they write is the hint the project's agent drafts
+with.
+
 An approval can be **withdrawn** by any maintainer, the one who gave it
 included: one that broke the rule (a package approved by the person who
 brought it, as the first package was during the bootstrap), or one a
@@ -83,11 +122,22 @@ decision — earns points, fifty for each half, from what the pool recorded:
 
 | The contributor's half | points | The maintainer's half | points |
 |---|---:|---|---:|
-| A request on the record: licence and source named | 5 | The project built it again (−3 per extra attempt, at least 6) | 15 |
+| A request on the record: licence and source named, as the form asks today (2 when it predates the checklist — renew it) | 5 | The project built it again (−3 per extra attempt, at least 6) | 15 |
 | A build that succeeds (−3 per extra attempt, at least 4) | 15 | The project's gate: clean 10, with warnings 7 | 10 |
 | The gate: clean 15, with warnings 10, failed 0 | 15 | The trial installed it | 15 |
 | The audit: ok 15, warn 10 (5 with a high finding), block 0 | 15 | A decision with a note (3 without) | 5 |
 | | | The category settled | 5 |
+
+A chain is **ready** for a maintainer when the contributor's half is
+complete: a build that succeeded, the gate passed, the audit answered —
+and the request as the form would take it today, naming the version the
+build is of. A request the pool wrote from a registration made before the
+form existed confirmed nothing; the contributor renews it from their page
+(the same form, filled from the record) and the build is ready again. The
+request judges what is still to be decided: a bump — the pool's own build
+of a new release from the approved recipe — and a chain already decided
+are not scored against it. Each architecture is its own chain: one can be
+ready while the other failed, and a person's page shows them one by one.
 
 The **class** is the score today: **A** from 90, **B** from 75, **C**
 from 55, **D** below. Beside it the dashboard shows the class the chain
@@ -132,3 +182,16 @@ maintainer merges it like any other change to the process.
   `.desktop` entry is valid — while a command-line binary must still start.
   The *Desktop apps* and *Prebuilt binaries* skills were written from the
   recipe that passed.
+- **2026-09-17 — the request predates the form.** The first packages were
+  registered before the request form existed; the pool wrote their
+  records from what it had, with an empty checklist and often an unknown
+  version, and the score gave them the full five points for "a request on
+  the record" — so a package could read *ready for a maintainer* on a
+  request nobody had confirmed. The request is now checked the way the
+  form checks it, one function for the story, for Review and for the
+  page: an incomplete one earns two points, is not ready, and says what to
+  put right; the contributor renews it from their page. A package's status
+  was also one word for two architectures, each built on a worker of its
+  own — *registered* after a failed x86_64 build hid an aarch64 build
+  waiting for a maintainer. A person's page now shows each architecture as
+  its own chain.
