@@ -1277,3 +1277,42 @@ describe("workers follow the brain", () => {
     expect(bounded).toContain("x".repeat(4095) + "\n");
   });
 });
+
+describe("one job at a time on a ring", () => {
+  it("a promotion into rc, a render of rc and the security fast-track wait for each other; a render of stable and a health check do not", async () => {
+    // A clean queue: what earlier tests left queued for the project's workers would be handed out first.
+    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = 'lock test' WHERE status IN ('queued', 'leased') AND trust = 'project'").run();
+    const ins = (kind: string, params: Record<string, string>, arch = "aarch64") =>
+      env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, kind, status, params) VALUES (?, ?, '-', ?, 'lock', 100, 0, 'project', ?, 'queued', ?)").bind(kind, arch, kind, kind, JSON.stringify(params)).run();
+    await ins("promote", { from: "edge", to: "rc", note: "test" });
+    await ins("render", { ring: "rc", arch: "aarch64" });
+    await ins("security", {});
+    await ins("render", { ring: "stable", arch: "aarch64" });
+    await ins("health", { ring: "rc", arch: "aarch64" });
+    const claim = (w: string) => call("POST", "/factory/claim", { arch: "aarch64", kinds: ["promote", "render", "security", "health"] }, w);
+    // w1 takes the promotion (first by id); the render of rc and the fast-track wait behind it — w2 gets the render of stable, then the health.
+    const first = await claim("omw_w1");
+    expect(first.status, JSON.stringify(first.json)).toBe(200);
+    expect(first.json.task.kind).toBe("promote");
+    const second = await claim("omw_w2");
+    expect(second.status).toBe(200);
+    expect(second.json.task).toMatchObject({ kind: "render", params: { ring: "stable" } });
+    await call("POST", `/factory/tasks/${second.json.task.id}/complete`, { result: {}, summary: "rendered" }, "omw_w2");
+    const third = await claim("omw_w2");
+    expect(third.status).toBe(200);
+    expect(third.json.task.kind).toBe("health");
+    await call("POST", `/factory/tasks/${third.json.task.id}/complete`, { result: {}, summary: "checked" }, "omw_w2");
+    expect((await claim("omw_w2")).status).toBe(204);
+    // The promotion done: the render of rc goes; the fast-track waits for it, being exclusive with every ring.
+    await call("POST", `/factory/tasks/${first.json.task.id}/fail`, { error: "test over", final: true }, "omw_w1");
+    const fourth = await claim("omw_w1");
+    expect(fourth.status).toBe(200);
+    expect(fourth.json.task).toMatchObject({ kind: "render", params: { ring: "rc" } });
+    expect((await claim("omw_w2")).status).toBe(204);
+    await call("POST", `/factory/tasks/${fourth.json.task.id}/complete`, { result: {}, summary: "rendered" }, "omw_w1");
+    const fifth = await claim("omw_w2");
+    expect(fifth.status).toBe(200);
+    expect(fifth.json.task.kind).toBe("security");
+    await call("POST", `/factory/tasks/${fifth.json.task.id}/complete`, { result: {}, summary: "matched" }, "omw_w2");
+  });
+});

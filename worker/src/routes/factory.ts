@@ -297,6 +297,8 @@ export function workerReady(w: { last_seen: string; kinds: string | null; agent:
 const ALL_KINDS = ["build", "sync", "promote", "rollback", "render", "health", "security", "metrics", "gc", "enqueue", "audit", "verify", "relayout", "publish", "trial"];
 /** Jobs any architecture can run: they read the index or the staging area, not packages of one arch. */
 const ANY_ARCH_KINDS = "'metrics', 'gc', 'security', 'promote', 'audit', 'verify', 'relayout'";
+/** Jobs that move a ring — one at a time per ring (the claim's lock). */
+const RING_MOVERS = "'promote', 'rollback', 'render', 'security'";
 
 export async function handleClaim(request: Request, env: Env, actor: Actor): Promise<Response> {
   const b = (await request.json()) as { arch?: string; hostname?: string; labels?: unknown; version?: string; kinds?: unknown; shared?: unknown; agent?: unknown; agent_status?: unknown; agent_error?: unknown; agent_checked_at?: unknown; usage?: unknown; log?: unknown };
@@ -352,6 +354,17 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   if (probe?.status !== "ok") scope += ` AND NOT ${AGENT_SCOPE}`;
   if (trust === "project") {
     scope += ` AND (kind != 'build' OR trust = 'project')`;
+    // One job at a time on a ring. The jobs that move a ring — a promotion
+    // into it, a rollback, a render, the security fast-track (any ring) —
+    // are not handed out while another of them holds a lease on the same
+    // ring: a promotion into rc and a fast-track into rc ran in the same
+    // minute, and the fast-track's late rollback undid the promotion
+    // (rc#34, 2026-09-17). Syncs (one per architecture, edge's releases
+    // carry each other's databases) and the read-only checks are not held.
+    scope += ` AND NOT (c.kind IN (${RING_MOVERS}) AND EXISTS (
+      SELECT 1 FROM build_tasks l WHERE l.status = 'leased' AND l.trust = 'project' AND l.kind IN (${RING_MOVERS}) AND l.id != c.id
+        AND (l.kind = 'security' OR c.kind = 'security'
+          OR COALESCE(json_extract(l.params, '$.to'), json_extract(l.params, '$.ring')) = COALESCE(json_extract(c.params, '$.to'), json_extract(c.params, '$.ring')))))`;
   } else {
     // The owner's worker takes the owner's tasks; a donated worker takes
     // anyone's once shared_after has passed (at once when it is unset).
@@ -384,7 +397,7 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   // serialises writes, so two workers never get the same one.
   const task = await env.DB.prepare(
     `UPDATE build_tasks SET status = 'leased', lease_owner = ?, lease_expires_at = ?, started_at = ?, attempts = attempts + 1, error = NULL
-      WHERE id = (SELECT id FROM build_tasks WHERE status = 'queued' AND (arch = ? OR kind IN (${ANY_ARCH_KINDS})) AND ${scope} ORDER BY priority, id LIMIT 1) AND status = 'queued'
+      WHERE id = (SELECT c.id FROM build_tasks c WHERE c.status = 'queued' AND (c.arch = ? OR c.kind IN (${ANY_ARCH_KINDS})) AND ${scope} ORDER BY c.priority, c.id LIMIT 1) AND status = 'queued'
       RETURNING *`,
   )
     .bind(workerId, plusMinutes(LEASE_MINUTES), now(), b.arch, ...binds)

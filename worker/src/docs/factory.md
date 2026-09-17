@@ -387,7 +387,12 @@ requeues leases past `lease_expires_at` — the way out for a worker that
 vanished, not the way a worker reports: the community worker's shell has
 last words, and whatever ends it while it holds a task (a command that fails
 outside the build's subshell, under `set -e`) is posted to `/fail` at once
-with the command and its status, the build's log with it.
+with the command and its status, the build's log with it. One job at a
+time on a ring: a promotion into it, a rollback, a render and the security
+fast-track (any ring) are not handed out while another of them holds a
+lease on the same ring — a promotion into rc and a fast-track into rc ran
+in the same minute and the fast-track's late rollback undid the promotion
+(2026-09-17). Syncs and the read-only checks are not held.
 
 ## Layout
 
