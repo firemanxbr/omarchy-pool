@@ -21,12 +21,6 @@ const BODY = String.raw`
     <div class="panel"><h3>Activity <span class="dim" style="font-size:12px;font-weight:400">16 weeks · builds, decisions, packages</span></h3><div class="activity" id="activity"></div><p class="sub" id="activity-note" style="margin:8px 0 0;font-size:12.5px"></p></div>
     <div class="panel"><h3>Track record <a href="/docs/governance">the formula →</a></h3><div class="score"><b id="score">…</b><div class="f" id="score-f"></div></div></div>
   </div>
-  <section id="share" hidden>
-    <div class="h2row"><h2>Share it</h2><span class="hint">this page is public — everything on it is on the record anyway</span></div>
-    <div class="share"><p><b style="color:var(--text)">You are part of open source.</b> Copy the link and post it wherever you like — your GitHub profile, LinkedIn, a blog. What it shows is what the pool recorded: packages, builds, decisions.</p><pre><span class="copy" id="copy-link">copy</span><span id="share-url"></span></pre><div class="row"><a class="btn ghost" href="/request">Request a package</a><a class="btn ghost" href="/auth/logout">Sign out</a></div>
-      <p class="sub" style="margin:12px 0 0;font-size:12.5px">Scripts and CI use a contributor token (<code>Authorization: Bearer omc_…</code>): <button type="button" class="small-btn" id="cli-token">Generate a token</button> <span class="dim">shown once; replaces the previous one, your workers keep theirs</span></p>
-      <pre id="cli-token-out" hidden></pre></div>
-  </section>
 
   <section id="record-section" hidden>
     <h2>Track record</h2>
@@ -50,7 +44,7 @@ const BODY = String.raw`
     <div class="h2row"><h2>Workers</h2><button type="button" class="more-link" id="w-toggle" hidden>+ register one</button></div>
     <p class="sub">The machines under this name, as the <a href="/workers">Workers</a> page shows them — their own (a contributor's), the review ones and the pool's, when this person keeps them.</p>
     <div id="w-own" hidden>
-      <p class="sub" style="margin:0 0 10px;font-size:12.5px">Optional — the shared workers build for you otherwise. Register one and run the signed image with the token it gives you, shown once: your packages only, your agent. <a href="/docs/workers">Run a worker →</a></p>
+      <p class="sub" style="margin:0 0 10px;font-size:12.5px">Optional — the shared queue builds for you otherwise. Register one and run the signed image with the token it gives you, shown once: your packages at once, with your agent; with <code>WORKER_SHARED=1</code>, everyone's queue too. <a href="/docs/workers">Run a worker →</a></p>
       <form id="worker-form" class="form" onsubmit="return false" hidden>
         <label>Name <input type="text" id="w-name" placeholder="laptop" required></label>
         <label>Architecture <select id="w-arch"><option>x86_64</option><option>aarch64</option></select></label>
@@ -134,7 +128,7 @@ const SCRIPT = String.raw`
         var mine = st.chains.filter(function (c) { return archOf(c) === a; });
         var running = mine[0] && ((mine[0].contributor && mine[0].contributor.status === "leased") || (mine[0].project && (mine[0].project.status === "queued" || mine[0].project.status === "leased")));
         var queued = mine[0] && mine[0].contributor && mine[0].contributor.status === "queued";
-        var acts = own && !pkg.blocked_at && registered.indexOf(a) >= 0 ? (running ? '<button type="button" class="small-btn" disabled title="a build is running">Build ' + esc(a) + '</button>' : '<button type="button" class="small-btn" data-build="' + esc(name) + '" data-arch="' + esc(a) + '" title="' + (queued ? "asked again: where it goes and the hint are what you choose now" : "this architecture only") + '">' + (queued ? "Re-route " : "Build ") + esc(a) + '</button>') : '';
+        var acts = own && !pkg.blocked_at && registered.indexOf(a) >= 0 ? (running ? '<button type="button" class="small-btn" disabled title="a build is running">Build ' + esc(a) + '</button>' : '<button type="button" class="small-btn" data-build="' + esc(name) + '" data-arch="' + esc(a) + '" title="' + (queued ? "name a worker, or take it out of the queue" : "this architecture only") + '">Build ' + esc(a) + '</button>') : '';
         return archPanel(a, mine, nextStep(st, mine[0]), acts);
       }).join("");
       return head + requestBlock(st.request, own, name, renewable, whyNot) + panels
@@ -156,7 +150,7 @@ const SCRIPT = String.raw`
     var art = function (t, f, text) { return '<a class="run" href="/api/v1/factory/tasks/' + t.id + '/artifacts/' + f + '">' + text + '</a>'; };
     var steps = function (items) { return '<ol class="howto">' + items.map(function (x) { return '<li>' + x + '</li>'; }).join("") + '</ol>'; };
     var drafted = function (t) { return !t || !t.pkgbuild_ref || t.pkgbuild_ref.indexOf("draft:") === 0; };
-    if (!c) return 'No build yet — ' + (own ? 'press <b>Build</b>: your worker (or a shared one) builds it as evidence, the gate checks it, the second agent audits it.' : 'the contributor\'s worker builds it first.');
+    if (!c) return 'No build yet — ' + (own ? 'press <b>Build</b>: it goes to the shared queue (the best idle shared worker takes it; a worker of yours at once), the gate checks it, the second agent audits it.' : 'the contributor\'s build comes first.');
     var cc = c.contributor, pb = c.project, a = c.approval, sc = c.score, arch = (cc || pb).arch;
     var worker = cc && cc.lease_owner && FACTORY ? FACTORY.workers.filter(function (w) { return w.id === cc.lease_owner; })[0] : null;
     var emulated = worker && worker.labels && worker.labels.emulated;
@@ -181,7 +175,12 @@ const SCRIPT = String.raw`
     if (pb && (pb.status === "queued" || pb.status === "leased")) return 'The project is building it again (<a href="/build/' + pb.id + '">#' + pb.id + '</a>) on a trusted worker, with the project\'s agent — then the trial, then a maintainer decides.' + (own ? ' Nothing on your side.' : '');
     if (pb && pb.status === "staged") return 'Built again by the project (<a href="/build/' + pb.id + '">#' + pb.id + '</a>): it waits for ' + (own ? '<b>another</b> maintainer\'s approval (you brought it)' : 'a maintainer\'s approval — never the one who brought it') + '. Class today ' + esc(sc.class) + ', ' + esc(sc.projected) + ' with the maintainer\'s half green.';
     if (pb && pb.status === "failed") return 'The project\'s build failed (<a href="/build/' + pb.id + '">#' + pb.id + '</a>)' + (pb.error ? ' — ' + esc(String(pb.error).slice(0, 140)) : '') + ' — a maintainer reads it and decides; your evidence stands.' + (own ? ' If the recipe is the cause, a new build of yours with the fix is the best help.' : '');
-    if (cc && cc.status === "queued") return 'Queued (<a href="/build/' + cc.id + '">#' + cc.id + '</a>)' + (cc.pinned_to ? ' for <b>' + esc(wtShort(cc.pinned_to)) + '</b> only' + (FACTORY && !FACTORY.workers.some(function (w) { return w.id === cc.pinned_to && w.alive; }) ? ' — <b>offline</b>: it claims when it is back; to send it elsewhere, press Build ' + esc(arch) + ' again and choose' : '') : (own ? ' — one of your workers, or a shared one, claims it' : ' on the contributor\'s side')) + '.' + (own ? ' This page follows it.' : '');
+    if (cc && cc.status === "queued") {
+      if (cc.pinned_to) return 'Queued (<a href="/build/' + cc.id + '">#' + cc.id + '</a>) for <b>' + esc(wtShort(cc.pinned_to)) + '</b> only' + (FACTORY && !FACTORY.workers.some(function (w) { return w.id === cc.pinned_to && w.alive; }) ? ' — <b>offline</b>: it claims when it is back' : '') + (own ? '. Press <b>Build ' + esc(arch) + '</b> to send it to the queue instead, or to take it out.' : '.');
+      if (cc.shared_after && cc.shared_after > new Date().toISOString()) return 'Queued (<a href="/build/' + cc.id + '">#' + cc.id + '</a>) for ' + (own ? 'your' : 'the owner\'s') + ' own worker — a new release, built from the approved recipe; the shared workers take it from ' + esc(cc.shared_after.slice(0, 10)) + '.' + (own ? ' Press <b>Build ' + esc(arch) + '</b> to name a worker or to take it out.' : '');
+      var q = cc.queue ? '<b>' + cc.queue.position + ' of ' + cc.queue.total + '</b> in the shared queue for ' + esc(arch) : 'in the shared queue for ' + esc(arch);
+      return 'Queued (<a href="/build/' + cc.id + '">#' + cc.id + '</a>) — ' + q + ': the best idle shared worker takes it' + (where ? ' — ' + esc(where.state) : '') + (own ? '; a worker of yours takes it at once. Press <b>Build ' + esc(arch) + '</b> to name a worker or to take it out of the queue.' : '.') + (own ? ' This page follows it.' : '');
+    }
     if (cc && cc.status === "leased") return 'Building (<a href="/build/' + cc.id + '">#' + cc.id + '</a>) on ' + (cc.lease_owner ? wtId({ id: cc.lease_owner, owner: cc.owner }) : 'a worker') + (emulated ? ' — emulated' : '') + (own ? ' — this page follows it.' : '.');
     if (cc && cc.status === "failed") return 'The build failed (<a href="/build/' + cc.id + '">#' + cc.id + '</a>)' + (cc.error ? ' — <b>' + esc(String(cc.error).slice(0, 160)) + '</b>' : '') + (own ? again(cc.attempts > 1 ? 'the agent tried ' + cc.attempts + ' times inside this build' : '') : ' — the contributor fixes it.');
     if (cc && cc.status === "cancelled") return 'Superseded (<a href="/build/' + cc.id + '">#' + cc.id + '</a>)' + (cc.error ? ' — ' + esc(String(cc.error).slice(0, 140)) : '') + '.';
@@ -251,7 +250,7 @@ const SCRIPT = String.raw`
     }, { empty: "no package registered", after: function () { Object.keys(OPEN).forEach(function (n) { if (OPEN[n]) story(n); }); }, text: function (p) { return [p.name, p.category, p.status, p.detail].join(" "); } });
     // ---- builds: the number is the build's page; the worker that held it
     pager("#builds", d.builds, function (t) {
-      return '<tr><td><a href="/build/' + t.id + '" title="the build, whole">' + t.id + '</a></td><td><a href="/package/' + encodeURIComponent(t.name) + '?ring=lab&arch=' + esc(t.arch) + '"><b>' + esc(t.name) + '</b></a>' + (t.version ? ' <span class="mono muted">' + esc(t.version) + '</span>' : '') + '</td><td>' + esc(t.arch) + '</td><td>' + pill(t.status) + '</td><td>' + esc(t.reason || "") + (t.trust === "project" ? ' <span class="pill ok" title="the project\'s own build, from a contributor\'s evidence">the project</span>' : '') + '</td><td>' + (t.lease_owner ? wtId({ id: t.lease_owner, owner: t.lease_owner.indexOf(login + "-") === 0 ? login : (t.lease_owner.split("-")[0] || null) }) : t.pinned_to && t.status === "queued" ? '<span class="muted" title="asked for this worker only">waiting for ' + esc(wtShort(t.pinned_to)) + '</span>' : '<span class="muted">—</span>') + '</td><td>' + took(t.duration_ms) + '</td><td class="when">' + ago(t.created_at) + '</td>' + (own ? '<td>' + evidence(t) + '</td>' : '') + '</tr>';
+      return '<tr><td><a href="/build/' + t.id + '" title="the build, whole">' + t.id + '</a></td><td><a href="/package/' + encodeURIComponent(t.name) + '?ring=lab&arch=' + esc(t.arch) + '"><b>' + esc(t.name) + '</b></a>' + (t.version ? ' <span class="mono muted">' + esc(t.version) + '</span>' : '') + '</td><td>' + esc(t.arch) + '</td><td>' + pill(t.status) + (t.queue ? ' <span class="dim" title="in the shared queue for ' + esc(t.arch) + '">' + t.queue.position + ' of ' + t.queue.total + '</span>' : '') + '</td><td>' + esc(t.reason || "") + (t.trust === "project" ? ' <span class="pill ok" title="the project\'s own build, from a contributor\'s evidence">the project</span>' : '') + '</td><td>' + (t.lease_owner ? wtId({ id: t.lease_owner, owner: t.lease_owner.indexOf(login + "-") === 0 ? login : (t.lease_owner.split("-")[0] || null) }) : t.pinned_to && t.status === "queued" ? '<span class="muted" title="asked for this worker only">waiting for ' + esc(wtShort(t.pinned_to)) + '</span>' : '<span class="muted">—</span>') + '</td><td>' + took(t.duration_ms) + '</td><td class="when">' + ago(t.created_at) + '</td>' + (own ? '<td>' + evidence(t) + '</td>' : '') + '</tr>';
     }, { empty: "nothing built yet", text: function (t) { return [t.id, t.name, t.version, t.arch, t.status, t.reason, t.lease_owner].join(" "); } });
     // ---- approvals: last, with the build behind each
     if (d.approvals.length || d.role === "maintainer") {
@@ -271,8 +270,18 @@ const SCRIPT = String.raw`
       if (!me || me.login !== login) return;
       own = true;
       var url = location.origin + "/user/" + encodeURIComponent(login);
-      $("#share").hidden = false; $("#share-url").textContent = url; $("#share-btn").innerHTML = '<a class="btn" href="#share">Share your profile</a>';
-      $("#copy-link").onclick = function () { navigator.clipboard.writeText(url).then(function () { $("#copy-link").textContent = "copied"; setTimeout(function () { $("#copy-link").textContent = "copy"; }, 1500); }); };
+      // Two buttons at the top: the link to this page (it is public, everything on it is on the record anyway) and a token for scripts and CI.
+      $("#share-btn").innerHTML = '<button type="button" class="btn" id="share-open" title="Share your profile">Share</button> <button type="button" class="btn ghost" id="token-open" title="Generate a token">Token</button>';
+      $("#share-open").onclick = function () { ask({ title: "Share your profile", text: "This page is public — what it shows is what the pool recorded: packages, builds, decisions. Post the link wherever you like: your GitHub profile, LinkedIn, a blog.", value: url, copy: "Copy the link", confirm: null, cancel: "Close" }); };
+      $("#token-open").onclick = function () {
+        ask({ title: "A token for scripts and CI", text: "Sent as <code>Authorization: Bearer omc_…</code>. Shown once; it replaces the previous one — your workers keep theirs.", confirm: "Generate a token" }).then(function (go) {
+          if (go === null) return;
+          call("POST", "/token", {}).then(function (d) {
+            if (d.error) { toast(esc(d.error), "error"); return; }
+            ask({ title: "Your token", text: "Copy it now: the pool keeps only its hash, and this box closes by its button only. " + esc(d.note || ""), value: "export OMARCHY_CONTRIBUTOR_TOKEN=" + d.token, copy: "Copy", confirm: null, cancel: "Close", sticky: true });
+          }).catch(function (e) { toast("failed: " + esc(String(e)), "error"); });
+        });
+      };
       $("#pk-request").hidden = false; $("#w-toggle").hidden = false; $("#w-own").hidden = false;
       $("#builds thead tr").insertAdjacentHTML("beforeend", "<th>Evidence</th>");
       load(); loadWorkers(); quota();
@@ -293,14 +302,25 @@ const SCRIPT = String.raw`
       // Where it runs is the asker's call (one architecture: any of their workers or the project's shared ones; all: the rule, or the shared ones at once); a hint goes to the agent that drafts the recipe.
       var st2 = STORIES[name], det = {}; try { det = JSON.parse((st2 && st2.package && st2.package.detected) || "{}"); } catch (e) {}
       var drafts = !det.has_pkgbuild; // the project's own PKGBUILD is built as it is: no agent, no hint
-      var where = FACTORY ? whereOptions(FACTORY.workers, arch || "x86_64", login, false, drafts) : null;
-      if (where && !arch) where.options = where.options.filter(function (o) { return o.value === "" || o.value === "shared"; });
-      var queuedNow = st2 && st2.chains.some(function (c) { return c.contributor && c.contributor.status === "queued" && (!arch || c.contributor.arch === arch); });
-      ask({ title: (queuedNow ? "Ask again for " : "Build ") + name + (arch ? " for " + arch : "") + "?", text: (drafts ? "The worker drafts the recipe with its agent — from the last build's PKGBUILD and what stopped it, when there is one — builds it, runs the gate and stages the result as evidence; the second agent audits it. " : "The worker builds the project's own PKGBUILD as it is, runs the gate and stages the result as evidence; the second agent audits it. ") + (arch ? "This architecture only." : "Every architecture the request names.") + (queuedNow ? " The build already queued takes what you choose here." : ""), select: where, input: drafts ? "optional" : false, placeholder: "a hint for the agent (optional): the binary's name, a build flag, a dependency, what to do differently", confirm: queuedNow ? "Ask again" : "Build" }).then(function (go) {
+      var waiting = st2 ? st2.chains.filter(function (c) { return c.contributor && c.contributor.status === "queued" && (!arch || c.contributor.arch === arch); }).map(function (c) { return c.contributor; }) : [];
+      var pinnedNow = waiting.length === 1 ? waiting[0].pinned_to : null;
+      var where = FACTORY ? whereOptions(FACTORY.workers, arch || "x86_64", login, false, drafts, waiting.length === 1 ? waiting[0].queue : null, pinnedNow) : null;
+      if (where && !arch) where.options = where.options.filter(function (o) { return o.value === ""; });
+      var queuedNow = waiting.length > 0;
+      ask({ title: (queuedNow ? (pinnedNow ? "Waiting for " + wtShort(pinnedNow) + ": " : "In the queue: ") : "Build ") + name + (arch ? " for " + arch : "") + (queuedNow ? "" : "?"), text: (queuedNow ? "Build <b>#" + waiting.map(function (t) { return t.id; }).join(", #") + "</b> " + (pinnedNow ? "waits for <b>" + esc(wtShort(pinnedNow)) + "</b> only. Keep that, send it to the shared queue instead, or take it out" : "waits in the shared queue. Leave it there, name a worker of yours to take it at once, or take it out") + " — nothing puts it back by itself; this button does. " : "") + (drafts ? "The worker drafts the recipe with its agent — from the last build's PKGBUILD and what stopped it, when there is one — builds it, runs the gate and stages the result as evidence; the second agent audits it. " : "The worker builds the project's own PKGBUILD as it is, runs the gate and stages the result as evidence; the second agent audits it. ") + (arch ? "This architecture only." : "Every architecture the request names."), select: where, input: drafts ? "optional" : false, placeholder: "a hint for the agent (optional): the binary's name, a build flag, a dependency, what to do differently", confirm: queuedNow ? (pinnedNow ? "Keep it so" : "Keep it queued") : "Build", alt: queuedNow ? { text: "Take it out of the queue", danger: true } : null }).then(function (go) {
         if (go === null) return; b.disabled = true;
+        if (go && typeof go === "object" && go.alt) {
+          // Out of the queue: each waiting build of the architecture(s) asked, one call each.
+          Promise.all(waiting.map(function (t) { return call("DELETE", "/packages/" + encodeURIComponent(name) + "/builds/" + t.id); })).then(function (rs) {
+            var bad = rs.filter(function (r) { return r.error; });
+            if (bad.length) toast(esc(bad[0].error), "error"); else toast("Out of the queue: build #" + waiting.map(function (t) { return t.id; }).join(", #") + ". Press Build to queue it again, on the queue or on a worker of yours.", "warn");
+            OPEN[name] = true; load();
+          });
+          return;
+        }
         var body = arch ? { arches: [arch] } : {};
         if (go && typeof go === "object") { if (go.pick) body.worker = go.pick; if (go.note) body.hint = go.note; } else if (go) body.hint = go;
-        call("POST", "/packages/" + encodeURIComponent(name) + "/build", body).then(function (r) { if (r.error) toast(esc(r.error), "error"); else if (!(r.tasks || []).length) toast(esc(r.note || "nothing queued"), "warn"); else toast((queuedNow ? "Asked again: " : "Queued ") + (r.tasks || []).length + " build(s): " + esc((r.arches || []).join(", ")) + (r.pinned_to ? " on " + esc(wtShort(r.pinned_to)) : "") + (r.lessons && Object.keys(r.lessons).length ? " — from the last build's PKGBUILD and log" : "") + " — this page follows them."); OPEN[name] = true; load(); });
+        call("POST", "/packages/" + encodeURIComponent(name) + "/build", body).then(function (r) { if (r.error) toast(esc(r.error), "error"); else if (!(r.tasks || []).length) toast(esc(r.note || "nothing queued"), "warn"); else toast((queuedNow ? "Still queued: " : "Queued ") + (r.tasks || []).length + " build(s): " + esc((r.arches || []).join(", ")) + (r.pinned_to ? " — for " + esc(wtShort(r.pinned_to)) : r.queue && Object.keys(r.queue).length ? " — " + Object.keys(r.queue).map(function (a) { return a + " " + r.queue[a].position + " of " + r.queue[a].total; }).join(", ") : "") + (r.lessons && Object.keys(r.lessons).length ? " — from the last build's PKGBUILD and log" : "") + " — this page follows them."); OPEN[name] = true; load(); });
       });
     }
     else if (b.hasAttribute("data-remove")) {
@@ -339,11 +359,6 @@ const SCRIPT = String.raw`
       $("#worker-form").reset(); $("#worker-form").hidden = true; load(); loadWorkers();
     }).catch(function (e) { $("#w-btn").disabled = false; toast("failed: " + esc(String(e)), "error"); });
     return false;
-  };
-  $("#cli-token").onclick = function () {
-    $("#cli-token").disabled = true;
-    call("POST", "/token", {}).then(function (d) { $("#cli-token").disabled = false; if (d.error) { toast(esc(d.error), "error"); return; } $("#cli-token-out").hidden = false; $("#cli-token-out").textContent = "export OMARCHY_CONTRIBUTOR_TOKEN=" + d.token + "\n# " + d.note; })
-      .catch(function (e) { $("#cli-token").disabled = false; toast("failed: " + esc(String(e)), "error"); });
   };
   liveStats(function () {}, 120000);
 `;

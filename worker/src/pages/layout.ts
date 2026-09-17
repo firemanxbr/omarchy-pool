@@ -439,6 +439,7 @@ const CSS = String.raw`
   /* Decisions ask in the dashboard: one dialog, and a toast that says what happened. */
   dialog.ask { border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 0; width: min(520px, calc(100vw - 32px)); box-shadow: 0 24px 60px rgba(0,0,0,.5); } dialog.ask::backdrop { background: rgba(10, 11, 16, .72); }
   dialog.ask form { padding: 20px 22px; display: grid; gap: 12px; } dialog.ask h3 { margin: 0; font-family: Geist, sans-serif; font-size: 17px; } dialog.ask .t { margin: 0; font-size: 13.5px; color: var(--muted); } dialog.ask textarea { width: 100%; box-sizing: border-box; background: var(--bg-deep); color: var(--text); border: 1px solid var(--line); padding: 8px 10px; font: 13px "JetBrains Mono", monospace; resize: vertical; }
+  dialog.ask .val { display: flex; gap: 8px; align-items: stretch; } dialog.ask .val code { flex: 1; min-width: 0; overflow-wrap: anywhere; background: var(--bg-deep); border: 1px solid var(--line); padding: 8px 10px; font: 12.5px "JetBrains Mono", monospace; color: var(--text); } dialog.ask .row .grow { flex: 1; } dialog.ask .val .take { white-space: nowrap; } dialog.ask button.alt.danger { border-color: var(--red); color: var(--red); }
   dialog.ask .err { margin: 0; font-size: 12.5px; color: var(--red); } dialog.ask label.pick { display: grid; gap: 4px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; } dialog.ask label.pick select { width: 100%; box-sizing: border-box; background: var(--bg-deep); color: var(--text); border: 1px solid var(--line); padding: 7px 10px; font: 13px "JetBrains Mono", monospace; text-transform: none; letter-spacing: 0; } dialog.ask .row { display: flex; justify-content: flex-end; gap: 8px; } dialog.ask button.danger { border-color: var(--red); color: var(--red); } dialog.ask button.ghost { color: var(--muted); }
   #toasts { position: fixed; right: 16px; bottom: 16px; z-index: 90; display: grid; gap: 8px; max-width: min(460px, calc(100vw - 32px)); } .toast { border: 1px solid var(--line); background: var(--panel); padding: 10px 14px; font-size: 13px; border-left: 3px solid var(--green); cursor: pointer; transition: opacity .3s, transform .3s; } .toast.error { border-left-color: var(--red); } .toast.warn { border-left-color: var(--amber); } .toast.out { opacity: 0; transform: translateY(6px); }
   /* A person's page: the package rows open into the story and the next step. */
@@ -701,36 +702,49 @@ const HELPERS = String.raw`
     return new Promise(function (resolve) {
       var d = document.createElement("dialog"); d.className = "ask";
       var sel = o.select && o.select.options && o.select.options.length ? '<label class="pick"><span>' + esc(o.select.label || "Where") + '</span><select>' + o.select.options.map(function (x) { return '<option value="' + esc(x.value) + '"' + (x.disabled ? ' disabled' : '') + (x.selected ? ' selected' : '') + '>' + esc(x.text) + '</option>'; }).join("") + '</select></label>' : '';
-      d.innerHTML = '<form method="dialog"><h3></h3><p class="t"></p>' + sel + (o.input ? '<textarea rows="3" placeholder="' + esc(o.placeholder || (o.input === "required" ? "why — it goes on the record" : "a note for the record (optional)")) + '"></textarea><p class="err" hidden></p>' : '') + '<div class="row"><button type="button" class="ghost cancel">Cancel</button><button type="submit" class="' + (o.danger ? "danger" : "") + '">' + esc(o.confirm || "OK") + '</button></div></form>';
+      // A value to take away (a link, a token): shown once, copied with one press.
+      var val = o.value !== undefined ? '<div class="val"><code></code><button type="button" class="take">' + esc(o.copy || "Copy") + '</button></div>' : '';
+      // A second way out (alt): the other thing this dialog can do — take a build out of the queue while the main button puts it back.
+      var alt = o.alt ? '<button type="button" class="alt ' + (o.alt.danger ? "danger" : "ghost") + '">' + esc(o.alt.text) + '</button>' : '';
+      d.innerHTML = '<form method="dialog"><h3></h3><p class="t"></p>' + val + sel + (o.input ? '<textarea rows="3" placeholder="' + esc(o.placeholder || (o.input === "required" ? "why — it goes on the record" : "a note for the record (optional)")) + '"></textarea><p class="err" hidden></p>' : '') + '<div class="row">' + alt + '<span class="grow"></span><button type="button" class="ghost cancel">' + esc(o.cancel || "Cancel") + '</button>' + (o.confirm === null ? '' : '<button type="submit" class="' + (o.danger ? "danger" : "") + '">' + esc(o.confirm || "OK") + '</button>') + '</div></form>';
       d.querySelector("h3").textContent = o.title || ""; d.querySelector(".t").innerHTML = o.text || "";
+      if (o.value !== undefined) d.querySelector(".val code").textContent = o.value;
       document.body.appendChild(d);
       var ta = d.querySelector("textarea"), se = d.querySelector("select"), form = d.querySelector("form"), done = function (v) { d.close(); d.remove(); resolve(v); };
+      var answer = function (extra) { var v = ta ? ta.value.trim() : ""; var out = se || o.alt || extra ? { note: v, pick: se ? se.value : "" } : v; if (extra && typeof out === "object") out.alt = true; return out; };
       d.querySelector(".cancel").onclick = function () { done(null); };
-      d.addEventListener("cancel", function (ev) { ev.preventDefault(); done(null); });
-      d.addEventListener("click", function (ev) { if (ev.target === d) done(null); });
+      // A sticky dialog (a token shown once) closes by its buttons only — not by a tap beside it, not by Escape.
+      d.addEventListener("cancel", function (ev) { ev.preventDefault(); if (!o.sticky) done(null); });
+      d.addEventListener("click", function (ev) { if (ev.target === d && !o.sticky) done(null); });
+      var cp = d.querySelector(".take"); if (cp) cp.onclick = function () { navigator.clipboard.writeText(o.value).then(function () { cp.textContent = "Copied"; setTimeout(function () { cp.textContent = o.copy || "Copy"; }, 1500); }); };
+      var al = d.querySelector(".alt"); if (al) al.onclick = function () { done(answer(true)); };
       form.onsubmit = function (ev) {
         ev.preventDefault();
         var v = ta ? ta.value.trim() : "";
         if (o.input === "required" && v.length < 4) { d.querySelector(".err").hidden = false; d.querySelector(".err").textContent = "Say why, in a few words — the record keeps it."; ta.focus(); return; }
-        done(se ? { note: v, pick: se.value } : v);
+        done(answer(false));
       };
       d.showModal(); if (ta) ta.focus();
     });
   }
   // The workers a build may go to, as the choice in the Build dialog, from the factory listing (/api/v1/factory): for a contributor's build, theirs and the ones the project shares; for the project's build, the project's own that build. The first option leaves it to the rule.
-  function whereOptions(workers, arch, login, forProject, needsAgent) {
+  // The choice of worker in the Build dialog, from the factory listing (/api/v1/factory): for a contributor's build, the shared queue (any shared worker, the best idle one first, the asker's own at once) or one of the asker's own workers; for the project's build, one of the project's; queue is where the build already stands, when it does.
+  function whereOptions(workers, arch, login, forProject, needsAgent, queue, pinnedTo) {
     if (needsAgent === undefined) needsAgent = true;
     var can = (workers || []).filter(function (w) { return w.arch === arch && !w.revoked_at && (forProject ? (w.side === "omarchy" && (!w.kinds || w.kinds.indexOf("build") >= 0)) : (w.side !== "omarchy" && (w.owner === login || w.mode === "shared"))); });
     // A drafted build (the project's always) goes only to a worker whose agent answered: pinned to another it would wait forever.
     var fit = function (w) { return w.alive && (!needsAgent || w.agent_status === "ok"); };
     var word = function (w) { return (w.owner && w.owner !== login ? w.owner + "'s " : forProject ? "" : "your ") + wtShort(w.id) + " · " + (w.alive ? (w.current_task ? "building" : "idle") : "offline") + " · " + (w.labels && w.labels.emulated ? "emulated" : "native") + (w.agent ? " · " + w.agent + (w.agent_status !== "ok" ? " (not answering)" : "") : " · no agent"); };
-    var mine = can.filter(function (w) { return w.owner === login && !forProject; }), shared = can.filter(function (w) { return w.mode === "shared" && w.owner !== login && !forProject; }), project = forProject ? can : [];
+    var mine = can.filter(function (w) { return w.owner === login && !forProject; }), shared = can.filter(function (w) { return w.mode === "shared" && !forProject; }), project = forProject ? can : [];
+    var online = shared.filter(fit), idle = online.filter(function (w) { return !w.current_task; }), native = idle.filter(function (w) { return !(w.labels && w.labels.emulated); });
+    var state = idle.length ? idle.length + " idle now, " + native.length + " native" : online.length ? "all " + online.length + " online busy" : shared.length ? "none of " + shared.length + " online" : "no shared worker for " + arch;
     var opts = [];
-    if (forProject) opts.push({ value: "", text: "Any of the project's workers for " + arch + (project.length ? "" : " (none is registered)"), selected: true });
-    else opts.push({ value: "", text: mine.length ? "Yours first; the project's shared workers after 14 days" : "The project's shared workers — you have no worker for " + arch, selected: true });
-    if (!forProject && shared.length) opts.push({ value: "shared", text: "The project's shared workers, at once (" + shared.filter(fit).length + " of " + shared.length + " ready)" });
-    mine.concat(shared).concat(project).forEach(function (w) { opts.push({ value: w.id, text: word(w), disabled: !fit(w) }); });
-    return { label: "Where", options: opts, count: can.length, native: can.filter(function (w) { return fit(w) && !(w.labels && w.labels.emulated); }).length };
+    if (forProject) opts.push({ value: "", text: "Any of the project's workers for " + arch + (project.length ? "" : " (none is registered)"), selected: !pinnedTo });
+    else opts.push({ value: "", text: "The queue — the best idle shared worker takes it" + (queue ? " (yours is " + queue.position + " of " + queue.total + ")" : "") + " · " + state, selected: !pinnedTo });
+    // A build already asked for one worker keeps that choice unless changed.
+    mine.concat(project).forEach(function (w) { opts.push({ value: w.id, text: word(w), disabled: !fit(w) && w.id !== pinnedTo, selected: w.id === pinnedTo }); });
+    if (pinnedTo && !opts.some(function (o) { return o.value === pinnedTo; })) opts.push({ value: pinnedTo, text: wtShort(pinnedTo) + " · as asked", selected: true });
+    return { label: "Worker", options: opts, count: can.length, native: native.length, idle: idle.length, online: online.length, shared: shared.length, mine: mine.length, state: state };
   }
   function wtShort(id) { var parts = String(id).split("-"); return parts.length > 3 ? parts.slice(-3).join("-") : id; }
 
@@ -850,7 +864,7 @@ const HELPERS = String.raw`
     if (pb && (pb.status === "queued" || pb.status === "leased")) return { cls: "blue", text: "the project is building it" };
     if (pb && pb.status === "staged") return { cls: "ok", text: "built again by the project" };
     if (pb && pb.status === "failed") return { cls: "error", text: "the project's build failed" };
-    if (cc && (cc.status === "queued")) return { cls: "blue", text: "queued" };
+    if (cc && (cc.status === "queued")) return { cls: "blue", text: "queued" + (cc.queue ? " · " + cc.queue.position + " of " + cc.queue.total : cc.pinned_to ? " · for " + wtShort(cc.pinned_to) : "") };
     if (cc && (cc.status === "leased")) return { cls: "blue", text: "building" };
     if (cc && cc.status === "failed") return { cls: "error", text: "the build failed" };
     if (cc && cc.status === "cancelled") return { cls: "none", text: "superseded" };

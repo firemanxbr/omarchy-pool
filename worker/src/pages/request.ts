@@ -13,7 +13,7 @@ const BODY = String.raw`
   <div class="hero compact">
     <p class="eyebrow" id="eyebrow">Package request</p>
     <h1 id="h1">Ask for a package, on the record</h1>
-    <p class="lede" id="lede">Four fields, four confirmations. The pool checks it, writes it once with its signature, and you press <b>Build</b>. <a href="/docs/governance">What happens after →</a></p>
+    <p class="lede" id="lede">Four fields, four confirmations. The pool checks it, writes it once with its signature, and the build starts by itself — in the shared queue, the best idle worker first. <a href="/docs/governance">What happens after →</a></p>
   </div>
 
   <div id="gate" class="gate"><div><div class="lock">GitHub sign-in</div><h3 style="margin-top:6px">Who is asking</h3><p>A request carries your GitHub login — it is on the record, next to the package. Nothing else is asked, no permission is needed.</p></div><a class="btn" href="/auth/github?next=/request">${GITHUB_ICON} Sign in with GitHub</a></div>
@@ -91,14 +91,9 @@ const SCRIPT = String.raw`
       $("#done").hidden = false;
       $("#done").innerHTML = '<b>' + esc(d.package.name) + ' ' + esc(d.package.release || "") + '</b> is on the record: <a href="' + esc(d.request.record) + '">request #' + d.request.id + '</a>' + (d.request.signature ? ' (<a href="' + esc(d.request.signature) + '">signature</a>)' : '') + (det.build_system ? ' · ' + esc(det.build_system) : '') +
         (d.skipped && d.skipped.length ? '<br><span class="dim">' + esc(d.skipped.map(function (s) { return s.arch + " skipped: " + s.source + " ships " + s.version; }).join(" · ")) + '</span>' : '') +
-        '<div class="cta-row" style="margin-top:12px"><button type="button" id="build-now" data-name="' + esc(d.package.name) + '">Build it now</button><a class="btn ghost" href="' + (ME && ME.login ? '/user/' + encodeURIComponent(ME.login) : '/factory#gate') + '">Your page →</a></div>';
+        (d.build && d.build.tasks && d.build.tasks.length ? '<br>' + pillHtml("blue", "queued") + ' build ' + d.build.tasks.map(function (t) { return '<a href="/build/' + t + '">#' + t + '</a>'; }).join(", ") + ' for ' + esc((d.build.arches || []).join(", ")) + (d.build.queue ? ' — ' + esc(Object.keys(d.build.queue).map(function (a) { return a + ": " + d.build.queue[a].position + " of " + d.build.queue[a].total + " in the shared queue"; }).join(" · ")) : '') + '. The best idle shared worker takes it, a worker of yours at once; your page follows it.' : d.build && d.build.error ? '<br>' + pillHtml("warn", "not queued") + ' ' + esc(d.build.error) : '') +
+        '<div class="cta-row" style="margin-top:12px"><a class="btn" href="' + (ME && ME.login ? '/user/' + encodeURIComponent(ME.login) : '/factory#gate') + '">Your page →</a></div>';
       $("#pkg-form").reset();
-      $("#build-now").onclick = function () {
-        var b = $("#build-now"); b.disabled = true;
-        call("POST", "/packages/" + encodeURIComponent(b.getAttribute("data-name")) + "/build", {}).then(function (r) {
-          $("#pkg-state").textContent = r.error || ("queued " + (r.tasks || []).length + " build(s) for " + (r.arches || []).join(", ") + " — a worker the project shares takes it, or one of yours; follow it in your workspace.");
-        });
-      };
     }).catch(function (e) { $("#pkg-btn").disabled = false; $("#pkg-state").textContent = "failed: " + e; });
     return false;
   };

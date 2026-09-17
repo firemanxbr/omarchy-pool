@@ -1380,6 +1380,14 @@ fn build_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
             run.arg("-e").arg(kv);
         }
     }
+    // The worker's labels ride along: an emulated worker's build container
+    // probes the toolchains a recipe installs (omarchy-build-worker.sh,
+    // toolchains_start) and fails at once when one cannot start.
+    if let Ok(labels) = std::env::var("WORKER_LABELS") {
+        if !labels.is_empty() {
+            run.arg("-e").arg(format!("WORKER_LABELS={labels}"));
+        }
+    }
     if let Ok(net) = std::env::var("OMARCHY_BUILD_NETWORK") {
         if !net.is_empty() {
             run.arg("--network").arg(net);

@@ -284,13 +284,12 @@ reg=$(curl -s "$OMARCHY_API/api/v1/factory/packages"); grep -q '"packages"' <<<"
      ('nowish', 'aarch64', 'draft:https://github.com/x/nowish@latest', 'package-request #1', 100, 0, 'community', 'someone-else', 'build', NULL)" >/dev/null)
 w3=(-H "authorization: Bearer omw_e2e_w3" -H "content-type: application/json")
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/claim" "${w3[@]}" -d '{"arch":"aarch64","agent":"openai/gpt-5","agent_status":"ok"}')" == 204 ]] || { echo "a worker not started --shared must only see its owner's tasks"; exit 1; }
-# Donating a worker is a maintainer's call: a contributor's --shared is ignored; a maintainer's is honoured.
-[[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/claim" "${w3[@]}" -d '{"arch":"aarch64","shared":true,"agent":"openai/gpt-5","agent_status":"ok"}')" == 204 ]] || { echo "a contributor's worker must not build strangers' packages, --shared or not"; exit 1; }
-(cd "$ROOT/worker" && npx wrangler d1 execute omarchy-repo --local --persist-to "$WRANGLER_STATE" --command "UPDATE build_workers SET owner = 'e2e' WHERE id = 'w3'" >/dev/null)
+# Sharing is the owner's word alone (2026-09-17): a contributor's --shared worker builds anyone's queued request — once its agent answers.
 # A draft is the agent's work: a worker whose agent did not answer the probe gets nothing; one whose agent did gets it.
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/claim" "${w3[@]}" -d '{"arch":"aarch64","shared":true,"agent":"openai/gpt-5","agent_status":"error","agent_error":"HTTP 402"}')" == 204 ]] || { echo "a worker whose agent is down must not be handed a draft"; exit 1; }
 c3=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/claim" "${w3[@]}" -d '{"arch":"aarch64","shared":true,"agent":"openai/gpt-5","agent_status":"ok"}')
-grep -q '"name":"nowish"' <<<"$c3" || { echo "a shared worker must get the task that is shareable now: $c3"; exit 1; }
+grep -q '"name":"nowish"' <<<"$c3" || { echo "a shared worker — any contributor's — must get the task that is shareable now: $c3"; exit 1; }
+(cd "$ROOT/worker" && npx wrangler d1 execute omarchy-repo --local --persist-to "$WRANGLER_STATE" --command "UPDATE build_workers SET owner = 'e2e' WHERE id = 'w3'" >/dev/null)
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/claim" "${w3[@]}" -d '{"arch":"aarch64","shared":true,"agent":"openai/gpt-5","agent_status":"ok"}')" == 204 ]] || { echo "a shared worker must not get a task before its shared_after"; exit 1; }
 fac3=$(curl -s "$OMARCHY_API/api/v1/factory?limit=50"); grep -q '"id":"w3","arch":"aarch64"' <<<"$fac3" && grep -q '"mode":"shared"' <<<"$fac3" && grep -q '"agent_status":"ok"' <<<"$fac3" && grep -q '"ready":true' <<<"$fac3" || { echo "the claim did not record the worker as shared and ready: $fac3"; exit 1; }
 # The community build's evidence goes to staging with the job token; the

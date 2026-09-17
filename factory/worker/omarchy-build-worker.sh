@@ -333,6 +333,30 @@ install_deps() {
   pacman -S --needed --noconfirm --asdeps -- $deps
 }
 
+# An emulated worker (x86_64 under qemu on an aarch64 host) runs most
+# things, not everything: on a 16 KB-page host qemu cannot map a library
+# whose segments sit at 4 KB offsets, and rustc — libLLVM, libedit — dies
+# on load before any recipe runs (felix, 2026-09-17: four builds, three
+# attempts each, an agent "correcting" a PKGBUILD that was never the
+# problem). So, once the dependencies are in, each toolchain the recipe
+# brought must start; one that cannot fails the build now, with the reason,
+# and the pool's page says: a native worker.
+toolchains_start() {
+  local emulated t
+  emulated="$(jq -r '.emulated // false' <<<"${WORKER_LABELS:-"{}"}" 2>/dev/null || echo false)"
+  [[ "$emulated" == true ]] || return 0
+  local probe
+  for t in rustc cargo clang gcc go node python3 zig; do
+    command -v "$t" >/dev/null 2>&1 || continue
+    case "$t" in go|zig) probe=version ;; *) probe=--version ;; esac
+    if ! "$t" "$probe" >/dev/null 2>&1; then
+      echo "==> $t cannot start on this worker: emulated $(uname -m) under qemu on a $(getconf PAGESIZE 2>/dev/null || echo ?)-byte-page host — a native worker is needed for this package" >&2
+      return 6
+    fi
+  done
+  return 0
+}
+
 run_makepkg() { # name → /build/out/*.pkg.tar.zst
   local name="$1" cache
   rm -rf /build/out; mkdir -p /build/out && chown -R builder:builder /build/pkg /build/out
@@ -352,6 +376,7 @@ run_makepkg() { # name → /build/out/*.pkg.tar.zst
   # namcap flags the obvious (missing deps, bad permissions) before the build.
   as_builder namcap /build/pkg/PKGBUILD || true
   install_deps
+  toolchains_start || return 6
   # zst whatever the image's makepkg.conf says (Arch Linux ARM defaults to xz).
   (cd /build/pkg && as_builder env PKGDEST=/build/out PKGEXT=.pkg.tar.zst PACKAGER="omarchy-pool factory <https://github.com/firemanxbr/omarchy-pool>" \
     CARGO_HOME="$cache/cargo" CARGO_BUILD_JOBS="$(nproc)" GOMODCACHE="$cache/go/mod" GOCACHE="$cache/go/build" GOFLAGS=-modcacherw CCACHE_DIR="$cache/ccache" \
@@ -556,8 +581,10 @@ build_attempts() { # name ref
   local name="$1" ref="$2" attempt=1 max=1
   [[ ( "$ref" == draft:* || "$ref" == review:* ) && -n "$(agent_label)" ]] && max=3
   fetch_pkgbuild "$name" "$ref"
+  local rc
   while :; do
-    if run_makepkg "$name" > /build/attempt.log 2>&1; then
+    rc=0; run_makepkg "$name" > /build/attempt.log 2>&1 || rc=$?
+    if (( rc == 0 )); then
       cat /build/attempt.log
       vet_package "$name" && return 0
       # The gate failed: one more turn of the drafter, with the verdict as the log, when there is an agent.
@@ -565,6 +592,8 @@ build_attempts() { # name ref
       cp "$VET_LOG" /build/attempt.log
     else
       cat /build/attempt.log
+      # The worker itself cannot build this (a toolchain that does not start under emulation): no drafter turns it around.
+      if (( rc == 6 )); then return 6; fi
       if (( attempt >= max )); then return 4; fi
     fi
     attempt=$((attempt + 1))
@@ -662,7 +691,8 @@ container_worker() {
   if [[ $status -ne 0 ]]; then
     kill "$BEAT" 2>/dev/null || true
     local err
-    if (( status == 5 )); then err="the gate: $(jq -r '[.checks[] | select(.status == "fail") | .name + ": " + .detail] | join("; ")' "$VET_JSON" 2>/dev/null | head -c 400)"
+    if (( status == 6 )); then err="$(grep -m1 -E 'cannot start on this worker' /build/build.log | sed 's/^==> //' || echo "a toolchain cannot start on this emulated worker")"
+    elif (( status == 5 )); then err="the gate: $(jq -r '[.checks[] | select(.status == "fail") | .name + ": " + .detail] | join("; ")' "$VET_JSON" 2>/dev/null | head -c 400)"
     else err="$(grep -m1 -E '^(==> ERROR|error|Error|fatal)' /build/build.log || tail -n1 /build/build.log)"; fi
     # The pool retries a task for the infrastructure's sake — a download
     # that broke, a mirror, a container killed under it. A recipe that

@@ -457,12 +457,14 @@ tasks from the pool ([factory/README.md](../factory/README.md)). Day to day:
     asks GitHub for each approved package's latest release and queues a
     community build from the approved PKGBUILD with `pkgver` moved to the
     tag (`bump:<task>@<tag>`, `updpkgsums` in the worker). The owner's
-    worker has **14 days**; then a worker a maintainer shares (`--shared`)
-    may build it. (A contributor's own request is different: it goes to
-    the shared workers at once when they have no worker for the
-    architecture, and a build asked for one worker — `worker` in
-    `POST /factory/packages/<name>/build`, `pinned_to` on the task — waits
-    for that worker only; revoking the worker frees it.) A
+    worker has **14 days**; then any shared worker (`WORKER_SHARED=1`,
+    anyone's) may build it. (A contributor's request is different: it lands in the
+    shared queue at once — any shared worker, the best idle one first for
+    three minutes, the owner's own at any time — and a build asked for one
+    worker — `worker` in `POST /factory/packages/<name>/build`, `pinned_to`
+    on the task — waits for that worker only; revoking the worker frees it;
+    the owner takes a queued build out with
+    `DELETE /factory/packages/<name>/builds/<id>`.) A
     maintainer reviews the staged build like the first one. **30 days**
     without a build and the package is *unmaintained* (Factory page badge,
     `bump` journal line): no more bumps until its owner builds again, or a

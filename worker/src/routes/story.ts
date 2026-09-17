@@ -11,6 +11,7 @@ import { json, type Env } from "../index";
 import { scoreChain, type Score } from "../score";
 import { requestChecks, type RequestRow, type RequestChecks } from "../request";
 import { recordUrl } from "../record";
+import { queuePosition } from "../queue";
 
 export interface TaskBrief {
   id: number;
@@ -24,6 +25,11 @@ export interface TaskBrief {
   lease_owner: string | null;
   /** The worker this build was asked for, when it was: only that one claims it. */
   pinned_to?: string | null;
+  priority?: number;
+  /** A bump's: until then only the owner's worker takes it. */
+  shared_after?: string | null;
+  /** A queued build's place in the shared queue of its architecture (none when it waits for one worker, or for the owner's until shared_after). */
+  queue?: { position: number; total: number } | null;
   /** Where the recipe came from (draft:, <url>@<tag>:<path>, bump:<task>@<tag>, review:<task>). */
   pkgbuild_ref?: string | null;
   created_at: string;
@@ -50,7 +56,7 @@ export interface Chain {
   score: Score;
 }
 
-const TASK_COLS = "id, kind, status, trust, owner, arch, version, attempts, lease_owner, pinned_to, pkgbuild_ref, created_at, started_at, finished_at, duration_ms, error, params, result";
+const TASK_COLS = "id, kind, status, trust, owner, arch, version, attempts, lease_owner, pinned_to, pkgbuild_ref, priority, shared_after, created_at, started_at, finished_at, duration_ms, error, params, result";
 
 function brief(r: Record<string, unknown>): TaskBrief {
   const parse = (s: unknown) => { try { return s ? (JSON.parse(s as string) as Record<string, unknown>) : null; } catch { return null; } };
@@ -74,9 +80,9 @@ export async function storyRows(env: Env, name: string) {
 /** The request as a page shows it: the record's URL, the version, the checks, whether the form would take it today. */
 export function requestView(env: Env, pkg: Record<string, unknown> | null, req: RequestRow | null, tasks: TaskBrief[] = []): (RequestChecks & { id: number | null; version: string | null; record: string | null; signature: string | null; arches: string[]; created_at: string | null; busy: number | null; renewable: boolean }) | null {
   if (!pkg) return null;
-  // A renewal is taken while the package is registered, staged, rejected or unmaintained and no build of it — the project's included — is queued or running.
-  const busy = tasks.find((t) => t.kind === "build" && (t.status === "queued" || t.status === "leased"))?.id ?? null;
-  const renewable = ["registered", "staged", "rejected", "unmaintained"].includes(String(pkg.status)) && busy === null;
+  // A renewal is taken while the package is registered, waiting, staged, rejected or unmaintained and no build of it — the project's included — is running (a build still in the queue is superseded by the renewal).
+  const busy = tasks.find((t) => t.kind === "build" && t.status === "leased")?.id ?? null;
+  const renewable = ["registered", "waiting", "staged", "rejected", "unmaintained"].includes(String(pkg.status)) && busy === null;
   const checks = requestChecks({ project: (pkg.project as string | null) ?? null, source: (pkg.source as string | null) ?? null, description: (pkg.description as string | null) ?? null, license: (pkg.license as string | null) ?? null, detected: (pkg.detected as string | null) ?? null }, req);
   let arches: string[] = [];
   try { arches = JSON.parse(String(req?.arches ?? pkg.arches ?? "[]")) as string[]; } catch { arches = []; }
@@ -125,6 +131,13 @@ export function chains(tasks: TaskBrief[], approvals: Approval[], pkg: Record<st
   return out;
 }
 
+/** A queued community build knows its place in the shared queue (the page says "3 of 7"); one asked for a worker waits for that worker instead. */
+export async function placeInQueue(env: Env, tasks: TaskBrief[]): Promise<void> {
+  for (const t of tasks) {
+    if (t.kind === "build" && t.trust === "community" && t.status === "queued") t.queue = await queuePosition(env, t);
+  }
+}
+
 /** The chain a task is in, or null: a build's page asks for its own. */
 export function chainOf(all: Chain[], taskId: number): Chain | null {
   return all.find((c) => [c.contributor?.id, c.project?.id, c.audit?.id, c.trial?.id, c.publish?.id].includes(taskId)) ?? null;
@@ -140,6 +153,7 @@ export function chainOf(all: Chain[], taskId: number): Chain | null {
 export async function handlePackageStory(name: string, env: Env): Promise<Response> {
   const { tasks, approvals, pkg, request } = await storyRows(env, name);
   if (!pkg && !tasks.length) return json({ error: `${name} is not a factory package` }, 404);
+  await placeInQueue(env, tasks);
   const all = chains(tasks, approvals, pkg, request);
   const rings = (await env.DB.prepare("SELECT DISTINCT rp.ring, p.repo_arch AS arch FROM packages p JOIN ring_packages rp ON rp.package_id = p.id AND rp.ring IN ('lab', 'edge', 'rc', 'stable') WHERE p.source = 'factory' AND p.name = ?").bind(name).all<{ ring: string; arch: string }>()).results;
   const decided = all.find((c) => c.approval?.decision === "approved") ?? null;

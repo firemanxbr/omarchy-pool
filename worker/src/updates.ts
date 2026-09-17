@@ -86,7 +86,8 @@ export async function checkUpdates(env: Env, now = new Date(), fetcher: typeof f
     if (!approved) continue;
     const have = (approved.version ?? "").replace(/^\d+:/, "").replace(/-\d+$/, "");
     if (have === want) continue;
-    const pending = await env.DB.prepare("SELECT id FROM build_tasks WHERE name = ? AND reason = ? AND status IN ('queued', 'leased', 'staged')").bind(p.name, `bump to ${tag}`).first();
+    // Queued, running or staged already — or taken out of the queue by its owner, which stands until the next release.
+    const pending = await env.DB.prepare("SELECT id FROM build_tasks WHERE name = ? AND reason = ? AND (status IN ('queued', 'leased', 'staged') OR (status = 'cancelled' AND error LIKE 'taken out of the queue%'))").bind(p.name, `bump to ${tag}`).first();
     if (pending) continue;
     const sharedAfter = new Date(now.getTime() + SHARED_AFTER_DAYS * 86400000).toISOString();
     const arches = (JSON.parse(p.arches || "[]") as string[]).filter((a) => a === "x86_64" || a === "aarch64");
