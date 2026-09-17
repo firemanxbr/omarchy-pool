@@ -299,8 +299,10 @@ runs `pacman -Sy` and `pacman -Sp <pkg>` against the generated database. See
   they define (`.gnu.version_d`).
 * `check` — for every package the release would install, each `requires` rule is
   classified: satisfied by the plan itself, by an installed library/package, a
-  **warning** (pacman must resolve it from another repository) or a **blocker**
-  (a soname or symbol version this system does not have).
+  **warning** (pacman must resolve it from another repository; a library that is
+  not on disk at all is almost always optional to one binary) or a **blocker**
+  (a library this system has, but too old — it does not define the symbol
+  version the package needs).
 
 ## Thin client (`crates/omarchy-cli`)
 
@@ -311,9 +313,9 @@ The client drives pacman rather than replacing it. What it adds:
 * knows which **release** the machine is on and what the ring currently serves
   (`status`, `upgrade` pins pacman to that release);
 * **safety check** before an out-of-band install: fetches the dependency subgraph,
-  reads `/var/lib/pacman/local`, and refuses when a required soname or symbol
-  version is not present on the system — the case that today produces a broken
-  partial upgrade;
+  reads `/var/lib/pacman/local`, and refuses when a library on the system does not
+  define a symbol version the package needs — the case that today produces a
+  broken partial upgrade;
 * **hook preview**: `check` and `install` list the libalpm hooks pacman
   would run for the transaction (`mkinitcpio`, `glib-compile-schemas`, …) —
   the `.hook` files of the system (`/usr/share/libalpm/hooks`,
