@@ -1254,8 +1254,13 @@ describe("workers follow the brain", () => {
     expect(mine.status).toBe(200);
     expect(mine.json.log).toBe("[10:00:00] container worker w3 (aarch64) preparing\n[10:00:02] agent ok\n[10:00:32] update required: this worker runs v0.0.1\n");
     expect(mine.json.at).toBeTruthy();
+    // The public listing carries no log: the icon on the page asks the route, with the session.
+    const listed = (await call("GET", "/factory?limit=42")).json.workers.find((x: { id: string }) => x.id === "w3");
+    expect(listed.log_tail).toBeUndefined();
+    expect(listed.log_at).toBeUndefined();
     expect((await call("GET", "/factory/workers/w3/log", undefined, "omc_m1")).status).toBe(200);
     expect((await call("GET", "/factory/workers/w3/log", undefined, "omc_nobody")).status).toBe(401);
+    await env.DB.prepare("INSERT OR IGNORE INTO contributors (login, token_hash, role) VALUES ('carol', ?, 'contributor')").bind(await sha256Hex("omc_carol")).run();
     expect((await call("GET", "/factory/workers/w3/log", undefined, "omc_carol")).status).toBe(403);
     // A secret in a line: the chunk is not kept, a word about it is.
     await call("POST", "/factory/claim", { arch: "aarch64", log: "[10:01:00] env: OMARCHY_WORKER_TOKEN=omw_abcdefghijklmnopqrstuvwxyz0123456789abcdef\n" }, "omw_w3");

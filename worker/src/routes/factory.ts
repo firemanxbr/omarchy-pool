@@ -733,6 +733,8 @@ export async function handleFactory(env: Env, url?: URL): Promise<Response> {
       workers: workers.results.map((w) => ({
         ...w,
         token_hash: undefined, // the hash of a worker's token is the pool's to compare, nobody's to see
+        log_tail: undefined, // the worker's own log is its owner's and the maintainers' (GET /factory/workers/:id/log), not the listing's
+        log_at: undefined,
         labels: w.labels ? JSON.parse(w.labels) : null,
         packages: w.packages ? JSON.parse(w.packages) : null,
         alive: Date.parse(w.last_seen) > alive,
