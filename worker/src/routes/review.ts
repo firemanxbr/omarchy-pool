@@ -75,14 +75,14 @@ export async function handleReviewList(env: Env): Promise<Response> {
   }
   // The contributor's build behind each of the project's rows in the list (its gate, its audit, its attempts): the score needs both halves.
   const fromIds = staged.results.map((r) => (r.trust === "project" && r.params ? (JSON.parse(r.params as string) as { review?: number }).review : null)).filter((x): x is number => typeof x === "number");
-  const fromRows = new Map<number, { id: number; attempts: number; status: string; result: string | null; audit_status: string | null; audit_result: string | null }>();
+  const fromRows = new Map<number, { id: number; attempts: number; status: string; result: string | null; version: string | null; pkgbuild_ref: string | null; audit_status: string | null; audit_result: string | null }>();
   if (fromIds.length) {
     const rows = await env.DB.prepare(
-      `SELECT t.id, t.attempts, t.status, t.result,
+      `SELECT t.id, t.attempts, t.status, t.result, t.version, t.pkgbuild_ref,
               (SELECT u.status FROM build_tasks u WHERE u.kind = 'audit' AND u.name = t.name AND json_extract(u.params, '$.task') = t.id ORDER BY u.id DESC LIMIT 1) AS audit_status,
               (SELECT u.result FROM build_tasks u WHERE u.kind = 'audit' AND u.name = t.name AND json_extract(u.params, '$.task') = t.id ORDER BY u.id DESC LIMIT 1) AS audit_result
          FROM build_tasks t WHERE t.id IN (${fromIds.map(() => "?").join(", ")})`,
-    ).bind(...fromIds).all<{ id: number; attempts: number; status: string; result: string | null; audit_status: string | null; audit_result: string | null }>();
+    ).bind(...fromIds).all<{ id: number; attempts: number; status: string; result: string | null; version: string | null; pkgbuild_ref: string | null; audit_status: string | null; audit_result: string | null }>();
     for (const r of rows.results) fromRows.set(r.id, r);
   }
   // The chain's score (score.ts) from what the row and its other half carry; `ready` = the contributor's half is complete, a maintainer's time is well spent.
@@ -94,14 +94,14 @@ export async function handleReviewList(env: Env): Promise<Response> {
       { project: (r.request_project as string | null) ?? null, source: (r.request_source as string | null) ?? null, description: (r.request_description as string | null) ?? null, license: (r.request_license as string | null) ?? null, detected: (r.detected as string | null) ?? null },
       r.request_id ? { id: r.request_id as number, version: (r.request_version as string) ?? "", checklist: (r.request_checklist as string | null) ?? null, migrated: (r.request_migrated as number) ?? 0, record: (r.request_record as string) ?? "", sha256: (r.request_sha256 as string) ?? "", created_at: (r.request_created_at as string) ?? "" } : null,
     );
-    const request = { license: (r.request_license as string | null) ?? null, source: (r.request_source as string | null) ?? null, complete: req.complete };
+    const request = { license: (r.request_license as string | null) ?? null, source: (r.request_source as string | null) ?? null, version: (r.request_version as string | null) ?? null, complete: req.complete };
     if (r.trust === "project") {
       const from = r.params ? (JSON.parse(r.params as string) as { review?: number }).review : undefined;
       const c = from ? fromRows.get(from) : undefined;
-      return scoreChain({ contributor: c ? { attempts: c.attempts, status: c.status } : null, vet: c ? vetOf(c.result) : null, audit: c ? audit(c.audit_status, c.audit_result) : null, request, project: { status: r.status as string, attempts: r.attempts as number }, projectVet: vetOf(r.result as string | null), trial: trial(r.trial_status as string | null, r.trial_result as string | null), approval: null, category: (r.category as string | null) ?? null });
+      return scoreChain({ contributor: c ? { attempts: c.attempts, status: c.status, version: c.version, bump: !!c.pkgbuild_ref?.startsWith("bump:") } : null, vet: c ? vetOf(c.result) : null, audit: c ? audit(c.audit_status, c.audit_result) : null, request, project: { status: r.status as string, attempts: r.attempts as number }, projectVet: vetOf(r.result as string | null), trial: trial(r.trial_status as string | null, r.trial_result as string | null), approval: null, category: (r.category as string | null) ?? null });
     }
     const pb = projectOf.get(r.id as number);
-    return scoreChain({ contributor: { attempts: r.attempts as number, status: r.status as string }, vet: vetOf(r.result as string | null), audit: audit(r.audit_status as string | null, r.audit_result as string | null), request, project: pb ? { status: pb.status, attempts: pb.attempts } : null, projectVet: pb ? vetOf(pb.result) : null, trial: pb ? trial(pb.trial_status, pb.trial_result) : null, approval: null, category: (r.category as string | null) ?? null });
+    return scoreChain({ contributor: { attempts: r.attempts as number, status: r.status as string, version: (r.version as string | null) ?? null, bump: String(r.pkgbuild_ref ?? "").startsWith("bump:") }, vet: vetOf(r.result as string | null), audit: audit(r.audit_status as string | null, r.audit_result as string | null), request, project: pb ? { status: pb.status, attempts: pb.attempts } : null, projectVet: pb ? vetOf(pb.result) : null, trial: pb ? trial(pb.trial_status, pb.trial_result) : null, approval: null, category: (r.category as string | null) ?? null });
   };
   // A build of a version a maintainer already approved — the same name,
   // version and architecture, an earlier task — is nothing to decide: the
@@ -233,7 +233,7 @@ async function ownerOf(env: Env, name: string, fallback: string | null): Promise
  * the same gate, staged like any build. Then a maintainer approves *that*.
  */
 export async function handleProjectBuild(c: Contributor, id: number, request: Request, env: Env): Promise<Response> {
-  const b = (await request.json().catch(() => ({}))) as { note?: string };
+  const b = (await request.json().catch(() => ({}))) as { note?: string; worker?: unknown };
   const t = await env.DB.prepare("SELECT * FROM build_tasks WHERE id = ?").bind(id).first<Staged & { trust: string }>();
   if (!t) return json({ error: "no such task" }, 404);
   if (t.trust !== "community" || t.status !== "staged") return json({ error: `task ${id} is ${t.trust === "project" ? "the project's own build" : t.status}; the project builds from a contributor's staged build` }, 409);
@@ -242,12 +242,19 @@ export async function handleProjectBuild(c: Contributor, id: number, request: Re
   if (owner === c.login) return json({ error: `${c.login} brought ${t.name}; another maintainer must review it` }, 403);
   const inFlight = await env.DB.prepare("SELECT id, status FROM build_tasks WHERE kind = 'build' AND trust = 'project' AND json_extract(params, '$.review') = ? AND status IN ('queued', 'leased', 'staged')").bind(id).first<{ id: number; status: string }>();
   if (inFlight) return json({ error: `the project is already on it: task ${inFlight.id} is ${inFlight.status}` }, 409);
+  // Where it runs: one of the project's workers that builds this architecture, when the maintainer says which (the native one, not the emulated one).
+  let pinned: string | null = null;
+  if (typeof b.worker === "string" && b.worker.trim()) {
+    const w = await env.DB.prepare("SELECT id, arch FROM build_workers WHERE id = ? AND revoked_at IS NULL AND trust = 'project'").bind(b.worker.trim()).first<{ id: string; arch: string }>();
+    if (!w || w.arch !== t.arch) return json({ error: `${b.worker} is not a project worker for ${t.arch}` }, 400);
+    pinned = w.id;
+  }
   const pkg = await env.DB.prepare("SELECT request_id, project, source, release, description, license FROM factory_packages WHERE name = ?").bind(t.name).first<{ request_id: number | null; project: string | null; source: string | null; release: string | null; description: string | null; license: string | null }>();
   const params = { review: id, request: pkg?.request_id ?? null, project: pkg?.project ?? null, source: pkg?.source ?? null, version: pkg?.release ?? t.version, description: pkg?.description ?? null, license: pkg?.license ?? null, owner, by: c.login, note: b.note ?? null };
   const row = await env.DB.prepare(
-    `INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, params) VALUES (?, ?, ?, ?, ?, 30, 0, 'project', ?, 'build', ?) RETURNING id`,
+    `INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, params, pinned_to) VALUES (?, ?, ?, ?, ?, 30, 0, 'project', ?, 'build', ?, ?) RETURNING id`,
   )
-    .bind(t.name, t.arch, t.version, `review:${id}`, `project build asked by ${c.login}`, owner, JSON.stringify(params))
+    .bind(t.name, t.arch, t.version, `review:${id}`, `project build asked by ${c.login}`, owner, JSON.stringify(params), pinned)
     .first<{ id: number }>();
   await env.DB.prepare("UPDATE factory_packages SET detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?")
     .bind(`${t.version ?? ""} for ${t.arch}: the project is building it (task ${row?.id}), asked by ${c.login}`, t.name)
@@ -255,7 +262,7 @@ export async function handleProjectBuild(c: Contributor, id: number, request: Re
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('review', NULL, 'factory', 'ok', ?, ?)")
     .bind(`${t.name} ${t.version ?? ""} (${t.arch}): ${c.login} asked the project to build it — task ${row?.id}, from ${owner ?? "?"}'s build ${id}`, JSON.stringify({ task: row?.id, from: id, name: t.name, arch: t.arch, by: c.login, owner, note: b.note ?? null }))
     .run();
-  return json({ task: row?.id, from: id, by: c.login });
+  return json({ task: row?.id, from: id, by: c.login, pinned_to: pinned });
 }
 
 export async function handleApprove(c: Contributor, id: number, request: Request, env: Env): Promise<Response> {

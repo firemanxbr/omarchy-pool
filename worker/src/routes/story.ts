@@ -22,6 +22,10 @@ export interface TaskBrief {
   version: string | null;
   attempts: number;
   lease_owner: string | null;
+  /** The worker this build was asked for, when it was: only that one claims it. */
+  pinned_to?: string | null;
+  /** Where the recipe came from (draft:, <url>@<tag>:<path>, bump:<task>@<tag>, review:<task>). */
+  pkgbuild_ref?: string | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -46,7 +50,7 @@ export interface Chain {
   score: Score;
 }
 
-const TASK_COLS = "id, kind, status, trust, owner, arch, version, attempts, lease_owner, created_at, started_at, finished_at, duration_ms, error, params, result";
+const TASK_COLS = "id, kind, status, trust, owner, arch, version, attempts, lease_owner, pinned_to, pkgbuild_ref, created_at, started_at, finished_at, duration_ms, error, params, result";
 
 function brief(r: Record<string, unknown>): TaskBrief {
   const parse = (s: unknown) => { try { return s ? (JSON.parse(s as string) as Record<string, unknown>) : null; } catch { return null; } };
@@ -83,7 +87,7 @@ export function chains(tasks: TaskBrief[], approvals: Approval[], pkg: Record<st
   const projects = builds.filter((t) => t.trust === "project");
   const of = (kind: string, key: string, id: number) => tasks.find((t) => t.kind === kind && t.params[key] === id) ?? null;
   const vetOf = (t: TaskBrief | null) => (t?.result?.vet as { verdict: string; fails: number; warnings: number } | undefined) ?? null;
-  const request = pkg ? { license: (pkg.license as string | null) ?? null, source: (pkg.source as string | null) ?? null, complete: requestChecks({ project: (pkg.project as string | null) ?? null, source: (pkg.source as string | null) ?? null, description: (pkg.description as string | null) ?? null, license: (pkg.license as string | null) ?? null, detected: (pkg.detected as string | null) ?? null }, req).complete } : null;
+  const request = pkg ? { license: (pkg.license as string | null) ?? null, source: (pkg.source as string | null) ?? null, version: req?.version ?? null, complete: requestChecks({ project: (pkg.project as string | null) ?? null, source: (pkg.source as string | null) ?? null, description: (pkg.description as string | null) ?? null, license: (pkg.license as string | null) ?? null, detected: (pkg.detected as string | null) ?? null }, req).complete } : null;
   const category = (pkg?.category as string | null) ?? null;
   const make = (contributor: TaskBrief | null, project: TaskBrief | null): Chain => {
     const audit = contributor ? of("audit", "task", contributor.id) : null;
@@ -95,7 +99,7 @@ export function chains(tasks: TaskBrief[], approvals: Approval[], pkg: Record<st
     const withdrawn = mine.find((a) => a.withdrawn_at) ?? null;
     const auditReport = audit?.result as { verdict?: string; findings?: { severity: string }[] } | null | undefined;
     const score = scoreChain({
-      contributor: contributor ? { attempts: contributor.attempts, status: contributor.status } : null,
+      contributor: contributor ? { attempts: contributor.attempts, status: contributor.status, version: contributor.version, bump: !!contributor.pkgbuild_ref?.startsWith("bump:") } : null,
       vet: vetOf(contributor),
       audit: audit ? { status: audit.status, verdict: auditReport?.verdict ?? null, high: (auditReport?.findings ?? []).filter((f) => f.severity === "high").length, findings: (auditReport?.findings ?? []).length } : null,
       request,

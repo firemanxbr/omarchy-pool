@@ -50,6 +50,19 @@ __CHARTS__
   skeletonTiles("#tiles", 4); skeletonRows("#w-project", 8, 2); skeletonRows("#w-review", 9, 2); skeletonRows("#w-community", 10, 2);
   $("#w-project thead tr").innerHTML = WT_HEAD.project; $("#w-review thead tr").innerHTML = WT_HEAD.review; $("#w-community thead tr").innerHTML = WT_HEAD.community; $("#wt-legend").innerHTML = WT_LEGEND;
   function kindOf(w) { return wtKind(w); }
+  var COLOR = { project: "var(--green)", review: "var(--blue)", community: "var(--lilac)" };
+  // What each kind finished per day over the last week, from the stats series: the pool's jobs are the
+  // project's (jobs_daily, by kind), the project's builds with the publishes and audits are the review side's,
+  // a contributor's builds are theirs (builds_daily, by trust). Only finished tasks count: done or staged, and failed.
+  var POOL_KINDS = { sync: 1, render: 1, promote: 1, rollback: 1, health: 1, security: 1, enqueue: 1, gc: 1, verify: 1, relayout: 1, metrics: 1, trial: 1 };
+  function perDay() {
+    var days = lastDays(7), zero = function () { var o = {}; days.forEach(function (d) { o[d] = { done: 0, failed: 0 }; }); return o; };
+    var P = { project: zero(), review: zero(), community: zero() }, S = (STATS && STATS.series) || {};
+    var add = function (k, day, status, n) { var o = P[k][day]; if (!o) return; if (status === "failed") o.failed += n; else if (status === "done" || status === "staged") o.done += n; };
+    (S.jobs_daily || []).forEach(function (r) { add(POOL_KINDS[r.kind] ? "project" : "review", r.day, r.status, Number(r.n || 0)); });
+    (S.builds_daily || []).forEach(function (r) { add(r.trust === "community" ? "community" : "review", r.day, r.status, Number(r.n || 0)); });
+    return { days: days, P: P };
+  }
   // The load: what each worker did in the last day, from the stats series (finished tasks by duration, a running one by its start).
   function loadOf() { var L = {}; ((STATS && STATS.series && STATS.series.workers_daily) || []).forEach(function (r) { L[r.worker] = { ms: Number(r.ms || 0) + Number(r.running_ms || 0), done: Number(r.done || 0) }; }); return L; }
   function render() {

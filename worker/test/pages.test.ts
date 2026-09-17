@@ -34,6 +34,29 @@ describe("dashboard pages", () => {
     }
   });
 
+  // Every function a page's script calls is declared somewhere in that script (the shell's helpers, the charts, the page's own) or is the browser's: a helper moved out of one page and dropped from another is a ReferenceError the tests would not otherwise see (the Workers page lost perDay() and COLOR that way, 2026-09-17).
+  it("no page script calls a function it does not have", async () => {
+    const GLOBALS = new Set(["fetch", "setTimeout", "setInterval", "clearTimeout", "clearInterval", "requestAnimationFrame", "encodeURIComponent", "decodeURIComponent", "encodeURI", "parseInt", "parseFloat", "isNaN", "isFinite", "Number", "String", "Boolean", "Array", "Object", "Date", "Promise", "RegExp", "Error", "Map", "Set", "Response", "URLSearchParams", "URL", "Function", "Symbol", "escape", "unescape", "alert", "confirm", "prompt", "Blob", "TextEncoder", "TextDecoder", "Intl", "structuredClone", "queueMicrotask", "matchMedia", "getComputedStyle", "scrollTo", "scrollBy", "open", "close", "atob", "btoa", "AbortController", "IntersectionObserver", "ResizeObserver", "MutationObserver", "CustomEvent", "Event", "FormData", "Headers", "Request", "if", "for", "while", "switch", "catch", "return", "function", "typeof", "new", "else", "do", "in", "of"]);
+    for (const path of PAGES) {
+      const html = await (await get(path)).text();
+      const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map((m) => m[1]).filter((s) => !/^\s*$/.test(s) && !/gtag|beacon/.test(s.slice(0, 120)));
+      const code = scripts.join("\n");
+      if (!code.trim()) continue;
+      const declared = new Set<string>();
+      for (const m of code.matchAll(/\bfunction\s+([A-Za-z_$][\w$]*)\s*\(/g)) declared.add(m[1]);
+      for (const m of code.matchAll(/\b(?:var|let|const)\s+([A-Za-z_$][\w$]*)/g)) declared.add(m[1]);
+      for (const m of code.matchAll(/,\s*([A-Za-z_$][\w$]*)\s*=\s*function\b/g)) declared.add(m[1]);
+      for (const m of code.matchAll(/\b([A-Za-z_$][\w$]*)\s*=\s*function\b/g)) declared.add(m[1]);
+      for (const m of code.matchAll(/\bfunction\s*[\w$]*\s*\(([^)]*)\)/g)) m[1].split(",").forEach((a) => declared.add(a.trim()));
+      for (const m of code.matchAll(/\(([^()]*)\)\s*=>/g)) m[1].split(",").forEach((a) => declared.add(a.trim()));
+      const stripped = code.replace(/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"/g, '""').replace(/\/\/[^\n]*/g, "");
+      const called = new Set<string>();
+      for (const m of stripped.matchAll(/(^|[^\w$.])([A-Za-z_$][\w$]*)\s*\(/g)) called.add(m[2]);
+      const missing = [...called].filter((n) => !declared.has(n) && !GLOBALS.has(n));
+      expect(missing, `${path} calls undeclared: ${missing.join(", ")}`).toEqual([]);
+    }
+  });
+
   it("the Pool keeps its headline, the Factory serves the contributors, the Pipeline draws the living system", async () => {
     expect(await (await get("/")).text()).toContain("tested before they reach you");
     const factory = await (await get("/factory")).text();

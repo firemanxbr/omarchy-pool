@@ -17,13 +17,13 @@
 
 export interface ChainInput {
   /** The contributor's build: how many leases it took, how it ended. */
-  contributor: { attempts: number; status: string } | null;
+  contributor: { attempts: number; status: string; version?: string | null; bump?: boolean } | null;
   /** The gate on the contributor's build (vet.json's summary). */
   vet: { verdict: string; fails: number; warnings: number } | null;
   /** The second agent's report on it. */
   audit: { status: string; verdict?: string | null; high?: number; findings?: number } | null;
-  /** The request on the record: a licence and a source named; `complete` when the form would accept it today (request.ts) — false for one that predates the checklist, null when not looked at. */
-  request: { license: string | null; source: string | null; complete?: boolean | null } | null;
+  /** The request on the record: a licence and a source named; `complete` when the form would accept it today (request.ts) — false for one that predates the checklist, null when not looked at; `version` is the release it names, so a build of another version is not this request's evidence. */
+  request: { license: string | null; source: string | null; complete?: boolean | null; version?: string | null } | null;
   /** The project's build of it, its gate and its trial. */
   project: { status: string; attempts: number } | null;
   projectVet: { verdict: string; fails: number; warnings: number } | null;
@@ -73,8 +73,12 @@ export function scoreChain(c: ChainInput): Score {
   const built = c.contributor && ["staged", "done"].includes(c.contributor.status);
   const attempts = c.contributor?.attempts ?? 0;
   const named = !!(c.request && c.request.license && c.request.source);
-  const incomplete = named && c.request?.complete === false;
-  add("contributor", "A request on the record", named ? (incomplete ? 2 : 5) : 0, 5, c.request ? "done" : "pending", c.request ? (named ? (incomplete ? "licence and source named, but the request is incomplete — renew it" : "licence and source named") : "the licence or the source is missing") : "no request yet");
+  // A build is this request's evidence when it is of the version the request names (the task's version is the tag without its v, dashes as underscores).
+  const asVersion = (tag: string) => tag.replace(/^[vV]/, "").replace(/-/g, "_");
+  // (A bump — the pool's own build of a new upstream release from the approved recipe — is evidence for the maintainer, not for the request.)
+  const stale = !!(named && !c.contributor?.bump && c.request?.version && c.contributor?.version && c.request.version !== "unknown" && asVersion(c.request.version) !== c.contributor.version);
+  const incomplete = !c.request || !named || c.request.complete === false || stale;
+  add("contributor", "A request on the record", named ? (incomplete ? 2 : 5) : 0, 5, c.request ? "done" : "pending", !c.request ? "no request on the record" : !named ? "the licence or the source is missing" : c.request.complete === false ? "licence and source named, but the request is incomplete — renew it" : stale ? `the request names ${c.request.version}, this build is ${c.contributor?.version} — build again` : "licence and source named");
   add("contributor", "A build that succeeds", built ? Math.max(4, 15 - 3 * Math.max(0, attempts - 1)) : 0, 15, c.contributor ? (built || c.contributor.status === "failed" || c.contributor.status === "cancelled" ? "done" : "pending") : "pending", c.contributor ? (built ? (attempts <= 1 ? "first attempt" : `${attempts} attempts`) : c.contributor.status === "failed" ? "the build failed" : c.contributor.status) : "no build yet");
   add("contributor", "The gate passed", c.vet ? (c.vet.verdict === "pass" ? (c.vet.warnings ? 10 : 15) : 0) : 0, 15, c.vet ? "done" : "pending", c.vet ? (c.vet.verdict === "pass" ? (c.vet.warnings ? `${c.vet.warnings} warning(s)` : "clean") : `${c.vet.fails} check(s) failed`) : built ? "no verdict on the record (built before the gate)" : "not run yet");
   const auditDone = c.audit?.status === "done";
@@ -94,7 +98,7 @@ export function scoreChain(c: ChainInput): Score {
   const max = items.reduce((n, i) => n + i.max, 0);
   const contributorPts = items.filter((i) => i.who === "contributor").reduce((n, i) => n + i.points, 0);
   const projected = classOf(contributorPts + 50);
-  // Ready for a maintainer: built, through the gate, audited — and the request as the form would take it today (an incomplete one is the contributor's to renew).
+  // Ready for a maintainer: built, through the gate, audited — and a request as the form would take it today, of this version (an incomplete one is the contributor's to renew; a build of another version is the contributor's to redo).
   const ready = !!(built && c.vet?.verdict === "pass" && (auditDone || c.audit?.status === "failed") && !incomplete);
   return { points, max, class: classOf(points), projected, ready, items };
 }

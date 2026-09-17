@@ -257,7 +257,21 @@ fetch_pkgbuild() { # name ref → /build/pkg holds the PKGBUILD directory
     spec="${ref#draft:}"; url="${spec%@*}"
     echo "==> Drafting a PKGBUILD for $url ($( [[ -n "$(agent_label)" ]] && echo "with the contributor's agent, $(agent_label)" || echo "template; set an agent key on the worker for an agent-written draft"))"
     mkdir -p /build/pkg
-    with_secrets python3 /build/pool/factory/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg
+    # A build asked after a failed one starts from that one's lesson: its
+    # PKGBUILD and its log (public evidence), the way a second attempt
+    # inside one task does — instead of drafting from nothing again and
+    # failing the same way. The contributor's hint goes with it.
+    rm -f /build/PKGBUILD.prev /build/lesson.log
+    if [[ -n "${LESSON_TASK:-}" ]]; then
+      curl -sSf --max-time 60 "${OMARCHY_API:-https://pkgs.firemanxbr.org}/api/v1/factory/tasks/$LESSON_TASK/artifacts/PKGBUILD" -o /build/PKGBUILD.prev 2>/dev/null || rm -f /build/PKGBUILD.prev
+      curl -sSf --max-time 60 "${OMARCHY_API:-https://pkgs.firemanxbr.org}/api/v1/factory/tasks/$LESSON_TASK/artifacts/build.log" -o /build/lesson.log 2>/dev/null || rm -f /build/lesson.log
+    fi
+    if [[ -s /build/PKGBUILD.prev && -s /build/lesson.log ]]; then
+      echo "==> The lesson: the PKGBUILD and the log of failed build $LESSON_TASK${BUILD_HINT:+; the hint from the contributor: $BUILD_HINT}"
+      with_secrets python3 /build/pool/factory/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg --previous /build/PKGBUILD.prev --log /build/lesson.log ${BUILD_HINT:+--hint "$BUILD_HINT"}
+    else
+      with_secrets python3 /build/pool/factory/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg ${BUILD_HINT:+--hint "$BUILD_HINT"}
+    fi
   elif [[ "$ref" == *@*:* ]]; then
     local url rest tag path
     url="${ref%%@*}"; rest="${ref#*@}"; tag="${rest%%:*}"; path="${rest#*:}"
@@ -557,15 +571,16 @@ build_attempts() { # name ref
         ${review_source:+--source "$review_source"} ${review_version:+--version "$review_version"} ${review_desc:+--description "$review_desc"} ${review_license:+--license "$review_license"} || return 4
     else
       local url; url="${ref#draft:}"; url="${url%@*}"
-      with_secrets python3 /build/pool/factory/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg --previous /build/PKGBUILD.prev --log /build/attempt.log || return 4
+      with_secrets python3 /build/pool/factory/bin/draft-pkgbuild --url "$url" --name "$name" --out /build/pkg --previous /build/PKGBUILD.prev --log /build/attempt.log ${BUILD_HINT:+--hint "$BUILD_HINT"} || return 4
     fi
   done
 }
 
 inside() {
-  local name ref arch pool review_url review_source review_version review_desc review_license
+  local name ref arch pool review_url review_source review_version review_desc review_license lesson hint
   # shellcheck source=/dev/null
   source /task/meta.sh
+  LESSON_TASK="${lesson:-}"; BUILD_HINT="${hint:-}"; export LESSON_TASK BUILD_HINT
   prepare_container
   add_pool_repos "$arch" "$pool"
   local status=0
@@ -616,7 +631,10 @@ container_worker() {
   done
   task="$body"
   id="$(jq -r .task.id <<<"$task")"; name="$(jq -r .task.name <<<"$task")"; ref="$(jq -r .task.pkgbuild_ref <<<"$task")"
-  log "task $id: $name for $ARCH ($ref)"
+  # What the asker put with the build: the failed build to learn from, a word for the agent (fetch_pkgbuild reads both).
+  LESSON_TASK="$(jq -r '.task.params.lesson // empty' <<<"$task")"; export LESSON_TASK
+  BUILD_HINT="$(jq -r '.task.params.hint // empty' <<<"$task")"; export BUILD_HINT
+  log "task $id: $name for $ARCH ($ref)${LESSON_TASK:+, lesson: build $LESSON_TASK}${BUILD_HINT:+, with a hint}"
   # The owner's workspace is full: nothing this build produces can land.
   # Say so now — the task fails with the reason on the dashboard — instead
   # of building for an hour into a 413 (2026-09-16, four tasks did).

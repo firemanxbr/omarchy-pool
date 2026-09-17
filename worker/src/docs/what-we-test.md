@@ -67,6 +67,37 @@ stable on the same evidence as every synced package. A maintainer can
 still block it later — the reason on the record, another maintainer lifts
 it — and it leaves every ring at once.
 
+### When a build does not pass
+
+A build that failed, or failed the gate, or was blocked by the audit, is
+the contributor's to fix — and the page says how, on the row of that
+architecture (each architecture is built on a worker of its own, so one
+can be ready while the other failed). The tools, in the order to try them:
+
+1. **Read the evidence.** The log says what stopped it; the gate's log
+   names each failed check, and this page explains it; the audit's report
+   lists its findings with a fix for each; the PKGBUILD the agent wrote is
+   beside them.
+2. **Build again, with the lesson.** The next build of that architecture
+   starts from the failed build's PKGBUILD and log — the drafter corrects
+   instead of starting from nothing — and from a **hint** the contributor
+   writes in the Build dialog: the binary's name, a build flag, a
+   dependency, what the recipe should do differently. Inside one build the
+   agent gets three attempts, each from the last log.
+3. **Choose where it runs.** The same dialog lists the workers that can
+   take it: the contributor's own, and the ones the project shares. A
+   build that ran *emulated* (x86_64 under qemu on an aarch64 host) may
+   need nothing but a native worker. A build asked for one worker goes to
+   that worker only and waits for it; a contributor with no worker for the
+   architecture is built by the project's shared workers at once, one with
+   a worker by theirs first and by the shared ones after 14 days.
+4. **Build it at home first.** The same image runs on any machine with
+   the contributor's own agent key (*Workers* in the docs): what passes
+   there is what they queue here.
+
+A maintainer chooses the same way for the project's build: which of the
+project's workers, native or emulated, and a hint for the project's agent.
+
 An approval can be **withdrawn** by any maintainer, the one who gave it
 included: one that broke the rule (a package approved by the person who
 brought it, as the first package was during the bootstrap), or one a

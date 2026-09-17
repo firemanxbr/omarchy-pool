@@ -65,7 +65,7 @@ export async function handleUser(login: string, env: Env): Promise<Response> {
   const [packages, builds, counts, approvals, workers, listed, record] = await Promise.all([
     env.DB.prepare(`SELECT name, category, url, arches, status, detail, updated_at FROM factory_packages WHERE owner = ? ORDER BY name`).bind(login).all(),
     env.DB.prepare(
-      `SELECT id, name, arch, version, status, reason, created_at, finished_at, duration_ms, lease_owner, trust FROM build_tasks
+      `SELECT id, name, arch, version, status, reason, created_at, finished_at, duration_ms, lease_owner, pinned_to, trust FROM build_tasks
         WHERE owner = ? AND kind = 'build' ORDER BY id DESC LIMIT 50`,
     )
       .bind(login)
@@ -79,7 +79,7 @@ export async function handleUser(login: string, env: Env): Promise<Response> {
     )
       .bind(login)
       .first<{ staged: number; published: number; failed: number; total: number }>(),
-    env.DB.prepare(`SELECT task_id, name, arch, version, decision, note, created_at FROM approvals WHERE by = ? ORDER BY id DESC LIMIT 50`).bind(login).all(),
+    env.DB.prepare(`SELECT task_id, name, arch, version, decision, note, created_at, withdrawn_at, withdrawn_by, withdrawn_reason FROM approvals WHERE by = ? ORDER BY id DESC LIMIT 50`).bind(login).all(),
     env.DB.prepare("SELECT id, arch, mode, trust, agent, last_seen, builds_done, builds_failed, revoked_at FROM build_workers WHERE owner = ? ORDER BY last_seen DESC").bind(login).all(),
     maintainersOf(env),
     recordOf(env, login),

@@ -302,8 +302,9 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   // (docs/GOVERNANCE.md, *Workers, compute and agents*).
   const owner = actor.w.owner ? await env.DB.prepare("SELECT role FROM contributors WHERE login = ?").bind(actor.w.owner).first<{ role: string }>() : null;
   const shared = trust === "community" && b.shared === true && owner?.role === "maintainer";
-  let scope = `kind IN (SELECT value FROM json_each(?))`;
-  const binds: unknown[] = [JSON.stringify(kinds)];
+  // A build asked for one worker (pinned_to) is claimed by that worker only; the rest is anyone's that qualifies.
+  let scope = `kind IN (SELECT value FROM json_each(?)) AND (pinned_to IS NULL OR pinned_to = ?)`;
+  const binds: unknown[] = [JSON.stringify(kinds), workerId];
   // Agent work goes only to a worker whose agent answered the probe: a
   // draft or an audit on a worker with no agent, or a failing one, is a
   // failed task an hour later.

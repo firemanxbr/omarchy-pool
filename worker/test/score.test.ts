@@ -42,6 +42,15 @@ describe("the score", () => {
     expect(s).toMatchObject({ points: 47, ready: false });
     expect(scoreChain({ ...green, request: { license: "MIT", source: "https://x/y.tar.gz", complete: true } }).ready).toBe(true);
     expect(scoreChain({ ...green, request: { license: "MIT", source: "https://x/y.tar.gz", complete: null } }).ready).toBe(true);
+    // No request, or one that names no licence or source, is not ready either — the rule is one: a request as the form takes it.
+    expect(scoreChain({ ...green, request: null }).ready).toBe(false);
+    expect(scoreChain({ ...green, request: { license: null, source: "https://x/y.tar.gz", complete: false } }).ready).toBe(false);
+    // A build of another version than the request names is not its evidence; a bump (the pool's own build of a new release) is exempt.
+    const v = { ...green, contributor: { attempts: 1, status: "staged", version: "1.2.0" }, request: { license: "MIT", source: "https://x/y.tar.gz", complete: true, version: "v1.2.0" } };
+    expect(scoreChain(v).ready).toBe(true);
+    expect(scoreChain({ ...v, request: { ...v.request, version: "v1.3.0" } })).toMatchObject({ ready: false });
+    expect(scoreChain({ ...v, request: { ...v.request, version: "v1.3.0" } }).items.find((i) => i.item === "A request on the record")!.note).toMatch(/names v1.3.0, this build is 1.2.0/);
+    expect(scoreChain({ ...v, contributor: { attempts: 1, status: "staged", version: "1.3.0-1", bump: true } }).ready).toBe(true);
   });
   it("the classes", () => {
     expect([100, 90, 89, 75, 74, 55, 54, 0].map(classOf)).toEqual(["A", "A", "B", "B", "C", "C", "D", "D"]);

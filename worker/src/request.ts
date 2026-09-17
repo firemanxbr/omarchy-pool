@@ -62,6 +62,8 @@ const parse = (s: unknown): Record<string, unknown> => {
   try { return JSON.parse(String(s)) as Record<string, unknown>; } catch { return {}; }
 };
 const https = (s: string | null | undefined): s is string => typeof s === "string" && /^https:\/\/[^\s]+$/.test(s);
+/** A release is a file somewhere under the host, never the host alone (the pool wrote `https://vendor.com` as the source of the first requests). */
+const hasPath = (s: string): boolean => { try { return new URL(s).pathname.replace(/\/+$/, "").length > 0; } catch { return false; } };
 /** A URL as a note reads it: the host and the last path segment — github.com/…/v2.16.1.tar.gz. */
 const tail = (s: string) => {
   const bare = s.replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/+$/, "");
@@ -84,9 +86,9 @@ export function requestChecks(pkg: RequestedPackage, req: RequestRow | null): Re
   const checks: RequestCheck[] = [
     { key: "project", ok: https(pkg.project), item: "The project's home", note: https(pkg.project) ? tail(pkg.project) : "no project URL on the record" },
     {
-      key: "source", ok: https(pkg.source) && versionKnown && pkg.source !== pkg.project,
+      key: "source", ok: https(pkg.source) && versionKnown && hasPath(pkg.source),
       item: "The source of the version",
-      note: !https(pkg.source) ? "no source URL" : !versionKnown ? "the version is unknown — name the release" : pkg.source === pkg.project ? `${version}, but the source is the project's home, not a release` : `${version} · ${tail(pkg.source)}`,
+      note: !https(pkg.source) ? "no source URL" : !versionKnown ? "the version is unknown — name the release" : !hasPath(pkg.source) ? `${version}, but the source is a home page, not a release` : `${version} · ${tail(pkg.source)}`,
     },
     { key: "description", ok: description.length >= 8 && description.length <= 120, item: "One line for pacman", note: description ? (description.length > 120 ? `${description.length} characters — 120 is the most` : description.length < 8 ? "too short" : description) : "missing" },
     { key: "license", ok: !!license && LICENSE.test(license) && licenseAgrees, item: "The licence, an SPDX identifier", note: !license ? "missing" : !LICENSE.test(license) ? `${license} is not an SPDX identifier` : !licenseAgrees ? `${license} — GitHub says ${ghLicense}` : license + (ghLicense ? " · GitHub agrees" : "") },

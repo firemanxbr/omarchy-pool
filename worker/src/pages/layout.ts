@@ -439,7 +439,7 @@ const CSS = String.raw`
   /* Decisions ask in the dashboard: one dialog, and a toast that says what happened. */
   dialog.ask { border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 0; width: min(520px, calc(100vw - 32px)); box-shadow: 0 24px 60px rgba(0,0,0,.5); } dialog.ask::backdrop { background: rgba(10, 11, 16, .72); }
   dialog.ask form { padding: 20px 22px; display: grid; gap: 12px; } dialog.ask h3 { margin: 0; font-family: Geist, sans-serif; font-size: 17px; } dialog.ask .t { margin: 0; font-size: 13.5px; color: var(--muted); } dialog.ask textarea { width: 100%; box-sizing: border-box; background: var(--bg-deep); color: var(--text); border: 1px solid var(--line); padding: 8px 10px; font: 13px "JetBrains Mono", monospace; resize: vertical; }
-  dialog.ask .err { margin: 0; font-size: 12.5px; color: var(--red); } dialog.ask .row { display: flex; justify-content: flex-end; gap: 8px; } dialog.ask button.danger { border-color: var(--red); color: var(--red); } dialog.ask button.ghost { color: var(--muted); }
+  dialog.ask .err { margin: 0; font-size: 12.5px; color: var(--red); } dialog.ask label.pick { display: grid; gap: 4px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; } dialog.ask label.pick select { width: 100%; box-sizing: border-box; background: var(--bg-deep); color: var(--text); border: 1px solid var(--line); padding: 7px 10px; font: 13px "JetBrains Mono", monospace; text-transform: none; letter-spacing: 0; } dialog.ask .row { display: flex; justify-content: flex-end; gap: 8px; } dialog.ask button.danger { border-color: var(--red); color: var(--red); } dialog.ask button.ghost { color: var(--muted); }
   #toasts { position: fixed; right: 16px; bottom: 16px; z-index: 90; display: grid; gap: 8px; max-width: min(460px, calc(100vw - 32px)); } .toast { border: 1px solid var(--line); background: var(--panel); padding: 10px 14px; font-size: 13px; border-left: 3px solid var(--green); cursor: pointer; transition: opacity .3s, transform .3s; } .toast.error { border-left-color: var(--red); } .toast.warn { border-left-color: var(--amber); } .toast.out { opacity: 0; transform: translateY(6px); }
   /* A person's page: the package rows open into the story and the next step. */
   table.pk td:first-child { width: 28px; padding-right: 0; } .expand { background: none; border: 0; color: var(--dim); font-size: 14px; cursor: pointer; padding: 2px 6px; } .expand:hover { color: var(--text); }
@@ -452,7 +452,7 @@ const CSS = String.raw`
   .pkreq { border: 1px solid var(--line); background: var(--panel); padding: 12px 14px; margin: 0 0 12px; } .pkreq.incomplete { border-left: 3px solid var(--amber); } .pkreq-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: 13px; } .pkreq-head .btn.small { margin-left: auto; padding: 4px 10px; font-size: 12px; }
   .pkreq-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(400px, 100%), 1fr)); gap: 4px 24px; } .pkreq-list li { display: grid; grid-template-columns: 16px 1fr; gap: 6px; font-size: 12.5px; align-items: start; min-width: 0; } .pkreq-list li div { overflow-wrap: anywhere; }
   .pkarch { border: 1px solid var(--line); background: var(--bg-deep); padding: 12px 14px; margin: 0 0 12px; } .pkarch-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: 13px; } .pkarch-head .arch-name { font-family: "JetBrains Mono", monospace; font-weight: 700; font-size: 14px; } .pkarch-head .acts-inline { margin-left: auto; }
-  .pkarch .pknext-line { margin: 8px 0 10px; font-size: 13px; color: var(--muted); } .pkarch .cklist { gap: 12px; } .pkarch .ckcol { padding: 10px 12px; } .pkarch .ckcol h3 { font-size: 14px; } .pkarch .ckcol h3 .num { font-size: 16px; } .pkarch .ckcol li { font-size: 12.5px; padding: 5px 0; }
+  .pkarch .pknext-line { margin: 8px 0 10px; font-size: 13px; color: var(--muted); } .howto { margin: 6px 0 0; padding-left: 22px; display: grid; gap: 4px; color: var(--text); } .howto li { font-size: 12.5px; } .howto li::marker { color: var(--green); font-weight: 700; } .pkarch .cklist { gap: 12px; } .pkarch .ckcol { padding: 10px 12px; } .pkarch .ckcol h3 { font-size: 14px; } .pkarch .ckcol h3 .num { font-size: 16px; } .pkarch .ckcol li { font-size: 12.5px; padding: 5px 0; }
   table.pk td.stands { max-width: 360px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } table.pk td.arches { white-space: nowrap; }
   .tile .v .dim { font-weight: 400; }
   .fchainrow { border: 1px solid var(--line); background: var(--panel); margin-top: 10px; } .fhead { display: flex; justify-content: space-between; gap: 10px; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--line); font-size: 13px; }
@@ -632,10 +632,11 @@ const HELPERS = String.raw`
       bar = document.createElement("div"); bar.className = "pager";
       bar.innerHTML = '<input type="search" placeholder="filter this table…" aria-label="filter"> <select aria-label="rows per page"><option>10</option><option>25</option><option>50</option><option>100</option></select> <span class="count"></span>';
       wrap.parentElement.insertBefore(bar, wrap);
-      bar.querySelector("input").oninput = function () { st.q = this.value.toLowerCase(); draw(); };
-      bar.querySelector("select").onchange = function () { st.n = Number(this.value); draw(); };
       bar.querySelector("select").value = String(st.n);
     }
+    // Bound again on every call: a page that refreshes its rows (every 15 s, after a Build) filters the rows it has now, not the first load's.
+    bar.querySelector("input").oninput = function () { st.q = this.value.toLowerCase(); draw(); };
+    bar.querySelector("select").onchange = function () { st.n = Number(this.value); draw(); };
     function text(r) { return (opts.text ? opts.text(r) : JSON.stringify(r)).toLowerCase(); }
     function draw() {
       var f = st.q ? rows.filter(function (r) { return text(r).indexOf(st.q) >= 0; }) : rows;
@@ -695,13 +696,15 @@ const HELPERS = String.raw`
   }
   // ---- decisions ask in the dashboard, never in the browser's own box: one dialog, a note when the action wants one, a promise of the note (null = cancelled).
   //   ask({ title, text, input: "required" | "optional" | false, placeholder, confirm: "Approve", danger: true })
+  // The dashboard's question: a title, a line, a note when the action wants one (input: "required" | "optional"), a choice when there is one (select: { label, options: [{ value, text, disabled, selected }] }), the button. Resolves the note as a string — or, with a select, { note, pick } — and null when cancelled.
   function ask(o) {
     return new Promise(function (resolve) {
       var d = document.createElement("dialog"); d.className = "ask";
-      d.innerHTML = '<form method="dialog"><h3></h3><p class="t"></p>' + (o.input ? '<textarea rows="3" placeholder="' + esc(o.placeholder || (o.input === "required" ? "why — it goes on the record" : "a note for the record (optional)")) + '"></textarea><p class="err" hidden></p>' : '') + '<div class="row"><button type="button" class="ghost cancel">Cancel</button><button type="submit" class="' + (o.danger ? "danger" : "") + '">' + esc(o.confirm || "OK") + '</button></div></form>';
+      var sel = o.select && o.select.options && o.select.options.length ? '<label class="pick"><span>' + esc(o.select.label || "Where") + '</span><select>' + o.select.options.map(function (x) { return '<option value="' + esc(x.value) + '"' + (x.disabled ? ' disabled' : '') + (x.selected ? ' selected' : '') + '>' + esc(x.text) + '</option>'; }).join("") + '</select></label>' : '';
+      d.innerHTML = '<form method="dialog"><h3></h3><p class="t"></p>' + sel + (o.input ? '<textarea rows="3" placeholder="' + esc(o.placeholder || (o.input === "required" ? "why — it goes on the record" : "a note for the record (optional)")) + '"></textarea><p class="err" hidden></p>' : '') + '<div class="row"><button type="button" class="ghost cancel">Cancel</button><button type="submit" class="' + (o.danger ? "danger" : "") + '">' + esc(o.confirm || "OK") + '</button></div></form>';
       d.querySelector("h3").textContent = o.title || ""; d.querySelector(".t").innerHTML = o.text || "";
       document.body.appendChild(d);
-      var ta = d.querySelector("textarea"), form = d.querySelector("form"), done = function (v) { d.close(); d.remove(); resolve(v); };
+      var ta = d.querySelector("textarea"), se = d.querySelector("select"), form = d.querySelector("form"), done = function (v) { d.close(); d.remove(); resolve(v); };
       d.querySelector(".cancel").onclick = function () { done(null); };
       d.addEventListener("cancel", function (ev) { ev.preventDefault(); done(null); });
       d.addEventListener("click", function (ev) { if (ev.target === d) done(null); });
@@ -709,11 +712,25 @@ const HELPERS = String.raw`
         ev.preventDefault();
         var v = ta ? ta.value.trim() : "";
         if (o.input === "required" && v.length < 4) { d.querySelector(".err").hidden = false; d.querySelector(".err").textContent = "Say why, in a few words — the record keeps it."; ta.focus(); return; }
-        done(v);
+        done(se ? { note: v, pick: se.value } : v);
       };
       d.showModal(); if (ta) ta.focus();
     });
   }
+  // The workers a build may go to, as the choice in the Build dialog, from the factory listing (/api/v1/factory): for a contributor's build, theirs and the ones the project shares; for the project's build, the project's own that build. The first option leaves it to the rule.
+  function whereOptions(workers, arch, login, forProject) {
+    var can = (workers || []).filter(function (w) { return w.arch === arch && !w.revoked_at && (forProject ? (w.side === "omarchy" && (!w.kinds || w.kinds.indexOf("build") >= 0)) : (w.side !== "omarchy" && (w.owner === login || w.mode === "shared"))); });
+    var word = function (w) { return (w.owner && w.owner !== login ? w.owner + "'s " : forProject ? "" : "your ") + wtShort(w.id) + " · " + (w.alive ? (w.current_task ? "building" : "idle") : "offline") + " · " + (w.labels && w.labels.emulated ? "emulated" : "native") + (w.agent ? " · " + w.agent : forProject ? "" : " · no agent"); };
+    var mine = can.filter(function (w) { return w.owner === login && !forProject; }), shared = can.filter(function (w) { return w.mode === "shared" && w.owner !== login && !forProject; }), project = forProject ? can : [];
+    var opts = [];
+    if (forProject) opts.push({ value: "", text: "Any of the project's workers for " + arch + (project.length ? "" : " (none is registered)"), selected: true });
+    else opts.push({ value: "", text: mine.length ? "Yours first; the project's shared workers after 14 days" : "The project's shared workers — you have no worker for " + arch, selected: true });
+    if (!forProject && shared.length) opts.push({ value: "shared", text: "The project's shared workers, at once (" + shared.filter(function (w) { return w.alive; }).length + " of " + shared.length + " online)" });
+    mine.concat(shared).concat(project).forEach(function (w) { opts.push({ value: w.id, text: word(w), disabled: !w.alive }); });
+    return { label: "Where", options: opts, count: can.length, native: can.filter(function (w) { return w.alive && !(w.labels && w.labels.emulated); }).length };
+  }
+  function wtShort(id) { var parts = String(id).split("-"); return parts.length > 3 ? parts.slice(-3).join("-") : id; }
+
   // A line that says what happened, where the eye is: bottom right, gone in a few seconds (an error stays until clicked).
   function toast(text, cls) {
     var box = $("#toasts"); if (!box) { box = document.createElement("div"); box.id = "toasts"; document.body.appendChild(box); }
@@ -810,13 +827,14 @@ const HELPERS = String.raw`
     }).join("") + '</ul></div>';
   }
   // The request on the record (request.ts), as the form checks it today: six lines, each green or not, and the way to put it right when it is the reader's own.
-  function requestBlock(q, own, name) {
+  function requestBlock(q, own, name, renewable, whyNot) {
     if (!q) return '<div class="pkreq"><b>The request</b> <span class="dim">none on the record</span></div>';
     var bad = q.checks.filter(function (c) { return !c.ok; }).length;
+    if (renewable === undefined) renewable = true;
     return '<div class="pkreq' + (q.complete ? '' : ' incomplete') + '"><div class="pkreq-head"><b>The request</b> '
       + (q.id ? '<a href="' + esc(q.record) + '" title="request.json, written once, signed by the pool">#' + q.id + '</a>' + (q.signature ? ' <a class="dim" href="' + esc(q.signature) + '">sig</a>' : '') : '') + (q.version ? ' · ' + esc(q.version) : '') + (q.created_at ? ' · ' + ago(q.created_at) : '')
       + ' ' + (q.complete ? pillHtml("ok", "complete", "what the form asks today, all on the record") : pillHtml("warn", bad + " to put right", "the form would not take it today"))
-      + (own && !q.complete ? ' <a class="btn small" href="/request?renew=' + encodeURIComponent(name) + '" title="the same form, filled from the record; the confirmations are yours to tick">Renew the request</a>' : '')
+      + (own && !q.complete ? (renewable ? ' <a class="btn small" href="/request?renew=' + encodeURIComponent(name) + '" title="the same form, filled from the record; the confirmations are yours to tick">Renew the request</a>' : ' <span class="dim" style="margin-left:auto">' + esc(whyNot || "renew it once nothing of it is being built") + '</span>') : '')
       + '</div><ul class="pkreq-list">' + q.checks.map(function (c) { return '<li><i class="ck ' + (c.ok ? 'ok">✓' : 'bad">✗') + '</i><div><b>' + esc(c.item) + '</b> <span class="dim">' + esc(c.note) + '</span></div></li>'; }).join("") + '</ul></div>';
   }
   // A chain's state in one word and its colour — the pill an architecture wears.
