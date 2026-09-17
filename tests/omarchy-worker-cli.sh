@@ -103,8 +103,8 @@ unset STUB_SELF_CODE
 export STUB_ARCH="$(uname -m)"; [[ "$STUB_ARCH" == arm64 ]] && STUB_ARCH=aarch64
 out="$("$tmp/omarchy-worker" status)"
 grep -q "the pool: alice-laptop-ab12 · community · $STUB_ARCH · dedicated" <<<"$out" || { echo "status asks the pool: $out"; exit 1; }
-# No runtime: told what to install.
-rm "$tmp/bin/docker"
+# No runtime: told what to install. (The stubs answer as an absent or stopped runtime would — a CI runner has a real docker on its PATH.)
+printf '#!/usr/bin/env bash\nexit 1\n' > "$tmp/bin/docker"; cp "$tmp/bin/docker" "$tmp/bin/podman"; chmod +x "$tmp/bin/docker" "$tmp/bin/podman"
 if out="$("$tmp/omarchy-worker" status 2>&1)"; then echo "no runtime must fail: $out"; exit 1; fi
 grep -q "no container runtime found" <<<"$out" || { echo "the reason: $out"; exit 1; }
 echo "omarchy-worker-cli: ok"
