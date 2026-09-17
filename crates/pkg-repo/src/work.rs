@@ -515,7 +515,7 @@ fn execute(opts: &WorkOptions, task: &Task, token: &Arc<Mutex<String>>) -> Resul
                 result: serde_json::json!({ "keep": keep }),
             })
         }
-        "build" => build_job(opts, &job, task),
+        "build" => build_job(opts, task, token),
         "publish" => publish_job(opts, &job, task),
         "audit" => audit_job(opts, &job, task),
         "verify" => verify_job(opts, &job, task),
@@ -1325,7 +1325,7 @@ fn verify_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
 /// image (`omarchy-build-worker --container`); this executor takes only
 /// tasks a project-trusted worker may claim.
 #[allow(clippy::too_many_lines)]
-fn build_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
+fn build_job(opts: &WorkOptions, task: &Task, token: &Arc<Mutex<String>>) -> Result<Outcome> {
     anyhow::ensure!(
         task.trust == "project",
         "community builds run in the Omarchy Packaging image, not here"
@@ -1466,6 +1466,11 @@ fn build_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
         .stderr(log)
         .status()
         .context("running the build container")?;
+    // The pool is spoken to only now, with the token the heartbeat last
+    // renewed: the one the claim issued lives thirty minutes, and a build
+    // is often longer — the lesson relayout learned on task 275.
+    let renewed = Api::new(&opts.api, &token.lock().unwrap().clone())?;
+    let job = &renewed;
     let log_text = std::fs::read_to_string(dir.join("build.log")).unwrap_or_default();
     if !status.success() {
         let tail: String = log_text
@@ -1520,16 +1525,16 @@ fn build_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
             .output()
             .map(|o| o.stdout)
             .unwrap_or_default();
+        // Streamed from disk, in parts above 90 MB: an Electron app is a
+        // 144 MB package, and a single body that size never reaches the
+        // pool (the edge answers 413 first).
         for p in &pkgs {
             let name = p
                 .file_name()
                 .map(|f| f.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            job.put_bytes(
-                &format!("/factory/tasks/{}/artifacts/{name}", task.id),
-                &std::fs::read(p)?,
-            )
-            .with_context(|| format!("staging {name}"))?;
+            job.stage_file(task.id, &name, p)
+                .with_context(|| format!("staging {name}"))?;
         }
         if !pkginfo.is_empty() {
             job.put_bytes(
