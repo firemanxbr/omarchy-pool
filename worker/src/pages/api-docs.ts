@@ -43,6 +43,7 @@ const BODY = String.raw`
       <tr><td><code>GET /factory/tasks/:id/artifacts/&lt;file&gt;</code></td><td>A staged build's evidence: <code>PKGBUILD</code>, <code>build.log</code>, <code>PKGINFO</code>, <code>audit.md</code>, <code>audit.json</code> are public; the package itself is for maintainers.</td></tr>
       <tr><td><code>GET /factory/approvals</code> · <code>/maintainers</code> · <code>/trust</code> · <code>/blocks</code></td><td>The record: every decision with who signed it; the maintainers (from <code>factory/MAINTAINERS.toml</code>, with since when); project-trusted workers; what is blocked now and why.</td></tr>
       <tr><td><code>GET /users/:login</code></td><td>A contributor's or maintainer's public profile: packages, builds, approvals, workers, and the <em>track record</em> (<a href="/docs/governance">Governance</a>).</td></tr>
+      <tr><td><code>GET /users/:login/can</code></td><td>What you may do on that page: <code>{request, register, token, share, build, dequeue, remove, revoke, withdraw, own_only, share_worker, why, packages}</code> — the page draws every control for everyone and greys the ones you may not press with the reason in <code>why</code>; <code>packages</code> answers Remove per registration. Not cached: the answer is yours.</td></tr>
       <tr><td><code>GET /factory/workers/self</code></td><td>With a worker token: what that registration is (id, arch, trust, owner, mode) — how the image decides its mode.</td></tr>
       <tr><td><code>GET /factory/me</code></td><td>With a contributor token or the browser session: who you are, your packages, tasks, workers and staging quota.</td></tr>
     </tbody></table></div>
@@ -205,7 +206,7 @@ export const API_DOCS_COMPONENTS = (F: Fixture): Component[] => {
         'id="factory"',
         "<code>GET /factory?", "<code>GET /factory/packages</code>", "<code>/built</code>", "<code>/tasks/:id</code>", "<code>GET /factory/review</code>",
         "<code>GET /factory/tasks/:id/can</code>", "<code>GET /factory/tasks/:id/artifacts/", "<code>GET /factory/approvals</code>", "<code>/maintainers</code>", "<code>/trust</code>", "<code>/blocks</code>",
-        "<code>GET /users/:login</code>", "<code>GET /factory/workers/self</code>", "<code>GET /factory/me</code>",
+        "<code>GET /users/:login</code>", "<code>GET /users/:login/can</code>", "<code>GET /factory/workers/self</code>", "<code>GET /factory/me</code>",
       ],
       reads: [
         {
@@ -235,6 +236,9 @@ export const API_DOCS_COMPONENTS = (F: Fixture): Component[] => {
           path: `/api/v1/users/${F.owner}`,
           fields: ["login", "role", "github", "packages", "packages.0.name", "builds", "builds.0.id", "build_counts.total", "approvals", "approved_packages", "record", "workers", "workers.0.id"],
         },
+        { path: `/api/v1/users/${F.owner}/can`, fields: ["login", "can.request", "can.register", "can.token", "can.share", "can.build", "can.dequeue", "can.remove", "can.revoke", "can.withdraw", "can.own_only", "can.share_worker", "can.why.request", `can.packages.${F.factoryPkg}.remove`] },
+        { path: `/api/v1/users/${F.owner}/can`, as: "owner", fields: ["login", "can.build", "can.remove", "can.why.withdraw", `can.packages.${F.factoryPkg}.remove`, `can.packages.${F.factoryPkg}.why`] },
+        { path: `/api/v1/users/${F.owner}/can`, as: "maintainer", fields: ["login", "can.revoke", "can.withdraw", "can.why.build", `can.packages.${F.factoryPkg}.remove`] },
         { path: "/api/v1/factory/workers/self", status: 401 },
         { path: "/api/v1/factory/workers/self", as: "maintainer", status: 401 },
         { path: "/api/v1/factory/me", status: 401 },

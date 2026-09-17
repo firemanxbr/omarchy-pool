@@ -3,6 +3,7 @@ import { updateState } from "../update";
 import { version as running } from "../meta";
 import { queuePosition } from "../queue";
 import { maintainersOf } from "../governance";
+import { registrationsOf, rights, workspace, type Contributor } from "./contributors";
 
 /**
  * A person's public page: what they contribute and what they maintain,
@@ -118,6 +119,19 @@ export async function handleUser(login: string, env: Env): Promise<Response> {
     200,
     { "cache-control": "public, max-age=60" },
   );
+}
+
+/**
+ * GET /users/:login/can — what the caller may do on this person's page,
+ * and why not: no-store, it is the caller's (the page itself is cached
+ * for everyone). The predicate is workspace() in routes/contributors.ts,
+ * the one the doors refuse with; Remove is answered per registration in
+ * `can.packages`, from the person's registrations as they stand now.
+ */
+export async function handleUserCan(c: Contributor | null, login: string, env: Env): Promise<Response> {
+  const person = await env.DB.prepare("SELECT login FROM contributors WHERE login = ?").bind(login).first<{ login: string }>();
+  if (!person) return json({ error: "no such contributor" }, 404);
+  return json({ login: person.login, can: rights(workspace(c, person.login, await registrationsOf(env, { owner: person.login }))) }, 200, { "cache-control": "no-store" });
 }
 
 /** Who stands behind a package the factory built: its owner, its category, the maintainers, the last approval. */
