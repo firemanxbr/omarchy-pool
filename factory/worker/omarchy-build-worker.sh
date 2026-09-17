@@ -383,7 +383,8 @@ toolchains_start() {
     command -v "$t" >/dev/null 2>&1 || continue
     case "$t" in go|zig) probe=version ;; *) probe=--version ;; esac
     if ! "$t" "$probe" >/dev/null 2>&1; then
-      echo "==> $t cannot start on this worker: emulated $(uname -m) under qemu on a $(getconf PAGESIZE 2>/dev/null || echo ?)-byte-page host — a native worker is needed for this package" >&2
+      # The page size qemu shows the guest is the guest's (4096); the host's — 16 KB on Asahi — is what stops rustc.
+      echo "==> $t cannot start on this worker: emulated $(uname -m) under qemu on a host whose page size is not the guest's — a native worker is needed for this package" >&2
       return 6
     fi
   done

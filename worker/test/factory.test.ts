@@ -1098,6 +1098,36 @@ describe("removing a registration", () => {
     // Gone: a second removal finds nothing.
     expect((await call("DELETE", "/factory/packages/ringed", undefined, "omc_m1")).status).toBe(404);
   });
+  it("takes the owner's staged build with it — nothing of a removed registration waits for a maintainer, its audit is cancelled, its package leaves staging and its evidence stays", async () => {
+    // felix, 2026-09-17: the registration left, build #447 stayed staged — on Review as "waiting for a maintainer", on the Pipeline as a build in the queue.
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO factory_packages (name, owner, url, arches, status) VALUES ('gone', 'alice', 'https://gone.example', '[\"aarch64\"]', 'staged')"),
+      env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, staged_prefix) VALUES ('gone', 'aarch64', '1', 'draft:https://gone.example@1', 'contributor', 100, 0, 'community', 'alice', 'build', 'staged', 'staging/alice/gone/1/')"),
+      env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status) VALUES ('gone', 'x86_64', '1', 'draft:https://gone.example@1', 'contributor', 100, 0, 'community', 'alice', 'build', 'queued')"),
+    ]);
+    const staged = (await env.DB.prepare("SELECT id FROM build_tasks WHERE name = 'gone' AND status = 'staged'").first<{ id: number }>())!.id;
+    const queued = (await env.DB.prepare("SELECT id FROM build_tasks WHERE name = 'gone' AND status = 'queued'").first<{ id: number }>())!.id;
+    await env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, kind, status, params) VALUES ('gone', 'aarch64', '1', 'audit', 'audit', 100, 0, 'project', 'audit', 'queued', ?)").bind(JSON.stringify({ task: staged })).run();
+    const prefix = `staging/alice/gone/${staged}/`;
+    for (const [f, size] of [["gone-1-1-aarch64.pkg.tar.zst", 40], ["PKGBUILD", 12], ["build.log", 20]] as const) {
+      await env.STAGING.put(`${prefix}${f}`, "x".repeat(size));
+      await env.DB.prepare("INSERT INTO staging_objects (key, owner, task_id, size) VALUES (?, 'alice', ?, ?)").bind(`${prefix}${f}`, staged, size).run();
+    }
+    const r = await call("DELETE", "/factory/packages/gone", undefined, "omc_alice");
+    expect(r.status, JSON.stringify(r.json)).toBe(200);
+    expect(r.json).toMatchObject({ deleted: "gone", by: "alice", cancelled: expect.arrayContaining([staged, queued]) });
+    for (const id of [staged, queued]) expect(await env.DB.prepare("SELECT status, error FROM build_tasks WHERE id = ?").bind(id).first()).toEqual({ status: "cancelled", error: "registration removed by alice" });
+    expect(await env.DB.prepare("SELECT status FROM build_tasks WHERE kind = 'audit' AND json_extract(params, '$.task') = ?").bind(staged).first()).toEqual({ status: "cancelled" });
+    // The package is gone from staging; the recipe and the log are the record.
+    expect(await env.STAGING.get(`${prefix}gone-1-1-aarch64.pkg.tar.zst`)).toBeNull();
+    expect(await env.STAGING.get(`${prefix}PKGBUILD`)).not.toBeNull();
+    expect(await env.STAGING.get(`${prefix}build.log`)).not.toBeNull();
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM staging_objects WHERE task_id = ?").bind(staged).first<{ n: number }>())!.n).toBe(2);
+    // Review lists nothing of it; the journal says what went.
+    const review = await call("GET", "/factory/review");
+    expect(review.json.staged.some((t: { name: string }) => t.name === "gone")).toBe(false);
+    expect(await env.DB.prepare("SELECT summary FROM events WHERE kind = 'request' AND summary LIKE 'gone: registration removed%' ORDER BY id DESC LIMIT 1").first()).toMatchObject({ summary: "gone: registration removed by alice — 2 build(s) cancelled" });
+  });
   it("a maintainer's page says where each standing approval stands — the rings that serve the package — so it can be taken back from there", async () => {
     await env.DB.batch([
       env.DB.prepare("INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES ('stood-1', 'stood', '1-1', 'aarch64', 'stood-1-1-aarch64.pkg.tar.zst', 1, 1, 1, '{}', 'factory', 'factory/aarch64/stood-1-1-aarch64.pkg.tar.zst', 'aarch64')"),
