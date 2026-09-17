@@ -181,7 +181,7 @@ const POOL_CHAPTERS: DocChapter[] = [
       { id: "learn", title: "We do not use what you built, we learn from it", blurb: "a contributor's build is evidence; the project builds it again on a trusted worker; the second agent's audit" },
       { id: "roles", title: "What each role does", blurb: "contributor, maintainer, the project's workers — what each does, and what none may" },
       { id: "categories", title: "Categories, not groups", blurb: "what a package is about — one of a fixed list, proposed by the project's agent, settled by a maintainer; never who may approve" },
-      { id: "becoming", title: "Becoming a maintainer", blurb: "contribute first, a maintainer proposes you, another approves — one pull request; the bootstrap exception" },
+      { id: "becoming", title: "Becoming a maintainer", blurb: "contribute first, a maintainer proposes you, another approves — one pull request; the bootstrap exception, and the one door left" },
       { id: "workers", title: "Workers, compute and agents", blurb: "one image, the registration decides; yours and only yours; ready is not online; agent keys stay with the owner, on the broker" },
       { id: "bumps", title: "Bumps and packages nobody builds", blurb: "a new upstream release is built as evidence again; 14 days for the owner's worker, 30 days and the package is unmaintained" },
       { id: "blocking", title: "Blocking", blurb: "a contributor or a package out of the pool, the reason on the record, another maintainer lifts it" },
