@@ -210,9 +210,9 @@ __CHARTS__
       var ts = $("#t-sec"), tss = $("#t-sec-s"), kev = t.kev + ta.kev, high = t.critical + t.high + ta.critical + ta.high;
       if (ts) { ts.textContent = num(t.packages) + " · " + num(ta.packages); ts.parentElement.classList.toggle("ok", !kev && !high); ts.parentElement.classList.toggle("warn", !!(kev + high)); }
       if (tss) tss.textContent = "x86_64 · aarch64 · " + num(kev) + " exploited in the wild · " + num(high) + " high · " + num(t.medium + ta.medium) + " medium · " + confWord() + (s.updated_at ? " · " + ago(s.updated_at) : "");
-      var rows = [["exploited in the wild (KEV)", t.kev, "var(--red)"], ["critical + high", t.rest.critical + t.rest.high, "var(--red)"], ["medium", t.rest.medium, "var(--amber)"], ["low / unknown", t.rest.low + t.rest.unknown, "var(--dim)"]];
-      var max = Math.max.apply(null, rows.map(function (r) { return r[1]; })) || 1;
-      $("#c-sec").innerHTML = hrows(rows.map(function (r) { return [r[0], "", Math.round(100 * r[1] / max), r[2], num(r[1])]; }), 190) +
+      // The four bars are the shell's severity buckets in the shell's colours — the same words and colours the Security page's stack and its pills wear.
+      var rows = sevSeries(t), max = Math.max.apply(null, rows.map(function (r) { return r.value; })) || 1;
+      $("#c-sec").innerHTML = hrows(rows.map(function (r) { return [r.name, "", Math.round(100 * r.value / max), r.color, num(r.value)]; }), 190) +
         (fast.length ? '<div class="mini-list"><div class="k">latest fast-tracks</div>' + fast.map(function (e) { return '<div><span class="dot ok"></span><b>' + esc(e.summary) + '</b> <span class="dim">· ' + ago(e.created_at) + '</span></div>'; }).join("") + '</div>' : '') +
         '<p class="sub" style="margin:10px 0 0;font-size:12px">Arch and Debian trackers, OSV, CISA KEV, EPSS — every three hours. <a href="/pipeline">Watch it happen →</a> · <a href="/security">Every advisory →</a></p>';
     }).catch(function () { $("#c-sec").innerHTML = '<div class="empty">no security data yet</div>'; });
@@ -421,7 +421,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       id: "pool.chart-security",
       page: "/",
       anchor: ['id="sec-when"', 'id="c-sec"'],
-      script: ['"#c-sec"', '"#sec-when"', '"/api/v1/security?ring=stable&arch="', "advisoryCounts(advisoriesAt(s))", "t.rest.critical + t.rest.high", 'e.kind === "fast-track"', "hrows("],
+      script: ['"#c-sec"', '"#sec-when"', '"/api/v1/security?ring=stable&arch="', "advisoryCounts(advisoriesAt(s))", "sevSeries(t)", "r.color", 'e.kind === "fast-track"', "hrows("],
       reads: [
         { path: security(F.arch), fields: ["updated_at", "vulnerable", "vulnerable.0.advisories.0.match", "vulnerable.0.advisories.0.severity", "vulnerable.0.advisories.0.kev"] },
         { path: security("aarch64"), fields: ["vulnerable"] },

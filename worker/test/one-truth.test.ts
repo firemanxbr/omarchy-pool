@@ -23,7 +23,12 @@
  * the series beneath, a cancelled job a success on one and a failure on the
  * other — and pins the jobs of the week to one reduce over jobs_daily
  * (jobsSummary), read by the tiles, the table and the charts, and by the
- * Pipeline's chart.
+ * Pipeline's chart. The same audit found an advisory's severity coloured by
+ * three maps — the shell's pill, the Pool's bars, the Security page's stack
+ * — critical + high red on one page and amber on the next, low / unknown in
+ * two greys, over the same advisoryCounts; the last block pins the colour
+ * to the shell's SEV_COLOR (the pill's class, as the CSS paints it) and the
+ * buckets to SEV_BUCKETS, and runs the served charts to see the colour land.
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -376,6 +381,52 @@ describe("three more facts, one source each", () => {
     // The Pool's tile lands the reader on the Security page at that default.
     expect(ownScript(html)).toContain('"/security?ring=stable&arch=x86_64"');
     expect(ownScript(await page("/security"))).toContain("SEC_CONF");
+  });
+
+  it("an advisory's severity wears one colour: the shell's SEV_COLOR paints the pill, the Pool's bars and the Security page's stack, and no page types a colour of its own", async () => {
+    const html = await page("/security"), script = scriptOf(html);
+    // The shell's map as served, run here: six keys — the five severities the server says and the exploited bucket — each a :root colour the CSS declares, by the class the pill wears.
+    const shell = ["esc", "pillHtml", "SEV_PILL", "SEV_COLOR", "SEV_BUCKETS", "sevSeries", "sevPill"].map((n) => served(script, n));
+    const sev = new Function([...shell, "return { SEV_PILL: SEV_PILL, PILL_COLOR: PILL_COLOR, SEV_COLOR: SEV_COLOR, buckets: SEV_BUCKETS.map(function (b) { return [b[0], b[1]]; }), sevSeries: sevSeries, sevPill: sevPill };"].join("\n"))();
+    expect(Object.keys(sev.SEV_COLOR).sort()).toEqual(["critical", "exploited", "high", "low", "medium", "unknown"]);
+    expect(sev.SEV_COLOR).toEqual({ exploited: "var(--red)", critical: "var(--red)", high: "var(--red)", medium: "var(--amber)", low: "var(--blue)", unknown: "var(--dim)" });
+    for (const [cls, color] of Object.entries(sev.PILL_COLOR) as [string, string][]) {
+      // The pill's colour in JS is the pill's colour in the CSS, and the variable is one :root declares.
+      expect(html, `.pill.${cls} is painted ${color}`).toContain(cls === "none" ? `.pill.none { color: ${color}; }` : `.pill.${cls} { color: ${color}; border-color: ${color}; }`);
+      expect(html).toMatch(new RegExp(`${color.slice(4, -1)}: #[0-9a-f]{6};`));
+    }
+    for (const s of ["critical", "high", "medium", "low", "unknown", "exploited"]) {
+      expect(sev.SEV_COLOR[s]).toBe(sev.PILL_COLOR[sev.SEV_PILL[s]]);
+      expect(sev.sevPill(s)).toBe(`<span class="pill ${sev.SEV_PILL[s]}">${s}</span>`);
+    }
+    // The buckets a chart stacks, in the order the stack draws them, each in the colour of its worst severity; over a count with every severity the series is the numbers regrouped.
+    expect(sev.buckets).toEqual([["exploited", "exploited in the wild (KEV)"], ["critical", "critical + high"], ["medium", "medium"], ["low", "low / unknown"]]);
+    const count = { packages: 16, kev: 1, critical: 1, high: 2, medium: 3, low: 4, unknown: 6, rest: { critical: 1, high: 2, medium: 3, low: 4, unknown: 5 } };
+    const series = sev.sevSeries(count) as { name: string; color: string; value: number }[];
+    expect(series).toEqual([{ name: "exploited in the wild (KEV)", color: "var(--red)", value: 1 }, { name: "critical + high", color: "var(--red)", value: 3 }, { name: "medium", color: "var(--amber)", value: 3 }, { name: "low / unknown", color: "var(--blue)", value: 9 }]);
+    expect(series.reduce((a, r) => a + r.value, 0)).toBe(count.packages);
+    // The two charts, drawn by the served CHARTS over that series: every bar the Pool draws and every rect the Security page stacks carries the shell's colour, and the legend says the shell's words.
+    const chartFn = (name: string) => new RegExp(`^  function ${name}\\([\\s\\S]*?\\n  \\}$`, "m").exec(script)![0];
+    const draw = new Function("series", [...shell, "function num(v) { return String(v); } function nice(v) { return v; } function shortDay(d) { return d; }", chartFn("hrows"), chartFn("stacked"),
+      "var max = Math.max.apply(null, series.map(function (r) { return r.value; })) || 1;",
+      "return { pool: hrows(series.map(function (r) { return [r.name, '', Math.round(100 * r.value / max), r.color, num(r.value)]; }), 190), security: stacked(['edge', 'rc', 'stable'], series.map(function (b) { return { name: b.name, color: b.color, values: [b.value, b.value, b.value] }; }), { full: true }) };"].join("\n"))(series) as { pool: string; security: string };
+    expect([...draw.pool.matchAll(/;background:(var\(--\w+\))"/g)].map((m) => m[1])).toEqual(series.map((r) => r.color));
+    expect([...draw.security.matchAll(/fill="(var\(--\w+\))"/g)].map((m) => m[1])).toEqual([0, 1, 2].flatMap(() => series.map((r) => r.color)));
+    expect([...draw.security.matchAll(/<i style="background:(var\(--\w+\))"><\/i>([^<]+)</g)].map((m) => [m[1], m[2]])).toEqual(series.map((r) => [r.color, r.name]));
+    // The pages read the shell's series and hand its colour to the chart; neither names a bucket or a colour of its own, and the manifests say so.
+    const components = allComponents(F);
+    for (const [path, id, reads] of [["/", "pool.chart-security", ["sevSeries(t)", "r.color"]], ["/security", "security.per-ring-chart", ["sevSeries(tot[i])", "b.color"]]] as const) {
+      const own = ownScript(await page(path)).replace(CHARTS, "");
+      for (const r of reads) expect(own, `${path} reads ${r}`).toContain(r);
+      expect(own, `${path} names a bucket of its own`).not.toMatch(/"critical \+ high"|"low \/ unknown"|"exploited in the wild \(KEV\)"|name: "medium"/);
+      expect(own, `${path} colours a severity of its own`).not.toMatch(/C\.(?:red|amber|blue|dim)|(?:critical|high|medium|low|unknown|kev)[^\n]{0,40}var\(--(?:red|amber|blue|dim)\)/);
+      const c = components.find((x) => x.id === id);
+      expect(c?.script, id).toEqual(expect.arrayContaining([...reads]));
+    }
+    // The Security table's exploited pill and the package page's "exploited in the wild" wear the bucket's class and colour, not a word of their own.
+    expect(ownScript(html)).toContain('pillHtml(SEV_PILL.exploited, "exploited", "in CISA KEV")');
+    expect(ownScript(await page(`/package/${F.pkg}`))).toContain("SEV_COLOR.exploited");
+    expect(ownScript(await page(`/package/${F.pkg}`))).not.toContain('style="color:var(--red)">exploited');
   });
 
   it("a build nobody decided yet links its package on the lab from Review, from its own page and from a person's builds table — one ringOfBuild", async () => {

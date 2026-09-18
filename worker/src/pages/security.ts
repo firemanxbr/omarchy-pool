@@ -60,7 +60,9 @@ __CHARTS__
     $("#sc-arch").textContent = arch + " · " + confWord(conf);
     Promise.all(RINGS.map(function (r) { return r === ring ? Promise.resolve(d) : fetch("/api/v1/security?ring=" + r + "&arch=" + arch).then(function (x) { return x.json(); }).catch(function () { return {}; }); })).then(function (reports) {
       var tot = reports.map(function (x) { return advisoryCounts(advisoriesAt(x, conf)); });
-      $("#sc-chart").innerHTML = stacked(["edge", "rc", "stable"], [{ name: "exploited", color: C.red, values: [2, 1, 0].map(function (i) { return tot[i].kev; }) }, { name: "critical + high", color: C.amber, values: [2, 1, 0].map(function (i) { return tot[i].rest.critical + tot[i].rest.high; }) }, { name: "medium", color: C.blue, values: [2, 1, 0].map(function (i) { return tot[i].rest.medium; }) }, { name: "low / unknown", color: C.dim, values: [2, 1, 0].map(function (i) { return tot[i].rest.low + tot[i].rest.unknown; }) }], { label: "Open advisories per ring by severity", full: true, empty: "no open advisory in any ring" });
+      // The stack's series are the shell's severity buckets in the shell's colours — the words and colours the Pool's bars and the pills in the table below wear — one value per ring, edge first.
+      var series = [2, 1, 0].map(function (i) { return sevSeries(tot[i]); });
+      $("#sc-chart").innerHTML = stacked(["edge", "rc", "stable"], series[0].map(function (b, k) { return { name: b.name, color: b.color, values: series.map(function (s) { return s[k].value; }) }; }), { label: "Open advisories per ring by severity", full: true, empty: "no open advisory in any ring" });
     });
   }
   function load() {
@@ -81,7 +83,7 @@ __CHARTS__
       renderFeeds(d); renderPerRing(d);
       pager("#vuln", rows, function (r) {
         var v = r.v;
-        return '<tr><td>' + sevPill(r.worst) + (r.kev ? ' ' + pillHtml("error", "exploited", "in CISA KEV") : '') + (r.epss >= 0.1 ? ' ' + pillHtml("warn", "epss " + (r.epss * 100).toFixed(0) + "%", "EPSS " + (r.epss * 100).toFixed(0) + "%") : '') + '</td>' +
+        return '<tr><td>' + sevPill(r.worst) + (r.kev ? ' ' + pillHtml(SEV_PILL.exploited, "exploited", "in CISA KEV") : '') + (r.epss >= 0.1 ? ' ' + pillHtml("warn", "epss " + (r.epss * 100).toFixed(0) + "%", "EPSS " + (r.epss * 100).toFixed(0) + "%") : '') + '</td>' +
           '<td><a href="' + pkgHref(v.name, ring, arch) + '"><b>' + esc(v.name) + '</b></a> <span class="src">' + esc(v.source) + '</span></td><td class="mono">' + esc(v.version) + '</td>' +
           '<td>' + r.advs.map(function (a) { return '<a class="run" href="' + esc(a.url) + '">' + esc(a.id.replace(/^(arch|debian|osv):/, "").replace(/:[^:]*$/, "")) + '</a>' + (a.fixed ? ' <span class="muted">fixed in ' + esc(a.fixed) + '</span>' : ''); }).join("<br>") + '</td>' +
           '<td>' + [...new Set(r.advs.map(function (a) { return a.match; }))].join(", ") + '</td>' +
@@ -158,11 +160,11 @@ export const SECURITY_COMPONENTS = (F: Fixture): Component[] => {
     {
       id: "security.per-ring-chart",
       page: "/security",
-      // The chart counts each ring's report as the tiles count the one on screen (the shell's advisoryCounts over advisoriesAt, at the confidence picked, the report on screen reused), a package once: exploited first, the rest by worst severity.
+      // The chart counts each ring's report as the tiles count the one on screen (the shell's advisoryCounts over advisoriesAt, at the confidence picked, the report on screen reused), a package once: exploited first, the rest by worst severity — the shell's buckets (sevSeries) in the shell's colours (SEV_COLOR), the ones the Pool's bars and the pills below wear.
       anchor: ['<h3>Open advisories per ring <span id="sc-arch"></span></h3>', 'id="sc-chart"', "by severity, a package once — edge catches fixes first, stable last"],
       script: [
         'fetch("/api/v1/security?ring=" + r + "&arch=" + arch)', "r === ring ? Promise.resolve(d)", '"#sc-chart"', '"#sc-arch"', 'stacked(["edge", "rc", "stable"]', "advisoryCounts(advisoriesAt(x, conf))",
-        "tot[i].kev", "tot[i].rest.critical", "tot[i].rest.high", "tot[i].rest.medium", "tot[i].rest.low", "tot[i].rest.unknown",
+        "sevSeries(tot[i])", "b.color", "s[k].value",
         '"Open advisories per ring by severity"', '"no open advisory in any ring"',
       ],
       reads: [
@@ -192,7 +194,7 @@ export const SECURITY_COMPONENTS = (F: Fixture): Component[] => {
       page: "/security",
       anchor: ['id="vuln"', "<th>Severity</th><th>Package</th><th>Version</th><th>Advisories</th><th>Confidence</th><th>Exposes</th><th>Fixed in</th>"],
       script: [
-        'skeletonRows("#vuln", 7, 6)', 'pager("#vuln", rows', "sevPill(r.worst)", '"in CISA KEV"', "r.epss >= 0.1", "pkgHref(v.name, ring, arch)",
+        'skeletonRows("#vuln", 7, 6)', 'pager("#vuln", rows', "sevPill(r.worst)", 'pillHtml(SEV_PILL.exploited, "exploited", "in CISA KEV")', "r.epss >= 0.1", "pkgHref(v.name, ring, arch)",
         "a.id.replace(/^(arch|debian|osv):/", "a.fixed", "a.match", "v.exposure.declared", "v.exposure.loads", "v.fixed_in.map", "pkgHref(v.name, f.ring, arch)", "f.version",
         "nothing with an open advisory at this confidence level",
       ],

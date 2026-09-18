@@ -348,7 +348,7 @@ const PACKAGE_SCRIPT = String.raw`
   }
 
   function advLine(a) {
-    return '<li>' + sevPill(a.severity) + ' <a class="run" href="' + esc(a.url) + '">' + esc(a.cves.join(", ") || a.id) + '</a> <span class="muted">' + esc(a.match) + (a.fixed ? ' · fixed in ' + esc(a.fixed) : '') + (a.kev ? ' · <span style="color:var(--red)">exploited in the wild</span>' : '') + (a.epss != null && a.epss >= 0.1 ? ' · EPSS ' + (a.epss * 100).toFixed(0) + '%' : '') + '</span>' + (a.summary ? '<div class="muted" style="font-size:12.5px">' + esc(a.summary.length > 160 ? a.summary.slice(0, 159) + "…" : a.summary) + '</div>' : '') + '</li>';
+    return '<li>' + sevPill(a.severity) + ' <a class="run" href="' + esc(a.url) + '">' + esc(a.cves.join(", ") || a.id) + '</a> <span class="muted">' + esc(a.match) + (a.fixed ? ' · fixed in ' + esc(a.fixed) : '') + (a.kev ? ' · <span style="color:' + SEV_COLOR.exploited + '">exploited in the wild</span>' : '') + (a.epss != null && a.epss >= 0.1 ? ' · EPSS ' + (a.epss * 100).toFixed(0) + '%' : '') + '</span>' + (a.summary ? '<div class="muted" style="font-size:12.5px">' + esc(a.summary.length > 160 ? a.summary.slice(0, 159) + "…" : a.summary) + '</div>' : '') + '</li>';
   }
   function renderSecurity(d) {
     var s = d.security || { advisories: [], exposed: [] };
@@ -739,7 +739,7 @@ export const PACKAGE_COMPONENTS = (F: Fixture): Component[] => {
       id: "package.security-own",
       page,
       anchor: ['id="sec-own"'],
-      script: ['"#sec-own"', "advLine", "a.cves.join", "a.match", "a.fixed", "a.kev", "a.epss", "a.summary", "fixed in this version"],
+      script: ['"#sec-own"', "advLine", "sevPill(a.severity)", "a.cves.join", "a.match", "a.fixed", "a.kev", "SEV_COLOR.exploited", "a.epss", "a.summary", "fixed in this version"],
       reads: [{ path: pkg, fields: ["package.version", "security.advisories.0.id", "security.advisories.0.severity", "security.advisories.0.status", "security.advisories.0.cves", "security.advisories.0.match", "security.advisories.0.fixed", "security.advisories.0.kev", "security.advisories.0.epss", "security.advisories.0.summary", "security.advisories.0.url"] }],
       visible: EVERYONE,
     },
