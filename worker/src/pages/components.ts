@@ -191,6 +191,63 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
+    // The maintainer set, read once per page from the one list the pool keeps (maintainerSet, as whoami reads the session): the role a person is drawn with when the caller passes none — avatar, avatarIcon, personChip, personLink — and the mark that colours a person drawn before the answer landed. Every page fetches it lazily, from the first person drawn, so the shell claims the read for all of them.
+    id: "shell.maintainers",
+    page: "/",
+    anchor: [],
+    script: ["function maintainerSet(", '"/api/v1/factory/maintainers"', "function roleOf(", "function markRoles(", "data-who", "function personLink(", "function avatar("],
+    reads: [{ path: "/api/v1/factory/maintainers", fields: ["maintainers", "maintainers.0.login", "maintainers.0.since"] }],
+    visible: EVERYONE,
+  },
+  {
+    // A package's one address (pkgHref: the ring the row is about and the architecture, always both) and the ring a row carries: the most stable ring that serves it (servedRing, by the reader's order) or, for a build, the lab while nobody decided (ringOfBuild).
+    id: "shell.package-address",
+    page: "/",
+    anchor: [],
+    script: ["function pkgHref(", "Object.keys(RINGS_TEXT)[0]", "function ringName(", "function servedRing(", "function ringOfBuild(", 'status === "staged" ? "lab" : null'],
+    visible: EVERYONE,
+  },
+  {
+    // A person's one address (userHref), written by the avatars, the chips, the links and the account chip — no page writes it by hand.
+    id: "shell.person-address",
+    page: "/",
+    anchor: [],
+    script: ["function userHref(", 'return "/user/" + encodeURIComponent(login)'],
+    visible: EVERYONE,
+  },
+  {
+    // A source late by one constant: LATE_MS is the server's LATE_AFTER_HOURS spliced in (meta.ts), read through lateSync — the server's mark first — and named by problemsOf.
+    id: "shell.late-sync",
+    page: "/",
+    anchor: [],
+    script: ["var LATE_MS = ", "function lateSync(c)", "Math.round(LATE_MS / 3600e3)"],
+    visible: EVERYONE,
+  },
+  {
+    // The workers counted once (workerCounts: registered, alive, ready, building, and the same per kind), on every tile that counts them.
+    id: "shell.worker-counts",
+    page: "/",
+    anchor: [],
+    script: ["function workerCounts(", "byKind"],
+    visible: EVERYONE,
+  },
+  {
+    // Open advisories counted one way: advisoriesAt(d, conf) keeps the rows of a security report that count at a confidence — the Security page's default, SEC_CONF, unless a page says — and advisoryCounts(rows) is the numbers a tile or a chart draws; the Pool, the Pipeline and the Security page say one number for stable.
+    id: "shell.advisory-counts",
+    page: "/",
+    anchor: [],
+    script: ["var SEC_CONFS = ", "function confOk(conf, m)", "function advisoriesAt(d, conf)", "function advisoryCounts(rows)", "function confWord(conf)"],
+    visible: EVERYONE,
+  },
+  {
+    // The oldest waiting row's age and every other span said the same way: span(ms), "3h" with no "ago".
+    id: "shell.span",
+    page: "/",
+    anchor: [],
+    script: ["function span(ms)"],
+    visible: EVERYONE,
+  },
+  {
     // liveStats(): the poll behind every page's tiles and charts, and the service check it runs first — which fetches only when the header has a pill, which no page has today.
     id: "shell.live-stats",
     page: "/",

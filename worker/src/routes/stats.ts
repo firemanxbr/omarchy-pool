@@ -1,6 +1,6 @@
 import { signingEnabled } from "../signing";
 import { json, RINGS, type Env } from "../index";
-import { EXPECTED_SOURCES, version } from "../meta";
+import { EXPECTED_SOURCES, LATE_AFTER_HOURS, version } from "../meta";
 import { ringHead, releaseSources, releaseSummary } from "../db";
 
 /** The security job's journal line says how many advisories it matched, and when. */
@@ -106,6 +106,8 @@ export async function handleStats(env: Env): Promise<Response> {
       missing: r?.upstream_total == null ? null : Math.max(0, r.upstream_total - (pinnedEdge.get(key) ?? have?.objects ?? 0)),
       last_sync: r?.created_at ?? null,
       last_status: r?.status ?? null,
+      // Said here, once: the page marks the row and the shell counts it from the same word.
+      late: !!r && Date.now() - Date.parse(r.created_at) > LATE_AFTER_HOURS * 3600e3,
     };
   });
 

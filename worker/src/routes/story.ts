@@ -41,7 +41,12 @@ export interface TaskBrief {
   result: Record<string, unknown> | null;
 }
 
-export interface Approval { id: number; task_id: number; decision: string; by: string; note: string | null; rebuild_task: number | null; created_at: string; version: string | null; arch: string; withdrawn_at: string | null; withdrawn_by: string | null; withdrawn_reason: string | null }
+export interface Approval { id: number; task_id: number; decision: string; by: string; note: string | null; rebuild_task: number | null; created_at: string; version: string | null; arch: string; withdrawn_at: string | null; withdrawn_by: string | null; withdrawn_reason: string | null; standing: boolean }
+
+/** An approval that stands: signed as approved and not taken back — the rule every page reads, never `decision` alone. Every approval the server hands out carries it as `standing`. */
+export function stands(a: { decision: string; withdrawn_at: string | null }): boolean {
+  return a.decision === "approved" && a.withdrawn_at === null;
+}
 
 export interface Chain {
   contributor: TaskBrief | null;
@@ -67,14 +72,14 @@ function brief(r: Record<string, unknown>): TaskBrief {
 export async function storyRows(env: Env, name: string) {
   const [tasks, approvals, pkg] = await Promise.all([
     env.DB.prepare(`SELECT ${TASK_COLS} FROM build_tasks WHERE name = ? AND kind IN ('build', 'audit', 'trial', 'publish') ORDER BY id DESC LIMIT 120`).bind(name).all<Record<string, unknown>>(),
-    env.DB.prepare("SELECT id, task_id, decision, by, note, rebuild_task, created_at, version, arch, withdrawn_at, withdrawn_by, withdrawn_reason FROM approvals WHERE name = ? ORDER BY id DESC LIMIT 40").bind(name).all<Approval>(),
+    env.DB.prepare("SELECT id, task_id, decision, by, note, rebuild_task, created_at, version, arch, withdrawn_at, withdrawn_by, withdrawn_reason FROM approvals WHERE name = ? ORDER BY id DESC LIMIT 40").bind(name).all<Omit<Approval, "standing">>(),
     env.DB.prepare("SELECT name, owner, url, status, detail, category, request_id, description, license, source, project, arches, detected, created_at, updated_at, blocked_at, blocked_by, blocked_reason FROM factory_packages WHERE name = ?").bind(name).first<Record<string, unknown>>(),
   ]);
   // The request the registration points at: what the contributor confirmed, the version, the record — the checks read it (request.ts).
   const request = pkg?.request_id
     ? await env.DB.prepare("SELECT id, version, checklist, migrated, record, sha256, arches, created_at FROM package_requests WHERE id = ?").bind(pkg.request_id).first<RequestRow>()
     : null;
-  return { tasks: tasks.results.map(brief), approvals: approvals.results, pkg, request: request ?? null };
+  return { tasks: tasks.results.map(brief), approvals: approvals.results.map((a) => ({ ...a, standing: stands(a) })), pkg, request: request ?? null };
 }
 
 /** The request as a page shows it: the record's URL, the version, the checks, whether the form would take it today. */
@@ -106,7 +111,7 @@ export function chains(tasks: TaskBrief[], approvals: Approval[], pkg: Record<st
     const mine = approvals.filter((a) => ids.includes(a.task_id) || (a.rebuild_task !== null && ids.includes(a.rebuild_task)));
     // The chain's decision is the approval that stands; a rejection written beside one (before the reject
     // handler refused it, 2026-09-17) must never hide it, or the approval could not be withdrawn.
-    const approval = mine.find((a) => a.decision === "approved" && !a.withdrawn_at) ?? mine.find((a) => !a.withdrawn_at) ?? null;
+    const approval = mine.find(stands) ?? mine.find((a) => !a.withdrawn_at) ?? null;
     const withdrawn = mine.find((a) => a.withdrawn_at) ?? null;
     const auditReport = audit?.result as { verdict?: string; findings?: { severity: string }[] } | null | undefined;
     const score = scoreChain({
@@ -158,7 +163,7 @@ export async function handlePackageStory(name: string, env: Env): Promise<Respon
   await placeInQueue(env, tasks);
   const all = chains(tasks, approvals, pkg, request);
   const rings = (await env.DB.prepare("SELECT DISTINCT rp.ring, p.repo_arch AS arch FROM packages p JOIN ring_packages rp ON rp.package_id = p.id AND rp.ring IN ('lab', 'edge', 'rc', 'stable') WHERE p.source = 'factory' AND p.name = ?").bind(name).all<{ ring: string; arch: string }>()).results;
-  const decided = all.find((c) => c.approval?.decision === "approved") ?? null;
+  const decided = all.find((c) => c.approval?.standing) ?? null;
   const current = decided ?? all[0] ?? null;
   return json(
     {

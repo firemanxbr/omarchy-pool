@@ -158,6 +158,14 @@ export const RINGS = ["edge", "rc", "stable", "lab"] as const;
 export type Ring = (typeof RINGS)[number];
 /** The rings a package is promoted through, in order. */
 export const PROMOTED_RINGS = ["edge", "rc", "stable"] as const;
+/**
+ * The same rings from the most stable down — stable, rc, edge, then the
+ * lab, which is below edge and promised nothing — the order a reader
+ * picks a ring in and the order the package page falls back through when
+ * the asked ring does not serve the package. Derived, so it cannot drift
+ * from RINGS; the ring texts (meta.ts) keep this order too.
+ */
+export const RINGS_BY_STABILITY: readonly Ring[] = [...[...PROMOTED_RINGS].reverse(), ...RINGS.filter((r) => !(PROMOTED_RINGS as readonly string[]).includes(r))];
 
 export function isRing(s: string): s is Ring {
   return (RINGS as readonly string[]).includes(s);
@@ -443,7 +451,9 @@ async function api(method: string, path: string, url: URL, request: Request, env
     const row = latest ? null : await env.DB.prepare("SELECT created_at, status, payload FROM events WHERE kind = 'cost' ORDER BY id DESC LIMIT 1").first<{ created_at: string; status: string; payload: string }>();
     const guard = await env.DB.prepare("SELECT value FROM settings WHERE key = 'cost_guard'").first<{ value: string }>();
     const est = latest ? (JSON.parse(latest.value) as Record<string, unknown>) : row ? { estimated_at: row.created_at, status: row.status, ...JSON.parse(row.payload) } : null;
-    return json(est ? { ...est, guard: guard?.value ?? null, lines_usd: { warn: BUDGET_WARN_USD, guard: BUDGET_GUARD_USD, cap: BUDGET_CAP_USD } } : { error: "no estimate yet" }, est ? 200 : 404, { "cache-control": "public, max-age=300" });
+    // The three lines (cost.ts) ride every answer, the one with no estimate too: they are the pool's budget, not the estimate's, and the Pipeline's panel names them before the first estimate exists.
+    const lines_usd = { warn: BUDGET_WARN_USD, guard: BUDGET_GUARD_USD, cap: BUDGET_CAP_USD };
+    return json(est ? { ...est, guard: guard?.value ?? null, lines_usd } : { error: "no estimate yet", lines_usd }, est ? 200 : 404, { "cache-control": "public, max-age=300" });
   }
   if (method === "GET" && path === "/signing-key") {
     const k = await publicKey(env);

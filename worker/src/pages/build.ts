@@ -85,14 +85,17 @@ const SCRIPT = String.raw`
     document.title = (isBuild ? t.name + " " + (t.version || "") + " · build #" + t.id : t.kind + " #" + t.id) + " · omarchy-pool";
     $("#crumb").textContent = (isBuild ? t.name + " " : t.kind + " ") + "#" + t.id;
     var sc = T.score;
-    $("#title").innerHTML = isBuild ? '<a href="/package/' + encodeURIComponent(t.name) + '?ring=' + (T.rings[0] || "lab") + '&arch=' + esc(t.arch) + '" title="the package, as Packages shows it — with where it came from">' + esc(t.name) + '</a> <span class="mono muted" style="font-size:.7em">' + esc(t.version || "") + '</span>' : esc(t.kind) + ' <span class="mono muted" style="font-size:.7em">#' + t.id + '</span>';
+    // The package's one address (the shell's pkgHref) with the ring this build is about (the shell's ringOfBuild): the most stable ring that serves the package — T.rings is the server's list — the lab for a staged build nobody decided yet, as Review and a person's builds link it, the shell's default for a build in no ring; the timeline's "the package →" is the same link.
+    $("#title").innerHTML = isBuild ? '<a href="' + pkgHref(t.name, ringOfBuild(t.status, T.rings), t.arch) + '" title="the package, as Packages shows it — with where it came from">' + esc(t.name) + '</a> <span class="mono muted" style="font-size:.7em">' + esc(t.version || "") + '</span>' : esc(t.kind) + ' <span class="mono muted" style="font-size:.7em">#' + t.id + '</span>';
     $("#badges").innerHTML = pillHtml("none", t.arch) + taskPill(t.status) + (isBuild ? pillHtml(project ? "ok" : "lilac", project ? "the project" : "evidence", project ? "built by the project on a trusted worker, from a contributor's evidence" : "a contributor's build: evidence for a maintainer, never what users get") : "")
       + (isBuild && sc ? (sc.ready ? pillHtml("ok", "ready for a maintainer", "the contributor's half is complete: a build that passed the gate, audited") : t.status === "staged" || t.status === "leased" || t.status === "queued" ? pillHtml("warn", "not ready", "the contributor's half is not complete yet") : "") : "");
-    var built = T.worker ? (T.worker.owner ? T.worker.owner + "'s worker " : "worker ") + T.worker.id : (t.lease_owner || (t.finished_at ? "a worker the record no longer names" : "no worker yet"));
-    var vet = t.result && t.result.vet, audit = T.audit[0], trial = T.trial[0], a = T.approval && !T.approval.withdrawn_at ? T.approval : null, wd = T.approval && T.approval.withdrawn_at ? T.approval : null;
+    // The worker as every table names it — the shell's wtId, its owner the shell's person — so the lede and the kv below read the same machine; a lease the record no longer lists is the bare id, whole, as the Pipeline and a person's builds draw it.
+    var built = T.worker ? (T.worker.owner ? personLink(T.worker.owner) + "'s worker " : "worker ") + wtId(T.worker) : t.lease_owner ? "worker " + wtId(t.lease_owner) : esc(t.finished_at ? "a worker the record no longer names" : "no worker yet");
+    // The approval as the server says it: standing (approved, not withdrawn) or taken back — the word rides the answer, the page derives nothing.
+    var vet = t.result && t.result.vet, audit = T.audit[0], trial = T.trial[0], a = T.approval && T.approval.standing ? T.approval : null, wd = T.approval && T.approval.withdrawn_at ? T.approval : null;
     $("#lede").innerHTML = (isBuild
-      ? (project ? 'The project built <b>' + esc(t.name) + '</b> ' + esc(t.version || '') + ' for ' + esc(t.arch) + (T.from ? ' from the evidence in <a href="/build/' + T.from.id + '">#' + T.from.id + '</a> (' + personLink(T.from.owner) + '\'s build)' : '') : personLink(t.owner) + ' built <b>' + esc(t.name) + '</b> ' + esc(t.version || '') + ' for ' + esc(t.arch) + ' on ' + esc(built))
-      : 'A pool job: <b>' + esc(t.kind) + '</b>' + (p && p.from ? ' ' + esc(p.from) + ' → ' + esc(p.to) : '') + ', on ' + esc(built))
+      ? (project ? 'The project built <b>' + esc(t.name) + '</b> ' + esc(t.version || '') + ' for ' + esc(t.arch) + (T.from ? ' from the evidence in <a href="/build/' + T.from.id + '">#' + T.from.id + '</a> (' + personLink(T.from.owner) + '\'s build)' : '') : personLink(t.owner) + ' built <b>' + esc(t.name) + '</b> ' + esc(t.version || '') + ' for ' + esc(t.arch) + ' on ' + built)
+      : 'A pool job: <b>' + esc(t.kind) + '</b>' + (p && p.from ? ' ' + esc(p.from) + ' → ' + esc(p.to) : '') + ', on ' + built)
       + ' · ' + (t.status === "staged" ? (a ? 'decided' : wd ? 'the approval was withdrawn — waiting for another maintainer' : 'waiting for a maintainer') : t.status === "leased" ? 'building now' : t.status === "queued" ? 'queued' : t.status) + (t.finished_at ? ', ' + ago(t.finished_at) : '') + '.';
     if (isBuild) setTiles("#tiles", [
       ["Gate", vet ? (vet.verdict === "pass" ? "pass" : "fail") : "—", vet ? (vet.fails ? vet.fails + " failing" : (vet.warnings ? vet.warnings + " warning" + (vet.warnings === 1 ? "" : "s") : "clean")) : "built before the gate", vet ? (vet.verdict === "pass" ? "ok" : "bad") : ""],
@@ -128,7 +131,7 @@ const SCRIPT = String.raw`
   function renderActions() {
     var t = T.task, el = $("#acts"), a = T.approval;
     if (t.kind !== "build") { el.innerHTML = ""; return; }
-    var standing = !!(a && a.decision === "approved" && !a.withdrawn_at), pb = T.project_builds[0], sc = T.score, beside = [];
+    var standing = !!(a && a.standing), pb = T.project_builds[0], sc = T.score, beside = [];
     if (standing) beside.push('<span class="muted">Approved by ' + personLink(a.by) + ' ' + ago(a.created_at) + '.</span>');
     else if (t.status === "staged") {
       if (pb && (pb.status === "queued" || pb.status === "leased")) beside.push('<span class="muted">the project is building it (<a href="/build/' + pb.id + '">#' + pb.id + '</a>)</span>');
@@ -159,7 +162,7 @@ const SCRIPT = String.raw`
     if (a) add(a.withdrawn_at ? "dim" : a.decision === "approved" ? "ok" : "error", a.decision === "approved" ? "Approved" : "Rejected", 'by ' + personLink(a.by) + (a.note ? ' — ' + esc(a.note) : '') + (a.rebuild_task && a.rebuild_task !== t.id ? ' · the project\'s build <a href="/build/' + a.rebuild_task + '">#' + a.rebuild_task + '</a> ' + esc(a.rebuild_status || '') : ''), a.created_at);
     if (a && a.withdrawn_at) add("warn", "Approval withdrawn", 'by ' + personLink(a.withdrawn_by) + ' — ' + esc(a.withdrawn_reason || '') + ' · the package left the rings; another maintainer decides', a.withdrawn_at);
     T.publish.slice().reverse().forEach(function (b) { add(b.status === "done" ? "ok" : b.status === "failed" ? "error" : "blue", "Published " + (b.status === "done" ? "" : b.status), '<a href="/build/' + b.id + '">#' + b.id + '</a> — into the pool, signed' + (b.error ? ' — ' + esc(b.error) : ''), b.finished_at || b.started_at); });
-    if (T.rings.length) add("ok", "In the rings", T.rings.join(" · ") + ' — <a href="/package/' + encodeURIComponent(t.name) + '?ring=' + T.rings[T.rings.length - 1] + '&arch=' + t.arch + '">the package →</a>', null);
+    if (T.rings.length) add("ok", "In the rings", T.rings.join(" · ") + ' — <a href="' + pkgHref(t.name, ringOfBuild(t.status, T.rings), t.arch) + '">the package →</a>', null);
     $("#timeline").innerHTML = steps.map(function (s) { return '<li><i class="dot ' + s.cls + '"></i><div><b>' + s.title + '</b> <span class="d">' + s.detail + '</span></div>' + (s.at ? when(s.at) : '<span class="when">now</span>') + '</li>'; }).join("");
   }
 
@@ -286,10 +289,11 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
+      // The package's link is the shell's one address, on the most stable ring the server lists for it.
       id: "build.title",
       page,
       anchor: ['id="title"'],
-      script: ['"#title"', "document.title", '<a href="/package/', "T.rings[0]"],
+      script: ['"#title"', "document.title", "pkgHref(t.name, ringOfBuild(t.status, T.rings), t.arch)"],
       reads: [{ path: task, fields: ["task.kind", "task.name", "task.version", "task.id", "task.arch", "rings"] }],
       visible: EVERYONE,
     },
@@ -302,15 +306,17 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
+      // The worker is the shell's wtId, the people the shell's personLink — the role from the maintainer set the shell reads once per page.
       id: "build.lede",
       page,
       anchor: ['id="lede"'],
-      script: ['"#lede"', "T.worker.owner", "T.from.owner", "T.approval.withdrawn_at", "t.lease_owner"],
+      script: ['"#lede"', "personLink(T.worker.owner)", "wtId(T.worker)", "wtId(t.lease_owner)", "T.from.owner", "T.approval.standing", "T.approval.withdrawn_at"],
       reads: [
         {
           path: task,
-          fields: ["task.kind", "task.trust", "task.name", "task.version", "task.arch", "task.owner", "task.status", "task.finished_at", "task.lease_owner", "task.params", "worker.id", "worker.owner", "from.id", "from.owner", "approval.decision", "approval.withdrawn_at"],
+          fields: ["task.kind", "task.trust", "task.name", "task.version", "task.arch", "task.owner", "task.status", "task.finished_at", "task.lease_owner", "task.params", "worker.id", "worker.owner", "from.id", "from.owner", "approval.standing", "approval.withdrawn_at"],
         },
+        { path: "/api/v1/factory/maintainers", fields: ["maintainers", "maintainers.0.login"] },
       ],
       visible: EVERYONE,
     },
@@ -343,11 +349,11 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="acts"'],
       script: [
         '"#acts"', "decisionCell({ id: t.id, name: t.name, version: t.version, arch: t.arch, can: CAN, approval: a })", 'API + "/tasks/" + ID + "/can"', "onDecided(function () { load(); })", 'Promise.all([api("GET", API + "/tasks/" + ID), loadCan()])', 'noes("reading what you may do here…")', '"could not read what you may do here — reload"',
-        'if (t.kind !== "build") { el.innerHTML = ""; return; }', "T.project_builds[0]", '"not ready"', "Approved by ",
+        'if (t.kind !== "build") { el.innerHTML = ""; return; }', "var standing = !!(a && a.standing)", "T.project_builds[0]", '"not ready"', "Approved by ",
       ],
       reads: [
         // The project's build: a standing approval draws "Withdraw the approval"; the project's build of a contributor's is what the note beside the cell names.
-        { path: task, fields: ["task.id", "task.kind", "task.name", "task.version", "task.arch", "task.status", "task.trust", "approval.decision", "approval.by", "approval.created_at", "approval.withdrawn_at", "score.ready", "project_builds"] },
+        { path: task, fields: ["task.id", "task.kind", "task.name", "task.version", "task.arch", "task.status", "task.trust", "approval.standing", "approval.by", "approval.created_at", "approval.withdrawn_at", "score.ready", "project_builds"] },
         { path: `/api/v1/factory/tasks/${F.contributorTask}`, fields: ["task.trust", "task.status", "score.ready", "project_builds.0.id", "project_builds.0.status", "project_builds.0.error"] },
         // What each reader may do on it, and why not — the caller's own answer, never cached: nobody gets four noes and the sign-in, a contributor and the owner "a maintainer decides", a maintainer the state of the chain (here: already approved, so Withdraw alone).
         { path: `${task}/can`, fields: ["task", "can.approve", "can.reject", "can.build", "can.withdraw", "can.why.approve", "can.why.reject", "can.why.build", "can.why.withdraw"] },
@@ -414,7 +420,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       script: [
         '"#timeline"', "T.package.request_id", "p.review !== undefined", "p.task !== undefined", "t.pkgbuild_ref",
         "T.audit.slice().reverse()", "T.trial.slice().reverse()", "T.project_builds.slice().reverse()", "T.publish.slice().reverse()",
-        "a.rebuild_task", "a.withdrawn_reason", "vet.warned", "vet.failed",
+        "a.rebuild_task", "a.withdrawn_reason", "vet.warned", "vet.failed", "pkgHref(t.name, ringOfBuild(t.status, T.rings), t.arch)",
       ],
       reads: [
         {

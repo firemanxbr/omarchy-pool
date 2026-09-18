@@ -41,32 +41,30 @@ const BODY = String.raw`
 
 const SCRIPT = String.raw`
   skeletonTiles("#tiles", 4); wtTables();
-  // The four reads and the session start together; the page draws once both have answered, since the one thing on a worker's row that depends on who is looking — the log icon, live for its owner and the maintainers, grey for everyone else — is drawn from the session.
+  // The maintainer set (the shell's one read: maintainerSet, login → since), three reads and the session start together; the page draws once all have answered, since the one thing on a worker's row that depends on who is looking — the log icon, live for its owner and the maintainers, grey for everyone else — is drawn from the session.
   Promise.all([
-    busy(fetch("/api/v1/factory/maintainers")).then(function (r) { return r.json(); }).catch(function () { return { maintainers: [] }; }),
+    busy(new Promise(function (ok) { maintainerSet(ok); })),
     busy(fetch("/api/v1/factory/packages")).then(function (r) { return r.json(); }).catch(function () { return { packages: [] }; }),
     busy(fetch("/api/v1/factory?limit=10")).then(function (r) { return r.json(); }).catch(function () { return { workers: [] }; }),
     busy(fetch("/api/v1/factory/blocks")).then(function (r) { return r.json(); }).catch(function () { return { contributors: [] }; })
   ]).then(function (res) { whoami(function () { draw(res); }); });
   function draw(res) {
-    var listed = res[0].maintainers || [], pkgs = res[1].packages || [], workers = res[2].workers || [], blocked = {};
+    // Maintainers: per login, since when — the set as the shell holds it.
+    var maint = res[0] || {}, pkgs = res[1].packages || [], workers = res[2].workers || [], blocked = {};
     (res[3].contributors || []).forEach(function (b) { blocked[b.login] = b.blocked_reason || ""; });
-    // Maintainers: per login, since when.
-    var maint = {};
-    listed.forEach(function (m) { maint[m.login] = m.since; });
-    // Contributors: per login, packages registered and workers run — a maintainer is listed once, above.
-    var contrib = {};
-    pkgs.forEach(function (p) { if (p.owner && !maint[p.owner]) { var c = contrib[p.owner] = contrib[p.owner] || { packages: 0, landed: 0, workers: 0 }; c.packages++; if (p.status === "approved" || p.status === "published") c.landed++; } });
-    workers.forEach(function (w) { if (w.owner && !maint[w.owner]) { var c = contrib[w.owner] = contrib[w.owner] || { packages: 0, landed: 0, workers: 0 }; c.workers++; } });
-    // Alive is a heartbeat in the last ten minutes — the word and the number the Pool's tile sends a reader here with, and the Workers page's first tile; ready is alive and, where the work needs one, an agent that answered — the listing's own words.
-    var alive = workers.filter(function (w) { return w.alive; }), ready = workers.filter(function (w) { return w.ready; });
+    // Contributors: per login, packages registered and workers run — a maintainer is listed once, above; landed is the registry's own word (the flag the Pool's, the Factory's and the Pipeline's numbers count).
+    var contrib = {}, isM = function (l) { return Object.prototype.hasOwnProperty.call(maint, l); };
+    pkgs.forEach(function (p) { if (p.owner && !isM(p.owner)) { var c = contrib[p.owner] = contrib[p.owner] || { packages: 0, landed: 0, workers: 0 }; c.packages++; if (p.landed) c.landed++; } });
+    workers.forEach(function (w) { if (w.owner && !isM(w.owner)) { var c = contrib[w.owner] = contrib[w.owner] || { packages: 0, landed: 0, workers: 0 }; c.workers++; } });
+    // The counts are the shell's (workerCounts), the listing's words: alive is a heartbeat in the last ten minutes — the word and the number the Pool's tile sends a reader here with, and the Workers page's first tile; ready is alive and, where the work needs one, an agent that answered; the project's are the project and review kinds.
+    var wc = workerCounts(workers);
     setTiles("#tiles", [
       ["Maintainers", num(Object.keys(maint).length), "every one reviews everything"],
       ["Contributors", num(Object.keys(contrib).length), num(pkgs.length) + " packages requested"],
-      ["Workers alive", num(alive.length) + " / " + num(workers.length), num(ready.length) + " ready · " + num(ready.filter(function (w) { return w.side === "omarchy"; }).length) + " the project's", ready.length < alive.length ? "warn" : ""],
-      ["Community packages", num(pkgs.filter(function (p) { return p.status === "approved" || p.status === "published"; }).length), "approved by a maintainer, built by the project"]
+      ["Workers alive", num(wc.alive) + " / " + num(wc.registered), num(wc.ready) + " ready · " + num(wc.byKind.project.ready + wc.byKind.review.ready) + " the project's", wc.ready < wc.alive ? "warn" : ""],
+      ["Community packages", num(pkgs.filter(function (p) { return p.landed; }).length), "approved by a maintainer, built by the project"]
     ]);
-    $("#maintainers-list").innerHTML = Object.keys(maint).sort().map(function (m) { return personChip(m, "maintainer", "since " + esc(ago(maint[m]))); }).join("") || '<span class="muted">none yet</span>';
+    $("#maintainers-list").innerHTML = Object.keys(maint).sort().map(function (m) { return personChip(m, "maintainer", maint[m] ? "since " + esc(ago(maint[m])) : ""); }).join("") || '<span class="muted">none yet</span>';
     $("#contributors-list").innerHTML = Object.keys(contrib).sort().map(function (c) {
       var x = contrib[c], bits = [];
       if (x.packages) bits.push(x.packages + " package" + (x.packages === 1 ? "" : "s") + (x.landed ? " · " + x.landed + " landed" : ""));
@@ -100,13 +98,14 @@ export function peopleHtml(poolUrl: string, version: RunningVersion): string {
 
 /**
  * What /people is made of.
- * Four public reads, no act, and the same tiles, chips and tables for
- * everyone. The worker tables are the shell's rows by kind, as on the
- * Workers page and a person's; the log icon on a row is the one thing here
- * that changes with the viewer — live for the worker's owner and the
- * maintainers, grey for everyone else, never dropped. The section ids are
- * the targets the Pool's "Made in the open" tiles link to, so each section
- * head keeps its anchor.
+ * The shell's maintainer set and three public reads, no act, and the same
+ * tiles, chips and tables for everyone; the worker counts on the tiles are
+ * the shell's, as on the Pool and the Workers page. The worker tables are
+ * the shell's rows by kind, as on the Workers page and a person's; the log
+ * icon on a row is the one thing here that changes with the viewer — live
+ * for the worker's owner and the maintainers, grey for everyone else, never
+ * dropped. The section ids are the targets the Pool's "Made in the open"
+ * tiles link to, so each section head keeps its anchor.
  */
 export const PEOPLE_COMPONENTS = (F: Fixture): Component[] => [
   {
@@ -119,11 +118,12 @@ export const PEOPLE_COMPONENTS = (F: Fixture): Component[] => [
     id: "people.tiles",
     page: "/people",
     anchor: ['id="tiles"'],
-    script: ['skeletonTiles("#tiles", 4)', 'setTiles("#tiles"', '"Workers alive"', '" ready · "', '" the project\'s"', '"Community packages"', 'w.side === "omarchy"'],
+    // The worker counts are the shell's (workerCounts over the listing), the same the Pool's and the Workers page's tiles say; the maintainer set the shell's one read.
+    script: ['skeletonTiles("#tiles", 4)', 'setTiles("#tiles"', "workerCounts(workers)", '"Workers alive"', "wc.alive", "wc.registered", '" ready · "', "wc.byKind.project.ready + wc.byKind.review.ready", '" the project\'s"', '"Community packages"', "p.landed"],
     reads: [
       { path: "/api/v1/factory/maintainers", fields: ["maintainers", "maintainers.0.login"] },
-      { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.owner", "packages.0.status"] },
-      { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.owner", "workers.0.alive", "workers.0.ready", "workers.0.side"] },
+      { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.owner", "packages.0.status", "packages.0.landed"] },
+      { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.owner", "workers.0.alive", "workers.0.ready", "workers.0.revoked_at", "workers.0.side", "workers.0.labels"] },
     ],
     visible: EVERYONE,
   },
@@ -137,7 +137,8 @@ export const PEOPLE_COMPONENTS = (F: Fixture): Component[] => [
     id: "people.maintainers-list",
     page: "/people",
     anchor: ['id="maintainers-list"'],
-    script: ['"/api/v1/factory/maintainers"', '"#maintainers-list"', "m.since", 'personChip(m, "maintainer"'],
+    // The list is the shell's maintainer set (maintainerSet: one read of GET /api/v1/factory/maintainers per page, login → since).
+    script: ["maintainerSet(ok)", '"#maintainers-list"', '"since "', "maint[m]", 'personChip(m, "maintainer"'],
     reads: [{ path: "/api/v1/factory/maintainers", fields: ["maintainers", "maintainers.0.login", "maintainers.0.since"] }],
     visible: EVERYONE,
   },
@@ -151,9 +152,9 @@ export const PEOPLE_COMPONENTS = (F: Fixture): Component[] => [
     id: "people.contributors-list",
     page: "/people",
     anchor: ['id="contributors-list"'],
-    script: ['"/api/v1/factory/packages"', '"/api/v1/factory?limit=10"', '"#contributors-list"', 'p.status === "approved" || p.status === "published"', 'personChip(c, "contributor"', 'href="/request">bring a package</a>'],
+    script: ['"/api/v1/factory/packages"', '"/api/v1/factory?limit=10"', '"#contributors-list"', "if (p.landed) c.landed++", 'personChip(c, "contributor"', 'href="/request">bring a package</a>'],
     reads: [
-      { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.owner", "packages.0.status"] },
+      { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.owner", "packages.0.status", "packages.0.landed"] },
       { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.owner"] },
       { path: "/api/v1/factory/maintainers", fields: ["maintainers", "maintainers.0.login"] },
       { path: "/api/v1/factory/blocks", fields: ["contributors"] },

@@ -192,7 +192,7 @@ export function workspace(c: Contributor | null, login: string, registrations: R
     packages[r.name] =
       person
         ?? (!theirs && !maintainer ? no(403, `only ${r.owner} removes it, or a maintainer`) : null)
-        ?? (!maintainer && (r.status === "approved" || r.status === "published") ? no(403, `${r.name} is ${r.status}: a maintainer removes it`) : null)
+        ?? (!maintainer && landed(r.status) ? no(403, `${r.name} is ${r.status}: a maintainer removes it`) : null)
         ?? (!maintainer && r.served.length ? no(409, `${r.name} is in ${r.served.join(", ")}: a maintainer withdraws the approval or blocks it first — the registration cannot leave a package behind in a ring`) : null)
         // The project's build of it — queued, running, or staged for a decision — is a maintainer's review in progress: the owner waits for it.
         ?? (!maintainer && r.reviewing ? no(409, `${r.name} is under review: the project's build #${r.reviewing.id} is ${r.reviewing.status} — a maintainer decides first`) : null)
@@ -797,12 +797,24 @@ export async function handleRevokeWorker(c: Contributor, id: string, env: Env): 
   return res.meta.changes ? json({ revoked: id, freed }) : json({ error: `${id} is revoked already` }, 404);
 }
 
+/**
+ * A registered package that landed: approved by a maintainer, or published
+ * once the project's build of it reached edge (factory.ts moves it from one
+ * word to the other). The status words are the server's, so the rule is said
+ * here once and every row of GET /factory/packages carries it as `landed` —
+ * the Pool's, the Factory's, the Pipeline's and the People page's
+ * "community packages" all read the flag, never the words.
+ */
+export function landed(status: string): boolean {
+  return status === "approved" || status === "published";
+}
+
 export async function handleListPackages(env: Env): Promise<Response> {
   const rows = await env.DB.prepare(
     `SELECT p.*, (SELECT COUNT(*) FROM build_tasks t WHERE t.name = p.name AND t.status = 'staged') AS staged_builds
        FROM factory_packages p ORDER BY updated_at DESC LIMIT 200`,
   ).all();
-  return json({ packages: rows.results.map((r) => ({ ...r, arches: JSON.parse(r.arches as string), detected: r.detected ? JSON.parse(r.detected as string) : null })) }, 200, { "cache-control": "public, max-age=30" });
+  return json({ packages: rows.results.map((r) => ({ ...r, arches: JSON.parse(r.arches as string), detected: r.detected ? JSON.parse(r.detected as string) : null, landed: landed(r.status as string) })) }, 200, { "cache-control": "public, max-age=30" });
 }
 
 // ---------- staging uploads (worker token, own task only) ----------

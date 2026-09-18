@@ -35,7 +35,8 @@ const SCRIPT = String.raw`
   var ring = q.get("ring") || "stable", from = q.get("from"), to = q.get("to"), arch = q.get("arch");
   skeletonTiles("#tiles", 4); skeletonRows("#upgraded", 5, 4); skeletonRows("#added", 4, 2); skeletonRows("#removed", 4, 2);
   var url = "/api/v1/releases/" + encodeURIComponent(ring) + "/diff?" + (from ? "from=" + encodeURIComponent(from) + "&" : "") + (to ? "to=" + encodeURIComponent(to) + "&" : "") + (arch ? "arch=" + encodeURIComponent(arch) : "");
-  var pkg = function (p) { return '<a href="/package/' + encodeURIComponent(p.name) + '"><b>' + esc(p.name) + '</b></a>'; };
+  // A row's package opens in the ring this diff is of and the row's own architecture — the shell's one address, so an edge or aarch64 row no longer lands on stable x86_64.
+  var pkg = function (p) { return '<a href="' + pkgHref(p.name, ring, p.arch) + '"><b>' + esc(p.name) + '</b></a>'; };
   api("GET", url).then(function (d) {
     if (d.__status !== 200) { $("#line").textContent = d.error || "not found"; endSkeleton(); return; }
     var f = d.from ? "release " + d.from.id + " (#" + d.from.seq + ")" : "nothing";
@@ -129,7 +130,7 @@ export const DIFF_COMPONENTS = (F: Fixture): Component[] => {
       id: "diff.upgraded-section",
       page,
       anchor: ["<h2>Upgraded</h2>", "a downgrade shows here too, the versions tell", 'id="upgraded"', "<th>From</th><th>To</th>"],
-      script: ['skeletonRows("#upgraded", 5, 4)', 'pager("#upgraded", d.upgraded', 'href="/package/', "esc(p.from)", "esc(p.to)", '"nothing upgraded"'],
+      script: ['skeletonRows("#upgraded", 5, 4)', 'pager("#upgraded", d.upgraded', "pkgHref(p.name, ring, p.arch)", "esc(p.from)", "esc(p.to)", '"nothing upgraded"'],
       reads: [{ path: head, fields: ["upgraded", "upgraded.0.name", "upgraded.0.arch", "upgraded.0.from", "upgraded.0.to", "upgraded.0.source"] }],
       visible: EVERYONE,
     },

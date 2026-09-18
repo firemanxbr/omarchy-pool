@@ -353,6 +353,8 @@ describe("a community build, its audit and the review", () => {
       // A build with no gate and no audit yet is not ready: the class column says D, the contributor's turn.
       expect(row.score).toMatchObject({ class: "D", ready: false });
       expect(review.json.staged.filter((r: any) => r.id !== again!.id).every((r: any) => r.already === null)).toBe(true);
+      // The one number every tile reads leaves it out: listed, not waiting.
+      expect(review.json.waiting).toBe(review.json.staged.length - 1);
     } finally {
       await env.DB.prepare("DELETE FROM build_tasks WHERE id = ?").bind(again!.id).run();
     }

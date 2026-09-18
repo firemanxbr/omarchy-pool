@@ -57,11 +57,19 @@ import { snapshotMetrics } from "../src/metrics";
 import { packageKey } from "../src/r2";
 import { sha256Hex } from "../src/routes/contributors";
 import type { Fixture } from "../src/pages/components";
+import { HELPERS } from "../src/pages/layout";
 
 export type { Fixture };
 
 /** The inline scripts of a served page, joined: what the page runs, for the tests that read it (components.test.ts, pages.test.ts). */
 export const scriptOf = (html: string): string => [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map((m) => m[1]).join("\n");
+
+// The page's own script is what follows the shell: page() splices HELPERS whole, so its last lines mark where the page's statements begin — a check on what a page draws must not read the shell's workerRow, avatar or personLink as the page's. Null when the shell is not spliced whole.
+const shellEnd = HELPERS.slice(-120);
+export function ownScriptOf(html: string): string | null {
+  const script = scriptOf(html), at = script.indexOf(shellEnd);
+  return at > 0 ? script.slice(at + shellEnd.length) : null;
+}
 
 /** What runScript hands back: the document's nodes by the selector they were asked for, the functions asked for by name, and a setter per variable asked for. */
 export type Ran = { nodes: Record<string, any> } & Record<string, any>;

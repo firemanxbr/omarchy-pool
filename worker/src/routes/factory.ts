@@ -7,7 +7,7 @@ import { isCategory } from "../categories";
 import { recordEvidence, vetSummary } from "../record";
 import { isTextEvidence, reclaimStagingPackages, STAGING_QUOTA_BYTES } from "../staging";
 import { findLeak } from "../leak";
-import { chains, chainOf, storyRows, requestView, placeInQueue, type Chain } from "./story";
+import { chains, chainOf, storyRows, requestView, placeInQueue, stands, type Chain } from "./story";
 import { betterIdleWorker, FIRST_PICK_MINUTES } from "../queue";
 import { updateMessage, updateState } from "../update";
 import { version as running } from "../meta";
@@ -856,7 +856,8 @@ export async function handleTask(id: number, env: Env): Promise<Response> {
       trial: trials?.results.map(brief) ?? [],
       project_builds: projectBuilds?.results.map(brief) ?? [],
       publish: publishes?.results.map(brief) ?? [],
-      approval,
+      // The approval on this build, with `standing` (approved, not withdrawn — stands()) as every approval row the server hands out carries it: the page reads the word, it does not derive it.
+      approval: approval ? { ...approval, standing: stands(approval as { decision: string; withdrawn_at: string | null }) } : null,
       chain,
       score: chain?.score ?? null,
       rings: rings.sort((a, b) => order.indexOf(a) - order.indexOf(b)),

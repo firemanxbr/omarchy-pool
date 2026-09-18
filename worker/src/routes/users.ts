@@ -4,6 +4,7 @@ import { version as running } from "../meta";
 import { queuePosition } from "../queue";
 import { maintainersOf } from "../governance";
 import { registrationsOf, rights, workersOf, workspace, type Contributor } from "./contributors";
+import { stands } from "./review";
 
 /**
  * A person's public page: what they contribute and what they maintain,
@@ -88,8 +89,8 @@ export async function handleUser(login: string, env: Env): Promise<Response> {
     maintainersOf(env),
     recordOf(env, login),
   ]);
-  // Packages this person approved into the pool (what they maintain, in practice).
-  const approvedNames = [...new Set((approvals.results as { name: string; decision: string }[]).filter((a) => a.decision === "approved").map((a) => a.name))];
+  // Packages this person approved into the pool (what they maintain, in practice): the approvals that stand, a withdrawn one no longer theirs to keep.
+  const approvedNames = [...new Set((approvals.results as { name: string; decision: string; withdrawn_at: string | null }[]).filter(stands).map((a) => a.name))];
   const alive = new Date(Date.now() - 10 * 60000).toISOString();
   return json(
     {
@@ -97,7 +98,8 @@ export async function handleUser(login: string, env: Env): Promise<Response> {
       name: person.name,
       avatar_url: person.avatar_url,
       github: `https://github.com/${person.login}`,
-      role: person.role,
+      // The role from the one set the shell reads (GET /factory/maintainers, maintainersOf): listed is a maintainer, anyone else a contributor. contributors.role is the sync's copy of the same list; a login listed before its first sign-in, or a sync that failed between its two writes, must not give this page a second answer.
+      role: listed.some((m) => m.login === login) ? "maintainer" : "contributor",
       blocked: person.blocked_at ? { at: person.blocked_at, by: person.blocked_by, reason: person.blocked_reason } : null,
       maintainer_since: listed.find((m) => m.login === login)?.since ?? null,
       since: person.created_at,
@@ -105,12 +107,12 @@ export async function handleUser(login: string, env: Env): Promise<Response> {
       packages: packages.results,
       builds: await Promise.all(builds.results.map(async (b) => (b.status === "queued" && b.trust === "community" ? { ...b, queue: await queuePosition(env, b as { id: number; arch: string; priority?: number; shared_after?: string | null; pinned_to?: string | null }) } : b))),
       build_counts: counts ?? { staged: 0, published: 0, failed: 0, total: 0 },
-      // A standing approval says where the package stands today: the rings that serve it, from the factory's rows in each ring.
+      // Every approval says whether it stands (`standing`, as GET /factory/approvals says it), and a standing one where the package is today: the rings that serve it, from the factory's rows in each ring.
       approvals: await Promise.all((approvals.results as { name: string; arch: string; decision: string; withdrawn_at: string | null }[]).map(async (a) => {
-        if (a.decision !== "approved" || a.withdrawn_at) return a;
+        if (!stands(a)) return { ...a, standing: false };
         const rings = (await env.DB.prepare("SELECT DISTINCT rp.ring FROM ring_packages rp JOIN packages p ON p.id = rp.package_id WHERE p.name = ? AND p.repo_arch = ? AND p.source = 'factory' AND rp.ring IN ('lab', 'edge', 'rc', 'stable')").bind(a.name, a.arch).all<{ ring: string }>()).results.map((r) => r.ring);
         const order = ["lab", "edge", "rc", "stable"];
-        return { ...a, rings: rings.sort((x, y) => order.indexOf(x) - order.indexOf(y)) };
+        return { ...a, standing: true, rings: rings.sort((x, y) => order.indexOf(x) - order.indexOf(y)) };
       })),
       approved_packages: approvedNames,
       record,
@@ -136,12 +138,17 @@ export async function handleUserCan(c: Contributor | null, login: string, env: E
   return json({ login: person.login, can: rights(workspace(c, person.login, registrations, workers)) }, 200, { "cache-control": "no-store" });
 }
 
-/** Who stands behind a package the factory built: its owner, its category, the maintainers, the last approval. */
+/**
+ * Who stands behind a package the factory built: its owner, its category,
+ * the maintainers, the last approval that stands — a withdrawn one is not
+ * the approval the package is served under, so the package page's "approved
+ * by" card and the Packages table's approver never name it.
+ */
 export async function maintenanceOf(env: Env, name: string, source: string, packager: string | undefined): Promise<Record<string, unknown>> {
   const out: Record<string, unknown> = { packager: packager ?? null };
   if (source !== "factory") return out;
   const pkg = await env.DB.prepare(`SELECT owner, category, url, status FROM factory_packages WHERE name = ?`).bind(name).first<{ owner: string; category: string | null; url: string; status: string }>();
-  const approval = await env.DB.prepare("SELECT by, version, arch, created_at, task_id FROM approvals WHERE name = ? AND decision = 'approved' ORDER BY id DESC LIMIT 1")
+  const approval = await env.DB.prepare("SELECT by, version, arch, created_at, task_id FROM approvals WHERE name = ? AND decision = 'approved' AND withdrawn_at IS NULL ORDER BY id DESC LIMIT 1")
     .bind(name)
     .first<{ by: string; version: string | null; arch: string; created_at: string; task_id: number }>();
   out.factory = {
