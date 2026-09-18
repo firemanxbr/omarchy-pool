@@ -33,7 +33,7 @@ const BODY = String.raw`
   </div>
 
   <section style="margin-top:44px">
-    <div class="h2row"><h2>Every worker</h2><label class="dim" style="font-size:13px"><input type="checkbox" id="all-workers"> show workers not seen recently</label></div>
+    <div class="h2row"><h2>Every worker</h2><span class="hint" id="lists-note"></span><label class="dim" style="font-size:13px"><input type="checkbox" id="all-workers"> show workers not seen recently</label></div>
     ${workerPanels([
       { kind: "project", blurb: "the pool's own jobs — sync, render, promote, health, security, gc — on the host a maintainer keeps" },
       { kind: "review", blurb: "the maintainers' side: builds again, publishes, audits — the agent through a proxy that holds the key" },
@@ -46,7 +46,8 @@ const BODY = String.raw`
 
 const SCRIPT = String.raw`
 __CHARTS__
-  var FACTORY = null, STATS = null;
+  // FACTORY is the listing once it answered; DOWN the reason it did not — the tiles the listing feeds then read "—" (the shell's tilesUnanswered; the note by Every worker says why), never "0 / 0" alive; the minutes tile is the stats poll's and keeps its number.
+  var FACTORY = null, STATS = null, DOWN = null;
   skeletonTiles("#tiles", 4); wtTables();
   // The kind's colour on every chart of the page: the card's line, the bar per worker, the legend.
   var COLOR = { project: C.green, review: C.blue, community: C.lilac };
@@ -66,10 +67,20 @@ __CHARTS__
     (S.builds_daily || []).forEach(function (r) { add(r.trust === "community" ? "community" : "review", r.day, r.status === "staged" ? "done" : r.status, Number(r.n || 0)); });
     return { days: days, P: P };
   }
+  // The four tiles, from the shell's counts (workerCounts), the workers building now, the load and the week's minutes — one list, so the tiles over a listing that did not answer carry the same labels.
+  function tilesOf(wc, bz, load, wm) {
+    return [
+      ["Alive", num(wc.alive) + " / " + num(wc.registered), num(wc.byKind.project.alive) + " project · " + num(wc.byKind.review.alive) + " review · " + num(wc.byKind.community.alive) + " contributors", wc.alive ? "ok" : "warn"],
+      ["Building now", num(wc.building), wc.building ? bz.map(function (w) { return "#" + w.current_task; }).join(" · ") : "every worker idle"],
+      ["Load · 24 h", load + "%", "of the last day with a lease, across the alive ones"],
+      // The stats poll's, not the listing's: marked so, it keeps its number when the listing did not answer — the chart below draws the same series.
+      ["Worker minutes · 7 d", wm ? num(wm.total) : "—", wm ? "≈ " + num(Math.round(wm.total / 7)) + " per day, the project's workers" : "", "", null, "stats"]
+    ];
+  }
   // The load: what each worker did in the last day, from the stats series (finished tasks by duration, a running one by its start).
   function loadOf() { var L = {}; ((STATS && STATS.series && STATS.series.workers_daily) || []).forEach(function (r) { L[r.worker] = { ms: Number(r.ms || 0) + Number(r.running_ms || 0), done: Number(r.done || 0) }; }); return L; }
   function render() {
-    var d = FACTORY; if (!d) return;
+    var d = FACTORY; if (!d) { if (DOWN) setTiles("#tiles", tilesUnanswered(tilesOf(workerCounts([]), [], null, STATS ? workerMinutes(STATS.series, 7) : null), DOWN)); return; }
     var showAll = $("#all-workers").checked, LOAD = loadOf();
     var busyOf = function (w) { var l = LOAD[w.id]; return l ? Math.min(100, Math.round(100 * l.ms / 86400000)) : 0; };
     var kinds = { project: [], review: [], community: [] };
@@ -79,12 +90,7 @@ __CHARTS__
     // Worker minutes: the sum of the series the chart below draws (workerMinutes over jobs_daily), the number the Status page and the Pipeline say — not the metrics snapshot.
     var wm = STATS ? workerMinutes(STATS.series, 7) : null;
     var load = al.length ? Math.round(al.reduce(function (n, w) { return n + busyOf(w); }, 0) / al.length) : 0;
-    setTiles("#tiles", [
-      ["Alive", num(wc.alive) + " / " + num(wc.registered), num(wc.byKind.project.alive) + " project · " + num(wc.byKind.review.alive) + " review · " + num(wc.byKind.community.alive) + " contributors", wc.alive ? "ok" : "warn"],
-      ["Building now", num(wc.building), wc.building ? bz.map(function (w) { return "#" + w.current_task; }).join(" · ") : "every worker idle"],
-      ["Load · 24 h", load + "%", "of the last day with a lease, across the alive ones"],
-      ["Worker minutes · 7 d", wm ? num(wm.total) : "—", wm ? "≈ " + num(Math.round(wm.total / 7)) + " per day, the project's workers" : ""]
-    ]);
+    setTiles("#tiles", tilesOf(wc, bz, load, wm));
     // One card per kind: one line on what it is for, the tasks it finished per day over a week (the Pool page's growth line, in the kind's colour), four numbers.
     var PD = perDay();
     var card = function (cls, name, ws, blurb) {
@@ -119,7 +125,8 @@ __CHARTS__
     var wm = workerMinutes(d.series, 7);
     $("#c-minutes").innerHTML = stacked(wm.labels, [{ name: "minutes", color: C.blue, values: wm.values }], { label: "Worker minutes per day over seven days", empty: "no job yet" });
   }
-  function load() { busy(fetch("/api/v1/factory?limit=10")).then(function (r) { return r.json(); }).then(function (d) { FACTORY = d; render(); }).catch(function () { endSkeleton(); }); }
+  // The listing did not answer (api() rejects on a 5xx and on the network): the note by Every worker says so; the first load's tiles read "—", the tables draw no "no worker alive" in its place, and the rows of the last load that answered stay.
+  function load() { api("GET", "/api/v1/factory?limit=10").then(function (d) { FACTORY = d; DOWN = null; $("#lists-note").textContent = ""; render(); }).catch(function (e) { DOWN = noAnswer("worker listing", e, "#lists-note"); render(); }); }
   $("#all-workers").onchange = render;
   // Who is looking decides what the rows show (the log icon is the owner's and the maintainers'): the session first, then the rows.
   whoami(function () { load(); }); setInterval(load, 20000);
@@ -159,8 +166,8 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     id: "workers.tiles",
     page: "/workers",
     anchor: ['id="tiles"'],
-    // The counts are the shell's (workerCounts over the listing), the same the Pool's and the People page's tiles say.
-    script: ['"#tiles"', "workerCounts(d.workers)", '"Alive"', "wc.alive", "wc.registered", "wc.byKind.project.alive", '"Building now"', "wc.building", '"Load · 24 h"', '"Worker minutes · 7 d", wm ? num(wm.total)', "workerMinutes(STATS.series, 7)"],
+    // The counts are the shell's (workerCounts over the listing), the same the Pool's and the People page's tiles say; over a listing that did not answer the three it feeds read "—" (the shell's tilesUnanswered) and the minutes tile, the stats poll's, keeps its number.
+    script: ['"#tiles"', "workerCounts(d.workers)", "function tilesOf(wc, bz, load, wm)", 'setTiles("#tiles", tilesUnanswered(tilesOf(workerCounts([]), [], null, STATS ? workerMinutes(STATS.series, 7) : null), DOWN))', '"", null, "stats"]', '"Alive"', "wc.alive", "wc.registered", "wc.byKind.project.alive", '"Building now"', "wc.building", '"Load · 24 h"', '"Worker minutes · 7 d", wm ? num(wm.total)', "workerMinutes(STATS.series, 7)"],
     reads: [
       { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.alive", "workers.0.ready", "workers.0.current_task", "workers.0.revoked_at", "workers.0.side", "workers.0.labels"] },
       { path: "/api/v1/stats", fields: ["series.workers_daily", "series.jobs_daily"] },
@@ -208,8 +215,8 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     id: "workers.table",
     page: "/workers",
     shared: "worker-table",
-    anchor: ['id="w-project"', 'id="w-review"', 'id="w-community"', 'id="all-workers"'],
-    script: ['"/api/v1/factory?limit=10"', 'wtTables()', '"#w-project"', '"#w-review"', '"#w-community"', '"#all-workers"', "showAll", "workerRow(w", "text: wtText"],
+    anchor: ['id="w-project"', 'id="w-review"', 'id="w-community"', 'id="all-workers"', 'id="lists-note"'],
+    script: ['api("GET", "/api/v1/factory?limit=10")', 'noAnswer("worker listing", e, "#lists-note")', '$("#lists-note").textContent = ""', 'wtTables()', '"#w-project"', '"#w-review"', '"#w-community"', '"#all-workers"', "showAll", "workerRow(w", "text: wtText"],
     reads: [
       {
         path: "/api/v1/factory?limit=10",

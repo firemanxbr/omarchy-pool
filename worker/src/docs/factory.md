@@ -126,6 +126,12 @@ registration's own words: `registered`, then `waiting` or `building`,
 (`approved`, `rejected`) and `published` once the project's build is in
 edge — `unmaintained` after 30 days without a build; the
 [Pipeline](../../../../pipeline) lists every request and where it stands.
+One word for a package that may have a build per architecture: it follows
+the builds, not the last worker to speak. While any build of the name is
+staged for a maintainer, a failure on the other architecture leaves it
+`staged` and writes what that build ran into in its detail; only with
+nothing staged does a failed build put it back to `registered` with the
+reason.
 
 ## The gate
 

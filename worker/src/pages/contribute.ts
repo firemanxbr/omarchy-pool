@@ -38,7 +38,7 @@ const BODY = String.raw`
   </section>
 
   <section>
-    <div class="h2row"><h2>Landed lately</h2><a class="more-link" href="/review">Every decision →</a></div>
+    <div class="h2row"><h2>Landed lately</h2><span class="hint" id="lists-note"></span><a class="more-link" href="/review">Every decision →</a></div>
     <p class="sub">Brought by contributors, built again by the pool, approved by a maintainer — and where each one is today.</p>
     <div class="landed" id="landed"><div class="muted">loading…</div></div>
   </section>
@@ -58,34 +58,38 @@ __CHARTS__
   // Signed in, the gate leads to the person's own page — the workspace. The gate is the same for everyone: only the button's words and where it goes change, the hint stays.
   whoami(function (me) { if (!me) return; var b = $("#gate-btn"); b.href = userHref(me.login); b.textContent = "Your page →"; });
   skeletonTiles("#tiles", 5);
-  // The tiles read two answers: the factory's lists (FACTS, once publicLoad answered, the maintainer set with them) and the stats series the builds chart draws (STATS, once the poll answered) — the builds of the week are the chart's own numbers summed, not a second count over the task window.
-  var FACTS = null, STATS = null;
+  // The tiles read two answers: the factory's lists (FACTS, once publicLoad answered, the maintainer set with them) and the stats series the builds chart draws (STATS, once the poll answered) — the builds of the week are the chart's own numbers summed, not a second count over the task window. DOWN is the reason the lists did not answer: the tiles they feed then read "—" (the shell's tilesUnanswered; the note beside Landed lately says why), never a 0 — a list that failed is not a list with nothing in it — and the Builds tile, the poll's, keeps its number.
+  var FACTS = null, STATS = null, DOWN = null;
   function renderTiles() {
-    if (!FACTS) return;
-    var pkgs = FACTS.pkgs, review = FACTS.review, sw = FACTS.shared, maint = FACTS.maintainers || {};
+    if (!FACTS && !DOWN) return;
+    var facts = FACTS || { pkgs: [], review: {}, shared: workerCounts([]), maintainers: {} };
+    var pkgs = facts.pkgs, review = facts.review, sw = facts.shared, maint = facts.maintainers || {};
     var week = STATS ? buildsByDay(STATS.series, 7).days.reduce(function (n, d) { n.staged += d.staged; n.published += d.published; n.failed += d.failed; return n; }, { staged: 0, published: 0, failed: 0 }) : null;
-    // Landed is the registry's own word (the Pool, the Pipeline and People count the same flag); the contributors under it are the owners of those packages who are not in the maintainer set — the People page's and the Pool's word for a contributor.
+    // Landed is the registry's own word (the Pool, the Pipeline and People count the same flag) — approved by a maintainer, which is what the caption says: an approval stands after a publish that failed and after a block, so the number is not "in the rings" (Landed lately below said "publish failed" under a tile that counted it as served, 2026-09-18). The contributors under it are the owners of those packages who are not in the maintainer set — the People page's and the Pool's word for a contributor.
     var landed = pkgs.filter(function (p) { return p.landed; }), from = {}; landed.forEach(function (p) { if (p.owner && !Object.prototype.hasOwnProperty.call(maint, p.owner)) from[p.owner] = 1; });
-    setTiles("#tiles", [
-      ["Community packages", num(landed.length), "in the rings, from " + num(Object.keys(from).length) + " contributors", "", "/packages?q=factory"],
+    var tiles = [
+      ["Community packages", num(landed.length), "approved by a maintainer, from " + num(Object.keys(from).length) + " contributors", "", "/packages?q=factory"],
       ["Waiting for review", num(review.waiting), review.oldest_ms ? "oldest " + span(review.oldest_ms) : "nothing waiting", review.waiting ? "warn" : "", "/review"],
       ["Shared workers alive", num(sw.alive), num(sw.byKind.community.alive) + " community · " + num(sw.byKind.project.alive + sw.byKind.review.alive) + " project", sw.alive ? "ok" : "", "/workers"],
-      ["Builds this week", week ? num(week.staged + week.published + week.failed) : "…", week ? num(week.staged) + " staged · " + num(week.published) + " published · " + num(week.failed) + " failed" : "", "", "/journal?kind=build"],
+      // Fed by the stats poll, not the lists: marked so, it keeps its number when the lists did not answer — the chart beside it draws the same series.
+      ["Builds this week", week ? num(week.staged + week.published + week.failed) : "—", week ? num(week.staged) + " staged · " + num(week.published) + " published · " + num(week.failed) + " failed" : "", "", "/journal?kind=build", "stats"],
       ["Requested, not built yet", num(pkgs.filter(function (p) { return p.status === "registered"; }).length), "on the record, waiting for a Build", "", "/review"]
-    ]);
+    ];
+    setTiles("#tiles", FACTS ? tiles : tilesUnanswered(tiles, DOWN));
   }
+  // The four lists are one load (api() rejects on a 5xx and on the network): one that did not answer is said in the note beside Landed lately and nothing is drawn in its place — an empty list stood in for a failed one here, and the tile read "Waiting for review 0 · nothing waiting" over a query that threw. The first load's tiles read "—"; what a later load drew stays.
   function publicLoad() {
     Promise.all([
-      busy(fetch("/api/v1/factory")).then(function (r) { return r.json(); }),
-      fetch("/api/v1/factory/packages").then(function (r) { return r.json(); }).catch(function () { return { packages: [] }; }),
-      fetch("/api/v1/factory/approvals").then(function (r) { return r.json(); }).catch(function () { return { approvals: [] }; }),
-      fetch("/api/v1/factory/review").then(function (r) { return r.json(); }).catch(function () { return { staged: [], waiting: 0, oldest_ms: null }; }),
+      api("GET", "/api/v1/factory"),
+      api("GET", "/api/v1/factory/packages"),
+      api("GET", "/api/v1/factory/approvals"),
+      api("GET", "/api/v1/factory/review"),
       new Promise(function (ok) { maintainerSet(ok); })
     ]).then(function (res) {
       var f = res[0], pkgs = res[1].packages || [], apps = res[2].approvals || [];
       // The workers the shared queue may hand a build to — the project's and a contributor's shared ones, an outdated one handed nothing — counted as the shell counts every tile's workers (workerCounts); what waits for review is the list's own waiting and oldest_ms, the number Review's and the Pipeline's tiles say.
       var shared = workerCounts(f.workers.filter(function (w) { return !(w.update && w.update.required) && (w.side === "omarchy" || w.mode === "shared"); }));
-      FACTS = { pkgs: pkgs, review: res[3], shared: shared, maintainers: res[4] }; renderTiles();
+      FACTS = { pkgs: pkgs, review: res[3], shared: shared, maintainers: res[4] }; DOWN = null; $("#lists-note").textContent = ""; renderTiles();
       var owners = {}; pkgs.forEach(function (p) { owners[p.name] = p.owner; });
       // Landed: the approvals that stand (standing, the server's word — approved and not withdrawn), so what this page calls landed Review never calls withdrawn.
       var approved = apps.filter(function (a) { return a.standing; });
@@ -95,10 +99,11 @@ __CHARTS__
       var ringBadges = function (rings) { return '<span class="rings">' + RINGS_UPWARD.map(function (r) { var on = rings.indexOf(r) >= 0; return '<i class="rb ' + r + (on ? " on" : "") + '" title="' + (on ? "in " + r : "not in " + r + " yet") + '"><svg viewBox="0 0 24 24" aria-hidden="true">' + RING_ICON[r] + '</svg>' + r + '</i>'; }).join("") + '</span>'; };
       $("#landed").innerHTML = approved.slice(0, 6).map(function (a) {
         var owner = owners[a.name], rings = a.rings || [];
-        // An approval that stands and no ring serving it yet, by what the row knows: blocked when the package is (the brake pulled it from every ring), "publish failed" when the publish job the approval queued gave up, "publishing" while that job is queued or running.
-        var state = rings.length ? "" : a.blocked_at ? pillHtml("error", "blocked", "blocked " + ago(a.blocked_at) + " — out of every ring") : a.publish_status === "failed" || a.publish_status === "cancelled" ? pillHtml("error", "publish " + a.publish_status, "approved, but the publish job of the project's build " + a.publish_status + "; nothing is on its way") : pillHtml("blue", "publishing", "approved; the project's build is on its way into edge");
-        // The person is the shell's, the role from the maintainer set; the package links the shell's one address, with the most stable ring that serves it (servedRing, the reader's order) and its architecture.
-        return '<div class="land">' + (owner ? avatar(owner) : '<span class="avatar">?</span>') + '<div class="n"><span><a href="' + pkgHref(a.name, servedRing(rings), a.arch) + '">' + esc(a.name) + '</a> <span class="v">' + esc(a.version || "") + '</span></span>' + state + '</div><div class="b">by ' + personLink(owner) + ' · approved by ' + personLink(a.by) + ' · ' + ago(a.created_at) + ' · ' + esc(a.arch) + '</div>' + ringBadges(rings) + '</div>';
+        // An approval that stands and no ring serving it yet: where it is by the shell's one rule (approvalWhere — blocked, publish failed or cancelled, publishing — the word Review's Decided line says of the same row); the badges below say the rings, so a served one wears no pill.
+        var where = approvalWhere(a), state = rings.length ? "" : pillHtml(where.cls, where.word, where.title);
+        // The person is the shell's, the role from the maintainer set; the package links the shell's one address, with the most stable ring that serves it (servedRing, the reader's order) and its architecture — and, served by no ring, its build: as Review's Decided line does, never a package address naming a ring no fact supports (lost linked /package/lost?ring=stable after its publish failed, 2026-09-18).
+        var href = rings.length ? pkgHref(a.name, servedRing(rings), a.arch) : "/build/" + a.task_id;
+        return '<div class="land">' + (owner ? avatar(owner) : '<span class="avatar">?</span>') + '<div class="n"><span><a href="' + href + '">' + esc(a.name) + '</a> <span class="v">' + esc(a.version || "") + '</span></span>' + state + '</div><div class="b">by ' + personLink(owner) + ' · approved by ' + personLink(a.by) + ' · ' + ago(a.created_at) + ' · ' + esc(a.arch) + '</div>' + ringBadges(rings) + '</div>';
       }).join("") || '<div class="muted">nothing approved yet — <a href="/request">be the first</a></div>';
       // The funnel: medians from what the record holds (a package's request, its first staged build, the decision), then the gates every package passes.
       var median = function (xs) { if (!xs.length) return null; xs = xs.slice().sort(function (a, b) { return a - b; }); return xs[Math.floor(xs.length / 2)]; };
@@ -112,7 +117,8 @@ __CHARTS__
       // A row per stage: the label carries what the stage is as its title, the bar is the stage's share of the longest one, the value its median; the stage a human decides is amber.
       $("#c-funnel").innerHTML = hrows(stagesF.map(function (st) { var human = st[0] === "staged → decided"; return ['<span title="' + esc(st[2]) + '">' + esc(st[0]) + '</span>', "", st[1] == null ? 0 : Math.min(100, 100 * st[1] / maxH), human ? "var(--amber)" : "var(--green)", fmtH(st[1]), st[0] + ": " + (st[1] == null ? "no measurement yet" : "median " + fmtH(st[1])) + " — " + st[2]]; }), { w: 160, html: true }) + '<div class="legend"><span><i style="background:var(--green)"></i>the machines</span><span><i style="background:var(--amber)"></i>a human decides</span></div>';
       endSkeleton();
-    }).catch(function () { endSkeleton(); });
+    // The funnel reads the same four lists: it says so too, as the Pipeline's promotions chart does, instead of a heading over nothing.
+    }).catch(function (e) { DOWN = noAnswer("factory's lists", e, "#lists-note"); if (!FACTS) { renderTiles(); $("#landed").innerHTML = '<div class="muted">' + esc(DOWN) + '</div>'; $("#c-funnel").innerHTML = '<div class="empty">' + esc(DOWN) + '</div>'; } });
   }
   publicLoad();
   // The chart and the Builds tile read one series (builds_daily): fourteen days drawn, the last seven summed.
@@ -140,10 +146,12 @@ export function factoryHtml(poolUrl: string, version: RunningVersion): string {
  * What /factory is made of.
  * The page is public and the same for everyone: the tiles, the assembly
  * line's one live number, Landed lately and the funnel share one
- * Promise.all over four factory reads; the builds chart and the Builds
- * tile share the /stats poll; only the gate asks who is signed in, and
- * changes its button's words and target — the gate and its hint are served
- * to everyone. Nothing here posts — every action is a link to another page.
+ * Promise.all over four factory reads — one that did not answer is said
+ * in the note beside Landed lately and the tiles read "—"; the builds
+ * chart and the Builds tile share the /stats poll; only the gate asks who
+ * is signed in, and changes its button's words and target — the gate and
+ * its hint are served to everyone. Nothing here posts — every action is a
+ * link to another page.
  */
 export const FACTORY_COMPONENTS = (_F: Fixture): Component[] => [
   {
@@ -153,11 +161,11 @@ export const FACTORY_COMPONENTS = (_F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // Five tiles from two answers: what waits for review is the list's own `waiting` and `oldest_ms` (Review's tile and the Pipeline's say the same), the shared workers are the shell's count over the listing (workerCounts), and the builds of the week are the chart's series (stats builds_daily) summed over seven days — not a count over the factory's task window.
+    // Five tiles from two answers: what waits for review is the list's own `waiting` and `oldest_ms` (Review's tile and the Pipeline's say the same), the shared workers are the shell's count over the listing (workerCounts), the community packages the registry's `landed` captioned as what it is — approved by a maintainer, the Pool's and People's words — and the builds of the week are the chart's series (stats builds_daily) summed over seven days — not a count over the factory's task window. Over lists that did not answer, the four the lists feed read "—" (the shell's tilesUnanswered), never a 0; the Builds tile is marked as the stats poll's and keeps its number.
     id: "factory.tiles",
     page: "/factory",
     anchor: ['class="tiles five"', 'id="tiles"'],
-    script: ['"/api/v1/factory"', '"/api/v1/factory/packages"', '"/api/v1/factory/review"', '"#tiles"', "function renderTiles()", '"Community packages"', "p.landed", "maintainerSet(ok)", '" contributors"', '"Waiting for review"', "review.waiting", "review.oldest_ms", '"Shared workers alive"', "workerCounts(f.workers.filter(", "sw.byKind.community.alive", '"Builds this week"', "buildsByDay(STATS.series, 7).days", '"Requested, not built yet"', '"/packages?q=factory"', '"/journal?kind=build"'],
+    script: ['api("GET", "/api/v1/factory")', 'api("GET", "/api/v1/factory/packages")', 'api("GET", "/api/v1/factory/review")', '"#tiles"', "function renderTiles()", 'setTiles("#tiles", FACTS ? tiles : tilesUnanswered(tiles, DOWN))', '"Community packages"', "p.landed", "maintainerSet(ok)", '"approved by a maintainer, from "', '" contributors"', '"Waiting for review"', "review.waiting", "review.oldest_ms", '"Shared workers alive"', "workerCounts(f.workers.filter(", "sw.byKind.community.alive", '"Builds this week"', "buildsByDay(STATS.series, 7).days", '"/journal?kind=build", "stats"]', '"Requested, not built yet"', '"/packages?q=factory"'],
     reads: [
       { path: "/api/v1/factory", fields: ["workers", "workers.0.id", "workers.0.alive", "workers.0.ready", "workers.0.current_task", "workers.0.revoked_at", "workers.0.side", "workers.0.mode", "workers.0.labels", "workers.0.update"] },
       { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.name", "packages.0.owner", "packages.0.status", "packages.0.landed"] },
@@ -189,13 +197,13 @@ export const FACTORY_COMPONENTS = (_F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // Landed is an approval that stands (`standing`: approved and not withdrawn) — the rule Review reads, so the two pages never disagree on one approval; the owner's icon takes its role from the maintainer set, the package links the shell's one address with the most stable ring that serves it.
+    // Landed is an approval that stands (`standing`: approved and not withdrawn) — the rule Review reads, so the two pages never disagree on one approval; the owner's icon takes its role from the maintainer set, the package links the shell's one address with the most stable ring that serves it, and its build when no ring does (as Review's Decided line links it).
     id: "factory.landed",
     page: "/factory",
-    anchor: ["<h2>Landed lately</h2>", 'href="/review"', 'id="landed"'],
-    script: ['"/api/v1/factory/approvals"', '"#landed"', "return a.standing;", "avatar(owner)", 'pillHtml("blue", "publishing"', 'class="rb ', "RINGS_UPWARD.map(function (r)", "pkgHref(a.name, servedRing(rings), a.arch)"],
+    anchor: ["<h2>Landed lately</h2>", 'id="lists-note"', 'href="/review"', 'id="landed"'],
+    script: ['api("GET", "/api/v1/factory/approvals")', '"#landed"', 'noAnswer("factory\'s lists", e, "#lists-note")', '$("#lists-note").textContent = ""', "return a.standing;", "avatar(owner)", "approvalWhere(a)", "pillHtml(where.cls, where.word, where.title)", 'class="rb ', "RINGS_UPWARD.map(function (r)", 'rings.length ? pkgHref(a.name, servedRing(rings), a.arch) : "/build/" + a.task_id'],
     reads: [
-      { path: "/api/v1/factory/approvals", fields: ["approvals", "approvals.0.standing", "approvals.0.name", "approvals.0.version", "approvals.0.arch", "approvals.0.by", "approvals.0.created_at", "approvals.0.rings", "approvals.0.publish_status", "approvals.0.blocked_at"] },
+      { path: "/api/v1/factory/approvals", fields: ["approvals", "approvals.0.standing", "approvals.0.name", "approvals.0.version", "approvals.0.arch", "approvals.0.by", "approvals.0.created_at", "approvals.0.rings", "approvals.0.publish_status", "approvals.0.blocked_at", "approvals.0.task_id"] },
       { path: "/api/v1/factory/packages", fields: ["packages.0.name", "packages.0.owner"] },
     ],
     visible: EVERYONE,
@@ -210,10 +218,11 @@ export const FACTORY_COMPONENTS = (_F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
+    // Drawn from the same four lists as the tiles: when they did not answer it says so in the chart's place, not a heading over nothing.
     id: "factory.funnel-chart",
     page: "/factory",
     anchor: ["From request to the rings <span>median</span>", 'id="c-funnel"'],
-    script: ['"#c-funnel"', '"requested → staged"', '"staged → decided"', "firstStaged", "byTask[a.task_id]", "p.created_at"],
+    script: ['"#c-funnel"', '"requested → staged"', '"staged → decided"', "firstStaged", "byTask[a.task_id]", "p.created_at", '$("#c-funnel").innerHTML = \'<div class="empty">\' + esc(DOWN)'],
     reads: [
       { path: "/api/v1/factory", fields: ["tasks", "tasks.0.id", "tasks.0.kind", "tasks.0.trust", "tasks.0.status", "tasks.0.name", "tasks.0.finished_at"] },
       { path: "/api/v1/factory/packages", fields: ["packages.0.name", "packages.0.created_at"] },

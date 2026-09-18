@@ -41,13 +41,26 @@ const BODY = String.raw`
 
 const SCRIPT = String.raw`
   skeletonTiles("#tiles", 4); wtTables();
-  // The maintainer set (the shell's one read: maintainerSet, login → since), three reads and the session start together; the page draws once all have answered, since the one thing on a worker's row that depends on who is looking — the log icon, live for its owner and the maintainers, grey for everyone else — is drawn from the session.
+  // The maintainer set (the shell's one read: maintainerSet, login → since), three reads and the session start together; the page draws once all have answered, since the one thing on a worker's row that depends on who is looking — the log icon, live for its owner and the maintainers, grey for everyone else — is drawn from the session. A read that did not answer (api() rejects on a 5xx and on the network) is said in the two lists and the tiles read "—": an empty list stood in for a failed one here, and a pool with people read as one with none.
   Promise.all([
     busy(new Promise(function (ok) { maintainerSet(ok); })),
-    busy(fetch("/api/v1/factory/packages")).then(function (r) { return r.json(); }).catch(function () { return { packages: [] }; }),
-    busy(fetch("/api/v1/factory?limit=10")).then(function (r) { return r.json(); }).catch(function () { return { workers: [] }; }),
-    busy(fetch("/api/v1/factory/blocks")).then(function (r) { return r.json(); }).catch(function () { return { contributors: [] }; })
-  ]).then(function (res) { whoami(function () { draw(res); }); });
+    api("GET", "/api/v1/factory/packages"),
+    api("GET", "/api/v1/factory?limit=10"),
+    api("GET", "/api/v1/factory/blocks")
+  ]).then(function (res) { whoami(function () { draw(res); }); }).catch(function (e) {
+    var down = noAnswer("people's lists", e);
+    setTiles("#tiles", tilesUnanswered(tilesOf({}, {}, [], workerCounts([])), down));
+    $("#maintainers-list").innerHTML = $("#contributors-list").innerHTML = '<span class="muted">' + esc(down) + '</span>';
+  });
+  // The four tiles: the set's size, the contributors and their packages, the shell's worker counts, the registry's landed — one list, so the tiles over lists that did not answer carry the same labels.
+  function tilesOf(maint, contrib, pkgs, wc) {
+    return [
+      ["Maintainers", num(Object.keys(maint).length), "every one reviews everything"],
+      ["Contributors", num(Object.keys(contrib).length), num(pkgs.length) + " packages requested"],
+      ["Workers alive", num(wc.alive) + " / " + num(wc.registered), num(wc.ready) + " ready · " + num(wc.byKind.project.ready + wc.byKind.review.ready) + " the project's", wc.ready < wc.alive ? "warn" : ""],
+      ["Community packages", num(pkgs.filter(function (p) { return p.landed; }).length), "approved by a maintainer, built by the project"]
+    ];
+  }
   function draw(res) {
     // Maintainers: per login, since when — the set as the shell holds it.
     var maint = res[0] || {}, pkgs = res[1].packages || [], workers = res[2].workers || [], blocked = {};
@@ -58,12 +71,7 @@ const SCRIPT = String.raw`
     workers.forEach(function (w) { if (w.owner && !isM(w.owner)) { var c = contrib[w.owner] = contrib[w.owner] || { packages: 0, landed: 0, workers: 0 }; c.workers++; } });
     // The counts are the shell's (workerCounts), the listing's words: alive is a heartbeat in the last WORKER_ALIVE_MINUTES — the word and the number the Pool's tile sends a reader here with, and the Workers page's first tile; ready is alive and, where the work needs one, an agent that answered; the project's are the project and review kinds.
     var wc = workerCounts(workers);
-    setTiles("#tiles", [
-      ["Maintainers", num(Object.keys(maint).length), "every one reviews everything"],
-      ["Contributors", num(Object.keys(contrib).length), num(pkgs.length) + " packages requested"],
-      ["Workers alive", num(wc.alive) + " / " + num(wc.registered), num(wc.ready) + " ready · " + num(wc.byKind.project.ready + wc.byKind.review.ready) + " the project's", wc.ready < wc.alive ? "warn" : ""],
-      ["Community packages", num(pkgs.filter(function (p) { return p.landed; }).length), "approved by a maintainer, built by the project"]
-    ]);
+    setTiles("#tiles", tilesOf(maint, contrib, pkgs, wc));
     $("#maintainers-list").innerHTML = Object.keys(maint).sort().map(function (m) { return personChip(m, "maintainer", maint[m] ? "since " + esc(ago(maint[m])) : ""); }).join("") || '<span class="muted">none yet</span>';
     $("#contributors-list").innerHTML = Object.keys(contrib).sort().map(function (c) {
       var x = contrib[c], bits = [];
@@ -118,8 +126,8 @@ export const PEOPLE_COMPONENTS = (F: Fixture): Component[] => [
     id: "people.tiles",
     page: "/people",
     anchor: ['id="tiles"'],
-    // The worker counts are the shell's (workerCounts over the listing), the same the Pool's and the Workers page's tiles say; the maintainer set the shell's one read.
-    script: ['skeletonTiles("#tiles", 4)', 'setTiles("#tiles"', "workerCounts(workers)", '"Workers alive"', "wc.alive", "wc.registered", '" ready · "', "wc.byKind.project.ready + wc.byKind.review.ready", '" the project\'s"', '"Community packages"', "p.landed"],
+    // The worker counts are the shell's (workerCounts over the listing), the same the Pool's and the Workers page's tiles say; the maintainer set the shell's one read. Over lists that did not answer the four read "—" (the shell's tilesUnanswered) and the two lists say why.
+    script: ['skeletonTiles("#tiles", 4)', 'setTiles("#tiles", tilesOf(maint, contrib, pkgs, wc))', 'setTiles("#tiles", tilesUnanswered(tilesOf({}, {}, [], workerCounts([])), down))', "workerCounts(workers)", '"Workers alive"', "wc.alive", "wc.registered", '" ready · "', "wc.byKind.project.ready + wc.byKind.review.ready", '" the project\'s"', '"Community packages"', "p.landed"],
     reads: [
       { path: "/api/v1/factory/maintainers", fields: ["maintainers", "maintainers.0.login"] },
       { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.owner", "packages.0.status", "packages.0.landed"] },
@@ -152,7 +160,7 @@ export const PEOPLE_COMPONENTS = (F: Fixture): Component[] => [
     id: "people.contributors-list",
     page: "/people",
     anchor: ['id="contributors-list"'],
-    script: ['"/api/v1/factory/packages"', '"/api/v1/factory?limit=10"', '"#contributors-list"', "if (p.landed) c.landed++", 'personChip(c, "contributor"', 'href="/request">bring a package</a>'],
+    script: ['api("GET", "/api/v1/factory/packages")', 'api("GET", "/api/v1/factory?limit=10")', '"#contributors-list"', "if (p.landed) c.landed++", 'personChip(c, "contributor"', 'href="/request">bring a package</a>', 'noAnswer("people\'s lists", e)', '$("#maintainers-list").innerHTML = $("#contributors-list").innerHTML'],
     reads: [
       { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.owner", "packages.0.status", "packages.0.landed"] },
       { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.owner"] },

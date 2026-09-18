@@ -115,7 +115,7 @@ const SCRIPT = String.raw`
         (d.build && d.build.tasks && d.build.tasks.length ? '<br>' + taskPill("queued") + ' build ' + d.build.tasks.map(function (t) { return '<a href="/build/' + t + '">#' + t + '</a>'; }).join(", ") + ' for ' + esc((d.build.arches || []).join(", ")) + (d.build.queue ? ' — ' + esc(Object.keys(d.build.queue).map(function (a) { return a + ": " + d.build.queue[a].position + " of " + d.build.queue[a].total + " in the shared queue"; }).join(" · ")) : '') + '. The best idle shared worker takes it, a worker of yours at once; your page follows it.' : d.build && d.build.error ? '<br>' + pillHtml("warn", "not queued") + ' ' + esc(d.build.error) : '') +
         '<div class="cta-row" style="margin-top:12px"><a class="btn" href="' + (WHO.login ? userHref(WHO.login) : '/me') + '">Your page →</a></div>';
       $("#pkg-form").reset();
-    }).catch(function (e) { $("#pkg-btn").disabled = false; $("#pkg-state").textContent = "failed: " + e; });
+    }).catch(function (e) { $("#pkg-btn").disabled = false; $("#pkg-state").textContent = "failed: " + errorText(e); });
     return false;
   };
 `;
@@ -232,7 +232,7 @@ export const REQUEST_COMPONENTS = (F: Fixture): Component[] => {
       page: "/request",
       // The button is served grey with the sign-in as its reason; pressed, it is disabled again while the POST is in flight — state, both times.
       anchor: [`<button type="submit" id="pkg-btn" ${grey}>Request</button>`, '<p class="sub" id="pkg-state"></p>'],
-      script: ['$("#pkg-btn").disabled = true', '"Checking the pool, the project and the source…"', '$("#pkg-state").textContent = d.error', '"failed: " + e'],
+      script: ['$("#pkg-btn").disabled = true', '"Checking the pool, the project and the source…"', '$("#pkg-state").textContent = d.error', '"failed: " + errorText(e)'],
       visible: EVERYONE,
     },
     {

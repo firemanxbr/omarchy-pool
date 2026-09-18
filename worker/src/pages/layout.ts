@@ -962,9 +962,20 @@ export const HELPERS = String.raw`
   function servedRing(rings) { var order = Object.keys(RINGS_TEXT), best = null; (rings || []).forEach(function (r) { var i = order.indexOf(ringName(r)); if (i >= 0 && (best === null || i < order.indexOf(ringName(best)))) best = r; }); return best; }
   // The ring a build's package link is about: the most stable ring that serves it, the lab for a build nobody decided yet (staged: in the lab by the trial, in no ring otherwise), none for the rest — the shell's default then. Review's rows, a build's page and a person's builds say one ring for one build.
   function ringOfBuild(status, rings) { var r = servedRing(rings); return r !== null ? ringName(r) : status === "staged" ? "lab" : null; }
+  // Where a standing approval is today, one rule for every page that draws it (the Factory's Landed lately, Review's Decided line) from what the row of GET /factory/approvals knows: a ring serves the package — "in <rings>"; the package is blocked (the brake pulled it from every ring) — "blocked"; the publish job the approval queued gave up — "publish failed" or "publish cancelled"; otherwise that job is queued or running — "publishing". Never from the absence of a ring, and never from the registry's status: factory_packages.status stays "approved" after a failed publish and "published" after a block, and Review guessed ["edge"] from it, promising edge over a publish that failed while the Factory said failed (2026-09-18).
+  function approvalWhere(a) {
+    var rings = a.rings || [];
+    if (rings.length) return { word: "in " + rings.join(" · "), cls: "ok", title: "in " + rings.join(", ") + ", signed by the pool" };
+    if (a.blocked_at) return { word: "blocked", cls: "error", title: "blocked " + ago(a.blocked_at) + " — out of every ring" };
+    if (a.publish_status === "failed" || a.publish_status === "cancelled") return { word: "publish " + a.publish_status, cls: "error", title: "approved, but the publish job of the project's build " + a.publish_status + "; nothing is on its way" };
+    return { word: "publishing", cls: "blue", title: "approved; the project's build is on its way into edge" };
+  }
   // An age without "ago": "oldest 3h", from a span in milliseconds.
   function span(ms) { return ago(new Date(Date.now() - ms).toISOString()).replace(" ago", ""); }
   function pkgHref(name, ring, arch) { return "/package/" + encodeURIComponent(name) + "?ring=" + encodeURIComponent(ring && RINGS_TEXT[ring] ? ring : Object.keys(RINGS_TEXT)[0]) + "&arch=" + encodeURIComponent(arch && arch !== "all" ? arch : ARCHES[0]); }
+  // A build's evidence has one address: the Evidence section of its page, which lists what the build left (the objects table, read there) and says "Nothing staged for this build" with the worker's last log lines when it left nothing. A row links there and never a raw file by name: a build that died before it uploaded — the worker gone, the lease lost — has no build.log, and a link to one answered a JSON 404 on three rows of production's /user pages (2026-09-18). The raw links live on the page, drawn from what is there.
+  function evidenceHref(id) { return "/build/" + id + "#evidence"; }
+  function evidenceLink(t, text) { return '<a class="run" href="' + evidenceHref(t.id) + '" title="what this build left, read in place">' + esc(text || "evidence") + '</a>'; }
   function pillHtml(cls, text, title) { return '<span class="pill ' + cls + '"' + (title ? ' title="' + esc(title) + '"' : '') + '>' + esc(text) + '</span>'; }
   // One build status, one colour, on every page: queued grey, building blue, staged and done green, failed and rejected red, cancelled and withdrawn grey. A package's own words (registered, waiting, approved, published, unmaintained) wear the same pills — the registration's statuses, nothing retired (build_requests' drafting and validating went with migration 0021).
   var TASK_PILL = { queued: "none", leased: "blue", building: "blue", staged: "ok", done: "ok", failed: "error", rejected: "error", cancelled: "none", withdrawn: "none", registered: "none", waiting: "warn", approved: "ok", published: "ok", unmaintained: "warn" };
@@ -1015,10 +1026,21 @@ export const HELPERS = String.raw`
       };
     });
   }
-  // One call to the API, JSON in and JSON out: the answer's body whatever the status — an error's message is in it — with the status on it as __status, so a page tells refused from done; the progress bar runs while it is in flight.
+  // One call to the API, JSON in and JSON out; the progress bar runs while it is in flight. An answer below 500 resolves with its body — an error's message is in it — and the status on it as __status, so a page tells refused (403), missing (404) or a check it failed (409, 422) from done and reads can where the answer carries one. A 5xx rejects, as a network failure does: its body is the Worker's { error: "internal error" } or nothing, never the list the page asked for, and a page that read it as one drew "Waiting for review 0 · nothing waiting" in green over a query that threw (2026-09-18). The Error's message is the body's error or "HTTP <status>", for the page's own line (noAnswer).
   function api(method, path, body) {
-    return busy(fetch(path, { method: method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined })).then(function (r) { return r.json().catch(function () { return { error: "HTTP " + r.status }; }).then(function (d) { d.__status = r.status; return d; }); });
+    return busy(fetch(path, { method: method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined })).then(function (r) {
+      return r.json().catch(function () { return { error: "HTTP " + r.status }; }).then(function (d) {
+        if (r.status >= 500) throw new Error((d && d.error) || "HTTP " + r.status);
+        d.__status = r.status; return d;
+      });
+    });
   }
+  // What a failure says: an Error's message (api()'s, the network's "Failed to fetch"), anything else as text.
+  function errorText(e) { return e && e.message ? String(e.message) : String(e || "no answer"); }
+  // The line a page writes when a list did not answer — "the review list did not answer: internal error" — the list's name and the reason. The skeleton ends here, so nothing reads as still loading; what was drawn before stays, since a refresh that failed is not a list that emptied, and no empty state is drawn in its place: "nothing waiting" over a query that threw read as good news. Written to sel's text when a selector is given; returned for a page that draws it its own way.
+  function noAnswer(what, e, sel) { endSkeleton(); var text = "the " + what + " did not answer: " + errorText(e); var el = sel ? $(sel) : null; if (el) el.textContent = text; return text; }
+  // The tiles a list that never answered would have drawn: the same labels and links, "—" for every number and "did not answer" under it, the reason on hover — never a 0, which reads as nothing queued, nothing failed, nobody waiting, and never the whole sentence under every tile: the page's note says it once (the Pipeline's first screen said it seven times, 2026-09-18). A tile whose sixth element names another read ("stats": the /api/v1/stats poll) stays as computed — its series answered, and the chart beside it draws the same series; "the factory's lists did not answer" under the Builds tile named a list that never fed it. Takes and returns what setTiles takes.
+  function tilesUnanswered(list, text) { return list.map(function (t) { return t[5] ? t : [t[0], "—", '<span title="' + esc(text) + '">did not answer</span>', "", t[4]]; }); }
   // A figure in the prose (a diagram's label, a sentence's number): every element with data-live="key" says text.
   function live(key, text) { document.querySelectorAll('[data-live="' + key + '"]').forEach(function (el) { el.textContent = text; }); }
   // One line of the journal (/api/v1/events), the same on the Journal and the Pipeline: the status, the kind, the ring and the source, the summary linked to the run that produced it and to the diff of the release it made, how long it took, when.
@@ -1042,7 +1064,7 @@ export const HELPERS = String.raw`
   document.addEventListener("click", function (ev) {
     var b = ev.target.closest ? ev.target.closest("button[data-rollback]") : null; if (!b) return;
     ev.stopImmediatePropagation(); b.disabled = true;
-    askRollback(b.getAttribute("data-ring"), b.getAttribute("data-rollback")).then(function (j) { if (j === null || j.error) b.disabled = false; }, function (e) { b.disabled = false; toast("failed: " + esc(String(e)), "error"); });
+    askRollback(b.getAttribute("data-ring"), b.getAttribute("data-rollback")).then(function (j) { if (j === null || j.error) b.disabled = false; }, function (e) { b.disabled = false; toast("failed: " + esc(errorText(e)), "error"); });
   });
   // ---- a control gated by role. The dashboard's rule: every role sees every control, the same for all; what a role cannot do is the same control disabled, grey, with the reason in its title — never hidden, never absent, never a sentence in its place. ok true returns the control as given; false marks every button, select, input and textarea in it disabled (aria-disabled, title = why, an existing title replaced) and every link class="disabled" with tabindex -1 and its href moved to data-href — a link without an href is followed by nothing, not a middle click, not "open in a new tab", not a drag — and the click handler below stops the rest. The reason is the server's where it has one (can.why on a review row, on GET /factory/tasks/:id/can), so a grey button is one the POST would refuse in the same words.
   function gate(html, ok, why) {
@@ -1140,7 +1162,7 @@ export const HELPERS = String.raw`
         toast(decidedText(what, d, b.hasAttribute("data-note")), what === "withdraw" ? "warn" : "ok");
         DECIDED.forEach(function (fn) { fn(what, Number(id), d); });
       });
-    }).catch(function (e) { b.disabled = false; toast("failed: " + esc(String(e)), "error"); });
+    }).catch(function (e) { b.disabled = false; toast("failed: " + esc(errorText(e)), "error"); });
   });
   // One chain of the factory's story (routes/story.ts) as a row of steps: built by the contributor → the gate → the audit → built again by the project → tried in the lab → decided. The package page and a person's page draw the same row.
   function chainRow(c) {
@@ -1198,11 +1220,12 @@ export const HELPERS = String.raw`
   function ckEvidence(c) {
     var art = function (t, file, text) { return t ? '<a class="run" href="/api/v1/factory/tasks/' + t.id + '/artifacts/' + file + '">' + text + '</a>' : ''; };
     var cc = c.contributor, pb = c.project, tr = c.trial;
+    // The build items link the build's evidence at its one address (a failed build may have no log to link); the rest name a file the server's row says is there — the gate's result, the audit done, the trial done.
     return function (i) {
-      if (i.item === "A build that succeeds") return cc ? art(cc, "build.log", "log") + (cc.status === "staged" || cc.status === "done" ? ' ' + art(cc, "PKGBUILD", "PKGBUILD") : '') : '';
+      if (i.item === "A build that succeeds") return cc ? evidenceLink(cc) + (cc.status === "staged" || cc.status === "done" ? ' ' + art(cc, "PKGBUILD", "PKGBUILD") : '') : '';
       if (i.item === "The gate passed") return cc && cc.result && cc.result.vet ? art(cc, "tests.log", "tests") + ' ' + art(cc, "vet.json", "vet.json") : '';
       if (i.item === "The audit") return c.audit && c.audit.status === "done" ? art(cc, "audit.md", "report") : '';
-      if (i.item === "The project built it again") return pb ? art(pb, "build.log", "log") : '';
+      if (i.item === "The project built it again") return pb ? evidenceLink(pb) : '';
       if (i.item === "The project's gate") return pb && pb.result && pb.result.vet ? art(pb, "tests.log", "tests") : '';
       if (i.item === "The trial installed it") return tr && tr.status === "done" ? art(pb, "trial.log", "transcript") : '';
       return '';
@@ -1227,7 +1250,7 @@ export const HELPERS = String.raw`
       + '</div>' + (earlier.length ? '<p class="sub" style="margin:8px 0 0">Earlier: ' + earlier.join(' · ') + '</p>' : '') + '</section>';
   }
   function personChip(login, role, extra) { return '<a class="person" href="' + userHref(login) + '"' + whoAttr(login, role) + '>' + avatarIcon(login, role) + '<b>' + esc(login) + '</b>' + (extra ? ' <span class="r">' + extra + '</span>' : '') + '</a>'; }
-  // A tile with a fifth element is a link: the number, and the page that proves it.
+  // A tile is [label, number, sub-line, class, href, fed]: with a fifth element it is a link — the number, and the page that proves it; the sixth names the read that fed it when that is not the list the row is drawn from (tilesUnanswered reads it, this does not).
   function setTiles(sel, list) { var el = $(sel); if (!el) return; list.forEach(function (t, i) { var cell = el.children[i], tag = t[4] ? "A" : "DIV"; if (!cell || cell.tagName !== tag) { var made = document.createElement(tag); made.className = "tile"; if (cell) { made.innerHTML = cell.innerHTML; el.replaceChild(made, cell); } else el.appendChild(made); cell = made; } if (t[4]) cell.href = t[4]; setTile(cell, '<div class="k">' + t[0] + '</div><div class="v num' + (t[3] ? " " + t[3] : "") + '">' + t[1] + '</div><div class="s">' + t[2] + '</div>'); }); while (el.children.length > list.length) el.removeChild(el.lastChild); }
   // Every fetch a page starts goes through busy(): the bar at the top stays
   // on while at least one is in flight.

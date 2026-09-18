@@ -62,7 +62,7 @@ const body = (login: string) => String.raw`
 
   <section>
     <div class="h2row"><h2>Builds</h2><span class="dim" id="quota" style="font-size:12px"></span></div>
-    <p class="sub">On this contributor's workers — evidence for a maintainer, never what users get directly. The number opens the build, whole; the log and the PKGBUILD are public.</p>
+    <p class="sub">On this contributor's workers — evidence for a maintainer, never what users get directly. The number opens the build, whole; its evidence — the log, the PKGBUILD — is read on that page, which says so when a build left none.</p>
     <div class="table-wrap"><table id="builds"><thead><tr><th>#</th><th>Package</th><th>Arch</th><th>Status</th><th>Why</th><th>Worker</th><th>Took</th><th>When</th><th>Evidence</th></tr></thead><tbody></tbody></table></div>
   </section>
 
@@ -118,10 +118,8 @@ const SCRIPT = String.raw`
   function fresh(sep) { return isOwner(login) || (isMaintainer() && Date.now() < FRESH_UNTIL) ? sep + "t=" + Date.now() : ""; }
   // After the viewer's own act: their rights may have changed with it (a registration gone, a worker revoked), and the next reads pass the cache.
   function acted() { FRESH_UNTIL = Date.now() + 90000; loadCan(); }
-  function evidence(t) {
-    var log = '<a class="run" href="' + API + '/tasks/' + t.id + '/artifacts/build.log">log</a>';
-    return t.status === "staged" ? log + ' <a class="run" href="' + API + '/tasks/' + t.id + '/artifacts/PKGBUILD">PKGBUILD</a>' : t.status === "failed" ? log : "";
-  }
+  // A staged or failed build's evidence, at the shell's one address for it (its page's Evidence section): the log and the PKGBUILD are read there, where a build that left nothing says so instead of a 404.
+  function evidence(t) { return t.status === "staged" || t.status === "failed" ? evidenceLink(t) : ""; }
   var OPEN = {}, LATEST = {}, FACTORY = null, STORIES = {};
   // Share and Token at the top, for everyone: the link to this page is anyone's to post (it is public, everything on it is on the record anyway — no door, so no gate), the token the owner's to mint — POST /factory/token mints the caller's own, whoever's page the button is on, which is why nobody else's is live.
   function renderTop() {
@@ -134,7 +132,7 @@ const SCRIPT = String.raw`
         api("POST", API + "/token", {}).then(function (d) {
           if (d.error) { toast(esc(d.error), "error"); return; }
           ask({ title: "Your token", text: "Copy it now: the pool keeps only its hash, and this box closes by its button only. " + esc(d.note || ""), value: "export OMARCHY_CONTRIBUTOR_TOKEN=" + d.token, copy: "Copy", confirm: null, cancel: "Close", sticky: true });
-        }).catch(function (e) { toast("failed: " + esc(String(e)), "error"); });
+        }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
       });
     };
   }
@@ -225,7 +223,6 @@ const SCRIPT = String.raw`
   function nextStep(st, c) {
     var own = isOwner(login), pkg = st.package || {}, rings = (st.rings || []).filter(function (r) { return !c || r.arch === (c.contributor || c.project || {}).arch; }).map(function (r) { return r.ring; });
     var incomplete = st.request && !st.request.complete;
-    var art = function (t, f, text) { return '<a class="run" href="/api/v1/factory/tasks/' + t.id + '/artifacts/' + f + '">' + text + '</a>'; };
     var steps = function (items) { return '<ol class="howto">' + items.map(function (x) { return '<li>' + x + '</li>'; }).join("") + '</ol>'; };
     var drafted = function (t) { return !t || !t.pkgbuild_ref || t.pkgbuild_ref.indexOf("draft:") === 0; };
     if (!c) return 'No build yet — ' + (own ? 'press <b>Build</b>: it goes to the shared queue (the best idle shared worker takes it; a native worker of yours at once), the gate checks it, the second agent audits it.' : 'the contributor\'s build comes first.');
@@ -236,12 +233,12 @@ const SCRIPT = String.raw`
     // The three tools a contributor has, in the order to try them.
     var again = function (why) {
       if (cc && !drafted(cc)) return steps([
-        'Read what stopped it: ' + art(cc, "build.log", "the log") + (cc.status === "failed" ? '' : ', ' + art(cc, "tests.log", "the gate\'s log")) + (why ? ' — ' + why : '') + '.',
+        'Read what stopped it in ' + evidenceLink(cc, "the evidence of #" + cc.id) + ': the log' + (cc.status === "failed" ? '' : ', the gate\'s log') + (why ? ' — ' + why : '') + '.',
         'The recipe is the project\'s own PKGBUILD (<span class="mono">' + esc(String(cc.pkgbuild_ref).split(":").pop()) + '</span>), built as it is — no agent drafts it: fix it there, tag a release, <b>renew the request</b> with that tag, then press <b>Build ' + esc(arch) + '</b>.',
         'Choose <b>where</b> in the Build dialog' + (emulated ? ': this one ran <b>emulated</b> — a native worker may be all it needs' : '') + '.',
       ]);
       return steps([
-        'Read what stopped it: ' + art(cc, "build.log", "the log") + (cc.status === "failed" ? '' : ', ' + art(cc, "tests.log", "the gate's log")) + ' and ' + art(cc, "PKGBUILD", "the PKGBUILD") + ' the agent wrote' + (why ? ' — ' + why : '') + '.',
+        'Read what stopped it in ' + evidenceLink(cc, "the evidence of #" + cc.id) + ': the log' + (cc.status === "failed" ? '' : ', the gate\'s log') + ' and the PKGBUILD the agent wrote' + (why ? ' — ' + why : '') + '.',
         'Press <b>Build ' + esc(arch) + '</b>: the next build starts from that PKGBUILD and that log (the lesson), not from nothing — and from a <b>hint</b> you write in the dialog: the binary\'s name, a build flag, a dependency, what the recipe should do differently.',
         'Choose <b>where</b> in the same dialog' + (emulated ? ': this one ran <b>emulated</b> (' + esc(arch) + ' under qemu on ' + esc(wtShort(worker.id)) + ') — a native worker may be all it needs' : '') + (where && where.native ? ' — ' + where.native + ' native ' + esc(arch) + ' worker(s) online' : where && where.count ? ' — ' + where.count + ' worker(s) can take it' : ' — the project\'s shared workers take it') + '.',
         'Or build it yourself first: <a href="/docs/workers">run the same image at home</a> with your own agent key; what passes there is what you queue here.',
@@ -346,7 +343,7 @@ const SCRIPT = String.raw`
     }
     renderWorkers();
     endSkeleton();
-  }).catch(function (e) { $("#line").textContent = "could not load: " + e; endSkeleton(); });
+  }).catch(function (e) { $("#line").textContent = "could not load: " + errorText(e); endSkeleton(); });
   }
   // The staging quota is the owner's own (GET /factory/me answers for the caller): the figure on their page, a dash on it for everyone else.
   function quota() {
@@ -371,7 +368,7 @@ const SCRIPT = String.raw`
       var wid = w.getAttribute("data-withdraw"), wname = w.getAttribute("data-name");
       ask({ title: "Withdraw the approval of " + wname, text: "The approval stays on the record and is void from now on; the package leaves every ring it reached — a release without it, the databases rendered again by the project's workers; another maintainer decides on the build.", input: "required", placeholder: "why take it back", confirm: "Withdraw", danger: true }).then(function (note) {
         if (note === null) return; w.disabled = true;
-        api("POST", API + "/tasks/" + wid + "/withdraw", { note: note }).then(function (r) { if (r.error) { toast(esc(r.error), "error"); w.disabled = false; } else toast("Withdrawn — " + esc(wname) + " leaves " + esc((r.rings || []).map(function (x) { return x.ring; }).join(", ") || "no ring") + "; another maintainer decides."); acted(); load(); });
+        api("POST", API + "/tasks/" + wid + "/withdraw", { note: note }).then(function (r) { if (r.error) { toast(esc(r.error), "error"); w.disabled = false; } else toast("Withdrawn — " + esc(wname) + " leaves " + esc((r.rings || []).map(function (x) { return x.ring; }).join(", ") || "no ring") + "; another maintainer decides."); acted(); load(); }).catch(function (e) { w.disabled = false; toast("failed: " + esc(errorText(e)), "error"); });
       });
       return;
     }
@@ -394,30 +391,30 @@ const SCRIPT = String.raw`
             var bad = rs.filter(function (r) { return r.error; });
             if (bad.length) toast(esc(bad[0].error), "error"); else toast("Out of the queue: build #" + waiting.map(function (t) { return t.id; }).join(", #") + ". Press Build to queue it again, on the queue or on a worker of yours.", "warn");
             OPEN[name] = true; acted(); load();
-          });
+          }).catch(function (e) { b.disabled = false; toast("failed: " + esc(errorText(e)), "error"); });
           return;
         }
         var body = arch ? { arches: [arch] } : {};
         if (go && typeof go === "object") { if (go.pick) body.worker = go.pick; if (go.note) body.hint = go.note; } else if (go) body.hint = go;
-        api("POST", API + "/packages/" + encodeURIComponent(name) + "/build", body).then(function (r) { if (r.error) toast(esc(r.error), "error"); else if (!(r.tasks || []).length) toast(esc(r.note || "nothing queued"), "warn"); else toast((queuedNow ? "Still queued: " : "Queued ") + (r.tasks || []).length + " build(s): " + esc((r.arches || []).join(", ")) + (r.pinned_to ? " — for " + esc(wtShort(r.pinned_to)) : r.queue && Object.keys(r.queue).length ? " — " + Object.keys(r.queue).map(function (a) { return a + " " + r.queue[a].position + " of " + r.queue[a].total; }).join(", ") : "") + (r.lessons && Object.keys(r.lessons).length ? " — from the last build's PKGBUILD and log" : "") + " — this page follows them."); OPEN[name] = true; acted(); load(); });
+        api("POST", API + "/packages/" + encodeURIComponent(name) + "/build", body).then(function (r) { if (r.error) toast(esc(r.error), "error"); else if (!(r.tasks || []).length) toast(esc(r.note || "nothing queued"), "warn"); else toast((queuedNow ? "Still queued: " : "Queued ") + (r.tasks || []).length + " build(s): " + esc((r.arches || []).join(", ")) + (r.pinned_to ? " — for " + esc(wtShort(r.pinned_to)) : r.queue && Object.keys(r.queue).length ? " — " + Object.keys(r.queue).map(function (a) { return a + " " + r.queue[a].position + " of " + r.queue[a].total; }).join(", ") : "") + (r.lessons && Object.keys(r.lessons).length ? " — from the last build's PKGBUILD and log" : "") + " — this page follows them."); OPEN[name] = true; acted(); load(); }).catch(function (e) { b.disabled = false; toast("failed: " + esc(errorText(e)), "error"); });
       });
     }
     else if (b.hasAttribute("data-remove")) {
       var rm = b.getAttribute("data-remove");
       ask({ title: "Remove the registration of " + rm + "?", text: "Its builds stop; the evidence on the record stays. Anyone can register the name again.", confirm: "Remove", danger: true }).then(function (go) {
         if (go === null) return;
-        api("DELETE", API + "/packages/" + encodeURIComponent(rm)).then(function (r) { if (r.error) toast(esc(r.error), "error"); else toast("Removed " + esc(rm) + "."); delete OPEN[rm]; acted(); load(); });
+        api("DELETE", API + "/packages/" + encodeURIComponent(rm)).then(function (r) { if (r.error) toast(esc(r.error), "error"); else toast("Removed " + esc(rm) + "."); delete OPEN[rm]; acted(); load(); }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
       });
     }
     else if (b.hasAttribute("data-mode")) {
       var mid = b.getAttribute("data-mode"), to = b.getAttribute("data-to");
-      api("POST", API + "/workers/" + encodeURIComponent(mid) + "/mode", { mode: to }).then(function (r) { if (r.error) toast(esc(r.error), "error"); else toast(esc(r.note || ("mode: " + to))); acted(); loadWorkers(); });
+      api("POST", API + "/workers/" + encodeURIComponent(mid) + "/mode", { mode: to }).then(function (r) { if (r.error) toast(esc(r.error), "error"); else toast(esc(r.note || ("mode: " + to))); acted(); loadWorkers(); }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
     }
     else if (b.hasAttribute("data-revoke")) {
       var wid = b.getAttribute("data-revoke");
       ask({ title: "Revoke " + wid + "?", text: "Its token stops working at once; a build it holds finishes on its own. Register a new one for a new token.", confirm: "Revoke", danger: true }).then(function (go) {
         if (go === null) return;
-        api("DELETE", API + "/workers/" + encodeURIComponent(wid)).then(function (r) { if (r.error) toast(esc(r.error), "error"); else toast("Revoked."); acted(); load(); loadWorkers(); });
+        api("DELETE", API + "/workers/" + encodeURIComponent(wid)).then(function (r) { if (r.error) toast(esc(r.error), "error"); else toast("Revoked."); acted(); load(); loadWorkers(); }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
       });
     }
   });
@@ -441,7 +438,7 @@ const SCRIPT = String.raw`
         "# the compose file it writes, for a hand-run set: " + location.origin + "/omarchy-worker/compose.yml\n" +
         "#   (.env beside it: OMARCHY_WORKER_TOKEN, COMPOSE_PROFILES=community, OMARCHY_WORKER_DIR=<this directory's absolute path>; the updater included)";
       $("#worker-form").reset(); $("#worker-form").hidden = true; acted(); load(); loadWorkers();
-    }).catch(function (e) { $("#w-btn").disabled = false; toast("failed: " + esc(String(e)), "error"); });
+    }).catch(function (e) { $("#w-btn").disabled = false; toast("failed: " + esc(errorText(e)), "error"); });
     return false;
   };
 `;
@@ -597,13 +594,15 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       id: "user.story-arch-panel",
       page,
       anchor: ['id="packages"'],
-      script: ["archPanel(a, mine, nextStep(st, mine[0]), acts)", "registered.indexOf(a) >= 0", "buildBtn(name, a,", '"a build is running"', "data-arch", 'href="/api/v1/factory/tasks/'],
+      // The checklist's build items link the build's page at its evidence (the shell's evidenceLink); the gate, the audit and the trial link the file the story's row says is there.
+      script: ["archPanel(a, mine, nextStep(st, mine[0]), acts)", "registered.indexOf(a) >= 0", "buildBtn(name, a,", '"a build is running"', "data-arch", 'href="/api/v1/factory/tasks/', "evidenceLink(cc)", "evidenceLink(pb)"],
       reads: [
         { path: story, fields: ["chains.0.contributor.id", "chains.0.contributor.status", "chains.0.contributor.arch", "chains.0.contributor.version", "chains.0.contributor.owner", "chains.0.contributor.lease_owner", "chains.0.contributor.params", "chains.0.contributor.finished_at", "chains.0.contributor.duration_ms", "chains.0.contributor.result.vet", "chains.0.project", "chains.0.audit", "chains.0.trial", "chains.0.approval", "chains.0.withdrawn", "chains.0.score.class", "chains.0.score.points", "chains.0.score.projected", "chains.0.score.ready", "chains.0.score.items.0.who", "chains.0.score.items.0.item", "chains.0.score.items.0.points", "package.blocked_at", "package.arches"] },
+        { path: `/build/${F.contributorTask}`, json: false },
+        { path: `/build/${F.projectTask}`, json: false },
         { path: evidence(F.contributorTask, "tests.log"), json: false },
         { path: evidence(F.contributorTask, "vet.json"), json: false },
         { path: evidence(F.contributorTask, "audit.md"), json: false },
-        { path: evidence(F.projectTask, "build.log"), json: false },
         { path: evidence(F.projectTask, "trial.log"), json: false },
       ],
       visible: EVERYONE,
@@ -612,7 +611,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       id: "user.story-next-step",
       page,
       anchor: ['id="packages"'],
-      script: ["function nextStep(", "cc.pinned_to", "cc.shared_after", "cc.queue", "audit.result.verdict", '"A request on the record"', "whereOptions(FACTORY.workers, arch, login, false)", "a && a.standing", "personLink(a.by)"],
+      script: ["function nextStep(", 'evidenceLink(cc, "the evidence of #" + cc.id)', "cc.pinned_to", "cc.shared_after", "cc.queue", "audit.result.verdict", '"A request on the record"', "whereOptions(FACTORY.workers, arch, login, false)", "a && a.standing", "personLink(a.by)"],
       reads: [
         { path: story, fields: ["chains.0.approval", "chains.0.contributor.status", "chains.0.contributor.pinned_to", "chains.0.contributor.shared_after", "chains.0.contributor.attempts", "chains.0.contributor.pkgbuild_ref", "chains.0.contributor.version", "chains.0.contributor.error", "chains.0.contributor.result.vet.verdict", "chains.0.audit", "chains.0.score.items", "request.complete", "request.version", "rings"] },
         { path: factory, fields: ["workers.0.id", "workers.0.alive", "workers.0.labels"] },
@@ -647,15 +646,14 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       visible: ["owner"],
     },
     {
-      // The evidence column for everyone: the log and the PKGBUILD are public.
+      // The evidence column for everyone: one link per staged or failed row, to the build's page at its Evidence section (the shell's evidenceLink) — never a raw file the build may not have left.
       id: "user.builds-table",
       page,
       anchor: ['id="builds"', "<th>Evidence</th>"],
-      script: ['pager("#builds"', "pkgHref(t.name, ringOfBuild(t.status, null), t.arch)", "wtId(t.lease_owner)", "t.pinned_to", "dur(t.duration_ms)", "t.queue", '/artifacts/build.log">log', '/artifacts/PKGBUILD">PKGBUILD', "evidence(t)"],
+      script: ['pager("#builds"', "pkgHref(t.name, ringOfBuild(t.status, null), t.arch)", "wtId(t.lease_owner)", "t.pinned_to", "dur(t.duration_ms)", "t.queue", 'evidenceLink(t) : ""', "evidence(t)"],
       reads: [
         { path: profile, fields: ["builds.0.id", "builds.0.name", "builds.0.version", "builds.0.arch", "builds.0.status", "builds.0.reason", "builds.0.trust", "builds.0.lease_owner", "builds.0.pinned_to", "builds.0.duration_ms", "builds.0.created_at"] },
-        { path: evidence(F.contributorTask, "build.log"), json: false },
-        { path: evidence(F.contributorTask, "PKGBUILD"), json: false },
+        { path: `/build/${F.contributorTask}`, json: false },
       ],
       visible: EVERYONE,
     },

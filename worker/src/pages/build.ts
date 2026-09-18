@@ -63,7 +63,8 @@ const SCRIPT = String.raw`
       var d = r[0];
       if (d.error) { $("#title").textContent = "No such task"; $("#lede").textContent = d.error; endSkeleton(); return; }
       T = d; render(); loadEvidence(); loadOwnerCan();
-    }).catch(function () { endSkeleton(); });
+    // The task did not answer (a 5xx, the network): the lede says so; the page's title stays what the address says.
+    }).catch(function (e) { $("#lede").textContent = noAnswer("build", e); });
   }
   // What this reader may decide on this build, and why not, as the server would answer the POST — read for everyone (nobody signed in gets four noes and "sign in with GitHub"), never cached: GET /factory/tasks/:id/can is the caller's own answer, while the task itself is public and cached for all. Until it lands the four buttons say so, and when it cannot be read they say that — a grey with no reason is the one thing this page never draws.
   function noes(why) { return { approve: false, reject: false, build: false, withdraw: false, why: { approve: why, reject: why, build: why, withdraw: why } }; }
@@ -542,7 +543,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       id: "build.not-found",
       page,
       anchor: ['id="title"', 'id="lede"'],
-      script: ['"No such task"', "d.error", "endSkeleton()"],
+      script: ['"No such task"', "d.error", "endSkeleton()", 'noAnswer("build", e)'],
       reads: [{ path: "/api/v1/factory/tasks/0", status: 404, fields: ["error"] }],
       visible: EVERYONE,
     },

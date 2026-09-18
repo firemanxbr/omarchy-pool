@@ -75,9 +75,9 @@ const SCRIPT = String.raw`
   // The hours a source may go without a sync before it is late: the shell's one number (LATE_MS), the one the pipeline pill counts with, so the sentence over the table and the pill never name two.
   $("#late-after").textContent = Math.round(LATE_MS / 3600e3);
 __CHARTS__
-  // The workers as every other page counts them — the shell's workerCounts over the live listing, not the snapshot's count from up to half an hour ago: read once per poll, the tile drawn again when it answers.
-  var WC = null;
-  function loadWorkers(d) { fetch("/api/v1/factory?limit=10").then(function (r) { return r.json(); }).then(function (f) { WC = workerCounts(f.workers); renderSystem(d); }).catch(function () {}); }
+  // The workers as every other page counts them — the shell's workerCounts over the live listing, not the snapshot's count from up to half an hour ago: read once per poll, the tile drawn again when it answers. WC_DOWN is the reason the listing did not: the tile says it in the workers' place instead of dropping the clause — a fact hidden reads as no fact.
+  var WC = null, WC_DOWN = null;
+  function loadWorkers(d) { api("GET", "/api/v1/factory?limit=10").then(function (f) { WC = workerCounts(f.workers); WC_DOWN = null; renderSystem(d); }).catch(function (e) { WC_DOWN = noAnswer("worker listing", e); renderSystem(d); }); }
   function renderSystem(d) {
     // The jobs of the week are the shell's one reduce over the series (jobsSummary): the two tiles, the table and the charts below say its numbers, never the metrics snapshot's — that one is up to half an hour older and counts a cancelled job as a success. The snapshot (m) is read for when it was taken and the pool's history.
     var m = d.metrics, js = jobsSummary(d.series, 7), wm = workerMinutes(d.series, 7);
@@ -91,7 +91,7 @@ __CHARTS__
     var gateRc = latest(d.latest, "gate", "rc", "edge"), gateStable = latest(d.latest, "gate", "stable", "rc");
     var gateWord = function (g) { if (!g) return "no attempt yet"; var v = (g.payload && g.payload.verdict) || (g.status === "ok" ? "promote" : g.status === "warn" ? "skip" : "block"); return (v === "promote" ? "promoted" : v === "skip" ? "nothing new" : "blocked") + " " + ago(g.created_at); };
     var tiles = [
-      ["Jobs waiting now", num(js.waiting), "pool jobs queued or leased, whatever their age" + (WC ? " · " + num(WC.alive) + " worker(s) alive, " + num(WC.building) + " building" : "")],
+      ["Jobs waiting now", num(js.waiting), "pool jobs queued or leased, whatever their age" + (WC ? " · " + num(WC.alive) + " worker(s) alive, " + num(WC.building) + " building" : WC_DOWN ? " · " + esc(WC_DOWN) : "")],
       ["Jobs, 7 days", num(js.runs), num(js.failed) + " failed · " + num(js.done) + " done"],
       // The sum of the chart below (workerMinutes over jobs_daily), the number the Workers page and the Pipeline say — not the snapshot's.
       ["Worker minutes, 7 days", num(wm.total), "on the project's workers, both architectures"],
@@ -107,12 +107,12 @@ __CHARTS__
     ];
     setTiles("#systiles", tiles);
     // The bill, estimated once a day from Cloudflare's analytics (cost.ts); the guard pauses writing jobs over budget.
-    fetch("/api/v1/cost").then(function (r) { return r.ok ? r.json() : null; }).then(function (c) {
+    api("GET", "/api/v1/cost").then(function (c) {
       var cell = $("#systiles").children[tiles.length - 1]; if (!cell) return;
-      if (!c) { setTile(cell, '<div class="k">Estimated bill</div><div class="v num">—</div><div class="s">no estimate yet (every three hours)</div>'); return; }
+      if (!c || c.error) { setTile(cell, '<div class="k">Estimated bill</div><div class="v num">—</div><div class="s">no estimate yet (every three hours)</div>'); return; }
       // The colour and the figure are the shell's (costColor, usd): the same word the Pipeline's budget panel tints the same way.
       setTile(cell, '<div class="k">Estimated bill</div><div class="v num" style="color:' + costColor(c) + '">' + usd(c.projected_usd) + '</div><div class="s">projected for ' + esc(c.month) + ' · ' + usd(c.month_to_date_usd) + ' so far · ' + ago(c.estimated_at) + (c.guard ? ' · <b>over budget: writing jobs paused</b>' : '') + '</div>');
-    }).catch(function () {});
+    }).catch(function (e) { var cell = $("#systiles").children[tiles.length - 1]; if (cell) setTile(cell, '<div class="k">Estimated bill</div><div class="v num">—</div><div class="s">' + esc(noAnswer("cost estimate", e)) + '</div>'); });
 
     var S = d.series || {};
     $("#c-pool").innerHTML = area((S.metrics || []).map(function (r) { return { t: Date.parse(r.created_at), v: Number(r.bytes || 0) }; }), bytes) +
@@ -210,8 +210,9 @@ __CHARTS__
       ["Incidents", num(incidents.length), "in the last 40 journal entries"]
     ]);
   }
+  // The service, measured now: four lines from one answer. A check that did not answer — the Worker threw (a 5xx: api() rejects with its reason), or nothing answered at all — is one line saying so, not "answering" over a body that has no times, and not a TypeError's text.
   function renderService() {
-    fetch("/api/v1/status", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (s) {
+    api("GET", "/api/v1/status").then(function (s) {
       var items = [
         ["ok", "API", "answering · " + esc(s.checked_at.replace("T", " ").slice(0, 19)) + " UTC"],
         [s.index.ok ? "ok" : "error", "index · D1", s.index.ok ? s.index.ms + " ms" : esc(s.index.error || "failed")],
@@ -220,7 +221,7 @@ __CHARTS__
       ];
       $("#service").innerHTML = items.map(function (t) { return '<div><i class="led ' + t[0] + '"></i><b>' + t[1] + '</b><span>' + t[2] + '</span></div>'; }).join("");
     }).catch(function (e) {
-      $("#service").innerHTML = '<div><i class="led error"></i><b>API</b><span>down · ' + esc(String(e)) + '</span></div>';
+      $("#service").innerHTML = '<div><i class="led error"></i><b>API</b><span>' + esc(noAnswer("service check", e)) + '</span></div>';
     });
   }
   renderService(); setInterval(renderService, 60000);
@@ -260,7 +261,7 @@ export const STATUS_COMPONENTS = (_F: Fixture): Component[] => [
     id: "status.service",
     page: "/status",
     anchor: ["<h2>Service</h2>", 'id="service"'],
-    script: ['"/api/v1/status"', '"#service"', "s.index.ok", "s.pool.ok", "s.signing", "setInterval(renderService, 60000)"],
+    script: ['api("GET", "/api/v1/status")', '"#service"', "s.index.ok", "s.pool.ok", "s.signing", "setInterval(renderService, 60000)", 'noAnswer("service check", e)'],
     reads: [{ path: "/api/v1/status", fields: ["checked_at", "index.ok", "index.ms", "pool.ok", "pool.ms", "signing"] }],
     visible: EVERYONE,
   },
@@ -345,8 +346,8 @@ export const STATUS_COMPONENTS = (_F: Fixture): Component[] => [
     id: "status.system-tiles",
     page: "/status",
     anchor: ['id="systiles"'],
-    // The workers alive and building are the shell's workerCounts over the live listing (loadWorkers), the same as every other page; the jobs of the week and the ones waiting the shell's jobsSummary over the series the table and the charts below draw, the worker minutes its workerMinutes — never the metrics snapshot's numbers, read only for when it was taken.
-    script: ['setTiles("#systiles"', "jobsSummary(d.series, 7)", '"Jobs waiting now", num(js.waiting)', '"Jobs, 7 days", num(js.runs)', "num(js.failed)", "num(js.done)", "workerCounts(f.workers)", "WC.alive", "WC.building", '"Worker minutes, 7 days", num(wm.total)', "workerMinutes(d.series, 7)", '"Sources synced"', '"rows per architecture · "', '"Promotion, by evidence"', 'latest(d.latest, "gate", "rc", "edge")', "pool.referenced_by_any_release", "pool.reclaimable", "sec.updated_at"],
+    // The workers alive and building are the shell's workerCounts over the live listing (loadWorkers), the same as every other page — and, the listing not answering, the tile says so where the clause would be (the shell's noAnswer); the jobs of the week and the ones waiting the shell's jobsSummary over the series the table and the charts below draw, the worker minutes its workerMinutes — never the metrics snapshot's numbers, read only for when it was taken.
+    script: ['setTiles("#systiles"', "jobsSummary(d.series, 7)", '"Jobs waiting now", num(js.waiting)', '"Jobs, 7 days", num(js.runs)', "num(js.failed)", "num(js.done)", "workerCounts(f.workers)", "WC.alive", "WC.building", 'WC_DOWN = noAnswer("worker listing", e)', 'WC_DOWN ? " · " + esc(WC_DOWN)', '"Worker minutes, 7 days", num(wm.total)', "workerMinutes(d.series, 7)", '"Sources synced"', '"rows per architecture · "', '"Promotion, by evidence"', 'latest(d.latest, "gate", "rc", "edge")', "pool.referenced_by_any_release", "pool.reclaimable", "sec.updated_at"],
     reads: [
       {
         path: "/api/v1/stats",
@@ -365,7 +366,7 @@ export const STATUS_COMPONENTS = (_F: Fixture): Component[] => [
     id: "status.bill-tile",
     page: "/status",
     anchor: ['id="systiles"'],
-    script: ['"/api/v1/cost"', '"Estimated bill"', "costColor(c)", "usd(c.projected_usd)", "usd(c.month_to_date_usd)", "c.estimated_at", "c.guard", "over budget: writing jobs paused"],
+    script: ['api("GET", "/api/v1/cost")', '"Estimated bill"', "c.error", 'noAnswer("cost estimate", e)', "costColor(c)", "usd(c.projected_usd)", "usd(c.month_to_date_usd)", "c.estimated_at", "c.guard", "over budget: writing jobs paused"],
     reads: [{ path: "/api/v1/cost", fields: ["status", "projected_usd", "month", "month_to_date_usd", "estimated_at", "guard"] }],
     visible: EVERYONE,
   },

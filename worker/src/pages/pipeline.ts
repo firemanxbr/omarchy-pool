@@ -20,7 +20,7 @@ const BODY = String.raw`
     <h1>The pipeline, as it runs right now</h1>
     <p class="lede">What is being verified, promoted and checked for you this very minute; how fast maintainers decide; who is building what, and what it costs. The same page for users, contributors and maintainers — only which buttons are live differs.</p>
   </div>
-  <div class="state-row" id="state"><span class="pill none">checking…</span></div>
+  <div class="state-row"><div class="state-row" id="state" style="margin:0"><span class="pill none">checking…</span></div><span class="hint" id="lists-note"></span></div>
 
   <section id="live">
     <div class="h2row"><h2>A living system</h2><a class="more-link" href="/docs/security#feeds">What each security feed contributes →</a></div>
@@ -71,7 +71,7 @@ const BODY = String.raw`
   </section>
 
   <section>
-    <div class="h2row"><h2>Build tasks</h2><span class="hint">leased first, then queued, then the most recent finished; three attempts, then failed</span></div>
+    <div class="h2row"><h2>Build tasks</h2><span class="hint">leased first, then queued, then the most recent finished; three attempts, then failed; a pool job's row says what it did</span></div>
     <div class="table-wrap"><table id="tasks"><thead><tr><th>#</th><th>Package</th><th>Arch</th><th>Status</th><th>Reason</th><th>Worker</th><th>Took</th><th>Result</th></tr></thead><tbody></tbody></table></div>
   </section>
 
@@ -100,34 +100,84 @@ const BODY = String.raw`
 const SCRIPT = String.raw`
 __CHARTS__
 
-  function paramsLabel(t) { var p = {}; try { p = typeof t.params === "string" ? JSON.parse(t.params || "{}") : (t.params || {}); } catch (e) {} return [p.source, p.from && p.to ? p.from + " → " + p.to : null, p.ring].filter(Boolean).join(" · "); }
-  // A pool job's result, in words: what it did rather than its JSON.
+  // What a pool job was asked, in words, from the params the brain wrote
+  // when it queued the job (src/scheduler.ts syncJobFor, src/jobs.ts): the
+  // scheduler's sync is one task per architecture with every source of it
+  // as a JSON list in sources; a sync queued by hand for one source
+  // names it; promote and rollback name their rings; render, health and
+  // verify a ring and an architecture; gc how many releases to keep. The
+  // three jobs on a build — the audit and the trial queued when it staged
+  // (routes/factory.ts), the publish its approval queued (routes/review.ts)
+  // — name the package and the build.
+  function paramsLabel(t) {
+    var p = t.params || {};
+    if (t.kind === "audit" || t.kind === "trial" || t.kind === "publish") return [p.name, p.version, p.task ? "build #" + p.task : null].filter(Boolean).join(" · ");
+    if (t.kind === "sync" && p.sources) { var n = 0; try { n = JSON.parse(p.sources).length; } catch (e) {} return [p.arch, n + " source" + (n === 1 ? "" : "s")].filter(Boolean).join(" · "); }
+    if (t.kind === "sync") return [p.source && p.arch ? p.source + "/" + p.arch : p.source, p.ring ? "→ " + p.ring : null].filter(Boolean).join(" ");
+    if (t.kind === "promote") return [p.from && p.to ? p.from + " → " + p.to : null, p.arch, p.force === "yes" ? "forced" : null].filter(Boolean).join(" · ");
+    if (t.kind === "rollback") return [p.ring && p.to ? p.ring + " → release " + p.to : p.ring, p.arch].filter(Boolean).join(" · ");
+    if (t.kind === "gc") return p.keep ? "keep " + p.keep : "";
+    if (t.kind === "verify") return [p.ring && p.arch ? p.ring + "/" + p.arch : p.ring || p.arch, p.repair === "no" ? "report only" : null].filter(Boolean).join(" · ");
+    return p.ring && p.arch ? p.ring + "/" + p.arch : "";
+  }
+  // A pool job's result, in words: what it did rather than its JSON. The
+  // shapes are what the Rust jobs post (crates/pkg-repo/src/work.rs, every
+  // result: serde_json::json!), and test/pool-jobs.test.ts runs this
+  // over one done job of every kind seeded as work.rs writes it — a field
+  // renamed there and not here reads as a zero on the Pipeline, which is
+  // what every sync row said until 2026-09-18: the scheduler had batched the
+  // sync per architecture a week before and this read the one-source shape.
+  // A release is named by its id first — "release 512", the number the diff
+  // page and the roll-back read — with the ring's head "(edge #346)" after
+  // it where the result carries the sequence (the syncs do; a promotion and
+  // a rollback post the id alone): one column, one form, and the two
+  // numbers never read as one.
   function jobResult(t) {
-    var r = {}; try { r = typeof t.result === "string" ? JSON.parse(t.result) : (t.result || {}); } catch (e) { return String(t.result).slice(0, 90); }
-    if (t.kind === "sync") return "upstream " + num(r.upstream_total) + " · uploaded " + num(r.uploaded) + " · removed " + num(r.removed) + (r.failed ? " · failed " + num(r.failed) : "") + (r.release ? " · release " + r.release[0] : " · unchanged");
-    if (t.kind === "promote") return r.verdict === "promoted" ? "promoted, release " + r.release_id : r.verdict === "blocked" ? "blocked: " + (r.reasons || []).join("; ") : r.verdict === "rolled-back" ? "rolled back to " + r.to : r.verdict === "skip" ? "nothing to promote" : JSON.stringify(r);
+    var r = t.result || {};
+    var releaseWords = function (list) { return list.length ? " · release " + list.map(function (x) { return x.id + " (" + x.ring + " #" + x.seq + ")"; }).join(", ") : " · unchanged"; };
+    if (t.kind === "sync" && r.sources) {
+      var sum = { upstream_total: 0, uploaded: 0, removed: 0, failed: 0 }, down = [];
+      r.sources.forEach(function (s) { if (s.error) down.push(s.source); Object.keys(sum).forEach(function (k) { sum[k] += Number(s[k] || 0); }); });
+      return "upstream " + num(sum.upstream_total) + " · uploaded " + num(sum.uploaded) + " · removed " + num(sum.removed) + (sum.failed ? " · failed " + num(sum.failed) : "") + (down.length ? " · " + down.join(", ") + " down" : "") + releaseWords(r.releases || []);
+    }
+    if (t.kind === "sync") { var ring = (t.params || {}).ring; return "upstream " + num(r.upstream_total) + " · uploaded " + num(r.uploaded) + " · removed " + num(r.removed) + (r.failed ? " · failed " + num(r.failed) : "") + (r.release ? " · release " + r.release[0] + " (" + (ring ? ring + " " : "") + "#" + r.release[1] + ")" : " · unchanged"); }
+    if (t.kind === "promote") {
+      var p = t.params || {};
+      return r.verdict === "promoted" ? "promoted → " + (p.to || "") + ", release " + r.release_id
+        : r.verdict === "blocked" ? "blocked — " + (r.reasons || []).join("; ")
+        : r.verdict === "rolled-back" ? "rolled back to release " + r.to + " — health failed on " + (r.unhealthy || []).join(", ")
+        : r.verdict === "skip" ? "nothing to promote" + (r.why ? " — " + r.why : "") : JSON.stringify(r);
+    }
+    if (t.kind === "rollback") return r.ring + " rolled back to release " + r.to + " as release " + r.release_id;
     if (t.kind === "health") return r.ok ? HEALTH_WORD.ok : HEALTH_WORD.error;
-    if (t.kind === "gc") return "kept the last " + r.keep + " releases per ring" + (r.staging && (r.staging.expired || r.staging.reclaimed) ? " · staging: " + num(r.staging.expired) + " expired, " + num(r.staging.reclaimed) + " packages reclaimed" : "");
+    if (t.kind === "gc") return "kept the last " + r.keep + " releases per ring";
     if (t.kind === "render") return "rendered " + (r.repos || []).join(", ");
+    if (t.kind === "security") return num(r.matches_vulnerable) + " vulnerable / " + num(r.matches_fixed) + " fixed matches · " + num(r.kev) + " in KEV" + ((r.fast_tracked || []).length ? " · fast-tracked into " + r.fast_tracked.map(function (f) { return f.ring + " (" + num(f.fixes) + " fix" + (f.fixes === 1 ? "" : "es") + ")"; }).join(", ") : " · nothing to fast-track") + ((r.rolled_back || []).length ? " · rolled back " + r.rolled_back.join(", ") : "");
+    if (t.kind === "verify") return num(r.objects) + " objects" + (r.bad_signatures ? " · " + num(r.bad_signatures) + " bad signatures, " + num(r.repaired_signatures) + " repaired" : "") + (r.mismatched ? " · " + num(r.mismatched) + " mismatched, " + num(r.repinned) + " re-pinned" : "") + (r.unfixable ? " · " + num(r.unfixable) + " unfixable" : !r.bad_signatures && !r.mismatched ? " · all verify" : "");
+    if (t.kind === "relayout") return num(r.moved) + " moved · " + num(r.ghosts) + " ghosts · " + num(r.missing) + " missing · " + num(r.purged) + " old keys purged" + ((r.errors || []).length ? " · " + num(r.errors.length) + " errors" : "");
+    if (t.kind === "enqueue") return "main@" + String(r.commit || "").slice(0, 7) + ": " + num((r.queued || []).length) + " queued, " + num((r.skipped || []).length) + " skipped, " + num(r.up_to_date) + " up to date";
+    // The three jobs on a build, in the words Review's pills use for the same facts: the audit's result is the agent's report (verdict, summary, findings), the trial's its verdict over the packages it installed, the publish's the file it put in the pool and the rings the fast lane gave it.
+    if (t.kind === "audit") { var nf = (r.findings || []).length; return r.verdict + " · " + num(nf) + " finding" + (nf === 1 ? "" : "s") + (r.summary ? " — " + r.summary : ""); }
+    if (t.kind === "trial") { var np = (r.packages || []).length; return (r.verdict === "ok" ? "installs" : "trial " + r.verdict) + " · " + num(np) + " package" + (np === 1 ? "" : "s"); }
+    if (t.kind === "publish") return "published " + (r.filename || "") + ((r.fast_track || []).length ? " · fast-tracked to " + r.fast_track.join(", ") : "") + ((r.rendered || []).length ? " · rendered " + r.rendered.join(", ") : "");
+    // A kind this page has no words for yet: its JSON, cut — every kind the pool queues has its sentence above, and pool-jobs.test.ts runs one done job of each.
     return JSON.stringify(r).slice(0, 90);
   }
-  function loadRegistry() {
-    busy(fetch("/api/v1/factory/packages")).then(function (r) { return r.json(); }).then(function (d) {
-      pager("#registry", d.packages || [], function (p) {
+  // The registry, from the packages list loadAll already holds — one read draws the flow's arrivals and this table.
+  function renderRegistry(pkgs) {
+    pager("#registry", pkgs, function (p) {
         var det = p.detected || {};
         var home = p.project || p.url;
         return '<tr><td><b>' + esc(p.name) + '</b>' + (p.request_id ? ' <a class="src" href="' + esc(POOL + "/factory/" + p.name + "/" + p.request_id + "/request.json") + '" title="the request, on the record">#' + p.request_id + '</a>' : '') + '</td><td><a href="' + esc(home) + '">' + esc(home.replace(/^https?:\/\/(www\.)?(github\.com\/)?/, "")) + '</a></td><td>' + esc(p.owner) + '</td><td>' + esc((p.arches || []).join(", ")) + '</td>' +
           '<td>' + esc([p.release || det.latest_tag, p.license || det.license].filter(Boolean).join(" · ")) + '</td><td>' + taskPill(p.status) + (p.staged_builds ? ' <span class="muted">' + p.staged_builds + ' staged</span>' : '') + '</td><td>' + esc(p.detail || "") + '</td><td>' + ago(p.updated_at) + '</td></tr>';
-      }, { empty: 'no package requested yet — <a href="/factory">be the first</a>', text: function (p) { return [p.name, p.category, p.owner, p.url, p.status].join(" "); } });
-    }).catch(function () { $("#registry tbody").innerHTML = ""; });
+    }, { empty: 'no package requested yet — <a href="/factory">be the first</a>', text: function (p) { return [p.name, p.category, p.owner, p.url, p.status].join(" "); } });
   }
   function renderTables(d) {
-    loadRegistry();
     // The worker a task ran on is drawn as every table draws one (the shell's wtId, the whole id and its host on hover): the listing's row where it still has one, the bare id whole where the record no longer lists it — no owner guessed.
     var byId = {}; (d.workers || []).forEach(function (w) { byId[w.id] = w; });
     pager("#tasks", d.tasks, function (t) {
       var result = t.status === "staged"
-        ? '<span class="mono">' + esc(t.result_filename || "") + '</span> <a class="run" href="/api/v1/factory/tasks/' + t.id + '/artifacts/build.log">log</a> <a class="run" href="/api/v1/factory/tasks/' + t.id + '/artifacts/PKGBUILD">PKGBUILD</a>'
+        ? '<span class="mono">' + esc(t.result_filename || "") + '</span> ' + evidenceLink(t)
         : t.status === "done" && t.result_filename && t.result_filename !== "-"
         ? (t.publish === 0 ? '<span class="mono">' + esc(t.result_filename) + '</span>' : '<a href="' + pkgHref(t.name, "edge", t.arch) + '" class="mono">' + esc(t.result_filename) + '</a>')
         : t.status === "done" && t.result ? '<span class="muted">' + esc(jobResult(t)) + '</span>'
@@ -139,11 +189,11 @@ __CHARTS__
     }, { empty: "nothing queued or built yet", text: function (t) { return [t.id, t.kind, t.name, t.arch, t.status, t.reason, t.lease_owner, t.owner, paramsLabel(t)].join(" "); } });
   }
   var API = "/api/v1/factory";
-  // REVIEW is the review list's own answer — the staged rows, and at the top waiting (the rows a maintainer's time is asked for now, the rule Review highlights by) and oldest_ms — so the flow, the tile and Review's say one number and one age.
-  var FACTORY = null, STATS = null, REVIEW = { staged: [], waiting: 0, oldest_ms: null }, STAGED = [];
+  // REVIEW is the review list's own answer — the staged rows, and at the top waiting (the rows a maintainer's time is asked for now, the rule Review highlights by) and oldest_ms — so the flow, the tile and Review's say one number and one age. FACTORY is null until the factory's lists answered; over lists that did not, DOWN is the reason: the tiles say "—" and the state row's note says why (loadAll), and the stats poll, answering after, still draws the minutes tile over them.
+  var FACTORY = null, STATS = null, DOWN = null, REVIEW = { staged: [], waiting: 0, oldest_ms: null }, STAGED = [];
   skeletonTiles("#tiles", 6); skeletonRows("#staged", 8, 2); skeletonRows("#events", 7, 6); skeletonRows("#tasks", 8, 4); skeletonRows("#registry", 8, 2); // ---- the state row: the service (measured now) and the pipeline (from the journal)
   function renderState(d) {
-    fetch("/api/v1/status", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (st) { live("api", "API up · index " + (st.index.ok ? st.index.ms + " ms" : "down") + " · pool " + (st.pool.ok ? st.pool.ms + " ms" : "down")); }).catch(function () { live("api", "API not answering"); });
+    api("GET", "/api/v1/status").then(function (st) { live("api", "API up · index " + (st.index.ok ? st.index.ms + " ms" : "down") + " · pool " + (st.pool.ok ? st.pool.ms + " ms" : "down")); }).catch(function (e) { live("api", noAnswer("service check", e)); });
     // A ring's pill is the worse of its two architectures' latest health checks, in the shell's word for it (HEALTH_WORD), over the rings a check covers (PROMISED_RINGS).
     var why = problemsOf(d), heads = PROMISED_RINGS.map(function (n) { var r = d.rings.filter(function (x) { return x.ring === n; })[0]; var hs = ARCHES.map(function (a) { return latest(d.latest, "health", n, a); }).filter(Boolean); var w = hs.reduce(function (acc, h) { return worst(acc, h.status); }, null); var bad = hs.filter(function (h) { return h.status !== "ok"; }); return r && r.release ? '<span class="pill ' + (w || "none") + '">' + n + ' #' + r.release.seq + (w ? ' · ' + (w === "ok" ? HEALTH_WORD.ok : bad.map(function (h) { return (h.source || NULL_SOURCE_ARCH) + " " + HEALTH_WORD[h.status]; }).join(", ")) : "") + '</span>' : ""; }).join("");
     $("#state").innerHTML = '<span class="pill ' + (why.length ? "warn" : "ok") + '">' + (why.length ? "pipeline behind: " + esc(why.join(" · ")) : "pipeline keeping up") + '</span>' + heads + '<span class="pill none">running ' + esc(d.version && d.version.version || "") + '</span>';
@@ -156,12 +206,13 @@ __CHARTS__
     return '<div class="row"' + (fresh ? "" : ' style="animation:none"') + '><span><span class="dot ' + esc(e.status) + '"></span>' + esc(e.status) + '</span><span class="what">' + esc(e.kind) + '</span><span><span class="where">' + esc([e.ring, e.source].filter(Boolean).join(" · ")) + '</span> ' + (run ? '<a class="run" href="' + esc(run) + '">' + esc(e.summary) + '</a>' : esc(e.summary)) + '</span><span class="when" title="' + esc(e.created_at) + '">' + ago(e.created_at) + '</span></div>';
   }
   function loadFeed() {
-    fetch("/api/v1/events?limit=12", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (d) {
+    api("GET", "/api/v1/events?limit=12").then(function (d) {
       var rows = (d.events || []).filter(function (e) { return e.kind !== "metrics"; }).slice(0, 9);
       var first = !Object.keys(seen).length;
       $("#feed").innerHTML = rows.map(function (e) { var fresh = !first && !seen[e.id]; seen[e.id] = 1; return feedRow(e, fresh); }).join("") || '<div class="muted">nothing yet</div>';
       if (first) rows.forEach(function (e) { seen[e.id] = 1; });
-    }).catch(function () {});
+    // The journal did not answer: the feed says so while it has no rows; the rows it has stay.
+    }).catch(function (e) { if (!Object.keys(seen).length) $("#feed").innerHTML = '<div class="muted">' + esc(noAnswer("journal", e)) + '</div>'; });
   }
   function renderLive(d) {
     var today = new Date().toISOString().slice(0, 10), S = d.series || {};
@@ -181,7 +232,7 @@ __CHARTS__
     ];
     $("#counters").innerHTML = cells.map(function (c) { return '<div><b class="' + c[2] + '">' + c[1] + '</b><span>' + c[0] + '</span></div>'; }).join("");
     // Open in stable as the Security page says it: the shell's one rule at the page's default confidence (advisoriesAt, advisoryCounts), the number the Pool's tile says too.
-    fetch("/api/v1/security?ring=stable&arch=x86_64").then(function (r) { return r.json(); }).then(function (s) { var t = advisoryCounts(advisoriesAt(s)); live("open-stable", "open in stable: " + num(t.packages) + " · exploited: " + num(t.kev) + " · " + confWord()); live("kev", num(t.kev)); }).catch(function () { live("open-stable", "open in stable: no scan yet"); live("kev", "—"); });
+    api("GET", "/api/v1/security?ring=stable&arch=x86_64").then(function (s) { var t = advisoryCounts(advisoriesAt(s)); live("open-stable", "open in stable: " + num(t.packages) + " · exploited: " + num(t.kev) + " · " + confWord()); live("kev", num(t.kev)); }).catch(function (e) { live("open-stable", noAnswer("security report", e)); live("kev", "—"); });
   }
 
   // ---- review throughput: arrivals, decisions, who decides, and a contributor's place in the queue
@@ -198,8 +249,8 @@ __CHARTS__
       '<div class="st"><span class="k">building</span><b>' + num(building) + '</b><span class="s">on contributors\' and shared workers</span></div><div class="ar">→</div>' +
       '<div class="st hum"><span class="k">waiting for review</span><b>' + num(review.waiting) + '</b><span class="s">' + (review.oldest_ms ? "oldest " + span(review.oldest_ms) : "nothing waiting") + '</span></div><div class="ar">→</div>' +
       '<div class="st"><span class="k">approved this week</span><b>' + num(approved7) + '</b><span class="s">' + num(back7) + ' sent back with a note</span></div><div class="ar">→</div>' +
-      // In the rings: the registry's own word (landed), the number the Factory's, the Pool's and People's tiles say.
-      '<div class="st you"><span class="k">in the rings</span><b>' + num(pkgs.filter(function (p) { return p.landed; }).length) + '</b><span class="s">community packages, total</span></div>';
+      // Approved: the registry's own word (landed), the number the Factory's, the Pool's and People's tiles say — captioned as what it counts, since an approval stands after a publish that failed and the rings are the approval row's to say (approvalWhere), not this flag's.
+      '<div class="st you"><span class="k">approved</span><b>' + num(pkgs.filter(function (p) { return p.landed; }).length) + '</b><span class="s">community packages, total</span></div>';
     var ap = bucket(weeks, apps.filter(function (a) { return a.standing; }), function (a) { return a.created_at; }), rj = bucket(weeks, apps.filter(function (a) { return !a.standing; }), function (a) { return a.created_at; });
     var labels = weeks.map(function (w) { return w.slice(5); });
     $("#c-decisions").innerHTML = stacked(labels, [{ name: "approved", color: C.green, values: ap }, { name: "sent back", color: C.amber, values: rj }], { label: "Decisions per week over eight weeks", full: true, empty: "no decision yet" });
@@ -228,30 +279,34 @@ __CHARTS__
   }
   onDecided(function () { loadAll(); });
 
-  // ---- operations: tiles, the diagram's numbers (the workers themselves are on /workers)
-  function renderOps(d) {
+  // ---- operations: tiles, the diagram's numbers (the workers themselves are on /workers). With no listing (d null) and the reason the lists did not answer (down), the tiles the lists feed say "—" — the shell's tilesUnanswered, the reason on hover and once in the state row's note — and the diagram's numbers wait.
+  function renderOps(d, down) {
+    d = d || { counts: [], workers: [], tasks: [], lease_minutes: 0 };
     var count = function (st, arch) { return d.counts.filter(function (c) { return c.status === st && (!arch || c.arch === arch); }).reduce(function (n, c) { return n + c.n; }, 0); };
     // The workers as the shell counts them (workerCounts): alive is the listing's word, the project's are the project and review kinds, the rest a contributor's.
     var wc = workerCounts(d.workers);
     var failed24 = d.tasks.filter(function (t) { return t.status === "failed" && Date.now() - Date.parse(t.finished_at || t.created_at) < 86400e3; });
     // Worker minutes: the sum of the series the Status and Workers pages chart (workerMinutes over jobs_daily), not the metrics snapshot beside it.
     var wm = STATS ? workerMinutes(STATS.series, 7) : null;
-    setTiles("#tiles", [
+    var tiles = [
       ["Queued", num(count("queued")), num(count("queued", "x86_64")) + " x86_64 · " + num(count("queued", "aarch64")) + " aarch64", count("queued") ? "warn" : ""],
       ["Building", num(count("leased")), "lease " + d.lease_minutes + " min, extended by heartbeats"],
       ["Workers alive", num(wc.alive) + " / " + num(wc.registered), num(wc.byKind.project.alive + wc.byKind.review.alive) + " the project's · " + num(wc.byKind.community.alive) + " contributors'", wc.alive ? "ok" : "warn", "/workers"],
       ["Waiting for review", num(REVIEW.waiting), REVIEW.oldest_ms ? "oldest " + span(REVIEW.oldest_ms) : "nothing waiting", REVIEW.waiting ? "warn" : ""],
       ["Failed · 24 h", num(failed24.length), failed24.length ? esc(failed24[0].name || failed24[0].kind) + " " + esc(failed24[0].arch || "") : "nothing failed"],
-      ["Worker minutes · 7 d", wm ? num(wm.total) : "—", wm ? "≈ " + num(Math.round(wm.total / 7)) + " per day, the project's workers" : ""]
-    ]);
+      // The stats poll's, not the listing's: marked so, it keeps its number when the lists did not answer.
+      ["Worker minutes · 7 d", wm ? num(wm.total) : "—", wm ? "≈ " + num(Math.round(wm.total / 7)) + " per day, the project's workers" : "", "", null, "stats"]
+    ];
+    setTiles("#tiles", down ? tilesUnanswered(tiles, down) : tiles);
+    // The reader's role, in the hint: what the grey buttons below are waiting for is said once here — whatever the lists said.
+    $("#ops-who").textContent = isMaintainer() ? WHO.login + " · you can approve and roll back" : WHO.login ? WHO.login + " · contributor — approving and rolling back are a maintainer's" : "read-only — approving and rolling back need the maintainer role";
+    if (down) return;
     live("queue", "queued " + num(count("queued")) + " · leased " + num(count("leased")) + " · per-job tokens · an expired lease goes back in the queue");
     var roles = { pool: [], review: [], shared: [], own: [] };
     // The diagram's three lines: the project's build workers (wtKind "project") are the pool's line, the review worker its own, a contributor's shared and own workers one line together.
     d.workers.forEach(function (w) { var k = wtKind(w); roles[k === "community" ? (w.mode === "shared" ? "shared" : "own") : k === "review" ? "review" : "pool"].push(w); });
     var line = function (ws) { var c = workerCounts(ws); return num(c.alive) + " alive · " + num(c.building) + " building" + (c.registered > c.alive ? " · " + num(c.registered - c.alive) + " gone" : ""); };
     live("w-pool", line(roles.pool)); live("w-review", line(roles.review)); live("w-community", line(roles.shared.concat(roles.own)));
-    // The reader's role, in the hint: what the grey buttons below are waiting for is said once here.
-    $("#ops-who").textContent = isMaintainer() ? WHO.login + " · you can approve and roll back" : WHO.login ? WHO.login + " · contributor — approving and rolling back are a maintainer's" : "read-only — approving and rolling back need the maintainer role";
   }
 
   // ---- ring heads and the journal; the roll-back button is on every card with a release before the head, for everyone — live for a maintainer, grey with the reason for anyone else — and the click is the shell's (askRollback asks, posts the job once, writes #rb-state)
@@ -281,47 +336,48 @@ __CHARTS__
 
   // ---- promotions per day: what the promote, rollback and fast-track jobs recorded
   function renderPromos() {
-    Promise.all(["promote", "rollback", "fast-track"].map(function (k) { return fetch("/api/v1/events?kind=" + k + "&limit=200").then(function (r) { return r.json(); }).then(function (d) { return d.events || []; }).catch(function () { return []; }); })).then(function (lists) {
+    Promise.all(["promote", "rollback", "fast-track"].map(function (k) { return api("GET", "/api/v1/events?kind=" + k + "&limit=200").then(function (d) { return d.events || []; }); })).then(function (lists) {
       var days = lastDays(14), by = {}; days.forEach(function (d) { by[d] = { promoted: 0, blocked: 0, rolled: 0 }; });
       lists[0].forEach(function (e) { var d = e.created_at.slice(0, 10); if (!by[d]) return; if (e.status === "ok") by[d].promoted++; else by[d].blocked++; });
       lists[2].forEach(function (e) { var d = e.created_at.slice(0, 10); if (by[d] && e.status === "ok") by[d].promoted++; });
       lists[1].forEach(function (e) { var d = e.created_at.slice(0, 10); if (by[d]) by[d].rolled++; });
       $("#c-promos").innerHTML = stacked(days, [{ name: "promoted", color: C.green, values: days.map(function (d) { return by[d].promoted; }) }, { name: "blocked", color: C.amber, values: days.map(function (d) { return by[d].blocked; }) }, { name: "rolled back", color: C.red, values: days.map(function (d) { return by[d].rolled; }) }], { label: "Promotions per day over fourteen days: promoted, blocked, rolled back", empty: "no promotion yet" });
-    });
+    // The journal did not answer: the chart says so, not "no promotion yet" — an empty list stood in for a failed one here.
+    }).catch(function (e) { $("#c-promos").innerHTML = '<div class="empty">' + esc(noAnswer("journal", e)) + '</div>'; });
   }
 
   // ---- the bill, estimated on cost.ts's cadence (ESTIMATE_CADENCE, spliced into the words above and below) from Cloudflare's analytics. The three lines — warn, guard, cap — are the pool's budget, not the estimate's: /api/v1/cost carries them with the estimate and without one, and the sentence, the cap beside the month, the guard's word and the mark on the bar all read them there, never a number typed here.
   function renderCost() {
-    fetch("/api/v1/cost").then(function (r) { return r.json(); }).then(function (c) {
+    api("GET", "/api/v1/cost").then(function (c) {
       var budget = c.lines_usd || {};
       live("cost-warn", num(budget.warn)); live("cost-guard", num(budget.guard)); live("cost-cap", num(budget.cap));
       var el = $("#budget"); if (c.error) { el.innerHTML = '<div><div class="k">this month</div><b>—</b> <span class="dim">no estimate yet (${ESTIMATE_CADENCE})</span></div>'; return; }
       // The colour and the figures are the shell's (costColor, usd): the same word the Status tile tints the same way.
       var color = costColor(c);
       el.innerHTML = '<div><div class="k">' + esc(c.month) + ', so far</div><b style="color:' + color + '">' + usd(c.month_to_date_usd) + '</b> <span class="dim">of a US$ ' + num(budget.cap) + ' hard cap</span></div><div><div class="k">projected</div><b>' + usd(c.projected_usd) + '</b> <span class="dim">' + (c.guard ? "over the guard: jobs that write are paused" : "guard at US$ " + num(budget.guard)) + '</span></div><div class="bar"><i style="width:' + Math.min(100, 100 * Number(c.projected_usd) / budget.cap) + '%;background:' + color + '"></i><em style="left:' + (100 * budget.guard / budget.cap) + '%"></em></div>';
-    }).catch(function () {});
+    }).catch(function (e) { $("#budget").innerHTML = '<div><div class="k">this month</div><b>—</b> <span class="dim">' + esc(noAnswer("cost estimate", e)) + '</span></div>'; });
   }
 
-  // ---- everything, together: stats every minute, the factory every 30 s, the feed every 20 s
+  // ---- everything, together: stats every minute, the factory every 30 s, the feed every 20 s. The four lists are one load: one that did not answer (api() rejects on a 5xx and on the network) is said in the state row's note, and nothing is drawn in its place — an empty list stood in for a failed one here and the flow read "waiting for review 0 · nothing waiting" over a query that threw. The first load's tiles read "—"; a refresh that failed leaves the last rows on screen.
   function loadAll() {
     Promise.all([
-      busy(fetch(API + "?limit=100")).then(function (r) { return r.json(); }),
-      fetch(API + "/packages").then(function (r) { return r.json(); }).catch(function () { return { packages: [] }; }),
-      fetch(API + "/approvals").then(function (r) { return r.json(); }).catch(function () { return { approvals: [] }; }),
-      fetch(API + "/review", { cache: "no-store" }).then(function (r) { return r.json(); }).catch(function () { return { staged: [] }; })
+      api("GET", API + "?limit=100"),
+      api("GET", API + "/packages"),
+      api("GET", API + "/approvals"),
+      api("GET", API + "/review")
     ]).then(function (res) {
       var f = res[0]; REVIEW = res[3]; STAGED = REVIEW.staged || [];
-      FACTORY = f; renderOps(f); renderStaged(STAGED); renderThroughput(f, res[1].packages || [], res[2].approvals || [], REVIEW, WHO.me);
-      renderTables(f);
+      FACTORY = f; DOWN = null; $("#lists-note").textContent = ""; renderOps(f); renderStaged(STAGED); renderThroughput(f, res[1].packages || [], res[2].approvals || [], REVIEW, WHO.me);
+      renderTables(f); renderRegistry(res[1].packages || []);
       endSkeleton();
-    }).catch(function () { endSkeleton(); });
+    }).catch(function (e) { DOWN = noAnswer("factory's lists", e, "#lists-note"); if (!FACTORY) renderOps(null, DOWN); });
   }
   // The first load waits for /auth/me, so every button is live or grey as the reader's rights say from the first draw; the ring cards come from the stats poll, drawn again here when the poll answered first.
   whoami(function () { loadAll(); if (STATS) renderRings(STATS); });
   setInterval(loadAll, 30000);
   loadFeed(); setInterval(loadFeed, 20000);
   renderCost(); renderPromos(); setInterval(renderPromos, 300000);
-  liveStats(function (d) { STATS = d; renderState(d); renderLive(d); renderRings(d); renderCharts(d); if (FACTORY) renderOps(FACTORY); }, 60000);
+  liveStats(function (d) { STATS = d; renderState(d); renderLive(d); renderRings(d); renderCharts(d); if (FACTORY) renderOps(FACTORY); else if (DOWN) renderOps(null, DOWN); }, 60000);
 `;
 
 export function pipelineHtml(poolUrl: string, version: RunningVersion): string {
@@ -357,10 +413,11 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
+    // The pills from the stats poll and the service check; beside them the page's note, where a load of the factory's lists that did not answer says so (loadAll, the shell's noAnswer) and which the next load that answers clears.
     id: "pipeline.state-row",
     page: "/pipeline",
-    anchor: ['class="state-row"', 'id="state"'],
-    script: ['$("#state")', 'fetch("/api/v1/status"', "problemsOf(d)", "PROMISED_RINGS.map(function (n)", "HEALTH_WORD.ok", "HEALTH_WORD[h.status]", "d.version && d.version.version"],
+    anchor: ['class="state-row"', 'id="state"', 'id="lists-note"'],
+    script: ['$("#state")', 'api("GET", "/api/v1/status")', "problemsOf(d)", "d.version && d.version.version", 'noAnswer("factory\'s lists", e, "#lists-note")', '$("#lists-note").textContent = ""', 'noAnswer("service check", e)', "PROMISED_RINGS.map(function (n)", "HEALTH_WORD.ok", "HEALTH_WORD[h.status]"],
     reads: [
       { path: "/api/v1/stats", fields: ["rings", "rings.2.ring", "rings.2.release.seq", "latest", "coverage", "version.version"] },
       { path: "/api/v1/status", fields: ["index.ok", "index.ms", "pool.ok", "pool.ms"] },
@@ -389,7 +446,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.live-feed",
     page: "/pipeline",
     anchor: ['class="ticker"', 'id="feed"'],
-    script: ['"/api/v1/events?limit=12"', '$("#feed")', 'e.kind !== "metrics"', "runHref(e.payload && e.payload.ci && e.payload.ci.run_url)"],
+    script: ['"/api/v1/events?limit=12"', '$("#feed")', 'e.kind !== "metrics"', "runHref(e.payload && e.payload.ci && e.payload.ci.run_url)", 'noAnswer("journal", e)'],
     reads: [{ path: "/api/v1/events?limit=12", fields: ["events", "events.0.id", "events.0.kind", "events.0.status", "events.0.ring", "events.0.source", "events.0.summary", "events.0.created_at", "events.0.payload"] }],
     visible: EVERYONE,
   },
@@ -405,11 +462,11 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // The flow's stages: what waits for review is the list's own `waiting` and `oldest_ms` (Review's tile and the Factory's read the same two); approved is an approval that stands, sent back the rest.
+    // The flow's stages: what waits for review is the list's own `waiting` and `oldest_ms` (Review's tile and the Factory's read the same two); approved this week is an approval that stands, sent back the rest; the last stage is the registry's `landed`, captioned as what it counts — approved, the Factory's, the Pool's and People's word — not "in the rings", which is the approval row's to say.
     id: "pipeline.throughput-flow",
     page: "/pipeline",
     anchor: ['id="throughput"', 'id="flow"'],
-    script: ['$("#flow")', 'API + "/packages"', 'API + "/approvals"', 'API + "/review"', "a.standing &&", "!a.standing &&", 't.status === "leased" && t.trust === "community"', "review.waiting", "review.oldest_ms", 'class="k">waiting for review</span>', "p.landed", 'class="k">in the rings</span>'],
+    script: ['$("#flow")', 'API + "/packages"', 'API + "/approvals"', 'API + "/review"', "a.standing &&", "!a.standing &&", 't.status === "leased" && t.trust === "community"', "review.waiting", "review.oldest_ms", 'class="k">waiting for review</span>', "p.landed", 'class="k">approved</span>'],
     reads: [
       { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.created_at", "packages.0.updated_at", "packages.0.status", "packages.0.landed"] },
       { path: "/api/v1/factory?limit=100", fields: ["tasks", "tasks.0.kind", "tasks.0.status", "tasks.0.trust"] },
@@ -471,11 +528,11 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // The workers are the shell's count (workerCounts: alive the listing's word, by kind); what waits for review is the list's own `waiting` and `oldest_ms`.
+    // The workers are the shell's count (workerCounts: alive the listing's word, by kind); what waits for review is the list's own `waiting` and `oldest_ms`. Over lists that did not answer, the five they feed read "—" (the shell's tilesUnanswered; the state row's note says why) — a 0 read as nothing queued, nothing failed, nobody waiting — and the minutes tile, the stats poll's, keeps its number.
     id: "pipeline.operations-tiles",
     page: "/pipeline",
     anchor: ['class="tiles six"', 'id="tiles"'],
-    script: ['setTiles("#tiles"', "workerCounts(d.workers)", "wc.byKind.project.alive + wc.byKind.review.alive", "wc.byKind.community.alive", '"Waiting for review"', "REVIEW.waiting", "REVIEW.oldest_ms", '"Failed · 24 h"', "d.lease_minutes", '"Worker minutes · 7 d", wm ? num(wm.total)', "workerMinutes(STATS.series, 7)"],
+    script: ['setTiles("#tiles", down ? tilesUnanswered(tiles, down) : tiles)', "if (!FACTORY) renderOps(null, DOWN)", "else if (DOWN) renderOps(null, DOWN)", "workerCounts(d.workers)", "wc.byKind.project.alive + wc.byKind.review.alive", "wc.byKind.community.alive", '"Waiting for review"', "REVIEW.waiting", "REVIEW.oldest_ms", '"Failed · 24 h"', "d.lease_minutes", '"Worker minutes · 7 d", wm ? num(wm.total)', "workerMinutes(STATS.series, 7)", '"", null, "stats"]'],
     reads: [
       { path: "/api/v1/factory?limit=100", fields: ["counts", "counts.0.status", "counts.0.arch", "counts.0.n", "lease_minutes", "workers", "workers.0.alive", "workers.0.ready", "workers.0.current_task", "workers.0.revoked_at", "workers.0.side", "workers.0.labels", "tasks.0.status", "tasks.0.finished_at", "tasks.0.created_at", "tasks.0.name", "tasks.0.kind", "tasks.0.arch"] },
       { path: "/api/v1/factory/review", fields: ["staged", "waiting", "oldest_ms"] },
@@ -543,7 +600,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.promotions-chart",
     page: "/pipeline",
     anchor: ['id="c-promos"'],
-    script: ['$("#c-promos")', '"/api/v1/events?kind="', '["promote", "rollback", "fast-track"]', "e.created_at.slice(0, 10)"],
+    script: ['$("#c-promos")', '"/api/v1/events?kind="', '["promote", "rollback", "fast-track"]', "e.created_at.slice(0, 10)", 'noAnswer("journal", e)'],
     reads: [
       { path: "/api/v1/events?kind=promote&limit=200", fields: ["events", "events.0.created_at", "events.0.status"] },
       { path: "/api/v1/events?kind=rollback&limit=200", fields: ["events"] },
@@ -585,14 +642,29 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
   },
   {
     // The worker a task ran on is the shell's wtId over the listing's row (its id and the task's owner where the record no longer lists it); a published build links its package in edge at the shell's one address.
+    // A pool job's row is worded from its params and its result (paramsLabel, jobResult): the fields named per kind are the ones the Rust jobs post (crates/pkg-repo/src/work.rs) and the brain queues (src/scheduler.ts, src/jobs.ts), on the fixture's done job of that kind; pool-jobs.test.ts reads the words.
     id: "pipeline.tasks-table",
     page: "/pipeline",
     anchor: ['id="tasks"'],
-    script: ['pager("#tasks"', 'href="/build/', "/artifacts/build.log", "/artifacts/PKGBUILD", 'pkgHref(t.name, "edge", t.arch)', "wtId(byId[t.lease_owner] || t.lease_owner)", "t.result_filename", "jobResult(t)", "r.ok ? HEALTH_WORD.ok : HEALTH_WORD.error", "t.max_attempts"],
+    script: ['pager("#tasks"', 'href="/build/', "evidenceLink(t)", 'pkgHref(t.name, "edge", t.arch)', "wtId(byId[t.lease_owner] || t.lease_owner)", "t.result_filename", "jobResult(t)", "paramsLabel(t)", "t.max_attempts", "r.sources", "r.releases", "sum.upstream_total", 'x.id + " (" + x.ring + " #" + x.seq + ")"', 't.kind === "audit"', 't.kind === "trial"', 't.kind === "publish"', "r.findings", "r.packages", "r.fast_track", "r.ok ? HEALTH_WORD.ok : HEALTH_WORD.error"],
     reads: [
-      { path: "/api/v1/factory?limit=100", fields: ["workers.0.id", "workers.0.owner", "tasks.0.id", "tasks.0.kind", "tasks.0.name", "tasks.0.version", "tasks.0.arch", "tasks.0.status", "tasks.0.trust", "tasks.0.owner", "tasks.0.publish", "tasks.0.attempts", "tasks.0.max_attempts", "tasks.0.reason", "tasks.0.lease_owner", "tasks.0.duration_ms", "tasks.0.result_filename", "tasks.0.result", "tasks.0.error", "tasks.0.params"] },
-      { path: `/api/v1/factory/tasks/${F.contributorTask}/artifacts/build.log`, json: false },
-      { path: `/api/v1/factory/tasks/${F.contributorTask}/artifacts/PKGBUILD`, json: false },
+      { path: "/api/v1/factory?limit=100", fields: ["workers.0.id", "workers.0.owner", "tasks.0.id", "tasks.0.kind", "tasks.0.name", "tasks.0.version", "tasks.0.arch", "tasks.0.status", "tasks.0.trust", "tasks.0.owner", "tasks.0.publish", "tasks.0.attempts", "tasks.0.max_attempts", "tasks.0.reason", "tasks.0.lease_owner", "tasks.0.duration_ms", "tasks.0.result_filename", "tasks.0.result", "tasks.0.error", "tasks.0.params",
+        "tasks.kind=sync.params.arch", "tasks.kind=sync.params.sources", "tasks.kind=sync.result.arch", "tasks.kind=sync.result.sources.0.source", "tasks.kind=sync.result.sources.0.upstream_total", "tasks.kind=sync.result.sources.0.uploaded", "tasks.kind=sync.result.sources.0.removed", "tasks.kind=sync.result.sources.0.failed", "tasks.kind=sync.result.releases.0.ring", "tasks.kind=sync.result.releases.0.id", "tasks.kind=sync.result.releases.0.seq", "tasks.kind=sync.result.rendered",
+        "tasks.kind=promote.params.from", "tasks.kind=promote.params.to", "tasks.kind=promote.result.verdict", "tasks.kind=promote.result.release_id",
+        "tasks.kind=rollback.params.ring", "tasks.kind=rollback.params.to", "tasks.kind=rollback.result.ring", "tasks.kind=rollback.result.to", "tasks.kind=rollback.result.release_id",
+        "tasks.kind=render.params.ring", "tasks.kind=render.params.arch", "tasks.kind=render.result.repos",
+        "tasks.kind=health.params.ring", "tasks.kind=health.params.arch", "tasks.kind=health.result.ok",
+        "tasks.kind=gc.result.keep",
+        "tasks.kind=security.result.matches_vulnerable", "tasks.kind=security.result.matches_fixed", "tasks.kind=security.result.kev", "tasks.kind=security.result.fast_tracked.0.ring", "tasks.kind=security.result.fast_tracked.0.fixes", "tasks.kind=security.result.rolled_back",
+        "tasks.kind=verify.result.objects", "tasks.kind=verify.result.bad_signatures", "tasks.kind=verify.result.repaired_signatures", "tasks.kind=verify.result.mismatched", "tasks.kind=verify.result.repinned", "tasks.kind=verify.result.unfixable",
+        "tasks.kind=relayout.result.moved", "tasks.kind=relayout.result.ghosts", "tasks.kind=relayout.result.missing", "tasks.kind=relayout.result.errors", "tasks.kind=relayout.result.purged",
+        "tasks.kind=enqueue.result.commit", "tasks.kind=enqueue.result.queued", "tasks.kind=enqueue.result.skipped", "tasks.kind=enqueue.result.up_to_date",
+        // The three jobs on a build, by the fixture's done one of each (a queued publish, mine's, has no result yet; the first row by kind could be it).
+        `tasks.id=${F.jobs.audit}.params.task`, `tasks.id=${F.jobs.audit}.params.name`, `tasks.id=${F.jobs.audit}.result.verdict`, `tasks.id=${F.jobs.audit}.result.summary`, `tasks.id=${F.jobs.audit}.result.findings`,
+        `tasks.id=${F.jobs.trial}.params.task`, `tasks.id=${F.jobs.trial}.params.name`, `tasks.id=${F.jobs.trial}.params.version`, `tasks.id=${F.jobs.trial}.result.verdict`, `tasks.id=${F.jobs.trial}.result.packages`,
+        `tasks.id=${F.jobs.publish}.params.task`, `tasks.id=${F.jobs.publish}.params.name`, `tasks.id=${F.jobs.publish}.params.version`, `tasks.id=${F.jobs.publish}.result.filename`] },
+      // A staged row's evidence is its build's page (the shell's evidenceLink), where what the build left is listed; the raw files are linked there.
+      { path: `/build/${F.contributorTask}`, json: false },
     ],
     visible: EVERYONE,
   },
@@ -600,7 +672,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.registry-table",
     page: "/pipeline",
     anchor: ['id="registry"'],
-    script: ['fetch("/api/v1/factory/packages")', 'pager("#registry"', "p.staged_builds", '"/request.json"', "det.latest_tag"],
+    script: ['API + "/packages"', "function renderRegistry(pkgs)", 'renderRegistry(res[1].packages || [])', 'pager("#registry"', "p.staged_builds", '"/request.json"', "det.latest_tag"],
     reads: [{ path: "/api/v1/factory/packages", fields: ["packages.0.name", "packages.0.request_id", "packages.0.project", "packages.0.url", "packages.0.owner", "packages.0.arches", "packages.0.release", "packages.0.license", "packages.0.status", "packages.0.staged_builds", "packages.0.detail", "packages.0.updated_at", "packages.0.category", "packages.0.detected"] }],
     visible: EVERYONE,
   },
@@ -635,7 +707,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.budget",
     page: "/pipeline",
     anchor: ['id="budget"', 'data-live="cost-warn"', 'data-live="cost-guard"', 'data-live="cost-cap"'],
-    script: ['fetch("/api/v1/cost")', '$("#budget")', "c.lines_usd", 'live("cost-warn", num(budget.warn))', 'live("cost-guard", num(budget.guard))', 'live("cost-cap", num(budget.cap))', "c.error", "costColor(c)", "usd(c.month_to_date_usd)", "usd(c.projected_usd)", "c.guard", "of a US$ ' + num(budget.cap) + ' hard cap", "\"guard at US$ \" + num(budget.guard)", "Number(c.projected_usd) / budget.cap", "100 * budget.guard / budget.cap"],
+    script: ['api("GET", "/api/v1/cost")', '$("#budget")', "c.lines_usd", 'noAnswer("cost estimate", e)', 'live("cost-warn", num(budget.warn))', 'live("cost-guard", num(budget.guard))', 'live("cost-cap", num(budget.cap))', "c.error", "costColor(c)", "usd(c.month_to_date_usd)", "usd(c.projected_usd)", "c.guard", "of a US$ ' + num(budget.cap) + ' hard cap", "\"guard at US$ \" + num(budget.guard)", "Number(c.projected_usd) / budget.cap", "100 * budget.guard / budget.cap"],
     reads: [{ path: "/api/v1/cost", fields: ["month", "month_to_date_usd", "projected_usd", "status", "guard", "lines_usd.warn", "lines_usd.guard", "lines_usd.cap"] }],
     visible: EVERYONE,
   },

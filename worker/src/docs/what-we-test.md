@@ -222,7 +222,9 @@ maintainer merges it like any other change to the process.
   was also one word for two architectures, each built on a worker of its
   own — *registered* after a failed x86_64 build hid an aarch64 build
   waiting for a maintainer. A person's page now shows each architecture as
-  its own chain.
+  its own chain — and since 2026-09-18 the word follows the builds: a
+  failure on one architecture leaves the package `staged` while a build of
+  the other waits for a maintainer, with the failure in its detail.
 - **2026-09-17 — a worker that died without a word.** omarchy-cli's
   aarch64 build was claimed five times by the Studio's community worker
   and reported nothing five times: each lease expired half an hour later,

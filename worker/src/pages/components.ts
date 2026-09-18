@@ -64,7 +64,7 @@ export const SIGNED_IN: Role[] = ["contributor", "owner", "maintainer"];
 export interface Read {
   /** Concrete path on the fixture (`/api/v1/package/${F.pkg}?ring=stable&arch=x86_64`): the test GETs exactly this. */
   path: string;
-  /** Top-level or dotted keys that must be on the JSON answer ("package.version", "events.0.kind"); a key that is there and null passes. */
+  /** Top-level or dotted keys that must be on the JSON answer ("package.version", "events.0.kind"); a step `key=value` picks the first row of a list by that field ("tasks.kind=sync.result.sources"); a key that is there and null passes. */
   fields?: string[];
   /** Who the request is made as; anonymous unless the component reads something a session unlocks. */
   as?: Role;
@@ -157,6 +157,14 @@ export interface Fixture {
   blockedContributor: string;
   /** "hers", carol's package, blocked by m1 before she was. */
   blockedPkg: string;
+  /** "dave": the contributor whose two packages m1 approved and no ring serves. */
+  outsider: string;
+  /** "lost", dave's package: approved by m1, its publish job failed on w1 — the registry still says approved; the row of GET /factory/approvals says `publish_status: "failed"`. */
+  failedPkg: string;
+  /** "pulled", dave's other package: approved by m1, then blocked by m2 with the approval standing — the row says `blocked_at`, its publish job is cancelled. */
+  pulledPkg: string;
+  /** The id of the one done pool job of each kind — sync, promote, rollback, render, health, gc, security, verify, relayout, enqueue, and the three on a build: audit, trial, publish (ours', run through the API) — its params as the brain queues them and its result as work.rs posts it: what the Pipeline's table words. */
+  jobs: Record<string, number>;
   /** The browser's cookie value (`omc=<value>`) per role; the CLI token of a login is `omc_<login>`, its session `oms_<login>`. */
   sessions: Record<Exclude<Role, "anonymous">, string>;
 }
@@ -208,11 +216,29 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
+    // Where a standing approval is today (approvalWhere): one rule over the row's rings, blocked_at and publish_status — "in <rings>", "blocked", "publish failed" or "publish cancelled", "publishing" — drawn by the Factory's Landed lately and Review's Decided line, so the two pages say one word of one approval; no page guesses a ring from the registry's status. The read is the list both pages draw it from, with the three fields the rule reads.
+    id: "shell.approval-where",
+    page: "/",
+    anchor: [],
+    script: ["function approvalWhere(", 'a.publish_status === "failed" || a.publish_status === "cancelled"', 'word: "publishing"'],
+    reads: [{ path: "/api/v1/factory/approvals", fields: ["approvals.0.rings", "approvals.0.blocked_at", "approvals.0.publish_status"] }],
+    visible: EVERYONE,
+  },
+  {
     // A person's one address (userHref), written by the avatars, the chips, the links and the account chip — no page writes it by hand.
     id: "shell.person-address",
     page: "/",
     anchor: [],
     script: ["function userHref(", 'return "/user/" + encodeURIComponent(login)'],
+    visible: EVERYONE,
+  },
+  {
+    // A build's evidence has one address (evidenceHref): its page's Evidence section, which lists what the build left and says when it left nothing. The rows that offer a build's log — a person's builds, the Pipeline's tasks, the checklist's build items — link there through evidenceLink and never a raw file by name, so a build that died before uploading links a page, not a 404. The read is the page the fragment lands on; build.evidence-list anchors the section.
+    id: "shell.evidence-address",
+    page: "/",
+    anchor: [],
+    script: ["function evidenceHref(", 'return "/build/" + id + "#evidence"', "function evidenceLink(", 'href="\' + evidenceHref(t.id) + \'"'],
+    reads: [{ path: `/build/${F.contributorTask}`, json: false }],
     visible: EVERYONE,
   },
   {
@@ -245,6 +271,14 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     page: "/",
     anchor: [],
     script: ["var SEC_CONFS = ", "function confOk(conf, m)", "function advisoriesAt(d, conf)", "function advisoryCounts(rows)", "function confWord(conf)"],
+    visible: EVERYONE,
+  },
+  {
+    // One call to the API (api): a 4xx resolves with its body and __status, a 5xx rejects with the body's error — never the list a page asked for. A list that did not answer is said, not drawn: noAnswer writes "the <list> did not answer: <reason>" into the page's line and ends the skeleton, tilesUnanswered draws "—" for every number with the reason under it. A 0 over a query that threw read as "nothing waiting" in green on three pages (2026-09-18); test/no-answer.test.ts runs the pages over a 500.
+    id: "shell.no-answer",
+    page: "/",
+    anchor: [],
+    script: ["function api(", "if (r.status >= 500) throw new Error(", "d.__status = r.status", "function errorText(", "function noAnswer(", '" did not answer: "', "function tilesUnanswered(", '"—"'],
     visible: EVERYONE,
   },
   {

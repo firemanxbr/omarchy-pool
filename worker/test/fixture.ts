@@ -23,9 +23,12 @@
  * The people: bob, a contributor with nothing of his own; alice, who
  * requested `mine` and `ours` and runs the community worker w3 that built
  * them; carol, blocked by m1 with her package `hers` — the brake's table has
- * a row, and m2 is the other maintainer who could lift it; m1 and m2, the
- * maintainers — w1 is m1's project worker, m2 asked for the project's
- * builds and approved them. Every login signs in with the cookie
+ * a row, and m2 is the other maintainer who could lift it; dave, whose two
+ * packages m1 approved and neither ring serves: `lost`, whose publish job
+ * failed on w1, and `pulled`, blocked by m2 with the approval standing —
+ * the two states of an approval that stands outside every ring, written as
+ * rows; m1 and m2, the maintainers — w1 is m1's project worker, m2 asked
+ * for the project's builds and approved them. Every login signs in with the cookie
  * `omc=oms_<login>` and the CLI token `omc_<login>`; the workers' tokens
  * are `omw_<id>`. `F.sessions` maps the three signed-in roles to their
  * cookie.
@@ -44,6 +47,12 @@
  * F.stagedTask for the probes that must not change anything,
  * F.disposableTask and F.spareTask for the acts that reject a row.
  *
+ * One pool job of every kind sits done in the queue (F.jobs), its params
+ * as the brain queues them and its result as the Rust worker posts it, so
+ * the Pipeline's table has every shape it words — the three jobs on a
+ * build among them: `ours`' audit, trial and publish, done by w1 through
+ * the API above.
+ *
  * The journal has one line of every kind the charts read — a sync, a
  * health check, a promotion, a role change, a day of audience — and the
  * metrics snapshot is taken last, over everything above.
@@ -56,6 +65,7 @@ import { issueJobToken } from "../src/jobtoken";
 import { snapshotMetrics } from "../src/metrics";
 import { packageKey } from "../src/r2";
 import { sha256Hex } from "../src/routes/contributors";
+import { syncJobFor } from "../src/scheduler";
 import type { Fixture } from "../src/pages/components";
 import { HELPERS } from "../src/pages/layout";
 
@@ -78,25 +88,36 @@ export type Ran = { nodes: Record<string, any> } & Record<string, any>;
  * A page's script — a served page's whole script with its IIFE opened, or
  * the shell alone — run the way the tests draw with it: ES5 written for a
  * browser, against a document that keeps every node written to by selector
- * and a fetch that never answers, so only the functions that draw are
- * exercised. `functions` names the script's own functions to hand back
- * (decisionCell, gate, a page's button makers), `variables` the script's
- * variables to get a setter for (`setCAN(v)`, `setWHO(v)`).
- * decision-cell.test.ts runs the shell this way, user-page.test.ts a
- * person's page.
+ * (a node's children are what the script appended, so a tile row can be
+ * read back) and a fetch that never answers unless the test hands one in
+ * (`fetch`: no-answer.test.ts answers every read with a 500), so only the
+ * functions that draw are exercised. `functions` names the script's own
+ * functions to hand back (decisionCell, gate, a page's button makers),
+ * `variables` the script's variables to get a setter for (`setCAN(v)`,
+ * `setWHO(v)`). decision-cell.test.ts runs the shell this way,
+ * user-page.test.ts a person's page.
  */
-export function runScript(code: string, opts: { pathname: string; functions: string[]; variables?: string[] }): Ran {
+export function runScript(code: string, opts: { pathname: string; functions: string[]; variables?: string[]; fetch?: (path: string, init?: RequestInit) => Promise<Response> }): Ran {
   const trimmed = code.trim();
   const body = trimmed.startsWith("(function () {") && trimmed.endsWith("})();") ? trimmed.slice("(function () {".length, -"})();".length) : trimmed;
   const nodes: Record<string, any> = {};
-  const node = (): any => ({
-    style: {}, classList: { add() {}, remove() {}, toggle() {} }, children: [], hidden: false, innerHTML: "", outerHTML: "", textContent: "", title: "",
-    appendChild() {}, setAttribute() {}, getAttribute: () => null, insertAdjacentHTML() {}, remove() {}, focus() {}, closest: () => null,
+  // A node by selector holds what the script wrote to it; a table's tBodies[0] is the node of "<sel> tbody", so the pager's rows are read back by that selector, and a parent is a node of its own for what the pager builds around a table.
+  const node = (sel?: string): any => ({
+    style: {}, classList: { add() {}, remove() {}, toggle() {}, contains: () => false }, children: [] as any[], hidden: false, innerHTML: "", outerHTML: "", textContent: "", title: "",
+    appendChild(c: any) { this.children.push(c); return c; },
+    replaceChild(n: any, o: any) { const i = this.children.indexOf(o); if (i >= 0) this.children[i] = n; return o; },
+    removeChild(c: any) { const i = this.children.indexOf(c); if (i >= 0) this.children.splice(i, 1); return c; },
+    insertBefore(n: any) { this.children.unshift(n); return n; },
+    get lastChild() { return this.children[this.children.length - 1] ?? null; },
+    get parentElement() { return (this._parent = this._parent || node()); },
+    previousElementSibling: null,
+    get tBodies() { return sel ? [document.querySelector(`${sel} tbody`)] : [node()]; },
+    setAttribute() {}, getAttribute: () => null, insertAdjacentHTML() {}, remove() {}, focus() {}, closest: () => null, addEventListener() {},
     querySelector: () => node(), querySelectorAll: () => [],
   });
   const document = {
-    querySelector: (sel: string) => (nodes[sel] = nodes[sel] || node()),
-    querySelectorAll: () => [], addEventListener() {}, createElement: node, body: node(), documentElement: { getAttribute: () => null }, title: "",
+    querySelector: (sel: string) => (nodes[sel] = nodes[sel] || node(sel)),
+    querySelectorAll: () => [], addEventListener() {}, createElement: () => node(), body: node(), documentElement: { getAttribute: () => null }, title: "",
   };
   const out = [
     "nodes: nodes",
@@ -104,7 +125,7 @@ export function runScript(code: string, opts: { pathname: string; functions: str
     ...(opts.variables ?? []).map((v) => `set${v}: function (x) { ${v} = x; }`),
   ].join(", ");
   const make = new Function("document", "window", "fetch", "location", "innerWidth", "nodes", `${body}\n return { ${out} };`);
-  return make(document, { matchMedia: null }, () => new Promise(() => {}), { pathname: opts.pathname, origin: "http://pool.test" }, 1024, nodes);
+  return make(document, { matchMedia: null }, opts.fetch ?? (() => new Promise(() => {})), { pathname: opts.pathname, origin: "http://pool.test" }, 1024, nodes);
 }
 
 const API = "http://pool.test/api/v1";
@@ -189,7 +210,7 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
   const release = must(await call(env, "POST", "/releases", { ring: "stable", add: [xzNewer, zstd], remove: ["bzip2"], note: "xz 5.8.5, zstd in, bzip2 out" }, stable), 201, "release stable again").json.release.id as number;
   // Edge serves a newer zlib with no advisory on it: the fix stable does not have yet.
   const zlibFixed = await index(env, "core", arch, { name: "zlib", version: "1:1.3.2-4", provides: ["libz.so=1-64"], sonames: ["libz.so.1"], components: [{ ecosystem: "crates.io", name: "libz-sys", version: "1.1.1" }] }, pool);
-  must(await call(env, "POST", "/releases", { ring: "edge", add: [zlibFixed], note: "zlib 1:1.3.2-4" }, stable), 201, "release edge");
+  const edge = must(await call(env, "POST", "/releases", { ring: "edge", add: [zlibFixed], note: "zlib 1:1.3.2-4" }, stable), 201, "release edge").json.release as { id: number; seq: number };
   // The stable head's rendered database, as the render job puts it (releases.test.ts).
   must(await call(env, "PUT", `/releases/${release}/artifacts/db?repo=omarchy-core-stable&arch=${arch}`, undefined, stable, new TextEncoder().encode("a rendered database")), 201, "render stable");
 
@@ -199,8 +220,8 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
       ('w1', ?, 'm1', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z'),
       ('w3', ?, 'alice', ?, 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z')`).bind(arch, await sha256Hex("omw_w1"), arch, await sha256Hex("omw_w3")),
     env.DB.prepare(`INSERT INTO factory_maintainers (login) VALUES ('m1'), ('m2')`),
-    env.DB.prepare(`INSERT INTO contributors (login, token_hash, session_hash, role) VALUES ('m1', ?, ?, 'maintainer'), ('m2', ?, ?, 'maintainer'), ('alice', ?, ?, 'contributor'), ('bob', ?, ?, 'contributor'), ('carol', ?, ?, 'contributor')`)
-      .bind(await sha256Hex("omc_m1"), await sha256Hex("oms_m1"), await sha256Hex("omc_m2"), await sha256Hex("oms_m2"), await sha256Hex("omc_alice"), await sha256Hex("oms_alice"), await sha256Hex("omc_bob"), await sha256Hex("oms_bob"), await sha256Hex("omc_carol"), await sha256Hex("oms_carol")),
+    env.DB.prepare(`INSERT INTO contributors (login, token_hash, session_hash, role) VALUES ('m1', ?, ?, 'maintainer'), ('m2', ?, ?, 'maintainer'), ('alice', ?, ?, 'contributor'), ('bob', ?, ?, 'contributor'), ('carol', ?, ?, 'contributor'), ('dave', ?, ?, 'contributor')`)
+      .bind(await sha256Hex("omc_m1"), await sha256Hex("oms_m1"), await sha256Hex("omc_m2"), await sha256Hex("oms_m2"), await sha256Hex("omc_alice"), await sha256Hex("oms_alice"), await sha256Hex("omc_bob"), await sha256Hex("oms_bob"), await sha256Hex("omc_carol"), await sha256Hex("oms_carol"), await sha256Hex("omc_dave"), await sha256Hex("oms_dave")),
   ]);
 
   // alice's request: registered, its record on the pool, one build queued for x86_64.
@@ -234,6 +255,7 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
     must(await call(env, "PUT", `/factory/tasks/${task}/artifacts/audit.json`, undefined, a.token, JSON.stringify({ verdict: "ok", summary: "nothing to change", findings: [] })), 201, `audit.json of ${task}`);
     must(await call(env, "PUT", `/factory/tasks/${task}/artifacts/audit.md`, undefined, a.token, "# Audit: ok\n\nNothing to change."), 201, `audit.md of ${task}`);
     must(await call(env, "POST", `/factory/tasks/${a.task.id}/complete`, { summary: "ok", result: { verdict: "ok", summary: "nothing to change", model: "test", category: "terminal", findings: [] } }, a.token), 200, `complete the audit of ${task}`);
+    return a.task.id as number;
   };
   /**
    * The story up to the approval: alice's worker builds and stages the
@@ -254,12 +276,12 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
     await stage(projectTask, built.token, "the project's", name, `${version}-1`);
     const sha = fakeSha(`factory/${arch}/${name}-${version}-1-${arch}.pkg.tar.zst`);
     must(await call(env, "POST", `/factory/tasks/${projectTask}/complete`, { sha256: sha, filename: `${name}-${version}-1-${arch}.pkg.tar.zst`, version: `${version}-1`, duration_ms: 90000 }, built.token), 200, `complete the project's build of ${name}`);
-    await audit(projectTask);
+    const audited = await audit(projectTask);
     const trial = await claimProject(["trial"], `the trial of ${name}`);
     must(await call(env, "PUT", `/factory/tasks/${projectTask}/artifacts/trial.log`, undefined, trial.token, `== pacman -S ${name}\nTRIAL=ok`), 201, `trial.log of ${name}`);
     must(await call(env, "POST", `/factory/tasks/${trial.task.id}/complete`, { result: { verdict: "ok", packages: [name], task: projectTask }, duration_ms: 30000 }, trial.token), 200, `complete the trial of ${name}`);
     const publish = must(await call(env, "POST", `/factory/tasks/${projectTask}/approve`, { note: "looks right" }, "omc_m2"), 200, `approve ${name}`).json.publish as number;
-    return { contributorTask, projectTask, publish, sha };
+    return { contributorTask, projectTask, publish, sha, audit: audited, trial: trial.task.id as number };
   };
 
   // `ours` goes the whole way: w1 takes the publish job, puts the object in the pool, indexes and releases it into edge (factory.test.ts).
@@ -293,10 +315,78 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
   const disposableTask = await staged("1.0-3");
   const spareTask = await staged("1.0-4");
 
+  // One done pool job of every kind the Pipeline's table words, as the
+  // brain queued it (src/scheduler.ts, src/jobs.ts: the params) and the
+  // Rust worker completed it (crates/pkg-repo/src/work.rs, every
+  // `result: serde_json::json!`, copied field for field): the sync is the
+  // scheduler's — one task per architecture, its sources as a list, the
+  // result per source with the releases it pinned — and the promotion is
+  // the one the journal line below records. The rows are written as
+  // handleComplete writes them, so the table's words (pool-jobs.test.ts)
+  // and the manifest's fields (pipeline.tasks-table) read what production
+  // holds; a field renamed in work.rs is renamed here, and the test says
+  // where the page still reads the old name.
+  const sync = syncJobFor(arch);
+  const sources = JSON.parse(sync.params.sources) as { source: string; ring: string }[];
+  const jobRows: [string, Record<string, string>, unknown][] = [
+    ["sync", sync.params, {
+      arch,
+      sources: sources.map((s, i) => (i === sources.length - 1
+        ? { source: s.source, ring: s.ring, error: "mirror down: connection refused" }
+        : { source: s.source, ring: s.ring, upstream_total: i === 0 ? 5 : 40, uploaded: i === 0 ? 2 : 0, removed: 0, failed: i === 1 ? 1 : 0 })),
+      releases: [{ ring: "edge", id: edge.id, seq: edge.seq, packages: 1, unchanged: ["aarch64"] }],
+      rendered: ["omarchy-core-edge"],
+    }],
+    ["promote", { from: "rc", to: "stable", note: "by evidence" }, { verdict: "promoted", release_id: release, rendered: ["omarchy-core-stable"] }],
+    ["rollback", { ring: "stable", to: String(previousRelease), note: "the fixture's rollback" }, { ring: "stable", to: previousRelease, release_id: release, rendered: ["omarchy-core-stable"] }],
+    ["render", { ring: "stable", arch }, { repos: ["omarchy-core-stable"] }],
+    ["health", { ring: "stable", arch }, { ok: true }],
+    ["gc", {}, { keep: 3 }],
+    ["security", {}, { matches_vulnerable: 1, matches_fixed: 0, kev: 1, fast_tracked: [{ ring: "stable", fixes: 1 }], rolled_back: [] }],
+    ["verify", {}, { objects: 6, bad_signatures: 0, repaired_signatures: 0, mismatched: 0, repinned: 0, unfixable: 0, repinned_rings: [], details: [] }],
+    ["relayout", {}, { moved: 6, ghosts: 0, missing: 0, errors: [], rendered: ["omarchy-core-stable"], purged: 6 }],
+    ["enqueue", {}, { commit: "0123456789abcdef0123456789abcdef01234567", queued: ["ours 2.0-1 x86_64"], skipped: [], up_to_date: 3 }],
+  ];
+  // The three jobs on a build are the ones w1 really ran above: ours' audit of the project's build (the report as the agent posts it), its trial and its publish (routes/factory.ts and routes/review.ts queued them, work.rs's shapes completed them).
+  const jobs: Record<string, number> = { audit: ours.audit, trial: ours.trial, publish: ours.publish };
+  for (const [kind, params, result] of jobRows) {
+    jobs[kind] = (await env.DB.prepare(
+      `INSERT INTO build_tasks (name, arch, pkgbuild_ref, reason, priority, status, publish, trust, kind, params, attempts, lease_owner, started_at, finished_at, duration_ms, result)
+       VALUES (?, ?, '-', 'scheduled', 50, 'done', 1, 'project', ?, ?, 1, 'w1', ?, ?, 20000, ?) RETURNING id`,
+    ).bind(kind, arch, kind, JSON.stringify(params), new Date(Date.now() - 20000).toISOString(), new Date().toISOString(), JSON.stringify(result)).first<{ id: number }>())!.id;
+  }
+
   // The brake: carol requested `hers`; m1 blocked the package, then her — m2 is the other maintainer who lifts a block.
   await request("hers", "0.1", "omc_carol");
   must(await call(env, "POST", "/factory/packages/hers/block", { reason: "the source is not the project's" }, "omc_m1"), 200, "block hers");
   must(await call(env, "POST", "/factory/contributors/carol/block", { reason: "requests under a name that is not hers" }, "omc_m1"), 200, "block carol");
+
+  // An approval that stands and no ring serves, both ways it happens, written
+  // as rows the way handleApprove and handleFail leave them: dave's `lost` —
+  // the project's build staged, m1's approval, the publish job it queued
+  // failed on w1 (the registry stays "approved": a failed publish does not
+  // touch it) — and `pulled`, the same up to a queued publish job, then
+  // blocked by m2 through the brake's own door, which cancels the job and
+  // pulls the package. GET /factory/approvals carries publish_status and
+  // blocked_at for them; the pages' one word for each is what
+  // one-truth.test.ts runs over these rows.
+  const approvedOutside = async (name: string, version: string) => {
+    await request(name, version, "omc_dave");
+    const built = (await env.DB.prepare(
+      `INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, lease_owner, staged_prefix, result, finished_at)
+       VALUES (?, ?, ?, '-', 'a maintainer asked', 20, 1, 'project', NULL, 'build', 'staged', 'w1', ?, '{"vet":{"verdict":"pass","fails":0,"warnings":0,"failed":[],"warned":[]}}', ?) RETURNING id`,
+    ).bind(name, arch, `${version}-1`, `staging/@project/${name}/${version}-1/`, new Date().toISOString()).first<{ id: number }>())!.id;
+    await env.DB.prepare("INSERT INTO approvals (task_id, name, arch, version, decision, by, note, rebuild_task) VALUES (?, ?, ?, ?, 'approved', 'm1', 'reads well', ?)").bind(built, name, arch, `${version}-1`, built).run();
+    const publish = (await env.DB.prepare(
+      `INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, params) VALUES (?, ?, ?, '-', 'approved by m1', 20, 1, 'project', NULL, 'publish', ?) RETURNING id`,
+    ).bind(name, arch, `${version}-1`, JSON.stringify({ task: built, name, arch, version: `${version}-1`, files: [`${name}-${version}-1-${arch}.pkg.tar.zst`], by: "m1", trial: "ok" })).first<{ id: number }>())!.id;
+    await env.DB.prepare("UPDATE factory_packages SET status = 'approved', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(`${version}-1 for ${arch} approved by m1; publishing the project's build (job ${publish})`, name).run();
+    return { built, publish };
+  };
+  const lost = await approvedOutside("lost", "0.3");
+  await env.DB.prepare("UPDATE build_tasks SET status = 'failed', attempts = 3, error = 'the pool refused the object: signature check failed', finished_at = ?, lease_owner = 'w1' WHERE id = ?").bind(new Date().toISOString(), lost.publish).run();
+  await approvedOutside("pulled", "0.2");
+  must(await call(env, "POST", "/factory/packages/pulled/block", { reason: "ships a binary the source does not build" }, "omc_m2"), 200, "block pulled");
 
   // The journal: one line of every kind the charts read, as the jobs write them (crates/pkg-repo, src/governance.ts, src/audience.ts).
   const today = new Date().toISOString().slice(0, 10);
@@ -328,6 +418,8 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
     factoryPkg: "mine", publishedPkg: "ours", worker: "w1", communityWorker: "w3",
     contributorTask: mine.contributorTask, projectTask: mine.projectTask, stagedTask, disposableTask, spareTask,
     blockedContributor: "carol", blockedPkg: "hers",
+    outsider: "dave", failedPkg: "lost", pulledPkg: "pulled",
+    jobs,
     sessions: { contributor: "oms_bob", owner: "oms_alice", maintainer: "oms_m2" },
   };
 }

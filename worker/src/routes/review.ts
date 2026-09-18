@@ -168,7 +168,7 @@ export async function handleReviewList(env: Env, request: Request): Promise<Resp
     };
   };
   const canOf = (r: Record<string, unknown>, f: Facts) => can(decisions(c, { id: r.id as number, name: r.name as string, trust: r.trust as string, status: r.status as string }, f));
-  const rows = staged.results.map((r) => ({
+  const shaped = staged.results.map((r) => ({
     ...r,
     ...(() => { const f = rowFacts(r); return { can: canOf(r, f), standing: f.standing }; })(),
     // contributor: evidence, a maintainer has the project build it · project: the project's own build, a maintainer approves it
@@ -197,17 +197,21 @@ export async function handleReviewList(env: Env, request: Request): Promise<Resp
     trial: trialOf(r.trial_status as string | null, r.trial_result as string | null, r.trial_error as string | null),
     audit_status: undefined, audit_result: undefined, audit_error: undefined, trial_status: undefined, trial_result: undefined, trial_error: undefined, result: undefined, attempts: undefined, request_license: undefined, request_source: undefined,
   }));
-  // The one number every tile reads — Review's, the Pipeline's, the
-  // Factory's — counted here and nowhere else: the rows a maintainer's time
-  // is asked for now. Not a build of a version already approved, not a
+  // Every row says whether it asks for a maintainer's time now — `waits`
+  // — by the one rule below, and the one number every tile reads —
+  // Review's, the Pipeline's, the Factory's — is counted from it here and
+  // nowhere else. Not a build of a version already approved, not a
   // contributor's build the project is building or has built again (the
   // project's row is the one to decide; a failed project build hands it
-  // back). The same rule the Review page highlights a row by (decidable),
-  // so the count and the rows agree. `oldest_ms` is the age of the oldest
-  // of them, from when it was staged; null when nothing waits. Both are
-  // counted over the hundred newest staged rows the list shows (LIMIT above):
-  // past a hundred, the oldest is the first left out.
-  const waiting = rows.filter(waitsForMaintainer);
+  // back). The Review page highlights a row and takes a maintainer's own
+  // rows out of "waiting for your decision" by reading `waits`, never by a
+  // rule of its own, so the count and the rows agree for every viewer (a
+  // page's copy of the rule drifted once, 2026-09-18). `oldest_ms` is the
+  // age of the oldest of them, from when it was staged; null when nothing
+  // waits. Both are counted over the hundred newest staged rows the list
+  // shows (LIMIT above): past a hundred, the oldest is the first left out.
+  const rows = shaped.map((t) => ({ ...t, waits: waitsForMaintainer(t) }));
+  const waiting = rows.filter((t) => t.waits);
   const ages = waiting.map((t) => Date.now() - Date.parse((t as { finished_at?: string | null }).finished_at ?? "")).filter((ms) => Number.isFinite(ms) && ms > 0);
   return json(
     { staged: rows, waiting: waiting.length, oldest_ms: ages.length ? Math.max(...ages) : null },
@@ -216,7 +220,7 @@ export async function handleReviewList(env: Env, request: Request): Promise<Resp
   );
 }
 
-/** A row of GET /factory/review that asks for a maintainer's decision now (the Review page's `decidable`). */
+/** A row of GET /factory/review that asks for a maintainer's decision now: its `waits`, and what `waiting` counts. */
 export function waitsForMaintainer(t: { already: unknown; kind: string; project_build: { status: string } | null }): boolean {
   return !t.already && (t.kind === "project" || !t.project_build || t.project_build.status === "failed");
 }

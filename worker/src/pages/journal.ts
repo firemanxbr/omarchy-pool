@@ -43,8 +43,9 @@ const SCRIPT = String.raw`
     $("#count").textContent = rows.length + " of " + EVENTS.length + " events on this page · the API keeps more: /api/v1/events?limit=200&kind=…";
   }
   $("#q").oninput = function () { q = this.value; drawEvents(); };
+  // The journal did not answer (api() rejects on a 5xx and on the network): the count line under the table says so, and the table draws no "nothing matches" in its place — the rows of the last load that answered stay.
   function loadEvents() {
-    busy(fetch("/api/v1/events?limit=200", { cache: "no-store" })).then(function (r) { return r.json(); }).then(function (d) { EVENTS = (d.events || []).filter(function (e) { return e.kind !== "metrics"; }); drawEvents(); endSkeleton(); }).catch(function () { endSkeleton(); });
+    api("GET", "/api/v1/events?limit=200").then(function (d) { EVENTS = (d.events || []).filter(function (e) { return e.kind !== "metrics"; }); drawEvents(); endSkeleton(); }).catch(function (e) { noAnswer("journal", e, "#count"); });
   }
   function drawReleases(d) {
     // The heading's link is served as /diff — stable's head against the release before it, which is what the API answers with no ids — and once the stats say which two those are, the address names them, as a row's diff does.
@@ -106,7 +107,7 @@ export const JOURNAL_COMPONENTS = (F: Fixture): Component[] => [
     id: "journal.events-table",
     page: "/journal",
     anchor: ['id="events"', 'id="count"'],
-    script: ['"/api/v1/events?limit=200"', 'pager("#events", rows, eventRow', 'e.kind !== "metrics"', '"#count"', "runHref(e.payload && e.payload.ci && e.payload.ci.run_url), rid = e.payload && Number(e.payload.release_id)"],
+    script: ['api("GET", "/api/v1/events?limit=200")', 'pager("#events", rows, eventRow', 'e.kind !== "metrics"', '"#count"', "runHref(e.payload && e.payload.ci && e.payload.ci.run_url), rid = e.payload && Number(e.payload.release_id)", 'noAnswer("journal", e, "#count")'],
     reads: [
       {
         path: "/api/v1/events?limit=200",
