@@ -1,7 +1,7 @@
 /target
 **/*.rs.bk
 worker/node_modules
-worker/.wrangler
+.wrangler/
 worker/dist
 .DS_Store
 .claude/worktrees/
