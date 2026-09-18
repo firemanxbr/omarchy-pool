@@ -65,7 +65,7 @@ architectures · paged release view · evidence-driven promotion with ABI check 
 automatic rollback · releases of the pool itself by dispatch · dashboard with
 coverage, charts and pipeline metrics · user-facing dashboard (rings guidance, Get
 started, How it works, Status, API docs, mobile) · package search and package page
-with dependency graph · OPR channels per ring, chaotic-aur as optional repo ·
+with dependency graph · the OPR through the gates like every source, chaotic-aur as optional repo ·
 security layer (Arch + Debian trackers, KEV, EPSS, confidence levels, exposure
 through the graph, fast-track of fixes, `omarchy-cli security`) · paged release
 view and linear release creation at 30k packages · edge-cached API reads ·
