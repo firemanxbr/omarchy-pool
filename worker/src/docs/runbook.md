@@ -305,7 +305,7 @@ decides on their own package, and never on a contributor's bytes:
 **Sign in with GitHub** (the header's *Sign in*) is the GitHub OAuth App
 `omarchy-pool` (registered under the GitHub account that runs the staging
 deployment, *Settings → Developer settings → OAuth Apps*; it moves with the
-project, MIGRATION part C;
+project, MIGRATION F2;
 callback `https://omarchy-pool.org/auth/github/callback` — the App holds
 several redirect URIs, and a sign-in pressed on any other production name
 starts over on the dashboard, so this is the one used — homepage the

@@ -159,17 +159,19 @@ npx wrangler deploy
 curl -s https://pkgs.example.org/api/v1/status      # {"ok":true,...} once D1 and R2 answer
 ```
 
-## C. The scheduler token
+## C. The GitHub token
 
-The worker still dispatches two workflows through the GitHub API (RUNBOOK,
-*The pool's own scheduler*): the recipe bumps and the hosted fallback worker.
-Create a **fine-grained personal access token** (or a GitHub App installation
-token) with *Actions: read and write* on `NEWORG/omarchy-pool` — under an
-organisation, from a machine user or a GitHub App rather than a person — save
-it to `~/.cache/omarchy-cli-poc/github-token`, outside the checkout, as the
-runbook does, and install it (B5). Without it the jobs still run; only
-those two dispatches (and the higher rate limit of the daily update check)
-are missing.
+Nothing starts on GitHub by dispatch any more (RUNBOOK, *The pool's own
+scheduler*): since 2026-09-17 the pool's operation does not go through GitHub
+Actions, and the worker secret `GITHUB_TOKEN` only raises the rate limit of
+the reads the pool still makes — the governance file, upstream releases for
+the bumps, provenance. Create a **fine-grained personal access token** (or a
+GitHub App installation token) with *read-only* access to
+`NEWORG/omarchy-pool` — under an organisation, from a machine user or a
+GitHub App rather than a person — save it to
+`~/.cache/omarchy-cli-poc/github-token`, outside the checkout, as the runbook
+does, and install it (B5). Without it everything still runs, anonymously,
+under GitHub's unauthenticated rate limit.
 
 ## D. A new signing key
 
