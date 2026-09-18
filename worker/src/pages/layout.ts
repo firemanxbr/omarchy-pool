@@ -942,6 +942,14 @@ export const HELPERS = String.raw`
   function servedRing(rings) { var order = Object.keys(RINGS_TEXT), best = null; (rings || []).forEach(function (r) { var i = order.indexOf(ringName(r)); if (i >= 0 && (best === null || i < order.indexOf(ringName(best)))) best = r; }); return best; }
   // The ring a build's package link is about: the most stable ring that serves it, the lab for a build nobody decided yet (staged: in the lab by the trial, in no ring otherwise), none for the rest — the shell's default then. Review's rows, a build's page and a person's builds say one ring for one build.
   function ringOfBuild(status, rings) { var r = servedRing(rings); return r !== null ? ringName(r) : status === "staged" ? "lab" : null; }
+  // Where a standing approval is today, one rule for every page that draws it (the Factory's Landed lately, Review's Decided line) from what the row of GET /factory/approvals knows: a ring serves the package — "in <rings>"; the package is blocked (the brake pulled it from every ring) — "blocked"; the publish job the approval queued gave up — "publish failed" or "publish cancelled"; otherwise that job is queued or running — "publishing". Never from the absence of a ring, and never from the registry's status: factory_packages.status stays "approved" after a failed publish and "published" after a block, and Review guessed ["edge"] from it, promising edge over a publish that failed while the Factory said failed (2026-09-18).
+  function approvalWhere(a) {
+    var rings = a.rings || [];
+    if (rings.length) return { word: "in " + rings.join(" · "), cls: "ok", title: "in " + rings.join(", ") + ", signed by the pool" };
+    if (a.blocked_at) return { word: "blocked", cls: "error", title: "blocked " + ago(a.blocked_at) + " — out of every ring" };
+    if (a.publish_status === "failed" || a.publish_status === "cancelled") return { word: "publish " + a.publish_status, cls: "error", title: "approved, but the publish job of the project's build " + a.publish_status + "; nothing is on its way" };
+    return { word: "publishing", cls: "blue", title: "approved; the project's build is on its way into edge" };
+  }
   // An age without "ago": "oldest 3h", from a span in milliseconds.
   function span(ms) { return ago(new Date(Date.now() - ms).toISOString()).replace(" ago", ""); }
   function pkgHref(name, ring, arch) { return "/package/" + encodeURIComponent(name) + "?ring=" + encodeURIComponent(ring && RINGS_TEXT[ring] ? ring : Object.keys(RINGS_TEXT)[0]) + "&arch=" + encodeURIComponent(arch && arch !== "all" ? arch : "x86_64"); }

@@ -23,9 +23,12 @@
  * The people: bob, a contributor with nothing of his own; alice, who
  * requested `mine` and `ours` and runs the community worker w3 that built
  * them; carol, blocked by m1 with her package `hers` — the brake's table has
- * a row, and m2 is the other maintainer who could lift it; m1 and m2, the
- * maintainers — w1 is m1's project worker, m2 asked for the project's
- * builds and approved them. Every login signs in with the cookie
+ * a row, and m2 is the other maintainer who could lift it; dave, whose two
+ * packages m1 approved and neither ring serves: `lost`, whose publish job
+ * failed on w1, and `pulled`, blocked by m2 with the approval standing —
+ * the two states of an approval that stands outside every ring, written as
+ * rows; m1 and m2, the maintainers — w1 is m1's project worker, m2 asked
+ * for the project's builds and approved them. Every login signs in with the cookie
  * `omc=oms_<login>` and the CLI token `omc_<login>`; the workers' tokens
  * are `omw_<id>`. `F.sessions` maps the three signed-in roles to their
  * cookie.
@@ -215,8 +218,8 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
       ('w1', ?, 'm1', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z'),
       ('w3', ?, 'alice', ?, 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z')`).bind(arch, await sha256Hex("omw_w1"), arch, await sha256Hex("omw_w3")),
     env.DB.prepare(`INSERT INTO factory_maintainers (login) VALUES ('m1'), ('m2')`),
-    env.DB.prepare(`INSERT INTO contributors (login, token_hash, session_hash, role) VALUES ('m1', ?, ?, 'maintainer'), ('m2', ?, ?, 'maintainer'), ('alice', ?, ?, 'contributor'), ('bob', ?, ?, 'contributor'), ('carol', ?, ?, 'contributor')`)
-      .bind(await sha256Hex("omc_m1"), await sha256Hex("oms_m1"), await sha256Hex("omc_m2"), await sha256Hex("oms_m2"), await sha256Hex("omc_alice"), await sha256Hex("oms_alice"), await sha256Hex("omc_bob"), await sha256Hex("oms_bob"), await sha256Hex("omc_carol"), await sha256Hex("oms_carol")),
+    env.DB.prepare(`INSERT INTO contributors (login, token_hash, session_hash, role) VALUES ('m1', ?, ?, 'maintainer'), ('m2', ?, ?, 'maintainer'), ('alice', ?, ?, 'contributor'), ('bob', ?, ?, 'contributor'), ('carol', ?, ?, 'contributor'), ('dave', ?, ?, 'contributor')`)
+      .bind(await sha256Hex("omc_m1"), await sha256Hex("oms_m1"), await sha256Hex("omc_m2"), await sha256Hex("oms_m2"), await sha256Hex("omc_alice"), await sha256Hex("oms_alice"), await sha256Hex("omc_bob"), await sha256Hex("oms_bob"), await sha256Hex("omc_carol"), await sha256Hex("oms_carol"), await sha256Hex("omc_dave"), await sha256Hex("oms_dave")),
   ]);
 
   // alice's request: registered, its record on the pool, one build queued for x86_64.
@@ -354,6 +357,33 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
   must(await call(env, "POST", "/factory/packages/hers/block", { reason: "the source is not the project's" }, "omc_m1"), 200, "block hers");
   must(await call(env, "POST", "/factory/contributors/carol/block", { reason: "requests under a name that is not hers" }, "omc_m1"), 200, "block carol");
 
+  // An approval that stands and no ring serves, both ways it happens, written
+  // as rows the way handleApprove and handleFail leave them: dave's `lost` —
+  // the project's build staged, m1's approval, the publish job it queued
+  // failed on w1 (the registry stays "approved": a failed publish does not
+  // touch it) — and `pulled`, the same up to a queued publish job, then
+  // blocked by m2 through the brake's own door, which cancels the job and
+  // pulls the package. GET /factory/approvals carries publish_status and
+  // blocked_at for them; the pages' one word for each is what
+  // one-truth.test.ts runs over these rows.
+  const approvedOutside = async (name: string, version: string) => {
+    await request(name, version, "omc_dave");
+    const built = (await env.DB.prepare(
+      `INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, lease_owner, staged_prefix, result, finished_at)
+       VALUES (?, ?, ?, '-', 'a maintainer asked', 20, 1, 'project', NULL, 'build', 'staged', 'w1', ?, '{"vet":{"verdict":"pass","fails":0,"warnings":0,"failed":[],"warned":[]}}', ?) RETURNING id`,
+    ).bind(name, arch, `${version}-1`, `staging/@project/${name}/${version}-1/`, new Date().toISOString()).first<{ id: number }>())!.id;
+    await env.DB.prepare("INSERT INTO approvals (task_id, name, arch, version, decision, by, note, rebuild_task) VALUES (?, ?, ?, ?, 'approved', 'm1', 'reads well', ?)").bind(built, name, arch, `${version}-1`, built).run();
+    const publish = (await env.DB.prepare(
+      `INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, params) VALUES (?, ?, ?, '-', 'approved by m1', 20, 1, 'project', NULL, 'publish', ?) RETURNING id`,
+    ).bind(name, arch, `${version}-1`, JSON.stringify({ task: built, name, arch, version: `${version}-1`, files: [`${name}-${version}-1-${arch}.pkg.tar.zst`], by: "m1", trial: "ok" })).first<{ id: number }>())!.id;
+    await env.DB.prepare("UPDATE factory_packages SET status = 'approved', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(`${version}-1 for ${arch} approved by m1; publishing the project's build (job ${publish})`, name).run();
+    return { built, publish };
+  };
+  const lost = await approvedOutside("lost", "0.3");
+  await env.DB.prepare("UPDATE build_tasks SET status = 'failed', attempts = 3, error = 'the pool refused the object: signature check failed', finished_at = ?, lease_owner = 'w1' WHERE id = ?").bind(new Date().toISOString(), lost.publish).run();
+  await approvedOutside("pulled", "0.2");
+  must(await call(env, "POST", "/factory/packages/pulled/block", { reason: "ships a binary the source does not build" }, "omc_m2"), 200, "block pulled");
+
   // The journal: one line of every kind the charts read, as the jobs write them (crates/pkg-repo, src/governance.ts, src/audience.ts).
   const today = new Date().toISOString().slice(0, 10);
   await env.DB.batch([
@@ -384,6 +414,7 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
     factoryPkg: "mine", publishedPkg: "ours", worker: "w1", communityWorker: "w3",
     contributorTask: mine.contributorTask, projectTask: mine.projectTask, stagedTask, disposableTask, spareTask,
     blockedContributor: "carol", blockedPkg: "hers",
+    outsider: "dave", failedPkg: "lost", pulledPkg: "pulled",
     jobs,
     sessions: { contributor: "oms_bob", owner: "oms_alice", maintainer: "oms_m2" },
   };

@@ -135,15 +135,15 @@ const SCRIPT = String.raw`
       else if (t.already) waiting.push(row("", t.name, t.version, "lab", t.arch, '<span class="pill none">already approved</span>', 'your build ' + taskLink(t.id) + ' is of a version approved ' + ago(t.already.at) + ' as ' + taskLink(t.already.task) + ' — nothing to decide', ["/build/" + t.id, "The build →"]));
       else waiting.push(row("", t.name, t.version, "lab", t.arch, taskPill("staged"), 'your build ' + taskLink(t.id) + ' waits for a maintainer' + (t.audit && t.audit.status === "done" && t.audit.verdict ? ' · audit <span class="pill ' + (t.audit.verdict === "ok" ? "ok" : t.audit.verdict === "warn" ? "warn" : "error") + '">' + esc(t.audit.verdict) + '</span>' : t.audit && t.audit.status === "queued" ? ' · audit waiting' : ''), ["/build/" + t.id, "Your build →"]));
     });
-    // Decided: the record's latest word on each package of yours (a rejection carries the note; an approval, the ring).
+    // Decided: the record's latest word on each package of yours (a rejection carries the note; an approval, where the package is today — the shell's approvalWhere over the row's rings, blocked_at and publish_status, the word the Factory's Landed lately says of the same row; the registry's status is not read, it stays "approved" after a failed publish).
     var mine = {}; ((MINE && MINE.packages) || []).forEach(function (p) { mine[p.name] = p; });
     var last = {};
     APPROVALS.forEach(function (a) { if (mine[a.name] && !last[a.name + "/" + a.arch]) last[a.name + "/" + a.arch] = a; });
     Object.keys(last).forEach(function (k) {
-      var a = last[k], p = mine[a.name];
+      var a = last[k];
       if (a.withdrawn_at) decided.push(row("act", a.name, a.version, servedRing(a.rings), a.arch, taskPill("withdrawn"), 'the approval by ' + personLink(a.by) + ' was withdrawn ' + ago(a.withdrawn_at) + ' by ' + personLink(a.withdrawn_by) + ': ' + short(a.withdrawn_reason, 100) + ' — another maintainer decides', ["/build/" + a.task_id, "The build →"]));
       else if (a.decision === "rejected") decided.push(row("act", a.name, a.version, servedRing(a.rings), a.arch, taskPill("rejected"), ago(a.created_at) + ' by ' + personLink(a.by) + ': ' + short(a.note, 110), ["/factory", "Fix it, build again →"]));
-      else { var inRings = a.rings && a.rings.length ? a.rings : (p && p.status === "published" ? ["edge"] : []); decided.push(row("ok", a.name, a.version, servedRing(inRings), a.arch, taskPill("approved"), ago(a.created_at) + ' by ' + personLink(a.by) + (inRings.length ? ' — in ' + inRings.join(" · ") + ', signed by the pool' : ' — the project\'s build is on its way into edge') + (a.note ? ' · ' + short(a.note, 80) : ''), inRings.length ? [pkgHref(a.name, servedRing(inRings), a.arch), "The package →"] : ["/build/" + a.task_id, "The build →"])); }
+      else { var where = approvalWhere(a), served = !!(a.rings && a.rings.length); decided.push(row(where.cls === "error" ? "act" : "ok", a.name, a.version, servedRing(a.rings), a.arch, taskPill("approved"), ago(a.created_at) + ' by ' + personLink(a.by) + ' — ' + pillHtml(where.cls, where.word, where.title) + (a.note ? ' · ' + short(a.note, 80) : ''), served ? [pkgHref(a.name, servedRing(a.rings), a.arch), "The package →"] : ["/build/" + a.task_id, "The build →"])); }
     });
     $("#mine-waiting").innerHTML = waiting.join("") || '<p class="sub" style="margin:0">Nothing of yours waiting. <a href="/request">Request a package →</a></p>';
     // Both groups stay for a maintainer with nothing of their own too: the block reads the same for every role, the empty line included.
@@ -370,10 +370,10 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     id: "review.yours-decided",
     page: "/review",
     anchor: ['id="g-decided"', 'id="mine-decided"'],
-    script: ['$("#mine-decided")', "No decision on a package of yours yet", "once you are signed in", "MINE.packages", "a.withdrawn_at", "a.rings", "servedRing(a.rings)", "pkgHref(a.name, servedRing(inRings), a.arch)", "blocks.packages"],
+    script: ['$("#mine-decided")', "No decision on a package of yours yet", "once you are signed in", "MINE.packages", "a.withdrawn_at", "a.rings", "servedRing(a.rings)", "approvalWhere(a)", "pillHtml(where.cls, where.word, where.title)", "pkgHref(a.name, servedRing(a.rings), a.arch)", "blocks.packages"],
     reads: [
-      { path: "/api/v1/factory/approvals", fields: ["approvals.0.name", "approvals.0.arch", "approvals.0.version", "approvals.0.decision", "approvals.0.by", "approvals.0.note", "approvals.0.created_at", "approvals.0.withdrawn_at", "approvals.0.withdrawn_by", "approvals.0.withdrawn_reason", "approvals.0.rings", "approvals.0.task_id"] },
-      { path: "/api/v1/factory/me", as: "owner", fields: ["contributor.login", "packages", "packages.0.name", "packages.0.status"] },
+      { path: "/api/v1/factory/approvals", fields: ["approvals.0.name", "approvals.0.arch", "approvals.0.version", "approvals.0.decision", "approvals.0.by", "approvals.0.note", "approvals.0.created_at", "approvals.0.withdrawn_at", "approvals.0.withdrawn_by", "approvals.0.withdrawn_reason", "approvals.0.rings", "approvals.0.publish_status", "approvals.0.blocked_at", "approvals.0.task_id"] },
+      { path: "/api/v1/factory/me", as: "owner", fields: ["contributor.login", "packages", "packages.0.name"] },
       { path: "/api/v1/factory/me", as: "contributor", fields: ["contributor.login", "packages"] },
       { path: "/api/v1/factory/blocks", fields: ["packages", "packages.0.owner", "packages.0.name", "packages.0.blocked_at", "packages.0.blocked_by", "packages.0.blocked_reason"] },
     ],

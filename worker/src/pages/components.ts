@@ -157,6 +157,12 @@ export interface Fixture {
   blockedContributor: string;
   /** "hers", carol's package, blocked by m1 before she was. */
   blockedPkg: string;
+  /** "dave": the contributor whose two packages m1 approved and no ring serves. */
+  outsider: string;
+  /** "lost", dave's package: approved by m1, its publish job failed on w1 — the registry still says approved; the row of GET /factory/approvals says `publish_status: "failed"`. */
+  failedPkg: string;
+  /** "pulled", dave's other package: approved by m1, then blocked by m2 with the approval standing — the row says `blocked_at`, its publish job is cancelled. */
+  pulledPkg: string;
   /** The id of the one done pool job of each kind — sync, promote, rollback, render, health, gc, security, verify, relayout, enqueue — its params as the brain queues them and its result as work.rs posts it: what the Pipeline's table words. */
   jobs: Record<string, number>;
   /** The browser's cookie value (`omc=<value>`) per role; the CLI token of a login is `omc_<login>`, its session `oms_<login>`. */
@@ -207,6 +213,15 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     page: "/",
     anchor: [],
     script: ["function pkgHref(", "Object.keys(RINGS_TEXT)[0]", "function ringName(", "function servedRing(", "function ringOfBuild(", 'status === "staged" ? "lab" : null'],
+    visible: EVERYONE,
+  },
+  {
+    // Where a standing approval is today (approvalWhere): one rule over the row's rings, blocked_at and publish_status — "in <rings>", "blocked", "publish failed" or "publish cancelled", "publishing" — drawn by the Factory's Landed lately and Review's Decided line, so the two pages say one word of one approval; no page guesses a ring from the registry's status. The read is the list both pages draw it from, with the three fields the rule reads.
+    id: "shell.approval-where",
+    page: "/",
+    anchor: [],
+    script: ["function approvalWhere(", 'a.publish_status === "failed" || a.publish_status === "cancelled"', 'word: "publishing"'],
+    reads: [{ path: "/api/v1/factory/approvals", fields: ["approvals.0.rings", "approvals.0.blocked_at", "approvals.0.publish_status"] }],
     visible: EVERYONE,
   },
   {

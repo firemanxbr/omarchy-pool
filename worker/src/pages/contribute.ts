@@ -98,8 +98,8 @@ __CHARTS__
       var ringBadges = function (rings) { return '<span class="rings">' + ["lab", "edge", "rc", "stable"].map(function (r) { var on = rings.indexOf(r) >= 0; return '<i class="rb ' + r + (on ? " on" : "") + '" title="' + (on ? "in " + r : "not in " + r + " yet") + '"><svg viewBox="0 0 24 24" aria-hidden="true">' + RING_ICON[r] + '</svg>' + r + '</i>'; }).join("") + '</span>'; };
       $("#landed").innerHTML = approved.slice(0, 6).map(function (a) {
         var owner = owners[a.name], rings = a.rings || [];
-        // An approval that stands and no ring serving it yet, by what the row knows: blocked when the package is (the brake pulled it from every ring), "publish failed" when the publish job the approval queued gave up, "publishing" while that job is queued or running.
-        var state = rings.length ? "" : a.blocked_at ? pillHtml("error", "blocked", "blocked " + ago(a.blocked_at) + " — out of every ring") : a.publish_status === "failed" || a.publish_status === "cancelled" ? pillHtml("error", "publish " + a.publish_status, "approved, but the publish job of the project's build " + a.publish_status + "; nothing is on its way") : pillHtml("blue", "publishing", "approved; the project's build is on its way into edge");
+        // An approval that stands and no ring serving it yet: where it is by the shell's one rule (approvalWhere — blocked, publish failed or cancelled, publishing — the word Review's Decided line says of the same row); the badges below say the rings, so a served one wears no pill.
+        var where = approvalWhere(a), state = rings.length ? "" : pillHtml(where.cls, where.word, where.title);
         // The person is the shell's, the role from the maintainer set; the package links the shell's one address, with the most stable ring that serves it (servedRing, the reader's order) and its architecture.
         return '<div class="land">' + (owner ? avatar(owner) : '<span class="avatar">?</span>') + '<div class="n"><span><a href="' + pkgHref(a.name, servedRing(rings), a.arch) + '">' + esc(a.name) + '</a> <span class="v">' + esc(a.version || "") + '</span></span>' + state + '</div><div class="b">by ' + personLink(owner) + ' · approved by ' + personLink(a.by) + ' · ' + ago(a.created_at) + ' · ' + esc(a.arch) + '</div>' + ringBadges(rings) + '</div>';
       }).join("") || '<div class="muted">nothing approved yet — <a href="/request">be the first</a></div>';
@@ -198,7 +198,7 @@ export const FACTORY_COMPONENTS = (_F: Fixture): Component[] => [
     id: "factory.landed",
     page: "/factory",
     anchor: ["<h2>Landed lately</h2>", 'id="lists-note"', 'href="/review"', 'id="landed"'],
-    script: ['api("GET", "/api/v1/factory/approvals")', '"#landed"', 'noAnswer("factory\'s lists", e, "#lists-note")', '$("#lists-note").textContent = ""', "return a.standing;", "avatar(owner)", 'pillHtml("blue", "publishing"', 'class="rb ', "pkgHref(a.name, servedRing(rings), a.arch)"],
+    script: ['api("GET", "/api/v1/factory/approvals")', '"#landed"', 'noAnswer("factory\'s lists", e, "#lists-note")', '$("#lists-note").textContent = ""', "return a.standing;", "avatar(owner)", "approvalWhere(a)", "pillHtml(where.cls, where.word, where.title)", 'class="rb ', "pkgHref(a.name, servedRing(rings), a.arch)"],
     reads: [
       { path: "/api/v1/factory/approvals", fields: ["approvals", "approvals.0.standing", "approvals.0.name", "approvals.0.version", "approvals.0.arch", "approvals.0.by", "approvals.0.created_at", "approvals.0.rings", "approvals.0.publish_status", "approvals.0.blocked_at"] },
       { path: "/api/v1/factory/packages", fields: ["packages.0.name", "packages.0.owner"] },
