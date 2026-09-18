@@ -135,7 +135,7 @@ first deploy from `wrangler.toml`.
 
 ```bash
 openssl rand -hex 32 | npx wrangler secret put JOB_TOKEN_SECRET   # signs the per-job tokens; nobody else needs it
-npx wrangler secret put GITHUB_TOKEN  < ../github-token           # part C
+npx wrangler secret put GITHUB_TOKEN  < ~/.cache/omarchy-cli-poc/github-token   # part C
 npx wrangler secret put CLOUDFLARE_ANALYTICS_TOKEN                # an API token with Account Analytics: Read and D1: Read — the daily cost estimate and the audience count (RUNBOOK, Costs)
 ```
 
@@ -166,7 +166,8 @@ The worker still dispatches two workflows through the GitHub API (RUNBOOK,
 Create a **fine-grained personal access token** (or a GitHub App installation
 token) with *Actions: read and write* on `NEWORG/omarchy-pool` — under an
 organisation, from a machine user or a GitHub App rather than a person — save
-it to `github-token`, and install it (B5). Without it the jobs still run; only
+it to `~/.cache/omarchy-cli-poc/github-token`, outside the checkout, as the
+runbook does, and install it (B5). Without it the jobs still run; only
 those two dispatches (and the higher rate limit of the daily update check)
 are missing.
 

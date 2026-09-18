@@ -266,4 +266,4 @@ jobs:
             "INSERT INTO events (kind, status, summary, payload) VALUES ('deploy', 'ok', 'omarchy-pool $VERSION deployed', '$payload')" >/dev/null
       - name: Not deployed
         if: env.CLOUDFLARE_API_TOKEN == ''
-        run: echo "::warning::CLOUDFLARE_API_TOKEN is not set — release $VERSION was published but the worker was not deployed (docs/RUNBOOK.md, Releasing)."
+        run: echo "::warning::CLOUDFLARE_API_TOKEN is not set — release $VERSION was published but the worker was not deployed (https://omarchy-pool.org/docs/runbook, Releasing the pool itself)."
