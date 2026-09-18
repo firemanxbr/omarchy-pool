@@ -64,7 +64,7 @@ export const SIGNED_IN: Role[] = ["contributor", "owner", "maintainer"];
 export interface Read {
   /** Concrete path on the fixture (`/api/v1/package/${F.pkg}?ring=stable&arch=x86_64`): the test GETs exactly this. */
   path: string;
-  /** Top-level or dotted keys that must be on the JSON answer ("package.version", "events.0.kind"); a key that is there and null passes. */
+  /** Top-level or dotted keys that must be on the JSON answer ("package.version", "events.0.kind"); a step `key=value` picks the first row of a list by that field ("tasks.kind=sync.result.sources"); a key that is there and null passes. */
   fields?: string[];
   /** Who the request is made as; anonymous unless the component reads something a session unlocks. */
   as?: Role;
@@ -157,6 +157,8 @@ export interface Fixture {
   blockedContributor: string;
   /** "hers", carol's package, blocked by m1 before she was. */
   blockedPkg: string;
+  /** The id of the one done pool job of each kind — sync, promote, rollback, render, health, gc, security, verify, relayout, enqueue — its params as the brain queues them and its result as work.rs posts it: what the Pipeline's table words. */
+  jobs: Record<string, number>;
   /** The browser's cookie value (`omc=<value>`) per role; the CLI token of a login is `omc_<login>`, its session `oms_<login>`. */
   sessions: Record<Exclude<Role, "anonymous">, string>;
 }

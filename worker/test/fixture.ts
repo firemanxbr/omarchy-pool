@@ -44,6 +44,10 @@
  * F.stagedTask for the probes that must not change anything,
  * F.disposableTask and F.spareTask for the acts that reject a row.
  *
+ * One pool job of every kind sits done in the queue (F.jobs), its params
+ * as the brain queues them and its result as the Rust worker posts it, so
+ * the Pipeline's table has every shape it words.
+ *
  * The journal has one line of every kind the charts read — a sync, a
  * health check, a promotion, a role change, a day of audience — and the
  * metrics snapshot is taken last, over everything above.
@@ -56,6 +60,7 @@ import { issueJobToken } from "../src/jobtoken";
 import { snapshotMetrics } from "../src/metrics";
 import { packageKey } from "../src/r2";
 import { sha256Hex } from "../src/routes/contributors";
+import { syncJobFor } from "../src/scheduler";
 import type { Fixture } from "../src/pages/components";
 import { HELPERS } from "../src/pages/layout";
 
@@ -189,7 +194,7 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
   const release = must(await call(env, "POST", "/releases", { ring: "stable", add: [xzNewer, zstd], remove: ["bzip2"], note: "xz 5.8.5, zstd in, bzip2 out" }, stable), 201, "release stable again").json.release.id as number;
   // Edge serves a newer zlib with no advisory on it: the fix stable does not have yet.
   const zlibFixed = await index(env, "core", arch, { name: "zlib", version: "1:1.3.2-4", provides: ["libz.so=1-64"], sonames: ["libz.so.1"], components: [{ ecosystem: "crates.io", name: "libz-sys", version: "1.1.1" }] }, pool);
-  must(await call(env, "POST", "/releases", { ring: "edge", add: [zlibFixed], note: "zlib 1:1.3.2-4" }, stable), 201, "release edge");
+  const edge = must(await call(env, "POST", "/releases", { ring: "edge", add: [zlibFixed], note: "zlib 1:1.3.2-4" }, stable), 201, "release edge").json.release as { id: number; seq: number };
   // The stable head's rendered database, as the render job puts it (releases.test.ts).
   must(await call(env, "PUT", `/releases/${release}/artifacts/db?repo=omarchy-core-stable&arch=${arch}`, undefined, stable, new TextEncoder().encode("a rendered database")), 201, "render stable");
 
@@ -293,6 +298,46 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
   const disposableTask = await staged("1.0-3");
   const spareTask = await staged("1.0-4");
 
+  // One done pool job of every kind the Pipeline's table words, as the
+  // brain queued it (src/scheduler.ts, src/jobs.ts: the params) and the
+  // Rust worker completed it (crates/pkg-repo/src/work.rs, every
+  // `result: serde_json::json!`, copied field for field): the sync is the
+  // scheduler's — one task per architecture, its sources as a list, the
+  // result per source with the releases it pinned — and the promotion is
+  // the one the journal line below records. The rows are written as
+  // handleComplete writes them, so the table's words (pool-jobs.test.ts)
+  // and the manifest's fields (pipeline.tasks-table) read what production
+  // holds; a field renamed in work.rs is renamed here, and the test says
+  // where the page still reads the old name.
+  const sync = syncJobFor(arch);
+  const sources = JSON.parse(sync.params.sources) as { source: string; ring: string }[];
+  const jobRows: [string, Record<string, string>, unknown][] = [
+    ["sync", sync.params, {
+      arch,
+      sources: sources.map((s, i) => (i === sources.length - 1
+        ? { source: s.source, ring: s.ring, error: "mirror down: connection refused" }
+        : { source: s.source, ring: s.ring, upstream_total: i === 0 ? 5 : 40, uploaded: i === 0 ? 2 : 0, removed: 0, failed: i === 1 ? 1 : 0 })),
+      releases: [{ ring: "edge", id: edge.id, seq: edge.seq, packages: 1, unchanged: ["aarch64"] }],
+      rendered: ["omarchy-core-edge"],
+    }],
+    ["promote", { from: "rc", to: "stable", note: "by evidence" }, { verdict: "promoted", release_id: release, rendered: ["omarchy-core-stable"] }],
+    ["rollback", { ring: "stable", to: String(previousRelease), note: "the fixture's rollback" }, { ring: "stable", to: previousRelease, release_id: release, rendered: ["omarchy-core-stable"] }],
+    ["render", { ring: "stable", arch }, { repos: ["omarchy-core-stable"] }],
+    ["health", { ring: "stable", arch }, { ok: true }],
+    ["gc", {}, { keep: 3 }],
+    ["security", {}, { matches_vulnerable: 1, matches_fixed: 0, kev: 1, fast_tracked: [{ ring: "stable", fixes: 1 }], rolled_back: [] }],
+    ["verify", {}, { objects: 6, bad_signatures: 0, repaired_signatures: 0, mismatched: 0, repinned: 0, unfixable: 0, repinned_rings: [], details: [] }],
+    ["relayout", {}, { moved: 6, ghosts: 0, missing: 0, errors: [], rendered: ["omarchy-core-stable"], purged: 6 }],
+    ["enqueue", {}, { commit: "0123456789abcdef0123456789abcdef01234567", queued: ["ours 2.0-1 x86_64"], skipped: [], up_to_date: 3 }],
+  ];
+  const jobs: Record<string, number> = {};
+  for (const [kind, params, result] of jobRows) {
+    jobs[kind] = (await env.DB.prepare(
+      `INSERT INTO build_tasks (name, arch, pkgbuild_ref, reason, priority, status, publish, trust, kind, params, attempts, lease_owner, started_at, finished_at, duration_ms, result)
+       VALUES (?, ?, '-', 'scheduled', 50, 'done', 1, 'project', ?, ?, 1, 'w1', ?, ?, 20000, ?) RETURNING id`,
+    ).bind(kind, arch, kind, JSON.stringify(params), new Date(Date.now() - 20000).toISOString(), new Date().toISOString(), JSON.stringify(result)).first<{ id: number }>())!.id;
+  }
+
   // The brake: carol requested `hers`; m1 blocked the package, then her — m2 is the other maintainer who lifts a block.
   await request("hers", "0.1", "omc_carol");
   must(await call(env, "POST", "/factory/packages/hers/block", { reason: "the source is not the project's" }, "omc_m1"), 200, "block hers");
@@ -328,6 +373,7 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
     factoryPkg: "mine", publishedPkg: "ours", worker: "w1", communityWorker: "w3",
     contributorTask: mine.contributorTask, projectTask: mine.projectTask, stagedTask, disposableTask, spareTask,
     blockedContributor: "carol", blockedPkg: "hers",
+    jobs,
     sessions: { contributor: "oms_bob", owner: "oms_alice", maintainer: "oms_m2" },
   };
 }

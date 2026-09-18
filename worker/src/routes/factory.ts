@@ -753,6 +753,11 @@ export async function requeueExpiredLeases(env: Env): Promise<number> {
 
 // ---------- read ----------
 
+/** A JSON column (a task's params, its result) as the object it holds; null when empty or not JSON, so a reader never parses text of its own. */
+function parseJson(text: string | null): unknown {
+  try { return text ? JSON.parse(text) : null; } catch { return null; }
+}
+
 export async function handleFactory(env: Env, url?: URL): Promise<Response> {
   const limit = Math.min(200, Math.max(10, Number(url?.searchParams.get("limit") ?? 60) || 60));
   const counts = await env.DB.prepare("SELECT status, arch, COUNT(*) AS n FROM build_tasks GROUP BY status, arch").all();
@@ -791,7 +796,8 @@ export async function handleFactory(env: Env, url?: URL): Promise<Response> {
         // omarchy: runs for the project (trusted; owner NULL is an old hosted registration) · community: a contributor's
         side: w.trust === "project" || w.owner === null ? "omarchy" : "community",
       })),
-      tasks: tasks.results.map((t) => ({ ...t, log_tail: undefined })),
+      // A task's params and result are JSON here as they are on the task's own page (handleTask): one shape for a task, whoever reads it.
+      tasks: tasks.results.map((t) => ({ ...t, log_tail: undefined, params: parseJson(t.params), result: parseJson(t.result) })),
     },
     200,
     { "cache-control": "public, max-age=10" },
@@ -843,7 +849,7 @@ export async function handleTask(id: number, env: Env): Promise<Response> {
     env.DB.prepare(`SELECT id, kind, status, error, result, lease_owner, started_at, finished_at, duration_ms FROM build_tasks WHERE name = ? AND kind = ? AND json_extract(params, '$.${key}') = ? ORDER BY id DESC LIMIT 5`)
       .bind(task.name, kind, of)
       .all<{ id: number; kind: string; status: string; error: string | null; result: string | null; lease_owner: string | null; started_at: string | null; finished_at: string | null; duration_ms: number | null }>();
-  const parse = (r: { result: string | null }) => { try { return r.result ? JSON.parse(r.result) : null; } catch { return null; } };
+  const parse = (r: { result: string | null }) => parseJson(r.result);
   const brief = (r: { id: number; kind: string; status: string; error: string | null; result: string | null; lease_owner: string | null; started_at: string | null; finished_at: string | null; duration_ms: number | null }) => ({ id: r.id, kind: r.kind, status: r.status, error: r.error, result: parse(r), worker: r.lease_owner, started_at: r.started_at, finished_at: r.finished_at, duration_ms: r.duration_ms });
   const isBuild = task.kind === "build";
   const from = typeof params.review === "number" ? params.review : typeof params.task === "number" ? params.task : null;

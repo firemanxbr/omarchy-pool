@@ -84,6 +84,7 @@ the network. Two kinds of tests live there:
 | `leak.test.ts` | the shapes a public log must not carry (`src/leak.ts`): each kind, the first hit's line, and the ordinary things a log says that are not one |
 | `pages.test.ts` | the dashboard's pages through the Worker's fetch handler, over the fixture: every door and detail page served with the shared frame, no page script using a name it does not declare (parsed with acorn, not grepped), no template placeholder left behind, no id served twice (a script draws into the first element of that name), the docs shell with every chapter's sections, the old chapter addresses still redirecting, the diagrams drawing no two boxes over each other |
 | `components.test.ts` | what each page is made of, against the served dashboard: every component's anchor in its page's HTML and its literals in the page's script, every read routed and answering JSON with the fields the page draws, every act routed with its method — and with no other — and answering per role what the manifest says, and the other way round: no fetch in a page script that nobody declares |
+| `pool-jobs.test.ts` | the Pipeline's table words a pool job from the shapes the jobs post: the served page's `jobResult` and `paramsLabel` run over the fixture's done job of every kind (params as the scheduler queues them, results as `work.rs` writes them) — a sync's totals summed over its sources with the releases it pinned, a promotion's verdict, a rollback, a render, a health check, the retention, the security run, the verify, the relayout, the enqueue — and the one-source sync and the gate's other verdicts over the shapes as written; the manifest pins the same fields, so a rename in `work.rs` fails by the field's name and here by the sentence |
 | `audience.test.ts` | one day of the account's request analytics, both pool hosts in one query, becomes one number per ring and per architecture; recorded once as an `audience` event; a token without *Account · Analytics · Read* is reported once for the day, then quiet |
 | `hosts.test.ts` | the pool's names (`src/meta.ts`): a page on an old dashboard name or www moves to omarchy-pool.org with its path and query (301 for a read, 308 otherwise) and its `/api/v1/*` is answered in place; the API's two names and the tests' pool.test serve without a redirect; a sign-in pressed on the API host starts over on the dashboard before any cookie; the setup script, the worker CLI and the include's comment name the API host on every production name, the request's own elsewhere; one edge key serves every name |
 | `provenance.test.ts` | the OPR provenance scan against a stubbed GitHub: origin per package from the tree and `.omarchy/package.json`, only changed packages fetched again, packages gone from the repository dropped, the per-ring counts |
@@ -93,8 +94,10 @@ Both page tests run over one fixture (`test/fixture.ts`): a dashboard's
 worth of data seeded through the Worker's own endpoints — two packages in
 stable and a fix in edge, an advisory, a contributor's package built, audited,
 rebuilt by the project, tried and approved, another one published, a blocked
-contributor, one journal line of every kind, the metrics snapshot — so the
-pages are served over something and every path a test hits is concrete.
+contributor, one done pool job of every kind with its params and result as
+the brain and the Rust jobs write them, one journal line of every kind, the
+metrics snapshot — so the pages are served over something and every path a
+test hits is concrete.
 
 What a page is made of is declared next to its template: each module in
 `src/pages/` exports its components (`PACKAGE_COMPONENTS` below

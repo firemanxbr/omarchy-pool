@@ -71,7 +71,7 @@ const BODY = String.raw`
   </section>
 
   <section>
-    <div class="h2row"><h2>Build tasks</h2><span class="hint">leased first, then queued, then the most recent finished; three attempts, then failed</span></div>
+    <div class="h2row"><h2>Build tasks</h2><span class="hint">leased first, then queued, then the most recent finished; three attempts, then failed; a pool job's row says what it did</span></div>
     <div class="table-wrap"><table id="tasks"><thead><tr><th>#</th><th>Package</th><th>Arch</th><th>Status</th><th>Reason</th><th>Worker</th><th>Took</th><th>Result</th></tr></thead><tbody></tbody></table></div>
   </section>
 
@@ -100,15 +100,53 @@ const BODY = String.raw`
 const SCRIPT = String.raw`
 __CHARTS__
 
-  function paramsLabel(t) { var p = {}; try { p = typeof t.params === "string" ? JSON.parse(t.params || "{}") : (t.params || {}); } catch (e) {} return [p.source, p.from && p.to ? p.from + " → " + p.to : null, p.ring].filter(Boolean).join(" · "); }
-  // A pool job's result, in words: what it did rather than its JSON.
+  // What a pool job was asked, in words, from the params the brain wrote
+  // when it queued the job (src/scheduler.ts syncJobFor, src/jobs.ts): the
+  // scheduler's sync is one task per architecture with every source of it
+  // as a JSON list in sources; a sync queued by hand for one source
+  // names it; promote and rollback name their rings; render, health and
+  // verify a ring and an architecture; gc how many releases to keep.
+  function paramsLabel(t) {
+    var p = t.params || {};
+    if (t.kind === "sync" && p.sources) { var n = 0; try { n = JSON.parse(p.sources).length; } catch (e) {} return [p.arch, n + " source" + (n === 1 ? "" : "s")].filter(Boolean).join(" · "); }
+    if (t.kind === "sync") return [p.source && p.arch ? p.source + "/" + p.arch : p.source, p.ring ? "→ " + p.ring : null].filter(Boolean).join(" ");
+    if (t.kind === "promote") return [p.from && p.to ? p.from + " → " + p.to : null, p.arch, p.force === "yes" ? "forced" : null].filter(Boolean).join(" · ");
+    if (t.kind === "rollback") return [p.ring && p.to ? p.ring + " → release " + p.to : p.ring, p.arch].filter(Boolean).join(" · ");
+    if (t.kind === "gc") return p.keep ? "keep " + p.keep : "";
+    if (t.kind === "verify") return [p.ring && p.arch ? p.ring + "/" + p.arch : p.ring || p.arch, p.repair === "no" ? "report only" : null].filter(Boolean).join(" · ");
+    return p.ring && p.arch ? p.ring + "/" + p.arch : "";
+  }
+  // A pool job's result, in words: what it did rather than its JSON. The
+  // shapes are what the Rust jobs post (crates/pkg-repo/src/work.rs, every
+  // result: serde_json::json!), and test/pool-jobs.test.ts runs this
+  // over one done job of every kind seeded as work.rs writes it — a field
+  // renamed there and not here reads as a zero on the Pipeline, which is
+  // what every sync row said until 2026-09-18: the scheduler had batched the
+  // sync per architecture a week before and this read the one-source shape.
   function jobResult(t) {
-    var r = {}; try { r = typeof t.result === "string" ? JSON.parse(t.result) : (t.result || {}); } catch (e) { return String(t.result).slice(0, 90); }
-    if (t.kind === "sync") return "upstream " + num(r.upstream_total) + " · uploaded " + num(r.uploaded) + " · removed " + num(r.removed) + (r.failed ? " · failed " + num(r.failed) : "") + (r.release ? " · release " + r.release[0] : " · unchanged");
-    if (t.kind === "promote") return r.verdict === "promoted" ? "promoted, release " + r.release_id : r.verdict === "blocked" ? "blocked: " + (r.reasons || []).join("; ") : r.verdict === "rolled-back" ? "rolled back to " + r.to : r.verdict === "skip" ? "nothing to promote" : JSON.stringify(r);
+    var r = t.result || {};
+    var releaseWords = function (list) { return list.length ? " · release " + list.map(function (x) { return x.ring + " #" + x.seq; }).join(", ") : " · unchanged"; };
+    if (t.kind === "sync" && r.sources) {
+      var sum = { upstream_total: 0, uploaded: 0, removed: 0, failed: 0 }, down = [];
+      r.sources.forEach(function (s) { if (s.error) down.push(s.source); Object.keys(sum).forEach(function (k) { sum[k] += Number(s[k] || 0); }); });
+      return "upstream " + num(sum.upstream_total) + " · uploaded " + num(sum.uploaded) + " · removed " + num(sum.removed) + (sum.failed ? " · failed " + num(sum.failed) : "") + (down.length ? " · " + down.join(", ") + " down" : "") + releaseWords(r.releases || []);
+    }
+    if (t.kind === "sync") return "upstream " + num(r.upstream_total) + " · uploaded " + num(r.uploaded) + " · removed " + num(r.removed) + (r.failed ? " · failed " + num(r.failed) : "") + (r.release ? " · release #" + r.release[1] : " · unchanged");
+    if (t.kind === "promote") {
+      var p = t.params || {};
+      return r.verdict === "promoted" ? "promoted → " + (p.to || "") + ", release " + r.release_id
+        : r.verdict === "blocked" ? "blocked — " + (r.reasons || []).join("; ")
+        : r.verdict === "rolled-back" ? "rolled back to release " + r.to + " — health failed on " + (r.unhealthy || []).join(", ")
+        : r.verdict === "skip" ? "nothing to promote" + (r.why ? " — " + r.why : "") : JSON.stringify(r);
+    }
+    if (t.kind === "rollback") return r.ring + " rolled back to release " + r.to + " as release " + r.release_id;
     if (t.kind === "health") return r.ok ? "healthy" : "unhealthy";
-    if (t.kind === "gc") return "kept the last " + r.keep + " releases per ring" + (r.staging && (r.staging.expired || r.staging.reclaimed) ? " · staging: " + num(r.staging.expired) + " expired, " + num(r.staging.reclaimed) + " packages reclaimed" : "");
+    if (t.kind === "gc") return "kept the last " + r.keep + " releases per ring";
     if (t.kind === "render") return "rendered " + (r.repos || []).join(", ");
+    if (t.kind === "security") return num(r.matches_vulnerable) + " vulnerable / " + num(r.matches_fixed) + " fixed matches · " + num(r.kev) + " in KEV" + ((r.fast_tracked || []).length ? " · fast-tracked into " + r.fast_tracked.map(function (f) { return f.ring + " (" + num(f.fixes) + " fix" + (f.fixes === 1 ? "" : "es") + ")"; }).join(", ") : " · nothing to fast-track") + ((r.rolled_back || []).length ? " · rolled back " + r.rolled_back.join(", ") : "");
+    if (t.kind === "verify") return num(r.objects) + " objects" + (r.bad_signatures ? " · " + num(r.bad_signatures) + " bad signatures, " + num(r.repaired_signatures) + " repaired" : "") + (r.mismatched ? " · " + num(r.mismatched) + " mismatched, " + num(r.repinned) + " re-pinned" : "") + (r.unfixable ? " · " + num(r.unfixable) + " unfixable" : !r.bad_signatures && !r.mismatched ? " · all verify" : "");
+    if (t.kind === "relayout") return num(r.moved) + " moved · " + num(r.ghosts) + " ghosts · " + num(r.missing) + " missing · " + num(r.purged) + " old keys purged" + ((r.errors || []).length ? " · " + num(r.errors.length) + " errors" : "");
+    if (t.kind === "enqueue") return "main@" + String(r.commit || "").slice(0, 7) + ": " + num((r.queued || []).length) + " queued, " + num((r.skipped || []).length) + " skipped, " + num(r.up_to_date) + " up to date";
     return JSON.stringify(r).slice(0, 90);
   }
   function loadRegistry() {
@@ -583,12 +621,23 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
   },
   {
     // The worker a task ran on is the shell's wtId over the listing's row (its id and the task's owner where the record no longer lists it); a published build links its package in edge at the shell's one address.
+    // A pool job's row is worded from its params and its result (paramsLabel, jobResult): the fields named per kind are the ones the Rust jobs post (crates/pkg-repo/src/work.rs) and the brain queues (src/scheduler.ts, src/jobs.ts), on the fixture's done job of that kind; pool-jobs.test.ts reads the words.
     id: "pipeline.tasks-table",
     page: "/pipeline",
     anchor: ['id="tasks"'],
-    script: ['pager("#tasks"', 'href="/build/', "/artifacts/build.log", "/artifacts/PKGBUILD", 'pkgHref(t.name, "edge", t.arch)', "wtId(byId[t.lease_owner] || t.lease_owner)", "t.result_filename", "jobResult(t)", "t.max_attempts"],
+    script: ['pager("#tasks"', 'href="/build/', "/artifacts/build.log", "/artifacts/PKGBUILD", 'pkgHref(t.name, "edge", t.arch)', "wtId(byId[t.lease_owner] || t.lease_owner)", "t.result_filename", "jobResult(t)", "paramsLabel(t)", "t.max_attempts", "r.sources", "r.releases", "sum.upstream_total"],
     reads: [
-      { path: "/api/v1/factory?limit=100", fields: ["workers.0.id", "workers.0.owner", "tasks.0.id", "tasks.0.kind", "tasks.0.name", "tasks.0.version", "tasks.0.arch", "tasks.0.status", "tasks.0.trust", "tasks.0.owner", "tasks.0.publish", "tasks.0.attempts", "tasks.0.max_attempts", "tasks.0.reason", "tasks.0.lease_owner", "tasks.0.duration_ms", "tasks.0.result_filename", "tasks.0.result", "tasks.0.error", "tasks.0.params"] },
+      { path: "/api/v1/factory?limit=100", fields: ["workers.0.id", "workers.0.owner", "tasks.0.id", "tasks.0.kind", "tasks.0.name", "tasks.0.version", "tasks.0.arch", "tasks.0.status", "tasks.0.trust", "tasks.0.owner", "tasks.0.publish", "tasks.0.attempts", "tasks.0.max_attempts", "tasks.0.reason", "tasks.0.lease_owner", "tasks.0.duration_ms", "tasks.0.result_filename", "tasks.0.result", "tasks.0.error", "tasks.0.params",
+        "tasks.kind=sync.params.arch", "tasks.kind=sync.params.sources", "tasks.kind=sync.result.arch", "tasks.kind=sync.result.sources.0.source", "tasks.kind=sync.result.sources.0.upstream_total", "tasks.kind=sync.result.sources.0.uploaded", "tasks.kind=sync.result.sources.0.removed", "tasks.kind=sync.result.sources.0.failed", "tasks.kind=sync.result.releases.0.ring", "tasks.kind=sync.result.releases.0.seq", "tasks.kind=sync.result.rendered",
+        "tasks.kind=promote.params.from", "tasks.kind=promote.params.to", "tasks.kind=promote.result.verdict", "tasks.kind=promote.result.release_id",
+        "tasks.kind=rollback.params.ring", "tasks.kind=rollback.params.to", "tasks.kind=rollback.result.ring", "tasks.kind=rollback.result.to", "tasks.kind=rollback.result.release_id",
+        "tasks.kind=render.params.ring", "tasks.kind=render.params.arch", "tasks.kind=render.result.repos",
+        "tasks.kind=health.params.ring", "tasks.kind=health.params.arch", "tasks.kind=health.result.ok",
+        "tasks.kind=gc.result.keep",
+        "tasks.kind=security.result.matches_vulnerable", "tasks.kind=security.result.matches_fixed", "tasks.kind=security.result.kev", "tasks.kind=security.result.fast_tracked.0.ring", "tasks.kind=security.result.fast_tracked.0.fixes", "tasks.kind=security.result.rolled_back",
+        "tasks.kind=verify.result.objects", "tasks.kind=verify.result.bad_signatures", "tasks.kind=verify.result.repaired_signatures", "tasks.kind=verify.result.mismatched", "tasks.kind=verify.result.repinned", "tasks.kind=verify.result.unfixable",
+        "tasks.kind=relayout.result.moved", "tasks.kind=relayout.result.ghosts", "tasks.kind=relayout.result.missing", "tasks.kind=relayout.result.errors", "tasks.kind=relayout.result.purged",
+        "tasks.kind=enqueue.result.commit", "tasks.kind=enqueue.result.queued", "tasks.kind=enqueue.result.skipped", "tasks.kind=enqueue.result.up_to_date"] },
       { path: `/api/v1/factory/tasks/${F.contributorTask}/artifacts/build.log`, json: false },
       { path: `/api/v1/factory/tasks/${F.contributorTask}/artifacts/PKGBUILD`, json: false },
     ],

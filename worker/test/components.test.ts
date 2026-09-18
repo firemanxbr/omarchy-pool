@@ -44,8 +44,19 @@ async function call(method: string, path: string, as: Role = "anonymous", body?:
   return { status: res.status, type, text };
 }
 
-/** A dotted key on a JSON answer: "events.0.kind"; undefined once a step is missing, a null leaf is a value. */
-const at = (o: unknown, dotted: string): unknown => dotted.split(".").reduce<any>((v, k) => (v == null ? undefined : v[k]), o);
+/**
+ * A dotted key on a JSON answer: "events.0.kind"; undefined once a step is
+ * missing, a null leaf is a value. A step written `key=value` picks the
+ * first row of a list whose key is that value — "tasks.kind=sync.result" —
+ * so a manifest names the row it means, not the position the fixture
+ * happens to give it.
+ */
+const at = (o: unknown, dotted: string): unknown =>
+  dotted.split(".").reduce<any>((v, k) => {
+    if (v == null) return undefined;
+    const pick = /^([^=]+)=(.*)$/.exec(k);
+    return pick && Array.isArray(v) ? v.find((row) => row != null && String(row[pick[1]]) === pick[2]) : v[k];
+  }, o);
 
 /** A page's HTML, fetched once; "" for a page that does not answer 200, which is reported once and then skipped. */
 const pages = new Map<string, string>();
