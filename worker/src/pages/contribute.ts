@@ -90,9 +90,9 @@ __CHARTS__
       // Landed: the approvals that stand (standing, the server's word — approved and not withdrawn), so what this page calls landed Review never calls withdrawn.
       var approved = apps.filter(function (a) { return a.standing; });
       live("shared-online", num(shared.alive) + " alive now");
-      // Where each one is today: the four rings as badges, lit as the package reaches them.
+      // Where each one is today: every ring as a badge in the order a package climbs (the shell's RINGS_UPWARD), lit as the package reaches it.
       var RING_ICON = { lab: '<path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3"/>', edge: '<path d="M13 2L4 14h7l-1 8 9-12h-7z"/>', rc: '<circle cx="12" cy="12" r="9"/><path d="M8 12l3 3 5-6"/>', stable: '<path d="M12 3l7 3v5c0 5-3.5 8.5-7 10-3.5-1.5-7-5-7-10V6l7-3z"/><path d="M9 12l2 2 4-4"/>' };
-      var ringBadges = function (rings) { return '<span class="rings">' + ["lab", "edge", "rc", "stable"].map(function (r) { var on = rings.indexOf(r) >= 0; return '<i class="rb ' + r + (on ? " on" : "") + '" title="' + (on ? "in " + r : "not in " + r + " yet") + '"><svg viewBox="0 0 24 24" aria-hidden="true">' + RING_ICON[r] + '</svg>' + r + '</i>'; }).join("") + '</span>'; };
+      var ringBadges = function (rings) { return '<span class="rings">' + RINGS_UPWARD.map(function (r) { var on = rings.indexOf(r) >= 0; return '<i class="rb ' + r + (on ? " on" : "") + '" title="' + (on ? "in " + r : "not in " + r + " yet") + '"><svg viewBox="0 0 24 24" aria-hidden="true">' + RING_ICON[r] + '</svg>' + r + '</i>'; }).join("") + '</span>'; };
       $("#landed").innerHTML = approved.slice(0, 6).map(function (a) {
         var owner = owners[a.name], rings = a.rings || [];
         // An approval that stands and no ring serving it yet, by what the row knows: blocked when the package is (the brake pulled it from every ring), "publish failed" when the publish job the approval queued gave up, "publishing" while that job is queued or running.
@@ -193,7 +193,7 @@ export const FACTORY_COMPONENTS = (_F: Fixture): Component[] => [
     id: "factory.landed",
     page: "/factory",
     anchor: ["<h2>Landed lately</h2>", 'href="/review"', 'id="landed"'],
-    script: ['"/api/v1/factory/approvals"', '"#landed"', "return a.standing;", "avatar(owner)", 'pillHtml("blue", "publishing"', 'class="rb ', "pkgHref(a.name, servedRing(rings), a.arch)"],
+    script: ['"/api/v1/factory/approvals"', '"#landed"', "return a.standing;", "avatar(owner)", 'pillHtml("blue", "publishing"', 'class="rb ', "RINGS_UPWARD.map(function (r)", "pkgHref(a.name, servedRing(rings), a.arch)"],
     reads: [
       { path: "/api/v1/factory/approvals", fields: ["approvals", "approvals.0.standing", "approvals.0.name", "approvals.0.version", "approvals.0.arch", "approvals.0.by", "approvals.0.created_at", "approvals.0.rings", "approvals.0.publish_status", "approvals.0.blocked_at"] },
       { path: "/api/v1/factory/packages", fields: ["packages.0.name", "packages.0.owner"] },

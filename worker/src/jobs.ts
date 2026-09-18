@@ -5,14 +5,14 @@
  * a per-job token. No credential of the maintainer's touches the pool.
  */
 import { json, type Env } from "./index";
-import { PROMOTED_RINGS, RINGS } from "./meta";
+import { PROMOTED_RINGS, REPO_ARCHES, RINGS } from "./meta";
 import { createJob, SYNC_SOURCES, syncJobFor } from "./scheduler";
 import type { Contributor } from "./routes/contributors";
 
-// The rings are meta.ts's; the messages name them from the list, so a ring added there is named here.
+// The rings and the architectures are meta.ts's; the messages name them from the lists, so a ring or an architecture added there is named here.
 const PROMISED: readonly string[] = PROMOTED_RINGS;
 const ALL_RINGS: readonly string[] = RINGS;
-const ARCHES = ["x86_64", "aarch64"];
+const ARCHES: readonly string[] = REPO_ARCHES;
 
 /** The jobs a maintainer may queue by hand — the switch below, one case each; the API page's row and `pkg-repo job`'s refusal name this list. */
 export const JOB_KINDS = ["sync", "promote", "rollback", "render", "health", "security", "enqueue", "gc", "verify", "relayout", "trial"] as const;

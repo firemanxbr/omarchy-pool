@@ -11,8 +11,9 @@
 //! `from` recorded since its current head was made — the promotion into
 //! `rc` needs the one the promote job just ran; `stable` needs one more,
 //! from the attempt three hours before (2026-09-16: evidence accelerates,
-//! the calendar does not). A ring with nothing rendered for an architecture
-//! (`warn`) is not evidence against it. The
+//! the calendar does not). A `warn` health row is not evidence either way —
+//! the check posts none since #47 (a ring with nothing rendered fails its
+//! check); the status is kept for a row posted by hand. The
 //! security layer is evidence too: a package `to` serves clean that `from`
 //! would replace with a version under an open advisory (exact match,
 //! medium or worse, or exploited in the wild) blocks the promotion — the

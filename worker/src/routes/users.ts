@@ -1,10 +1,10 @@
 import { json, type Env } from "../index";
-import { updateState } from "../update";
 import { version as running, RINGS, ringsSql, sortRings } from "../meta";
 import { queuePosition } from "../queue";
 import { maintainersOf } from "../governance";
 import { registrationsOf, rights, workersOf, workspace, type Contributor } from "./contributors";
 import { stands } from "./review";
+import { aliveSince, workerView, type WorkerRow } from "./factory";
 import { standsSql } from "./story";
 
 /**
@@ -89,13 +89,14 @@ export async function handleUser(login: string, env: Env): Promise<Response> {
       .bind(login)
       .first<{ staged: number; published: number; failed: number; total: number }>(),
     env.DB.prepare(`SELECT task_id, name, arch, version, decision, note, created_at, withdrawn_at, withdrawn_by, withdrawn_reason FROM approvals WHERE by = ? ORDER BY id DESC LIMIT 50`).bind(login).all(),
-    env.DB.prepare("SELECT id, arch, mode, trust, agent, version, last_seen, builds_done, builds_failed, revoked_at FROM build_workers WHERE owner = ? ORDER BY last_seen DESC").bind(login).all(),
+    // Every worker under this name, the revoked ones too (the page says so on the row): the whole row, served through the listing's own view (workerView) so the page's tile and tables count the same rows by the same words.
+    env.DB.prepare("SELECT * FROM build_workers WHERE owner = ? ORDER BY last_seen DESC").bind(login).all<WorkerRow>(),
     maintainersOf(env),
     recordOf(env, login),
   ]);
   // Packages this person approved into the pool (what they maintain, in practice): the approvals that stand, a withdrawn one no longer theirs to keep.
   const approvedNames = [...new Set((approvals.results as { name: string; decision: string; withdrawn_at: string | null }[]).filter(stands).map((a) => a.name))];
-  const alive = new Date(Date.now() - 10 * 60000).toISOString();
+  const alive = aliveSince(), pool = running(env);
   return json(
     {
       login: person.login,
@@ -119,7 +120,7 @@ export async function handleUser(login: string, env: Env): Promise<Response> {
       })),
       approved_packages: approvedNames,
       record,
-      workers: (workers.results as { last_seen: string; version: string | null }[]).map((w) => ({ ...w, alive: w.last_seen > alive, update: updateState(w.version, running(env)) })),
+      workers: workers.results.map((w) => workerView(w, alive, pool)),
     },
     200,
     { "cache-control": "public, max-age=60" },

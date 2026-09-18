@@ -6,7 +6,7 @@
  */
 import type { RunningVersion } from "../meta";
 import { DOCS_TREE, GLOSSARY, type DocKey } from "./docs-tree";
-import { LATE_AFTER_HOURS, RING_TEXT } from "../meta";
+import { LATE_AFTER_HOURS, PROMOTED_RINGS, REPO_ARCHES, RING_TEXT, RINGS_BY_STABILITY, SEVERITIES, WORKER_ALIVE_MINUTES } from "../meta";
 import { escapeHtml } from "../html";
 
 export const GITHUB_ICON =
@@ -619,6 +619,16 @@ export function servedGrey(html: string, why: string): string {
 export const HELPERS = String.raw`
   var POOL = "__POOL_URL__";
   var RINGS_TEXT = __RINGS_TEXT__;
+  // Every ring the way a package climbs — lab, edge, rc, stable (meta.ts's RINGS_UPWARD) — the Factory's ring badges; derived from the reader's order RINGS_TEXT keeps, so one splice.
+  var RINGS_UPWARD = Object.keys(RINGS_TEXT).reverse();
+  // The architectures the pool serves (meta.ts's REPO_ARCHES), spliced in by page(): the pickers, the health grid, the Pipeline's heads and the package page's chips read this and hold no pair of their own; the first is the default a picker falls back to.
+  var ARCHES = __ARCHES__;
+  // A health row the journal wrote before it named an architecture (events.source is nullable, migrations/0002) is an x86_64 check: the one word for that legacy null, read where a row's source is missing — a data rule, not a picker's default, which is ARCHES[0].
+  var NULL_SOURCE_ARCH = "x86_64";
+  // An advisory's severities, worst first (meta.ts's SEVERITIES): the order advisoriesAt picks a package's worst by, and the keys advisoryCounts counts under.
+  var SEVERITIES = __SEVERITIES__;
+  // A worker is alive when its heartbeat is younger than this (meta.ts's WORKER_ALIVE_MINUTES, the listing's rule): the pill titles say the number from here.
+  var WORKER_ALIVE_MINUTES = __WORKER_ALIVE_MINUTES__;
   var WICON = __WICON__;
   var $ = function (s) { return document.querySelector(s); };
   function esc(s) { return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
@@ -626,11 +636,15 @@ export const HELPERS = String.raw`
   function runHref(u) { return typeof u === "string" && /^https:\/\//i.test(u) ? u : ""; }
   function bytes(n) { n = Number(n || 0); var u = ["B", "KB", "MB", "GB", "TB"], i = 0; while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; } return (i === 0 ? n : n.toFixed(n >= 100 ? 0 : 1)) + " " + u[i]; }
   function num(n) { return Number(n || 0).toLocaleString("en-US"); }
+  // A sum of money as every page writes one: US$ and two decimals.
+  function usd(n) { return "US$ " + Number(n || 0).toFixed(2); }
+  // The bill's colour, from the status /api/v1/cost says (cost.ts: ok under the warn line, warn under the guard, error over it): the pill's colours, so the Status tile and the Pipeline's budget panel tint the same word the same way — one said ok in green and the other in plain ink before (2026-09-18).
+  function costColor(c) { return PILL_COLOR[c && c.status === "error" ? "error" : c && c.status === "warn" ? "warn" : "ok"]; }
   function ago(iso) { if (!iso) return "—"; var s = (Date.now() - Date.parse(iso)) / 1000; if (s < 60) return Math.floor(s) + "s ago"; if (s < 3600) return Math.floor(s / 60) + "m ago"; if (s < 86400) return Math.floor(s / 3600) + "h ago"; return Math.floor(s / 86400) + "d ago"; }
   function dur(ms) { if (ms == null) return ""; if (ms < 1000) return ms + " ms"; if (ms < 60000) return (ms / 1000).toFixed(1) + " s"; return Math.floor(ms / 60000) + "m " + Math.round((ms % 60000) / 1000) + "s"; }
   function latest(list, kind, ring, source) {
     for (var i = 0; i < list.length; i++) { var e = list[i]; if (e.kind === kind && (ring == null || e.ring === ring) && (source == null || e.source === source)) return e; }
-    if (source === "x86_64") for (var j = 0; j < list.length; j++) { var f = list[j]; if (f.kind === kind && (ring == null || f.ring === ring) && !f.source) return f; }
+    if (source === NULL_SOURCE_ARCH) for (var j = 0; j < list.length; j++) { var f = list[j]; if (f.kind === kind && (ring == null || f.ring === ring) && !f.source) return f; }
     return null;
   }
   // Header pill = the service: online when the API answers and it can reach
@@ -651,6 +665,12 @@ export const HELPERS = String.raw`
   var LATE_MS = __LATE_AFTER_HOURS__ * 3600e3;
   // Whether a coverage row is late: the server's word when it sent one, else the same rule over last_sync. A source never synced is not late, it is missing — the sync line says so.
   function lateSync(c) { return typeof c.late === "boolean" ? c.late : !!c.last_sync && Date.now() - Date.parse(c.last_sync) > LATE_MS; }
+  // ---- a health check's result wears one word on every page that says it: the Pool's ring cards, the Pipeline's ring pills, its ring heads and its job's result, the Status rings table, and the 14-day grid both pages draw (the audit found it spelled three ways — ok on the cards and the table, healthy on the pill, healthy / unhealthy on the job, ok / warn / error on one grid and healthy / warning / failed on the other, over the same journal rows). The status is the journal's (events.ts: ok, warn, error); the word is what it means for a ring — healthy, warning, failed. The check (tests/health-check.sh) posts ok or error only — a ring with nothing rendered fails its check, since #47 — so warn is the journal's generic word, kept for a row a hand posts and drawn only where one is; a legend that advertised "nothing rendered" in amber named a state the check never produces while the state it named showed red. A cell or a pill wears the status as its class, the CSS paints it, PILL_COLOR says what it is painted.
+  var HEALTH_WORD = { ok: "healthy", warn: "warning", error: "failed" };
+  // The rings a health check covers — the ones that promise something, the scheduler's PROMOTED_RINGS — in the reader's order (RINGS_TEXT's, stable first), spliced in by page() so the list is typed once in meta.ts; the lab is promised nothing and is not checked, so no page draws a check for it.
+  var PROMISED_RINGS = __PROMISED_RINGS__;
+  // The same rings the way a package climbs them — edge, rc, stable, meta.ts's PROMOTED_RINGS — for a line read in that direction (the Pipeline's heads, the Security page's stack); derived, so the splice is one.
+  var PROMISED_UPWARD = PROMISED_RINGS.slice().reverse();
   // What is wrong, if anything: no sync for four hours (they run every three), a source not synced
   // for nine (LATE_MS: a long import holds the pipeline's queue, so small sources wait),
   // or a ring whose latest health check failed. The header pill and the
@@ -668,7 +688,7 @@ export const HELPERS = String.raw`
     if (!sync || Date.now() - Date.parse(sync.created_at) > 4 * 3600e3) why.push("no sync for " + (sync ? ago(sync.created_at).replace(" ago", "") : "ever"));
     var late = (d.coverage || []).filter(lateSync);
     if (late.length) why.push(late.length + " source(s) not synced for " + Math.round(LATE_MS / 3600e3) + " h");
-    (d.latest || []).forEach(function (e) { if (e.kind === "health" && e.status === "error") why.push(e.ring + " " + (e.source || "x86_64") + " failed its health check"); });
+    (d.latest || []).forEach(function (e) { if (e.kind === "health" && e.status === "error") why.push(e.ring + " " + (e.source || NULL_SOURCE_ARCH) + " failed its health check"); });
     return why;
   }
   // Pipeline pill (where a page has one): keeping up, or what is behind.
@@ -840,7 +860,7 @@ export const HELPERS = String.raw`
   // ---- the worker tables (the Workers page, a person's page): the same row for the same kind of worker everywhere.
   // The kind: project (pool jobs) and review are the project's, told apart by the role the worker reported; everything else is a contributor's.
   function wtKind(w) { if (w.side !== "omarchy") return "community"; var r = w.labels && w.labels.role; return r === "review" ? "review" : "project"; }
-  // The numbers every tile that counts workers says, counted once: registered (not revoked), alive (a heartbeat in the last ten minutes, the listing's word), ready (alive and, where the work needs one, an agent that answered — the listing's ready), building (alive with a task in hand); and the same four per kind in byKind.project, .review and .community.
+  // The numbers every tile that counts workers says, counted once: registered (not revoked), alive (a heartbeat in the last WORKER_ALIVE_MINUTES, the listing's word), ready (alive and, where the work needs one, an agent that answered — the listing's ready), building (alive with a task in hand); and the same four per kind in byKind.project, .review and .community.
   function workerCounts(ws) {
     var count = function (list) { var kept = list.filter(function (w) { return !w.revoked_at; }), alive = kept.filter(function (w) { return w.alive; }); return { registered: kept.length, alive: alive.length, ready: alive.filter(function (w) { return w.ready; }).length, building: alive.filter(function (w) { return w.current_task; }).length }; };
     var all = count(ws || []); all.byKind = {};
@@ -862,7 +882,7 @@ export const HELPERS = String.raw`
   function wtStatus(w) {
     var seen = "seen " + ago(w.last_seen);
     if (w.revoked_at) return '<span class="pill none" title="revoked ' + esc(ago(w.revoked_at)) + '">revoked</span>';
-    if (!w.alive) return '<span class="pill none" title="not seen in the last ten minutes">offline · ' + esc(ago(w.last_seen).replace(" ago", "")) + '</span>';
+    if (!w.alive) return '<span class="pill none" title="not seen in the last ' + WORKER_ALIVE_MINUTES + ' minutes">offline · ' + esc(ago(w.last_seen).replace(" ago", "")) + '</span>';
     if (w.current_task) return '<a class="pill blue" href="/build/' + w.current_task + '" title="task #' + w.current_task + ' · ' + esc(seen) + '">building</a>';
     if (w.update && w.update.required) return '<a class="pill warn" href="/docs/workers#update" title="' + esc("its image is " + w.update.yours + ", the pool is at " + w.update.latest + ": every worker follows the latest image — it is handed nothing until it updates · " + seen) + '">outdated</a>';
     if (!w.ready) return '<span class="pill error" title="' + esc((w.agent_error ? "its agent did not answer: " + w.agent_error : !w.agent ? "no agent: a contributor's builds and the audits need one that answers" : "not ready for the work it declares") + " · " + seen) + '">failed</span>';
@@ -932,7 +952,7 @@ export const HELPERS = String.raw`
   }
   // What the pager's filter searches on a worker's row: its id, owner, arch, version, mode, agent, who trusted it, its last task, its labels.
   function wtText(w) { return [w.id, w.owner, w.arch, w.version, w.mode, w.agent, w.trusted_by, w.last_task && w.last_task.name, JSON.stringify(w.labels || {})].join(" "); }
-  var WT_LEGEND = '<p class="dim wt-legend">' + '<span>' + WICON.native + ' native</span><span>' + WICON.emu + ' emulated</span><span>' + WICON.shared + ' shared</span><span>' + WICON.own + ' own packages</span><span><span class="pill ok">idle</span> waiting</span><span><span class="pill blue">building</span> a task in hand</span><span><span class="pill error">failed</span> its agent does not answer</span><span><span class="pill warn">outdated</span> behind the latest image, handed nothing</span><span><span class="pill none">offline</span> not seen in ten minutes</span><span>' + WICON.log + ' its own log (its owner, the maintainers)</span></p>';
+  var WT_LEGEND = '<p class="dim wt-legend">' + '<span>' + WICON.native + ' native</span><span>' + WICON.emu + ' emulated</span><span>' + WICON.shared + ' shared</span><span>' + WICON.own + ' own packages</span><span><span class="pill ok">idle</span> waiting</span><span><span class="pill blue">building</span> a task in hand</span><span><span class="pill error">failed</span> its agent does not answer</span><span><span class="pill warn">outdated</span> behind the latest image, handed nothing</span><span><span class="pill none">offline</span> not seen in ' + WORKER_ALIVE_MINUTES + ' minutes</span><span>' + WICON.log + ' its own log (its owner, the maintainers)</span></p>';
   // A person's login as a link to their page, the role on hover from the set (or the caller's word); a pill with a title. Shared by the pages that tell a package's story.
   // The role is the caller's word or the set's; anything else (map's index, when a list maps personLink) is none.
   function personLink(l, role) { if (typeof role !== "string") role = ""; return l ? '<a href="' + userHref(l) + '"' + whoAttr(l, role) + '>' + esc(l) + '</a>' : '<span class="muted">—</span>'; }
@@ -944,12 +964,11 @@ export const HELPERS = String.raw`
   function ringOfBuild(status, rings) { var r = servedRing(rings); return r !== null ? ringName(r) : status === "staged" ? "lab" : null; }
   // An age without "ago": "oldest 3h", from a span in milliseconds.
   function span(ms) { return ago(new Date(Date.now() - ms).toISOString()).replace(" ago", ""); }
-  function pkgHref(name, ring, arch) { return "/package/" + encodeURIComponent(name) + "?ring=" + encodeURIComponent(ring && RINGS_TEXT[ring] ? ring : Object.keys(RINGS_TEXT)[0]) + "&arch=" + encodeURIComponent(arch && arch !== "all" ? arch : "x86_64"); }
+  function pkgHref(name, ring, arch) { return "/package/" + encodeURIComponent(name) + "?ring=" + encodeURIComponent(ring && RINGS_TEXT[ring] ? ring : Object.keys(RINGS_TEXT)[0]) + "&arch=" + encodeURIComponent(arch && arch !== "all" ? arch : ARCHES[0]); }
   function pillHtml(cls, text, title) { return '<span class="pill ' + cls + '"' + (title ? ' title="' + esc(title) + '"' : '') + '>' + esc(text) + '</span>'; }
   // One build status, one colour, on every page: queued grey, building blue, staged and done green, failed and rejected red, cancelled and withdrawn grey. A package's own words (registered, waiting, approved, published, unmaintained) wear the same pills — the registration's statuses, nothing retired (build_requests' drafting and validating went with migration 0021).
   var TASK_PILL = { queued: "none", leased: "blue", building: "blue", staged: "ok", done: "ok", failed: "error", rejected: "error", cancelled: "none", withdrawn: "none", registered: "none", waiting: "warn", approved: "ok", published: "ok", unmaintained: "warn" };
   function taskPill(status, title) { return pillHtml(TASK_PILL[status] || "none", status === "leased" ? "building" : status, title); }
-  // An advisory's severity: critical and high red, medium amber, low blue, unknown grey.
   // ---- open advisories, counted one way on every page that says a number: a package counts at a confidence when one of its advisories matched that well — exact, or exact and name-version (the Security page's default, SEC_CONF), or any — under the worst severity of those, exploited when one of those is in KEV. advisoriesAt(d, conf) is the rows of a /api/v1/security report that count; advisoryCounts(rows) the numbers a tile or a chart draws: packages, kev, one per severity, and in rest the severities of the not exploited, so a stack that draws the exploited first holds each package once. The report's own totals are the count at any confidence; a page that says a number says at which confidence.
   var SEC_CONFS = ["all", "exact + name-version", "exact"], SEC_CONF = SEC_CONFS[1];
   function confOk(conf, m) { return conf === "all" || m === "exact" || (conf === "exact + name-version" && m === "name-version"); }
@@ -958,17 +977,23 @@ export const HELPERS = String.raw`
     return ((d && d.vulnerable) || []).map(function (v) {
       var advs = (v.advisories || []).filter(function (a) { return confOk(conf, a.match); });
       if (!advs.length) return null;
-      var sev = advs.reduce(function (w, a) { var order = ["critical", "high", "medium", "low", "unknown"]; return order.indexOf(a.severity) < order.indexOf(w) ? a.severity : w; }, "unknown");
+      var sev = advs.reduce(function (w, a) { return SEVERITIES.indexOf(a.severity) >= 0 && SEVERITIES.indexOf(a.severity) < SEVERITIES.indexOf(w) ? a.severity : w; }, SEVERITIES[SEVERITIES.length - 1]);
       return { v: v, advs: advs, worst: sev, kev: advs.some(function (a) { return a.kev; }), epss: advs.reduce(function (m, a) { return a.epss != null && a.epss > m ? a.epss : m; }, 0) };
     }).filter(Boolean);
   }
   function advisoryCounts(rows) {
-    var c = { packages: rows.length, kev: 0, critical: 0, high: 0, medium: 0, low: 0, unknown: 0, rest: { critical: 0, high: 0, medium: 0, low: 0, unknown: 0 } };
+    var c = { packages: rows.length, kev: 0, rest: {} };
+    SEVERITIES.forEach(function (s) { c[s] = 0; c.rest[s] = 0; });
     rows.forEach(function (r) { c[r.worst]++; if (r.kev) c.kev++; else c.rest[r.worst]++; });
     return c;
   }
   function confWord(conf) { return (conf || SEC_CONF) === "all" ? "any confidence" : (conf || SEC_CONF); }
-  function sevPill(s) { return pillHtml({ critical: "error", high: "error", medium: "warn", low: "blue", unknown: "none" }[s] || "none", s); }
+  // ---- an advisory's severity wears one colour on every page that draws it — the pill on a row, the Pool's bars, the Security page's stack (the audit found three maps: critical + high red on one chart and amber on the next, low / unknown in two greys). SEV_PILL is the class the CSS paints a pill with, PILL_COLOR what that class is painted (the :root colours), SEV_COLOR the one following the other: critical and high red, medium amber, low blue, unknown grey; exploited red, the bucket a KEV package counts in. A chart stacks SEV_BUCKETS over advisoryCounts, a package once: the exploited first, then the not exploited by worst severity, critical with high and low with unknown — each bucket the word both charts say, the colour of its worst severity (as a package is coloured by its worst advisory) and the count read from the numbers. sevSeries(c) is the four rows a chart draws.
+  var SEV_PILL = { exploited: "error", critical: "error", high: "error", medium: "warn", low: "blue", unknown: "none" }, PILL_COLOR = { ok: "var(--green)", warn: "var(--amber)", error: "var(--red)", blue: "var(--blue)", none: "var(--dim)" };
+  var SEV_COLOR = Object.keys(SEV_PILL).reduce(function (m, s) { m[s] = PILL_COLOR[SEV_PILL[s]]; return m; }, {});
+  var SEV_BUCKETS = [["exploited", "exploited in the wild (KEV)", function (c) { return c.kev; }], ["critical", "critical + high", function (c) { return c.rest.critical + c.rest.high; }], ["medium", "medium", function (c) { return c.rest.medium; }], ["low", "low / unknown", function (c) { return c.rest.low + c.rest.unknown; }]];
+  function sevSeries(c) { return SEV_BUCKETS.map(function (b) { return { name: b[1], color: SEV_COLOR[b[0]], value: b[2](c) }; }); }
+  function sevPill(s) { return pillHtml(SEV_PILL[s] || "none", s); }
   // A build's class (score.ts): A and B green, C amber, D red — the pill says the class and the points, the hover what the maintainer's half would make of it; text and title replace those where a row has room for the letter only.
   var CLASS_CLS = { A: "ok", B: "ok", C: "warn", D: "error" };
   function classPill(sc, text, title) { return pillHtml(CLASS_CLS[sc.class] || "none", text || "class " + sc.class + " · " + sc.points + "/100", title || "today; with the maintainer's half green: " + sc.projected); }
@@ -1085,7 +1110,7 @@ export const HELPERS = String.raw`
     opts = opts || {};
     if (opts.note) return Promise.resolve(opts.note);
     if (what === "build") return fetch("/api/v1/factory?limit=10").then(function (r) { return r.json(); }).then(function (d) { return d.workers || []; }).catch(function () { return []; }).then(function (ws) {
-      return ask({ title: "Have the project build " + label + " again", text: "A trusted review worker builds the recipe again with the project's agent — the contributor's bytes are never used. The result shows in review when it is staged.", select: whereOptions(ws, opts.arch || "x86_64", WHO.login, true), input: "optional", placeholder: "a hint for the project's agent (optional)", confirm: "Build by the project" });
+      return ask({ title: "Have the project build " + label + " again", text: "A trusted review worker builds the recipe again with the project's agent — the contributor's bytes are never used. The result shows in review when it is staged.", select: whereOptions(ws, opts.arch || ARCHES[0], WHO.login, true), input: "optional", placeholder: "a hint for the project's agent (optional)", confirm: "Build by the project" });
     });
     if (what === "reject") return ask({ title: "Reject " + label, text: "The contributor reads the note and builds again. The rejection is on the record.", input: "required", placeholder: "what is wrong, in a line or two", confirm: "Reject", danger: true });
     if (what === "withdraw") return ask({ title: "Withdraw the approval of " + label, text: "The approval stays on the record and is void from now on; the package leaves every ring it reached; another maintainer decides.", input: "required", placeholder: "why take it back", confirm: "Withdraw", danger: true });
@@ -1462,7 +1487,7 @@ ${body}
 (function () {
   // The footer lights the entry the reader is on or under: /package/<name> is Packages, /docs/<chapter> is Docs, /diff is the Journal's; a build lights nothing here, its door is Review.
   document.querySelectorAll("footer .more a").forEach(function (a) { var href = a.getAttribute("href"), here = location.pathname; if (here === href || here.indexOf(href + "/") === 0 || (href === "/packages" && here.indexOf("/package/") === 0) || (href === "/journal" && here === "/diff")) a.classList.add("active"); });
-${HELPERS.split("__POOL_URL__").join(pool).split("__RINGS_TEXT__").join(JSON.stringify(RING_TEXT)).split("__WICON__").join(JSON.stringify(WORKER_ICONS)).split("__LATE_AFTER_HOURS__").join(String(LATE_AFTER_HOURS))}
+${HELPERS.split("__POOL_URL__").join(pool).split("__RINGS_TEXT__").join(JSON.stringify(RING_TEXT)).split("__WICON__").join(JSON.stringify(WORKER_ICONS)).split("__LATE_AFTER_HOURS__").join(String(LATE_AFTER_HOURS)).split("__PROMISED_RINGS__").join(JSON.stringify(RINGS_BY_STABILITY.filter((r) => (PROMOTED_RINGS as readonly string[]).includes(r)))).split("__ARCHES__").join(JSON.stringify(REPO_ARCHES)).split("__SEVERITIES__").join(JSON.stringify(SEVERITIES)).split("__WORKER_ALIVE_MINUTES__").join(String(WORKER_ALIVE_MINUTES))}
 ${o.script ?? ""}
 ${docsSearch}
 })();

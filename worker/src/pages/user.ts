@@ -289,7 +289,7 @@ const SCRIPT = String.raw`
       (d.blocked ? pillHtml("error", "blocked: " + (d.blocked.reason || ""), "by " + (d.blocked.by || "") + ", " + (d.blocked.at || "")) : '') +
       (d.maintainer_since ? pillHtml("none", "since " + ago(d.maintainer_since), "listed in factory/MAINTAINERS.toml") : '') +
       '<span>since ' + esc(String(d.since).slice(0, 10)) + '</span><span class="dim">·</span><span>last seen ' + ago(d.last_seen) + '</span><span class="dim">·</span><a href="' + esc(d.github) + '" style="color:var(--muted);text-decoration:none">github.com/' + esc(d.login) + ' ↗</a>';
-    // The workers counted as every tile counts them (the shell's workerCounts): registered is not revoked, alive is a heartbeat in ten minutes.
+    // The workers counted as every tile counts them (the shell's workerCounts): registered is not revoked, alive is a heartbeat in the last WORKER_ALIVE_MINUTES — the rows are the listing's own (routes/factory.ts workerView), so the tile counts what the tables below draw.
     var c = d.build_counts, wc = workerCounts(d.workers);
     setTiles("#tiles", [
       ["Packages", num(d.packages.length), "registered under this name"],
@@ -383,7 +383,7 @@ const SCRIPT = String.raw`
       var drafts = !det.has_pkgbuild; // the project's own PKGBUILD is built as it is: no agent, no hint
       var waiting = st2 ? st2.chains.filter(function (c) { return c.contributor && c.contributor.status === "queued" && (!arch || c.contributor.arch === arch); }).map(function (c) { return c.contributor; }) : [];
       var pinnedNow = waiting.length === 1 ? waiting[0].pinned_to : null;
-      var where = FACTORY ? whereOptions(FACTORY.workers, arch || "x86_64", login, false, drafts, waiting.length === 1 ? waiting[0].queue : null, pinnedNow) : null;
+      var where = FACTORY ? whereOptions(FACTORY.workers, arch || ARCHES[0], login, false, drafts, waiting.length === 1 ? waiting[0].queue : null, pinnedNow) : null;
       if (where && !arch) where.options = where.options.filter(function (o) { return o.value === ""; });
       var queuedNow = waiting.length > 0;
       ask({ title: (queuedNow ? (pinnedNow ? "Waiting for " + wtShort(pinnedNow) + ": " : "In the queue: ") : "Build ") + name + (arch ? " for " + arch : "") + (queuedNow ? "" : "?"), text: (queuedNow ? "Build <b>#" + waiting.map(function (t) { return t.id; }).join(", #") + "</b> " + (pinnedNow ? "waits for <b>" + esc(wtShort(pinnedNow)) + "</b> only. Keep that, send it to the shared queue instead, or take it out" : "waits in the shared queue. Leave it there, name a worker of yours to take it at once, or take it out") + " — nothing puts it back by itself; this button does. " : "") + (drafts ? "The worker drafts the recipe with its agent — from the last build's PKGBUILD and what stopped it, when there is one — builds it, runs the gate and stages the result as evidence; the second agent audits it. " : "The worker builds the project's own PKGBUILD as it is, runs the gate and stages the result as evidence; the second agent audits it. ") + (arch ? "This architecture only." : "Every architecture the request names."), select: where, input: drafts ? "optional" : false, placeholder: "a hint for the agent (optional): the binary's name, a build flag, a dependency, what to do differently", confirm: queuedNow ? (pinnedNow ? "Keep it so" : "Keep it queued") : "Build", alt: queuedNow ? { text: "Take it out of the queue", danger: true } : null }).then(function (go) {
@@ -533,7 +533,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       page,
       anchor: ['id="tiles"'],
       script: ['"#tiles"', "d.build_counts", '"Decisions", num(d.approvals.length)', "d.approved_packages.length", "workerCounts(d.workers)", "wc.registered", "wc.alive"],
-      reads: [{ path: profile, fields: ["packages", "build_counts.total", "build_counts.staged", "build_counts.published", "build_counts.failed", "approvals", "approved_packages", "workers", "workers.0.revoked_at", "workers.0.alive"] }],
+      reads: [{ path: profile, fields: ["packages", "build_counts.total", "build_counts.staged", "build_counts.published", "build_counts.failed", "approvals", "approved_packages", "workers", "workers.0.revoked_at", "workers.0.alive", "workers.0.ready", "workers.0.side", "workers.0.current_task"] }],
       visible: EVERYONE,
     },
     {
@@ -635,7 +635,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       id: "user.build-dialog",
       page,
       anchor: ['id="packages"'],
-      script: ["st2.package.detected", "det.has_pkgbuild", 'whereOptions(FACTORY.workers, arch || "x86_64"', "go.alt", '"/builds/" + t.id', '"/build", body', "body.worker = go.pick", "body.hint"],
+      script: ["st2.package.detected", "det.has_pkgbuild", "whereOptions(FACTORY.workers, arch || ARCHES[0]", "go.alt", '"/builds/" + t.id', '"/build", body', "body.worker = go.pick", "body.hint"],
       reads: [
         { path: factory, fields: ["workers.0.arch", "workers.0.owner", "workers.0.mode", "workers.0.side", "workers.0.alive", "workers.0.agent_status", "workers.0.update"] },
         { path: story, fields: ["package.detected", "chains.0.contributor.status", "chains.0.contributor.arch", "chains.0.contributor.pinned_to"] },

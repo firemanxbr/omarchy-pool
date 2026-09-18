@@ -1,6 +1,7 @@
 import { advisoriesKnown } from "./stats";
 import { isRing, json, RINGS, type Env, type Ring } from "../index";
 import { isRepoArch } from "../r2";
+import { SEVERITIES as META_SEVERITIES } from "../meta";
 import { ringHead, ringMembers } from "../db";
 
 /**
@@ -38,7 +39,8 @@ interface MatchIn {
   status: string;
 }
 
-const SEVERITIES = ["critical", "high", "medium", "low", "unknown"];
+// The severities are meta.ts's, worst first: the shell ranks a package's advisories by the same list.
+const SEVERITIES: readonly string[] = META_SEVERITIES;
 
 export async function handlePutAdvisories(request: Request, env: Env): Promise<Response> {
   const body = (await request.json()) as { advisories?: AdvisoryIn[]; cves?: CveIn[]; updated_at?: string };

@@ -1,5 +1,5 @@
 import type { Env } from "./index";
-import { PROMOTED_RINGS } from "./meta";
+import { PROMOTED_RINGS, REPO_ARCHES, WORKER_ALIVE_MINUTES } from "./meta";
 import { requeueExpiredLeases, pruneWorkers } from "./routes/factory";
 import { snapshotMetrics } from "./metrics";
 import { syncGovernance } from "./governance";
@@ -96,11 +96,11 @@ export const RULES: Rule[] = [
 export function jobsOf(rule: Rule): { kind: string; params: Record<string, string>; arch: string }[] {
   const j = rule.job;
   if (!j) return [];
-  if (j.kind === "sync") return ["x86_64", "aarch64"].map((arch) => syncJobFor(arch));
+  if (j.kind === "sync") return REPO_ARCHES.map((arch) => syncJobFor(arch));
   if (j.kind === "health") {
     const out: { kind: string; params: Record<string, string>; arch: string }[] = [];
     // A health check per promised ring and architecture; the lab is promised nothing and is not checked.
-    for (const ring of PROMOTED_RINGS) for (const arch of ["x86_64", "aarch64"]) out.push({ kind: "health", params: { ring, arch }, arch });
+    for (const ring of PROMOTED_RINGS) for (const arch of REPO_ARCHES) out.push({ kind: "health", params: { ring, arch }, arch });
     return out;
   }
   return [{ kind: j.kind, params: j.params, arch: j.arch ?? "x86_64" }];
@@ -205,7 +205,7 @@ export async function factoryDemand(env: Env, now = new Date()): Promise<{ arch:
             (SELECT COUNT(*) FROM build_workers w WHERE w.arch = t.arch AND w.last_seen > ? AND w.current_task IS NULL AND w.trust = 'project' AND w.revoked_at IS NULL) AS alive
        FROM build_tasks t WHERE status = 'queued' AND (kind != 'build' OR trust = 'project') GROUP BY arch`,
   )
-    .bind(new Date(now.getTime() - 10 * 60000).toISOString())
+    .bind(new Date(now.getTime() - WORKER_ALIVE_MINUTES * 60000).toISOString())
     .all<{ arch: string; queued: number; alive: number; pool: number }>();
   return rows.results;
 }

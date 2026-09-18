@@ -111,10 +111,11 @@ const SCRIPT = String.raw`
 __CHARTS__
   var RING_INFO = RINGS_TEXT;
   var DESC = {}; Object.keys(RINGS_TEXT).forEach(function (r) { DESC[r] = RINGS_TEXT[r].desc; });
-  var RINGS = ["stable", "rc", "edge", "lab"], ARCHES = ["x86_64", "aarch64"];
+  // The rings are the server's list in its order (RINGS_TEXT: stable, rc, edge, lab), the architectures the shell's (ARCHES); the first of each is the default.
+  var RINGS = Object.keys(RINGS_TEXT);
   var q = new URLSearchParams(location.search);
-  var ring = RINGS.indexOf(q.get("ring")) >= 0 ? q.get("ring") : "stable";
-  var arch = ARCHES.indexOf(q.get("arch")) >= 0 ? q.get("arch") : "x86_64";
+  var ring = RINGS.indexOf(q.get("ring")) >= 0 ? q.get("ring") : RINGS[0];
+  var arch = ARCHES.indexOf(q.get("arch")) >= 0 ? q.get("arch") : ARCHES[0];
   var data = null, optional = {};
   // The pacman configuration, generated from what the ring serves right now (the same as /docs/get-started).
   function drawStart() {
@@ -167,7 +168,7 @@ __CHARTS__
       if (name === "lab") return '<div class="ring lab"><div class="head"><span class="name">lab <span class="pill lab">not a promise</span></span></div>' +
         '<div class="desc"><b>' + info.title + '.</b> ' + info.text + ' Every build in it was installed by a real pacman first — the trial.</div>' +
         '<div class="cta"><span class="lag">' + (rel ? 'release #' + rel.seq + ' · ' + ago(rel.created_at) + ' · ' + num(r.package_count) + ' pkgs' : 'empty right now') + '</span><a href="#get-started" data-ring="lab">Try the lab →</a></div></div>';
-      var health = ARCHES.map(function (a) { var h = latest(d.latest, "health", name, a); return h ? '<span class="pill ' + h.status + '">' + a + ' · ' + h.status + '</span>' : '<span class="pill none">' + a + ' · no check yet</span>'; }).join("");
+      var health = ARCHES.map(function (a) { var h = latest(d.latest, "health", name, a); return h ? '<span class="pill ' + h.status + '">' + a + ' · ' + HEALTH_WORD[h.status] + '</span>' : '<span class="pill none">' + a + ' · no check yet</span>'; }).join("");
       return '<div class="ring ' + name + '"><div class="head"><span class="name">' + name + (name === "stable" ? ' <span class="pill rec">recommended</span>' : '') + '</span><span class="rel">' + num(r.package_count) + ' pkgs · ' + bytes(r.bytes) + '</span></div>' +
         '<div class="desc"><b>' + info.title + '.</b> ' + info.text + '</div><div class="health">' + health + '</div>' +
         '<div class="cta"><span class="lag">' + (rel ? 'release #' + rel.seq + ' · ' + ago(rel.created_at) : 'no release yet') + ' · ' + info.lag + '</span><a href="#get-started" data-ring="' + name + '">Use ' + name + ' →</a></div></div>';
@@ -210,9 +211,9 @@ __CHARTS__
       var ts = $("#t-sec"), tss = $("#t-sec-s"), kev = t.kev + ta.kev, high = t.critical + t.high + ta.critical + ta.high;
       if (ts) { ts.textContent = num(t.packages) + " · " + num(ta.packages); ts.parentElement.classList.toggle("ok", !kev && !high); ts.parentElement.classList.toggle("warn", !!(kev + high)); }
       if (tss) tss.textContent = "x86_64 · aarch64 · " + num(kev) + " exploited in the wild · " + num(high) + " high · " + num(t.medium + ta.medium) + " medium · " + confWord() + (s.updated_at ? " · " + ago(s.updated_at) : "");
-      var rows = [["exploited in the wild (KEV)", t.kev, "var(--red)"], ["critical + high", t.rest.critical + t.rest.high, "var(--red)"], ["medium", t.rest.medium, "var(--amber)"], ["low / unknown", t.rest.low + t.rest.unknown, "var(--dim)"]];
-      var max = Math.max.apply(null, rows.map(function (r) { return r[1]; })) || 1;
-      $("#c-sec").innerHTML = hrows(rows.map(function (r) { return [r[0], "", Math.round(100 * r[1] / max), r[2], num(r[1])]; }), 190) +
+      // The four bars are the shell's severity buckets in the shell's colours — the same words and colours the Security page's stack and its pills wear.
+      var rows = sevSeries(t), max = Math.max.apply(null, rows.map(function (r) { return r.value; })) || 1;
+      $("#c-sec").innerHTML = hrows(rows.map(function (r) { return [r.name, "", Math.round(100 * r.value / max), r.color, num(r.value)]; }), 190) +
         (fast.length ? '<div class="mini-list"><div class="k">latest fast-tracks</div>' + fast.map(function (e) { return '<div><span class="dot ok"></span><b>' + esc(e.summary) + '</b> <span class="dim">· ' + ago(e.created_at) + '</span></div>'; }).join("") + '</div>' : '') +
         '<p class="sub" style="margin:10px 0 0;font-size:12px">Arch and Debian trackers, OSV, CISA KEV, EPSS — every three hours. <a href="/pipeline">Watch it happen →</a> · <a href="/security">Every advisory →</a></p>';
     }).catch(function () { $("#c-sec").innerHTML = '<div class="empty">no security data yet</div>'; });
@@ -288,8 +289,8 @@ __CHARTS__
     function show(term, rows) {
       if (!rows.length) { out.innerHTML = '<div class="none">nothing in stable matches “' + esc(term) + '”</div>'; out.hidden = false; return; }
       out.innerHTML = rows.slice(0, 8).map(function (p) {
-        return '<a href="' + pkgHref(p.name, "stable", "x86_64") + '"><b>' + esc(p.name) + '</b><span class="mono dim">' + esc(p.version) + '</span><span class="src">' + esc(p.source) + '</span><span class="d">' + esc(p.description || "") + '</span></a>';
-      }).join("") + '<a class="all" href="/packages?q=' + encodeURIComponent(term) + '&ring=stable&arch=x86_64">' + (rows.length >= 9 ? "More results" : "All " + rows.length + " results") + ' — every ring, both architectures →</a>';
+        return '<a href="' + pkgHref(p.name, "stable", ARCHES[0]) + '"><b>' + esc(p.name) + '</b><span class="mono dim">' + esc(p.version) + '</span><span class="src">' + esc(p.source) + '</span><span class="d">' + esc(p.description || "") + '</span></a>';
+      }).join("") + '<a class="all" href="/packages?q=' + encodeURIComponent(term) + '&ring=stable&arch=' + ARCHES[0] + '">' + (rows.length >= 9 ? "More results" : "All " + rows.length + " results") + ' — every ring, both architectures →</a>';
       out.hidden = false;
     }
     box.addEventListener("input", function () {
@@ -297,7 +298,7 @@ __CHARTS__
       var term = box.value.trim(), my = ++seq;
       if (term.length < 2) { hide(); return; }
       timer = setTimeout(function () {
-        fetch("/api/v1/search?q=" + encodeURIComponent(term) + "&ring=stable&arch=x86_64&limit=9").then(function (r) { return r.json(); }).then(function (d) {
+        fetch("/api/v1/search?q=" + encodeURIComponent(term) + "&ring=stable&arch=" + ARCHES[0] + "&limit=9").then(function (r) { return r.json(); }).then(function (d) {
           if (my !== seq || box.value.trim() !== term) return;
           show(term, d.packages || []);
         }).catch(hide);
@@ -343,7 +344,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       id: "pool.search",
       page: "/",
       anchor: ['<form class="searchbar" action="/packages" method="get"', 'name="q"', 'id="pool-q"', 'id="pool-suggest"'],
-      script: ['"#pool-q"', '"#pool-suggest"', '"/api/v1/search?q="', '"&ring=stable&arch=x86_64&limit=9"', "d.packages", "p.description", 'pkgHref(p.name, "stable", "x86_64")'],
+      script: ['"#pool-q"', '"#pool-suggest"', '"/api/v1/search?q="', '"&ring=stable&arch=" + ARCHES[0] + "&limit=9"', "d.packages", "p.description", 'pkgHref(p.name, "stable", ARCHES[0])'],
       reads: [
         { path: `/api/v1/search?q=${F.pkg}&ring=stable&arch=${F.arch}&limit=9`, fields: ["packages", "packages.0.name", "packages.0.version", "packages.0.source", "packages.0.description"] },
         { path: `/packages?q=${F.pkg}`, json: false },
@@ -382,7 +383,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       id: "pool.ring-cards",
       page: "/",
       anchor: ['id="rings-section"', '<div class="rings" id="rings">'],
-      script: ['"#rings"', "a[data-ring]", "RING_INFO[name]", 'latest(d.latest, "health", name, a)', "info.lag"],
+      script: ['"#rings"', "a[data-ring]", "RING_INFO[name]", 'latest(d.latest, "health", name, a)', "HEALTH_WORD[h.status]", "info.lag"],
       reads: [{ path: stats, fields: ["rings", "rings.0.ring", "rings.0.package_count", "rings.0.bytes", "rings.0.release", "rings.2.release.seq", "rings.2.release.created_at", "latest"] }],
       visible: EVERYONE,
     },
@@ -398,7 +399,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       id: "pool.get-started-step",
       page: "/",
       anchor: ['id="get-started"', 'id="pick-ring"', 'id="ring-desc"', 'data-copy="setup"', 'id="setup-cmd"', 'href="/setup"'],
-      script: ['pick("#pick-ring", RINGS, ring', '"#ring-desc"', '"#setup-cmd"', "DESC[ring]", "/setup | sudo bash -s -- --ring ", 'copyChips({ setup: "#setup-cmd", cli: "#cli-cmd" })'],
+      script: ["RINGS = Object.keys(RINGS_TEXT)", 'pick("#pick-ring", RINGS, ring', '"#ring-desc"', '"#setup-cmd"', "DESC[ring]", "/setup | sudo bash -s -- --ring ", 'copyChips({ setup: "#setup-cmd", cli: "#cli-cmd" })'],
       reads: [{ path: "/setup", json: false }],
       visible: EVERYONE,
     },
@@ -421,7 +422,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       id: "pool.chart-security",
       page: "/",
       anchor: ['id="sec-when"', 'id="c-sec"'],
-      script: ['"#c-sec"', '"#sec-when"', '"/api/v1/security?ring=stable&arch="', "advisoryCounts(advisoriesAt(s))", "t.rest.critical + t.rest.high", 'e.kind === "fast-track"', "hrows("],
+      script: ['"#c-sec"', '"#sec-when"', '"/api/v1/security?ring=stable&arch="', "advisoryCounts(advisoriesAt(s))", "sevSeries(t)", "r.color", 'e.kind === "fast-track"', "hrows("],
       reads: [
         { path: security(F.arch), fields: ["updated_at", "vulnerable", "vulnerable.0.advisories.0.match", "vulnerable.0.advisories.0.severity", "vulnerable.0.advisories.0.kev"] },
         { path: security("aarch64"), fields: ["vulnerable"] },
