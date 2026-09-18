@@ -570,3 +570,13 @@ export function json(body: unknown, status = 200, extra: Record<string, string> 
     headers: { "content-type": "application/json; charset=utf-8", ...extra },
   });
 }
+
+/** The body as JSON, or the 400 to send: a body that is not JSON is the caller's mistake, refused the way a missing field is — not an internal error, so only the SyntaxError of a malformed body is caught. A route that takes an empty body reads `request.json().catch(() => ({}))` and answers through its field checks. */
+export async function readJson<T>(request: Request): Promise<T | Response> {
+  try {
+    return (await request.json()) as T;
+  } catch (err) {
+    if (err instanceof SyntaxError) return json({ error: "a JSON body is required" }, 400);
+    throw err;
+  }
+}

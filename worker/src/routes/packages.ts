@@ -1,4 +1,4 @@
-import { json, type Env } from "../index";
+import { json, readJson, type Env } from "../index";
 import { isRepoArch, packageKey, signatureKey } from "../r2";
 import { gzipJson } from "../gzip";
 
@@ -58,7 +58,8 @@ export async function handlePostPackage(url: URL, request: Request, env: Env): P
   if (!(SOURCES as readonly string[]).includes(source)) return json({ error: `source must be one of ${SOURCES.join(", ")}` }, 400);
   const repoArch = url.searchParams.get("arch") ?? "x86_64";
   if (!isRepoArch(repoArch)) return json({ error: "arch must be x86_64 or aarch64" }, 400);
-  const m = (await request.json()) as Manifest;
+  const m = await readJson<Manifest>(request);
+  if (m instanceof Response) return m;
   if (!m?.sha256 || !m.name || !m.version || !m.arch || !m.filename) {
     return json({ error: "manifest is missing required fields" }, 400);
   }
@@ -142,7 +143,8 @@ export async function handleGetPackage(sha256: string, env: Env): Promise<Respon
  * Another source's build of the filename is another object: no collision.
  */
 export async function handleKnownPackages(request: Request, env: Env): Promise<Response> {
-  const body = (await request.json()) as { sha256: string[]; filenames?: string[]; source?: string; arch?: string };
+  const body = await readJson<{ sha256: string[]; filenames?: string[]; source?: string; arch?: string }>(request);
+  if (body instanceof Response) return body;
   const repoArch = body.arch ?? "x86_64";
   if (!isRepoArch(repoArch)) return json({ error: "arch must be x86_64 or aarch64" }, 400);
   const source = body.source ?? "";

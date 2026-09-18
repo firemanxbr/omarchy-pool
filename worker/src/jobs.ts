@@ -4,7 +4,7 @@
  * scheduler does: a task in the queue that a project worker executes with
  * a per-job token. No credential of the maintainer's touches the pool.
  */
-import { json, type Env } from "./index";
+import { json, readJson, type Env } from "./index";
 import { PROMOTED_RINGS, REPO_ARCHES, RINGS } from "./meta";
 import { createJob, SYNC_SOURCES, syncJobFor } from "./scheduler";
 import type { Contributor } from "./routes/contributors";
@@ -18,7 +18,8 @@ const ARCHES: readonly string[] = REPO_ARCHES;
 export const JOB_KINDS = ["sync", "promote", "rollback", "render", "health", "security", "enqueue", "gc", "verify", "relayout", "trial"] as const;
 
 export async function handleQueueJob(c: Contributor, request: Request, env: Env): Promise<Response> {
-  const b = (await request.json()) as { kind?: string; params?: Record<string, unknown>; arch?: string };
+  const b = await readJson<{ kind?: string; params?: Record<string, unknown>; arch?: string }>(request);
+  if (b instanceof Response) return b;
   if (!(JOB_KINDS as readonly string[]).includes(b.kind ?? "")) return json({ error: `kind must be one of ${JOB_KINDS.join(", ")}` }, 400);
   const p = b.params ?? {};
   const s = (k: string) => (typeof p[k] === "string" ? (p[k] as string) : "");
