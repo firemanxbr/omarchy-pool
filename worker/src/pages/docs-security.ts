@@ -21,7 +21,7 @@ const BODY = String.raw`
 
   <section id="feeds">
     <h2>The five feeds</h2>
-    <div class="srcs" id="feeds"></div>
+    <div class="srcs" id="feed-pick"></div>
     <p class="sub" id="feed-text"></p>
   </section>
 
@@ -49,7 +49,7 @@ const BODY = String.raw`
 const SCRIPT = String.raw`
   var FEEDS = ${JSON.stringify(FEEDS)}, NAMES = FEEDS.map(function (x) { return x[0]; }), feed = NAMES[0];
   function drawFeeds() {
-    pick("#feeds", NAMES, feed, function (v) { feed = v; drawFeeds(); });
+    pick("#feed-pick", NAMES, feed, function (v) { feed = v; drawFeeds(); });
     var f = FEEDS[NAMES.indexOf(feed)];
     $("#feed-text").innerHTML = '<b style="color:var(--text)">' + esc(f[0]) + '.</b> ' + esc(f[1]) + ' <span class="pill none">' + esc(f[2]) + '</span>';
   }
@@ -93,8 +93,8 @@ export const DOCS_SECURITY_COMPONENTS = (_F: Fixture): Component[] => {
       // The section keeps id="feeds" for the map (docs-tree.ts); the buttons are the shell's pick(), drawn into the .srcs row from the inlined list, the feed's name the choice.
       id: "docs-security.feed-picker",
       page,
-      anchor: ['<section id="feeds">', "<h2>The five feeds</h2>", 'class="srcs"'],
-      script: ["var FEEDS = ", "function drawFeeds()", 'pick("#feeds", NAMES, feed'],
+      anchor: ['<section id="feeds">', "<h2>The five feeds</h2>", 'class="srcs" id="feed-pick"'],
+      script: ["var FEEDS = ", "function drawFeeds()", 'pick("#feed-pick", NAMES, feed'],
       visible: EVERYONE,
     },
     {

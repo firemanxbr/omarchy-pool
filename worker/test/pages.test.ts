@@ -58,6 +58,12 @@ describe("dashboard pages", () => {
       expect(html, path).toContain("built for Omarchy");
       expect(html, path).not.toMatch(/__[A-Z_]+__/);
       expect(html, path).not.toContain("${");
+      // No id served twice: a script draws into $("#id"), and the first element of that name is the one it finds — a section and its row sharing one id had the picker replace the section, heading and text gone, and the next $() null (the Security chapter, v0.0.183).
+      // A figure's SVG is read out: two diagrams on one page carry the same marker defs, identical, and a url(#arw) resolves to the first.
+      const served = html.replace(/<script[\s\S]*?<\/script>/g, "").replace(/<style[\s\S]*?<\/style>/g, "").replace(/<svg[\s\S]*?<\/svg>/g, "");
+      const ids = [...served.matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]);
+      const twice = ids.filter((id, i) => ids.indexOf(id) !== i);
+      expect([...new Set(twice)], `${path} serves an id twice`).toEqual([]);
     }
   });
 
