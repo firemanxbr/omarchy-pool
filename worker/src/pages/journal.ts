@@ -106,7 +106,7 @@ export const JOURNAL_COMPONENTS = (F: Fixture): Component[] => [
     id: "journal.events-table",
     page: "/journal",
     anchor: ['id="events"', 'id="count"'],
-    script: ['"/api/v1/events?limit=200"', 'pager("#events", rows, eventRow', 'e.kind !== "metrics"', '"#count"'],
+    script: ['"/api/v1/events?limit=200"', 'pager("#events", rows, eventRow', 'e.kind !== "metrics"', '"#count"', "runHref(e.payload && e.payload.ci && e.payload.ci.run_url), rid = e.payload && Number(e.payload.release_id)"],
     reads: [
       {
         path: "/api/v1/events?limit=200",

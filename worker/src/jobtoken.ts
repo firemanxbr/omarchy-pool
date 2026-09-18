@@ -80,7 +80,9 @@ export async function jobHas(request: Request, env: Env, scope: string): Promise
 
 /** The scopes a task of this kind needs, from its parameters. */
 export function scopesFor(kind: string, id: number, trust: string, params: Record<string, unknown>): string[] {
-  const s = [`task:${id}`, "events"];
+  // The journal is the project's: its jobs post what they did (sync, promote, health, abi…) and the promotion gate and the Status page read those rows as evidence. A community build posts nothing — its worker writes through its task alone, and the Worker records the build — so its token carries no `events` scope: a contributor's worker could otherwise post a health row the gate would promote or block on.
+  const s = [`task:${id}`];
+  if (trust !== "community") s.push("events");
   const ring = typeof params.ring === "string" ? params.ring : "edge";
   switch (kind) {
     case "build":
