@@ -27,7 +27,7 @@
  *   PUT  /api/v1/security/advisories|matches       vulnerability data from the Security workflow
  *   POST /api/v1/security/prune?before=
  *   GET  /api/v1/factory · POST /factory/{claim,requests,enqueue,jobs} · /factory/tasks/:id/{heartbeat,complete,fail,cancel,approve,reject,artifacts/<file>}
- *   GET  /api/v1/factory/{packages,built,review,approvals,maintainers,trust,workers/self,me} · GET /api/v1/users/:login · GET /api/v1/cost
+ *   GET  /api/v1/factory/{packages,built,review,approvals,maintainers,trust,workers/self,me} · GET /api/v1/factory/tasks/:id/can · GET /api/v1/users/:login · GET /api/v1/cost
  *                                                  the factory's brain: package requests, build tasks, pull-based workers
  *   GET  /api/v1/graph?targets=a,b&ring=stable
  *   POST /api/v1/events   GET /api/v1/events       activity log
@@ -68,7 +68,7 @@ import { maintainersOf, GOVERNANCE_FILE } from "./governance";
 import { BUDGET_CAP_USD, BUDGET_GUARD_USD, BUDGET_WARN_USD } from "./cost";
 import { handleQueueJob } from "./jobs";
 import { isMaintainer } from "./routes/contributors";
-import { handleReviewList, handleApprove, handleReject, handleApprovals, handleProjectBuild, handleWithdraw } from "./routes/review";
+import { handleReviewList, handleApprove, handleReject, handleApprovals, handleProjectBuild, handleWithdraw, handleTaskCan } from "./routes/review";
 import { handleBlockContributor, handleUnblockContributor, handleBlockPackage, handleUnblockPackage, handleBlocks } from "./routes/blocks";
 import { handleAuthStart, handleAuthCallback, handleLogout } from "./routes/auth";
 import { handleSignPool } from "./routes/pool";
@@ -303,14 +303,15 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
     return c ? handleNewToken(c, env) : json({ error: "sign in first" }, 401);
   }
   // Maintainers: have the project build a staged package, approve or reject a staged build.
+  // Nobody at the door reads the same words the predicate gives a page (decisions() in routes/review.ts): the refusal is the button's title.
   if ((m = path.match(/^\/factory\/tasks\/(\d+)\/withdraw$/)) && method === "POST") {
     const c = await contributorOf(request, env);
-    if (!c) return json({ error: "a maintainer's contributor token is required" }, 401);
+    if (!c) return json({ error: "sign in with GitHub" }, 401);
     return handleWithdraw(c, Number(m[1]), request, env);
   }
   if ((m = path.match(/^\/factory\/tasks\/(\d+)\/(approve|reject|build)$/)) && method === "POST") {
     const c = await contributorOf(request, env);
-    if (!c) return json({ error: "a maintainer's contributor token is required" }, 401);
+    if (!c) return json({ error: "sign in with GitHub" }, 401);
     return m[2] === "approve" ? handleApprove(c, Number(m[1]), request, env) : m[2] === "build" ? handleProjectBuild(c, Number(m[1]), request, env) : handleReject(c, Number(m[1]), request, env);
   }
   // Workers: registered ones only (own token), or a job's token. There is
@@ -448,7 +449,8 @@ async function api(method: string, path: string, url: URL, request: Request, env
     const synced = await env.DB.prepare("SELECT updated_at FROM settings WHERE key = 'governance_sha256'").first<{ updated_at: string }>();
     return json({ maintainers: await maintainersOf(env), source: GOVERNANCE_FILE, synced_at: synced?.updated_at ?? null }, 200, { "cache-control": "public, max-age=60" });
   }
-  if (method === "GET" && path === "/factory/review") return handleReviewList(env);
+  // No-store: each row says what the caller may do on it.
+  if (method === "GET" && path === "/factory/review") return handleReviewList(env, request);
   if (method === "GET" && path === "/factory/approvals") return handleApprovals(env);
   // A worker asks what its registration is (the image decides its mode from this).
   // A worker's own log: its owner's and the maintainers' to read (a contributor token, or the dashboard's session).
@@ -472,6 +474,8 @@ async function api(method: string, path: string, url: URL, request: Request, env
     return handleStagingGet(Number(m[1]), m[2], env, (!!c && isMaintainer(c)) || (!!job && (job.k === "publish" || job.k === "trial") && job.s.includes(`staging:${m[1]}`)));
   }
   if ((m = path.match(/^\/factory\/tasks\/(\d+)$/)) && method === "GET") return handleTask(Number(m[1]), env);
+  // The task is cached for everyone (public, max-age); what one caller may do on it is theirs alone, so it rides on a no-store answer of its own.
+  if ((m = path.match(/^\/factory\/tasks\/(\d+)\/can$/)) && method === "GET") return handleTaskCan(await contributorOf(request, env), Number(m[1]), env);
   if ((m = path.match(/^\/factory\/packages\/([A-Za-z0-9@._+-]+)\/story$/)) && method === "GET") return handlePackageStory(m[1], env);
   if (path.startsWith("/factory/") && (method === "POST" || method === "PUT" || method === "DELETE" || method === "PATCH")) {
     const r = await factoryRoutes(method, path, url, request, env);

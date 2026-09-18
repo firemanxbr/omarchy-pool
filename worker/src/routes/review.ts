@@ -1,24 +1,28 @@
 import { json, type Env } from "../index";
 import { scoreChain } from "../score";
 import { requestChecks } from "../request";
-import { isMaintainer, type Contributor } from "./contributors";
+import { contributorOf, isMaintainer, type Contributor } from "./contributors";
 import { reclaimStagingPackages } from "../staging";
 import { pullFromRings } from "./blocks";
-import { chains, chainOf, storyRows } from "./story";
+import { chains, chainOf, storyRows, type Approval } from "./story";
 import { putRecord, recordUrl } from "../record";
 
 /**
  * Review: what maintainers do with staged builds (docs/GOVERNANCE.md).
  *
  *   GET  /factory/review                    staged builds — the contributors' (evidence) and the project's — with
- *                                           their evidence, the gate and the audit (public)
+ *                                           their evidence, the gate and the audit (public, no-store: each row says
+ *                                           what the caller may do on it, `can`)
+ *   GET  /factory/tasks/:id/can             what the caller may do on one task — the same `can`, no-store
  *   POST /factory/tasks/:id/build   {note?} a maintainer, never the owner, on a contributor's staged build → the
  *                                           project builds the package again on a review worker with the project's
  *                                           agent: the request and the contributor's evidence as the lesson, its own
  *                                           recipe, the gate, staged like any build (review:<id>)
  *   POST /factory/tasks/:id/approve {note?} a maintainer, never the owner, on the *project's* staged build → the
  *                                           decision on the record and a publish job: the project's package into edge
- *   POST /factory/tasks/:id/reject  {note}  maintainer, either kind of staged build → back to registered with the reason
+ *   POST /factory/tasks/:id/reject  {note}  a maintainer, never the owner, either kind of staged build → back to registered
+ *                                           with the reason
+ *   POST /factory/tasks/:id/withdraw {note} any maintainer takes a standing approval back: the package leaves the rings
  *   GET  /factory/approvals                 the record (public)
  */
 
@@ -38,11 +42,12 @@ interface Staged {
   lease_owner: string | null;
 }
 
-export async function handleReviewList(env: Env): Promise<Response> {
+export async function handleReviewList(env: Env, request: Request): Promise<Response> {
+  const c = await contributorOf(request, env);
   const staged = await env.DB.prepare(
     `SELECT t.id, t.name, t.arch, t.version, t.owner, t.status, t.trust, t.params, t.staged_prefix, t.result_sha256, t.result_filename, t.duration_ms, t.finished_at, t.pkgbuild_ref, t.result, t.attempts,
             t.lease_owner, w.owner AS worker_owner, w.labels AS worker_labels, w.hostname AS worker_hostname, w.trusted_by AS worker_trusted_by,
-            p.url, p.detected, p.category, p.license AS request_license, p.source AS request_source, p.project AS request_project, p.description AS request_description,
+            p.owner AS package_owner, p.url, p.detected, p.category, p.license AS request_license, p.source AS request_source, p.project AS request_project, p.description AS request_description,
             q.id AS request_id, q.version AS request_version, q.checklist AS request_checklist, q.migrated AS request_migrated, q.record AS request_record, q.sha256 AS request_sha256, q.created_at AS request_created_at,
             (SELECT decision FROM approvals a WHERE a.task_id = t.id ORDER BY a.id DESC LIMIT 1) AS decision,
             (SELECT by FROM approvals a WHERE a.task_id = t.id ORDER BY a.id DESC LIMIT 1) AS decided_by,
@@ -131,16 +136,47 @@ export async function handleReviewList(env: Env): Promise<Response> {
     }
     return { worker: r.lease_owner as string, owner: (r.worker_owner as string | null) ?? null, where, trusted_by: (r.worker_trusted_by as string | null) ?? null };
   };
+  // The project's builds that still have a package in staging: the sweep
+  // (staging.ts, STAGING_DAYS) drops the objects of an old build while the
+  // row stays staged, and an approval of such a build has nothing to publish.
+  const projectIds = staged.results.filter((r) => r.trust === "project").map((r) => r.id as number);
+  const packaged = new Set(
+    projectIds.length
+      ? (await env.DB.prepare(`SELECT DISTINCT task_id FROM staging_objects WHERE task_id IN (${projectIds.map(() => "?").join(", ")}) AND key LIKE '%.pkg.tar.zst'`).bind(...projectIds).all<{ task_id: number }>()).results.map((x) => x.task_id)
+      : [],
+  );
+  // What the caller may do on the row, from what the list already holds: the
+  // registration's owner, the standing approvals of the name (`prior`), the
+  // project's build of a contributor's row, the package in staging. The same
+  // predicate the POST handlers apply, so a button greyed here is one the
+  // server would refuse. `standing` rides along: the Decision cell draws
+  // Withdraw where an approval stands, for every viewer alike.
+  const rowFacts = (r: Record<string, unknown>): Facts => {
+    const id = r.id as number;
+    const from = r.trust === "project" && r.params ? ((JSON.parse(r.params as string) as { review?: number }).review ?? null) : null;
+    const pb = r.trust === "community" ? projectOf.get(id) : undefined;
+    const halves = [id, from, pb?.id].filter((x): x is number => typeof x === "number");
+    return {
+      owner: (r.package_owner as string | null) ?? (r.owner as string | null) ?? null,
+      already: prior.some((x) => x.task_id === id),
+      inFlight: pb && ["queued", "leased", "staged"].includes(pb.status) ? { id: pb.id, status: pb.status } : null,
+      standing: prior.some((x) => halves.includes(x.task_id) || (x.rebuild_task !== null && halves.includes(x.rebuild_task))),
+      packaged: r.trust !== "project" || packaged.has(id),
+    };
+  };
+  const canOf = (r: Record<string, unknown>, f: Facts) => can(decisions(c, { id: r.id as number, name: r.name as string, trust: r.trust as string, status: r.status as string }, f));
   return json(
     {
       staged: staged.results.map((r) => ({
         ...r,
+        ...(() => { const f = rowFacts(r); return { can: canOf(r, f), standing: f.standing }; })(),
         // contributor: evidence, a maintainer has the project build it · project: the project's own build, a maintainer approves it
         kind: r.trust === "project" ? "project" : "contributor",
         from: r.trust === "project" && r.params ? ((JSON.parse(r.params as string) as { review?: number }).review ?? null) : null,
         project_build: r.trust === "community" ? (() => { const pb = projectOf.get(r.id as number); return pb ? { id: pb.id, status: pb.status, error: pb.error, worker: pb.worker } : null; })() : null,
         built_by: builtBy(r),
         already: already(r),
+        package_owner: undefined,
         // The class the chain has today and the one it reaches with the maintainer's half green; ready = the contributor's half is complete.
         score: (() => { const sc = scoreOf(r); return { points: sc.points, class: sc.class, projected: sc.projected, ready: sc.ready }; })(),
         params: undefined,
@@ -215,14 +251,117 @@ async function cancelPendingAudit(env: Env, taskId: number): Promise<void> {
   await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = 'the build was decided before the trial ran' WHERE kind = 'trial' AND status = 'queued' AND json_extract(params, '$.task') = ?").bind(taskId).run();
 }
 
-function canReview(c: Contributor): boolean {
-  return isMaintainer(c);
-}
-
 /** The owner of a package — the contributor who requested it — from the registration; the task's owner as the fallback. */
 async function ownerOf(env: Env, name: string, fallback: string | null): Promise<string | null> {
   const p = await env.DB.prepare("SELECT owner, request_id FROM factory_packages WHERE name = ?").bind(name).first<{ owner: string; request_id: number | null }>();
   return p?.owner ?? fallback;
+}
+
+/**
+ * The four decisions on a build, decided in one place. Every page draws
+ * every button for every reader and greys the ones the reader may not press,
+ * with the reason in the button's title (the dashboard's rule: nothing
+ * hidden, nothing absent, a disabled control with why). The reason must be
+ * the one the server would answer, so the predicate below is what the POST
+ * handlers refuse with and what GET /factory/review and
+ * GET /factory/tasks/:id/can carry as `can` — computed once, read twice, no
+ * drift. The order of the reasons is the order a reader wants them: sign in
+ * first, then the role (the main difference on the dashboard), then the
+ * build's state, then the owner (who never decides on their own package —
+ * /docs/governance, and that holds for a rejection too), then what is
+ * already done.
+ */
+export type Decision = "approve" | "reject" | "build" | "withdraw";
+
+/** What the pages read: true where the caller may, else the reason a person reads in the button's title. */
+export interface Can {
+  approve: boolean;
+  reject: boolean;
+  build: boolean;
+  withdraw: boolean;
+  why: Partial<Record<Decision, string>>;
+}
+
+/** A decision allowed, or refused with the status the POST answers and the reason. */
+type Verdict = { ok: true } | { ok: false; status: 401 | 403 | 404 | 409; why: string };
+
+/** The task as the predicate reads it: the columns every build_tasks row has. */
+interface Decidable { id: number; name: string; trust: string; status: string }
+
+/** What the predicate needs beyond the row: the registration's owner, a standing approval on the task, the project's build in flight, a standing approval anywhere on the chain, a package still in staging (a project's build the sweep emptied has nothing to publish). */
+interface Facts { owner: string | null; already: boolean; inFlight: { id: number; status: string } | null; standing: boolean; packaged: boolean }
+
+export function decisions(c: Contributor | null, t: Decidable, f: Facts): Record<Decision, Verdict> {
+  const allow: Verdict = { ok: true };
+  const no = (status: 401 | 403 | 404 | 409, why: string): Verdict => ({ ok: false, status, why });
+  // The two reasons every decision shares: nobody signed in, or somebody who is not a maintainer.
+  const person = !c ? no(401, "sign in with GitHub") : !isMaintainer(c) ? no(403, "a maintainer decides") : null;
+  const notStaged = t.status !== "staged" ? no(409, `task ${t.id} is ${t.status}, not staged`) : null;
+  // Conflict of interest: nobody decides on their own package, and a project with a single maintainer is no
+  // exception — that maintainer's own packages wait for a second one (/docs/governance).
+  const owner = c && f.owner === c.login ? no(403, `you brought ${t.name} — another maintainer decides; with one maintainer, that maintainer's own packages wait`) : null;
+  return {
+    // What users get is the project's build: a contributor's build is evidence, and "Build it by the project" comes first.
+    approve:
+      person ?? notStaged
+        ?? (t.trust !== "project" ? no(409, "a contributor's build is evidence, never what users get — have the project build it first, then approve the project's build") : null)
+        ?? owner
+        ?? (f.already ? no(409, "already approved") : null)
+        ?? (!f.packaged ? no(409, "the project's build left no package in staging") : null)
+        ?? allow,
+    // A chain with a standing approval is decided: the package is served (or on its way) under that approval, and a
+    // rejection beside it would mark the registration as if nothing were — the approval is withdrawn first.
+    reject: person ?? notStaged ?? owner ?? (f.standing ? no(409, "already approved — withdraw the approval first") : null) ?? allow,
+    build:
+      person ?? notStaged
+        ?? (t.trust !== "community" ? no(409, "the project's own build; the project builds from a contributor's staged build") : null)
+        ?? owner
+        ?? (f.inFlight ? no(409, `the project is already on it: task ${f.inFlight.id} is ${f.inFlight.status}`) : null)
+        ?? allow,
+    // Any maintainer may, the one who approved and the owner included: undoing a mistake is not deciding on a package.
+    withdraw: person ?? (!f.standing ? no(404, "nothing standing to withdraw") : null) ?? allow,
+  };
+}
+
+/** The verdicts as a page reads them. */
+export function can(v: Record<Decision, Verdict>): Can {
+  const why: Partial<Record<Decision, string>> = {};
+  for (const d of ["approve", "reject", "build", "withdraw"] as Decision[]) {
+    const x = v[d];
+    if (!x.ok) why[d] = x.why;
+  }
+  return { approve: v.approve.ok, reject: v.reject.ok, build: v.build.ok, withdraw: v.withdraw.ok, why };
+}
+
+/** The refusal a POST answers: the reason, with its status. */
+function refused(v: Verdict): Response | null {
+  return v.ok ? null : json({ error: v.why }, v.status);
+}
+
+/** The approval that stands on this task's chain — asked by the contributor's build or the project's, it is the same one. */
+async function standingApproval(env: Env, name: string, id: number): Promise<Approval | null> {
+  const story = await storyRows(env, name);
+  const chain = chainOf(chains(story.tasks, story.approvals, story.pkg, story.request), id);
+  return chain?.approval && chain.approval.decision === "approved" ? chain.approval : null;
+}
+
+/** The facts about one task, read for a decision on it: five indexed reads, one of them the package's story. */
+async function factsOf(env: Env, t: Decidable & { owner: string | null }): Promise<Facts & { approval: Approval | null }> {
+  const [owner, already, inFlight, approval, packaged] = await Promise.all([
+    ownerOf(env, t.name, t.owner),
+    env.DB.prepare("SELECT id FROM approvals WHERE task_id = ? AND decision = 'approved' AND withdrawn_at IS NULL").bind(t.id).first(),
+    env.DB.prepare("SELECT id, status FROM build_tasks WHERE kind = 'build' AND trust = 'project' AND json_extract(params, '$.review') = ? AND status IN ('queued', 'leased', 'staged')").bind(t.id).first<{ id: number; status: string }>(),
+    standingApproval(env, t.name, t.id),
+    t.trust === "project" ? env.DB.prepare("SELECT 1 AS one FROM staging_objects WHERE task_id = ? AND key LIKE '%.pkg.tar.zst' LIMIT 1").bind(t.id).first() : Promise.resolve(true),
+  ]);
+  return { owner, already: !!already, inFlight, standing: !!approval, packaged: !!packaged, approval };
+}
+
+/** GET /factory/tasks/:id/can — what the caller may do on this task, and why not: no-store, it is the caller's. */
+export async function handleTaskCan(c: Contributor | null, id: number, env: Env): Promise<Response> {
+  const t = await env.DB.prepare("SELECT id, name, trust, status, owner FROM build_tasks WHERE id = ?").bind(id).first<Decidable & { owner: string | null }>();
+  if (!t) return json({ error: "no such task" }, 404);
+  return json({ task: id, can: can(decisions(c, t, await factsOf(env, t))) }, 200, { "cache-control": "no-store" });
 }
 
 /**
@@ -236,12 +375,10 @@ export async function handleProjectBuild(c: Contributor, id: number, request: Re
   const b = (await request.json().catch(() => ({}))) as { note?: string; worker?: unknown };
   const t = await env.DB.prepare("SELECT * FROM build_tasks WHERE id = ?").bind(id).first<Staged & { trust: string }>();
   if (!t) return json({ error: "no such task" }, 404);
-  if (t.trust !== "community" || t.status !== "staged") return json({ error: `task ${id} is ${t.trust === "project" ? "the project's own build" : t.status}; the project builds from a contributor's staged build` }, 409);
-  if (!canReview(c)) return json({ error: "a maintainer is required" }, 403);
-  const owner = await ownerOf(env, t.name, t.owner);
-  if (owner === c.login) return json({ error: `${c.login} brought ${t.name}; another maintainer must review it` }, 403);
-  const inFlight = await env.DB.prepare("SELECT id, status FROM build_tasks WHERE kind = 'build' AND trust = 'project' AND json_extract(params, '$.review') = ? AND status IN ('queued', 'leased', 'staged')").bind(id).first<{ id: number; status: string }>();
-  if (inFlight) return json({ error: `the project is already on it: task ${inFlight.id} is ${inFlight.status}` }, 409);
+  const f = await factsOf(env, t);
+  const no = refused(decisions(c, t, f).build);
+  if (no) return no;
+  const owner = f.owner;
   // Where it runs: one of the project's workers that builds this architecture, when the maintainer says which (the native one, not the emulated one).
   let pinned: string | null = null;
   if (typeof b.worker === "string" && b.worker.trim()) {
@@ -274,23 +411,16 @@ export async function handleApprove(c: Contributor, id: number, request: Request
   const b = (await request.json().catch(() => ({}))) as { note?: string };
   const t = await env.DB.prepare("SELECT * FROM build_tasks WHERE id = ?").bind(id).first<Staged & { trust: string; params: string | null; result_filename: string | null }>();
   if (!t) return json({ error: "no such task" }, 404);
-  if (t.status !== "staged") return json({ error: `task ${id} is ${t.status}, not staged` }, 409);
-  // What users get is the project's build: a contributor's build cannot be
-  // approved — it is evidence, and "Build it by the project" comes first.
-  if (t.trust !== "project") return json({ error: `task ${id} is a contributor's build — evidence, never what users get. Have the project build it first (POST /factory/tasks/${id}/build), then approve the project's build` }, 409);
-  if (!canReview(c)) return json({ error: "a maintainer is required" }, 403);
-  // Conflict of interest: nobody approves their own package, and a project
-  // with a single maintainer is no exception — that maintainer's own
-  // packages wait for a second one (docs/GOVERNANCE.md).
-  const owner = await ownerOf(env, t.name, t.owner);
-  if (owner === c.login) return json({ error: `${c.login} brought ${t.name}; another maintainer must approve it — with one maintainer, that maintainer's own packages wait` }, 403);
-  const already = await env.DB.prepare("SELECT id FROM approvals WHERE task_id = ? AND decision = 'approved' AND withdrawn_at IS NULL").bind(id).first();
-  if (already) return json({ error: "already approved" }, 409);
+  const f = await factsOf(env, t);
+  const no = refused(decisions(c, t, f).approve);
+  if (no) return no;
+  const owner = f.owner;
   // The decision, on the record, and the publish job: a project worker
   // carries the staged package into the pool (signed there), renders
   // edge, and handleComplete marks the registration published and links
   // this approval to the build (the seal and the track record read it).
   const files = (await env.DB.prepare("SELECT key FROM staging_objects WHERE task_id = ? AND key LIKE '%.pkg.tar.zst'").bind(id).all<{ key: string }>()).results.map((r) => r.key.slice(r.key.lastIndexOf("/") + 1));
+  // The predicate said so already (f.packaged); kept as the belt under the publish job, which needs the names.
   if (!files.length) return json({ error: "the project's build left no package in staging" }, 409);
   // The fast lane: a build a real pacman installed from the lab (the trial's
   // verdict) goes to rc and stable with edge — the publish job's token gets
@@ -327,16 +457,14 @@ export async function handleApprove(c: Contributor, id: number, request: Request
  */
 export async function handleWithdraw(c: Contributor, id: number, request: Request, env: Env): Promise<Response> {
   const b = (await request.json().catch(() => ({}))) as { note?: string };
-  if (!b.note || b.note.trim().length < 4) return json({ error: "a note saying why is required — it goes on the record" }, 400);
-  if (!canReview(c)) return json({ error: "a maintainer is required" }, 403);
-  // The approval that stands on this task's chain — asked by the contributor's build or the project's, it is the same one.
-  const t = await env.DB.prepare("SELECT name FROM build_tasks WHERE id = ?").bind(id).first<{ name: string }>();
+  const t = await env.DB.prepare("SELECT id, name, trust, status, owner FROM build_tasks WHERE id = ?").bind(id).first<Decidable & { owner: string | null }>();
   if (!t) return json({ error: "no such task" }, 404);
-  const story = await storyRows(env, t.name);
-  const chain = chainOf(chains(story.tasks, story.approvals, story.pkg, story.request), id);
-  const found = chain?.approval && chain.approval.decision === "approved" ? chain.approval : null;
-  if (!found) return json({ error: `no standing approval on task ${id}` }, 404);
-  const a = { ...found, name: t.name };
+  const f = await factsOf(env, t);
+  const no = refused(decisions(c, t, f).withdraw);
+  if (no) return no;
+  // The input after the predicate, as in the other three handlers: a caller who may not is told so, whatever they sent.
+  if (!b.note || b.note.trim().length < 4) return json({ error: "a note saying why is required — it goes on the record" }, 400);
+  const a = { ...f.approval!, name: t.name };
   const at = new Date().toISOString();
   await env.DB.prepare("UPDATE approvals SET withdrawn_at = ?, withdrawn_by = ?, withdrawn_reason = ? WHERE id = ?").bind(at, c.login, b.note.trim().slice(0, 500), a.id).run();
   // Out of every ring it reached through this approval; the registration is evidence again.
@@ -344,7 +472,7 @@ export async function handleWithdraw(c: Contributor, id: number, request: Reques
   await env.DB.prepare("UPDATE factory_packages SET status = 'staged', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ? AND status IN ('approved', 'published')")
     .bind(`approval of ${a.version ?? ""} for ${a.arch} withdrawn by ${c.login}: ${b.note.trim().slice(0, 160)} — waits for another maintainer`, a.name)
     .run();
-  const owner = await ownerOf(env, a.name, null);
+  const owner = f.owner;
   const record = await putRecord(env, `factory/${a.name}/decisions/${at.replace(/[:.]/g, "-")}-withdrawn.json`, { schema: "omarchy-pool/decision/1", decision: "withdrawn", name: a.name, arch: a.arch, version: a.version, owner, approval: { id: a.id, task: a.task_id, rebuild_task: a.rebuild_task, by: a.by, at: a.created_at, note: a.note }, by: c.login, at, reason: b.note.trim(), rings });
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('withdraw', NULL, 'factory', 'warn', ?, ?)")
     .bind(`${a.name} ${a.version ?? ""} (${a.arch}): the approval by ${a.by} withdrawn by ${c.login} — ${b.note.trim().slice(0, 120)}${rings.length ? "; pulled from " + rings.map((r) => r.ring).join(", ") : ""}`, JSON.stringify({ name: a.name, arch: a.arch, version: a.version, approval: a.id, task: a.task_id, rebuild_task: a.rebuild_task, approved_by: a.by, by: c.login, reason: b.note.trim(), rings, record: recordUrl(env, record.key) }))
@@ -354,11 +482,11 @@ export async function handleWithdraw(c: Contributor, id: number, request: Reques
 
 export async function handleReject(c: Contributor, id: number, request: Request, env: Env): Promise<Response> {
   const b = (await request.json().catch(() => ({}))) as { note?: string };
-  if (!b.note) return json({ error: "a note saying why is required" }, 400);
-  const t = await env.DB.prepare("SELECT * FROM build_tasks WHERE id = ?").bind(id).first<Staged>();
+  const t = await env.DB.prepare("SELECT * FROM build_tasks WHERE id = ?").bind(id).first<Staged & { trust: string }>();
   if (!t) return json({ error: "no such task" }, 404);
-  if (t.status !== "staged") return json({ error: `task ${id} is ${t.status}, not staged` }, 409);
-  if (!canReview(c)) return json({ error: "a maintainer is required" }, 403);
+  const no = refused(decisions(c, t, await factsOf(env, t)).reject);
+  if (no) return no;
+  if (!b.note) return json({ error: "a note saying why is required" }, 400);
   await env.DB.prepare(`INSERT INTO approvals (task_id, name, arch, version, decision, by, note) VALUES (?, ?, ?, ?, 'rejected', ?, ?)`)
     .bind(id, t.name, t.arch, t.version, c.login, b.note)
     .run();

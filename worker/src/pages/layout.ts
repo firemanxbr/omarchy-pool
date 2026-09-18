@@ -400,7 +400,7 @@ const CSS = String.raw`
   .rrow .n { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .rrow .s { color: var(--muted); min-width: 0; } .rrow .s .pill { margin-right: 4px; }
   .rrow .go { font-size: 12.5px; color: var(--green); text-decoration: none; white-space: nowrap; justify-self: end; } .rrow .go:hover { text-decoration: underline; }
   .rrows > p { background: var(--panel); padding: 10px 14px; }
-  table.reader .decision { display: none; } tr.for-you td:first-child { box-shadow: inset 3px 0 0 var(--amber); } tr.mine-row td:first-child { box-shadow: inset 3px 0 0 var(--line); }
+  tr.for-you td:first-child { box-shadow: inset 3px 0 0 var(--amber); } tr.mine-row td:first-child { box-shadow: inset 3px 0 0 var(--line); }
   details.tool { border: 1px solid var(--line); background: var(--panel); padding: 12px 16px; } details.tool summary { cursor: pointer; font-weight: 500; } details.tool summary .dim { font-weight: 400; font-size: 12.5px; margin-left: 8px; } details.tool[open] summary { margin-bottom: 12px; }
   #mine-queue { margin: 0 0 18px; } #mine-queue b { color: var(--text); } #mine-queue a { color: var(--green); text-decoration: none; }
   .panel { border: 1px solid var(--line); background: var(--panel); padding: 16px 18px; min-width: 0; }
@@ -567,6 +567,10 @@ const CSS = String.raw`
   }
   .live-grid > * { min-width: 0; } .ticker .row > span { min-width: 0; overflow-wrap: anywhere; }
   #seal .mono, .meta .mono, .kv dd .mono, .whorow, .whoc span { overflow-wrap: anywhere; }
+  /* A control gated by the shell's gate(): everyone sees it, the person who may not use it sees it grey, and the reason is its title — so the pointer stays on it (no pointer-events: none) and the hover stays quiet. A link gated the same way is stopped by the shell's click handler. A control disabled by state (a build in flight, a button pressed) is the same grey: one look for "not now", whatever the reason. */
+  button[disabled], select[disabled], input[disabled], textarea[disabled], a.disabled { opacity: .45; cursor: not-allowed; }
+  button[disabled]:hover, a.disabled:hover { border-color: var(--line); text-decoration: none; }
+  .decide { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
   @media (max-width: 720px) {
     .hero h1 { font-size: 24px; } .hrow { grid-template-columns: 110px 1fr 46px; }
     .ticker .row { grid-template-columns: 1fr; gap: 1px; padding-bottom: 6px; border-bottom: 1px solid var(--line); } .ticker .row .when { font-size: 11px; }
@@ -914,6 +918,104 @@ export const HELPERS = String.raw`
     var b = ev.target.closest ? ev.target.closest("button[data-rollback]") : null; if (!b) return;
     ev.stopImmediatePropagation(); b.disabled = true;
     askRollback(b.getAttribute("data-ring"), b.getAttribute("data-rollback")).then(function (j) { if (j === null || j.error) b.disabled = false; }, function (e) { b.disabled = false; toast("failed: " + esc(String(e)), "error"); });
+  });
+  // ---- a control gated by role. The dashboard's rule: every role sees every control, the same for all; what a role cannot do is the same control disabled, grey, with the reason in its title — never hidden, never absent, never a sentence in its place. ok true returns the control as given; false marks every button, select, input and textarea in it disabled (aria-disabled, title = why, an existing title replaced) and every link class="disabled" with tabindex -1 and its href moved to data-href — a link without an href is followed by nothing, not a middle click, not "open in a new tab", not a drag — and the click handler below stops the rest. The reason is the server's where it has one (can.why on a review row, on GET /factory/tasks/:id/can), so a grey button is one the POST would refuse in the same words.
+  function gate(html, ok, why) {
+    if (ok) return html;
+    return html.replace(/<(button|select|input|textarea|a)\b([^>]*)>/g, function (m, tag, attrs) {
+      attrs = attrs.replace(/\s*\/$/, "").replace(/\s+(title|aria-disabled|tabindex)="[^"]*"/g, "").replace(/\s+disabled(="[^"]*")?(?=[\s>]|$)/g, "");
+      var tip = ' aria-disabled="true" title="' + esc(why) + '"';
+      if (tag !== "a") return "<" + tag + attrs + " disabled" + tip + ">";
+      attrs = attrs.replace(/\shref="/, ' data-href="');
+      return "<a" + (/\sclass="/.test(attrs) ? attrs.replace(/\sclass="/, ' class="disabled ') : attrs + ' class="disabled"') + ' tabindex="-1"' + tip + ">";
+    });
+  }
+  // A gated link goes nowhere: caught first (capture), before any page's handler on the same click.
+  document.addEventListener("click", function (ev) { var a = ev.target.closest ? ev.target.closest("a.disabled") : null; if (a) { ev.preventDefault(); ev.stopImmediatePropagation(); } }, true);
+  // The reason a page gives its own gate, for whoever is looking: nobody signed in reads the sign-in first, as the server's own first refusal is the 401 — the same word on every grey control of a page, the Decision cell's included.
+  function orSignIn(why) { return WHO.me ? why : "sign in with GitHub"; }
+
+  // ---- the three verdicts on a staged build, as Review's table reads them: the gate (the worker's own checks on the build), the audit (the project's second agent), the trial (a real pacman installing the project's build in the lab). The pill, then the evidence as a link when the row has one (href: t.evidence.tests / .audit / .trial) — what warned or failed, the findings, the transcript — and as a word when it has none.
+  function gatePill(v, href) {
+    if (!v) return '<span class="dim" title="built before the gate existed">—</span>';
+    var more = function (text, title) { return href ? ' <a class="run" href="' + esc(href) + '"' + (title ? ' title="' + esc(title) + '"' : '') + '>' + text + '</a>' : ' <span class="muted"' + (title ? ' title="' + esc(title) + '"' : '') + '>' + text + '</span>'; };
+    if (v.verdict === "pass") return pillHtml("ok", "pass") + more(v.warnings ? v.warnings + " warning" + (v.warnings === 1 ? "" : "s") : "clean", (v.warned || []).join(", "));
+    return pillHtml("error", v.verdict) + more(esc((v.failed || []).join(", ")));
+  }
+  function auditPill(a, href) {
+    a = a || { status: "none" };
+    if (a.status === "done" && a.verdict) {
+      var text = a.findings ? a.findings + " finding" + (a.findings === 1 ? "" : "s") + (a.high ? ", " + a.high + " high" : "") : "report";
+      return pillHtml(a.verdict === "ok" ? "ok" : a.verdict === "warn" ? "warn" : "error", a.verdict) + (href ? ' <a class="run" href="' + esc(href) + '" title="' + esc(a.summary || "") + '">' + text + '</a>' : ' <span class="muted" title="' + esc(a.summary || "") + '">' + text + '</span>');
+    }
+    if (a.status === "queued") return '<span class="muted">waiting</span>';
+    if (a.status === "leased") return '<span class="muted">running</span>';
+    if (a.status === "failed") return pillHtml("none", "failed", a.error || "");
+    if (a.status === "done") return pillHtml("none", "unreadable");
+    return '<span class="muted">—</span>';
+  }
+  function trialPill(t, href) {
+    t = t || { status: "none" };
+    if (t.status === "done" && t.verdict) {
+      var ok = t.verdict === "ok";
+      return pillHtml(ok ? "ok" : "error", ok ? "installs" : t.verdict) + (href ? ' <a class="run" href="' + esc(href) + '" title="the lab above edge: pacman -S, hooks, files">transcript</a>' : '');
+    }
+    if (t.status === "queued") return '<span class="muted">waiting</span>';
+    if (t.status === "leased") return '<span class="muted">installing</span>';
+    if (t.status === "failed") return pillHtml("none", "did not run", t.error || "");
+    if (t.status === "done") return pillHtml("none", "unreadable");
+    return '<span class="muted" title="only the project\'s build is tried">—</span>';
+  }
+
+  // ---- the Decision cell of a build, the same for every viewer: Approve, Reject (Drop, its note preset, on a build of a version already approved — t.already), Build by the project, and Withdraw the approval when one stands on the row (t.standing, as the review list says it; t.approval, as a build's page reads it) — each enabled where t.can says so and grey with t.can.why in its title otherwise. t is a row of GET /factory/review, or { id, name, version, arch, can, already, approval } put together from a task and GET /factory/tasks/:id/can. A row nobody can act on shows the same buttons, all grey. The buttons carry the task id (data-approve="12" …) and the click is the shell's (below): the page registers onDecided(fn) to draw again.
+  function decisionCell(t) {
+    var c = t.can || { why: {} }, why = c.why || {}, id = t.id;
+    var btn = function (what, text, extra) { return gate('<button type="button" data-' + what + '="' + id + '"' + (extra || "") + '>' + text + '</button>', !!c[what], why[what] || "not now"); };
+    var standing = t.standing === true || !!(t.approval && t.approval.decision === "approved" && !t.approval.withdrawn_at);
+    var label = t.name ? t.name + (t.version ? " " + t.version : "") + " (build #" + id + ")" : "build #" + id;
+    return '<span class="decide" data-task="' + id + '" data-label="' + esc(label) + '" data-arch="' + esc(t.arch || "") + '">'
+      + btn("approve", "Approve")
+      + (t.already ? btn("reject", "Drop", ' data-note="a build of a version already approved (#' + t.already.task + ')" title="the same name, version and architecture were approved as build #' + t.already.task + ' — nothing to decide; drop it"') : btn("reject", "Reject"))
+      + btn("build", "Build by the project")
+      + (standing ? btn("withdraw", "Withdraw the approval", ' title="take the approval back: the package leaves every ring, another maintainer decides — the reason goes on the record"') : "")
+      + '</span>';
+  }
+  // The four decisions' dialogs, one place for Review, the Pipeline and a build's page: what the decision does, the note it wants (a rejection's is required — the contributor reads it), and for the project's build the choice of worker, the project's own for the architecture, read when the dialog opens. label names the build ("build #12", "mine 1.0-2 (build #12)"); opts.arch picks the workers; opts.note, given (Drop), answers at once, no dialog. Resolves as ask() does: the note, { note, pick } with a worker chosen, null when cancelled.
+  function decideDialog(what, label, opts) {
+    opts = opts || {};
+    if (opts.note) return Promise.resolve(opts.note);
+    if (what === "build") return fetch("/api/v1/factory?limit=10").then(function (r) { return r.json(); }).then(function (d) { return d.workers || []; }).catch(function () { return []; }).then(function (ws) {
+      return ask({ title: "Have the project build " + label + " again", text: "A trusted review worker builds the recipe again with the project's agent — the contributor's bytes are never used. The result shows in review when it is staged.", select: whereOptions(ws, opts.arch || "x86_64", WHO.login, true), input: "optional", placeholder: "a hint for the project's agent (optional)", confirm: "Build by the project" });
+    });
+    if (what === "reject") return ask({ title: "Reject " + label, text: "The contributor reads the note and builds again. The rejection is on the record.", input: "required", placeholder: "what is wrong, in a line or two", confirm: "Reject", danger: true });
+    if (what === "withdraw") return ask({ title: "Withdraw the approval of " + label, text: "The approval stays on the record and is void from now on; the package leaves every ring it reached; another maintainer decides.", input: "required", placeholder: "why take it back", confirm: "Withdraw", danger: true });
+    return ask({ title: "Approve " + label, text: "The project's build goes into edge, signed by the pool; the approval is on the record with your name.", input: "optional", confirm: "Approve" });
+  }
+  // What the toast says once the server said yes: where the build went, the task the project builds it as and on what, what the withdrawal emptied.
+  function decidedText(what, d, dropped) {
+    if (what === "approve") return "Approved — the project's build goes into edge (publish job <a href=\"/build/" + d.publish + "\">#" + d.publish + "</a>).";
+    if (what === "build") return "The project is building it: task <a href=\"/build/" + d.task + "\">#" + d.task + "</a>, on " + (d.pinned_to ? esc(wtShort(d.pinned_to)) : "a review worker") + " with the project's agent.";
+    if (what === "withdraw") return "Withdrawn — the approval is void; the package leaves " + esc((d.rings || []).map(function (r) { return r.ring; }).join(", ") || "no ring") + "; another maintainer decides.";
+    return dropped ? "Dropped." : "Rejected — the contributor sees the note.";
+  }
+  // The decision buttons are the shell's (data-approve / data-reject / data-build / data-withdraw = the task id, inside decisionCell's .decide): the click stops here, asks through decideDialog, posts once through api() and tells every fn a page gave onDecided — fn(what, id, answer) — to draw again. The button is disabled from the click and enabled again on cancel or refusal only, so a decision is never posted twice (a rejected row draws again without the button). A page's own Build buttons (a person's page names a package in data-build) are outside .decide and untouched.
+  var DECIDED = [];
+  function onDecided(fn) { DECIDED.push(fn); }
+  document.addEventListener("click", function (ev) {
+    var b = ev.target.closest ? ev.target.closest(".decide button[data-approve], .decide button[data-reject], .decide button[data-build], .decide button[data-withdraw]") : null; if (!b) return;
+    ev.stopImmediatePropagation(); if (b.disabled) return;
+    var what = ["approve", "reject", "build", "withdraw"].filter(function (w) { return b.hasAttribute("data-" + w); })[0], id = b.getAttribute("data-" + what), cell = b.closest(".decide");
+    b.disabled = true;
+    decideDialog(what, cell.getAttribute("data-label") || "build #" + id, { arch: cell.getAttribute("data-arch"), note: b.getAttribute("data-note") }).then(function (got) {
+      if (got === null) { b.disabled = false; return; }
+      var body = { note: got && typeof got === "object" ? got.note : got };
+      if (got && typeof got === "object" && got.pick) body.worker = got.pick;
+      return api("POST", "/api/v1/factory/tasks/" + id + "/" + what, body).then(function (d) {
+        if (d.error) { b.disabled = false; toast(esc(d.error), "error"); return; }
+        toast(decidedText(what, d, b.hasAttribute("data-note")), what === "withdraw" ? "warn" : "ok");
+        DECIDED.forEach(function (fn) { fn(what, Number(id), d); });
+      });
+    }).catch(function (e) { b.disabled = false; toast("failed: " + esc(String(e)), "error"); });
   });
   // One chain of the factory's story (routes/story.ts) as a row of steps: built by the contributor → the gate → the audit → built again by the project → tried in the lab → decided. The package page and a person's page draw the same row.
   function chainRow(c) {

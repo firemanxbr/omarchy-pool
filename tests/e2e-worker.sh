@@ -355,6 +355,10 @@ mine=$(curl -s "$OMARCHY_API/api/v1/factory/review" | python3 -c 'import json,sy
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/tasks/$mine/build" "${mauth[@]}" -d '{}')" == 403 ]] || { echo "a maintainer must not have the project build their own package when another maintainer exists"; exit 1; }
 (cd "$ROOT/worker" && npx wrangler d1 execute omarchy-repo --local --persist-to "$WRANGLER_STATE" --command "DELETE FROM factory_maintainers WHERE login = 'other'" >/dev/null)
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/tasks/$mine/build" "${mauth[@]}" -d '{}')" == 403 ]] || { echo "the sole maintainer must not have the project build their own package either"; exit 1; }
+# The owner never decides on their own package — a rejection included — and what the page reads (GET .../can) refuses in the POST's words.
+[[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/tasks/$mine/reject" "${mauth[@]}" -d '{"note":"my own"}')" == 403 ]] || { echo "a maintainer must not reject their own package"; exit 1; }
+mcan=$(curl -s "$OMARCHY_API/api/v1/factory/tasks/$mine/can" "${mauth[@]}")
+[[ "$(jq -r .can.reject <<<"$mcan")" == false && "$(jq -r .can.why.reject <<<"$mcan")" == "$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$mine/reject" "${mauth[@]}" -d '{"note":"my own"}' | jq -r .error)" ]] || { echo "can.reject must be false for the owner, with the POST's reason: $mcan"; exit 1; }
 # Somebody else's package: a contributor's build is never approved — it is evidence. A maintainer has the project
 # build it (review:<task>, the project's own recipe, its agent, a worker it trusts); the approval comes on that build.
 (cd "$ROOT/worker" && npx wrangler d1 execute omarchy-repo --local --persist-to "$WRANGLER_STATE" --command "UPDATE build_tasks SET owner = 'someone-else' WHERE id = $mine" >/dev/null)

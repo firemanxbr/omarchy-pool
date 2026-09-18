@@ -104,7 +104,9 @@ export function chains(tasks: TaskBrief[], approvals: Approval[], pkg: Record<st
     const publish = project ? of("publish", "task", project.id) : contributor ? of("publish", "task", contributor.id) : null;
     const ids = [contributor?.id, project?.id].filter((x): x is number => typeof x === "number");
     const mine = approvals.filter((a) => ids.includes(a.task_id) || (a.rebuild_task !== null && ids.includes(a.rebuild_task)));
-    const approval = mine.find((a) => !a.withdrawn_at) ?? null;
+    // The chain's decision is the approval that stands; a rejection written beside one (before the reject
+    // handler refused it, 2026-09-17) must never hide it, or the approval could not be withdrawn.
+    const approval = mine.find((a) => a.decision === "approved" && !a.withdrawn_at) ?? mine.find((a) => !a.withdrawn_at) ?? null;
     const withdrawn = mine.find((a) => a.withdrawn_at) ?? null;
     const auditReport = audit?.result as { verdict?: string; findings?: { severity: string }[] } | null | undefined;
     const score = scoreChain({
