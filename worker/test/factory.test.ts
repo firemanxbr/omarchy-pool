@@ -485,6 +485,44 @@ describe("a recipe's failure", () => {
     const pkg = await env.DB.prepare("SELECT status, detail FROM factory_packages WHERE name = 'broken'").first<{ status: string; detail: string }>();
     expect(pkg).toMatchObject({ status: "registered", detail: "build failed on w3: exit 4: error: target not found: ghostty" });
   });
+
+  it("on one architecture leaves the package staged while the other's build waits for a maintainer; registered once nothing is staged", async () => {
+    // omarchy-cli, 2026-09-18: the aarch64 build staged at 03:50, the x86_64 one
+    // gave up at 03:59, and the registry row said `registered` while Review
+    // counted the staged build as waiting — two words for one package.
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, last_seen) VALUES ('wx86', 'x86_64', 'alice', ?, 'dedicated', 'community', '2000-01-01T00:00:00Z')").bind(await sha256Hex("omw_wx86")),
+      env.DB.prepare(`INSERT INTO factory_packages (name, owner, url, arches, status, detail) VALUES ('twoarch', 'alice', 'https://github.com/alice/twoarch', '["aarch64","x86_64"]', 'staged', '1.0-1 built for aarch64 by w3; waiting for a maintainer')`),
+      env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, staged_prefix, finished_at) VALUES ('twoarch', 'aarch64', '1.0-1', 'https://github.com/alice/twoarch@HEAD:PKGBUILD', 'contributor', 100, 0, 'community', 'alice', 'build', 'staged', 'staging/alice/twoarch/1/', '2026-09-18T03:50:46Z')`),
+      env.DB.prepare(`INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, max_attempts) VALUES ('twoarch', 'x86_64', '1.0-1', 'https://github.com/alice/twoarch@HEAD:PKGBUILD', 'contributor', 100, 0, 'community', 'alice', 'build', 1)`),
+    ]);
+    const staged = (await env.DB.prepare("SELECT id FROM build_tasks WHERE name = 'twoarch' AND arch = 'aarch64'").first<{ id: number }>())!.id;
+    const pkg = async () => (await env.DB.prepare("SELECT status, detail FROM factory_packages WHERE name = 'twoarch'").first<{ status: string; detail: string }>())!;
+    // The worker reports the recipe's failure: the package keeps the word its staged build earns, and the detail says what x86_64 ran into.
+    let c = await call("POST", "/factory/claim", { arch: "x86_64" }, "omw_wx86");
+    expect(c.status).toBe(200);
+    const x86 = c.json.task.id;
+    expect((await call("POST", `/factory/tasks/${x86}/fail`, { error: "exit 5: the gate: dependency-detected-not-included libgcc", final: true }, c.json.token)).json).toMatchObject({ status: "failed" });
+    expect(await pkg()).toEqual({ status: "staged", detail: "build failed on wx86: exit 5: the gate: dependency-detected-not-included libgcc" });
+    // Review and the listing say the same one thing: a build of this package waits.
+    expect((await call("GET", "/factory/review")).json.staged.map((t: any) => t.id)).toContain(staged);
+    expect((await call("GET", "/factory/packages?t=twoarch")).json.packages.find((p: any) => p.name === "twoarch")).toMatchObject({ status: "staged", staged_builds: 1 });
+    // A lease that dies the same way, out of attempts: the same rule from the scheduler's side.
+    await env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, max_attempts) VALUES ('twoarch', 'x86_64', '1.0-1', 'https://github.com/alice/twoarch@HEAD:PKGBUILD', 'contributor', 100, 0, 'community', 'alice', 'build', 1)").run();
+    c = await call("POST", "/factory/claim", { arch: "x86_64" }, "omw_wx86");
+    expect(c.status).toBe(200);
+    expect((await pkg()).status).toBe("building"); // the claim's word, as before
+    await env.DB.prepare("UPDATE build_tasks SET lease_expires_at = '2000-01-01T00:00:00Z' WHERE id = ?").bind(c.json.task.id).run();
+    expect(await requeueExpiredLeases(env)).toBe(1);
+    expect(await pkg()).toEqual({ status: "staged", detail: "build failed on wx86: lease by wx86 expired (the worker stopped mid-build?)" });
+    // The mirror: the staged build decided (rejected here, as review.ts cancels it), nothing of the name staged — the next failure puts the package back to registered with the reason.
+    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = 'rejected by m1: no' WHERE id = ?").bind(staged).run();
+    await env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, max_attempts) VALUES ('twoarch', 'x86_64', '1.0-1', 'https://github.com/alice/twoarch@HEAD:PKGBUILD', 'contributor', 100, 0, 'community', 'alice', 'build', 1)").run();
+    c = await call("POST", "/factory/claim", { arch: "x86_64" }, "omw_wx86");
+    expect(c.status).toBe(200);
+    expect((await call("POST", `/factory/tasks/${c.json.task.id}/fail`, { error: "exit 4: still no", final: true }, c.json.token)).json).toMatchObject({ status: "failed" });
+    expect(await pkg()).toEqual({ status: "registered", detail: "build failed on wx86: exit 4: still no" });
+  });
 });
 
 describe("an expired lease", () => {

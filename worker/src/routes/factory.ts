@@ -655,6 +655,33 @@ export async function handleComplete(id: number, request: Request, env: Env, act
   return json({ task: id, status: "done", attested });
 }
 
+/**
+ * The registration's one word after a community build of one architecture
+ * failed. A package has one status and may have a build per architecture,
+ * each on a worker of its own, so the word follows the builds, not the
+ * last worker to speak: while any build of the name is staged for a
+ * maintainer the package stays `staged` — Review counts it as waiting and
+ * the tile must not count it as not built — and only the detail says what
+ * the other architecture ran into; with nothing staged it goes to `fallback`
+ * (registered with the reason, or waiting when the task is queued again).
+ * omarchy-cli, 2026-09-18: aarch64 staged at 03:50, x86_64 gave up at 03:59
+ * and the row read `registered` beside a build waiting for review. The
+ * staging-drop handler (contributors.ts) keeps the same rule from its side.
+ * `only` narrows the write to a package in that status (the lease path
+ * touches a package it left `building`; a worker's own report touches the
+ * package whatever the claim or the other architecture wrote since).
+ */
+async function packageAfterFailure(env: Env, name: string, fallback: "registered" | "waiting", detail: string, only?: "building"): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE factory_packages SET
+       status = CASE WHEN EXISTS (SELECT 1 FROM build_tasks t WHERE t.kind = 'build' AND t.status = 'staged' AND t.name = factory_packages.name) THEN 'staged' ELSE ? END,
+       detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE name = ?${only ? " AND status = ?" : ""}`,
+  )
+    .bind(fallback, detail, name, ...(only ? [only] : []))
+    .run();
+}
+
 export async function handleFail(id: number, request: Request, env: Env, actor: Actor): Promise<Response> {
   const b = (await request.json()) as { error?: string; duration_ms?: number; log_tail?: string; final?: boolean };
   const task = await owned(env, id, actor);
@@ -687,7 +714,7 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
   // gate or the quota stopped it: the log and the recipe stay, the package goes.
   if (exhausted && task.kind === "build") await reclaimStagingPackages(env, [id]);
   if (task.trust === "community" && exhausted) {
-    await env.DB.prepare("UPDATE factory_packages SET status = 'registered', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(`build failed on ${who}: ${error.slice(0, 160)}`, task.name).run();
+    await packageAfterFailure(env, task.name, "registered", `build failed on ${who}: ${error.slice(0, 160)}`);
   } else if (review !== undefined && exhausted) {
     // The project's build failed: the contributor's stays staged, and the review row says what the project ran into.
     await env.DB.prepare("UPDATE factory_packages SET detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(`the project's build (task ${id}) failed on ${who}: ${error.slice(0, 160)}`, task.name).run();
@@ -717,9 +744,7 @@ export async function requeueExpiredLeases(env: Env): Promise<number> {
     // the reason. Left at "building", obsidian showed a build in progress
     // for hours after its third lease had died (2026-09-15).
     if (t.trust === "community" && t.kind === "build") {
-      await env.DB.prepare("UPDATE factory_packages SET status = ?, detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ? AND status = 'building'")
-        .bind(exhausted ? "registered" : "waiting", exhausted ? `build failed on ${t.lease_owner}: ${error} (the worker stopped mid-build?)` : `${error}; queued again`, t.name)
-        .run();
+      await packageAfterFailure(env, t.name, exhausted ? "registered" : "waiting", exhausted ? `build failed on ${t.lease_owner}: ${error} (the worker stopped mid-build?)` : `${error}; queued again`, "building");
     }
     await event(env, "build", exhausted ? "error" : "warn", `${t.name} for ${t.arch}: ${error}${exhausted ? " — giving up" : " — back in the queue"}`, { task: t.id, worker: t.lease_owner, attempts: t.attempts });
   }
