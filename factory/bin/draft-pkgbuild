@@ -130,7 +130,11 @@ SYS_CRATES = {
 def rust_depends(a):
     lock = a["files"].get("Cargo.lock", "")
     crates = set(re.findall(r'^name = "([^"]+)"', lock, re.M))
-    deps = sorted({SYS_CRATES[c] for c in crates if c in SYS_CRATES})
+    # Every Rust binary on a gnu target links libc and libgcc_s: glibc and libgcc,
+    # the names Arch's own Rust recipes list (ripgrep, fd, zoxide) — libgcc since
+    # gcc-libs became a meta-package, February 2026. The gate takes a linked
+    # library's package left out of depends as an error (glibc excepted).
+    deps = sorted({"glibc", "libgcc"} | {SYS_CRATES[c] for c in crates if c in SYS_CRATES})
     # git2 with the vendored feature needs nothing; the lock cannot tell, so
     # the dependency is declared and makepkg's namcap says if it is unused.
     return deps
@@ -265,7 +269,7 @@ def evidence_text(d):
 def draft(a, previous, log, hint, request=None, evidence=None):
     rules = open(os.path.join(os.path.dirname(__file__), "..", "prompts", "pkgbuild.md")).read() + agent.skills_text()
     facts = {k: v for k, v in a.items() if k not in ("files", "readme")}
-    user = "Project facts (native_deps_hint: Arch packages behind the -sys crates in Cargo.lock):\n" + json.dumps(facts, indent=1) + "\n\n"
+    user = "Project facts (native_deps_hint: the runtime a Rust binary links — glibc, libgcc — and the Arch packages behind the -sys crates in Cargo.lock):\n" + json.dumps(facts, indent=1) + "\n\n"
     if request:
         user += "The package request (on the record — pkgdesc, license, source and version follow it):\n" + json.dumps(request, indent=1) + "\n\n"
     for f, body in a["files"].items():

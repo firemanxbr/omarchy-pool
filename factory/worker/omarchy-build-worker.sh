@@ -189,6 +189,8 @@ prepare_container() {
   done
   pacman-key --init >/dev/null 2>&1 || true
   pacman -Syu --noconfirm --needed base-devel git namcap jq python pacman-contrib ccache desktop-file-utils >/dev/null
+  # namcap's library map, on every architecture (see namcap_sees_this_arch): without it the gate's ELF scan is blind on aarch64.
+  namcap_sees_this_arch || echo "==> namcap's library map is not the one this worker knows how to fix; on aarch64 its ELF scan may be blind (library-no-package-associated on libc itself)" >&2
   # The shellcheck binary is the gate's, not the build's: without it the gate says so (a warning) and the build goes on — never a build lost to a download.
   install_shellcheck || echo "==> shellcheck is not available here; the gate will say so" >&2
   # makepkg refuses root; `builder` builds, root installs the dependencies
@@ -199,7 +201,12 @@ prepare_container() {
   # image's makepkg.conf leaves MAKEFLAGS unset, which is one job; ccache
   # on, so a rebuild of the same sources compiles only what changed.
   mkdir -p /etc/makepkg.conf.d
-  printf 'MAKEFLAGS="-j%s"\nNINJAFLAGS="-j%s"\nBUILDENV=(!distcc color ccache check !sign)\n' "$(nproc)" "$(nproc)" > /etc/makepkg.conf.d/omarchy-pool.conf
+  # No -debug split: the pool serves no debug packages, and namcap fails every -debug split it meets here —
+  # its build-id symlinks point into the main package, which namcap resolves against the installed one, and
+  # the gate runs before the install (omarchy-cli #505, second attempt, 2026-09-18). Arch's x86_64 makepkg.conf
+  # has `debug` on and Arch Linux ARM's has it off; with it off on both, one recipe builds the same set of
+  # packages on both. `lto` stays Arch's default, a recipe opts out where the link cannot take it.
+  printf 'MAKEFLAGS="-j%s"\nNINJAFLAGS="-j%s"\nBUILDENV=(!distcc color ccache check !sign)\nOPTIONS+=(!debug)\n' "$(nproc)" "$(nproc)" > /etc/makepkg.conf.d/omarchy-pool.conf
   # Caches that outlive the container when the operator mounts /build/cache
   # (one directory per trust and architecture on the host; a fresh directory
   # otherwise). Inside it, one directory per package (run_makepkg): what a
@@ -442,6 +449,45 @@ install_shellcheck() {
   [[ "$(sha256 "$tmp")" == "$sum" ]] || { echo "shellcheck: checksum mismatch, not installed" >&2; rm -f "$tmp"; return 1; }
   tar -xJf "$tmp" -C /build && install -m755 "/build/shellcheck-$SHELLCHECK_VERSION/shellcheck" /usr/local/bin/shellcheck && rm -rf "$tmp" "/build/shellcheck-$SHELLCHECK_VERSION"
 }
+namcap_sees_this_arch() { # [sodepends.py] → 0 the library map covers aarch64 (patched now, or already), 1 namcap changed and it may not
+  # namcap maps a linked library to the package that owns it through `ldconfig -p`, and namcap 3.6.0 takes as
+  # 64-bit only the lines tagged `libc6,x86-64`: on aarch64 the tag is `libc6,AArch64`, no 64-bit ELF finds
+  # its map, and the scan says `library-no-package-associated` about libc itself — a warning — where x86_64
+  # names the missing dependency — an error. Two drafts of omarchy-cli 0.0.168, neither naming depends=,
+  # passed aarch64 blind and failed x86_64 on `libgcc` the same day (2026-09-18). The one line, until the
+  # namcap that carries it (master 9db9ba5c, 2026-01-27, unreleased) reaches the container: then the first
+  # grep stands this down.
+  local f="${1:-}"
+  if [[ -z "$f" ]]; then for f in /usr/lib/python3.*/site-packages/Namcap/rules/sodepends.py; do [[ -f "$f" ]] && break; done; fi
+  [[ -f "$f" ]] || return 1
+  grep -q 'libc6,AArch64' "$f" && return 0
+  grep -q 'startswith("libc6,x86-64")' "$f" || return 1
+  sed -i 's/startswith("libc6,x86-64")/startswith(("libc6,x86-64", "libc6,AArch64"))/' "$f"
+}
+namcap_map_blind() { # stdin: `namcap -m -i` on a built package → 0 when namcap found no package for libc itself
+  # glibc is on every worker, so a libc without a package is not a finding about the package: it is the
+  # library map not working here (namcap_sees_this_arch), and every other library is unmapped with it —
+  # a missing dependency would pass. The gate says so beside the warnings, so the audit weighs the cause.
+  grep -qE ' W: library-no-package-associated (libc\.so\.6|ld-linux-[a-z0-9-]+\.so\.[0-9]+) '
+}
+namcap_package_errors() { # stdin: `namcap -m -i` on a built package → the errors the gate weighs, one per line
+  # Machine-readable (-m): the rule's id, not its sentence — the exemptions name ids, and without -m they never
+  # matched (every Electron app failed on ELF files under /opt, 2026-09-16). Two exemptions, no more:
+  # glibc, the one package Arch's own guideline lets a recipe leave out (it cannot be uninstalled); and an ELF
+  # under /opt, where a self-contained application lives (skills: Desktop apps) — namcap 3.6.0 says it twice,
+  # `elffile-not-in-allowed-dirs opt/…` per file as information and `elffile-in-questionable-dirs opt/` once
+  # as the error, and only the second is ever here. Everything else namcap calls an error is one: the runtime
+  # included — `libgcc`, `libstdc++`, `libgomp`… are the names Arch gives its libraries since gcc-libs became
+  # a meta-package (February 2026), and its own recipes list them (skills: Every package, *Dependencies*).
+  # The gate exempted `gcc-libs` from 2026-09-16 to 2026-09-18, a name that owned no library by then.
+  grep -E ' E: ' | grep -vE 'E: (dependency-detected-not-included glibc |elffile-(not-in-allowed-dirs|in-questionable-dirs) opt/)' || true
+}
+namcap_package_warnings() { # stdin: `namcap -m -i` on a built package → the warnings the gate weighs, one per line
+  # The dynamic loader is NEEDED by every binary glibc links and `ldd -u` never sees it used, so namcap's
+  # `unused-sodepend` on ld-linux is the linker's doing, not the recipe's — every x86_64 Rust binary had it
+  # (#450, #505) and no recipe can clear it. On any other library the same warning is the package's own.
+  grep -E ' W: ' | grep -vE 'W: unused-sodepend /usr/lib(64)?/ld-linux-[^ ]+ ' || true
+}
 
 # ------------------------------------------------------------------ gate ---
 # What every package must pass before it is evidence, on both sides of the
@@ -534,20 +580,22 @@ vet_package() { # name → 0 pass (maybe warnings), 5 fail; writes vet.json and 
   elif grep -qE "^PKGBUILD.* W: " <<<"$out"; then vet_add namcap-pkgbuild warn "$(grep -E ' W: ' <<<"$out" | head -4 | tr '\n' ' ')"
   else vet_add namcap-pkgbuild pass "clean"; fi
   # 4. namcap on every built package: dependencies the ELF scan finds, permissions, paths, srcdir leaks, the licence.
-  # Machine-readable (-m): the rule's id, not its sentence — the two exemptions below name ids, and without -m
-  # they never matched (every Electron app failed on ELF files under /opt, 2026-09-16). glibc and gcc-libs are
-  # always there; ELF under /opt is where a self-contained application lives (skills: Desktop apps).
+  # The errors it weighs, and what it lets pass, are namcap_package_errors; the library map behind the
+  # ELF scan is namcap_sees_this_arch (prepare_container).
   local p e w
   for p in "${pkgs[@]}"; do
     out="$(as_builder namcap -m -i "$p" 2>&1 || true)"
-    e="$(grep -E ' E: ' <<<"$out" | grep -vE 'E: (dependency-detected-not-included (glibc|gcc-libs)|elffile-not-in-allowed-dirs.*opt/)' | head -6 | tr '\n' ' ')"
-    w="$(grep -E ' W: ' <<<"$out" | head -6 | tr '\n' ' ')"
+    e="$(namcap_package_errors <<<"$out" | head -6 | tr '\n' ' ')"
+    w="$(namcap_package_warnings <<<"$out" | head -6 | tr '\n' ' ')"
     if [[ -n "$e" ]]; then vet_add "namcap-package:$(basename "$p")" fail "$e"
     elif [[ -n "$w" ]]; then vet_add "namcap-package:$(basename "$p")" warn "$w"
     else vet_add "namcap-package:$(basename "$p")" pass "clean"; fi
+    # A libc without a package is the map, not the package: the scan found no owner for any library here.
+    if namcap_map_blind <<<"$out"; then vet_add "namcap-libmap:$(basename "$p")" warn "namcap found no package for libc itself: its library map does not work on this worker (namcap_sees_this_arch), so a missing dependency passes here unseen"; fi
   done
   # 4b. a recipe that compiles nothing (no build(): a prebuilt binary) has no debug info of its own: makepkg's
-  # default debug option then makes a -debug split of dangling build-id symlinks that namcap fails on, and
+  # debug option (off in the pool's makepkg.conf.d since 2026-09-18, so only a recipe that turns it on gets
+  # here) then makes a -debug split of dangling build-id symlinks that namcap fails on, and
   # an agent reads "dangling-symlink" and looks in the wrong place (omarchy-cli-bin, 2026-09-17). The rule
   # is options=('!debug'); the gate says so (skills: Prebuilt binaries).
   if ! grep -qE '^build\(\)' /build/pkg/PKGBUILD; then
