@@ -510,7 +510,7 @@ but the sizing ones (`factory/sizing/`, benchmarks). Day to day:
     worker has **14 days**; then any shared worker (`WORKER_SHARED=1`,
     anyone's) may build it. (A contributor's request is different: it lands in the
     shared queue at once — any shared worker, the best idle one first for
-    three minutes, the owner's own at any time — and a build asked for one
+    three minutes, the owner's own native worker at any time — and a build asked for one
     worker — `worker` in `POST /factory/packages/<name>/build`, `pinned_to`
     on the task — waits for that worker only; revoking the worker frees it;
     the owner takes a queued build out with

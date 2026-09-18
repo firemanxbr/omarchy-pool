@@ -722,6 +722,80 @@ describe("where a build runs", () => {
     await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE name = 'noworker' AND status IN ('queued', 'leased')").run();
     await env.DB.prepare("UPDATE build_workers SET revoked_at = '2026-01-01T00:00:00Z' WHERE id = 'w7'").run();
   });
+  it("an emulated worker has no first pick of its owner's build either: handed nothing while a native shared worker is idle, it takes the build when that one is busy or after three minutes, and one pinned to it at once", async () => {
+    // dave's own request; w7 (dave's native worker) is back, idle and just seen; w5 claims as dave's emulated one.
+    await env.DB.prepare("UPDATE build_workers SET revoked_at = NULL, current_task = NULL, last_seen = ? WHERE id = 'w7'").bind(new Date().toISOString()).run();
+    const made = await call("POST", "/factory/packages", req("rusty"), "omc_dave");
+    expect(made.status).toBe(201);
+    const id = made.json.build.tasks[0];
+    const emu = { arch: "aarch64", shared: true, labels: { emulated: true }, usage: { cpu: 1, ram: 1, disk: 1, cores: 4, ram_gb: 16 }, agent: "claude-code/claude-sonnet-5", agent_status: "ok" };
+    expect((await call("POST", "/factory/claim", emu, "omw_w5")).status).toBe(204); // its owner's, but w7 is native and idle
+    // Native, the same worker keeps its owner's as its own — w7's twelve cores or not.
+    const c0 = await call("POST", "/factory/claim", { ...emu, labels: {} }, "omw_w5");
+    expect(c0.status).toBe(200);
+    expect(c0.json.task.id).toBe(id);
+    await env.DB.prepare("UPDATE build_tasks SET status = 'queued', lease_owner = NULL WHERE id = ?").bind(id).run();
+    // w7 busy: the emulated one takes its owner's build after all.
+    await env.DB.prepare("UPDATE build_workers SET current_task = 1 WHERE id = 'w7'").run();
+    const c = await call("POST", "/factory/claim", emu, "omw_w5");
+    expect(c.status).toBe(200);
+    expect(c.json.task.id).toBe(id);
+    // Older than three minutes, w7 idle again: anyone's, the emulated owner's worker included.
+    await env.DB.prepare("UPDATE build_tasks SET status = 'queued', lease_owner = NULL, created_at = ? WHERE id = ?").bind(new Date(Date.now() - 4 * 60000).toISOString(), id).run();
+    await env.DB.prepare("UPDATE build_workers SET current_task = NULL, last_seen = ? WHERE id = 'w7'").bind(new Date().toISOString()).run();
+    const c2 = await call("POST", "/factory/claim", emu, "omw_w5");
+    expect(c2.status).toBe(200);
+    expect(c2.json.task.id).toBe(id);
+    // Pinned to it and fresh, w7 idle: handed to it at once.
+    await env.DB.prepare("UPDATE build_tasks SET status = 'queued', lease_owner = NULL, created_at = ?, pinned_to = 'w5' WHERE id = ?").bind(new Date().toISOString(), id).run();
+    const c3 = await call("POST", "/factory/claim", emu, "omw_w5");
+    expect(c3.status).toBe(200);
+    expect(c3.json.task).toMatchObject({ id, pinned_to: "w5" });
+    await env.DB.prepare("UPDATE build_tasks SET status = 'queued', lease_owner = NULL, pinned_to = NULL, attempts = 0 WHERE id = ?").bind(id).run();
+  });
+  it("a build a toolchain cannot start on the worker goes back to the queue for a native one: the attempt given back, its pin and its owner's days dropped, the package and the journal say what it waits for, no emulated worker is handed it again — asked again it still waits for one; the same word from a native worker is a plain failure, and a final one fails as before", async () => {
+    const id = (await env.DB.prepare("SELECT id FROM build_tasks WHERE name = 'rusty' AND status = 'queued'").first<{ id: number }>())!.id;
+    // The worst case: a bump's fourteen days for the owner's worker, pinned to the emulated one — nothing else could take it.
+    const days = new Date(Date.now() + 14 * 86400000).toISOString();
+    await env.DB.prepare("UPDATE build_tasks SET params = '{\"hint\":\"use cargo\"}', pinned_to = 'w5', shared_after = ? WHERE id = ?").bind(days, id).run();
+    const emu = { arch: "aarch64", shared: true, labels: { emulated: true }, usage: { cpu: 1, ram: 1, disk: 1, cores: 4, ram_gb: 16 }, agent: "claude-code/claude-sonnet-5", agent_status: "ok" };
+    const nat = { arch: "aarch64", shared: true, labels: { where: "big" }, usage: { cpu: 1, ram: 1, disk: 1, cores: 12, ram_gb: 32 }, agent: "claude-code/claude-sonnet-5", agent_status: "ok" };
+    // w5 (emulated) takes dave's build — its by name — installs the toolchain, and rustc cannot start.
+    const c = await call("POST", "/factory/claim", emu, "omw_w5");
+    expect(c.status).toBe(200);
+    expect(c.json.task).toMatchObject({ id, attempts: 1, pinned_to: "w5" });
+    const rustc = "exit 96: rustc cannot start on this worker: emulated x86_64 under qemu on a host whose page size is not the guest's — a native worker is needed for this package";
+    const f = await call("POST", `/factory/tasks/${id}/fail`, { error: rustc, duration_ms: 540000, needs_native: true, final: false }, c.json.token);
+    expect(f.json).toEqual({ task: id, status: "queued", attempts: 0 });
+    const row = (await env.DB.prepare("SELECT status, attempts, priority, lease_owner, pinned_to, shared_after, error, params FROM build_tasks WHERE id = ?").bind(id).first<{ status: string; attempts: number; priority: number; lease_owner: string | null; pinned_to: string | null; shared_after: string | null; error: string; params: string }>())!;
+    expect(row).toMatchObject({ status: "queued", attempts: 0, priority: 110, lease_owner: null, pinned_to: null, shared_after: null, error: rustc });
+    expect(JSON.parse(row.params)).toEqual({ hint: "use cargo", needs_native: 1 }); // the hint stays; the mark is added
+    expect(await env.DB.prepare("SELECT status, detail FROM factory_packages WHERE name = 'rusty'").first()).toEqual({ status: "waiting", detail: `waiting for a native aarch64 worker (task ${id})` });
+    expect(await env.DB.prepare("SELECT status, summary FROM events WHERE kind = 'build' ORDER BY id DESC LIMIT 1").first()).toEqual({ status: "warn", summary: expect.stringMatching(/^rusty for aarch64 on w5 needs a native aarch64 worker — back in the queue for one, the pin to w5 dropped: exit 96: rustc cannot start/) });
+    // The emulated worker is handed nothing — w7 busy, the build older than three minutes, its owner's: none of that counts now.
+    await env.DB.prepare("UPDATE build_tasks SET created_at = ? WHERE id = ?").bind(new Date(Date.now() - 4 * 60000).toISOString(), id).run();
+    await env.DB.prepare("UPDATE build_workers SET current_task = 1 WHERE id = 'w7'").run();
+    expect((await call("POST", "/factory/claim", emu, "omw_w5")).status).toBe(204);
+    // Asked again with no worker named, it waits for a native one still; named, the choice is the asker's.
+    const again = await call("POST", "/factory/packages/rusty/build", { hint: "cargo, not make" }, "omc_dave");
+    expect(again.json.tasks).toEqual([id]);
+    expect(JSON.parse((await env.DB.prepare("SELECT params FROM build_tasks WHERE id = ?").bind(id).first<{ params: string }>())!.params)).toEqual({ hint: "cargo, not make", needs_native: 1 });
+    expect((await call("POST", "/factory/claim", emu, "omw_w5")).status).toBe(204);
+    // A native worker takes it, with the mark in its params. Its "needs_native" is no such thing — a plain failure, retried like any other.
+    await env.DB.prepare("UPDATE build_workers SET current_task = NULL, last_seen = ? WHERE id = 'w7'").bind(new Date().toISOString()).run();
+    const n = await call("POST", "/factory/claim", nat, "omw_w7");
+    expect(n.status).toBe(200);
+    expect(n.json.task).toMatchObject({ id, attempts: 1, params: { hint: "cargo, not make", needs_native: 1 } });
+    expect((await call("POST", `/factory/tasks/${id}/fail`, { error: "exit 96: rustc cannot start on this worker", needs_native: true, final: false }, n.json.token)).json).toEqual({ task: id, status: "queued", attempts: 1 });
+    expect(await env.DB.prepare("SELECT status, summary FROM events WHERE kind = 'build' ORDER BY id DESC LIMIT 1").first()).toEqual({ status: "warn", summary: expect.stringMatching(/^rusty for aarch64 failed on w7 \(attempt 1\/3\) — back in the queue/) });
+    // And its failure that is the recipe's fails at once, as before: the package says why.
+    const n2 = await call("POST", "/factory/claim", nat, "omw_w7");
+    expect(n2.json.task).toMatchObject({ id, attempts: 2 });
+    const final = await call("POST", `/factory/tasks/${id}/fail`, { error: "exit 4: error: could not compile `rusty`", final: true }, n2.json.token);
+    expect(final.json).toEqual({ task: id, status: "failed", attempts: 2 });
+    expect(await env.DB.prepare("SELECT status, detail FROM factory_packages WHERE name = 'rusty'").first()).toEqual({ status: "registered", detail: "build failed on w7: exit 4: error: could not compile `rusty`" });
+    await env.DB.prepare("UPDATE build_workers SET revoked_at = '2026-01-01T00:00:00Z' WHERE id = 'w7'").run();
+  });
   it("a maintainer names the project's worker for the project's build — one that builds this architecture", async () => {
     await env.DB.batch([
       env.DB.prepare("INSERT INTO factory_packages (name, owner, url, arches, status, project, source, description, license) VALUES ('pinme', 'alice', 'https://pinme.example', '[\"aarch64\"]', 'staged', 'https://pinme.example', 'https://pinme.example/pinme-1.tar.gz', 'A tool for the test', 'MIT')"),

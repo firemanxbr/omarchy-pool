@@ -68,4 +68,6 @@ host in minutes: copy `compose.yml`, `.env`, `etc/agent.env`,
 `etc/community-x86_64.env` and `etc/review-x86_64.env` there, drop the
 `profiles:` lines (they are native there), `docker compose up -d
 broker-community-x86_64 community-x86_64 review-x86_64`. `COMPOSE_PROFILES=emulated` in `.env`
-turns the emulated pair on here regardless, for C-only packages.
+turns the emulated pair on here regardless, for C-only packages (a
+toolchain that cannot start there sends the build back to the queue: *Run a
+worker* in the docs).

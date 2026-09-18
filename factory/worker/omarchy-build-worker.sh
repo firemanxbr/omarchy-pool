@@ -386,8 +386,9 @@ install_deps() {
 # on load before any recipe runs (felix, 2026-09-17: four builds, three
 # attempts each, an agent "correcting" a PKGBUILD that was never the
 # problem). So, once the dependencies are in, each toolchain the recipe
-# brought must start; one that cannot fails the build now, with the reason,
-# and the pool's page says: a native worker.
+# brought must start; one that cannot ends the build here, with the reason,
+# and the report sends it back to the queue for a native worker. Its status
+# is nobody else's: makepkg's own 6 is a source file it cannot find.
 toolchains_start() {
   local emulated t
   emulated="$(jq -r '.emulated // false' <<<"${WORKER_LABELS:-"{}"}" 2>/dev/null || echo false)"
@@ -399,7 +400,7 @@ toolchains_start() {
     if ! "$t" "$probe" >/dev/null 2>&1; then
       # The page size qemu shows the guest is the guest's (4096); the host's — 16 KB on Asahi — is what stops rustc.
       echo "==> $t cannot start on this worker: emulated $(uname -m) under qemu on a host whose page size is not the guest's — a native worker is needed for this package" >&2
-      return 6
+      return 96
     fi
   done
   return 0
@@ -424,7 +425,7 @@ run_makepkg() { # name → /build/out/*.pkg.tar.zst
   # namcap flags the obvious (missing deps, bad permissions) before the build.
   as_builder namcap /build/pkg/PKGBUILD || true
   install_deps
-  toolchains_start || return 6
+  toolchains_start || return 96
   # zst whatever the image's makepkg.conf says (Arch Linux ARM defaults to xz).
   (cd /build/pkg && as_builder env PKGDEST=/build/out PKGEXT=.pkg.tar.zst PACKAGER="omarchy-pool factory <https://github.com/firemanxbr/omarchy-pool>" \
     CARGO_HOME="$cache/cargo" CARGO_BUILD_JOBS="$(nproc)" GOMODCACHE="$cache/go/mod" GOCACHE="$cache/go/build" GOFLAGS=-modcacherw CCACHE_DIR="$cache/ccache" \
@@ -692,7 +693,7 @@ build_attempts() { # name ref
     else
       cat /build/attempt.log
       # The worker itself cannot build this (a toolchain that does not start under emulation): no drafter turns it around.
-      if (( rc == 6 )); then return 6; fi
+      if (( rc == 96 )); then return 96; fi
       if (( attempt >= max )); then return 4; fi
     fi
     attempt=$((attempt + 1))
@@ -803,24 +804,28 @@ container_worker() {
   if [[ $status -ne 0 ]]; then
     kill "$BEAT" 2>/dev/null || true
     local err
-    if (( status == 6 )); then err="$(grep -m1 -E 'cannot start on this worker' /build/build.log | sed 's/^==> //' || echo "a toolchain cannot start on this emulated worker")"
+    if (( status == 96 )); then err="$(grep -m1 -E 'cannot start on this worker' /build/build.log | sed 's/^==> //' || echo "a toolchain cannot start on this emulated worker")"
     elif (( status == 5 )); then err="the gate: $(jq -r '[.checks[] | select(.status == "fail") | .name + ": " + .detail] | join("; ")' "$VET_JSON" 2>/dev/null | head -c 400)"
     else err="$(grep -m1 -E '^(==> ERROR|error|Error|fatal)' /build/build.log || tail -n1 /build/build.log)"; fi
     # The pool retries a task for the infrastructure's sake — a download
     # that broke, a mirror, a container killed under it. A recipe that
     # fails, fails the same way in the next fresh container: the report
     # says so (`final`) and the task fails now; the contributor fixes the
-    # PKGBUILD (or sets GITHUB_TOKEN) and queues a new build.
-    local final=true
+    # PKGBUILD (or sets GITHUB_TOKEN) and queues a new build. A toolchain
+    # that cannot start here (exit 96, toolchains_start's alone) is this
+    # worker's fault, not the recipe's: `needs_native` sends the build back
+    # to the queue for a native worker, and the pool does not count the attempt.
+    local final=true native=false
     if grep -qE 'Failure while downloading|curl: \([0-9]+\)|failed retrieving file|failed to synchronize|Could not resolve host|Connection (timed out|refused|reset)|Temporary failure in name resolution' /build/build.log; then final=false; fi
-    log "task $id: failed (exit $status$( [[ "$final" == true ]] && echo ", the recipe's — not retried" )) — ${err:0:200}"
+    if (( status == 96 )); then final=false native=true; fi
+    log "task $id: failed (exit $status$( [[ "$final" == true ]] && echo ", the recipe's — not retried" )$( [[ "$native" == true ]] && echo ", this worker's — back in the queue for a native one" )) — ${err:0:200}"
     # Upload what there is for the record, then report.
     upload_staging "$id" /build/build.log build.log || true
     [[ -f /build/pkg/PKGBUILD ]] && upload_staging "$id" /build/pkg/PKGBUILD PKGBUILD || true
     [[ -f "$VET_JSON" ]] && upload_staging "$id" "$VET_JSON" vet.json && upload_staging "$id" "$VET_LOG" tests.log || true
     [[ -f "$RES_JSON" ]] && upload_staging "$id" "$RES_JSON" resources.json || true
     REPORTED=1
-    api POST "/factory/tasks/$id/fail" "$(jq -n --arg e "exit $status: ${err:0:500}" --argjson d "$took" --argjson t "$tail" --argjson f "$final" '{error:$e,duration_ms:$d,log_tail:$t,final:$f}')" >/dev/null || true
+    api POST "/factory/tasks/$id/fail" "$(jq -n --arg e "exit $status: ${err:0:500}" --argjson d "$took" --argjson t "$tail" --argjson f "$final" --argjson n "$native" '{error:$e,duration_ms:$d,log_tail:$t,final:$f,needs_native:$n}')" >/dev/null || true
     exit 1
   fi
   shopt -s nullglob
