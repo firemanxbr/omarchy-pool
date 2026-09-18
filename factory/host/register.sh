@@ -11,7 +11,7 @@
 # replace a registration, revoke it on the dashboard (or DELETE
 # /factory/workers/<id>), blank the token in its env file, run again.
 set -euo pipefail
-: "${OMARCHY_API:=https://pkgs.firemanxbr.org}"
+: "${OMARCHY_API:=https://pkgs.omarchy-pool.org}"
 : "${OMARCHY_CONTRIBUTOR_TOKEN:?OMARCHY_CONTRIBUTOR_TOKEN is required: the contributor token of a maintainer, from the profile page (never paste it anywhere else)}"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 where="$(sed -n 's/^WHERE=//p' "$here/.env" 2>/dev/null | head -1)"; where="${where:-$(hostname -s)}"

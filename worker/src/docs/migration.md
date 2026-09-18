@@ -12,10 +12,10 @@ Throughout, replace:
 |---|---|---|
 | `NEWORG/omarchy-pool` | the new GitHub repository | `firemanxbr/omarchy-pool` |
 | `ACCOUNT_ID` | the new Cloudflare account id | `34f1918ac9ca522150a1830ea9b61a40` |
-| `example.org` | the DNS zone in the new Cloudflare account | `firemanxbr.org` |
-| `pool.example.org` | the **pool** host (R2 custom domain; what pacman reads) | `pool.firemanxbr.org` |
-| `pkgs.example.org` | the **API** host (worker) | `pkgs.firemanxbr.org` |
-| `omarchy-pool.example.org` | the **dashboard** host (worker) | `omarchy-pool.firemanxbr.org` |
+| `example.org` | the DNS zone in the new Cloudflare account | `omarchy-pool.org` (since 2026-09-18; `firemanxbr.org` keeps the old names, serving or redirecting) |
+| `pool.example.org` | the **pool** host (R2 custom domain; what pacman reads) | `pool.omarchy-pool.org` (`pool.firemanxbr.org` still serves) |
+| `pkgs.example.org` | the **API** host (worker) | `pkgs.omarchy-pool.org` (`pkgs.firemanxbr.org` still serves) |
+| `omarchy-pool.example.org` | the **dashboard** host (worker) | `omarchy-pool.org` |
 
 Tools on the machine doing the migration: `git`, `gh` (logged in to the new
 organisation), `node` 22 with `npm`, `wrangler` (comes with `npm ci` in `worker/`),
@@ -98,13 +98,15 @@ npx wrangler d1 create omarchy-repo                 # prints the database_id
 ### B3. Point the code at the new account
 
 Edit **`worker/wrangler.toml`**: `account_id = "ACCOUNT_ID"`, the printed
-`database_id`, the three `routes` patterns (`pkgs.example.org`,
-`omarchy-pool.example.org`, and the legacy dashboard pattern — remove it if
-there is no old name to redirect), and `POOL_URL = "https://pool.example.org"`.
+`database_id`, the `routes` patterns (`pkgs.example.org`,
+`omarchy-pool.example.org`, and one per old name that must go on answering or
+redirecting — six today, on two zones; drop the ones with no old name behind
+them), and `POOL_URL = "https://pool.example.org"`.
 
 Edit **`worker/src/meta.ts`**: `REPO_URL` (`https://github.com/NEWORG/omarchy-pool`),
-`DASHBOARD_HOST`, `LEGACY_DASHBOARD_HOST` (or delete the redirect in
-`worker/src/index.ts`).
+`DASHBOARD_HOST`, `API_HOST`, `LEGACY_API_HOST` and `LEGACY_DASHBOARD_HOSTS`
+(or delete the redirect in `worker/src/index.ts`), `LEGACY_POOL_HOSTS` (the
+audience count reads every pool host).
 
 Edit **`worker/src/scheduler.ts`** (`REPO`), **`worker/src/governance.ts`**,
 **`worker/src/requests.ts`** and **`crates/pkg-repo/src/reconcile.rs`**: the
@@ -116,7 +118,7 @@ Edit **`crates/omarchy-cli/src/config.rs`**: the default `api` and `pool` URLs.
 Search for the old hosts to be sure nothing is left:
 
 ```bash
-grep -rn "firemanxbr" --exclude-dir=node_modules --exclude-dir=target --exclude-dir=.git .
+grep -rn "omarchy-pool\.org\|firemanxbr" --exclude-dir=node_modules --exclude-dir=target --exclude-dir=.git .
 ```
 
 What remains are documentation and the key's e-mail address (part D).
@@ -126,24 +128,25 @@ What remains are documentation and the key's e-mail address (part D).
 pacman reads packages and databases straight from the bucket, so the bucket
 needs its own hostname: Cloudflare dashboard → *R2 → omarchy-packages → Settings
 → Custom domains → Connect domain* → `pool.example.org`. (Wrangler cannot do
-this one.) The worker's two hostnames are created by the first deploy from the
-`routes` in `wrangler.toml`.
+this one.) The worker's hostnames (every `routes` pattern) are created by the
+first deploy from `wrangler.toml`.
 
 ### B5. Worker secrets
 
 ```bash
 openssl rand -hex 32 | npx wrangler secret put JOB_TOKEN_SECRET   # signs the per-job tokens; nobody else needs it
 npx wrangler secret put GITHUB_TOKEN  < ../github-token           # part C
-npx wrangler secret put CLOUDFLARE_ANALYTICS_TOKEN                # an API token with Account Analytics: Read and D1: Read — the daily cost estimate (RUNBOOK, Costs)
+npx wrangler secret put CLOUDFLARE_ANALYTICS_TOKEN                # an API token with Account Analytics: Read and D1: Read — the daily cost estimate and the audience count (RUNBOOK, Costs)
 ```
 
 ### B6. An API token for the release workflow
 
 Cloudflare dashboard → *Manage account → Account API tokens → Create Token →
 Custom*: **Account** → Workers Scripts: Edit, D1: Edit, Account Settings: Read;
-**Zone** (`example.org`) → Workers Routes: Edit, Zone: Read. Save it as the GitHub
-secret `CLOUDFLARE_API_TOKEN` (A3). Every merge into `main` then migrates the
-database and deploys the worker with the release version.
+**Zone** (`example.org`, and every zone an old name in `routes` lives on) →
+Workers Routes: Edit, Zone: Read. Save it as the GitHub secret
+`CLOUDFLARE_API_TOKEN` (A3). A release (`gh workflow run release.yml`) then
+migrates the database and deploys the worker with the release version.
 
 ### B7. First deploy
 
@@ -244,7 +247,9 @@ Until then, moving the pool moves them too:
   `ghcr.io/<owner>/omarchy-worker` (the `worker-image` jobs of `release.yml`);
   the compose file and the README name it.
 - Sign in with GitHub: a GitHub OAuth App on the new organisation
-  (callback `https://<dashboard>/auth/github/callback`): client id in
+  (callback `https://<dashboard>/auth/github/callback`, today
+  `https://omarchy-pool.org/auth/github/callback`; the App may hold several):
+  client id in
   `wrangler.toml` (`GITHUB_OAUTH_CLIENT_ID`), secret with
   `npx wrangler secret put GITHUB_OAUTH_CLIENT_SECRET`.
 - Workers: register one per architecture for the hosted fallback (`POST

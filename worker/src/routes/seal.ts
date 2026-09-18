@@ -23,7 +23,10 @@ export const RECIPES_LEFT_AT = "2026-09-17T00:00:00Z";
 export function recipesDir(createdAt: string | undefined): string {
   return createdAt && createdAt < RECIPES_LEFT_AT ? "factory/pkgbuilds" : "factory/sizing";
 }
-const PREDICATE_TYPE = "https://omarchy-pool.firemanxbr.org/provenance/v1";
+// An in-toto predicateType is a name, frozen from the first attestation that
+// carries it; moved to the product's domain on 2026-09-18 while none had been
+// written. A schema change is /v2, never a rename.
+const PREDICATE_TYPE = "https://omarchy-pool.org/provenance/v1";
 
 /** Which project's keyring the sync verified a source's packages against (crates/pkg-repo, tests/fetch-keyrings.sh). */
 function upstreamOf(source: string, repoArch: string): { project: string; keyring: string } {

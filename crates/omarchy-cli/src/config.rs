@@ -25,9 +25,10 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            // The POC staging repository; production will move this to omarchy.org.
-            api: "https://pkgs.firemanxbr.org".into(),
-            pool: "https://pool.firemanxbr.org".into(),
+            // The pool's own domain (since 2026-09-18). The names it moved from
+            // still answer, so a machine set up before the move keeps working.
+            api: "https://pkgs.omarchy-pool.org".into(),
+            pool: "https://pool.omarchy-pool.org".into(),
             ring: "stable".into(),
             repo: "omarchy".into(),
             arch: std::env::consts::ARCH.into(),

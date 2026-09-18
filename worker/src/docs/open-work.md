@@ -62,7 +62,7 @@ Pool retention with grace period · signature verification on import against the
 upstream keyrings · resilient publishing (retries, parallel imports, per-source
 reports) · every Arch, Arch Linux ARM and OPR repository mirrored on both
 architectures · paged release view · evidence-driven promotion with ABI check and
-automatic rollback · releases of the pool itself on every merge · dashboard with
+automatic rollback · releases of the pool itself by dispatch · dashboard with
 coverage, charts and pipeline metrics · user-facing dashboard (rings guidance, Get
 started, How it works, Status, API docs, mobile) · package search and package page
 with dependency graph · OPR channels per ring, chaotic-aur as optional repo ·

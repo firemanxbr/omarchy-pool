@@ -273,8 +273,8 @@ export async function runScheduler(env: Env, now = new Date()): Promise<string[]
     }
   }
   // Who used the pool yesterday: counted once a day after 00:30 UTC from the
-  // zone's analytics (audience.ts); one event, no per-request data.
-  if (now.getUTCHours() * 60 + now.getUTCMinutes() >= 30 && env.CLOUDFLARE_ANALYTICS_TOKEN && env.CLOUDFLARE_ZONE_ID) {
+  // account's request analytics (audience.ts); one event, no per-request data.
+  if (now.getUTCHours() * 60 + now.getUTCMinutes() >= 30 && env.CLOUDFLARE_ANALYTICS_TOKEN && env.CLOUDFLARE_ACCOUNT_ID) {
     try {
       const a = await dailyAudience(env, now);
       if (a !== "audience: measured today") log.push(a);

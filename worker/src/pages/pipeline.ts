@@ -93,7 +93,7 @@ const BODY = String.raw`
     <p class="sub">D1 rows read and written are most of the bill. Estimated ${ESTIMATE_CADENCE}; the report warns from US$ <span data-live="cost-warn">…</span>, the guard pauses the jobs that write at US$ <span data-live="cost-guard">…</span>, the cap is US$ <span data-live="cost-cap">…</span>; the daily report says why.</p>
     <div class="budget" id="budget"><div><div class="k">this month</div><b>…</b></div><div><div class="k">projected</div><b>…</b></div><div class="bar"><i style="width:0"></i></div></div>
     <div class="sponsor"><div><p><b>Help keep it running.</b> The pool runs on one pocket: the brain on Cloudflare, one machine building for both architectures, and the agent tokens that draft and audit PKGBUILDs. More hardware means shorter queues; more tokens mean every build gets an audit.</p><div class="needs"><span class="pill lilac">an aarch64 builder</span><span class="pill lilac">an x86_64 builder</span><span class="pill lilac">agent tokens</span><span class="pill lilac">a mirror in another region</span></div></div>
-    <div class="side"><a class="mail" href="mailto:sponsor@firemanxbr.org">sponsor@firemanxbr.org</a><span class="promise">Every contribution shows up on this page, and the code stays open source — that is the deal.</span></div></div>
+    <div class="side"><a class="mail" href="mailto:sponsor@omarchy-pool.org">sponsor@omarchy-pool.org</a><span class="promise">Every contribution shows up on this page, and the code stays open source — that is the deal.</span></div></div>
   </section>
 `;
 
@@ -640,7 +640,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
   {
     id: "pipeline.sponsor",
     page: "/pipeline",
-    anchor: ['class="sponsor"', "Help keep it running.", 'href="mailto:sponsor@firemanxbr.org"'],
+    anchor: ['class="sponsor"', "Help keep it running.", 'href="mailto:sponsor@omarchy-pool.org"'],
     visible: EVERYONE,
   },
 ];

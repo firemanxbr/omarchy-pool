@@ -51,7 +51,7 @@
 # in project mode (--idle-exit, --once; --kind and --labels are the role's
 # when a role is set); in community mode they are ignored.
 set -euo pipefail
-: "${OMARCHY_API:=https://pkgs.firemanxbr.org}"
+: "${OMARCHY_API:=https://pkgs.omarchy-pool.org}"
 role="${OMARCHY_WORKER_ROLE:-}"
 case "$role" in ""|pool|review|community|agent|broker|updater) ;; *) echo "omarchy-worker: OMARCHY_WORKER_ROLE must be pool, review, community, broker, agent or updater (or unset)" >&2; exit 2 ;; esac
 # The updater: the compose project (COMPOSE_DIR, mounted at the same path)

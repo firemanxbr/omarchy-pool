@@ -84,7 +84,8 @@ the network. Two kinds of tests live there:
 | `leak.test.ts` | the shapes a public log must not carry (`src/leak.ts`): each kind, the first hit's line, and the ordinary things a log says that are not one |
 | `pages.test.ts` | the dashboard's pages through the Worker's fetch handler, over the fixture: every door and detail page served with the shared frame, no page script using a name it does not declare (parsed with acorn, not grepped), no template placeholder left behind, no id served twice (a script draws into the first element of that name), the docs shell with every chapter's sections, the old chapter addresses still redirecting, the diagrams drawing no two boxes over each other |
 | `components.test.ts` | what each page is made of, against the served dashboard: every component's anchor in its page's HTML and its literals in the page's script, every read routed and answering JSON with the fields the page draws, every act routed with its method — and with no other — and answering per role what the manifest says, and the other way round: no fetch in a page script that nobody declares |
-| `audience.test.ts` | one day of the zone's request analytics becomes one number per ring and per architecture; recorded once as an `audience` event; a token without *Zone · Analytics · Read* is reported once for the day, then quiet |
+| `audience.test.ts` | one day of the account's request analytics, both pool hosts in one query, becomes one number per ring and per architecture; recorded once as an `audience` event; a token without *Account · Analytics · Read* is reported once for the day, then quiet |
+| `hosts.test.ts` | the pool's names (`src/meta.ts`): a page on an old dashboard name or www moves to omarchy-pool.org with its path and query (301 for a read, 308 otherwise) and its `/api/v1/*` is answered in place; the API's two names and the tests' pool.test serve without a redirect; a sign-in pressed on the API host starts over on the dashboard before any cookie; the setup script, the worker CLI and the include's comment name the API host on every production name, the request's own elsewhere; one edge key serves every name |
 | `provenance.test.ts` | the OPR provenance scan against a stubbed GitHub: origin per package from the tree and `.omarchy/package.json`, only changed packages fetched again, packages gone from the repository dropped, the per-ring counts |
 | `jobtoken`, `scheduler`, `governance`, `updates`, `metrics`, `cost`, `signing` | the pure functions: tokens and scopes, the scheduler's rules, the governance file, bump detection, the metrics snapshot shape, the bill estimate, OpenPGP signing |
 
@@ -214,7 +215,7 @@ The container needs `DisableSandboxSyscalls` in `/etc/pacman.conf` because pacma
 You can also point the client at any rootfs by hand:
 
 ```bash
-OMARCHY_API=https://pkgs.firemanxbr.org omarchy-cli --root target/rootfs-2021 check xz
+OMARCHY_API=https://pkgs.omarchy-pool.org omarchy-cli --root target/rootfs-2021 check xz
 ```
 
 ## Benchmark (historical)
@@ -384,9 +385,9 @@ already serves the source's head is a skip. `cargo test -p pkg-repo gate` and
 
 ## Cloudflare (staging)
 
-The staging worker runs at `https://pkgs.firemanxbr.org` (index API + dashboard at
-`https://omarchy-pool.firemanxbr.org`) with a real D1 database and an R2 bucket
-whose custom domain `https://pool.firemanxbr.org` serves packages and databases
+The staging worker runs at `https://pkgs.omarchy-pool.org` (index API + dashboard at
+`https://omarchy-pool.org`) with a real D1 database and an R2 bucket
+whose custom domain `https://pool.omarchy-pool.org` serves packages and databases
 statically. Deploying is what a release does (`release.yml`, cut by a maintainer with
 `gh workflow run release.yml` once the merges it should carry are in; see
 [RUNBOOK.md](RUNBOOK.md#releasing-the-pool-itself)); by hand, for a hotfix or a
@@ -408,7 +409,7 @@ runs any of them by hand by queueing the job (`pkg-repo job`, or
 `POST /api/v1/factory/jobs` with their contributor token):
 
 ```bash
-export OMARCHY_API=https://pkgs.firemanxbr.org OMARCHY_TOKEN=omc_…   # a maintainer's token
+export OMARCHY_API=https://pkgs.omarchy-pool.org OMARCHY_TOKEN=omc_…   # a maintainer's token
 pkg-repo job sync --param source=core --param arch=x86_64             # import from mirror.omarchy.org → edge
 pkg-repo job promote --param from=edge --param to=rc
 pkg-repo job render --param ring=stable --param arch=x86_64           # one omarchy-<source>-stable db per source
@@ -432,7 +433,7 @@ To validate with pacman, use the same container recipe as the local scripts with
 
 ```
 [omarchy-core-stable]
-Server = https://pool.firemanxbr.org/core/$arch
+Server = https://pool.omarchy-pool.org/core/$arch
 ```
 
 and the POC public key imported into `pacman-key`. This has been exercised end to end:

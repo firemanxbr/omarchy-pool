@@ -10,7 +10,7 @@
 import { page } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
 import { escapeHtml } from "../html";
-import { JOURNAL_KINDS, LATE_AFTER_HOURS, type RunningVersion } from "../meta";
+import { API_HOST, JOURNAL_KINDS, LATE_AFTER_HOURS, type RunningVersion } from "../meta";
 import { BUDGET_CAP_USD, BUDGET_GUARD_USD, BUDGET_WARN_USD, ESTIMATE_CADENCE } from "../cost";
 import { JOB_KINDS } from "../jobs";
 
@@ -92,9 +92,10 @@ export const DOCUMENTED_ROUTES: string[] = [...READ, ...FACTORY_READ, ...WRITE_J
 const cell = (routes: string[]) => routes.map((r) => `<code>${escapeHtml(r)}</code>`).join(" · ");
 const rows = (list: Row[]) => list.map((r) => `      <tr><td>${cell(r.routes)}</td>${r.who ? `<td>${r.who}</td>` : ""}<td>${r.text}</td></tr>`).join("\n");
 
-const BODY = String.raw`
+/** The page's HTML. The API's address is meta's one name for it; the pool's is the deployment's (POOL_URL), so the examples name what this deployment serves. */
+const body = (pool: string) => String.raw`
   <h1>API</h1>
-  <p class="lede">Everything this site shows comes from a small JSON API at <code>https://pkgs.firemanxbr.org/api/v1</code>. Reads need no authentication and allow cross-origin requests; writes need the per-job token a worker gets when it claims a task — there is no shared secret — or, on the factory's own routes, a maintainer's token.</p>
+  <p class="lede">Everything this site shows comes from a small JSON API at <code>https://${API_HOST}/api/v1</code>. Reads need no authentication and allow cross-origin requests; writes need the per-job token a worker gets when it claims a task — there is no shared secret — or, on the factory's own routes, a maintainer's token.</p>
 
   <section id="read">
     <h2>Read</h2>
@@ -115,18 +116,18 @@ ${rows(FACTORY_READ)}
     <div class="steps">
       <div class="step"><h3>Which version of a package does each ring serve?</h3>
 <pre>for ring in edge rc stable; do
-  curl -s "https://pkgs.firemanxbr.org/api/v1/releases/$ring?fields=summary&amp;arch=x86_64" \
+  curl -s "https://${API_HOST}/api/v1/releases/$ring?fields=summary&amp;arch=x86_64" \
     | jq -r --arg r "$ring" '.packages[] | select(.name == "openssl") | "\($r)\t\(.version)"'
 done</pre></div>
       <div class="step"><h3>What changed in stable today?</h3>
-<pre>curl -s https://pkgs.firemanxbr.org/api/v1/events?kind=promote | jq '.events[0]'
-curl -s https://pkgs.firemanxbr.org/api/v1/releases/stable/history | jq '.releases[0:3]'</pre></div>
+<pre>curl -s https://${API_HOST}/api/v1/events?kind=promote | jq '.events[0]'
+curl -s https://${API_HOST}/api/v1/releases/stable/history | jq '.releases[0:3]'</pre></div>
       <div class="step"><h3>Is the pool healthy right now?</h3>
-<pre>curl -s https://pkgs.firemanxbr.org/api/v1/stats \
+<pre>curl -s https://${API_HOST}/api/v1/stats \
   | jq '[.latest[] | select(.kind == "health") | {ring, arch: .source, status, at: .created_at}]'</pre></div>
       <div class="step"><h3>The static side (what pacman reads)</h3>
-<pre>curl -sI https://pool.firemanxbr.org/core/x86_64/omarchy-core-stable.db | head -3
-curl -s  https://pool.firemanxbr.org/core/x86_64/omarchy-core-stable.db | tar -tz | head</pre></div>
+<pre>curl -sI ${pool}/core/x86_64/omarchy-core-stable.db | head -3
+curl -s  ${pool}/core/x86_64/omarchy-core-stable.db | tar -tz | head</pre></div>
     </div>
   </section>
 
@@ -154,7 +155,7 @@ export function apiDocsHtml(poolUrl: string, version: RunningVersion): string {
     description: "The omarchy-pool JSON API: rings, releases, packages, dependency graph, journal.",
     active: "docs",
     doc: "api",
-    body: BODY,
+    body: body(poolUrl.replace(/\/$/, "")),
     poolUrl,
     version,
   });

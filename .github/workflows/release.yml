@@ -218,7 +218,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pool
-      url: https://omarchy-pool.firemanxbr.org
+      url: https://omarchy-pool.org
     env:
       VERSION: ${{ needs.version.outputs.version }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

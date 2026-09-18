@@ -21,8 +21,8 @@
 #
 # Environment (secrets come from the operator, never from the task — and
 # never reach the build: hold_secrets, below):
-#   OMARCHY_API            https://pkgs.firemanxbr.org
-#   OMARCHY_POOL           https://pool.firemanxbr.org (builds can depend on earlier factory builds)
+#   OMARCHY_API            https://pkgs.omarchy-pool.org
+#   OMARCHY_POOL           https://pool.omarchy-pool.org (builds can depend on earlier factory builds)
 #   OMARCHY_BROKER         http://broker:8790 — the broker that holds the credentials; then none of the next three is needed here
 #   OMARCHY_WORKER_TOKEN   this worker's token (POST /factory/workers, shown once); FACTORY_TOKEN is an accepted alias
 #   WORKER_ID              the registered worker id (shown with the token; the image reads it from the broker)
@@ -281,7 +281,7 @@ fetch_pkgbuild() { # name ref → /build/pkg holds the PKGBUILD directory
     rm -rf /build/evidence && mkdir -p /build/evidence /build/pkg
     local f
     for f in PKGBUILD build.log tests.log audit.md; do
-      curl -sSf --max-time 60 "${OMARCHY_API:-https://pkgs.firemanxbr.org}/api/v1/factory/tasks/$from/artifacts/$f" -o "/build/evidence/$f" 2>/dev/null || rm -f "/build/evidence/$f"
+      curl -sSf --max-time 60 "${OMARCHY_API:-https://pkgs.omarchy-pool.org}/api/v1/factory/tasks/$from/artifacts/$f" -o "/build/evidence/$f" 2>/dev/null || rm -f "/build/evidence/$f"
     done
     ls -la /build/evidence
     with_secrets python3 "$FACTORY_LIB"/bin/draft-pkgbuild --url "${review_url:-$OMARCHY_REVIEW_URL}" --name "$name" --out /build/pkg --evidence /build/evidence \
@@ -294,7 +294,7 @@ fetch_pkgbuild() { # name ref → /build/pkg holds the PKGBUILD directory
     spec="${ref#bump:}"; from="${spec%@*}"; tag="${spec#*@}"; ver="${tag#v}"; ver="${ver#V}"
     echo "==> PKGBUILD from approved task $from, bumped to $tag"
     mkdir -p /build/pkg
-    curl -sSf "${OMARCHY_API:-https://pkgs.firemanxbr.org}/api/v1/factory/tasks/$from/artifacts/PKGBUILD" -o /build/pkg/PKGBUILD
+    curl -sSf "${OMARCHY_API:-https://pkgs.omarchy-pool.org}/api/v1/factory/tasks/$from/artifacts/PKGBUILD" -o /build/pkg/PKGBUILD
     sed -i -e "s/^pkgver=.*/pkgver=${ver//\//\\/}/" -e "s/^pkgrel=.*/pkgrel=1/" /build/pkg/PKGBUILD
     chown -R builder:builder /build/pkg && (cd /build/pkg && as_builder updpkgsums) || echo "updpkgsums failed; the build will tell"
   elif [[ "$ref" == draft:* ]]; then
@@ -311,7 +311,7 @@ fetch_pkgbuild() { # name ref → /build/pkg holds the PKGBUILD directory
     # failing the same way. The contributor's hint goes with it.
     rm -f /build/PKGBUILD.prev /build/lesson.log
     if [[ -n "${LESSON_TASK:-}" ]]; then
-      local api="${OMARCHY_API:-https://pkgs.firemanxbr.org}" f
+      local api="${OMARCHY_API:-https://pkgs.omarchy-pool.org}" f
       curl -sSf --max-time 60 "$api/api/v1/factory/tasks/$LESSON_TASK/artifacts/PKGBUILD" -o /build/PKGBUILD.prev 2>/dev/null || rm -f /build/PKGBUILD.prev
       # The build's log, then the gate's verdict and the audit's report when they exist: what stopped it, whichever step did.
       for f in build.log tests.log audit.md; do
@@ -929,8 +929,8 @@ upload_staging() { # task-id file name
 }
 
 # ------------------------------------------------------------------ api ----
-: "${OMARCHY_API:=https://pkgs.firemanxbr.org}"
-: "${OMARCHY_POOL:=https://pool.firemanxbr.org}"
+: "${OMARCHY_API:=https://pkgs.omarchy-pool.org}"
+: "${OMARCHY_POOL:=https://pool.omarchy-pool.org}"
 : "${IDLE_EXIT:=0}"
 : "${MAX_TASKS:=0}"
 # The pool's calls go to the broker when there is one (it adds the worker's

@@ -102,7 +102,7 @@ const BODY = String.raw`
         <p class="sub" style="margin:10px 0 0"><a href="/journal#releases">Ring history, every release →</a></p>
       </div>
     </div>
-    <div class="sponsor compact"><p><b>Help keep it running.</b> Hardware, compute and agent tokens are what the pool needs. Everything it gets shows up on the <a href="/pipeline">Pipeline</a> page — open source, in the open.</p><a class="mail" href="mailto:sponsor@firemanxbr.org">sponsor@firemanxbr.org</a></div>
+    <div class="sponsor compact"><p><b>Help keep it running.</b> Hardware, compute and agent tokens are what the pool needs. Everything it gets shows up on the <a href="/pipeline">Pipeline</a> page — open source, in the open.</p><a class="mail" href="mailto:sponsor@omarchy-pool.org">sponsor@omarchy-pool.org</a></div>
   </section>
 `;
 
@@ -489,7 +489,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
     {
       id: "pool.sponsor",
       page: "/",
-      anchor: ['class="sponsor compact"', 'href="/pipeline">Pipeline</a>', 'href="mailto:sponsor@firemanxbr.org"'],
+      anchor: ['class="sponsor compact"', 'href="/pipeline">Pipeline</a>', 'href="mailto:sponsor@omarchy-pool.org"'],
       visible: EVERYONE,
     },
     {

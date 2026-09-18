@@ -180,12 +180,12 @@ Server = ${pool}/multilib/$arch
 
   <section id="pieces">
     <h2>The pieces</h2>
-    <p class="sub">All of it is open source (MIT), released on every merge, and shows its version in the header. The code's own documentation — architecture, runbook, testing — is in the repository, for people working on the pool itself.</p>
+    <p class="sub">All of it is open source (MIT), released when a maintainer dispatches a release, and shows its version in the header. The code's own documentation — architecture, runbook, testing — is in the repository, for people working on the pool itself.</p>
     <div class="table-wrap"><table><thead><tr><th>Piece</th><th>What it is</th></tr></thead><tbody>
       <tr><td>Pool</td><td>A Cloudflare R2 bucket with a custom domain. pacman reads packages and databases from it as plain static files; nothing runs in front of them.</td></tr>
       <tr><td>Index</td><td>A D1 (SQLite) database: one row per package object with its manifest, dependency edges, sonames; releases and ring heads; every event the pipeline records.</td></tr>
       <tr><td>API + this site</td><td>One Cloudflare Worker serving <code>/api/v1</code> and these pages.</td></tr>
-      <tr><td>Pipeline</td><td>Jobs the pool queues on its own clock and project workers pull: sync (every 3 h, one release per ring), the evidence and the promotion it earns (after every sync that changed edge; rc checked every 3 h), health, security (every 3 h), the trial of every review build, GC (weekly); a metrics snapshot every 30 min and the daily cost estimate by the pool itself. GitHub only releases the code (every merge).</td></tr>
+      <tr><td>Pipeline</td><td>Jobs the pool queues on its own clock and project workers pull: sync (every 3 h, one release per ring), the evidence and the promotion it earns (after every sync that changed edge; rc checked every 3 h), health, security (every 3 h), the trial of every review build, GC (weekly); a metrics snapshot every 30 min and the daily cost estimate by the pool itself. GitHub only releases the code, when a maintainer dispatches it.</td></tr>
       <tr><td>Factory</td><td>The build queue lives in the index (requests, tasks, leases); workers are containers anywhere — a contributor's laptop for their own packages, machines the project trusts for what maintainers approved — that claim a task, build it in a fresh Arch container and report; the pool signs what a project worker publishes. A lease that expires goes back to the queue.</td></tr>
       <tr><td>Tools</td><td><code>pkg-repo</code> (the publisher: sync, promote, gate, trial, render, security, gc), <code>pkg-extract</code> (manifests), <code>pkg-check</code> (the ABI check), <code>omarchy-cli</code> (the thin client) — Rust, built for both architectures on every release.</td></tr>
     </tbody></table></div>

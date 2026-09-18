@@ -1,16 +1,18 @@
 /**
  * Who uses the pool: the machines that fetched a ring's database, counted
- * once a day from Cloudflare's zone analytics — distinct client addresses on
- * the pool's host for `/<source>/<arch>/omarchy-*-<ring>.db` over one UTC day. No
- * accounts, no cookies, nothing kept per request: one number per day, per
- * ring and per architecture, as an `audience` event. An address is a machine
- * most of the time; a NAT hides several and a laptop on the move counts
- * twice, so the dashboard says "about". The analytics token must carry
- * Zone · Analytics · Read on the zone (CLOUDFLARE_ZONE_ID); without it the
+ * once a day from Cloudflare's request analytics — distinct client addresses
+ * on the pool's hosts for `/<source>/<arch>/omarchy-*-<ring>.db` over one UTC
+ * day. No accounts, no cookies, nothing kept per request: one number per
+ * day, per ring and per architecture, as an `audience` event. An address is
+ * a machine most of the time; a NAT hides several and a laptop on the move
+ * counts twice, so the dashboard says "about". The pool has two names
+ * (POOL_URL's and LEGACY_POOL_HOSTS) in two zones; one account-scoped query
+ * spans both, so a machine that used both in a day is one address, not two.
+ * The analytics token must carry Account · Analytics · Read; without it the
  * day is skipped once and the scheduler's log says why.
  */
 import type { Env } from "./index";
-import { RINGS, RINGS_BY_STABILITY } from "./meta";
+import { LEGACY_POOL_HOSTS, RINGS, RINGS_BY_STABILITY } from "./meta";
 
 export interface Audience {
   /** The UTC day measured, YYYY-MM-DD. */
@@ -31,19 +33,19 @@ export const AUDIENCE_LIMIT = 10000;
 
 interface Rows { count?: number; sum?: { edgeResponseBytes?: number }; avg?: { sampleInterval?: number }; dimensions?: { clientIP?: string } }
 /** The query's aliases: `all`, one per ring (RINGS), one per architecture, and `totals`. */
-interface Zone { all?: Rows[]; x86_64?: Rows[]; aarch64?: Rows[]; totals?: Rows[]; [ring: string]: Rows[] | undefined }
+interface Account { all?: Rows[]; x86_64?: Rows[]; aarch64?: Rows[]; totals?: Rows[]; [ring: string]: Rows[] | undefined }
 
-/** One day of the pool's audience, from the zone's request analytics. */
+/** One day of the pool's audience, from the account's request analytics over every name the pool serves under. */
 export async function measureAudience(env: Env, day: string, fetcher: typeof fetch = fetch): Promise<Audience> {
   if (!env.CLOUDFLARE_ANALYTICS_TOKEN) throw new Error("CLOUDFLARE_ANALYTICS_TOKEN is not set");
-  if (!env.CLOUDFLARE_ZONE_ID) throw new Error("CLOUDFLARE_ZONE_ID is not set");
-  const host = new URL(env.POOL_URL).host;
+  if (!env.CLOUDFLARE_ACCOUNT_ID) throw new Error("CLOUDFLARE_ACCOUNT_ID is not set");
+  const hosts = [...new Set([new URL(env.POOL_URL).host, ...LEGACY_POOL_HOSTS])];
   const from = `${day}T00:00:00Z`;
   const to = new Date(Date.parse(from) + 86400000).toISOString().slice(0, 19) + "Z";
-  const base = `datetime_geq: "${from}", datetime_lt: "${to}", clientRequestHTTPHost: "${host}"`;
+  const base = `datetime_geq: "${from}", datetime_lt: "${to}", clientRequestHTTPHost_in: ${JSON.stringify(hosts)}`;
   const ips = (path: string, alias: string) =>
     `${alias}: httpRequestsAdaptiveGroups(limit: ${AUDIENCE_LIMIT}, filter: {${base}, clientRequestPath_like: "${path}"}) { count dimensions { clientIP } }`;
-  const q = `{ viewer { zones(filter: {zoneTag: "${env.CLOUDFLARE_ZONE_ID}"}) {
+  const q = `{ viewer { accounts(filter: {accountTag: "${env.CLOUDFLARE_ACCOUNT_ID}"}) {
     totals: httpRequestsAdaptiveGroups(limit: 1, filter: {${base}, clientRequestPath_like: "%.db"}) { count sum { edgeResponseBytes } avg { sampleInterval } }
     ${ips("%.db", "all")}
     ${RINGS.map((ring) => ips(`%-${ring}.db`, ring)).join("\n    ")}
@@ -55,19 +57,19 @@ export async function measureAudience(env: Env, day: string, fetcher: typeof fet
     headers: { authorization: `Bearer ${env.CLOUDFLARE_ANALYTICS_TOKEN}`, "content-type": "application/json" },
     body: JSON.stringify({ query: q }),
   });
-  const body = (await res.json()) as { data?: { viewer?: { zones?: Zone[] } }; errors?: { message: string }[] };
+  const body = (await res.json()) as { data?: { viewer?: { accounts?: Account[] } }; errors?: { message: string }[] };
   if (body.errors?.length) {
     const msg = body.errors.map((e) => e.message).join("; ");
-    throw new Error(/zone\.analytics\.read/.test(msg) ? `the analytics token needs Zone · Analytics · Read on the zone: ${msg}` : msg);
+    throw new Error(/analytics\.read/.test(msg) ? `the analytics token needs Account · Analytics · Read on the account: ${msg}` : msg);
   }
-  const z = body.data?.viewer?.zones?.[0] ?? {};
+  const account = body.data?.viewer?.accounts?.[0] ?? {};
   const n = (rows?: Rows[]) => (rows ?? []).length;
-  const t = z.totals?.[0];
+  const t = account.totals?.[0];
   return {
     day,
-    machines: n(z.all),
-    by_ring: Object.fromEntries(RINGS_BY_STABILITY.map((ring) => [ring, n(z[ring])])),
-    by_arch: { x86_64: n(z.x86_64), aarch64: n(z.aarch64) },
+    machines: n(account.all),
+    by_ring: Object.fromEntries(RINGS_BY_STABILITY.map((ring) => [ring, n(account[ring])])),
+    by_arch: { x86_64: n(account.x86_64), aarch64: n(account.aarch64) },
     requests: t?.count ?? 0,
     bytes: t?.sum?.edgeResponseBytes ?? 0,
     // Adaptive sampling reports the interval it used; a day within a few percent of 1 was counted whole.
