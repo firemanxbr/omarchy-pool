@@ -945,6 +945,9 @@ export const HELPERS = String.raw`
   // An age without "ago": "oldest 3h", from a span in milliseconds.
   function span(ms) { return ago(new Date(Date.now() - ms).toISOString()).replace(" ago", ""); }
   function pkgHref(name, ring, arch) { return "/package/" + encodeURIComponent(name) + "?ring=" + encodeURIComponent(ring && RINGS_TEXT[ring] ? ring : Object.keys(RINGS_TEXT)[0]) + "&arch=" + encodeURIComponent(arch && arch !== "all" ? arch : "x86_64"); }
+  // A build's evidence has one address: the Evidence section of its page, which lists what the build left (the objects table, read there) and says "Nothing staged for this build" with the worker's last log lines when it left nothing. A row links there and never a raw file by name: a build that died before it uploaded — the worker gone, the lease lost — has no build.log, and a link to one answered a JSON 404 on three rows of production's /user pages (2026-09-18). The raw links live on the page, drawn from what is there.
+  function evidenceHref(id) { return "/build/" + id + "#evidence"; }
+  function evidenceLink(t, text) { return '<a class="run" href="' + evidenceHref(t.id) + '" title="what this build left, read in place">' + esc(text || "evidence") + '</a>'; }
   function pillHtml(cls, text, title) { return '<span class="pill ' + cls + '"' + (title ? ' title="' + esc(title) + '"' : '') + '>' + esc(text) + '</span>'; }
   // One build status, one colour, on every page: queued grey, building blue, staged and done green, failed and rejected red, cancelled and withdrawn grey. A package's own words (registered, waiting, approved, published, unmaintained) wear the same pills — the registration's statuses, nothing retired (build_requests' drafting and validating went with migration 0021).
   var TASK_PILL = { queued: "none", leased: "blue", building: "blue", staged: "ok", done: "ok", failed: "error", rejected: "error", cancelled: "none", withdrawn: "none", registered: "none", waiting: "warn", approved: "ok", published: "ok", unmaintained: "warn" };
@@ -1173,11 +1176,12 @@ export const HELPERS = String.raw`
   function ckEvidence(c) {
     var art = function (t, file, text) { return t ? '<a class="run" href="/api/v1/factory/tasks/' + t.id + '/artifacts/' + file + '">' + text + '</a>' : ''; };
     var cc = c.contributor, pb = c.project, tr = c.trial;
+    // The build items link the build's evidence at its one address (a failed build may have no log to link); the rest name a file the server's row says is there — the gate's result, the audit done, the trial done.
     return function (i) {
-      if (i.item === "A build that succeeds") return cc ? art(cc, "build.log", "log") + (cc.status === "staged" || cc.status === "done" ? ' ' + art(cc, "PKGBUILD", "PKGBUILD") : '') : '';
+      if (i.item === "A build that succeeds") return cc ? evidenceLink(cc) + (cc.status === "staged" || cc.status === "done" ? ' ' + art(cc, "PKGBUILD", "PKGBUILD") : '') : '';
       if (i.item === "The gate passed") return cc && cc.result && cc.result.vet ? art(cc, "tests.log", "tests") + ' ' + art(cc, "vet.json", "vet.json") : '';
       if (i.item === "The audit") return c.audit && c.audit.status === "done" ? art(cc, "audit.md", "report") : '';
-      if (i.item === "The project built it again") return pb ? art(pb, "build.log", "log") : '';
+      if (i.item === "The project built it again") return pb ? evidenceLink(pb) : '';
       if (i.item === "The project's gate") return pb && pb.result && pb.result.vet ? art(pb, "tests.log", "tests") : '';
       if (i.item === "The trial installed it") return tr && tr.status === "done" ? art(pb, "trial.log", "transcript") : '';
       return '';

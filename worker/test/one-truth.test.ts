@@ -351,6 +351,50 @@ describe("three more facts, one source each", () => {
   });
 });
 
+describe("a build's evidence has one address", () => {
+  // A build that died before it uploaded anything — the worker gone, the lease lost: production's tasks 451, 467 and 391 on 2026-09-18 — has a row and no build.log, so a raw link to one is a JSON 404.
+  let dead: number;
+  beforeAll(async () => {
+    dead = (await env.DB.prepare(
+      `INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, lease_owner, error, log_tail, finished_at)
+       VALUES (?, ?, '1.0-9', 'draft:https://mine.example@latest', 'contributor', 100, 0, 'community', ?, 'build', 'failed', ?, 'the worker died: lease lost', 'makepkg: killed', ?) RETURNING id`,
+    ).bind(F.factoryPkg, F.arch, F.owner, F.communityWorker, new Date().toISOString()).first<{ id: number }>())!.id;
+  });
+
+  it("the raw log of a build that left nothing is a 404, its page is not, and the page says so", async () => {
+    const raw = await call("GET", `/factory/tasks/${dead}/artifacts/build.log`);
+    expect(raw.status).toBe(404);
+    expect((await call("GET", `/factory/tasks/${dead}`)).json).toMatchObject({ evidence: [], task: { status: "failed", log_tail: "makepkg: killed" } });
+    const html = await page(`/build/${dead}`);
+    expect(html).toContain('id="evidence"');
+    expect(scriptOf(html)).toContain("Nothing staged for this build");
+  });
+
+  it("the shell writes the address, and the rows link it: a person's builds, the Pipeline's tasks, the checklist's build items — no page writes /artifacts/build.log by hand", async () => {
+    const script = scriptOf(await page("/"));
+    const href = new Function("id", [served(script, "evidenceHref"), "return evidenceHref(id);"].join("\n"));
+    expect(href(dead)).toBe(`/build/${dead}#evidence`);
+    // The person's builds column, the served function over the server's row of the dead build.
+    // Past the edge cache (keyed by URL), as the owner's own page reads it: the dead build was written after the profile was read above.
+    const person = (await call("GET", `/users/${F.owner}?t=${Date.now()}`)).json;
+    const row = person.builds.find((b: { id: number }) => b.id === dead);
+    expect(row).toMatchObject({ id: dead, status: "failed" });
+    const user = scriptOf(await page(`/user/${F.owner}`));
+    const cell = new Function("t", [served(user, "esc"), served(user, "evidenceHref"), served(user, "evidenceLink"), served(user, "evidence"), "return evidence(t);"].join("\n"));
+    expect(cell(row)).toContain(`href="/build/${dead}#evidence"`);
+    expect(cell(row)).not.toContain("/artifacts/");
+    expect(cell({ ...row, status: "staged" })).toContain(`href="/build/${dead}#evidence"`);
+    expect(cell({ ...row, status: "queued" })).toBe("");
+    // The Pipeline's staged row and the checklist's build items go through the same link; the raw file links a page draws by hand are gone from every page's own script.
+    for (const path of ["/pipeline", `/user/${F.owner}`, `/build/${F.projectTask}`, "/review", "/factory", "/", "/packages", `/package/${F.pkg}`]) {
+      expect(ownScript(await page(path)), `${path} links a raw artifact by hand`).not.toMatch(/artifacts\//);
+    }
+    expect(ownScript(await page("/pipeline"))).toContain("evidenceLink(t)");
+    expect(script).toContain("evidenceLink(cc)");
+    expect(script).toContain("evidenceLink(pb)");
+  });
+});
+
 describe("nothing waiting", () => {
   it("answers `waiting` 0 and `oldest_ms` null once every staged row is decided — the last thing this file does to the fixture", async () => {
     // Rejecting the project's build hands alice's evidence behind it back to a maintainer (project_build gone), so the queue empties in two rounds.

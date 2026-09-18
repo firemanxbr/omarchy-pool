@@ -165,7 +165,7 @@ __CHARTS__
     var byId = {}; (d.workers || []).forEach(function (w) { byId[w.id] = w; });
     pager("#tasks", d.tasks, function (t) {
       var result = t.status === "staged"
-        ? '<span class="mono">' + esc(t.result_filename || "") + '</span> <a class="run" href="/api/v1/factory/tasks/' + t.id + '/artifacts/build.log">log</a> <a class="run" href="/api/v1/factory/tasks/' + t.id + '/artifacts/PKGBUILD">PKGBUILD</a>'
+        ? '<span class="mono">' + esc(t.result_filename || "") + '</span> ' + evidenceLink(t)
         : t.status === "done" && t.result_filename && t.result_filename !== "-"
         ? (t.publish === 0 ? '<span class="mono">' + esc(t.result_filename) + '</span>' : '<a href="' + pkgHref(t.name, "edge", t.arch) + '" class="mono">' + esc(t.result_filename) + '</a>')
         : t.status === "done" && t.result ? '<span class="muted">' + esc(jobResult(t)) + '</span>'
@@ -625,7 +625,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.tasks-table",
     page: "/pipeline",
     anchor: ['id="tasks"'],
-    script: ['pager("#tasks"', 'href="/build/', "/artifacts/build.log", "/artifacts/PKGBUILD", 'pkgHref(t.name, "edge", t.arch)', "wtId(byId[t.lease_owner] || t.lease_owner)", "t.result_filename", "jobResult(t)", "paramsLabel(t)", "t.max_attempts", "r.sources", "r.releases", "sum.upstream_total"],
+    script: ['pager("#tasks"', 'href="/build/', "evidenceLink(t)", 'pkgHref(t.name, "edge", t.arch)', "wtId(byId[t.lease_owner] || t.lease_owner)", "t.result_filename", "jobResult(t)", "paramsLabel(t)", "t.max_attempts", "r.sources", "r.releases", "sum.upstream_total"],
     reads: [
       { path: "/api/v1/factory?limit=100", fields: ["workers.0.id", "workers.0.owner", "tasks.0.id", "tasks.0.kind", "tasks.0.name", "tasks.0.version", "tasks.0.arch", "tasks.0.status", "tasks.0.trust", "tasks.0.owner", "tasks.0.publish", "tasks.0.attempts", "tasks.0.max_attempts", "tasks.0.reason", "tasks.0.lease_owner", "tasks.0.duration_ms", "tasks.0.result_filename", "tasks.0.result", "tasks.0.error", "tasks.0.params",
         "tasks.kind=sync.params.arch", "tasks.kind=sync.params.sources", "tasks.kind=sync.result.arch", "tasks.kind=sync.result.sources.0.source", "tasks.kind=sync.result.sources.0.upstream_total", "tasks.kind=sync.result.sources.0.uploaded", "tasks.kind=sync.result.sources.0.removed", "tasks.kind=sync.result.sources.0.failed", "tasks.kind=sync.result.releases.0.ring", "tasks.kind=sync.result.releases.0.seq", "tasks.kind=sync.result.rendered",
@@ -638,8 +638,8 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
         "tasks.kind=verify.result.objects", "tasks.kind=verify.result.bad_signatures", "tasks.kind=verify.result.repaired_signatures", "tasks.kind=verify.result.mismatched", "tasks.kind=verify.result.repinned", "tasks.kind=verify.result.unfixable",
         "tasks.kind=relayout.result.moved", "tasks.kind=relayout.result.ghosts", "tasks.kind=relayout.result.missing", "tasks.kind=relayout.result.errors", "tasks.kind=relayout.result.purged",
         "tasks.kind=enqueue.result.commit", "tasks.kind=enqueue.result.queued", "tasks.kind=enqueue.result.skipped", "tasks.kind=enqueue.result.up_to_date"] },
-      { path: `/api/v1/factory/tasks/${F.contributorTask}/artifacts/build.log`, json: false },
-      { path: `/api/v1/factory/tasks/${F.contributorTask}/artifacts/PKGBUILD`, json: false },
+      // A staged row's evidence is its build's page (the shell's evidenceLink), where what the build left is listed; the raw files are linked there.
+      { path: `/build/${F.contributorTask}`, json: false },
     ],
     visible: EVERYONE,
   },

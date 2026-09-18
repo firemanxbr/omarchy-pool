@@ -218,6 +218,15 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
+    // A build's evidence has one address (evidenceHref): its page's Evidence section, which lists what the build left and says when it left nothing. The rows that offer a build's log — a person's builds, the Pipeline's tasks, the checklist's build items — link there through evidenceLink and never a raw file by name, so a build that died before uploading links a page, not a 404. The read is the page the fragment lands on; build.evidence-list anchors the section.
+    id: "shell.evidence-address",
+    page: "/",
+    anchor: [],
+    script: ["function evidenceHref(", 'return "/build/" + id + "#evidence"', "function evidenceLink(", 'href="\' + evidenceHref(t.id) + \'"'],
+    reads: [{ path: `/build/${F.contributorTask}`, json: false }],
+    visible: EVERYONE,
+  },
+  {
     // A source late by one constant: LATE_MS is the server's LATE_AFTER_HOURS spliced in (meta.ts), read through lateSync — the server's mark first — and named by problemsOf.
     id: "shell.late-sync",
     page: "/",
