@@ -132,7 +132,7 @@ const SCRIPT = String.raw`
         api("POST", API + "/token", {}).then(function (d) {
           if (d.error) { toast(esc(d.error), "error"); return; }
           ask({ title: "Your token", text: "Copy it now: the pool keeps only its hash, and this box closes by its button only. " + esc(d.note || ""), value: "export OMARCHY_CONTRIBUTOR_TOKEN=" + d.token, copy: "Copy", confirm: null, cancel: "Close", sticky: true });
-        }).catch(function (e) { toast("failed: " + esc(String(e)), "error"); });
+        }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
       });
     };
   }
@@ -341,7 +341,7 @@ const SCRIPT = String.raw`
     }
     renderWorkers();
     endSkeleton();
-  }).catch(function (e) { $("#line").textContent = "could not load: " + e; endSkeleton(); });
+  }).catch(function (e) { $("#line").textContent = "could not load: " + errorText(e); endSkeleton(); });
   }
   // The staging quota is the owner's own (GET /factory/me answers for the caller): the figure on their page, a dash on it for everyone else.
   function quota() {
@@ -366,7 +366,7 @@ const SCRIPT = String.raw`
       var wid = w.getAttribute("data-withdraw"), wname = w.getAttribute("data-name");
       ask({ title: "Withdraw the approval of " + wname, text: "The approval stays on the record and is void from now on; the package leaves every ring it reached — a release without it, the databases rendered again by the project's workers; another maintainer decides on the build.", input: "required", placeholder: "why take it back", confirm: "Withdraw", danger: true }).then(function (note) {
         if (note === null) return; w.disabled = true;
-        api("POST", API + "/tasks/" + wid + "/withdraw", { note: note }).then(function (r) { if (r.error) { toast(esc(r.error), "error"); w.disabled = false; } else toast("Withdrawn — " + esc(wname) + " leaves " + esc((r.rings || []).map(function (x) { return x.ring; }).join(", ") || "no ring") + "; another maintainer decides."); acted(); load(); });
+        api("POST", API + "/tasks/" + wid + "/withdraw", { note: note }).then(function (r) { if (r.error) { toast(esc(r.error), "error"); w.disabled = false; } else toast("Withdrawn — " + esc(wname) + " leaves " + esc((r.rings || []).map(function (x) { return x.ring; }).join(", ") || "no ring") + "; another maintainer decides."); acted(); load(); }).catch(function (e) { w.disabled = false; toast("failed: " + esc(errorText(e)), "error"); });
       });
       return;
     }
@@ -389,30 +389,30 @@ const SCRIPT = String.raw`
             var bad = rs.filter(function (r) { return r.error; });
             if (bad.length) toast(esc(bad[0].error), "error"); else toast("Out of the queue: build #" + waiting.map(function (t) { return t.id; }).join(", #") + ". Press Build to queue it again, on the queue or on a worker of yours.", "warn");
             OPEN[name] = true; acted(); load();
-          });
+          }).catch(function (e) { b.disabled = false; toast("failed: " + esc(errorText(e)), "error"); });
           return;
         }
         var body = arch ? { arches: [arch] } : {};
         if (go && typeof go === "object") { if (go.pick) body.worker = go.pick; if (go.note) body.hint = go.note; } else if (go) body.hint = go;
-        api("POST", API + "/packages/" + encodeURIComponent(name) + "/build", body).then(function (r) { if (r.error) toast(esc(r.error), "error"); else if (!(r.tasks || []).length) toast(esc(r.note || "nothing queued"), "warn"); else toast((queuedNow ? "Still queued: " : "Queued ") + (r.tasks || []).length + " build(s): " + esc((r.arches || []).join(", ")) + (r.pinned_to ? " — for " + esc(wtShort(r.pinned_to)) : r.queue && Object.keys(r.queue).length ? " — " + Object.keys(r.queue).map(function (a) { return a + " " + r.queue[a].position + " of " + r.queue[a].total; }).join(", ") : "") + (r.lessons && Object.keys(r.lessons).length ? " — from the last build's PKGBUILD and log" : "") + " — this page follows them."); OPEN[name] = true; acted(); load(); });
+        api("POST", API + "/packages/" + encodeURIComponent(name) + "/build", body).then(function (r) { if (r.error) toast(esc(r.error), "error"); else if (!(r.tasks || []).length) toast(esc(r.note || "nothing queued"), "warn"); else toast((queuedNow ? "Still queued: " : "Queued ") + (r.tasks || []).length + " build(s): " + esc((r.arches || []).join(", ")) + (r.pinned_to ? " — for " + esc(wtShort(r.pinned_to)) : r.queue && Object.keys(r.queue).length ? " — " + Object.keys(r.queue).map(function (a) { return a + " " + r.queue[a].position + " of " + r.queue[a].total; }).join(", ") : "") + (r.lessons && Object.keys(r.lessons).length ? " — from the last build's PKGBUILD and log" : "") + " — this page follows them."); OPEN[name] = true; acted(); load(); }).catch(function (e) { b.disabled = false; toast("failed: " + esc(errorText(e)), "error"); });
       });
     }
     else if (b.hasAttribute("data-remove")) {
       var rm = b.getAttribute("data-remove");
       ask({ title: "Remove the registration of " + rm + "?", text: "Its builds stop; the evidence on the record stays. Anyone can register the name again.", confirm: "Remove", danger: true }).then(function (go) {
         if (go === null) return;
-        api("DELETE", API + "/packages/" + encodeURIComponent(rm)).then(function (r) { if (r.error) toast(esc(r.error), "error"); else toast("Removed " + esc(rm) + "."); delete OPEN[rm]; acted(); load(); });
+        api("DELETE", API + "/packages/" + encodeURIComponent(rm)).then(function (r) { if (r.error) toast(esc(r.error), "error"); else toast("Removed " + esc(rm) + "."); delete OPEN[rm]; acted(); load(); }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
       });
     }
     else if (b.hasAttribute("data-mode")) {
       var mid = b.getAttribute("data-mode"), to = b.getAttribute("data-to");
-      api("POST", API + "/workers/" + encodeURIComponent(mid) + "/mode", { mode: to }).then(function (r) { if (r.error) toast(esc(r.error), "error"); else toast(esc(r.note || ("mode: " + to))); acted(); loadWorkers(); });
+      api("POST", API + "/workers/" + encodeURIComponent(mid) + "/mode", { mode: to }).then(function (r) { if (r.error) toast(esc(r.error), "error"); else toast(esc(r.note || ("mode: " + to))); acted(); loadWorkers(); }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
     }
     else if (b.hasAttribute("data-revoke")) {
       var wid = b.getAttribute("data-revoke");
       ask({ title: "Revoke " + wid + "?", text: "Its token stops working at once; a build it holds finishes on its own. Register a new one for a new token.", confirm: "Revoke", danger: true }).then(function (go) {
         if (go === null) return;
-        api("DELETE", API + "/workers/" + encodeURIComponent(wid)).then(function (r) { if (r.error) toast(esc(r.error), "error"); else toast("Revoked."); acted(); load(); loadWorkers(); });
+        api("DELETE", API + "/workers/" + encodeURIComponent(wid)).then(function (r) { if (r.error) toast(esc(r.error), "error"); else toast("Revoked."); acted(); load(); loadWorkers(); }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
       });
     }
   });
@@ -436,7 +436,7 @@ const SCRIPT = String.raw`
         "# the compose file it writes, for a hand-run set: " + location.origin + "/omarchy-worker/compose.yml\n" +
         "#   (.env beside it: OMARCHY_WORKER_TOKEN, COMPOSE_PROFILES=community, OMARCHY_WORKER_DIR=<this directory's absolute path>; the updater included)";
       $("#worker-form").reset(); $("#worker-form").hidden = true; acted(); load(); loadWorkers();
-    }).catch(function (e) { $("#w-btn").disabled = false; toast("failed: " + esc(String(e)), "error"); });
+    }).catch(function (e) { $("#w-btn").disabled = false; toast("failed: " + esc(errorText(e)), "error"); });
     return false;
   };
 `;

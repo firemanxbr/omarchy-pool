@@ -251,6 +251,14 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
+    // One call to the API (api): a 4xx resolves with its body and __status, a 5xx rejects with the body's error — never the list a page asked for. A list that did not answer is said, not drawn: noAnswer writes "the <list> did not answer: <reason>" into the page's line and ends the skeleton, tilesUnanswered draws "—" for every number with the reason under it. A 0 over a query that threw read as "nothing waiting" in green on three pages (2026-09-18); test/no-answer.test.ts runs the pages over a 500.
+    id: "shell.no-answer",
+    page: "/",
+    anchor: [],
+    script: ["function api(", "if (r.status >= 500) throw new Error(", "d.__status = r.status", "function errorText(", "function noAnswer(", '" did not answer: "', "function tilesUnanswered(", '"—"'],
+    visible: EVERYONE,
+  },
+  {
     // The oldest waiting row's age and every other span said the same way: span(ms), "3h" with no "ago".
     id: "shell.span",
     page: "/",

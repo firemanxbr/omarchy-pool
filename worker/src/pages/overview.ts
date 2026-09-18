@@ -254,11 +254,19 @@ __CHARTS__
   }
   $("#open-journal").addEventListener("click", function (ev) { var r = ev.target.closest ? ev.target.closest(".row") : null; if (r) r.classList.toggle("open"); });
 
-  // The people: every contributor with a registered package or a worker, every maintainer in the set the shell reads once (maintainerSet: the one list the pool keeps); the workers counted as every tile counts them (workerCounts).
+  // The people: every contributor with a registered package or a worker, every maintainer in the set the shell reads once (maintainerSet: the one list the pool keeps); the workers counted as every tile counts them (workerCounts). The four tiles are one list, so the ones over lists that did not answer (api() rejects on a 5xx and on the network) carry the same labels with "—" and the reason — an empty list stood in for a failed one here, and a pool with people read as one with none.
+  function openTiles(contributors, maintainers, wc, landed) {
+    return [
+      ["Contributors", num(Object.keys(contributors).length), "anyone with a package or a worker", "", "/people#contributors"],
+      ["Maintainers", num(Object.keys(maintainers).length), "named in MAINTAINERS.toml", "", "/people#maintainers"],
+      ["Workers alive", num(wc.alive), num(wc.registered) + " registered", "", "/people#workers"],
+      ["Community packages", num(landed), "approved, built by the project", "", "/packages?q=factory"]
+    ];
+  }
   Promise.all([
-    fetch("/api/v1/factory/packages").then(function (r) { return r.json(); }).catch(function () { return { packages: [] }; }),
+    api("GET", "/api/v1/factory/packages"),
     new Promise(function (ok) { maintainerSet(ok); }),
-    fetch("/api/v1/factory").then(function (r) { return r.json(); }).catch(function () { return { workers: [] }; })
+    api("GET", "/api/v1/factory")
   ]).then(function (res) {
     var pkgs = res[0].packages || [], maintainers = res[1] || {}, workers = res[2].workers || [], wc = workerCounts(workers);
     var contributors = {}, isM = function (l) { return Object.prototype.hasOwnProperty.call(maintainers, l); };
@@ -269,12 +277,11 @@ __CHARTS__
     var people = Object.keys(maintainers).map(function (m) { return [m, "maintainer"]; }).concat(Object.keys(contributors).map(function (c) { return [c, "contributor"]; }));
     var chips = people.map(function (p) { return personChip(p[0], p[1]); }).join("");
     $("#cc-people").innerHTML = (chips || '<span class="muted">be the first</span>') + '<span class="dim">' + num(wc.alive) + ' workers alive</span><a href="/factory">Bring a package →</a>';
-    setTiles("#open-stats", [
-      ["Contributors", num(Object.keys(contributors).length), "anyone with a package or a worker", "", "/people#contributors"],
-      ["Maintainers", num(Object.keys(maintainers).length), "named in MAINTAINERS.toml", "", "/people#maintainers"],
-      ["Workers alive", num(wc.alive), num(wc.registered) + " registered", "", "/people#workers"],
-      ["Community packages", num(landed), "approved, built by the project", "", "/packages?q=factory"]
-    ]);
+    setTiles("#open-stats", openTiles(contributors, maintainers, wc, landed));
+  }).catch(function (e) {
+    var down = noAnswer("people's lists", e);
+    $("#cc-people").innerHTML = '<span class="muted">' + esc(down) + '</span><a href="/factory">Bring a package →</a>';
+    setTiles("#open-stats", tilesUnanswered(openTiles({}, {}, workerCounts([]), 0), down));
   });
   liveStats(render, 60000);
 
@@ -442,7 +449,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       page: "/",
       anchor: ['id="cc-people"'],
       // The maintainer set is the shell's one read (maintainerSet, GET /api/v1/factory/maintainers), the workers the shell's one count (workerCounts).
-      script: ['"#cc-people"', '"/api/v1/factory/packages"', "maintainerSet(ok)", '"/api/v1/factory"', "personChip(", "workerCounts(workers)", "wc.alive", "p.owner"],
+      script: ['"#cc-people"', 'api("GET", "/api/v1/factory/packages")', "maintainerSet(ok)", 'api("GET", "/api/v1/factory")', "personChip(", "workerCounts(workers)", "wc.alive", "p.owner", 'noAnswer("people\'s lists", e)'],
       reads: [
         { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.owner"] },
         { path: "/api/v1/factory/maintainers", fields: ["maintainers", "maintainers.0.login", "maintainers.0.since"] },
@@ -454,7 +461,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       id: "pool.open-stats",
       page: "/",
       anchor: ['<div class="tiles four" id="open-stats">'],
-      script: ['setTiles("#open-stats"', '"/people#contributors"', '"/people#maintainers"', '"/people#workers"', '"/packages?q=factory"', "p.landed", '"Workers alive", num(wc.alive), num(wc.registered) + " registered"'],
+      script: ['setTiles("#open-stats", openTiles(contributors, maintainers, wc, landed))', 'setTiles("#open-stats", tilesUnanswered(openTiles({}, {}, workerCounts([]), 0), down))', '"/people#contributors"', '"/people#maintainers"', '"/people#workers"', '"/packages?q=factory"', "p.landed", '"Workers alive", num(wc.alive), num(wc.registered) + " registered"'],
       reads: [
         { path: "/api/v1/factory/packages", fields: ["packages.0.owner", "packages.0.status", "packages.0.landed"] },
         { path: "/api/v1/factory/maintainers", fields: ["maintainers.0.login"] },

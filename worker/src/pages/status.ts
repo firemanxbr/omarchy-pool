@@ -77,7 +77,7 @@ const SCRIPT = String.raw`
 __CHARTS__
   // The workers as every other page counts them — the shell's workerCounts over the live listing, not the snapshot's count from up to half an hour ago: read once per poll, the tile drawn again when it answers.
   var WC = null;
-  function loadWorkers(d) { fetch("/api/v1/factory?limit=10").then(function (r) { return r.json(); }).then(function (f) { WC = workerCounts(f.workers); renderSystem(d); }).catch(function () {}); }
+  function loadWorkers(d) { api("GET", "/api/v1/factory?limit=10").then(function (f) { WC = workerCounts(f.workers); renderSystem(d); }).catch(function () {}); }
   function renderSystem(d) {
     // Snapshots before v0.0.51 measured GitHub Actions ("actions"); now the pool's own jobs.
     var m = d.metrics, a = m && (m.jobs || m.actions), wm = workerMinutes(d.series, 7);
@@ -107,12 +107,12 @@ __CHARTS__
     ];
     setTiles("#systiles", tiles);
     // The bill, estimated once a day from Cloudflare's analytics (cost.ts); the guard pauses writing jobs over budget.
-    fetch("/api/v1/cost").then(function (r) { return r.ok ? r.json() : null; }).then(function (c) {
+    api("GET", "/api/v1/cost").then(function (c) {
       var cell = $("#systiles").children[tiles.length - 1]; if (!cell) return;
-      if (!c) { setTile(cell, '<div class="k">Estimated bill</div><div class="v num">—</div><div class="s">no estimate yet (every three hours)</div>'); return; }
+      if (c.error) { setTile(cell, '<div class="k">Estimated bill</div><div class="v num">—</div><div class="s">no estimate yet (every three hours)</div>'); return; }
       var color = c.status === "error" ? "var(--red)" : c.status === "warn" ? "var(--amber)" : "inherit";
       setTile(cell, '<div class="k">Estimated bill</div><div class="v num" style="color:' + color + '">US$ ' + Number(c.projected_usd).toFixed(2) + '</div><div class="s">projected for ' + esc(c.month) + ' · US$ ' + Number(c.month_to_date_usd).toFixed(2) + ' so far · ' + ago(c.estimated_at) + (c.guard ? ' · <b>over budget: writing jobs paused</b>' : '') + '</div>');
-    }).catch(function () {});
+    }).catch(function (e) { var cell = $("#systiles").children[tiles.length - 1]; if (cell) setTile(cell, '<div class="k">Estimated bill</div><div class="v num">—</div><div class="s">' + esc(noAnswer("cost estimate", e)) + '</div>'); });
 
     var S = d.series || {};
     $("#c-pool").innerHTML = area((S.metrics || []).map(function (r) { return { t: Date.parse(r.created_at), v: Number(r.bytes || 0) }; }), bytes) +
@@ -215,8 +215,9 @@ __CHARTS__
       ["Incidents", num(incidents.length), "in the last 40 journal entries"]
     ]);
   }
+  // The service, measured now: four lines from one answer. A check that did not answer — the Worker threw (a 5xx: api() rejects with its reason), or nothing answered at all — is one line saying so, not "answering" over a body that has no times, and not a TypeError's text.
   function renderService() {
-    fetch("/api/v1/status", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (s) {
+    api("GET", "/api/v1/status").then(function (s) {
       var items = [
         ["ok", "API", "answering · " + esc(s.checked_at.replace("T", " ").slice(0, 19)) + " UTC"],
         [s.index.ok ? "ok" : "error", "index · D1", s.index.ok ? s.index.ms + " ms" : esc(s.index.error || "failed")],
@@ -225,7 +226,7 @@ __CHARTS__
       ];
       $("#service").innerHTML = items.map(function (t) { return '<div><i class="led ' + t[0] + '"></i><b>' + t[1] + '</b><span>' + t[2] + '</span></div>'; }).join("");
     }).catch(function (e) {
-      $("#service").innerHTML = '<div><i class="led error"></i><b>API</b><span>down · ' + esc(String(e)) + '</span></div>';
+      $("#service").innerHTML = '<div><i class="led error"></i><b>API</b><span>' + esc(noAnswer("service check", e)) + '</span></div>';
     });
   }
   renderService(); setInterval(renderService, 60000);
@@ -265,7 +266,7 @@ export const STATUS_COMPONENTS = (_F: Fixture): Component[] => [
     id: "status.service",
     page: "/status",
     anchor: ["<h2>Service</h2>", 'id="service"'],
-    script: ['"/api/v1/status"', '"#service"', "s.index.ok", "s.pool.ok", "s.signing", "setInterval(renderService, 60000)"],
+    script: ['api("GET", "/api/v1/status")', '"#service"', "s.index.ok", "s.pool.ok", "s.signing", "setInterval(renderService, 60000)", 'noAnswer("service check", e)'],
     reads: [{ path: "/api/v1/status", fields: ["checked_at", "index.ok", "index.ms", "pool.ok", "pool.ms", "signing"] }],
     visible: EVERYONE,
   },
@@ -370,7 +371,7 @@ export const STATUS_COMPONENTS = (_F: Fixture): Component[] => [
     id: "status.bill-tile",
     page: "/status",
     anchor: ['id="systiles"'],
-    script: ['"/api/v1/cost"', '"Estimated bill"', "c.projected_usd", "c.month_to_date_usd", "c.estimated_at", "c.guard", "over budget: writing jobs paused"],
+    script: ['api("GET", "/api/v1/cost")', '"Estimated bill"', "c.error", 'noAnswer("cost estimate", e)', "c.projected_usd", "c.month_to_date_usd", "c.estimated_at", "c.guard", "over budget: writing jobs paused"],
     reads: [{ path: "/api/v1/cost", fields: ["status", "projected_usd", "month", "month_to_date_usd", "estimated_at", "guard"] }],
     visible: EVERYONE,
   },

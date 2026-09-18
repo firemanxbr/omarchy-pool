@@ -83,25 +83,36 @@ export type Ran = { nodes: Record<string, any> } & Record<string, any>;
  * A page's script — a served page's whole script with its IIFE opened, or
  * the shell alone — run the way the tests draw with it: ES5 written for a
  * browser, against a document that keeps every node written to by selector
- * and a fetch that never answers, so only the functions that draw are
- * exercised. `functions` names the script's own functions to hand back
- * (decisionCell, gate, a page's button makers), `variables` the script's
- * variables to get a setter for (`setCAN(v)`, `setWHO(v)`).
- * decision-cell.test.ts runs the shell this way, user-page.test.ts a
- * person's page.
+ * (a node's children are what the script appended, so a tile row can be
+ * read back) and a fetch that never answers unless the test hands one in
+ * (`fetch`: no-answer.test.ts answers every read with a 500), so only the
+ * functions that draw are exercised. `functions` names the script's own
+ * functions to hand back (decisionCell, gate, a page's button makers),
+ * `variables` the script's variables to get a setter for (`setCAN(v)`,
+ * `setWHO(v)`). decision-cell.test.ts runs the shell this way,
+ * user-page.test.ts a person's page.
  */
-export function runScript(code: string, opts: { pathname: string; functions: string[]; variables?: string[] }): Ran {
+export function runScript(code: string, opts: { pathname: string; functions: string[]; variables?: string[]; fetch?: (path: string, init?: RequestInit) => Promise<Response> }): Ran {
   const trimmed = code.trim();
   const body = trimmed.startsWith("(function () {") && trimmed.endsWith("})();") ? trimmed.slice("(function () {".length, -"})();".length) : trimmed;
   const nodes: Record<string, any> = {};
-  const node = (): any => ({
-    style: {}, classList: { add() {}, remove() {}, toggle() {} }, children: [], hidden: false, innerHTML: "", outerHTML: "", textContent: "", title: "",
-    appendChild() {}, setAttribute() {}, getAttribute: () => null, insertAdjacentHTML() {}, remove() {}, focus() {}, closest: () => null,
+  // A node by selector holds what the script wrote to it; a table's tBodies[0] is the node of "<sel> tbody", so the pager's rows are read back by that selector, and a parent is a node of its own for what the pager builds around a table.
+  const node = (sel?: string): any => ({
+    style: {}, classList: { add() {}, remove() {}, toggle() {}, contains: () => false }, children: [] as any[], hidden: false, innerHTML: "", outerHTML: "", textContent: "", title: "",
+    appendChild(c: any) { this.children.push(c); return c; },
+    replaceChild(n: any, o: any) { const i = this.children.indexOf(o); if (i >= 0) this.children[i] = n; return o; },
+    removeChild(c: any) { const i = this.children.indexOf(c); if (i >= 0) this.children.splice(i, 1); return c; },
+    insertBefore(n: any) { this.children.unshift(n); return n; },
+    get lastChild() { return this.children[this.children.length - 1] ?? null; },
+    get parentElement() { return (this._parent = this._parent || node()); },
+    previousElementSibling: null,
+    get tBodies() { return sel ? [document.querySelector(`${sel} tbody`)] : [node()]; },
+    setAttribute() {}, getAttribute: () => null, insertAdjacentHTML() {}, remove() {}, focus() {}, closest: () => null, addEventListener() {},
     querySelector: () => node(), querySelectorAll: () => [],
   });
   const document = {
-    querySelector: (sel: string) => (nodes[sel] = nodes[sel] || node()),
-    querySelectorAll: () => [], addEventListener() {}, createElement: node, body: node(), documentElement: { getAttribute: () => null }, title: "",
+    querySelector: (sel: string) => (nodes[sel] = nodes[sel] || node(sel)),
+    querySelectorAll: () => [], addEventListener() {}, createElement: () => node(), body: node(), documentElement: { getAttribute: () => null }, title: "",
   };
   const out = [
     "nodes: nodes",
@@ -109,7 +120,7 @@ export function runScript(code: string, opts: { pathname: string; functions: str
     ...(opts.variables ?? []).map((v) => `set${v}: function (x) { ${v} = x; }`),
   ].join(", ");
   const make = new Function("document", "window", "fetch", "location", "innerWidth", "nodes", `${body}\n return { ${out} };`);
-  return make(document, { matchMedia: null }, () => new Promise(() => {}), { pathname: opts.pathname, origin: "http://pool.test" }, 1024, nodes);
+  return make(document, { matchMedia: null }, opts.fetch ?? (() => new Promise(() => {})), { pathname: opts.pathname, origin: "http://pool.test" }, 1024, nodes);
 }
 
 const API = "http://pool.test/api/v1";

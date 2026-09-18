@@ -71,7 +71,7 @@ const BODY = String.raw`
 
 const SCRIPT = String.raw`
   var API = "/api/v1/factory", CATEGORIES = ${JSON.stringify(CATEGORIES)};
-  // REVIEW is the list's own answer: its rows (STAGED), and at the top waiting — the rows a maintainer's time is asked for now, counted by the server by the rule decidable() highlights with — and oldest_ms, the age of the oldest of them. The tiles, the queue line and the note read those two, never a count of their own, so this page, the Pipeline and the Factory say one number. BLOCKS is null until the brake's record answers, DRAWN true once the lists were drawn: what whoami's answer draws again is only what is there.
+  // REVIEW is the list's own answer: its rows (STAGED), and at the top waiting — the rows a maintainer's time is asked for now, counted by the server by the rule decidable() highlights with — and oldest_ms, the age of the oldest of them. The tiles, the queue line and the note read those two, never a count of their own, so this page, the Pipeline and the Factory say one number. BLOCKS is null until the brake's record answers, DRAWN true once the lists were drawn: what whoami's answer draws again is only what is there — and until then no number is said: a 0 before the list answered, or over a list that did not (a 5xx, the network — api() rejects, load() says so in the note), reads as nothing waiting.
   var REVIEW = { staged: [], waiting: 0, oldest_ms: null }, STAGED = [], APPROVALS = [], BLOCKS = null, MINE = null, DRAWN = false;
   // The package's name is its page, at the one address (the shell's pkgHref, the ring before the architecture as there): with the ring the row is about — the lab for a build nobody decided yet, the most stable ring that serves an approved one (the shell's servedRing), the page's default where it is in none — and the architecture.
   function pkg(name, version, ring, arch) { return '<a href="' + pkgHref(name, ring, arch) + '" title="the package as Packages shows it — where it is, and the factory\'s story of it"><b>' + esc(name) + '</b></a>' + (version ? ' <span class="mono muted">' + esc(version) + '</span>' : ''); }
@@ -89,17 +89,18 @@ const SCRIPT = String.raw`
   // What a session unlocks: the reader's own packages, for the Decided list.
   function privateLoad() { api("GET", API + "/me").then(function (d) { if (!d.error) { MINE = d; renderMine(); } }).catch(function () {}); }
 
-  // ---- the tiles: what waits for a maintainer (the list's own number and age, the same tile on the Pipeline and the Factory), the rows by kind, and how much was decided this week — every decision counted, an approval that stands told from one taken back.
-  function renderTiles() {
+  // ---- the tiles: what waits for a maintainer (the list's own number and age, the same tile on the Pipeline and the Factory), the rows by kind, and how much was decided this week — every decision counted, an approval that stands told from one taken back. Given the reason the lists did not answer (down), the same tiles say "—" and why (the shell's tilesUnanswered), never a 0.
+  function renderTiles(down) {
     var rows = shown(), contrib = rows.filter(function (t) { return t.kind !== "project"; }), proj = rows.filter(function (t) { return t.kind === "project"; });
     var week = APPROVALS.filter(function (a) { return Date.now() - Date.parse(a.created_at) < 7 * 86400e3; });
     var withdrawn = week.filter(function (a) { return a.withdrawn_at; }).length;
-    setTiles("#tiles", [
+    var tiles = [
       ["Waiting for review", num(REVIEW.waiting), REVIEW.oldest_ms ? "oldest " + span(REVIEW.oldest_ms) : "nothing waiting", REVIEW.waiting ? "warn" : "ok"],
       ["Contributors' builds", num(contrib.length), "evidence: a maintainer has the project build it again"],
       ["The project's builds", num(proj.length), "waiting for a maintainer's approval into edge"],
       ["Decided · 7 d", num(week.length), num(week.filter(function (a) { return a.standing; }).length) + " approved · " + num(week.filter(function (a) { return a.decision === "rejected"; }).length) + " rejected" + (withdrawn ? " · " + num(withdrawn) + " withdrawn" : "")]
-    ]);
+    ];
+    setTiles("#tiles", down ? tilesUnanswered(tiles, down) : tiles);
   }
 
   // ---- yours: one line per package of yours in the flow — waiting first, then decided; the ring is the one the line is about (the lab for a build waiting, the ring an approval landed in).
@@ -148,10 +149,11 @@ const SCRIPT = String.raw`
     // Both groups stay for a maintainer with nothing of their own too: the block reads the same for every role, the empty line included.
     $("#mine-decided").innerHTML = decided.join("") || '<p class="sub" style="margin:0">No decision on a package of yours yet.</p>';
   }
-  // One line for everyone: what waits for a maintainer — for you, as one — what the project is building, what is yours (the reader's own wait for another maintainer).
+  // One line for everyone: what waits for a maintainer — for you, as one — what the project is building, what is yours (the reader's own wait for another maintainer). Before the list answered, or when it did not, the three numbers are "—": whoami draws this line first, and a 0 there is a claim.
   function queueLine() {
     var inFlight = STAGED.filter(function (t) { return t.kind !== "project" && t.project_build && (t.project_build.status === "queued" || t.project_build.status === "leased"); }), own = shown().filter(function (t) { return isOwner(t.owner) && !t.already; });
-    $("#mine-queue").innerHTML = '<b>' + num(forMe()) + '</b> waiting for ' + (isMaintainer() ? "your decision" : "a maintainer") + ' <a href="#queue">↓</a> · <b>' + num(inFlight.length) + '</b> the project is building · <b>' + num(own.length) + '</b> yours — ' + (isMaintainer() ? "another" : "a") + ' maintainer decides';
+    var n = function (x) { return DRAWN ? num(x) : "—"; };
+    $("#mine-queue").innerHTML = '<b>' + n(forMe()) + '</b> waiting for ' + (isMaintainer() ? "your decision" : "a maintainer") + ' <a href="#queue">↓</a> · <b>' + n(inFlight.length) + '</b> the project is building · <b>' + n(own.length) + '</b> yours — ' + (isMaintainer() ? "another" : "a") + ' maintainer decides';
   }
   // One row per package and architecture: a contributor's build the project
   // has built again and staged is represented by the project's row, which
@@ -218,7 +220,7 @@ const SCRIPT = String.raw`
   function block(kind, what, lift) {
     ask(lift ? { title: "Lift the block on " + what, text: "The record keeps why.", input: "required", confirm: "Lift it" } : { title: "Block " + what, text: "The record and the contributor see this.", input: "required", confirm: "Block", danger: true }).then(function (why) {
       if (why === null) return;
-      api("POST", API + "/" + kind + "/" + encodeURIComponent(what) + "/" + (lift ? "unblock" : "block"), { reason: why }).then(function (d) { if (d.error) toast(esc(d.error), "error"); else toast(lift ? "Lifted." : "Blocked."); load(); });
+      api("POST", API + "/" + kind + "/" + encodeURIComponent(what) + "/" + (lift ? "unblock" : "block"), { reason: why }).then(function (d) { if (d.error) toast(esc(d.error), "error"); else toast(lift ? "Lifted." : "Blocked."); load(); }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
     });
   }
   // The brake's record, for everyone: the two tables, a Lift on every row — another maintainer's than the one who blocked.
@@ -234,7 +236,7 @@ const SCRIPT = String.raw`
   }
   document.addEventListener("change", function (ev) {
     var s = ev.target.closest ? ev.target.closest("select[data-category]") : null; if (!s || !s.value) return;
-    api("POST", API + "/packages/" + encodeURIComponent(s.getAttribute("data-category")) + "/category", { category: s.value }).then(function (d) { if (d.error) { toast(esc(d.error), "error"); load(); } });
+    api("POST", API + "/packages/" + encodeURIComponent(s.getAttribute("data-category")) + "/category", { category: s.value }).then(function (d) { if (d.error) { toast(esc(d.error), "error"); load(); } }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); load(); });
   });
   document.addEventListener("click", function (ev) {
     var u = ev.target.closest ? ev.target.closest("button[data-unblock]") : null;
@@ -251,17 +253,17 @@ const SCRIPT = String.raw`
         api("POST", API + "/" + kind + "/" + encodeURIComponent(what) + "/block", { reason: why }).then(function (d) {
           if (d.error) toast(esc(d.error), "error"); else { toast("Blocked."); $("#block-what").value = ""; $("#block-why").value = ""; }
           load();
-        });
+        }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
       });
     });
   });
 
-  // ---- the public lists: the review (its rows carry can for whoever asks), the decisions, the brake's record
+  // ---- the public lists: the review (its rows carry can for whoever asks), the decisions, the brake's record. A list that did not answer (api() rejects on a 5xx and on the network) is said in the note beside the heading, not drawn: the first load's tiles read "—", a refresh that failed leaves the last rows on screen.
   function load() {
     Promise.all([api("GET", API + "/review"), api("GET", API + "/approvals")]).then(function (rs) {
       REVIEW = rs[0]; STAGED = REVIEW.staged || []; APPROVALS = rs[1].approvals || []; DRAWN = true;
       renderTiles(); renderStaged(); renderDecisions(); renderMine();
-    }).catch(function () { endSkeleton(); });
+    }).catch(function (e) { var down = noAnswer("review list", e, "#queue-note"); if (!DRAWN) renderTiles(down); });
     api("GET", API + "/blocks").then(function (d) { if (!d.error) { BLOCKS = d; renderMine(); renderBlocks(); } }).catch(function () {});
   }
   load();
@@ -313,11 +315,11 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // What waits is the list's own number and age (`waiting`, `oldest_ms`) — the tile the Pipeline and the Factory draw too; the decisions of the week count every row, an approval that stands told from one withdrawn.
+    // What waits is the list's own number and age (`waiting`, `oldest_ms`) — the tile the Pipeline and the Factory draw too; the decisions of the week count every row, an approval that stands told from one withdrawn. Over a list that did not answer, the same tiles read "—" with the reason (the shell's tilesUnanswered), never a 0.
     id: "review.tiles",
     page: "/review",
     anchor: ['id="tiles"'],
-    script: ['skeletonTiles("#tiles", 4)', 'setTiles("#tiles"', '"Waiting for review"', "REVIEW.waiting", "REVIEW.oldest_ms", '"Decided · 7 d"', "a.standing", "a.withdrawn_at"],
+    script: ['skeletonTiles("#tiles", 4)', 'setTiles("#tiles", down ? tilesUnanswered(tiles, down) : tiles)', '"Waiting for review"', "REVIEW.waiting", "REVIEW.oldest_ms", '"Decided · 7 d"', "a.standing", "a.withdrawn_at", "if (!DRAWN) renderTiles(down)"],
     reads: [
       { path: "/api/v1/factory/review", fields: ["staged", "waiting", "oldest_ms", "staged.0.kind"] },
       { path: "/api/v1/factory/approvals", fields: ["approvals", "approvals.0.created_at", "approvals.0.decision", "approvals.0.standing", "approvals.0.withdrawn_at"] },
@@ -347,11 +349,11 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     visible: ["contributor", "owner"],
   },
   {
-    // One line for everyone: what waits for a maintainer — the list's own `waiting`, less a maintainer's own rows (for you, as one) — what the project is building, what is yours.
+    // One line for everyone: what waits for a maintainer — the list's own `waiting`, less a maintainer's own rows (for you, as one) — what the project is building, what is yours; "—" for each until the list answered.
     id: "review.yours-queue-line",
     page: "/review",
     anchor: ['<p class="sub" id="mine-queue">'],
-    script: ['$("#mine-queue")', "function queueLine()", '"your decision" : "a maintainer"', "function decidable(t)", "function forMe()", "REVIEW.waiting -"],
+    script: ['$("#mine-queue")', "function queueLine()", '"your decision" : "a maintainer"', "function decidable(t)", "function forMe()", "REVIEW.waiting -", 'return DRAWN ? num(x) : "—"'],
     reads: [{ path: "/api/v1/factory/review", fields: ["waiting", "staged.0.owner", "staged.0.kind", "staged.0.already", "staged.0.project_build"] }],
     visible: EVERYONE,
   },
@@ -378,11 +380,11 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // The note says the same number the queue line does — the list's `waiting`, less a maintainer's own rows — and how many rows are staged.
+    // The note says the same number the queue line does — the list's `waiting`, less a maintainer's own rows — and how many rows are staged; when the lists did not answer, it says so and why (the shell's noAnswer), and the table draws no "nothing waiting" in their place.
     id: "review.queue-head",
     page: "/review",
     anchor: ['<section id="queue">', 'id="queue-note"'],
-    script: ['$("#queue-note")', "num(forMe())", '" waiting for "', '" staged"', "of a version already approved"],
+    script: ['$("#queue-note")', "num(forMe())", '" waiting for "', '" staged"', "of a version already approved", 'noAnswer("review list", e, "#queue-note")'],
     reads: [{ path: "/api/v1/factory/review", fields: ["staged", "waiting", "staged.0.already", "staged.0.owner"] }],
     visible: EVERYONE,
   },

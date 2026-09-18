@@ -50,7 +50,7 @@ const SCRIPT = String.raw`
     pager("#added", d.added, function (p) { return '<tr><td>' + pkg(p) + '</td><td>' + esc(p.arch) + '</td><td class="mono">' + esc(p.version) + '</td><td><span class="src">' + esc(p.source || "") + '</span></td></tr>'; }, { empty: "nothing added" });
     pager("#removed", d.removed, function (p) { return '<tr><td>' + pkg(p) + '</td><td>' + esc(p.arch) + '</td><td class="mono">' + esc(p.version) + '</td><td><span class="src">' + esc(p.source || "") + '</span></td></tr>'; }, { empty: "nothing removed" });
     endSkeleton();
-  }).catch(function (e) { $("#line").textContent = "failed: " + e; endSkeleton(); });
+  }).catch(function (e) { $("#line").textContent = noAnswer("diff", e); });
 `;
 
 export function diffHtml(poolUrl: string, version: RunningVersion): string {
@@ -102,7 +102,7 @@ export const DIFF_COMPONENTS = (F: Fixture): Component[] => {
       id: "diff.lede",
       page,
       anchor: ['<p class="lede" id="line">'],
-      script: ['$("#line")', "ago(d.to.created_at)", "d.to.note", "ago(d.from.created_at)", "d.from.note", 'd.error || "not found"', '"failed: " + e'],
+      script: ['$("#line")', "ago(d.to.created_at)", "d.to.note", "ago(d.from.created_at)", "d.from.note", 'd.error || "not found"', 'noAnswer("diff", e)'],
       reads: [
         { path: head, fields: ["to.created_at", "to.note", "from.created_at", "from.note"] },
         { path: "/api/v1/releases/nope/diff", status: 404, fields: ["error"] },

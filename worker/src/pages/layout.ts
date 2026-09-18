@@ -993,10 +993,21 @@ export const HELPERS = String.raw`
       };
     });
   }
-  // One call to the API, JSON in and JSON out: the answer's body whatever the status — an error's message is in it — with the status on it as __status, so a page tells refused from done; the progress bar runs while it is in flight.
+  // One call to the API, JSON in and JSON out; the progress bar runs while it is in flight. An answer below 500 resolves with its body — an error's message is in it — and the status on it as __status, so a page tells refused (403), missing (404) or a check it failed (409, 422) from done and reads can where the answer carries one. A 5xx rejects, as a network failure does: its body is the Worker's { error: "internal error" } or nothing, never the list the page asked for, and a page that read it as one drew "Waiting for review 0 · nothing waiting" in green over a query that threw (2026-09-18). The Error's message is the body's error or "HTTP <status>", for the page's own line (noAnswer).
   function api(method, path, body) {
-    return busy(fetch(path, { method: method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined })).then(function (r) { return r.json().catch(function () { return { error: "HTTP " + r.status }; }).then(function (d) { d.__status = r.status; return d; }); });
+    return busy(fetch(path, { method: method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined })).then(function (r) {
+      return r.json().catch(function () { return { error: "HTTP " + r.status }; }).then(function (d) {
+        if (r.status >= 500) throw new Error((d && d.error) || "HTTP " + r.status);
+        d.__status = r.status; return d;
+      });
+    });
   }
+  // What a failure says: an Error's message (api()'s, the network's "Failed to fetch"), anything else as text.
+  function errorText(e) { return e && e.message ? String(e.message) : String(e || "no answer"); }
+  // The line a page writes when a list did not answer — "the review list did not answer: internal error" — the list's name and the reason. The skeleton ends here, so nothing reads as still loading; what was drawn before stays, since a refresh that failed is not a list that emptied, and no empty state is drawn in its place: "nothing waiting" over a query that threw read as good news. Written to sel's text when a selector is given; returned for a page that draws it its own way.
+  function noAnswer(what, e, sel) { endSkeleton(); var text = "the " + what + " did not answer: " + errorText(e); var el = sel ? $(sel) : null; if (el) el.textContent = text; return text; }
+  // The tiles a list that never answered would have drawn: the same labels and links, "—" for every number and the reason under each — never a 0, which reads as nothing queued, nothing failed, nobody waiting. Takes and returns what setTiles takes.
+  function tilesUnanswered(list, text) { return list.map(function (t) { return [t[0], "—", esc(text), "", t[4]]; }); }
   // A figure in the prose (a diagram's label, a sentence's number): every element with data-live="key" says text.
   function live(key, text) { document.querySelectorAll('[data-live="' + key + '"]').forEach(function (el) { el.textContent = text; }); }
   // One line of the journal (/api/v1/events), the same on the Journal and the Pipeline: the status, the kind, the ring and the source, the summary linked to the run that produced it and to the diff of the release it made, how long it took, when.
@@ -1020,7 +1031,7 @@ export const HELPERS = String.raw`
   document.addEventListener("click", function (ev) {
     var b = ev.target.closest ? ev.target.closest("button[data-rollback]") : null; if (!b) return;
     ev.stopImmediatePropagation(); b.disabled = true;
-    askRollback(b.getAttribute("data-ring"), b.getAttribute("data-rollback")).then(function (j) { if (j === null || j.error) b.disabled = false; }, function (e) { b.disabled = false; toast("failed: " + esc(String(e)), "error"); });
+    askRollback(b.getAttribute("data-ring"), b.getAttribute("data-rollback")).then(function (j) { if (j === null || j.error) b.disabled = false; }, function (e) { b.disabled = false; toast("failed: " + esc(errorText(e)), "error"); });
   });
   // ---- a control gated by role. The dashboard's rule: every role sees every control, the same for all; what a role cannot do is the same control disabled, grey, with the reason in its title — never hidden, never absent, never a sentence in its place. ok true returns the control as given; false marks every button, select, input and textarea in it disabled (aria-disabled, title = why, an existing title replaced) and every link class="disabled" with tabindex -1 and its href moved to data-href — a link without an href is followed by nothing, not a middle click, not "open in a new tab", not a drag — and the click handler below stops the rest. The reason is the server's where it has one (can.why on a review row, on GET /factory/tasks/:id/can), so a grey button is one the POST would refuse in the same words.
   function gate(html, ok, why) {
@@ -1118,7 +1129,7 @@ export const HELPERS = String.raw`
         toast(decidedText(what, d, b.hasAttribute("data-note")), what === "withdraw" ? "warn" : "ok");
         DECIDED.forEach(function (fn) { fn(what, Number(id), d); });
       });
-    }).catch(function (e) { b.disabled = false; toast("failed: " + esc(String(e)), "error"); });
+    }).catch(function (e) { b.disabled = false; toast("failed: " + esc(errorText(e)), "error"); });
   });
   // One chain of the factory's story (routes/story.ts) as a row of steps: built by the contributor → the gate → the audit → built again by the project → tried in the lab → decided. The package page and a person's page draw the same row.
   function chainRow(c) {

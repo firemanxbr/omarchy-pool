@@ -20,7 +20,7 @@ const BODY = String.raw`
     <h1>The pipeline, as it runs right now</h1>
     <p class="lede">What is being verified, promoted and checked for you this very minute; how fast maintainers decide; who is building what, and what it costs. The same page for users, contributors and maintainers — only which buttons are live differs.</p>
   </div>
-  <div class="state-row" id="state"><span class="pill none">checking…</span></div>
+  <div class="state-row"><div class="state-row" id="state" style="margin:0"><span class="pill none">checking…</span></div><span class="hint" id="lists-note"></span></div>
 
   <section id="live">
     <div class="h2row"><h2>A living system</h2><a class="more-link" href="/docs/security#feeds">What each security feed contributes →</a></div>
@@ -149,18 +149,16 @@ __CHARTS__
     if (t.kind === "enqueue") return "main@" + String(r.commit || "").slice(0, 7) + ": " + num((r.queued || []).length) + " queued, " + num((r.skipped || []).length) + " skipped, " + num(r.up_to_date) + " up to date";
     return JSON.stringify(r).slice(0, 90);
   }
-  function loadRegistry() {
-    busy(fetch("/api/v1/factory/packages")).then(function (r) { return r.json(); }).then(function (d) {
-      pager("#registry", d.packages || [], function (p) {
+  // The registry, from the packages list loadAll already holds — one read draws the flow's arrivals and this table.
+  function renderRegistry(pkgs) {
+    pager("#registry", pkgs, function (p) {
         var det = p.detected || {};
         var home = p.project || p.url;
         return '<tr><td><b>' + esc(p.name) + '</b>' + (p.request_id ? ' <a class="src" href="' + esc(POOL + "/factory/" + p.name + "/" + p.request_id + "/request.json") + '" title="the request, on the record">#' + p.request_id + '</a>' : '') + '</td><td><a href="' + esc(home) + '">' + esc(home.replace(/^https?:\/\/(www\.)?(github\.com\/)?/, "")) + '</a></td><td>' + esc(p.owner) + '</td><td>' + esc((p.arches || []).join(", ")) + '</td>' +
           '<td>' + esc([p.release || det.latest_tag, p.license || det.license].filter(Boolean).join(" · ")) + '</td><td>' + taskPill(p.status) + (p.staged_builds ? ' <span class="muted">' + p.staged_builds + ' staged</span>' : '') + '</td><td>' + esc(p.detail || "") + '</td><td>' + ago(p.updated_at) + '</td></tr>';
-      }, { empty: 'no package requested yet — <a href="/factory">be the first</a>', text: function (p) { return [p.name, p.category, p.owner, p.url, p.status].join(" "); } });
-    }).catch(function () { $("#registry tbody").innerHTML = ""; });
+    }, { empty: 'no package requested yet — <a href="/factory">be the first</a>', text: function (p) { return [p.name, p.category, p.owner, p.url, p.status].join(" "); } });
   }
   function renderTables(d) {
-    loadRegistry();
     // The worker a task ran on is drawn as every table draws one (the shell's wtId, the whole id and its host on hover): the listing's row where it still has one, the bare id whole where the record no longer lists it — no owner guessed.
     var byId = {}; (d.workers || []).forEach(function (w) { byId[w.id] = w; });
     pager("#tasks", d.tasks, function (t) {
@@ -177,11 +175,11 @@ __CHARTS__
     }, { empty: "nothing queued or built yet", text: function (t) { return [t.id, t.kind, t.name, t.arch, t.status, t.reason, t.lease_owner, t.owner, paramsLabel(t)].join(" "); } });
   }
   var API = "/api/v1/factory";
-  // REVIEW is the review list's own answer — the staged rows, and at the top waiting (the rows a maintainer's time is asked for now, the rule Review highlights by) and oldest_ms — so the flow, the tile and Review's say one number and one age.
+  // REVIEW is the review list's own answer — the staged rows, and at the top waiting (the rows a maintainer's time is asked for now, the rule Review highlights by) and oldest_ms — so the flow, the tile and Review's say one number and one age. FACTORY is null until the factory's lists answered; over lists that did not, the tiles say "—" and the state row's note says why (loadAll).
   var FACTORY = null, STATS = null, REVIEW = { staged: [], waiting: 0, oldest_ms: null }, STAGED = [];
   skeletonTiles("#tiles", 6); skeletonRows("#staged", 8, 2); skeletonRows("#events", 7, 6); skeletonRows("#tasks", 8, 4); skeletonRows("#registry", 8, 2); // ---- the state row: the service (measured now) and the pipeline (from the journal)
   function renderState(d) {
-    fetch("/api/v1/status", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (st) { live("api", "API up · index " + (st.index.ok ? st.index.ms + " ms" : "down") + " · pool " + (st.pool.ok ? st.pool.ms + " ms" : "down")); }).catch(function () { live("api", "API not answering"); });
+    api("GET", "/api/v1/status").then(function (st) { live("api", "API up · index " + (st.index.ok ? st.index.ms + " ms" : "down") + " · pool " + (st.pool.ok ? st.pool.ms + " ms" : "down")); }).catch(function (e) { live("api", noAnswer("service check", e)); });
     // A ring's pill is the worse of its two architectures' latest health checks.
     var why = problemsOf(d), heads = ["stable", "rc", "edge"].map(function (n) { var r = d.rings.filter(function (x) { return x.ring === n; })[0]; var hs = ["x86_64", "aarch64"].map(function (a) { return latest(d.latest, "health", n, a); }).filter(Boolean); var w = hs.reduce(function (acc, h) { return worst(acc, h.status); }, null); var bad = hs.filter(function (h) { return h.status !== "ok"; }); return r && r.release ? '<span class="pill ' + (w || "none") + '">' + n + ' #' + r.release.seq + (w ? ' · ' + (w === "ok" ? "healthy" : bad.map(function (h) { return (h.source || "x86_64") + " " + h.status; }).join(", ")) : "") + '</span>' : ""; }).join("");
     $("#state").innerHTML = '<span class="pill ' + (why.length ? "warn" : "ok") + '">' + (why.length ? "pipeline behind: " + esc(why.join(" · ")) : "pipeline keeping up") + '</span>' + heads + '<span class="pill none">running ' + esc(d.version && d.version.version || "") + '</span>';
@@ -194,12 +192,13 @@ __CHARTS__
     return '<div class="row"' + (fresh ? "" : ' style="animation:none"') + '><span><span class="dot ' + esc(e.status) + '"></span>' + esc(e.status) + '</span><span class="what">' + esc(e.kind) + '</span><span><span class="where">' + esc([e.ring, e.source].filter(Boolean).join(" · ")) + '</span> ' + (run ? '<a class="run" href="' + esc(run) + '">' + esc(e.summary) + '</a>' : esc(e.summary)) + '</span><span class="when" title="' + esc(e.created_at) + '">' + ago(e.created_at) + '</span></div>';
   }
   function loadFeed() {
-    fetch("/api/v1/events?limit=12", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (d) {
+    api("GET", "/api/v1/events?limit=12").then(function (d) {
       var rows = (d.events || []).filter(function (e) { return e.kind !== "metrics"; }).slice(0, 9);
       var first = !Object.keys(seen).length;
       $("#feed").innerHTML = rows.map(function (e) { var fresh = !first && !seen[e.id]; seen[e.id] = 1; return feedRow(e, fresh); }).join("") || '<div class="muted">nothing yet</div>';
       if (first) rows.forEach(function (e) { seen[e.id] = 1; });
-    }).catch(function () {});
+    // The journal did not answer: the feed says so while it has no rows; the rows it has stay.
+    }).catch(function (e) { if (!Object.keys(seen).length) $("#feed").innerHTML = '<div class="muted">' + esc(noAnswer("journal", e)) + '</div>'; });
   }
   function renderLive(d) {
     var today = new Date().toISOString().slice(0, 10), S = d.series || {};
@@ -219,7 +218,7 @@ __CHARTS__
     ];
     $("#counters").innerHTML = cells.map(function (c) { return '<div><b class="' + c[2] + '">' + c[1] + '</b><span>' + c[0] + '</span></div>'; }).join("");
     // Open in stable as the Security page says it: the shell's one rule at the page's default confidence (advisoriesAt, advisoryCounts), the number the Pool's tile says too.
-    fetch("/api/v1/security?ring=stable&arch=x86_64").then(function (r) { return r.json(); }).then(function (s) { var t = advisoryCounts(advisoriesAt(s)); live("open-stable", "open in stable: " + num(t.packages) + " · exploited: " + num(t.kev) + " · " + confWord()); live("kev", num(t.kev)); }).catch(function () { live("open-stable", "open in stable: no scan yet"); live("kev", "—"); });
+    api("GET", "/api/v1/security?ring=stable&arch=x86_64").then(function (s) { var t = advisoryCounts(advisoriesAt(s)); live("open-stable", "open in stable: " + num(t.packages) + " · exploited: " + num(t.kev) + " · " + confWord()); live("kev", num(t.kev)); }).catch(function (e) { live("open-stable", noAnswer("security report", e)); live("kev", "—"); });
   }
 
   // ---- review throughput: arrivals, decisions, who decides, and a contributor's place in the queue
@@ -266,30 +265,33 @@ __CHARTS__
   }
   onDecided(function () { loadAll(); });
 
-  // ---- operations: tiles, the diagram's numbers (the workers themselves are on /workers)
-  function renderOps(d) {
+  // ---- operations: tiles, the diagram's numbers (the workers themselves are on /workers). With no listing (d null) and the reason the lists did not answer (down), the tiles say "—" and why — the shell's tilesUnanswered — and the diagram's numbers wait.
+  function renderOps(d, down) {
+    d = d || { counts: [], workers: [], tasks: [], lease_minutes: 0 };
     var count = function (st, arch) { return d.counts.filter(function (c) { return c.status === st && (!arch || c.arch === arch); }).reduce(function (n, c) { return n + c.n; }, 0); };
     // The workers as the shell counts them (workerCounts): alive is the listing's word, the project's are the project and review kinds, the rest a contributor's.
     var wc = workerCounts(d.workers);
     var failed24 = d.tasks.filter(function (t) { return t.status === "failed" && Date.now() - Date.parse(t.finished_at || t.created_at) < 86400e3; });
     // Worker minutes: the sum of the series the Status and Workers pages chart (workerMinutes over jobs_daily), not the metrics snapshot beside it.
     var wm = STATS ? workerMinutes(STATS.series, 7) : null;
-    setTiles("#tiles", [
+    var tiles = [
       ["Queued", num(count("queued")), num(count("queued", "x86_64")) + " x86_64 · " + num(count("queued", "aarch64")) + " aarch64", count("queued") ? "warn" : ""],
       ["Building", num(count("leased")), "lease " + d.lease_minutes + " min, extended by heartbeats"],
       ["Workers alive", num(wc.alive) + " / " + num(wc.registered), num(wc.byKind.project.alive + wc.byKind.review.alive) + " the project's · " + num(wc.byKind.community.alive) + " contributors'", wc.alive ? "ok" : "warn", "/workers"],
       ["Waiting for review", num(REVIEW.waiting), REVIEW.oldest_ms ? "oldest " + span(REVIEW.oldest_ms) : "nothing waiting", REVIEW.waiting ? "warn" : ""],
       ["Failed · 24 h", num(failed24.length), failed24.length ? esc(failed24[0].name || failed24[0].kind) + " " + esc(failed24[0].arch || "") : "nothing failed"],
       ["Worker minutes · 7 d", wm ? num(wm.total) : "—", wm ? "≈ " + num(Math.round(wm.total / 7)) + " per day, the project's workers" : ""]
-    ]);
+    ];
+    setTiles("#tiles", down ? tilesUnanswered(tiles, down) : tiles);
+    // The reader's role, in the hint: what the grey buttons below are waiting for is said once here — whatever the lists said.
+    $("#ops-who").textContent = isMaintainer() ? WHO.login + " · you can approve and roll back" : WHO.login ? WHO.login + " · contributor — approving and rolling back are a maintainer's" : "read-only — approving and rolling back need the maintainer role";
+    if (down) return;
     live("queue", "queued " + num(count("queued")) + " · leased " + num(count("leased")) + " · per-job tokens · an expired lease goes back in the queue");
     var roles = { pool: [], review: [], shared: [], own: [] };
     // The diagram's three lines: the project's build workers (wtKind "project") are the pool's line, the review worker its own, a contributor's shared and own workers one line together.
     d.workers.forEach(function (w) { var k = wtKind(w); roles[k === "community" ? (w.mode === "shared" ? "shared" : "own") : k === "review" ? "review" : "pool"].push(w); });
     var line = function (ws) { var c = workerCounts(ws); return num(c.alive) + " alive · " + num(c.building) + " building" + (c.registered > c.alive ? " · " + num(c.registered - c.alive) + " gone" : ""); };
     live("w-pool", line(roles.pool)); live("w-review", line(roles.review)); live("w-community", line(roles.shared.concat(roles.own)));
-    // The reader's role, in the hint: what the grey buttons below are waiting for is said once here.
-    $("#ops-who").textContent = isMaintainer() ? WHO.login + " · you can approve and roll back" : WHO.login ? WHO.login + " · contributor — approving and rolling back are a maintainer's" : "read-only — approving and rolling back need the maintainer role";
   }
 
   // ---- ring heads and the journal; the roll-back button is on every card with a release before the head, for everyone — live for a maintainer, grey with the reason for anyone else — and the click is the shell's (askRollback asks, posts the job once, writes #rb-state)
@@ -319,39 +321,40 @@ __CHARTS__
 
   // ---- promotions per day: what the promote, rollback and fast-track jobs recorded
   function renderPromos() {
-    Promise.all(["promote", "rollback", "fast-track"].map(function (k) { return fetch("/api/v1/events?kind=" + k + "&limit=200").then(function (r) { return r.json(); }).then(function (d) { return d.events || []; }).catch(function () { return []; }); })).then(function (lists) {
+    Promise.all(["promote", "rollback", "fast-track"].map(function (k) { return api("GET", "/api/v1/events?kind=" + k + "&limit=200").then(function (d) { return d.events || []; }); })).then(function (lists) {
       var days = lastDays(14), by = {}; days.forEach(function (d) { by[d] = { promoted: 0, blocked: 0, rolled: 0 }; });
       lists[0].forEach(function (e) { var d = e.created_at.slice(0, 10); if (!by[d]) return; if (e.status === "ok") by[d].promoted++; else by[d].blocked++; });
       lists[2].forEach(function (e) { var d = e.created_at.slice(0, 10); if (by[d] && e.status === "ok") by[d].promoted++; });
       lists[1].forEach(function (e) { var d = e.created_at.slice(0, 10); if (by[d]) by[d].rolled++; });
       $("#c-promos").innerHTML = stacked(days, [{ name: "promoted", color: C.green, values: days.map(function (d) { return by[d].promoted; }) }, { name: "blocked", color: C.amber, values: days.map(function (d) { return by[d].blocked; }) }, { name: "rolled back", color: C.red, values: days.map(function (d) { return by[d].rolled; }) }], { label: "Promotions per day over fourteen days: promoted, blocked, rolled back", empty: "no promotion yet" });
-    });
+    // The journal did not answer: the chart says so, not "no promotion yet" — an empty list stood in for a failed one here.
+    }).catch(function (e) { $("#c-promos").innerHTML = '<div class="empty">' + esc(noAnswer("journal", e)) + '</div>'; });
   }
 
   // ---- the bill, estimated on cost.ts's cadence (ESTIMATE_CADENCE, spliced into the words above and below) from Cloudflare's analytics. The three lines — warn, guard, cap — are the pool's budget, not the estimate's: /api/v1/cost carries them with the estimate and without one, and the sentence, the cap beside the month, the guard's word and the mark on the bar all read them there, never a number typed here.
   function renderCost() {
-    fetch("/api/v1/cost").then(function (r) { return r.json(); }).then(function (c) {
+    api("GET", "/api/v1/cost").then(function (c) {
       var usd = c.lines_usd || {};
       live("cost-warn", num(usd.warn)); live("cost-guard", num(usd.guard)); live("cost-cap", num(usd.cap));
       var el = $("#budget"); if (c.error) { el.innerHTML = '<div><div class="k">this month</div><b>—</b> <span class="dim">no estimate yet (${ESTIMATE_CADENCE})</span></div>'; return; }
       var color = c.status === "error" ? "var(--red)" : c.status === "warn" ? "var(--amber)" : "var(--green)";
       el.innerHTML = '<div><div class="k">' + esc(c.month) + ', so far</div><b style="color:' + color + '">US$ ' + Number(c.month_to_date_usd).toFixed(2) + '</b> <span class="dim">of a US$ ' + num(usd.cap) + ' hard cap</span></div><div><div class="k">projected</div><b>US$ ' + Number(c.projected_usd).toFixed(2) + '</b> <span class="dim">' + (c.guard ? "over the guard: jobs that write are paused" : "guard at US$ " + num(usd.guard)) + '</span></div><div class="bar"><i style="width:' + Math.min(100, 100 * Number(c.projected_usd) / usd.cap) + '%;background:' + color + '"></i><em style="left:' + (100 * usd.guard / usd.cap) + '%"></em></div>';
-    }).catch(function () {});
+    }).catch(function (e) { $("#budget").innerHTML = '<div><div class="k">this month</div><b>—</b> <span class="dim">' + esc(noAnswer("cost estimate", e)) + '</span></div>'; });
   }
 
-  // ---- everything, together: stats every minute, the factory every 30 s, the feed every 20 s
+  // ---- everything, together: stats every minute, the factory every 30 s, the feed every 20 s. The four lists are one load: one that did not answer (api() rejects on a 5xx and on the network) is said in the state row's note, and nothing is drawn in its place — an empty list stood in for a failed one here and the flow read "waiting for review 0 · nothing waiting" over a query that threw. The first load's tiles read "—"; a refresh that failed leaves the last rows on screen.
   function loadAll() {
     Promise.all([
-      busy(fetch(API + "?limit=100")).then(function (r) { return r.json(); }),
-      fetch(API + "/packages").then(function (r) { return r.json(); }).catch(function () { return { packages: [] }; }),
-      fetch(API + "/approvals").then(function (r) { return r.json(); }).catch(function () { return { approvals: [] }; }),
-      fetch(API + "/review", { cache: "no-store" }).then(function (r) { return r.json(); }).catch(function () { return { staged: [] }; })
+      api("GET", API + "?limit=100"),
+      api("GET", API + "/packages"),
+      api("GET", API + "/approvals"),
+      api("GET", API + "/review")
     ]).then(function (res) {
       var f = res[0]; REVIEW = res[3]; STAGED = REVIEW.staged || [];
-      FACTORY = f; renderOps(f); renderStaged(STAGED); renderThroughput(f, res[1].packages || [], res[2].approvals || [], REVIEW, WHO.me);
-      renderTables(f);
+      FACTORY = f; $("#lists-note").textContent = ""; renderOps(f); renderStaged(STAGED); renderThroughput(f, res[1].packages || [], res[2].approvals || [], REVIEW, WHO.me);
+      renderTables(f); renderRegistry(res[1].packages || []);
       endSkeleton();
-    }).catch(function () { endSkeleton(); });
+    }).catch(function (e) { var down = noAnswer("factory's lists", e, "#lists-note"); if (!FACTORY) renderOps(null, down); });
   }
   // The first load waits for /auth/me, so every button is live or grey as the reader's rights say from the first draw; the ring cards come from the stats poll, drawn again here when the poll answered first.
   whoami(function () { loadAll(); if (STATS) renderRings(STATS); });
@@ -394,10 +397,11 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
+    // The pills from the stats poll and the service check; beside them the page's note, where a load of the factory's lists that did not answer says so (loadAll, the shell's noAnswer) and which the next load that answers clears.
     id: "pipeline.state-row",
     page: "/pipeline",
-    anchor: ['class="state-row"', 'id="state"'],
-    script: ['$("#state")', 'fetch("/api/v1/status"', "problemsOf(d)", "d.version && d.version.version"],
+    anchor: ['class="state-row"', 'id="state"', 'id="lists-note"'],
+    script: ['$("#state")', 'api("GET", "/api/v1/status")', "problemsOf(d)", "d.version && d.version.version", 'noAnswer("factory\'s lists", e, "#lists-note")', '$("#lists-note").textContent = ""', 'noAnswer("service check", e)'],
     reads: [
       { path: "/api/v1/stats", fields: ["rings", "rings.2.ring", "rings.2.release.seq", "latest", "coverage", "version.version"] },
       { path: "/api/v1/status", fields: ["index.ok", "index.ms", "pool.ok", "pool.ms"] },
@@ -426,7 +430,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.live-feed",
     page: "/pipeline",
     anchor: ['class="ticker"', 'id="feed"'],
-    script: ['"/api/v1/events?limit=12"', '$("#feed")', 'e.kind !== "metrics"', "runHref(e.payload && e.payload.ci && e.payload.ci.run_url)"],
+    script: ['"/api/v1/events?limit=12"', '$("#feed")', 'e.kind !== "metrics"', "runHref(e.payload && e.payload.ci && e.payload.ci.run_url)", 'noAnswer("journal", e)'],
     reads: [{ path: "/api/v1/events?limit=12", fields: ["events", "events.0.id", "events.0.kind", "events.0.status", "events.0.ring", "events.0.source", "events.0.summary", "events.0.created_at", "events.0.payload"] }],
     visible: EVERYONE,
   },
@@ -508,11 +512,11 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // The workers are the shell's count (workerCounts: alive the listing's word, by kind); what waits for review is the list's own `waiting` and `oldest_ms`.
+    // The workers are the shell's count (workerCounts: alive the listing's word, by kind); what waits for review is the list's own `waiting` and `oldest_ms`. Over lists that did not answer, the six read "—" with the reason (the shell's tilesUnanswered) — a 0 read as nothing queued, nothing failed, nobody waiting.
     id: "pipeline.operations-tiles",
     page: "/pipeline",
     anchor: ['class="tiles six"', 'id="tiles"'],
-    script: ['setTiles("#tiles"', "workerCounts(d.workers)", "wc.byKind.project.alive + wc.byKind.review.alive", "wc.byKind.community.alive", '"Waiting for review"', "REVIEW.waiting", "REVIEW.oldest_ms", '"Failed · 24 h"', "d.lease_minutes", '"Worker minutes · 7 d", wm ? num(wm.total)', "workerMinutes(STATS.series, 7)"],
+    script: ['setTiles("#tiles", down ? tilesUnanswered(tiles, down) : tiles)', "if (!FACTORY) renderOps(null, down)", "workerCounts(d.workers)", "wc.byKind.project.alive + wc.byKind.review.alive", "wc.byKind.community.alive", '"Waiting for review"', "REVIEW.waiting", "REVIEW.oldest_ms", '"Failed · 24 h"', "d.lease_minutes", '"Worker minutes · 7 d", wm ? num(wm.total)', "workerMinutes(STATS.series, 7)"],
     reads: [
       { path: "/api/v1/factory?limit=100", fields: ["counts", "counts.0.status", "counts.0.arch", "counts.0.n", "lease_minutes", "workers", "workers.0.alive", "workers.0.ready", "workers.0.current_task", "workers.0.revoked_at", "workers.0.side", "workers.0.labels", "tasks.0.status", "tasks.0.finished_at", "tasks.0.created_at", "tasks.0.name", "tasks.0.kind", "tasks.0.arch"] },
       { path: "/api/v1/factory/review", fields: ["staged", "waiting", "oldest_ms"] },
@@ -579,7 +583,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.promotions-chart",
     page: "/pipeline",
     anchor: ['id="c-promos"'],
-    script: ['$("#c-promos")', '"/api/v1/events?kind="', '["promote", "rollback", "fast-track"]', "e.created_at.slice(0, 10)"],
+    script: ['$("#c-promos")', '"/api/v1/events?kind="', '["promote", "rollback", "fast-track"]', "e.created_at.slice(0, 10)", 'noAnswer("journal", e)'],
     reads: [
       { path: "/api/v1/events?kind=promote&limit=200", fields: ["events", "events.0.created_at", "events.0.status"] },
       { path: "/api/v1/events?kind=rollback&limit=200", fields: ["events"] },
@@ -647,7 +651,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.registry-table",
     page: "/pipeline",
     anchor: ['id="registry"'],
-    script: ['fetch("/api/v1/factory/packages")', 'pager("#registry"', "p.staged_builds", '"/request.json"', "det.latest_tag"],
+    script: ['API + "/packages"', "function renderRegistry(pkgs)", 'renderRegistry(res[1].packages || [])', 'pager("#registry"', "p.staged_builds", '"/request.json"', "det.latest_tag"],
     reads: [{ path: "/api/v1/factory/packages", fields: ["packages.0.name", "packages.0.request_id", "packages.0.project", "packages.0.url", "packages.0.owner", "packages.0.arches", "packages.0.release", "packages.0.license", "packages.0.status", "packages.0.staged_builds", "packages.0.detail", "packages.0.updated_at", "packages.0.category", "packages.0.detected"] }],
     visible: EVERYONE,
   },
@@ -682,7 +686,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.budget",
     page: "/pipeline",
     anchor: ['id="budget"', 'data-live="cost-warn"', 'data-live="cost-guard"', 'data-live="cost-cap"'],
-    script: ['fetch("/api/v1/cost")', '$("#budget")', "c.lines_usd", 'live("cost-warn", num(usd.warn))', 'live("cost-guard", num(usd.guard))', 'live("cost-cap", num(usd.cap))', "c.error", "c.month_to_date_usd", "c.projected_usd", "c.guard", "100 * usd.guard / usd.cap"],
+    script: ['api("GET", "/api/v1/cost")', '$("#budget")', "c.lines_usd", 'noAnswer("cost estimate", e)', 'live("cost-warn", num(usd.warn))', 'live("cost-guard", num(usd.guard))', 'live("cost-cap", num(usd.cap))', "c.error", "c.month_to_date_usd", "c.projected_usd", "c.guard", "100 * usd.guard / usd.cap"],
     reads: [{ path: "/api/v1/cost", fields: ["month", "month_to_date_usd", "projected_usd", "status", "guard", "lines_usd.warn", "lines_usd.guard", "lines_usd.cap"] }],
     visible: EVERYONE,
   },
