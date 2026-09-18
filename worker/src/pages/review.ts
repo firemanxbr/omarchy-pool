@@ -71,7 +71,7 @@ const BODY = String.raw`
 
 const SCRIPT = String.raw`
   var API = "/api/v1/factory", CATEGORIES = ${JSON.stringify(CATEGORIES)};
-  // REVIEW is the list's own answer: its rows (STAGED), and at the top waiting — the rows a maintainer's time is asked for now, counted by the server by the rule decidable() highlights with — and oldest_ms, the age of the oldest of them. The tiles, the queue line and the note read those two, never a count of their own, so this page, the Pipeline and the Factory say one number. BLOCKS is null until the brake's record answers, DRAWN true once the lists were drawn: what whoami's answer draws again is only what is there — and until then no number is said: a 0 before the list answered, or over a list that did not (a 5xx, the network — api() rejects, load() says so in the note), reads as nothing waiting.
+  // REVIEW is the list's own answer: its rows (STAGED), each saying whether it waits for a maintainer, and at the top waiting — the rows a maintainer's time is asked for now, counted by the server over the rows' own waits, the field decidable() highlights with — and oldest_ms, the age of the oldest of them. The tiles, the queue line and the note read those two, never a count of their own, so this page, the Pipeline and the Factory say one number. BLOCKS is null until the brake's record answers, DRAWN true once the lists were drawn: what whoami's answer draws again is only what is there — and until then no number is said: a 0 before the list answered, or over a list that did not (a 5xx, the network — api() rejects, load() says so in the note), reads as nothing waiting.
   var REVIEW = { staged: [], waiting: 0, oldest_ms: null }, STAGED = [], APPROVALS = [], BLOCKS = null, MINE = null, DRAWN = false;
   // The package's name is its page, at the one address (the shell's pkgHref, the ring before the architecture as there): with the ring the row is about — the lab for a build nobody decided yet, the most stable ring that serves an approved one (the shell's servedRing), the page's default where it is in none — and the architecture.
   function pkg(name, version, ring, arch) { return '<a href="' + pkgHref(name, ring, arch) + '" title="the package as Packages shows it — where it is, and the factory\'s story of it"><b>' + esc(name) + '</b></a>' + (version ? ' <span class="mono muted">' + esc(version) + '</span>' : ''); }
@@ -162,8 +162,8 @@ const SCRIPT = String.raw`
   // stays reachable from the project's row and on the build's own page.
   function folded(t) { var pb = t.project_build; return t.kind !== "project" && !!pb && pb.status === "staged" && STAGED.some(function (p) { return p.id === pb.id; }); }
   function shown() { return STAGED.filter(function (t) { return !folded(t); }); }
-  // Highlighted, never gated: a row a maintainer's time is asked for now — nothing already decided, the project not already building it. The same rule the server counts waiting by (waitsForMaintainer, routes/review.ts), so the rows marked and the number said agree; the buttons read the row's can, and this reads the same as they do: a chain whose contributor's half is not complete says so in its Class cell, and is still a maintainer's to decide.
-  function decidable(t) { var pb = t.project_build; return !t.already && (t.kind === "project" || !pb || pb.status === "failed"); }
+  // Highlighted, never gated: a row a maintainer's time is asked for now — the row's own waits, said by the server (waitsForMaintainer, routes/review.ts) by the rule it counts waiting with, so the rows marked, the rows subtracted and the number said agree for every viewer; the page keeps no copy of the rule (its copy drifted once). The buttons read the row's can, which is the viewer's; waits is not: a chain whose contributor's half is not complete says so in its Class cell, and is still a maintainer's to decide.
+  function decidable(t) { return t.waits === true; }
   // What waits for this reader: the list's own count, less a maintainer's own rows — those are another maintainer's; a contributor's own rows wait like the rest.
   function forMe() { return REVIEW.waiting - (isMaintainer() ? shown().filter(function (t) { return isOwner(t.owner) && decidable(t); }).length : 0); }
   function taskLink(id, text) { return '<a href="/build/' + id + '">' + (text || "#" + id) + '</a>'; }
@@ -349,12 +349,12 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     visible: ["contributor", "owner"],
   },
   {
-    // One line for everyone: what waits for a maintainer — the list's own `waiting`, less a maintainer's own rows (for you, as one) — what the project is building, what is yours; "—" for each until the list answered.
+    // One line for everyone: what waits for a maintainer — the list's own `waiting`, less a maintainer's own rows that wait (for you, as one), each row's `waits` the server's — what the project is building, what is yours; "—" for each until the list answered.
     id: "review.yours-queue-line",
     page: "/review",
     anchor: ['<p class="sub" id="mine-queue">'],
-    script: ['$("#mine-queue")', "function queueLine()", '"your decision" : "a maintainer"', "function decidable(t)", "function forMe()", "REVIEW.waiting -", 'return DRAWN ? num(x) : "—"'],
-    reads: [{ path: "/api/v1/factory/review", fields: ["waiting", "staged.0.owner", "staged.0.kind", "staged.0.already", "staged.0.project_build"] }],
+    script: ['$("#mine-queue")', "function queueLine()", '"your decision" : "a maintainer"', "function decidable(t) { return t.waits === true; }", "function forMe()", "REVIEW.waiting -", 'return DRAWN ? num(x) : "—"'],
+    reads: [{ path: "/api/v1/factory/review", fields: ["waiting", "staged.0.owner", "staged.0.kind", "staged.0.already", "staged.0.project_build", "staged.0.waits"] }],
     visible: EVERYONE,
   },
   {
@@ -385,21 +385,21 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     page: "/review",
     anchor: ['<section id="queue">', 'id="queue-note"'],
     script: ['$("#queue-note")', "num(forMe())", '" waiting for "', '" staged"', "of a version already approved", 'noAnswer("review list", e, "#queue-note")'],
-    reads: [{ path: "/api/v1/factory/review", fields: ["staged", "waiting", "staged.0.already", "staged.0.owner"] }],
+    reads: [{ path: "/api/v1/factory/review", fields: ["staged", "waiting", "staged.0.already", "staged.0.owner", "staged.0.waits"] }],
     visible: EVERYONE,
   },
   {
     id: "review.staged-table",
     page: "/review",
     anchor: ['<table id="staged">', "<th>Gate</th><th>Audit</th><th>Trial</th>", '<th class="decision">Decision</th>'],
-    // The package's name is its page at the shell's one address (pkgHref), with the lab — the ring a build nobody decided yet is about — and the row's architecture.
-    script: ['pager("#staged"', 'pkg(t.name, t.version, "lab", t.arch)', "function pkg(name, version, ring, arch)", "pkgHref(name, ring, arch)", "gatePill(t.vet, t.evidence.tests)", "auditPill(t.audit, t.evidence.audit)", "trialPill(t.trial, t.evidence.trial)", "t.built_by", "sc.projected", '"project-row"', '"mine-row"'],
+    // The package's name is its page at the shell's one address (pkgHref), with the lab — the ring a build nobody decided yet is about — and the row's architecture. A row for a maintainer to decide is highlighted (for-you) by the row's own `waits`, the server's word, never a rule of the page's.
+    script: ['pager("#staged"', 'pkg(t.name, t.version, "lab", t.arch)', "function pkg(name, version, ring, arch)", "pkgHref(name, ring, arch)", "gatePill(t.vet, t.evidence.tests)", "auditPill(t.audit, t.evidence.audit)", "trialPill(t.trial, t.evidence.trial)", "t.built_by", "sc.projected", '"project-row"', '"mine-row"', '"for-you"', "!mine && decidable(t)"],
     reads: [
       {
         path: "/api/v1/factory/review",
         fields: [
           "staged", "staged.0.id", "staged.0.name", "staged.0.version", "staged.0.arch", "staged.0.owner", "staged.0.kind", "staged.0.from", "staged.0.url", "staged.0.detected", "staged.0.category", "staged.0.duration_ms", "staged.0.finished_at",
-          "staged.0.project_build", "staged.0.built_by", "staged.0.built_by.worker", "staged.0.built_by.owner", "staged.0.built_by.where", "staged.0.built_by.trusted_by", "staged.0.already",
+          "staged.0.project_build", "staged.0.built_by", "staged.0.built_by.worker", "staged.0.built_by.owner", "staged.0.built_by.where", "staged.0.built_by.trusted_by", "staged.0.already", "staged.0.waits",
           "staged.0.vet.verdict", "staged.0.vet.warnings", "staged.0.vet.warned", "staged.0.vet.failed", "staged.0.audit.status", "staged.0.trial.status",
           "staged.0.score.points", "staged.0.score.class", "staged.0.score.projected", "staged.0.score.ready", "staged.0.evidence.tests", "staged.0.evidence.audit", "staged.0.evidence.trial",
         ],

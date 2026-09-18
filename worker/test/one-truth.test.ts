@@ -18,6 +18,11 @@
  * the registry's `landed`, one sum over jobs_daily, one count at the
  * Security page's confidence; and one ring for one build, one word for an
  * approval that stands, on every page that draws them.
+ * The third (2026-09-18) found the Review page holding a copy of the
+ * server's waitsForMaintainer as `decidable`, subtracting a maintainer's
+ * own rows with it and highlighting by it, with nothing holding the two
+ * together: now every row of the list says `waits`, the page reads the
+ * field, and the first block runs the served rule over the server's rows.
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -55,6 +60,9 @@ describe("the review list counts what waits, once", () => {
     expect(r.json.staged.map((t: { id: number }) => t.id).sort()).toEqual([F.stagedTask, F.disposableTask, F.spareTask].sort());
     expect(r.json.waiting).toBe(3);
     expect(r.json.waiting).toBe(r.json.staged.filter(waitsForMaintainer).length);
+    // Every row says it for itself: `waits` is the same rule, and `waiting` is the count of rows that say true — the page reads the field, not the rule.
+    for (const t of r.json.staged) expect(t.waits, `#${t.id} waits`).toBe(waitsForMaintainer(t));
+    expect(r.json.waiting).toBe(r.json.staged.filter((t: { waits: boolean }) => t.waits === true).length);
     const ages = r.json.staged.map((t: { finished_at: string }) => Date.now() - Date.parse(t.finished_at));
     expect(r.json.oldest_ms).toBeGreaterThan(0);
     expect(Math.abs(r.json.oldest_ms - Math.max(...ages))).toBeLessThan(5000);
@@ -78,6 +86,34 @@ describe("the review list counts what waits, once", () => {
     expect(r.staged.find((t: { id: number }) => t.id === F.stagedTask).project_build).toMatchObject({ status: "queued" });
     expect(r.waiting).toBe(3);
     expect(r.waiting).toBe(r.staged.filter(waitsForMaintainer).length);
+    // The rows moved and each row's word moved with them: the contributor's row behind a project build in flight says false, the project's row says true, the count is theirs.
+    for (const t of r.staged) expect(t.waits, `#${t.id} waits`).toBe(waitsForMaintainer(t));
+    expect(r.staged.find((t: { id: number }) => t.id === F.stagedTask).waits).toBe(false);
+    expect(r.staged.find((t: { id: number }) => t.id === F.projectTask).waits).toBe(true);
+    expect(r.waiting).toBe(r.staged.filter((t: { waits: boolean }) => t.waits).length);
+  });
+
+  it("the Review page highlights a row and takes a maintainer's own rows out of the number by the row's `waits`, keeping no rule of its own", async () => {
+    const r = (await call("GET", "/factory/review")).json as { waiting: number; staged: { id: number; owner: string; waits: boolean }[] };
+    const html = await page("/review"), script = scriptOf(html);
+    // The served rule, run over the server's rows, is the field: row by row what waitsForMaintainer says — and, the field withheld, nothing is highlighted, because the page has no copy of the rule to fall back on.
+    const decidable = served(script, "decidable");
+    expect(decidable).not.toMatch(/project_build|already|kind|failed/);
+    const rule = new Function("rows", [decidable, "return rows.map(decidable);"].join("\n"));
+    expect(rule(r.staged)).toEqual(r.staged.map(waitsForMaintainer));
+    expect(r.staged.some((t) => t.waits)).toBe(true);
+    expect(rule(r.staged.map(({ waits: _, ...t }) => t))).toEqual(r.staged.map(() => false));
+    // The maintainer's number is the list's `waiting` less their own rows that wait, by the same field: the served forMe over the served shown(), as a maintainer who owns rows and as one who owns none — never below zero, never above the list's.
+    const forMe = new Function("REVIEW", "me", [decidable, served(script, "folded"), served(script, "shown"), served(script, "forMe"), "var STAGED = REVIEW.staged; function isMaintainer() { return true; } function isOwner(o) { return o === me; }", "return forMe();"].join("\n"));
+    const own = r.staged.filter((t) => t.owner === F.owner && t.waits).length;
+    expect(own).toBeGreaterThan(0);
+    expect(forMe(r, F.owner)).toBe(r.waiting - own);
+    expect(forMe(r, F.m1)).toBe(r.waiting);
+    // The manifests pin the field on every component that reads it: the queue line, the note and the table.
+    for (const id of ["review.yours-queue-line", "review.queue-head", "review.staged-table"]) {
+      const c = allComponents(F).find((x) => x.id === id);
+      expect(c?.reads?.some((x) => x.path === "/api/v1/factory/review" && x.fields?.includes("staged.0.waits")), `${id} reads waits`).toBe(true);
+    }
   });
 });
 
