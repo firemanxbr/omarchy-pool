@@ -56,6 +56,9 @@ jobs:
       - name: Governance file and CODEOWNERS agree
         working-directory: .
         run: factory/bin/check-governance
+      - name: The tree carries no ignored, one-machine or secret file
+        working-directory: .
+        run: bash tests/tracked-tree.sh
       - name: The agent's claude-code provider, against a fake claude
         working-directory: .
         run: python3 tests/agent-claude-code.py

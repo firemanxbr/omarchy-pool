@@ -13,7 +13,11 @@ cargo test --workspace
 ```
 
 CI (`.github/workflows/ci.yml`) runs exactly these on x86_64 **and** arm64 runners,
-plus the worker typecheck and its tests, on every pull request. The three end-to-end scripts
+plus the worker typecheck and its tests, on every pull request — and
+`tests/tracked-tree.sh`: no tracked file that an ignore rule covers, none that
+belongs to one machine or holds a secret (Wrangler's caches and `.dev.vars`,
+`.DS_Store`, a saved token), the lesson of the account cache that sat in the
+tree from #107 to #211. The three end-to-end scripts
 below also run in GitHub Actions (`.github/workflows/e2e.yml`) on native x86_64
 runners, where the Arch container needs no emulation. Both are required checks on
 `main`, and `release.yml` — run when a maintainer decides, not by the merge — runs
