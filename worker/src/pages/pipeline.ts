@@ -145,7 +145,7 @@ __CHARTS__
   function renderState(d) {
     fetch("/api/v1/status", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (st) { live("api", "API up · index " + (st.index.ok ? st.index.ms + " ms" : "down") + " · pool " + (st.pool.ok ? st.pool.ms + " ms" : "down")); }).catch(function () { live("api", "API not answering"); });
     // A ring's pill is the worse of its two architectures' latest health checks, in the shell's word for it (HEALTH_WORD), over the rings a check covers (PROMISED_RINGS).
-    var why = problemsOf(d), heads = PROMISED_RINGS.map(function (n) { var r = d.rings.filter(function (x) { return x.ring === n; })[0]; var hs = ARCHES.map(function (a) { return latest(d.latest, "health", n, a); }).filter(Boolean); var w = hs.reduce(function (acc, h) { return worst(acc, h.status); }, null); var bad = hs.filter(function (h) { return h.status !== "ok"; }); return r && r.release ? '<span class="pill ' + (w || "none") + '">' + n + ' #' + r.release.seq + (w ? ' · ' + (w === "ok" ? HEALTH_WORD.ok : bad.map(function (h) { return (h.source || "x86_64") + " " + HEALTH_WORD[h.status]; }).join(", ")) : "") + '</span>' : ""; }).join("");
+    var why = problemsOf(d), heads = PROMISED_RINGS.map(function (n) { var r = d.rings.filter(function (x) { return x.ring === n; })[0]; var hs = ARCHES.map(function (a) { return latest(d.latest, "health", n, a); }).filter(Boolean); var w = hs.reduce(function (acc, h) { return worst(acc, h.status); }, null); var bad = hs.filter(function (h) { return h.status !== "ok"; }); return r && r.release ? '<span class="pill ' + (w || "none") + '">' + n + ' #' + r.release.seq + (w ? ' · ' + (w === "ok" ? HEALTH_WORD.ok : bad.map(function (h) { return (h.source || NULL_SOURCE_ARCH) + " " + HEALTH_WORD[h.status]; }).join(", ")) : "") + '</span>' : ""; }).join("");
     $("#state").innerHTML = '<span class="pill ' + (why.length ? "warn" : "ok") + '">' + (why.length ? "pipeline behind: " + esc(why.join(" · ")) : "pipeline keeping up") + '</span>' + heads + '<span class="pill none">running ' + esc(d.version && d.version.version || "") + '</span>';
   }
 
@@ -298,7 +298,7 @@ __CHARTS__
       var el = $("#budget"); if (c.error) { el.innerHTML = '<div><div class="k">this month</div><b>—</b> <span class="dim">no estimate yet (${ESTIMATE_CADENCE})</span></div>'; return; }
       // The colour and the figures are the shell's (costColor, usd): the same word the Status tile tints the same way.
       var color = costColor(c);
-      el.innerHTML = '<div><div class="k">' + esc(c.month) + ', so far</div><b style="color:' + color + '">' + usd(c.month_to_date_usd) + '</b> <span class="dim">of a US$ ' + num(lines.cap) + ' hard cap</span></div><div><div class="k">projected</div><b>' + usd(c.projected_usd) + '</b> <span class="dim">' + (c.guard ? "over the guard: jobs that write are paused" : "guard at US$ " + num(lines.guard)) + '</span></div><div class="bar"><i style="width:' + Math.min(100, 100 * Number(c.projected_usd) / lines.cap) + '%;background:' + color + '"></i><em style="left:' + (100 * budget.guard / budget.cap) + '%"></em></div>';
+      el.innerHTML = '<div><div class="k">' + esc(c.month) + ', so far</div><b style="color:' + color + '">' + usd(c.month_to_date_usd) + '</b> <span class="dim">of a US$ ' + num(budget.cap) + ' hard cap</span></div><div><div class="k">projected</div><b>' + usd(c.projected_usd) + '</b> <span class="dim">' + (c.guard ? "over the guard: jobs that write are paused" : "guard at US$ " + num(budget.guard)) + '</span></div><div class="bar"><i style="width:' + Math.min(100, 100 * Number(c.projected_usd) / budget.cap) + '%;background:' + color + '"></i><em style="left:' + (100 * budget.guard / budget.cap) + '%"></em></div>';
     }).catch(function () {});
   }
 
@@ -635,7 +635,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.budget",
     page: "/pipeline",
     anchor: ['id="budget"', 'data-live="cost-warn"', 'data-live="cost-guard"', 'data-live="cost-cap"'],
-    script: ['fetch("/api/v1/cost")', '$("#budget")', "c.lines_usd", 'live("cost-warn", num(budget.warn))', 'live("cost-guard", num(budget.guard))', 'live("cost-cap", num(budget.cap))', "c.error", "costColor(c)", "usd(c.month_to_date_usd)", "usd(c.projected_usd)", "c.guard", "100 * budget.guard / budget.cap"],
+    script: ['fetch("/api/v1/cost")', '$("#budget")', "c.lines_usd", 'live("cost-warn", num(budget.warn))', 'live("cost-guard", num(budget.guard))', 'live("cost-cap", num(budget.cap))', "c.error", "costColor(c)", "usd(c.month_to_date_usd)", "usd(c.projected_usd)", "c.guard", "of a US$ ' + num(budget.cap) + ' hard cap", "\"guard at US$ \" + num(budget.guard)", "Number(c.projected_usd) / budget.cap", "100 * budget.guard / budget.cap"],
     reads: [{ path: "/api/v1/cost", fields: ["month", "month_to_date_usd", "projected_usd", "status", "guard", "lines_usd.warn", "lines_usd.guard", "lines_usd.cap"] }],
     visible: EVERYONE,
   },

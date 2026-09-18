@@ -623,6 +623,8 @@ export const HELPERS = String.raw`
   var RINGS_UPWARD = Object.keys(RINGS_TEXT).reverse();
   // The architectures the pool serves (meta.ts's REPO_ARCHES), spliced in by page(): the pickers, the health grid, the Pipeline's heads and the package page's chips read this and hold no pair of their own; the first is the default a picker falls back to.
   var ARCHES = __ARCHES__;
+  // A health row the journal wrote before it named an architecture (events.source is nullable, migrations/0002) is an x86_64 check: the one word for that legacy null, read where a row's source is missing — a data rule, not a picker's default, which is ARCHES[0].
+  var NULL_SOURCE_ARCH = "x86_64";
   // An advisory's severities, worst first (meta.ts's SEVERITIES): the order advisoriesAt picks a package's worst by, and the keys advisoryCounts counts under.
   var SEVERITIES = __SEVERITIES__;
   // A worker is alive when its heartbeat is younger than this (meta.ts's WORKER_ALIVE_MINUTES, the listing's rule): the pill titles say the number from here.
@@ -642,7 +644,7 @@ export const HELPERS = String.raw`
   function dur(ms) { if (ms == null) return ""; if (ms < 1000) return ms + " ms"; if (ms < 60000) return (ms / 1000).toFixed(1) + " s"; return Math.floor(ms / 60000) + "m " + Math.round((ms % 60000) / 1000) + "s"; }
   function latest(list, kind, ring, source) {
     for (var i = 0; i < list.length; i++) { var e = list[i]; if (e.kind === kind && (ring == null || e.ring === ring) && (source == null || e.source === source)) return e; }
-    if (source === "x86_64") for (var j = 0; j < list.length; j++) { var f = list[j]; if (f.kind === kind && (ring == null || f.ring === ring) && !f.source) return f; }
+    if (source === NULL_SOURCE_ARCH) for (var j = 0; j < list.length; j++) { var f = list[j]; if (f.kind === kind && (ring == null || f.ring === ring) && !f.source) return f; }
     return null;
   }
   // Header pill = the service: online when the API answers and it can reach
@@ -663,8 +665,8 @@ export const HELPERS = String.raw`
   var LATE_MS = __LATE_AFTER_HOURS__ * 3600e3;
   // Whether a coverage row is late: the server's word when it sent one, else the same rule over last_sync. A source never synced is not late, it is missing — the sync line says so.
   function lateSync(c) { return typeof c.late === "boolean" ? c.late : !!c.last_sync && Date.now() - Date.parse(c.last_sync) > LATE_MS; }
-  // ---- a health check's result wears one word on every page that says it: the Pool's ring cards, the Pipeline's ring pills, its ring heads and its job's result, the Status rings table, and the 14-day grid both pages draw (the audit found it spelled three ways — ok on the cards and the table, healthy on the pill, healthy / unhealthy on the job, ok / warn / error on one grid and healthy / warning / failed on the other, over the same journal rows). The status is the journal's (events.ts: ok, warn, error); the word is what it means for a ring — healthy; nothing rendered for the architecture, which is what warn is (the gate ignores it); failed. A cell or a pill wears the status as its class, the CSS paints it, PILL_COLOR says what it is painted.
-  var HEALTH_WORD = { ok: "healthy", warn: "nothing rendered", error: "failed" };
+  // ---- a health check's result wears one word on every page that says it: the Pool's ring cards, the Pipeline's ring pills, its ring heads and its job's result, the Status rings table, and the 14-day grid both pages draw (the audit found it spelled three ways — ok on the cards and the table, healthy on the pill, healthy / unhealthy on the job, ok / warn / error on one grid and healthy / warning / failed on the other, over the same journal rows). The status is the journal's (events.ts: ok, warn, error); the word is what it means for a ring — healthy, warning, failed. The check (tests/health-check.sh) posts ok or error only — a ring with nothing rendered fails its check, since #47 — so warn is the journal's generic word, kept for a row a hand posts and drawn only where one is; a legend that advertised "nothing rendered" in amber named a state the check never produces while the state it named showed red. A cell or a pill wears the status as its class, the CSS paints it, PILL_COLOR says what it is painted.
+  var HEALTH_WORD = { ok: "healthy", warn: "warning", error: "failed" };
   // The rings a health check covers — the ones that promise something, the scheduler's PROMOTED_RINGS — in the reader's order (RINGS_TEXT's, stable first), spliced in by page() so the list is typed once in meta.ts; the lab is promised nothing and is not checked, so no page draws a check for it.
   var PROMISED_RINGS = __PROMISED_RINGS__;
   // The same rings the way a package climbs them — edge, rc, stable, meta.ts's PROMOTED_RINGS — for a line read in that direction (the Pipeline's heads, the Security page's stack); derived, so the splice is one.
@@ -686,7 +688,7 @@ export const HELPERS = String.raw`
     if (!sync || Date.now() - Date.parse(sync.created_at) > 4 * 3600e3) why.push("no sync for " + (sync ? ago(sync.created_at).replace(" ago", "") : "ever"));
     var late = (d.coverage || []).filter(lateSync);
     if (late.length) why.push(late.length + " source(s) not synced for " + Math.round(LATE_MS / 3600e3) + " h");
-    (d.latest || []).forEach(function (e) { if (e.kind === "health" && e.status === "error") why.push(e.ring + " " + (e.source || "x86_64") + " failed its health check"); });
+    (d.latest || []).forEach(function (e) { if (e.kind === "health" && e.status === "error") why.push(e.ring + " " + (e.source || NULL_SOURCE_ARCH) + " failed its health check"); });
     return why;
   }
   // Pipeline pill (where a page has one): keeping up, or what is behind.
@@ -962,7 +964,7 @@ export const HELPERS = String.raw`
   function ringOfBuild(status, rings) { var r = servedRing(rings); return r !== null ? ringName(r) : status === "staged" ? "lab" : null; }
   // An age without "ago": "oldest 3h", from a span in milliseconds.
   function span(ms) { return ago(new Date(Date.now() - ms).toISOString()).replace(" ago", ""); }
-  function pkgHref(name, ring, arch) { return "/package/" + encodeURIComponent(name) + "?ring=" + encodeURIComponent(ring && RINGS_TEXT[ring] ? ring : Object.keys(RINGS_TEXT)[0]) + "&arch=" + encodeURIComponent(arch && arch !== "all" ? arch : "x86_64"); }
+  function pkgHref(name, ring, arch) { return "/package/" + encodeURIComponent(name) + "?ring=" + encodeURIComponent(ring && RINGS_TEXT[ring] ? ring : Object.keys(RINGS_TEXT)[0]) + "&arch=" + encodeURIComponent(arch && arch !== "all" ? arch : ARCHES[0]); }
   function pillHtml(cls, text, title) { return '<span class="pill ' + cls + '"' + (title ? ' title="' + esc(title) + '"' : '') + '>' + esc(text) + '</span>'; }
   // One build status, one colour, on every page: queued grey, building blue, staged and done green, failed and rejected red, cancelled and withdrawn grey. A package's own words (registered, waiting, approved, published, unmaintained) wear the same pills — the registration's statuses, nothing retired (build_requests' drafting and validating went with migration 0021).
   var TASK_PILL = { queued: "none", leased: "blue", building: "blue", staged: "ok", done: "ok", failed: "error", rejected: "error", cancelled: "none", withdrawn: "none", registered: "none", waiting: "warn", approved: "ok", published: "ok", unmaintained: "warn" };
@@ -1108,7 +1110,7 @@ export const HELPERS = String.raw`
     opts = opts || {};
     if (opts.note) return Promise.resolve(opts.note);
     if (what === "build") return fetch("/api/v1/factory?limit=10").then(function (r) { return r.json(); }).then(function (d) { return d.workers || []; }).catch(function () { return []; }).then(function (ws) {
-      return ask({ title: "Have the project build " + label + " again", text: "A trusted review worker builds the recipe again with the project's agent — the contributor's bytes are never used. The result shows in review when it is staged.", select: whereOptions(ws, opts.arch || "x86_64", WHO.login, true), input: "optional", placeholder: "a hint for the project's agent (optional)", confirm: "Build by the project" });
+      return ask({ title: "Have the project build " + label + " again", text: "A trusted review worker builds the recipe again with the project's agent — the contributor's bytes are never used. The result shows in review when it is staged.", select: whereOptions(ws, opts.arch || ARCHES[0], WHO.login, true), input: "optional", placeholder: "a hint for the project's agent (optional)", confirm: "Build by the project" });
     });
     if (what === "reject") return ask({ title: "Reject " + label, text: "The contributor reads the note and builds again. The rejection is on the record.", input: "required", placeholder: "what is wrong, in a line or two", confirm: "Reject", danger: true });
     if (what === "withdraw") return ask({ title: "Withdraw the approval of " + label, text: "The approval stays on the record and is void from now on; the package leaves every ring it reached; another maintainer decides.", input: "required", placeholder: "why take it back", confirm: "Withdraw", danger: true });

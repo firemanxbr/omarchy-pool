@@ -289,8 +289,8 @@ __CHARTS__
     function show(term, rows) {
       if (!rows.length) { out.innerHTML = '<div class="none">nothing in stable matches “' + esc(term) + '”</div>'; out.hidden = false; return; }
       out.innerHTML = rows.slice(0, 8).map(function (p) {
-        return '<a href="' + pkgHref(p.name, "stable", "x86_64") + '"><b>' + esc(p.name) + '</b><span class="mono dim">' + esc(p.version) + '</span><span class="src">' + esc(p.source) + '</span><span class="d">' + esc(p.description || "") + '</span></a>';
-      }).join("") + '<a class="all" href="/packages?q=' + encodeURIComponent(term) + '&ring=stable&arch=x86_64">' + (rows.length >= 9 ? "More results" : "All " + rows.length + " results") + ' — every ring, both architectures →</a>';
+        return '<a href="' + pkgHref(p.name, "stable", ARCHES[0]) + '"><b>' + esc(p.name) + '</b><span class="mono dim">' + esc(p.version) + '</span><span class="src">' + esc(p.source) + '</span><span class="d">' + esc(p.description || "") + '</span></a>';
+      }).join("") + '<a class="all" href="/packages?q=' + encodeURIComponent(term) + '&ring=stable&arch=' + ARCHES[0] + '">' + (rows.length >= 9 ? "More results" : "All " + rows.length + " results") + ' — every ring, both architectures →</a>';
       out.hidden = false;
     }
     box.addEventListener("input", function () {
@@ -298,7 +298,7 @@ __CHARTS__
       var term = box.value.trim(), my = ++seq;
       if (term.length < 2) { hide(); return; }
       timer = setTimeout(function () {
-        fetch("/api/v1/search?q=" + encodeURIComponent(term) + "&ring=stable&arch=x86_64&limit=9").then(function (r) { return r.json(); }).then(function (d) {
+        fetch("/api/v1/search?q=" + encodeURIComponent(term) + "&ring=stable&arch=" + ARCHES[0] + "&limit=9").then(function (r) { return r.json(); }).then(function (d) {
           if (my !== seq || box.value.trim() !== term) return;
           show(term, d.packages || []);
         }).catch(hide);
@@ -344,7 +344,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       id: "pool.search",
       page: "/",
       anchor: ['<form class="searchbar" action="/packages" method="get"', 'name="q"', 'id="pool-q"', 'id="pool-suggest"'],
-      script: ['"#pool-q"', '"#pool-suggest"', '"/api/v1/search?q="', '"&ring=stable&arch=x86_64&limit=9"', "d.packages", "p.description", 'pkgHref(p.name, "stable", "x86_64")'],
+      script: ['"#pool-q"', '"#pool-suggest"', '"/api/v1/search?q="', '"&ring=stable&arch=" + ARCHES[0] + "&limit=9"', "d.packages", "p.description", 'pkgHref(p.name, "stable", ARCHES[0])'],
       reads: [
         { path: `/api/v1/search?q=${F.pkg}&ring=stable&arch=${F.arch}&limit=9`, fields: ["packages", "packages.0.name", "packages.0.version", "packages.0.source", "packages.0.description"] },
         { path: `/packages?q=${F.pkg}`, json: false },

@@ -103,11 +103,13 @@ export const CHARTS = String.raw`  // ---- tiny SVG charts (no library; the page
     var labels = lastDays(days || 14), counts = labels.map(function (d) { return by[d] || { staged: 0, published: 0, failed: 0 }; }), of = function (k) { return counts.map(function (c) { return c[k]; }); };
     return { labels: labels, days: counts, series: [{ name: "staged", color: C.blue, values: of("staged") }, { name: "published", color: C.green, values: of("published") }, { name: "failed", color: C.red, values: of("failed") }] };
   }
-  // The pool's jobs over the last days, from the stats series (jobs_daily: {day, kind, status, n, ms}, grouped by the day the job finished, a waiting one by the day it was queued), reduced once: runs, done, failed, waiting and the milliseconds — in all, per kind (byKind) and per day (byDay, over labels). The Status tiles, its jobs table and both its job charts, and the Pipeline's chart read this; none reduces the rows itself, and none reads the metrics snapshot's jobs, which is up to half an hour older than the series beside it and counts a cancelled job as a success. Here a cancelled job is a failed one: it did not do its work. The snapshot stays for the history it alone has (the pool's growth).
+  // The pool's jobs over the last days, from the stats series (jobs_daily: {day, kind, status, n, ms}, grouped by the day the job finished; a job still queued or leased is on today, whatever the day it was queued, so waiting is every job in flight), reduced once: runs, done, failed, waiting and the milliseconds — in all, per kind (byKind) and per day (byDay, over labels). The Status tiles, its jobs table and both its job charts, and the Pipeline's chart read this; none reduces the rows itself, and none reads the metrics snapshot's jobs, which is up to half an hour older than the series beside it and counts a cancelled job as a success. Here a cancelled job is a failed one: it did not do its work. The snapshot stays for the history it alone has (the pool's growth).
+  // A job's bucket by the status the series says — done, failed or waiting — the one rule every reduce over jobs_daily applies: jobsSummary below, and the Workers page's cards, which split the same rows by kind. A cancelled job is a failed one: it did not do its work. Queued or leased is waiting.
+  function jobBucket(status) { return status === "done" ? "done" : status === "failed" || status === "cancelled" ? "failed" : "waiting"; }
   function jobsSummary(series, days) {
     var labels = lastDays(days || 7), keep = {}; labels.forEach(function (d) { keep[d] = 1; });
     var zero = function () { return { runs: 0, done: 0, failed: 0, waiting: 0, ms: 0 }; };
-    var add = function (o, r) { var n = Number(r.n || 0); o.runs += n; if (r.status === "done") o.done += n; else if (r.status === "failed" || r.status === "cancelled") o.failed += n; else o.waiting += n; o.ms += Number(r.ms || 0); };
+    var add = function (o, r) { var n = Number(r.n || 0); o.runs += n; o[jobBucket(r.status)] += n; o.ms += Number(r.ms || 0); };
     var all = zero(), byKind = {}, byDay = {};
     ((series || {}).jobs_daily || []).forEach(function (r) { if (!keep[r.day]) return; add(all, r); add(byKind[r.kind] = byKind[r.kind] || zero(), r); add(byDay[r.day] = byDay[r.day] || zero(), r); });
     return { labels: labels, runs: all.runs, done: all.done, failed: all.failed, waiting: all.waiting, ms: all.ms, byKind: byKind, byDay: byDay };
@@ -117,15 +119,15 @@ export const CHARTS = String.raw`  // ---- tiny SVG charts (no library; the page
     var js = jobsSummary(series, days), values = js.labels.map(function (d) { return Math.round((js.byDay[d] || { ms: 0 }).ms / 60000); });
     return { labels: js.labels, values: values, total: values.reduce(function (n, v) { return n + v; }, 0) };
   }
-  // Fourteen days of health per ring and architecture, worst result per day, as html cells — the one grid the Pipeline and the Status page draw (each drew its own once, the rings in opposite orders and the same result in different words). The rows are the rings a check covers in the reader's order (the shell's PROMISED_RINGS); a cell's class is the journal's status, painted by the CSS as a pill of that class is; its tooltip and the legend say the shell's HEALTH_WORD for it.
+  // Fourteen days of health per ring and architecture, worst result per day, as html cells — the one grid the Pipeline and the Status page draw (each drew its own once, the rings in opposite orders and the same result in different words). The rows are the rings a check covers in the reader's order (the shell's PROMISED_RINGS); a cell's class is the journal's status, painted by the CSS as a pill of that class is; its tooltip and the legend say the shell's HEALTH_WORD for it — the legend only for the statuses a cell wears, so a status the check never posts (warn, since #47) is not advertised over a grid with none.
   function heatGrid(health) {
     var days = lastDays(14), cells = {};
     (health || []).forEach(function (h) { var k = h.ring + "/" + h.arch + "/" + day(h.created_at); cells[k] = worst(cells[k], h.status); });
     if (!Object.keys(cells).length) return '<div class="empty">no health checks yet</div>';
-    var rows = []; PROMISED_RINGS.forEach(function (r) { ARCHES.forEach(function (a) { rows.push([r + " " + a, r + "/" + a]); }); });
+    var rows = [], worn = {}; PROMISED_RINGS.forEach(function (r) { ARCHES.forEach(function (a) { rows.push([r + " " + a, r + "/" + a]); }); }); Object.keys(cells).forEach(function (k) { worn[cells[k]] = 1; });
     return '<div class="heat">' + rows.map(function (r) { return '<div class="r"><span class="l">' + esc(r[0]) + '</span>' + days.map(function (dd) { var st = cells[r[1] + "/" + dd]; return '<span class="c ' + (st || "") + '" data-tip="' + esc(dd + " · " + r[0] + " · " + (HEALTH_WORD[st] || "no check")) + '"></span>'; }).join("") + '</div>'; }).join("") +
       '<div class="days"><span></span>' + days.map(function (d, i) { return '<span>' + (i % 2 ? esc(d.slice(5)) : "") + '</span>'; }).join("") + '</div></div>' +
-      '<div class="legend">' + Object.keys(HEALTH_WORD).map(function (st) { return '<span><i style="background:' + PILL_COLOR[st] + '"></i>' + esc(HEALTH_WORD[st]) + '</span>'; }).join("") + '<span><i style="background:var(--line)"></i>no check</span></div>';
+      '<div class="legend">' + Object.keys(HEALTH_WORD).filter(function (st) { return worn[st]; }).map(function (st) { return '<span><i style="background:' + PILL_COLOR[st] + '"></i>' + esc(HEALTH_WORD[st]) + '</span>'; }).join("") + '<span><i style="background:var(--line)"></i>no check</span></div>';
   }
 `;
 

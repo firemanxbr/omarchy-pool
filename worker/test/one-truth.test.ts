@@ -38,12 +38,20 @@
  * the grid to heatGrid over the shell's PROMISED_RINGS (meta.ts's promoted
  * rings, stable first) and the word to HEALTH_WORD, run as served over the
  * server's rows on both pages, and reads every page that says a result.
+ * The review of that branch found the Pipeline's budget panel reading a
+ * chart function for the cap (a rename that CI let through: the name
+ * existed), the Status tile losing a job queued longer than the week, the
+ * Workers page keeping a bucket rule of its own, and four proofs that
+ * passed with their rule inverted; the cases below now run the served
+ * renderCost over /cost, carry an old queued job through the series, read
+ * the shell's jobBucket on every page that buckets a job, and hold each
+ * rule with data that tells it from its mutation.
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import worker, { RINGS, RINGS_BY_STABILITY } from "../src/index";
 import { PROMOTED_RINGS } from "../src/meta";
-import { LATE_AFTER_HOURS, RING_TEXT } from "../src/meta";
+import { LATE_AFTER_HOURS, RING_TEXT, WORKER_ALIVE_MINUTES } from "../src/meta";
 import { waitsForMaintainer, stands } from "../src/routes/review";
 import { maintenanceOf } from "../src/routes/users";
 import { landed } from "../src/routes/contributors";
@@ -307,9 +315,9 @@ describe("three more facts, one source each", () => {
     }
   });
 
-  // The shell's reduce over the jobs series, as served: jobsSummary and the minutes view on it, with the day helper they need — the proofs below run them over the server's rows.
+  // The shell's reduce over the jobs series, as served: jobsSummary and the minutes view on it, with the day helper and the bucket rule they need — the proofs below run them over the server's rows.
   function jobsFns(script: string): string[] {
-    return [/^  function lastDays\(n\) [^\n]*$/m.exec(script)![0], /^  function jobsSummary\(series, days\) \{[\s\S]*?\n  \}$/m.exec(script)![0], /^  function workerMinutes\(series, days\) \{[\s\S]*?\n  \}$/m.exec(script)![0]];
+    return [/^  function lastDays\(n\) [^\n]*$/m.exec(script)![0], /^  function jobBucket\(status\) [^\n]*$/m.exec(script)![0], /^  function jobsSummary\(series, days\) \{[\s\S]*?\n  \}$/m.exec(script)![0], /^  function workerMinutes\(series, days\) \{[\s\S]*?\n  \}$/m.exec(script)![0]];
   }
 
   it("the worker minutes of the week are one sum over jobs_daily — the tile and the chart's bars — on the Workers page, the Pipeline and Status", async () => {
@@ -326,35 +334,57 @@ describe("three more facts, one source each", () => {
     }
   });
 
-  it("the jobs of the week are one reduce over jobs_daily — the Status tiles, its table and its charts, the Pipeline's chart — and a cancelled job is a failed one everywhere, whatever the snapshot says", async () => {
+  it("the jobs of the week are one reduce over jobs_daily — the Status tiles, its table and its charts, the Pipeline's chart, the Workers page's cards — a cancelled job is a failed one everywhere, whatever the snapshot says, and a job queued longer than the week still waits", async () => {
     // A job cancelled this week, beside the fixture's done and queued ones, and a snapshot taken over it: the snapshot's "succeeded" (runs − failures − running) counts it as a success; the series counts it as failed. The two disagree from here on, on the same page if a page read both.
     await env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, finished_at, duration_ms) VALUES ('gc', ?, '', '', 'schedule', 0, 0, 'project', 'pool', 'gc', 'cancelled', ?, 60000)").bind(F.arch, new Date().toISOString()).run();
+    // A security job queued ten days ago and never pulled — the pool's case when no worker of its architecture is alive: the snapshot took every queued or leased row whatever its age, and the tile that read it said so; the series carries it on today, so the reduce that replaced the snapshot counts it too.
+    const tenDaysAgo = new Date(Date.now() - 10 * 86400000).toISOString();
+    await env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, created_at) VALUES ('security', ?, '', '', 'schedule', 0, 0, 'project', 'pool', 'security', 'queued', ?)").bind(F.arch, tenDaysAgo).run();
+    // A health check done yesterday: a row of the week that is not today's, for the day window below.
+    const yesterday = new Date(Date.now() - 86400000).toISOString();
+    await env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, created_at, finished_at, duration_ms) VALUES ('health', ?, '', '', 'schedule', 0, 0, 'project', 'pool', 'health', 'done', ?, ?, 30000)").bind(F.arch, yesterday, yesterday).run();
     // The fixture's snapshot is minutes old and a snapshot on time declines: this one is asked for half an hour later.
     expect(await snapshotMetrics(env, new Date(Date.now() + 30 * 60000))).not.toBe("metrics: on time");
     const stats = (await call("GET", "/stats?after=cancelled")).json;
     const rows = stats.series.jobs_daily as { day: string; kind: string; status: string; n: number; ms: number }[];
     expect(rows.some((r) => r.status === "cancelled")).toBe(true);
+    const today = new Date().toISOString().slice(0, 10);
+    expect(rows.find((r) => r.kind === "security" && r.status === "queued"), "a job queued ten days ago is in the series, on today").toMatchObject({ day: today, n: 1 });
+    expect(rows.find((r) => r.kind === "health" && r.status === "done" && r.day === yesterday.slice(0, 10)), "yesterday's health check is on yesterday").toMatchObject({ n: 1 });
     // The server's rows, reduced here by the rule the shell states: every row of the week counted once, done or failed (cancelled with it) or waiting.
     const week = new Set(Array.from({ length: 7 }, (_, i) => new Date(Date.now() - i * 86400000).toISOString().slice(0, 10)));
     const kept = rows.filter((r) => week.has(r.day)), n = (f: (r: typeof rows[number]) => boolean) => kept.filter(f).reduce((a, r) => a + Number(r.n), 0);
     const expected = { runs: n(() => true), done: n((r) => r.status === "done"), failed: n((r) => r.status === "failed" || r.status === "cancelled"), waiting: n((r) => r.status !== "done" && r.status !== "failed" && r.status !== "cancelled") };
     expect(expected.runs).toBeGreaterThan(0);
     expect(expected.failed).toBeGreaterThan(0);
-    expect(expected.waiting).toBeGreaterThan(0);
+    expect(expected.waiting).toBeGreaterThan(1);
     expect(expected.runs).toBe(expected.done + expected.failed + expected.waiting);
+    // Today's rows alone, for the reduce's day window: fewer than the week's, yesterday's check among the missing.
+    const todays = rows.filter((r) => r.day === today), t = (f: (r: typeof rows[number]) => boolean) => todays.filter(f).reduce((a, r) => a + Number(r.n), 0);
+    const expectedToday = { runs: t(() => true), done: t((r) => r.status === "done"), failed: t((r) => r.status === "failed" || r.status === "cancelled"), waiting: t((r) => r.status !== "done" && r.status !== "failed" && r.status !== "cancelled") };
+    expect(expectedToday.runs).toBeLessThan(expected.runs);
+    expect(expectedToday.waiting).toBe(expected.waiting);
     // The snapshot's word for the same week is another number: the proof that a page reading it beside the series would say two.
     expect(stats.metrics.jobs.runs).toBe(expected.runs);
     expect(stats.metrics.jobs.runs - stats.metrics.jobs.failures - stats.metrics.jobs.running).toBe(expected.done + 1);
     const components = allComponents(F);
+    let js7!: { byKind: Record<string, { runs: number; done: number; failed: number; waiting: number }> };
     for (const [path, ids] of [["/status", ["status.system-tiles", "status.chart-jobs", "status.chart-minutes", "status.workflows-table"]], ["/pipeline", ["pipeline.jobs-chart"]]] as const) {
       // The page's own statements, less CHARTS where it splices them: the reduce lives there, the page only reads it.
       const html = await page(path), script = scriptOf(html), own = ownScript(html).replace(CHARTS, "");
       // The served reduce, run over the server's series, is the rule above — in all, and its buckets sum to it.
-      const js = new Function("series", [...jobsFns(script), "return jobsSummary(series, 7);"].join("\n"))(stats.series) as { runs: number; done: number; failed: number; waiting: number; byKind: Record<string, { runs: number; failed: number; waiting: number }>; byDay: Record<string, { runs: number; failed: number }> };
+      const reduce = new Function("series", "days", [...jobsFns(script), "return jobsSummary(series, days);"].join("\n")) as (series: unknown, days: number) => { runs: number; done: number; failed: number; waiting: number; byKind: Record<string, { runs: number; failed: number; waiting: number }>; byDay: Record<string, { runs: number; failed: number }> };
+      const js = reduce(stats.series, 7); js7 = js as typeof js7;
       expect({ runs: js.runs, done: js.done, failed: js.failed, waiting: js.waiting }, path).toEqual(expected);
       expect(Object.values(js.byKind).reduce((a, k) => a + k.runs, 0), `${path} byKind`).toBe(expected.runs);
       expect(Object.values(js.byDay).reduce((a, d) => a + d.failed, 0), `${path} byDay`).toBe(expected.failed);
       expect(js.byKind.gc, `${path} counts the cancelled job as failed`).toMatchObject({ failed: 1, waiting: 0 });
+      expect(js.byKind.security, `${path} counts the job queued ten days ago as waiting`).toMatchObject({ waiting: 1 });
+      expect(js.byDay[today].runs, `${path} byDay has today's rows`).toBe(expectedToday.runs);
+      // The reduce's window is the days asked for: over one day it is today's rows and nothing older, which is what keeps the tiles equal to the chart's bars beneath them.
+      const one = reduce(stats.series, 1);
+      expect({ runs: one.runs, done: one.done, failed: one.failed, waiting: one.waiting }, `${path} over one day`).toEqual(expectedToday);
+      expect(Object.keys(one.byDay), `${path} one day, one label`).toEqual([today]);
       // The page reads the shell's reduce and nothing else: no snapshot's jobs, no reduce of the rows on the page.
       expect(own, `${path} reads the shell's reduce`).toContain("jobsSummary(d.series, 7)");
       expect(own, `${path} reads the snapshot's jobs`).not.toMatch(/m\.jobs|m\.actions|metrics\.jobs|\ba\.(?:runs|running|failures)\b/);
@@ -366,10 +396,26 @@ describe("three more facts, one source each", () => {
         expect(c?.reads?.some((r) => r.fields?.some((f) => /^metrics\.jobs\./.test(f))), `${id} still pins the snapshot's jobs`).toBe(false);
       }
     }
-    // The Status tiles say the reduce's numbers by name, in the order the sentence reads: what waits, what ran, what failed and what got done.
-    const status = ownScript(await page("/status")).replace(CHARTS, "");
-    expect(status).toContain('"Jobs running now", num(js.waiting)');
+    // The Status tiles say the reduce's numbers by name, in the order the sentence reads: what waits, what ran, what failed and what got done — and the bucket is one word on the page, the reduce's: the tile, the table's column, the chart's legend.
+    const statusHtml = await page("/status"), status = ownScript(statusHtml).replace(CHARTS, "");
+    expect(status).toContain('"Jobs waiting now", num(js.waiting)');
     expect(status).toContain('"Jobs, 7 days", num(js.runs), num(js.failed) + " failed · " + num(js.done) + " done"');
+    expect(statusHtml).toContain('<th class="num">Waiting</th>');
+    expect(status).toContain("waiting: v.waiting");
+    expect(status).toContain("</i>waiting</span>");
+    expect(status, "the page calls the bucket by another word").not.toMatch(/running: v\.waiting|queued \/ running|"Jobs running now"|<th class="num">Running<\/th>/);
+    // The Workers page splits the same rows by kind — the pool's kinds on the project's card — and a job's bucket there is the shell's jobBucket, the rule jobsSummary applies: the card's failed of the week is the reduce's failed over the pool's kinds, the cancelled job in it (the page's own rule, done or failed by name, counted it nowhere).
+    const workersHtml = await page("/workers"), workersScript = scriptOf(workersHtml), workersOwn = ownScript(workersHtml).replace(CHARTS, "");
+    expect(workersOwn).toContain("jobBucket(r.status)");
+    expect(workersOwn, "/workers buckets a job by a rule of its own").not.toMatch(/status === "(?:failed|cancelled)"|status === "done" \|\|/);
+    const perDay = /^  function perDay\(\) \{[\s\S]*?\n  \}$/m.exec(workersScript)![0], poolKinds = /^  var POOL_KINDS = [^\n]*$/m.exec(workersScript)![0];
+    const cards = new Function("STATS", [served(workersScript, "lastDays"), served(workersScript, "jobBucket"), poolKinds, perDay, "var pd = perDay(); return { days: pd.days, P: pd.P, POOL_KINDS: POOL_KINDS };"].join("\n"))(stats) as { days: string[]; P: Record<string, Record<string, { done: number; failed: number }>>; POOL_KINDS: string[] };
+    const sum = (side: string, k: "done" | "failed") => cards.days.reduce((a, d) => a + cards.P[side][d][k], 0);
+    const pool = (k: "done" | "failed" | "waiting") => Object.keys(js7.byKind).filter((kind) => cards.POOL_KINDS.includes(kind)).reduce((a, kind) => a + js7.byKind[kind][k], 0);
+    expect(sum("project", "failed"), "the project card's failed is the reduce's over the pool's kinds").toBe(pool("failed"));
+    expect(sum("project", "done"), "the project card's done is the reduce's over the pool's kinds").toBe(pool("done"));
+    expect(pool("failed")).toBeGreaterThanOrEqual(1);
+    expect(allComponents(F).find((x) => x.id === "workers.kind-cards")?.script, "workers.kind-cards names the shell's bucket").toContain("jobBucket(r.status)");
   });
 
   it("open advisories in stable are counted at the Security page's default confidence on the Pool and the Pipeline, through the shell's one rule", async () => {
@@ -382,6 +428,21 @@ describe("three more facts, one source each", () => {
     expect(all.packages).toBe(report.totals.packages);
     expect(all.kev).toBe(report.totals.kev);
     expect(dflt.packages).toBe((report.vulnerable as { advisories: { match: string }[] }[]).filter((v) => v.advisories.some((a) => a.match === "exact" || a.match === "name-version")).length);
+    // The worst of a package's advisories, by the server's SEVERITIES order, over a report built here: a package with a low and a critical advisory is critical; one with a severity the list does not know, and one with none at all, is unknown; a KEV advisory makes the package exploited, whatever its severity — and advisoryCounts puts each once where its worst says, the exploited out of `rest`.
+    const at = new Function("d", "conf", [...fns, "return advisoriesAt(d, conf);"].join("\n"));
+    const made = { vulnerable: [
+      { name: "a", advisories: [{ match: "exact", severity: "low" }, { match: "exact", severity: "critical" }, { match: "name", severity: "medium" }] },
+      { name: "b", advisories: [{ match: "exact", severity: "urgent" }] },
+      { name: "c", advisories: [{ match: "exact" }] },
+      { name: "d", advisories: [{ match: "name-version", severity: "medium", kev: true, epss: 0.3 }, { match: "exact", severity: "high", epss: 0.7 }] },
+      { name: "e", advisories: [{ match: "name", severity: "critical" }] },
+    ] };
+    const worst = Object.fromEntries((at(made) as { v: { name: string }; worst: string; kev: boolean; epss: number }[]).map((r) => [r.v.name, r.worst]));
+    expect(worst).toEqual({ a: "critical", b: "unknown", c: "unknown", d: "high" });
+    expect((at(made) as { v: { name: string }; kev: boolean; epss: number }[]).find((r) => r.v.name === "d")).toMatchObject({ kev: true, epss: 0.7 });
+    expect((at(made, "all") as { v: { name: string }; worst: string }[]).map((r) => [r.v.name, r.worst])).toEqual([["a", "critical"], ["b", "unknown"], ["c", "unknown"], ["d", "high"], ["e", "critical"]]);
+    expect((at(made, "exact") as { v: { name: string }; worst: string; kev: boolean }[]).find((r) => r.v.name === "d")).toMatchObject({ worst: "high", kev: false });
+    expect(count(made)).toEqual({ packages: 4, kev: 1, critical: 1, high: 1, medium: 0, low: 0, unknown: 2, rest: { critical: 1, high: 0, medium: 0, low: 0, unknown: 2 } });
     for (const path of ["/", "/pipeline"]) {
       const own = ownScript(await page(path));
       expect(own, `${path} reads the report's totals for the number`).not.toMatch(/totals\.packages|t\.packages \|\| 0/);
@@ -409,11 +470,13 @@ describe("three more facts, one source each", () => {
       expect(sev.SEV_COLOR[s]).toBe(sev.PILL_COLOR[sev.SEV_PILL[s]]);
       expect(sev.sevPill(s)).toBe(`<span class="pill ${sev.SEV_PILL[s]}">${s}</span>`);
     }
-    // The buckets a chart stacks, in the order the stack draws them, each in the colour of its worst severity; over a count with every severity the series is the numbers regrouped.
+    // The buckets a chart stacks, in the order the stack draws them, each in the colour of its worst severity; over a count with every severity the series is the numbers regrouped, a package once: the exploited packages — one of every severity here, so every total differs from its `rest` — sit in the first bucket and in no other, and the four sum to the packages.
     expect(sev.buckets).toEqual([["exploited", "exploited in the wild (KEV)"], ["critical", "critical + high"], ["medium", "medium"], ["low", "low / unknown"]]);
-    const count = { packages: 16, kev: 1, critical: 1, high: 2, medium: 3, low: 4, unknown: 6, rest: { critical: 1, high: 2, medium: 3, low: 4, unknown: 5 } };
+    const count = { packages: 21, kev: 5, critical: 2, high: 3, medium: 4, low: 5, unknown: 7, rest: { critical: 1, high: 2, medium: 3, low: 4, unknown: 6 } };
+    expect(count.critical + count.high + count.medium + count.low + count.unknown).toBe(count.packages);
+    expect(Object.values(count.rest).reduce((a, n) => a + n, 0)).toBe(count.packages - count.kev);
     const series = sev.sevSeries(count) as { name: string; color: string; value: number }[];
-    expect(series).toEqual([{ name: "exploited in the wild (KEV)", color: "var(--red)", value: 1 }, { name: "critical + high", color: "var(--red)", value: 3 }, { name: "medium", color: "var(--amber)", value: 3 }, { name: "low / unknown", color: "var(--blue)", value: 9 }]);
+    expect(series).toEqual([{ name: "exploited in the wild (KEV)", color: "var(--red)", value: 5 }, { name: "critical + high", color: "var(--red)", value: 3 }, { name: "medium", color: "var(--amber)", value: 3 }, { name: "low / unknown", color: "var(--blue)", value: 10 }]);
     expect(series.reduce((a, r) => a + r.value, 0)).toBe(count.packages);
     // The two charts, drawn by the served CHARTS over that series: every bar the Pool draws and every rect the Security page stacks carries the shell's colour, and the legend says the shell's words.
     const chartFn = (name: string) => new RegExp(`^  function ${name}\\([\\s\\S]*?\\n  \\}$`, "m").exec(script)![0];
@@ -440,7 +503,7 @@ describe("three more facts, one source each", () => {
   });
 
   it("the 14-day health grid is drawn once — the shell's heatGrid on the Pipeline and on Status, the rings in the reader's order — and a check's result is one word everywhere: HEALTH_WORD on the grid, the Pool's ring cards, the Pipeline's pills, heads and job results, the Status table", async () => {
-    // Health checks beside the fixture's one: two on edge aarch64 yesterday, ok then failed — the day's cell is the worse; a warn on rc today; and one on the lab, which no scheduler queues (the lab is promised nothing) and no grid draws a row for.
+    // Health checks beside the fixture's one: two on edge aarch64 yesterday, ok then failed — the day's cell is the worse; a warn on rc today, posted by hand (the check posts ok or error only: a ring with nothing rendered fails, since #47); and one on the lab, which no scheduler queues (the lab is promised nothing) and no grid draws a row for.
     const at = (hoursAgo: number) => new Date(Date.now() - hoursAgo * 3600e3).toISOString();
     const yesterday = new Date(Date.now() - 86400e3).toISOString().slice(0, 10), today = new Date().toISOString().slice(0, 10);
     const ins = (ring: string, arch: string, status: string, when: string) => env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload, created_at) VALUES ('health', ?, ?, ?, ?, '{}', ?)").bind(ring, arch, status, `${ring} ${arch}: ${status}`, when);
@@ -458,7 +521,7 @@ describe("three more facts, one source each", () => {
     const promised = RINGS_BY_STABILITY.filter((r) => (PROMOTED_RINGS as readonly string[]).includes(r));
     expect(promised).toEqual(["stable", "rc", "edge"]);
     const labels = promised.flatMap((r) => ["x86_64", "aarch64"].map((a) => `${r} ${a}`));
-    const WORD = { ok: "healthy", warn: "nothing rendered", error: "failed" };
+    const WORD = { ok: "healthy", warn: "warning", error: "failed" };
     const components = allComponents(F), grids: string[] = [];
     for (const [path, id] of [["/pipeline", "pipeline.health-heatgrid"], ["/status", "status.chart-health"]] as const) {
       const html = await page(path), script = scriptOf(html), own = ownScript(html).replace(CHARTS, "");
@@ -483,13 +546,17 @@ describe("three more facts, one source each", () => {
         });
       }
       expect(grid).toContain(`data-tip="${yesterday} · edge aarch64 · failed"`);
-      expect(grid).toContain(`data-tip="${today} · rc x86_64 · nothing rendered"`);
+      expect(grid).toContain(`data-tip="${today} · rc x86_64 · warning"`);
       expect(grid).toContain(`data-tip="${today} · stable ${F.arch} · healthy"`);
       expect(grid).not.toContain("lab ");
-      expect(grid).toMatch(/<div class="legend"><span><i style="background:var\(--green\)"><\/i>healthy<\/span><span><i style="background:var\(--amber\)"><\/i>nothing rendered<\/span><span><i style="background:var\(--red\)"><\/i>failed<\/span><span><i style="background:var\(--line\)"><\/i>no check<\/span><\/div>$/);
+      expect(grid).toMatch(/<div class="legend"><span><i style="background:var\(--green\)"><\/i>healthy<\/span><span><i style="background:var\(--amber\)"><\/i>warning<\/span><span><i style="background:var\(--red\)"><\/i>failed<\/span><span><i style="background:var\(--line\)"><\/i>no check<\/span><\/div>$/);
+      // The legend says the statuses the cells wear and no other: without the hand-posted warn — the production case, the check never posting one — the amber entry is not advertised.
+      const noWarn = new Function("health", [...shell, served(script, "lastDays"), served(script, "day"), served(script, "worst"), chartFn("heatGrid"), "return heatGrid(health);"].join("\n"))(rows.filter((h) => h.status !== "warn")) as string;
+      expect(noWarn).toMatch(/<div class="legend"><span><i style="background:var\(--green\)"><\/i>healthy<\/span><span><i style="background:var\(--red\)"><\/i>failed<\/span><span><i style="background:var\(--line\)"><\/i>no check<\/span><\/div>$/);
+      expect(noWarn).not.toContain("warning");
       // The page draws the shell's grid and nothing of its own: no cell map, no ring list, no word for a result, no legend.
       expect(own, `${path} reads the shell's grid`).toContain('$("#c-health").innerHTML = heatGrid(S.health);');
-      expect(own, `${path} builds the cells itself`).not.toMatch(/worst\(cells|h\.ring \+ "\/"|\bheat\(|nothing rendered\)|"healthy"|"unhealthy"|"warning"/);
+      expect(own, `${path} builds the cells itself`).not.toMatch(/worst\(cells|h\.ring \+ "\/"|\bheat\(|nothing rendered|"healthy"|"unhealthy"|"warning"/);
       const c = components.find((x) => x.id === id);
       expect(c?.script, id).toEqual(expect.arrayContaining(["heatGrid(S.health)"]));
       expect(c?.script?.some((l) => l.includes("worst(cells")), `${id} pins a cell map of its own`).toBe(false);
@@ -517,10 +584,19 @@ describe("three more facts, one source each", () => {
   });
 
   it("a person's workers are the listing's rows: /users/:login serves each through the same view as /factory — alive by the one threshold, ready, side, update — so the page's tile counts what its tables draw", async () => {
+    // The fixture's workers were last seen in 2000, dead under any window: one of m1's heartbeats five minutes ago and another fifteen — one side of the threshold each — so a route with a window of its own would say a different word on one of them.
+    const minutesAgo = (m: number) => new Date(Date.now() - m * 60000).toISOString();
+    await env.DB.batch([
+      env.DB.prepare("UPDATE build_workers SET last_seen = ? WHERE id = 'w1'").bind(minutesAgo(WORKER_ALIVE_MINUTES / 2)),
+      env.DB.prepare("INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, trusted_by, last_seen) VALUES ('w1-idle', ?, 'm1', 'idle', 'shared', 'project', 'm1', ?)").bind(F.arch, minutesAgo(WORKER_ALIVE_MINUTES + WORKER_ALIVE_MINUTES / 2)),
+    ]);
     const listing = (await call("GET", "/factory?limit=10")).json.workers as Record<string, unknown>[];
+    expect(listing.find((w) => w.id === "w1")).toMatchObject({ alive: true });
+    expect(listing.find((w) => w.id === "w1-idle")).toMatchObject({ alive: false });
     for (const login of [F.owner, F.m1]) {
-      const mine = (await call("GET", `/users/${login}`)).json.workers as Record<string, unknown>[];
+      const mine = (await call("GET", `/users/${login}?after=heartbeat`)).json.workers as Record<string, unknown>[];
       expect(mine.length, login).toBeGreaterThan(0);
+      if (login === F.m1) expect(mine.map((w) => [w.id, w.alive]).sort(), "one side of the threshold each").toEqual([["w1", true], ["w1-idle", false]]);
       for (const w of mine) {
         // The same words on the row: alive, ready and side are the listing's, computed by workerView; nothing the listing withholds rides here.
         for (const k of ["alive", "ready", "side", "update", "labels", "kinds"]) expect(w, `${login}'s ${w.id} carries ${k}`).toHaveProperty(k);
@@ -557,6 +633,19 @@ describe("three more facts, one source each", () => {
       const c = components.find((x) => x.id === id);
       expect(c?.script, id).toEqual(expect.arrayContaining(["costColor(c)", "usd(c.projected_usd)", "usd(c.month_to_date_usd)"]));
     }
+    // The Pipeline's panel, run as served over the server's answer: the cap and the guard on the panel are the lines the sentence's slots say, and the bar is a width. A name that resolves to something else spliced into the same script — `lines`, the chart — prints US$ 0 and NaN without throwing, so the text is read here, not trusted.
+    const pipeline = scriptOf(await page("/pipeline"));
+    const slots: Record<string, string> = {}, el = { innerHTML: "" };
+    const renderCost = /^  function renderCost\(\) \{[\s\S]*?\n  \}$/m.exec(pipeline)![0];
+    await new Promise<void>((done) => new Function("c", "$", "live", "fetch", "done", [served(pipeline, "esc"), served(pipeline, "num"), served(pipeline, "usd"), served(pipeline, "SEV_PILL"), served(pipeline, "costColor"), "function lines() {} /* CHARTS' chart, in the same scope as on the page */", renderCost, "renderCost(); setTimeout(done, 0);"].join("\n"))(cost, () => el, (k: string, v: string) => { slots[k] = v; }, () => Promise.resolve({ json: () => Promise.resolve(cost) }), done));
+    expect(slots).toEqual({ "cost-warn": String(cost.lines_usd.warn), "cost-guard": String(cost.lines_usd.guard), "cost-cap": String(cost.lines_usd.cap) });
+    expect(el.innerHTML).toContain(`of a US$ ${cost.lines_usd.cap} hard cap`);
+    expect(el.innerHTML).toContain(cost.guard ? "over the guard" : `guard at US$ ${cost.lines_usd.guard}`);
+    expect(el.innerHTML).toContain(`<b style="color:${shell.costColor(cost)}">${shell.usd(cost.month_to_date_usd)}</b>`);
+    expect(el.innerHTML).toMatch(new RegExp(`<i style="width:${Math.min(100, (100 * cost.projected_usd) / cost.lines_usd.cap)}%;`));
+    expect(el.innerHTML).toContain(`<em style="left:${(100 * cost.lines_usd.guard) / cost.lines_usd.cap}%">`);
+    expect(el.innerHTML).not.toMatch(/NaN|US\$ 0 hard cap|guard at US\$ 0\b/);
+    expect(ownScript(await page("/pipeline"))).not.toMatch(/\blines\.(?:warn|guard|cap)\b/);
   });
 
   it("a build nobody decided yet links its package on the lab from Review, from its own page and from a person's builds table — one ringOfBuild", async () => {

@@ -215,8 +215,21 @@ describe("lists come from the code that owns them", () => {
       expect(c!.script, `${id} pins the read`).toContain(literal);
       expect(c!.script?.some((l) => RING_LIST.test(l) || ARCH_PAIR.test(l)), `${id} pins a literal`).toBe(false);
     }
-    // The architectures' first is every picker's default; no page types "x86_64" as one.
-    for (const path of ["/", "/docs/get-started", "/packages", "/security", `/package/${F.pkg}`]) expect(ownScriptOf(await text(path)), path).not.toMatch(/q\.get\("arch"\) : "x86_64"/);
+    // The architectures' first is every default: a picker's, pkgHref's, the build dialogs' choice of workers, the Pool's search. No page and not the shell types "x86_64" as a fallback — `|| "x86_64"`, `: "x86_64"`, `?? "x86_64"` — in any spelling. The one typed word is the shell's NULL_SOURCE_ARCH, the architecture of a health row the journal wrote without one: a data rule, read by name where a source is missing.
+    const typedDefault = /(?:\|\||\?\?|[?:]) "x86_64"/;
+    expect(HELPERS).not.toMatch(typedDefault);
+    expect(HELPERS).toContain('var NULL_SOURCE_ARCH = "x86_64";');
+    expect(HELPERS).toContain("arch && arch !== \"all\" ? arch : ARCHES[0]");
+    expect(HELPERS).toContain("opts.arch || ARCHES[0]");
+    expect(HELPERS).toMatch(/source === NULL_SOURCE_ARCH|e\.source \|\| NULL_SOURCE_ARCH/);
+    for (const path of ["/", "/factory", "/review", "/pipeline", "/packages", "/security", "/status", "/workers", "/journal", "/request", "/people", "/docs/get-started", `/package/${F.pkg}`, `/build/${F.projectTask}`, `/user/${F.owner}`]) {
+      const own = ownScriptOf(await text(path))!;
+      expect(own, `${path} types x86_64 as a default`).not.toMatch(typedDefault);
+      expect(own, `${path} types the null source's architecture`).not.toMatch(/source \|\| "x86_64"/);
+    }
+    expect(ownScriptOf(await text(`/user/${F.owner}`))).toContain("arch || ARCHES[0]");
+    expect(ownScriptOf(await text("/"))).toContain('pkgHref(p.name, "stable", ARCHES[0])');
+    expect(ownScriptOf(await text("/pipeline"))).toContain("h.source || NULL_SOURCE_ARCH");
   });
 
   it("the Workers page's pool kinds are JOB_KINDS, spliced in — a kind added to jobs.ts lands on the project's card", async () => {
