@@ -1,4 +1,4 @@
-import { json, type Env } from "../index";
+import { json, readJson, type Env } from "../index";
 import { maintainersOf, roleFor, GOVERNANCE_FILE } from "../governance";
 import { CATEGORIES, isCategory } from "../categories";
 import { isRepoArch, REPO_ARCHES } from "../r2";
@@ -304,7 +304,8 @@ export async function workerOf(request: Request, env: Env): Promise<WorkerIdenti
 }
 
 export async function handleRegister(request: Request, env: Env): Promise<Response> {
-  const b = (await request.json()) as { github_token?: string };
+  const b = await readJson<{ github_token?: string }>(request);
+  if (b instanceof Response) return b;
   if (!b.github_token) return json({ error: "github_token is required (used once, to read your login; a fine-grained token with no permissions is enough)" }, 400);
   const res = await fetch("https://api.github.com/user", {
     headers: { authorization: `Bearer ${b.github_token}`, accept: "application/vnd.github+json", "user-agent": "omarchy-pool-factory" },
@@ -924,7 +925,8 @@ export async function handleStagingMultipart(taskId: number, filename: string, u
     return json({ part: part.partNumber, etag: part.etag });
   }
   if (action === "complete") {
-    const b = (await request.json()) as { parts: { partNumber: number; etag: string }[] };
+    const b = await readJson<{ parts: { partNumber: number; etag: string }[] }>(request);
+    if (b instanceof Response) return b;
     const obj = await mp.complete(b.parts);
     const refused = await quotaRefusal(env, space, obj.size, key);
     if (refused) {
@@ -1038,7 +1040,8 @@ export async function handleSetCategory(c: Contributor, name: string, request: R
  */
 export async function handleTrustWorker(c: Contributor, id: string, request: Request, env: Env): Promise<Response> {
   if (!isMaintainer(c)) return json({ error: "a maintainer's token is required" }, 403);
-  const b = (await request.json()) as { trust?: string };
+  const b = await readJson<{ trust?: string }>(request);
+  if (b instanceof Response) return b;
   const trust = b.trust === "project" ? "project" : "community";
   const w = await env.DB.prepare("SELECT id, owner, trust, trusted_by, trust_proposed_by FROM build_workers WHERE id = ? AND revoked_at IS NULL")
     .bind(id)

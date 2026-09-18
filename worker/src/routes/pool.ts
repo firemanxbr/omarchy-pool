@@ -1,4 +1,4 @@
-import { json, type Env } from "../index";
+import { json, readJson, type Env } from "../index";
 import { signingEnabled, detachedSignature } from "../signing";
 import { IMMUTABLE, isRepoArch, packageKey, signatureKey } from "../r2";
 import { SOURCES } from "./packages";
@@ -101,7 +101,8 @@ export async function handleMultipartPart(key: string, uploadId: string, part: n
 }
 
 export async function handleMultipartComplete(key: string, uploadId: string, request: Request, env: Env): Promise<Response> {
-  const body = (await request.json()) as { parts: { partNumber: number; etag: string }[] };
+  const body = await readJson<{ parts: { partNumber: number; etag: string }[] }>(request);
+  if (body instanceof Response) return body;
   const upload = env.PACKAGES.resumeMultipartUpload(key, uploadId);
   const object = await upload.complete(body.parts);
   return json({ key, size: object.size, status: "stored" }, 201);

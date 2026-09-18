@@ -1,5 +1,5 @@
 import { signingEnabled, detachedSignature } from "../signing";
-import { edgeHit, edgeStore, isRing, json, type Env, type Ring } from "../index";
+import { edgeHit, edgeStore, isRing, json, readJson, type Env, type Ring } from "../index";
 import { artifactKey, isRepoArch, REPO_ARCHES, SHORT } from "../r2";
 import { machineOrigin, REPO_ORDER, sourceOfRepo } from "../meta";
 import { releaseManifests, releaseSummary, releaseSources, ringHead, ringMembers, releaseMembers, ensureCheckpoint, CHECKPOINT_EVERY, type ManifestDetail, type ReleaseRow } from "../db";
@@ -41,7 +41,8 @@ interface CreateRelease {
  * rollback is a new release whose selection equals an older one.
  */
 export async function handleCreateRelease(request: Request, env: Env): Promise<Response> {
-  const body = (await request.json()) as CreateRelease;
+  const body = await readJson<CreateRelease>(request);
+  if (body instanceof Response) return body;
   if (!isRing(body.ring)) return json({ error: "ring must be edge, rc, stable or lab" }, 400);
   const ring: Ring = body.ring;
   let source: ReleaseRow | null = null;

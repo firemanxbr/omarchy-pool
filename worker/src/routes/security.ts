@@ -1,5 +1,5 @@
 import { advisoriesKnown } from "./stats";
-import { isRing, json, RINGS, type Env, type Ring } from "../index";
+import { isRing, json, readJson, RINGS, type Env, type Ring } from "../index";
 import { isRepoArch } from "../r2";
 import { SEVERITIES as META_SEVERITIES } from "../meta";
 import { ringHead, ringMembers } from "../db";
@@ -43,7 +43,8 @@ interface MatchIn {
 const SEVERITIES: readonly string[] = META_SEVERITIES;
 
 export async function handlePutAdvisories(request: Request, env: Env): Promise<Response> {
-  const body = (await request.json()) as { advisories?: AdvisoryIn[]; cves?: CveIn[]; updated_at?: string };
+  const body = await readJson<{ advisories?: AdvisoryIn[]; cves?: CveIn[]; updated_at?: string }>(request);
+  if (body instanceof Response) return body;
   const now = body.updated_at ?? new Date().toISOString();
   const stmts = [];
   for (const a of body.advisories ?? []) {
@@ -70,7 +71,8 @@ export async function handlePutAdvisories(request: Request, env: Env): Promise<R
 }
 
 export async function handlePutMatches(request: Request, env: Env): Promise<Response> {
-  const body = (await request.json()) as { matches?: MatchIn[]; updated_at?: string };
+  const body = await readJson<{ matches?: MatchIn[]; updated_at?: string }>(request);
+  if (body instanceof Response) return body;
   const now = body.updated_at ?? new Date().toISOString();
   const matches = body.matches ?? [];
   const shas = [...new Set(matches.map((m) => m.sha256))];

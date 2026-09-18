@@ -1,4 +1,4 @@
-import { json, type Env } from "../index";
+import { json, readJson, type Env } from "../index";
 import { writeAttestation, recipesDir } from "./seal";
 import { isRepoArch } from "../r2";
 import type { WorkerIdentity } from "./contributors";
@@ -156,7 +156,8 @@ async function enqueue(env: Env, t: { name: string; arches: string[]; pkgbuild_r
 // ---------- maintainers / pipeline ----------
 
 export async function handleEnqueue(request: Request, env: Env): Promise<Response> {
-  const b = (await request.json()) as { name?: string; arches?: unknown; pkgbuild_ref?: string; reason?: string; version?: string; priority?: number; override?: boolean; publish?: boolean };
+  const b = await readJson<{ name?: string; arches?: unknown; pkgbuild_ref?: string; reason?: string; version?: string; priority?: number; override?: boolean; publish?: boolean }>(request);
+  if (b instanceof Response) return b;
   if (!b.name || !b.pkgbuild_ref || !b.reason) return json({ error: "name, pkgbuild_ref and reason are required" }, 400);
   const arches = parseArches(b.arches);
   const { build, skipped } = splitByUpstream(await providedBy(env, b.name), arches, b.override);
@@ -301,7 +302,8 @@ const ANY_ARCH_KINDS = "'metrics', 'gc', 'security', 'promote', 'audit', 'verify
 const RING_MOVERS = "'promote', 'rollback', 'render', 'security'";
 
 export async function handleClaim(request: Request, env: Env, actor: Actor): Promise<Response> {
-  const b = (await request.json()) as { arch?: string; hostname?: string; labels?: unknown; version?: string; kinds?: unknown; shared?: unknown; agent?: unknown; agent_status?: unknown; agent_error?: unknown; agent_checked_at?: unknown; usage?: unknown; log?: unknown };
+  const b = await readJson<{ arch?: string; hostname?: string; labels?: unknown; version?: string; kinds?: unknown; shared?: unknown; agent?: unknown; agent_status?: unknown; agent_error?: unknown; agent_checked_at?: unknown; usage?: unknown; log?: unknown }>(request);
+  if (b instanceof Response) return b;
   if (!b.arch || !isRepoArch(b.arch)) return json({ error: "arch (x86_64|aarch64) is required" }, 400);
   if (actor.kind === "job") return json({ error: "a job token cannot claim; use the worker token" }, 403);
   const probe = agentReport(b);
@@ -493,7 +495,8 @@ async function withheld(env: Env, id: number, field: string, text: string | unde
 }
 
 export async function handleComplete(id: number, request: Request, env: Env, actor: Actor): Promise<Response> {
-  const b = (await request.json()) as { sha256?: string; filename?: string; version?: string; duration_ms?: number; log_tail?: string; result?: unknown; summary?: string };
+  const b = await readJson<{ sha256?: string; filename?: string; version?: string; duration_ms?: number; log_tail?: string; result?: unknown; summary?: string }>(request);
+  if (b instanceof Response) return b;
   const task = await owned(env, id, actor);
   if (task instanceof Response) return task;
   const who = workerName(actor);
@@ -702,7 +705,8 @@ async function packageAfterFailure(env: Env, name: string, fallback: "registered
 }
 
 export async function handleFail(id: number, request: Request, env: Env, actor: Actor): Promise<Response> {
-  const b = (await request.json()) as { error?: string; duration_ms?: number; log_tail?: string; final?: boolean; needs_native?: boolean };
+  const b = await readJson<{ error?: string; duration_ms?: number; log_tail?: string; final?: boolean; needs_native?: boolean }>(request);
+  if (b instanceof Response) return b;
   const task = await owned(env, id, actor);
   if (task instanceof Response) return task;
   const who = workerName(actor);

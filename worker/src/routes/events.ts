@@ -1,4 +1,4 @@
-import { json, type Env } from "../index";
+import { json, readJson, type Env } from "../index";
 
 interface EventIn {
   kind: string;
@@ -11,7 +11,8 @@ interface EventIn {
 }
 
 export async function handlePostEvent(request: Request, env: Env): Promise<Response> {
-  const e = (await request.json()) as EventIn;
+  const e = await readJson<EventIn>(request);
+  if (e instanceof Response) return e;
   if (!e?.kind || !e.summary) return json({ error: "kind and summary are required" }, 400);
   const status = e.status ?? "ok";
   if (!["ok", "warn", "error"].includes(status)) return json({ error: "bad status" }, 400);

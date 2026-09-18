@@ -14,7 +14,7 @@ import worker from "../src/index";
 import { sha256Hex } from "../src/routes/contributors";
 import { requeueExpiredLeases, workerReady } from "../src/routes/factory";
 import { packageKey } from "../src/r2";
-import { jobOf } from "../src/jobtoken";
+import { issueJobToken, jobOf, scopesFor } from "../src/jobtoken";
 import { STAGING_QUOTA_BYTES, sweepStaging } from "../src/staging";
 
 const API = "http://pool.test/api/v1";
@@ -1435,5 +1435,37 @@ describe("one job at a time on a ring", () => {
     expect(fifth.status).toBe(200);
     expect(fifth.json.task.kind).toBe("security");
     await call("POST", `/factory/tasks/${fifth.json.task.id}/complete`, { result: {}, summary: "matched" }, "omw_w2");
+  });
+});
+
+describe("a body that is not JSON", () => {
+  // Three doors of three kinds — public, a worker's token, a job's token: no body and a body that
+  // is not JSON are the caller's mistake, refused with the same 400 as a missing field and never
+  // the router's 500 (status and error exact, no `detail`); a JSON body still answers through the
+  // route's own checks.
+  const refused = { status: 400, json: { error: "a JSON body is required" } };
+  let job: string;
+  beforeAll(async () => {
+    job = await issueJobToken(env, { t: 2, k: "sync", s: scopesFor("sync", 2, "project", { ring: "edge" }), e: Math.floor(Date.now() / 1000) + 3600, w: "w-pool" });
+  });
+
+  it("is refused at the public door, POST /factory/register, with the 400 and never the router's 500; a JSON body still meets the field check", async () => {
+    expect(await call("POST", "/factory/register")).toEqual(refused);
+    expect(await call("POST", "/factory/register", undefined, undefined, "not json")).toEqual(refused);
+    const empty = await call("POST", "/factory/register", {});
+    expect(empty.status).toBe(400);
+    expect(empty.json.error).toContain("github_token is required");
+  });
+
+  it("is refused with a worker's token at POST /factory/claim; a JSON body meets the route's own checks", async () => {
+    expect(await call("POST", "/factory/claim", undefined, "omw_w1")).toEqual(refused);
+    expect(await call("POST", "/factory/claim", undefined, "omw_w1", "not json")).toEqual(refused);
+    expect(await call("POST", "/factory/claim", {}, "omw_w1")).toEqual({ status: 400, json: { error: "arch (x86_64|aarch64) is required" } });
+  });
+
+  it("is refused with a job's token at POST /events; a JSON event is recorded as before", async () => {
+    expect(await call("POST", "/events", undefined, job)).toEqual(refused);
+    expect(await call("POST", "/events", undefined, job, "not json")).toEqual(refused);
+    expect((await call("POST", "/events", { kind: "build", summary: "built" }, job)).status).toBe(201);
   });
 });
