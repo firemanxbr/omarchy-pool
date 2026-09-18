@@ -10,7 +10,7 @@ import { findLeak } from "../leak";
 import { chains, chainOf, storyRows, requestView, placeInQueue, stands, type Chain } from "./story";
 import { betterIdleWorker, FIRST_PICK_MINUTES } from "../queue";
 import { updateMessage, updateState } from "../update";
-import { version as running, RINGS, ringsSql, sortRings } from "../meta";
+import { version as running, RINGS, ringsSql, sortRings, REPO_ARCHES, WORKER_ALIVE_MINUTES, type RunningVersion } from "../meta";
 
 /**
  * The factory's brain. Cloudflare is the source of truth for package
@@ -35,7 +35,6 @@ import { version as running, RINGS, ringsSql, sortRings } from "../meta";
  */
 
 const LEASE_MINUTES = 30;
-const WORKER_ALIVE_MINUTES = 10;
 
 interface TaskRow {
   id: number;
@@ -84,7 +83,7 @@ async function event(env: Env, kind: string, status: string, summary: string, pa
 }
 
 function parseArches(v: unknown): string[] {
-  const list = Array.isArray(v) ? v : ["x86_64", "aarch64"];
+  const list = Array.isArray(v) ? v : [...REPO_ARCHES];
   return list.filter((a): a is string => typeof a === "string" && isRepoArch(a));
 }
 
@@ -764,18 +763,56 @@ export async function requeueExpiredLeases(env: Env): Promise<number> {
 
 // ---------- read ----------
 
+/** A build_workers row as the API serves it. */
+export interface WorkerRow { last_seen: string; labels: string | null; owner: string | null; trust: string; packages: string | null; kinds: string | null; agent: string | null; agent_status: string | null; usage: string | null; last_task: string | null; version?: string | null }
+
+/** The moment a heartbeat must be younger than to count as alive: the one rule (meta.ts's WORKER_ALIVE_MINUTES), as a timestamp. */
+export function aliveSince(at = Date.now()): number {
+  return at - WORKER_ALIVE_MINUTES * 60000;
+}
+
+/**
+ * A worker's row as every listing serves it — GET /factory and a person's
+ * page (routes/users.ts) — so the tile that counts a person's workers
+ * counts what the Workers page lists, by the same words: alive by the one
+ * threshold, ready (workerReady), where its image stands, its side. The
+ * person's page mapped its own rows before, alive by a ten-minute threshold of
+ * its own and without ready or side (2026-09-18).
+ */
+export function workerView<W extends WorkerRow>(w: W, since: number, pool: RunningVersion) {
+  return {
+    ...w,
+    token_hash: undefined, // the hash of a worker's token is the pool's to compare, nobody's to see
+    log_tail: undefined, // the worker's own log is its owner's and the maintainers' (GET /factory/workers/:id/log), not the listing's
+    log_at: undefined,
+    labels: w.labels ? JSON.parse(w.labels) : null,
+    packages: w.packages ? JSON.parse(w.packages) : null,
+    alive: Date.parse(w.last_seen) > since,
+    // Ready for what it declares: alive, and its agent answered when the work needs one (workerReady).
+    ready: workerReady(w, since),
+    // Where its image stands against the pool's release (update.ts): behind past the grace, it is handed nothing.
+    update: updateState(w.version, pool),
+    kinds: w.kinds ? JSON.parse(w.kinds) : null,
+    // What the machine uses (the worker's own average, with the claim) and the last task it finished (with the completion).
+    usage: w.usage ? JSON.parse(w.usage) : null,
+    last_task: w.last_task ? JSON.parse(w.last_task) : null,
+    // omarchy: runs for the project (trusted; owner NULL is an old hosted registration) · community: a contributor's
+    side: w.trust === "project" || w.owner === null ? "omarchy" : "community",
+  };
+}
+
 export async function handleFactory(env: Env, url?: URL): Promise<Response> {
   const limit = Math.min(200, Math.max(10, Number(url?.searchParams.get("limit") ?? 60) || 60));
   const counts = await env.DB.prepare("SELECT status, arch, COUNT(*) AS n FROM build_tasks GROUP BY status, arch").all();
+  const alive = aliveSince();
   // Every worker belongs to someone: the project (trust project, granted by
   // a maintainer) or a contributor.
   const workers = await env.DB.prepare(
     "SELECT * FROM build_workers WHERE revoked_at IS NULL ORDER BY (last_seen > ?) DESC, last_seen DESC LIMIT 200",
   )
-    .bind(new Date(Date.now() - WORKER_ALIVE_MINUTES * 60000).toISOString())
-    .all<{ last_seen: string; labels: string | null; owner: string | null; trust: string; packages: string | null; kinds: string | null; agent: string | null; agent_status: string | null; usage: string | null; last_task: string | null }>();
+    .bind(new Date(alive).toISOString())
+    .all<WorkerRow>();
   const tasks = await env.DB.prepare("SELECT * FROM build_tasks ORDER BY CASE status WHEN 'leased' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, id DESC LIMIT ?").bind(limit).all<TaskRow>();
-  const alive = Date.now() - WORKER_ALIVE_MINUTES * 60000;
   const pool = running(env);
   return json(
     {
@@ -783,25 +820,7 @@ export async function handleFactory(env: Env, url?: URL): Promise<Response> {
       lease_minutes: LEASE_MINUTES,
       limit,
       counts: counts.results,
-      workers: workers.results.map((w) => ({
-        ...w,
-        token_hash: undefined, // the hash of a worker's token is the pool's to compare, nobody's to see
-        log_tail: undefined, // the worker's own log is its owner's and the maintainers' (GET /factory/workers/:id/log), not the listing's
-        log_at: undefined,
-        labels: w.labels ? JSON.parse(w.labels) : null,
-        packages: w.packages ? JSON.parse(w.packages) : null,
-        alive: Date.parse(w.last_seen) > alive,
-        // Ready for what it declares: alive, and its agent answered when the work needs one (workerReady).
-        ready: workerReady(w, alive),
-        // Where its image stands against the pool's release (update.ts): behind past the grace, it is handed nothing.
-        update: updateState((w as { version?: string | null }).version, pool),
-        kinds: w.kinds ? JSON.parse(w.kinds) : null,
-        // What the machine uses (the worker's own average, with the claim) and the last task it finished (with the completion).
-        usage: w.usage ? JSON.parse(w.usage) : null,
-        last_task: w.last_task ? JSON.parse(w.last_task) : null,
-        // omarchy: runs for the project (trusted; owner NULL is an old hosted registration) · community: a contributor's
-        side: w.trust === "project" || w.owner === null ? "omarchy" : "community",
-      })),
+      workers: workers.results.map((w) => workerView(w, alive, pool)),
       tasks: tasks.results.map((t) => ({ ...t, log_tail: undefined })),
     },
     200,

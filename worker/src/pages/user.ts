@@ -289,7 +289,7 @@ const SCRIPT = String.raw`
       (d.blocked ? pillHtml("error", "blocked: " + (d.blocked.reason || ""), "by " + (d.blocked.by || "") + ", " + (d.blocked.at || "")) : '') +
       (d.maintainer_since ? pillHtml("none", "since " + ago(d.maintainer_since), "listed in factory/MAINTAINERS.toml") : '') +
       '<span>since ' + esc(String(d.since).slice(0, 10)) + '</span><span class="dim">·</span><span>last seen ' + ago(d.last_seen) + '</span><span class="dim">·</span><a href="' + esc(d.github) + '" style="color:var(--muted);text-decoration:none">github.com/' + esc(d.login) + ' ↗</a>';
-    // The workers counted as every tile counts them (the shell's workerCounts): registered is not revoked, alive is a heartbeat in ten minutes.
+    // The workers counted as every tile counts them (the shell's workerCounts): registered is not revoked, alive is a heartbeat in the last WORKER_ALIVE_MINUTES — the rows are the listing's own (routes/factory.ts workerView), so the tile counts what the tables below draw.
     var c = d.build_counts, wc = workerCounts(d.workers);
     setTiles("#tiles", [
       ["Packages", num(d.packages.length), "registered under this name"],
@@ -533,7 +533,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       page,
       anchor: ['id="tiles"'],
       script: ['"#tiles"', "d.build_counts", '"Decisions", num(d.approvals.length)', "d.approved_packages.length", "workerCounts(d.workers)", "wc.registered", "wc.alive"],
-      reads: [{ path: profile, fields: ["packages", "build_counts.total", "build_counts.staged", "build_counts.published", "build_counts.failed", "approvals", "approved_packages", "workers", "workers.0.revoked_at", "workers.0.alive"] }],
+      reads: [{ path: profile, fields: ["packages", "build_counts.total", "build_counts.staged", "build_counts.published", "build_counts.failed", "approvals", "approved_packages", "workers", "workers.0.revoked_at", "workers.0.alive", "workers.0.ready", "workers.0.side", "workers.0.current_task"] }],
       visible: EVERYONE,
     },
     {

@@ -110,8 +110,8 @@ __CHARTS__
     fetch("/api/v1/cost").then(function (r) { return r.ok ? r.json() : null; }).then(function (c) {
       var cell = $("#systiles").children[tiles.length - 1]; if (!cell) return;
       if (!c) { setTile(cell, '<div class="k">Estimated bill</div><div class="v num">—</div><div class="s">no estimate yet (every three hours)</div>'); return; }
-      var color = c.status === "error" ? "var(--red)" : c.status === "warn" ? "var(--amber)" : "inherit";
-      setTile(cell, '<div class="k">Estimated bill</div><div class="v num" style="color:' + color + '">US$ ' + Number(c.projected_usd).toFixed(2) + '</div><div class="s">projected for ' + esc(c.month) + ' · US$ ' + Number(c.month_to_date_usd).toFixed(2) + ' so far · ' + ago(c.estimated_at) + (c.guard ? ' · <b>over budget: writing jobs paused</b>' : '') + '</div>');
+      // The colour and the figure are the shell's (costColor, usd): the same word the Pipeline's budget panel tints the same way.
+      setTile(cell, '<div class="k">Estimated bill</div><div class="v num" style="color:' + costColor(c) + '">' + usd(c.projected_usd) + '</div><div class="s">projected for ' + esc(c.month) + ' · ' + usd(c.month_to_date_usd) + ' so far · ' + ago(c.estimated_at) + (c.guard ? ' · <b>over budget: writing jobs paused</b>' : '') + '</div>');
     }).catch(function () {});
 
     var S = d.series || {};
@@ -173,7 +173,6 @@ __CHARTS__
 
 
   function render(d) {
-    var ARCHES = ["x86_64", "aarch64"];
     loadWorkers(d);
     var problems = problemsOf(d);
     var lastSync = newest(d.latest, "sync");
@@ -366,7 +365,7 @@ export const STATUS_COMPONENTS = (_F: Fixture): Component[] => [
     id: "status.bill-tile",
     page: "/status",
     anchor: ['id="systiles"'],
-    script: ['"/api/v1/cost"', '"Estimated bill"', "c.projected_usd", "c.month_to_date_usd", "c.estimated_at", "c.guard", "over budget: writing jobs paused"],
+    script: ['"/api/v1/cost"', '"Estimated bill"', "costColor(c)", "usd(c.projected_usd)", "usd(c.month_to_date_usd)", "c.estimated_at", "c.guard", "over budget: writing jobs paused"],
     reads: [{ path: "/api/v1/cost", fields: ["status", "projected_usd", "month", "month_to_date_usd", "estimated_at", "guard"] }],
     visible: EVERYONE,
   },

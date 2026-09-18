@@ -145,7 +145,7 @@ __CHARTS__
   function renderState(d) {
     fetch("/api/v1/status", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (st) { live("api", "API up · index " + (st.index.ok ? st.index.ms + " ms" : "down") + " · pool " + (st.pool.ok ? st.pool.ms + " ms" : "down")); }).catch(function () { live("api", "API not answering"); });
     // A ring's pill is the worse of its two architectures' latest health checks, in the shell's word for it (HEALTH_WORD), over the rings a check covers (PROMISED_RINGS).
-    var why = problemsOf(d), heads = PROMISED_RINGS.map(function (n) { var r = d.rings.filter(function (x) { return x.ring === n; })[0]; var hs = ["x86_64", "aarch64"].map(function (a) { return latest(d.latest, "health", n, a); }).filter(Boolean); var w = hs.reduce(function (acc, h) { return worst(acc, h.status); }, null); var bad = hs.filter(function (h) { return h.status !== "ok"; }); return r && r.release ? '<span class="pill ' + (w || "none") + '">' + n + ' #' + r.release.seq + (w ? ' · ' + (w === "ok" ? HEALTH_WORD.ok : bad.map(function (h) { return (h.source || "x86_64") + " " + HEALTH_WORD[h.status]; }).join(", ")) : "") + '</span>' : ""; }).join("");
+    var why = problemsOf(d), heads = PROMISED_RINGS.map(function (n) { var r = d.rings.filter(function (x) { return x.ring === n; })[0]; var hs = ARCHES.map(function (a) { return latest(d.latest, "health", n, a); }).filter(Boolean); var w = hs.reduce(function (acc, h) { return worst(acc, h.status); }, null); var bad = hs.filter(function (h) { return h.status !== "ok"; }); return r && r.release ? '<span class="pill ' + (w || "none") + '">' + n + ' #' + r.release.seq + (w ? ' · ' + (w === "ok" ? HEALTH_WORD.ok : bad.map(function (h) { return (h.source || "x86_64") + " " + HEALTH_WORD[h.status]; }).join(", ")) : "") + '</span>' : ""; }).join("");
     $("#state").innerHTML = '<span class="pill ' + (why.length ? "warn" : "ok") + '">' + (why.length ? "pipeline behind: " + esc(why.join(" · ")) : "pipeline keeping up") + '</span>' + heads + '<span class="pill none">running ' + esc(d.version && d.version.version || "") + '</span>';
   }
 
@@ -172,8 +172,8 @@ __CHARTS__
     live("advisories", "advisories known: " + num((d.security || {}).advisories || 0));
     live("last-sync", "synced " + (lastSync ? ago(lastSync.created_at) : "never") + " · every 3 h");
     live("pool-size", num(d.pool.objects) + " objects · " + bytes(d.pool.bytes));
-    ["edge", "rc", "stable"].forEach(function (n) { var r = d.rings.filter(function (x) { return x.ring === n; })[0]; if (r && r.release) live(n + "-head", "release #" + r.release.seq + " · " + ago(r.release.created_at)); });
-    live("heads", ["edge", "rc", "stable"].map(function (n) { var r = d.rings.filter(function (x) { return x.ring === n; })[0]; return n + (r && r.release ? " #" + r.release.seq : " —"); }).join(" · "));
+    PROMISED_RINGS.forEach(function (n) { var r = d.rings.filter(function (x) { return x.ring === n; })[0]; if (r && r.release) live(n + "-head", "release #" + r.release.seq + " · " + ago(r.release.created_at)); });
+    live("heads", PROMISED_UPWARD.map(function (n) { var r = d.rings.filter(function (x) { return x.ring === n; })[0]; return n + (r && r.release ? " #" + r.release.seq : " —"); }).join(" · "));
     var aud = d.audience || [], y = aud[aud.length - 1];
     var cells = [
       ["packages verified today", num(imp), "ok"], ["advisories known", num((d.security || {}).advisories || 0), ""], ["exploited in stable", "<span data-live=\"kev\">…</span>", "ok"],
@@ -258,7 +258,7 @@ __CHARTS__
   function renderRings(d) {
     var heads = {}; (d.releases || []).forEach(function (r) { if (r.is_head) heads[r.ring] = r; });
     $("#heads").innerHTML = PROMISED_RINGS.map(function (n) {
-      var r = d.rings.filter(function (x) { return x.ring === n; })[0] || {}, rel = r.release, h = ["x86_64", "aarch64"].map(function (a) { var e = latest(d.latest, "health", n, a); return a + " " + (e ? HEALTH_WORD[e.status] : "—"); }).join(" · ");
+      var r = d.rings.filter(function (x) { return x.ring === n; })[0] || {}, rel = r.release, h = ARCHES.map(function (a) { var e = latest(d.latest, "health", n, a); return a + " " + (e ? HEALTH_WORD[e.status] : "—"); }).join(" · ");
       var prev = (d.releases || []).filter(function (x) { return x.ring === n && !x.is_head; })[0];
       return '<div class="headc ' + n + '"><div class="n"><b>' + n + '</b><span class="dim">' + (rel ? "#" + rel.seq + " · " + ago(rel.created_at) : "no release") + '</span></div><div class="m">' + num(r.package_count || 0) + ' packages · ' + bytes(r.bytes || 0) + ' · ' + h + '</div><div class="acts">' + (rel && rel.parent_id ? '<a class="small-btn" href="/diff?ring=' + n + '&from=' + rel.parent_id + '&to=' + rel.id + '">diff</a>' : "") + (prev ? gate('<button type="button" class="small-btn" data-rollback="' + prev.id + '" data-ring="' + n + '" title="point ' + n + ' back at release ' + prev.id + '">roll back to #' + prev.seq + '</button>', isMaintainer(), orSignIn("a maintainer rolls back")) : "") + '</div></div>';
     }).join("");
@@ -293,11 +293,12 @@ __CHARTS__
   // ---- the bill, estimated on cost.ts's cadence (ESTIMATE_CADENCE, spliced into the words above and below) from Cloudflare's analytics. The three lines — warn, guard, cap — are the pool's budget, not the estimate's: /api/v1/cost carries them with the estimate and without one, and the sentence, the cap beside the month, the guard's word and the mark on the bar all read them there, never a number typed here.
   function renderCost() {
     fetch("/api/v1/cost").then(function (r) { return r.json(); }).then(function (c) {
-      var usd = c.lines_usd || {};
-      live("cost-warn", num(usd.warn)); live("cost-guard", num(usd.guard)); live("cost-cap", num(usd.cap));
+      var budget = c.lines_usd || {};
+      live("cost-warn", num(budget.warn)); live("cost-guard", num(budget.guard)); live("cost-cap", num(budget.cap));
       var el = $("#budget"); if (c.error) { el.innerHTML = '<div><div class="k">this month</div><b>—</b> <span class="dim">no estimate yet (${ESTIMATE_CADENCE})</span></div>'; return; }
-      var color = c.status === "error" ? "var(--red)" : c.status === "warn" ? "var(--amber)" : "var(--green)";
-      el.innerHTML = '<div><div class="k">' + esc(c.month) + ', so far</div><b style="color:' + color + '">US$ ' + Number(c.month_to_date_usd).toFixed(2) + '</b> <span class="dim">of a US$ ' + num(usd.cap) + ' hard cap</span></div><div><div class="k">projected</div><b>US$ ' + Number(c.projected_usd).toFixed(2) + '</b> <span class="dim">' + (c.guard ? "over the guard: jobs that write are paused" : "guard at US$ " + num(usd.guard)) + '</span></div><div class="bar"><i style="width:' + Math.min(100, 100 * Number(c.projected_usd) / usd.cap) + '%;background:' + color + '"></i><em style="left:' + (100 * usd.guard / usd.cap) + '%"></em></div>';
+      // The colour and the figures are the shell's (costColor, usd): the same word the Status tile tints the same way.
+      var color = costColor(c);
+      el.innerHTML = '<div><div class="k">' + esc(c.month) + ', so far</div><b style="color:' + color + '">' + usd(c.month_to_date_usd) + '</b> <span class="dim">of a US$ ' + num(lines.cap) + ' hard cap</span></div><div><div class="k">projected</div><b>' + usd(c.projected_usd) + '</b> <span class="dim">' + (c.guard ? "over the guard: jobs that write are paused" : "guard at US$ " + num(lines.guard)) + '</span></div><div class="bar"><i style="width:' + Math.min(100, 100 * Number(c.projected_usd) / lines.cap) + '%;background:' + color + '"></i><em style="left:' + (100 * budget.guard / budget.cap) + '%"></em></div>';
     }).catch(function () {});
   }
 
@@ -486,7 +487,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.arch-diagram",
     page: "/pipeline",
     anchor: ['data-live="last-sync"', 'data-live="api"', 'data-live="pool-size"', 'data-live="heads"', 'data-live="queue"', 'data-live="w-pool"', 'data-live="w-review"', 'data-live="w-community"', 'href="/workers"'],
-    script: ['live("last-sync"', 'live("api"', 'live("pool-size"', 'live("heads"', 'live("queue"', 'live("w-pool"', 'live("w-review"', 'live("w-community"', "wtKind(w)", "workerCounts(ws)"],
+    script: ['live("last-sync"', 'live("api"', 'live("pool-size"', 'live("heads", PROMISED_UPWARD.map(function (n)', 'live("queue"', 'live("w-pool"', 'live("w-review"', 'live("w-community"', "wtKind(w)", "workerCounts(ws)"],
     reads: [
       { path: "/api/v1/stats", fields: ["latest", "pool.objects", "pool.bytes", "rings.2.release.seq"] },
       { path: "/api/v1/status", fields: ["index.ok", "index.ms", "pool.ok", "pool.ms"] },
@@ -634,7 +635,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.budget",
     page: "/pipeline",
     anchor: ['id="budget"', 'data-live="cost-warn"', 'data-live="cost-guard"', 'data-live="cost-cap"'],
-    script: ['fetch("/api/v1/cost")', '$("#budget")', "c.lines_usd", 'live("cost-warn", num(usd.warn))', 'live("cost-guard", num(usd.guard))', 'live("cost-cap", num(usd.cap))', "c.error", "c.month_to_date_usd", "c.projected_usd", "c.guard", "100 * usd.guard / usd.cap"],
+    script: ['fetch("/api/v1/cost")', '$("#budget")', "c.lines_usd", 'live("cost-warn", num(budget.warn))', 'live("cost-guard", num(budget.guard))', 'live("cost-cap", num(budget.cap))', "c.error", "costColor(c)", "usd(c.month_to_date_usd)", "usd(c.projected_usd)", "c.guard", "100 * budget.guard / budget.cap"],
     reads: [{ path: "/api/v1/cost", fields: ["month", "month_to_date_usd", "projected_usd", "status", "guard", "lines_usd.warn", "lines_usd.guard", "lines_usd.cap"] }],
     visible: EVERYONE,
   },

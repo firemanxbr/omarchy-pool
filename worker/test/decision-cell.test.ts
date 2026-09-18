@@ -25,7 +25,7 @@ beforeAll(async () => {
 
 /** The shell's drawing functions, taken out of HELPERS and run as a page runs them (runScript in test/fixture.ts). */
 function shell(): { decisionCell: (t: unknown) => string; gate: (html: string, ok: boolean, why: string) => string } {
-  const src = HELPERS.split("__POOL_URL__").join("http://pool.test").split("__RINGS_TEXT__").join("{}").split("__WICON__").join("{}").split("__LATE_AFTER_HOURS__").join("9").split("__PROMISED_RINGS__").join("[]");
+  const src = HELPERS.split("__POOL_URL__").join("http://pool.test").split("__RINGS_TEXT__").join("{}").split("__WICON__").join("{}").split("__LATE_AFTER_HOURS__").join("9").split("__PROMISED_RINGS__").join("[]").split("__ARCHES__").join("[]").split("__SEVERITIES__").join("[]").split("__WORKER_ALIVE_MINUTES__").join("10");
   return runScript(src, { pathname: "/review", functions: ["decisionCell", "gate"] }) as any;
 }
 

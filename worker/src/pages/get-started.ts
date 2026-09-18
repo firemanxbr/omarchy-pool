@@ -93,7 +93,8 @@ const body = (sample: string | null) => String.raw`
 
 /** The page's script: the default ring is the pool's (the API's fallback), and when the page was served with the include for the pick, the script knows it has that answer already. */
 const script = (pick: Pick, served: boolean) => String.raw`
-  var RINGS = ["stable", "rc", "edge", "lab"], ARCHES = ["x86_64", "aarch64"];
+  // The rings are the server's list in its order (RINGS_TEXT: stable, rc, edge, lab), the architectures the shell's (ARCHES); the first of each is the default.
+  var RINGS = Object.keys(RINGS_TEXT);
   // Three questions, one recommendation — the ring the command below uses.
   var QUIZ = [["rely", "This machine matters to me — I cannot afford a broken morning."], ["early", "I want to see problems before everyone else does."], ["ci", "This is a CI runner or a throwaway VM."], ["build", "I am trying a build of the factory before it is approved."]], quiz = {};
   function drawQuiz() {
@@ -106,7 +107,7 @@ const script = (pick: Pick, served: boolean) => String.raw`
   var DESC = {}; Object.keys(RINGS_TEXT).forEach(function (r) { DESC[r] = RINGS_TEXT[r].desc; });
   var q = new URLSearchParams(location.search);
   var ring = RINGS.indexOf(q.get("ring")) >= 0 ? q.get("ring") : ${JSON.stringify(pick.defaultRing)};
-  var arch = ARCHES.indexOf(q.get("arch")) >= 0 ? q.get("arch") : "x86_64";
+  var arch = ARCHES.indexOf(q.get("arch")) >= 0 ? q.get("arch") : ARCHES[0];
   var data = null, optional = {};
 
   // The sections are the API's: /api/v1/pacman.conf for the pick and the optional sources switched on, asked again only when one of them changes; the served page carries the answer for the address's pick, so confKey starts as that pick and the first draw asks nothing — unless the ring had no release, when the first draw asks and writes the words for it. A late answer to an earlier pick is dropped.
@@ -200,7 +201,7 @@ export const GET_STARTED_COMPONENTS = (F: Fixture): Component[] => {
       id: "docs-get-started.ring-picker",
       page,
       anchor: ['id="ring"', 'id="pick-ring"', 'id="pick-arch"', 'id="ring-desc"'],
-      script: ['RINGS = ["stable", "rc", "edge", "lab"]', 'ARCHES = ["x86_64", "aarch64"]', 'pick("#pick-ring"', 'pick("#pick-arch"', '{ url: "ring" }', '{ url: "arch" }', '$("#ring-desc")', 'q.get("ring")', 'q.get("arch")'],
+      script: ["RINGS = Object.keys(RINGS_TEXT)", 'ARCHES.indexOf(q.get("arch"))', 'pick("#pick-ring"', 'pick("#pick-arch"', '{ url: "ring" }', '{ url: "arch" }', '$("#ring-desc")', 'q.get("ring")', 'q.get("arch")'],
       visible: EVERYONE,
     },
     {

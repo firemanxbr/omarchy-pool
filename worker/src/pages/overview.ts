@@ -111,10 +111,11 @@ const SCRIPT = String.raw`
 __CHARTS__
   var RING_INFO = RINGS_TEXT;
   var DESC = {}; Object.keys(RINGS_TEXT).forEach(function (r) { DESC[r] = RINGS_TEXT[r].desc; });
-  var RINGS = ["stable", "rc", "edge", "lab"], ARCHES = ["x86_64", "aarch64"];
+  // The rings are the server's list in its order (RINGS_TEXT: stable, rc, edge, lab), the architectures the shell's (ARCHES); the first of each is the default.
+  var RINGS = Object.keys(RINGS_TEXT);
   var q = new URLSearchParams(location.search);
-  var ring = RINGS.indexOf(q.get("ring")) >= 0 ? q.get("ring") : "stable";
-  var arch = ARCHES.indexOf(q.get("arch")) >= 0 ? q.get("arch") : "x86_64";
+  var ring = RINGS.indexOf(q.get("ring")) >= 0 ? q.get("ring") : RINGS[0];
+  var arch = ARCHES.indexOf(q.get("arch")) >= 0 ? q.get("arch") : ARCHES[0];
   var data = null, optional = {};
   // The pacman configuration, generated from what the ring serves right now (the same as /docs/get-started).
   function drawStart() {
@@ -398,7 +399,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       id: "pool.get-started-step",
       page: "/",
       anchor: ['id="get-started"', 'id="pick-ring"', 'id="ring-desc"', 'data-copy="setup"', 'id="setup-cmd"', 'href="/setup"'],
-      script: ['pick("#pick-ring", RINGS, ring', '"#ring-desc"', '"#setup-cmd"', "DESC[ring]", "/setup | sudo bash -s -- --ring ", 'copyChips({ setup: "#setup-cmd", cli: "#cli-cmd" })'],
+      script: ["RINGS = Object.keys(RINGS_TEXT)", 'pick("#pick-ring", RINGS, ring', '"#ring-desc"', '"#setup-cmd"', "DESC[ring]", "/setup | sudo bash -s -- --ring ", 'copyChips({ setup: "#setup-cmd", cli: "#cli-cmd" })'],
       reads: [{ path: "/setup", json: false }],
       visible: EVERYONE,
     },

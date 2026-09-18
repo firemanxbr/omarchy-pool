@@ -14,6 +14,7 @@ import { page, workerPanels } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
 import { CHARTS } from "./charts";
 import type { RunningVersion } from "../meta";
+import { JOB_KINDS } from "../jobs";
 
 const BODY = String.raw`
   <div class="hero compact">
@@ -53,12 +54,13 @@ __CHARTS__
   // project's (jobs_daily, by kind), the project's builds with the publishes and audits are the review side's,
   // a contributor's builds are theirs (builds_daily, by trust). Only finished tasks count: done or staged, and failed.
   // Not the shell's buildsByDay: that splits one series by status, this splits two series by kind.
-  var POOL_KINDS = { sync: 1, render: 1, promote: 1, rollback: 1, health: 1, security: 1, enqueue: 1, gc: 1, verify: 1, relayout: 1, metrics: 1, trial: 1 };
+  // The pool's kinds are jobs.ts's JOB_KINDS, spliced in: a kind added there lands on the project's card the day it is written (a hand copy here put a new kind on the review side without a word).
+  var POOL_KINDS = ${JSON.stringify(JOB_KINDS)};
   function perDay() {
     var days = lastDays(7), zero = function () { var o = {}; days.forEach(function (d) { o[d] = { done: 0, failed: 0 }; }); return o; };
     var P = { project: zero(), review: zero(), community: zero() }, S = (STATS && STATS.series) || {};
     var add = function (k, d, status, n) { var o = P[k][d]; if (!o) return; if (status === "failed") o.failed += n; else if (status === "done" || status === "staged") o.done += n; };
-    (S.jobs_daily || []).forEach(function (r) { add(POOL_KINDS[r.kind] ? "project" : "review", r.day, r.status, Number(r.n || 0)); });
+    (S.jobs_daily || []).forEach(function (r) { add(POOL_KINDS.indexOf(r.kind) >= 0 ? "project" : "review", r.day, r.status, Number(r.n || 0)); });
     (S.builds_daily || []).forEach(function (r) { add(r.trust === "community" ? "community" : "review", r.day, r.status, Number(r.n || 0)); });
     return { days: days, P: P };
   }
@@ -167,7 +169,7 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     id: "workers.kind-cards",
     page: "/workers",
     anchor: ['id="kinds"'],
-    script: ['"#kinds"', "POOL_KINDS", 'class="kchart"', 'class="mini four"', "builds_daily", "wc.byKind[cls]", "k.registered", "k.alive", "k.building"],
+    script: ['"#kinds"', `POOL_KINDS = ${JSON.stringify(JOB_KINDS)}`, "POOL_KINDS.indexOf(r.kind)", 'class="kchart"', 'class="mini four"', "builds_daily", "wc.byKind[cls]", "k.registered", "k.alive", "k.building"],
     reads: [
       { path: "/api/v1/factory?limit=10", fields: ["workers.0.side", "workers.0.labels", "workers.0.alive", "workers.0.ready", "workers.0.current_task", "workers.0.revoked_at"] },
       {

@@ -260,7 +260,7 @@ describe("the pages read the one answer instead of counting their own", () => {
     expect(typed, typed.join("\n")).toEqual([]);
     // The Pipeline's budget panel fills its three slots from the answer, with and without an estimate.
     const pipeline = ownScript(await page("/pipeline"));
-    for (const slot of ["cost-warn", "cost-guard", "cost-cap"]) expect(pipeline).toContain(`live("${slot}", num(usd.${slot.slice(5)}))`);
+    for (const slot of ["cost-warn", "cost-guard", "cost-cap"]) expect(pipeline).toContain(`live("${slot}", num(budget.${slot.slice(5)}))`);
     // The shell types no hour either: the constant is spliced in from meta.ts, and the served value is the server's.
     expect(HELPERS).toContain("var LATE_MS = __LATE_AFTER_HOURS__ * 3600e3;");
     expect(HELPERS).not.toMatch(/var LATE_MS = \d/);
@@ -375,7 +375,7 @@ describe("three more facts, one source each", () => {
   it("open advisories in stable are counted at the Security page's default confidence on the Pool and the Pipeline, through the shell's one rule", async () => {
     const report = (await call("GET", `/security?ring=stable&arch=${F.arch}`)).json;
     const html = await page("/"), script = scriptOf(html);
-    const fns = ["SEC_CONFS", "confOk", "advisoriesAt", "advisoryCounts"].map((n) => (n === "SEC_CONFS" ? /^  var SEC_CONFS = [^\n]*$/m : new RegExp(`^  function ${n}\\([\\s\\S]*?\\n  \\}$`, "m")).exec(script)![0]);
+    const fns = ["SEC_CONFS", "SEVERITIES", "confOk", "advisoriesAt", "advisoryCounts"].map((n) => (n === "SEC_CONFS" || n === "SEVERITIES" ? new RegExp(`^  var ${n} = [^\\n]*$`, "m") : new RegExp(`^  function ${n}\\([\\s\\S]*?\\n  \\}$`, "m")).exec(script)![0]);
     const count = new Function("d", "conf", [...fns, "return advisoryCounts(advisoriesAt(d, conf));"].join("\n"));
     // At any confidence the shell's count is the report's own totals; at the default it is the Security page's first tile — the fixture's one match is exact, so both agree here, and the rule is one function either way.
     const all = count(report, "all"), dflt = count(report);
@@ -425,7 +425,7 @@ describe("three more facts, one source each", () => {
     expect([...draw.security.matchAll(/<i style="background:(var\(--\w+\))"><\/i>([^<]+)</g)].map((m) => [m[1], m[2]])).toEqual(series.map((r) => [r.color, r.name]));
     // The pages read the shell's series and hand its colour to the chart; neither names a bucket or a colour of its own, and the manifests say so.
     const components = allComponents(F);
-    for (const [path, id, reads] of [["/", "pool.chart-security", ["sevSeries(t)", "r.color"]], ["/security", "security.per-ring-chart", ["sevSeries(tot[i])", "b.color"]]] as const) {
+    for (const [path, id, reads] of [["/", "pool.chart-security", ["sevSeries(t)", "r.color"]], ["/security", "security.per-ring-chart", ["sevSeries(tot[RINGS.indexOf(r)])", "b.color"]]] as const) {
       const own = ownScript(await page(path)).replace(CHARTS, "");
       for (const r of reads) expect(own, `${path} reads ${r}`).toContain(r);
       expect(own, `${path} names a bucket of its own`).not.toMatch(/"critical \+ high"|"low \/ unknown"|"exploited in the wild \(KEV\)"|name: "medium"/);
@@ -463,7 +463,7 @@ describe("three more facts, one source each", () => {
     for (const [path, id] of [["/pipeline", "pipeline.health-heatgrid"], ["/status", "status.chart-health"]] as const) {
       const html = await page(path), script = scriptOf(html), own = ownScript(html).replace(CHARTS, "");
       // The shell's word and rings, as served: the one map, the promised rings in the reader's order.
-      const shell = ["esc", "HEALTH_WORD", "PROMISED_RINGS", "SEV_PILL"].map((n) => served(script, n));
+      const shell = ["esc", "HEALTH_WORD", "PROMISED_RINGS", "ARCHES", "SEV_PILL"].map((n) => served(script, n));
       const words = new Function([...shell, "return { HEALTH_WORD: HEALTH_WORD, PROMISED_RINGS: PROMISED_RINGS };"].join("\n"))() as { HEALTH_WORD: Record<string, string>; PROMISED_RINGS: string[] };
       expect(words.HEALTH_WORD, `${path} HEALTH_WORD`).toEqual(WORD);
       expect(words.PROMISED_RINGS, `${path} PROMISED_RINGS`).toEqual(promised);
@@ -514,6 +514,49 @@ describe("three more facts, one source each", () => {
     const jobResult = new Function("t", [served(pipeline, "HEALTH_WORD"), "function num(v) { return String(v); }", /^  function jobResult\(t\) \{[\s\S]*?\n  \}$/m.exec(pipeline)![0], "return jobResult(t);"].join("\n"));
     expect(jobResult({ kind: "health", result: { ok: true } })).toBe("healthy");
     expect(jobResult({ kind: "health", result: JSON.stringify({ ok: false }) })).toBe("failed");
+  });
+
+  it("a person's workers are the listing's rows: /users/:login serves each through the same view as /factory — alive by the one threshold, ready, side, update — so the page's tile counts what its tables draw", async () => {
+    const listing = (await call("GET", "/factory?limit=10")).json.workers as Record<string, unknown>[];
+    for (const login of [F.owner, F.m1]) {
+      const mine = (await call("GET", `/users/${login}`)).json.workers as Record<string, unknown>[];
+      expect(mine.length, login).toBeGreaterThan(0);
+      for (const w of mine) {
+        // The same words on the row: alive, ready and side are the listing's, computed by workerView; nothing the listing withholds rides here.
+        for (const k of ["alive", "ready", "side", "update", "labels", "kinds"]) expect(w, `${login}'s ${w.id} carries ${k}`).toHaveProperty(k);
+        expect(w).not.toHaveProperty("token_hash"); expect(w).not.toHaveProperty("log_tail"); expect(w).not.toHaveProperty("log_at");
+        const same = listing.find((x) => x.id === w.id);
+        if (!w.revoked_at) { expect(same, `${w.id} is listed`).toBeDefined(); for (const k of ["alive", "ready", "side", "current_task", "trust", "owner"]) expect(w[k], `${w.id} ${k}`).toEqual(same![k]); }
+      }
+    }
+    // The user page reads the answer with the shell's counter, as every tile does, and the manifest reads the fields the counter needs.
+    const own = ownScript(await page(`/user/${F.owner}`));
+    expect(own).toContain("wc = workerCounts(d.workers)");
+    const c = allComponents(F).find((x) => x.id === "user.tiles");
+    expect(c?.reads?.some((r) => r.path === `/api/v1/users/${F.owner}` && ["workers.0.alive", "workers.0.ready", "workers.0.side"].every((f) => r.fields?.includes(f))), "user.tiles reads the listing's words").toBe(true);
+  });
+
+  it("the bill wears one colour and one figure: the shell's costColor (the pill's colours by the status /cost says) and usd() on the Status tile and the Pipeline's panel, neither page mapping a status or formatting a sum of its own", async () => {
+    const script = scriptOf(await page("/status"));
+    const shell = new Function([served(script, "SEV_PILL") /* PILL_COLOR is declared beside it */, served(script, "usd"), served(script, "costColor"), "return { usd: usd, costColor: costColor, PILL_COLOR: PILL_COLOR };"].join("\n"))() as { usd: (n: unknown) => string; costColor: (c: unknown) => string; PILL_COLOR: Record<string, string> };
+    expect(shell.usd(12.345)).toBe("US$ 12.35"); expect(shell.usd(0)).toBe("US$ 0.00"); expect(shell.usd(null)).toBe("US$ 0.00"); expect(shell.usd("7")).toBe("US$ 7.00");
+    // ok is green — the pill's ok — on both pages: it was plain ink on Status and green on the Pipeline.
+    expect(shell.costColor({ status: "ok" })).toBe(shell.PILL_COLOR.ok);
+    expect(shell.costColor({ status: "warn" })).toBe(shell.PILL_COLOR.warn);
+    expect(shell.costColor({ status: "error" })).toBe(shell.PILL_COLOR.error);
+    expect(shell.costColor(null)).toBe(shell.PILL_COLOR.ok);
+    // The server's status is the one the shell maps: the three words cost.ts says.
+    const cost = (await call("GET", "/cost")).json;
+    expect(["ok", "warn", "error"]).toContain(cost.status);
+    const components = allComponents(F);
+    for (const [path, id] of [["/status", "status.bill-tile"], ["/pipeline", "pipeline.budget"]] as const) {
+      const own = ownScript(await page(path));
+      for (const r of ["costColor(c)", "usd(c.projected_usd)", "usd(c.month_to_date_usd)"]) expect(own, `${path} reads ${r}`).toContain(r);
+      expect(own, `${path} maps the status itself`).not.toMatch(/c\.status === "(?:error|warn|ok)"/);
+      expect(own, `${path} formats the bill itself`).not.toMatch(/toFixed\(2\)|"US\$ " \+ Number/);
+      const c = components.find((x) => x.id === id);
+      expect(c?.script, id).toEqual(expect.arrayContaining(["costColor(c)", "usd(c.projected_usd)", "usd(c.month_to_date_usd)"]));
+    }
   });
 
   it("a build nobody decided yet links its package on the lab from Review, from its own page and from a person's builds table — one ringOfBuild", async () => {

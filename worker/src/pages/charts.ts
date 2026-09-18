@@ -119,7 +119,7 @@ export const CHARTS = String.raw`  // ---- tiny SVG charts (no library; the page
   }
   // Fourteen days of health per ring and architecture, worst result per day, as html cells — the one grid the Pipeline and the Status page draw (each drew its own once, the rings in opposite orders and the same result in different words). The rows are the rings a check covers in the reader's order (the shell's PROMISED_RINGS); a cell's class is the journal's status, painted by the CSS as a pill of that class is; its tooltip and the legend say the shell's HEALTH_WORD for it.
   function heatGrid(health) {
-    var days = lastDays(14), cells = {}, ARCHES = ["x86_64", "aarch64"];
+    var days = lastDays(14), cells = {};
     (health || []).forEach(function (h) { var k = h.ring + "/" + h.arch + "/" + day(h.created_at); cells[k] = worst(cells[k], h.status); });
     if (!Object.keys(cells).length) return '<div class="empty">no health checks yet</div>';
     var rows = []; PROMISED_RINGS.forEach(function (r) { ARCHES.forEach(function (a) { rows.push([r + " " + a, r + "/" + a]); }); });
