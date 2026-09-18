@@ -21,7 +21,7 @@ does not repeat the name, `depends` that exist.
 
 **The built package reads cleanly** [namcap-package]. namcap scans what was
 built: every shared library an ELF file links is provided by `depends`
-(glibc and gcc-libs excepted, they are always there); no file is
+(glibc, libgcc and libstdc++ excepted: `base` brings them); no file is
 world-writable or setuid unless the recipe says why; nothing from `$srcdir`
 leaks into the package; ELF files live in `/usr` — or in `/opt`, which the
 gate allows for a self-contained application (see *Desktop apps*).
@@ -53,7 +53,11 @@ display is checked differently: see *Desktop apps*.
 needs at run time (the libraries it links, the tools it calls);
 `makedepends` the toolchain and headers; `optdepends` what unlocks a
 feature, with a reason after the colon. Nothing base-devel provides is
-listed. A dependency the build log mentions and the recipe omits is a
+listed. The runtime is named the way Arch names it since the gcc split:
+`glibc` for a compiled binary, `libgcc` when it links `libgcc_s` (every
+Rust binary does), `libstdc++` for C++ — `gcc-libs` is the meta-package
+that pulls them, and namcap reads it as a dependency satisfied only in
+passing. A dependency the build log mentions and the recipe omits is a
 finding.
 
 **Provenance in the recipe.** The file begins with

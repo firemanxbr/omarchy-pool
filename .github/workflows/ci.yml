@@ -71,6 +71,9 @@ jobs:
       - name: The worker's own package and its last words
         working-directory: .
         run: bash tests/worker-main-package.sh
+      - name: The gate's reading of namcap, and namcap's library map on aarch64
+        working-directory: .
+        run: bash tests/worker-gate-namcap.sh
       - name: The updater, against a stubbed docker
         working-directory: .
         run: bash tests/omarchy-rollout.sh

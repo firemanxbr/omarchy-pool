@@ -189,6 +189,8 @@ prepare_container() {
   done
   pacman-key --init >/dev/null 2>&1 || true
   pacman -Syu --noconfirm --needed base-devel git namcap jq python pacman-contrib ccache desktop-file-utils >/dev/null
+  # namcap's library map, on every architecture (see namcap_sees_this_arch): without it the gate's ELF scan is blind on aarch64.
+  namcap_sees_this_arch || echo "==> namcap's library map is not the one this worker knows how to fix; on aarch64 its ELF scan may be blind (library-no-package-associated on libc itself)" >&2
   # The shellcheck binary is the gate's, not the build's: without it the gate says so (a warning) and the build goes on — never a build lost to a download.
   install_shellcheck || echo "==> shellcheck is not available here; the gate will say so" >&2
   # makepkg refuses root; `builder` builds, root installs the dependencies
@@ -442,6 +444,28 @@ install_shellcheck() {
   [[ "$(sha256 "$tmp")" == "$sum" ]] || { echo "shellcheck: checksum mismatch, not installed" >&2; rm -f "$tmp"; return 1; }
   tar -xJf "$tmp" -C /build && install -m755 "/build/shellcheck-$SHELLCHECK_VERSION/shellcheck" /usr/local/bin/shellcheck && rm -rf "$tmp" "/build/shellcheck-$SHELLCHECK_VERSION"
 }
+namcap_sees_this_arch() { # [sodepends.py] → 0 the library map covers aarch64 (patched now, or already), 1 namcap changed and it may not
+  # namcap maps a linked library to the package that owns it through `ldconfig -p`, and takes as 64-bit only
+  # the lines tagged `libc6,x86-64`: on aarch64 the tag is `libc6,AArch64`, no 64-bit ELF finds its map, and
+  # the scan says `library-no-package-associated` about libc itself — a warning — where x86_64 says which
+  # dependency is missing — an error. omarchy-cli 0.0.168 passed aarch64 blind and failed x86_64 on `libgcc`
+  # the same night (2026-09-18). The one line, until namcap carries it: the aarch64 tag is 64-bit too.
+  local f="${1:-}"
+  if [[ -z "$f" ]]; then for f in /usr/lib/python3.*/site-packages/Namcap/rules/sodepends.py; do [[ -f "$f" ]] && break; done; fi
+  [[ -f "$f" ]] || return 1
+  grep -q 'libc6,AArch64' "$f" && return 0
+  grep -q 'startswith("libc6,x86-64")' "$f" || return 1
+  sed -i 's/startswith("libc6,x86-64")/startswith(("libc6,x86-64", "libc6,AArch64"))/' "$f"
+}
+namcap_package_errors() { # stdin: `namcap -m -i` on a built package → the errors the gate weighs, one per line
+  # Machine-readable (-m): the rule's id, not its sentence — the exemptions name ids, and without -m they never
+  # matched (every Electron app failed on ELF files under /opt, 2026-09-16). The C and C++ runtime is not a
+  # dependency the gate asks a recipe to name: glibc, libgcc and libstdc++ come with `base` — gcc-libs is the
+  # meta-package that pulls them since Arch split it (omarchy-cli 0.0.168 failed x86_64 on `libgcc`, the name
+  # the split gave libgcc_s.so.1, 2026-09-18). ELF under /opt is where a self-contained application lives
+  # (skills: Desktop apps). Anything else namcap calls an error is one.
+  grep -E ' E: ' | grep -vE 'E: (dependency-detected-not-included (glibc|gcc-libs|libgcc|libstdc\+\+) |elffile-not-in-allowed-dirs.*opt/)' || true
+}
 
 # ------------------------------------------------------------------ gate ---
 # What every package must pass before it is evidence, on both sides of the
@@ -534,13 +558,12 @@ vet_package() { # name → 0 pass (maybe warnings), 5 fail; writes vet.json and 
   elif grep -qE "^PKGBUILD.* W: " <<<"$out"; then vet_add namcap-pkgbuild warn "$(grep -E ' W: ' <<<"$out" | head -4 | tr '\n' ' ')"
   else vet_add namcap-pkgbuild pass "clean"; fi
   # 4. namcap on every built package: dependencies the ELF scan finds, permissions, paths, srcdir leaks, the licence.
-  # Machine-readable (-m): the rule's id, not its sentence — the two exemptions below name ids, and without -m
-  # they never matched (every Electron app failed on ELF files under /opt, 2026-09-16). glibc and gcc-libs are
-  # always there; ELF under /opt is where a self-contained application lives (skills: Desktop apps).
+  # The errors it weighs, and what it lets pass, are namcap_package_errors; the library map behind the
+  # ELF scan is namcap_sees_this_arch (prepare_container).
   local p e w
   for p in "${pkgs[@]}"; do
     out="$(as_builder namcap -m -i "$p" 2>&1 || true)"
-    e="$(grep -E ' E: ' <<<"$out" | grep -vE 'E: (dependency-detected-not-included (glibc|gcc-libs)|elffile-not-in-allowed-dirs.*opt/)' | head -6 | tr '\n' ' ')"
+    e="$(namcap_package_errors <<<"$out" | head -6 | tr '\n' ' ')"
     w="$(grep -E ' W: ' <<<"$out" | head -6 | tr '\n' ' ')"
     if [[ -n "$e" ]]; then vet_add "namcap-package:$(basename "$p")" fail "$e"
     elif [[ -n "$w" ]]; then vet_add "namcap-package:$(basename "$p")" warn "$w"
