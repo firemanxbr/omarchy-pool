@@ -13,6 +13,7 @@ tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 script="$root/factory/worker/omarchy-build-worker.sh"
 
 awk '/^namcap_package_errors\(\)/,/^}/' "$script" > "$tmp/fn.sh"
+awk '/^namcap_package_warnings\(\)/,/^}/' "$script" >> "$tmp/fn.sh"
 awk '/^namcap_map_blind\(\)/,/^}/' "$script" >> "$tmp/fn.sh"
 awk '/^namcap_sees_this_arch\(\)/,/^}/' "$script" >> "$tmp/fn.sh"
 # shellcheck source=/dev/null
@@ -37,13 +38,26 @@ out="$(errors "x E: dependency-detected-not-included glibc-locales (libraries-ne
 # ELF under /opt: namcap 3.6.0 says it per file as information and once as the error — the error is the one the gate sees.
 out="$(errors "app I: elffile-not-in-allowed-dirs opt/app/app
 app E: elffile-in-questionable-dirs opt/
-app E: elffile-not-in-allowed-dirs usr/local/bin/app")"
-[[ "$out" != *"opt/"* && "$out" == *"usr/local/bin/app"* ]] || { echo "ELF under /opt passes, /usr/local does not: '$out'"; exit 1; }
+app E: elffile-not-in-allowed-dirs usr/local/bin/app
+app E: elffile-not-in-allowed-dirs usr/local/opt/app/helper")"
+[[ "$out" != *" opt/"* && "$out" == *"usr/local/bin/app"* && "$out" == *"usr/local/opt/app/helper"* ]] || { echo "ELF under /opt passes; /usr/local does not, an opt/ deeper down neither: '$out'"; exit 1; }
 out="$(errors "y E: dangling-symlink usr/lib/debug
 y W: file-world-writable usr/bin/y")"
 [[ "$out" == "y E: dangling-symlink usr/lib/debug " ]] || { echo "an error is an error, a warning is not one: '$out'"; exit 1; }
 out="$(errors "clean I: depends-by-namcap-sight depends=()")"
 [[ -z "$out" ]] || { echo "nothing to weigh yields nothing (and the function must not fail the caller): '$out'"; exit 1; }
+
+# --- the warnings: the loader's unused-sodepend is the linker's, every other one is the package's.
+warnings() { namcap_package_warnings <<<"$1" | tr '\n' ' '; }
+out="$(warnings "omarchy-cli W: unused-sodepend /usr/lib64/ld-linux-x86-64.so.2 usr/bin/omarchy-cli
+omarchy-cli W: unused-sodepend /usr/lib/ld-linux-aarch64.so.1 usr/bin/omarchy-cli
+omarchy-cli I: link-level-dependence glibc in ['usr/lib/libc.so.6']")"
+[[ -z "$out" ]] || { echo "ld-linux is NEEDED by every binary and never 'used': not the recipe's warning: '$out'"; exit 1; }
+out="$(warnings "x W: unused-sodepend /usr/lib/libfoo.so.1 usr/bin/x
+x W: elffile-unstripped usr/lib/x/x")"
+[[ "$out" == *"libfoo.so.1"* && "$out" == *"elffile-unstripped"* ]] || { echo "an unused library, and every other warning, is weighed: '$out'"; exit 1; }
+out="$(warnings "clean I: depends-by-namcap-sight depends=()")"
+[[ -z "$out" ]] || { echo "no warning yields nothing (and the function must not fail the caller): '$out'"; exit 1; }
 
 # --- a libc without a package is the map, not the package (what #506 got on aarch64).
 namcap_map_blind <<<"omarchy-cli W: library-no-package-associated libc.so.6 ['usr/bin/omarchy-cli']
@@ -76,4 +90,4 @@ printf 'if g.group(2).endswith(",x86-64"):\n' > "$tmp/other.py"
 ! namcap_sees_this_arch "$tmp/other.py" || { echo "a parser the fix does not know is reported, not patched blind"; exit 1; }
 [[ "$(cat "$tmp/other.py")" == 'if g.group(2).endswith(",x86-64"):' ]] || { echo "an unknown parser is left as it is"; exit 1; }
 ! namcap_sees_this_arch "$tmp/missing.py" || { echo "no file, no map: reported"; exit 1; }
-echo "ok: the gate weighs namcap's errors, knows a blind map, and namcap's library map sees aarch64"
+echo "ok: the gate weighs namcap's errors and warnings, knows a blind map, and namcap's library map sees aarch64"

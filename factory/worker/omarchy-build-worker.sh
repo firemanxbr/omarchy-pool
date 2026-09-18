@@ -477,6 +477,12 @@ namcap_package_errors() { # stdin: `namcap -m -i` on a built package → the err
   # The gate exempted `gcc-libs` from 2026-09-16 to 2026-09-18, a name that owned no library by then.
   grep -E ' E: ' | grep -vE 'E: (dependency-detected-not-included glibc |elffile-(not-in-allowed-dirs|in-questionable-dirs) opt/)' || true
 }
+namcap_package_warnings() { # stdin: `namcap -m -i` on a built package → the warnings the gate weighs, one per line
+  # The dynamic loader is NEEDED by every binary glibc links and `ldd -u` never sees it used, so namcap's
+  # `unused-sodepend` on ld-linux is the linker's doing, not the recipe's — every x86_64 Rust binary had it
+  # (#450, #505) and no recipe can clear it. On any other library the same warning is the package's own.
+  grep -E ' W: ' | grep -vE 'W: unused-sodepend /usr/lib(64)?/ld-linux-[^ ]+ ' || true
+}
 
 # ------------------------------------------------------------------ gate ---
 # What every package must pass before it is evidence, on both sides of the
@@ -575,7 +581,7 @@ vet_package() { # name → 0 pass (maybe warnings), 5 fail; writes vet.json and 
   for p in "${pkgs[@]}"; do
     out="$(as_builder namcap -m -i "$p" 2>&1 || true)"
     e="$(namcap_package_errors <<<"$out" | head -6 | tr '\n' ' ')"
-    w="$(grep -E ' W: ' <<<"$out" | head -6 | tr '\n' ' ')"
+    w="$(namcap_package_warnings <<<"$out" | head -6 | tr '\n' ' ')"
     if [[ -n "$e" ]]; then vet_add "namcap-package:$(basename "$p")" fail "$e"
     elif [[ -n "$w" ]]; then vet_add "namcap-package:$(basename "$p")" warn "$w"
     else vet_add "namcap-package:$(basename "$p")" pass "clean"; fi

@@ -265,5 +265,9 @@ maintainer merges it like any other change to the process.
   blind scan reads as one; and the exemption for an ELF under `/opt`,
   which named the id namcap prints as information
   (`elffile-not-in-allowed-dirs`) and never the one it prints as the
-  error (`elffile-in-questionable-dirs`), now names both. The skill
-  names the runtime the way Arch does.
+  error (`elffile-in-questionable-dirs`), now names both. And the one
+  warning every x86_64 binary carried — `unused-sodepend` on the dynamic
+  loader, which the linker names NEEDED and `ldd -u` never sees used —
+  is no longer weighed: it cost every Rust package five points of the
+  gate's fifteen and no recipe could clear it. The skill names the
+  runtime the way Arch does.
