@@ -4,9 +4,9 @@
 
 # The index API the client asks about releases, dependency graphs and
 # advisories, and the static origin pacman downloads packages from
-# (the pool's custom domain). Both move to omarchy.org with the project.
-api = "https://pkgs.firemanxbr.org"
-pool = "https://pool.firemanxbr.org"
+# (the pool's custom domain).
+api = "https://pkgs.omarchy-pool.org"
+pool = "https://pool.omarchy-pool.org"
 
 # The ring this machine follows: edge (upstream within hours, nothing
 # checked yet), rc (a day later, after a real pacman and an ABI check

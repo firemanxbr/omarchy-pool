@@ -1,8 +1,44 @@
 import type { Env } from "./index";
 
 export const REPO_URL = "https://github.com/firemanxbr/omarchy-pool";
-export const DASHBOARD_HOST = "omarchy-pool.firemanxbr.org";
-export const LEGACY_DASHBOARD_HOST = "dashboard-omarchy.firemanxbr.org";
+
+/**
+ * The pool's names, said once. The product moved from firemanxbr.org to its
+ * own domain on 2026-09-18: people read the dashboard, machines call the
+ * API and fetch the pool, and the two kinds of name move differently. A
+ * person's link redirects — a browser follows. A machine's name is never
+ * redirected: a worker's curl and a pacman with the old include do not
+ * follow a 3xx, and a redirect they do not follow is a silent success. So
+ * the old machine names keep serving beside the new, for as long as a
+ * machine set up before the move still names them.
+ */
+export const DASHBOARD_HOST = "omarchy-pool.org";
+export const API_HOST = "pkgs.omarchy-pool.org";
+/** The API's old name: serves beside API_HOST, never redirected (see above). */
+export const LEGACY_API_HOST = "pkgs.firemanxbr.org";
+/** The dashboard's old names, and www: a page on them is a redirect to DASHBOARD_HOST; an API call on them is answered (the old omarchy-worker copies name the old dashboard host and call without -L). */
+export const LEGACY_DASHBOARD_HOSTS: readonly string[] = ["omarchy-pool.firemanxbr.org", "dashboard-omarchy.firemanxbr.org", "www.omarchy-pool.org"];
+/** The pool bucket's old name, still serving: audience.ts counts it with POOL_URL's host as one pool. */
+export const LEGACY_POOL_HOSTS: readonly string[] = ["pool.firemanxbr.org"];
+/** Every name this Worker answers to in production; anything else is wrangler dev or the tests' pool.test. */
+export const PRODUCTION_HOSTS: readonly string[] = [DASHBOARD_HOST, API_HOST, LEGACY_API_HOST, ...LEGACY_DASHBOARD_HOSTS];
+
+export function isProductionHost(host: string): boolean {
+  return PRODUCTION_HOSTS.includes(host);
+}
+
+/**
+ * The origin a text a machine keeps should name — the setup script, the
+ * worker CLI, the pacman include's own comment — and the origin an edge
+ * cache key is built from: the API host that is never redirected, whichever
+ * production name the request came in on, so the names in one zone read the
+ * one copy — the cache is the zone's, so one copy per zone, not one per
+ * name (D1 rows read is the bill). Off production it is the request's own
+ * origin, so wrangler dev and the tests read themselves.
+ */
+export function machineOrigin(url: URL): string {
+  return isProductionHost(url.hostname) ? `https://${API_HOST}` : url.origin;
+}
 
 export interface RunningVersion {
   version: string;

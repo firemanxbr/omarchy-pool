@@ -7,12 +7,25 @@ time; there is no shared secret. Humans operate the pipeline by queueing jobs
 
 | | |
 |---|---|
-| Dashboard | https://omarchy-pool.firemanxbr.org |
-| Index API | https://pkgs.firemanxbr.org/api/v1/stats |
-| Pool (static, what pacman reads) | https://pool.firemanxbr.org/`<source>`/x86_64/ · `/aarch64/` — `core/`, `extra/`, `packages/` (the OPR), `asahi/`, `factory/`, … |
-| Signing key | `docs/omarchy-staging.pub.asc` · https://pool.firemanxbr.org/omarchy-staging.pub.asc · https://pkgs.firemanxbr.org/api/v1/signing-key (expires 2027-09-12); the private key is the Worker secret `SIGNING_KEY` — nowhere else |
+| Dashboard | https://omarchy-pool.org |
+| Index API | https://pkgs.omarchy-pool.org/api/v1/stats |
+| Pool (static, what pacman reads) | https://pool.omarchy-pool.org/`<source>`/x86_64/ · `/aarch64/` — `core/`, `extra/`, `packages/` (the OPR), `asahi/`, `factory/`, … |
+| Signing key | `docs/omarchy-staging.pub.asc` · https://pool.omarchy-pool.org/omarchy-staging.pub.asc · https://pkgs.omarchy-pool.org/api/v1/signing-key (expires 2027-09-12); the private key is the Worker secret `SIGNING_KEY` — nowhere else |
 | Jobs (pulled by project workers) | Sync (every 3 h, one task per architecture) · Promote (by evidence: edge→rc right after the sync that changed edge, rc→stable on the second green check in a row, attempted every 3 h; auto-rollback) · Fast lane (a factory build the trial installed, and security fixes, straight to stable) · Health (daily, both arches) · Security (every 3 h, with fast-track) · GC (Sundays) · Metrics snapshot (every 30 min, by the brain itself) · Release (GitHub, when a maintainer decides: `gh workflow run release.yml`) |
-| Running version | https://pkgs.firemanxbr.org/api/v1/version · the chip in the dashboard header |
+| Running version | https://pkgs.omarchy-pool.org/api/v1/version · the chip in the dashboard header |
+
+**The address moved (2026-09-18).** The product has its own domain. Six
+names reach the Worker: `omarchy-pool.org` is the dashboard;
+`www.omarchy-pool.org`, `omarchy-pool.firemanxbr.org` and
+`dashboard-omarchy.firemanxbr.org` redirect a page to it (`/api/v1/*` on them
+is answered, not redirected); `pkgs.omarchy-pool.org` is the API and
+`pkgs.firemanxbr.org` serves beside it, never redirected — a worker's `curl`
+does not follow, and a 3xx would be a silent success. The bucket has two:
+`pool.omarchy-pool.org` is the pool, `pool.firemanxbr.org` keeps serving it.
+http becomes https at the edge (*Always Use HTTPS*, on both zones), not in
+the Worker. A machine set up before the move keeps the old pool host until it
+runs `/setup` again; nothing it reads went away. The key's user id,
+`staging@firemanxbr.org`, is a name inside the key and stays.
 
 ## Trust model
 
@@ -96,9 +109,10 @@ be inside retention: GC prunes the membership of older ones (410).
 
 `main` is protected: no direct pushes, every change is a pull request that CI and
 E2E must pass, squash-merged with the pull request title as the commit message.
-Every merge is a release — there is no separate "cut a version" step:
+A release is `main` at the moment a maintainer dispatches one
+(`gh workflow run release.yml`; a merge alone releases nothing):
 
-1. `release.yml` runs CI and E2E again on the merged commit.
+1. `release.yml` runs CI and E2E again on that commit.
 2. The next version is the last tag plus one **patch** (`v0.0.1 → v0.0.2`). Label
    the pull request `release:minor` for a significant change (`v0.1.0`) or
    `release:major` for an incompatible one; `workflow_dispatch` with `bump=` does
@@ -114,8 +128,11 @@ Every merge is a release — there is no separate "cut a version" step:
 
 The deploy step needs the `CLOUDFLARE_API_TOKEN` repository secret (Account →
 Workers Scripts: Edit, D1: Edit, Account Settings: Read; Zone → Workers Routes:
-Edit, Zone: Read, for `firemanxbr.org`). Without it the release is still
-published and the run ends with a warning instead of a deployment.
+Edit, Zone: Read, on **both** zones, `omarchy-pool.org` and `firemanxbr.org` —
+the routes span them). It is an account-owned token: Cloudflare dashboard →
+*Manage account → Account API tokens → omarchy-pool github-actions deploy →
+Edit*, not *My Profile*. Without it the release is still published and the run
+ends with a warning instead of a deployment.
 
 Rolling the worker back is deploying an earlier release: re-run the Deploy job of
 that release's run, or `git checkout vX.Y.Z && cd worker && npx wrangler deploy
@@ -289,9 +306,11 @@ decides on their own package, and never on a contributor's bytes:
 `omarchy-pool` (registered under the GitHub account that runs the staging
 deployment, *Settings → Developer settings → OAuth Apps*; it moves with the
 project, MIGRATION part C;
-callback `https://omarchy-pool.firemanxbr.org/auth/github/callback`,
-homepage the dashboard, no device flow, expiring user tokens on — the
-token is used once, to read the login). Its client id is
+callback `https://omarchy-pool.org/auth/github/callback` — the App holds
+several redirect URIs, and a sign-in pressed on any other production name
+starts over on the dashboard, so this is the one used — homepage the
+dashboard, no device flow, expiring user tokens on — the token is used
+once, to read the login). Its client id is
 `GITHUB_OAUTH_CLIENT_ID` in `wrangler.toml`; the secret is set with
 `npx wrangler secret put GITHUB_OAUTH_CLIENT_SECRET` and rotated from the
 app's page (*Generate a new client secret*, set, then delete the old one).
@@ -306,7 +325,7 @@ ten minutes (`worker/src/governance.ts`) and sets each contributor's role
 from it — every change a `role` line in the journal. Changing the file
 is a pull request another maintainer approves (`.github/CODEOWNERS` is
 generated from it by `factory/bin/check-governance --write`; CI checks they
-agree). See [Governance](https://omarchy-pool.firemanxbr.org/docs/governance). `GET /api/v1/factory/maintainers`
+agree). See [Governance](GOVERNANCE.md). `GET /api/v1/factory/maintainers`
 and `/factory/approvals` are the public record. What a package is about is
 its *category*, proposed by the project's agent at audit and settled by a
 maintainer (`POST /factory/packages/<name>/category`).
@@ -365,7 +384,7 @@ Every machine set up before it needs the new include once — the one
 command, again:
 
 ```
-curl -fsSL https://pkgs.firemanxbr.org/setup | sudo bash -s -- --ring stable
+curl -fsSL https://pkgs.omarchy-pool.org/setup | sudo bash -s -- --ring stable
 ```
 
 Its old include keeps working until the purge; after, its `Server =
@@ -613,15 +632,17 @@ read, so a planner regression fails CI.
 
 **Who uses it.** Once a day (00:30 UTC) the brain counts yesterday's
 audience from the same analytics: the distinct client addresses that
-fetched a ring database (`/<source>/<arch>/omarchy-*-<ring>.db`) on the pool's host,
-per ring and per architecture, as one `audience` journal line
+fetched a ring database (`/<source>/<arch>/omarchy-*-<ring>.db`) on the pool's
+hosts — both names, one query, so a machine that used both in a day is
+one address — per ring and per architecture, as one `audience` journal line
 (`src/audience.ts`); the Pool page's community card and the Pipeline's
 counters show it, `/api/v1/stats` carries the last 30 days. Nothing is kept
 per request — one number per day. An address is a machine most of the
 time (a NAT hides several, a laptop on the move counts twice), so the
-dashboard says *about*. It needs `CLOUDFLARE_ZONE_ID` (wrangler.toml) and
-the analytics token to also carry *Zone · Analytics · Read* on the zone;
-without it the day is skipped and the scheduler log says so once a day.
+dashboard says *about*. The query is scoped to the account
+(`CLOUDFLARE_ACCOUNT_ID`), so the analytics token must carry *Account ·
+Analytics · Read*; without it the day is skipped and the scheduler log says
+so once a day.
 
 **The guard.** Three lines (`src/cost.ts`): the report warns at a
 projected US$ 25; at a projected or actual **US$ 40** the brain sets
@@ -681,7 +702,7 @@ cd worker
 gpg --batch --armor --export-secret-keys "$KEY" | npx wrangler secret put SIGNING_KEY
 npx wrangler r2 object put omarchy-packages/omarchy-staging.pub.asc --file ../docs/omarchy-staging.pub.asc --remote
 cd .. && gpg --batch --yes --delete-secret-keys "$KEY"   # the Worker is the only holder
-curl -s https://pkgs.firemanxbr.org/api/v1/signing-key | jq .fingerprint   # the new key
+curl -s https://pkgs.omarchy-pool.org/api/v1/signing-key | jq .fingerprint   # the new key
 for ring in edge rc stable; do for arch in x86_64 aarch64; do pkg-repo render --ring $ring --arch $arch; done; done
 ```
 

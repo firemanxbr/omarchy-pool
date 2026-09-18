@@ -30,10 +30,12 @@ Evidence for the three questions in the repository migration outline. Everything
 below is reproducible with the scripts in `tests/` (see [TESTING.md](../docs/TESTING.md))
 against the staging deployment. Nothing touches production.
 
-**Live:** https://omarchy-pool.firemanxbr.org — the pipeline running hourly on
-the real Arch `core`/`extra`/`multilib` packages from the Omarchy mirror: sync into
-the pool, promotion `edge → rc → stable`, signed databases per source and ring at
-`https://pool.firemanxbr.org/x86_64/`, and a daily health check with a real pacman.
+**Live:** https://omarchy-pool.org (https://omarchy-pool.firemanxbr.org at the
+time; the addresses below are the proof's, as they were) — the pipeline running
+hourly on the real Arch `core`/`extra`/`multilib` packages from the Omarchy
+mirror: sync into the pool, promotion `edge → rc → stable`, signed databases per
+source and ring at `https://pool.firemanxbr.org/x86_64/`, and a daily health
+check with a real pacman.
 
 ### 1. Can the immutable pool and index cleanly represent complete releases?
 

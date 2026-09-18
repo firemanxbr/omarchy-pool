@@ -103,7 +103,7 @@ import { packageHtml, packagesHtml } from "./pages/packages";
 import { securityHtml } from "./pages/security";
 import { pipelineHtml } from "./pages/pipeline";
 import { factoryHtml as factoryPageHtml } from "./pages/contribute";
-import { DASHBOARD_HOST, LEGACY_DASHBOARD_HOST, version } from "./meta";
+import { DASHBOARD_HOST, LEGACY_DASHBOARD_HOSTS, machineOrigin, version } from "./meta";
 import { handleStatic } from "./routes/static";
 import { pacmanInclude, setupScript, workerCli, workerCompose } from "./routes/setup";
 import { runScheduler } from "./scheduler";
@@ -127,12 +127,10 @@ export interface Env {
   SOURCE_CHECK?: string;
   /** Signs per-job tokens (jobtoken.ts); any random string. */
   JOB_TOKEN_SECRET?: string;
-  /** A Cloudflare API token with Analytics: Read, and the account, for the daily cost estimate (cost.ts). */
+  /** A Cloudflare API token with Account · Analytics · Read, and the account, for the daily cost estimate (cost.ts) and the daily audience count (audience.ts). */
   CLOUDFLARE_ANALYTICS_TOKEN?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;
   CLOUDFLARE_D1_ID?: string;
-  /** The zone the pool's host lives in: the daily audience count reads its request analytics (audience.ts). */
-  CLOUDFLARE_ZONE_ID?: string;
   /** The pool's OpenPGP signing key (armored private key) and its passphrase, if any — signing.ts. */
   SIGNING_KEY?: string;
   SIGNING_KEY_PASSPHRASE?: string;
@@ -155,11 +153,13 @@ export default {
     const path = url.pathname;
     const { method } = request;
 
-    // The dashboard moved from dashboard-omarchy to omarchy-pool; the old name
-    // was published, so it keeps redirecting.
-    if (url.hostname === LEGACY_DASHBOARD_HOST) {
-      url.hostname = DASHBOARD_HOST;
-      return Response.redirect(url.toString(), 301);
+    // A page on a legacy dashboard name moves to the dashboard, path and
+    // query kept — 301 for a read, 308 so a client that follows keeps its
+    // method; /api/v1/* on them is answered (why: LEGACY_DASHBOARD_HOSTS).
+    // http→https is the zone setting Always Use HTTPS at the edge, on both
+    // zones, not here.
+    if (LEGACY_DASHBOARD_HOSTS.includes(url.hostname) && !path.startsWith(API + "/")) {
+      return Response.redirect(`https://${DASHBOARD_HOST}${path}${url.search}`, method === "GET" || method === "HEAD" ? 301 : 308);
     }
 
     try {
@@ -179,9 +179,9 @@ export default {
         return Response.redirect(url.toString(), 301);
       }
       // One command to join a ring: the script, read by people before they pipe it into sudo.
-      if (path === "/setup" || path === "/setup.sh") return new Response(setupScript(url.origin, env.POOL_URL.replace(/\/$/, "")), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300" } });
+      if (path === "/setup" || path === "/setup.sh") return new Response(setupScript(machineOrigin(url), env.POOL_URL.replace(/\/$/, "")), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300" } });
       // One command to run a worker: the script (read before it is run) and the compose file it writes.
-      if (path === "/omarchy-worker" || path === "/omarchy-worker.sh") return new Response(workerCli(url.origin), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300" } });
+      if (path === "/omarchy-worker" || path === "/omarchy-worker.sh") return new Response(workerCli(machineOrigin(url)), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300" } });
       if (path === "/omarchy-worker/compose.yml") return new Response(workerCompose(), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300" } });
       // Sign in with GitHub: cookie session for the dashboard's pages.
       if (path === "/auth/github" && method === "GET") return handleAuthStart(url, env);
@@ -356,7 +356,8 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
  */
 async function cachedApi(method: string, path: string, url: URL, request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   if (method !== "GET") return api(method, path, url, request, env);
-  const key = new Request(url.toString(), { method: "GET" });
+  // The key names the API host whichever production name was asked: one copy per zone (the cache is the zone's), not per name.
+  const key = new Request(`${machineOrigin(url)}${url.pathname}${url.search}`, { method: "GET" });
   const hit = await edgeHit(key);
   if (hit) return hit;
   const res = await api(method, path, url, request, env);
@@ -417,7 +418,7 @@ async function api(method: string, path: string, url: URL, request: Request, env
   if (method === "OPTIONS") return new Response(null, { status: 204, headers: cors() });
   if (method === "GET" && path === "/pacman.conf") {
     const withOptional = new Set((url.searchParams.get("with") ?? "").split(",").map((s) => s.trim()).filter(Boolean));
-    const text = await pacmanInclude(env, url.searchParams.get("ring") ?? env.DEFAULT_RING, url.searchParams.get("arch") ?? "x86_64", withOptional, `${url.origin}/setup`);
+    const text = await pacmanInclude(env, url.searchParams.get("ring") ?? env.DEFAULT_RING, url.searchParams.get("arch") ?? "x86_64", withOptional, `${machineOrigin(url)}/setup`);
     if (text === null) return json({ error: "unknown ring or arch, or no release yet" }, 404);
     return new Response(text, { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=120" } });
   }

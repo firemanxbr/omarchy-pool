@@ -59,7 +59,7 @@ COPY factory/skills /usr/local/lib/omarchy-factory/skills/
 COPY docs/omarchy-staging.pub.asc /usr/local/lib/omarchy-factory/omarchy-staging.pub.asc
 RUN chmod 755 /usr/local/bin/omarchy-build-worker /usr/local/bin/omarchy-worker /usr/local/lib/omarchy-factory/bin/* && mkdir -p /build /task /var/lib/omarchy-worker
 # OMARCHY_IMAGE: the release this image is, reported with every claim (the Workers page shows it).
-ENV OMARCHY_API=https://pkgs.firemanxbr.org OMARCHY_POOL=https://pool.firemanxbr.org \
+ENV OMARCHY_API=https://pkgs.omarchy-pool.org OMARCHY_POOL=https://pool.omarchy-pool.org \
     OMARCHY_WORK_DIR=/var/lib/omarchy-worker DOCKER_HOST=unix:///var/run/docker.sock OMARCHY_IMAGE=${POOL_RELEASE}
 VOLUME /var/lib/omarchy-worker
 WORKDIR /build

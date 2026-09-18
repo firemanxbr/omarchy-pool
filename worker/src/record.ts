@@ -2,10 +2,11 @@
  * The factory's record: every step a package takes, written once to the
  * pool bucket under factory/<name>/<request>/… with the pool's detached
  * signature beside it, and never rewritten. Public — the bucket is what
- * pool.firemanxbr.org serves — so anyone can read a request, a decision or
- * a build's evidence and verify who wrote it; nothing in it is private (a
- * GitHub login, a project URL, a licence, a log). The staging bucket stays
- * the workers' scratch space and expires; this does not.
+ * pool.omarchy-pool.org serves, and pool.firemanxbr.org still does — so
+ * anyone can read a request, a decision or a build's evidence and verify
+ * who wrote it; nothing in it is private (a GitHub login, a project URL, a
+ * licence, a log). The staging bucket stays the workers' scratch space and
+ * expires; this does not.
  *
  *   factory/<name>/<request>/request.json            what the contributor asked for (record.ts, PR A)
  *   factory/<name>/<request>/build-<task>/…          a build's evidence, copied from staging when it is staged (PR C)

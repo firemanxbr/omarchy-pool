@@ -1,6 +1,6 @@
 # docs/
 
-The documentation lives on the dashboard — https://omarchy-pool.firemanxbr.org/docs
+The documentation lives on the dashboard — https://omarchy-pool.org/docs
 — with its source under [`worker/src/docs/`](../worker/src/docs/), rendered
 by the Worker. This directory holds what the code and the releases ship,
 not prose:

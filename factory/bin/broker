@@ -47,7 +47,7 @@ import agent  # noqa: E402
 
 LOCK = threading.Lock()
 PORT = int(os.environ.get("AGENT_PROXY_PORT", os.environ.get("BROKER_PORT", "8790")))
-POOL = os.environ.get("OMARCHY_API", "https://pkgs.firemanxbr.org").rstrip("/") + "/api/v1"
+POOL = os.environ.get("OMARCHY_API", "https://pkgs.omarchy-pool.org").rstrip("/") + "/api/v1"
 GITHUB = "https://api.github.com"
 LEASE_SECONDS = 30 * 60
 # Cloudflare fronts the pool and answers a request without a browser-like

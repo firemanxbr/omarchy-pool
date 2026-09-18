@@ -24,7 +24,7 @@ struct Cli {
 
 #[derive(Args)]
 struct Remote {
-    /// Base URL of the edge API, e.g. `https://pkgs.firemanxbr.org`.
+    /// Base URL of the edge API, e.g. `https://pkgs.omarchy-pool.org`.
     #[arg(long, env = "OMARCHY_API")]
     api: String,
     /// Bearer token: the per-job token a worker got at claim time, or a
@@ -208,7 +208,7 @@ enum Command {
         #[arg(
             long,
             env = "OMARCHY_POOL",
-            default_value = "https://pool.firemanxbr.org"
+            default_value = "https://pool.omarchy-pool.org"
         )]
         pool: String,
         #[arg(long = "ring", default_values_t = ["edge".to_owned(), "rc".to_owned(), "stable".to_owned()])]
@@ -284,13 +284,13 @@ enum Command {
         #[arg(
             long,
             env = "OMARCHY_API",
-            default_value = "https://pkgs.firemanxbr.org"
+            default_value = "https://pkgs.omarchy-pool.org"
         )]
         api: String,
         #[arg(
             long,
             env = "OMARCHY_POOL",
-            default_value = "https://pool.firemanxbr.org"
+            default_value = "https://pool.omarchy-pool.org"
         )]
         pool: String,
         /// The worker's token (`omw_…` from `POST /factory/workers`); the registration names the worker.

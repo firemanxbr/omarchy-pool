@@ -1,7 +1,7 @@
 import { signingEnabled, detachedSignature } from "../signing";
 import { edgeHit, edgeStore, isRing, json, type Env, type Ring } from "../index";
 import { artifactKey, isRepoArch, REPO_ARCHES, SHORT } from "../r2";
-import { REPO_ORDER, sourceOfRepo } from "../meta";
+import { machineOrigin, REPO_ORDER, sourceOfRepo } from "../meta";
 import { releaseManifests, releaseSummary, releaseSources, ringHead, ringMembers, releaseMembers, ensureCheckpoint, CHECKPOINT_EVERY, type ManifestDetail, type ReleaseRow } from "../db";
 
 interface CreateRelease {
@@ -293,8 +293,10 @@ export async function handleGetRelease(ring: string, url: URL, env: Env): Promis
   // with it, so a new release is never served stale. Every `omarchy-cli
   // status`, `list` and `search` on every machine reads a whole ring's
   // summary (32 000 rows of D1 a call); a hit costs the head's row and the
-  // artifacts' few, and reads no manifest.
-  const cacheKey = new Request(`${url.origin}/api/v1/releases/${ring}/listing?release=${release.id}@${release.created_at}&artifacts=${artifacts.results.length}@${artifacts.results.map((a) => a.created_at).sort().pop() ?? ""}&${url.searchParams.toString()}`);
+  // artifacts' few, and reads no manifest. The key names the API host
+  // whichever production name asked: one copy per zone (the cache is the
+  // zone's), not per name.
+  const cacheKey = new Request(`${machineOrigin(url)}/api/v1/releases/${ring}/listing?release=${release.id}@${release.created_at}&artifacts=${artifacts.results.length}@${artifacts.results.map((a) => a.created_at).sort().pop() ?? ""}&${url.searchParams.toString()}`);
   const hit = await edgeHit(cacheKey);
   if (hit) return hit;
 

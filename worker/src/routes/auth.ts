@@ -1,5 +1,6 @@
 import { json, type Env } from "../index";
 import { roleFor } from "../governance";
+import { DASHBOARD_HOST, isProductionHost } from "../meta";
 import { sha256Hex } from "./contributors";
 
 /**
@@ -43,6 +44,10 @@ function safeNext(url: URL): string {
 }
 
 export async function handleAuthStart(url: URL, env: Env): Promise<Response> {
+  // The OAuth App's callback is the dashboard's: a sign-in pressed on any
+  // other production name (pkgs.*) starts over on the dashboard, before a
+  // state cookie is set on a host the callback will never come back to.
+  if (isProductionHost(url.hostname) && url.hostname !== DASHBOARD_HOST) return Response.redirect(`https://${DASHBOARD_HOST}${url.pathname}${url.search}`, 302);
   if (!env.GITHUB_OAUTH_CLIENT_ID) return json({ error: "sign-in with GitHub is not configured (GITHUB_OAUTH_CLIENT_ID); POST /api/v1/factory/register with a GitHub token instead" }, 501);
   const state = crypto.randomUUID();
   const redirect = `${url.origin}/auth/github/callback`;

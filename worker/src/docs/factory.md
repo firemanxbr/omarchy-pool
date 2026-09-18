@@ -11,7 +11,7 @@ nothing. Workers are ephemeral, live anywhere, and pull.
 
 Contributors and maintainers use the same tools; maintainers never ship a
 contributor's bytes — *we do not use what you built, we learn from it*
-([Governance](https://omarchy-pool.firemanxbr.org/docs/governance)). A contributor's build is
+([Governance](../docs/GOVERNANCE.md)). A contributor's build is
 evidence: the recipe, the log, the manifest that let a maintainer rebuild,
 verify and attest the package faster and approve it with more confidence.
 
@@ -163,7 +163,7 @@ package, you run the worker (on your machine, with your tokens), the result
 waits in your staging workspace.
 
 ```bash
-API=https://pkgs.firemanxbr.org/api/v1
+API=https://pkgs.omarchy-pool.org/api/v1
 
 # 1. Who you are — a GitHub token is used once to read your login and never stored
 #    (a fine-grained token with no permissions, made for this; never `gh auth token`).
@@ -176,7 +176,7 @@ curl -s -X POST $API/factory/packages -H "authorization: Bearer $OMC" -H 'conten
   -d '{"url":"https://github.com/you/project","description":"What it does, one line","license":"MIT",
        "checklist":{"official":true,"license":true,"unshipped":true,"evidence":true}}'
 #    optional: "name", "arches"; for a project not on GitHub: "source" (the release tarball) and "version"
-#    → {"package":…,"request":{"id":12,"record":"https://pool.firemanxbr.org/factory/<name>/12/request.json",…},
+#    → {"package":…,"request":{"id":12,"record":"https://pool.omarchy-pool.org/factory/<name>/12/request.json",…},
 #       "build":{"tasks":[57],"queue":{"aarch64":{"position":2,"total":3}},…}}   — queued at once, in the shared queue
 
 # 3. Register a worker (optional: the request above is already in the shared queue). It builds your packages at once; started with WORKER_SHARED=1 it builds everyone's queue too.
@@ -197,7 +197,7 @@ curl -s -X POST $API/factory/packages/project/build -H "authorization: Bearer $O
 #    the agent key (--anthropic-key, --openai-key, --gemini-key or --xai-key — or --claude-token, a Claude
 #    subscription through Claude Code) is *yours*, on the broker: the pool never holds one.
 #    A worker is ready only when its agent answers the probe (the broker's /health): no agent, no draft.
-curl -fsSLo omarchy-worker https://omarchy-pool.firemanxbr.org/omarchy-worker && chmod +x omarchy-worker
+curl -fsSLo omarchy-worker https://omarchy-pool.org/omarchy-worker && chmod +x omarchy-worker
 ./omarchy-worker start --token omw_… --github-token github_pat_… --anthropic-key sk-…
 ./omarchy-worker status                                  # what runs, what the pool thinks; logs · share on · update · stop
 #    by hand, the same set: the compose file (served at /omarchy-worker/compose.yml) and a .env beside it —
@@ -260,7 +260,7 @@ token. `cosign verify ghcr.io/firemanxbr/omarchy-worker:latest
 the image is the project's.
 
 Who approves, and how one becomes a maintainer, is
-[Governance](https://omarchy-pool.firemanxbr.org/docs/governance): a file in this repository,
+[Governance](../docs/GOVERNANCE.md): a file in this repository,
 `factory/MAINTAINERS.toml`, changed by pull requests other maintainers review.
 
 ## Sizing a package before committing to it
@@ -294,7 +294,7 @@ Without a container, the release binaries do the same:
 
 ```bash
 # once: the pool's publisher (from the releases, or cargo build --release -p pkg-repo)
-export OMARCHY_API=https://pkgs.firemanxbr.org OMARCHY_POOL=https://pool.firemanxbr.org
+export OMARCHY_API=https://pkgs.omarchy-pool.org OMARCHY_POOL=https://pool.omarchy-pool.org
 
 # register (POST /factory/workers with your contributor token) and have a
 # maintainer trust it; then, native architecture:
