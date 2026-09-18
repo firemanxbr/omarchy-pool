@@ -531,7 +531,8 @@ but the sizing ones (`factory/sizing/`, benchmarks). Day to day:
   refuses is reported as the build's failure, the pool's answer as the
   reason. A contributor token (`omc_…`) or worker token (`omw_…`) is a random secret
   hashed in D1; revoke a worker with `DELETE /factory/workers/<id>` as its
-  owner, or set `revoked_at` in `build_workers` by hand.
+  owner or as a maintainer (the Revoke button on the owner's page is the same
+  door).
 - **Tokens**: there is no shared worker secret. Every worker — each of the
   Studio's six, a droplet's, a contributor's — is a registration with its
   own `omw_` token; project trust is a maintainer's decision on that

@@ -1,7 +1,7 @@
 import { json, type Env } from "../index";
 import { scoreChain } from "../score";
 import { requestChecks } from "../request";
-import { contributorOf, isMaintainer, type Contributor } from "./contributors";
+import { contributorOf, isMaintainer, MAINTAINER_DECIDES, SIGN_IN, type Contributor } from "./contributors";
 import { reclaimStagingPackages } from "../staging";
 import { pullFromRings } from "./blocks";
 import { chains, chainOf, storyRows, type Approval } from "./story";
@@ -294,8 +294,8 @@ interface Facts { owner: string | null; already: boolean; inFlight: { id: number
 export function decisions(c: Contributor | null, t: Decidable, f: Facts): Record<Decision, Verdict> {
   const allow: Verdict = { ok: true };
   const no = (status: 401 | 403 | 404 | 409, why: string): Verdict => ({ ok: false, status, why });
-  // The two reasons every decision shares: nobody signed in, or somebody who is not a maintainer.
-  const person = !c ? no(401, "sign in with GitHub") : !isMaintainer(c) ? no(403, "a maintainer decides") : null;
+  // The two reasons every decision shares: nobody signed in, or somebody who is not a maintainer — the words a person's page greys Withdraw with (workspace() in routes/contributors.ts).
+  const person = !c ? no(401, SIGN_IN) : !isMaintainer(c) ? no(403, MAINTAINER_DECIDES) : null;
   const notStaged = t.status !== "staged" ? no(409, `task ${t.id} is ${t.status}, not staged`) : null;
   // Conflict of interest: nobody decides on their own package, and a project with a single maintainer is no
   // exception — that maintainer's own packages wait for a second one (/docs/governance).

@@ -222,6 +222,7 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
+    // The shell's log icon on every row: live for the worker's owner and the maintainers, grey with the pool's refusal for everyone else.
     id: "workers.log",
     page: "/workers",
     anchor: ['id="w-project"', 'id="w-community"'],
@@ -234,7 +235,7 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
       { path: `/api/v1/factory/workers/${F.worker}/log`, as: "maintainer", fields: ["id", "log", "at"] },
       { path: `/api/v1/factory/workers/${F.communityWorker}/log`, as: "maintainer", fields: ["id", "log", "at"] },
     ],
-    visible: ["owner", "maintainer"],
+    visible: EVERYONE,
   },
   {
     id: "workers.legend",

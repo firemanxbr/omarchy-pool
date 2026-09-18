@@ -98,9 +98,185 @@ export async function contributorOf(request: Request, env: Env): Promise<Contrib
   return { login: row.login, name: row.name, avatar_url: row.avatar_url, role: row.role, blocked: row.blocked_at ? { at: row.blocked_at, reason: row.blocked_reason } : null };
 }
 
-/** The answer a blocked contributor gets from every door that changes something. */
-function blockedResponse(c: Contributor): Response | null {
-  return c.blocked ? json({ error: `${c.login} is blocked by a maintainer${c.blocked.reason ? ": " + c.blocked.reason : ""}; nothing can be requested or built until another maintainer lifts it` }, 403) : null;
+// ---------- what a person may do on a person's page ----------
+
+/** The two reasons every door shares, here and on a build's decisions (routes/review.ts): nobody signed in, or somebody who is not a maintainer. */
+export const SIGN_IN = "sign in with GitHub";
+export const MAINTAINER_DECIDES = "a maintainer decides";
+
+/** The acts on a person's page (pages/user.ts), each a control drawn for every viewer and grey with its reason where the viewer may not press it. Share is not here: the page is public and its link is anyone's to copy — no door, no gate. */
+export type Right = "request" | "register" | "token" | "build" | "dequeue" | "remove" | "revoke" | "withdraw" | "own_only" | "share_worker";
+export const RIGHTS: Right[] = ["request", "register", "token", "build", "dequeue", "remove", "revoke", "withdraw", "own_only", "share_worker"];
+
+/** An act allowed, or refused with the status the door answers and the reason a person reads in the control's title. */
+export type Verdict = { ok: true } | { ok: false; status: 401 | 403 | 404 | 409; why: string };
+
+/** A registration as Remove reads it: whose, where it stands, the rings that serve it, the project's build of it in flight. */
+export interface Registration { name: string; owner: string; status: string; served: string[]; reviewing: { id: number; status: string } | null }
+
+/** A worker as its row's buttons read it: whose, of what kind (community: its owner's or shared; project, review: the pool's), and whether it is revoked. */
+export interface WorkerRow { id: string; owner: string | null; trust: string; revoked_at: string | null }
+
+/** The three acts on a worker's row. */
+export type WorkerRight = "revoke" | "own_only" | "share_worker";
+const WORKER_RIGHTS: WorkerRight[] = ["revoke", "own_only", "share_worker"];
+
+/** What the pages read: true where the caller may, else the reason in `why`; `packages` says the same for Remove on each registration, by name, and `workers` for the three acts on each worker, by id. */
+export interface Rights extends Record<Right, boolean> {
+  why: Partial<Record<Right, string>>;
+  packages: Record<string, { remove: boolean; why?: string }>;
+  workers: Record<string, Record<WorkerRight, boolean> & { why: Partial<Record<WorkerRight, string>> }>;
+}
+
+/** What a worker's own state refuses before whose it is: a revoked one is gone (404, the word the door has always said the second time), a project's or review's worker has no mode to set (409) — the pool's work is not shared or kept. */
+const revokedAlready = (w: WorkerRow): Verdict | null => (w.revoked_at ? { ok: false, status: 404, why: `${w.id} is revoked already` } : null);
+const noMode = (w: WorkerRow): Verdict | null => (w.trust !== "community" ? { ok: false, status: 409, why: "a project worker takes the project's work; it has no shared or own mode" } : null);
+
+/**
+ * What a person may do on a person's page, decided in one place. The page
+ * draws the same controls for every viewer — Request, Register, Token,
+ * Share, Build and Remove on a registration, Revoke and the mode on a
+ * worker, Withdraw on an approval — and greys the ones this viewer may not
+ * press with the reason in the title (the dashboard's rule: nothing hidden,
+ * nothing absent). The reason must be the one the door would answer, so
+ * this predicate is what the handlers below refuse with and what
+ * GET /users/:login/can carries as `can` for whoever asks: computed once,
+ * read twice, no drift. The order of the reasons is the order a reader
+ * wants them: sign in first, then whose page and what role (the difference
+ * on the dashboard), then a block, then the registration's state — except
+ * on a worker's row, where the state (revoked; a project's, with no mode)
+ * is the same grey for every role and so comes before whose it is.
+ *
+ * Whose acts these are: request, register and token are the owner's alone
+ * — the doors behind them act on the caller's own account (POST
+ * /factory/token mints the caller's token, whoever's page the button is
+ * on), so the page offers them on nobody else's page, and the reason a
+ * signed-in reader gets names where their own control is: their page.
+ * Build and the queue are the owner's: the project's builds are a
+ * maintainer's to start from Review, never a contributor's registration to
+ * build. Remove is the owner's while the registration is theirs to free —
+ * not approved or published, not in a ring, not under the project's
+ * review — and a maintainer's always. Revoke and "own only" are the
+ * owner's or any maintainer's; sharing a worker is the owner's word alone.
+ * Withdraw is a maintainer's: the role rides here, and whether a row has
+ * an approval standing to withdraw is the row's own fact (`withdrawn_at`,
+ * `rings` on GET /users/:login, which is cached for everyone) — the page
+ * greys the button by the role from this answer and draws it where the
+ * row says an approval stands; the POST decides on the task with
+ * decisions() in routes/review.ts, which reads the same two words for the
+ * same two reasons.
+ *
+ * What differs by registration — Remove — comes back per name in
+ * `packages`, from the registrations given (registrationsOf); `remove`
+ * itself is the role's answer, the one the page reads where no
+ * registration is named. What differs by worker — a revoked one, a
+ * project's with no mode to set — comes back per id in `workers`, the
+ * state's word before the role's, as the row greys it; the doors behind
+ * Revoke and the mode refuse with the same verdict.
+ */
+export function workspace(c: Contributor | null, login: string, registrations: Registration[] = [], workers: WorkerRow[] = []): Record<Right, Verdict> & { packages: Record<string, Verdict>; workers: Record<string, Record<WorkerRight, Verdict>> } {
+  const allow: Verdict = { ok: true };
+  const no = (status: 401 | 403 | 404 | 409, why: string): Verdict => ({ ok: false, status, why });
+  const person = !c ? no(401, SIGN_IN) : null;
+  const owner = !!c && c.login === login;
+  const maintainer = !!c && isMaintainer(c);
+  const blocked = c?.blocked ? no(403, `${c.login} is blocked by a maintainer${c.blocked.reason ? ": " + c.blocked.reason : ""}; nothing can be requested or built until another maintainer lifts it`) : null;
+  // A name where the record has none (an ownerless row): the sentence still reads.
+  const whose = login || "its owner";
+  // The owner's alone, and the reader is told where theirs is — the same control on their own page.
+  const onlyOwner = (does: string, status: 403 | 404 = 403) => person ?? (owner ? null : no(status, `only ${whose} ${does} — yours is on /user/${c!.login}`));
+  const ownerOrMaintainer = (does: string, status: 403 | 404 = 403) => person ?? (owner || maintainer ? null : no(status, `only ${whose} or a maintainer ${does}`));
+  const packages: Record<string, Verdict> = {};
+  for (const r of registrations) {
+    const theirs = !!c && c.login === r.owner;
+    packages[r.name] =
+      person
+        ?? (!theirs && !maintainer ? no(403, `only ${r.owner} removes it, or a maintainer`) : null)
+        ?? (!maintainer && (r.status === "approved" || r.status === "published") ? no(403, `${r.name} is ${r.status}: a maintainer removes it`) : null)
+        ?? (!maintainer && r.served.length ? no(409, `${r.name} is in ${r.served.join(", ")}: a maintainer withdraws the approval or blocks it first — the registration cannot leave a package behind in a ring`) : null)
+        // The project's build of it — queued, running, or staged for a decision — is a maintainer's review in progress: the owner waits for it.
+        ?? (!maintainer && r.reviewing ? no(409, `${r.name} is under review: the project's build #${r.reviewing.id} is ${r.reviewing.status} — a maintainer decides first`) : null)
+        ?? allow;
+  }
+  const revoke = ownerOrMaintainer("revokes a worker here", 404) ?? allow;
+  const ownOnly = ownerOrMaintainer("sets where it builds") ?? allow;
+  // Sharing is the owner's word alone (governance): a maintainer may take a worker out of the queue, never put someone's machine in it.
+  const shareWorker = person ?? (owner ? null : no(403, "sharing is the owner's word alone: a maintainer can set a worker to its owner's packages, not share it")) ?? allow;
+  const byWorker: Record<string, Record<WorkerRight, Verdict>> = {};
+  for (const w of workers) {
+    // The row's own state first — the same grey for every role — then whose it is.
+    const gone = person ?? revokedAlready(w);
+    byWorker[w.id] = { revoke: gone ?? revoke, own_only: gone ?? noMode(w) ?? ownOnly, share_worker: gone ?? noMode(w) ?? shareWorker };
+  }
+  return {
+    request: onlyOwner("requests here") ?? blocked ?? allow,
+    register: onlyOwner("registers a worker here") ?? blocked ?? allow,
+    token: onlyOwner("mints their token") ?? allow,
+    // A registration is built by the one who brought it: for anyone else the name is not theirs to build (404, as a name not registered).
+    build: onlyOwner("builds here", 404) ?? blocked ?? allow,
+    dequeue: onlyOwner("takes their build out of the queue") ?? allow,
+    remove: ownerOrMaintainer("removes a registration here") ?? allow,
+    revoke,
+    withdraw: person ?? (maintainer ? null : no(403, MAINTAINER_DECIDES)) ?? allow,
+    own_only: ownOnly,
+    share_worker: shareWorker,
+    packages,
+    workers: byWorker,
+  };
+}
+
+/** The verdicts as a page reads them. */
+export function rights(v: ReturnType<typeof workspace>): Rights {
+  const out = { why: {}, packages: {}, workers: {} } as Rights;
+  for (const r of RIGHTS) {
+    out[r] = v[r].ok;
+    if (!v[r].ok) out.why[r] = v[r].why;
+  }
+  for (const [name, x] of Object.entries(v.packages)) out.packages[name] = x.ok ? { remove: true } : { remove: false, why: x.why };
+  for (const [id, x] of Object.entries(v.workers)) {
+    const row = { why: {} } as Rights["workers"][string];
+    for (const r of WORKER_RIGHTS) {
+      row[r] = x[r].ok;
+      if (!x[r].ok) row.why[r] = x[r].why;
+    }
+    out.workers[id] = row;
+  }
+  return out;
+}
+
+/** A person's workers as the row's verdicts read them — revoked ones included, since their rows are drawn too. */
+export async function workersOf(env: Env, owner: string): Promise<WorkerRow[]> {
+  return (await env.DB.prepare("SELECT id, owner, trust, revoked_at FROM build_workers WHERE owner = ? ORDER BY id").bind(owner).all<WorkerRow>()).results;
+}
+
+/** The refusal a door answers: the reason, with its status. */
+export function refused(v: Verdict): Response | null {
+  return v.ok ? null : json({ error: v.why }, v.status);
+}
+
+/**
+ * The registrations Remove decides on — a person's, or one by name — with
+ * what the decision needs: the rings that serve the package (never out
+ * from under a ring) and the project's build of it in flight (a
+ * maintainer's review in progress).
+ */
+export async function registrationsOf(env: Env, by: { owner: string } | { name: string }): Promise<Registration[]> {
+  const rows = (await ("owner" in by
+    ? env.DB.prepare("SELECT name, owner, status FROM factory_packages WHERE owner = ? ORDER BY name").bind(by.owner)
+    : env.DB.prepare("SELECT name, owner, status FROM factory_packages WHERE name = ?").bind(by.name)
+  ).all<{ name: string; owner: string; status: string }>()).results;
+  if (!rows.length) return [];
+  const names = JSON.stringify(rows.map((r) => r.name));
+  const order = ["lab", "edge", "rc", "stable"];
+  const [served, reviewing] = await Promise.all([
+    env.DB.prepare("SELECT DISTINCT p.name, rp.ring FROM ring_packages rp JOIN packages p ON p.id = rp.package_id WHERE p.name IN (SELECT value FROM json_each(?)) AND p.source = 'factory' AND rp.ring IN ('lab', 'edge', 'rc', 'stable')").bind(names).all<{ name: string; ring: string }>(),
+    env.DB.prepare("SELECT name, id, status FROM build_tasks WHERE name IN (SELECT value FROM json_each(?)) AND kind = 'build' AND trust = 'project' AND status IN ('queued', 'leased', 'staged') ORDER BY id DESC").bind(names).all<{ name: string; id: number; status: string }>(),
+  ]);
+  return rows.map((r) => ({
+    ...r,
+    served: served.results.filter((s) => s.name === r.name).map((s) => s.ring).sort((x, y) => order.indexOf(x) - order.indexOf(y)),
+    reviewing: reviewing.results.find((t) => t.name === r.name) ?? null,
+  }));
 }
 
 export interface WorkerIdentity {
@@ -150,6 +326,9 @@ export async function handleRegister(request: Request, env: Env): Promise<Respon
 
 /** A signed-in contributor mints (or replaces) the CLI / worker token; the browser session stays. */
 export async function handleNewToken(c: Contributor, env: Env): Promise<Response> {
+  // The caller's own token, on their own page: the predicate says so, and would say why not.
+  const no = refused(workspace(c, c.login).token);
+  if (no) return no;
   const token = newToken("omc");
   await env.DB.prepare("UPDATE contributors SET token_hash = ? WHERE login = ?").bind(await sha256Hex(token), c.login).run();
   return json({ login: c.login, token, note: "Shown once; it replaces any earlier token. Use it as `Authorization: Bearer …` on the command line and for workers." }, 201);
@@ -257,8 +436,9 @@ async function sourceAnswers(source: string, fetcher: typeof fetch = fetch): Pro
  * written once; the registration points at it and the build can start.
  */
 export async function handleRequestPackage(c: Contributor, request: Request, env: Env, fetcher: typeof fetch = fetch): Promise<Response> {
-  const blocked = blockedResponse(c);
-  if (blocked) return blocked;
+  // A request is the caller's own (a blocked one is refused here, in the words the page greys the button with).
+  const no = refused(workspace(c, c.login).request);
+  if (no) return no;
   const b = (await request.json().catch(() => ({}))) as { name?: string; url?: string; source?: string; version?: string; description?: string; license?: string; arches?: unknown; checklist?: Record<string, unknown> };
   if (!b.url) return json({ error: "url is required: the project's GitHub repository, a release tarball, or the project's home page" }, 400);
   const parsed = parseProjectUrl(b.url);
@@ -370,15 +550,12 @@ export async function handleRequestPackage(c: Contributor, request: Request, env
  * the project's workers, a line in the journal.
  */
 export async function handleDeletePackage(c: Contributor, name: string, env: Env): Promise<Response> {
-  const pkg = await env.DB.prepare("SELECT owner, status FROM factory_packages WHERE name = ?").bind(name).first<{ owner: string; status: string }>();
+  const [pkg] = await registrationsOf(env, { name });
   if (!pkg) return json({ error: "not registered" }, 404);
-  const mine = pkg.owner === c.login && pkg.status !== "approved" && pkg.status !== "published";
-  if (!mine && !isMaintainer(c)) return json({ error: "not yours, or already approved (a maintainer can remove it)" }, 403);
-  const served = (await env.DB.prepare("SELECT DISTINCT rp.ring FROM ring_packages rp JOIN packages p ON p.id = rp.package_id WHERE p.name = ? AND p.source = 'factory' AND rp.ring IN ('lab', 'edge', 'rc', 'stable')").bind(name).all<{ ring: string }>()).results.map((r) => r.ring);
-  if (served.length && !isMaintainer(c)) return json({ error: `${name} is in ${served.join(", ")}: a maintainer withdraws the approval or blocks it first — the registration cannot leave a package behind in a ring` }, 409);
-  // The project's build of it — queued, running, or staged for a decision — is a maintainer's review in progress: the owner waits for it.
-  const reviewing = await env.DB.prepare("SELECT id, status FROM build_tasks WHERE name = ? AND kind = 'build' AND trust = 'project' AND status IN ('queued', 'leased', 'staged') ORDER BY id DESC LIMIT 1").bind(name).first<{ id: number; status: string }>();
-  if (reviewing && !isMaintainer(c)) return json({ error: `${name} is under review: the project's build #${reviewing.id} is ${reviewing.status} — a maintainer decides first` }, 409);
+  // Whose it is to remove, and whether it can leave now: the predicate's answer, the one the page greys the button with.
+  const no = refused(workspace(c, pkg.owner, [pkg]).packages[name]);
+  if (no) return no;
+  const served = pkg.served;
   const rings = served.length ? await pullFromRings(env, name, `registration removed by ${c.login}`) : [];
   // Every build of it stops: the community's builds of the name — queued,
   // running, or staged and waiting for a maintainer; a maintainer's removal
@@ -445,9 +622,12 @@ export interface Queued { tasks: number[]; building: { task: number; arch: strin
  * waits, the build takes the choice made now.
  */
 export async function queueBuilds(env: Env, c: Contributor, name: string, ask: QueueAsk): Promise<Queued | Response> {
-  const pkg = await env.DB.prepare("SELECT * FROM factory_packages WHERE name = ? AND owner = ?").bind(name, c.login).first<{ name: string; arches: string; url: string; release: string | null; pkgbuild_path: string | null; detected: string | null; blocked_at: string | null; blocked_reason: string | null }>();
+  const pkg = await env.DB.prepare("SELECT * FROM factory_packages WHERE name = ?").bind(name).first<{ name: string; owner: string; arches: string; url: string; release: string | null; pkgbuild_path: string | null; detected: string | null; blocked_at: string | null; blocked_reason: string | null }>();
   if (!pkg) return json({ error: "request the package first (POST /factory/packages)" }, 404);
-  if (pkg.blocked_at) return json({ error: `${name} is blocked by a maintainer: ${pkg.blocked_reason ?? ""}`.trim() }, 403);
+  // A blocked package builds for nobody — the state's word first, as the page greys the button — then the owner builds, nobody else (a blocked owner neither): the predicate's word.
+  if (pkg.blocked_at) return json({ error: `${name} is blocked by a maintainer${pkg.blocked_reason ? ": " + pkg.blocked_reason : ""}` }, 403);
+  const no = refused(workspace(c, pkg.owner).build);
+  if (no) return no;
   const registered = JSON.parse(pkg.arches) as string[];
   const wanted = Array.isArray(ask.arches) && ask.arches.length ? ask.arches : registered;
   const arches = wanted.filter((a) => isRepoArch(a) && registered.includes(a));
@@ -515,8 +695,6 @@ export async function queueBuilds(env: Env, c: Contributor, name: string, ask: Q
 
 /** POST /factory/packages/:name/build — the Build button: the same queue the request used, with the asker's choice of worker and hint. */
 export async function handleBuildPackage(c: Contributor, name: string, request: Request, env: Env): Promise<Response> {
-  const blocked = blockedResponse(c);
-  if (blocked) return blocked;
   const b = (await request.json().catch(() => ({}))) as { arches?: unknown; reason?: string; release?: string; worker?: unknown; hint?: unknown };
   const out = await queueBuilds(env, c, name, { arches: Array.isArray(b.arches) ? (b.arches as string[]) : undefined, worker: typeof b.worker === "string" ? b.worker : null, hint: typeof b.hint === "string" ? b.hint : null, reason: b.reason, release: b.release });
   if (out instanceof Response) return out;
@@ -533,7 +711,9 @@ export async function handleBuildPackage(c: Contributor, name: string, request: 
 export async function handleDequeueBuild(c: Contributor, name: string, id: number, env: Env): Promise<Response> {
   const t = await env.DB.prepare("SELECT id, name, arch, owner, status, trust FROM build_tasks WHERE id = ?").bind(id).first<{ id: number; name: string; arch: string; owner: string | null; status: string; trust: string }>();
   if (!t || t.name !== name) return json({ error: "no such build of this package" }, 404);
-  if (t.owner !== c.login || t.trust !== "community") return json({ error: "not your build" }, 403);
+  if (t.trust !== "community") return json({ error: "not your build" }, 403);
+  const no = refused(workspace(c, t.owner ?? "its owner").dequeue);
+  if (no) return no;
   if (t.status !== "queued") return json({ error: `build #${id} is ${t.status}; only a queued build leaves the queue` }, 409);
   const gone = await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = ?, finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status = 'queued'").bind(`taken out of the queue by ${c.login}`, id).run();
   if (!gone.meta.changes) return json({ error: `build #${id} was just taken by a worker; it runs — the evidence comes` }, 409);
@@ -546,8 +726,9 @@ export async function handleDequeueBuild(c: Contributor, name: string, id: numbe
 }
 
 export async function handleRegisterWorker(c: Contributor, request: Request, env: Env): Promise<Response> {
-  const blocked = blockedResponse(c);
-  if (blocked) return blocked;
+  // A worker is registered under the caller's own name (a blocked one is refused here, in the words the page greys the button with).
+  const no = refused(workspace(c, c.login).register);
+  if (no) return no;
   const b = (await request.json().catch(() => ({}))) as { name?: string; arch?: string; labels?: unknown };
   if (!b.arch || !isRepoArch(b.arch)) return json({ error: "arch (x86_64|aarch64) is required" }, 400);
   // A worker builds its owner's packages. Donating it to anyone's is decided
@@ -571,17 +752,21 @@ export async function handleRegisterWorker(c: Contributor, request: Request, env
  * uses, whatever the container was started with; it takes effect at the
  * worker's next claim, within the minute, nothing restarts.
  */
-export async function handleWorkerMode(by: { login: string; maintainer: boolean } | { worker: string }, id: string, request: Request, env: Env): Promise<Response> {
+export async function handleWorkerMode(by: Contributor | { worker: string }, id: string, request: Request, env: Env): Promise<Response> {
   const b = (await request.json().catch(() => ({}))) as { mode?: string };
   if (b.mode !== "shared" && b.mode !== "dedicated") return json({ error: "mode must be shared or dedicated" }, 400);
-  const w = await env.DB.prepare("SELECT id, owner, trust, mode FROM build_workers WHERE id = ? AND revoked_at IS NULL").bind(id).first<{ id: string; owner: string | null; trust: string; mode: string }>();
+  const w = await env.DB.prepare("SELECT id, owner, trust, mode, revoked_at FROM build_workers WHERE id = ?").bind(id).first<WorkerRow & { mode: string }>();
   if (!w) return json({ error: "no such worker" }, 404);
-  if (w.trust !== "community") return json({ error: "a project worker takes the project's work; it has no shared or own mode" }, 409);
   const who = "worker" in by ? "worker" : by.login;
-  if ("worker" in by ? by.worker !== w.id : !(by.maintainer || by.login === w.owner)) return json({ error: "not yours" }, 403);
-  // Sharing is the owner's word alone (governance): a maintainer may take a
-  // worker out of the queue, never put someone's machine in it.
-  if (b.mode === "shared" && !("worker" in by) && by.login !== w.owner) return json({ error: "sharing is the owner's word alone: a maintainer can set a worker to its owner's packages, not share it" }, 403);
+  if ("worker" in by) {
+    if (by.worker !== w.id) return json({ error: "not yours" }, 403);
+    const no = refused(revokedAlready(w) ?? noMode(w) ?? { ok: true });
+    if (no) return no;
+  } else {
+    // From the page: the row's verdict — revoked already, a project worker's no mode, then its owner or a maintainer sets it to its owner's packages and sharing is the owner's word alone — the one the page greys the button with.
+    const no = refused(workspace(by, w.owner ?? "its owner", [], [w]).workers[w.id][b.mode === "shared" ? "share_worker" : "own_only"]);
+    if (no) return no;
+  }
   await env.DB.prepare("UPDATE build_workers SET mode = ?, mode_by = ? WHERE id = ?").bind(b.mode, who, id).run();
   return json({ id, mode: b.mode, by: who, note: b.mode === "shared" ? "from its next claim it builds whatever is queued, anyone's" : "from its next claim it builds its owner's packages only" });
 }
@@ -595,10 +780,12 @@ export async function handleWorkerLog(c: Contributor, id: string, env: Env): Pro
 }
 
 export async function handleRevokeWorker(c: Contributor, id: string, env: Env): Promise<Response> {
-  // Its owner, or a maintainer (any worker): a revoked worker cannot claim again.
-  const res = isMaintainer(c)
-    ? await env.DB.prepare("UPDATE build_workers SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND revoked_at IS NULL").bind(id).run()
-    : await env.DB.prepare("UPDATE build_workers SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND owner = ? AND revoked_at IS NULL").bind(id, c.login).run();
+  // Its owner, or a maintainer (any worker): a revoked worker cannot claim again. The row's verdict — revoked already, then whose it is to revoke — is the predicate's answer, the one the page greys the button with.
+  const w = await env.DB.prepare("SELECT id, owner, trust, revoked_at FROM build_workers WHERE id = ?").bind(id).first<WorkerRow>();
+  if (!w) return json({ error: "no such worker" }, 404);
+  const no = refused(workspace(c, w.owner ?? "its owner", [], [w]).workers[w.id].revoke);
+  if (no) return no;
+  const res = await env.DB.prepare("UPDATE build_workers SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND revoked_at IS NULL").bind(id).run();
   let freed = 0;
   if (res.meta.changes) {
     // A build asked for this worker would wait for it forever: back to the rule, for the shared workers at once.
@@ -607,7 +794,7 @@ export async function handleRevokeWorker(c: Contributor, id: string, env: Env): 
       .bind(`worker ${id} revoked by ${c.login}${freed ? ` — ${freed} queued build(s) asked for it go to any worker that qualifies` : ""}`, JSON.stringify({ worker: id, by: c.login, freed }))
       .run();
   }
-  return res.meta.changes ? json({ revoked: id, freed }) : json({ error: "not yours (or not a maintainer), or already revoked" }, 404);
+  return res.meta.changes ? json({ revoked: id, freed }) : json({ error: `${id} is revoked already` }, 404);
 }
 
 export async function handleListPackages(env: Env): Promise<Response> {

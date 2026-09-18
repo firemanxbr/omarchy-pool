@@ -13,21 +13,20 @@
  * never hidden and never a sentence in its place; the reason for a decision is
  * the server's own (`can` on every row of GET /factory/review).
  */
-import { page } from "./layout";
+import { page, servedGrey } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 import { CATEGORIES } from "../categories";
 
 /**
- * The brake's form is one template drawn twice: served grey for everyone —
- * its inputs and button carry the attributes the shell's gate() writes,
- * the reason in their title — and drawn again through gate() once whoami
- * answers, so a maintainer's session is what makes it live. The hero's
- * sign-in hint is the same shape: served live, gated for a signed-in person.
+ * The brake's form is one template drawn twice: served grey for everyone
+ * (servedGrey — what the shell's gate() writes, the reason in the title)
+ * and drawn again through gate() once whoami answers, so a maintainer's
+ * session is what makes it live. The hero's sign-in hint is the same
+ * shape: served live, gated for a signed-in person.
  */
 const BLOCK_WHY = "a maintainer blocks; another maintainer lifts";
 const BLOCK_FORM = `<input id="block-what" placeholder="contributor login, or package name" required> <input id="block-why" placeholder="why — the record and the contributor see this" required minlength="4"> <button type="submit">Block</button>`;
-const GATED = ` disabled aria-disabled="true" title="${BLOCK_WHY}"`;
 const WHO_HINT = `Contributors and maintainers: <a href="/auth/github?next=/review">sign in with GitHub</a> to see yours first.`;
 
 const BODY = String.raw`
@@ -58,7 +57,7 @@ const BODY = String.raw`
 
   <section id="brake">
     <details class="tool"><summary>The brake <span class="dim">block a contributor or a package, with the reason on the record — another maintainer lifts it</span></summary>
-      <form id="block-form" class="searchbar">${BLOCK_FORM.replace(/<(input|button)\b/g, `<$1${GATED}`)}</form>
+      <form id="block-form" class="searchbar">${servedGrey(BLOCK_FORM, BLOCK_WHY)}</form>
       <div class="two"><div><div class="table-wrap"><table id="blocked-people"><thead><tr><th>Contributor</th><th>Since</th><th>By</th><th>Reason</th><th></th></tr></thead><tbody></tbody></table></div></div>
       <div><div class="table-wrap"><table id="blocked-packages"><thead><tr><th>Package</th><th>Owner</th><th>Since</th><th>By</th><th>Reason</th><th></th></tr></thead><tbody></tbody></table></div></div></div>
     </details>

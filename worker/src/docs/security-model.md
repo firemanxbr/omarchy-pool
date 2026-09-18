@@ -124,7 +124,7 @@ check, and the security layer's advisories.
 | Compromised | Blast radius | Recovery |
 |---|---|---|
 | a contributor's token | their registrations and their staging folder | they register again (the old token dies) |
-| a community worker's token | claims of that owner's tasks; uploads to those tasks' staging | owner revokes the worker |
+| a community worker's token | claims of that owner's tasks; uploads to those tasks' staging | its owner or a maintainer revokes the worker |
 | a job token | that task's writes, until its lease ends | expires by itself; the task can be cancelled |
 | a project worker's token | claims of pool jobs — each still executed with a scoped job token — until revoked | a maintainer revokes the worker |
 | a maintainer's token | approvals (never of their own package), one word on a worker's trust, blocks, withdrawals | a governance pull request removes the login; approvals are journaled and reversible (rollback); trust takes a second maintainer; a block is lifted by another |

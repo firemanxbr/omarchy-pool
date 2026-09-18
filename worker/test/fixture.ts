@@ -63,6 +63,42 @@ export type { Fixture };
 /** The inline scripts of a served page, joined: what the page runs, for the tests that read it (components.test.ts, pages.test.ts). */
 export const scriptOf = (html: string): string => [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map((m) => m[1]).join("\n");
 
+/** What runScript hands back: the document's nodes by the selector they were asked for, the functions asked for by name, and a setter per variable asked for. */
+export type Ran = { nodes: Record<string, any> } & Record<string, any>;
+
+/**
+ * A page's script — a served page's whole script with its IIFE opened, or
+ * the shell alone — run the way the tests draw with it: ES5 written for a
+ * browser, against a document that keeps every node written to by selector
+ * and a fetch that never answers, so only the functions that draw are
+ * exercised. `functions` names the script's own functions to hand back
+ * (decisionCell, gate, a page's button makers), `variables` the script's
+ * variables to get a setter for (`setCAN(v)`, `setWHO(v)`).
+ * decision-cell.test.ts runs the shell this way, user-page.test.ts a
+ * person's page.
+ */
+export function runScript(code: string, opts: { pathname: string; functions: string[]; variables?: string[] }): Ran {
+  const trimmed = code.trim();
+  const body = trimmed.startsWith("(function () {") && trimmed.endsWith("})();") ? trimmed.slice("(function () {".length, -"})();".length) : trimmed;
+  const nodes: Record<string, any> = {};
+  const node = (): any => ({
+    style: {}, classList: { add() {}, remove() {}, toggle() {} }, children: [], hidden: false, innerHTML: "", outerHTML: "", textContent: "", title: "",
+    appendChild() {}, setAttribute() {}, getAttribute: () => null, insertAdjacentHTML() {}, remove() {}, focus() {}, closest: () => null,
+    querySelector: () => node(), querySelectorAll: () => [],
+  });
+  const document = {
+    querySelector: (sel: string) => (nodes[sel] = nodes[sel] || node()),
+    querySelectorAll: () => [], addEventListener() {}, createElement: node, body: node(), documentElement: { getAttribute: () => null }, title: "",
+  };
+  const out = [
+    "nodes: nodes",
+    ...opts.functions.map((f) => `${f}: ${f}`),
+    ...(opts.variables ?? []).map((v) => `set${v}: function (x) { ${v} = x; }`),
+  ].join(", ");
+  const make = new Function("document", "window", "fetch", "location", "innerWidth", "nodes", `${body}\n return { ${out} };`);
+  return make(document, { matchMedia: null }, () => new Promise(() => {}), { pathname: opts.pathname, origin: "http://pool.test" }, 1024, nodes);
+}
+
 const API = "http://pool.test/api/v1";
 
 interface Answer { status: number; json: any }

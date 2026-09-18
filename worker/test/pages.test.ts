@@ -198,6 +198,8 @@ describe("dashboard pages", () => {
       "/review": ["mine", "mine-queue", "legend", "brake", "staged"],
       "/pipeline": ["queue-pos", "ops-who", "staged", "heads"],
       "/journal": ["releases"],
+      [`/build/${F.projectTask}`]: ["acts"],
+      [`/user/${F.owner}`]: ["pk-request", "w-toggle", "w-own", "share-btn"],
     };
     const problems: string[] = [];
     for (const [path, ids] of Object.entries(ALWAYS)) {

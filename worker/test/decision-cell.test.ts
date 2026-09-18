@@ -13,8 +13,8 @@
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import worker from "../src/index";
-import { HELPERS } from "../src/pages/layout";
-import { seedDashboard, type Fixture } from "./fixture";
+import { HELPERS, servedGrey } from "../src/pages/layout";
+import { runScript, seedDashboard, type Fixture } from "./fixture";
 
 let F: Fixture;
 type Who = "" | "bob" | "alice" | "m1" | "m2";
@@ -23,13 +23,10 @@ beforeAll(async () => {
   F = await seedDashboard(env);
 });
 
-/** The shell's drawing functions, taken out of HELPERS: a document with nothing in it, a fetch that never answers (whoami's is the only one at load). */
+/** The shell's drawing functions, taken out of HELPERS and run as a page runs them (runScript in test/fixture.ts). */
 function shell(): { decisionCell: (t: unknown) => string; gate: (html: string, ok: boolean, why: string) => string } {
-  const node = () => ({ style: {}, appendChild() {}, classList: { add() {} }, setAttribute() {}, hidden: false, innerHTML: "", textContent: "" });
-  const document = { querySelector: () => null, querySelectorAll: () => [], addEventListener() {}, createElement: node, body: node(), documentElement: { getAttribute: () => null } };
   const src = HELPERS.split("__POOL_URL__").join("http://pool.test").split("__RINGS_TEXT__").join("{}").split("__WICON__").join("{}");
-  const make = new Function("document", "window", "fetch", "location", "innerWidth", src + "\n return { decisionCell: decisionCell, gate: gate };");
-  return make(document, { matchMedia: null }, () => new Promise(() => {}), { pathname: "/review" }, 1024);
+  return runScript(src, { pathname: "/review", functions: ["decisionCell", "gate"] }) as any;
 }
 
 async function get(path: string, as: Who): Promise<{ status: number; json: any }> {
@@ -121,14 +118,16 @@ describe("the Decision cell is the same buttons for every viewer, grey with the 
     expect(b[2].title).toBeNull();
   });
 
-  it("m1 on the project's approved build: Approve grey (already approved), Reject grey (withdraw first), Build grey (the project's own), Withdraw live", async () => {
-    const b = buttons(shell().decisionCell(await buildRow(F.projectTask, "m1")));
-    expect(b.map((x) => [x.what, x.disabled, x.title])).toEqual([
-      ["approve", true, "already approved"],
-      ["reject", true, "already approved — withdraw the approval first"],
-      ["build", true, "the project's own build; the project builds from a contributor's staged build"],
-      ["withdraw", false, "take the approval back: the package leaves every ring, another maintainer decides — the reason goes on the record"],
-    ]);
+  it("m1 and m2 on the project's approved build: Approve grey (already approved), Reject grey (withdraw first), Build grey (the project's own), Withdraw live — for the one who approved it as for the other", async () => {
+    for (const m of ["m1", "m2"] as Who[]) {
+      const b = buttons(shell().decisionCell(await buildRow(F.projectTask, m)));
+      expect(b.map((x) => [x.what, x.disabled, x.title]), m).toEqual([
+        ["approve", true, "already approved"],
+        ["reject", true, "already approved — withdraw the approval first"],
+        ["build", true, "the project's own build; the project builds from a contributor's staged build"],
+        ["withdraw", false, "take the approval back: the package leaves every ring, another maintainer decides — the reason goes on the record"],
+      ]);
+    }
   });
 
   it("a list row that carries a standing approval draws Withdraw as the build's page does — the same cell whichever page reads it", async () => {
@@ -146,5 +145,9 @@ describe("the Decision cell is the same buttons for every viewer, grey with the 
     const grey = gate(html, false, 'a maintainer "decides"');
     expect(grey).toBe('<button type="button" disabled aria-disabled="true" title="a maintainer &quot;decides&quot;">Go</button> <a class="disabled run" data-href="/x" tabindex="-1" aria-disabled="true" title="a maintainer &quot;decides&quot;">there</a> <select disabled aria-disabled="true" title="a maintainer &quot;decides&quot;"><option>a</option></select>');
     expect(grey).not.toContain(' href="');
+    // A page that serves a control grey before its script runs writes the same attributes (servedGrey in layout.ts): the served control and the one gate() draws again are one.
+    expect(servedGrey(html, 'a maintainer "decides"')).toBe(grey);
+    const served = '<input id="w-name" placeholder="laptop" required> <a class="more-link" id="pk-request" href="/request">+ request one →</a>';
+    expect(servedGrey(served, "only alice requests here")).toBe(gate(served, false, "only alice requests here"));
   });
 });
