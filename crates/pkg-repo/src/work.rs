@@ -1769,9 +1769,8 @@ fn shell_quote(s: &str) -> String {
 }
 
 /// The daily promotion, as the pipeline does it: evidence on both
-/// architectures, the gate, the promotion, the OPR channel aligned, both
-/// databases rendered, health of the new head — and a rollback when health
-/// fails.
+/// architectures, the gate, the promotion, both databases rendered, health
+/// of the new head — and a rollback when health fails.
 #[allow(clippy::too_many_lines)]
 fn promote_job(
     opts: &WorkOptions,
@@ -1861,33 +1860,11 @@ fn promote_job(
     }
     let previous = ops::head(job, &to)?;
     let created = ops::promote(job, &from, &to, Some(&note), only_arch)?;
-    // The OPR channel that matches the ring (aarch64 has only edge upstream).
-    let keys = keyrings(opts)?;
-    for arch in &arches {
-        let channel = if *arch == "aarch64" {
-            "edge"
-        } else {
-            to.as_str()
-        };
-        let o = SyncOptions {
-            source: "packages".into(),
-            upstream: String::new(),
-            base_url: Some(format!("https://pkgs.omarchy.org/{channel}/{arch}")),
-            db_name: Some("omarchy".into()),
-            arch: arch.clone(),
-            ring: to.clone(),
-            limit: 0,
-            concurrency: 8,
-            work_dir: opts.work_dir.join("sync"),
-            dry_run: false,
-            keyring: Some(keys.join("omarchy.gpg")),
-            defer_to: vec![],
-            defer_release: false,
-        };
-        if let Err(e) = ops::run_sync_report(job, &o) {
-            eprintln!("warning: aligning the OPR channel for {arch}: {e:#}");
-        }
-    }
+    // What the promotion wrote is what the ring serves: no source, the OPR
+    // included, reaches rc or stable on its name — its rc and stable
+    // channels were once synced in here after every promotion, the one
+    // source that skipped the gates, and rc#43 removed thirteen names the
+    // gate had just promoted (zero trust, 2026-09-16; the loop went 2026-09-18).
     let mut rendered = Vec::new();
     for arch in &arches {
         rendered.extend(ops::render(job, &to, arch, opts.sign.as_deref())?);

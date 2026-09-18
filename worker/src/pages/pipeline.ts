@@ -149,7 +149,7 @@ __CHARTS__
         : r.verdict === "skip" ? "nothing to promote" + (r.why ? " — " + r.why : "") : JSON.stringify(r);
     }
     if (t.kind === "rollback") return r.ring + " rolled back to release " + r.to + " as release " + r.release_id;
-    if (t.kind === "health") return r.ok ? "healthy" : "unhealthy";
+    if (t.kind === "health") return r.ok ? HEALTH_WORD.ok : HEALTH_WORD.error;
     if (t.kind === "gc") return "kept the last " + r.keep + " releases per ring";
     if (t.kind === "render") return "rendered " + (r.repos || []).join(", ");
     if (t.kind === "security") return num(r.matches_vulnerable) + " vulnerable / " + num(r.matches_fixed) + " fixed matches · " + num(r.kev) + " in KEV" + ((r.fast_tracked || []).length ? " · fast-tracked into " + r.fast_tracked.map(function (f) { return f.ring + " (" + num(f.fixes) + " fix" + (f.fixes === 1 ? "" : "es") + ")"; }).join(", ") : " · nothing to fast-track") + ((r.rolled_back || []).length ? " · rolled back " + r.rolled_back.join(", ") : "");
@@ -194,8 +194,8 @@ __CHARTS__
   skeletonTiles("#tiles", 6); skeletonRows("#staged", 8, 2); skeletonRows("#events", 7, 6); skeletonRows("#tasks", 8, 4); skeletonRows("#registry", 8, 2); // ---- the state row: the service (measured now) and the pipeline (from the journal)
   function renderState(d) {
     api("GET", "/api/v1/status").then(function (st) { live("api", "API up · index " + (st.index.ok ? st.index.ms + " ms" : "down") + " · pool " + (st.pool.ok ? st.pool.ms + " ms" : "down")); }).catch(function (e) { live("api", noAnswer("service check", e)); });
-    // A ring's pill is the worse of its two architectures' latest health checks.
-    var why = problemsOf(d), heads = ["stable", "rc", "edge"].map(function (n) { var r = d.rings.filter(function (x) { return x.ring === n; })[0]; var hs = ["x86_64", "aarch64"].map(function (a) { return latest(d.latest, "health", n, a); }).filter(Boolean); var w = hs.reduce(function (acc, h) { return worst(acc, h.status); }, null); var bad = hs.filter(function (h) { return h.status !== "ok"; }); return r && r.release ? '<span class="pill ' + (w || "none") + '">' + n + ' #' + r.release.seq + (w ? ' · ' + (w === "ok" ? "healthy" : bad.map(function (h) { return (h.source || "x86_64") + " " + h.status; }).join(", ")) : "") + '</span>' : ""; }).join("");
+    // A ring's pill is the worse of its two architectures' latest health checks, in the shell's word for it (HEALTH_WORD), over the rings a check covers (PROMISED_RINGS).
+    var why = problemsOf(d), heads = PROMISED_RINGS.map(function (n) { var r = d.rings.filter(function (x) { return x.ring === n; })[0]; var hs = ARCHES.map(function (a) { return latest(d.latest, "health", n, a); }).filter(Boolean); var w = hs.reduce(function (acc, h) { return worst(acc, h.status); }, null); var bad = hs.filter(function (h) { return h.status !== "ok"; }); return r && r.release ? '<span class="pill ' + (w || "none") + '">' + n + ' #' + r.release.seq + (w ? ' · ' + (w === "ok" ? HEALTH_WORD.ok : bad.map(function (h) { return (h.source || NULL_SOURCE_ARCH) + " " + HEALTH_WORD[h.status]; }).join(", ")) : "") + '</span>' : ""; }).join("");
     $("#state").innerHTML = '<span class="pill ' + (why.length ? "warn" : "ok") + '">' + (why.length ? "pipeline behind: " + esc(why.join(" · ")) : "pipeline keeping up") + '</span>' + heads + '<span class="pill none">running ' + esc(d.version && d.version.version || "") + '</span>';
   }
 
@@ -223,8 +223,8 @@ __CHARTS__
     live("advisories", "advisories known: " + num((d.security || {}).advisories || 0));
     live("last-sync", "synced " + (lastSync ? ago(lastSync.created_at) : "never") + " · every 3 h");
     live("pool-size", num(d.pool.objects) + " objects · " + bytes(d.pool.bytes));
-    ["edge", "rc", "stable"].forEach(function (n) { var r = d.rings.filter(function (x) { return x.ring === n; })[0]; if (r && r.release) live(n + "-head", "release #" + r.release.seq + " · " + ago(r.release.created_at)); });
-    live("heads", ["edge", "rc", "stable"].map(function (n) { var r = d.rings.filter(function (x) { return x.ring === n; })[0]; return n + (r && r.release ? " #" + r.release.seq : " —"); }).join(" · "));
+    PROMISED_RINGS.forEach(function (n) { var r = d.rings.filter(function (x) { return x.ring === n; })[0]; if (r && r.release) live(n + "-head", "release #" + r.release.seq + " · " + ago(r.release.created_at)); });
+    live("heads", PROMISED_UPWARD.map(function (n) { var r = d.rings.filter(function (x) { return x.ring === n; })[0]; return n + (r && r.release ? " #" + r.release.seq : " —"); }).join(" · "));
     var aud = d.audience || [], y = aud[aud.length - 1];
     var cells = [
       ["packages verified today", num(imp), "ok"], ["advisories known", num((d.security || {}).advisories || 0), ""], ["exploited in stable", "<span data-live=\"kev\">…</span>", "ok"],
@@ -312,8 +312,8 @@ __CHARTS__
   // ---- ring heads and the journal; the roll-back button is on every card with a release before the head, for everyone — live for a maintainer, grey with the reason for anyone else — and the click is the shell's (askRollback asks, posts the job once, writes #rb-state)
   function renderRings(d) {
     var heads = {}; (d.releases || []).forEach(function (r) { if (r.is_head) heads[r.ring] = r; });
-    $("#heads").innerHTML = ["stable", "rc", "edge"].map(function (n) {
-      var r = d.rings.filter(function (x) { return x.ring === n; })[0] || {}, rel = r.release, h = ["x86_64", "aarch64"].map(function (a) { var e = latest(d.latest, "health", n, a); return a + " " + (e ? e.status : "—"); }).join(" · ");
+    $("#heads").innerHTML = PROMISED_RINGS.map(function (n) {
+      var r = d.rings.filter(function (x) { return x.ring === n; })[0] || {}, rel = r.release, h = ARCHES.map(function (a) { var e = latest(d.latest, "health", n, a); return a + " " + (e ? HEALTH_WORD[e.status] : "—"); }).join(" · ");
       var prev = (d.releases || []).filter(function (x) { return x.ring === n && !x.is_head; })[0];
       return '<div class="headc ' + n + '"><div class="n"><b>' + n + '</b><span class="dim">' + (rel ? "#" + rel.seq + " · " + ago(rel.created_at) : "no release") + '</span></div><div class="m">' + num(r.package_count || 0) + ' packages · ' + bytes(r.bytes || 0) + ' · ' + h + '</div><div class="acts">' + (rel && rel.parent_id ? '<a class="small-btn" href="/diff?ring=' + n + '&from=' + rel.parent_id + '&to=' + rel.id + '">diff</a>' : "") + (prev ? gate('<button type="button" class="small-btn" data-rollback="' + prev.id + '" data-ring="' + n + '" title="point ' + n + ' back at release ' + prev.id + '">roll back to #' + prev.seq + '</button>', isMaintainer(), orSignIn("a maintainer rolls back")) : "") + '</div></div>';
     }).join("");
@@ -321,10 +321,10 @@ __CHARTS__
   }
   // ---- the charts, from /api/v1/stats
   function renderCharts(d) {
-    var S = d.series || {}, days14 = lastDays(14), days7 = lastDays(7);
-    var jd = S.jobs_daily || [], byD = {};
-    jd.forEach(function (r) { var x = byD[r.day] = byD[r.day] || { done: 0, failed: 0, waiting: 0 }; if (r.status === "done") x.done += Number(r.n); else if (r.status === "failed" || r.status === "cancelled") x.failed += Number(r.n); else x.waiting += Number(r.n); });
-    $("#c-jobs").innerHTML = stacked(days7, [{ name: "done", color: C.green, values: days7.map(function (x) { return (byD[x] || {}).done || 0; }) }, { name: "waiting", color: C.amber, values: days7.map(function (x) { return (byD[x] || {}).waiting || 0; }) }, { name: "failed", color: C.red, values: days7.map(function (x) { return (byD[x] || {}).failed || 0; }) }], { label: "Pool jobs per day over seven days", empty: "no job yet — the pool queues them on schedule and project workers pull them" });
+    var S = d.series || {}, days14 = lastDays(14);
+    // The jobs per day are the shell's one reduce over the series (jobsSummary), the buckets the Status page's tiles, table and charts read: one count of done, waiting and failed, here as a bar a day.
+    var js = jobsSummary(d.series, 7), jobsOf = function (k) { return js.labels.map(function (x) { return (js.byDay[x] || {})[k] || 0; }); };
+    $("#c-jobs").innerHTML = stacked(js.labels, [{ name: "done", color: C.green, values: jobsOf("done") }, { name: "waiting", color: C.amber, values: jobsOf("waiting") }, { name: "failed", color: C.red, values: jobsOf("failed") }], { label: "Pool jobs per day over seven days", empty: "no job yet — the pool queues them on schedule and project workers pull them" });
     $("#c-health").innerHTML = heatGrid(S.health);
     var byDay = {}; (S.imports_daily || []).forEach(function (r) { byDay[r.day] = r; });
     $("#c-imports").innerHTML = stacked(days14, [{ name: "imported", color: C.green, values: days14.map(function (x) { return byDay[x] ? Number(byDay[x].packages) : 0; }) }], { label: "Packages imported per day over fourteen days", empty: "no sync yet" });
@@ -349,11 +349,12 @@ __CHARTS__
   // ---- the bill, estimated on cost.ts's cadence (ESTIMATE_CADENCE, spliced into the words above and below) from Cloudflare's analytics. The three lines — warn, guard, cap — are the pool's budget, not the estimate's: /api/v1/cost carries them with the estimate and without one, and the sentence, the cap beside the month, the guard's word and the mark on the bar all read them there, never a number typed here.
   function renderCost() {
     api("GET", "/api/v1/cost").then(function (c) {
-      var usd = c.lines_usd || {};
-      live("cost-warn", num(usd.warn)); live("cost-guard", num(usd.guard)); live("cost-cap", num(usd.cap));
+      var budget = c.lines_usd || {};
+      live("cost-warn", num(budget.warn)); live("cost-guard", num(budget.guard)); live("cost-cap", num(budget.cap));
       var el = $("#budget"); if (c.error) { el.innerHTML = '<div><div class="k">this month</div><b>—</b> <span class="dim">no estimate yet (${ESTIMATE_CADENCE})</span></div>'; return; }
-      var color = c.status === "error" ? "var(--red)" : c.status === "warn" ? "var(--amber)" : "var(--green)";
-      el.innerHTML = '<div><div class="k">' + esc(c.month) + ', so far</div><b style="color:' + color + '">US$ ' + Number(c.month_to_date_usd).toFixed(2) + '</b> <span class="dim">of a US$ ' + num(usd.cap) + ' hard cap</span></div><div><div class="k">projected</div><b>US$ ' + Number(c.projected_usd).toFixed(2) + '</b> <span class="dim">' + (c.guard ? "over the guard: jobs that write are paused" : "guard at US$ " + num(usd.guard)) + '</span></div><div class="bar"><i style="width:' + Math.min(100, 100 * Number(c.projected_usd) / usd.cap) + '%;background:' + color + '"></i><em style="left:' + (100 * usd.guard / usd.cap) + '%"></em></div>';
+      // The colour and the figures are the shell's (costColor, usd): the same word the Status tile tints the same way.
+      var color = costColor(c);
+      el.innerHTML = '<div><div class="k">' + esc(c.month) + ', so far</div><b style="color:' + color + '">' + usd(c.month_to_date_usd) + '</b> <span class="dim">of a US$ ' + num(budget.cap) + ' hard cap</span></div><div><div class="k">projected</div><b>' + usd(c.projected_usd) + '</b> <span class="dim">' + (c.guard ? "over the guard: jobs that write are paused" : "guard at US$ " + num(budget.guard)) + '</span></div><div class="bar"><i style="width:' + Math.min(100, 100 * Number(c.projected_usd) / budget.cap) + '%;background:' + color + '"></i><em style="left:' + (100 * budget.guard / budget.cap) + '%"></em></div>';
     }).catch(function (e) { $("#budget").innerHTML = '<div><div class="k">this month</div><b>—</b> <span class="dim">' + esc(noAnswer("cost estimate", e)) + '</span></div>'; });
   }
 
@@ -416,7 +417,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.state-row",
     page: "/pipeline",
     anchor: ['class="state-row"', 'id="state"', 'id="lists-note"'],
-    script: ['$("#state")', 'api("GET", "/api/v1/status")', "problemsOf(d)", "d.version && d.version.version", 'noAnswer("factory\'s lists", e, "#lists-note")', '$("#lists-note").textContent = ""', 'noAnswer("service check", e)'],
+    script: ['$("#state")', 'api("GET", "/api/v1/status")', "problemsOf(d)", "d.version && d.version.version", 'noAnswer("factory\'s lists", e, "#lists-note")', '$("#lists-note").textContent = ""', 'noAnswer("service check", e)', "PROMISED_RINGS.map(function (n)", "HEALTH_WORD.ok", "HEALTH_WORD[h.status]"],
     reads: [
       { path: "/api/v1/stats", fields: ["rings", "rings.2.ring", "rings.2.release.seq", "latest", "coverage", "version.version"] },
       { path: "/api/v1/status", fields: ["index.ok", "index.ms", "pool.ok", "pool.ms"] },
@@ -543,7 +544,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.arch-diagram",
     page: "/pipeline",
     anchor: ['data-live="last-sync"', 'data-live="api"', 'data-live="pool-size"', 'data-live="heads"', 'data-live="queue"', 'data-live="w-pool"', 'data-live="w-review"', 'data-live="w-community"', 'href="/workers"'],
-    script: ['live("last-sync"', 'live("api"', 'live("pool-size"', 'live("heads"', 'live("queue"', 'live("w-pool"', 'live("w-review"', 'live("w-community"', "wtKind(w)", "workerCounts(ws)"],
+    script: ['live("last-sync"', 'live("api"', 'live("pool-size"', 'live("heads", PROMISED_UPWARD.map(function (n)', 'live("queue"', 'live("w-pool"', 'live("w-review"', 'live("w-community"', "wtKind(w)", "workerCounts(ws)"],
     reads: [
       { path: "/api/v1/stats", fields: ["latest", "pool.objects", "pool.bytes", "rings.2.release.seq"] },
       { path: "/api/v1/status", fields: ["index.ok", "index.ms", "pool.ok", "pool.ms"] },
@@ -590,7 +591,8 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.jobs-chart",
     page: "/pipeline",
     anchor: ['id="c-jobs"'],
-    script: ['$("#c-jobs")', "S.jobs_daily", 'r.status === "done"'],
+    // The bars are the shell's jobsSummary over the series, by day — the same buckets the Status page draws.
+    script: ['$("#c-jobs")', "jobsSummary(d.series, 7)", "js.byDay[x]", 'jobsOf("done")', 'jobsOf("waiting")', 'jobsOf("failed")'],
     reads: [{ path: "/api/v1/stats", fields: ["series.jobs_daily", "series.jobs_daily.0.day", "series.jobs_daily.0.status", "series.jobs_daily.0.n"] }],
     visible: EVERYONE,
   },
@@ -644,7 +646,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.tasks-table",
     page: "/pipeline",
     anchor: ['id="tasks"'],
-    script: ['pager("#tasks"', 'href="/build/', "evidenceLink(t)", 'pkgHref(t.name, "edge", t.arch)', "wtId(byId[t.lease_owner] || t.lease_owner)", "t.result_filename", "jobResult(t)", "paramsLabel(t)", "t.max_attempts", "r.sources", "r.releases", "sum.upstream_total", 'x.id + " (" + x.ring + " #" + x.seq + ")"', 't.kind === "audit"', 't.kind === "trial"', 't.kind === "publish"', "r.findings", "r.packages", "r.fast_track"],
+    script: ['pager("#tasks"', 'href="/build/', "evidenceLink(t)", 'pkgHref(t.name, "edge", t.arch)', "wtId(byId[t.lease_owner] || t.lease_owner)", "t.result_filename", "jobResult(t)", "paramsLabel(t)", "t.max_attempts", "r.sources", "r.releases", "sum.upstream_total", 'x.id + " (" + x.ring + " #" + x.seq + ")"', 't.kind === "audit"', 't.kind === "trial"', 't.kind === "publish"', "r.findings", "r.packages", "r.fast_track", "r.ok ? HEALTH_WORD.ok : HEALTH_WORD.error"],
     reads: [
       { path: "/api/v1/factory?limit=100", fields: ["workers.0.id", "workers.0.owner", "tasks.0.id", "tasks.0.kind", "tasks.0.name", "tasks.0.version", "tasks.0.arch", "tasks.0.status", "tasks.0.trust", "tasks.0.owner", "tasks.0.publish", "tasks.0.attempts", "tasks.0.max_attempts", "tasks.0.reason", "tasks.0.lease_owner", "tasks.0.duration_ms", "tasks.0.result_filename", "tasks.0.result", "tasks.0.error", "tasks.0.params",
         "tasks.kind=sync.params.arch", "tasks.kind=sync.params.sources", "tasks.kind=sync.result.arch", "tasks.kind=sync.result.sources.0.source", "tasks.kind=sync.result.sources.0.upstream_total", "tasks.kind=sync.result.sources.0.uploaded", "tasks.kind=sync.result.sources.0.removed", "tasks.kind=sync.result.sources.0.failed", "tasks.kind=sync.result.releases.0.ring", "tasks.kind=sync.result.releases.0.id", "tasks.kind=sync.result.releases.0.seq", "tasks.kind=sync.result.rendered",
@@ -678,7 +680,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.ring-heads",
     page: "/pipeline",
     anchor: ['id="heads"'],
-    script: ['$("#heads")', "rel.parent_id", 'href="/diff?ring=', "r.package_count", "x.is_head"],
+    script: ['$("#heads")', "PROMISED_RINGS.map(function (n)", "HEALTH_WORD[e.status]", "rel.parent_id", 'href="/diff?ring=', "r.package_count", "x.is_head"],
     reads: [{ path: "/api/v1/stats", fields: ["rings.2.ring", "rings.2.release.id", "rings.2.release.seq", "rings.2.release.created_at", "rings.2.release.parent_id", "rings.2.package_count", "rings.2.bytes", "latest", "releases", "releases.0.ring", "releases.0.id", "releases.0.seq", "releases.0.is_head"] }],
     visible: EVERYONE,
   },
@@ -705,7 +707,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.budget",
     page: "/pipeline",
     anchor: ['id="budget"', 'data-live="cost-warn"', 'data-live="cost-guard"', 'data-live="cost-cap"'],
-    script: ['api("GET", "/api/v1/cost")', '$("#budget")', "c.lines_usd", 'noAnswer("cost estimate", e)', 'live("cost-warn", num(usd.warn))', 'live("cost-guard", num(usd.guard))', 'live("cost-cap", num(usd.cap))', "c.error", "c.month_to_date_usd", "c.projected_usd", "c.guard", "100 * usd.guard / usd.cap"],
+    script: ['api("GET", "/api/v1/cost")', '$("#budget")', "c.lines_usd", 'noAnswer("cost estimate", e)', 'live("cost-warn", num(budget.warn))', 'live("cost-guard", num(budget.guard))', 'live("cost-cap", num(budget.cap))', "c.error", "costColor(c)", "usd(c.month_to_date_usd)", "usd(c.projected_usd)", "c.guard", "of a US$ ' + num(budget.cap) + ' hard cap", "\"guard at US$ \" + num(budget.guard)", "Number(c.projected_usd) / budget.cap", "100 * budget.guard / budget.cap"],
     reads: [{ path: "/api/v1/cost", fields: ["month", "month_to_date_usd", "projected_usd", "status", "guard", "lines_usd.warn", "lines_usd.guard", "lines_usd.cap"] }],
     visible: EVERYONE,
   },

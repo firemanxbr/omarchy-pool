@@ -10,7 +10,7 @@ import { findLeak } from "../leak";
 import { chains, chainOf, storyRows, requestView, placeInQueue, stands, type Chain } from "./story";
 import { betterIdleWorker, FIRST_PICK_MINUTES } from "../queue";
 import { updateMessage, updateState } from "../update";
-import { version as running, RINGS, ringsSql, sortRings } from "../meta";
+import { version as running, RINGS, ringsSql, sortRings, REPO_ARCHES, WORKER_ALIVE_MINUTES, type RunningVersion } from "../meta";
 
 /**
  * The factory's brain. Cloudflare is the source of truth for package
@@ -20,7 +20,7 @@ import { version as running, RINGS, ringsSql, sortRings } from "../meta";
  *   POST /factory/claim                 {arch, hostname?, labels?, version?, kinds?, agent?} → a task with a lease and its job token, or 204
  *   POST /factory/tasks/:id/heartbeat                                  extend the lease (a fresh job token)
  *   POST /factory/tasks/:id/complete    {sha256, filename, version, duration_ms?, log_tail?} · {result, summary} for jobs
- *   POST /factory/tasks/:id/fail        {error, duration_ms?, log_tail?, final?}   → requeued, or failed after max_attempts (at once when final: the recipe's fault, not the worker's)
+ *   POST /factory/tasks/:id/fail        {error, duration_ms?, log_tail?, final?, needs_native?}   → requeued, or failed after max_attempts (at once when final: the recipe's fault, not the worker's; needs_native, from an emulated worker: back in the queue for a native worker — unpinned, the attempt given back)
  * The worker is its registered token (POST /factory/workers); a task's
  * writes use the job token the claim issued.
  *
@@ -35,7 +35,6 @@ import { version as running, RINGS, ringsSql, sortRings } from "../meta";
  */
 
 const LEASE_MINUTES = 30;
-const WORKER_ALIVE_MINUTES = 10;
 
 interface TaskRow {
   id: number;
@@ -67,6 +66,7 @@ interface TaskRow {
   /** project: the worker signs and publishes · community: the result goes to staging for a maintainer. */
   trust: string;
   owner: string | null;
+  pinned_to: string | null;
   staged_prefix: string | null;
 }
 
@@ -83,7 +83,7 @@ async function event(env: Env, kind: string, status: string, summary: string, pa
 }
 
 function parseArches(v: unknown): string[] {
-  const list = Array.isArray(v) ? v : ["x86_64", "aarch64"];
+  const list = Array.isArray(v) ? v : [...REPO_ARCHES];
   return list.filter((a): a is string => typeof a === "string" && isRepoArch(a));
 }
 
@@ -352,6 +352,20 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   // draft or an audit on a worker with no agent, or a failing one, is a
   // failed task an hour later.
   if (probe?.status !== "ok") scope += ` AND NOT ${AGENT_SCOPE}`;
+  // What this worker is for the queue: emulated (x86_64 under qemu on an
+  // aarch64 host) or native, and its size. (A fresh container's first claim
+  // carries no usage yet: what this worker last reported stands in.)
+  let mine = { emulated: !!(b.labels && typeof b.labels === "object" && (b.labels as Record<string, unknown>).emulated), cores: usage?.cores ?? 0, ram: usage?.ram_gb ?? 0 };
+  if (!usage) {
+    const last = await env.DB.prepare("SELECT labels, usage FROM build_workers WHERE id = ?").bind(workerId).first<{ labels: string | null; usage: string | null }>();
+    try { const u = last?.usage ? (JSON.parse(last.usage) as { cores?: number; ram_gb?: number }) : {}; const l = last?.labels ? (JSON.parse(last.labels) as { emulated?: boolean }) : {}; mine = { emulated: mine.emulated || !!l.emulated, cores: u.cores ?? 0, ram: u.ram_gb ?? 0 }; } catch { /* as reported now */ }
+  }
+  // A build a toolchain could not start emulated (the fail report's
+  // needs_native) waits for a native worker of its architecture, whoever's
+  // and whatever the trust: handed to an emulated one again it fails the
+  // same way, and its attempt is never spent (handleFail).
+  scope += ` AND (json_extract(c.params, '$.needs_native') IS NOT 1 OR ? = 0)`;
+  binds.push(mine.emulated ? 1 : 0);
   if (trust === "project") {
     scope += ` AND (kind != 'build' OR trust = 'project')`;
     // One job at a time on a ring. The jobs that move a ring — a promotion
@@ -375,17 +389,16 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
       // The best idle worker has first pick: while a better shared worker of
       // this architecture — native over emulated, then more cores, then more
       // memory — is alive and idle, this one leaves the queue's newest builds
-      // to it (its owner's are its own). After three minutes anyone takes
-      // them: a worker that is alive but never claims holds nobody up.
-      // (A fresh container's first claim carries no usage yet: what this worker last reported stands in.)
-      let mine = { emulated: !!(b.labels && typeof b.labels === "object" && (b.labels as Record<string, unknown>).emulated), cores: usage?.cores ?? 0, ram: usage?.ram_gb ?? 0 };
-      if (!usage) {
-        const last = await env.DB.prepare("SELECT labels, usage FROM build_workers WHERE id = ?").bind(workerId).first<{ labels: string | null; usage: string | null }>();
-        try { const u = last?.usage ? (JSON.parse(last.usage) as { cores?: number; ram_gb?: number }) : {}; const l = last?.labels ? (JSON.parse(last.labels) as { emulated?: boolean }) : {}; mine = { emulated: mine.emulated || !!l.emulated, cores: u.cores ?? 0, ram: u.ram_gb ?? 0 }; } catch { /* as reported now */ }
-      }
+      // to it. A native worker keeps its owner's as its own; an emulated one
+      // has no first pick of those either — it took omarchy-cli's Rust build
+      // at once, installed the toolchain and could not start rustc while a
+      // native worker sat idle (#519, 2026-09-18). After three minutes anyone
+      // takes them: most packages build fine emulated, and a worker that is
+      // alive but never claims holds nobody up.
       if (await betterIdleWorker(env, workerId, b.arch, mine, probe?.status === "ok")) {
-        scope += ` AND (owner = ? OR pinned_to = ? OR created_at <= ?)`;
-        binds.push(actor.w.owner ?? "-", workerId, new Date(Date.now() - FIRST_PICK_MINUTES * 60000).toISOString());
+        scope += mine.emulated ? ` AND (pinned_to = ? OR created_at <= ?)` : ` AND (owner = ? OR pinned_to = ? OR created_at <= ?)`;
+        if (!mine.emulated) binds.push(actor.w.owner ?? "-");
+        binds.push(workerId, new Date(Date.now() - FIRST_PICK_MINUTES * 60000).toISOString());
       }
     } else {
       // A dedicated worker takes its owner's builds — and one somebody asked for it by name while it was shared.
@@ -441,6 +454,12 @@ async function owned(env: Env, id: number, actor: Actor): Promise<TaskRow | Resp
 
 function workerName(actor: Actor): string {
   return actor.kind === "worker" ? actor.w.id : actor.job.w;
+}
+
+/** What the worker registered about itself: x86_64 under qemu on an aarch64 host, or not. */
+async function emulated(env: Env, workerId: string): Promise<boolean> {
+  const w = await env.DB.prepare("SELECT labels FROM build_workers WHERE id = ?").bind(workerId).first<{ labels: string | null }>();
+  try { return !!(w?.labels && (JSON.parse(w.labels) as { emulated?: boolean }).emulated); } catch { return false; }
 }
 
 export async function handleHeartbeat(id: number, env: Env, actor: Actor): Promise<Response> {
@@ -683,7 +702,7 @@ async function packageAfterFailure(env: Env, name: string, fallback: "registered
 }
 
 export async function handleFail(id: number, request: Request, env: Env, actor: Actor): Promise<Response> {
-  const b = (await request.json()) as { error?: string; duration_ms?: number; log_tail?: string; final?: boolean };
+  const b = (await request.json()) as { error?: string; duration_ms?: number; log_tail?: string; final?: boolean; needs_native?: boolean };
   const task = await owned(env, id, actor);
   if (task instanceof Response) return task;
   const who = workerName(actor);
@@ -694,8 +713,15 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
   // same way three times, each in a fresh container — the first
   // contributor's day, 2026-09-15, was 84 failed attempts for 28 tasks. The
   // worker says which is which (`final`); the contributor fixes and queues
-  // a new build.
-  const exhausted = b.final === true || task.attempts >= task.max_attempts;
+  // a new build. A toolchain that cannot start on the worker (rustc under
+  // qemu on a 16 KB-page host, `needs_native`) is the worker's fault, not
+  // the recipe's: the build goes back to the queue for a native worker of
+  // its architecture (the claim hands it to no emulated one again), and the
+  // attempt is given back — a build no worker ran is not an attempt. The
+  // word counts from an emulated worker only: a native one that says it
+  // would be handed the same build back for ever.
+  const needsNative = b.needs_native === true && (await emulated(env, who));
+  const exhausted = !needsNative && (b.final === true || task.attempts >= task.max_attempts);
   // What the worker uploaded before giving up — the log, the PKGBUILD, the
   // gate's verdict — is evidence too: a failed attempt is on the record.
   const review = task.kind === "build" && task.params ? (JSON.parse(task.params) as { review?: number }).review : undefined;
@@ -703,9 +729,11 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
     await recordEvidence(env, task.name, await requestOf(env, task.name), id, `staging/${review !== undefined ? "@project" : task.owner}/${task.name}/${task.id}/`, ["PKGBUILD", "build.log", "vet.json", "tests.log"]);
   }
   // A requeued task goes behind its peers (priority + 10) so one broken
-  // PKGBUILD does not hold the queue.
+  // PKGBUILD does not hold the queue. One sent back for a native worker
+  // waits for no other: not the worker it was pinned to, not the owner's
+  // fourteen days of a bump — the one that had it is the one that cannot.
   await env.DB.prepare(
-    `UPDATE build_tasks SET status = ?, finished_at = ?, error = ?, log_tail = ?, duration_ms = ?, lease_owner = ?, lease_expires_at = NULL, priority = priority + 10 WHERE id = ?`,
+    `UPDATE build_tasks SET status = ?, finished_at = ?, error = ?, log_tail = ?, duration_ms = ?, lease_owner = ?, lease_expires_at = NULL, priority = priority + 10${needsNative ? ", attempts = attempts - 1, pinned_to = NULL, shared_after = NULL, params = json_set(COALESCE(params, '{}'), '$.needs_native', 1)" : ""} WHERE id = ?`,
   )
     .bind(exhausted ? "failed" : "queued", exhausted ? now() : null, error, tail, b.duration_ms ?? null, exhausted ? task.lease_owner : null, id)
     .run();
@@ -715,12 +743,19 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
   if (exhausted && task.kind === "build") await reclaimStagingPackages(env, [id]);
   if (task.trust === "community" && exhausted) {
     await packageAfterFailure(env, task.name, "registered", `build failed on ${who}: ${error.slice(0, 160)}`);
+  } else if (task.trust === "community" && needsNative) {
+    // The package follows its task back to waiting, and says what for — the page shows it while no native worker is online.
+    await env.DB.prepare("UPDATE factory_packages SET status = 'waiting', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ? AND status = 'building'").bind(`waiting for a native ${task.arch} worker (task ${id})`, task.name).run();
   } else if (review !== undefined && exhausted) {
     // The project's build failed: the contributor's stays staged, and the review row says what the project ran into.
     await env.DB.prepare("UPDATE factory_packages SET detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(`the project's build (task ${id}) failed on ${who}: ${error.slice(0, 160)}`, task.name).run();
+  } else if (review !== undefined && needsNative) {
+    await env.DB.prepare("UPDATE factory_packages SET detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(`the project's build (task ${id}) waits for a native ${task.arch} worker`, task.name).run();
   }
-  await event(env, "build", exhausted ? "error" : "warn", `${task.name} for ${task.arch} failed on ${who} (attempt ${task.attempts}/${task.max_attempts})${b.final ? " — the recipe's, not retried" : exhausted ? " — giving up" : " — back in the queue"}: ${error.slice(0, 120)}`, { task: id, arch: task.arch, worker: who, attempts: task.attempts, exhausted, final: b.final === true });
-  return json({ task: id, status: exhausted ? "failed" : "queued", attempts: task.attempts });
+  const attempts = needsNative ? task.attempts - 1 : task.attempts;
+  const tale = needsNative ? ` on ${who} needs a native ${task.arch} worker — back in the queue for one${task.pinned_to ? `, the pin to ${task.pinned_to} dropped` : ""}` : ` failed on ${who} (attempt ${task.attempts}/${task.max_attempts})${b.final ? " — the recipe's, not retried" : exhausted ? " — giving up" : " — back in the queue"}`;
+  await event(env, "build", exhausted ? "error" : "warn", `${task.name} for ${task.arch}${tale}: ${error.slice(0, 120)}`, { task: id, arch: task.arch, worker: who, attempts, exhausted, final: b.final === true, needs_native: needsNative });
+  return json({ task: id, status: exhausted ? "failed" : "queued", attempts });
 }
 
 /** Leases that expired go back to the queue (or fail when out of attempts). Called by the scheduler. */
@@ -753,6 +788,44 @@ export async function requeueExpiredLeases(env: Env): Promise<number> {
 
 // ---------- read ----------
 
+/** A build_workers row as the API serves it. */
+export interface WorkerRow { last_seen: string; labels: string | null; owner: string | null; trust: string; packages: string | null; kinds: string | null; agent: string | null; agent_status: string | null; usage: string | null; last_task: string | null; version?: string | null }
+
+/** The moment a heartbeat must be younger than to count as alive: the one rule (meta.ts's WORKER_ALIVE_MINUTES), as a timestamp. */
+export function aliveSince(at = Date.now()): number {
+  return at - WORKER_ALIVE_MINUTES * 60000;
+}
+
+/**
+ * A worker's row as every listing serves it — GET /factory and a person's
+ * page (routes/users.ts) — so the tile that counts a person's workers
+ * counts what the Workers page lists, by the same words: alive by the one
+ * threshold, ready (workerReady), where its image stands, its side. The
+ * person's page mapped its own rows before, alive by a ten-minute threshold of
+ * its own and without ready or side (2026-09-18).
+ */
+export function workerView<W extends WorkerRow>(w: W, since: number, pool: RunningVersion) {
+  return {
+    ...w,
+    token_hash: undefined, // the hash of a worker's token is the pool's to compare, nobody's to see
+    log_tail: undefined, // the worker's own log is its owner's and the maintainers' (GET /factory/workers/:id/log), not the listing's
+    log_at: undefined,
+    labels: w.labels ? JSON.parse(w.labels) : null,
+    packages: w.packages ? JSON.parse(w.packages) : null,
+    alive: Date.parse(w.last_seen) > since,
+    // Ready for what it declares: alive, and its agent answered when the work needs one (workerReady).
+    ready: workerReady(w, since),
+    // Where its image stands against the pool's release (update.ts): behind past the grace, it is handed nothing.
+    update: updateState(w.version, pool),
+    kinds: w.kinds ? JSON.parse(w.kinds) : null,
+    // What the machine uses (the worker's own average, with the claim) and the last task it finished (with the completion).
+    usage: w.usage ? JSON.parse(w.usage) : null,
+    last_task: w.last_task ? JSON.parse(w.last_task) : null,
+    // omarchy: runs for the project (trusted; owner NULL is an old hosted registration) · community: a contributor's
+    side: w.trust === "project" || w.owner === null ? "omarchy" : "community",
+  };
+}
+
 /** A JSON column (a task's params, its result) as the object it holds; null when empty or not JSON, so a reader never parses text of its own. */
 function parseJson(text: string | null): unknown {
   try { return text ? JSON.parse(text) : null; } catch { return null; }
@@ -761,15 +834,15 @@ function parseJson(text: string | null): unknown {
 export async function handleFactory(env: Env, url?: URL): Promise<Response> {
   const limit = Math.min(200, Math.max(10, Number(url?.searchParams.get("limit") ?? 60) || 60));
   const counts = await env.DB.prepare("SELECT status, arch, COUNT(*) AS n FROM build_tasks GROUP BY status, arch").all();
+  const alive = aliveSince();
   // Every worker belongs to someone: the project (trust project, granted by
   // a maintainer) or a contributor.
   const workers = await env.DB.prepare(
     "SELECT * FROM build_workers WHERE revoked_at IS NULL ORDER BY (last_seen > ?) DESC, last_seen DESC LIMIT 200",
   )
-    .bind(new Date(Date.now() - WORKER_ALIVE_MINUTES * 60000).toISOString())
-    .all<{ last_seen: string; labels: string | null; owner: string | null; trust: string; packages: string | null; kinds: string | null; agent: string | null; agent_status: string | null; usage: string | null; last_task: string | null }>();
+    .bind(new Date(alive).toISOString())
+    .all<WorkerRow>();
   const tasks = await env.DB.prepare("SELECT * FROM build_tasks ORDER BY CASE status WHEN 'leased' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, id DESC LIMIT ?").bind(limit).all<TaskRow>();
-  const alive = Date.now() - WORKER_ALIVE_MINUTES * 60000;
   const pool = running(env);
   return json(
     {
@@ -777,25 +850,7 @@ export async function handleFactory(env: Env, url?: URL): Promise<Response> {
       lease_minutes: LEASE_MINUTES,
       limit,
       counts: counts.results,
-      workers: workers.results.map((w) => ({
-        ...w,
-        token_hash: undefined, // the hash of a worker's token is the pool's to compare, nobody's to see
-        log_tail: undefined, // the worker's own log is its owner's and the maintainers' (GET /factory/workers/:id/log), not the listing's
-        log_at: undefined,
-        labels: w.labels ? JSON.parse(w.labels) : null,
-        packages: w.packages ? JSON.parse(w.packages) : null,
-        alive: Date.parse(w.last_seen) > alive,
-        // Ready for what it declares: alive, and its agent answered when the work needs one (workerReady).
-        ready: workerReady(w, alive),
-        // Where its image stands against the pool's release (update.ts): behind past the grace, it is handed nothing.
-        update: updateState((w as { version?: string | null }).version, pool),
-        kinds: w.kinds ? JSON.parse(w.kinds) : null,
-        // What the machine uses (the worker's own average, with the claim) and the last task it finished (with the completion).
-        usage: w.usage ? JSON.parse(w.usage) : null,
-        last_task: w.last_task ? JSON.parse(w.last_task) : null,
-        // omarchy: runs for the project (trusted; owner NULL is an old hosted registration) · community: a contributor's
-        side: w.trust === "project" || w.owner === null ? "omarchy" : "community",
-      })),
+      workers: workers.results.map((w) => workerView(w, alive, pool)),
       // A task's params and result are JSON here as they are on the task's own page (handleTask): one shape for a task, whoever reads it.
       tasks: tasks.results.map((t) => ({ ...t, log_tail: undefined, params: parseJson(t.params), result: parseJson(t.result) })),
     },

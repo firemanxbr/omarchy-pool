@@ -23,12 +23,8 @@
  * object goes by the row, what stores one computes the key here.
  */
 
-export const REPO_ARCHES = ["x86_64", "aarch64"] as const;
-export type RepoArch = (typeof REPO_ARCHES)[number];
-
-export function isRepoArch(s: string): s is RepoArch {
-  return (REPO_ARCHES as readonly string[]).includes(s);
-}
+// The architectures are meta.ts's one list; the routes that check an arch import it from here as they always did.
+export { REPO_ARCHES, isRepoArch, type RepoArch } from "./meta";
 
 /** A source is a directory name: lower-case letters, digits and dashes. */
 export const SOURCE_RE = /^[a-z0-9][a-z0-9-]{0,40}$/;

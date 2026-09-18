@@ -1,7 +1,7 @@
 import { json, type Env } from "../index";
 import { maintainersOf, roleFor, GOVERNANCE_FILE } from "../governance";
 import { CATEGORIES, isCategory } from "../categories";
-import { isRepoArch } from "../r2";
+import { isRepoArch, REPO_ARCHES } from "../r2";
 import { providedBy } from "./factory";
 import { pullFromRings } from "./blocks";
 import { queuePosition } from "../queue";
@@ -451,7 +451,7 @@ export async function handleRequestPackage(c: Contributor, request: Request, env
   if (!LICENSE.test(license)) return json({ error: "license must be an SPDX identifier (MIT, GPL-3.0-or-later, Apache-2.0 …) or custom:<name>" }, 400);
   const name = (b.name ?? parsed.github?.repo ?? parsed.project.split("/").pop() ?? "").toLowerCase();
   if (!/^[a-z0-9@._+-]+$/.test(name) || name.length > 100) return json({ error: "name must be a pacman package name (lowercase letters, digits, @ . _ + -)" }, 400);
-  const arches = (Array.isArray(b.arches) ? b.arches : ["x86_64", "aarch64"]).filter((a): a is string => typeof a === "string" && isRepoArch(a));
+  const arches = (Array.isArray(b.arches) ? b.arches : [...REPO_ARCHES]).filter((a): a is string => typeof a === "string" && isRepoArch(a));
   if (!arches.length) return json({ error: "arches must include x86_64 and/or aarch64" }, 400);
 
   // The same project, or the same source, requested before by someone a maintainer blocked: a new account
@@ -655,10 +655,12 @@ export async function queueBuilds(env: Env, c: Contributor, name: string, ask: Q
     const params: Record<string, unknown> = {};
     if (last && ref.startsWith("draft:")) { params.lesson = last.id; lessons[arch] = last.id; }
     if (hint) params.hint = hint;
-    const dup = await env.DB.prepare("SELECT id, status, lease_owner FROM build_tasks WHERE name = ? AND arch = ? AND pkgbuild_ref = ? AND status IN ('queued', 'leased') LIMIT 1").bind(name, arch, ref).first<{ id: number; status: string; lease_owner: string | null }>();
+    const dup = await env.DB.prepare("SELECT id, status, lease_owner, params FROM build_tasks WHERE name = ? AND arch = ? AND pkgbuild_ref = ? AND status IN ('queued', 'leased') LIMIT 1").bind(name, arch, ref).first<{ id: number; status: string; lease_owner: string | null; params: string | null }>();
     if (dup) {
       if (dup.status === "queued") {
         // Asked again while it waits: where it goes, the hint and the lesson are what was asked now — the queue when nothing was named.
+        // A build sent back for a native worker (needs_native) still waits for one there; a worker named is the asker's own choice.
+        if (!pinned && dup.params && (JSON.parse(dup.params) as { needs_native?: number }).needs_native === 1) params.needs_native = 1;
         await env.DB.prepare("UPDATE build_tasks SET pinned_to = ?, shared_after = NULL, params = ? WHERE id = ? AND status = 'queued'")
           .bind(pinned, Object.keys(params).length ? JSON.stringify(params) : null, dup.id).run();
         ids.push(dup.id);

@@ -214,7 +214,7 @@ const SCRIPT = String.raw`
       live(k, last ? ago(last) + " · " + num(n) + " packages" : n ? num(n) + " packages" : "not synced yet");
     });
     live("stored-once", num(d.pool.objects) + " objects · " + bytes(d.pool.bytes));
-    ["edge", "rc", "stable"].forEach(function (n) { var r = d.rings.filter(function (x) { return x.ring === n; })[0]; live(n + "-head", r && r.release ? "#" + r.release.seq + " · " + ago(r.release.created_at) : "no release yet"); });
+    PROMISED_RINGS.forEach(function (n) { var r = d.rings.filter(function (x) { return x.ring === n; })[0]; live(n + "-head", r && r.release ? "#" + r.release.seq + " · " + ago(r.release.created_at) : "no release yet"); });
   }, 120000);
 `;
 
@@ -269,7 +269,7 @@ export const HOW_IT_WORKS_COMPONENTS = (_F: Fixture): Component[] => {
         'aria-label="Arch Linux, Arch Linux ARM, the OPR\'s edge channel',
         ...[...sourceBoxes().map((b) => b.id), "stored-once", "edge-head", "rc-head", "stable-head"].map((k) => `data-live="${k}"`),
       ],
-      script: ["liveStats(", '"/api/v1/stats"', '"src-arch"', '"src-chaotic"', 'live(k, ', 'live("stored-once"', "d.coverage", "c.indexed", "c.last_sync", "d.pool.objects", "d.pool.bytes", "d.rings", '"-head"', "r.release.seq", "r.release.created_at"],
+      script: ["liveStats(", '"/api/v1/stats"', '"src-arch"', '"src-chaotic"', 'live(k, ', 'live("stored-once"', "d.coverage", "c.indexed", "c.last_sync", "d.pool.objects", "d.pool.bytes", "PROMISED_RINGS.forEach(function (n)", "d.rings", '"-head"', "r.release.seq", "r.release.created_at"],
       reads: [
         {
           path: "/api/v1/stats",

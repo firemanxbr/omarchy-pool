@@ -1,9 +1,10 @@
 /target
 **/*.rs.bk
-worker/node_modules
-.wrangler/
+node_modules
+.wrangler
 worker/dist
 .DS_Store
 .claude/worktrees/
+.claude/launch.json
 __pycache__/
 *.pyc

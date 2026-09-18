@@ -49,12 +49,18 @@ describe("what the snapshot reads", () => {
     expect(first.pool_scanned).toBe(true);
     expect(first.pool.objects).toBeGreaterThan(0);
 
+    // A pool job finished in between: the pool did not move, the jobs did.
+    await env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, finished_at, duration_ms) VALUES ('health', 'x86_64', '', '', 'schedule', 0, 0, 'project', 'pool', 'health', 'done', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 30000)").run();
     const later = await snapshotMetrics(env, at(62));
     expect(later).toContain("(unchanged)");
     const second = JSON.parse((await env.DB.prepare("SELECT payload FROM events WHERE kind = 'metrics' ORDER BY id DESC LIMIT 1").first<{ payload: string }>())!.payload);
     expect(second.pool_scanned).toBe(false);
     expect(second.pool).toEqual(first.pool);
     expect(second.rings).toEqual(first.rings);
+    // Only the pool block is the previous one's: the jobs, the window and the summary are this snapshot's.
+    expect(second.jobs.runs).toBe(first.jobs.runs + 1);
+    expect(second.since).toBe(at(62 - 7 * 24 * 60).toISOString());
+    expect(later).toContain(`${first.jobs.runs + 1} jobs in 7 days`);
 
     await synced(at(1).toISOString());
     await env.DB.prepare(`INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES

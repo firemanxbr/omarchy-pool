@@ -69,7 +69,7 @@ const SCRIPT = String.raw`
     var contrib = {}, isM = function (l) { return Object.prototype.hasOwnProperty.call(maint, l); };
     pkgs.forEach(function (p) { if (p.owner && !isM(p.owner)) { var c = contrib[p.owner] = contrib[p.owner] || { packages: 0, landed: 0, workers: 0 }; c.packages++; if (p.landed) c.landed++; } });
     workers.forEach(function (w) { if (w.owner && !isM(w.owner)) { var c = contrib[w.owner] = contrib[w.owner] || { packages: 0, landed: 0, workers: 0 }; c.workers++; } });
-    // The counts are the shell's (workerCounts), the listing's words: alive is a heartbeat in the last ten minutes — the word and the number the Pool's tile sends a reader here with, and the Workers page's first tile; ready is alive and, where the work needs one, an agent that answered; the project's are the project and review kinds.
+    // The counts are the shell's (workerCounts), the listing's words: alive is a heartbeat in the last WORKER_ALIVE_MINUTES — the word and the number the Pool's tile sends a reader here with, and the Workers page's first tile; ready is alive and, where the work needs one, an agent that answered; the project's are the project and review kinds.
     var wc = workerCounts(workers);
     setTiles("#tiles", tilesOf(maint, contrib, pkgs, wc));
     $("#maintainers-list").innerHTML = Object.keys(maint).sort().map(function (m) { return personChip(m, "maintainer", maint[m] ? "since " + esc(ago(maint[m])) : ""); }).join("") || '<span class="muted">none yet</span>';

@@ -76,6 +76,40 @@ export function version(env: Env): RunningVersion {
 export const LATE_AFTER_HOURS = 9;
 
 /**
+ * A worker is alive when its last heartbeat is younger than this. One
+ * number for everything that counts workers: the listing every tile reads
+ * (routes/factory.ts, `alive` and `ready` on each row), a person's page
+ * (routes/users.ts, the same rows), the scheduler's idle count that decides
+ * what the queue can take, the metrics snapshot's history, and the shell's
+ * pill titles, where layout.ts splices it in as WORKER_ALIVE_MINUTES. Four
+ * files typed `10 * 60000` beside the constant before (2026-09-18).
+ */
+export const WORKER_ALIVE_MINUTES = 10;
+
+/**
+ * The architectures the pool serves, said once: the layout of the pool
+ * (r2.ts, which re-exports it for the routes that check an arch), the jobs
+ * the scheduler queues per architecture, the enqueue's default, and the
+ * shell of every page, where layout.ts splices it in as ARCHES so the
+ * pickers, the grids and the pipeline's heads hold no copy. Fifteen sites
+ * typed the pair before (2026-09-18).
+ */
+export const REPO_ARCHES = ["x86_64", "aarch64"] as const;
+export type RepoArch = (typeof REPO_ARCHES)[number];
+export function isRepoArch(s: string): s is RepoArch {
+  return (REPO_ARCHES as readonly string[]).includes(s);
+}
+
+/**
+ * An advisory's severities, worst first: what the security feed writes on
+ * a row (anything else is unknown), the order a report ranks packages in
+ * and the totals it counts (routes/security.ts), and the order the shell
+ * picks a package's worst advisory by — spliced in as SEVERITIES, where
+ * advisoriesAt() typed the five words again.
+ */
+export const SEVERITIES = ["critical", "high", "medium", "low", "unknown"] as const;
+
+/**
  * The rings. edge, rc and stable are the promise: a package enters edge
  * signature-verified and reaches rc and stable by evidence, whichever
  * source built it. lab is the fourth, beside them, where nothing is
@@ -89,7 +123,11 @@ export const LATE_AFTER_HOURS = 9;
  * that asks "which rings serve this package" is written from it through
  * ringsSql(), the order a served list is read in is sortRings(), so a ring
  * added here is in every query and every order the server writes. Five
- * routes typed the four names by hand before (2026-09-18).
+ * routes typed the four names by hand before (2026-09-18) — and eight page
+ * modules after them: layout.ts now splices the promised rings in the
+ * reader's order (PROMISED_RINGS) and every page reads that or the keys of
+ * RING_TEXT, so a ring added here reaches the Pool's cards, the pickers,
+ * the Security chart, the Status tables and the Pipeline's heads.
  */
 export const RINGS = ["edge", "rc", "stable", "lab"] as const;
 export type Ring = (typeof RINGS)[number];

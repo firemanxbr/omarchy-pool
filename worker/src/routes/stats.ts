@@ -130,10 +130,16 @@ export async function handleStats(env: Env): Promise<Response> {
       WHERE kind = 'health' AND created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-14 days') ORDER BY id`,
   ).all();
   // The pool's own jobs (pulled by workers) and the factory's builds, per
-  // day: what replaces GitHub Actions on the pipeline card.
+  // day: what replaces GitHub Actions on the pipeline card. A finished job
+  // sits on the day it finished; a job still queued or leased sits on today
+  // whatever its age, so the shell's jobsSummary (the Status tiles, the
+  // Pipeline's chart) counts every job in flight — the snapshot it replaced
+  // took every queued or leased row too, and a pool job can wait longer than
+  // a week when no worker of its architecture is alive.
   const jobsDaily = await env.DB.prepare(
-    `SELECT substr(COALESCE(finished_at, created_at), 1, 10) AS day, kind, status, COUNT(*) AS n, COALESCE(SUM(duration_ms), 0) AS ms
-       FROM build_tasks WHERE kind != 'build' AND created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days')
+    `SELECT CASE WHEN status IN ('queued', 'leased') THEN strftime('%Y-%m-%d', 'now') ELSE substr(COALESCE(finished_at, created_at), 1, 10) END AS day,
+            kind, status, COUNT(*) AS n, COALESCE(SUM(duration_ms), 0) AS ms
+       FROM build_tasks WHERE kind != 'build' AND (created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days') OR status IN ('queued', 'leased'))
       GROUP BY day, kind, status ORDER BY day`,
   ).all();
   const buildsDaily = await env.DB.prepare(

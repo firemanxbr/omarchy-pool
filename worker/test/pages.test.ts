@@ -266,7 +266,7 @@ describe("dashboard pages", () => {
     const shell = new Set(shellNames);
     expect(shell.has("pillHtml") && shell.has("whoami") && shell.has("pick") && chartNames.includes("stacked")).toBe(true);
     // The primitives a page draws only through CHARTS — a page that does not splice CHARTS and declares one of these has copied it.
-    const CHART_ONLY = ["bars", "area", "heat", "hbars", "stacked", "lines", "hrows", "heatGrid", "buildsByDay", "worst", "lastDays"];
+    const CHART_ONLY = ["bars", "area", "hbars", "stacked", "lines", "hrows", "heatGrid", "buildsByDay", "jobsSummary", "workerMinutes", "worst", "lastDays"];
     const problems: string[] = [];
     for (const path of PAGES) {
       const code = scriptOf(await (await get(path)).text());

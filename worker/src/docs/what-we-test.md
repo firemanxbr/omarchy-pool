@@ -97,9 +97,11 @@ can be ready while the other failed). The tools, in the order to try them:
    a queued build can be taken out and put back from the same dialog —
    nothing puts it back by itself. A build that ran *emulated* (x86_64
    under qemu on an aarch64 host) may need nothing but a native worker: a
-   toolchain that cannot start there fails the build as soon as it is
-   installed, with the reason — before any correction turn of the drafter.
-   Revoking a worker frees the builds asked for it.
+   toolchain that cannot start there ends the build as soon as it is
+   installed, with the reason — before any correction turn of the drafter —
+   and the build goes back to the queue for a native worker, the attempt
+   uncounted (*Run a worker* in the docs). Revoking a worker frees the
+   builds asked for it.
 4. **Build it at home first.** The same image runs on any machine with
    the contributor's own agent key (*Workers* in the docs): what passes
    there is what they queue here.
@@ -281,3 +283,16 @@ maintainer merges it like any other change to the process.
   gate's fifteen and no recipe could clear it. The skill and the prompt name
   the runtime the way Arch does, and the drafter's own tool writes `glibc`
   and `libgcc` into a Rust recipe before any model reads it.
+- **2026-09-18 — the owner's emulated worker.** omarchy-cli 0.0.168 for
+  x86_64 failed on `rustc` under emulation once more, on its owner's
+  emulated worker, while another contributor's native x86_64 worker sat
+  idle: the queue's first pick never applied to a worker's own builds, so
+  the emulated one took its owner's Rust build at once, installed the
+  toolchain and reported the failure as the recipe's — final, on the first
+  of three attempts. Two rules followed: an emulated shared worker has no
+  first pick of its own — its owner's builds wait the three minutes like
+  anyone's while a native worker is idle (a build pinned to it is still its
+  at once) — and a build a toolchain cannot start on the worker is the
+  worker's failure, not the recipe's: it goes back to the queue marked for
+  a native worker, the attempt given back, and waits there until one is
+  alive — the page says so.

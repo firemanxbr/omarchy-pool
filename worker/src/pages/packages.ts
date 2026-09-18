@@ -33,11 +33,11 @@ const SEARCH_BODY = String.raw`
 
 const SEARCH_SCRIPT = String.raw`
 __CHARTS__
-  // The rings are the server's list in its order (RINGS_TEXT: stable, rc, edge, lab — the lab included, as the search takes it), the first the default.
-  var RINGS = Object.keys(RINGS_TEXT), ARCHES = ["x86_64", "aarch64"];
+  // The rings are the server's list in its order (RINGS_TEXT: stable, rc, edge, lab — the lab included, as the search takes it), the architectures the shell's (ARCHES); the first of each is the default.
+  var RINGS = Object.keys(RINGS_TEXT);
   var q = new URLSearchParams(location.search);
   var ring = RINGS.indexOf(q.get("ring")) >= 0 ? q.get("ring") : RINGS[0];
-  var arch = ARCHES.indexOf(q.get("arch")) >= 0 ? q.get("arch") : "x86_64";
+  var arch = ARCHES.indexOf(q.get("arch")) >= 0 ? q.get("arch") : ARCHES[0];
   var timer = null, seq = 0, OWNERS = {}, APPROVERS = {};
   // Who made the factory's packages: the contributor who registered it, the maintainer whose approval stands — the row's own standing, the server's word, so a withdrawn one names nobody.
   fetch("/api/v1/factory/packages").then(function (r) { return r.json(); }).then(function (d) { (d.packages || []).forEach(function (p) { OWNERS[p.name] = p.owner; }); }).catch(function () {});
@@ -191,7 +191,7 @@ const PACKAGE_SCRIPT = String.raw`
   // The rings are the server's list in its order (RINGS_TEXT: stable, rc, edge, lab), the first the default: the page asks the API for any of them, the lab included, and draws the ring the API says it shows (shown_ring) — the most stable one that serves the package when the asked one does not.
   var RINGS = Object.keys(RINGS_TEXT);
   var ring = RINGS.indexOf(q.get("ring")) >= 0 ? q.get("ring") : RINGS[0];
-  var arch = ["x86_64", "aarch64"].indexOf(q.get("arch")) >= 0 ? q.get("arch") : "x86_64";
+  var arch = ARCHES.indexOf(q.get("arch")) >= 0 ? q.get("arch") : ARCHES[0];
   var data = null;
   $("#crumb").textContent = name; $("#title").textContent = name; $("#arch-label").textContent = arch;
   // Every package named on this page links its page in the ring shown and the architecture read — the shell's one address.
@@ -246,7 +246,7 @@ const PACKAGE_SCRIPT = String.raw`
     ]);
     // The ring chips are every ring, the lab included, the one the API shows lit; each is the package's one address in that ring.
     $("#pg-ring").innerHTML = RINGS.map(function (r) { return '<a class="' + (r === d.shown_ring ? "on" : "") + '" href="' + pkgHref(d.name, r, arch) + '" style="display:inline-block;background:' + (r === d.shown_ring ? "var(--green)" : "var(--panel-2)") + ';color:' + (r === d.shown_ring ? "var(--green-ink)" : "var(--muted)") + ';border:1px solid ' + (r === d.shown_ring ? "var(--green)" : "var(--line)") + ';padding:5px 12px;font-size:13px;text-decoration:none">' + r + '</a>'; }).join("");
-    $("#pg-arch").innerHTML = ["x86_64", "aarch64"].map(function (a) { return '<a href="' + pkgHref(d.name, d.shown_ring, a) + '" style="display:inline-block;background:' + (a === arch ? "var(--green)" : "var(--panel-2)") + ';color:' + (a === arch ? "var(--green-ink)" : "var(--muted)") + ';border:1px solid ' + (a === arch ? "var(--green)" : "var(--line)") + ';padding:5px 12px;font-size:13px;text-decoration:none">' + a + '</a>'; }).join("");
+    $("#pg-arch").innerHTML = ARCHES.map(function (a) { return '<a href="' + pkgHref(d.name, d.shown_ring, a) + '" style="display:inline-block;background:' + (a === arch ? "var(--green)" : "var(--panel-2)") + ';color:' + (a === arch ? "var(--green-ink)" : "var(--muted)") + ';border:1px solid ' + (a === arch ? "var(--green)" : "var(--line)") + ';padding:5px 12px;font-size:13px;text-decoration:none">' + a + '</a>'; }).join("");
     $("#meta").innerHTML = [
       m.url ? '<a href="' + esc(m.url) + '">' + esc(m.url.replace(/^https?:\/\//, "")) + '</a>' : "",
       (m.licenses || []).length ? "license " + esc((m.licenses || []).join(", ")) : "",
@@ -348,7 +348,7 @@ const PACKAGE_SCRIPT = String.raw`
   }
 
   function advLine(a) {
-    return '<li>' + sevPill(a.severity) + ' <a class="run" href="' + esc(a.url) + '">' + esc(a.cves.join(", ") || a.id) + '</a> <span class="muted">' + esc(a.match) + (a.fixed ? ' · fixed in ' + esc(a.fixed) : '') + (a.kev ? ' · <span style="color:var(--red)">exploited in the wild</span>' : '') + (a.epss != null && a.epss >= 0.1 ? ' · EPSS ' + (a.epss * 100).toFixed(0) + '%' : '') + '</span>' + (a.summary ? '<div class="muted" style="font-size:12.5px">' + esc(a.summary.length > 160 ? a.summary.slice(0, 159) + "…" : a.summary) + '</div>' : '') + '</li>';
+    return '<li>' + sevPill(a.severity) + ' <a class="run" href="' + esc(a.url) + '">' + esc(a.cves.join(", ") || a.id) + '</a> <span class="muted">' + esc(a.match) + (a.fixed ? ' · fixed in ' + esc(a.fixed) : '') + (a.kev ? ' · <span style="color:' + SEV_COLOR.exploited + '">exploited in the wild</span>' : '') + (a.epss != null && a.epss >= 0.1 ? ' · EPSS ' + (a.epss * 100).toFixed(0) + '%' : '') + '</span>' + (a.summary ? '<div class="muted" style="font-size:12.5px">' + esc(a.summary.length > 160 ? a.summary.slice(0, 159) + "…" : a.summary) + '</div>' : '') + '</li>';
   }
   function renderSecurity(d) {
     var s = d.security || { advisories: [], exposed: [] };
@@ -470,7 +470,7 @@ export const PACKAGES_COMPONENTS = (F: Fixture): Component[] => [
     id: "packages.ring-arch-pickers",
     page: "/packages",
     anchor: ['id="pick-ring"', 'id="pick-arch"'],
-    script: ["RINGS = Object.keys(RINGS_TEXT)", 'ARCHES = ["x86_64", "aarch64"]', 'pick("#pick-ring"', 'pick("#pick-arch"'],
+    script: ["RINGS = Object.keys(RINGS_TEXT)", 'ARCHES.indexOf(q.get("arch"))', 'pick("#pick-ring"', 'pick("#pick-arch"'],
     visible: EVERYONE,
   },
   {
@@ -739,7 +739,7 @@ export const PACKAGE_COMPONENTS = (F: Fixture): Component[] => {
       id: "package.security-own",
       page,
       anchor: ['id="sec-own"'],
-      script: ['"#sec-own"', "advLine", "a.cves.join", "a.match", "a.fixed", "a.kev", "a.epss", "a.summary", "fixed in this version"],
+      script: ['"#sec-own"', "advLine", "sevPill(a.severity)", "a.cves.join", "a.match", "a.fixed", "a.kev", "SEV_COLOR.exploited", "a.epss", "a.summary", "fixed in this version"],
       reads: [{ path: pkg, fields: ["package.version", "security.advisories.0.id", "security.advisories.0.severity", "security.advisories.0.status", "security.advisories.0.cves", "security.advisories.0.match", "security.advisories.0.fixed", "security.advisories.0.kev", "security.advisories.0.epss", "security.advisories.0.summary", "security.advisories.0.url"] }],
       visible: EVERYONE,
     },

@@ -225,7 +225,7 @@ const SCRIPT = String.raw`
     var incomplete = st.request && !st.request.complete;
     var steps = function (items) { return '<ol class="howto">' + items.map(function (x) { return '<li>' + x + '</li>'; }).join("") + '</ol>'; };
     var drafted = function (t) { return !t || !t.pkgbuild_ref || t.pkgbuild_ref.indexOf("draft:") === 0; };
-    if (!c) return 'No build yet — ' + (own ? 'press <b>Build</b>: it goes to the shared queue (the best idle shared worker takes it; a worker of yours at once), the gate checks it, the second agent audits it.' : 'the contributor\'s build comes first.');
+    if (!c) return 'No build yet — ' + (own ? 'press <b>Build</b>: it goes to the shared queue (the best idle shared worker takes it; a native worker of yours at once), the gate checks it, the second agent audits it.' : 'the contributor\'s build comes first.');
     var cc = c.contributor, pb = c.project, a = c.approval, sc = c.score, arch = (cc || pb).arch;
     var worker = cc && cc.lease_owner && FACTORY ? FACTORY.workers.filter(function (w) { return w.id === cc.lease_owner; })[0] : null;
     var emulated = worker && worker.labels && worker.labels.emulated;
@@ -254,7 +254,9 @@ const SCRIPT = String.raw`
       if (cc.pinned_to) return 'Queued (<a href="/build/' + cc.id + '">#' + cc.id + '</a>) for <b>' + esc(wtShort(cc.pinned_to)) + '</b> only' + (FACTORY && !FACTORY.workers.some(function (w) { return w.id === cc.pinned_to && w.alive; }) ? ' — <b>offline</b>: it claims when it is back' : '') + (own ? '. Press <b>Build ' + esc(arch) + '</b> to send it to the queue instead, or to take it out.' : '.');
       if (cc.shared_after && cc.shared_after > new Date().toISOString()) return 'Queued (<a href="/build/' + cc.id + '">#' + cc.id + '</a>) for ' + (own ? 'your' : 'the owner\'s') + ' own worker — a new release, built from the approved recipe; the shared workers take it from ' + esc(cc.shared_after.slice(0, 10)) + '.' + (own ? ' Press <b>Build ' + esc(arch) + '</b> to name a worker or to take it out.' : '');
       var q = cc.queue ? '<b>' + cc.queue.position + ' of ' + cc.queue.total + '</b> in the shared queue for ' + esc(arch) : 'in the shared queue for ' + esc(arch);
-      return 'Queued (<a href="/build/' + cc.id + '">#' + cc.id + '</a>) — ' + q + ': the best idle shared worker takes it' + (where ? ' — ' + esc(where.state) : '') + (own ? '; a worker of yours takes it at once. Press <b>Build ' + esc(arch) + '</b> to name a worker or to take it out of the queue.' : '.') + ' This page follows it.';
+      // Sent back by an emulated worker a toolchain could not start on: only a native one takes it, the owner's own included — an emulated one of theirs is not "at once".
+      if (cc.params && cc.params.needs_native) return 'Queued (<a href="/build/' + cc.id + '">#' + cc.id + '</a>) — ' + q + ': a toolchain could not start <b>emulated</b>, so a <b>native</b> ' + esc(arch) + ' worker takes it' + (where ? ' — ' + esc(where.state) : '') + (own ? '. Press <b>Build ' + esc(arch) + '</b> to name a worker or to take it out of the queue.' : '.') + ' This page follows it.';
+      return 'Queued (<a href="/build/' + cc.id + '">#' + cc.id + '</a>) — ' + q + ': the best idle shared worker takes it' + (where ? ' — ' + esc(where.state) : '') + (own ? '; a native worker of yours takes it at once. Press <b>Build ' + esc(arch) + '</b> to name a worker or to take it out of the queue.' : '.') + ' This page follows it.';
     }
     if (cc && cc.status === "leased") return 'Building (<a href="/build/' + cc.id + '">#' + cc.id + '</a>) on ' + (cc.lease_owner ? wtId(cc.lease_owner) : 'a worker') + (emulated ? ' — emulated' : '') + ' — this page follows it.';
     if (cc && cc.status === "failed") return 'The build failed (<a href="/build/' + cc.id + '">#' + cc.id + '</a>)' + (cc.error ? ' — <b>' + esc(String(cc.error).slice(0, 160)) + '</b>' : '') + (own ? again(cc.attempts > 1 ? 'the agent tried ' + cc.attempts + ' times inside this build' : '') : ' — the contributor fixes it.');
@@ -284,7 +286,7 @@ const SCRIPT = String.raw`
       (d.blocked ? pillHtml("error", "blocked: " + (d.blocked.reason || ""), "by " + (d.blocked.by || "") + ", " + (d.blocked.at || "")) : '') +
       (d.maintainer_since ? pillHtml("none", "since " + ago(d.maintainer_since), "listed in factory/MAINTAINERS.toml") : '') +
       '<span>since ' + esc(String(d.since).slice(0, 10)) + '</span><span class="dim">·</span><span>last seen ' + ago(d.last_seen) + '</span><span class="dim">·</span><a href="' + esc(d.github) + '" style="color:var(--muted);text-decoration:none">github.com/' + esc(d.login) + ' ↗</a>';
-    // The workers counted as every tile counts them (the shell's workerCounts): registered is not revoked, alive is a heartbeat in ten minutes.
+    // The workers counted as every tile counts them (the shell's workerCounts): registered is not revoked, alive is a heartbeat in the last WORKER_ALIVE_MINUTES — the rows are the listing's own (routes/factory.ts workerView), so the tile counts what the tables below draw.
     var c = d.build_counts, wc = workerCounts(d.workers);
     setTiles("#tiles", [
       ["Packages", num(d.packages.length), "registered under this name"],
@@ -378,7 +380,7 @@ const SCRIPT = String.raw`
       var drafts = !det.has_pkgbuild; // the project's own PKGBUILD is built as it is: no agent, no hint
       var waiting = st2 ? st2.chains.filter(function (c) { return c.contributor && c.contributor.status === "queued" && (!arch || c.contributor.arch === arch); }).map(function (c) { return c.contributor; }) : [];
       var pinnedNow = waiting.length === 1 ? waiting[0].pinned_to : null;
-      var where = FACTORY ? whereOptions(FACTORY.workers, arch || "x86_64", login, false, drafts, waiting.length === 1 ? waiting[0].queue : null, pinnedNow) : null;
+      var where = FACTORY ? whereOptions(FACTORY.workers, arch || ARCHES[0], login, false, drafts, waiting.length === 1 ? waiting[0].queue : null, pinnedNow) : null;
       if (where && !arch) where.options = where.options.filter(function (o) { return o.value === ""; });
       var queuedNow = waiting.length > 0;
       ask({ title: (queuedNow ? (pinnedNow ? "Waiting for " + wtShort(pinnedNow) + ": " : "In the queue: ") : "Build ") + name + (arch ? " for " + arch : "") + (queuedNow ? "" : "?"), text: (queuedNow ? "Build <b>#" + waiting.map(function (t) { return t.id; }).join(", #") + "</b> " + (pinnedNow ? "waits for <b>" + esc(wtShort(pinnedNow)) + "</b> only. Keep that, send it to the shared queue instead, or take it out" : "waits in the shared queue. Leave it there, name a worker of yours to take it at once, or take it out") + " — nothing puts it back by itself; this button does. " : "") + (drafts ? "The worker drafts the recipe with its agent — from the last build's PKGBUILD and what stopped it, when there is one — builds it, runs the gate and stages the result as evidence; the second agent audits it. " : "The worker builds the project's own PKGBUILD as it is, runs the gate and stages the result as evidence; the second agent audits it. ") + (arch ? "This architecture only." : "Every architecture the request names."), select: where, input: drafts ? "optional" : false, placeholder: "a hint for the agent (optional): the binary's name, a build flag, a dependency, what to do differently", confirm: queuedNow ? (pinnedNow ? "Keep it so" : "Keep it queued") : "Build", alt: queuedNow ? { text: "Take it out of the queue", danger: true } : null }).then(function (go) {
@@ -528,7 +530,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       page,
       anchor: ['id="tiles"'],
       script: ['"#tiles"', "d.build_counts", '"Decisions", num(d.approvals.length)', "d.approved_packages.length", "workerCounts(d.workers)", "wc.registered", "wc.alive"],
-      reads: [{ path: profile, fields: ["packages", "build_counts.total", "build_counts.staged", "build_counts.published", "build_counts.failed", "approvals", "approved_packages", "workers", "workers.0.revoked_at", "workers.0.alive"] }],
+      reads: [{ path: profile, fields: ["packages", "build_counts.total", "build_counts.staged", "build_counts.published", "build_counts.failed", "approvals", "approved_packages", "workers", "workers.0.revoked_at", "workers.0.alive", "workers.0.ready", "workers.0.side", "workers.0.current_task"] }],
       visible: EVERYONE,
     },
     {
@@ -595,7 +597,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       // The checklist's build items link the build's page at its evidence (the shell's evidenceLink); the gate, the audit and the trial link the file the story's row says is there.
       script: ["archPanel(a, mine, nextStep(st, mine[0]), acts)", "registered.indexOf(a) >= 0", "buildBtn(name, a,", '"a build is running"', "data-arch", 'href="/api/v1/factory/tasks/', "evidenceLink(cc)", "evidenceLink(pb)"],
       reads: [
-        { path: story, fields: ["chains.0.contributor.id", "chains.0.contributor.status", "chains.0.contributor.arch", "chains.0.contributor.version", "chains.0.contributor.owner", "chains.0.contributor.lease_owner", "chains.0.contributor.finished_at", "chains.0.contributor.duration_ms", "chains.0.contributor.result.vet", "chains.0.project", "chains.0.audit", "chains.0.trial", "chains.0.approval", "chains.0.withdrawn", "chains.0.score.class", "chains.0.score.points", "chains.0.score.projected", "chains.0.score.ready", "chains.0.score.items.0.who", "chains.0.score.items.0.item", "chains.0.score.items.0.points", "package.blocked_at", "package.arches"] },
+        { path: story, fields: ["chains.0.contributor.id", "chains.0.contributor.status", "chains.0.contributor.arch", "chains.0.contributor.version", "chains.0.contributor.owner", "chains.0.contributor.lease_owner", "chains.0.contributor.params", "chains.0.contributor.finished_at", "chains.0.contributor.duration_ms", "chains.0.contributor.result.vet", "chains.0.project", "chains.0.audit", "chains.0.trial", "chains.0.approval", "chains.0.withdrawn", "chains.0.score.class", "chains.0.score.points", "chains.0.score.projected", "chains.0.score.ready", "chains.0.score.items.0.who", "chains.0.score.items.0.item", "chains.0.score.items.0.points", "package.blocked_at", "package.arches"] },
         { path: `/build/${F.contributorTask}`, json: false },
         { path: `/build/${F.projectTask}`, json: false },
         { path: evidence(F.contributorTask, "tests.log"), json: false },
@@ -632,7 +634,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       id: "user.build-dialog",
       page,
       anchor: ['id="packages"'],
-      script: ["st2.package.detected", "det.has_pkgbuild", 'whereOptions(FACTORY.workers, arch || "x86_64"', "go.alt", '"/builds/" + t.id', '"/build", body', "body.worker = go.pick", "body.hint"],
+      script: ["st2.package.detected", "det.has_pkgbuild", "whereOptions(FACTORY.workers, arch || ARCHES[0]", "go.alt", '"/builds/" + t.id', '"/build", body', "body.worker = go.pick", "body.hint"],
       reads: [
         { path: factory, fields: ["workers.0.arch", "workers.0.owner", "workers.0.mode", "workers.0.side", "workers.0.alive", "workers.0.agent_status", "workers.0.update"] },
         { path: story, fields: ["package.detected", "chains.0.contributor.status", "chains.0.contributor.arch", "chains.0.contributor.pinned_to"] },

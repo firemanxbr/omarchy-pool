@@ -96,7 +96,7 @@ function expectDashes(d: Ran, n: number, reason: string, sel = "#tiles", kept = 
 
 describe("the shell's api()", () => {
   const shell = (fetch: (path: string) => Promise<Response>) => {
-    const src = HELPERS.split("__POOL_URL__").join("http://pool.test").split("__RINGS_TEXT__").join("{}").split("__WICON__").join("{}").split("__LATE_AFTER_HOURS__").join("9");
+    const src = HELPERS.split("__POOL_URL__").join("http://pool.test").split("__RINGS_TEXT__").join("{}").split("__WICON__").join("{}").split("__LATE_AFTER_HOURS__").join("9").split("__PROMISED_RINGS__").join("[]").split("__ARCHES__").join('["x86_64"]').split("__SEVERITIES__").join("[]").split("__WORKER_ALIVE_MINUTES__").join("10");
     return runScript(src, { pathname: "/review", functions: ["api"], fetch }) as Ran & { api: (m: string, p: string, b?: unknown) => Promise<any> };
   };
 
@@ -302,7 +302,7 @@ describe("a list that did not answer is said, not drawn", () => {
     const d = await run("/status", { down: true, up: /^\/api\/v1\/(stats|status|cost)/ });
     await settled();
     const jobs = tiles(d, "#systiles")[0];
-    expect(jobs).toContain("Jobs running now");
+    expect(jobs).toContain("Jobs waiting now");
     expect(jobs).toContain(`the worker listing did not answer: ${INTERNAL}`);
     expect(jobs).not.toContain("worker(s) alive");
   });
