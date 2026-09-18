@@ -17,7 +17,7 @@
  * refuse in the same words. A maintainer keeps what is theirs on anyone's
  * page — revoke, own only, remove, withdraw.
  */
-import { page, servedGrey } from "./layout";
+import { page, servedGrey, workerPanels } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 
@@ -74,11 +74,12 @@ const body = (login: string) => String.raw`
       <form id="worker-form" class="form" onsubmit="return false" hidden>${servedGrey(WORKER_FORM, `only ${login} registers a worker here`)}</form>
       <div id="w-new" hidden><p class="sub">Your worker token, shown once. One command wherever the worker lives (docker or podman):</p><pre id="w-cmd"></pre></div>
     </div>
-    <div class="panel" id="wp-community" hidden><h3>Contributor's <span class="dim" style="font-size:12px;font-weight:400">their own machines: their packages, or whatever is queued when shared</span></h3><div class="table-wrap" style="border:0"><table id="w-community" class="wtable"><thead><tr></tr></thead><tbody></tbody></table></div></div>
-    <div class="panel" id="wp-review" style="margin-top:16px" hidden><h3>Review <span class="dim" style="font-size:12px;font-weight:400">the maintainers' side: builds again, publishes, audits</span></h3><div class="table-wrap" style="border:0"><table id="w-review" class="wtable"><thead><tr></tr></thead><tbody></tbody></table></div></div>
-    <div class="panel" id="wp-project" style="margin-top:16px" hidden><h3>Project <span class="dim" style="font-size:12px;font-weight:400">the pool's own jobs, on the host this maintainer keeps</span></h3><div class="table-wrap" style="border:0"><table id="w-project" class="wtable"><thead><tr></tr></thead><tbody></tbody></table></div></div>
+    ${workerPanels([
+      { kind: "community", blurb: "their own machines: their packages, or whatever is queued when shared", hidden: true },
+      { kind: "review", blurb: "the maintainers' side: builds again, publishes, audits", hidden: true },
+      { kind: "project", blurb: "the pool's own jobs, on the host this maintainer keeps", hidden: true },
+    ])}
     <p class="sub" id="w-none" hidden style="margin:0">No worker registered under this name.</p>
-    <div id="wt-legend"></div>
   </section>
 
   <section id="approvals-section" hidden>
@@ -150,13 +151,14 @@ const SCRIPT = String.raw`
     var kinds = { community: [], review: [], project: [] };
     mine.forEach(function (w) { kinds[wtKind(w)].push(w); });
     var any = false;
+    // The shell's head with one more cell, the buttons'; a panel with no row of this person's stays hidden, as does the legend when there is none.
+    wtTables(true);
     ["community", "review", "project"].forEach(function (k) {
       var panel = $("#wp-" + k), rows = kinds[k];
       panel.hidden = !rows.length; if (!rows.length) return; any = true;
-      $("#w-" + k + " thead tr").innerHTML = WT_HEAD[k] + "<th></th>";
-      pager("#w-" + k, rows, function (w) { return workerRow(w, k, workerActs(w)); }, { empty: "", text: function (w) { return [w.id, w.arch, w.version, w.agent].join(" "); } });
+      pager("#w-" + k, rows, function (w) { return workerRow(w, k, workerActs(w)); }, { empty: "", text: wtText });
     });
-    $("#w-none").hidden = any; $("#wt-legend").innerHTML = any ? WT_LEGEND : "";
+    $("#w-none").hidden = any; $("#wt-legend").hidden = !any;
   }
   // A worker's buttons, on every row for whoever looks — a revoked worker's and a project's too, grey with the state's word: the mode is the brain's to set — shared (everyone's queue) or its owner's packages only — from the worker's next claim, nothing restarts; and Revoke stops its token. Own only and Revoke are the owner's or a maintainer's, sharing the owner's word alone: the server says which, and why not, per row.
   function workerActs(w) {
@@ -439,6 +441,7 @@ const SCRIPT = String.raw`
 
 export function userHtml(login: string, poolUrl: string, version: RunningVersion): string {
   return page({
+    path: `/user/${login}`,
     title: `${login} · omarchy-pool`,
     description: `What ${login} contributes to and maintains in the pool.`,
     active: "factory",
@@ -687,8 +690,9 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       // The three panels by kind from one listing; every row — a revoked worker's and a project's too — carries Share / Own only and Revoke for whoever looks, grey with the state's word first (revoked already; a project worker has no mode) and the role's after (the owner's, and a maintainer's but for sharing, the owner's word alone), the shell's log icon beside the id the same way; the Revoke dialog is this entry's.
       id: "user.workers-tables",
       page,
+      shared: "worker-table",
       anchor: ['id="wp-community"', 'id="w-community"', 'id="wp-review"', 'id="w-review"', 'id="wp-project"', 'id="w-project"', 'id="w-none"'],
-      script: ['"/api/v1/factory?limit=10"', "w.owner === login", "wtKind(w)", "WT_HEAD[k]", "workerRow(w, k, workerActs(w))", "function workerActs(", 'workerCan(w, toShared ? "share_worker" : "own_only")', 'workerCan(w, "revoke")', "data-mode", "data-revoke", '"/mode"', 'api("DELETE", API + "/workers/" + encodeURIComponent(wid))', 'title="its own log — the lines between tasks, as it sent them"'],
+      script: ['"/api/v1/factory?limit=10"', "w.owner === login", "wtKind(w)", "wtTables(true)", "workerRow(w, k, workerActs(w))", "text: wtText", "function workerActs(", 'workerCan(w, toShared ? "share_worker" : "own_only")', 'workerCan(w, "revoke")', "data-mode", "data-revoke", '"/mode"', 'api("DELETE", API + "/workers/" + encodeURIComponent(wid))', 'title="its own log — the lines between tasks, as it sent them"'],
       reads: [{ path: factory, fields: ["workers", "workers.0.id", "workers.0.owner", "workers.0.side", "workers.0.mode", "workers.0.arch", "workers.0.alive", "workers.0.revoked_at", "workers.0.labels", "workers.0.agent_status", "workers.0.update"] }],
       acts: [
         { method: "POST", path: `/api/v1/factory/workers/${F.communityWorker}/mode`, body: { mode: "shared" }, expect: { anonymous: 401, contributor: 403, owner: 200, maintainer: 403 } },
@@ -700,8 +704,9 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
     {
       id: "user.workers-legend",
       page,
+      shared: "worker-legend",
       anchor: ['id="wt-legend"'],
-      script: ['"#wt-legend"', "WT_LEGEND"],
+      script: ["wtTables(true)", '$("#wt-legend").hidden = !any'],
       visible: EVERYONE,
     },
     {

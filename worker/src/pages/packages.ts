@@ -403,6 +403,7 @@ const PACKAGE_SCRIPT = String.raw`
 
 export function packagesHtml(poolUrl: string, version: RunningVersion): string {
   return page({
+    path: "/packages",
     title: "Packages · omarchy-pool",
     description: "Search the packages a ring serves; versions per ring, dependencies, what loads them, files.",
     active: "none",
@@ -415,6 +416,7 @@ export function packagesHtml(poolUrl: string, version: RunningVersion): string {
 
 export function packageHtml(name: string, poolUrl: string, version: RunningVersion): string {
   return page({
+    path: `/package/${name}`,
     title: `${name} · omarchy-pool`,
     description: `${name}: versions per ring, dependencies, what loads it, files.`,
     active: "none",

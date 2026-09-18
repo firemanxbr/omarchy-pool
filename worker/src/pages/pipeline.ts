@@ -315,6 +315,7 @@ __CHARTS__
 
 export function pipelineHtml(poolUrl: string, version: RunningVersion): string {
   return page({
+    path: "/pipeline",
     title: "Pipeline · omarchy-pool",
     description: "The pipeline as it runs: what is verified, promoted and checked right now, how fast maintainers decide, the charts, the cost.",
     active: "pipeline",

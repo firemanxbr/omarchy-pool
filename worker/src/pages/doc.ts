@@ -58,6 +58,7 @@ export function resolveLink(from: string, href: string): string {
 export function docHtml(chapter: MdChapter, poolUrl: string, version: RunningVersion): string {
   const body = `<h1>${chapter.label}</h1>\n<div class="md">${renderMarkdown(chapter.text, { skipTitle: true, link: (h) => resolveLink(chapter.from, h), figure: (name) => DOC_DIAGRAMS[name]?.() })}</div>`;
   return page({
+    path: `/docs/${chapter.key}`,
     title: `${chapter.label} · Documentation · omarchy-pool`,
     description: chapter.text.split("\n").find((l) => l.trim() && !l.startsWith("#"))?.slice(0, 160) ?? chapter.label,
     active: "docs",

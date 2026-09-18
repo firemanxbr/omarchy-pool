@@ -28,9 +28,18 @@ export function cookieOf(request: Request, name: string): string | null {
   return m ? decodeURIComponent(m[1]) : null;
 }
 
+/**
+ * Where the sign-in comes back to: a path on this origin, with its query
+ * (a renewal's name rides there), as the header's Sign in names the page
+ * it was pressed on. A second slash or a backslash after the first would
+ * read as another host in a Location header, and a control character
+ * anywhere (a newline, once decoded) makes the callback's Headers throw
+ * after the session was already replaced — so those fall back to the
+ * Factory, as does no path at all.
+ */
 function safeNext(url: URL): string {
   const next = url.searchParams.get("next") ?? "/factory";
-  return next.startsWith("/") && !next.startsWith("//") ? next : "/factory";
+  return /^\/(?![\/\\])[^\x00-\x1f\x7f]*$/.test(next) ? next : "/factory";
 }
 
 export async function handleAuthStart(url: URL, env: Env): Promise<Response> {

@@ -14,6 +14,7 @@ const BODY = String.raw`
 
 export function glossaryHtml(poolUrl: string, version: RunningVersion): string {
   return page({
+    path: "/docs/glossary",
     title: "Glossary · Documentation · omarchy-pool",
     description: "The words on the omarchy-pool pages, one line each.",
     active: "docs",

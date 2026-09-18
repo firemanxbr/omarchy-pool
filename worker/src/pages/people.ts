@@ -1,10 +1,13 @@
 /**
  * The people and the machines: every maintainer named in
  * factory/MAINTAINERS.toml, every contributor with a registered package or a
- * worker, every worker registration that is not revoked. Linked from the
- * Pool's "Made in the open" numbers; each name leads to its profile.
+ * worker, every worker registration that is not revoked — the workers in
+ * the shell's rows, by whose they are (the project's, the review ones, the
+ * contributors'), so a worker reads here as it reads on the Workers page
+ * and on its owner's. Linked from the footer and from the Pool's "Made in
+ * the open" numbers; each name leads to its profile.
  */
-import { page } from "./layout";
+import { page, workerPanels } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 
@@ -20,26 +23,32 @@ const BODY = String.raw`
   </section>
 
   <section id="contributors">
-    <div class="h2row"><h2>Contributors</h2><a class="more-link" href="/factory">Bring a package →</a></div>
+    <div class="h2row"><h2>Contributors</h2><a class="more-link" href="/request">Bring a package →</a></div>
     <p class="sub">Anyone who registered a package or a worker. Their builds are evidence; a maintainer decides.</p>
     <div class="people" id="contributors-list"><span class="muted">loading…</span></div>
   </section>
 
   <section id="workers">
-    <div class="h2row"><h2>Workers</h2><a class="more-link" href="/docs/workers">Run one →</a></div>
-    <p class="sub">The machines that build: the project's (trusted by a maintainer) and contributors' own. <em>Ready</em> means a heartbeat in the last ten minutes and, for a worker that builds or audits, an agent that answered its last probe — a key set is not an agent that works.</p>
-    <div class="table-wrap"><table id="workers-table"><thead><tr><th>Worker</th><th>Arch</th><th>Side</th><th>Owner</th><th>Agent</th><th>Ready</th><th>Now</th><th>Last seen</th><th>Done / failed</th></tr></thead><tbody></tbody></table></div>
+    <div class="h2row"><h2>Workers</h2><a class="more-link" href="/workers">Every worker, how busy →</a></div>
+    <p class="sub">Every registration, seen lately or not, its state in one word.</p>
+    ${workerPanels([
+      { kind: "project", blurb: "the pool's own jobs, on the host a maintainer keeps" },
+      { kind: "review", blurb: "the maintainers' side: builds again, publishes, audits — trusted on two maintainers' word" },
+      { kind: "community", blurb: "their own machines: their packages, or whatever is queued when shared" },
+    ])}
   </section>
 `;
 
 const SCRIPT = String.raw`
-  skeletonTiles("#tiles", 4);
+  skeletonTiles("#tiles", 4); wtTables();
+  // The four reads and the session start together; the page draws once both have answered, since the one thing on a worker's row that depends on who is looking — the log icon, live for its owner and the maintainers, grey for everyone else — is drawn from the session.
   Promise.all([
     busy(fetch("/api/v1/factory/maintainers")).then(function (r) { return r.json(); }).catch(function () { return { maintainers: [] }; }),
     busy(fetch("/api/v1/factory/packages")).then(function (r) { return r.json(); }).catch(function () { return { packages: [] }; }),
-    busy(fetch("/api/v1/factory")).then(function (r) { return r.json(); }).catch(function () { return { workers: [] }; }),
+    busy(fetch("/api/v1/factory?limit=10")).then(function (r) { return r.json(); }).catch(function () { return { workers: [] }; }),
     busy(fetch("/api/v1/factory/blocks")).then(function (r) { return r.json(); }).catch(function () { return { contributors: [] }; })
-  ]).then(function (res) {
+  ]).then(function (res) { whoami(function () { draw(res); }); });
+  function draw(res) {
     var listed = res[0].maintainers || [], pkgs = res[1].packages || [], workers = res[2].workers || [], blocked = {};
     (res[3].contributors || []).forEach(function (b) { blocked[b.login] = b.blocked_reason || ""; });
     // Maintainers: per login, since when.
@@ -49,11 +58,12 @@ const SCRIPT = String.raw`
     var contrib = {};
     pkgs.forEach(function (p) { if (p.owner && !maint[p.owner]) { var c = contrib[p.owner] = contrib[p.owner] || { packages: 0, landed: 0, workers: 0 }; c.packages++; if (p.status === "approved" || p.status === "published") c.landed++; } });
     workers.forEach(function (w) { if (w.owner && !maint[w.owner]) { var c = contrib[w.owner] = contrib[w.owner] || { packages: 0, landed: 0, workers: 0 }; c.workers++; } });
-    var online = workers.filter(function (w) { return w.alive; }), ready = workers.filter(function (w) { return w.ready; });
+    // Alive is a heartbeat in the last ten minutes — the word and the number the Pool's tile sends a reader here with, and the Workers page's first tile; ready is alive and, where the work needs one, an agent that answered — the listing's own words.
+    var alive = workers.filter(function (w) { return w.alive; }), ready = workers.filter(function (w) { return w.ready; });
     setTiles("#tiles", [
       ["Maintainers", num(Object.keys(maint).length), "every one reviews everything"],
       ["Contributors", num(Object.keys(contrib).length), num(pkgs.length) + " packages requested"],
-      ["Workers ready", num(ready.length), num(online.length) + " online · " + num(workers.length) + " registered · " + num(ready.filter(function (w) { return w.side === "omarchy"; }).length) + " the project's", ready.length < online.length ? "warn" : ""],
+      ["Workers alive", num(alive.length) + " / " + num(workers.length), num(ready.length) + " ready · " + num(ready.filter(function (w) { return w.side === "omarchy"; }).length) + " the project's", ready.length < alive.length ? "warn" : ""],
       ["Community packages", num(pkgs.filter(function (p) { return p.status === "approved" || p.status === "published"; }).length), "approved by a maintainer, built by the project"]
     ]);
     $("#maintainers-list").innerHTML = Object.keys(maint).sort().map(function (m) { return personChip(m, "maintainer", "since " + esc(ago(maint[m]))); }).join("") || '<span class="muted">none yet</span>';
@@ -64,32 +74,23 @@ const SCRIPT = String.raw`
       var extra = esc(bits.join(" · "));
       if (c in blocked) extra += (extra ? " " : "") + '<span class="pill error" title="' + esc(blocked[c]) + '">blocked</span>';
       return personChip(c, "contributor", extra);
-    }).join("") || '<span class="muted">be the first — <a href="/factory">bring a package</a></span>';
-    // Ready means: alive, and — for a worker that builds or audits — an
-    // agent that answered the last probe. A key set is not an agent that
-    // works; a worker whose agent is down is shown, and gets no agent work.
-    var tb = $("#workers-table tbody");
-    tb.innerHTML = workers.map(function (w) {
-      var where = w.labels && w.labels.where ? ' <span class="dim">· ' + esc(String(w.labels.where)) + '</span>' : '';
-      var kinds = w.kinds || [], needsAgent = kinds.indexOf("audit") >= 0 || (kinds.indexOf("build") >= 0 && w.side !== "omarchy");
-      var agent = !w.agent ? '<span class="dim">none</span>' : '<span class="mono" style="font-size:12px">' + esc(w.agent) + '</span>' +
-        (w.agent_status === "ok" ? ' <span class="pill ok" title="answered the probe ' + esc(w.agent_checked_at ? ago(w.agent_checked_at) : "") + '">answers</span>' :
-         w.agent_status === "error" ? ' <span class="pill error" title="' + esc(w.agent_error || "") + '">not answering</span>' : ' <span class="pill none">not probed</span>');
-      var readyCell = !w.alive ? '<span class="pill none">offline</span>' : w.ready ? '<span class="pill ok">ready</span>' : '<span class="pill error" title="' + esc(w.agent_error || (needsAgent ? "builds and audits need an agent that answers" : "")) + '">not ready</span>';
-      var now = !w.alive ? '<span class="dim">—</span>' : w.current_task ? '<span class="pill warn">building #' + esc(String(w.current_task)) + '</span>' : '<span class="dim">idle · ' + esc(kinds.length ? kinds.join(", ") : (w.side === "omarchy" ? "jobs" : "builds")) + '</span>';
-      return '<tr><td>' + workerName(w) + where + '</td><td>' + esc(w.arch) + '</td><td>' + (w.side === "omarchy" ? '<span class="pill ok">project</span>' : '<span class="pill none">community</span>') + '</td>' +
-        '<td>' + (w.owner ? '<a href="/user/' + encodeURIComponent(w.owner) + '">' + esc(w.owner) + '</a>' : '<span class="dim">—</span>') + '</td>' +
-        '<td>' + agent + '</td><td>' + readyCell + '</td><td>' + now + '</td>' +
-        '<td class="dim">' + ago(w.last_seen) + '</td><td class="num">' + num(w.builds_done || 0) + ' / ' + num(w.builds_failed || 0) + '</td></tr>';
-    }).join("") || '<tr><td colspan="9" class="muted">no worker registered yet</td></tr>';
-  });
+    }).join("") || '<span class="muted">be the first — <a href="/request">bring a package</a></span>';
+    // The workers, by whose they are, in the shell's rows: every registration the listing has, alive or not.
+    var kinds = { project: [], review: [], community: [] };
+    workers.forEach(function (w) { kinds[wtKind(w)].push(w); });
+    pager("#w-project", kinds.project, function (w) { return workerRow(w, "project"); }, { empty: "no project worker registered", text: wtText });
+    pager("#w-review", kinds.review, function (w) { return workerRow(w, "review"); }, { empty: "no review worker registered", text: wtText });
+    pager("#w-community", kinds.community, function (w) { return workerRow(w, "community"); }, { empty: "no contributor's worker registered yet", text: wtText });
+    endSkeleton();
+  }
 `;
 
 export function peopleHtml(poolUrl: string, version: RunningVersion): string {
   return page({
+    path: "/people",
     title: "People · omarchy-pool",
     description: "The maintainers, contributors and workers of the Omarchy pool — everyone on the record.",
-    active: "pool",
+    active: "none",
     body: BODY,
     script: SCRIPT,
     poolUrl,
@@ -99,11 +100,15 @@ export function peopleHtml(poolUrl: string, version: RunningVersion): string {
 
 /**
  * What /people is made of.
- * The page is role-blind: four public reads, no act, and the same tiles,
- * chips and table for everyone. The section ids are the targets the Pool's
- * "Made in the open" tiles link to, so each section head keeps its anchor.
+ * Four public reads, no act, and the same tiles, chips and tables for
+ * everyone. The worker tables are the shell's rows by kind, as on the
+ * Workers page and a person's; the log icon on a row is the one thing here
+ * that changes with the viewer — live for the worker's owner and the
+ * maintainers, grey for everyone else, never dropped. The section ids are
+ * the targets the Pool's "Made in the open" tiles link to, so each section
+ * head keeps its anchor.
  */
-export const PEOPLE_COMPONENTS = (_F: Fixture): Component[] => [
+export const PEOPLE_COMPONENTS = (F: Fixture): Component[] => [
   {
     id: "people.hero",
     page: "/people",
@@ -114,11 +119,11 @@ export const PEOPLE_COMPONENTS = (_F: Fixture): Component[] => [
     id: "people.tiles",
     page: "/people",
     anchor: ['id="tiles"'],
-    script: ['skeletonTiles("#tiles", 4)', 'setTiles("#tiles"', '"Workers ready"', '"Community packages"', 'w.side === "omarchy"'],
+    script: ['skeletonTiles("#tiles", 4)', 'setTiles("#tiles"', '"Workers alive"', '" ready · "', '" the project\'s"', '"Community packages"', 'w.side === "omarchy"'],
     reads: [
       { path: "/api/v1/factory/maintainers", fields: ["maintainers", "maintainers.0.login"] },
       { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.owner", "packages.0.status"] },
-      { path: "/api/v1/factory", fields: ["workers", "workers.0.owner", "workers.0.alive", "workers.0.ready", "workers.0.side"] },
+      { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.owner", "workers.0.alive", "workers.0.ready", "workers.0.side"] },
     ],
     visible: EVERYONE,
   },
@@ -139,17 +144,17 @@ export const PEOPLE_COMPONENTS = (_F: Fixture): Component[] => [
   {
     id: "people.contributors-head",
     page: "/people",
-    anchor: ['<section id="contributors">', 'href="/factory">Bring a package →</a>'],
+    anchor: ['<section id="contributors">', 'href="/request">Bring a package →</a>'],
     visible: EVERYONE,
   },
   {
     id: "people.contributors-list",
     page: "/people",
     anchor: ['id="contributors-list"'],
-    script: ['"/api/v1/factory/packages"', '"/api/v1/factory"', '"#contributors-list"', 'p.status === "approved" || p.status === "published"', 'personChip(c, "contributor"'],
+    script: ['"/api/v1/factory/packages"', '"/api/v1/factory?limit=10"', '"#contributors-list"', 'p.status === "approved" || p.status === "published"', 'personChip(c, "contributor"', 'href="/request">bring a package</a>'],
     reads: [
       { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.owner", "packages.0.status"] },
-      { path: "/api/v1/factory", fields: ["workers", "workers.0.owner"] },
+      { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.owner"] },
       { path: "/api/v1/factory/maintainers", fields: ["maintainers", "maintainers.0.login"] },
       { path: "/api/v1/factory/blocks", fields: ["contributors"] },
     ],
@@ -165,26 +170,56 @@ export const PEOPLE_COMPONENTS = (_F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
+    // The section's one link is the page whose tables these are: the Workers page has the load, the minutes and the ones not seen recently.
     id: "people.workers-head",
     page: "/people",
-    anchor: ['<section id="workers">', 'href="/docs/workers">Run one →</a>', "<em>Ready</em> means a heartbeat in the last ten minutes"],
+    anchor: ['<section id="workers">', 'href="/workers">Every worker, how busy →</a>', "Every registration, seen lately or not, its state in one word."],
     visible: EVERYONE,
   },
   {
+    // The three tables are one component — the same read, the shell's panels, head and row per kind — as on the Workers page and a person's.
     id: "people.workers-table",
     page: "/people",
-    anchor: ['id="workers-table"', "<th>Ready</th><th>Now</th><th>Last seen</th><th>Done / failed</th>"],
-    script: ['"/api/v1/factory"', '"#workers-table tbody"', "w.agent_status", "w.current_task", "w.builds_failed", 'colspan="9"'],
+    shared: "worker-table",
+    anchor: ['id="w-project"', 'id="w-review"', 'id="w-community"'],
+    script: ['"/api/v1/factory?limit=10"', 'wtTables()', '"#w-project"', '"#w-review"', '"#w-community"', "kinds[wtKind(w)]", 'workerRow(w, "project")', 'workerRow(w, "review")', 'workerRow(w, "community")', "text: wtText"],
     reads: [
       {
-        path: "/api/v1/factory",
+        path: "/api/v1/factory?limit=10",
         fields: [
-          "workers", "workers.0.id", "workers.0.owner", "workers.0.arch", "workers.0.labels", "workers.0.side", "workers.0.kinds",
+          "workers", "workers.0.id", "workers.0.owner", "workers.0.side", "workers.0.trust", "workers.0.labels", "workers.0.hostname", "workers.0.kinds", "workers.0.trusted_by", "workers.0.trust_proposed_by",
+          "workers.0.alive", "workers.0.last_seen", "workers.0.current_task", "workers.0.ready", "workers.0.update.required", "workers.0.update.latest",
+          "workers.0.arch", "workers.0.version", "workers.0.mode", "workers.0.packages",
           "workers.0.agent", "workers.0.agent_status", "workers.0.agent_checked_at", "workers.0.agent_error",
-          "workers.0.alive", "workers.0.ready", "workers.0.current_task", "workers.0.last_seen", "workers.0.builds_done", "workers.0.builds_failed",
+          "workers.0.usage", "workers.0.usage_at", "workers.0.builds_done", "workers.0.builds_failed",
+          "workers.0.last_task", "workers.0.last_task.id", "workers.0.last_task.kind", "workers.0.last_task.name", "workers.0.last_task.status", "workers.0.last_task.at",
         ],
       },
     ],
+    visible: EVERYONE,
+  },
+  {
+    // The shell's log icon on every row: live for the worker's owner and the maintainers, grey with the pool's refusal for everyone else — so the rows are drawn once the session is known.
+    id: "people.log",
+    page: "/people",
+    anchor: ['id="w-project"', 'id="w-community"'],
+    script: ["workerRow(w", "whoami(function () { draw(res); })"],
+    reads: [
+      { path: `/api/v1/factory/workers/${F.worker}/log`, status: 401 },
+      { path: `/api/v1/factory/workers/${F.worker}/log`, as: "contributor", status: 403 },
+      { path: `/api/v1/factory/workers/${F.worker}/log`, as: "owner", status: 403 },
+      { path: `/api/v1/factory/workers/${F.communityWorker}/log`, as: "owner", fields: ["id", "log", "at"] },
+      { path: `/api/v1/factory/workers/${F.worker}/log`, as: "maintainer", fields: ["id", "log", "at"] },
+      { path: `/api/v1/factory/workers/${F.communityWorker}/log`, as: "maintainer", fields: ["id", "log", "at"] },
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "people.legend",
+    page: "/people",
+    shared: "worker-legend",
+    anchor: ['id="wt-legend"'],
+    script: ["wtTables()"],
     visible: EVERYONE,
   },
 ];

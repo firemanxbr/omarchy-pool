@@ -114,6 +114,7 @@ const SCRIPT = String.raw`
 
 export function getStartedHtml(poolUrl: string, version: RunningVersion): string {
   return page({
+    path: "/docs/get-started",
     title: "Get started · omarchy-pool",
     description: "Point pacman at the omarchy-pool: the database key, the repository sections for a ring, and the optional omarchy-cli.",
     active: "docs",

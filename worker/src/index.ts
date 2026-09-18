@@ -188,7 +188,12 @@ export default {
       if (path.startsWith("/pool/") && (method === "GET" || method === "HEAD")) {
         return await handleStatic(decodeURIComponent(path.slice("/pool/".length)), request, env);
       }
-      if (path === "/" || path === "/index.html") return html(overviewHtml(env.POOL_URL, version(env)));
+      if (path === "/") return html(overviewHtml(env.POOL_URL, version(env)));
+      // The two old addresses of a door are redirects, not a second page: one page, one address, and a bookmark still lands.
+      if (path === "/index.html" || path === "/contribute") {
+        url.pathname = path === "/contribute" ? "/factory" : "/";
+        return Response.redirect(url.toString(), 301);
+      }
       // One command to join a ring: the script, read by people before they pipe it into sudo.
       if (path === "/setup" || path === "/setup.sh") return new Response(setupScript(url.origin, env.POOL_URL.replace(/\/$/, "")), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300" } });
       // One command to run a worker: the script (read before it is run) and the compose file it writes.
@@ -201,6 +206,15 @@ export default {
       if (path === "/auth/me" && method === "GET") {
         const c = await contributorOf(request, env);
         return c ? json({ login: c.login, name: c.name, avatar_url: c.avatar_url, role: c.role }, 200, { "cache-control": "no-store" }) : json({ error: "not signed in" }, 401, { "cache-control": "no-store" });
+      }
+      // The reader's own page: /me is the address the Factory's gate and the
+      // sign-in name before the login is known. With a session it is
+      // /user/<login>; without one it is the sign-in, which comes back here.
+      // The answer depends on the cookie, so no cache keeps it; the Location
+      // is relative, as the sign-in's own redirects are.
+      if (path === "/me" && (method === "GET" || method === "HEAD")) {
+        const c = await contributorOf(request, env);
+        return new Response(null, { status: 302, headers: { location: c ? `/user/${encodeURIComponent(c.login)}` : "/auth/github?next=/me", "cache-control": "no-store" } });
       }
       // Documentation: one section, its chapters under /docs; the old addresses redirect.
       if (path === "/docs" || path === "/docs/") return html(docsHtml(env.POOL_URL, version(env)));
@@ -227,7 +241,6 @@ export default {
       if (path === "/factory") return html(factoryPageHtml(env.POOL_URL, version(env)));
       if (path === "/people") return html(peopleHtml(env.POOL_URL, version(env)));
       if (path === "/pipeline") return html(pipelineHtml(env.POOL_URL, version(env)));
-      if (path === "/contribute") return html(factoryPageHtml(env.POOL_URL, version(env)));
       if (path === "/review") return html(reviewHtml(env.POOL_URL, version(env)));
       if (path === "/request") return html(requestHtml(env.POOL_URL, version(env)));
       const user = path.match(/^\/user\/([A-Za-z0-9-]{1,39})$/);

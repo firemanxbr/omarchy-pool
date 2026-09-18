@@ -225,6 +225,7 @@ __CHARTS__
 
 export function statusHtml(poolUrl: string, version: RunningVersion): string {
   return page({
+    path: "/status",
     title: "Status · omarchy-pool",
     description: "Is the pool serving, is it being fed, and did anything go wrong recently.",
     active: "none",

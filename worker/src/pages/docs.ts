@@ -35,6 +35,7 @@ const BODY = String.raw`
 
 export function docsHtml(poolUrl: string, version: RunningVersion): string {
   return page({
+    path: "/docs",
     title: "Documentation · omarchy-pool",
     description: "How to use the pool, how to build for it, how it works and who decides what — one map, one search.",
     active: "docs",

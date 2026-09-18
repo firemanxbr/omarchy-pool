@@ -100,6 +100,7 @@ __CHARTS__
 
 export function securityHtml(poolUrl: string, version: RunningVersion): string {
   return page({
+    path: "/security",
     title: "Security · omarchy-pool",
     description: "Open advisories on what each ring serves, with confidence levels, exploitation data and what they expose through dependencies.",
     active: "none",

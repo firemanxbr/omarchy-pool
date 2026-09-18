@@ -194,6 +194,7 @@ const SCRIPT = String.raw`
 
 export function howItWorksHtml(poolUrl: string, version: RunningVersion): string {
   return page({
+    path: "/docs/how-it-works",
     title: "How it works · omarchy-pool",
     description: "Where every package comes from, what is checked before it reaches you, what protects you, and what the pool does for contributors and maintainers.",
     active: "docs",

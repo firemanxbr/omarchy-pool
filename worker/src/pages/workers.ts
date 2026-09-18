@@ -10,7 +10,7 @@
  * last did. Public, from /api/v1/factory and /api/v1/stats. Running one is
  * a chapter of the docs.
  */
-import { page } from "./layout";
+import { page, workerPanels } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
 import { CHARTS } from "./charts";
 import type { RunningVersion } from "../meta";
@@ -33,13 +33,11 @@ const BODY = String.raw`
 
   <section style="margin-top:44px">
     <div class="h2row"><h2>Every worker</h2><label class="dim" style="font-size:13px"><input type="checkbox" id="all-workers"> show workers not seen recently</label></div>
-    <div class="panel" style="margin-top:12px"><h3>Project <span class="dim" style="font-size:12px;font-weight:400">the pool's own jobs — sync, render, promote, health, security, gc — on the host a maintainer keeps</span></h3>
-      <div class="table-wrap" style="border:0"><table id="w-project" class="wtable"><thead><tr></tr></thead><tbody></tbody></table></div></div>
-    <div class="panel" style="margin-top:16px"><h3>Review <span class="dim" style="font-size:12px;font-weight:400">the maintainers' side: builds again, publishes, audits — the agent through a proxy that holds the key</span></h3>
-      <div class="table-wrap" style="border:0"><table id="w-review" class="wtable"><thead><tr></tr></thead><tbody></tbody></table></div></div>
-    <div class="panel" style="margin-top:16px"><h3>Contributors <span class="dim" style="font-size:12px;font-weight:400">their own machines: their packages, or whatever is queued when shared</span></h3>
-      <div class="table-wrap" style="border:0"><table id="w-community" class="wtable"><thead><tr></tr></thead><tbody></tbody></table></div></div>
-    <div id="wt-legend"></div>
+    ${workerPanels([
+      { kind: "project", blurb: "the pool's own jobs — sync, render, promote, health, security, gc — on the host a maintainer keeps" },
+      { kind: "review", blurb: "the maintainers' side: builds again, publishes, audits — the agent through a proxy that holds the key" },
+      { kind: "community", blurb: "their own machines: their packages, or whatever is queued when shared" },
+    ])}
   </section>
 
   <div class="gate"><div><h3>Run one of your own</h3><p>The signed image, Docker Desktop or Podman, a token from your <a href="/factory">workspace</a>: it builds only your packages, with your agent, and your builds skip the queue. Share it, and it takes whatever is queued.</p></div><a class="btn ghost" href="/docs/workers">Run a worker →</a></div>
@@ -48,8 +46,7 @@ const BODY = String.raw`
 const SCRIPT = String.raw`
 __CHARTS__
   var FACTORY = null, STATS = null;
-  skeletonTiles("#tiles", 4); skeletonRows("#w-project", 8, 2); skeletonRows("#w-review", 9, 2); skeletonRows("#w-community", 10, 2);
-  $("#w-project thead tr").innerHTML = WT_HEAD.project; $("#w-review thead tr").innerHTML = WT_HEAD.review; $("#w-community thead tr").innerHTML = WT_HEAD.community; $("#wt-legend").innerHTML = WT_LEGEND;
+  skeletonTiles("#tiles", 4); wtTables();
   // The kind's colour on every chart of the page: the card's line, the bar per worker, the legend.
   var COLOR = { project: C.green, review: C.blue, community: C.lilac };
   // What each kind finished per day over the last week, from the stats series: the pool's jobs are the
@@ -106,10 +103,9 @@ __CHARTS__
     }), { w: 150, html: true }) + '<div class="legend"><span><i style="background:' + COLOR.project + '"></i>project</span><span><i style="background:' + COLOR.review + '"></i>review</span><span><i style="background:' + COLOR.community + '"></i>contributors</span></div>' : '<div class="empty">no worker alive, nothing leased in the last day</div>';
     // The three tables.
     var seen = function (ws) { return ws.filter(function (w) { return showAll || w.alive; }); };
-    var text = function (w) { return [w.id, w.owner, w.arch, w.version, w.mode, w.agent, w.trusted_by, w.last_task && w.last_task.name, JSON.stringify(w.labels || {})].join(" "); };
-    pager("#w-project", seen(kinds.project), function (w) { return workerRow(w, "project"); }, { empty: showAll ? "no project worker registered" : "no project worker alive — the host is off; pool jobs wait", text: text });
-    pager("#w-review", seen(kinds.review), function (w) { return workerRow(w, "review"); }, { empty: showAll ? "no review worker registered" : "no review worker alive — the project's builds and the audits wait", text: text });
-    pager("#w-community", seen(kinds.community), function (w) { return workerRow(w, "community"); }, { empty: showAll ? "no contributor's worker registered yet" : "no contributor's worker alive right now", text: text });
+    pager("#w-project", seen(kinds.project), function (w) { return workerRow(w, "project"); }, { empty: showAll ? "no project worker registered" : "no project worker alive — the host is off; pool jobs wait", text: wtText });
+    pager("#w-review", seen(kinds.review), function (w) { return workerRow(w, "review"); }, { empty: showAll ? "no review worker registered" : "no review worker alive — the project's builds and the audits wait", text: wtText });
+    pager("#w-community", seen(kinds.community), function (w) { return workerRow(w, "community"); }, { empty: showAll ? "no contributor's worker registered yet" : "no contributor's worker alive right now", text: wtText });
     endSkeleton();
   }
   // Worker minutes per day, from the jobs series.
@@ -127,6 +123,7 @@ __CHARTS__
 
 export function workersHtml(poolUrl: string, version: RunningVersion): string {
   return page({
+    path: "/workers",
     title: "Workers · omarchy-pool",
     description: "Every worker building for the pool, by kind — the project's, the review ones two maintainers vouched for, the contributors' — alive or gone, how busy, what it built.",
     active: "none",
@@ -204,8 +201,9 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
   {
     id: "workers.table",
     page: "/workers",
+    shared: "worker-table",
     anchor: ['id="w-project"', 'id="w-review"', 'id="w-community"', 'id="all-workers"'],
-    script: ['"/api/v1/factory?limit=10"', '"#w-project"', '"#w-review"', '"#w-community"', '"#all-workers"', "showAll", "WT_HEAD.project", "workerRow(w"],
+    script: ['"/api/v1/factory?limit=10"', 'wtTables()', '"#w-project"', '"#w-review"', '"#w-community"', '"#all-workers"', "showAll", "workerRow(w", "text: wtText"],
     reads: [
       {
         path: "/api/v1/factory?limit=10",
@@ -240,8 +238,9 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
   {
     id: "workers.legend",
     page: "/workers",
+    shared: "worker-legend",
     anchor: ['id="wt-legend"'],
-    script: ['"#wt-legend"', "WT_LEGEND"],
+    script: ["wtTables()"],
     visible: EVERYONE,
   },
   {

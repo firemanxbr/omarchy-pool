@@ -58,6 +58,7 @@ const SCRIPT = String.raw`
 
 export function docsSecurityHtml(poolUrl: string, version: RunningVersion): string {
   return page({
+    path: "/docs/security",
     title: "Security · Documentation · omarchy-pool",
     description: "The five security feeds, how sure a match is, exposure through the dependency graph, and the fast-track.",
     active: "docs",

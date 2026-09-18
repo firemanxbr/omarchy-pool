@@ -245,6 +245,7 @@ const SCRIPT = String.raw`
 
 export function buildHtml(id: number, poolUrl: string, version: RunningVersion): string {
   return page({
+    path: `/build/${id}`,
     title: `Build #${id} · omarchy-pool`,
     description: "One build, whole: what happened and when, the machine that built it and what it cost, every piece of evidence read in place.",
     active: "review",
