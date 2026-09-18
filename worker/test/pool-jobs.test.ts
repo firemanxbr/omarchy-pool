@@ -13,10 +13,14 @@
  * unchanged" with an empty label, task 501 among them, which had uploaded
  * six packages and created release 346. This file runs the served page's
  * two functions over the fixture's one done job of every kind
- * (test/fixture.ts, F.jobs: params and result copied from the writers) and
+ * (test/fixture.ts, F.jobs: params and result copied from the writers —
+ * the audit, the trial and the publish run for real through the API) and
  * expects the words; the manifest (pipeline.tasks-table) pins the same
  * fields on the same rows, so a rename fails by the field's name and this
- * file by the sentence.
+ * file by the sentence. A release is named one way in the column: its id
+ * first, the ring's head "(edge #346)" after it where the result carries
+ * the sequence — the sync rows said "release edge #346" beside a promotion's
+ * "release 512", two numbers a reader could not tell apart.
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -60,7 +64,7 @@ describe("the Pipeline's table words every pool job from the shapes the jobs pos
     const sum = (k: string) => sources.reduce((n, s) => n + (s[k] || 0), 0);
     expect(sum("uploaded"), "core's two packages, the fixture's journal line").toBe(2);
     expect(paramsLabel(t)).toBe(`${F.arch} · ${sources.length} sources`);
-    expect(jobResult(t)).toBe(`upstream ${sum("upstream_total")} · uploaded 2 · removed 0 · failed 1 · ${sources[sources.length - 1].source} down · release edge #${t.result.releases[0].seq}`);
+    expect(jobResult(t)).toBe(`upstream ${sum("upstream_total")} · uploaded 2 · removed 0 · failed 1 · ${sources[sources.length - 1].source} down · release ${t.result.releases[0].id} (edge #${t.result.releases[0].seq})`);
     // Production today, before this: every sync row read the one-source shape over the batched result.
     expect(jobResult(t)).not.toContain("upstream 0");
   });
@@ -78,6 +82,26 @@ describe("the Pipeline's table words every pool job from the shapes the jobs pos
     expect(jobResult(tasks.gc)).toBe("kept the last 3 releases per ring");
   });
 
+  it("the three jobs on a build: the audit's report, the trial's verdict, the file the publish put in the pool — every done row in words, none its JSON", () => {
+    // w1 ran these for ours in the fixture; the Pipeline lists them among the pool's jobs and read their JSON, cut at 90 characters, until 2026-09-18.
+    // The three are on one build, the project's build of ours: its id is in each job's params, as the brain queued them.
+    const built = tasks.audit.params.task as number;
+    expect(built).toBeGreaterThan(0);
+    expect(tasks.trial.params.task).toBe(built);
+    expect(tasks.publish.params.task).toBe(built);
+    expect(paramsLabel(tasks.audit)).toBe(`${F.publishedPkg} · build #${built}`);
+    expect(jobResult(tasks.audit)).toBe("ok · 0 findings — nothing to change");
+    expect(paramsLabel(tasks.trial)).toBe(`${F.publishedPkg} · 2.0-1 · build #${built}`);
+    expect(jobResult(tasks.trial)).toBe("installs · 1 package");
+    expect(paramsLabel(tasks.publish)).toBe(`${F.publishedPkg} · ${tasks.publish.params.version} · build #${built}`);
+    expect(jobResult(tasks.publish)).toBe(`published ${F.publishedPkg}-2.0-1-${F.arch}.pkg.tar.zst`);
+    // The shapes work.rs posts for the other outcomes: an audit with findings, a trial that failed, a publish the fast lane carried on, one with the repos it rendered.
+    expect(jobResult({ kind: "audit", result: { verdict: "warn", summary: "one thing to look at", findings: [{ severity: "medium" }] } })).toBe("warn · 1 finding — one thing to look at");
+    expect(jobResult({ kind: "trial", result: { verdict: "install failed", packages: ["a", "b"], task: 3 } })).toBe("trial install failed · 2 packages");
+    expect(jobResult({ kind: "publish", result: { sha256: "0", filename: "a-1-1-x86_64.pkg.tar.zst", version: "1-1", rendered: ["omarchy-factory-edge"], task: 3, fast_track: ["rc", "stable"] } })).toBe("published a-1-1-x86_64.pkg.tar.zst · fast-tracked to rc, stable · rendered omarchy-factory-edge");
+    for (const [kind, t] of Object.entries(tasks)) expect(jobResult(t), `${kind} reads as JSON`).not.toMatch(/^\{/);
+  });
+
   it("the security run, the weekly verify, the relayout, the enqueue", () => {
     expect(jobResult(tasks.security)).toBe("1 vulnerable / 0 fixed matches · 1 in KEV · fast-tracked into stable (1 fix)");
     expect(jobResult(tasks.verify)).toBe("6 objects · all verify");
@@ -90,7 +114,8 @@ describe("the Pipeline's table words every pool job from the shapes the jobs pos
     // work.rs: a sync queued by hand for one source (src/jobs.ts) answers with the source's own report; `release` is [id, seq] or null.
     const one = { kind: "sync", params: { source: "core", arch: "x86_64", ring: "edge" }, result: { upstream_total: 5, uploaded: 2, already_indexed: 3, removed: 0, deferred: 0, failed: 0, release: [7, 3], rendered: ["omarchy-core-edge"] } };
     expect(paramsLabel(one)).toBe("core/x86_64 → edge");
-    expect(jobResult(one)).toBe("upstream 5 · uploaded 2 · removed 0 · release #3");
+    expect(jobResult(one)).toBe("upstream 5 · uploaded 2 · removed 0 · release 7 (edge #3)");
+    expect(jobResult({ ...one, params: { source: "core", arch: "x86_64" } })).toBe("upstream 5 · uploaded 2 · removed 0 · release 7 (#3)");
     expect(jobResult({ ...one, result: { ...one.result, release: null } })).toBe("upstream 5 · uploaded 2 · removed 0 · unchanged");
     expect(jobResult({ ...tasks.sync, result: { ...tasks.sync.result, releases: [] } })).toContain(" · unchanged");
     // work.rs: the gate's three other verdicts.

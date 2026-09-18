@@ -126,7 +126,7 @@ export const PEOPLE_COMPONENTS = (F: Fixture): Component[] => [
     id: "people.tiles",
     page: "/people",
     anchor: ['id="tiles"'],
-    // The worker counts are the shell's (workerCounts over the listing), the same the Pool's and the Workers page's tiles say; the maintainer set the shell's one read. Over lists that did not answer the four read "—" with the reason (the shell's tilesUnanswered).
+    // The worker counts are the shell's (workerCounts over the listing), the same the Pool's and the Workers page's tiles say; the maintainer set the shell's one read. Over lists that did not answer the four read "—" (the shell's tilesUnanswered) and the two lists say why.
     script: ['skeletonTiles("#tiles", 4)', 'setTiles("#tiles", tilesOf(maint, contrib, pkgs, wc))', 'setTiles("#tiles", tilesUnanswered(tilesOf({}, {}, [], workerCounts([])), down))', "workerCounts(workers)", '"Workers alive"', "wc.alive", "wc.registered", '" ready · "', "wc.byKind.project.ready + wc.byKind.review.ready", '" the project\'s"', '"Community packages"', "p.landed"],
     reads: [
       { path: "/api/v1/factory/maintainers", fields: ["maintainers", "maintainers.0.login"] },

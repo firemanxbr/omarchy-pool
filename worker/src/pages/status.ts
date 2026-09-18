@@ -75,9 +75,9 @@ const SCRIPT = String.raw`
   // The hours a source may go without a sync before it is late: the shell's one number (LATE_MS), the one the pipeline pill counts with, so the sentence over the table and the pill never name two.
   $("#late-after").textContent = Math.round(LATE_MS / 3600e3);
 __CHARTS__
-  // The workers as every other page counts them — the shell's workerCounts over the live listing, not the snapshot's count from up to half an hour ago: read once per poll, the tile drawn again when it answers.
-  var WC = null;
-  function loadWorkers(d) { api("GET", "/api/v1/factory?limit=10").then(function (f) { WC = workerCounts(f.workers); renderSystem(d); }).catch(function () {}); }
+  // The workers as every other page counts them — the shell's workerCounts over the live listing, not the snapshot's count from up to half an hour ago: read once per poll, the tile drawn again when it answers. WC_DOWN is the reason the listing did not: the tile says it in the workers' place instead of dropping the clause — a fact hidden reads as no fact.
+  var WC = null, WC_DOWN = null;
+  function loadWorkers(d) { api("GET", "/api/v1/factory?limit=10").then(function (f) { WC = workerCounts(f.workers); WC_DOWN = null; renderSystem(d); }).catch(function (e) { WC_DOWN = noAnswer("worker listing", e); renderSystem(d); }); }
   function renderSystem(d) {
     // Snapshots before v0.0.51 measured GitHub Actions ("actions"); now the pool's own jobs.
     var m = d.metrics, a = m && (m.jobs || m.actions), wm = workerMinutes(d.series, 7);
@@ -91,7 +91,7 @@ __CHARTS__
     var gateRc = latest(d.latest, "gate", "rc", "edge"), gateStable = latest(d.latest, "gate", "stable", "rc");
     var gateWord = function (g) { if (!g) return "no attempt yet"; var v = (g.payload && g.payload.verdict) || (g.status === "ok" ? "promote" : g.status === "warn" ? "skip" : "block"); return (v === "promote" ? "promoted" : v === "skip" ? "nothing new" : "blocked") + " " + ago(g.created_at); };
     var tiles = [
-      ["Jobs running now", a ? num(a.running) : "—", (a ? "pool jobs leased or queued" : "no metrics snapshot yet") + (WC ? " · " + num(WC.alive) + " worker(s) alive, " + num(WC.building) + " building" : "")],
+      ["Jobs running now", a ? num(a.running) : "—", (a ? "pool jobs leased or queued" : "no metrics snapshot yet") + (WC ? " · " + num(WC.alive) + " worker(s) alive, " + num(WC.building) + " building" : WC_DOWN ? " · " + esc(WC_DOWN) : "")],
       ["Jobs, 7 days", a ? num(a.runs) : "—", a ? num(a.failures) + " failed · " + num(a.runs - a.failures - a.running) + " succeeded" : ""],
       // The sum of the chart below (workerMinutes over jobs_daily), the number the Workers page and the Pipeline say — not the snapshot's.
       ["Worker minutes, 7 days", num(wm.total), "on the project's workers, both architectures"],
@@ -351,8 +351,8 @@ export const STATUS_COMPONENTS = (_F: Fixture): Component[] => [
     id: "status.system-tiles",
     page: "/status",
     anchor: ['id="systiles"'],
-    // The workers alive and building are the shell's workerCounts over the live listing (loadWorkers), the same as every other page; the worker minutes the shell's workerMinutes over the series the chart below draws.
-    script: ['setTiles("#systiles"', "m.jobs || m.actions", '"Jobs running now"', "workerCounts(f.workers)", "WC.alive", "WC.building", '"Worker minutes, 7 days", num(wm.total)', "workerMinutes(d.series, 7)", '"Sources synced"', '"rows per architecture · "', '"Promotion, by evidence"', 'latest(d.latest, "gate", "rc", "edge")', "pool.referenced_by_any_release", "pool.reclaimable", "sec.updated_at"],
+    // The workers alive and building are the shell's workerCounts over the live listing (loadWorkers), the same as every other page — and, the listing not answering, the tile says so where the clause would be (the shell's noAnswer); the worker minutes the shell's workerMinutes over the series the chart below draws.
+    script: ['setTiles("#systiles"', "m.jobs || m.actions", '"Jobs running now"', "workerCounts(f.workers)", "WC.alive", "WC.building", 'WC_DOWN = noAnswer("worker listing", e)', 'WC_DOWN ? " · " + esc(WC_DOWN)', '"Worker minutes, 7 days", num(wm.total)', "workerMinutes(d.series, 7)", '"Sources synced"', '"rows per architecture · "', '"Promotion, by evidence"', 'latest(d.latest, "gate", "rc", "edge")', "pool.referenced_by_any_release", "pool.reclaimable", "sec.updated_at"],
     reads: [
       {
         path: "/api/v1/stats",

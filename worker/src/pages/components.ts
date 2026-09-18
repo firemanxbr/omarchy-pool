@@ -163,7 +163,7 @@ export interface Fixture {
   failedPkg: string;
   /** "pulled", dave's other package: approved by m1, then blocked by m2 with the approval standing — the row says `blocked_at`, its publish job is cancelled. */
   pulledPkg: string;
-  /** The id of the one done pool job of each kind — sync, promote, rollback, render, health, gc, security, verify, relayout, enqueue — its params as the brain queues them and its result as work.rs posts it: what the Pipeline's table words. */
+  /** The id of the one done pool job of each kind — sync, promote, rollback, render, health, gc, security, verify, relayout, enqueue, and the three on a build: audit, trial, publish (ours', run through the API) — its params as the brain queues them and its result as work.rs posts it: what the Pipeline's table words. */
   jobs: Record<string, number>;
   /** The browser's cookie value (`omc=<value>`) per role; the CLI token of a login is `omc_<login>`, its session `oms_<login>`. */
   sessions: Record<Exclude<Role, "anonymous">, string>;

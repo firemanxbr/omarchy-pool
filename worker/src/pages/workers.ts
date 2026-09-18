@@ -45,7 +45,7 @@ const BODY = String.raw`
 
 const SCRIPT = String.raw`
 __CHARTS__
-  // FACTORY is the listing once it answered; DOWN the reason it did not — the tiles then read "—" and why (the shell's tilesUnanswered), never "0 / 0" alive.
+  // FACTORY is the listing once it answered; DOWN the reason it did not — the tiles the listing feeds then read "—" (the shell's tilesUnanswered; the note by Every worker says why), never "0 / 0" alive; the minutes tile is the stats poll's and keeps its number.
   var FACTORY = null, STATS = null, DOWN = null;
   skeletonTiles("#tiles", 4); wtTables();
   // The kind's colour on every chart of the page: the card's line, the bar per worker, the legend.
@@ -69,13 +69,14 @@ __CHARTS__
       ["Alive", num(wc.alive) + " / " + num(wc.registered), num(wc.byKind.project.alive) + " project · " + num(wc.byKind.review.alive) + " review · " + num(wc.byKind.community.alive) + " contributors", wc.alive ? "ok" : "warn"],
       ["Building now", num(wc.building), wc.building ? bz.map(function (w) { return "#" + w.current_task; }).join(" · ") : "every worker idle"],
       ["Load · 24 h", load + "%", "of the last day with a lease, across the alive ones"],
-      ["Worker minutes · 7 d", wm ? num(wm.total) : "—", wm ? "≈ " + num(Math.round(wm.total / 7)) + " per day, the project's workers" : ""]
+      // The stats poll's, not the listing's: marked so, it keeps its number when the listing did not answer — the chart below draws the same series.
+      ["Worker minutes · 7 d", wm ? num(wm.total) : "—", wm ? "≈ " + num(Math.round(wm.total / 7)) + " per day, the project's workers" : "", "", null, "stats"]
     ];
   }
   // The load: what each worker did in the last day, from the stats series (finished tasks by duration, a running one by its start).
   function loadOf() { var L = {}; ((STATS && STATS.series && STATS.series.workers_daily) || []).forEach(function (r) { L[r.worker] = { ms: Number(r.ms || 0) + Number(r.running_ms || 0), done: Number(r.done || 0) }; }); return L; }
   function render() {
-    var d = FACTORY; if (!d) { if (DOWN) setTiles("#tiles", tilesUnanswered(tilesOf(workerCounts([]), [], null), DOWN)); return; }
+    var d = FACTORY; if (!d) { if (DOWN) setTiles("#tiles", tilesUnanswered(tilesOf(workerCounts([]), [], null, STATS ? workerMinutes(STATS.series, 7) : null), DOWN)); return; }
     var showAll = $("#all-workers").checked, LOAD = loadOf();
     var busyOf = function (w) { var l = LOAD[w.id]; return l ? Math.min(100, Math.round(100 * l.ms / 86400000)) : 0; };
     var kinds = { project: [], review: [], community: [] };
@@ -161,8 +162,8 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     id: "workers.tiles",
     page: "/workers",
     anchor: ['id="tiles"'],
-    // The counts are the shell's (workerCounts over the listing), the same the Pool's and the People page's tiles say; over a listing that did not answer the four read "—" with the reason (the shell's tilesUnanswered).
-    script: ['"#tiles"', "workerCounts(d.workers)", "function tilesOf(wc, bz, load, wm)", 'setTiles("#tiles", tilesUnanswered(tilesOf(workerCounts([]), [], null), DOWN))', '"Alive"', "wc.alive", "wc.registered", "wc.byKind.project.alive", '"Building now"', "wc.building", '"Load · 24 h"', '"Worker minutes · 7 d", wm ? num(wm.total)', "workerMinutes(STATS.series, 7)"],
+    // The counts are the shell's (workerCounts over the listing), the same the Pool's and the People page's tiles say; over a listing that did not answer the three it feeds read "—" (the shell's tilesUnanswered) and the minutes tile, the stats poll's, keeps its number.
+    script: ['"#tiles"', "workerCounts(d.workers)", "function tilesOf(wc, bz, load, wm)", 'setTiles("#tiles", tilesUnanswered(tilesOf(workerCounts([]), [], null, STATS ? workerMinutes(STATS.series, 7) : null), DOWN))', '"", null, "stats"]', '"Alive"', "wc.alive", "wc.registered", "wc.byKind.project.alive", '"Building now"', "wc.building", '"Load · 24 h"', '"Worker minutes · 7 d", wm ? num(wm.total)', "workerMinutes(STATS.series, 7)"],
     reads: [
       { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.alive", "workers.0.ready", "workers.0.current_task", "workers.0.revoked_at", "workers.0.side", "workers.0.labels"] },
       { path: "/api/v1/stats", fields: ["series.workers_daily", "series.jobs_daily"] },

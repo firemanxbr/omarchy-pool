@@ -49,7 +49,9 @@
  *
  * One pool job of every kind sits done in the queue (F.jobs), its params
  * as the brain queues them and its result as the Rust worker posts it, so
- * the Pipeline's table has every shape it words.
+ * the Pipeline's table has every shape it words — the three jobs on a
+ * build among them: `ours`' audit, trial and publish, done by w1 through
+ * the API above.
  *
  * The journal has one line of every kind the charts read — a sync, a
  * health check, a promotion, a role change, a day of audience — and the
@@ -253,6 +255,7 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
     must(await call(env, "PUT", `/factory/tasks/${task}/artifacts/audit.json`, undefined, a.token, JSON.stringify({ verdict: "ok", summary: "nothing to change", findings: [] })), 201, `audit.json of ${task}`);
     must(await call(env, "PUT", `/factory/tasks/${task}/artifacts/audit.md`, undefined, a.token, "# Audit: ok\n\nNothing to change."), 201, `audit.md of ${task}`);
     must(await call(env, "POST", `/factory/tasks/${a.task.id}/complete`, { summary: "ok", result: { verdict: "ok", summary: "nothing to change", model: "test", category: "terminal", findings: [] } }, a.token), 200, `complete the audit of ${task}`);
+    return a.task.id as number;
   };
   /**
    * The story up to the approval: alice's worker builds and stages the
@@ -273,12 +276,12 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
     await stage(projectTask, built.token, "the project's", name, `${version}-1`);
     const sha = fakeSha(`factory/${arch}/${name}-${version}-1-${arch}.pkg.tar.zst`);
     must(await call(env, "POST", `/factory/tasks/${projectTask}/complete`, { sha256: sha, filename: `${name}-${version}-1-${arch}.pkg.tar.zst`, version: `${version}-1`, duration_ms: 90000 }, built.token), 200, `complete the project's build of ${name}`);
-    await audit(projectTask);
+    const audited = await audit(projectTask);
     const trial = await claimProject(["trial"], `the trial of ${name}`);
     must(await call(env, "PUT", `/factory/tasks/${projectTask}/artifacts/trial.log`, undefined, trial.token, `== pacman -S ${name}\nTRIAL=ok`), 201, `trial.log of ${name}`);
     must(await call(env, "POST", `/factory/tasks/${trial.task.id}/complete`, { result: { verdict: "ok", packages: [name], task: projectTask }, duration_ms: 30000 }, trial.token), 200, `complete the trial of ${name}`);
     const publish = must(await call(env, "POST", `/factory/tasks/${projectTask}/approve`, { note: "looks right" }, "omc_m2"), 200, `approve ${name}`).json.publish as number;
-    return { contributorTask, projectTask, publish, sha };
+    return { contributorTask, projectTask, publish, sha, audit: audited, trial: trial.task.id as number };
   };
 
   // `ours` goes the whole way: w1 takes the publish job, puts the object in the pool, indexes and releases it into edge (factory.test.ts).
@@ -344,7 +347,8 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
     ["relayout", {}, { moved: 6, ghosts: 0, missing: 0, errors: [], rendered: ["omarchy-core-stable"], purged: 6 }],
     ["enqueue", {}, { commit: "0123456789abcdef0123456789abcdef01234567", queued: ["ours 2.0-1 x86_64"], skipped: [], up_to_date: 3 }],
   ];
-  const jobs: Record<string, number> = {};
+  // The three jobs on a build are the ones w1 really ran above: ours' audit of the project's build (the report as the agent posts it), its trial and its publish (routes/factory.ts and routes/review.ts queued them, work.rs's shapes completed them).
+  const jobs: Record<string, number> = { audit: ours.audit, trial: ours.trial, publish: ours.publish };
   for (const [kind, params, result] of jobRows) {
     jobs[kind] = (await env.DB.prepare(
       `INSERT INTO build_tasks (name, arch, pkgbuild_ref, reason, priority, status, publish, trust, kind, params, attempts, lease_owner, started_at, finished_at, duration_ms, result)
