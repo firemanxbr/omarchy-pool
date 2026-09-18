@@ -22,7 +22,10 @@ Rules, all of them:
 - Dependencies are Arch package names. `depends` is what the binary needs at
   run time (shared libraries it links, tools it calls); `makedepends` the
   toolchain (cargo, go, cmake, meson, ninja, nodejs, npm, python-build…) and
-  headers. Do not list what base-devel provides (gcc, make, pkgconf, binutils).
+  headers. Do not list what base-devel provides (gcc, make, pkgconf, binutils)
+  as makedepends. The runtime a binary links is listed the way Arch lists it:
+  `glibc` and `libgcc` for Rust, `libstdc++` too for C++ (`gcc-libs` is a
+  meta-package now; namcap calls it `dependency-implicitly-satisfied`).
 - Rust: `cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"`
   in prepare(), `cargo build --frozen --release` in build(), install the binary
   from `target/release/`. `export CARGO_TARGET_DIR=target` before building.

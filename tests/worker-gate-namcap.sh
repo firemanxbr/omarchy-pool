@@ -90,4 +90,14 @@ printf 'if g.group(2).endswith(",x86-64"):\n' > "$tmp/other.py"
 ! namcap_sees_this_arch "$tmp/other.py" || { echo "a parser the fix does not know is reported, not patched blind"; exit 1; }
 [[ "$(cat "$tmp/other.py")" == 'if g.group(2).endswith(",x86-64"):' ]] || { echo "an unknown parser is left as it is"; exit 1; }
 ! namcap_sees_this_arch "$tmp/missing.py" || { echo "no file, no map: reported"; exit 1; }
-echo "ok: the gate weighs namcap's errors and warnings, knows a blind map, and namcap's library map sees aarch64"
+# --- the drafter's tool names the runtime the gate asks for: a Rust binary is glibc and libgcc, then the -sys crates.
+python3 - "$root/factory/bin/draft-pkgbuild" <<'PY' || { echo "the drafter's Rust depends: glibc and libgcc first, the -sys crates after"; exit 1; }
+import importlib.machinery, importlib.util, os, sys
+path = sys.argv[1]; sys.path.insert(0, os.path.dirname(path)); sys.argv = ["draft-pkgbuild"]
+loader = importlib.machinery.SourceFileLoader("dp", path); m = importlib.util.module_from_spec(importlib.util.spec_from_loader("dp", loader))
+try: loader.exec_module(m)
+except SystemExit: pass
+assert m.rust_depends({"files": {}}) == ["glibc", "libgcc"], m.rust_depends({"files": {}})
+assert m.rust_depends({"files": {"Cargo.lock": 'name = "libz-sys"\n'}}) == ["glibc", "libgcc", "zlib"]
+PY
+echo "ok: the gate weighs namcap's errors and warnings, knows a blind map, namcap's library map sees aarch64, and the drafter names the runtime"

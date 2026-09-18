@@ -19,9 +19,10 @@ rewritten to the wrapper. Nothing is compiled; `makedepends` is empty or
 names only the tool that unpacks.
 
 **Nothing to debug, nothing to strip.** Always `options=('!debug')`: the
-recipe compiled nothing, so makepkg's default `debug` option would only
-make a `-debug` split of dangling build-id symlinks, which the gate fails
-[prebuilt-debug]. Add `!strip` when the vendor's binaries carry their own
+recipe compiled nothing, and a `debug` option turned on would only make a
+`-debug` split of dangling build-id symlinks, which the gate fails
+[prebuilt-debug] (the pool builds with `!debug`; it serves no debug
+package). Add `!strip` when the vendor's binaries carry their own
 symbols or signatures, and say why. An unstripped ELF is a namcap warning,
 not an error.
 

@@ -140,7 +140,9 @@ fails the build; `warn` is for the audit and the maintainer to weigh.
 | checksums | every source pinned (`updpkgsums` fills them) | a `SKIP` for a source that is not a VCS |
 | shellcheck | `shellcheck --shell=bash` on the PKGBUILD (SC2034, SC2154, SC2164 excluded: makepkg's own) | an error |
 | namcap-pkgbuild | `namcap PKGBUILD` | an `E:` |
-| namcap-package | `namcap -m -i` on every built package: dependencies the ELF scan finds (glibc excepted), sonames, permissions, paths, `$srcdir` leaks, the licence file — `unused-sodepend` on the dynamic loader is the linker's and not weighed; *namcap-libmap* warns when the scan found no package for libc itself — the map is blind on that worker | an `E:` other than an ELF under `/opt` |
+| namcap-package | `namcap -m -i` on every built package: dependencies the ELF scan finds (glibc excepted), sonames, permissions, paths, `$srcdir` leaks, the licence file — `unused-sodepend` on the dynamic loader is the linker's and not weighed | an `E:` other than an ELF under `/opt` |
+| namcap-libmap | namcap found no package for libc itself: its library map is blind on this worker, so a missing dependency passed unseen — the fix is on the worker (`namcap_sees_this_arch`), and the evidence is thinner | never (a warning, five points of the score) |
+| prebuilt-debug | a `-debug` split of a recipe without `build()` — the pool builds with `!debug`, so only a recipe that turns it on gets here | the split exists |
 | files | `pacman -Qlp`: only `/usr`, `/etc`, `/opt` | anything under `/usr/local`, `/bin`, `/sbin`, `/lib`, `/home`, `/tmp`; a `.la`; an empty package |
 | metadata | `pacman -Qip`: `pkgdesc`, `license`, `url` | no description or licence |
 | check | a `check()` running the upstream tests, or a comment saying why not | never (a warning) |

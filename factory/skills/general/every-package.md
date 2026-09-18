@@ -53,7 +53,7 @@ display is checked differently: see *Desktop apps*.
 needs at run time (the libraries it links, the tools it calls);
 `makedepends` the toolchain and headers; `optdepends` what unlocks a
 feature, with a reason after the colon. Nothing base-devel provides is
-listed. The runtime is named the way Arch names it since gcc-libs became
+listed as `makedepends`. The runtime is named the way Arch names it since gcc-libs became
 a meta-package (February 2026): `glibc` and `libgcc` for a binary that
 links `libgcc_s` (a Rust binary does), `libstdc++` for C++, `libgomp`
 for OpenMP — as Arch's own recipes do (ripgrep, fd, ninja). `gcc-libs`

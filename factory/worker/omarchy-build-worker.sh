@@ -201,7 +201,12 @@ prepare_container() {
   # image's makepkg.conf leaves MAKEFLAGS unset, which is one job; ccache
   # on, so a rebuild of the same sources compiles only what changed.
   mkdir -p /etc/makepkg.conf.d
-  printf 'MAKEFLAGS="-j%s"\nNINJAFLAGS="-j%s"\nBUILDENV=(!distcc color ccache check !sign)\n' "$(nproc)" "$(nproc)" > /etc/makepkg.conf.d/omarchy-pool.conf
+  # No -debug split: the pool serves no debug packages, and namcap fails every -debug split it meets here —
+  # its build-id symlinks point into the main package, which namcap resolves against the installed one, and
+  # the gate runs before the install (omarchy-cli #505, second attempt, 2026-09-18). Arch's x86_64 makepkg.conf
+  # has `debug` on and Arch Linux ARM's has it off; with it off on both, one recipe builds the same set of
+  # packages on both. `lto` stays Arch's default, a recipe opts out where the link cannot take it.
+  printf 'MAKEFLAGS="-j%s"\nNINJAFLAGS="-j%s"\nBUILDENV=(!distcc color ccache check !sign)\nOPTIONS+=(!debug)\n' "$(nproc)" "$(nproc)" > /etc/makepkg.conf.d/omarchy-pool.conf
   # Caches that outlive the container when the operator mounts /build/cache
   # (one directory per trust and architecture on the host; a fresh directory
   # otherwise). Inside it, one directory per package (run_makepkg): what a
@@ -589,7 +594,8 @@ vet_package() { # name → 0 pass (maybe warnings), 5 fail; writes vet.json and 
     if namcap_map_blind <<<"$out"; then vet_add "namcap-libmap:$(basename "$p")" warn "namcap found no package for libc itself: its library map does not work on this worker (namcap_sees_this_arch), so a missing dependency passes here unseen"; fi
   done
   # 4b. a recipe that compiles nothing (no build(): a prebuilt binary) has no debug info of its own: makepkg's
-  # default debug option then makes a -debug split of dangling build-id symlinks that namcap fails on, and
+  # debug option (off in the pool's makepkg.conf.d since 2026-09-18, so only a recipe that turns it on gets
+  # here) then makes a -debug split of dangling build-id symlinks that namcap fails on, and
   # an agent reads "dangling-symlink" and looks in the wrong place (omarchy-cli-bin, 2026-09-17). The rule
   # is options=('!debug'); the gate says so (skills: Prebuilt binaries).
   if ! grep -qE '^build\(\)' /build/pkg/PKGBUILD; then
