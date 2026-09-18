@@ -66,4 +66,19 @@ bash -c "
   REPORTED=1; api POST /factory/tasks/463/complete '{}' >/dev/null
 " || { echo "a normal end exits 0"; exit 1; }
 [[ "$(grep -c '/fail' "$STUB_LOG")" == 0 ]] || { echo "a reported task has no last words: $(cat "$STUB_LOG")"; exit 1; }
+
+# A toolchain that cannot start on an emulated worker ends the build with a
+# status nobody else produces (96): makepkg's own 6 is a missing source
+# file, the recipe's fault, and the report must not send that back to the
+# queue for a native worker.
+awk '/^toolchains_start\(\)/,/^}/' "$script" > "$tmp/tc.sh"
+# shellcheck source=/dev/null
+source "$tmp/tc.sh"
+printf '#!/bin/sh\nexit 127\n' > "$tmp/bin/rustc"; chmod +x "$tmp/bin/rustc"
+set +e
+PATH="$tmp/bin:$PATH" WORKER_LABELS='{"emulated":true}' toolchains_start 2>/dev/null; rc=$?
+set -e
+(( rc == 96 )) || { echo "a toolchain that cannot start under emulation is status 96, not $rc"; exit 1; }
+PATH="$tmp/bin:$PATH" WORKER_LABELS='{}' toolchains_start || { echo "a native worker starts no toolchain to check"; exit 1; }
+grep -qE '^\s*if \(\( status == 96 \)\); then final=false native=true; fi' "$script" || { echo "the fail report sends status 96 alone back for a native worker"; exit 1; }
 echo "worker-main-package: ok"

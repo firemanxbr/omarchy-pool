@@ -655,10 +655,12 @@ export async function queueBuilds(env: Env, c: Contributor, name: string, ask: Q
     const params: Record<string, unknown> = {};
     if (last && ref.startsWith("draft:")) { params.lesson = last.id; lessons[arch] = last.id; }
     if (hint) params.hint = hint;
-    const dup = await env.DB.prepare("SELECT id, status, lease_owner FROM build_tasks WHERE name = ? AND arch = ? AND pkgbuild_ref = ? AND status IN ('queued', 'leased') LIMIT 1").bind(name, arch, ref).first<{ id: number; status: string; lease_owner: string | null }>();
+    const dup = await env.DB.prepare("SELECT id, status, lease_owner, params FROM build_tasks WHERE name = ? AND arch = ? AND pkgbuild_ref = ? AND status IN ('queued', 'leased') LIMIT 1").bind(name, arch, ref).first<{ id: number; status: string; lease_owner: string | null; params: string | null }>();
     if (dup) {
       if (dup.status === "queued") {
         // Asked again while it waits: where it goes, the hint and the lesson are what was asked now — the queue when nothing was named.
+        // A build sent back for a native worker (needs_native) still waits for one there; a worker named is the asker's own choice.
+        if (!pinned && dup.params && (JSON.parse(dup.params) as { needs_native?: number }).needs_native === 1) params.needs_native = 1;
         await env.DB.prepare("UPDATE build_tasks SET pinned_to = ?, shared_after = NULL, params = ? WHERE id = ? AND status = 'queued'")
           .bind(pinned, Object.keys(params).length ? JSON.stringify(params) : null, dup.id).run();
         ids.push(dup.id);
