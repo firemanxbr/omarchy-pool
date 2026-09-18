@@ -152,8 +152,8 @@ __CHARTS__
   // ---- the living system: the diagram's numbers, the feed, the counters — all from the journal
   var seen = {};
   function feedRow(e, fresh) {
-    var run = e.payload && e.payload.ci && e.payload.ci.run_url;
-    return '<div class="row"' + (fresh ? "" : ' style="animation:none"') + '><span><span class="dot ' + e.status + '"></span>' + e.status + '</span><span class="what">' + esc(e.kind) + '</span><span><span class="where">' + esc([e.ring, e.source].filter(Boolean).join(" · ")) + '</span> ' + (run ? '<a class="run" href="' + esc(run) + '">' + esc(e.summary) + '</a>' : esc(e.summary)) + '</span><span class="when" title="' + esc(e.created_at) + '">' + ago(e.created_at) + '</span></div>';
+    var run = runHref(e.payload && e.payload.ci && e.payload.ci.run_url);
+    return '<div class="row"' + (fresh ? "" : ' style="animation:none"') + '><span><span class="dot ' + esc(e.status) + '"></span>' + esc(e.status) + '</span><span class="what">' + esc(e.kind) + '</span><span><span class="where">' + esc([e.ring, e.source].filter(Boolean).join(" · ")) + '</span> ' + (run ? '<a class="run" href="' + esc(run) + '">' + esc(e.summary) + '</a>' : esc(e.summary)) + '</span><span class="when" title="' + esc(e.created_at) + '">' + ago(e.created_at) + '</span></div>';
   }
   function loadFeed() {
     fetch("/api/v1/events?limit=12", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (d) {
@@ -388,7 +388,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.live-feed",
     page: "/pipeline",
     anchor: ['class="ticker"', 'id="feed"'],
-    script: ['"/api/v1/events?limit=12"', '$("#feed")', 'e.kind !== "metrics"', "e.payload.ci.run_url"],
+    script: ['"/api/v1/events?limit=12"', '$("#feed")', 'e.kind !== "metrics"', "runHref(e.payload && e.payload.ci && e.payload.ci.run_url)"],
     reads: [{ path: "/api/v1/events?limit=12", fields: ["events", "events.0.id", "events.0.kind", "events.0.status", "events.0.ring", "events.0.source", "events.0.summary", "events.0.created_at", "events.0.payload"] }],
     visible: EVERYONE,
   },
@@ -624,7 +624,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.journal-table",
     page: "/pipeline",
     anchor: ['id="events"'],
-    script: ['pager("#events", d.events, eventRow', 'empty: "nothing yet", n: 10'],
+    script: ['pager("#events", d.events, eventRow', 'empty: "nothing yet", n: 10', "runHref(e.payload && e.payload.ci && e.payload.ci.run_url), rid = e.payload && Number(e.payload.release_id)"],
     reads: [{ path: "/api/v1/stats", fields: ["events", "events.0.status", "events.0.kind", "events.0.ring", "events.0.source", "events.0.summary", "events.0.payload", "events.0.duration_ms", "events.0.created_at"] }],
     visible: EVERYONE,
   },

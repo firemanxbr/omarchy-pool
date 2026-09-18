@@ -204,12 +204,15 @@ const CSS = String.raw`
   a.run { color: var(--muted); text-decoration: none; border-bottom: 1px dotted var(--dim); }
   a.run:hover { color: var(--text); }
   #graph { overflow-x: auto; } #graph svg { min-width: 720px; }
-  @media (max-width: 720px) {
+  /* The header folds to two rows — brand and account, then the doors on a scrolling line — below the width the three columns need (~880 px with the version label): a phone held sideways and a tablet held upright scrolled the whole page for the header alone between 721 and 880 px. */
+  @media (max-width: 900px) {
     header { grid-template-columns: 1fr auto; grid-template-areas: "brand account" "mid mid"; gap: 10px 12px; padding: 12px 16px; }
     header .brand { grid-area: brand; } header .account { grid-area: account; max-width: 60vw; }
     header .hmid { grid-area: mid; justify-self: stretch; gap: 16px; overflow-x: auto; white-space: nowrap; padding-bottom: 4px; margin: 0 -16px; padding-left: 16px; padding-right: 16px; scrollbar-width: none; }
     header .hmid::-webkit-scrollbar { display: none; }
     header nav { gap: 16px; }
+  }
+  @media (max-width: 720px) {
     footer { grid-template-columns: 1fr; justify-items: start; }
     main { padding: 20px 16px 28px; }
     h1 { font-size: 22px; line-height: 1.25; } h2 { font-size: 19px; }
@@ -565,8 +568,10 @@ const CSS = String.raw`
     .gate, .sponsor { grid-template-columns: 1fr; } .rrow { grid-template-columns: 1fr auto; } .rrow .s, .rrow .go { grid-column: 1 / -1; } .rrow .go { justify-self: start; } .sponsor .side { justify-items: start; } .sponsor .promise { text-align: left; }
     .heat .r, .heat .days { grid-template-columns: 80px repeat(14, 1fr); }
   }
-  .live-grid > * { min-width: 0; } .ticker .row > span { min-width: 0; overflow-wrap: anywhere; }
-  #seal .mono, .meta .mono, .kv dd .mono, .whorow, .whoc span { overflow-wrap: anywhere; }
+  /* A grid column is minmax(auto, 1fr) unless told otherwise: a child's min-content (a six-column table head, a card) would widen the track past the phone; a word with no space to break at (an upstream address, a path in a code span) wraps where it must. */
+  .live-grid > *, .two > *, .pk-grid > *, .tl li > * { min-width: 0; } .ticker .row > span { min-width: 0; overflow-wrap: anywhere; }
+  #seal .mono, .meta .mono, .meta a, .kv dd, .whorow, .whoc span, .tl li, p code, li code, dd code, .step code { overflow-wrap: anywhere; }
+  .ev .body { overflow-x: auto; }
   /* A control gated by the shell's gate(): everyone sees it, the person who may not use it sees it grey, and the reason is its title — so the pointer stays on it (no pointer-events: none) and the hover stays quiet. A link gated the same way is stopped by the shell's click handler. A control disabled by state (a build in flight, a button pressed) is the same grey: one look for "not now", whatever the reason. */
   button[disabled], select[disabled], input[disabled], textarea[disabled], a.disabled { opacity: .45; cursor: not-allowed; }
   button[disabled]:hover, a.disabled:hover { border-color: var(--line); text-decoration: none; }
@@ -617,6 +622,8 @@ export const HELPERS = String.raw`
   var WICON = __WICON__;
   var $ = function (s) { return document.querySelector(s); };
   function esc(s) { return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+  // A link a journal event carries (payload.ci.run_url) is drawn only when it is an https address: esc() keeps the quotes out of the attribute, not the scheme — a job token may post any payload, and a javascript: value would be a live link under the summary on the Journal, the Pipeline's feed and the Status incidents.
+  function runHref(u) { return typeof u === "string" && /^https:\/\//i.test(u) ? u : ""; }
   function bytes(n) { n = Number(n || 0); var u = ["B", "KB", "MB", "GB", "TB"], i = 0; while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; } return (i === 0 ? n : n.toFixed(n >= 100 ? 0 : 1)) + " " + u[i]; }
   function num(n) { return Number(n || 0).toLocaleString("en-US"); }
   function ago(iso) { if (!iso) return "—"; var s = (Date.now() - Date.parse(iso)) / 1000; if (s < 60) return Math.floor(s) + "s ago"; if (s < 3600) return Math.floor(s / 60) + "m ago"; if (s < 86400) return Math.floor(s / 3600) + "h ago"; return Math.floor(s / 86400) + "d ago"; }
@@ -991,8 +998,9 @@ export const HELPERS = String.raw`
   function live(key, text) { document.querySelectorAll('[data-live="' + key + '"]').forEach(function (el) { el.textContent = text; }); }
   // One line of the journal (/api/v1/events), the same on the Journal and the Pipeline: the status, the kind, the ring and the source, the summary linked to the run that produced it and to the diff of the release it made, how long it took, when.
   function eventRow(e) {
-    var run = e.payload && e.payload.ci && e.payload.ci.run_url, rid = e.payload && e.payload.release_id, diff = "";
-    if (rid && e.ring && (e.kind === "promote" || e.kind === "rollback" || e.kind === "sync" || e.kind === "fast-track")) diff = ' <a class="run" href="/diff?ring=' + esc(e.ring) + '&to=' + rid + '" title="what release ' + rid + ' changed">diff</a>';
+    // The release is a number or nothing: it is written into an address and a title, and the payload is whatever the job posted.
+    var run = runHref(e.payload && e.payload.ci && e.payload.ci.run_url), rid = e.payload && Number(e.payload.release_id), diff = "";
+    if (rid > 0 && rid === Math.floor(rid) && e.ring && (e.kind === "promote" || e.kind === "rollback" || e.kind === "sync" || e.kind === "fast-track")) diff = ' <a class="run" href="/diff?ring=' + esc(e.ring) + '&to=' + rid + '" title="what release ' + rid + ' changed">diff</a>';
     return '<tr><td><span class="dot ' + esc(e.status) + '"></span>' + esc(e.status) + '</td><td><span class="kind">' + esc(e.kind) + '</span></td><td>' + esc(e.ring || "") + '</td><td>' + esc(e.source || "") + '</td><td>' + (run ? '<a class="run" href="' + esc(run) + '" title="open the run">' + esc(e.summary) + '</a>' : esc(e.summary)) + diff + '</td><td class="num">' + dur(e.duration_ms) + '</td><td class="when" title="' + esc(e.created_at) + '">' + ago(e.created_at) + '</td></tr>';
   }
   // Roll a ring back to a release: asked in the dashboard's dialog, posted once as a pool job, the answer written to #rb-state where the page has one. Resolves with the job's answer, null when cancelled.

@@ -21,7 +21,8 @@ describe("job tokens", () => {
   });
 
   it("gives each kind the scopes it needs and nothing else", () => {
-    expect(scopesFor("build", 7, "community", {})).toEqual(["task:7", "events", "staging:7"]);
+    expect(scopesFor("build", 7, "community", {})).toEqual(["task:7", "staging:7"]);
+    expect(scopesFor("build", 7, "project", {})).toContain("events");
     expect(scopesFor("build", 7, "project", {})).toContain("pool:write");
     expect(scopesFor("build", 7, "community", {})).not.toContain("pool:write");
     expect(scopesFor("promote", 8, "project", { from: "rc", to: "stable" })).toEqual(["task:8", "events", "release:stable", "artifacts:*:stable"]);

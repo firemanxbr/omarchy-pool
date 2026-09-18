@@ -200,8 +200,8 @@ __CHARTS__
 
     var incidents = d.events.filter(function (e) { return e.kind === "rollback" || e.status === "error" || (e.kind === "gate" && e.payload && e.payload.verdict === "block"); });
     $("#incidents tbody").innerHTML = incidents.map(function (e) {
-      var run = e.payload && e.payload.ci && e.payload.ci.run_url;
-      return '<tr><td><span class="dot ' + e.status + '"></span>' + e.status + '</td><td><span class="kind">' + esc(e.kind) + '</span></td><td>' + esc(e.ring || "") + '</td><td>' + (run ? '<a class="run" href="' + esc(run) + '">' + esc(e.summary) + '</a>' : esc(e.summary)) + '</td><td class="when">' + ago(e.created_at) + '</td></tr>';
+      var run = runHref(e.payload && e.payload.ci && e.payload.ci.run_url);
+      return '<tr><td><span class="dot ' + esc(e.status) + '"></span>' + esc(e.status) + '</td><td><span class="kind">' + esc(e.kind) + '</span></td><td>' + esc(e.ring || "") + '</td><td>' + (run ? '<a class="run" href="' + esc(run) + '">' + esc(e.summary) + '</a>' : esc(e.summary)) + '</td><td class="when">' + ago(e.created_at) + '</td></tr>';
     }).join("") || '<tr><td colspan="5" class="muted">none in the last 40 journal entries</td></tr>';
 
     $("#headline").innerHTML = problems.length
@@ -447,7 +447,7 @@ export const STATUS_COMPONENTS = (_F: Fixture): Component[] => [
     id: "status.incidents-table",
     page: "/status",
     anchor: ["<h2>Incidents</h2>", 'id="incidents"'],
-    script: ['"#incidents tbody"', 'e.kind === "rollback"', 'e.payload.verdict === "block"', "e.summary", "none in the last 40 journal entries"],
+    script: ['"#incidents tbody"', 'e.kind === "rollback"', 'e.payload.verdict === "block"', "runHref(e.payload && e.payload.ci && e.payload.ci.run_url)", "e.summary", "none in the last 40 journal entries"],
     reads: [{ path: "/api/v1/stats", fields: ["events", "events.0.kind", "events.0.status", "events.0.ring", "events.0.summary", "events.0.created_at", "events.0.payload"] }],
     visible: EVERYONE,
   },
