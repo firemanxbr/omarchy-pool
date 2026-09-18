@@ -100,7 +100,7 @@ fn model_fits(provider: &str, model: &str) -> bool {
 }
 
 /// The agent this worker runs, as `<provider>/<model>` — what the claim
-/// reports so the Factory page can show it; the key itself stays here.
+/// reports so the Workers page can show it; the key itself stays here.
 /// None without a key. `FACTORY_PROVIDER` and `FACTORY_MODEL` override the
 /// choice the way `agent.py` honours them.
 pub fn agent_label() -> Option<String> {

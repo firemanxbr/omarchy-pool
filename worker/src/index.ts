@@ -90,7 +90,7 @@ import { handleServiceStatus, handleStats } from "./routes/stats";
 import { handleGc, handleUnreferenced } from "./routes/gc";
 import { handleRelayout } from "./routes/relayout";
 import { overviewHtml } from "./pages/overview";
-import { getStartedHtml } from "./pages/get-started";
+import { getStartedHtml, picked, sampleUrl } from "./pages/get-started";
 import { howItWorksHtml } from "./pages/how-it-works";
 import { docsSecurityHtml } from "./pages/docs-security";
 import { glossaryHtml } from "./pages/glossary";
@@ -144,32 +144,8 @@ export interface Env {
 }
 
 
-/**
- * The rings. edge, rc and stable are the promise: a package enters edge
- * signature-verified and reaches rc and stable by evidence, whichever
- * source built it. lab is the fourth, beside them, where nothing is
- * promised and nothing is promoted from: the factory's builds land there
- * first and a real pacman tries them against edge (the trial job), any
- * object of the pool can be pinned there to be tried in a combination,
- * and only a maintainer's approval takes a build from there to edge. No
- * sync targets it; `--ring lab` on a machine is the lab above the edge.
- */
-export const RINGS = ["edge", "rc", "stable", "lab"] as const;
-export type Ring = (typeof RINGS)[number];
-/** The rings a package is promoted through, in order. */
-export const PROMOTED_RINGS = ["edge", "rc", "stable"] as const;
-/**
- * The same rings from the most stable down — stable, rc, edge, then the
- * lab, which is below edge and promised nothing — the order a reader
- * picks a ring in and the order the package page falls back through when
- * the asked ring does not serve the package. Derived, so it cannot drift
- * from RINGS; the ring texts (meta.ts) keep this order too.
- */
-export const RINGS_BY_STABILITY: readonly Ring[] = [...[...PROMOTED_RINGS].reverse(), ...RINGS.filter((r) => !(PROMOTED_RINGS as readonly string[]).includes(r))];
-
-export function isRing(s: string): s is Ring {
-  return (RINGS as readonly string[]).includes(s);
-}
+// The rings live in meta.ts with the ring texts; re-exported here so every route keeps its import.
+export { RINGS, PROMOTED_RINGS, RINGS_BY_STABILITY, isRing, type Ring } from "./meta";
 
 const API = "/api/v1";
 
@@ -226,7 +202,12 @@ export default {
       }
       // Documentation: one section, its chapters under /docs; the old addresses redirect.
       if (path === "/docs" || path === "/docs/") return html(docsHtml(env.POOL_URL, version(env)));
-      if (path === "/docs/get-started") return html(getStartedHtml(env.POOL_URL, version(env)));
+      if (path === "/docs/get-started") {
+        // The include is the API's answer for the pick, through the API's edge cache under the address the script fetches: one stored answer for the page and its script, pacmanInclude's reads paid once per colo per two minutes, not per view.
+        const pick = picked(url, env);
+        const res = await cachedApi("GET", "/pacman.conf", sampleUrl(url, pick), request, env, ctx);
+        return html(getStartedHtml(env.POOL_URL, version(env), pick, res.ok ? await res.text() : null));
+      }
       if (path === "/docs/workers") return html(docsWorkersHtml(env.POOL_URL, version(env)));
       if (path === "/docs/how-it-works") return html(howItWorksHtml(env.POOL_URL, version(env)));
       if (path === "/docs/security") return html(docsSecurityHtml(env.POOL_URL, version(env)));

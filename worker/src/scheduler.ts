@@ -1,4 +1,5 @@
 import type { Env } from "./index";
+import { PROMOTED_RINGS } from "./meta";
 import { requeueExpiredLeases, pruneWorkers } from "./routes/factory";
 import { snapshotMetrics } from "./metrics";
 import { syncGovernance } from "./governance";
@@ -98,7 +99,8 @@ export function jobsOf(rule: Rule): { kind: string; params: Record<string, strin
   if (j.kind === "sync") return ["x86_64", "aarch64"].map((arch) => syncJobFor(arch));
   if (j.kind === "health") {
     const out: { kind: string; params: Record<string, string>; arch: string }[] = [];
-    for (const ring of ["edge", "rc", "stable"]) for (const arch of ["x86_64", "aarch64"]) out.push({ kind: "health", params: { ring, arch }, arch });
+    // A health check per promised ring and architecture; the lab is promised nothing and is not checked.
+    for (const ring of PROMOTED_RINGS) for (const arch of ["x86_64", "aarch64"]) out.push({ kind: "health", params: { ring, arch }, arch });
     return out;
   }
   return [{ kind: j.kind, params: j.params, arch: j.arch ?? "x86_64" }];
@@ -192,7 +194,7 @@ export function isDue(rule: Rule, runs: RunSummary[], now: Date): { due: boolean
  * Per architecture: what is queued for a project worker, and how many are
  * alive and idle. Nothing starts a worker: GitHub runs CI and the release
  * only, so when no project worker is alive the jobs wait and the log says
- * so (the Factory page too).
+ * so (the Workers page too).
  */
 export async function factoryDemand(env: Env, now = new Date()): Promise<{ arch: string; queued: number; alive: number; pool: number }[]> {
   // "alive" here means alive *and idle*: a worker busy with a nine-hour

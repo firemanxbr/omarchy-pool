@@ -9,6 +9,7 @@
  * picture on the dashboard is drawn the same way.
  */
 import { escapeHtml } from "../html";
+import { EXPECTED_SOURCES, UPSTREAMS, type ExpectedSource, type Upstream } from "../meta";
 
 export const CW = 6.6; // px per character at 11 px mono
 
@@ -229,20 +230,42 @@ export function archDiagram(): string {
  * maintainer's approval, and the fast lane a trial earns. The live lines are
  * filled by the page from /api/v1/stats.
  */
+/**
+ * The sources figure's boxes: one per upstream of EXPECTED_SOURCES (the
+ * factory has its own road at the foot of the picture) — the title and the
+ * live id are the picture's, the sources in the box and its keyring are the
+ * code's (meta.ts), so a source added there lands in its upstream's box and
+ * an upstream added there does not typecheck without a box.
+ */
+const UPSTREAM_BOX: Record<Exclude<Upstream, "the factory">, { id: string; title: string; note?: string }> = {
+  "mirror.omarchy.org": { id: "src-arch", title: "Arch Linux · x86_64" },
+  "os.archlinuxarm.org": { id: "src-alarm", title: "Arch Linux ARM · aarch64" },
+  "pkgs.omarchy.org": { id: "src-opr", title: "Omarchy (OPR) · both", note: "the edge channel" },
+  "github.com/maralcbr/omarchy-pkgs": { id: "src-asahi", title: "Omarchy for Apple Silicon", note: "aarch64 · the fork" },
+  "github.com/asahi-alarm/asahi-alarm": { id: "src-asahi-alarm", title: "Asahi Linux · aarch64" },
+  "builds.garudalinux.org": { id: "src-chaotic", title: "chaotic-aur · optional" },
+};
+export interface SourceBox { id: string; title: string; sources: string; keyring: string; entries: ExpectedSource[] }
+/** The boxes in the order their upstreams first appear in EXPECTED_SOURCES; `sources` is the line in the box (each source once, the box's note after), `keyring` the upstream's. */
+export function sourceBoxes(): SourceBox[] {
+  const boxes: SourceBox[] = [];
+  for (const e of EXPECTED_SOURCES) {
+    if (e.upstream === "the factory") continue;
+    const box = UPSTREAM_BOX[e.upstream];
+    let b = boxes.find((x) => x.id === box.id);
+    if (!b) boxes.push((b = { id: box.id, title: box.title, sources: "", keyring: UPSTREAMS[e.upstream].keyring, entries: [] }));
+    b.entries.push(e);
+    b.sources = [...new Set(b.entries.map((x) => x.source))].concat(box.note ? [box.note] : []).join(" · ");
+  }
+  return boxes;
+}
+
 export function sourcesDiagram(): string {
   let s = "";
   const HEAD = svgo(1330, 560, "Arch Linux, Arch Linux ARM, the OPR's edge channel, Omarchy for Apple Silicon, Asahi Linux and, optionally, the prebuilt AUR selections feed the pool; every package is verified against its project's keyring and stored once, then moves from edge to rc on a real pacman, an ABI check and the security layer, and from rc to stable after two green health checks in a row; a failed check rolls a ring back. The factory's builds go to the lab, where a real pacman installs them before a maintainer approves them into edge — and, when the trial installed them, into stable with it.");
-  const src: [string, string, string, string][] = [
-    ["Arch Linux · x86_64", "core · extra · multilib", "archlinux-keyring", "src-arch"],
-    ["Arch Linux ARM · aarch64", "core · extra · alarm", "archlinuxarm-keyring", "src-alarm"],
-    ["Omarchy (OPR) · both", "packages · the edge channel", "Omarchy's key", "src-opr"],
-    ["Omarchy for Apple Silicon", "asahi · aarch64 · the fork", "the fork's key", "src-asahi"],
-    ["Asahi Linux · aarch64", "asahi-alarm", "asahi-alarm-keyring", "src-asahi-alarm"],
-    ["Prebuilt AUR · optional", "chaotic x86_64 · aur aarch64", "unclaimed names only", "src-optional"],
-  ];
-  src.forEach((r, i) => {
+  sourceBoxes().forEach((b, i) => {
     const y = 14 + i * 68;
-    s += dbox({ x: 20, y, w: 220, h: 64, title: r[0], tcls: "small", lines: [r[1], r[2], { text: "…", cls: "live", live: r[3] }] }) + dline([240, y + 32, 270, y + 32]);
+    s += dbox({ x: 20, y, w: 220, h: 64, title: b.title, tcls: "small", lines: [b.sources, b.keyring, { text: "…", cls: "live", live: b.id }] }) + dline([240, y + 32, 270, y + 32]);
   });
   s += dline([270, 46, 270, 386]) + darrow(270, 198, 300, 198);
   s += dbox({ x: 300, y: 168, w: 176, h: 60, title: "Verify", cls: "amber", tcls: "amber", lines: ["the project's signature", "against its keyring"] });

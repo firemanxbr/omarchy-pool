@@ -47,7 +47,7 @@ PROVIDERS = {
 KEYS = [p["key"] for p in PROVIDERS.values()]
 # Who answered the last anthropic-shaped completion, when it was a broker
 # (factory/bin/broker) speaking for another provider: "claude-code/…". The
-# probe reports it, so the Factory page names the agent that really runs.
+# probe reports it, so the Workers page names the agent that really runs.
 BEHIND = {"agent": ""}
 
 

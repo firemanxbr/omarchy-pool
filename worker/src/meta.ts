@@ -40,6 +40,59 @@ export function version(env: Env): RunningVersion {
 export const LATE_AFTER_HOURS = 9;
 
 /**
+ * The rings. edge, rc and stable are the promise: a package enters edge
+ * signature-verified and reaches rc and stable by evidence, whichever
+ * source built it. lab is the fourth, beside them, where nothing is
+ * promised and nothing is promoted from: the factory's builds land there
+ * first and a real pacman tries them against edge (the trial job), any
+ * object of the pool can be pinned there to be tried in a combination,
+ * and only a maintainer's approval takes a build from there to edge. No
+ * sync targets it; `--ring lab` on a machine is the lab above the edge.
+ *
+ * This is the one list. index.ts re-exports it for the routes; the SQL
+ * that asks "which rings serve this package" is written from it through
+ * ringsSql(), the order a served list is read in is sortRings(), so a ring
+ * added here is in every query and every order the server writes. Five
+ * routes typed the four names by hand before (2026-09-18).
+ */
+export const RINGS = ["edge", "rc", "stable", "lab"] as const;
+export type Ring = (typeof RINGS)[number];
+/** The rings a package is promoted through, in order. */
+export const PROMOTED_RINGS = ["edge", "rc", "stable"] as const;
+/**
+ * The same rings from the most stable down — stable, rc, edge, then the
+ * lab, which is below edge and promised nothing — the order a reader
+ * picks a ring in and the order the package page falls back through when
+ * the asked ring does not serve the package. Derived, so it cannot drift
+ * from RINGS; the ring texts (RING_TEXT) keep this order too.
+ */
+export const RINGS_BY_STABILITY: readonly Ring[] = [...[...PROMOTED_RINGS].reverse(), ...RINGS.filter((r) => !(PROMOTED_RINGS as readonly string[]).includes(r))];
+/** The order a package climbs — lab, edge, rc, stable — the order the rings that serve a package are listed in. Derived from RINGS_BY_STABILITY, read the other way. */
+export const RINGS_UPWARD: readonly Ring[] = [...RINGS_BY_STABILITY].reverse();
+
+export function isRing(s: string): s is Ring {
+  return (RINGS as readonly string[]).includes(s);
+}
+
+/**
+ * A ring list as a SQL `IN (…)` fragment in the list's own order (an IN
+ * list has none) — `'edge', 'rc', 'stable', 'lab'` for RINGS — to splice
+ * into a query. The values are the constants above, never a caller's
+ * input: a name that is not plain lowercase letters throws rather than
+ * reaching the query, so the fragment can only ever be the rings' own names.
+ */
+export function ringsSql(rings: readonly Ring[]): string {
+  for (const r of rings) if (!/^[a-z]+$/.test(r)) throw new Error(`not a ring name: ${r}`);
+  return rings.map((r) => `'${r}'`).join(", ");
+}
+
+/** The rings that serve a package, in the order a package climbs (RINGS_UPWARD). A name that is no ring sorts last. */
+export function sortRings<T extends string>(rings: T[]): T[] {
+  const at = (r: string) => { const i = (RINGS_UPWARD as readonly string[]).indexOf(r); return i < 0 ? RINGS_UPWARD.length : i; };
+  return [...rings].sort((a, b) => at(a) - at(b));
+}
+
+/**
  * What each ring is, said once: the Pool page's cards, the Docs, Get
  * started and the status tiles read it from here (layout.ts hands it to
  * every page script as RINGS_TEXT). Promotion is by evidence, when the
@@ -91,17 +144,52 @@ export function sourceRank(source: string): number {
   return i < 0 ? REPO_ORDER.length : i;
 }
 
+/** A rendered repository's name, `omarchy-<source>-<ring>`, with the rings' own names — built once: sourceOfRepo runs in sort comparators. */
+const REPO_NAME = new RegExp(`^omarchy-(.+)-(${RINGS.join("|")})$`);
 /** The source a rendered repository lists: `omarchy-<source>-<ring>` → `<source>`; null for any other name. */
 export function sourceOfRepo(repo: string): string | null {
-  const m = repo.match(/^omarchy-(.+)-(edge|rc|stable|lab)$/);
+  const m = repo.match(REPO_NAME);
   return m ? m[1] : null;
 }
+
+/**
+ * Every kind of line the journal serves — the filter's chips, `?kind=`,
+ * and the API page's row on GET /events read this one list: the pool's
+ * jobs as the CLI posts them (sync, gate, promote, fast-track, health,
+ * trial, abi, security, render, publish, verify, rollback, relayout, gc),
+ * what the Worker writes on its own (deploy, cost, audience, provenance,
+ * dispatch, job, build, enqueue) and what people do on the record
+ * (request, review, approve, withdraw, trust, role, block, category, bump,
+ * worker, leak). A page that links `/journal?kind=<k>` names one of these
+ * — pages.test.ts reads every such link against this list — and a kind
+ * missing here is a filter that falls back to all without a word. The
+ * metrics snapshot is left out: it is a number, not a line.
+ */
+export const JOURNAL_KINDS = ["all", "sync", "gate", "promote", "fast-track", "health", "trial", "abi", "security", "render", "publish", "verify", "rollback", "relayout", "gc", "deploy", "cost", "audience", "provenance", "dispatch", "job", "build", "enqueue", "request", "review", "approve", "withdraw", "trust", "role", "block", "category", "bump", "worker", "leak"];
+
+/**
+ * The projects the pool takes packages from, by the host a sync reads, each
+ * with the keyring its packages verify against — one keyring per upstream,
+ * said once: How it works' table and its sources figure draw it from here.
+ * A source whose upstream is not listed does not typecheck.
+ */
+export const UPSTREAMS = {
+  "mirror.omarchy.org": { keyring: "archlinux-keyring" },
+  "os.archlinuxarm.org": { keyring: "archlinuxarm-keyring" },
+  "pkgs.omarchy.org": { keyring: "Omarchy's key" },
+  "github.com/maralcbr/omarchy-pkgs": { keyring: "the fork's key" },
+  "github.com/asahi-alarm/asahi-alarm": { keyring: "asahi-alarm-keyring" },
+  "builds.garudalinux.org": { keyring: "chaotic-keyring" },
+  "the factory": { keyring: "the pool's key" },
+} as const;
+export type Upstream = keyof typeof UPSTREAMS;
 
 /**
  * Every upstream repository the pipeline mirrors (the SOURCES table of
  * SYNC_SOURCES in scheduler.ts), so the dashboard can show what has not been synced yet.
  */
-export const EXPECTED_SOURCES: { source: string; arch: string; upstream: string; optional?: boolean; title: string }[] = [
+export interface ExpectedSource { source: string; arch: string; upstream: Upstream; optional?: boolean; title: string }
+export const EXPECTED_SOURCES: ExpectedSource[] = [
   { source: "core", arch: "x86_64", upstream: "mirror.omarchy.org", title: "Arch Linux core" },
   { source: "extra", arch: "x86_64", upstream: "mirror.omarchy.org", title: "Arch Linux extra" },
   { source: "multilib", arch: "x86_64", upstream: "mirror.omarchy.org", title: "Arch Linux multilib" },

@@ -10,6 +10,7 @@
  * day is skipped once and the scheduler's log says why.
  */
 import type { Env } from "./index";
+import { RINGS, RINGS_BY_STABILITY } from "./meta";
 
 export interface Audience {
   /** The UTC day measured, YYYY-MM-DD. */
@@ -29,7 +30,8 @@ export interface Audience {
 export const AUDIENCE_LIMIT = 10000;
 
 interface Rows { count?: number; sum?: { edgeResponseBytes?: number }; avg?: { sampleInterval?: number }; dimensions?: { clientIP?: string } }
-interface Zone { all?: Rows[]; stable?: Rows[]; rc?: Rows[]; edge?: Rows[]; lab?: Rows[]; x86_64?: Rows[]; aarch64?: Rows[]; totals?: Rows[] }
+/** The query's aliases: `all`, one per ring (RINGS), one per architecture, and `totals`. */
+interface Zone { all?: Rows[]; x86_64?: Rows[]; aarch64?: Rows[]; totals?: Rows[]; [ring: string]: Rows[] | undefined }
 
 /** One day of the pool's audience, from the zone's request analytics. */
 export async function measureAudience(env: Env, day: string, fetcher: typeof fetch = fetch): Promise<Audience> {
@@ -44,10 +46,7 @@ export async function measureAudience(env: Env, day: string, fetcher: typeof fet
   const q = `{ viewer { zones(filter: {zoneTag: "${env.CLOUDFLARE_ZONE_ID}"}) {
     totals: httpRequestsAdaptiveGroups(limit: 1, filter: {${base}, clientRequestPath_like: "%.db"}) { count sum { edgeResponseBytes } avg { sampleInterval } }
     ${ips("%.db", "all")}
-    ${ips("%-stable.db", "stable")}
-    ${ips("%-rc.db", "rc")}
-    ${ips("%-edge.db", "edge")}
-    ${ips("%-lab.db", "lab")}
+    ${RINGS.map((ring) => ips(`%-${ring}.db`, ring)).join("\n    ")}
     ${ips("%/x86_64/%.db", "x86_64")}
     ${ips("%/aarch64/%.db", "aarch64")}
   } } }`;
@@ -67,7 +66,7 @@ export async function measureAudience(env: Env, day: string, fetcher: typeof fet
   return {
     day,
     machines: n(z.all),
-    by_ring: { stable: n(z.stable), rc: n(z.rc), edge: n(z.edge), lab: n(z.lab) },
+    by_ring: Object.fromEntries(RINGS_BY_STABILITY.map((ring) => [ring, n(z[ring])])),
     by_arch: { x86_64: n(z.x86_64), aarch64: n(z.aarch64) },
     requests: t?.count ?? 0,
     bytes: t?.sum?.edgeResponseBytes ?? 0,

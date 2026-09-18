@@ -205,10 +205,10 @@ const SCRIPT = String.raw`
     }, { empty: "nothing waiting for review", text: function (t) { return [t.id, t.name, t.version, t.arch, t.owner, t.kind, t.category, t.score && t.score.class].join(" "); } });
     endSkeleton();
   }
-  // Every decision on the record, newest first: an approval taken back reads withdrawn, and only one that stands (standing, the server's word) is waiting for the recipe on main.
+  // Every decision on the record, newest first: an approval taken back reads withdrawn; the last cell is the project's build the approval carries (rebuild_task, set by the approval itself) with its status and the file it left.
   function renderDecisions() {
     pager("#decisions", APPROVALS, function (a) {
-      return '<tr><td class="when">' + ago(a.created_at) + '</td><td>' + pkg(a.name, a.version, servedRing(a.rings), a.arch) + ' <span class="dim">' + taskLink(a.task_id) + '</span></td><td>' + esc(a.arch) + '</td><td>' + (a.withdrawn_at ? taskPill("withdrawn", "approved by " + a.by + ", withdrawn " + ago(a.withdrawn_at) + " by " + a.withdrawn_by + ": " + (a.withdrawn_reason || "")) : taskPill(a.decision)) + '</td><td>' + personLink(a.by) + (a.withdrawn_at ? ' <span class="dim">· withdrawn by ' + personLink(a.withdrawn_by) + '</span>' : '') + '</td><td class="muted">' + esc(a.withdrawn_at ? (a.withdrawn_reason || "") : (a.note || "")) + '</td><td>' + (a.rebuild_task ? taskLink(a.rebuild_task) + ' ' + esc(a.rebuild_status || "") + (a.rebuild_result ? ' <span class="mono">' + esc(a.rebuild_result) + '</span>' : '') : (a.standing ? '<span class="dim">waiting for the recipe on main</span>' : '—')) + '</td></tr>';
+      return '<tr><td class="when">' + ago(a.created_at) + '</td><td>' + pkg(a.name, a.version, servedRing(a.rings), a.arch) + ' <span class="dim">' + taskLink(a.task_id) + '</span></td><td>' + esc(a.arch) + '</td><td>' + (a.withdrawn_at ? taskPill("withdrawn", "approved by " + a.by + ", withdrawn " + ago(a.withdrawn_at) + " by " + a.withdrawn_by + ": " + (a.withdrawn_reason || "")) : taskPill(a.decision)) + '</td><td>' + personLink(a.by) + (a.withdrawn_at ? ' <span class="dim">· withdrawn by ' + personLink(a.withdrawn_by) + '</span>' : '') + '</td><td class="muted">' + esc(a.withdrawn_at ? (a.withdrawn_reason || "") : (a.note || "")) + '</td><td>' + (a.rebuild_task ? taskLink(a.rebuild_task) + ' ' + esc(a.rebuild_status || "") + (a.rebuild_result ? ' <span class="mono">' + esc(a.rebuild_result) + '</span>' : '') : '—') + '</td></tr>';
     }, { empty: "no decision yet", text: function (a) { return [a.name, a.version, a.arch, a.decision, a.by, a.note].join(" "); } });
     endSkeleton();
   }
@@ -484,12 +484,12 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // Every decision, an approval taken back read as withdrawn; the recipe is waited for only where the approval stands (`standing`); the package links the most stable ring that serves it (`rings`).
+    // Every decision, an approval taken back read as withdrawn; the project's build the approval carries (`rebuild_task`) with its status; the package links the most stable ring that serves it (`rings`).
     id: "review.decisions-table",
     page: "/review",
     anchor: ['id="decisions"', "<h2>Decided lately</h2>", 'href="/journal"'],
-    script: ['pager("#decisions"', "pkg(a.name, a.version, servedRing(a.rings), a.arch)", "a.standing", "a.rebuild_task", "a.rebuild_status", "a.rebuild_result", "a.withdrawn_reason"],
-    reads: [{ path: "/api/v1/factory/approvals", fields: ["approvals", "approvals.0.created_at", "approvals.0.name", "approvals.0.version", "approvals.0.arch", "approvals.0.task_id", "approvals.0.decision", "approvals.0.standing", "approvals.0.rings", "approvals.0.by", "approvals.0.note", "approvals.0.withdrawn_at", "approvals.0.withdrawn_by", "approvals.0.withdrawn_reason", "approvals.0.rebuild_task", "approvals.0.rebuild_status", "approvals.0.rebuild_result"] }],
+    script: ['pager("#decisions"', "pkg(a.name, a.version, servedRing(a.rings), a.arch)", "a.rebuild_task", "a.rebuild_status", "a.rebuild_result", "a.withdrawn_reason"],
+    reads: [{ path: "/api/v1/factory/approvals", fields: ["approvals", "approvals.0.created_at", "approvals.0.name", "approvals.0.version", "approvals.0.arch", "approvals.0.task_id", "approvals.0.decision", "approvals.0.rings", "approvals.0.by", "approvals.0.note", "approvals.0.withdrawn_at", "approvals.0.withdrawn_by", "approvals.0.withdrawn_reason", "approvals.0.rebuild_task", "approvals.0.rebuild_status", "approvals.0.rebuild_result"] }],
     visible: EVERYONE,
   },
 ];

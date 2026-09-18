@@ -10,7 +10,7 @@ import { findLeak } from "../leak";
 import { chains, chainOf, storyRows, requestView, placeInQueue, stands, type Chain } from "./story";
 import { betterIdleWorker, FIRST_PICK_MINUTES } from "../queue";
 import { updateMessage, updateState } from "../update";
-import { version as running } from "../meta";
+import { version as running, RINGS, ringsSql, sortRings } from "../meta";
 
 /**
  * The factory's brain. Cloudflare is the source of truth for package
@@ -630,7 +630,11 @@ export async function handleComplete(id: number, request: Request, env: Env, act
   if (task.publish !== 0) {
     // What users get. A contributor's registration of this name is now
     // published, and the approval that led here keeps the task — the seal
-    // and the track record follow that link (docs/GOVERNANCE.md).
+    // and the track record follow that link (docs/GOVERNANCE.md). The link
+    // is history — which approval asked for this build — so it reads
+    // `decision` alone, a withdrawn approval included: an approval taken
+    // back since still asked; approve sets rebuild_task at once (#182), so
+    // this finds the approvals from before that flow, newest first.
     const answered = await env.DB.prepare("SELECT id FROM approvals WHERE name = ? AND arch = ? AND decision = 'approved' AND rebuild_task IS NULL ORDER BY id DESC LIMIT 1").bind(task.name, task.arch).first<{ id: number }>();
     await env.DB.batch([
       env.DB.prepare("UPDATE factory_packages SET status = 'published', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?")
@@ -844,9 +848,8 @@ export async function handleTask(id: number, env: Env): Promise<Response> {
   }
   // The rings that serve this package today, from the factory's rows in each ring.
   const rings = isBuild
-    ? (await env.DB.prepare("SELECT rp.ring FROM packages p JOIN ring_packages rp ON rp.package_id = p.id AND rp.ring IN ('lab', 'edge', 'rc', 'stable') WHERE p.source = 'factory' AND p.name = ? AND p.repo_arch = ?").bind(task.name, task.arch).all<{ ring: string }>()).results.map((r) => r.ring)
+    ? sortRings((await env.DB.prepare(`SELECT rp.ring FROM packages p JOIN ring_packages rp ON rp.package_id = p.id AND rp.ring IN (${ringsSql(RINGS)}) WHERE p.source = 'factory' AND p.name = ? AND p.repo_arch = ?`).bind(task.name, task.arch).all<{ ring: string }>()).results.map((r) => r.ring))
     : [];
-  const order = ["lab", "edge", "rc", "stable"];
   return json(
     {
       task: { ...task, params, result: parse(task) },
@@ -860,7 +863,7 @@ export async function handleTask(id: number, env: Env): Promise<Response> {
       approval: approval ? { ...approval, standing: stands(approval as { decision: string; withdrawn_at: string | null }) } : null,
       chain,
       score: chain?.score ?? null,
-      rings: rings.sort((a, b) => order.indexOf(a) - order.indexOf(b)),
+      rings,
       package: pkg,
       request,
       evidence: objects.results.map((o) => {

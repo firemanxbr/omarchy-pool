@@ -1,7 +1,7 @@
 /**
  * /request — the package request, on a page of its own: nothing to look at
  * but the four fields and the four confirmations. Linked from the footer
- * and from the Factory page's first way; a contributor lands here to ask
+ * and from the Factory's first way; a contributor lands here to ask
  * for one thing. The page is the same for whoever opens it: the form is
  * served for everyone, its fields grey with the sign-in as the reason
  * until whoami answers with a person, live then — signed in with GitHub
@@ -13,6 +13,11 @@
 import { page, servedGrey, GITHUB_ICON } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
+import { CHECKLIST } from "../request";
+import { escapeHtml } from "../html";
+
+/** A confirmation as the form asks it: the checklist's sentence (src/request.ts, the one text) as a line — capitalised, a full stop, escaped as the chapter's copy is by the markdown renderer. */
+const asLine = (s: string) => escapeHtml(`${s.charAt(0).toUpperCase()}${s.slice(1)}.`);
 
 /**
  * The form's fields are one template drawn twice: served grey for everyone
@@ -37,10 +42,7 @@ const FIELDS = String.raw`
           <label>Version <input type="text" id="pkg-version" placeholder="1.2.3"></label>
         </details>
         <div class="checklist" id="pkg-checklist">
-          <label><input type="checkbox" data-check="official"> The URL is the project's own repository or its official release — not a fork, not a mirror.</label>
-          <label><input type="checkbox" data-check="license"> The licence is the one the project declares (an SPDX identifier).</label>
-          <label><input type="checkbox" data-check="unshipped"> No upstream the pool mirrors ships this package already, and nobody else requested it.</label>
-          <label><input type="checkbox" data-check="evidence"> My build is evidence a maintainer learns from, never what users get; the pool may reject or block it.</label>
+${Object.entries(CHECKLIST).map(([key, text]) => `          <label><input type="checkbox" data-check="${key}"> ${asLine(text)}</label>`).join("\n")}
         </div>
         <button type="submit" id="pkg-btn">Request</button>
 `;
@@ -144,8 +146,8 @@ export function requestHtml(poolUrl: string, version: RunningVersion): string {
  * fixture's package request again as its owner.
  */
 export const REQUEST_COMPONENTS = (F: Fixture): Component[] => {
-  // The four confirmations as the template's boxes name them (data-check), not the server's CHECKLIST: a fifth
-  // sentence added on one side alone makes the request answer 400 here.
+  // The four confirmations typed by hand, not read from CHECKLIST — the boxes are rendered from it, so a fifth
+  // sentence added there and not here makes the request answer 400 here.
   const confirmed = { official: true, license: true, unshipped: true, evidence: true };
   // bob's request, as the form sends it: a project that is not on GitHub (the tests run without the network),
   // so the release is named by hand — the "Not on GitHub?" fields.
@@ -218,7 +220,8 @@ export const REQUEST_COMPONENTS = (F: Fixture): Component[] => {
     {
       id: "request.checklist",
       page: "/request",
-      anchor: ['<div class="checklist" id="pkg-checklist">', `data-check="official" ${grey}>`, 'data-check="license"', 'data-check="unshipped"', 'data-check="evidence"'],
+      // Every box is a key of CHECKLIST with its sentence as the form's line: the server's one text, never a copy.
+      anchor: ['<div class="checklist" id="pkg-checklist">', `data-check="official" ${grey}>`, ...Object.entries(CHECKLIST).map(([k, t]) => `data-check="${k}" ${grey}> ${asLine(t)}</label>`)],
       script: ['querySelectorAll("input[data-check]")', 'checklist[i.getAttribute("data-check")] = i.checked'],
       // One box left unticked and the request is refused, whoever asks, before the name or the project is looked at.
       acts: [{ method: "POST", path: "/api/v1/factory/packages", body: { ...theirs, checklist: { ...confirmed, evidence: false } }, expect: { anonymous: 401, contributor: 400, owner: 400, maintainer: 400 } }],

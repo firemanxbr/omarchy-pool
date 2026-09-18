@@ -12,7 +12,7 @@ const BODY = String.raw`
   <div class="hero compact">
     <p class="eyebrow">Security</p>
     <h1>What a ring serves that has an open advisory — and how sure we are</h1>
-    <p class="lede">Five feeds — the Arch and Debian security trackers, OSV, CISA KEV, EPSS — matched every three hours against what each ring serves. A package with an open advisory also <em>exposes</em> what depends on it; a confident fix already in <code>edge</code> is fast-tracked. <a href="/docs#security">The feeds and the confidences, explained →</a></p>
+    <p class="lede">Five feeds — the Arch and Debian security trackers, OSV, CISA KEV, EPSS — matched every three hours against what each ring serves. A package with an open advisory also <em>exposes</em> what depends on it; a confident fix already in <code>edge</code> is fast-tracked. <a href="/docs/security">The feeds and the confidences, explained →</a></p>
   </div>
   <form class="searchbar" onsubmit="return false">
     <div class="choice" id="pick-ring"></div>

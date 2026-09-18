@@ -123,5 +123,5 @@ Done. Next, as $user (log in again so the docker group applies):
        OMARCHY_CONTRIBUTOR_TOKEN=omc_… $root/register.sh        (a maintainer's token; from the profile page, shown once)
   3. cd $root && docker compose pull && docker compose up -d
   4. systemctl --user enable --now omarchy-pool-rollout.timer     (rolling upgrades from then on)
-  5. the Factory page lists them within a minute
+  5. the Workers page lists them within a minute
 NEXT

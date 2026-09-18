@@ -15,7 +15,7 @@ a machine to the project can use the same three files.
 
 ```
 POOL_ROOT (/srv/omarchy-pool)
-├── .env                 POOL_ROOT and WHERE (the label on the Factory page)
+├── .env                 POOL_ROOT and WHERE (the label in the worker's tooltip on the Workers page)
 ├── compose.yml
 ├── register.sh
 ├── rollout.sh
@@ -48,7 +48,7 @@ systemctl --user list-timers omarchy-pool-rollout.timer   # when it last ran, wh
 docker compose restart pool-x86_64                # a worker that looks stuck — also a drain: it finishes its task first (up to 3 h); docker kill for one that must die now
 ```
 
-The Factory page shows the six by role, with the agent each reports; a
+The Workers page lists the six by role, with the agent each reports; a
 worker that is not alive there is not running here. Moving the tree to
 another disk (the 4 TB one, when it has a USB enclosure) is `docker compose
 down`, copy, mount at the same `POOL_ROOT`, `docker compose up -d`.
@@ -61,8 +61,8 @@ user-mode emulation, and on a 16K-page host qemu cannot map every x86_64
 library: `rustc` (through libedit), `sudo` (libldap) and others fail with
 *failed to map segment from shared object* — a C package builds, a Rust
 one does not. So the two x86_64 build services are behind the `emulated`
-profile and off by default: x86_64 build tasks stay queued, the Factory
-page says they wait for a worker, and nothing burns attempts or agent
+profile and off by default: x86_64 build tasks stay queued, the Pipeline
+lists them as queued, and nothing burns attempts or agent
 calls on them. Any x86_64 machine with docker becomes the x86_64 build
 host in minutes: copy `compose.yml`, `.env`, `etc/agent.env`,
 `etc/community-x86_64.env` and `etc/review-x86_64.env` there, drop the

@@ -8,7 +8,7 @@
  */
 import { page } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
-import type { RunningVersion } from "../meta";
+import { JOURNAL_KINDS, type RunningVersion } from "../meta";
 
 const BODY = String.raw`
   <div class="hero compact">
@@ -29,9 +29,10 @@ const BODY = String.raw`
   </section>
 `;
 
+
 const SCRIPT = String.raw`
   skeletonRows("#events", 7, 8); skeletonRows("#releases", 9, 4);
-  var KINDS = ["all", "sync", "promote", "health", "security", "fast-track", "build", "render", "rollback", "gc", "deploy", "cost"], STATUSES = ["all", "ok", "warn", "error"];
+  var KINDS = ${JSON.stringify(JOURNAL_KINDS)}, STATUSES = ["all", "ok", "warn", "error"];
   var qs = new URLSearchParams(location.search);
   var kind = KINDS.indexOf(qs.get("kind")) >= 0 ? qs.get("kind") : "all", status = "all", q = "", EVENTS = [], LAST = null;
   function drawEvents() {

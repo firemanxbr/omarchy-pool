@@ -35,6 +35,8 @@ export const BUDGET_GUARD_USD = 40;
 export const BUDGET_WARN_USD = 25;
 /** How often the month is estimated and the guard reconsidered. */
 export const ESTIMATE_EVERY_HOURS = 3;
+/** The cadence as a page says it — "every three hours" — so the API page and the Pipeline read the number here. */
+export const ESTIMATE_CADENCE = `every ${["", "one", "two", "three", "four", "five", "six"][ESTIMATE_EVERY_HOURS] ?? ESTIMATE_EVERY_HOURS} hours`;
 
 const CLASS_A = new Set(["PutObject", "CopyObject", "CompleteMultipartUpload", "CreateMultipartUpload", "UploadPart", "ListObjects", "PutBucket", "DeleteObject", "PutBucketLifecycleConfiguration", "ListBuckets"]);
 

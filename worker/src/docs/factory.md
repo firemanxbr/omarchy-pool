@@ -23,17 +23,17 @@ verify and attest the package faster and approve it with more confidence.
    dashboard: the project's URL (a GitHub repository or its release tarball
    — for a project elsewhere, its home page and the release's source and
    version), a name, one line of description, the licence (SPDX), the
-   architectures, and four things they confirm (the URL is the project's
-   own, the licence is the project's, nobody ships or requested it, their
-   build is evidence). The pool checks all of it — a blocked contributor,
-   a name or a project already in the pool, an upstream that ships the
-   name, a source that does not answer — and only then writes the request
-   **once** to the record, `factory/<name>/<id>/request.json` in the pool
-   bucket with the pool's detached signature, public and immutable
-   (`worker/src/record.ts`). Nothing about a request lives on GitHub.
-   The build starts by itself, in the shared queue: the best idle shared
-   worker of the architecture — anyone's, with its owner's agent — or one
-   of the contributor's own, at once.
+   architectures, and four things they confirm. The pool checks all of
+   it — a blocked contributor, a name or a project already in the pool,
+   an upstream that ships the name, a source that does not answer — and
+   only then writes the request **once** to the record,
+   `factory/<name>/<id>/request.json` in the pool bucket with the pool's
+   detached signature, public and immutable (`worker/src/record.ts`).
+   Nothing about a request lives on GitHub. The build starts by itself,
+   in the shared queue: the best idle shared worker of the architecture
+   — anyone's, with its owner's agent — or one of the contributor's own,
+   at once. The four things, as the form asks them:
+<!-- checklist -->
 2. **Does someone ship it already?** The pool is asked first. If Arch, Arch
    Linux ARM or the OPR ship the name for an architecture it enters the pool's
    cycle as it is; the factory refuses to build that architecture
@@ -116,12 +116,16 @@ verify and attest the package faster and approve it with more confidence.
    it is a package like any other: health checks, the soak, `rc`, `stable`,
    the security layer, `omarchy-cli`.
 10. **If it fails**, the task returns to the queue with the log tail; after
-   three attempts it is marked failed and the Factory page shows why. A
+   three attempts it is marked failed and the build's page shows why. A
    worker that dies mid-build loses its lease and the task is requeued by the
    pool's scheduler within ten minutes.
 
-The Factory page follows a request through every stage
-(`requested → drafting → validating → review → approved`).
+The asker's own page follows a request per architecture, in the
+registration's own words: `registered`, then `waiting` or `building`,
+`staged` when the worker hands the evidence in, a maintainer's decision
+(`approved`, `rejected`) and `published` once the project's build is in
+edge — `unmaintained` after 30 days without a build; the
+[Pipeline](../../../../pipeline) lists every request and where it stands.
 
 ## The gate
 
@@ -209,7 +213,7 @@ writes it and corrects it from the build log, up to three times; without a
 key a template covers Rust, Go, CMake, Meson, autotools and release
 binaries) — and uploads the package, the PKGBUILD, `PKGINFO` and the build
 log to `staging/<you>/<package>/<task>/`. The task is then **staged**: the
-Factory page lists it, the log and the PKGBUILD are public, the package is
+Review page lists it, the log and the PKGBUILD are public, the package is
 for maintainers. Nothing you build reaches users: a maintainer reads it
 on the [Review](../../../../review) page and has the
 project build it again — the project's agent, a worker the project
@@ -246,7 +250,7 @@ leave staging, what a finished build had put on the record (the recipe,
 the log, the reports) stays, a build still running is cut off and leaves
 nothing, and anyone can register the name again. Your worker fails a task at claim time when your
 workspace is full, and reports an upload the pool refused as the build's
-failure — the reason is on the Factory page. A worker token is revocable
+failure — the reason is on the build's page. A worker token is revocable
 (`DELETE /factory/workers/<id>`); registering again replaces your contributor
 token. `cosign verify ghcr.io/firemanxbr/omarchy-worker:latest
 --certificate-identity-regexp github.com/firemanxbr/omarchy-pool
@@ -263,7 +267,7 @@ A **dry run** builds and measures but never publishes or renders: a
 maintainer queues it with `publish:false` —
 `curl -X POST $API/factory/enqueue -H "authorization: Bearer omc_…" -d '{"name":"chromium","pkgbuild_ref":"<commit>","version":"…","arches":["aarch64"],"reason":"sizing","publish":false,"override":true}'`
 (`override` when an upstream source ships the name). The worker keeps the
-result under its work directory; the Factory page shows the task with a
+result under its work directory; the Pipeline's build tasks show it with a
 *dry run* pill and how long it took. `factory/sizing/` holds recipes kept
 only for this (chromium, from Arch Linux ARM): the only recipes left in
 the repository, and the `enqueue` job never queues them.
@@ -334,7 +338,7 @@ community worker someone else runs); project builds — the ones written
 from contributors' evidence — run on machines the project trusts. No GitHub runner ever builds a package: the project's compute is
 not for building everyone's software, and GitHub Actions runs CI and the
 release only — no worker, not even for the pool's own jobs: when the
-project's host is down they wait, and the Factory page says so.
+project's host is down they wait, and the Workers page says so.
 
 ## The contract
 

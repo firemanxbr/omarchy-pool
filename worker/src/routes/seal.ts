@@ -74,6 +74,9 @@ export async function factoryChain(env: Env, sha256: string): Promise<Record<str
   // project's agent's own; the contributor's build is what it learned from.
   const review = ref.startsWith("review:") ? Number(ref.slice(7)) : null;
   const recipe: Record<string, unknown> = { ref };
+  // The approval that sent this object into the pool — a historical fact of the object, kept
+  // even once the approval is withdrawn: the seal says how the object got here, not whether
+  // it still stands (the rings say that, and pullFromRings takes a withdrawn package out).
   const approval = await env.DB.prepare("SELECT by, note, created_at, task_id FROM approvals WHERE decision = 'approved' AND (rebuild_task = ?1 OR task_id = ?2) ORDER BY id DESC LIMIT 1")
     .bind(build.id, staged ?? -1)
     .first<{ by: string; note: string | null; created_at: string; task_id: number }>();

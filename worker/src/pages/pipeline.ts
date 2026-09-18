@@ -12,6 +12,7 @@ import { EVERYONE, type Component, type Fixture } from "./components";
 import { CHARTS } from "./charts";
 import { archDiagram, liveDiagram } from "./diagrams";
 import type { RunningVersion } from "../meta";
+import { ESTIMATE_CADENCE } from "../cost";
 
 const BODY = String.raw`
   <div class="hero compact">
@@ -22,7 +23,7 @@ const BODY = String.raw`
   <div class="state-row" id="state"><span class="pill none">checking…</span></div>
 
   <section id="live">
-    <div class="h2row"><h2>A living system</h2><a class="more-link" href="/docs#security/feeds">What each security feed contributes →</a></div>
+    <div class="h2row"><h2>A living system</h2><a class="more-link" href="/docs/security#feeds">What each security feed contributes →</a></div>
     <p class="sub">Every three hours: packages are verified and promoted, five security feeds are matched against what every ring serves, and a confident fix does not wait for the soak.</p>
     <figure class="diagram live-diagram">${liveDiagram()}<figcaption>Green marks are packages on their way to <code>stable</code>; amber marks are advisories being matched against each ring. The dashed arc is the fast-track. The numbers are the pool's own.</figcaption></figure>
     <div class="live-grid" style="margin-top:16px">
@@ -42,17 +43,17 @@ const BODY = String.raw`
     </div>
   </section>
 
-  <div class="h2row" id="operations" style="border-top:1px solid var(--line);padding-top:28px;margin-bottom:4px"><h2>Operations</h2><span class="hint" id="ops-who">read-only — approving, trusting and rolling back need the maintainer role</span></div>
+  <div class="h2row" id="operations" style="border-top:1px solid var(--line);padding-top:28px;margin-bottom:4px"><h2>Operations</h2><span class="hint" id="ops-who">read-only — approving and rolling back need the maintainer role</span></div>
   <div class="tiles six" id="tiles"></div>
 
   <section>
     <div class="h2row"><h2>How it runs</h2><a class="more-link" href="/docs/factory">The factory in detail →</a></div>
     <p class="sub">One brain queues, workers claim with a lease, objects land on R2, rings are rendered and signed. Live numbers on the mechanism.</p>
-    <figure class="diagram">${archDiagram()}<figcaption>Every job runs on a registered worker. Contributors' builds are evidence; the review worker rebuilds what a maintainer approves. A lease that expires puts the task back in the queue. <a href="/workers">Every worker, by kind →</a></figcaption></figure>
+    <figure class="diagram">${archDiagram()}<figcaption>Every job runs on a registered worker. Contributors' builds are evidence; the review worker builds again what a maintainer asks for, and approve publishes that build. A lease that expires puts the task back in the queue. <a href="/workers">Every worker, by kind →</a></figcaption></figure>
   </section>
 
   <section>
-    <div class="h2row"><h2>Review queue</h2><a class="more-link" href="/review">Decisions, trust, the audit →</a></div>
+    <div class="h2row"><h2>Review queue</h2><a class="more-link" href="/review">Decisions and the audit →</a></div>
     <p class="sub">Evidence, not packages. Build by the project queues a rebuild on the review worker; approve publishes the project's build; reject sends a note back.</p>
     <div class="table-wrap"><table id="staged"><thead><tr><th>#</th><th>Package</th><th>Arch</th><th>Built by</th><th>Evidence</th><th>Audit</th><th>Waiting</th><th class="decision">Decision</th></tr></thead><tbody></tbody></table></div>
   </section>
@@ -88,8 +89,8 @@ const BODY = String.raw`
   </section>
 
   <section>
-    <div class="h2row"><h2>Cost, in the open</h2><span class="hint">Cloudflare, estimated every three hours from its analytics</span></div>
-    <p class="sub">D1 rows read and written are most of the bill. Estimated every three hours; the report warns from US$ <span data-live="cost-warn">…</span>, the guard pauses the jobs that write at US$ <span data-live="cost-guard">…</span>, the cap is US$ <span data-live="cost-cap">…</span>; the daily report says why.</p>
+    <div class="h2row"><h2>Cost, in the open</h2><span class="hint">Cloudflare, estimated ${ESTIMATE_CADENCE} from its analytics</span></div>
+    <p class="sub">D1 rows read and written are most of the bill. Estimated ${ESTIMATE_CADENCE}; the report warns from US$ <span data-live="cost-warn">…</span>, the guard pauses the jobs that write at US$ <span data-live="cost-guard">…</span>, the cap is US$ <span data-live="cost-cap">…</span>; the daily report says why.</p>
     <div class="budget" id="budget"><div><div class="k">this month</div><b>…</b></div><div><div class="k">projected</div><b>…</b></div><div class="bar"><i style="width:0"></i></div></div>
     <div class="sponsor"><div><p><b>Help keep it running.</b> The pool runs on one pocket: the brain on Cloudflare, one machine building for both architectures, and the agent tokens that draft and audit PKGBUILDs. More hardware means shorter queues; more tokens mean every build gets an audit.</p><div class="needs"><span class="pill lilac">an aarch64 builder</span><span class="pill lilac">an x86_64 builder</span><span class="pill lilac">agent tokens</span><span class="pill lilac">a mirror in another region</span></div></div>
     <div class="side"><a class="mail" href="mailto:sponsor@firemanxbr.org">sponsor@firemanxbr.org</a><span class="promise">Every contribution shows up on this page, and the code stays open source — that is the deal.</span></div></div>
@@ -250,7 +251,7 @@ __CHARTS__
     var line = function (ws) { var c = workerCounts(ws); return num(c.alive) + " alive · " + num(c.building) + " building" + (c.registered > c.alive ? " · " + num(c.registered - c.alive) + " gone" : ""); };
     live("w-pool", line(roles.pool)); live("w-review", line(roles.review)); live("w-community", line(roles.shared.concat(roles.own)));
     // The reader's role, in the hint: what the grey buttons below are waiting for is said once here.
-    $("#ops-who").textContent = isMaintainer() ? WHO.login + " · you can approve, trust and roll back" : WHO.login ? WHO.login + " · contributor — approving, trusting and rolling back are a maintainer's" : "read-only — approving, trusting and rolling back need the maintainer role";
+    $("#ops-who").textContent = isMaintainer() ? WHO.login + " · you can approve and roll back" : WHO.login ? WHO.login + " · contributor — approving and rolling back are a maintainer's" : "read-only — approving and rolling back need the maintainer role";
   }
 
   // ---- ring heads and the journal; the roll-back button is on every card with a release before the head, for everyone — live for a maintainer, grey with the reason for anyone else — and the click is the shell's (askRollback asks, posts the job once, writes #rb-state)
@@ -289,12 +290,12 @@ __CHARTS__
     });
   }
 
-  // ---- the bill, estimated every three hours from Cloudflare's analytics (cost.ts). The three lines — warn, guard, cap — are the pool's budget, not the estimate's: /api/v1/cost carries them with the estimate and without one, and the sentence, the cap beside the month, the guard's word and the mark on the bar all read them there, never a number typed here.
+  // ---- the bill, estimated on cost.ts's cadence (ESTIMATE_CADENCE, spliced into the words above and below) from Cloudflare's analytics. The three lines — warn, guard, cap — are the pool's budget, not the estimate's: /api/v1/cost carries them with the estimate and without one, and the sentence, the cap beside the month, the guard's word and the mark on the bar all read them there, never a number typed here.
   function renderCost() {
     fetch("/api/v1/cost").then(function (r) { return r.json(); }).then(function (c) {
       var usd = c.lines_usd || {};
       live("cost-warn", num(usd.warn)); live("cost-guard", num(usd.guard)); live("cost-cap", num(usd.cap));
-      var el = $("#budget"); if (c.error) { el.innerHTML = '<div><div class="k">this month</div><b>—</b> <span class="dim">no estimate yet (every three hours)</span></div>'; return; }
+      var el = $("#budget"); if (c.error) { el.innerHTML = '<div><div class="k">this month</div><b>—</b> <span class="dim">no estimate yet (${ESTIMATE_CADENCE})</span></div>'; return; }
       var color = c.status === "error" ? "var(--red)" : c.status === "warn" ? "var(--amber)" : "var(--green)";
       el.innerHTML = '<div><div class="k">' + esc(c.month) + ', so far</div><b style="color:' + color + '">US$ ' + Number(c.month_to_date_usd).toFixed(2) + '</b> <span class="dim">of a US$ ' + num(usd.cap) + ' hard cap</span></div><div><div class="k">projected</div><b>US$ ' + Number(c.projected_usd).toFixed(2) + '</b> <span class="dim">' + (c.guard ? "over the guard: jobs that write are paused" : "guard at US$ " + num(usd.guard)) + '</span></div><div class="bar"><i style="width:' + Math.min(100, 100 * Number(c.projected_usd) / usd.cap) + '%;background:' + color + '"></i><em style="left:' + (100 * usd.guard / usd.cap) + '%"></em></div>';
     }).catch(function () {});
@@ -461,7 +462,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     page: "/pipeline",
     anchor: ['id="operations"', 'id="ops-who"'],
     // One line naming the reader and the role: a maintainer's, a contributor's, a reader's — so the grey buttons below need no second sentence.
-    script: ['$("#ops-who")', "isMaintainer() ? WHO.login", "you can approve, trust and roll back", "contributor — approving, trusting and rolling back are a maintainer's", "read-only — approving, trusting and rolling back need the maintainer role"],
+    script: ['$("#ops-who")', "isMaintainer() ? WHO.login", "you can approve and roll back", "contributor — approving and rolling back are a maintainer's", "read-only — approving and rolling back need the maintainer role"],
     reads: [
       { path: "/auth/me", as: "maintainer", fields: ["login", "role"] },
       { path: "/auth/me", as: "contributor", fields: ["login", "role"] },

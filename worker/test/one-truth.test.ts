@@ -88,6 +88,10 @@ describe("an approval stands or it does not, said once", () => {
     expect(before.find((a) => a.name === F.publishedPkg)).toMatchObject({ decision: "approved", withdrawn_at: null, standing: true });
     expect(before.find((a) => a.name === F.factoryPkg)).toMatchObject({ decision: "approved", withdrawn_at: expect.any(String), standing: false });
     for (const a of before) expect(a.standing).toBe(stands(a));
+    // The row says whether the project's build is on its way: the newest publish job of the approved build, and the package's block — ours' publish job is done (w1 released it into edge), nothing is blocked; a page's "publishing" pill reads these, not the absence of a ring.
+    const rows = before as (typeof before[number] & { publish_status: string | null; blocked_at: string | null })[];
+    expect(rows.find((a) => a.name === F.publishedPkg)).toMatchObject({ publish_status: "done", blocked_at: null });
+    for (const a of rows) { expect(a).toHaveProperty("publish_status"); expect(a).toHaveProperty("blocked_at"); }
   });
 
   it("a person's page lists the approvals they signed with `standing`, and counts only standing ones as what they maintain", async () => {
