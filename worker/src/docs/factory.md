@@ -140,7 +140,7 @@ fails the build; `warn` is for the audit and the maintainer to weigh.
 | checksums | every source pinned (`updpkgsums` fills them) | a `SKIP` for a source that is not a VCS |
 | shellcheck | `shellcheck --shell=bash` on the PKGBUILD (SC2034, SC2154, SC2164 excluded: makepkg's own) | an error |
 | namcap-pkgbuild | `namcap PKGBUILD` | an `E:` |
-| namcap-package | `namcap -m -i` on every built package: dependencies the ELF scan finds (glibc, libgcc and libstdc++ excepted: `base` brings them), sonames, permissions, paths, `$srcdir` leaks, the licence file | an `E:` other than an ELF under `/opt` |
+| namcap-package | `namcap -m -i` on every built package: dependencies the ELF scan finds (glibc excepted), sonames, permissions, paths, `$srcdir` leaks, the licence file; *namcap-libmap* warns when the scan found no package for libc itself — the map is blind on that worker | an `E:` other than an ELF under `/opt` |
 | files | `pacman -Qlp`: only `/usr`, `/etc`, `/opt` | anything under `/usr/local`, `/bin`, `/sbin`, `/lib`, `/home`, `/tmp`; a `.la`; an empty package |
 | metadata | `pacman -Qip`: `pkgdesc`, `license`, `url` | no description or licence |
 | check | a `check()` running the upstream tests, or a comment saying why not | never (a warning) |

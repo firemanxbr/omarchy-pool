@@ -238,23 +238,32 @@ maintainer merges it like any other change to the process.
   there is none), and the shell has *last words* — whatever ends it while
   it holds a task is reported to the pool at once, with the command that
   did it, so a death costs a minute on the dashboard, not a day of leases.
-- **2026-09-18 — one package, two architectures, two namcaps.** omarchy-cli
-  0.0.168 passed the gate on aarch64 (one warning) and failed it on x86_64
-  the same night, on the same recipe, with *namcap-package* saying
-  `dependency-detected-not-included libgcc`: Arch split `gcc-libs` into
-  one package per library (`libgcc`, `libstdc++`, `libatomic`…) and kept
-  the old name as a meta-package that pulls them, so `libgcc_s.so.1` now
-  belongs to `libgcc` — and the gate's exemption named `gcc-libs`, a
-  package that owns no library any more. The aarch64 pass was not a
-  pass: namcap finds a library's owner through `ldconfig -p` and takes as
-  64-bit only the lines tagged `libc6,x86-64`; on aarch64 the tag is
-  `libc6,AArch64`, no library finds its map, and the scan warns
-  `library-no-package-associated` about libc itself instead of naming a
-  missing dependency — the same binary, checked with the one line
-  changed, reports `glibc` and `libgcc` exactly as x86_64 does. Two
-  things followed: the gate lets the runtime pass under the names Arch
-  gives it now (`glibc`, `libgcc`, `libstdc++`, `gcc-libs`) and nothing
-  else, and the build container teaches namcap that the aarch64 tag is
-  64-bit before the gate runs, so a missing dependency is the same
-  finding on either architecture. The skill names the runtime the way
-  Arch's own recipes do — `glibc` and `libgcc` for a Rust binary.
+- **2026-09-18 — one package, two architectures, two namcaps.** Two drafts
+  of omarchy-cli 0.0.168, neither naming `depends=`, met the gate the same
+  morning: the aarch64 one passed with a warning, the x86_64 one — the
+  first build to reach the gate on a native x86_64 worker — failed on
+  *namcap-package* `dependency-detected-not-included libgcc`. Arch had
+  split `gcc-libs` into one package per library in February 2026 (gcc
+  15.2.1: `libgcc`, `libstdc++`, `libgomp`…) and left the name as a
+  meta-package that owns no file, so `libgcc_s.so.1` is `libgcc`'s — and
+  the gate's exemption, written in September, named `gcc-libs`: a name
+  checked against memory, not against `pacman -Qo` on a live system. The
+  aarch64 pass was not a pass: namcap 3.6.0 finds a library's owner
+  through `ldconfig -p` and takes as 64-bit only the lines tagged
+  `libc6,x86-64`; on aarch64 the tag is `libc6,AArch64`, no library
+  finds its map, and the scan warns `library-no-package-associated` about
+  libc itself instead of naming a missing dependency — the same package,
+  checked with namcap taught that tag (a fix namcap's master has carried
+  since January, unreleased), reports `glibc` and `libgcc` exactly as
+  x86_64 does. Three things followed: the
+  gate exempts what Arch's guideline exempts, `glibc`, and takes every
+  other name namcap finds as a dependency to list — `libgcc` and
+  `libstdc++` as Arch's own recipes list them, `libgomp` and the rest
+  that the old name used to cover; the build container teaches namcap
+  that the aarch64 tag is 64-bit before the gate runs, and says
+  *namcap-libmap* beside the warnings when a libc has no package, so a
+  blind scan reads as one; and the exemption for an ELF under `/opt`,
+  which named the id namcap prints as information
+  (`elffile-not-in-allowed-dirs`) and never the one it prints as the
+  error (`elffile-in-questionable-dirs`), now names both. The skill
+  names the runtime the way Arch does.
