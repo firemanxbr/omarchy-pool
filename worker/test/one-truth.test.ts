@@ -29,10 +29,20 @@
  * two greys, over the same advisoryCounts; the last block pins the colour
  * to the shell's SEV_COLOR (the pill's class, as the CSS paints it) and the
  * buckets to SEV_BUCKETS, and runs the served charts to see the colour land.
+ * The same audit found the 14-day health grid drawn twice — the shell's
+ * heatGrid on the Pipeline, an inline copy on Status with the rings the
+ * other way round — and a check's result spelled three ways over the same
+ * journal rows (ok on the Pool's cards and the Status table, healthy on the
+ * Pipeline's pill, healthy / unhealthy on a job, ok / warn / error on one
+ * grid and healthy / warning / failed on the other); the last block pins
+ * the grid to heatGrid over the shell's PROMISED_RINGS (meta.ts's promoted
+ * rings, stable first) and the word to HEALTH_WORD, run as served over the
+ * server's rows on both pages, and reads every page that says a result.
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import worker, { RINGS, RINGS_BY_STABILITY } from "../src/index";
+import { PROMOTED_RINGS } from "../src/meta";
 import { LATE_AFTER_HOURS, RING_TEXT } from "../src/meta";
 import { waitsForMaintainer, stands } from "../src/routes/review";
 import { maintenanceOf } from "../src/routes/users";
@@ -427,6 +437,83 @@ describe("three more facts, one source each", () => {
     expect(ownScript(html)).toContain('pillHtml(SEV_PILL.exploited, "exploited", "in CISA KEV")');
     expect(ownScript(await page(`/package/${F.pkg}`))).toContain("SEV_COLOR.exploited");
     expect(ownScript(await page(`/package/${F.pkg}`))).not.toContain('style="color:var(--red)">exploited');
+  });
+
+  it("the 14-day health grid is drawn once — the shell's heatGrid on the Pipeline and on Status, the rings in the reader's order — and a check's result is one word everywhere: HEALTH_WORD on the grid, the Pool's ring cards, the Pipeline's pills, heads and job results, the Status table", async () => {
+    // Health checks beside the fixture's one: two on edge aarch64 yesterday, ok then failed — the day's cell is the worse; a warn on rc today; and one on the lab, which no scheduler queues (the lab is promised nothing) and no grid draws a row for.
+    const at = (hoursAgo: number) => new Date(Date.now() - hoursAgo * 3600e3).toISOString();
+    const yesterday = new Date(Date.now() - 86400e3).toISOString().slice(0, 10), today = new Date().toISOString().slice(0, 10);
+    const ins = (ring: string, arch: string, status: string, when: string) => env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload, created_at) VALUES ('health', ?, ?, ?, ?, '{}', ?)").bind(ring, arch, status, `${ring} ${arch}: ${status}`, when);
+    await env.DB.batch([ins("edge", "aarch64", "ok", at(26)), ins("edge", "aarch64", "error", at(25)), ins("rc", "x86_64", "warn", at(1)), ins("lab", "x86_64", "ok", at(1))]);
+    const stats = (await call("GET", "/stats?after=health")).json;
+    const rows = stats.series.health as { ring: string; arch: string; created_at: string; status: string }[];
+    expect(rows.map((r) => r.status).sort()).toEqual(["error", "ok", "ok", "ok", "warn"]);
+    // The rule, stated here over the server's rows: the worst status per ring, architecture and day — ok under warn under error.
+    const rank: Record<string, number> = { error: 3, warn: 2, ok: 1 }, expected: Record<string, string> = {};
+    for (const h of rows) { const k = `${h.ring}/${h.arch}/${h.created_at.slice(0, 10)}`; if ((rank[h.status] || 0) > (rank[expected[k]] || 0)) expected[k] = h.status; }
+    expect(expected[`edge/aarch64/${yesterday}`]).toBe("error");
+    expect(expected[`rc/x86_64/${today}`]).toBe("warn");
+    const days = Array.from({ length: 14 }, (_, i) => new Date(Date.now() - (13 - i) * 86400000).toISOString().slice(0, 10));
+    // The rows a grid draws: the rings a check covers, stable first — meta.ts's PROMOTED_RINGS in RINGS_BY_STABILITY's order — over both architectures; never the lab.
+    const promised = RINGS_BY_STABILITY.filter((r) => (PROMOTED_RINGS as readonly string[]).includes(r));
+    expect(promised).toEqual(["stable", "rc", "edge"]);
+    const labels = promised.flatMap((r) => ["x86_64", "aarch64"].map((a) => `${r} ${a}`));
+    const WORD = { ok: "healthy", warn: "nothing rendered", error: "failed" };
+    const components = allComponents(F), grids: string[] = [];
+    for (const [path, id] of [["/pipeline", "pipeline.health-heatgrid"], ["/status", "status.chart-health"]] as const) {
+      const html = await page(path), script = scriptOf(html), own = ownScript(html).replace(CHARTS, "");
+      // The shell's word and rings, as served: the one map, the promised rings in the reader's order.
+      const shell = ["esc", "HEALTH_WORD", "PROMISED_RINGS", "SEV_PILL"].map((n) => served(script, n));
+      const words = new Function([...shell, "return { HEALTH_WORD: HEALTH_WORD, PROMISED_RINGS: PROMISED_RINGS };"].join("\n"))() as { HEALTH_WORD: Record<string, string>; PROMISED_RINGS: string[] };
+      expect(words.HEALTH_WORD, `${path} HEALTH_WORD`).toEqual(WORD);
+      expect(words.PROMISED_RINGS, `${path} PROMISED_RINGS`).toEqual(promised);
+      // The served grid, run over the server's rows: one cell per ring, architecture and day, its class the worst status of the day, its tooltip the shell's word; the legend the same words in the pill's colours.
+      const chartFn = (name: string) => new RegExp(`^  function ${name}\\([\\s\\S]*?\\n  \\}$`, "m").exec(script)![0];
+      const grid = new Function("health", [...shell, served(script, "lastDays"), served(script, "day"), served(script, "worst"), chartFn("heatGrid"), "return heatGrid(health);"].join("\n"))(rows) as string;
+      grids.push(grid);
+      const drawn = [...grid.matchAll(/<div class="r"><span class="l">([^<]+)<\/span>((?:<span class="c[^>]*><\/span>)+)<\/div>/g)].map((m) => [m[1], [...m[2].matchAll(/<span class="c ?(\w*)" data-tip="([^"]*)"><\/span>/g)].map((c) => [c[1], c[2]])] as [string, [string, string][]]);
+      expect(drawn.map((r) => r[0]), `${path} rows`).toEqual(labels);
+      for (const [label, cells] of drawn) {
+        const key = label.replace(" ", "/");
+        expect(cells.length, `${path} ${label}`).toBe(14);
+        cells.forEach(([cls, tip], i) => {
+          const st = expected[`${key}/${days[i]}`] || "";
+          expect(cls, `${path} ${label} ${days[i]}`).toBe(st);
+          expect(tip, `${path} ${label} ${days[i]}`).toBe(`${days[i]} · ${label} · ${st ? WORD[st as keyof typeof WORD] : "no check"}`);
+        });
+      }
+      expect(grid).toContain(`data-tip="${yesterday} · edge aarch64 · failed"`);
+      expect(grid).toContain(`data-tip="${today} · rc x86_64 · nothing rendered"`);
+      expect(grid).toContain(`data-tip="${today} · stable ${F.arch} · healthy"`);
+      expect(grid).not.toContain("lab ");
+      expect(grid).toMatch(/<div class="legend"><span><i style="background:var\(--green\)"><\/i>healthy<\/span><span><i style="background:var\(--amber\)"><\/i>nothing rendered<\/span><span><i style="background:var\(--red\)"><\/i>failed<\/span><span><i style="background:var\(--line\)"><\/i>no check<\/span><\/div>$/);
+      // The page draws the shell's grid and nothing of its own: no cell map, no ring list, no word for a result, no legend.
+      expect(own, `${path} reads the shell's grid`).toContain('$("#c-health").innerHTML = heatGrid(S.health);');
+      expect(own, `${path} builds the cells itself`).not.toMatch(/worst\(cells|h\.ring \+ "\/"|\bheat\(|nothing rendered\)|"healthy"|"unhealthy"|"warning"/);
+      const c = components.find((x) => x.id === id);
+      expect(c?.script, id).toEqual(expect.arrayContaining(["heatGrid(S.health)"]));
+      expect(c?.script?.some((l) => l.includes("worst(cells")), `${id} pins a cell map of its own`).toBe(false);
+    }
+    expect(grids[0], "the Status page's cells are the Pipeline's").toBe(grids[1]);
+    // Every other place a check's result is said reads HEALTH_WORD — the Pool's ring cards, the Pipeline's ring pills, its ring heads and a health job's result, the Status rings table — and no page draws the journal's status as text; the manifests name the read.
+    for (const [path, ids, reads] of [
+      ["/", ["pool.ring-cards"], ["HEALTH_WORD[h.status]"]],
+      ["/pipeline", ["pipeline.state-row", "pipeline.ring-heads", "pipeline.tasks-table"], ["HEALTH_WORD.ok", "HEALTH_WORD[h.status]", "HEALTH_WORD[e.status]", "r.ok ? HEALTH_WORD.ok : HEALTH_WORD.error", "PROMISED_RINGS.map(function (n)"]],
+      ["/status", ["status.rings-table"], ["pillHtml(h.status, HEALTH_WORD[h.status])", "PROMISED_RINGS.forEach(function (ring)"]],
+    ] as const) {
+      const html = await page(path), own = ownScript(html).replace(CHARTS, "");
+      for (const r of reads) expect(own, `${path} reads ${r}`).toContain(r);
+      expect(own, `${path} says a health result in a word of its own`).not.toMatch(/' · ' \+ h\.status|" " \+ h\.status|pillHtml\(h\.status, h\.status\)|e\.status : "—"|"healthy"|"unhealthy"/);
+      for (const id of ids) {
+        const c = components.find((x) => x.id === id);
+        expect(c?.script?.some((l) => l.includes("HEALTH_WORD")), `${id} names the shell's word`).toBe(true);
+      }
+    }
+    // The Pipeline's word for a health job, run as served over the two results a job has: the shell's, not one of its own.
+    const pipeline = scriptOf(await page("/pipeline"));
+    const jobResult = new Function("t", [served(pipeline, "HEALTH_WORD"), "function num(v) { return String(v); }", /^  function jobResult\(t\) \{[\s\S]*?\n  \}$/m.exec(pipeline)![0], "return jobResult(t);"].join("\n"));
+    expect(jobResult({ kind: "health", result: { ok: true } })).toBe("healthy");
+    expect(jobResult({ kind: "health", result: JSON.stringify({ ok: false }) })).toBe("failed");
   });
 
   it("a build nobody decided yet links its package on the lab from Review, from its own page and from a person's builds table — one ringOfBuild", async () => {

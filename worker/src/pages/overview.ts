@@ -167,7 +167,7 @@ __CHARTS__
       if (name === "lab") return '<div class="ring lab"><div class="head"><span class="name">lab <span class="pill lab">not a promise</span></span></div>' +
         '<div class="desc"><b>' + info.title + '.</b> ' + info.text + ' Every build in it was installed by a real pacman first — the trial.</div>' +
         '<div class="cta"><span class="lag">' + (rel ? 'release #' + rel.seq + ' · ' + ago(rel.created_at) + ' · ' + num(r.package_count) + ' pkgs' : 'empty right now') + '</span><a href="#get-started" data-ring="lab">Try the lab →</a></div></div>';
-      var health = ARCHES.map(function (a) { var h = latest(d.latest, "health", name, a); return h ? '<span class="pill ' + h.status + '">' + a + ' · ' + h.status + '</span>' : '<span class="pill none">' + a + ' · no check yet</span>'; }).join("");
+      var health = ARCHES.map(function (a) { var h = latest(d.latest, "health", name, a); return h ? '<span class="pill ' + h.status + '">' + a + ' · ' + HEALTH_WORD[h.status] + '</span>' : '<span class="pill none">' + a + ' · no check yet</span>'; }).join("");
       return '<div class="ring ' + name + '"><div class="head"><span class="name">' + name + (name === "stable" ? ' <span class="pill rec">recommended</span>' : '') + '</span><span class="rel">' + num(r.package_count) + ' pkgs · ' + bytes(r.bytes) + '</span></div>' +
         '<div class="desc"><b>' + info.title + '.</b> ' + info.text + '</div><div class="health">' + health + '</div>' +
         '<div class="cta"><span class="lag">' + (rel ? 'release #' + rel.seq + ' · ' + ago(rel.created_at) : 'no release yet') + ' · ' + info.lag + '</span><a href="#get-started" data-ring="' + name + '">Use ' + name + ' →</a></div></div>';
@@ -382,7 +382,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       id: "pool.ring-cards",
       page: "/",
       anchor: ['id="rings-section"', '<div class="rings" id="rings">'],
-      script: ['"#rings"', "a[data-ring]", "RING_INFO[name]", 'latest(d.latest, "health", name, a)', "info.lag"],
+      script: ['"#rings"', "a[data-ring]", "RING_INFO[name]", 'latest(d.latest, "health", name, a)', "HEALTH_WORD[h.status]", "info.lag"],
       reads: [{ path: stats, fields: ["rings", "rings.0.ring", "rings.0.package_count", "rings.0.bytes", "rings.0.release", "rings.2.release.seq", "rings.2.release.created_at", "latest"] }],
       visible: EVERYONE,
     },

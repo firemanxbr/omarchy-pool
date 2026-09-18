@@ -106,7 +106,7 @@ __CHARTS__
     var r = {}; try { r = typeof t.result === "string" ? JSON.parse(t.result) : (t.result || {}); } catch (e) { return String(t.result).slice(0, 90); }
     if (t.kind === "sync") return "upstream " + num(r.upstream_total) + " · uploaded " + num(r.uploaded) + " · removed " + num(r.removed) + (r.failed ? " · failed " + num(r.failed) : "") + (r.release ? " · release " + r.release[0] : " · unchanged");
     if (t.kind === "promote") return r.verdict === "promoted" ? "promoted, release " + r.release_id : r.verdict === "blocked" ? "blocked: " + (r.reasons || []).join("; ") : r.verdict === "rolled-back" ? "rolled back to " + r.to : r.verdict === "skip" ? "nothing to promote" : JSON.stringify(r);
-    if (t.kind === "health") return r.ok ? "healthy" : "unhealthy";
+    if (t.kind === "health") return r.ok ? HEALTH_WORD.ok : HEALTH_WORD.error;
     if (t.kind === "gc") return "kept the last " + r.keep + " releases per ring" + (r.staging && (r.staging.expired || r.staging.reclaimed) ? " · staging: " + num(r.staging.expired) + " expired, " + num(r.staging.reclaimed) + " packages reclaimed" : "");
     if (t.kind === "render") return "rendered " + (r.repos || []).join(", ");
     return JSON.stringify(r).slice(0, 90);
@@ -144,8 +144,8 @@ __CHARTS__
   skeletonTiles("#tiles", 6); skeletonRows("#staged", 8, 2); skeletonRows("#events", 7, 6); skeletonRows("#tasks", 8, 4); skeletonRows("#registry", 8, 2); // ---- the state row: the service (measured now) and the pipeline (from the journal)
   function renderState(d) {
     fetch("/api/v1/status", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (st) { live("api", "API up · index " + (st.index.ok ? st.index.ms + " ms" : "down") + " · pool " + (st.pool.ok ? st.pool.ms + " ms" : "down")); }).catch(function () { live("api", "API not answering"); });
-    // A ring's pill is the worse of its two architectures' latest health checks.
-    var why = problemsOf(d), heads = ["stable", "rc", "edge"].map(function (n) { var r = d.rings.filter(function (x) { return x.ring === n; })[0]; var hs = ["x86_64", "aarch64"].map(function (a) { return latest(d.latest, "health", n, a); }).filter(Boolean); var w = hs.reduce(function (acc, h) { return worst(acc, h.status); }, null); var bad = hs.filter(function (h) { return h.status !== "ok"; }); return r && r.release ? '<span class="pill ' + (w || "none") + '">' + n + ' #' + r.release.seq + (w ? ' · ' + (w === "ok" ? "healthy" : bad.map(function (h) { return (h.source || "x86_64") + " " + h.status; }).join(", ")) : "") + '</span>' : ""; }).join("");
+    // A ring's pill is the worse of its two architectures' latest health checks, in the shell's word for it (HEALTH_WORD), over the rings a check covers (PROMISED_RINGS).
+    var why = problemsOf(d), heads = PROMISED_RINGS.map(function (n) { var r = d.rings.filter(function (x) { return x.ring === n; })[0]; var hs = ["x86_64", "aarch64"].map(function (a) { return latest(d.latest, "health", n, a); }).filter(Boolean); var w = hs.reduce(function (acc, h) { return worst(acc, h.status); }, null); var bad = hs.filter(function (h) { return h.status !== "ok"; }); return r && r.release ? '<span class="pill ' + (w || "none") + '">' + n + ' #' + r.release.seq + (w ? ' · ' + (w === "ok" ? HEALTH_WORD.ok : bad.map(function (h) { return (h.source || "x86_64") + " " + HEALTH_WORD[h.status]; }).join(", ")) : "") + '</span>' : ""; }).join("");
     $("#state").innerHTML = '<span class="pill ' + (why.length ? "warn" : "ok") + '">' + (why.length ? "pipeline behind: " + esc(why.join(" · ")) : "pipeline keeping up") + '</span>' + heads + '<span class="pill none">running ' + esc(d.version && d.version.version || "") + '</span>';
   }
 
@@ -257,8 +257,8 @@ __CHARTS__
   // ---- ring heads and the journal; the roll-back button is on every card with a release before the head, for everyone — live for a maintainer, grey with the reason for anyone else — and the click is the shell's (askRollback asks, posts the job once, writes #rb-state)
   function renderRings(d) {
     var heads = {}; (d.releases || []).forEach(function (r) { if (r.is_head) heads[r.ring] = r; });
-    $("#heads").innerHTML = ["stable", "rc", "edge"].map(function (n) {
-      var r = d.rings.filter(function (x) { return x.ring === n; })[0] || {}, rel = r.release, h = ["x86_64", "aarch64"].map(function (a) { var e = latest(d.latest, "health", n, a); return a + " " + (e ? e.status : "—"); }).join(" · ");
+    $("#heads").innerHTML = PROMISED_RINGS.map(function (n) {
+      var r = d.rings.filter(function (x) { return x.ring === n; })[0] || {}, rel = r.release, h = ["x86_64", "aarch64"].map(function (a) { var e = latest(d.latest, "health", n, a); return a + " " + (e ? HEALTH_WORD[e.status] : "—"); }).join(" · ");
       var prev = (d.releases || []).filter(function (x) { return x.ring === n && !x.is_head; })[0];
       return '<div class="headc ' + n + '"><div class="n"><b>' + n + '</b><span class="dim">' + (rel ? "#" + rel.seq + " · " + ago(rel.created_at) : "no release") + '</span></div><div class="m">' + num(r.package_count || 0) + ' packages · ' + bytes(r.bytes || 0) + ' · ' + h + '</div><div class="acts">' + (rel && rel.parent_id ? '<a class="small-btn" href="/diff?ring=' + n + '&from=' + rel.parent_id + '&to=' + rel.id + '">diff</a>' : "") + (prev ? gate('<button type="button" class="small-btn" data-rollback="' + prev.id + '" data-ring="' + n + '" title="point ' + n + ' back at release ' + prev.id + '">roll back to #' + prev.seq + '</button>', isMaintainer(), orSignIn("a maintainer rolls back")) : "") + '</div></div>';
     }).join("");
@@ -359,7 +359,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.state-row",
     page: "/pipeline",
     anchor: ['class="state-row"', 'id="state"'],
-    script: ['$("#state")', 'fetch("/api/v1/status"', "problemsOf(d)", "d.version && d.version.version"],
+    script: ['$("#state")', 'fetch("/api/v1/status"', "problemsOf(d)", "PROMISED_RINGS.map(function (n)", "HEALTH_WORD.ok", "HEALTH_WORD[h.status]", "d.version && d.version.version"],
     reads: [
       { path: "/api/v1/stats", fields: ["rings", "rings.2.ring", "rings.2.release.seq", "latest", "coverage", "version.version"] },
       { path: "/api/v1/status", fields: ["index.ok", "index.ms", "pool.ok", "pool.ms"] },
@@ -587,7 +587,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.tasks-table",
     page: "/pipeline",
     anchor: ['id="tasks"'],
-    script: ['pager("#tasks"', 'href="/build/', "/artifacts/build.log", "/artifacts/PKGBUILD", 'pkgHref(t.name, "edge", t.arch)', "wtId(byId[t.lease_owner] || t.lease_owner)", "t.result_filename", "jobResult(t)", "t.max_attempts"],
+    script: ['pager("#tasks"', 'href="/build/', "/artifacts/build.log", "/artifacts/PKGBUILD", 'pkgHref(t.name, "edge", t.arch)', "wtId(byId[t.lease_owner] || t.lease_owner)", "t.result_filename", "jobResult(t)", "r.ok ? HEALTH_WORD.ok : HEALTH_WORD.error", "t.max_attempts"],
     reads: [
       { path: "/api/v1/factory?limit=100", fields: ["workers.0.id", "workers.0.owner", "tasks.0.id", "tasks.0.kind", "tasks.0.name", "tasks.0.version", "tasks.0.arch", "tasks.0.status", "tasks.0.trust", "tasks.0.owner", "tasks.0.publish", "tasks.0.attempts", "tasks.0.max_attempts", "tasks.0.reason", "tasks.0.lease_owner", "tasks.0.duration_ms", "tasks.0.result_filename", "tasks.0.result", "tasks.0.error", "tasks.0.params"] },
       { path: `/api/v1/factory/tasks/${F.contributorTask}/artifacts/build.log`, json: false },
@@ -607,7 +607,7 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.ring-heads",
     page: "/pipeline",
     anchor: ['id="heads"'],
-    script: ['$("#heads")', "rel.parent_id", 'href="/diff?ring=', "r.package_count", "x.is_head"],
+    script: ['$("#heads")', "PROMISED_RINGS.map(function (n)", "HEALTH_WORD[e.status]", "rel.parent_id", 'href="/diff?ring=', "r.package_count", "x.is_head"],
     reads: [{ path: "/api/v1/stats", fields: ["rings.2.ring", "rings.2.release.id", "rings.2.release.seq", "rings.2.release.created_at", "rings.2.release.parent_id", "rings.2.package_count", "rings.2.bytes", "latest", "releases", "releases.0.ring", "releases.0.id", "releases.0.seq", "releases.0.is_head"] }],
     visible: EVERYONE,
   },

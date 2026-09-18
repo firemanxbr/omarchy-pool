@@ -41,19 +41,6 @@ export const CHARTS = String.raw`  // ---- tiny SVG charts (no library; the page
     body += '<text x="' + left + '" y="' + (H - 6) + '" font-size="10">' + esc(new Date(t0).toUTCString().slice(5, 16)) + '</text><text x="' + (W - right) + '" y="' + (H - 6) + '" text-anchor="end" font-size="10">' + esc(new Date(t1).toUTCString().slice(5, 16)) + '</text>';
     return svg(W, H, body);
   }
-  function heat(rows, days, cell) { // rows: [{key,label}], cell(key, day) -> status|null
-    if (!rows.length) return '<div class="empty">no health checks yet</div>';
-    var W = 360, labelW = 110, rh = 18, H = rows.length * rh + 22, cw = (W - labelW) / days.length, body = '';
-    rows.forEach(function (r, ri) {
-      body += '<text x="0" y="' + (ri * rh + 13) + '" font-size="10.5"><title>' + esc(r.label) + '</title>' + esc(fit(r.label, 17)) + '</text>';
-      days.forEach(function (dd, di) {
-        var st = cell(r.key, dd), col = st === "error" ? C.red : st === "warn" ? C.amber : st === "ok" ? C.green : C.dim;
-        body += '<rect x="' + (labelW + di * cw + 1) + '" y="' + (ri * rh + 2) + '" width="' + (cw - 2) + '" height="' + (rh - 4) + '" fill="' + col + '" fill-opacity="' + (st ? 1 : 0.35) + '"><title>' + esc(r.label + " " + dd + ": " + (st || "no check")) + '</title></rect>';
-      });
-    });
-    body += '<text x="' + labelW + '" y="' + (H - 4) + '" font-size="10">' + esc(days[0].slice(5)) + '</text><text x="' + W + '" y="' + (H - 4) + '" text-anchor="end" font-size="10">' + esc(days[days.length - 1].slice(5)) + '</text>';
-    return svg(W, H, body);
-  }
   function hbars(items) { // items: [{label, parts: [{v, color}], note}]
     if (!items.length) return '<div class="empty">no snapshot yet</div>';
     var W = 360, labelW = 112, noteW = 66, rh = 20, H = items.length * rh + 4, body = '';
@@ -130,15 +117,15 @@ export const CHARTS = String.raw`  // ---- tiny SVG charts (no library; the page
     var js = jobsSummary(series, days), values = js.labels.map(function (d) { return Math.round((js.byDay[d] || { ms: 0 }).ms / 60000); });
     return { labels: js.labels, values: values, total: values.reduce(function (n, v) { return n + v; }, 0) };
   }
-  // Fourteen days of health per ring and architecture, worst result per day, as html cells.
+  // Fourteen days of health per ring and architecture, worst result per day, as html cells — the one grid the Pipeline and the Status page draw (each drew its own once, the rings in opposite orders and the same result in different words). The rows are the rings a check covers in the reader's order (the shell's PROMISED_RINGS); a cell's class is the journal's status, painted by the CSS as a pill of that class is; its tooltip and the legend say the shell's HEALTH_WORD for it.
   function heatGrid(health) {
-    var days = lastDays(14), cells = {}, RINGS = ["stable", "rc", "edge"], ARCHES = ["x86_64", "aarch64"];
+    var days = lastDays(14), cells = {}, ARCHES = ["x86_64", "aarch64"];
     (health || []).forEach(function (h) { var k = h.ring + "/" + h.arch + "/" + day(h.created_at); cells[k] = worst(cells[k], h.status); });
     if (!Object.keys(cells).length) return '<div class="empty">no health checks yet</div>';
-    var rows = []; RINGS.forEach(function (r) { ARCHES.forEach(function (a) { rows.push([r + " " + a, r + "/" + a]); }); });
-    var names = { ok: "healthy", warn: "warning", error: "failed" };
-    return '<div class="heat">' + rows.map(function (r) { return '<div class="r"><span class="l">' + esc(r[0]) + '</span>' + days.map(function (dd) { var st = cells[r[1] + "/" + dd]; return '<span class="c ' + (st || "") + '" data-tip="' + esc(dd + " · " + r[0] + " · " + (names[st] || "no check")) + '"></span>'; }).join("") + '</div>'; }).join("") +
-      '<div class="days"><span></span>' + days.map(function (d, i) { return '<span>' + (i % 2 ? esc(d.slice(5)) : "") + '</span>'; }).join("") + '</div></div>';
+    var rows = []; PROMISED_RINGS.forEach(function (r) { ARCHES.forEach(function (a) { rows.push([r + " " + a, r + "/" + a]); }); });
+    return '<div class="heat">' + rows.map(function (r) { return '<div class="r"><span class="l">' + esc(r[0]) + '</span>' + days.map(function (dd) { var st = cells[r[1] + "/" + dd]; return '<span class="c ' + (st || "") + '" data-tip="' + esc(dd + " · " + r[0] + " · " + (HEALTH_WORD[st] || "no check")) + '"></span>'; }).join("") + '</div>'; }).join("") +
+      '<div class="days"><span></span>' + days.map(function (d, i) { return '<span>' + (i % 2 ? esc(d.slice(5)) : "") + '</span>'; }).join("") + '</div></div>' +
+      '<div class="legend">' + Object.keys(HEALTH_WORD).map(function (st) { return '<span><i style="background:' + PILL_COLOR[st] + '"></i>' + esc(HEALTH_WORD[st]) + '</span>'; }).join("") + '<span><i style="background:var(--line)"></i>no check</span></div>';
   }
 `;
 

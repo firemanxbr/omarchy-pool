@@ -6,7 +6,7 @@
  */
 import type { RunningVersion } from "../meta";
 import { DOCS_TREE, GLOSSARY, type DocKey } from "./docs-tree";
-import { LATE_AFTER_HOURS, RING_TEXT } from "../meta";
+import { LATE_AFTER_HOURS, PROMOTED_RINGS, RING_TEXT, RINGS_BY_STABILITY } from "../meta";
 import { escapeHtml } from "../html";
 
 export const GITHUB_ICON =
@@ -651,6 +651,10 @@ export const HELPERS = String.raw`
   var LATE_MS = __LATE_AFTER_HOURS__ * 3600e3;
   // Whether a coverage row is late: the server's word when it sent one, else the same rule over last_sync. A source never synced is not late, it is missing — the sync line says so.
   function lateSync(c) { return typeof c.late === "boolean" ? c.late : !!c.last_sync && Date.now() - Date.parse(c.last_sync) > LATE_MS; }
+  // ---- a health check's result wears one word on every page that says it: the Pool's ring cards, the Pipeline's ring pills, its ring heads and its job's result, the Status rings table, and the 14-day grid both pages draw (the audit found it spelled three ways — ok on the cards and the table, healthy on the pill, healthy / unhealthy on the job, ok / warn / error on one grid and healthy / warning / failed on the other, over the same journal rows). The status is the journal's (events.ts: ok, warn, error); the word is what it means for a ring — healthy; nothing rendered for the architecture, which is what warn is (the gate ignores it); failed. A cell or a pill wears the status as its class, the CSS paints it, PILL_COLOR says what it is painted.
+  var HEALTH_WORD = { ok: "healthy", warn: "nothing rendered", error: "failed" };
+  // The rings a health check covers — the ones that promise something, the scheduler's PROMOTED_RINGS — in the reader's order (RINGS_TEXT's, stable first), spliced in by page() so the list is typed once in meta.ts; the lab is promised nothing and is not checked, so no page draws a check for it.
+  var PROMISED_RINGS = __PROMISED_RINGS__;
   // What is wrong, if anything: no sync for four hours (they run every three), a source not synced
   // for nine (LATE_MS: a long import holds the pipeline's queue, so small sources wait),
   // or a ring whose latest health check failed. The header pill and the
@@ -1466,7 +1470,7 @@ ${body}
 (function () {
   // The footer lights the entry the reader is on or under: /package/<name> is Packages, /docs/<chapter> is Docs, /diff is the Journal's; a build lights nothing here, its door is Review.
   document.querySelectorAll("footer .more a").forEach(function (a) { var href = a.getAttribute("href"), here = location.pathname; if (here === href || here.indexOf(href + "/") === 0 || (href === "/packages" && here.indexOf("/package/") === 0) || (href === "/journal" && here === "/diff")) a.classList.add("active"); });
-${HELPERS.split("__POOL_URL__").join(pool).split("__RINGS_TEXT__").join(JSON.stringify(RING_TEXT)).split("__WICON__").join(JSON.stringify(WORKER_ICONS)).split("__LATE_AFTER_HOURS__").join(String(LATE_AFTER_HOURS))}
+${HELPERS.split("__POOL_URL__").join(pool).split("__RINGS_TEXT__").join(JSON.stringify(RING_TEXT)).split("__WICON__").join(JSON.stringify(WORKER_ICONS)).split("__LATE_AFTER_HOURS__").join(String(LATE_AFTER_HOURS)).split("__PROMISED_RINGS__").join(JSON.stringify(RINGS_BY_STABILITY.filter((r) => (PROMOTED_RINGS as readonly string[]).includes(r))))}
 ${o.script ?? ""}
 ${docsSearch}
 })();

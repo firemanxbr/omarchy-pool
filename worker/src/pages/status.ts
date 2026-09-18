@@ -122,11 +122,8 @@ __CHARTS__
     (S.imports_daily || []).forEach(function (r) { byDay[r.day] = r; });
     $("#c-imports").innerHTML = bars(days14.map(function (dd) { var r = byDay[dd]; return { label: dd.slice(5), value: r ? Number(r.packages) : 0, title: dd + ": " + (r ? num(r.packages) + " packages, " + bytes(r.bytes) + " in " + r.runs + " run(s)" : "no sync") }; }), num);
 
-    var RINGS = ["edge", "rc", "stable"], ARCHES = ["x86_64", "aarch64"], cells = {};
-    (S.health || []).forEach(function (h) { var k = h.ring + "/" + h.arch + "/" + day(h.created_at); cells[k] = worst(cells[k], h.status); });
-    var rows = []; RINGS.forEach(function (r) { ARCHES.forEach(function (ar) { rows.push({ key: r + "/" + ar, label: r + " " + ar }); }); });
-    $("#c-health").innerHTML = heat(rows, days14, function (k, dd) { return cells[k + "/" + dd] || null; }) +
-      '<div class="legend"><span><i style="background:' + C.green + '"></i>ok</span><span><i style="background:' + C.amber + '"></i>warn (nothing rendered)</span><span><i style="background:' + C.red + '"></i>error</span><span><i style="background:' + C.dim + ';opacity:.5"></i>no check</span></div>';
+    // The grid the Pipeline draws, from the shell (heatGrid): the same rows in the same order, the same word for a result — this page kept a grid of its own once, the rings the other way round and ok / warn / error where the Pipeline said healthy / warning / failed.
+    $("#c-health").innerHTML = heatGrid(S.health);
 
     var runs = (S.sync_runs || []).slice().reverse().filter(function (r) { return r.bytes && r.duration_ms; });
     $("#c-sync").innerHTML = bars(runs.map(function (r) { var mbs = Number(r.bytes) / 1048576 / (Number(r.duration_ms) / 1000); return { label: r.source.slice(0, 5) + (r.arch === "aarch64" ? "/arm" : ""), value: Math.round(mbs * 10) / 10, color: r.status === "ok" ? C.green : C.amber, title: r.source + " " + r.arch + " " + ago(r.created_at) + ": " + num(r.uploaded) + " packages, " + bytes(r.bytes) + " in " + dur(r.duration_ms) + " → " + (Math.round(mbs * 10) / 10) + " MB/s" + (r.concurrency ? " with " + r.concurrency + " workers" : "") }; }), function (v) { return v + " MB/s"; });
@@ -176,18 +173,18 @@ __CHARTS__
 
 
   function render(d) {
-    var RINGS = ["stable", "rc", "edge"], ARCHES = ["x86_64", "aarch64"];
+    var ARCHES = ["x86_64", "aarch64"];
     loadWorkers(d);
     var problems = problemsOf(d);
     var lastSync = newest(d.latest, "sync");
     var healthRows = [];
-    RINGS.forEach(function (ring) {
+    PROMISED_RINGS.forEach(function (ring) {
       var r = d.rings.filter(function (x) { return x.ring === ring; })[0] || {};
       ARCHES.forEach(function (arch) {
         var h = latest(d.latest, "health", ring, arch);
         var dbs = (r.artifacts || []).filter(function (a) { return a.kind === "db" && a.arch === arch; });
         if (!dbs.length && !(r.sources || []).some(function (s) { return s.arch === arch; })) return;
-        healthRows.push('<tr><td>' + ring + '</td><td>' + arch + '</td><td>' + (h ? pillHtml(h.status, h.status) : pillHtml("none", "none")) + '</td><td class="when">' + (h ? ago(h.created_at) : "—") + '</td><td>' + (r.release ? "#" + r.release.seq : "—") + '</td><td class="when">' + (r.release ? ago(r.release.created_at) : "—") + '</td><td>' + (dbs.length ? dbs.map(function (a) { return '<code>' + esc(a.repo) + '</code>'; }).join(" ") : '<span class="muted">not rendered</span>') + '</td></tr>');
+        healthRows.push('<tr><td>' + ring + '</td><td>' + arch + '</td><td>' + (h ? pillHtml(h.status, HEALTH_WORD[h.status]) : pillHtml("none", "no check yet")) + '</td><td class="when">' + (h ? ago(h.created_at) : "—") + '</td><td>' + (r.release ? "#" + r.release.seq : "—") + '</td><td class="when">' + (r.release ? ago(r.release.created_at) : "—") + '</td><td>' + (dbs.length ? dbs.map(function (a) { return '<code>' + esc(a.repo) + '</code>'; }).join(" ") : '<span class="muted">not rendered</span>') + '</td></tr>');
       });
     });
     $("#rings tbody").innerHTML = healthRows.join("") || '<tr><td colspan="7" class="muted">no rings yet</td></tr>';
@@ -288,7 +285,7 @@ export const STATUS_COMPONENTS = (_F: Fixture): Component[] => [
     id: "status.rings-table",
     page: "/status",
     anchor: ['id="rings"', "<th>Health</th>", "<th>Databases</th>"],
-    script: ['"#rings tbody"', 'latest(d.latest, "health", ring, arch)', 'a.kind === "db"', "r.sources", "no rings yet"],
+    script: ['"#rings tbody"', "PROMISED_RINGS.forEach(function (ring)", 'latest(d.latest, "health", ring, arch)', "pillHtml(h.status, HEALTH_WORD[h.status])", 'a.kind === "db"', "r.sources", "no rings yet"],
     reads: [
       {
         path: "/api/v1/stats",
@@ -393,7 +390,7 @@ export const STATUS_COMPONENTS = (_F: Fixture): Component[] => [
     id: "status.chart-health",
     page: "/status",
     anchor: ['id="c-health"', "<h3>Health <span>14 days</span></h3>"],
-    script: ['"#c-health"', "S.health", "h.ring", "h.arch", "worst(cells[k], h.status)"],
+    script: ['"#c-health"', "heatGrid(S.health)"],
     reads: [{ path: "/api/v1/stats", fields: ["series.health", "series.health.0.ring", "series.health.0.arch", "series.health.0.created_at", "series.health.0.status"] }],
     visible: EVERYONE,
   },
