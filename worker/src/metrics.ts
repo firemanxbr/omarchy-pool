@@ -109,7 +109,10 @@ export async function snapshotMetrics(env: Env, now = new Date()): Promise<strin
   // carries the previous one's (D1 bills every row read).
   const previous = last ? (JSON.parse(last.payload) as Partial<PoolBlock>) : null;
   const reuse = previous?.pool && previous.rings && previous.provenance && previous.any && !(await poolChangedSince(env, last!.created_at));
-  const block: PoolBlock = reuse ? (previous as PoolBlock) : await scanPool(env);
+  // Only the pool block is carried over — the previous payload is the whole
+  // snapshot, and spreading it whole carried its jobs, builds and workers
+  // too: the Status page's job tiles stood still between two syncs.
+  const block: PoolBlock = reuse ? { pool: previous!.pool!, rings: previous!.rings!, provenance: previous!.provenance!, any: previous!.any! } : await scanPool(env);
 
   // The pool's own jobs (sync, promote, health, security, gc…) and the
   // factory's builds over the last seven days, plus what is in flight now.

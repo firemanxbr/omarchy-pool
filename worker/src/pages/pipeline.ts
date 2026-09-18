@@ -266,10 +266,10 @@ __CHARTS__
   }
   // ---- the charts, from /api/v1/stats
   function renderCharts(d) {
-    var S = d.series || {}, days14 = lastDays(14), days7 = lastDays(7);
-    var jd = S.jobs_daily || [], byD = {};
-    jd.forEach(function (r) { var x = byD[r.day] = byD[r.day] || { done: 0, failed: 0, waiting: 0 }; if (r.status === "done") x.done += Number(r.n); else if (r.status === "failed" || r.status === "cancelled") x.failed += Number(r.n); else x.waiting += Number(r.n); });
-    $("#c-jobs").innerHTML = stacked(days7, [{ name: "done", color: C.green, values: days7.map(function (x) { return (byD[x] || {}).done || 0; }) }, { name: "waiting", color: C.amber, values: days7.map(function (x) { return (byD[x] || {}).waiting || 0; }) }, { name: "failed", color: C.red, values: days7.map(function (x) { return (byD[x] || {}).failed || 0; }) }], { label: "Pool jobs per day over seven days", empty: "no job yet — the pool queues them on schedule and project workers pull them" });
+    var S = d.series || {}, days14 = lastDays(14);
+    // The jobs per day are the shell's one reduce over the series (jobsSummary), the buckets the Status page's tiles, table and charts read: one count of done, waiting and failed, here as a bar a day.
+    var js = jobsSummary(d.series, 7), jobsOf = function (k) { return js.labels.map(function (x) { return (js.byDay[x] || {})[k] || 0; }); };
+    $("#c-jobs").innerHTML = stacked(js.labels, [{ name: "done", color: C.green, values: jobsOf("done") }, { name: "waiting", color: C.amber, values: jobsOf("waiting") }, { name: "failed", color: C.red, values: jobsOf("failed") }], { label: "Pool jobs per day over seven days", empty: "no job yet — the pool queues them on schedule and project workers pull them" });
     $("#c-health").innerHTML = heatGrid(S.health);
     var byDay = {}; (S.imports_daily || []).forEach(function (r) { byDay[r.day] = r; });
     $("#c-imports").innerHTML = stacked(days14, [{ name: "imported", color: C.green, values: days14.map(function (x) { return byDay[x] ? Number(byDay[x].packages) : 0; }) }], { label: "Packages imported per day over fourteen days", empty: "no sync yet" });
@@ -533,7 +533,8 @@ export const PIPELINE_COMPONENTS = (F: Fixture): Component[] => [
     id: "pipeline.jobs-chart",
     page: "/pipeline",
     anchor: ['id="c-jobs"'],
-    script: ['$("#c-jobs")', "S.jobs_daily", 'r.status === "done"'],
+    // The bars are the shell's jobsSummary over the series, by day — the same buckets the Status page draws.
+    script: ['$("#c-jobs")', "jobsSummary(d.series, 7)", "js.byDay[x]", 'jobsOf("done")', 'jobsOf("waiting")', 'jobsOf("failed")'],
     reads: [{ path: "/api/v1/stats", fields: ["series.jobs_daily", "series.jobs_daily.0.day", "series.jobs_daily.0.status", "series.jobs_daily.0.n"] }],
     visible: EVERYONE,
   },

@@ -17,7 +17,13 @@
  * open advisories in stable — and the last block pins each to one source:
  * the registry's `landed`, one sum over jobs_daily, one count at the
  * Security page's confidence; and one ring for one build, one word for an
- * approval that stands, on every page that draws them.
+ * approval that stands, on every page that draws them. The third audit
+ * found the Status page saying the week's jobs two ways on one screen —
+ * the tiles from the half-hourly snapshot, the table and the charts from
+ * the series beneath, a cancelled job a success on one and a failure on the
+ * other — and pins the jobs of the week to one reduce over jobs_daily
+ * (jobsSummary), read by the tiles, the table and the charts, and by the
+ * Pipeline's chart.
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -26,8 +32,10 @@ import { LATE_AFTER_HOURS, RING_TEXT } from "../src/meta";
 import { waitsForMaintainer, stands } from "../src/routes/review";
 import { maintenanceOf } from "../src/routes/users";
 import { landed } from "../src/routes/contributors";
+import { snapshotMetrics } from "../src/metrics";
 import { allComponents } from "../src/pages/components";
 import { HELPERS } from "../src/pages/layout";
+import { CHARTS } from "../src/pages/charts";
 import { ownScriptOf, scriptOf, seedDashboard, type Fixture } from "./fixture";
 
 let F: Fixture;
@@ -284,6 +292,11 @@ describe("three more facts, one source each", () => {
     }
   });
 
+  // The shell's reduce over the jobs series, as served: jobsSummary and the minutes view on it, with the day helper they need — the proofs below run them over the server's rows.
+  function jobsFns(script: string): string[] {
+    return [/^  function lastDays\(n\) [^\n]*$/m.exec(script)![0], /^  function jobsSummary\(series, days\) \{[\s\S]*?\n  \}$/m.exec(script)![0], /^  function workerMinutes\(series, days\) \{[\s\S]*?\n  \}$/m.exec(script)![0]];
+  }
+
   it("the worker minutes of the week are one sum over jobs_daily — the tile and the chart's bars — on the Workers page, the Pipeline and Status", async () => {
     const stats = (await call("GET", "/stats")).json;
     for (const path of ["/workers", "/pipeline", "/status"]) {
@@ -291,12 +304,57 @@ describe("three more facts, one source each", () => {
       expect(own, `${path} reads the snapshot's minutes`).not.toMatch(/\ba\.minutes\b|metrics\.jobs\.minutes/);
       expect(own, `${path} sums the series through the shell`).toMatch(/workerMinutes\((?:STATS|d)\.series, 7\)/);
       // The served sum, run over the server's series, is the series summed.
-      const fn = /^  function workerMinutes\(series, days\) \{[\s\S]*?\n  \}$/m.exec(script)![0], lastDays = /^  function lastDays\(n\) [^\n]*$/m.exec(script)![0];
-      const wm = new Function("series", [lastDays, fn, "return workerMinutes(series, 7);"].join("\n"))(stats.series) as { total: number; values: number[] };
+      const wm = new Function("series", [...jobsFns(script), "return workerMinutes(series, 7);"].join("\n"))(stats.series) as { total: number; values: number[] };
       const days = new Set(wm.values.map((_: number, i: number) => new Date(Date.now() - (6 - i) * 86400000).toISOString().slice(0, 10)));
       const expected = Math.round((stats.series.jobs_daily as { day: string; ms: number }[]).filter((r) => days.has(r.day)).reduce((n, r) => n + Number(r.ms || 0) / 60000, 0));
       expect(Math.abs(wm.total - expected)).toBeLessThanOrEqual(wm.values.length);
     }
+  });
+
+  it("the jobs of the week are one reduce over jobs_daily — the Status tiles, its table and its charts, the Pipeline's chart — and a cancelled job is a failed one everywhere, whatever the snapshot says", async () => {
+    // A job cancelled this week, beside the fixture's done and queued ones, and a snapshot taken over it: the snapshot's "succeeded" (runs − failures − running) counts it as a success; the series counts it as failed. The two disagree from here on, on the same page if a page read both.
+    await env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, finished_at, duration_ms) VALUES ('gc', ?, '', '', 'schedule', 0, 0, 'project', 'pool', 'gc', 'cancelled', ?, 60000)").bind(F.arch, new Date().toISOString()).run();
+    // The fixture's snapshot is minutes old and a snapshot on time declines: this one is asked for half an hour later.
+    expect(await snapshotMetrics(env, new Date(Date.now() + 30 * 60000))).not.toBe("metrics: on time");
+    const stats = (await call("GET", "/stats?after=cancelled")).json;
+    const rows = stats.series.jobs_daily as { day: string; kind: string; status: string; n: number; ms: number }[];
+    expect(rows.some((r) => r.status === "cancelled")).toBe(true);
+    // The server's rows, reduced here by the rule the shell states: every row of the week counted once, done or failed (cancelled with it) or waiting.
+    const week = new Set(Array.from({ length: 7 }, (_, i) => new Date(Date.now() - i * 86400000).toISOString().slice(0, 10)));
+    const kept = rows.filter((r) => week.has(r.day)), n = (f: (r: typeof rows[number]) => boolean) => kept.filter(f).reduce((a, r) => a + Number(r.n), 0);
+    const expected = { runs: n(() => true), done: n((r) => r.status === "done"), failed: n((r) => r.status === "failed" || r.status === "cancelled"), waiting: n((r) => r.status !== "done" && r.status !== "failed" && r.status !== "cancelled") };
+    expect(expected.runs).toBeGreaterThan(0);
+    expect(expected.failed).toBeGreaterThan(0);
+    expect(expected.waiting).toBeGreaterThan(0);
+    expect(expected.runs).toBe(expected.done + expected.failed + expected.waiting);
+    // The snapshot's word for the same week is another number: the proof that a page reading it beside the series would say two.
+    expect(stats.metrics.jobs.runs).toBe(expected.runs);
+    expect(stats.metrics.jobs.runs - stats.metrics.jobs.failures - stats.metrics.jobs.running).toBe(expected.done + 1);
+    const components = allComponents(F);
+    for (const [path, ids] of [["/status", ["status.system-tiles", "status.chart-jobs", "status.chart-minutes", "status.workflows-table"]], ["/pipeline", ["pipeline.jobs-chart"]]] as const) {
+      // The page's own statements, less CHARTS where it splices them: the reduce lives there, the page only reads it.
+      const html = await page(path), script = scriptOf(html), own = ownScript(html).replace(CHARTS, "");
+      // The served reduce, run over the server's series, is the rule above — in all, and its buckets sum to it.
+      const js = new Function("series", [...jobsFns(script), "return jobsSummary(series, 7);"].join("\n"))(stats.series) as { runs: number; done: number; failed: number; waiting: number; byKind: Record<string, { runs: number; failed: number; waiting: number }>; byDay: Record<string, { runs: number; failed: number }> };
+      expect({ runs: js.runs, done: js.done, failed: js.failed, waiting: js.waiting }, path).toEqual(expected);
+      expect(Object.values(js.byKind).reduce((a, k) => a + k.runs, 0), `${path} byKind`).toBe(expected.runs);
+      expect(Object.values(js.byDay).reduce((a, d) => a + d.failed, 0), `${path} byDay`).toBe(expected.failed);
+      expect(js.byKind.gc, `${path} counts the cancelled job as failed`).toMatchObject({ failed: 1, waiting: 0 });
+      // The page reads the shell's reduce and nothing else: no snapshot's jobs, no reduce of the rows on the page.
+      expect(own, `${path} reads the shell's reduce`).toContain("jobsSummary(d.series, 7)");
+      expect(own, `${path} reads the snapshot's jobs`).not.toMatch(/m\.jobs|m\.actions|metrics\.jobs|\ba\.(?:runs|running|failures)\b/);
+      expect(own, `${path} reduces jobs_daily itself`).not.toMatch(/\.jobs_daily\b|r\.status === "(?:done|failed|cancelled)"/);
+      for (const id of ids) {
+        const c = components.find((x) => x.id === id);
+        expect(c?.script?.some((l) => /^jobsSummary\(d\.series, 7\)$|^js\./.test(l) || l.includes("js.byKind") || l.includes("js.byDay")), `${id} names the shell's reduce`).toBe(true);
+        expect(c?.reads?.some((r) => r.path === "/api/v1/stats" && r.fields?.some((f) => f.startsWith("series.jobs_daily"))), `${id} reads the series`).toBe(true);
+        expect(c?.reads?.some((r) => r.fields?.some((f) => /^metrics\.jobs\./.test(f))), `${id} still pins the snapshot's jobs`).toBe(false);
+      }
+    }
+    // The Status tiles say the reduce's numbers by name, in the order the sentence reads: what waits, what ran, what failed and what got done.
+    const status = ownScript(await page("/status")).replace(CHARTS, "");
+    expect(status).toContain('"Jobs running now", num(js.waiting)');
+    expect(status).toContain('"Jobs, 7 days", num(js.runs), num(js.failed) + " failed · " + num(js.done) + " done"');
   });
 
   it("open advisories in stable are counted at the Security page's default confidence on the Pool and the Pipeline, through the shell's one rule", async () => {
