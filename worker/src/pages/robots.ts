@@ -13,18 +13,8 @@
  * robots.txt is a request, not a wall — the WAF rule on the zone is the
  * wall (Runbook, Costs) — and takes effect when the crawler next reads it.
  */
-import { API_HOST, DASHBOARD_HOST, LEGACY_API_HOST } from "../meta";
+import { AI_CRAWLERS, API_HOST, DASHBOARD_HOST, LEGACY_API_HOST } from "../meta";
 import { DOCS_TREE } from "./docs-tree";
-
-/** The AI and research crawlers by their robots.txt token (Cloudflare Radar categories AI Crawler and AI Search, September 2026); the read guard names the same list. */
-export const AI_CRAWLERS: readonly string[] = [
-  "GoogleOther", "GoogleOther-Image", "GoogleOther-Video", "Google-Extended",
-  "GPTBot", "ChatGPT-User", "OAI-SearchBot",
-  "ClaudeBot", "Claude-User", "Claude-SearchBot", "anthropic-ai",
-  "CCBot", "Bytespider", "Amazonbot", "meta-externalagent", "meta-externalfetcher",
-  "PerplexityBot", "Perplexity-User", "Applebot-Extended", "cohere-ai", "Diffbot",
-  "ImagesiftBot", "omgili", "omgilibot", "YouBot", "PetalBot", "Timpibot", "DuckAssistBot", "MistralAI-User",
-];
 
 /** The paths no crawler indexes: the API, the sign-in, and what is a reader's own or a machine's — not a page for a search. */
 export const ROBOTS_DISALLOW: readonly string[] = ["/api/", "/auth/", "/me", "/diff", "/review", "/request", "/build/", "/user/", "/pool/", "/setup", "/omarchy-worker"];

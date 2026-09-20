@@ -65,7 +65,7 @@ import type { Actor } from "./routes/factory";
 import { jobOf } from "./jobtoken";
 import { handleTrustWorker, handleTrustList, handleNewToken, handleWithdrawRecord, handleWorkerMode, handleWorkerLog, SIGN_IN } from "./routes/contributors";
 import { maintainersOf, GOVERNANCE_FILE } from "./governance";
-import { BUDGET_CAP_USD, BUDGET_GUARD_USD, BUDGET_WARN_USD } from "./cost";
+import { BUDGET_CAP_USD, BUDGET_GUARD_USD, BUDGET_WARN_USD, readGuard } from "./cost";
 import { handleQueueJob } from "./jobs";
 import { isMaintainer } from "./routes/contributors";
 import { handleReviewList, handleApprove, handleReject, handleApprovals, handleProjectBuild, handleWithdraw, handleTaskCan } from "./routes/review";
@@ -164,6 +164,11 @@ export default {
     }
 
     try {
+      // While the cost guard is up, an anonymous machine reading a package
+      // page or its data is shed here (cost.ts readGuard) — before the API
+      // branch, so the 503 is never looked up or stored by cachedApi.
+      const shed = await readGuard(request, url, env);
+      if (shed) return shed;
       if (path.startsWith(API + "/")) {
         const res = await cachedApi(method, path.slice(API.length), url, request, env, ctx);
         res.headers.set("access-control-allow-origin", "*");

@@ -678,7 +678,8 @@ bill. The Worker serves `/robots.txt` on every name (`src/pages/robots.ts`):
 the dashboard's keeps the landing, the docs and `/package/<name>` open to
 search engines, closes `/api/`, `/auth/`, `/diff`, `/build/`, `/user/` and
 the rest to everyone, and closes the whole site to the AI and research
-crawlers listed there by name (`AI_CRAWLERS`); the API names deny
+crawlers by name (`AI_CRAWLERS`, `src/meta.ts` — the read guard below
+sheds the same list); the API names deny
 everything; `/sitemap.xml` lists the fixed pages. Every `/api/v1` answer
 and the sign-in carry `x-robots-tag: noindex, nofollow`, and the header's
 Sign in link says `rel="nofollow"` (19,800 crawler fetches of `/auth/github`
@@ -703,7 +704,19 @@ projected US$ 25; at a projected or actual **US$ 40** the brain sets
 (sync, promote, render, security, enqueue) until an estimate — the next is
 at most three hours away — is back under the line; **US$ 50** is the
 month's cap, agreed with the sponsor, never to be raised. Health, gc and
-metrics keep running, the pool keeps serving. The header of every page says so. To lift it by hand:
+metrics keep running, the pool keeps serving. The same setting closes the
+read side (`readGuard`, the same file): while it is up, an anonymous machine
+— no `omc` session, no bearer token, and a user-agent that is empty, an AI
+crawler's (`AI_CRAWLERS`) or not a browser's, or a Cloudflare-verified bot
+that is not a search engine's crawler — asking `GET /package/<name>` or
+`GET /api/v1/package/<name>` gets a 503 with `retry-after: 3600`, no
+database read and nothing stored at the edge; people, signed-in readers,
+search engines, `omarchy-cli/`, `pkg-repo/`, `omarchy-broker/` and
+`pacman/` read on, and the file list, the graph, the search and every other
+address stay open. The crawl of 2026-09-19–20 (GoogleOther, 1.6 B rows a
+day) was reads, which the write pause did not touch. The Worker reads the
+setting once a minute per isolate, so lifting it takes up to a minute to
+show. The header of every page says so. To lift it by hand:
 `npx wrangler d1 execute omarchy-repo --remote --command "DELETE FROM settings WHERE key = 'cost_guard'"`.
 
 ## Known limits

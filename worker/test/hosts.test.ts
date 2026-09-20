@@ -13,8 +13,8 @@
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import worker from "../src/index";
-import { API_HOST, DASHBOARD_HOST, LEGACY_API_HOST, LEGACY_DASHBOARD_HOSTS, LEGACY_POOL_HOSTS, PRODUCTION_HOSTS, isProductionHost, machineOrigin } from "../src/meta";
-import { AI_CRAWLERS, ROBOTS_DISALLOW, SITEMAP_PATHS } from "../src/pages/robots";
+import { AI_CRAWLERS, API_HOST, DASHBOARD_HOST, LEGACY_API_HOST, LEGACY_DASHBOARD_HOSTS, LEGACY_POOL_HOSTS, PRODUCTION_HOSTS, isProductionHost, machineOrigin } from "../src/meta";
+import { ROBOTS_DISALLOW, SITEMAP_PATHS } from "../src/pages/robots";
 import { DOCS_TREE } from "../src/pages/docs-tree";
 
 async function fetchAt(origin: string, path: string, method = "GET"): Promise<Response> {

@@ -4,11 +4,16 @@
  * CLOUDFLARE_ANALYTICS_TOKEN) priced at the Workers Paid rates below, and a
  * guard: when the month's projected charges reach the budget, the scheduler
  * stops creating the jobs that write (sync, promote, render, security,
- * enqueue) until the estimate is back under it. Reads keep working; the
- * pool keeps serving. Budget review of 2026-09-13: the card is capped at
- * US$ 30 a month.
+ * enqueue) until the estimate is back under it — and, since 2026-09-20,
+ * sheds the anonymous machine reads of the package pages (readGuard below:
+ * the crawl that put September over the line was reads, which the write
+ * pause did not touch). People, signed-in readers, search engines, the
+ * pool's own clients and pacman keep reading; the pool keeps serving.
+ * Budget review of 2026-09-13: the card is capped at US$ 30 a month.
  */
 import type { Env } from "./index";
+import { cookieOf } from "./routes/auth";
+import { AI_CRAWLERS } from "./meta";
 
 /** Workers Paid, US$, 2026. Included quotas are per month. */
 export const PRICES = {
@@ -171,6 +176,72 @@ function round(n: number): number {
 export async function costGuard(env: Env): Promise<string | null> {
   const row = await env.DB.prepare("SELECT value FROM settings WHERE key = 'cost_guard'").first<{ value: string }>();
   return row?.value ?? null;
+}
+
+/** The pool's own clients, by the user-agent prefix each sends: never shed, whatever the guard says — the CLI reads a package's page and files, the broker and pacman read on a machine's behalf. */
+export const OWN_CLIENTS = ["omarchy-cli/", "pkg-repo/", "omarchy-broker/", "pacman/"];
+
+/** What the read guard closes: the package page and its data — the two addresses the crawl paid for. Not the file list, the graph or the search: the CLI reads those, and the crawler did not. */
+const SHED_PATHS = [/^\/package\/[^/]+$/, /^\/api\/v1\/package\/[^/]+$/];
+
+/** How long a fetch trusts the guard word it last read: one settings row a minute per isolate, not one per request. */
+const GUARD_MEMO_MS = 60_000;
+let guardMemo: { at: number; value: string | null } | null = null;
+
+/** The guard word as fetch() reads it: through the memo, refreshed at most once a minute. */
+async function guardWord(env: Env, now: number): Promise<string | null> {
+  if (!guardMemo || now - guardMemo.at >= GUARD_MEMO_MS) guardMemo = { at: now, value: await costGuard(env) };
+  return guardMemo.value;
+}
+
+/** Forgets the memo, so the next read asks the settings row: the tests raise and lower the guard inside one minute. */
+export function forgetGuardWord(): void {
+  guardMemo = null;
+}
+
+/**
+ * Is this a machine reading, and not one of ours? Cloudflare's word first
+ * when it has one (request.cf.verifiedBotCategory: a verified bot of any
+ * category but a search engine's crawler is a machine — the AI crawlers
+ * are verified too, and GoogleOther's category is "AI Crawler"); then the
+ * user-agent: empty, one of the AI crawlers by name, or not a browser's —
+ * every browser since 1994 says "Mozilla/". A heuristic: a crawler that
+ * wears a browser's user-agent passes, and the zone's rules are what catch
+ * it; the pool's own clients are exempt by their prefix before any of it.
+ */
+export function machineReader(request: Request): boolean {
+  const ua = request.headers.get("user-agent") ?? "";
+  if (OWN_CLIENTS.some((p) => ua.startsWith(p))) return false;
+  const category = (request.cf as { verifiedBotCategory?: string } | undefined)?.verifiedBotCategory;
+  if (category) return category !== "Search Engine Crawler";
+  if (!ua) return true;
+  const lower = ua.toLowerCase();
+  if (AI_CRAWLERS.some((c) => lower.includes(c.toLowerCase()))) return true;
+  return !ua.includes("Mozilla/");
+}
+
+/**
+ * The read guard: while the cost guard is up, an anonymous machine asking
+ * for a package page or its data is answered 503 with an hour's
+ * retry-after — no database read, and nothing the edge keeps: the answer
+ * is no-store and is made before cachedApi looks the URL up, so a person's
+ * next request is a real answer. Anonymous is no `omc` session and no
+ * bearer token; machine is machineReader above. Every other read — the
+ * docs, the landing, the status, the file list and the graph the CLI asks
+ * for, the include pacman reads — passes untouched, as does every read
+ * while the guard is down. The write pause (scheduler.ts) stays beside it:
+ * one setting, `settings.cost_guard`, lifted the same way.
+ */
+export async function readGuard(request: Request, url: URL, env: Env, now = Date.now()): Promise<Response | null> {
+  if (request.method !== "GET" || !SHED_PATHS.some((re) => re.test(url.pathname))) return null;
+  if (cookieOf(request, "omc") || /^bearer\s/i.test(request.headers.get("authorization") ?? "")) return null;
+  if (!machineReader(request)) return null;
+  const word = await guardWord(env, now);
+  if (!word) return null;
+  const headers = { "retry-after": "3600", "cache-control": "no-store", "x-robots-tag": "noindex" };
+  const why = "the pool is over its monthly budget; try again later";
+  if (url.pathname.startsWith("/api/")) return new Response(JSON.stringify({ error: why, guard: word }), { status: 503, headers: { ...headers, "content-type": "application/json; charset=utf-8" } });
+  return new Response(`<!doctype html><title>omarchy-pool: over budget</title><p>The pool is over its monthly budget; the package pages are closed to crawlers until an estimate is back under the line. Try again in an hour.</p>\n`, { status: 503, headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
 }
 
 /** The slot a moment falls in: the day and the three-hour block, so one estimate is taken per block. */
