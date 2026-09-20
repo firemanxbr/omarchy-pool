@@ -23,6 +23,7 @@ describe("findLeak", () => {
       ["Bearer " + "a".repeat(32), "a bearer token"],
       ["https://alice:" + "p".repeat(12) + "@git.example/r", "a credential in a URL"],
       ["GITHUB_TOKEN=" + "a".repeat(20), "the worker's environment"],
+      ["GITHUB_REPORT_TOKEN=" + "a".repeat(20), "the worker's environment"],
     ];
     for (const [text, kind] of cases) expect(findLeak("line one\n" + text + "\n"), text).toEqual({ kind, line: 2 });
   });

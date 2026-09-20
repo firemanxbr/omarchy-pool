@@ -2,67 +2,164 @@ name: Cost report
 
 # Every morning: the pool's own estimate of this month's Cloudflare bill
 # (GET /api/v1/cost — computed every three hours by the brain from Cloudflare's
-# analytics, src/cost.ts) posted as a comment on the "Cost report" issue, so
-# GitHub e-mails it to whoever watches the issue. The run FAILS when the
-# projection reaches the warning line, which is one more e-mail. No secret
-# of the pool's is involved: the endpoint is public and the comment uses
-# the workflow's own token.
+# analytics, worker/src/cost.ts) as a comment on the "Cost report" issue, so
+# GitHub e-mails it to whoever watches the issue. The brain posts the comment
+# itself the moment the day's 06:00 UTC line is written (cost.ts
+# postCostReport, secret GITHUB_REPORT_TOKEN); this workflow is the late
+# fallback — GitHub's cron started it 4.8–6.6 hours late every day of
+# 2026-09-13..20 — and stays quiet when the day's number is already on the
+# issue (any comment since midnight that carries an estimate, whoever
+# posted it: the same rule the brain skips by). It reads the estimate from
+# three hosts with backoff, about forty minutes in all, because on
+# 2026-09-18 an edge rule answered the runner 403 on every try and the
+# issue went a day without its line.
+#
+# The colours: green means the day's comment is on the issue. A projection
+# at the warning line is not a broken pipeline — the run stays green with a
+# ::warning:: annotation and the comment leads with ⚠️; the comment is the
+# e-mail. Red means the comment is NOT posted, or is the "no estimate
+# today" line: something is broken. No secret of the pool's is involved
+# here: the endpoint is public and the comment uses the workflow's own token.
 
 on:
   schedule:
     - cron: "45 6 * * *"
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Post even when today's comment is already on the issue"
+        type: boolean
+        default: false
 
 permissions:
   issues: write
   contents: read
 
+concurrency:
+  group: cost-report
+  cancel-in-progress: false
+
 env:
   OMARCHY_API: ${{ vars.OMARCHY_API }}
+  # Fallbacks: the dashboard name (same zone) and the old machine name (the
+  # firemanxbr.org zone — a zone-wide block like 2026-09-18's 403 does not
+  # reach it); both serve /api/v1/cost (PR #213).
+  OMARCHY_API_FALLBACKS: "https://omarchy-pool.org https://pkgs.firemanxbr.org"
   GH_TOKEN: ${{ github.token }}
   GH_REPO: ${{ github.repository }}
-  WARN_USD: "25"
 
 jobs:
   report:
     runs-on: ubuntu-latest
+    # The read loop waits about 32 minutes between its rounds and a host that
+    # hangs costs 20 s a try (27 tries): 41 minutes at the worst, well inside.
+    timeout-minutes: 60
     steps:
-      - name: Read the estimate
-        id: cost
-        run: |
-          set -euo pipefail
-          for i in $(seq 1 6); do
-            if curl -sf "$OMARCHY_API/api/v1/cost" -o cost.json; then break; fi
-            sleep 60
-          done
-          [[ -s cost.json ]] || { echo "::error::no estimate at $OMARCHY_API/api/v1/cost"; exit 1; }
-          jq . cost.json
-          {
-            echo "projected=$(jq -r .projected_usd cost.json)"
-            echo "mtd=$(jq -r .month_to_date_usd cost.json)"
-            echo "month=$(jq -r .month cost.json)"
-            echo "guard=$(jq -r '.guard // ""' cost.json)"
-          } >> "$GITHUB_OUTPUT"
-      - name: Post it on the Cost report issue
+      - name: Find the Cost report issue
+        id: issue
         run: |
           set -euo pipefail
           n="$(gh issue list --label cost-report --state open --json number --jq '.[0].number // empty')"
           if [[ -z "$n" ]]; then
             gh label create cost-report --description "the daily Cloudflare bill estimate" --color 0e8a16 2>/dev/null || true
             n="$(gh issue create --title "Cost report: this month's Cloudflare bill, estimated daily" --label cost-report \
-                  --body "One comment a day from the Cost report workflow: what this account's Cloudflare bill looks like so far this month and where it is heading, as the pool estimates it (the runbook, /docs/runbook.md, Costs). Subscribe to this issue to get it by e-mail." | grep -o '[0-9]*$')"
+                  --body "One comment a day from the pool's brain (or, late, the Cost report workflow): what this account's Cloudflare bill looks like so far this month and where it is heading, as the pool estimates it (the runbook, /docs/runbook.md, Costs). Subscribe to this issue to get it by e-mail." | grep -o '[0-9]*$')"
           fi
-          body="$(jq -r --arg warn "$WARN_USD" '
+          echo "number=$n" >> "$GITHUB_OUTPUT"
+          # One number a day. The brain posts at 06:00 UTC and a second
+          # dispatch may run this too: count today's comments that carry an
+          # estimate — the header "**YYYY-MM** — day N of M · estimated"
+          # (cost.ts REPORT_HEADER), whoever wrote them — and not the
+          # "no estimate today" line below, so a morning outage still gets
+          # its number from the late run once the hosts answer again.
+          today="$(date -u +%F)"
+          posted="$(gh api "repos/$GH_REPO/issues/$n/comments?since=${today}T00:00:00Z&per_page=100" \
+                    --jq '[.[] | select((.body | test("no estimate today") | not) and (.body | test("\\*\\*[0-9]{4}-[0-9]{2}\\*\\* — day [0-9]+ of [0-9]+ · estimated ")))] | length')"
+          if [[ "$posted" != "0" && "${{ inputs.force }}" != "true" ]]; then
+            echo "already posted today: $posted comment(s) with an estimate on #$n" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Read the estimate
+        id: cost
+        if: steps.issue.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          # Every host, nine rounds, a wait between rounds that doubles from
+          # 15 s to 8 min (15+30+60+120+240+480+480+480 s: about 32 minutes
+          # of waiting; a hanging host adds 20 s a try). curl -f fails on any
+          # non-2xx, so an edge 403 (2026-09-18) counts as no answer and the
+          # next host is tried.
+          hosts=()
+          for h in "$OMARCHY_API" $OMARCHY_API_FALLBACKS; do [[ -n "$h" ]] && hosts+=("$h"); done
+          wait=15
+          for round in $(seq 1 9); do
+            for h in "${hosts[@]}"; do
+              if curl -sfS --max-time 20 -A "omarchy-pool cost-report (github-actions)" "$h/api/v1/cost" -o cost.json \
+                 && jq -e '.projected_usd' cost.json >/dev/null 2>&1; then
+                echo "estimate from $h (round $round)"
+                jq . cost.json
+                {
+                  echo "ok=true"
+                  echo "host=$h"
+                  echo "projected=$(jq -r .projected_usd cost.json)"
+                  echo "mtd=$(jq -r .month_to_date_usd cost.json)"
+                  echo "month=$(jq -r .month cost.json)"
+                  echo "warn=$(jq -r '.lines_usd.warn // 25' cost.json)"
+                  echo "guard=$(jq -r '.guard // ""' cost.json)"
+                } >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              echo "$h: no estimate (round $round)"
+            done
+            # Sleep between rounds only: the ninth failure is the answer.
+            (( round < 9 )) && sleep "$wait"
+            wait=$(( wait * 2 > 480 ? 480 : wait * 2 ))
+          done
+          echo "::warning::no estimate from any of: ${hosts[*]} — the comment will say so"
+          echo "ok=false" >> "$GITHUB_OUTPUT"
+
+      - name: Post it on the Cost report issue
+        if: steps.issue.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          n="${{ steps.issue.outputs.number }}"
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          if [[ "${{ steps.cost.outputs.ok }}" != "true" ]]; then
+            body="**$(date -u +%F)** — ⚠️ **no estimate today**: \`$OMARCHY_API/api/v1/cost\` and its fallbacks ($OMARCHY_API_FALLBACKS) did not answer in forty minutes ([this run]($run_url)). The brain's own line for the day is the \`cost\` event in the journal (Pipeline page; \`SELECT created_at, summary FROM events WHERE kind = 'cost' ORDER BY id DESC LIMIT 1\`); a later dispatch of this workflow posts the number once a host answers."
+            gh issue comment "$n" --body "$body"
+            echo "::error title=Cost report::no estimate today — the issue says so; check the hosts"
+            echo "## ❌ no estimate today — the issue has the line, the hosts need a look" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          # The three lines come from the API (lines_usd: cost.ts's numbers,
+          # with cost.ts's values as the fallback for an older body), so this
+          # text cannot go stale again. The template is the twin of
+          # worker/src/cost.ts costReportMarkdown: change both together.
+          body="$(jq -r '
             def usd: "US$ " + (. | tostring);
+            (.lines_usd.warn // 25) as $warn | (.lines_usd.guard // 40) as $guard | (.lines_usd.cap // 50) as $cap |
+            (if .projected_usd >= $warn then "⚠️ " else "" end) +
             "**\(.month)** — day \(.day_of_month) of \(.days_in_month) · estimated \(.estimated_at)\n\n" +
             "| | |\n|---|---|\n| So far | **\(.month_to_date_usd | usd)** |\n| Projected for the month | **\(.projected_usd | usd)** |\n" +
-            (if .guard then "\n> ⚠️ **Over the guard (US$ 40): the jobs that write are paused** until the estimate is back under it — the cap is US$ 50.\n" else "" end) +
+            (if .guard then "\n> ⚠️ **Over the guard (\($guard | usd)): the jobs that write are paused** until the estimate is back under it — the cap is \($cap | usd).\n" else "" end) +
             "\n| Item | Used | Included | So far | Projected |\n|---|---:|---:|---:|---:|\n" +
             ([.lines[] | "| \(.item) | \(.used | if . > 1e6 then (./1e6 | floor | tostring) + " M" else (. * 100 | round / 100 | tostring) end) \(.unit) | \(.included | if . > 1e6 then (./1e6 | floor | tostring) + " M" else tostring end) | \(.month_to_date_usd | usd) | \(.projected_usd | usd) |"] | join("\n")) +
-            "\n\nBudget (worker/src/cost.ts): this report warns from a projected US$ 25; the pool pauses the jobs that write at a projected US$ 40 and resumes within three hours of the estimate heading back; US$ 50 is the cap, never more."
+            "\n\nBudget (worker/src/cost.ts): this report warns from a projected \($warn | usd); the pool pauses the jobs that write at a projected \($guard | usd) and resumes within three hours of the estimate heading back; \($cap | usd) is the cap, never more."
           ' cost.json)"
           gh issue comment "$n" --body "$body"
+
       - name: Warn when the projection reaches the line
+        if: steps.issue.outputs.skip != 'true' && steps.cost.outputs.ok == 'true'
         run: |
-          p="${{ steps.cost.outputs.projected }}"
-          awk -v p="$p" -v w="$WARN_USD" 'BEGIN { exit !(p+0 >= w+0) }' && { echo "::error::projected US$ $p for ${{ steps.cost.outputs.month }} reaches the US$ $WARN_USD warning line"; exit 1; } || echo "projected US$ $p"
+          p="${{ steps.cost.outputs.projected }}"; w="${{ steps.cost.outputs.warn }}"; m="${{ steps.cost.outputs.month }}"
+          if awk -v p="$p" -v w="$w" 'BEGIN { exit !(p+0 >= w+0) }'; then
+            echo "::warning title=Cost report::projected US$ $p for $m reaches the US$ $w warning line — the comment carries the ⚠️ (the run is not broken)"
+            echo "## ⚠️ projected US$ $p for $m — at or over the US$ $w warning line (posted; nothing is broken)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## projected US$ $p for $m (warning line US$ $w)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          # To make the run red at the line instead (one more e-mail from
+          # GitHub, to the workflow's actor only): replace the two echo lines
+          # of the first branch with
+          #   echo "::error title=Cost report — over the line, not broken::projected US$ $p for $m reaches the US$ $w line; the comment was posted"; exit 1
