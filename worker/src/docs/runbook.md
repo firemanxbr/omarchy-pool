@@ -628,7 +628,20 @@ whether the package is in the release. And the ABI verdict of an
 unchanged release stands for a day: an attempt three hours later does not
 repeat it (`gate::abi_evidence_stands`); the health check, which is the
 soak, runs every time. `test/graph.test.ts` measures both queries' rows
-read, so a planner regression fails CI.
+read, so a planner regression fails CI. The same trap in a smaller query
+was the largest reader of all once the pages had readers: on 2026-09-19,
+the morning after the domain moved, Google's crawler followed every
+package link and fetched `/api/v1/package/<name>` 25 thousand times a day
+(the pages are skeletons; the script fetches the rows), and the package
+page's one lookup of its providers in the ring — a list of names `IN`
+the ring's members — walked the whole ring per call: 64.8 k rows for
+ffmpeg's 94 providers, 1.6 billion rows a day, 84 % of the day's reads,
+US$ 1.6 a day past the included 25 billion. The Security page's *fixed
+elsewhere* lookup had the same shape (65 k rows a call, 35 million a day).
+Both are driven from the names now (`CROSS JOIN` through the name index,
+then a point lookup on the ring's key: 377 and 1.4 k rows), the package
+answer stays at the edge ten minutes instead of one, and
+`test/package-page.test.ts` bounds both by the names asked for.
 
 **Who uses it.** Once a day (00:30 UTC) the brain counts yesterday's
 audience from the same analytics: the distinct client addresses that
