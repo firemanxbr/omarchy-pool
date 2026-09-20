@@ -243,7 +243,22 @@ function workerLog(v: unknown): string {
   return leak ? `[${text.replace(/\n$/, "").split("\n").length} line(s) dropped: one looked like ${leak.kind}]\n` : text.endsWith("\n") ? text : text + "\n";
 }
 
-async function touchWorker(env: Env, w: { worker: string; arch: string; hostname?: string; labels?: unknown; version?: string; mode?: string; agent?: string | null; kinds?: string[]; probe?: AgentReport; usage?: Usage | null; log?: string }, currentTask: number | null): Promise<void> {
+/**
+ * A heartbeat is written when it says something new — or every
+ * TOUCH_MINUTES, so the row stays younger than WORKER_ALIVE_MINUTES
+ * (meta.ts) with three misses of slack. A worker claims every 30 s and an
+ * idle one has nothing new to say 119 times in 120: written every time,
+ * the eight workers' heartbeats were 20 k rows a day, the noisiest writer
+ * of the account (2026-09-20). What counts as new is what the row's readers
+ * act on at once — the task taken or finished, a log chunk, the version,
+ * the agent and its probe, the kinds, the mode (while the worker's own flag
+ * still applies), the labels, the host — never the usage: it is a rolling
+ * average, at most TOUCH_MINUTES old, and the 7-day chart reads the metrics
+ * events, not the row.
+ */
+export const TOUCH_MINUTES = 3;
+
+export async function touchWorker(env: Env, w: { worker: string; arch: string; hostname?: string; labels?: unknown; version?: string; mode?: string; agent?: string | null; kinds?: string[]; probe?: AgentReport; usage?: Usage | null; log?: string }, currentTask: number | null): Promise<D1Meta> {
   // The agent is what the worker says it runs ("<provider>/<model>"): a
   // worker that reports none ("" or null) clears it, one that says nothing
   // (an older client) keeps what it last reported. The probe's answer
@@ -251,7 +266,7 @@ async function touchWorker(env: Env, w: { worker: string; arch: string; hostname
   // "claude-code/claude-sonnet-5" has a hyphen in the provider: the older
   // pattern refused it, and every Studio worker showed no agent (2026-09-15).
   const agent = w.agent === undefined ? undefined : typeof w.agent === "string" && /^[a-z0-9-]+\/[A-Za-z0-9._:-]{1,60}$/.test(w.agent) ? w.agent : null;
-  await env.DB.prepare(
+  const res = await env.DB.prepare(
     `INSERT INTO build_workers (id, arch, hostname, labels, version, last_seen, current_task, agent, kinds, agent_status, agent_error, agent_checked_at, usage, usage_at, log_tail, log_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT (id) DO UPDATE SET arch = excluded.arch, hostname = COALESCE(excluded.hostname, hostname), labels = COALESCE(excluded.labels, labels),
        version = COALESCE(excluded.version, version), last_seen = excluded.last_seen, current_task = excluded.current_task,
@@ -261,15 +276,28 @@ async function touchWorker(env: Env, w: { worker: string; arch: string; hostname
        agent = CASE WHEN ? THEN excluded.agent ELSE agent END, kinds = COALESCE(excluded.kinds, kinds),
        agent_status = CASE WHEN ? THEN excluded.agent_status ELSE agent_status END, agent_error = CASE WHEN ? THEN excluded.agent_error ELSE agent_error END,
        agent_checked_at = CASE WHEN ? THEN excluded.agent_checked_at ELSE agent_checked_at END,
-       usage = COALESCE(excluded.usage, usage), usage_at = CASE WHEN excluded.usage IS NULL THEN usage_at ELSE excluded.usage_at END`,
+       usage = COALESCE(excluded.usage, usage), usage_at = CASE WHEN excluded.usage IS NULL THEN usage_at ELSE excluded.usage_at END
+     WHERE current_task IS NOT excluded.current_task
+       OR excluded.log_tail IS NOT NULL
+       OR COALESCE(excluded.version, version) IS NOT version
+       OR (? AND excluded.agent IS NOT agent)
+       OR (? AND (agent_status IS NOT excluded.agent_status OR agent_error IS NOT excluded.agent_error OR agent_checked_at IS NOT excluded.agent_checked_at))
+       OR COALESCE(excluded.kinds, kinds) IS NOT kinds
+       OR (mode_by IS NULL AND ? IS NOT NULL AND ? IS NOT mode)
+       OR COALESCE(excluded.labels, labels) IS NOT labels
+       OR excluded.arch IS NOT arch
+       OR COALESCE(excluded.hostname, hostname) IS NOT hostname
+       OR last_seen < strftime('%Y-%m-%dT%H:%M:%fZ', excluded.last_seen, '-${TOUCH_MINUTES} minutes')`,
   )
     .bind(
       w.worker, w.arch, w.hostname ?? null, w.labels ? JSON.stringify(w.labels) : null, w.version ?? null, now(), currentTask, agent ?? null,
       w.kinds ? JSON.stringify(w.kinds) : null, w.probe?.status ?? null, w.probe?.error ?? null, w.probe?.checked_at ?? null,
       w.usage ? JSON.stringify(w.usage) : null, w.usage ? now() : null, w.log || null, w.log ? now() : null,
       w.mode ?? null, agent === undefined ? 0 : 1, w.probe === undefined ? 0 : 1, w.probe === undefined ? 0 : 1, w.probe === undefined ? 0 : 1,
+      agent === undefined ? 0 : 1, w.probe === undefined ? 0 : 1, w.mode ?? null, w.mode ?? null,
     )
     .run();
+  return res.meta;
 }
 
 /**
