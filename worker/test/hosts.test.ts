@@ -14,7 +14,8 @@ import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:
 import { beforeAll, describe, expect, it } from "vitest";
 import worker from "../src/index";
 import { API_HOST, DASHBOARD_HOST, LEGACY_API_HOST, LEGACY_DASHBOARD_HOSTS, LEGACY_POOL_HOSTS, PRODUCTION_HOSTS, isProductionHost, machineOrigin } from "../src/meta";
-import { AI_CRAWLERS, ROBOTS_DISALLOW, SITEMAP_PATHS } from "../src/pages/robots";
+import { AI_CRAWLERS, ROBOTS_DISALLOW } from "../src/pages/robots";
+import { SITEMAP_PATHS } from "../src/pages/sitemap";
 import { DOCS_TREE } from "../src/pages/docs-tree";
 
 async function fetchAt(origin: string, path: string, method = "GET"): Promise<Response> {
@@ -138,7 +139,7 @@ describe("what a machine keeps", () => {
   });
 });
 
-// What a crawler may read (src/pages/robots.ts): the dashboard's robots.txt keeps the pages open to search engines and closes the API, the sign-in and the reader's own pages to all, and the whole site to the AI crawlers by name; the API names deny everything; the sitemap lists the fixed pages under the dashboard's name; the API's answers and the sign-in say noindex themselves.
+// What a crawler may read (src/pages/robots.ts, src/pages/sitemap.ts): the dashboard's robots.txt keeps the pages open to search engines and closes the API, the sign-in and the reader's own pages to all, and the whole site to the AI crawlers by name; the API names deny everything; the sitemap lists the fixed pages under the dashboard's name; the API's answers and the sign-in say noindex themselves.
 describe("what a crawler may read", () => {
   it("is said by robots.txt on every name: the dashboard's rules, the API name's one line", async () => {
     for (const origin of [DASHBOARD, "http://pool.test"]) {

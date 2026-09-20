@@ -12,9 +12,13 @@
  * code; its robots.txt is an object at its root (Runbook, Costs).
  * robots.txt is a request, not a wall — the WAF rule on the zone is the
  * wall (Runbook, Costs) — and takes effect when the crawler next reads it.
+ *
+ * This module imports meta.ts only: cost.ts reads AI_CRAWLERS for the
+ * read guard, and the docs map (docs-tree.ts) reads cost.ts, so an import
+ * of a page module here would close a cycle. The sitemap the robots.txt
+ * names is pages/sitemap.ts for that reason.
  */
 import { API_HOST, DASHBOARD_HOST, LEGACY_API_HOST } from "../meta";
-import { DOCS_TREE } from "./docs-tree";
 
 /** The AI and research crawlers by their robots.txt token (Cloudflare Radar categories AI Crawler and AI Search, September 2026); the read guard names the same list. */
 export const AI_CRAWLERS: readonly string[] = [
@@ -29,10 +33,7 @@ export const AI_CRAWLERS: readonly string[] = [
 /** The paths no crawler indexes: the API, the sign-in, and what is a reader's own or a machine's — not a page for a search. */
 export const ROBOTS_DISALLOW: readonly string[] = ["/api/", "/auth/", "/me", "/diff", "/review", "/request", "/build/", "/user/", "/pool/", "/setup", "/omarchy-worker"];
 
-/** The pages a search engine may list, with no database behind the list: the landing, the docs and every chapter of the map, the doors that are a page and not a reader's own. Package pages are found by the links, not listed here. */
-export const SITEMAP_PATHS: readonly string[] = ["/", "/docs", ...DOCS_TREE.map((c) => c.href), "/packages", "/security", "/status", "/factory", "/pipeline", "/people"];
-
-/** robots.txt for the name it was asked on: the dashboard's rules, or the API name's one line. */
+/** robots.txt for the name it was asked on: the dashboard's rules, or the API name's one line. The Sitemap line names what pages/sitemap.ts serves. */
 export function robotsTxt(host: string): string {
   if (host === API_HOST || host === LEGACY_API_HOST) return `# The API name: nothing here is for an index; the pages live on https://${DASHBOARD_HOST}\nUser-agent: *\nDisallow: /\n`;
   return [
@@ -48,10 +49,4 @@ export function robotsTxt(host: string): string {
     "",
     `Sitemap: https://${DASHBOARD_HOST}/sitemap.xml`,
   ].join("\n") + "\n";
-}
-
-/** The sitemap: SITEMAP_PATHS under one origin — the dashboard's on production, the request's own elsewhere (the tests', a local wrangler). */
-export function sitemapXml(origin: string): string {
-  const url = (p: string) => `  <url><loc>${origin}${p}</loc></url>`;
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${SITEMAP_PATHS.map(url).join("\n")}\n</urlset>\n`;
 }

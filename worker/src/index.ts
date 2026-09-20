@@ -77,7 +77,8 @@ import { reviewHtml } from "./pages/review";
 import { buildHtml } from "./pages/build";
 import { handlePackageStory } from "./routes/story";
 import { icon } from "./pages/icons";
-import { robotsTxt, sitemapXml } from "./pages/robots";
+import { robotsTxt } from "./pages/robots";
+import { sitemapXml } from "./pages/sitemap";
 import { requestHtml } from "./pages/request";
 import { governanceHtml } from "./pages/governance";
 import { docsHtml } from "./pages/docs";
@@ -239,7 +240,7 @@ export default {
       if (user) return html(userHtml(user[1], env.POOL_URL, version(env)));
       if (path.startsWith("/package/")) return html(packageHtml(decodeURIComponent(path.slice("/package/".length)), env.POOL_URL, version(env)));
       if (/^\/build\/\d+$/.test(path)) return html(buildHtml(Number(path.slice("/build/".length)), env.POOL_URL, version(env)));
-      // What a crawler may read (pages/robots.ts): the rules for the name asked on, and the pages worth an index under the dashboard's name on production.
+      // What a crawler may read (pages/robots.ts, pages/sitemap.ts): the rules for the name asked on, and the pages worth an index under the dashboard's name on production.
       if (path === "/robots.txt") return new Response(robotsTxt(url.hostname), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=86400" } });
       if (path === "/sitemap.xml") return new Response(sitemapXml(isProductionHost(url.hostname) ? `https://${DASHBOARD_HOST}` : url.origin), { headers: { "content-type": "application/xml; charset=utf-8", "cache-control": "public, max-age=86400" } });
       const ic = icon(path);
