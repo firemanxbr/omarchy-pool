@@ -173,6 +173,16 @@ cd worker && npx wrangler secret put GITHUB_TOKEN < ~/.cache/omarchy-cli-poc/git
 ```
 
 Without the secret everything still runs, at GitHub's anonymous rate limit.
+The one thing the brain writes on GitHub — the daily comment on the *Cost
+report* issue (*Costs*, below) — uses a second, separate secret,
+`GITHUB_REPORT_TOKEN`: a fine-grained token on this repository with
+*Issues: Read and write* and nothing else, so no token in the Worker can
+start a workflow (`release.yml` is dispatch-only and deploys production).
+`GITHUB_TOKEN` is never widened for it.
+
+```bash
+cd worker && npx wrangler secret put GITHUB_REPORT_TOKEN     # paste the token
+```
 
 ## Pulled jobs (the pool without GitHub)
 
@@ -561,14 +571,18 @@ but the sizing ones (`factory/sizing/`, benchmarks). Day to day:
 
 ## Costs
 
-The account's card is capped at **US$ 30 a month**. What costs money on
+The month's cap is **US$ 50**, agreed with the sponsor on 2026-09-16 and
+never to be raised (`src/cost.ts` `BUDGET_CAP_USD`); the guard pauses the
+jobs that write at a projected US$ 40 and the report warns at US$ 25 — the
+three lines every answer of `GET /api/v1/cost` carries as `lines_usd`, so
+no page or workflow types them. What costs money on
 Workers Paid is usage over the included quotas — above all D1 rows read
 (25 B/month included, then US$ 0.001 per million) and rows written
 (50 M/month included, then **US$ 1.00 per million**), then R2 storage
 (US$ 0.015/GB after 10 GB; egress is free). The review of 2026-09-13 found
 the overview re-scanning `release_packages` on every call (US$ 14 a day)
 and every release copying its whole selection three times (index included).
-What keeps the bill near US$ 10:
+What keeps the bill down:
 
 - a release's summary is computed once and stored (`releases.package_count`,
   `bytes`, `sources`); the pool-wide aggregates that need the join are
@@ -620,12 +634,27 @@ it (`src/cost.ts`; secret `CLOUDFLARE_ANALYTICS_TOKEN`, an API token with
 *Account Analytics: Read* and *D1: Read*). The latest estimate is
 `settings.cost_latest` — `GET /api/v1/cost` has the breakdown and the
 Pipeline page shows the projection — and one `cost` journal line a day
-(the first estimate after 06:00 UTC) keeps the history. `cost-report.yml`
-(06:45 UTC) posts it as a comment on the *Cost report* issue — GitHub
-e-mails it to whoever watches the issue — and fails the run at a projected
-US$ 25, which is one more e-mail. Cloudflare's own budget notifications
-e-mail at actual charges of US$ 10, 20 and 28 (*Notifications → Billing →
-Usage based billing*; the API token cannot create them).
+(the first estimate at or after 06:00 UTC) keeps the history. That line is
+also the day's report: the brain posts it as a comment on the *Cost report*
+issue (#68) the moment it is written (`src/cost.ts` `postCostReport`, the
+secret `GITHUB_REPORT_TOKEN` above) — GitHub e-mails it to whoever watches
+the issue. `cost-report.yml` is the late fallback: GitHub's 06:45 UTC cron
+starts it five or six hours late, it stays quiet when the day's number is
+already on the issue (any comment since midnight whose first line is the
+report's header — the same rule the brain skips by, whoever posted), and
+otherwise reads the estimate from three hosts with backoff for about forty
+minutes — on 2026-09-18 an edge rule answered the runner 403 on every try
+and the issue went a day without its line — and posts it; a day no host
+answers still gets a comment saying so, and a later dispatch fills the
+number in. The run's colour: green means the comment is on the issue — a
+projection at the warning line marks the comment ⚠️ and annotates the run,
+nothing is broken; red means no estimate, or the comment failed. A post the
+brain could not make is one `cost` journal line with status `warn`, and the
+workflow still posts. Cloudflare's own budget notifications e-mail at
+actual charges (*Notifications → Billing → Usage based billing*; the API
+token cannot create or read them): the ones made on 2026-09-13 were US$ 10,
+20 and 28, against the US$ 30 cap of the day — against the US$ 50 cap they
+belong at 25, 40 and 48, the three lines less the day's margin.
 
 **What the rows cost.** `wrangler d1 insights omarchy-repo --time-period 1d
 --sort-by reads --limit 40` lists the queries by rows read — the one

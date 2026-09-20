@@ -27,7 +27,7 @@ const SHAPES: [string, RegExp][] = [
   ["a credential in a URL", /\/\/[^/\s:@]+:[^/\s@]{8,}@[^/\s]+/],
   [
     "the worker's environment",
-    /^(?:OMARCHY_WORKER_TOKEN|FACTORY_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY|GEMINI_API_KEY|XAI_API_KEY|GITHUB_TOKEN)=[A-Za-z0-9._~+/-]{16,}/m,
+    /^(?:OMARCHY_WORKER_TOKEN|FACTORY_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY|GEMINI_API_KEY|XAI_API_KEY|GITHUB_TOKEN|GITHUB_REPORT_TOKEN)=[A-Za-z0-9._~+/-]{16,}/m,
   ],
 ];
 

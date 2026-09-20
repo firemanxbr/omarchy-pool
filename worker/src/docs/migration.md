@@ -136,6 +136,7 @@ first deploy from `wrangler.toml`.
 ```bash
 openssl rand -hex 32 | npx wrangler secret put JOB_TOKEN_SECRET   # signs the per-job tokens; nobody else needs it
 npx wrangler secret put GITHUB_TOKEN  < ~/.cache/omarchy-cli-poc/github-token   # part C
+npx wrangler secret put GITHUB_REPORT_TOKEN                       # part C: Issues: Read and write only — the daily cost comment
 npx wrangler secret put CLOUDFLARE_ANALYTICS_TOKEN                # an API token with Account Analytics: Read and D1: Read — the daily cost estimate and the audience count (RUNBOOK, Costs)
 ```
 
@@ -172,6 +173,13 @@ GitHub App rather than a person — save it to
 `~/.cache/omarchy-cli-poc/github-token`, outside the checkout, as the runbook
 does, and install it (B5). Without it everything still runs, anonymously,
 under GitHub's unauthenticated rate limit.
+
+The one write the brain makes on GitHub — the daily comment on the *Cost
+report* issue (RUNBOOK, *Costs*) — has its own secret, `GITHUB_REPORT_TOKEN`:
+a second fine-grained token on `NEWORG/omarchy-pool` with *Issues: Read and
+write* and nothing else (B5). Keep the two apart: no token in the Worker may
+start a workflow. Without it the `cost-report.yml` workflow posts the
+comment from GitHub's own cron, hours late.
 
 ## D. A new signing key
 

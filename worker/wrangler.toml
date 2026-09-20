@@ -37,8 +37,8 @@ enabled = true
 [limits]
 cpu_ms = 120000
 
-# The pool's own scheduler (src/scheduler.ts): every ten minutes, dispatch the
-# workflows GitHub's cron has not run on time. Needs the GITHUB_TOKEN secret.
+# The pool's own scheduler (src/scheduler.ts): every ten minutes, queue the
+# pool's jobs that are due and run the brain's own (metrics, cost, audience).
 [triggers]
 crons = ["*/10 * * * *"]
 
@@ -95,6 +95,7 @@ POOL_DEPLOYED_AT = ""
 # Secrets (set with `wrangler secret put <NAME>`):
 #   JOB_TOKEN_SECRET — signs the per-job tokens workers get at claim time (jobtoken.ts)
 #   SIGNING_KEY      — the pool's OpenPGP private key, armored (signing.ts)
-#   GITHUB_TOKEN     — fine-grained token, Actions: read and write on the repository, for the scheduler's last dispatches
+#   GITHUB_TOKEN     — fine-grained token, read-only: a higher rate limit for the reads the pool makes (never a write scope)
+#   GITHUB_REPORT_TOKEN — a separate fine-grained token, Issues: Read and write only — the daily cost comment (cost.ts postCostReport)
 #   GITHUB_OAUTH_CLIENT_SECRET — the OAuth App behind "Sign in with GitHub"
 #   CLOUDFLARE_ANALYTICS_TOKEN — API token with Account · Analytics · Read, for the daily cost estimate and the audience count

@@ -261,8 +261,9 @@ export async function runScheduler(env: Env, now = new Date()): Promise<string[]
       log.push(`metrics: ${String(e)}`);
     }
   }
-  // The bill: estimated every three hours (one journal line a day, after
-  // 06:30 UTC); the guard pauses the jobs that write when the month heads
+  // The bill: estimated every three hours (one journal line a day, the first
+  // estimate at or after 06:00 UTC — also posted on GitHub as the day's
+  // report); the guard pauses the jobs that write when the month heads
   // over budget, and lifts within three hours of it heading back (cost.ts).
   if (env.CLOUDFLARE_ANALYTICS_TOKEN) {
     try {

@@ -122,8 +122,10 @@ export interface Env {
   /** Page views: a GA4 measurement id (G-XXXXXXX) or a Cloudflare Web Analytics token (32 hex); empty or unset = no script on any page. */
   ANALYTICS?: string;
   POOL_DEPLOYED_AT?: string;
-  /** Fine-grained GitHub token (Actions: read and write) for the pool's own scheduler. */
+  /** Fine-grained GitHub token, read-only: a higher rate limit for the reads the pool makes (governance, releases, provenance, run history). Never a write scope. */
   GITHUB_TOKEN?: string;
+  /** A separate fine-grained token with Issues: Read and write on the repository and nothing else — the daily cost report the brain posts on the Cost report issue (cost.ts postCostReport). Unset: the GitHub workflow posts it, late. */
+  GITHUB_REPORT_TOKEN?: string;
   /** "off" only in tests: the request's source URL is not fetched. */
   SOURCE_CHECK?: string;
   /** Signs per-job tokens (jobtoken.ts); any random string. */

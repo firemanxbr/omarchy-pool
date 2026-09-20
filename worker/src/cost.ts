@@ -9,7 +9,11 @@
  * the crawl that put September over the line was reads, which the write
  * pause did not touch). People, signed-in readers, search engines, the
  * pool's own clients and pacman keep reading; the pool keeps serving.
- * Budget review of 2026-09-13: the card is capped at US$ 30 a month.
+ * The budget is three lines (below): the report warns at US$ 25, the
+ * guard pauses the writers at US$ 40, US$ 50 is the cap. The day's first
+ * estimate is also the daily report: posted from here as a comment on the
+ * Cost report issue (postCostReport), the GitHub workflow cost-report.yml
+ * being the late fallback.
  */
 import type { Env } from "./index";
 import { cookieOf } from "./routes/auth";
@@ -253,8 +257,10 @@ export function estimateSlot(now: Date): string {
  * The cost job, every three hours: estimate, keep the latest estimate where
  * the dashboard reads it (settings.cost_latest), raise or lower the guard
  * the moment the projection crosses the line — not the next morning. One
- * `cost` journal line a day (the first estimate after 06:30 UTC, what the
- * daily report reads), plus one whenever the guard goes up or comes down.
+ * `cost` journal line a day (the first estimate at or after 06:00 UTC, what
+ * the daily report carries), plus one whenever the guard goes up or comes
+ * down. The daily line is also the day's report on GitHub: posted right
+ * after it, once (postCostReport).
  */
 export async function dailyCost(env: Env, now = new Date(), fetcher: typeof fetch = fetch): Promise<string> {
   const slot = estimateSlot(now);
@@ -275,5 +281,97 @@ export async function dailyCost(env: Env, now = new Date(), fetcher: typeof fetc
   if (est.guard && !guardBefore) stmts.push(upsert("cost_guard", summary));
   else if (!est.guard && guardBefore) stmts.push(env.DB.prepare("DELETE FROM settings WHERE key = 'cost_guard'"));
   await env.DB.batch(stmts);
-  return `cost: ${summary}`;
+  const report = dailyLine ? await postCostReport(env, { estimated_at: now.toISOString(), ...est }, now, fetcher) : "";
+  return `cost: ${summary}${report ? `; ${report}` : ""}`;
+}
+
+/** The repository whose Cost report issue gets the daily comment. */
+export const REPORT_REPO = "firemanxbr/omarchy-pool";
+const GITHUB = `https://api.github.com/repos/${REPORT_REPO}`;
+
+/** The estimate as the API serves it: when it was taken, and the three lines that ride every answer. */
+export type ReportedEstimate = CostEstimate & { estimated_at: string };
+
+/**
+ * A comment that carries an estimate starts with the month and the day —
+ * `**2026-09** — day 20 of 30 · estimated …`, a ⚠️ before it at the warning
+ * line. The rule both posters skip by: the Worker and cost-report.yml each
+ * count today's comments on the issue that look like this (and not like the
+ * workflow's "no estimate today" line), whoever wrote them, so the day gets
+ * one number and a second poster stays quiet. Change the header here and in
+ * the workflow's jq together.
+ */
+export const REPORT_HEADER = /\*\*\d{4}-\d{2}\*\* — day \d+ of \d+ · estimated /;
+
+/** `US$ 12.34` — the same spelling as the workflow's jq `usd`. */
+const usd = (n: number) => `US$ ${n}`;
+/** A quantity as the jq template prints it: millions floored with " M" over a million, else two decimals. */
+const qty = (n: number) => (n > 1e6 ? `${Math.floor(n / 1e6)} M` : String(Math.round(n * 100) / 100));
+const included = (n: number) => (n > 1e6 ? `${Math.floor(n / 1e6)} M` : String(n));
+
+/**
+ * The daily comment's markdown — the twin of the jq template in
+ * .github/workflows/cost-report.yml, line for line, so the day reads the
+ * same whichever of the two posted it. The lines come from the budget
+ * constants above, as the API's `lines_usd` gives them to the workflow.
+ */
+export function costReportMarkdown(est: ReportedEstimate): string {
+  const guardNote = est.guard
+    ? `\n> ⚠️ **Over the guard (${usd(BUDGET_GUARD_USD)}): the jobs that write are paused** until the estimate is back under it — the cap is ${usd(BUDGET_CAP_USD)}.\n`
+    : "";
+  const rows = est.lines.map((l) => `| ${l.item} | ${qty(l.used)} ${l.unit} | ${included(l.included)} | ${usd(l.month_to_date_usd)} | ${usd(l.projected_usd)} |`).join("\n");
+  return (
+    (est.projected_usd >= BUDGET_WARN_USD ? "⚠️ " : "") +
+    `**${est.month}** — day ${est.day_of_month} of ${est.days_in_month} · estimated ${est.estimated_at}\n\n` +
+    `| | |\n|---|---|\n| So far | **${usd(est.month_to_date_usd)}** |\n| Projected for the month | **${usd(est.projected_usd)}** |\n` +
+    guardNote +
+    `\n| Item | Used | Included | So far | Projected |\n|---|---:|---:|---:|---:|\n` +
+    rows +
+    `\n\nBudget (worker/src/cost.ts): this report warns from a projected ${usd(BUDGET_WARN_USD)}; the pool pauses the jobs that write at a projected ${usd(BUDGET_GUARD_USD)} and resumes within three hours of the estimate heading back; ${usd(BUDGET_CAP_USD)} is the cap, never more.`
+  );
+}
+
+/**
+ * The daily report, posted by the brain itself the moment the day's line is
+ * written — GitHub's cron started cost-report.yml 4.8–6.6 hours late every
+ * day of 2026-09-13..20, and on the 18th an edge rule kept the runner from
+ * reading the estimate at all, so the issue went a day without its number
+ * while the journal had it at 06:00. The secret is GITHUB_REPORT_TOKEN, a
+ * fine-grained token with Issues: Read and write on the repository and
+ * nothing else — never GITHUB_TOKEN, which stays read-only (the release
+ * workflow is dispatch-only and deploys production, so no token with
+ * Actions: write lives in the Worker). Without the secret this says so in
+ * the tick's log and the workflow posts, late. One attempt a day: a failure
+ * is one `cost` journal line with status warn, and the workflow still posts.
+ * Costs no D1 row on success.
+ */
+export async function postCostReport(env: Env, est: ReportedEstimate, now = new Date(), fetcher: typeof fetch = fetch): Promise<string> {
+  if (!env.GITHUB_REPORT_TOKEN) {
+    const line = "report: GITHUB_REPORT_TOKEN not set; cost-report.yml posts it on GitHub, late";
+    console.log(`cost ${line}`);
+    return line;
+  }
+  const headers = { authorization: `Bearer ${env.GITHUB_REPORT_TOKEN}`, accept: "application/vnd.github+json", "content-type": "application/json", "user-agent": "omarchy-pool-cost-report" };
+  const day = now.toISOString().slice(0, 10);
+  try {
+    const issues = await fetcher(`${GITHUB}/issues?labels=cost-report&state=open&per_page=1`, { headers });
+    if (!issues.ok) throw new Error(`listing the issue: HTTP ${issues.status}`);
+    const issue = ((await issues.json()) as { number: number }[])[0];
+    if (!issue) return "report: no open issue labelled cost-report (the workflow creates it)";
+    // One number a day: a comment carrying an estimate since midnight — the
+    // workflow's, a maintainer's dispatch, an earlier attempt — means done.
+    const comments = await fetcher(`${GITHUB}/issues/${issue.number}/comments?since=${day}T00:00:00Z&per_page=100`, { headers });
+    if (!comments.ok) throw new Error(`reading #${issue.number}'s comments: HTTP ${comments.status}`);
+    const today = ((await comments.json()) as { body?: string }[]).filter((c) => REPORT_HEADER.test(c.body ?? ""));
+    if (today.length) return `report: #${issue.number} already has today's comment`;
+    const post = await fetcher(`${GITHUB}/issues/${issue.number}/comments`, { method: "POST", headers, body: JSON.stringify({ body: costReportMarkdown(est) }) });
+    if (!post.ok) throw new Error(`posting on #${issue.number}: HTTP ${post.status}`);
+    return `report: posted on #${issue.number}`;
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    await env.DB.prepare("INSERT INTO events (kind, status, summary, payload) VALUES ('cost', 'warn', ?, ?)")
+      .bind(`Cost report for ${day} not posted on GitHub — ${reason}; cost-report.yml posts it, late`, JSON.stringify({ day, error: reason, repo: REPORT_REPO }))
+      .run();
+    return `report: not posted — ${reason}`;
+  }
 }
