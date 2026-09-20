@@ -7,6 +7,7 @@
 import type { Env } from "./index";
 import { provenanceCounts } from "./provenance";
 import { version, PROMOTED_RINGS, WORKER_ALIVE_MINUTES } from "./meta";
+import { GRACE_DAYS, KEEP_RELEASES, outsideRetention, retention } from "./db";
 
 const EVERY_MINUTES = 30;
 
@@ -62,15 +63,17 @@ async function scanPool(env: Env): Promise<PoolBlock> {
   ).first<{ objects: number; bytes: number }>();
   // What retention would drop: nothing a ring serves, nothing the last
   // three releases of a ring added or removed (a rollback target), nothing
-  // a kept checkpoint lists (routes/gc.ts has the same rule).
+  // a kept checkpoint lists, nothing younger than the grace — the rule
+  // routes/gc.ts deletes by, read from db.ts, so the tile says what the
+  // next run would free. The count used to exclude what any checkpoint
+  // listed, kept or not, and read every row of release_packages for it:
+  // 1.4 M rows per snapshot by the end of a week (2026-09-19), 66 k now.
+  const { protectedReleases, keptCheckpoints } = await retention(env, KEEP_RELEASES);
   const reclaimable = await env.DB.prepare(
-    `SELECT COUNT(*) AS objects, COALESCE(SUM(size_download), 0) AS bytes FROM packages
-      WHERE id NOT IN (SELECT package_id FROM ring_packages)
-        AND id NOT IN (SELECT package_id FROM release_deltas WHERE release_id IN (SELECT id FROM releases r WHERE r.id IN (
-                          SELECT id FROM releases r2 WHERE r2.ring = r.ring ORDER BY seq DESC LIMIT 3)))
-        AND id NOT IN (SELECT package_id FROM release_packages)
-        AND created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days')`,
-  ).first<{ objects: number; bytes: number }>();
+    `SELECT COUNT(*) AS objects, COALESCE(SUM(p.size_download), 0) AS bytes FROM packages p
+      WHERE p.created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?3)
+        AND ${outsideRetention("p")}`,
+  ).bind(JSON.stringify(protectedReleases), JSON.stringify(keptCheckpoints), `-${GRACE_DAYS} days`).first<{ objects: number; bytes: number }>();
   // What each ring serves: the head's stored summary (db.ts), three columns
   // per ring, instead of a join over every member of every ring.
   const heads = await env.DB.prepare("SELECT h.ring, r.package_count AS packages, r.bytes FROM ring_heads h JOIN releases r ON r.id = h.release_id ORDER BY h.ring")

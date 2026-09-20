@@ -1,6 +1,7 @@
 /** Index queries shared by several routes. */
 
 import type { Env, Ring } from "./index";
+import { RINGS, ringsSql } from "./meta";
 
 
 export interface ReleaseRow {
@@ -114,6 +115,71 @@ export async function ensureCheckpoint(env: Env, releaseId: number): Promise<voi
   }
   stmts.push(env.DB.prepare("UPDATE releases SET checkpoint = 1 WHERE id = ?").bind(releaseId));
   await env.DB.batch(stmts);
+}
+
+/** Retention's defaults: the releases of a ring it protects, and the days an unreferenced object is kept (an import in progress). */
+export const KEEP_RELEASES = 3;
+export const GRACE_DAYS = 7;
+
+/**
+ * Retention: a package is protected while a ring serves it, while any of
+ * the last `keep` releases of a ring added or removed it (a rollback
+ * inside retention may need it back), while a kept checkpoint lists it,
+ * or while it is younger than the grace period (an import in progress has
+ * uploaded objects that no release pins yet). A kept checkpoint is, per
+ * ring, the newest one at or before the oldest protected release — what
+ * reconstructing any protected release starts from (migration 0017) —
+ * and any checkpoint among the protected ones. What routes/gc.ts deletes
+ * by and what the metrics snapshot counts as reclaimable: one rule.
+ */
+export async function retention(env: Env, keep: number): Promise<{ protectedReleases: number[]; keptCheckpoints: number[]; checkpointSeq: Record<string, number> }> {
+  const protectedReleases: number[] = [];
+  const keptCheckpoints: number[] = [];
+  const checkpointSeq: Record<string, number> = {};
+  for (const ring of RINGS) {
+    const rows = await env.DB.prepare("SELECT id, seq, checkpoint FROM releases WHERE ring = ? ORDER BY seq DESC LIMIT ?")
+      .bind(ring, keep)
+      .all<{ id: number; seq: number; checkpoint: number }>();
+    for (const r of rows.results) {
+      protectedReleases.push(r.id);
+      if (r.checkpoint) keptCheckpoints.push(r.id);
+    }
+    const oldest = rows.results.at(-1);
+    if (!oldest) continue;
+    const base = await env.DB.prepare("SELECT id, seq FROM releases WHERE ring = ? AND checkpoint = 1 AND seq <= ? ORDER BY seq DESC LIMIT 1")
+      .bind(ring, oldest.seq)
+      .first<{ id: number; seq: number }>();
+    if (base) {
+      if (!keptCheckpoints.includes(base.id)) keptCheckpoints.push(base.id);
+      checkpointSeq[ring] = base.seq;
+    }
+  }
+  return { protectedReleases, keptCheckpoints, checkpointSeq };
+}
+
+/**
+ * The membership half of retention as a predicate on `${alias}.id`: no
+ * ring serves the package, no kept checkpoint lists it, no protected
+ * release's delta names it. The protected releases are bound as ?1 and
+ * the kept checkpoints as ?2, both JSON arrays of ids (retention() above).
+ * NOT EXISTS probes on the membership tables' primary keys — (ring,
+ * package_id) and (release_id, package_id), so a ring name or a release
+ * id leads each — instead of `id NOT IN (SELECT package_id …)`, which
+ * materialised every row of ring_packages and of the listed checkpoints
+ * per call: 302 k rows read on 2026-09-20 against 66 k, and the form
+ * metrics.ts had listed every checkpoint, 1.4 M rows by the end of a
+ * week. One probe per ring, in RINGS order, rather than `ring IN (…)`:
+ * the AND chain stops at the first ring that serves the package, and edge
+ * serves nearly everything, so a served package costs one index row
+ * (98 k with the IN list, measured the same day). The ring names are the
+ * constants of meta.ts.
+ */
+export function outsideRetention(alias: string): string {
+  return [
+    ...RINGS.map((ring) => `NOT EXISTS (SELECT 1 FROM ring_packages r WHERE r.ring = ${ringsSql([ring])} AND r.package_id = ${alias}.id)`),
+    `NOT EXISTS (SELECT 1 FROM release_packages rp WHERE rp.release_id IN (SELECT value FROM json_each(?2)) AND rp.package_id = ${alias}.id)`,
+    `NOT EXISTS (SELECT 1 FROM release_deltas d WHERE d.release_id IN (SELECT value FROM json_each(?1)) AND d.package_id = ${alias}.id)`,
+  ].join("\n        AND ");
 }
 
 export async function ringHead(env: Env, ring: Ring): Promise<ReleaseRow | null> {
