@@ -584,6 +584,15 @@ What keeps the bill near US$ 10:
   compared full lists, and every release's parent was written out (65 k
   rows, deleted again by the next GC) the first time its diff was viewed
   — 1.45 M rows on 2026-09-19, a crawler following the dashboard's links.
+  Neither membership table has a foreign key to `packages` (migration
+  0035: the check scanned both tables, 259k rows, for every one of GC's
+  deletes); what it guaranteed is kept by the code instead — GC asks the
+  rings once more about each victim right before its object goes and
+  every one of its deletes is conditional on the answer (a package a ring
+  took back in between is left alone and counted, `taken_back_by_a_ring`),
+  and a reconstruction refuses a release whose packages GC took rather
+  than writing it short (`cannot be reconstructed: N of its packages were
+  garbage-collected`; the diff answers 410 as for a pruned release).
   The delta is computed in SQL with the request's lists materialised once
   (CTEs): evaluated per row over a 32k-row ring, the first version took
   D1 past its CPU limit and every sync failed for three hours on

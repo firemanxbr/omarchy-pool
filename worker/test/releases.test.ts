@@ -10,6 +10,8 @@ import { beforeAll, describe, expect, it } from "vitest";
 import worker from "../src/index";
 import { issueJobToken } from "../src/jobtoken";
 import { packageKey } from "../src/r2";
+import { ensureCheckpoint } from "../src/db";
+import { handleGc } from "../src/routes/gc";
 
 const API = "http://pool.test/api/v1";
 
@@ -594,5 +596,139 @@ describe("the lab", () => {
     expect(order).toEqual([...order].sort((a, b) => a - b));
     expect(inc).toContain("Server = http://pool.test/factory/$arch");
     expect(inc).toContain("the lab above edge");
+  });
+});
+
+describe("membership without a foreign key", () => {
+  // Migration 0035: ring_packages and release_packages no longer REFERENCE
+  // packages (the check scanned both tables for every GC delete); what the
+  // constraint guaranteed is now guaranteed by gc.ts and ensureCheckpoint.
+  const fks = async (table: string) => (await env.DB.prepare(`PRAGMA foreign_key_list('${table}')`).all<{ table: string }>()).results.map((r) => r.table);
+  // env.DB with a hook run right after `method` of the first statement whose SQL `matches` — the way to land a write
+  // between two of GC's statements, where a sync or a rollback could land it.
+  const after = (matches: (sql: string) => boolean, method: "all" | "first", hook: () => Promise<unknown>): D1Database => {
+    const racing = (stmt: D1PreparedStatement): D1PreparedStatement =>
+      new Proxy(stmt, {
+        get(target, key) {
+          if (key === "bind") return (...args: unknown[]) => racing(target.bind(...args));
+          if (key === method) return async () => { const r = await (target[method] as () => Promise<unknown>)(); await hook(); return r; };
+          const v = Reflect.get(target, key);
+          return typeof v === "function" ? v.bind(target) : v;
+        },
+      });
+    return new Proxy(env.DB, {
+      get(target, key) {
+        if (key === "prepare") return (sql: string) => (matches(sql) ? racing(target.prepare(sql)) : target.prepare(sql));
+        const v = Reflect.get(target, key);
+        return typeof v === "function" ? v.bind(target) : v;
+      },
+    });
+  };
+
+  it("neither membership table names packages any more; release_packages still goes with its release", async () => {
+    expect(await fks("ring_packages")).toEqual([]);
+    expect(await fks("release_packages")).toEqual(["releases"]);
+    // The primary keys every membership read probes are what they were.
+    for (const [table, cols] of [["ring_packages", ["ring", "package_id"]], ["release_packages", ["release_id", "package_id"]]] as const) {
+      const pk = (await env.DB.prepare(`PRAGMA table_info('${table}')`).all<{ name: string; pk: number }>()).results.filter((c) => c.pk).sort((a, b) => a.pk - b.pk).map((c) => c.name);
+      expect(pk).toEqual([...cols]);
+    }
+  });
+
+  it("deleting a package row reads the row and its indexed children, not the membership tables", async () => {
+    const s = await index("extra", "x86_64", { name: "orphan", version: "1.0-1", arch: "x86_64" }, pool);
+    const id = (await env.DB.prepare("SELECT id FROM packages WHERE sha256 = ?").bind(s).first<{ id: number }>())!.id;
+    const plan = (await env.DB.prepare("EXPLAIN QUERY PLAN DELETE FROM packages WHERE id = ?").bind(id).all<{ detail: string }>()).results.map((r) => r.detail);
+    expect(plan.some((d) => /SCAN (ring_packages|release_packages)/.test(d)), plan.join("; ")).toBe(false);
+    const del = await env.DB.prepare("DELETE FROM packages WHERE id = ?").bind(id).run();
+    expect(del.meta.changes).toBeGreaterThanOrEqual(1); // the row and its cascaded children
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM packages WHERE id = ?").bind(id).first<{ n: number }>())!.n).toBe(0);
+    // Before 0035 this read every row of ring_packages and release_packages (30-odd ring rows and every checkpoint's rows here, 259k on production).
+    const membership = (await env.DB.prepare("SELECT (SELECT COUNT(*) FROM ring_packages) + (SELECT COUNT(*) FROM release_packages) AS n").first<{ n: number }>())!.n;
+    expect(membership).toBeGreaterThan(20);
+    expect(del.meta.rows_read).toBeLessThan(20);
+  });
+
+  it("GC leaves a victim alone when a ring took it back after the listing, row, lists and object", async () => {
+    const s = await index("extra", "x86_64", { name: "revenant", version: "2.0-1", arch: "x86_64", provides: ["librevenant.so=2-64"] }, pool);
+    const row = (await env.DB.prepare("SELECT id, r2_key FROM packages WHERE sha256 = ?").bind(s).first<{ id: number; r2_key: string }>())!;
+    // The victims of this run: revenant and whatever the tests before left outside every ring (the file shares one pool).
+    const victims = (await call("GET", "/pool/unreferenced?keep=3&grace_days=0")).json.packages as { id: number; size_download: number }[];
+    expect(victims.some((p) => p.id === row.id)).toBe(true);
+    // The race: the ring row lands after unreferenced() listed the victim and before the loop reaches it — a sync that
+    // re-indexed the same bytes got the old id back and the release that followed put it into ring_packages again.
+    const takeBack = () => env.DB.prepare("INSERT OR IGNORE INTO ring_packages (ring, package_id) VALUES ('lab', ?)").bind(row.id).run();
+    const listing = (sql: string) => sql.includes("json_each(?2)") && sql.includes("created_at <");
+    const res = await handleGc(new URL(`${API}/pool/gc?keep=3&grace_days=0`), { ...env, DB: after(listing, "all", takeBack) });
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    // Every other victim goes as before; the one a ring took back is counted, not deleted.
+    const others = victims.filter((p) => p.id !== row.id);
+    expect(body.taken_back_by_a_ring).toBe(1);
+    expect(body.deleted).toBe(others.length);
+    expect(body.bytes).toBe(others.reduce((n, p) => n + p.size_download, 0));
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM packages WHERE id = ?").bind(row.id).first<{ n: number }>())!.n).toBe(1);
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM package_provides WHERE package_id = ?").bind(row.id).first<{ n: number }>())!.n).toBeGreaterThan(0);
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM ring_packages WHERE ring = 'lab' AND package_id = ?").bind(row.id).first<{ n: number }>())!.n).toBe(1);
+    expect(await env.PACKAGES.head(row.r2_key)).not.toBeNull();
+    // Served now, it is no victim of the next run either.
+    expect((await call("GET", "/pool/unreferenced?keep=3&grace_days=0")).json.packages.some((p: any) => p.id === row.id)).toBe(false);
+    await env.DB.prepare("DELETE FROM ring_packages WHERE ring = 'lab' AND package_id = ?").bind(row.id).run();
+    // Out of every ring again, the same victim goes on the next run, object and all.
+    const gc = await call("POST", "/pool/gc?keep=3&grace_days=0", undefined, await job(["gc"]));
+    expect(gc.status).toBe(200);
+    expect(gc.json.taken_back_by_a_ring).toBe(0);
+    expect(gc.json.deleted).toBeGreaterThanOrEqual(1);
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM packages WHERE id = ?").bind(row.id).first<{ n: number }>())!.n).toBe(0);
+    expect(await env.PACKAGES.head(row.r2_key)).toBeNull();
+  });
+
+  it("GC leaves the row and its lists alone when a ring took the victim back after the probe: every DELETE is conditional", async () => {
+    const s = await index("extra", "x86_64", { name: "revenant", version: "2.1-1", arch: "x86_64", provides: ["librevenant.so=2-64"] }, pool);
+    const row = (await env.DB.prepare("SELECT id, r2_key FROM packages WHERE sha256 = ?").bind(s).first<{ id: number; r2_key: string }>())!;
+    expect((await call("GET", "/pool/unreferenced?keep=3&grace_days=0")).json.packages.some((p: any) => p.id === row.id)).toBe(true);
+    // The narrower race: the ring row lands after the probe answered "no ring" and before the batch. Between the two
+    // the loop asks whether another row shares the object, so the write is staged right after that statement.
+    const takeBack = () => env.DB.prepare("INSERT OR IGNORE INTO ring_packages (ring, package_id) VALUES ('lab', ?)").bind(row.id).run();
+    const sharing = (sql: string) => sql.includes("COALESCE(r2_key") && sql.includes("id != ?");
+    const res = await handleGc(new URL(`${API}/pool/gc?keep=3&grace_days=0`), { ...env, DB: after(sharing, "first", takeBack) });
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.taken_back_by_a_ring).toBe(1);
+    expect(body.deleted).toBe(0);
+    expect(body.bytes).toBe(0);
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM packages WHERE id = ?").bind(row.id).first<{ n: number }>())!.n).toBe(1);
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM package_provides WHERE package_id = ?").bind(row.id).first<{ n: number }>())!.n).toBeGreaterThan(0);
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM ring_packages WHERE ring = 'lab' AND package_id = ?").bind(row.id).first<{ n: number }>())!.n).toBe(1);
+    // The object had already gone in that instant — the same instant the foreign key used to fail in, after the R2
+    // delete — so the row is served without its bytes until it is re-indexed; nothing here asserts the object.
+    expect((await call("GET", "/pool/unreferenced?keep=3&grace_days=0")).json.packages.some((p: any) => p.id === row.id)).toBe(false);
+    await env.DB.prepare("DELETE FROM ring_packages WHERE ring = 'lab' AND package_id = ?").bind(row.id).run();
+    const gc = await call("POST", "/pool/gc?keep=3&grace_days=0", undefined, await job(["gc"]));
+    expect(gc.status).toBe(200);
+    expect(gc.json.taken_back_by_a_ring).toBe(0);
+    expect(gc.json.deleted).toBeGreaterThanOrEqual(1);
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM packages WHERE id = ?").bind(row.id).first<{ n: number }>())!.n).toBe(0);
+  });
+
+  it("a release whose packages were garbage-collected is refused by the reconstruction, not written short", async () => {
+    // A release that added a package, then one that removed it: the first is inside retention and not a checkpoint.
+    const s = await index("extra", "x86_64", { name: "ephemeral", version: "1.0-1", arch: "x86_64" }, pool);
+    const id = (await env.DB.prepare("SELECT id FROM packages WHERE sha256 = ?").bind(s).first<{ id: number }>())!.id;
+    const added = await call("POST", "/releases", { ring: "edge", add: [s] }, edge);
+    expect(added.status, JSON.stringify(added.json)).toBe(201);
+    const removed = await call("POST", "/releases", { ring: "edge", remove: ["ephemeral"], remove_arch: "x86_64" }, edge);
+    expect(removed.status, JSON.stringify(removed.json)).toBe(201);
+    const rel = added.json.release.id as number;
+    const state = async () => (await env.DB.prepare("SELECT checkpoint, (SELECT COUNT(*) FROM release_packages WHERE release_id = releases.id) AS rows FROM releases WHERE id = ?").bind(rel).first<{ checkpoint: number; rows: number }>())!;
+    expect(await state()).toEqual({ checkpoint: 0, rows: 0 });
+    // What GC does to a package no ring, no protected delta and no kept checkpoint lists — here by hand, the release still names it.
+    await env.DB.prepare("DELETE FROM packages WHERE id = ?").bind(id).run();
+    await expect(ensureCheckpoint(env, rel)).rejects.toThrow(`release ${rel} cannot be reconstructed: 1 of its packages were garbage-collected`);
+    expect(await state()).toEqual({ checkpoint: 0, rows: 0 });
+    // The diff says so too, as it does for a pruned release.
+    expect((await call("GET", `/releases/edge/diff?to=${rel}`)).status).toBe(410);
+    // The head, which never reconstructs, is untouched.
+    expect((await call("GET", "/releases/edge?fields=summary")).status).toBe(200);
   });
 });

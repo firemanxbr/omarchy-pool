@@ -1,4 +1,5 @@
-import { json, RINGS, type Env } from "../index";
+import { json, type Env } from "../index";
+import { RINGS, ringsSql } from "../meta";
 import { sweepStaging } from "../staging";
 
 /**
@@ -93,7 +94,26 @@ export async function handleGc(url: URL, env: Env): Promise<Response> {
   const victims = packages.slice(0, limit);
   let bytes = 0;
   let objectsKept = 0;
+  let deleted = 0;
+  let takenBack = 0;
+  // The membership tables carry no foreign key to packages (migration
+  // 0035: the check scanned both tables for every delete), so what kept a
+  // served row from being deleted is this loop. The victims were listed
+  // minutes ago and nothing serialises GC against a sync or a rollback: a
+  // sync that re-indexes bytes already in the pool gets the old row back
+  // ("already-indexed"), and the release that follows puts its id into
+  // ring_packages again. So a victim is asked once more, right before its
+  // object goes, whether a ring serves it now (a probe of the PK, 2-4
+  // rows), and every DELETE of the batch carries the same condition, so
+  // the batch can never take a row, or a row's lists, that a ring names:
+  // the row's DELETE changing nothing says a ring took it back in between.
+  const served = `SELECT 1 FROM ring_packages WHERE ring IN (${ringsSql(RINGS)}) AND package_id = ?1`;
+  const unless = `WHERE package_id = ?1 AND NOT EXISTS (${served})`;
   for (const p of victims) {
+    if (await env.DB.prepare(`${served} LIMIT 1`).bind(p.id).first()) {
+      takenBack++;
+      continue;
+    }
     // One object per key: an upstream rebuild of the same version with
     // different bytes (the OPR, per channel) can leave two index rows
     // behind one key. The row goes; the object only when no other row —
@@ -101,14 +121,19 @@ export async function handleGc(url: URL, env: Env): Promise<Response> {
     const shared = await env.DB.prepare("SELECT COUNT(*) AS n FROM packages WHERE COALESCE(r2_key, repo_arch || '/' || filename) = ? AND id != ?").bind(p.r2_key, p.id).first<{ n: number }>();
     if (shared?.n) objectsKept++;
     else if (!p.r2_key.startsWith("ghost/")) await env.PACKAGES.delete([p.r2_key, `${p.r2_key}.sig`, `${p.r2_key}.provenance.json`, `${p.r2_key}.provenance.json.sig`]);
-    await env.DB.batch([
-      env.DB.prepare("DELETE FROM package_provides WHERE package_id = ?").bind(p.id),
-      env.DB.prepare("DELETE FROM package_requires WHERE package_id = ?").bind(p.id),
-      env.DB.prepare("DELETE FROM package_files WHERE package_id = ?").bind(p.id),
-      env.DB.prepare("DELETE FROM package_file_lists WHERE package_id = ?").bind(p.id),
-      env.DB.prepare("DELETE FROM package_components WHERE package_id = ?").bind(p.id),
-      env.DB.prepare("DELETE FROM packages WHERE id = ?").bind(p.id),
+    const gone = await env.DB.batch([
+      env.DB.prepare(`DELETE FROM package_provides ${unless}`).bind(p.id),
+      env.DB.prepare(`DELETE FROM package_requires ${unless}`).bind(p.id),
+      env.DB.prepare(`DELETE FROM package_files ${unless}`).bind(p.id),
+      env.DB.prepare(`DELETE FROM package_file_lists ${unless}`).bind(p.id),
+      env.DB.prepare(`DELETE FROM package_components ${unless}`).bind(p.id),
+      env.DB.prepare(`DELETE FROM packages WHERE id = ?1 AND NOT EXISTS (${served})`).bind(p.id),
     ]);
+    if (!(gone.at(-1)?.meta.changes ?? 0)) {
+      takenBack++;
+      continue;
+    }
+    deleted++;
     bytes += p.size_download;
   }
   // Advisories and matches are replaced by every security run (the run
@@ -123,5 +148,5 @@ export async function handleGc(url: URL, env: Env): Promise<Response> {
   // contributor's quota never counts objects the bucket already dropped;
   // the packages of finished builds a transition missed go too.
   const staging = await sweepStaging(env);
-  return json({ keep, deleted: victims.length, objects_kept_for_another_row: objectsKept, bytes, remaining: packages.length - victims.length, protected_releases: protectedReleases, kept_checkpoints: keptCheckpoints, membership_rows_pruned: pruned.meta.changes ?? 0, delta_rows_pruned: deltasPruned, cve_meta_pruned: cves.meta.changes ?? 0, staging });
+  return json({ keep, deleted, taken_back_by_a_ring: takenBack, objects_kept_for_another_row: objectsKept, bytes, remaining: packages.length - victims.length, protected_releases: protectedReleases, kept_checkpoints: keptCheckpoints, membership_rows_pruned: pruned.meta.changes ?? 0, delta_rows_pruned: deltasPruned, cve_meta_pruned: cves.meta.changes ?? 0, staging });
 }
