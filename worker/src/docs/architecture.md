@@ -42,9 +42,12 @@ Promoting a release copies and re-uploads most of that data, so a bump takes
   **deltas**: what a ring serves now lives in one table (`ring_packages`), a
   release writes only what it changed against its parent (`release_deltas`), and
   the full membership is written out for a *checkpoint* — the first release of a
-  ring, then every 24th, and any older release read by id (a pinned page, a diff,
-  a rollback target), reconstructed from the checkpoint behind it plus the deltas.
-  A release costs hundreds of rows, not thirty thousand (migration 0017).
+  ring, then every 24th, and any older release read by id (a pinned page, a
+  rollback target), reconstructed from the checkpoint behind it plus the deltas.
+  A release costs hundreds of rows, not thirty thousand (migration 0017). The
+  diff of two releases is folded from the deltas between them and writes
+  nothing; only a pair the deltas cannot answer (a side below the ring's oldest
+  checkpoint, a reversed pair) is compared as full lists.
   A selection holds **one row per source, name and architecture**: a package
   added replaces its own source's build of that name, never another source's —
   Arch Linux ARM's `mesa` and asahi-alarm's are two rows, each in its own
