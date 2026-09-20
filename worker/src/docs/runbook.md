@@ -737,9 +737,10 @@ show. The header of every page says so. To lift it by hand:
   `wrangler d1 migrations apply` in a release can fail on it — re-run the job.
   pacman is never affected (packages and databases are static objects on R2);
   the dashboard shows the index as *degraded* on its status pill. GET responses
-  of the API are cached at the edge for their `max-age` (30 s for stats, 60 s
-  for search and package pages, 120 s for security), so viewers do not multiply
-  the load; the pages poll every 60–120 s and retry transient errors.
+  of the API are cached at the edge for their `max-age` (a minute for stats
+  and search, ten minutes for a package page, half an hour for security), so
+  viewers do not multiply the load; the pages poll every 60–120 s and retry
+  transient errors.
 
 ## Kill switch
 
