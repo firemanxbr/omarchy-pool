@@ -291,7 +291,14 @@ describe("the maintainer set, the late mark and the budget lines are the server'
   it("GET /factory/maintainers is the one list a page takes a person's role from, cached at the edge", async () => {
     const r = await call("GET", "/factory/maintainers");
     expect(r.status).toBe(200);
-    expect(r.headers.get("cache-control")).toBe("public, max-age=60");
+    // A miss says the minute; a hit says what is left of it (edgeHit rewrites
+    // cache-control from x-pool-expires), which is 59 once the clock has
+    // ticked since the copy was stored — the edge cache is shared across the
+    // test files of one run, so either answer can be the first one here.
+    expect(r.headers.get("x-pool-cache")).toMatch(/^(hit|miss)$/);
+    const left = Number(/^public, max-age=(\d+)$/.exec(r.headers.get("cache-control") ?? "")?.[1]);
+    expect(left).toBeGreaterThan(0);
+    expect(left).toBeLessThanOrEqual(60);
     expect(r.json.maintainers.map((m: { login: string }) => m.login)).toEqual([F.m1, F.m2]);
   });
 
