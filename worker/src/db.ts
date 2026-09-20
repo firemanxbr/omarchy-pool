@@ -98,7 +98,19 @@ export async function ensureCheckpoint(env: Env, releaseId: number): Promise<voi
   const list = [...ids];
   const stmts: D1PreparedStatement[] = [];
   for (let i = 0; i < list.length; i += 2000) {
-    stmts.push(env.DB.prepare("INSERT OR IGNORE INTO release_packages (release_id, package_id) SELECT ?, value FROM json_each(?)").bind(releaseId, JSON.stringify(list.slice(i, i + 2000))));
+    const chunk = JSON.stringify(list.slice(i, i + 2000));
+    // release_packages has no foreign key to packages (migration 0034),
+    // so nothing but this check refuses a release whose packages GC took:
+    // a release between the kept checkpoint and the protected ones added
+    // packages a later release removed, and those are exactly what
+    // retention deletes. Written anyway, its rows would name packages
+    // that are gone, the page would render short and a rollback to it
+    // would serve fewer packages than the release did, silently. The
+    // count is a probe of the primary key per id, ~3 rows each.
+    const present = await env.DB.prepare("SELECT COUNT(*) AS n FROM packages WHERE id IN (SELECT value FROM json_each(?))").bind(chunk).first<{ n: number }>();
+    const missing = Math.min(list.length, i + 2000) - i - (present?.n ?? 0);
+    if (missing > 0) throw new Error(`release ${releaseId} cannot be reconstructed: ${missing} of its packages were garbage-collected`);
+    stmts.push(env.DB.prepare("INSERT OR IGNORE INTO release_packages (release_id, package_id) SELECT ?, value FROM json_each(?)").bind(releaseId, chunk));
   }
   stmts.push(env.DB.prepare("UPDATE releases SET checkpoint = 1 WHERE id = ?").bind(releaseId));
   await env.DB.batch(stmts);
