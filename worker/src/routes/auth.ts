@@ -47,7 +47,7 @@ export async function handleAuthStart(url: URL, env: Env): Promise<Response> {
   // The OAuth App's callback is the dashboard's: a sign-in pressed on any
   // other production name (pkgs.*) starts over on the dashboard, before a
   // state cookie is set on a host the callback will never come back to.
-  if (isProductionHost(url.hostname) && url.hostname !== DASHBOARD_HOST) return Response.redirect(`https://${DASHBOARD_HOST}${url.pathname}${url.search}`, 302);
+  if (isProductionHost(url.hostname) && url.hostname !== DASHBOARD_HOST) return new Response(null, { status: 302, headers: { location: `https://${DASHBOARD_HOST}${url.pathname}${url.search}`, "x-robots-tag": "noindex, nofollow" } });
   if (!env.GITHUB_OAUTH_CLIENT_ID) return json({ error: "sign-in with GitHub is not configured (GITHUB_OAUTH_CLIENT_ID); POST /api/v1/factory/register with a GitHub token instead" }, 501);
   const state = crypto.randomUUID();
   const redirect = `${url.origin}/auth/github/callback`;
@@ -56,7 +56,8 @@ export async function handleAuthStart(url: URL, env: Env): Promise<Response> {
   gh.searchParams.set("redirect_uri", redirect);
   gh.searchParams.set("state", state);
   gh.searchParams.set("scope", "read:user");
-  const headers = new Headers({ location: gh.toString() });
+  // Not a page for an index: a crawler that follows the header's Sign in gets a redirect it must not keep (robots.txt closes /auth/ as well; the header's link says nofollow).
+  const headers = new Headers({ location: gh.toString(), "x-robots-tag": "noindex, nofollow" });
   headers.append("set-cookie", cookie("omc_state", `${state}:${encodeURIComponent(safeNext(url))}`, 600, url.protocol === "https:"));
   return new Response(null, { status: 302, headers });
 }
@@ -106,7 +107,7 @@ export async function handleAuthCallback(url: URL, request: Request, env: Env): 
 export async function handleLogout(url: URL, request: Request, env: Env): Promise<Response> {
   const session = cookieOf(request, "omc") ?? "";
   if (session.startsWith("oms_")) await env.DB.prepare("UPDATE contributors SET session_hash = NULL WHERE session_hash = ?").bind(await sha256Hex(session)).run();
-  const headers = new Headers({ location: "/" });
+  const headers = new Headers({ location: "/", "x-robots-tag": "noindex, nofollow" });
   headers.append("set-cookie", cookie("omc", "", 0, url.protocol === "https:"));
   return new Response(null, { status: 302, headers });
 }

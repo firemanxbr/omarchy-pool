@@ -644,6 +644,34 @@ dashboard says *about*. The query is scoped to the account
 Analytics · Read*; without it the day is skipped and the scheduler log says
 so once a day.
 
+**Crawlers.** A package page is a database read (its API answer), so a
+crawler that walks every package name is a bill: on 2026-09-19 one AI
+crawler (GoogleOther) fetched ~6,000 pages an hour across the zone's
+names — about a fifth of it on `pkgs.omarchy-pool.org` — and read the
+rings' membership 25,000 times a day. Three layers keep that off the
+bill. The Worker serves `/robots.txt` on every name (`src/pages/robots.ts`):
+the dashboard's keeps the landing, the docs and `/package/<name>` open to
+search engines, closes `/api/`, `/auth/`, `/diff`, `/build/`, `/user/` and
+the rest to everyone, and closes the whole site to the AI and research
+crawlers listed there by name (`AI_CRAWLERS`); the API names deny
+everything; `/sitemap.xml` lists the fixed pages. Every `/api/v1` answer
+and the sign-in carry `x-robots-tag: noindex, nofollow`, and the header's
+Sign in link says `rel="nofollow"` (19,800 crawler fetches of `/auth/github`
+in two days came from that one link). The bucket runs no code: its
+`robots.txt` is an object at the root of `omarchy-packages`
+(`User-agent: *` / `Disallow: /`, `npx wrangler r2 object put
+omarchy-packages/robots.txt --file robots-pool.txt --content-type
+text/plain`). robots.txt is a request; the wall is a WAF custom rule on the
+zone (*Security → WAF → Custom rules*, free plan): "AI crawlers off the
+package pages", a Block for a request whose `cf.verified_bot_category` is
+"AI Crawler" or whose user agent names one of the crawlers, on `/package/`,
+`/api/v1/package/` and `/auth/`. Bot Fight Mode and AI Labyrinth stay
+**off** on this zone: on 2026-09-18 they injected challenges into pacman,
+omarchy-cli and broker responses and answered the cost report with 403.
+Cloudflare prepends its own content-signals comment to any origin
+robots.txt while its managed robots.txt is on (*Security → Bots → Manage
+AI bots*); the rules below it still hold.
+
 **The guard.** Three lines (`src/cost.ts`): the report warns at a
 projected US$ 25; at a projected or actual **US$ 40** the brain sets
 `settings.cost_guard` and the scheduler stops creating the jobs that write
