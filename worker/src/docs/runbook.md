@@ -600,7 +600,17 @@ What keeps the bill near US$ 10:
   row stays younger than the ten the alive rule asks: an idle worker writes
   20 rows an hour, not 120 (eight workers wrote 20 k rows a day before
   2026-09-20). A contributor's `last_seen` moves once per ten minutes, not
-  once per authenticated request.
+  once per authenticated request;
+- the security job posts its whole set every three hours (4.6 k advisories,
+  8 k CVEs, 7.4 k matches), and the index writes only the rows that changed:
+  every upsert's `DO UPDATE` carries a `WHERE` over the row's values, an
+  EPSS score is kept to three decimals, and the prune that closes a run
+  deletes by the run's own key set (the advisory ids and the `(sha256,
+  advisory)` matches it posts), not by `updated_at` — a run that changed
+  nothing writes nothing, where it wrote 290 k rows a day (2026-09-19). A
+  prune without the keys (an older `pkg-repo`) is refused with a `security`
+  warn line and deletes nothing: a contributor's worker on an old image
+  leaves a stale match in place until a current worker runs the job.
 
 **Watching it.** The brain estimates the month's bill <!-- estimate-cadence -->
 from Cloudflare's own analytics — what was used so far, priced, plus the

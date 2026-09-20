@@ -112,7 +112,7 @@ export async function handleGc(url: URL, env: Env): Promise<Response> {
     bytes += p.size_download;
   }
   // Advisories and matches are replaced by every security run (the run
-  // prunes what it did not refresh); the CVE metadata behind them (KEV,
+  // prunes what it did not post); the CVE metadata behind them (KEV,
   // EPSS) is not, so a CVE no advisory mentions any more goes after 90
   // days.
   const cves = await env.DB.prepare(

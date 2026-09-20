@@ -9,8 +9,19 @@ import { ringHead, ringMembers } from "../db";
  *
  *   PUT  /security/advisories   {advisories: [...], cves: [...]}   upsert (pipeline)
  *   PUT  /security/matches      {matches: [{sha256, advisory, match, status}]} (pipeline)
- *   POST /security/prune?before=<iso>   drop rows an earlier run wrote (pipeline)
+ *   POST /security/prune        {advisories: [id], matches: [[sha256, advisory]]}  drop what the run did not post (pipeline)
  *   GET  /security?ring=&arch=  what a ring serves that is vulnerable, and what that exposes
+ *
+ * The job posts its whole set every three hours (4.6 k advisories, 8 k CVEs,
+ * 7.4 k matches on production) and the set changes by dozens of rows a day.
+ * D1 bills every row an UPDATE touches, index entries included — an
+ * unconditional upsert wrote 3 + 1 + 2 rows per unchanged advisory, CVE and
+ * match, 290 k rows a day (2026-09-18/19). Every DO UPDATE below carries a
+ * WHERE over the row's values against `excluded`'s (row-value IS NOT, NULLs
+ * compare as values), so an unchanged row writes nothing; updated_at is in
+ * every SET and in no WHERE, and now means "last changed". That is why the
+ * prune can no longer look for what an earlier run wrote by updated_at: the
+ * run posts the keys it holds and the prune deletes the rest.
  */
 
 interface AdvisoryIn {
@@ -54,7 +65,9 @@ export async function handlePutAdvisories(request: Request, env: Env): Promise<R
         `INSERT INTO advisories (id, source, package, cves, severity, status, affected, fixed, summary, url, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET source = excluded.source, package = excluded.package, cves = excluded.cves, severity = excluded.severity,
-           status = excluded.status, affected = excluded.affected, fixed = excluded.fixed, summary = excluded.summary, url = excluded.url, updated_at = excluded.updated_at`,
+           status = excluded.status, affected = excluded.affected, fixed = excluded.fixed, summary = excluded.summary, url = excluded.url, updated_at = excluded.updated_at
+         WHERE (source, package, cves, severity, status, affected, fixed, summary, url)
+            IS NOT (excluded.source, excluded.package, excluded.cves, excluded.severity, excluded.status, excluded.affected, excluded.fixed, excluded.summary, excluded.url)`,
       ).bind(a.id, a.source, a.package, JSON.stringify(a.cves ?? []), SEVERITIES.includes(a.severity) ? a.severity : "unknown", a.status, a.affected ?? null, a.fixed ?? null, a.summary ?? null, a.url, now),
     );
   }
@@ -62,12 +75,27 @@ export async function handlePutAdvisories(request: Request, env: Env): Promise<R
     stmts.push(
       env.DB.prepare(
         `INSERT INTO cve_meta (cve, kev, kev_added, epss, epss_percentile, updated_at) VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT (cve) DO UPDATE SET kev = excluded.kev, kev_added = excluded.kev_added, epss = excluded.epss, epss_percentile = excluded.epss_percentile, updated_at = excluded.updated_at`,
-      ).bind(c.cve, c.kev ? 1 : 0, c.kev_added ?? null, c.epss ?? null, c.epss_percentile ?? null, now),
+         ON CONFLICT (cve) DO UPDATE SET kev = excluded.kev, kev_added = excluded.kev_added, epss = excluded.epss, epss_percentile = excluded.epss_percentile, updated_at = excluded.updated_at
+         WHERE (kev, kev_added, epss, epss_percentile) IS NOT (excluded.kev, excluded.kev_added, excluded.epss, excluded.epss_percentile)`,
+      ).bind(c.cve, c.kev ? 1 : 0, c.kev_added ?? null, milli(c.epss), milli(c.epss_percentile), now),
     );
   }
-  for (let i = 0; i < stmts.length; i += 100) await env.DB.batch(stmts.slice(i, i + 100));
-  return json({ advisories: (body.advisories ?? []).length, cves: (body.cves ?? []).length, updated_at: now });
+  const written = await batched(env, stmts);
+  return json({ advisories: (body.advisories ?? []).length, cves: (body.cves ?? []).length, updated_at: now, rows_written: written });
+}
+
+/**
+ * An EPSS score to three decimals: the pages show it as a percentage, and
+ * FIRST republishes every score daily with the fifth decimal moved — kept
+ * whole, the refresh rewrote all 8 k CVEs each day for nothing.
+ */
+const milli = (x: number | null | undefined): number | null => (x == null ? null : Math.round(x * 1000) / 1000);
+
+/** Runs the statements a hundred at a time and adds up the rows D1 wrote — what the job's writes cost, and what the tests pin. */
+async function batched(env: Env, stmts: D1PreparedStatement[]): Promise<number> {
+  let written = 0;
+  for (let i = 0; i < stmts.length; i += 100) for (const r of await env.DB.batch(stmts.slice(i, i + 100))) written += r.meta.rows_written ?? 0;
+  return written;
 }
 
 export async function handlePutMatches(request: Request, env: Env): Promise<Response> {
@@ -94,20 +122,59 @@ export async function handlePutMatches(request: Request, env: Env): Promise<Resp
     stmts.push(
       env.DB.prepare(
         `INSERT INTO package_advisories (package_id, advisory_id, match, status, updated_at) VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT (package_id, advisory_id) DO UPDATE SET match = excluded.match, status = excluded.status, updated_at = excluded.updated_at`,
+         ON CONFLICT (package_id, advisory_id) DO UPDATE SET match = excluded.match, status = excluded.status, updated_at = excluded.updated_at
+         WHERE (match, status) IS NOT (excluded.match, excluded.status)`,
       ).bind(id, m.advisory, m.match, m.status, now),
     );
   }
-  for (let i = 0; i < stmts.length; i += 100) await env.DB.batch(stmts.slice(i, i + 100));
-  return json({ matches: stmts.length, unknown_sha256: unknown, updated_at: now });
+  const written = await batched(env, stmts);
+  return json({ matches: stmts.length, unknown_sha256: unknown, updated_at: now, rows_written: written });
 }
 
-export async function handlePrune(url: URL, env: Env): Promise<Response> {
+/**
+ * The prune closes a run: the body is the key set the run posted — every
+ * advisory id and every (sha256, advisory) match — and what the index holds
+ * beyond it goes. The index is read whole (4.6 k ids and 7.4 k matches with
+ * their sha256, 20 k rows read per run = US$ 0.0002 a day) and diffed here;
+ * the deletes name their keys, two hundred at a time, and walk the primary
+ * keys (EXPLAIN on production: SEARCH ... USING COVERING INDEX). A body
+ * without both arrays is an older pkg-repo's prune, which used to delete by
+ * updated_at: it is refused and journalled, and nothing is deleted — the
+ * Studio workers follow the latest image within 45 minutes, and a stale
+ * match waits for the next run rather than the whole table going.
+ */
+export async function handlePrune(request: Request, url: URL, env: Env): Promise<Response> {
+  const body = await readJson<{ advisories?: unknown; matches?: unknown }>(request);
+  if (body instanceof Response) return body;
   const before = url.searchParams.get("before");
-  if (!before) return json({ error: "before= is required" }, 400);
-  const m = await env.DB.prepare("DELETE FROM package_advisories WHERE updated_at < ?").bind(before).run();
-  const a = await env.DB.prepare("DELETE FROM advisories WHERE updated_at < ?").bind(before).run();
-  return json({ pruned: { matches: m.meta.changes, advisories: a.meta.changes } });
+  if (!Array.isArray(body.advisories) || !Array.isArray(body.matches)) {
+    await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('security', NULL, NULL, 'warn', ?, ?)")
+      .bind("a prune without the run's keys was refused: nothing deleted (an older pkg-repo? the prune posts the advisories and matches it holds)", JSON.stringify({ before, refused: "prune" }))
+      .run();
+    return json({ error: "the prune needs the run's advisories and matches arrays" }, 400);
+  }
+  const keptAdvisories = new Set(body.advisories as string[]);
+  const keptMatches = new Set((body.matches as [string, string][]).map(([sha256, advisory]) => `${sha256}\0${advisory}`));
+
+  const held = await env.DB.prepare("SELECT pa.package_id, pa.advisory_id, p.sha256 FROM package_advisories pa JOIN packages p ON p.id = pa.package_id")
+    .all<{ package_id: number; advisory_id: string; sha256: string }>();
+  const goneMatches = held.results.filter((r) => !keptMatches.has(`${r.sha256}\0${r.advisory_id}`)).map((r) => [r.package_id, r.advisory_id]);
+  const ids = await env.DB.prepare("SELECT id FROM advisories").all<{ id: string }>();
+  const goneAdvisories = ids.results.filter((r) => !keptAdvisories.has(r.id)).map((r) => r.id);
+
+  let matches = 0, advisories = 0;
+  for (let i = 0; i < goneMatches.length; i += 200) {
+    const r = await env.DB.prepare("DELETE FROM package_advisories WHERE (package_id, advisory_id) IN (SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]') FROM json_each(?))")
+      .bind(JSON.stringify(goneMatches.slice(i, i + 200)))
+      .run();
+    matches += r.meta.changes ?? 0;
+  }
+  // An advisory's matches go with it (ON DELETE CASCADE); those were absent from the run too.
+  for (let i = 0; i < goneAdvisories.length; i += 200) {
+    const r = await env.DB.prepare("DELETE FROM advisories WHERE id IN (SELECT value FROM json_each(?))").bind(JSON.stringify(goneAdvisories.slice(i, i + 200))).run();
+    advisories += r.meta.changes ?? 0;
+  }
+  return json({ pruned: { matches, advisories } });
 }
 
 /**
@@ -267,7 +334,8 @@ export async function handleSecurity(url: URL, env: Env): Promise<Response> {
 
   const totals: Record<string, number> = { packages: vulnerable.length, exposed: exposedTotal, kev: vulnerable.filter((v) => v.kev).length };
   for (const s of SEVERITIES) totals[s] = vulnerable.filter((v) => v.worst === s).length;
-  const lastRun = await env.DB.prepare("SELECT created_at, payload FROM events WHERE kind = 'security' AND status != 'error' ORDER BY id DESC LIMIT 1").first<{ created_at: string; payload: string }>();
+  // The last run that matched: a refused prune is a 'security' warn line with no counts.
+  const lastRun = await env.DB.prepare("SELECT created_at, payload FROM events WHERE kind = 'security' AND status = 'ok' ORDER BY id DESC LIMIT 1").first<{ created_at: string; payload: string }>();
   const known = lastRun ? advisoriesKnown(JSON.parse(lastRun.payload) as Record<string, unknown>, lastRun.created_at) : null;
   return json(
     {

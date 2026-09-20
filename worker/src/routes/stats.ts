@@ -168,7 +168,7 @@ export async function handleStats(env: Env): Promise<Response> {
   const latestMetrics = await env.DB.prepare("SELECT payload, created_at FROM events WHERE kind = 'metrics' ORDER BY id DESC LIMIT 1").first<{ payload: string; created_at: string }>();
   // What the security layer knows: from its last run's journal line (one
   // row, by index), not a count over the advisories table on every poll.
-  const securityRun = await env.DB.prepare("SELECT created_at, payload FROM events WHERE kind = 'security' AND status != 'error' ORDER BY id DESC LIMIT 1").first<{ created_at: string; payload: string }>();
+  const securityRun = await env.DB.prepare("SELECT created_at, payload FROM events WHERE kind = 'security' AND status = 'ok' ORDER BY id DESC LIMIT 1").first<{ created_at: string; payload: string }>();
   const securityData = securityRun ? advisoriesKnown(JSON.parse(securityRun.payload) as Record<string, unknown>, securityRun.created_at) : null;
   // The audience: one row per day, the last 30 (audience.ts). Nothing per request is ever kept.
   const audience = await env.DB.prepare("SELECT payload FROM events WHERE kind = 'audience' ORDER BY id DESC LIMIT 30").all<{ payload: string }>();
