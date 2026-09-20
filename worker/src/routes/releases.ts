@@ -2,7 +2,7 @@ import { signingEnabled, detachedSignature } from "../signing";
 import { edgeHit, edgeStore, isRing, json, readJson, type Env, type Ring } from "../index";
 import { artifactKey, isRepoArch, REPO_ARCHES, SHORT } from "../r2";
 import { machineOrigin, REPO_ORDER, sourceOfRepo } from "../meta";
-import { releaseManifests, releaseSummary, releaseSources, ringHead, ringMembers, releaseMembers, ensureCheckpoint, CHECKPOINT_EVERY, type ManifestDetail, type ReleaseRow } from "../db";
+import { releaseManifests, releaseSummary, releaseSources, ringHead, ringMembers, releaseMembers, ensureCheckpoint, CHECKPOINT_EVERY, type ManifestDetail, type ReleaseRow, type SourceSlice } from "../db";
 
 interface CreateRelease {
   ring: string;
@@ -195,6 +195,103 @@ export async function handleCreateRelease(request: Request, env: Env): Promise<R
   return json({ release, ...summary, unchanged_arches: unchanged }, 201);
 }
 
+/** One source's build of a name in a release, as the diff lists it. */
+type Side = { name: string; arch: string; version: string; sha256: string; source: string };
+
+/** A delta row with its object — null columns when GC deleted the object already. */
+type DeltaRow = { release_id: number; op: "add" | "remove"; package_id: number; name: string | null; arch: string | null; version: string | null; sha256: string | null; source: string | null };
+
+/** What a diff answers: the two sides' rows and their sizes (a side's size is the whole side, `arch` applied — not the rows' count when the fold gives only what changed). */
+interface DiffSides {
+  before: Side[];
+  after: Side[];
+  counts: { before: number; after: number };
+}
+
+/**
+ * The diff folded from the deltas. A release's rows in release_deltas are
+ * exactly what it changed against its parent (the two INSERTs of
+ * handleCreateRelease), so the diff of two releases of a ring is the
+ * fold of the deltas of every release after `from` up to `to`, oldest
+ * first: an object added then removed inside the span (or the reverse)
+ * is not in the diff. A few hundred rows read, nothing written. The full
+ * lists (releaseMembers) reconstruct any side that is neither a head nor
+ * a checkpoint — 64 k rows written per release the first time its diff
+ * is viewed, and GC writes them again when it prunes them: 1.45 M rows
+ * on 2026-09-19 alone, a crawler following the dashboard's diff links,
+ * every release's parent being such a side — and read 65 k rows per
+ * side per call. The stable head against its parent on that day: 129 k
+ * rows read and 65 k written, or 1.1 k read and none.
+ *
+ * Null when the fold cannot answer, and the full lists answer as before,
+ * the 410 included: no `from` (the ring's first release); a side without
+ * its stored counts (older than migration 0015); a ring with no
+ * checkpoint at all, or `from` below the ring's oldest one — GC keeps the
+ * deltas above that checkpoint only (gc.ts), and a chain that reaches it
+ * has lost its rows; `from` not met on the way down from `to` (a reversed
+ * or cross-ring pair); an object GC deleted since (a delta the fold could
+ * not word).
+ */
+async function diffFromDeltas(env: Env, from: ReleaseRow | null, to: ReleaseRow, arch: string | null): Promise<DiffSides | null> {
+  if (!from) return null;
+  // The size of a side is the release's stored count — the whole release,
+  // or the (source, arch) slices of the architecture asked — the same join
+  // the full lists count, computed once at creation.
+  const size = (r: ReleaseRow): number | null => {
+    if (arch === null) return r.package_count ?? null;
+    if (!r.sources) return null;
+    return (JSON.parse(r.sources) as SourceSlice[]).filter((s) => s.arch === arch).reduce((n, s) => n + s.packages, 0);
+  };
+  const before = size(from), after = size(to);
+  if (before === null || after === null) return null;
+  // No COALESCE: a ring without a checkpoint has no floor to fold above.
+  const floor = (await env.DB.prepare("SELECT MIN(seq) AS seq FROM releases WHERE ring = ? AND checkpoint = 1").bind(to.ring).first<{ seq: number | null }>())?.seq ?? null;
+  if (floor === null || from.seq < floor) return null;
+  // The releases after `from` up to `to`, newest first: down the parent
+  // chain from `to` until the row whose parent is `from`. The walk stops
+  // early at a row at or below the floor (its deltas are gone) and after
+  // as many hops as a reconstruction allows itself; either way the last
+  // row's parent is not `from` and the fold declines.
+  const chain = (
+    await env.DB.prepare(
+      `WITH RECURSIVE chain(id, parent_id, seq, depth) AS (
+         SELECT id, parent_id, seq, 0 FROM releases WHERE id = ?1 AND id != ?2
+         UNION ALL SELECT r.id, r.parent_id, r.seq, c.depth + 1 FROM releases r JOIN chain c ON r.id = c.parent_id
+          WHERE c.parent_id != ?2 AND c.seq > ?3 AND c.depth < ?4
+       ) SELECT id, parent_id, seq FROM chain ORDER BY depth`,
+    )
+      .bind(to.id, from.id, floor, CHECKPOINT_EVERY * 4)
+      .all<{ id: number; parent_id: number | null; seq: number }>()
+  ).results;
+  const last = chain[chain.length - 1];
+  if (to.id !== from.id && last?.parent_id !== from.id) return null;
+  if (chain.some((r) => r.seq <= floor)) return null;
+  const rows = chain.length
+    ? (
+        await env.DB.prepare(
+          `SELECT d.release_id, d.op, d.package_id, p.name, p.repo_arch AS arch, p.version, p.sha256, p.source
+             FROM release_deltas d LEFT JOIN packages p ON p.id = d.package_id
+            WHERE d.release_id IN (SELECT value FROM json_each(?1))`,
+        )
+          .bind(JSON.stringify(chain.map((r) => r.id)))
+          .all<DeltaRow>()
+      ).results
+    : [];
+  if (rows.some((r) => r.sha256 === null)) return null;
+  // Oldest release first; the same object cannot be added twice without
+  // a removal between (a delta is an EXCEPT against the parent), so an
+  // op that meets its opposite cancels it and the pair leaves the fold.
+  const age = new Map(chain.map((r, i) => [r.id, i]));
+  const net = new Map<number, DeltaRow>();
+  for (const r of rows.filter((r) => arch === null || r.arch === arch).sort((x, y) => age.get(y.release_id)! - age.get(x.release_id)!)) {
+    const prev = net.get(r.package_id);
+    if (prev && prev.op !== r.op) net.delete(r.package_id);
+    else net.set(r.package_id, r);
+  }
+  const side = (op: DeltaRow["op"]): Side[] => [...net.values()].filter((r) => r.op === op).map((r) => ({ name: r.name!, arch: r.arch!, version: r.version!, sha256: r.sha256!, source: r.source! }));
+  return { before: side("remove"), after: side("add"), counts: { before, after } };
+}
+
 /**
  * What changed between two releases of a ring: packages added, removed and
  * upgraded (same name and architecture, another version — a downgrade
@@ -212,30 +309,34 @@ export async function handleReleaseDiff(ring: string, url: URL, env: Env): Promi
   if (from && !fromRow) return json({ error: `release ${from} does not exist` }, 404);
   const arch = url.searchParams.get("arch");
   if (arch !== null && !isRepoArch(arch)) return json({ error: "unknown arch" }, 400);
-  // A release inside retention is a head, a checkpoint or reconstructable
-  // from one; GC prunes the checkpoints and deltas of older ones, and such
-  // a release keeps its summary but has no list to compare.
-  const members: Record<number, string> = {};
-  for (const r of [toRow, fromRow]) {
-    if (!r) continue;
-    try {
-      members[r.id] = await releaseMembers(env, r.id);
-    } catch {
-      return json({ error: `release ${r.id} is outside retention: its package list was pruned, only its summary remains` }, 410);
+  // The deltas answer nearly every diff; the full lists the rest.
+  let sides = await diffFromDeltas(env, fromRow, toRow, arch);
+  if (!sides) {
+    // A release inside retention is a head, a checkpoint or reconstructable
+    // from one; GC prunes the checkpoints and deltas of older ones, and such
+    // a release keeps its summary but has no list to compare.
+    const members: Record<number, string> = {};
+    for (const r of [toRow, fromRow]) {
+      if (!r) continue;
+      try {
+        members[r.id] = await releaseMembers(env, r.id);
+      } catch {
+        return json({ error: `release ${r.id} is outside retention: its package list was pruned, only its summary remains` }, 410);
+      }
     }
+    const side = (id: number) =>
+      env.DB.prepare(
+        `SELECT p.name, p.repo_arch AS arch, p.version, p.sha256, p.source FROM ${members[id]} rp JOIN packages p ON p.id = rp.package_id
+          WHERE (?1 IS NULL OR p.repo_arch = ?1)`,
+      ).bind(arch).all<Side>();
+    const [a, b] = await Promise.all([fromRow ? side(fromRow.id) : Promise.resolve({ results: [] as Side[] }), side(toRow.id)]);
+    sides = { before: a.results, after: b.results, counts: { before: a.results.length, after: b.results.length } };
   }
-  type Side = { name: string; arch: string; version: string; sha256: string; source: string };
-  const side = (id: number) =>
-    env.DB.prepare(
-      `SELECT p.name, p.repo_arch AS arch, p.version, p.sha256, p.source FROM ${members[id]} rp JOIN packages p ON p.id = rp.package_id
-        WHERE (?1 IS NULL OR p.repo_arch = ?1)`,
-    ).bind(arch).all<Side>();
-  const [a, b] = await Promise.all([fromRow ? side(fromRow.id) : Promise.resolve({ results: [] as Side[] }), side(toRow.id)]);
   // A row is one source's build of a name: another source taking the name
   // over is that source's add and the other's removal, not an upgrade.
   const key = (p: { source: string; name: string; arch: string }) => `${p.source}\0${p.name}\0${p.arch}`;
-  const before = new Map(a.results.map((p) => [key(p), p]));
-  const after = new Map(b.results.map((p) => [key(p), p]));
+  const before = new Map(sides.before.map((p) => [key(p), p]));
+  const after = new Map(sides.after.map((p) => [key(p), p]));
   const added = [], removed = [], upgraded = [];
   for (const [k, p] of after) {
     const was = before.get(k);
@@ -251,7 +352,7 @@ export async function handleReleaseDiff(ring: string, url: URL, env: Env): Promi
       from: fromRow ? { id: fromRow.id, seq: fromRow.seq, created_at: fromRow.created_at, note: fromRow.note } : null,
       to: { id: toRow.id, seq: toRow.seq, created_at: toRow.created_at, note: toRow.note },
       arch,
-      counts: { added: added.length, removed: removed.length, upgraded: upgraded.length, before: a.results.length, after: b.results.length },
+      counts: { added: added.length, removed: removed.length, upgraded: upgraded.length, before: sides.counts.before, after: sides.counts.after },
       added: added.sort(byName),
       removed: removed.sort(byName),
       upgraded: upgraded.sort(byName),
