@@ -86,6 +86,8 @@ describe("POST /pool/relayout", () => {
     expect(await env.PACKAGES.head(`x86_64/${zlibFile}`)).not.toBeNull();
     const rows = (await env.DB.prepare("SELECT name, sha256, r2_key FROM packages WHERE name IN ('zlib', 'tool', 'app') ORDER BY name, id").all<{ name: string; sha256: string; r2_key: string }>()).results;
     expect(rows.map((r) => r.r2_key)).toEqual([`packages/x86_64/${appFile}`, `ghost/packages/x86_64/${appFile}`, `factory/aarch64/${toolFile}`, `core/x86_64/${zlibFile}`]);
+    // Every form of a key ends with '/' || filename — GC's shared-object check finds a key's other rows through the filename index on that (gc.test.ts).
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM packages WHERE substr(COALESCE(r2_key, repo_arch || '/' || filename), -length(filename) - 1) != '/' || filename").first<{ n: number }>())!.n).toBe(0);
     // The seal names the new place.
     expect((await call("GET", `/packages/${zlibSha}/provenance`)).json.object).toBe(`${env.POOL_URL}/core/x86_64/${zlibFile}`);
     // A second copy pass is a no-op.

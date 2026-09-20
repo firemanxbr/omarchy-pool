@@ -1,52 +1,21 @@
 import { json, type Env } from "../index";
 import { RINGS, ringsSql } from "../meta";
 import { sweepStaging } from "../staging";
+import { GRACE_DAYS, KEEP_RELEASES, outsideRetention, retention } from "../db";
 
 /**
- * Retention: a package is protected while a ring serves it, while any of
- * the last `keep` releases of a ring added or removed it (a rollback
- * inside retention may need it back), while a kept checkpoint lists it,
- * or while it is younger than the grace period (an import in progress has
- * uploaded objects that no release pins yet). A kept checkpoint is, per
- * ring, the newest one at or before the oldest protected release — what
- * reconstructing any protected release starts from (migration 0017) —
- * and any checkpoint among the protected ones. `?keep=N` (default 3),
- * `?grace_days=N` (default 7).
+ * What retention would delete now: what is outside it (db.ts: the rule
+ * and its predicate, shared with the metrics snapshot's reclaimable
+ * count) and past the grace period. `?keep=N` (default 3), `?grace_days=N`
+ * (default 7).
  */
-async function retention(env: Env, keep: number): Promise<{ protectedReleases: number[]; keptCheckpoints: number[]; checkpointSeq: Record<string, number> }> {
-  const protectedReleases: number[] = [];
-  const keptCheckpoints: number[] = [];
-  const checkpointSeq: Record<string, number> = {};
-  for (const ring of RINGS) {
-    const rows = await env.DB.prepare("SELECT id, seq, checkpoint FROM releases WHERE ring = ? ORDER BY seq DESC LIMIT ?")
-      .bind(ring, keep)
-      .all<{ id: number; seq: number; checkpoint: number }>();
-    for (const r of rows.results) {
-      protectedReleases.push(r.id);
-      if (r.checkpoint) keptCheckpoints.push(r.id);
-    }
-    const oldest = rows.results.at(-1);
-    if (!oldest) continue;
-    const base = await env.DB.prepare("SELECT id, seq FROM releases WHERE ring = ? AND checkpoint = 1 AND seq <= ? ORDER BY seq DESC LIMIT 1")
-      .bind(ring, oldest.seq)
-      .first<{ id: number; seq: number }>();
-    if (base) {
-      if (!keptCheckpoints.includes(base.id)) keptCheckpoints.push(base.id);
-      checkpointSeq[ring] = base.seq;
-    }
-  }
-  return { protectedReleases, keptCheckpoints, checkpointSeq };
-}
-
 async function unreferenced(env: Env, keep: number, graceDays: number) {
   const { protectedReleases, keptCheckpoints, checkpointSeq } = await retention(env, keep);
   const rows = await env.DB.prepare(
-    `SELECT id, sha256, name, version, arch, repo_arch, filename, size_download, source, COALESCE(r2_key, repo_arch || '/' || filename) AS r2_key FROM packages
-      WHERE id NOT IN (SELECT package_id FROM ring_packages)
-        AND id NOT IN (SELECT package_id FROM release_deltas WHERE release_id IN (SELECT value FROM json_each(?1)))
-        AND id NOT IN (SELECT package_id FROM release_packages WHERE release_id IN (SELECT value FROM json_each(?2)))
-        AND created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?3)
-      ORDER BY id`,
+    `SELECT id, sha256, name, version, arch, repo_arch, filename, size_download, source, COALESCE(r2_key, repo_arch || '/' || filename) AS r2_key FROM packages p
+      WHERE p.created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?3)
+        AND ${outsideRetention("p")}
+      ORDER BY p.id`,
   )
     .bind(JSON.stringify(protectedReleases), JSON.stringify(keptCheckpoints), `-${graceDays} days`)
     .all<{ id: number; sha256: string; name: string; version: string; arch: string; repo_arch: string; filename: string; size_download: number; source: string; r2_key: string }>();
@@ -54,11 +23,11 @@ async function unreferenced(env: Env, keep: number, graceDays: number) {
 }
 
 function graceOf(url: URL): number {
-  return Math.max(0, Number(url.searchParams.get("grace_days") ?? 7));
+  return Math.max(0, Number(url.searchParams.get("grace_days") ?? GRACE_DAYS));
 }
 
 export async function handleUnreferenced(url: URL, env: Env): Promise<Response> {
-  const keep = Math.max(1, Number(url.searchParams.get("keep") ?? 3));
+  const keep = Math.max(1, Number(url.searchParams.get("keep") ?? KEEP_RELEASES));
   const { protectedReleases, keptCheckpoints, packages } = await unreferenced(env, keep, graceOf(url));
   return json({
     keep,
@@ -79,7 +48,7 @@ export async function handleUnreferenced(url: URL, env: Env): Promise<Response> 
  * row, summary and note stay in the history.
  */
 export async function handleGc(url: URL, env: Env): Promise<Response> {
-  const keep = Math.max(1, Number(url.searchParams.get("keep") ?? 3));
+  const keep = Math.max(1, Number(url.searchParams.get("keep") ?? KEEP_RELEASES));
   const limit = Math.min(Number(url.searchParams.get("limit") ?? 200), 500);
   const { protectedReleases, keptCheckpoints, checkpointSeq, packages } = await unreferenced(env, keep, graceOf(url));
   const pruned = await env.DB.prepare("DELETE FROM release_packages WHERE release_id NOT IN (SELECT value FROM json_each(?))")
@@ -117,8 +86,17 @@ export async function handleGc(url: URL, env: Env): Promise<Response> {
     // One object per key: an upstream rebuild of the same version with
     // different bytes (the OPR, per channel) can leave two index rows
     // behind one key. The row goes; the object only when no other row —
-    // served or not — still names it (a ghost row names no object).
-    const shared = await env.DB.prepare("SELECT COUNT(*) AS n FROM packages WHERE COALESCE(r2_key, repo_arch || '/' || filename) = ? AND id != ?").bind(p.r2_key, p.id).first<{ n: number }>();
+    // served or not — still names it (a ghost row names no object). Every
+    // key form ends with '/' || filename — source/arch/filename (r2.ts
+    // packageKey), the flat arch/filename a row had before the relayout,
+    // ghost/source/arch/filename (routes/relayout.ts) — so a row that
+    // names the same object has the same filename: the filename term only
+    // narrows, through idx_packages_filename, and the key equality stays
+    // the truth. Without it the check scanned the packages table per
+    // victim: 34,808 rows read for each of the 3,552 deletes of 2026-09-20.
+    const shared = await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM packages WHERE filename = ?1 AND id != ?2 AND COALESCE(r2_key, repo_arch || '/' || filename) = ?3",
+    ).bind(p.filename, p.id, p.r2_key).first<{ n: number }>();
     if (shared?.n) objectsKept++;
     else if (!p.r2_key.startsWith("ghost/")) await env.PACKAGES.delete([p.r2_key, `${p.r2_key}.sig`, `${p.r2_key}.provenance.json`, `${p.r2_key}.provenance.json.sig`]);
     const gone = await env.DB.batch([
