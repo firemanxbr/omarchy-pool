@@ -585,7 +585,7 @@ What keeps the bill near US$ 10:
   rows, deleted again by the next GC) the first time its diff was viewed
   — 1.45 M rows on 2026-09-19, a crawler following the dashboard's links.
   Neither membership table has a foreign key to `packages` (migration
-  0034: the check scanned both tables, 259k rows, for every one of GC's
+  0035: the check scanned both tables, 259k rows, for every one of GC's
   deletes); what it guaranteed is kept by the code instead — GC asks the
   rings once more about each victim right before its object goes and
   every one of its deletes is conditional on the answer (a package a ring

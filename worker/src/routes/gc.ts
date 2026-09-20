@@ -97,7 +97,7 @@ export async function handleGc(url: URL, env: Env): Promise<Response> {
   let deleted = 0;
   let takenBack = 0;
   // The membership tables carry no foreign key to packages (migration
-  // 0034: the check scanned both tables for every delete), so what kept a
+  // 0035: the check scanned both tables for every delete), so what kept a
   // served row from being deleted is this loop. The victims were listed
   // minutes ago and nothing serialises GC against a sync or a rollback: a
   // sync that re-indexes bytes already in the pool gets the old row back

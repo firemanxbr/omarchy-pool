@@ -99,7 +99,7 @@ export async function ensureCheckpoint(env: Env, releaseId: number): Promise<voi
   const stmts: D1PreparedStatement[] = [];
   for (let i = 0; i < list.length; i += 2000) {
     const chunk = JSON.stringify(list.slice(i, i + 2000));
-    // release_packages has no foreign key to packages (migration 0034),
+    // release_packages has no foreign key to packages (migration 0035),
     // so nothing but this check refuses a release whose packages GC took:
     // a release between the kept checkpoint and the protected ones added
     // packages a later release removed, and those are exactly what

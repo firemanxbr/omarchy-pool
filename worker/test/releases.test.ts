@@ -600,7 +600,7 @@ describe("the lab", () => {
 });
 
 describe("membership without a foreign key", () => {
-  // Migration 0034: ring_packages and release_packages no longer REFERENCE
+  // Migration 0035: ring_packages and release_packages no longer REFERENCE
   // packages (the check scanned both tables for every GC delete); what the
   // constraint guaranteed is now guaranteed by gc.ts and ensureCheckpoint.
   const fks = async (table: string) => (await env.DB.prepare(`PRAGMA foreign_key_list('${table}')`).all<{ table: string }>()).results.map((r) => r.table);
@@ -643,7 +643,7 @@ describe("membership without a foreign key", () => {
     const del = await env.DB.prepare("DELETE FROM packages WHERE id = ?").bind(id).run();
     expect(del.meta.changes).toBeGreaterThanOrEqual(1); // the row and its cascaded children
     expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM packages WHERE id = ?").bind(id).first<{ n: number }>())!.n).toBe(0);
-    // Before 0034 this read every row of ring_packages and release_packages (30-odd ring rows and every checkpoint's rows here, 259k on production).
+    // Before 0035 this read every row of ring_packages and release_packages (30-odd ring rows and every checkpoint's rows here, 259k on production).
     const membership = (await env.DB.prepare("SELECT (SELECT COUNT(*) FROM ring_packages) + (SELECT COUNT(*) FROM release_packages) AS n").first<{ n: number }>())!.n;
     expect(membership).toBeGreaterThan(20);
     expect(del.meta.rows_read).toBeLessThan(20);
@@ -652,7 +652,9 @@ describe("membership without a foreign key", () => {
   it("GC leaves a victim alone when a ring took it back after the listing, row, lists and object", async () => {
     const s = await index("extra", "x86_64", { name: "revenant", version: "2.0-1", arch: "x86_64", provides: ["librevenant.so=2-64"] }, pool);
     const row = (await env.DB.prepare("SELECT id, r2_key FROM packages WHERE sha256 = ?").bind(s).first<{ id: number; r2_key: string }>())!;
-    expect((await call("GET", "/pool/unreferenced?keep=3&grace_days=0")).json.packages.some((p: any) => p.id === row.id)).toBe(true);
+    // The victims of this run: revenant and whatever the tests before left outside every ring (the file shares one pool).
+    const victims = (await call("GET", "/pool/unreferenced?keep=3&grace_days=0")).json.packages as { id: number; size_download: number }[];
+    expect(victims.some((p) => p.id === row.id)).toBe(true);
     // The race: the ring row lands after unreferenced() listed the victim and before the loop reaches it — a sync that
     // re-indexed the same bytes got the old id back and the release that followed put it into ring_packages again.
     const takeBack = () => env.DB.prepare("INSERT OR IGNORE INTO ring_packages (ring, package_id) VALUES ('lab', ?)").bind(row.id).run();
@@ -660,9 +662,11 @@ describe("membership without a foreign key", () => {
     const res = await handleGc(new URL(`${API}/pool/gc?keep=3&grace_days=0`), { ...env, DB: after(listing, "all", takeBack) });
     expect(res.status).toBe(200);
     const body = await res.json() as any;
+    // Every other victim goes as before; the one a ring took back is counted, not deleted.
+    const others = victims.filter((p) => p.id !== row.id);
     expect(body.taken_back_by_a_ring).toBe(1);
-    expect(body.deleted).toBe(0);
-    expect(body.bytes).toBe(0);
+    expect(body.deleted).toBe(others.length);
+    expect(body.bytes).toBe(others.reduce((n, p) => n + p.size_download, 0));
     expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM packages WHERE id = ?").bind(row.id).first<{ n: number }>())!.n).toBe(1);
     expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM package_provides WHERE package_id = ?").bind(row.id).first<{ n: number }>())!.n).toBeGreaterThan(0);
     expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM ring_packages WHERE ring = 'lab' AND package_id = ?").bind(row.id).first<{ n: number }>())!.n).toBe(1);
