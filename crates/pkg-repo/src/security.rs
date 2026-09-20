@@ -452,6 +452,7 @@ pub fn run(api: &Api, opts: &SecurityOptions) -> Result<SecurityReport, RepoErro
         advisories.extend(adv);
         matches.extend(m);
     }
+    normalise(&mut advisories);
     report.matches_vulnerable = matches.iter().filter(|m| m.status == "vulnerable").count();
     report.matches_fixed = matches.iter().filter(|m| m.status == "fixed").count();
 
@@ -545,6 +546,17 @@ fn print_dry_run(objects: &[Object], advisories: &[Advisory], matches: &[Match])
     }
 }
 
+/// One spelling per advisory: its CVEs sorted and unique. The index writes
+/// an advisory only when a field differs from what it holds, and `cves` is
+/// compared as the JSON text — the trackers list the same CVEs in whatever
+/// order they like, and a reordering would rewrite the row for nothing.
+fn normalise(advisories: &mut [Advisory]) {
+    for a in advisories {
+        a.cves.sort();
+        a.cves.dedup();
+    }
+}
+
 /// KEV and EPSS for every CVE the advisories mention.
 fn enrich(advisories: &[Advisory], opts: &SecurityOptions) -> Result<Vec<CveMeta>, RepoError> {
     let wanted: HashSet<String> = advisories
@@ -578,6 +590,9 @@ fn enrich(advisories: &[Advisory], opts: &SecurityOptions) -> Result<Vec<CveMeta
 }
 
 /// Batches everything into the index, then drops what this run did not write.
+/// The index writes only the rows that changed, so it cannot tell a run's rows
+/// by their timestamp: the prune carries the run's key set — every advisory
+/// id and every (sha256, advisory) match — and the index deletes the rest.
 fn upload(
     api: &Api,
     run_at: &str,
@@ -605,9 +620,17 @@ fn upload(
     }
     api.post_json(
         &format!("/security/prune?before={run_at}"),
-        &serde_json::json!({}),
+        &prune_keys(advisories, matches),
     )?;
     Ok(())
+}
+
+/// The prune's body: what this run holds, as the index keys it.
+fn prune_keys(advisories: &[Advisory], matches: &[Match]) -> serde_json::Value {
+    serde_json::json!({
+        "advisories": advisories.iter().map(|a| &a.id).collect::<Vec<_>>(),
+        "matches": matches.iter().map(|m| [&m.sha256, &m.advisory]).collect::<Vec<_>>(),
+    })
 }
 
 /// ISO-8601 now (UTC, seconds) without pulling a date crate in.
@@ -889,6 +912,42 @@ mod tests {
         );
         assert_eq!(matches.iter().filter(|m| m.status == "fixed").count(), 1);
         assert!(covered.contains(&("vim".to_owned(), "CVE-2023-0433".to_owned())));
+    }
+
+    #[test]
+    fn an_advisory_is_posted_with_its_cves_sorted_and_the_prune_with_the_runs_keys() {
+        let objects = vec![obj("vim", "9.0.1224-1"), obj("vim", "9.0.1225-1")];
+        let tracker = vec![ArchAdvisory {
+            name: "AVG-1".into(),
+            packages: vec!["vim".into()],
+            status: "Fixed".into(),
+            severity: "High".into(),
+            affected: Some("9.0.1224-1".into()),
+            fixed: Some("9.0.1225-1".into()),
+            issues: vec![
+                "CVE-2023-0433".into(),
+                "CVE-2023-0049".into(),
+                "CVE-2023-0433".into(),
+            ],
+        }];
+        let (mut adv, matches, _) = match_arch(&objects, &tracker);
+        normalise(&mut adv);
+        // The index compares the JSON text: one order, no repeats.
+        assert_eq!(adv[0].cves, vec!["CVE-2023-0049", "CVE-2023-0433"]);
+        assert_eq!(
+            serde_json::to_value(&adv[0]).unwrap()["cves"],
+            serde_json::json!(["CVE-2023-0049", "CVE-2023-0433"])
+        );
+        // The prune names what the run holds; the index deletes the rest.
+        let keys = prune_keys(&adv, &matches);
+        assert_eq!(keys["advisories"], serde_json::json!(["arch:AVG-1:vim"]));
+        assert_eq!(
+            keys["matches"],
+            serde_json::json!([
+                ["sha-vim-9.0.1224-1", "arch:AVG-1:vim"],
+                ["sha-vim-9.0.1225-1", "arch:AVG-1:vim"]
+            ])
+        );
     }
 
     #[test]

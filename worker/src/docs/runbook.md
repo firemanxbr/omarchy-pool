@@ -589,6 +589,15 @@ What keeps the bill near US$ 10:
   per ring** — not one release per source per hour. With releases this
   cheap the interval could go back to hourly (`scheduler.ts` RULES); what
   an hourly sync still costs is the rows it reads to diff against upstream.
+- the security job posts its whole set every three hours (4.6 k advisories,
+  8 k CVEs, 7.4 k matches), and the index writes only the rows that changed:
+  every upsert's `DO UPDATE` carries a `WHERE` over the row's values, an
+  EPSS score is kept to three decimals, and the prune that closes a run
+  deletes by the run's own key set (the advisory ids and the `(sha256,
+  advisory)` matches it posts), not by `updated_at` — a run that changed
+  nothing writes nothing, where it wrote 290 k rows a day (2026-09-19). A
+  prune without the keys (an older `pkg-repo`) is refused with a `security`
+  warn line and deletes nothing.
 
 **Watching it.** The brain estimates the month's bill <!-- estimate-cadence -->
 from Cloudflare's own analytics — what was used so far, priced, plus the
