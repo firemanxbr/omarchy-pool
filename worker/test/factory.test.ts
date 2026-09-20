@@ -11,8 +11,8 @@
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import worker from "../src/index";
-import { sha256Hex } from "../src/routes/contributors";
-import { requeueExpiredLeases, workerReady } from "../src/routes/factory";
+import { contributorOf, SEEN_MINUTES, sha256Hex } from "../src/routes/contributors";
+import { requeueExpiredLeases, TOUCH_MINUTES, touchWorker, workerReady } from "../src/routes/factory";
 import { packageKey } from "../src/r2";
 import { issueJobToken, jobOf, scopesFor } from "../src/jobtoken";
 import { STAGING_QUOTA_BYTES, sweepStaging } from "../src/staging";
@@ -1467,5 +1467,55 @@ describe("a body that is not JSON", () => {
     expect(await call("POST", "/events", undefined, job)).toEqual(refused);
     expect(await call("POST", "/events", undefined, job, "not json")).toEqual(refused);
     expect((await call("POST", "/events", { kind: "build", summary: "built" }, job)).status).toBe(201);
+  });
+});
+
+describe("a heartbeat is written when it says something new", () => {
+  const seen = async () => (await env.DB.prepare("SELECT last_seen, kinds, agent_status, log_tail FROM build_workers WHERE id = 'w2'").first<{ last_seen: string; kinds: string; agent_status: string | null; log_tail: string | null }>())!;
+  // What w2 says of itself at every claim: the same words the container sends every 30 s.
+  const same = (): Parameters<typeof touchWorker>[1] => ({ worker: "w2", arch: "aarch64", hostname: "studio", labels: { emulated: false }, version: "9.9.9", kinds: ["build", "audit"], usage: { cpu: 12, ram: 40, disk: 33, cores: 8, ram_gb: 32 } });
+
+  it("an idle worker's claim a moment after the last writes no row; one after TOUCH_MINUTES does; a task, a probe, a log chunk or a new declaration writes at once", async () => {
+    // The first claim after a change (labels, version, kinds) is written.
+    expect((await touchWorker(env, same(), null)).rows_written).toBeGreaterThan(0);
+    const first = await seen();
+    expect(first.kinds).toBe('["build","audit"]');
+    // The same words again — the usage moved, nothing else — write nothing, over the wire too.
+    expect((await touchWorker(env, { ...same(), usage: { cpu: 50, ram: 41, disk: 33 } }, null)).rows_written).toBe(0);
+    expect((await call("POST", "/factory/claim", { arch: "aarch64", hostname: "studio", labels: { emulated: false }, version: "9.9.9", kinds: ["build", "audit"] }, "omw_w2")).status).toBe(204);
+    expect((await seen()).last_seen).toBe(first.last_seen);
+    // Older than TOUCH_MINUTES, the row is touched so it stays alive (WORKER_ALIVE_MINUTES = 10 keeps three misses of slack).
+    const stale = new Date(Date.now() - (TOUCH_MINUTES + 1) * 60000).toISOString();
+    await env.DB.prepare("UPDATE build_workers SET last_seen = ? WHERE id = 'w2'").bind(stale).run();
+    expect((await touchWorker(env, same(), null)).rows_written).toBeGreaterThan(0);
+    expect((await seen()).last_seen > stale).toBe(true);
+    // What the readers act on at once lands at once: the probe's answer, a log chunk, the task, new kinds, a new agent.
+    expect((await touchWorker(env, { ...same(), agent: "claude-code/claude-sonnet-5", probe: { status: "ok", error: null, checked_at: "2026-09-20T12:00:00Z" } }, null)).rows_written).toBeGreaterThan(0);
+    expect((await seen()).agent_status).toBe("ok");
+    expect((await touchWorker(env, { ...same(), agent: "claude-code/claude-sonnet-5", probe: { status: "ok", error: null, checked_at: "2026-09-20T12:00:00Z" } }, null)).rows_written).toBe(0);
+    expect((await touchWorker(env, { ...same(), agent: "claude-code/claude-sonnet-5", probe: { status: "error", error: "no answer in 90 s", checked_at: "2026-09-20T12:01:00Z" } }, null)).rows_written).toBeGreaterThan(0);
+    expect((await seen()).agent_status).toBe("error");
+    expect((await touchWorker(env, { ...same(), log: "==> idle\n" }, null)).rows_written).toBeGreaterThan(0);
+    expect((await seen()).log_tail).toMatch(/==> idle\n$/);
+    expect((await touchWorker(env, same(), 12345)).rows_written).toBeGreaterThan(0);
+    expect((await touchWorker(env, same(), null)).rows_written).toBeGreaterThan(0);
+    expect((await touchWorker(env, { ...same(), kinds: ["build"] }, null)).rows_written).toBeGreaterThan(0);
+    expect((await seen()).kinds).toBe('["build"]');
+    expect((await touchWorker(env, { ...same(), kinds: ["build"], agent: "openai/gpt-5" }, null)).rows_written).toBeGreaterThan(0);
+    expect((await touchWorker(env, { ...same(), kinds: ["build"], agent: "openai/gpt-5" }, null)).rows_written).toBe(0);
+    // Back to what w2 said before, so the tests after this one read the worker they seeded.
+    await touchWorker(env, { ...same(), kinds: ["build", "audit"], agent: null, log: "" }, null);
+  });
+
+  it("a contributor's last_seen moves once per SEEN_MINUTES, not once per request", async () => {
+    const at = async () => (await env.DB.prepare("SELECT last_seen FROM contributors WHERE login = 'm2'").first<{ last_seen: string }>())!.last_seen;
+    const req = () => new Request(API + "/factory", { headers: { authorization: "Bearer omc_m2" } });
+    const stale = new Date(Date.now() - (SEEN_MINUTES + 1) * 60000).toISOString();
+    await env.DB.prepare("UPDATE contributors SET last_seen = ? WHERE login = 'm2'").bind(stale).run();
+    expect((await contributorOf(req(), env))?.login).toBe("m2");
+    const moved = await at();
+    expect(moved > stale).toBe(true);
+    expect((await contributorOf(req(), env))?.login).toBe("m2");
+    expect(await at()).toBe(moved);
   });
 });

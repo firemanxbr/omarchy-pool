@@ -588,7 +588,14 @@ What keeps the bill near US$ 10:
 - the sync runs **every three hours, one task per architecture, one release
   per ring** — not one release per source per hour. With releases this
   cheap the interval could go back to hourly (`scheduler.ts` RULES); what
-  an hourly sync still costs is the rows it reads to diff against upstream.
+  an hourly sync still costs is the rows it reads to diff against upstream;
+- a worker's heartbeat (its claim, every 30 s) is written only when it says
+  something new — the task, a log chunk, the version, the agent and its
+  probe, the kinds, the mode, the labels — or every three minutes, so the
+  row stays younger than the ten the alive rule asks: an idle worker writes
+  20 rows an hour, not 120 (eight workers wrote 20 k rows a day before
+  2026-09-20). A contributor's `last_seen` moves once per ten minutes, not
+  once per authenticated request.
 
 **Watching it.** The brain estimates the month's bill <!-- estimate-cadence -->
 from Cloudflare's own analytics — what was used so far, priced, plus the
