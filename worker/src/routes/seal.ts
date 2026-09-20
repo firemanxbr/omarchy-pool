@@ -141,7 +141,7 @@ export async function factoryChain(env: Env, sha256: string): Promise<Record<str
 
 /** The seal of any object the pool stores. */
 export async function sealOf(env: Env, sha256: string): Promise<Record<string, unknown> | null> {
-  const p = await env.DB.prepare("SELECT id, sha256, name, version, arch, repo_arch, filename, source, has_signature, created_at, COALESCE(r2_key, repo_arch || '/' || filename) AS r2_key FROM packages WHERE sha256 = ? ORDER BY id LIMIT 1")
+  const p = await env.DB.prepare("SELECT id, sha256, name, version, arch, repo_arch, filename, source, has_signature, created_at, COALESCE(r2_key, source || '/' || repo_arch || '/' || filename) AS r2_key FROM packages WHERE sha256 = ? ORDER BY id LIMIT 1")
     .bind(sha256)
     .first<PackageRow>();
   if (!p) return null;
@@ -183,7 +183,7 @@ export async function sealOf(env: Env, sha256: string): Promise<Record<string, u
  * build completes; a rerun overwrites with the same facts.
  */
 export async function writeAttestation(env: Env, sha256: string): Promise<boolean> {
-  const p = await env.DB.prepare("SELECT filename, COALESCE(r2_key, repo_arch || '/' || filename) AS r2_key FROM packages WHERE sha256 = ? ORDER BY id LIMIT 1").bind(sha256).first<{ filename: string; r2_key: string }>();
+  const p = await env.DB.prepare("SELECT filename, COALESCE(r2_key, source || '/' || repo_arch || '/' || filename) AS r2_key FROM packages WHERE sha256 = ? ORDER BY id LIMIT 1").bind(sha256).first<{ filename: string; r2_key: string }>();
   const chain = await factoryChain(env, sha256);
   if (!p || !chain) return false;
   const statement = {
