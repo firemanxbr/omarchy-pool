@@ -28,6 +28,25 @@ export function isProductionHost(host: string): boolean {
 }
 
 /**
+ * The AI and research crawlers by their robots.txt token (Cloudflare Radar
+ * categories AI Crawler and AI Search, September 2026). Two readers, one
+ * list: robots.txt (pages/robots.ts) closes the site to them by name, and
+ * the read guard (cost.ts) sheds them by the same name while the cost
+ * guard is up. It lives here, not with either, because cost.ts must not
+ * import a page (docs-tree.ts reads cost.ts's cadence — a page importing
+ * the guard and the guard importing a page is a cycle, and the runbook's
+ * cadence came out undefined, 2026-09-20).
+ */
+export const AI_CRAWLERS: readonly string[] = [
+  "GoogleOther", "GoogleOther-Image", "GoogleOther-Video", "Google-Extended",
+  "GPTBot", "ChatGPT-User", "OAI-SearchBot",
+  "ClaudeBot", "Claude-User", "Claude-SearchBot", "anthropic-ai",
+  "CCBot", "Bytespider", "Amazonbot", "meta-externalagent", "meta-externalfetcher",
+  "PerplexityBot", "Perplexity-User", "Applebot-Extended", "cohere-ai", "Diffbot",
+  "ImagesiftBot", "omgili", "omgilibot", "YouBot", "PetalBot", "Timpibot", "DuckAssistBot", "MistralAI-User",
+];
+
+/**
  * The origin a text a machine keeps should name — the setup script, the
  * worker CLI, the pacman include's own comment — and the origin an edge
  * cache key is built from: the API host that is never redirected, whichever
