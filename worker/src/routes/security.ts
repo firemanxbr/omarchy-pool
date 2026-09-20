@@ -200,6 +200,31 @@ export async function handleComponents(env: Env): Promise<Response> {
   return json({ components: [...out.values()] }, 200, { "cache-control": "public, max-age=300" });
 }
 
+/**
+ * The objects of these names a ring serves without an open advisory, one
+ * architecture — where a fix for the vulnerable ones may already be — with
+ * D1's count of what it read. The join order is forced (CROSS JOIN): from
+ * the few names through the packages name index, a point lookup on the
+ * ring's primary key, then the advisory status index; the same lesson as
+ * the exposure CTE below. Left to itself the planner walked the ring —
+ * 65.4 k rows read per call for stable's 326 names against rc, 35 M a
+ * day between the page and the security job (2026-09-19) — where the same
+ * answer is 1.4 k this way. A join driven by json_each answers one row per
+ * list entry, so `names` must be unique: the caller's are the keys of a
+ * Map. test/package-page.test.ts measures it.
+ */
+export function cleanIn(env: Env, ring: Ring, arch: string, names: string[]) {
+  return env.DB.prepare(
+    `SELECT p.name, p.version, EXISTS (SELECT 1 FROM package_components c WHERE c.package_id = p.id) AS scanned
+       FROM json_each(?2) j
+       CROSS JOIN packages p ON p.name = j.value AND p.repo_arch = ?1
+      WHERE EXISTS (SELECT 1 FROM ring_packages rp WHERE rp.ring = '${ring}' AND rp.package_id = p.id)
+        AND NOT EXISTS (SELECT 1 FROM package_advisories pa WHERE pa.package_id = p.id AND pa.status = 'vulnerable')`,
+  )
+    .bind(arch, JSON.stringify(names))
+    .all<{ name: string; version: string; scanned: number }>();
+}
+
 /** Open advisories on the objects a ring serves, and what depends on them. */
 export async function handleSecurity(url: URL, env: Env): Promise<Response> {
   const ring = url.searchParams.get("ring") ?? env.DEFAULT_RING;
@@ -255,14 +280,7 @@ export async function handleSecurity(url: URL, env: Env): Promise<Response> {
     );
     for (const { ring: r, head: h } of otherHeads) {
       if (!h) continue;
-      const clean = await env.DB.prepare(
-        `SELECT p.name, p.version, EXISTS (SELECT 1 FROM package_components c WHERE c.package_id = p.id) AS scanned
-           FROM ${ringMembers(r)} rp JOIN packages p ON p.id = rp.package_id
-          WHERE p.repo_arch = ?1 AND p.name IN (SELECT value FROM json_each(?2))
-            AND NOT EXISTS (SELECT 1 FROM package_advisories pa WHERE pa.package_id = p.id AND pa.status = 'vulnerable')`,
-      )
-        .bind(arch, JSON.stringify(vulnerable.map((v) => v.name)))
-        .all<{ name: string; version: string; scanned: number }>();
+      const clean = await cleanIn(env, r, arch, vulnerable.map((v) => v.name));
       for (const c of clean.results) {
         if (withComponents.has(c.name) && !c.scanned) continue;
         fixedElsewhere.set(c.name, [...(fixedElsewhere.get(c.name) ?? []), { ring: r, version: c.version }]);

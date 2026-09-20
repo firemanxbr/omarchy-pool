@@ -42,6 +42,7 @@ const READ: Row[] = [
   { routes: ["GET /events?kind=&limit="], text: `The journal, one line per ${JOURNAL_KINDS.filter((k) => k !== "all").join(", ")}; <code>kind=</code> filters to one. The <code>metrics</code> snapshot rides the same table and is a number, not a line.` },
   { routes: ["GET /pool/unreferenced?keep=3"], text: "What retention would delete now." },
   { routes: ["GET /cost"], text: `The month's estimated bill, line by line (D1, R2, Workers), the projection and the guard's state. Estimated ${ESTIMATE_CADENCE}; the lines: warn at US$ ${BUDGET_WARN_USD}, pause at US$ ${BUDGET_GUARD_USD}, cap US$ ${BUDGET_CAP_USD}.` },
+  { routes: ["GET /robots.txt", "GET /sitemap.xml"], root: true, text: `What a crawler may read, at the root of every name: on the dashboard the landing, the docs and the package pages are open to search engines, the API, the sign-in and the pages that are a reader's own are closed to all, and the AI and research crawlers are closed out by name; on <code>${API_HOST}</code> everything is. Every <code>/api/v1</code> answer and the sign-in carry <code>x-robots-tag: noindex, nofollow</code> as well. The sitemap lists the fixed pages, no package pages, nothing read from the database.` },
 ];
 
 const FACTORY_READ: Row[] = [

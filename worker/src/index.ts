@@ -77,6 +77,7 @@ import { reviewHtml } from "./pages/review";
 import { buildHtml } from "./pages/build";
 import { handlePackageStory } from "./routes/story";
 import { icon } from "./pages/icons";
+import { robotsTxt, sitemapXml } from "./pages/robots";
 import { requestHtml } from "./pages/request";
 import { governanceHtml } from "./pages/governance";
 import { docsHtml } from "./pages/docs";
@@ -103,7 +104,7 @@ import { packageHtml, packagesHtml } from "./pages/packages";
 import { securityHtml } from "./pages/security";
 import { pipelineHtml } from "./pages/pipeline";
 import { factoryHtml as factoryPageHtml } from "./pages/contribute";
-import { DASHBOARD_HOST, LEGACY_DASHBOARD_HOSTS, machineOrigin, version } from "./meta";
+import { DASHBOARD_HOST, LEGACY_DASHBOARD_HOSTS, isProductionHost, machineOrigin, version } from "./meta";
 import { handleStatic } from "./routes/static";
 import { pacmanInclude, setupScript, workerCli, workerCompose } from "./routes/setup";
 import { runScheduler } from "./scheduler";
@@ -166,6 +167,8 @@ export default {
       if (path.startsWith(API + "/")) {
         const res = await cachedApi(method, path.slice(API.length), url, request, env, ctx);
         res.headers.set("access-control-allow-origin", "*");
+        // No API answer is a page for an index (pages/robots.ts): said on the answer too, for a crawler that reads the API from a page's script.
+        res.headers.set("x-robots-tag", "noindex, nofollow");
         return res;
       }
       if (method === "OPTIONS") return new Response(null, { status: 204, headers: cors() });
@@ -236,6 +239,9 @@ export default {
       if (user) return html(userHtml(user[1], env.POOL_URL, version(env)));
       if (path.startsWith("/package/")) return html(packageHtml(decodeURIComponent(path.slice("/package/".length)), env.POOL_URL, version(env)));
       if (/^\/build\/\d+$/.test(path)) return html(buildHtml(Number(path.slice("/build/".length)), env.POOL_URL, version(env)));
+      // What a crawler may read (pages/robots.ts): the rules for the name asked on, and the pages worth an index under the dashboard's name on production.
+      if (path === "/robots.txt") return new Response(robotsTxt(url.hostname), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=86400" } });
+      if (path === "/sitemap.xml") return new Response(sitemapXml(isProductionHost(url.hostname) ? `https://${DASHBOARD_HOST}` : url.origin), { headers: { "content-type": "application/xml; charset=utf-8", "cache-control": "public, max-age=86400" } });
       const ic = icon(path);
       if (ic) return ic;
       return json({ error: "not found" }, 404);

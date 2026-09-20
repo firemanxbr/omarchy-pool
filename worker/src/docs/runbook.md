@@ -579,6 +579,11 @@ What keeps the bill near US$ 10:
   of a ring, then every 24th, and any older release read by id. A sync that
   moves a hundred packages writes a hundred rows, not thirty thousand; GC
   drops the checkpoints and deltas nothing inside retention starts from.
+  A diff (`/diff`, `pkg-repo diff`, the Packages page) is folded from the
+  deltas between its two releases and writes nothing: until 2026-09-20 it
+  compared full lists, and every release's parent was written out (65 k
+  rows, deleted again by the next GC) the first time its diff was viewed
+  — 1.45 M rows on 2026-09-19, a crawler following the dashboard's links.
   The delta is computed in SQL with the request's lists materialised once
   (CTEs): evaluated per row over a 32k-row ring, the first version took
   D1 past its CPU limit and every sync failed for three hours on
@@ -588,7 +593,14 @@ What keeps the bill near US$ 10:
 - the sync runs **every three hours, one task per architecture, one release
   per ring** — not one release per source per hour. With releases this
   cheap the interval could go back to hourly (`scheduler.ts` RULES); what
-  an hourly sync still costs is the rows it reads to diff against upstream.
+  an hourly sync still costs is the rows it reads to diff against upstream;
+- a worker's heartbeat (its claim, every 30 s) is written only when it says
+  something new — the task, a log chunk, the version, the agent and its
+  probe, the kinds, the mode, the labels — or every three minutes, so the
+  row stays younger than the ten the alive rule asks: an idle worker writes
+  20 rows an hour, not 120 (eight workers wrote 20 k rows a day before
+  2026-09-20). A contributor's `last_seen` moves once per ten minutes, not
+  once per authenticated request;
 - the security job posts its whole set every three hours (4.6 k advisories,
   8 k CVEs, 7.4 k matches), and the index writes only the rows that changed:
   every upsert's `DO UPDATE` carries a `WHERE` over the row's values, an
@@ -597,7 +609,8 @@ What keeps the bill near US$ 10:
   advisory)` matches it posts), not by `updated_at` — a run that changed
   nothing writes nothing, where it wrote 290 k rows a day (2026-09-19). A
   prune without the keys (an older `pkg-repo`) is refused with a `security`
-  warn line and deletes nothing.
+  warn line and deletes nothing: a contributor's worker on an old image
+  leaves a stale match in place until a current worker runs the job.
 
 **Watching it.** The brain estimates the month's bill <!-- estimate-cadence -->
 from Cloudflare's own analytics — what was used so far, priced, plus the
@@ -637,7 +650,20 @@ whether the package is in the release. And the ABI verdict of an
 unchanged release stands for a day: an attempt three hours later does not
 repeat it (`gate::abi_evidence_stands`); the health check, which is the
 soak, runs every time. `test/graph.test.ts` measures both queries' rows
-read, so a planner regression fails CI.
+read, so a planner regression fails CI. The same trap in a smaller query
+was the largest reader of all once the pages had readers: on 2026-09-19,
+the morning after the domain moved, Google's crawler followed every
+package link and fetched `/api/v1/package/<name>` 25 thousand times a day
+(the pages are skeletons; the script fetches the rows), and the package
+page's one lookup of its providers in the ring — a list of names `IN`
+the ring's members — walked the whole ring per call: 64.8 k rows for
+ffmpeg's 94 providers, 1.6 billion rows a day, 84 % of the day's reads,
+US$ 1.6 a day past the included 25 billion. The Security page's *fixed
+elsewhere* lookup had the same shape (65 k rows a call, 35 million a day).
+Both are driven from the names now (`CROSS JOIN` through the name index,
+then a point lookup on the ring's key: 377 and 1.4 k rows), the package
+answer stays at the edge ten minutes instead of one, and
+`test/package-page.test.ts` bounds both by the names asked for.
 
 **Who uses it.** Once a day (00:30 UTC) the brain counts yesterday's
 audience from the same analytics: the distinct client addresses that
@@ -652,6 +678,34 @@ dashboard says *about*. The query is scoped to the account
 (`CLOUDFLARE_ACCOUNT_ID`), so the analytics token must carry *Account ·
 Analytics · Read*; without it the day is skipped and the scheduler log says
 so once a day.
+
+**Crawlers.** A package page is a database read (its API answer), so a
+crawler that walks every package name is a bill: on 2026-09-19 one AI
+crawler (GoogleOther) fetched ~6,000 pages an hour across the zone's
+names — about a fifth of it on `pkgs.omarchy-pool.org` — and read the
+rings' membership 25,000 times a day. Three layers keep that off the
+bill. The Worker serves `/robots.txt` on every name (`src/pages/robots.ts`):
+the dashboard's keeps the landing, the docs and `/package/<name>` open to
+search engines, closes `/api/`, `/auth/`, `/diff`, `/build/`, `/user/` and
+the rest to everyone, and closes the whole site to the AI and research
+crawlers listed there by name (`AI_CRAWLERS`); the API names deny
+everything; `/sitemap.xml` lists the fixed pages. Every `/api/v1` answer
+and the sign-in carry `x-robots-tag: noindex, nofollow`, and the header's
+Sign in link says `rel="nofollow"` (19,800 crawler fetches of `/auth/github`
+in two days came from that one link). The bucket runs no code: its
+`robots.txt` is an object at the root of `omarchy-packages`
+(`User-agent: *` / `Disallow: /`, `npx wrangler r2 object put
+omarchy-packages/robots.txt --file robots-pool.txt --content-type
+text/plain`). robots.txt is a request; the wall is a WAF custom rule on the
+zone (*Security → WAF → Custom rules*, free plan): "AI crawlers off the
+package pages", a Block for a request whose `cf.verified_bot_category` is
+"AI Crawler" or whose user agent names one of the crawlers, on `/package/`,
+`/api/v1/package/` and `/auth/`. Bot Fight Mode and AI Labyrinth stay
+**off** on this zone: on 2026-09-18 they injected challenges into pacman,
+omarchy-cli and broker responses and answered the cost report with 403.
+Cloudflare prepends its own content-signals comment to any origin
+robots.txt while its managed robots.txt is on (*Security → Bots → Manage
+AI bots*); the rules below it still hold.
 
 **The guard.** Three lines (`src/cost.ts`): the report warns at a
 projected US$ 25; at a projected or actual **US$ 40** the brain sets

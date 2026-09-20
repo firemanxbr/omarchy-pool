@@ -221,8 +221,55 @@ describe("GET /releases/:ring/diff", () => {
     expect((await call("GET", "/releases/rc/diff?arch=mips")).status).toBe(400);
   });
 
+  it("folds the diff from the deltas and writes nothing: no side is reconstructed", async () => {
+    // rc: A (checkpoint, the ring's first) → B → C (head). B is neither a
+    // head nor a checkpoint: the full lists would write its membership out
+    // to compare it (every release's parent is such a side the first time
+    // its diff is viewed — 64 k rows per release on production).
+    const [c, b, a] = (await call("GET", "/releases/rc/history")).json.releases;
+    const rows = async (id: number) => (await env.DB.prepare("SELECT checkpoint, (SELECT COUNT(*) FROM release_packages WHERE release_id = r.id) AS n FROM releases r WHERE id = ?").bind(id).first<{ checkpoint: number; n: number }>())!;
+    expect(await rows(b.id)).toEqual({ checkpoint: 0, n: 0 });
+    // Head against its parent is the head's own deltas, word for word.
+    const d = await call("GET", `/releases/rc/diff?from=${b.id}&to=${c.id}`);
+    expect(d.status).toBe(200);
+    const deltas = (await env.DB.prepare("SELECT d.op, p.name, p.repo_arch AS arch, p.version FROM release_deltas d JOIN packages p ON p.id = d.package_id WHERE d.release_id = ? ORDER BY p.name, p.repo_arch").bind(c.id).all<{ op: string; name: string; arch: string; version: string }>()).results;
+    expect(deltas.every((x) => x.op === "add")).toBe(true);
+    expect(d.json.added.map((p: any) => ({ op: "add", name: p.name, arch: p.arch, version: p.version }))).toEqual(deltas);
+    expect(d.json.counts).toEqual({ added: deltas.length, removed: 0, upgraded: 0, before: b.package_count, after: c.package_count });
+    // Two hops, A → C through B: xz left in B and came back in C, so the
+    // fold says nothing changed.
+    const two = await call("GET", `/releases/rc/diff?from=${a.id}&to=${c.id}`);
+    expect(two.json.counts).toEqual({ added: 0, removed: 0, upgraded: 0, before: 5, after: 5 });
+    expect(two.json.added).toEqual([]);
+    expect(two.json.removed).toEqual([]);
+    // The full lists, read after the diffs (a side pinned by id is
+    // reconstructed — what the diffs above must not have done), say the
+    // same as the fold for both pairs.
+    expect(await rows(b.id)).toEqual({ checkpoint: 0, n: 0 });
+    const list = async (id: number) => new Map(((await call("GET", `/releases/rc?fields=summary&release_id=${id}`)).json.packages as { name: string; arch: string; source: string; sha256: string }[]).map((p) => [`${p.source}/${p.name}/${p.arch}`, p.sha256]));
+    const byLists = async (from: number, to: number) => {
+      const [x, y] = [await list(from), await list(to)];
+      return {
+        added: [...y.keys()].filter((k) => !x.has(k)).sort(),
+        removed: [...x.keys()].filter((k) => !y.has(k)).sort(),
+        upgraded: [...y.keys()].filter((k) => x.has(k) && x.get(k) !== y.get(k)).sort(),
+      };
+    };
+    const byFold = (j: any) => ({
+      added: j.added.map((p: any) => `${p.source}/${p.name}/${p.arch}`).sort(),
+      removed: j.removed.map((p: any) => `${p.source}/${p.name}/${p.arch}`).sort(),
+      upgraded: j.upgraded.map((p: any) => `${p.source}/${p.name}/${p.arch}`).sort(),
+    });
+    expect(byFold(d.json)).toEqual(await byLists(b.id, c.id));
+    expect(byFold(two.json)).toEqual(await byLists(a.id, c.id));
+    expect(await rows(b.id)).toEqual({ checkpoint: 1, n: 3 });
+  });
+
   it("answers 410 for a release whose checkpoint GC pruned", async () => {
-    const a = (await call("GET", "/releases/rc/history")).json.releases.at(-1);
+    // rc: A (the pruned checkpoint) → B (the one GC keeps: the test above
+    // reconstructed it) → C. The floor the fold works above is B.
+    const [c, b, a] = (await call("GET", "/releases/rc/history")).json.releases;
+    expect((await env.DB.prepare("SELECT checkpoint FROM releases WHERE id = ?").bind(b.id).first<{ checkpoint: number }>())!.checkpoint).toBe(1);
     // What GC does to a checkpoint nothing inside retention starts from.
     await env.DB.batch([
       env.DB.prepare("DELETE FROM release_packages WHERE release_id = ?").bind(a.id),
@@ -232,6 +279,15 @@ describe("GET /releases/:ring/diff", () => {
     const d = await call("GET", `/releases/rc/diff?from=${a.id}`);
     expect(d.status).toBe(410);
     expect(d.json.error).toMatch(/retention/);
+    // A chain that crosses the pruned release below the floor is the same
+    // answer (B's deltas still exist; A's do not), a side at the floor folds.
+    // The parameters in the other order: the URL the test above asked is
+    // still in the edge cache, answered as it was.
+    expect((await call("GET", `/releases/rc/diff?to=${c.id}&from=${a.id}`)).status).toBe(410);
+    expect((await call("GET", `/releases/rc/diff?to=${a.id}`)).status).toBe(410);
+    const above = await call("GET", `/releases/rc/diff?from=${b.id}&to=${c.id}`);
+    expect(above.status).toBe(200);
+    expect(above.json.counts).toMatchObject({ added: 2, before: 3, after: 5 });
   });
 });
 
@@ -479,7 +535,11 @@ describe("one row per source", () => {
     expect(page.status).toBe(200);
     expect(page.json.rings.filter((r: any) => r.ring === "edge").map((r: any) => r.source)).toEqual(["asahi-alarm", "extra"]);
     expect(page.json.package.source).toBe("asahi-alarm");
-    expect((await call("GET", "/package/mesa?ring=edge&arch=aarch64&source=extra")).json.package.version).toBe("1:26.2.3-1");
+    const extra = (await call("GET", "/package/mesa?ring=edge&arch=aarch64&source=extra")).json;
+    expect(extra.package.version).toBe("1:26.2.3-1");
+    // The download link is the row's object, in the source's directory: the other source's mesa is another object.
+    expect(extra.pool_url).toBe(`${env.POOL_URL}/extra/aarch64/${extra.package.filename}`);
+    expect(page.json.pool_url).toBe(`${env.POOL_URL}/asahi-alarm/aarch64/${page.json.package.filename}`);
     // Keyset paging walks both rows of the name: one per page, nothing skipped at the boundary between them.
     const all = ((await call("GET", "/releases/edge?fields=summary&arch=aarch64")).json.packages as { name: string; source: string }[]).map((p) => `${p.name}/${p.source}`);
     const walked: string[] = [];

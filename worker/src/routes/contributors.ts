@@ -80,6 +80,9 @@ export interface Contributor {
   blocked?: { at: string; reason: string | null } | null;
 }
 
+/** How old a contributor's last_seen may be before an authenticated request moves it. */
+export const SEEN_MINUTES = 10;
+
 /**
  * The contributor behind the request — a `omc_…` bearer token (the CLI /
  * worker credential) or the sign-in cookie (a browser session, `oms_…`,
@@ -88,14 +91,21 @@ export interface Contributor {
 export async function contributorOf(request: Request, env: Env): Promise<Contributor | null> {
   const token = bearer(request);
   const session = token ? "" : (cookieOf(request, "omc") ?? "");
-  let row: { login: string; name: string | null; avatar_url: string | null; role: string; blocked_at: string | null; blocked_reason: string | null } | null = null;
+  let row: { login: string; name: string | null; avatar_url: string | null; role: string; blocked_at: string | null; blocked_reason: string | null; last_seen: string } | null = null;
   if (token.startsWith("omc_")) {
-    row = await env.DB.prepare("SELECT login, name, avatar_url, role, blocked_at, blocked_reason FROM contributors WHERE token_hash = ?").bind(await sha256Hex(token)).first();
+    row = await env.DB.prepare("SELECT login, name, avatar_url, role, blocked_at, blocked_reason, last_seen FROM contributors WHERE token_hash = ?").bind(await sha256Hex(token)).first();
   } else if (session.startsWith("oms_")) {
-    row = await env.DB.prepare("SELECT login, name, avatar_url, role, blocked_at, blocked_reason FROM contributors WHERE session_hash = ?").bind(await sha256Hex(session)).first();
+    row = await env.DB.prepare("SELECT login, name, avatar_url, role, blocked_at, blocked_reason, last_seen FROM contributors WHERE session_hash = ?").bind(await sha256Hex(session)).first();
   }
   if (!row) return null;
-  await env.DB.prepare("UPDATE contributors SET last_seen = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE login = ?").bind(row.login).run();
+  // "last seen" moves once per SEEN_MINUTES, not once per request: the
+  // person's page says it in minutes at best (ago()), and written on every
+  // authenticated request it was 4 k rows a day (2026-09-20). The row just
+  // read decides, and the statement checks again so two requests in the
+  // same moment write once.
+  if (Date.now() - Date.parse(row.last_seen) > SEEN_MINUTES * 60000) {
+    await env.DB.prepare(`UPDATE contributors SET last_seen = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE login = ? AND last_seen < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-${SEEN_MINUTES} minutes')`).bind(row.login).run();
+  }
   return { login: row.login, name: row.name, avatar_url: row.avatar_url, role: row.role, blocked: row.blocked_at ? { at: row.blocked_at, reason: row.blocked_reason } : null };
 }
 

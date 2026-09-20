@@ -270,6 +270,21 @@ describe("the rings are RINGS, the lab included", () => {
     expect((await call("GET", `/package/${F.pkg}?ring=stable&arch=${F.arch}`)).json).toMatchObject({ ring: "stable", shown_ring: "stable", package: { version: "1:1.3.2-3" } });
     expect((await call("GET", `/package/${F.pkg}?ring=nightly&arch=${F.arch}`)).status).toBe(400);
   });
+
+  it("the package page's download link is the object's one address — the row's key, `<pool>/<source>/<arch>/<filename>`, the seal's `object` — never a key built from the arch alone", async () => {
+    // The bucket has been laid out per source since the relayout (r2.ts); the page linked `<pool>/<arch>/<filename>`
+    // until 2026-09-20 and every download and .sig on every package page was a 404 for four days.
+    const page = await call("GET", `/package/${F.pkg}?ring=stable&arch=${F.arch}`);
+    expect(page.status).toBe(200);
+    expect(page.json.pool_url).toBe(`${env.POOL_URL}/core/${F.arch}/${F.pkg}-1:1.3.2-3-${F.arch}.pkg.tar.zst`);
+    expect(page.json.pool_url).toBe(page.json.seal.object);
+    // A row indexed before the key column existed links the same address: the key is computed, not the old layout.
+    await env.DB.prepare("UPDATE packages SET r2_key = NULL WHERE sha256 = ?").bind(page.json.package.sha256).run();
+    const older = await call("GET", `/package/${F.pkg}?ring=stable&arch=${F.arch}`);
+    expect(older.json.pool_url).toBe(page.json.pool_url);
+    expect(older.json.seal.object).toBe(page.json.pool_url);
+    await env.DB.prepare("UPDATE packages SET r2_key = ? WHERE sha256 = ?").bind(`core/${F.arch}/${F.pkg}-1:1.3.2-3-${F.arch}.pkg.tar.zst`, page.json.package.sha256).run();
+  });
 });
 
 describe("the maintainer set, the late mark and the budget lines are the server's", () => {

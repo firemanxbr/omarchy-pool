@@ -1,5 +1,5 @@
 import { isRing, json, RINGS, RINGS_BY_STABILITY, type Env, type Ring } from "../index";
-import { isRepoArch } from "../r2";
+import { isRepoArch, packageKey } from "../r2";
 import { ringHead, ringMembers } from "../db";
 import { sourceRank } from "../meta";
 import { maintenanceOf } from "./users";
@@ -30,6 +30,8 @@ interface PackageRow {
   size_installed: number;
   has_signature: number;
   created_at: string;
+  // The object's key in the bucket, `<source>/<arch>/<filename>` (r2.ts): the row carries it, the page's links go by it.
+  r2_key: string | null;
   manifest_json?: string;
 }
 
@@ -69,6 +71,30 @@ function capabilityOf(dep: string): string {
   return dep.split(/[<>=]/)[0].trim();
 }
 
+/**
+ * The ring's objects of these names, one architecture: the rows the
+ * package page resolves its providers' advisories through, with D1's count
+ * of what it read. The order is forced (CROSS JOIN): from the few names
+ * through the packages name index, then a point lookup on the ring's
+ * primary key — the same trap as the edges below and the 2026-09-15 lesson.
+ * Left to itself the planner walked the whole ring for every page view —
+ * `p.name IN (json_each)` over the ring's members, 64.8 k rows read per
+ * call, 1.6 B a day under the crawl that began on 2026-09-19 — where the
+ * same 94 rows of ffmpeg's page are 377 this way. A join driven by
+ * json_each answers one row per list entry, so `names` must be unique: the
+ * caller hands a Set. test/package-page.test.ts measures it.
+ */
+export function providersInRing(env: Env, ring: Ring, arch: string, names: string[]) {
+  return env.DB.prepare(
+    `SELECT p.id, p.name
+       FROM json_each(?2) j
+       CROSS JOIN packages p ON p.name = j.value AND p.repo_arch = ?1
+      WHERE EXISTS (SELECT 1 FROM ring_packages rp WHERE rp.ring = '${ring}' AND rp.package_id = p.id)`,
+  )
+    .bind(arch, JSON.stringify(names))
+    .all<{ id: number; name: string }>();
+}
+
 export async function handlePackage(name: string, url: URL, env: Env): Promise<Response> {
   const s = scope(url, env);
   if (s instanceof Response) return s;
@@ -88,7 +114,7 @@ export async function handlePackage(name: string, url: URL, env: Env): Promise<R
   for (const { ring, head } of heads) {
     if (!head) continue;
     const rows = await env.DB.prepare(
-      `SELECT p.id, p.name, p.version, p.arch, p.repo_arch, p.source, p.filename, p.sha256, p.size_download, p.size_installed, p.has_signature, p.created_at
+      `SELECT p.id, p.name, p.version, p.arch, p.repo_arch, p.source, p.filename, p.sha256, p.size_download, p.size_installed, p.has_signature, p.created_at, p.r2_key
          FROM ${ringMembers(ring)} rp JOIN packages p ON p.id = rp.package_id
         WHERE p.name = ?1 AND p.repo_arch = ?2`,
     )
@@ -202,16 +228,7 @@ export async function handlePackage(name: string, url: URL, env: Env): Promise<R
       : [];
   const own = await advisoriesOf([chosen.id]);
   const providerNames = [...new Set([...depends, ...links].map((x) => x.provider?.name).filter((n): n is string => !!n))];
-  const providerIds = providerNames.length
-    ? (
-        await env.DB.prepare(
-          `SELECT p.id, p.name FROM ${ringMembers(ring)} rp JOIN packages p ON p.id = rp.package_id
-            WHERE p.repo_arch = ?1 AND p.name IN (SELECT value FROM json_each(?2))`,
-        )
-          .bind(s.arch, JSON.stringify(providerNames))
-          .all<{ id: number; name: string }>()
-      ).results
-    : [];
+  const providerIds = providerNames.length ? (await providersInRing(env, ring, s.arch, providerNames)).results : [];
   const providerAdvisories = (await advisoriesOf(providerIds.map((p) => p.id))).filter((a) => a.object_status === "vulnerable");
   const nameOfId = new Map(providerIds.map((p) => [p.id, p.name]));
   const exposed = providerAdvisories.map((a) => ({
@@ -243,10 +260,18 @@ export async function handlePackage(name: string, url: URL, env: Env): Promise<R
       depends,
       links,
       required_by: [...requiredBy.values()],
-      pool_url: `${env.POOL_URL.replace(/\/$/, "")}/${s.arch}/${chosen.filename}`,
+      // The object the page links (download, .sig): by the row's key, as the seal does — the bucket is laid out per
+      // source since the relayout, so a key built from the arch alone answers 404. A row indexed before the key column
+      // existed gets the same key computed.
+      pool_url: `${env.POOL_URL.replace(/\/$/, "")}/${chosen.r2_key ?? packageKey(chosen.source, chosen.repo_arch, chosen.filename)}`,
     },
     200,
-    { "cache-control": "public, max-age=60" },
+    // Ten minutes at the edge: everything behind the page — sync, promote,
+    // the security job — moves every three hours (scheduler.ts), so the
+    // only thing a reader can see late is a fresh approval or a promotion,
+    // by up to ten minutes; a crawler fetching each page a few times a day
+    // hit a one-minute cache 13 % of the time (2026-09-19).
+    { "cache-control": "public, max-age=600" },
   );
 }
 
