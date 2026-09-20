@@ -1,5 +1,5 @@
 import { isRing, json, RINGS, RINGS_BY_STABILITY, type Env, type Ring } from "../index";
-import { isRepoArch } from "../r2";
+import { isRepoArch, packageKey } from "../r2";
 import { ringHead, ringMembers } from "../db";
 import { sourceRank } from "../meta";
 import { maintenanceOf } from "./users";
@@ -30,6 +30,8 @@ interface PackageRow {
   size_installed: number;
   has_signature: number;
   created_at: string;
+  // The object's key in the bucket, `<source>/<arch>/<filename>` (r2.ts): the row carries it, the page's links go by it.
+  r2_key: string | null;
   manifest_json?: string;
 }
 
@@ -88,7 +90,7 @@ export async function handlePackage(name: string, url: URL, env: Env): Promise<R
   for (const { ring, head } of heads) {
     if (!head) continue;
     const rows = await env.DB.prepare(
-      `SELECT p.id, p.name, p.version, p.arch, p.repo_arch, p.source, p.filename, p.sha256, p.size_download, p.size_installed, p.has_signature, p.created_at
+      `SELECT p.id, p.name, p.version, p.arch, p.repo_arch, p.source, p.filename, p.sha256, p.size_download, p.size_installed, p.has_signature, p.created_at, p.r2_key
          FROM ${ringMembers(ring)} rp JOIN packages p ON p.id = rp.package_id
         WHERE p.name = ?1 AND p.repo_arch = ?2`,
     )
@@ -243,7 +245,10 @@ export async function handlePackage(name: string, url: URL, env: Env): Promise<R
       depends,
       links,
       required_by: [...requiredBy.values()],
-      pool_url: `${env.POOL_URL.replace(/\/$/, "")}/${s.arch}/${chosen.filename}`,
+      // The object the page links (download, .sig): by the row's key, as the seal does — the bucket is laid out per
+      // source since the relayout, so a key built from the arch alone answers 404. A row indexed before the key column
+      // existed gets the same key computed.
+      pool_url: `${env.POOL_URL.replace(/\/$/, "")}/${chosen.r2_key ?? packageKey(chosen.source, chosen.repo_arch, chosen.filename)}`,
     },
     200,
     { "cache-control": "public, max-age=60" },

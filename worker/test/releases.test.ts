@@ -479,7 +479,11 @@ describe("one row per source", () => {
     expect(page.status).toBe(200);
     expect(page.json.rings.filter((r: any) => r.ring === "edge").map((r: any) => r.source)).toEqual(["asahi-alarm", "extra"]);
     expect(page.json.package.source).toBe("asahi-alarm");
-    expect((await call("GET", "/package/mesa?ring=edge&arch=aarch64&source=extra")).json.package.version).toBe("1:26.2.3-1");
+    const extra = (await call("GET", "/package/mesa?ring=edge&arch=aarch64&source=extra")).json;
+    expect(extra.package.version).toBe("1:26.2.3-1");
+    // The download link is the row's object, in the source's directory: the other source's mesa is another object.
+    expect(extra.pool_url).toBe(`${env.POOL_URL}/extra/aarch64/${extra.package.filename}`);
+    expect(page.json.pool_url).toBe(`${env.POOL_URL}/asahi-alarm/aarch64/${page.json.package.filename}`);
     // Keyset paging walks both rows of the name: one per page, nothing skipped at the boundary between them.
     const all = ((await call("GET", "/releases/edge?fields=summary&arch=aarch64")).json.packages as { name: string; source: string }[]).map((p) => `${p.name}/${p.source}`);
     const walked: string[] = [];
