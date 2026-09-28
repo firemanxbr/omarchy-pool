@@ -70,8 +70,11 @@ verify and attest the package faster and approve it with more confidence.
    verdict (`ok`, `warn`, `block`); nothing acts on it, the maintainer does.
 6. **A maintainer has the project build it — never their own package.** On
    the Review page, a maintainer (`factory/MAINTAINERS.toml`) reads the
-   evidence and presses *Build by the project* (or rejects with
-   a note). A review worker takes the task (`review:<task>`): the project's
+   evidence and presses *Build by the project* (or rejects it with a note:
+   its builds in review stop, and a request rejected frees its name). One
+   review covers the package: it starts once every architecture requested
+   is built or *not supported*, and the project builds each built one
+   again. A review worker of each architecture takes its task (`review:<task>`): the project's
    agent gets the request and the contributor's PKGBUILD, log, gate and
    audit as the lesson — `draft-pkgbuild --evidence` — and writes the
    project's own recipe from the project's sources; the same gate runs;
@@ -87,8 +90,10 @@ verify and attest the package faster and approve it with more confidence.
    it. Nothing is published yet.
 7. **A maintainer approves the project's build.** With the project's
    evidence in front of them (the Review page shows both rows), a
-   maintainer — not the owner — approves. The approval is the decision on
-   the record and a `publish` job: a project worker fetches the staged
+   maintainer — not the owner — approves. The approval is one decision on
+   the record for the package — a review covering every architecture the
+   project built again, one that never built named *not supported* — and a
+   `publish` job per architecture: a project worker fetches the staged
    packages with the job's token, publishes them into `edge` as source
    `factory` (the pool signs), renders, and the brain marks the
    registration `published`, links the approval to the build and writes
@@ -120,18 +125,41 @@ verify and attest the package faster and approve it with more confidence.
    worker that dies mid-build loses its lease and the task is requeued by the
    pool's scheduler within ten minutes.
 
-The asker's own page follows a request per architecture, in the
-registration's own words: `registered`, then `waiting` or `building`,
-`staged` when the worker hands the evidence in, a maintainer's decision
+The asker's own page follows the package — one name, one registration —
+in its own words: `registered`, then `waiting` or `building`, `staged`
+when the worker hands the evidence in, a maintainer's decision
 (`approved`, `rejected`) and `published` once the project's build is in
 edge — `unmaintained` after 30 days without a build;
 `GET /api/v1/factory/packages` lists every request and where it stands.
-One word for a package that may have a build per architecture: it follows
-the builds, not the last worker to speak. While any build of the name is
-staged for a maintainer, a failure on the other architecture leaves it
-`staged` and writes what that build ran into in its detail; only with
-nothing staged does a failed build put it back to `registered` with the
-reason.
+Beside that word, each architecture's own, its *target*: `waiting`,
+`building`, `built`, `not supported`, `reviewing`, `reviewed`,
+`approved`, `published`. The package's word follows the builds, not the
+last worker to speak. While any build of the name is staged for a
+maintainer, a failure on the other architecture leaves it `staged` and
+writes what that build ran into in its detail; while the other
+architecture still builds it stays `building` or `waiting`; only when no
+architecture built does a failed build put it back to `registered` with
+the reason — the request back with its owner.
+
+## One name, one package
+
+A package is its name. `marcelo` is one package, requested once; x86_64
+and aarch64 are two targets of it — two artifacts, each built on a worker
+of its architecture. The request reserves the name the moment it is sent,
+in one statement: two requests for one name at once, and one of them has
+it. A rejection frees the name, and anyone may request it again; a
+package already in the pool keeps it, and what was rejected is the new
+version. The builds run per architecture: one that fails after the tries
+it had is *not supported*, and the others go on to the review; if none
+builds, the request goes back to its owner. One review covers every
+target: the project builds each supported architecture again on its
+review workers, and one decision — approve, reject, withdraw — covers them
+all; what it approved is what the publish jobs, one per architecture,
+carry into edge. A block covers the package on every architecture and
+every ring, withdraws the review it stood on, and sends the package back
+to the factory. The decisions made per architecture before this rule
+(migration 0036) were merged into the reviews they were; the rows stay on
+the record as they were written.
 
 ## The gate
 

@@ -4,6 +4,8 @@ import { handleCreateRelease } from "./releases";
 import { createJob } from "../scheduler";
 import { putRecord, recordKey, recordUrl } from "../record";
 import { REPO_ARCHES } from "../r2";
+import { standsSql } from "./story";
+import { settleTargets } from "../targets";
 
 /**
  * Blocking — the maintainers' brake (docs/GOVERNANCE.md, *Blocking*).
@@ -12,10 +14,12 @@ import { REPO_ARCHES } from "../r2";
  *                                                       their workers revoked, their queued and staged builds cancelled,
  *                                                       their packages rejected. The record: contributors/<login>/block-<t>.json
  *   POST /factory/contributors/:login/unblock {reason}  another maintainer than the one who blocked
- *   POST /factory/packages/:name/block        {reason}  any maintainer: the package leaves every ring (a release per ring,
- *                                                       edge re-rendered), its builds cancelled, its bumps stopped, its
- *                                                       project refused to new requests. The record: factory/<name>/<request>/decision-<t>.json
- *   POST /factory/packages/:name/unblock      {reason}  another maintainer than the one who blocked (a new request or build follows)
+ *   POST /factory/packages/:name/block        {reason}  any maintainer: the package — every architecture of it — leaves every
+ *                                                       ring (a release per ring, edge re-rendered), its builds cancelled, the
+ *                                                       review it stood on withdrawn, its bumps stopped, its project refused to
+ *                                                       new requests. The record: factory/<name>/<request>/decision-<t>.json
+ *   POST /factory/packages/:name/unblock      {reason}  another maintainer than the one who blocked: back to the factory,
+ *                                                       registered (a new build and a new review follow)
  *   GET  /factory/blocks                                what is blocked, and by whom (public)
  */
 
@@ -47,6 +51,8 @@ export async function handleBlockContributor(c: Contributor, login: string, requ
     env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = 'the build it audited was cancelled: its owner was blocked' WHERE kind = 'audit' AND status = 'queued' AND json_extract(params, '$.owner') = ?").bind(login),
     env.DB.prepare("UPDATE factory_packages SET status = 'rejected', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE owner = ?").bind(`owner blocked by ${c.login}: ${b.reason.slice(0, 200)}`, login),
   ]);
+  // Their builds stopped: each package's architectures say so.
+  await settleTargets(env, packages);
   const key = `contributors/${login}/block-${stamp()}.json`;
   const record = await putRecord(env, key, { schema: "omarchy-pool/block/1", kind: "contributor", login, by: c.login, at, reason: b.reason, packages, workers_revoked: workers });
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('block', NULL, 'factory', 'warn', ?, ?)")
@@ -91,6 +97,15 @@ export async function pullFromRings(env: Env, name: string, note: string): Promi
   return out;
 }
 
+/**
+ * A block covers the package, every architecture and every ring (#242): it
+ * leaves the rings, its builds in flight or staged stop, and the review it
+ * stood on is withdrawn with the block's reason — the package goes back to
+ * the factory, and once another maintainer lifts the block it is built and
+ * reviewed again from the start (the bumps of an approval no longer
+ * standing never queue). Everything of the package's until now is a
+ * closed round: its targets start from what is built after.
+ */
 export async function handleBlockPackage(c: Contributor, name: string, request: Request, env: Env): Promise<Response> {
   const denied = need(c);
   if (denied) return denied;
@@ -102,17 +117,23 @@ export async function handleBlockPackage(c: Contributor, name: string, request: 
   const at = new Date().toISOString();
   const note = `blocked by ${c.login}: ${b.reason.slice(0, 200)}`;
   const rings = await pullFromRings(env, name, note);
+  const withdrawn = (await env.DB.prepare(`SELECT id, review_id, arch FROM approvals WHERE name = ? AND ${standsSql()} ORDER BY id`).bind(name).all<{ id: number; review_id: number | null; arch: string }>()).results;
   await env.DB.batch([
-    env.DB.prepare("UPDATE factory_packages SET status = 'rejected', blocked_at = ?, blocked_by = ?, blocked_reason = ?, detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(at, c.login, b.reason, note, name),
+    env.DB.prepare("UPDATE factory_packages SET status = 'rejected', blocked_at = ?, blocked_by = ?, blocked_reason = ?, detail = ?, closed_through = MAX(closed_through, COALESCE((SELECT MAX(t.id) FROM build_tasks t WHERE t.name = factory_packages.name AND t.kind = 'build'), 0)), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(at, c.login, b.reason, note, name),
     env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = ? WHERE name = ? AND kind IN ('build', 'publish') AND status IN ('queued', 'leased', 'staged')").bind(note, name),
     env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = 'the build it audited was blocked' WHERE kind = 'audit' AND status = 'queued' AND json_extract(params, '$.name') = ?").bind(name),
+    // The review it stood on, every architecture of it: withdrawn by the block, with its reason.
+    env.DB.prepare(`UPDATE approvals SET withdrawn_at = ?, withdrawn_by = ?, withdrawn_reason = ? WHERE name = ? AND ${standsSql()}`).bind(at, c.login, note, name),
+    env.DB.prepare("UPDATE reviews SET withdrawn_at = ?, withdrawn_by = ?, withdrawn_reason = ? WHERE name = ? AND decision = 'approved' AND withdrawn_at IS NULL").bind(at, c.login, note, name),
   ]);
+  await settleTargets(env, name);
   const key = pkg.request_id ? recordKey(name, pkg.request_id, `decision-${stamp()}.json`) : `factory/${name}/0/decision-${stamp()}.json`;
-  const record = await putRecord(env, key, { schema: "omarchy-pool/decision/1", decision: "block", name, owner: pkg.owner, by: c.login, at, reason: b.reason, rings });
+  const reviews = [...new Set(withdrawn.map((a) => a.review_id ?? a.id))];
+  const record = await putRecord(env, key, { schema: "omarchy-pool/decision/1", decision: "block", name, owner: pkg.owner, by: c.login, at, reason: b.reason, rings, withdrawn: { reviews, approvals: withdrawn.map((a) => a.id), arches: [...new Set(withdrawn.map((a) => a.arch))] } });
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('block', NULL, 'factory', 'warn', ?, ?)")
-    .bind(`${name} blocked by ${c.login}: ${b.reason.slice(0, 140)}${rings.length ? " — pulled from " + rings.map((r) => r.ring).join(", ") : ""}`, JSON.stringify({ name, owner: pkg.owner, by: c.login, reason: b.reason, rings, record: recordUrl(env, record.key) }))
+    .bind(`${name} blocked by ${c.login}: ${b.reason.slice(0, 140)}${rings.length ? " — pulled from " + rings.map((r) => r.ring).join(", ") : ""}${reviews.length ? ` — the approval withdrawn, back to the factory` : ""}`, JSON.stringify({ name, owner: pkg.owner, by: c.login, reason: b.reason, rings, withdrawn: reviews, record: recordUrl(env, record.key) }))
     .run();
-  return json({ blocked: name, by: c.login, at, rings, record: recordUrl(env, record.key) });
+  return json({ blocked: name, by: c.login, at, rings, withdrawn: reviews, record: recordUrl(env, record.key) });
 }
 
 export async function handleUnblockPackage(c: Contributor, name: string, request: Request, env: Env): Promise<Response> {
@@ -124,7 +145,8 @@ export async function handleUnblockPackage(c: Contributor, name: string, request
   if (!pkg?.blocked_at) return json({ error: `${name} is not blocked` }, 409);
   if (pkg.blocked_by === c.login) return json({ error: `${c.login} blocked ${name}; another maintainer lifts it` }, 403);
   const at = new Date().toISOString();
-  await env.DB.prepare("UPDATE factory_packages SET blocked_at = NULL, blocked_by = NULL, blocked_reason = NULL, detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(`block lifted by ${c.login}: ${b.reason.slice(0, 200)}; a new build starts it over`, name).run();
+  // Back to the factory: registered, its owner's; a new build and a new review start it over.
+  await env.DB.prepare("UPDATE factory_packages SET status = 'registered', blocked_at = NULL, blocked_by = NULL, blocked_reason = NULL, detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(`block lifted by ${c.login}: ${b.reason.slice(0, 200)}; a new build starts it over`, name).run();
   const key = pkg.request_id ? recordKey(name, pkg.request_id, `decision-${stamp()}.json`) : `factory/${name}/0/decision-${stamp()}.json`;
   const record = await putRecord(env, key, { schema: "omarchy-pool/decision/1", decision: "unblock", name, owner: pkg.owner, by: c.login, at, reason: b.reason, lifted: { blocked_at: pkg.blocked_at, blocked_by: pkg.blocked_by } });
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('block', NULL, 'factory', 'ok', ?, ?)")

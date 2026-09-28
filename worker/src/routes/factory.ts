@@ -11,6 +11,7 @@ import { chains, chainOf, storyRows, requestView, placeInQueue, stands, type Cha
 import { betterIdleWorker, FIRST_PICK_MINUTES } from "../queue";
 import { updateMessage, updateState } from "../update";
 import { version as running, RINGS, ringsSql, sortRings, REPO_ARCHES, WORKER_ALIVE_MINUTES, type RunningVersion } from "../meta";
+import { parseTargets, settleTargets } from "../targets";
 
 /**
  * The factory's brain. Cloudflare is the source of truth for package
@@ -173,6 +174,8 @@ export async function handleCancelTask(id: number, env: Env): Promise<Response> 
   if (!res.meta.changes) return json({ error: "task is not queued or leased" }, 409);
   // What a leased worker had already staged: the lease is void, its next PUT is refused, the packages go.
   await reclaimStagingPackages(env, [id]);
+  const t = await env.DB.prepare("SELECT name, kind FROM build_tasks WHERE id = ?").bind(id).first<{ name: string; kind: string }>();
+  if (t?.kind === "build") await settleTargets(env, t.name);
   return json({ task: id, status: "cancelled" });
 }
 
@@ -450,6 +453,8 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   if (task.trust === "community" && task.kind === "build") {
     await env.DB.prepare("UPDATE factory_packages SET status = 'building', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(`building on ${workerId} (${task.arch})`, task.name).run();
   }
+  // The package's architecture is being built — by its contributor, or again by the project: its target says so.
+  if (task.kind === "build") await settleTargets(env, task.name);
   // The job's own credential: exactly the routes this task needs, until the lease ends.
   const params = task.params ? (JSON.parse(task.params) as Record<string, unknown>) : {};
   const expires = Math.floor(Date.now() / 1000) + LEASE_MINUTES * 60;
@@ -575,6 +580,8 @@ export async function handleComplete(id: number, request: Request, env: Env, act
           await event(env, "build", "warn", `${task.name}: attestation not written — ${String(e)}`, { task: built, sha256: res.sha256 });
         }
       }
+      // This architecture of the package is in the pool; the others say where they are.
+      await settleTargets(env, task.name);
     }
     if (task.kind === "audit" && p.task) {
       // The second agent's report joins the evidence on the record.
@@ -659,6 +666,7 @@ export async function handleComplete(id: number, request: Request, env: Env, act
         .bind(task.name, task.arch, b.version ?? null, `staging:${id}`, `staged as task ${id}`, JSON.stringify({ task: id, name: task.name, arch: task.arch, version: b.version ?? null, files: [b.filename] }))
         .run();
     }
+    await settleTargets(env, task.name);
     return json({ task: id, status: "staged", staged_prefix: prefix });
   }
   // The result must be in the pool. A rebuild of a version already stored
@@ -693,6 +701,7 @@ export async function handleComplete(id: number, request: Request, env: Env, act
     ]);
   }
   await event(env, "build", "ok", `${task.name} ${b.version ?? ""} built for ${task.arch} by ${who}${b.duration_ms ? " in " + Math.round(b.duration_ms / 60000) + " min" : ""}${task.publish === 0 ? " (dry run, not published)" : ""}`, { task: id, arch: task.arch, sha256: indexed.sha256, filename: b.filename, worker: who, attempts: task.attempts, duration_ms: b.duration_ms ?? null });
+  if (task.publish !== 0) await settleTargets(env, task.name);
   // The seal, next to the object: the chain that produced it, signed by the pool.
   let attested = false;
   if (task.publish !== 0) {
@@ -712,19 +721,27 @@ export async function handleComplete(id: number, request: Request, env: Env, act
  * last worker to speak: while any build of the name is staged for a
  * maintainer the package stays `staged` — Review counts it as waiting and
  * the tile must not count it as not built — and only the detail says what
- * the other architecture ran into; with nothing staged it goes to `fallback`
- * (registered with the reason, or waiting when the task is queued again).
- * omarchy-cli, 2026-09-18: aarch64 staged at 03:50, x86_64 gave up at 03:59
- * and the row read `registered` beside a build waiting for review. The
- * staging-drop handler (contributors.ts) keeps the same rule from its side.
- * `only` narrows the write to a package in that status (the lease path
- * touches a package it left `building`; a worker's own report touches the
- * package whatever the claim or the other architecture wrote since).
+ * the other architecture ran into; while another architecture's build is
+ * still running or queued, it is `building` or `waiting` — one that failed
+ * is not supported, and the others go on (#242); with nothing staged and
+ * nothing in flight it goes to `fallback`: registered with the reason — no
+ * architecture built, the request is back with its owner — or waiting when
+ * the task is queued again. Each architecture's own word is its target
+ * (targets.ts). omarchy-cli, 2026-09-18: aarch64 staged at 03:50, x86_64
+ * gave up at 03:59 and the row read `registered` beside a build waiting for
+ * review. The staging-drop handler (contributors.ts) keeps the same rule
+ * from its side. `only` narrows the write to a package in that status (the
+ * lease path touches a package it left `building`; a worker's own report
+ * touches the package whatever the claim or the other architecture wrote
+ * since).
  */
 async function packageAfterFailure(env: Env, name: string, fallback: "registered" | "waiting", detail: string, only?: "building"): Promise<void> {
   await env.DB.prepare(
     `UPDATE factory_packages SET
-       status = CASE WHEN EXISTS (SELECT 1 FROM build_tasks t WHERE t.kind = 'build' AND t.status = 'staged' AND t.name = factory_packages.name) THEN 'staged' ELSE ? END,
+       status = CASE WHEN EXISTS (SELECT 1 FROM build_tasks t WHERE t.kind = 'build' AND t.status = 'staged' AND t.name = factory_packages.name) THEN 'staged'
+                     WHEN EXISTS (SELECT 1 FROM build_tasks t WHERE t.status = 'leased' AND t.kind = 'build' AND t.trust = 'community' AND t.name = factory_packages.name) THEN 'building'
+                     WHEN EXISTS (SELECT 1 FROM build_tasks t WHERE t.status = 'queued' AND t.kind = 'build' AND t.trust = 'community' AND t.name = factory_packages.name) THEN 'waiting'
+                     ELSE ? END,
        detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
      WHERE name = ?${only ? " AND status = ?" : ""}`,
   )
@@ -784,6 +801,7 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
   } else if (review !== undefined && needsNative) {
     await env.DB.prepare("UPDATE factory_packages SET detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(`the project's build (task ${id}) waits for a native ${task.arch} worker`, task.name).run();
   }
+  if (task.kind === "build") await settleTargets(env, task.name);
   const attempts = needsNative ? task.attempts - 1 : task.attempts;
   const tale = needsNative ? ` on ${who} needs a native ${task.arch} worker — back in the queue for one${task.pinned_to ? `, the pin to ${task.pinned_to} dropped` : ""}` : ` failed on ${who} (attempt ${task.attempts}/${task.max_attempts})${b.final ? " — the recipe's, not retried" : exhausted ? " — giving up" : " — back in the queue"}`;
   await event(env, "build", exhausted ? "error" : "warn", `${task.name} for ${task.arch}${tale}: ${error.slice(0, 120)}`, { task: id, arch: task.arch, worker: who, attempts, exhausted, final: b.final === true, needs_native: needsNative });
@@ -813,6 +831,7 @@ export async function requeueExpiredLeases(env: Env): Promise<number> {
     if (t.trust === "community" && t.kind === "build") {
       await packageAfterFailure(env, t.name, exhausted ? "registered" : "waiting", exhausted ? `build failed on ${t.lease_owner}: ${error} (the worker stopped mid-build?)` : `${error}; queued again`, "building");
     }
+    if (t.kind === "build") await settleTargets(env, t.name);
     await event(env, "build", exhausted ? "error" : "warn", `${t.name} for ${t.arch}: ${error}${exhausted ? " — giving up" : " — back in the queue"}`, { task: t.id, worker: t.lease_owner, attempts: t.attempts });
   }
   return expired.results.length;
@@ -953,7 +972,7 @@ export async function handleTask(id: number, env: Env): Promise<Response> {
              FROM approvals a LEFT JOIN build_tasks r ON r.id = a.rebuild_task WHERE a.task_id = ? OR a.rebuild_task = ? ORDER BY a.id DESC LIMIT 1`,
         ).bind(task.id, task.id).first()
       : null,
-    env.DB.prepare("SELECT name, owner, url, status, category, request_id, description, license, project, created_at FROM factory_packages WHERE name = ?").bind(task.name).first(),
+    env.DB.prepare("SELECT name, owner, url, status, category, request_id, description, license, project, targets, created_at FROM factory_packages WHERE name = ?").bind(task.name).first<Record<string, unknown>>(),
     env.DB.prepare("SELECT key, size, uploaded_at FROM staging_objects WHERE task_id = ? ORDER BY key").bind(task.id).all<{ key: string; size: number; uploaded_at: string }>(),
   ]);
   // The chain this task is in — the contributor's build, the project's, the audit, the trial, the decision — and its score (score.ts), from the package's story.
@@ -982,7 +1001,8 @@ export async function handleTask(id: number, env: Env): Promise<Response> {
       chain,
       score: chain?.score ?? null,
       rings,
-      package: pkg,
+      // The package this is a build of, with where each of its architectures stands (targets.ts).
+      package: pkg ? { ...pkg, targets: parseTargets(pkg.targets) } : null,
       request,
       evidence: objects.results.map((o) => {
         const name = o.key.split("/").pop() ?? o.key;
