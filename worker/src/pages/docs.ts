@@ -54,7 +54,18 @@ export function docsHtml(poolUrl: string, version: RunningVersion): string {
  * or the code block that is the chapter's substance.
  */
 const CHAPTER_ANCHORS: Partial<Record<DocKey, string[]>> = {
-  "omarchy-cli-mcp": ["<th>Tool</th><th>Arguments</th><th>Answers</th>", '<pre><code class="lang-json">', `href="${REPO_URL}/blob/main/docs/omarchy-cli.config.toml"`],
+  // The write tools are a proposal waiting for a maintainer's sign-off (#252): the draft says so above its table, and its questions close it — the same chapter must not read as a description of tools that exist.
+  "omarchy-cli-mcp": [
+    "<th>Tool</th><th>Arguments</th><th>Answers</th>",
+    '<pre><code class="lang-json">',
+    `href="${REPO_URL}/blob/main/docs/omarchy-cli.config.toml"`,
+    "<blockquote><p><strong>Draft.</strong> Nothing in this section is built.",
+    "<th>Tool</th><th>Role</th><th>Input</th><th>Answers</th>",
+    "<th>Tool</th><th>Worker route</th><th>Today</th>",
+    'id="the-agent-drafts-the-person-confirms"',
+    'id="questions-for-the-maintainers"',
+    'href="/docs/security-model#principles"',
+  ],
   // The score and who does what: /build and /packages link here.
   "what-we-test": ['id="the-score"', 'id="who-does-what"', "<th>The contributor's half</th><th>points</th><th>The maintainer's half</th><th>points</th>"],
   architecture: ['href="/docs/proof-of-concept#results"', 'href="/docs/omarchy-cli-mcp"', `href="${REPO_URL}/blob/main/docs/omarchy-cli.config.toml"`, "<th>Route</th><th>Purpose</th>", '<figure class="diagram">'],
