@@ -49,7 +49,8 @@ export async function handleBlockContributor(c: Contributor, login: string, requ
     env.DB.prepare("UPDATE build_tasks SET pinned_to = NULL, shared_after = NULL WHERE status = 'queued' AND pinned_to IN (SELECT id FROM build_workers WHERE owner = ?)").bind(login),
     env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = ? WHERE owner = ? AND trust = 'community' AND status IN ('queued', 'leased', 'staged')").bind(`${login} was blocked by ${c.login}: ${b.reason.slice(0, 200)}`, login),
     env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = 'the build it audited was cancelled: its owner was blocked' WHERE kind = 'audit' AND status = 'queued' AND json_extract(params, '$.owner') = ?").bind(login),
-    env.DB.prepare("UPDATE factory_packages SET status = 'rejected', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE owner = ?").bind(`owner blocked by ${c.login}: ${b.reason.slice(0, 200)}`, login),
+    // Rejected, and held: a block frees none of their names (contributors.ts, nameIsFree) — a name a review had already freed, and nobody built since, stays free.
+    env.DB.prepare("UPDATE factory_packages SET status = 'rejected', freed_by_review = CASE WHEN status = 'rejected' THEN freed_by_review END, detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE owner = ?").bind(`owner blocked by ${c.login}: ${b.reason.slice(0, 200)}`, login),
   ]);
   // Their builds stopped: each package's architectures say so.
   await settleTargets(env, packages);
@@ -119,7 +120,7 @@ export async function handleBlockPackage(c: Contributor, name: string, request: 
   const rings = await pullFromRings(env, name, note);
   const withdrawn = (await env.DB.prepare(`SELECT id, review_id, arch FROM approvals WHERE name = ? AND ${standsSql()} ORDER BY id`).bind(name).all<{ id: number; review_id: number | null; arch: string }>()).results;
   await env.DB.batch([
-    env.DB.prepare("UPDATE factory_packages SET status = 'rejected', blocked_at = ?, blocked_by = ?, blocked_reason = ?, detail = ?, closed_through = MAX(closed_through, COALESCE((SELECT MAX(t.id) FROM build_tasks t WHERE t.name = factory_packages.name AND t.kind = 'build'), 0)), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(at, c.login, b.reason, note, name),
+    env.DB.prepare("UPDATE factory_packages SET status = 'rejected', blocked_at = ?, blocked_by = ?, blocked_reason = ?, detail = ?, closed_through = MAX(closed_through, COALESCE((SELECT MAX(t.id) FROM build_tasks t WHERE t.name = factory_packages.name AND +t.kind = 'build'), 0)), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(at, c.login, b.reason, note, name),
     env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = ? WHERE name = ? AND kind IN ('build', 'publish') AND status IN ('queued', 'leased', 'staged')").bind(note, name),
     env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = 'the build it audited was blocked' WHERE kind = 'audit' AND status = 'queued' AND json_extract(params, '$.name') = ?").bind(name),
     // The review it stood on, every architecture of it: withdrawn by the block, with its reason.

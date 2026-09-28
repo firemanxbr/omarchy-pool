@@ -459,6 +459,8 @@ pub=$(jq -r .publish <<<"$ap")
 # The publish job, as a project worker runs it: the staged package fetched with the job's token, published into edge as source factory (the pool signs), the job completed.
 cj=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/claim" "${wpx[@]}" -d '{"arch":"x86_64","kinds":["publish"]}')
 [[ "$(jq -r .task.id <<<"$cj")" == "$pub" && "$(jq -r .task.arch <<<"$cj")" == x86_64 ]] || { echo "the project's worker did not get the publish job: $cj"; exit 1; }
+# It names its review as review_id: `review` in a task's params is the contributor's build a project's build answers — a publish job has no staging of its own to upload to.
+[[ "$(jq -r .task.params.review_id <<<"$cj")" == "$(jq -r .review <<<"$ap")" && "$(jq -r '.task.params | has("review")' <<<"$cj")" == false && "$(jq -r .upload <<<"$cj")" == null ]] || { echo "the publish job must carry its review as review_id, and no upload: $cj"; exit 1; }
 pj=$(jq -r .token <<<"$cj")
 mkdir -p "$E2E/ident/publish"
 curl -sf -o "$E2E/ident/publish/e2e-ident-1.0-1-x86_64.pkg.tar.zst" "$OMARCHY_API/api/v1/factory/tasks/$px/artifacts/e2e-ident-1.0-1-x86_64.pkg.tar.zst" -H "authorization: Bearer $pj" || { echo "the publish job could not fetch the project's build"; exit 1; }

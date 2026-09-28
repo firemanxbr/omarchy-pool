@@ -3,7 +3,7 @@ import { version as running, RINGS, ringsSql, sortRings } from "../meta";
 import { queuePosition } from "../queue";
 import { maintainersOf } from "../governance";
 import { registrationsOf, rights, workersOf, workspace, type Contributor } from "./contributors";
-import { asReviews, stands } from "./review";
+import { asReviews, stands, wholeReviews } from "./review";
 import { aliveSince, workerView, type WorkerRow } from "./factory";
 import { standsSql } from "./story";
 import { parseTargets } from "../targets";
@@ -70,6 +70,12 @@ export async function recordOf(env: Env, login: string): Promise<TrackRecord> {
   return { ...r, score: scoreOf(r) };
 }
 
+/** A person's decisions as the record keeps them: each row with its review's own word on it — the architectures it decided, those not supported, whether it freed the name. */
+const DECISIONS = `SELECT a.id, a.task_id, a.name, a.arch, a.version, a.decision, a.by, a.note, a.rebuild_task, a.created_at, a.withdrawn_at, a.withdrawn_by, a.withdrawn_reason, a.review_id,
+                          v.arches AS review_arches, v.not_supported AS review_not_supported, v.released AS review_released
+                     FROM approvals a LEFT JOIN reviews v ON v.id = a.review_id`;
+type DecisionOf = { id: number; task_id: number; name: string; arch: string; version: string | null; decision: string; by: string; note: string | null; rebuild_task: number | null; created_at: string; withdrawn_at: string | null; withdrawn_by: string | null; withdrawn_reason: string | null; review_id: number | null; review_arches: string | null; review_not_supported: string | null; review_released: number | null };
+
 export async function handleUser(login: string, env: Env): Promise<Response> {
   const person = await env.DB.prepare("SELECT login, name, avatar_url, role, created_at, last_seen, blocked_at, blocked_by, blocked_reason FROM contributors WHERE login = ?")
     .bind(login)
@@ -92,19 +98,28 @@ export async function handleUser(login: string, env: Env): Promise<Response> {
     )
       .bind(login)
       .first<{ staged: number; published: number; failed: number; total: number }>(),
-    env.DB.prepare(`SELECT id, task_id, name, arch, version, decision, by, note, rebuild_task, created_at, withdrawn_at, withdrawn_by, withdrawn_reason, review_id FROM approvals WHERE by = ? ORDER BY id DESC LIMIT 50`).bind(login).all<{ id: number; task_id: number; name: string; arch: string; version: string | null; decision: string; by: string; note: string | null; rebuild_task: number | null; created_at: string; withdrawn_at: string | null; withdrawn_by: string | null; withdrawn_reason: string | null; review_id: number | null }>(),
+    env.DB.prepare(`${DECISIONS} WHERE a.by = ? ORDER BY a.id DESC LIMIT 50`).bind(login).all<DecisionOf>(),
     // Every worker under this name, the revoked ones too (the page says so on the row): the whole row, served through the listing's own view (workerView) so the page's tile and tables count the same rows by the same words.
     env.DB.prepare("SELECT * FROM build_workers WHERE owner = ? ORDER BY last_seen DESC").bind(login).all<WorkerRow>(),
     maintainersOf(env),
     recordOf(env, login),
   ]);
+  // A review whose rows straddle the fifty: the rest of its rows, so the page lists it whole (they are all this person's — a review is one maintainer's).
+  const decided = await wholeReviews(approvals.results, async (reviews, below) =>
+    (await env.DB.prepare(`${DECISIONS} WHERE a.review_id IN (SELECT value FROM json_each(?)) AND a.id < ?`).bind(JSON.stringify(reviews), below).all<DecisionOf>()).results);
   // Packages this person approved into the pool (what they maintain, in practice): the approvals that stand, a withdrawn one no longer theirs to keep.
-  const approvedNames = [...new Set(approvals.results.filter(stands).map((a) => a.name))];
-  // Where each standing approval's architecture is served today: the rings, from the factory's rows in each ring.
+  const approvedNames = [...new Set(decided.filter(stands).map((a) => a.name))];
+  // Where each standing approval's architecture is served today — the rings, from the factory's rows in each ring — in one read: each
+  // (name, arch) seeks the (name, repo_arch, source) index, then the ring table's key per ring. CROSS JOIN holds that order: the
+  // planner, left to itself, walked every row of the four rings instead (one query per approval did the same, one after another).
+  const pairs = [...new Set(decided.filter(stands).map((a) => JSON.stringify([a.name, a.arch])))];
   const served = new Map<string, string[]>();
-  for (const a of approvals.results.filter(stands)) {
-    const k = `${a.name}\t${a.arch}`;
-    if (!served.has(k)) served.set(k, (await env.DB.prepare(`SELECT DISTINCT rp.ring FROM ring_packages rp JOIN packages p ON p.id = rp.package_id WHERE p.name = ? AND p.repo_arch = ? AND p.source = 'factory' AND rp.ring IN (${ringsSql(RINGS)})`).bind(a.name, a.arch).all<{ ring: string }>()).results.map((r) => r.ring));
+  if (pairs.length) {
+    const rows = await env.DB.prepare(
+      `SELECT DISTINCT rp.ring, p.name, p.repo_arch AS arch FROM json_each(?) k CROSS JOIN packages p CROSS JOIN ring_packages rp
+        WHERE p.name = json_extract(k.value, '$[0]') AND p.repo_arch = json_extract(k.value, '$[1]') AND p.source = 'factory' AND rp.package_id = p.id AND rp.ring IN (${ringsSql(RINGS)})`,
+    ).bind(`[${pairs.join(",")}]`).all<{ ring: string; name: string; arch: string }>();
+    for (const r of rows.results) served.set(`${r.name}\t${r.arch}`, [...(served.get(`${r.name}\t${r.arch}`) ?? []), r.ring]);
   }
   const alive = aliveSince(), pool = running(env);
   return json(
@@ -124,7 +139,7 @@ export async function handleUser(login: string, env: Env): Promise<Response> {
       builds: await Promise.all(builds.results.map(async (b) => (b.status === "queued" && b.trust === "community" ? { ...b, queue: await queuePosition(env, b as { id: number; arch: string; priority?: number; shared_after?: string | null; pinned_to?: string | null }) } : b))),
       build_counts: counts ?? { staged: 0, published: 0, failed: 0, total: 0 },
       // Every decision as the review it is (one per package, its architectures in `arches` and `targets`), saying whether it stands (`standing`, as GET /factory/approvals says it), and a standing one where the package is today: the rings that serve it.
-      approvals: asReviews(approvals.results, (name, arch) => sortRings(served.get(`${name}\t${arch}`) ?? [])),
+      approvals: asReviews(decided, (name, arch) => sortRings(served.get(`${name}\t${arch}`) ?? [])),
       approved_packages: approvedNames,
       record,
       workers: workers.results.map((w) => workerView(w, alive, pool)),

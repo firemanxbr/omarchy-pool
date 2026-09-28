@@ -104,9 +104,9 @@ const SCRIPT = String.raw`
     setTiles("#tiles", down ? tilesUnanswered(tiles, down) : tiles);
   }
 
-  // ---- yours: one line per package of yours in the flow — waiting first, then decided; the ring is the one the line is about (the lab for a build waiting, the ring an approval landed in). Where the package's architectures stand is the chips (targetChips); a line without them names the architectures it is about.
-  function row(cls, name, version, ring, arch, state, line, link, targets) {
-    var where = targetChips(targets) || '<span class="pill none">' + esc(arch) + '</span>';
+  // ---- yours: one line per package of yours in the flow — waiting first, then decided; the ring is the one the line is about (the lab for a build waiting, the ring an approval landed in), the architecture the one the package's link opens on. Where the package's architectures stand is the chips (targetChips); a line without them names the architectures it is about (label, the architecture itself when none is given).
+  function row(cls, name, version, ring, arch, state, line, link, targets, label) {
+    var where = targetChips(targets) || '<span class="pill none">' + esc(label || arch) + '</span>';
     return '<div class="rrow ' + cls + '"><div class="n">' + pkg(name, version, ring, arch) + '</div>' + where + '<div class="s">' + state + ' ' + line + '</div>' + (link ? '<a class="go" href="' + esc(link[0]) + '">' + link[1] + '</a>' : '<span></span>') + '</div>';
   }
   function short(t, n) { t = String(t || ""); return t.length > n ? '<span title="' + esc(t) + '">' + esc(t.slice(0, n - 1)) + '…</span>' : esc(t); }
@@ -146,9 +146,10 @@ const SCRIPT = String.raw`
     APPROVALS.forEach(function (a) { if (mine[a.name] && !last[a.name]) last[a.name] = a; });
     Object.keys(last).forEach(function (k) {
       var a = last[k], tg = mine[a.name] && mine[a.name].targets;
-      if (a.withdrawn_at) decided.push(row("act", a.name, a.version, servedRing(a.rings), archesOf(a), taskPill("withdrawn"), 'the approval by ' + personLink(a.by) + ' was withdrawn ' + ago(a.withdrawn_at) + ' by ' + personLink(a.withdrawn_by) + ': ' + short(a.withdrawn_reason, 100) + ' — another maintainer decides', ["/build/" + a.task_id, "The build →"], tg));
-      else if (a.decision === "rejected") decided.push(row("act", a.name, a.version, servedRing(a.rings), archesOf(a), taskPill("rejected"), ago(a.created_at) + ' by ' + personLink(a.by) + ': ' + short(a.note, 110) + (a.released ? ' — the name is free again' : ''), ["/request", "Request it again →"], tg));
-      else { var where = approvalWhere(a), served = !!(a.rings && a.rings.length); decided.push(row(where.cls === "error" ? "act" : "ok", a.name, a.version, servedRing(a.rings), archesOf(a), taskPill("approved"), ago(a.created_at) + ' by ' + personLink(a.by) + ' — ' + pillHtml(where.cls, where.word, where.title) + (a.note ? ' · ' + short(a.note, 80) : ''), served ? [pkgHref(a.name, servedRing(a.rings), a.arch), "The package →"] : ["/build/" + a.task_id, "The build →"], tg)); }
+      if (a.withdrawn_at) decided.push(row("act", a.name, a.version, servedRing(a.rings), a.arch, taskPill("withdrawn"), 'the approval by ' + personLink(a.by) + ' was withdrawn ' + ago(a.withdrawn_at) + ' by ' + personLink(a.withdrawn_by) + ': ' + short(a.withdrawn_reason, 100) + ' — another maintainer decides', ["/build/" + a.task_id, "The build →"], tg, archesOf(a)));
+      // A rejected request freed its name: request it again. A rejected new version of a package in the pool did not — the name and the approved version stay, the next version is built again.
+      else if (a.decision === "rejected") decided.push(row("act", a.name, a.version, servedRing(a.rings), a.arch, taskPill("rejected"), ago(a.created_at) + ' by ' + personLink(a.by) + ': ' + short(a.note, 110) + (a.released ? ' — the name is free again' : ''), a.released ? ["/request", "Request it again →"] : ["/factory", "Fix it, build again →"], tg, archesOf(a)));
+      else { var where = approvalWhere(a), served = !!(a.rings && a.rings.length); decided.push(row(where.cls === "error" ? "act" : "ok", a.name, a.version, servedRing(a.rings), a.arch, taskPill("approved"), ago(a.created_at) + ' by ' + personLink(a.by) + ' — ' + pillHtml(where.cls, where.word, where.title) + (a.note ? ' · ' + short(a.note, 80) : ''), served ? [pkgHref(a.name, servedRing(a.rings), a.arch), "The package →"] : ["/build/" + a.task_id, "The build →"], tg, archesOf(a))); }
     });
     $("#mine-waiting").innerHTML = waiting.join("") || '<p class="sub" style="margin:0">Nothing of yours waiting. <a href="/request">Request a package →</a></p>';
     // Both groups stay for a maintainer with nothing of their own too: the block reads the same for every role, the empty line included — once the reader's own packages answered; before, or when they did not, the line says that.
@@ -393,7 +394,7 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     id: "review.yours-decided",
     page: "/review",
     anchor: ['id="g-decided"', 'id="mine-decided"'],
-    script: ['$("#mine-decided")', "No decision on a package of yours yet", "once you are signed in", "MINE.packages", "a.withdrawn_at", "a.rings", "servedRing(a.rings)", "approvalWhere(a)", "pillHtml(where.cls, where.word, where.title)", "pkgHref(a.name, servedRing(a.rings), a.arch)", "blocks.packages", '$("#mine-decided").innerHTML = unanswered(DOWN)', 'noAnswer("list of your packages", e)', "unanswered(MINE_DOWN)", "if (mine[a.name] && !last[a.name])", "archesOf(a)", "a.released"],
+    script: ['$("#mine-decided")', "No decision on a package of yours yet", "once you are signed in", "MINE.packages", "a.withdrawn_at", "a.rings", "servedRing(a.rings)", "approvalWhere(a)", "pillHtml(where.cls, where.word, where.title)", "pkgHref(a.name, servedRing(a.rings), a.arch)", "blocks.packages", '$("#mine-decided").innerHTML = unanswered(DOWN)', 'noAnswer("list of your packages", e)', "unanswered(MINE_DOWN)", "if (mine[a.name] && !last[a.name])", "archesOf(a)", "a.released", 'a.released ? ["/request", "Request it again →"] : ["/factory", "Fix it, build again →"]', "tg, archesOf(a)", "esc(label || arch)"],
     reads: [
       { path: "/api/v1/factory/approvals", fields: ["approvals.0.name", "approvals.0.arch", "approvals.0.arches", "approvals.0.version", "approvals.0.decision", "approvals.0.by", "approvals.0.note", "approvals.0.created_at", "approvals.0.withdrawn_at", "approvals.0.withdrawn_by", "approvals.0.withdrawn_reason", "approvals.0.rings", "approvals.0.publish_status", "approvals.0.blocked_at", "approvals.0.task_id", "approvals.0.released"] },
       { path: "/api/v1/factory/me", as: "owner", fields: ["contributor.login", "packages", "packages.0.name", "packages.0.targets"] },

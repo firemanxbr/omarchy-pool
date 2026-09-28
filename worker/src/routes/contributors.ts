@@ -476,11 +476,11 @@ export async function handleRequestPackage(c: Contributor, request: Request, env
   ).bind(parsed.project, (parsed.source ?? (b.source ?? "").trim()), c.login).first<{ owner: string; name: string }>();
   if (tainted) return json({ error: `${parsed.project} was requested by ${tainted.owner}, who is blocked; a maintainer must lift that first` }, 403);
   // Who has this name, who has this project.
-  const byName = await env.DB.prepare("SELECT owner, status, project, release, blocked_at, blocked_reason FROM factory_packages WHERE name = ?").bind(name).first<{ owner: string; status: string; project: string | null; release: string | null; blocked_at: string | null; blocked_reason: string | null }>();
+  const byName = await env.DB.prepare("SELECT owner, status, detail, project, release, request_id, freed_by_review, blocked_at, blocked_reason FROM factory_packages WHERE name = ?").bind(name).first<Held & { project: string | null; release: string | null; blocked_at: string | null; blocked_reason: string | null }>();
   if (byName?.blocked_at) return json({ error: `${name} is blocked by a maintainer: ${byName.blocked_reason ?? ""}`.trim() }, 403);
   // An unmaintained name (thirty days without a build) is anyone's to take over: the registration becomes theirs, the package stays served until their build is decided.
-  // A rejected request freed its name (#242): anyone may request it again — a package still in the pool keeps it (the approval, below).
-  if (byName && byName.owner !== c.login && !FREE_NAME.includes(byName.status)) return json({ error: `${name} is ${byName.status}, requested by ${byName.owner}` }, 409);
+  // A request a review rejected freed its name (#242): anyone may request it again — a package still in the pool keeps it (the approval, below), and a contributor's block frees none of theirs.
+  if (byName && byName.owner !== c.login && !nameIsFree(byName)) return json({ error: `${name} is ${byName.status}, requested by ${byName.owner}` }, 409);
   const takeover = byName && byName.owner !== c.login ? { from: byName.owner, why: byName.status === "rejected" ? "whose request was rejected" : "who left it unmaintained" } : null;
   const byProject = await env.DB.prepare("SELECT name, owner, status, blocked_at, blocked_reason FROM factory_packages WHERE project = ? AND name != ?").bind(parsed.project, name).first<{ name: string; owner: string; status: string; blocked_at: string | null; blocked_reason: string | null }>();
   if (byProject?.blocked_at) return json({ error: `${parsed.project} is blocked by a maintainer as ${byProject.name}: ${byProject.blocked_reason ?? ""}`.trim() }, 403);
@@ -524,6 +524,11 @@ export async function handleRequestPackage(c: Contributor, request: Request, env
     const holder = await env.DB.prepare("SELECT owner, status FROM factory_packages WHERE name = ?").bind(name).first<{ owner: string; status: string }>();
     return json({ error: `${name} is ${holder?.status ?? "reserved"}, requested by ${holder?.owner ?? "someone else"}` }, 409);
   }
+  // The reservation undone when the request is not on the record after all: a new name is free again, a registration that was there is as it was — its owner, its word, its freed name.
+  const unreserve = async () => {
+    if (!byName) await env.DB.prepare("DELETE FROM factory_packages WHERE name = ? AND owner = ? AND request_id IS NULL").bind(name, c.login).run();
+    else await env.DB.prepare("UPDATE factory_packages SET owner = ?, status = ?, detail = ?, freed_by_review = ? WHERE name = ? AND owner = ? AND request_id IS ?").bind(byName.owner, byName.status, byName.detail, byName.freed_by_review, name, c.login, byName.request_id).run();
+  };
   const recordRequest = async (): Promise<Response> => {
     // A build still waiting in the queue is the old request's — it leaves the queue, and the renewed request queues its own.
     if (byName) await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = ?, finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ? AND kind = 'build' AND trust = 'community' AND status = 'queued'").bind(`superseded: the request was renewed by ${c.login}`, name).run();
@@ -534,7 +539,7 @@ export async function handleRequestPackage(c: Contributor, request: Request, env
       .bind(name, c.login, parsed.project, source, tag, description, license, JSON.stringify(build), JSON.stringify(Object.fromEntries(Object.keys(CHECKLIST).map((k) => [k, true]))), JSON.stringify(detected))
       .first<{ id: number; created_at: string }>();
     if (!req) {
-      if (!byName) await env.DB.prepare("DELETE FROM factory_packages WHERE name = ? AND owner = ? AND request_id IS NULL").bind(name, c.login).run();
+      await unreserve();
       return json({ error: "the request could not be recorded" }, 500);
     }
     const key = recordKey(name, req.id, "request.json");
@@ -568,29 +573,46 @@ export async function handleRequestPackage(c: Contributor, request: Request, env
   try {
     return await recordRequest();
   } catch (e) {
-    // A name reserved a moment ago and never written: free again. A registration that was there stays as it was.
-    if (!byName) await env.DB.prepare("DELETE FROM factory_packages WHERE name = ? AND owner = ? AND request_id IS NULL").bind(name, c.login).run();
+    // A name reserved a moment ago and never written: free again, or back to whoever held it.
+    await unreserve();
     throw e;
   }
 }
 
-/** The statuses in which a registration's name is free for anyone to request: left unmaintained, or rejected (#242). */
-const FREE_NAME = ["unmaintained", "rejected"];
+/** A registration as the name's rule reads it: whose, its word, and what freed it. */
+interface Held { owner: string; status: string; detail: string | null; request_id: number | null; freed_by_review: number | null }
+
+/**
+ * Whether a registration's name is free for anyone to request: left
+ * unmaintained, or `rejected` by a review that freed it (#242) — a
+ * contributor's block writes `rejected` on their registrations too, and
+ * holds their names (docs/GOVERNANCE.md, *Blocking*). FREE_SQL is the same
+ * rule for the reservation's statement.
+ */
+export function nameIsFree(r: Pick<Held, "status" | "freed_by_review">): boolean {
+  return r.status === "unmaintained" || (r.status === "rejected" && r.freed_by_review !== null);
+}
+const FREE_SQL = "(factory_packages.status = 'unmaintained' OR (factory_packages.status = 'rejected' AND factory_packages.freed_by_review IS NOT NULL))";
 
 /**
  * A request reserves its name, in one statement (#242: the name is the
  * package): a new name is inserted as the caller's registration; an
  * existing one is taken only while it is the caller's to take — their own
- * (a renewal), left unmaintained, or freed by a rejection — and not
- * blocked. Two requests for one name at the same moment: one of them has
- * it, the other gets false and is told whose it is. The registration is
- * written whole once the request is on the record.
+ * (a renewal), or free (nameIsFree) — and not blocked. Taking it moves it
+ * out of the free set in the same statement — `registered`, no longer
+ * freed by anything — so the next request for it finds it held, not free:
+ * two requests for one name at the same moment, a new name or a freed one,
+ * and one of them has it; the other gets false and is told whose it is.
+ * The registration is written whole once the request is on the record.
  */
 export async function reserveName(env: Env, name: string, login: string, url: string, arches: string[]): Promise<boolean> {
   const row = await env.DB.prepare(
     `INSERT INTO factory_packages (name, owner, url, arches, status, detail) VALUES (?, ?, ?, ?, 'registered', ?)
-     ON CONFLICT (name) DO UPDATE SET owner = excluded.owner, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-      WHERE factory_packages.blocked_at IS NULL AND (factory_packages.owner = excluded.owner OR factory_packages.status IN (${FREE_NAME.map((x) => `'${x}'`).join(", ")}))
+     ON CONFLICT (name) DO UPDATE SET owner = excluded.owner,
+        status = CASE WHEN ${FREE_SQL} THEN 'registered' ELSE factory_packages.status END,
+        detail = CASE WHEN ${FREE_SQL} THEN excluded.detail ELSE factory_packages.detail END,
+        freed_by_review = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      WHERE factory_packages.blocked_at IS NULL AND (factory_packages.owner = excluded.owner OR ${FREE_SQL})
      RETURNING owner`,
   )
     .bind(name, login, url, JSON.stringify(arches), `reserved by ${login}: the request is being written`)

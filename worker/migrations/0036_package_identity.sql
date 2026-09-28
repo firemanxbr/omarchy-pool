@@ -25,7 +25,11 @@
 -- the same rule (targetsOf; test/package-identity.test.ts holds the two
 -- together). closed_through: the last build of a round that a rejection or
 -- a block closed; an older build that ended is history, not where the
--- package stands.
+-- package stands. freed_by_review: the review whose rejection freed the
+-- name — anyone may request it while the registration says `rejected` —
+-- and NULL while the name is held; a contributor's block also writes
+-- `rejected`, and holds their names. Every row here is NULL: a rejection
+-- before this rule freed nothing.
 --
 -- Additive only, so the Worker and the schema never disagree during a
 -- deploy: the Release workflow applies the migrations and then deploys, and
@@ -56,6 +60,7 @@ CREATE INDEX idx_approvals_review ON approvals (review_id);
 
 ALTER TABLE factory_packages ADD COLUMN targets TEXT;            -- JSON {arch: {status, task}}
 ALTER TABLE factory_packages ADD COLUMN closed_through INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE factory_packages ADD COLUMN freed_by_review INTEGER;  -- reviews.id; NULL: the name is held
 
 -- The decisions: a row's review is the first row of its group, by id.
 UPDATE approvals SET review_id = m.review_id
@@ -87,12 +92,15 @@ UPDATE factory_packages SET closed_through = MAX(closed_through, COALESCE((SELEC
 -- of their own and copied onto the packages: per requested architecture (and
 -- any other an approval stands on), the newest build that says where it
 -- stands — not cancelled, not a dry run, not one a round closed, not a
--- published build whose approval was taken back.
+-- published build whose approval was taken back, and not a failed build of
+-- an architecture an approval stands on (its next version's failure: the
+-- approved one is still where it stands).
 CREATE TABLE target_merge AS
   WITH b AS (
     SELECT t.id, t.name, t.arch, t.status, t.trust, p.closed_through,
            EXISTS (SELECT 1 FROM approvals a WHERE a.name = t.name AND a.arch = t.arch AND a.decision = 'approved' AND a.withdrawn_at IS NULL AND (a.task_id = t.id OR a.rebuild_task = t.id)) AS standing,
-           EXISTS (SELECT 1 FROM approvals a WHERE a.name = t.name AND a.arch = t.arch AND a.decision = 'approved' AND a.withdrawn_at IS NOT NULL AND (a.task_id = t.id OR a.rebuild_task = t.id)) AS withdrawn
+           EXISTS (SELECT 1 FROM approvals a WHERE a.name = t.name AND a.arch = t.arch AND a.decision = 'approved' AND a.withdrawn_at IS NOT NULL AND (a.task_id = t.id OR a.rebuild_task = t.id)) AS withdrawn,
+           EXISTS (SELECT 1 FROM approvals a WHERE a.name = t.name AND a.arch = t.arch AND a.decision = 'approved' AND a.withdrawn_at IS NULL) AS served
       FROM build_tasks t JOIN factory_packages p ON p.name = t.name
      WHERE t.kind = 'build' AND t.status != 'cancelled' AND t.arch IN ('x86_64', 'aarch64')
        AND NOT (t.trust = 'project' AND json_extract(t.params, '$.review') IS NULL AND t.publish = 0)
@@ -101,6 +109,7 @@ CREATE TABLE target_merge AS
       FROM b
      WHERE (b.status IN ('queued', 'leased', 'staged') OR b.standing OR b.id > b.closed_through)
        AND NOT (b.status = 'done' AND NOT b.standing AND (b.withdrawn OR b.trust = 'community'))
+       AND NOT (b.status = 'failed' AND b.served)
   )
   SELECT name, arch, id AS task,
          CASE

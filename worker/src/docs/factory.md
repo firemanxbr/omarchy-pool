@@ -146,20 +146,24 @@ the reason — the request back with its owner.
 A package is its name. `marcelo` is one package, requested once; x86_64
 and aarch64 are two targets of it — two artifacts, each built on a worker
 of its architecture. The request reserves the name the moment it is sent,
-in one statement: two requests for one name at once, and one of them has
-it. A rejection frees the name, and anyone may request it again; a
-package already in the pool keeps it, and what was rejected is the new
-version. The builds run per architecture: one that fails after the tries
-it had is *not supported*, and the others go on to the review; if none
-builds, the request goes back to its owner. One review covers every
-target: the project builds each supported architecture again on its
-review workers, and one decision — approve, reject, withdraw — covers them
-all; what it approved is what the publish jobs, one per architecture,
-carry into edge. A block covers the package on every architecture and
-every ring, withdraws the review it stood on, and sends the package back
-to the factory. The decisions made per architecture before this rule
-(migration 0036) were merged into the reviews they were; the rows stay on
-the record as they were written.
+in one statement: two requests for one name at once — a new name, or one
+that was free — and one of them has it. A rejection frees the name, and
+anyone may request it again; a package already in the pool keeps it, and
+what was rejected is the new version. A contributor's block frees none of
+their names. The builds run per architecture: one that fails after the
+tries it had is *not supported*, and the others go on to the review; if
+none builds, the request goes back to its owner. An architecture already
+in the pool stays where it is served when a build of its next version
+fails: that failure is the new version's. One review covers every
+target, as each architecture stands now and at one version: the project
+builds each supported architecture again on its review workers — never an
+older build of an architecture whose newest one failed — and one decision
+— approve, reject, withdraw — covers them all; what it approved is what
+the publish jobs, one per architecture, carry into edge. A block covers
+the package on every architecture and every ring, withdraws the review it
+stood on, and sends the package back to the factory. The decisions made
+per architecture before this rule (migration 0036) were merged into the
+reviews they were; the rows stay on the record as they were written.
 
 ## The gate
 
