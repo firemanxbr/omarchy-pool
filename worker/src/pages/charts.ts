@@ -5,7 +5,8 @@
  * data-tip; the layout's tooltip shows it.
  */
 export const CHARTS = String.raw`  // ---- tiny SVG charts (no library; the page has no build step) ----
-  var C = { green: "#9ece6a", amber: "#e0af68", red: "#f7768e", blue: "#7aa2f7", lilac: "#bb9af7", dim: "#414868", grid: "#2a2e3f", text: "#8b93b8" };
+  // The charts' colours are the palette's names (layout.ts PALETTE), so a chart follows the theme; an SVG attribute takes var() as a style does. text is the axis and the labels (--dim), grid the hairlines (--line).
+  var C = { green: "var(--green)", amber: "var(--amber)", red: "var(--red)", blue: "var(--blue)", lilac: "var(--lilac)", grid: "var(--line)", text: "var(--dim)" };
   // The viewBox is the drawing; the SVG scales uniformly with its column
   // (no preserveAspectRatio="none": stretched text overflowed its space).
   function svg(w, h, body) { return '<svg viewBox="0 0 ' + w + ' ' + h + '" width="100%" style="display:block;height:auto" font-family="JetBrains Mono, ui-monospace, monospace" font-size="11" fill="' + C.text + '">' + body + '</svg>'; }
@@ -84,7 +85,7 @@ export const CHARTS = String.raw`  // ---- tiny SVG charts (no library; the page
     [0, .5, 1].forEach(function (f) { var y = ys(max * f); out += '<line class="grid" x1="' + L + '" x2="' + (W - R) + '" y1="' + y + '" y2="' + y + '"/><text class="ax" x="' + (L - 6) + '" y="' + (y + 3.5) + '" text-anchor="end">' + num(Math.round(max * f)) + '</text>'; });
     series.forEach(function (s) {
       out += '<polyline points="' + s.values.map(function (v, i) { return xs(i) + "," + ys(Number(v) || 0); }).join(" ") + '" fill="none" stroke="' + s.color + '" stroke-width="2"/>';
-      s.values.forEach(function (v, i) { out += '<circle class="mark" cx="' + xs(i) + '" cy="' + ys(Number(v) || 0) + '" r="' + (i === n - 1 ? 4.5 : 3) + '" fill="' + s.color + '" stroke="#1f2230" stroke-width="2" data-tip="' + esc(labels[i] + " · " + s.name + " " + num(v) + (unit ? " " + unit : "")) + '"/>'; });
+      s.values.forEach(function (v, i) { out += '<circle class="mark" cx="' + xs(i) + '" cy="' + ys(Number(v) || 0) + '" r="' + (i === n - 1 ? 4.5 : 3) + '" fill="' + s.color + '" stroke="var(--panel)" stroke-width="2" data-tip="' + esc(labels[i] + " · " + s.name + " " + num(v) + (unit ? " " + unit : "")) + '"/>'; });
     });
     labels.forEach(function (lab, i) { if (n <= 8 || i % 2 === 1) out += '<text class="ax" x="' + xs(i) + '" y="' + (H - 6) + '" text-anchor="middle">' + esc(shortDay(lab)) + '</text>'; });
     return out + '</svg><div class="legend">' + series.map(function (s) { return '<span><i style="background:' + s.color + '"></i>' + esc(s.name) + '</span>'; }).join("") + '</div>';

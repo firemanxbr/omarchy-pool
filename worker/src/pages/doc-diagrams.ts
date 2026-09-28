@@ -54,7 +54,7 @@ export function publishingLayerDiagram(): string {
   // The marks ride under the boxes: visible on the arrows, covered inside a box, never across its text.
   // Upstream packages ride green; the factory's, tried before anyone promises them, amber.
   const tail = " L228 157 L258 157 L343 157 L343 143 L428 143 L448 143 L448 96 L468 96 L638 96 L1071 96 L1190 96";
-  const dots = dot("M203 42 L228 42" + tail, "#9ece6a", 10, 0) + dot("M203 134 L228 134" + tail, "#9ece6a", 10, 3.3) + dot("M203 272 L228 272" + tail, "#e0af68", 10, 6.6);
+  const dots = dot("M203 42 L228 42" + tail, "var(--green)", 10, 0) + dot("M203 134 L228 134" + tail, "var(--green)", 10, 3.3) + dot("M203 272 L228 272" + tail, "var(--amber)", 10, 6.6);
   // JetBrains Mono ligates "-<" into a hook arrow, which would eat the opening
   // bracket of omarchy-<source>-<ring>; the group turns the font's ligatures off
   // for this figure (the same property a site-wide rule on figure.diagram svg would set).
