@@ -51,8 +51,10 @@ confirmed by the person in a browser, outside the agent.
 The design keeps three things from the pool as it is. The server holds every
 rule, so an agent that skips the MCP server and calls the API itself gains
 nothing. Every write reuses the handler the web already calls, with the same
-predicate and the same words when it refuses. And every new read is one
-indexed lookup, or a public answer the edge already caches.
+predicate and the same words when it refuses. And every read a tool makes
+is an indexed lookup or a public answer the edge caches. Two reads are
+neither today, a person's workers and the text evidence of a build; the
+proposal changes both (*Limits and cost*).
 
 ### Six tools for two roles
 
@@ -60,7 +62,7 @@ indexed lookup, or a public answer the edge already caches.
 |---|---|---|---|
 | `request_package` | contribute | `url`, `description`, `license`, `checklist` (the four confirmations, each `true`); optional `name`, `arches`, `source`, `version` | the registration, the request's record and signature, the builds it queued |
 | `request_status` | contribute | optional `name` | with a name: the package's word, its builds per architecture (queued with a place, building, staged, failed), its review and the rings that serve it; without one: your requests, and your drafts with where each stands |
-| `review_claim` | maintain | optional `task` (else the oldest build that waits and that you may take); optional `worker` (a project review worker, whose agent drafts the rebuild) and `note` | the project's build queued from it, and where it runs |
+| `review_claim` | maintain | `task`; optional `worker` (a project review worker, whose agent drafts the rebuild) and `note` (kept for people, never a hint to the project's agent) | the project's build queued from it, and where it runs |
 | `review_context` | maintain | `task` | the request as checked, the recipe (`PKGBUILD`), the gate (`vet.json`), the audit, and the build, test and trial logs (the last 64 KB of each), for the contributor's build and the project's rebuild — never a package |
 | `submit_review` | maintain | `task`, `verdict` (`approve`, `request_changes` or `reject`), `note` | a draft: its id, the link the person opens to confirm it, when it expires |
 | `block` | maintain | `name`, `reason` | a draft, as `submit_review` answers one |
@@ -71,8 +73,8 @@ Four of them call a door the web already uses. Two call one new route.
 |---|---|---|
 | `request_package` | `POST /api/v1/factory/packages` | existing: the request form's own door and checks |
 | `request_status` | `GET /api/v1/factory/packages/:name/story`, or `GET /api/v1/factory/me` without a name | existing; the story is public and stays 30 s at the edge; `/factory/me` would list your drafts too |
-| `review_claim` | `GET /api/v1/factory/review` to pick one, then `POST /api/v1/factory/tasks/:id/build` | existing: "Build it by the project" on Review |
-| `review_context` | `GET /api/v1/factory/tasks/:id` and `GET /api/v1/factory/tasks/:id/artifacts/<file>` | existing, public, read without the token |
+| `review_claim` | `POST /api/v1/factory/tasks/:id/build` | existing: "Build it by the project" on Review; the tool takes the task it is given and never reads the Review list |
+| `review_context` | `GET /api/v1/factory/tasks/:id` and `GET /api/v1/factory/tasks/:id/artifacts/<file>` | existing, public, read without the token; the text evidence gains a tail read and the edge cache |
 | `submit_review` | `POST /api/v1/factory/drafts` | new |
 | `block` | `POST /api/v1/factory/drafts` | new |
 
@@ -128,22 +130,41 @@ offers `approve` and `request_changes` only.
 ### Who the agent acts as
 
 The agent acts as one GitHub login, through a token that login granted to it.
+The grant is made in the person's own browser, signed in with GitHub, and its
+code goes from the pool to the person's own command, never the other way.
 
 - **Login.** `omarchy-cli login --agent "Claude Code"` (add `--maintain` for
-  the review scopes) asks the pool for a grant and prints a short code and an
-  address, `https://omarchy-pool.org/auth/agent`. The person opens it in a
-  browser signed in with GitHub, types the code, reads what is asked — the
-  agent's name, the scopes, the expiry, and the city and country the request
-  came from — and presses Grant. The command, polling, receives the token.
-  This is the device flow people know from GitHub, with the pool's own
-  sign-in as the identity: the login is the one GitHub told the pool at
-  sign-in. The code is typed, never carried in the link, and lives ten
-  minutes, so a link sent by somebody else grants nothing.
+  the review scopes) listens on `127.0.0.1`, on a port the system picks, and
+  opens the browser at `https://omarchy-pool.org/auth/agent` with the agent's
+  name, the scopes, the port, a `state` and a PKCE challenge (RFC 7636, S256).
+  The person, signed in with GitHub, reads what is asked — the agent's name,
+  the scopes, the expiry — and presses Grant, a form posted with the session
+  cookie, checked by its `Origin` and a nonce the page wrote into it. The pool
+  sends the browser to `http://127.0.0.1:<port>/` with a one-time code; the
+  command checks the `state` and swaps the code and its verifier for the
+  token at `POST /auth/agent/token`. This is the loopback flow of RFC 8252,
+  with the pool's own sign-in as the identity: the login is the one GitHub
+  told the pool at sign-in. The page takes a port, not an address, and builds
+  the loopback address itself. The code lives a minute, is taken once, and is
+  worth nothing without the verifier, which never leaves the command. So a
+  Grant link somebody else sends lands its code on the person's own machine,
+  where the sender's command is not listening.
+- **A machine without a browser** (a server over SSH). `omarchy-cli login
+  --agent "Claude Code" --paste` asks for a code instead. The person opens
+  `/auth/agent` in any browser signed in with GitHub, names the agent, picks
+  the scopes and presses Grant; the page shows a one-time code, 128 random
+  bits that live ten minutes and are taken once, to paste into the command.
+  The page says what the code is: whoever pastes it first gets the token, so
+  it goes into the person's own terminal and nowhere else. The grant keeps
+  the city and country the code was taken from, and the person's page shows
+  them beside the grant, marked when they differ from where Grant was pressed.
 - **The token.** `oma_` and 192 random bits, handed to the command once and
   kept by the pool as a SHA-256 hash, like the contributor and worker tokens.
-  New table `agent_grants`: the login, the agent's name, the scopes, created,
-  expires, revoked, last used (moved once per ten minutes, as `last_seen` is).
-  One read by a unique index per call — what an `omc_` token costs today.
+  New table `agent_grants`: the login, the agent's name, the scopes, the
+  one-time code's hash and the challenge until the token is taken, created,
+  expires, revoked, last used (moved once per ten minutes, as `last_seen` is),
+  where Grant was pressed and where the code was taken. One read by a unique
+  index per call — what an `omc_` token costs today.
 - **Scopes.** `contribute`: `request_package`, `request_status`. `review`:
   `review_claim`, `submit_review`, and `review_context` (which reads public
   answers without the token; the scope only lists it). `block`: `block`. The
@@ -151,7 +172,10 @@ The agent acts as one GitHub login, through a token that login granted to it.
   call: a login taken out of `factory/MAINTAINERS.toml` loses them at its
   next call, not at its next login.
 - **Expiry.** Thirty days by default, ninety at most. Logging in again with the
-  same agent name replaces that grant.
+  same agent name replaces that grant. A login holds three live grants at
+  most; a fourth is refused at Grant until one is revoked or expires. The
+  limits below count by the login, so a new grant or another agent name
+  starts no new count.
 - **Revocation.** `omarchy-cli logout` revokes the grant on the server, then
   deletes the file. The person's page lists their grants, each with Revoke. A
   contributor a maintainer blocks loses their grants with their workers.
@@ -167,6 +191,17 @@ approve. The pool's rule is that a credential is worth one job
 ([security model](../SECURITY.md#principles)); an agent's token is worth the
 six tools.
 
+**Why not a device flow.** In a device flow (RFC 8628; GitHub's is one) the
+command starts the grant and prints a code, and the person types it into a
+page. Anybody can start one on their own machine and send a maintainer the
+real address and the code with a pretext; a maintainer who types it grants
+the sender's command a token for the maintainer's login (RFC 8628, section
+5.4, remote phishing). That the code is typed, never carried in a link, does
+not help. Both ways above start in the person's signed-in browser, so there
+is no code of somebody else's to type. A device flow also needs an anonymous
+door that writes: its start stores a pending code before anyone has proved
+who they are, and its polling reads that code every few seconds.
+
 **The server holds the line, not the MCP server.** An agent with a shell can read
 the credentials file and call the API itself. So every limit is the Worker's:
 an `oma_` token is taken by the routes in the table above and refused
@@ -176,7 +211,8 @@ reject, withdraw, block, unblock, trust, token, record withdrawal.
 only on the routes that name the scope.
 
 **The agent's name is recorded twice.** The grant's name is the one the person
-typed at login and read on the grant page: what the person says the agent is.
+gave at login or on the grant page, and read there before Grant: what the
+person says the agent is.
 The client's own name and version from MCP's `initialize` travel on every call
 as `x-omarchy-client`: what the agent says it is. Both are recorded; only the
 first is the person's word. Both are escaped wherever a page shows them.
@@ -200,12 +236,18 @@ first is the person's word. Both are escaped wherever a page shows them.
    note, the pool's own evidence (the gate, the audit, the trial, the logs),
    and who drafted it with which agent. For reject and block, the person types
    the package's name.
-4. Confirm posts the form with the session cookie. The server checks that the
-   draft is this person's, unused and not expired. It runs the predicate again
-   on the facts of now: a build decided in the meantime is refused, with the
-   reason. Then it calls the handler the web calls — `handleApprove`,
-   `handleReject` or `handleBlockPackage` — with the draft attached. A
-   conditional update uses the draft once.
+4. Confirm posts the form with the session cookie. The server reads the draft
+   by its id and checks that it is this person's and still waiting. It runs
+   the predicate again on the facts of now: a build decided in the meantime
+   is refused, with the reason, and the draft says so. Then it spends the
+   draft before anything is decided —
+   `UPDATE drafts SET used_at = now WHERE id = ? AND login = ? AND used_at IS NULL AND expires_at > now`
+   — and goes on only when that changed one row. A second confirm of the same
+   draft, a double click or a retried request, changes none and is answered
+   409, "confirmed already". Only then does it call the handler the web calls
+   — `handleApprove`, `handleReject` or `handleBlockPackage` — with the draft
+   attached. Those handlers read, then insert, with no guard of their own
+   against a second call, so the spend comes first: one draft decides once.
 5. `request_status` shows each draft: waiting, confirmed (with the decision),
    discarded or expired.
 
@@ -230,9 +272,12 @@ confirmation.
 
 `review_claim` and `request_package` are not confirmed this way; the issue
 names approve, reject and block. A claim decides nothing: the project builds
-the package again, and a maintainer still decides on that build. A request is
-the person's own; the four confirmations are passed by the agent after it
-asks the person, and the record says they came through an agent.
+the package again, and a maintainer still decides on that build. Nor may a
+claim through an agent steer that build: its note is kept for people and
+never becomes the hint the project's agent drafts with (*What the server
+enforces*). A request is the person's own; the four confirmations are passed
+by the agent after it asks the person, and the record says they came through
+an agent.
 
 ### Signed and journaled
 
@@ -255,25 +300,81 @@ asks the person, and the record says they came through an agent.
 
 ### Limits and cost
 
-- **Bursts.** Cloudflare's rate limiting binding on the Worker, keyed by the
-  grant: ten writes a minute. It reads and writes no D1 row.
-- **Per day, per grant.** Five requests, ten claims, thirty drafts. The count is
-  kept in the grant's own row and moved by a conditional update in the same
-  batch as the write: one primary-key write per agent write. Past it, 429 with
-  `retry-after`.
-- **What stays.** The contributor's quotas (ten builds queued, the staging
-  space) and the cost guard's pause on writes apply to an agent as they do to
-  the person.
-- **Reads.** `review_context` and `request_status` with a name read public
-  answers without the token, so the edge serves them (a task and a story stay
-  30 s there): an agent that polls costs what a page view costs. Without the
-  token a maintainer's read cannot fetch a package either — the server keeps
-  packages in staging for maintainers. `request_status` without a name reads
-  `/factory/me`, four indexed reads and no-store; the command answers a
-  repeat within a minute from memory.
-- **New queries.** A grant by its token's hash (unique index), a draft by its id
-  (primary key), a person's drafts by `(login, created_at)` with a limit of
-  twenty. Nothing scans, nothing fans out per row.
+- **Bursts.** Two rate limiting bindings on the Worker (Cloudflare's;
+  `wrangler.toml` has none today). One is keyed by the login: twenty calls a
+  minute that carry an `oma_` token, reads and writes alike, however many
+  grants the login holds. The other is keyed by `cf-connecting-ip` and guards
+  the one route open without a credential, `POST /auth/agent/token`: five
+  tries a minute per address. Neither writes a D1 row. The address's limit
+  is checked before anything is read; the login's once the grant is read,
+  the one read every call makes, so a call over it costs that row and
+  nothing more.
+- **Per day, per person.** Five requests, ten claims, thirty drafts for each
+  login, across all its grants and agent names. The counts live in the
+  person's `contributors` row (new columns: the day and the three counts),
+  not in a grant's, so logging in again or naming another agent starts no
+  new count. A conditional update on the primary key moves the count before
+  the write; when it changes no row, the write is not made and the answer is
+  429 with `retry-after`. A write the handler then refuses has still counted,
+  so an agent that loops on a refusal stops at the cap.
+- **The route without a credential.** `POST /auth/agent/token` writes only a
+  row a signed-in person made: the pending code is stored at Grant, in the
+  grant's own row, by a form posted with the session. The swap is one
+  conditional update through the unique index on the code's hash — the token
+  is set only where the code matches, has not expired, was not taken, and
+  (loopback) the verifier hashes to the challenge. A wrong code reads one
+  index entry and writes nothing. There is no polling to pace. A code nobody
+  took is deleted by the person's next Grant, and by the weekly gc through a
+  partial index on its expiry.
+- **The cost guard.** Today the guard stops the scheduler's jobs that write
+  and sheds the anonymous machine reads of package pages
+  ([cost.ts](../worker/src/cost.ts)); no route a person writes through checks
+  it. An agent's writes should stop with the pool's: `agentOf` refuses a write
+  while `settings.cost_guard` is set, with 503 and an hour's `retry-after` as
+  the read guard answers, and reads the guard through the read guard's
+  one-minute memo (`guardWord`), so the check costs no row. The contributor's
+  quotas (ten builds queued, the staging space) apply to an agent as they do
+  to the person.
+- **`request_status` with a name** reads the story, public and 30 s at the
+  edge: a hit, or the story's own reads once per 30 s per data centre.
+- **`request_status` without one** reads `/factory/me`, no-store, with the
+  token: four reads by the owner today, and one of them scans. The workers
+  query filters `build_workers` on `owner`, which has no index, so it reads
+  every worker ever registered, revoked ones too. The proposal's migration
+  adds `idx_build_workers_owner ON build_workers (owner, last_seen)`; with the
+  drafts by `(login, created_at)` it is then five indexed reads. The command
+  answers a repeat within a minute from memory.
+- **`review_claim`** reads what the web's button reads: the grant (unique
+  index), the task (primary key), the web's predicate (`factsOf`: five
+  indexed reads, one of them the package's story) and the package (primary
+  key). It writes the project's build, the package's line, the journal line
+  and the day's count. It takes the task it is given and never reads
+  `GET /factory/review`: that list is the caller's own and no-store, and its
+  main query reads up to a hundred staged builds, each with lookups of audit
+  and trial tasks that grow with every audit and trial ever run — the
+  heaviest read Review has, and an agent that claims in a loop would make it
+  every time. An agent finds a build the way a person does: the public
+  package list (`staged_builds`, 30 s at the edge), the package's story, or
+  the Review page the person has open.
+- **`review_context`** reads two tasks, public and 30 s at the edge, and the
+  text evidence each lists. That evidence is not cached today:
+  `handleStagingGet` answers no-store, and every file costs one D1 read
+  through the index on `task_id` and one R2 GET of the whole object, on every
+  call. The proposal changes the handler for text evidence only.
+  `?tail=<bytes>` (64 KB at most) reads the object's last bytes as a ranged
+  R2 get, so a log's tail is not the whole log. And a text answer says
+  `public, max-age=30`, so the edge keeps it as it keeps the task. A package
+  stays no-store and for maintainers only: the edge keys by the URL alone,
+  so it may keep only what anyone may read. A call is then an edge hit per
+  file, or one D1 row and a 64 KB read on a miss, and the command answers the
+  same task again within a minute from memory.
+- **New queries.** A grant by its token's hash (unique index); a pending grant
+  by its code's hash (unique index), and expired ones by their expiry
+  (partial index, where no token was taken); a login's live grants by
+  `(login, created_at)`, three at most; a draft by its id (primary key); a
+  person's drafts by `(login, created_at)`, twenty at most; the day's counts
+  by the `contributors` primary key; a person's workers by
+  `(owner, last_seen)`. Nothing scans, nothing fans out per row.
 
 ### What the server enforces
 
@@ -282,30 +383,50 @@ asks the person, and the record says they came through an agent.
 - **Evidence is not the product.** Approve takes the project's rebuild only; a
   contributor's build is refused, as the web refuses it.
 - **Confirmation.** Approve, request changes, reject and block need the person
-  in the browser. No route decides on an agent's token.
+  in the browser. No route decides on an agent's token. A draft is spent
+  before its handler runs, so it decides once.
 - **Block.** Any maintainer, with a reason of four characters or more. Lifting
   it is another maintainer's act, on the web.
+- **No hint from an agent.** The project's agent drafts its recipe with
+  `params.hint` in the prompt, as "a hint from the person who asked for this
+  build" (`factory/bin/draft-pkgbuild`); on the web, "Build it by the
+  project" makes the maintainer's note that hint. A claim made with an `oma_`
+  token keeps its `note` in the project build's params, for people, and
+  leaves `hint` null: text that passed through an agent, which may have read
+  the requester's instructions, is not the maintainer's word, and it must not
+  reach the build the project approves and publishes. A maintainer who wants
+  to give the project's agent a hint presses the button on the web.
 - **Untrusted text.** `review_context` returns what the requester and their
   build wrote: the description, the recipe, the logs. That text can carry
   instructions aimed at the maintainer's agent. The tool marks it as the
   requester's text, and the confirm page shows the pool's own evidence rather
   than the agent's summary, so a verdict never rests on the agent's reading
-  alone.
+  alone. Nor can that text reach the project's rebuild through the agent: a
+  claim's note is never the hint (above).
 
 ### Where it changes
 
-- `crates/omarchy-cli`: `login` and `logout`; the credentials file, 0600 and
-  bound to its origin; an authenticated client in `api.rs` for the writes and
-  `/factory/me`, while public reads stay anonymous; the six tools in `mcp.rs`,
-  listed by scope. The `instructions` from `initialize` say that reads are
-  open, that writes act as the login through the named agent, and that
-  decisions wait for the person.
-- `worker/`: a migration for `agent_grants`, `drafts` and the two `agent`
-  columns; the grant flow in `routes/auth.ts` (`POST /auth/agent`,
-  `POST /auth/agent/token`, the page at `/auth/agent`); `agentOf` in
-  `auth.ts`; `POST /api/v1/factory/drafts` and `GET /api/v1/factory/drafts/:id`;
-  the drafts in `/factory/me`; the confirm page at `/auth/confirm/<id>`; the
-  grants on the person's page; the API page's *Write (people)* section.
+- `crates/omarchy-cli`: `login` (the loopback listener on `127.0.0.1` with
+  its `state` and PKCE verifier, and `--paste`) and `logout`; the credentials
+  file, 0600 and bound to its origin; an authenticated client in `api.rs` for
+  the writes and `/factory/me`, while public reads stay anonymous; the six
+  tools in `mcp.rs`, listed by scope, with a minute's memory of what they
+  read. The `instructions` from `initialize` say that reads are open, that
+  writes act as the login through the named agent, and that decisions wait
+  for the person.
+- `worker/`: a migration for `agent_grants` (with the pending code in the
+  grant's row), `drafts`, the two `agent` columns, the day's counts on
+  `contributors`, and `idx_build_workers_owner`; two rate limiting bindings in
+  `wrangler.toml`; the grant flow in `routes/auth.ts` (the page at
+  `/auth/agent` and its Grant, posted with the session; `POST /auth/agent/token`,
+  the one route open without a credential); `agentOf` in `auth.ts`, with the
+  cost guard's check; `POST /api/v1/factory/drafts` and
+  `GET /api/v1/factory/drafts/:id`; the drafts in `/factory/me`; no hint on an
+  agent's claim in `handleProjectBuild`; the tail read and the edge cache of
+  text evidence in `handleStagingGet`; the confirm page at
+  `/auth/confirm/<id>`, which spends a draft before it decides; the expired
+  codes in the weekly gc; the grants on the person's page; the API page's
+  *Write (people)* section.
 
 ### Tests
 
@@ -331,6 +452,9 @@ pedantic lints) and `cargo fmt --all --check`:
 - The credentials file: written 0600; a file others can read is refused; an
   expired grant says "run omarchy-cli login" without a request; the token is
   never sent to another origin.
+- Login: the listener binds `127.0.0.1` only and takes one request; a
+  callback with another `state` is refused; the verifier goes to the pool's
+  origin only, in the swap, never in the browser's address.
 
 The Worker's side, in vitest on the fixture:
 
@@ -338,22 +462,46 @@ The Worker's side, in vitest on the fixture:
   decision routes — and `contributorOf` never takes it.
 - `review` and `block` are refused to a contributor, at the grant and on use,
   and to a login removed from `factory/MAINTAINERS.toml`, on its next call.
+- Grant takes the session only (a bearer token is refused), with its `Origin`
+  and nonce, and sends the code to `127.0.0.1` only, whatever the link
+  asked. A code is swapped once, not after it expires, and not without
+  the verifier that matches its challenge; a wrong code writes no row. A
+  fourth live grant is refused.
 - A draft from the requester is refused with the web's reason. Confirm takes
   the session only (a bearer token is refused), the same login only, once
-  only, and not after it expires; it runs the predicate again. The decision's
-  row, record and journal line carry the agent.
+  only, and not after it expires; it runs the predicate again. Two confirms
+  of one draft sent at once make one approval, one publish job and one
+  journal line; the second is answered 409. The decision's row, record and
+  journal line carry the agent.
+- A claim with an `oma_` token leaves `params.hint` null and keeps its note
+  in `params.note`; the same note through the web's button is still the hint.
 - Logout, Revoke on the person's page and a contributor's block each end a
   grant at once.
-- The limits answer 429, and the burst limit reads no D1 row.
+- The limits answer 429. The address's limit reads no D1 row, the login's
+  reads the grant only. The day's counts are the login's: a new grant, or
+  another agent name, does not start them again.
+- With the cost guard up, an agent's write is answered 503 and a person's
+  write on the web is not.
+- Text evidence answers `public, max-age=30` and `?tail=` gives its last
+  bytes; a package in staging is still no-store and for maintainers only.
+- Every new query, and `/factory/me`'s workers, is asked for its plan
+  (`EXPLAIN QUERY PLAN`, as [releases.test.ts](../worker/test/releases.test.ts)
+  does): a search through an index, never a scan.
 
 ### Questions for the maintainers
 
 1. **Scope.** Are these six tools the first set? Should `submit_review` wait for
    #247's `reject` that frees the name, or ship with `approve` and
    `request_changes` first?
-2. **Identity.** The pool's own grant, confirmed in the signed-in browser — or
-   GitHub's device flow, with the GitHub token read once, as
-   `POST /factory/register` reads one today?
+2. **Identity.** The pool's own grant, made in the signed-in browser and handed
+   to the command through a loopback address with PKCE, or pasted where the
+   machine has no browser? The alternative is a device flow, the pool's or
+   GitHub's (the GitHub token read once, as `POST /factory/register` reads
+   one today). A device flow is started by the command, so a maintainer can
+   be sent somebody else's code to type (RFC 8628, section 5.4), and its
+   start and polling are a door without a credential that writes to D1. The
+   design takes the loopback flow for that. Is the paste fallback needed at
+   all, or can a machine without a browser wait?
 3. **Expiry.** Thirty days by default, ninety at most. Shorter for `review` and
    `block`?
 4. **Confirmation.** The session link, with the name typed for reject and block.
@@ -362,8 +510,10 @@ The Worker's side, in vitest on the fixture:
    four confirmations are the person's word.
 6. **Drafts.** On the public journal as they are made, or on the person's page
    only until they are confirmed?
-7. **Limits.** Ten writes a minute; five requests, ten claims and thirty drafts
-   a day per grant. Are these the right numbers?
+7. **Limits.** Twenty calls a minute per login; five requests, ten claims and
+   thirty drafts a day per person, across all their agents; three live grants
+   per login; five token swaps a minute per address. Are these the right
+   numbers?
 8. **Signatures.** The pool's signature on every record, as today — or the
    person's own as well, with a key they publish on GitHub?
 9. **Order.** Once a package is one name across its architectures (#242), the

@@ -55,6 +55,7 @@ export function docsHtml(poolUrl: string, version: RunningVersion): string {
  */
 const CHAPTER_ANCHORS: Partial<Record<DocKey, string[]>> = {
   // The write tools are a proposal waiting for a maintainer's sign-off (#252): the draft says so above its table, and its questions close it — the same chapter must not read as a description of tools that exist.
+  // What a sign-off rests on is pinned as well: how a grant is made and why not a device flow, what each call costs, and what the server enforces, so the risk the review named cannot drop out of the chapter unnoticed.
   "omarchy-cli-mcp": [
     "<th>Tool</th><th>Arguments</th><th>Answers</th>",
     '<pre><code class="lang-json">',
@@ -62,7 +63,12 @@ const CHAPTER_ANCHORS: Partial<Record<DocKey, string[]>> = {
     "<blockquote><p><strong>Draft.</strong> Nothing in this section is built.",
     "<th>Tool</th><th>Role</th><th>Input</th><th>Answers</th>",
     "<th>Tool</th><th>Worker route</th><th>Today</th>",
+    'id="who-the-agent-acts-as"',
+    "<p><strong>Why not a device flow.</strong>",
     'id="the-agent-drafts-the-person-confirms"',
+    'id="limits-and-cost"',
+    'id="what-the-server-enforces"',
+    "<strong>No hint from an agent.</strong>",
     'id="questions-for-the-maintainers"',
     'href="/docs/security-model#principles"',
   ],
