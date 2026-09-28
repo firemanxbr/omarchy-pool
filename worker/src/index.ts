@@ -40,7 +40,7 @@
  *   GET  /                                         the dashboard: the Pool (users), /factory (contributors), /pipeline (everyone, live),
  *                                                  /docs, and the detail pages /packages /package/:name /security /status /journal /workers /review /user/:login
  *   GET  /pool/<source>/<arch>/<file>              fallback static origin (dev)
- *   GET  /assets/icons.<hash>.css                  the icons' stylesheet (pages/kit.ts), immutable under its hash
+ *   GET  /assets/kit.<hash>.css                    the v1 kit's stylesheet (pages/kit.ts): its primitives and icons, immutable under its hash
  *   GET  /setup                                    the one-command setup script (curl … | sudo bash -s -- --ring stable)
  *   GET  /omarchy-worker · /omarchy-worker/compose.yml   one command to run a worker (src/omarchy-worker.sh) and the compose file it writes
  *   GET  /api/v1/pacman.conf?ring=&arch=&with=     the pacman.d include a ring serves right now
@@ -253,7 +253,7 @@ export default {
       if (path === "/sitemap.xml") return new Response(sitemapXml(isProductionHost(url.hostname) ? `https://${DASHBOARD_HOST}` : url.origin), { headers: { "content-type": "application/xml; charset=utf-8", "cache-control": "public, max-age=86400" } });
       const ic = icon(path);
       if (ic) return ic;
-      // The icons' one stylesheet (pages/kit.ts): immutable under its content's hash, so a browser asks for it once per icon set.
+      // The v1 kit's one stylesheet (pages/kit.ts): immutable under its content's hash, so a browser asks for it once per change of the kit.
       const asset = kitAsset(path, method);
       if (asset) return asset;
       return json({ error: "not found" }, 404);

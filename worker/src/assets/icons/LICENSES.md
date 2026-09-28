@@ -1,7 +1,7 @@
 # The icons and their licences
 
 The SVG files here are drawn by the v1 kit (`worker/src/pages/kit.ts`) and
-served in one stylesheet, `/assets/icons.<hash>.css`, whose header repeats
+served in its one stylesheet, `/assets/kit.<hash>.css`, whose header repeats
 the notices below. Each file is the package's own, byte for byte: taken
 from the npm registry's tarball (integrity checked against the registry),
 the SVG extracted and nothing of the package run.

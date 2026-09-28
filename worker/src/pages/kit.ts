@@ -2,13 +2,15 @@
  * The v1 kit (#238, #239): the pieces the v1.0 pages are drawn with, taken
  * from the handoff's prototype (design/Hi-fi v1.0.dc.html) once, here, so
  * the page pull requests share one set instead of each inventing its own.
- * Nothing uses it yet: a page adopts it when its own issue lands, and the
- * dashboard looks the same until then.
+ * Nothing uses it yet: a page adopts it when its own issue lands, by
+ * passing kit: true to page(), and declares what it draws in its own
+ * manifest entry (components.ts). A page that has not adopted it pays
+ * nothing for it — no request, no bytes — and looks the same.
  *
  * Three parts:
  * - KIT_CSS, the primitives (documented where they are declared): tokens
- *   only, square, 1px lines, no shadow, no gradient. page() serves it after
- *   the frame's CSS.
+ *   only, square, 1px lines, no shadow, no gradient. A kit page links them
+ *   after the frame's CSS.
  * - The icons: the Lucide icons the whole prototype draws (lucide-static
  *   0.400.0, ISC) and the agents' marks it shows (@lobehub/icons-static-svg
  *   1.95.1, MIT; the marks stay their owners' trademarks), as the SVG files
@@ -17,15 +19,17 @@
  *   currentColor for an icon and a one-colour mark, the mark itself for a
  *   coloured one. The shell's script has the same two functions (KIT_HELPERS),
  *   so a row a page draws in the browser is the row the server would write.
- * - KIT_HELPERS, spliced into the shell's script: the two above, countUp()
+ * - KIT_HELPERS, spliced into a kit page's script: the two above, countUp()
  *   for a number that lands, and the copy button of a code well.
  *
- * The shapes travel in one stylesheet, /assets/icons.<hash>.css, every icon
- * a data: URI in it, and not as a file per icon or inline in every page: an
- * icon per request would be a Worker invocation per icon per first visit,
- * and the sheet inline would add its weight to every page view. The name
- * carries a hash of the content, so the sheet is immutable — a browser asks
- * for it once per change of the icon set, and no request ever reads D1.
+ * The primitives and the shapes travel in one stylesheet,
+ * /assets/kit.<hash>.css, every icon a data: URI in it, and not as a file
+ * per icon or inline in every page: an icon per request would be a Worker
+ * invocation per icon per first visit, and the sheet inline would add its
+ * weight to every page view (pages are cached for a minute; the sheet for a
+ * year). The name carries a hash of the content, so the sheet is immutable
+ * — a browser asks for it once per change of the kit, and no request ever
+ * reads D1.
  */
 import { escapeHtml } from "../html";
 import activitySvg from "../assets/icons/lucide/activity.svg";
@@ -98,7 +102,7 @@ import githubcopilotSvg from "../assets/icons/agents/githubcopilot.svg";
 import grokSvg from "../assets/icons/agents/grok.svg";
 import opencodeSvg from "../assets/icons/agents/opencode.svg";
 import qwenColorSvg from "../assets/icons/agents/qwen-color.svg";
-import kimiColorSvg from "../assets/icons/agents/kimi-color.svg";
+import kimiSvg from "../assets/icons/agents/kimi.svg";
 import metaColorSvg from "../assets/icons/agents/meta-color.svg";
 
 /**
@@ -178,9 +182,12 @@ export type LucideName = keyof typeof LUCIDE;
 /**
  * The agents' marks the prototype shows (its AGENTS list), by their file
  * name in lobe-icons: a coloured mark is drawn as it is, a one-colour mark
- * in the text's colour — the prototype's img and mask. The agent's name
- * (Claude Code, Codex …) is the caller's: it is what the reader sees on
- * hover and what a screen reader says.
+ * in the text's colour — the prototype's img and mask. A coloured mark is
+ * drawn on both themes' surfaces, so none may paint in white or black:
+ * Kimi's coloured file draws its K in white, which vanished on a light page
+ * (a blue dot was all that showed), so Kimi is its one-colour file. The
+ * agent's name (Claude Code, Codex …) is the caller's: it is what the
+ * reader sees on hover and what a screen reader says.
  */
 export const AGENT_MARKS = {
   "claude-color": { svg: claudeColorSvg, color: true },
@@ -191,7 +198,7 @@ export const AGENT_MARKS = {
   grok: { svg: grokSvg, color: false },
   opencode: { svg: opencodeSvg, color: false },
   "qwen-color": { svg: qwenColorSvg, color: true },
-  "kimi-color": { svg: kimiColorSvg, color: true },
+  kimi: { svg: kimiSvg, color: false },
   "meta-color": { svg: metaColorSvg, color: true },
 } as const;
 export type AgentMark = keyof typeof AGENT_MARKS;
@@ -240,20 +247,9 @@ export function svgUri(svg: string): string {
   return "data:image/svg+xml," + clean.replace(/[%#<>{}\\]|[^\x20-\x7e]/g, (c) => encodeURIComponent(c));
 }
 
-const LICENCES = `/* omarchy-pool's icons, one sheet (src/pages/kit.ts; the files and their licences are in src/assets/icons/).
+const LICENCES = `/* omarchy-pool's v1 kit, one sheet: its primitives, then its icons (src/pages/kit.ts; the icon files and their licences are in src/assets/icons/).
    Lucide (lucide-static 0.400.0), ISC License. Copyright (c) for portions of Lucide are held by Cole Bemis 2013-2022 as part of Feather (MIT). All other copyright (c) for Lucide are held by Lucide Contributors 2022.
    Agent marks from lobe-icons (@lobehub/icons-static-svg 1.95.1), MIT License, Copyright (c) 2023 LobeHub. The marks are trademarks of their owners and identify the agents they name. */`;
-
-/**
- * The sheet: a custom property per icon that the kit's .op-i masks with,
- * and per agent mark either the image (a coloured mark: --op-bc, with no
- * mask) or the mask (a one-colour mark: --op-bm, painted currentColor).
- */
-export const ICON_SHEET = [
-  LICENCES,
-  ...Object.entries(LUCIDE).map(([name, svg]) => `.op-i-${name}{--op-i:url("${svgUri(svg)}")}`),
-  ...Object.entries(AGENT_MARKS).map(([name, m]) => (m.color ? `.op-b-${name}{--op-bc:url("${svgUri(m.svg)}");--op-bm:none}` : `.op-b-${name}{--op-bm:url("${svgUri(m.svg)}")}`)),
-].join("\n") + "\n";
 
 /** FNV-1a over the sheet: a name that changes when a byte of it does — for the cache, not for security. */
 function fnv1a(s: string): string {
@@ -261,27 +257,8 @@ function fnv1a(s: string): string {
   for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193) >>> 0;
   return h.toString(16).padStart(8, "0");
 }
-export const ICON_SHEET_HASH = fnv1a(ICON_SHEET);
-/** The sheet's address, the one page() links. */
-export const ICON_SHEET_PATH = `/assets/icons.${ICON_SHEET_HASH}.css`;
 
-/**
- * The sheet by its name: immutable for a year under the current hash. A
- * page served before a deploy (pages are public for a minute) may still ask
- * for the old name; it gets today's sheet for five minutes, so no icon goes
- * blank and nothing old is pinned for long. Anything else under /assets/
- * is not ours: null, and the router's 404.
- */
-export function kitAsset(path: string, method: string): Response | null {
-  const m = /^\/assets\/icons\.([0-9a-f]{8})\.css$/.exec(path);
-  if (!m || (method !== "GET" && method !== "HEAD")) return null;
-  const current = m[1] === ICON_SHEET_HASH;
-  return new Response(method === "HEAD" ? null : ICON_SHEET, {
-    headers: { "content-type": "text/css; charset=utf-8", "cache-control": current ? "public, max-age=31536000, immutable" : "public, max-age=300" },
-  });
-}
-
-/** An SVG with nothing in it: the mask an icon wears until the sheet has come, so it is blank for that moment, never a filled square. */
+/** An SVG with nothing in it: the mask an icon or a mark wears when the sheet has no shape for its name, so it is blank, never a filled square in the text's colour. */
 const EMPTY = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'/%3E")`;
 
 /**
@@ -300,20 +277,26 @@ const EMPTY = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'
  *   .op-pill           a state, uppercase: .ok green, .run blue, .warn amber, .fail red, .wait dim, .na dashed
  *   .op-chip           a tag, as written: 1px --line; a button or a link chip lights green; .na is dashed
  *   .edge .rc .stable .lab   on .op-ring (a chip), .op-ring-name (the ring's name in display type), .op-card
- *                      (a 2px top), .op-arch and .op-seg's buttons: the ring's own hue, and no other use of it
+ *                      (a 2px top), .op-arch and .op-seg's buttons: the ring's own hue, and no other use of it —
+ *                      the element's own class, never its parent's: a ring card does not tint the arch squares,
+ *                      chips or segments inside it (each resets --op-hue and --op-tone, custom properties that
+ *                      would otherwise inherit)
  *   .op-arch           an architecture's 10px square in the tone's colour: filled when .ok, .run, .fail or
  *                      .wait, hollow and dashed when .na (not supported)
  *   .op-mark           a status mark in its colour: ✓ .ok, ⟳ .run, ✗ .fail, ○ .wait, — .na; .op-box is an
  *                      icon's square bordered in its tone (dashed .na; .lg is a package's 54px square)
- *   .op-seg            a segmented choice: its buttons or links share their borders; .on is lit — green, or the
- *                      ring's hue — on --bg-deep; .na is dashed
- *   .op-tabs           underline tabs: --dim, .on in --text over a 1px green line
+ *   .op-seg            a segmented choice: its buttons or links share their borders; the chosen one is lit —
+ *                      green, or the ring's hue — on --bg-deep; .na is dashed
+ *   .op-tabs           underline tabs: --dim, the chosen one in --text over a 1px green line
+ *                      Chosen is .on or the ARIA state a screen reader hears — aria-pressed="true" on a
+ *                      segment, aria-selected="true" on a tab, aria-current="page" or "true" on a link —, drawn
+ *                      alike: a page that sets the attribute needs no class, and the two cannot disagree
  *   .op-code           a code well: a <code> (a .op-prompt glyph first) and a button.op-copy with data-op-copy —
  *                      the shell copies the code (or the attribute's own text) and says "copied" for 1.5 s
  *   .op-btn            a button: 1px --line; .primary green, .danger red
  *   .op-table          a table: a --bg-deep head of labels, 1px between rows; .num right-aligned
  *   .op-fresh          a row that just arrived: its --panel-2 highlight fades in 1.2 s
- *   .op-live-dot       the 8px green square that pulses (1.6 s), for what is live
+ *   .op-live-dot       the 8px green square that pulses (the frame's op-pulse, 1.6 s), for what is live
  *   .op-i  .op-b       an icon (lucide()) and an agent's mark (agentMark()), 14 and 16px unless --op-i-s says
  */
 export const KIT_CSS = String.raw`
@@ -323,7 +306,7 @@ export const KIT_CSS = String.raw`
   .op-hero { margin: 0; max-width: 640px; font: 600 36px/1.12 var(--font-display); letter-spacing: var(--tracking-display); text-wrap: balance; }
   .op-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); }
   .op-stat { background: var(--panel); padding: 16px 18px; display: grid; gap: 4px; align-content: start; min-width: 0; color: inherit; text-decoration: none; }
-  a.op-stat:hover { background: var(--panel-2); }
+  a.op-stat:hover { background: var(--panel-2); } a.op-stat:focus-visible { outline: 1px solid var(--green); outline-offset: -1px; }
   .op-stat .n { font: 600 28px/1.1 var(--font-display); letter-spacing: -0.01em; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .op-stat .s { font-size: 12px; color: var(--dim); display: flex; align-items: center; gap: 6px; }
   .op-card { border: 1px solid var(--line); background: var(--panel); min-width: 0; }
@@ -331,6 +314,8 @@ export const KIT_CSS = String.raw`
   .op-card-h > b { font: 600 15px var(--font-display); } .op-card-h small { font-size: 12px; color: var(--dim); }
   .op-card-b { padding: 16px; }
   .op-card-f { display: flex; justify-content: flex-end; align-items: center; gap: 12px; padding: 10px 16px; border-top: 1px solid var(--line); font-size: 12.5px; }
+  /* A tone and a ring's hue are the element's own: reset where they are read, before the classes set them, so neither inherits from a parent that has one ('initial' is no value, and each var() below takes its fallback). */
+  .op-pill, .op-arch, .op-mark, .op-box { --op-tone: initial; } .op-ring, .op-ring-name, .op-card, .op-arch, .op-seg > * { --op-hue: initial; }
   :is(.op-pill, .op-arch, .op-mark, .op-box).ok { --op-tone: var(--status-ok); } :is(.op-pill, .op-arch, .op-mark, .op-box).run { --op-tone: var(--status-info); }
   :is(.op-pill, .op-arch, .op-mark, .op-box).warn { --op-tone: var(--status-warn); } :is(.op-pill, .op-arch, .op-mark, .op-box).fail { --op-tone: var(--status-error); }
   :is(.op-pill, .op-arch, .op-mark, .op-box):is(.wait, .na) { --op-tone: var(--dim); }
@@ -351,11 +336,11 @@ export const KIT_CSS = String.raw`
   .op-seg { display: flex; flex-wrap: wrap; padding-left: 1px; }
   .op-seg > :is(button, a) { position: relative; margin-left: -1px; padding: 4px 12px; border: 1px solid var(--line); background: transparent; color: var(--op-hue, var(--muted)); font: inherit; font-size: 13px; cursor: pointer; text-decoration: none; white-space: nowrap; }
   .op-seg > :is(button, a):hover { color: var(--op-hue, var(--text)); }
-  .op-seg > .on { z-index: 1; border-color: var(--op-hue, var(--green)); background: var(--bg-deep); color: var(--op-hue, var(--text)); }
+  .op-seg > :is(.on, [aria-pressed="true"], [aria-current="page"], [aria-current="true"]) { z-index: 1; border-color: var(--op-hue, var(--green)); background: var(--bg-deep); color: var(--op-hue, var(--text)); }
   .op-seg > .na { border-style: dashed; color: var(--dim); }
   .op-tabs { display: flex; gap: 16px; font-size: 13px; overflow-x: auto; scrollbar-width: none; }
   .op-tabs > :is(button, a) { padding: 0 0 1px; border: 0; border-bottom: 1px solid transparent; background: none; color: var(--dim); font: inherit; cursor: pointer; text-decoration: none; white-space: nowrap; }
-  .op-tabs > :is(button, a):hover { color: var(--text); } .op-tabs > .on { color: var(--text); border-bottom-color: var(--green); }
+  .op-tabs > :is(button, a):hover { color: var(--text); } .op-tabs > :is(.on, [aria-selected="true"], [aria-current="page"], [aria-current="true"]) { color: var(--text); border-bottom-color: var(--green); }
   .op-code { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; padding: 12px 14px; background: var(--bg-deep); border: 1px solid var(--line); }
   .op-code code { min-width: 0; color: var(--text); font: 13.5px/1.6 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
   .op-code .op-prompt { color: var(--dim); user-select: none; }
@@ -371,7 +356,6 @@ export const KIT_CSS = String.raw`
   .op-table .num { text-align: right; font-variant-numeric: tabular-nums; }
   @keyframes op-fresh { from { background-color: var(--panel-2); } to { background-color: transparent; } }
   .op-fresh { animation: op-fresh 1.2s ease-out; }
-  @keyframes op-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
   .op-live-dot { display: inline-block; flex: none; width: 8px; height: 8px; background: var(--green); animation: op-pulse 1.6s ease-in-out infinite; }
   .op-i, .op-b { display: inline-block; flex: none; vertical-align: -2px; }
   .op-i { width: var(--op-i-s, 14px); height: var(--op-i-s, 14px); background: currentColor; -webkit-mask: var(--op-i, ${EMPTY}) center / contain no-repeat; mask: var(--op-i, ${EMPTY}) center / contain no-repeat; }
@@ -379,9 +363,42 @@ export const KIT_CSS = String.raw`
 `;
 
 /**
- * The kit's side of the shell's script, spliced into HELPERS (layout.ts):
- * the browser's lucide() and agentMark() — the server's above, character for
- * character —, countUp(), and the copy button of every code well.
+ * The sheet a kit page links: the licences, the primitives, then per icon
+ * a custom property that .op-i masks with, and per agent mark either the
+ * image (a coloured mark: --op-bc, with no mask) or the mask (a one-colour
+ * mark: --op-bm, painted currentColor).
+ */
+export const KIT_SHEET = [
+  LICENCES,
+  KIT_CSS.trim(),
+  ...Object.entries(LUCIDE).map(([name, svg]) => `.op-i-${name}{--op-i:url("${svgUri(svg)}")}`),
+  ...Object.entries(AGENT_MARKS).map(([name, m]) => (m.color ? `.op-b-${name}{--op-bc:url("${svgUri(m.svg)}");--op-bm:none}` : `.op-b-${name}{--op-bm:url("${svgUri(m.svg)}")}`)),
+].join("\n") + "\n";
+export const KIT_SHEET_HASH = fnv1a(KIT_SHEET);
+/** The sheet's address, the one a kit page links. */
+export const KIT_SHEET_PATH = `/assets/kit.${KIT_SHEET_HASH}.css`;
+
+/**
+ * The sheet by its name: immutable for a year under the current hash. A
+ * page served before a deploy (pages are public for a minute) may still ask
+ * for the old name; it gets today's sheet for five minutes, so no primitive
+ * or icon goes missing and nothing old is pinned for long. Anything else under /assets/
+ * is not ours: null, and the router's 404.
+ */
+export function kitAsset(path: string, method: string): Response | null {
+  const m = /^\/assets\/kit\.([0-9a-f]{8})\.css$/.exec(path);
+  if (!m || (method !== "GET" && method !== "HEAD")) return null;
+  const current = m[1] === KIT_SHEET_HASH;
+  return new Response(method === "HEAD" ? null : KIT_SHEET, {
+    headers: { "content-type": "text/css; charset=utf-8", "cache-control": current ? "public, max-age=31536000, immutable" : "public, max-age=300" },
+  });
+}
+
+/**
+ * The kit's side of a page's script, spliced after the shell's HELPERS
+ * (layout.ts) on a kit page: the browser's lucide() and agentMark() — the
+ * server's above, character for character —, countUp(), and the copy button
+ * of every code well.
  */
 export const KIT_HELPERS = String.raw`
   // ---- the v1 kit (pages/kit.ts): an icon and an agent's mark as the server writes them, a number that lands, a code well's copy.
@@ -403,14 +420,15 @@ export const KIT_HELPERS = String.raw`
       if (p < 1) requestAnimationFrame(step);
     });
   }
-  // A code well's copy button (button.op-copy with data-op-copy): the attribute's text when it has one, else the well's code without its prompt glyph; "copied" for 1.5 s, or "could not copy" when the browser refused (no permission, plain http).
+  // A code well's copy button (button.op-copy with data-op-copy): the attribute's text when it has one, else the well's code without its prompt glyph; "copied" for 1.5 s, or "could not copy" when the browser refused — no permission, or no clipboard at all (plain http, an older browser: navigator.clipboard is undefined there, and calling it would throw before any answer).
   document.addEventListener("click", function (ev) {
     var b = ev.target && ev.target.closest ? ev.target.closest("[data-op-copy]") : null; if (!b || b.disabled) return;
     var well = b.closest(".op-code"), code = well && well.querySelector("code"), text = b.getAttribute("data-op-copy");
     if (!text && code) { var c = code.cloneNode(true); c.querySelectorAll(".op-prompt").forEach(function (p) { p.remove(); }); text = c.textContent; }
     if (!text) return;
     var was = b.getAttribute("data-was") || b.textContent; b.setAttribute("data-was", was);
-    var back = function () { setTimeout(function () { b.textContent = was; b.classList.remove("copied"); }, 1500); };
-    navigator.clipboard.writeText(text).then(function () { b.textContent = "copied"; b.classList.add("copied"); back(); }, function () { b.textContent = "could not copy"; back(); });
+    var back = function () { setTimeout(function () { b.textContent = was; b.classList.remove("copied"); }, 1500); }, refused = function () { b.textContent = "could not copy"; back(); };
+    var copying; try { copying = navigator.clipboard.writeText(text); } catch (e) { refused(); return; }
+    copying.then(function () { b.textContent = "copied"; b.classList.add("copied"); back(); }, refused);
   });
 `;

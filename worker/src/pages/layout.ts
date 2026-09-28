@@ -8,7 +8,7 @@ import type { RunningVersion } from "../meta";
 import { DOCS_TREE, GLOSSARY, type DocKey } from "./docs-tree";
 import { LATE_AFTER_HOURS, PROMOTED_RINGS, REPO_ARCHES, RING_TEXT, RINGS_BY_STABILITY, SEVERITIES, WORKER_ALIVE_MINUTES } from "../meta";
 import { escapeHtml } from "../html";
-import { ICON_SHEET_PATH, KIT_CSS, KIT_HELPERS } from "./kit";
+import { KIT_HELPERS, KIT_SHEET_PATH } from "./kit";
 
 /**
  * The palette, typed once (#239, the handoff's "Design tokens"): every
@@ -18,6 +18,16 @@ import { ICON_SHEET_PATH, KIT_CSS, KIT_HELPERS } from "./kit";
  * roles, each re-tuned for paper. The token block below, the theme-color
  * the browser's chrome wears and the contrast table in test/kit.test.ts all
  * read this; a colour added to a page is a name added here, in both themes.
+ *
+ * Light is the handoff's table with four values darker: --dim, --amber,
+ * --blue and --lilac were under 4.5:1 on --bg-deep (4.13, 4.30, 4.47,
+ * 4.35), and the chrome's small text sits there — the header's role labels,
+ * the footer's notes, a code well's comments, a degraded status. #239 asks
+ * for 4.5:1 for body text, and the handoff's design system for a light
+ * twin "re-tuned for contrast", so each keeps its hue and saturation and
+ * only loses lightness, to the first step that reaches 4.5:1 (under 6%
+ * of it). test/kit.test.ts keeps the handoff's table: it holds every other
+ * value to it and these four to its hues.
  */
 export const PALETTE = {
   bg: { dark: "#1a1b26", light: "#e6e7ed" },
@@ -27,13 +37,13 @@ export const PALETTE = {
   line: { dark: "#2a2e3f", light: "#c3c7d8" },
   text: { dark: "#c0caf5", light: "#2b3150" },
   muted: { dark: "#a9b1d6", light: "#474e70" },
-  dim: { dark: "#8b93b8", light: "#5d6488" },
+  dim: { dark: "#8b93b8", light: "#585e80" },
   green: { dark: "#9ece6a", light: "#466a20" },
   "green-ink": { dark: "#0c0e10", light: "#f6f7fa" },
-  amber: { dark: "#e0af68", light: "#875a0c" },
+  amber: { dark: "#e0af68", light: "#83570c" },
   red: { dark: "#f7768e", light: "#b3244a" },
-  blue: { dark: "#7aa2f7", light: "#2d5bc0" },
-  lilac: { dark: "#bb9af7", light: "#7446c9" },
+  blue: { dark: "#7aa2f7", light: "#2d5abf" },
+  lilac: { dark: "#bb9af7", light: "#7143c8" },
 } as const;
 export type Theme = "dark" | "light";
 export type Token = keyof typeof PALETTE;
@@ -92,9 +102,12 @@ const CSS = String.raw`
      data-theme also pins one element to a theme (the footer's badge is the
      brand's, dark in both). The aliases are declared wherever a theme is, so
      they follow it: --edge on a light page is light lilac. */
-  :root, [data-theme="dark"] { color-scheme: dark; ${tokens("dark")} --scrim: color-mix(in srgb, var(--bg-deep) 72%, transparent); }
-  @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { color-scheme: light; ${tokens("light")} --scrim: color-mix(in srgb, var(--text) 40%, transparent); } }
-  [data-theme="light"] { color-scheme: light; ${tokens("light")} --scrim: color-mix(in srgb, var(--text) 40%, transparent); }
+  :root, [data-theme="dark"] { color-scheme: dark; ${tokens("dark")} }
+  @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { color-scheme: light; ${tokens("light")} } }
+  [data-theme="light"] { color-scheme: light; ${tokens("light")} }
+  /* The veil behind a dialog is the handoff's in both themes: the dark chrome at 60%, so a light page dims as a dark one does.
+     It is declared on ::backdrop itself too: a browser from before early 2024 (Chrome 122, Safari 17.4, Firefox 120) gives ::backdrop none of the page's custom properties. */
+  :root, ::backdrop { --scrim: color-mix(in srgb, ${PALETTE["bg-deep"].dark} 60%, transparent); }
   :root, [data-theme] {
     /* A ring's hue is its own, and none is used for anything but its ring. */
     --edge: var(--lilac); --rc: var(--blue); --stable: var(--green); --lab: var(--amber);
@@ -146,7 +159,8 @@ const CSS = String.raw`
   .gh:hover { color: var(--text); }
   .gh svg { width: 18px; height: 18px; fill: currentColor; }
   .status { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--dim); text-decoration: none; }
-  /* A live light is a square that breathes (the kit's op-pulse: its opacity, 1.6 s), not a glow: no shadows, and it stops under prefers-reduced-motion. */
+  /* A live light is a square that breathes (op-pulse: its opacity, 1.6 s), not a glow: no shadows, and it stops under prefers-reduced-motion. The frame declares it — every page's lights, skeletons and live marks breathe with it — and the kit's live dot uses the same. */
+  @keyframes op-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
   .status .led { width: 9px; height: 9px; background: var(--dim); }
   .status.online .led { background: var(--green); animation: op-pulse 1.6s ease-in-out infinite; }
   .status.online { color: var(--green); }
@@ -359,7 +373,9 @@ const CSS = String.raw`
   /* What the box answers as you type: a package a line, the full search last. */
   .suggest { position: absolute; left: 0; right: 0; top: calc(100% + 4px); z-index: 30; background: var(--panel); border: 1px solid var(--line); text-align: left; }
   .suggest a { display: grid; grid-template-columns: minmax(120px, auto) auto auto minmax(0, 1fr); gap: 12px; align-items: center; padding: 9px 14px; color: var(--text); text-decoration: none; border-bottom: 1px solid var(--line); font-size: 13px; }
-  .suggest a:last-child { border-bottom: 0; } .suggest a:hover, .suggest a:focus { background: var(--panel-2); outline: none; }
+  .suggest a:last-child { border-bottom: 0; } .suggest a:hover, .suggest a:focus { background: var(--panel-2); } .suggest a:focus { outline: none; }
+  /* The row the keyboard is on has the green line of every focus: the background alone is a step of 1.06:1 in light (--panel to --panel-2). */
+  .suggest a:focus-visible { outline: 1px solid var(--green); outline-offset: -1px; }
   .suggest a b { font-weight: 600; color: var(--green); } .suggest a .d { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .suggest a.all { display: block; color: var(--green); font-size: 12.5px; padding: 10px 14px; }
   .suggest .none { padding: 10px 14px; color: var(--dim); font-size: 12.5px; }
@@ -668,6 +684,10 @@ const CSS = String.raw`
   button[disabled], select[disabled], input[disabled], textarea[disabled], a.disabled { opacity: .45; cursor: not-allowed; }
   button[disabled]:hover, a.disabled:hover { border-color: var(--line); text-decoration: none; }
   .decide { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  /* The shell's own buttons, the decision dialog's and the Decision cell's, are drawn in the palette's names: left to the browser, a light page drew them in its own light grey with a black outset border, a dark one in its grey. :where() keeps the rule at an element's weight, so a table's smaller buttons (table button) and the dialog's danger and ghost still win. The dialog's confirm is its primary, in green. */
+  :where(dialog.ask, .decide) button { background: var(--panel-2); border: 1px solid var(--line); color: var(--text); padding: 5px 12px; font: inherit; font-size: 13px; cursor: pointer; }
+  :where(dialog.ask, .decide) button:hover { border-color: var(--green); }
+  dialog.ask button[type="submit"]:not(.danger) { background: var(--green); border-color: var(--green); color: var(--green-ink); } dialog.ask button[type="submit"]:not(.danger):hover { filter: brightness(1.08); }
   @media (max-width: 720px) {
     .hero h1 { font-size: 24px; } .hrow { grid-template-columns: 110px 1fr 46px; }
     .ticker .row { grid-template-columns: 1fr; gap: 1px; padding-bottom: 6px; border-bottom: 1px solid var(--line); } .ticker .row .when { font-size: 11px; }
@@ -1376,7 +1396,7 @@ export const HELPERS = String.raw`
     load();
     setInterval(load, everyMs || 20000);
   }
-${KIT_HELPERS}`;
+`;
 
 export interface PageOptions {
   title: string;
@@ -1397,6 +1417,14 @@ export interface PageOptions {
    * encodes it once, as a query value.
    */
   path: string;
+  /**
+   * The page is drawn with the v1 kit (pages/kit.ts): the frame links the
+   * kit's stylesheet (its primitives and icons, one immutable file) after
+   * its own CSS and puts the kit's helpers (lucide(), agentMark(),
+   * countUp(), the code well's copy) in the page's script. A page that is
+   * not pays nothing for it: no request, no bytes.
+   */
+  kit?: boolean;
 }
 
 /** Four doors — use it, contribute to it, maintain it, watch it run. Everything else, the documentation included, is one link away in the footer. */
@@ -1579,9 +1607,8 @@ export function page(o: PageOptions): string {
 <meta name="theme-color" content="${PALETTE.bg.light}" media="(prefers-color-scheme: light)">
 <script>${THEME_BOOT}</script>${analyticsTag(v)}
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Geist:wght@500;600;700&display=swap">
-<link rel="stylesheet" href="${ICON_SHEET_PATH}">
-<style>${CSS}${KIT_CSS}</style>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Geist:wght@500;600;700&display=swap">
+<style>${CSS}</style>${o.kit ? `\n<link rel="stylesheet" href="${KIT_SHEET_PATH}">` : ""}
 </head>
 <body>
 <div id="progress"></div>
@@ -1610,7 +1637,7 @@ ${body}
 (function () {
   // The footer lights the entry the reader is on or under: /package/<name> is Packages, /docs/<chapter> is Docs, /diff is the Journal's; a build lights nothing here, its door is Review.
   document.querySelectorAll("footer .more a").forEach(function (a) { var href = a.getAttribute("href"), here = location.pathname; if (here === href || here.indexOf(href + "/") === 0 || (href === "/packages" && here.indexOf("/package/") === 0) || (href === "/journal" && here === "/diff")) a.classList.add("active"); });
-${HELPERS.split("__POOL_URL__").join(pool).split("__RINGS_TEXT__").join(JSON.stringify(RING_TEXT)).split("__WICON__").join(JSON.stringify(WORKER_ICONS)).split("__LATE_AFTER_HOURS__").join(String(LATE_AFTER_HOURS)).split("__PROMISED_RINGS__").join(JSON.stringify(RINGS_BY_STABILITY.filter((r) => (PROMOTED_RINGS as readonly string[]).includes(r)))).split("__ARCHES__").join(JSON.stringify(REPO_ARCHES)).split("__SEVERITIES__").join(JSON.stringify(SEVERITIES)).split("__WORKER_ALIVE_MINUTES__").join(String(WORKER_ALIVE_MINUTES))}
+${HELPERS.split("__POOL_URL__").join(pool).split("__RINGS_TEXT__").join(JSON.stringify(RING_TEXT)).split("__WICON__").join(JSON.stringify(WORKER_ICONS)).split("__LATE_AFTER_HOURS__").join(String(LATE_AFTER_HOURS)).split("__PROMISED_RINGS__").join(JSON.stringify(RINGS_BY_STABILITY.filter((r) => (PROMOTED_RINGS as readonly string[]).includes(r)))).split("__ARCHES__").join(JSON.stringify(REPO_ARCHES)).split("__SEVERITIES__").join(JSON.stringify(SEVERITIES)).split("__WORKER_ALIVE_MINUTES__").join(String(WORKER_ALIVE_MINUTES))}${o.kit ? KIT_HELPERS : ""}
 ${o.script ?? ""}
 ${docsSearch}
 })();

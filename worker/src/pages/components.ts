@@ -31,7 +31,6 @@
  * the page's name, so a new read or act is declared the day it is written.
  */
 import { MORE, PALETTE, THEME_KEY } from "./layout";
-import { ICON_SHEET_PATH } from "./kit";
 import { OVERVIEW_COMPONENTS } from "./overview";
 import { FACTORY_COMPONENTS } from "./contribute";
 import { REVIEW_COMPONENTS } from "./review";
@@ -181,15 +180,6 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     id: "shell.theme",
     page: "/",
     anchor: [`<meta name="theme-color" content="${PALETTE.bg.dark}" media="(prefers-color-scheme: dark)">`, `<meta name="theme-color" content="${PALETTE.bg.light}" media="(prefers-color-scheme: light)">`, "window.opTheme = {", `"${THEME_KEY}"`, '[data-theme="light"] { color-scheme: light;'],
-    visible: EVERYONE,
-  },
-  {
-    // The v1 kit (pages/kit.ts): the icons' one stylesheet, linked by every page and immutable under its hash; the shell's lucide() and agentMark() draw into it, countUp() lands a number, and a code well's copy button is the shell's.
-    id: "shell.kit",
-    page: "/",
-    anchor: [`<link rel="stylesheet" href="${ICON_SHEET_PATH}">`, ".op-stats {", ".op-code {"],
-    script: ["function lucide(name, size, label)", "function agentMark(mark, label, size)", "function countUp(el, to, fmt, ms)", 'closest("[data-op-copy]")'],
-    reads: [{ path: ICON_SHEET_PATH, json: false }],
     visible: EVERYONE,
   },
   {
