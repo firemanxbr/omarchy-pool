@@ -55,7 +55,7 @@ describe("what a caller may do on a person's page", () => {
     const c = await canOn("alice", "");
     expect(flags(c)).toEqual(allFalse);
     expect(c.why).toEqual(Object.fromEntries(RIGHTS.map((r) => [r, SIGN_IN])));
-    expect(Object.keys(c.packages).sort()).toEqual([F.factoryPkg, F.publishedPkg].sort());
+    expect(Object.keys(c.packages).sort()).toEqual([F.factoryPkg, F.publishedPkg, F.disposablePkg, F.sparePkg].sort());
     for (const name of Object.keys(c.packages)) expect(c.packages[name]).toEqual({ remove: false, why: SIGN_IN });
     expect(Object.keys(c.workers)).toEqual([F.communityWorker]);
     expect(c.workers[F.communityWorker]).toEqual({ revoke: false, own_only: false, share_worker: false, why: { revoke: SIGN_IN, own_only: SIGN_IN, share_worker: SIGN_IN } });
@@ -154,8 +154,8 @@ describe("what a caller may do on a person's page", () => {
     expect((await call("POST", `/factory/workers/${F.communityWorker}/mode`, "m1", { mode: "dedicated" })).status).toBe(200);
     expect((await call("POST", `/factory/tasks/${F.projectTask}/withdraw`, "m1", { note: "taken back by the test" })).status).toBe(200);
     expect((await call("DELETE", `/factory/workers/${F.communityWorker}`, "m1")).json).toMatchObject({ revoked: F.communityWorker });
-    // The maintainer's removal takes the approved one and the published one alike; then alice's page has nothing to remove.
-    for (const name of [F.factoryPkg, F.publishedPkg]) {
+    // The maintainer's removal takes the approved one and the published one alike, and the two under review; then alice's page has nothing to remove.
+    for (const name of [F.factoryPkg, F.publishedPkg, F.disposablePkg, F.sparePkg]) {
       const r = await call("DELETE", `/factory/packages/${name}`, "m1");
       expect(r.status, `m1 removes ${name}: ${JSON.stringify(r.json)}`).toBe(200);
     }

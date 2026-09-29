@@ -48,13 +48,13 @@ const READ: Row[] = [
 
 const FACTORY_READ: Row[] = [
   { routes: ["GET /factory?limit="], text: "Workers the pool has heard from (owner, trust, mode, the agent each reported, current task), the queue (every kind: builds, pool jobs, audits — a task's <code>params</code> and <code>result</code> as JSON, the shapes the brain queues and the jobs post), package requests, counts." },
-  { routes: ["GET /factory/packages", "GET /factory/built", "GET /factory/tasks/:id"], text: "The registry of packages people brought (a row says <code>landed</code> once a maintainer approved it or the project published it); what the factory built; one task with its log tail, its approval carrying <code>standing</code>." },
-  { routes: ["GET /factory/packages/:name/story"], text: "The factory's view of one package: its registration and the request as the form checks it, every chain with its score, the class it has today, the rings it is in. What the package page and a person's rows draw." },
-  { routes: ["GET /factory/review"], text: "Staged community builds waiting for a maintainer, each with links to its evidence (PKGBUILD, log, .PKGINFO, the audit), the second agent's verdict (<code>ok</code> / <code>warn</code> / <code>block</code>, or <em>queued</em> / <em>failed</em>) and <code>can</code>: what you may do on the row — approve, reject, build, withdraw — and, where not, why; <code>standing</code> says an approval stands on the row's chain; <code>waits</code> says the row asks for a maintainer's time now — the same for every caller, the rule the Review page highlights by; <code>waiting</code> and <code>oldest_ms</code> count those rows and the age of the oldest — the one number every tile reads. Not cached: the answer is yours." },
+  { routes: ["GET /factory/packages", "GET /factory/built", "GET /factory/tasks/:id"], text: "The registry of packages people brought, one per name, the most recently updated first (<code>truncated</code> when the answer stops before the last; a row says <code>landed</code> once a maintainer approved it or the project published it, and <code>targets</code> where each architecture stands); what the factory built; one task with its log tail, its approval carrying <code>standing</code>." },
+  { routes: ["GET /factory/packages/:name/story"], text: "The factory's view of one package: its registration and the request as the form checks it, <code>targets</code> — each architecture's <code>status</code> (<em>waiting</em>, <em>building</em>, <em>built</em>, <em>not_supported</em>, <em>reviewing</em>, <em>reviewed</em>, <em>approved</em>, <em>published</em>) and the build that says so — every chain with its score, the class it has today, the rings it is in. What the package page and a person's rows draw." },
+  { routes: ["GET /factory/review"], text: "Staged community builds waiting for a maintainer, each with links to its evidence (PKGBUILD, log, .PKGINFO, the audit), the second agent's verdict (<code>ok</code> / <code>warn</code> / <code>block</code>, or <em>queued</em> / <em>failed</em>), its package's <code>targets</code> and <code>can</code>: what you may do on the row — approve, reject, build, withdraw, each deciding the whole package — and, where not, why; <code>standing</code> says an approval stands on the row's chain; <code>lead</code> marks the one row that speaks for its package, and <code>waits</code> says that row asks for a maintainer's time now — the same for every caller, the rule the Review page highlights by; <code>waiting</code> and <code>oldest_ms</code> count those packages and the age of the oldest — the one number every tile reads; <code>packages</code> lists one entry per package with its rows. Not cached: the answer is yours." },
   { routes: ["GET /factory/tasks/:id/can"], text: "The same <code>can</code> for one task: <code>{approve, reject, build, withdraw, why}</code> for whoever asks — every page draws every button and greys the ones you may not press with this reason. Not cached." },
   { routes: ["GET /factory/tasks/:id/artifacts", "GET /factory/tasks/:id/artifacts/<file>"], text: "What a task has in staging (key, size, when), then a staged build's evidence: <code>PKGBUILD</code>, <code>build.log</code>, <code>PKGINFO</code>, <code>audit.md</code>, <code>audit.json</code> are public; the package itself is for maintainers." },
-  { routes: ["GET /factory/approvals", "GET /factory/maintainers", "GET /factory/trust", "GET /factory/blocks"], text: "The record: every decision with who signed it, whether it stands (<code>standing</code>: approved, not withdrawn) and, for one that stands, where the package is (<code>rings</code>, or none with <code>publish_status</code> and <code>blocked_at</code> — what the pages word as publishing, publish failed or blocked); the maintainers (from <code>factory/MAINTAINERS.toml</code>, with since when); project-trusted workers; what is blocked now and why." },
-  { routes: ["GET /users/:login"], text: "A contributor's or maintainer's public profile: packages, builds, approvals, workers, and the <em>track record</em> (<a href=\"/docs/governance\">Governance</a>)." },
+  { routes: ["GET /factory/approvals", "GET /factory/maintainers", "GET /factory/trust", "GET /factory/blocks"], text: "The record: the newest decisions (<code>truncated</code> when older ones exist) — each one review of a package (<code>review</code>; <code>id</code> stays its first target's approval id, the one the journal names), the architectures it covered in <code>arches</code> and <code>targets</code>, the ones never built in <code>not_supported</code> — with who signed it, whether it stands (<code>standing</code>: approved, not withdrawn) and, for one that stands, where the package is (<code>rings</code>, or none with <code>publish_status</code> and <code>blocked_at</code> — what the pages word as publishing, publish failed or blocked); the maintainers (from <code>factory/MAINTAINERS.toml</code>, with since when); project-trusted workers, those proposed for it, and each maintainer's own with the agent it reports; what is blocked now and why." },
+  { routes: ["GET /users/:login"], text: "A contributor's or maintainer's public profile: packages (each with <code>landed</code>), builds, approvals, workers, and the <em>track record</em> (<a href=\"/docs/governance\">Governance</a>)." },
   { routes: ["GET /users/:login/can"], text: "What you may do on that page: <code>{request, register, token, build, dequeue, remove, revoke, withdraw, own_only, share_worker, why, packages, workers}</code> — the page draws every control for everyone and greys the ones you may not press with the reason in <code>why</code>; <code>packages</code> answers Remove per registration, <code>workers</code> Revoke and the mode per worker (a revoked one, a project's). Not cached: the answer is yours." },
   { routes: ["GET /factory/workers/self"], text: "With a worker token: what that registration is (id, arch, trust, owner, mode) — how the image decides its mode." },
   { routes: ["GET /factory/workers/:id/log"], text: "The worker's own log — the lines between tasks, as it sent them with its claims — for its owner and the maintainers." },
@@ -78,7 +78,7 @@ const WRITE_PEOPLE: Row[] = [
   { routes: ["POST /factory/register", "POST /factory/token"], who: "contributor", text: "A GitHub token, used once to read your login and never stored, answers a contributor token (<code>omc_…</code>); signed in on the dashboard, mint or replace the same token from your page." },
   { routes: ["POST /factory/packages", "POST /factory/packages/:name/build", "DELETE /factory/packages/:name/builds/:id", "DELETE /factory/packages/:name", "DELETE /factory/tasks/:id/artifacts"], who: "contributor", text: "Request a package (the project's URL, a description, the licence, the checklist — written once to the record), ask for a build, take a queued build out, remove the request, or drop a finished task's staging objects (the 5 GB quota; the pool reclaims superseded, rejected and published builds itself)." },
   { routes: ["POST /factory/workers", "DELETE /factory/workers/:id", "POST /factory/workers/:id/mode", "POST /factory/workers/self/mode"], who: "contributor", text: "Register a worker (the token is shown once), revoke it, set whether it builds everyone's queue or its owner's packages only — from the page, or the worker itself through its token (<code>omarchy-worker share on|off</code>)." },
-  { routes: ["POST /factory/tasks/:id/build", "POST /factory/tasks/:id/approve", "POST /factory/tasks/:id/reject", "POST /factory/tasks/:id/withdraw"], who: "maintainer", text: "Have the project build a contributor's staged package again (its agent, a trusted worker, its own recipe); approve the project's build into edge — the decision on the record, a publish job; send either back with a note; or take a standing approval back, the reason on the record. Never your own package — a withdrawal excepted: undoing is not deciding. A refusal answers the reason <code>can</code> gives." },
+  { routes: ["POST /factory/tasks/:id/build", "POST /factory/tasks/:id/approve", "POST /factory/tasks/:id/reject", "POST /factory/tasks/:id/withdraw"], who: "maintainer", text: "Each decides the package the task is a build of — every architecture of it. Have the project build a contributor's staged package again (its agent, trusted workers, its own recipe) for every architecture its contributor built, once each is built or not supported; approve the project's builds into edge — one review on the record, a publish job per architecture, one that never built not supported; reject with a note — the builds in review stop and a request's name is free again; or take a standing review back, the reason on the record. Never your own package — a withdrawal excepted: undoing is not deciding. A refusal answers the reason <code>can</code> gives." },
   { routes: ["POST /factory/packages/:name/category"], who: "maintainer", text: "Settle the package's category (<a href=\"/docs/governance#categories\">one of the list</a>) — at review or any time after; a <code>category</code> line in the journal says who and from what." },
   { routes: ["POST /factory/jobs"], who: "maintainer", text: `Queue a pool job by hand (${JOB_KINDS.join(", ")}) — what <code>pkg-repo job</code> calls.` },
   { routes: ["POST /factory/workers/:id/trust"], who: "maintainer", text: "Project trust on two maintainers' word: the first call proposes (<code>202</code>), a second maintainer's — never the same person's; the owner's counts as the second word, never the first — confirms; <code>{\"trust\":\"community\"}</code> takes it back at one word. Each step an event; the trust a signed record under <code>workers/&lt;id&gt;/</code>." },
@@ -89,6 +89,28 @@ const WRITE_PEOPLE: Row[] = [
 
 /** Every route the reference documents under /api/v1, as "METHOD /path" with the query hint dropped — what the test holds against the router. */
 export const DOCUMENTED_ROUTES: string[] = [...READ, ...FACTORY_READ, ...WRITE_JOBS, ...WRITE_PEOPLE].filter((r) => !r.root).flatMap((r) => r.routes.map((x) => x.replace(/\?.*$/, "")));
+
+/**
+ * The reads the docs index's API section lists (#250, pages/docs.ts): a
+ * route as a row above writes it — method, path, query hint — and what it
+ * answers in a few words. A reader starts from these; the rest is here.
+ * test/lists.test.ts holds each to a read row of this page and to a GET
+ * the router serves, so the short table cannot name a route that is gone
+ * or one that writes.
+ */
+export const API_BRIEF: [route: string, returns: string][] = [
+  ["GET /package/:name?ring=&arch=", "a package: its version in every ring, what it depends on, its advisories"],
+  ["GET /search?q=&ring=&arch=&limit=", "packages in a ring, by name or description"],
+  ["GET /releases/:ring?fields=summary&arch=", "the ring's current release, a line per package"],
+  ["GET /packages/:sha256/provenance", "the seal of one package file: where it came from, and the proof"],
+  ["GET /security?ring=&arch=", "open advisories in a ring, by package"],
+  ["GET /events?kind=&limit=", "the journal, newest first"],
+  ["GET /factory/packages", "every request, and where it stands"],
+  ["GET /factory/review", "what waits for a maintainer"],
+];
+
+/** The read rows' routes as they are written, for the test that holds API_BRIEF to them. */
+export const READ_ROUTES: string[] = [...READ, ...FACTORY_READ].flatMap((r) => r.routes);
 
 /** A route's cell: every route whole, in a code each. */
 const cell = (routes: string[]) => routes.map((r) => `<code>${escapeHtml(r)}</code>`).join(" · ");
@@ -257,7 +279,7 @@ export const API_DOCS_COMPONENTS = (F: Fixture): Component[] => {
           path: "/api/v1/factory?limit=10",
           fields: ["generated_at", "lease_minutes", "limit", "counts", "workers", "workers.0.id", "workers.0.owner", "workers.0.trust", "workers.0.mode", "workers.0.agent", "workers.0.current_task", "tasks", "tasks.0.id", "tasks.0.kind", "tasks.0.status"],
         },
-        { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.name", "packages.0.owner", "packages.0.status", "packages.0.arches", "packages.0.staged_builds"] },
+        { path: "/api/v1/factory/packages", fields: ["truncated", "packages", "packages.0.name", "packages.0.owner", "packages.0.status", "packages.0.arches", "packages.0.staged_builds"] },
         { path: "/api/v1/factory/built", fields: ["built", "built.0.name", "built.0.arch", "built.0.version", "built.0.status", "built.0.id"] },
         {
           path: `/api/v1/factory/tasks/${F.projectTask}`,
@@ -265,22 +287,22 @@ export const API_DOCS_COMPONENTS = (F: Fixture): Component[] => {
         },
         {
           path: "/api/v1/factory/review",
-          fields: ["staged", "waiting", "oldest_ms", "staged.0.id", "staged.0.kind", "staged.0.owner", "staged.0.waits", "staged.0.evidence.pkgbuild", "staged.0.evidence.log", "staged.0.evidence.pkginfo", "staged.0.evidence.audit", "staged.0.vet", "staged.0.audit.status", "staged.0.trial", "staged.0.can.approve", "staged.0.can.reject", "staged.0.can.build", "staged.0.can.withdraw", "staged.0.can.why"],
+          fields: ["staged", "waiting", "oldest_ms", "packages", "packages.0.name", "packages.0.targets", "packages.0.lead", "packages.0.rows", "staged.0.id", "staged.0.kind", "staged.0.owner", "staged.0.waits", "staged.0.lead", "staged.0.targets", "staged.0.evidence.pkgbuild", "staged.0.evidence.log", "staged.0.evidence.pkginfo", "staged.0.evidence.audit", "staged.0.vet", "staged.0.audit.status", "staged.0.trial", "staged.0.can.approve", "staged.0.can.reject", "staged.0.can.build", "staged.0.can.withdraw", "staged.0.can.why"],
         },
         { path: `/api/v1/factory/tasks/${F.stagedTask}/can`, fields: ["task", "can.approve", "can.reject", "can.build", "can.withdraw", "can.why.approve"] },
         { path: `/api/v1/factory/tasks/${F.stagedTask}/can`, as: "maintainer", fields: ["task", "can.approve", "can.reject", "can.build", "can.withdraw", "can.why.approve"] },
-        { path: `/api/v1/factory/packages/${F.factoryPkg}/story`, fields: ["package", "package.name", "request", "chains", "rings"] },
+        { path: `/api/v1/factory/packages/${F.factoryPkg}/story`, fields: ["package", "package.name", "package.targets", "targets", "request", "chains", "rings"] },
         { path: `/api/v1/factory/tasks/${F.projectTask}/artifacts`, fields: ["task", "objects", "objects.0.key", "objects.0.size", "objects.0.uploaded_at"] },
         { path: `/api/v1/factory/tasks/${F.projectTask}/artifacts/PKGBUILD`, json: false },
         { path: `/api/v1/factory/tasks/${F.projectTask}/artifacts/${stagedPackage}`, status: 403 },
         { path: `/api/v1/factory/tasks/${F.projectTask}/artifacts/${stagedPackage}`, as: "maintainer", json: false },
-        { path: "/api/v1/factory/approvals", fields: ["approvals", "approvals.0.id", "approvals.0.task_id", "approvals.0.name", "approvals.0.decision", "approvals.0.by", "approvals.0.standing", "approvals.0.rings", "approvals.0.publish_status", "approvals.0.blocked_at"] },
+        { path: "/api/v1/factory/approvals", fields: ["truncated", "approvals", "approvals.0.id", "approvals.0.review", "approvals.0.task_id", "approvals.0.name", "approvals.0.decision", "approvals.0.by", "approvals.0.standing", "approvals.0.arches", "approvals.0.not_supported", "approvals.0.targets", "approvals.0.targets.0.arch", "approvals.0.rings", "approvals.0.publish_status", "approvals.0.blocked_at"] },
         { path: "/api/v1/factory/maintainers", fields: ["maintainers", "maintainers.0.login", "maintainers.0.since", "source", "synced_at"] },
         { path: "/api/v1/factory/trust", fields: ["workers", "workers.0.id", "workers.0.trust", "workers.0.trusted_by", "maintainers", "listed", "source"] },
         { path: "/api/v1/factory/blocks", fields: ["contributors", "packages"] },
         {
           path: `/api/v1/users/${F.owner}`,
-          fields: ["login", "role", "github", "packages", "packages.0.name", "builds", "builds.0.id", "build_counts.total", "approvals", "approved_packages", "record", "workers", "workers.0.id"],
+          fields: ["login", "role", "github", "packages", "packages.0.name", "packages.0.landed", "builds", "builds.0.id", "build_counts.total", "approvals", "approved_packages", "record", "workers", "workers.0.id"],
         },
         { path: `/api/v1/users/${F.owner}/can`, fields: ["login", "can.request", "can.register", "can.token", "can.build", "can.dequeue", "can.remove", "can.revoke", "can.withdraw", "can.own_only", "can.share_worker", "can.why.request", `can.packages.${F.factoryPkg}.remove`, `can.workers.${F.communityWorker}.revoke`] },
         { path: `/api/v1/users/${F.owner}/can`, as: "owner", fields: ["login", "can.build", "can.remove", "can.why.withdraw", `can.packages.${F.factoryPkg}.remove`, `can.packages.${F.factoryPkg}.why`] },

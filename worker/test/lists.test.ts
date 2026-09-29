@@ -10,7 +10,8 @@
  * on the API page, the categories the auditing agent is told to choose
  * from (factory/prompts/audit.md, held to CATEGORIES), and the API page's
  * endpoint rows against the routes the router serves under /api/v1 — read
- * from index.ts's own source, as the reachability test reads the html routes;
+ * from index.ts's own source, as the reachability test reads the html routes —
+ * and the docs index's short API table against both;
  * the rings, the architectures, the severities and the alive threshold
  * (meta.ts) spliced into the shell and read by every page script, none
  * typing a list of its own; the Workers page's pool kinds (JOB_KINDS).
@@ -23,7 +24,7 @@ import { EXPECTED_SOURCES, JOURNAL_KINDS, LATE_AFTER_HOURS, PROMOTED_RINGS, REPO
 import { sourceBoxes } from "../src/pages/diagrams";
 import { JOB_KINDS } from "../src/jobs";
 import { BUDGET_CAP_USD, BUDGET_GUARD_USD, BUDGET_WARN_USD, ESTIMATE_CADENCE } from "../src/cost";
-import { DOCUMENTED_ROUTES } from "../src/pages/api-docs";
+import { API_BRIEF, DOCUMENTED_ROUTES, READ_ROUTES } from "../src/pages/api-docs";
 import { escapeHtml } from "../src/html";
 import { allComponents } from "../src/pages/components";
 import { GO_MENU, HELPERS } from "../src/pages/layout";
@@ -197,7 +198,8 @@ describe("lists come from the code that owns them", () => {
     // Each page reads the list it means — every ring where a reader picks one, the promised ones where a check or a scan covers them — and its manifest pins the read, not a literal.
     const components = allComponents(F);
     for (const [path, id, literal] of [
-      ["/", "pool.get-started-step", "RINGS = Object.keys(RINGS_TEXT)"],
+      // Home's picker offers the rings that promise something (#243): the lab is picked on Get started, where it is explained.
+      ["/", "pool.setup", 'PROMISED_RINGS.indexOf(q.get("ring"))'],
       ["/docs/get-started", "docs-get-started.ring-picker", "RINGS = Object.keys(RINGS_TEXT)"],
       ["/packages", "packages.ring-arch-pickers", "RINGS = Object.keys(RINGS_TEXT)"],
       // Status picks through its own choose(), the shell's pick() with the pressed state and the section kept in the address.
@@ -227,7 +229,9 @@ describe("lists come from the code that owns them", () => {
       expect(own, `${path} types the null source's architecture`).not.toMatch(/source \|\| "x86_64"/);
     }
     expect(ownScriptOf(await text(`/user/${F.owner}`))).toContain("arch || ARCHES[0]");
-    expect(ownScriptOf(await text("/"))).toContain('pkgHref(p.name, "stable", ARCHES[0])');
+    // The Pool's search starts on the first architecture, and a row links its package on the architecture the row came from (#243: stable on aarch64 is asked when the first finds nothing).
+    expect(ownScriptOf(await text("/"))).toContain("search(term, ARCHES[0])");
+    expect(ownScriptOf(await text("/"))).toContain('pkgHref(p.name, "stable", p.repo_arch)');
     expect(ownScriptOf(await text("/status"))).toContain("h.source || NULL_SOURCE_ARCH");
   });
 
@@ -308,5 +312,12 @@ describe("lists come from the code that owns them", () => {
     expect(undocumented, "served under /api/v1 with no row on /api").toEqual([]);
     const gone = DOCUMENTED_ROUTES.filter((r, i) => !served.some((s) => covers(rows[i], s)));
     expect(gone, "a row on /api about a route the router does not serve").toEqual([]);
+    // The docs index's API table (#250) is the reference's short list: each a read row's route as /api writes it, and a GET the router serves.
+    expect(API_BRIEF.length).toBeGreaterThan(5);
+    for (const [route] of API_BRIEF) {
+      expect(READ_ROUTES, `${route}: no read row on /api writes it so`).toContain(route);
+      expect(route.startsWith("GET "), route).toBe(true);
+      expect(served.some((s) => covers(documented(route.replace(/\?.*$/, "")), s)), `${route}: the router does not serve it`).toBe(true);
+    }
   });
 });
