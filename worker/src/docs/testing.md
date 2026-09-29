@@ -414,6 +414,13 @@ restart; four probes, then the half-hour one; a failure logged once; an
 agent that never answers probed at gaps that double back to the half hour
 and stay there (two probes in its second hour); and the same through a
 broker's `/health`.
+`bash tests/worker-needs-native.sh` (CI, the Rust job) runs `pkg-repo work
+--once` against a stub pool that hands it the project's x86_64 review
+build and a stub `podman` that plays the build container (#281): on an
+emulated worker, the build script's exit 96 and a library the loader could
+not map (`failed to map segment from shared object`) are reported
+`needs_native: true, final: false`, the log staged; the same loader line on
+a native worker is a plain failure; the gate's stays final.
 `bash tests/omarchy-rollout.sh` (CI) runs the updater and the Studio's
 `factory/host/rollout.sh` against a stubbed docker: the brokers
 (`agent-proxy`, `broker-*`, a service with the broker or agent role) in

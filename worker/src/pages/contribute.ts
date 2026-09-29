@@ -665,15 +665,16 @@ const SCRIPT = String.raw`
     if (s === 0) return [arches.some(function (a) { return BUILT[t[a].status]; }) ? "built · not ready yet" : "on the record · no build yet", ""];
     if (s === 1) {
       var run = arches.filter(function (a) { return t[a].status === "building"; }).map(function (a) { return taskOf(t[a].task); }).filter(Boolean)[0];
-      var doing = run ? (run.status === "leased" ? stepOf(run) : "queued for a worker") : "queued for a worker";
-      return [(off ? off + " · " : "") + doing, off ? "warn" : ""];
+      var doing = run ? (run.status === "leased" ? stepOf(run) : waitsForNative(run) || "queued for a worker") : "queued for a worker";
+      return [(off ? off + " · " : "") + doing, off || waitsForNative(run) ? "warn" : ""];
     }
     if (s === 2) {
       var built = arches.filter(function (a) { return BUILT[t[a].status]; });
       return [(built.length === arches.length && arches.length > 1 ? "built on every architecture" : built.join(", ") + " built") + (off ? " · " + off : ""), off ? "warn" : ""];
     }
     // In review: the project's rebuild running, or staged for a maintainer's decision — or a new version building while the claim on the last one stands. Short enough for the card's one line at 1024.
-    if (s === 3) { var at = function (w) { return arches.some(function (a) { return t[a].status === w; }); }; return [(at("reviewing") ? "project rebuilding" : at("building") ? "new version building" : "rebuild staged") + (off ? " · " + off : ""), ""]; }
+    // The project's rebuild an emulated worker sent back says what it waits for (the shell's waitsForNative, #281).
+    if (s === 3) { var at = function (w) { return arches.some(function (a) { return t[a].status === w; }); }; var rv = arches.filter(function (a) { return t[a].status === "reviewing"; }).map(function (a) { return taskOf(t[a].task); }).filter(Boolean)[0], wn = waitsForNative(rv); return [(wn ? wn : at("reviewing") ? "project rebuilding" : at("building") ? "new version building" : "rebuild staged") + (off ? " · " + off : ""), wn ? "warn" : ""]; }
     var a = standingOf(p);
     if (a) { var where = approvalWhere(a); return [where.word + (off ? " · " + off : ""), where.cls === "error" ? "bad" : ""]; }
     // No row to read yet: the targets' own word — in the pool once published; an approval alone promises nothing of its publish.
@@ -1047,11 +1048,11 @@ export const FACTORY_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // The line: five columns, a card per package placed by its targets (targets.ts, the server's rule for where each architecture stands) — checking, building, ready for review, in review, shipped —, the two review columns filed by the review list's own `state` for every package it names (ready: waiting for a claim; in_review: claimed until the decision — routes/review.ts, the rule Review files by, #274), each counting its own cards, an empty one saying so; a request whose every build failed is off it. Each card links the package's one address, its architectures as the kit's squares with the shell's words; a shipped one says where its approval stands in the shell's one word (approvalWhere over GET /factory/approvals, read when the column changes) and leads to the ring that serves it or, in none, to its build. Read again when a build starts or ends, and a card that moved is lit.
+      // The line: five columns, a card per package placed by its targets (targets.ts, the server's rule for where each architecture stands) — checking, building, ready for review, in review, shipped —, the two review columns filed by the review list's own `state` for every package it names (ready: waiting for a claim; in_review: claimed until the decision — routes/review.ts, the rule Review files by, #274), each counting its own cards, an empty one saying so; a request whose every build failed is off it. Each card links the package's one address, its architectures as the kit's squares with the shell's words; a shipped one says where its approval stands in the shell's one word (approvalWhere over GET /factory/approvals, read when the column changes) and leads to the ring that serves it or, in none, to its build. Read again when a build starts or ends, and a card that moved is lit. A build an emulated worker sent back says the native worker it waits for (the shell's waitsForNative over the live read's task, #281).
       id: "factory.line",
       page: "/factory",
       anchor: ['<section class="fx-line" id="line"', 'id="line-note"', "live · a card moves when its job ends", 'id="board"', ...LINE.map((_, i) => `id="col-${i}"`), ...LINE.map(([name]) => `<span>${escapeHtml(name)}</span>`)],
-      script: ['api("GET", "/api/v1/factory/packages")', "function stageOf(p)", "function lineOf(p)", 'has("building")', "CLAIMED = { reviewing: 1, reviewed: 1 }", "BUILT = { built: 1 }", 'if (r === "in_review") return 3;', 'if (r === "ready") return 2;', "return s === 2 || s === 3 ? (p.landed ? 4 : 0) : s;", "if (allFailed(p)) return -1;", "TARGET_WORD[x.status]", "function hrefOf(p, s)", "approvalWhere(a)", "servedRing(rings)", '"/build/" + task', 'api("GET", "/api/v1/factory/approvals")', "avatarIcon(p.owner)", " op-fresh", "nothing here now", "if (SIG !== null && sig !== SIG) { loadRegistry();", 't.kind === "build"', "if (!document.hidden) loadRegistry();", 'noAnswer("registry", e)'],
+      script: ['api("GET", "/api/v1/factory/packages")', "function stageOf(p)", "function lineOf(p)", 'has("building")', "CLAIMED = { reviewing: 1, reviewed: 1 }", "BUILT = { built: 1 }", 'if (r === "in_review") return 3;', 'if (r === "ready") return 2;', "return s === 2 || s === 3 ? (p.landed ? 4 : 0) : s;", "if (allFailed(p)) return -1;", "TARGET_WORD[x.status]", "function hrefOf(p, s)", "approvalWhere(a)", "servedRing(rings)", '"/build/" + task', 'api("GET", "/api/v1/factory/approvals")', "avatarIcon(p.owner)", " op-fresh", "nothing here now", "if (SIG !== null && sig !== SIG) { loadRegistry();", 't.kind === "build"', "if (!document.hidden) loadRegistry();", 'noAnswer("registry", e)', "waitsForNative(run)", "waitsForNative(rv)"],
       reads: [
         { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.name", "packages.0.owner", "packages.0.status", "packages.0.release", "packages.0.targets", "packages.0.updated_at", "packages.0.landed", "packages.0.blocked_at", "packages.0.detail"] },
         { path: "/api/v1/factory/review", fields: ["packages", "packages.0.name", "packages.0.state"] },

@@ -109,7 +109,8 @@ can be ready while the other failed). The tools, in the order to try them:
 A maintainer chooses the same way for the project's build: which of the
 project's workers — one that builds and whose agent answers, native or
 emulated — and the note they write is the hint the project's agent drafts
-with.
+with. A project build that dies of emulation goes back for a native worker
+the same way.
 
 An approval can be **withdrawn** by any maintainer, the one who gave it
 included: one that broke the rule (a package approved by the person who
@@ -297,3 +298,12 @@ maintainer merges it like any other change to the process.
   worker's failure, not the recipe's: it goes back to the queue marked for
   a native worker, the attempt given back, and waits there until one is
   alive — the page says so.
+- **2026-09-29 — the project's own emulated worker.** The x86_64 capacity
+  evaluation found omarchy-cli's own x86_64 review build failed for good
+  on the Studio's review-x86_64: rustc under qemu again, three attempts,
+  then final. The pool and the community worker already sent such a build
+  back for a native worker; the review and pool workers run `pkg-repo
+  work`, which never said so. It does now (#281): the build script's exit
+  96, or the loader's *failed to map segment* on an emulated worker, is
+  reported `needs_native`, and the Status, Factory, Workers and build pages
+  say what the build waits for.
