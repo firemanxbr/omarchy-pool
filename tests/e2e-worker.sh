@@ -4,7 +4,8 @@
 #   → render databases (signed by the pool's own key) → pacman in a container
 #   syncs from the worker mirror.
 #
-# Requires: cargo, gpg, node (worker deps installed), podman or docker.
+# Requires: cargo, gpg, node (worker deps installed), podman or docker, jq,
+# python3, and libfaketime (the orders scenarios: tests/e2e-worker-orders.sh).
 # Usage: tests/e2e-worker.sh
 set -euo pipefail
 
@@ -85,8 +86,10 @@ npx wrangler d1 execute omarchy-repo --local --persist-to "$WRANGLER_STATE" --co
    INSERT INTO contributors (login, token_hash, session_hash, role) VALUES ('e2e', '$C_HASH', '$(printf %s oms_e2e | sha256sum | cut -d' ' -f1)', 'maintainer'),
      ('e2e-contributor', '$(printf %s omc_e2e_contributor | sha256sum | cut -d' ' -f1)', NULL, 'contributor')" >/dev/null
 # SOURCE_CHECK off: the package requests below name a source on a host nobody serves, and the pool would ask it (the vitest pool runs the same way).
+# WORKER_RULES_SCALE: the pool's rules for its workers' health (#277) at 60 times their pace — their step timings only; honoured
+# here because the local pool is no release (POOL_VERSION "dev"). The orders scenarios below lean on it.
 npx wrangler dev --ip 0.0.0.0 --port "$PORT" --persist-to "$WRANGLER_STATE" \
-  --env-file "$E2E/.dev.vars" --var "POOL_URL:http://$HOST_FROM_CONTAINER:$PORT/pool" --var "SOURCE_CHECK:off" > "$E2E/wrangler.log" 2>&1 &
+  --env-file "$E2E/.dev.vars" --var "POOL_URL:http://$HOST_FROM_CONTAINER:$PORT/pool" --var "SOURCE_CHECK:off" --var "WORKER_RULES_SCALE:60" > "$E2E/wrangler.log" 2>&1 &
 WRANGLER_PID=$!
 for _ in $(seq 1 60); do
   if grep -q "no release" <<<"$(curl -s "$OMARCHY_API/api/v1/releases/stable")"; then break; fi
@@ -667,6 +670,12 @@ XDG_CONFIG_HOME="$E2E/agent-contributor" "$CLI" --api "$OMARCHY_API" logout | gr
 [[ ! -e "$E2E/agent-contributor/omarchy-cli/credentials.toml" ]] || { echo "logout must delete the credentials"; exit 1; }
 [[ "$(curl -s -o /dev/null -w '%{http_code}' "$OMARCHY_API/api/v1/factory/me" -H "authorization: Bearer $ctoken")" == 401 ]] || { echo "a revoked agent token must stop working"; exit 1; }
 echo "agents: a grant in the browser, a request through the agent, a block drafted and confirmed once with a passkey, logout"
+
+step "Workers follow the brain (#277): the pool re-checks a worker, restarts it only if needed, within its bounds, and holds through an outage"
+# Real pkg-repo work processes against stub agents, a fresh worker per scenario, side by side (tests/e2e-worker-orders.sh).
+# shellcheck source=tests/e2e-worker-orders.sh
+source "$ROOT/tests/e2e-worker-orders.sh"
+w5_scenarios
 
 step "pacman in $IMAGE against the worker mirror"
 gpg --armor --export "$KEYID" > "$E2E/omarchy-poc.pub.asc"
