@@ -196,6 +196,8 @@ describe("migration 0036: one package per name, with a target per architecture",
     const m = env.TEST_MIGRATIONS.find((x) => x.name.startsWith("0036_"))!;
     expect(m, "migration 0036 is in the list").toBeTruthy();
     await env.DB.batch(m.queries.map((q) => env.DB.prepare(q)));
+    // The migrations after it run again too, in their order — what the rewind took off with the reviews table (0037's column, #247) comes back as D1 applies it.
+    for (const later of env.TEST_MIGRATIONS.filter((x) => x.name > m.name)) await env.DB.batch(later.queries.map((q) => env.DB.prepare(q)));
 
     // The schema is what every other test file runs on, and nothing of the rows it had changed.
     expect(await schema()).toEqual(after0036);
@@ -412,7 +414,8 @@ describe("a package built for two architectures", () => {
     const review = (await call("GET", "/factory/review", undefined, "omc_m2")).json;
     row = review.staged.find((t: any) => t.id === x86);
     expect(row).toMatchObject({ waits: true, lead: true, can: { build: true, approve: false } });
-    expect(review.packages.find((p: any) => p.name === "duo")).toEqual({ name: "duo", owner: "alice", version: "1.0", category: null, targets: { x86_64: { status: "built", task: x86 }, aarch64: { status: "not_supported", task: arm } }, lead: x86, waits: true, rows: [x86] });
+    // Nobody claimed it yet: it is Review's to claim (#247), by the list's own word.
+    expect(review.packages.find((p: any) => p.name === "duo")).toEqual({ name: "duo", owner: "alice", version: "1.0", category: null, targets: { x86_64: { status: "built", task: x86 }, aarch64: { status: "not_supported", task: arm } }, lead: x86, waits: true, rows: [x86], claim: null, state: "ready" });
   });
 
   it("is built again by the project for every architecture its contributor built — aarch64 is not rebuilt — and approved once", async () => {
@@ -614,11 +617,13 @@ describe("a package built for two architectures", () => {
     await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = 'not this story' WHERE name IN ('held', 'let-go') AND status = 'queued'").run();
   });
 
-  it("is one group of rows on Review: the package's cells span its builds, and each build is a row of its own", async () => {
+  it("is one row of Review's queue: the package's name once, a square per architecture, one claim for the package", async () => {
     expect((await request("rows")).status).toBe(201);
     const a = await build("omw_cx", "x86_64", "rows"); await stage(a);
     const b = await build("omw_ca", "aarch64", "rows"); await stage(b);
-    // The page as m2's browser draws it: the served script, run over the Worker's answers with m2's session.
+    const listed = (await call("GET", "/factory/review", undefined, "omc_m2")).json.packages.find((p: any) => p.name === "rows");
+    expect(listed).toMatchObject({ state: "ready", claim: null, rows: expect.arrayContaining([a.task.id, b.task.id]) });
+    // The page as m2's browser draws it (#247): the served script, run over the Worker's answers with m2's session.
     await env.DB.prepare("UPDATE contributors SET session_hash = ? WHERE login = 'm2'").bind(await sha256Hex("oms_m2")).run();
     const browser = async (path: string, init?: RequestInit) => {
       const ctx = createExecutionContext();
@@ -628,19 +633,13 @@ describe("a package built for two architectures", () => {
     };
     const drawn = runScript(scriptOf(await (await browser("/review")).text()), { pathname: "/review", functions: [], fetch: browser });
     await new Promise((r) => setTimeout(r, 80));
-    const rows = (drawn.nodes["#staged tbody"].innerHTML as string).split("<tr").slice(1);
-    const group = rows.filter((r) => r.startsWith(` id="t-${a.task.id}"`) || r.startsWith(` id="t-${b.task.id}"`));
-    expect(group, "both builds of rows are drawn").toHaveLength(2);
-    // The first row carries the package's five cells — its name and targets, who brought it, its class, since when, the decision — each spanning both builds; one class, for-you by the rows' `waits`.
-    expect(group[0]).toMatch(/^ id="t-\d+" class="for-you">/);
-    expect(group[0].match(/<td[^>]* rowspan="2"/g)).toHaveLength(5);
-    expect(group[0]).toContain("<b>rows</b></a>");
-    // The second is its build's own five cells — Arch, Build, Gate, Audit, Trial — under the same mark, with nothing spanning.
-    expect(group[1]).toMatch(/^ id="t-\d+" class="for-you more">/);
-    expect(group[1].match(/<td/g)).toHaveLength(5);
-    expect(group[1]).not.toContain("rowspan");
-    // No row carries two class attributes, which a browser reads as the first alone.
-    for (const r of rows) expect(r.slice(0, r.indexOf(">")).match(/ class=/g)?.length ?? 0, r.slice(0, 80)).toBeLessThanOrEqual(1);
+    const rows = (drawn.nodes["#rv-rows"].innerHTML as string).split('<div class="rv-row').slice(1);
+    const mine = rows.filter((r) => r.includes("<b>rows</b></a>"));
+    expect(mine, "the package is one row, whatever builds it has").toHaveLength(1);
+    // Each architecture a square in its package's row, and one Claim — for the build that speaks for the package, m2 not its owner.
+    expect(mine[0].match(/<i class="op-arch ok" title="(x86_64|aarch64): built"><\/i>/g)).toHaveLength(2);
+    expect(mine[0]).toContain(`data-claim="${listed.lead}"`);
+    expect(mine[0].match(/data-claim=/g)).toHaveLength(1);
     await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = 'not this story' WHERE name = 'rows' AND status = 'queued'").run();
   });
 

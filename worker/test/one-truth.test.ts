@@ -133,6 +133,11 @@ describe("the review list counts what waits, once", () => {
     r = (await call("GET", "/factory/review")).json;
     expect(r.staged.find((t: { id: number }) => t.id === F.stagedTask).project_build).toMatchObject({ status: "queued" });
     expect(r.waiting).toBe(2);
+    // Review files mine as claimed (#247) — the list's `state`, whose claim, and the two counts beside `waiting` — by one rule, counted once.
+    type P = { name: string; state: string | null; claim: unknown };
+    expect(r.packages.find((p: P) => p.name === F.factoryPkg)).toMatchObject({ state: "in_review", claim: { by: F.m1, status: "queued" } });
+    expect([r.ready, r.in_review]).toEqual([2, 1]);
+    expect([r.ready, r.in_review]).toEqual([r.packages.filter((p: P) => p.state === "ready").length, r.packages.filter((p: P) => p.state === "in_review").length]);
     expect(r.waiting).toBe(r.staged.filter(waitsForMaintainer).length);
     // The rows moved and each row's word moved with them: the contributor's row behind a project build in flight says false, and so does the project's old row of the same package; the count is theirs.
     for (const t of r.staged) expect(t.waits, `#${t.id} waits`).toBe(waitsForMaintainer(t));
@@ -142,26 +147,26 @@ describe("the review list counts what waits, once", () => {
     expect(r.waiting).toBe(r.staged.filter((t: { waits: boolean }) => t.waits).length);
   });
 
-  it("the Review page highlights a row and takes a maintainer's own rows out of the number by the row's `waits`, keeping no rule of its own", async () => {
-    const r = (await call("GET", "/factory/review")).json as { waiting: number; staged: { id: number; owner: string; waits: boolean }[] };
-    const html = await page("/review"), script = scriptOf(html);
-    // The served rule, run over the server's rows, is the field: row by row what waitsForMaintainer says — and, the field withheld, nothing is highlighted, because the page has no copy of the rule to fall back on.
-    const decidable = served(script, "decidable");
-    expect(decidable).not.toMatch(/project_build|already|kind|failed/);
-    const rule = new Function("rows", [decidable, "return rows.map(decidable);"].join("\n"));
-    expect(rule(r.staged)).toEqual(r.staged.map(waitsForMaintainer));
-    expect(r.staged.some((t) => t.waits)).toBe(true);
-    expect(rule(r.staged.map(({ waits: _, ...t }) => t))).toEqual(r.staged.map(() => false));
-    // The maintainer's number is the list's `waiting` less their own rows that wait, by the same field: the served forMe over the served shown(), as a maintainer who owns rows and as one who owns none — never below zero, never above the list's.
-    const forMe = new Function("REVIEW", "me", [decidable, served(script, "folded"), served(script, "shown"), served(script, "forMe"), "var STAGED = REVIEW.staged; function isMaintainer() { return true; } function isOwner(o) { return o === me; }", "return forMe();"].join("\n"));
-    const own = r.staged.filter((t) => t.owner === F.owner && t.waits).length;
-    expect(own).toBeGreaterThan(0);
-    expect(forMe(r, F.owner)).toBe(r.waiting - own);
-    expect(forMe(r, F.m1)).toBe(r.waiting);
-    // The manifests pin the field on every component that reads it: the queue line, the note and the table.
-    for (const id of ["review.yours-queue-line", "review.queue-head", "review.staged-table"]) {
+  it("the Review page files a package in a tab by the list's `state`, keeping no rule of its own", async () => {
+    type Row = { id: number; already: unknown };
+    type P = { name: string; state: string | null; rows: number[] };
+    const r = (await call("GET", "/factory/review")).json as { ready: number; in_review: number; staged: Row[]; packages: P[] };
+    const script = scriptOf(await page("/review"));
+    // The served rule, run over the server's packages, is the field: Ready for `ready`, In review for `in_review` — and, the field withheld, nothing is filed but a build of a version already approved (Ready's to drop), because the page has no copy of the rule to fall back on (#247; before it, the rows' `waits` — a page's copy of that rule drifted once, 2026-09-18).
+    const tabOf = served(script, "tabOf");
+    expect(tabOf).not.toMatch(/project_build|waits|kind|claim\b/);
+    const rule = new Function("p", [tabOf, "return tabOf(p);"].join("\n"));
+    const withRows = (p: P) => ({ ...p, rows: p.rows.map((id) => r.staged.find((t) => t.id === id)!) });
+    expect(r.packages.some((p) => p.state === "ready") && r.packages.some((p) => p.state === "in_review")).toBe(true);
+    for (const p of r.packages) expect(rule(withRows(p)), p.name).toBe(p.state === "in_review" ? "review" : p.state === "ready" ? "ready" : withRows(p).rows.some((t) => t.already) ? "ready" : null);
+    for (const p of r.packages) expect(rule({ ...withRows(p), state: undefined }), p.name).toBe(withRows(p).rows.some((t) => t.already) ? "ready" : null);
+    // The tiles read the list's two counts, never a count of their own; the manifests pin the fields.
+    const own = ownScript(await page("/review"));
+    expect(own).toContain("REVIEW.ready");
+    expect(own).toContain("REVIEW.in_review");
+    for (const id of ["review.tiles", "review.ready"]) {
       const c = allComponents(F).find((x) => x.id === id);
-      expect(c?.reads?.some((x) => x.path === "/api/v1/factory/review" && x.fields?.includes("staged.0.waits")), `${id} reads waits`).toBe(true);
+      expect(c?.reads?.some((x) => x.path === "/api/v1/factory/review" && x.fields?.includes("packages.0.state")), `${id} reads state`).toBe(true);
     }
   });
 });
@@ -179,7 +184,7 @@ describe("an approval stands or it does not, said once", () => {
     for (const a of rows) { expect(a).toHaveProperty("publish_status"); expect(a).toHaveProperty("blocked_at"); }
   });
 
-  it("where a standing approval is today is one word, the shell's approvalWhere over the row's rings, blocked_at and publish_status — said by the Factory's Landed lately and Review's Decided line alike; no page guesses a ring from the registry's status", async () => {
+  it("where a standing approval is today is one word, the shell's approvalWhere over the row's rings, blocked_at and publish_status — said by the Factory's Landed lately and Review's workspace alike; no page guesses a ring from the registry's status", async () => {
     type Row = { name: string; task_id: number; standing: boolean; rings: string[]; publish_status: string | null; blocked_at: string | null };
     const rows = (await call("GET", "/factory/approvals")).json.approvals as Row[];
     const served = rows.find((a) => a.name === F.publishedPkg)!, failed = rows.find((a) => a.name === F.failedPkg)!, pulled = rows.find((a) => a.name === F.pulledPkg)!;
@@ -204,45 +209,42 @@ describe("an approval stands or it does not, said once", () => {
     expect(shell.approvalWhere({ ...failed, publish_status: "cancelled" })).toMatchObject({ word: "publish cancelled", cls: "error" });
     for (const publish_status of ["queued", "leased", null]) expect(shell.approvalWhere({ ...failed, publish_status }), String(publish_status)).toMatchObject({ word: "publishing", cls: "blue" });
     expect(shell.approvalWhere({ ...served, rings: ["edge", "stable"] })).toMatchObject({ word: "in edge · stable", cls: "ok" });
-    // The two pages drawn over the Worker's answers, as the fixture's people see them: the Factory for anyone, Review as dave, whose two packages these are, and as alice, whose ours edge serves.
+    // The two pages drawn over the Worker's answers: the Factory for anyone, and Review's workspace of each package (#247) — the state it wears for a package decided is the rule's word.
     const viewer = (login: string) => async (path: string, init?: RequestInit) => {
       const ctx = createExecutionContext();
       const res = await worker.fetch(new Request(`http://pool.test${path}`, { ...init, headers: { ...(init?.headers as Record<string, string> | undefined), ...(login ? { cookie: `omc=oms_${login}` } : {}) } }), env, ctx);
       await waitOnExecutionContext(ctx);
       return res;
     };
-    const drawn = async (path: string, login: string) => { const d = runScript(scriptOf(await page(path)), { pathname: path, functions: [], fetch: viewer(login) }); await new Promise((r) => setTimeout(r, 80)); return d; };
+    const drawn = async (path: string, login: string, search = "") => { const d = runScript(scriptOf(await page(path)), { pathname: path, search, functions: [], fetch: viewer(login) }); await new Promise((r) => setTimeout(r, 80)); return d; };
     const landed = (await drawn("/factory", "")).nodes["#landed"].innerHTML as string;
-    const decided = (await drawn("/review", F.outsider)).nodes["#mine-decided"].innerHTML as string;
     // The pill as the shell draws it from the rule's answer — class and word; the title is left out, since "blocked 0s ago" is a clock read twice (once by the page, once here) and a second boundary between the two reads is not this test's to control.
     const pill = (a: Row) => { const w = shell.approvalWhere(a); return new RegExp(`<span class="pill ${w.cls}" title="[^"]*">${w.word}</span>`); };
-    // The row of one package, in the drawn list: the Factory's card (a div.land), Review's line (a div.rrow). The assertions on lost and pulled read their own rows, not the whole list — mine, alice's, may stand approved with its publish queued, and then wears the shell's "publishing" pill by right; whether it does depends on what the tests above did to the database, and this test holds either way (it failed alone, passing only after the withdrawal at the top of the file).
+    // The row of one package, in the drawn list: the Factory's card (a div.land). The assertions on lost and pulled read their own rows, not the whole list — mine, alice's, may stand approved with its publish queued, and then wears the shell's "publishing" pill by right; whether it does depends on what the tests above did to the database, and this test holds either way (it failed alone, passing only after the withdrawal at the top of the file).
     const rowOf = (html: string, name: string, cls: string, mark = "") => { const m = html.split(`<div class="${cls}`).find((r) => r.includes(`>${name}</`) && r.includes(mark)); expect(m, `a ${cls} row of ${name}`).toBeDefined(); return m!; };
-    // Review's Decided holds two rows of pulled — the brake's, then the approval's (marked "approved"); the approval's is the one the rule words.
-    // The way out of a row: the Factory card's one link is the name's; Review's line has the package's story on the name and the way out on its `go` link.
-    for (const [what, html, cls, mark, out] of [["the Factory's Landed lately", landed, "land", "", ""], ["Review's Decided", decided, "rrow", ">approved</span>", '<a class="go" ']] as const) {
-      for (const [name, a] of [[F.failedPkg, failed], [F.pulledPkg, pulled]] as const) {
-        const row = rowOf(html, name, cls, mark);
-        expect(row, `${what}: ${name}`).toMatch(pill(a));
-        // Neither row promises edge: the word for a publish that failed, or a package pulled, is never "publishing".
-        expect(row, `${what}: ${name} promises edge`).not.toContain("on its way into edge");
-        expect(row, `${what}: ${name} says publishing`).not.toContain(">publishing</span>");
-        // In no ring, the way out of both rows is the build — never a package address as if a ring served it (the Factory's card linked /package/lost?ring=stable, a ring no fact supports, while Review's line led to the build).
-        expect(row, `${what}: ${name} leads to the build`).toContain(`${out}href="/build/${a.task_id}"`);
-        expect(row, `${what}: ${name} leads to a ring`).not.toContain(`${out}href="/package/${name}?`);
-      }
+    for (const [name, a] of [[F.failedPkg, failed], [F.pulledPkg, pulled]] as const) {
+      const row = rowOf(landed, name, "land");
+      expect(row, `the Factory's Landed lately: ${name}`).toMatch(pill(a));
+      // Neither row promises edge: the word for a publish that failed, or a package pulled, is never "publishing".
+      expect(row, `${name} promises edge`).not.toContain("on its way into edge");
+      expect(row, `${name} says publishing`).not.toContain(">publishing</span>");
+      // In no ring, the way out of the row is the build — never a package address as if a ring served it (the Factory's card linked /package/lost?ring=stable, a ring no fact supports).
+      expect(row, `${name} leads to the build`).toContain(`href="/build/${a.task_id}"`);
+      expect(row, `${name} leads to a ring`).not.toContain(`href="/package/${name}?`);
     }
-    // A standing approval whose publish is queued wears the shell's "publishing" pill on both pages — the shape the two negatives above forbid on lost and pulled, drawn here from the row alone.
+    // Review's workspace of each (#247), as the package's own owner and as anyone: the state is the rule's word in the kit's pill — publish failed and blocked in red, in edge in green — never "publishing" for either of dave's.
+    const tone: Record<string, string> = { ok: "ok", error: "fail", blue: "run" };
+    for (const [name, a, login] of [[F.failedPkg, failed, F.outsider], [F.pulledPkg, pulled, ""], [F.publishedPkg, served, F.owner]] as const) {
+      const state = (await drawn("/review", login, `?package=${name}`)).nodes["#rv-w-state"].innerHTML as string;
+      const w = shell.approvalWhere(a);
+      expect(state, `Review's workspace of ${name}`).toMatch(new RegExp(`^<span class="op-pill ${tone[w.cls]}" title="[^"]*">${w.word}</span>$`));
+    }
+    // A standing approval whose publish is queued wears the shell's "publishing" pill on both pages — the shape the negatives above forbid on lost and pulled, drawn here from the row alone.
     const queued = { ...failed, publish_status: "queued" };
     expect(shell.approvalWhere(queued)).toMatchObject({ word: "publishing", cls: "blue", title: expect.stringContaining("on its way into edge") });
-    // ours is served: the Factory's card wears the ring badges and no pill; Review's line says the ring and its way out is the package's one address.
+    // ours is served: the Factory's card wears the ring badges and no pill.
     expect(landed).not.toMatch(pill(served));
     expect(rowOf(landed, F.publishedPkg, "land")).toContain(`href="/package/${F.publishedPkg}?ring=edge&arch=${F.arch}"`);
-    const alices = (await drawn("/review", F.owner)).nodes["#mine-decided"].innerHTML as string;
-    expect(alices).toMatch(pill(served));
-    expect(alices).toContain(`<a class="go" href="/package/${F.publishedPkg}?ring=edge&amp;arch=${F.arch}">`);
-    // pulled: the block row and the approval row of the same package say one word — the owner read "blocked" and, a row later, "on its way into edge".
-    expect(decided.split(">blocked</span>").length - 1).toBe(2);
   });
 
   it("a person's page lists the approvals they signed with `standing`, and counts only standing ones as what they maintain", async () => {
@@ -362,10 +364,10 @@ function served(script: string, name: string): string {
 }
 
 describe("the pages read the one answer instead of counting their own", () => {
-  // The doors that say how much waits for a maintainer: Review, the Pipeline and the Factory.
-  const TILES = { "/review": "review.tiles", "/pipeline": "pipeline.operations-tiles", "/factory": "factory.tiles" } as const;
+  // The doors that say how much waits for a maintainer: the Pipeline and the Factory. Review's own tiles split it since #247 — Ready for a claim, In review once claimed — and read the list's `ready` and `in_review`, counted beside `waiting` by the same list (the state test above holds them).
+  const TILES = { "/pipeline": "pipeline.operations-tiles", "/factory": "factory.tiles" } as const;
 
-  it("the Review, Pipeline and Factory tiles say \"waiting for review\" from the review list's own `waiting` and `oldest_ms`, never a count of their own", async () => {
+  it("the Pipeline and Factory tiles say \"waiting for review\" from the review list's own `waiting` and `oldest_ms`, never a count of their own", async () => {
     const components = allComponents(F);
     for (const [path, id] of Object.entries(TILES)) {
       const script = ownScript(await page(path));
@@ -808,7 +810,7 @@ describe("three more facts, one source each", () => {
     expect(rule("failed", [])).toBeNull();
     // servedRing takes the server's rows too, in any order, and hands the row back.
     expect(rule("done", [{ ring: "edge", arch: "x86_64" }, { ring: "rc", arch: "x86_64" }])).toBe("rc");
-    for (const [path, literal] of [[`/build/${F.projectTask}`, "pkgHref(t.name, ringOfBuild(t.status, T.rings), t.arch)"], [`/user/${F.owner}`, "pkgHref(t.name, ringOfBuild(t.status, null), t.arch)"], ["/review", 'pkg(t.name, t.version, "lab", t.arch)']] as const) {
+    for (const [path, literal] of [[`/build/${F.projectTask}`, "pkgHref(t.name, ringOfBuild(t.status, T.rings), t.arch)"], [`/user/${F.owner}`, "pkgHref(t.name, ringOfBuild(t.status, null), t.arch)"], ["/review", 'pkgHref(p.name, "lab", t.arch)']] as const) {
       expect(ownScript(await page(path)), path).toContain(literal);
     }
   });

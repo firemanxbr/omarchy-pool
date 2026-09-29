@@ -1,5 +1,5 @@
 /**
- * The four decisions on a build, decided in one place (routes/review.ts,
+ * The six decisions on a build, decided in one place (routes/review.ts,
  * `decisions`): what GET /factory/review says a caller may do on each row
  * and GET /factory/tasks/:id/can says for one task is exactly what the POST
  * answers — `can.X` is true when POST /factory/tasks/:id/X answers 200, and
@@ -15,13 +15,14 @@ import { seedDashboard, type Fixture } from "./fixture";
 
 let F: Fixture;
 
-const DECISIONS = ["approve", "build", "reject", "withdraw"] as const;
+// In the order a row is consumed below: the claim (build) before its release, changes before the rejection they leave nothing to.
+const DECISIONS = ["approve", "build", "release", "changes", "reject", "withdraw"] as const;
 type Decision = (typeof DECISIONS)[number];
 /** Who asks: the fixture's logins, each signed in with the cookie `omc=oms_<login>`; "" is nobody. */
 const ROLES = ["", "bob", "alice", "m1", "m2"] as const;
 type Who = (typeof ROLES)[number];
 
-interface Can { approve: boolean; reject: boolean; build: boolean; withdraw: boolean; why: Partial<Record<Decision, string>> }
+interface Can { approve: boolean; reject: boolean; build: boolean; withdraw: boolean; changes: boolean; release: boolean; why: Partial<Record<Decision, string>> }
 
 beforeAll(async () => {
   F = await seedDashboard(env);
@@ -46,10 +47,12 @@ const canOf = async (id: number, as: Who): Promise<Can> => {
   return r.json.can as Can;
 };
 const nothing = (c: Can, why: string) => {
-  expect([c.approve, c.reject, c.build, c.withdraw]).toEqual([false, false, false, false]);
-  expect(c.why).toEqual({ approve: why, reject: why, build: why, withdraw: why });
+  expect(DECISIONS.map((d) => c[d])).toEqual(DECISIONS.map(() => false));
+  expect(c.why).toEqual(Object.fromEntries(DECISIONS.map((d) => [d, why])));
 };
 const OWNER = (name: string) => `you brought ${name} — another maintainer decides; with one maintainer, that maintainer's own packages wait`;
+/** Release's refusal where no rebuild of the package is queued or running (#247). */
+const NO_CLAIM = (name: string) => `nothing to release: no rebuild of ${name} is queued or running — a staged rebuild is decided, not released`;
 
 describe("what a caller may do on a staged build", () => {
   it("GET /factory/review is no-store and every row carries `can` for the caller: all false for nobody, the sign-in as the reason", async () => {
@@ -74,10 +77,12 @@ describe("what a caller may do on a staged build", () => {
     for (const who of ["m1", "m2"] as const) {
       const r = await review(who);
       for (const t of r.json.staged) {
-        expect(t.can, `${who} on ${t.id}`).toMatchObject({ approve: false, reject: true, build: true, withdraw: false });
+        expect(t.can, `${who} on ${t.id}`).toMatchObject({ approve: false, reject: true, build: true, withdraw: false, changes: true, release: false });
         expect(t.can.why.approve).toMatch(/have the project build it first/);
         expect(t.can.why.withdraw).toBe("nothing standing to withdraw");
-        expect(Object.keys(t.can.why).sort()).toEqual(["approve", "withdraw"]);
+        // Nothing claimed yet: no rebuild of it to let go.
+        expect(t.can.why.release).toBe(NO_CLAIM(t.name));
+        expect(Object.keys(t.can.why).sort()).toEqual(["approve", "release", "withdraw"]);
         expect(await canOf(t.id, who)).toEqual(t.can);
       }
     }
@@ -86,8 +91,8 @@ describe("what a caller may do on a staged build", () => {
   it("the project's build approved by m2: already approved for any maintainer, nothing to reject beside a standing approval, its approval there to withdraw; its contributor's half says the project is on it", async () => {
     for (const who of ["m1", "m2"] as const) {
       const p = await canOf(F.projectTask, who);
-      expect(p).toMatchObject({ approve: false, reject: false, build: false, withdraw: true });
-      expect(p.why).toEqual({ approve: "already approved", reject: "already approved — withdraw the approval first", build: "the project's own build; the project builds from a contributor's staged build" });
+      expect(p).toMatchObject({ approve: false, reject: false, build: false, withdraw: true, changes: false, release: false });
+      expect(p.why).toEqual({ approve: "already approved", reject: "already approved — withdraw the approval first", build: "the project's own build; the project builds from a contributor's staged build", changes: "already approved — withdraw the approval first", release: NO_CLAIM(F.factoryPkg) });
       // The contributor's half stays staged after the publish; it is decided all the same.
       const c = await canOf(F.contributorTask, who);
       expect(c).toMatchObject({ approve: false, reject: false, build: false, withdraw: true });
@@ -114,6 +119,13 @@ describe("what a caller may do on a staged build", () => {
         const build = await call("POST", `/factory/tasks/${t.id}/build`, "alice", {});
         expect(build.status).toBe(403);
         expect(build.json.error).toBe(t.can.why.build);
+        // A claim is a review of it, and so are changes and letting a claim go (#247): the owner is refused each, with the conflict named as a code an agent can read.
+        expect(build.json.code).toBe("conflict_of_interest");
+        expect(t.can.why).toMatchObject({ changes: OWNER(t.name), release: OWNER(t.name) });
+        for (const [d, body] of [["changes", { note: "my own, sent back" }], ["release", { reason: "my own, let go" }], ["reject", { note: "my own, rejected" }]] as const) {
+          const r = await call("POST", `/factory/tasks/${t.id}/${d}`, "alice", body);
+          expect([r.status, r.json.error, r.json.code], d).toEqual([403, OWNER(t.name), "conflict_of_interest"]);
+        }
       }
       // The project's build of her package: the approval is not hers to give, and would not be were it undecided.
       const p = await canOf(F.projectTask, "alice");
@@ -127,7 +139,7 @@ describe("what a caller may do on a staged build", () => {
 
   it("can.X is true exactly when POST /factory/tasks/:id/X answers 200, and a refusal says why in the same words — every row, every role, each row consumed once", async () => {
     const rows: number[] = (await review("")).json.staged.map((t: any) => t.id);
-    const note = { note: "decided by the test, on the record" };
+    const note = { note: "decided by the test, on the record", reason: "decided by the test, on the record" };
     let allowed = 0;
     for (const id of rows) {
       for (const who of ROLES) {
@@ -141,19 +153,21 @@ describe("what a caller may do on a staged build", () => {
         }
       }
     }
-    // Per row: m1 had the project build it (200), then rejected it (200); nothing else went through — m2 found it cancelled.
-    expect(allowed).toBe(rows.length * 2);
+    // Per row: m1 had the project build it (200), let the claim go (200), then asked for changes (200) — the round cancelled, the rejection after it found nothing staged; nothing else went through — m2 found it cancelled.
+    expect(allowed).toBe(rows.length * 3);
+    const names = new Map<number, string>((await review("")).json.staged.map((t: any) => [t.id, t.name]));
     for (const id of rows) {
       const c = await canOf(id, "m2");
-      expect([c.approve, c.reject, c.build, c.withdraw]).toEqual([false, false, false, false]);
-      expect(c.why).toEqual({ approve: `task ${id} is cancelled, not staged`, reject: `task ${id} is cancelled, not staged`, build: `task ${id} is cancelled, not staged`, withdraw: "nothing standing to withdraw" });
+      expect(DECISIONS.map((d) => c[d])).toEqual(DECISIONS.map(() => false));
+      const name = names.get(id) ?? (await env.DB.prepare("SELECT name FROM build_tasks WHERE id = ?").bind(id).first<{ name: string }>())!.name;
+      expect(c.why).toEqual({ approve: `task ${id} is cancelled, not staged`, reject: `task ${id} is cancelled, not staged`, build: `task ${id} is cancelled, not staged`, withdraw: "nothing standing to withdraw", changes: `task ${id} is cancelled, not staged`, release: NO_CLAIM(name) });
     }
   });
 
   it("a task that is not staged: everything false with the reason; an unknown task is 404", async () => {
     const c = await canOf(F.disposableTask, "m1");
-    expect([c.approve, c.reject, c.build, c.withdraw]).toEqual([false, false, false, false]);
-    expect(c.why).toEqual({ approve: `task ${F.disposableTask} is cancelled, not staged`, reject: `task ${F.disposableTask} is cancelled, not staged`, build: `task ${F.disposableTask} is cancelled, not staged`, withdraw: "nothing standing to withdraw" });
+    expect(DECISIONS.map((d) => c[d])).toEqual(DECISIONS.map(() => false));
+    expect(c.why).toEqual({ approve: `task ${F.disposableTask} is cancelled, not staged`, reject: `task ${F.disposableTask} is cancelled, not staged`, build: `task ${F.disposableTask} is cancelled, not staged`, withdraw: "nothing standing to withdraw", changes: `task ${F.disposableTask} is cancelled, not staged`, release: NO_CLAIM(F.disposablePkg) });
     expect((await call("GET", "/factory/tasks/999999/can", "m1")).status).toBe(404);
   });
 

@@ -41,16 +41,20 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
 
 /**
  * Writes one JSON document and its signature. Refuses to overwrite: a
- * record is written once, a correction is a new record.
+ * record is written once, a correction is a new record. The refusal is the
+ * put's own (only if no object has the key), not a look first and a write
+ * after: two writers of one key at once are one record and an error, never
+ * the second's document under the first's name (2026-09-29).
  */
 export async function putRecord(env: Env, key: string, document: Record<string, unknown>): Promise<{ key: string; sha256: string; signed: boolean }> {
   if (await env.PACKAGES.head(key)) throw new Error(`record ${key} already exists; records are written once`);
-  return putRecordBytes(env, key, new TextEncoder().encode(JSON.stringify(document, null, 2) + "\n"), "application/json");
+  return putRecordBytes(env, key, new TextEncoder().encode(JSON.stringify(document, null, 2) + "\n"), "application/json", true);
 }
 
-/** The same for bytes that are not a document of the pool's — a PKGBUILD, a log, a report — with the pool's signature beside them. */
-export async function putRecordBytes(env: Env, key: string, bytes: Uint8Array, contentType: string): Promise<{ key: string; sha256: string; signed: boolean }> {
-  await env.PACKAGES.put(key, bytes, { httpMetadata: { contentType, cacheControl: RECORD_CACHE } });
+/** The same for bytes that are not a document of the pool's — a PKGBUILD, a log, a report — with the pool's signature beside them; `once`: refused, as putRecord's, when the key is taken. */
+export async function putRecordBytes(env: Env, key: string, bytes: Uint8Array, contentType: string, once = false): Promise<{ key: string; sha256: string; signed: boolean }> {
+  const put = await env.PACKAGES.put(key, bytes, { httpMetadata: { contentType, cacheControl: RECORD_CACHE }, ...(once ? { onlyIf: { etagDoesNotMatch: "*" } } : {}) });
+  if (once && !put) throw new Error(`record ${key} already exists; records are written once`);
   let signed = false;
   if (signingEnabled(env)) {
     const sig = await detachedSignature(env, bytes);

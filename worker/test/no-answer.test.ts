@@ -124,65 +124,74 @@ describe("the shell's api()", () => {
 });
 
 describe("a list that did not answer is said, not drawn", () => {
-  it("/review: the note names the list, the tiles and the queue line read —, the table draws no 'nothing waiting'", async () => {
+  // Review's tiles are the kit's (#247): one op-stat each, the number in .n and the line under it in .s.
+  const rvTiles = (d: Ran): string[] => (html(d, "#rv-tiles").match(/<div class="op-stat">[\s\S]*?<\/span><\/div>/g) ?? []);
+  it("/review: the note names the list, the tiles read — with the reason on hover, the queue draws no 'Nothing here right now.'", async () => {
     const d = await run("/review", { down: true });
     await settled();
     const reason = `the review list did not answer: ${INTERNAL}`;
-    expect(d.nodes["#queue-note"].textContent).toBe(reason);
-    expectDashes(d, 4, reason);
-    expect(tiles(d)[0]).toContain("Waiting for review");
-    expect(d.nodes["#mine-queue"].innerHTML).toContain("<b>—</b> waiting for a maintainer");
-    expect(d.nodes["#mine-queue"].innerHTML).not.toContain("<b>0</b>");
-    expect(html(d, "#staged tbody")).not.toContain("nothing waiting for review");
-    expect(html(d, "#decisions tbody")).not.toContain("no decision yet");
-    // The brake's record: its note on the summary says so; the two tables draw no "no contributor blocked" in its place.
-    expect(d.nodes["#blocks-note"].textContent).toBe(`the brake's record did not answer: ${INTERNAL}`);
-    expect(html(d, "#blocked-people tbody")).not.toContain("no contributor blocked");
-    expect(html(d, "#blocked-packages tbody")).not.toContain("no package blocked");
+    expect(d.nodes["#rv-note"].textContent).toBe(reason);
+    const t = rvTiles(d);
+    expect(t).toHaveLength(4);
+    for (const tile of t) {
+      expect(tile).toContain('<b class="n" data-n="">—</b>');
+      expect(tile).not.toMatch(/data-n="\d/);
+      expect(tile, "the sentence under a tile").not.toMatch(/>the [^<]* did not answer: /);
+    }
+    expect(t[0]).toContain("Ready for review");
+    // The review list's three tiles say which read failed on hover; Blocked is the brake's record's, and says its own.
+    expect(t.slice(0, 3).every((x) => x.includes(`<span title="${reason}">did not answer</span>`))).toBe(true);
+    expect(t[3]).toContain(`<span title="the brake's record did not answer: ${INTERNAL}">did not answer</span>`);
+    expect(html(d, "#rv-rows")).toContain(reason);
+    expect(html(d, "#rv-rows")).not.toContain("Nothing here right now.");
   });
 
-  it("/review as alice, who has three builds staged and an approval: the Yours block says the lists did not answer, never 'nothing of yours waiting'", async () => {
-    // The session probe answers her session; every list answers 500 — the lists her block is drawn from among them.
+  it("/review as alice, whose three builds are staged: the queue says the list did not answer, never 'Nothing here right now.'", async () => {
+    // The session probe answers her session; every list answers 500 — the one her rows are drawn from among them.
     const d = await run("/review", { down: true, as: F.sessions.owner });
     await settled();
     const reason = `the review list did not answer: ${INTERNAL}`;
-    expect(d.nodes["#mine-who"].textContent).toContain(F.owner);
-    expect(d.nodes["#queue-note"].textContent).toBe(reason);
-    expect(d.nodes["#mine-queue"].innerHTML).toContain("<b>—</b> waiting for a maintainer");
-    // The two lists of hers: the reason, in place of the good news the page drew over a query that threw (2026-09-18).
-    for (const sel of ["#mine-waiting", "#mine-decided"]) {
-      expect(html(d, sel), sel).toContain(reason);
-      expect(html(d, sel), sel).not.toContain("Nothing of yours waiting");
-      expect(html(d, sel), sel).not.toContain("No decision on a package of yours yet");
+    expect(d.nodes["#rv-note"].textContent).toBe(reason);
+    expect(html(d, "#rv-rows")).toContain(reason);
+    expect(html(d, "#rv-rows")).not.toContain("Nothing here right now.");
+    expect(html(d, "#rv-rows")).not.toContain("yours · locked");
+    // Each tab says its own list's reason: the brake's record on Blocked, the registry on No maintainer.
+    for (const [tab, what] of [["blocked", "brake's record"], ["unmaintained", "registry"]] as const) {
+      const t = runScript(scriptOf(await (await real("/review")).text()), { pathname: "/review", search: `?tab=${tab}`, functions: [], fetch: fetchThat({ down: true, as: F.sessions.owner }) });
+      await settled();
+      expect(html(t, "#rv-rows"), tab).toContain(`the ${what} did not answer: ${INTERNAL}`);
+      expect(html(t, "#rv-rows"), tab).not.toContain("Nothing here right now.");
     }
   });
 
-  it("/review as alice, the lists answering and her own packages not: the Decided list says which read did not answer, never 'no decision yet'", async () => {
-    // Only GET /factory/me fails — the read that tells the page which packages are hers; the review list and the decisions answered.
-    const d = await run("/review", { down: true, as: F.sessions.owner, up: /^\/api\/v1\/factory\/(review|approvals|blocks)$/ });
+  it("/review as alice, the review list answering and the brake's record not: her packages are drawn as hers, and the Blocked tab says which read did not answer", async () => {
+    const d = await run("/review", { down: true, as: F.sessions.owner, up: /^\/api\/v1\/factory\/(review|approvals|packages)$/ });
     await settled();
-    expect(d.nodes["#queue-note"].textContent).toContain("waiting for a maintainer");
-    expect(html(d, "#mine-waiting")).toContain("waits for a maintainer");
-    expect(html(d, "#mine-decided")).toContain(`the list of your packages did not answer: ${INTERNAL}`);
-    expect(html(d, "#mine-decided")).not.toContain("No decision on a package of yours yet");
+    expect(d.nodes["#rv-note"].textContent).toBe("");
+    expect(html(d, "#rv-rows")).toContain("yours · locked");
+    expect(rvTiles(d)[3]).toContain(`the brake's record did not answer: ${INTERNAL}`);
+    const b = runScript(scriptOf(await (await real("/review")).text()), { pathname: "/review", search: "?tab=blocked", functions: [], fetch: fetchThat({ down: true, as: F.sessions.owner, up: /^\/api\/v1\/factory\/(review|approvals|packages)$/ }) });
+    await settled();
+    expect(html(b, "#rv-rows")).toContain(`the brake's record did not answer: ${INTERNAL}`);
+    expect(html(b, "#rv-rows")).not.toContain("Nothing here right now.");
   });
 
   it("/review: a refresh that fails leaves the last answer's rows and numbers on screen, and says so", async () => {
     const state = { down: false };
     const d = await run("/review", state, ["load"]);
     await settled();
-    // The first load answered over the fixture: three waiting, rows in the table, the note counting them.
-    expect(d.nodes["#queue-note"].textContent).toContain("3 waiting for a maintainer");
-    const before = tiles(d);
-    expect(before[0]).toContain('<div class="v num warn">3</div>');
-    const rows = d.nodes["#staged tbody"].innerHTML;
-    expect(rows).toContain(`id="t-${F.stagedTask}"`);
+    // The first load answered over the fixture: three packages ready for a claim, their rows drawn.
+    const before = rvTiles(d);
+    expect(before[0]).toContain('<b class="n" data-n="3">3</b>');
+    const rows = d.nodes["#rv-rows"].innerHTML;
+    expect(rows).toContain("<b>disposable</b>");
     state.down = true;
     d.load();
     await settled();
-    expect(d.nodes["#queue-note"].textContent).toBe(`the review list did not answer: ${INTERNAL}`);
-    expect(d.nodes["#staged tbody"].innerHTML).toBe(rows);
-    expect(tiles(d)).toEqual(before);
+    expect(d.nodes["#rv-note"].textContent).toBe(`the review list did not answer: ${INTERNAL}`);
+    expect(d.nodes["#rv-rows"].innerHTML).toBe(rows);
+    // Every tile, the brake's Blocked among them: its list failed too, and what it drew last stays.
+    expect(rvTiles(d)).toEqual(before);
   });
 
   it("/pipeline: the state row's note names the factory's lists, the six tiles read —, the flow and the queue draw nothing in their place, and every other read says so where it draws", async () => {
