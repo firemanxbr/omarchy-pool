@@ -353,7 +353,7 @@ const CSS = String.raw`
   .ag-role .op-code code { font-size: 13px; }
   .ag-role-f { display: flex; justify-content: space-between; align-items: flex-start; gap: 6px 12px; flex-wrap: wrap; margin-top: 12px; padding: 12px 16px; border-top: 1px solid var(--line); font-size: 12px; color: var(--dim); }
   .ag-uses { flex: 1 1 180px; min-width: 0; } .ag-uses code { font: inherit; }
-  .ag-login { display: block; margin-top: 4px; } .ag-login code { font: inherit; }
+  .ag-login { display: block; margin-top: 4px; } .ag-login code { font: inherit; white-space: nowrap; }
   .ag-login a, .ag-where a, .ag-note a, .ag-tools .op-card-h a, .ag-tools .op-card-f a { color: var(--green); text-decoration: none; }
   .ag-login a:hover, .ag-where a:hover, .ag-note a:hover, .ag-tools .op-card-h a:hover, .ag-tools .op-card-f a:hover { text-decoration: underline; }
   .op-copy.ag-copy { padding: 0; border: 0; background: none; color: var(--green); font-size: 12px; white-space: nowrap; }

@@ -368,7 +368,7 @@ const SCRIPT = String.raw`
       return '<tr><td><b>' + esc(g.agent) + '</b></td><td>' + (g.scopes || []).map(function (x) { return pillHtml(x === "contribute" ? "none" : "rec", x); }).join(" ") + '</td><td class="when">' + ago(g.created_at) + '</td><td class="when" title="' + esc(g.expires_at) + '">' + esc(String(g.expires_at).slice(0, 10)) + '</td><td class="when">' + (g.last_used ? ago(g.last_used) : '<span class="dim">never</span>') + '</td><td>' + (lives ? '<button type="button" class="btn ghost" data-grant-revoke="' + esc(g.id) + '" data-agent="' + esc(g.agent) + '" title="its token stops working at once">Revoke</button>' : taskPill(g.state === "revoked" ? "withdrawn" : "cancelled", g.state + (g.revoked_by ? " (" + g.revoked_by + ")" : ""))) + '</td></tr>';
     }, { empty: "no agent granted — omarchy-cli login --agent \"<its name>\"" });
     pager("#drafts", d.drafts || [], function (x) {
-      var said = x.state === "waiting" ? '<a href="' + esc(x.confirm_url) + '">confirm or discard →</a>' : esc((x.outcome && (x.outcome.error || x.outcome.decision)) || "");
+      var said = x.state === "waiting" ? '<a href="/auth/confirm/' + esc(x.id) + '">confirm or discard →</a>' : esc((x.outcome && (x.outcome.error || x.outcome.decision)) || "");
       return '<tr><td class="when">' + ago(x.created_at) + '</td><td><a href="' + pkgHref(x.name, null, null) + '"><b>' + esc(x.name) + '</b></a>' + (x.task_id ? ' <a class="dim" href="/build/' + x.task_id + '">#' + x.task_id + '</a>' : '') + '</td><td>' + esc(VERDICT_WORDS[x.verdict] || x.verdict) + '</td><td>' + esc(x.agent) + '</td><td>' + pillHtml(DRAFT_PILL[x.state] || "none", x.state) + ' <span class="muted">' + said + '</span></td><td class="muted">' + esc(x.note || "") + '</td></tr>';
     }, { empty: "no draft yet" });
   }
@@ -705,7 +705,7 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       id: "user.agents",
       page,
       anchor: ['<section id="agents" hidden>', 'href="/agents#login">+ grant one →</a>', 'id="grants"', 'id="drafts"', 'href="/docs/omarchy-cli-mcp#write-tools">How it works →</a>'],
-      script: ["function renderAgents(d)", '$("#agents").hidden = false', 'pager("#grants"', 'pager("#drafts"', "data-grant-revoke", "x.confirm_url", 'api("POST", API + "/grants/" + encodeURIComponent(gid) + "/revoke", {})'],
+      script: ["function renderAgents(d)", '$("#agents").hidden = false', 'pager("#grants"', 'pager("#drafts"', "data-grant-revoke", "'<a href=\"/auth/confirm/' + esc(x.id)", 'api("POST", API + "/grants/" + encodeURIComponent(gid) + "/revoke", {})'],
       reads: [
         { path: "/api/v1/factory/me", status: 401 },
         { path: "/api/v1/factory/me", as: "owner", fields: ["grants", "drafts"] },

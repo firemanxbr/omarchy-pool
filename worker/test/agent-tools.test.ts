@@ -173,6 +173,8 @@ describe("the grant", () => {
     expect(p.status).toBe(200);
     expect(p.headers.get("cache-control")).toBe("no-store");
     expect(p.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+    // Never framed; the address goes to no other site, and the page's own form still carries its Origin (no-referrer would make it "null").
+    expect([p.headers.get("x-frame-options"), p.headers.get("content-security-policy"), p.headers.get("referrer-policy")]).toEqual(["DENY", "frame-ancestors 'none'", "same-origin"]);
     expect(p.text).toContain('<meta name="robots" content="noindex, nofollow">');
     expect(p.text).toContain("Claude &lt;b&gt;Code&lt;/b&gt;");
     expect(p.text).not.toContain("<b>Code</b>");

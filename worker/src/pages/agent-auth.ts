@@ -56,9 +56,9 @@ const CSS = String.raw`
   .aa label { display: grid; gap: 6px; font-size: 13px; color: var(--muted); }
   .aa input[type=text] { font: inherit; font-size: 14px; padding: 7px 10px; border: 1px solid var(--line); background: var(--bg-deep); color: var(--text); min-width: 0; }
   .aa input[type=text]:focus-visible, .aa .op-btn:focus-visible, .aa a:focus-visible { outline: 1px solid var(--green); outline-offset: 2px; }
-  .aa .acts { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
-  .aa .ev { display: grid; gap: 6px; font-size: 13px; }
-  .aa .ev a, .aa .said a, .aa .lead a, .aa dd a { color: var(--green); }
+  .aa .aa-acts { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .aa .aa-ev { font-size: 13px; } .aa .aa-ev .said { padding: 10px 16px 12px; border-top: 1px solid var(--line); }
+  .aa .aa-ev a, .aa .said a, .aa .lead a, .aa dd a { color: var(--green); }
   .aa table.op-table td:first-child { color: var(--dim); white-space: nowrap; }
   @media (max-width: 520px) { .aa dl { grid-template-columns: minmax(0, 1fr); gap: 2px; } .aa dd { margin-bottom: 8px; } .aa h1 { font-size: 22px; } }
 `;
@@ -87,7 +87,7 @@ export function agentMessageHtml(o: { path: string; title: string; heading: stri
     poolUrl: o.poolUrl,
     version: o.version,
     body: `<section><p class="op-eyebrow">Agents</p><h1>${esc(o.heading)}</h1></section>
-  <section class="${o.tone}" role="${o.tone === "refused" ? "alert" : "status"}">${o.text}</section>${links ? `\n  <div class="acts">${links}</div>` : ""}`,
+  <section class="${o.tone}" role="${o.tone === "refused" ? "alert" : "status"}">${o.text}</section>${links ? `\n  <div class="aa-acts">${links}</div>` : ""}`,
   });
 }
 
@@ -139,7 +139,7 @@ export function grantHtml(v: GrantView, path: string, poolUrl: string, version: 
   </section>
   ${v.refusal ? `<section class="refused" role="alert"><b>Not granted.</b> ${esc(v.refusal)}</section>` : ""}
   <form method="post" action="/auth/agent">${hidden}
-    <div class="acts">${v.refusal ? "" : `<button class="op-btn primary" type="submit" name="action" value="grant">Grant</button>`}<button class="op-btn" type="submit" name="action" value="deny">Deny</button></div>
+    <div class="aa-acts">${v.refusal ? "" : `<button class="op-btn primary" type="submit" name="action" value="grant">Grant</button>`}<button class="op-btn" type="submit" name="action" value="deny">Deny</button></div>
     <p class="said">Did you not start this with <code>omarchy-cli login</code> on this machine? Press Deny. A grant ends when you revoke it, run <code>omarchy-cli logout</code>, or it expires.</p>
   </form>`,
   });
@@ -165,11 +165,11 @@ export interface ConfirmView {
 }
 
 /** The verdict in the person's words, and whether confirming it needs the package's name typed (reject and block). */
-export const VERDICT_WORDS: Readonly<Record<string, { label: string; does: string; typed: boolean; danger: boolean }>> = {
-  approve: { label: "Approve", does: "the project's build goes into edge, and on through the rings", typed: false, danger: false },
-  request_changes: { label: "Request changes", does: "the builds in review stop and the note goes to the requester; the name stays theirs", typed: false, danger: false },
-  reject: { label: "Reject", does: "the builds in review stop and the name is free again", typed: true, danger: true },
-  block: { label: "Block", does: "the package leaves every ring, its builds stop, the approval it stood on is withdrawn, and its project is refused to new requests until another maintainer lifts it", typed: true, danger: true },
+export const VERDICT_WORDS: Readonly<Record<string, { label: string; act: string; does: string; typed: boolean; danger: boolean }>> = {
+  approve: { label: "Approve", act: "approve", does: "the project's build goes into edge, and on through the rings", typed: false, danger: false },
+  request_changes: { label: "Request changes", act: "request changes on", does: "the builds in review stop and the note goes to the requester; the name stays theirs", typed: false, danger: false },
+  reject: { label: "Reject", act: "reject", does: "the builds in review stop and the name is free again", typed: true, danger: true },
+  block: { label: "Block", act: "block", does: "the package leaves every ring, its builds stop, the approval it stood on is withdrawn, and its project is refused to new requests until another maintainer lifts it", typed: true, danger: true },
 };
 
 function evidenceRows(e: ConfirmEvidence, name: string): string {
@@ -186,7 +186,8 @@ function evidenceRows(e: ConfirmEvidence, name: string): string {
 
 /** A draft, with Confirm and Discard while it waits; what became of it after. */
 export function confirmHtml(v: ConfirmView, path: string, poolUrl: string, version: RunningVersion): string {
-  const d = v.draft, w = VERDICT_WORDS[d.verdict] ?? { label: d.verdict, does: "", typed: true, danger: true };
+  const d = v.draft, w = VERDICT_WORDS[d.verdict] ?? { label: d.verdict, act: d.verdict, does: "", typed: true, danger: true };
+  const ask = `${w.act.charAt(0).toUpperCase()}${w.act.slice(1)} ${d.name}?`;
   const waiting = d.state === "waiting";
   const outcome = !waiting
     ? `<section class="${d.state === "confirmed" ? "done" : "refused"}" role="status"><b>${esc(d.state === "confirmed" ? "Confirmed" : d.state === "expired" ? "Expired" : d.state === "discarded" ? "Discarded" : "Refused")}.</b> ${esc(d.state === "expired" ? "Nobody confirmed it within thirty minutes; nothing was decided. Ask the agent for a new draft." : d.state === "discarded" ? "Nothing was decided." : String((d.outcome as { error?: string; summary?: string } | null)?.error ?? (d.outcome as { summary?: string } | null)?.summary ?? ""))}</section>`
@@ -195,19 +196,19 @@ export function confirmHtml(v: ConfirmView, path: string, poolUrl: string, versi
     ? `<form method="post" action="/auth/confirm/${esc(d.id)}">
     <input type="hidden" name="nonce" value="${esc(v.nonce)}">
     ${v.refusal ? `<section class="refused" role="alert"><b>It cannot be confirmed now.</b> ${esc(v.refusal)}</section>` : ""}
-    ${w.typed && !v.refusal ? `<label>Type <b>${esc(d.name)}</b> to ${esc(w.label.toLowerCase())} it<input type="text" name="name" autocomplete="off" spellcheck="false" required pattern="${esc(d.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))}"></label>` : ""}
-    <div class="acts">${v.refusal ? "" : `<button class="op-btn ${w.danger ? "danger" : "primary"}" type="submit" name="action" value="confirm">Confirm: ${esc(w.label.toLowerCase())} ${esc(d.name)}</button>`}<button class="op-btn" type="submit" name="action" value="discard">Discard the draft</button></div>
+    ${w.typed && !v.refusal ? `<label><span>Type <b>${esc(d.name)}</b> to ${esc(w.label.toLowerCase())} it</span><input type="text" name="name" autocomplete="off" spellcheck="false" required pattern="${esc(d.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))}"></label>` : ""}
+    <div class="aa-acts">${v.refusal ? "" : `<button class="op-btn ${w.danger ? "danger" : "primary"}" type="submit" name="action" value="confirm">Confirm: ${esc(w.act)} ${esc(d.name)}</button>`}<button class="op-btn" type="submit" name="action" value="discard">Discard the draft</button></div>
     <p class="said">Drafts expire at ${esc(whenUtc(d.expires_at))}. Nothing is decided until you confirm, and a draft decides once.</p>
   </form>`
     : "";
   return frame({
     path,
-    title: `${w.label} ${d.name}?`,
+    title: ask,
     poolUrl,
     version,
     body: `<section>
     <p class="op-eyebrow">Agents · a draft to confirm</p>
-    <h1>${esc(w.label)} ${esc(d.name)}?</h1>
+    <h1>${esc(ask)}</h1>
     <p class="lead">${esc(d.agent)} drafted this for ${esc(d.login)}. ${esc(w.does ? `If you confirm it, ${w.does}.` : "")}</p>
   </section>
   <section class="op-card">
@@ -219,7 +220,7 @@ export function confirmHtml(v: ConfirmView, path: string, poolUrl: string, versi
       <dt>Drafted by</dt><dd>${esc(d.agent)}${d.client ? ` <span class="said">(its client says: ${esc(d.client)})</span>` : ""}, for ${esc(d.login)}, at ${esc(whenUtc(d.created_at))}</dd>
     </dl></div>
   </section>
-  ${v.evidence ? `<section class="op-card"><div class="op-card-h"><b>The evidence</b><small>build #${v.evidence.task.id}, ${esc(v.evidence.task.arch)}${v.evidence.task.version ? `, ${esc(v.evidence.task.version)}` : ""}</small></div><div class="ev">${evidenceRows(v.evidence, d.name)}</div></section>` : ""}
+  ${v.evidence ? `<section class="op-card"><div class="op-card-h"><b>The evidence</b><small>build #${v.evidence.task.id}, ${esc(v.evidence.task.arch)}${v.evidence.task.version ? `, ${esc(v.evidence.task.version)}` : ""}</small></div><div class="aa-ev">${evidenceRows(v.evidence, d.name)}</div></section>` : ""}
   ${outcome}${form}`,
   });
 }

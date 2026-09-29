@@ -44,9 +44,16 @@ export function dashboardOrigin(url: URL): string {
   return isProductionHost(url.hostname) ? `https://${DASHBOARD_HOST}` : url.origin;
 }
 
-/** One person's page: never kept by a cache, never indexed. */
+/**
+ * One person's page: never kept by a cache, never indexed, never framed (a
+ * Grant or a Confirm is pressed on the pool's own page, not under another
+ * site's), and its address — a draft's id, a grant's state — never sent to
+ * another site as a Referer. `same-origin`, not `no-referrer`: under
+ * no-referrer a browser posts the page's own form with `Origin: null`, and
+ * the Origin check refuses it.
+ */
 function personal(body: string, status = 200): Response {
-  return new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-robots-tag": "noindex, nofollow", "referrer-policy": "no-referrer" } });
+  return new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-robots-tag": "noindex, nofollow", "referrer-policy": "same-origin", "x-frame-options": "DENY", "content-security-policy": "frame-ancestors 'none'" } });
 }
 
 function message(url: URL, env: Env, v: RunningVersion, status: number, heading: string, text: string, tone: "refused" | "done" = "refused", links?: { href: string; label: string }[]): Response {
