@@ -1144,6 +1144,8 @@ export const HELPERS = String.raw`
     if (shown.length > 32) shown = shown.slice(0, 18) + "…" + shown.slice(-13);
     return '<span class="mono wid" title="' + esc([id, tip].filter(Boolean).join(" · ")) + '">' + esc(shown) + '</span>';
   }
+  // Why an alive worker is not ready, in the words every page says it — the tables' failed pill, the Factory's workers card, Status's workers list (#273): its agent's own error when it reported one, and when that was.
+  function wtNotReady(w) { return (w.agent_error ? "its agent did not answer: " + w.agent_error : !w.agent ? "no agent: a contributor's builds and the audits need one that answers" : "not ready for the work it declares") + (w.agent_checked_at ? " · checked " + ago(w.agent_checked_at) : ""); }
   // The state, one word: building (a task in hand), failed (alive but not ready — its agent did not answer), idle, offline (with how long). Seen-when on hover.
   function wtStatus(w) {
     var seen = "seen " + ago(w.last_seen);
@@ -1151,7 +1153,7 @@ export const HELPERS = String.raw`
     if (!w.alive) return '<span class="pill none" title="not seen in the last ' + WORKER_ALIVE_MINUTES + ' minutes">offline · ' + esc(ago(w.last_seen).replace(" ago", "")) + '</span>';
     if (w.current_task) return '<a class="pill blue" href="/build/' + w.current_task + '" title="task #' + w.current_task + ' · ' + esc(seen) + '">building</a>';
     if (w.update && w.update.required) return '<a class="pill warn" href="/docs/workers#update" title="' + esc("its image is " + w.update.yours + ", the pool is at " + w.update.latest + ": every worker follows the latest image — it is handed nothing until it updates · " + seen) + '">outdated</a>';
-    if (!w.ready) return '<span class="pill error" title="' + esc((w.agent_error ? "its agent did not answer: " + w.agent_error : !w.agent ? "no agent: a contributor's builds and the audits need one that answers" : "not ready for the work it declares") + " · " + seen) + '">failed</span>';
+    if (!w.ready) return '<span class="pill error" title="' + esc(wtNotReady(w) + " · " + seen) + '">failed</span>';
     return '<span class="pill ok" title="' + esc("alive, nothing in hand · " + seen) + '">idle</span>';
   }
   function wtVersion(w) {

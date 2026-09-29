@@ -77,7 +77,10 @@ jobs:
       - name: The gate's reading of namcap, and namcap's library map on aarch64
         working-directory: .
         run: bash tests/worker-gate-namcap.sh
-      - name: The updater, against a stubbed docker
+      - name: The worker checks its agent again until it answers, against a stub agent that comes up late
+        working-directory: .
+        run: bash tests/worker-agent-recheck.sh
+      - name: The updater and the host's rollout, brokers first, against a stubbed docker
         working-directory: .
         run: bash tests/omarchy-rollout.sh
       - name: The one command to run a worker, against a stubbed docker and pool
