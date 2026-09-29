@@ -29,6 +29,7 @@
  *   POST /api/v1/security/prune                  {advisories, matches}: the run's keys; the rest goes
  *   GET  /api/v1/factory · POST /factory/{claim,requests,enqueue,jobs} · /factory/tasks/:id/{heartbeat,complete,fail,cancel,approve,reject,artifacts/<file>}
  *   GET  /api/v1/factory/{packages,built,review,approvals,maintainers,trust,workers/self,me} · GET /api/v1/factory/tasks/:id/can · GET /api/v1/users/:login · GET /api/v1/users/:login/can · GET /api/v1/cost
+ *   GET  /api/v1/factory/names/:name?arches= · GET /api/v1/factory/source?url=   the Factory form's live checks: would the name be taken, what the repository says
  *                                                  the factory's brain: package requests, build tasks, pull-based workers
  *   GET  /api/v1/graph?targets=a,b&ring=stable
  *   POST /api/v1/events   GET /api/v1/events       activity log
@@ -39,8 +40,8 @@
  *   POST /api/v1/pool/gc?keep=3&limit=200          delete it (objects, then rows)
  *   POST /api/v1/pool/relayout?phase=copy|purge     the one-time move to <source>/<arch>/ (the relayout job)
  *   GET  /                                         the dashboard: the Pool (users), /factory (contributors), /review (maintainers),
- *                                                  /docs, and the detail pages /packages /package/:name /status /agents /people /workers /request /user/:login /build/:id
- *                                                  (/pipeline, /journal, /security and /docs/api redirect to the section they became: MOVED)
+ *                                                  /docs, and the detail pages /packages /package/:name /status /agents /people /workers /user/:login /build/:id
+ *                                                  (/pipeline, /journal, /security, /docs/api and /request redirect to the section they became: MOVED)
  *   GET  /pool/<source>/<arch>/<file>              fallback static origin (dev)
  *   GET  /assets/kit.<hash>.css                    the v1 kit's stylesheet (pages/kit.ts): its primitives and icons, immutable under its hash
  *   GET  /setup                                    the one-command setup script (curl … | sudo bash -s -- --ring stable)
@@ -64,7 +65,9 @@ import { authorize, authorizeRelease, authorizeArtifacts, authorizeJobOrMaintain
 import {
   contributorOf, workerOf, handleRegister, handleMe, handleRequestPackage, handleDeletePackage, handleSetCategory, handleBuildPackage, handleRegisterWorker,
   handleRevokeWorker, handleDequeueBuild, handleListPackages, handleStagingPut, handleStagingMultipart, handleStagingList, handleStagingGet, handleStagingDelete,
+  handleNameStanding,
 } from "./routes/contributors";
+import { handleSourceRead } from "./routes/sources";
 import type { Actor } from "./routes/factory";
 import { jobOf } from "./jobtoken";
 import { handleTrustWorker, handleTrustList, handleNewToken, handleWithdrawRecord, handleWorkerMode, handleWorkerLog, SIGN_IN } from "./routes/contributors";
@@ -83,7 +86,6 @@ import { handlePackageStory } from "./routes/story";
 import { icon } from "./pages/icons";
 import { kitAsset } from "./pages/kit";
 import { robotsTxt, sitemapXml } from "./pages/robots";
-import { requestHtml } from "./pages/request";
 import { governanceHtml } from "./pages/governance";
 import { docsHtml } from "./pages/docs";
 import { docsWorkersHtml } from "./pages/docs-workers";
@@ -160,16 +162,20 @@ const API = "/api/v1";
  * each became: the Pipeline, the Journal and Security are Status's (#248
  * draws them there), and /docs/api is the API section of the docs index
  * (#250) — the reference itself is still served at /api, a chapter of the
- * docs map. A 301 to the section with the query kept — /journal?kind=role
- * is the journal filtered, /security?ring=rc the ring's advisories — so a
- * bookmark and every link written before still land where the page went.
- * Status draws what the three pages drew (#248); their modules are gone.
+ * docs map. The request's own page is the Factory's request card since
+ * #246: /request?name=… and /request?renew=… land on the card with the name
+ * filled in or the renewal drawn. A 301 to the section with the query kept
+ * — /journal?kind=role is the journal filtered, /security?ring=rc the
+ * ring's advisories — so a bookmark and every link written before still
+ * land where the page went. Status draws what the three pages drew (#248);
+ * their modules are gone.
  */
 export const MOVED: Readonly<Record<string, string>> = {
   "/pipeline": "/status",
   "/journal": "/status#journal",
   "/security": "/status#advisories",
   "/docs/api": "/docs#api",
+  "/request": "/factory#request",
 };
 
 export default {
@@ -284,7 +290,6 @@ export default {
       // Agents (#249): which agent's configuration it shows is the address's (?agent=), so the choice is a link that works with script off; the page reads nothing.
       if (path === "/agents") return html(agentsHtml(env.POOL_URL, version(env), url.searchParams.get("agent")));
       if (path === "/review") return html(reviewHtml(env.POOL_URL, version(env)));
-      if (path === "/request") return html(requestHtml(env.POOL_URL, version(env)));
       const user = path.match(/^\/user\/([A-Za-z0-9-]{1,39})$/);
       if (user) return html(userHtml(user[1], env.POOL_URL, version(env)));
       if (path.startsWith("/package/")) return html(packageHtml(decodeURIComponent(path.slice("/package/".length)), env.POOL_URL, version(env)));
@@ -508,6 +513,9 @@ async function api(method: string, path: string, url: URL, request: Request, env
   if (method === "GET" && path === "/factory/blocks") return handleBlocks(env);
   if (method === "GET" && path === "/factory/built") return handleBuilt(env);
   if (method === "GET" && path === "/factory/packages") return handleListPackages(env);
+  // The Factory form's live checks (#246): the name by the request's own rule, and what the repository says.
+  if ((m = path.match(/^\/factory\/names\/([^/]+)$/)) && method === "GET") return handleNameStanding(m[1], url, env);
+  if (method === "GET" && path === "/factory/source") return handleSourceRead(url, request, env);
   if (method === "GET" && path === "/factory/trust") return handleTrustList(env);
   if ((m = path.match(/^\/users\/([A-Za-z0-9-]{1,39})$/)) && method === "GET") return handleUser(m[1], env);
   // The page is cached for everyone (public, max-age); what one caller may do on it is theirs alone, so it rides on a no-store answer of its own.

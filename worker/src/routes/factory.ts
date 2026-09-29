@@ -95,9 +95,14 @@ function parseArches(v: unknown): string[] {
  * exception — the factory is meant to take its names over.
  */
 export async function providedBy(env: Env, name: string): Promise<{ source: string; arch: string; version: string }[]> {
+  // From the name into edge, never edge into the name (CROSS JOIN is SQLite's word for "this order", as the package page's lookups say it):
+  // with no statistics to go by, the planner walked every package edge serves to find one name — a row read per package in edge, on
+  // every request and on every name the Factory's live check asks (#246); the name's rows through its index, each one's place in edge
+  // by the key, is a handful.
   const rows = await env.DB.prepare(
-    `SELECT p.source, p.repo_arch AS arch, p.version FROM ring_packages rp JOIN packages p ON p.id = rp.package_id
-      WHERE rp.ring = 'edge' AND p.name = ?`,
+    `SELECT p.source, p.repo_arch AS arch, p.version FROM packages p
+      CROSS JOIN ring_packages rp ON rp.ring = 'edge' AND rp.package_id = p.id
+      WHERE p.name = ?`,
   )
     .bind(name)
     .all<{ source: string; arch: string; version: string }>();
@@ -882,9 +887,18 @@ function parseJson(text: string | null): unknown {
   try { return text ? JSON.parse(text) : null; } catch { return null; }
 }
 
+/**
+ * GET /factory — the workers and the queue. `?live=1` is the read a page
+ * polls for what is running now (the Factory's workers card, #246): the
+ * tasks in flight only (queued or leased), found through the queue's
+ * status index, and no counts — the whole listing reads every task twice
+ * (the counts, then an order no index gives), about 2 000 rows a miss in
+ * production, the live read the queue's few rows.
+ */
 export async function handleFactory(env: Env, url?: URL): Promise<Response> {
   const limit = Math.min(200, Math.max(10, Number(url?.searchParams.get("limit") ?? 60) || 60));
-  const counts = await env.DB.prepare("SELECT status, arch, COUNT(*) AS n FROM build_tasks GROUP BY status, arch").all();
+  const live = url?.searchParams.get("live") === "1";
+  const counts = live ? { results: [] } : await env.DB.prepare("SELECT status, arch, COUNT(*) AS n FROM build_tasks GROUP BY status, arch").all();
   const alive = aliveSince();
   // Every worker belongs to someone: the project (trust project, granted by
   // a maintainer) or a contributor.
@@ -893,7 +907,7 @@ export async function handleFactory(env: Env, url?: URL): Promise<Response> {
   )
     .bind(new Date(alive).toISOString())
     .all<WorkerRow>();
-  const tasks = await env.DB.prepare("SELECT * FROM build_tasks ORDER BY CASE status WHEN 'leased' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, id DESC LIMIT ?").bind(limit).all<TaskRow>();
+  const tasks = await env.DB.prepare(`SELECT * FROM build_tasks ${live ? "WHERE status IN ('leased', 'queued') " : ""}ORDER BY CASE status WHEN 'leased' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, id DESC LIMIT ?`).bind(limit).all<TaskRow>();
   const pool = running(env);
   return json(
     {

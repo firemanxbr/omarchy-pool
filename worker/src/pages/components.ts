@@ -31,6 +31,7 @@
  * the page's name, so a new read or act is declared the day it is written.
  */
 import { GO_ACTIONS, MORE, PALETTE, THEME_KEY } from "./layout";
+import { PKGNAME } from "../request";
 import { OVERVIEW_COMPONENTS } from "./overview";
 import { FACTORY_COMPONENTS } from "./contribute";
 import { REVIEW_COMPONENTS } from "./review";
@@ -42,7 +43,6 @@ import { PEOPLE_COMPONENTS } from "./people";
 import { AGENTS_COMPONENTS } from "./agents";
 import { WORKERS_COMPONENTS } from "./workers";
 import { STATUS_COMPONENTS } from "./status";
-import { REQUEST_COMPONENTS } from "./request";
 import { DIFF_COMPONENTS } from "./diff";
 import { API_DOCS_COMPONENTS } from "./api-docs";
 import { DOCS_COMPONENTS } from "./docs";
@@ -221,11 +221,11 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // The ⌘K menu (#241, layout.ts GO_MENU): a closed dialog after the footer on every page — never drawn with script off —, opened by ⌘K or Ctrl+K, by / where the page marks no search of its own, and by Go…; a combobox over a listbox, the row the keyboard is on named by aria-activedescendant. It reads the one search Home's box reads, at the same address and in lower case, so the two share the edge's copy; a name that search did not find is asked where it is — the factory's names, then the name on each architecture, at the package page's own address — before Request "<name>", the Factory's form with the name filled in, is offered; and every action lands on a page — a redirect where its address is one (/me, and a footer page still standing in for its own: MORE's `until`).
+    // The ⌘K menu (#241, layout.ts GO_MENU): a closed dialog after the footer on every page — never drawn with script off —, opened by ⌘K or Ctrl+K, by / where the page marks no search of its own, and by Go…; a combobox over a listbox, the row the keyboard is on named by aria-activedescendant. It reads the one search Home's box reads, at the same address and in lower case, so the two share the edge's copy; a name that search did not find is asked where it is — the factory's names, then the name on each architecture, at the package page's own address — before Request "<name>", the Factory's request card with the name filled in, is offered — the name by the request's own rule (request.ts PKGNAME, spliced in); and every action lands on a page — a redirect where its address is one (/me, and a footer page still standing in for its own: MORE's `until`).
     id: "shell.go-menu",
     page: "/",
     anchor: ['<dialog class="go-menu" id="go-menu" aria-label="Go to a package or a page" aria-modal="true">', 'id="go-q" role="combobox"', 'aria-controls="go-list"', '<div class="go-list" id="go-list" role="listbox" aria-label="Packages and pages">', '<span class="go-said" role="status">'],
-    script: ['document.querySelector("#go-menu")', 'typeof menu.showModal !== "function"', '"/api/v1/search?q=" + encodeURIComponent(term) + "&ring=stable&arch=" + ARCHES[0] + "&limit=" + LIMIT', '"/api/v1/factory/packages"', '"/api/v1/package/" + term + "?ring=stable&arch=" + arch', "(d.package || {}).source", 'role="option"', '"aria-activedescendant"', '"/request?name=" + encodeURIComponent(term)', "window.opTheme.toggle()", `document.querySelector('[aria-keyshortcuts="/"]')`, "window.opPalette = {"],
+    script: ['document.querySelector("#go-menu")', 'typeof menu.showModal !== "function"', '"/api/v1/search?q=" + encodeURIComponent(term) + "&ring=stable&arch=" + ARCHES[0] + "&limit=" + LIMIT', '"/api/v1/factory/packages"', '"/api/v1/package/" + term + "?ring=stable&arch=" + arch', "(d.package || {}).source", 'role="option"', '"aria-activedescendant"', '"/factory?name=" + encodeURIComponent(term)', `NAME = ${String(PKGNAME)}`, "window.opTheme.toggle()", `document.querySelector('[aria-keyshortcuts="/"]')`, "window.opPalette = {"],
     reads: [
       { path: `/api/v1/search?q=${F.pkg}&ring=stable&arch=${F.arch}&limit=9`, fields: ["packages", "packages.0.name", "packages.0.source", "packages.0.repo_arch", "packages.0.description"] },
       { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.name"] },
@@ -234,7 +234,7 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
         const path = a.href!.split("#")[0];
         return { path, json: false as const, ...(path === "/me" || MORE.some((m) => m.href === path && m.until) ? { status: 302 } : {}) };
       }),
-      { path: "/request?name=zzfoo", json: false },
+      { path: "/factory?name=zzfoo", json: false },
     ],
     visible: EVERYONE,
   },
@@ -256,7 +256,7 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // Where a standing approval is today (approvalWhere): one rule over the row's rings, blocked_at and publish_status — "in <rings>", "blocked", "publish failed" or "publish cancelled", "publishing" — drawn by the Factory's Landed lately and Review's Decided line, so the two pages say one word of one approval; no page guesses a ring from the registry's status. The read is the list both pages draw it from, with the three fields the rule reads.
+    // Where a standing approval is today (approvalWhere): one rule over the row's rings, blocked_at and publish_status — "in <rings>", "blocked", "publish failed" or "publish cancelled", "publishing" — drawn by Review's Decided line (and by the Factory's Landed lately until #246), so no two pages say two words of one approval; no page guesses a ring from the registry's status. The read is the list both pages draw it from, with the three fields the rule reads.
     id: "shell.approval-where",
     page: "/",
     anchor: [],
@@ -424,7 +424,6 @@ export function allComponents(F: Fixture): Component[] {
     ...AGENTS_COMPONENTS(F),
     ...WORKERS_COMPONENTS(F),
     ...STATUS_COMPONENTS(F),
-    ...REQUEST_COMPONENTS(F),
     ...DIFF_COMPONENTS(F),
     ...API_DOCS_COMPONENTS(F),
     ...DOCS_COMPONENTS(F),

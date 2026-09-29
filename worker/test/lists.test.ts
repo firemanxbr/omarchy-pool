@@ -57,8 +57,8 @@ beforeAll(async () => {
 });
 
 describe("lists come from the code that owns them", () => {
-  it("the request form's boxes and the factory chapter's four things are CHECKLIST's sentences", async () => {
-    const form = await text("/request");
+  it("the request card's boxes and the factory chapter's four things are CHECKLIST's sentences", async () => {
+    const form = await text("/factory");
     const keys = Object.keys(CHECKLIST);
     expect(keys.length).toBe(4);
     for (const [key, sentence] of Object.entries(CHECKLIST)) {
@@ -207,7 +207,7 @@ describe("lists come from the code that owns them", () => {
       ["/status", "status.advisory-list", 'choose("#pick-ring", PROMISED_RINGS, ADV_RING'],
       ["/status", "status.releases", "PROMISED_UPWARD.map(function (ring)"],
       ["/docs/how-it-works", "how-it-works.sources-diagram", "PROMISED_RINGS.forEach(function (n)"],
-      ["/factory", "factory.landed", "RINGS_UPWARD.map(function (r)"],
+      ["/factory", "factory.request-form", "ARCHES.forEach(function (a) { ON[a] = true; })"],
     ] as const) {
       expect(ownScriptOf(await text(path)), `${path} reads ${literal}`).toContain(literal);
       const c = components.find((x) => x.id === id);
@@ -224,7 +224,7 @@ describe("lists come from the code that owns them", () => {
     expect(HELPERS).toContain("arch && arch !== \"all\" ? arch : ARCHES[0]");
     expect(HELPERS).toContain("opts.arch || ARCHES[0]");
     expect(HELPERS).toMatch(/source === NULL_SOURCE_ARCH|e\.source \|\| NULL_SOURCE_ARCH/);
-    for (const path of ["/", "/factory", "/review", "/packages", "/status", "/workers", "/request", "/people", "/docs/get-started", `/package/${F.pkg}`, `/build/${F.projectTask}`, `/user/${F.owner}`]) {
+    for (const path of ["/", "/factory", "/review", "/packages", "/status", "/workers", "/people", "/docs/get-started", `/package/${F.pkg}`, `/build/${F.projectTask}`, `/user/${F.owner}`]) {
       const own = ownScriptOf(await text(path))!;
       expect(own, `${path} types x86_64 as a default`).not.toMatch(typedDefault);
       expect(own, `${path} types the null source's architecture`).not.toMatch(/source \|\| "x86_64"/);

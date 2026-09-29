@@ -16,7 +16,7 @@
  * hidden word found; a name the search did not find looked up — the
  * factory's names, then the name on each architecture — and drawn first
  * where it is, Request "<name>" only for a name found nowhere, landing on
- * the request form with the name filled in, ↵ before that answer waiting
+ * the Factory's request card with the name filled in, ↵ before that answer waiting
  * for it; a package's origin in words; a search or a lookup that did not
  * answer said, to a screen reader too, not drawn as "no package"; one
  * letter asking for another; on a Mac, Ctrl+K left to a text field; the
@@ -52,7 +52,7 @@ let PAGES: string[];
 let SHELL: { esc: (s: unknown) => string; pkgHref: (name: string, ring?: string, arch?: string) => string; errorText: (e: unknown) => string };
 beforeAll(async () => {
   F = await seedDashboard(env);
-  PAGES = ["/", "/factory", "/review", "/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/glossary", "/docs/runbook", "/docs/omarchy-cli-mcp", "/packages", `/package/${F.pkg}`, `/build/${F.projectTask}`, "/status", "/workers", "/request", `/user/${F.owner}`, "/people", "/agents", "/api", "/diff"];
+  PAGES = ["/", "/factory", "/review", "/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/glossary", "/docs/runbook", "/docs/omarchy-cli-mcp", "/packages", `/package/${F.pkg}`, `/build/${F.projectTask}`, "/status", "/workers", `/user/${F.owner}`, "/people", "/agents", "/api", "/diff"];
   const shell = runScript(scriptOf(await (await get("/docs")).text()), { pathname: "/docs", functions: ["esc", "pkgHref", "errorText"] });
   SHELL = { esc: shell.esc, pkgHref: shell.pkgHref, errorText: shell.errorText };
 });
@@ -114,13 +114,17 @@ describe("the ⌘K menu on the page", () => {
     }
   });
 
-  it("lands Request \"<name>\" on the Factory's form with the name filled in, for whoever is looking, and takes only a pacman name from the address", async () => {
-    const res = await raw("/request?name=zzfoo");
+  it("lands Request \"<name>\" on the Factory's request card with the name filled in, for whoever is looking, and takes only a pacman name from the address", async () => {
+    // The card's address (#246); the request's old page redirects there, the name kept.
+    const old = await raw("/request?name=zzfoo");
+    expect(old.status).toBe(301);
+    expect(old.headers.get("location")).toBe("http://pool.test/factory?name=zzfoo#request");
+    const res = await raw("/factory?name=zzfoo");
     expect(res.status).toBe(200);
     const script = scriptOf(await res.text());
     const cases: [string, unknown, string][] = [
       ["?name=zzfoo", { login: "alice", role: "contributor" }, "zzfoo"],
-      // Nobody signed in: the name is in the grey form, and the sign-in comes back to this address.
+      // Nobody signed in: the name is in the card all the same — its fields are live for everyone — and the sign-in comes back to this address.
       ["?name=zzfoo", null, "zzfoo"],
       ["?name=%3Cb%3Ex", { login: "alice", role: "contributor" }, ""],
       ["?name=ZZFOO", { login: "alice", role: "contributor" }, ""],
@@ -129,12 +133,11 @@ describe("the ⌘K menu on the page", () => {
     ];
     for (const [search, me, want] of cases) {
       const ran = runScript(script, {
-        pathname: "/request", search, functions: [],
+        pathname: "/factory", search, functions: [],
         fetch: async (path: string) => (path === "/auth/me" ? (me ? Response.json(me) : Response.json({ error: "sign in" }, { status: 401 })) : new Promise<Response>(() => {})),
       });
-      for (let i = 0; i < 20 && !ran.nodes["#pkg-form"]?.innerHTML; i++) await new Promise((r) => globalThis.setTimeout(r, 5));
-      expect(ran.nodes["#pkg-form"]?.innerHTML, `${search}: the form drawn`).toContain('id="pkg-name"');
-      expect(ran.nodes["#pkg-name"]?.value ?? "", search).toBe(want);
+      await new Promise((r) => globalThis.setTimeout(r, 10));
+      expect(ran.nodes["#fx-name"]?.value ?? "", search).toBe(want);
     }
   });
 });
@@ -482,7 +485,7 @@ describe("the ⌘K menu, run", () => {
     rows = m.rows();
     expect(rows.map((r) => r.label)).toEqual([...nine.slice(0, 6).map((p) => p.name), 'Request "hypr"']);
     expect(rows[0]).toMatchObject({ hint: origin("extra", REPO_ARCHES[0]), href: SHELL.pkgHref("hyprland", "stable", REPO_ARCHES[0]), icon: lucide("package", 16) });
-    expect(rows[6]).toMatchObject({ hint: "factory", href: "/request?name=hypr", icon: lucide("git-pull-request", 16) });
+    expect(rows[6]).toMatchObject({ hint: "factory", href: "/factory?name=hypr#request", icon: lucide("git-pull-request", 16) });
     expect(m.said.textContent).toBe("7 results");
     // A longer term the answer does not hold whole: asked, and until then the rows of the last answer that still match — never a Request.
     m.type("hyprland");
@@ -516,7 +519,7 @@ describe("the ⌘K menu, run", () => {
     await nowhere(m, "zzfoo");
     expect(m.rows().map((r) => [r.label, r.hint, r.selected])).toEqual([['Request "zzfoo"', "factory", true]]);
     m.keyOnLine("Enter");
-    expect(m.location.assigned[m.location.assigned.length - 1]).toBe("/request?name=zzfoo");
+    expect(m.location.assigned[m.location.assigned.length - 1]).toBe("/factory?name=zzfoo#request");
     // The factory's names were asked once for the page, whatever was looked up.
     expect(m.asked.filter((u) => u === REGISTRY).length).toBe(1);
   });
@@ -618,7 +621,7 @@ describe("the ⌘K menu, run", () => {
     await m.reply(homeSearch("qqq"), { packages: [] });
     expect(m.location.assigned, "the name is looked up first").toEqual([]);
     await nowhere(m, "qqq");
-    expect(m.location.assigned).toEqual(["/request?name=qqq"]);
+    expect(m.location.assigned).toEqual(["/factory?name=qqq#request"]);
     // An answer that lands after the line changed does not draw over it.
     m.window.opPalette.open();
     m.type("abc");
