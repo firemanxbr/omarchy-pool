@@ -54,8 +54,8 @@ export function docsHtml(poolUrl: string, version: RunningVersion): string {
  * or the code block that is the chapter's substance.
  */
 const CHAPTER_ANCHORS: Partial<Record<DocKey, string[]>> = {
-  // The write tools are a proposal waiting for a maintainer's sign-off (#252): the draft says so above its table, and its questions close it — the same chapter must not read as a description of tools that exist.
-  // What a sign-off rests on is pinned as well: how a grant is made and why not a device flow, what each call costs, and what the server enforces, so the risk the review named cannot drop out of the chapter unnoticed.
+  // The write tools are a proposal a maintainer signed off on (#252, 2026-09-29) and nothing of it is built yet: the draft says so above its table, and the sign-off closes it — the same chapter must not read as a description of tools that exist.
+  // What the sign-off rests on is pinned as well: how a grant is made and why not a device flow, releasing a claim, what each call costs, and what the server enforces, so the risk the review named cannot drop out of the chapter unnoticed.
   "omarchy-cli-mcp": [
     "<th>Tool</th><th>Arguments</th><th>Answers</th>",
     '<pre><code class="lang-json">',
@@ -69,7 +69,9 @@ const CHAPTER_ANCHORS: Partial<Record<DocKey, string[]>> = {
     'id="limits-and-cost"',
     'id="what-the-server-enforces"',
     "<strong>No hint from an agent.</strong>",
-    'id="questions-for-the-maintainers"',
+    'id="signed-off"',
+    "<p><strong>Releasing a claim.</strong>",
+    'href="https://github.com/firemanxbr/omarchy-pool/issues/257"',
     'href="/docs/security-model#principles"',
   ],
   // The score and who does what: /build and /packages link here.

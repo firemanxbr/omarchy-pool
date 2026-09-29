@@ -24,8 +24,9 @@ request (see [CONTRIBUTING.md](CONTRIBUTING.md)), and keep
 - [ ] **Write tools for agents.** `omarchy-cli mcp` answers and writes
       nothing. The proposal for a contributor's and a maintainer's agent —
       a token scoped to the person, and decisions the agent drafts and the
-      person confirms in the browser — waits for a maintainer's sign-off
-      ([the proposal](docs/omarchy-cli-mcp.md#proposed-write-tools-draft-needs-sign-off),
+      person confirms in the browser — was signed off on 2026-09-29 and is
+      built after #242 and #247
+      ([the proposal](docs/omarchy-cli-mcp.md#proposed-write-tools-draft-signed-off),
       issue #252).
 
 - [ ] **Production keys and hosting.** The staging database key is throwaway and
