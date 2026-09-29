@@ -167,7 +167,7 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     id: "workers.tiles",
     page: "/workers",
     anchor: ['id="tiles"'],
-    // The counts are the shell's (workerCounts over the listing), the same the Pool's and the People page's tiles say; over a listing that did not answer the three it feeds read "—" (the shell's tilesUnanswered) and the minutes tile, the stats poll's, keeps its number.
+    // The counts are the shell's (workerCounts over the listing), the same the Pool's tiles say; over a listing that did not answer the three it feeds read "—" (the shell's tilesUnanswered) and the minutes tile, the stats poll's, keeps its number.
     script: ['"#tiles"', "workerCounts(d.workers)", "function tilesOf(wc, bz, load, wm)", 'setTiles("#tiles", tilesUnanswered(tilesOf(workerCounts([]), [], null, STATS ? workerMinutes(STATS.series, 7) : null), DOWN))', '"", null, "stats"]', '"Alive"', "wc.alive", "wc.registered", "wc.byKind.project.alive", '"Building now"', "wc.building", '"Load · 24 h"', '"Worker minutes · 7 d", wm ? num(wm.total)', "workerMinutes(STATS.series, 7)"],
     reads: [
       { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.alive", "workers.0.ready", "workers.0.current_task", "workers.0.revoked_at", "workers.0.side", "workers.0.labels"] },

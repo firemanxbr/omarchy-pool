@@ -52,7 +52,7 @@ let PAGES: string[];
 let SHELL: { esc: (s: unknown) => string; pkgHref: (name: string, ring?: string, arch?: string) => string; errorText: (e: unknown) => string };
 beforeAll(async () => {
   F = await seedDashboard(env);
-  PAGES = ["/", "/factory", "/review", "/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/glossary", "/docs/runbook", "/docs/omarchy-cli-mcp", "/packages", `/package/${F.pkg}`, `/build/${F.projectTask}`, "/status", "/workers", `/user/${F.owner}`, "/people", "/api", "/diff", ...Object.keys(RETIRED_PAGES)];
+  PAGES = ["/", "/factory", "/review", "/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/glossary", "/docs/runbook", "/docs/omarchy-cli-mcp", "/packages", `/package/${F.pkg}`, `/build/${F.projectTask}`, "/status", "/workers", `/user/${F.owner}`, "/people", "/agents", "/api", "/diff", ...Object.keys(RETIRED_PAGES)];
   const shell = runScript(scriptOf(await (await get("/docs")).text()), { pathname: "/docs", functions: ["esc", "pkgHref", "errorText"] });
   SHELL = { esc: shell.esc, pkgHref: shell.pkgHref, errorText: shell.errorText };
 });
@@ -367,6 +367,9 @@ describe("the ⌘K menu, run", () => {
     expect(m.line.value, "the line is empty again").toBe("");
     m.type("journal");
     expect(m.rows().map((r) => r.label)).toEqual(["Status"]);
+    // The workers are the Factory's — the door the Workers page lights, one hop from its tile — and no longer People's since #251.
+    m.type("workers");
+    expect(m.rows().map((r) => r.label)).toEqual(["Request a package"]);
     // The pointer moves the lit row too; a press opens it, and one with a modifier is the browser's.
     m.type("do");
     m.tick();

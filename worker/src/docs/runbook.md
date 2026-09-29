@@ -594,7 +594,7 @@ What keeps the bill down:
   of a ring, then every 24th, and any older release read by id. A sync that
   moves a hundred packages writes a hundred rows, not thirty thousand; GC
   drops the checkpoints and deltas nothing inside retention starts from.
-  A diff (`/diff`, `pkg-repo diff`, the Packages page) is folded from the
+  A diff (`/diff`, `pkg-repo diff`) is folded from the
   deltas between its two releases and writes nothing: until 2026-09-20 it
   compared full lists, and every release's parent was written out (65 k
   rows, deleted again by the next GC) the first time its diff was viewed
@@ -709,8 +709,8 @@ audience from the same analytics: the distinct client addresses that
 fetched a ring database (`/<source>/<arch>/omarchy-*-<ring>.db`) on the pool's
 hosts — both names, one query, so a machine that used both in a day is
 one address — per ring and per architecture, as one `audience` journal line
-(`src/audience.ts`); the Pool page's *machines on the pool* chart shows
-it, `/api/v1/stats` carries the last 30 days. Nothing is kept
+(`src/audience.ts`); `/api/v1/stats` carries the last 30 days (no page
+draws them since the Pool's redesign, #243). Nothing is kept
 per request — one number per day. An address is a machine most of the
 time (a NAT hides several, a laptop on the move counts twice), so the
 dashboard says *about*. The query is scoped to the account

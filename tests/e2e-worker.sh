@@ -219,6 +219,11 @@ moved=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$OMARCHY_API/req
 gpage=$(curl -s "$OMARCHY_API/governance" -L); grep -q "Becoming a maintainer" <<<"$gpage" || { echo "governance page not served"; exit 1; }
 search_body=$(curl -s "$OMARCHY_API/api/v1/search?q=zlib&ring=stable")
 grep -q '"name":"zlib"' <<<"$search_body" || { echo "search did not find zlib: $search_body"; exit 1; }
+# The packages list (#245): the API filters it, and /packages draws it into the page, links and all, with script off.
+list_body=$(curl -s "$OMARCHY_API/api/v1/packages?q=zlib&ring=stable")
+grep -q '"name":"zlib"' <<<"$list_body" || { echo "the packages list did not find zlib: $list_body"; exit 1; }
+list_page=$(curl -s "$OMARCHY_API/packages?q=zlib")
+grep -q '<a class="pk-row" href="/package/zlib?ring=' <<<"$list_page" || { echo "/packages did not draw zlib's row: $(head -c 600 <<<"$list_page")"; exit 1; }
 pkg_body=$(curl -s "$OMARCHY_API/api/v1/package/zlib?ring=stable")
 grep -q '"shown_ring":"stable"' <<<"$pkg_body" || { echo "package page data missing: $pkg_body"; exit 1; }
 # Security: an advisory on the served zlib object shows up in the ring's report,

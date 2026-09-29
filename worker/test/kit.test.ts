@@ -194,6 +194,8 @@ describe("both themes", () => {
     }
     expect(checked).toBeGreaterThanOrEqual(3);
     expect(rules.some((r) => r.sel === ".suggest a:focus-visible" && greenLine(r.body))).toBe(true);
+    // The kit's copy button is focused with the green line too, not the browser's own ring (the docs index's well is the first page to draw it, #250).
+    expect(rules.some((r) => parts(r.sel).includes(".op-copy:focus-visible") && greenLine(r.body)), ".op-copy:focus-visible").toBe(true);
   });
 
   it("draw the shell's own buttons in the palette's names, never the browser's: the decision dialog's and the Decision cell's", async () => {
@@ -302,8 +304,8 @@ describe("the theme", () => {
 
 describe("the v1 kit", () => {
   it("is on the pages that ask for it, and costs the others nothing: its sheet after the frame's CSS, its helpers after the shell's", async () => {
-    // A page that has not adopted it links no sheet, carries no primitive and none of the kit's helpers. The one mention of the sheet is the ⌘K menu's (#241): its icons are the kit's, and it links the sheet the first time it opens — nothing is asked for before that (test/go-menu.test.ts opens it).
-    for (const path of ["/", "/review", "/docs", "/status", "/package/zlib"]) {
+    // A page that has not adopted it links no sheet, carries no primitive and not the kit's helpers (the docs index has, #250: test/docs-index.test.ts; Home, #243, and the Factory, #246, have: below). The one mention of the sheet is the ⌘K menu's (#241): its icons are the kit's, and it links the sheet the first time it opens — nothing is asked for before that (test/go-menu.test.ts opens it).
+    for (const path of ["/review", "/status", "/package/zlib"]) {
       const html = await page(path);
       expect(/<head>([\s\S]*?)<\/head>/.exec(html)![1], path).not.toContain("/assets/kit.");
       expect(html.split("/assets/kit.").length - 1, `${path}: the menu's mention only`).toBe(1);
@@ -318,6 +320,14 @@ describe("the v1 kit", () => {
     expect(styleOf(html)).not.toContain(".op-");
     expect(scriptOf(html)).toContain(KIT_HELPERS);
     expect(ownScriptOf(html)!.trim().startsWith("var own = 1;")).toBe(true);
+    // Home (#243), as served: the sheet once in its head, after the frame's <style>, and the page's own rules (page({ css })) after the sheet, so they refine the kit's; the helpers the shell's.
+    const home = await page("/"), homeHead = /<head>([\s\S]*?)<\/head>/.exec(home)![1];
+    expect(homeHead.match(/\/assets\/kit\./g)?.length).toBe(1);
+    expect(homeHead.indexOf(link)).toBeGreaterThan(homeHead.indexOf("</style>"));
+    expect(homeHead.lastIndexOf("<style>")).toBeGreaterThan(homeHead.indexOf(link));
+    expect(styleOf(home)).not.toContain(".op-");
+    expect(scriptOf(home)).toContain(KIT_HELPERS);
+    expect(ownScriptOf(home)).not.toContain(KIT_HELPERS.trim().slice(0, 80));
     // The Factory has adopted it (#246): the sheet once, after the frame's CSS, its own rules after the sheet (page()'s css), the helpers the shell's.
     const factory = await page("/factory"), fhead = /<head>([\s\S]*?)<\/head>/.exec(factory)![1];
     expect(fhead.match(/\/assets\/kit\./g)?.length).toBe(1);
@@ -325,6 +335,7 @@ describe("the v1 kit", () => {
     expect(fhead.lastIndexOf("<style>")).toBeGreaterThan(fhead.indexOf(link));
     expect(styleOf(factory)).not.toContain(".op-");
     expect(scriptOf(factory)).toContain(KIT_HELPERS);
+    expect(ownScriptOf(factory)).not.toContain(KIT_HELPERS.trim().slice(0, 80));
   });
 
   it("serves its sheet, immutable under its hash, and nothing else under /assets/", async () => {

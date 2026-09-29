@@ -662,20 +662,11 @@ const CSS = String.raw`
   .whoc { border: 1px solid var(--line); background: var(--panel); padding: 16px 18px; display: grid; grid-template-columns: auto 1fr; gap: 14px; align-items: center; text-decoration: none; color: var(--text); }
   a.whoc:hover { border-color: var(--green); } .whoc .k { font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); } .whoc b { display: block; font-family: Geist, sans-serif; font-size: 18px; font-weight: 600; } .whoc span { font-size: 12.5px; color: var(--muted); }
   .whoc.wait { border-color: var(--amber); border-style: dashed; }
-  .whorow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; color: var(--muted); margin: -4px 0 12px; } .whorow .avatar { width: 24px; height: 24px; font-size: 10.5px; }
-  .pkname { font-weight: 600; color: var(--text); text-decoration: none; border-bottom: 1px dotted var(--dim); } .pkname:hover { color: var(--green); border-bottom-color: var(--green); } .pkname .go { color: var(--green); font-weight: 400; }
-  .by { display: inline-flex; gap: 4px; } .by .avatar { width: 24px; height: 24px; font-size: 10.5px; }
-  .pk-grid { grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr); align-items: start; margin-top: 4px; }
-  /* The results: the page's search box is the search, so the table's own filter stays hidden; its size and count remain. A description is two lines at most; who made it stays on one. */
-  .pk-results .pager { margin: 0 0 6px; } .pk-results .pager input { display: none; }
-  .pk-results td:nth-child(4) { white-space: nowrap; } .pk-results .clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .pk-grid + .tiles { margin-top: 28px; }
-  #results tr.sel td { background: var(--panel-2); }
 
   .docs { display: grid; grid-template-columns: 230px 1fr; gap: 24px; align-items: start; }
   .docs-side { position: sticky; top: 16px; display: grid; gap: 10px; }
   .docs-side input { background: var(--bg-deep); border: 1px solid var(--line); color: var(--text); padding: 8px 10px; font: inherit; font-size: 13.5px; width: 100%; } .docs-side input:focus { outline: none; border-color: var(--green); }
-  .docs-home { display: block; font-family: Geist, sans-serif; font-weight: 600; font-size: 14px; color: var(--muted); text-decoration: none; padding: 2px 10px 6px; } .docs-home.on, .docs-home:hover { color: var(--text); }
+  .docs-home { display: block; font-family: Geist, sans-serif; font-weight: 600; font-size: 14px; color: var(--muted); text-decoration: none; padding: 2px 10px 6px; } .docs-home:hover { color: var(--text); }
   .docs-nav { display: grid; gap: 2px; } .docs-nav details { border-left: 2px solid transparent; } .docs-nav details[open] { border-left-color: var(--green); background: var(--panel); }
   .docs-nav summary { list-style: none; cursor: pointer; display: flex; justify-content: space-between; align-items: baseline; gap: 8px; padding: 6px 10px; font-size: 13.5px; color: var(--muted); } .docs-nav summary::-webkit-details-marker { display: none; }
   .docs-nav summary::before { content: "›"; color: var(--dim); font-size: 13px; width: 8px; transition: transform .12s; } .docs-nav details[open] > summary::before { transform: rotate(90deg); }
@@ -693,10 +684,50 @@ const CSS = String.raw`
   .doc-figure { margin: 0 0 16px; background: var(--panel); border: 1px solid var(--line); padding: 10px; } .doc-figure img { display: block; width: 100%; max-width: 1100px; height: auto; margin: 0 auto; }
   .docs-hint { font-size: 12px; color: var(--dim); padding: 0 10px; } .docs-main { min-width: 0; }
   .docs-main > h1:first-child { margin-top: 2px; }
-  .doc-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 14px; }
-  .doc-card { border: 1px solid var(--line); background: var(--panel); padding: 16px 18px; display: grid; gap: 8px; align-content: start; } .doc-card h3 { margin: 0; } .doc-card h3 a { color: var(--text); text-decoration: none; } .doc-card h3 a:hover { color: var(--green); }
-  .doc-card p { margin: 0; font-size: 13.5px; color: var(--muted); } .doc-secs { display: flex; flex-wrap: wrap; gap: 4px 6px; margin-top: 4px; }
-  .doc-secs a { font-size: 12px; color: var(--dim); text-decoration: none; border: 1px solid var(--line); padding: 2px 8px; } .doc-secs a:hover { color: var(--text); border-color: var(--muted); }
+  .docs-said { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  /* The docs index (#250, pages/docs.ts): the title with the search beside it, then the map of the seven sections, sticky beside their
+     cards — the one the reader is in lit on --panel-2 —, each card its icon's square, a line or two, a command, a grid of facts or the API's
+     table, and the chapters that say more in green; the code's chapters one quiet line under them. 1120px wide with the frame's sides, as every
+     v1 page; the frame's main is wider, so the page narrows itself. Below 960px the map is on top, in four columns (two below 720px), and scrolls
+     with the page; below 640px a grid of facts is one column, the command scrolls in its well rather than break inside a word, and a row of the
+     API's table is its method and path, then what it returns, its head there for a screen reader only. */
+  .guide { max-width: calc(var(--content-max) - 2 * var(--gutter)); margin: 0 auto; padding: 12px 0 16px; display: grid; gap: 36px; }
+  .guide-head { display: flex; flex-wrap: wrap; gap: 24px 40px; align-items: flex-end; } .guide-head > div { flex: 1 1 480px; min-width: 0; display: grid; gap: 14px; }
+  .guide-search { flex: 0 1 340px; display: flex; align-items: center; gap: 10px; padding: 9px 12px; border: 1px solid var(--line); background: var(--bg-deep); color: var(--green); }
+  .guide-search:focus-within { border-color: var(--green); }
+  .guide-search input { flex: 1; min-width: 0; padding: 0; border: 0; border-radius: 0; outline: none; -webkit-appearance: none; appearance: none; background: transparent; color: var(--text); font: 14px var(--font-mono); }
+  .guide-search input::placeholder { color: var(--dim); } .guide-search input::-webkit-search-decoration, .guide-search input::-webkit-search-cancel-button { -webkit-appearance: none; }
+  .guide-body { display: grid; grid-template-columns: 218px minmax(0, 1fr); gap: 24px; align-items: start; }
+  .guide-nav { position: sticky; top: 16px; display: grid; gap: 2px; padding: 8px; border: 1px solid var(--line); background: var(--panel); }
+  .guide-nav a { display: flex; align-items: center; gap: 10px; padding: 7px 10px; font-size: 13px; line-height: 1.6; color: var(--muted); text-decoration: none; }
+  .guide-nav a:hover, .guide-nav a[aria-current="true"] { color: var(--text); } .guide-nav a[aria-current="true"] { background: var(--panel-2); }
+  .guide-nav a:focus-visible, .guide-more a:focus-visible, .guide-code a:focus-visible { outline: 1px solid var(--green); outline-offset: 1px; }
+  .guide-secs { display: grid; gap: 14px; min-width: 0; }
+  .guide-sec { margin: 0; padding: 18px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; scroll-margin-top: 16px; }
+  .guide-sec h2 { display: flex; align-items: center; gap: 10px; margin: 0; font: 600 18px/1.3 var(--font-display); letter-spacing: normal; }
+  .guide-sec > p { margin: 0; font-size: 13.5px; color: var(--muted); text-wrap: pretty; }
+  /* Two classes: the kit's sheet comes after this one, and its well's own rule for the code, one class and an element, would win a tie. */
+  .guide-sec .guide-well code { font-size: 12.5px; line-height: 1.7; }
+  /* The cells' lines are the grid's --line showing through a 1px gap, so an empty track would show as a block of it: three columns, one on a
+     phone, a count that divides every grid's cells (three rings, six gates; test/docs-index.test.ts holds them to it). */
+  .guide-items { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); }
+  .guide-items > div { display: grid; gap: 3px; align-content: start; padding: 10px 12px; background: var(--panel-2); }
+  .guide-items b { display: flex; align-items: center; gap: 8px; font: 600 13.5px/1.4 var(--font-display); color: var(--text); } .guide-items b > i { color: var(--green); }
+  .guide-items .edge b > i { color: var(--edge); } .guide-items .rc b > i { color: var(--rc); } .guide-items .stable b > i { color: var(--stable); }
+  .guide-items span { font-size: 12px; color: var(--dim); }
+  .guide-api { border: 1px solid var(--line); } .guide-api td { font-size: 12.5px; } .guide-api td:first-child { width: 44px; color: var(--green); font-size: 11.5px; }
+  .guide-api code { color: var(--text); white-space: nowrap; } .guide-api td:last-child { color: var(--dim); }
+  .guide-sec > p.guide-more { display: flex; flex-wrap: wrap; gap: 4px 20px; font-size: 13px; } .guide-more a { color: var(--green); text-decoration: none; } .guide-more a:hover { text-decoration: underline; }
+  .guide-code { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; margin: 6px 0 0; font-size: 12.5px; } .guide-code > span { flex-basis: 100%; }
+  .guide-code a { color: var(--muted); text-decoration: none; } .guide-code a:hover { color: var(--green); }
+  @media (max-width: 960px) { .guide-body { grid-template-columns: minmax(0, 1fr); } .guide-nav { position: static; grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+  @media (max-width: 720px) { .guide-nav { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 640px) {
+    .guide-items { grid-template-columns: minmax(0, 1fr); } .guide-sec .guide-well code { white-space: pre; overflow-wrap: normal; overflow-x: auto; }
+    .guide-api thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+    .guide-api tr { display: grid; grid-template-columns: 44px minmax(0, 1fr); } .guide-api code { white-space: normal; overflow-wrap: break-word; } .guide-api code > span { display: inline-block; }
+    .guide-api td:last-child { grid-column: 2; padding-top: 0; border-top: 0; }
+  }
   .docs-main h2 { margin-bottom: 4px; } .docs-main h3 { margin: 22px 0 8px; } .docs-main p { color: var(--muted); font-size: 14px; max-width: 78ch; margin: 0 0 10px; } .docs-main p code, .docs-main li code { color: var(--text); }
   .docs-main ul { margin: 0 0 12px; padding-left: 18px; color: var(--muted); font-size: 13.5px; }
   .doc-sec { border: 1px solid var(--line); background: var(--panel); padding: 18px 20px; margin-bottom: 16px; } .doc-sec h3:first-child { margin-top: 0; }
@@ -824,7 +855,7 @@ export const HELPERS = String.raw`
   var LATE_MS = __LATE_AFTER_HOURS__ * 3600e3;
   // Whether a coverage row is late: the server's word when it sent one, else the same rule over last_sync. A source never synced is not late, it is missing — the sync line says so.
   function lateSync(c) { return typeof c.late === "boolean" ? c.late : !!c.last_sync && Date.now() - Date.parse(c.last_sync) > LATE_MS; }
-  // ---- a health check's result wears one word on every page that says it: the Pool's ring cards, the Pipeline's ring pills, its ring heads and its job's result, the Status rings table, and the 14-day grid both pages draw (the audit found it spelled three ways — ok on the cards and the table, healthy on the pill, healthy / unhealthy on the job, ok / warn / error on one grid and healthy / warning / failed on the other, over the same journal rows). The status is the journal's (events.ts: ok, warn, error); the word is what it means for a ring — healthy, warning, failed. The check (tests/health-check.sh) posts ok or error only — a ring with nothing rendered fails its check, since #47 — so warn is the journal's generic word, kept for a row a hand posts and drawn only where one is; a legend that advertised "nothing rendered" in amber named a state the check never produces while the state it named showed red. A cell or a pill wears the status as its class, the CSS paints it, PILL_COLOR says what it is painted.
+  // ---- a health check's result wears one word on every page that says it: the Pool's stable tile, the Pipeline's ring pills, its ring heads and its job's result, the Status rings table, and the 14-day grid both pages draw (the audit found it spelled three ways — ok on the cards and the table, healthy on the pill, healthy / unhealthy on the job, ok / warn / error on one grid and healthy / warning / failed on the other, over the same journal rows). The status is the journal's (events.ts: ok, warn, error); the word is what it means for a ring — healthy, warning, failed. The check (tests/health-check.sh) posts ok or error only — a ring with nothing rendered fails its check, since #47 — so warn is the journal's generic word, kept for a row a hand posts and drawn only where one is; a legend that advertised "nothing rendered" in amber named a state the check never produces while the state it named showed red. A cell or a pill wears the status as its class, the CSS paints it, PILL_COLOR says what it is painted.
   var HEALTH_WORD = { ok: "healthy", warn: "warning", error: "failed" };
   // The rings a health check covers — the ones that promise something, the scheduler's PROMOTED_RINGS — in the reader's order (RINGS_TEXT's, stable first), spliced in by page() so the list is typed once in meta.ts; the lab is promised nothing and is not checked, so no page draws a check for it.
   var PROMISED_RINGS = __PROMISED_RINGS__;
@@ -1159,7 +1190,7 @@ export const HELPERS = String.raw`
     return c;
   }
   function confWord(conf) { return (conf || SEC_CONF) === "all" ? "any confidence" : (conf || SEC_CONF); }
-  // ---- an advisory's severity wears one colour on every page that draws it — the pill on a row, the Pool's bars, the Security page's stack (the audit found three maps: critical + high red on one chart and amber on the next, low / unknown in two greys). SEV_PILL is the class the CSS paints a pill with, PILL_COLOR what that class is painted (the :root colours), SEV_COLOR the one following the other: critical and high red, medium amber, low blue, unknown grey; exploited red, the bucket a KEV package counts in. A chart stacks SEV_BUCKETS over advisoryCounts, a package once: the exploited first, then the not exploited by worst severity, critical with high and low with unknown — each bucket the word both charts say, the colour of its worst severity (as a package is coloured by its worst advisory) and the count read from the numbers. sevSeries(c) is the four rows a chart draws.
+  // ---- an advisory's severity wears one colour on every page that draws it — the pill on a row, the charts' bars, the Security page's stack (the audit found three maps: critical + high red on one chart and amber on the next, low / unknown in two greys). SEV_PILL is the class the CSS paints a pill with, PILL_COLOR what that class is painted (the :root colours), SEV_COLOR the one following the other: critical and high red, medium amber, low blue, unknown grey; exploited red, the bucket a KEV package counts in. A chart stacks SEV_BUCKETS over advisoryCounts, a package once: the exploited first, then the not exploited by worst severity, critical with high and low with unknown — each bucket the word both charts say, the colour of its worst severity (as a package is coloured by its worst advisory) and the count read from the numbers. sevSeries(c) is the four rows a chart draws.
   var SEV_PILL = { exploited: "error", critical: "error", high: "error", medium: "warn", low: "blue", unknown: "none" }, PILL_COLOR = { ok: "var(--green)", warn: "var(--amber)", error: "var(--red)", blue: "var(--blue)", none: "var(--dim)" };
   var SEV_COLOR = Object.keys(SEV_PILL).reduce(function (m, s) { m[s] = PILL_COLOR[SEV_PILL[s]]; return m; }, {});
   var SEV_BUCKETS = [["exploited", "exploited in the wild (KEV)", function (c) { return c.kev; }], ["critical", "critical + high", function (c) { return c.rest.critical + c.rest.high; }], ["medium", "medium", function (c) { return c.rest.medium; }], ["low", "low / unknown", function (c) { return c.rest.low + c.rest.unknown; }]];
@@ -1447,12 +1478,13 @@ export const HELPERS = String.raw`
   function endSkeleton() { document.querySelectorAll(".skel").forEach(function (el) { el.remove(); }); document.querySelectorAll(".empty.loading").forEach(function (el) { el.classList.remove("empty", "loading"); if (el.textContent === "Loading") el.textContent = ""; }); }
   // Numbers that change between refreshes flash briefly, so the page reads as live.
   function setTile(el, html) { el.classList.remove("skel"); if (el.innerHTML !== html) { el.innerHTML = html; el.classList.remove("bump"); void el.offsetWidth; el.classList.add("bump"); } }
-  function liveStats(render, everyMs) {
+  // A poll that fails keeps what the last one drew; a page that has something to say about it (Home, whose every section waits on this read) passes failed, which gets the error.
+  function liveStats(render, everyMs, failed) {
     function load() {
       serviceStatus();
       busy(fetch("/api/v1/stats")).then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
         .then(function (d) { pipelineFrom(d); render(d); endSkeleton(); })
-        .catch(function () {});
+        .catch(function (e) { if (failed) failed(e); });
     }
     load();
     setInterval(load, everyMs || 20000);
@@ -1468,19 +1500,21 @@ export const HELPERS = String.raw`
  * /me signs a visitor in and comes back to their own page, Review is a
  * queue anyone may read. `words` are what else a reader may type for it:
  * the Journal, the Pipeline and Security are sections of Status now
- * (index.ts MOVED), so "journal" finds Status. test/go-menu.test.ts opens
+ * (index.ts MOVED), so "journal" finds Status; the workers are the
+ * Factory's (the door the Workers page lights, its tile one hop from it),
+ * not People's since #251. test/go-menu.test.ts opens
  * every address and finds every fragment on its page — Home's #get-started
  * included, which #243 keeps on its "Point pacman at a ring".
  */
 export const GO_ACTIONS: { label: string; hint: string; icon: LucideName; href?: string; act?: "theme"; words: string[] }[] = [
   { label: "Browse packages", hint: "/", icon: "search", href: "/packages", words: ["search", "find", "list"] },
   { label: "Set up the pool", hint: "›", icon: "terminal", href: "/#get-started", words: ["setup", "install", "pacman", "ring", "command"] },
-  { label: "Request a package", hint: "factory", icon: "git-pull-request", href: "/factory", words: ["new", "add", "contribute", "bring"] },
+  { label: "Request a package", hint: "factory", icon: "git-pull-request", href: "/factory", words: ["new", "add", "contribute", "bring", "workers"] },
   { label: "Your requests", hint: "SIGNED IN", icon: "list-checks", href: "/me", words: ["mine", "my", "workspace", "builds"] },
   { label: "Review queue", hint: "MAINTAINERS", icon: "clipboard-check", href: "/review", words: ["approve", "maintain", "staged"] },
   { label: "Connect your agent", hint: "›", icon: "bot", href: "/agents", words: ["mcp", "ai", "assistant"] },
   { label: "Docs", hint: "", icon: "book-open", href: "/docs", words: ["documentation", "help", "api", "guide"] },
-  { label: "People", hint: "", icon: "users", href: "/people", words: ["maintainers", "contributors", "workers", "who"] },
+  { label: "People", hint: "", icon: "users", href: "/people", words: ["maintainers", "contributors", "who"] },
   { label: "Status", hint: "LIVE", icon: "activity", href: "/status", words: ["health", "journal", "pipeline", "security", "advisories", "releases"] },
   { label: "Theme: dark / light", hint: "", icon: "sun-moon", act: "theme", words: ["mode", "colour", "color"] },
 ];
@@ -1540,7 +1574,7 @@ const ORIGINS: Record<string, string> = Object.fromEntries(EXPECTED_SOURCES.map(
  * edge or the lab (a factory package on its way), one a request reserved.
  * Before the menu calls a name free it asks where the name is, at addresses
  * the pages already read: the factory's names (/api/v1/factory/packages,
- * the list /packages reads, 30 s at the edge — once per page), then the
+ * the list Home and the Factory read, 30 s at the edge — once per page), then the
  * name itself on each architecture in turn, until one serves it
  * (/api/v1/package/<name>, which answers from the most stable ring that has
  * it, the lab included: the package page's own address, so the ten-minute
@@ -1764,7 +1798,7 @@ export interface PageOptions {
   description: string;
   /** Which of the three doors (or the docs) is highlighted: a page lights the door it belongs to — a package and the packages list the Pool, the request and the workers the Factory, a build Review — and a page the footer lights (Status, People) none. */
   active: "pool" | "factory" | "review" | "docs" | "none";
-  /** Documentation pages: which chapter, for the section's own navigation. */
+  /** Documentation pages: which chapter, for the section's own navigation — the map of every chapter beside the text (docsShell). The index ("index") draws its own map of its sections (docs.ts) and keeps the search. */
   doc?: DocKey;
   body: string;
   script?: string;
@@ -1787,10 +1821,10 @@ export interface PageOptions {
    */
   kit?: boolean;
   /**
-   * The page's own rules, for what the kit's primitives do not draw: a
-   * <style> after the frame's CSS and the kit's sheet, so a rule here
-   * refines theirs. It is served with this page only, and the other pages
-   * pay nothing for it.
+   * The page's own rules: its layout, and where it refines a primitive of
+   * the kit. They live in the page's module, not in the frame's CSS, and
+   * are served after the frame's CSS and the kit's sheet, so a rule here
+   * wins over theirs at equal weight. Tokens only, as the frame's.
    */
   css?: string;
 }
@@ -1812,14 +1846,13 @@ export const NAV: { key: PageOptions["active"]; href: string; label: string; sub
  * to use it through one's own agent, what explains it, who runs it. Agents
  * is drawn in green (`accent`). An entry whose page has not landed yet names
  * what stands in for it (`until`): the router answers its address with a
- * 302 there (index.ts) and the docs hint does not call it a page. Agents is
- * #249's page, and until then its address is the chapter on connecting an
- * agent today; #249 drops the `until`.
+ * 302 there (index.ts) and the docs hint does not call it a page. None does
+ * since Agents became a page of its own (#249, pages/agents.ts); until then
+ * its address was the chapter on omarchy-cli as an MCP server.
  *
  * The rest of what the footer linked before is one hop from the frame, not
- * in it: the request is the Factory's first step (and People's "Bring a
- * package"), the workers are People's "Every worker", and both light the
- * Factory door; the API reference is a chapter of the docs map. Security,
+ * in it: the request is the Factory's first step, the workers are
+ * People's "Every worker", and both light the Factory door; the API reference is a chapter of the docs map. Security,
  * the Journal and the Pipeline are sections of Status (#248), and their
  * addresses redirect there (index.ts MOVED). test/pages.test.ts walks the
  * frame and fails by address for a page no longer reached in one hop.
@@ -1831,7 +1864,7 @@ export const NAV: { key: PageOptions["active"]; href: string; label: string; sub
 export const MORE: { href: string; label: string; accent?: true; until?: string }[] = [
   { href: "/packages", label: "Packages" },
   { href: "/status", label: "Status" },
-  { href: "/agents", label: "Agents", accent: true, until: "/docs/omarchy-cli-mcp" },
+  { href: "/agents", label: "Agents", accent: true },
   { href: "/docs", label: "Docs" },
   { href: "/people", label: "People" },
 ];
@@ -1840,8 +1873,9 @@ export const MORE: { href: string; label: string; accent?: true; until?: string 
  * The line under the docs map that says where the rest is, written from
  * MORE so it cannot name a page the footer does not link (it once
  * said Review was in the footer), nor call an address that still stands in
- * for its page (`until`) a page of its own: "Packages, Status and People
- * have their own pages, linked from the footer. The three doors are the header."
+ * for its page (`until`) a page of its own: "Packages, Status, Agents and
+ * People have their own pages, linked from the footer. The three doors are
+ * the header."
  */
 export function docsHint(): string {
   const rest = MORE.filter((m) => m.href !== "/docs" && !m.until).map((m) => m.label);
@@ -1852,8 +1886,8 @@ export function docsHint(): string {
 export type WorkerKind = "project" | "review" | "community";
 
 /**
- * The three worker tables as every page serves them — the Workers page,
- * the People page, a person's — one panel per kind with the kind's name
+ * The three worker tables as every page serves them — the Workers page
+ * and a person's — one panel per kind with the kind's name
  * and the page's one line under it, the table the shell's script fills
  * (wtTables() the head and the skeleton, workerRow() the rows), the legend
  * after them. The order is the page's; a panel with `hidden` is a person's,
@@ -1881,12 +1915,14 @@ const BUILT_FOR_OMARCHY =
 export type { DocKey } from "./docs-tree";
 
 /**
- * The documentation's shell: every docs page — the index, a chapter — is
- * the same layout, the map beside the text. The sidebar carries the search
- * and the chapters; the current one is open on its sections, the others
- * open on a click; a section is a link to its anchor on its chapter's
- * page. The search (docsSearch, below) matches chapters, sections and the
- * glossary and answers with links, so a reader never leaves the shell.
+ * The documentation's shell: every chapter is the same layout, the map
+ * beside the text. The sidebar carries the search and the chapters; the
+ * current one is open on its sections, the others open on a click; a
+ * section is a link to its anchor on its chapter's page. The search
+ * (docsSearch, below) matches chapters, sections and the glossary and
+ * answers with links, so a reader never leaves the shell. The index
+ * (/docs, #250) is the one docs page without it: seven short sections with
+ * their own map, the search, and every chapter linked from its section.
  */
 function docsShell(current: DocKey, body: string): string {
   const tree = DOCS_TREE.map((c, i) => {
@@ -1899,8 +1935,9 @@ function docsShell(current: DocKey, body: string): string {
   });
   return `<div class="docs">
   <aside class="docs-side">
-    <a class="docs-home${current === "index" ? " on" : ""}" href="/docs">Documentation</a>
+    <a class="docs-home" href="/docs">Documentation</a>
     <input type="search" id="docs-q" placeholder="search the docs…" aria-label="search the docs" autocomplete="off">
+    <p class="docs-said" id="docs-said" role="status"></p>
     <div class="docs-hits" id="docs-hits" hidden></div>
     <nav class="docs-nav" id="docs-nav" aria-label="Chapters">${tree.join("")}</nav>
     <div class="docs-hint">${docsHint()}</div>
@@ -1916,10 +1953,16 @@ export function termId(term: string): string {
   return "term-" + term.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 }
 
-/** The search over the map, on every docs page: chapters, sections, the glossary — each hit a link. */
+/**
+ * The search over the map, on every docs page: chapters, sections, the
+ * glossary — each hit a link. Its answer takes the place of the map (on the
+ * index, of the whole page under the title), so a screen reader is told what
+ * came of each word (#docs-said, a status line the eye does not see): how
+ * many it found, or that nothing says it.
+ */
 const DOCS_SEARCH = String.raw`
   (function () {
-    var q = $("#docs-q"), hits = $("#docs-hits"), nav = $("#docs-nav"); if (!q || !hits || !nav) return;
+    var q = $("#docs-q"), hits = $("#docs-hits"), nav = $("#docs-nav"), said = $("#docs-said"); if (!q || !hits || !nav) return;
     var TREE = __DOCS_TREE__, GLOSSARY = __GLOSSARY__;
     var items = [];
     TREE.forEach(function (c) {
@@ -1930,12 +1973,13 @@ const DOCS_SEARCH = String.raw`
     function hl(t, needle) { var i = t.toLowerCase().indexOf(needle); return i < 0 ? esc(t) : esc(t.slice(0, i)) + "<mark>" + esc(t.slice(i, i + needle.length)) + "</mark>" + esc(t.slice(i + needle.length)); }
     q.oninput = function () {
       var needle = q.value.trim().toLowerCase();
-      if (!needle) { hits.hidden = true; nav.hidden = false; return; }
+      if (!needle) { hits.hidden = true; nav.hidden = false; if (said) said.textContent = ""; return; }
       var found = items.filter(function (it) { return (it.ch + " " + it.title + " " + it.text).toLowerCase().indexOf(needle) >= 0; }).slice(0, 12);
       hits.innerHTML = found.length
         ? found.map(function (it) { return '<a class="hit" href="' + it.href + '"><span class="ch">' + esc(it.ch) + '</span><b>' + hl(it.title, needle) + '</b><span>' + hl(it.text, needle) + '</span></a>'; }).join("")
         : '<div class="hit none">nothing in the docs says “' + esc(q.value.trim()) + '”</div>';
       hits.hidden = false; nav.hidden = true;
+      if (said) said.textContent = found.length ? found.length + (found.length === 1 ? " result" : " results") : "nothing in the docs says “" + q.value.trim() + "”";
     };
     q.onkeydown = function (e) { if (e.key === "Escape") { q.value = ""; q.oninput(); } };
   })();
@@ -1943,9 +1987,8 @@ const DOCS_SEARCH = String.raw`
 
 /**
  * The page-view counter, when the deployment names one (ANALYTICS): Google
- * Analytics 4 for a G-… id — it sets cookies, so the Pool page's "no
- * cookies" line is only true without it — or Cloudflare Web Analytics for
- * a beacon token, which sets none. Nothing at all otherwise.
+ * Analytics 4 for a G-… id — it sets cookies — or Cloudflare Web Analytics
+ * for a beacon token, which sets none. Nothing at all otherwise.
  */
 function analyticsTag(v: RunningVersion): string {
   const id = v.analytics;
@@ -1967,7 +2010,7 @@ export function page(o: PageOptions): string {
     : `<span class="ver" title="local build">${tag}</span>`;
   const nav = NAV.map((n) => `<a href="${n.href}"${n.key === o.active ? ' class="active" aria-current="page"' : ""}>${n.label}${n.sub ? `<small> ${n.sub}</small>` : ""}</a>`).join("\n      ");
   const more = MORE.map((m) => `<a href="${m.href}"${m.accent ? ' class="accent"' : ""}>${m.label}</a>`).join("");
-  const body = o.doc ? docsShell(o.doc, o.body) : o.body;
+  const body = o.doc && o.doc !== "index" ? docsShell(o.doc, o.body) : o.body;
   const pool = o.poolUrl.replace(/\/$/, "");
   const docsSearch = o.doc
     ? DOCS_SEARCH.replace("__DOCS_TREE__", JSON.stringify(DOCS_TREE.map((c) => ({ label: c.label, blurb: c.blurb, href: c.href, secs: c.secs })))).replace("__GLOSSARY__", JSON.stringify(GLOSSARY.map(([t, d]) => [t, d, termId(t)])))

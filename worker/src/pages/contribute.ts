@@ -76,7 +76,7 @@ const BODY = String.raw`
       <a class="op-stat" id="t-line" href="#line"><span class="k">In the factory</span><b class="n" id="t-line-n"><span class="skl"></span></b><span class="s" id="t-line-s">requests on the line</span></a>
       <a class="op-stat" id="t-building" href="#workers"><span class="k">Building now</span><b class="n" id="t-building-n"><span class="skl"></span></b><span class="s" id="t-building-s">workers busy</span></a>
       <a class="op-stat" id="t-ready" href="/review"><span class="k">Ready for review</span><b class="n" id="t-ready-n"><span class="skl"></span></b><span class="s" id="t-ready-s">waiting for a maintainer</span></a>
-      <a class="op-stat" id="t-shipped" href="/packages?q=factory"><span class="k">Shipped</span><b class="n" id="t-shipped-n"><span class="skl"></span></b><span class="s" id="t-shipped-s">approved by a maintainer</span></a>
+      <a class="op-stat" id="t-shipped" href="/packages?origin=factory"><span class="k">Shipped</span><b class="n" id="t-shipped-n"><span class="skl"></span></b><span class="s" id="t-shipped-s">approved by a maintainer</span></a>
     </div>
   </section>
 

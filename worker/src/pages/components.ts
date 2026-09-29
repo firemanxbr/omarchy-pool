@@ -36,10 +36,12 @@ import { OVERVIEW_COMPONENTS } from "./overview";
 import { FACTORY_COMPONENTS } from "./contribute";
 import { REVIEW_COMPONENTS } from "./review";
 import { PIPELINE_COMPONENTS } from "./pipeline";
-import { PACKAGES_COMPONENTS, PACKAGE_COMPONENTS } from "./packages";
+import { PACKAGE_COMPONENTS } from "./packages";
+import { PACKAGES_COMPONENTS } from "./browse";
 import { BUILD_COMPONENTS } from "./build";
 import { USER_COMPONENTS } from "./user";
 import { PEOPLE_COMPONENTS } from "./people";
+import { AGENTS_COMPONENTS } from "./agents";
 import { WORKERS_COMPONENTS } from "./workers";
 import { SECURITY_COMPONENTS } from "./security";
 import { STATUS_COMPONENTS } from "./status";
@@ -207,7 +209,7 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     anchor: [...MORE.map((m) => `href="${m.href}"`), '<a href="/agents" class="accent">Agents</a>', '<nav class="more" aria-label="Footer">'],
     script: ['footer .more a', 'href === "/packages" && here.indexOf("/package/") === 0', 'href === "/docs" && here === "/api"', 'href === "/status" && here === "/diff"', 'a.setAttribute("aria-current", "page")'],
     reads: [
-      // A footer page that has not landed yet (MORE's `until`: Agents, #249's) is a 302 to what stands in for it, one no browser keeps.
+      // A footer page that has not landed yet (MORE's `until`; none since Agents landed, #249) is a 302 to what stands in for it, one no browser keeps.
       ...MORE.filter((m) => m.until).map((m) => ({ path: m.href, status: 302, json: false as const })),
     ],
     visible: EVERYONE,
@@ -308,15 +310,15 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // The pool's jobs of the week counted once (CHARTS' jobsSummary over the stats series: runs, done, failed, waiting, per kind and per day), a job's bucket by one rule (jobBucket: a cancelled job is failed, queued or leased is waiting — jobsSummary's and the Workers page's cards') and the worker minutes as a view on its days (workerMinutes): the Status tiles, table and charts and the Pipeline's chart read these, never the metrics snapshot's jobs.
+    // The pool's jobs of the week counted once (CHARTS' jobsSummary over the stats series: runs, done, failed, waiting, per kind and per day), a job's bucket by one rule (jobBucket: a cancelled job is failed, queued or leased is waiting — jobsSummary's and the Workers page's cards') and the worker minutes as a view on its days (workerMinutes): the Status tiles, table and charts and the Pipeline's chart read these, never the metrics snapshot's jobs. Read on Status, a page that splices CHARTS (Home draws no chart since #243).
     id: "shell.jobs-summary",
-    page: "/",
+    page: "/status",
     anchor: [],
     script: ["function jobBucket(status)", 'status === "failed" || status === "cancelled" ? "failed" : "waiting"', "function jobsSummary(series, days)", "o[jobBucket(r.status)] += n", "function workerMinutes(series, days)", "var js = jobsSummary(series, days)"],
     visible: EVERYONE,
   },
   {
-    // Open advisories counted one way: advisoriesAt(d, conf) keeps the rows of a security report that count at a confidence — the Security page's default, SEC_CONF, unless a page says — and advisoryCounts(rows) is the numbers a tile or a chart draws; the Pool, the Pipeline and the Security page say one number for stable.
+    // Open advisories counted one way: advisoriesAt(d, conf) keeps the rows of a security report that count at a confidence — the Security page's default, SEC_CONF, unless a page says — and advisoryCounts(rows) is the numbers a tile or a chart draws; the Pipeline and the Security page say one number for stable.
     id: "shell.advisory-counts",
     page: "/",
     anchor: [],
@@ -423,6 +425,7 @@ export function allComponents(F: Fixture): Component[] {
     ...BUILD_COMPONENTS(F),
     ...USER_COMPONENTS(F),
     ...PEOPLE_COMPONENTS(F),
+    ...AGENTS_COMPONENTS(F),
     ...WORKERS_COMPONENTS(F),
     ...SECURITY_COMPONENTS(F),
     ...STATUS_COMPONENTS(F),

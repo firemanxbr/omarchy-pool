@@ -44,7 +44,7 @@ export const GLOSSARY_COMPONENTS = (_F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // Every term is an anchor the sidebar, the docs index and the search link to; a renamed term moves it.
+      // Every term is an anchor the sidebar and the search link to; a renamed term moves it.
       id: "glossary.list",
       page,
       anchor: ['<dl class="gloss-list">', ...GLOSSARY.map(([term]) => `<dt id="${termId(term)}"><a href="#${termId(term)}">${escapeHtml(term)}</a></dt>`)],

@@ -999,20 +999,32 @@ export async function handleRevokeWorker(c: Contributor, id: string, env: Env): 
  * A registered package that landed: approved by a maintainer, or published
  * once the project's build of it reached edge (factory.ts moves it from one
  * word to the other). The status words are the server's, so the rule is said
- * here once and every row of GET /factory/packages carries it as `landed` —
- * the Pool's, the Factory's, the Pipeline's and the People page's
- * "community packages" all read the flag, never the words.
+ * here once and every row of GET /factory/packages carries it as `landed`,
+ * and every package on a person's GET /users/:login — the Pool's, the
+ * Factory's and the Pipeline's "community packages", the People page's
+ * ranking of contributors and its Open the issue all read the flag, never
+ * the words.
  */
 export function landed(status: string): boolean {
   return status === "approved" || status === "published";
 }
 
+/** The registry's rows GET /factory/packages answers, the most recently updated first. */
+export const PACKAGES_PAGE = 200;
+
+/**
+ * GET /factory/packages — the registry, the most recently updated rows
+ * first, PACKAGES_PAGE of them; `truncated` says there are more, so a page
+ * that counts over them (People's contributors) says its number is a
+ * floor instead of passing it off as the whole. One row more is read to
+ * know, never counted.
+ */
 export async function handleListPackages(env: Env): Promise<Response> {
   const rows = await env.DB.prepare(
     `SELECT p.*, (SELECT COUNT(*) FROM build_tasks t WHERE t.name = p.name AND t.status = 'staged') AS staged_builds
-       FROM factory_packages p ORDER BY updated_at DESC LIMIT 200`,
-  ).all();
-  return json({ packages: rows.results.map((r) => ({ ...r, arches: JSON.parse(r.arches as string), targets: parseTargets(r.targets), detected: r.detected ? JSON.parse(r.detected as string) : null, landed: landed(r.status as string) })) }, 200, { "cache-control": "public, max-age=30" });
+       FROM factory_packages p ORDER BY updated_at DESC LIMIT ?`,
+  ).bind(PACKAGES_PAGE + 1).all();
+  return json({ truncated: rows.results.length > PACKAGES_PAGE, packages: rows.results.slice(0, PACKAGES_PAGE).map((r) => ({ ...r, arches: JSON.parse(r.arches as string), targets: parseTargets(r.targets), detected: r.detected ? JSON.parse(r.detected as string) : null, landed: landed(r.status as string) })) }, 200, { "cache-control": "public, max-age=30" });
 }
 
 // ---------- staging uploads (worker token, own task only) ----------
@@ -1272,8 +1284,18 @@ export async function handleTrustWorker(c: Contributor, id: string, request: Req
   return json({ worker: id, trust: "project", trusted_by: by, record: record ? recordUrl(env, record.key) : null });
 }
 
+/**
+ * GET /factory/trust — the workers under the project's trust or on their
+ * way to it (proposed, or registered before owners existed), and every
+ * maintainer's own, whatever its trust: the People page draws the agent a
+ * maintainer's workers report on their card, a project worker's first (the
+ * order: project before community, then the most recently seen), and a
+ * maintainer who runs only community workers still has one. The table is
+ * scanned once either way; the maintainers are the few rows the pool
+ * applied from factory/MAINTAINERS.toml.
+ */
 export async function handleTrustList(env: Env): Promise<Response> {
-  const workers = await env.DB.prepare("SELECT id, owner, arch, mode, trust, trusted_by, trusted_at, trust_proposed_by, trust_proposed_at, agent, last_seen, revoked_at FROM build_workers WHERE trust = 'project' OR trust_proposed_by IS NOT NULL OR owner IS NULL ORDER BY trust DESC, last_seen DESC LIMIT 100").all();
+  const workers = await env.DB.prepare("SELECT id, owner, arch, mode, trust, trusted_by, trusted_at, trust_proposed_by, trust_proposed_at, agent, last_seen, revoked_at FROM build_workers WHERE trust = 'project' OR trust_proposed_by IS NOT NULL OR owner IS NULL OR owner IN (SELECT login FROM factory_maintainers) ORDER BY trust DESC, last_seen DESC LIMIT 100").all();
   const people = await env.DB.prepare("SELECT login, name, role, last_seen FROM contributors WHERE role = 'maintainer' ORDER BY login").all();
   return json({ workers: workers.results, maintainers: people.results, listed: await maintainersOf(env), source: GOVERNANCE_FILE }, 200, { "cache-control": "public, max-age=30" });
 }

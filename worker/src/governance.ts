@@ -9,9 +9,19 @@
  */
 import { parse } from "smol-toml";
 import type { Env } from "./index";
+import { REPO_URL } from "./meta";
 
 export const GOVERNANCE_FILE = "factory/MAINTAINERS.toml";
 const RAW = `https://raw.githubusercontent.com/firemanxbr/omarchy-pool/main/${GOVERNANCE_FILE}`;
+
+/**
+ * The maintainer application: the issue form in
+ * .github/ISSUE_TEMPLATE/maintainer.yml, opened on GitHub. Asking is an
+ * issue; the decision is still the pull request that changes
+ * GOVERNANCE_FILE, which another maintainer approves. The People page's
+ * "Open the issue" and the governance chapter link here.
+ */
+export const APPLY_URL = `${REPO_URL}/issues/new?template=maintainer.yml`;
 
 const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 
