@@ -198,6 +198,16 @@ async function guardWord(env: Env, now: number): Promise<string | null> {
   return guardMemo.value;
 }
 
+/**
+ * The guard as an agent's write reads it (agents.ts agentOf): the same word
+ * through the same memo, so the check costs no row. While it is up, what an
+ * agent writes waits with the scheduler's jobs; a person's write on the web
+ * is not stopped by it.
+ */
+export async function agentWriteGuard(env: Env, now = Date.now()): Promise<string | null> {
+  return guardWord(env, now);
+}
+
 /** Forgets the memo, so the next read asks the settings row: the tests raise and lower the guard inside one minute. */
 export function forgetGuardWord(): void {
   guardMemo = null;

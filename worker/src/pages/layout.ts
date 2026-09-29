@@ -1826,6 +1826,8 @@ export interface PageOptions {
    * wins over theirs at equal weight. Tokens only, as the frame's.
    */
   css?: string;
+  /** A page for one signed-in person, never for an index: the agent's grant and a draft's confirmation (#252, routes/agents.ts). /auth/ is closed to crawlers already (robots.txt); the page says it too. */
+  noindex?: boolean;
 }
 
 /**
@@ -2020,7 +2022,7 @@ export function page(o: PageOptions): string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(o.title)}</title>
-<meta name="description" content="${escapeHtml(o.description)}">
+<meta name="description" content="${escapeHtml(o.description)}">${o.noindex ? '\n<meta name="robots" content="noindex, nofollow">' : ""}
 <link rel="icon" href="/favicon.ico" sizes="32x32">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">

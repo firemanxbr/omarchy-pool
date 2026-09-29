@@ -28,6 +28,8 @@
  *   PUT  /api/v1/security/advisories|matches       vulnerability data from the Security workflow
  *   POST /api/v1/security/prune                  {advisories, matches}: the run's keys; the rest goes
  *   GET  /api/v1/factory · POST /factory/{claim,requests,enqueue,jobs} · /factory/tasks/:id/{heartbeat,complete,fail,cancel,approve,reject,artifacts/<file>}
+ *   POST /api/v1/factory/drafts · GET /factory/drafts/:id · POST /factory/grants/:id/revoke   an agent's drafts and grants (#252, routes/agents.ts)
+ *   GET|POST /auth/agent · POST /auth/agent/token · POST /auth/agent/revoke · GET|POST /auth/confirm/:id   the grant, the swap, logout, a draft confirmed
  *   GET  /api/v1/factory/{packages,built,review,approvals,maintainers,trust,workers/self,me} · GET /api/v1/factory/tasks/:id/can · GET /api/v1/users/:login · GET /api/v1/users/:login/can · GET /api/v1/cost
  *                                                  the factory's brain: package requests, build tasks, pull-based workers
  *   GET  /api/v1/graph?targets=a,b&ring=stable
@@ -75,6 +77,8 @@ import { isMaintainer } from "./routes/contributors";
 import { handleReviewList, handleApprove, handleReject, handleChanges, handleRelease, handleAdopt, handleApprovals, handleProjectBuild, handleWithdraw, handleTaskCan, cancelByHand } from "./routes/review";
 import { handleBlockContributor, handleUnblockContributor, handleBlockPackage, handleUnblockPackage, handleBlocks } from "./routes/blocks";
 import { handleAuthStart, handleAuthCallback, handleLogout } from "./routes/auth";
+import { agentClaimOrRelease, dashboardOrigin, handleAgentLogout, handleConfirm, handleConfirmPage, handleDraft, handleGetDraft, handleGrant, handleGrantPage, handleRevokeGrant, handleSwap } from "./routes/agents";
+import { agentOf, agentTokenRefusal, dayCount, hasAgentToken } from "./agents";
 import { handleSignPool } from "./routes/pool";
 import { signingEnabled, publicKey } from "./signing";
 import { reviewHtml } from "./pages/review";
@@ -147,6 +151,9 @@ export interface Env {
   GITHUB_OAUTH_CLIENT_SECRET?: string;
   /** Task kinds the scheduler creates as pulled jobs instead of GitHub workflows (comma-separated). */
   JOB_KINDS?: string;
+  /** The MCP write tools' bursts (wrangler.toml, rate limiting bindings; agents.ts): twenty calls a minute per login that carry an agent token, five token swaps a minute per address. Unset (a deploy before them): not counted. */
+  AGENT_CALLS?: RateLimit;
+  AGENT_SWAPS?: RateLimit;
 }
 
 
@@ -234,6 +241,14 @@ export default {
       if (path === "/auth/github" && method === "GET") return handleAuthStart(url, env);
       if (path === "/auth/github/callback" && method === "GET") return handleAuthCallback(url, request, env);
       if (path === "/auth/logout") return handleLogout(url, request, env);
+      // An agent's grant and its drafts (#252, routes/agents.ts): the grant page and its form, the loopback code's swap, logout, and a draft's confirmation — the browser's session only, except the swap (no credential: the code and its verifier) and logout (the agent's token it revokes).
+      if (path === "/auth/agent" && method === "GET") return handleGrantPage(url, request, env, version(env));
+      if (path === "/auth/agent" && method === "POST") return handleGrant(url, request, env, version(env));
+      if (path === "/auth/agent/token" && method === "POST") return handleSwap(request, env);
+      if (path === "/auth/agent/revoke" && method === "POST") return handleAgentLogout(request, env);
+      const confirm = path.match(/^\/auth\/confirm\/([A-Za-z0-9_]{1,64})$/);
+      if (confirm && method === "GET") return handleConfirmPage(confirm[1], url, request, env, version(env));
+      if (confirm && method === "POST") return handleConfirm(confirm[1], url, request, env, version(env));
       if (path === "/auth/me" && method === "GET") {
         const c = await contributorOf(request, env);
         return c ? json({ login: c.login, name: c.name, avatar_url: c.avatar_url, role: c.role }, 200, { "cache-control": "no-store" }) : json({ error: "not signed in" }, 401, { "cache-control": "no-store" });
@@ -322,6 +337,29 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
   // Contributors.
   if (method === "POST" && path === "/factory/register") return handleRegister(request, env);
   // Maintainers: the brake — a contributor or a package blocked, or the block lifted by another maintainer.
+  // The tools' writes with an agent's token (#252): a request, a claim, a release, a draft — the web's own handlers, the agent on their row, record and line; every other route refused the token already (api(), agentTokenRefusal).
+  if (hasAgentToken(request)) {
+    if (method === "POST" && path === "/factory/packages") {
+      const a = await agentOf(request, env, "contribute", { write: true });
+      if (a instanceof Response) return a;
+      return (await dayCount(env, a.contributor.login, "requests")) ?? handleRequestPackage(a.contributor, request, env, fetch, a.through);
+    }
+    if ((m = path.match(/^\/factory\/tasks\/(\d+)\/(build|release)$/)) && method === "POST") {
+      const a = await agentOf(request, env, "review", { write: true });
+      if (a instanceof Response) return a;
+      return agentClaimOrRelease(a, Number(m[1]), request, env, m[2] === "build" ? handleProjectBuild : handleRelease);
+    }
+    if (method === "POST" && path === "/factory/drafts") {
+      const a = await agentOf(request, env, ["review", "block"], { write: true });
+      return a instanceof Response ? a : handleDraft(a, request, env, dashboardOrigin(url));
+    }
+    return null;
+  }
+  // The person's own page: Revoke on one of their agents' grants.
+  if ((m = path.match(/^\/factory\/grants\/(g_[0-9a-f]{32})\/revoke$/)) && method === "POST") {
+    const c = await contributorOf(request, env);
+    return c ? handleRevokeGrant(c, m[1], env) : nobody();
+  }
   if ((m = path.match(/^\/factory\/(contributors|packages)\/([A-Za-z0-9@._+-]+)\/(block|unblock)$/)) && method === "POST") {
     const c = await contributorOf(request, env);
     if (!c) return nobody();
@@ -484,6 +522,9 @@ async function api(method: string, path: string, url: URL, request: Request, env
   let m: RegExpMatchArray | null;
 
   if (method === "OPTIONS") return new Response(null, { status: 204, headers: cors() });
+  // An agent's token is taken by the routes of omarchy-cli's tools only (agents.ts AGENT_ROUTES), and refused on every other — each decision route among them — before anything is read.
+  const agentRefused = agentTokenRefusal(request, method, path);
+  if (agentRefused) return agentRefused;
   if (method === "GET" && path === "/pacman.conf") {
     const withOptional = new Set((url.searchParams.get("with") ?? "").split(",").map((s) => s.trim()).filter(Boolean));
     const text = await pacmanInclude(env, url.searchParams.get("ring") ?? env.DEFAULT_RING, url.searchParams.get("arch") ?? "x86_64", withOptional, `${machineOrigin(url)}/setup`);
@@ -539,15 +580,24 @@ async function api(method: string, path: string, url: URL, request: Request, env
     return w ? json({ id: w.id, arch: w.arch, trust: w.trust, owner: w.owner, mode: w.mode, mode_by: w.mode_by ?? null }, 200, { "cache-control": "no-store" }) : json({ error: "a worker token is required" }, 401);
   }
   if (method === "GET" && path === "/factory/me") {
+    // request_status without a name (#252): the agent's person, read with contribute; their drafts ride here, no-store, nobody else's to read.
+    if (hasAgentToken(request)) {
+      const a = await agentOf(request, env, "contribute", { write: false });
+      return a instanceof Response ? a : handleMe(a.contributor, env, dashboardOrigin(url));
+    }
     const c = await contributorOf(request, env);
-    return c ? handleMe(c, env) : json({ error: "a contributor token is required (POST /factory/register)" }, 401);
+    return c ? handleMe(c, env, dashboardOrigin(url)) : json({ error: "a contributor token is required (POST /factory/register)" }, 401);
+  }
+  if ((m = path.match(/^\/factory\/drafts\/(d_[0-9a-f]{32})$/)) && method === "GET") {
+    const a = await agentOf(request, env, ["review", "block"], { write: false });
+    return a instanceof Response ? a : handleGetDraft(a, m[1], env, dashboardOrigin(url));
   }
   if ((m = path.match(/^\/factory\/tasks\/(\d+)\/artifacts$/)) && method === "GET") return handleStagingList(Number(m[1]), env);
   if ((m = path.match(/^\/factory\/tasks\/(\d+)\/artifacts\/([A-Za-z0-9][A-Za-z0-9._:+-]{0,200})$/)) && method === "GET") {
     // A package in staging is for maintainers — and for the publish job that carries the project's build into the pool, and the trial that tries it in the lab (their tokens name the task).
     const c = await contributorOf(request, env);
     const job = c ? null : await jobOf(request, env);
-    return handleStagingGet(Number(m[1]), m[2], env, (!!c && isMaintainer(c)) || (!!job && (job.k === "publish" || job.k === "trial") && job.s.includes(`staging:${m[1]}`)));
+    return handleStagingGet(Number(m[1]), m[2], env, (!!c && isMaintainer(c)) || (!!job && (job.k === "publish" || job.k === "trial") && job.s.includes(`staging:${m[1]}`)), url.searchParams.get("tail"));
   }
   if ((m = path.match(/^\/factory\/tasks\/(\d+)$/)) && method === "GET") return handleTask(Number(m[1]), env);
   // The task is cached for everyone (public, max-age); what one caller may do on it is theirs alone, so it rides on a no-store answer of its own.

@@ -64,6 +64,16 @@ async function planOf(x: { sql: string; args: unknown[] }): Promise<string> {
 
 /** What 0036 added, taken off again: the schema as production has it before the migration. */
 const REWIND = [
+  // What 0039 added (the MCP write tools, #252) comes off first, so the migrations after 0036 run again in their order below.
+  "DROP TABLE agent_grants",
+  "DROP TABLE drafts",
+  "DROP INDEX idx_build_workers_owner",
+  "ALTER TABLE package_requests DROP COLUMN agent",
+  "ALTER TABLE approvals DROP COLUMN agent",
+  "ALTER TABLE contributors DROP COLUMN agent_day",
+  "ALTER TABLE contributors DROP COLUMN agent_requests",
+  "ALTER TABLE contributors DROP COLUMN agent_claims",
+  "ALTER TABLE contributors DROP COLUMN agent_drafts",
   "DROP INDEX idx_approvals_review",
   "ALTER TABLE approvals DROP COLUMN review_id",
   "DROP TABLE reviews",
@@ -196,14 +206,14 @@ describe("migration 0036: one package per name, with a target per architecture",
     const m = env.TEST_MIGRATIONS.find((x) => x.name.startsWith("0036_"))!;
     expect(m, "migration 0036 is in the list").toBeTruthy();
     await env.DB.batch(m.queries.map((q) => env.DB.prepare(q)));
-    // The migrations after it run again too, in their order — what the rewind took off with the reviews table (0037's column, #247) comes back as D1 applies it.
+    // The migrations after it run again too, in their order — what the rewind took off with the reviews table (0037's column, #247) and 0039's tables and columns (#252) come back as D1 applies them.
     for (const later of env.TEST_MIGRATIONS.filter((x) => x.name > m.name)) await env.DB.batch(later.queries.map((q) => env.DB.prepare(q)));
 
     // The schema is what every other test file runs on, and nothing of the rows it had changed.
     expect(await schema()).toEqual(after0036);
     const now = await read();
     expect(now.tasks).toEqual(before.tasks);
-    expect(now.approvals.map(({ review_id: _, ...a }) => a)).toEqual(before.approvals);
+    expect(now.approvals.map(({ review_id: _, agent: _a, ...a }) => a)).toEqual(before.approvals);
     expect(now.packages.map(({ targets: _t, closed_through: _c, freed_by_review: _f, ...p }) => p)).toEqual(before.packages);
     // A rejection before #242 freed no name: every name is held as it was.
     expect(now.packages.every((p) => p.freed_by_review === null)).toBe(true);

@@ -6,6 +6,7 @@ import { putRecord, recordKey, recordUrl } from "../record";
 import { REPO_ARCHES } from "../r2";
 import { standsSql } from "./story";
 import { settleTargets } from "../targets";
+import { throughWords, type Through } from "../agents";
 
 /**
  * Blocking — the maintainers' brake (docs/GOVERNANCE.md, *Blocking*).
@@ -24,7 +25,11 @@ import { settleTargets } from "../targets";
  *
  * Each is signed on the record and a journal line naming who and through
  * which door (`via`, contributors.ts); `agent` is null — a block rests on no
- * agent's rebuild, as Review's decisions do (routes/review.ts).
+ * agent's rebuild, as Review's decisions do (routes/review.ts). A package's
+ * block an agent drafted and the person confirmed in the browser (#252,
+ * routes/agents.ts) carries `through` — the agent, its client, the grant and
+ * the draft — on its record and its line. A contributor's block ends their
+ * agents' grants with their workers.
  */
 
 function need(c: Contributor): Response | null {
@@ -49,6 +54,8 @@ export async function handleBlockContributor(c: Contributor, login: string, requ
   await env.DB.batch([
     env.DB.prepare("UPDATE contributors SET blocked_at = ?, blocked_by = ?, blocked_reason = ? WHERE login = ?").bind(at, c.login, b.reason, login),
     env.DB.prepare("UPDATE build_workers SET revoked_at = ? WHERE owner = ? AND revoked_at IS NULL").bind(at, login),
+    // Their agents' grants end with their workers (#252): the tokens stop at once, a code not yet swapped too.
+    env.DB.prepare("UPDATE agent_grants SET revoked_at = ?, revoked_by = 'blocked' WHERE login = ? AND revoked_at IS NULL").bind(at, login),
     // Other people's builds asked of the blocked person's shared workers go back to the queue.
     env.DB.prepare("UPDATE build_tasks SET pinned_to = NULL, shared_after = NULL WHERE status = 'queued' AND pinned_to IN (SELECT id FROM build_workers WHERE owner = ?)").bind(login),
     env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = ? WHERE owner = ? AND trust = 'community' AND status IN ('queued', 'leased', 'staged')").bind(`${login} was blocked by ${c.login}: ${b.reason.slice(0, 200)}`, login),
@@ -113,14 +120,28 @@ export async function pullFromRings(env: Env, name: string, note: string): Promi
  * standing never queue). Everything of the package's until now is a
  * closed round: its targets start from what is built after.
  */
-export async function handleBlockPackage(c: Contributor, name: string, request: Request, env: Env): Promise<Response> {
+/**
+ * Who may block a package, and whether it can be: a maintainer, with a
+ * reason of four characters or more, a package that was requested and is
+ * not blocked already — the registration, or the refusal the door sends. The
+ * block's door reads it, and so do an agent's draft of a block and its
+ * confirmation in the browser (routes/agents.ts), so the rule is here once.
+ */
+export async function blockRefusal(c: Contributor, name: string, reason: unknown, env: Env): Promise<Response | { name: string; owner: string; request_id: number | null; blocked_at: string | null }> {
   const denied = need(c);
   if (denied) return denied;
-  const b = (await request.json().catch(() => ({}))) as { reason?: string };
-  if (!b.reason || b.reason.trim().length < 4) return json({ error: "a reason is required; it is on the record" }, 400);
+  if (typeof reason !== "string" || reason.trim().length < 4) return json({ error: "a reason is required; it is on the record" }, 400);
   const pkg = await env.DB.prepare("SELECT name, owner, request_id, blocked_at FROM factory_packages WHERE name = ?").bind(name).first<{ name: string; owner: string; request_id: number | null; blocked_at: string | null }>();
   if (!pkg) return json({ error: `${name} was never requested` }, 404);
   if (pkg.blocked_at) return json({ error: `${name} is already blocked (since ${pkg.blocked_at})` }, 409);
+  return pkg;
+}
+
+export async function handleBlockPackage(c: Contributor, name: string, request: Request, env: Env, through?: Through): Promise<Response> {
+  const b = (await request.json().catch(() => ({}))) as { reason?: string };
+  const pkg = await blockRefusal(c, name, b.reason, env);
+  if (pkg instanceof Response) return pkg;
+  b.reason = b.reason!.trim();
   const at = new Date().toISOString();
   const note = `blocked by ${c.login}: ${b.reason.slice(0, 200)}`;
   const rings = await pullFromRings(env, name, note);
@@ -137,11 +158,11 @@ export async function handleBlockPackage(c: Contributor, name: string, request: 
   const key = pkg.request_id ? recordKey(name, pkg.request_id, `decision-${stamp()}.json`) : `factory/${name}/0/decision-${stamp()}.json`;
   const reviews = [...new Set(withdrawn.map((a) => a.review_id ?? a.id))];
   const via = viaOf(request);
-  const record = await putRecord(env, key, { schema: "omarchy-pool/decision/1", decision: "block", name, owner: pkg.owner, by: c.login, via, agent: null, at, reason: b.reason, rings, withdrawn: { reviews, approvals: withdrawn.map((a) => a.id), arches: [...new Set(withdrawn.map((a) => a.arch))] } });
+  const record = await putRecord(env, key, { schema: "omarchy-pool/decision/1", decision: "block", name, owner: pkg.owner, by: c.login, via, ...(through ? { through } : {}), agent: null, at, reason: b.reason, rings, withdrawn: { reviews, approvals: withdrawn.map((a) => a.id), arches: [...new Set(withdrawn.map((a) => a.arch))] } });
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('block', NULL, 'factory', 'warn', ?, ?)")
-    .bind(`${name} blocked by ${c.login}: ${b.reason.slice(0, 140)}${rings.length ? " — pulled from " + rings.map((r) => r.ring).join(", ") : ""}${reviews.length ? ` — the approval withdrawn, back to the factory` : ""}`, JSON.stringify({ name, owner: pkg.owner, by: c.login, via, agent: null, reason: b.reason, rings, withdrawn: reviews, record: recordUrl(env, record.key) }))
+    .bind(`${name} blocked by ${c.login}${throughWords(through)}: ${b.reason.slice(0, 140)}${rings.length ? " — pulled from " + rings.map((r) => r.ring).join(", ") : ""}${reviews.length ? ` — the approval withdrawn, back to the factory` : ""}`, JSON.stringify({ name, owner: pkg.owner, by: c.login, via, ...(through ? { through } : {}), agent: null, reason: b.reason, rings, withdrawn: reviews, record: recordUrl(env, record.key) }))
     .run();
-  return json({ blocked: name, by: c.login, at, rings, withdrawn: reviews, record: recordUrl(env, record.key) });
+  return json({ blocked: name, by: c.login, at, rings, withdrawn: reviews, ...(through ? { through } : {}), record: recordUrl(env, record.key) });
 }
 
 export async function handleUnblockPackage(c: Contributor, name: string, request: Request, env: Env): Promise<Response> {
