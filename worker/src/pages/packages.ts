@@ -90,8 +90,11 @@ const PACKAGE_CSS = String.raw`
   .pkg-stage-a > span { margin-left: 4px; }
   .pkg-panel { border: 1px solid var(--line); border-top: 0; background: var(--panel); padding: 18px; display: grid; gap: 16px; min-width: 0; }
   .pkg-ph { display: flex; justify-content: space-between; align-items: center; gap: 10px 16px; flex-wrap: wrap; }
-  /* A panel's title and its tag: the tag goes under the title when one row cannot hold both (waiting for a native x86_64 worker, on a phone). */
+  /* A panel's title and its tag: the tag goes under the title when one row cannot hold both (waiting for a native x86_64 worker, on a phone),
+     and a tag wider than the panel wraps inside its own box: Review's word and the native wait, "in review · waiting for a native x86_64
+     worker", is wider than a phone's panel on one line. */
   .pkg-ph > span { display: flex; align-items: center; gap: 6px 10px; flex-wrap: wrap; min-width: 0; } .pkg-ph h3 { font: 600 17px var(--font-display); }
+  .pkg-ph > span > .op-pill { max-width: 100%; white-space: normal; }
   .pkg-who { display: flex; gap: 6px; flex-wrap: wrap; }
   .pkg-whoc { display: inline-flex; align-items: center; gap: 7px; min-width: 0; border: 1px solid var(--line); background: var(--bg-deep); padding: 2px 9px 2px 3px; font-size: 12.5px; color: var(--text); }
   .pkg-whoc .r { color: var(--dim); } .pkg-whoc > a:not(.avatar) { color: var(--text); } .pkg-whoc > a:not(.avatar):hover { color: var(--green); } .pkg-whoc .avatar { width: 20px; height: 20px; font-size: 8.5px; }
@@ -500,14 +503,16 @@ const PACKAGE_SCRIPT = String.raw`
     var standing = ARCHES.map(approvedChain).filter(Boolean)[0], stood = standing ? standing.approval : null;
     var withdrawn = ((ST && ST.chains) || []).some(function (c) { return c.withdrawn; });
     // Undecided, it says Review's word — the chip's, unless a ring serves it — first, then where the claim stands, in the Factory card's words
-    // and by its order (#282): the native worker a rebuild an emulated worker sent back waits for (#281), else the project rebuilding while
-    // any architecture's rebuild is queued or running, else a new version building beside the claim, else the rebuild staged.
-    var reviewTone, reviewSum, reviewWhy = "", inReview = reviewOf();
+    // and by its order (#282): a rebuild an emulated worker sent back waiting for a native worker (#281), else the project rebuilding while
+    // any architecture's rebuild is queued or running, else a new version building beside the claim, else the rebuild staged. The native
+    // wait in the shell's short word, as Review's step and the review cell say it ("native worker"), so the line stays whole in its two
+    // lines; its whole words in the line's title, the mark's and the architecture's square.
+    var reviewTone, reviewSum, reviewWhy = "", reviewFull = "", inReview = reviewOf();
     var sentBack = function (a) { var k = status(a) === "reviewing" ? claimOf(a) : null; return k ? waitsForNative(k.project) : ""; }, waits = arches.map(sentBack).filter(Boolean)[0] || "";
-    var claimAt = waits ? ["warn", waits] : anyT(["reviewing"]) ? ["run", "project rebuilding"] : anyT(["building"]) ? ["run", "new version building"] : ["warn", "rebuild staged"];
+    var claimAt = waits ? ["warn", "native worker"] : anyT(["reviewing"]) ? ["run", "project rebuilding"] : anyT(["building"]) ? ["run", "new version building"] : ["warn", "rebuild staged"];
     if (b && !approval) { reviewTone = "na"; reviewSum = withdrawn ? "withdrawn by the block" : "never reviewed · blocked"; }
     else if (approval) { reviewTone = approval.decision === "approved" ? "ok" : "fail"; reviewSum = "@" + approval.by + (approval.decision === "approved" ? " · rebuilt · approved" : " · " + approval.decision); }
-    else if (inReview === "in-review") { reviewTone = claimAt[0]; reviewSum = STATE[inReview][1] + " · " + claimAt[1]; reviewWhy = waits; }
+    else if (inReview === "in-review") { reviewTone = claimAt[0]; reviewSum = STATE[inReview][1] + " · " + claimAt[1]; reviewWhy = waits; reviewFull = waits ? STATE[inReview][1] + " · " + waits : ""; }
     else if (inReview === "ready") { reviewTone = "wait"; reviewSum = STATE[inReview][1] + " · waiting for a claim"; }
     else if (stood) { reviewTone = "ok"; reviewSum = "@" + stood.by + " · approved " + (stood.version || ""); }
     else { reviewTone = "wait"; reviewSum = "waiting for builds"; }
@@ -517,7 +522,7 @@ const PACKAGE_SCRIPT = String.raw`
     return [
       { id: "source", icon: "file-text", label: "Request", tone: req.complete ? "ok" : checks.length ? "fail" : "wait", sum: (owner ? "@" + owner + " · " : "") + okN + "/" + checks.length + " checks", when: onDay(req.created_at || ((ST && ST.package) || {}).created_at).replace(/ \d{4}$/, "") },
       { id: "build", icon: "hammer", label: "Factory build", tone: buildTone, sum: buildSum, archs: sq(function (a) { var s = status(a); return s === "building" ? ["run", "building"] : s === "not_supported" ? ["na", "not supported"] : ["built", "reviewing", "reviewed", "approved", "published"].indexOf(s) >= 0 ? ["ok", "built"] : rejected ? ["na", "rejected"] : s ? ["wait", s] : ["na", "not requested"]; }), when: since(((bc || chainFor(arches[0]) || {}).contributor || {}).finished_at) },
-      { id: "review", icon: "user-check", label: "Review", tone: reviewTone, sum: reviewSum, why: reviewWhy, archs: sq(function (a) { var s = status(a), c = chainFor(a); return s === "not_supported" ? ["na", "not supported"] : s === "reviewing" ? (sentBack(a) ? ["warn", "in review · " + sentBack(a)] : ["run", "in review · project rebuilding"]) : s === "reviewed" ? ["warn", "in review · rebuild staged"] : ["approved", "published"].indexOf(s) >= 0 ? ["ok", "approved"] : c && c.approval && c.approval.decision === "rejected" ? ["fail", "rejected"] : s === "built" ? (inReview === "ready" ? ["wait", "ready for review · waiting for a claim"] : inReview === "in-review" ? ["warn", "in review"] : anyT(["building"]) ? ["wait", "built · waiting for the others"] : ["wait", "built · nothing to decide"]) : approvedChain(a) ? ["ok", "approved"] : s ? ["wait", "not yet"] : ["na", "not requested"]; }), when: approval ? since(approval.created_at) : stood ? since(stood.created_at) : "" },
+      { id: "review", icon: "user-check", label: "Review", tone: reviewTone, sum: reviewSum, why: reviewWhy, full: reviewFull, archs: sq(function (a) { var s = status(a), c = chainFor(a); return s === "not_supported" ? ["na", "not supported"] : s === "reviewing" ? (sentBack(a) ? ["warn", "in review · " + sentBack(a)] : ["run", "in review · project rebuilding"]) : s === "reviewed" ? ["warn", "in review · rebuild staged"] : ["approved", "published"].indexOf(s) >= 0 ? ["ok", "approved"] : c && c.approval && c.approval.decision === "rejected" ? ["fail", "rejected"] : s === "built" ? (inReview === "ready" ? ["wait", "ready for review · waiting for a claim"] : inReview === "in-review" ? ["warn", "in review"] : anyT(["building"]) ? ["wait", "built · waiting for the others"] : ["wait", "built · nothing to decide"]) : approvedChain(a) ? ["ok", "approved"] : s ? ["wait", "not yet"] : ["na", "not requested"]; }), when: approval ? since(approval.created_at) : stood ? since(stood.created_at) : "" },
       { id: "rings", icon: "layers", label: "Rings", tone: ringsStage[0], sum: ringsStage[1], when: ringsStage[2] }
     ];
   }
@@ -528,7 +533,7 @@ const PACKAGE_SCRIPT = String.raw`
     $("#chain-note").textContent = stateOf() === "none" ? "not in the pool · nobody requested it" : fac ? peopleCount() : "mirrored from " + upstreamName() + " · verified here";
     $("#stages").innerHTML = list.map(function (s) {
       var on = s.id === STAGE;
-      return '<button type="button" role="tab" class="pkg-stage ' + s.tone + '" id="stage-' + s.id + '" aria-controls="stage-panel" aria-selected="' + on + '" tabindex="' + (on ? 0 : -1) + '" data-stage="' + s.id + '"><span class="pkg-stage-t"><span><span class="op-box ' + (s.dashed ? "na" : "") + '">' + lucide(s.icon, 15) + '</span><b>' + esc(s.label) + '</b></span>' + (s.tone === "warn" ? '<b class="op-mark warn" title="' + esc(s.why || "waiting for a decision") + '">⟳</b>' : mark(s.tone)) + '</span><span class="pkg-stage-s" title="' + esc(s.sum) + '">' + esc(s.sum) + '</span><span class="pkg-stage-a">' + (s.archs || "") + (s.when ? '<span>' + esc(s.when) + '</span>' : '') + '</span></button>';
+      return '<button type="button" role="tab" class="pkg-stage ' + s.tone + '" id="stage-' + s.id + '" aria-controls="stage-panel" aria-selected="' + on + '" tabindex="' + (on ? 0 : -1) + '" data-stage="' + s.id + '"><span class="pkg-stage-t"><span><span class="op-box ' + (s.dashed ? "na" : "") + '">' + lucide(s.icon, 15) + '</span><b>' + esc(s.label) + '</b></span>' + (s.tone === "warn" ? '<b class="op-mark warn" title="' + esc(s.why || "waiting for a decision") + '">⟳</b>' : mark(s.tone)) + '</span><span class="pkg-stage-s" title="' + esc(s.full || s.sum) + '">' + esc(s.sum) + '</span><span class="pkg-stage-a">' + (s.archs || "") + (s.when ? '<span>' + esc(s.when) + '</span>' : '') + '</span></button>';
     }).join("");
     $("#stage-panel").setAttribute("aria-labelledby", "stage-" + STAGE);
     $("#stage-panel").innerHTML = panelOf(STAGE);
@@ -1264,7 +1269,7 @@ export const PACKAGE_COMPONENTS = (F: Fixture): Component[] => {
       id: "package.stages",
       page,
       anchor: ['id="op-chain"', 'id="stages"', 'role="tablist"', 'id="stage-panel"', 'role="tabpanel"', 'id="chain-note"'],
-      script: ['"#stages"', "stagesOf()", "defaultStage()", '"Upstream"', '"Request"', '"Factory build"', '"Review"', '"Rings"', "not needed · mirrored", 'role="tab"', "aria-selected", "ArrowRight", "peopleCount()", "waitsForNative(k.project)", 'waits ? ["warn", waits]'],
+      script: ['"#stages"', "stagesOf()", "defaultStage()", '"Upstream"', '"Request"', '"Factory build"', '"Review"', '"Rings"', "not needed · mirrored", 'role="tab"', "aria-selected", "ArrowRight", "peopleCount()", "waitsForNative(k.project)", 'waits ? ["warn", "native worker"]', "s.full || s.sum"],
       reads: [
         { path: story, fields: ["targets", "chains.0.contributor.status", "chains.0.contributor.attempts", "chains.0.contributor.finished_at", "chains.0.approval", "request.checks", "request.complete", "request.created_at", "package.owner", "review"] },
         { path: pkg, fields: ["seal.upstream.project", "manifest.pkginfo.builddate", "arches.x86_64.rings"] },

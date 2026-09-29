@@ -162,7 +162,8 @@ describe("a build waiting for a native worker", () => {
   });
 
   // Its How it got here Review stage and the review panel's tag say Review's word first (#282), then what the claim's rebuild waits for,
-  // in the Factory card's words and by its order: the native wait before "project rebuilding".
+  // by the Factory card's order: the native wait before "project rebuilding". The stage's line says it in the shell's short word, as the
+  // review cell does, whole in its two lines; its title, its mark's and its square's say it all. The panel's tag says it all.
   it("the package page's Review stage and its panel's tag say it, after Review's word", async () => {
     const d = await drawn(`/package/${F.pkg}`, (x) => x.nodes["#title"] !== undefined, { functions: ["stagesOf", "reviewPanel", "renderChain"], variables: ["ST", "STAGE"] });
     const story = (project: typeof sentBack) => ({
@@ -174,16 +175,17 @@ describe("a build waiting for a native worker", () => {
     });
     const TAG = /<h3>Independent review<\/h3><span class="op-pill ([a-z]+)">([^<]*)<\/span>/;
     d.setST(story(sentBack));
-    expect(d.stagesOf().find((s: { id: string }) => s.id === "review")).toMatchObject({ tone: "warn", sum: `in review · ${words}`, why: words });
+    expect(d.stagesOf().find((s: { id: string }) => s.id === "review")).toMatchObject({ tone: "warn", sum: "in review · native worker", why: words, full: `in review · ${words}` });
     expect(TAG.exec(d.reviewPanel())?.slice(1)).toEqual(["warn", `in review · ${words}`]);
     d.setSTAGE("review");
     d.renderChain();
     const stage = /<button[^>]*id="stage-review"[\s\S]*?<\/button>/.exec(d.nodes["#stages"].innerHTML)?.[0] ?? "";
     expect(stage).toContain(`<b class="op-mark warn" title="${words}">⟳</b>`);
+    expect(stage).toContain(`<span class="pkg-stage-s" title="in review · ${words}">in review · native worker</span>`);
     expect(stage).toContain(`title="x86_64: in review · ${words}"`);
     // A rebuild queued as any other: the project rebuilding, as before.
     d.setST(story({ ...sentBack, params: { review: 5 } } as typeof sentBack));
-    expect(d.stagesOf().find((s: { id: string }) => s.id === "review")).toMatchObject({ tone: "run", sum: "in review · project rebuilding", why: "" });
+    expect(d.stagesOf().find((s: { id: string }) => s.id === "review")).toMatchObject({ tone: "run", sum: "in review · project rebuilding", why: "", full: "" });
     expect(TAG.exec(d.reviewPanel())?.slice(1)).toEqual(["run", "in review · rebuilding"]);
   });
 });
