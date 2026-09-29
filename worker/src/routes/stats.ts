@@ -13,6 +13,23 @@ export function advisoriesKnown(payload: Record<string, unknown>, at: string): {
 /** How many of each ring's latest releases the stats carry: the Status page's strip of a ring's last releases. */
 export const RING_HISTORY = 20;
 
+/**
+ * The last RING_HISTORY releases of every ring, newest first — one window per
+ * ring on its (ring, seq) index, ?1 the window and ?2… the rings (RINGS), so
+ * the rows read are a few per ring whatever the table holds
+ * (test/status-page.test.ts reads its plan and its rows). A function, not a
+ * constant: RINGS is index.ts's, which imports this module.
+ */
+export const releaseWindowsSql = (): string => `SELECT r.id, r.ring, r.seq, r.parent_id, r.source_id, s.ring AS source_ring, r.note, r.created_at, r.package_count,
+            r.id IN (SELECT release_id FROM ring_heads) AS is_head
+       FROM releases r
+       JOIN (${RINGS.map((_, i) => `SELECT id FROM (SELECT id FROM releases WHERE ring = ?${i + 2} ORDER BY seq DESC LIMIT ?1)`).join(" UNION ALL ")}) w ON w.id = r.id
+       LEFT JOIN releases s ON s.id = r.source_id
+      ORDER BY r.id DESC`;
+
+/** The journal's newest lines the stats carry (the metrics snapshots left out): Status draws its journal's first lines from them and asks for no more until Show more. */
+export const RECENT_EVENTS = 40;
+
 /** Everything the dashboard shows, in one round trip. */
 export async function handleStats(env: Env): Promise<Response> {
   const rings = [];
@@ -59,19 +76,12 @@ export async function handleStats(env: Env): Promise<Response> {
   // first, as the fifteen this list was before. source_ring says where a
   // release's selection came from: another ring's head (a promotion) or an
   // earlier release of its own ring (a rollback).
-  const releases = await env.DB.prepare(
-    `SELECT r.id, r.ring, r.seq, r.parent_id, r.source_id, s.ring AS source_ring, r.note, r.created_at, r.package_count,
-            r.id IN (SELECT release_id FROM ring_heads) AS is_head
-       FROM releases r
-       JOIN (${RINGS.map((_, i) => `SELECT id FROM (SELECT id FROM releases WHERE ring = ?${i + 2} ORDER BY seq DESC LIMIT ?1)`).join(" UNION ALL ")}) w ON w.id = r.id
-       LEFT JOIN releases s ON s.id = r.source_id
-      ORDER BY r.id DESC`,
-  )
+  const releases = await env.DB.prepare(releaseWindowsSql())
     .bind(RING_HISTORY, ...RINGS)
     .all();
 
   // Activity: everything but the half-hourly metrics snapshots.
-  const events = await env.DB.prepare("SELECT * FROM events WHERE kind != 'metrics' ORDER BY id DESC LIMIT 40").all();
+  const events = await env.DB.prepare("SELECT * FROM events WHERE kind != 'metrics' ORDER BY id DESC LIMIT ?").bind(RECENT_EVENTS).all();
   // The latest event of every kind, source and ring: one row per group in
   // latest_events (a trigger keeps it, migration 0027) instead of a GROUP BY
   // over every event ever recorded, on every poll of this page.

@@ -409,7 +409,7 @@ describe("the pages read the one answer instead of counting their own", () => {
     expect(own).toContain("lateSync(c)");
     expect(own).toContain('$("#late-after").textContent = Math.round(LATE_MS / 3600e3)');
     expect(own).not.toMatch(/function isLate|var isLate|last_sync\) >/);
-    expect(html).toContain('older than <span id="late-after">…</span> hours');
+    expect(html).toContain('late after <span id="late-after">…</span> hours without a sync');
     // The core sync aged past the constant: the server marks the row, the shell's lateSync agrees with the mark and, the mark withheld, with the same rule over last_sync; problemsOf (the pipeline pill) names the count and the constant.
     await env.DB.prepare("UPDATE events SET created_at = ? WHERE kind = 'sync' AND source = 'core'").bind(new Date(Date.now() - (LATE_AFTER_HOURS + 1) * 3600e3).toISOString()).run();
     const stats = (await call("GET", "/stats?after=status-page")).json;
@@ -634,7 +634,7 @@ describe("three more facts, one source each", () => {
     expect(ownScript(await page(`/package/${F.pkg}`))).not.toContain('style="color:var(--red)">exploited');
   });
 
-  it("the 14-day health grid is drawn once — the shell's heatGrid on Status, the rings in the reader's order — and a check's result is one word everywhere: HEALTH_WORD on the grid, the Pool's ring cards, the Pipeline's pills, heads and job results, the Status table", async () => {
+  it("the 14-day health grid is drawn once — the shell's heatGrid on Status, the rings in the reader's order — and a check's result is one word everywhere: HEALTH_WORD on the grid, the Pool's ring cards, and Status's ring cards, its checks and its jobs table", async () => {
     // Health checks beside the fixture's one: two on edge aarch64 yesterday, ok then failed — the day's cell is the worse; a warn on rc today, posted by hand (the check posts ok or error only: a ring with nothing rendered fails, since #47); and one on the lab, which no scheduler queues (the lab is promised nothing) and no grid draws a row for.
     const at = (hoursAgo: number) => new Date(Date.now() - hoursAgo * 3600e3).toISOString();
     const yesterday = new Date(Date.now() - 86400e3).toISOString().slice(0, 10), today = new Date().toISOString().slice(0, 10);

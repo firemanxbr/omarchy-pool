@@ -10,24 +10,28 @@
  * (pages/kit.ts) after the handoff's design (startScreen = status).
  *
  * What a maintainer could do there is here: roll a ring back, on its card
- * (to the release before its head) and in its history (to any release the
- * stats carry). The information is the same for everyone and only the
- * actions change (the v1 rule, #238): the buttons are drawn for a
- * maintainer, once the session says so, and for nobody else. Deciding a
- * staged build is Review's, and the Pipeline's copy of its queue went with
- * the Pipeline.
+ * (to the release before its head, unless the head is a rollback) and in
+ * its history (to any release the stats carry). The information is the same
+ * for everyone and only the actions change (the v1 rule, #238): the buttons
+ * are drawn for a maintainer, once the session says so, and for nobody
+ * else. Deciding a staged build is Review's, and the Pipeline's copy of its
+ * queue went with the Pipeline.
  *
  * The numbers behind all of it — the service check, the pool's jobs, every
  * source's coverage, the charts, the bill — are one section at the end,
- * closed until opened: what the Status page was before #248, kept whole.
+ * closed until opened: what the Status page was before #248, kept whole,
+ * with the Pipeline's requested packages until the Factory draws them (#246).
  *
- * Every read is an endpoint the dashboard already had, at the pace the old
- * pages read it: the stats every minute (liveStats), the service check every
- * minute, the worker listing every 30 s (the Pipeline's lists), the
- * rollbacks and the fast-tracks every five minutes (the Pipeline's
- * promotions chart), a journal filter once a minute while it is picked (the
- * Journal's pace), and an advisories report once per ring and architecture
- * looked at (half an hour at the edge; the Pool reads the same address).
+ * Every read is an endpoint the dashboard already had, no faster than the
+ * old pages read it: the stats every minute (liveStats), the service check
+ * every minute, the worker listing every minute (as the Status page read it
+ * with each stats poll: a miss reads the tasks table), the requested
+ * packages with it while the numbers are open, the rollbacks and the
+ * fast-tracks every five minutes (the Pipeline's promotions chart), a
+ * journal filter's newest lines once a minute while it is picked (the
+ * Journal's pace, and fewer rows: see the journal below), and an advisories
+ * report once per ring and architecture looked at (half an hour at the
+ * edge; the Pool reads the same address).
  */
 import { page } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
@@ -36,7 +40,7 @@ import { lucide } from "./kit";
 import { EXPECTED_SOURCES, JOURNAL_KINDS, PROMOTED_RINGS, UPSTREAMS, type RunningVersion } from "../meta";
 import { ESTIMATE_CADENCE } from "../cost";
 import { RULES } from "../scheduler";
-import { RING_HISTORY } from "../routes/stats";
+import { RECENT_EVENTS, RING_HISTORY } from "../routes/stats";
 
 /**
  * The Sources card's rows: the projects the pool syncs from, in the
@@ -106,21 +110,25 @@ const CSS = String.raw`
   .st-r.none { background: transparent; border: 1px dashed var(--line); }
   .st-strip-l { display: flex; justify-content: space-between; gap: 10px; font-size: 11.5px; color: var(--dim); }
   .st-next { display: flex; align-items: center; gap: 8px; min-width: 0; padding-top: 10px; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--muted); }
-  .st-next > .op-i { color: var(--dim); } .st-next > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .st-next > .op-i { color: var(--dim); } .st-next > span { flex: 1; min-width: 0; } /* wrapped, never cut: "stable candidate · 1 of 2 green checks" is one fact */
   .st-next.warn > span { color: var(--amber); } .st-next.fail > span { color: var(--red); }
   .st-wait { margin: 0; font-size: 13px; color: var(--dim); }
-  .st .st-rb { flex: none; padding: 1px 8px; font-size: 12px; } .st-acts { display: flex; justify-content: flex-end; margin-top: -4px; }
+  .st .st-rb { flex: none; padding: 3px 10px; font-size: 12px; } .st-acts { display: flex; justify-content: flex-end; margin-top: -4px; } /* 26px tall: a destructive control keeps the 24px target */
   .st-hist td:nth-child(1), .st-hist td:nth-child(3), .st-hist td:nth-child(6), .st-hist td:nth-child(7) { white-space: nowrap; } .st-hist td:nth-child(7) .st-rb { margin-left: 8px; }
   .st-note { margin: 0; font-size: 12.5px; color: var(--muted); }
   .st-pair { display: flex; flex-wrap: wrap; gap: 16px; align-items: stretch; }
   .st-src { flex: 1 1 560px; } .st-wk { flex: 1 1 360px; display: grid; grid-template-rows: auto 1fr auto; }
   .st-chk { flex: 1 1 520px; } .st-adv { flex: 1 1 400px; display: grid; grid-template-rows: auto auto 1fr auto; grid-template-columns: minmax(0, 1fr); }
-  .st-h { display: flex; align-items: center; gap: 10px; color: var(--dim); } .st-h b { font: 600 15px var(--font-display); color: var(--text); }
+  .st-h { display: flex; align-items: center; gap: 10px; color: var(--dim); }
+  /* A card's title is a heading (the outline: Releases, Sources, Workers, … each an h2, a fold inside a section an h3), drawn as the kit's card title (.op-card-h > b). */
+  .st .st-t { margin: 0; font: 600 15px var(--font-display); color: var(--text); letter-spacing: normal; text-transform: none; }
   .st-scroll { overflow-x: auto; }
   .st .op-table th:first-child, .st .op-table td:first-child { padding-left: 16px; } .st .op-table th:last-child, .st .op-table td:last-child { padding-right: 16px; }
-  /* The handoff's columns: the source and its repositories share what the three numbers leave, the repositories cut first. */
-  .st-src-t { min-width: 520px; table-layout: fixed; } .st-src-t th:nth-child(1) { width: 26%; } .st-src-t th:nth-child(3) { width: 84px; } .st-src-t th:nth-child(4) { width: 60px; } .st-src-t th:nth-child(5) { width: 92px; }
+  /* The handoff's columns: the source keeps room for its longest name ("Arch Linux ARM"), the repositories take what the three numbers leave and are cut first. */
+  .st-src-t { min-width: 520px; table-layout: fixed; } .st-src-t th:nth-child(1) { width: 168px; } .st-src-t th:nth-child(3) { width: 84px; } .st-src-t th:nth-child(4) { width: 60px; } .st-src-t th:nth-child(5) { width: 92px; }
   .st-src-t td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .st-src-t td:nth-child(2) { font-size: 12px; color: var(--dim); }
+  /* A source that is not on time says so in words under its time, not by colour alone; the repositories under the name are the phone's (the column is the desktop's). */
+  .st-src-t .s-when small { display: block; font-size: 11.5px; } .st-src-t .s-repos { display: none; }
   .st-dot { display: inline-block; width: 8px; height: 8px; margin-right: 8px; vertical-align: 1px; background: var(--green); }
   .st-dot.warn { background: var(--amber); } .st-dot.fail { background: var(--red); } .st-dot.run { background: var(--blue); } .st-dot.na { background: transparent; border: 1px dashed var(--dim); }
   .st-src-t .s-plus { color: var(--green); } .st-src-t .s-when { color: var(--dim); } .st-src-t .s-when.run { color: var(--blue); } .st-src-t .s-when.warn { color: var(--amber); } .st-src-t .s-when.fail { color: var(--red); }
@@ -141,8 +149,9 @@ const CSS = String.raw`
   .st-c .c-d { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); } .st-c.fail .c-d { color: var(--red); }
   .st-c .c-ring.edge { color: var(--edge); } .st-c .c-ring.rc { color: var(--rc); } .st-c .c-ring.stable { color: var(--stable); }
   .st-sev { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 1px; background: var(--line); border-bottom: 1px solid var(--line); }
-  .st-sv { background: var(--panel); padding: 12px 14px; display: grid; gap: 2px; min-width: 0; } .st-sv b { font: 600 22px/1.1 var(--font-display); font-variant-numeric: tabular-nums; }
-  .st-sv span { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--dim); overflow-wrap: anywhere; }
+  /* Five cells in a card that shares its row (400px at its narrowest): a label keeps its word whole — "critical" never breaks mid-word. */
+  .st-sv { background: var(--panel); padding: 12px 10px; display: grid; gap: 2px; min-width: 0; } .st-sv b { font: 600 22px/1.1 var(--font-display); font-variant-numeric: tabular-nums; }
+  .st-sv span { font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--dim); white-space: nowrap; }
   .st-top { padding: 12px 16px; display: grid; gap: 9px; align-content: start; }
   .st-x { display: grid; gap: 4px; } .st-x-h { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; min-width: 0; }
   .st-x-h > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .st-x-h a { color: var(--text); text-decoration: none; font-weight: 600; } .st-x-h a:hover { color: var(--green); }
@@ -155,7 +164,9 @@ const CSS = String.raw`
   .st-chips { display: flex; gap: 6px; flex-wrap: wrap; }
   .st-chips button { padding: 2px 10px; border: 1px solid var(--line); background: transparent; color: var(--dim); font: 12.5px/1.6 var(--font-mono); cursor: pointer; }
   .st-chips button:hover { color: var(--text); } .st-chips button.on { border-color: var(--green); color: var(--text); }
-  .st-chips button:focus-visible, .st summary:focus-visible { outline: 1px solid var(--green); outline-offset: -1px; }
+  /* Keyboard focus is the frame's square green line on everything the page draws (the header's, the kit's tiles): around a link's text, on the edge of a boxed control. */
+  .st a:focus-visible, .st button:focus-visible, .st summary:focus-visible, .st input:focus-visible, .st select:focus-visible { outline: 1px solid var(--green); outline-offset: 2px; }
+  .st a.op-stat:focus-visible, .st .st-chips button:focus-visible, .st .op-seg button:focus-visible, .st .op-btn:focus-visible, .st summary:focus-visible, .st input:focus-visible, .st select:focus-visible { outline-offset: -1px; }
   .st-j { display: grid; grid-template-columns: 36px 8px 150px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 8px 16px; border-bottom: 1px solid var(--line); font-size: 13px; }
   .st-j > * { min-width: 0; } .st-j .j-ago { font-size: 12px; color: var(--dim); white-space: nowrap; }
   .st-j .j-sq { width: 8px; height: 8px; background: var(--dim); } .st-j .j-ev { font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -176,12 +187,14 @@ const CSS = String.raw`
   .st-num h3 { font-size: 15px; margin: 6px 0 0; } .st-num .tiles, .st-num .charts { margin: 0; } .st-num p.sub { margin: 0; font-size: 13px; color: var(--muted); }
   @media (max-width: 640px) {
     .st-j { grid-template-columns: 36px 8px minmax(0, 1fr) auto; row-gap: 2px; } .st-j .j-ev { grid-area: 1 / 3; } .st-j .j-who { grid-area: 1 / 4; } .st-j .j-what { grid-area: 2 / 3 / auto / -1; }
-    .st-c { grid-template-columns: 30px 50px minmax(0, 1fr) 14px; row-gap: 2px; } .st-c .c-d { grid-column: 2 / -1; } .st-c .c-rel { display: none; }
+    /* A check's line wraps under its ring: what it says, and a rollback's "#from → #to" beside it. */
+    .st-c { grid-template-columns: 30px 50px minmax(0, 1fr) auto; row-gap: 2px; } .st-c .op-mark { justify-self: end; } .st-c .c-d { grid-column: 2 / 4; } .st-c .c-rel { grid-column: 4; justify-self: end; }
     .st-sv { padding: 10px 6px; } .st-sv span { font-size: 10px; letter-spacing: .02em; }
     .st-ring-n { gap: 20px; }
-    /* A phone keeps the numbers in view: the repositories are the row's tooltip there. */
+    /* A phone keeps the numbers in view, each under a label it has room for; a source's name wraps, its repositories are a line under it. */
     .st-src-t { min-width: 0; } .st-src-t th:nth-child(2), .st-src-t td:nth-child(2) { display: none; } .st-src-t th, .st-src-t td { padding-left: 8px; padding-right: 8px; }
-    .st-src-t th:nth-child(1) { width: auto; } .st-src-t th:nth-child(3) { width: 64px; } .st-src-t th:nth-child(4) { width: 48px; } .st-src-t th:nth-child(5) { width: 84px; }
+    .st-src-t th:nth-child(1) { width: auto; } .st-src-t th:nth-child(3) { width: 80px; } .st-src-t th:nth-child(4) { width: 56px; } .st-src-t th:nth-child(5) { width: 96px; }
+    .st-src-t td:nth-child(1) { white-space: normal; } .st-src-t .s-repos { display: block; font-size: 11.5px; color: var(--dim); }
   }
 `;
 
@@ -207,18 +220,18 @@ const BODY = String.raw`
     <div class="st-rings" id="st-rings">${PROMOTED_RINGS.map((ring) => `<article class="op-card ${ring} st-ring"><div class="st-ring-h"><span class="st-ring-t"><b class="op-ring-name ${ring}">${ring}</b></span></div><p class="st-wait">Loading</p></article>`).join("")}</div>
     <p class="st-note" id="rb-state" hidden></p>
     <details class="op-card st-fold" id="history">
-      <summary class="op-card-h"><b>Ring history</b><small>the last ${RING_HISTORY} releases of each ring and what each changed</small></summary>
+      <summary class="op-card-h"><h3 class="st-t">Ring history</h3><small>the last ${RING_HISTORY} releases of each ring and what each changed</small></summary>
       <div class="st-fold-b"><div class="table-wrap"><table class="op-table st-hist" id="history-table"><thead><tr><th>Release</th><th>Ring</th><th class="num">Packages</th><th>From</th><th>Note</th><th>When</th><th></th></tr></thead><tbody></tbody></table></div></div>
     </details>
   </section>
 
   <div class="st-pair">
     <section class="op-card st-src" id="sources" aria-labelledby="sources-h">
-      <div class="op-card-h"><span class="st-h">${lucide("refresh-cw", 16)}<b id="sources-h">Sources</b></span><small>signatures checked against each project's key</small></div>
+      <div class="op-card-h"><span class="st-h">${lucide("refresh-cw", 16)}<h2 class="st-t" id="sources-h">Sources</h2></span><small>signatures checked against each project's key</small></div>
       <div class="st-scroll"><table class="op-table st-src-t"><thead><tr><th>Source</th><th>Repos</th><th class="num">Packages</th><th class="num">Today</th><th class="num">Synced</th></tr></thead><tbody id="sources-rows"></tbody></table></div>
     </section>
     <section class="op-card st-wk" id="workers" aria-labelledby="workers-h">
-      <div class="op-card-h"><span class="st-h">${lucide("cpu", 16)}<b id="workers-h">Workers</b></span><small id="workers-busy"></small></div>
+      <div class="op-card-h"><span class="st-h">${lucide("cpu", 16)}<h2 class="st-t" id="workers-h">Workers</h2></span><small id="workers-busy"></small></div>
       <div id="workers-list"></div>
       <div class="op-card-f"><span class="st-note" id="workers-note"></span><a class="st-link" href="/workers">Every worker →</a></div>
     </section>
@@ -226,11 +239,11 @@ const BODY = String.raw`
 
   <div class="st-pair">
     <section class="op-card st-chk" id="checks" aria-labelledby="checks-h">
-      <div class="op-card-h"><span class="st-h">${lucide("heart-pulse", 16)}<b id="checks-h">Health checks &amp; rollbacks</b></span><small>green checks promote · a red one after a promotion rolls it back</small></div>
+      <div class="op-card-h"><span class="st-h">${lucide("heart-pulse", 16)}<h2 class="st-t" id="checks-h">Health checks &amp; rollbacks</h2></span><small>green checks promote · a red one rolls back</small></div>
       <div id="checks-list"></div>
     </section>
     <section class="op-card st-adv" id="advisories" aria-labelledby="advisories-h">
-      <div class="op-card-h"><span class="st-h">${lucide("shield", 16)}<b id="advisories-h">Advisories</b></span><small id="adv-note"></small></div>
+      <div class="op-card-h"><span class="st-h">${lucide("shield", 16)}<h2 class="st-t" id="advisories-h">Advisories</h2></span><small id="adv-note"></small></div>
       <div class="st-sev" id="adv-sev"></div>
       <div class="st-top"><h3 class="op-label">Most exposure</h3><div id="adv-top"></div></div>
       <div class="st-adv-f">${lucide("zap", 13)}<a id="adv-fast" href="/status?kind=fast-track#journal">&nbsp;</a></div>
@@ -238,7 +251,7 @@ const BODY = String.raw`
   </div>
 
   <details class="op-card st-fold" id="advisory-list">
-    <summary class="op-card-h"><b>Every open advisory</b><small id="adv-list-note">by ring and architecture, with how sure each match is</small></summary>
+    <summary class="op-card-h"><h2 class="st-t">Every open advisory</h2><small id="adv-list-note">by ring and architecture, with how sure each match is</small></summary>
     <div class="st-fold-b">
       <div class="st-picks"><div class="op-seg" id="pick-ring" role="group" aria-label="Ring"></div><div class="op-seg" id="pick-arch" role="group" aria-label="Architecture"></div><div class="op-seg" id="pick-conf" role="group" aria-label="Confidence"></div></div>
       <p class="st-note" id="updated"></p>
@@ -248,19 +261,19 @@ const BODY = String.raw`
   </details>
 
   <section class="op-card st-jr" id="journal" aria-labelledby="journal-h">
-    <div class="op-card-h"><span class="st-h">${lucide("scroll-text", 16)}<b id="journal-h">Journal</b><span class="op-live-dot" title="live"></span></span><div class="st-chips" id="journal-chips" role="group" aria-label="Show in the journal"></div></div>
+    <div class="op-card-h"><span class="st-h">${lucide("scroll-text", 16)}<h2 class="st-t" id="journal-h">Journal</h2><span class="op-live-dot" title="live"></span></span><div class="st-chips" id="journal-chips" role="group" aria-label="Show in the journal"></div></div>
     <div id="journal-list"></div>
-    <div class="op-card-f"><span class="st-note" id="journal-count"></span><button type="button" class="op-btn" id="journal-more">Show more</button></div>
+    <div class="op-card-f"><span class="st-note" id="journal-count"></span><button type="button" class="op-btn" id="journal-more" hidden>Show more</button></div>
   </section>
 
   <details class="op-card st-fold st-num" id="numbers">
-    <summary class="op-card-h"><span class="st-h">${lucide("activity", 16)}<b>The numbers</b></span><small>the service, the pool's jobs, every source's coverage, the charts and the bill</small></summary>
+    <summary class="op-card-h"><span class="st-h">${lucide("activity", 16)}<h2 class="st-t">The numbers</h2></span><small>the service, the pool's jobs, every source's coverage, the charts and the bill</small></summary>
     <div class="st-fold-b">
       <h3>Service</h3>
-      <p class="sub">Measured right now by the API: can it reach the index and the pool.</p>
+      <p class="sub">Measured now by the API: whether it reaches the index and the pool.</p>
       <div class="svc" id="service"></div>
       <h3>The pipeline, in numbers</h3>
-      <p class="sub">The pool's own jobs, pulled by workers with a per-job credential: what ran this week, what failed, what is waiting — the tiles, the table and the charts are one count over the same rows. A snapshot every 30 minutes keeps the pool's history.</p>
+      <p class="sub">The pool's jobs this week — what ran, what failed, what waits — one count for the tiles, the charts and the table.</p>
       <div class="tiles" id="systiles"></div>
       <div class="charts">
         <div class="chart"><h3>Pool growth <span>7 days</span></h3><div class="sub">bytes stored once, from the metrics snapshots</div><div id="c-pool"></div></div>
@@ -273,13 +286,17 @@ const BODY = String.raw`
       </div>
       <div class="table-wrap"><table id="workflows"><thead><tr><th>Job</th><th>Last</th><th class="num">Runs 7d</th><th class="num">Failed</th><th class="num">Waiting</th><th class="num">Minutes 7d</th></tr></thead><tbody></tbody></table></div>
       <h3>Jobs and builds</h3>
-      <p class="sub">Leased first, then queued, then the most recent finished; three attempts, then failed; a pool job's row says what it did.</p>
+      <p class="sub">Leased first, then queued, then the latest finished; each row says what it did.</p>
       <div class="table-wrap"><table id="tasks"><thead><tr><th>#</th><th>Package</th><th>Arch</th><th>Status</th><th>Reason</th><th>Worker</th><th>Took</th><th>Result</th></tr></thead><tbody></tbody></table></div>
       <h3>Coverage</h3>
-      <p class="sub">What upstream serves, what <code>edge</code> already pins, what <code>stable</code> pins. A source is late when its last sync is older than <span id="late-after">…</span> hours (a long import of one source makes the others wait their turn).</p>
+      <p class="sub">What upstream serves and what <code>edge</code> and <code>stable</code> pin; a source is late after <span id="late-after">…</span> hours without a sync.</p>
       <div class="table-wrap"><table id="coverage"><thead><tr><th>Source</th><th>Arch</th><th class="num">Upstream</th><th class="num">In edge</th><th class="num">Missing</th><th class="num">In stable</th><th>Progress</th><th class="num">Size</th><th>Last sync</th></tr></thead><tbody></tbody></table></div>
       <p class="sub" id="provenance" hidden></p>
       <p class="sub" id="any" hidden></p>
+      <h3>Requested packages</h3>
+      <p class="sub">Every package a contributor asked for, its request signed on the record, and where it stands.</p>
+      <p class="st-note" id="registry-note"></p>
+      <div class="table-wrap" id="registry-wrap" hidden><table id="registry"><thead><tr><th>Package</th><th>Project</th><th>Owner</th><th>Arches</th><th>Version · licence</th><th>Stage</th><th>Detail</th><th>Updated</th></tr></thead><tbody></tbody></table></div>
     </div>
   </details>
 </div>
@@ -289,29 +306,52 @@ const SCRIPT = String.raw`
 __CHARTS__
   var KINDS = __KINDS__, SOURCES = __SOURCES__, HISTORY = __HISTORY__, PROMOTE_EVERY_MIN = __PROMOTE_EVERY__, FEEDS = __FEEDS__;
   var q = new URLSearchParams(location.search);
-  var STATS = null, FACTORY = null, SERVICE = null, ROLLBACKS = null, ROLLBACKS_DOWN = null, FAST = null, REPORTS = {}, NUMBERS = false, LANDED = false;
+  var STATS = null, STATS_DOWN = null, FACTORY = null, SERVICE = null, ROLLBACKS = null, ROLLBACKS_DOWN = null, FAST = null, REPORTS = {}, NUMBERS = false, LANDED = false;
   // The workers as every other page counts them (the shell's workerCounts over the live listing): the Workers card and the numbers' tile read it; WC_DOWN is the reason the listing did not answer, said where the workers would be.
   var WC = null, WC_DOWN = null;
   skeletonRows("#coverage", 9, 5); skeletonRows("#workflows", 7, 4); skeletonTiles("#systiles", 8); skeletonRows("#tasks", 8, 4);
   // The hours a source may go without a sync before it is late: the shell's one number (LATE_MS), the one problemsOf and the Sources card count with.
   $("#late-after").textContent = Math.round(LATE_MS / 3600e3);
 
-  // ---- the hero: all rings healthy, or what is not — worst first: a service check that did not answer, a ring whose latest health check failed, a pipeline falling behind (the shell's problemsOf: no sync for four hours, sources late). A ring nobody has checked yet is not called unhealthy.
+  // ---- the hero: all rings healthy, or what is not — worst first: a service check that did not answer, the pool's numbers that did not, a ring whose latest health check failed, rings with nothing to judge yet, syncs falling behind. A ring nobody has checked yet is not called unhealthy, and no ring is called healthy before a check said so.
   function andList(list) { return list.length < 2 ? list.join("") : list.slice(0, -1).join(", ") + " and " + list[list.length - 1]; }
+  // A failure's reason as the hero's one sentence: what the API answered (its status, and its error when it said one), or the browser's word for no answer at all.
+  function reasonLine(e) {
+    var m = errorText(e), code = e && e.status ? "HTTP " + e.status : (/^HTTP \d+/.exec(m) || [""])[0];
+    return (code ? "The API answered " + code + (m === code ? "" : ": " + m) : "No answer from the API: " + m) + ".";
+  }
+  // What keeps the syncs behind, counted as the Last sync tile and the Sources card count — a project, not a coverage row: no sync yet, or none for four hours (they run every three; the shell's problemsOf says when), and the sources not on time.
+  function behindOf(d) {
+    var why = !newest(d.latest, "sync") ? ["no sync yet"] : problemsOf(d).filter(function (x) { return x.indexOf("no sync for ") === 0; });
+    var fams = sourceRows(d).filter(function (s) { return s.synced; }), off = fams.filter(function (s) { return s.state !== "ok" && s.state !== "run"; }).length;
+    if (off) why.push(off + " of " + fams.length + " sources not on time");
+    return why;
+  }
   function drawHero() {
-    var d = STATS, why = d ? problemsOf(d) : [], sick = [];
-    if (d) PROMISED_RINGS.forEach(function (ring) { if (ARCHES.some(function (arch) { var h = latest(d.latest, "health", ring, arch); return h && h.status === "error"; })) sick.push(ring); });
+    var d = STATS, why = d ? behindOf(d) : [], sick = [], failedOn = [], released = [], checked = [];
+    if (d) PROMISED_RINGS.forEach(function (ring) {
+      ARCHES.forEach(function (arch) {
+        var h = latest(d.latest, "health", ring, arch); if (!h) return;
+        if (checked.indexOf(ring) < 0) checked.push(ring);
+        if (h.status === "error") { failedOn.push(ring + " " + (h.source || arch)); if (sick.indexOf(ring) < 0) sick.push(ring); }
+      });
+      if (ringOf(d, ring).release) released.push(ring);
+    });
     var title = "Checking the rings…", tone = "", lede = "Every sync, release, check and decision is on the record.";
-    if (SERVICE && SERVICE.down) { title = SERVICE.down; tone = "fail"; }
+    if (SERVICE && SERVICE.down) { title = SERVICE.down; tone = "fail"; lede = SERVICE.why; }
+    else if (!d && STATS_DOWN) { title = "The pool's numbers did not answer"; tone = "fail"; lede = STATS_DOWN; }
     else if (sick.length) { title = andList(sick) + " not healthy"; tone = "fail"; }
+    else if (d && !checked.length) { title = released.length ? "No health check yet" : "No ring released yet"; }
     else if (why.length) { title = "All rings healthy, syncs behind"; tone = "warn"; }
     else if (d) { title = "All rings healthy"; tone = "ok"; }
-    if (SERVICE && SERVICE.down) lede = SERVICE.why;
-    else if (why.length) lede = why.join("; ") + ". The rings keep serving what they have; the journal below says what the pool is doing about it.";
+    // One sentence under it: where the check failed, or what is behind (a sentence that starts with "no sync" or a number, never a ring's name, so capitalising it is safe).
+    if (!(SERVICE && SERVICE.down) && d && failedOn.length) lede = "The latest health check failed on " + andList(failedOn) + (why.length ? "; " + why.join(" and ") : "") + ".";
+    else if (!(SERVICE && SERVICE.down) && d && why.length) { var line = why.join(" and "); lede = line.charAt(0).toUpperCase() + line.slice(1) + (released.length ? "; the rings keep serving what they have." : "."); }
     $("#headline").textContent = title; $("#st-mark").className = "st-mark " + tone; $("#st-lede").textContent = lede;
   }
 
-  // ---- the four numbers beside it, each a link to the section that proves it.
+  // ---- the four numbers beside it, each a link to the section that proves it. A number counts up when it first lands and when it changes; a poll that brings the same number leaves it be (countUp starts again from 0, and the Health checks tile is drawn again with every stats poll and every listing).
+  function tileCount(el, to) { if (!el || el.stTo === to) return; el.stTo = to; countUp(el, to); }
   function drawTiles(d) {
     var lastSync = newest(d.latest, "sync"), fams = sourceRows(d).filter(function (s) { return s.synced; }), onTime = fams.filter(function (s) { return s.state === "ok" || s.state === "run"; }).length;
     $("#t-sync-n").textContent = lastSync ? span(Date.now() - Date.parse(lastSync.created_at)) : "never";
@@ -319,7 +359,7 @@ __CHARTS__
     // Today's health checks of the rings a check covers (the stats' 14 days of them), and how many failed — the word is the shell's.
     var today = new Date().toISOString().slice(0, 10), checks = ((d.series || {}).health || []).filter(function (h) { return h.created_at.slice(0, 10) === today && PROMISED_RINGS.indexOf(h.ring) >= 0; });
     var failed = checks.filter(function (h) { return h.status === "error"; }).length;
-    countUp($("#t-checks-n"), checks.length);
+    tileCount($("#t-checks-n"), checks.length);
     $("#t-checks-s").textContent = !checks.length ? "none yet today" : failed ? "today · " + num(failed) + " " + HEALTH_WORD.error : "today · all green";
   }
   // A rollback is one line of the journal's: ops::rollback writes it with the release it made; a promotion that rolled itself back writes a second line after it (rolled_back_to) that is the same event, counted once.
@@ -329,7 +369,7 @@ __CHARTS__
     if (ROLLBACKS_DOWN && !ROLLBACKS) { n.textContent = "—"; s.innerHTML = '<span title="' + esc(ROLLBACKS_DOWN) + '">did not answer</span>'; return; }
     if (!ROLLBACKS) return;
     var month = new Date().toISOString().slice(0, 7);
-    countUp(n, rollbacksOf(ROLLBACKS).filter(function (e) { return e.created_at.slice(0, 7) === month; }).length);
+    tileCount(n, rollbacksOf(ROLLBACKS).filter(function (e) { return e.created_at.slice(0, 7) === month; }).length);
     s.textContent = "this month";
   }
   // An advisories report, asked once per ring and architecture (half an hour at the edge): the tile's and the card's are one answer when they name the same pair. A report that did not answer is asked again next time.
@@ -395,12 +435,14 @@ __CHARTS__
       var cls = "st-r" + (isRollback(x) ? " rb" : "") + (x.is_head ? " head" : "");
       return x.parent_id ? '<a class="' + cls + '" href="/diff?ring=' + ring + '&from=' + x.parent_id + '&to=' + x.id + '" title="' + esc(tip) + '" tabindex="-1"></a>' : '<span class="' + cls + '" title="' + esc(tip) + '"></span>';
     }).join("");
-    var prev = hist.filter(function (x) { return x.id === rel.parent_id; })[0];
+    // The card's roll back points the ring at the release before its head, named by its sequence and its id — the dialog and the note after it say the id. A head that is a rollback has no such button: its parent is the release it rolled away from, the one that failed; the history offers every release, by name, to a maintainer who means it.
+    var prev = hist.filter(function (x) { return x.id === rel.parent_id; })[0], headRow = hist.filter(function (x) { return x.id === rel.id; })[0];
+    var back = rel.parent_id && !(headRow && isRollback(headRow)) ? rollbackButton(ring, rel.parent_id, "Roll back to " + (prev ? "#" + prev.seq + " (release " + rel.parent_id + ")" : "release " + rel.parent_id)) : "";
     var rbWord = rb ? rb + (rb === 1 ? " rollback" : " rollbacks") : "no rollbacks";
     return head + '<span class="st-health">' + health + '<span>health</span></span></div>' +
       '<div class="st-ring-n"><div><span class="op-label">released</span><b>' + ago(rel.created_at) + '</b></div><div><span class="op-label">packages</span><b>' + num(r.package_count) + '</b></div></div>' +
       '<div class="st-strip"><div class="st-rs" role="img" aria-label="' + esc("the last " + hist.length + " releases of " + ring + ", " + rbWord) + '">' + slots + '</div><div class="st-strip-l"><span>last ' + HISTORY + ' releases</span><span>' + rbWord + '</span></div></div>' +
-      '<div class="st-next' + (next.tone ? " " + next.tone : "") + '">' + lucide("arrow-up-right", 13) + '<span title="' + esc(next.text) + '">' + esc(next.text) + '</span></div>' + (rel.parent_id && isMaintainer() ? '<div class="st-acts">' + rollbackButton(ring, rel.parent_id, "Roll back to " + (prev ? "#" + prev.seq : "release " + rel.parent_id)) + '</div>' : "");
+      '<div class="st-next' + (next.tone ? " " + next.tone : "") + '">' + lucide("arrow-up-right", 13) + '<span title="' + esc(next.text) + '">' + esc(next.text) + '</span></div>' + (back ? '<div class="st-acts">' + back + '</div>' : "");
   }
   function drawRings(d) {
     $("#st-rings").innerHTML = PROMISED_UPWARD.map(function (ring) { return '<article class="op-card ' + ring + ' st-ring" id="ring-' + ring + '">' + ringCard(d, ring) + '</article>'; }).join("");
@@ -448,18 +490,25 @@ __CHARTS__
       var byRepo = {}; s.rows.forEach(function (c) { byRepo[c.source + "/" + c.arch] = c; });
       var tip = s.repos.map(function (x) { var c = byRepo[x.source + "/" + x.arch]; return x.title + " (" + x.arch + ")" + (s.synced ? ": " + (c && c.last_sync ? "synced " + ago(c.last_sync) + (lateSync(c) ? ", late" : "") : "not synced yet") : ""); }).join("\n");
       var when = !s.synced ? "live" : s.state === "run" ? "syncing…" : s.oldest ? ago(s.oldest) : "never";
-      return '<tr title="' + esc(tip) + '"><td><span class="st-dot ' + s.state + '"></span>' + esc(s.name) + '</td><td>' + esc(repos) + '</td><td class="num">' + num(s.packages) + '</td><td class="num s-plus">+' + num(s.today) + '</td><td class="num s-when ' + s.state + '">' + esc(when) + '</td></tr>';
+      // Late or failed is said in a word under the time, not by the colour alone.
+      var word = s.state === "warn" ? "late" : s.state === "fail" ? "failed" : "";
+      return '<tr title="' + esc(tip) + '"><td><span class="st-dot ' + s.state + '"></span>' + esc(s.name) + '<small class="s-repos">' + esc(repos) + '</small></td><td>' + esc(repos) + '</td><td class="num">' + num(s.packages) + '</td><td class="num s-plus">+' + num(s.today) + '</td><td class="num s-when ' + s.state + '">' + esc(when) + (word ? '<small>' + word + '</small>' : '') + '</td></tr>';
     }).join("");
   }
 
-  // ---- workers: the project's, the ones doing the pool's jobs and the maintainers' rebuilds — a contributor's are on /workers. An agent's mark from what a worker says it runs ("<provider>/<model>"), or the name #252 writes on a line an agent drafted ("Claude Code"): the provider, or the name's first word, looked up; the mark says the whole name on hover and to a screen reader. One the kit has no mark for is its initials in a square, as the handoff draws one.
+  // ---- workers: the project's, the ones doing the pool's jobs and the maintainers' rebuilds — a contributor's are on /workers. An agent's mark from what a worker says it runs ("<provider>/<model>"), or the name #252 writes on a line an agent drafted ("Claude Code"): the provider, or the name's first word, looked up; the mark says the agent's name on hover and to a screen reader. One the kit has no mark for is its initials in a square, as the handoff draws one.
   var AGENT_MARKS = { anthropic: "claude-color", claude: "claude-color", "claude-code": "claude-color", openai: "openai", codex: "openai", gpt: "openai", gemini: "gemini-color", google: "gemini-color", xai: "grok", grok: "grok", qwen: "qwen-color", alibaba: "qwen-color", moonshot: "kimi", kimi: "kimi", meta: "meta-color", llama: "meta-color", cursor: "cursor", opencode: "opencode", github: "githubcopilot", copilot: "githubcopilot" };
+  // An agent's name as a reader says it, never its slug: the provider looked up ("claude-code" is Claude Code) and the model's words spelled out ("claude-sonnet-5" is Claude Sonnet 5, "gpt-5" GPT 5) — "Claude Code · Claude Sonnet 5"; a name #252 writes ("Claude Code") is one already.
+  var AGENT_NAMES = { anthropic: "Anthropic", claude: "Claude", "claude-code": "Claude Code", openai: "OpenAI", codex: "Codex", gpt: "GPT", gemini: "Gemini", google: "Google", xai: "xAI", grok: "Grok", qwen: "Qwen", alibaba: "Alibaba", moonshot: "Moonshot", kimi: "Kimi", meta: "Meta", llama: "Llama", cursor: "Cursor", opencode: "opencode", github: "GitHub", copilot: "Copilot" };
+  function spelled(s) { return String(s).split(/[-_]+/).filter(Boolean).map(function (w) { return AGENT_NAMES[w.toLowerCase()] || (/^[a-z]/.test(w) ? w.charAt(0).toUpperCase() + w.slice(1) : w); }).join(" "); }
+  function modelOf(agent) { var cut = agent.indexOf("/"); return spelled(cut > 0 ? agent.slice(cut + 1) : agent); }
+  function agentName(agent) { var s = String(agent || ""), cut = s.indexOf("/"); return cut > 0 ? (AGENT_NAMES[s.slice(0, cut).toLowerCase()] || spelled(s.slice(0, cut))) + " · " + modelOf(s) : spelled(s); }
   function agentOf(name) {
     var s = String(name || ""), cut = s.indexOf("/"), key = (cut > 0 ? s.slice(0, cut) : s.split(/[\s-]/)[0]).toLowerCase(), mark = AGENT_MARKS[key];
-    return mark ? agentMark(mark, s) : '<span class="st-ini" title="' + esc(s) + '">' + esc((cut > 0 ? s.slice(cut + 1) : s).slice(0, 2).toUpperCase()) + '</span>';
+    return mark ? agentMark(mark, agentName(s)) : '<span class="st-ini" title="' + esc(agentName(s)) + '">' + esc((cut > 0 ? s.slice(cut + 1) : s).slice(0, 2).toUpperCase()) + '</span>';
   }
   function workerLine(w, t) {
-    var working = w.alive && !!w.current_task, cut = w.agent ? w.agent.indexOf("/") : -1, model = w.agent ? (cut > 0 ? w.agent.slice(cut + 1) : w.agent) : "—";
+    var working = w.alive && !!w.current_task, model = w.agent ? modelOf(w.agent) : "—";
     var doing = !w.alive ? '<b>offline</b><span class="st-dim">' + esc(span(Date.now() - Date.parse(w.last_seen))) + '</span>'
       : !working ? '<b>idle</b><span class="st-dim">waiting for work</span>'
       : !t ? '<a href="/build/' + Number(w.current_task) + '"><b>task #' + Number(w.current_task) + '</b></a>'
@@ -478,13 +527,14 @@ __CHARTS__
     $("#workers-list").innerHTML = ws.map(function (w) { return workerLine(w, tasks[w.current_task]); }).join("") || '<p class="st-empty">no project worker registered</p>';
   }
   function workerById(id) { return ((FACTORY || {}).workers || []).filter(function (w) { return w.id === id; })[0] || null; }
-  // The listing every 30 s — the one read of the Workers card, the syncing marks, the journal's agents and the numbers' jobs (a hundred rows while the numbers are open, ten otherwise: leased tasks come first).
+  // The listing once a minute, at the stats' pace — the one read of the Workers card, the syncing marks, the journal's agents and the numbers' jobs (a hundred rows while the numbers are open, ten otherwise: leased tasks come first). Its edge copy lives 10 s and a miss reads the tasks table whole, so the page asks no more often than the Status page before #248 did (once per stats poll).
   function loadFactory() {
+    if (NUMBERS) loadRegistry();
     api("GET", "/api/v1/factory?limit=" + (NUMBERS ? 100 : 10)).then(function (f) {
       FACTORY = f; WC = workerCounts(f.workers); WC_DOWN = null;
       drawWorkers(); drawTasks();
       if (STATS) { renderSystem(STATS); drawSources(STATS); drawTiles(STATS); }
-      if (JLAST.length) drawJournal(JLAST, true);
+      if (JLAST.length) drawJournal([], true);
     }).catch(function (e) { WC_DOWN = noAnswer("worker listing", e); drawWorkers(); if (STATS) renderSystem(STATS); });
   }
 
@@ -541,12 +591,17 @@ __CHARTS__
   var ADV_ARCH = ARCHES.indexOf(q.get("arch")) >= 0 ? q.get("arch") : ARCHES[0];
   var ADV_CONF = SEC_CONFS.indexOf(q.get("conf")) >= 0 ? q.get("conf") : SEC_CONF;
   if (q.get("ring") || q.get("arch") || q.get("conf")) $("#advisory-list").open = true;
+  // The shell's pick(), on this page: the chosen button says so to a screen reader too (aria-pressed, which the kit draws as it draws .on), and the address keeps the section it points at — pick() writes the query alone, and a reload would land at the top of a long page.
+  function choose(sel, values, current, on, opts, hash) {
+    pick(sel, values, current, function (v) { if (hash && window.history && history.replaceState) history.replaceState(null, "", location.pathname + location.search + hash); on(v); }, opts);
+    var el = $(sel); if (el) el.querySelectorAll("button").forEach(function (b) { b.setAttribute("aria-pressed", String(b.getAttribute("data-v") === current)); });
+  }
   function advId(a) { return String(a.id || "").replace(/^(arch|debian|osv):/, "").replace(/:[^:]*$/, ""); }
   function exposureOf(r) { var x = r.v.exposure || {}; return Number(x.declared || 0) + Number(x.loads || 0); }
   function loadAdvisories() {
-    pick("#pick-ring", PROMISED_RINGS, ADV_RING, function (v) { ADV_RING = v; loadAdvisories(); }, { url: "ring" });
-    pick("#pick-arch", ARCHES, ADV_ARCH, function (v) { ADV_ARCH = v; loadAdvisories(); }, { url: "arch" });
-    pick("#pick-conf", SEC_CONFS, ADV_CONF, function (v) { ADV_CONF = v; loadAdvisories(); }, { url: "conf" });
+    choose("#pick-ring", PROMISED_RINGS, ADV_RING, function (v) { ADV_RING = v; loadAdvisories(); }, { url: "ring" }, "#advisory-list");
+    choose("#pick-arch", ARCHES, ADV_ARCH, function (v) { ADV_ARCH = v; loadAdvisories(); }, { url: "arch" }, "#advisory-list");
+    choose("#pick-conf", SEC_CONFS, ADV_CONF, function (v) { ADV_CONF = v; loadAdvisories(); }, { url: "conf" }, "#advisory-list");
     $("#updated").textContent = "Reading " + ADV_RING + " · " + ADV_ARCH + " — the report covers every package the ring serves…";
     skeletonRows("#vuln", 7, 3);
     var ring = ADV_RING, arch = ADV_ARCH;
@@ -576,22 +631,28 @@ __CHARTS__
     endSkeleton();
   }
 
-  // ---- the journal, live: the newest lines, with who did each and with which agent. All is the stats poll's own newest forty (nothing more to ask); a chip asks the journal for its kinds, once a minute while it is picked — as the Journal did —; ?kind= picks a chip, or a kind of the journal's own (KINDS: meta.ts's list, what /journal?kind= named), so an old link stays filtered.
+  // ---- the journal, live: the newest lines, with who did each and with which agent. ?kind= picks a chip, or a kind of the journal's own (KINDS: meta.ts's list, what /journal?kind= named), so an old link stays filtered.
+  //
+  // What it reads, and how often. All is the stats poll's own newest lines (nothing more to ask) until Show more asks the journal for its window, once; a chip asks for its kinds once when it is picked, and again at each Show more. Then, once a minute while a chip is picked, only the newest twenty of each of its kinds are asked and added to what is drawn — three kinds at most, sixty rows a minute, under the two hundred a minute the Journal read — and the window is asked again only when they do not reach what is drawn (more lines came in than that); under All the stats poll's lines do the same.
   var GROUPS = { all: null, syncs: ["sync"], promotions: ["promote", "fast-track"], decisions: ["approve", "withdraw", "review"], blocks: ["block", "rollback"] };
   var CHIPS = { all: "All", syncs: "Syncs", promotions: "Promotions", decisions: "Decisions", blocks: "Blocks" };
+  // A kind whose word is a chip's comes under that chip (?kind=sync is Syncs); any other kind the address names is a chip of its own, named in words.
+  var GROUP_OF = { sync: "syncs", promote: "promotions", block: "blocks" };
+  var KIND_CHIPS = { gate: "Gates", "fast-track": "Fast-tracks", health: "Health checks", trial: "Trials", abi: "ABI checks", security: "Security runs", render: "Renders", publish: "Publishes", verify: "Verifies", rollback: "Rollbacks", relayout: "Relayouts", gc: "Clean-ups", deploy: "Deploys", cost: "Bills", audience: "Audience", provenance: "Provenance", dispatch: "Dispatches", job: "Jobs", build: "Builds", enqueue: "Enqueues", request: "Requests", review: "Project builds", approve: "Approvals", withdraw: "Withdrawals", trust: "Trust", role: "Roles", category: "Categories", bump: "Bumps", worker: "Workers", leak: "Leaks" };
   var asked = q.get("kind");
-  var JF = Object.prototype.hasOwnProperty.call(GROUPS, asked) ? asked : asked === "sync" ? "syncs" : KINDS.indexOf(asked) >= 0 ? asked : "all";
-  // The window: twenty lines, the stats poll's newest forty covering All; Show more asks the journal for more, up to the two hundred the Journal read.
-  var JSTART = 20, JLIMIT = JSTART, JSEEN = null, JLAST = [];
+  var JF = Object.prototype.hasOwnProperty.call(GROUPS, asked) ? asked : GROUP_OF[asked] || (KINDS.indexOf(asked) >= 0 ? asked : "all");
+  // The window: twenty lines, up to the two hundred the Journal read; the stats carry the newest RECENT (stats.ts). JLAST is what is drawn, newest first; JFULL whether the read that filled the window came back full, so the journal may hold more; JTOP the newest line drawn, what a line that just arrived is newer than.
+  var JSTART = 20, JMAX = 200, RECENT = __RECENT__, JLIMIT = JSTART, JLAST = [], JFULL = false, JTOP = null;
+  function chipLabel(v) { return CHIPS[v] || KIND_CHIPS[v] || v; }
   function chipIds() { var ids = Object.keys(CHIPS); return ids.indexOf(JF) >= 0 ? ids : ids.concat([JF]); }
   function drawChips() {
-    pick("#journal-chips", chipIds(), JF, function (v) { JF = v; JLIMIT = JSTART; JSEEN = null; drawChips(); loadJournal(); }, { url: "kind", label: function (v) { return esc(CHIPS[v] || v); } });
+    choose("#journal-chips", chipIds(), JF, function (v) { JF = v; JLIMIT = JSTART; JLAST = []; JFULL = false; JTOP = null; drawChips(); loadJournal(); }, { url: "kind", label: function (v) { return esc(chipLabel(v)); } }, "#journal");
   }
-  // A line's verb, in the handoff's words: what happened, and where to for what moves a ring.
+  // A line's verb, in the handoff's words: what happened, in the past tense, and where to for what moves a ring.
   function verbOf(e) {
-    var p = e.payload || {}, to = e.ring ? " → " + e.ring : "";
-    if (e.kind === "sync") return e.status === "error" ? "sync failed" : "synced" + to;
-    if (e.kind === "promote") return e.status === "error" ? "promotion failed" : "promoted" + to;
+    var p = e.payload || {}, to = e.ring ? " → " + e.ring : "", failed = e.status === "error";
+    if (e.kind === "sync") return failed ? "sync failed" : "synced" + to;
+    if (e.kind === "promote") return failed ? "promotion failed" : "promoted" + to;
     if (e.kind === "fast-track") return "fast-tracked" + to;
     if (e.kind === "gate") return "gate · " + (p.verdict === "block" ? "held back" : p.verdict === "skip" ? "nothing new" : "passed");
     if (e.kind === "health") return (e.ring ? e.ring + " " : "") + (HEALTH_WORD[e.status] || e.status);
@@ -601,10 +662,29 @@ __CHARTS__
     if (e.kind === "review") return "project build asked";
     if (e.kind === "block") return e.status === "ok" ? "block lifted" : "blocked";
     if (e.kind === "request") return e.status === "ok" ? "requested" : "request dropped";
-    if (e.kind === "build") return e.status === "ok" ? "built" : e.status === "error" ? "build failed" : "build retried";
+    if (e.kind === "build") return e.status === "ok" ? "built" : failed ? "build failed" : "build retried";
     if (e.kind === "publish") return "published" + to;
-    if (e.kind === "job") return e.status === "error" ? "job failed" : "job done";
-    return e.kind + (e.status === "error" ? " failed" : "");
+    if (e.kind === "job") return failed ? "job failed" : "job done";
+    if (e.kind === "trial") return failed ? "trial failed" : e.status === "warn" ? "trial warned" : "trial passed";
+    if (e.kind === "abi") return failed ? "ABI break" : e.status === "warn" ? "ABI warning" : "ABI checked";
+    if (e.kind === "security") return failed ? "advisory run failed" : "advisories matched";
+    if (e.kind === "render") return failed ? "render failed" : "rendered" + to;
+    if (e.kind === "verify") return failed ? "verify failed" : e.status === "warn" ? "verified, repaired" : "verified";
+    if (e.kind === "relayout") return failed ? "relayout failed" : "pool relaid out";
+    if (e.kind === "gc") return failed ? "clean-up failed" : "pool cleaned up";
+    if (e.kind === "deploy") return failed ? "deploy failed" : "deployed";
+    if (e.kind === "cost") return "bill estimated";
+    if (e.kind === "audience") return "audience counted";
+    if (e.kind === "provenance") return "recipes traced";
+    if (e.kind === "dispatch") return "job queued";
+    if (e.kind === "enqueue") return failed ? "enqueue failed" : "builds queued";
+    if (e.kind === "trust") return p.proposed_by ? "trust proposed" : p.trust === "project" ? "trusted" : p.trust === "community" ? "made community" : "worker revoked";
+    if (e.kind === "role") return "role changed";
+    if (e.kind === "category") return p.by === "agent" ? "category proposed" : "category set";
+    if (e.kind === "bump") return e.status === "ok" ? "update queued" : "unmaintained";
+    if (e.kind === "worker") return e.status === "warn" ? "update needed" : "worker told";
+    if (e.kind === "leak") return "secret withheld";
+    return e.kind + (failed ? " failed" : "");
   }
   // Its colour: a ring's hue for what moved a ring, red for what stopped something (a rollback, a block, a rejection, a withdrawal, a failure), green for an approval, amber for a warning.
   function toneOf(e) {
@@ -613,16 +693,19 @@ __CHARTS__
     if (e.kind === "approve") return "ok";
     return e.status === "warn" ? "warn" : "";
   }
-  // Who did it, and with which agent: the person the line names (payload.by, a login — "agent" is the project's own agent), the contributor a request or a queue is for (payload.owner), the worker a build or a job ran on (payload.worker: its owner, or the pool for the project's, with the agent it runs), else the pool. #252 names the agent on a line a person's agent drafted (payload.via.agent); it is drawn when it is there.
-  var LOGIN = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
+  // Who did it, and with which agent. The people a line names: payload.by (a login, or two where two maintainers' word made it: "m1, m2"; "agent" is the project's own agent), payload.proposed_by (a trust proposal), else the contributor a request or a queue is for (payload.owner). A line a worker wrote of its own work — a job, a build, what the pool told it (WORKER_LINES) — is its owner's, or the pool's for the project's; no other line borrows a worker's owner. The agent: #252's, on a line a person's agent drafted (payload.via.agent), or the worker's where the work was an agent's — a build (its recipe drafted) or an audit (the second agent's report); a sync or a promotion is the pool's own, and names none. A worker's agent is the one it runs now (the listing): the line does not record it.
+  var LOGIN = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/, WORKER_LINES = { job: 1, build: 1, worker: 1 };
   function whoOf(e) {
     var p = e.payload || {}, isLogin = function (x) { return typeof x === "string" && x !== "agent" && LOGIN.test(x); };
-    var login = isLogin(p.by) ? p.by : isLogin(p.owner) && !p.worker ? p.owner : "";
-    var w = !login && typeof p.worker === "string" ? workerById(p.worker) : null;
-    var agent = (p.via && typeof p.via.agent === "string" && p.via.agent) || (w && w.agent) || "";
+    var own = !!WORKER_LINES[e.kind] && typeof p.worker === "string";
+    var people = (typeof p.by === "string" ? p.by.split(/,\s*/) : []).concat([p.proposed_by]).filter(isLogin);
+    if (!people.length && !own && isLogin(p.owner)) people = [p.owner];
+    var w = own ? workerById(p.worker) : null;
+    if (!people.length && own && (w ? wtKind(w) === "community" && isLogin(w.owner) : isLogin(p.owner))) people = [w ? w.owner : p.owner];
+    var agentWork = e.kind === "build" || (e.kind === "job" && p.kind === "audit");
+    var agent = (p.via && typeof p.via.agent === "string" && p.via.agent) || (agentWork && w && w.agent) || "";
     var mark = agent ? agentOf(agent) : p.by === "agent" ? '<span class="st-ini" title="the project\'s agent">AI</span>' : "";
-    var person = login || (w && wtKind(w) === "community" ? w.owner : "");
-    if (person) return mark + '<a href="' + userHref(person) + '"' + whoAttr(person) + '>' + (mark ? '' : '<span class="st-ini" aria-hidden="true">' + esc(person.slice(0, 2).toUpperCase()) + '</span>') + esc(person) + '</a>';
+    if (people.length) return mark + people.slice(0, 2).map(function (person, i) { return '<a href="' + userHref(person) + '"' + whoAttr(person) + '>' + (mark || i ? '' : '<span class="st-ini" aria-hidden="true">' + esc(person.slice(0, 2).toUpperCase()) + '</span>') + esc(person) + '</a>'; }).join(", ");
     return (mark || '<span class="st-pool" aria-hidden="true">▣</span>') + '<span>the pool</span>';
   }
   // One line: when, its colour, what happened, the line itself — linked to the run that produced it (an https link only: runHref) and to the diff of the release it made (a whole number only: the payload is whatever a job posted) — and who.
@@ -632,22 +715,52 @@ __CHARTS__
     return '<div class="st-j' + (fresh ? " op-fresh" : "") + '"><span class="j-ago" title="' + esc(e.created_at) + '">' + (age < 10000 ? "now" : esc(span(age))) + '</span><span class="j-sq ' + tone + '"></span><span class="j-ev ' + tone + '">' + esc(verbOf(e)) + '</span>' +
       '<span class="j-what" title="' + esc(e.summary) + '">' + (run ? '<a href="' + esc(run) + '" title="open the run">' + esc(e.summary) + '</a>' : esc(e.summary)) + diff + '</span><span class="j-who">' + whoOf(e) + '</span></div>';
   }
+  // Lines added to what is drawn: a line once, newest first, the metrics snapshots left out (a snapshot is no line of the journal's), the newest JLIMIT kept. A line newer than the newest drawn before lights up as it arrives; again is a redraw for the agents the listing brought, with nothing new in it. Show more stays while the journal may hold more than is drawn: a read came back full (its metrics lines counted), or more lines are known than the window shows.
   function drawJournal(list, again) {
-    var ids = {}, kept = list.filter(function (e) { return e.kind !== "metrics"; }).sort(function (a, b) { return b.id - a.id; }).filter(function (e) { if (ids[e.id]) return false; ids[e.id] = 1; return true; }).slice(0, JLIMIT);
-    var first = JSEEN === null; JSEEN = JSEEN || {};
-    $("#journal-list").innerHTML = kept.map(function (e) { var fresh = !first && !again && !JSEEN[e.id]; JSEEN[e.id] = 1; return journalRow(e, fresh); }).join("") || '<p class="st-empty">nothing on the record yet</p>';
-    JLAST = kept;
-    $("#journal-count").textContent = kept.length ? "the " + kept.length + " newest" + (JF === "all" ? "" : " · " + (CHIPS[JF] || JF)) : "";
-    $("#journal-more").hidden = kept.length < JLIMIT || JLIMIT >= 200;
+    var ids = {}, all = JLAST.concat(list.filter(function (e) { return e.kind !== "metrics"; })).filter(function (e) { if (ids[e.id]) return false; ids[e.id] = 1; return true; }).sort(function (a, b) { return b.id - a.id; });
+    var kept = all.slice(0, JLIMIT), top = JTOP;
+    $("#journal-list").innerHTML = kept.map(function (e) { return journalRow(e, top !== null && !again && e.id > top); }).join("") || '<p class="st-empty">nothing on the record yet</p>';
+    JLAST = kept; JTOP = Math.max(JTOP || 0, kept.length ? kept[0].id : 0);
+    $("#journal-count").textContent = (kept.length === 1 ? "the newest line" : kept.length ? "the " + num(kept.length) + " newest lines" : "") + (kept.length && JF !== "all" ? " · " + chipLabel(JF) : "");
+    $("#journal-more").hidden = !(JFULL || all.length > JLIMIT) || JLIMIT >= JMAX;
   }
+  // A read of the journal for the filter picked: each of its kinds (the whole journal under All) at limit. The answer is dropped when the reader picked another filter or window since it was asked, so a slow answer never draws over the chip picked after it.
+  function readJournal(limit) {
+    var f = JF, lim = JLIMIT, kinds = f === "all" ? [null] : GROUPS[f] || [f];
+    return Promise.all(kinds.map(function (k) { return api("GET", "/api/v1/events?" + (k ? "kind=" + encodeURIComponent(k) + "&" : "") + "limit=" + limit); }))
+      .then(function (lists) { return f === JF && lim === JLIMIT ? lists.map(function (l) { return l.events || []; }) : null; });
+  }
+  // The window, asked once: a chip picked, Show more pressed, or fresh lines that did not reach what is drawn. All's first twenty are the stats poll's.
   function loadJournal() {
-    var kinds = JF === "all" ? null : GROUPS[JF] || [JF];
-    if (!kinds && JLIMIT === JSTART) { if (STATS) drawJournal(STATS.events || []); return; }
-    var reads = (kinds || [null]).map(function (k) { return api("GET", "/api/v1/events?" + (k ? "kind=" + encodeURIComponent(k) + "&" : "") + "limit=" + JLIMIT); });
-    Promise.all(reads).then(function (lists) { drawJournal(lists.reduce(function (all, l) { return all.concat(l.events || []); }, [])); })
+    if (JF === "all" && JLIMIT === JSTART) { if (STATS) statsLines(STATS); return; }
+    var lim = JLIMIT;
+    readJournal(lim).then(function (lists) { if (!lists) return; JFULL = lists.some(function (l) { return l.length >= lim; }); drawJournal([].concat.apply([], lists)); })
       .catch(function (e) { noAnswer("journal", e, "#journal-count"); });
   }
-  $("#journal-more").addEventListener("click", function () { JLIMIT = Math.min(200, JLIMIT * 2 + 10); loadJournal(); });
+  // Whether fresh lines reach what is drawn, so adding them leaves no hole: they came back short (every line there is), or share a line with it, or go back past its oldest. Otherwise more came in than was asked, and the window is read again.
+  function reaches(list, limit) {
+    if (list.length < limit) return true;
+    if (!JLAST.length) return false;
+    var have = {}; JLAST.forEach(function (e) { have[e.id] = 1; });
+    return list.some(function (e) { return have[e.id]; }) || Math.min.apply(null, list.map(function (e) { return e.id; })) < JLAST[JLAST.length - 1].id;
+  }
+  // Once a minute while a chip is picked: the newest twenty of each of its kinds, added to what is drawn. All's are the stats poll's (statsLines).
+  function refreshJournal() {
+    if (JF === "all") return;
+    readJournal(JSTART).then(function (lists) {
+      if (!lists) return;
+      if (!lists.every(function (l) { return reaches(l, JSTART); })) return loadJournal();
+      drawJournal([].concat.apply([], lists));
+    }).catch(function (e) { noAnswer("journal", e, "#journal-count"); });
+  }
+  // Under All, each stats poll: its newest lines are the first window whole, and past Show more they are added to what is drawn the same way.
+  function statsLines(d) {
+    var list = d.events || [];
+    if (JLIMIT > JSTART && !reaches(list, RECENT)) return loadJournal();
+    if (JLIMIT === JSTART) JFULL = list.length >= RECENT;
+    drawJournal(list);
+  }
+  $("#journal-more").addEventListener("click", function () { JLIMIT = Math.min(JMAX, JLIMIT * 2 + 10); loadJournal(); });
 
   // ---- the numbers: the Status page before #248, kept whole — the jobs of the week are the shell's one reduce over the series (jobsSummary), the minutes its workerMinutes, the workers its workerCounts over the listing (WC); the metrics snapshot is read for when it was taken and the pool's history.
   function renderSystem(d) {
@@ -779,17 +892,17 @@ __CHARTS__
     }, { empty: "nothing queued or built yet", text: function (t) { return [t.id, t.kind, t.name, t.arch, t.status, t.reason, t.lease_owner, t.owner, paramsLabel(t)].join(" "); } });
   }
 
-  // OPR recipes by origin: the AUR-synced count in stable is the number to drive to zero.
+  // OPR recipes in stable by where each comes from: Omarchy's own, synced from the AUR, unknown — the facts, as each package page says them.
   function renderProvenance(d) {
     var pv = d.provenance && d.provenance.stable; var el = $("#provenance"); if (!pv || !el || !pv.packages) return;
     el.hidden = false;
-    el.innerHTML = '<b>OPR recipes in stable:</b> ' + num(pv.packages) + ' packages — ' + num(pv.local) + " Omarchy's own, <b>" + num(pv.aur) + ' still synced from the AUR</b>' + (pv.unknown ? ', ' + num(pv.unknown) + ' of unknown origin' : '') + ' (<a href="https://github.com/omacom/omarchy-pkgs/tree/master/pkgbuilds">omarchy-pkgs</a>, read daily; each package page says which). The AUR number is the one to drive to zero.';
+    el.innerHTML = '<b>OPR recipes in stable:</b> ' + num(pv.packages) + ' packages — ' + num(pv.local) + " Omarchy's own, " + num(pv.aur) + ' synced from the AUR' + (pv.unknown ? ', ' + num(pv.unknown) + ' of unknown origin' : '') + ' (<a href="https://github.com/omacom/omarchy-pkgs/tree/master/pkgbuilds">omarchy-pkgs</a>, read daily; each package page says which).';
   }
-  // Architecture-independent packages stored once per architecture: Arch Linux ARM rebuilds and re-signs them.
+  // Architecture-independent packages in stable, and how many of them the pool stores once per architecture (each architecture's source signs its own copy).
   function renderAny(d) {
     var a = d.any && d.any.stable; var el = $("#any"); if (!a || !el || !a.names) return;
     el.hidden = false;
-    el.innerHTML = '<b>Architecture-independent packages in stable:</b> ' + num(a.names) + ' (' + num(a.objects) + ' objects, ' + bytes(a.bytes) + ') — ' + num(a.twice) + ' of them stored twice, once per architecture, because Arch Linux ARM rebuilds and re-signs <code>any</code> packages: ' + bytes(a.extra_bytes) + ' the pool would not need if one signed object served both.';
+    el.innerHTML = '<b>Architecture-independent packages in stable:</b> ' + num(a.names) + ' (' + num(a.objects) + ' objects, ' + bytes(a.bytes) + ') — ' + num(a.twice) + ' of them stored once per architecture (' + bytes(a.extra_bytes) + ').';
   }
   function renderCoverage(d) {
     renderProvenance(d);
@@ -802,9 +915,15 @@ __CHARTS__
         '<td>' + (pending ? pillHtml("none", "not synced yet") : '<span class="bar"><i class="' + (pct < 100 ? 'partial' : '') + '" style="width:' + pct + '%"></i></span><span class="pct">' + pct + '%</span>') + '</td><td class="num">' + bytes(c.bytes) + '</td><td class="when" title="' + esc(c.last_sync || "") + '">' + (pending ? '—' : ago(c.last_sync) + (lateSync(c) ? ' ' + pillHtml("warn", "late") : c.last_status !== "ok" ? ' ' + pillHtml(c.last_status, c.last_status) : '')) + '</td></tr>';
     }, { n: 25 });
   }
-  // The service, measured now: four lines from one answer, and the hero's first word when the index or the pool behind the API does not answer. A check that did not answer — the Worker threw (a 5xx: api() rejects with its reason), or nothing answered at all — is one line saying so, not "answering" over a body that has no times, and not a TypeError's text.
+  // The service, measured now: four lines from one answer, and the hero's first word when the index or the pool behind the API does not answer. The check answers 503 when either failed, with the body that says which — read here, not through api(), which rejects every 5xx and would call a check that answered one that did not. A check that did not answer — no body of its shape, or nothing at all — is one line saying so, not "answering" over a body that has no times, and not a TypeError's text.
   function renderService() {
-    api("GET", "/api/v1/status").then(function (s) {
+    busy(fetch("/api/v1/status")).then(function (r) {
+      return r.json().catch(function () { return null; }).then(function (s) {
+        // Anything else is api()'s failure, in its words: the body's error, or "HTTP <status>".
+        if (!s || !s.index || !s.pool || !s.checked_at) { var e = new Error((s && s.error) || "HTTP " + r.status); e.status = r.status; throw e; }
+        return s;
+      });
+    }).then(function (s) {
       var items = [
         ["ok", "API", "answering · " + esc(s.checked_at.replace("T", " ").slice(0, 19)) + " UTC"],
         [s.index.ok ? "ok" : "error", "index · D1", s.index.ok ? s.index.ms + " ms" : esc(s.index.error || "failed")],
@@ -812,14 +931,41 @@ __CHARTS__
         [s.signing ? "ok" : "warn", "signing", s.signing ? "the pool's key is loaded" : "no signing key"]
       ];
       $("#service").innerHTML = items.map(function (t) { return '<div><i class="led ' + t[0] + '"></i><b>' + t[1] + '</b><span>' + t[2] + '</span></div>'; }).join("");
-      SERVICE = { down: !s.index.ok ? "The index is not answering" : !s.pool.ok ? "The pool is not answering" : null, why: [s.index.error, s.pool.error].filter(Boolean).join(" · ") };
+      var down = [s.index.ok ? null : "the index (" + (s.index.error || "failed") + ")", s.pool.ok ? null : "the pool (" + (s.pool.error || "failed") + ")"].filter(Boolean);
+      SERVICE = { down: !s.index.ok ? "The index is not answering" : !s.pool.ok ? "The pool is not answering" : null, why: down.length ? "The API could not reach " + down.join(" or ") + " just now." : "" };
       drawHero();
     }).catch(function (e) {
       var why = noAnswer("service check", e);
       $("#service").innerHTML = '<div><i class="led error"></i><b>API</b><span>' + esc(why) + '</span></div>';
-      SERVICE = { down: "The service check did not answer", why: why };
+      SERVICE = { down: "The service check did not answer", why: reasonLine(e) };
       drawHero();
     });
+  }
+  // The pool's numbers did not answer (liveStats's read of /api/v1/stats): said in the hero and once where each section drawn from them would be — never "Checking the rings…" and "Loading" for good. A poll that fails after one answered leaves what it drew: a refresh that failed is not a pool that emptied (the shell's rule, noAnswer).
+  function statsDown(e) {
+    if (STATS) return;
+    var why = noAnswer("pool's numbers", e), line = '<p class="st-empty">' + esc(why) + '</p>', tip = ' title="' + esc(why) + '"';
+    STATS_DOWN = reasonLine(e);
+    drawHero();
+    $("#st-rings").innerHTML = PROMISED_UPWARD.map(function (ring) { return '<article class="op-card ' + ring + ' st-ring" id="ring-' + ring + '"><div class="st-ring-h"><span class="st-ring-t"><b class="op-ring-name ' + ring + '">' + ring + '</b></span></div><p class="st-wait"' + tip + '>did not answer</p></article>'; }).join("");
+    $("#sources-rows").innerHTML = '<tr><td colspan="5" class="st-dim"' + tip + '>' + esc(why) + '</td></tr>';
+    $("#checks-list").innerHTML = line;
+    ["#t-sync", "#t-checks"].forEach(function (t) { $(t + "-n").textContent = "—"; $(t + "-s").innerHTML = '<span' + tip + '>did not answer</span>'; });
+    if (JF === "all" && JLIMIT === JSTART && !JLAST.length) { $("#journal-list").innerHTML = line; $("#journal-more").hidden = true; }
+  }
+
+  // ---- the requested packages, while the numbers are open (the Pipeline's registry before #248, until the Factory draws its line, #246): the factory's list, read with the listing (half a minute at the edge); the table is served hidden and shown once it has its rows, the note saying why when they did not come. A project's address is a link only when it is https (runHref): it is whatever the request said.
+  function loadRegistry() {
+    api("GET", "/api/v1/factory/packages").then(function (d) { $("#registry-note").textContent = ""; $("#registry-wrap").hidden = false; renderRegistry(d.packages || []); })
+      .catch(function (e) { noAnswer("factory's packages", e, "#registry-note"); });
+  }
+  function renderRegistry(pkgs) {
+    pager("#registry", pkgs, function (p) {
+      var det = p.detected || {}, home = String(p.project || p.url || ""), link = runHref(home);
+      return '<tr><td><b>' + esc(p.name) + '</b>' + (p.request_id ? ' <a class="st-link" href="' + esc(POOL + "/factory/" + encodeURIComponent(p.name) + "/" + Number(p.request_id) + "/request.json") + '" title="the request, on the record">#' + Number(p.request_id) + '</a>' : '') + '</td>' +
+        '<td>' + (link ? '<a class="st-link" href="' + esc(link) + '">' + esc(home.replace(/^https:\/\/(www\.)?(github\.com\/)?/, "")) + '</a>' : esc(home)) + '</td><td>' + esc(p.owner) + '</td><td>' + esc((p.arches || []).join(", ")) + '</td>' +
+        '<td>' + esc([p.release || det.latest_tag, p.license || det.license].filter(Boolean).join(" · ")) + '</td><td>' + taskPill(p.status) + (p.staged_builds ? ' <span class="muted">' + num(p.staged_builds) + ' staged</span>' : '') + '</td><td>' + esc(p.detail || "") + '</td><td>' + ago(p.updated_at) + '</td></tr>';
+    }, { empty: 'no package requested yet — <a href="/factory">be the first</a>', text: function (p) { return [p.name, p.category, p.owner, p.url, p.status].join(" "); } });
   }
 
   // ---- the page: what the address names is opened (a fold) and landed on once the first answer drew what is above it; the rest keeps its pace.
@@ -827,23 +973,25 @@ __CHARTS__
     if (LANDED) return; LANDED = true;
     var id = location.hash ? location.hash.slice(1) : "", el = id && document.getElementById ? document.getElementById(id) : null;
     if (el && el.tagName === "DETAILS") el.open = true;
+    // /security lands on the Advisories card: its list, every open advisory, is opened below it, as the page it was showed it.
+    if (id === "advisories") $("#advisory-list").open = true;
     if (el && el.scrollIntoView) el.scrollIntoView();
   }
   function render(d) {
     STATS = d;
     drawHero(); drawTiles(d); drawRings(d); drawHistory(d); drawSources(d); drawChecks(d);
-    if (JF === "all" && JLIMIT === JSTART) drawJournal(d.events || []);
+    if (JF === "all") statsLines(d);
     renderCoverage(d); renderSystem(d); loadCost(); endSkeleton(); land();
   }
   $("#numbers").addEventListener("toggle", function () { NUMBERS = !!this.open; if (NUMBERS) loadFactory(); });
   // The rings, the history and a maintainer's buttons are drawn again once the session says who is looking.
   whoami(function () { if (STATS) { drawRings(STATS); drawHistory(STATS); } });
-  drawChips(); loadJournal(); setInterval(loadJournal, 60000);
-  loadFactory(); setInterval(loadFactory, 30000);
+  drawChips(); loadJournal(); setInterval(refreshJournal, 60000);
+  loadFactory(); setInterval(loadFactory, 60000);
   loadEvidence(); setInterval(loadEvidence, 300000);
   loadStableTile(); loadAdvisories();
   renderService(); setInterval(renderService, 60000);
-  liveStats(render, 60000);
+  liveStats(render, 60000, statsDown);
 `;
 
 export function statusHtml(poolUrl: string, version: RunningVersion): string {
@@ -860,6 +1008,7 @@ export function statusHtml(poolUrl: string, version: RunningVersion): string {
       .replace("__KINDS__", JSON.stringify(JOURNAL_KINDS))
       .replace("__SOURCES__", JSON.stringify(sourcesForScript()))
       .replace("__HISTORY__", String(RING_HISTORY))
+      .replace("__RECENT__", String(RECENT_EVENTS))
       .replace("__PROMOTE_EVERY__", String(promoteEvery))
       .replace("__FEEDS__", JSON.stringify(FEEDS))
       .split("__CADENCE__").join(ESTIMATE_CADENCE),
@@ -886,7 +1035,7 @@ export const STATUS_COMPONENTS = (F: Fixture): Component[] => {
       id: "status.hero",
       page: "/status",
       anchor: ['<p class="op-eyebrow">Status</p>', 'id="st-mark"', 'id="headline"', 'id="st-lede"', "Every sync, release, check and decision is on the record."],
-      script: ['"#headline"', "problemsOf(d)", '"All rings healthy"', '" not healthy"', 'latest(d.latest, "health", ring, arch)', "SERVICE.down", "liveStats(render, 60000)"],
+      script: ['"#headline"', "problemsOf(d)", '"All rings healthy"', '" not healthy"', 'latest(d.latest, "health", ring, arch)', "SERVICE.down", "liveStats(render, 60000, statsDown)", '"The pool\'s numbers did not answer"', "reasonLine(e)", '"No ring released yet"', '" sources not on time"'],
       reads: [{ path: stats, fields: ["latest", "latest.0.kind", "latest.0.status", "latest.0.ring", "latest.0.source", "latest.0.created_at", "coverage.0.last_sync", "coverage.0.late"] }],
       visible: EVERYONE,
     },
@@ -895,7 +1044,7 @@ export const STATUS_COMPONENTS = (F: Fixture): Component[] => {
       id: "status.tiles",
       page: "/status",
       anchor: ['<a class="op-stat" href="#sources">', 'id="t-sync-n"', 'id="t-checks-n"', 'id="t-rollbacks-n"', '<a class="op-stat" href="#advisories">', 'id="t-adv-n"'],
-      script: ['newest(d.latest, "sync")', '" sources on time"', 'countUp($("#t-checks-n"), checks.length)', "HEALTH_WORD.error", "e.payload.rolled_back_to", '"this month"', '"/api/v1/events?kind=rollback&limit=50"', "advisoryCounts(advisoriesAt(s))", "confWord()"],
+      script: ['newest(d.latest, "sync")', '" sources on time"', 'tileCount($("#t-checks-n"), checks.length)', "el.stTo === to", "HEALTH_WORD.error", "e.payload.rolled_back_to", '"this month"', '"/api/v1/events?kind=rollback&limit=50"', "advisoryCounts(advisoriesAt(s))", "confWord()"],
       reads: [
         { path: stats, fields: ["series.health", "series.health.0.ring", "series.health.0.status", "series.health.0.created_at", "coverage.0.indexed", "coverage.0.last_status"] },
         { path: "/api/v1/events?kind=rollback&limit=50", fields: ["events"] },
@@ -931,11 +1080,11 @@ export const STATUS_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // A maintainer's roll back: on a ring's card (to the release before its head) and on every release of the history but a head — the shell's button (data-rollback: it asks why, posts the job once, writes #rb-state), drawn for a maintainer only. Queued, never run: no worker claims it in the tests, so what stable serves does not change; `to` is a string, as the button's attribute sends it.
+      // A maintainer's roll back: on a ring's card (to the release before its head, named by its sequence and its id; none when the head is a rollback, whose parent is the release that failed) and on every release of the history but a head — the shell's button (data-rollback: it asks why, posts the job once, writes #rb-state), drawn for a maintainer only. Queued, never run: no worker claims it in the tests, so what stable serves does not change; `to` is a string, as the button's attribute sends it.
       id: "status.rollback",
       page: "/status",
       anchor: ['id="rb-state" hidden'],
-      script: ["function rollbackButton(ring, id, label) { return isMaintainer() ?", 'data-rollback="', 'data-ring="', '"Roll back to "', 'whoami(function () { if (STATS) { drawRings(STATS); drawHistory(STATS); } })'],
+      script: ["function rollbackButton(ring, id, label) { return isMaintainer() ?", 'data-rollback="', 'data-ring="', '"Roll back to "', "!(headRow && isRollback(headRow))", 'whoami(function () { if (STATS) { drawRings(STATS); drawHistory(STATS); } })'],
       reads: [{ path: "/auth/me", as: "maintainer", fields: ["role"] }],
       acts: [{ method: "POST", path: "/api/v1/factory/jobs", body: { kind: "rollback", params: { ring: "stable", to: String(F.previousRelease), note: "the Status page's roll back, from the fixture" } }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 201 } }],
       visible: ["maintainer"],
@@ -964,11 +1113,11 @@ export const STATUS_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // The project's workers, live: the agent's mark (the kit's agentMark), the name and the model, what each is doing and for how long, a bar that runs while it works; how many are busy (the shell's workerCounts); the listing that did not answer said in the card's foot.
+      // The project's workers, live (the listing once a minute): the agent's mark (the kit's agentMark) and the model, both named as a reader says them, the worker's name, what each is doing and for how long, a bar that runs while it works; how many are busy (the shell's workerCounts); the listing that did not answer said in the card's foot.
       id: "status.workers",
       page: "/status",
       anchor: ['id="workers"', 'id="workers-list"', 'id="workers-busy"', 'id="workers-note"', 'href="/workers"'],
-      script: ['api("GET", "/api/v1/factory?limit=" + (NUMBERS ? 100 : 10))', "setInterval(loadFactory, 30000)", 'wtKind(w) !== "community"', "workerCounts(ws)", '" busy"', "workerName(w)", "agentMark(mark, s)", "paramsLabel(t)", 'WC_DOWN = noAnswer("worker listing", e)'],
+      script: ['api("GET", "/api/v1/factory?limit=" + (NUMBERS ? 100 : 10))', "setInterval(loadFactory, 60000)", 'wtKind(w) !== "community"', "workerCounts(ws)", '" busy"', "workerName(w)", "agentMark(mark, agentName(s))", "modelOf(w.agent)", "paramsLabel(t)", 'WC_DOWN = noAnswer("worker listing", e)'],
       reads: [
         { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.id", "workers.0.arch", "workers.0.side", "workers.0.labels", "workers.0.alive", "workers.0.current_task", "workers.0.agent", "workers.0.last_seen", "tasks.0.id", "tasks.0.kind", "tasks.0.name", "tasks.0.started_at"] },
         { path: "/workers", json: false },
@@ -1004,7 +1153,7 @@ export const STATUS_COMPONENTS = (F: Fixture): Component[] => {
       id: "status.advisory-list",
       page: "/status",
       anchor: ['<details class="op-card st-fold" id="advisory-list">', 'id="pick-ring"', 'id="pick-arch"', 'id="pick-conf"', 'id="updated"', 'id="vuln"', 'href="/docs/security"'],
-      script: ['pick("#pick-ring", PROMISED_RINGS, ADV_RING', 'pick("#pick-arch", ARCHES, ADV_ARCH', 'pick("#pick-conf", SEC_CONFS, ADV_CONF', 'SEC_CONFS.indexOf(q.get("conf")) >= 0 ? q.get("conf") : SEC_CONF', '$("#advisory-list").open = true', 'pager("#vuln", rows', "sevPill(r.worst)", 'pillHtml(SEV_PILL.exploited, "exploited", "in CISA KEV")', "pkgHref(v.name, ring, arch)", "pkgHref(v.name, f.ring, arch)", "runHref(a.url)", "d.advisories_total"],
+      script: ['choose("#pick-ring", PROMISED_RINGS, ADV_RING', 'choose("#pick-arch", ARCHES, ADV_ARCH', 'choose("#pick-conf", SEC_CONFS, ADV_CONF', '"aria-pressed"', 'if (id === "advisories") $("#advisory-list").open = true', 'SEC_CONFS.indexOf(q.get("conf")) >= 0 ? q.get("conf") : SEC_CONF', '$("#advisory-list").open = true', 'pager("#vuln", rows', "sevPill(r.worst)", 'pillHtml(SEV_PILL.exploited, "exploited", "in CISA KEV")', "pkgHref(v.name, ring, arch)", "pkgHref(v.name, f.ring, arch)", "runHref(a.url)", "d.advisories_total"],
       reads: [
         { path: report, fields: ["advisories_total", "vulnerable.0.version", "vulnerable.0.source", "vulnerable.0.advisories.0.url", "vulnerable.0.advisories.0.fixed", "vulnerable.0.advisories.0.match", "vulnerable.0.advisories.0.epss", "vulnerable.0.fixed_in"] },
         { path: `/api/v1/security?ring=rc&arch=${F.arch}`, fields: ["ring", "arch", "vulnerable"] },
@@ -1014,11 +1163,11 @@ export const STATUS_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // The journal, live: All from the stats poll's newest lines, a chip asking the journal for its kinds once a minute while it is picked; ?kind= picks a chip or one of the journal's own kinds (KINDS, meta.ts), so /journal?kind=role stays filtered; Show more asks for more, up to two hundred lines.
+      // The journal, live: All from the stats poll's newest lines, a chip asking the journal for its kinds when it is picked and for their newest twenty once a minute after (the window read again only when they do not reach it); an answer for a chip or a window no longer picked is dropped; ?kind= picks a chip or one of the journal's own kinds (KINDS, meta.ts), so /journal?kind=role stays filtered; Show more asks for more, up to two hundred lines, and stays while a read came back full.
       id: "status.journal",
       page: "/status",
       anchor: ['<section class="op-card st-jr" id="journal"', 'id="journal-chips"', 'id="journal-list"', 'id="journal-count"', 'id="journal-more"'],
-      script: ["var KINDS = ", 'KINDS.indexOf(asked) >= 0 ? asked : "all"', 'syncs: ["sync"]', 'promotions: ["promote", "fast-track"]', 'decisions: ["approve", "withdraw", "review"]', 'blocks: ["block", "rollback"]', '{ url: "kind"', '"/api/v1/events?" + (k ? "kind=" + encodeURIComponent(k) + "&" : "") + "limit=" + JLIMIT', "setInterval(loadJournal, 60000)", 'noAnswer("journal", e, "#journal-count")', "op-fresh"],
+      script: ["var KINDS = ", 'KINDS.indexOf(asked) >= 0 ? asked : "all"', 'syncs: ["sync"]', 'promotions: ["promote", "fast-track"]', 'decisions: ["approve", "withdraw", "review"]', 'blocks: ["block", "rollback"]', '{ url: "kind"', '"/api/v1/events?" + (k ? "kind=" + encodeURIComponent(k) + "&" : "") + "limit=" + limit', "setInterval(refreshJournal, 60000)", "f === JF && lim === JLIMIT", "reaches(l, JSTART)", "JFULL = lists.some(function (l) { return l.length >= lim; })", '"#journal"', 'noAnswer("journal", e, "#journal-count")', "op-fresh"],
       reads: [
         { path: stats, fields: ["events", "events.0.id", "events.0.kind", "events.0.status", "events.0.ring", "events.0.summary", "events.0.created_at", "events.0.payload"] },
         { path: "/api/v1/events?kind=sync&limit=20", fields: ["events"] },
@@ -1028,11 +1177,11 @@ export const STATUS_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // Each line's who and agent: the person it names (payload.by, payload.owner), the worker it ran on (payload.worker: its owner or the pool, and the agent it runs), the agent #252 writes (payload.via.agent), else the pool; its run linked only when https (runHref), its release's diff only when a whole number.
+      // Each line's who and agent: the people it names (payload.by, payload.proposed_by, payload.owner), the worker a job or a build ran on (payload.worker: its owner or the pool, and its agent where the work was an agent's), the agent #252 writes (payload.via.agent), else the pool; its run linked only when https (runHref), its release's diff only when a whole number.
       id: "status.journal-rows",
       page: "/status",
       anchor: ['id="journal-list"'],
-      script: ["function journalRow(e, fresh)", "runHref(e.payload && e.payload.ci && e.payload.ci.run_url), rid = e.payload && Number(e.payload.release_id)", "rid === Math.floor(rid)", "function whoOf(e)", "p.via && typeof p.via.agent", "workerById(p.worker)", "userHref(person)", '"the pool"', "function verbOf(e)", "function toneOf(e)"],
+      script: ["function journalRow(e, fresh)", "runHref(e.payload && e.payload.ci && e.payload.ci.run_url), rid = e.payload && Number(e.payload.release_id)", "rid === Math.floor(rid)", "function whoOf(e)", "p.via && typeof p.via.agent", "workerById(p.worker)", "[p.proposed_by]", "WORKER_LINES[e.kind]", 'p.kind === "audit"', "userHref(person)", '"the pool"', "function verbOf(e)", "function toneOf(e)"],
       reads: [{ path: "/api/v1/factory?limit=10", fields: ["workers.0.id", "workers.0.owner", "workers.0.agent"] }],
       visible: EVERYONE,
     },
@@ -1047,7 +1196,7 @@ export const STATUS_COMPONENTS = (F: Fixture): Component[] => {
       id: "status.service",
       page: "/status",
       anchor: ["<h3>Service</h3>", 'id="service"'],
-      script: ['api("GET", "/api/v1/status")', '"#service"', "s.index.ok", "s.pool.ok", "s.signing", "setInterval(renderService, 60000)", 'noAnswer("service check", e)', '"The index is not answering"'],
+      script: ['busy(fetch("/api/v1/status"))', '"#service"', "s.index.ok", "s.pool.ok", "s.signing", "setInterval(renderService, 60000)", 'noAnswer("service check", e)', '"The index is not answering"', '"The API could not reach "'],
       reads: [{ path: "/api/v1/status", fields: ["checked_at", "index.ok", "index.ms", "pool.ok", "pool.ms", "signing"] }],
       visible: EVERYONE,
     },
@@ -1195,6 +1344,15 @@ export const STATUS_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="provenance" hidden'],
       script: ['"#provenance"', "d.provenance && d.provenance.stable", "pv.aur", "pv.unknown"],
       reads: [{ path: stats, fields: ["provenance.stable.packages", "provenance.stable.local", "provenance.stable.aur", "provenance.stable.unknown"] }],
+      visible: EVERYONE,
+    },
+    {
+      // The Pipeline's registry until the Factory draws its line (#246): every requested package, its signed request on the record, read while the numbers are open.
+      id: "status.registry-table",
+      page: "/status",
+      anchor: ['id="registry-wrap" hidden', 'id="registry"', 'id="registry-note"', "<h3>Requested packages</h3>"],
+      script: ['api("GET", "/api/v1/factory/packages")', "function renderRegistry(pkgs)", 'pager("#registry"', "p.staged_builds", '"/request.json"', "det.latest_tag", "runHref(home)", "if (NUMBERS) loadRegistry()"],
+      reads: [{ path: "/api/v1/factory/packages", fields: ["packages.0.name", "packages.0.request_id", "packages.0.project", "packages.0.url", "packages.0.owner", "packages.0.arches", "packages.0.release", "packages.0.license", "packages.0.status", "packages.0.staged_builds", "packages.0.detail", "packages.0.updated_at", "packages.0.category", "packages.0.detected"] }],
       visible: EVERYONE,
     },
     {

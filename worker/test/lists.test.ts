@@ -200,7 +200,8 @@ describe("lists come from the code that owns them", () => {
       ["/", "pool.get-started-step", "RINGS = Object.keys(RINGS_TEXT)"],
       ["/docs/get-started", "docs-get-started.ring-picker", "RINGS = Object.keys(RINGS_TEXT)"],
       ["/packages", "packages.ring-arch-pickers", "RINGS = Object.keys(RINGS_TEXT)"],
-      ["/status", "status.advisory-list", 'pick("#pick-ring", PROMISED_RINGS, ADV_RING'],
+      // Status picks through its own choose(), the shell's pick() with the pressed state and the section kept in the address.
+      ["/status", "status.advisory-list", 'choose("#pick-ring", PROMISED_RINGS, ADV_RING'],
       ["/status", "status.releases", "PROMISED_UPWARD.map(function (ring)"],
       ["/docs/how-it-works", "how-it-works.sources-diagram", "PROMISED_RINGS.forEach(function (n)"],
       ["/factory", "factory.landed", "RINGS_UPWARD.map(function (r)"],

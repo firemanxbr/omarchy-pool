@@ -1428,12 +1428,13 @@ export const HELPERS = String.raw`
   function endSkeleton() { document.querySelectorAll(".skel").forEach(function (el) { el.remove(); }); document.querySelectorAll(".empty.loading").forEach(function (el) { el.classList.remove("empty", "loading"); if (el.textContent === "Loading") el.textContent = ""; }); }
   // Numbers that change between refreshes flash briefly, so the page reads as live.
   function setTile(el, html) { el.classList.remove("skel"); if (el.innerHTML !== html) { el.innerHTML = html; el.classList.remove("bump"); void el.offsetWidth; el.classList.add("bump"); } }
-  function liveStats(render, everyMs) {
+  // The stats poll: render(d) with every answer; a read that failed is the page's to say (failed(e): Status names it where its sections would be), or nobody's.
+  function liveStats(render, everyMs, failed) {
     function load() {
       serviceStatus();
       busy(fetch("/api/v1/stats")).then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
         .then(function (d) { pipelineFrom(d); render(d); endSkeleton(); })
-        .catch(function () {});
+        .catch(function (e) { if (failed) failed(e); });
     }
     load();
     setInterval(load, everyMs || 20000);

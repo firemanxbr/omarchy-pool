@@ -17,7 +17,7 @@ const FEEDS: [string, string, string][] = [
 
 const BODY = String.raw`
   <h1>Security</h1>
-  <p class="lede">Public advisories matched against what each ring serves, every three hours, on both architectures. A package with an open advisory also <em>exposes</em> what depends on it; a promotion that would replace a clean package with a vulnerable one is blocked; a confident fix is pulled forward. <a href="/status#advisories">Every advisory, per ring →</a></p>
+  <p class="lede">Public advisories matched against what each ring serves, every three hours, on both architectures. A package with an open advisory also <em>exposes</em> what depends on it; a promotion that would replace a clean package with a vulnerable one is blocked; a confident fix is pulled forward. <a href="/status#advisory-list">Every advisory, per ring →</a></p>
 
   <section id="feeds">
     <h2>The five feeds</h2>
@@ -86,7 +86,7 @@ export const DOCS_SECURITY_COMPONENTS = (_F: Fixture): Component[] => {
     {
       id: "docs-security.lede",
       page,
-      anchor: ["<h1>Security</h1>", '<p class="lede">Public advisories matched against what each ring serves', '<a href="/status#advisories">Every advisory, per ring →</a>'],
+      anchor: ["<h1>Security</h1>", '<p class="lede">Public advisories matched against what each ring serves', '<a href="/status#advisory-list">Every advisory, per ring →</a>'],
       visible: EVERYONE,
     },
     {
