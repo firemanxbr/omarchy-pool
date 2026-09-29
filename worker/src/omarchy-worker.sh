@@ -17,7 +17,7 @@
 #   start     write the files, pull, start (or apply changed options)
 #   status    what runs here, and what the pool thinks of it
 #   logs      follow the builder's log (logs broker|updater|project for another)
-#   update    pull now and replace what changed, one service at a time
+#   update    wake the updater: it pulls now and replaces what changed (one round here when no updater runs)
 #   share     on|off — build everyone's queue, or yours only (the pool keeps it; the page has the same switch)
 #   stop      drain and stop (a build in hand finishes first, up to three hours)
 #   remove    stop and delete the files here (the registration stays; revoke it on your page)
@@ -184,12 +184,23 @@ cmd_status() {
   local running; running="$(compose ps -q 2>/dev/null | head -1)"
   if [[ -n "$running" ]]; then
     local ver; ver="$("$RUNTIME" inspect -f '{{index .Config.Env}}' "$running" 2>/dev/null | grep -oE 'OMARCHY_IMAGE=v[0-9.]+' | head -1 | cut -d= -f2 || true)"
-    say "image: ${ver:-?}${latest:+ · the pool: $latest}$( [[ -n "$ver" && -n "$latest" && "$ver" != "$latest" ]] && echo " — the updater brings it within the hour, or: omarchy-worker update")"
+    say "image: ${ver:-?}${latest:+ · the pool: $latest}$( [[ -n "$ver" && -n "$latest" && "$ver" != "$latest" ]] && echo " — the updater brings it within minutes of the pool's release, or now: omarchy-worker update")"
   fi
 }
 
 cmd_logs() { find_runtime; local svc="${1:-}"; if [[ -z "$svc" ]]; then svc=worker; [[ "$(env_get COMPOSE_PROFILES)" == project ]] && svc=project; fi; compose logs -f --tail 100 "$svc"; }
-cmd_update() { find_runtime; fetch_compose; say "pulling and replacing what changed (a build in hand finishes first)"; compose run --rm --no-deps updater --once; }
+# The updater that runs here does the round (#277): it follows the pool by itself, and a kick (SIGUSR1) makes it start one now, with its
+# own lock and its guard. Only when none runs does this run one round of its own, the same way.
+cmd_update() {
+  find_runtime; fetch_compose
+  local cid; cid="$(compose ps -q --status running updater 2>/dev/null | head -1 || true)"
+  if [[ -n "$cid" ]] && compose kill -s USR1 updater >/dev/null 2>&1; then
+    say "woke the updater: it pulls and replaces what changed now (a build in hand finishes first) — 'omarchy-worker logs updater' follows it"
+  else
+    say "no updater runs here: pulling and replacing what changed once (a build in hand finishes first); 'omarchy-worker start' starts the updater again"
+    compose run --rm --no-deps updater --once
+  fi
+}
 # The mode is the brain's: set through the worker's token, it holds from the
 # next claim (within the minute), nothing restarts — the page shows the same
 # switch. The .env keeps it too, for a set started again from scratch.

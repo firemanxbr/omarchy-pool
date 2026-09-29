@@ -294,8 +294,13 @@ enum Command {
         )]
         pool: String,
         /// The worker's token (`omw_…` from `POST /factory/workers`); the registration names the worker.
-        #[arg(long, env = "OMARCHY_WORKER_TOKEN", hide_env_values = true)]
-        worker_token: String,
+        #[arg(
+            long,
+            env = "OMARCHY_WORKER_TOKEN",
+            hide_env_values = true,
+            required_unless_present = "self_test"
+        )]
+        worker_token: Option<String>,
         /// Architecture to work for (default: this machine's).
         #[arg(long, default_value = std::env::consts::ARCH)]
         arch: String,
@@ -334,6 +339,10 @@ enum Command {
         /// A checkout of the repository (its tests/ scripts); cloned into the work dir when absent.
         #[arg(long)]
         repo_dir: Option<PathBuf>,
+        /// Read the claim answers every pool release may send — orders, a task, one it cannot read — and exit 0 without asking
+        /// any pool: the release's smoke start of this image (#277), before any tag moves.
+        #[arg(long)]
+        self_test: bool,
     },
     /// Deletes pool objects no recent release references (retention).
     Gc {
@@ -600,33 +609,41 @@ fn main() -> Result<()> {
             work_dir,
             sign,
             repo_dir,
-        } => work::run(&work::WorkOptions {
-            api,
-            pool,
-            worker_token,
-            arch: if arch == "arm64" {
-                "aarch64".to_owned()
-            } else {
-                arch
-            },
-            kinds: if kinds.is_empty() {
-                work::default_kinds()
-            } else {
-                kinds
-            },
-            shared,
-            // An empty WORKER_LABELS is none, as the build script reads it.
-            labels: if labels.trim().is_empty() {
-                serde_json::json!({})
-            } else {
-                serde_json::from_str(&labels).context("--labels (or WORKER_LABELS) must be JSON")?
-            },
-            once,
-            idle_exit,
-            work_dir,
-            sign,
-            repo_dir,
-        }),
+            self_test,
+        } => {
+            if self_test {
+                return work::self_test();
+            }
+            work::run(&work::WorkOptions {
+                api,
+                pool,
+                worker_token: worker_token
+                    .context("--worker-token (or OMARCHY_WORKER_TOKEN) is required")?,
+                arch: if arch == "arm64" {
+                    "aarch64".to_owned()
+                } else {
+                    arch
+                },
+                kinds: if kinds.is_empty() {
+                    work::default_kinds()
+                } else {
+                    kinds
+                },
+                shared,
+                // An empty WORKER_LABELS is none, as the build script reads it.
+                labels: if labels.trim().is_empty() {
+                    serde_json::json!({})
+                } else {
+                    serde_json::from_str(&labels)
+                        .context("--labels (or WORKER_LABELS) must be JSON")?
+                },
+                once,
+                idle_exit,
+                work_dir,
+                sign,
+                repo_dir,
+            })
+        }
         Command::Event {
             remote,
             kind,

@@ -22,10 +22,16 @@ ARG BASE=docker.io/library/archlinux:base-devel
 FROM ${BASE}
 ARG ARCH=x86_64
 ARG POOL_RELEASE
+# Where the release's binaries are fetched from: the GitHub release by default; CI's smoke start of a local build serves this
+# commit's own from the runner (tests/image-smoke.sh, the ci.yml job that builds the image).
+ARG TOOLS_URL=https://github.com/firemanxbr/omarchy-pool/releases/download/${POOL_RELEASE}
 ARG DOCKER_CLI=27.5.1
+# com.omarchy.updater.follows: this image's updater follows the pool (#277) — it asks GET /factory/follow every two minutes and
+# takes Update. A project worker reports it with its set's rollout, so the pool knows what rolls the set out.
 LABEL org.opencontainers.image.source="https://github.com/firemanxbr/omarchy-pool" \
       org.opencontainers.image.description="Omarchy Worker: builds for the Omarchy pool — a contributor's packages, or the project's jobs and approved rebuilds" \
-      org.opencontainers.image.licenses="MIT"
+      org.opencontainers.image.licenses="MIT" \
+      com.omarchy.updater.follows="1"
 # pacman's download sandbox needs privileges a container build does not have.
 RUN sed -i '0,/^\[options\]/s//[options]\nDisableSandboxSyscalls\nDisableSandboxFilesystem/' /etc/pacman.conf \
  && pacman -Syu --noconfirm --needed git curl jq python libarchive gnupg bash ca-certificates sudo namcap pacman-contrib && pacman -Scc --noconfirm
@@ -44,8 +50,8 @@ RUN set -eu; case "$ARCH" in x86_64) sum=db1889184726840f75c4f9c001048430d4f25b3
     echo "$sum  /tmp/docker-compose" | sha256sum -c -; install -Dm755 /tmp/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose; rm -f /tmp/docker-compose
 # The pool's tools, from the release this image is tagged with (project mode).
 RUN set -eu; name="omarchy-pool-${POOL_RELEASE}-${ARCH}-linux"; \
-    curl -fsSL -o /tmp/tools.tgz "https://github.com/firemanxbr/omarchy-pool/releases/download/${POOL_RELEASE}/${name}.tar.gz"; \
-    curl -fsSL -o /tmp/tools.tgz.sha256 "https://github.com/firemanxbr/omarchy-pool/releases/download/${POOL_RELEASE}/${name}.tar.gz.sha256"; \
+    curl -fsSL -o /tmp/tools.tgz "${TOOLS_URL}/${name}.tar.gz"; \
+    curl -fsSL -o /tmp/tools.tgz.sha256 "${TOOLS_URL}/${name}.tar.gz.sha256"; \
     cd /tmp && echo "$(cut -d' ' -f1 tools.tgz.sha256)  tools.tgz" | sha256sum -c -; \
     tar -xzf /tmp/tools.tgz -C /tmp && install -m 755 "/tmp/${name}"/pkg-repo "/tmp/${name}"/omarchy-cli "/tmp/${name}"/pkg-extract /usr/local/bin/ && rm -rf /tmp/tools.tgz* "/tmp/${name}"
 # The build half and the drafter (community mode), the auditor (project mode

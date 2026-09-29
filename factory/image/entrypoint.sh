@@ -79,10 +79,12 @@ ensure_claude() { # returns non-zero when Claude Code is not there after it
 role="${OMARCHY_WORKER_ROLE:-}"
 case "$role" in ""|pool|review|community|agent|broker|updater) ;; *) echo "omarchy-worker: OMARCHY_WORKER_ROLE must be pool, review, community, broker, agent or updater (or unset)" >&2; exit 2 ;; esac
 # The updater: the compose project (COMPOSE_DIR, mounted at the same path)
-# follows the latest image through the runtime's socket
-# (factory/bin/omarchy-rollout) — every fifteen minutes as a service, once
-# with --once (omarchy-worker update), what changed replaced together,
-# itself last. No token, no key.
+# follows the pool's release through the runtime's socket
+# (factory/bin/omarchy-rollout) — as a service it asks the pool every two
+# minutes and rolls the set out when the release changes or an Update is
+# open for one of its workers (#277), once with --once when no updater runs
+# (omarchy-worker update), what changed replaced together, itself last. No
+# token, no key.
 if [[ "$role" == updater ]]; then
   [[ -S /var/run/docker.sock ]] || { echo "omarchy-worker: the updater needs the runtime's socket at /var/run/docker.sock" >&2; exit 2; }
   exec /usr/local/lib/omarchy-factory/bin/omarchy-rollout "${@:---loop}"
@@ -155,6 +157,11 @@ export WORKER_LABELS="$labels"
 
 case "$mode" in
   project)
+    # Its id, where its set's updater reads it through the engine (#277): the updater names this worker to the pool's follow with it, and
+    # never sees the token. Root-owned, readable, beside the instance pkg-repo work writes (its own container's proof, §1.14).
+    run_dir="${OMARCHY_RUN_DIR:-/run/omarchy}"
+    if mkdir -p "$run_dir" 2>/dev/null && printf '%s\n' "$id" > "$run_dir/worker-id" 2>/dev/null; then chmod 0644 "$run_dir/worker-id" 2>/dev/null || true
+    else echo "omarchy-worker: could not write $run_dir/worker-id; its set's updater cannot name $id to the pool, and follows the pool's release alone" >&2; fi
     # The runtime's socket (DOCKER_HOST, unix:///var/run/docker.sock in the image).
     sock="${DOCKER_HOST:-unix:///var/run/docker.sock}"; sock="${sock#unix://}"
     if [[ "$sock" != *://* && ! -S "$sock" ]]; then

@@ -212,4 +212,11 @@ echo '503 {"error":"internal error"}' > "$STUB_ANSWERS"
 run_worker 60 "${common[@]}"
 [[ "$(claims | jq -r '.previous_exit.why // "none"' | tr '\n' ' ')" == "restart restart none " ]] || { echo "said until heard: $(claims | jq -c .previous_exit | tr '\n' ' ')"; exit 1; }
 rm -f "$tmp/state/last-exit"
+
+# 11. --self-test (#277, part 3): the release's smoke start of the builder — the answers a pool may send, read as the loop reads them,
+# and the claim it would send; nothing reaches the pool.
+before="$(wc -l < "$STUB_LOG")"
+out="$(env -i PATH="$PATH" HOME="$tmp" bash "$script" --self-test 2>&1)" || { echo "the builder's self-test fails: $out"; exit 1; }
+grep -q '^omarchy-build-worker --self-test: ok' <<<"$out" || { echo "the builder's self-test says so: $out"; exit 1; }
+[[ "$(wc -l < "$STUB_LOG")" == "$before" ]] || { echo "the self-test asks no pool: $(tail -n +$((before + 1)) "$STUB_LOG")"; exit 1; }
 echo "worker orders: ok"

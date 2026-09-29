@@ -67,11 +67,14 @@ services:
       WORKER_SHARED: ${WORKER_SHARED:-0}
     networks: [worker]
 
-  # Every worker follows the latest image: every fifteen minutes the updater
-  # pulls it and, one service at a time, replaces what changed — a stop is a
-  # drain, the build in hand finishes first — itself last. It holds no token
-  # and no key; it needs the runtime's socket and this directory (the compose
-  # file and .env it recreates the services from).
+  # Every worker follows the latest image: the updater asks the pool every
+  # two minutes and, when its release changes or an Update is pressed on the
+  # page of a worker of this set, pulls the image and replaces what changed —
+  # the broker first, a stop is a drain, the build in hand finishes first —
+  # itself last, and only with an image under which the rest stays up. It
+  # holds no token and no key; it needs the runtime's socket and this
+  # directory (the compose file and .env it recreates the services from).
+  # `omarchy-worker update` wakes it.
   updater:
     image: ghcr.io/firemanxbr/omarchy-worker:latest
     restart: unless-stopped
