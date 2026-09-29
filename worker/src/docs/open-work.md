@@ -42,7 +42,12 @@ request (see [CONTRIBUTING.md](CONTRIBUTING.md)), and keep
       or to a commit on `main` (the enqueue job's own), the same passkey's
       assertion on each door (in the browser only, so no token presses
       them), and whether a reset also replaces the login's token
-      ([the write tools](docs/omarchy-cli-mcp.md#write-tools)).
+      ([the write tools](docs/omarchy-cli-mcp.md#write-tools)). #277's
+      orders to a worker (Re-check agent, Restart, Restart agent service,
+      and the kinds its next parts add) also take a session or an `omc_`
+      token without a passkey, on purpose: capped, on the journal, undone
+      by another order, and neither publishing nor deciding anything (its
+      design's Q12).
 
 - [ ] **Production keys and hosting.** The staging database key is throwaway and
       the pool lives on a personal account; moving to omarchy.org means a key in
