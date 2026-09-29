@@ -861,6 +861,48 @@ describe("where a build runs", () => {
     expect(c.json.task).toMatchObject({ id: ok.json.task, pinned_to: "w6" });
     await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE name = 'pinme' AND status IN ('queued', 'leased')").run();
   });
+  it("the project's review build that dies of emulation on the Rust worker waits for a native worker of its architecture: the attempt given back, the pin dropped, the review row and the listing say so, no emulated project worker takes it again, a native one does (#281)", async () => {
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO factory_packages (name, owner, url, arches, status, project, source, description, license) VALUES ('rustyx', 'alice', 'https://rustyx.example', '[\"x86_64\"]', 'staged', 'https://rustyx.example', 'https://rustyx.example/rustyx-1.tar.gz', 'A Rust tool for the test', 'MIT')"),
+      env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, staged_prefix) VALUES ('rustyx', 'x86_64', '1', 'draft:https://rustyx.example@1', 'contributor', 100, 0, 'community', 'alice', 'build', 'staged', 'staging/alice/rustyx/1/')"),
+      // The Studio's review-x86_64 (emulated, the Rust worker) and a native x86_64 review worker, both the project's.
+      env.DB.prepare("INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, trusted_by, last_seen) VALUES ('wxe', 'x86_64', 'm1', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z'), ('wxe2', 'x86_64', 'm1', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z'), ('wxn', 'x86_64', 'm1', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z')")
+        .bind(await sha256Hex("omw_wxe"), await sha256Hex("omw_wxe2"), await sha256Hex("omw_wxn")),
+    ]);
+    const staged = (await env.DB.prepare("SELECT id FROM build_tasks WHERE name = 'rustyx'").first<{ id: number }>())!.id;
+    const agent = { agent: "anthropic/claude-sonnet-5", agent_status: "ok" };
+    const emu = { arch: "x86_64", kinds: ["build"], labels: { where: "omarchy-studio", emulated: true, role: "review" }, ...agent };
+    const nat = { arch: "x86_64", kinds: ["build"], labels: { where: "x86-box", role: "review" }, ...agent };
+    for (const w of ["omw_wxe", "omw_wxe2", "omw_wxn"]) expect((await call("POST", "/factory/claim", w === "omw_wxn" ? nat : emu, w)).status).toBe(204);
+    // The maintainer asks the emulated one by name: nothing else could take it.
+    const ok = await call("POST", `/factory/tasks/${staged}/build`, { worker: "wxe" }, "omc_m2");
+    expect(ok.status, JSON.stringify(ok.json)).toBe(200);
+    const id = ok.json.task as number;
+    const c = await call("POST", "/factory/claim", emu, "omw_wxe");
+    expect(c.json.task).toMatchObject({ id, trust: "project", attempts: 1, pinned_to: "wxe", params: { review: staged } });
+    // What `pkg-repo work` sends when rustc cannot start under qemu (crates/pkg-repo/src/work.rs, fail_body).
+    const why = "build failed (exit Some(96)) — this worker's, not the recipe's: rustc cannot start on this worker: emulated x86_64 under qemu on a host whose page size is not the guest's — a native worker is needed for this package";
+    const f = await call("POST", `/factory/tasks/${id}/fail`, { error: why, duration_ms: 300000, log_tail: why, final: false, needs_native: true }, c.json.token);
+    expect(f.json).toEqual({ task: id, status: "queued", attempts: 0 });
+    const row = (await env.DB.prepare("SELECT status, attempts, pinned_to, lease_owner, params FROM build_tasks WHERE id = ?").bind(id).first<{ status: string; attempts: number; pinned_to: string | null; lease_owner: string | null; params: string }>())!;
+    expect(row).toMatchObject({ status: "queued", attempts: 0, pinned_to: null, lease_owner: null });
+    expect(JSON.parse(row.params)).toMatchObject({ review: staged, needs_native: 1 });
+    expect(await env.DB.prepare("SELECT detail FROM factory_packages WHERE name = 'rustyx'").first()).toEqual({ detail: `the project's build (task ${id}) waits for a native x86_64 worker` });
+    expect(await env.DB.prepare("SELECT status, summary FROM events WHERE kind = 'build' ORDER BY id DESC LIMIT 1").first()).toEqual({ status: "warn", summary: expect.stringMatching(/^rustyx for x86_64 on wxe needs a native x86_64 worker — back in the queue for one, the pin to wxe dropped: /) });
+    // The pages read the mark from the listing and the task's own answer.
+    const live = (await call("GET", "/factory?live=1&limit=20")).json.tasks.find((t: any) => t.id === id);
+    expect(live).toMatchObject({ status: "queued", arch: "x86_64", params: { needs_native: 1 } });
+    expect((await call("GET", `/factory/tasks/${id}`)).json.task).toMatchObject({ status: "queued", params: { needs_native: 1 } });
+    // Not retried on an emulated worker — the one that had it, nor another.
+    expect((await call("POST", "/factory/claim", emu, "omw_wxe")).status).toBe(204);
+    expect((await call("POST", "/factory/claim", emu, "omw_wxe2")).status).toBe(204);
+    // A native worker of the architecture claims it, the attempt its first.
+    const n = await call("POST", "/factory/claim", nat, "omw_wxn");
+    expect(n.status).toBe(200);
+    expect(n.json.task).toMatchObject({ id, attempts: 1, params: { review: staged, needs_native: 1 } });
+    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE name = 'rustyx' AND status IN ('queued', 'leased')").run();
+    await env.DB.prepare("UPDATE build_workers SET revoked_at = '2026-01-01T00:00:00Z', current_task = NULL WHERE id IN ('wxe', 'wxe2', 'wxn')").run();
+  });
 });
 
 describe("staging quota", () => {

@@ -311,8 +311,9 @@ enum Command {
         /// Code) — the worker owner's key, never the pool's.
         #[arg(long = "kind")]
         kinds: Vec<String>,
-        /// Free JSON shown on the Workers page (the id's tooltip), e.g. {"where":"droplet-1"}.
-        #[arg(long, default_value = "{}")]
+        /// Free JSON shown on the Workers page (the id's tooltip), e.g. {"where":"droplet-1"};
+        /// `"emulated":true` for a worker under qemu. `WORKER_LABELS` when not given.
+        #[arg(long, env = "WORKER_LABELS", default_value = "{}")]
         labels: String,
         /// Do one task and exit.
         #[arg(long)]
@@ -614,7 +615,12 @@ fn main() -> Result<()> {
                 kinds
             },
             shared,
-            labels: serde_json::from_str(&labels).context("--labels must be JSON")?,
+            // An empty WORKER_LABELS is none, as the build script reads it.
+            labels: if labels.trim().is_empty() {
+                serde_json::json!({})
+            } else {
+                serde_json::from_str(&labels).context("--labels (or WORKER_LABELS) must be JSON")?
+            },
             once,
             idle_exit,
             work_dir,

@@ -658,22 +658,32 @@ const SCRIPT = String.raw`
   }
   // The standing approval of a shipped package, as the approvals list says it (the row Review's Decided line reads): null until that list answered, or for one older than its page.
   function standingOf(p) { return APPROVED ? APPROVED[p.name] || null : null; }
+  // What a card's build sent back by an emulated worker waits for (#281), in the shell's words: any of its targets standing at that status, not the first one only. The live read's row says it (waitsForNative); one past its twenty rows, the package's own detail, which the fail report wrote naming that task (routes/factory.ts, handleFail). "" when none waits.
+  function nativeWait(p, status) {
+    var t = p.targets || {}, d = String(p.detail || "");
+    return Object.keys(t).map(function (a) {
+      var x = t[a]; if (x.status !== status || !x.task) return "";
+      var r = taskOf(x.task); if (r) return waitsForNative(r);
+      return d.indexOf("(task " + x.task + ")") >= 0 && d.indexOf("native " + a + " worker") >= 0 ? "waiting for a native " + a + " worker" : "";
+    }).filter(Boolean)[0] || "";
+  }
   // A card's line: what is happening to it now, in a few words — the running job's step from the listing, what is built and what is not supported; a shipped one where its approval stands today, in the shell's one word (approvalWhere: its rings, blocked, publish failed or cancelled, publishing). Its tone: "" (dim), warn or bad.
   function noteOf(p, s) {
     var t = p.targets || {}, arches = Object.keys(t), ns = arches.filter(function (a) { return t[a].status === "not_supported"; });
     var off = ns.length ? ns.join(", ") + " not supported" : "";
     if (s === 0) return [arches.some(function (a) { return BUILT[t[a].status]; }) ? "built · not ready yet" : "on the record · no build yet", ""];
     if (s === 1) {
-      var run = arches.filter(function (a) { return t[a].status === "building"; }).map(function (a) { return taskOf(t[a].task); }).filter(Boolean)[0];
-      var doing = run ? (run.status === "leased" ? stepOf(run) : "queued for a worker") : "queued for a worker";
-      return [(off ? off + " · " : "") + doing, off ? "warn" : ""];
+      var run = arches.filter(function (a) { return t[a].status === "building"; }).map(function (a) { return taskOf(t[a].task); }).filter(Boolean)[0], wb = nativeWait(p, "building");
+      var doing = wb || (run ? (run.status === "leased" ? stepOf(run) : "queued for a worker") : "queued for a worker");
+      return [(off ? off + " · " : "") + doing, off || wb ? "warn" : ""];
     }
     if (s === 2) {
       var built = arches.filter(function (a) { return BUILT[t[a].status]; });
       return [(built.length === arches.length && arches.length > 1 ? "built on every architecture" : built.join(", ") + " built") + (off ? " · " + off : ""), off ? "warn" : ""];
     }
     // In review: the project's rebuild running, or staged for a maintainer's decision — or a new version building while the claim on the last one stands. Short enough for the card's one line at 1024.
-    if (s === 3) { var at = function (w) { return arches.some(function (a) { return t[a].status === w; }); }; return [(at("reviewing") ? "project rebuilding" : at("building") ? "new version building" : "rebuild staged") + (off ? " · " + off : ""), ""]; }
+    // The project's rebuild an emulated worker sent back says what it waits for (nativeWait, #281).
+    if (s === 3) { var at = function (w) { return arches.some(function (a) { return t[a].status === w; }); }, wn = nativeWait(p, "reviewing"); return [(wn ? wn : at("reviewing") ? "project rebuilding" : at("building") ? "new version building" : "rebuild staged") + (off ? " · " + off : ""), wn ? "warn" : ""]; }
     var a = standingOf(p);
     if (a) { var where = approvalWhere(a); return [where.word + (off ? " · " + off : ""), where.cls === "error" ? "bad" : ""]; }
     // No row to read yet: the targets' own word — in the pool once published; an approval alone promises nothing of its publish.
@@ -1047,11 +1057,11 @@ export const FACTORY_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // The line: five columns, a card per package placed by its targets (targets.ts, the server's rule for where each architecture stands) — checking, building, ready for review, in review, shipped —, the two review columns filed by the review list's own `state` for every package it names (ready: waiting for a claim; in_review: claimed until the decision — routes/review.ts, the rule Review files by, #274), each counting its own cards, an empty one saying so; a request whose every build failed is off it. Each card links the package's one address, its architectures as the kit's squares with the shell's words; a shipped one says where its approval stands in the shell's one word (approvalWhere over GET /factory/approvals, read when the column changes) and leads to the ring that serves it or, in none, to its build. Read again when a build starts or ends, and a card that moved is lit.
+      // The line: five columns, a card per package placed by its targets (targets.ts, the server's rule for where each architecture stands) — checking, building, ready for review, in review, shipped —, the two review columns filed by the review list's own `state` for every package it names (ready: waiting for a claim; in_review: claimed until the decision — routes/review.ts, the rule Review files by, #274), each counting its own cards, an empty one saying so; a request whose every build failed is off it. Each card links the package's one address, its architectures as the kit's squares with the shell's words; a shipped one says where its approval stands in the shell's one word (approvalWhere over GET /factory/approvals, read when the column changes) and leads to the ring that serves it or, in none, to its build. Read again when a build starts or ends, and a card that moved is lit. A build an emulated worker sent back says the native worker it waits for, whichever of its architectures it is (nativeWait: the shell's waitsForNative over the live read's task, else the package's detail naming it, #281).
       id: "factory.line",
       page: "/factory",
       anchor: ['<section class="fx-line" id="line"', 'id="line-note"', "live · a card moves when its job ends", 'id="board"', ...LINE.map((_, i) => `id="col-${i}"`), ...LINE.map(([name]) => `<span>${escapeHtml(name)}</span>`)],
-      script: ['api("GET", "/api/v1/factory/packages")', "function stageOf(p)", "function lineOf(p)", 'has("building")', "CLAIMED = { reviewing: 1, reviewed: 1 }", "BUILT = { built: 1 }", 'if (r === "in_review") return 3;', 'if (r === "ready") return 2;', "return s === 2 || s === 3 ? (p.landed ? 4 : 0) : s;", "if (allFailed(p)) return -1;", "TARGET_WORD[x.status]", "function hrefOf(p, s)", "approvalWhere(a)", "servedRing(rings)", '"/build/" + task', 'api("GET", "/api/v1/factory/approvals")', "avatarIcon(p.owner)", " op-fresh", "nothing here now", "if (SIG !== null && sig !== SIG) { loadRegistry();", 't.kind === "build"', "if (!document.hidden) loadRegistry();", 'noAnswer("registry", e)'],
+      script: ['api("GET", "/api/v1/factory/packages")', "function stageOf(p)", "function lineOf(p)", 'has("building")', "CLAIMED = { reviewing: 1, reviewed: 1 }", "BUILT = { built: 1 }", 'if (r === "in_review") return 3;', 'if (r === "ready") return 2;', "return s === 2 || s === 3 ? (p.landed ? 4 : 0) : s;", "if (allFailed(p)) return -1;", "TARGET_WORD[x.status]", "function hrefOf(p, s)", "approvalWhere(a)", "servedRing(rings)", '"/build/" + task', 'api("GET", "/api/v1/factory/approvals")', "avatarIcon(p.owner)", " op-fresh", "nothing here now", "if (SIG !== null && sig !== SIG) { loadRegistry();", 't.kind === "build"', "if (!document.hidden) loadRegistry();", 'noAnswer("registry", e)', "function nativeWait(p, status)", 'nativeWait(p, "building")', 'nativeWait(p, "reviewing")'],
       reads: [
         { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.name", "packages.0.owner", "packages.0.status", "packages.0.release", "packages.0.targets", "packages.0.updated_at", "packages.0.landed", "packages.0.blocked_at", "packages.0.detail"] },
         { path: "/api/v1/factory/review", fields: ["packages", "packages.0.name", "packages.0.state"] },

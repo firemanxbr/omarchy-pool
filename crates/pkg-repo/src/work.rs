@@ -504,19 +504,98 @@ fn report(job: &Api, token: &str, task: &Task, outcome: Result<Outcome>, took: u
             ));
         }
         Err(e) => {
-            let msg = format!("{e:#}");
-            // A failed gate is the recipe's failure: the next fresh container
-            // fails it the same way — final, as the community worker reports.
-            let last = msg.contains("— the gate");
             let _ = job.post_json_as(
                 token,
                 &format!("/factory/tasks/{}/fail", task.id),
-                &serde_json::json!({ "error": msg, "duration_ms": took, "log_tail": msg, "final": last }),
+                &fail_body(&e, took),
             );
-            say(format!("task {}: failed — {e:#}", task.id));
+            if e.downcast_ref::<NeedsNative>().is_some() {
+                say(format!(
+                    "task {}: failed, this worker's — back in the queue for a native {} worker — {e:#}",
+                    task.id, task.arch
+                ));
+            } else {
+                say(format!("task {}: failed — {e:#}", task.id));
+            }
         }
     }
     Ok(())
+}
+
+/// What `/factory/tasks/:id/fail` hears. A failed gate is the recipe's
+/// failure: the next fresh container fails it the same way — final, as the
+/// community worker reports. A build that died of emulation is this
+/// worker's (`NeedsNative`): not final, and `needs_native` sends it back to
+/// the queue for a native worker of its architecture, the attempt given
+/// back — the pool hands it to no emulated worker again.
+fn fail_body(e: &anyhow::Error, took: u64) -> serde_json::Value {
+    let msg = format!("{e:#}");
+    let native = e.downcast_ref::<NeedsNative>().is_some();
+    let last = !native && msg.contains("— the gate");
+    serde_json::json!({ "error": msg, "duration_ms": took, "log_tail": msg, "final": last, "needs_native": native })
+}
+
+/// A build this worker cannot run, whatever the recipe says: it runs
+/// emulated (`x86_64` under qemu on an `aarch64` host), and on a 16 KB-page
+/// kernel qemu cannot map every `x86_64` library — rustc (libLLVM, libedit),
+/// sudo (libldap) and their like die on load. A native worker of the
+/// architecture builds it; the report says so (`needs_native`), as the
+/// community worker's does (omarchy-build-worker.sh, exit 96).
+#[derive(Debug)]
+struct NeedsNative(String);
+
+impl std::fmt::Display for NeedsNative {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NeedsNative {}
+
+/// The worker's labels say it runs emulated (`{"emulated":true}`), read as
+/// the pool reads them (routes/factory.ts: any value JavaScript counts
+/// true) and as the build script does (omarchy-build-worker.sh,
+/// `emulated_worker`): the worker and the pool never disagree on which
+/// one it is, so a `needs_native` it sends is one the pool heeds.
+fn emulated(labels: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match labels.get("emulated") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(Value::Number(n)) => n.as_f64().is_some_and(|f| f != 0.0),
+        Some(Value::String(s)) => !s.is_empty(),
+        Some(Value::Array(_) | Value::Object(_)) => true,
+    }
+}
+
+/// Why a failed build container died of emulation, or None when it did
+/// not: the build script's own exit 96 (`toolchains_start`: a toolchain the
+/// recipe installed does not start; `libraries_start`: a library qemu could
+/// not map, sudo or anything linking libedit or libldap), its line for it,
+/// or — on an emulated worker — the loader's own words where the script
+/// did not see them (outside makepkg). The markers are the community
+/// worker's, the same script's; a native worker's "failed to map segment"
+/// is a real failure.
+fn emulation_failure(emulated: bool, code: Option<i32>, log: &str) -> Option<String> {
+    const CANNOT_START: &str = "cannot start on this worker";
+    const CANNOT_MAP: &str = "failed to map segment from shared object";
+    let line = |marker: &str| {
+        log.lines()
+            .find(|l| l.contains(marker))
+            .map(|l| l.trim().trim_start_matches("==> ").to_owned())
+    };
+    if code == Some(96) || (emulated && log.contains(CANNOT_START)) {
+        return Some(
+            line(CANNOT_START)
+                .unwrap_or_else(|| "a toolchain cannot start on this emulated worker".to_owned()),
+        );
+    }
+    if emulated {
+        return line(CANNOT_MAP).map(|l| {
+            format!("{l} — emulated under qemu on a host whose page size is not the guest's; a native worker is needed for this package")
+        });
+    }
+    None
 }
 
 /// Sleeps `d`, a second at a time, unless `stop` says so first.
@@ -1576,12 +1655,11 @@ fn build_job(opts: &WorkOptions, task: &Task, token: &Arc<Mutex<String>>) -> Res
     }
     // The worker's labels ride along: an emulated worker's build container
     // probes the toolchains a recipe installs (omarchy-build-worker.sh,
-    // toolchains_start) and fails at once when one cannot start.
-    if let Ok(labels) = std::env::var("WORKER_LABELS") {
-        if !labels.is_empty() {
-            run.arg("-e").arg(format!("WORKER_LABELS={labels}"));
-        }
-    }
+    // toolchains_start, libraries_start) and fails at once when one cannot
+    // start. The labels this worker claimed with (`--labels`, or
+    // WORKER_LABELS), not the environment's own: what the container
+    // probes, what this worker reports and what the pool heeds are one.
+    run.arg("-e").arg(format!("WORKER_LABELS={}", opts.labels));
     if let Ok(net) = std::env::var("OMARCHY_BUILD_NETWORK") {
         if !net.is_empty() {
             run.arg("--network").arg(net);
@@ -1638,6 +1716,15 @@ fn build_job(opts: &WorkOptions, task: &Task, token: &Arc<Mutex<String>>) -> Res
                 &["build.log"],
                 &["PKGBUILD", "vet.json", "tests.log", "resources.json"],
             );
+        }
+        // Died of emulation: this worker's failure, not the recipe's — back
+        // to the queue for a native worker (report, `needs_native`).
+        if let Some(why) = emulation_failure(emulated(&opts.labels), status.code(), &log_text) {
+            return Err(NeedsNative(format!(
+                "build failed (exit {:?}) — this worker's, not the recipe's: {why}:\n{tail}",
+                status.code()
+            ))
+            .into());
         }
         let gate = status.code() == Some(5);
         return Err(anyhow!(
@@ -2149,8 +2236,8 @@ fn security_job(opts: &WorkOptions, job: &Api, token: &Arc<Mutex<String>>) -> Re
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_retry_after, chrono_now, probe_agent, AgentCheck, AgentProbe, WorkOptions,
-        AGENT_PROBE_EVERY, POLL,
+        agent_retry_after, chrono_now, emulated, emulation_failure, fail_body, probe_agent,
+        AgentCheck, AgentProbe, NeedsNative, WorkOptions, AGENT_PROBE_EVERY, POLL,
     };
     use std::time::{Duration, Instant};
 
@@ -2404,5 +2491,116 @@ mod tests {
         };
         let year = year_of_era + era * 400 + i64::from(month <= 2);
         assert_eq!((year, month, day), (2023, 11, 14));
+    }
+
+    /// The review-x86_64 worker's own words: `{"where":…,"emulated":true}`.
+    #[test]
+    fn a_worker_is_emulated_when_its_labels_say_so() {
+        assert!(emulated(
+            &serde_json::json!({"where": "omarchy-studio", "emulated": true})
+        ));
+        assert!(!emulated(&serde_json::json!({"where": "omarchy-studio"})));
+        assert!(!emulated(&serde_json::json!({})));
+        // As the pool reads it (`!!labels.emulated`): one rule on both sides.
+        for yes in [
+            serde_json::json!("yes"),
+            serde_json::json!("true"),
+            serde_json::json!(1),
+        ] {
+            assert!(emulated(&serde_json::json!({ "emulated": yes })), "{yes}");
+        }
+        for no in [
+            serde_json::json!(false),
+            serde_json::json!(null),
+            serde_json::json!(0),
+            serde_json::json!(""),
+        ] {
+            assert!(!emulated(&serde_json::json!({ "emulated": no })), "{no}");
+        }
+    }
+
+    /// Exit 96 is the build script's (`toolchains_start`): a toolchain that
+    /// cannot start on this worker. Its line is the reason.
+    #[test]
+    fn exit_96_is_a_build_that_needs_a_native_worker() {
+        let log = "==> Installing dependencies\n==> rustc cannot start on this worker: emulated x86_64 under qemu on a host whose page size is not the guest's — a native worker is needed for this package\n";
+        assert_eq!(
+            emulation_failure(true, Some(96), log).as_deref(),
+            Some("rustc cannot start on this worker: emulated x86_64 under qemu on a host whose page size is not the guest's — a native worker is needed for this package")
+        );
+        // The status alone, whatever the labels say — the community worker's rule; the pool heeds it from an emulated worker only.
+        assert_eq!(
+            emulation_failure(false, Some(96), "").as_deref(),
+            Some("a toolchain cannot start on this emulated worker")
+        );
+        // The line under another status (the container runtime's own, say), on an emulated worker.
+        assert!(emulation_failure(true, Some(1), log).is_some());
+    }
+
+    /// A library qemu cannot map dies in the loader before any probe sees
+    /// it: sudo through libldap, anything linking libedit. On an emulated
+    /// worker that is this worker's failure; on a native one it is a real one.
+    #[test]
+    fn a_library_qemu_cannot_map_is_emulation_on_an_emulated_worker_only() {
+        let log = "==> Starting build()...\nsudo: error while loading shared libraries: libldap.so.2: failed to map segment from shared object\n==> ERROR: A failure occurred in build().\n";
+        let why = emulation_failure(true, Some(4), log).expect("emulated: this worker's");
+        assert!(
+            why.starts_with("sudo: error while loading shared libraries: libldap.so.2: failed to map segment from shared object — emulated under qemu"),
+            "{why}"
+        );
+        assert!(
+            why.ends_with("a native worker is needed for this package"),
+            "{why}"
+        );
+        assert_eq!(emulation_failure(false, Some(4), log), None);
+    }
+
+    #[test]
+    fn a_recipe_that_fails_is_not_emulation() {
+        let log = "==> Starting build()...\nerror[E0425]: cannot find value `x` in this scope\nerror: could not compile `rusty`\n";
+        assert_eq!(emulation_failure(true, Some(4), log), None);
+        assert_eq!(
+            emulation_failure(
+                true,
+                Some(5),
+                "==> The gate: FAIL (1 failing check(s), 0 warning(s))\n"
+            ),
+            None
+        );
+        assert_eq!(emulation_failure(true, None, ""), None);
+    }
+
+    /// What the pool hears: `needs_native` (not final) for a build that died
+    /// of emulation, final for the gate's failure, neither for the rest.
+    #[test]
+    fn the_fail_report_sends_needs_native_for_emulation_alone() {
+        let native: anyhow::Error = NeedsNative(
+            "build failed (exit Some(96)) — this worker's, not the recipe's: rustc cannot start on this worker".into(),
+        )
+        .into();
+        let b = fail_body(&native, 540_000);
+        assert_eq!(b["needs_native"], true);
+        assert_eq!(b["final"], false);
+        assert_eq!(b["duration_ms"], 540_000);
+        assert!(b["error"]
+            .as_str()
+            .unwrap()
+            .contains("rustc cannot start on this worker"));
+        // Wrapped in context on its way up, it is still this worker's.
+        let wrapped = anyhow::Error::from(NeedsNative("x".into())).context("task 7");
+        assert_eq!(fail_body(&wrapped, 1)["needs_native"], true);
+        let gate = anyhow::anyhow!("build failed (exit Some(5)) — the gate:\n…");
+        let b = fail_body(&gate, 1);
+        assert_eq!(
+            (b["final"].clone(), b["needs_native"].clone()),
+            (serde_json::json!(true), serde_json::json!(false))
+        );
+        let other =
+            anyhow::anyhow!("build failed (exit Some(4)):\nerror: could not compile `rusty`");
+        let b = fail_body(&other, 1);
+        assert_eq!(
+            (b["final"].clone(), b["needs_native"].clone()),
+            (serde_json::json!(false), serde_json::json!(false))
+        );
     }
 }

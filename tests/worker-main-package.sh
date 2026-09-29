@@ -71,7 +71,7 @@ bash -c "
 # status nobody else produces (96): makepkg's own 6 is a missing source
 # file, the recipe's fault, and the report must not send that back to the
 # queue for a native worker.
-awk '/^toolchains_start\(\)/,/^}/' "$script" > "$tmp/tc.sh"
+awk '/^toolchains_start\(\)/,/^}/; /^libraries_start\(\)/,/^}/; /^emulated_worker\(\)/,/^}/' "$script" > "$tmp/tc.sh"
 # shellcheck source=/dev/null
 source "$tmp/tc.sh"
 printf '#!/bin/sh\nexit 127\n' > "$tmp/bin/rustc"; chmod +x "$tmp/bin/rustc"
@@ -81,4 +81,23 @@ set -e
 (( rc == 96 )) || { echo "a toolchain that cannot start under emulation is status 96, not $rc"; exit 1; }
 PATH="$tmp/bin:$PATH" WORKER_LABELS='{}' toolchains_start || { echo "a native worker starts no toolchain to check"; exit 1; }
 grep -qE '^\s*if \(\( status == 96 \)\); then final=false native=true; fi' "$script" || { echo "the fail report sends status 96 alone back for a native worker"; exit 1; }
+
+# A library qemu cannot map (sudo through libldap, a libedit user) dies in
+# the loader, past any probe (#281): on an emulated worker, status 96 with
+# the loader's line, the words the fail report picks; on a native one, a
+# real failure. Checked on the first attempt, before any drafter turn.
+printf '==> Starting build()...\nsudo: error while loading shared libraries: libldap.so.2: failed to map segment from shared object\n' > "$tmp/attempt.log"
+set +e
+out="$(WORKER_LABELS='{"where":"omarchy-studio","emulated":true}' libraries_start "$tmp/attempt.log")"; rc=$?
+set -e
+(( rc == 96 )) || { echo "a library that cannot load under emulation is status 96, not $rc"; exit 1; }
+grep -q '^==> a library cannot start on this worker (sudo: error while loading shared libraries: libldap.so.2: failed to map segment from shared object): emulated .* a native worker is needed for this package$' <<<"$out" || { echo "the loader's line is the reason, in the words the report picks: $out"; exit 1; }
+[[ -z "$(WORKER_LABELS='{"where":"x86-box"}' libraries_start "$tmp/attempt.log")" ]] || { echo "a native worker's loader failure is a real one"; exit 1; }
+printf '==> Starting build()...\nerror: could not compile `rusty`\n' > "$tmp/attempt.log"
+WORKER_LABELS='{"emulated":true}' libraries_start "$tmp/attempt.log" || { echo "a recipe that fails is not the worker's"; exit 1; }
+grep -qE '^\s*libraries_start /build/attempt.log \|\| return 96$' "$script" || { echo "build_attempts checks the loader before any drafter turn"; exit 1; }
+# "emulated" is read as the pool reads it (JavaScript's truth): one rule for
+# the pool, this script and pkg-repo work.
+for l in '{"emulated":true}' '{"emulated":"yes"}' '{"emulated":1}'; do WORKER_LABELS="$l" emulated_worker || { echo "$l is emulated, as the pool reads it"; exit 1; }; done
+for l in '{}' '{"emulated":false}' '{"emulated":null}' '{"emulated":0}' '{"emulated":""}' 'not json'; do ! WORKER_LABELS="$l" emulated_worker || { echo "$l is native, as the pool reads it"; exit 1; }; done
 echo "worker-main-package: ok"

@@ -80,5 +80,6 @@ host in minutes: copy `compose.yml`, `.env`, `etc/agent.env`,
 `profiles:` lines (they are native there), `docker compose up -d
 broker-community-x86_64 community-x86_64 review-x86_64`. `COMPOSE_PROFILES=emulated` in `.env`
 turns the emulated pair on here regardless, for C-only packages (a
-toolchain that cannot start there sends the build back to the queue: *Run a
-worker* in the docs).
+toolchain or a library that cannot start there sends the build back to the
+queue for a native worker, from the community builder and the review
+worker alike: *Run a worker* in the docs, the runbook's *Studio host*).

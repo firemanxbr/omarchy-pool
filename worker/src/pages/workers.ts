@@ -7,8 +7,9 @@
  * queued when shared). Each table says, per worker: the id whole (two
  * workers of one host share a name, never an id), its state in one word,
  * the release it runs, who keeps it, what its machine uses and what it
- * last did. Public, from /api/v1/factory and /api/v1/stats. Running one is
- * a chapter of the docs.
+ * last did; above them, how many builds wait for a native worker (an
+ * emulated one sent them back). Public, from /api/v1/factory (its live
+ * read) and /api/v1/stats. Running one is a chapter of the docs.
  */
 import { page, workerPanels } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
@@ -24,6 +25,7 @@ const BODY = String.raw`
   </div>
 
   <div class="tiles four" id="tiles"></div>
+  <p class="notice warn" id="native-wait" hidden></p>
 
   <div class="roles-grid" id="kinds"></div>
 
@@ -91,6 +93,7 @@ __CHARTS__
     var wm = STATS ? workerMinutes(STATS.series, 7) : null;
     var load = al.length ? Math.round(al.reduce(function (n, w) { return n + busyOf(w); }, 0) / al.length) : 0;
     setTiles("#tiles", tilesOf(wc, bz, load, wm));
+    drawNativeWait(d);
     // One card per kind: one line on what it is for, the tasks it finished per day over a week (the Pool page's growth line, in the kind's colour), four numbers.
     var PD = perDay();
     var card = function (cls, name, ws, blurb) {
@@ -120,13 +123,26 @@ __CHARTS__
     pager("#w-community", seen(kinds.community), function (w) { return workerRow(w, "community"); }, { empty: showAll ? "no contributor's worker registered yet" : "no contributor's worker alive right now", text: wtText });
     endSkeleton();
   }
+  // The builds an emulated worker sent back (params.needs_native, #281): how many wait for a native worker, per architecture, each linked. The live read lists every task in flight up to its limit; a full page says "at least".
+  function drawNativeWait(d) {
+    var by = {}, ts = d.tasks || [];
+    ts.forEach(function (t) { if (waitsForNative(t)) (by[t.arch] = by[t.arch] || []).push(t.id); });
+    var arches = Object.keys(by).sort(), el = $("#native-wait");
+    el.hidden = !arches.length;
+    el.innerHTML = arches.map(function (a) {
+      var n = by[a].length;
+      return '<b>' + (ts.length >= LISTED ? "At least " : "") + num(n) + (n === 1 ? " build waits" : " builds wait") + ' for a native ' + esc(a) + ' worker.</b> ' + (n === 1 ? "It" : "They") + ' could not run emulated: ' + by[a].map(function (id) { return '<a href="/build/' + id + '">#' + id + '</a>'; }).join(", ") + '.';
+    }).join("<br>") + (arches.length ? ' <a href="/docs/workers">Run one →</a>' : "");
+  }
   // Worker minutes per day, the shell's one sum over the jobs series (workerMinutes) — the tile above is its total.
   function renderMinutes(d) {
     var wm = workerMinutes(d.series, 7);
     $("#c-minutes").innerHTML = stacked(wm.labels, [{ name: "minutes", color: C.blue, values: wm.values }], { label: "Worker minutes per day over seven days", empty: "no job yet" });
   }
   // The listing did not answer (api() rejects on a 5xx and on the network): the note by Every worker says so; the first load's tiles read "—", the tables draw no "no worker alive" in its place, and the rows of the last load that answered stay.
-  function load() { api("GET", "/api/v1/factory?limit=10").then(function (d) { FACTORY = d; DOWN = null; $("#lists-note").textContent = ""; render(); }).catch(function (e) { DOWN = noAnswer("worker listing", e, "#lists-note"); render(); }); }
+  // The live read: the workers and the tasks in flight through the queue's index, no counts — the full listing read every task twice for a page that shows none of them.
+  var LISTED = 200;
+  function load() { api("GET", "/api/v1/factory?live=1&limit=" + LISTED).then(function (d) { FACTORY = d; DOWN = null; $("#lists-note").textContent = ""; render(); }).catch(function (e) { DOWN = noAnswer("worker listing", e, "#lists-note"); render(); }); }
   $("#all-workers").onchange = render;
   // Who is looking decides what the rows show (the log icon is the owner's and the maintainers'): the session first, then the rows.
   whoami(function () { load(); }); setInterval(load, 20000);
@@ -170,9 +186,18 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     // The counts are the shell's (workerCounts over the listing), the same the Pool's tiles say; over a listing that did not answer the three it feeds read "—" (the shell's tilesUnanswered) and the minutes tile, the stats poll's, keeps its number.
     script: ['"#tiles"', "workerCounts(d.workers)", "function tilesOf(wc, bz, load, wm)", 'setTiles("#tiles", tilesUnanswered(tilesOf(workerCounts([]), [], null, STATS ? workerMinutes(STATS.series, 7) : null), DOWN))', '"", null, "stats"]', '"Alive"', "wc.alive", "wc.registered", "wc.byKind.project.alive", '"Building now"', "wc.building", '"Load · 24 h"', '"Worker minutes · 7 d", wm ? num(wm.total)', "workerMinutes(STATS.series, 7)"],
     reads: [
-      { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.alive", "workers.0.ready", "workers.0.current_task", "workers.0.revoked_at", "workers.0.side", "workers.0.labels"] },
+      { path: "/api/v1/factory?live=1&limit=200", fields: ["workers", "workers.0.alive", "workers.0.ready", "workers.0.current_task", "workers.0.revoked_at", "workers.0.side", "workers.0.labels"] },
       { path: "/api/v1/stats", fields: ["series.workers_daily", "series.jobs_daily"] },
     ],
+    visible: EVERYONE,
+  },
+  {
+    // How many builds wait for a native worker, per architecture, each linked (#281): the live read's queued tasks an emulated worker sent back (params.needs_native, the shell's waitsForNative). Hidden while none waits.
+    id: "workers.native-wait",
+    page: "/workers",
+    anchor: ['<p class="notice warn" id="native-wait" hidden></p>'],
+    script: ["function drawNativeWait(d)", "waitsForNative(t)", '" builds wait"', "' for a native '", "' could not run emulated: '", '"At least "', "drawNativeWait(d);"],
+    reads: [{ path: "/api/v1/factory?live=1&limit=200", fields: ["tasks", "tasks.0.id", "tasks.0.arch", "tasks.0.status", "tasks.0.params"] }],
     visible: EVERYONE,
   },
   {
@@ -181,7 +206,7 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     anchor: ['id="kinds"'],
     script: ['"#kinds"', `POOL_KINDS = ${JSON.stringify(JOB_KINDS)}`, "POOL_KINDS.indexOf(r.kind)", "jobBucket(r.status)", 'class="kchart"', 'class="mini four"', "builds_daily", "wc.byKind[cls]", "k.registered", "k.alive", "k.building"],
     reads: [
-      { path: "/api/v1/factory?limit=10", fields: ["workers.0.side", "workers.0.labels", "workers.0.alive", "workers.0.ready", "workers.0.current_task", "workers.0.revoked_at"] },
+      { path: "/api/v1/factory?live=1&limit=200", fields: ["workers.0.side", "workers.0.labels", "workers.0.alive", "workers.0.ready", "workers.0.current_task", "workers.0.revoked_at"] },
       {
         path: "/api/v1/stats",
         fields: [
@@ -200,7 +225,7 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     script: ['"#c-perworker"', "workers_daily", "running_ms", "hrows(ranked", "builds_failed"],
     reads: [
       { path: "/api/v1/stats", fields: ["series.workers_daily.0.worker", "series.workers_daily.0.ms", "series.workers_daily.0.running_ms", "series.workers_daily.0.done"] },
-      { path: "/api/v1/factory?limit=10", fields: ["workers.0.id", "workers.0.arch", "workers.0.mode", "workers.0.alive", "workers.0.current_task", "workers.0.builds_done", "workers.0.builds_failed"] },
+      { path: "/api/v1/factory?live=1&limit=200", fields: ["workers.0.id", "workers.0.arch", "workers.0.mode", "workers.0.alive", "workers.0.current_task", "workers.0.builds_done", "workers.0.builds_failed"] },
     ],
     visible: EVERYONE,
   },
@@ -217,10 +242,10 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     page: "/workers",
     shared: "worker-table",
     anchor: ['id="w-project"', 'id="w-review"', 'id="w-community"', 'id="all-workers"', 'id="lists-note"'],
-    script: ['api("GET", "/api/v1/factory?limit=10")', 'noAnswer("worker listing", e, "#lists-note")', '$("#lists-note").textContent = ""', 'wtTables()', '"#w-project"', '"#w-review"', '"#w-community"', '"#all-workers"', "showAll", "workerRow(w", "text: wtText"],
+    script: ['api("GET", "/api/v1/factory?live=1&limit=" + LISTED)', "LISTED = 200", 'noAnswer("worker listing", e, "#lists-note")', '$("#lists-note").textContent = ""', 'wtTables()', '"#w-project"', '"#w-review"', '"#w-community"', '"#all-workers"', "showAll", "workerRow(w", "text: wtText"],
     reads: [
       {
-        path: "/api/v1/factory?limit=10",
+        path: "/api/v1/factory?live=1&limit=200",
         fields: [
           "workers", "workers.0.id", "workers.0.owner", "workers.0.side", "workers.0.trust", "workers.0.labels", "workers.0.hostname", "workers.0.kinds", "workers.0.trusted_by", "workers.0.trust_proposed_by",
           "workers.0.alive", "workers.0.last_seen", "workers.0.current_task", "workers.0.ready", "workers.0.update.required", "workers.0.update.latest",
