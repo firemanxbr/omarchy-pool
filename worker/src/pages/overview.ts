@@ -256,12 +256,12 @@ __CHARTS__
   }
   $("#open-journal").addEventListener("click", function (ev) { var r = ev.target.closest ? ev.target.closest(".row") : null; if (r) r.classList.toggle("open"); });
 
-  // The people: every contributor with a registered package or a worker, every maintainer in the set the shell reads once (maintainerSet: the one list the pool keeps); the workers counted as every tile counts them (workerCounts). The four tiles are one list, so the ones over lists that did not answer (api() rejects on a 5xx and on the network) carry the same labels with "—" and the reason — an empty list stood in for a failed one here, and a pool with people read as one with none.
-  function openTiles(contributors, maintainers, wc, landed) {
+  // The people: every contributor with a registered package or a worker, every maintainer in the set the shell reads once (maintainerSet: the one list the pool keeps); the workers counted as every tile counts them (workerCounts). The Contributors tile counts as the People page it opens counts (#251) — everyone with a request, a maintainer too — so a click never lands on another number under the same word; the workers are the Workers page's. The four tiles are one list, so the ones over lists that did not answer (api() rejects on a 5xx and on the network) carry the same labels with "—" and the reason — an empty list stood in for a failed one here, and a pool with people read as one with none.
+  function openTiles(requesters, maintainers, wc, landed) {
     return [
-      ["Contributors", num(Object.keys(contributors).length), "anyone with a package or a worker", "", "/people#contributors"],
+      ["Contributors", num(Object.keys(requesters).length), "with a request", "", "/people#contributors"],
       ["Maintainers", num(Object.keys(maintainers).length), "named in MAINTAINERS.toml", "", "/people#maintainers"],
-      ["Workers alive", num(wc.alive), num(wc.registered) + " registered", "", "/people#workers"],
+      ["Workers alive", num(wc.alive), num(wc.registered) + " registered", "", "/workers"],
       ["Community packages", num(landed), "approved, built by the project", "", "/packages?origin=factory"]
     ];
   }
@@ -271,15 +271,15 @@ __CHARTS__
     api("GET", "/api/v1/factory")
   ]).then(function (res) {
     var pkgs = res[0].packages || [], maintainers = res[1] || {}, workers = res[2].workers || [], wc = workerCounts(workers);
-    var contributors = {}, isM = function (l) { return Object.prototype.hasOwnProperty.call(maintainers, l); };
-    pkgs.forEach(function (p) { if (p.owner && !isM(p.owner)) contributors[p.owner] = true; });
+    var contributors = {}, requesters = {}, isM = function (l) { return Object.prototype.hasOwnProperty.call(maintainers, l); };
+    pkgs.forEach(function (p) { if (p.owner) requesters[p.owner] = true; if (p.owner && !isM(p.owner)) contributors[p.owner] = true; });
     workers.forEach(function (w) { if (w.owner && !isM(w.owner)) contributors[w.owner] = true; });
     // Landed is the registry's own word (landed: approved or published, said once on the server) — the Factory, the Pipeline and People count the same flag.
     var landed = pkgs.filter(function (p) { return p.landed; }).length;
     var people = Object.keys(maintainers).map(function (m) { return [m, "maintainer"]; }).concat(Object.keys(contributors).map(function (c) { return [c, "contributor"]; }));
     var chips = people.map(function (p) { return personChip(p[0], p[1]); }).join("");
     $("#cc-people").innerHTML = (chips || '<span class="muted">be the first</span>') + '<span class="dim">' + num(wc.alive) + ' workers alive</span><a href="/factory">Bring a package →</a>';
-    setTiles("#open-stats", openTiles(contributors, maintainers, wc, landed));
+    setTiles("#open-stats", openTiles(requesters, maintainers, wc, landed));
   }).catch(function (e) {
     var down = noAnswer("people's lists", e);
     $("#cc-people").innerHTML = '<span class="muted">' + esc(down) + '</span><a href="/factory">Bring a package →</a>';
@@ -467,7 +467,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       id: "pool.open-stats",
       page: "/",
       anchor: ['<div class="tiles four" id="open-stats">'],
-      script: ['setTiles("#open-stats", openTiles(contributors, maintainers, wc, landed))', 'setTiles("#open-stats", tilesUnanswered(openTiles({}, {}, workerCounts([]), 0), down))', '"/people#contributors"', '"/people#maintainers"', '"/people#workers"', '"/packages?origin=factory"', "p.landed", '"Workers alive", num(wc.alive), num(wc.registered) + " registered"'],
+      script: ['setTiles("#open-stats", openTiles(requesters, maintainers, wc, landed))', 'setTiles("#open-stats", tilesUnanswered(openTiles({}, {}, workerCounts([]), 0), down))', '"/people#contributors"', '"with a request"', '"/people#maintainers"', '"/workers"', '"/packages?origin=factory"', "p.landed", '"Workers alive", num(wc.alive), num(wc.registered) + " registered"'],
       reads: [
         { path: "/api/v1/factory/packages", fields: ["packages.0.owner", "packages.0.status", "packages.0.landed"] },
         { path: "/api/v1/factory/maintainers", fields: ["maintainers.0.login"] },

@@ -1498,19 +1498,21 @@ export const HELPERS = String.raw`
  * /me signs a visitor in and comes back to their own page, Review is a
  * queue anyone may read. `words` are what else a reader may type for it:
  * the Journal, the Pipeline and Security are sections of Status now
- * (index.ts MOVED), so "journal" finds Status. test/go-menu.test.ts opens
+ * (index.ts MOVED), so "journal" finds Status; the workers are the
+ * Factory's (the door the Workers page lights, its tile one hop from it),
+ * not People's since #251. test/go-menu.test.ts opens
  * every address and finds every fragment on its page — Home's #get-started
  * included, which #243 keeps on its "Point pacman at a ring".
  */
 export const GO_ACTIONS: { label: string; hint: string; icon: LucideName; href?: string; act?: "theme"; words: string[] }[] = [
   { label: "Browse packages", hint: "/", icon: "search", href: "/packages", words: ["search", "find", "list"] },
   { label: "Set up the pool", hint: "›", icon: "terminal", href: "/#get-started", words: ["setup", "install", "pacman", "ring", "command"] },
-  { label: "Request a package", hint: "factory", icon: "git-pull-request", href: "/factory", words: ["new", "add", "contribute", "bring"] },
+  { label: "Request a package", hint: "factory", icon: "git-pull-request", href: "/factory", words: ["new", "add", "contribute", "bring", "workers"] },
   { label: "Your requests", hint: "SIGNED IN", icon: "list-checks", href: "/me", words: ["mine", "my", "workspace", "builds"] },
   { label: "Review queue", hint: "MAINTAINERS", icon: "clipboard-check", href: "/review", words: ["approve", "maintain", "staged"] },
   { label: "Connect your agent", hint: "›", icon: "bot", href: "/agents", words: ["mcp", "ai", "assistant"] },
   { label: "Docs", hint: "", icon: "book-open", href: "/docs", words: ["documentation", "help", "api", "guide"] },
-  { label: "People", hint: "", icon: "users", href: "/people", words: ["maintainers", "contributors", "workers", "who"] },
+  { label: "People", hint: "", icon: "users", href: "/people", words: ["maintainers", "contributors", "who"] },
   { label: "Status", hint: "LIVE", icon: "activity", href: "/status", words: ["health", "journal", "pipeline", "security", "advisories", "releases"] },
   { label: "Theme: dark / light", hint: "", icon: "sun-moon", act: "theme", words: ["mode", "colour", "color"] },
 ];
@@ -1847,9 +1849,8 @@ export const NAV: { key: PageOptions["active"]; href: string; label: string; sub
  * its address was the chapter on omarchy-cli as an MCP server.
  *
  * The rest of what the footer linked before is one hop from the frame, not
- * in it: the request is the Factory's first step (and People's "Bring a
- * package"), the workers are People's "Every worker", and both light the
- * Factory door; the API reference is a chapter of the docs map. Security,
+ * in it: the request is the Factory's first step, the workers are
+ * People's "Every worker", and both light the Factory door; the API reference is a chapter of the docs map. Security,
  * the Journal and the Pipeline are sections of Status (#248), and their
  * addresses redirect there (index.ts MOVED). test/pages.test.ts walks the
  * frame and fails by address for a page no longer reached in one hop.
@@ -1883,8 +1884,8 @@ export function docsHint(): string {
 export type WorkerKind = "project" | "review" | "community";
 
 /**
- * The three worker tables as every page serves them — the Workers page,
- * the People page, a person's — one panel per kind with the kind's name
+ * The three worker tables as every page serves them — the Workers page
+ * and a person's — one panel per kind with the kind's name
  * and the page's one line under it, the table the shell's script fills
  * (wtTables() the head and the skeleton, workerRow() the rows), the legend
  * after them. The order is the page's; a panel with `hidden` is a person's,

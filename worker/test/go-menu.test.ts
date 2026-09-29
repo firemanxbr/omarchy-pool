@@ -364,6 +364,9 @@ describe("the ⌘K menu, run", () => {
     expect(m.line.value, "the line is empty again").toBe("");
     m.type("journal");
     expect(m.rows().map((r) => r.label)).toEqual(["Status"]);
+    // The workers are the Factory's — the door the Workers page lights, one hop from its tile — and no longer People's since #251.
+    m.type("workers");
+    expect(m.rows().map((r) => r.label)).toEqual(["Request a package"]);
     // The pointer moves the lit row too; a press opens it, and one with a modifier is the browser's.
     m.type("do");
     m.tick();
