@@ -24,7 +24,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
 tmp="$(mktemp -d)"
 stub_pid=""
-trap '[[ -n "$stub_pid" ]] && { kill "$stub_pid" 2>/dev/null; wait "$stub_pid" 2>/dev/null; }; rm -rf "$tmp"' EXIT
+trap '[[ -n "$stub_pid" ]] && { kill "$stub_pid" 2>/dev/null; wait "$stub_pid" 2>/dev/null || true; }; rm -rf "$tmp"' EXIT
 fail() { echo "task-containers: $*" >&2; exit 1; }
 
 # ---- 1. the static check ----
