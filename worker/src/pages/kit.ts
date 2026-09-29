@@ -409,13 +409,13 @@ export const KIT_HELPERS = String.raw`
   function countUp(el, to, fmt, ms) {
     if (!el) return;
     fmt = fmt || num; to = Number(to) || 0;
-    var run = el.opCount = (el.opCount || 0) + 1, dur = ms || 1100, start = null;
+    var run = el.opCount = (el.opCount || 0) + 1, length = ms || 1100, start = null;
     if (!to || typeof requestAnimationFrame !== "function" || (window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches)) { el.textContent = fmt(to); return; }
     el.textContent = fmt(0);
     requestAnimationFrame(function step(t) {
       if (el.opCount !== run) return;
       if (start === null) start = t;
-      var p = Math.min(1, (t - start) / dur);
+      var p = Math.min(1, (t - start) / length);
       el.textContent = fmt(p < 1 ? Math.round(to * (1 - Math.pow(1 - p, 3))) : to);
       if (p < 1) requestAnimationFrame(step);
     });

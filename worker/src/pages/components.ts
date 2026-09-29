@@ -34,15 +34,12 @@ import { GO_ACTIONS, MORE, PALETTE, THEME_KEY } from "./layout";
 import { OVERVIEW_COMPONENTS } from "./overview";
 import { FACTORY_COMPONENTS } from "./contribute";
 import { REVIEW_COMPONENTS } from "./review";
-import { PIPELINE_COMPONENTS } from "./pipeline";
 import { PACKAGES_COMPONENTS, PACKAGE_COMPONENTS } from "./packages";
 import { BUILD_COMPONENTS } from "./build";
 import { USER_COMPONENTS } from "./user";
 import { PEOPLE_COMPONENTS } from "./people";
 import { WORKERS_COMPONENTS } from "./workers";
-import { SECURITY_COMPONENTS } from "./security";
 import { STATUS_COMPONENTS } from "./status";
-import { JOURNAL_COMPONENTS } from "./journal";
 import { REQUEST_COMPONENTS } from "./request";
 import { DIFF_COMPONENTS } from "./diff";
 import { API_DOCS_COMPONENTS } from "./api-docs";
@@ -354,7 +351,7 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // The rollback button a maintainer sees on a release (the Journal, the Pipeline) is the shell's: it asks, posts the job once and leaves the button disabled.
+    // The rollback button a maintainer sees on a release (Status's ring cards and ring history) is the shell's: it asks, posts the job once and leaves the button disabled.
     id: "shell.rollback",
     page: "/",
     anchor: [],
@@ -405,16 +402,13 @@ export function allComponents(F: Fixture): Component[] {
     ...OVERVIEW_COMPONENTS(F),
     ...FACTORY_COMPONENTS(F),
     ...REVIEW_COMPONENTS(F),
-    ...PIPELINE_COMPONENTS(F),
     ...PACKAGES_COMPONENTS(F),
     ...PACKAGE_COMPONENTS(F),
     ...BUILD_COMPONENTS(F),
     ...USER_COMPONENTS(F),
     ...PEOPLE_COMPONENTS(F),
     ...WORKERS_COMPONENTS(F),
-    ...SECURITY_COMPONENTS(F),
     ...STATUS_COMPONENTS(F),
-    ...JOURNAL_COMPONENTS(F),
     ...REQUEST_COMPONENTS(F),
     ...DIFF_COMPONENTS(F),
     ...API_DOCS_COMPONENTS(F),

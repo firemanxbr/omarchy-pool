@@ -159,8 +159,7 @@ const API = "/api/v1";
  * docs map. A 301 to the section with the query kept — /journal?kind=role
  * is the journal filtered, /security?ring=rc the ring's advisories — so a
  * bookmark and every link written before still land where the page went.
- * The modules of the three pages stay until #248 folds them into Status;
- * the router no longer serves them.
+ * Status draws what the three pages drew (#248); their modules are gone.
  */
 export const MOVED: Readonly<Record<string, string>> = {
   "/pipeline": "/status",

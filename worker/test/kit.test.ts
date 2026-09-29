@@ -302,8 +302,8 @@ describe("the theme", () => {
 
 describe("the v1 kit", () => {
   it("is on the pages that ask for it, and costs the others nothing: its sheet after the frame's CSS, its helpers after the shell's", async () => {
-    // No page has adopted it yet: none links the sheet, carries a primitive or the kit's helpers. The one mention of the sheet is the ⌘K menu's (#241): its icons are the kit's, and it links the sheet the first time it opens — nothing is asked for before that (test/go-menu.test.ts opens it).
-    for (const path of ["/", "/factory", "/review", "/docs", "/status", "/package/zlib"]) {
+    // A page that has not adopted it links no sheet and carries no primitive or kit helper of its own. The one mention of the sheet is the ⌘K menu's (#241): its icons are the kit's, and it links the sheet the first time it opens — nothing is asked for before that (test/go-menu.test.ts opens it).
+    for (const path of ["/", "/factory", "/review", "/docs", "/package/zlib"]) {
       const html = await page(path);
       expect(/<head>([\s\S]*?)<\/head>/.exec(html)![1], path).not.toContain("/assets/kit.");
       expect(html.split("/assets/kit.").length - 1, `${path}: the menu's mention only`).toBe(1);
@@ -318,6 +318,12 @@ describe("the v1 kit", () => {
     expect(styleOf(html)).not.toContain(".op-");
     expect(scriptOf(html)).toContain(KIT_HELPERS);
     expect(ownScriptOf(html)!.trim().startsWith("var own = 1;")).toBe(true);
+    // Status is drawn with it (#248): the sheet in its head after the frame's CSS, the helpers after the shell's, and its own script after them.
+    const status = await page("/status"), statusHead = /<head>([\s\S]*?)<\/head>/.exec(status)![1];
+    expect(statusHead.match(/\/assets\/kit\./g)?.length).toBe(1);
+    expect(statusHead.indexOf(link)).toBeGreaterThan(statusHead.indexOf("</style>"));
+    expect(scriptOf(status)).toContain(KIT_HELPERS);
+    expect(ownScriptOf(status)).not.toContain(KIT_HELPERS.trim().slice(0, 80));
   });
 
   it("serves its sheet, immutable under its hash, and nothing else under /assets/", async () => {

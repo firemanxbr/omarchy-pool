@@ -14,12 +14,13 @@ import { allComponents } from "../src/pages/components";
 import { GO_MENU, HELPERS, MORE, NAV, termId } from "../src/pages/layout";
 import { DOCS_TREE, GLOSSARY } from "../src/pages/docs-tree";
 import { CHARTS } from "../src/pages/charts";
+import { KIT_HELPERS } from "../src/pages/kit";
 import { JOURNAL_KINDS } from "../src/meta";
-import { fetchPage, ownScriptOf, RETIRED_PAGES, scriptOf, seedDashboard, type Fixture } from "./fixture";
+import { fetchPage, ownScriptOf, runScript, scriptOf, seedDashboard, type Fixture } from "./fixture";
 // The router's own source, as text (Vite's ?raw): the routed pages are read from it, so a page added to index.ts without a way in fails here by name.
 import routerSource from "../src/index.ts?raw";
 
-// The Worker's handler — and a retired page (the fixture's RETIRED_PAGES: its address redirects since #240) drawn as it was, so the rules below keep reading it until #248 folds it into Status. The redirects themselves are asserted through the handler (raw).
+// The Worker's handler, as the page tests ask it (the fixture's fetchPage); raw() asks it by method.
 async function get(path: string, cookie?: string): Promise<Response> {
   const ctx = createExecutionContext();
   const res = await fetchPage(new Request(`http://pool.test${path}`, cookie ? { headers: { cookie: `omc=${cookie}` } } : undefined), env, ctx);
@@ -40,19 +41,17 @@ function ownScript(html: string): string {
   return own!;
 }
 
-// The pages are served over the fixture's data (test/fixture.ts): the package, the build and the person exist. PAGES are what the router serves; DRAWN adds the retired pages, which every rule over a page's HTML and script still reads.
+// The pages are served over the fixture's data (test/fixture.ts): the package, the build and the person exist. PAGES are what the router serves, and every rule over a page's HTML and script reads them all.
 let F: Fixture;
 let PAGES: string[];
-let DRAWN: string[];
 beforeAll(async () => {
   F = await seedDashboard(env);
   PAGES = ["/", "/factory", "/review", "/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/what-we-test", "/docs/governance", "/docs/security", "/docs/glossary", "/docs/architecture", "/docs/runbook", "/docs/testing", "/docs/migration", "/docs/factory", "/docs/worker-host", "/docs/security-model", "/docs/contributing", "/docs/proof-of-concept", "/docs/open-work", "/docs/omarchy-cli-mcp", "/packages", `/package/${F.pkg}`, `/build/${F.projectTask}`, "/status", "/workers", "/request", `/user/${F.owner}`, "/people", "/api", "/diff"];
-  DRAWN = [...PAGES, ...Object.keys(RETIRED_PAGES)];
 });
 
 describe("dashboard pages", () => {
   it("every page is served with the shared frame and no placeholder left behind", async () => {
-    for (const path of DRAWN) {
+    for (const path of PAGES) {
       const res = await get(path);
       expect(res.status, path).toBe(200);
       const html = await res.text();
@@ -123,7 +122,7 @@ describe("dashboard pages", () => {
     }
   });
 
-  // The addresses #240 took out of the header and the footer are one redirect each, to the section they became (index.ts MOVED): a 301 with the section as the fragment and the query kept — a bookmark lands, a filtered journal stays filtered, a ring's advisories stay that ring's. A HEAD — a link checker's — is answered as a GET is. Asked through the handler itself (raw): the fixture's get() draws the retired pages.
+  // The addresses #240 took out of the header and the footer are one redirect each, to the section they became (index.ts MOVED): a 301 with the section as the fragment and the query kept — a bookmark lands, a filtered journal stays filtered, a ring's advisories stay that ring's. A HEAD — a link checker's — is answered as a GET is.
   it("redirects the Pipeline, the Journal, Security and /docs/api to the section each became, and the footer's Agents to the agents chapter until its page lands", async () => {
     let res: Response;
     expect(MOVED).toEqual({ "/pipeline": "/status", "/journal": "/status#journal", "/security": "/status#advisories", "/docs/api": "/docs#api" });
@@ -244,11 +243,11 @@ describe("dashboard pages", () => {
       [/approve, trust and roll back|approving, trusting and rolling back/, "no page has a trust control: trust is through the API"],
       [/href="\/docs#/, "the docs index has no ids: a chapter's page carries the anchors (DOCS_TREE)"],
       [/under a group in <code>factory\/MAINTAINERS\.toml/, "one list, no groups"],
-      [/Journal's\s+(?:<em>)?Ring\s+history|overview's\s+roll\s+back/, "no served page has a roll back button until #248 draws the ring history on Status: a manual rollback is the rollback job (pkg-repo job rollback, POST /api/v1/factory/jobs), as the runbook says"],
+      [/Journal's\s+(?:<em>)?Ring\s+history|overview's\s+roll\s+back/, "the Journal is a section of Status since #248, and a maintainer rolls a ring back on Status's Releases — a ring's card, its history — or with the rollback job (pkg-repo job rollback, POST /api/v1/factory/jobs)"],
       [/the\s+Pipeline\s+(?:follows|lists)|Pipeline\s+page\s+shows|Pipeline's\s+(?:build\s+tasks|counters)|Security\s+page\s+shows/, "the Pipeline and Security are not served since #240 (their addresses redirect to Status, index.ts MOVED): name Status, a build's page or the API"],
     ];
     const problems: string[] = [];
-    for (const path of DRAWN) {
+    for (const path of PAGES) {
       const html = await (await get(path)).text();
       // (a) the served HTML's links, scripts set aside: what a reader can press.
       const body = html.replace(/<script[\s\S]*?<\/script>/g, "");
@@ -265,10 +264,17 @@ describe("dashboard pages", () => {
       for (const m of html.matchAll(/\/journal\?kind=([a-z-]+)/g)) if (!JOURNAL_KINDS.includes(m[1])) problems.push(`${path} links /journal?kind=${m[1]}, a kind the journal's filter lacks (${JOURNAL_KINDS.join(", ")})`);
     }
     expect(problems, problems.join("\n")).toEqual([]);
-    // The journal's chips are the same list, and `?kind=` picks one of them rather than falling back to all.
-    const journal = ownScript(await (await get("/journal")).text());
-    expect(journal).toContain(`var KINDS = ${JSON.stringify(JOURNAL_KINDS)}`);
-    expect(journal).toContain('KINDS.indexOf(qs.get("kind")) >= 0 ? qs.get("kind") : "all"');
+    // The journal is Status's since #248 (/journal?kind=k lands on /status?kind=k#journal): `?kind=` picks one of the journal's kinds — a chip of its own beside All, Syncs, Promotions, Decisions and Blocks — rather than falling back to all; sync is the Syncs chip; a word the journal does not know is All.
+    const status = scriptOf(await (await get("/status")).text());
+    expect(ownScript(await (await get("/status")).text())).toContain(`var KINDS = ${JSON.stringify(JOURNAL_KINDS)}`);
+    const chips = (search: string) => runScript(status, { pathname: "/status", search, functions: ["chipIds"] }).chipIds() as string[];
+    const groups = ["all", "syncs", "promotions", "decisions", "blocks"];
+    expect(chips("")).toEqual(groups);
+    expect(chips("?kind=role")).toEqual([...groups, "role"]);
+    expect(chips("?kind=fast-track")).toEqual([...groups, "fast-track"]);
+    expect(chips("?kind=sync")).toEqual(groups);
+    expect(chips("?kind=promotions")).toEqual(groups);
+    expect(chips("?kind=nothing-we-know")).toEqual(groups);
     for (const k of ["role", "withdraw", "review", "request", "audience", "fast-track", "trial", "build", "promote", "rollback", "sync"]) expect(JOURNAL_KINDS, k).toContain(k);
   });
 
@@ -276,7 +282,7 @@ describe("dashboard pages", () => {
   it("no page script uses a name it does not declare", async () => {
     const GLOBALS = new Set(["window", "document", "location", "history", "navigator", "console", "fetch", "setTimeout", "setInterval", "clearTimeout", "clearInterval", "requestAnimationFrame", "cancelAnimationFrame", "encodeURIComponent", "decodeURIComponent", "encodeURI", "decodeURI", "parseInt", "parseFloat", "isNaN", "isFinite", "Number", "String", "Boolean", "Array", "Object", "Date", "Promise", "RegExp", "Error", "TypeError", "Map", "Set", "WeakMap", "JSON", "Math", "Response", "Request", "Headers", "URLSearchParams", "URL", "Function", "Symbol", "Infinity", "NaN", "undefined", "escape", "unescape", "alert", "confirm", "prompt", "Blob", "TextEncoder", "TextDecoder", "Intl", "structuredClone", "queueMicrotask", "matchMedia", "getComputedStyle", "scrollTo", "scrollBy", "scrollX", "scrollY", "innerWidth", "innerHeight", "open", "close", "atob", "btoa", "AbortController", "IntersectionObserver", "ResizeObserver", "MutationObserver", "CustomEvent", "Event", "FormData", "localStorage", "sessionStorage", "crypto", "performance", "CSS", "arguments", "this", "Element", "HTMLElement", "Node", "NodeList", "DOMParser", "XMLSerializer", "Image", "Audio", "devicePixelRatio", "self", "globalThis", "gtag", "dataLayer"]);
     const acorn = await import("acorn");
-    for (const path of DRAWN) {
+    for (const path of PAGES) {
       const html = await (await get(path)).text();
       const code = scriptOf(html);
       if (!code.trim()) continue;
@@ -367,7 +373,7 @@ describe("dashboard pages", () => {
     const dupes = (a: string[]): string[] => [...new Set(a.filter((x, i) => a.indexOf(x) !== i))];
     const program = (code: string): N[] => (acorn.parse(code, { ecmaVersion: 2020, sourceType: "script" }) as unknown as N).body;
     // The shell first, by its own name: page() splices HELPERS whole, so a name it declared twice would fail every page. The ⌘K menu's script (GO_MENU) follows it on every page, one statement that declares nothing outside itself — nor, inside, a name the shell has.
-    const helpers = program(HELPERS), charts = program(CHARTS), menu = program(GO_MENU);
+    const helpers = program(HELPERS), charts = program(CHARTS), menu = program(GO_MENU), kit = program(KIT_HELPERS);
     const shellNames = top(declarations(helpers)), chartNames = top(declarations(charts));
     expect(dupes(shellNames), "HELPERS declares a name twice").toEqual([]);
     expect(dupes(chartNames), "CHARTS declares a name twice").toEqual([]);
@@ -378,18 +384,22 @@ describe("dashboard pages", () => {
     expect(top(declarations(menu)), "GO_MENU declares nothing outside itself").toEqual([]);
     const menuShadows = declarations(menu).filter((d) => shell.has(d.name)).map((d) => d.name);
     expect(menuShadows, `GO_MENU shadows the shell's ${menuShadows.join(", ")}`).toEqual([]);
+    // A kit page (page({ kit: true })) has the kit's helpers after the menu (KIT_HELPERS): the frame's too, their names a page may not declare again, and none of them the shell's.
+    const kitNames = top(declarations(kit)), kitShadows = declarations(kit).filter((d) => shell.has(d.name)).map((d) => d.name);
+    expect(kitShadows, `KIT_HELPERS shadows the shell's ${kitShadows.join(", ")}`).toEqual([]);
     // The primitives a page draws only through CHARTS — a page that does not splice CHARTS and declares one of these has copied it.
     const CHART_ONLY = ["bars", "area", "hbars", "stacked", "lines", "hrows", "heatGrid", "buildsByDay", "jobsSummary", "workerMinutes", "worst", "lastDays"];
     const problems: string[] = [];
-    for (const path of DRAWN) {
+    for (const path of PAGES) {
       const code = scriptOf(await (await get(path)).text());
       if (!code.trim()) continue;
       // page() wraps the footer's line, the shell, the ⌘K menu, then the page's script in one function: the page's own statements are what follows the menu's, less CHARTS where the page splices it.
       const iife: N[] | undefined = program(code)[0]?.expression?.callee?.body?.body;
       expect(iife, `${path}: the page's script is not one IIFE`).toBeDefined();
       const cs = code.indexOf(CHARTS), withCharts = cs >= 0;
-      const own = iife!.slice(1 + helpers.length + menu.length).filter((st) => !(withCharts && st.start >= cs && st.end <= cs + CHARTS.length));
-      const has = new Set([...shell, ...(withCharts ? chartNames : [])]);
+      const kitted = code.includes(KIT_HELPERS);
+      const own = iife!.slice(1 + helpers.length + menu.length + (kitted ? kit.length : 0)).filter((st) => !(withCharts && st.start >= cs && st.end <= cs + CHARTS.length));
+      const has = new Set([...shell, ...(withCharts ? chartNames : []), ...(kitted ? kitNames : [])]);
       const decls = declarations(own);
       for (const d of decls) {
         if (d.inside !== null) { if (has.has(d.name)) problems.push(`${path} shadows the shell's ${d.name} inside ${d.inside}`); }
@@ -419,12 +429,11 @@ describe("dashboard pages", () => {
     expect(problems, problems.join("\n")).toEqual([]);
   });
 
-  // The dashboard's rule for roles: every role sees every section and every control, the same for all; what a role cannot do is a disabled control with the reason in its title — never hidden, never absent, never a sentence in its place. So the sections that exist for everyone are never served `hidden`; the attribute stays for what does not exist yet (a result line before a POST, a blocked notice for nobody blocked). The list is the sections the redesign names per page — Review's Yours block, a maintainer's queue line, the audit legend, the brake; the Pipeline's queue-position card, its Operations hint; the Journal's releases with the rollback column; a build's page (#acts); a person's page (#pk-request, #w-toggle, #w-own); the request's gate and form (#gate, #ask, #pkg-form); the Factory gate with its hint (#gate-hint, once hidden for a session); the People page's three worker tables and their legend.
+  // The dashboard's rule for roles: every role sees every section and every control, the same for all; what a role cannot do is a disabled control with the reason in its title — never hidden, never absent, never a sentence in its place. So the sections that exist for everyone are never served `hidden`; the attribute stays for what does not exist yet (a result line before a POST, a blocked notice for nobody blocked). The list is the sections the redesign names per page — Review's Yours block, a maintainer's queue line, the audit legend, the brake; Status's sections — the releases and their history, the sources, the workers, the checks, the advisories and their list, the journal, the numbers (its roll back is a maintainer's alone, and drawn for a maintainer only: the v1 rule, #238, is that the information is the same for everyone and only the actions change); a build's page (#acts); a person's page (#pk-request, #w-toggle, #w-own); the request's gate and form (#gate, #ask, #pkg-form); the Factory gate with its hint (#gate-hint, once hidden for a session); the People page's three worker tables and their legend.
   it("serves the sections everyone gets without hidden — a role that cannot act sees the control grey, never nothing", async () => {
     const ALWAYS: Record<string, string[]> = {
       "/review": ["mine", "mine-queue", "legend", "brake", "staged"],
-      "/pipeline": ["queue-pos", "ops-who", "staged", "heads"],
-      "/journal": ["releases", "compare"],
+      "/status": ["releases", "history", "sources", "workers", "checks", "advisories", "advisory-list", "journal", "numbers"],
       [`/build/${F.projectTask}`]: ["acts"],
       [`/user/${F.owner}`]: ["pk-request", "w-toggle", "w-own", "share-btn"],
       "/request": ["gate", "gate-who", "gate-cta", "gate-btn", "ask", "pkg-form", "pkg-checklist", "pkg-btn", "ws"],
@@ -485,7 +494,7 @@ describe("dashboard pages", () => {
     expect(unreached, `reached only by address: ${unreached.join(", ")}`).toEqual([]);
     const ways = [...routed].sort().map((p) => `${p} ← ${via.get(p)}${via.get(p) === "the frame" ? "" : " ← the frame"}`);
     console.log(`the way to every page:\n  ${ways.join("\n  ")}`);
-    // The pages nothing links, on purpose: an alias is a redirect to a page that is reached, never a page of its own — the old addresses, the pages that became sections (MOVED, #240) and, until #249, the footer's Agents. Asked through the handler itself: the fixture's get() would draw a retired page instead.
+    // The pages nothing links, on purpose: an alias is a redirect to a page that is reached, never a page of its own — the old addresses, the pages that became sections (MOVED, #240) and, until #249, the footer's Agents.
     for (const alias of ["/me", "/contribute", "/index.html", "/get-started", "/how-it-works", "/governance", "/agents", ...Object.keys(MOVED)]) {
       const res = await raw(alias);
       expect([301, 302], alias).toContain(res.status);
@@ -539,7 +548,7 @@ describe("dashboard pages", () => {
       for (const hand of ["WT_HEAD", "WT_LEGEND", 'skeletonRows("#w-', 'colspan="9"', "#workers-table", "var text = function", "<th>Worker</th>"]) expect(script, `${c.page} writes ${hand} by hand`).not.toContain(hand);
     }
     // Every page that serves a worker table claims it: a fourth page drawing rows of its own would be caught here.
-    for (const path of DRAWN) {
+    for (const path of PAGES) {
       const html = await (await get(path)).text();
       if (/class="wtable"/.test(html)) expect(claims.map((c) => c.page), `${path} serves a worker table and claims no shared component`).toContain(path);
     }
@@ -594,9 +603,9 @@ describe("dashboard pages", () => {
 // The documentation's figures are drawn the same way and checked the same way.
 describe("diagrams", () => {
   it("draws no two boxes over each other", async () => {
-    const { ringsDiagram, sourcesDiagram, liveDiagram, archDiagram, factoryDiagram } = await import("../src/pages/diagrams");
+    const { ringsDiagram, sourcesDiagram, factoryDiagram } = await import("../src/pages/diagrams");
     const { DOC_DIAGRAMS } = await import("../src/pages/doc-diagrams");
-    const draw: Record<string, () => string> = { rings: ringsDiagram, "rings/promote": () => ringsDiagram("promote"), sources: sourcesDiagram, live: liveDiagram, arch: archDiagram, factory: factoryDiagram };
+    const draw: Record<string, () => string> = { rings: ringsDiagram, "rings/promote": () => ringsDiagram("promote"), sources: sourcesDiagram, factory: factoryDiagram };
     for (const [name, fn] of Object.entries(DOC_DIAGRAMS)) draw[`docs/${name}`] = fn;
     const claimed = new Set(allComponents(F).map((c) => c.drawn).filter((k): k is string => k !== undefined));
     expect([...claimed].sort()).toEqual(Object.keys(draw).sort());

@@ -54,7 +54,7 @@ runs `/setup` again; nothing it reads went away. The key's user id,
 Everything the scheduler does can be queued by hand by a maintainer
 (`OMARCHY_API` and `OMARCHY_TOKEN=omc_…` set — the token from your own
 page); a project worker runs it with a per-job token, and Status counts it
-with the pool's other jobs (*The pipeline, in numbers*):
+with the pool's other jobs (*The numbers*, at the foot of the page):
 
 ```bash
 pkg-repo job sync --param arch=x86_64                                  # every source of the architecture, one release per ring
@@ -98,9 +98,10 @@ tests/abi-gate.sh rc x86_64                                    # ABI check of rc
 The reads run directly from anywhere (`pkg-repo releases --ring stable`,
 `pkg-repo diff`, `pkg-repo head`, `pkg-repo gc --keep 3` without `--delete`
 is a report); the writes above are jobs. A manual rollback is the
-`rollback` job above, from the CLI or `POST /api/v1/factory/jobs`: the
-dashboard has no roll back button while the ring history moves onto Status
-(#248), where the button comes back on any earlier release. A diff opens at
+`rollback` job above, from the CLI or `POST /api/v1/factory/jobs` — or, for a
+maintainer signed in, the *Roll back* button on Status's Releases: on a ring's
+card (to the release before its head) and in its ring history (to any release
+of the last 20), each asking why before it queues the same job. A diff opens at
 `/diff?ring=&from=&to=` — added, removed and upgraded packages, per
 architecture (`GET /api/v1/releases/:ring/diff`); `/diff` alone is stable's
 head against its parent. Both releases must still be inside retention: GC

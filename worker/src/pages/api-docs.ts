@@ -11,6 +11,7 @@ import { page } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
 import { escapeHtml } from "../html";
 import { API_HOST, JOURNAL_KINDS, LATE_AFTER_HOURS, type RunningVersion } from "../meta";
+import { RING_HISTORY } from "../routes/stats";
 import { BUDGET_CAP_USD, BUDGET_GUARD_USD, BUDGET_WARN_USD, ESTIMATE_CADENCE } from "../cost";
 import { JOB_KINDS } from "../jobs";
 
@@ -27,7 +28,7 @@ const READ: Row[] = [
   { routes: ["GET /version"], text: "The running release, its commit and when it was deployed." },
   { routes: ["GET /signing-key"], text: "The pool's public signing key (fingerprint, user id, armored) — what <code>pacman-key --add</code> imports." },
   { routes: ["GET /status"], text: "Service check, measured now: index (D1) and pool (R2) reachable, with timings. 503 when one is not. What <em>online</em> in the header means." },
-  { routes: ["GET /stats"], text: `Everything the overview shows in one response: rings, coverage (a source's row says <code>late</code> when its last sync is older than the pool's one threshold, ${LATE_AFTER_HOURS} hours), pool totals, chart series, the latest metrics snapshot, recent journal entries, OPR recipes by origin per ring (<code>provenance</code>), <code>any</code> packages stored once per architecture and what that costs (<code>any</code>). Cached 60 s.` },
+  { routes: ["GET /stats"], text: `Everything the overview shows in one response: rings, coverage (a source's row says <code>late</code> when its last sync is older than the pool's one threshold, ${LATE_AFTER_HOURS} hours) with what its syncs brought today (<code>today</code>), each ring's last ${RING_HISTORY} releases (<code>releases</code>, <code>source_ring</code> the ring a release's selection came from: another ring's for a promotion, its own for a rollback), pool totals, chart series, the latest metrics snapshot, recent journal entries, OPR recipes by origin per ring (<code>provenance</code>), <code>any</code> packages stored once per architecture and what that costs (<code>any</code>). Cached 60 s.` },
   { routes: ["GET /pacman.conf?ring=&arch=&with="], text: "The pacman.d include for a ring and an architecture — one section per database the ring serves right now, in the include's order; <code>with=</code> names the optional sources to keep. What <a href=\"/setup\">the setup script</a> writes, and what Get started shows." },
   { routes: ["GET /releases/:ring?fields=summary&arch="], text: "The ring's current release and a light row per package (name, version, arch, filename, sha256, sizes, description). This is what <code>omarchy-cli status</code> reads." },
   { routes: ["GET /releases/:ring?arch=&limit=&after=&release_id="], text: "Full manifests, paged (≤ 1000 per request; above 2000 packages paging is required): <code>page.next</code> names the row the next page starts after — pass it as <code>after=</code> (keyset; <code>offset=</code> still works). Add <code>include=files</code> for file lists. <code>release_id</code> pins a release across pages." },
@@ -107,7 +108,7 @@ ${rows(READ)}
 
   <section id="factory">
     <h2>The factory (read)</h2>
-    <p class="sub">What the factory's pages — Factory, Pipeline, Workers, People, Review, a person's — show. Public, cached briefly.</p>
+    <p class="sub">What the factory's pages — Factory, Status, Workers, People, Review, a person's — show. Public, cached briefly.</p>
     <div class="table-wrap"><table><thead><tr><th>Endpoint</th><th>What it returns</th></tr></thead><tbody>
 ${rows(FACTORY_READ)}
     </tbody></table></div>

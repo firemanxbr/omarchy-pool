@@ -37,7 +37,7 @@ import metricsSource from "../src/metrics.ts?raw";
 import schedulerSource from "../src/scheduler.ts?raw";
 import auditPrompt from "../../factory/prompts/audit.md";
 
-// The Worker's handler, and the three pages whose address redirects since #240 drawn as they were (the fixture's fetchPage), until #248 folds them into Status.
+// The Worker's handler (the fixture's fetchPage).
 async function get(path: string): Promise<Response> {
   const ctx = createExecutionContext();
   const res = await fetchPage(new Request(`http://pool.test${path}`), env, ctx);
@@ -141,14 +141,13 @@ describe("lists come from the code that owns them", () => {
     expect(script).not.toContain("data.rings");
   });
 
-  it("the cost cadence and the budget's three lines are cost.ts's on the API page and the Pipeline", async () => {
+  it("the cost cadence and the budget's three lines are cost.ts's on the API page and Status", async () => {
     expect(ESTIMATE_CADENCE).toBe("every three hours");
     const api = await text("/api");
     expect(api).toContain(`Estimated ${ESTIMATE_CADENCE}; the lines: warn at US$ ${BUDGET_WARN_USD}, pause at US$ ${BUDGET_GUARD_USD}, cap US$ ${BUDGET_CAP_USD}.`);
-    const pipeline = await text("/pipeline");
-    expect(pipeline).toContain(`Cloudflare, estimated ${ESTIMATE_CADENCE} from its analytics`);
-    expect(pipeline).toContain(`Estimated ${ESTIMATE_CADENCE}; the report warns from US$`);
-    expect(scriptOf(pipeline)).toContain(`no estimate yet (${ESTIMATE_CADENCE})`);
+    // The bill tile in Status's numbers (the Pipeline's budget panel went with it, #248) says the cadence where there is no estimate yet.
+    const status = await text("/status");
+    expect(scriptOf(status)).toContain(`no estimate yet (${ESTIMATE_CADENCE})`);
     const runbook = await text("/docs/runbook");
     expect(runbook).toContain(`the cost estimate (${ESTIMATE_CADENCE}) it does itself`);
     expect(runbook).toContain(`The brain estimates the month's bill ${ESTIMATE_CADENCE} from`);
@@ -201,11 +200,8 @@ describe("lists come from the code that owns them", () => {
       ["/", "pool.get-started-step", "RINGS = Object.keys(RINGS_TEXT)"],
       ["/docs/get-started", "docs-get-started.ring-picker", "RINGS = Object.keys(RINGS_TEXT)"],
       ["/packages", "packages.ring-arch-pickers", "RINGS = Object.keys(RINGS_TEXT)"],
-      ["/security", "security.pickers", "RINGS = PROMISED_RINGS"],
-      ["/security", "security.per-ring-chart", "stacked(PROMISED_UPWARD"],
-      ["/pipeline", "pipeline.ring-heads", "PROMISED_RINGS.map(function (n)"],
-      ["/pipeline", "pipeline.arch-diagram", 'live("heads", PROMISED_UPWARD.map(function (n)'],
-      ["/status", "status.rings-table", "PROMISED_RINGS.forEach(function (ring)"],
+      ["/status", "status.advisory-list", 'pick("#pick-ring", PROMISED_RINGS, ADV_RING'],
+      ["/status", "status.releases", "PROMISED_UPWARD.map(function (ring)"],
       ["/docs/how-it-works", "how-it-works.sources-diagram", "PROMISED_RINGS.forEach(function (n)"],
       ["/factory", "factory.landed", "RINGS_UPWARD.map(function (r)"],
     ] as const) {
@@ -224,14 +220,14 @@ describe("lists come from the code that owns them", () => {
     expect(HELPERS).toContain("arch && arch !== \"all\" ? arch : ARCHES[0]");
     expect(HELPERS).toContain("opts.arch || ARCHES[0]");
     expect(HELPERS).toMatch(/source === NULL_SOURCE_ARCH|e\.source \|\| NULL_SOURCE_ARCH/);
-    for (const path of ["/", "/factory", "/review", "/pipeline", "/packages", "/security", "/status", "/workers", "/journal", "/request", "/people", "/docs/get-started", `/package/${F.pkg}`, `/build/${F.projectTask}`, `/user/${F.owner}`]) {
+    for (const path of ["/", "/factory", "/review", "/packages", "/status", "/workers", "/request", "/people", "/docs/get-started", `/package/${F.pkg}`, `/build/${F.projectTask}`, `/user/${F.owner}`]) {
       const own = ownScriptOf(await text(path))!;
       expect(own, `${path} types x86_64 as a default`).not.toMatch(typedDefault);
       expect(own, `${path} types the null source's architecture`).not.toMatch(/source \|\| "x86_64"/);
     }
     expect(ownScriptOf(await text(`/user/${F.owner}`))).toContain("arch || ARCHES[0]");
     expect(ownScriptOf(await text("/"))).toContain('pkgHref(p.name, "stable", ARCHES[0])');
-    expect(ownScriptOf(await text("/pipeline"))).toContain("h.source || NULL_SOURCE_ARCH");
+    expect(ownScriptOf(await text("/status"))).toContain("h.source || NULL_SOURCE_ARCH");
   });
 
   it("the Workers page's pool kinds are JOB_KINDS, spliced in — a kind added to jobs.ts lands on the project's card", async () => {
