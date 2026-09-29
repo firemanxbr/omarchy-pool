@@ -2,8 +2,8 @@
  * The v1 kit (#238, #239): the pieces the v1.0 pages are drawn with, taken
  * from the handoff's prototype (design/Hi-fi v1.0.dc.html) once, here, so
  * the page pull requests share one set instead of each inventing its own.
- * Nothing uses it yet: a page adopts it when its own issue lands, by
- * passing kit: true to page(), and declares what it draws in its own
+ * A page adopts it when its own issue lands, by passing kit: true to
+ * page(), and declares what it draws in its own
  * manifest entry (components.ts). A page that has not adopted it pays
  * nothing for it — no request, no bytes — and looks the same.
  *

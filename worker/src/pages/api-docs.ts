@@ -89,6 +89,28 @@ const WRITE_PEOPLE: Row[] = [
 /** Every route the reference documents under /api/v1, as "METHOD /path" with the query hint dropped — what the test holds against the router. */
 export const DOCUMENTED_ROUTES: string[] = [...READ, ...FACTORY_READ, ...WRITE_JOBS, ...WRITE_PEOPLE].filter((r) => !r.root).flatMap((r) => r.routes.map((x) => x.replace(/\?.*$/, "")));
 
+/**
+ * The reads the docs index's API section lists (#250, pages/docs.ts): a
+ * route as a row above writes it — method, path, query hint — and what it
+ * answers in a few words. A reader starts from these; the rest is here.
+ * test/lists.test.ts holds each to a read row of this page and to a GET
+ * the router serves, so the short table cannot name a route that is gone
+ * or one that writes.
+ */
+export const API_BRIEF: [route: string, returns: string][] = [
+  ["GET /package/:name?ring=&arch=", "a package: its version in every ring, what it depends on, its advisories"],
+  ["GET /search?q=&ring=&arch=&limit=", "packages in a ring, by name or description"],
+  ["GET /releases/:ring?fields=summary&arch=", "the ring's current release, a line per package"],
+  ["GET /packages/:sha256/provenance", "the seal of one package file: where it came from, and the proof"],
+  ["GET /security?ring=&arch=", "open advisories in a ring, by package"],
+  ["GET /events?kind=&limit=", "the journal, newest first"],
+  ["GET /factory/packages", "every request, and where it stands"],
+  ["GET /factory/review", "what waits for a maintainer"],
+];
+
+/** The read rows' routes as they are written, for the test that holds API_BRIEF to them. */
+export const READ_ROUTES: string[] = [...READ, ...FACTORY_READ].flatMap((r) => r.routes);
+
 /** A route's cell: every route whole, in a code each. */
 const cell = (routes: string[]) => routes.map((r) => `<code>${escapeHtml(r)}</code>`).join(" · ");
 const rows = (list: Row[]) => list.map((r) => `      <tr><td>${cell(r.routes)}</td>${r.who ? `<td>${r.who}</td>` : ""}<td>${r.text}</td></tr>`).join("\n");
