@@ -1,63 +1,185 @@
 /**
  * Shared page frame of the dashboard: styles (omarchy.org's Tokyo Night look),
- * the header with the four doors and the running version, the footer,
- * and the small helpers every page script uses. No build step: each page is a
- * string with a <script> that reads /api/v1/stats.
+ * the header with the three doors and the running version, the footer, the
+ * ⌘K menu, and the small helpers every page script uses. No build step: each
+ * page is a string with a <script> that reads /api/v1/stats.
  */
 import type { RunningVersion } from "../meta";
 import { DOCS_TREE, GLOSSARY, type DocKey } from "./docs-tree";
-import { LATE_AFTER_HOURS, PROMOTED_RINGS, REPO_ARCHES, RING_TEXT, RINGS_BY_STABILITY, SEVERITIES, WORKER_ALIVE_MINUTES } from "../meta";
+import { EXPECTED_SOURCES, LATE_AFTER_HOURS, PROMOTED_RINGS, REPO_ARCHES, RING_TEXT, RINGS_BY_STABILITY, SEVERITIES, WORKER_ALIVE_MINUTES } from "../meta";
 import { escapeHtml } from "../html";
+import { KIT_HELPERS, KIT_SHEET_PATH, type LucideName } from "./kit";
+
+/**
+ * The palette, typed once (#239, the handoff's "Design tokens"): every
+ * colour the dashboard paints is one of these names, in the CSS as a custom
+ * property and nowhere as a literal. Dark is the default — the site's Tokyo
+ * Night, omarchy.org's — and light is its day twin: the same names and
+ * roles, each re-tuned for paper. The token block below, the theme-color
+ * the browser's chrome wears and the contrast table in test/kit.test.ts all
+ * read this; a colour added to a page is a name added here, in both themes.
+ *
+ * Light is the handoff's table with four values darker: --dim, --amber,
+ * --blue and --lilac were under 4.5:1 on --bg-deep (4.13, 4.30, 4.47,
+ * 4.35), and the chrome's small text sits there — the header's role labels,
+ * the footer's notes, a code well's comments, a degraded status. #239 asks
+ * for 4.5:1 for body text, and the handoff's design system for a light
+ * twin "re-tuned for contrast", so each keeps its hue and saturation and
+ * only loses lightness, to the first step that reaches 4.5:1 (under 6%
+ * of it). test/kit.test.ts keeps the handoff's table: it holds every other
+ * value to it and these four to its hues.
+ */
+export const PALETTE = {
+  bg: { dark: "#1a1b26", light: "#e6e7ed" },
+  "bg-deep": { dark: "#0e0e14", light: "#d8dae3" },
+  panel: { dark: "#1f2230", light: "#eff0f4" },
+  "panel-2": { dark: "#13141c", light: "#f6f7fa" },
+  line: { dark: "#2a2e3f", light: "#c3c7d8" },
+  text: { dark: "#c0caf5", light: "#2b3150" },
+  muted: { dark: "#a9b1d6", light: "#474e70" },
+  dim: { dark: "#8b93b8", light: "#585e80" },
+  green: { dark: "#9ece6a", light: "#466a20" },
+  "green-ink": { dark: "#0c0e10", light: "#f6f7fa" },
+  amber: { dark: "#e0af68", light: "#83570c" },
+  red: { dark: "#f7768e", light: "#b3244a" },
+  blue: { dark: "#7aa2f7", light: "#2d5abf" },
+  lilac: { dark: "#bb9af7", light: "#7143c8" },
+} as const;
+export type Theme = "dark" | "light";
+export type Token = keyof typeof PALETTE;
+
+/** One theme's palette as the declarations of a CSS rule. */
+function tokens(theme: Theme): string {
+  return (Object.keys(PALETTE) as Token[]).map((k) => `--${k}: ${PALETTE[k][theme]};`).join(" ");
+}
+
+/** Where the reader's choice of theme is kept: this browser's localStorage, under this key. */
+export const THEME_KEY = "op-theme";
+
+/**
+ * The theme before the first paint, in the head. With nothing chosen the
+ * page follows the system — the token block's media query does that, so it
+ * holds with script off too, and nothing here runs for it. A choice the
+ * reader made (window.opTheme.set, the ⌘K menu's "Theme" from #241) is kept
+ * under THEME_KEY and applied here as data-theme on <html>, before the body
+ * is drawn, so a light reader on a dark system never sees a dark flash; the
+ * browser's own chrome (theme-color) follows the page. The one API, for the
+ * palette and anything else that offers the choice:
+ *
+ *   opTheme.get()        "dark" or "light": what the page shows now
+ *   opTheme.set(theme)   "dark" or "light" keeps that choice; anything else ("system", null) forgets it
+ *   opTheme.toggle()     the other one, kept
+ *
+ * Each returns the theme shown after it. A choice made in another tab of
+ * the pool is followed here too (the storage event). localStorage can throw
+ * (a private window, storage blocked): the choice then lasts for the page.
+ */
+export const THEME_BOOT = `(function (d, KEY, BG) {
+  var root = d.documentElement;
+  function kept() { try { var t = localStorage.getItem(KEY); return t === "dark" || t === "light" ? t : null; } catch (e) { return null; } }
+  function shown() { var t = root.getAttribute("data-theme"); return t === "dark" || t === "light" ? t : window.matchMedia && matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"; }
+  function apply(t) {
+    if (t) root.setAttribute("data-theme", t); else root.removeAttribute("data-theme");
+    d.querySelectorAll('meta[name="theme-color"]').forEach(function (m) { m.setAttribute("content", BG[t || (/light/.test(m.getAttribute("media") || "") ? "light" : "dark")]); });
+  }
+  window.opTheme = {
+    get: shown,
+    set: function (t) { t = t === "dark" || t === "light" ? t : null; try { if (t) localStorage.setItem(KEY, t); else localStorage.removeItem(KEY); } catch (e) {} apply(t); return shown(); },
+    toggle: function () { return window.opTheme.set(shown() === "dark" ? "light" : "dark"); }
+  };
+  window.addEventListener("storage", function (e) { if (e.key === KEY) apply(kept()); });
+  apply(kept());
+})(document, ${JSON.stringify(THEME_KEY)}, ${JSON.stringify({ dark: PALETTE.bg.dark, light: PALETTE.bg.light })});`;
 
 export const GITHUB_ICON =
   '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>';
 
 const CSS = String.raw`
+  /* ---- the tokens (#239). The palette (PALETTE: dark by default, light for a
+     reader who chose it or whose system prefers it — data-theme on <html>,
+     THEME_BOOT), then the names that point into it, then type and space.
+     The only colours layout.ts writes are PALETTE's; everything below is a name.
+     data-theme also pins one element to a theme (the footer's badge is the
+     brand's, dark in both). The aliases are declared wherever a theme is, so
+     they follow it: --edge on a light page is light lilac. */
+  :root, [data-theme="dark"] { color-scheme: dark; ${tokens("dark")} }
+  @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { color-scheme: light; ${tokens("light")} } }
+  [data-theme="light"] { color-scheme: light; ${tokens("light")} }
+  /* The veil behind a dialog is the handoff's in both themes: the dark chrome at 60%, so a light page dims as a dark one does.
+     It is declared on ::backdrop itself too: a browser from before early 2024 (Chrome 122, Safari 17.4, Firefox 120) gives ::backdrop none of the page's custom properties. */
+  :root, ::backdrop { --scrim: color-mix(in srgb, ${PALETTE["bg-deep"].dark} 60%, transparent); }
+  :root, [data-theme] {
+    /* A ring's hue is its own, and none is used for anything but its ring. */
+    --edge: var(--lilac); --rc: var(--blue); --stable: var(--green); --lab: var(--amber);
+    /* What a colour is for: new work (the v1 kit, pages/kit.ts) names these. */
+    --surface-page: var(--bg); --surface-chrome: var(--bg-deep); --surface-card: var(--panel); --surface-sunken: var(--panel-2);
+    --border: var(--line); --text-body: var(--text); --text-secondary: var(--muted); --text-tertiary: var(--dim);
+    --accent: var(--green); --on-accent: var(--green-ink);
+    --status-ok: var(--green); --status-warn: var(--amber); --status-error: var(--red); --status-info: var(--blue);
+  }
   :root {
-    --bg: #1a1b26; --bg-deep: #0e0e14; --panel: #1f2230; --panel-2: #13141c; --line: #2a2e3f;
-    --text: #c0caf5; --muted: #a9b1d6; --dim: #8b93b8; --green: #9ece6a; --green-ink: #0c0e10;
-    --amber: #e0af68; --red: #f7768e; --blue: #7aa2f7;
+    --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; --font-display: Geist, "JetBrains Mono", sans-serif;
+    /* Six sizes for new work: a hero, a page's title, a section, the body, the small line, the label (uppercase, .08em). */
+    --fs-display: 40px; --fs-h1: 28px; --fs-h2: 20px; --fs-body: 15px; --fs-small: 13px; --fs-label: 11.5px;
+    --lh-tight: 1.15; --lh-body: 1.6; --tracking-display: -0.02em; --tracking-label: .08em;
+    --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 24px; --space-6: 32px; --space-7: 48px; --space-8: 72px;
+    /* Square everywhere, 1px lines; a v1 page is 1120px wide (a package's 1200px), 32px from the sides, 40px between sections. */
+    --radius: 0; --border-w: 1px; --content-max: 1120px; --content-wide: 1200px; --prose-max: 680px; --gutter: 32px; --section-gap: 40px;
   }
   * { box-sizing: border-box; }
   [hidden] { display: none !important; } /* a class with its own display (.gate is a grid) must not undo hidden — the Factory's sign-in gate stayed visible after signing in */
-  html { color-scheme: dark; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.6 "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: var(--fs-body)/var(--lh-body) var(--font-mono); }
   a { color: var(--text); }
-  h1, h2, h3 { font-family: Geist, "JetBrains Mono", sans-serif; letter-spacing: -0.02em; margin: 0; }
+  h1, h2, h3 { font-family: var(--font-display); letter-spacing: var(--tracking-display); margin: 0; }
   h1 { font-size: 30px; font-weight: 600; }
   h2 { font-size: 22px; font-weight: 600; }
   h3 { font-size: 16px; font-weight: 600; }
-  code, .mono { font-family: "JetBrains Mono", ui-monospace, monospace; }
+  code, .mono { font-family: var(--font-mono); }
   .num { font-variant-numeric: tabular-nums; }
 
-  header { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 24px; padding: 14px 32px; border-bottom: 1px solid var(--line); background: var(--bg-deep); }
-  header .hmid { display: flex; align-items: center; gap: 34px; justify-self: center; }
-  header .brand { display: flex; align-items: center; gap: 12px; font-weight: 600; color: var(--text); text-decoration: none; }
+  /* The header (#240): the mark on the left; the running version and the three doors in the middle; on the right Go… — the way to
+     any package or page, the ⌘K menu's (#241) — and the account. From 1120px it is one row whose two sides grow alike, so the doors sit
+     in the middle while each side fits its half; a side that does not (a long login near 1120px) keeps its width and moves the doors
+     aside rather than cut the name. Below 1120px the doors drop to a row of their own (the media queries further down). It wraps, it
+     never scrolls. */
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; padding: 14px var(--gutter); border-bottom: 1px solid var(--line); background: var(--bg-deep); }
+  header .hl, header .hr { flex: 1 1 0; min-width: max-content; display: flex; align-items: center; }
+  header .hmid { order: 2; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 34px; }
+  header .hr { order: 3; justify-content: flex-end; gap: 10px; }
+  header .brand { display: flex; align-items: center; gap: 12px; font-weight: 600; color: var(--text); text-decoration: none; white-space: nowrap; }
   header .brand .mark { width: 22px; height: 22px; background: var(--green); display: grid; place-items: center; color: var(--green-ink); font-size: 12px; font-weight: 700; }
-  header nav { display: flex; gap: 22px; font-size: 14px; }
+  header nav { display: flex; flex-wrap: wrap; gap: 6px 22px; font-size: 14px; white-space: nowrap; }
   header nav a { color: var(--muted); text-decoration: none; padding-bottom: 2px; border-bottom: 1px solid transparent; }
   header nav a:hover { color: var(--text); }
-  header nav a.active { color: var(--text); border-bottom-color: var(--green); }
-  header .account { font-size: 13px; border: 1px solid var(--line); padding: 5px 11px; white-space: nowrap; display: inline-flex; align-items: center; max-width: min(46vw, 420px); justify-self: end; }
+  header nav a.active, header nav a[aria-current="page"] { color: var(--text); border-bottom-color: var(--green); }
+  /* A door's role follows its name after a real space (page() writes "Pool<small> use</small>"), so a screen reader names the link
+     "Pool use", not "Pooluse"; the space is the gap, so the role takes no margin of its own. */
+  header nav a small { color: var(--dim); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }
+  /* Go… is served as a link to the packages and becomes a button, with the key beside it, once the ⌘K menu is on the page (page(), below). The key is a hint for a keyboard: a touch screen has no key to press, so it is not drawn there. */
+  header .go { display: inline-flex; align-items: center; gap: 12px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 0; -webkit-appearance: none; appearance: none; background: transparent; color: var(--dim); font: 13px/1.6 var(--font-mono); text-decoration: none; white-space: nowrap; cursor: pointer; }
+  header .go:hover { color: var(--text); border-color: var(--green); }
+  header .go kbd { padding: 0 5px; border: 1px solid var(--line); font: 11px/1.5 var(--font-mono); }
+  @media (hover: none) and (pointer: coarse) { header .go kbd { display: none; } }
+  header .account { flex: none; font-size: 13px; border: 1px solid var(--line); padding: 5px 11px; white-space: nowrap; display: inline-flex; align-items: center; max-width: min(46vw, 420px); }
   header .account #account { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
   /* A long GitHub login never wraps the header: the name is cut with an ellipsis (the full one is the link's title). */
-  header .account b { max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  header #status { margin-left: 0; }
+  header .account .handle { max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   header .account:hover { border-color: var(--green); }
+  /* Signed in, the chip is the handle in green (accountChip adds .in): who is signed in is the one thing the right side says once it knows. */
+  header .account.in { border-color: var(--green); } header .account.in .handle { color: var(--green); }
   header .account a { color: var(--text); text-decoration: none; }
-  header .account .who { color: var(--muted); }
   header .account #signout { color: var(--muted); margin-left: 10px; padding-left: 10px; border-left: 1px solid var(--line); }
   header .account #signout:hover { color: var(--text); }
-  .gh { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); text-decoration: none; font-size: 13.5px; }
-  .gh:hover { color: var(--text); }
-  .gh svg { width: 18px; height: 18px; fill: currentColor; }
+  /* Keyboard focus in the frame is the design system's: a 1px green line, square, in both themes — not the browser's rounded blue ring. */
+  header a:focus-visible, header button:focus-visible, footer a:focus-visible { outline: 1px solid var(--green); outline-offset: 2px; }
   .status { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--dim); text-decoration: none; }
-  .status .led { width: 9px; height: 9px; border-radius: 50%; background: var(--dim); box-shadow: 0 0 0 0 rgba(158,206,106,0); }
-  .status.online .led { background: var(--green); animation: pulse 2.4s ease-out infinite; }
+  /* A live light is a square that breathes (op-pulse: its opacity, 1.6 s), not a glow: no shadows, and it stops under prefers-reduced-motion. The frame declares it — every page's lights, skeletons and live marks breathe with it — and the kit's live dot uses the same. */
+  @keyframes op-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+  .status .led { width: 9px; height: 9px; background: var(--dim); }
+  .status.online .led { background: var(--green); animation: op-pulse 1.6s ease-in-out infinite; }
   .status.online { color: var(--green); }
   .status.degraded .led { background: var(--amber); } .status.degraded { color: var(--amber); }
   .status.offline .led { background: var(--red); } .status.offline { color: var(--red); }
-  @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(158,206,106,.55); } 70% { box-shadow: 0 0 0 7px rgba(158,206,106,0); } 100% { box-shadow: 0 0 0 0 rgba(158,206,106,0); } }
   .v.bump { animation: bump .5s ease-out; } @keyframes bump { 0% { color: var(--green); } 100% { color: inherit; } }
   .ring .desc { font-size: 13px; color: var(--muted); line-height: 1.5; }
   .ring .cta { margin-top: auto; display: flex; justify-content: space-between; align-items: center; gap: 10px; }
@@ -74,7 +196,6 @@ const CSS = String.raw`
   .step pre { position: relative; padding-right: 76px; white-space: pre-wrap; word-break: break-all; }
   .copy { position: absolute; right: 8px; top: 8px; font-size: 12px; color: var(--dim); cursor: pointer; border: 1px solid var(--line); padding: 1px 8px; background: var(--panel); }
   .copy:hover { color: var(--text); }
-  footer .sep { color: var(--line); }
   .searchbar { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; margin: 0 0 10px; }
   .searchbar input { flex: 1 1 380px; font: inherit; font-size: 15px; padding: 9px 12px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line); }
   .searchbar input:focus { outline: none; border-color: var(--green); }
@@ -90,8 +211,6 @@ const CSS = String.raw`
   #graph svg { width: 100%; height: auto; display: block; } #graph a { cursor: pointer; } #graph a:hover rect { stroke-width: 2; }
   .choice-btn { background: var(--panel-2); color: var(--muted); border: 1px solid var(--line); padding: 3px 10px; font: inherit; font-size: 12.5px; cursor: pointer; vertical-align: middle; margin-left: 8px; }
   #files { max-height: 420px; overflow: auto; }
-  footer .gh { font-size: 13px; }
-  header .spacer { display: none; }
   .btn { background: var(--green); color: var(--green-ink); font-weight: 500; padding: 6px 14px; text-decoration: none; font-size: 14px; }
   .btn:hover { filter: brightness(1.08); }
   .ver { font-size: 12.5px; letter-spacing: .04em; color: var(--green); border: 1px solid var(--green); padding: 2px 8px; text-decoration: none; white-space: nowrap; }
@@ -125,6 +244,10 @@ const CSS = String.raw`
   dialog.ask.wide { width: min(880px, 94vw); } dialog.ask pre.block { max-height: 60vh; overflow: auto; margin: 0; background: var(--bg-deep); border: 1px solid var(--line); padding: 10px 12px; font: 12px/1.5 "JetBrains Mono", monospace; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
   .pill.error { color: var(--red); border-color: var(--red); }
   .pill.none { color: var(--dim); }
+  /* A package's targets: a chip per architecture, dashed when it is not supported (targetChips). */
+  .tgts { display: inline-flex; flex-wrap: wrap; gap: 4px; vertical-align: middle; } .pill.tgt { text-transform: none; letter-spacing: 0; font: 400 11.5px var(--font-mono); } .pill.tgt.dashed { border-style: dashed; }
+  /* One line per build of a decision (Review's Decided lately). */
+  .bl + .bl { margin-top: 6px; }
   .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 13.5px; }
   .kv dt { color: var(--dim); }
   .kv dd { margin: 0; }
@@ -144,11 +267,10 @@ const CSS = String.raw`
   #progress { position: fixed; top: 0; left: 0; height: 2px; width: 0; background: var(--green); z-index: 50; opacity: 0; transition: opacity .2s; }
   #progress.on { opacity: 1; animation: progress 1.6s ease-in-out infinite; }
   @keyframes progress { 0% { width: 0; margin-left: 0 } 50% { width: 60%; margin-left: 20% } 100% { width: 0; margin-left: 100% } }
-  /* .skl is the shimmering bar; .skel marks a placeholder row or tile (removed when data lands). */
-  .skl { display: inline-block; height: 12px; width: 70%; border-radius: 2px; background: linear-gradient(90deg, var(--line) 25%, var(--panel-2) 50%, var(--line) 75%); background-size: 200% 100%; animation: shimmer 1.2s linear infinite; vertical-align: middle; }
+  /* .skl is the placeholder bar, flat and square, breathing like a live light (no gradient); .skel marks a placeholder row or tile (removed when data lands). */
+  .skl { display: inline-block; height: 12px; width: 70%; background: var(--line); animation: op-pulse 1.6s ease-in-out infinite; vertical-align: middle; }
   tr.skel td:nth-child(2n) .skl { width: 45%; } tr.skel td:nth-child(3n) .skl { width: 30%; }
   .tile.skel .v .skl { height: 26px; width: 55%; } .tile.skel .s .skl { width: 80%; }
-  @keyframes shimmer { 0% { background-position: 200% 0 } 100% { background-position: -200% 0 } }
   .empty.loading { color: var(--dim); }
   .empty.loading::after { content: "…"; animation: dots 1.2s steps(4, end) infinite; }
   @keyframes dots { 0% { content: "" } 25% { content: "." } 50% { content: ".." } 75% { content: "..." } }
@@ -184,9 +306,14 @@ const CSS = String.raw`
   .kind { display: inline-block; min-width: 68px; color: var(--blue); }
   .when { color: var(--dim); white-space: nowrap; }
   .muted { color: var(--muted); }
-  footer { border-top: 1px solid var(--line); background: var(--bg-deep); padding: 18px 32px 20px; font-size: 13px; color: var(--dim); display: grid; grid-template-columns: 1fr auto 1fr; align-items: start; gap: 16px 24px; }
-  footer .more { justify-self: center; } footer .fright { justify-self: end; }
-  footer a { color: var(--muted); text-decoration: none; }
+  /* The footer (#240): the badge and what the pool is not on the left, the five pages every page links in the middle, the code and its
+     licence on the right. A wrapping row, as the header is: the two sides grow alike and never narrower than what they say, so the note
+     stays one line and a whole block moves to the next row when the three do not fit — equal grid columns cut the note in two from 721
+     to about 1030px, the width the right side never needed. */
+  footer { border-top: 1px solid var(--line); background: var(--bg-deep); padding: 18px var(--gutter) 20px; font-size: 13px; color: var(--dim); display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 16px 24px; }
+  footer .fleft, footer .fright { flex: 1 1 0; min-width: max-content; }
+  footer .more { flex: 0 1 auto; display: flex; flex-wrap: wrap; justify-content: center; gap: 10px 18px; }
+  footer a { color: var(--muted); text-decoration: none; } footer a:hover { color: var(--text); }
 
   .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(360px, 100%), 1fr)); gap: 16px; margin: 16px 0; }
   .chart { border: 1px solid var(--line); background: var(--panel); padding: 14px 16px 10px; min-width: 0; }
@@ -204,16 +331,15 @@ const CSS = String.raw`
   a.run { color: var(--muted); text-decoration: none; border-bottom: 1px dotted var(--dim); }
   a.run:hover { color: var(--text); }
   #graph { overflow-x: auto; } #graph svg { min-width: 720px; }
-  /* The header folds to two rows — brand and account, then the doors on a scrolling line — below the width the three columns need (~880 px with the version label): a phone held sideways and a tablet held upright scrolled the whole page for the header alone between 721 and 880 px. */
-  @media (max-width: 900px) {
-    header { grid-template-columns: 1fr auto; grid-template-areas: "brand account" "mid mid"; gap: 10px 12px; padding: 12px 16px; }
-    header .brand { grid-area: brand; } header .account { grid-area: account; max-width: 60vw; }
-    header .hmid { grid-area: mid; justify-self: stretch; gap: 16px; overflow-x: auto; white-space: nowrap; padding-bottom: 4px; margin: 0 -16px; padding-left: 16px; padding-right: 16px; scrollbar-width: none; }
-    header .hmid::-webkit-scrollbar { display: none; }
-    header nav { gap: 16px; }
+  /* Below 1120px the header is two rows: the mark and the right side, then the version and the doors on a row of their own, from the left. One row
+     needs about 900px signed out and more with a long login beside the menu, and a header that wrapped where the widths happened to fall put the
+     account under the doors; the live site's header folded the same way, at 900px, onto a line that scrolled. */
+  @media (max-width: 1119px) {
+    header .hmid { order: 3; flex: 1 1 100%; }
+    header .hr { order: 2; }
   }
   @media (max-width: 720px) {
-    footer { grid-template-columns: 1fr; justify-items: start; }
+    header { padding: 12px 16px; gap: 10px 12px; } header .hmid { column-gap: 20px; } header nav { column-gap: 16px; }
     main { padding: 20px 16px 28px; }
     h1 { font-size: 22px; line-height: 1.25; } h2 { font-size: 19px; }
     .lede { font-size: 14px; }
@@ -222,20 +348,21 @@ const CSS = String.raw`
     .meta { margin-bottom: 24px; }
     ul.plain.cols { columns: 1; }
     .step pre { padding-right: 12px; padding-top: 34px; } .copy { top: 6px; }
-    footer { padding: 16px 16px 18px; gap: 12px 14px; } footer .fright { justify-self: start; justify-items: start; }
+    /* A phone: one block per row — the badge and the note, the five pages, then GitHub and the licence on the right, as the handoff has them — and the note may wrap below 340px rather than push the page sideways. */
+    footer { padding: 16px 16px 18px; gap: 12px 14px; } footer .fleft, footer .fright { flex-basis: 100%; min-width: 0; } footer .more { justify-content: flex-start; }
     section { margin-bottom: 32px; }
   }
   /* ---- the three doors: heroes, diagrams, cards, live pieces (v2 of the dashboard) ---- */
-  :root { --lilac: #bb9af7; --edge: var(--lilac); --rc: var(--blue); --stable: var(--green); --lab: var(--amber); }
   @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
   h1, h2, h3 { text-wrap: balance; }
-  header .brand { white-space: nowrap; } header .account { flex: none; } header nav { gap: 18px; }
-  header .account .avatar { width: 22px; height: 22px; font-size: 10.5px; margin-right: 8px; vertical-align: middle; }
-  header nav a small { color: var(--dim); font-size: 11px; margin-left: 5px; letter-spacing: .06em; text-transform: uppercase; }
-  footer .fleft, footer .fright { display: grid; gap: 5px; align-content: start; } footer .fleft { justify-items: start; } footer .fright { justify-items: end; }
-  footer .fnote { font-size: 12px; color: var(--dim); line-height: 1.4; } footer a.fnote:hover { color: var(--text); }
+  /* A phone: a door's role goes under its name, so the version and the three doors share one row down to 360px instead of Review wrapping alone. */
+  @media (max-width: 480px) { header nav a { display: inline-grid; line-height: 1.3; } }
+  footer .fleft, footer .fright { display: grid; align-content: start; } footer .fleft { gap: 6px; justify-items: start; } footer .fright { gap: 4px; justify-items: end; }
+  footer .fnote { color: var(--dim); line-height: 1.4; }
   footer .fbadge { display: inline-flex; align-items: center; } footer .fbadge svg { display: block; height: 20px; width: auto; } footer .fbadge:hover svg { filter: brightness(1.1); }
-  footer .more { display: inline-flex; gap: 10px 14px; flex-wrap: wrap; } footer .more a.active { color: var(--green); }
+  /* Agents is the footer's one accent: the way to use the pool the header does not name — one's own agent, in each of the three roles (#249). The page the reader is on or under is marked as a door is, a green line under it. */
+  footer .more a:hover, footer .more a.accent { color: var(--green); }
+  footer .more a.active, footer .more a[aria-current="page"] { color: var(--text); border-bottom: 1px solid var(--green); }
   .hero { display: grid; gap: 14px; margin: 0 0 32px; max-width: 900px; }
   .hero h1 { font-size: 34px; line-height: 1.15; max-width: 22ch; }
   .hero.compact { margin-bottom: 22px; } .hero.compact h1 { font-size: 28px; }
@@ -260,15 +387,16 @@ const CSS = String.raw`
   .dim { color: var(--dim); }
   .searchbar input[type="search"], .searchbar input[type="text"] { -webkit-appearance: none; appearance: none; border-radius: 0; background: var(--bg-deep); font-size: 14px; padding: 10px 14px; }
   .searchbar input::placeholder { color: var(--dim); } .searchbar input::-webkit-search-decoration, .searchbar input::-webkit-search-cancel-button { -webkit-appearance: none; }
-  .searchbar input:focus { box-shadow: 0 0 0 3px rgba(158,206,106,.14); }
   .pool-search { position: relative; flex: 1 1 440px; max-width: 640px; }
   .pool-search svg { position: absolute; left: 13px; top: 50%; transform: translateY(-50%); width: 17px; height: 17px; fill: none; stroke: var(--dim); stroke-width: 2; stroke-linecap: round; pointer-events: none; }
   .searchbar .pool-search input[type="search"] { width: 100%; padding: 11px 14px 11px 42px; font-size: 15px; }
   .pool-search:focus-within svg { stroke: var(--green); }
   /* What the box answers as you type: a package a line, the full search last. */
-  .suggest { position: absolute; left: 0; right: 0; top: calc(100% + 4px); z-index: 30; background: var(--panel); border: 1px solid var(--line); box-shadow: 0 12px 32px rgba(0, 0, 0, .45); text-align: left; }
+  .suggest { position: absolute; left: 0; right: 0; top: calc(100% + 4px); z-index: 30; background: var(--panel); border: 1px solid var(--line); text-align: left; }
   .suggest a { display: grid; grid-template-columns: minmax(120px, auto) auto auto minmax(0, 1fr); gap: 12px; align-items: center; padding: 9px 14px; color: var(--text); text-decoration: none; border-bottom: 1px solid var(--line); font-size: 13px; }
-  .suggest a:last-child { border-bottom: 0; } .suggest a:hover, .suggest a:focus { background: var(--panel-2); outline: none; }
+  .suggest a:last-child { border-bottom: 0; } .suggest a:hover, .suggest a:focus { background: var(--panel-2); } .suggest a:focus { outline: none; }
+  /* The row the keyboard is on has the green line of every focus: the background alone is a step of 1.06:1 in light (--panel to --panel-2). */
+  .suggest a:focus-visible { outline: 1px solid var(--green); outline-offset: -1px; }
   .suggest a b { font-weight: 600; color: var(--green); } .suggest a .d { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .suggest a.all { display: block; color: var(--green); font-size: 12.5px; padding: 10px 14px; }
   .suggest .none { padding: 10px 14px; color: var(--dim); font-size: 12.5px; }
@@ -332,7 +460,8 @@ const CSS = String.raw`
   .ring-head { background: var(--panel-2); padding: 8px 10px; display: grid; gap: 1px; text-decoration: none; color: inherit; min-width: 0; } .ring-head:hover { background: var(--panel); }
   .ring-head .k { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; } .ring-head b { font-family: Geist, sans-serif; font-size: 20px; font-weight: 600; line-height: 1.15; } .ring-head .s { font-size: 11.5px; color: var(--dim); line-height: 1.4; }
   .feed a.row { text-decoration: none; color: inherit; cursor: pointer; }
-  tr.project-row td { background: var(--panel-2); } tr.project-row td:first-child { box-shadow: inset 3px 0 0 var(--green); } .feed a.row:hover .what { color: var(--text); }
+  /* An inset box-shadow with no blur and no offset is a 3px bar on a row's edge, not a shadow: it takes no room in the grid or the table, where a border would. */
+  tr.project-row td { background: var(--panel-2); } tr.project-row:not(.more) td:first-child { box-shadow: inset 3px 0 0 var(--green); } .feed a.row:hover .what { color: var(--text); }
   .charts.three { grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); }
   .charts.three .chart { display: flex; flex-direction: column; } .charts.three .chart > .mini { margin-top: auto; }
   .charts.three #c-sec { display: flex; flex-direction: column; flex: 1; } .charts.three #c-sec .hrows { flex: 1; align-content: space-evenly; } .charts.three #c-sec > p { margin-top: auto; }
@@ -403,7 +532,8 @@ const CSS = String.raw`
   .rrow .n { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .rrow .s { color: var(--muted); min-width: 0; } .rrow .s .pill { margin-right: 4px; }
   .rrow .go { font-size: 12.5px; color: var(--green); text-decoration: none; white-space: nowrap; justify-self: end; } .rrow .go:hover { text-decoration: underline; }
   .rrows > p { background: var(--panel); padding: 10px 14px; }
-  tr.for-you td:first-child { box-shadow: inset 3px 0 0 var(--amber); } tr.mine-row td:first-child { box-shadow: inset 3px 0 0 var(--line); }
+  /* A row's mark is on its first cell; a package's other builds in Review's table (tr.more) are rows under the cells the package spans, whose first cell carries the mark for them all. */
+  tr.for-you:not(.more) td:first-child { box-shadow: inset 3px 0 0 var(--amber); } tr.mine-row:not(.more) td:first-child { box-shadow: inset 3px 0 0 var(--line); }
   details.tool { border: 1px solid var(--line); background: var(--panel); padding: 12px 16px; } details.tool summary { cursor: pointer; font-weight: 500; } details.tool summary .dim { font-weight: 400; font-size: 12.5px; margin-left: 8px; } details.tool[open] summary { margin-bottom: 12px; }
   #mine-queue { margin: 0 0 18px; } #mine-queue b { color: var(--text); } #mine-queue a { color: var(--green); text-decoration: none; }
   .panel { border: 1px solid var(--line); background: var(--panel); padding: 16px 18px; min-width: 0; }
@@ -412,7 +542,7 @@ const CSS = String.raw`
   .panel table { font-size: 13px; } .panel th, .panel td { padding: 6px 8px; }
   .wcards { display: grid; gap: 10px; }
   .wcard { border: 1px solid var(--line); background: var(--panel-2); padding: 10px 12px; display: grid; grid-template-columns: auto 1fr auto; gap: 2px 12px; align-items: center; font-size: 13px; }
-  .wcard .led { width: 9px; height: 9px; border-radius: 50%; background: var(--dim); grid-row: span 2; } .wcard .led.on { background: var(--green); } .wcard .led.busy { background: var(--blue); }
+  .wcard .led { width: 9px; height: 9px; background: var(--dim); grid-row: span 2; } .wcard .led.on { background: var(--green); } .wcard .led.busy { background: var(--blue); }
   .wcard b { font-weight: 500; } .wcard .m { font-size: 12px; color: var(--dim); grid-column: 2; } .wcard .pill { grid-row: span 2; }
   .small-btn { background: var(--panel-2); border: 1px solid var(--line); color: var(--text); padding: 3px 9px; font: inherit; font-size: 12.5px; cursor: pointer; text-decoration: none; } .small-btn:hover { border-color: var(--green); }
 
@@ -421,7 +551,7 @@ const CSS = String.raw`
   .ticker .row { display: grid; grid-template-columns: 78px 92px 1fr auto; gap: 12px; align-items: baseline; animation: tick .5s ease-out; }
   .ticker .row .what { color: var(--blue); } .ticker .row .where { color: var(--dim); } .ticker .row .when { color: var(--dim); font-size: 12px; white-space: nowrap; }
   .ticker .head { display: flex; justify-content: space-between; font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); border-bottom: 1px solid var(--line); padding-bottom: 6px; margin-bottom: 4px; }
-  .live { color: var(--green); display: inline-flex; align-items: center; gap: 6px; } .live i { width: 7px; height: 7px; border-radius: 50%; background: var(--green); animation: pulse 2.4s ease-out infinite; }
+  .live { color: var(--green); display: inline-flex; align-items: center; gap: 6px; } .live i { width: 7px; height: 7px; background: var(--green); animation: op-pulse 1.6s ease-in-out infinite; }
   @keyframes tick { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
   /* The Pool's feed: one line per event, the newest on top, cut at the box's edge (the full text on hover and on click). */
   .feed { display: grid; gap: 0; font-size: 12.5px; }
@@ -457,11 +587,35 @@ const CSS = String.raw`
   .ev { border: 1px solid var(--line); background: var(--panel); margin-top: 10px; } .ev summary { cursor: pointer; padding: 10px 14px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 13px; list-style: none; } .ev summary::-webkit-details-marker { display: none; } .ev summary::before { content: "▸"; color: var(--dim); } .ev[open] summary::before { content: "▾"; } .ev .body { padding: 0 14px 14px; }
   .ev-table { width: 100%; font-size: 12.5px; } .ev-table th, .ev-table td { padding: 5px 8px; vertical-align: top; } .ev pre.code { white-space: pre; line-height: 1.5; max-height: 640px; overflow: auto; } .ev pre .ln { display: inline-block; width: 3ch; margin-right: 12px; text-align: right; color: var(--dim); user-select: none; }
   /* Decisions ask in the dashboard: one dialog, and a toast that says what happened. */
-  dialog.ask { border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 0; width: min(520px, calc(100vw - 32px)); box-shadow: 0 24px 60px rgba(0,0,0,.5); } dialog.ask::backdrop { background: rgba(10, 11, 16, .72); }
+  dialog.ask { border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 0; width: min(520px, calc(100vw - 32px)); } dialog.ask::backdrop { background: var(--scrim); }
   dialog.ask form { padding: 20px 22px; display: grid; gap: 12px; } dialog.ask h3 { margin: 0; font-family: Geist, sans-serif; font-size: 17px; } dialog.ask .t { margin: 0; font-size: 13.5px; color: var(--muted); } dialog.ask textarea { width: 100%; box-sizing: border-box; background: var(--bg-deep); color: var(--text); border: 1px solid var(--line); padding: 8px 10px; font: 13px "JetBrains Mono", monospace; resize: vertical; }
   dialog.ask .val { display: flex; gap: 8px; align-items: stretch; } dialog.ask .val code { flex: 1; min-width: 0; overflow-wrap: anywhere; background: var(--bg-deep); border: 1px solid var(--line); padding: 8px 10px; font: 12.5px "JetBrains Mono", monospace; color: var(--text); } dialog.ask .row .grow { flex: 1; } dialog.ask .val .take { white-space: nowrap; } dialog.ask button.alt.danger { border-color: var(--red); color: var(--red); }
   dialog.ask .err { margin: 0; font-size: 12.5px; color: var(--red); } dialog.ask label.pick { display: grid; gap: 4px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; } dialog.ask label.pick select { width: 100%; box-sizing: border-box; background: var(--bg-deep); color: var(--text); border: 1px solid var(--line); padding: 7px 10px; font: 13px "JetBrains Mono", monospace; text-transform: none; letter-spacing: 0; } dialog.ask .row { display: flex; justify-content: flex-end; gap: 8px; } dialog.ask button.danger { border-color: var(--red); color: var(--red); } dialog.ask button.ghost { color: var(--muted); }
   #toasts { position: fixed; right: 16px; bottom: 16px; z-index: 90; display: grid; gap: 8px; max-width: min(460px, calc(100vw - 32px)); } .toast { border: 1px solid var(--line); background: var(--panel); padding: 10px 14px; font-size: 13px; border-left: 3px solid var(--green); cursor: pointer; transition: opacity .3s, transform .3s; } .toast.error { border-left-color: var(--red); } .toast.warn { border-left-color: var(--amber); } .toast.out { opacity: 0; transform: translateY(6px); }
+  /* The ⌘K menu (#241, GO_MENU below): the handoff's palette on the chrome's surface under the dialogs' veil — the reader's line, then what it
+     matches, the row the keyboard is on in --panel and green, and the keys in a footnote a touch screen does not need (the header's key is not
+     drawn there either). 530px wide as the handoff draws it (its 500 and the 14px sides), 14vh from the top, 16px from the sides on a phone;
+     the list gives way before the dialog outgrows the screen, and scrolls. The icons are the kit's: their 16px box is here, so nothing moves
+     when their shapes arrive with the kit's sheet, the first time the menu opens. A closed dialog is not drawn at all — with script off it
+     never opens — so only an open one is given a display, and a closed one is hidden here too: a browser without <dialog> has no rule of
+     its own for it, and would draw the empty line and the keys after the footer. */
+  dialog.go-menu { width: min(530px, calc(100vw - 32px)); max-width: none; max-height: calc(86vh - 16px); max-height: calc(86dvh - 16px); margin: 14vh auto auto; padding: 0; border: 1px solid var(--line); background: var(--bg-deep); color: var(--text); overflow: hidden; }
+  dialog.go-menu:not([open]) { display: none; } dialog.go-menu[open] { display: flex; } dialog.go-menu::backdrop { background: var(--scrim); }
+  .go-box { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 2px; padding: 14px; font-size: 13.5px; }
+  .go-box input { flex: none; width: 100%; min-width: 0; padding: 4px 10px 10px; border: 0; border-radius: 0; outline: none; -webkit-appearance: none; appearance: none; background: transparent; color: var(--text); font: 14px var(--font-mono); }
+  .go-box input::placeholder { color: var(--dim); }
+  .go-list { min-height: 0; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; } .go-list:empty { display: none; }
+  .go-opt { flex: none; display: flex; align-items: center; gap: 12px; padding: 8px 10px; color: var(--text); text-decoration: none; cursor: pointer; }
+  .go-opt[aria-selected="true"] { background: var(--panel); color: var(--green); }
+  .go-ic { flex: none; display: inline-grid; place-items: center; width: 16px; height: 16px; }
+  .go-l { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .go-h { flex: none; color: var(--dim); font-size: 11.5px; }
+  .go-none { flex: none; margin: 0; padding: 8px 10px; color: var(--dim); font-size: 12.5px; }
+  .go-foot { flex: none; display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 8px; padding: 8px 10px 0; border-top: 1px solid var(--line); color: var(--dim); font-size: 11.5px; }
+  /* A touch screen: no keys to name, and the line at 16px — a phone's browser zooms the page into a field whose text is smaller, and the menu
+     puts the focus there each time it opens. */
+  @media (hover: none) and (pointer: coarse) { .go-foot { display: none; } .go-box input { font-size: 16px; } }
+  /* What a screen reader hears and the eye does not need: the count of what the line matches. */
+  .go-said { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   /* A person's page: the package rows open into the story and the next step. */
   table.pk td:first-child { width: 28px; padding-right: 0; } .expand { background: none; border: 0; color: var(--dim); font-size: 14px; cursor: pointer; padding: 2px 6px; } .expand:hover { color: var(--text); }
   tr.pkopen td { background: var(--bg-deep); padding: 12px 14px 14px; } .pkstory { display: grid; gap: 10px; } .pknext { display: flex; gap: 10px 16px; align-items: center; flex-wrap: wrap; font-size: 13px; } .pknext .acts-inline { margin-left: auto; display: inline-flex; gap: 8px; } .pknext button.ghost { color: var(--muted); }
@@ -493,7 +647,7 @@ const CSS = String.raw`
   .headc .n { display: flex; justify-content: space-between; align-items: baseline; } .headc .n b { font-family: Geist, sans-serif; font-size: 17px; } .headc .m { color: var(--dim); font-size: 12px; } .headc .acts { display: flex; gap: 6px; margin-top: 4px; }
   .svc { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); margin: 0 0 36px; }
   .svc div { background: var(--panel); padding: 12px 14px; display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; align-items: center; font-size: 13px; }
-  .svc .led { width: 9px; height: 9px; border-radius: 50%; background: var(--dim); grid-row: span 2; } .svc .led.ok { background: var(--green); animation: pulse 2.4s ease-out infinite; } .svc .led.warn { background: var(--amber); } .svc .led.error { background: var(--red); }
+  .svc .led { width: 9px; height: 9px; background: var(--dim); grid-row: span 2; } .svc .led.ok { background: var(--green); animation: op-pulse 1.6s ease-in-out infinite; } .svc .led.warn { background: var(--amber); } .svc .led.error { background: var(--red); }
   .svc span { grid-column: 2; color: var(--dim); font-size: 12px; }
   .feeds { display: grid; gap: 8px; margin-top: 8px; } .feed { display: grid; grid-template-columns: 1fr; gap: 1px; font-size: 12.5px; border-bottom: 1px solid var(--line); padding-bottom: 6px; } .feed span { color: var(--muted); } .feed:last-child { border-bottom: 0; }
 
@@ -507,20 +661,11 @@ const CSS = String.raw`
   .whoc { border: 1px solid var(--line); background: var(--panel); padding: 16px 18px; display: grid; grid-template-columns: auto 1fr; gap: 14px; align-items: center; text-decoration: none; color: var(--text); }
   a.whoc:hover { border-color: var(--green); } .whoc .k { font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); } .whoc b { display: block; font-family: Geist, sans-serif; font-size: 18px; font-weight: 600; } .whoc span { font-size: 12.5px; color: var(--muted); }
   .whoc.wait { border-color: var(--amber); border-style: dashed; }
-  .whorow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; color: var(--muted); margin: -4px 0 12px; } .whorow .avatar { width: 24px; height: 24px; font-size: 10.5px; }
-  .pkname { font-weight: 600; color: var(--text); text-decoration: none; border-bottom: 1px dotted var(--dim); } .pkname:hover { color: var(--green); border-bottom-color: var(--green); } .pkname .go { color: var(--green); font-weight: 400; }
-  .by { display: inline-flex; gap: 4px; } .by .avatar { width: 24px; height: 24px; font-size: 10.5px; }
-  .pk-grid { grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr); align-items: start; margin-top: 4px; }
-  /* The results: the page's search box is the search, so the table's own filter stays hidden; its size and count remain. A description is two lines at most; who made it stays on one. */
-  .pk-results .pager { margin: 0 0 6px; } .pk-results .pager input { display: none; }
-  .pk-results td:nth-child(4) { white-space: nowrap; } .pk-results .clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .pk-grid + .tiles { margin-top: 28px; }
-  #results tr.sel td { background: var(--panel-2); }
 
   .docs { display: grid; grid-template-columns: 230px 1fr; gap: 24px; align-items: start; }
   .docs-side { position: sticky; top: 16px; display: grid; gap: 10px; }
   .docs-side input { background: var(--bg-deep); border: 1px solid var(--line); color: var(--text); padding: 8px 10px; font: inherit; font-size: 13.5px; width: 100%; } .docs-side input:focus { outline: none; border-color: var(--green); }
-  .docs-home { display: block; font-family: Geist, sans-serif; font-weight: 600; font-size: 14px; color: var(--muted); text-decoration: none; padding: 2px 10px 6px; } .docs-home.on, .docs-home:hover { color: var(--text); }
+  .docs-home { display: block; font-family: Geist, sans-serif; font-weight: 600; font-size: 14px; color: var(--muted); text-decoration: none; padding: 2px 10px 6px; } .docs-home:hover { color: var(--text); }
   .docs-nav { display: grid; gap: 2px; } .docs-nav details { border-left: 2px solid transparent; } .docs-nav details[open] { border-left-color: var(--green); background: var(--panel); }
   .docs-nav summary { list-style: none; cursor: pointer; display: flex; justify-content: space-between; align-items: baseline; gap: 8px; padding: 6px 10px; font-size: 13.5px; color: var(--muted); } .docs-nav summary::-webkit-details-marker { display: none; }
   .docs-nav summary::before { content: "›"; color: var(--dim); font-size: 13px; width: 8px; transition: transform .12s; } .docs-nav details[open] > summary::before { transform: rotate(90deg); }
@@ -538,16 +683,56 @@ const CSS = String.raw`
   .doc-figure { margin: 0 0 16px; background: var(--panel); border: 1px solid var(--line); padding: 10px; } .doc-figure img { display: block; width: 100%; max-width: 1100px; height: auto; margin: 0 auto; }
   .docs-hint { font-size: 12px; color: var(--dim); padding: 0 10px; } .docs-main { min-width: 0; }
   .docs-main > h1:first-child { margin-top: 2px; }
-  .doc-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 14px; }
-  .doc-card { border: 1px solid var(--line); background: var(--panel); padding: 16px 18px; display: grid; gap: 8px; align-content: start; } .doc-card h3 { margin: 0; } .doc-card h3 a { color: var(--text); text-decoration: none; } .doc-card h3 a:hover { color: var(--green); }
-  .doc-card p { margin: 0; font-size: 13.5px; color: var(--muted); } .doc-secs { display: flex; flex-wrap: wrap; gap: 4px 6px; margin-top: 4px; }
-  .doc-secs a { font-size: 12px; color: var(--dim); text-decoration: none; border: 1px solid var(--line); padding: 2px 8px; } .doc-secs a:hover { color: var(--text); border-color: var(--muted); }
+  .docs-said { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  /* The docs index (#250, pages/docs.ts): the title with the search beside it, then the map of the seven sections, sticky beside their
+     cards — the one the reader is in lit on --panel-2 —, each card its icon's square, a line or two, a command, a grid of facts or the API's
+     table, and the chapters that say more in green; the code's chapters one quiet line under them. 1120px wide with the frame's sides, as every
+     v1 page; the frame's main is wider, so the page narrows itself. Below 960px the map is on top, in four columns (two below 720px), and scrolls
+     with the page; below 640px a grid of facts is one column, the command scrolls in its well rather than break inside a word, and a row of the
+     API's table is its method and path, then what it returns, its head there for a screen reader only. */
+  .guide { max-width: calc(var(--content-max) - 2 * var(--gutter)); margin: 0 auto; padding: 12px 0 16px; display: grid; gap: 36px; }
+  .guide-head { display: flex; flex-wrap: wrap; gap: 24px 40px; align-items: flex-end; } .guide-head > div { flex: 1 1 480px; min-width: 0; display: grid; gap: 14px; }
+  .guide-search { flex: 0 1 340px; display: flex; align-items: center; gap: 10px; padding: 9px 12px; border: 1px solid var(--line); background: var(--bg-deep); color: var(--green); }
+  .guide-search:focus-within { border-color: var(--green); }
+  .guide-search input { flex: 1; min-width: 0; padding: 0; border: 0; border-radius: 0; outline: none; -webkit-appearance: none; appearance: none; background: transparent; color: var(--text); font: 14px var(--font-mono); }
+  .guide-search input::placeholder { color: var(--dim); } .guide-search input::-webkit-search-decoration, .guide-search input::-webkit-search-cancel-button { -webkit-appearance: none; }
+  .guide-body { display: grid; grid-template-columns: 218px minmax(0, 1fr); gap: 24px; align-items: start; }
+  .guide-nav { position: sticky; top: 16px; display: grid; gap: 2px; padding: 8px; border: 1px solid var(--line); background: var(--panel); }
+  .guide-nav a { display: flex; align-items: center; gap: 10px; padding: 7px 10px; font-size: 13px; line-height: 1.6; color: var(--muted); text-decoration: none; }
+  .guide-nav a:hover, .guide-nav a[aria-current="true"] { color: var(--text); } .guide-nav a[aria-current="true"] { background: var(--panel-2); }
+  .guide-nav a:focus-visible, .guide-more a:focus-visible, .guide-code a:focus-visible { outline: 1px solid var(--green); outline-offset: 1px; }
+  .guide-secs { display: grid; gap: 14px; min-width: 0; }
+  .guide-sec { margin: 0; padding: 18px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; scroll-margin-top: 16px; }
+  .guide-sec h2 { display: flex; align-items: center; gap: 10px; margin: 0; font: 600 18px/1.3 var(--font-display); letter-spacing: normal; }
+  .guide-sec > p { margin: 0; font-size: 13.5px; color: var(--muted); text-wrap: pretty; }
+  /* Two classes: the kit's sheet comes after this one, and its well's own rule for the code, one class and an element, would win a tie. */
+  .guide-sec .guide-well code { font-size: 12.5px; line-height: 1.7; }
+  /* The cells' lines are the grid's --line showing through a 1px gap, so an empty track would show as a block of it: three columns, one on a
+     phone, a count that divides every grid's cells (three rings, six gates; test/docs-index.test.ts holds them to it). */
+  .guide-items { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); }
+  .guide-items > div { display: grid; gap: 3px; align-content: start; padding: 10px 12px; background: var(--panel-2); }
+  .guide-items b { display: flex; align-items: center; gap: 8px; font: 600 13.5px/1.4 var(--font-display); color: var(--text); } .guide-items b > i { color: var(--green); }
+  .guide-items .edge b > i { color: var(--edge); } .guide-items .rc b > i { color: var(--rc); } .guide-items .stable b > i { color: var(--stable); }
+  .guide-items span { font-size: 12px; color: var(--dim); }
+  .guide-api { border: 1px solid var(--line); } .guide-api td { font-size: 12.5px; } .guide-api td:first-child { width: 44px; color: var(--green); font-size: 11.5px; }
+  .guide-api code { color: var(--text); white-space: nowrap; } .guide-api td:last-child { color: var(--dim); }
+  .guide-sec > p.guide-more { display: flex; flex-wrap: wrap; gap: 4px 20px; font-size: 13px; } .guide-more a { color: var(--green); text-decoration: none; } .guide-more a:hover { text-decoration: underline; }
+  .guide-code { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; margin: 6px 0 0; font-size: 12.5px; } .guide-code > span { flex-basis: 100%; }
+  .guide-code a { color: var(--muted); text-decoration: none; } .guide-code a:hover { color: var(--green); }
+  @media (max-width: 960px) { .guide-body { grid-template-columns: minmax(0, 1fr); } .guide-nav { position: static; grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+  @media (max-width: 720px) { .guide-nav { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 640px) {
+    .guide-items { grid-template-columns: minmax(0, 1fr); } .guide-sec .guide-well code { white-space: pre; overflow-wrap: normal; overflow-x: auto; }
+    .guide-api thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+    .guide-api tr { display: grid; grid-template-columns: 44px minmax(0, 1fr); } .guide-api code { white-space: normal; overflow-wrap: break-word; } .guide-api code > span { display: inline-block; }
+    .guide-api td:last-child { grid-column: 2; padding-top: 0; border-top: 0; }
+  }
   .docs-main h2 { margin-bottom: 4px; } .docs-main h3 { margin: 22px 0 8px; } .docs-main p { color: var(--muted); font-size: 14px; max-width: 78ch; margin: 0 0 10px; } .docs-main p code, .docs-main li code { color: var(--text); }
   .docs-main ul { margin: 0 0 12px; padding-left: 18px; color: var(--muted); font-size: 13.5px; }
   .doc-sec { border: 1px solid var(--line); background: var(--panel); padding: 18px 20px; margin-bottom: 16px; } .doc-sec h3:first-child { margin-top: 0; }
   .hits { display: grid; gap: 8px; } .hit { border: 1px solid var(--line); background: var(--panel); padding: 12px 14px; cursor: pointer; } .hit:hover { border-color: var(--green); }
   .hit .ch { font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--green); } .hit b { display: block; margin: 2px 0; } .hit span { font-size: 13px; color: var(--muted); }
-  mark { background: rgba(224,175,104,.35); color: var(--text); padding: 0 2px; }
+  mark { background: color-mix(in srgb, var(--amber) 35%, transparent); color: var(--text); padding: 0 2px; }
   .stepper { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin: 0 0 12px; }
   .stepper button { background: var(--panel-2); color: var(--muted); border: 1px solid var(--line); padding: 8px 10px; font: inherit; font-size: 13px; cursor: pointer; text-align: left; display: grid; gap: 2px; } .stepper button small { color: var(--dim); font-size: 11px; }
   .stepper button.on { border-color: var(--green); color: var(--text); } .stepper button.on small { color: var(--green); }
@@ -576,6 +761,10 @@ const CSS = String.raw`
   button[disabled], select[disabled], input[disabled], textarea[disabled], a.disabled { opacity: .45; cursor: not-allowed; }
   button[disabled]:hover, a.disabled:hover { border-color: var(--line); text-decoration: none; }
   .decide { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  /* The shell's own buttons, the decision dialog's and the Decision cell's, are drawn in the palette's names: left to the browser, a light page drew them in its own light grey with a black outset border, a dark one in its grey. :where() keeps the rule at an element's weight, so a table's smaller buttons (table button) and the dialog's danger and ghost still win. The dialog's confirm is its primary, in green. */
+  :where(dialog.ask, .decide) button { background: var(--panel-2); border: 1px solid var(--line); color: var(--text); padding: 5px 12px; font: inherit; font-size: 13px; cursor: pointer; }
+  :where(dialog.ask, .decide) button:hover { border-color: var(--green); }
+  dialog.ask button[type="submit"]:not(.danger) { background: var(--green); border-color: var(--green); color: var(--green-ink); } dialog.ask button[type="submit"]:not(.danger):hover { filter: brightness(1.08); }
   @media (max-width: 720px) {
     .hero h1 { font-size: 24px; } .hrow { grid-template-columns: 110px 1fr 46px; }
     .ticker .row { grid-template-columns: 1fr; gap: 1px; padding-bottom: 6px; border-bottom: 1px solid var(--line); } .ticker .row .when { font-size: 11px; }
@@ -665,7 +854,7 @@ export const HELPERS = String.raw`
   var LATE_MS = __LATE_AFTER_HOURS__ * 3600e3;
   // Whether a coverage row is late: the server's word when it sent one, else the same rule over last_sync. A source never synced is not late, it is missing — the sync line says so.
   function lateSync(c) { return typeof c.late === "boolean" ? c.late : !!c.last_sync && Date.now() - Date.parse(c.last_sync) > LATE_MS; }
-  // ---- a health check's result wears one word on every page that says it: the Pool's ring cards, the Pipeline's ring pills, its ring heads and its job's result, the Status rings table, and the 14-day grid both pages draw (the audit found it spelled three ways — ok on the cards and the table, healthy on the pill, healthy / unhealthy on the job, ok / warn / error on one grid and healthy / warning / failed on the other, over the same journal rows). The status is the journal's (events.ts: ok, warn, error); the word is what it means for a ring — healthy, warning, failed. The check (tests/health-check.sh) posts ok or error only — a ring with nothing rendered fails its check, since #47 — so warn is the journal's generic word, kept for a row a hand posts and drawn only where one is; a legend that advertised "nothing rendered" in amber named a state the check never produces while the state it named showed red. A cell or a pill wears the status as its class, the CSS paints it, PILL_COLOR says what it is painted.
+  // ---- a health check's result wears one word on every page that says it: the Pool's stable tile, the Pipeline's ring pills, its ring heads and its job's result, the Status rings table, and the 14-day grid both pages draw (the audit found it spelled three ways — ok on the cards and the table, healthy on the pill, healthy / unhealthy on the job, ok / warn / error on one grid and healthy / warning / failed on the other, over the same journal rows). The status is the journal's (events.ts: ok, warn, error); the word is what it means for a ring — healthy, warning, failed. The check (tests/health-check.sh) posts ok or error only — a ring with nothing rendered fails its check, since #47 — so warn is the journal's generic word, kept for a row a hand posts and drawn only where one is; a legend that advertised "nothing rendered" in amber named a state the check never produces while the state it named showed red. A cell or a pill wears the status as its class, the CSS paints it, PILL_COLOR says what it is painted.
   var HEALTH_WORD = { ok: "healthy", warn: "warning", error: "failed" };
   // The rings a health check covers — the ones that promise something, the scheduler's PROMOTED_RINGS — in the reader's order (RINGS_TEXT's, stable first), spliced in by page() so the list is typed once in meta.ts; the lab is promised nothing and is not checked, so no page draws a check for it.
   var PROMISED_RINGS = __PROMISED_RINGS__;
@@ -733,10 +922,11 @@ export const HELPERS = String.raw`
   function signInHref() { return "/auth/github?next=" + encodeURIComponent(location.pathname + location.search).replace(/%2F/g, "/"); }
   // Every sign-in the page served for its own path — the header's, a gate's — is rewritten to the whole address once the query is known; a sign-in to another page (the Factory gate's /me) is left as served.
   if (location.search) document.querySelectorAll('a[href^="/auth/github?next="]').forEach(function (a) { if (a.getAttribute("href") === "/auth/github?next=" + encodeURIComponent(location.pathname).replace(/%2F/g, "/")) a.href = signInHref(); });
-  // The header shows the login and the role; sign out is on every page: /auth/logout clears the cookie.
+  // The header shows the handle, in green, and the role on hover; sign out is on every page: /auth/logout clears the cookie.
   function accountChip(me) {
     var a = $("#account"); if (!a) return;
-    a.innerHTML = '<span class="avatar' + (me.role === "maintainer" ? " m" : "") + '">' + esc(String(me.login).slice(0, 2)) + '</span><b>' + esc(me.login) + '</b>'; a.href = userHref(me.login); a.title = esc(me.login) + " · " + esc(me.role) + " — signed in with GitHub as " + me.login + (me.areas && me.areas.length ? " (" + me.areas.join(", ") + ")" : "");
+    a.innerHTML = '<span class="handle">@' + esc(me.login) + '</span>'; a.href = userHref(me.login); a.title = esc(me.login) + " · " + esc(me.role) + " — signed in with GitHub as " + me.login + (me.areas && me.areas.length ? " (" + me.areas.join(", ") + ")" : "");
+    if (a.parentElement) a.parentElement.classList.add("in");
     var out = $("#signout"); if (out) { out.hidden = false; }
   }
   // One fetch of /auth/me per page: the shell asks first, and every whoami(cb) a page makes gets the same answer — from the fetch in flight, or from what it said. A fetch that fails, or a header that throws, still answers every page: nobody.
@@ -999,7 +1189,7 @@ export const HELPERS = String.raw`
     return c;
   }
   function confWord(conf) { return (conf || SEC_CONF) === "all" ? "any confidence" : (conf || SEC_CONF); }
-  // ---- an advisory's severity wears one colour on every page that draws it — the pill on a row, the Pool's bars, the Security page's stack (the audit found three maps: critical + high red on one chart and amber on the next, low / unknown in two greys). SEV_PILL is the class the CSS paints a pill with, PILL_COLOR what that class is painted (the :root colours), SEV_COLOR the one following the other: critical and high red, medium amber, low blue, unknown grey; exploited red, the bucket a KEV package counts in. A chart stacks SEV_BUCKETS over advisoryCounts, a package once: the exploited first, then the not exploited by worst severity, critical with high and low with unknown — each bucket the word both charts say, the colour of its worst severity (as a package is coloured by its worst advisory) and the count read from the numbers. sevSeries(c) is the four rows a chart draws.
+  // ---- an advisory's severity wears one colour on every page that draws it — the pill on a row, the charts' bars, the Security page's stack (the audit found three maps: critical + high red on one chart and amber on the next, low / unknown in two greys). SEV_PILL is the class the CSS paints a pill with, PILL_COLOR what that class is painted (the :root colours), SEV_COLOR the one following the other: critical and high red, medium amber, low blue, unknown grey; exploited red, the bucket a KEV package counts in. A chart stacks SEV_BUCKETS over advisoryCounts, a package once: the exploited first, then the not exploited by worst severity, critical with high and low with unknown — each bucket the word both charts say, the colour of its worst severity (as a package is coloured by its worst advisory) and the count read from the numbers. sevSeries(c) is the four rows a chart draws.
   var SEV_PILL = { exploited: "error", critical: "error", high: "error", medium: "warn", low: "blue", unknown: "none" }, PILL_COLOR = { ok: "var(--green)", warn: "var(--amber)", error: "var(--red)", blue: "var(--blue)", none: "var(--dim)" };
   var SEV_COLOR = Object.keys(SEV_PILL).reduce(function (m, s) { m[s] = PILL_COLOR[SEV_PILL[s]]; return m; }, {});
   var SEV_BUCKETS = [["exploited", "exploited in the wild (KEV)", function (c) { return c.kev; }], ["critical", "critical + high", function (c) { return c.rest.critical + c.rest.high; }], ["medium", "medium", function (c) { return c.rest.medium; }], ["low", "low / unknown", function (c) { return c.rest.low + c.rest.unknown; }]];
@@ -1082,6 +1272,18 @@ export const HELPERS = String.raw`
   // The reason a page gives its own gate, for whoever is looking: nobody signed in reads the sign-in first, as the server's own first refusal is the 401 — the same word on every grey control of a page, the Decision cell's included.
   function orSignIn(why) { return WHO.me ? why : "sign in with GitHub"; }
 
+  // ---- a package's targets (targets.ts): one package, an architecture per chip, the server's word for each — "x86_64 ✓" once it built (again by the project, approved, in the pool), "aarch64 ⟳" while it builds or the project builds it again, "aarch64 · not supported" dashed when its build failed after the tries it had, "x86_64 ○" while nothing of it is in flight. Review, the package page and a person's page draw the same chips; "marcelo, on x86_64", never "the x86_64 package".
+  var TARGET_WORD = { waiting: ["none", "○", "requested, nothing of it in flight"], building: ["blue", "⟳", "its contributor's build is queued or running"], built: ["ok", "✓", "built, ready for the review"], not_supported: ["none", "· not supported", "its build failed after the tries it had; the other architectures go on"], reviewing: ["blue", "⟳", "the project builds it again"], reviewed: ["ok", "✓", "built again by the project; the review decides"], approved: ["ok", "✓", "approved; its publish job carries it into edge"], published: ["ok", "✓", "in the pool"] };
+  function targetChips(targets) {
+    var arches = Object.keys(targets || {});
+    if (!arches.length) return "";
+    return '<span class="tgts">' + arches.map(function (a) {
+      var t = targets[a] || {}, w = TARGET_WORD[t.status] || ["none", "", t.status || ""];
+      return '<span class="pill tgt ' + w[0] + (t.status === "not_supported" ? " dashed" : "") + '" title="' + esc(a + ": " + w[2] + (t.task ? " (build #" + t.task + ")" : "")) + '">' + esc(a) + " " + esc(w[1]) + "</span>";
+    }).join("") + "</span>";
+  }
+  // The architectures a decision covered (a review of the package, GET /factory/approvals), as a row words them: "x86_64 · aarch64".
+  function archesOf(a) { return ((a && a.arches && a.arches.length ? a.arches : [a && a.arch]).filter(Boolean)).join(" · "); }
   // ---- the three verdicts on a staged build, as Review's table reads them: the gate (the worker's own checks on the build), the audit (the project's second agent), the trial (a real pacman installing the project's build in the lab). The pill, then the evidence as a link when the row has one (href: t.evidence.tests / .audit / .trial) — what warned or failed, the findings, the transcript — and as a word when it has none.
   function gatePill(v, href) {
     if (!v) return '<span class="dim" title="built before the gate existed">—</span>';
@@ -1132,18 +1334,19 @@ export const HELPERS = String.raw`
     opts = opts || {};
     if (opts.note) return Promise.resolve(opts.note);
     if (what === "build") return fetch("/api/v1/factory?limit=10").then(function (r) { return r.json(); }).then(function (d) { return d.workers || []; }).catch(function () { return []; }).then(function (ws) {
-      return ask({ title: "Have the project build " + label + " again", text: "A trusted review worker builds the recipe again with the project's agent — the contributor's bytes are never used. The result shows in review when it is staged.", select: whereOptions(ws, opts.arch || ARCHES[0], WHO.login, true), input: "optional", placeholder: "a hint for the project's agent (optional)", confirm: "Build by the project" });
+      return ask({ title: "Have the project build " + label + " again", text: "Trusted review workers build the recipe again with the project's agent, for every architecture its contributor built — the contributor's bytes are never used. One review covers them all; the results show in review when they are staged.", select: whereOptions(ws, opts.arch || ARCHES[0], WHO.login, true), input: "optional", placeholder: "a hint for the project's agent (optional)", confirm: "Build by the project" });
     });
-    if (what === "reject") return ask({ title: "Reject " + label, text: "The contributor reads the note and builds again. The rejection is on the record.", input: "required", placeholder: "what is wrong, in a line or two", confirm: "Reject", danger: true });
-    if (what === "withdraw") return ask({ title: "Withdraw the approval of " + label, text: "The approval stays on the record and is void from now on; the package leaves every ring it reached; another maintainer decides.", input: "required", placeholder: "why take it back", confirm: "Withdraw", danger: true });
-    return ask({ title: "Approve " + label, text: "The project's build goes into edge, signed by the pool; the approval is on the record with your name.", input: "optional", confirm: "Approve" });
+    if (what === "reject") return ask({ title: "Reject " + label, text: "Every build of the package in review stops, on every architecture. A request rejected frees its name; a package already in the pool keeps it. The contributor reads the note, and the rejection is on the record.", input: "required", placeholder: "what is wrong, in a line or two", confirm: "Reject", danger: true });
+    if (what === "withdraw") return ask({ title: "Withdraw the approval of " + label, text: "The approval stays on the record and is void from now on, on every architecture it covered; the package leaves every ring it reached; another maintainer decides.", input: "required", placeholder: "why take it back", confirm: "Withdraw", danger: true });
+    return ask({ title: "Approve " + label, text: "One decision for the package: the project's build of every architecture it built again goes into edge, signed by the pool; one that did not build is not supported. The approval is on the record with your name.", input: "optional", confirm: "Approve" });
   }
-  // What the toast says once the server said yes: where the build went, the task the project builds it as and on what, what the withdrawal emptied.
+  // What the toast says once the server said yes: where the builds went, the tasks the project builds it as and on what, what the withdrawal emptied, whether a rejection freed the name.
   function decidedText(what, d, dropped) {
-    if (what === "approve") return "Approved — the project's build goes into edge (publish job <a href=\"/build/" + d.publish + "\">#" + d.publish + "</a>).";
-    if (what === "build") return "The project is building it: task <a href=\"/build/" + d.task + "\">#" + d.task + "</a>, on " + (d.pinned_to ? esc(wtShort(d.pinned_to)) : "a review worker") + " with the project's agent.";
+    var jobs = function (ids) { return ids.map(function (id) { return "<a href=\"/build/" + id + "\">#" + id + "</a>"; }).join(", "); };
+    if (what === "approve") { var pubs = d.publishes ? Object.keys(d.publishes).map(function (a) { return d.publishes[a]; }) : [d.publish]; return "Approved — the project's build" + (pubs.length > 1 ? "s go" : " goes") + " into edge (publish job" + (pubs.length > 1 ? "s " : " ") + jobs(pubs) + ")."; }
+    if (what === "build") { var tasks = d.tasks && d.tasks.length ? d.tasks : [d.task]; return "The project is building it: task" + (tasks.length > 1 ? "s " : " ") + jobs(tasks) + ", on " + (d.pinned_to ? esc(wtShort(d.pinned_to)) : "a review worker") + " with the project's agent."; }
     if (what === "withdraw") return "Withdrawn — the approval is void; the package leaves " + esc((d.rings || []).map(function (r) { return r.ring; }).join(", ") || "no ring") + "; another maintainer decides.";
-    return dropped ? "Dropped." : "Rejected — the contributor sees the note.";
+    return dropped ? "Dropped." : "Rejected — the contributor sees the note." + (d.released ? " The name is free again." : "");
   }
   // The decision buttons are the shell's (data-approve / data-reject / data-build / data-withdraw = the task id, inside decisionCell's .decide): the click stops here, asks through decideDialog, posts once through api() and tells every fn a page gave onDecided — fn(what, id, answer) — to draw again. The button is disabled from the click and enabled again on cancel or refusal only, so a decision is never posted twice (a rejected row draws again without the button). A page's own Build buttons (a person's page names a package in data-build) are outside .decide and untouched.
   var DECIDED = [];
@@ -1274,24 +1477,327 @@ export const HELPERS = String.raw`
   function endSkeleton() { document.querySelectorAll(".skel").forEach(function (el) { el.remove(); }); document.querySelectorAll(".empty.loading").forEach(function (el) { el.classList.remove("empty", "loading"); if (el.textContent === "Loading") el.textContent = ""; }); }
   // Numbers that change between refreshes flash briefly, so the page reads as live.
   function setTile(el, html) { el.classList.remove("skel"); if (el.innerHTML !== html) { el.innerHTML = html; el.classList.remove("bump"); void el.offsetWidth; el.classList.add("bump"); } }
-  function liveStats(render, everyMs) {
+  // A poll that fails keeps what the last one drew; a page that has something to say about it (Home, whose every section waits on this read) passes failed, which gets the error.
+  function liveStats(render, everyMs, failed) {
     function load() {
       serviceStatus();
       busy(fetch("/api/v1/stats")).then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
         .then(function (d) { pipelineFrom(d); render(d); endSkeleton(); })
-        .catch(function () {});
+        .catch(function (e) { if (failed) failed(e); });
     }
     load();
     setInterval(load, everyMs || 20000);
   }
 `;
 
+/**
+ * What the ⌘K menu offers besides packages (#241), in the handoff's order
+ * and words: the label, the hint on the right, the kit's icon, and where it
+ * goes — an address, or `act` for what happens in place. Every reader gets
+ * every action, the dashboard's rule for controls: the hint says who one is
+ * for ("SIGNED IN", "MAINTAINERS"), and the page it opens says the rest —
+ * /me signs a visitor in and comes back to their own page, Review is a
+ * queue anyone may read. `words` are what else a reader may type for it:
+ * the Journal, the Pipeline and Security are sections of Status now
+ * (index.ts MOVED), so "journal" finds Status; the workers are the
+ * Factory's (the door the Workers page lights, its tile one hop from it),
+ * not People's since #251. test/go-menu.test.ts opens
+ * every address and finds every fragment on its page — Home's #get-started
+ * included, which #243 keeps on its "Point pacman at a ring".
+ */
+export const GO_ACTIONS: { label: string; hint: string; icon: LucideName; href?: string; act?: "theme"; words: string[] }[] = [
+  { label: "Browse packages", hint: "/", icon: "search", href: "/packages", words: ["search", "find", "list"] },
+  { label: "Set up the pool", hint: "›", icon: "terminal", href: "/#get-started", words: ["setup", "install", "pacman", "ring", "command"] },
+  { label: "Request a package", hint: "factory", icon: "git-pull-request", href: "/factory", words: ["new", "add", "contribute", "bring", "workers"] },
+  { label: "Your requests", hint: "SIGNED IN", icon: "list-checks", href: "/me", words: ["mine", "my", "workspace", "builds"] },
+  { label: "Review queue", hint: "MAINTAINERS", icon: "clipboard-check", href: "/review", words: ["approve", "maintain", "staged"] },
+  { label: "Connect your agent", hint: "›", icon: "bot", href: "/agents", words: ["mcp", "ai", "assistant"] },
+  { label: "Docs", hint: "", icon: "book-open", href: "/docs", words: ["documentation", "help", "api", "guide"] },
+  { label: "People", hint: "", icon: "users", href: "/people", words: ["maintainers", "contributors", "who"] },
+  { label: "Status", hint: "LIVE", icon: "activity", href: "/status", words: ["health", "journal", "pipeline", "security", "advisories", "releases"] },
+  { label: "Theme: dark / light", hint: "", icon: "sun-moon", act: "theme", words: ["mode", "colour", "color"] },
+];
+
+/**
+ * The ⌘K menu as the frame serves it, after the footer on every page: a
+ * dialog, closed — so with script off it is never drawn and Go… stays the
+ * link to the packages. A modal dialog with a name, the line a combobox
+ * that owns the list (aria-controls), says whether it has rows
+ * (aria-expanded) and points at the row the keyboard is on
+ * (aria-activedescendant) — GO_MENU keeps both —, the list a listbox of
+ * options, and a status line a screen reader hears the count from. The
+ * rows are the script's.
+ */
+export const GO_MENU_HTML = `<dialog class="go-menu" id="go-menu" aria-label="Go to a package or a page" aria-modal="true">
+  <div class="go-box">
+    <input type="text" id="go-q" role="combobox" aria-label="A package or a page" aria-autocomplete="list" aria-expanded="false" aria-controls="go-list" placeholder="Go…" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="go">
+    <div class="go-list" id="go-list" role="listbox" aria-label="Packages and pages"></div>
+    <p class="go-none" hidden></p>
+    <div class="go-foot"><span>↑↓ move</span><span>↵ open</span><span>esc close</span></div>
+    <span class="go-said" role="status"></span>
+  </div>
+</dialog>`;
+
+/**
+ * Where a package comes from, in the handoff's words, by source and
+ * architecture ("extra/<first arch>" → "Arch extra"): EXPECTED_SOURCES'
+ * `origin`, for the ⌘K menu's hint beside a package. A source the list
+ * does not know is said by its id.
+ */
+const ORIGINS: Record<string, string> = Object.fromEntries(EXPECTED_SOURCES.map((e) => [`${e.source}/${e.arch}`, e.origin]));
+
+/**
+ * The ⌘K menu's script (#241), spliced by page() right after the shell's
+ * HELPERS, before the page's own script, so a page whose script throws
+ * still has it. It works like Omarchy's own menu: ⌘K or Ctrl+K opens and
+ * closes it on every page, `/` focuses the page's own search where the page
+ * marks one (aria-keyshortcuts="/": Home's box, which #243 keeps) and opens
+ * the menu everywhere else, Esc closes it. On a Mac, Ctrl+K in a text field
+ * is the field's own — it deletes to the end of the line — so there it is
+ * left to the field, the menu's line included, and ⌘K is the menu's. The
+ * line filters the actions (GO_ACTIONS) and the packages; ↑ and ↓ move, ↵
+ * opens, and the focus goes back where it was.
+ *
+ * The packages are the search Home's box asks, the very address —
+ * `/api/v1/search?q=<term>&ring=stable&arch=<ARCHES[0]>&limit=9`, the term
+ * in lower case as the box sends it — so the two share the edge's
+ * one-minute copy of every answer (index.ts cachedApi): nothing below two
+ * characters (the endpoint's floor), one search per pause in the typing
+ * (200 ms, Home's), each term asked once per page, and a term inside one
+ * whose answer came whole (fewer rows than the limit) is narrowed from that
+ * answer here, in the server's order, without asking — every row that
+ * holds "hyprl" holds "hypr".
+ *
+ * That search sees stable on the first architecture, so a name it does not
+ * find may still be a package: an aarch64 one (linux-asahi), one only in
+ * edge or the lab (a factory package on its way), one a request reserved.
+ * Before the menu calls a name free it asks where the name is, at addresses
+ * the pages already read: the factory's names (/api/v1/factory/packages,
+ * the list Home and the Factory read, 30 s at the edge — once per page), then the
+ * name itself on each architecture in turn, until one serves it
+ * (/api/v1/package/<name>, which answers from the most stable ring that has
+ * it, the lab included: the package page's own address, so the ten-minute
+ * copy the edge keeps is the page's when the reader opens it). A miss there
+ * is a few point reads by the packages' name index and the rings' key,
+ * never a scan. A name found is its package's row, first; a name found
+ * nowhere, and a pacman name (routes/contributors.ts's rule), is Request
+ * "<name>".
+ *
+ * The order: the typed name when it is a package; an action whose label
+ * starts with the line ("theme", "docs" — the search also matches
+ * descriptions, and the Theme action would be last behind a page of
+ * themes); the packages whose name holds the line, in the server's order;
+ * the other actions, found by a later word or by what else a reader may
+ * type for them ("pacm" is in Set up the pool's words, and pacman comes
+ * first); the packages only their description matched; then Request
+ * "<name>" — the first row with nothing else to show, as the handoff's
+ * "zzfoo" has it, after the packages as its "mar" has them. Up to six
+ * package rows. Request opens the Factory's form, /request, with the name
+ * filled in from ?name= (pages/request.ts). ↵ opens the lit row, but waits
+ * while the answer may still put the typed name first — with nothing shown
+ * yet, or a package row lit that is not the name — so a fast "zzfoo↵" is
+ * the request and a fast "linux-asahi↵" the package, as a slow one is.
+ *
+ * A browser without <dialog> keeps the frame as served: no key is taken,
+ * Go… stays the link (the frame swaps it for the button only once
+ * window.opPalette is here), and the CSS hides the closed dialog. The icons
+ * are the kit's (pages/kit.ts): the rows write what lucide(name, 16)
+ * writes, and the kit's sheet is linked the first time the menu opens,
+ * where the page has not linked it — one immutable file, asked for once
+ * per browser.
+ */
+export const GO_MENU = String.raw`
+  // ---- the ⌘K menu (#241; layout.ts GO_MENU says how it works and why)
+  (function () {
+    var menu = document.querySelector("#go-menu");
+    if (!menu || typeof menu.showModal !== "function") return;
+    var line = menu.querySelector("#go-q"), list = menu.querySelector("#go-list"), none = menu.querySelector(".go-none"), said = menu.querySelector(".go-said");
+    var ACTIONS = ${JSON.stringify(GO_ACTIONS)}, SHEET = ${JSON.stringify(KIT_SHEET_PATH)}, ORIGIN = ${JSON.stringify(ORIGINS)};
+    var LIMIT = 9, SHOWN = 6, PAUSE_MS = 200, NAME = /^[a-z0-9][a-z0-9@._+-]{1,99}$/, MAC = /Mac|iPhone|iPad/.test(navigator.platform || "");
+    // answers: the search's, per term; places: where a name the search did not find is — its row, false for nowhere, null while asked; registered: the factory's names, asked once per page (again after a failure).
+    var answers = new Map(), asking = new Set(), places = new Map(), registered = null, lastRows = [], failed = { term: "", why: "" }, timer = null, settled = "";
+    var items = [], at = 0, moved = false, pending = false, enterLater = false, back = null;
+    function termOf() { return line.value.trim().toLowerCase(); }
+    function originOf(source, arch) { return ORIGIN[source + "/" + arch] || source || ""; }
+    // A row of the search holds the term in its name or its description; the server's order is the name itself, a name that starts with it, one that holds it, a description that does, then by name (routes/search.ts).
+    function holds(p, term) { return p.name.indexOf(term) >= 0 || String(p.description || "").toLowerCase().indexOf(term) >= 0; }
+    function rank(p, term) { return p.name === term ? 0 : p.name.indexOf(term) === 0 ? 1 : p.name.indexOf(term) >= 0 ? 2 : 3; }
+    function narrow(rows, term) { return rows.filter(function (p) { return holds(p, term); }).sort(function (a, b) { return rank(a, term) - rank(b, term) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0); }); }
+    // The answer for a term when it is known without asking: asked before, or held whole in the answer to a term inside it.
+    function known(term) {
+      if (answers.has(term)) return answers.get(term);
+      var found = null;
+      answers.forEach(function (a, t) { if (!found && a.whole && term.indexOf(t) >= 0) found = { rows: narrow(a.rows, term), whole: true }; });
+      if (found) answers.set(term, found);
+      return found;
+    }
+    // Whether the line may still turn out to be a package's name the search did not find: a pacman name, not in the answer, not placed yet.
+    function unsure(term, got) { var place = places.get(term); return NAME.test(term) && !got.rows.some(function (p) { return p.name === term; }) && place !== false && !place; }
+    // What the line needs next, once the reader has paused on it: the search's answer, then — for a name it did not find — where the name is. Every answer that lands comes back here, and a line whose last ask failed waits for the reader to type again.
+    function step() {
+      var term = settled, got = known(term);
+      if (term.length > 1 && failed.term !== term) { if (!got) lookUp(term); else if (unsure(term, got)) whereIs(term); }
+      refresh();
+    }
+    // An answer landed: the line the reader paused on takes its next step; one still being typed is drawn again when the answer holds it whole.
+    function landed() {
+      if (!menu.open) return;
+      var now = termOf();
+      if (now.length > 1 && now === settled) step(); else if (now.length > 1 && known(now)) refresh();
+    }
+    // One request per term at a time: a term typed again while its answer is on the way waits for that answer.
+    function lookUp(term) {
+      if (asking.has(term)) return;
+      asking.add(term);
+      fetch("/api/v1/search?q=" + encodeURIComponent(term) + "&ring=stable&arch=" + ARCHES[0] + "&limit=" + LIMIT)
+        .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+        .then(function (d) { var rows = d.packages || []; answers.set(term, { rows: rows, whole: rows.length < LIMIT }); if (failed.term === term) failed = { term: "", why: "" }; }, function (e) { failed = { term: term, why: errorText(e) }; })
+        .then(function () { asking.delete(term); landed(); });
+    }
+    function registry() {
+      if (!registered) registered = fetch("/api/v1/factory/packages").then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+        .then(function (d) { return (d.packages || []).map(function (p) { return p.name; }); }, function (e) { registered = null; throw e; });
+      return registered;
+    }
+    // Where a name the search did not find is: a factory name, then the name on each architecture in turn. The name is a pacman name (NAME), every character of which a path takes as it is — and the router's pattern takes "+" and "@" only as they are.
+    function whereIs(term) {
+      if (places.has(term)) return;
+      places.set(term, null);
+      var i = 0;
+      function onArch() {
+        if (i >= ARCHES.length) return false;
+        var arch = ARCHES[i++];
+        return fetch("/api/v1/package/" + term + "?ring=stable&arch=" + arch).then(function (r) {
+          if (r.status === 404) return onArch();
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          return r.json().then(function (d) { return { label: term, name: term, hint: originOf((d.package || {}).source, arch), icon: "package", href: pkgHref(term, "stable", arch) }; });
+        });
+      }
+      registry().then(function (names) { return names.indexOf(term) >= 0 ? { label: term, name: term, hint: originOf("factory", ARCHES[0]), icon: "package", href: pkgHref(term, "stable", ARCHES[0]) } : onArch(); })
+        .then(function (found) { places.set(term, found); }, function (e) { places.delete(term); failed = { term: term, why: errorText(e) }; })
+        .then(landed);
+    }
+    function pkgItem(p) { return { label: p.name, name: p.name, hint: originOf(p.source, p.repo_arch || ARCHES[0]), icon: "package", href: pkgHref(p.name, "stable", ARCHES[0]) }; }
+    function build() {
+      var term = termOf();
+      var acts = ACTIONS.filter(function (a) { return !term || a.label.toLowerCase().indexOf(term) >= 0 || (term.length > 1 && a.words.some(function (w) { return w.indexOf(term) === 0; })); });
+      if (term.length < 2) return acts;
+      var lead = acts.filter(function (a) { return a.label.toLowerCase().indexOf(term) === 0; }), other = acts.filter(function (a) { return lead.indexOf(a) < 0; });
+      var got = known(term), rows = got ? got.rows : narrow(lastRows, term), place = places.get(term);
+      var exact = rows.filter(function (p) { return p.name === term; })[0], first = exact ? [pkgItem(exact)] : place ? [place] : [];
+      var rest = rows.filter(function (p) { return p.name !== term; }).slice(0, SHOWN - first.length);
+      var named = rest.filter(function (p) { return p.name.indexOf(term) >= 0; }), described = rest.filter(function (p) { return p.name.indexOf(term) < 0; });
+      var out = first.concat(lead, named.map(pkgItem), other, described.map(pkgItem));
+      if (got && !exact && place === false && NAME.test(term)) out.push({ label: 'Request "' + term + '"', hint: "factory", icon: "git-pull-request", href: "/request?name=" + encodeURIComponent(term) });
+      return out;
+    }
+    function draw() {
+      list.innerHTML = items.map(function (it, i) {
+        var attrs = ' class="go-opt" id="go-o-' + i + '" role="option" aria-selected="' + (i === at) + '" data-i="' + i + '"';
+        var inner = '<span class="go-ic"><i class="op-i op-i-' + esc(it.icon) + '" style="--op-i-s:16px" aria-hidden="true"></i></span><span class="go-l">' + esc(it.label) + '</span><span class="go-h">' + esc(it.hint) + '</span>';
+        return it.href ? '<a' + attrs + ' href="' + esc(it.href) + '" tabindex="-1">' + inner + '</a>' : '<div' + attrs + '>' + inner + '</div>';
+      }).join("");
+      line.setAttribute("aria-expanded", items.length ? "true" : "false");
+      if (items.length) line.setAttribute("aria-activedescendant", "go-o-" + at); else line.removeAttribute("aria-activedescendant");
+      var row = items.length ? list.querySelector("#go-o-" + at) : null;
+      if (row && row.scrollIntoView) row.scrollIntoView({ block: "nearest" });
+    }
+    // ↵ waits while the answer may still put the typed name first: nothing shown yet, or a package row lit that is not the name — unless the reader moved to the row.
+    function early(it) { return pending && !moved && (!it || (!!it.name && it.name !== termOf())); }
+    // The rows again, for the line as it is now; the row the reader moved to stays theirs while it is still there. What the line shows is said once: a search that did not answer, a letter short of one, nothing found — and for a screen reader the same words, or the count.
+    function refresh() {
+      var term = termOf(), kept = moved && items[at] ? items[at].href || items[at].act : null;
+      items = build();
+      at = 0;
+      for (var i = 0; kept && i < items.length; i++) if ((items[i].href || items[i].act) === kept) at = i;
+      if (!at) moved = false;
+      var got = term.length > 1 ? known(term) : null, down = term.length > 1 && failed.term === term;
+      pending = term.length > 1 && !down && (!got || unsure(term, got));
+      if (got) lastRows = got.rows;
+      var count = items.length + (items.length === 1 ? " result" : " results");
+      var why = down ? "the package search did not answer: " + failed.why : term.length === 1 && !items.length ? "type one more letter to search the packages" : !pending && !items.length ? "nothing matches “" + line.value.trim() + "”" : "";
+      none.hidden = !why;
+      none.textContent = why;
+      said.textContent = pending ? "" : down ? why + (items.length ? "; " + count : "") : why && !items.length ? (term.length === 1 ? why : "no results") : count;
+      draw();
+      if (enterLater && !early(items[at])) { enterLater = false; if (items[at]) go(items[at]); }
+    }
+    function go(it) {
+      close();
+      if (it.act === "theme") { if (window.opTheme) window.opTheme.toggle(); return; }
+      location.assign(it.href);
+    }
+    function open() {
+      if (menu.open) return;
+      back = document.activeElement;
+      line.value = ""; settled = ""; moved = false; enterLater = false;
+      if (!document.querySelector('link[href="' + SHEET + '"]')) { var sheet = document.createElement("link"); sheet.rel = "stylesheet"; sheet.href = SHEET; document.head.appendChild(sheet); }
+      menu.showModal();
+      refresh();
+      line.focus();
+    }
+    function close() { if (menu.open) menu.close(); }
+    // However it closes — Esc, ⌘K, a row, a press beside it — the focus goes back to what had it (Go… when that was nothing: a button Safari does not focus on a press).
+    menu.addEventListener("close", function () {
+      clearTimeout(timer); enterLater = false;
+      var to = back && back !== document.body && back.isConnected !== false ? back : document.querySelector("#go");
+      back = null;
+      if (to && to.focus) to.focus({ preventScroll: true });
+    });
+    menu.addEventListener("cancel", function (ev) { ev.preventDefault(); close(); });
+    menu.addEventListener("click", function (ev) { if (ev.target === menu) close(); });
+    line.addEventListener("input", function () {
+      var term = termOf();
+      clearTimeout(timer); settled = ""; moved = false; enterLater = false; failed = { term: "", why: "" };
+      if (term.length > 1) timer = setTimeout(function () { if (termOf() === term) { settled = term; step(); } }, PAUSE_MS);
+      refresh();
+    });
+    // The keys, on the line: the focus never leaves it — Tab stays, and a press anywhere else in the menu does not take it (below) — so the dialog is a trap with one way out.
+    line.addEventListener("keydown", function (ev) {
+      if (ev.isComposing) return;
+      var n = items.length;
+      // A move takes back a ↵ still waiting for the answer: the reader is choosing again.
+      if (ev.key === "ArrowDown" || ev.key === "ArrowUp") { ev.preventDefault(); enterLater = false; if (n) { at = (at + (ev.key === "ArrowDown" ? 1 : n - 1)) % n; moved = true; draw(); } }
+      else if (ev.key === "Enter") { ev.preventDefault(); if (early(items[at])) enterLater = true; else if (items[at]) go(items[at]); }
+      else if (ev.key === "Escape") { ev.preventDefault(); close(); }
+      else if (ev.key === "Tab") ev.preventDefault();
+    });
+    menu.addEventListener("mousedown", function (ev) { if (ev.target !== line) ev.preventDefault(); });
+    list.addEventListener("mousemove", function (ev) {
+      var o = ev.target && ev.target.closest ? ev.target.closest('[role="option"]') : null, i = o ? Number(o.getAttribute("data-i")) : -1;
+      if (i >= 0 && i !== at) { at = i; moved = true; draw(); }
+    });
+    // A press opens the row; a link pressed with a modifier opens where the browser puts it, and the menu stays.
+    list.addEventListener("click", function (ev) {
+      var o = ev.target && ev.target.closest ? ev.target.closest('[role="option"]') : null, it = o ? items[Number(o.getAttribute("data-i"))] : null;
+      if (!it || (it.href && (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey))) return;
+      ev.preventDefault(); go(it);
+    });
+    function typing(el) { var t = el && el.tagName; return t === "INPUT" || t === "TEXTAREA" || t === "SELECT" || !!(el && el.isContentEditable); }
+    document.addEventListener("keydown", function (ev) {
+      if (ev.defaultPrevented || ev.isComposing) return;
+      if ((ev.metaKey || (ev.ctrlKey && !(MAC && typing(ev.target)))) && !ev.altKey && !ev.shiftKey && String(ev.key).toLowerCase() === "k") {
+        // Another dialog (a decision's question) answers first: the menu does not open over it.
+        if (!menu.open && document.querySelector("dialog[open]")) return;
+        ev.preventDefault();
+        if (menu.open) close(); else open();
+        return;
+      }
+      if (ev.key !== "/" || ev.metaKey || ev.ctrlKey || ev.altKey || menu.open || typing(ev.target) || document.querySelector("dialog[open]")) return;
+      ev.preventDefault();
+      var own = document.querySelector('[aria-keyshortcuts="/"]');
+      if (own && !own.disabled && own.getClientRects().length) own.focus(); else open();
+    });
+    window.opPalette = { open: open, close: close, toggle: function () { if (menu.open) close(); else open(); } };
+  })();
+`;
+
 export interface PageOptions {
   title: string;
   description: string;
-  /** Which of the three doors (or the docs) is highlighted; detail pages highlight none. */
-  active: "pool" | "factory" | "review" | "pipeline" | "docs" | "none";
-  /** Documentation pages: which chapter, for the section's own navigation. */
+  /** Which of the three doors (or the docs) is highlighted: a page lights the door it belongs to — a package and the packages list the Pool, the request and the workers the Factory, a build Review — and a page the footer lights (Status, People) none. */
+  active: "pool" | "factory" | "review" | "docs" | "none";
+  /** Documentation pages: which chapter, for the section's own navigation — the map of every chapter beside the text (docsShell). The index ("index") draws its own map of its sections (docs.ts) and keeps the search. */
   doc?: DocKey;
   body: string;
   script?: string;
@@ -1305,55 +1811,82 @@ export interface PageOptions {
    * encodes it once, as a query value.
    */
   path: string;
+  /**
+   * The page is drawn with the v1 kit (pages/kit.ts): the frame links the
+   * kit's stylesheet (its primitives and icons, one immutable file) after
+   * its own CSS and puts the kit's helpers (lucide(), agentMark(),
+   * countUp(), the code well's copy) in the page's script. A page that is
+   * not pays nothing for it: no request, no bytes.
+   */
+  kit?: boolean;
+  /**
+   * The page's own rules: its layout, and where it refines a primitive of
+   * the kit. They live in the page's module, not in the frame's CSS, and
+   * are served after the frame's CSS and the kit's sheet, so a rule here
+   * wins over theirs at equal weight. Tokens only, as the frame's.
+   */
+  css?: string;
 }
 
-/** Four doors — use it, contribute to it, maintain it, watch it run. Everything else, the documentation included, is one link away in the footer. */
+/**
+ * Three doors, one per job (#238): use the pool, contribute to it, maintain
+ * it. Watching it run is no longer a door of its own: the Pipeline is a
+ * section of Status (#248), in the footer with the rest, and its old
+ * address redirects there (index.ts MOVED).
+ */
 export const NAV: { key: PageOptions["active"]; href: string; label: string; sub?: string }[] = [
   { key: "pool", href: "/", label: "Pool", sub: "use" },
   { key: "factory", href: "/factory", label: "Factory", sub: "contribute" },
   { key: "review", href: "/review", label: "Review", sub: "maintain" },
-  { key: "pipeline", href: "/pipeline", label: "Pipeline", sub: "live" },
 ];
 
 /**
- * The detail pages and the documentation, pushed to the side: linked from
- * the footer and from the doors. Every page with a route of its own is here
- * or in NAV, so no page is reached only through another page's content —
- * what the pool serves first (packages, their security, its status and its
- * history), then who runs it (workers, people), then the way in (a request),
- * then what explains it (the docs, the API). The footer lights the entry
- * whose path the reader is on or under, so a package's page lights Packages
- * and a chapter lights Docs.
+ * The footer's five (#240): what the pool serves, how it is doing, the way
+ * to use it through one's own agent, what explains it, who runs it. Agents
+ * is drawn in green (`accent`). An entry whose page has not landed yet names
+ * what stands in for it (`until`): the router answers its address with a
+ * 302 there (index.ts) and the docs hint does not call it a page. None does
+ * since Agents became a page of its own (#249, pages/agents.ts); until then
+ * its address was the chapter on omarchy-cli as an MCP server.
+ *
+ * The rest of what the footer linked before is one hop from the frame, not
+ * in it: the request is the Factory's first step, the workers are
+ * People's "Every worker", and both light the Factory door; the API reference is a chapter of the docs map. Security,
+ * the Journal and the Pipeline are sections of Status (#248), and their
+ * addresses redirect there (index.ts MOVED). test/pages.test.ts walks the
+ * frame and fails by address for a page no longer reached in one hop.
+ *
+ * The footer marks the entry whose path the reader is on or under, so a
+ * package's page marks Packages, a chapter or the API reference Docs, and a
+ * diff Status (the journal it came from is Status's).
  */
-export const MORE: { href: string; label: string }[] = [
+export const MORE: { href: string; label: string; accent?: true; until?: string }[] = [
   { href: "/packages", label: "Packages" },
-  { href: "/security", label: "Security" },
   { href: "/status", label: "Status" },
-  { href: "/journal", label: "Journal" },
-  { href: "/workers", label: "Workers" },
-  { href: "/people", label: "People" },
-  { href: "/request", label: "Request" },
+  { href: "/agents", label: "Agents", accent: true },
   { href: "/docs", label: "Docs" },
-  { href: "/api", label: "API" },
+  { href: "/people", label: "People" },
 ];
 
 /**
  * The line under the docs map that says where the rest is, written from
  * MORE so it cannot name a page the footer does not link (it once
- * said Review was in the footer): "Packages, Security, … and the API are
- * pages of their own — linked from the footer; the four doors are the header."
+ * said Review was in the footer), nor call an address that still stands in
+ * for its page (`until`) a page of its own: "Packages, Status, Agents and
+ * People have their own pages, linked from the footer. The three doors are
+ * the header."
  */
 export function docsHint(): string {
-  const rest = MORE.filter((m) => m.href !== "/docs").map((m) => (m.label === "API" ? "the API" : m.label));
-  return `${rest.slice(0, -1).join(", ")} and ${rest[rest.length - 1]} are pages of their own — linked from the footer; the four doors are the header.`;
+  const rest = MORE.filter((m) => m.href !== "/docs" && !m.until).map((m) => m.label);
+  return `${rest.slice(0, -1).join(", ")} and ${rest[rest.length - 1]} have their own pages, linked from the footer. The three doors are the header.`;
 }
 
 /** The three kinds of worker, as their tables name them: the project's, the review ones, the contributors'. */
 export type WorkerKind = "project" | "review" | "community";
 
 /**
- * The three worker tables as every page serves them — the Workers page,
- * the People page, a person's — one panel per kind with the kind's name
+ * The three worker tables as every page serves them — the Workers page
+ * and a person's — one panel per kind with the kind's name
  * and the page's one line under it, the table the shell's script fills
  * (wtTables() the head and the skeleton, workerRow() the rows), the legend
  * after them. The order is the page's; a panel with `hidden` is a person's,
@@ -1369,19 +1902,26 @@ export function workerPanels(kinds: { kind: WorkerKind; blurb: string; hidden?: 
 
 const LICENSE_URL = "https://github.com/firemanxbr/omarchy-pool/blob/main/LICENSE";
 
-/** One badge in the footer: this is built for Omarchy, and the link goes there. */
+/**
+ * One badge in the footer: this is built for Omarchy, and the link goes
+ * there. The badge is the brand's, drawn in the dark palette's names on
+ * either theme — data-theme="dark" pins its tokens — so it reads the same on
+ * a light page, as omarchy.org's own mark does.
+ */
 const BUILT_FOR_OMARCHY =
-  '<svg viewBox="0 0 156 20" width="156" height="20" role="img" aria-label="built for Omarchy"><rect width="86" height="20" fill="#2a2e3f"/><rect x="86" width="70" height="20" fill="#9ece6a"/><rect x="6" y="5" width="10" height="10" fill="#9ece6a"/><rect x="9" y="8" width="4" height="4" fill="#2a2e3f"/><text x="21" y="14" font-family="JetBrains Mono, monospace" font-size="10.5" fill="#c0caf5">built for</text><text x="121" y="14" text-anchor="middle" font-family="Geist, sans-serif" font-size="11" font-weight="700" fill="#0c0e10">Omarchy</text></svg>';
+  '<svg data-theme="dark" viewBox="0 0 156 20" width="156" height="20" role="img" aria-label="built for Omarchy"><rect width="86" height="20" fill="var(--line)"/><rect x="86" width="70" height="20" fill="var(--green)"/><rect x="6" y="5" width="10" height="10" fill="var(--green)"/><rect x="9" y="8" width="4" height="4" fill="var(--line)"/><text x="21" y="14" font-family="JetBrains Mono, monospace" font-size="10.5" fill="var(--text)">built for</text><text x="121" y="14" text-anchor="middle" font-family="Geist, sans-serif" font-size="11" font-weight="700" fill="var(--green-ink)">Omarchy</text></svg>';
 
 export type { DocKey } from "./docs-tree";
 
 /**
- * The documentation's shell: every docs page — the index, a chapter — is
- * the same layout, the map beside the text. The sidebar carries the search
- * and the chapters; the current one is open on its sections, the others
- * open on a click; a section is a link to its anchor on its chapter's
- * page. The search (docsSearch, below) matches chapters, sections and the
- * glossary and answers with links, so a reader never leaves the shell.
+ * The documentation's shell: every chapter is the same layout, the map
+ * beside the text. The sidebar carries the search and the chapters; the
+ * current one is open on its sections, the others open on a click; a
+ * section is a link to its anchor on its chapter's page. The search
+ * (docsSearch, below) matches chapters, sections and the glossary and
+ * answers with links, so a reader never leaves the shell. The index
+ * (/docs, #250) is the one docs page without it: seven short sections with
+ * their own map, the search, and every chapter linked from its section.
  */
 function docsShell(current: DocKey, body: string): string {
   const tree = DOCS_TREE.map((c, i) => {
@@ -1394,8 +1934,9 @@ function docsShell(current: DocKey, body: string): string {
   });
   return `<div class="docs">
   <aside class="docs-side">
-    <a class="docs-home${current === "index" ? " on" : ""}" href="/docs">Documentation</a>
+    <a class="docs-home" href="/docs">Documentation</a>
     <input type="search" id="docs-q" placeholder="search the docs…" aria-label="search the docs" autocomplete="off">
+    <p class="docs-said" id="docs-said" role="status"></p>
     <div class="docs-hits" id="docs-hits" hidden></div>
     <nav class="docs-nav" id="docs-nav" aria-label="Chapters">${tree.join("")}</nav>
     <div class="docs-hint">${docsHint()}</div>
@@ -1411,10 +1952,16 @@ export function termId(term: string): string {
   return "term-" + term.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 }
 
-/** The search over the map, on every docs page: chapters, sections, the glossary — each hit a link. */
+/**
+ * The search over the map, on every docs page: chapters, sections, the
+ * glossary — each hit a link. Its answer takes the place of the map (on the
+ * index, of the whole page under the title), so a screen reader is told what
+ * came of each word (#docs-said, a status line the eye does not see): how
+ * many it found, or that nothing says it.
+ */
 const DOCS_SEARCH = String.raw`
   (function () {
-    var q = $("#docs-q"), hits = $("#docs-hits"), nav = $("#docs-nav"); if (!q || !hits || !nav) return;
+    var q = $("#docs-q"), hits = $("#docs-hits"), nav = $("#docs-nav"), said = $("#docs-said"); if (!q || !hits || !nav) return;
     var TREE = __DOCS_TREE__, GLOSSARY = __GLOSSARY__;
     var items = [];
     TREE.forEach(function (c) {
@@ -1425,12 +1972,13 @@ const DOCS_SEARCH = String.raw`
     function hl(t, needle) { var i = t.toLowerCase().indexOf(needle); return i < 0 ? esc(t) : esc(t.slice(0, i)) + "<mark>" + esc(t.slice(i, i + needle.length)) + "</mark>" + esc(t.slice(i + needle.length)); }
     q.oninput = function () {
       var needle = q.value.trim().toLowerCase();
-      if (!needle) { hits.hidden = true; nav.hidden = false; return; }
+      if (!needle) { hits.hidden = true; nav.hidden = false; if (said) said.textContent = ""; return; }
       var found = items.filter(function (it) { return (it.ch + " " + it.title + " " + it.text).toLowerCase().indexOf(needle) >= 0; }).slice(0, 12);
       hits.innerHTML = found.length
         ? found.map(function (it) { return '<a class="hit" href="' + it.href + '"><span class="ch">' + esc(it.ch) + '</span><b>' + hl(it.title, needle) + '</b><span>' + hl(it.text, needle) + '</span></a>'; }).join("")
         : '<div class="hit none">nothing in the docs says “' + esc(q.value.trim()) + '”</div>';
       hits.hidden = false; nav.hidden = true;
+      if (said) said.textContent = found.length ? found.length + (found.length === 1 ? " result" : " results") : "nothing in the docs says “" + q.value.trim() + "”";
     };
     q.onkeydown = function (e) { if (e.key === "Escape") { q.value = ""; q.oninput(); } };
   })();
@@ -1438,9 +1986,8 @@ const DOCS_SEARCH = String.raw`
 
 /**
  * The page-view counter, when the deployment names one (ANALYTICS): Google
- * Analytics 4 for a G-… id — it sets cookies, so the Pool page's "no
- * cookies" line is only true without it — or Cloudflare Web Analytics for
- * a beacon token, which sets none. Nothing at all otherwise.
+ * Analytics 4 for a G-… id — it sets cookies — or Cloudflare Web Analytics
+ * for a beacon token, which sets none. Nothing at all otherwise.
  */
 function analyticsTag(v: RunningVersion): string {
   const id = v.analytics;
@@ -1460,9 +2007,9 @@ export function page(o: PageOptions): string {
   const chip = v.release_url
     ? `<a class="ver" href="${escapeHtml(v.release_url)}" title="running release">${tag}</a>`
     : `<span class="ver" title="local build">${tag}</span>`;
-  const nav = NAV.map((n) => `<a href="${n.href}"${n.key === o.active ? ' class="active"' : ""}>${n.label}${n.sub ? `<small>${n.sub}</small>` : ""}</a>`).join("\n    ");
-  const more = MORE.map((m) => `<a href="${m.href}">${m.label}</a>`).join("");
-  const body = o.doc ? docsShell(o.doc, o.body) : o.body;
+  const nav = NAV.map((n) => `<a href="${n.href}"${n.key === o.active ? ' class="active" aria-current="page"' : ""}>${n.label}${n.sub ? `<small> ${n.sub}</small>` : ""}</a>`).join("\n      ");
+  const more = MORE.map((m) => `<a href="${m.href}"${m.accent ? ' class="accent"' : ""}>${m.label}</a>`).join("");
+  const body = o.doc && o.doc !== "index" ? docsShell(o.doc, o.body) : o.body;
   const pool = o.poolUrl.replace(/\/$/, "");
   const docsSearch = o.doc
     ? DOCS_SEARCH.replace("__DOCS_TREE__", JSON.stringify(DOCS_TREE.map((c) => ({ label: c.label, blurb: c.blurb, href: c.href, secs: c.secs })))).replace("__GLOSSARY__", JSON.stringify(GLOSSARY.map(([t, d]) => [t, d, termId(t)])))
@@ -1478,22 +2025,27 @@ export function page(o: PageOptions): string {
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="manifest" href="/site.webmanifest">
-<meta name="theme-color" content="#1a1b26">${analyticsTag(v)}
+<meta name="theme-color" content="${PALETTE.bg.dark}" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="${PALETTE.bg.light}" media="(prefers-color-scheme: light)">
+<script>${THEME_BOOT}</script>${analyticsTag(v)}
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Geist:wght@500;600;700&display=swap">
-<style>${CSS}</style>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Geist:wght@500;600;700&display=swap">
+<style>${CSS}</style>${o.kit ? `\n<link rel="stylesheet" href="${KIT_SHEET_PATH}">` : ""}${o.css ? `\n<style>${o.css}</style>` : ""}
 </head>
 <body>
 <div id="progress"></div>
 <header>
-  <a class="brand" href="/"><span class="mark">▣</span> omarchy-pool</a>
+  <div class="hl"><a class="brand" href="/"><span class="mark">▣</span> omarchy-pool</a></div>
   <div class="hmid">
     ${chip}
-    <nav>
+    <nav aria-label="Main">
       ${nav}
     </nav>
   </div>
-  <span class="account"><a id="account" href="/auth/github?next=${escapeHtml(nextOf(o.path))}" title="contributors and maintainers sign in with GitHub" rel="nofollow">Sign in</a><a id="signout" href="/auth/logout" hidden title="sign out of the dashboard on this browser">sign out</a></span>
+  <div class="hr">
+    <a class="go" id="go" href="/packages" title="find a package">Go…</a>
+    <span class="account"><a id="account" href="/auth/github?next=${escapeHtml(nextOf(o.path))}" title="contributors and maintainers sign in with GitHub" rel="nofollow">Sign in</a><a id="signout" href="/auth/logout" hidden title="sign out of the dashboard on this browser">sign out</a></span>
+  </div>
 </header>
 
 <main>
@@ -1502,15 +2054,31 @@ ${body}
 
 <footer>
   <div class="fleft"><a class="fbadge" href="https://omarchy.org/" title="Built for Omarchy">${BUILT_FOR_OMARCHY}</a><span class="fnote">a community pool — not official Omarchy</span></div>
-  <span class="more">${more}</span>
-  <div class="fright"><a class="gh" href="https://github.com/firemanxbr/omarchy-pool" title="omarchy-pool on GitHub">${GITHUB_ICON} GitHub</a><a class="fnote" href="${LICENSE_URL}" title="the code is open source under the MIT licence">MIT License</a></div>
+  <nav class="more" aria-label="Footer">${more}</nav>
+  <div class="fright"><a href="https://github.com/firemanxbr/omarchy-pool" title="omarchy-pool on GitHub">GitHub</a><a class="fnote" href="${LICENSE_URL}" title="the code is open source under the MIT licence">MIT License</a></div>
 </footer>
+
+${GO_MENU_HTML}
 
 <script>
 (function () {
-  // The footer lights the entry the reader is on or under: /package/<name> is Packages, /docs/<chapter> is Docs, /diff is the Journal's; a build lights nothing here, its door is Review.
-  document.querySelectorAll("footer .more a").forEach(function (a) { var href = a.getAttribute("href"), here = location.pathname; if (here === href || here.indexOf(href + "/") === 0 || (href === "/packages" && here.indexOf("/package/") === 0) || (href === "/journal" && here === "/diff")) a.classList.add("active"); });
-${HELPERS.split("__POOL_URL__").join(pool).split("__RINGS_TEXT__").join(JSON.stringify(RING_TEXT)).split("__WICON__").join(JSON.stringify(WORKER_ICONS)).split("__LATE_AFTER_HOURS__").join(String(LATE_AFTER_HOURS)).split("__PROMISED_RINGS__").join(JSON.stringify(RINGS_BY_STABILITY.filter((r) => (PROMOTED_RINGS as readonly string[]).includes(r)))).split("__ARCHES__").join(JSON.stringify(REPO_ARCHES)).split("__SEVERITIES__").join(JSON.stringify(SEVERITIES)).split("__WORKER_ALIVE_MINUTES__").join(String(WORKER_ALIVE_MINUTES))}
+  // The frame's own, one statement before the shell. The footer marks the entry the reader is on or under, for the eye and for a screen reader (aria-current): /package/<name> is Packages, /docs/<chapter> and the API reference are Docs, /diff is Status's (where the journal went); a build marks nothing here, its door is Review.
+  // Go… is served as a link to the packages, and stays one until the ⌘K menu is on the page (window.opPalette, which GO_MENU sets where the browser has <dialog>, #241): then it is the button the menu opens from, naming the platform's key, and saying it opens a dialog. It is decided once the page's whole script has run (a microtask, through the Promise every page already uses), so a menu declared anywhere in it counts — and a page without one never shows a key that nothing answers.
+  (function () {
+    var here = location.pathname;
+    document.querySelectorAll("footer .more a").forEach(function (a) { var href = a.getAttribute("href"); if (here === href || here.indexOf(href + "/") === 0 || (href === "/packages" && here.indexOf("/package/") === 0) || (href === "/docs" && here === "/api") || (href === "/status" && here === "/diff")) { a.classList.add("active"); a.setAttribute("aria-current", "page"); } });
+    Promise.resolve().then(function () {
+      var go = document.querySelector("header a.go");
+      if (!window.opPalette || !go || !go.parentNode) return;
+      var mac = /Mac|iPhone|iPad/.test(navigator.platform || ""), b = document.createElement("button"), key = document.createElement("kbd");
+      b.type = "button"; b.className = go.className; b.id = go.id; b.title = "go to a package or a page"; b.textContent = go.textContent;
+      key.textContent = mac ? "⌘K" : "Ctrl K"; key.setAttribute("aria-hidden", "true"); b.appendChild(key);
+      b.setAttribute("aria-keyshortcuts", mac ? "Meta+K" : "Control+K"); b.setAttribute("aria-haspopup", "dialog"); b.setAttribute("aria-controls", "go-menu");
+      b.addEventListener("click", function () { window.opPalette.open(); });
+      go.parentNode.replaceChild(b, go);
+    });
+  })();
+${HELPERS.split("__POOL_URL__").join(pool).split("__RINGS_TEXT__").join(JSON.stringify(RING_TEXT)).split("__WICON__").join(JSON.stringify(WORKER_ICONS)).split("__LATE_AFTER_HOURS__").join(String(LATE_AFTER_HOURS)).split("__PROMISED_RINGS__").join(JSON.stringify(RINGS_BY_STABILITY.filter((r) => (PROMOTED_RINGS as readonly string[]).includes(r)))).split("__ARCHES__").join(JSON.stringify(REPO_ARCHES)).split("__SEVERITIES__").join(JSON.stringify(SEVERITIES)).split("__WORKER_ALIVE_MINUTES__").join(String(WORKER_ALIVE_MINUTES))}${GO_MENU}${o.kit ? KIT_HELPERS : ""}
 ${o.script ?? ""}
 ${docsSearch}
 })();

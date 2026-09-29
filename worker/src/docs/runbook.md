@@ -53,8 +53,8 @@ runs `/setup` again; nothing it reads went away. The key's user id,
 
 Everything the scheduler does can be queued by hand by a maintainer
 (`OMARCHY_API` and `OMARCHY_TOKEN=omc_…` set — the token from your own
-page); a project worker runs it with a per-job token and the Pipeline
-follows it:
+page); a project worker runs it with a per-job token, and Status counts it
+with the pool's other jobs (*The pipeline, in numbers*):
 
 ```bash
 pkg-repo job sync --param arch=x86_64                                  # every source of the architecture, one release per ring
@@ -63,7 +63,7 @@ pkg-repo job promote --param from=edge --param to=rc --param note="…"
 pkg-repo job promote --param from=rc --param to=stable --param note="…"        # evidence-gated: two green checks of rc in a row (--param soak_checks=1 for one)
 pkg-repo job promote --param from=rc --param to=stable --param force=yes       # emergency: skips the gate (the target's health still rolls back)
 pkg-repo job promote --param from=rc --param to=stable --param arch=aarch64    # one architecture only: its evidence, its gate, its rows; x86_64 keeps what stable serves
-pkg-repo job rollback --param ring=stable --param to=<release id>              # then renders both architectures (or the overview's roll back button)
+pkg-repo job rollback --param ring=stable --param to=<release id>              # then renders both architectures
 pkg-repo job rollback --param ring=stable --param to=<release id> --param arch=x86_64   # that architecture only
 pkg-repo job render --param ring=stable --param arch=x86_64                     # any ring, the lab included
 pkg-repo job health --param ring=stable --param arch=aarch64
@@ -97,13 +97,14 @@ tests/abi-gate.sh rc x86_64                                    # ABI check of rc
 
 The reads run directly from anywhere (`pkg-repo releases --ring stable`,
 `pkg-repo diff`, `pkg-repo head`, `pkg-repo gc --keep 3` without `--delete`
-is a report); the writes above are jobs. A signed-in maintainer also rolls a
-ring back from the Journal's *Ring history* (the *roll back* button on any
-earlier row queues the same `rollback` job), and every row's *diff* link,
-like the *diff* on a promotion or rollback line of the journal, opens
+is a report); the writes above are jobs. A manual rollback is the
+`rollback` job above, from the CLI or `POST /api/v1/factory/jobs`: the
+dashboard has no roll back button while the ring history moves onto Status
+(#248), where the button comes back on any earlier release. A diff opens at
 `/diff?ring=&from=&to=` — added, removed and upgraded packages, per
-architecture (`GET /api/v1/releases/:ring/diff`). Both releases must still
-be inside retention: GC prunes the membership of older ones (410).
+architecture (`GET /api/v1/releases/:ring/diff`); `/diff` alone is stable's
+head against its parent. Both releases must still be inside retention: GC
+prunes the membership of older ones (410).
 
 ## Releasing the pool itself
 
@@ -593,7 +594,7 @@ What keeps the bill down:
   of a ring, then every 24th, and any older release read by id. A sync that
   moves a hundred packages writes a hundred rows, not thirty thousand; GC
   drops the checkpoints and deltas nothing inside retention starts from.
-  A diff (`/diff`, `pkg-repo diff`, the Packages page) is folded from the
+  A diff (`/diff`, `pkg-repo diff`) is folded from the
   deltas between its two releases and writes nothing: until 2026-09-20 it
   compared full lists, and every release's parent was written out (65 k
   rows, deleted again by the next GC) the first time its diff was viewed
@@ -641,10 +642,10 @@ from Cloudflare's own analytics — what was used so far, priced, plus the
 the next estimate instead of being averaged with the expensive days before
 it (`src/cost.ts`; secret `CLOUDFLARE_ANALYTICS_TOKEN`, an API token with
 *Account Analytics: Read* and *D1: Read*). The latest estimate is
-`settings.cost_latest` — `GET /api/v1/cost` has the breakdown and the
-Pipeline page shows the projection — and one `cost` journal line a day
-(the first estimate at or after 06:00 UTC) keeps the history. That line is
-also the day's report: the brain posts it as a comment on the *Cost report*
+`settings.cost_latest` — `GET /api/v1/cost` has the breakdown and Status's
+*Estimated bill* tile shows the projection — and one `cost` journal line
+a day (the first estimate at or after 06:00 UTC) keeps the history. That
+line is also the day's report: the brain posts it as a comment on the *Cost report*
 issue (#68) the moment it is written (`src/cost.ts` `postCostReport`, the
 secret `GITHUB_REPORT_TOKEN` above) — GitHub e-mails it to whoever watches
 the issue. `cost-report.yml` is the late fallback: GitHub's 06:45 UTC cron
@@ -708,8 +709,8 @@ audience from the same analytics: the distinct client addresses that
 fetched a ring database (`/<source>/<arch>/omarchy-*-<ring>.db`) on the pool's
 hosts — both names, one query, so a machine that used both in a day is
 one address — per ring and per architecture, as one `audience` journal line
-(`src/audience.ts`); the Pool page's community card and the Pipeline's
-counters show it, `/api/v1/stats` carries the last 30 days. Nothing is kept
+(`src/audience.ts`); `/api/v1/stats` carries the last 30 days (no page
+draws them since the Pool's redesign, #243). Nothing is kept
 per request — one number per day. An address is a machine most of the
 time (a NAT hides several, a laptop on the move counts twice), so the
 dashboard says *about*. The query is scoped to the account

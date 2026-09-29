@@ -42,7 +42,8 @@ export function pkgbuildFields(text: string): { url: string | null; pkgdesc: str
 }
 
 export async function backfillRequests(env: Env): Promise<string> {
-  const rows = await env.DB.prepare("SELECT name, owner, url, arches, release, detected, created_at FROM factory_packages WHERE request_id IS NULL ORDER BY created_at LIMIT 10").all<Registration>();
+  // An hour old at least: a request reserves its name a moment before it writes its record (#242), and that registration is not one from before requests.
+  const rows = await env.DB.prepare("SELECT name, owner, url, arches, release, detected, created_at FROM factory_packages WHERE request_id IS NULL AND created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hour') ORDER BY created_at LIMIT 10").all<Registration>();
   if (!rows.results.length) return "";
   const done: string[] = [];
   for (const r of rows.results) {

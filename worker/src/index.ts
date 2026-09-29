@@ -21,6 +21,7 @@
  *   POST /api/v1/releases                          create / promote / roll back
  *   PUT  /api/v1/releases/:id/artifacts/:kind?repo=&arch=
  *   GET  /api/v1/search?q=&ring=&arch=          package search within a ring
+ *   GET  /api/v1/packages?q=&ring=&arch=&origin=&sort=   the packages list: one row per name, filtered and paged by the server (routes/browse.ts)
  *   GET  /api/v1/package/:name[/files]?ring=&arch=  package page data: rings, manifest, edges
  *   GET  /api/v1/security?ring=&arch=             open advisories in a ring and what they expose
  *   GET  /api/v1/security/components              what the rings' packages embed (Go modules, crates), for OSV
@@ -37,9 +38,11 @@
  *   GET  /api/v1/pool/unreferenced?keep=3          retention: what GC would delete
  *   POST /api/v1/pool/gc?keep=3&limit=200          delete it (objects, then rows)
  *   POST /api/v1/pool/relayout?phase=copy|purge     the one-time move to <source>/<arch>/ (the relayout job)
- *   GET  /                                         the dashboard: the Pool (users), /factory (contributors), /pipeline (everyone, live),
- *                                                  /docs, and the detail pages /packages /package/:name /security /status /journal /workers /review /user/:login
+ *   GET  /                                         the dashboard: the Pool (users), /factory (contributors), /review (maintainers),
+ *                                                  /docs, and the detail pages /packages /package/:name /status /agents /people /workers /request /user/:login /build/:id
+ *                                                  (/pipeline, /journal, /security and /docs/api redirect to the section they became: MOVED)
  *   GET  /pool/<source>/<arch>/<file>              fallback static origin (dev)
+ *   GET  /assets/kit.<hash>.css                    the v1 kit's stylesheet (pages/kit.ts): its primitives and icons, immutable under its hash
  *   GET  /setup                                    the one-command setup script (curl … | sudo bash -s -- --ring stable)
  *   GET  /omarchy-worker · /omarchy-worker/compose.yml   one command to run a worker (src/omarchy-worker.sh) and the compose file it writes
  *   GET  /api/v1/pacman.conf?ring=&arch=&with=     the pacman.d include a ring serves right now
@@ -51,6 +54,7 @@ import { handleProvenance } from "./routes/seal";
 import { handleCreateRelease, handleGetRelease, handleReleaseHistory, handlePutArtifact, handleReleaseDiff } from "./routes/releases";
 import { handleGraph } from "./routes/graph";
 import { handlePackage, handlePackageFiles, handleSearch } from "./routes/search";
+import { browseQuery, browseSearch, handleBrowse, type BrowseAnswer } from "./routes/browse";
 import { handlePrune, handlePutAdvisories, handlePutMatches, handleSecurity, handleComponents } from "./routes/security";
 import {
   handleCancelTask, handleClaim, handleComplete, handleEnqueue, handleFactory, handleFail,
@@ -77,6 +81,7 @@ import { reviewHtml } from "./pages/review";
 import { buildHtml } from "./pages/build";
 import { handlePackageStory } from "./routes/story";
 import { icon } from "./pages/icons";
+import { kitAsset } from "./pages/kit";
 import { robotsTxt, sitemapXml } from "./pages/robots";
 import { requestHtml } from "./pages/request";
 import { governanceHtml } from "./pages/governance";
@@ -85,6 +90,7 @@ import { docsWorkersHtml } from "./pages/docs-workers";
 import { workersHtml } from "./pages/workers";
 import { userHtml } from "./pages/user";
 import { peopleHtml } from "./pages/people";
+import { agentsHtml } from "./pages/agents";
 import { handleUser, handleUserCan } from "./routes/users";
 import { handleGetEvents, handlePostEvent } from "./routes/events";
 import { handleServiceStatus, handleStats } from "./routes/stats";
@@ -97,13 +103,12 @@ import { docsSecurityHtml } from "./pages/docs-security";
 import { glossaryHtml } from "./pages/glossary";
 import { docHtml, mdChapterAt } from "./pages/doc";
 import { statusHtml } from "./pages/status";
-import { journalHtml } from "./pages/journal";
 import { apiDocsHtml } from "./pages/api-docs";
 import { diffHtml } from "./pages/diff";
-import { packageHtml, packagesHtml } from "./pages/packages";
-import { securityHtml } from "./pages/security";
-import { pipelineHtml } from "./pages/pipeline";
+import { packageHtml } from "./pages/packages";
+import { packagesHtml } from "./pages/browse";
 import { factoryHtml as factoryPageHtml } from "./pages/contribute";
+import { MORE } from "./pages/layout";
 import { DASHBOARD_HOST, LEGACY_DASHBOARD_HOSTS, isProductionHost, machineOrigin, version } from "./meta";
 import { handleStatic } from "./routes/static";
 import { pacmanInclude, setupScript, workerCli, workerCompose } from "./routes/setup";
@@ -150,6 +155,24 @@ export { RINGS, PROMOTED_RINGS, RINGS_BY_STABILITY, isRing, type Ring } from "./
 
 const API = "/api/v1";
 
+/**
+ * The addresses #240 took out of the header and the footer, and the section
+ * each became: the Pipeline, the Journal and Security are Status's (#248
+ * draws them there), and /docs/api is the API section of the docs index
+ * (#250) — the reference itself is still served at /api, a chapter of the
+ * docs map. A 301 to the section with the query kept — /journal?kind=role
+ * is the journal filtered, /security?ring=rc the ring's advisories — so a
+ * bookmark and every link written before still land where the page went.
+ * The modules of the three pages stay until #248 folds them into Status;
+ * the router no longer serves them.
+ */
+export const MOVED: Readonly<Record<string, string>> = {
+  "/pipeline": "/status",
+  "/journal": "/status#journal",
+  "/security": "/status#advisories",
+  "/docs/api": "/docs#api",
+};
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -187,6 +210,20 @@ export default {
       if (path === "/index.html" || path === "/contribute") {
         url.pathname = path === "/contribute" ? "/factory" : "/";
         return Response.redirect(url.toString(), 301);
+      }
+      // A page that became a section of another (MOVED): one address per page, and the old one still lands. Every key starts with a slash, so no name of Object's prototype is one.
+      const moved = MOVED[path];
+      if (moved) {
+        const [to, section] = moved.split("#");
+        url.pathname = to;
+        url.hash = section ?? "";
+        return Response.redirect(url.toString(), 301);
+      }
+      // A footer page that has not landed yet (MORE's `until`) is a 302 to what stands in for it, so no browser keeps the move once the page is there. None has since Agents landed (#249); until then /agents was the chapter on omarchy-cli as an MCP server.
+      const interim = MORE.find((m) => m.href === path)?.until;
+      if (interim) {
+        url.pathname = interim;
+        return Response.redirect(url.toString(), 302);
       }
       // One command to join a ring: the script, read by people before they pipe it into sudo.
       if (path === "/setup" || path === "/setup.sh") return new Response(setupScript(machineOrigin(url), env.POOL_URL.replace(/\/$/, "")), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300" } });
@@ -231,15 +268,22 @@ export default {
         return Response.redirect(url.toString(), 301);
       }
       if (path === "/status") return html(statusHtml(env.POOL_URL, version(env)));
-      if (path === "/journal") return html(journalHtml(env.POOL_URL, version(env)));
       if (path === "/workers") return html(workersHtml(env.POOL_URL, version(env)));
       if (path === "/diff") return html(diffHtml(env.POOL_URL, version(env)));
       if (path === "/api" || path === "/api/") return html(apiDocsHtml(env.POOL_URL, version(env)));
-      if (path === "/packages") return html(packagesHtml(env.POOL_URL, version(env)));
-      if (path === "/security") return html(securityHtml(env.POOL_URL, version(env)));
+      if (path === "/packages") {
+        // The list is drawn into the page (#245), so it works with script off: from the API's answer for the page's own query, through the API's edge cache under the address the page's script asks for the same list — one stored answer for the two, the list's reads paid once per colo per five minutes, not per view. A value the list does not know is its default here, where the API would refuse it.
+        const { query, typed } = browseQuery(url.searchParams);
+        // A list that threw is said as the API's own 500 says it — "internal error" — never with the database's words, which a public page would print.
+        const res = await cachedApi("GET", "/packages", new URL(`/api/v1/packages${browseSearch(query)}`, url), request, env, ctx).catch((e: unknown) => (console.error(e), json({ error: "internal error" }, 500)));
+        const answer = res.ok ? ((await res.json()) as BrowseAnswer) : null;
+        const error = answer ? null : (((await res.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${res.status}`);
+        return html(packagesHtml(env.POOL_URL, version(env), { query, typed, answer, error }));
+      }
       if (path === "/factory") return html(factoryPageHtml(env.POOL_URL, version(env)));
       if (path === "/people") return html(peopleHtml(env.POOL_URL, version(env)));
-      if (path === "/pipeline") return html(pipelineHtml(env.POOL_URL, version(env)));
+      // Agents (#249): which agent's configuration it shows is the address's (?agent=), so the choice is a link that works with script off; the page reads nothing.
+      if (path === "/agents") return html(agentsHtml(env.POOL_URL, version(env), url.searchParams.get("agent")));
       if (path === "/review") return html(reviewHtml(env.POOL_URL, version(env)));
       if (path === "/request") return html(requestHtml(env.POOL_URL, version(env)));
       const user = path.match(/^\/user\/([A-Za-z0-9-]{1,39})$/);
@@ -251,6 +295,9 @@ export default {
       if (path === "/sitemap.xml") return new Response(sitemapXml(isProductionHost(url.hostname) ? `https://${DASHBOARD_HOST}` : url.origin), { headers: { "content-type": "application/xml; charset=utf-8", "cache-control": "public, max-age=86400" } });
       const ic = icon(path);
       if (ic) return ic;
+      // The v1 kit's one stylesheet (pages/kit.ts): immutable under its content's hash, so a browser asks for it once per change of the kit.
+      const asset = kitAsset(path, method);
+      if (asset) return asset;
       return json({ error: "not found" }, 404);
     } catch (err) {
       console.error(err);
@@ -456,6 +503,7 @@ async function api(method: string, path: string, url: URL, request: Request, env
   }
   if (method === "GET" && path === "/graph") return handleGraph(url, env);
   if (method === "GET" && path === "/search") return handleSearch(url, env);
+  if (method === "GET" && path === "/packages") return handleBrowse(url, env);
   if (method === "GET" && path === "/security") return handleSecurity(url, env);
   if (method === "GET" && path === "/factory") return handleFactory(env, url);
   if (method === "GET" && path === "/factory/blocks") return handleBlocks(env);

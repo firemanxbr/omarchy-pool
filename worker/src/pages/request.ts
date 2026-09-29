@@ -1,7 +1,7 @@
 /**
  * /request — the package request, on a page of its own: nothing to look at
- * but the four fields and the four confirmations. Linked from the footer
- * and from the Factory's first way; a contributor lands here to ask
+ * but the four fields and the four confirmations. Linked from the Factory's
+ * first way (its door is lit here) and from People; a contributor lands here to ask
  * for one thing. The page is the same for whoever opens it: the form is
  * served for everyone, its fields grey with the sign-in as the reason
  * until whoami answers with a person, live then — signed in with GitHub
@@ -69,6 +69,9 @@ const BODY = String.raw`
 const SCRIPT = String.raw`
   // A renewal (?renew=<name>, from the package's row on your page): the same form, filled from the record — the confirmations are yours to tick again.
   var RENEW = new URLSearchParams(location.search).get("renew");
+  // A name brought here (?name=<name>, the ⌘K menu's Request "<name>": layout.ts GO_MENU): the form's name, filled in for whoever is looking — grey with the rest for nobody, and kept through the sign-in, which comes back to this address. Only a pacman name (the server's rule) is taken; the rest of the form is the reader's to give.
+  var NAMED = new URLSearchParams(location.search).get("name");
+  if (!/^[a-z0-9][a-z0-9@._+-]{0,99}$/.test(NAMED || "")) NAMED = null;
   function prefill(name) {
     fetch("/api/v1/factory/packages/" + encodeURIComponent(name) + "/story?t=" + Date.now()).then(function (r) { return r.ok ? r.json() : null; }).then(function (st) {
       if (!st || !st.package) return;
@@ -92,6 +95,7 @@ const SCRIPT = String.raw`
     if (!me) $("#gate-btn").href = signInHref();
     if (me) $("#gate-who").innerHTML = "Asking as <b>" + esc(WHO.login) + "</b> — on the record, next to the package.";
     $("#pkg-form").innerHTML = gate(${JSON.stringify(FIELDS)}, !!me, ${JSON.stringify(ASK_WHY)});
+    if (NAMED && !RENEW) $("#pkg-name").value = NAMED;
     if (!me) return;
     if (RENEW) prefill(RENEW);
     var u = $("#pkg-url"); if (u && u.focus) u.focus();
@@ -125,7 +129,7 @@ export function requestHtml(poolUrl: string, version: RunningVersion): string {
     path: "/request",
     title: "Request a package · omarchy-pool",
     description: "Ask the Omarchy Pool for a package: the project's URL, a name, a description, the licence — checked, written once to the record, signed.",
-    active: "none",
+    active: "factory",
     body: BODY,
     script: SCRIPT,
     poolUrl,
@@ -190,7 +194,8 @@ export const REQUEST_COMPONENTS = (F: Fixture): Component[] => {
       page: "/request",
       // Served grey for everyone — every field disabled with the sign-in as its reason — and drawn again live once a person answers.
       anchor: ['<section id="ask">', '<form id="pkg-form" class="form" onsubmit="return false">', `id="pkg-url" placeholder="https://github.com/owner/project — or …/archive/refs/tags/v1.2.3.tar.gz" required autofocus ${grey}>`, 'id="pkg-name"', 'pattern="[a-z0-9@._+-]+"', 'id="pkg-desc"', 'minlength="8" maxlength="120"', 'id="pkg-license"', 'id="pkg-x86" checked', 'id="pkg-arm" checked'],
-      script: ['$("#pkg-form").innerHTML = gate(', `"${ASK_WHY}"`, 'api("POST", "/api/v1/factory/packages", body)', '$("#pkg-form").onsubmit', 'arches.push("x86_64")', 'arches.push("aarch64")', "checklist: checklist", 'if ($("#pkg-name").value.trim()) body.name'],
+      // A name brought in the address (?name=, the ⌘K menu's Request "<name>") is the form's name, drawn for everyone.
+      script: ['$("#pkg-form").innerHTML = gate(', `"${ASK_WHY}"`, 'api("POST", "/api/v1/factory/packages", body)', '$("#pkg-form").onsubmit', 'arches.push("x86_64")', 'arches.push("aarch64")', "checklist: checklist", 'if ($("#pkg-name").value.trim()) body.name', 'new URLSearchParams(location.search).get("name")', 'if (NAMED && !RENEW) $("#pkg-name").value = NAMED;'],
       // Anyone signed in asks; the name is then the asker's: the same request by anyone else is refused.
       acts: [{ method: "POST", path: "/api/v1/factory/packages", body: theirs, expect: { anonymous: 401, contributor: 201, owner: 409, maintainer: 409 } }],
       visible: EVERYONE,

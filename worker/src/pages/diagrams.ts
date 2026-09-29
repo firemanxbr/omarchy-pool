@@ -51,14 +51,14 @@ export function dpath(d: string, cls = "", arrow = false): string {
 export function dlab(x: number, y: number, lines: string[], anchor = "middle", cls = ""): string {
   return lines.map((l, i) => `<text class="d-lab ${cls}" x="${x}" y="${y + i * 13}" text-anchor="${anchor}">${escapeHtml(l)}</text>`).join("");
 }
-/** A mark that rides a path (SMIL; the page pauses it under prefers-reduced-motion). */
+/** A mark that rides a path (SMIL; the page pauses it under prefers-reduced-motion). The colour is a palette name, var(--green): every colour in a diagram is one, so a figure follows the theme. */
 export function dot(path: string, color: string, dur: number, begin: number): string {
-  return `<circle r="4" fill="${color}" stroke="#1a1b26" stroke-width="1.5"><animateMotion dur="${dur}s" begin="${begin}s" repeatCount="indefinite" path="${path}"/></circle>`;
+  return `<circle r="4" fill="${color}" stroke="var(--bg)" stroke-width="1.5"><animateMotion dur="${dur}s" begin="${begin}s" repeatCount="indefinite" path="${path}"/></circle>`;
 }
 const DEFS =
-  '<defs><marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#8b93b8"/></marker>' +
-  '<marker id="arw-g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#9ece6a"/></marker>' +
-  '<marker id="arw-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#e0af68"/></marker></defs>';
+  '<defs><marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--dim)"/></marker>' +
+  '<marker id="arw-g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--green)"/></marker>' +
+  '<marker id="arw-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--amber)"/></marker></defs>';
 export function svgo(w: number, h: number, label: string, cls = ""): string {
   return `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="${escapeHtml(label)}"${cls ? ` class="${cls}"` : ""}>${DEFS}`;
 }
@@ -102,8 +102,8 @@ export function ringsDiagram(hi?: Stage): string {
   let dots = "";
   if (!hi) {
     const tail = " L240 132 L290 132 L450 132 L500 132 L665 132 L815 132 L965 132 L1115 132 L1190 132";
-    dots += dot("M200 41 L240 41" + tail, "#9ece6a", 10, 0) + dot("M200 133 L240 133" + tail, "#9ece6a", 10, 3.3) + dot("M200 225 L240 225" + tail, "#9ece6a", 10, 6.6);
-    dots += dot("M450 152 L475 152 L475 215 L500 215 L620 215 L620 162", "#e0af68", 6, 1.5);
+    dots += dot("M200 41 L240 41" + tail, "var(--green)", 10, 0) + dot("M200 133 L240 133" + tail, "var(--green)", 10, 3.3) + dot("M200 225 L240 225" + tail, "var(--green)", 10, 6.6);
+    dots += dot("M450 152 L475 152 L475 215 L500 215 L620 215 L620 162", "var(--amber)", 6, 1.5);
   }
   return svgo(1280, 262, "Five sources feed the pool — Arch Linux, Arch Linux ARM, the OPR's edge channel, the Asahi projects and the pool's own factory — verified and stored once, then promoted through the edge, rc and stable rings on evidence; a ring rolls back by itself when a health check fails. Beside them the lab, where the factory's builds are installed by a real pacman before a maintainer approves them into edge.") + dots + s + "</svg>";
 }
@@ -134,31 +134,36 @@ export function factoryDiagram(): string {
   s += darrow(1062, 75, 1127, 75) + dlab(1094, 63, ["review"]);
   s += dbox({ x: 1127, y: 40, w: 190, h: 70, title: "Pool", big: true, cls: "hi", lines: ["its agent makes it again", "a real pacman installs it"] });
   // The drops: where a package on the belt changes colour. Labels and figures stand clear of the lines.
-  const drops: [number, string, string][] = [[337, "requested", "#8b93b8"], [656, "built", "#7aa2f7"], [895, "staged", "#e0af68"], [1222, "approved", "#9ece6a"]];
+  const drops: [number, string, string][] = [[337, "requested", "var(--dim)"], [656, "built", "var(--blue)"], [895, "staged", "var(--amber)"], [1222, "approved", "var(--green)"]];
   for (const d of drops) s += dline([d[0], d[1] === "built" ? 130 : 110, d[0], 214], "dash") + `<text class="d-lab" x="${d[0] + 8}" y="176" style="fill:${d[2]}">${d[1]}</text>`;
   const person = (x: number, color: number | string, values: string, dur: number, extra = "") =>
     `<g transform="translate(${x} 142)"><circle cx="0" cy="0" r="8" fill="none" stroke="${color}" stroke-width="1.5"/><path d="M-14 30 Q0 12 14 30" fill="none" stroke="${color}" stroke-width="1.5"/>${extra}<animateTransform attributeName="transform" type="translate" values="${values}" dur="${dur}s" repeatCount="indefinite"/></g>`;
   const agent = (x: number, begin: number) =>
-    `<g transform="translate(${x} 142)"><rect x="-9" y="-7" width="18" height="15" rx="3" fill="none" stroke="#bb9af7" stroke-width="1.5"/><circle cx="-4" cy="0" r="1.7" fill="#bb9af7"/><circle cx="4" cy="0" r="1.7" fill="#bb9af7"/><line x1="0" y1="-7" x2="0" y2="-12" stroke="#bb9af7" stroke-width="1.5"/><circle cx="0" cy="-14" r="2" fill="#bb9af7"><animate attributeName="opacity" values="1;0.2;1" dur="1.2s" begin="${begin}s" repeatCount="indefinite"/></circle><path d="M-13 30 L-13 16 Q-13 12 -9 12 L9 12 Q13 12 13 16 L13 30" fill="none" stroke="#bb9af7" stroke-width="1.5"/></g>`;
-  s += person(540, "#7aa2f7", "540 142;540 139;540 142", 1.4) + dlab(540, 190, ["contributor", "asks, on the record"]);
+    `<g transform="translate(${x} 142)"><rect x="-9" y="-7" width="18" height="15" fill="none" stroke="var(--lilac)" stroke-width="1.5"/><circle cx="-4" cy="0" r="1.7" fill="var(--lilac)"/><circle cx="4" cy="0" r="1.7" fill="var(--lilac)"/><line x1="0" y1="-7" x2="0" y2="-12" stroke="var(--lilac)" stroke-width="1.5"/><circle cx="0" cy="-14" r="2" fill="var(--lilac)"><animate attributeName="opacity" values="1;0.2;1" dur="1.2s" begin="${begin}s" repeatCount="indefinite"/></circle><path d="M-13 30 L-13 16 Q-13 12 -9 12 L9 12 Q13 12 13 16 L13 30" fill="none" stroke="var(--lilac)" stroke-width="1.5"/></g>`;
+  s += person(540, "var(--blue)", "540 142;540 139;540 142", 1.4) + dlab(540, 190, ["contributor", "asks, on the record"]);
   s += agent(780, 0) + dlab(780, 190, ["agent", "writes and builds"]);
   s += agent(1008, 0.6) + dlab(1008, 190, ["second agent", "audits the evidence"]);
-  s += person(1148, "#9ece6a", "1148 142;1145 142;1148 142;1151 142;1148 142", 2.4, '<circle cx="18" cy="6" r="5" fill="none" stroke="#9ece6a" stroke-width="1.5"/><line x1="22" y1="10" x2="28" y2="16" stroke="#9ece6a" stroke-width="1.5"/>') + dlab(1148, 190, ["maintainer", "reads, then decides"]);
-  s += '<rect x="20" y="222" width="1300" height="32" fill="#13141c" stroke="#2a2e3f"/><line x1="20" y1="222" x2="1320" y2="222" stroke="#8b93b8" stroke-width="1.5" stroke-dasharray="10 8"><animate attributeName="stroke-dashoffset" from="36" to="0" dur="1s" repeatCount="indefinite"/></line>';
-  for (let x = 55; x < 1320; x += 70) s += `<g transform="translate(${x} 238)"><circle r="8" fill="#1f2230" stroke="#2a2e3f"/><line x1="-8" y1="0" x2="8" y2="0" stroke="#8b93b8"/><line x1="0" y1="-8" x2="0" y2="8" stroke="#8b93b8"/><animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="4s" repeatCount="indefinite" additive="sum"/></g>`;
+  s += person(1148, "var(--green)", "1148 142;1145 142;1148 142;1151 142;1148 142", 2.4, '<circle cx="18" cy="6" r="5" fill="none" stroke="var(--green)" stroke-width="1.5"/><line x1="22" y1="10" x2="28" y2="16" stroke="var(--green)" stroke-width="1.5"/>') + dlab(1148, 190, ["maintainer", "reads, then decides"]);
+  s += '<rect x="20" y="222" width="1300" height="32" fill="var(--panel-2)" stroke="var(--line)"/><line x1="20" y1="222" x2="1320" y2="222" stroke="var(--dim)" stroke-width="1.5" stroke-dasharray="10 8"><animate attributeName="stroke-dashoffset" from="36" to="0" dur="1s" repeatCount="indefinite"/></line>';
+  for (let x = 55; x < 1320; x += 70) s += `<g transform="translate(${x} 238)"><circle r="8" fill="var(--panel)" stroke="var(--line)"/><line x1="-8" y1="0" x2="8" y2="0" stroke="var(--dim)"/><line x1="0" y1="-8" x2="0" y2="8" stroke="var(--dim)"/><animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="4s" repeatCount="indefinite" additive="sum"/></g>`;
   // Five packages, one every 3.2 s, at the belt's speed: the colour changes
   // under the drops. The third is stopped at the maintainer — it turns red,
   // gets its mark and leaves the belt; the others ride off the end, approved.
-  const T = 16;
+  // Each colour is a square of its own and the animation is their opacity:
+  // an animation's values are read as colours, not through the cascade, so
+  // a palette name there is not something every browser resolves — as a
+  // square's fill, it is.
+  const T = 16, KEYS = "0;0.42;0.43;0.58;0.59;0.80;0.81;1";
   for (let i = 0; i < 5; i++) {
     const begin = `begin="${(i * 3.2).toFixed(1)}s" repeatCount="indefinite"`, stopped = i === 2;
-    const fill = stopped ? "#8b93b8;#8b93b8;#7aa2f7;#7aa2f7;#e0af68;#e0af68;#f7768e;#f7768e" : "#8b93b8;#8b93b8;#7aa2f7;#7aa2f7;#e0af68;#e0af68;#9ece6a;#9ece6a";
-    s += `<g><rect x="-7" y="-14" width="14" height="14" fill="#8b93b8" stroke="#1a1b26" stroke-width="1.2"><animate attributeName="fill" values="${fill}" keyTimes="0;0.42;0.43;0.58;0.59;0.80;0.81;1" dur="${T}s" ${begin}/></rect><rect x="-3" y="-10" width="6" height="6" fill="#1a1b26"/>` +
+    const tones = ["var(--dim)", "var(--blue)", "var(--amber)", stopped ? "var(--red)" : "var(--green)"];
+    const squares = tones.map((c, k) => `<rect x="-7" y="-14" width="14" height="14" fill="${c}" stroke="var(--bg)" stroke-width="1.2"${k ? ' opacity="0"' : ""}><animate attributeName="opacity" values="${tones.flatMap((_, j) => (j === k ? [1, 1] : [0, 0])).join(";")}" keyTimes="${KEYS}" dur="${T}s" ${begin}/></rect>`).join("");
+    s += `<g>${squares}<rect x="-3" y="-10" width="6" height="6" fill="var(--bg)"/>` +
       (stopped
-        ? `<text x="0" y="-19" text-anchor="middle" font-size="13" font-weight="700" fill="#f7768e" opacity="0">✕<animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.81;0.83;0.95;1" dur="${T}s" ${begin}/></text><animate attributeName="opacity" values="1;1;1;0" keyTimes="0;0.81;0.95;1" dur="${T}s" ${begin}/><animateMotion dur="${T}s" ${begin} calcMode="linear" keyPoints="0;1;1" keyTimes="0;0.81;1" path="M30 222 L1222 222"/>`
+        ? `<text x="0" y="-19" text-anchor="middle" font-size="13" font-weight="700" fill="var(--red)" opacity="0">✕<animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.81;0.83;0.95;1" dur="${T}s" ${begin}/></text><animate attributeName="opacity" values="1;1;1;0" keyTimes="0;0.81;0.95;1" dur="${T}s" ${begin}/><animateMotion dur="${T}s" ${begin} calcMode="linear" keyPoints="0;1;1" keyTimes="0;0.81;1" path="M30 222 L1222 222"/>`
         : `<animate attributeName="opacity" values="1;1;0;0" keyTimes="0;0.87;0.875;1" dur="${T}s" ${begin}/><animateMotion dur="${T}s" ${begin} calcMode="linear" keyPoints="0;1;1" keyTimes="0;0.87;1" path="M30 222 L1310 222"/>`) + "</g>";
   }
-  s += dlab(20, 296, ["the factory floor"], "start") + '<text x="1320" y="296" text-anchor="end" font-size="13" font-weight="600" font-family="Geist, sans-serif"><tspan fill="#8b93b8">off the belt → </tspan><tspan fill="#bb9af7">edge</tspan><tspan fill="#8b93b8"> → </tspan><tspan fill="#7aa2f7">rc</tspan><tspan fill="#8b93b8"> → </tspan><tspan fill="#9ece6a">stable</tspan><tspan fill="#8b93b8">, signed by the pool</tspan></text>';
+  s += dlab(20, 296, ["the factory floor"], "start") + '<text x="1320" y="296" text-anchor="end" font-size="13" font-weight="600" font-family="Geist, sans-serif"><tspan fill="var(--dim)">off the belt → </tspan><tspan fill="var(--edge)">edge</tspan><tspan fill="var(--dim)"> → </tspan><tspan fill="var(--rc)">rc</tspan><tspan fill="var(--dim)"> → </tspan><tspan fill="var(--stable)">stable</tspan><tspan fill="var(--dim)">, signed by the pool</tspan></text>';
   return s + "</svg>";
 }
 
@@ -184,7 +189,7 @@ export function liveDiagram(): string {
   s += dpath("M670 97 C670 40, 1200 40, 1200 97", "hi dash", true) + dlab(935, 34, ["fast-track: a confident fix in edge skips the soak"], "middle", "hi");
   ["Arch Security Tracker", "Debian Security Tracker", "OSV · Go modules, crates", "CISA KEV · exploited", "EPSS · likelihood"].forEach((t, i) => {
     const y = 262 + i * 32;
-    s += `<rect class="d-chip" x="20" y="${y}" width="190" height="26"/><text class="d-s" x="115" y="${y + 17}" text-anchor="middle" style="fill:#a9b1d6">${escapeHtml(t)}</text>` + dline([210, y + 13, 250, y + 13]);
+    s += `<rect class="d-chip" x="20" y="${y}" width="190" height="26"/><text class="d-s" x="115" y="${y + 17}" text-anchor="middle" style="fill:var(--muted)">${escapeHtml(t)}</text>` + dline([210, y + 13, 250, y + 13]);
   });
   s += dline([250, 275, 250, 403]) + darrow(250, 339, 300, 339);
   s += dbox({ x: 300, y: 289, w: 200, h: 100, title: "Security scan", big: true, lines: [{ text: "advisories known: …", cls: "live", live: "advisories" }, { text: "open in stable: …", cls: "amber", live: "open-stable" }, "every 3 h, every ring"] });
@@ -192,10 +197,10 @@ export function liveDiagram(): string {
   s += dlab(580, 248, ["matches open advisories against what each ring serves"], "start");
   // The marks ride under the boxes: visible on the arrows, covered inside a box, never across its text.
   const pkg = "M230 55 L250 55 L250 127 L300 127 L500 127 L600 127 L740 127 L860 127 L1010 127 L1120 127 L1200 127";
-  let dots = dot(pkg, "#9ece6a", 9, 0) + dot(pkg, "#9ece6a", 9, 3) + dot(pkg, "#9ece6a", 9, 6);
-  dots += dot("M230 275 L250 275 L250 339 L300 339", "#e0af68", 3, 0.5) + dot("M230 371 L250 371 L250 339 L300 339", "#e0af68", 3, 2);
-  dots += dot("M500 339 L560 339 L560 230 L670 230 L670 157", "#e0af68", 4, 1) + dot("M500 339 L560 339 L560 230 L935 230 L935 157", "#e0af68", 5, 2.3) + dot("M500 339 L560 339 L560 230 L1200 230 L1200 157", "#e0af68", 6, 0.2);
-  dots += dot("M670 97 C670 40, 1200 40, 1200 97", "#9ece6a", 5, 4);
+  let dots = dot(pkg, "var(--green)", 9, 0) + dot(pkg, "var(--green)", 9, 3) + dot(pkg, "var(--green)", 9, 6);
+  dots += dot("M230 275 L250 275 L250 339 L300 339", "var(--amber)", 3, 0.5) + dot("M230 371 L250 371 L250 339 L300 339", "var(--amber)", 3, 2);
+  dots += dot("M500 339 L560 339 L560 230 L670 230 L670 157", "var(--amber)", 4, 1) + dot("M500 339 L560 339 L560 230 L935 230 L935 157", "var(--amber)", 5, 2.3) + dot("M500 339 L560 339 L560 230 L1200 230 L1200 157", "var(--amber)", 6, 0.2);
+  dots += dot("M670 97 C670 40, 1200 40, 1200 97", "var(--green)", 5, 4);
   return HEAD + dots + s + "</svg>";
 }
 
@@ -293,6 +298,6 @@ export function sourcesDiagram(): string {
   s += dpath("M880 510 L1290 510 L1290 240", "hi dash", true) + dlab(1085, 502, ["the fast lane: the trial installed it → stable with edge"], "middle", "hi");
   // The marks ride under the boxes: visible on the arrows, covered inside a box, never across its text.
   const tail = " L270 198 L300 198 L460 198 L500 198 L710 198 L760 198 L910 198 L960 198 L1110 198 L1160 198 L1235 198";
-  const dots = dot("M240 46 L270 46" + tail, "#9ece6a", 10, 0) + dot("M240 250 L270 250" + tail, "#9ece6a", 10, 4) + dot("M280 500 L320 500 L590 500 L630 500 L785 500 L785 240", "#e0af68", 8, 2);
+  const dots = dot("M240 46 L270 46" + tail, "var(--green)", 10, 0) + dot("M240 250 L270 250" + tail, "var(--green)", 10, 4) + dot("M280 500 L320 500 L590 500 L630 500 L785 500 L785 240", "var(--amber)", 8, 2);
   return HEAD + dots + s + "</svg>";
 }

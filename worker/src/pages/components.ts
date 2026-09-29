@@ -30,15 +30,17 @@
  * script whose path no entry on that page (or the shell) claims fails by
  * the page's name, so a new read or act is declared the day it is written.
  */
-import { MORE } from "./layout";
+import { GO_ACTIONS, MORE, PALETTE, THEME_KEY } from "./layout";
 import { OVERVIEW_COMPONENTS } from "./overview";
 import { FACTORY_COMPONENTS } from "./contribute";
 import { REVIEW_COMPONENTS } from "./review";
 import { PIPELINE_COMPONENTS } from "./pipeline";
-import { PACKAGES_COMPONENTS, PACKAGE_COMPONENTS } from "./packages";
+import { PACKAGE_COMPONENTS } from "./packages";
+import { PACKAGES_COMPONENTS } from "./browse";
 import { BUILD_COMPONENTS } from "./build";
 import { USER_COMPONENTS } from "./user";
 import { PEOPLE_COMPONENTS } from "./people";
+import { AGENTS_COMPONENTS } from "./agents";
 import { WORKERS_COMPONENTS } from "./workers";
 import { SECURITY_COMPONENTS } from "./security";
 import { STATUS_COMPONENTS } from "./status";
@@ -149,10 +151,13 @@ export interface Fixture {
   projectTask: number;
   /** A later staged community build of `mine`, undecided: probe "build by the project" and "approve" (409: a contributor's build) on it. */
   stagedTask: number;
-  /** Another one, to reject: an act that changes the fixture runs on this row. */
+  /** The staged build of alice's `disposable`, to reject: an act that changes the fixture runs on this row — a package of its own, since a decision covers the whole package (#242). */
   disposableTask: number;
-  /** A third, for a second page whose act rejects a row of its own. */
+  /** The staged build of alice's `spare`, for a second page whose act rejects a row of its own. */
   spareTask: number;
+  /** "disposable" and "spare", alice's two packages with one staged build each (F.disposableTask, F.spareTask). */
+  disposablePkg: string;
+  sparePkg: string;
   /** "carol", blocked by m1: the brake's table has a row, and m2 is the other maintainer who could lift it. */
   blockedContributor: string;
   /** "hers", carol's package, blocked by m1 before she was. */
@@ -161,7 +166,7 @@ export interface Fixture {
   outsider: string;
   /** "lost", dave's package: approved by m1, its publish job failed on w1 — the registry still says approved; the row of GET /factory/approvals says `publish_status: "failed"`. */
   failedPkg: string;
-  /** "pulled", dave's other package: approved by m1, then blocked by m2 with the approval standing — the row says `blocked_at`, its publish job is cancelled. */
+  /** "pulled", dave's other package: approved by m1, then blocked by m2 with the approval standing (a block from before #242; the door withdraws it now) — the row says `blocked_at`, its publish job is cancelled. */
   pulledPkg: string;
   /** The id of the one done pool job of each kind — sync, promote, rollback, render, health, gc, security, verify, relayout, enqueue, and the three on a build: audit, trial, publish (ours', run through the API) — its params as the brain queues them and its result as work.rs posts it: what the Pipeline's table words. */
   jobs: Record<string, number>;
@@ -175,6 +180,13 @@ export interface Fixture {
  * poll and the worker's log, so a page's own entries need not claim them.
  */
 export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
+  {
+    // The theme (#239): the system's, or the one the reader chose — kept in this browser under THEME_KEY and applied in the head before the first paint, with the browser's chrome (theme-color) following. window.opTheme is the one way to choose, what the ⌘K menu calls; kit.test.ts runs the boot.
+    id: "shell.theme",
+    page: "/",
+    anchor: [`<meta name="theme-color" content="${PALETTE.bg.dark}" media="(prefers-color-scheme: dark)">`, `<meta name="theme-color" content="${PALETTE.bg.light}" media="(prefers-color-scheme: light)">`, "window.opTheme = {", `"${THEME_KEY}"`, '[data-theme="light"] { color-scheme: light;'],
+    visible: EVERYONE,
+  },
   {
     // The header's Sign in carries the page it is pressed on as `next`, so the sign-in comes back to it; /me is the reader's own page, a redirect that needs the session to know where.
     id: "shell.account",
@@ -191,11 +203,42 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // Every page with a route of its own that is not a door: the footer is where a reader finds People and the Request, not only a page's content.
+    // The footer's five (#240): Packages, Status, Agents in green, Docs, People — what is not a door, one hop from every page; the rest of the pages are one hop from these or from a door (layout.ts MORE says which). The page the reader is on or under is marked, for a screen reader too: a package's page is Packages', the API reference Docs', a diff Status'.
     id: "shell.footer-more",
     page: "/",
-    anchor: MORE.map((m) => `href="${m.href}"`),
-    script: ['footer .more a', 'href === "/packages" && here.indexOf("/package/") === 0', 'href === "/journal" && here === "/diff"'],
+    anchor: [...MORE.map((m) => `href="${m.href}"`), '<a href="/agents" class="accent">Agents</a>', '<nav class="more" aria-label="Footer">'],
+    script: ['footer .more a', 'href === "/packages" && here.indexOf("/package/") === 0', 'href === "/docs" && here === "/api"', 'href === "/status" && here === "/diff"', 'a.setAttribute("aria-current", "page")'],
+    reads: [
+      // A footer page that has not landed yet (MORE's `until`; none since Agents landed, #249) is a 302 to what stands in for it, one no browser keeps.
+      ...MORE.filter((m) => m.until).map((m) => ({ path: m.href, status: 302, json: false as const })),
+    ],
+    visible: EVERYONE,
+  },
+  {
+    // Go… (#240): served as a link to the packages, and the button the ⌘K menu (#241) opens from once the menu is on the page (window.opPalette) — only then does it name a key, the platform's, for the eye and as aria-keyshortcuts, and say it opens a dialog.
+    id: "shell.go",
+    page: "/",
+    anchor: ['<a class="go" id="go" href="/packages" title="find a package">Go…</a>'],
+    script: ['document.querySelector("header a.go")', "!window.opPalette", 'document.createElement("button")', "window.opPalette.open()", '"Ctrl K"', '"aria-keyshortcuts"', 'b.setAttribute("aria-haspopup", "dialog")'],
+    reads: [{ path: "/packages", json: false }],
+    visible: EVERYONE,
+  },
+  {
+    // The ⌘K menu (#241, layout.ts GO_MENU): a closed dialog after the footer on every page — never drawn with script off —, opened by ⌘K or Ctrl+K, by / where the page marks no search of its own, and by Go…; a combobox over a listbox, the row the keyboard is on named by aria-activedescendant. It reads the one search Home's box reads, at the same address and in lower case, so the two share the edge's copy; a name that search did not find is asked where it is — the factory's names, then the name on each architecture, at the package page's own address — before Request "<name>", the Factory's form with the name filled in, is offered; and every action lands on a page — a redirect where its address is one (/me, and a footer page still standing in for its own: MORE's `until`).
+    id: "shell.go-menu",
+    page: "/",
+    anchor: ['<dialog class="go-menu" id="go-menu" aria-label="Go to a package or a page" aria-modal="true">', 'id="go-q" role="combobox"', 'aria-controls="go-list"', '<div class="go-list" id="go-list" role="listbox" aria-label="Packages and pages">', '<span class="go-said" role="status">'],
+    script: ['document.querySelector("#go-menu")', 'typeof menu.showModal !== "function"', '"/api/v1/search?q=" + encodeURIComponent(term) + "&ring=stable&arch=" + ARCHES[0] + "&limit=" + LIMIT', '"/api/v1/factory/packages"', '"/api/v1/package/" + term + "?ring=stable&arch=" + arch', "(d.package || {}).source", 'role="option"', '"aria-activedescendant"', '"/request?name=" + encodeURIComponent(term)', "window.opTheme.toggle()", `document.querySelector('[aria-keyshortcuts="/"]')`, "window.opPalette = {"],
+    reads: [
+      { path: `/api/v1/search?q=${F.pkg}&ring=stable&arch=${F.arch}&limit=9`, fields: ["packages", "packages.0.name", "packages.0.source", "packages.0.repo_arch", "packages.0.description"] },
+      { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.name"] },
+      { path: `/api/v1/package/${F.pkg}?ring=stable&arch=${F.arch}`, fields: ["name", "package.source"] },
+      ...GO_ACTIONS.filter((a) => a.href).map((a) => {
+        const path = a.href!.split("#")[0];
+        return { path, json: false as const, ...(path === "/me" || MORE.some((m) => m.href === path && m.until) ? { status: 302 } : {}) };
+      }),
+      { path: "/request?name=zzfoo", json: false },
+    ],
     visible: EVERYONE,
   },
   {
@@ -222,6 +265,15 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     anchor: [],
     script: ["function approvalWhere(", 'a.publish_status === "failed" || a.publish_status === "cancelled"', 'word: "publishing"'],
     reads: [{ path: "/api/v1/factory/approvals", fields: ["approvals.0.rings", "approvals.0.blocked_at", "approvals.0.publish_status"] }],
+    visible: EVERYONE,
+  },
+  {
+    // A package's targets (targets.ts): one chip per architecture in the server's word — built, building, not supported (dashed), waiting — drawn the same by Review, the package page and a person's page (targetChips); a decision's architectures, as one line (archesOf). "marcelo, on x86_64", never "the x86_64 package".
+    id: "shell.target-chips",
+    page: "/",
+    anchor: [],
+    script: ["var TARGET_WORD = ", "function targetChips(targets)", '"· not supported"', '" dashed"', "function archesOf(a)"],
+    reads: [{ path: `/api/v1/factory/packages/${F.factoryPkg}/story`, fields: ["targets", "targets.x86_64.status", "targets.x86_64.task"] }],
     visible: EVERYONE,
   },
   {
@@ -258,15 +310,15 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // The pool's jobs of the week counted once (CHARTS' jobsSummary over the stats series: runs, done, failed, waiting, per kind and per day), a job's bucket by one rule (jobBucket: a cancelled job is failed, queued or leased is waiting — jobsSummary's and the Workers page's cards') and the worker minutes as a view on its days (workerMinutes): the Status tiles, table and charts and the Pipeline's chart read these, never the metrics snapshot's jobs.
+    // The pool's jobs of the week counted once (CHARTS' jobsSummary over the stats series: runs, done, failed, waiting, per kind and per day), a job's bucket by one rule (jobBucket: a cancelled job is failed, queued or leased is waiting — jobsSummary's and the Workers page's cards') and the worker minutes as a view on its days (workerMinutes): the Status tiles, table and charts and the Pipeline's chart read these, never the metrics snapshot's jobs. Read on Status, a page that splices CHARTS (Home draws no chart since #243).
     id: "shell.jobs-summary",
-    page: "/",
+    page: "/status",
     anchor: [],
     script: ["function jobBucket(status)", 'status === "failed" || status === "cancelled" ? "failed" : "waiting"', "function jobsSummary(series, days)", "o[jobBucket(r.status)] += n", "function workerMinutes(series, days)", "var js = jobsSummary(series, days)"],
     visible: EVERYONE,
   },
   {
-    // Open advisories counted one way: advisoriesAt(d, conf) keeps the rows of a security report that count at a confidence — the Security page's default, SEC_CONF, unless a page says — and advisoryCounts(rows) is the numbers a tile or a chart draws; the Pool, the Pipeline and the Security page say one number for stable.
+    // Open advisories counted one way: advisoriesAt(d, conf) keeps the rows of a security report that count at a confidence — the Security page's default, SEC_CONF, unless a page says — and advisoryCounts(rows) is the numbers a tile or a chart draws; the Pipeline and the Security page say one number for stable.
     id: "shell.advisory-counts",
     page: "/",
     anchor: [],
@@ -373,6 +425,7 @@ export function allComponents(F: Fixture): Component[] {
     ...BUILD_COMPONENTS(F),
     ...USER_COMPONENTS(F),
     ...PEOPLE_COMPONENTS(F),
+    ...AGENTS_COMPONENTS(F),
     ...WORKERS_COMPONENTS(F),
     ...SECURITY_COMPONENTS(F),
     ...STATUS_COMPONENTS(F),

@@ -68,7 +68,7 @@ __CHARTS__
     // Landed is the registry's own word (the Pool, the Pipeline and People count the same flag) — approved by a maintainer, which is what the caption says: an approval stands after a publish that failed and after a block, so the number is not "in the rings" (Landed lately below said "publish failed" under a tile that counted it as served, 2026-09-18). The contributors under it are the owners of those packages who are not in the maintainer set — the People page's and the Pool's word for a contributor.
     var landed = pkgs.filter(function (p) { return p.landed; }), from = {}; landed.forEach(function (p) { if (p.owner && !Object.prototype.hasOwnProperty.call(maint, p.owner)) from[p.owner] = 1; });
     var tiles = [
-      ["Community packages", num(landed.length), "approved by a maintainer, from " + num(Object.keys(from).length) + " contributors", "", "/packages?q=factory"],
+      ["Community packages", num(landed.length), "approved by a maintainer, from " + num(Object.keys(from).length) + " contributors", "", "/packages?origin=factory"],
       ["Waiting for review", num(review.waiting), review.oldest_ms ? "oldest " + span(review.oldest_ms) : "nothing waiting", review.waiting ? "warn" : "", "/review"],
       ["Shared workers alive", num(sw.alive), num(sw.byKind.community.alive) + " community · " + num(sw.byKind.project.alive + sw.byKind.review.alive) + " project", sw.alive ? "ok" : "", "/workers"],
       // Fed by the stats poll, not the lists: marked so, it keeps its number when the lists did not answer — the chart beside it draws the same series.
@@ -103,7 +103,7 @@ __CHARTS__
         var where = approvalWhere(a), state = rings.length ? "" : pillHtml(where.cls, where.word, where.title);
         // The person is the shell's, the role from the maintainer set; the package links the shell's one address, with the most stable ring that serves it (servedRing, the reader's order) and its architecture — and, served by no ring, its build: as Review's Decided line does, never a package address naming a ring no fact supports (lost linked /package/lost?ring=stable after its publish failed, 2026-09-18).
         var href = rings.length ? pkgHref(a.name, servedRing(rings), a.arch) : "/build/" + a.task_id;
-        return '<div class="land">' + (owner ? avatar(owner) : '<span class="avatar">?</span>') + '<div class="n"><span><a href="' + href + '">' + esc(a.name) + '</a> <span class="v">' + esc(a.version || "") + '</span></span>' + state + '</div><div class="b">by ' + personLink(owner) + ' · approved by ' + personLink(a.by) + ' · ' + ago(a.created_at) + ' · ' + esc(a.arch) + '</div>' + ringBadges(rings) + '</div>';
+        return '<div class="land">' + (owner ? avatar(owner) : '<span class="avatar">?</span>') + '<div class="n"><span><a href="' + href + '">' + esc(a.name) + '</a> <span class="v">' + esc(a.version || "") + '</span></span>' + state + '</div><div class="b">by ' + personLink(owner) + ' · approved by ' + personLink(a.by) + ' · ' + ago(a.created_at) + ' · ' + esc(archesOf(a)) + '</div>' + ringBadges(rings) + '</div>';
       }).join("") || '<div class="muted">nothing approved yet — <a href="/request">be the first</a></div>';
       // The funnel: medians from what the record holds (a package's request, its first staged build, the decision), then the gates every package passes.
       var median = function (xs) { if (!xs.length) return null; xs = xs.slice().sort(function (a, b) { return a - b; }); return xs[Math.floor(xs.length / 2)]; };
@@ -165,7 +165,7 @@ export const FACTORY_COMPONENTS = (_F: Fixture): Component[] => [
     id: "factory.tiles",
     page: "/factory",
     anchor: ['class="tiles five"', 'id="tiles"'],
-    script: ['api("GET", "/api/v1/factory")', 'api("GET", "/api/v1/factory/packages")', 'api("GET", "/api/v1/factory/review")', '"#tiles"', "function renderTiles()", 'setTiles("#tiles", FACTS ? tiles : tilesUnanswered(tiles, DOWN))', '"Community packages"', "p.landed", "maintainerSet(ok)", '"approved by a maintainer, from "', '" contributors"', '"Waiting for review"', "review.waiting", "review.oldest_ms", '"Shared workers alive"', "workerCounts(f.workers.filter(", "sw.byKind.community.alive", '"Builds this week"', "buildsByDay(STATS.series, 7).days", '"/journal?kind=build", "stats"]', '"Requested, not built yet"', '"/packages?q=factory"'],
+    script: ['api("GET", "/api/v1/factory")', 'api("GET", "/api/v1/factory/packages")', 'api("GET", "/api/v1/factory/review")', '"#tiles"', "function renderTiles()", 'setTiles("#tiles", FACTS ? tiles : tilesUnanswered(tiles, DOWN))', '"Community packages"', "p.landed", "maintainerSet(ok)", '"approved by a maintainer, from "', '" contributors"', '"Waiting for review"', "review.waiting", "review.oldest_ms", '"Shared workers alive"', "workerCounts(f.workers.filter(", "sw.byKind.community.alive", '"Builds this week"', "buildsByDay(STATS.series, 7).days", '"/journal?kind=build", "stats"]', '"Requested, not built yet"', '"/packages?origin=factory"'],
     reads: [
       { path: "/api/v1/factory", fields: ["workers", "workers.0.id", "workers.0.alive", "workers.0.ready", "workers.0.current_task", "workers.0.revoked_at", "workers.0.side", "workers.0.mode", "workers.0.labels", "workers.0.update"] },
       { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.name", "packages.0.owner", "packages.0.status", "packages.0.landed"] },
@@ -201,9 +201,9 @@ export const FACTORY_COMPONENTS = (_F: Fixture): Component[] => [
     id: "factory.landed",
     page: "/factory",
     anchor: ["<h2>Landed lately</h2>", 'id="lists-note"', 'href="/review"', 'id="landed"'],
-    script: ['api("GET", "/api/v1/factory/approvals")', '"#landed"', 'noAnswer("factory\'s lists", e, "#lists-note")', '$("#lists-note").textContent = ""', "return a.standing;", "avatar(owner)", "approvalWhere(a)", "pillHtml(where.cls, where.word, where.title)", 'class="rb ', "RINGS_UPWARD.map(function (r)", 'rings.length ? pkgHref(a.name, servedRing(rings), a.arch) : "/build/" + a.task_id'],
+    script: ['api("GET", "/api/v1/factory/approvals")', '"#landed"', 'noAnswer("factory\'s lists", e, "#lists-note")', '$("#lists-note").textContent = ""', "return a.standing;", "avatar(owner)", "approvalWhere(a)", "pillHtml(where.cls, where.word, where.title)", 'class="rb ', "RINGS_UPWARD.map(function (r)", 'rings.length ? pkgHref(a.name, servedRing(rings), a.arch) : "/build/" + a.task_id', "esc(archesOf(a))"],
     reads: [
-      { path: "/api/v1/factory/approvals", fields: ["approvals", "approvals.0.standing", "approvals.0.name", "approvals.0.version", "approvals.0.arch", "approvals.0.by", "approvals.0.created_at", "approvals.0.rings", "approvals.0.publish_status", "approvals.0.blocked_at", "approvals.0.task_id"] },
+      { path: "/api/v1/factory/approvals", fields: ["approvals", "approvals.0.standing", "approvals.0.name", "approvals.0.version", "approvals.0.arch", "approvals.0.arches", "approvals.0.by", "approvals.0.created_at", "approvals.0.rings", "approvals.0.publish_status", "approvals.0.blocked_at", "approvals.0.task_id"] },
       { path: "/api/v1/factory/packages", fields: ["packages.0.name", "packages.0.owner"] },
     ],
     visible: EVERYONE,

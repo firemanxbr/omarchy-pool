@@ -24,17 +24,17 @@
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
-import worker from "../src/index";
-import { runScript, scriptOf, seedDashboard, type Fixture } from "./fixture";
+import { fetchPage, runScript, scriptOf, seedDashboard, type Fixture } from "./fixture";
 
 let F: Fixture;
 let jobResult: (t: unknown) => string;
 let paramsLabel: (t: unknown) => string;
 let tasks: Record<string, any>;
 
+// The Pipeline redirects to Status since #240; its table is drawn by the module #248 folds into it (the fixture's fetchPage).
 async function get(path: string): Promise<Response> {
   const ctx = createExecutionContext();
-  const res = await worker.fetch(new Request(`http://pool.test${path}`), env, ctx);
+  const res = await fetchPage(new Request(`http://pool.test${path}`), env, ctx);
   await waitOnExecutionContext(ctx);
   return res;
 }

@@ -27,7 +27,7 @@ tool results with `isError`, never as protocol errors, so the session goes on.
 Register it the way the assistant expects a stdio server, for example:
 
 ```json
-{ "mcpServers": { "omarchy": { "command": "omarchy-cli", "args": ["mcp"] } } }
+{ "mcpServers": { "omarchy-pool": { "command": "omarchy-cli", "args": ["mcp"] } } }
 ```
 
 `--ring`, `--api`, `--arch` and `--root` before `mcp` apply to every tool of the

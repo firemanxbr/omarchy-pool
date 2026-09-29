@@ -9,7 +9,7 @@ import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:
 import { beforeAll, describe, expect, it } from "vitest";
 import worker from "../src/index";
 import { issueJobToken, scopesFor } from "../src/jobtoken";
-import { runScript, scriptOf, seedDashboard } from "./fixture";
+import { fetchPage, runScript, scriptOf, seedDashboard } from "./fixture";
 
 const API = "http://pool.test/api/v1";
 
@@ -20,9 +20,10 @@ async function post(path: string, body: unknown, token: string): Promise<{ statu
   return { status: res.status, json: await res.json().catch(() => null) };
 }
 
+// The Journal and the Pipeline redirect to Status since #240; their rows are drawn by the modules #248 folds into it (the fixture's fetchPage).
 async function get(path: string): Promise<string> {
   const ctx = createExecutionContext();
-  const res = await worker.fetch(new Request(`http://pool.test${path}`), env, ctx);
+  const res = await fetchPage(new Request(`http://pool.test${path}`), env, ctx);
   await waitOnExecutionContext(ctx);
   return res.text();
 }

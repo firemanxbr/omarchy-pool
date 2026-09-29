@@ -13,6 +13,7 @@ import { scoreChain, type Score } from "../score";
 import { requestChecks, type RequestRow, type RequestChecks } from "../request";
 import { recordUrl } from "../record";
 import { queuePosition } from "../queue";
+import { parseTargets } from "../targets";
 
 export interface TaskBrief {
   id: number;
@@ -42,7 +43,8 @@ export interface TaskBrief {
   result: Record<string, unknown> | null;
 }
 
-export interface Approval { id: number; task_id: number; decision: string; by: string; note: string | null; rebuild_task: number | null; created_at: string; version: string | null; arch: string; withdrawn_at: string | null; withdrawn_by: string | null; withdrawn_reason: string | null; standing: boolean }
+/** An approvals row — one architecture of a review (#242): `review_id` is the review, null for a row a Worker older than reviews wrote. */
+export interface Approval { id: number; task_id: number; decision: string; by: string; note: string | null; rebuild_task: number | null; created_at: string; version: string | null; arch: string; withdrawn_at: string | null; withdrawn_by: string | null; withdrawn_reason: string | null; review_id: number | null; standing: boolean }
 
 /** An approval that stands: signed as approved and not taken back — the rule every page reads, never `decision` alone. Every approval the server hands out carries it as `standing`. */
 export function stands(a: { decision: string; withdrawn_at: string | null }): boolean {
@@ -78,8 +80,8 @@ function brief(r: Record<string, unknown>): TaskBrief {
 export async function storyRows(env: Env, name: string) {
   const [tasks, approvals, pkg] = await Promise.all([
     env.DB.prepare(`SELECT ${TASK_COLS} FROM build_tasks WHERE name = ? AND kind IN ('build', 'audit', 'trial', 'publish') ORDER BY id DESC LIMIT 120`).bind(name).all<Record<string, unknown>>(),
-    env.DB.prepare("SELECT id, task_id, decision, by, note, rebuild_task, created_at, version, arch, withdrawn_at, withdrawn_by, withdrawn_reason FROM approvals WHERE name = ? ORDER BY id DESC LIMIT 40").bind(name).all<Omit<Approval, "standing">>(),
-    env.DB.prepare("SELECT name, owner, url, status, detail, category, request_id, description, license, source, project, arches, detected, created_at, updated_at, blocked_at, blocked_by, blocked_reason FROM factory_packages WHERE name = ?").bind(name).first<Record<string, unknown>>(),
+    env.DB.prepare("SELECT id, task_id, decision, by, note, rebuild_task, created_at, version, arch, withdrawn_at, withdrawn_by, withdrawn_reason, review_id FROM approvals WHERE name = ? ORDER BY id DESC LIMIT 40").bind(name).all<Omit<Approval, "standing">>(),
+    env.DB.prepare("SELECT name, owner, url, status, detail, category, request_id, description, license, source, project, arches, targets, detected, created_at, updated_at, blocked_at, blocked_by, blocked_reason FROM factory_packages WHERE name = ?").bind(name).first<Record<string, unknown>>(),
   ]);
   // The request the registration points at: what the contributor confirmed, the version, the record — the checks read it (request.ts).
   const request = pkg?.request_id
@@ -158,10 +160,12 @@ export function chainOf(all: Chain[], taskId: number): Chain | null {
 
 /**
  * GET /api/v1/factory/packages/:name/story — the factory's view of a
- * package: its registration, every chain with its score, the class the
- * package has today (its latest decided chain, else its latest), the
- * rings it is in. The package page draws its factory section from this;
- * a package that came from a source has no story, and says so.
+ * package: its registration, where each of its architectures stands
+ * (`targets`, targets.ts — one package, a target per architecture), every
+ * chain with its score, the class the package has today (its latest
+ * decided chain, else its latest), the rings it is in. The package page
+ * draws its factory section from this; a package that came from a source
+ * has no story, and says so.
  */
 export async function handlePackageStory(name: string, env: Env): Promise<Response> {
   const { tasks, approvals, pkg, request } = await storyRows(env, name);
@@ -174,7 +178,8 @@ export async function handlePackageStory(name: string, env: Env): Promise<Respon
   return json(
     {
       name,
-      package: pkg ? { ...pkg, arches: (() => { try { return JSON.parse(String(pkg.arches ?? "[]")) as string[]; } catch { return []; } })() } : null,
+      package: pkg ? { ...pkg, arches: (() => { try { return JSON.parse(String(pkg.arches ?? "[]")) as string[]; } catch { return []; } })(), targets: parseTargets(pkg.targets) } : null,
+      targets: parseTargets(pkg?.targets),
       request: requestView(env, pkg, request, tasks),
       class: current ? current.score.class : null,
       score: current ? current.score : null,

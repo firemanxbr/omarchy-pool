@@ -84,8 +84,9 @@ npx wrangler d1 execute omarchy-repo --local --persist-to "$WRANGLER_STATE" --co
    INSERT INTO factory_maintainers (login) VALUES ('e2e');
    INSERT INTO contributors (login, token_hash, session_hash, role) VALUES ('e2e', '$C_HASH', '$(printf %s oms_e2e | sha256sum | cut -d' ' -f1)', 'maintainer'),
      ('e2e-contributor', '$(printf %s omc_e2e_contributor | sha256sum | cut -d' ' -f1)', NULL, 'contributor')" >/dev/null
+# SOURCE_CHECK off: the package requests below name a source on a host nobody serves, and the pool would ask it (the vitest pool runs the same way).
 npx wrangler dev --ip 0.0.0.0 --port "$PORT" --persist-to "$WRANGLER_STATE" \
-  --env-file "$E2E/.dev.vars" --var "POOL_URL:http://$HOST_FROM_CONTAINER:$PORT/pool" > "$E2E/wrangler.log" 2>&1 &
+  --env-file "$E2E/.dev.vars" --var "POOL_URL:http://$HOST_FROM_CONTAINER:$PORT/pool" --var "SOURCE_CHECK:off" > "$E2E/wrangler.log" 2>&1 &
 WRANGLER_PID=$!
 for _ in $(seq 1 60); do
   if grep -q "no release" <<<"$(curl -s "$OMARCHY_API/api/v1/releases/stable")"; then break; fi
@@ -214,6 +215,11 @@ done
 gpage=$(curl -s "$OMARCHY_API/governance" -L); grep -q "Becoming a maintainer" <<<"$gpage" || { echo "governance page not served"; exit 1; }
 search_body=$(curl -s "$OMARCHY_API/api/v1/search?q=zlib&ring=stable")
 grep -q '"name":"zlib"' <<<"$search_body" || { echo "search did not find zlib: $search_body"; exit 1; }
+# The packages list (#245): the API filters it, and /packages draws it into the page, links and all, with script off.
+list_body=$(curl -s "$OMARCHY_API/api/v1/packages?q=zlib&ring=stable")
+grep -q '"name":"zlib"' <<<"$list_body" || { echo "the packages list did not find zlib: $list_body"; exit 1; }
+list_page=$(curl -s "$OMARCHY_API/packages?q=zlib")
+grep -q '<a class="pk-row" href="/package/zlib?ring=' <<<"$list_page" || { echo "/packages did not draw zlib's row: $(head -c 600 <<<"$list_page")"; exit 1; }
 pkg_body=$(curl -s "$OMARCHY_API/api/v1/package/zlib?ring=stable")
 grep -q '"shown_ring":"stable"' <<<"$pkg_body" || { echo "package page data missing: $pkg_body"; exit 1; }
 # Security: an advisory on the served zlib object shows up in the ring's report,
@@ -378,6 +384,104 @@ rpage=$(curl -s "$OMARCHY_API/review"); grep -q "Review" <<<"$rpage" || { echo "
 # A signature for bytes the pool does not serve under that filename is refused.
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$OMARCHY_API/api/v1/pool/$(printf 'a%.0s' {1..64})/sig?filename=xz-5.8.4-1-x86_64.pkg.tar.zst&source=packages&arch=x86_64" -H "authorization: Bearer $OMARCHY_TOKEN" --data-binary "@$E2E/pkgs/xz-5.8.4-1-x86_64.pkg.tar.zst.sig")" == 409 ]] || { echo "a mismatching signature must be refused"; exit 1; }
 echo "factory queue, lease, requeue, guard and completion OK"
+
+step "Factory: one name, one package — built on x86_64, not on aarch64, reviewed once, published on x86_64 alone"
+# A package is its name (#242): x86_64 and aarch64 are two targets of one
+# package. A contributor requests it for both; their x86_64 worker builds
+# it, their aarch64 worker gives up on it (the recipe's fault, final): that
+# architecture is not supported and x86_64 goes on to the review alone. A
+# maintainer who did not request it has the project build it again — the
+# project's x86_64 worker, nothing for aarch64 — and approves it once; the
+# publish job is x86_64's only, and what it carries into edge is the
+# project's build, published here with the job's own token as work.rs does.
+command -v zstd >/dev/null || { echo "zstd is needed to make the package the project builds"; exit 1; }
+REQ_HASH=$(printf %s omc_e2e_req | sha256sum | cut -d' ' -f1)
+(cd "$ROOT/worker" && npx wrangler d1 execute omarchy-repo --local --persist-to "$WRANGLER_STATE" --command \
+  "INSERT INTO contributors (login, token_hash, role) VALUES ('e2e-req', '$REQ_HASH', 'contributor');
+   INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, trusted_by, last_seen) VALUES
+     ('wrx', 'x86_64', 'e2e-req', '$(printf %s omw_e2e_wrx | sha256sum | cut -d' ' -f1)', 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z'),
+     ('wra', 'aarch64', 'e2e-req', '$(printf %s omw_e2e_wra | sha256sum | cut -d' ' -f1)', 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z'),
+     ('wpx', 'x86_64', 'e2e', '$(printf %s omw_e2e_wpx | sha256sum | cut -d' ' -f1)', 'shared', 'project', 'e2e', '2000-01-01T00:00:00Z')" >/dev/null)
+d1n() { (cd "$ROOT/worker" && npx wrangler d1 execute omarchy-repo --local --persist-to "$WRANGLER_STATE" --json --command "$1") | jq -r '.[0].results[0].n'; }
+reqauth=(-H "authorization: Bearer omc_e2e_req" -H "content-type: application/json")
+wrx=(-H "authorization: Bearer omw_e2e_wrx" -H "content-type: application/json")
+wra=(-H "authorization: Bearer omw_e2e_wra" -H "content-type: application/json")
+wpx=(-H "authorization: Bearer omw_e2e_wpx" -H "content-type: application/json")
+agent='"agent":"e2e/agent","agent_status":"ok"'
+ident_req='{"name":"e2e-ident","url":"https://e2e-ident.example","source":"https://e2e-ident.example/e2e-ident-1.0.tar.gz","version":"1.0","description":"One name, one package: the e2e test of it","license":"MIT","arches":["x86_64","aarch64"],"checklist":{"official":true,"license":true,"unshipped":true,"evidence":true}}'
+# The request reserves the name, for both architectures; another contributor asking for it is refused.
+rq=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/packages" "${reqauth[@]}" -d "$ident_req")
+[[ "$(jq -r '.package.owner' <<<"$rq")" == e2e-req && "$(jq -r '.targets.x86_64.status + " " + .targets.aarch64.status' <<<"$rq")" == "building building" ]] || { echo "the request did not register e2e-ident for both architectures: $rq"; exit 1; }
+taken=$(curl -s -w '\n%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/packages" -H "authorization: Bearer omc_e2e_contributor" -H "content-type: application/json" -d "$ident_req")
+[[ "$(tail -n1 <<<"$taken")" == 409 && "$(head -n1 <<<"$taken" | jq -r .error)" == "e2e-ident is waiting, requested by e2e-req" ]] || { echo "the name must be reserved for its requester: $taken"; exit 1; }
+# x86_64: the requester's worker builds it and hands the evidence in; staged.
+cx=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/claim" "${wrx[@]}" -d "{\"arch\":\"x86_64\",$agent}")
+[[ "$(jq -r '.task.name + " " + .task.arch' <<<"$cx")" == "e2e-ident x86_64" ]] || { echo "the x86_64 worker did not get the x86_64 build: $cx"; exit 1; }
+x86=$(jq -r .task.id <<<"$cx"); cxj=(-H "authorization: Bearer $(jq -r .token <<<"$cx")")
+for f in PKGBUILD build.log PKGINFO e2e-ident-1.0-1-x86_64.pkg.tar.zst; do
+  [[ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$OMARCHY_API/api/v1/factory/tasks/$x86/artifacts/$f" "${cxj[@]}" --data-binary "the contributor's $f")" == 201 ]] || { echo "the contributor's build could not stage $f"; exit 1; }
+done
+curl -s -o /dev/null -X PUT "$OMARCHY_API/api/v1/factory/tasks/$x86/artifacts/vet.json" "${cxj[@]}" --data-binary '{"schema":"omarchy-pool/vet/1","verdict":"pass","checks":[{"name":"smoke","status":"pass","detail":""}]}'
+st=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$x86/complete" "${cxj[@]}" -H "content-type: application/json" -d '{"sha256":"2222","filename":"e2e-ident-1.0-1-x86_64.pkg.tar.zst","version":"1.0-1"}')
+[[ "$(jq -r .status <<<"$st")" == staged ]] || { echo "the x86_64 build did not stage: $st"; exit 1; }
+# One review covers every architecture: none starts while aarch64 still builds.
+early=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$x86/build" "${mauth[@]}" -d '{}')
+[[ "$(jq -r .error <<<"$early")" == "aarch64 is still building (task "*"): one review covers every architecture — it starts once each is built or not supported" ]] || { echo "the review must wait for aarch64: $early"; exit 1; }
+# aarch64: the requester's other worker gives up on the recipe (final) — not supported.
+ca=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/claim" "${wra[@]}" -d "{\"arch\":\"aarch64\",$agent}")
+[[ "$(jq -r '.task.name + " " + .task.arch' <<<"$ca")" == "e2e-ident aarch64" ]] || { echo "the aarch64 worker did not get the aarch64 build: $ca"; exit 1; }
+arm=$(jq -r .task.id <<<"$ca")
+fa=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$arm/fail" -H "authorization: Bearer $(jq -r .token <<<"$ca")" -H "content-type: application/json" -d '{"error":"exit 4: no linker for aarch64 in the recipe","final":true}')
+[[ "$(jq -r .status <<<"$fa")" == failed ]] || { echo "the aarch64 build must fail for good: $fa"; exit 1; }
+story=$(curl -s "$OMARCHY_API/api/v1/factory/packages/e2e-ident/story?at=built")
+[[ "$(jq -r '.targets.x86_64.status + " " + .targets.aarch64.status' <<<"$story")" == "built not_supported" && "$(jq -r .targets.aarch64.task <<<"$story")" == "$arm" ]] || { echo "the package must say x86_64 built, aarch64 not supported: $(jq -c .targets <<<"$story")"; exit 1; }
+rv=$(curl -s "$OMARCHY_API/api/v1/factory/review" "${mauth[@]}")
+[[ "$(jq -r '.packages[] | select(.name == "e2e-ident") | "\(.lead) \(.waits) \(.rows | length)"' <<<"$rv")" == "$x86 true 1" ]] || { echo "Review must list e2e-ident once, waiting, its x86_64 build speaking for it: $(jq -c '.packages' <<<"$rv")"; exit 1; }
+# The review: the project builds again what its contributor built — x86_64 only — on its own worker.
+pb=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$x86/build" "${mauth[@]}" -d '{"note":"reads well"}')
+[[ "$(jq -c .arches <<<"$pb")" == '["x86_64"]' && "$(jq -r '.tasks | length' <<<"$pb")" == 1 ]] || { echo "the project must build x86_64 again, and nothing for aarch64: $pb"; exit 1; }
+px=$(jq -r .task <<<"$pb")
+[[ "$(d1n "SELECT COUNT(*) AS n FROM build_tasks WHERE name = 'e2e-ident' AND arch = 'aarch64' AND trust = 'project'")" == 0 ]] || { echo "no project build may be queued for an architecture that is not supported"; exit 1; }
+cp=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/claim" "${wpx[@]}" -d "{\"arch\":\"x86_64\",\"kinds\":[\"build\"],$agent}")
+[[ "$(jq -r .task.id <<<"$cp")" == "$px" && "$(jq -r .task.pkgbuild_ref <<<"$cp")" == "review:$x86" ]] || { echo "the project's x86_64 worker did not get the review build: $cp"; exit 1; }
+cpj=(-H "authorization: Bearer $(jq -r .token <<<"$cp")")
+# The project's build is a real package: the one the publish job carries into edge.
+mkdir -p "$E2E/ident/root"
+printf 'pkgname = e2e-ident\npkgver = 1.0-1\npkgdesc = One name, one package: the e2e test of it\narch = x86_64\nsize = 1\n' > "$E2E/ident/root/.PKGINFO"
+(cd "$E2E/ident/root" && tar -cf - .PKGINFO | zstd -q -c > "../e2e-ident-1.0-1-x86_64.pkg.tar.zst")
+ident_sha=$(sha256sum "$E2E/ident/e2e-ident-1.0-1-x86_64.pkg.tar.zst" | cut -d' ' -f1)
+for f in PKGBUILD build.log PKGINFO; do curl -s -o /dev/null -X PUT "$OMARCHY_API/api/v1/factory/tasks/$px/artifacts/$f" "${cpj[@]}" --data-binary "the project's $f"; done
+[[ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$OMARCHY_API/api/v1/factory/tasks/$px/artifacts/e2e-ident-1.0-1-x86_64.pkg.tar.zst" "${cpj[@]}" --data-binary "@$E2E/ident/e2e-ident-1.0-1-x86_64.pkg.tar.zst")" == 201 ]] || { echo "the project's build could not stage its package"; exit 1; }
+curl -s -o /dev/null -X PUT "$OMARCHY_API/api/v1/factory/tasks/$px/artifacts/vet.json" "${cpj[@]}" --data-binary '{"schema":"omarchy-pool/vet/1","verdict":"pass","checks":[{"name":"smoke","status":"pass","detail":""}]}'
+pst=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$px/complete" "${cpj[@]}" -H "content-type: application/json" -d "{\"sha256\":\"$ident_sha\",\"filename\":\"e2e-ident-1.0-1-x86_64.pkg.tar.zst\",\"version\":\"1.0-1\"}")
+[[ "$(jq -r .status <<<"$pst")" == staged ]] || { echo "the project's build did not stage: $pst"; exit 1; }
+# One decision for the package: x86_64 approved, aarch64 named not supported, one publish job — x86_64's.
+ap=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$px/approve" "${mauth[@]}" -d '{"note":"x86_64 only; aarch64 needs a linker"}')
+[[ "$(jq -c .arches <<<"$ap")" == '["x86_64"]' && "$(jq -r .not_supported.aarch64 <<<"$ap")" == "$arm" && "$(jq -r '.publishes | keys | join(",")' <<<"$ap")" == x86_64 ]] || { echo "the approval must cover x86_64 alone: $ap"; exit 1; }
+pub=$(jq -r .publish <<<"$ap")
+[[ "$(d1n "SELECT COUNT(*) AS n FROM build_tasks WHERE name = 'e2e-ident' AND kind = 'publish'")" == 1 ]] || { echo "one publish job, and only one, for e2e-ident"; exit 1; }
+[[ "$(d1n "SELECT COUNT(*) AS n FROM reviews WHERE name = 'e2e-ident' AND decision = 'approved' AND arches = '[\"x86_64\"]'")" == 1 ]] || { echo "one review of e2e-ident on the record"; exit 1; }
+# The publish job, as a project worker runs it: the staged package fetched with the job's token, published into edge as source factory (the pool signs), the job completed.
+cj=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/claim" "${wpx[@]}" -d '{"arch":"x86_64","kinds":["publish"]}')
+[[ "$(jq -r .task.id <<<"$cj")" == "$pub" && "$(jq -r .task.arch <<<"$cj")" == x86_64 ]] || { echo "the project's worker did not get the publish job: $cj"; exit 1; }
+# It names its review as review_id: `review` in a task's params is the contributor's build a project's build answers — a publish job has no staging of its own to upload to.
+[[ "$(jq -r .task.params.review_id <<<"$cj")" == "$(jq -r .review <<<"$ap")" && "$(jq -r '.task.params | has("review")' <<<"$cj")" == false && "$(jq -r .upload <<<"$cj")" == null ]] || { echo "the publish job must carry its review as review_id, and no upload: $cj"; exit 1; }
+pj=$(jq -r .token <<<"$cj")
+mkdir -p "$E2E/ident/publish"
+curl -sf -o "$E2E/ident/publish/e2e-ident-1.0-1-x86_64.pkg.tar.zst" "$OMARCHY_API/api/v1/factory/tasks/$px/artifacts/e2e-ident-1.0-1-x86_64.pkg.tar.zst" -H "authorization: Bearer $pj" || { echo "the publish job could not fetch the project's build"; exit 1; }
+[[ "$(sha256sum "$E2E/ident/publish/e2e-ident-1.0-1-x86_64.pkg.tar.zst" | cut -d' ' -f1)" == "$ident_sha" ]] || { echo "the publish job fetched other bytes than the project's build"; exit 1; }
+OMARCHY_TOKEN="$pj" "$PKG_REPO" publish --ring edge --source factory --arch x86_64 --note "factory task $px: e2e-ident approved (e2e)" "$E2E/ident/publish/e2e-ident-1.0-1-x86_64.pkg.tar.zst"
+done_pub=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$pub/complete" -H "authorization: Bearer $pj" -H "content-type: application/json" -d "{\"summary\":\"published\",\"result\":{\"sha256\":\"$ident_sha\",\"filename\":\"e2e-ident-1.0-1-x86_64.pkg.tar.zst\",\"version\":\"1.0-1\",\"task\":$px}}")
+[[ "$(jq -r .status <<<"$done_pub")" == done ]] || { echo "the publish job did not complete: $done_pub"; exit 1; }
+# In edge on x86_64, and on x86_64 alone; the package says aarch64 is not supported.
+grep -q '"name":"e2e-ident"' <<<"$(curl -s "$OMARCHY_API/api/v1/releases/edge?fields=summary&arch=x86_64")" || { echo "edge must serve e2e-ident on x86_64"; exit 1; }
+! grep -q '"name":"e2e-ident"' <<<"$(curl -s "$OMARCHY_API/api/v1/releases/edge?fields=summary&arch=aarch64")" || { echo "edge must not serve e2e-ident on aarch64"; exit 1; }
+story=$(curl -s "$OMARCHY_API/api/v1/factory/packages/e2e-ident/story?at=published")
+[[ "$(jq -r '.package.status + " " + .targets.x86_64.status + " " + .targets.aarch64.status' <<<"$story")" == "published published not_supported" ]] || { echo "the package must say published on x86_64, not supported on aarch64: $(jq -c '{status: .package.status, targets}' <<<"$story")"; exit 1; }
+[[ "$(jq -r '[.rings[] | select(.arch == "aarch64")] | length' <<<"$story")" == 0 && "$(jq -r '[.rings[] | select(.arch == "x86_64" and .ring == "edge")] | length' <<<"$story")" == 1 ]] || { echo "the rings must serve e2e-ident on x86_64 only: $(jq -c .rings <<<"$story")"; exit 1; }
+decided=$(curl -s "$OMARCHY_API/api/v1/factory/approvals?at=published" | jq -c '.approvals[] | select(.name == "e2e-ident")')
+[[ "$(jq -r '"\(.standing) \(.arches | join(",")) \(.not_supported | keys | join(",")) \(.rings | join(","))"' <<<"$decided")" == "true x86_64 aarch64 edge" ]] || { echo "the record must hold one standing review of e2e-ident, x86_64 in edge, aarch64 not supported: $decided"; exit 1; }
+echo "one name, one package: x86_64 published, aarch64 not supported, one review, one publish job"
 
 step "pacman in $IMAGE against the worker mirror"
 gpg --armor --export "$KEYID" > "$E2E/omarchy-poc.pub.asc"
