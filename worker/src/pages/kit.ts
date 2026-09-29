@@ -74,6 +74,7 @@ import keyRoundSvg from "../assets/icons/lucide/key-round.svg";
 import layersSvg from "../assets/icons/lucide/layers.svg";
 import listChecksSvg from "../assets/icons/lucide/list-checks.svg";
 import lockSvg from "../assets/icons/lucide/lock.svg";
+import moonSvg from "../assets/icons/lucide/moon.svg";
 import octagonXSvg from "../assets/icons/lucide/octagon-x.svg";
 import packageSvg from "../assets/icons/lucide/package.svg";
 import packageCheckSvg from "../assets/icons/lucide/package-check.svg";
@@ -85,6 +86,7 @@ import searchSvg from "../assets/icons/lucide/search.svg";
 import sendSvg from "../assets/icons/lucide/send.svg";
 import shieldSvg from "../assets/icons/lucide/shield.svg";
 import shieldCheckSvg from "../assets/icons/lucide/shield-check.svg";
+import sunSvg from "../assets/icons/lucide/sun.svg";
 import sunMoonSvg from "../assets/icons/lucide/sun-moon.svg";
 import tagSvg from "../assets/icons/lucide/tag.svg";
 import terminalSvg from "../assets/icons/lucide/terminal.svg";
@@ -111,7 +113,9 @@ import metaColorSvg from "../assets/icons/agents/meta-color.svg";
  * actions, the package page's stages, fields, gates and facts). The
  * prototype's git-commit is not in lucide-static 0.400.0 (its edge icon
  * was blank there); git-commit-horizontal is that icon's name in this
- * release.
+ * release. Sun and moon are the header's theme switch (#272), which the
+ * prototype does not draw: from the same release, drawn inline
+ * (lucideSvg) because the header is on pages that link no kit sheet.
  */
 export const LUCIDE = {
   activity: activitySvg,
@@ -156,6 +160,7 @@ export const LUCIDE = {
   layers: layersSvg,
   "list-checks": listChecksSvg,
   lock: lockSvg,
+  moon: moonSvg,
   "octagon-x": octagonXSvg,
   package: packageSvg,
   "package-check": packageCheckSvg,
@@ -167,6 +172,7 @@ export const LUCIDE = {
   send: sendSvg,
   shield: shieldSvg,
   "shield-check": shieldCheckSvg,
+  sun: sunSvg,
   "sun-moon": sunMoonSvg,
   tag: tagSvg,
   terminal: terminalSvg,
@@ -219,6 +225,26 @@ function sized(size: number, fallback: number): string {
  */
 export function lucide(name: LucideName, size = 14, label?: string): string {
   return `<i class="op-i op-i-${escapeHtml(name)}"${sized(size, 14)}${label ? ` role="img" aria-label="${escapeHtml(label)}"` : ' aria-hidden="true"'}></i>`;
+}
+
+/**
+ * An icon as inline SVG, for the frame's header, which is on every page —
+ * most of which link no kit sheet, so lucide()'s mask would paint nothing
+ * there. The file's own drawing in currentColor at the size asked for: the
+ * licence comment and the root's class and size go (LICENSES.md and the
+ * kit sheet's header carry the licence), whitespace is collapsed, and it is
+ * decoration — hidden from screen readers and never a focus stop; the
+ * control it sits in carries the name. `cls` is a class for the page's CSS.
+ */
+export function lucideSvg(name: LucideName, size = 14, cls?: string): string {
+  const px = Number.isFinite(Number(size)) && Number(size) > 0 ? Number(size) : 14;
+  return LUCIDE[name]
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<svg\b[^>]*>/, (root) => root.replace(/\s(?:class|style|width|height)="[^"]*"/g, "").replace(/^<svg/, `<svg${cls ? ` class="${escapeHtml(cls)}"` : ""} width="${px}" height="${px}" aria-hidden="true" focusable="false"`))
+    .replace(/\s+/g, " ")
+    .replace(/>\s+</g, "><")
+    .replace(/\s+(\/?>)/g, "$1")
+    .trim();
 }
 
 /** An agent's mark, 16 px unless told, named by the agent it stands for. The shell's agentMark() writes the same element. */
