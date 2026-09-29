@@ -1116,10 +1116,10 @@ export const HELPERS = String.raw`
   }
   function wtShort(id) { var parts = String(id).split("-"); return parts.length > 3 ? parts.slice(-3).join("-") : id; }
 
-  // A line that says what happened, where the eye is: bottom right, gone in a few seconds (an error stays until clicked).
+  // A line that says what happened, where the eye is: bottom right, gone in a few seconds (an error stays until clicked, and is an alert a screen reader says).
   function toast(text, cls) {
     var box = $("#toasts"); if (!box) { box = document.createElement("div"); box.id = "toasts"; document.body.appendChild(box); }
-    var t = document.createElement("div"); t.className = "toast " + (cls || "ok"); t.innerHTML = text; box.appendChild(t);
+    var t = document.createElement("div"); t.className = "toast " + (cls || "ok"); if (cls === "error") t.setAttribute("role", "alert"); t.innerHTML = text; box.appendChild(t);
     var go = function () { t.classList.add("out"); setTimeout(function () { t.remove(); }, 300); };
     t.onclick = go; if (cls !== "error") setTimeout(go, 6000);
   }
@@ -1324,6 +1324,11 @@ export const HELPERS = String.raw`
       });
     });
   }
+  // A refusal as HTML, as a page draws it (#271): the pool's words, escaped — and when the login holds no passkey (code no_passkey, with register: its own page's section), the way to add one as a link in place of the address the words carry, never an address to copy by hand.
+  function refusalHtml(d) {
+    var text = esc(d && d.error ? d.error : errorText(d)), to = d && typeof d.register === "string" && /^\/user\/[A-Za-z0-9-]{1,39}#passkeys$/.test(d.register) ? d.register : "";
+    return to ? text.split(" (" + esc(to) + ")").join("").replace(/[.\s]*$/, ".") + ' <a href="' + esc(to) + '">Register a passkey</a>' : text;
+  }
   // The line a page writes when a list did not answer — "the review list did not answer: internal error" — the list's name and the reason. The skeleton ends here, so nothing reads as still loading; what was drawn before stays, since a refresh that failed is not a list that emptied, and no empty state is drawn in its place: "nothing waiting" over a query that threw read as good news. Written to sel's text when a selector is given; returned for a page that draws it its own way.
   function noAnswer(what, e, sel) { endSkeleton(); var text = "the " + what + " did not answer: " + errorText(e); var el = sel ? $(sel) : null; if (el) el.textContent = text; return text; }
   // The tiles a list that never answered would have drawn: the same labels and links, "—" for every number and "did not answer" under it, the reason on hover — never a 0, which reads as nothing queued, nothing failed, nobody waiting, and never the whole sentence under every tile: the page's note says it once (the Pipeline's first screen said it seven times, 2026-09-18). A tile whose sixth element names another read ("stats": the /api/v1/stats poll) stays as computed — its series answered, and the chart beside it draws the same series; "the factory's lists did not answer" under the Builds tile named a list that never fed it. Takes and returns what setTiles takes.
@@ -1460,7 +1465,7 @@ export const HELPERS = String.raw`
       // Approve is confirmed with the maintainer's passkey (#271): the answer rides in the body; the other three post as they are.
       var send = function (assertion) { if (assertion) body.assertion = assertion; return api("POST", "/api/v1/factory/tasks/" + id + "/" + what, body); };
       return (what === "approve" ? passkeyed("approve:" + id, send) : send()).then(function (d) {
-        if (d.error) { b.disabled = false; toast(esc(d.error), "error"); return; }
+        if (d.error) { b.disabled = false; toast(refusalHtml(d), "error"); return; }
         toast(decidedText(what, d, b.hasAttribute("data-note")), what === "withdraw" ? "warn" : "ok");
         DECIDED.forEach(function (fn) { fn(what, Number(id), d); });
       });

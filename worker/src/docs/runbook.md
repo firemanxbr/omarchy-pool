@@ -363,8 +363,8 @@ decides on their own package, and never on a contributor's bytes:
 - **Approve** the project's build (a contributor's cannot be approved), in
   the browser with your passkey — your first is added on your own page
   (`/user/<login>#passkeys`); a lost one is reset by another maintainer
-  there — records the decision (`approvals`, with your login, note and
-  passkey) and queues a
+  (*A lost passkey*, below) — records the decision (`approvals`, with your
+  login, note and passkey) and queues a
   `publish` job that carries it into `edge` as source `factory` — and, when
   the trial passed, into rc and stable with it (the fast lane). The pool
   signs; from there the package follows the rings like any other.
@@ -401,6 +401,44 @@ decides on their own package, and never on a contributor's bytes:
 - **Withdraw a record** (`POST /api/v1/factory/record/withdraw {key,
   reason}`) when a log or a report must leave the public bucket: a signed
   tombstone takes its place, the staging copy goes with it.
+
+**Passkeys (#271).** Approve and block are decided in the browser with the
+maintainer's passkey; no token approves or blocks. From the release that
+carries #271, a maintainer who holds no passkey is refused both
+(`no_passkey`, with the link to their page): each maintainer registers one
+on `/user/<login>#passkeys` before that release deploys (v1.0.1 offers it
+already). Register two — a phone and a security key, say: the second is
+added with an answer from the first, and a lost one is then removed with
+the other, with no reset.
+
+**A lost passkey.** A maintainer who lost their only passkey — or every one
+— cannot approve, block, add or remove one. The way back is another
+maintainer's reset, and it hands the passkey back to a sign-in with GitHub,
+so it is done in this order:
+
+1. The person asks another maintainer, and that maintainer confirms the
+   request out of band — a call, or a channel the two already share —
+   before anything else. A request that came only through GitHub, or
+   through the pool, may come from whoever holds the lost device.
+2. The person, on a device they trust, ends the lost device's GitHub
+   sessions (github.com → *Settings* → *Sessions*: revoke the others). A
+   sign-in with GitHub that is still live there would register the next
+   passkey for whoever holds it.
+3. The other maintainer opens the person's page, *A lost passkey*
+   (`/user/<login>#pk-reset`, drawn for a maintainer on another
+   maintainer's page), writes why — it goes on the public journal and a
+   record the pool signs — and confirms with their own passkey. Every
+   passkey of the login goes, and the login is signed out of the browser.
+4. The person signs in with GitHub at once and adds a new passkey on their
+   page — the first again, with the session alone. On the same page they
+   replace their command-line token (*Token*: the old one stops working)
+   and revoke their agents' grants (*Agents*). The reset leaves both, and a
+   token that left with the device still rejects, withdraws, lifts, queues
+   builds and runs pool jobs.
+5. Both read the journal (`/journal?kind=passkey`): after the reset's line,
+   the next *registered a passkey* line for the login is the person's own
+   (its id is on their page). One they did not add is another reset, and
+   these steps again.
 
 **Sign in with GitHub** (the header's *Sign in*) is the GitHub OAuth App
 `omarchy-pool` (registered under the GitHub account that runs the staging

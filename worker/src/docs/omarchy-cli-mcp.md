@@ -383,18 +383,21 @@ says `noindex` and is never cached.
 
 **What the session cannot tell apart.** An agent that drives the person's own
 signed-in browser presses Confirm as well as the person does. What the
-passkey closes, since #271 end to end, is everything the session and the
-tokens could do alone about the two decisions that change what users get.
-An agent that holds its `oma_` token cannot turn its own draft of approve or
-block into a decision; a session driven by someone else cannot press the
-web's own Approve or Block, cannot enrol a passkey of its own once the
-person holds one, and cannot remove the person's; and no token of any kind
-— the agent's, a maintainer's `omc_` — approves or blocks at all. Each of
-those needs an assertion with the user verified on the person's
-authenticator (*A passkey for approve and block*, below). Request changes and
-reject confirm with the session and, for reject, the package's name typed
-(*Signed off*, 4): neither ships anything, and both issues keep them as they
-were.
+passkey closes, since #271 end to end, is the two decisions on a package
+someone asked for: approve and block. An agent that holds its `oma_` token
+cannot turn its own draft of approve or block into a decision; a session
+driven by someone else cannot press the web's own Approve or Block, cannot
+enrol a passkey of its own once the person holds one, and cannot remove the
+person's; and no token of any kind — the agent's, a maintainer's `omc_` —
+approves or blocks at all. Each of those needs an assertion with the user
+verified on the person's authenticator (*A passkey for approve and block*,
+below). Request changes and reject confirm with the session and, for
+reject, the package's name typed (*Signed off*, 4): neither ships anything,
+and both issues keep them as they were. The passkey does not guard every
+door that changes what users get: a maintainer's session or `omc_` token
+alone still queues a project build by hand that publishes into edge, forces
+a promotion past its evidence, and withdraws an approval (*What it still
+cannot tell apart*, below).
 
 **Not MCP elicitation.** The protocol lets a server ask the person a question
 through the agent's client (`elicitation/create`). The answer comes back
@@ -499,9 +502,10 @@ another maintainer.
   decides. The command line never had an approve or a block (the MCP tools
   draft); what changed is `curl` with a maintainer's token. Request changes,
   reject, withdraw, a lift and every other maintainer's act keep their
-  doors as they were. Whether a non-browser path may ever approve again — a
-  token with an assertion made by a local authenticator, say — is left open
-  (*open-work.md*).
+  doors as they were — a build queued by hand and a pool job by hand among
+  them (*What it still cannot tell apart*, below). Whether a non-browser
+  path may ever approve again — a token with an assertion made by a local
+  authenticator, say — is left open (*open-work.md*).
 - **Adding and removing (#271).** A login that holds a passkey adds another
   only with an assertion from one it holds, for `passkey:add`, sent with the
   registration (`assertion`); the page asks for it first, then for the new
@@ -518,16 +522,23 @@ another maintainer.
   for `passkey:reset:<login>` (`POST /auth/passkeys/reset`,
   `{login, reason, assertion}`). Nobody resets their own — so a session that
   left with the lost device cannot open its own way back — and a login that
-  holds none has nothing to reset. One batch writes the journal line (who,
-  whose, why, which passkeys, the passkey that confirmed it), removes every
-  passkey of the login and its challenges, and ends its browser session; the
-  command line's token stays. The pool then signs the record at
+  holds none has nothing to reset, said before the resetting maintainer's
+  device is asked. One batch writes the journal line (who, whose, why, which
+  passkeys, the passkey that confirmed it), removes every passkey of the
+  login and its challenges, and ends its browser session: a registration
+  already under way on that session stores nothing, since the insert asks
+  for the session and for the passkey that vouched, both still the login's.
+  The command line's token and the agents' grants stay; the person replaces
+  them (the runbook's *A lost passkey*). The pool then signs the record at
   `contributors/<login>/passkeys-reset-<time>.json` (who, why, which
   passkeys, when — nothing of the keys), whose address the line names; a
   record the bucket refused is said in the answer and on a line of its own,
   the reset standing. The person signs in with GitHub again and adds a first
   passkey with the session alone. Two resets at once are one. It is never an
-  operator's write to D1.
+  operator's write to D1. The reset hands the passkey back to a sign-in with
+  GitHub, so the resetting maintainer confirms the request out of band first,
+  and the person ends the lost device's GitHub sessions before signing in
+  (the runbook's *A lost passkey*).
 - **The relying party.** One list, never the request's word: every production
   name is `omarchy-pool.org` (origin `https://omarchy-pool.org`, where the
   pages and the session live), and `localhost` on any port is itself, for
@@ -559,7 +570,15 @@ another maintainer.
   registered on a fresh sign-in with GitHub. Every registration, removal and
   reset is a line on the public journal, and the person's page lists their
   passkeys with their last use, so a key the person did not add is seen, and
-  another maintainer resets it.
+  another maintainer resets it. Nor does the passkey guard a maintainer's
+  other doors that change what users get, which take the session or the
+  `omc_` token alone, as before #271: a build queued by hand
+  (`POST /factory/enqueue`) is a project build that publishes into edge
+  from whatever recipe its `pkgbuild_ref` names, with no approval; a
+  promotion queued by hand with `force` (`POST /factory/jobs`) skips the
+  evidence and the gate; a withdrawal takes an approved package out of every
+  ring. Each is on the journal; none asks for a passkey, and a reset leaves
+  the token that can press them (*open-work.md*).
 
 `review_claim`, `review_release` and `request_package` are not confirmed this
 way; the issue names approve, reject and block (*Signed off*, 5). A claim
@@ -783,7 +802,8 @@ the day's five requests still hold.
   (`routes/review.ts`, `routes/blocks.ts`), the options for an act and the
   reset in the same file, the shell's `passkeyed` (`pages/layout.ts`) that
   Review, a build's page, a package's page and the person's own page go
-  through, and the person's page's *A lost passkey*; `through` on the handlers of `routes/review.ts`,
+  through, and its `refusalHtml`, which draws a refusal with the way to add
+  a passkey as a link, and the person's page's *A lost passkey*; `through` on the handlers of `routes/review.ts`,
   `routes/blocks.ts` and the request; no hint on an agent's claim; the tail
   read and the edge cache of text evidence in `handleStagingGet`; the grants
   and the drafts in `/factory/me` and on the person's own page; the expired

@@ -88,9 +88,9 @@ const passkeyLines = (login: string) => env.DB.prepare("SELECT status, summary, 
 beforeAll(async () => {
   // The reset's record is signed by the pool: a key of its own, made here (signing.test.ts makes one the same way).
   env.SIGNING_KEY = (await openpgp.generateKey({ type: "curve25519", userIDs: [{ name: "Pool Test", email: "test@omarchy.invalid" }], format: "armored" })).privateKey;
-  const people = ["m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8", "alice"];
+  const people = ["m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8", "m9", "alice"];
   await env.DB.batch([
-    env.DB.prepare("INSERT INTO factory_maintainers (login) VALUES ('m1'), ('m2'), ('m3'), ('m4'), ('m5'), ('m6'), ('m7'), ('m8')"),
+    env.DB.prepare("INSERT INTO factory_maintainers (login) VALUES ('m1'), ('m2'), ('m3'), ('m4'), ('m5'), ('m6'), ('m7'), ('m8'), ('m9')"),
     ...(await Promise.all(people.map(async (l) => env.DB.prepare("INSERT INTO contributors (login, token_hash, session_hash, role) VALUES (?, ?, ?, ?)").bind(l, await sha256Hex(`omc_${l}`), await sha256Hex(`oms_${l}`), l.startsWith("m") ? "maintainer" : "contributor")))),
   ]);
 });
@@ -365,10 +365,18 @@ describe("a second passkey, and a removal, with one the login holds (#271)", () 
   });
 
   it("two first registrations at once store one: the insert holds the rule, whatever the checks before it saw", async () => {
-    // The statement alone: for a login that holds one, an insert no passkey vouched for stores nothing; one vouched for is stored.
-    const insert = (id: string, credential: string, vouched: number) => env.DB.prepare(PASSKEY_INSERT_SQL).bind(id, "m5", credential, "pQ", ES256, RP_ID, 0, "raw", vouched).run();
-    expect((await insert(`pk_${"a".repeat(32)}`, "raw-a", 0)).meta.changes).toBe(0);
-    expect((await insert(`pk_${"b".repeat(32)}`, "raw-b", 1)).meta.changes).toBe(1);
+    // The statement alone: for a login that holds one, an insert no passkey vouched for stores nothing, nor one vouched for by a passkey the login does not hold, nor one asked by a session that is not the login's; one vouched for by its own, on its own session, is stored.
+    const session = await sha256Hex("oms_m5"), voucher = await idOf(held.m5[0]);
+    const insert = (id: string, credential: string, vouchedBy: string | null, asked = session) => env.DB.prepare(PASSKEY_INSERT_SQL).bind(id, "m5", credential, "pQ", ES256, RP_ID, 0, "raw", vouchedBy, asked).run();
+    const refused: [string, string | null, string][] = [
+      ["no passkey vouched", null, session],
+      ["a passkey nobody holds", `pk_${"f".repeat(32)}`, session],
+      ["another login's passkey", await idOf(held.m1[0]), session],
+      ["a session that is not the login's", voucher, await sha256Hex("oms_m1")],
+      ["no session at all", voucher, await sha256Hex("")],
+    ];
+    for (const [what, vouchedBy, asked] of refused) expect((await insert(`pk_${"a".repeat(32)}`, "raw-a", vouchedBy, asked)).meta.changes, what).toBe(0);
+    expect((await insert(`pk_${"b".repeat(32)}`, "raw-b", voucher)).meta.changes).toBe(1);
     await env.DB.prepare("DELETE FROM passkeys WHERE id = ?").bind(`pk_${"b".repeat(32)}`).run();
     // Through the door: m8's first passkey asked for twice (two challenges live, as two tabs would hold them), both answers sent at once.
     const later = new Date(Date.now() + 5 * 60_000).toISOString();
@@ -428,6 +436,7 @@ describe("the options for an act (#271)", () => {
       ["a contributor's block", assertOptions("alice", "block:contributor:bob"), 403, "maintainer_only"],
       ["a contributor's removal, with no passkey", assertOptions("alice", `passkey:remove:pk_${"0".repeat(32)}`), 403, "no_passkey"],
       ["one's own reset", assertOptions("m5", "passkey:reset:m5"), 403, "second_maintainer"],
+      ["a reset of a login that holds none, before the device is asked", assertOptions("m5", "passkey:reset:m6"), 409, "nothing_to_reset"],
       ["a maintainer with no passkey", assertOptions("m6", "block:package:hers"), 403, "no_passkey"],
     ];
     for (const [what, p, status, code] of refusals) {
@@ -490,6 +499,43 @@ describe("a reset, when the only passkey is lost (#271)", () => {
     const back = await registerAs("m7", { label: "new phone" });
     expect(back.res.status, JSON.stringify(back.res.json)).toBe(201);
     expect(back.res.json.confirmed_with).toBeUndefined();
+  });
+
+  it("leaves nothing behind a registration under way on the session it signs out: no key from the lost device, and the person adds their own after a fresh sign-in", async () => {
+    await registerAs("m9", { label: "the lost laptop" });
+    // Whoever holds m9's browser session — the lost laptop — registers a key of their own, and m5's reset lands in the middle: after the registration took its challenge, before it read whether m9 holds a passkey (the reviewer's interleaving, one D1 round trip wide).
+    const thief = await createAuthenticator();
+    const opts = await options("m9");
+    const body = await register(thief, { challenge: opts.json.publicKey.challenge, origin: ORIGIN, rpId: RP_ID });
+    const resetAnswer = await assertionFor("m5", "passkey:reset:m9");
+    let armed = true, resetStatus = 0;
+    const DB = new Proxy(env.DB, {
+      get(t, p) {
+        if (p !== "prepare") { const v = (t as any)[p]; return typeof v === "function" ? v.bind(t) : v; }
+        return (sql: string) => {
+          const st = t.prepare(sql);
+          if (sql !== HAS_PASSKEY_SQL || !armed) return st;
+          armed = false;
+          return { bind: (...args: unknown[]) => { const b = st.bind(...args); return { first: async () => { resetStatus = (await reset("m5", { login: "m9", reason: REASON, assertion: resetAnswer })).status; return b.first(); } }; } };
+        };
+      },
+    });
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(new Request(`${ORIGIN}/auth/passkeys`, { method: "POST", headers: { "content-type": "application/json", cookie: "omc=oms_m9", origin: ORIGIN }, body: JSON.stringify({ label: "not mine", ...body }) }), { ...env, DB } as typeof env, ctx);
+    await waitOnExecutionContext(ctx);
+    const planted = { status: res.status, json: (await res.json()) as any };
+    expect(resetStatus).toBe(200);
+    expect(await env.DB.prepare("SELECT session_hash FROM contributors WHERE login = 'm9'").first()).toEqual({ session_hash: null });
+    // Refused in the person's words, and nothing stored nor journaled: the session that asked is not m9's any more.
+    expect([planted.status, planted.json.code], JSON.stringify(planted.json)).toEqual([401, "sign_in"]);
+    expect(planted.json.error).toContain("no passkey was added");
+    expect(await countOf("m9")).toBe(0);
+    expect((await passkeyLines("m9")).filter((l) => JSON.parse(l.payload).action === "register")).toHaveLength(1);
+    // The way back stays open: m9 signs in with GitHub again and adds a first passkey of their own with the session alone.
+    await env.DB.prepare("UPDATE contributors SET session_hash = ? WHERE login = 'm9'").bind(await sha256Hex("oms_m9")).run();
+    held.m9 = [];
+    const back = await registerAs("m9", { label: "new laptop" });
+    expect(back.res.status, JSON.stringify(back.res.json)).toBe(201);
   });
 
   it("refuses the login itself, someone who is not a maintainer, a token, another page, no login, no reason, a login that holds none, a maintainer with no passkey, no answer, an answer for another reset — and removes nothing", async () => {
@@ -561,7 +607,7 @@ describe("every new query", () => {
       ["whether a login holds one", HAS_PASSKEY_SQL, [/SEARCH passkeys USING COVERING INDEX idx_passkeys_login \(login=\?\)/]],
       ["a passkey by its credential", PASSKEY_BY_CREDENTIAL_SQL, [/SEARCH passkeys USING INDEX idx_passkeys_credential \(credential_id=\?\)/]],
       ["a login's own passkey", OWN_PASSKEY_SQL, [/SEARCH passkeys USING INDEX sqlite_autoindex_passkeys_1 \(id=\?\)/]],
-      ["a registration", PASSKEY_INSERT_SQL, [/SEARCH passkeys USING COVERING INDEX idx_passkeys_login \(login=\?\)/, /SEARCH passkeys USING COVERING INDEX idx_passkeys_credential \(credential_id=\?\)/]],
+      ["a registration", PASSKEY_INSERT_SQL, [/SEARCH passkeys USING COVERING INDEX idx_passkeys_login \(login=\?\)/, /SEARCH passkeys USING COVERING INDEX idx_passkeys_credential \(credential_id=\?\)/, /SEARCH passkeys USING INDEX sqlite_autoindex_passkeys_1 \(id=\?\)/, /SEARCH contributors (EXISTS )?USING INDEX (sqlite_autoindex_contributors_1 \(login=\?\)|idx_contributors_session \(session_hash=\?\))/]],
       ["the journal's line", PASSKEY_EVENT_SQL, [/SEARCH passkeys (EXISTS )?USING INDEX sqlite_autoindex_passkeys_1 \(id=\?\)/]],
       ["a reset's journal line", RESET_EVENT_SQL, [/SEARCH passkeys (EXISTS )?USING COVERING INDEX idx_passkeys_login \(login=\?\)/]],
       ["a reset", RESET_SQL, [/SEARCH passkeys USING (COVERING )?INDEX idx_passkeys_login \(login=\?\)/]],
@@ -579,7 +625,8 @@ describe("every new query", () => {
       for (const re of want) expect(p, `${what}: ${p}`).toMatch(re);
       expect(p, `${what}: ${p}`).not.toMatch(/\bSCAN (passkeys|passkey_challenges)\b/);
     }
-    // The reset signs the login out by its primary key: one row, never a walk of every person.
+    // The registration asks for the session through a unique index (the login's, or the session's own), and the reset signs the login out by its primary key: one row, never a walk of every person.
+    expect(await plan(PASSKEY_INSERT_SQL)).not.toMatch(/\bSCAN contributors\b/);
     const out = await plan(SIGN_OUT_SQL);
     expect(out).toMatch(/SEARCH contributors USING INDEX sqlite_autoindex_contributors_1 \(login=\?\)/);
     expect(out).not.toMatch(/\bSCAN contributors\b/);

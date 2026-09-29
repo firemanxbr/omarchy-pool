@@ -326,8 +326,8 @@ describe("the pages' half (#271)", () => {
       await waitOnExecutionContext(ctx);
       return res;
     };
-    const ran = runScript(`${browser} var navigator = globalThis.__pkNavigator;\n${src}`, { pathname: "/review", functions: ["passkeyed", "api"], fetch: fetchAs }) as any;
-    return { passkeyed: ran.passkeyed as (what: string, post: (a: unknown) => Promise<any>) => Promise<any>, api: ran.api as (m: string, p: string, b: unknown) => Promise<any>, asked, posted };
+    const ran = runScript(`${browser} var navigator = globalThis.__pkNavigator;\n${src}`, { pathname: "/review", functions: ["passkeyed", "api", "refusalHtml"], fetch: fetchAs }) as any;
+    return { passkeyed: ran.passkeyed as (what: string, post: (a: unknown) => Promise<any>) => Promise<any>, api: ran.api as (m: string, p: string, b: unknown) => Promise<any>, refusalHtml: ran.refusalHtml as (d: unknown) => string, asked, posted };
   }
 
   it("asks the pool for this act's challenge, hands it to the browser with user verification required, and posts the act with the answer", async () => {
@@ -356,5 +356,23 @@ describe("the pages' half (#271)", () => {
     expect(said).toMatchObject({ code: "no_passkey", register: "/user/m3#passkeys", __status: 403 });
     expect(none.posted).toEqual(["/auth/passkeys/assert"]);
     expect(await approvals("notfromshell")).toBe(0);
+  });
+
+  it("draws a refusal with the way to add a passkey as a link, where the pages say it — never an address to copy, never a link the pool did not name", async () => {
+    const { project } = await reviewed("linkfromshell");
+    const s = shellAs("m3");
+    // A maintainer with no passkey presses Approve: the words, with the address they carried turned into the link.
+    const said = await s.passkeyed(`approve:${project}`, (assertion) => s.api("POST", `/api/v1/factory/tasks/${project}/approve`, { note: "reads well", assertion }));
+    expect(s.refusalHtml(said)).toBe(`approving build #${project} is confirmed with your passkey, and m3 has none yet: add one on your page, then press again — nothing was decided. <a href="/user/m3#passkeys">Register a passkey</a>`);
+    // The act's own door says the same when no challenge was asked for (a page that posts without one): the same link.
+    const posted = await s.api("POST", `/api/v1/factory/tasks/${project}/approve`, { note: "reads well" });
+    expect(posted).toMatchObject({ code: "no_passkey", register: "/user/m3#passkeys" });
+    expect(s.refusalHtml(posted)).toContain('<a href="/user/m3#passkeys">Register a passkey</a>');
+    // Any other refusal is its words, escaped, and nothing more; a register that is not a person's own section is no link.
+    expect(s.refusalHtml({ error: "a <b>bold</b> refusal", code: "challenge" })).toBe("a &lt;b&gt;bold&lt;/b&gt; refusal");
+    for (const register of ["javascript:alert(1)", "https://evil.example/user/m3#passkeys", "/user/m3#agents", '/user/m3"onmouseover="x#passkeys']) {
+      expect(s.refusalHtml({ error: "no passkey", code: "no_passkey", register }), register).toBe("no passkey");
+    }
+    expect(await approvals("linkfromshell")).toBe(0);
   });
 });

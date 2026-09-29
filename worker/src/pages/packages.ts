@@ -1047,7 +1047,7 @@ const PACKAGE_SCRIPT = String.raw`
     // A block is confirmed with the maintainer's passkey (#271): the answer rides with the reason. Adopt and a lift post as they are.
     (what === "block" ? passkeyed("block:package:" + name, function (assertion) { return api("POST", path, { reason: why, assertion: assertion }); }) : api("POST", path, what === "adopt" ? {} : { reason: why })).then(function (d) {
       // Refused: said, and the form stays open with its words for another try.
-      if (d.error) { toast(esc(d.error), "error"); renderYou(); if (!ASK) refocus(what); return; }
+      if (d.error) { toast(refusalHtml(d), "error"); renderYou(); if (!ASK) refocus(what); return; }
       // Adopt makes you its maintainer in the pool: the package stays what it was, synced or built here — and a registration left unmaintained is yours as well (d.registration: whom it was taken from, where it stands now).
       if (what === "adopt") {
         var box = D || D404; box.maintenance = box.maintenance || {}; box.maintenance.maintainer = { login: WHO.login, since: d.since || new Date().toISOString(), adopted: true };
@@ -1364,7 +1364,7 @@ export const PACKAGE_COMPONENTS = (F: Fixture): Component[] => {
       id: "package.you",
       page,
       anchor: ['id="you-section"', 'id="you"', 'id="you-who"'],
-      script: ["renderYou", "signInHref()", '"Sign in with GitHub"', '"Request an update"', "You can't review your own request.", '"Adopt"', '"Block"', '"Lift the block"', '"Open review"', "!!req.renewable && !b", "isMaintainer()", "Why? This goes on the record.", 'role="alert"', '"Left unmaintained by "', "d.registration", 'passkeyed("block:package:" + name', '" with your passkey"'],
+      script: ["renderYou", "signInHref()", '"Sign in with GitHub"', '"Request an update"', "You can't review your own request.", '"Adopt"', '"Block"', '"Lift the block"', '"Open review"', "!!req.renewable && !b", "isMaintainer()", "Why? This goes on the record.", 'role="alert"', '"Left unmaintained by "', "d.registration", 'passkeyed("block:package:" + name', '" with your passkey"', 'toast(refusalHtml(d), "error")'],
       reads: [{ path: story, fields: ["request.renewable", "request.busy", "package.owner", "package.status"] }],
       acts: [
         // No reason, no block: the probes change nothing.

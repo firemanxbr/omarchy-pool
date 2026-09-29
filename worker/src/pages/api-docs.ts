@@ -72,7 +72,7 @@ const WRITE_JOBS: Row[] = [
   { routes: ["PUT /releases/:id/artifacts/:kind?repo=&arch="], text: "Publish a rendered database beside the packages (<code>db</code>, <code>db.sig</code>, <code>files</code>, <code>files.sig</code>); the pool signs it as it stores it." },
   { routes: ["PUT /security/advisories", "PUT /security/matches", "POST /security/prune"], text: "The security job's writes: the advisories it read from the feeds, what they match in the rings (a row that did not change is not written), and the prune of what the run did not post — its body is the run's advisory ids and (sha256, advisory) matches; without them it is refused." },
   { routes: ["POST /events", "POST /pool/gc", "POST /pool/relayout"], text: "Record a journal entry — the project's jobs and maintainers only, a community build's token carries no <code>events</code> scope, and a run link must be https, a release an id; run retention; one step of the one-time move to one directory per source (the <code>relayout</code> job)." },
-  { routes: ["POST /factory/enqueue", "POST /factory/tasks/:id/cancel"], text: "The enqueue job's writes (a maintainer by hand too): queue the project's build of a package for its architectures, cancel a task — by hand, never a claim's rebuild (its release is the door) nor the publish job of an approval that stands (a block is)." },
+  { routes: ["POST /factory/enqueue", "POST /factory/tasks/:id/cancel"], text: "The enqueue job's writes (a maintainer by hand too): queue the project's build of a package for its architectures, cancel a task — by hand, never a claim's rebuild (its release is the door) nor the publish job of an approval that stands (a block is). A build queued by hand publishes into edge unless it says <code>publish:false</code>, with no approval and no passkey." },
   { routes: ["PUT /factory/tasks/:id/artifacts/<file>", "POST /factory/tasks/:id/artifacts/<file>/multipart"], text: "A community build's token uploads its evidence to its own staging workspace, a large file in parts; an audit's token adds <code>audit.json</code> / <code>audit.md</code> to a staged build, and nothing else." },
 ];
 
@@ -175,7 +175,7 @@ ${rows(WRITE_JOBS)}
 
   <section id="write-people">
     <h2>Write (people)</h2>
-    <p class="sub">Bearer <code>omc_…</code> (a contributor token from your profile) or the browser session after <em>Sign in with GitHub</em> — and, on the routes of <a href="/docs/omarchy-cli-mcp">omarchy-cli's tools</a> only, an agent's <code>oma_…</code>, which decides nothing: what it drafts, the person confirms in the browser. Nothing here touches the pool directly: maintainers queue jobs and approve builds; workers do the work with per-job tokens.</p>
+    <p class="sub">Bearer <code>omc_…</code> (a contributor token from your profile) or the browser session after <em>Sign in with GitHub</em> — and, on the routes of <a href="/docs/omarchy-cli-mcp">omarchy-cli's tools</a> only, an agent's <code>oma_…</code>, which decides nothing: what it drafts, the person confirms in the browser. Approve and block take the browser session and the maintainer's passkey only: no token approves or blocks (#271). Nothing here touches the pool directly: maintainers queue jobs and approve builds; workers do the work with per-job tokens.</p>
     <div class="table-wrap"><table><thead><tr><th>Endpoint</th><th>Who</th><th>What it does</th></tr></thead><tbody>
 ${rows(WRITE_PEOPLE)}
     </tbody></table></div>

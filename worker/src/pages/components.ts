@@ -397,7 +397,7 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     id: "shell.passkey",
     page: "/",
     anchor: [],
-    script: ["function passkeyed(what, post)", 'api("POST", "/auth/passkeys/assert", { for: what })', "navigator.credentials.get", 'passkeyed("approve:" + id, send)'],
+    script: ["function passkeyed(what, post)", 'api("POST", "/auth/passkeys/assert", { for: what })', "navigator.credentials.get", 'passkeyed("approve:" + id, send)', "function refusalHtml(d)", 'toast(refusalHtml(d), "error")', 'if (cls === "error") t.setAttribute("role", "alert")'],
     acts: [{ method: "POST", path: "/auth/passkeys/assert", body: { for: `approve:${F.projectTask}` }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } }],
     visible: EVERYONE,
   },

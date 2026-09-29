@@ -46,7 +46,7 @@
 import { json, type Env } from "../index";
 import { DASHBOARD_HOST, isProductionHost } from "../meta";
 import { browserSession, randomHex, type Through } from "../agents";
-import { contributorOf, isMaintainer, SIGN_IN, type Contributor } from "./contributors";
+import { contributorOf, isMaintainer, sha256Hex, SIGN_IN, type Contributor } from "./contributors";
 import { ALGORITHMS, OFFERED_ALGORITHMS, WebAuthnError, fromB64url, sha256, toB64url, verifyAssertion, verifyRegistration, type WebAuthnCode } from "../webauthn";
 import { NO_PASSKEY, PASSKEY_ELSEWHERE } from "../pages/agent-auth";
 import { putRecord, recordUrl } from "../record";
@@ -132,15 +132,18 @@ export const PASSKEY_BY_CREDENTIAL_SQL = "SELECT id, login, public_key, alg, cou
 export const OWN_PASSKEY_SQL = "SELECT id, alg, created_at FROM passkeys WHERE id = ? AND login = ?";
 /**
  * A registration: inserted only while the login holds fewer than ten, only a
- * credential not registered already, and — unless an assertion from a
- * passkey the login holds vouched for it (?9 = 1, #271) — only while the
+ * credential not registered already, only while the session that asked is
+ * still the login's (?10, its hash: a reset or a sign-out that landed while
+ * the ceremony ran leaves nothing behind it, #271), and — unless a passkey
+ * the login still holds vouched for it (?9, its id, #271) — only while the
  * login holds none: the first is the session's alone, and two first
  * registrations sent at once store one.
  */
 export const PASSKEY_INSERT_SQL = `INSERT INTO passkeys (id, login, credential_id, public_key, alg, rp_id, counter, label)
   SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
    WHERE (SELECT COUNT(*) FROM passkeys WHERE login = ?2) < ${MAX_PASSKEYS} AND NOT EXISTS (SELECT 1 FROM passkeys WHERE credential_id = ?3)
-     AND (?9 = 1 OR NOT EXISTS (SELECT 1 FROM passkeys WHERE login = ?2))`;
+     AND EXISTS (SELECT 1 FROM contributors WHERE login = ?2 AND session_hash = ?10)
+     AND (EXISTS (SELECT 1 FROM passkeys WHERE id = ?9 AND login = ?2) OR (?9 IS NULL AND NOT EXISTS (SELECT 1 FROM passkeys WHERE login = ?2)))`;
 /** The journal's line of a registration or a removal, written only while the passkey is there (?4 its id, ?5 the login): after the insert, before the delete, in the same batch. */
 export const PASSKEY_EVENT_SQL = `INSERT INTO events (kind, ring, source, status, summary, payload)
   SELECT 'passkey', NULL, 'factory', ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM passkeys WHERE id = ?4 AND login = ?5)`;
@@ -175,7 +178,7 @@ export const RESET_EVENT_SQL = `INSERT INTO events (kind, ring, source, status, 
 export const RESET_SQL = "DELETE FROM passkeys WHERE login = ? RETURNING id, alg, created_at, last_used";
 /** …the login's challenges with them, by (login, expires_at): a registration asked for before the reset answers nothing after it. */
 export const RESET_CHALLENGES_SQL = "DELETE FROM passkey_challenges WHERE login = ?";
-/** …and the login signed out of the browser, by its primary key: the first passkey after a reset is registered on a fresh sign-in with GitHub, never on a session that may have left with the lost device. The command line's token stays. */
+/** …and the login signed out of the browser, by its primary key: the first passkey after a reset is registered on a fresh sign-in with GitHub, never on a session that may have left with the lost device — a registration already under way on it stores nothing (PASSKEY_INSERT_SQL asks for the session). The command line's token stays: the runbook's *A lost passkey* has the person replace it. */
 export const SIGN_OUT_SQL = "UPDATE contributors SET session_hash = NULL WHERE login = ?";
 
 // ---------- challenges ----------
@@ -343,7 +346,10 @@ export async function handlePasskeyOptions(url: URL, request: Request, env: Env)
  * one batch. A login that holds a passkey adds another only with an
  * assertion from one it holds (`assertion`, for `passkey:add`, #271): a
  * session driven by someone else cannot enrol a key of its own. The first
- * stays the session's alone, and the insert holds it so (PASSKEY_INSERT_SQL).
+ * stays the session's alone, and the insert holds it so (PASSKEY_INSERT_SQL)
+ * — with the session still the login's and the passkey that vouched still
+ * held when it runs, so a reset that lands during the ceremony leaves no key
+ * behind it.
  */
 export async function handlePasskeyRegister(url: URL, request: Request, env: Env): Promise<Response> {
   const who = await personOnRp(request, url, env, "maintainer");
@@ -374,15 +380,24 @@ export async function handlePasskeyRegister(url: URL, request: Request, env: Env
   }
   const id = `pk_${randomHex(16)}`;
   const alg = ALGORITHMS[reg.alg];
+  // The session that asked, as the insert checks it is still the login's: a reset that landed during the ceremony signed it out (#271).
+  const session = await sha256Hex(browserSession(request).session ?? "");
   const [ins] = await env.DB.batch([
-    env.DB.prepare(PASSKEY_INSERT_SQL).bind(id, c.login, reg.credentialId, reg.publicKey, reg.alg, rp.id, reg.counter, label, vouched ? 1 : 0),
+    env.DB.prepare(PASSKEY_INSERT_SQL).bind(id, c.login, reg.credentialId, reg.publicKey, reg.alg, rp.id, reg.counter, label, vouched, session),
     env.DB.prepare(PASSKEY_EVENT_SQL).bind("ok", `${c.login} registered a passkey (${alg}, ${id})`, JSON.stringify({ login: c.login, by: c.login, via: "web", action: "register", passkey: id, alg, rp: rp.id, ...(vouched ? { confirmed_with: vouched } : {}) }), id, c.login),
   ]);
   if (!ins.meta.changes) {
     const taken = await env.DB.prepare(PASSKEY_BY_CREDENTIAL_SQL).bind(reg.credentialId).first();
     if (taken) return json({ error: "this passkey is registered already", code: "passkey_exists" }, 409, NO_STORE);
-    // Not vouched for, and the login holds one now: another first registration landed a moment before this one.
-    if (!vouched && (await env.DB.prepare(HAS_PASSKEY_SQL).bind(c.login).first())) return refusedAct({ refused: "passkey_required" }, rp, c.login, "passkey:add");
+    // Signed out while the ceremony ran — another maintainer's reset, or a sign-out: the session that asked is not the login's any more, and nothing it started is stored.
+    if ((await contributorOf(request, env))?.login !== c.login) return json({ error: `${c.login} was signed out while the passkey was being added — a reset of the login's passkeys, or a sign-out: sign in with GitHub again, then add it — no passkey was added`, code: "sign_in" }, 401, NO_STORE);
+    if (vouched) {
+      // The passkey that vouched went meanwhile (removed, or reset): it vouches for nothing.
+      if (!(await env.DB.prepare(OWN_PASSKEY_SQL).bind(vouched, c.login).first())) return refusedAct({ refused: "not_yours" }, rp, c.login, "passkey:add");
+    } else if (await env.DB.prepare(HAS_PASSKEY_SQL).bind(c.login).first()) {
+      // Not vouched for, and the login holds one now: another first registration landed a moment before this one.
+      return refusedAct({ refused: "passkey_required" }, rp, c.login, "passkey:add");
+    }
     return json({ error: `${c.login} holds ${MAX_PASSKEYS} passkeys: remove one first`, code: "passkey_limit" }, 409, NO_STORE);
   }
   return json({ passkey: { id, label, alg, counter: reg.counter, created_at: new Date().toISOString() }, ...(vouched ? { confirmed_with: vouched } : {}), note: "Approve and block — on the web, and the drafts of your agents — are confirmed with it from now on." }, 201, NO_STORE);
@@ -422,7 +437,9 @@ export async function handlePasskeyRemove(id: string, url: URL, request: Request
  * adding a passkey too; removing one is anyone's who holds it. A login
  * without a passkey is told to register one, with the link; its first is
  * added without one (409). Nobody resets their own: that is another
- * maintainer's act, so a stolen session cannot open its own way back.
+ * maintainer's act, so a stolen session cannot open its own way back; and a
+ * login that holds none has nothing to reset (409), said before the
+ * resetting maintainer's device is asked.
  */
 export async function handlePasskeyAssert(url: URL, request: Request, env: Env): Promise<Response> {
   const who = await personOnRp(request, url, env, "holder");
@@ -436,6 +453,9 @@ export async function handlePasskeyAssert(url: URL, request: Request, env: Env):
     if (no) return no;
   }
   if (subject === `passkey:reset:${c.login}`) return json({ error: SELF_RESET, code: "second_maintainer" }, 403, NO_STORE);
+  // A login that holds no passkey has nothing to reset: said before the resetting maintainer answers their device, not after.
+  const target = subject.startsWith("passkey:reset:") ? subject.slice("passkey:reset:".length) : null;
+  if (target && !(await env.DB.prepare(HAS_PASSKEY_SQL).bind(target).first())) return nothingToReset(target);
   const { act, nothing } = actOf(subject);
   if (subject === "passkey:add" && !(await env.DB.prepare(HAS_PASSKEY_SQL).bind(c.login).first())) {
     return json({ error: `${c.login} holds no passkey yet: the first is added with your session alone, with nothing to ask`, code: "first_passkey" }, 409, NO_STORE);
@@ -445,6 +465,8 @@ export async function handlePasskeyAssert(url: URL, request: Request, env: Env):
 
 /** Why nobody resets their own passkeys, in their words. */
 const SELF_RESET = "nobody resets their own passkeys: another maintainer does, with a reason on the record — so a session that left with a lost device cannot open its own way back";
+/** A reset of a login that holds no passkey: the options refuse it before the ceremony, and the reset itself when the last one went since. */
+const nothingToReset = (login: string): Response => json({ error: `${login} holds no passkey: there is nothing to reset — their next one is added with their session alone`, code: "nothing_to_reset" }, 409, NO_STORE);
 
 const stamp = (): string => new Date().toISOString().replace(/[-:.Z]/g, "");
 
@@ -474,7 +496,7 @@ export async function handlePasskeyReset(url: URL, request: Request, env: Env): 
     return json({ error: `reason: why, in ${RESET_REASON.min} to ${RESET_REASON.max} printable characters — it goes on the public journal and the signed record`, code: "reason" }, 400, NO_STORE);
   }
   const held = (await env.DB.prepare(PASSKEYS_SQL).bind(login).all<{ id: string }>()).results;
-  if (!held.length) return json({ error: `${login} holds no passkey: there is nothing to reset — their next one is added with their session alone`, code: "nothing_to_reset" }, 409, NO_STORE);
+  if (!held.length) return nothingToReset(login);
   const subject = `passkey:reset:${login}`;
   const ok = await checkAssertion(env, rp, c.login, subject, assertionIn(b?.assertion));
   if ("refused" in ok) return refusedAct(ok, rp, c.login, subject);
