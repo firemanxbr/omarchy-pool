@@ -2,7 +2,8 @@
 
 The SVG files here are drawn by the v1 kit (`worker/src/pages/kit.ts`) and
 served in its one stylesheet, `/assets/kit.<hash>.css`, whose header repeats
-the notices below. Each file is the package's own, byte for byte: taken
+the notices below. Two of them, Lucide's `sun` and `moon`, are also drawn
+inline in the header of every page, as the theme switch's icons (#272). Each file is the package's own, byte for byte: taken
 from the npm registry's tarball (integrity checked against the registry),
 the SVG extracted and nothing of the package run.
 

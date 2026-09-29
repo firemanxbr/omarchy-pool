@@ -6,9 +6,11 @@
  * every text colour reaches 4.5:1 on every surface of both themes, measured
  * here; the frame square, with no shadow and no gradient; a focused control
  * and the shell's own buttons visible in both themes, and every weight the
- * CSS draws with loaded; the theme chosen before the first paint
- * (THEME_BOOT, run over a document of its own) and window.opTheme doing
- * what the ⌘K menu will ask of it; the kit on the pages that ask for it and
+ * CSS draws with loaded; the theme chosen before the first paint — dark
+ * by default whatever the system prefers, light only as a reader's choice
+ * (THEME_BOOT, run over a document of its own) — window.opTheme doing
+ * what the ⌘K menu asks of it, and the header's switch (THEME_SWITCH, #272)
+ * doing the same from every page; the kit on the pages that ask for it and
  * nowhere else; its one stylesheet, immutable under its hash, carrying the
  * primitives and every icon and mark with their licences, no coloured mark
  * painting in white or black; a tone or a ring's hue never inherited by a
@@ -22,8 +24,8 @@ import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:
 import { describe, expect, it } from "vitest";
 import worker from "../src/index";
 import { version } from "../src/meta";
-import { PALETTE, THEME_BOOT, THEME_KEY, page as frame, type Theme, type Token } from "../src/pages/layout";
-import { AGENT_MARKS, KIT_CSS, KIT_HELPERS, KIT_SHEET, KIT_SHEET_PATH, LUCIDE, agentMark, lucide, svgUri, type AgentMark, type LucideName } from "../src/pages/kit";
+import { PALETTE, THEME_BOOT, THEME_KEY, THEME_SWITCH, page as frame, type Theme, type Token } from "../src/pages/layout";
+import { AGENT_MARKS, KIT_CSS, KIT_HELPERS, KIT_SHEET, KIT_SHEET_PATH, LUCIDE, agentMark, lucide, lucideSvg, svgUri, type AgentMark, type LucideName } from "../src/pages/kit";
 import licences from "../src/assets/icons/LICENSES.md";
 import { ownScriptOf, runScript, scriptOf } from "./fixture";
 
@@ -106,10 +108,11 @@ describe("the tokens", () => {
       expect(style, name).toContain(`--${name}: ${v.dark};`);
       expect(style, name).toContain(`--${name}: ${v.light};`);
     }
-    // Dark on the root and on anything pinned dark; light for a system that prefers it and nobody chose dark, and for a choice of light.
+    // Dark on the root and on anything pinned dark; light only for a choice of light (#272): the system's preference picks nothing, so no rule asks it.
     expect(style).toContain(`:root, [data-theme="dark"] { color-scheme: dark; --bg: ${PALETTE.bg.dark};`);
-    expect(style).toContain(`@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { color-scheme: light; --bg: ${PALETTE.bg.light};`);
     expect(style).toContain(`[data-theme="light"] { color-scheme: light; --bg: ${PALETTE.bg.light};`);
+    expect(style.match(new RegExp(`--bg: ${PALETTE.bg.light};`, "g"))?.length, "light is declared once, for a choice").toBe(1);
+    expect(style + KIT_CSS).not.toMatch(/@media[^{]*prefers-color-scheme/);
     // The veil behind a dialog: one, the handoff's in both themes, and declared on ::backdrop itself, which an older browser gives none of the page's custom properties.
     expect(style).toContain(`:root, ::backdrop { --scrim: color-mix(in srgb, ${PALETTE["bg-deep"].dark} 60%, transparent); }`);
     expect(style.match(/--scrim:/g)?.length).toBe(1);
@@ -223,34 +226,51 @@ describe("both themes", () => {
   });
 });
 
-/** THEME_BOOT over a document of its own: the root's attributes, the two theme-color metas, a localStorage that can refuse, the system's preference. */
-function boot(o: { stored?: string; prefersLight?: boolean; storageThrows?: boolean } = {}) {
+/**
+ * THEME_BOOT over a document of its own: the root's attributes, the theme-color meta, a localStorage that can refuse, the system's
+ * preference (a matchMedia that answers light when asked to, and counts the asking), the document's events — and, with `withSwitch`,
+ * the header's switch (THEME_SWITCH) run after it, over the button and its description as page() serves them.
+ */
+function boot(o: { stored?: string; prefersLight?: boolean; storageThrows?: boolean; withSwitch?: boolean; noBoot?: boolean } = {}) {
   const attrs: Record<string, string> = {};
   const root = { getAttribute: (n: string) => attrs[n] ?? null, setAttribute: (n: string, v: string) => { attrs[n] = v; }, removeAttribute: (n: string) => { delete attrs[n]; } };
-  const metas = (["dark", "light"] as const).map((t) => {
-    const m = { media: `(prefers-color-scheme: ${t})`, content: PALETTE.bg[t], getAttribute: (n: string) => (n === "media" ? m.media : n === "content" ? m.content : null), setAttribute: (n: string, v: string) => { if (n === "content") m.content = v; } };
-    return m;
-  });
+  const meta = { content: PALETTE.bg.dark, getAttribute: (n: string) => (n === "content" ? meta.content : null), setAttribute: (n: string, v: string) => { if (n === "content") meta.content = v; } };
   const store: Record<string, string> = o.stored ? { [THEME_KEY]: o.stored } : {};
   const refuse = () => { if (o.storageThrows) throw new Error("SecurityError"); };
   const localStorage = { getItem: (k: string) => { refuse(); return store[k] ?? null; }, setItem: (k: string, v: string) => { refuse(); store[k] = v; }, removeItem: (k: string) => { refuse(); delete store[k]; } };
-  const matchMedia = (q: string) => ({ matches: q === "(prefers-color-scheme: light)" && !!o.prefersLight });
+  let asked = 0;
+  const matchMedia = (q: string) => { asked++; return { matches: q === "(prefers-color-scheme: light)" && !!o.prefersLight }; };
   const on: Record<string, (e: { key: string }) => void> = {};
+  const heard: string[] = [];
+  const listeners: Record<string, ((e: { detail: string }) => void)[]> = {};
+  class CustomEvent { type: string; detail: string; constructor(type: string, init: { detail: string }) { this.type = type; this.detail = init.detail; } }
+  // The switch as served: hidden, named for light, its description the dark theme's.
+  const sw = { hidden: true, title: "Switch to the light theme", attrs: { "aria-label": "Switch to the light theme" } as Record<string, string>, click: null as null | (() => void), setAttribute(k: string, v: string) { this.attrs[k] = v; }, addEventListener(t: string, f: () => void) { if (t === "click") this.click = f; } };
+  const now = { textContent: "The dark theme is on." };
   const window: Record<string, any> = { matchMedia, addEventListener: (t: string, f: (e: { key: string }) => void) => { on[t] = f; } };
-  const document = { documentElement: root, querySelectorAll: (sel: string) => (sel === 'meta[name="theme-color"]' ? metas : []) };
-  new Function("document", "window", "localStorage", "matchMedia", THEME_BOOT)(document, window, localStorage, matchMedia);
-  return { attrs, metas: () => metas.map((m) => m.content), store, opTheme: window.opTheme as { get(): string; set(t: unknown): string; toggle(): string }, on };
+  const document = {
+    documentElement: root,
+    querySelectorAll: (sel: string) => (sel === 'meta[name="theme-color"]' ? [meta] : []),
+    querySelector: (sel: string) => (sel === "#theme" ? sw : sel === "#theme-now" ? now : null),
+    addEventListener: (t: string, f: (e: { detail: string }) => void) => { (listeners[t] = listeners[t] || []).push(f); },
+    dispatchEvent: (e: CustomEvent) => { heard.push(`${e.type}:${e.detail}`); (listeners[e.type] || []).forEach((f) => f(e)); return true; },
+  };
+  if (!o.noBoot) new Function("document", "window", "localStorage", "matchMedia", "CustomEvent", THEME_BOOT)(document, window, localStorage, matchMedia, CustomEvent);
+  if (o.withSwitch) new Function("document", "window", THEME_SWITCH)(document, window);
+  return { attrs, meta: () => meta.content, store, opTheme: window.opTheme as { get(): string; set(t: unknown): string; toggle(): string }, on, asked: () => asked, heard, sw, now };
 }
 
 describe("the theme", () => {
-  it("is decided in the head, before the body is drawn: the metas the browser's chrome reads, then the boot, then the styles", async () => {
+  it("is decided in the head, before the body is drawn: the meta the browser's chrome reads, then the boot, then the styles — and no rule asks the system", async () => {
     for (const path of ["/", "/factory", "/docs", "/status", "/package/zlib"]) {
       const html = await page(path), head = /<head>([\s\S]*?)<\/head>/.exec(html)![1];
-      const dark = `<meta name="theme-color" content="${PALETTE.bg.dark}" media="(prefers-color-scheme: dark)">`, light = `<meta name="theme-color" content="${PALETTE.bg.light}" media="(prefers-color-scheme: light)">`, script = `<script>${THEME_BOOT}</script>`;
-      for (const part of [dark, light, script, "<style>"]) expect(head, `${path}: ${part.slice(0, 40)}`).toContain(part);
-      expect(head.indexOf(light), path).toBeLessThan(head.indexOf(script));
+      const meta = `<meta name="theme-color" content="${PALETTE.bg.dark}">`, script = `<script>${THEME_BOOT}</script>`;
+      for (const part of [meta, script, "<style>"]) expect(head, `${path}: ${part.slice(0, 40)}`).toContain(part);
+      expect(head.indexOf(meta), path).toBeLessThan(head.indexOf(script));
       expect(head.indexOf(script), path).toBeLessThan(head.indexOf("<style>"));
-      expect(head.match(/<meta name="theme-color"/g)?.length, path).toBe(2);
+      // One theme-color, dark as served, for every system: the boot sets it to the theme shown.
+      expect(head.match(/<meta name="theme-color"/g)?.length, path).toBe(1);
+      expect(html, path).not.toMatch(/media="\(prefers-color-scheme|@media[^{]*prefers-color-scheme|matchMedia\("\(prefers-color-scheme/);
       // The page's own script is still one function after the boot: the tests read it with scriptOf, which sets the boot aside.
       expect(scriptOf(html).trim().startsWith("(function () {"), path).toBe(true);
     }
@@ -260,33 +280,42 @@ describe("the theme", () => {
     expect(/<footer>[\s\S]*<\/footer>/.exec(home)![0]).not.toMatch(/#[0-9a-fA-F]{6}\b/);
   });
 
-  it("follows the system until the reader chooses, keeps the choice, and gives the ⌘K menu get, set and toggle", () => {
-    // Nothing chosen: the CSS's media query decides, the boot sets nothing, the chrome keeps each meta's own colour.
-    let b = boot();
+  it("is dark on a first visit whatever the system prefers, keeps a choice, and gives the switch and the ⌘K menu get, set and toggle", () => {
+    // A first visit on a light system (#272): dark — nothing set, the chrome dark, and the system never asked.
+    let b = boot({ prefersLight: true });
     expect(b.attrs["data-theme"]).toBeUndefined();
-    expect(b.metas()).toEqual([PALETTE.bg.dark, PALETTE.bg.light]);
+    expect(b.meta()).toBe(PALETTE.bg.dark);
     expect(b.opTheme.get()).toBe("dark");
-    expect(boot({ prefersLight: true }).opTheme.get()).toBe("light");
-    // A choice kept from an earlier visit is applied before the first paint, the chrome following it.
+    expect(b.asked(), "the system's preference is not read").toBe(0);
+    expect(boot().opTheme.get()).toBe("dark");
+    // A choice kept from an earlier visit is applied before the first paint, the chrome following it — on a dark system too.
     b = boot({ stored: "light" });
     expect(b.attrs["data-theme"]).toBe("light");
-    expect(b.metas()).toEqual([PALETTE.bg.light, PALETTE.bg.light]);
+    expect(b.meta()).toBe(PALETTE.bg.light);
     expect(b.opTheme.get()).toBe("light");
-    // Something else under the key is no choice.
-    expect(boot({ stored: "sepia" }).attrs["data-theme"]).toBeUndefined();
-    // set, toggle, and back to the system.
+    expect(boot({ stored: "dark", prefersLight: true }).opTheme.get()).toBe("dark");
+    // Something else under the key is no choice: dark.
+    b = boot({ stored: "sepia", prefersLight: true });
+    expect(b.attrs["data-theme"]).toBeUndefined();
+    expect(b.opTheme.get()).toBe("dark");
+    // set, toggle, and forgetting — which is dark again, on a light system too; each change is told to the document.
     b = boot({ prefersLight: true });
+    expect(b.opTheme.toggle()).toBe("light");
+    expect(b.store[THEME_KEY]).toBe("light");
+    expect(b.attrs["data-theme"]).toBe("light");
+    expect(b.meta()).toBe(PALETTE.bg.light);
     expect(b.opTheme.set("dark")).toBe("dark");
     expect(b.store[THEME_KEY]).toBe("dark");
     expect(b.attrs["data-theme"]).toBe("dark");
-    expect(b.metas()).toEqual([PALETTE.bg.dark, PALETTE.bg.dark]);
-    expect(b.opTheme.toggle()).toBe("light");
-    expect(b.store[THEME_KEY]).toBe("light");
-    expect(b.opTheme.set("system")).toBe("light");
+    expect(b.meta()).toBe(PALETTE.bg.dark);
+    expect(b.opTheme.set("light")).toBe("light");
+    expect(b.opTheme.set("system")).toBe("dark");
     expect(b.store[THEME_KEY]).toBeUndefined();
     expect(b.attrs["data-theme"]).toBeUndefined();
-    expect(b.metas()).toEqual([PALETTE.bg.dark, PALETTE.bg.light]);
-    expect(b.opTheme.set(null)).toBe("light");
+    expect(b.meta()).toBe(PALETTE.bg.dark);
+    expect(b.opTheme.set(null)).toBe("dark");
+    expect(b.heard).toEqual(["op-theme:dark", "op-theme:light", "op-theme:dark", "op-theme:light", "op-theme:dark", "op-theme:dark"]);
+    expect(b.asked()).toBe(0);
     // A choice made in another tab of the pool is followed; another key is not.
     b = boot();
     b.store[THEME_KEY] = "light";
@@ -294,11 +323,67 @@ describe("the theme", () => {
     expect(b.attrs["data-theme"]).toBeUndefined();
     b.on.storage({ key: THEME_KEY });
     expect(b.attrs["data-theme"]).toBe("light");
+    delete b.store[THEME_KEY];
+    b.on.storage({ key: THEME_KEY });
+    expect(b.opTheme.get(), "forgotten in another tab: dark").toBe("dark");
     // Storage refused (a private window, blocked site data): the page still switches, for as long as it is open.
     b = boot({ storageThrows: true });
     expect(b.opTheme.get()).toBe("dark");
     expect(b.opTheme.toggle()).toBe("light");
     expect(b.attrs["data-theme"]).toBe("light");
+  });
+
+  it("has a switch in the header that shows itself, names the theme it switches to, says the one that is on, toggles and keeps the choice", () => {
+    let b = boot({ withSwitch: true, prefersLight: true });
+    expect(b.sw.hidden, "drawn once the script runs").toBe(false);
+    expect(b.sw.attrs["aria-label"]).toBe("Switch to the light theme");
+    expect(b.sw.title).toBe("Switch to the light theme");
+    expect(b.now.textContent).toBe("The dark theme is on.");
+    // A press (a click, or Enter or Space on the native button) toggles and stores; the name and the state follow.
+    b.sw.click!();
+    expect(b.opTheme.get()).toBe("light");
+    expect(b.store[THEME_KEY]).toBe("light");
+    expect(b.meta()).toBe(PALETTE.bg.light);
+    expect(b.sw.attrs["aria-label"]).toBe("Switch to the dark theme");
+    expect(b.sw.title).toBe("Switch to the dark theme");
+    expect(b.now.textContent).toBe("The light theme is on.");
+    b.sw.click!();
+    expect(b.store[THEME_KEY]).toBe("dark");
+    expect(b.sw.attrs["aria-label"]).toBe("Switch to the light theme");
+    // The ⌘K menu's Theme (the same API) and another tab's choice move the switch too.
+    b.opTheme.toggle();
+    expect(b.sw.attrs["aria-label"]).toBe("Switch to the dark theme");
+    b.store[THEME_KEY] = "dark";
+    b.on.storage({ key: THEME_KEY });
+    expect(b.now.textContent).toBe("The dark theme is on.");
+    // A choice kept from an earlier visit: the switch is served named for light and says so for dark at once.
+    b = boot({ withSwitch: true, stored: "light" });
+    expect(b.sw.attrs["aria-label"]).toBe("Switch to the dark theme");
+    expect(b.now.textContent).toBe("The light theme is on.");
+    // Without the boot (no opTheme) the switch stays hidden: nothing could switch.
+    b = boot({ withSwitch: true, noBoot: true });
+    expect(b.sw.hidden).toBe(true);
+  });
+
+  it("serves the switch hidden, so with script off the page is dark and draws no control that does nothing", async () => {
+    const html = await page("/");
+    const sw = /<button class="theme" id="theme"[^>]*>[\s\S]*?<\/button>/.exec(html)![0];
+    expect(sw).toMatch(/^<button class="theme" id="theme" type="button" hidden aria-label="Switch to the light theme" title="Switch to the light theme" aria-describedby="theme-now">/);
+    expect(sw).toContain('<span id="theme-now" hidden>The dark theme is on.</span>');
+    // Its icons: Lucide's sun and moon, inline, in currentColor, decoration only; the CSS shows the sun on a dark page and the moon on a light one.
+    expect(sw).toContain(lucideSvg("sun", 15, "i-sun"));
+    expect(sw).toContain(lucideSvg("moon", 15, "i-moon"));
+    expect(lucideSvg("moon", 15, "i-moon")).toBe('<svg class="i-moon" width="15" height="15" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>');
+    const style = styleOf(html);
+    for (const rule of [
+      "header .theme:hover { color: var(--text); border-color: var(--green); }",
+      'header .theme .i-moon, :root[data-theme="light"] header .theme .i-sun { display: none; }',
+      ':root[data-theme="light"] header .theme .i-moon { display: block; }',
+      "[hidden] { display: none !important; }",
+    ]) expect(style, rule).toContain(rule);
+    expect(style).toMatch(/header \.theme \{[^}]*border: 1px solid var\(--line\); border-radius: 0;[^}]*color: var\(--dim\);/);
+    // Its focus is the header's green line.
+    expect(style).toContain("header a:focus-visible, header button:focus-visible, footer a:focus-visible { outline: 1px solid var(--green); outline-offset: 2px; }");
   });
 });
 
@@ -387,8 +472,9 @@ describe("the v1 kit", () => {
     expect(KIT_SHEET.startsWith("/*")).toBe(true);
     expect(KIT_SHEET.indexOf(KIT_CSS.trim())).toBe(KIT_SHEET.indexOf("*/") + 3);
     expect(KIT_SHEET.indexOf(KIT_CSS.trim())).toBeLessThan(KIT_SHEET.indexOf(".op-i-"));
-    // The icons the handoff's prototype draws, the one it names that 0.400.0 lacks (git-commit) as that release names it.
-    expect(Object.keys(LUCIDE).length).toBe(62);
+    // The icons the handoff's prototype draws, the one it names that 0.400.0 lacks (git-commit) as that release names it, and the header's theme switch's sun and moon (#272).
+    expect(Object.keys(LUCIDE).length).toBe(64);
+    for (const name of ["sun", "moon"]) expect(LUCIDE).toHaveProperty(name);
     expect(LUCIDE).toHaveProperty("git-commit-horizontal");
     for (const [name, svg] of Object.entries(LUCIDE)) {
       expect(svg.startsWith("<!-- @license lucide-static v0.400.0 - ISC -->"), name).toBe(true);

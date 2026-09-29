@@ -8,7 +8,7 @@ import type { RunningVersion } from "../meta";
 import { DOCS_TREE, GLOSSARY, type DocKey } from "./docs-tree";
 import { EXPECTED_SOURCES, LATE_AFTER_HOURS, PROMOTED_RINGS, REPO_ARCHES, RING_TEXT, RINGS_BY_STABILITY, SEVERITIES, WORKER_ALIVE_MINUTES } from "../meta";
 import { escapeHtml } from "../html";
-import { KIT_HELPERS, KIT_SHEET_PATH, type LucideName } from "./kit";
+import { KIT_HELPERS, KIT_SHEET_PATH, lucideSvg, type LucideName } from "./kit";
 import { PKGNAME } from "../request";
 
 /**
@@ -58,30 +58,41 @@ function tokens(theme: Theme): string {
 export const THEME_KEY = "op-theme";
 
 /**
- * The theme before the first paint, in the head. With nothing chosen the
- * page follows the system — the token block's media query does that, so it
- * holds with script off too, and nothing here runs for it. A choice the
- * reader made (window.opTheme.set, the ⌘K menu's "Theme" from #241) is kept
- * under THEME_KEY and applied here as data-theme on <html>, before the body
- * is drawn, so a light reader on a dark system never sees a dark flash; the
- * browser's own chrome (theme-color) follows the page. The one API, for the
- * palette and anything else that offers the choice:
+ * The theme before the first paint, in the head. Dark is the default, for
+ * everyone (#272): the handoff says "Dark is the default" — the site is
+ * omarchy.org's Tokyo Night, and light is its day twin a reader asks for —
+ * so the system's prefers-color-scheme picks nothing. v1.0.0 followed the
+ * system, and a reader on a light desktop met the day twin first and found
+ * the way back only in the ⌘K menu. With nothing chosen the token block's
+ * :root is dark, which holds with script off too, and nothing here runs for
+ * it. A choice the reader made (the header's switch, the ⌘K menu's "Theme"
+ * from #241, window.opTheme.set) is kept under THEME_KEY and applied here as
+ * data-theme on <html>, before the body is drawn, so a reader who chose
+ * light never sees a dark flash; the browser's own chrome (the theme-color
+ * meta) follows the page, and so does color-scheme (the token block sets it
+ * with the tokens). The one API, for the switch, the palette and anything
+ * else that offers the choice:
  *
  *   opTheme.get()        "dark" or "light": what the page shows now
- *   opTheme.set(theme)   "dark" or "light" keeps that choice; anything else ("system", null) forgets it
+ *   opTheme.set(theme)   "dark" or "light" keeps that choice; anything else ("system", null) forgets it, and the page is dark
  *   opTheme.toggle()     the other one, kept
  *
- * Each returns the theme shown after it. A choice made in another tab of
- * the pool is followed here too (the storage event). localStorage can throw
- * (a private window, storage blocked): the choice then lasts for the page.
+ * Each returns the theme shown after it, and every change is announced on
+ * the document as an "op-theme" event (detail: the theme shown), so the
+ * header's switch follows a change the menu or another tab made. A choice
+ * made in another tab of the pool is followed here too (the storage event).
+ * localStorage can throw (a private window, storage blocked): the choice
+ * then lasts for the page.
  */
 export const THEME_BOOT = `(function (d, KEY, BG) {
   var root = d.documentElement;
   function kept() { try { var t = localStorage.getItem(KEY); return t === "dark" || t === "light" ? t : null; } catch (e) { return null; } }
-  function shown() { var t = root.getAttribute("data-theme"); return t === "dark" || t === "light" ? t : window.matchMedia && matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"; }
+  function shown() { return root.getAttribute("data-theme") === "light" ? "light" : "dark"; }
   function apply(t) {
     if (t) root.setAttribute("data-theme", t); else root.removeAttribute("data-theme");
-    d.querySelectorAll('meta[name="theme-color"]').forEach(function (m) { m.setAttribute("content", BG[t || (/light/.test(m.getAttribute("media") || "") ? "light" : "dark")]); });
+    var now = shown();
+    d.querySelectorAll('meta[name="theme-color"]').forEach(function (m) { m.setAttribute("content", BG[now]); });
+    if (d.dispatchEvent && typeof CustomEvent === "function") d.dispatchEvent(new CustomEvent("op-theme", { detail: now }));
   }
   window.opTheme = {
     get: shown,
@@ -92,19 +103,50 @@ export const THEME_BOOT = `(function (d, KEY, BG) {
   apply(kept());
 })(document, ${JSON.stringify(THEME_KEY)}, ${JSON.stringify({ dark: PALETTE.bg.dark, light: PALETTE.bg.light })});`;
 
+/**
+ * The header's theme switch (#272), beside Go…: the choice the ⌘K menu
+ * offers, where a reader sees it without knowing the menu. An icon button —
+ * the sun on a dark page, the moon on a light one: the theme it switches to
+ * — whose name says the same ("Switch to the light theme") and whose
+ * description says the theme that is on, so a screen reader hears both what
+ * pressing does and the state now. It carries no aria-pressed: its name
+ * changes with the theme, and a pressed state on top of a changing name
+ * reads as two answers to one question. A native <button>: Tab reaches it,
+ * Enter and Space press it, and the frame's focus rule gives it the green
+ * line. It is served hidden and shown by this script, so with script off
+ * (where nothing could switch) it is not drawn and the page stays dark.
+ * The icons are inline SVG from the kit's Lucide files (lucideSvg), not the
+ * kit's sheet: the header is on every page, and most pages link no sheet.
+ */
+export const THEME_ICONS = lucideSvg("sun", 15, "i-sun") + lucideSvg("moon", 15, "i-moon");
+export const THEME_SWITCH = String.raw`
+  (function () {
+    var sw = document.querySelector("#theme"), now = document.querySelector("#theme-now");
+    if (!sw || !window.opTheme) return;
+    function show() {
+      var t = window.opTheme.get(), other = t === "dark" ? "light" : "dark", name = "Switch to the " + other + " theme";
+      sw.setAttribute("aria-label", name); sw.title = name;
+      if (now) now.textContent = "The " + t + " theme is on.";
+    }
+    sw.addEventListener("click", function () { window.opTheme.toggle(); });
+    document.addEventListener("op-theme", show);
+    show();
+    sw.hidden = false;
+  })();
+`;
+
 export const GITHUB_ICON =
   '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>';
 
 const CSS = String.raw`
-  /* ---- the tokens (#239). The palette (PALETTE: dark by default, light for a
-     reader who chose it or whose system prefers it — data-theme on <html>,
-     THEME_BOOT), then the names that point into it, then type and space.
+  /* ---- the tokens (#239). The palette (PALETTE: dark by default, for everyone — the handoff's rule, #272: the system's
+     prefers-color-scheme picks nothing — and light only for a reader who chose it: data-theme on <html>, THEME_BOOT),
+     then the names that point into it, then type and space.
      The only colours layout.ts writes are PALETTE's; everything below is a name.
      data-theme also pins one element to a theme (the footer's badge is the
      brand's, dark in both). The aliases are declared wherever a theme is, so
      they follow it: --edge on a light page is light lilac. */
   :root, [data-theme="dark"] { color-scheme: dark; ${tokens("dark")} }
-  @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { color-scheme: light; ${tokens("light")} } }
   [data-theme="light"] { color-scheme: light; ${tokens("light")} }
   /* The veil behind a dialog is the handoff's in both themes: the dark chrome at 60%, so a light page dims as a dark one does.
      It is declared on ::backdrop itself too: a browser from before early 2024 (Chrome 122, Safari 17.4, Firefox 120) gives ::backdrop none of the page's custom properties. */
@@ -161,6 +203,14 @@ const CSS = String.raw`
   header .go:hover { color: var(--text); border-color: var(--green); }
   header .go kbd { padding: 0 5px; border: 1px solid var(--line); font: 11px/1.5 var(--font-mono); }
   @media (hover: none) and (pointer: coarse) { header .go kbd { display: none; } }
+  /* The theme switch (#272, THEME_SWITCH): a square beside Go…, as tall as it, in Go…'s dim that brightens on hover, one 15px Lucide icon
+     in currentColor — the sun on a dark page, the moon on a light one: the theme a press switches to. Served hidden: with script off it is
+     not drawn. It changes nothing but the theme, at once: no transition, so there is no motion to reduce. */
+  header .theme { flex: none; align-self: stretch; display: inline-grid; place-items: center; padding: 0 8px; border: 1px solid var(--line); border-radius: 0; -webkit-appearance: none; appearance: none; background: transparent; color: var(--dim); cursor: pointer; }
+  header .theme:hover { color: var(--text); border-color: var(--green); }
+  header .theme svg { display: block; width: 15px; height: 15px; }
+  header .theme .i-moon, :root[data-theme="light"] header .theme .i-sun { display: none; }
+  :root[data-theme="light"] header .theme .i-moon { display: block; }
   header .account { flex: none; font-size: 13px; border: 1px solid var(--line); padding: 5px 11px; white-space: nowrap; display: inline-flex; align-items: center; max-width: min(46vw, 420px); }
   header .account #account { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
   /* A long GitHub login never wraps the header: the name is cut with an ellipsis (the full one is the link's title). */
@@ -2028,8 +2078,7 @@ export function page(o: PageOptions): string {
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="manifest" href="/site.webmanifest">
-<meta name="theme-color" content="${PALETTE.bg.dark}" media="(prefers-color-scheme: dark)">
-<meta name="theme-color" content="${PALETTE.bg.light}" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="${PALETTE.bg.dark}">
 <script>${THEME_BOOT}</script>${analyticsTag(v)}
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Geist:wght@500;600;700&display=swap">
@@ -2047,6 +2096,7 @@ export function page(o: PageOptions): string {
   </div>
   <div class="hr">
     <a class="go" id="go" href="/packages" title="find a package">Go…</a>
+    <button class="theme" id="theme" type="button" hidden aria-label="Switch to the light theme" title="Switch to the light theme" aria-describedby="theme-now">${THEME_ICONS}<span id="theme-now" hidden>The dark theme is on.</span></button>
     <span class="account"><a id="account" href="/auth/github?next=${escapeHtml(nextOf(o.path))}" title="contributors and maintainers sign in with GitHub" rel="nofollow">Sign in</a><a id="signout" href="/auth/logout" hidden title="sign out of the dashboard on this browser">sign out</a></span>
   </div>
 </header>
@@ -2081,7 +2131,7 @@ ${GO_MENU_HTML}
       go.parentNode.replaceChild(b, go);
     });
   })();
-${HELPERS.split("__POOL_URL__").join(pool).split("__RINGS_TEXT__").join(JSON.stringify(RING_TEXT)).split("__WICON__").join(JSON.stringify(WORKER_ICONS)).split("__LATE_AFTER_HOURS__").join(String(LATE_AFTER_HOURS)).split("__PROMISED_RINGS__").join(JSON.stringify(RINGS_BY_STABILITY.filter((r) => (PROMOTED_RINGS as readonly string[]).includes(r)))).split("__ARCHES__").join(JSON.stringify(REPO_ARCHES)).split("__SEVERITIES__").join(JSON.stringify(SEVERITIES)).split("__WORKER_ALIVE_MINUTES__").join(String(WORKER_ALIVE_MINUTES))}${GO_MENU}${o.kit ? KIT_HELPERS : ""}
+${THEME_SWITCH}${HELPERS.split("__POOL_URL__").join(pool).split("__RINGS_TEXT__").join(JSON.stringify(RING_TEXT)).split("__WICON__").join(JSON.stringify(WORKER_ICONS)).split("__LATE_AFTER_HOURS__").join(String(LATE_AFTER_HOURS)).split("__PROMISED_RINGS__").join(JSON.stringify(RINGS_BY_STABILITY.filter((r) => (PROMOTED_RINGS as readonly string[]).includes(r)))).split("__ARCHES__").join(JSON.stringify(REPO_ARCHES)).split("__SEVERITIES__").join(JSON.stringify(SEVERITIES)).split("__WORKER_ALIVE_MINUTES__").join(String(WORKER_ALIVE_MINUTES))}${GO_MENU}${o.kit ? KIT_HELPERS : ""}
 ${o.script ?? ""}
 ${docsSearch}
 })();

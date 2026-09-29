@@ -63,6 +63,10 @@ describe("dashboard pages", () => {
       expect([...header.matchAll(/<nav aria-label="Main">[\s\S]*?<\/nav>/g)].map((m) => [...m[0].matchAll(/href="([^"]*)"/g)].map((h) => h[1])), `${path} doors`).toEqual([["/", "/factory", "/review"]]);
       expect(header, `${path} go`).toContain('<a class="go" id="go" href="/packages" title="find a package">Go…</a>');
       expect(header, `${path} go`).not.toContain("<kbd>");
+      // The theme switch (#272) on every page, once, right after Go… and before the account: a native button, served hidden (the script shows it), named for the theme it switches to, its state its description, its two icons decoration.
+      expect(header.match(/<button class="theme" id="theme" type="button" hidden aria-label="Switch to the light theme" title="Switch to the light theme" aria-describedby="theme-now">/g)?.length, `${path} theme switch`).toBe(1);
+      expect(header, `${path} theme switch`).toMatch(/<\/a>\s*<button class="theme" id="theme"[^>]*><svg class="i-sun"[^>]* aria-hidden="true" focusable="false"[^>]*>[\s\S]*?<\/svg><svg class="i-moon"[^>]* aria-hidden="true" focusable="false"[^>]*>[\s\S]*?<\/svg><span id="theme-now" hidden>The dark theme is on\.<\/span><\/button>\s*<span class="account">/);
+      expect(header.indexOf('id="go"'), `${path} theme switch beside Go…`).toBeLessThan(header.indexOf('id="theme"'));
       // A door's role follows its name after a real space, so a screen reader names the link "Pool use", not "Pooluse"; the lit door is the page for a screen reader too, and no other door is.
       for (const n of NAV) expect(header, `${path} ${n.label}`).toContain(`>${n.label}<small> ${n.sub}</small></a>`);
       expect((header.match(/class="active"/g) ?? []).length, `${path} one door lit, and it is the current page`).toBe((header.match(/ class="active" aria-current="page">/g) ?? []).length);
