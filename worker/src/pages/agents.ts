@@ -264,11 +264,14 @@ function roleCard(r: RoleCard): string {
       </article>`;
 }
 
-/** Step 2's panel for one agent: where it goes, the snippet with its copy button, and the documentation it was checked against. Every panel is served; all but the chosen one hidden. */
+/** A snippet run in the terminal, one line, as against a file's content (JSON or TOML, whose lines and indentation are its structure). */
+export const isCommand = (a: AgentConfig) => a.where.endsWith("in your terminal");
+
+/** Step 2's panel for one agent: where it goes, the snippet with its copy button (a file's kept on its lines: ag-file), and the documentation it was checked against. Every panel is served; all but the chosen one hidden. */
 function agentPanel(a: AgentConfig, chosen: AgentConfig): string {
   return `<div class="ag-cfg" id="agent-${escapeHtml(a.key)}"${a === chosen ? "" : " hidden"}>
               <p class="ag-where">${escapeHtml(a.label)} · ${escapeHtml(a.where)} · <a href="${escapeHtml(a.docs)}">docs →</a></p>
-              <div class="op-code"><code>${escapeHtml(a.snippet)}</code><button type="button" class="op-copy" data-op-copy>copy</button></div>
+              <div class="op-code${isCommand(a) ? "" : " ag-file"}"><code>${escapeHtml(a.snippet)}</code><button type="button" class="op-copy" data-op-copy>copy</button></div>
             </div>`;
 }
 
@@ -373,9 +376,9 @@ const CSS = String.raw`
   .ag-step { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; }
   .ag-step h3 { font: 400 13.5px/1.5 var(--font-mono); }
   .ag-step .op-code { padding: 10px 12px; }
+  /* A command or a configuration is read and retyped as it is, so no well breaks a word (the kit's wrap anywhere, which split "omarchy-" from "cli"): a command, and step 3's question, wrap between words only, the whole of it in view on a phone; a file's content keeps its lines, whose indentation is its structure, and a well too narrow for one scrolls, as the prototype's do, the copy button staying put. The step's columns are minmax(0, 1fr) for that: an auto column would grow to the longest line and push the well and the picker out of the card. */
   .ag-step .op-code code { font-size: 12.5px; line-height: 1.7; overflow-wrap: normal; }
-  /* A command or a configuration is read and retyped as it is: its lines never wrap (the kit's wells wrap anywhere, which split "omarchy-" from "cli" and sent a JSON line back to the margin), and a well too narrow for a line scrolls, as the prototype's do; the copy button stays put. The step's columns are minmax(0, 1fr) for that: an auto column would grow to the longest line and push the well and the picker out of the card. Step 3's question is prose, and wraps between words. */
-  .ag-step .op-code:not(.ag-ask) code { flex: 1 1 auto; white-space: pre; overflow-x: auto; }
+  .ag-step .ag-file code { flex: 1 1 auto; white-space: pre; overflow-x: auto; }
   .ag-step-h { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
   .ag-pick { display: flex; flex-wrap: wrap; gap: 4px; }
   .ag-cfg { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
@@ -478,10 +481,10 @@ export const AGENTS_COMPONENTS = (_F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // Step 2's picker: a link per agent to this page with it shown (the server draws the choice), and every agent's panel served, the chosen one alone not hidden; the script switches in place, and a mark under the title leaves the focus on the picker.
+    // Step 2's picker: a link per agent to this page with it shown (the server draws the choice), and every agent's panel served, the chosen one alone not hidden, a file's content in a well that keeps its lines; the script switches in place, and a mark under the title leaves the focus on the picker.
     id: "agents.picker",
     page: "/agents",
-    anchor: ['<nav class="ag-pick" aria-labelledby="ag-pick-t">', ...AGENTS.map((a) => `id="agent-${a.key}"`)],
+    anchor: ['<nav class="ag-pick" aria-labelledby="ag-pick-t">', ...AGENTS.map((a) => `id="agent-${a.key}"`), '<div class="op-code ag-file"><code>'],
     script: ["function showAgent(", '"agent-" + k', 'a.setAttribute("aria-current", "true")', 'history.replaceState(null, "", "?" + q + "#connect")', 'closest("a[data-agent]")', "inPicker.focus({ preventScroll: true })"],
     visible: EVERYONE,
   },

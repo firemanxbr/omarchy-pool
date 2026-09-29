@@ -15,7 +15,7 @@
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import worker from "../src/index";
-import { AGENTS, FIRST_QUESTION, MCP_TOOLS, PROPOSAL_URL, PROPOSED_TOOLS, ROLES, SERVER_NAME, agentOf } from "../src/pages/agents";
+import { AGENTS, FIRST_QUESTION, MCP_TOOLS, PROPOSAL_URL, PROPOSED_TOOLS, ROLES, SERVER_NAME, agentOf, isCommand } from "../src/pages/agents";
 import { AGENT_MARKS, KIT_HELPERS, KIT_SHEET_PATH } from "../src/pages/kit";
 import { ownScriptOf, scriptOf } from "./fixture";
 // The MCP server's own source, as text (Vite's ?raw): the tests run inside workerd, which has no filesystem.
@@ -136,7 +136,7 @@ describe("the Agents page", () => {
       expect(a.checked, a.label).toMatch(/^20\d\d-\d\d-\d\d$/);
       expect(a.snippet, a.label).toContain(SERVER_NAME);
       // A command ends with the server's; a file's snippet is what the file holds — JSON that parses to the server by its name, starting omarchy-cli mcp, or TOML's one table.
-      if (a.where.endsWith("in your terminal")) expect(a.snippet, a.label).toMatch(/ omarchy-pool (?:-- )?omarchy-cli mcp$/);
+      if (isCommand(a)) expect(a.snippet, a.label).toMatch(/ omarchy-pool (?:-- )?omarchy-cli mcp$/);
       else if (a.where.endsWith(".json")) {
         const entry = (a.key === "opencode" ? JSON.parse(a.snippet).mcp : JSON.parse(a.snippet).mcpServers)[SERVER_NAME];
         expect([entry.command, entry.args].flat().filter(Boolean), a.label).toEqual(["omarchy-cli", "mcp"]);
@@ -147,7 +147,8 @@ describe("the Agents page", () => {
       expect(html.split(href).length - 1, a.label).toBe(2);
       expect(html, a.label).toContain(`<i class="op-b op-b-${a.mark}" style="--op-i-s:18px" role="img" aria-label="${esc(a.label)}"`);
       expect(html, a.label).toContain(`<p class="ag-where">${esc(a.label)} · ${esc(a.where)} · <a href="${esc(a.docs)}">docs →</a></p>`);
-      expect(html, a.label).toContain(`<code>${esc(a.snippet)}</code>`);
+      // A file's content is served in a well that keeps its lines (ag-file); a command's wraps between words.
+      expect(html, a.label).toContain(`<div class="op-code${isCommand(a) ? "" : " ag-file"}"><code>${esc(a.snippet)}</code>`);
     }
     // The prototype also showed Meta's mark; no agent of Meta's documents a local MCP server, so none is offered.
     expect(AGENTS.map((a) => a.mark)).not.toContain("meta-color");
@@ -247,13 +248,13 @@ describe("the Agents page", () => {
     for (const w of weights) expect([400, 500, 600, 700], String(w)).toContain(w);
     // Motion: none of its own.
     expect(css).not.toMatch(/animation|transition/);
-    // A command's or a configuration's line in steps 1 and 2 never wraps (the kit's wells wrap anywhere: "omarchy-" / "cli"), and a narrow well scrolls; step 3's question wraps between words, never inside one.
+    // No well of the steps breaks a word (the kit's wrap anywhere: "omarchy-" / "cli"): a command and the question wrap between words, and a file's content never wraps — a narrow well scrolls.
     expect(css).toContain(".ag-step .op-code code { font-size: 12.5px; line-height: 1.7; overflow-wrap: normal; }");
-    expect(css).toContain(".ag-step .op-code:not(.ag-ask) code { flex: 1 1 auto; white-space: pre; overflow-x: auto; }");
+    expect(css).toContain(".ag-step .ag-file code { flex: 1 1 auto; white-space: pre; overflow-x: auto; }");
+    expect(AGENTS.filter((a) => !isCommand(a)).map((a) => a.key)).toEqual(["codex", "cursor", "opencode", "kimi-code"]);
     // …and it scrolls inside its card: every box between the card and the well may be narrower than the longest line, or a phone's step 2 pushes the well and the picker past the card's edge.
     expect(css).toContain(".ag-connect { flex: 1 1 560px; min-width: 0; }");
     expect(css).toContain(".ag-step { display: grid; grid-template-columns: minmax(0, 1fr);");
     expect(css).toContain(".ag-cfg { display: grid; grid-template-columns: minmax(0, 1fr);");
-    expect(await page()).toContain('<div class="op-code ag-ask"><code>');
   });
 });
