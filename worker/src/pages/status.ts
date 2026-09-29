@@ -140,6 +140,7 @@ const CSS = String.raw`
   .st-wl { display: flex; justify-content: space-between; gap: 8px; font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--dim); } .st-wl > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .st-wj { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .st-wj b { font-weight: 600; } .st-wj a { color: var(--text); text-decoration: none; } .st-wj a:hover { color: var(--green); } .st-wj .st-dim { margin-left: 8px; }
   .st-w.off .st-wj { color: var(--dim); }
+  .st-w.notready .st-wj { color: var(--dim); } .st-w.notready .st-wj b { color: var(--red); }
   .st-wbar { position: relative; height: 2px; overflow: hidden; background: var(--line); } .st-wbar i { position: absolute; top: 0; bottom: 0; left: 0; width: 0; }
   .st-w.busy .st-wbar i { width: 100%; background: var(--blue); }
   @media (prefers-reduced-motion: no-preference) { .st-w.busy .st-wbar i { width: 30%; animation: st-run 1.6s linear infinite; } }
@@ -510,12 +511,15 @@ __CHARTS__
   }
   function workerLine(w, t) {
     var working = w.alive && !!w.current_task, model = w.agent ? modelOf(w.agent) : "—";
+    // Alive, nothing in hand, not ready — its agent did not answer (the listing's ready; the shell's words for why, whole on hover): never "waiting for work" (#273).
+    var down = w.alive && !working && !w.ready;
     var doing = !w.alive ? '<b>offline</b><span class="st-dim">' + esc(span(Date.now() - Date.parse(w.last_seen))) + '</span>'
+      : down ? '<span class="st-dot fail" aria-hidden="true"></span><b>not ready</b><span class="st-dim">' + esc(wtNotReady(w)) + '</span>'
       : !working ? '<b>idle</b><span class="st-dim">waiting for work</span>'
       : !t ? '<a href="/build/' + Number(w.current_task) + '"><b>task #' + Number(w.current_task) + '</b></a>'
       : '<a href="/build/' + t.id + '"><b>' + esc(t.kind === "build" ? t.name : t.kind) + '</b></a><span class="st-dim">' + esc([t.kind === "build" ? [t.version, t.arch].filter(Boolean).join(" · ") : paramsLabel(t), t.started_at ? span(Date.now() - Date.parse(t.started_at)) : ""].filter(Boolean).join(" · ")) + '</span>';
-    return '<div class="st-w' + (working ? " busy" : "") + (w.alive ? "" : " off") + '"><span class="st-wbox">' + (w.agent ? agentOf(w.agent) : '<span class="st-ini" title="no agent: the pool\'s jobs need none">—</span>') + '</span>' +
-      '<div class="st-wt"><div class="st-wl">' + workerName(w) + '<span>' + esc(model) + '</span></div><div class="st-wj">' + doing + '</div><div class="st-wbar"><i></i></div></div></div>';
+    return '<div class="st-w' + (working ? " busy" : "") + (w.alive ? "" : " off") + (down ? " notready" : "") + '"><span class="st-wbox">' + (w.agent ? agentOf(w.agent) : '<span class="st-ini" title="no agent: the pool\'s jobs need none">—</span>') + '</span>' +
+      '<div class="st-wt"><div class="st-wl">' + workerName(w) + '<span>' + esc(model) + '</span></div><div class="st-wj"' + (down ? ' title="' + esc(wtNotReady(w)) + '"' : '') + '>' + doing + '</div><div class="st-wbar"><i></i></div></div></div>';
   }
   function drawWorkers() {
     $("#workers-note").textContent = WC_DOWN || "";
@@ -524,7 +528,8 @@ __CHARTS__
     (FACTORY.tasks || []).forEach(function (t) { tasks[t.id] = t; });
     var ws = (FACTORY.workers || []).filter(function (w) { return wtKind(w) !== "community"; }).sort(function (a, b) { return rank[wtKind(a)] - rank[wtKind(b)] || ARCHES.indexOf(a.arch) - ARCHES.indexOf(b.arch) || (a.id < b.id ? -1 : 1); });
     var c = workerCounts(ws);
-    $("#workers-busy").textContent = num(c.building) + " of " + num(c.registered) + " busy";
+    var down = ws.filter(function (w) { return w.alive && !w.revoked_at && !w.current_task && !w.ready; }).length;
+    $("#workers-busy").textContent = num(c.building) + " of " + num(c.registered) + " busy" + (down ? " · " + num(down) + " not ready" : "");
     $("#workers-list").innerHTML = ws.map(function (w) { return workerLine(w, tasks[w.current_task]); }).join("") || '<p class="st-empty">no project worker registered</p>';
   }
   function workerById(id) { return ((FACTORY || {}).workers || []).filter(function (w) { return w.id === id; })[0] || null; }
@@ -1115,13 +1120,13 @@ export const STATUS_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // The project's workers, live (the listing once a minute): the agent's mark (the kit's agentMark) and the model, both named as a reader says them, the worker's name, what each is doing and for how long, a bar that runs while it works; how many are busy (the shell's workerCounts); the listing that did not answer said in the card's foot.
+      // The project's workers, live (the listing once a minute): the agent's mark (the kit's agentMark) and the model, both named as a reader says them, the worker's name, what each is doing and for how long, a bar that runs while it works; one alive but not ready said so, with why (the shell's wtNotReady, the agent's error on hover — #273), and counted beside the busy; how many are busy (the shell's workerCounts); the listing that did not answer said in the card's foot.
       id: "status.workers",
       page: "/status",
       anchor: ['id="workers"', 'id="workers-list"', 'id="workers-busy"', 'id="workers-note"', 'href="/workers"'],
-      script: ['api("GET", "/api/v1/factory?limit=" + (NUMBERS ? 100 : 10))', "setInterval(loadFactory, 60000)", 'wtKind(w) !== "community"', "workerCounts(ws)", '" busy"', "workerName(w)", "agentMark(mark, agentName(s))", "modelOf(w.agent)", "paramsLabel(t)", 'WC_DOWN = noAnswer("worker listing", e)'],
+      script: ['api("GET", "/api/v1/factory?limit=" + (NUMBERS ? 100 : 10))', "setInterval(loadFactory, 60000)", 'wtKind(w) !== "community"', "workerCounts(ws)", '" busy"', "workerName(w)", "agentMark(mark, agentName(s))", "modelOf(w.agent)", "paramsLabel(t)", 'WC_DOWN = noAnswer("worker listing", e)', "w.alive && !working && !w.ready", "wtNotReady(w)", "<b>not ready</b>", '" not ready"'],
       reads: [
-        { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.id", "workers.0.arch", "workers.0.side", "workers.0.labels", "workers.0.alive", "workers.0.current_task", "workers.0.agent", "workers.0.last_seen", "tasks.0.id", "tasks.0.kind", "tasks.0.name", "tasks.0.started_at"] },
+        { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.id", "workers.0.arch", "workers.0.side", "workers.0.labels", "workers.0.alive", "workers.0.ready", "workers.0.agent_error", "workers.0.agent_checked_at", "workers.0.current_task", "workers.0.agent", "workers.0.last_seen", "tasks.0.id", "tasks.0.kind", "tasks.0.name", "tasks.0.started_at"] },
         { path: "/workers", json: false },
       ],
       visible: EVERYONE,

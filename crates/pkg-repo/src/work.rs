@@ -195,6 +195,8 @@ struct AgentProbe {
     label: String,
     checked_at: Option<std::time::Instant>,
     checked_iso: String,
+    /// How long the answer took, for the log.
+    ms: u64,
 }
 
 /// Does the agent answer? `factory/bin/agent.py --probe` in the pool's
@@ -232,14 +234,7 @@ fn probe_agent(opts: &WorkOptions) -> AgentProbe {
                 .and_then(|v| v.get("agent").and_then(|a| a.as_str()))
                 .unwrap_or_default()
                 .clone_into(&mut p.label);
-            eprintln!(
-                "agent: ok ({ms} ms{})",
-                if p.label.is_empty() {
-                    String::new()
-                } else {
-                    format!(", {}", p.label)
-                }
-            );
+            p.ms = ms;
         }
         Ok(o) => {
             "error".clone_into(&mut p.status);
@@ -253,15 +248,87 @@ fn probe_agent(opts: &WorkOptions) -> AgentProbe {
                         .take(300)
                         .collect()
                 });
-            eprintln!("agent: NOT ready — {}", p.error);
+            if p.error.is_empty() {
+                "no answer".clone_into(&mut p.error);
+            }
         }
         Err(e) => {
             "error".clone_into(&mut p.status);
             p.error = format!("probe did not run: {e}");
-            eprintln!("agent: NOT ready — {}", p.error);
         }
     }
     p
+}
+
+/// A probe that did not answer is not a verdict for half an hour: the
+/// agent behind it may only be starting — the agent proxy replaced in the
+/// same rollout refused both review workers on the Studio at their only
+/// check, and they stayed not ready for 35 minutes after v1.0.0 and again
+/// after v1.0.1, until someone restarted them (#273). A failed probe is
+/// tried again after 15 s, doubled at each failure up to five minutes,
+/// until the agent answers; an agent that answers is probed every
+/// `AGENT_PROBE_EVERY`. Every result goes with the next claim.
+const AGENT_RETRY_FIRST: Duration = Duration::from_secs(15);
+const AGENT_RETRY_MOST: Duration = Duration::from_secs(5 * 60);
+
+/// How long after the `failures`-th failed probe in a row the next one runs: 15 s, 30 s, 60 s … five minutes.
+fn agent_retry_after(failures: u32) -> Duration {
+    let doubled = AGENT_RETRY_FIRST.saturating_mul(1u32 << failures.saturating_sub(1).min(16));
+    doubled.min(AGENT_RETRY_MOST)
+}
+
+/// The agent's standing between probes: the last answer (what the claims
+/// report), how many probes in a row did not answer, and when to ask again.
+#[derive(Debug, Default)]
+struct AgentCheck {
+    probe: AgentProbe,
+    failures: u32,
+}
+
+impl AgentCheck {
+    fn due(&self, now: Instant) -> bool {
+        let wait = if self.probe.status == "error" {
+            agent_retry_after(self.failures)
+        } else {
+            AGENT_PROBE_EVERY
+        };
+        self.probe
+            .checked_at
+            .is_none_or(|t| now.saturating_duration_since(t) >= wait)
+    }
+
+    /// Takes a probe's answer; the line to log, once per change of state —
+    /// the first failure, a different error, the answer — never per check.
+    fn record(&mut self, p: AgentProbe) -> Option<String> {
+        let who = if p.label.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", p.label)
+        };
+        let line = if p.status == "error" {
+            self.failures += 1;
+            let changed = self.probe.status != "error" || self.probe.error != p.error;
+            changed.then(|| {
+                format!(
+                    "agent{who}: NOT ready — {}; checking again in {} s, then less often (up to every {} s) until it answers",
+                    p.error,
+                    agent_retry_after(self.failures).as_secs(),
+                    AGENT_RETRY_MOST.as_secs()
+                )
+            })
+        } else if self.failures > 0 {
+            let line = format!(
+                "agent{who}: ok ({} ms) — answering again after {} failed check(s)",
+                p.ms, self.failures
+            );
+            self.failures = 0;
+            Some(line)
+        } else {
+            Some(format!("agent{who}: ok ({} ms)", p.ms))
+        };
+        self.probe = p;
+        line
+    }
 }
 
 fn chrono_now() -> String {
@@ -326,7 +393,7 @@ pub fn run(opts: &WorkOptions) -> Result<()> {
     let is_draining = || draining.load(std::sync::atomic::Ordering::Relaxed);
     let mut idle = 0u64;
     let mut done = 0u32;
-    let mut probe = AgentProbe::default();
+    let mut check = AgentCheck::default();
     loop {
         if is_draining() {
             say(format!(
@@ -334,13 +401,12 @@ pub fn run(opts: &WorkOptions) -> Result<()> {
             ));
             return Ok(());
         }
-        if agent.is_some()
-            && probe
-                .checked_at
-                .is_none_or(|t| t.elapsed() >= AGENT_PROBE_EVERY)
-        {
-            probe = probe_agent(opts);
+        if agent.is_some() && check.due(Instant::now()) {
+            if let Some(line) = check.record(probe_agent(opts)) {
+                say(line);
+            }
         }
+        let probe = &check.probe;
         let body = serde_json::json!({
             "arch": opts.arch, "hostname": hostname, "version": version, "labels": opts.labels, "kinds": opts.kinds, "shared": opts.shared,
             "agent": if probe.label.is_empty() { agent.clone().unwrap_or_default() } else { probe.label.clone() },
@@ -2068,7 +2134,180 @@ fn security_job(opts: &WorkOptions, job: &Api, token: &Arc<Mutex<String>>) -> Re
 
 #[cfg(test)]
 mod tests {
-    use super::chrono_now;
+    use super::{
+        agent_retry_after, chrono_now, probe_agent, AgentCheck, AgentProbe, WorkOptions,
+        AGENT_PROBE_EVERY, POLL,
+    };
+    use std::time::{Duration, Instant};
+
+    fn answer(status: &str, error: &str, at: Instant) -> AgentProbe {
+        AgentProbe {
+            status: status.to_owned(),
+            error: error.to_owned(),
+            label: if status == "ok" {
+                "anthropic/claude-sonnet-5".to_owned()
+            } else {
+                String::new()
+            },
+            checked_at: Some(at),
+            ms: 42,
+            ..AgentProbe::default()
+        }
+    }
+
+    #[test]
+    fn a_failed_probe_is_tried_again_sooner_then_less_often_up_to_five_minutes() {
+        let secs: Vec<u64> = (1..=8).map(|n| agent_retry_after(n).as_secs()).collect();
+        assert_eq!(secs, [15, 30, 60, 120, 240, 300, 300, 300]);
+        assert_eq!(
+            agent_retry_after(u32::MAX).as_secs(),
+            300,
+            "never overflows, never past the ceiling"
+        );
+    }
+
+    /// #273: the agent proxy replaced in the same rollout refuses the first
+    /// probe; it listens 100 s later. The loop claims every POLL (30 s):
+    /// the claims say error, then ok after the next re-check — no restart.
+    #[test]
+    fn an_agent_that_comes_up_late_is_reported_ok_without_a_restart() {
+        let t0 = Instant::now();
+        let up = t0 + Duration::from_secs(100);
+        let mut check = AgentCheck::default();
+        let (mut probes, mut lines, mut claims) = (Vec::new(), Vec::new(), Vec::new());
+        for k in 0..60u32 {
+            let now = t0 + POLL * k;
+            if check.due(now) {
+                probes.push((now - t0).as_secs());
+                let p = if now < up {
+                    answer("error", "URLError: [Errno 111] Connection refused", now)
+                } else {
+                    answer("ok", "", now)
+                };
+                lines.extend(check.record(p));
+            }
+            claims.push(check.probe.status.clone());
+        }
+        assert_eq!(claims[0], "error", "the first claim reports the refusal");
+        assert_eq!(
+            probes,
+            [0, 30, 60, 120],
+            "15 s, 30 s, 60 s at the loop's pace; then the half-hour probe"
+        );
+        let ok_at = claims
+            .iter()
+            .position(|c| c == "ok")
+            .expect("ok without a restart");
+        assert_eq!(ok_at, 4, "at the claim after the agent came up (+120 s)");
+        assert!(claims[ok_at..].iter().all(|c| c == "ok"));
+        assert_eq!(
+            lines.len(),
+            2,
+            "once per change of state, not per check: {lines:?}"
+        );
+        assert!(lines[0].starts_with("agent: NOT ready — URLError: [Errno 111] Connection refused; checking again in 15 s"), "{}", lines[0]);
+        assert_eq!(
+            lines[1],
+            "agent anthropic/claude-sonnet-5: ok (42 ms) — answering again after 3 failed check(s)"
+        );
+    }
+
+    #[test]
+    fn an_agent_that_never_answers_is_checked_at_most_every_five_minutes_and_logged_once() {
+        let t0 = Instant::now();
+        let mut check = AgentCheck::default();
+        let (mut probes, mut lines) = (Vec::new(), 0);
+        for k in 0..120u32 {
+            let now = t0 + POLL * k;
+            if check.due(now) {
+                probes.push((now - t0).as_secs());
+                lines += usize::from(check.record(answer("error", "refused", now)).is_some());
+            }
+        }
+        let gaps: Vec<u64> = probes.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(
+            gaps.windows(2).all(|g| g[1] >= g[0]),
+            "never faster: {gaps:?}"
+        );
+        assert!(
+            gaps.iter().all(|&g| g <= 300 + POLL.as_secs()),
+            "never slower than the ceiling: {gaps:?}"
+        );
+        assert!(
+            (10..=17).contains(&probes.len()),
+            "about one probe per five minutes in the hour: {probes:?}"
+        );
+        assert_eq!(lines, 1, "the same error is said once");
+        // A different error is news.
+        assert!(check.record(answer("error", "HTTP 502", t0)).is_some());
+    }
+
+    #[test]
+    fn a_healthy_agent_keeps_its_half_hour_probe() {
+        let t0 = Instant::now();
+        let mut check = AgentCheck::default();
+        assert!(check.due(t0), "the first probe runs at once");
+        assert!(check.record(answer("ok", "", t0)).is_some());
+        assert!(!check.due(t0 + AGENT_PROBE_EVERY.saturating_sub(Duration::from_secs(1))));
+        assert!(check.due(t0 + AGENT_PROBE_EVERY));
+    }
+
+    /// The probe itself, against a stub `factory/bin/agent.py` in a checkout:
+    /// refused until a file says the agent is up, then answered — the same
+    /// check, no restart. Needs `timeout` and `python3`, as the image has.
+    #[test]
+    fn the_probe_runs_the_checkouts_agent_py_and_recovers() {
+        let have = |c: &str| {
+            std::process::Command::new("sh")
+                .args(["-c", &format!("command -v {c}")])
+                .output()
+                .is_ok_and(|o| o.status.success())
+        };
+        if !have("timeout") || !have("python3") {
+            eprintln!("skipped: no timeout or python3 on this machine");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("factory/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(
+            bin.join("agent.py"),
+            "import json, os, sys\n\
+             if os.path.exists(os.path.join(os.path.dirname(__file__), 'up')):\n    print(json.dumps({'ok': True, 'ms': 7, 'agent': 'anthropic/claude-sonnet-5'}))\n\
+             else:\n    print(json.dumps({'ok': False, 'error': 'URLError: [Errno 111] Connection refused'}))\n    sys.exit(1)\n",
+        )
+        .unwrap();
+        let opts = WorkOptions {
+            api: String::new(),
+            pool: String::new(),
+            worker_token: String::new(),
+            arch: "aarch64".into(),
+            kinds: vec!["audit".into()],
+            shared: false,
+            labels: serde_json::json!({}),
+            once: false,
+            idle_exit: 0,
+            work_dir: dir.path().into(),
+            sign: None,
+            repo_dir: Some(dir.path().into()),
+        };
+        let mut check = AgentCheck::default();
+        check.record(probe_agent(&opts));
+        assert_eq!(
+            (check.probe.status.as_str(), check.probe.error.as_str()),
+            ("error", "URLError: [Errno 111] Connection refused")
+        );
+        let at = check.probe.checked_at.unwrap();
+        assert!(
+            !check.due(at + Duration::from_secs(14)) && check.due(at + Duration::from_secs(15)),
+            "the re-check is due after 15 s, not half an hour"
+        );
+        std::fs::write(bin.join("up"), "").unwrap();
+        let line = check.record(probe_agent(&opts));
+        assert_eq!(check.probe.status, "ok");
+        assert_eq!(check.probe.label, "anthropic/claude-sonnet-5");
+        assert_eq!(line.as_deref(), Some("agent anthropic/claude-sonnet-5: ok (7 ms) — answering again after 1 failed check(s)"));
+    }
 
     #[test]
     fn the_probe_time_is_iso_8601_utc() {

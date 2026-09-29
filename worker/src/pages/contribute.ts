@@ -259,6 +259,8 @@ const FACTORY_CSS = String.raw`
   .fx-wjob { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--text); }
   .fx-wjob b { font-weight: 600; } .fx-wjob a { color: inherit; } .fx-wjob a:hover { color: var(--green); } .fx-wjob .fx-step { margin-left: 8px; color: var(--dim); }
   .fx-wrow.idle .fx-wjob { color: var(--dim); }
+  .fx-wrow.notready .fx-wjob { color: var(--dim); } .fx-wrow.notready .fx-wjob b { color: var(--red); }
+  .fx-wmark { display: inline-block; width: 8px; height: 8px; margin-right: 8px; vertical-align: 1px; background: var(--red); }
   .fx-bar { height: 2px; background: var(--line); } .fx-bar i { display: block; height: 2px; background: var(--blue); transition: width .7s linear; } .fx-bar i.unknown { background: var(--dim); }
   .fx-wempty { margin: 0; padding: 14px 16px; font-size: 13px; color: var(--dim); } .fx-wempty a { color: var(--green); }
   .fx .fx-wfoot { flex-wrap: wrap; justify-content: space-between; border-top: 0; color: var(--dim); } .fx-wfoot a { color: var(--green); } .fx-wfoot a:hover { text-decoration: underline; }
@@ -597,6 +599,8 @@ const SCRIPT = String.raw`
     var t = w.current_task ? taskOf(w.current_task) : null, mark = markOf(w.agent), model = w.agent ? String(w.agent).split("/").slice(1).join("/") || w.agent : "";
     var box = '<span class="fx-wbox">' + (mark ? agentMark(mark, w.agent, 22) : '<span title="' + esc(w.agent || "no agent reported") + '">—</span>') + '</span>';
     var top = '<div class="fx-wtop"><span>' + workerName(w) + ' · ' + esc(w.arch) + '</span><span title="' + esc(w.agent || "no agent reported") + '">' + esc(model || "—") + '</span></div>';
+    // Alive but not ready — its agent did not answer (the listing's ready, the shell's words for why, the agent's own error on hover): never "waiting for work", which it would not be handed (#273).
+    if (!w.current_task && !w.ready) { var why = wtNotReady(w); return '<div class="fx-wrow notready">' + box + '<div class="fx-wmain">' + top + '<div class="fx-wjob" title="' + esc(why) + '"><i class="fx-wmark" aria-hidden="true"></i><b>not ready</b><span class="fx-step">' + esc(why) + '</span></div><div class="fx-bar"><i style="width:0%"></i></div></div></div>'; }
     if (!w.current_task) return '<div class="fx-wrow idle">' + box + '<div class="fx-wmain">' + top + '<div class="fx-wjob"><b>idle</b><span class="fx-step">waiting for work</span></div><div class="fx-bar"><i style="width:0%"></i></div></div></div>';
     var p = progressOf(t);
     return '<div class="fx-wrow">' + box + '<div class="fx-wmain">' + top + '<div class="fx-wjob"><a href="/build/' + esc(w.current_task) + '"><b>' + esc(t ? t.name : "#" + w.current_task) + '</b></a><span class="fx-step">' + esc(t ? stepOf(t) : "running") + '</span></div>'
@@ -605,9 +609,11 @@ const SCRIPT = String.raw`
   function drawWorkers() {
     var list = $("#fx-wlist"), head = $("#fx-busy"); if (!list) return;
     if (!LISTING) { if (DOWN.listing) { list.innerHTML = '<p class="fx-wempty">' + esc(DOWN.listing) + '</p>'; if (head) head.textContent = ""; } return; }
-    var ws = (LISTING.workers || []).filter(function (w) { return w.alive && !w.revoked_at; }).sort(function (a, b) { return (b.current_task ? 1 : 0) - (a.current_task ? 1 : 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0); });
-    var working = ws.filter(function (w) { return w.current_task; }).length, shown = ws.slice(0, 6);
-    if (head) head.textContent = num(working) + " busy · " + num(ws.length - working) + " idle";
+    // Busy first, then the ones not ready (what a maintainer looks at), then the idle.
+    var rank = function (w) { return w.current_task ? 0 : w.ready ? 2 : 1; };
+    var ws = (LISTING.workers || []).filter(function (w) { return w.alive && !w.revoked_at; }).sort(function (a, b) { return rank(a) - rank(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0); });
+    var working = ws.filter(function (w) { return w.current_task; }).length, down = ws.filter(function (w) { return !w.current_task && !w.ready; }).length, shown = ws.slice(0, 6);
+    if (head) head.textContent = num(working) + " busy · " + num(ws.length - working - down) + " idle" + (down ? " · " + num(down) + " not ready" : "");
     // The rest are counted, not linked: the card's foot is the way to every worker.
     list.innerHTML = (shown.length ? shown.map(workerRowOf).join("") + (ws.length > shown.length ? '<p class="fx-wempty">' + num(ws.length - shown.length) + ' more alive</p>' : '') : '<p class="fx-wempty">No worker is alive right now. A request waits in the queue until one is.</p>')
       // A refresh that did not answer leaves the last answer's rows, and says so.
@@ -1014,15 +1020,15 @@ export const FACTORY_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // The workers, live: each one alive, busy first, with its agent's mark, its job and step from the listing's task, and how far it is against the week's time of a job of its kind (the stats series: jobs_daily and builds_daily carry ms). What runs now is the listing's live read (the tasks in flight through the queue's index, no counts), every minute, and nothing while the tab is hidden: the whole listing read every task twice, and every twenty seconds was a page nobody watched costing the most.
+      // The workers, live: each one alive, busy first, then any not ready (its agent did not answer: the listing's ready, the shell's wtNotReady for why, the agent's error on hover — #273), with its agent's mark, its job and step from the listing's task, and how far it is against the week's time of a job of its kind (the stats series: jobs_daily and builds_daily carry ms). What runs now is the listing's live read (the tasks in flight through the queue's index, no counts), every minute, and nothing while the tab is hidden: the whole listing read every task twice, and every twenty seconds was a page nobody watched costing the most.
       id: "factory.workers",
       page: "/factory",
       anchor: ['<div class="op-card fx-workers" id="workers">', 'id="fx-busy"', 'id="fx-wlist"', '<a href="/workers">All workers →</a>', 'class="op-live-dot"'],
-      script: ['api("GET", "/api/v1/factory?live=1&limit=20")', "LIVE_MS = 60000", "if (!document.hidden) loadListing();", '"visibilitychange"', "function workerRowOf(w)", "agentMark(mark, w.agent, 22)", "workerName(w)", "function stepOf(t)", '"rebuilding from scratch"', '"writing the PKGBUILD"', "function typicalMs(t)", "s.builds_daily", "s.jobs_daily", "liveStats(function (d) { STATS = d; drawWorkers(); }, 120000)", 'noAnswer("worker listing", e)'],
+      script: ['api("GET", "/api/v1/factory?live=1&limit=20")', "LIVE_MS = 60000", "if (!document.hidden) loadListing();", '"visibilitychange"', "function workerRowOf(w)", "agentMark(mark, w.agent, 22)", "workerName(w)", "!w.current_task && !w.ready", "wtNotReady(w)", "<b>not ready</b>", '" not ready"', "function stepOf(t)", '"rebuilding from scratch"', '"writing the PKGBUILD"', "function typicalMs(t)", "s.builds_daily", "s.jobs_daily", "liveStats(function (d) { STATS = d; drawWorkers(); }, 120000)", 'noAnswer("worker listing", e)'],
       reads: [
         {
           path: "/api/v1/factory?live=1&limit=20",
-          fields: ["workers", "workers.0.id", "workers.0.arch", "workers.0.agent", "workers.0.alive", "workers.0.current_task", "workers.0.revoked_at", "tasks", "tasks.0.id", "tasks.0.name", "tasks.0.kind", "tasks.0.trust", "tasks.0.status", "tasks.0.arch", "tasks.0.attempts", "tasks.0.max_attempts", "tasks.0.started_at", "tasks.0.pkgbuild_ref", "tasks.0.params"],
+          fields: ["workers", "workers.0.id", "workers.0.arch", "workers.0.agent", "workers.0.alive", "workers.0.ready", "workers.0.agent_error", "workers.0.agent_checked_at", "workers.0.current_task", "workers.0.revoked_at", "tasks", "tasks.0.id", "tasks.0.name", "tasks.0.kind", "tasks.0.trust", "tasks.0.status", "tasks.0.arch", "tasks.0.attempts", "tasks.0.max_attempts", "tasks.0.started_at", "tasks.0.pkgbuild_ref", "tasks.0.params"],
         },
         { path: "/api/v1/stats", fields: ["series.jobs_daily", "series.builds_daily", "series.builds_daily.0.ms", "series.builds_daily.0.trust", "series.builds_daily.0.status", "series.builds_daily.0.n"] },
         { path: "/workers", json: false },

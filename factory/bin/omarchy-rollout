@@ -9,8 +9,9 @@
 # stop the running container — SIGTERM, which a worker takes as *drain*: it
 # finishes the task it holds, reports it, claims nothing new and exits, up
 # to the compose file's stop_grace_period — and start one from the new
-# image. The brokers first (nothing to drain; a builder mid-task takes its
-# lease up again through the new one), the builders next, the project
+# image. The brokers first, each answering before anything that calls it
+# is replaced (nothing to drain; a builder mid-task takes its lease up
+# again through the new one), the builders next, the project
 # workers last, and the updater itself at the very end: replacing it ends
 # this run, and the next container carries on.
 #
@@ -18,12 +19,15 @@
 #   omarchy-rollout --check     say what would change, change nothing
 #   omarchy-rollout --loop      every ROLLOUT_EVERY seconds (900), forever
 #
-# What changed is replaced in one go — compose stops and recreates the
-# services together, each draining under its own stop_grace_period — so a
-# worker never idles on the old image while another drains for hours (the
-# pool refuses an outdated worker 45 minutes after a deploy). The updater
-# replaces itself last, through a one-off container that outlives it: a
-# container cannot recreate itself from inside.
+# The brokers that changed are replaced first and waited for until each
+# answers (bounded: ROLLOUT_BROKER_WAIT, 300 s), then the other services
+# that changed in one go — compose stops and recreates them together, each
+# draining under its own stop_grace_period — so a worker never idles on the
+# old image while another drains for hours (the pool refuses an outdated
+# worker 45 minutes after a deploy), and never checks an agent whose broker
+# is not listening yet (#273). The updater replaces itself last, through a
+# one-off container that outlives it: a container cannot recreate itself
+# from inside.
 #
 # The pool hands nothing to a worker behind its release for longer than
 # the rollout's grace (worker/src/update.ts), so a worker without this
@@ -47,6 +51,40 @@ ORDER=(agent-proxy broker broker-community-x86_64 broker-community-aarch64 worke
 # like for itself, and interpolated into the file they would turn the
 # maintainer's project worker into a second updater (found in review).
 compose() { env -i PATH="$PATH" HOME="${HOME:-/root}" DOCKER_HOST="${DOCKER_HOST:-}" DOCKER_CONFIG="${DOCKER_CONFIG:-}" docker compose --project-directory "$COMPOSE_DIR" "$@"; }
+
+# up -d recreates a container whose image changed: stop (drain), remove, start — all of the given ones at once.
+replace_now() { # service...
+  if compose up -d --no-deps --no-build "$@" >/dev/null 2>&1; then
+    local svc; for svc in "$@"; do log "$svc: running $(docker inspect -f '{{.Image}}' "$(compose ps -q "$svc" | head -1)" 2>/dev/null | cut -c8-19)"; done
+  else
+    log "FAILED to replace $* — docker compose logs"
+  fi
+}
+# Does the broker answer? Any HTTP answer from inside its container (curl
+# is in the image): GET / is a 404 from the broker, where /health would
+# spend a completion of the agent on every try. Connection refused until
+# it listens — a broker installs Claude Code first when the agent is a
+# subscription.
+answers() { # service
+  local cid; cid="$(compose ps -q "$1" 2>/dev/null | head -1)"
+  [[ -n "$cid" ]] && docker exec "$cid" curl -s -o /dev/null --max-time 3 http://127.0.0.1:8790/ >/dev/null 2>&1
+}
+# Bounded: ROLLOUT_BROKER_WAIT seconds (300), a try every 2; a broker that
+# never answers is said, and the rollout goes on — it never hangs on one,
+# and the workers check their agent again until it answers.
+wait_answering() { # service
+  local svc="$1" most="${ROLLOUT_BROKER_WAIT:-300}" tries=0 deadline=$(( SECONDS + ${ROLLOUT_BROKER_WAIT:-300} ))
+  log "$svc: waiting until it answers on :8790 (at most ${most} s) before the workers that call it are replaced"
+  until answers "$svc"; do
+    tries=$((tries + 1))
+    if (( tries * 2 >= most || SECONDS >= deadline )); then
+      log "$svc: WARNING — not answering on :8790 after ${most} s; replacing the workers anyway (they check their agent again until it answers) — docker compose logs $svc"
+      return 0
+    fi
+    sleep 2
+  done
+  log "$svc: answering on :8790$( (( tries > 0 )) && echo " after about $((tries * 2)) s")"
+}
 
 rollout() { # → 0 changed something, 1 nothing to do, 2 docker unreachable
   local check="$1"
@@ -83,15 +121,22 @@ rollout() { # → 0 changed something, 1 nothing to do, 2 docker unreachable
   done
   if (( ${#replace[@]} == 0 && self_changed == 0 )); then log "nothing to roll out: every service runs the latest image"; return 1; fi
   [[ "$check" == 1 ]] && return 0
-  if (( ${#replace[@]} )); then
-    # One call for all of them: compose stops and recreates them together,
-    # each draining under its own grace, none idling refused meanwhile.
-    if compose up -d --no-deps --no-build "${replace[@]}" >/dev/null 2>&1; then
-      for svc in "${replace[@]}"; do log "$svc: running $(docker inspect -f '{{.Image}}' "$(compose ps -q "$svc" | head -1)" 2>/dev/null | cut -c8-19)"; done
-    else
-      log "FAILED to replace ${replace[*]} — docker compose logs"
-    fi
+  # The brokers first, and each answering on :8790, before the builders
+  # and workers that call them (#273: agent-proxy replaced in the same `up`
+  # as the Studio's review workers refused their only agent check). A
+  # broker holds no task: its stop takes seconds.
+  local brokers=() workers=() role
+  for svc in "${replace[@]}"; do
+    role="$(jq -r ".services[\"$svc\"].environment.OMARCHY_WORKER_ROLE // \"\"" <<<"$config" 2>/dev/null || true)"
+    if [[ "$svc" == agent-proxy || "$svc" == broker || "$svc" == broker-* || "$role" == broker || "$role" == agent ]]; then brokers+=("$svc"); else workers+=("$svc"); fi
+  done
+  if (( ${#brokers[@]} )); then
+    replace_now "${brokers[@]}"
+    for svc in "${brokers[@]}"; do wait_answering "$svc"; done
   fi
+  # Then the rest in one call: compose stops and recreates them together,
+  # each draining under its own grace, none idling refused meanwhile.
+  (( ${#workers[@]} == 0 )) || replace_now "${workers[@]}"
   # Only what this run replaced goes; a contributor's other images are theirs.
   local img; for img in "${old_images[@]}"; do docker image rm "$img" >/dev/null 2>&1 || true; done
   if (( self_changed )); then
