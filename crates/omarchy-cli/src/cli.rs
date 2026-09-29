@@ -110,6 +110,9 @@ pub enum Command {
         /// How many days a contribute-only grant lives (thirty by default, ninety at most).
         #[arg(long)]
         days: Option<u32>,
+        /// Print the grant page's address without opening a browser: open it yourself, in a browser on this machine.
+        #[arg(long)]
+        no_browser: bool,
     },
     /// Revokes the agent's grant on the pool, then deletes the credentials file.
     Logout,
@@ -232,7 +235,8 @@ pub fn run(mut cli: Cli) -> Result<i32> {
             agent,
             maintain,
             days,
-        } => login(&api, &agent, maintain, days, json),
+            no_browser,
+        } => login(&api, &agent, maintain, days, !no_browser, json),
         Command::Logout => logout(json),
     }
 }
@@ -243,7 +247,14 @@ fn credentials_path() -> Result<PathBuf> {
         .context("neither XDG_CONFIG_HOME nor HOME is set: no place for the credentials")
 }
 
-fn login(api: &Api, agent: &str, maintain: bool, days: Option<u32>, json: bool) -> Result<i32> {
+fn login(
+    api: &Api,
+    agent: &str,
+    maintain: bool,
+    days: Option<u32>,
+    browser: bool,
+    json: bool,
+) -> Result<i32> {
     let scopes: &[&str] = if maintain {
         &["contribute", "review", "block"]
     } else {
@@ -256,7 +267,9 @@ fn login(api: &Api, agent: &str, maintain: bool, days: Option<u32>, json: bool) 
     };
     let creds = crate::login::login(api, &ask, crate::login::WAIT, &|url: &str| {
         eprintln!("Open this address in a browser signed in with GitHub, on this machine, and press Grant:\n\n  {url}\n\nWaiting for the browser (five minutes)…");
-        crate::login::open_browser(url);
+        if browser {
+            crate::login::open_browser(url);
+        }
     })?;
     let path = credentials_path()?;
     crate::credentials::save(&path, &creds)?;

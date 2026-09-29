@@ -173,7 +173,12 @@ Same requirements plus the worker's npm dependencies. Starts a throwaway local
 worker (`wrangler dev` with local D1 and R2 under `target/e2e-worker/`), publishes
 the fixtures to `edge`, promotes `edge → rc → stable`, renders and signs the
 `stable` databases, checks the mirror routes (databases, signatures, blobs, Range),
-and finally runs pacman in a container against
+walks the factory (a request, a claim and its release, one review for a
+package's architectures, the publish into edge), runs an agent's login as a
+person does — `omarchy-cli login` on its loopback address, the grant page
+posted with the session, a request through the agent's MCP tool, a block the
+agent drafts and the person confirms once with the name typed, logout — and
+finally runs pacman in a container against
 `http://host.containers.internal:<port>/stable/os/$arch`:
 
 ```bash

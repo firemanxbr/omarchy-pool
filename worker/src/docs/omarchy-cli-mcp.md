@@ -168,8 +168,9 @@ The grant is made in the person's own browser, signed in with GitHub, and its
 code goes from the pool to the person's own command, never the other way.
 
 - **Login.** `omarchy-cli login --agent "Claude Code"` (add `--maintain` for
-  the review scopes) listens on `127.0.0.1`, on a port the system picks, and
-  opens the browser at `<api>/auth/agent` — the dashboard's
+  the review scopes; `--no-browser` prints the address instead of opening
+  it, for a browser on the same machine) listens on `127.0.0.1`, on a port
+  the system picks, and opens the browser at `<api>/auth/agent` — the dashboard's
   `https://omarchy-pool.org/auth/agent` in production — with the agent's name,
   the scopes, the port, a `state` and a PKCE challenge (RFC 7636, S256). The
   person, signed in with GitHub, reads what is asked — the agent's name, the
