@@ -1,13 +1,14 @@
 /**
  * The Pool (#243): the door for Omarchy users, search first. The hero is
  * the one sentence of what the pool is and a box that finds a package as
- * you type, the packages people asked for lately under it, and four
- * numbers that count up; then the chain a package travels from its source
- * to your machine, the one command that points pacman at a ring (or the
- * words to ask your agent) beside what the pool did last, and what reached
- * the rings this week. Every number is the pool's own, from the APIs the
- * dashboard already reads; nothing on the page needs an account, and what
- * the old page explained lives one link away (Status, the docs).
+ * you type, the requests a maintainer let through lately under it, and
+ * four numbers that count up; then the chain a package travels from its
+ * source to your machine, the one command that points pacman at a ring (or
+ * the words to ask your agent) beside the packages moving through the pool
+ * now, and what the rings' newest releases brought. Every number is the
+ * pool's own, from the APIs the dashboard already reads; nothing on the
+ * page needs an account, and what the old page explained lives one link
+ * away (Status, the docs).
  */
 import { page } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
@@ -55,7 +56,7 @@ const AGENTS: [string, AgentMark][] = [
   ["Grok", "grok"], ["OpenCode", "opencode"], ["Qwen Code", "qwen-color"], ["Kimi", "kimi"], ["Meta", "meta-color"],
 ];
 
-/** A segment of the chain: its gate's word over a line three squares run along — still, evenly spaced, for a reader who asked for less motion. */
+/** A segment of the chain: its gate's word over a line three squares run along — still, evenly spaced, for a reader who asked for less motion. Each square rides a box as wide as the line, so the move is a transform the compositor runs, never a layout per frame. */
 const track = (label: string, hue: string, seconds: number) =>
   `<div class="home-track${hue ? ` ${hue}` : ""}" style="--dur:${seconds}s"><span>${label}</span><i aria-hidden="true"><b></b><b></b><b></b></i></div>`;
 
@@ -68,13 +69,14 @@ const BODY = String.raw`
       <p class="op-eyebrow">For Omarchy users</p>
       <h1 class="op-hero">Arch, Arch Linux ARM, Omarchy and Asahi packages, tested before they reach you</h1>
       <form class="home-search" action="/packages" method="get" role="search">
-        <div class="home-box">${lucide("search", 18)}<input type="search" name="q" id="pool-q" placeholder="Search the pool's packages" aria-label="Find a package" aria-keyshortcuts="/" aria-controls="pool-results" aria-expanded="false" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search"><kbd aria-hidden="true">/</kbd></div>
+        <div class="home-box">${lucide("search", 18)}<input type="search" name="q" id="pool-q" placeholder="Search the pool's packages" aria-label="Find a package" aria-keyshortcuts="/" aria-controls="pool-results" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search"><kbd aria-hidden="true">/</kbd></div>
         <div class="home-results" id="pool-results" hidden></div>
+        <span class="home-said" id="pool-said" role="status"></span>
       </form>
       <div class="home-asked" id="pool-asked" hidden></div>
     </div>
     <div class="op-stats home-stats" id="pool-stats">
-      <a class="op-stat" href="/packages"><span class="k">Packages</span><b class="n" id="n-pkgs"><span class="skl"></span></b><span class="s">${REPO_ARCHES.join(" + ")}</span></a>
+      <a class="op-stat" href="/packages"><span class="k">Packages</span><b class="n" id="n-pkgs"><span class="skl"></span></b><span class="s" id="s-pkgs">${REPO_ARCHES.join(" + ")}</span></a>
       <a class="op-stat" href="/status?kind=sync#journal"><span class="k">Into edge today</span><b class="n" id="n-edge"><span class="skl"></span></b><span class="s" id="s-edge"></span></a>
       <a class="op-stat" href="/diff?ring=stable"><span class="k">Stable release</span><b class="n" id="n-rel"><span class="skl"></span></b><span class="s" id="s-rel"></span></a>
       <a class="op-stat" href="/status"><span class="k">Sources</span><b class="n" id="n-src"><span class="skl"></span></b><span class="s" id="s-src"></span></a>
@@ -117,7 +119,7 @@ const BODY = String.raw`
   </section>
 
   <section aria-labelledby="new-h">
-    <div class="home-head"><h2 class="op-label" id="new-h">New in the pool this week</h2><a class="home-more" href="/packages">All packages →</a></div>
+    <div class="home-head"><h2 class="op-label" id="new-h">New in the pool</h2><a class="home-more" href="/packages">All packages →</a></div>
     <div class="home-cards" id="pool-new">${'<span class="op-card home-pkg wait"><span class="skl"></span><span class="skl"></span></span>'.repeat(4)}</div>
   </section>
 `;
@@ -128,7 +130,10 @@ const BODY = String.raw`
  * rest is the kit's (tiles, cards, tabs, the ring picker, the code well,
  * chips). Square, 1px lines, tokens only, as the kit is; what moves stops
  * under prefers-reduced-motion (the frame's rule), and the chain's squares
- * then stand evenly along their line.
+ * then stand evenly along their line. Focus is the design's 1px green line
+ * on everything a reader can reach here, the kit's chips, copy button,
+ * buttons and tabs included — inside the tab, since the tab row scrolls
+ * and would clip a line drawn outside it.
  */
 const CSS = String.raw`
   /* ---- the Pool (#243, pages/overview.ts) */
@@ -154,24 +159,27 @@ const CSS = String.raw`
   .home-results .d { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .home-results .o { color: var(--dim); font-size: 12px; white-space: nowrap; }
   .home-results .none, .home-results a.all { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; padding: 12px 16px; border-top: 1px solid var(--line); font-size: 13.5px; }
-  .home-results .none span { color: var(--muted); } .home-results a.all { font-size: 12.5px; }
+  .home-results .none span { color: var(--muted); } .home-results .none .go { display: flex; flex-wrap: wrap; gap: 6px 18px; } .home-results a.all { font-size: 12.5px; }
+  .home-said { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .home-asked { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12.5px; }
   .home-asked > span { margin-right: 2px; color: var(--dim); }
   .home-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin: 0 0 12px; }
   .home-head h2 { font-family: var(--font-mono); }
   .home-more { font-size: 12.5px; color: var(--green); text-decoration: none; white-space: nowrap; } .home-more:hover { text-decoration: underline; }
+  .home-more:focus-visible, .home-ringline a:focus-visible, .home-asked .op-chip:focus-visible, .home-setup .op-copy:focus-visible, .home-own .op-btn:focus-visible { outline: 1px solid var(--green); outline-offset: 2px; }
   .home-flow { display: flex; align-items: center; padding: 18px 20px; border: 1px solid var(--line); background: var(--panel); overflow-x: auto; scrollbar-width: none; }
-  .home-sources { flex: none; width: 176px; margin: 0; padding: 0; list-style: none; display: grid; gap: 1px; }
+  .home-sources { flex: none; width: 176px; margin: 0 6px 0 0; padding: 0; list-style: none; display: grid; gap: 1px; }
   .home-sources li { display: flex; justify-content: space-between; gap: 10px; font-size: 12.5px; line-height: 1.55; }
   .home-sources span { color: var(--muted); white-space: nowrap; } .home-sources b { font-weight: 400; font-variant-numeric: tabular-nums; }
-  .home-track { flex: 1 1 64px; min-width: 52px; display: grid; gap: 6px; padding: 0 8px; --dot: var(--muted); }
+  .home-track { flex: 1 1 64px; min-width: max-content; display: grid; gap: 6px; padding: 0 6px; --dot: var(--muted); }
   .home-track.edge { --dot: var(--edge); } .home-track.rc { --dot: var(--rc); } .home-track.stable { --dot: var(--stable); }
   .home-track > span { font-size: 11.5px; color: var(--dim); text-align: center; white-space: nowrap; }
   .home-track > i { position: relative; display: block; height: 7px; overflow: hidden; }
   .home-track > i::before { content: ""; position: absolute; left: 0; right: 0; top: 3px; height: 1px; background: var(--line); }
-  .home-track b { position: absolute; top: 0; left: 16%; width: 7px; height: 7px; background: var(--dot); animation: home-flow var(--dur) linear infinite; }
-  .home-track b + b { left: 47%; animation-delay: calc(var(--dur) / -3); } .home-track b + b + b { left: 78%; animation-delay: calc(var(--dur) / -1.5); }
-  @keyframes home-flow { from { left: -8px; } to { left: 100%; } }
+  .home-track b { position: absolute; top: 0; left: 0; width: 100%; height: 7px; transform: translateX(16%); animation: home-flow var(--dur) linear infinite; }
+  .home-track b::before { content: ""; position: absolute; top: 0; left: 0; width: 7px; height: 7px; background: var(--dot); }
+  .home-track b + b { transform: translateX(47%); animation-delay: calc(var(--dur) / -3); } .home-track b + b + b { transform: translateX(78%); animation-delay: calc(var(--dur) / -1.5); }
+  @keyframes home-flow { from { transform: translateX(-8px); } to { transform: translateX(100%); } }
   .home-node { flex: none; display: grid; justify-items: center; gap: 1px; padding: 8px 14px; border: 1px solid var(--line); background: var(--bg-deep); }
   .home-node b { font: 600 17px/1.2 var(--font-display); } .home-node span { font-size: 12px; color: var(--dim); white-space: nowrap; }
   .home-node.pool { padding: 10px 14px; border-color: var(--green); } .home-node.pool b { color: var(--green); }
@@ -187,7 +195,7 @@ const CSS = String.raw`
   .home-setup .op-card-b { display: grid; gap: 12px; }
   .home-rings { flex-wrap: nowrap; }
   .home-rings > button { flex: 1 1 0; min-width: 0; display: flex; justify-content: space-between; align-items: baseline; gap: 8px; padding: 9px 12px; background: var(--panel-2); }
-  .home-rings > button:focus-visible, .op-tabs > button:focus-visible { outline: 1px solid var(--green); outline-offset: 2px; }
+  .home-rings > button:focus-visible { outline: 1px solid var(--green); outline-offset: 2px; } .home-setup .op-tabs > button:focus-visible { outline: 1px solid var(--green); outline-offset: -1px; }
   .home-rings small { font-size: 12px; color: var(--dim); }
   .home-ringline { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 16px; margin: 0; font-size: 13px; color: var(--muted); }
   .home-ringline a { font-size: 12.5px; color: var(--green); text-decoration: none; white-space: nowrap; } .home-ringline a:hover { text-decoration: underline; }
@@ -222,10 +230,12 @@ const CSS = String.raw`
   .home-pkg .h b { font: 600 15px var(--font-display); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .home-pkg .h span { font-size: 12px; color: var(--dim); white-space: nowrap; }
   .home-pkg .v { font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .home-pkg .c { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 11.5px; }
-  .home-pkg .src { padding: 0 6px; border: 1px solid var(--line); color: var(--muted); line-height: 1.6; white-space: nowrap; } .home-pkg .a { padding: 0 2px; color: var(--dim); }
+  .home-pkg .from { padding: 0 6px; border: 1px solid var(--line); color: var(--muted); line-height: 1.6; white-space: nowrap; } .home-pkg .a { padding: 0 2px; color: var(--dim); }
   @media (max-width: 720px) {
     main { padding: 24px 16px 32px; gap: 32px; }
     .home-flow { padding: 14px 16px; }
+    /* Live stacks under the setup card here: it grows to hold its lines instead of hiding some. */
+    .home-feed > div { position: static; }
   }
   @media (max-width: 560px) {
     .home-results a.r { grid-template-columns: minmax(0, auto) minmax(0, 1fr); } .home-results .o { display: none; }
@@ -240,11 +250,16 @@ const SCRIPT = String.raw`
   var q = new URLSearchParams(location.search), box = $("#pool-q"), out = $("#pool-results");
   var ring = PROMISED_RINGS.indexOf(q.get("ring")) >= 0 ? q.get("ring") : PROMISED_RINGS[0], mode = "command", total = 0, landed = false;
   function originOf(source, arch) { return ORIGIN[source + "/" + arch] || source || ""; }
-  // Where a package comes from, as a search row says it: the factory's builds are only in the pool; everything else is synced from its project.
-  function fromWhere(source, arch) { return source === "factory" ? "factory · only in the pool" : "synced · " + originOf(source, arch); }
+  // Where a package comes from, as a search row says it: the factory's builds are only in the pool, everything else is synced from its project. A factory name no promised ring serves says where it is instead — a trial in the lab, a request not in a ring yet, a blocked one — never "in the pool".
+  function fromWhere(source, arch, where) {
+    if (source !== "factory") return "synced · " + originOf(source, arch);
+    return where === "lab" ? "factory · in the lab only" : where === "blocked" ? "factory · blocked" : where === "requested" ? "factory · not in a ring yet" : "factory · only in the pool";
+  }
   // The source a card names: the project, as the chain lists it.
   function sourceName(source, arch) { var k = source + "/" + arch, s = SOURCES.filter(function (x) { return x.keys.indexOf(k) >= 0; })[0]; return s ? s.name : originOf(source, arch); }
   function headOf(d, name) { return ((d.rings || []).filter(function (r) { return r.ring === name; })[0] || {}).release || null; }
+  // A section's one quiet line: that it has nothing to show, or which read did not answer (the shell's sentence, noAnswer).
+  function quiet(text) { return '<p class="home-quiet">' + esc(text) + '</p>'; }
 
   // ---- the four numbers. They count up the first time they land (the kit's countUp: at once for a reader who asked for less motion) and are simply written after that. Packages is the pool's names — one name is one package on every architecture it is built for, as the handoff has it — from the metrics snapshot the stats read.
   function land(sel, n, fmt) { var el = $(sel); if (!el) return; if (!landed) countUp(el, n, fmt); else el.textContent = (fmt || num)(n); }
@@ -280,6 +295,16 @@ const SCRIPT = String.raw`
     $("#s-src").textContent = late.length || never.length ? [late.length ? "late: " + late.join(", ") : "", never.length ? "not synced yet: " + never.join(", ") : ""].filter(Boolean).join(" · ") : "all in sync";
     landed = true;
   }
+  // The stats did not answer before anything landed: each number reads "—" with "did not answer" under it and the reason on hover — the shell's words (tilesUnanswered), never a 0 —, the chain's figures "—", and Live and the cards say which read did not answer, once each. A poll that fails after one answered leaves what that one drew, as the shell's lists do (noAnswer).
+  function statsDown(e) {
+    if (landed) return;
+    var text = noAnswer("pool's stats", e);
+    ["pkgs", "edge", "rel", "src"].forEach(function (k) { $("#n-" + k).textContent = "—"; $("#s-" + k).innerHTML = '<span title="' + esc(text) + '">did not answer</span>'; });
+    $("#pool-sources").innerHTML = SOURCES.map(function (s) { return '<li><span>' + esc(s.name) + '</span><b>—</b></li>'; }).join("");
+    PROMISED_RINGS.forEach(function (r) { var el = $("#fl-" + r); if (el) el.textContent = "—"; });
+    $("#live-feed").innerHTML = '<div>' + quiet(text) + '</div>';
+    $("#pool-new").innerHTML = quiet(text);
+  }
 
   // ---- the chain: every source with what edge serves from it, the pool's names, each ring's release.
   function chain(d) {
@@ -288,16 +313,19 @@ const SCRIPT = String.raw`
     PROMISED_RINGS.forEach(function (r) { var h = headOf(d, r), el = $("#fl-" + r); if (el) el.textContent = h ? "#" + h.seq : "no release"; });
   }
 
-  // ---- Point pacman at a ring: the picked ring (?ring= picks one on arrival), the command or the words for an agent, its copy button. The well is written again on every change, so a "copied" still on its way back from the last one lands on a button no longer on the page.
+  // ---- Point pacman at a ring: the picked ring (?ring= picks one on arrival), the command or the words for an agent, its copy button. The well is written again when the ring or the mode changes, and only then: a poll leaves it alone, so the copy button keeps its focus and its "copied", and a selection a reader is making in the command stays.
+  var drawnSetup = "";
   function command(r) { return "curl -fsSL " + location.origin + "/setup | sudo bash -s -- --ring " + r; }
   function askAgent(r) { return "Set up omarchy-pool on this machine on the " + r + " ring, with the script at " + location.origin + "/setup. After that I'll install packages with pacman as usual."; }
-  function drawSetup(d) {
-    var agent = mode === "agent";
-    document.querySelectorAll("#pick-ring button[data-ring]").forEach(function (b) {
-      var r = b.getAttribute("data-ring"), h = d ? headOf(d, r) : null;
-      b.setAttribute("aria-pressed", String(r === ring));
-      if (h) b.querySelector("small").textContent = "#" + h.seq;
-    });
+  // Each ring's release beside its name in the picker: all a poll changes in the card.
+  function ringNumbers(d) {
+    document.querySelectorAll("#pick-ring button[data-ring]").forEach(function (b) { var h = headOf(d, b.getAttribute("data-ring")); if (h) b.querySelector("small").textContent = "#" + h.seq; });
+  }
+  function drawSetup() {
+    var agent = mode === "agent", now = mode + " " + ring;
+    if (now === drawnSetup) return;
+    drawnSetup = now;
+    document.querySelectorAll("#pick-ring button[data-ring]").forEach(function (b) { b.setAttribute("aria-pressed", String(b.getAttribute("data-ring") === ring)); });
     document.querySelectorAll("#setup-tabs [role=tab]").forEach(function (t) { var on = t.getAttribute("data-mode") === mode; t.setAttribute("aria-selected", String(on)); t.tabIndex = on ? 0 : -1; });
     $("#setup-panel").setAttribute("aria-labelledby", "tab-" + mode);
     $("#ring-line").textContent = RINGS_TEXT[ring].title + " · " + RINGS_TEXT[ring].lag;
@@ -315,40 +343,69 @@ const SCRIPT = String.raw`
     $("#tab-" + mode).focus();
   });
 
-  // ---- Live: the newest lines of the journal the stats carry, a line that arrived since the last poll lit for a moment (the kit's op-fresh). A job's own line and the scheduler's dispatch repeat what the job itself wrote, and a sync that found nothing new changed nothing: they stay in the journal, one link away. A line opens to its whole text on a press.
-  var seen = null, opened = {};
-  function news(e) { var p = e.payload || {}; return e.kind !== "job" && e.kind !== "dispatch" && !(e.kind === "sync" && e.status === "ok" && !(p.uploaded > 0) && !(p.removed > 0)); }
-  // What a line says happened, in the colour of what it is about: a ring's hue, the health word, amber and red for a warning and a failure.
+  // ---- Live: packages moving through the pool — a sync that brought or dropped packages, a promotion, a security fix, a rollback, the factory's publish —, newest first, from the journal's newest lines and its latest line of each kind (both in the stats), a line that arrived since the last poll lit for a moment (the kit's op-fresh). The rest of the journal (checks, renders, jobs, the factory's bookkeeping) is one link away, and a promotion the journal writes twice (the ring's line and the copy's) is said once. A line opens to its whole text on a press.
+  var MOVES = ["sync", "promote", "fast-track", "rollback", "publish"], seen = null, opened = {}, shownFeed = null;
+  function moves(d) {
+    var had = {}, promoted = {};
+    return (d.events || []).concat(d.latest || []).filter(function (e) {
+      var p = e.payload || {}, rel = e.kind === "promote" && p.release_id ? e.ring + "#" + p.release_id : "";
+      if (had[e.id] || MOVES.indexOf(e.kind) < 0 || (e.kind === "sync" && !(p.uploaded > 0) && !(p.removed > 0)) || (rel && promoted[rel])) return false;
+      had[e.id] = true; if (rel) promoted[rel] = true;
+      return true;
+    }).sort(function (a, b) { return b.id - a.id; });
+  }
+  // What a line says happened, in the handoff's words and the colour of where it went: the ring's hue, amber for a security fix, red for a rollback and a failure, the factory's in grey.
   function said(e) {
-    var p = e.payload || {}, r = e.ring && RINGS_TEXT[e.ring] ? e.ring : "", bad = e.status === "error" ? "fail" : e.status === "warn" ? "warn" : "";
-    if (e.kind === "sync") return { word: p.uploaded > 0 ? "synced → edge" : "synced", hue: bad || "edge" };
+    var r = e.ring && RINGS_TEXT[e.ring] ? e.ring : "", bad = e.status === "error" ? "fail" : e.status === "warn" ? "warn" : "";
+    if (e.kind === "sync") return { word: "synced → edge", hue: bad || "edge" };
     if (e.kind === "promote") return { word: r ? "promoted → " + r : "promoted", hue: bad || r };
     if (e.kind === "fast-track") return { word: "security fix" + (r ? " → " + r : ""), hue: bad || "warn" };
-    if (e.kind === "rollback") return { word: "rolled back", hue: "fail" };
-    if (e.kind === "health") return { word: (r ? r + " " : "") + (HEALTH_WORD[e.status] || e.status), hue: bad || "ok" };
-    return { word: e.kind, hue: bad };
+    if (e.kind === "rollback") return { word: "rolled back" + (r ? " · " + r : ""), hue: "fail" };
+    return { word: "built in the factory", hue: bad };
   }
   function evRow(e, fresh) {
     var s = String(e.summary || ""), cut = s.indexOf(": "), w = said(e);
     var text = cut > 0 ? '<b>' + esc(s.slice(0, cut)) + '</b><span>' + esc(s.slice(cut + 2)) + '</span>' : '<b>' + esc(s) + '</b>';
     return '<button type="button" class="home-ev ' + w.hue + (fresh ? " op-fresh" : "") + (opened[e.id] ? " open" : "") + '" data-id="' + esc(e.id) + '" aria-expanded="' + !!opened[e.id] + '" title="' + esc(s) + '"><span class="w">' + span(Date.now() - Date.parse(e.created_at)) + '</span><i class="sq"></i><span class="t">' + text + '</span><span class="e">' + esc(w.word) + '</span></button>';
   }
+  function liveRows() { return [].slice.call(document.querySelectorAll("#live-feed .home-ev[data-id]")); }
+  // A line the panel has no room for is out of the tab order and hidden from a screen reader, as it is from the eye: the panel does not scroll. Measured again whenever the panel changes size (the setup card beside it sets its height).
+  function fit() {
+    var inner = $("#live-feed > div");
+    if (!inner || !inner.getBoundingClientRect) return;
+    var bottom = inner.getBoundingClientRect().bottom;
+    liveRows().forEach(function (b) { var off = b.getBoundingClientRect().bottom > bottom + 1; b.tabIndex = off ? -1 : 0; if (off) b.setAttribute("aria-hidden", "true"); else b.removeAttribute("aria-hidden"); });
+  }
   function feed(d) {
-    var all = d.events || [], today = new Date().toISOString().slice(0, 10), rows = all.filter(news).slice(0, 8), fresh = {};
+    var today = new Date().toISOString().slice(0, 10), rows = moves(d).slice(0, 8), key = rows.map(function (e) { return e.id; }).join(","), fresh = {}, by = {};
+    // The day's syncs, exact: the stats' daily series counts every one, where the journal's forty newest lines hold a fraction of a busy day.
+    var imp = ((d.series || {}).imports_daily || []).filter(function (r) { return r.day === today; })[0], runs = imp ? imp.runs : 0;
+    $("#live-count").textContent = runs ? num(runs) + (runs === 1 ? " sync today" : " syncs today") : "no sync yet today";
+    // The same lines as the last poll: only their ages move, so a line keeps the focus, its open state and a reader's place.
+    if (key && key === shownFeed) {
+      rows.forEach(function (e) { by[e.id] = e; });
+      liveRows().forEach(function (b) { var e = by[b.getAttribute("data-id")], w = b.querySelector(".w"); if (e && w) w.textContent = span(Date.now() - Date.parse(e.created_at)); });
+      return;
+    }
+    var focused = document.activeElement, back = focused && focused.closest && focused.closest("#live-feed") ? focused.getAttribute("data-id") : null;
     if (seen) rows.forEach(function (e) { if (!seen[e.id]) fresh[e.id] = true; });
-    // Today's lines in the forty the stats carry: every one of them today says there were more.
-    var n = all.filter(function (e) { return String(e.created_at).slice(0, 10) === today; }).length;
-    $("#live-count").textContent = num(n) + (n && n === all.length ? "+" : "") + (n === 1 ? " event today" : " events today");
-    $("#live-feed").innerHTML = '<div>' + (rows.map(function (e) { return evRow(e, fresh[e.id]); }).join("") || '<p class="home-quiet">Nothing on the record yet.</p>') + '</div>';
+    $("#live-feed").innerHTML = '<div>' + (rows.map(function (e) { return evRow(e, fresh[e.id]); }).join("") || '<p class="home-quiet">No package moved lately.</p>') + '</div>';
     seen = {}; rows.forEach(function (e) { seen[e.id] = true; });
+    shownFeed = key;
+    // A line that had the focus has it again when it is still there.
+    var again = back ? liveRows().filter(function (b) { return b.getAttribute("data-id") === back; })[0] : null;
+    if (again) again.focus({ preventScroll: true });
+    fit();
   }
   $("#live-feed").addEventListener("click", function (ev) {
     var b = ev.target.closest ? ev.target.closest(".home-ev[data-id]") : null; if (!b) return;
     var id = b.getAttribute("data-id"); opened[id] = !opened[id];
     b.classList.toggle("open", opened[id]); b.setAttribute("aria-expanded", String(opened[id]));
+    fit();
   });
+  if (window.ResizeObserver) new ResizeObserver(fit).observe($("#live-feed"));
 
-  // ---- New in the pool this week: what the rings' newest releases brought, added or upgraded, from the diff of each against its parent — the address the Packages page asks for stable's, so the two share the edge's copy. The page asks only about releases retention keeps whole (KEEP_RELEASES, db.ts: the newest of each ring), so a diff is always folded from the newer release's deltas and the older one's counts, and never rebuilds a release: each ring's head, and the release before it when that one's own parent is still kept, as far as the stats' latest releases show the ring. A release older than a week, or the first of its ring, adds nothing.
+  // ---- New in the pool: what the rings' newest releases brought, added or upgraded, from the diff of each against its parent — the address the Packages page asks for stable's, so the two share the edge's copy; each card says how long ago. The page asks only about releases retention keeps whole (KEEP_RELEASES, db.ts: the newest of each ring), so a diff is always folded from the newer release's deltas and the older one's counts, and never rebuilds a release: each ring's head, and the release before it when that one's own parent is still kept, as far as the stats' latest releases show the ring. A release older than a week, or the first of its ring, adds nothing. So the section is the newest releases' arrivals, not the week's: older diffs would rebuild what retention pruned.
   var KEEP_RELEASES = __KEEP__, asked = {}, shownKey = null, WORDS = [], typing = null;
   function releasesOf(d, r) {
     var head = headOf(d, r);
@@ -371,10 +428,11 @@ const SCRIPT = String.raw`
     var key = rings.map(function (l) { return l.map(function (x) { return x.id; }).join("+"); }).join(",");
     if (key === shownKey) return;
     shownKey = key;
+    if (!rings.length) { $("#pool-new").innerHTML = quiet("No ring has a new release this week."); return; }
     Promise.all(rings.map(function (l) { return diffOf(l[0]); })).then(function (heads) {
       if (key !== shownKey) return;
       var failed = heads.filter(function (g) { return g.error; });
-      if (heads.length && failed.length === heads.length) { shownKey = null; noAnswer("rings' latest changes", failed[0].error, "#pool-new"); return; }
+      if (failed.length === heads.length) { shownKey = null; $("#pool-new").innerHTML = quiet(noAnswer("rings' latest changes", failed[0].error)); return; }
       if (drawNew(heads.map(function (g) { return [g]; })) >= CARDS || !rings.some(function (l) { return l.length > 1; })) return;
       Promise.all(rings.map(function (l) { return l[1] ? diffOf(l[1]) : null; })).then(function (older) {
         if (key === shownKey) drawNew(heads.map(function (g, i) { return older[i] ? [g, older[i]] : [g]; }));
@@ -412,13 +470,13 @@ const SCRIPT = String.raw`
     picked.sort(function (a, b) { return a.at < b.at ? 1 : a.at > b.at ? -1 : 0; });
     $("#pool-new").innerHTML = picked.map(function (c) {
       var arch = c.arches.length > 1 && ARCHES.every(function (a) { return c.arches.indexOf(a) >= 0; }) ? "both" : c.arches.join(" · ");
-      return '<a class="op-card ' + c.ring + ' home-pkg" href="' + esc(pkgHref(c.name, c.ring, c.arches[0])) + '" title="' + esc(c.name + " " + c.version + " reached " + c.ring + " " + ago(c.at)) + '"><span class="h"><b>' + esc(c.name) + '</b><span>' + span(Date.now() - Date.parse(c.at)) + '</span></span><span class="v">' + esc(c.version) + '</span><span class="c"><span class="op-ring ' + c.ring + '">' + c.ring + '</span><span class="src">' + esc(sourceName(c.source, c.arches[0])) + '</span><span class="a">' + esc(arch) + '</span></span></a>';
-    }).join("") || '<p class="home-quiet">Nothing reached a ring this week.</p>';
+      return '<a class="op-card ' + c.ring + ' home-pkg" href="' + esc(pkgHref(c.name, c.ring, c.arches[0])) + '" title="' + esc(c.name + " " + c.version + " reached " + c.ring + " " + ago(c.at)) + '"><span class="h"><b>' + esc(c.name) + '</b><span>' + span(Date.now() - Date.parse(c.at)) + '</span></span><span class="v">' + esc(c.version) + '</span><span class="c"><span class="op-ring ' + c.ring + '">' + c.ring + '</span><span class="from">' + esc(sourceName(c.source, c.arches[0])) + '</span><span class="a">' + esc(arch) + '</span></span></a>';
+    }).join("") || quiet("Nothing new in the rings' latest releases.");
     offer(picked.map(function (c) { return c.name; }));
     return picked.length;
   }
 
-  // ---- the box's placeholder: the pool's count, and a name the page just drew — typed out, a letter at a time, or still for a reader who asked for less motion.
+  // ---- the box's placeholder: the pool's count, and a name the page just drew in New in the pool — a package a ring serves, never a request — typed out a letter at a time, or still for a reader who asked for less motion. The typing waits, writing nothing, while the box holds a query or the tab is hidden.
   function placeholder(word) { box.placeholder = "Search " + (total ? num(total) + " " : "the pool's ") + "packages" + (word ? " · try " + word : ""); }
   function offer(names) {
     names.forEach(function (n) { if (WORDS.indexOf(n) < 0 && WORDS.length < 8) WORDS.push(n); });
@@ -427,6 +485,7 @@ const SCRIPT = String.raw`
     if (typing) return;
     var wi = 0, ci = 0, dir = 1;
     (function type() {
+      if (box.value || document.hidden) { typing = setTimeout(type, 1000); return; }
       var w = WORDS[wi % WORDS.length], wait = dir > 0 ? 90 : 40;
       ci += dir;
       if (ci >= w.length) { dir = -1; wait = 1600; } else if (ci <= 0) { dir = 1; wi++; wait = 400; }
@@ -435,60 +494,74 @@ const SCRIPT = String.raw`
     })();
   }
 
-  // ---- Requested: the packages people asked the factory for, newest first — the registry the Packages page reads, once per page. The pool counts no downloads and keeps no searches, so what people asked for is the one measure of interest it has. A blocked one is left out.
+  // ---- Requested: what people asked the factory for and a maintainer let through (the registry's own landed: approved, or in the pool), newest first — the registry the Packages page reads, once per page. The pool counts no downloads and keeps no searches, so a request is the one measure of interest it has; a name only asked for, rejected or blocked stays off the front page, since anyone signed in may ask for any name.
   var registry = null;
   function registryRows() {
     if (!registry) registry = api("GET", "/api/v1/factory/packages").then(function (d) { return d.packages || []; }, function (e) { registry = null; throw e; });
     return registry;
   }
   registryRows().then(function (rows) {
-    var wanted = rows.filter(function (p) { return !p.blocked_at; }).sort(function (a, b) { return String(b.created_at).localeCompare(String(a.created_at)); }).slice(0, 5);
+    var wanted = rows.filter(function (p) { return p.landed && !p.blocked_at; }).sort(function (a, b) { return String(b.created_at).localeCompare(String(a.created_at)); }).slice(0, 5);
     if (!wanted.length) return;
     $("#pool-asked").innerHTML = '<span>Requested</span>' + wanted.map(function (p) { return '<button type="button" class="op-chip" data-name="' + esc(p.name) + '">' + esc(p.name) + '</button>'; }).join("");
     $("#pool-asked").hidden = false;
-    offer(wanted.map(function (p) { return p.name; }));
   }, function () {});
   $("#pool-asked").addEventListener("click", function (ev) { var b = ev.target.closest ? ev.target.closest("button[data-name]") : null; if (b) { box.value = b.getAttribute("data-name"); box.focus(); lookFor(box.value.trim().toLowerCase()); } });
 
-  // ---- the search box: as you type, the first matches in stable for the first architecture, each its package page; Enter is the whole search, on the Packages page. It asks what the ⌘K menu asks, at the very same address and in lower case, so the two share the edge's copy: nothing below two characters, one search per pause (200 ms). A name the search found nothing for may still be a package — on the other architecture, only in edge or the lab, reserved by a request — so it is looked for where the menu looks (the factory's names, then the name on each architecture at the package page's own address) before "Request it" is offered; the request form takes the name from ?name=.
+  // ---- the search box: as you type, the first matches in stable, each its package page; Enter is the whole search, on the Packages page. It asks what the ⌘K menu asks, at the very same address and in lower case, so the two share the edge's copy: nothing below two characters, one search per pause (200 ms). Stable on the first architecture first; when that finds nothing, the same search on the others (an Asahi or a Raspberry Pi package is on aarch64 alone), at the same address shape and as cached. A pacman name no row is named for may still be a package — only in edge or the lab, reserved by a request — so it is looked up at the package page's own address on each architecture, then among the factory's names, and drawn first where it is, as the menu draws it; "Request it" is offered only for a name found nowhere, beside the whole search, and the request form takes the name from ?name=. What the rows say is said to a screen reader too.
   var timer = null, seq = 0, places = {};
-  function closeResults() { out.hidden = true; out.innerHTML = ""; box.setAttribute("aria-expanded", "false"); }
-  function showResults(html) { out.innerHTML = html; out.hidden = false; box.setAttribute("aria-expanded", "true"); }
+  function closeResults() { out.hidden = true; out.innerHTML = ""; $("#pool-said").textContent = ""; }
+  function showResults(html, words) { out.innerHTML = html; out.hidden = false; $("#pool-said").textContent = words; }
   function rowHtml(name, desc, where, href) { return '<a class="r" href="' + esc(href) + '"><b>' + esc(name) + '</b><span class="d">' + esc(desc || "") + '</span><span class="o">' + esc(where) + '</span></a>'; }
+  function search(term, arch) {
+    return fetch("/api/v1/search?q=" + encodeURIComponent(term) + "&ring=stable&arch=" + arch + "&limit=9").then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }).then(function (d) { return d.packages || []; });
+  }
+  // Where a name the search did not find is: in a ring on some architecture (the package page's own answer, the lab included, says which), else among the factory's names — a request, which no ring serves yet, or a blocked one.
   function whereIs(term) {
     if (places[term] !== undefined) return Promise.resolve(places[term]);
     var i = 0;
     function onArch() {
-      if (i >= ARCHES.length) return false;
+      if (i >= ARCHES.length) return registryRows().then(function (rows) {
+        var p = rows.filter(function (x) { return x.name === term; })[0];
+        return p ? { name: term, arch: (p.arches || [])[0] || ARCHES[0], ring: "stable", source: "factory", where: p.blocked_at ? "blocked" : "requested", description: p.description } : false;
+      });
       var arch = ARCHES[i++];
       return fetch("/api/v1/package/" + term + "?ring=stable&arch=" + arch).then(function (r) {
         if (r.status === 404) return onArch();
         if (!r.ok) throw new Error("HTTP " + r.status);
-        return r.json().then(function (d) { return { name: term, arch: arch, source: (d.package || {}).source, description: (d.manifest || {}).description }; });
+        return r.json().then(function (d) { return { name: term, arch: arch, ring: d.shown_ring, source: (d.package || {}).source, where: d.shown_ring === "lab" ? "lab" : "", description: (d.manifest || {}).description }; });
       });
     }
-    return registryRows().then(function (rows) { return rows.some(function (p) { return p.name === term; }) ? { name: term, arch: ARCHES[0], source: "factory" } : onArch(); })
-      .then(function (found) { places[term] = found; return found; });
+    return onArch().then(function (found) { places[term] = found; return found; });
+  }
+  function drawFound(term, rows, found) {
+    var first = found ? [rowHtml(found.name, found.description, fromWhere(found.source, found.arch, found.where), pkgHref(found.name, found.ring, found.arch))] : [];
+    var list = first.concat(rows.slice(0, SHOWN - first.length).map(function (p) { return rowHtml(p.name, p.description, fromWhere(p.source, p.repo_arch), pkgHref(p.name, "stable", p.repo_arch)); }));
+    var whole = '<a href="/packages?q=' + encodeURIComponent(term) + '">Search all packages →</a>';
+    if (list.length) {
+      var cut = rows.length + first.length > list.length;
+      return showResults(list.join("") + (cut ? '<a class="all" href="/packages?q=' + encodeURIComponent(term) + '">All results for “' + esc(term) + '” →</a>' : ""), list.length + (list.length === 1 ? " package" : " packages") + (cut ? ", and more on the Packages page" : ""));
+    }
+    if (!NAME.test(term)) return showResults('<div class="none"><span>Nothing in stable matches “' + esc(term) + '”.</span><span class="go">' + whole + '</span></div>', "Nothing in stable matches “" + term + "”");
+    showResults('<div class="none"><span>No “' + esc(term) + '” yet.</span><span class="go">' + whole + '<a href="' + "/request?name=" + encodeURIComponent(term) + '">Request it →</a></span></div>', "No “" + term + "” yet: you can request it");
   }
   function lookFor(term) {
     var my = ++seq;
     if (term.length < 2) { closeResults(); return; }
-    fetch("/api/v1/search?q=" + encodeURIComponent(term) + "&ring=stable&arch=" + ARCHES[0] + "&limit=9").then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }).then(function (d) {
+    search(term, ARCHES[0]).then(function (rows) {
+      return rows.length ? rows : Promise.all(ARCHES.slice(1).map(function (a) { return search(term, a); })).then(function (l) { return [].concat.apply([], l); });
+    }).then(function (rows) {
       if (my !== seq) return;
-      var rows = d.packages || [];
-      var html = rows.slice(0, SHOWN).map(function (p) { return rowHtml(p.name, p.description, fromWhere(p.source, p.repo_arch || ARCHES[0]), pkgHref(p.name, "stable", ARCHES[0])); }).join("");
-      if (rows.length > SHOWN) html += '<a class="all" href="/packages?q=' + encodeURIComponent(term) + '">All results for “' + esc(term) + '” →</a>';
-      if (rows.length || !NAME.test(term)) return showResults(html || '<div class="none"><span>Nothing in stable matches “' + esc(term) + '”.</span><a href="/packages?q=' + encodeURIComponent(term) + '">Every ring →</a></div>');
-      return whereIs(term).then(function (found) {
-        if (my !== seq) return;
-        showResults(found ? rowHtml(found.name, found.description, fromWhere(found.source, found.arch), pkgHref(found.name, "stable", found.arch)) : '<div class="none"><span>No “' + esc(term) + '” yet.</span><a href="' + "/request?name=" + encodeURIComponent(term) + '">Request it →</a></div>');
-      });
-    }).catch(function (e) { if (my === seq) showResults('<div class="none"><span>' + esc("the package search did not answer: " + errorText(e)) + '</span></div>'); });
+      if (!NAME.test(term) || rows.some(function (p) { return p.name === term; })) return drawFound(term, rows, null);
+      return whereIs(term).then(function (found) { if (my === seq) drawFound(term, rows, found); });
+    }).catch(function (e) { if (my === seq) { var text = "the package search did not answer: " + errorText(e); showResults('<div class="none"><span>' + esc(text) + '</span></div>', text); } });
   }
+  // Every keystroke makes an answer still on its way for an earlier term stale; the next pause asks again.
   box.addEventListener("input", function () {
     clearTimeout(timer);
+    seq++;
     var term = box.value.trim().toLowerCase();
-    if (term.length < 2) { seq++; closeResults(); return; }
+    if (term.length < 2) { closeResults(); return; }
     timer = setTimeout(function () { if (box.value.trim().toLowerCase() === term) lookFor(term); }, 200);
   });
   // ↓ from the box walks the rows, ↑ back to it; Esc closes them and keeps the box.
@@ -501,11 +574,11 @@ const SCRIPT = String.raw`
     if (ev.key === "ArrowDown" || ev.key === "ArrowUp") { ev.preventDefault(); var to = at + (ev.key === "ArrowDown" ? 1 : -1); if (to < 0) box.focus(); else if (links[to]) links[to].focus(); }
     else if (ev.key === "Escape") { closeResults(); box.focus(); }
   });
-  box.addEventListener("focus", function () { if (out.innerHTML) { out.hidden = false; box.setAttribute("aria-expanded", "true"); } });
-  document.addEventListener("click", function (ev) { if (!out.hidden && !out.contains(ev.target) && ev.target !== box) { out.hidden = true; box.setAttribute("aria-expanded", "false"); } });
+  box.addEventListener("focus", function () { if (out.innerHTML) out.hidden = false; });
+  document.addEventListener("click", function (ev) { if (!out.hidden && !out.contains(ev.target) && ev.target !== box) out.hidden = true; });
 
   drawSetup();
-  liveStats(function (d) { numbers(d); chain(d); drawSetup(d); feed(d); arrivals(d); if (!typing) placeholder(WORDS[0]); }, 60000);
+  liveStats(function (d) { numbers(d); chain(d); ringNumbers(d); feed(d); arrivals(d); if (!typing) placeholder(WORDS[0]); }, 60000, statsDown);
 `;
 
 export function overviewHtml(poolUrl: string, version: RunningVersion): string {
@@ -542,35 +615,37 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // The box / focuses (aria-keyshortcuts="/", the ⌘K menu's hook: layout.ts GO_MENU), and the one search the menu asks too, at this very address and in lower case, so the two share the edge's copy; a name it did not find is looked for where the menu looks before Request is offered, and Request is the menu's: the request form with the name.
+      // The box / focuses (aria-keyshortcuts="/", the ⌘K menu's hook: layout.ts GO_MENU), and the one search the menu asks too, at this very address and in lower case, so the two share the edge's copy — on the other architectures at the same address shape when the first finds nothing; a pacman name no row is named for is looked up at the package page's own address, then among the factory's names, and drawn first where it is; Request is the menu's (the request form with the name), offered beside the whole search only for a name found nowhere; what the rows say is said to a screen reader too.
       id: "pool.search",
       page: "/",
-      anchor: ['<form class="home-search" action="/packages" method="get" role="search">', 'name="q"', 'id="pool-q"', 'aria-keyshortcuts="/"', 'id="pool-results"'],
-      script: ['"/api/v1/search?q=" + encodeURIComponent(term) + "&ring=stable&arch=" + ARCHES[0] + "&limit=9"', "box.value.trim().toLowerCase()", 'pkgHref(p.name, "stable", ARCHES[0])', '"/api/v1/package/" + term + "?ring=stable&arch=" + arch', "NAME.test(term)", '"/request?name=" + encodeURIComponent(term)', "Request it →", "fromWhere(p.source, p.repo_arch || ARCHES[0])"],
+      anchor: ['<form class="home-search" action="/packages" method="get" role="search">', 'name="q"', 'id="pool-q"', 'aria-keyshortcuts="/"', 'id="pool-results"', '<span class="home-said" id="pool-said" role="status"></span>'],
+      script: ['"/api/v1/search?q=" + encodeURIComponent(term) + "&ring=stable&arch=" + arch + "&limit=9"', "search(term, ARCHES[0])", "ARCHES.slice(1).map(function (a) { return search(term, a); })", "box.value.trim().toLowerCase()", 'pkgHref(p.name, "stable", p.repo_arch)', '"/api/v1/package/" + term + "?ring=stable&arch=" + arch', "d.shown_ring", "NAME.test(term)", "rows.some(function (p) { return p.name === term; })", '"/request?name=" + encodeURIComponent(term)', "Request it →", "Search all packages →", "fromWhere(p.source, p.repo_arch)", '"factory · not in a ring yet"', '$("#pool-said").textContent'],
       reads: [
         { path: `/api/v1/search?q=${F.pkg}&ring=stable&arch=${F.arch}&limit=9`, fields: ["packages", "packages.0.name", "packages.0.source", "packages.0.repo_arch", "packages.0.description"] },
-        { path: `/api/v1/package/${F.pkg}?ring=stable&arch=${F.arch}`, fields: ["name", "package.source", "manifest.description"] },
+        { path: `/api/v1/search?q=${F.pkg}&ring=stable&arch=aarch64&limit=9`, fields: ["packages"] },
+        { path: `/api/v1/package/${F.pkg}?ring=stable&arch=${F.arch}`, fields: ["name", "shown_ring", "package.source", "manifest.description"] },
         { path: `/api/v1/package/zzfoo?ring=stable&arch=${F.arch}`, status: 404 },
+        { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.name", "packages.0.arches", "packages.0.blocked_at", "packages.0.description"] },
         { path: "/request?name=zzfoo", json: false },
         { path: `/packages?q=${F.pkg}`, json: false },
       ],
       visible: EVERYONE,
     },
     {
-      // What people asked the factory for, newest first: the registry the Packages page and the menu read.
+      // What people asked the factory for and a maintainer let through (the registry's landed), none blocked, newest first: the registry the Packages page and the menu read.
       id: "pool.requested",
       page: "/",
       anchor: ['<div class="home-asked" id="pool-asked" hidden></div>'],
-      script: ['api("GET", "/api/v1/factory/packages")', "!p.blocked_at", "String(b.created_at).localeCompare(String(a.created_at))", "<span>Requested</span>", 'class="op-chip" data-name="'],
-      reads: [{ path: "/api/v1/factory/packages", fields: ["packages", "packages.0.name", "packages.0.created_at", "packages.0.blocked_at"] }],
+      script: ['api("GET", "/api/v1/factory/packages")', "p.landed && !p.blocked_at", "String(b.created_at).localeCompare(String(a.created_at))", "<span>Requested</span>", 'class="op-chip" data-name="'],
+      reads: [{ path: "/api/v1/factory/packages", fields: ["packages", "packages.0.name", "packages.0.created_at", "packages.0.landed", "packages.0.blocked_at"] }],
       visible: EVERYONE,
     },
     {
-      // The four numbers, each a link to the page that proves it, counted up by the kit the first time they land.
+      // The four numbers, each a link to the page that proves it, counted up by the kit the first time they land; "—" and "did not answer" when the stats never answered (the poll's failure, liveStats' third argument).
       id: "pool.tiles",
       page: "/",
-      anchor: ['<div class="op-stats home-stats" id="pool-stats">', 'id="n-pkgs"', 'id="n-edge"', 'id="n-rel"', 'id="n-src"', 'href="/status?kind=sync#journal"', 'href="/diff?ring=stable"'],
-      script: ["countUp(el, n, fmt)", "(d.pool || {}).names", "imports_daily", 'newest(d.latest, "sync")', 'latest(d.latest || [], "health", "stable", a)', "HEALTH_WORD[worst]", "rows.some(lateSync)", '"all in sync"'],
+      anchor: ['<div class="op-stats home-stats" id="pool-stats">', 'id="n-pkgs"', 'id="s-pkgs"', 'id="n-edge"', 'id="n-rel"', 'id="n-src"', 'href="/status?kind=sync#journal"', 'href="/diff?ring=stable"'],
+      script: ["countUp(el, n, fmt)", "(d.pool || {}).names", "imports_daily", 'newest(d.latest, "sync")', 'latest(d.latest || [], "health", "stable", a)', "HEALTH_WORD[worst]", "rows.some(lateSync)", '"all in sync"', "function statsDown(e)", 'noAnswer("pool\'s stats", e)', "did not answer</span>", "60000, statsDown)"],
       reads: [
         {
           path: stats,
@@ -599,7 +674,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       id: "pool.setup",
       page: "/",
       anchor: ['id="get-started"', 'id="setup-tabs" role="tablist"', 'id="tab-command"', 'id="tab-agent"', 'id="pick-ring"', 'data-ring="stable"', 'data-ring="rc"', 'data-ring="edge"', 'id="ring-line"', 'id="setup-well"', 'class="op-copy" data-op-copy=""', '<a href="/setup">Read the script first →</a>'],
-      script: ['PROMISED_RINGS.indexOf(q.get("ring"))', "/setup | sudo bash -s -- --ring ", "RINGS_TEXT[ring].title", '"copy prompt"', 'ev.key !== "ArrowLeft"'],
+      script: ['PROMISED_RINGS.indexOf(q.get("ring"))', "/setup | sudo bash -s -- --ring ", "RINGS_TEXT[ring].title", '"copy prompt"', 'ev.key !== "ArrowLeft"', "if (now === drawnSetup) return;", "ringNumbers(d)"],
       reads: [
         { path: "/setup", json: false },
         { path: stats, fields: ["rings.0.release.seq", "rings.1.ring", "rings.2.release.seq"] },
@@ -622,22 +697,22 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // Live: the journal's newest lines from the stats' forty, a line that arrived since the last poll lit for a moment; Full journal is Status's section.
+      // Live: packages moving through the pool, from the journal's newest lines and its latest of each kind in the stats, a line that arrived since the last poll lit for a moment, the day's syncs counted by the stats' daily series; Full journal is Status's section.
       id: "pool.live",
       page: "/",
       anchor: ['id="live-feed"', 'id="live-count"', '<a class="home-more" href="/status#journal">Full journal →</a>', 'class="op-live-dot"'],
-      script: ['$("#live-feed").innerHTML', "all.filter(news)", '" op-fresh"', "e.summary", "HEALTH_WORD[e.status]", 'e.kind !== "dispatch"', '" events today"'],
+      script: ['$("#live-feed").innerHTML', 'MOVES = ["sync", "promote", "fast-track", "rollback", "publish"]', "(d.events || []).concat(d.latest || [])", "moves(d).slice(0, 8)", '" op-fresh"', "e.summary", '"synced → edge"', '"built in the factory"', '" syncs today"', "key === shownFeed", "new ResizeObserver(fit)"],
       reads: [
-        { path: stats, fields: ["events", "events.0.id", "events.0.kind", "events.0.status", "events.0.summary", "events.0.created_at", "events.0.ring", "events.0.payload"] },
+        { path: stats, fields: ["events", "events.0.id", "events.0.kind", "events.0.status", "events.0.summary", "events.0.created_at", "events.0.ring", "events.0.payload", "latest", "latest.0.id", "latest.0.kind", "series.imports_daily.0.day", "series.imports_daily.0.runs"] },
         { path: "/status", json: false },
       ],
       visible: EVERYONE,
     },
     {
-      // New in the pool this week: each ring's newest release against its parent, at the address the Packages page reads stable's.
+      // New in the pool: each ring's newest release against its parent, at the address the Packages page reads stable's.
       id: "pool.new",
       page: "/",
-      anchor: ['<h2 class="op-label" id="new-h">New in the pool this week</h2>', 'id="pool-new"', 'href="/packages">All packages →'],
+      anchor: ['<h2 class="op-label" id="new-h">New in the pool</h2>', 'id="pool-new"', 'href="/packages">All packages →'],
       script: ['"/api/v1/releases/" + rel.ring + "/diff?from=" + rel.parent_id + "&to=" + rel.id', `var KEEP_RELEASES = ${KEEP_RELEASES}`, "if (!head || !head.parent_id) return [];", "Date.now() - Date.parse(x.created_at) < WEEK_MS", "df.added", "df.upgraded", "pkgHref(c.name, c.ring, c.arches[0])", 'noAnswer("rings\' latest changes"'],
       reads: [
         { path: stats, fields: ["rings.2.release.id", "rings.2.release.parent_id", "rings.2.release.created_at", "releases", "releases.0.id", "releases.0.ring", "releases.0.seq", "releases.0.parent_id", "releases.0.created_at"] },

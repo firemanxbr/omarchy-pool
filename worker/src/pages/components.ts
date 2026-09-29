@@ -316,7 +316,7 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // Open advisories counted one way: advisoriesAt(d, conf) keeps the rows of a security report that count at a confidence — the Security page's default, SEC_CONF, unless a page says — and advisoryCounts(rows) is the numbers a tile or a chart draws; the Pool, the Pipeline and the Security page say one number for stable.
+    // Open advisories counted one way: advisoriesAt(d, conf) keeps the rows of a security report that count at a confidence — the Security page's default, SEC_CONF, unless a page says — and advisoryCounts(rows) is the numbers a tile or a chart draws; the Pipeline and the Security page say one number for stable.
     id: "shell.advisory-counts",
     page: "/",
     anchor: [],

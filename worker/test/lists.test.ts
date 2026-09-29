@@ -231,7 +231,9 @@ describe("lists come from the code that owns them", () => {
       expect(own, `${path} types the null source's architecture`).not.toMatch(/source \|\| "x86_64"/);
     }
     expect(ownScriptOf(await text(`/user/${F.owner}`))).toContain("arch || ARCHES[0]");
-    expect(ownScriptOf(await text("/"))).toContain('pkgHref(p.name, "stable", ARCHES[0])');
+    // The Pool's search starts on the first architecture, and a row links its package on the architecture the row came from (#243: stable on aarch64 is asked when the first finds nothing).
+    expect(ownScriptOf(await text("/"))).toContain("search(term, ARCHES[0])");
+    expect(ownScriptOf(await text("/"))).toContain('pkgHref(p.name, "stable", p.repo_arch)');
     expect(ownScriptOf(await text("/pipeline"))).toContain("h.source || NULL_SOURCE_ARCH");
   });
 

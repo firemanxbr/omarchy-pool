@@ -652,7 +652,7 @@ describe("three more facts, one source each", () => {
     expect(ownScript(await page(`/package/${F.pkg}`))).not.toContain('style="color:var(--red)">exploited');
   });
 
-  it("the 14-day health grid is drawn once — the shell's heatGrid on the Pipeline and on Status, the rings in the reader's order — and a check's result is one word everywhere: HEALTH_WORD on the grid, the Pool's stable tile and live lines, the Pipeline's pills, heads and job results, the Status table", async () => {
+  it("the 14-day health grid is drawn once — the shell's heatGrid on the Pipeline and on Status, the rings in the reader's order — and a check's result is one word everywhere: HEALTH_WORD on the grid, the Pool's stable tile, the Pipeline's pills, heads and job results, the Status table", async () => {
     // Health checks beside the fixture's one: two on edge aarch64 yesterday, ok then failed — the day's cell is the worse; a warn on rc today, posted by hand (the check posts ok or error only: a ring with nothing rendered fails, since #47); and one on the lab, which no scheduler queues (the lab is promised nothing) and no grid draws a row for.
     const at = (hoursAgo: number) => new Date(Date.now() - hoursAgo * 3600e3).toISOString();
     const yesterday = new Date(Date.now() - 86400e3).toISOString().slice(0, 10), today = new Date().toISOString().slice(0, 10);
@@ -712,9 +712,9 @@ describe("three more facts, one source each", () => {
       expect(c?.script?.some((l) => l.includes("worst(cells")), `${id} pins a cell map of its own`).toBe(false);
     }
     expect(grids[0], "the Status page's cells are the Pipeline's").toBe(grids[1]);
-    // Every other place a check's result is said reads HEALTH_WORD — the Pool's stable tile and live lines, the Pipeline's ring pills, its ring heads and a health job's result, the Status rings table — and no page draws the journal's status as text; the manifests name the read.
+    // Every other place a check's result is said reads HEALTH_WORD — the Pool's stable tile, the Pipeline's ring pills, its ring heads and a health job's result, the Status rings table — and no page draws the journal's status as text; the manifests name the read. (The Pool's Live lines are packages moving since #243's review: a check is the journal's, one link away.)
     for (const [path, ids, reads] of [
-      ["/", ["pool.tiles", "pool.live"], ["HEALTH_WORD[worst]", "HEALTH_WORD[e.status]"]],
+      ["/", ["pool.tiles"], ["HEALTH_WORD[worst]"]],
       ["/pipeline", ["pipeline.state-row", "pipeline.ring-heads", "pipeline.tasks-table"], ["HEALTH_WORD.ok", "HEALTH_WORD[h.status]", "HEALTH_WORD[e.status]", "r.ok ? HEALTH_WORD.ok : HEALTH_WORD.error", "PROMISED_RINGS.map(function (n)"]],
       ["/status", ["status.rings-table"], ["pillHtml(h.status, HEALTH_WORD[h.status])", "PROMISED_RINGS.forEach(function (ring)"]],
     ] as const) {
