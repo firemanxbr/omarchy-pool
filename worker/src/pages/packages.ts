@@ -1,124 +1,11 @@
 /**
- * Packages: search within a ring, and one package's page — where it is in
- * every ring, what it declares, what its binaries actually load, who depends
- * on it, drawn as a graph — with the file list on demand.
+ * One package's page — where it is in every ring, what it declares, what
+ * its binaries actually load, who depends on it, drawn as a graph — with
+ * the file list on demand. The packages list is pages/browse.ts.
  */
 import { page } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
-import { CHARTS } from "./charts";
 import type { RunningVersion } from "../meta";
-
-const SEARCH_BODY = String.raw`
-  <div class="hero compact">
-    <p class="eyebrow">Packages</p>
-    <h1>Every package the pool serves, in every ring</h1>
-    <p class="lede">Search by name or by words from the description. Open a package for its versions per ring, who made it, the dependency graph, the files and the seal.</p>
-  </div>
-  <form id="search" class="searchbar" onsubmit="return false">
-    <input id="q" type="search" placeholder="package name or words from its description" autofocus autocomplete="off">
-    <div class="choice" id="pick-ring"></div>
-    <div class="choice" id="pick-arch"></div>
-  </form>
-  <p class="sub" id="hint">Type at least two characters.</p>
-  <div class="two pk-grid">
-    <div class="pk-results"><div class="table-wrap"><table id="results"><thead><tr><th>Package</th><th>Version</th><th>Source</th><th>By</th><th>Description</th><th class="num">Size</th></tr></thead><tbody></tbody></table></div></div>
-    <div class="panel" id="pk-detail"><h3>Pick a package</h3><p class="sub" style="margin:0">Click a row for its versions per ring, what it depends on, what depends on it, who made it and whether an advisory is open — or open the full page.</p></div>
-  </div>
-  <div class="tiles five" id="pk-tiles"></div>
-  <section><div class="charts">
-    <div class="chart"><h3>Packages per source <span id="pk-src-ring">stable</span></h3><div class="sub">what each upstream contributes to the ring, per architecture</div><div id="pk-sources"></div></div>
-    <div class="chart"><h3>What the last stable changed <span id="pk-diff-when"></span></h3><div class="sub">against its parent — the diff every release carries</div><div id="pk-diff"></div></div>
-  </div></section>
-`;
-
-const SEARCH_SCRIPT = String.raw`
-__CHARTS__
-  // The rings are the server's list in its order (RINGS_TEXT: stable, rc, edge, lab — the lab included, as the search takes it), the architectures the shell's (ARCHES); the first of each is the default.
-  var RINGS = Object.keys(RINGS_TEXT);
-  var q = new URLSearchParams(location.search);
-  var ring = RINGS.indexOf(q.get("ring")) >= 0 ? q.get("ring") : RINGS[0];
-  var arch = ARCHES.indexOf(q.get("arch")) >= 0 ? q.get("arch") : ARCHES[0];
-  var timer = null, seq = 0, OWNERS = {}, APPROVERS = {};
-  // Who made the factory's packages: the contributor who registered it, the maintainer whose approval stands — the row's own standing, the server's word, so a withdrawn one names nobody.
-  fetch("/api/v1/factory/packages").then(function (r) { return r.json(); }).then(function (d) { (d.packages || []).forEach(function (p) { OWNERS[p.name] = p.owner; }); }).catch(function () {});
-  fetch("/api/v1/factory/approvals").then(function (r) { return r.json(); }).then(function (d) { (d.approvals || []).forEach(function (a) { if (a.standing && !APPROVERS[a.name]) APPROVERS[a.name] = a.by; }); }).catch(function () {});
-  // The two icons take their role from the maintainer set the shell reads once per page — a maintainer who brought a package is green here as everywhere, not a guessed "contributor".
-  function byCell(p) {
-    if (p.source === "factory") { var o = OWNERS[p.name], a = APPROVERS[p.name]; return '<span class="by">' + (o ? avatar(o) : "") + (a ? avatar(a) : "") + '</span>' + (!o && !a ? '<span class="dim">the pool</span>' : ""); }
-    return '<span class="dim" style="font-size:12px">' + (p.source === "alarm" ? "Arch Linux ARM" : p.source === "packages" ? "Omarchy" : p.source === "chaotic" ? "Chaotic-AUR" : "Arch Linux") + '</span>';
-  }
-  function sync() {
-    pick("#pick-ring", RINGS, ring, function (v) { ring = v; sync(); run(); });
-    pick("#pick-arch", ARCHES, arch, function (v) { arch = v; sync(); run(); });
-    var term = $("#q").value.trim();
-    history.replaceState(null, "", "?q=" + encodeURIComponent(term) + "&ring=" + ring + "&arch=" + arch);
-  }
-  function run() {
-    var term = $("#q").value.trim(), my = ++seq;
-    if (term.length < 2) { $("#hint").textContent = "Type at least two characters."; pager("#results", [], function () { return ""; }, { empty: "type at least two characters" }); return; }
-    $("#hint").textContent = "Searching " + ring + " · " + arch + "…";
-    skeletonRows("#results", 5, 5);
-    busy(fetch("/api/v1/search?q=" + encodeURIComponent(term) + "&ring=" + ring + "&arch=" + arch + "&limit=100")).then(function (r) { return r.json(); }).then(function (d) {
-      if (my !== seq) return;
-      var rows = d.packages || [];
-      $("#hint").textContent = rows.length ? rows.length + (rows.length === 100 ? "+" : "") + " package(s) in " + ring + " · " + arch : "Nothing in " + ring + " · " + arch + " matches “" + term + "”.";
-      pager("#results", rows, function (p) {
-        return '<tr data-name="' + esc(p.name) + '" style="cursor:pointer"><td><a class="pkname" href="' + pkgHref(p.name, ring, arch) + '" title="open the package page">' + esc(p.name) + ' <span class="go">→</span></a></td><td class="mono">' + esc(p.version) + '</td><td><span class="src">' + esc(p.source) + '</span></td><td>' + byCell(p) + '</td><td class="muted"><span class="clamp">' + esc(p.description || "") + '</span></td><td class="num">' + bytes(p.size_download) + '</td></tr>';
-      }, { empty: "nothing matches", n: 25, text: function (p) { return p.name + " " + (p.description || "") + " " + p.source; } });
-    }).catch(function (e) { $("#hint").textContent = "search failed: " + e; endSkeleton(); });
-  }
-  $("#q").value = q.get("q") || "";
-  $("#q").addEventListener("input", function () { clearTimeout(timer); timer = setTimeout(function () { sync(); run(); }, 250); });
-  sync(); run();
-  // A row opens the panel: the package's page data, summarised.
-  document.addEventListener("click", function (ev) {
-    var tr = ev.target.closest ? ev.target.closest("#results tbody tr") : null; if (!tr || !tr.getAttribute("data-name") || (ev.target.closest && ev.target.closest("a"))) return;
-    document.querySelectorAll("#results tr.sel").forEach(function (x) { x.classList.remove("sel"); }); tr.classList.add("sel");
-    detail(tr.getAttribute("data-name"));
-  });
-  function detail(name) {
-    var el = $("#pk-detail"); el.innerHTML = '<h3>' + esc(name) + '</h3><div class="empty loading">Loading</div>';
-    busy(fetch("/api/v1/package/" + encodeURIComponent(name) + "?ring=" + ring + "&arch=" + arch)).then(function (r) { return r.json(); }).then(function (d) {
-      if (d.error) { el.innerHTML = '<h3>' + esc(name) + '</h3><p class="sub" style="margin:0">' + esc(d.error) + '</p>'; return; }
-      var p = d.package, m = d.manifest || {}, pi = m.pkginfo || {}, mt = d.maintenance || {}, f = mt.factory, own = (d.security && d.security.advisories || []).filter(function (a) { return a.status === "vulnerable"; }), exp = (d.security && d.security.exposed) || [];
-      // The people are the shell's — icon and link — with the role from the maintainer set; approved_by is the approval that stands, the server's word.
-      var who = f ? '<div class="whorow">' + (f.owner ? avatar(f.owner) + '<span>brought by ' + personLink(f.owner) + '</span>' : '') + (f.approved_by ? avatar(f.approved_by) + '<span>approved by ' + personLink(f.approved_by) + '</span>' : '<span class="dim">waiting for a maintainer</span>') + '</div>' : '<div class="whorow dim">packaged upstream' + (mt.packager ? ' by ' + esc(mt.packager.replace(/<.*>/, "").trim()) : '') + ' · mirrored, signature kept</div>';
-      var rows = RINGS.map(function (r) { var x = (d.rings || []).filter(function (y) { return y.ring === r; })[0]; return '<dt>' + r + '</dt><dd>' + (x ? esc(x.version) : '<span class="dim">not served</span>') + '</dd>'; }).join("");
-      el.innerHTML = '<h3>' + esc(name) + ' <span class="dim" style="font-size:12px;font-weight:400">' + esc(p.source) + '</span></h3>' + who + '<p class="sub" style="margin:0 0 12px">' + esc(pi.desc || m.description || "") + '</p>' +
-        '<dl class="kv">' + rows + '<dt>size</dt><dd>' + bytes(p.size_download) + ' · ' + bytes(p.size_installed) + ' installed</dd><dt>depends on</dt><dd>' + num((d.depends || []).length) + ' declared · loads ' + num((d.links || []).length) + ' libraries</dd><dt>required by</dt><dd>' + num((d.required_by || []).length) + ' in ' + esc(d.shown_ring) + (d.required_by && d.required_by.length > 100 ? ' <span class="pill warn">exposes many</span>' : '') + '</dd><dt>security</dt><dd>' + (own.length ? '<span class="pill warn">' + num(own.length) + ' open</span> ' + esc(own[0].cves.join(", ")) : '<span class="pill ok">no open advisory</span>') + (exp.length ? ' · exposed through ' + num(exp.length) : '') + '</dd></dl>' +
-        '<pre style="margin-top:12px"><span class="c"># from the ring you configured</span>\nsudo pacman -S ' + esc(name) + '</pre><div class="cta-row" style="margin-top:14px"><a class="btn" href="' + pkgHref(name, d.shown_ring, arch) + '">Open ' + esc(name) + ' →</a><span class="hint">who made it · provenance · graph · files</span></div>';
-    }).catch(function (e) { el.innerHTML = '<h3>' + esc(name) + '</h3><p class="sub" style="margin:0">could not load: ' + esc(String(e)) + '</p>'; });
-  }
-  // The tiles and the two charts: what the rings serve, per source, and what the last stable changed.
-  skeletonTiles("#pk-tiles", 5);
-  liveStats(function (d) {
-    var stable = d.rings.filter(function (r) { return r.ring === "stable"; })[0] || { sources: [] }, srcs = stable.sources || [];
-    var by = function (pred) { return srcs.filter(pred).reduce(function (n, x) { return n + x.packages; }, 0); };
-    var arches = function (pred) { return num(by(function (x) { return pred(x) && x.arch === "x86_64"; })) + " x86_64 · " + num(by(function (x) { return pred(x) && x.arch === "aarch64"; })); };
-    setTiles("#pk-tiles", [
-      ["Packages in stable", num(stable.package_count || 0), arches(function () { return true; }) + " aarch64"],
-      ["From Arch", num(by(function (x) { return x.source === "core" || x.source === "extra" || x.source === "multilib"; })), "core · extra · multilib"],
-      ["From Arch Linux ARM", num(by(function (x) { return x.source === "alarm"; })), "alarm — aarch64 only"],
-      ["From Omarchy", num(by(function (x) { return x.source === "packages"; })), "OPR"],
-      ["Built here", num(by(function (x) { return x.source === "factory"; })), "the factory, from contributors' recipes", "ok"]
-    ]);
-    // The picked ring is one of RINGS already; /stats lists every ring, the lab too.
-    var r0 = d.rings.filter(function (r) { return r.ring === ring; })[0] || { sources: [] };
-    $("#pk-src-ring").textContent = ring + " · " + arch;
-    var rows = (r0.sources || []).filter(function (x) { return x.arch === arch; }).sort(function (a, b) { return b.packages - a.packages; }), tot = rows.reduce(function (n, x) { return n + x.packages; }, 0) || 1;
-    $("#pk-sources").innerHTML = hrows(rows.map(function (x) { return [x.source, "", Math.round(1000 * x.packages / tot) / 10, x.source === "factory" ? "var(--lilac)" : x.source === "packages" ? "var(--blue)" : "var(--green)", num(x.packages)]; }), 120);
-    var head = (d.releases || []).filter(function (r) { return r.ring === "stable" && r.is_head; })[0];
-    if (head && head.parent_id) {
-      $("#pk-diff-when").textContent = "#" + head.seq + " · " + ago(head.created_at);
-      fetch("/api/v1/releases/stable/diff?from=" + head.parent_id + "&to=" + head.id).then(function (r) { return r.json(); }).then(function (df) {
-        var name = function (x) { return '<a class="run" href="' + pkgHref(x.name, "stable", x.arch) + '">' + esc(x.name) + '</a>'; };
-        var up = df.upgraded || [], ad = df.added || [], rm = df.removed || [];
-        $("#pk-diff").innerHTML = '<div class="flow" style="margin-top:6px"><div class="st"><span class="k">upgraded</span><b>' + num(up.length) + '</b><span class="s">' + up.slice(0, 3).map(name).join(", ") + (up.length > 3 ? "…" : "") + '</span></div><div class="ar">·</div><div class="st"><span class="k">added</span><b>' + num(ad.length) + '</b><span class="s">' + ad.slice(0, 3).map(name).join(", ") + (ad.length > 3 ? "…" : "") + '</span></div><div class="ar">·</div><div class="st"><span class="k">removed</span><b>' + num(rm.length) + '</b><span class="s">' + (rm.length ? rm.slice(0, 3).map(name).join(", ") : "nothing left the ring") + '</span></div></div><p class="sub" style="margin:12px 0 0;font-size:12.5px"><a href="/diff?ring=stable&from=' + head.parent_id + '&to=' + head.id + '">The whole diff →</a> · <a href="/journal">Ring history →</a></p>';
-      }).catch(function () { $("#pk-diff").innerHTML = '<div class="empty">no diff available</div>'; });
-    } else $("#pk-diff").innerHTML = '<div class="empty">' + (head ? "the first stable release has no parent" : "no stable release yet") + '</div>';
-    endSkeleton();
-  }, 120000);
-`;
 
 const PACKAGE_BODY = String.raw`
   <p class="crumbs"><a href="/packages">Packages</a> / <span id="crumb"></span></p>
@@ -416,20 +303,6 @@ const PACKAGE_SCRIPT = String.raw`
   }).catch(function () {});
 `;
 
-export function packagesHtml(poolUrl: string, version: RunningVersion): string {
-  return page({
-    path: "/packages",
-    title: "Packages · omarchy-pool",
-    description: "Search the packages a ring serves; versions per ring, dependencies, what loads them, files.",
-    // The packages list and a package's page are the Pool's: what a user comes to the pool for (#240).
-    active: "pool",
-    body: SEARCH_BODY,
-    script: SEARCH_SCRIPT.replace("__CHARTS__", CHARTS),
-    poolUrl,
-    version,
-  });
-}
-
 export function packageHtml(name: string, poolUrl: string, version: RunningVersion): string {
   return page({
     path: `/package/${name}`,
@@ -442,104 +315,6 @@ export function packageHtml(name: string, poolUrl: string, version: RunningVersi
     version,
   });
 }
-
-/**
- * What /packages is made of: the search box and the table it fills, the
- * panel a row opens, the stable tiles and the two cards under them. Every
- * read is a public GET and nothing on the page changes with the role — the
- * header's account chip is the shell's. The stable ring is the third of
- * RINGS (index.ts: edge, rc, stable, lab), so its slice of /api/v1/stats is
- * `rings.2`; the fixture's stable head is its second release, so the diff
- * against its parent has an upgrade (xz), an addition (zstd) and a removal
- * (bzip2) — the three kinds of row the panel draws.
- */
-export const PACKAGES_COMPONENTS = (F: Fixture): Component[] => [
-  {
-    id: "packages.hero",
-    page: "/packages",
-    anchor: ['<p class="eyebrow">Packages</p>', "Every package the pool serves, in every ring"],
-    visible: EVERYONE,
-  },
-  {
-    id: "packages.search-box",
-    page: "/packages",
-    anchor: ['id="search"', 'id="q"', 'type="search"', 'id="hint"'],
-    script: ['"/api/v1/search?q="', '"&limit=100"', '"#q"', '"#hint"', "d.packages"],
-    reads: [{ path: `/api/v1/search?q=${F.pkg}&ring=stable&arch=${F.arch}&limit=100`, fields: ["ring", "arch", "query", "packages"] }],
-    visible: EVERYONE,
-  },
-  {
-    // The rings are the server's list (RINGS_TEXT, the lab included), never a copy on the page.
-    id: "packages.ring-arch-pickers",
-    page: "/packages",
-    anchor: ['id="pick-ring"', 'id="pick-arch"'],
-    script: ["RINGS = Object.keys(RINGS_TEXT)", 'ARCHES.indexOf(q.get("arch"))', 'pick("#pick-ring"', 'pick("#pick-arch"'],
-    visible: EVERYONE,
-  },
-  {
-    // The name is the package's one address in the ring and architecture picked; the two icons of a factory package are the shell's, the approver the approval that stands (the row's `standing`), their colour the maintainer set's word.
-    id: "packages.results-table",
-    page: "/packages",
-    anchor: ['id="results"', "<th>By</th>", 'class="pk-results"'],
-    script: ['"#results"', 'data-name="', 'class="pkname"', "pkgHref(p.name, ring, arch)", "size_download", '"/api/v1/factory/packages"', "OWNERS[p.name]", '"/api/v1/factory/approvals"', "a.standing && !APPROVERS[a.name]", "avatar(o)", "avatar(a)"],
-    reads: [
-      { path: `/api/v1/search?q=${F.pkg}&ring=stable&arch=${F.arch}&limit=100`, fields: ["packages.0.name", "packages.0.version", "packages.0.source", "packages.0.description", "packages.0.size_download"] },
-      { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.name", "packages.0.owner"] },
-      { path: "/api/v1/factory/approvals", fields: ["approvals", "approvals.0.name", "approvals.0.decision", "approvals.0.standing", "approvals.0.by"] },
-      { path: "/api/v1/factory/maintainers", fields: ["maintainers", "maintainers.0.login"] },
-    ],
-    visible: EVERYONE,
-  },
-  {
-    id: "packages.detail-panel",
-    page: "/packages",
-    anchor: ['id="pk-detail"', "Pick a package"],
-    script: ['"#pk-detail"', '"/api/v1/package/"', "d.shown_ring", "size_installed", "d.depends", "d.links", "d.required_by", "security.advisories", "security.exposed", "sudo pacman -S ", "pkgHref(name, d.shown_ring, arch)", "Open "],
-    reads: [
-      {
-        path: `/api/v1/package/${F.pkg}?ring=stable&arch=${F.arch}`,
-        fields: ["name", "shown_ring", "package.source", "package.size_download", "package.size_installed", "manifest.description", "rings.0.ring", "rings.0.version", "depends", "links", "required_by", "required_by.0.name", "security.advisories.0.status", "security.advisories.0.cves.0", "security.exposed"],
-      },
-    ],
-    visible: EVERYONE,
-  },
-  {
-    // The two people are the shell's icon and link, their role the maintainer set's.
-    id: "packages.detail-who-row",
-    page: "/packages",
-    anchor: ['id="pk-detail"'],
-    script: ['class="whorow', "mt.factory", "avatar(f.owner)", "personLink(f.owner)", "avatar(f.approved_by)", "personLink(f.approved_by)", "mt.packager", "brought by", "approved by", "waiting for a maintainer", "packaged upstream"],
-    reads: [{ path: `/api/v1/package/${F.pkg}?ring=stable&arch=${F.arch}`, fields: ["maintenance", "maintenance.packager"] }],
-    visible: EVERYONE,
-  },
-  {
-    id: "packages.stat-tiles",
-    page: "/packages",
-    anchor: ['id="pk-tiles"', 'class="tiles five"'],
-    script: ['"#pk-tiles"', "package_count", '"Packages in stable"', '"From Arch"', '"From Arch Linux ARM"', '"From Omarchy"', '"Built here"', 'x.source === "factory"'],
-    reads: [{ path: "/api/v1/stats", fields: ["rings", "rings.2.ring", "rings.2.package_count", "rings.2.sources", "rings.2.sources.0.source", "rings.2.sources.0.arch", "rings.2.sources.0.packages"] }],
-    visible: EVERYONE,
-  },
-  {
-    id: "packages.sources-chart",
-    page: "/packages",
-    anchor: ['id="pk-src-ring"', 'id="pk-sources"', "Packages per source"],
-    script: ['"#pk-src-ring"', '"#pk-sources"', "hrows(", "r0.sources", "x.packages"],
-    reads: [{ path: "/api/v1/stats", fields: ["rings.2.sources.0.source", "rings.2.sources.0.arch", "rings.2.sources.0.packages"] }],
-    visible: EVERYONE,
-  },
-  {
-    id: "packages.last-stable-diff",
-    page: "/packages",
-    anchor: ['id="pk-diff-when"', 'id="pk-diff"', "What the last stable changed"],
-    script: ['"/api/v1/releases/stable/diff?from="', '"#pk-diff"', '"#pk-diff-when"', "d.releases", "r.is_head", "head.parent_id", "df.upgraded", "df.added", "df.removed", 'pkgHref(x.name, "stable", x.arch)', 'href="/diff?ring=stable&from=', 'href="/journal"'],
-    reads: [
-      { path: "/api/v1/stats", fields: ["releases", "releases.0.ring", "releases.0.is_head", "releases.0.parent_id", "releases.0.id", "releases.0.seq", "releases.0.created_at"] },
-      { path: `/api/v1/releases/stable/diff?to=${F.release}`, fields: ["to.id", "from", "upgraded", "added", "added.0.name", "removed"] },
-    ],
-    visible: EVERYONE,
-  },
-];
 
 /**
  * What /package/<name> is made of. The page is role-blind and never writes:
