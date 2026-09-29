@@ -16,10 +16,10 @@
  *
  * It says only what exists. The tools are the ones mcp.rs serves today,
  * all read-only; the write tools Contribute and Maintain need are the
- * proposal of #252 (PR #253, waiting for a maintainer's sign-off): marked
- * *, never drawn as available, and the two role cards say "proposed" and
- * where the web does it today. test/agents.test.ts reads mcp.rs and holds
- * the table to it.
+ * proposal of #252 (PR #253, signed off on 2026-09-29 and not built yet):
+ * marked *, never drawn as available, and the two role cards say
+ * "proposed", offer no prompt to copy, and name where the web does it
+ * today. test/agents.test.ts reads mcp.rs and holds the table to it.
  */
 import { page } from "./layout";
 import { agentMark, lucide, type AgentMark } from "./kit";
@@ -175,16 +175,18 @@ export const MCP_TOOLS: Tool[] = [
 ];
 
 /**
- * The write tools #252 proposes for the other two roles (PR #253, a draft
- * that waits for a maintainer's sign-off). None exists yet, so the page
- * marks each with * and links the proposal. In it the agent drafts a
- * decision and the person confirms it in the browser, which is why two of
- * them end "you confirm".
+ * The write tools #252 proposes for the other two roles, the seven of the
+ * proposal a maintainer signed off on 2026-09-29 (PR #253), in its order.
+ * None is built yet, so the page marks each with * and links the proposal.
+ * In it the agent drafts a decision and the person confirms it in the
+ * browser, which is why two of them end "you confirm"; letting go of a
+ * claim is not a decision, and asks for a reason on the record instead.
  */
 export const PROPOSED_TOOLS: Tool[] = [
   { name: "request_package", does: "send a request to the factory", role: "contribute" },
   { name: "request_status", does: "follow a request and its builds", role: "contribute" },
   { name: "review_claim", does: "claim a package that is ready", role: "maintain" },
+  { name: "review_release", does: "let go of a claim, with a reason", role: "maintain" },
   { name: "review_context", does: "request, recipe and logs, no artifacts", role: "maintain" },
   { name: "submit_review", does: "approve, request changes or reject; you confirm", role: "maintain" },
   { name: "block", does: "pull a package from every ring; you confirm", role: "maintain" },
@@ -202,10 +204,13 @@ interface RoleCard {
 }
 
 /**
- * One card per role, each with a prompt to copy. Use asks only what the
- * read-only tools answer — installing stays with the person, as the
- * server's own instructions say. Contribute and Maintain need the proposed
- * tools: their cards say so, and name the page that does it today.
+ * One card per role, each with a prompt. Use asks only what the read-only
+ * tools answer — installing stays with the person, as the server's own
+ * instructions say — and its prompt is there to copy. Contribute and
+ * Maintain need the proposed tools: their cards say so, name the page that
+ * does it today, and show the prompt as an example with nothing to copy,
+ * since no agent could carry it out yet. The day those tools are served,
+ * their cards get the button back from the same rule.
  */
 export const ROLES: RoleCard[] = [
   {
@@ -250,11 +255,12 @@ const agentHref = (a: AgentConfig) => `?agent=${encodeURIComponent(a.key)}#conne
 
 function roleCard(r: RoleCard): string {
   const later = r.tools.some(proposed);
+  const copy = later ? "" : `<button type="button" class="op-copy ag-copy" data-op-copy="${escapeHtml(r.prompt)}">copy prompt</button>`;
   return `<article class="op-card ag-role" id="role-${r.role}">
         <div class="ag-role-h"><span class="ag-role-k">${escapeHtml(r.eyebrow)}</span>${later ? `<span class="op-pill wait">proposed</span>` : ""}</div>
         <h2>${escapeHtml(r.title)}</h2>
         <div class="op-code"><code><span class="op-prompt">› </span>${escapeHtml(r.prompt)}</code></div>
-        <div class="ag-role-f"><span class="ag-uses">${r.tools.map(toolName).join(" · ")}${r.today ? `<span class="ag-today">not built yet · on the web: <a href="${escapeHtml(r.today.href)}">${escapeHtml(r.today.label)} →</a></span>` : ""}</span><button type="button" class="op-copy ag-copy" data-op-copy="${escapeHtml(r.prompt)}">copy prompt</button></div>
+        <div class="ag-role-f"><span class="ag-uses">${r.tools.map(toolName).join(" · ")}${r.today ? `<span class="ag-today">not built yet · on the web: <a href="${escapeHtml(r.today.href)}">${escapeHtml(r.today.label)} →</a></span>` : ""}</span>${copy}</div>
       </article>`;
 }
 
@@ -285,12 +291,12 @@ function body(chosen: AgentConfig): string {
   <section class="ag-row" aria-label="Connect it, and its tools">
     <div class="op-card ag-connect" id="connect">
       <div class="op-card-h"><h2 class="ag-card-t">${lucide("plug", 16)}Connect it</h2><small>one MCP server: ${escapeHtml(SERVER_COMMAND)}</small></div>
-      <ol class="ag-steps">
+      <ol class="ag-steps" role="list">
         <li><span class="ag-n" aria-hidden="true">1</span>
           <div class="ag-step">
             <h3>Install the client</h3>
             <div class="op-code"><code>sudo pacman -S omarchy-cli</code><button type="button" class="op-copy" data-op-copy>copy</button></div>
-            <p class="ag-note">From your ring, on a machine <a href="/docs/get-started">set up for the pool</a>. Not in your ring yet? <a href="/docs/get-started#cli">The release binary →</a></p>
+            <p class="ag-note">From your ring once it serves omarchy-cli, on a machine <a href="/docs/get-started">set up for the pool</a>. Until then, the release binary: <a href="/docs/get-started#cli">how to install it →</a></p>
           </div>
         </li>
         <li><span class="ag-n" aria-hidden="true">2</span>
@@ -309,7 +315,7 @@ function body(chosen: AgentConfig): string {
     </div>
 
     <div class="op-card ag-tools" id="tools">
-      <div class="op-card-h"><h2 class="ag-card-t">${lucide("wrench", 16)}Tools</h2><small><a href="${PROPOSAL_URL}">* proposed</a>, not built yet</small></div>
+      <div class="op-card-h"><h2 class="ag-card-t">${lucide("wrench", 16)}Tools</h2><small>* proposed, not built yet · <a href="${PROPOSAL_URL}">the proposal →</a></small></div>
       <table>
         <thead class="ag-vh"><tr><th scope="col">Tool</th><th scope="col">What it does</th><th scope="col">Role</th></tr></thead>
         <tbody>
@@ -357,19 +363,22 @@ const CSS = String.raw`
   .op-copy.ag-copy { padding: 0; border: 0; background: none; color: var(--green); font-size: 12px; white-space: nowrap; }
   .op-copy.ag-copy:hover { text-decoration: underline; } .op-copy.ag-copy.copied { background: none; color: var(--green); }
   .ag-row { display: flex; flex-wrap: wrap; gap: 16px; align-items: stretch; }
-  .ag-connect { flex: 1 1 560px; } .ag-tools { flex: 1 1 380px; }
+  .ag-connect { flex: 1 1 560px; min-width: 0; } .ag-tools { flex: 1 1 380px; min-width: 0; }
   .ag-card-t { display: flex; align-items: center; gap: 10px; font: 600 15px var(--font-display); }
   .ag-card-t .op-i { color: var(--dim); }
+  /* Without its markers an <ol> is no list to WebKit, so VoiceOver would read neither order nor numbers (theirs are aria-hidden): the <ol> says role="list". */
   .ag-steps { list-style: none; margin: 0; padding: 16px; display: grid; gap: 16px; }
   .ag-steps > li { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 12px; }
   .ag-n { color: var(--green); font-weight: 700; line-height: 1.5; }
-  .ag-step { display: grid; gap: 8px; min-width: 0; }
+  .ag-step { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; }
   .ag-step h3 { font: 400 13.5px/1.5 var(--font-mono); }
   .ag-step .op-code { padding: 10px 12px; }
-  .ag-step .op-code code { font-size: 12.5px; line-height: 1.7; }
+  .ag-step .op-code code { font-size: 12.5px; line-height: 1.7; overflow-wrap: normal; }
+  /* A command or a configuration is read and retyped as it is: its lines never wrap (the kit's wells wrap anywhere, which split "omarchy-" from "cli" and sent a JSON line back to the margin), and a well too narrow for a line scrolls, as the prototype's do; the copy button stays put. The step's columns are minmax(0, 1fr) for that: an auto column would grow to the longest line and push the well and the picker out of the card. Step 3's question is prose, and wraps between words. */
+  .ag-step .op-code:not(.ag-ask) code { flex: 1 1 auto; white-space: pre; overflow-x: auto; }
   .ag-step-h { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
   .ag-pick { display: flex; flex-wrap: wrap; gap: 4px; }
-  .ag-cfg { display: grid; gap: 8px; }
+  .ag-cfg { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
   .ag-where, .ag-note { margin: 0; font-size: 12px; color: var(--dim); }
   .ag-ask code { color: var(--muted); }
   .ag-tools table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -400,8 +409,12 @@ const CSS = String.raw`
  * a mark under the title — shows that agent's panel and hides the others,
  * marks its link in the picker current, and rewrites the address to the
  * one the link names, with no new history entry; a mark under the title
- * then brings the steps into view. A click with a modifier (a new tab) is
- * the browser's, and a key the list does not have changes nothing.
+ * then brings the steps into view and moves the focus to that agent's link
+ * in the picker, so the keyboard is where the page went: a reader who
+ * pressed Enter on a mark tabs on from step 2, not from the title (with
+ * script off, the fragment moves the focus the same way). A click with a
+ * modifier (a new tab) is the browser's, and a key the list does not have
+ * changes nothing.
  */
 const SCRIPT = (keys: string[]) => String.raw`
   var AGENT_KEYS = ${JSON.stringify(keys)};
@@ -418,7 +431,9 @@ const SCRIPT = (keys: string[]) => String.raw`
     if (!a || ev.defaultPrevented || ev.button || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
     if (!showAgent(a.getAttribute("data-agent"))) return;
     ev.preventDefault();
-    if (!a.closest(".ag-pick")) { var steps = document.getElementById("connect"); if (steps) steps.scrollIntoView({ block: "start" }); }
+    if (a.closest(".ag-pick")) return;
+    var steps = document.getElementById("connect"); if (steps) steps.scrollIntoView({ block: "start" });
+    var inPicker = document.querySelector('.ag-pick a[data-agent="' + a.getAttribute("data-agent") + '"]'); if (inPicker) inPicker.focus({ preventScroll: true });
   });
 `;
 
@@ -447,7 +462,7 @@ export const AGENTS_COMPONENTS = (_F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // One card per role with a prompt the kit's copy puts on the clipboard; the two whose tools are proposed say so, and name the page that does it today.
+    // One card per role with its prompt, the kit's copy putting Use's on the clipboard; the two whose tools are proposed say so, name the page that does it today, and offer nothing to copy.
     id: "agents.roles",
     page: "/agents",
     anchor: ['id="role-use"', 'id="role-contribute"', 'id="role-maintain"', 'class="op-copy ag-copy" data-op-copy="', '<span class="op-pill wait">proposed</span>', 'href="/factory">the Factory →</a>', 'href="/review">Review →</a>'],
@@ -455,26 +470,26 @@ export const AGENTS_COMPONENTS = (_F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // The three steps: the client from the ring (the release binary until it is on the reader's), the server added to the agent, a first question.
+    // The three steps: the client from the ring (the release binary until the reader's serves it), the server added to the agent, a first question.
     id: "agents.connect",
     page: "/agents",
-    anchor: ['id="connect"', "<code>sudo pacman -S omarchy-cli</code>", 'href="/docs/get-started#cli">The release binary →</a>', `<small>one MCP server: ${SERVER_COMMAND}</small>`, FIRST_QUESTION],
+    anchor: ['id="connect"', '<ol class="ag-steps" role="list">', "<code>sudo pacman -S omarchy-cli</code>", 'href="/docs/get-started#cli">how to install it →</a>', `<small>one MCP server: ${SERVER_COMMAND}</small>`, FIRST_QUESTION],
     reads: [{ path: "/docs/get-started", json: false }],
     visible: EVERYONE,
   },
   {
-    // Step 2's picker: a link per agent to this page with it shown (the server draws the choice), and every agent's panel served, the chosen one alone not hidden; the script switches in place.
+    // Step 2's picker: a link per agent to this page with it shown (the server draws the choice), and every agent's panel served, the chosen one alone not hidden; the script switches in place, and a mark under the title leaves the focus on the picker.
     id: "agents.picker",
     page: "/agents",
     anchor: ['<nav class="ag-pick" aria-labelledby="ag-pick-t">', ...AGENTS.map((a) => `id="agent-${a.key}"`)],
-    script: ["function showAgent(", '"agent-" + k', 'a.setAttribute("aria-current", "true")', 'history.replaceState(null, "", "?" + q + "#connect")', 'closest("a[data-agent]")'],
+    script: ["function showAgent(", '"agent-" + k', 'a.setAttribute("aria-current", "true")', 'history.replaceState(null, "", "?" + q + "#connect")', 'closest("a[data-agent]")', "inPicker.focus({ preventScroll: true })"],
     visible: EVERYONE,
   },
   {
-    // The tools: what omarchy-cli mcp serves today, then the proposal's, each marked * and linked to it; the chapter has the arguments and the answers.
+    // The tools: what omarchy-cli mcp serves today, then the proposal's, each marked *, and a link to the proposal; the chapter has the arguments and the answers.
     id: "agents.tools",
     page: "/agents",
-    anchor: ['id="tools"', `href="${PROPOSAL_URL}"`, 'href="/docs/omarchy-cli-mcp">What each tool answers →</a>', ...MCP_TOOLS.map((t) => `<th scope="row"><code>${t.name}</code></th>`), ...PROPOSED_TOOLS.map((t) => `<tr class="proposed"><th scope="row"><code>${t.name}<span aria-hidden="true">*</span></code>`)],
+    anchor: ['id="tools"', `<a href="${PROPOSAL_URL}">the proposal →</a>`, 'href="/docs/omarchy-cli-mcp">What each tool answers →</a>', ...MCP_TOOLS.map((t) => `<th scope="row"><code>${t.name}</code></th>`), ...PROPOSED_TOOLS.map((t) => `<tr class="proposed"><th scope="row"><code>${t.name}<span aria-hidden="true">*</span></code>`)],
     reads: [{ path: "/docs/omarchy-cli-mcp", json: false }],
     visible: EVERYONE,
   },
