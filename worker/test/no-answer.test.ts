@@ -73,6 +73,13 @@ const settled = () => new Promise((r) => setTimeout(r, 40));
 
 /** What a page wrote into a node — "" for one it never touched. */
 const html = (d: Ran, sel: string): string => d.nodes[sel]?.innerHTML ?? "";
+/**
+ * Rows as a redraw keeps them, their ages taken out: a failed refresh draws the last answer again, and an age is
+ * counted from the clock at each draw — "0s" at the first, "1s" at the redraw when a second turns in between (CI,
+ * 2026-09-29), Review's "now" becoming "5s" the same way. The rows, and the time each age is of (the title the
+ * Factory's cards carry), stay compared whole.
+ */
+const ageless = (s: string): string => s.replace(/(<span class="(?:age|rv-age)"[^>]*>)[^<]*(<\/span>)/g, "$1$2");
 /** The tiles a page drew, each as its inner HTML. */
 const tiles = (d: Ran, sel = "#tiles"): string[] => (d.nodes[sel]?.children ?? []).map((c: { innerHTML: string }) => c.innerHTML);
 /** What the shell writes under a tile whose list did not answer: two words, the reason on hover. */
@@ -185,11 +192,12 @@ describe("a list that did not answer is said, not drawn", () => {
     expect(before[0]).toContain('<b class="n" data-n="3">3</b>');
     const rows = d.nodes["#rv-rows"].innerHTML;
     expect(rows).toContain("<b>disposable</b>");
+    expect(rows, "the rows' ages are what ageless takes out").toContain('<span class="rv-age">');
     state.down = true;
     d.load();
     await settled();
     expect(d.nodes["#rv-note"].textContent).toBe(`the review list did not answer: ${INTERNAL}`);
-    expect(d.nodes["#rv-rows"].innerHTML).toBe(rows);
+    expect(ageless(d.nodes["#rv-rows"].innerHTML)).toBe(ageless(rows));
     // Every tile, the brake's Blocked among them: its list failed too, and what it drew last stays.
     expect(rvTiles(d)).toEqual(before);
   });
@@ -245,12 +253,13 @@ describe("a list that did not answer is said, not drawn", () => {
     await settled(); await settled();
     const cards = html(d, "#col-2"), workers = html(d, "#fx-wlist"), shipped = d.nodes["#t-shipped-n"].textContent;
     expect(cards).toContain(`<b>${F.disposablePkg}</b>`);
+    expect(cards, "the cards' ages are what ageless takes out").toContain('<span class="age" title="');
     expect(workers).toContain("fx-wrow");
     state.down = true;
     d.loadRegistry(); d.loadListing();
     await settled();
     expect(d.nodes["#line-note"].textContent).toBe(`the registry did not answer: ${INTERNAL}`);
-    expect(html(d, "#col-2")).toBe(cards);
+    expect(ageless(html(d, "#col-2"))).toBe(ageless(cards));
     expect(d.nodes["#t-shipped-n"].textContent).toBe(shipped);
     expect(html(d, "#fx-wlist")).toContain("fx-wrow");
     expect(html(d, "#fx-wlist")).toContain(`the worker listing did not answer: ${INTERNAL}`);
