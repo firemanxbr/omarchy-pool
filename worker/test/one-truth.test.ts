@@ -443,7 +443,7 @@ describe("the pages read the one answer instead of counting their own", () => {
 });
 
 describe("three more facts, one source each", () => {
-  it("community packages, approved by a maintainer, is the registry's own `landed`, read by the Pool, the Factory, the Pipeline and People — captioned as what it counts, never \"in the rings\"", async () => {
+  it("community packages, approved by a maintainer, is the registry's own `landed`, read by the Factory, the Pipeline and People — captioned as what it counts, never \"in the rings\"", async () => {
     const pkgs = (await call("GET", "/factory/packages")).json.packages as { name: string; status: string; landed: boolean }[];
     // The server's rule on every row: ours published, hers registered — and mine, whose approval was withdrawn above, back to staged and not landed. lost is the registry's word too: approved, and a failed publish leaves it so (the approval's own row says where it is — the block below); pulled's block set it rejected. So the number is "approved", not "in the rings": the Factory's tile said "3 · in the rings" over a Landed lately reading "publish failed" on one of the three (2026-09-18).
     for (const p of pkgs) expect(p.landed, p.name).toBe(landed(p.status));
@@ -451,8 +451,8 @@ describe("three more facts, one source each", () => {
     expect(pkgs.find((p) => p.name === F.pulledPkg)).toMatchObject({ status: "rejected", landed: false });
     expect(pkgs.find((p) => p.name === F.factoryPkg)).toMatchObject({ status: "staged", landed: false });
     const components = allComponents(F);
-    // People counts the flag per contributor since #251 — the ranking by approved packages, the caption on each count — where it was a tile before.
-    for (const [path, id, caption] of [["/", "pool.open-stats", '"approved, built by the project"'], ["/factory", "factory.tiles", '"approved by a maintainer, from "'], ["/pipeline", "pipeline.throughput-flow", '<span class="k">approved</span>'], ["/people", "people.contributors", '"approved by a maintainer, built by the project"']] as const) {
+    // Home counts no community packages since #243: its numbers are the pool's (names, arrivals, the stable release, the sources). People counts the flag per contributor since #251 — the ranking by approved packages, the caption on each count — where it was a tile before.
+    for (const [path, id, caption] of [["/factory", "factory.tiles", '"approved by a maintainer, from "'], ["/pipeline", "pipeline.throughput-flow", '<span class="k">approved</span>'], ["/people", "people.contributors", '"approved by a maintainer, built by the project"']] as const) {
       const own = ownScript(await page(path));
       expect(own, `${path} reads landed`).toContain("p.landed");
       expect(own, `${path} still types the status words`).not.toMatch(/status === "approved" \|\| p\.status === "published"|status === "approved"; \}\)\.length/);
@@ -568,7 +568,7 @@ describe("three more facts, one source each", () => {
     expect(allComponents(F).find((x) => x.id === "workers.kind-cards")?.script, "workers.kind-cards names the shell's bucket").toContain("jobBucket(r.status)");
   });
 
-  it("open advisories in stable are counted at the Security page's default confidence on the Pool and the Pipeline, through the shell's one rule", async () => {
+  it("open advisories in stable are counted at the Security page's default confidence on the Pipeline, through the shell's one rule", async () => {
     const report = (await call("GET", `/security?ring=stable&arch=${F.arch}`)).json;
     const html = await page("/"), script = scriptOf(html);
     const fns = ["SEC_CONFS", "SEVERITIES", "confOk", "advisoriesAt", "advisoryCounts"].map((n) => (n === "SEC_CONFS" || n === "SEVERITIES" ? new RegExp(`^  var ${n} = [^\\n]*$`, "m") : new RegExp(`^  function ${n}\\([\\s\\S]*?\\n  \\}$`, "m")).exec(script)![0]);
@@ -593,18 +593,17 @@ describe("three more facts, one source each", () => {
     expect((at(made, "all") as { v: { name: string }; worst: string }[]).map((r) => [r.v.name, r.worst])).toEqual([["a", "critical"], ["b", "unknown"], ["c", "unknown"], ["d", "high"], ["e", "critical"]]);
     expect((at(made, "exact") as { v: { name: string }; worst: string; kev: boolean }[]).find((r) => r.v.name === "d")).toMatchObject({ worst: "high", kev: false });
     expect(count(made)).toEqual({ packages: 4, kev: 1, critical: 1, high: 1, medium: 0, low: 0, unknown: 2, rest: { critical: 1, high: 0, medium: 0, low: 0, unknown: 2 } });
-    for (const path of ["/", "/pipeline"]) {
+    // Home's advisories tile left with #243: the count is Status's section (the Pipeline's module until #248 folds it in).
+    for (const path of ["/pipeline"]) {
       const own = ownScript(await page(path));
       expect(own, `${path} reads the report's totals for the number`).not.toMatch(/totals\.packages|t\.packages \|\| 0/);
       expect(own, `${path} counts through the shell`).toContain("advisoryCounts(advisoriesAt(s))");
       expect(own, `${path} names the confidence`).toContain("confWord()");
     }
-    // The Pool's tile lands the reader on the Security page at that default.
-    expect(ownScript(html)).toContain('"/security?ring=stable&arch=x86_64"');
     expect(ownScript(await page("/security"))).toContain("SEC_CONF");
   });
 
-  it("an advisory's severity wears one colour: the shell's SEV_COLOR paints the pill, the Pool's bars and the Security page's stack, and no page types a colour of its own", async () => {
+  it("an advisory's severity wears one colour: the shell's SEV_COLOR paints the pill, the bars and the Security page's stack, and no page types a colour of its own", async () => {
     const html = await page("/security"), script = scriptOf(html);
     // The shell's map as served, run here: six keys — the five severities the server says and the exploited bucket — each a :root colour the CSS declares, by the class the pill wears.
     const shell = ["esc", "pillHtml", "SEV_PILL", "SEV_COLOR", "SEV_BUCKETS", "sevSeries", "sevPill"].map((n) => served(script, n));
@@ -638,7 +637,8 @@ describe("three more facts, one source each", () => {
     expect([...draw.security.matchAll(/<i style="background:(var\(--\w+\))"><\/i>([^<]+)</g)].map((m) => [m[1], m[2]])).toEqual(series.map((r) => [r.color, r.name]));
     // The pages read the shell's series and hand its colour to the chart; neither names a bucket or a colour of its own, and the manifests say so.
     const components = allComponents(F);
-    for (const [path, id, reads] of [["/", "pool.chart-security", ["sevSeries(t)", "r.color"]], ["/security", "security.per-ring-chart", ["sevSeries(tot[RINGS.indexOf(r)])", "b.color"]]] as const) {
+    // Home's security chart left with #243; the bars are still the served CHARTS', drawn above.
+    for (const [path, id, reads] of [["/security", "security.per-ring-chart", ["sevSeries(tot[RINGS.indexOf(r)])", "b.color"]]] as const) {
       const own = ownScript(await page(path)).replace(CHARTS, "");
       for (const r of reads) expect(own, `${path} reads ${r}`).toContain(r);
       expect(own, `${path} names a bucket of its own`).not.toMatch(/"critical \+ high"|"low \/ unknown"|"exploited in the wild \(KEV\)"|name: "medium"/);
@@ -652,7 +652,7 @@ describe("three more facts, one source each", () => {
     expect(ownScript(await page(`/package/${F.pkg}`))).not.toContain('style="color:var(--red)">exploited');
   });
 
-  it("the 14-day health grid is drawn once — the shell's heatGrid on the Pipeline and on Status, the rings in the reader's order — and a check's result is one word everywhere: HEALTH_WORD on the grid, the Pool's ring cards, the Pipeline's pills, heads and job results, the Status table", async () => {
+  it("the 14-day health grid is drawn once — the shell's heatGrid on the Pipeline and on Status, the rings in the reader's order — and a check's result is one word everywhere: HEALTH_WORD on the grid, the Pool's stable tile, the Pipeline's pills, heads and job results, the Status table", async () => {
     // Health checks beside the fixture's one: two on edge aarch64 yesterday, ok then failed — the day's cell is the worse; a warn on rc today, posted by hand (the check posts ok or error only: a ring with nothing rendered fails, since #47); and one on the lab, which no scheduler queues (the lab is promised nothing) and no grid draws a row for.
     const at = (hoursAgo: number) => new Date(Date.now() - hoursAgo * 3600e3).toISOString();
     const yesterday = new Date(Date.now() - 86400e3).toISOString().slice(0, 10), today = new Date().toISOString().slice(0, 10);
@@ -712,9 +712,9 @@ describe("three more facts, one source each", () => {
       expect(c?.script?.some((l) => l.includes("worst(cells")), `${id} pins a cell map of its own`).toBe(false);
     }
     expect(grids[0], "the Status page's cells are the Pipeline's").toBe(grids[1]);
-    // Every other place a check's result is said reads HEALTH_WORD — the Pool's ring cards, the Pipeline's ring pills, its ring heads and a health job's result, the Status rings table — and no page draws the journal's status as text; the manifests name the read.
+    // Every other place a check's result is said reads HEALTH_WORD — the Pool's stable tile, the Pipeline's ring pills, its ring heads and a health job's result, the Status rings table — and no page draws the journal's status as text; the manifests name the read. (The Pool's Live lines are packages moving since #243's review: a check is the journal's, one link away.)
     for (const [path, ids, reads] of [
-      ["/", ["pool.ring-cards"], ["HEALTH_WORD[h.status]"]],
+      ["/", ["pool.tiles"], ["HEALTH_WORD[worst]"]],
       ["/pipeline", ["pipeline.state-row", "pipeline.ring-heads", "pipeline.tasks-table"], ["HEALTH_WORD.ok", "HEALTH_WORD[h.status]", "HEALTH_WORD[e.status]", "r.ok ? HEALTH_WORD.ok : HEALTH_WORD.error", "PROMISED_RINGS.map(function (n)"]],
       ["/status", ["status.rings-table"], ["pillHtml(h.status, HEALTH_WORD[h.status])", "PROMISED_RINGS.forEach(function (ring)"]],
     ] as const) {

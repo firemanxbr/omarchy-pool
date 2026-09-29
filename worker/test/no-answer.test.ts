@@ -293,13 +293,41 @@ describe("a list that did not answer is said, not drawn", () => {
     expect(recordUp.nodes["#you"].textContent).toMatch(new RegExp(`^@${F.owner} · \\d+ approved · eligible$`));
   });
 
-  it("/: the Made-in-the-open row says so and its four tiles read —", async () => {
+  it("/, the stats answering and the rest not: what reached the rings says its list did not answer, the requests draw nothing, the search says it did not answer — no empty state and no Request", async () => {
+    const d = await run("/", { down: true, up: /^\/api\/v1\/(stats|status)/ }, ["lookFor"]);
+    await settled();
+    await settled();
+    // The rings' heads have parents in the fixture, so their diffs are asked; every one of them failed.
+    expect(html(d, "#pool-new")).toBe(`<p class="home-quiet">the rings' latest changes did not answer: ${INTERNAL}</p>`);
+    expect(html(d, "#pool-new")).not.toContain("Nothing new");
+    // The requests' row stays as served, hidden and empty: no chip, and no word standing in for a list that failed.
+    expect(html(d, "#pool-asked")).toBe("");
+    // The stats answered: the numbers are theirs.
+    expect(d.nodes["#n-pkgs"]?.textContent).toMatch(/^\d/);
+    // A name typed while the search does not answer: said, and never offered to the factory.
+    d.lookFor("zzfoo");
+    await settled();
+    expect(html(d, "#pool-results")).toContain("the package search did not answer: HTTP 500");
+    expect(html(d, "#pool-results")).not.toContain("Request it");
+    expect(d.nodes["#pool-said"]?.textContent, "said to a screen reader too").toBe("the package search did not answer: HTTP 500");
+  });
+
+  it("/, the stats not answering: every number reads — with \"did not answer\" under it and the reason on hover, none reads 0, the chain's figures —, and Live and New in the pool say which read did not answer — nothing stays a skeleton", async () => {
     const d = await run("/", { down: true });
     await settled();
-    const reason = `the people's lists did not answer: ${INTERNAL}`;
-    expect(html(d, "#cc-people")).toContain(reason);
-    expect(html(d, "#cc-people")).not.toContain("be the first");
-    expectDashes(d, 4, reason, "#open-stats");
+    await settled();
+    // The poll's own reason: liveStats reads /api/v1/stats with fetch, so a 500 is its status.
+    const reason = "the pool's stats did not answer: HTTP 500";
+    for (const k of ["pkgs", "edge", "rel", "src"]) {
+      expect(d.nodes[`#n-${k}`]?.textContent, `#n-${k}`).toBe("—");
+      expect(html(d, `#s-${k}`), `#s-${k}`).toBe(`<span title="${reason}">did not answer</span>`);
+    }
+    expect(html(d, "#pool-sources")).not.toMatch(/<b>\d/);
+    expect(html(d, "#pool-sources")).toContain("<b>—</b>");
+    for (const r of ["edge", "rc", "stable"]) expect(d.nodes[`#fl-${r}`]?.textContent, `#fl-${r}`).toBe("—");
+    expect(html(d, "#live-feed")).toBe(`<div><p class="home-quiet">${reason}</p></div>`);
+    expect(html(d, "#pool-new")).toBe(`<p class="home-quiet">${reason}</p>`);
+    expect(html(d, "#live-feed") + html(d, "#pool-new")).not.toMatch(/skl|No package moved|Nothing new/);
   });
 
   it("/status: the service line says the check did not answer, with the Worker's reason and no TypeError", async () => {

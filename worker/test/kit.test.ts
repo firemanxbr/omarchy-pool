@@ -304,8 +304,8 @@ describe("the theme", () => {
 
 describe("the v1 kit", () => {
   it("is on the pages that ask for it, and costs the others nothing: its sheet after the frame's CSS, its helpers after the shell's", async () => {
-    // A page that has not adopted it links no sheet, carries no primitive and not the kit's helpers (the docs index has, #250: test/docs-index.test.ts). The one mention of the sheet is the ⌘K menu's (#241): its icons are the kit's, and it links the sheet the first time it opens — nothing is asked for before that (test/go-menu.test.ts opens it).
-    for (const path of ["/", "/factory", "/review", "/status", "/package/zlib"]) {
+    // A page that has not adopted it links no sheet, carries no primitive and not the kit's helpers (the docs index has, #250: test/docs-index.test.ts; Home has, #243: below). The one mention of the sheet is the ⌘K menu's (#241): its icons are the kit's, and it links the sheet the first time it opens — nothing is asked for before that (test/go-menu.test.ts opens it).
+    for (const path of ["/factory", "/review", "/status", "/package/zlib"]) {
       const html = await page(path);
       expect(/<head>([\s\S]*?)<\/head>/.exec(html)![1], path).not.toContain("/assets/kit.");
       expect(html.split("/assets/kit.").length - 1, `${path}: the menu's mention only`).toBe(1);
@@ -320,6 +320,14 @@ describe("the v1 kit", () => {
     expect(styleOf(html)).not.toContain(".op-");
     expect(scriptOf(html)).toContain(KIT_HELPERS);
     expect(ownScriptOf(html)!.trim().startsWith("var own = 1;")).toBe(true);
+    // Home (#243), as served: the sheet once in its head, after the frame's <style>, and the page's own rules (page({ css })) after the sheet, so they refine the kit's; the helpers the shell's.
+    const home = await page("/"), homeHead = /<head>([\s\S]*?)<\/head>/.exec(home)![1];
+    expect(homeHead.match(/\/assets\/kit\./g)?.length).toBe(1);
+    expect(homeHead.indexOf(link)).toBeGreaterThan(homeHead.indexOf("</style>"));
+    expect(homeHead.lastIndexOf("<style>")).toBeGreaterThan(homeHead.indexOf(link));
+    expect(styleOf(home)).not.toContain(".op-");
+    expect(scriptOf(home)).toContain(KIT_HELPERS);
+    expect(ownScriptOf(home)).not.toContain(KIT_HELPERS.trim().slice(0, 80));
   });
 
   it("serves its sheet, immutable under its hash, and nothing else under /assets/", async () => {

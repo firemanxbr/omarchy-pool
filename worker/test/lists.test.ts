@@ -199,7 +199,8 @@ describe("lists come from the code that owns them", () => {
     // Each page reads the list it means — every ring where a reader picks one, the promised ones where a check or a scan covers them — and its manifest pins the read, not a literal.
     const components = allComponents(F);
     for (const [path, id, literal] of [
-      ["/", "pool.get-started-step", "RINGS = Object.keys(RINGS_TEXT)"],
+      // Home's picker offers the rings that promise something (#243): the lab is picked on Get started, where it is explained.
+      ["/", "pool.setup", 'PROMISED_RINGS.indexOf(q.get("ring"))'],
       ["/docs/get-started", "docs-get-started.ring-picker", "RINGS = Object.keys(RINGS_TEXT)"],
       ["/packages", "packages.ring-arch-pickers", "RINGS = Object.keys(RINGS_TEXT)"],
       ["/security", "security.pickers", "RINGS = PROMISED_RINGS"],
@@ -231,7 +232,9 @@ describe("lists come from the code that owns them", () => {
       expect(own, `${path} types the null source's architecture`).not.toMatch(/source \|\| "x86_64"/);
     }
     expect(ownScriptOf(await text(`/user/${F.owner}`))).toContain("arch || ARCHES[0]");
-    expect(ownScriptOf(await text("/"))).toContain('pkgHref(p.name, "stable", ARCHES[0])');
+    // The Pool's search starts on the first architecture, and a row links its package on the architecture the row came from (#243: stable on aarch64 is asked when the first finds nothing).
+    expect(ownScriptOf(await text("/"))).toContain("search(term, ARCHES[0])");
+    expect(ownScriptOf(await text("/"))).toContain('pkgHref(p.name, "stable", p.repo_arch)');
     expect(ownScriptOf(await text("/pipeline"))).toContain("h.source || NULL_SOURCE_ARCH");
   });
 
