@@ -75,6 +75,9 @@ w5_seed_all() {
 w5_agent() { # id mode — the stub's word: down, up, credit
   printf %s "$2" > "$W5/$1/agent"
 }
+w5_listening() { # port — a bare connect, no request: the stub counts no probe for it
+  (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+}
 w5_start() { # id provider port [skew]
   local id="$1" provider="$2" port="$3" skew="${4:-}" key base preload=()
   case "$provider" in
@@ -97,6 +100,11 @@ w5_start() { # id provider port [skew]
   [[ -z "$skew" ]] || touch -d "@$(( $(date +%s) - 3600 ))" "$W5/$id/work/keyrings/.fetched"
   python3 "$ROOT/tests/agent-late.py" "$port" "$W5/$id/agent" > "$W5/$id/agent.log" 2>&1 &
   echo $! > "$W5/$id/agent.pid"; disown $!
+  # A stub told to listen does so before the worker's first probe: a probe that beats Python's start reads "Connection refused",
+  # a class the pool re-checks, not the one the scenario set (E's first probe must be its 402).
+  if [[ "$(cat "$W5/$id/agent")" != down ]]; then
+    w5_until 30 "$id's stub agent listening on $port" w5_listening "$port" || return 1
+  fi
   # The supervisor: whatever the worker exits with is noted, and it starts again — a non-zero exit is what it is here for, never the end of the loop.
   (
     set +e
