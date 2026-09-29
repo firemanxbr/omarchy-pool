@@ -284,6 +284,25 @@ describe("the package page, drawn for every viewer", () => {
     expect(p.nodes["#files"].innerHTML).toContain("Show all 450 files");
   });
 
+  it("says a package built and waiting for a claim is ready for review, and in review only once claimed: the Factory's and Review's words (#274)", async () => {
+    // spare is built and nobody claimed it: Review files it ready, the Factory's line Ready for review — the chip said "in review" until #274.
+    expect((await call("GET", "/api/v1/factory/review")).json.packages.find((x: { name: string }) => x.name === F.sparePkg)?.state).toBe("ready");
+    const p = await view(`/package/${F.sparePkg}`, "m1", { fresh: (a) => (a.includes("/story") ? `${a}?t=ready` : a) });
+    expect(p.nodes["#pkg-state"].innerHTML).toBe('<span class="op-pill warn">ready for review</span>');
+    expect(p.nodes["#you"].innerHTML).toContain("Ready for a maintainer: have the project build it again, then decide.");
+    // Claimed, the project builds it again: in review on every page, until the claim is let go.
+    const claimed = await call("POST", `/api/v1/factory/tasks/${F.spareTask}/build`, "m1", { note: "claimed by the package page's test" });
+    expect(claimed.status).toBe(200);
+    try {
+      expect((await call("GET", "/api/v1/factory/review")).json.packages.find((x: { name: string }) => x.name === F.sparePkg)?.state).toBe("in_review");
+      const q = await view(`/package/${F.sparePkg}`, "m1", { fresh: (a) => (a.includes("/story") ? `${a}?t=claimed` : a) });
+      expect(q.nodes["#pkg-state"].innerHTML).toBe('<span class="op-pill warn">in review</span>');
+      expect(q.nodes["#you"].innerHTML).toContain("The project builds it again; the decision follows.");
+    } finally {
+      expect((await call("POST", `/api/v1/factory/tasks/${F.spareTask}/release`, "m1", { reason: "let go by the package page's test" })).status).toBe(200);
+    }
+  });
+
   it("says a rejected package is rejected — not waiting for a worker, nor installable after an approval", async () => {
     expect((await call("POST", `/api/v1/factory/tasks/${F.spareTask}/reject`, "m1", { note: "the recipe fetches outside its sources" })).status).toBe(200);
     const p = await view(`/package/${F.sparePkg}`, "m1", { fresh: (a) => (a.includes("/story") ? `${a}?t=rejected` : a) });
@@ -297,8 +316,8 @@ describe("the package page, drawn for every viewer", () => {
 
   it("keeps the approval that stands and its publish on the page while a newer build of the package waits for a maintainer", async () => {
     const p = await view(`/package/${F.factoryPkg}`, "", { functions: ["timeline"] });
-    // The newer build is the review's (in review, waiting for a maintainer); m2's approval of 1.0 is what the rings will serve, its publish on its way.
-    expect(p.nodes["#pkg-state"].innerHTML).toContain("in review");
+    // The newer build is the review's (ready for review, waiting for a maintainer's claim); m2's approval of 1.0 is what the rings will serve, its publish on its way.
+    expect(p.nodes["#pkg-state"].innerHTML).toContain("ready for review");
     expect(p.nodes["#stages"].innerHTML).toContain("publishing into edge");
     expect(p.nodes["#stage-panel"].innerHTML).toContain('stays approved by <a href="/user/m2"');
     expect(p.nodes["#who"].innerHTML).toMatch(/reviewed by<\/span><span class="l"><a href="\/user\/m2"[^>]*>@m2<\/a>/);
@@ -539,6 +558,9 @@ describe("a dependency's name in the graph", () => {
     expect(v).toMatchObject({ "min-width": "0", overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" });
     expect(v.flex ?? "0 1 auto", "the version may shrink").toMatch(/^\d+ [1-9]\d* /);
     expect(v["flex-shrink"] ?? "1").not.toBe("0");
+    // Under three characters of room it wraps onto a line the box clips: never a few pixels of a digit with no ellipsis.
+    expect(v.flex).toBe("1 1 3ch");
+    expect(declared(html, ".pkg-node > span:has(> .nm)")).toMatchObject({ "flex-wrap": "wrap", height: "16px", overflow: "hidden" });
     // The two sit in a box that may shrink inside the node, beside the tag, which never does.
     expect(declared(html, ".pkg-node > span")).toMatchObject({ display: "flex", "min-width": "0" });
     expect(declared(html, ".pkg-node .t")).toMatchObject({ flex: "none" });

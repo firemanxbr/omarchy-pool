@@ -250,14 +250,14 @@ describe("an approval stands or it does not, said once", () => {
       expect(card, `${what}: lost leads to the build`).toMatch(new RegExp(`^[^>]*href="/build/${failed.task_id}"`));
       expect(card, `${what}: lost leads to a ring`).not.toContain(`href="/package/${F.failedPkg}?`);
     }
-    expect(linkOf(shipped, F.failedPkg, "fx-card")).toContain('<span class="fx-note bad">publish failed</span>');
+    expect(linkOf(shipped, F.failedPkg, "fx-card")).toContain('<span class="fx-note bad" title="publish failed">publish failed</span>');
     // pulled is blocked: off the line, no card at all.
     expect(visitor.nodes["#board"]?.innerHTML ?? "", "pulled").not.toContain(`<b>${F.pulledPkg}</b>`);
     for (let i = 0; i < 5; i++) expect(visitor.nodes[`#col-${i}`].innerHTML, `column ${i}: pulled`).not.toContain(`<b>${F.pulledPkg}</b>`);
     // ours is served: its card says the ring and leads to the package's one address in it.
     const ours = linkOf(shipped, F.publishedPkg, "fx-card");
     expect(ours).toContain(`href="/package/${F.publishedPkg}?ring=edge&amp;arch=${F.arch}"`);
-    expect(ours).toContain('<span class="fx-note">in edge</span>');
+    expect(ours).toContain('<span class="fx-note" title="in edge">in edge</span>');
     // Review's workspace of each (#247), as the package's own owner and as anyone: the state is the rule's word in the kit's pill — publish failed and blocked in red, in edge in green — never "publishing" for either of dave's.
     const tone: Record<string, string> = { ok: "ok", error: "fail", blue: "run" };
     for (const [name, a, login] of [[F.failedPkg, failed, F.outsider], [F.pulledPkg, pulled, ""], [F.publishedPkg, served, F.owner]] as const) {
@@ -886,12 +886,15 @@ describe("one meaning of in review", () => {
   // and "In review" on Review — the line filed a package In review only while the project rebuilt it, Review from the claim. One meaning
   // now, Review's: in review from the claim until the decision (the project's rebuild queued, running or staged: the list's `in_review`);
   // ready for review, built and waiting for a claim (the list's `ready`). The Factory's served stageOf runs here over the registry, beside
-  // the review list, as the package moves: claimed, let go, claimed again, its rebuild staged.
+  // the review list, as the package moves: claimed, let go, claimed again, its rebuild staged — then the two places where the targets
+  // alone once disagreed with the list (the #274 review): a new version building beside a standing claim, and a staged build of a version
+  // already approved (felix 2.16.1, 2026-09-16). The line files a package the list names by the list's own state, never by its targets.
+  // The page runs as m1, a maintainer: the way to Review under "Your requests" says the list's two numbers too.
   const viewer = async (path: string, init?: RequestInit) => {
     const ctx = createExecutionContext();
     // The registry asked past its thirty seconds at the edge (a new query), so the page reads the targets each step settled.
     const asked = path === "/api/v1/factory/packages" ? `${path}?t=${Math.random()}` : path;
-    const res = await worker.fetch(new Request(`http://pool.test${asked}`, init), env, ctx);
+    const res = await worker.fetch(new Request(`http://pool.test${asked}`, { ...init, headers: { ...(init?.headers as Record<string, string> | undefined), cookie: `omc=oms_${F.m1}` } }), env, ctx);
     await waitOnExecutionContext(ctx);
     return res;
   };
@@ -909,6 +912,11 @@ describe("one meaning of in review", () => {
     // Ready for review: the same packages, and the Factory's tile is Review's number.
     expect(line(2), `${step}: ready for review`).toEqual(listed("ready"));
     expect(d.nodes["#t-ready-n"].textContent, `${step}: the Ready for review tile`).toBe(String(review.ready));
+    expect(d.nodes["#col-2-n"].textContent, `${step}: the Ready for review column`).toBe(String(review.ready));
+    // Neither: the list names it and files it in no review column — on the line's other columns only.
+    for (const p of review.packages.filter((x) => x.state === null)) expect([2, 3], `${step}: ${p.name}, neither ready nor in review`).not.toContain(d.stageOf(reg.find((r) => r.name === p.name)));
+    // A maintainer's way to Review: the same two numbers, in the same words.
+    expect(d.nodes["#mine-maint"].textContent, `${step}: the Review queue link`).toBe(`Review queue · ${review.ready} ready · ${review.in_review} in review ›`);
     return { d, review, card: (name: string) => (d.nodes["#col-3"].innerHTML as string).split('<a class="fx-card').find((c) => c.includes(`<b>${name}</b>`)) ?? null };
   };
   const spare = (review: { packages: Pkg[] }) => review.packages.find((p) => p.name === F.sparePkg)?.state ?? null;
@@ -921,7 +929,7 @@ describe("one meaning of in review", () => {
     expect(claimed.status).toBe(200);
     now = await agree("claimed, the rebuild queued");
     expect(spare(now.review)).toBe("in_review");
-    expect(now.card(F.sparePkg)).toContain("the project builds it again");
+    expect(now.card(F.sparePkg)).toContain("project rebuilding");
     // Let go: the claim ends, spare waits for a claim again — ready for review on both.
     expect((await call("POST", `/factory/tasks/${F.spareTask}/release`, "m1", { reason: "let go by the one-truth test" })).status).toBe(200);
     now = await agree("released");
@@ -933,7 +941,31 @@ describe("one meaning of in review", () => {
     expect((await settleTargets(env, F.sparePkg))[F.sparePkg]).toMatchObject({ [F.arch]: { status: "reviewed", task: again.json.task } });
     now = await agree("claimed, the rebuild staged");
     expect(spare(now.review)).toBe("in_review");
-    expect(now.card(F.sparePkg)).toContain("the project's build is staged · a maintainer decides");
+    expect(now.card(F.sparePkg)).toContain(">rebuild staged</span>");
+    // The owner renews it while the claim is staged (a renewal is taken while nothing of it runs, story.ts): a new version is queued, its
+    // target building. The claim stands until a maintainer decides, so Review says in review — and so does the line, never Building.
+    const bump = (await env.DB.prepare(
+      `INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status) VALUES (?, ?, '1.1-1', 'bump:1@1.1', 'renewed by the one-truth test', 100, 0, 'community', ?, 'build', 'queued') RETURNING id`,
+    ).bind(F.sparePkg, F.arch, F.owner).first<{ id: number }>())!.id;
+    expect((await settleTargets(env, F.sparePkg))[F.sparePkg]).toMatchObject({ [F.arch]: { status: "building", task: bump } });
+    now = await agree("claimed and staged, a new version building");
+    expect(spare(now.review)).toBe("in_review");
+    expect(now.card(F.sparePkg)).toContain("new version building");
+    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE id = ?").bind(bump).run();
+    await settleTargets(env, F.sparePkg);
+    // A staged build of a version already approved (felix 2.16.1): built, by its targets, but nothing for a maintainer to claim — Review's
+    // state is null and its tile does not count it. The line files it Shipped, where its approved version is, never Ready for review.
+    const approved = (await call("GET", `/factory/approvals?t=${Math.random()}`)).json.approvals.find((a: { name: string; standing: boolean }) => a.name === F.publishedPkg && a.standing) as { version: string };
+    const again2 = (await env.DB.prepare(
+      `INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, lease_owner, staged_prefix, result, finished_at)
+       VALUES (?, ?, ?, '-', 'built again by the one-truth test', 100, 0, 'community', ?, 'build', 'staged', 'w3', ?, '{"vet":{"verdict":"pass","fails":0,"warnings":0,"failed":[],"warned":[]}}', ?) RETURNING id`,
+    ).bind(F.publishedPkg, F.arch, approved.version, F.owner, `staging/${F.owner}/${F.publishedPkg}/${approved.version}-again/`, new Date().toISOString()).first<{ id: number }>())!.id;
+    expect((await settleTargets(env, F.publishedPkg))[F.publishedPkg]).toMatchObject({ [F.arch]: { status: "built", task: again2 } });
+    now = await agree("a staged build of the version already approved");
+    expect(now.review.packages.find((p) => p.name === F.publishedPkg)).toMatchObject({ state: null });
+    expect(now.d.stageOf((await call("GET", `/factory/packages?t=${Math.random()}`)).json.packages.find((p: { name: string }) => p.name === F.publishedPkg))).toBe(4);
+    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE id = ?").bind(again2).run();
+    await settleTargets(env, F.publishedPkg);
   });
 });
 

@@ -559,7 +559,9 @@ describe("the page", () => {
     const bob = await run({ login: F.contributor });
     expect(bob.nodes["#mine-n"].textContent).toBe(String((await call("GET", "/api/v1/factory/packages")).json.packages.filter((p: { owner: string }) => p.owner === F.contributor).length));
     const m2 = await run({ login: F.m2 });
-    expect(m2.nodes["#mine-maint"].textContent).toMatch(/^Review queue · \d+ waiting ›$/);
+    // A maintainer's way to Review says Review's two numbers in Review's words: ready (waiting for a claim) and in review (claimed) — never `waiting`, which counts a claimed package whose rebuild is staged too (#274).
+    const review = (await call("GET", "/api/v1/factory/review")).json;
+    expect(m2.nodes["#mine-maint"].textContent).toBe(`Review queue · ${review.ready} ready · ${review.in_review} in review ›`);
   });
 
   it("fills a renewal from the record, and takes a name brought in the address", async () => {

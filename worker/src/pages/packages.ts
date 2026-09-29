@@ -154,8 +154,9 @@ const PACKAGE_CSS = String.raw`
   .pkg-node { height: 24px; border: 1px solid var(--line); background: var(--bg-deep); display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 8px; font: 12px var(--font-mono); color: var(--text); min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   a.pkg-node:hover { border-color: var(--green); }
   .pkg-node > span { display: flex; align-items: center; gap: 6px; min-width: 0; }
-  /* The name keeps its width and the version is cut: a long version (glibc's 2.44+r50+g1848099f063e-1) drew the dependency as "g…" (#274). A name longer than the node is cut last. */
-  .pkg-node .nm { flex: 0 0 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .pkg-node .v { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 11px; color: var(--dim); white-space: nowrap; }
+  /* The name keeps its width and the version is cut: a long version (glibc's 2.44+r50+g1848099f063e-1) drew the dependency as "g…" (#274). A name longer than the node is cut last. With less than three characters left, the version wraps onto a line the box clips, never a stray digit without its ellipsis. */
+  .pkg-node > span:has(> .nm) { flex-wrap: wrap; align-content: flex-start; row-gap: 8px; height: 16px; overflow: hidden; }
+  .pkg-node .nm { flex: 0 0 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 16px; } .pkg-node .v { flex: 1 1 3ch; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 11px; line-height: 16px; color: var(--dim); white-space: nowrap; }
   .pkg-node .t { font-size: 11px; white-space: nowrap; flex: none; } .pkg-node .t.decl { color: var(--blue); } .pkg-node .t.so { color: var(--green); } .pkg-node .t.none { color: var(--dim); }
   .pkg-node.adv { border-color: color-mix(in oklab, var(--red) 55%, var(--line)); } .pkg-node .dot { width: 7px; height: 7px; flex: none; background: var(--red); }
   .pkg-node.gone { color: var(--dim); } button.pkg-node { width: 100%; color: var(--green); cursor: pointer; text-align: left; } button.pkg-node:hover { border-color: var(--green); }
@@ -361,15 +362,16 @@ const PACKAGE_SCRIPT = String.raw`
   // A standing approval whose publish is still on its way: approved, not in edge yet.
   function publishing() { return ARCHES.map(approvedChain).some(function (c) { return c && c.publish && (c.publish.status === "queued" || c.publish.status === "leased"); }); }
   function archList() { var t = targetsOf(); return ARCHES.filter(function (a) { return !isFactory() || !t || t[a] || servedOn(a).length; }); }
-  // The package's state, one word for the chip: blocked, in rings (a promised ring serves it), else where its targets stand.
-  var STATE = { "in-rings": ["ok", "in rings"], building: ["run", "building"], "in-review": ["warn", "in review"], approved: ["ok", "approved"], blocked: ["fail", "blocked"], rejected: ["fail", "rejected"], requested: ["wait", "requested"], none: ["wait", "not in the pool"] };
+  // The package's state, one word for the chip: blocked, in rings (a promised ring serves it), else where its targets stand — ready for review while it waits for a claim, in review once the project rebuilds it for a maintainer's claim, the words the Factory and Review say (#274).
+  var STATE = { "in-rings": ["ok", "in rings"], building: ["run", "building"], ready: ["warn", "ready for review"], "in-review": ["warn", "in review"], approved: ["ok", "approved"], blocked: ["fail", "blocked"], rejected: ["fail", "rejected"], requested: ["wait", "requested"], none: ["wait", "not in the pool"] };
   function stateOf() {
     if (blockedBy()) return "blocked";
     if (ARCHES.some(function (a) { return promised(servedOn(a)).length; })) return "in-rings";
     if (!ST) return D ? "in-rings" : "none";
     var ts = targetsOf() || {}, has = function (list) { return Object.keys(ts).some(function (a) { return list.indexOf(ts[a].status) >= 0; }); };
     if (has(["building"])) return "building";
-    if (has(["built", "reviewing", "reviewed"])) return "in-review";
+    if (has(["reviewing", "reviewed"])) return "in-review";
+    if (has(["built"])) return "ready";
     if (has(["approved", "published"])) return "approved";
     return (ST.package || {}).status === "rejected" ? "rejected" : "requested";
   }
@@ -485,7 +487,7 @@ const PACKAGE_SCRIPT = String.raw`
       { id: "rings", icon: "layers", label: "Rings", tone: ringsStage[0], sum: ringsStage[1], when: ringsStage[2] }
     ];
   }
-  function defaultStage() { var s = stateOf(); return s === "building" ? "build" : s === "in-review" || s === "approved" ? "review" : s === "blocked" ? "rings" : "source"; }
+  function defaultStage() { var s = stateOf(); return s === "building" ? "build" : s === "ready" || s === "in-review" || s === "approved" ? "review" : s === "blocked" ? "rings" : "source"; }
   function renderChain() {
     var list = stagesOf(), fac = isFactory();
     if (!STAGE || !list.some(function (s) { return s.id === STAGE; })) STAGE = defaultStage();
@@ -1005,7 +1007,7 @@ const PACKAGE_SCRIPT = String.raw`
       icon = "shield"; who = "@" + login + " · maintainer";
       if (b) { text = b.blocked_by === login ? "You blocked it. Another maintainer lifts the block." : "Blocked by " + atLink(b.blocked_by) + ". You can lift the block; the reason goes on the record."; btns.push(gate(btn("Lift the block", 'data-act="unblock"', "primary"), b.blocked_by !== login, login + " blocked " + name + "; another maintainer lifts it")); }
       else if (st === "building") { text = "Builds are still running. Nothing to review yet."; btns.push(btn("Open the review queue", 'href="/review"')); btns.push(blockBtn); }
-      else if (st === "in-review") { var tst = targetsOf() || {}, at = function (w) { return Object.keys(tst).some(function (a) { return tst[a].status === w; }); }; text = at("reviewed") ? "The project built it again: the decision is a maintainer's." : at("reviewing") ? "The project builds it again; the decision follows." : "Ready for a maintainer: have the project build it again, then decide."; var rb = reviewBuild(); btns.push(btn("Open review", 'href="' + (rb ? "/build/" + rb : "/review") + '"', "primary")); btns.push(blockBtn); }
+      else if (st === "ready" || st === "in-review") { var tst = targetsOf() || {}, at = function (w) { return Object.keys(tst).some(function (a) { return tst[a].status === w; }); }; text = at("reviewed") ? "The project built it again: the decision is a maintainer's." : at("reviewing") ? "The project builds it again; the decision follows." : "Ready for a maintainer: have the project build it again, then decide."; var rb = reviewBuild(); btns.push(btn("Open review", 'href="' + (rb ? "/build/" + rb : "/review") + '"', "primary")); btns.push(blockBtn); }
       else if (!mt && servedAnywhere()) { text = unmaintained() ? "Left unmaintained by " + atLink(pk.owner) + ". Adopt it: you look after it in the pool, and its registration and bumps become yours." : "No pool maintainer yet. Any maintainer can look after it."; btns.push(btn("Adopt", 'data-act="adopt"', "primary")); btns.push(blockBtn); }
       else {
         var decider = ((ST && ST.chains) || []).map(function (c) { return c.approval; }).filter(function (a) { return a && a.decision === "rejected"; })[0];
