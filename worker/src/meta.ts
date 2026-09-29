@@ -252,13 +252,13 @@ export function sourceOfRepo(repo: string): string | null {
  * trial, abi, security, render, publish, verify, rollback, relayout, gc),
  * what the Worker writes on its own (deploy, cost, audience, provenance,
  * dispatch, job, build, enqueue) and what people do on the record
- * (request, review, approve, withdraw, trust, role, block, category, bump,
- * worker, leak). A page that links `/journal?kind=<k>` names one of these
+ * (request, review, approve, withdraw, trust, role, block, adopt, category,
+ * bump, worker, leak). A page that links `/journal?kind=<k>` names one of these
  * — pages.test.ts reads every such link against this list — and a kind
  * missing here is a filter that falls back to all without a word. The
  * metrics snapshot is left out: it is a number, not a line.
  */
-export const JOURNAL_KINDS = ["all", "sync", "gate", "promote", "fast-track", "health", "trial", "abi", "security", "render", "publish", "verify", "rollback", "relayout", "gc", "deploy", "cost", "audience", "provenance", "dispatch", "job", "build", "enqueue", "request", "review", "approve", "withdraw", "trust", "role", "block", "category", "bump", "worker", "leak"];
+export const JOURNAL_KINDS = ["all", "sync", "gate", "promote", "fast-track", "health", "trial", "abi", "security", "render", "publish", "verify", "rollback", "relayout", "gc", "deploy", "cost", "audience", "provenance", "dispatch", "job", "build", "enqueue", "request", "review", "approve", "withdraw", "trust", "role", "block", "adopt", "category", "bump", "worker", "leak"];
 
 /**
  * The projects the pool takes packages from, by the host a sync reads, each

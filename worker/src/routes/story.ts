@@ -67,6 +67,8 @@ export interface Chain {
   /** An approval taken back: on the record, void. */
   withdrawn: Approval | null;
   score: Score;
+  /** The two recipes a review compares, by their address — the contributor's and the one the project's agent wrote again from the evidence — each once its build staged it: the package page draws the diff between them (#244). */
+  recipes: { contributor: string | null; project: string | null };
 }
 
 const TASK_COLS = "id, kind, status, trust, owner, arch, version, attempts, lease_owner, pinned_to, pkgbuild_ref, priority, shared_after, created_at, started_at, finished_at, duration_ms, error, params, result";
@@ -133,7 +135,8 @@ export function chains(tasks: TaskBrief[], approvals: Approval[], pkg: Record<st
       approval: approval ? { decision: approval.decision, note: approval.note } : null,
       category,
     });
-    return { contributor, project, audit, trial, publish, approval, withdrawn, score };
+    const recipe = (t: TaskBrief | null) => (t && (t.status === "staged" || t.status === "done") ? `/api/v1/factory/tasks/${t.id}/artifacts/PKGBUILD` : null);
+    return { contributor, project, audit, trial, publish, approval, withdrawn, score, recipes: { contributor: recipe(contributor), project: recipe(project) } };
   };
   const out: Chain[] = [];
   const used = new Set<number>();
