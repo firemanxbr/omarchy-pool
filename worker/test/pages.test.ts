@@ -379,18 +379,24 @@ describe("dashboard pages", () => {
     expect(top(declarations(menu)), "GO_MENU declares nothing outside itself").toEqual([]);
     const menuShadows = declarations(menu).filter((d) => shell.has(d.name)).map((d) => d.name);
     expect(menuShadows, `GO_MENU shadows the shell's ${menuShadows.join(", ")}`).toEqual([]);
+    // The kit's helpers (KIT_HELPERS) follow the menu on a page drawn with the kit (page({ kit: true })): the shell's too there — a name of their own each, none the shell has, and none of the shell's shadowed inside them.
+    const kitNames = top(declarations(kit));
+    expect(dupes(kitNames), "KIT_HELPERS declares a name twice").toEqual([]);
+    expect(kitNames.filter((n) => shell.has(n)), "KIT_HELPERS declares a name the shell has").toEqual([]);
+    const kitShadows = declarations(kit).filter((d) => d.inside !== null && shell.has(d.name)).map((d) => d.name);
+    expect(kitShadows, `KIT_HELPERS shadows the shell's ${kitShadows.join(", ")}`).toEqual([]);
     // The primitives a page draws only through CHARTS — a page that does not splice CHARTS and declares one of these has copied it.
     const CHART_ONLY = ["bars", "area", "hbars", "stacked", "lines", "hrows", "heatGrid", "buildsByDay", "jobsSummary", "workerMinutes", "worst", "lastDays"];
     const problems: string[] = [];
     for (const path of DRAWN) {
       const code = scriptOf(await (await get(path)).text());
       if (!code.trim()) continue;
-      // page() wraps the footer's line, the shell, the ⌘K menu, then the page's script in one function: the page's own statements are what follows the menu's — and the kit's helpers on a page drawn with the kit (page({ kit: true })), the frame's as the menu is (the fixture's ownScriptOf) — less CHARTS where the page splices it.
+      // page() wraps the footer's line, the shell, the ⌘K menu, then the page's script in one function: the page's own statements are what follows the menu's, less CHARTS where the page splices it.
       const iife: N[] | undefined = program(code)[0]?.expression?.callee?.body?.body;
       expect(iife, `${path}: the page's script is not one IIFE`).toBeDefined();
-      const cs = code.indexOf(CHARTS), withCharts = cs >= 0;
-      const own = iife!.slice(1 + helpers.length + menu.length + (code.includes(KIT_HELPERS) ? kit.length : 0)).filter((st) => !(withCharts && st.start >= cs && st.end <= cs + CHARTS.length));
-      const has = new Set([...shell, ...(withCharts ? chartNames : [])]);
+      const cs = code.indexOf(CHARTS), withCharts = cs >= 0, withKit = code.includes(KIT_HELPERS);
+      const own = iife!.slice(1 + helpers.length + menu.length + (withKit ? kit.length : 0)).filter((st) => !(withCharts && st.start >= cs && st.end <= cs + CHARTS.length));
+      const has = new Set([...shell, ...(withCharts ? chartNames : []), ...(withKit ? kitNames : [])]);
       const decls = declarations(own);
       for (const d of decls) {
         if (d.inside !== null) { if (has.has(d.name)) problems.push(`${path} shadows the shell's ${d.name} inside ${d.inside}`); }
