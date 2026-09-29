@@ -190,7 +190,8 @@ describe("a list that did not answer is said, not drawn", () => {
     await settled();
     expect(d.nodes["#rv-note"].textContent).toBe(`the review list did not answer: ${INTERNAL}`);
     expect(d.nodes["#rv-rows"].innerHTML).toBe(rows);
-    expect(rvTiles(d).slice(0, 3)).toEqual(before.slice(0, 3));
+    // Every tile, the brake's Blocked among them: its list failed too, and what it drew last stays.
+    expect(rvTiles(d)).toEqual(before);
   });
 
   it("/pipeline: the state row's note names the factory's lists, the six tiles read —, the flow and the queue draw nothing in their place, and every other read says so where it draws", async () => {

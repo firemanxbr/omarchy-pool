@@ -1,5 +1,5 @@
 import { json, type Env } from "../index";
-import { REPO_ARCHES, RINGS, ringsSql, sortRings } from "../meta";
+import { REPO_ARCHES, RINGS, ringsSql, sortRings, WORKER_ALIVE_MINUTES } from "../meta";
 import { scoreChain } from "../score";
 import { requestChecks } from "../request";
 import { contributorOf, isMaintainer, MAINTAINER_DECIDES, SIGN_IN, viaOf, type Contributor } from "./contributors";
@@ -43,22 +43,31 @@ import { packageRows, parseTargets, settleTargets, targetsOf, type PackageRows, 
  *                                           the round goes back to the factory with the note — the name stays the
  *                                           requester's
  *   POST /factory/tasks/:id/release {reason} the maintainer who claimed the package or another, never the owner → the
- *                                           claim let go: the project's rebuild still queued or running is cancelled,
- *                                           and the package waits for a claim again (a staged rebuild is decided, not
- *                                           released)
- *   POST /factory/packages/:name/adopt {reason?} a maintainer takes a package its owner left unmaintained: the
- *                                           registration becomes theirs, its bumps come to them
+ *                                           claim let go, whole, while a rebuild of it is still queued or running:
+ *                                           every rebuild of the claim is cancelled — the ones staged beside it too —
+ *                                           and the package waits for a claim again (a claim whose rebuilds all staged
+ *                                           is decided, not released)
+ *   POST /factory/packages/:name/adopt {reason?} a maintainer takes a package its owner left unmaintained, with nothing
+ *                                           of it in review: the registration becomes theirs, its bumps come to them
  *   GET  /factory/approvals                 the record (public), one row per review with its `targets`; `standing` on
  *                                           every row — a review not withdrawn
  *
- * Every decision — approve, changes, reject, withdraw, release, adopt, and a
- * block and its lift (routes/blocks.ts) — is written once to the record,
- * signed by the pool (record.ts, decisionRecord below), and is a journal line
- * that names who took it, through which door (`via`: the web's session or a
- * token) and the agent the review rests on: the one that rebuilt the package
- * on the project's review worker, the maintainer's choice at the claim. None
- * is undone by another decision: what takes an approval back is a block, or
- * the withdrawal a maintainer writes a reason for — both on the record too.
+ * Every decision — a claim, approve, changes, reject, release, adopt, a
+ * withdrawal, and a block and its lift (routes/blocks.ts) — is written once
+ * to the record, signed by the pool (record.ts), and is a journal line that
+ * names who took it, through which door (`via`: the web's session or a
+ * token) and the agent the review rests on: the one that rebuilt each
+ * architecture on the project's review worker (`built_with`, what the worker
+ * ran when it staged the rebuild), else the maintainer's choice at the claim.
+ * Review's decisions are beside the package's request
+ * (factory/<name>/<request>/decision-<time>-<word>-<id>.json, decisionRecord
+ * below); a withdrawal is at factory/<name>/decisions/<time>-withdrawn.json,
+ * and a block's are routes/blocks.ts's. A decision is taken once — a second
+ * one on the same builds, sent at the same moment, is refused (the review and
+ * its rows are written by one conditional statement each, in one batch) — and
+ * never rewritten: what takes an approval back is a block, or the withdrawal
+ * a maintainer writes a reason for (#178), each a decision of its own on the
+ * record.
  */
 
 interface Staged {
@@ -75,6 +84,7 @@ interface Staged {
   finished_at: string | null;
   pkgbuild_ref: string;
   lease_owner: string | null;
+  params: string | null;
 }
 
 export async function handleReviewList(env: Env, request: Request): Promise<Response> {
@@ -130,14 +140,14 @@ export async function handleReviewList(env: Env, request: Request): Promise<Resp
   });
   // The contributor's build behind each of the project's rows in the list (its gate, its audit, its attempts): the score needs both halves.
   const fromIds = staged.results.map((r) => (r.trust === "project" && r.params ? (JSON.parse(r.params as string) as { review?: number }).review : null)).filter((x): x is number => typeof x === "number");
-  const fromRows = new Map<number, { id: number; attempts: number; status: string; result: string | null; version: string | null; pkgbuild_ref: string | null; audit_status: string | null; audit_result: string | null }>();
+  const fromRows = new Map<number, { id: number; owner: string | null; attempts: number; status: string; result: string | null; version: string | null; pkgbuild_ref: string | null; audit_status: string | null; audit_result: string | null }>();
   if (fromIds.length) {
     const rows = await env.DB.prepare(
-      `SELECT t.id, t.attempts, t.status, t.result, t.version, t.pkgbuild_ref,
+      `SELECT t.id, t.owner, t.attempts, t.status, t.result, t.version, t.pkgbuild_ref,
               (SELECT u.status FROM build_tasks u WHERE u.kind = 'audit' AND u.name = t.name AND json_extract(u.params, '$.task') = t.id ORDER BY u.id DESC LIMIT 1) AS audit_status,
               (SELECT u.result FROM build_tasks u WHERE u.kind = 'audit' AND u.name = t.name AND json_extract(u.params, '$.task') = t.id ORDER BY u.id DESC LIMIT 1) AS audit_result
          FROM build_tasks t WHERE t.id IN (${fromIds.map(() => "?").join(", ")})`,
-    ).bind(...fromIds).all<{ id: number; attempts: number; status: string; result: string | null; version: string | null; pkgbuild_ref: string | null; audit_status: string | null; audit_result: string | null }>();
+    ).bind(...fromIds).all<{ id: number; owner: string | null; attempts: number; status: string; result: string | null; version: string | null; pkgbuild_ref: string | null; audit_status: string | null; audit_result: string | null }>();
     for (const r of rows.results) fromRows.set(r.id, r);
   }
   // The chain's score (score.ts) from what the row and its other half carry; `ready` = the contributor's half is complete, a maintainer's time is well spent.
@@ -220,6 +230,7 @@ export async function handleReviewList(env: Env, request: Request): Promise<Resp
     const halves = [id, from, pb?.id].filter((x): x is number => typeof x === "number");
     return {
       owner: (r.package_owner as string | null) ?? (r.owner as string | null) ?? null,
+      requesters: requestersOf(r.package_owner as string | null, r.owner as string | null, from !== null ? fromRows.get(from)?.owner : null),
       already: prior.some((x) => x.task_id === id),
       inFlight: pb && ["queued", "leased", "staged"].includes(pb.status) ? { id: pb.id, status: pb.status } : null,
       standing: prior.some((x) => halves.includes(x.task_id) || (x.rebuild_task !== null && halves.includes(x.rebuild_task))),
@@ -412,8 +423,11 @@ export interface Can {
  * A decision allowed, or refused with the status the POST answers, the
  * reason, and — for the refusals an agent acts on — a code it can say
  * plainly without parsing the sentence: `sign_in`, `maintainer_only`, and
- * `conflict_of_interest` for the owner of the package (#247; the MCP
- * proposal's review tools read it).
+ * `conflict_of_interest` for a maintainer who asked for the package (#247;
+ * the MCP proposal's review tools read it). The role comes first, so a
+ * requester who is not a maintainer is told `maintainer_only`: what they
+ * lack to decide on any package, theirs or not. Nobody signed in hears
+ * `sign_in` from the door before the predicate runs (index.ts, nobody()).
  */
 type Verdict = { ok: true } | { ok: false; status: 401 | 403 | 404 | 409; why: string; code?: "sign_in" | "maintainer_only" | "conflict_of_interest" };
 
@@ -511,12 +525,43 @@ export function buildsOfPackage(rows: Pick<PackageRows, "builds" | "decisions">)
   };
 }
 
-/** What the predicate needs beyond the row: the registration's owner, a standing approval on the task, the project's build in flight, a standing approval anywhere on the chain, a package still in staging (a project's build the sweep emptied has nothing to publish), the claim — the project's rebuilds of the package still queued or running, what a release lets go — and what the package says (packageFacts). */
-interface Facts extends PackageFacts { owner: string | null; already: boolean; inFlight: { id: number; status: string } | null; standing: boolean; packaged: boolean; claim: number[] }
+/**
+ * What the predicate needs beyond the row: the registration's owner, who
+ * asked for the build (`requesters`), a standing approval on the task, the
+ * project's build in flight, a standing approval anywhere on the chain, a
+ * package still in staging (a project's build the sweep emptied has nothing
+ * to publish), the claim — what a release lets go — and what the package
+ * says (packageFacts).
+ */
+interface Facts extends PackageFacts { owner: string | null; requesters: string[]; already: boolean; inFlight: { id: number; status: string } | null; standing: boolean; packaged: boolean; claim: number[] }
 
-/** The claim on a package: the project's rebuilds of it still queued or running (one press of "Build by the project" — a claim — queues one per architecture). */
-export function claimOf(p: Pick<PackageBuilds, "project">): number[] {
-  return p.project.filter((b) => b.status === "queued" || b.status === "leased").map((b) => b.id);
+/**
+ * The claim on a package, as a release lets it go: the project's rebuilds a
+ * maintainer's claim queued and nobody decided — one press of "Build by the
+ * project" queues one per architecture, and they stage one by one — while
+ * one of them is still queued or running. Those, and the ones already
+ * staged beside them (their contributor's build still undecided): the claim
+ * is one round, let go whole, so the package really waits for a claim again
+ * (a release of the queued half left the staged half in review with nothing
+ * on the page to move it, 2026-09-29). A claim whose rebuilds all staged is
+ * none: a maintainer decides it, nobody releases it.
+ */
+export function claimOf(p: Pick<PackageBuilds, "project" | "staged">): number[] {
+  const live = (b: PackageBuilds["project"][number]) => b.status === "queued" || b.status === "leased";
+  if (!p.project.some(live)) return [];
+  const undecided = new Set(p.staged.map((s) => s.id));
+  return p.project.filter((b) => live(b) || (b.status === "staged" && undecided.has(b.review))).map((b) => b.id);
+}
+
+/** The contributor's build a project's rebuild answers (its params' `review`), or null for any other task. */
+function reviewOf(params: string | null | undefined): number | null {
+  if (!params) return null;
+  try { const r = (JSON.parse(params) as { review?: unknown }).review; return typeof r === "number" ? r : null; } catch { return null; }
+}
+
+/** Who asked for a build, as the conflict of interest reads it: the registration's owner today, the build's own owner, and — for the project's rebuild — the owner of the contributor's build it answers. An adoption moves the registration, never who asked for a build in review. */
+function requestersOf(...logins: (string | null | undefined)[]): string[] {
+  return [...new Set(logins.filter((l): l is string => typeof l === "string" && l !== ""))];
 }
 
 export function decisions(c: Contributor | null, t: Decidable, f: Facts): Record<Decision, Verdict> {
@@ -527,8 +572,10 @@ export function decisions(c: Contributor | null, t: Decidable, f: Facts): Record
   const notStaged = t.status !== "staged" ? no(409, `task ${t.id} is ${t.status}, not staged`) : null;
   // Conflict of interest: nobody decides on their own package, and a project with a single maintainer is no
   // exception — that maintainer's own packages wait for a second one (/docs/governance). Claiming it is deciding
-  // on it too (the claim is the project's rebuild), and so is letting a claim on it go.
-  const owner = c && f.owner === c.login ? no(403, `you brought ${t.name} — another maintainer decides; with one maintainer, that maintainer's own packages wait`, "conflict_of_interest") : null;
+  // on it too (the claim is the project's rebuild), and so is letting a claim on it go. Their own is the
+  // registration's today and every build they asked for: a package adopted from them is still not theirs to
+  // review while a build they asked for is in review (an adoption once made the requester a stranger to it).
+  const owner = c && (f.owner === c.login || f.requesters.includes(c.login)) ? no(403, `you brought ${t.name} — another maintainer decides; with one maintainer, that maintainer's own packages wait`, "conflict_of_interest") : null;
   // One review covers every architecture: it starts once each is built or not supported, and decides once the project built each again.
   const building = f.building ? no(409, `${f.building.arch} is still building (task ${f.building.id}): one review covers every architecture — it starts once each is built or not supported`) : null;
   // A build its architecture no longer stands on is history: the review decides where each architecture stands now.
@@ -595,17 +642,20 @@ const stamp = (): string => new Date().toISOString().replace(/[-:.Z]/g, "");
 
 /**
  * A decision on the record: one JSON document beside the package's request
- * (factory/<name>/<request>/decision-<time>-<word>.json, as a block's is),
- * written once and signed by the pool (record.ts). The word is in the name,
- * so two decisions in one millisecond never meet. The decision is already
- * in the database when this runs: a record the bucket refused is said in
- * the answer and the journal line (`record: null`, and the reason), not a
- * decision undone.
+ * (factory/<name>/<request>/decision-<time>-<word>-<id>.json), written once
+ * and signed by the pool (record.ts). The id is the decision's own — the
+ * review's, the rebuild's, the adopter's — so two decisions on one package in
+ * one millisecond never share a key (two approvals sent at once named one
+ * record, and the second overwrote the first, 2026-09-29), and the bucket
+ * refuses a key it holds (putRecord's conditional put) rather than rewrite
+ * it. The decision is already in the database when this runs: a record the
+ * bucket refused is said in the answer and the journal line (`record: null`,
+ * and the reason), not a decision undone.
  */
-export async function decisionRecord(env: Env, name: string, word: string, doc: Record<string, unknown>): Promise<{ url: string | null; error?: string }> {
+export async function decisionRecord(env: Env, name: string, word: string, id: string | number, doc: Record<string, unknown>): Promise<{ url: string | null; error?: string }> {
   try {
     const pkg = await env.DB.prepare("SELECT request_id FROM factory_packages WHERE name = ?").bind(name).first<{ request_id: number | null }>();
-    const file = `decision-${stamp()}-${word}.json`;
+    const file = `decision-${stamp()}-${word}-${String(id).replace(/[^A-Za-z0-9._-]/g, "_")}.json`;
     const key = pkg?.request_id ? recordKey(name, pkg.request_id, file) : `factory/${name}/0/${file}`;
     const record = await putRecord(env, key, { schema: "omarchy-pool/decision/1", decision: word, name, ...doc });
     return { url: recordUrl(env, record.key) };
@@ -630,32 +680,35 @@ async function standingApproval(env: Env, name: string, id: number): Promise<App
  * architectures stands. A decision never reads the stored column: it is a
  * view the next transition settles, not what a decision is taken on.
  */
-async function factsOf(env: Env, t: Decidable & { owner: string | null; version?: string | null }): Promise<Facts & { approval: Approval | null; builds: PackageBuilds; targets: Targets }> {
-  const [owner, already, approval, packaged, rows] = await Promise.all([
+async function factsOf(env: Env, t: Decidable & { owner: string | null; version?: string | null; params?: string | null }): Promise<Facts & { approval: Approval | null; builds: PackageBuilds; targets: Targets }> {
+  // The project's rebuild answers a contributor's build: whoever asked for that one asked for this one too (requestersOf), by the primary key.
+  const from = t.trust === "project" ? reviewOf(t.params) : null;
+  const [owner, already, approval, packaged, rows, asked] = await Promise.all([
     ownerOf(env, t.name, t.owner),
     env.DB.prepare(`SELECT id FROM approvals WHERE task_id = ? AND ${standsSql()}`).bind(t.id).first(),
     standingApproval(env, t.name, t.id),
     t.trust === "project" ? env.DB.prepare("SELECT 1 AS one FROM staging_objects WHERE task_id = ? AND key LIKE '%.pkg.tar.zst' LIMIT 1").bind(t.id).first() : Promise.resolve(true),
     packageRows(env, t.name, { unregistered: true }),
+    from !== null ? env.DB.prepare("SELECT owner FROM build_tasks WHERE id = ?").bind(from).first<{ owner: string | null }>() : Promise.resolve(null),
   ]);
   const builds = rows ? buildsOfPackage(rows) : { building: [], staged: [], project: [] };
   const targets = rows ? targetsOf(rows.arches, rows.builds, rows.decisions, rows.closedThrough) : {};
   // The project's build of this one, queued, running or staged: the newest, from the same rows.
   const pb = builds.project.find((b) => b.review === t.id && ["queued", "leased", "staged"].includes(b.status));
   const inFlight = pb ? { id: pb.id, status: pb.status } : null;
-  return { owner, already: !!already, inFlight, standing: !!approval, packaged: !!packaged, claim: claimOf(builds), approval, builds, targets, ...packageFacts({ ...t, version: t.version ?? null }, builds, targets) };
+  return { owner, requesters: requestersOf(owner, t.owner, asked?.owner), already: !!already, inFlight, standing: !!approval, packaged: !!packaged, claim: claimOf(builds), approval, builds, targets, ...packageFacts({ ...t, version: t.version ?? null }, builds, targets) };
 }
 
 /** GET /factory/tasks/:id/can — what the caller may do on this task, and why not: no-store, it is the caller's. */
 export async function handleTaskCan(c: Contributor | null, id: number, env: Env): Promise<Response> {
-  const t = await env.DB.prepare("SELECT id, name, arch, trust, status, owner, version FROM build_tasks WHERE id = ?").bind(id).first<Decidable & { owner: string | null; version: string | null }>();
+  const t = await env.DB.prepare("SELECT id, name, arch, trust, status, owner, version, params FROM build_tasks WHERE id = ?").bind(id).first<Decidable & { owner: string | null; version: string | null; params: string | null }>();
   if (!t) return json({ error: "no such task" }, 404);
   return json({ task: id, can: can(decisions(c, t, await factsOf(env, t))) }, 200, { "cache-control": "no-store" });
 }
 
 /**
- * "Build it by the project": a maintainer, never the owner, on a
- * contributor's staged build. The project builds the package again on
+ * "Build it by the project" — a claim (#247): a maintainer, never the owner,
+ * on a contributor's staged build. The project builds the package again on
  * workers it trusts, with its own agent — the request, the contributor's
  * PKGBUILD, log, gate and audit as the lesson, never the product — through
  * the same gate, staged like any build. One review covers the package, so
@@ -664,16 +717,26 @@ export async function handleTaskCan(c: Contributor | null, id: number, env: Env)
  * that the project is not building yet (a failed one is asked again) —
  * never an older build of an architecture whose newest one failed. Then a
  * maintainer approves *those*.
+ *
+ * The maintainer's choice of agent is the worker they name for this
+ * architecture; each other architecture goes to a live project worker of it
+ * with the same agent when there is one (an idle one first), else to any
+ * project worker — and what each ran is kept when it stages (built_with,
+ * routes/factory.ts). A claim is one maintainer's: the rebuild of this build
+ * is queued by one conditional statement, so a second claim sent at the
+ * same moment is refused with whose it is. Claiming is deciding on the
+ * package, so it is signed on the record and a journal line like the rest.
  */
 export async function handleProjectBuild(c: Contributor, id: number, request: Request, env: Env): Promise<Response> {
-  const b = (await request.json().catch(() => ({}))) as { note?: string; worker?: unknown };
+  const b = (await request.json().catch(() => ({}))) as { note?: unknown; worker?: unknown };
+  const note = typeof b.note === "string" && b.note.trim() ? b.note.trim() : null;
   const t = await env.DB.prepare("SELECT * FROM build_tasks WHERE id = ?").bind(id).first<Staged & { trust: string }>();
   if (!t) return json({ error: "no such task" }, 404);
   const f = await factsOf(env, t);
   const no = refused(decisions(c, t, f).build);
   if (no) return no;
   const owner = f.owner;
-  // Where it runs: one of the project's workers that builds this architecture, when the maintainer says which (the native one, not the emulated one); the other architectures go to the queue.
+  // Where it runs: one of the project's workers that builds this architecture, when the maintainer says which (the native one, not the emulated one).
   let pinned: string | null = null, agent: string | null = null;
   if (typeof b.worker === "string" && b.worker.trim()) {
     const w = await env.DB.prepare("SELECT id, arch, kinds, agent, agent_status FROM build_workers WHERE id = ? AND revoked_at IS NULL AND trust = 'project'").bind(b.worker.trim()).first<{ id: string; arch: string; kinds: string | null; agent: string | null; agent_status: string | null }>();
@@ -686,33 +749,61 @@ export async function handleProjectBuild(c: Contributor, id: number, request: Re
     // The maintainer's choice of agent is the worker's: the one that drafts the rebuild (#247), on the record with the claim.
     agent = w.agent;
   }
-  // This build, and each other architecture the review covers (othersOf) that the project is not already building or has built.
+  // This build first — the claim's own, the conditional one below — then each other architecture the review covers (othersOf) that the project is not already building or has built.
   const others = othersOf(t, f.builds, f.targets).filter((s) => !f.builds.project.some((p) => p.review === s.id && ["queued", "leased", "staged"].includes(p.status)));
-  const from = [{ id, arch: t.arch, version: t.version }, ...others]
-    .sort((x, y) => REPO_ARCHES.indexOf(x.arch as (typeof REPO_ARCHES)[number]) - REPO_ARCHES.indexOf(y.arch as (typeof REPO_ARCHES)[number]));
+  const from = [{ id, arch: t.arch, version: t.version }, ...others.sort((x, y) => REPO_ARCHES.indexOf(x.arch as (typeof REPO_ARCHES)[number]) - REPO_ARCHES.indexOf(y.arch as (typeof REPO_ARCHES)[number]))];
+  const round = JSON.stringify(from.map((s) => s.id));
   const pkg = await env.DB.prepare("SELECT request_id, project, source, release, description, license FROM factory_packages WHERE name = ?").bind(t.name).first<{ request_id: number | null; project: string | null; source: string | null; release: string | null; description: string | null; license: string | null }>();
-  const queued: { task: number; arch: string; from: number }[] = [];
+  // The same agent on the other architectures: a live project worker of that architecture that builds, whose agent answered — an idle one first. build_workers is the project's and the contributors' machines, a few dozen rows.
+  const alive = new Date(Date.now() - WORKER_ALIVE_MINUTES * 60000).toISOString();
+  const sameAgent = async (arch: string): Promise<string | null> =>
+    agent
+      ? ((await env.DB.prepare(
+          "SELECT id FROM build_workers WHERE arch = ? AND trust = 'project' AND revoked_at IS NULL AND agent = ? AND agent_status = 'ok' AND last_seen > ? AND (kinds IS NULL OR EXISTS (SELECT 1 FROM json_each(kinds) WHERE value = 'build')) ORDER BY current_task IS NOT NULL, last_seen DESC LIMIT 1",
+        ).bind(arch, agent, alive).first<{ id: string }>())?.id ?? null)
+      : null;
+  const queued: { task: number; arch: string; from: number; pinned_to: string | null; agent: string | null }[] = [];
   for (const s of from) {
+    const pin = s.id === id ? pinned : await sameAgent(s.arch);
     // The maintainer's note is on the record and is the hint the project's agent drafts with (the worker reads params.hint).
     // What the rebuild starts from is the request's facts, the maintainer's word and the contributor's text evidence as the lesson (read through the public evidence routes): never a staged object of the contributor's — no package, no staging prefix, no checksum — and its job's token reads no staging but its own (jobtoken.ts), so the factory's packages are never downloaded, let alone reused (#247; test/review.test.ts holds it).
-    const params = { review: s.id, request: pkg?.request_id ?? null, project: pkg?.project ?? null, source: pkg?.source ?? null, version: pkg?.release ?? s.version, description: pkg?.description ?? null, license: pkg?.license ?? null, owner, by: c.login, agent: s.id === id ? agent : null, note: b.note ?? null, hint: typeof b.note === "string" && b.note.trim() ? b.note.trim().slice(0, 600) : null };
-    const row = await env.DB.prepare(
-      `INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, params, pinned_to) VALUES (?, ?, ?, ?, ?, 30, 0, 'project', ?, 'build', ?, ?) RETURNING id`,
-    )
-      .bind(t.name, s.arch, s.version, `review:${s.id}`, `project build asked by ${c.login}`, owner, JSON.stringify(params), s.id === id ? pinned : null)
+    const params = { review: s.id, request: pkg?.request_id ?? null, project: pkg?.project ?? null, source: pkg?.source ?? null, version: pkg?.release ?? s.version, description: pkg?.description ?? null, license: pkg?.license ?? null, owner, by: c.login, agent: pin ? agent : null, note, hint: note ? note.slice(0, 600) : null };
+    // Queued only while no rebuild of the round is queued, running or staged: two claims sent at once are one claim (the name's index, then each row's params).
+    const row = await env.DB.prepare(CLAIM_SQL)
+      .bind(t.name, s.arch, s.version, `review:${s.id}`, `project build asked by ${c.login}`, owner, JSON.stringify(params), pin, t.name, s.id === id ? round : JSON.stringify([s.id]))
       .first<{ id: number }>();
-    if (row) queued.push({ task: row.id, arch: s.arch, from: s.id });
+    if (row) queued.push({ task: row.id, arch: s.arch, from: s.id, pinned_to: pin, agent: pin ? agent : null });
+    else if (s.id === id) {
+      const by = await env.DB.prepare("SELECT json_extract(params, '$.by') AS by FROM build_tasks WHERE name = ? AND +kind = 'build' AND +trust = 'project' AND +status IN ('queued', 'leased', 'staged') AND json_extract(params, '$.review') IN (SELECT value FROM json_each(?)) ORDER BY id DESC LIMIT 1").bind(t.name, round).first<{ by: string | null }>();
+      return json({ error: `${t.name} was claimed a moment ago${by?.by ? ` by ${by.by}` : ""}: the project is already on it` }, 409);
+    }
   }
+  queued.sort((x, y) => REPO_ARCHES.indexOf(x.arch as (typeof REPO_ARCHES)[number]) - REPO_ARCHES.indexOf(y.arch as (typeof REPO_ARCHES)[number]));
   const arches = queued.map((q) => q.arch).join(" · ");
+  const lead = queued.find((q) => q.from === id)!;
   await env.DB.prepare("UPDATE factory_packages SET detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?")
     .bind(`${t.version ?? ""} for ${arches}: the project is building it (task${queued.length > 1 ? "s" : ""} ${queued.map((q) => q.task).join(", ")}), asked by ${c.login}`, t.name)
     .run();
+  const via = viaOf(request), at = new Date().toISOString();
+  const record = await decisionRecord(env, t.name, "claim", lead.task, { version: t.version, arches: queued.map((q) => q.arch), owner, from: id, tasks: queued, by: c.login, via, agent, pinned_to: pinned, at, note });
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('review', NULL, 'factory', 'ok', ?, ?)")
-    .bind(`${t.name} ${t.version ?? ""} (${arches}): ${c.login} asked the project to build it — ${queued.map((q) => `task ${q.task} from ${owner ?? "?"}'s build ${q.from}`).join(", ")}${agent ? ` — claimed with ${agent}` : ""}`, JSON.stringify({ task: queued.find((q) => q.from === id)?.task, tasks: queued, from: id, name: t.name, arch: t.arch, arches: queued.map((q) => q.arch), by: c.login, via: viaOf(request), agent, pinned_to: pinned, owner, note: b.note ?? null }))
+    .bind(`${t.name} ${t.version ?? ""} (${arches}): ${c.login} asked the project to build it — ${queued.map((q) => `task ${q.task} from ${owner ?? "?"}'s build ${q.from}`).join(", ")}${agent ? ` — claimed with ${agent}` : ""}`, JSON.stringify({ task: lead.task, tasks: queued, from: id, name: t.name, arch: t.arch, arches: queued.map((q) => q.arch), by: c.login, via, agent, pinned_to: pinned, owner, note, record: record.url, ...(record.error ? { record_error: record.error } : {}) }))
     .run();
   await settleTargets(env, t.name);
-  return json({ task: queued.find((q) => q.from === id)?.task, tasks: queued.map((q) => q.task), arches: queued.map((q) => q.arch), from: id, by: c.login, pinned_to: pinned, agent });
+  return json({ task: lead.task, tasks: queued.map((q) => q.task), arches: queued.map((q) => q.arch), from: id, by: c.login, pinned_to: pinned, agent, record: record.url });
 }
+
+/**
+ * A claim's rebuild, queued only while none of the round is: no project
+ * rebuild of the builds named (`review` in its params) queued, running or
+ * staged. One statement, so D1 serialises two claims sent at once and the
+ * second queues nothing. Led by the name ((name, arch, id) index; `+` keeps
+ * the planner there), then each of its rows' params.
+ */
+export const CLAIM_SQL = `INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, params, pinned_to)
+  SELECT ?, ?, ?, ?, ?, 30, 0, 'project', ?, 'build', ?, ?
+   WHERE NOT EXISTS (SELECT 1 FROM build_tasks r WHERE r.name = ? AND +r.kind = 'build' AND +r.trust = 'project' AND +r.status IN ('queued', 'leased', 'staged') AND json_extract(r.params, '$.review') IN (SELECT value FROM json_each(?)))
+  RETURNING id`;
 
 /**
  * Approve: a maintainer, never the owner, on the project's staged build —
@@ -726,7 +817,8 @@ export async function handleProjectBuild(c: Contributor, id: number, request: Re
  * and links the review to the build (the seal and the track record read it).
  */
 export async function handleApprove(c: Contributor, id: number, request: Request, env: Env): Promise<Response> {
-  const b = (await request.json().catch(() => ({}))) as { note?: string };
+  const b = (await request.json().catch(() => ({}))) as { note?: unknown };
+  const note = typeof b.note === "string" ? b.note : null;
   const t = await env.DB.prepare("SELECT * FROM build_tasks WHERE id = ?").bind(id).first<Staged & { trust: string; params: string | null; result_filename: string | null }>();
   if (!t) return json({ error: "no such task" }, 404);
   const f = await factsOf(env, t);
@@ -744,7 +836,7 @@ export async function handleApprove(c: Contributor, id: number, request: Request
   for (const p of others.filter((x) => x.status === "failed")) notSupported[p.arch] = p.id;
   for (const [arch, x] of Object.entries(current)) if (x.status === "not_supported" && !rows.some((r) => r.arch === arch)) notSupported[arch] = x.task;
   // The staged package of each target: the predicate said so of this one (f.packaged), the publish jobs need the names.
-  const targets: { t: Staged & { trust: string }; files: string[]; trial: string }[] = [];
+  const targets: { t: Staged & { trust: string }; files: string[]; trial: string; agent: string | null }[] = [];
   for (const r of rows) {
     const files = (await env.DB.prepare("SELECT key FROM staging_objects WHERE task_id = ? AND key LIKE '%.pkg.tar.zst'").bind(r.id).all<{ key: string }>()).results.map((x) => x.key.slice(x.key.lastIndexOf("/") + 1));
     if (!files.length) return json({ error: r.id === id ? "the project's build left no package in staging" : `the project's build of ${r.arch} (task ${r.id}) left no package in staging` }, 409);
@@ -752,37 +844,92 @@ export async function handleApprove(c: Contributor, id: number, request: Request
     // verdict) goes to rc and stable with edge — the publish job's token gets
     // those rings only then. Evidence decides the speed; the maintainer decided the build.
     const trial = trialOf(...(await latestTrial(env, r.id)));
-    targets.push({ t: r, files, trial: trial.status === "done" ? (trial.verdict ?? "unknown") : trial.status });
+    targets.push({ t: r, files, trial: trial.status === "done" ? (trial.verdict ?? "unknown") : trial.status, agent: await rebuiltWith(env, r) });
   }
   const arches = targets.map((x) => x.t.arch);
-  const review = await env.DB.prepare("INSERT INTO reviews (name, version, decision, by, note, arches, not_supported) VALUES (?, ?, 'approved', ?, ?, ?, ?) RETURNING id")
-    .bind(t.name, t.version, c.login, b.note ?? null, JSON.stringify(arches), JSON.stringify(notSupported))
-    .first<{ id: number }>();
+  // The review and its rows, taken at once: a second approval — or a rejection — of these builds sent at the same moment writes nothing.
+  const review = await takeRound(env, { name: t.name, version: t.version, decision: "approved", by: c.login, note, arches, notSupported, rows: targets.map((x) => ({ task: x.t.id, arch: x.t.arch, version: x.t.version, rebuild: x.t.id })) });
+  if (review === null) return decidedAlready(env, t.name, targets.map((x) => x.t.id));
   const publishes: Record<string, number> = {};
   for (const x of targets) {
     // The review it publishes is `review_id`: `review` in a task's params names the contributor's build a project's build answers, and every reader of a task (its page's provenance, the claim's upload, the job's scopes) reads it so.
     const publish = await env.DB.prepare(
       `INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, params) VALUES (?, ?, ?, '-', ?, 20, 1, 'project', NULL, 'publish', ?) RETURNING id`,
     )
-      .bind(t.name, x.t.arch, x.t.version, `approved by ${c.login}`, JSON.stringify({ task: x.t.id, name: t.name, arch: x.t.arch, version: x.t.version, files: x.files, by: c.login, trial: x.trial, review_id: review?.id ?? null }))
+      .bind(t.name, x.t.arch, x.t.version, `approved by ${c.login}`, JSON.stringify({ task: x.t.id, name: t.name, arch: x.t.arch, version: x.t.version, files: x.files, by: c.login, trial: x.trial, review_id: review }))
       .first<{ id: number }>();
     if (publish) publishes[x.t.arch] = publish.id;
   }
   const ns = Object.keys(notSupported);
-  await env.DB.batch([
-    ...targets.map((x) => env.DB.prepare(`INSERT INTO approvals (task_id, name, arch, version, decision, by, note, rebuild_task, review_id) VALUES (?, ?, ?, ?, 'approved', ?, ?, ?, ?)`).bind(x.t.id, t.name, x.t.arch, x.t.version, c.login, b.note ?? null, x.t.id, review?.id ?? null)),
-    env.DB.prepare("UPDATE factory_packages SET status = 'approved', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?")
-      .bind(`${t.version ?? ""} for ${arches.join(" · ")} approved by ${c.login}${ns.length ? ` (${ns.join(" · ")} not supported)` : ""}; publishing the project's build${arches.length > 1 ? "s" : ""} (job${arches.length > 1 ? "s" : ""} ${Object.values(publishes).join(", ")})`, t.name),
-  ]);
+  await env.DB.prepare("UPDATE factory_packages SET status = 'approved', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?")
+    .bind(`${t.version ?? ""} for ${arches.join(" · ")} approved by ${c.login}${ns.length ? ` (${ns.join(" · ")} not supported)` : ""}; publishing the project's build${arches.length > 1 ? "s" : ""} (job${arches.length > 1 ? "s" : ""} ${Object.values(publishes).join(", ")})`, t.name)
+    .run();
   for (const x of targets) await cancelPendingAudit(env, x.t.id);
-  // Signed and journaled: who, through which door, and the agent that rebuilt what ships — the review worker's the maintainer chose at the claim.
-  const via = viaOf(request), agent = await workerAgent(env, t.lease_owner), at = new Date().toISOString();
-  const record = await decisionRecord(env, t.name, "approve", { version: t.version, arches, not_supported: notSupported, owner, review: review?.id ?? null, targets: targets.map((x) => ({ arch: x.t.arch, task: x.t.id, files: x.files, trial: x.trial, publish: publishes[x.t.arch] ?? null })), by: c.login, via, agent, at, note: b.note ?? null });
+  // Signed and journaled: who, through which door, and the agent that rebuilt what ships — per architecture, what its review worker ran (rebuiltWith); `agent` is this build's.
+  const via = viaOf(request), agent = targets.find((x) => x.t.id === id)?.agent ?? null, at = new Date().toISOString();
+  const record = await decisionRecord(env, t.name, "approve", `r${review}`, { version: t.version, arches, not_supported: notSupported, owner, review, targets: targets.map((x) => ({ arch: x.t.arch, task: x.t.id, files: x.files, trial: x.trial, publish: publishes[x.t.arch] ?? null, agent: x.agent })), by: c.login, via, agent, at, note });
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('approve', 'edge', 'factory', 'ok', ?, ?)")
-    .bind(`${t.name} ${t.version ?? ""} (${arches.join(", ")}${ns.length ? `; ${ns.join(", ")} not supported` : ""}) approved by ${c.login}${agent ? ` (rebuilt with ${agent})` : ""}${b.note ? " — " + b.note.slice(0, 120) : ""}; the project's build${arches.length > 1 ? "s" : ""} ${targets.map((x) => x.t.id).join(", ")} go${arches.length > 1 ? "" : "es"} into edge (job${arches.length > 1 ? "s" : ""} ${Object.values(publishes).join(", ")})`, JSON.stringify({ review: review?.id ?? null, task: id, publish: publishes[t.arch], publishes, name: t.name, arch: t.arch, arches, not_supported: notSupported, by: c.login, via, agent, owner, note: b.note ?? null, record: record.url, ...(record.error ? { record_error: record.error } : {}) }))
+    .bind(`${t.name} ${t.version ?? ""} (${arches.join(", ")}${ns.length ? `; ${ns.join(", ")} not supported` : ""}) approved by ${c.login}${withAgents(targets.map((x) => ({ arch: x.t.arch, agent: x.agent })))}${note ? " — " + note.slice(0, 120) : ""}; the project's build${arches.length > 1 ? "s" : ""} ${targets.map((x) => x.t.id).join(", ")} go${arches.length > 1 ? "" : "es"} into edge (job${arches.length > 1 ? "s" : ""} ${Object.values(publishes).join(", ")})`, JSON.stringify({ review, task: id, publish: publishes[t.arch], publishes, name: t.name, arch: t.arch, arches, not_supported: notSupported, by: c.login, via, agent, agents: Object.fromEntries(targets.map((x) => [x.t.arch, x.agent])), owner, note, record: record.url, ...(record.error ? { record_error: record.error } : {}) }))
     .run();
   await settleTargets(env, t.name);
-  return json({ task: id, decision: "approved", by: c.login, publish: publishes[t.arch], publishes, review: review?.id ?? null, arches, not_supported: notSupported, via, agent, record: record.url });
+  return json({ task: id, decision: "approved", by: c.login, publish: publishes[t.arch], publishes, review, arches, not_supported: notSupported, via, agent, record: record.url });
+}
+
+/**
+ * The agent that rebuilt a project's build: what its review worker ran when
+ * it staged it (params.built_with, routes/factory.ts), else the one the
+ * maintainer chose at the claim (params.agent), else — a rebuild staged
+ * before either was kept — the worker's agent now. A worker re-reports its
+ * agent with every claim, so its row is the last resort, never the first: a
+ * worker that switched model after the rebuild would have the pool sign the
+ * wrong one.
+ */
+async function rebuiltWith(env: Env, t: { params?: string | Record<string, unknown> | null; lease_owner: string | null }): Promise<string | null> {
+  let p: { built_with?: unknown; agent?: unknown } = {};
+  try { p = typeof t.params === "string" ? (JSON.parse(t.params) as typeof p) : (t.params ?? {}); } catch { p = {}; }
+  if (typeof p.built_with === "string" && p.built_with) return p.built_with;
+  if (typeof p.agent === "string" && p.agent) return p.agent;
+  return workerAgent(env, t.lease_owner);
+}
+
+/** The journal's words for the agents a decision rests on: " (rebuilt with A)", or each architecture's when they differ; nothing when none is known. */
+function withAgents(xs: { arch: string; agent: string | null }[]): string {
+  const known = xs.filter((x) => x.agent);
+  if (!known.length) return "";
+  const one = [...new Set(known.map((x) => x.agent))];
+  return one.length === 1 ? ` (rebuilt with ${one[0]})` : ` (rebuilt with ${known.map((x) => `${x.agent} on ${x.arch}`).join(", ")})`;
+}
+
+/** No live decision on any of the builds named — an approvals row not withdrawn: what both statements of a decision's batch write under. */
+const UNDECIDED = "NOT EXISTS (SELECT 1 FROM approvals a WHERE a.task_id IN (SELECT value FROM json_each(?)) AND a.withdrawn_at IS NULL)";
+/** A decision's review, written only while its builds are undecided (UNDECIDED; the approvals' task index). */
+export const REVIEW_SQL = `INSERT INTO reviews (name, version, decision, by, note, arches, not_supported, released, changes) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${UNDECIDED} RETURNING id`;
+/** Its rows, one per build decided, under the same condition, with the review just written (the name's newest, by the reviews' (name, id) index). */
+export const ROWS_SQL = `INSERT INTO approvals (task_id, name, arch, version, decision, by, note, rebuild_task, review_id)
+  SELECT json_extract(j.value, '$.task'), ?, json_extract(j.value, '$.arch'), json_extract(j.value, '$.version'), ?, ?, ?, json_extract(j.value, '$.rebuild'), (SELECT MAX(id) FROM reviews WHERE name = ?)
+    FROM json_each(?) j WHERE ${UNDECIDED}`;
+
+/**
+ * A decision taken: its review and one approvals row per build it decided,
+ * in one batch — a transaction, nothing runs between its two statements —
+ * each written only while no live decision is on any of those builds. Two
+ * decisions sent at once on the same builds (two approvals; changes and a
+ * rejection) are one decision: the facts both read said "undecided", and the
+ * second batch writes nothing. The review's id, or null: decided already.
+ */
+async function takeRound(env: Env, r: { name: string; version: string | null; decision: "approved" | "rejected"; by: string; note: string | null; arches: string[]; notSupported?: Record<string, number | null>; released?: boolean; changes?: boolean; rows: { task: number; arch: string; version: string | null; rebuild: number | null }[] }): Promise<number | null> {
+  const decided = JSON.stringify(r.rows.map((x) => x.task));
+  const [review] = await env.DB.batch([
+    env.DB.prepare(REVIEW_SQL).bind(r.name, r.version, r.decision, r.by, r.note, JSON.stringify(r.arches), JSON.stringify(r.notSupported ?? {}), r.released ? 1 : 0, r.changes ? 1 : 0, decided),
+    env.DB.prepare(ROWS_SQL).bind(r.name, r.decision, r.by, r.note, r.name, JSON.stringify(r.rows), decided),
+  ]);
+  return (review.results[0] as { id?: number } | undefined)?.id ?? null;
+}
+
+/** The 409 of a decision another maintainer took a moment before: what it was and whose. */
+async function decidedAlready(env: Env, name: string, tasks: number[]): Promise<Response> {
+  const d = await env.DB.prepare("SELECT decision, by FROM approvals WHERE task_id IN (SELECT value FROM json_each(?)) AND withdrawn_at IS NULL ORDER BY id DESC LIMIT 1").bind(JSON.stringify(tasks)).first<{ decision: string; by: string }>();
+  return json({ error: `${name} was decided a moment ago${d ? `: ${d.decision} by ${d.by}` : ""}` }, 409);
 }
 
 /**
@@ -797,14 +944,15 @@ export async function handleApprove(c: Contributor, id: number, request: Request
  * is not deciding on a package.
  */
 export async function handleWithdraw(c: Contributor, id: number, request: Request, env: Env): Promise<Response> {
-  const b = (await request.json().catch(() => ({}))) as { note?: string };
+  const b = (await request.json().catch(() => ({}))) as { note?: unknown };
   const t = await env.DB.prepare("SELECT id, name, arch, trust, status, owner FROM build_tasks WHERE id = ?").bind(id).first<Decidable & { owner: string | null }>();
   if (!t) return json({ error: "no such task" }, 404);
   const f = await factsOf(env, t);
   const no = refused(decisions(c, t, f).withdraw);
   if (no) return no;
   // The input after the predicate, as in the other three handlers: a caller who may not is told so, whatever they sent.
-  if (!b.note || b.note.trim().length < 4) return json({ error: "a note saying why is required — it goes on the record" }, 400);
+  const note = typeof b.note === "string" ? b.note.trim() : "";
+  if (note.length < 4) return json({ error: "a note saying why is required — it goes on the record" }, 400);
   const a = { ...f.approval!, name: t.name };
   const at = new Date().toISOString();
   // The review, whole: every row of it that stands (a row a Worker older than reviews wrote is a review of its own).
@@ -813,19 +961,19 @@ export async function handleWithdraw(c: Contributor, id: number, request: Reques
     : [{ id: a.id, arch: a.arch, task_id: a.task_id, rebuild_task: a.rebuild_task }];
   const arches = void_.map((x) => x.arch);
   await env.DB.batch([
-    env.DB.prepare("UPDATE approvals SET withdrawn_at = ?, withdrawn_by = ?, withdrawn_reason = ? WHERE id IN (SELECT value FROM json_each(?))").bind(at, c.login, b.note.trim().slice(0, 500), JSON.stringify(void_.map((x) => x.id))),
-    ...(a.review_id !== null ? [env.DB.prepare("UPDATE reviews SET withdrawn_at = ?, withdrawn_by = ?, withdrawn_reason = ? WHERE id = ? AND withdrawn_at IS NULL").bind(at, c.login, b.note.trim().slice(0, 500), a.review_id)] : []),
+    env.DB.prepare("UPDATE approvals SET withdrawn_at = ?, withdrawn_by = ?, withdrawn_reason = ? WHERE id IN (SELECT value FROM json_each(?))").bind(at, c.login, note.slice(0, 500), JSON.stringify(void_.map((x) => x.id))),
+    ...(a.review_id !== null ? [env.DB.prepare("UPDATE reviews SET withdrawn_at = ?, withdrawn_by = ?, withdrawn_reason = ? WHERE id = ? AND withdrawn_at IS NULL").bind(at, c.login, note.slice(0, 500), a.review_id)] : []),
   ]);
   // Out of every ring it reached through this review; the registration is evidence again.
-  const rings = await pullFromRings(env, a.name, `approval of ${a.name} ${a.version ?? ""} withdrawn by ${c.login}: ${b.note.trim().slice(0, 120)}`);
+  const rings = await pullFromRings(env, a.name, `approval of ${a.name} ${a.version ?? ""} withdrawn by ${c.login}: ${note.slice(0, 120)}`);
   await env.DB.prepare("UPDATE factory_packages SET status = 'staged', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ? AND status IN ('approved', 'published')")
-    .bind(`approval of ${a.version ?? ""} for ${arches.join(" · ")} withdrawn by ${c.login}: ${b.note.trim().slice(0, 160)} — waits for another maintainer`, a.name)
+    .bind(`approval of ${a.version ?? ""} for ${arches.join(" · ")} withdrawn by ${c.login}: ${note.slice(0, 160)} — waits for another maintainer`, a.name)
     .run();
   const owner = f.owner;
   const via = viaOf(request);
-  const record = await putRecord(env, `factory/${a.name}/decisions/${at.replace(/[:.]/g, "-")}-withdrawn.json`, { schema: "omarchy-pool/decision/1", decision: "withdrawn", name: a.name, arch: a.arch, arches, version: a.version, owner, review: a.review_id, approval: { id: a.id, task: a.task_id, rebuild_task: a.rebuild_task, by: a.by, at: a.created_at, note: a.note }, targets: void_, by: c.login, via, agent: null, at, reason: b.note.trim(), rings });
+  const record = await putRecord(env, `factory/${a.name}/decisions/${at.replace(/[:.]/g, "-")}-withdrawn.json`, { schema: "omarchy-pool/decision/1", decision: "withdrawn", name: a.name, arch: a.arch, arches, version: a.version, owner, review: a.review_id, approval: { id: a.id, task: a.task_id, rebuild_task: a.rebuild_task, by: a.by, at: a.created_at, note: a.note }, targets: void_, by: c.login, via, agent: null, at, reason: note, rings });
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('withdraw', NULL, 'factory', 'warn', ?, ?)")
-    .bind(`${a.name} ${a.version ?? ""} (${arches.join(", ")}): the approval by ${a.by} withdrawn by ${c.login} — ${b.note.trim().slice(0, 120)}${rings.length ? "; pulled from " + rings.map((r) => r.ring).join(", ") : ""}`, JSON.stringify({ name: a.name, arch: a.arch, arches, version: a.version, review: a.review_id, approval: a.id, task: a.task_id, rebuild_task: a.rebuild_task, approved_by: a.by, by: c.login, via, agent: null, reason: b.note.trim(), rings, record: recordUrl(env, record.key) }))
+    .bind(`${a.name} ${a.version ?? ""} (${arches.join(", ")}): the approval by ${a.by} withdrawn by ${c.login} — ${note.slice(0, 120)}${rings.length ? "; pulled from " + rings.map((r) => r.ring).join(", ") : ""}`, JSON.stringify({ name: a.name, arch: a.arch, arches, version: a.version, review: a.review_id, approval: a.id, task: a.task_id, rebuild_task: a.rebuild_task, approved_by: a.by, by: c.login, via, agent: null, reason: note, rings, record: recordUrl(env, record.key) }))
     .run();
   await settleTargets(env, a.name);
   return json({ withdrawn: a.id, review: a.review_id, arches, task: a.task_id, rebuild_task: a.rebuild_task, by: c.login, at, rings, record: recordUrl(env, record.key) });
@@ -860,12 +1008,14 @@ export async function handleChanges(c: Contributor, id: number, request: Request
 
 /** The round of a package's review closed by a maintainer: rejected (a request's name freed), or sent back with changes asked for (the name kept). */
 async function closeRound(c: Contributor, id: number, request: Request, env: Env, word: "reject" | "changes"): Promise<Response> {
-  const b = (await request.json().catch(() => ({}))) as { note?: string };
+  const b = (await request.json().catch(() => ({}))) as { note?: unknown };
   const t = await env.DB.prepare("SELECT * FROM build_tasks WHERE id = ?").bind(id).first<Staged & { trust: string }>();
   if (!t) return json({ error: "no such task" }, 404);
   const no = refused(decisions(c, t, await factsOf(env, t))[word]);
   if (no) return no;
-  if (!b.note) return json({ error: word === "changes" ? "a note saying what to change is required — the requester reads it" : "a note saying why is required" }, 400);
+  // The input after the predicate, and before any write: a note that is not text is none (a number once wrote the review, then failed on it).
+  const note = typeof b.note === "string" ? b.note.trim() : "";
+  if (!note) return json({ error: word === "changes" ? "a note saying what to change is required — the requester reads it" : "a note saying why is required" }, 400);
   // The round: every chain of the package no standing approval decided, its builds still in flight or staged.
   const story = await storyRows(env, t.name);
   const round = chains(story.tasks, story.approvals, story.pkg, story.request)
@@ -884,34 +1034,33 @@ async function closeRound(c: Contributor, id: number, request: Request, env: Env
   const released = word === "reject" && !inPool;
   const closes = !inPool;
   const done = word === "changes" ? `changes requested by ${c.login}` : `rejected by ${c.login}`;
-  const review = await env.DB.prepare("INSERT INTO reviews (name, version, decision, by, note, arches, released, changes) VALUES (?, ?, 'rejected', ?, ?, ?, ?, ?) RETURNING id")
-    .bind(t.name, t.version, c.login, b.note, JSON.stringify(decided.map((x) => x.arch)), released ? 1 : 0, word === "changes" ? 1 : 0)
-    .first<{ id: number }>();
+  // The review and its rows, taken at once: changes and a rejection — or two of either — sent at the same moment are one decision.
+  const review = await takeRound(env, { name: t.name, version: t.version, decision: "rejected", by: c.login, note, arches: decided.map((x) => x.arch), released, changes: word === "changes", rows: decided.map((x) => ({ task: x.id, arch: x.arch, version: x.version, rebuild: null })) });
+  if (review === null) return decidedAlready(env, t.name, decided.map((x) => x.id));
   // The round's last build, by the name's (name, arch, id) index: `+kind` keeps the planner off the index of every build's kind.
   const through = await env.DB.prepare("SELECT MAX(id) AS id FROM build_tasks WHERE name = ? AND +kind = 'build'").bind(t.name).first<{ id: number | null }>();
   await env.DB.batch([
-    ...decided.map((x) => env.DB.prepare(`INSERT INTO approvals (task_id, name, arch, version, decision, by, note, review_id) VALUES (?, ?, ?, ?, 'rejected', ?, ?, ?)`).bind(x.id, t.name, x.arch, x.version, c.login, b.note, review?.id ?? null)),
-    env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = ?, lease_expires_at = NULL, finished_at = COALESCE(finished_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) WHERE id IN (SELECT value FROM json_each(?)) AND status IN ('queued', 'leased', 'staged')").bind(`${done}: ${b.note.slice(0, 500)}`, JSON.stringify(ids)),
+    env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = ?, lease_expires_at = NULL, finished_at = COALESCE(finished_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) WHERE id IN (SELECT value FROM json_each(?)) AND status IN ('queued', 'leased', 'staged')").bind(`${done}: ${note.slice(0, 500)}`, JSON.stringify(ids)),
     // A rejected request frees the name — this review is what freed it (freed_by_review; a contributor's block writes `rejected` too, and frees
     // nothing) — and closes the round: what it built is history, not where the package stands. Changes asked for close the round the same way
     // and keep the name: the registration is the requester's to build again. A package in the pool keeps its name, and where its
     // architectures stood — what was rejected is a new version; the next one starts from the factory again.
     env.DB.prepare("UPDATE factory_packages SET status = ?, detail = ?, closed_through = MAX(closed_through, ?), freed_by_review = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?")
-      .bind(released ? "rejected" : "registered", `${done}: ${b.note.slice(0, 200)}${released ? " — the name is free again" : word === "changes" && closes ? " — back to the factory, the name stays the requester's" : ""}`, closes ? (through?.id ?? 0) : 0, released ? (review?.id ?? null) : null, t.name),
+      .bind(released ? "rejected" : "registered", `${done}: ${note.slice(0, 200)}${released ? " — the name is free again" : word === "changes" && closes ? " — back to the factory, the name stays the requester's" : ""}`, closes ? (through?.id ?? 0) : 0, released ? review : null, t.name),
   ]);
   for (const x of ids) await cancelPendingAudit(env, x);
   // The note and the evidence are the record of a rejection; the package is not.
   await reclaimStagingPackages(env, ids);
-  // Signed and journaled: who, through which door, and the agent that rebuilt it for the review, when the project had.
-  const rebuilt = round.find((x) => x.trust === "project" && x.status === "staged") ?? null;
-  const via = viaOf(request), agent = await workerAgent(env, rebuilt?.lease_owner ?? null), at = new Date().toISOString();
+  // Signed and journaled: who, through which door, and the agent that rebuilt each architecture for the review, where the project had (rebuiltWith).
+  const rebuilt = await Promise.all(decided.filter((x) => x.trust === "project" && x.status === "staged").map(async (x) => ({ arch: x.arch, agent: await rebuiltWith(env, x) })));
+  const via = viaOf(request), agent = rebuilt.find((x) => x.agent)?.agent ?? null, at = new Date().toISOString();
   const arches = decided.map((x) => x.arch);
-  const record = await decisionRecord(env, t.name, word, { version: t.version, arches, owner: t.owner, review: review?.id ?? null, tasks: ids, released, by: c.login, via, agent, at, note: b.note });
+  const record = await decisionRecord(env, t.name, word, `r${review}`, { version: t.version, arches, owner: t.owner, review, tasks: ids, released, by: c.login, via, agent, agents: Object.fromEntries(rebuilt.map((x) => [x.arch, x.agent])), at, note });
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('approve', NULL, 'factory', 'warn', ?, ?)")
-    .bind(`${t.name} ${t.version ?? ""} (${arches.join(", ")}) ${done}: ${b.note.slice(0, 140)}${released ? " — the name is free again" : word === "changes" ? " — back to the factory, the name stays the requester's" : ""}`, JSON.stringify({ review: review?.id ?? null, task: id, tasks: ids, name: t.name, arch: t.arch, arches, decision: word === "changes" ? "changes_requested" : "rejected", by: c.login, via, agent, owner: t.owner, note: b.note, released, record: record.url, ...(record.error ? { record_error: record.error } : {}) }))
+    .bind(`${t.name} ${t.version ?? ""} (${arches.join(", ")}) ${done}: ${note.slice(0, 140)}${released ? " — the name is free again" : word === "changes" ? " — back to the factory, the name stays the requester's" : ""}`, JSON.stringify({ review, task: id, tasks: ids, name: t.name, arch: t.arch, arches, decision: word === "changes" ? "changes_requested" : "rejected", by: c.login, via, agent, owner: t.owner, note, released, record: record.url, ...(record.error ? { record_error: record.error } : {}) }))
     .run();
   await settleTargets(env, t.name);
-  return json({ task: id, decision: word === "changes" ? "changes_requested" : "rejected", by: c.login, review: review?.id ?? null, released, cancelled: ids, via, agent, record: record.url });
+  return json({ task: id, decision: word === "changes" ? "changes_requested" : "rejected", by: c.login, review, released, cancelled: ids, via, agent, record: record.url });
 }
 
 /**
@@ -919,19 +1068,21 @@ async function closeRound(c: Contributor, id: number, request: Request, env: Env
  * another maintainer can take the package. The claim is the project's
  * rebuild "Build by the project" queued — one per architecture — and the
  * maintainer who claimed it or another may let it go; never the requester,
- * who may not claim it either (the predicate's `release`). It cancels the
- * rebuilds still queued or running with one conditional update, as the
- * cancel door does, and goes on only when that changed a row: a rebuild
- * staged in the meantime is decided, not released, and a second release
- * finds nothing to cancel — both are a 409. A leased worker's lease is void
- * and what it staged goes. Nothing is decided: the package waits for a
- * claim again. On the record and in the journal, with whose claim it was,
- * who let it go, through which door, the agent the claim had chosen, and
- * why.
+ * who may not claim it either (the predicate's `release`). It goes whole
+ * (claimOf): every rebuild of the claim, the ones still queued or running
+ * and the ones staged beside them, cancelled by one conditional update that
+ * changes nothing unless one of them is still queued or running — a claim
+ * whose rebuilds all staged in the meantime is decided, not released, and a
+ * second release finds nothing to cancel: both are a 409. A leased worker's
+ * lease is void, and what the claim staged goes (its packages; the text
+ * evidence stays). Nothing is decided: the package waits for a claim again.
+ * On the record and in the journal, with whose claim it was, who let it go,
+ * through which door, the agent the claim had chosen, and why — naming only
+ * the rebuilds the update cancelled.
  */
 export async function handleRelease(c: Contributor, id: number, request: Request, env: Env): Promise<Response> {
   const b = (await request.json().catch(() => ({}))) as { reason?: string };
-  const t = await env.DB.prepare("SELECT id, name, arch, trust, status, owner, version FROM build_tasks WHERE id = ?").bind(id).first<Decidable & { owner: string | null; version: string | null }>();
+  const t = await env.DB.prepare("SELECT id, name, arch, trust, status, owner, version, params FROM build_tasks WHERE id = ?").bind(id).first<Decidable & { owner: string | null; version: string | null; params: string | null }>();
   if (!t) return json({ error: "no such task" }, 404);
   const f = await factsOf(env, t);
   const no = refused(decisions(c, t, f).release);
@@ -940,29 +1091,75 @@ export async function handleRelease(c: Contributor, id: number, request: Request
   const reason = typeof b.reason === "string" ? b.reason.trim() : "";
   if (reason.length < 4) return json({ error: "a reason is required; it is on the record" }, 400);
   // The claim's own rows, by their primary keys: who made it and with which agent (its params), where it runs.
-  const rows = (await env.DB.prepare("SELECT id, arch, status, lease_owner, pinned_to, json_extract(params, '$.by') AS by, json_extract(params, '$.agent') AS agent FROM build_tasks WHERE id IN (SELECT value FROM json_each(?))").bind(JSON.stringify(f.claim)).all<{ id: number; arch: string; status: string; lease_owner: string | null; pinned_to: string | null; by: string | null; agent: string | null }>()).results;
-  // Led by the ids (the primary key): `+status` keeps the planner off the index of every task's status, which it chose over the claim's own rows.
-  const res = await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = ?, lease_expires_at = NULL, finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id IN (SELECT value FROM json_each(?)) AND +status IN ('queued', 'leased')")
-    .bind(`claim released by ${c.login}: ${reason.slice(0, 300)}`, JSON.stringify(f.claim))
-    .run();
-  if (!res.meta.changes) return json({ error: `nothing to release: no rebuild of ${t.name} is queued or running — released already, or staged and decided, not released` }, 409);
-  // What a leased worker had already staged: the lease is void, its next PUT is refused, the packages go.
-  await reclaimStagingPackages(env, f.claim);
-  const claimedBy = rows.map((r) => r.by).find((x) => !!x) ?? null;
-  const agent = rows.map((r) => r.agent).find((x) => !!x) ?? (await workerAgent(env, rows.map((r) => r.lease_owner ?? r.pinned_to).find((x) => !!x) ?? null));
-  const arches = rows.map((r) => r.arch);
+  const rows = (await env.DB.prepare(CLAIM_ROWS_SQL).bind(JSON.stringify(f.claim)).all<{ id: number; arch: string; status: string; lease_owner: string | null; pinned_to: string | null; by: string | null; agent: string | null }>()).results;
+  const res = await env.DB.prepare(RELEASE_SQL).bind(`claim released by ${c.login}: ${reason.slice(0, 300)}`, JSON.stringify(f.claim), JSON.stringify(f.claim)).all<{ id: number; arch: string }>();
+  const gone = res.results.map((r) => r.id);
+  if (!gone.length) return json({ error: `nothing to release: no rebuild of ${t.name} is queued or running — released already, or staged and decided, not released` }, 409);
+  // What the claim had staged, or a leased worker had put there: the lease is void, its next PUT is refused, the packages go — of the rebuilds cancelled here, never another's.
+  for (const x of gone) await cancelPendingAudit(env, x);
+  await reclaimStagingPackages(env, gone);
+  const let_ = rows.filter((r) => gone.includes(r.id));
+  const claimedBy = let_.map((r) => r.by).find((x) => !!x) ?? null;
+  const agent = let_.map((r) => r.agent).find((x) => !!x) ?? (await workerAgent(env, let_.map((r) => r.lease_owner ?? r.pinned_to).find((x) => !!x) ?? null));
+  const arches = REPO_ARCHES.filter((a) => let_.some((r) => r.arch === a));
+  const staged = let_.filter((r) => r.status === "staged").map((r) => r.arch);
   const via = viaOf(request), at = new Date().toISOString();
   const whose = claimedBy === c.login ? `${c.login}'s claim released` : `${claimedBy ?? "the"}${claimedBy ? "'s" : ""} claim released by ${c.login}`;
   await env.DB.prepare("UPDATE factory_packages SET detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?")
     .bind(`${whose}: ${reason.slice(0, 200)} — waiting for a maintainer's claim again`, t.name)
     .run();
-  const record = await decisionRecord(env, t.name, "release", { version: t.version, arches, owner: f.owner, tasks: f.claim, claimed_by: claimedBy, by: c.login, via, agent, at, reason });
+  const record = await decisionRecord(env, t.name, "release", gone[0], { version: t.version, arches, staged, owner: f.owner, tasks: gone, claimed_by: claimedBy, by: c.login, via, agent, at, reason });
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('review', NULL, 'factory', 'warn', ?, ?)")
-    .bind(`${t.name} ${t.version ?? ""} (${arches.join(", ")}): ${whose}${agent ? ` (the rebuild with ${agent} stopped)` : ""} — ${reason.slice(0, 120)}`, JSON.stringify({ name: t.name, arches, tasks: f.claim, claimed_by: claimedBy, by: c.login, via, agent, reason, record: record.url, ...(record.error ? { record_error: record.error } : {}) }))
+    .bind(`${t.name} ${t.version ?? ""} (${arches.join(", ")}): ${whose}${agent ? ` (the rebuild with ${agent} stopped)` : ""}${staged.length ? `, the rebuild staged for ${staged.join(", ")} with it` : ""} — ${reason.slice(0, 120)}`, JSON.stringify({ name: t.name, arches, staged, tasks: gone, claimed_by: claimedBy, by: c.login, via, agent, reason, record: record.url, ...(record.error ? { record_error: record.error } : {}) }))
     .run();
   await settleTargets(env, t.name);
-  return json({ released: t.name, tasks: f.claim, arches, claimed_by: claimedBy, by: c.login, via, agent, record: record.url });
+  return json({ released: t.name, tasks: gone, arches, staged, claimed_by: claimedBy, by: c.login, via, agent, record: record.url });
 }
+
+/**
+ * POST /factory/tasks/:id/cancel by hand — a maintainer's session or token,
+ * not the enqueue job's (index.ts). That door stops any queued or running
+ * task with no rule about whose it is and no line in the journal, so two
+ * kinds of task are not its to stop (#247): a rebuild a maintainer's claim
+ * queued is let go through /release — never by the requester, with a
+ * reason, signed and journaled — and the publish job of an approval that
+ * stands is stopped by what takes an approval back, a block, on the record
+ * too. The requester is refused as the release would refuse them; anyone
+ * else is told which door is the claim's or the approval's. null: the
+ * cancel goes on (a build, an audit, a trial, a job of the pool's).
+ */
+export async function cancelByHand(c: Contributor, id: number, env: Env): Promise<Response | null> {
+  const t = await env.DB.prepare("SELECT id, name, kind, trust, status, params FROM build_tasks WHERE id = ?").bind(id).first<{ id: number; name: string; kind: string; trust: string; status: string; params: string | null }>();
+  if (!t || (t.status !== "queued" && t.status !== "leased")) return null;
+  let p: { review?: unknown; task?: unknown; by?: unknown } = {};
+  try { p = t.params ? (JSON.parse(t.params) as typeof p) : {}; } catch { p = {}; }
+  if (t.kind === "build" && t.trust === "project" && typeof p.review === "number") {
+    const from = await env.DB.prepare("SELECT id, name, arch, trust, status, owner, version, params FROM build_tasks WHERE id = ?").bind(p.review).first<Decidable & { owner: string | null; version: string | null; params: string | null }>();
+    const v = from ? decisions(c, from, await factsOf(env, from)).release : null;
+    if (v && !v.ok && v.code === "conflict_of_interest") return refused(v);
+    return json({ error: `task ${id} is ${typeof p.by === "string" ? `${p.by}'s` : "a maintainer's"} claim on ${t.name}: let it go with POST /api/v1/factory/tasks/${p.review}/release and a reason — it goes on the record` }, 409);
+  }
+  if (t.kind === "publish" && typeof p.task === "number") {
+    const a = await env.DB.prepare(`SELECT by FROM approvals WHERE task_id = ? AND ${standsSql()} LIMIT 1`).bind(p.task).first<{ by: string }>();
+    if (a) return json({ error: `task ${id} publishes ${t.name}, approved by ${a.by}: what takes an approval back is a block (POST /api/v1/factory/packages/${t.name}/block), on the record` }, 409);
+  }
+  return null;
+}
+
+/** The claim's rows, by their primary keys: who made it and with which agent (its params), where it runs. */
+export const CLAIM_ROWS_SQL = "SELECT id, arch, status, lease_owner, pinned_to, json_extract(params, '$.by') AS by, json_extract(params, '$.agent') AS agent FROM build_tasks WHERE id IN (SELECT value FROM json_each(?))";
+/**
+ * The claim let go: every rebuild of it queued, running or staged cancelled,
+ * only while one of them is still queued or running (evaluated once, before
+ * any row changes) — and the ids it cancelled, the only ones the release
+ * reclaims and names. Led by the ids (the primary key): `+status` keeps the
+ * planner off the index of every task's status, which it chose over the
+ * claim's own rows.
+ */
+export const RELEASE_SQL = `UPDATE build_tasks SET status = 'cancelled', error = ?, lease_expires_at = NULL, finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+  WHERE id IN (SELECT value FROM json_each(?)) AND +status IN ('queued', 'leased', 'staged')
+    AND EXISTS (SELECT 1 FROM build_tasks l WHERE l.id IN (SELECT value FROM json_each(?)) AND +l.status IN ('queued', 'leased'))
+  RETURNING id, arch`;
 
 /**
  * Adopt (#247): a maintainer takes a package its owner left unmaintained —
@@ -971,7 +1168,11 @@ export async function handleRelease(c: Contributor, id: number, request: Request
  * their workers, and a build of it is theirs to request, never theirs to
  * review (the owner rule holds for the new owner). It is where it was
  * before it went unmaintained: published or approved while a review stands,
- * registered otherwise. One conditional update takes it, so two maintainers
+ * registered otherwise. Not while a build of it is queued, running or in
+ * review: that build is its requester's, and a maintainer decides it first
+ * (the owner rule reads who asked for a build too, but an adoption with a
+ * round open would leave that round with an owner who never asked for it).
+ * One conditional update takes it, on both conditions, so two maintainers
  * adopting at once are one adoption and a 409. On the record and in the
  * journal, with whom it was taken from.
  */
@@ -983,21 +1184,29 @@ export async function handleAdopt(c: Contributor, name: string, request: Request
   if (pkg.blocked_at) return json({ error: `${name} is blocked: another maintainer lifts the block first` }, 409);
   if (pkg.status !== "unmaintained") return json({ error: `${name} has a maintainer: it is ${pkg.status}, ${pkg.owner}'s` }, 409);
   if (pkg.owner === c.login) return json({ error: `${name} is yours already: build it to take it up again` }, 409);
+  const open = await env.DB.prepare(`SELECT t.id, t.status, t.owner FROM build_tasks t WHERE ${ROUND_OPEN} ORDER BY t.id DESC LIMIT 1`).bind(name).first<{ id: number; status: string; owner: string | null }>();
+  if (open) return json({ error: `build #${open.id} of ${name} is ${open.status}${open.owner ? `, ${open.owner}'s` : ""}: a maintainer decides it before anyone adopts ${name}` }, 409);
   const standing = await env.DB.prepare(`SELECT id FROM approvals WHERE name = ? AND ${standsSql()} LIMIT 1`).bind(name).first<{ id: number }>();
   const served = Object.values(parseTargets(pkg.targets)).some((x) => x.status === "published");
   const status = standing ? (served ? "published" : "approved") : "registered";
   const reason = typeof b.reason === "string" && b.reason.trim() ? b.reason.trim().slice(0, 300) : null;
-  const res = await env.DB.prepare("UPDATE factory_packages SET owner = ?, status = ?, detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ? AND status = 'unmaintained' AND blocked_at IS NULL")
-    .bind(c.login, status, `adopted by ${c.login} from ${pkg.owner}, who left it unmaintained${reason ? `: ${reason}` : ""}`, name)
+  const res = await env.DB.prepare(ADOPT_SQL)
+    .bind(c.login, status, `adopted by ${c.login} from ${pkg.owner}, who left it unmaintained${reason ? `: ${reason}` : ""}`, name, name)
     .run();
-  if (!res.meta.changes) return json({ error: `${name} was taken a moment ago; it has a maintainer again` }, 409);
+  if (!res.meta.changes) return json({ error: `${name} was taken a moment ago, or a build of it went into review: look again` }, 409);
   const via = viaOf(request), at = new Date().toISOString();
-  const record = await decisionRecord(env, name, "adopt", { owner: c.login, from: pkg.owner, status, by: c.login, via, agent: null, at, reason });
+  const record = await decisionRecord(env, name, "adopt", c.login, { owner: c.login, from: pkg.owner, status, by: c.login, via, agent: null, at, reason });
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('review', NULL, 'factory', 'ok', ?, ?)")
     .bind(`${name}: adopted by ${c.login} from ${pkg.owner}, who left it unmaintained${reason ? ` — ${reason.slice(0, 120)}` : ""}`, JSON.stringify({ name, from: pkg.owner, by: c.login, via, agent: null, status, reason, record: record.url, ...(record.error ? { record_error: record.error } : {}) }))
     .run();
   return json({ adopted: name, from: pkg.owner, by: c.login, status, via, record: record.url });
 }
+
+/** A build of the package still open — queued, running, or staged with no approval standing on it — by the name's (name, arch, id) index: what an adoption waits for. */
+const ROUND_OPEN = `t.name = ? AND +t.kind = 'build' AND +t.status IN ('queued', 'leased', 'staged') AND NOT EXISTS (SELECT 1 FROM approvals a WHERE a.task_id = t.id AND a.decision = 'approved' AND a.withdrawn_at IS NULL)`;
+/** The adoption, by the registration's primary key: only while it is unmaintained, not blocked, and nothing of it is open (ROUND_OPEN). */
+export const ADOPT_SQL = `UPDATE factory_packages SET owner = ?, status = ?, detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+  WHERE name = ? AND status = 'unmaintained' AND blocked_at IS NULL AND NOT EXISTS (SELECT 1 FROM build_tasks t WHERE ${ROUND_OPEN})`;
 
 /** An approvals row as the record lists it: the row, the build it published and where its publish job is, the registration's block. */
 interface DecisionRow {

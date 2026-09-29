@@ -106,6 +106,14 @@ export const LATE_AFTER_HOURS = 9;
 export const WORKER_ALIVE_MINUTES = 10;
 
 /**
+ * GET /factory/packages lists the most recently updated registrations, this
+ * many (routes/contributors.ts); a page that needs every one of a kind asks
+ * for it by status when the list comes back full — Review's No maintainer
+ * tab reads the unmaintained ones that way (#247).
+ */
+export const PACKAGES_LIMIT = 200;
+
+/**
  * The architectures the pool serves, said once: the layout of the pool
  * (r2.ts, which re-exports it for the routes that check an arch), the jobs
  * the scheduler queues per architecture, the enqueue's default, and the

@@ -614,11 +614,14 @@ export async function handleComplete(id: number, request: Request, env: Env, act
     if (vet?.verdict === "fail") return json({ error: `the gate failed (${vet.failed.join(", ")}); report the build as failed, not complete` }, 409);
     // The lease ends with the status; who held it stays on the row — the
     // Review page names the worker behind every build (built_by), the seal
-    // and the load per worker read it later.
+    // and the load per worker read it later. The project's review build
+    // keeps the agent its worker ran (built_with, the worker's own word with
+    // its claim): the agent a maintainer's decision on it is signed with
+    // (#247), whatever the worker runs by then.
     await env.DB.prepare(
-      "UPDATE build_tasks SET status = 'staged', finished_at = ?, result_sha256 = ?, result_filename = ?, result_version = ?, version = COALESCE(version, ?), duration_ms = ?, log_tail = ?, staged_prefix = ?, result = ?, lease_expires_at = NULL WHERE id = ?",
+      "UPDATE build_tasks SET status = 'staged', finished_at = ?, result_sha256 = ?, result_filename = ?, result_version = ?, version = COALESCE(version, ?), duration_ms = ?, log_tail = ?, staged_prefix = ?, result = ?, lease_expires_at = NULL, params = CASE WHEN ? THEN json_set(COALESCE(params, '{}'), '$.built_with', (SELECT agent FROM build_workers WHERE id = ?)) ELSE params END WHERE id = ?",
     )
-      .bind(now(), b.sha256, b.filename, b.version ?? null, b.version ?? null, b.duration_ms ?? null, tail, prefix, vet ? JSON.stringify({ vet }) : null, id)
+      .bind(now(), b.sha256, b.filename, b.version ?? null, b.version ?? null, b.duration_ms ?? null, tail, prefix, vet ? JSON.stringify({ vet }) : null, review !== undefined ? 1 : 0, who, id)
       .run();
     // The evidence outlives staging: on the record, signed.
     await recordEvidence(env, task.name, await requestOf(env, task.name), id, prefix);
@@ -968,8 +971,8 @@ export async function handleTask(id: number, env: Env): Promise<Response> {
     isBuild ? rel("publish", "task", task.id) : null,
     isBuild
       ? env.DB.prepare(
-          `SELECT a.id, a.task_id, a.decision, a.by, a.note, a.rebuild_task, a.created_at, a.withdrawn_at, a.withdrawn_by, a.withdrawn_reason, r.status AS rebuild_status, r.result_filename AS rebuild_result
-             FROM approvals a LEFT JOIN build_tasks r ON r.id = a.rebuild_task WHERE a.task_id = ? OR a.rebuild_task = ? ORDER BY a.id DESC LIMIT 1`,
+          `SELECT a.id, a.task_id, a.decision, a.by, a.note, a.rebuild_task, a.created_at, a.withdrawn_at, a.withdrawn_by, a.withdrawn_reason, r.status AS rebuild_status, r.result_filename AS rebuild_result, COALESCE(v.changes, 0) = 1 AS changes
+             FROM approvals a LEFT JOIN build_tasks r ON r.id = a.rebuild_task LEFT JOIN reviews v ON v.id = a.review_id WHERE a.task_id = ? OR a.rebuild_task = ? ORDER BY a.id DESC LIMIT 1`,
         ).bind(task.id, task.id).first()
       : null,
     env.DB.prepare("SELECT name, owner, url, status, category, request_id, description, license, project, targets, created_at FROM factory_packages WHERE name = ?").bind(task.name).first<Record<string, unknown>>(),
@@ -997,7 +1000,7 @@ export async function handleTask(id: number, env: Env): Promise<Response> {
       project_builds: projectBuilds?.results.map(brief) ?? [],
       publish: publishes?.results.map(brief) ?? [],
       // The approval on this build, with `standing` (approved, not withdrawn — stands()) as every approval row the server hands out carries it: the page reads the word, it does not derive it.
-      approval: approval ? { ...approval, standing: stands(approval as { decision: string; withdrawn_at: string | null }) } : null,
+      approval: approval ? { ...approval, standing: stands(approval as { decision: string; withdrawn_at: string | null }), changes: (approval as { changes?: number }).changes === 1 } : null,
       chain,
       score: chain?.score ?? null,
       rings,

@@ -75,8 +75,9 @@ verify and attest the package faster and approve it with more confidence.
    chose — the worker the claim pins. The workspace puts the factory's build
    beside the rebuild: the request as checked, both PKGBUILDs with the lines
    that differ lit, both logs. A claim can be let go (*Release claim*) by the
-   maintainer who made it or another, while its rebuild is queued or running;
-   the rebuild stops and the package waits for a claim again. A maintainer may
+   maintainer who made it or another, while a rebuild of it is queued or
+   running; every rebuild of the claim stops, one already staged too, and
+   the package waits for a claim again. A maintainer may
    also stop the round with a note: *Request changes* sends it back to the
    factory and the name stays the requester's; *Reject* frees a request's
    name. One review covers the package: it starts once every architecture
@@ -98,11 +99,19 @@ verify and attest the package faster and approve it with more confidence.
 7. **A maintainer approves the project's build.** With the project's
    evidence in front of them (the workspace shows the factory's build and the
    rebuild side by side), a maintainer — not the owner — approves, after a
-   confirmation. Every decision — approve, request changes, reject, a release,
-   a block and its lift, an adoption — is a record the pool signs
-   (`factory/<name>/<request>/decision-<time>-<word>.json`) and a journal line
+   confirmation. Every decision is a record the pool signs and a journal line
    with who, the door (`via`: the web or a token) and the agent that rebuilt
-   the package; none is undone by another decision. The approval is one decision on
+   each architecture (what its review worker ran when it staged it). Review's
+   decisions — a claim, approve, request changes, reject, a release, an
+   adoption — are beside the request, at
+   `factory/<name>/<request>/decision-<time>-<word>-<id>.json`; a block of a
+   package and its lift at `factory/<name>/<request>/decision-<time>.json`;
+   a withdrawal at `factory/<name>/decisions/<time>-withdrawn.json`; a
+   contributor's block and its lift at `contributors/<login>/`. Each is
+   written once and never rewritten, and a decision is taken once: a second
+   one on the same builds at the same moment is refused. What takes an
+   approval back is a decision of its own, on the record: a block, or the
+   withdrawal a maintainer writes a reason for. The approval is one decision on
    the record for the package — a review covering every architecture the
    project built again, one that never built named *not supported* — and a
    `publish` job per architecture: a project worker fetches the staged
@@ -171,7 +180,8 @@ fails: that failure is the new version's. One review covers every
 target, as each architecture stands now and at one version: the project
 builds each supported architecture again on its review workers — never an
 older build of an architecture whose newest one failed — and one decision
-— approve, reject, withdraw — covers them all; what it approved is what
+— approve, request changes, reject — covers them all, as a withdrawal or a
+block of it does later; what it approved is what
 the publish jobs, one per architecture, carry into edge. A block covers
 the package on every architecture and every ring, withdraws the review it
 stood on, and sends the package back to the factory. The decisions made

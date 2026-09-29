@@ -70,7 +70,7 @@ import { maintainersOf, GOVERNANCE_FILE } from "./governance";
 import { BUDGET_CAP_USD, BUDGET_GUARD_USD, BUDGET_WARN_USD, readGuard } from "./cost";
 import { handleQueueJob } from "./jobs";
 import { isMaintainer } from "./routes/contributors";
-import { handleReviewList, handleApprove, handleReject, handleChanges, handleRelease, handleAdopt, handleApprovals, handleProjectBuild, handleWithdraw, handleTaskCan } from "./routes/review";
+import { handleReviewList, handleApprove, handleReject, handleChanges, handleRelease, handleAdopt, handleApprovals, handleProjectBuild, handleWithdraw, handleTaskCan, cancelByHand } from "./routes/review";
 import { handleBlockContributor, handleUnblockContributor, handleBlockPackage, handleUnblockPackage, handleBlocks } from "./routes/blocks";
 import { handleAuthStart, handleAuthCallback, handleLogout } from "./routes/auth";
 import { handleSignPool } from "./routes/pool";
@@ -501,7 +501,7 @@ async function api(method: string, path: string, url: URL, request: Request, env
   if (method === "GET" && path === "/factory") return handleFactory(env, url);
   if (method === "GET" && path === "/factory/blocks") return handleBlocks(env);
   if (method === "GET" && path === "/factory/built") return handleBuilt(env);
-  if (method === "GET" && path === "/factory/packages") return handleListPackages(env);
+  if (method === "GET" && path === "/factory/packages") return handleListPackages(env, url);
   if (method === "GET" && path === "/factory/trust") return handleTrustList(env);
   if ((m = path.match(/^\/users\/([A-Za-z0-9-]{1,39})$/)) && method === "GET") return handleUser(m[1], env);
   // The page is cached for everyone (public, max-age); what one caller may do on it is theirs alone, so it rides on a no-store answer of its own.
@@ -544,7 +544,13 @@ async function api(method: string, path: string, url: URL, request: Request, env
   }
   // The factory's writes: the enqueue job (its token carries factory:write) or a maintainer by hand.
   const factoryWrite = () => authorizeJobOrMaintainer(request, env, "factory:write");
-  if ((m = path.match(/^\/factory\/tasks\/(\d+)\/cancel$/)) && method === "POST") return (await factoryWrite()) ?? handleCancelTask(Number(m[1]), env);
+  if ((m = path.match(/^\/factory\/tasks\/(\d+)\/cancel$/)) && method === "POST") {
+    const no = await factoryWrite();
+    if (no) return no;
+    // By hand — a maintainer, not the enqueue job — a claim's rebuild and an approval's publish job have doors of their own, on the record (#247).
+    const hand = (await jobOf(request, env)) ? null : await contributorOf(request, env);
+    return (hand && (await cancelByHand(hand, Number(m[1]), env))) ?? handleCancelTask(Number(m[1]), env);
+  }
   if (method === "POST" && path === "/factory/enqueue") return (await factoryWrite()) ?? handleEnqueue(request, env);
   // A maintainer runs a pool job by hand: queued like the scheduler's, executed by a project worker.
   if (method === "POST" && path === "/factory/jobs") {
@@ -613,9 +619,9 @@ async function api(method: string, path: string, url: URL, request: Request, env
   return json({ error: "not found" }, 404);
 }
 
-/** Nobody at a door the dashboard greys: the refusal is the predicate's own first word (SIGN_IN — the title of every grey control for nobody signed in), the way in for a script beside it. */
+/** Nobody at a door the dashboard greys: the refusal is the predicate's own first word (SIGN_IN — the title of every grey control for nobody signed in), with its code for an agent (`sign_in`, as the predicate names it: routes/review.ts), the way in for a script beside it. */
 function nobody(): Response {
-  return json({ error: SIGN_IN, hint: "a contributor token (POST /factory/register with a GitHub token) as Authorization: Bearer, or the dashboard's session" }, 401);
+  return json({ error: SIGN_IN, code: "sign_in", hint: "a contributor token (POST /factory/register with a GitHub token) as Authorization: Bearer, or the dashboard's session" }, 401);
 }
 
 export function json(body: unknown, status = 200, extra: Record<string, string> = {}): Response {

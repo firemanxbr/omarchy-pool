@@ -8,7 +8,7 @@ import { queuePosition } from "../queue";
 import { standsSql } from "./story";
 import { cookieOf } from "./auth";
 import { putRecord, recordKey, recordUrl, withdrawRecord } from "../record";
-import { version, RINGS, ringsSql, sortRings } from "../meta";
+import { version, RINGS, ringsSql, sortRings, PACKAGES_LIMIT } from "../meta";
 import { isTextEvidence, reclaimStagingPackages, STAGING_DAYS, STAGING_QUOTA_BYTES } from "../staging";
 import { findLeak, leakMessage } from "../leak";
 import { CHECKLIST, LICENSE, sourceHasPath } from "../request";
@@ -897,11 +897,15 @@ export function landed(status: string): boolean {
   return status === "approved" || status === "published";
 }
 
-export async function handleListPackages(env: Env): Promise<Response> {
+export async function handleListPackages(env: Env, url?: URL): Promise<Response> {
+  // One status asked for — the registrations left unmaintained, Review's No maintainer tab (#247) — or the newest of all. A registration
+  // goes unmaintained when its status changes, so past PACKAGES_LIMIT newer updates it drops out of the list of all; the page asks for
+  // them this way only then. The same walk of the registrations either way (the table is a few hundred rows), bounded the same.
+  const status = url?.searchParams.get("status") === "unmaintained" ? "unmaintained" : null;
   const rows = await env.DB.prepare(
     `SELECT p.*, (SELECT COUNT(*) FROM build_tasks t WHERE t.name = p.name AND t.status = 'staged') AS staged_builds
-       FROM factory_packages p ORDER BY updated_at DESC LIMIT 200`,
-  ).all();
+       FROM factory_packages p ${status ? "WHERE p.status = ?" : ""} ORDER BY updated_at DESC LIMIT ${PACKAGES_LIMIT}`,
+  ).bind(...(status ? [status] : [])).all();
   return json({ packages: rows.results.map((r) => ({ ...r, arches: JSON.parse(r.arches as string), targets: parseTargets(r.targets), detected: r.detected ? JSON.parse(r.detected as string) : null, landed: landed(r.status as string) })) }, 200, { "cache-control": "public, max-age=30" });
 }
 

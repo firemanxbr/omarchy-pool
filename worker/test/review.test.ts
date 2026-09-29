@@ -8,17 +8,23 @@
  * cancelled once, a staged one or a second release refused. Then the
  * factory's build is the lesson and never the product: the rebuild's inputs
  * carry no staged object of it, and its job's token cannot read one. Then
- * every decision — approve, request changes, reject, release, adopt, block,
- * lift — is a record signed by the pool and a journal line with who,
- * through which door and the agent the review rests on, and none is undone
- * by another decision: a block is what takes an approval back. The queries
- * the new doors add are asked for their plans.
+ * every decision — a claim, approve, request changes, reject, release,
+ * adopt, block, lift — is a record signed by the pool and a journal line
+ * with who, through which door and the agent the review rests on (the one
+ * each rebuild ran, not the one its worker runs by the time of the
+ * decision); each is taken once — two sent at the same moment are one and
+ * a 409 — and none is undone by another decision: a block is what takes an
+ * approval back, and the cancel door is not a way around a release or an
+ * approval. The queries the new doors add are asked for their plans, the
+ * handlers' own statements.
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import * as openpgp from "openpgp";
 import worker from "../src/index";
 import { sha256Hex } from "../src/routes/contributors";
+import { ADOPT_SQL, CLAIM_ROWS_SQL, CLAIM_SQL, RELEASE_SQL, REVIEW_SQL, ROWS_SQL } from "../src/routes/review";
+import { putRecord } from "../src/record";
 import { ownScriptOf } from "./fixture";
 
 const API = "http://pool.test/api/v1";
@@ -46,24 +52,26 @@ beforeAll(async () => {
     // alice's worker builds her requests; the project's review worker, whose agent answers, takes the rebuilds a claim pins to it.
     env.DB.prepare(`INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, trusted_by, last_seen, agent, agent_status, kinds) VALUES
       ('cx', 'x86_64', 'alice', ?, 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z', 'openai/gpt-5', 'ok', '["build"]'),
-      ('px', 'x86_64', 'm2', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z', ?, 'ok', '["build"]')`).bind(await h("omw_cx"), await h("omw_px"), AGENT),
+      ('px', 'x86_64', 'm2', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z', ?, 'ok', '["build"]'),
+      ('ca', 'aarch64', 'alice', ?, 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z', 'openai/gpt-5', 'ok', '["build"]'),
+      ('pa', 'aarch64', 'm2', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z', ?, 'ok', '["build"]')`).bind(await h("omw_cx"), await h("omw_px"), AGENT, await h("omw_ca"), await h("omw_pa"), AGENT),
   ]);
 });
 
 const checklist = { official: true, license: true, unshipped: true, evidence: true };
-const request = (name: string, token = "omc_alice") =>
-  call("POST", "/factory/packages", { name, url: `https://${name}.example`, source: `https://${name}.example/${name}-1.0.tar.gz`, version: "1.0", description: `${name}, a tool for Review's tests`, license: "MIT", arches: ["x86_64"], checklist }, token);
+const request = (name: string, token = "omc_alice", arches = ["x86_64"]) =>
+  call("POST", "/factory/packages", { name, url: `https://${name}.example`, source: `https://${name}.example/${name}-1.0.tar.gz`, version: "1.0", description: `${name}, a tool for Review's tests`, license: "MIT", arches, checklist }, token);
 /** A worker's claim of the next task for it: the task and its job's token. The queue is the story's alone: what an earlier story left queued or running waits for no worker here. */
-const claimAs = async (worker: string, name: string) => {
+const claimAs = async (worker: string, name: string, arch = "x86_64", agent = worker === "omw_px" || worker === "omw_pa" ? AGENT : "openai/gpt-5") => {
   await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = 'not this story' WHERE status IN ('queued', 'leased') AND name != ?").bind(name).run();
-  const c = await call("POST", "/factory/claim", { arch: "x86_64", agent: worker === "omw_px" ? AGENT : "openai/gpt-5", agent_status: "ok", kinds: ["build"] }, worker);
+  const c = await call("POST", "/factory/claim", { arch, agent, agent_status: "ok", kinds: ["build"] }, worker);
   expect(c.status, `${worker} claims ${name}: ${JSON.stringify(c.json)}`).toBe(200);
-  expect(c.json.task).toMatchObject({ name });
-  return c.json as { task: { id: number; name: string; params: Record<string, unknown>; pkgbuild_ref: string }; token: string; upload: string | null };
+  expect(c.json.task).toMatchObject({ name, arch });
+  return c.json as { task: { id: number; name: string; arch: string; params: Record<string, unknown>; pkgbuild_ref: string }; token: string; upload: string | null };
 };
 /** A build through the gate: its evidence, its package, staged. */
-const stage = async (c: { task: { id: number; name: string }; token: string }, who: string) => {
-  const file = `${c.task.name}-1.0-1-x86_64.pkg.tar.zst`;
+const stage = async (c: { task: { id: number; name: string; arch?: string }; token: string }, who: string) => {
+  const file = `${c.task.name}-1.0-1-${c.task.arch ?? "x86_64"}.pkg.tar.zst`;
   for (const f of ["PKGBUILD", "build.log", "PKGINFO", file]) expect((await call("PUT", `/factory/tasks/${c.task.id}/artifacts/${f}`, undefined, c.token, `${who}'s ${f} of ${c.task.id}`)).status).toBe(201);
   await call("PUT", `/factory/tasks/${c.task.id}/artifacts/vet.json`, undefined, c.token, JSON.stringify({ schema: "omarchy-pool/vet/1", verdict: "pass", checks: [{ name: "smoke", status: "pass", detail: "" }] }));
   const done = await call("POST", `/factory/tasks/${c.task.id}/complete`, { sha256: (who === "the project" ? "d" : "c").repeat(64), filename: file, version: "1.0-1" }, c.token);
@@ -109,10 +117,18 @@ describe("no maintainer reviews what they asked for", () => {
         if (d === "approve") { expect(r.status).toBe(409); continue; }
         expect([r.status, r.json], d).toEqual([403, { error: OWNER("own"), code: "conflict_of_interest" }]);
       }
-      // Another maintainer claims it; the requester may not let that claim go either.
-      expect((await claim(id)).status).toBe(200);
+      // Another maintainer claims it; the requester may not let that claim go either — nor stop its rebuild through the cancel door, which is a maintainer's too.
+      const claimed = await claim(id);
+      expect(claimed.status).toBe(200);
       const rel = await call("POST", `/factory/tasks/${id}/release`, { reason: "I would rather it waited" }, "omc_alice");
       expect([rel.status, rel.json]).toEqual([403, { error: OWNER("own"), code: "conflict_of_interest" }]);
+      const cancel = await call("POST", `/factory/tasks/${claimed.json.task}/cancel`, {}, "omc_alice");
+      expect([cancel.status, cancel.json]).toEqual([403, { error: OWNER("own"), code: "conflict_of_interest" }]);
+      // Another maintainer is sent to the claim's own door: a release, with a reason on the record.
+      const other = await call("POST", `/factory/tasks/${claimed.json.task}/cancel`, {}, "omc_m2");
+      expect(other.status).toBe(409);
+      expect(other.json.error).toBe(`task ${claimed.json.task} is m1's claim on own: let it go with POST /api/v1/factory/tasks/${id}/release and a reason — it goes on the record`);
+      expect(await env.DB.prepare("SELECT status FROM build_tasks WHERE id = ?").bind(claimed.json.task).first()).toEqual({ status: "queued" });
       const can = (await call("GET", `/factory/tasks/${id}/can`, undefined, "omc_alice")).json.can;
       expect(can).toMatchObject({ build: false, changes: false, reject: false, release: false });
       expect(can.why).toMatchObject({ build: OWNER("own"), changes: OWNER("own"), reject: OWNER("own"), release: OWNER("own") });
@@ -121,7 +137,8 @@ describe("no maintainer reviews what they asked for", () => {
     }
     // A contributor — the requester while a contributor, or bob — is refused as one; nobody signed in is asked to sign in.
     for (const who of ["omc_alice", "omc_bob"]) expect((await call("POST", `/factory/tasks/${id}/release`, { reason: "not mine to let go" }, who)).json).toEqual({ error: "a maintainer decides", code: "maintainer_only" });
-    expect((await call("POST", `/factory/tasks/${id}/release`, { reason: "nobody at all" })).status).toBe(401);
+    const nobody = await call("POST", `/factory/tasks/${id}/release`, { reason: "nobody at all" });
+    expect([nobody.status, nobody.json.error, nobody.json.code]).toEqual([401, "sign in with GitHub", "sign_in"]);
     // The claim stands: nobody's refusal moved it.
     expect((await call("GET", "/factory/review")).json.packages.find((p: any) => p.name === "own")).toMatchObject({ state: "in_review", claim: { by: "m1", status: "queued" } });
   });
@@ -140,7 +157,23 @@ describe("a claim", () => {
     expect(review.staged.find((x: any) => x.id === id).claim).toMatchObject({ task: r.json.task, by: "m1", agent: AGENT });
     const l = await line("review", "chosen");
     expect(l.summary).toContain(`claimed with ${AGENT}`);
-    expect(l.payload).toMatchObject({ by: "m1", via: "token", agent: AGENT, pinned_to: "px" });
+    expect(l.payload).toMatchObject({ by: "m1", via: "token", agent: AGENT, pinned_to: "px", record: r.json.record });
+    // Claiming is deciding on the package: signed on the record like every other decision.
+    const rec = await record(r.json.record);
+    expect(rec.verified).toBe(true);
+    expect(rec.doc).toMatchObject({ schema: "omarchy-pool/decision/1", decision: "claim", name: "chosen", from: id, by: "m1", via: "token", agent: AGENT, pinned_to: "px", note: "pin the source to the tag" });
+    expect(r.json.record).toMatch(new RegExp(`/decision-\\d+T\\d+-claim-${r.json.task}\\.json$`));
+  });
+
+  it("sent twice at once is one claim: one rebuild queued, the other maintainer told whose it is", async () => {
+    const id = await ready("both");
+    const [a, b] = await Promise.all([claim(id, "omc_m1"), claim(id, "omc_m2")]);
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+    const won = a.status === 200 ? a : b, by = won === a ? "m1" : "m2";
+    // Refused by the conditional insert when both read the package before either wrote, by the predicate when they did not.
+    expect((won === a ? b : a).json.error).toMatch(new RegExp(`^(both was claimed a moment ago by ${by}: the project is already on it|the project is already on it: task \\d+ is queued)$`));
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM build_tasks WHERE name = 'both' AND kind = 'build' AND trust = 'project' AND status = 'queued'").first()).toEqual({ n: 1 });
+    expect((await call("GET", "/factory/review")).json.packages.find((p: any) => p.name === "both")).toMatchObject({ state: "in_review", claim: { by } });
   });
 
   it("never downloads or reuses the factory's build: the rebuild's inputs carry no staged object of it, and its job's token cannot read one", async () => {
@@ -228,6 +261,60 @@ describe("a release", () => {
   });
 });
 
+describe("a claim on two architectures, half of it staged", () => {
+  it("is let go whole: the staged rebuild goes with the queued one, and the package is ready for a claim again", async () => {
+    expect((await request("duo", "omc_alice", ["x86_64", "aarch64"])).status).toBe(201);
+    const x86 = await claimAs("omw_cx", "duo");
+    await stage(x86, "alice");
+    const arm = await claimAs("omw_ca", "duo", "aarch64");
+    await stage(arm, "alice");
+    // m1 claims it on the x86_64 review worker; the project's aarch64 worker is offline, so that rebuild waits for any project worker.
+    const c = await claim(x86.task.id);
+    expect(c.json).toMatchObject({ arches: ["x86_64", "aarch64"], by: "m1" });
+    const [rx, ra] = c.json.tasks as number[];
+    expect(await env.DB.prepare("SELECT pinned_to, json_extract(params, '$.agent') AS agent FROM build_tasks WHERE id = ?").bind(ra).first()).toEqual({ pinned_to: null, agent: null });
+    // x86_64 rebuilt and staged; aarch64 still queued: the claim is half staged.
+    const rb = await claimAs("omw_px", "duo");
+    expect(rb.task.id).toBe(rx);
+    await stage(rb, "the project");
+    expect(await env.DB.prepare("SELECT status FROM build_tasks WHERE id = ?").bind(ra).first()).toEqual({ status: "queued" });
+    const before = (await call("GET", "/factory/review")).json.packages.find((p: any) => p.name === "duo");
+    expect(before).toMatchObject({ state: "in_review" });
+    // Released by another maintainer: both rebuilds cancelled — the staged one named as such — and its package taken out of staging.
+    const r = await call("POST", `/factory/tasks/${x86.task.id}/release`, { reason: "the aarch64 worker is away for a week" }, "omc_m2");
+    expect(r.status, JSON.stringify(r.json)).toBe(200);
+    expect(r.json).toMatchObject({ released: "duo", arches: ["x86_64", "aarch64"], staged: ["x86_64"], claimed_by: "m1", by: "m2" });
+    expect([...r.json.tasks].sort()).toEqual([rx, ra].sort());
+    expect((await env.DB.prepare("SELECT id, status FROM build_tasks WHERE id IN (?, ?) ORDER BY id").bind(rx, ra).all()).results).toEqual([{ id: rx, status: "cancelled" }, { id: ra, status: "cancelled" }]);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM staging_objects WHERE task_id = ? AND key LIKE '%.pkg.tar.zst'").bind(rx).first()).toEqual({ n: 0 });
+    expect((await record(r.json.record)).doc).toMatchObject({ decision: "release", staged: ["x86_64"], claimed_by: "m1", by: "m2" });
+    expect((await line("review", "duo")).summary).toContain("m1's claim released by m2");
+    // Ready again, the lead claimable: nothing of it is in review, and Release has nothing left.
+    const review = (await call("GET", "/factory/review", undefined, "omc_m1")).json;
+    const pkg = review.packages.find((p: any) => p.name === "duo");
+    expect(pkg).toMatchObject({ state: "ready", claim: null });
+    const lead = review.staged.find((t: any) => t.id === pkg.lead);
+    expect(lead.can, JSON.stringify(lead.can.why)).toMatchObject({ build: true, release: false });
+    expect((await call("POST", `/factory/tasks/${x86.task.id}/release`, { reason: "once more" }, "omc_m1")).status).toBe(409);
+    const again = await claim(x86.task.id);
+    expect(again.status, JSON.stringify(again.json)).toBe(200);
+    expect(again.json.arches).toEqual(["x86_64", "aarch64"]);
+  });
+
+  it("a claim whose rebuilds all staged is decided, not released", async () => {
+    const pending = await env.DB.prepare("SELECT id FROM build_tasks WHERE name = 'duo' AND kind = 'build' AND trust = 'project' AND status = 'queued' ORDER BY id").all<{ id: number }>();
+    expect(pending.results).toHaveLength(2);
+    await stage(await claimAs("omw_px", "duo"), "the project");
+    // The aarch64 rebuild, to the project's aarch64 worker now that it is up.
+    await stage(await claimAs("omw_pa", "duo", "aarch64"), "the project");
+    const from = (await env.DB.prepare("SELECT id FROM build_tasks WHERE name = 'duo' AND trust = 'community' AND arch = 'x86_64' AND status = 'staged'").first<{ id: number }>())!.id;
+    const r = await call("POST", `/factory/tasks/${from}/release`, { reason: "too late for this" }, "omc_m2");
+    expect(r.status).toBe(409);
+    expect(r.json.error).toBe("nothing to release: no rebuild of duo is queued or running — a staged rebuild is decided, not released");
+    expect((await call("GET", "/factory/review")).json.packages.find((p: any) => p.name === "duo")).toMatchObject({ state: "in_review" });
+  });
+});
+
 describe("the three decisions of the workspace", () => {
   it("request changes: the round stops and goes back to the factory with the note, the name stays the requester's; signed and journaled with the agent that rebuilt it", async () => {
     const id = await ready("fixme");
@@ -250,8 +337,35 @@ describe("the three decisions of the workspace", () => {
     const rec = await record(r.json.record);
     expect(rec.verified).toBe(true);
     expect(rec.doc).toMatchObject({ decision: "changes", name: "fixme", by: "m2", via: "token", agent: AGENT, note: "pin the source to the signed tag", released: false });
+    // Every page that reads the decision says changes were asked for, not a rejection: the package's story, the build's own answer, the maintainer's record.
+    const story = (await call("GET", `/factory/packages/fixme/story?t=${Date.now()}`)).json;
+    expect(story.chains.find((ch: any) => ch.contributor?.id === id).approval).toMatchObject({ decision: "rejected", by: "m2", changes: true });
+    expect((await call("GET", `/factory/tasks/${c.json.task}?t=${Date.now()}`)).json.approval).toMatchObject({ decision: "rejected", changes: true });
+    expect((await call("GET", `/users/m2?t=${Date.now()}`)).json.approvals.find((a: any) => a.name === "fixme")).toMatchObject({ decision: "rejected", changes: true });
     const rebuild = await call("POST", "/factory/packages/fixme/build", {}, "omc_alice");
     expect(rebuild.status, JSON.stringify(rebuild.json)).toBe(201);
+  });
+
+  it("a note that is not text is none: refused before anything is written", async () => {
+    const id = await ready("numnote");
+    for (const d of ["changes", "reject"]) {
+      const r = await call("POST", `/factory/tasks/${id}/${d}`, { note: 12345 }, "omc_m1");
+      expect([r.status, d]).toEqual([400, d]);
+    }
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM reviews WHERE name = 'numnote'").first()).toEqual({ n: 0 });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM approvals WHERE name = 'numnote'").first()).toEqual({ n: 0 });
+    expect(await env.DB.prepare("SELECT status FROM build_tasks WHERE id = ?").bind(id).first()).toEqual({ status: "staged" });
+  });
+
+  it("changes and a rejection sent at the same moment are one decision: one review, one record, the other told it was decided", async () => {
+    const id = await ready("race");
+    const [a, b] = await Promise.all([call("POST", `/factory/tasks/${id}/changes`, { note: "pin the source to the tag" }, "omc_m1"), call("POST", `/factory/tasks/${id}/reject`, { note: "not the upstream's source" }, "omc_m2")]);
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+    const lost = a.status === 409 ? a : b;
+    expect(lost.json.error).toMatch(/^(race was decided a moment ago: rejected by m[12]|task \d+ is cancelled, not staged)$/);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM reviews WHERE name = 'race'").first()).toEqual({ n: 1 });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM approvals WHERE name = 'race'").first()).toEqual({ n: 1 });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM events WHERE kind = 'approve' AND json_extract(payload, '$.name') = 'race'").first()).toEqual({ n: 1 });
   });
 
   it("reject frees a request's name, signed and journaled — no agent when nothing was rebuilt", async () => {
@@ -281,6 +395,43 @@ describe("the three decisions of the workspace", () => {
     const l = await line("approve", "good");
     expect(l.summary).toContain(`approved by m2 (rebuilt with ${AGENT})`);
     expect(l.payload).toMatchObject({ by: "m2", via: "token", agent: AGENT, review: r.json.review, record: r.json.record });
+    expect(r.json.record).toMatch(new RegExp(`-approve-r${r.json.review}\\.json$`));
+    // The approval's publish job is not the cancel door's: what takes an approval back is a block.
+    const stop = await call("POST", `/factory/tasks/${r.json.publish}/cancel`, {}, "omc_m1");
+    expect(stop.status).toBe(409);
+    expect(stop.json.error).toBe(`task ${r.json.publish} publishes good, approved by m2: what takes an approval back is a block (POST /api/v1/factory/packages/good/block), on the record`);
+    expect(await env.DB.prepare("SELECT status FROM build_tasks WHERE id = ?").bind(r.json.publish).first()).toEqual({ status: "queued" });
+  });
+
+  it("the agent on the record is the one the rebuild ran, whatever its worker runs by the decision", async () => {
+    const id = await ready("drift");
+    expect((await claim(id)).status).toBe(200);
+    const rb = await claimAs("omw_px", "drift");
+    await stage(rb, "the project");
+    expect(JSON.parse((await env.DB.prepare("SELECT params FROM build_tasks WHERE id = ?").bind(rb.task.id).first<{ params: string }>())!.params)).toMatchObject({ built_with: AGENT });
+    // The review worker switches model and says so with its next claim, before anyone decides.
+    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = 'not this story' WHERE status = 'queued' AND name != 'drift'").run();
+    expect((await call("POST", "/factory/claim", { arch: "x86_64", agent: "openai/gpt-5", agent_status: "ok", kinds: ["build"] }, "omw_px")).status).toBe(204);
+    expect(await env.DB.prepare("SELECT agent FROM build_workers WHERE id = 'px'").first()).toEqual({ agent: "openai/gpt-5" });
+    const r = await call("POST", `/factory/tasks/${rb.task.id}/approve`, { note: "reads well" }, "omc_m2");
+    expect(r.json).toMatchObject({ decision: "approved", agent: AGENT });
+    expect((await record(r.json.record)).doc).toMatchObject({ agent: AGENT, targets: [{ arch: "x86_64", task: rb.task.id, agent: AGENT }] });
+    expect((await line("approve", "drift")).summary).toContain(`(rebuilt with ${AGENT})`);
+  });
+
+  it("two approvals sent at the same moment are one: one review, one publish job, one record", async () => {
+    const id = await ready("twin");
+    expect((await claim(id)).status).toBe(200);
+    const rb = await claimAs("omw_px", "twin");
+    await stage(rb, "the project");
+    const [a, b] = await Promise.all([call("POST", `/factory/tasks/${rb.task.id}/approve`, { note: "m1 approves" }, "omc_m1"), call("POST", `/factory/tasks/${rb.task.id}/approve`, { note: "m2 approves" }, "omc_m2")]);
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+    const won = a.status === 200 ? a : b, lost = won === a ? b : a;
+    expect(lost.json.error).toMatch(new RegExp(`^(twin was decided a moment ago: approved by ${won.json.by}|already approved)$`));
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM reviews WHERE name = 'twin'").first()).toEqual({ n: 1 });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM approvals WHERE name = 'twin'").first()).toEqual({ n: 1 });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM build_tasks WHERE name = 'twin' AND kind = 'publish'").first()).toEqual({ n: 1 });
+    expect((await record(won.json.record)).doc).toMatchObject({ by: won.json.by, review: won.json.review });
   });
 
   it("a decision is taken back only by a block: approve, changes and reject again are refused, no route rewrites one, and the block withdraws the review — on the record too", async () => {
@@ -308,6 +459,45 @@ describe("the three decisions of the workspace", () => {
   });
 });
 
+describe("who asked for a build", () => {
+  it("never decides on it, whoever owns the registration since: the requester of a build in review is refused its claim and the approval of its rebuild; nobody adopts a package while a build of it is open", async () => {
+    const id = await ready("moved");
+    await env.DB.prepare("UPDATE contributors SET role = 'maintainer' WHERE login = 'alice'").run();
+    try {
+      // Unmaintained the way updates.ts leaves a package, with alice's build still staged: an adoption waits for a maintainer's decision on it.
+      await env.DB.prepare("UPDATE factory_packages SET status = 'unmaintained' WHERE name = 'moved'").run();
+      const adopt = await call("POST", "/factory/packages/moved/adopt", {}, "omc_m1");
+      expect([adopt.status, adopt.json.error]).toEqual([409, `build #${id} of moved is staged, alice's: a maintainer decides it before anyone adopts moved`]);
+      expect(await env.DB.prepare("SELECT owner, status FROM factory_packages WHERE name = 'moved'").first()).toEqual({ owner: "alice", status: "unmaintained" });
+      // The registration moved to dave another way (a registration taken over): alice asked for the build in review, and it is still not hers to decide.
+      await env.DB.prepare("UPDATE factory_packages SET owner = 'dave', status = 'staged' WHERE name = 'moved'").run();
+      expect((await claim(id, "omc_alice")).json).toEqual({ error: OWNER("moved"), code: "conflict_of_interest" });
+      expect((await call("GET", `/factory/tasks/${id}/can`, undefined, "omc_alice")).json.can).toMatchObject({ build: false, reject: false, changes: false });
+      // Another maintainer claims it; the rebuild is dave's by the registration, and still alice's request.
+      expect((await claim(id, "omc_m1")).status).toBe(200);
+      const rb = await claimAs("omw_px", "moved");
+      await stage(rb, "the project");
+      expect((await call("POST", `/factory/tasks/${rb.task.id}/approve`, { note: "mine to approve?" }, "omc_alice")).json).toEqual({ error: OWNER("moved"), code: "conflict_of_interest" });
+      const review = (await call("GET", "/factory/review", undefined, "omc_alice")).json;
+      expect(review.staged.find((t: any) => t.id === rb.task.id).can).toMatchObject({ approve: false, why: { approve: OWNER("moved") } });
+      expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM approvals WHERE name = 'moved'").first()).toEqual({ n: 0 });
+    } finally {
+      await env.DB.prepare("UPDATE contributors SET role = 'contributor' WHERE login = 'alice'").run();
+    }
+  });
+});
+
+describe("the record", () => {
+  it("is written once: two writers of one key at the same moment are one record and an error, never the second's document under the first's name", async () => {
+    const key = "factory/once/0/decision-20260929T000000000-approve-r1.json";
+    const [a, b] = await Promise.allSettled([putRecord(env, key, { by: "m1" }), putRecord(env, key, { by: "m2" })]);
+    expect([a.status, b.status].sort()).toEqual(["fulfilled", "rejected"]);
+    const won = a.status === "fulfilled" ? "m1" : "m2";
+    expect(JSON.parse(await (await env.PACKAGES.get(key))!.text())).toEqual({ by: won });
+    await expect(putRecord(env, key, { by: "m3" })).rejects.toThrow(/written once/);
+  });
+});
+
 describe("adopt", () => {
   it("a maintainer takes a package its owner left unmaintained: theirs, where it stood before, signed and journaled; refused to anyone else, to a package that has a maintainer, and twice", async () => {
     await env.DB.prepare(`INSERT INTO factory_packages (name, owner, url, arches, status, detail) VALUES
@@ -331,20 +521,52 @@ describe("adopt", () => {
   });
 });
 
+describe("a decision's round", () => {
+  it("is written by its first batch only: a second one on the same builds — facts read before either wrote — writes no review and no row", async () => {
+    const rows = JSON.stringify([{ task: 9001, arch: "x86_64", version: "1.0-1", rebuild: 9001 }, { task: 9002, arch: "aarch64", version: "1.0-1", rebuild: 9002 }]);
+    const decided = JSON.stringify([9001, 9002]);
+    const take = (by: string) => env.DB.batch([
+      env.DB.prepare(REVIEW_SQL).bind("roundtwice", "1.0-1", "approved", by, null, '["x86_64","aarch64"]', "{}", 0, 0, decided),
+      env.DB.prepare(ROWS_SQL).bind("roundtwice", "approved", by, null, "roundtwice", rows, decided),
+    ]);
+    const [first, second] = await Promise.all([take("m1"), take("m2")]);
+    const ids = [first[0].results.length, second[0].results.length].sort();
+    expect(ids).toEqual([0, 1]);
+    const review = await env.DB.prepare("SELECT id, by FROM reviews WHERE name = 'roundtwice'").all<{ id: number; by: string }>();
+    expect(review.results).toHaveLength(1);
+    // Both rows of the one review, each on its build, none of the other's.
+    expect((await env.DB.prepare("SELECT task_id, by, review_id FROM approvals WHERE name = 'roundtwice' ORDER BY task_id").all()).results).toEqual([
+      { task_id: 9001, by: review.results[0].by, review_id: review.results[0].id },
+      { task_id: 9002, by: review.results[0].by, review_id: review.results[0].id },
+    ]);
+  });
+});
+
 describe("the new doors' reads", () => {
-  it("are led by a key: the claim's rows and the cancel by their ids, a worker's agent, the registration and the adoption by the primary key", async () => {
-    const plan = async (sql: string, ...args: unknown[]) => (await env.DB.prepare(`EXPLAIN QUERY PLAN ${sql}`).bind(...args).all<{ detail: string }>()).results.map((r) => r.detail).join("; ");
-    const ids = JSON.stringify([1, 2]);
-    for (const [sql, args] of [
-      ["SELECT id, arch, status, lease_owner, pinned_to, json_extract(params, '$.by') AS by, json_extract(params, '$.agent') AS agent FROM build_tasks WHERE id IN (SELECT value FROM json_each(?))", [ids]],
-      ["UPDATE build_tasks SET status = 'cancelled', error = ?, lease_expires_at = NULL, finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id IN (SELECT value FROM json_each(?)) AND +status IN ('queued', 'leased')", ["x", ids]],
-      ["SELECT agent FROM build_workers WHERE id = ?", ["px"]],
-      ["SELECT request_id FROM factory_packages WHERE name = ?", ["good"]],
-      ["UPDATE factory_packages SET owner = ?, status = ?, detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ? AND status = 'unmaintained' AND blocked_at IS NULL", ["m1", "registered", "x", "orphan"]],
-    ] as const) {
-      const p = await plan(sql, ...args);
-      expect(p, sql).toMatch(/SEARCH (build_tasks|build_workers|factory_packages) USING (INTEGER PRIMARY KEY|INDEX sqlite_autoindex_\w+)/);
-      expect(p, sql).not.toMatch(/SCAN (build_tasks|build_workers|factory_packages)\b/);
+  it("are led by a key — the handlers' own statements: the claim's rows and the release by their ids, the claim by the name, a decision's round by the approvals' task index, the adoption by the registration's key", async () => {
+    const plan = async (sql: string) => {
+      const n = (sql.match(/\?/g) ?? []).length;
+      const args = Array.from({ length: n }, () => JSON.stringify([1, 2]));
+      return (await env.DB.prepare(`EXPLAIN QUERY PLAN ${sql}`).bind(...args).all<{ detail: string }>()).results.map((r) => r.detail).join("; ");
+    };
+    const expected: [string, string, RegExp[]][] = [
+      ["the claim's rows", CLAIM_ROWS_SQL, [/SEARCH build_tasks USING INTEGER PRIMARY KEY/]],
+      ["the release", RELEASE_SQL, [/SEARCH build_tasks USING INTEGER PRIMARY KEY/, /SEARCH l USING INTEGER PRIMARY KEY/]],
+      ["the claim", CLAIM_SQL, [/SEARCH r USING INDEX idx_build_tasks_name \(name=\?\)/]],
+      ["a decision's review", REVIEW_SQL, [/SEARCH a USING (COVERING )?INDEX idx_approvals_task \(task_id=\?\)/]],
+      ["a decision's rows", ROWS_SQL, [/SEARCH a USING (COVERING )?INDEX idx_approvals_task \(task_id=\?\)/, /SEARCH reviews USING COVERING INDEX idx_reviews_name \(name=\?\)/]],
+      ["the adoption", ADOPT_SQL, [/SEARCH factory_packages USING INDEX sqlite_autoindex_factory_packages_1 \(name=\?\)/, /SEARCH t USING INDEX idx_build_tasks_name \(name=\?\)/, /SEARCH a USING INDEX idx_approvals_task \(task_id=\?\)/]],
+      ["a worker's agent", "SELECT agent FROM build_workers WHERE id = ?", [/SEARCH build_workers USING INDEX sqlite_autoindex_build_workers_1 \(id=\?\)/]],
+      ["the record's request", "SELECT request_id FROM factory_packages WHERE name = ?", [/SEARCH factory_packages USING INDEX sqlite_autoindex_factory_packages_1 \(name=\?\)/]],
+    ];
+    for (const [what, sql, want] of expected) {
+      const p = await plan(sql);
+      for (const re of want) expect(p, `${what}: ${p}`).toMatch(re);
+      expect(p, what).not.toMatch(/SCAN (build_tasks|build_workers|factory_packages|approvals|reviews|[atlr])\b/);
     }
+    // The story's decisions read each row's review by its primary key, after the name's index.
+    const story = await plan("SELECT a.id, COALESCE(v.changes, 0) AS changes FROM approvals a LEFT JOIN reviews v ON v.id = a.review_id WHERE a.name = ? ORDER BY a.id DESC LIMIT 40");
+    expect(story).toMatch(/SEARCH a USING INDEX idx_approvals_name \(name=\?\)/);
+    expect(story).toMatch(/SEARCH v USING INTEGER PRIMARY KEY/);
   });
 });

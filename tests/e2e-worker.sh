@@ -459,6 +459,10 @@ pb=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$x86/build" "${mauth[@]}
 [[ "$(jq -c .arches <<<"$pb")" == '["x86_64"]' && "$(jq -r '.tasks | length' <<<"$pb")" == 1 ]] || { echo "the project must build x86_64 again, and nothing for aarch64: $pb"; exit 1; }
 px=$(jq -r .task <<<"$pb")
 [[ "$(d1n "SELECT COUNT(*) AS n FROM build_tasks WHERE name = 'e2e-ident' AND arch = 'aarch64' AND trust = 'project'")" == 0 ]] || { echo "no project build may be queued for an architecture that is not supported"; exit 1; }
+# The claim is a decision too, signed on the record; its rebuild is let go through a release, never stopped by the cancel door by hand.
+record_ok "$(jq -r .record <<<"$pb")" claim || exit 1
+byhand=$(curl -s -w '\n%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/tasks/$px/cancel" "${mauth[@]}")
+[[ "$(tail -n1 <<<"$byhand")" == 409 ]] && grep -q "/release" <<<"$(head -n1 <<<"$byhand")" || { echo "the cancel door must send a claim's rebuild to its release: $byhand"; exit 1; }
 cp=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/claim" "${wpx[@]}" -d "{\"arch\":\"x86_64\",\"kinds\":[\"build\"],$agent}")
 [[ "$(jq -r .task.id <<<"$cp")" == "$px" && "$(jq -r .task.pkgbuild_ref <<<"$cp")" == "review:$x86" ]] || { echo "the project's x86_64 worker did not get the review build: $cp"; exit 1; }
 cpj=(-H "authorization: Bearer $(jq -r .token <<<"$cp")")
