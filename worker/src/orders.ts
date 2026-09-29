@@ -1049,6 +1049,11 @@ export async function capRefusal(env: Env, a: Pick<IssueAsk, "worker" | "kind" |
   }
   if (a.kind === "recheck-agent" && f.rechecksHour >= MAX_RECHECKS_PER_HOUR) return `re-checked ${MAX_RECHECKS_PER_HOUR} times in the last hour; the next from ${f.rechecksFreeAt ? clock(f.rechecksFreeAt) : "within the hour"}`;
   if (RESTART_GROUP.includes(a.kind) && f.restartsHour >= MAX_RESTARTS_PER_HOUR) return `restarted ${MAX_RESTARTS_PER_HOUR} times in the last hour; the next from ${f.restartsFreeAt ? clock(f.restartsFreeAt) : "within the hour"}`;
+  // A drain and a resume are their own group (#277, part 2): six of each an hour per worker, like every other kind.
+  if (a.kind === "drain" || a.kind === "resume") {
+    const own = await env.DB.prepare(COUNT_WORKER_SQL).bind(a.worker, JSON.stringify([a.kind]), hourAgo).first<{ n: number; oldest: string | null }>();
+    if ((own?.n ?? 0) >= MAX_RESTARTS_PER_HOUR) return `${a.kind === "drain" ? "drained" : "resumed"} ${MAX_RESTARTS_PER_HOUR} times in the last hour; the next from ${own?.oldest ? clock(Date.parse(own.oldest) + HOUR) : "within the hour"}`;
+  }
   return "the rules' state moved under this order: the next claim decides again";
 }
 

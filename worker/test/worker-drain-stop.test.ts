@@ -461,6 +461,12 @@ describe("Drain and Resume: states the pool enforces at the claim", () => {
     }
     expect((await issue("alice-t", { kind: "drain" }, cli("m3"))).json.error).toContain("m3 reached 20 orders in an hour");
     expect((await resume("proj-t", "m3")).status).toBe(201);
+    // Six drains of one worker in an hour, then the seventh refused in words that say so.
+    await seedWorker("proj-cap", "aarch64", "m1", "project");
+    for (let i = 0; i < 6; i++) {
+      await env.DB.prepare("INSERT INTO worker_orders (id, worker_id, kind, reason, issued_by, issued_at, expires_at, state) VALUES (?, 'proj-cap', 'drain', 'r', 'someone', ?, ?, 'done')").bind(`wo_cap_drain_${i}`, new Date(Date.now() - (10 - i) * MIN).toISOString(), new Date(Date.now() + 60 * MIN).toISOString()).run();
+    }
+    expect((await issue("proj-cap", { kind: "drain" }, cli("m2"))).json.error).toMatch(/^drained 6 times in the last hour; the next from \d\d:\d\d$/);
   });
 
   it("the Build door and the project-build door refuse to pin a drained worker, and the other architecture is not pinned to one", async () => {
