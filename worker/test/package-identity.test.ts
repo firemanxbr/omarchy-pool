@@ -22,6 +22,7 @@ import { reserveName, sha256Hex } from "../src/routes/contributors";
 import { asReviews, wholeReviews } from "../src/routes/review";
 import { settleTargets, targetsOf, type TargetBuild, type TargetDecision } from "../src/targets";
 import { packageKey } from "../src/r2";
+import { runScript, scriptOf } from "./fixture";
 
 const API = "http://pool.test/api/v1";
 
@@ -611,6 +612,36 @@ describe("a package built for two architectures", () => {
     expect((await fork("held")).status).toBe(409);
     expect((await request("held", "omc_dave", ["x86_64"])).status).toBe(200);
     await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = 'not this story' WHERE name IN ('held', 'let-go') AND status = 'queued'").run();
+  });
+
+  it("is one group of rows on Review: the package's cells span its builds, and each build is a row of its own", async () => {
+    expect((await request("rows")).status).toBe(201);
+    const a = await build("omw_cx", "x86_64", "rows"); await stage(a);
+    const b = await build("omw_ca", "aarch64", "rows"); await stage(b);
+    // The page as m2's browser draws it: the served script, run over the Worker's answers with m2's session.
+    await env.DB.prepare("UPDATE contributors SET session_hash = ? WHERE login = 'm2'").bind(await sha256Hex("oms_m2")).run();
+    const browser = async (path: string, init?: RequestInit) => {
+      const ctx = createExecutionContext();
+      const res = await worker.fetch(new Request(`http://pool.test${path}`, { ...init, headers: { ...(init?.headers as Record<string, string> | undefined), cookie: "omc=oms_m2" } }), env, ctx);
+      await waitOnExecutionContext(ctx);
+      return res;
+    };
+    const drawn = runScript(scriptOf(await (await browser("/review")).text()), { pathname: "/review", functions: [], fetch: browser });
+    await new Promise((r) => setTimeout(r, 80));
+    const rows = (drawn.nodes["#staged tbody"].innerHTML as string).split("<tr").slice(1);
+    const group = rows.filter((r) => r.startsWith(` id="t-${a.task.id}"`) || r.startsWith(` id="t-${b.task.id}"`));
+    expect(group, "both builds of rows are drawn").toHaveLength(2);
+    // The first row carries the package's five cells — its name and targets, who brought it, its class, since when, the decision — each spanning both builds; one class, for-you by the rows' `waits`.
+    expect(group[0]).toMatch(/^ id="t-\d+" class="for-you">/);
+    expect(group[0].match(/<td[^>]* rowspan="2"/g)).toHaveLength(5);
+    expect(group[0]).toContain("<b>rows</b></a>");
+    // The second is its build's own five cells — Arch, Build, Gate, Audit, Trial — under the same mark, with nothing spanning.
+    expect(group[1]).toMatch(/^ id="t-\d+" class="for-you more">/);
+    expect(group[1].match(/<td/g)).toHaveLength(5);
+    expect(group[1]).not.toContain("rowspan");
+    // No row carries two class attributes, which a browser reads as the first alone.
+    for (const r of rows) expect(r.slice(0, r.indexOf(">")).match(/ class=/g)?.length ?? 0, r.slice(0, 80)).toBeLessThanOrEqual(1);
+    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = 'not this story' WHERE name = 'rows' AND status = 'queued'").run();
   });
 });
 

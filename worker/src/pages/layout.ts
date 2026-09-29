@@ -246,8 +246,8 @@ const CSS = String.raw`
   .pill.none { color: var(--dim); }
   /* A package's targets: a chip per architecture, dashed when it is not supported (targetChips). */
   .tgts { display: inline-flex; flex-wrap: wrap; gap: 4px; vertical-align: middle; } .pill.tgt { text-transform: none; letter-spacing: 0; font: 400 11.5px var(--font-mono); } .pill.tgt.dashed { border-style: dashed; }
-  /* One line per build in a package's row (Review's table). */
-  .bl { white-space: nowrap; } .bl + .bl { margin-top: 6px; }
+  /* One line per build of a decision (Review's Decided lately). */
+  .bl + .bl { margin-top: 6px; }
   .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 13.5px; }
   .kv dt { color: var(--dim); }
   .kv dd { margin: 0; }
@@ -461,7 +461,7 @@ const CSS = String.raw`
   .ring-head .k { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; } .ring-head b { font-family: Geist, sans-serif; font-size: 20px; font-weight: 600; line-height: 1.15; } .ring-head .s { font-size: 11.5px; color: var(--dim); line-height: 1.4; }
   .feed a.row { text-decoration: none; color: inherit; cursor: pointer; }
   /* An inset box-shadow with no blur and no offset is a 3px bar on a row's edge, not a shadow: it takes no room in the grid or the table, where a border would. */
-  tr.project-row td { background: var(--panel-2); } tr.project-row td:first-child { box-shadow: inset 3px 0 0 var(--green); } .feed a.row:hover .what { color: var(--text); }
+  tr.project-row td { background: var(--panel-2); } tr.project-row:not(.more) td:first-child { box-shadow: inset 3px 0 0 var(--green); } .feed a.row:hover .what { color: var(--text); }
   .charts.three { grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); }
   .charts.three .chart { display: flex; flex-direction: column; } .charts.three .chart > .mini { margin-top: auto; }
   .charts.three #c-sec { display: flex; flex-direction: column; flex: 1; } .charts.three #c-sec .hrows { flex: 1; align-content: space-evenly; } .charts.three #c-sec > p { margin-top: auto; }
@@ -532,7 +532,8 @@ const CSS = String.raw`
   .rrow .n { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .rrow .s { color: var(--muted); min-width: 0; } .rrow .s .pill { margin-right: 4px; }
   .rrow .go { font-size: 12.5px; color: var(--green); text-decoration: none; white-space: nowrap; justify-self: end; } .rrow .go:hover { text-decoration: underline; }
   .rrows > p { background: var(--panel); padding: 10px 14px; }
-  tr.for-you td:first-child { box-shadow: inset 3px 0 0 var(--amber); } tr.mine-row td:first-child { box-shadow: inset 3px 0 0 var(--line); }
+  /* A row's mark is on its first cell; a package's other builds in Review's table (tr.more) are rows under the cells the package spans, whose first cell carries the mark for them all. */
+  tr.for-you:not(.more) td:first-child { box-shadow: inset 3px 0 0 var(--amber); } tr.mine-row:not(.more) td:first-child { box-shadow: inset 3px 0 0 var(--line); }
   details.tool { border: 1px solid var(--line); background: var(--panel); padding: 12px 16px; } details.tool summary { cursor: pointer; font-weight: 500; } details.tool summary .dim { font-weight: 400; font-size: 12.5px; margin-left: 8px; } details.tool[open] summary { margin-bottom: 12px; }
   #mine-queue { margin: 0 0 18px; } #mine-queue b { color: var(--text); } #mine-queue a { color: var(--green); text-decoration: none; }
   .panel { border: 1px solid var(--line); background: var(--panel); padding: 16px 18px; min-width: 0; }

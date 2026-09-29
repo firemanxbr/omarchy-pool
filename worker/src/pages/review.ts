@@ -217,12 +217,20 @@ const SCRIPT = String.raw`
     $("#queue-note").textContent = rows.length ? num(forMe()) + " waiting for " + (isMaintainer() ? "your decision" : "a maintainer") + " · " + num(pkgs.length) + " in review" + (redundant ? " · " + num(redundant) + " of a version already approved" : "") : "";
     pager("#staged", pkgs, function (p) {
       var t = p.t, det = t.detected || {};
-      var lines = function (cell) { return p.rows.map(function (r) { return '<div class="bl">' + cell(r) + '</div>'; }).join(""); };
       var mine = isOwner(t.owner), forYou = isMaintainer() && !mine && p.rows.some(decidable);
-      return '<tr id="t-' + t.id + '"' + (t.kind === "project" ? ' class="project-row"' : '') + (forYou ? ' class="for-you"' : mine ? ' class="mine-row"' : '') + '><td>' + pkg(t.name, t.version, "lab", t.arch) + (det.license ? ' <span class="dim">' + esc(det.license) + '</span>' : '') + (t.url ? ' <a class="run dim" href="' + esc(t.url) + '" title="' + esc(t.url) + '">source</a>' : '') + '<br>' + targetChips(t.targets) + ' ' + category(t) + '</td><td>' + lines(function (r) { return esc(r.arch); }) + '</td>' +
-        '<td>' + personLink(t.owner) + (mine ? ' <span class="pill none">you</span>' : '') + '</td><td>' + lines(buildCell) + '</td><td>' + lines(function (r) { return gatePill(r.vet, r.evidence.tests); }) + '</td><td>' + lines(function (r) { return auditPill(r.audit, r.evidence.audit); }) + '</td><td>' + lines(function (r) { return trialPill(r.trial, r.evidence.trial); }) + '</td>' +
-        '<td>' + klass(t) + '</td>' +
-        '<td class="when">' + ago(t.finished_at) + '</td><td class="decision">' + decision(t) + '</td></tr>';
+      // One class per row: the lead's kind first, then whose it is — what a browser kept when the row carried two class attributes.
+      var cls = t.kind === "project" ? "project-row" : forYou ? "for-you" : mine ? "mine-row" : "";
+      // Each build of the package is a row of its own, so a long Build cell wraps and the Arch, Gate, Audit and Trial beside it stay on its line; the package's cells — its name and targets, who brought it, its class, since when, the decision — span them all.
+      var across = p.rows.length > 1 ? ' rowspan="' + p.rows.length + '"' : '';
+      var arch = function (r) { return '<td>' + esc(r.arch) + '</td>'; };
+      var build = function (r) { return '<td>' + buildCell(r) + '</td><td>' + gatePill(r.vet, r.evidence.tests) + '</td><td>' + auditPill(r.audit, r.evidence.audit) + '</td><td>' + trialPill(r.trial, r.evidence.trial) + '</td>'; };
+      return p.rows.map(function (r, i) {
+        if (i) return '<tr id="t-' + r.id + '" class="' + (cls ? cls + ' ' : '') + 'more">' + arch(r) + build(r) + '</tr>';
+        return '<tr id="t-' + r.id + '"' + (cls ? ' class="' + cls + '"' : '') + '><td' + across + '>' + pkg(t.name, t.version, "lab", t.arch) + (det.license ? ' <span class="dim">' + esc(det.license) + '</span>' : '') + (t.url ? ' <a class="run dim" href="' + esc(t.url) + '" title="' + esc(t.url) + '">source</a>' : '') + '<br>' + targetChips(t.targets) + ' ' + category(t) + '</td>' + arch(r) +
+          '<td' + across + '>' + personLink(t.owner) + (mine ? ' <span class="pill none">you</span>' : '') + '</td>' + build(r) +
+          '<td' + across + '>' + klass(t) + '</td>' +
+          '<td class="when"' + across + '>' + ago(t.finished_at) + '</td><td class="decision"' + across + '>' + decision(t) + '</td></tr>';
+      }).join("");
     }, { empty: "nothing waiting for review", text: function (p) { return p.rows.map(function (t) { return [t.id, t.name, t.version, t.arch, t.owner, t.kind, t.category, t.score && t.score.class].join(" "); }).join(" "); } });
     endSkeleton();
   }
@@ -416,8 +424,8 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     id: "review.staged-table",
     page: "/review",
     anchor: ['<table id="staged">', "<th>Gate</th><th>Audit</th><th>Trial</th>", '<th class="decision">Decision</th>'],
-    // One row per package (#242): the build that speaks for it (the server's `lead`) draws the row, its targets say where each architecture stands under the name, and every build of it shown is a line of the Arch, Build, Gate, Audit and Trial cells. The package's name is its page at the shell's one address (pkgHref), with the lab — the ring a build nobody decided yet is about — and the row's architecture. A package for a maintainer to decide is highlighted (for-you) by its rows' own `waits`, the server's word, never a rule of the page's.
-    script: ['pager("#staged", pkgs', "function byPackage(rows)", "p.rows.filter(function (t) { return t.lead; })[0] || p.rows[0]", "targetChips(t.targets)", 'pkg(t.name, t.version, "lab", t.arch)', "function pkg(name, version, ring, arch)", "pkgHref(name, ring, arch)", "gatePill(r.vet, r.evidence.tests)", "auditPill(r.audit, r.evidence.audit)", "trialPill(r.trial, r.evidence.trial)", "t.built_by", "sc.projected", '"project-row"', '"mine-row"', '"for-you"', "!mine && p.rows.some(decidable)"],
+    // One group of rows per package (#242): the build that speaks for it (the server's `lead`) draws the package's cells, which span the group, its targets say where each architecture stands under the name, and every build of it shown is a row of its own Arch, Build, Gate, Audit and Trial cells. The package's name is its page at the shell's one address (pkgHref), with the lab — the ring a build nobody decided yet is about — and the row's architecture. A package for a maintainer to decide is highlighted (for-you) by its rows' own `waits`, the server's word, never a rule of the page's.
+    script: ['pager("#staged", pkgs', "function byPackage(rows)", "p.rows.filter(function (t) { return t.lead; })[0] || p.rows[0]", "targetChips(t.targets)", 'pkg(t.name, t.version, "lab", t.arch)', "function pkg(name, version, ring, arch)", "pkgHref(name, ring, arch)", "gatePill(r.vet, r.evidence.tests)", "auditPill(r.audit, r.evidence.audit)", "trialPill(r.trial, r.evidence.trial)", "t.built_by", "sc.projected", '"project-row"', '"mine-row"', '"for-you"', "!mine && p.rows.some(decidable)", "' rowspan=\"' + p.rows.length", "'more\">' + arch(r) + build(r)"],
     reads: [
       {
         path: "/api/v1/factory/review",
