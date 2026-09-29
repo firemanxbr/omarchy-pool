@@ -378,14 +378,16 @@ pkg-repo work --worker-token omw_… --labels '{"where":"laptop"}'
 pkg-repo work --worker-token omw_… --arch x86_64 --labels '{"where":"laptop","emulated":true}'
 ```
 
-An emulated worker says so in its labels (`"emulated":true`). A build that
-dies of emulation there — a toolchain that cannot start (the build
-script's exit 96) or a library qemu cannot map (*failed to map segment
-from shared object*: rustc, sudo, anything linking libedit or libldap) —
-is the worker's failure, not the recipe's: `pkg-repo work` reports it with
-`needs_native`, and the build goes back to the queue for a native worker of
-its architecture, the attempt given back. No emulated worker takes it
-again. The Status, Factory and Workers pages and the build's own page say
+An emulated worker says so in its labels (`"emulated":true`; `--labels`,
+or `WORKER_LABELS` when the flag is not given). Its build containers get
+the same labels. A build that dies of emulation there is the worker's
+failure, not the recipe's: a toolchain that cannot start, or a library
+qemu cannot map (*failed to map segment from shared object*: rustc, sudo,
+anything linking libedit or libldap). The build script stops at the first
+attempt with exit 96, before any drafter turn. `pkg-repo work` and the
+community worker report it with `needs_native`, and the build goes back to
+the queue for a native worker of its architecture, the attempt given back.
+No emulated worker takes it again. Every page that follows the build says
 what it waits for.
 
 `--idle-exit 300` makes a worker exit after five minutes without work;

@@ -625,7 +625,7 @@ const SCRIPT = String.raw`
       var d = t[0] !== null && t[1] !== null ? diff(t[0].replace(/\n$/, "").split("\n"), t[1].replace(/\n$/, "").split("\n")) : null;
       $("#rv-f-pkgbuild").innerHTML = t[0] !== null ? recipe(t[0], d ? d.left : {}, f.factory.id) : f ? elsewhere(f.factory.id, "Its PKGBUILD is") : empty("nothing built yet");
       $("#rv-y-pkgbuild").innerHTML = t[1] !== null ? recipe(t[1], d ? d.right : {}, y.rebuild.id) : y ? elsewhere(y.rebuild.id, "Its PKGBUILD is") : empty("Written from the request's facts by the claim's agent; the factory's recipe is only read.");
-      var note = $("#rv-diffnote"); if (note) { note.textContent = d ? (d.differ ? diffCount(d.differ) + " from the factory's" : "the same as the factory's") : R.some(function (r) { return r.rebuild && r.rebuild.status === "leased"; }) ? "being written…" : R.some(function (r) { return r.rebuild && r.rebuild.status === "queued"; }) ? "waiting for a review worker" : ""; note.className = "rv-diffnote" + (d && d.differ ? " warn" : ""); }
+      var note = $("#rv-diffnote"); if (note) { note.textContent = d ? (d.differ ? diffCount(d.differ) + " from the factory's" : "the same as the factory's") : R.some(function (r) { return r.rebuild && r.rebuild.status === "leased"; }) ? "being written…" : R.some(function (r) { return r.rebuild && r.rebuild.status === "queued"; }) ? R.map(function (r) { return waitsForNative(r.rebuild); }).filter(Boolean)[0] || "waiting for a review worker" : ""; note.className = "rv-diffnote" + (d && d.differ ? " warn" : ""); }
       DIFFED = d;
       renderSteps(R);
     });
@@ -649,7 +649,7 @@ const SCRIPT = String.raw`
       var r = R.filter(function (x) { return x.arch === a; })[0], b = r && r.rebuild;
       if (!r || !r.asked) steps.push(S("Build " + a, "na", "not requested"));
       else if (!b) steps.push(S("Build " + a, r.target.status === "not_supported" ? "na" : "wait", r.target.status === "not_supported" ? "not supported" : ""));
-      else if (b.status === "queued") steps.push(S("Build " + a, "wait", "queued"));
+      else if (b.status === "queued") steps.push(waitsForNative(b) ? S("Build " + a, "wait", "native worker", waitsForNative(b) + ": it could not run emulated") : S("Build " + a, "wait", "queued"));
       else if (b.status === "leased") steps.push(S("Build " + a, "run", "now"));
       else if (built(b)) steps.push(S("Build " + a, vetOk(b) === false ? "fail" : "ok", b.duration_ms ? dur(b.duration_ms) : "", vetOk(b) === false ? "the gate did not pass" : ""));
       else steps.push(S("Build " + a, "fail", "failed", b.error || ""));
@@ -685,7 +685,8 @@ const SCRIPT = String.raw`
     if (!b) log.innerHTML = empty(cl ? "queued for a review worker" : "Nothing yet: a maintainer's claim starts the rebuild.");
     else if (built(b) || b.status === "failed") textOf(b.id, "log").then(function (t) { if (current(gen)) tail(log, t !== null ? numbered(t, null, 40) : elsewhere(b.id, b.error ? b.error + " — the log is" : "Its log is")); });
     else if (b.status === "leased" && WLOG && WLOG.id === b.id) tail(log, WLOG.log ? numbered(WLOG.log, null, 40) : empty("building on " + WLOG.worker + "; nothing logged yet"));
-    else log.innerHTML = empty(b.status === "leased" ? "building on " + (b.lease_owner || "a review worker") + (isMaintainer() ? "" : " — its log is here once it built") : "queued for a review worker");
+    // Sent back by an emulated worker (#281): no review worker of that kind takes it again, so the words are the shell's.
+    else log.innerHTML = empty(b.status === "leased" ? "building on " + (b.lease_owner || "a review worker") + (isMaintainer() ? "" : " — its log is here once it built") : waitsForNative(b) ? waitsForNative(b) + ": it could not run emulated" : "queued for a review worker");
     var yev = b ? evidenceOf(b.id) || {} : {};
     $("#rv-y-evid").innerHTML = b ? (built(b) ? '<span>gate ' + gatePill(vetOf(b), yev.tests) + '</span> <span>trial ' + trialPill(shown.trial ? { status: shown.trial.status, verdict: shown.trial.result && shown.trial.result.verdict } : null, shown.trial ? yev.trial : "") + '</span> ' : '') + '<a href="/build/' + b.id + '">build #' + b.id + '</a> ' + builtOn(b.id) : '';
   }
@@ -1034,11 +1035,11 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // Right, the rebuild — "Your rebuild" to the maintainer who claimed it, the claimant's to anyone else: the agents a maintainer's claim may choose (the project's workers, read when a claim or the workspace first needs them), the steps with their progress, the rebuilt PKGBUILD with the lines that differ from the factory's lit, the log — the worker's own while it runs (a maintainer's read, with the story), the build's once it built — and Claim with a hint where nobody claimed it.
+    // Right, the rebuild — "Your rebuild" to the maintainer who claimed it, the claimant's to anyone else: the agents a maintainer's claim may choose (the project's workers, read when a claim or the workspace first needs them), the steps with their progress, the rebuilt PKGBUILD with the lines that differ from the factory's lit, the log — the worker's own while it runs (a maintainer's read, with the story), the build's once it built — and Claim with a hint where nobody claimed it. A rebuild an emulated worker sent back says, in its step, its recipe's note and its log, the native worker it waits for (the shell's waitsForNative, #281).
     id: "review.rebuild-pane",
     page: "/review",
     anchor: ['id="rv-yours"', '<b id="rv-y-title">The rebuild</b>', 'id="rv-agents"', 'id="rv-steps"', 'id="rv-progress"', 'id="rv-y-pkgbuild"', 'id="rv-diffnote"', 'id="rv-y-log"', "If approved, this build is the one that ships."],
-    script: ["function diff(a, b)", '"s differ"', '" from the factory\'s"', '"Your rebuild"', "\"'s rebuild\"", '"Re-check the request"', '"Derive the recipe from scratch"', '"Install with a real pacman"', '"Compare with the factory"', ">Claim and rebuild</button>", "data-agent=", '"/workers/"', '"/log"', "localStorage.getItem(AGENT_KEY)", "function needWorkers()", "RECIPE_LINES = 1000"],
+    script: ["function diff(a, b)", '"s differ"', '" from the factory\'s"', '"Your rebuild"', "\"'s rebuild\"", '"Re-check the request"', '"Derive the recipe from scratch"', '"Install with a real pacman"', '"Compare with the factory"', ">Claim and rebuild</button>", "data-agent=", '"/workers/"', '"/log"', "localStorage.getItem(AGENT_KEY)", "function needWorkers()", "RECIPE_LINES = 1000", '"native worker"', "waitsForNative(b)", "waitsForNative(r.rebuild)"],
     reads: [
       { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.id", "workers.0.arch", "workers.0.side", "workers.0.kinds", "workers.0.alive", "workers.0.agent", "workers.0.agent_status"] },
       { path: `/api/v1/factory/tasks/${F.projectTask}/artifacts/PKGBUILD`, json: false },

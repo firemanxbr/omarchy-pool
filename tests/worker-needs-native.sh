@@ -7,7 +7,9 @@
 # start) and a library the loader could not map (sudo through libldap)
 # are reported `needs_native: true, final: false`; the same loader line on
 # a native worker is a plain failure, retried; the gate's failure is final
-# and a recipe's is neither. The log is on the record either way.
+# and a recipe's is neither. The log is on the record either way. The
+# labels the worker claims with (--labels, or WORKER_LABELS alone) are the
+# ones its build container gets, so the script's probe and the report agree.
 #
 # Requires: cargo (or PKG_REPO=<a built pkg-repo>), python3, jq.
 set -euo pipefail
@@ -61,11 +63,13 @@ open(os.environ["STUB_PORT"], "w").write(str(srv.server_address[1]))
 srv.serve_forever()
 P
 
-# The build container: what it prints is the build's log, its status the container's.
+# The build container: what it prints is the build's log, its status the
+# container's; its arguments, one per line, to STUB_PODMAN_ARGS.
 mkdir -p "$tmp/bin"
 cat > "$tmp/bin/podman" <<'S'
 #!/usr/bin/env bash
 [[ "$1" == --version ]] && { echo "podman version 5.0.0 (stub)"; exit 0; }
+printf '%s\n' "$@" > "$STUB_PODMAN_ARGS"
 printf '%b' "$STUB_BUILD_LOG"
 exit "$STUB_BUILD_STATUS"
 S
@@ -74,16 +78,17 @@ chmod +x "$tmp/bin/podman"
 # One task, one worker: a fresh pool and work directory, the keyrings
 # already fetched (the worker fetches them at start otherwise), the report
 # the pool heard printed.
-run() { # labels status log
-  local work="$tmp/work"
+run() { # labels status log — labels "env:<json>": no --labels, WORKER_LABELS instead (the image's role-less project mode)
+  local work="$tmp/work" flag=(--labels "$1") envl=()
+  if [[ "$1" == env:* ]]; then flag=(); envl=(WORKER_LABELS="${1#env:}"); fi
   rm -rf "$work"; mkdir -p "$work/keyrings"; : > "$work/keyrings/archlinux.gpg"; : > "$work/keyrings/.fetched"
   : > "$tmp/requests"; rm -f "$tmp/port"
   STUB_REQUESTS="$tmp/requests" STUB_PORT="$tmp/port" python3 "$tmp/pool.py" & stub_pid=$!
   for _ in $(seq 50); do [[ -s "$tmp/port" ]] && break; sleep 0.1; done
   [[ -s "$tmp/port" ]] || { echo "the stub pool did not start"; exit 1; }
-  PATH="$tmp/bin:$PATH" STUB_BUILD_STATUS="$2" STUB_BUILD_LOG="$3" \
+  env -u WORKER_LABELS ${envl[@]+"${envl[@]}"} PATH="$tmp/bin:$PATH" STUB_BUILD_STATUS="$2" STUB_BUILD_LOG="$3" STUB_PODMAN_ARGS="$tmp/podman-args" \
     "$PKG_REPO" work --api "http://127.0.0.1:$(cat "$tmp/port")" --pool "http://127.0.0.1:1/pool" --worker-token omw_stub \
-      --arch x86_64 --kind build --labels "$1" --once --work-dir "$work" --repo-dir "$root" 2>"$tmp/stderr" \
+      --arch x86_64 --kind build ${flag[@]+"${flag[@]}"} --once --work-dir "$work" --repo-dir "$root" 2>"$tmp/stderr" \
     || { echo "pkg-repo work failed: $(cat "$tmp/stderr")"; exit 1; }
   kill "$stub_pid" 2>/dev/null; wait "$stub_pid" 2>/dev/null || true; stub_pid=""
   report="$(jq -c 'select(.path == "/api/v1/factory/tasks/7/fail") | .body' "$tmp/requests")"
@@ -91,6 +96,11 @@ run() { # labels status log
 }
 expect() { # jq-filter what
   jq -e "$1" <<<"$report" >/dev/null || { echo "$2: $report"; exit 1; }
+}
+# The labels the worker claimed with are the ones its build container probes by (WORKER_LABELS).
+claimed_and_probed() { # labels-json what
+  jq -e --argjson l "$1" 'select(.path == "/api/v1/factory/claim") | .body.labels == $l' "$tmp/requests" | grep -q true || { echo "$2: the claim's labels: $(cat "$tmp/requests")"; exit 1; }
+  sed -n 's/^WORKER_LABELS=//p' "$tmp/podman-args" | jq -e --argjson l "$1" '. == $l' >/dev/null 2>&1 || { echo "$2: the container's: $(cat "$tmp/podman-args")"; exit 1; }
 }
 emulated='{"where":"omarchy-studio","emulated":true,"role":"review"}'
 native='{"where":"x86-box","role":"review"}'
@@ -103,6 +113,7 @@ expect '.needs_native == true and .final == false' "exit 96 on an emulated worke
 expect '.error | contains("rustc cannot start on this worker")' "the report says why"
 grep -q '"path": "/api/v1/factory/tasks/7/artifacts/build.log"' "$tmp/requests" || { echo "the log is on the record: $(cat "$tmp/requests")"; exit 1; }
 grep -q 'back in the queue for a native x86_64 worker' "$tmp/stderr" || { echo "the worker's log says where the build went: $(cat "$tmp/stderr")"; exit 1; }
+claimed_and_probed "$emulated" "--labels, and no WORKER_LABELS in the worker's environment"
 
 # 2. Emulated, a library qemu could not map (no probe sees it coming): the same.
 run "$emulated" 4 "$sudo"
@@ -112,6 +123,12 @@ expect '.error | contains("libldap.so.2: failed to map segment from shared objec
 # 3. The same line on a native worker is a real failure: retried, not sent anywhere.
 run "$native" 4 "$sudo"
 expect '.needs_native == false and .final == false' "a native worker's loader failure is a plain one"
+claimed_and_probed "$native" "a native worker's labels"
+
+# 3b. No --labels, WORKER_LABELS alone (the image's role-less project mode): the same labels claimed, probed and heeded.
+run "env:$emulated" 96 "$rustc"
+expect '.needs_native == true and .final == false' "WORKER_LABELS alone makes the worker emulated"
+claimed_and_probed "$emulated" "WORKER_LABELS alone"
 
 # 4. The gate's failure is the recipe's: final. 5. A recipe that does not compile: neither.
 run "$emulated" 5 '==> The gate: FAIL (1 failing check(s), 0 warning(s))\n'

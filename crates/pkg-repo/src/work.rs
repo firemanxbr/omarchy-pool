@@ -552,21 +552,30 @@ impl std::fmt::Display for NeedsNative {
 
 impl std::error::Error for NeedsNative {}
 
-/// The worker's labels say it runs emulated (`{"emulated":true}`).
+/// The worker's labels say it runs emulated (`{"emulated":true}`), read as
+/// the pool reads them (routes/factory.ts: any value JavaScript counts
+/// true) and as the build script does (omarchy-build-worker.sh,
+/// `emulated_worker`): the worker and the pool never disagree on which
+/// one it is, so a `needs_native` it sends is one the pool heeds.
 fn emulated(labels: &serde_json::Value) -> bool {
-    labels
-        .get("emulated")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
+    use serde_json::Value;
+    match labels.get("emulated") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(Value::Number(n)) => n.as_f64().is_some_and(|f| f != 0.0),
+        Some(Value::String(s)) => !s.is_empty(),
+        Some(Value::Array(_) | Value::Object(_)) => true,
+    }
 }
 
 /// Why a failed build container died of emulation, or None when it did
 /// not: the build script's own exit 96 (`toolchains_start`: a toolchain the
-/// recipe installed does not start), its line for it, or — on an emulated
-/// worker — the loader's own words for a library qemu could not map, which
-/// no probe sees coming (sudo, anything linking libedit or libldap). The
-/// markers are the community worker's (its fail report), plus the
-/// loader's; a native worker's "failed to map segment" is a real failure.
+/// recipe installed does not start; `libraries_start`: a library qemu could
+/// not map, sudo or anything linking libedit or libldap), its line for it,
+/// or — on an emulated worker — the loader's own words where the script
+/// did not see them (outside makepkg). The markers are the community
+/// worker's, the same script's; a native worker's "failed to map segment"
+/// is a real failure.
 fn emulation_failure(emulated: bool, code: Option<i32>, log: &str) -> Option<String> {
     const CANNOT_START: &str = "cannot start on this worker";
     const CANNOT_MAP: &str = "failed to map segment from shared object";
@@ -1646,12 +1655,11 @@ fn build_job(opts: &WorkOptions, task: &Task, token: &Arc<Mutex<String>>) -> Res
     }
     // The worker's labels ride along: an emulated worker's build container
     // probes the toolchains a recipe installs (omarchy-build-worker.sh,
-    // toolchains_start) and fails at once when one cannot start.
-    if let Ok(labels) = std::env::var("WORKER_LABELS") {
-        if !labels.is_empty() {
-            run.arg("-e").arg(format!("WORKER_LABELS={labels}"));
-        }
-    }
+    // toolchains_start, libraries_start) and fails at once when one cannot
+    // start. The labels this worker claimed with (`--labels`, or
+    // WORKER_LABELS), not the environment's own: what the container
+    // probes, what this worker reports and what the pool heeds are one.
+    run.arg("-e").arg(format!("WORKER_LABELS={}", opts.labels));
     if let Ok(net) = std::env::var("OMARCHY_BUILD_NETWORK") {
         if !net.is_empty() {
             run.arg("--network").arg(net);
@@ -2492,8 +2500,23 @@ mod tests {
             &serde_json::json!({"where": "omarchy-studio", "emulated": true})
         ));
         assert!(!emulated(&serde_json::json!({"where": "omarchy-studio"})));
-        assert!(!emulated(&serde_json::json!({"emulated": "yes"})));
         assert!(!emulated(&serde_json::json!({})));
+        // As the pool reads it (`!!labels.emulated`): one rule on both sides.
+        for yes in [
+            serde_json::json!("yes"),
+            serde_json::json!("true"),
+            serde_json::json!(1),
+        ] {
+            assert!(emulated(&serde_json::json!({ "emulated": yes })), "{yes}");
+        }
+        for no in [
+            serde_json::json!(false),
+            serde_json::json!(null),
+            serde_json::json!(0),
+            serde_json::json!(""),
+        ] {
+            assert!(!emulated(&serde_json::json!({ "emulated": no })), "{no}");
+        }
     }
 
     /// Exit 96 is the build script's (`toolchains_start`): a toolchain that

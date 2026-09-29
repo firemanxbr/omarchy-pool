@@ -82,4 +82,4 @@ broker-community-x86_64 community-x86_64 review-x86_64`. `COMPOSE_PROFILES=emula
 turns the emulated pair on here regardless, for C-only packages (a
 toolchain or a library that cannot start there sends the build back to the
 queue for a native worker, from the community builder and the review
-worker alike: *Run a worker* in the docs).
+worker alike: *Run a worker* in the docs, the runbook's *Studio host*).

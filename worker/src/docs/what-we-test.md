@@ -301,9 +301,12 @@ maintainer merges it like any other change to the process.
 - **2026-09-29 — the project's own emulated worker.** The x86_64 capacity
   evaluation found omarchy-cli's own x86_64 review build failed for good
   on the Studio's review-x86_64: rustc under qemu again, three attempts,
-  then final. The pool and the community worker already sent such a build
-  back for a native worker; the review and pool workers run `pkg-repo
-  work`, which never said so. It does now (#281): the build script's exit
-  96, or the loader's *failed to map segment* on an emulated worker, is
-  reported `needs_native`, and the Status, Factory, Workers and build pages
-  say what the build waits for.
+  then final. The pool and the community worker already sent a build back
+  for a native worker when a toolchain could not start (exit 96); the
+  review and pool workers run `pkg-repo work`, which never said so, and a
+  library qemu could not map (sudo through libldap, a libedit user) was
+  nobody's exit 96. Both are now (#281): the build script stops at the
+  first attempt with exit 96 when the loader says *failed to map segment*
+  on an emulated worker, `pkg-repo work` reports it `needs_native` with the
+  labels it claimed with, and the pages that follow a build say what it
+  waits for.
