@@ -503,7 +503,7 @@ const PACKAGE_SCRIPT = String.raw`
     // and by its order (#282): the native worker a rebuild an emulated worker sent back waits for (#281), else the project rebuilding while
     // any architecture's rebuild is queued or running, else a new version building beside the claim, else the rebuild staged.
     var reviewTone, reviewSum, reviewWhy = "", inReview = reviewOf();
-    var sentBack = function (a) { var k = status(a) === "reviewing" ? claimOf(a) : null; return k ? waitsForNative(k.project) : ""; }, waits = arches.map(sentBack).filter(Boolean)[0];
+    var sentBack = function (a) { var k = status(a) === "reviewing" ? claimOf(a) : null; return k ? waitsForNative(k.project) : ""; }, waits = arches.map(sentBack).filter(Boolean)[0] || "";
     var claimAt = waits ? ["warn", waits] : anyT(["reviewing"]) ? ["run", "project rebuilding"] : anyT(["building"]) ? ["run", "new version building"] : ["warn", "rebuild staged"];
     if (b && !approval) { reviewTone = "na"; reviewSum = withdrawn ? "withdrawn by the block" : "never reviewed · blocked"; }
     else if (approval) { reviewTone = approval.decision === "approved" ? "ok" : "fail"; reviewSum = "@" + approval.by + (approval.decision === "approved" ? " · rebuilt · approved" : " · " + approval.decision); }
