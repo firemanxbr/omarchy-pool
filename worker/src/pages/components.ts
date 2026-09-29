@@ -296,9 +296,9 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // The pool's jobs of the week counted once (CHARTS' jobsSummary over the stats series: runs, done, failed, waiting, per kind and per day), a job's bucket by one rule (jobBucket: a cancelled job is failed, queued or leased is waiting — jobsSummary's and the Workers page's cards') and the worker minutes as a view on its days (workerMinutes): the Status tiles, table and charts and the Pipeline's chart read these, never the metrics snapshot's jobs.
+    // The pool's jobs of the week counted once (CHARTS' jobsSummary over the stats series: runs, done, failed, waiting, per kind and per day), a job's bucket by one rule (jobBucket: a cancelled job is failed, queued or leased is waiting — jobsSummary's and the Workers page's cards') and the worker minutes as a view on its days (workerMinutes): the Status tiles, table and charts and the Pipeline's chart read these, never the metrics snapshot's jobs. Read on Status, a page that splices CHARTS (Home draws no chart since #243).
     id: "shell.jobs-summary",
-    page: "/",
+    page: "/status",
     anchor: [],
     script: ["function jobBucket(status)", 'status === "failed" || status === "cancelled" ? "failed" : "waiting"', "function jobsSummary(series, days)", "o[jobBucket(r.status)] += n", "function workerMinutes(series, days)", "var js = jobsSummary(series, days)"],
     visible: EVERYONE,

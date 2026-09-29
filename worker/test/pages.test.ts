@@ -596,7 +596,8 @@ describe("diagrams", () => {
   it("draws no two boxes over each other", async () => {
     const { ringsDiagram, sourcesDiagram, liveDiagram, archDiagram, factoryDiagram } = await import("../src/pages/diagrams");
     const { DOC_DIAGRAMS } = await import("../src/pages/doc-diagrams");
-    const draw: Record<string, () => string> = { rings: ringsDiagram, "rings/promote": () => ringsDiagram("promote"), sources: sourcesDiagram, live: liveDiagram, arch: archDiagram, factory: factoryDiagram };
+    // The rings drawn with no stage lit were Home's until #243 (its chain is HTML now); How it works draws them a stage at a time, the same boxes.
+    const draw: Record<string, () => string> = { "rings/promote": () => ringsDiagram("promote"), sources: sourcesDiagram, live: liveDiagram, arch: archDiagram, factory: factoryDiagram };
     for (const [name, fn] of Object.entries(DOC_DIAGRAMS)) draw[`docs/${name}`] = fn;
     const claimed = new Set(allComponents(F).map((c) => c.drawn).filter((k): k is string => k !== undefined));
     expect([...claimed].sort()).toEqual(Object.keys(draw).sort());

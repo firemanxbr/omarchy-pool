@@ -709,8 +709,8 @@ audience from the same analytics: the distinct client addresses that
 fetched a ring database (`/<source>/<arch>/omarchy-*-<ring>.db`) on the pool's
 hosts — both names, one query, so a machine that used both in a day is
 one address — per ring and per architecture, as one `audience` journal line
-(`src/audience.ts`); the Pool page's *machines on the pool* chart shows
-it, `/api/v1/stats` carries the last 30 days. Nothing is kept
+(`src/audience.ts`); `/api/v1/stats` carries the last 30 days for the
+dashboard to draw. Nothing is kept
 per request — one number per day. An address is a machine most of the
 time (a NAT hides several, a laptop on the move counts twice), so the
 dashboard says *about*. The query is scoped to the account

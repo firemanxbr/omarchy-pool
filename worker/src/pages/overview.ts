@@ -1,518 +1,648 @@
 /**
- * The Pool: the door for Omarchy users. What the pool serves right now, how a
- * package reaches stable (drawn, and moving), which ring to use, the three
- * steps of pacman, coverage, and the people behind it. No account is ever
- * needed here; the details live one link away (Status, Journal, Packages).
+ * The Pool (#243): the door for Omarchy users, search first. The hero is
+ * the one sentence of what the pool is and a box that finds a package as
+ * you type, the packages people asked for lately under it, and four
+ * numbers that count up; then the chain a package travels from its source
+ * to your machine, the one command that points pacman at a ring (or the
+ * words to ask your agent) beside what the pool did last, and what reached
+ * the rings this week. Every number is the pool's own, from the APIs the
+ * dashboard already reads; nothing on the page needs an account, and what
+ * the old page explained lives one link away (Status, the docs).
  */
 import { page } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
-import { CHARTS } from "./charts";
-import { ringsDiagram } from "./diagrams";
-import type { RunningVersion } from "../meta";
+import { agentMark, lucide, type AgentMark } from "./kit";
+import { escapeHtml } from "../html";
+import { KEEP_RELEASES } from "../db";
+import { DASHBOARD_HOST, EXPECTED_SOURCES, PROMOTED_RINGS, REPO_ARCHES, RING_TEXT, RINGS_BY_STABILITY, type RunningVersion, type Upstream } from "../meta";
 
-const SEARCH_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>';
+/**
+ * The sources the chain lists, by the project a sync reads (meta.ts
+ * UPSTREAMS), in the handoff's words and order. Typed by the upstreams, so
+ * a project added there does not build until it has a name here.
+ */
+export const SOURCE_NAME: Record<Upstream, string> = {
+  "mirror.omarchy.org": "Arch Linux",
+  "os.archlinuxarm.org": "Arch Linux ARM",
+  "builds.garudalinux.org": "Chaotic",
+  "pkgs.omarchy.org": "Omarchy",
+  "github.com/maralcbr/omarchy-pkgs": "Asahi",
+  "github.com/asahi-alarm/asahi-alarm": "Asahi ALARM",
+  "the factory": "Factory",
+};
 
+/**
+ * Each source with the repositories it is made of (`<source>/<arch>`, the
+ * rows of /api/v1/stats' coverage), for the script. The factory builds
+ * what it serves: it never syncs, so it is never late (`built`).
+ */
+const SOURCES = (Object.keys(SOURCE_NAME) as Upstream[]).map((u) => ({
+  name: SOURCE_NAME[u],
+  keys: EXPECTED_SOURCES.filter((e) => e.upstream === u).map((e) => `${e.source}/${e.arch}`),
+  built: u === "the factory",
+}));
+
+/** Where a package comes from in the handoff's few words, by repository ("extra/x86_64" → "Arch extra"): EXPECTED_SOURCES' `origin`, as the ⌘K menu says it. */
+const ORIGIN: Record<string, string> = Object.fromEntries(EXPECTED_SOURCES.map((e) => [`${e.source}/${e.arch}`, e.origin]));
+
+/** The rings a reader points pacman at, most stable first (the shell's PROMISED_RINGS), and the same rings the way a package climbs them. */
+const PROMISED = RINGS_BY_STABILITY.filter((r) => (PROMOTED_RINGS as readonly string[]).includes(r));
+const CLIMB = [...PROMOTED_RINGS];
+
+/** The agents the prompt is written for, with the mark the kit draws for each (kit.ts AGENT_MARKS): the handoff's list, in its order. */
+const AGENTS: [string, AgentMark][] = [
+  ["Claude Code", "claude-color"], ["Codex", "openai"], ["Cursor", "cursor"], ["Gemini CLI", "gemini-color"], ["GitHub Copilot", "githubcopilot"],
+  ["Grok", "grok"], ["OpenCode", "opencode"], ["Qwen Code", "qwen-color"], ["Kimi", "kimi"], ["Meta", "meta-color"],
+];
+
+/** A segment of the chain: its gate's word over a line three squares run along — still, evenly spaced, for a reader who asked for less motion. */
+const track = (label: string, hue: string, seconds: number) =>
+  `<div class="home-track${hue ? ` ${hue}` : ""}" style="--dur:${seconds}s"><span>${label}</span><i aria-hidden="true"><b></b><b></b><b></b></i></div>`;
+
+const ringLine = (r: string) => escapeHtml(`${RING_TEXT[r].title} · ${RING_TEXT[r].lag}`);
+
+/** What the page is before its script runs: the frame of every section, the command for the most stable ring, and placeholders where the numbers land. */
 const BODY = String.raw`
-  <div class="hero">
-    <p class="eyebrow">For Omarchy users</p>
-    <h1>Arch, Arch Linux ARM, Omarchy and Asahi packages, tested before they reach you</h1>
-    <p class="lede">One host. Every package is verified against its project's key, stored once, and promoted through three rings on evidence — a real <code>pacman</code>, an ABI check, two green health checks — never on a promise.</p>
-    <div class="cta-row">
-      <a class="btn" href="#get-started">Get started</a>
-      <span class="hint">No account, no sign-up. Just your Omarchy.</span>
+  <section class="home-top">
+    <div class="home-lead">
+      <p class="op-eyebrow">For Omarchy users</p>
+      <h1 class="op-hero">Arch, Arch Linux ARM, Omarchy and Asahi packages, tested before they reach you</h1>
+      <form class="home-search" action="/packages" method="get" role="search">
+        <div class="home-box">${lucide("search", 18)}<input type="search" name="q" id="pool-q" placeholder="Search the pool's packages" aria-label="Find a package" aria-keyshortcuts="/" aria-controls="pool-results" aria-expanded="false" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search"><kbd aria-hidden="true">/</kbd></div>
+        <div class="home-results" id="pool-results" hidden></div>
+      </form>
+      <div class="home-asked" id="pool-asked" hidden></div>
     </div>
-    <form class="searchbar" action="/packages" method="get" style="margin:6px 0 0">
-      <div class="pool-search"><input type="search" name="q" id="pool-q" placeholder="find a package — pacman, ghostty, openssl…" aria-label="find a package" aria-keyshortcuts="/" autocomplete="off">${SEARCH_ICON}<div class="suggest" id="pool-suggest" hidden></div></div>
-      <button type="submit" class="btn">Search</button>
-      <span class="hint">every ring, both architectures</span>
-    </form>
-  </div>
-
-  <div class="tiles six" id="tiles"></div>
-
-  <section id="how">
-    <div class="h2row"><h2>From upstream to your machine</h2><a class="more-link" href="/docs/how-it-works">The full story, stage by stage →</a></div>
-    <p class="sub">Same packages, three levels of proof — and the lab beside them, where the factory's builds are installed by a real pacman before anyone decides. A ring that fails a health check rolls back on its own.</p>
-    <figure class="diagram">${ringsDiagram()}<figcaption>Packages keep the signature of the project that built them; the only key you add signs the databases and what the factory builds.</figcaption></figure>
-  </section>
-
-  <section id="rings-section">
-    <div class="h2row"><h2>Pick a ring</h2><a class="more-link" href="/docs/get-started#switching">Switching rings, going back →</a></div>
-    <p class="sub">Each ring is a complete, signed set of pacman databases over the same packages. The lab is the fourth: nothing there is promised or promoted.</p>
-    <div class="rings" id="rings"></div>
-  </section>
-
-  <section>
-    <h2>Why the pool</h2>
-    <p class="sub">Open source, in the open: every decision, build and rollback is on the record.</p>
-    <div class="features">
-      <div class="feature"><div class="ic"><svg viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 5-3.5 8.5-7 10-3.5-1.5-7-5-7-10V6l7-3z"/><path d="M9 12l2 2 4-4"/></svg></div><h3>Verified, then signed</h3><p>Every upstream package checked against its project's own key before it is stored.</p><div class="proof" id="proof-verified">…</div></div>
-      <div class="feature"><div class="ic"><svg viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3"/><path d="M7 15h10"/></svg></div><h3>Tested before you</h3><p>A real pacman sync and an ABI check on x86_64 and aarch64, then two green health checks in <code>rc</code>.</p><div class="proof" id="proof-tested">…</div></div>
-      <div class="feature"><div class="ic"><svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.3-5.7"/><path d="M4 4v5h5"/></svg></div><h3>Rolls back by itself</h3><p>A promotion that fails its health check is undone before your next <code>pacman -Syu</code>.</p><div class="proof" id="proof-rollback">…</div></div>
-      <div class="feature"><div class="ic"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="9" r="2.5"/><path d="M3 19c0-3 3-5 6-5s6 2 6 5"/><path d="M15 15c2.5 0 5 1.5 5 4"/></svg></div><h3>Made by the community</h3><p>Packages nobody ships come from contributors' recipes, rebuilt and approved by maintainers. Open source, on GitHub.</p><a href="/factory">Bring a package →</a></div>
+    <div class="op-stats home-stats" id="pool-stats">
+      <a class="op-stat" href="/packages"><span class="k">Packages</span><b class="n" id="n-pkgs"><span class="skl"></span></b><span class="s">${REPO_ARCHES.join(" + ")}</span></a>
+      <a class="op-stat" href="/status?kind=sync#journal"><span class="k">Into edge today</span><b class="n" id="n-edge"><span class="skl"></span></b><span class="s" id="s-edge"></span></a>
+      <a class="op-stat" href="/diff?ring=stable"><span class="k">Stable release</span><b class="n" id="n-rel"><span class="skl"></span></b><span class="s" id="s-rel"></span></a>
+      <a class="op-stat" href="/status"><span class="k">Sources</span><b class="n" id="n-src"><span class="skl"></span></b><span class="s" id="s-src"></span></a>
     </div>
   </section>
 
-  <section id="get-started">
-    <div class="h2row"><h2>Get started</h2><a class="more-link" href="/docs/get-started#which-ring">Which ring is for me? →</a></div>
-    <p class="sub">One command, once per machine. <a href="/docs/get-started">What it does, how to switch rings, how to undo it →</a></p>
-    <div class="start-grid">
-      <div class="step start-cmd">
-        <h3>Point pacman at a ring <span class="dim" style="font-size:12px;font-weight:400">x86_64 · aarch64</span></h3>
-        <div class="choice" id="pick-ring"></div>
-        <p id="ring-desc" style="margin:0 0 12px;font-size:13.5px"></p>
-        <pre><span class="copy" data-copy="setup">copy</span><span id="setup-cmd"></span></pre>
-        <p style="margin:10px 0 0;font-size:13px">Then <code>omarchy update</code> — off Omarchy, <code>sudo pacman -Syu</code>. <a href="/setup">Read the script first →</a></p>
+  <section aria-labelledby="flow-h">
+    <div class="home-head"><h2 class="op-label" id="flow-h">From upstream to your machine</h2><a class="home-more" href="/docs/how-it-works">The full story →</a></div>
+    <div class="home-flow">
+      <ul class="home-sources" id="pool-sources">${SOURCES.map((s) => `<li><span>${escapeHtml(s.name)}</span><b>…</b></li>`).join("")}</ul>
+      ${track("signed", "", 2.4)}
+      <div class="home-node pool"><b>pool</b><span id="fl-pool">verified</span></div>
+      ${CLIMB.map((r, i) => `${track(i === 0 ? "ABI" : "health", r, 2.8 + 0.6 * i)}\n      <div class="home-node ${r}"><b>${r}</b><span id="fl-${r}">…</span></div>`).join("\n      ")}
+      ${track("install", CLIMB[CLIMB.length - 1], 2.6)}
+      <div class="home-node you"><i aria-hidden="true">▣</i><b>your Omarchy</b></div>
+    </div>
+  </section>
+
+  <section class="home-use">
+    <div class="op-card home-setup" id="get-started">
+      <div class="op-card-h">
+        <h2 class="home-card-t">Point pacman at a ring</h2>
+        <div class="op-tabs" id="setup-tabs" role="tablist" aria-label="How to set it up"><button type="button" role="tab" id="tab-command" data-mode="command" aria-selected="true" aria-controls="setup-panel">Command</button><button type="button" role="tab" id="tab-agent" data-mode="agent" aria-selected="false" aria-controls="setup-panel" tabindex="-1">Ask your agent</button></div>
       </div>
-      <aside class="cli-card">
-        <h3>omarchy-cli <span class="dim" style="font-size:12px;font-weight:400">optional</span></h3>
-        <p>Upgrades explained, installs checked, advisories for this machine.</p>
-        <pre><span class="copy" data-copy="cli">copy</span><span id="cli-cmd">sudo pacman -S omarchy-cli</span></pre>
-        <p style="font-size:13px"><a href="/docs/get-started#cli">status · check · upgrade · security →</a></p>
-        <p id="cli-note" class="dim" style="font-size:12px"></p>
-      </aside>
+      <div class="op-card-b" id="setup-panel" role="tabpanel" aria-labelledby="tab-command">
+        <div class="op-seg home-rings" id="pick-ring" role="group" aria-label="Ring">${PROMISED.map((r, i) => `<button type="button" class="${r}" data-ring="${r}" aria-pressed="${i === 0}"><span class="op-ring-name ${r}">${r}</span><small></small></button>`).join("")}</div>
+        <p class="home-ringline"><span id="ring-line">${ringLine(PROMISED[0])}</span><a href="/setup">Read the script first →</a></p>
+        <div class="op-code" id="setup-well"><code><span class="op-prompt">$ </span>curl -fsSL https://${DASHBOARD_HOST}/setup | sudo bash -s -- --ring ${PROMISED[0]}</code><button type="button" class="op-copy" data-op-copy="">copy</button></div>
+        <div class="home-agents" id="setup-agents" hidden><span>Works with</span>${AGENTS.map(([name, mark]) => `<span class="m">${agentMark(mark, name)}</span>`).join("")}</div>
+      </div>
+      <details class="home-own"><summary><span><i class="chev" aria-hidden="true">›</i>Bring your own package</span><small>factory</small></summary>
+        <div class="b"><span>The pool's agents build it. Two people review it.</span><span><a class="op-btn primary" href="/factory">Request a package</a><a class="op-btn" href="/agents">Ask your agent</a></span></div>
+      </details>
     </div>
-    <div class="charts three">
-      <div class="chart"><h3>Pool growth <span>7 days</span></h3><div class="sub">bytes stored once, from the metrics snapshots</div><div id="c-pool"></div><div class="mini" id="c-pool-mini"></div></div>
-      <div class="chart"><h3>Security in stable <span id="sec-when">now</span></h3><div class="sub">open advisories matched against what stable serves</div><div id="c-sec"></div></div>
-      <div class="chart"><h3><span class="live"><i></i>machines on the pool</span><span id="mc-days">14 days</span></h3><div class="sub">distinct addresses that fetched a ring database, once a day · no accounts, no cookies</div><div id="mc-spark"><div class="empty loading">Loading</div></div><div class="mini five" id="mc-split"></div><div class="people-row" id="cc-people"><span class="dim">the people, from what the pool recorded…</span></div></div>
+    <div class="op-card home-live">
+      <div class="op-card-h"><h2 class="home-card-t">Live <i class="op-live-dot"></i></h2><small id="live-count"></small></div>
+      <div class="home-feed" id="live-feed"><div>${'<span class="home-ev wait"><span class="skl"></span></span>'.repeat(5)}</div></div>
+      <div class="op-card-f"><a class="home-more" href="/status#journal">Full journal →</a></div>
     </div>
   </section>
 
-  <section>
-    <div class="h2row"><h2>Coverage</h2><a class="more-link" href="/status">Every source, every number →</a></div>
-    <p class="sub">Share of what each upstream serves that edge already pins, on both architectures. The optional sources and the factory are not counted.</p>
-    <div class="coverage-box"><div class="cov" id="c-coverage"></div></div>
-  </section>
-
-  <section>
-    <h2>Made in the open</h2>
-    <p class="sub">The pool is a project, not a service you rent. Everything it does is on the record.</p>
-    <div class="tiles four" id="open-stats"></div>
-    <div class="open-grid">
-      <div class="box feed-box">
-        <div class="feed-head"><b>The last things the pipeline did</b><span class="live"><i></i>live · every minute</span></div>
-        <div class="feed" id="open-journal"><div class="muted">loading…</div></div>
-        <p class="sub" style="margin:10px 0 0"><a href="/journal">Full journal →</a></p>
-      </div>
-      <div class="box feed-box">
-        <div class="feed-head"><b>The rings</b><span class="dim" style="font-size:11.5px;letter-spacing:.06em;text-transform:uppercase">head · last releases</span></div>
-        <div class="ring-heads" id="open-heads"></div>
-        <div class="feed" id="open-releases"><div class="muted">loading…</div></div>
-        <p class="sub" style="margin:10px 0 0"><a href="/journal#releases">Ring history, every release →</a></p>
-      </div>
-    </div>
-    <div class="sponsor compact"><p><b>Help keep it running.</b> Hardware, compute and agent tokens are what the pool needs. Everything it gets shows up on the <a href="/pipeline">Pipeline</a> page — open source, in the open.</p><a class="mail" href="mailto:sponsor@omarchy-pool.org">sponsor@omarchy-pool.org</a></div>
+  <section aria-labelledby="new-h">
+    <div class="home-head"><h2 class="op-label" id="new-h">New in the pool this week</h2><a class="home-more" href="/packages">All packages →</a></div>
+    <div class="home-cards" id="pool-new">${'<span class="op-card home-pkg wait"><span class="skl"></span><span class="skl"></span></span>'.repeat(4)}</div>
   </section>
 `;
 
+/**
+ * The page's own rules: the layout of its four sections, and what no other
+ * page draws — the search box, the chain, the live lines, the cards. The
+ * rest is the kit's (tiles, cards, tabs, the ring picker, the code well,
+ * chips). Square, 1px lines, tokens only, as the kit is; what moves stops
+ * under prefers-reduced-motion (the frame's rule), and the chain's squares
+ * then stand evenly along their line.
+ */
+const CSS = String.raw`
+  /* ---- the Pool (#243, pages/overview.ts) */
+  main { max-width: var(--content-max); padding: 48px var(--gutter) 56px; display: grid; gap: var(--section-gap); }
+  main > section { margin: 0; min-width: 0; }
+  .home-top { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 32px 40px; }
+  .home-lead { flex: 1 1 520px; min-width: 0; display: grid; gap: 18px; }
+  .home-stats { flex: 1 1 360px; grid-template-columns: 1fr 1fr; }
+  .home-search { position: relative; margin: 0; }
+  .home-box { display: flex; align-items: center; gap: 12px; height: 54px; padding: 0 16px; border: 1px solid var(--line); background: var(--bg-deep); color: var(--green); transition: border-color .12s; }
+  .home-box:focus-within { border-color: var(--green); }
+  .home-box input { flex: 1; min-width: 0; height: 100%; padding: 0; border: 0; border-radius: 0; outline: 0; background: transparent; color: var(--text); font: 16px var(--font-mono); -webkit-appearance: none; appearance: none; }
+  .home-box input::placeholder { color: var(--dim); opacity: 1; }
+  .home-box input::-webkit-search-decoration, .home-box input::-webkit-search-cancel-button { -webkit-appearance: none; }
+  .home-box kbd { flex: none; padding: 0 6px; border: 1px solid var(--line); color: var(--dim); font: 11.5px/1.6 var(--font-mono); }
+  @media (hover: none) and (pointer: coarse) { .home-box kbd { display: none; } }
+  .home-results { position: absolute; left: 0; right: 0; top: 100%; z-index: 6; border: 1px solid var(--line); border-top: 0; background: var(--panel); }
+  .home-results a { color: var(--green); text-decoration: none; }
+  .home-results a.r { display: grid; grid-template-columns: minmax(110px, 150px) minmax(0, 1fr) auto; gap: 14px; align-items: baseline; padding: 10px 16px; border-top: 1px solid var(--line); color: var(--text); font-size: 13.5px; }
+  .home-results a.r:hover, .home-results a.r:focus-visible { background: var(--panel-2); }
+  .home-results a:focus-visible { outline: 1px solid var(--green); outline-offset: -1px; }
+  .home-results b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .home-results .d { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .home-results .o { color: var(--dim); font-size: 12px; white-space: nowrap; }
+  .home-results .none, .home-results a.all { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; padding: 12px 16px; border-top: 1px solid var(--line); font-size: 13.5px; }
+  .home-results .none span { color: var(--muted); } .home-results a.all { font-size: 12.5px; }
+  .home-asked { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12.5px; }
+  .home-asked > span { margin-right: 2px; color: var(--dim); }
+  .home-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin: 0 0 12px; }
+  .home-head h2 { font-family: var(--font-mono); }
+  .home-more { font-size: 12.5px; color: var(--green); text-decoration: none; white-space: nowrap; } .home-more:hover { text-decoration: underline; }
+  .home-flow { display: flex; align-items: center; padding: 18px 20px; border: 1px solid var(--line); background: var(--panel); overflow-x: auto; scrollbar-width: none; }
+  .home-sources { flex: none; width: 176px; margin: 0; padding: 0; list-style: none; display: grid; gap: 1px; }
+  .home-sources li { display: flex; justify-content: space-between; gap: 10px; font-size: 12.5px; line-height: 1.55; }
+  .home-sources span { color: var(--muted); white-space: nowrap; } .home-sources b { font-weight: 400; font-variant-numeric: tabular-nums; }
+  .home-track { flex: 1 1 64px; min-width: 52px; display: grid; gap: 6px; padding: 0 8px; --dot: var(--muted); }
+  .home-track.edge { --dot: var(--edge); } .home-track.rc { --dot: var(--rc); } .home-track.stable { --dot: var(--stable); }
+  .home-track > span { font-size: 11.5px; color: var(--dim); text-align: center; white-space: nowrap; }
+  .home-track > i { position: relative; display: block; height: 7px; overflow: hidden; }
+  .home-track > i::before { content: ""; position: absolute; left: 0; right: 0; top: 3px; height: 1px; background: var(--line); }
+  .home-track b { position: absolute; top: 0; left: 16%; width: 7px; height: 7px; background: var(--dot); animation: home-flow var(--dur) linear infinite; }
+  .home-track b + b { left: 47%; animation-delay: calc(var(--dur) / -3); } .home-track b + b + b { left: 78%; animation-delay: calc(var(--dur) / -1.5); }
+  @keyframes home-flow { from { left: -8px; } to { left: 100%; } }
+  .home-node { flex: none; display: grid; justify-items: center; gap: 1px; padding: 8px 14px; border: 1px solid var(--line); background: var(--bg-deep); }
+  .home-node b { font: 600 17px/1.2 var(--font-display); } .home-node span { font-size: 12px; color: var(--dim); white-space: nowrap; }
+  .home-node.pool { padding: 10px 14px; border-color: var(--green); } .home-node.pool b { color: var(--green); }
+  .home-node.edge { border-top: 2px solid var(--edge); } .home-node.edge b { color: var(--edge); }
+  .home-node.rc { border-top: 2px solid var(--rc); } .home-node.rc b { color: var(--rc); }
+  .home-node.stable { border-top: 2px solid var(--stable); } .home-node.stable b { color: var(--stable); }
+  .home-node.you { display: flex; align-items: center; gap: 8px; padding: 10px 14px; } .home-node.you b { font-size: 15px; }
+  .home-node.you i { width: 18px; height: 18px; display: grid; place-items: center; background: var(--green); color: var(--green-ink); font-size: 10px; font-style: normal; font-weight: 700; }
+  .home-use { display: flex; flex-wrap: wrap; gap: 16px; align-items: stretch; }
+  .home-setup { flex: 1 1 560px; display: grid; align-content: start; }
+  .home-live { flex: 1 1 380px; display: grid; grid-template-rows: auto 1fr auto; }
+  .home-card-t { margin: 0; display: inline-flex; align-items: center; gap: 10px; font: 600 15px var(--font-display); letter-spacing: normal; }
+  .home-setup .op-card-b { display: grid; gap: 12px; }
+  .home-rings { flex-wrap: nowrap; }
+  .home-rings > button { flex: 1 1 0; min-width: 0; display: flex; justify-content: space-between; align-items: baseline; gap: 8px; padding: 9px 12px; background: var(--panel-2); }
+  .home-rings > button:focus-visible, .op-tabs > button:focus-visible { outline: 1px solid var(--green); outline-offset: 2px; }
+  .home-rings small { font-size: 12px; color: var(--dim); }
+  .home-ringline { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 16px; margin: 0; font-size: 13px; color: var(--muted); }
+  .home-ringline a { font-size: 12.5px; color: var(--green); text-decoration: none; white-space: nowrap; } .home-ringline a:hover { text-decoration: underline; }
+  .home-agents { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; } .home-agents > span:first-child { margin-right: 4px; font-size: 12px; color: var(--dim); }
+  .home-agents .m { display: grid; place-items: center; width: 32px; height: 32px; border: 1px solid var(--line); background: var(--bg-deep); }
+  .home-own { border-top: 1px solid var(--line); }
+  .home-own summary { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 11px 16px; font-size: 13.5px; cursor: pointer; list-style: none; }
+  .home-own summary::-webkit-details-marker { display: none; }
+  .home-own summary:hover { background: var(--panel-2); } .home-own summary:focus-visible { outline: 1px solid var(--green); outline-offset: -1px; }
+  .home-own summary > span { display: flex; align-items: center; gap: 10px; } .home-own summary small { font-size: 12px; color: var(--dim); }
+  .home-own .chev { display: inline-block; color: var(--green); font-style: normal; transition: transform .12s; } .home-own[open] .chev { transform: rotate(90deg); }
+  .home-own .b { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px 16px; padding: 4px 16px 16px; font-size: 13px; color: var(--muted); }
+  .home-own .b > span:last-child { display: flex; flex-wrap: wrap; gap: 8px; }
+  .home-feed { position: relative; min-height: 200px; }
+  .home-feed > div { position: absolute; inset: 0; overflow: hidden; display: grid; align-content: start; }
+  .home-ev { display: grid; grid-template-columns: 34px 8px minmax(0, 1fr) auto; gap: 10px; align-items: center; width: 100%; padding: 8px 16px; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--text); font: 13px/1.6 var(--font-mono); text-align: left; cursor: pointer; --hue: var(--muted); }
+  .home-ev:focus-visible { outline: 1px solid var(--green); outline-offset: -1px; }
+  .home-ev.wait { display: block; cursor: default; }
+  .home-ev.edge { --hue: var(--edge); } .home-ev.rc { --hue: var(--rc); } .home-ev.stable, .home-ev.ok { --hue: var(--green); } .home-ev.lab, .home-ev.warn { --hue: var(--amber); } .home-ev.fail { --hue: var(--red); }
+  .home-ev .w { font-size: 12px; color: var(--dim); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .home-ev .sq { width: 8px; height: 8px; background: var(--hue); }
+  .home-ev .t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .home-ev .t b { font-weight: 600; } .home-ev .t span { margin-left: 8px; color: var(--dim); }
+  .home-ev .e { font-size: 12px; color: var(--hue); white-space: nowrap; }
+  .home-ev.open .t { white-space: normal; overflow-wrap: anywhere; }
+  .home-quiet { margin: 0; padding: 14px 16px; font-size: 13px; color: var(--dim); }
+  .home-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr)); gap: 12px; }
+  .home-cards > .home-quiet, .home-cards > .none { grid-column: 1 / -1; padding: 0; }
+  .home-pkg { display: grid; gap: 6px; padding: 12px 14px; color: var(--text); text-decoration: none; }
+  a.home-pkg:hover { border-color: var(--green); } a.home-pkg:focus-visible { outline: 1px solid var(--green); outline-offset: -1px; }
+  .home-pkg.wait { min-height: 92px; align-content: start; }
+  .home-pkg .h { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; min-width: 0; }
+  .home-pkg .h b { font: 600 15px var(--font-display); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .home-pkg .h span { font-size: 12px; color: var(--dim); white-space: nowrap; }
+  .home-pkg .v { font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .home-pkg .c { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 11.5px; }
+  .home-pkg .src { padding: 0 6px; border: 1px solid var(--line); color: var(--muted); line-height: 1.6; white-space: nowrap; } .home-pkg .a { padding: 0 2px; color: var(--dim); }
+  @media (max-width: 720px) {
+    main { padding: 24px 16px 32px; gap: 32px; }
+    .home-flow { padding: 14px 16px; }
+  }
+  @media (max-width: 560px) {
+    .home-results a.r { grid-template-columns: minmax(0, auto) minmax(0, 1fr); } .home-results .o { display: none; }
+    .home-rings > button { flex-direction: column; gap: 0; }
+  }
+`;
+
 const SCRIPT = String.raw`
-  skeletonTiles("#tiles", 6);
-__CHARTS__
-  var RING_INFO = RINGS_TEXT;
-  var DESC = {}; Object.keys(RINGS_TEXT).forEach(function (r) { DESC[r] = RINGS_TEXT[r].desc; });
-  // The rings are the server's list in its order (RINGS_TEXT: stable, rc, edge, lab), the architectures the shell's (ARCHES); the first of each is the default.
-  var RINGS = Object.keys(RINGS_TEXT);
-  var q = new URLSearchParams(location.search);
-  var ring = RINGS.indexOf(q.get("ring")) >= 0 ? q.get("ring") : RINGS[0];
-  var arch = ARCHES.indexOf(q.get("arch")) >= 0 ? q.get("arch") : ARCHES[0];
-  var data = null, optional = {};
-  // The pacman configuration, generated from what the ring serves right now (the same as /docs/get-started).
-  function drawStart() {
-    pick("#pick-ring", RINGS, ring, function (v) { ring = v; drawStart(); });
-    $("#ring-desc").textContent = DESC[ring];
-    $("#setup-cmd").innerHTML = 'curl -fsSL ' + location.origin + '/setup | sudo bash -s -- --ring ' + ring;
-    $("#cli-cmd").innerHTML = 'sudo pacman -S omarchy-cli\nomarchy-cli --ring ' + ring + ' status';
-    $("#cli-note").innerHTML = 'Not on your ring yet? <a href="/docs/get-started#cli">The release tarball →</a>';
-  }
-  copyChips({ setup: "#setup-cmd", cli: "#cli-cmd" });
-  drawStart();
+  // ---- the Pool (#243). One poll of the stats, a minute apart as before, draws the four numbers, the chain, the rings' releases in the picker and the Live lines; what reached the rings is asked once per release of theirs, and the packages people asked for once per page.
+  var SOURCES = __SOURCES__, ORIGIN = __ORIGIN__, NAME = /^[a-z0-9][a-z0-9@._+-]{1,99}$/, CARDS = 12, SHOWN = 6, WEEK_MS = 7 * 86400e3;
+  var STILL = !!(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches);
+  var q = new URLSearchParams(location.search), box = $("#pool-q"), out = $("#pool-results");
+  var ring = PROMISED_RINGS.indexOf(q.get("ring")) >= 0 ? q.get("ring") : PROMISED_RINGS[0], mode = "command", total = 0, landed = false;
+  function originOf(source, arch) { return ORIGIN[source + "/" + arch] || source || ""; }
+  // Where a package comes from, as a search row says it: the factory's builds are only in the pool; everything else is synced from its project.
+  function fromWhere(source, arch) { return source === "factory" ? "factory · only in the pool" : "synced · " + originOf(source, arch); }
+  // The source a card names: the project, as the chain lists it.
+  function sourceName(source, arch) { var k = source + "/" + arch, s = SOURCES.filter(function (x) { return x.keys.indexOf(k) >= 0; })[0]; return s ? s.name : originOf(source, arch); }
+  function headOf(d, name) { return ((d.rings || []).filter(function (r) { return r.ring === name; })[0] || {}).release || null; }
 
-  // The sources, counted one way for the tile and the coverage grid: the upstream repositories the pool mirrors, by name whatever the architectures (core, asahi…), a name synced once one of its architectures has. The factory is not one — what it builds has no upstream to be short of — and the optional sources (chaotic, aur) are left out and named: they yield every name another source ships, so their share of the upstream says nothing. The Status page counts every row per architecture instead, the factory's among them, and says so.
+  // ---- the four numbers. They count up the first time they land (the kit's countUp: at once for a reader who asked for less motion) and are simply written after that. Packages is the pool's names — one name is one package on every architecture it is built for, as the handoff has it — from the metrics snapshot the stats read.
+  function land(sel, n, fmt) { var el = $(sel); if (!el) return; if (!landed) countUp(el, n, fmt); else el.textContent = (fmt || num)(n); }
+  // Stable's health in one word: the shell's, over the latest check on each architecture — the worst of them, and which architecture it is when only one was checked yet.
+  function stableHealth(d) {
+    var got = ARCHES.map(function (a) { return latest(d.latest || [], "health", "stable", a); }).filter(Boolean);
+    if (!got.length) return "no health check yet";
+    var worst = got.some(function (h) { return h.status === "error"; }) ? "error" : got.some(function (h) { return h.status === "warn"; }) ? "warn" : "ok";
+    return HEALTH_WORD[worst] + (got.length < ARCHES.length ? " on " + (got[0].source || NULL_SOURCE_ARCH) : "");
+  }
+  // The sources, counted from the coverage rows: what edge serves from each, one architecture at a time — a source on both counts its larger side, since a name built for both is one package. A source is in sync when every repository of it synced and none is late (the shell's lateSync, the server's mark); the factory builds what it serves and is never behind.
   function sourcesOf(d) {
-    var names = [], synced = {}, optional = [];
-    (d.coverage || []).forEach(function (c) {
-      if (c.source === "factory") return;
-      if (c.optional) { if (optional.indexOf(c.source) < 0) optional.push(c.source); return; }
-      if (names.indexOf(c.source) < 0) names.push(c.source);
-      if (c.upstream_total != null) synced[c.source] = true;
+    var cov = d.coverage || [];
+    return SOURCES.map(function (s) {
+      var rows = cov.filter(function (c) { return s.keys.indexOf(c.source + "/" + c.arch) >= 0; }), per = {};
+      rows.forEach(function (c) { per[c.arch] = (per[c.arch] || 0) + (c.indexed || 0); });
+      var n = Object.keys(per).reduce(function (m, a) { return Math.max(m, per[a]); }, 0);
+      var never = !s.built && (!rows.length || rows.some(function (c) { return !c.last_sync; })), late = !s.built && rows.some(lateSync);
+      return { name: s.name, n: n, never: never, late: late && !never };
     });
-    return { names: names, missing: names.filter(function (n) { return !synced[n]; }), optional: optional, rows: (d.coverage || []).filter(function (c) { return names.indexOf(c.source) >= 0; }) };
+  }
+  function numbers(d) {
+    var today = new Date().toISOString().slice(0, 10), sync = newest(d.latest, "sync"), rel = headOf(d, "stable");
+    var imp = ((d.series || {}).imports_daily || []).filter(function (r) { return r.day === today; })[0];
+    total = (d.pool || {}).names || 0;
+    land("#n-pkgs", total);
+    land("#n-edge", imp ? imp.packages : 0, function (n) { return "+" + num(n); });
+    $("#s-edge").textContent = sync ? "last sync " + ago(sync.created_at) : "no sync yet";
+    if (rel) land("#n-rel", rel.seq, function (n) { return "#" + num(n); }); else $("#n-rel").textContent = "—";
+    $("#s-rel").innerHTML = rel ? '<i class="op-live-dot"></i>' + esc(ago(rel.created_at) + " · " + stableHealth(d)) : "no release yet";
+    var src = sourcesOf(d), late = src.filter(function (s) { return s.late; }).map(function (s) { return s.name; }), never = src.filter(function (s) { return s.never; }).map(function (s) { return s.name; });
+    land("#n-src", src.length - late.length - never.length, function (n) { return n + " / " + src.length; });
+    $("#s-src").textContent = late.length || never.length ? [late.length ? "late: " + late.join(", ") : "", never.length ? "not synced yet: " + never.join(", ") : ""].filter(Boolean).join(" · ") : "all in sync";
+    landed = true;
   }
 
-  function render(d) {
-    data = d;
-    var stable = d.rings.filter(function (r) { return r.ring === "stable"; })[0] || {};
-    var byArch = function (r, arch) { return (r.sources || []).filter(function (s) { return s.arch === arch; }).reduce(function (n, s) { return n + s.packages; }, 0); };
-    var lastSync = newest(d.latest, "sync");
-    var src = sourcesOf(d);
-    var S = d.series || {}, today = new Date().toISOString().slice(0, 10);
-    var imp = (S.imports_daily || []).filter(function (r) { return r.day === today; })[0];
-    var sh = latest(d.latest, "health", "stable", "x86_64"), sha = latest(d.latest, "health", "stable", "aarch64");
-    // The audience (audience.ts): yesterday's distinct addresses that fetched a ring database — no accounts, no cookies, nothing kept per request.
-    var aud = d.audience || [], y = aud.length ? aud[aud.length - 1] : null;
-    setTiles("#tiles", [
-      ["Packages in stable", num(stable.package_count), num(byArch(stable, "x86_64")) + " x86_64 · " + num(byArch(stable, "aarch64")) + " aarch64", "", "/packages?ring=stable"],
-      ["Stable release", stable.release ? "#" + stable.release.seq : "—", stable.release ? ago(stable.release.created_at) + " · health " + (sh ? sh.status : "n/a") + " / " + (sha ? sha.status : "n/a") : "no release yet", "", "/journal#releases"],
-      ["Sources mirrored", (src.names.length - src.missing.length) + " / " + src.names.length, (src.missing.length ? "not yet: " + src.missing.join(", ") : "Arch · Arch Linux ARM · Omarchy · Asahi") + (src.optional.length ? " · " + src.optional.join(", ") + " optional, not counted" : ""), "", "/status"],
-      ["Open advisories in stable", '<span id="t-sec">…</span>', '<span id="t-sec-s">matching the five feeds, on both architectures…</span>', "", "/security?ring=stable&arch=x86_64"],
-      ["Machines on the pool", y ? "≈ " + num(y.machines) + (y.machines >= 10000 ? "+" : "") : "—", y ? "yesterday · " + RINGS.filter(function (r) { return r !== "lab" || (y.by_ring || {}).lab; }).map(function (r) { return r + " " + num((y.by_ring || {})[r] || 0); }).join(" · ") + " · " + num(y.requests) + " fetches" : "counted once a day", "", "/pipeline"],
-      ["Into edge today", imp ? "+" + num(imp.packages) : "+0", (imp ? bytes(imp.bytes) + " · " + num(imp.runs) + " syncs" : "no sync yet today") + (lastSync ? " · last " + ago(lastSync.created_at) : ""), "", "/journal?kind=sync"]
-    ]);
-    drawStart();
-
-    $("#rings").innerHTML = RINGS.map(function (name) {
-      var r = d.rings.filter(function (x) { return x.ring === name; })[0] || { ring: name, sources: [], artifacts: [] };
-      var rel = r.release, info = RING_INFO[name];
-      // The lab: one slim row under the three — no health check (every build in it was installed by the trial, one by one), nothing promised.
-      if (name === "lab") return '<div class="ring lab"><div class="head"><span class="name">lab <span class="pill lab">not a promise</span></span></div>' +
-        '<div class="desc"><b>' + info.title + '.</b> ' + info.text + ' Every build in it was installed by a real pacman first — the trial.</div>' +
-        '<div class="cta"><span class="lag">' + (rel ? 'release #' + rel.seq + ' · ' + ago(rel.created_at) + ' · ' + num(r.package_count) + ' pkgs' : 'empty right now') + '</span><a href="#get-started" data-ring="lab">Try the lab →</a></div></div>';
-      var health = ARCHES.map(function (a) { var h = latest(d.latest, "health", name, a); return h ? '<span class="pill ' + h.status + '">' + a + ' · ' + HEALTH_WORD[h.status] + '</span>' : '<span class="pill none">' + a + ' · no check yet</span>'; }).join("");
-      return '<div class="ring ' + name + '"><div class="head"><span class="name">' + name + (name === "stable" ? ' <span class="pill rec">recommended</span>' : '') + '</span><span class="rel">' + num(r.package_count) + ' pkgs · ' + bytes(r.bytes) + '</span></div>' +
-        '<div class="desc"><b>' + info.title + '.</b> ' + info.text + '</div><div class="health">' + health + '</div>' +
-        '<div class="cta"><span class="lag">' + (rel ? 'release #' + rel.seq + ' · ' + ago(rel.created_at) : 'no release yet') + ' · ' + info.lag + '</span><a href="#get-started" data-ring="' + name + '">Use ' + name + ' →</a></div></div>';
-    }).join("");
-    $("#rings").querySelectorAll("a[data-ring]").forEach(function (a) { a.onclick = function () { ring = a.getAttribute("data-ring"); drawStart(); }; });
-
-    // The proofs under "why": numbers the pool recorded, not claims.
-    var rollbacks = (d.events || []).filter(function (e) { return e.kind === "rollback"; });
-    $("#proof-verified").innerHTML = '<b>' + num(d.pool.objects) + '</b> objects verified · <b>' + num(d.pool.names || 0) + '</b> package names';
-    $("#proof-tested").innerHTML = stable.release ? '<b>' + num(stable.release.seq) + '</b> stable releases so far · health ' + (sh ? sh.status : "n/a") + ' / ' + (sha ? sha.status : "n/a") : 'no stable release yet';
-    $("#proof-rollback").innerHTML = rollbacks.length ? 'last rollback <b>' + ago(rollbacks[0].created_at) + '</b> · ' + esc(rollbacks[0].ring || "") + ' · automatic' : 'none in the recent journal — <b>0</b> of the last ' + (d.events || []).length + ' events';
-
-    // Coverage: one row per source — the same set the tile counts (sourcesOf) — the sources both architectures serve first, so core is core on either side.
-    var covBy = {}; src.rows.forEach(function (c) { covBy[c.source] = covBy[c.source] || {}; covBy[c.source][c.arch] = c; });
-    var covNames = Object.keys(covBy).sort(function (a, b) { var na = Object.keys(covBy[a]).length, nb = Object.keys(covBy[b]).length; return nb - na || (a < b ? -1 : 1); });
-    // A cell is the count beside the share — 12,905/12,905 · 100% — so a full
-    // bar says how much it holds, not only that it is full. A source an
-    // architecture does not have (alarm, asahi: aarch64; multilib: x86_64)
-    // says so instead of showing an empty bar.
-    // Each cell names its architecture (data-arch): on a phone the row folds
-    // to one line per architecture and the name is drawn before the count.
-    var covCell = function (c, a, other) {
-      if (!c) return '<div></div><div class="p dim" data-arch="' + a + '">' + other + ' only</div>';
-      var up = c.upstream_total, pct = up ? Math.min(100, Math.round(1000 * c.indexed / up) / 10) : 0;
-      var label = up == null ? "not synced yet" : num(c.indexed) + "/" + num(up) + ' <span class="dim">·</span> ' + pct + "%";
-      return '<div class="bar" data-tip="' + esc(c.source + " " + a + " · " + num(c.indexed) + " of " + num(up || 0)) + '"><i class="' + (pct >= 100 ? "" : "partial") + '" style="width:' + pct + '%"></i></div><div class="p num" data-arch="' + a + '">' + label + '</div>';
-    };
-    $("#c-coverage").innerHTML = '<div class="cov-row head"><div></div><div class="k">x86_64</div><div></div><div class="k">aarch64</div><div></div></div>' +
-      covNames.map(function (n) { return '<div class="cov-row"><div class="l">' + esc(n) + '</div>' + covCell(covBy[n].x86_64, "x86_64", "aarch64") + covCell(covBy[n].aarch64, "aarch64", "x86_64") + '</div>'; }).join("");
-    $("#c-pool").innerHTML = area((S.metrics || []).map(function (r) { return { t: Date.parse(r.created_at), v: Number(r.bytes || 0) }; }), bytes, 200);
-    var m0 = (S.metrics || [])[0], m1 = (S.metrics || [])[(S.metrics || []).length - 1];
-    $("#c-pool-mini").innerHTML = '<div><b>' + num(d.pool.objects) + '</b>objects</div><div><b>' + (m0 && m1 ? "+" + num(Math.max(0, Number(m1.objects) - Number(m0.objects))) : "—") + '</b>this week</div><div><b>' + bytes(d.pool.bytes) + '</b>stored once</div>';
-
-    var fast = (d.events || []).filter(function (e) { return e.kind === "fast-track" && e.status === "ok"; }).slice(0, 3);
-    if (!$("#c-sec").innerHTML) $("#c-sec").innerHTML = '<div class="empty loading">Loading</div>';
-    // The tile counts both architectures, per architecture, as the Security page it links to counts its first tile: the shell's one rule (advisoriesAt, advisoryCounts) at the page's default confidence (SEC_CONF), said in the subtitle — so the number here is the number there. The chart below is x86_64, the reference system, counted the same way.
-    busy(Promise.all(ARCHES.map(function (a) { return fetch("/api/v1/security?ring=stable&arch=" + a).then(function (r) { return r.json(); }); }))).then(function (both) {
-      var s = both[0], t = advisoryCounts(advisoriesAt(s)), ta = advisoryCounts(advisoriesAt(both[1]));
-      $("#sec-when").textContent = s.updated_at ? ago(s.updated_at) + " · x86_64 · " + confWord() : "no scan yet";
-      var ts = $("#t-sec"), tss = $("#t-sec-s"), kev = t.kev + ta.kev, high = t.critical + t.high + ta.critical + ta.high;
-      if (ts) { ts.textContent = num(t.packages) + " · " + num(ta.packages); ts.parentElement.classList.toggle("ok", !kev && !high); ts.parentElement.classList.toggle("warn", !!(kev + high)); }
-      if (tss) tss.textContent = "x86_64 · aarch64 · " + num(kev) + " exploited in the wild · " + num(high) + " high · " + num(t.medium + ta.medium) + " medium · " + confWord() + (s.updated_at ? " · " + ago(s.updated_at) : "");
-      // The four bars are the shell's severity buckets in the shell's colours — the same words and colours the Security page's stack and its pills wear.
-      var rows = sevSeries(t), max = Math.max.apply(null, rows.map(function (r) { return r.value; })) || 1;
-      $("#c-sec").innerHTML = hrows(rows.map(function (r) { return [r.name, "", Math.round(100 * r.value / max), r.color, num(r.value)]; }), 190) +
-        (fast.length ? '<div class="mini-list"><div class="k">latest fast-tracks</div>' + fast.map(function (e) { return '<div><span class="dot ok"></span><b>' + esc(e.summary) + '</b> <span class="dim">· ' + ago(e.created_at) + '</span></div>'; }).join("") + '</div>' : '') +
-        '<p class="sub" style="margin:10px 0 0;font-size:12px">Arch and Debian trackers, OSV, CISA KEV, EPSS — every three hours. <a href="/pipeline">Watch it happen →</a> · <a href="/security">Every advisory →</a></p>';
-    }).catch(function () { $("#c-sec").innerHTML = '<div class="empty">no security data yet</div>'; });
-
-    var m14 = aud.slice(-14);
-    $("#mc-spark").innerHTML = m14.length >= 2 ? area(m14.map(function (a) { return { t: Date.parse(a.day + "T12:00:00Z"), v: a.machines }; }), function (v) { return num(Math.round(v)); }) : '<div class="empty">counted once a day — the line needs two days</div>';
-    if (y) {
-      $("#mc-days").textContent = m14.length + " days" + (y.sampled ? " · sampled" : "");
-      $("#mc-split").innerHTML = RINGS.filter(function (r) { return r !== "lab" || (y.by_ring || {}).lab; }).map(function (r) { return '<div><b style="color:var(--' + r + ')">' + num((y.by_ring || {})[r] || 0) + '</b>' + r + '</div>'; }).join("") + ARCHES.map(function (a) { return '<div><b>' + num((y.by_arch || {})[a] || 0) + '</b>' + a + '</div>'; }).join("");
-    }
-    drawFeed(d.events || []);
-    drawRings(d);
+  // ---- the chain: every source with what edge serves from it, the pool's names, each ring's release.
+  function chain(d) {
+    $("#pool-sources").innerHTML = sourcesOf(d).map(function (s) { return '<li><span>' + esc(s.name) + '</span><b>' + num(s.n) + '</b></li>'; }).join("");
+    $("#fl-pool").textContent = num(total) + " verified";
+    PROMISED_RINGS.forEach(function (r) { var h = headOf(d, r), el = $("#fl-" + r); if (el) el.textContent = h ? "#" + h.seq : "no release"; });
   }
 
-  // The rings: what each one serves right now, then the last releases across all four — a promotion, a sync, a rollback, a trial each make one.
-  function drawRings(d) {
-    $("#open-heads").innerHTML = RINGS.map(function (name) {
-      var r = d.rings.filter(function (x) { return x.ring === name; })[0] || {}, rel = r.release;
-      return '<a href="/diff?ring=' + name + '" class="ring-head"><span class="k" style="color:var(--' + name + ')">' + name + '</span><b>' + (rel ? "#" + rel.seq : "—") + '</b><span class="s">' + (rel ? ago(rel.created_at) + " · " + num(r.package_count) + " pkgs" : name === "lab" ? "empty · not a promise" : "no release yet") + '</span></a>';
-    }).join("");
-    var rows = (d.releases || []).slice(0, 6);
-    $("#open-releases").innerHTML = rows.map(function (r) {
-      var what = (r.source_id ? "promoted · " : "") + (r.note || "release " + r.id);
-      return '<a class="row" href="/diff?ring=' + esc(r.ring) + '&to=' + r.id + '" title="' + esc(what) + '"><span class="when">' + ago(r.created_at) + '</span><span class="kind"><span style="color:var(--' + esc(r.ring) + ')">' + esc(r.ring) + '</span> #' + r.seq + '</span><span class="what">' + esc(what) + '</span></a>';
-    }).join("") || '<div class="muted">no releases yet</div>';
+  // ---- Point pacman at a ring: the picked ring (?ring= picks one on arrival), the command or the words for an agent, its copy button. The well is written again on every change, so a "copied" still on its way back from the last one lands on a button no longer on the page.
+  function command(r) { return "curl -fsSL " + location.origin + "/setup | sudo bash -s -- --ring " + r; }
+  function askAgent(r) { return "Set up omarchy-pool on this machine on the " + r + " ring, with the script at " + location.origin + "/setup. After that I'll install packages with pacman as usual."; }
+  function drawSetup(d) {
+    var agent = mode === "agent";
+    document.querySelectorAll("#pick-ring button[data-ring]").forEach(function (b) {
+      var r = b.getAttribute("data-ring"), h = d ? headOf(d, r) : null;
+      b.setAttribute("aria-pressed", String(r === ring));
+      if (h) b.querySelector("small").textContent = "#" + h.seq;
+    });
+    document.querySelectorAll("#setup-tabs [role=tab]").forEach(function (t) { var on = t.getAttribute("data-mode") === mode; t.setAttribute("aria-selected", String(on)); t.tabIndex = on ? 0 : -1; });
+    $("#setup-panel").setAttribute("aria-labelledby", "tab-" + mode);
+    $("#ring-line").textContent = RINGS_TEXT[ring].title + " · " + RINGS_TEXT[ring].lag;
+    $("#setup-well").innerHTML = '<code><span class="op-prompt">' + (agent ? "› " : "$ ") + '</span>' + esc(agent ? askAgent(ring) : command(ring)) + '</code><button type="button" class="op-copy" data-op-copy="">' + (agent ? "copy prompt" : "copy") + '</button>';
+    $("#setup-agents").hidden = !agent;
   }
-
-  // The feed: eight lines, the newest on top, each cut at the box's edge with
-  // the whole text a click away. The stats poll (once a minute) brings new
-  // events; those slide in, the rest stay put.
-  var seenEvents = null;
-  function drawFeed(events) {
-    var rows = events.slice(0, 8), fresh = {};
-    if (seenEvents) rows.forEach(function (e) { if (!seenEvents[e.id]) fresh[e.id] = true; });
-    $("#open-journal").innerHTML = rows.map(function (e) {
-      return '<div class="row' + (fresh[e.id] ? " new" : "") + '" data-id="' + e.id + '" title="' + esc(e.summary) + '"><span class="when">' + ago(e.created_at) + '</span><span class="kind"><span class="dot ' + esc(e.status) + '"></span>' + esc(e.kind) + '</span><span class="what">' + esc(e.summary) + '</span></div>';
-    }).join("") || '<div class="muted">nothing yet</div>';
-    seenEvents = {}; rows.forEach(function (e) { seenEvents[e.id] = true; });
-  }
-  $("#open-journal").addEventListener("click", function (ev) { var r = ev.target.closest ? ev.target.closest(".row") : null; if (r) r.classList.toggle("open"); });
-
-  // The people: every contributor with a registered package or a worker, every maintainer in the set the shell reads once (maintainerSet: the one list the pool keeps); the workers counted as every tile counts them (workerCounts). The four tiles are one list, so the ones over lists that did not answer (api() rejects on a 5xx and on the network) carry the same labels with "—" and the reason — an empty list stood in for a failed one here, and a pool with people read as one with none.
-  function openTiles(contributors, maintainers, wc, landed) {
-    return [
-      ["Contributors", num(Object.keys(contributors).length), "anyone with a package or a worker", "", "/people#contributors"],
-      ["Maintainers", num(Object.keys(maintainers).length), "named in MAINTAINERS.toml", "", "/people#maintainers"],
-      ["Workers alive", num(wc.alive), num(wc.registered) + " registered", "", "/people#workers"],
-      ["Community packages", num(landed), "approved, built by the project", "", "/packages?q=factory"]
-    ];
-  }
-  Promise.all([
-    api("GET", "/api/v1/factory/packages"),
-    new Promise(function (ok) { maintainerSet(ok); }),
-    api("GET", "/api/v1/factory")
-  ]).then(function (res) {
-    var pkgs = res[0].packages || [], maintainers = res[1] || {}, workers = res[2].workers || [], wc = workerCounts(workers);
-    var contributors = {}, isM = function (l) { return Object.prototype.hasOwnProperty.call(maintainers, l); };
-    pkgs.forEach(function (p) { if (p.owner && !isM(p.owner)) contributors[p.owner] = true; });
-    workers.forEach(function (w) { if (w.owner && !isM(w.owner)) contributors[w.owner] = true; });
-    // Landed is the registry's own word (landed: approved or published, said once on the server) — the Factory, the Pipeline and People count the same flag.
-    var landed = pkgs.filter(function (p) { return p.landed; }).length;
-    var people = Object.keys(maintainers).map(function (m) { return [m, "maintainer"]; }).concat(Object.keys(contributors).map(function (c) { return [c, "contributor"]; }));
-    var chips = people.map(function (p) { return personChip(p[0], p[1]); }).join("");
-    $("#cc-people").innerHTML = (chips || '<span class="muted">be the first</span>') + '<span class="dim">' + num(wc.alive) + ' workers alive</span><a href="/factory">Bring a package →</a>';
-    setTiles("#open-stats", openTiles(contributors, maintainers, wc, landed));
-  }).catch(function (e) {
-    var down = noAnswer("people's lists", e);
-    $("#cc-people").innerHTML = '<span class="muted">' + esc(down) + '</span><a href="/factory">Bring a package →</a>';
-    setTiles("#open-stats", tilesUnanswered(openTiles({}, {}, workerCounts([]), 0), down));
+  $("#pick-ring").addEventListener("click", function (ev) { var b = ev.target.closest ? ev.target.closest("button[data-ring]") : null; if (b) { ring = b.getAttribute("data-ring"); drawSetup(); } });
+  // The two tabs, as a tab list is worked: a press, or ← and → between them.
+  $("#setup-tabs").addEventListener("click", function (ev) { var t = ev.target.closest ? ev.target.closest("[role=tab]") : null; if (t) { mode = t.getAttribute("data-mode"); drawSetup(); } });
+  $("#setup-tabs").addEventListener("keydown", function (ev) {
+    if (ev.key !== "ArrowLeft" && ev.key !== "ArrowRight") return;
+    ev.preventDefault();
+    mode = mode === "command" ? "agent" : "command";
+    drawSetup();
+    $("#tab-" + mode).focus();
   });
-  liveStats(render, 60000);
 
-  // The search box answers as you type: the first matches in stable for
-  // x86_64, each a package page; the last line, and Enter, the full search
-  // with its rings and architectures. Nothing is sent below two characters.
-  // The term goes in lower case — package names are, and the search's LIKE
-  // ignores case — so "Hypr" and "hypr" are one address, the ⌘K menu's too,
-  // and one copy at the edge.
-  (function () {
-    var box = $("#pool-q"), out = $("#pool-suggest"), timer = null, seq = 0;
-    if (!box || !out) return;
-    function hide() { out.hidden = true; out.innerHTML = ""; }
-    function show(term, rows) {
-      if (!rows.length) { out.innerHTML = '<div class="none">nothing in stable matches “' + esc(term) + '”</div>'; out.hidden = false; return; }
-      out.innerHTML = rows.slice(0, 8).map(function (p) {
-        return '<a href="' + pkgHref(p.name, "stable", ARCHES[0]) + '"><b>' + esc(p.name) + '</b><span class="mono dim">' + esc(p.version) + '</span><span class="src">' + esc(p.source) + '</span><span class="d">' + esc(p.description || "") + '</span></a>';
-      }).join("") + '<a class="all" href="/packages?q=' + encodeURIComponent(term) + '&ring=stable&arch=' + ARCHES[0] + '">' + (rows.length >= 9 ? "More results" : "All " + rows.length + " results") + ' — every ring, both architectures →</a>';
-      out.hidden = false;
-    }
-    box.addEventListener("input", function () {
-      clearTimeout(timer);
-      var term = box.value.trim().toLowerCase(), my = ++seq;
-      if (term.length < 2) { hide(); return; }
-      timer = setTimeout(function () {
-        fetch("/api/v1/search?q=" + encodeURIComponent(term) + "&ring=stable&arch=" + ARCHES[0] + "&limit=9").then(function (r) { return r.json(); }).then(function (d) {
-          if (my !== seq || box.value.trim().toLowerCase() !== term) return;
-          show(term, d.packages || []);
-        }).catch(hide);
-      }, 200);
+  // ---- Live: the newest lines of the journal the stats carry, a line that arrived since the last poll lit for a moment (the kit's op-fresh). A job's own line and the scheduler's dispatch repeat what the job itself wrote, and a sync that found nothing new changed nothing: they stay in the journal, one link away. A line opens to its whole text on a press.
+  var seen = null, opened = {};
+  function news(e) { var p = e.payload || {}; return e.kind !== "job" && e.kind !== "dispatch" && !(e.kind === "sync" && e.status === "ok" && !(p.uploaded > 0) && !(p.removed > 0)); }
+  // What a line says happened, in the colour of what it is about: a ring's hue, the health word, amber and red for a warning and a failure.
+  function said(e) {
+    var p = e.payload || {}, r = e.ring && RINGS_TEXT[e.ring] ? e.ring : "", bad = e.status === "error" ? "fail" : e.status === "warn" ? "warn" : "";
+    if (e.kind === "sync") return { word: p.uploaded > 0 ? "synced → edge" : "synced", hue: bad || "edge" };
+    if (e.kind === "promote") return { word: r ? "promoted → " + r : "promoted", hue: bad || r };
+    if (e.kind === "fast-track") return { word: "security fix" + (r ? " → " + r : ""), hue: bad || "warn" };
+    if (e.kind === "rollback") return { word: "rolled back", hue: "fail" };
+    if (e.kind === "health") return { word: (r ? r + " " : "") + (HEALTH_WORD[e.status] || e.status), hue: bad || "ok" };
+    return { word: e.kind, hue: bad };
+  }
+  function evRow(e, fresh) {
+    var s = String(e.summary || ""), cut = s.indexOf(": "), w = said(e);
+    var text = cut > 0 ? '<b>' + esc(s.slice(0, cut)) + '</b><span>' + esc(s.slice(cut + 2)) + '</span>' : '<b>' + esc(s) + '</b>';
+    return '<button type="button" class="home-ev ' + w.hue + (fresh ? " op-fresh" : "") + (opened[e.id] ? " open" : "") + '" data-id="' + esc(e.id) + '" aria-expanded="' + !!opened[e.id] + '" title="' + esc(s) + '"><span class="w">' + span(Date.now() - Date.parse(e.created_at)) + '</span><i class="sq"></i><span class="t">' + text + '</span><span class="e">' + esc(w.word) + '</span></button>';
+  }
+  function feed(d) {
+    var all = d.events || [], today = new Date().toISOString().slice(0, 10), rows = all.filter(news).slice(0, 8), fresh = {};
+    if (seen) rows.forEach(function (e) { if (!seen[e.id]) fresh[e.id] = true; });
+    // Today's lines in the forty the stats carry: every one of them today says there were more.
+    var n = all.filter(function (e) { return String(e.created_at).slice(0, 10) === today; }).length;
+    $("#live-count").textContent = num(n) + (n && n === all.length ? "+" : "") + (n === 1 ? " event today" : " events today");
+    $("#live-feed").innerHTML = '<div>' + (rows.map(function (e) { return evRow(e, fresh[e.id]); }).join("") || '<p class="home-quiet">Nothing on the record yet.</p>') + '</div>';
+    seen = {}; rows.forEach(function (e) { seen[e.id] = true; });
+  }
+  $("#live-feed").addEventListener("click", function (ev) {
+    var b = ev.target.closest ? ev.target.closest(".home-ev[data-id]") : null; if (!b) return;
+    var id = b.getAttribute("data-id"); opened[id] = !opened[id];
+    b.classList.toggle("open", opened[id]); b.setAttribute("aria-expanded", String(opened[id]));
+  });
+
+  // ---- New in the pool this week: what the rings' newest releases brought, added or upgraded, from the diff of each against its parent — the address the Packages page asks for stable's, so the two share the edge's copy. The page asks only about releases retention keeps whole (KEEP_RELEASES, db.ts: the newest of each ring), so a diff is always folded from the newer release's deltas and the older one's counts, and never rebuilds a release: each ring's head, and the release before it when that one's own parent is still kept, as far as the stats' latest releases show the ring. A release older than a week, or the first of its ring, adds nothing.
+  var KEEP_RELEASES = __KEEP__, asked = {}, shownKey = null, WORDS = [], typing = null;
+  function releasesOf(d, r) {
+    var head = headOf(d, r);
+    if (!head || !head.parent_id) return [];
+    var mine = (d.releases || []).filter(function (x) { return x.ring === r; }).sort(function (a, b) { return b.seq - a.seq; }).slice(0, KEEP_RELEASES);
+    var ids = mine.map(function (x) { return x.id; }), before = mine.filter(function (x) { return x.id === head.parent_id; })[0], out = [head];
+    // Every kept release of the ring in sight and the head's parent not among them (two releases made from one head at once): nothing is asked.
+    if (mine.length === KEEP_RELEASES && !before) return [];
+    if (mine.length === KEEP_RELEASES && before.parent_id && ids.indexOf(before.parent_id) >= 0) out.push(before);
+    return out.filter(function (x) { return Date.now() - Date.parse(x.created_at) < WEEK_MS; });
+  }
+  function diffOf(rel) {
+    var u = "/api/v1/releases/" + rel.ring + "/diff?from=" + rel.parent_id + "&to=" + rel.id;
+    if (!asked[u]) asked[u] = api("GET", u).catch(function (e) { delete asked[u]; throw e; });
+    return asked[u].then(function (df) { return { rel: rel, df: df }; }, function (e) { return { rel: rel, error: e }; });
+  }
+  // The heads first; the releases before them only when the heads brought fewer than twelve names.
+  function arrivals(d) {
+    var rings = PROMISED_RINGS.map(function (r) { return releasesOf(d, r); }).filter(function (l) { return l.length; });
+    var key = rings.map(function (l) { return l.map(function (x) { return x.id; }).join("+"); }).join(",");
+    if (key === shownKey) return;
+    shownKey = key;
+    Promise.all(rings.map(function (l) { return diffOf(l[0]); })).then(function (heads) {
+      if (key !== shownKey) return;
+      var failed = heads.filter(function (g) { return g.error; });
+      if (heads.length && failed.length === heads.length) { shownKey = null; noAnswer("rings' latest changes", failed[0].error, "#pool-new"); return; }
+      if (drawNew(heads.map(function (g) { return [g]; })) >= CARDS || !rings.some(function (l) { return l.length > 1; })) return;
+      Promise.all(rings.map(function (l) { return l[1] ? diffOf(l[1]) : null; })).then(function (older) {
+        if (key === shownKey) drawNew(heads.map(function (g, i) { return older[i] ? [g, older[i]] : [g]; }));
+      });
     });
-    box.addEventListener("keydown", function (ev) { if (ev.key === "Escape") hide(); });
-    document.addEventListener("click", function (ev) { if (!out.contains(ev.target) && ev.target !== box) hide(); });
-    box.addEventListener("focus", function () { if (out.innerHTML) out.hidden = false; });
-  })();
+  }
+  // One card per name, its architectures together, the newest release of its ring first; within a release the sources in turn, so forty rebuilds from one source do not hide the rest; the rings in turn, most stable first, until twelve; newest first.
+  function drawNew(groups) {
+    var lists = groups.map(function (gs) {
+      var list = [], had = {};
+      gs.forEach(function (g) {
+        if (g.error) return;
+        var df = g.df || {}, by = {}, order = [], bySource = {}, sources = [];
+        (df.added || []).map(function (p) { return { name: p.name, arch: p.arch, version: p.version, source: p.source }; })
+          .concat((df.upgraded || []).map(function (p) { return { name: p.name, arch: p.arch, version: p.to, source: p.source }; }))
+          .forEach(function (p) {
+            if (had[p.name]) return;
+            var c = by[p.name];
+            if (!c) { c = by[p.name] = { name: p.name, version: p.version, source: p.source, arches: [], ring: g.rel.ring, at: g.rel.created_at }; order.push(c); }
+            if (c.arches.indexOf(p.arch) < 0) c.arches.push(p.arch);
+          });
+        order.forEach(function (c) { had[c.name] = true; if (!bySource[c.source]) { bySource[c.source] = []; sources.push(c.source); } bySource[c.source].push(c); });
+        for (var i = 0, n = list.length; list.length < n + order.length; i++) sources.forEach(function (s) { if (bySource[s][i]) list.push(bySource[s][i]); });
+      });
+      return list;
+    });
+    var picked = [], taken = {}, next = lists.map(function () { return 0; }), more = true;
+    while (more && picked.length < CARDS) {
+      more = false;
+      lists.forEach(function (list, i) {
+        while (next[i] < list.length && taken[list[next[i]].name]) next[i]++;
+        if (next[i] < list.length && picked.length < CARDS) { taken[list[next[i]].name] = true; picked.push(list[next[i]]); next[i]++; more = true; }
+      });
+    }
+    picked.sort(function (a, b) { return a.at < b.at ? 1 : a.at > b.at ? -1 : 0; });
+    $("#pool-new").innerHTML = picked.map(function (c) {
+      var arch = c.arches.length > 1 && ARCHES.every(function (a) { return c.arches.indexOf(a) >= 0; }) ? "both" : c.arches.join(" · ");
+      return '<a class="op-card ' + c.ring + ' home-pkg" href="' + esc(pkgHref(c.name, c.ring, c.arches[0])) + '" title="' + esc(c.name + " " + c.version + " reached " + c.ring + " " + ago(c.at)) + '"><span class="h"><b>' + esc(c.name) + '</b><span>' + span(Date.now() - Date.parse(c.at)) + '</span></span><span class="v">' + esc(c.version) + '</span><span class="c"><span class="op-ring ' + c.ring + '">' + c.ring + '</span><span class="src">' + esc(sourceName(c.source, c.arches[0])) + '</span><span class="a">' + esc(arch) + '</span></span></a>';
+    }).join("") || '<p class="home-quiet">Nothing reached a ring this week.</p>';
+    offer(picked.map(function (c) { return c.name; }));
+    return picked.length;
+  }
+
+  // ---- the box's placeholder: the pool's count, and a name the page just drew — typed out, a letter at a time, or still for a reader who asked for less motion.
+  function placeholder(word) { box.placeholder = "Search " + (total ? num(total) + " " : "the pool's ") + "packages" + (word ? " · try " + word : ""); }
+  function offer(names) {
+    names.forEach(function (n) { if (WORDS.indexOf(n) < 0 && WORDS.length < 8) WORDS.push(n); });
+    if (!WORDS.length) return placeholder("");
+    if (STILL) return placeholder(WORDS[0]);
+    if (typing) return;
+    var wi = 0, ci = 0, dir = 1;
+    (function type() {
+      var w = WORDS[wi % WORDS.length], wait = dir > 0 ? 90 : 40;
+      ci += dir;
+      if (ci >= w.length) { dir = -1; wait = 1600; } else if (ci <= 0) { dir = 1; wi++; wait = 400; }
+      placeholder(w.slice(0, Math.max(0, ci)) + "▌");
+      typing = setTimeout(type, wait);
+    })();
+  }
+
+  // ---- Requested: the packages people asked the factory for, newest first — the registry the Packages page reads, once per page. The pool counts no downloads and keeps no searches, so what people asked for is the one measure of interest it has. A blocked one is left out.
+  var registry = null;
+  function registryRows() {
+    if (!registry) registry = api("GET", "/api/v1/factory/packages").then(function (d) { return d.packages || []; }, function (e) { registry = null; throw e; });
+    return registry;
+  }
+  registryRows().then(function (rows) {
+    var wanted = rows.filter(function (p) { return !p.blocked_at; }).sort(function (a, b) { return String(b.created_at).localeCompare(String(a.created_at)); }).slice(0, 5);
+    if (!wanted.length) return;
+    $("#pool-asked").innerHTML = '<span>Requested</span>' + wanted.map(function (p) { return '<button type="button" class="op-chip" data-name="' + esc(p.name) + '">' + esc(p.name) + '</button>'; }).join("");
+    $("#pool-asked").hidden = false;
+    offer(wanted.map(function (p) { return p.name; }));
+  }, function () {});
+  $("#pool-asked").addEventListener("click", function (ev) { var b = ev.target.closest ? ev.target.closest("button[data-name]") : null; if (b) { box.value = b.getAttribute("data-name"); box.focus(); lookFor(box.value.trim().toLowerCase()); } });
+
+  // ---- the search box: as you type, the first matches in stable for the first architecture, each its package page; Enter is the whole search, on the Packages page. It asks what the ⌘K menu asks, at the very same address and in lower case, so the two share the edge's copy: nothing below two characters, one search per pause (200 ms). A name the search found nothing for may still be a package — on the other architecture, only in edge or the lab, reserved by a request — so it is looked for where the menu looks (the factory's names, then the name on each architecture at the package page's own address) before "Request it" is offered; the request form takes the name from ?name=.
+  var timer = null, seq = 0, places = {};
+  function closeResults() { out.hidden = true; out.innerHTML = ""; box.setAttribute("aria-expanded", "false"); }
+  function showResults(html) { out.innerHTML = html; out.hidden = false; box.setAttribute("aria-expanded", "true"); }
+  function rowHtml(name, desc, where, href) { return '<a class="r" href="' + esc(href) + '"><b>' + esc(name) + '</b><span class="d">' + esc(desc || "") + '</span><span class="o">' + esc(where) + '</span></a>'; }
+  function whereIs(term) {
+    if (places[term] !== undefined) return Promise.resolve(places[term]);
+    var i = 0;
+    function onArch() {
+      if (i >= ARCHES.length) return false;
+      var arch = ARCHES[i++];
+      return fetch("/api/v1/package/" + term + "?ring=stable&arch=" + arch).then(function (r) {
+        if (r.status === 404) return onArch();
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json().then(function (d) { return { name: term, arch: arch, source: (d.package || {}).source, description: (d.manifest || {}).description }; });
+      });
+    }
+    return registryRows().then(function (rows) { return rows.some(function (p) { return p.name === term; }) ? { name: term, arch: ARCHES[0], source: "factory" } : onArch(); })
+      .then(function (found) { places[term] = found; return found; });
+  }
+  function lookFor(term) {
+    var my = ++seq;
+    if (term.length < 2) { closeResults(); return; }
+    fetch("/api/v1/search?q=" + encodeURIComponent(term) + "&ring=stable&arch=" + ARCHES[0] + "&limit=9").then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }).then(function (d) {
+      if (my !== seq) return;
+      var rows = d.packages || [];
+      var html = rows.slice(0, SHOWN).map(function (p) { return rowHtml(p.name, p.description, fromWhere(p.source, p.repo_arch || ARCHES[0]), pkgHref(p.name, "stable", ARCHES[0])); }).join("");
+      if (rows.length > SHOWN) html += '<a class="all" href="/packages?q=' + encodeURIComponent(term) + '">All results for “' + esc(term) + '” →</a>';
+      if (rows.length || !NAME.test(term)) return showResults(html || '<div class="none"><span>Nothing in stable matches “' + esc(term) + '”.</span><a href="/packages?q=' + encodeURIComponent(term) + '">Every ring →</a></div>');
+      return whereIs(term).then(function (found) {
+        if (my !== seq) return;
+        showResults(found ? rowHtml(found.name, found.description, fromWhere(found.source, found.arch), pkgHref(found.name, "stable", found.arch)) : '<div class="none"><span>No “' + esc(term) + '” yet.</span><a href="' + "/request?name=" + encodeURIComponent(term) + '">Request it →</a></div>');
+      });
+    }).catch(function (e) { if (my === seq) showResults('<div class="none"><span>' + esc("the package search did not answer: " + errorText(e)) + '</span></div>'); });
+  }
+  box.addEventListener("input", function () {
+    clearTimeout(timer);
+    var term = box.value.trim().toLowerCase();
+    if (term.length < 2) { seq++; closeResults(); return; }
+    timer = setTimeout(function () { if (box.value.trim().toLowerCase() === term) lookFor(term); }, 200);
+  });
+  // ↓ from the box walks the rows, ↑ back to it; Esc closes them and keeps the box.
+  box.addEventListener("keydown", function (ev) {
+    if (ev.key === "Escape") closeResults();
+    else if (ev.key === "ArrowDown" && !out.hidden) { var first = out.querySelector("a"); if (first) { ev.preventDefault(); first.focus(); } }
+  });
+  out.addEventListener("keydown", function (ev) {
+    var links = [].slice.call(out.querySelectorAll("a")), at = links.indexOf(document.activeElement);
+    if (ev.key === "ArrowDown" || ev.key === "ArrowUp") { ev.preventDefault(); var to = at + (ev.key === "ArrowDown" ? 1 : -1); if (to < 0) box.focus(); else if (links[to]) links[to].focus(); }
+    else if (ev.key === "Escape") { closeResults(); box.focus(); }
+  });
+  box.addEventListener("focus", function () { if (out.innerHTML) { out.hidden = false; box.setAttribute("aria-expanded", "true"); } });
+  document.addEventListener("click", function (ev) { if (!out.hidden && !out.contains(ev.target) && ev.target !== box) { out.hidden = true; box.setAttribute("aria-expanded", "false"); } });
+
+  drawSetup();
+  liveStats(function (d) { numbers(d); chain(d); drawSetup(d); feed(d); arrivals(d); if (!typing) placeholder(WORDS[0]); }, 60000);
 `;
 
 export function overviewHtml(poolUrl: string, version: RunningVersion): string {
   return page({
     path: "/",
     title: "omarchy-pool",
-    description: "One package repository for Omarchy: Arch, Arch Linux ARM and Omarchy packages, verified, served in rings and rolled back automatically.",
+    description: "Arch, Arch Linux ARM, Omarchy and Asahi packages for Omarchy, tested before they reach you: one pool, three rings, rolled back automatically.",
     active: "pool",
+    kit: true,
+    css: CSS,
     body: BODY,
-    script: SCRIPT.replace("__CHARTS__", CHARTS),
+    script: SCRIPT.replace("__SOURCES__", () => JSON.stringify(SOURCES)).replace("__ORIGIN__", () => JSON.stringify(ORIGIN)).replace("__KEEP__", String(KEEP_RELEASES)),
     poolUrl,
     version,
   });
 }
 
 /**
- * What / is made of. The door is public end to end: nothing on it changes with the role, every read
- * is an anonymous GET, and there is no act. Almost everything draws from
- * /api/v1/stats, so each unit declares that read with the fields it takes
- * from it; the rings of that answer come in RINGS order (edge, rc, stable,
- * lab), so `rings.2` is stable, the ring the fixture released.
+ * What / is made of. The door is public end to end: nothing on it changes
+ * with the role, every read is an anonymous GET, and there is no act. Most
+ * of it draws from /api/v1/stats, so each unit declares that read with the
+ * fields it takes from it; the rings of that answer come in RINGS order
+ * (edge, rc, stable, lab), so `rings.2` is stable, the ring the fixture
+ * released twice — its head's diff against its parent is what the
+ * fixture's stable release changed.
  */
 export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
   const stats = "/api/v1/stats";
-  const security = (arch: string) => `/api/v1/security?ring=stable&arch=${arch}`;
   return [
     {
       id: "pool.hero",
       page: "/",
-      anchor: ['class="hero"', 'class="eyebrow"', "tested before they reach you", 'href="#get-started"'],
+      anchor: ['<section class="home-top">', '<p class="op-eyebrow">For Omarchy users</p>', 'class="op-hero">Arch, Arch Linux ARM, Omarchy and Asahi packages, tested before they reach you</h1>'],
       visible: EVERYONE,
     },
     {
-      // The box / focuses (aria-keyshortcuts="/", the ⌘K menu's hook: layout.ts GO_MENU), and the one search the menu asks too, at this very address and in lower case, so the two share the edge's copy.
+      // The box / focuses (aria-keyshortcuts="/", the ⌘K menu's hook: layout.ts GO_MENU), and the one search the menu asks too, at this very address and in lower case, so the two share the edge's copy; a name it did not find is looked for where the menu looks before Request is offered, and Request is the menu's: the request form with the name.
       id: "pool.search",
       page: "/",
-      anchor: ['<form class="searchbar" action="/packages" method="get"', 'name="q"', 'id="pool-q"', 'aria-keyshortcuts="/"', 'id="pool-suggest"'],
-      script: ['"#pool-q"', '"#pool-suggest"', '"/api/v1/search?q="', '"&ring=stable&arch=" + ARCHES[0] + "&limit=9"', "box.value.trim().toLowerCase()", "d.packages", "p.description", 'pkgHref(p.name, "stable", ARCHES[0])'],
+      anchor: ['<form class="home-search" action="/packages" method="get" role="search">', 'name="q"', 'id="pool-q"', 'aria-keyshortcuts="/"', 'id="pool-results"'],
+      script: ['"/api/v1/search?q=" + encodeURIComponent(term) + "&ring=stable&arch=" + ARCHES[0] + "&limit=9"', "box.value.trim().toLowerCase()", 'pkgHref(p.name, "stable", ARCHES[0])', '"/api/v1/package/" + term + "?ring=stable&arch=" + arch', "NAME.test(term)", '"/request?name=" + encodeURIComponent(term)', "Request it →", "fromWhere(p.source, p.repo_arch || ARCHES[0])"],
       reads: [
-        { path: `/api/v1/search?q=${F.pkg}&ring=stable&arch=${F.arch}&limit=9`, fields: ["packages", "packages.0.name", "packages.0.version", "packages.0.source", "packages.0.description"] },
+        { path: `/api/v1/search?q=${F.pkg}&ring=stable&arch=${F.arch}&limit=9`, fields: ["packages", "packages.0.name", "packages.0.source", "packages.0.repo_arch", "packages.0.description"] },
+        { path: `/api/v1/package/${F.pkg}?ring=stable&arch=${F.arch}`, fields: ["name", "package.source", "manifest.description"] },
+        { path: `/api/v1/package/zzfoo?ring=stable&arch=${F.arch}`, status: 404 },
+        { path: "/request?name=zzfoo", json: false },
         { path: `/packages?q=${F.pkg}`, json: false },
       ],
       visible: EVERYONE,
     },
     {
+      // What people asked the factory for, newest first: the registry the Packages page and the menu read.
+      id: "pool.requested",
+      page: "/",
+      anchor: ['<div class="home-asked" id="pool-asked" hidden></div>'],
+      script: ['api("GET", "/api/v1/factory/packages")', "!p.blocked_at", "String(b.created_at).localeCompare(String(a.created_at))", "<span>Requested</span>", 'class="op-chip" data-name="'],
+      reads: [{ path: "/api/v1/factory/packages", fields: ["packages", "packages.0.name", "packages.0.created_at", "packages.0.blocked_at"] }],
+      visible: EVERYONE,
+    },
+    {
+      // The four numbers, each a link to the page that proves it, counted up by the kit the first time they land.
       id: "pool.tiles",
       page: "/",
-      anchor: ['<div class="tiles six" id="tiles">'],
-      // The advisories tile counts at the Security page's default confidence, through the shell's rule, and lands the reader on that page at that default.
-      script: ['skeletonTiles("#tiles", 6)', 'setTiles("#tiles"', '"#t-sec"', '"#t-sec-s"', "package_count", "imports_daily", '"/api/v1/security?ring=stable&arch="', "advisoryCounts(advisoriesAt(s))", "confWord()", '"/security?ring=stable&arch=x86_64"', "sourcesOf(d)", '"Sources mirrored"', '" optional, not counted"'],
+      anchor: ['<div class="op-stats home-stats" id="pool-stats">', 'id="n-pkgs"', 'id="n-edge"', 'id="n-rel"', 'id="n-src"', 'href="/status?kind=sync#journal"', 'href="/diff?ring=stable"'],
+      script: ["countUp(el, n, fmt)", "(d.pool || {}).names", "imports_daily", 'newest(d.latest, "sync")', 'latest(d.latest || [], "health", "stable", a)', "HEALTH_WORD[worst]", "rows.some(lateSync)", '"all in sync"'],
       reads: [
         {
           path: stats,
           fields: [
-            "rings.2.ring", "rings.2.package_count", "rings.2.sources.0.arch", "rings.2.sources.0.packages", "rings.2.release.seq", "rings.2.release.created_at",
-            "latest", "coverage.0.source", "coverage.0.upstream_total", "coverage.0.optional",
-            "series.imports_daily.0.day", "series.imports_daily.0.packages", "series.imports_daily.0.bytes", "series.imports_daily.0.runs",
-            "audience.0.machines", "audience.0.by_ring", "audience.0.requests",
+            "pool.names", "series.imports_daily.0.day", "series.imports_daily.0.packages", "latest",
+            "rings.2.ring", "rings.2.release.seq", "rings.2.release.created_at",
+            "coverage.0.source", "coverage.0.arch", "coverage.0.indexed", "coverage.0.last_sync", "coverage.0.late",
           ],
         },
-        { path: security(F.arch), fields: ["vulnerable", "vulnerable.0.advisories.0.match", "vulnerable.0.advisories.0.severity", "vulnerable.0.advisories.0.kev", "updated_at"] },
-        { path: security("aarch64"), fields: ["vulnerable"] },
+        { path: "/diff?ring=stable", json: false },
+        { path: "/status", json: false },
       ],
       visible: EVERYONE,
     },
     {
-      id: "pool.how-diagram",
+      // The chain from the sources to your machine, drawn by the server from meta.ts's upstreams and rings, its numbers the stats'.
+      id: "pool.flow",
       page: "/",
-      anchor: ['id="how"', '<figure class="diagram">', 'aria-label="Five sources feed the pool'],
-      visible: EVERYONE,
-      drawn: "rings",
-    },
-    {
-      id: "pool.ring-cards",
-      page: "/",
-      anchor: ['id="rings-section"', '<div class="rings" id="rings">'],
-      script: ['"#rings"', "a[data-ring]", "RING_INFO[name]", 'latest(d.latest, "health", name, a)', "HEALTH_WORD[h.status]", "info.lag"],
-      reads: [{ path: stats, fields: ["rings", "rings.0.ring", "rings.0.package_count", "rings.0.bytes", "rings.0.release", "rings.2.release.seq", "rings.2.release.created_at", "latest"] }],
+      anchor: ['<h2 class="op-label" id="flow-h">From upstream to your machine</h2>', 'href="/docs/how-it-works">The full story →', 'id="pool-sources"', "<span>Arch Linux ARM</span>", 'id="fl-pool"', 'id="fl-edge"', 'id="fl-rc"', 'id="fl-stable"', "<b>your Omarchy</b>"],
+      script: ['$("#pool-sources")', "sourcesOf(d)", "c.indexed", '"#fl-" + r', '" verified"'],
+      reads: [{ path: stats, fields: ["pool.names", "coverage", "coverage.0.indexed", "rings.0.release", "rings.2.release.seq"] }],
       visible: EVERYONE,
     },
     {
-      id: "pool.why-features",
+      // Point pacman at a ring: the ⌘K menu's "Set up the pool" lands here (#get-started). The three rings a reader points pacman at are the shell's PROMISED_RINGS; the command pipes /setup into sudo, and the script is a link away to read first.
+      id: "pool.setup",
       page: "/",
-      anchor: ['class="features"', 'id="proof-verified"', 'id="proof-tested"', 'id="proof-rollback"', 'href="/factory">Bring a package'],
-      script: ['"#proof-verified"', '"#proof-tested"', '"#proof-rollback"', "d.pool.objects", "d.pool.names", 'e.kind === "rollback"'],
-      reads: [{ path: stats, fields: ["pool.objects", "pool.names", "rings.2.release.seq", "events", "events.0.kind", "events.0.created_at", "events.0.ring"] }],
-      visible: EVERYONE,
-    },
-    {
-      id: "pool.get-started-step",
-      page: "/",
-      anchor: ['id="get-started"', 'id="pick-ring"', 'id="ring-desc"', 'data-copy="setup"', 'id="setup-cmd"', 'href="/setup"'],
-      script: ["RINGS = Object.keys(RINGS_TEXT)", 'pick("#pick-ring", RINGS, ring', '"#ring-desc"', '"#setup-cmd"', "DESC[ring]", "/setup | sudo bash -s -- --ring ", 'copyChips({ setup: "#setup-cmd", cli: "#cli-cmd" })'],
-      reads: [{ path: "/setup", json: false }],
-      visible: EVERYONE,
-    },
-    {
-      id: "pool.cli-card",
-      page: "/",
-      anchor: ['class="cli-card"', 'data-copy="cli"', 'id="cli-cmd"', 'id="cli-note"', 'href="/docs/get-started#cli"'],
-      script: ['"#cli-cmd"', '"#cli-note"', "omarchy-cli --ring "],
-      visible: EVERYONE,
-    },
-    {
-      id: "pool.chart-pool-growth",
-      page: "/",
-      anchor: ['id="c-pool"', 'id="c-pool-mini"'],
-      script: ['"#c-pool"', '"#c-pool-mini"', "S.metrics", "d.pool.bytes", "area("],
-      reads: [{ path: stats, fields: ["series.metrics.0.created_at", "series.metrics.0.bytes", "series.metrics.0.objects", "pool.objects", "pool.bytes"] }],
-      visible: EVERYONE,
-    },
-    {
-      id: "pool.chart-security",
-      page: "/",
-      anchor: ['id="sec-when"', 'id="c-sec"'],
-      script: ['"#c-sec"', '"#sec-when"', '"/api/v1/security?ring=stable&arch="', "advisoryCounts(advisoriesAt(s))", "sevSeries(t)", "r.color", 'e.kind === "fast-track"', "hrows("],
+      anchor: ['id="get-started"', 'id="setup-tabs" role="tablist"', 'id="tab-command"', 'id="tab-agent"', 'id="pick-ring"', 'data-ring="stable"', 'data-ring="rc"', 'data-ring="edge"', 'id="ring-line"', 'id="setup-well"', 'class="op-copy" data-op-copy=""', '<a href="/setup">Read the script first →</a>'],
+      script: ['PROMISED_RINGS.indexOf(q.get("ring"))', "/setup | sudo bash -s -- --ring ", "RINGS_TEXT[ring].title", '"copy prompt"', 'ev.key !== "ArrowLeft"'],
       reads: [
-        { path: security(F.arch), fields: ["updated_at", "vulnerable", "vulnerable.0.advisories.0.match", "vulnerable.0.advisories.0.severity", "vulnerable.0.advisories.0.kev"] },
-        { path: security("aarch64"), fields: ["vulnerable"] },
-        { path: stats, fields: ["events", "events.0.kind", "events.0.status", "events.0.summary", "events.0.created_at"] },
+        { path: "/setup", json: false },
+        { path: stats, fields: ["rings.0.release.seq", "rings.1.ring", "rings.2.release.seq"] },
       ],
       visible: EVERYONE,
     },
     {
-      id: "pool.chart-machines",
+      // The agents the prompt is written for: the kit's marks, named for a screen reader and on hover.
+      id: "pool.agents",
       page: "/",
-      anchor: ['id="mc-days"', 'id="mc-spark"', 'id="mc-split"'],
-      script: ['"#mc-spark"', '"#mc-split"', '"#mc-days"', "d.audience", "y.by_ring", "y.by_arch", "y.sampled"],
-      reads: [{ path: stats, fields: ["audience", "audience.0.day", "audience.0.machines", "audience.0.by_ring", "audience.0.by_arch", "audience.0.sampled"] }],
+      anchor: ['id="setup-agents" hidden', '<span>Works with</span>', 'class="op-b op-b-claude-color"', 'aria-label="Claude Code"', 'aria-label="Meta"'],
+      script: ['$("#setup-agents").hidden = !agent'],
       visible: EVERYONE,
     },
     {
-      id: "pool.people-row",
+      id: "pool.own",
       page: "/",
-      anchor: ['id="cc-people"'],
-      // The maintainer set is the shell's one read (maintainerSet, GET /api/v1/factory/maintainers), the workers the shell's one count (workerCounts).
-      script: ['"#cc-people"', 'api("GET", "/api/v1/factory/packages")', "maintainerSet(ok)", 'api("GET", "/api/v1/factory")', "personChip(", "workerCounts(workers)", "wc.alive", "p.owner", 'noAnswer("people\'s lists", e)'],
+      anchor: ['<details class="home-own">', "Bring your own package", '<a class="op-btn primary" href="/factory">Request a package</a>', '<a class="op-btn" href="/agents">Ask your agent</a>'],
+      reads: [{ path: "/factory", json: false }, { path: "/agents", status: 302, json: false }],
+      visible: EVERYONE,
+    },
+    {
+      // Live: the journal's newest lines from the stats' forty, a line that arrived since the last poll lit for a moment; Full journal is Status's section.
+      id: "pool.live",
+      page: "/",
+      anchor: ['id="live-feed"', 'id="live-count"', '<a class="home-more" href="/status#journal">Full journal →</a>', 'class="op-live-dot"'],
+      script: ['$("#live-feed").innerHTML', "all.filter(news)", '" op-fresh"', "e.summary", "HEALTH_WORD[e.status]", 'e.kind !== "dispatch"', '" events today"'],
       reads: [
-        { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.owner"] },
-        { path: "/api/v1/factory/maintainers", fields: ["maintainers", "maintainers.0.login", "maintainers.0.since"] },
-        { path: "/api/v1/factory", fields: ["workers", "workers.0.owner", "workers.0.alive", "workers.0.revoked_at"] },
+        { path: stats, fields: ["events", "events.0.id", "events.0.kind", "events.0.status", "events.0.summary", "events.0.created_at", "events.0.ring", "events.0.payload"] },
+        { path: "/status", json: false },
       ],
       visible: EVERYONE,
     },
     {
-      id: "pool.open-stats",
+      // New in the pool this week: each ring's newest release against its parent, at the address the Packages page reads stable's.
+      id: "pool.new",
       page: "/",
-      anchor: ['<div class="tiles four" id="open-stats">'],
-      script: ['setTiles("#open-stats", openTiles(contributors, maintainers, wc, landed))', 'setTiles("#open-stats", tilesUnanswered(openTiles({}, {}, workerCounts([]), 0), down))', '"/people#contributors"', '"/people#maintainers"', '"/people#workers"', '"/packages?q=factory"', "p.landed", '"Workers alive", num(wc.alive), num(wc.registered) + " registered"'],
+      anchor: ['<h2 class="op-label" id="new-h">New in the pool this week</h2>', 'id="pool-new"', 'href="/packages">All packages →'],
+      script: ['"/api/v1/releases/" + rel.ring + "/diff?from=" + rel.parent_id + "&to=" + rel.id', `var KEEP_RELEASES = ${KEEP_RELEASES}`, "if (!head || !head.parent_id) return [];", "Date.now() - Date.parse(x.created_at) < WEEK_MS", "df.added", "df.upgraded", "pkgHref(c.name, c.ring, c.arches[0])", 'noAnswer("rings\' latest changes"'],
       reads: [
-        { path: "/api/v1/factory/packages", fields: ["packages.0.owner", "packages.0.status", "packages.0.landed"] },
-        { path: "/api/v1/factory/maintainers", fields: ["maintainers.0.login"] },
-        { path: "/api/v1/factory", fields: ["workers", "workers.0.owner", "workers.0.alive", "workers.0.revoked_at"] },
-      ],
-      visible: EVERYONE,
-    },
-    {
-      id: "pool.feed-journal",
-      page: "/",
-      anchor: ['id="open-journal"', 'href="/journal">Full journal'],
-      script: ['"#open-journal"', "drawFeed(", 'data-id="', "e.summary", "e.status", "seenEvents"],
-      reads: [{ path: stats, fields: ["events", "events.0.id", "events.0.kind", "events.0.status", "events.0.summary", "events.0.created_at"] }],
-      visible: EVERYONE,
-    },
-    {
-      id: "pool.ring-heads",
-      page: "/",
-      anchor: ['id="open-heads"', 'id="open-releases"', 'href="/journal#releases"'],
-      script: ['"#open-heads"', '"#open-releases"', 'href="/diff?ring=', "d.releases", "r.source_id", "r.note"],
-      reads: [{ path: stats, fields: ["rings.0.ring", "rings.0.release", "rings.0.package_count", "releases", "releases.0.id", "releases.0.ring", "releases.0.seq", "releases.0.source_id", "releases.0.note", "releases.0.created_at"] }],
-      visible: EVERYONE,
-    },
-    {
-      id: "pool.coverage",
-      page: "/",
-      anchor: ['class="coverage-box"', 'id="c-coverage"'],
-      script: ['"#c-coverage"', "sourcesOf(", "src.rows", "c.upstream_total", "c.indexed", "c.optional", 'data-tip="'],
-      reads: [{ path: stats, fields: ["coverage", "coverage.0.source", "coverage.0.arch", "coverage.0.optional", "coverage.0.upstream_total", "coverage.0.indexed"] }],
-      visible: EVERYONE,
-    },
-    {
-      id: "pool.sponsor",
-      page: "/",
-      anchor: ['class="sponsor compact"', 'href="/pipeline">Pipeline</a>', 'href="mailto:sponsor@omarchy-pool.org"'],
-      visible: EVERYONE,
-    },
-    {
-      id: "pool.section-heads",
-      page: "/",
-      anchor: [
-        "<h2>From upstream to your machine</h2>", 'href="/docs/how-it-works"',
-        "<h2>Pick a ring</h2>", "<h2>Why the pool</h2>",
-        "<h2>Get started</h2>", 'href="/docs/get-started">',
-        "<h2>Coverage</h2>", 'href="/status">Every source, every number', "The optional sources and the factory are not counted.",
-        "<h2>Made in the open</h2>",
+        { path: stats, fields: ["rings.2.release.id", "rings.2.release.parent_id", "rings.2.release.created_at", "releases", "releases.0.id", "releases.0.ring", "releases.0.seq", "releases.0.parent_id", "releases.0.created_at"] },
+        { path: `/api/v1/releases/stable/diff?from=${F.previousRelease}&to=${F.release}`, fields: ["added", "added.0.name", "added.0.arch", "added.0.version", "added.0.source", "upgraded", "upgraded.0.name", "upgraded.0.arch", "upgraded.0.to", "upgraded.0.source"] },
+        { path: "/packages", json: false },
       ],
       visible: EVERYONE,
     },
