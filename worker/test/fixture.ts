@@ -67,18 +67,27 @@ import { packageKey } from "../src/r2";
 import { sha256Hex } from "../src/routes/contributors";
 import { syncJobFor } from "../src/scheduler";
 import type { Fixture } from "../src/pages/components";
-import { HELPERS } from "../src/pages/layout";
+import { HELPERS, THEME_BOOT } from "../src/pages/layout";
+import { KIT_HELPERS } from "../src/pages/kit";
 
 export type { Fixture };
 
-/** The inline scripts of a served page, joined: what the page runs, for the tests that read it (components.test.ts, pages.test.ts). */
-export const scriptOf = (html: string): string => [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map((m) => m[1]).join("\n");
+/**
+ * The inline scripts of a served page, joined: what the page runs, for the
+ * tests that read it (components.test.ts, pages.test.ts) — less the theme's
+ * boot in the head (THEME_BOOT, the same on every page; kit.test.ts reads
+ * and runs it), so what they read is the page's one function: the footer's
+ * line, the shell, the page's own.
+ */
+export const scriptOf = (html: string): string => [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map((m) => m[1]).filter((s) => s !== THEME_BOOT).join("\n");
 
-// The page's own script is what follows the shell: page() splices HELPERS whole, so its last lines mark where the page's statements begin — a check on what a page draws must not read the shell's workerRow, avatar or personLink as the page's. Null when the shell is not spliced whole.
+// The page's own script is what follows the shell: page() splices HELPERS whole, so its last lines mark where the page's statements begin — a check on what a page draws must not read the shell's workerRow, avatar or personLink as the page's. A kit page (page({ kit: true })) has the kit's helpers right after, and they are the shell's too. Null when the shell is not spliced whole.
 const shellEnd = HELPERS.slice(-120);
 export function ownScriptOf(html: string): string | null {
   const script = scriptOf(html), at = script.indexOf(shellEnd);
-  return at > 0 ? script.slice(at + shellEnd.length) : null;
+  if (at <= 0) return null;
+  const own = script.slice(at + shellEnd.length);
+  return own.startsWith(KIT_HELPERS) ? own.slice(KIT_HELPERS.length) : own;
 }
 
 /** What runScript hands back: the document's nodes by the selector they were asked for, the functions asked for by name, and a setter per variable asked for. */

@@ -30,7 +30,7 @@
  * script whose path no entry on that page (or the shell) claims fails by
  * the page's name, so a new read or act is declared the day it is written.
  */
-import { MORE } from "./layout";
+import { MORE, PALETTE, THEME_KEY } from "./layout";
 import { OVERVIEW_COMPONENTS } from "./overview";
 import { FACTORY_COMPONENTS } from "./contribute";
 import { REVIEW_COMPONENTS } from "./review";
@@ -175,6 +175,13 @@ export interface Fixture {
  * poll and the worker's log, so a page's own entries need not claim them.
  */
 export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
+  {
+    // The theme (#239): the system's, or the one the reader chose — kept in this browser under THEME_KEY and applied in the head before the first paint, with the browser's chrome (theme-color) following. window.opTheme is the one way to choose, what the ⌘K menu calls; kit.test.ts runs the boot.
+    id: "shell.theme",
+    page: "/",
+    anchor: [`<meta name="theme-color" content="${PALETTE.bg.dark}" media="(prefers-color-scheme: dark)">`, `<meta name="theme-color" content="${PALETTE.bg.light}" media="(prefers-color-scheme: light)">`, "window.opTheme = {", `"${THEME_KEY}"`, '[data-theme="light"] { color-scheme: light;'],
+    visible: EVERYONE,
+  },
   {
     // The header's Sign in carries the page it is pressed on as `next`, so the sign-in comes back to it; /me is the reader's own page, a redirect that needs the session to know where.
     id: "shell.account",

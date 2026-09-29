@@ -206,28 +206,29 @@ const PACKAGE_SCRIPT = String.raw`
     d.links.forEach(function (x) { var k = x.provider ? x.provider.name : x.soname; right[k] = right[k] || { name: k, provided: !!x.provider, declared: false, sonames: [] }; right[k].sonames.push(x.soname); });
     var rightList = Object.keys(right).map(function (k) { return right[k]; }).sort(function (a, b) { return a.name < b.name ? -1 : 1; }).slice(0, 22), moreRight = Object.keys(right).length - rightList.length;
     var rows = Math.max(left.length + (moreLeft ? 1 : 0), rightList.length + (moreRight ? 1 : 0), 1), rh = 26, W = 1100, H = Math.max(rows * rh + 20, 120), colW = 300, cx = W / 2;
-    var body = '<defs><marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="#8b93b8"/></marker></defs>';
+    // The graph's colours are the palette's names, so it follows the theme; a dependency the ring does not provide is --dim, the legend's grey (it was a darker grey of its own, outside the palette).
+    var body = '<defs><marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--dim)"/></marker></defs>';
     function node(x, y, w, n, color, title, sub) {
       var href = pkgHref(n, ring, arch);
       var vuln = vulnProviders[n];
-      var badge = vuln ? '<circle cx="' + (x + w - 4) + '" cy="' + (y - 8) + '" r="6" fill="#f7768e"><title>' + esc(vuln.length + " open advisor" + (vuln.length > 1 ? "ies" : "y") + ": " + vuln.map(function (a) { return a.cves.join(","); }).join("; ")) + '</title></circle><text x="' + (x + w - 4) + '" y="' + (y - 5) + '" fill="#0c0e10" font-size="9" text-anchor="middle" font-weight="700">!</text>' : '';
-      return '<a href="' + href + '"><rect x="' + x + '" y="' + (y - 10) + '" width="' + w + '" height="21" rx="3" fill="#13141c" stroke="' + (vuln ? "#f7768e" : color) + '"/><text x="' + (x + 8) + '" y="' + (y + 4) + '" fill="#c0caf5" font-size="12">' + esc(n.length > 34 ? n.slice(0, 33) + "…" : n) + '</text>' + (sub ? '<text x="' + (x + w - 8) + '" y="' + (y + 4) + '" fill="#8b93b8" font-size="10" text-anchor="end">' + esc(sub) + '</text>' : '') + '<title>' + esc(title) + '</title></a>' + badge;
+      var badge = vuln ? '<circle cx="' + (x + w - 4) + '" cy="' + (y - 8) + '" r="6" fill="var(--red)"><title>' + esc(vuln.length + " open advisor" + (vuln.length > 1 ? "ies" : "y") + ": " + vuln.map(function (a) { return a.cves.join(","); }).join("; ")) + '</title></circle><text x="' + (x + w - 4) + '" y="' + (y - 5) + '" fill="var(--on-accent)" font-size="9" text-anchor="middle" font-weight="700">!</text>' : '';
+      return '<a href="' + href + '"><rect x="' + x + '" y="' + (y - 10) + '" width="' + w + '" height="21" fill="var(--panel-2)" stroke="' + (vuln ? "var(--red)" : color) + '"/><text x="' + (x + 8) + '" y="' + (y + 4) + '" fill="var(--text)" font-size="12">' + esc(n.length > 34 ? n.slice(0, 33) + "…" : n) + '</text>' + (sub ? '<text x="' + (x + w - 8) + '" y="' + (y + 4) + '" fill="var(--dim)" font-size="10" text-anchor="end">' + esc(sub) + '</text>' : '') + '<title>' + esc(title) + '</title></a>' + badge;
     }
     // centre: red when this version itself has an open advisory
     var cy = H / 2, ownOpen = ((d.security && d.security.advisories) || []).filter(function (a) { return a.status === "vulnerable"; }).length;
-    body += '<rect x="' + (cx - 90) + '" y="' + (cy - 14) + '" width="180" height="29" rx="3" fill="' + (ownOpen ? "#f7768e" : "#9ece6a") + '"/><text x="' + cx + '" y="' + (cy + 5) + '" text-anchor="middle" fill="#0c0e10" font-size="13" font-weight="600">' + esc(d.name) + '</text>';
+    body += '<rect x="' + (cx - 90) + '" y="' + (cy - 14) + '" width="180" height="29" fill="' + (ownOpen ? "var(--red)" : "var(--green)") + '"/><text x="' + cx + '" y="' + (cy + 5) + '" text-anchor="middle" fill="var(--on-accent)" font-size="13" font-weight="600">' + esc(d.name) + '</text>';
     left.forEach(function (n, i) {
-      var y = 20 + i * rh, color = n.declared ? "#7aa2f7" : "#9ece6a";
+      var y = 20 + i * rh, color = n.declared ? "var(--blue)" : "var(--green)";
       body += '<path d="M' + (20 + colW) + ' ' + y + ' C ' + (cx - 160) + ' ' + y + ', ' + (cx - 160) + ' ' + cy + ', ' + (cx - 92) + ' ' + cy + '" fill="none" stroke="' + color + '" stroke-opacity="0.45" marker-end="url(#m)"/>';
       body += node(20, y, colW, n.name, color, n.name + " " + n.version + (n.declared ? " declares " + d.name : "") + (n.sonames.length ? " · loads " + n.sonames.join(", ") : ""), n.sonames.length ? n.sonames[0] : "depends");
     });
-    if (moreLeft > 0) body += '<text x="20" y="' + (20 + left.length * rh + 4) + '" fill="#8b93b8" font-size="11">+ ' + moreLeft + ' more (listed below)</text>';
+    if (moreLeft > 0) body += '<text x="20" y="' + (20 + left.length * rh + 4) + '" fill="var(--dim)" font-size="11">+ ' + moreLeft + ' more (listed below)</text>';
     rightList.forEach(function (n, i) {
-      var y = 20 + i * rh, color = !n.provided ? "#414868" : n.sonames.length ? "#9ece6a" : "#7aa2f7", x = W - 20 - colW;
+      var y = 20 + i * rh, color = !n.provided ? "var(--dim)" : n.sonames.length ? "var(--green)" : "var(--blue)", x = W - 20 - colW;
       body += '<path d="M' + (cx + 92) + ' ' + cy + ' C ' + (cx + 160) + ' ' + cy + ', ' + (cx + 160) + ' ' + y + ', ' + x + ' ' + y + '" fill="none" stroke="' + color + '" stroke-opacity="0.45" marker-end="url(#m)"/>';
       body += node(x, y, colW, n.name, color, (n.provided ? n.name : n.name + " — not in this ring") + (n.declared ? " · declared" : "") + (n.sonames.length ? " · loads " + n.sonames.join(", ") : ""), n.sonames.length ? n.sonames[0] : "declared");
     });
-    if (moreRight > 0) body += '<text x="' + (W - 20 - colW) + '" y="' + (20 + rightList.length * rh + 4) + '" fill="#8b93b8" font-size="11">+ ' + moreRight + ' more (listed below)</text>';
+    if (moreRight > 0) body += '<text x="' + (W - 20 - colW) + '" y="' + (20 + rightList.length * rh + 4) + '" fill="var(--dim)" font-size="11">+ ' + moreRight + ' more (listed below)</text>';
     $("#graph").innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" font-family="JetBrains Mono, ui-monospace, monospace" style="min-height:' + Math.min(H, 700) + 'px">' + body + '</svg>';
   }
 

@@ -8,26 +8,133 @@ import type { RunningVersion } from "../meta";
 import { DOCS_TREE, GLOSSARY, type DocKey } from "./docs-tree";
 import { LATE_AFTER_HOURS, PROMOTED_RINGS, REPO_ARCHES, RING_TEXT, RINGS_BY_STABILITY, SEVERITIES, WORKER_ALIVE_MINUTES } from "../meta";
 import { escapeHtml } from "../html";
+import { KIT_HELPERS, KIT_SHEET_PATH } from "./kit";
+
+/**
+ * The palette, typed once (#239, the handoff's "Design tokens"): every
+ * colour the dashboard paints is one of these names, in the CSS as a custom
+ * property and nowhere as a literal. Dark is the default — the site's Tokyo
+ * Night, omarchy.org's — and light is its day twin: the same names and
+ * roles, each re-tuned for paper. The token block below, the theme-color
+ * the browser's chrome wears and the contrast table in test/kit.test.ts all
+ * read this; a colour added to a page is a name added here, in both themes.
+ *
+ * Light is the handoff's table with four values darker: --dim, --amber,
+ * --blue and --lilac were under 4.5:1 on --bg-deep (4.13, 4.30, 4.47,
+ * 4.35), and the chrome's small text sits there — the header's role labels,
+ * the footer's notes, a code well's comments, a degraded status. #239 asks
+ * for 4.5:1 for body text, and the handoff's design system for a light
+ * twin "re-tuned for contrast", so each keeps its hue and saturation and
+ * only loses lightness, to the first step that reaches 4.5:1 (under 6%
+ * of it). test/kit.test.ts keeps the handoff's table: it holds every other
+ * value to it and these four to its hues.
+ */
+export const PALETTE = {
+  bg: { dark: "#1a1b26", light: "#e6e7ed" },
+  "bg-deep": { dark: "#0e0e14", light: "#d8dae3" },
+  panel: { dark: "#1f2230", light: "#eff0f4" },
+  "panel-2": { dark: "#13141c", light: "#f6f7fa" },
+  line: { dark: "#2a2e3f", light: "#c3c7d8" },
+  text: { dark: "#c0caf5", light: "#2b3150" },
+  muted: { dark: "#a9b1d6", light: "#474e70" },
+  dim: { dark: "#8b93b8", light: "#585e80" },
+  green: { dark: "#9ece6a", light: "#466a20" },
+  "green-ink": { dark: "#0c0e10", light: "#f6f7fa" },
+  amber: { dark: "#e0af68", light: "#83570c" },
+  red: { dark: "#f7768e", light: "#b3244a" },
+  blue: { dark: "#7aa2f7", light: "#2d5abf" },
+  lilac: { dark: "#bb9af7", light: "#7143c8" },
+} as const;
+export type Theme = "dark" | "light";
+export type Token = keyof typeof PALETTE;
+
+/** One theme's palette as the declarations of a CSS rule. */
+function tokens(theme: Theme): string {
+  return (Object.keys(PALETTE) as Token[]).map((k) => `--${k}: ${PALETTE[k][theme]};`).join(" ");
+}
+
+/** Where the reader's choice of theme is kept: this browser's localStorage, under this key. */
+export const THEME_KEY = "op-theme";
+
+/**
+ * The theme before the first paint, in the head. With nothing chosen the
+ * page follows the system — the token block's media query does that, so it
+ * holds with script off too, and nothing here runs for it. A choice the
+ * reader made (window.opTheme.set, the ⌘K menu's "Theme" from #241) is kept
+ * under THEME_KEY and applied here as data-theme on <html>, before the body
+ * is drawn, so a light reader on a dark system never sees a dark flash; the
+ * browser's own chrome (theme-color) follows the page. The one API, for the
+ * palette and anything else that offers the choice:
+ *
+ *   opTheme.get()        "dark" or "light": what the page shows now
+ *   opTheme.set(theme)   "dark" or "light" keeps that choice; anything else ("system", null) forgets it
+ *   opTheme.toggle()     the other one, kept
+ *
+ * Each returns the theme shown after it. A choice made in another tab of
+ * the pool is followed here too (the storage event). localStorage can throw
+ * (a private window, storage blocked): the choice then lasts for the page.
+ */
+export const THEME_BOOT = `(function (d, KEY, BG) {
+  var root = d.documentElement;
+  function kept() { try { var t = localStorage.getItem(KEY); return t === "dark" || t === "light" ? t : null; } catch (e) { return null; } }
+  function shown() { var t = root.getAttribute("data-theme"); return t === "dark" || t === "light" ? t : window.matchMedia && matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"; }
+  function apply(t) {
+    if (t) root.setAttribute("data-theme", t); else root.removeAttribute("data-theme");
+    d.querySelectorAll('meta[name="theme-color"]').forEach(function (m) { m.setAttribute("content", BG[t || (/light/.test(m.getAttribute("media") || "") ? "light" : "dark")]); });
+  }
+  window.opTheme = {
+    get: shown,
+    set: function (t) { t = t === "dark" || t === "light" ? t : null; try { if (t) localStorage.setItem(KEY, t); else localStorage.removeItem(KEY); } catch (e) {} apply(t); return shown(); },
+    toggle: function () { return window.opTheme.set(shown() === "dark" ? "light" : "dark"); }
+  };
+  window.addEventListener("storage", function (e) { if (e.key === KEY) apply(kept()); });
+  apply(kept());
+})(document, ${JSON.stringify(THEME_KEY)}, ${JSON.stringify({ dark: PALETTE.bg.dark, light: PALETTE.bg.light })});`;
 
 export const GITHUB_ICON =
   '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>';
 
 const CSS = String.raw`
+  /* ---- the tokens (#239). The palette (PALETTE: dark by default, light for a
+     reader who chose it or whose system prefers it — data-theme on <html>,
+     THEME_BOOT), then the names that point into it, then type and space.
+     The only colours layout.ts writes are PALETTE's; everything below is a name.
+     data-theme also pins one element to a theme (the footer's badge is the
+     brand's, dark in both). The aliases are declared wherever a theme is, so
+     they follow it: --edge on a light page is light lilac. */
+  :root, [data-theme="dark"] { color-scheme: dark; ${tokens("dark")} }
+  @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { color-scheme: light; ${tokens("light")} } }
+  [data-theme="light"] { color-scheme: light; ${tokens("light")} }
+  /* The veil behind a dialog is the handoff's in both themes: the dark chrome at 60%, so a light page dims as a dark one does.
+     It is declared on ::backdrop itself too: a browser from before early 2024 (Chrome 122, Safari 17.4, Firefox 120) gives ::backdrop none of the page's custom properties. */
+  :root, ::backdrop { --scrim: color-mix(in srgb, ${PALETTE["bg-deep"].dark} 60%, transparent); }
+  :root, [data-theme] {
+    /* A ring's hue is its own, and none is used for anything but its ring. */
+    --edge: var(--lilac); --rc: var(--blue); --stable: var(--green); --lab: var(--amber);
+    /* What a colour is for: new work (the v1 kit, pages/kit.ts) names these. */
+    --surface-page: var(--bg); --surface-chrome: var(--bg-deep); --surface-card: var(--panel); --surface-sunken: var(--panel-2);
+    --border: var(--line); --text-body: var(--text); --text-secondary: var(--muted); --text-tertiary: var(--dim);
+    --accent: var(--green); --on-accent: var(--green-ink);
+    --status-ok: var(--green); --status-warn: var(--amber); --status-error: var(--red); --status-info: var(--blue);
+  }
   :root {
-    --bg: #1a1b26; --bg-deep: #0e0e14; --panel: #1f2230; --panel-2: #13141c; --line: #2a2e3f;
-    --text: #c0caf5; --muted: #a9b1d6; --dim: #8b93b8; --green: #9ece6a; --green-ink: #0c0e10;
-    --amber: #e0af68; --red: #f7768e; --blue: #7aa2f7;
+    --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; --font-display: Geist, "JetBrains Mono", sans-serif;
+    /* Six sizes for new work: a hero, a page's title, a section, the body, the small line, the label (uppercase, .08em). */
+    --fs-display: 40px; --fs-h1: 28px; --fs-h2: 20px; --fs-body: 15px; --fs-small: 13px; --fs-label: 11.5px;
+    --lh-tight: 1.15; --lh-body: 1.6; --tracking-display: -0.02em; --tracking-label: .08em;
+    --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 24px; --space-6: 32px; --space-7: 48px; --space-8: 72px;
+    /* Square everywhere, 1px lines; a v1 page is 1120px wide (a package's 1200px), 32px from the sides, 40px between sections. */
+    --radius: 0; --border-w: 1px; --content-max: 1120px; --content-wide: 1200px; --prose-max: 680px; --gutter: 32px; --section-gap: 40px;
   }
   * { box-sizing: border-box; }
   [hidden] { display: none !important; } /* a class with its own display (.gate is a grid) must not undo hidden — the Factory's sign-in gate stayed visible after signing in */
-  html { color-scheme: dark; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.6 "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: var(--fs-body)/var(--lh-body) var(--font-mono); }
   a { color: var(--text); }
-  h1, h2, h3 { font-family: Geist, "JetBrains Mono", sans-serif; letter-spacing: -0.02em; margin: 0; }
+  h1, h2, h3 { font-family: var(--font-display); letter-spacing: var(--tracking-display); margin: 0; }
   h1 { font-size: 30px; font-weight: 600; }
   h2 { font-size: 22px; font-weight: 600; }
   h3 { font-size: 16px; font-weight: 600; }
-  code, .mono { font-family: "JetBrains Mono", ui-monospace, monospace; }
+  code, .mono { font-family: var(--font-mono); }
   .num { font-variant-numeric: tabular-nums; }
 
   header { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 24px; padding: 14px 32px; border-bottom: 1px solid var(--line); background: var(--bg-deep); }
@@ -52,12 +159,13 @@ const CSS = String.raw`
   .gh:hover { color: var(--text); }
   .gh svg { width: 18px; height: 18px; fill: currentColor; }
   .status { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--dim); text-decoration: none; }
-  .status .led { width: 9px; height: 9px; border-radius: 50%; background: var(--dim); box-shadow: 0 0 0 0 rgba(158,206,106,0); }
-  .status.online .led { background: var(--green); animation: pulse 2.4s ease-out infinite; }
+  /* A live light is a square that breathes (op-pulse: its opacity, 1.6 s), not a glow: no shadows, and it stops under prefers-reduced-motion. The frame declares it — every page's lights, skeletons and live marks breathe with it — and the kit's live dot uses the same. */
+  @keyframes op-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+  .status .led { width: 9px; height: 9px; background: var(--dim); }
+  .status.online .led { background: var(--green); animation: op-pulse 1.6s ease-in-out infinite; }
   .status.online { color: var(--green); }
   .status.degraded .led { background: var(--amber); } .status.degraded { color: var(--amber); }
   .status.offline .led { background: var(--red); } .status.offline { color: var(--red); }
-  @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(158,206,106,.55); } 70% { box-shadow: 0 0 0 7px rgba(158,206,106,0); } 100% { box-shadow: 0 0 0 0 rgba(158,206,106,0); } }
   .v.bump { animation: bump .5s ease-out; } @keyframes bump { 0% { color: var(--green); } 100% { color: inherit; } }
   .ring .desc { font-size: 13px; color: var(--muted); line-height: 1.5; }
   .ring .cta { margin-top: auto; display: flex; justify-content: space-between; align-items: center; gap: 10px; }
@@ -144,11 +252,10 @@ const CSS = String.raw`
   #progress { position: fixed; top: 0; left: 0; height: 2px; width: 0; background: var(--green); z-index: 50; opacity: 0; transition: opacity .2s; }
   #progress.on { opacity: 1; animation: progress 1.6s ease-in-out infinite; }
   @keyframes progress { 0% { width: 0; margin-left: 0 } 50% { width: 60%; margin-left: 20% } 100% { width: 0; margin-left: 100% } }
-  /* .skl is the shimmering bar; .skel marks a placeholder row or tile (removed when data lands). */
-  .skl { display: inline-block; height: 12px; width: 70%; border-radius: 2px; background: linear-gradient(90deg, var(--line) 25%, var(--panel-2) 50%, var(--line) 75%); background-size: 200% 100%; animation: shimmer 1.2s linear infinite; vertical-align: middle; }
+  /* .skl is the placeholder bar, flat and square, breathing like a live light (no gradient); .skel marks a placeholder row or tile (removed when data lands). */
+  .skl { display: inline-block; height: 12px; width: 70%; background: var(--line); animation: op-pulse 1.6s ease-in-out infinite; vertical-align: middle; }
   tr.skel td:nth-child(2n) .skl { width: 45%; } tr.skel td:nth-child(3n) .skl { width: 30%; }
   .tile.skel .v .skl { height: 26px; width: 55%; } .tile.skel .s .skl { width: 80%; }
-  @keyframes shimmer { 0% { background-position: 200% 0 } 100% { background-position: -200% 0 } }
   .empty.loading { color: var(--dim); }
   .empty.loading::after { content: "…"; animation: dots 1.2s steps(4, end) infinite; }
   @keyframes dots { 0% { content: "" } 25% { content: "." } 50% { content: ".." } 75% { content: "..." } }
@@ -226,7 +333,6 @@ const CSS = String.raw`
     section { margin-bottom: 32px; }
   }
   /* ---- the three doors: heroes, diagrams, cards, live pieces (v2 of the dashboard) ---- */
-  :root { --lilac: #bb9af7; --edge: var(--lilac); --rc: var(--blue); --stable: var(--green); --lab: var(--amber); }
   @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
   h1, h2, h3 { text-wrap: balance; }
   header .brand { white-space: nowrap; } header .account { flex: none; } header nav { gap: 18px; }
@@ -260,15 +366,16 @@ const CSS = String.raw`
   .dim { color: var(--dim); }
   .searchbar input[type="search"], .searchbar input[type="text"] { -webkit-appearance: none; appearance: none; border-radius: 0; background: var(--bg-deep); font-size: 14px; padding: 10px 14px; }
   .searchbar input::placeholder { color: var(--dim); } .searchbar input::-webkit-search-decoration, .searchbar input::-webkit-search-cancel-button { -webkit-appearance: none; }
-  .searchbar input:focus { box-shadow: 0 0 0 3px rgba(158,206,106,.14); }
   .pool-search { position: relative; flex: 1 1 440px; max-width: 640px; }
   .pool-search svg { position: absolute; left: 13px; top: 50%; transform: translateY(-50%); width: 17px; height: 17px; fill: none; stroke: var(--dim); stroke-width: 2; stroke-linecap: round; pointer-events: none; }
   .searchbar .pool-search input[type="search"] { width: 100%; padding: 11px 14px 11px 42px; font-size: 15px; }
   .pool-search:focus-within svg { stroke: var(--green); }
   /* What the box answers as you type: a package a line, the full search last. */
-  .suggest { position: absolute; left: 0; right: 0; top: calc(100% + 4px); z-index: 30; background: var(--panel); border: 1px solid var(--line); box-shadow: 0 12px 32px rgba(0, 0, 0, .45); text-align: left; }
+  .suggest { position: absolute; left: 0; right: 0; top: calc(100% + 4px); z-index: 30; background: var(--panel); border: 1px solid var(--line); text-align: left; }
   .suggest a { display: grid; grid-template-columns: minmax(120px, auto) auto auto minmax(0, 1fr); gap: 12px; align-items: center; padding: 9px 14px; color: var(--text); text-decoration: none; border-bottom: 1px solid var(--line); font-size: 13px; }
-  .suggest a:last-child { border-bottom: 0; } .suggest a:hover, .suggest a:focus { background: var(--panel-2); outline: none; }
+  .suggest a:last-child { border-bottom: 0; } .suggest a:hover, .suggest a:focus { background: var(--panel-2); } .suggest a:focus { outline: none; }
+  /* The row the keyboard is on has the green line of every focus: the background alone is a step of 1.06:1 in light (--panel to --panel-2). */
+  .suggest a:focus-visible { outline: 1px solid var(--green); outline-offset: -1px; }
   .suggest a b { font-weight: 600; color: var(--green); } .suggest a .d { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .suggest a.all { display: block; color: var(--green); font-size: 12.5px; padding: 10px 14px; }
   .suggest .none { padding: 10px 14px; color: var(--dim); font-size: 12.5px; }
@@ -332,6 +439,7 @@ const CSS = String.raw`
   .ring-head { background: var(--panel-2); padding: 8px 10px; display: grid; gap: 1px; text-decoration: none; color: inherit; min-width: 0; } .ring-head:hover { background: var(--panel); }
   .ring-head .k { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; } .ring-head b { font-family: Geist, sans-serif; font-size: 20px; font-weight: 600; line-height: 1.15; } .ring-head .s { font-size: 11.5px; color: var(--dim); line-height: 1.4; }
   .feed a.row { text-decoration: none; color: inherit; cursor: pointer; }
+  /* An inset box-shadow with no blur and no offset is a 3px bar on a row's edge, not a shadow: it takes no room in the grid or the table, where a border would. */
   tr.project-row td { background: var(--panel-2); } tr.project-row td:first-child { box-shadow: inset 3px 0 0 var(--green); } .feed a.row:hover .what { color: var(--text); }
   .charts.three { grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); }
   .charts.three .chart { display: flex; flex-direction: column; } .charts.three .chart > .mini { margin-top: auto; }
@@ -412,7 +520,7 @@ const CSS = String.raw`
   .panel table { font-size: 13px; } .panel th, .panel td { padding: 6px 8px; }
   .wcards { display: grid; gap: 10px; }
   .wcard { border: 1px solid var(--line); background: var(--panel-2); padding: 10px 12px; display: grid; grid-template-columns: auto 1fr auto; gap: 2px 12px; align-items: center; font-size: 13px; }
-  .wcard .led { width: 9px; height: 9px; border-radius: 50%; background: var(--dim); grid-row: span 2; } .wcard .led.on { background: var(--green); } .wcard .led.busy { background: var(--blue); }
+  .wcard .led { width: 9px; height: 9px; background: var(--dim); grid-row: span 2; } .wcard .led.on { background: var(--green); } .wcard .led.busy { background: var(--blue); }
   .wcard b { font-weight: 500; } .wcard .m { font-size: 12px; color: var(--dim); grid-column: 2; } .wcard .pill { grid-row: span 2; }
   .small-btn { background: var(--panel-2); border: 1px solid var(--line); color: var(--text); padding: 3px 9px; font: inherit; font-size: 12.5px; cursor: pointer; text-decoration: none; } .small-btn:hover { border-color: var(--green); }
 
@@ -421,7 +529,7 @@ const CSS = String.raw`
   .ticker .row { display: grid; grid-template-columns: 78px 92px 1fr auto; gap: 12px; align-items: baseline; animation: tick .5s ease-out; }
   .ticker .row .what { color: var(--blue); } .ticker .row .where { color: var(--dim); } .ticker .row .when { color: var(--dim); font-size: 12px; white-space: nowrap; }
   .ticker .head { display: flex; justify-content: space-between; font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); border-bottom: 1px solid var(--line); padding-bottom: 6px; margin-bottom: 4px; }
-  .live { color: var(--green); display: inline-flex; align-items: center; gap: 6px; } .live i { width: 7px; height: 7px; border-radius: 50%; background: var(--green); animation: pulse 2.4s ease-out infinite; }
+  .live { color: var(--green); display: inline-flex; align-items: center; gap: 6px; } .live i { width: 7px; height: 7px; background: var(--green); animation: op-pulse 1.6s ease-in-out infinite; }
   @keyframes tick { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
   /* The Pool's feed: one line per event, the newest on top, cut at the box's edge (the full text on hover and on click). */
   .feed { display: grid; gap: 0; font-size: 12.5px; }
@@ -457,7 +565,7 @@ const CSS = String.raw`
   .ev { border: 1px solid var(--line); background: var(--panel); margin-top: 10px; } .ev summary { cursor: pointer; padding: 10px 14px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 13px; list-style: none; } .ev summary::-webkit-details-marker { display: none; } .ev summary::before { content: "▸"; color: var(--dim); } .ev[open] summary::before { content: "▾"; } .ev .body { padding: 0 14px 14px; }
   .ev-table { width: 100%; font-size: 12.5px; } .ev-table th, .ev-table td { padding: 5px 8px; vertical-align: top; } .ev pre.code { white-space: pre; line-height: 1.5; max-height: 640px; overflow: auto; } .ev pre .ln { display: inline-block; width: 3ch; margin-right: 12px; text-align: right; color: var(--dim); user-select: none; }
   /* Decisions ask in the dashboard: one dialog, and a toast that says what happened. */
-  dialog.ask { border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 0; width: min(520px, calc(100vw - 32px)); box-shadow: 0 24px 60px rgba(0,0,0,.5); } dialog.ask::backdrop { background: rgba(10, 11, 16, .72); }
+  dialog.ask { border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 0; width: min(520px, calc(100vw - 32px)); } dialog.ask::backdrop { background: var(--scrim); }
   dialog.ask form { padding: 20px 22px; display: grid; gap: 12px; } dialog.ask h3 { margin: 0; font-family: Geist, sans-serif; font-size: 17px; } dialog.ask .t { margin: 0; font-size: 13.5px; color: var(--muted); } dialog.ask textarea { width: 100%; box-sizing: border-box; background: var(--bg-deep); color: var(--text); border: 1px solid var(--line); padding: 8px 10px; font: 13px "JetBrains Mono", monospace; resize: vertical; }
   dialog.ask .val { display: flex; gap: 8px; align-items: stretch; } dialog.ask .val code { flex: 1; min-width: 0; overflow-wrap: anywhere; background: var(--bg-deep); border: 1px solid var(--line); padding: 8px 10px; font: 12.5px "JetBrains Mono", monospace; color: var(--text); } dialog.ask .row .grow { flex: 1; } dialog.ask .val .take { white-space: nowrap; } dialog.ask button.alt.danger { border-color: var(--red); color: var(--red); }
   dialog.ask .err { margin: 0; font-size: 12.5px; color: var(--red); } dialog.ask label.pick { display: grid; gap: 4px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; } dialog.ask label.pick select { width: 100%; box-sizing: border-box; background: var(--bg-deep); color: var(--text); border: 1px solid var(--line); padding: 7px 10px; font: 13px "JetBrains Mono", monospace; text-transform: none; letter-spacing: 0; } dialog.ask .row { display: flex; justify-content: flex-end; gap: 8px; } dialog.ask button.danger { border-color: var(--red); color: var(--red); } dialog.ask button.ghost { color: var(--muted); }
@@ -493,7 +601,7 @@ const CSS = String.raw`
   .headc .n { display: flex; justify-content: space-between; align-items: baseline; } .headc .n b { font-family: Geist, sans-serif; font-size: 17px; } .headc .m { color: var(--dim); font-size: 12px; } .headc .acts { display: flex; gap: 6px; margin-top: 4px; }
   .svc { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); margin: 0 0 36px; }
   .svc div { background: var(--panel); padding: 12px 14px; display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; align-items: center; font-size: 13px; }
-  .svc .led { width: 9px; height: 9px; border-radius: 50%; background: var(--dim); grid-row: span 2; } .svc .led.ok { background: var(--green); animation: pulse 2.4s ease-out infinite; } .svc .led.warn { background: var(--amber); } .svc .led.error { background: var(--red); }
+  .svc .led { width: 9px; height: 9px; background: var(--dim); grid-row: span 2; } .svc .led.ok { background: var(--green); animation: op-pulse 1.6s ease-in-out infinite; } .svc .led.warn { background: var(--amber); } .svc .led.error { background: var(--red); }
   .svc span { grid-column: 2; color: var(--dim); font-size: 12px; }
   .feeds { display: grid; gap: 8px; margin-top: 8px; } .feed { display: grid; grid-template-columns: 1fr; gap: 1px; font-size: 12.5px; border-bottom: 1px solid var(--line); padding-bottom: 6px; } .feed span { color: var(--muted); } .feed:last-child { border-bottom: 0; }
 
@@ -547,7 +655,7 @@ const CSS = String.raw`
   .doc-sec { border: 1px solid var(--line); background: var(--panel); padding: 18px 20px; margin-bottom: 16px; } .doc-sec h3:first-child { margin-top: 0; }
   .hits { display: grid; gap: 8px; } .hit { border: 1px solid var(--line); background: var(--panel); padding: 12px 14px; cursor: pointer; } .hit:hover { border-color: var(--green); }
   .hit .ch { font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--green); } .hit b { display: block; margin: 2px 0; } .hit span { font-size: 13px; color: var(--muted); }
-  mark { background: rgba(224,175,104,.35); color: var(--text); padding: 0 2px; }
+  mark { background: color-mix(in srgb, var(--amber) 35%, transparent); color: var(--text); padding: 0 2px; }
   .stepper { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin: 0 0 12px; }
   .stepper button { background: var(--panel-2); color: var(--muted); border: 1px solid var(--line); padding: 8px 10px; font: inherit; font-size: 13px; cursor: pointer; text-align: left; display: grid; gap: 2px; } .stepper button small { color: var(--dim); font-size: 11px; }
   .stepper button.on { border-color: var(--green); color: var(--text); } .stepper button.on small { color: var(--green); }
@@ -576,6 +684,10 @@ const CSS = String.raw`
   button[disabled], select[disabled], input[disabled], textarea[disabled], a.disabled { opacity: .45; cursor: not-allowed; }
   button[disabled]:hover, a.disabled:hover { border-color: var(--line); text-decoration: none; }
   .decide { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  /* The shell's own buttons, the decision dialog's and the Decision cell's, are drawn in the palette's names: left to the browser, a light page drew them in its own light grey with a black outset border, a dark one in its grey. :where() keeps the rule at an element's weight, so a table's smaller buttons (table button) and the dialog's danger and ghost still win. The dialog's confirm is its primary, in green. */
+  :where(dialog.ask, .decide) button { background: var(--panel-2); border: 1px solid var(--line); color: var(--text); padding: 5px 12px; font: inherit; font-size: 13px; cursor: pointer; }
+  :where(dialog.ask, .decide) button:hover { border-color: var(--green); }
+  dialog.ask button[type="submit"]:not(.danger) { background: var(--green); border-color: var(--green); color: var(--green-ink); } dialog.ask button[type="submit"]:not(.danger):hover { filter: brightness(1.08); }
   @media (max-width: 720px) {
     .hero h1 { font-size: 24px; } .hrow { grid-template-columns: 110px 1fr 46px; }
     .ticker .row { grid-template-columns: 1fr; gap: 1px; padding-bottom: 6px; border-bottom: 1px solid var(--line); } .ticker .row .when { font-size: 11px; }
@@ -1305,6 +1417,14 @@ export interface PageOptions {
    * encodes it once, as a query value.
    */
   path: string;
+  /**
+   * The page is drawn with the v1 kit (pages/kit.ts): the frame links the
+   * kit's stylesheet (its primitives and icons, one immutable file) after
+   * its own CSS and puts the kit's helpers (lucide(), agentMark(),
+   * countUp(), the code well's copy) in the page's script. A page that is
+   * not pays nothing for it: no request, no bytes.
+   */
+  kit?: boolean;
 }
 
 /** Four doors — use it, contribute to it, maintain it, watch it run. Everything else, the documentation included, is one link away in the footer. */
@@ -1369,9 +1489,14 @@ export function workerPanels(kinds: { kind: WorkerKind; blurb: string; hidden?: 
 
 const LICENSE_URL = "https://github.com/firemanxbr/omarchy-pool/blob/main/LICENSE";
 
-/** One badge in the footer: this is built for Omarchy, and the link goes there. */
+/**
+ * One badge in the footer: this is built for Omarchy, and the link goes
+ * there. The badge is the brand's, drawn in the dark palette's names on
+ * either theme — data-theme="dark" pins its tokens — so it reads the same on
+ * a light page, as omarchy.org's own mark does.
+ */
 const BUILT_FOR_OMARCHY =
-  '<svg viewBox="0 0 156 20" width="156" height="20" role="img" aria-label="built for Omarchy"><rect width="86" height="20" fill="#2a2e3f"/><rect x="86" width="70" height="20" fill="#9ece6a"/><rect x="6" y="5" width="10" height="10" fill="#9ece6a"/><rect x="9" y="8" width="4" height="4" fill="#2a2e3f"/><text x="21" y="14" font-family="JetBrains Mono, monospace" font-size="10.5" fill="#c0caf5">built for</text><text x="121" y="14" text-anchor="middle" font-family="Geist, sans-serif" font-size="11" font-weight="700" fill="#0c0e10">Omarchy</text></svg>';
+  '<svg data-theme="dark" viewBox="0 0 156 20" width="156" height="20" role="img" aria-label="built for Omarchy"><rect width="86" height="20" fill="var(--line)"/><rect x="86" width="70" height="20" fill="var(--green)"/><rect x="6" y="5" width="10" height="10" fill="var(--green)"/><rect x="9" y="8" width="4" height="4" fill="var(--line)"/><text x="21" y="14" font-family="JetBrains Mono, monospace" font-size="10.5" fill="var(--text)">built for</text><text x="121" y="14" text-anchor="middle" font-family="Geist, sans-serif" font-size="11" font-weight="700" fill="var(--green-ink)">Omarchy</text></svg>';
 
 export type { DocKey } from "./docs-tree";
 
@@ -1478,10 +1603,12 @@ export function page(o: PageOptions): string {
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="manifest" href="/site.webmanifest">
-<meta name="theme-color" content="#1a1b26">${analyticsTag(v)}
+<meta name="theme-color" content="${PALETTE.bg.dark}" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="${PALETTE.bg.light}" media="(prefers-color-scheme: light)">
+<script>${THEME_BOOT}</script>${analyticsTag(v)}
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Geist:wght@500;600;700&display=swap">
-<style>${CSS}</style>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Geist:wght@500;600;700&display=swap">
+<style>${CSS}</style>${o.kit ? `\n<link rel="stylesheet" href="${KIT_SHEET_PATH}">` : ""}
 </head>
 <body>
 <div id="progress"></div>
@@ -1510,7 +1637,7 @@ ${body}
 (function () {
   // The footer lights the entry the reader is on or under: /package/<name> is Packages, /docs/<chapter> is Docs, /diff is the Journal's; a build lights nothing here, its door is Review.
   document.querySelectorAll("footer .more a").forEach(function (a) { var href = a.getAttribute("href"), here = location.pathname; if (here === href || here.indexOf(href + "/") === 0 || (href === "/packages" && here.indexOf("/package/") === 0) || (href === "/journal" && here === "/diff")) a.classList.add("active"); });
-${HELPERS.split("__POOL_URL__").join(pool).split("__RINGS_TEXT__").join(JSON.stringify(RING_TEXT)).split("__WICON__").join(JSON.stringify(WORKER_ICONS)).split("__LATE_AFTER_HOURS__").join(String(LATE_AFTER_HOURS)).split("__PROMISED_RINGS__").join(JSON.stringify(RINGS_BY_STABILITY.filter((r) => (PROMOTED_RINGS as readonly string[]).includes(r)))).split("__ARCHES__").join(JSON.stringify(REPO_ARCHES)).split("__SEVERITIES__").join(JSON.stringify(SEVERITIES)).split("__WORKER_ALIVE_MINUTES__").join(String(WORKER_ALIVE_MINUTES))}
+${HELPERS.split("__POOL_URL__").join(pool).split("__RINGS_TEXT__").join(JSON.stringify(RING_TEXT)).split("__WICON__").join(JSON.stringify(WORKER_ICONS)).split("__LATE_AFTER_HOURS__").join(String(LATE_AFTER_HOURS)).split("__PROMISED_RINGS__").join(JSON.stringify(RINGS_BY_STABILITY.filter((r) => (PROMOTED_RINGS as readonly string[]).includes(r)))).split("__ARCHES__").join(JSON.stringify(REPO_ARCHES)).split("__SEVERITIES__").join(JSON.stringify(SEVERITIES)).split("__WORKER_ALIVE_MINUTES__").join(String(WORKER_ALIVE_MINUTES))}${o.kit ? KIT_HELPERS : ""}
 ${o.script ?? ""}
 ${docsSearch}
 })();

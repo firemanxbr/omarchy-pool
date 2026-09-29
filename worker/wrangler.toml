@@ -23,10 +23,12 @@ routes = [
 
 # The setup script (src/setup.sh) is served as text: `curl …/setup | sudo bash`;
 # the documentation's chapters (src/docs/*.md) are bundled the same way and
-# rendered by the dashboard (their diagrams are drawn there, pages/doc-diagrams.ts).
+# rendered by the dashboard (their diagrams are drawn there, pages/doc-diagrams.ts);
+# so are the icons (src/assets/icons/*/*.svg), which pages/kit.ts serves in one
+# stylesheet.
 [[rules]]
 type = "Text"
-globs = ["**/*.sh", "**/*.md", "**/*.yml"]
+globs = ["**/*.sh", "**/*.md", "**/*.yml", "**/*.svg"]
 fallthrough = true
 
 [observability]
