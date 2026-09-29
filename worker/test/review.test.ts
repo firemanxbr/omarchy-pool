@@ -23,7 +23,9 @@ import { beforeAll, describe, expect, it } from "vitest";
 import * as openpgp from "openpgp";
 import worker from "../src/index";
 import { sha256Hex } from "../src/routes/contributors";
-import { ADOPT_SQL, CLAIM_ROWS_SQL, CLAIM_SQL, RELEASE_SQL, REVIEW_SQL, ROWS_SQL } from "../src/routes/review";
+import { CLAIM_ROWS_SQL, CLAIM_SQL, RELEASE_SQL, REVIEW_SQL, ROWS_SQL } from "../src/routes/review";
+import { ADOPT_SQL, MAINTAINER_SQL } from "../src/routes/adopt";
+import { maintenanceOf } from "../src/routes/users";
 import { putRecord } from "../src/record";
 import { ownScriptOf } from "./fixture";
 
@@ -103,6 +105,13 @@ const record = async (url: string) => {
   let verified = false;
   try { await v.signatures[0].verified; verified = true; } catch { verified = false; }
   return { doc: JSON.parse(new TextDecoder().decode(bytes)), verified };
+};
+/** A package a ring serves, the way the pool holds one: an object of it, a member of edge. */
+const serve = async (name: string, source = "factory") => {
+  const id = (await env.DB.prepare("INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, manifest_json, source) VALUES (?, ?, '1.0-1', 'x86_64', ?, 1, 1, '{}', ?) RETURNING id")
+    .bind(await sha256Hex(`${source}/${name}`), name, `${name}-1.0-1-x86_64.pkg.tar.zst`, source)
+    .first<{ id: number }>())!.id;
+  await env.DB.prepare("INSERT INTO ring_packages (ring, package_id) VALUES ('edge', ?)").bind(id).run();
 };
 
 describe("no maintainer reviews what they asked for", () => {
@@ -464,11 +473,13 @@ describe("who asked for a build", () => {
     const id = await ready("moved");
     await env.DB.prepare("UPDATE contributors SET role = 'maintainer' WHERE login = 'alice'").run();
     try {
-      // Unmaintained the way updates.ts leaves a package, with alice's build still staged: an adoption waits for a maintainer's decision on it.
+      // Unmaintained the way updates.ts leaves a package — its approved version still in edge — with alice's build still staged: an adoption waits for a maintainer's decision on it.
+      await serve("moved");
       await env.DB.prepare("UPDATE factory_packages SET status = 'unmaintained' WHERE name = 'moved'").run();
       const adopt = await call("POST", "/factory/packages/moved/adopt", {}, "omc_m1");
       expect([adopt.status, adopt.json.error]).toEqual([409, `build #${id} of moved is staged, alice's: a maintainer decides it before anyone adopts moved`]);
       expect(await env.DB.prepare("SELECT owner, status FROM factory_packages WHERE name = 'moved'").first()).toEqual({ owner: "alice", status: "unmaintained" });
+      expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM package_maintainers WHERE name = 'moved'").first()).toEqual({ n: 0 });
       // The registration moved to dave another way (a registration taken over): alice asked for the build in review, and it is still not hers to decide.
       await env.DB.prepare("UPDATE factory_packages SET owner = 'dave', status = 'staged' WHERE name = 'moved'").run();
       expect((await claim(id, "omc_alice")).json).toEqual({ error: OWNER("moved"), code: "conflict_of_interest" });
@@ -499,30 +510,58 @@ describe("the record", () => {
 });
 
 describe("adopt", () => {
-  it("a maintainer takes a package its owner left unmaintained: theirs, where it stood before, signed and journaled; refused to anyone else, to a package that has a maintainer, and twice", async () => {
+  it("is one door: on a package a ring serves the maintainer becomes its maintainer in the pool, and a registration its owner left unmaintained is theirs too — signed, journaled once, taken once; refused to anyone else, to its owner, to a package with a maintainer and to one in no ring", async () => {
     await env.DB.prepare(`INSERT INTO factory_packages (name, owner, url, arches, status, detail) VALUES
       ('orphan', 'dave', 'https://orphan.example', '["x86_64"]', 'unmaintained', 'no worker built its bump in 30 days'),
-      ('kept', 'dave', 'https://kept.example', '["x86_64"]', 'published', '1.0-1 in edge')`).run();
+      ('left', 'm2', 'https://left.example', '["x86_64"]', 'unmaintained', 'no worker built its bump in 30 days'),
+      ('idle', 'dave', 'https://idle.example', '["x86_64"]', 'unmaintained', 'no worker built its bump in 30 days')`).run();
+    // orphan and left are in edge, as a package left unmaintained is: its approved version stays served, the approval standing. idle never reached a ring. tzdata is synced.
+    for (const name of ["orphan", "left"]) await serve(name);
+    await env.DB.prepare("INSERT INTO approvals (task_id, name, arch, version, decision, by, note) VALUES (0, 'orphan', 'x86_64', '1.0-1', 'approved', 'm2', 'reads well'), (0, 'left', 'x86_64', '1.0-1', 'approved', 'm1', 'reads well')").run();
+    await serve("tzdata", "core");
     // The No maintainer tab's own read, asked for when the list of all says it was truncated: the unmaintained registrations alone, paged the same way.
     const unmaintained = (await call("GET", "/factory/packages?status=unmaintained")).json;
     expect(unmaintained.truncated).toBe(false);
-    expect(unmaintained.packages.map((p: { name: string }) => p.name)).toContain("orphan");
+    expect(unmaintained.packages.map((p: { name: string }) => p.name)).toEqual(expect.arrayContaining(["orphan", "left", "idle"]));
     expect(unmaintained.packages.every((p: { status: string }) => p.status === "unmaintained")).toBe(true);
+    // Refused: nobody signed in, a contributor, the registration's own owner (a maintainer too: nobody looks after their own request), a package in no ring.
     expect((await call("POST", "/factory/packages/orphan/adopt", {})).status).toBe(401);
-    expect((await call("POST", "/factory/packages/orphan/adopt", {}, "omc_bob")).json).toEqual({ error: "a maintainer decides", code: "maintainer_only" });
-    expect((await call("POST", "/factory/packages/kept/adopt", {}, "omc_m1")).json.error).toBe("kept has a maintainer: it is published, dave's");
-    expect((await call("POST", "/factory/packages/nothing-here/adopt", {}, "omc_m1")).status).toBe(404);
+    expect(await call("POST", "/factory/packages/orphan/adopt", {}, "omc_bob")).toEqual({ status: 403, json: { error: "a maintainer adopts a package", code: "maintainer_only" } });
+    expect(await call("POST", "/factory/packages/left/adopt", {}, "omc_m2")).toEqual({ status: 403, json: { error: "m2 requested left; another maintainer looks after it — build it to take it up again", code: "conflict_of_interest" } });
+    for (const name of ["idle", "nothing-here"]) expect(await call("POST", `/factory/packages/${name}/adopt`, {}, "omc_m1"), name).toEqual({ status: 404, json: { error: `${name} is in no ring: a package is adopted once the pool serves it` } });
+    expect(await env.DB.prepare("SELECT owner, status FROM factory_packages WHERE name IN ('left', 'idle') ORDER BY name").all().then((r) => r.results)).toEqual([{ owner: "dave", status: "unmaintained" }, { owner: "m2", status: "unmaintained" }]);
+
+    // A synced package: its maintainer of record, and nothing else — no registration, no record, one line in the journal.
+    const synced = await call("POST", "/factory/packages/tzdata/adopt", {}, "omc_m1");
+    expect(synced).toMatchObject({ status: 200, json: { adopted: "tzdata", by: "m1", via: "token", registration: null } });
+    expect((await line("adopt", "tzdata"))).toEqual({ summary: "tzdata adopted by m1: its maintainer in the pool", payload: { name: "tzdata", by: "m1", source: "core", via: "token", registration: null } });
+    // Once: another maintainer is told whose it is.
+    const again = await call("POST", "/factory/packages/tzdata/adopt", {}, "omc_m2");
+    expect(again.status).toBe(409);
+    expect(again.json.error).toMatch(/^tzdata is maintained by m1 \(since /);
+
+    // An unmaintained registration: its approver is no maintainer of it any more (its owner left it), so two maintainers at once, the approver among them, and one takes it — its maintainer of record and its registration, where it stood before: approved — and the other is told.
     const [a, b] = await Promise.all([call("POST", "/factory/packages/orphan/adopt", { reason: "I use it every day" }, "omc_m1"), call("POST", "/factory/packages/orphan/adopt", {}, "omc_m2")]);
-    const won = a.status === 200 ? a : b;
     expect([a.status, b.status].sort()).toEqual([200, 409]);
+    const won = a.status === 200 ? a : b;
     const by = won === a ? "m1" : "m2";
-    expect(won.json).toMatchObject({ adopted: "orphan", from: "dave", by, status: "registered", via: "token" });
-    expect(await env.DB.prepare("SELECT owner, status FROM factory_packages WHERE name = 'orphan'").first()).toEqual({ owner: by, status: "registered" });
+    expect(won.json).toMatchObject({ adopted: "orphan", by, via: "token", registration: { from: "dave", status: "approved" } });
+    expect(await env.DB.prepare("SELECT owner, status FROM factory_packages WHERE name = 'orphan'").first()).toEqual({ owner: by, status: "approved" });
+    expect((await env.DB.prepare("SELECT login FROM package_maintainers WHERE name = 'orphan'").all()).results).toEqual([{ login: by }]);
     const rec = await record(won.json.record);
     expect(rec.verified).toBe(true);
-    expect(rec.doc).toMatchObject({ decision: "adopt", name: "orphan", from: "dave", owner: by, by, via: "token", agent: null });
-    expect((await line("review", "orphan")).summary).toMatch(new RegExp(`^orphan: adopted by ${by} from dave, who left it unmaintained`));
-    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM events WHERE kind = 'review' AND json_extract(payload, '$.name') = 'orphan'").first()).toEqual({ n: 1 });
+    expect(rec.doc).toMatchObject({ decision: "adopt", name: "orphan", from: "dave", owner: by, maintainer: by, by, via: "token", agent: null });
+    // One adopt line that says it took both, with who and from whom — and no line of any other kind about it.
+    const took = await line("adopt", "orphan");
+    expect(took.summary).toMatch(new RegExp(`^orphan adopted by ${by}: its maintainer in the pool, and its registration, taken from dave, who left it unmaintained`));
+    expect(took.payload).toMatchObject({ name: "orphan", by, source: "factory", via: "token", registration: { from: "dave", status: "approved" }, record: won.json.record });
+    expect(await env.DB.prepare("SELECT kind, COUNT(*) AS n FROM events WHERE json_extract(payload, '$.name') = 'orphan' GROUP BY kind").all().then((r) => r.results)).toEqual([{ kind: "adopt", n: 1 }]);
+    // The package's page names the adopter as its maintainer, for either path: the server's word it reads (maintenance on GET /package/:name).
+    for (const [name, source, who] of [["orphan", "factory", by], ["tzdata", "core", "m1"]]) expect((await maintenanceOf(env, name, source, undefined)).maintainer, name).toMatchObject({ login: who, adopted: true });
+    // left is still unmaintained: nobody looks after it, the approval it is served under notwithstanding.
+    expect((await maintenanceOf(env, "left", "factory", undefined)).maintainer).toBeNull();
+    // The adopter is its owner now, as its requester was: the one door refuses them as it refuses a requester.
+    expect((await call("POST", "/factory/packages/orphan/adopt", {}, `omc_${by}`)).json).toMatchObject({ code: "conflict_of_interest" });
   });
 });
 
@@ -550,7 +589,8 @@ describe("a decision's round", () => {
 describe("the new doors' reads", () => {
   it("are led by a key — the handlers' own statements: the claim's rows and the release by their ids, the claim by the name, a decision's round by the approvals' task index, the adoption by the registration's key", async () => {
     const plan = async (sql: string) => {
-      const n = (sql.match(/\?/g) ?? []).length;
+      // A statement that numbers its parameters (?1, ?2) takes each once however often it reads it.
+      const numbered = sql.match(/\?\d+/g), n = numbered ? new Set(numbered).size : (sql.match(/\?/g) ?? []).length;
       const args = Array.from({ length: n }, () => JSON.stringify([1, 2]));
       return (await env.DB.prepare(`EXPLAIN QUERY PLAN ${sql}`).bind(...args).all<{ detail: string }>()).results.map((r) => r.detail).join("; ");
     };
@@ -561,6 +601,7 @@ describe("the new doors' reads", () => {
       ["a decision's review", REVIEW_SQL, [/SEARCH a USING (COVERING )?INDEX idx_approvals_task \(task_id=\?\)/]],
       ["a decision's rows", ROWS_SQL, [/SEARCH a USING (COVERING )?INDEX idx_approvals_task \(task_id=\?\)/, /SEARCH reviews USING COVERING INDEX idx_reviews_name \(name=\?\)/]],
       ["the adoption", ADOPT_SQL, [/SEARCH factory_packages USING INDEX sqlite_autoindex_factory_packages_1 \(name=\?\)/, /SEARCH t USING INDEX idx_build_tasks_name \(name=\?\)/, /SEARCH a USING INDEX idx_approvals_task \(task_id=\?\)/]],
+      ["the adoption's maintainer of record", MAINTAINER_SQL, [/SEARCH factory_packages (EXISTS )?USING INDEX sqlite_autoindex_factory_packages_1 \(name=\?\)/]],
       ["a worker's agent", "SELECT agent FROM build_workers WHERE id = ?", [/SEARCH build_workers USING INDEX sqlite_autoindex_build_workers_1 \(id=\?\)/]],
       ["the record's request", "SELECT request_id FROM factory_packages WHERE name = ?", [/SEARCH factory_packages USING INDEX sqlite_autoindex_factory_packages_1 \(name=\?\)/]],
     ];

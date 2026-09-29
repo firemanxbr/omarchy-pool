@@ -75,7 +75,7 @@ import { maintainersOf, GOVERNANCE_FILE } from "./governance";
 import { BUDGET_CAP_USD, BUDGET_GUARD_USD, BUDGET_WARN_USD, readGuard } from "./cost";
 import { handleQueueJob } from "./jobs";
 import { isMaintainer } from "./routes/contributors";
-import { handleReviewList, handleApprove, handleReject, handleChanges, handleRelease, handleAdopt, handleApprovals, handleProjectBuild, handleWithdraw, handleTaskCan, cancelByHand } from "./routes/review";
+import { handleReviewList, handleApprove, handleReject, handleChanges, handleRelease, handleApprovals, handleProjectBuild, handleWithdraw, handleTaskCan, cancelByHand } from "./routes/review";
 import { handleBlockContributor, handleUnblockContributor, handleBlockPackage, handleUnblockPackage, handleBlocks } from "./routes/blocks";
 import { handleAdoptPackage } from "./routes/adopt";
 import { handleAuthStart, handleAuthCallback, handleLogout } from "./routes/auth";
@@ -333,11 +333,12 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
     if (m[1] === "contributors") return m[3] === "block" ? handleBlockContributor(c, m[2], request, env) : handleUnblockContributor(c, m[2], request, env);
     return m[3] === "block" ? handleBlockPackage(c, m[2], request, env) : handleUnblockPackage(c, m[2], request, env);
   }
-  // Maintainers: a package the pool serves adopted — its maintainer in the pool (routes/adopt.ts).
+  // Maintainers: Adopt, the one door the package page and Review's No maintainer tab post to — the package's maintainer in the pool,
+  // and a registration its owner left unmaintained taken with it (routes/adopt.ts). The only route of the path.
   if ((m = path.match(/^\/factory\/packages\/([A-Za-z0-9@._+-]+)\/adopt$/)) && method === "POST") {
     const c = await contributorOf(request, env);
     if (!c) return nobody();
-    return handleAdoptPackage(c, m[1], env);
+    return handleAdoptPackage(c, m[1], request, env);
   }
   // Maintainers: a record withdrawn from the public bucket, a signed tombstone in its place.
   if (method === "POST" && path === "/factory/record/withdraw") {
@@ -363,8 +364,6 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
     if ((m = path.match(/^\/factory\/packages\/([a-z0-9@._+-]+)\/build$/)) && method === "POST") return handleBuildPackage(c, m[1], request, env);
     if ((m = path.match(/^\/factory\/packages\/([a-z0-9@._+-]+)$/)) && method === "DELETE") return handleDeletePackage(c, m[1], env);
     if ((m = path.match(/^\/factory\/packages\/([a-z0-9@._+-]+)\/category$/)) && method === "POST") return handleSetCategory(c, m[1], request, env);
-    // Review's No maintainer tab (#247): a maintainer takes a package its owner left unmaintained.
-    if ((m = path.match(/^\/factory\/packages\/([a-z0-9@._+-]+)\/adopt$/)) && method === "POST") return handleAdopt(c, m[1], request, env);
     if (method === "POST" && path === "/factory/workers") return handleRegisterWorker(c, request, env);
     if ((m = path.match(/^\/factory\/packages\/([A-Za-z0-9@._+-]+)\/builds\/(\d+)$/)) && method === "DELETE") return handleDequeueBuild(c, m[1], Number(m[2]), env);
     if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)$/)) && method === "DELETE") return handleRevokeWorker(c, m[1], env);

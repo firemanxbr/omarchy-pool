@@ -342,7 +342,7 @@ const SCRIPT = String.raw`
     return (BLOCKS.packages || []).map(function (b) { return row(b.name, pkgHref(b.name, null, null), "", blockSub(b), "", since(b.blocked_at), liftBtn("packages", b.name, b)); })
       .concat((BLOCKS.contributors || []).map(function (b) { return row("@" + b.login, userHref(b.login), "contributor", blockSub(b), "", since(b.blocked_at), liftBtn("contributors", b.login, b)); }));
   }
-  // No maintainer: a package its owner left unmaintained — no build of its bump for thirty days — for a maintainer to adopt. From the registry's list, or — when that list came back full, and an older registration could be missing from it — from the read of the unmaintained ones.
+  // No maintainer: a package its owner left unmaintained — no build of its bump for thirty days — for a maintainer to adopt. From the registry's list, or — when that list came back full, and an older registration could be missing from it — from the read of the unmaintained ones. Adopt is the one door (routes/adopt.ts), the package page's too: on a package a ring serves it makes the adopter its maintainer in the pool and gives them the registration; where it is refused (a package in no ring, a build of it still open), the toast says the server's reason — the page guesses no ring.
   function unmaintained() { var list = UNMAINTAINED || REGISTRY; return list ? (list.packages || []).filter(function (p) { return p.status === "unmaintained" && !p.blocked_at; }) : null; }
   function unmaintainedRows() {
     var list = unmaintained(); if (!list) return null;
@@ -828,7 +828,7 @@ const SCRIPT = String.raw`
     });
   }
   function adopt(name) {
-    ask({ title: "Adopt " + name + "?", text: "Its registration becomes yours: its bumps come to your workers, and another maintainer reviews them. On the record with your name.", input: "optional", placeholder: "a note for the record (optional)", confirm: "Adopt" }).then(function (why) {
+    ask({ title: "Adopt " + name + "?", text: "You become its maintainer in the pool, and its registration becomes yours: its bumps come to your workers, and another maintainer reviews them. On the record with your name.", input: "optional", placeholder: "a note for the record (optional)", confirm: "Adopt" }).then(function (why) {
       if (why === null) return;
       api("POST", API + "/packages/" + encodeURIComponent(name) + "/adopt", { reason: why || undefined }).then(function (d) { if (d.error) toast(esc(d.error), "error"); else toast("You now maintain " + esc(name) + " in the pool."); load(); }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
     });
@@ -975,7 +975,7 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // No maintainer: the registrations left unmaintained, Adopt for a maintainer; the fixture has none, so the act answers what a maintainer adopting a package that has one gets.
+    // No maintainer: the registrations left unmaintained, Adopt for a maintainer — the one Adopt, the package page's too (routes/adopt.ts); the fixture has none, so the act answers what a maintainer adopting a package that has one gets: ours, served under m2's approval.
     id: "review.unmaintained",
     page: "/review",
     anchor: ['data-tab="unmaintained"'],
@@ -984,7 +984,7 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
       { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.name", "packages.0.status", "packages.0.owner", "packages.0.detail", "packages.0.targets", "packages.0.updated_at", "packages.0.blocked_at"] },
       { path: "/api/v1/factory/packages?status=unmaintained", fields: ["packages"] },
     ],
-    acts: [{ method: "POST", path: `/api/v1/factory/packages/${F.factoryPkg}/adopt`, body: {}, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 409 } }],
+    acts: [{ method: "POST", path: `/api/v1/factory/packages/${F.publishedPkg}/adopt`, body: {}, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 409 } }],
     visible: EVERYONE,
   },
   {

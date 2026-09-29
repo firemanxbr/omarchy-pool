@@ -403,12 +403,12 @@ describe("Adopt: a package the pool serves gets its maintainer in the pool", () 
   it("is a maintainer's: nobody signed in, a contributor and the one who requested it are refused", async () => {
     expect((await call("POST", `/api/v1/factory/packages/${F.pkg}/adopt`, "", {})).status).toBe(401);
     const bob = await call("POST", `/api/v1/factory/packages/${F.pkg}/adopt`, "bob", {});
-    expect(bob).toMatchObject({ status: 403, json: { error: "a maintainer adopts a package" } });
+    expect(bob).toMatchObject({ status: 403, json: { error: "a maintainer adopts a package", code: "maintainer_only" } });
     // alice as a maintainer, on her own request: never her own.
     await env.DB.prepare("UPDATE contributors SET role = 'maintainer' WHERE login = 'alice'").run();
     const own = await call("POST", `/api/v1/factory/packages/${F.publishedPkg}/adopt`, "alice", {});
     await env.DB.prepare("UPDATE contributors SET role = 'contributor' WHERE login = 'alice'").run();
-    expect(own).toMatchObject({ status: 403, json: { error: `alice requested ${F.publishedPkg}; another maintainer looks after it` } });
+    expect(own).toMatchObject({ status: 403, json: { error: `alice requested ${F.publishedPkg}; another maintainer looks after it`, code: "conflict_of_interest" } });
   });
 
   it("is refused for a package no ring serves, and for one that has its maintainer", async () => {
@@ -427,7 +427,8 @@ describe("Adopt: a package the pool serves gets its maintainer in the pool", () 
     expect(took).toMatchObject({ status: 200, json: { adopted: F.pkg, by: F.m1 } });
     const line = await env.DB.prepare("SELECT kind, source, status, summary, payload FROM events WHERE kind = 'adopt' ORDER BY id DESC LIMIT 1").first<{ kind: string; source: string; status: string; summary: string; payload: string }>();
     expect(line).toMatchObject({ kind: "adopt", source: "core", status: "ok", summary: `${F.pkg} adopted by ${F.m1}: its maintainer in the pool` });
-    expect(JSON.parse(line!.payload)).toEqual({ name: F.pkg, by: F.m1, source: "core" });
+    // One door for both (#247): the line says it took the maintainer of record alone — no registration — and through which door.
+    expect(JSON.parse(line!.payload)).toEqual({ name: F.pkg, by: F.m1, source: "core", via: "web", registration: null });
     expect((await call("GET", `/api/v1/package/${F.pkg}?ring=stable&arch=${F.arch}&t=a1`)).json.maintenance.maintainer).toMatchObject({ login: F.m1, adopted: true });
     // Once: another maintainer is told whose it is.
     const again = await call("POST", `/api/v1/factory/packages/${F.pkg}/adopt`, "m2", {});
@@ -440,6 +441,38 @@ describe("Adopt: a package the pool serves gets its maintainer in the pool", () 
     expect(both.map((r) => r.status).sort()).toEqual([200, 409]);
     expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM package_maintainers WHERE name = ?").bind(F.pkg2).first<{ n: number }>())!.n).toBe(1);
     expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM events WHERE kind = 'adopt' AND json_extract(payload, '$.name') = ?").bind(F.pkg2).first<{ n: number }>())!.n).toBe(1);
+  });
+  it("pressed on a registration its owner left unmaintained, takes the registration with it: the one door Review's No maintainer tab posts to", async () => {
+    // ours, left unmaintained the way updates.ts leaves a package: edge still serves m2's approved build, and nobody builds its bumps — nobody looks after it.
+    // alice's build stays staged, the evidence the approved rebuild answered: it has served, and an adoption does not wait for it.
+    const before = await env.DB.prepare("SELECT owner, status, detail, updated_at FROM factory_packages WHERE name = ?").bind(F.publishedPkg).first<{ owner: string; status: string; detail: string | null; updated_at: string }>();
+    await env.DB.prepare("UPDATE factory_packages SET status = 'unmaintained' WHERE name = ?").bind(F.publishedPkg).run();
+    try {
+      const fresh = (p: string) => (p.startsWith("/api/v1/package/") || p.includes("/story") ? `${p}${p.includes("?") ? "&" : "?"}t=unmaintained` : p);
+      expect((await call("GET", `/api/v1/package/${F.publishedPkg}?ring=edge&arch=${F.arch}&t=left`)).json.maintenance.maintainer).toBeNull();
+      const p = await view(`/package/${F.publishedPkg}?ring=edge&arch=${F.arch}`, "m1", { functions: ["act"], fresh });
+      expect(p.nodes["#you"].innerHTML).toContain("Left unmaintained by");
+      expect(p.nodes["#you"].innerHTML).toContain('data-act="adopt"');
+      p.fn.act("adopt", "");
+      await until(() => p.nodes["#you"].innerHTML.includes("You adopted this package"));
+      expect(p.asked).toContain(`POST /api/v1/factory/packages/${F.publishedPkg}/adopt`);
+      expect(p.nodes["#you"].innerHTML).toContain("You adopted this package: its registration is yours, and its bumps come to your workers.");
+      expect(p.nodes["#you-who"].textContent).toBe("@m1 · maintainer");
+      // Its maintainer, adopted — and nobody named as having requested it who did not.
+      expect(p.nodes["#who"].innerHTML).toContain("@m1</a>");
+      expect(p.nodes["#who"].innerHTML).not.toContain("requested by");
+      // The server says the same: the registration m1's, where it stood before — published — and m1 its maintainer in the pool, on the page's data.
+      expect(await env.DB.prepare("SELECT owner, status FROM factory_packages WHERE name = ?").bind(F.publishedPkg).first()).toEqual({ owner: F.m1, status: "published" });
+      expect((await call("GET", `/api/v1/package/${F.publishedPkg}?ring=edge&arch=${F.arch}&t=took`)).json.maintenance.maintainer).toMatchObject({ login: F.m1, adopted: true });
+      const line = await env.DB.prepare("SELECT summary, payload FROM events WHERE kind = 'adopt' ORDER BY id DESC LIMIT 1").first<{ summary: string; payload: string }>();
+      expect(line!.summary).toBe(`${F.publishedPkg} adopted by ${F.m1}: its maintainer in the pool, and its registration, taken from ${F.owner}, who left it unmaintained`);
+      expect(JSON.parse(line!.payload)).toMatchObject({ name: F.publishedPkg, by: F.m1, source: "factory", via: "web", registration: { from: F.owner, status: "published" } });
+    } finally {
+      await env.DB.batch([
+        env.DB.prepare("UPDATE factory_packages SET owner = ?, status = ?, detail = ?, updated_at = ? WHERE name = ?").bind(before!.owner, before!.status, before!.detail, before!.updated_at, F.publishedPkg),
+        env.DB.prepare("DELETE FROM package_maintainers WHERE name = ?").bind(F.publishedPkg),
+      ]);
+    }
   });
 });
 

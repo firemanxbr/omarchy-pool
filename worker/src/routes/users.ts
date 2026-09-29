@@ -168,7 +168,10 @@ export async function handleUserCan(c: Contributor | null, login: string, env: E
  * Who stands behind a package: its packager upstream, and its maintainer
  * in the pool (#244) — the maintainer who adopted it (routes/adopt.ts),
  * else, for what the factory built, the one whose approval stands; a
- * synced package nobody adopted has none. For a factory package also its
+ * synced package nobody adopted has none, and neither has a registration
+ * its owner left unmaintained until a maintainer adopts it (#247: Review's
+ * No maintainer tab and the package page's Adopt are the one door, and
+ * what it answers 409 for is what this names). For a factory package also its
  * owner, its category, the maintainers, the last approval that stands — a
  * withdrawn one is not the approval the package is served under, so the
  * package page's "reviewed by" and the Packages table's approver never
@@ -192,6 +195,6 @@ export async function maintenanceOf(env: Env, name: string, source: string, pack
     approved_version: approval?.version ?? null,
     task: approval?.task_id ?? null,
   };
-  if (!adopted && approval) out.maintainer = { login: approval.by, since: approval.created_at, adopted: false };
+  if (!adopted && approval && pkg?.status !== "unmaintained") out.maintainer = { login: approval.by, since: approval.created_at, adopted: false };
   return out;
 }
