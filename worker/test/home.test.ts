@@ -239,9 +239,9 @@ describe("the Pool, drawn over the fixture", () => {
     await look(F.pulledPkg);
     expect(results()).toContain("factory · blocked");
 
-    // Nowhere: stable on both architectures, the name on each at the package page's address, then Request — the request form with the name — beside the whole search.
+    // Nowhere: stable on both architectures, the name on each at the package page's address, then Request — the Factory's request card with the name (#246) — beside the whole search.
     expect(await look("zzfoo")).toEqual([search("zzfoo"), search("zzfoo", other), ...REPO_ARCHES.map((a) => pkg("zzfoo", a))]);
-    expect(results()).toBe('<div class="none"><span>No “zzfoo” yet.</span><span class="go"><a href="/packages?q=zzfoo">Search all packages →</a><a href="/request?name=zzfoo">Request it →</a></span></div>');
+    expect(results()).toBe('<div class="none"><span>No “zzfoo” yet.</span><span class="go"><a href="/packages?q=zzfoo">Search all packages →</a><a href="/factory?name=zzfoo#request">Request it →</a></span></div>');
     expect(said()).toBe("No “zzfoo” yet: you can request it");
     // Words that are no pacman name: nothing to request, the whole search a link away.
     expect(await look("no such words")).toEqual([search("no such words"), search("no such words", other)]);

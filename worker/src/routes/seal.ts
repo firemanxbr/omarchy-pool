@@ -37,11 +37,18 @@ function upstreamOf(source: string, repoArch: string): { project: string; keyrin
 }
 
 interface PackageRow { id: number; sha256: string; name: string; version: string; arch: string; repo_arch: string; filename: string; source: string; has_signature: number; created_at: string; r2_key: string }
-interface TaskRow { id: number; name: string; arch: string; version: string | null; pkgbuild_ref: string; owner: string | null; trust: string; started_at: string | null; finished_at: string | null; duration_ms: number | null; attempts: number; result: string | null }
+interface TaskRow { id: number; name: string; arch: string; version: string | null; pkgbuild_ref: string; owner: string | null; trust: string; lease_owner: string | null; started_at: string | null; finished_at: string | null; duration_ms: number | null; attempts: number; result: string | null }
 
-async function builderOf(env: Env, task: number): Promise<{ worker: string | null; agent: string | null }> {
-  const ev = await env.DB.prepare("SELECT payload FROM events WHERE kind = 'build' AND status = 'ok' AND json_extract(payload, '$.task') = ? ORDER BY id DESC LIMIT 1").bind(task).first<{ payload: string }>();
-  const worker = ev ? ((JSON.parse(ev.payload) as { worker?: string }).worker ?? null) : null;
+/**
+ * The worker that built a task, and its agent. The task's row names the
+ * worker whose completion staged it (lease_owner, kept once it completes);
+ * only a row without one asks the journal's build line — which walks the
+ * build lines newest first until it meets the task, the most expensive read
+ * behind a factory package's page (#244) when it ran for every one.
+ */
+async function builderOf(env: Env, task: { id: number; lease_owner: string | null }): Promise<{ worker: string | null; agent: string | null }> {
+  const ev = task.lease_owner ? null : await env.DB.prepare("SELECT payload FROM events WHERE kind = 'build' AND status = 'ok' AND json_extract(payload, '$.task') = ? ORDER BY id DESC LIMIT 1").bind(task.id).first<{ payload: string }>();
+  const worker = task.lease_owner ?? (ev ? ((JSON.parse(ev.payload) as { worker?: string }).worker ?? null) : null);
   const w = worker ? await env.DB.prepare("SELECT agent FROM build_workers WHERE id = ?").bind(worker).first<{ agent: string | null }>() : null;
   return { worker, agent: w?.agent ?? null };
 }
@@ -66,7 +73,7 @@ export async function factoryChain(env: Env, sha256: string): Promise<Record<str
     .bind(sha256)
     .first<TaskRow>();
   if (!build) return null;
-  const builder = await builderOf(env, build.id);
+  const builder = await builderOf(env, build);
   const ref = build.pkgbuild_ref;
   // Before 2026-09-15 an approval queued a rebuild of the staged PKGBUILD
   // itself (`staging:<task>`); since then the project builds the recipe a
@@ -109,7 +116,7 @@ export async function factoryChain(env: Env, sha256: string): Promise<Record<str
   if (learned) {
     const src = await env.DB.prepare("SELECT * FROM build_tasks WHERE id = ?").bind(learned).first<TaskRow>();
     if (src) {
-      const b = await builderOf(env, src.id);
+      const b = await builderOf(env, src);
       sourceBuild = { task: src.id, owner: src.owner, worker: b.worker, agent: b.agent, recipe: src.pkgbuild_ref, staged_at: src.finished_at, evidence: { pkgbuild: `/api/v1/factory/tasks/${src.id}/artifacts/PKGBUILD`, log: `/api/v1/factory/tasks/${src.id}/artifacts/build.log`, pkginfo: `/api/v1/factory/tasks/${src.id}/artifacts/PKGINFO`, tests: `/api/v1/factory/tasks/${src.id}/artifacts/tests.log`, vet: `/api/v1/factory/tasks/${src.id}/artifacts/vet.json` }, gate: vetOf(src.result) };
       if (staged) {
         recipe.from = src.pkgbuild_ref;

@@ -19,6 +19,48 @@ export const CHECKLIST: Record<string, string> = {
 /** SPDX identifier or expression; `custom:` is what Arch writes for the rest. */
 export const LICENSE = /^(custom:[A-Za-z0-9._+-]+|[A-Za-z0-9._+-]+(?:\s+(?:OR|AND|WITH)\s+[A-Za-z0-9._+-]+)*)$/;
 
+/**
+ * A package's name, the one rule: what makepkg takes as a pkgname —
+ * letters, digits and @ . _ + -, never a leading - or . — in lower case, as
+ * the pool keeps every name, and at most 100 characters. The request is
+ * refused by it (routes/contributors.ts), and every page that offers a name
+ * — the Factory's form and its live check, the ⌘K menu's Request "<name>" —
+ * splices this expression into its script instead of typing one: the
+ * request page and the menu each typed a copy, and the three disagreed on a
+ * leading "-", "." or "@" (2026-09-29).
+ */
+export const PKGNAME = /^[a-z0-9@_+][a-z0-9@._+-]{0,99}$/;
+/** What PKGNAME asks, in the words the request's refusal and the form's check both say. */
+export const PKGNAME_RULE = "lowercase letters, digits and @ . _ + -, not starting with - or ., at most 100";
+
+/** The forges the Factory's form reads (routes/sources.ts), by their host. */
+export const FORGES = { "github.com": "GitHub", "gitlab.com": "GitLab", "codeberg.org": "Codeberg" } as const;
+export type Forge = keyof typeof FORGES;
+
+/**
+ * The forge an address is on and the repository's path there: GitHub's
+ * owner/repo, GitLab's group/…/project, Codeberg's owner/repo — the ".git",
+ * a trailing slash and a view (GitLab's /-/tree/main, Codeberg's
+ * /src/branch/main) set aside. One rule for the form's read and the
+ * request's project (parseProjectUrl): a repository pasted as one of its
+ * views is still that repository, so the record names the repository and
+ * one project is never two registrations.
+ */
+export function forgeOf(url: string): { forge: Forge; path: string; repo: string } | null {
+  let u: URL;
+  try { u = new URL(url); } catch { return null; }
+  const host = u.hostname.toLowerCase().replace(/^www\./, "");
+  if (u.protocol !== "https:" || !(host in FORGES)) return null;
+  let segs = u.pathname.split("/").filter(Boolean);
+  const view = segs.indexOf("-");
+  if (view >= 0) segs = segs.slice(0, view);
+  if (host !== "gitlab.com") segs = segs.slice(0, 2);
+  if (segs.length < 2) return null;
+  segs[segs.length - 1] = segs[segs.length - 1].replace(/\.git$/, "");
+  if (!segs.every((s) => /^[A-Za-z0-9_.-]+$/.test(s))) return null;
+  return { forge: host as Forge, path: segs.join("/"), repo: segs[segs.length - 1] };
+}
+
 /** The registration's fields the checks read (factory_packages). */
 export interface RequestedPackage {
   project: string | null;

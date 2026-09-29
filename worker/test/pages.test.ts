@@ -17,11 +17,11 @@ import { DOC_SECTIONS } from "../src/pages/docs";
 import { CHARTS } from "../src/pages/charts";
 import { KIT_HELPERS } from "../src/pages/kit";
 import { JOURNAL_KINDS } from "../src/meta";
-import { fetchPage, ownScriptOf, RETIRED_PAGES, scriptOf, seedDashboard, type Fixture } from "./fixture";
+import { fetchPage, ownScriptOf, runScript, scriptOf, seedDashboard, type Fixture } from "./fixture";
 // The router's own source, as text (Vite's ?raw): the routed pages are read from it, so a page added to index.ts without a way in fails here by name.
 import routerSource from "../src/index.ts?raw";
 
-// The Worker's handler — and a retired page (the fixture's RETIRED_PAGES: its address redirects since #240) drawn as it was, so the rules below keep reading it until #248 folds it into Status. The redirects themselves are asserted through the handler (raw).
+// The Worker's handler, as the page tests ask it (the fixture's fetchPage); raw() asks it by method.
 async function get(path: string, cookie?: string): Promise<Response> {
   const ctx = createExecutionContext();
   const res = await fetchPage(new Request(`http://pool.test${path}`, cookie ? { headers: { cookie: `omc=${cookie}` } } : undefined), env, ctx);
@@ -42,19 +42,17 @@ function ownScript(html: string): string {
   return own!;
 }
 
-// The pages are served over the fixture's data (test/fixture.ts): the package, the build and the person exist. PAGES are what the router serves; DRAWN adds the retired pages, which every rule over a page's HTML and script still reads.
+// The pages are served over the fixture's data (test/fixture.ts): the package, the build and the person exist. PAGES are what the router serves, and every rule over a page's HTML and script reads them all.
 let F: Fixture;
 let PAGES: string[];
-let DRAWN: string[];
 beforeAll(async () => {
   F = await seedDashboard(env);
-  PAGES = ["/", "/factory", "/review", "/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/what-we-test", "/docs/governance", "/docs/security", "/docs/glossary", "/docs/architecture", "/docs/runbook", "/docs/testing", "/docs/migration", "/docs/factory", "/docs/worker-host", "/docs/security-model", "/docs/contributing", "/docs/proof-of-concept", "/docs/open-work", "/docs/omarchy-cli-mcp", "/packages", `/package/${F.pkg}`, `/build/${F.projectTask}`, "/status", "/workers", "/request", `/user/${F.owner}`, "/people", "/agents", "/api", "/diff"];
-  DRAWN = [...PAGES, ...Object.keys(RETIRED_PAGES)];
+  PAGES = ["/", "/factory", "/review", "/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/what-we-test", "/docs/governance", "/docs/security", "/docs/glossary", "/docs/architecture", "/docs/runbook", "/docs/testing", "/docs/migration", "/docs/factory", "/docs/worker-host", "/docs/security-model", "/docs/contributing", "/docs/proof-of-concept", "/docs/open-work", "/docs/omarchy-cli-mcp", "/packages", `/package/${F.pkg}`, `/build/${F.projectTask}`, "/status", "/workers", `/user/${F.owner}`, "/people", "/agents", "/api", "/diff"];
 });
 
 describe("dashboard pages", () => {
   it("every page is served with the shared frame and no placeholder left behind", async () => {
-    for (const path of DRAWN) {
+    for (const path of PAGES) {
       const res = await get(path);
       expect(res.status, path).toBe(200);
       const html = await res.text();
@@ -86,8 +84,8 @@ describe("dashboard pages", () => {
       const twice = ids.filter((id, i) => ids.indexOf(id) !== i);
       expect([...new Set(twice)], `${path} serves an id twice`).toEqual([]);
     }
-    // The door a page lights (#240): a package and the packages list are the Pool's, the request and the workers the Factory's, a build Review's; a page the footer names (Status, People) and the docs light none.
-    const LIT: [string, string | null][] = [["/", "/"], ["/packages", "/"], [`/package/${F.pkg}`, "/"], ["/factory", "/factory"], ["/request", "/factory"], ["/workers", "/factory"], ["/review", "/review"], [`/build/${F.projectTask}`, "/review"], ["/status", null], ["/people", null], ["/agents", null], ["/docs", null], ["/diff", null]];
+    // The door a page lights (#240): a package and the packages list are the Pool's, the workers the Factory's (the request is the Factory's own card since #246), a build Review's; a page the footer names (Status, People) and the docs light none.
+    const LIT: [string, string | null][] = [["/", "/"], ["/packages", "/"], [`/package/${F.pkg}`, "/"], ["/factory", "/factory"], ["/workers", "/factory"], ["/review", "/review"], [`/build/${F.projectTask}`, "/review"], ["/status", null], ["/people", null], ["/agents", null], ["/docs", null], ["/diff", null]];
     for (const [path, door] of LIT) {
       const header = /<header>[\s\S]*?<\/header>/.exec(await (await get(path)).text())?.[0] ?? "";
       expect([...header.matchAll(/<a href="([^"]*)" class="active" aria-current="page">/g)].map((m) => m[1]), path).toEqual(door ? [door] : []);
@@ -118,23 +116,25 @@ describe("dashboard pages", () => {
     }
     expect((await get("/factory")).status).toBe(200);
     // The sign-in start keeps `next` for the callback in its state cookie: a page's path stays, its query too (a renewal's name); another host does not, nor a control character — a newline in the Location would make the callback throw after the session was replaced.
-    for (const [next, kept] of [["/workers", "/workers"], [`/build/${F.projectTask}`, `/build/${F.projectTask}`], ["/request?renew=zlib", "/request?renew=zlib"], ["//evil.example", "/factory"], ["/\\evil.example", "/factory"], ["https://evil.example/", "/factory"], ["/\nevil", "/factory"], ["/x\u0000y", "/factory"]]) {
+    for (const [next, kept] of [["/workers", "/workers"], [`/build/${F.projectTask}`, `/build/${F.projectTask}`], ["/factory?renew=zlib", "/factory?renew=zlib"], ["//evil.example", "/factory"], ["/\\evil.example", "/factory"], ["https://evil.example/", "/factory"], ["/\nevil", "/factory"], ["/x\u0000y", "/factory"]]) {
       res = await get(`/auth/github?next=${encodeURIComponent(next)}`);
       expect(res.status, next).toBe(302);
       expect(res.headers.get("set-cookie"), next).toContain(`:${encodeURIComponent(kept)};`);
     }
   });
 
-  // The addresses #240 took out of the header and the footer are one redirect each, to the section they became (index.ts MOVED): a 301 with the section as the fragment and the query kept — a bookmark lands, a filtered journal stays filtered, a ring's advisories stay that ring's. A HEAD — a link checker's — is answered as a GET is. Asked through the handler itself (raw): the fixture's get() draws the retired pages.
-  it("redirects the Pipeline, the Journal, Security and /docs/api to the section each became, and serves the footer's Agents as a page of its own", async () => {
+  // The addresses #240 took out of the header and the footer are one redirect each, to the section they became (index.ts MOVED): a 301 with the section as the fragment and the query kept — a bookmark lands, a filtered journal stays filtered, a ring's advisories stay that ring's. The request's own page is the Factory's request card since #246: the ⌘K menu's ?name= and a renewal's ?renew= ride along. A HEAD — a link checker's — is answered as a GET is.
+  it("redirects the Pipeline, the Journal, Security, /docs/api and the request to the section each became, and serves the footer's Agents as a page of its own", async () => {
     let res: Response;
-    expect(MOVED).toEqual({ "/pipeline": "/status", "/journal": "/status#journal", "/security": "/status#advisories", "/docs/api": "/docs#api" });
+    expect(MOVED).toEqual({ "/pipeline": "/status", "/journal": "/status#journal", "/security": "/status#advisories", "/docs/api": "/docs#api", "/request": "/factory#request" });
     for (const [from, to] of [
       ...Object.entries(MOVED),
       ["/journal?kind=role", "/status?kind=role#journal"],
       ["/security?ring=rc&arch=aarch64", "/status?ring=rc&arch=aarch64#advisories"],
       ["/pipeline?since=1", "/status?since=1"],
       ["/docs/api?x=1", "/docs?x=1#api"],
+      ["/request?name=zzfoo", "/factory?name=zzfoo#request"],
+      ["/request?renew=zlib", "/factory?renew=zlib#request"],
     ]) {
       for (const method of ["GET", "HEAD"]) {
         res = await raw(from, method);
@@ -143,7 +143,8 @@ describe("dashboard pages", () => {
       }
     }
     // Only those addresses: the API's own /security and /events, the API reference at /api and the page a redirect lands on answer as they did.
-    for (const path of ["/api/v1/security?ring=stable&arch=x86_64", "/api/v1/events?limit=1", "/api", "/api/", "/status", "/docs"]) expect((await raw(path)).status, path).toBe(200);
+    for (const path of ["/api/v1/security?ring=stable&arch=x86_64", "/api/v1/events?limit=1", "/api", "/api/", "/status", "/docs", "/factory"]) expect((await raw(path)).status, path).toBe(200);
+    expect(await (await raw("/factory")).text(), "the fragment the request lands on").toContain('<div class="op-card fx-request" id="request">');
     expect((await raw("/journal/x")).status, "a path under a moved address is no address").toBe(404);
     // A footer entry whose page has not landed is a 302 to what stands in for it (MORE's `until`). None is left: the footer's Agents was the chapter on omarchy-cli as an MCP server until its page landed (#249), and it is the page now, with a query or without — the chapter still served, and linked from the page.
     expect(MORE.filter((m) => m.until)).toEqual([]);
@@ -169,19 +170,19 @@ describe("dashboard pages", () => {
     expect((await raw("/docs/omarchy-cli-mcp")).status).toBe(200);
   });
 
-  // The header's Sign in names the page it is on, a build's page and a package's included — so a maintainer who signs in from a build lands on the build, not on Review. The served href is the path; the shell's script rewrites it to the whole address once the query is known, so /request?renew=zlib signs in and comes back to the renewal. The docs sidebar's hint is written from MORE, so it names every page the footer links and no other.
+  // The header's Sign in names the page it is on, a build's page and a package's included — so a maintainer who signs in from a build lands on the build, not on Review. The served href is the path; the shell's script rewrites it to the whole address once the query is known, so /factory?renew=zlib signs in and comes back to the renewal. The docs sidebar's hint is written from MORE, so it names every page the footer links and no other.
   it("sends the sign-in back to the page it was pressed on, and the docs hint names the footer's pages", async () => {
-    for (const path of ["/workers", `/build/${F.projectTask}`, `/package/${F.pkg}`, `/user/${F.owner}`, "/docs/runbook", "/request", "/review"]) {
+    for (const path of ["/workers", `/build/${F.projectTask}`, `/package/${F.pkg}`, `/user/${F.owner}`, "/docs/runbook", "/factory", "/review"]) {
       const html = await (await get(path)).text();
       expect(html, path).toContain(`<a id="account" href="/auth/github?next=${path}" title=`);
       expect(html, path).not.toContain("next=/me");
       expect(scriptOf(html), path).toContain('if (location.search) document.querySelectorAll(\'a[href^="/auth/github?next="]\')');
     }
-    // The one place `next=/me` stays: the Factory gate's way to the reader's own page, whoever they turn out to be. The Request's workspace link is /me itself, one href for everyone; Review has none since #247 — a reader's own requests are in its queue, "yours · locked".
+    // The Factory's send is the sign-in for nobody, and it comes back to the Factory — the name typed so far carried in the address by the script; the reader's own page is the account chip's. Review has no workspace link since #247 — a reader's own requests are in its queue, "yours · locked".
     const factory = await (await get("/factory")).text();
-    expect(factory).toContain('id="gate-btn" href="/auth/github?next=/me"');
+    expect(factory).toContain('<a class="op-btn" id="fx-send" href="/auth/github?next=/factory">Sign in to send</a>');
     expect(factory).toContain('id="account" href="/auth/github?next=/factory"');
-    expect(await (await get("/request")).text()).toContain('<a id="ws" href="/me">Your workspace</a>');
+    expect(factory).not.toContain("next=/me");
     expect(await (await get("/review")).text()).not.toContain('href="/me"');
     // The hint is the chapters' shell's: the index (/docs, #250) draws its own map of its sections, without it.
     const docs = await (await get("/docs/get-started")).text();
@@ -260,11 +261,11 @@ describe("dashboard pages", () => {
       [/rebuilds what a maintainer approves|[Aa]pprove queues a rebuild/, "approve queues a publish of the project's build; Build by the project is the separate action, and the one that queues a rebuild"],
       [/approve, trust and roll back|approving, trusting and rolling back/, "no page has a trust control: trust is through the API"],
       [/under a group in <code>factory\/MAINTAINERS\.toml/, "one list, no groups"],
-      [/Journal's\s+(?:<em>)?Ring\s+history|overview's\s+roll\s+back/, "no served page has a roll back button until #248 draws the ring history on Status: a manual rollback is the rollback job (pkg-repo job rollback, POST /api/v1/factory/jobs), as the runbook says"],
+      [/Journal's\s+(?:<em>)?Ring\s+history|overview's\s+roll\s+back/, "the Journal is a section of Status since #248, and a maintainer rolls a ring back on Status's Releases — a ring's card, its history — or with the rollback job (pkg-repo job rollback, POST /api/v1/factory/jobs)"],
       [/the\s+Pipeline\s+(?:follows|lists)|Pipeline\s+page\s+shows|Pipeline's\s+(?:build\s+tasks|counters)|Security\s+page\s+shows/, "the Pipeline and Security are not served since #240 (their addresses redirect to Status, index.ts MOVED): name Status, a build's page or the API"],
     ];
     const problems: string[] = [];
-    for (const path of DRAWN) {
+    for (const path of PAGES) {
       const html = await (await get(path)).text();
       // (a) the served HTML's links, scripts set aside: what a reader can press.
       const body = html.replace(/<script[\s\S]*?<\/script>/g, "");
@@ -284,10 +285,17 @@ describe("dashboard pages", () => {
       for (const m of html.matchAll(/\/journal\?kind=([a-z-]+)/g)) if (!JOURNAL_KINDS.includes(m[1])) problems.push(`${path} links /journal?kind=${m[1]}, a kind the journal's filter lacks (${JOURNAL_KINDS.join(", ")})`);
     }
     expect(problems, problems.join("\n")).toEqual([]);
-    // The journal's chips are the same list, and `?kind=` picks one of them rather than falling back to all.
-    const journal = ownScript(await (await get("/journal")).text());
-    expect(journal).toContain(`var KINDS = ${JSON.stringify(JOURNAL_KINDS)}`);
-    expect(journal).toContain('KINDS.indexOf(qs.get("kind")) >= 0 ? qs.get("kind") : "all"');
+    // The journal is Status's since #248 (/journal?kind=k lands on /status?kind=k#journal): `?kind=` picks one of the journal's kinds — a chip of its own beside All, Syncs, Promotions, Decisions and Blocks — rather than falling back to all; sync is the Syncs chip; a word the journal does not know is All.
+    const status = scriptOf(await (await get("/status")).text());
+    expect(ownScript(await (await get("/status")).text())).toContain(`var KINDS = ${JSON.stringify(JOURNAL_KINDS)}`);
+    const chips = (search: string) => runScript(status, { pathname: "/status", search, functions: ["chipIds"] }).chipIds() as string[];
+    const groups = ["all", "syncs", "promotions", "decisions", "blocks"];
+    expect(chips("")).toEqual(groups);
+    expect(chips("?kind=role")).toEqual([...groups, "role"]);
+    expect(chips("?kind=fast-track")).toEqual([...groups, "fast-track"]);
+    expect(chips("?kind=sync")).toEqual(groups);
+    expect(chips("?kind=promotions")).toEqual(groups);
+    expect(chips("?kind=nothing-we-know")).toEqual(groups);
     for (const k of ["role", "withdraw", "review", "request", "audience", "fast-track", "trial", "build", "promote", "rollback", "sync"]) expect(JOURNAL_KINDS, k).toContain(k);
   });
 
@@ -295,7 +303,7 @@ describe("dashboard pages", () => {
   it("no page script uses a name it does not declare", async () => {
     const GLOBALS = new Set(["window", "document", "location", "history", "navigator", "console", "fetch", "setTimeout", "setInterval", "clearTimeout", "clearInterval", "requestAnimationFrame", "cancelAnimationFrame", "encodeURIComponent", "decodeURIComponent", "encodeURI", "decodeURI", "parseInt", "parseFloat", "isNaN", "isFinite", "Number", "String", "Boolean", "Array", "Object", "Date", "Promise", "RegExp", "Error", "TypeError", "Map", "Set", "WeakMap", "JSON", "Math", "Response", "Request", "Headers", "URLSearchParams", "URL", "Function", "Symbol", "Infinity", "NaN", "undefined", "escape", "unescape", "alert", "confirm", "prompt", "Blob", "TextEncoder", "TextDecoder", "Intl", "structuredClone", "queueMicrotask", "matchMedia", "getComputedStyle", "scrollTo", "scrollBy", "scrollX", "scrollY", "innerWidth", "innerHeight", "open", "close", "atob", "btoa", "AbortController", "IntersectionObserver", "ResizeObserver", "MutationObserver", "CustomEvent", "Event", "FormData", "localStorage", "sessionStorage", "crypto", "performance", "CSS", "arguments", "this", "Element", "HTMLElement", "Node", "NodeList", "DOMParser", "XMLSerializer", "Image", "Audio", "devicePixelRatio", "self", "globalThis", "gtag", "dataLayer"]);
     const acorn = await import("acorn");
-    for (const path of DRAWN) {
+    for (const path of PAGES) {
       const html = await (await get(path)).text();
       const code = scriptOf(html);
       if (!code.trim()) continue;
@@ -406,7 +414,7 @@ describe("dashboard pages", () => {
     // The primitives a page draws only through CHARTS — a page that does not splice CHARTS and declares one of these has copied it.
     const CHART_ONLY = ["bars", "area", "hbars", "stacked", "lines", "hrows", "heatGrid", "buildsByDay", "jobsSummary", "workerMinutes", "worst", "lastDays"];
     const problems: string[] = [];
-    for (const path of DRAWN) {
+    for (const path of PAGES) {
       const code = scriptOf(await (await get(path)).text());
       if (!code.trim()) continue;
       // page() wraps the footer's line, the shell, the ⌘K menu, then the page's script in one function: the page's own statements are what follows the menu's — and the kit's helpers on a page drawn with the kit (page({ kit: true })), the frame's as the menu is (the fixture's ownScriptOf) — less CHARTS where the page splices it.
@@ -444,16 +452,14 @@ describe("dashboard pages", () => {
     expect(problems, problems.join("\n")).toEqual([]);
   });
 
-  // The dashboard's rule for roles: every role sees every section and every control, the same for all; what a role cannot do is a disabled control with the reason in its title — never hidden, never absent, never a sentence in its place. So the sections that exist for everyone are never served `hidden`; the attribute stays for what does not exist yet (a result line before a POST, a blocked notice for nobody blocked). The list is the sections the redesign names per page — Review's queue (its tiles, its tabs and rows, the maintainers, the brake on the Blocked tab; the workspace is served hidden until a package is opened, #247); the Pipeline's queue-position card, its Operations hint; the Journal's releases with the rollback column; a build's page (#acts); a person's page (#pk-request, #w-toggle, #w-own); the request's gate and form (#gate, #ask, #pkg-form); the Factory gate with its hint (#gate-hint, once hidden for a session); the People page's sections and its Open the issue (#251: grey with the reason for a viewer who may not apply, never absent).
+  // The dashboard's rule for roles: every role sees every section and every control, the same for all; what a role cannot do is a disabled control with the reason in its title — never hidden, never absent, never a sentence in its place. So the sections that exist for everyone are never served `hidden`; the attribute stays for what does not exist yet (a result line before a POST, a blocked notice for nobody blocked). The list is the sections the redesign names per page — Review's queue (its tiles, its tabs and rows, the maintainers, the brake on the Blocked tab; the workspace is served hidden until a package is opened, #247); Status's sections — the releases and their history, the sources, the workers, the checks, the advisories and their list, the journal, the numbers (its roll back is a maintainer's alone, and drawn for a maintainer only: the v1 rule, #238, is that the information is the same for everyone and only the actions change); a build's page (#acts); a person's page (#pk-request, #w-toggle, #w-own); the Factory's tiles, its request card with every field and the send, its workers and its line (#246 — the reader's own requests alone are a session's: signed in only, as the issue asks, since a visitor has none); the People page's sections and its Open the issue (#251: grey with the reason for a viewer who may not apply, never absent).
   it("serves the sections everyone gets without hidden — a role that cannot act sees the control grey, never nothing", async () => {
     const ALWAYS: Record<string, string[]> = {
       "/review": ["rv-queue", "rv-tiles", "rv-tabs", "rv-rows", "rv-maint", "brake"],
-      "/pipeline": ["queue-pos", "ops-who", "staged", "heads"],
-      "/journal": ["releases", "compare"],
+      "/status": ["releases", "history", "sources", "workers", "checks", "advisories", "advisory-list", "journal", "numbers"],
       [`/build/${F.projectTask}`]: ["acts"],
       [`/user/${F.owner}`]: ["pk-request", "w-toggle", "w-own", "share-btn"],
-      "/request": ["gate", "gate-who", "gate-cta", "gate-btn", "ask", "pkg-form", "pkg-checklist", "pkg-btn", "ws"],
-      "/factory": ["gate", "gate-btn", "gate-hint"],
+      "/factory": ["tiles", "request", "fx-form", "fx-name", "fx-url", "fx-license", "fx-desc", "fx-checklist", "fx-send", "workers", "fx-wlist", "line", "board"],
       "/people": ["tiles", "maintainers", "contributors", "workers", "become", "apply"],
     };
     const problems: string[] = [];
@@ -507,7 +513,7 @@ describe("dashboard pages", () => {
     expect(unreached, `reached only by address: ${unreached.join(", ")}`).toEqual([]);
     const ways = [...routed].sort().map((p) => `${p} ← ${via.get(p)}${via.get(p) === "the frame" ? "" : " ← the frame"}`);
     console.log(`the way to every page:\n  ${ways.join("\n  ")}`);
-    // The pages nothing links, on purpose: an alias is a redirect to a page that is reached, never a page of its own — the old addresses and the pages that became sections (MOVED, #240). Asked through the handler itself: the fixture's get() would draw a retired page instead.
+    // The pages nothing links, on purpose: an alias is a redirect to a page that is reached, never a page of its own — the old addresses and the pages that became sections (MOVED, #240).
     for (const alias of ["/me", "/contribute", "/index.html", "/get-started", "/how-it-works", "/governance", ...Object.keys(MOVED)]) {
       const res = await raw(alias);
       expect([301, 302], alias).toContain(res.status);
@@ -518,29 +524,21 @@ describe("dashboard pages", () => {
     }
   });
 
-  // The request as nobody: the gate banner with the sign-in live, and the whole form served — every field, every confirmation and the button grey with the sign-in as the reason — so a person who is not in sees what a request asks, and a person who is sees the same page with its fields live.
-  it("serves the request to nobody as the gate banner and the form with every control grey", async () => {
-    const html = await (await get("/request")).text();
-    expect(html).toContain('<div id="gate" class="gate">');
-    expect(html).toContain('<a class="btn" id="gate-btn" href="/auth/github?next=/request">');
-    expect(html).toContain('<section id="ask">');
-    const form = /<form id="pkg-form" class="form" onsubmit="return false">([\s\S]*?)<\/form>/.exec(html)?.[1] ?? "";
+  // The request as nobody (#246): the Factory's request card with every field live — a visitor checks a name and builds the prompt for their agent, and nothing is written — and one control that is a person's, the send, served as "Sign in to send": the sign-in that comes back here. Signed in, the script puts the send in its place; nothing is greyed, nothing is hidden.
+  it("serves the request card to nobody with its fields live and the send as the sign-in", async () => {
+    const html = await (await get("/factory")).text();
+    expect(html).toContain('<div class="op-card fx-request" id="request">');
+    const form = /<form class="fx-form" id="fx-form"[^>]*>([\s\S]*?)<\/form>/.exec(html)?.[1] ?? "";
     const controls = [...form.matchAll(/<(?:input|button|select|textarea)\b[^>]*>/g)].map((m) => m[0]);
-    // Eight fields (two of them for a project not on GitHub), four confirmations, the button.
-    expect(controls.length).toBe(13);
-    // The reason is the shell's word for nobody — orSignIn's, the server's 401's — not a fourth spelling.
-    for (const c of controls) expect(c).toMatch(/ disabled aria-disabled="true" title="sign in with GitHub">$/);
-    expect(form).toContain('id="pkg-url"');
+    // Six fields (two of them for a release not on GitHub, GitLab or Codeberg), one toggle per architecture, four confirmations.
+    expect(controls.length).toBe(6 + 2 + 4);
+    for (const c of controls) expect(c, c).not.toMatch(/\sdisabled|aria-disabled/);
     expect(form).toContain('data-check="evidence"');
-    expect(form).toContain('<button type="submit" id="pkg-btn" disabled aria-disabled="true" title="sign in with GitHub">Request</button>');
-    // Signed in, the page is the same page: the script draws the fields again through the shell's gate(), live for a person; the workspace line is /me for everyone, rewritten for nobody.
+    expect(form).toContain('<span id="fx-send-slot"><a class="op-btn" id="fx-send" href="/auth/github?next=/factory">Sign in to send</a></span>');
     const script = ownScript(html);
-    expect(script).toContain('$("#pkg-form").innerHTML = gate(');
-    expect(script).toContain('$("#gate-cta").innerHTML = gate(');
-    expect(script).not.toContain('$("#ask").hidden');
-    expect(script).not.toContain('$("#ws").href');
-    expect(html).not.toContain("next=/me");
-    expect(html).not.toContain("/factory#gate");
+    expect(script).toContain('$("#fx-send-slot").innerHTML = \'<button type="button" class="op-btn" id="fx-send">\'');
+    expect(script).toContain('"Send request"');
+    expect(script).not.toContain("gate(");
   });
 
   // A worker's row is the shell's wherever it is drawn. The manifests say which pages draw the worker tables (`shared: "worker-table"`, the legend `"worker-legend"`) — the Workers page and a person's; the People page links the Workers page since #251 and draws none — and each is proved the same way: the panels served by workerPanels(), the head and the skeleton by wtTables(), every row by workerRow() over wtKind(), the filter by wtText, and no hand-written head, cell or filter left; a page that serves a worker table without claiming the shared name fails here by its address.
@@ -561,7 +559,7 @@ describe("dashboard pages", () => {
       for (const hand of ["WT_HEAD", "WT_LEGEND", 'skeletonRows("#w-', 'colspan="9"', "#workers-table", "var text = function", "<th>Worker</th>"]) expect(script, `${c.page} writes ${hand} by hand`).not.toContain(hand);
     }
     // Every page that serves a worker table claims it: a third page drawing rows of its own would be caught here.
-    for (const path of DRAWN) {
+    for (const path of PAGES) {
       const html = await (await get(path)).text();
       if (/class="wtable"/.test(html)) expect(claims.map((c) => c.page), `${path} serves a worker table and claims no shared component`).toContain(path);
     }
@@ -610,17 +608,16 @@ describe("dashboard pages", () => {
 
 // The diagrams size a box to its text; a line longer than planned widens the
 // box into its neighbour, and the labels between them end up on a border. A
-// box drawn inside a group (`d-group`: the Factory's "Build — your choice"
-// holds the two kinds of worker) is not two boxes over each other. Which
+// box drawn inside a group (`d-group`) is not two boxes over each other. Which
 // diagrams exist is what the manifests claim with `drawn`: a figure claimed
 // by no page, or a page claiming one nobody draws, fails here.
 // The documentation's figures are drawn the same way and checked the same way.
 describe("diagrams", () => {
   it("draws no two boxes over each other", async () => {
-    const { ringsDiagram, sourcesDiagram, liveDiagram, archDiagram, factoryDiagram } = await import("../src/pages/diagrams");
+    const { ringsDiagram, sourcesDiagram } = await import("../src/pages/diagrams");
     const { DOC_DIAGRAMS } = await import("../src/pages/doc-diagrams");
-    // The rings drawn with no stage lit were Home's until #243 (its chain is HTML now); How it works draws them a stage at a time, the same boxes.
-    const draw: Record<string, () => string> = { "rings/promote": () => ringsDiagram("promote"), sources: sourcesDiagram, live: liveDiagram, arch: archDiagram, factory: factoryDiagram };
+    // The rings drawn with no stage lit were Home's until #243 (its chain is HTML now), the live and architecture figures the Pipeline's until #248, and the assembly line the old Factory's until #246 (the v1 Factory draws the line as a board); How it works draws the rings a stage at a time, the same boxes.
+    const draw: Record<string, () => string> = { "rings/promote": () => ringsDiagram("promote"), sources: sourcesDiagram };
     for (const [name, fn] of Object.entries(DOC_DIAGRAMS)) draw[`docs/${name}`] = fn;
     const claimed = new Set(allComponents(F).map((c) => c.drawn).filter((k): k is string => k !== undefined));
     expect([...claimed].sort()).toEqual(Object.keys(draw).sort());

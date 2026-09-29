@@ -165,13 +165,18 @@ export async function handleUserCan(c: Contributor | null, login: string, env: E
 }
 
 /**
- * Who stands behind a package the factory built: its owner, its category,
- * the maintainers, the last approval that stands — a withdrawn one is not
- * the approval the package is served under, so the package page's "approved
- * by" card and the Packages table's approver never name it.
+ * Who stands behind a package: its packager upstream, and its maintainer
+ * in the pool (#244) — the maintainer who adopted it (routes/adopt.ts),
+ * else, for what the factory built, the one whose approval stands; a
+ * synced package nobody adopted has none. For a factory package also its
+ * owner, its category, the maintainers, the last approval that stands — a
+ * withdrawn one is not the approval the package is served under, so the
+ * package page's "reviewed by" and the Packages table's approver never
+ * name it.
  */
 export async function maintenanceOf(env: Env, name: string, source: string, packager: string | undefined): Promise<Record<string, unknown>> {
-  const out: Record<string, unknown> = { packager: packager ?? null };
+  const adopted = await env.DB.prepare("SELECT login, since FROM package_maintainers WHERE name = ?").bind(name).first<{ login: string; since: string }>();
+  const out: Record<string, unknown> = { packager: packager ?? null, maintainer: adopted ? { login: adopted.login, since: adopted.since, adopted: true } : null };
   if (source !== "factory") return out;
   const pkg = await env.DB.prepare(`SELECT owner, category, url, status FROM factory_packages WHERE name = ?`).bind(name).first<{ owner: string; category: string | null; url: string; status: string }>();
   const approval = await env.DB.prepare(`SELECT by, version, arch, created_at, task_id FROM approvals WHERE name = ? AND ${standsSql()} ORDER BY id DESC LIMIT 1`)
@@ -187,5 +192,6 @@ export async function maintenanceOf(env: Env, name: string, source: string, pack
     approved_version: approval?.version ?? null,
     task: approval?.task_id ?? null,
   };
+  if (!adopted && approval) out.maintainer = { login: approval.by, since: approval.created_at, adopted: false };
   return out;
 }

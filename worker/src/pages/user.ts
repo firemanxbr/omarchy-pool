@@ -32,7 +32,7 @@ import type { RunningVersion } from "../meta";
  */
 const SHARE_BTN = `<button type="button" class="btn" id="share-open" title="the link to this page, to post anywhere">Share</button>`;
 const TOKEN_BTN = `<button type="button" class="btn ghost" id="token-open" title="a token for scripts and CI">Token</button>`;
-const REQUEST_LINK = `<a class="more-link" id="pk-request" href="/request">+ request one →</a>`;
+const REQUEST_LINK = `<a class="more-link" id="pk-request" href="/factory#request">+ request one →</a>`;
 const REGISTER_TOGGLE = `<button type="button" class="more-link" id="w-toggle" title="the form: a name, an architecture, one command to run it">+ register one</button>`;
 const WORKER_FORM = `<label>Name <input type="text" id="w-name" placeholder="laptop" required></label> <label>Architecture <select id="w-arch"><option>x86_64</option><option>aarch64</option></select></label> <button type="submit" id="w-btn">Register worker</button>`;
 
@@ -564,8 +564,8 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       // The table, and the way to request a package: served grey with whose it is, drawn again from the server's word (the owner's).
       id: "user.packages-table",
       page,
-      anchor: ['id="pk-request"', 'data-href="/request"', `title="only ${F.owner} requests here"`, 'id="packages"'],
-      script: ['pager("#packages"', '"#pk-request"', 'href=\\"/request\\"', 'gate(REQUEST_LINK, may("request"), reason("request"))', "data-expand", 'JSON.parse(p.arches', "pkgHref(p.name, null, arches[0])", "p.detail", "targetChips(p.targets)", 'byPkg[p.name + "/" + a]', "data-story"],
+      anchor: ['id="pk-request"', 'data-href="/factory#request"', `title="only ${F.owner} requests here"`, 'id="packages"'],
+      script: ['pager("#packages"', '"#pk-request"', 'href=\\"/factory#request\\"', 'gate(REQUEST_LINK, may("request"), reason("request"))', "data-expand", 'JSON.parse(p.arches', "pkgHref(p.name, null, arches[0])", "p.detail", "targetChips(p.targets)", 'byPkg[p.name + "/" + a]', "data-story"],
       reads: [{ path: profile, fields: ["packages.0.name", "packages.0.category", "packages.0.url", "packages.0.arches", "packages.0.targets", "packages.0.status", "packages.0.detail", "builds.0.name", "builds.0.arch", "builds.0.status", "builds.0.id"] }],
       visible: EVERYONE,
     },

@@ -1,7 +1,8 @@
 /**
- * The dashboard's diagrams, drawn on the server as inline SVG: the rings, the
- * factory's assembly line, the living system (packages and advisories moving
- * through the pipeline), and the architecture maintainers operate. Boxes are
+ * The dashboard's diagrams, drawn on the server as inline SVG: the rings and
+ * where every package comes from (the living system and the architecture
+ * went with the Pipeline, #248; the Factory's assembly line went with its old
+ * page — the v1 Factory draws the line as a board, #246). Boxes are
  * sized from their text so nothing overflows; arrows are orthogonal and
  * labels sit beside a segment, never across one. A text with `live` carries
  * data-live="key": the page script fills it from the API. The helpers are
@@ -106,125 +107,6 @@ export function ringsDiagram(hi?: Stage): string {
     dots += dot("M450 152 L475 152 L475 215 L500 215 L620 215 L620 162", "var(--amber)", 6, 1.5);
   }
   return svgo(1280, 262, "Five sources feed the pool — Arch Linux, Arch Linux ARM, the OPR's edge channel, the Asahi projects and the pool's own factory — verified and stored once, then promoted through the edge, rc and stable rings on evidence; a ring rolls back by itself when a health check fails. Beside them the lab, where the factory's builds are installed by a real pacman before a maintainer approves them into edge.") + dots + s + "</svg>";
-}
-
-/**
- * The factory as an assembly line: stations above, the belt below. Packages
- * ride the belt and change colour at each station — grey requested, blue
- * built, amber staged for review, green approved — and the stations wear the
- * same colours, so the line reads as progress. One package in five is
- * stopped at the maintainer: not everything passes. The people on the
- * floor, and the agents beside them.
- */
-export function factoryDiagram(): string {
-  let s = svgo(1340, 330, "An assembly line: a contributor requests a package on the record, it is built on the workers the project shares or on their own, the evidence is staged and audited, the pool's agent makes the package again on a trusted worker, a real pacman installs it in the lab and a maintainer approves it into the rings — or stops it. Packages ride a conveyor belt below the stations.");
-  // Every box is at least as wide as its longest line (dbox widens to the
-  // text), so the widths here are the real ones; the arrows are long enough
-  // for their label to stand clear of both boxes.
-  s += dbox({ x: 20, y: 40, w: 160, h: 70, title: "Contributor", big: true, lines: ["a GitHub account", "nothing else asked"] });
-  s += darrow(180, 75, 245, 75) + dlab(212, 63, ["request"]);
-  s += dbox({ x: 245, y: 40, w: 185, h: 70, title: "The request", cls: "dim", lines: ["URL · name · licence", "on the record, signed"] });
-  s += darrow(430, 75, 495, 75) + dlab(462, 63, ["build"]);
-  // A group: the one box the overlap test lets others sit inside.
-  s += '<rect class="d-box d-group rc" x="495" y="20" width="322" height="110"/><text class="d-t" x="656" y="40" text-anchor="middle">Build — your choice</text>';
-  s += dbox({ x: 503, y: 50, w: 150, h: 70, title: "Shared workers", cls: "rc", lines: ["the project's agent", { text: "alive now", cls: "live", live: "shared-online" }], tcls: "small" });
-  s += dbox({ x: 659, y: 50, w: 150, h: 70, title: "Your worker", cls: "rc", lines: ["at home, your agent", "your packages only"], tcls: "small" });
-  s += darrow(817, 75, 882, 75) + dlab(849, 63, ["staged"]);
-  s += dbox({ x: 882, y: 40, w: 180, h: 70, title: "Evidence", cls: "amber", lines: ["PKGBUILD · log · audit", "never what users get"] });
-  s += darrow(1062, 75, 1127, 75) + dlab(1094, 63, ["review"]);
-  s += dbox({ x: 1127, y: 40, w: 190, h: 70, title: "Pool", big: true, cls: "hi", lines: ["its agent makes it again", "a real pacman installs it"] });
-  // The drops: where a package on the belt changes colour. Labels and figures stand clear of the lines.
-  const drops: [number, string, string][] = [[337, "requested", "var(--dim)"], [656, "built", "var(--blue)"], [895, "staged", "var(--amber)"], [1222, "approved", "var(--green)"]];
-  for (const d of drops) s += dline([d[0], d[1] === "built" ? 130 : 110, d[0], 214], "dash") + `<text class="d-lab" x="${d[0] + 8}" y="176" style="fill:${d[2]}">${d[1]}</text>`;
-  const person = (x: number, color: number | string, values: string, dur: number, extra = "") =>
-    `<g transform="translate(${x} 142)"><circle cx="0" cy="0" r="8" fill="none" stroke="${color}" stroke-width="1.5"/><path d="M-14 30 Q0 12 14 30" fill="none" stroke="${color}" stroke-width="1.5"/>${extra}<animateTransform attributeName="transform" type="translate" values="${values}" dur="${dur}s" repeatCount="indefinite"/></g>`;
-  const agent = (x: number, begin: number) =>
-    `<g transform="translate(${x} 142)"><rect x="-9" y="-7" width="18" height="15" fill="none" stroke="var(--lilac)" stroke-width="1.5"/><circle cx="-4" cy="0" r="1.7" fill="var(--lilac)"/><circle cx="4" cy="0" r="1.7" fill="var(--lilac)"/><line x1="0" y1="-7" x2="0" y2="-12" stroke="var(--lilac)" stroke-width="1.5"/><circle cx="0" cy="-14" r="2" fill="var(--lilac)"><animate attributeName="opacity" values="1;0.2;1" dur="1.2s" begin="${begin}s" repeatCount="indefinite"/></circle><path d="M-13 30 L-13 16 Q-13 12 -9 12 L9 12 Q13 12 13 16 L13 30" fill="none" stroke="var(--lilac)" stroke-width="1.5"/></g>`;
-  s += person(540, "var(--blue)", "540 142;540 139;540 142", 1.4) + dlab(540, 190, ["contributor", "asks, on the record"]);
-  s += agent(780, 0) + dlab(780, 190, ["agent", "writes and builds"]);
-  s += agent(1008, 0.6) + dlab(1008, 190, ["second agent", "audits the evidence"]);
-  s += person(1148, "var(--green)", "1148 142;1145 142;1148 142;1151 142;1148 142", 2.4, '<circle cx="18" cy="6" r="5" fill="none" stroke="var(--green)" stroke-width="1.5"/><line x1="22" y1="10" x2="28" y2="16" stroke="var(--green)" stroke-width="1.5"/>') + dlab(1148, 190, ["maintainer", "reads, then decides"]);
-  s += '<rect x="20" y="222" width="1300" height="32" fill="var(--panel-2)" stroke="var(--line)"/><line x1="20" y1="222" x2="1320" y2="222" stroke="var(--dim)" stroke-width="1.5" stroke-dasharray="10 8"><animate attributeName="stroke-dashoffset" from="36" to="0" dur="1s" repeatCount="indefinite"/></line>';
-  for (let x = 55; x < 1320; x += 70) s += `<g transform="translate(${x} 238)"><circle r="8" fill="var(--panel)" stroke="var(--line)"/><line x1="-8" y1="0" x2="8" y2="0" stroke="var(--dim)"/><line x1="0" y1="-8" x2="0" y2="8" stroke="var(--dim)"/><animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="4s" repeatCount="indefinite" additive="sum"/></g>`;
-  // Five packages, one every 3.2 s, at the belt's speed: the colour changes
-  // under the drops. The third is stopped at the maintainer — it turns red,
-  // gets its mark and leaves the belt; the others ride off the end, approved.
-  // Each colour is a square of its own and the animation is their opacity:
-  // an animation's values are read as colours, not through the cascade, so
-  // a palette name there is not something every browser resolves — as a
-  // square's fill, it is.
-  const T = 16, KEYS = "0;0.42;0.43;0.58;0.59;0.80;0.81;1";
-  for (let i = 0; i < 5; i++) {
-    const begin = `begin="${(i * 3.2).toFixed(1)}s" repeatCount="indefinite"`, stopped = i === 2;
-    const tones = ["var(--dim)", "var(--blue)", "var(--amber)", stopped ? "var(--red)" : "var(--green)"];
-    const squares = tones.map((c, k) => `<rect x="-7" y="-14" width="14" height="14" fill="${c}" stroke="var(--bg)" stroke-width="1.2"${k ? ' opacity="0"' : ""}><animate attributeName="opacity" values="${tones.flatMap((_, j) => (j === k ? [1, 1] : [0, 0])).join(";")}" keyTimes="${KEYS}" dur="${T}s" ${begin}/></rect>`).join("");
-    s += `<g>${squares}<rect x="-3" y="-10" width="6" height="6" fill="var(--bg)"/>` +
-      (stopped
-        ? `<text x="0" y="-19" text-anchor="middle" font-size="13" font-weight="700" fill="var(--red)" opacity="0">✕<animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.81;0.83;0.95;1" dur="${T}s" ${begin}/></text><animate attributeName="opacity" values="1;1;1;0" keyTimes="0;0.81;0.95;1" dur="${T}s" ${begin}/><animateMotion dur="${T}s" ${begin} calcMode="linear" keyPoints="0;1;1" keyTimes="0;0.81;1" path="M30 222 L1222 222"/>`
-        : `<animate attributeName="opacity" values="1;1;0;0" keyTimes="0;0.87;0.875;1" dur="${T}s" ${begin}/><animateMotion dur="${T}s" ${begin} calcMode="linear" keyPoints="0;1;1" keyTimes="0;0.87;1" path="M30 222 L1310 222"/>`) + "</g>";
-  }
-  s += dlab(20, 296, ["the factory floor"], "start") + '<text x="1320" y="296" text-anchor="end" font-size="13" font-weight="600" font-family="Geist, sans-serif"><tspan fill="var(--dim)">off the belt → </tspan><tspan fill="var(--edge)">edge</tspan><tspan fill="var(--dim)"> → </tspan><tspan fill="var(--rc)">rc</tspan><tspan fill="var(--dim)"> → </tspan><tspan fill="var(--stable)">stable</tspan><tspan fill="var(--dim)">, signed by the pool</tspan></text>';
-  return s + "</svg>";
-}
-
-/**
- * The living system: packages flow from the sources through the rings, five
- * security feeds are matched against every ring, a confident fix skips the soak.
- */
-export function liveDiagram(): string {
-  let s = "";
-  const HEAD = svgo(1300, 420, "Packages move from five sources — Arch Linux, Arch Linux ARM, the OPR's edge channel, the Asahi projects and the factory — through the pool into the edge, rc and stable rings, while five security feeds are matched against every ring every three hours and confident fixes are fast-tracked from edge to stable.", "live");
-  ["Arch Linux", "Arch Linux ARM", "Omarchy OPR · edge", "Asahi", "Factory"].forEach((t, i) => {
-    const y = 40 + i * 37;
-    s += dbox({ x: 20, y, w: 190, h: 30, title: t }) + dline([210, y + 15, 250, y + 15]);
-  });
-  s += dline([250, 55, 250, 203]) + darrow(250, 127, 300, 127);
-  s += dbox({ x: 300, y: 70, w: 200, h: 115, title: "Pool", big: true, lines: [{ text: "verified today: …", cls: "live", live: "verified-today" }, { text: "stored once: …", cls: "live", live: "stored-once" }, "every 3 h"] });
-  s += darrow(500, 127, 600, 127) + dlab(550, 115, ["≤ 3 h"]);
-  s += dbox({ x: 600, y: 97, w: 140, h: 60, title: "edge", big: true, tcls: "edge", cls: "edge", lines: [{ text: "follows upstream", live: "edge-head" }] });
-  s += darrow(740, 127, 860, 127) + dlab(800, 103, ["pacman + ABI", "+ security"]);
-  s += dbox({ x: 860, y: 97, w: 150, h: 60, title: "rc", big: true, tcls: "rc", cls: "rc", lines: [{ text: "tested, both arches", live: "rc-head" }] });
-  s += darrow(1010, 127, 1120, 127) + dlab(1065, 103, ["two green checks", "≈ 6 h"]);
-  s += dbox({ x: 1120, y: 97, w: 160, h: 60, title: "stable", big: true, tcls: "stable", cls: "stable", lines: [{ text: "what you run", live: "stable-head" }] });
-  s += dpath("M670 97 C670 40, 1200 40, 1200 97", "hi dash", true) + dlab(935, 34, ["fast-track: a confident fix in edge skips the soak"], "middle", "hi");
-  ["Arch Security Tracker", "Debian Security Tracker", "OSV · Go modules, crates", "CISA KEV · exploited", "EPSS · likelihood"].forEach((t, i) => {
-    const y = 262 + i * 32;
-    s += `<rect class="d-chip" x="20" y="${y}" width="190" height="26"/><text class="d-s" x="115" y="${y + 17}" text-anchor="middle" style="fill:var(--muted)">${escapeHtml(t)}</text>` + dline([210, y + 13, 250, y + 13]);
-  });
-  s += dline([250, 275, 250, 403]) + darrow(250, 339, 300, 339);
-  s += dbox({ x: 300, y: 289, w: 200, h: 100, title: "Security scan", big: true, lines: [{ text: "advisories known: …", cls: "live", live: "advisories" }, { text: "open in stable: …", cls: "amber", live: "open-stable" }, "every 3 h, every ring"] });
-  s += dline([500, 339, 560, 339, 560, 230, 1200, 230]) + darrow(670, 230, 670, 157) + darrow(935, 230, 935, 157) + darrow(1200, 230, 1200, 157);
-  s += dlab(580, 248, ["matches open advisories against what each ring serves"], "start");
-  // The marks ride under the boxes: visible on the arrows, covered inside a box, never across its text.
-  const pkg = "M230 55 L250 55 L250 127 L300 127 L500 127 L600 127 L740 127 L860 127 L1010 127 L1120 127 L1200 127";
-  let dots = dot(pkg, "var(--green)", 9, 0) + dot(pkg, "var(--green)", 9, 3) + dot(pkg, "var(--green)", 9, 6);
-  dots += dot("M230 275 L250 275 L250 339 L300 339", "var(--amber)", 3, 0.5) + dot("M230 371 L250 371 L250 339 L300 339", "var(--amber)", 3, 2);
-  dots += dot("M500 339 L560 339 L560 230 L670 230 L670 157", "var(--amber)", 4, 1) + dot("M500 339 L560 339 L560 230 L935 230 L935 157", "var(--amber)", 5, 2.3) + dot("M500 339 L560 339 L560 230 L1200 230 L1200 157", "var(--amber)", 6, 0.2);
-  dots += dot("M670 97 C670 40, 1200 40, 1200 97", "var(--green)", 5, 4);
-  return HEAD + dots + s + "</svg>";
-}
-
-/** What maintainers operate: the brain, the queue, the three worker roles, R2, the rings, GitHub. */
-export function archDiagram(): string {
-  let s = svgo(1280, 390, "Upstream mirrors and GitHub feed the brain, a Cloudflare Worker with the index in D1; it queues jobs that pool, review and community workers claim with a lease and report back; objects are stored on R2 and rendered into signed ring databases served to pacman.");
-  s += dbox({ x: 20, y: 50, w: 200, h: 86, title: "Upstream", big: true, lines: ["Arch · ARM · OPR · Asahi", { text: "synced …", cls: "live", live: "last-sync" }] });
-  s += darrow(220, 93, 300, 93) + dlab(260, 81, ["sync jobs"]);
-  s += dbox({ x: 300, y: 30, w: 330, h: 150, title: "Brain", big: true, cls: "hi", lines: ["Cloudflare Worker · index in D1", "schedules sync · promote · health", "security · trial · gc · builds", "signs databases and factory packages", { text: "API …", cls: "live", live: "api" }] });
-  s += darrow(630, 93, 730, 93) + dlab(680, 81, ["index ↔ objects"]);
-  s += dbox({ x: 730, y: 50, w: 185, h: 86, title: "Pool · R2", big: true, lines: ["each package stored once", { text: "…", cls: "live", live: "pool-size" }] });
-  s += darrow(915, 93, 1025, 93) + dlab(970, 81, ["rendered, signed"]);
-  s += dbox({ x: 1025, y: 50, w: 240, h: 86, title: "Rings", big: true, lines: ["pacman DBs, both arches", { text: "edge · rc · stable", cls: "live", live: "heads" }] });
-  s += darrow(1145, 136, 1145, 170) + dlab(1145, 186, ["served to every pacman -Syu"]);
-  s += darrow(465, 180, 465, 215);
-  s += '<rect class="d-queue" x="300" y="215" width="700" height="30"/><text class="d-t small" x="314" y="234">job queue</text><text class="d-s live" x="400" y="234" data-live="queue">…</text>';
-  // Each box is as wide as its longest line (dbox widens to the text), so the three stand apart.
-  for (const x of [410, 680, 960]) s += darrow(x, 300, x, 245, "", true) + dlab(x + 10, 276, ["claim · report"], "start");
-  s += dbox({ x: 300, y: 300, w: 220, h: 70, title: "Pool workers", lines: ["the project's host · trusted", { text: "…", cls: "live", live: "w-pool" }] });
-  s += dbox({ x: 545, y: 300, w: 270, h: 70, title: "Review workers", lines: ["rebuilds + audits · agent via a proxy", { text: "…", cls: "live", live: "w-review" }] });
-  s += dbox({ x: 840, y: 300, w: 240, h: 70, title: "Community workers", lines: ["a broker + a builder, anyone's", { text: "…", cls: "live", live: "w-community" }] });
-  s += dbox({ x: 20, y: 300, w: 200, h: 70, title: "GitHub", lines: ["OAuth · MAINTAINERS.toml", "releases · worker image"] });
-  s += dline([220, 320, 260, 320, 260, 150], "dash") + darrow(260, 150, 300, 150, "dash") + dlab(266, 270, ["who may approve"], "start");
-  return s + "</svg>";
 }
 
 /**
