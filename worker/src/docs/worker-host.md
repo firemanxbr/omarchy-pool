@@ -45,8 +45,20 @@ docker compose ps                                 # the six, and whether they ar
 docker compose logs -f --tail 50 review-aarch64   # one worker
 ./rollout.sh                                      # a rolling upgrade now (the timer does it within 15 minutes of a release); --check to only look
 systemctl --user list-timers omarchy-pool-rollout.timer   # when it last ran, when it runs next; journalctl --user -u omarchy-pool-rollout for its log
-docker compose restart pool-x86_64                # a worker that looks stuck — also a drain: it finishes its task first (up to 3 h); docker kill for one that must die now
+docker kill pool-x86_64                           # only for a stall of the engine itself: everything else is on the worker's page
 ```
+
+A worker that looks stuck is operated from its page, `/worker/<id>`, not
+from here: **Stop its task** if the task hangs — a build, a trial, an
+audit or a check stops within 5 minutes while its container or script
+runs (its process group killed, the containers labelled with the task
+removed); a build already uploading once its container has ended, a trial
+publishing into the lab, and a pool job in the worker's own process stop at
+their next call to the pool; the task goes back to the queue then, or when
+its lease ends — then **Restart**, and **Restart agent service** for
+`agent-proxy`. **Drain** keeps a worker out of work until **Resume**,
+across its restarts; a worker that wedges is restarted by its own watchdog
+(20 minutes without progress, then ever more slowly), and its page says so.
 
 The Workers page lists the six by role, with the agent each reports; a
 worker that is not alive there is not running here. One whose agent does
