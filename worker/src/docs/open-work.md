@@ -21,13 +21,14 @@ request (see [CONTRIBUTING.md](CONTRIBUTING.md)), and keep
       `.PKGINFO` against the staged ones) would catch a recipe that builds
       differently on the trusted worker.
 
-- [ ] **Write tools for agents.** `omarchy-cli mcp` answers and writes
-      nothing. The proposal for a contributor's and a maintainer's agent —
-      a token scoped to the person, and decisions the agent drafts and the
-      person confirms in the browser — was signed off on 2026-09-29 and is
-      built after #242 and #247
-      ([the proposal](docs/omarchy-cli-mcp.md#proposed-write-tools-draft-signed-off),
-      issue #252).
+- [ ] **A passkey for the decisions an agent drafts.** An agent's verdict or
+      block is confirmed in the browser with the session and, for reject
+      and block, the package's name typed
+      ([the write tools](docs/omarchy-cli-mcp.md#write-tools),
+      #252). An agent that drives the person's own signed-in browser could
+      press Confirm; a passkey with user verification for approve and block
+      is issue #257. A way in for a machine without a browser (no loopback)
+      can come later if someone needs it.
 
 - [ ] **Production keys and hosting.** The staging database key is throwaway and
       the pool lives on a personal account; moving to omarchy.org means a key in

@@ -1,6 +1,8 @@
 mod api;
 mod cli;
 mod config;
+mod credentials;
+mod login;
 mod mcp;
 mod state;
 

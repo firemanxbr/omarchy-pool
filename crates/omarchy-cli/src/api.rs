@@ -1,4 +1,6 @@
-//! Read-only client for the edge index.
+//! Client for the edge index: the public reads, anonymous, and — for the MCP
+//! write tools (#252) — the calls that carry an agent's token, which only the
+//! caller that holds a credential for this origin makes.
 
 use anyhow::{bail, Context, Result};
 use pkg_manifest::PackageManifest;
@@ -109,7 +111,117 @@ pub struct Graph {
     pub truncated: bool,
 }
 
+/// A call the pool refused, in its own words: the status, the machine-readable
+/// code when it gives one (`conflict_of_interest`, `rate_limited`, …) and the
+/// sentence. The MCP tools hand it to the agent as it is.
+#[derive(Debug, Clone)]
+pub struct Refused {
+    pub status: u16,
+    pub code: Option<String>,
+    pub error: String,
+    pub retry_after: Option<String>,
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HTTP {}", self.status)?;
+        if let Some(c) = &self.code {
+            write!(f, " ({c})")?;
+        }
+        write!(f, ": {}", self.error)?;
+        if let Some(r) = &self.retry_after {
+            write!(f, " — retry after {r} s")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// An agent's token on a call, and the name its MCP client gave (sent as `x-omarchy-client`).
+pub struct Auth<'a> {
+    pub token: &'a str,
+    pub client: Option<&'a str>,
+}
+
 impl Api {
+    /// The base URL every call goes to (the config's `api`, or `--api`).
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
+    /// A JSON call to the pool at `path` under its root (`/api/v1/…`, `/auth/…`):
+    /// the answer on 2xx, else the pool's refusal ([`Refused`]). The token is
+    /// sent only when `auth` is given — the writes and the caller's own reads;
+    /// a public read goes anonymous.
+    pub fn call(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        auth: Option<&Auth<'_>>,
+    ) -> Result<serde_json::Value> {
+        let url = format!("{}{path}", self.base);
+        let m = reqwest::Method::from_bytes(method.as_bytes())?;
+        let mut req = self.http.request(m, &url);
+        if let Some(a) = auth {
+            req = req.bearer_auth(a.token);
+            if let Some(c) = a.client {
+                req = req.header("x-omarchy-client", c);
+            }
+        }
+        if let Some(b) = body {
+            req = req.json(b);
+        }
+        let resp = req.send().with_context(|| format!("{method} {url}"))?;
+        let status = resp.status();
+        let retry_after = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let text = resp.text().unwrap_or_default();
+        let value: serde_json::Value =
+            serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+        if !status.is_success() {
+            return Err(Refused {
+                status: status.as_u16(),
+                code: value
+                    .get("code")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                error: value
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .map_or_else(|| text.trim().chars().take(300).collect(), str::to_owned),
+                retry_after,
+            }
+            .into());
+        }
+        Ok(value)
+    }
+
+    /// Public text at `path` (a build's evidence): None when it is not there.
+    pub fn text(&self, path: &str) -> Result<Option<String>> {
+        let url = format!("{}{path}", self.base);
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .with_context(|| format!("GET {url}"))?;
+        if resp.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            bail!(
+                "{url}: {} {}",
+                resp.status(),
+                resp.text().unwrap_or_default()
+            );
+        }
+        Ok(Some(resp.text()?))
+    }
+
     pub fn new(base: &str) -> Result<Self> {
         Ok(Self {
             base: base.trim_end_matches('/').to_owned(),
@@ -247,7 +359,7 @@ pub struct SecurityView {
 }
 
 /// Percent-encodes what a package name or a cursor may carry (`+`, `@`, `/`…).
-fn urlencode(s: &str) -> String {
+pub fn urlencode(s: &str) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {

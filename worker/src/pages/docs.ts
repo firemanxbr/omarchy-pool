@@ -286,18 +286,18 @@ export function docsHtml(poolUrl: string, version: RunningVersion): string {
  * or the code block that is the chapter's substance.
  */
 const CHAPTER_ANCHORS: Partial<Record<DocKey, string[]>> = {
-  // The write tools are a proposal a maintainer signed off on (#252, 2026-09-29) and nothing of it is built yet: the draft says so above its table, and the sign-off closes it — the same chapter must not read as a description of tools that exist.
-  // What the sign-off rests on is pinned as well: how a grant is made and why not a device flow, releasing a claim, what each call costs, and what the server enforces, so the risk the review named cannot drop out of the chapter unnoticed.
+  // The write tools (#252) as they are built: the tables of the tools and their routes and scopes, how a grant is made and why not a device flow, the drafts the person confirms, releasing a claim, what each call costs and what the server enforces, and the sign-off they follow — so none of what the review of the design named drops out of the chapter unnoticed.
   "omarchy-cli-mcp": [
     "<th>Tool</th><th>Arguments</th><th>Answers</th>",
     '<pre><code class="lang-json">',
     `href="${REPO_URL}/blob/main/docs/omarchy-cli.config.toml"`,
-    "<blockquote><p><strong>Draft.</strong> Nothing in this section is built.",
+    'id="write-tools"',
     "<th>Tool</th><th>Role</th><th>Input</th><th>Answers</th>",
-    "<th>Tool</th><th>Worker route</th><th>Today</th>",
+    "<th>Tool</th><th>Worker route</th><th>Scope</th>",
     'id="who-the-agent-acts-as"',
     "<p><strong>Why not a device flow.</strong>",
     'id="the-agent-drafts-the-person-confirms"',
+    'id="signed-and-journaled"',
     'id="limits-and-cost"',
     'id="what-the-server-enforces"',
     "<strong>No hint from an agent.</strong>",

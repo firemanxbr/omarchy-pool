@@ -93,27 +93,46 @@ pub enum Command {
     List,
     /// Serves status, check, info, search, list and security to an agent over
     /// MCP (JSON-RPC on stdin/stdout): what an assistant needs to reason
-    /// about this machine and the ring, read-only.
+    /// about this machine and the ring, read-only — and, after `login`, the
+    /// write tools its grant holds, which decide nothing without the person.
     Mcp,
+    /// Grants an agent a token to act as you through omarchy-cli's tools:
+    /// the pool's grant page opens in your browser (signed in with GitHub,
+    /// on this machine), and the code comes back to this command on
+    /// 127.0.0.1. The token is kept in ~/.config/omarchy-cli/credentials.toml.
+    Login {
+        /// The agent's name, as the pool shows it on the grant page, on your page and on the record ("Claude Code").
+        #[arg(long)]
+        agent: String,
+        /// Also review and block, for a maintainer: the grant lives seven days.
+        #[arg(long)]
+        maintain: bool,
+        /// How many days a contribute-only grant lives (thirty by default, ninety at most).
+        #[arg(long)]
+        days: Option<u32>,
+    },
+    /// Revokes the agent's grant on the pool, then deletes the credentials file.
+    Logout,
 }
 
 const EXIT_BLOCKED: i32 = 2;
 
-pub fn run(cli: Cli) -> Result<i32> {
+/// The config file with the command line's flags over it, checked.
+fn configured(cli: &mut Cli) -> Result<Config> {
     let mut config = Config::load(&cli.config)?;
-    if let Some(api) = cli.api {
+    if let Some(api) = cli.api.take() {
         config.api = api;
     }
-    if let Some(pool) = cli.pool {
+    if let Some(pool) = cli.pool.take() {
         config.pool = pool;
     }
-    if let Some(ring) = cli.ring {
+    if let Some(ring) = cli.ring.take() {
         config.ring = ring;
     }
-    if let Some(root) = cli.root {
+    if let Some(root) = cli.root.take() {
         config.root = root;
     }
-    if let Some(arch) = cli.arch {
+    if let Some(arch) = cli.arch.take() {
         config.arch = arch;
     }
     // The index serves three rings and the lab; a typo here would otherwise
@@ -128,6 +147,11 @@ pub fn run(cli: Cli) -> Result<i32> {
     if !["x86_64", "aarch64"].contains(&config.arch.as_str()) {
         bail!("arch must be x86_64 or aarch64 (got '{}')", config.arch);
     }
+    Ok(config)
+}
+
+pub fn run(mut cli: Cli) -> Result<i32> {
+    let config = configured(&mut cli)?;
     let api = Api::new(&config.api)?;
     let json = cli.json;
 
@@ -204,7 +228,105 @@ pub fn run(cli: Cli) -> Result<i32> {
         Command::Provenance { targets, quiet } => provenance(&config, &api, &targets, quiet, json),
         Command::List => list(&config, &api, json),
         Command::Mcp => crate::mcp::serve(&config, &api),
+        Command::Login {
+            agent,
+            maintain,
+            days,
+        } => login(&api, &agent, maintain, days, json),
+        Command::Logout => logout(json),
     }
+}
+
+/// Where the credentials live: `~/.config/omarchy-cli/credentials.toml`.
+fn credentials_path() -> Result<PathBuf> {
+    crate::credentials::default_path()
+        .context("neither XDG_CONFIG_HOME nor HOME is set: no place for the credentials")
+}
+
+fn login(api: &Api, agent: &str, maintain: bool, days: Option<u32>, json: bool) -> Result<i32> {
+    let scopes: &[&str] = if maintain {
+        &["contribute", "review", "block"]
+    } else {
+        &["contribute"]
+    };
+    let ask = crate::login::Ask {
+        agent,
+        scopes,
+        days,
+    };
+    let creds = crate::login::login(api, &ask, crate::login::WAIT, &|url: &str| {
+        eprintln!("Open this address in a browser signed in with GitHub, on this machine, and press Grant:\n\n  {url}\n\nWaiting for the browser (five minutes)…");
+        crate::login::open_browser(url);
+    })?;
+    let path = credentials_path()?;
+    crate::credentials::save(&path, &creds)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({ "login": creds.login, "agent": creds.agent, "scopes": creds.scopes, "grant": creds.grant, "expires_at": creds.expires_at, "origin": creds.origin, "credentials": path })
+        );
+    } else {
+        println!(
+            "Granted: {} acts as {} ({}) until {}.\nThe token is in {} (mode 0600); `omarchy-cli mcp` offers the tools it holds. Revoke it with `omarchy-cli logout`, or on your page.",
+            creds.agent,
+            creds.login,
+            creds.scopes.join(", "),
+            creds.expires_at,
+            path.display()
+        );
+    }
+    Ok(0)
+}
+
+fn logout(json: bool) -> Result<i32> {
+    let path = credentials_path()?;
+    // A file others could read is still this machine's grant to end: read it anyway to revoke it, then delete it.
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            println!(
+                "{}",
+                if json {
+                    r#"{"revoked":null}"#.to_owned()
+                } else {
+                    "No agent grant on this machine.".to_owned()
+                }
+            );
+            return Ok(0);
+        }
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    let creds: crate::credentials::Credentials =
+        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    // Revoked at the origin that granted it, whatever --api says: the token goes nowhere else.
+    let revoked = Api::new(&creds.origin)?.call(
+        "POST",
+        "/auth/agent/revoke",
+        None,
+        Some(&crate::api::Auth {
+            token: &creds.token,
+            client: None,
+        }),
+    );
+    crate::credentials::remove(&path)?;
+    let said = match &revoked {
+        Ok(_) => format!(
+            "Revoked the grant to {} ({}) and deleted {}.",
+            creds.agent,
+            creds.grant,
+            path.display()
+        ),
+        Err(e) => format!("Deleted {}; the pool said: {e:#}", path.display()),
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({ "revoked": revoked.is_ok().then_some(&creds.grant), "deleted": path, "said": said })
+        );
+    } else {
+        println!("{said}");
+    }
+    Ok(0)
 }
 
 /// The ring's packages whose name or description matches — what `search`
