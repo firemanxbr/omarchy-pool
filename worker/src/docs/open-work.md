@@ -21,14 +21,28 @@ request (see [CONTRIBUTING.md](CONTRIBUTING.md)), and keep
       `.PKGINFO` against the staged ones) would catch a recipe that builds
       differently on the trusted worker.
 
-- [ ] **A passkey for the decisions an agent drafts.** An agent's verdict or
-      block is confirmed in the browser with the session and, for reject
-      and block, the package's name typed
-      ([the write tools](docs/omarchy-cli-mcp.md#write-tools),
-      #252). An agent that drives the person's own signed-in browser could
-      press Confirm; a passkey with user verification for approve and block
-      is issue #257. A way in for a machine without a browser (no loopback)
-      can come later if someone needs it.
+- [ ] **Deciding without a browser.** Approve and block are decided in the
+      browser with the maintainer's passkey — the web's own buttons and an
+      agent's drafts alike
+      ([the write tools](docs/omarchy-cli-mcp.md#write-tools), #257, #271),
+      and no token of any kind approves or blocks. A path for a machine
+      without a browser — a maintainer's token with an assertion made by a
+      local authenticator, or an agent's login with no loopback — is a
+      product decision first, then a door of its own with the same
+      assertion.
+
+- [ ] **The other doors that ship without a passkey.** #271 guards approve
+      and block; a maintainer's session or `omc_` token alone still queues a
+      build by hand (`POST /factory/enqueue`: a project build of whatever
+      `pkgbuild_ref` names, `draft:` or any commit, which publishes into
+      edge with no approval), forces a promotion past its evidence and gate
+      (`POST /factory/jobs`, promote with `force`), and withdraws an
+      approval, as before #271 — and a reset leaves that token. Closing them
+      is a product decision first: a build by hand held to `publish:false`
+      or to a commit on `main` (the enqueue job's own), the same passkey's
+      assertion on each door (in the browser only, so no token presses
+      them), and whether a reset also replaces the login's token
+      ([the write tools](docs/omarchy-cli-mcp.md#write-tools)).
 
 - [ ] **Production keys and hosting.** The staging database key is throwaway and
       the pool lives on a personal account; moving to omarchy.org means a key in

@@ -107,7 +107,8 @@ verify and attest the package faster and approve it with more confidence.
 7. **A maintainer approves the project's build.** With the project's
    evidence in front of them (the workspace shows the factory's build and the
    rebuild side by side), a maintainer — not the owner — approves, after a
-   confirmation. Every decision is a record the pool signs and a journal line
+   confirmation, with their passkey in the browser (#271: no token approves
+   or blocks). Every decision is a record the pool signs and a journal line
    with who, the door (`via`: the web or a token) and the agent that rebuilt
    each architecture (what its review worker ran when it staged it). Review's
    decisions — a claim, approve, request changes, reject, a release, an
@@ -423,7 +424,7 @@ The factory touches the pool through four things, all versioned in the API:
 | The factory uses | Meaning |
 |---|---|
 | `GET /api/v1/package/:name` | who ships a name already (the guard) |
-| `POST /api/v1/factory/{requests,enqueue}` · `/requests/:id/{approve,reject}` · `/tasks/:id/cancel` (a maintainer's token, or the enqueue job's) · `/tasks/:id/{build,approve,reject}` (a maintainer, never the owner) · `/{contributors,packages}/:x/{block,unblock}` (a maintainer; lifting by another) · `POST /factory/jobs` (a maintainer queues a pool job) · `GET /factory/built`, `/factory/maintainers`, `/factory/review`, `/factory/blocks` | maintainers and the enqueue job |
+| `POST /api/v1/factory/{requests,enqueue}` · `/requests/:id/{approve,reject}` · `/tasks/:id/cancel` (a maintainer's token, or the enqueue job's) · `/tasks/:id/{build,approve,reject}` (a maintainer, never the owner) · `/{contributors,packages}/:x/{block,unblock}` (a maintainer — a block, like an approval, in the browser with their passkey; lifting by another) · `POST /factory/jobs` (a maintainer queues a pool job) · `GET /factory/built`, `/factory/maintainers`, `/factory/review`, `/factory/blocks` | maintainers and the enqueue job |
 | `POST /api/v1/factory/claim` (a registered worker's token) · `/tasks/:id/{heartbeat,complete,fail}` (the claim's job token) | the worker protocol |
 | `POST /api/v1/factory/register` · `/factory/packages[/:name/build]` · `/factory/workers` (contributor token) · `PUT /factory/tasks/:id/artifacts/:file` (worker token) · `GET /factory/packages`, `/factory/me` | contributors: registry, own workers, staging uploads |
 | `pkg-repo publish --source factory --ring edge --arch …` · `pkg-repo render` | how a result enters the pool: as a source like any other |

@@ -10,7 +10,8 @@
  * carry no staged object of it, and its job's token cannot read one. Then
  * every decision — a claim, approve, request changes, reject, release,
  * adopt, block, lift — is a record signed by the pool and a journal line
- * with who, through which door and the agent the review rests on (the one
+ * with who, through which door (approve and block the browser's, with the
+ * maintainer's passkey, #271: decide.ts) and the agent the review rests on (the one
  * each rebuild ran, not the one its worker runs by the time of the
  * decision); each is taken once — two sent at the same moment are one and
  * a 409 — and none is undone by another decision: a block is what takes an
@@ -28,8 +29,11 @@ import { ADOPT_SQL, MAINTAINER_SQL } from "../src/routes/adopt";
 import { maintenanceOf } from "../src/routes/users";
 import { putRecord } from "../src/record";
 import { ownScriptOf } from "./fixture";
+import { decider } from "./decide";
 
 const API = "http://pool.test/api/v1";
+/** Approve and block, decided in the browser with the maintainer's passkey (#271): decide.ts. */
+const { decide } = decider(env);
 
 async function call(method: string, path: string, body?: unknown, token?: string, raw?: string): Promise<{ status: number; json: any }> {
   const headers: Record<string, string> = {};
@@ -49,8 +53,8 @@ beforeAll(async () => {
   const h = (t: string) => sha256Hex(t);
   await env.DB.batch([
     env.DB.prepare("INSERT INTO factory_maintainers (login) VALUES ('m1'), ('m2')"),
-    env.DB.prepare("INSERT INTO contributors (login, token_hash, role) VALUES ('m1', ?, 'maintainer'), ('m2', ?, 'maintainer'), ('alice', ?, 'contributor'), ('bob', ?, 'contributor'), ('dave', ?, 'contributor')")
-      .bind(await h("omc_m1"), await h("omc_m2"), await h("omc_alice"), await h("omc_bob"), await h("omc_dave")),
+    env.DB.prepare("INSERT INTO contributors (login, token_hash, session_hash, role) VALUES ('m1', ?, ?, 'maintainer'), ('m2', ?, ?, 'maintainer'), ('alice', ?, NULL, 'contributor'), ('bob', ?, NULL, 'contributor'), ('dave', ?, NULL, 'contributor')")
+      .bind(await h("omc_m1"), await h("oms_m1"), await h("omc_m2"), await h("oms_m2"), await h("omc_alice"), await h("omc_bob"), await h("omc_dave")),
     // alice's worker builds her requests; the project's review worker, whose agent answers, takes the rebuilds a claim pins to it.
     env.DB.prepare(`INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, trusted_by, last_seen, agent, agent_status, kinds) VALUES
       ('cx', 'x86_64', 'alice', ?, 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z', 'openai/gpt-5', 'ok', '["build"]'),
@@ -395,15 +399,16 @@ describe("the three decisions of the workspace", () => {
     expect((await claim(id)).status).toBe(200);
     const rb = await claimAs("omw_px", "good");
     await stage(rb, "the project");
-    const r = await call("POST", `/factory/tasks/${rb.task.id}/approve`, { note: "reads well" }, "omc_m2");
+    const r = await decide("m2", `/factory/tasks/${rb.task.id}/approve`, { note: "reads well" });
     expect(r.status, JSON.stringify(r.json)).toBe(200);
-    expect(r.json).toMatchObject({ decision: "approved", by: "m2", via: "token", agent: AGENT, arches: ["x86_64"] });
+    // The door is the browser's (#271: approve is the session's and the maintainer's passkey's, never a token's), and the passkey is named.
+    expect(r.json).toMatchObject({ decision: "approved", by: "m2", via: "web", passkey: expect.stringMatching(/^pk_[0-9a-f]{32}$/), agent: AGENT, arches: ["x86_64"] });
     const rec = await record(r.json.record);
     expect(rec.verified).toBe(true);
-    expect(rec.doc).toMatchObject({ schema: "omarchy-pool/decision/1", decision: "approve", name: "good", by: "m2", via: "token", agent: AGENT, note: "reads well", review: r.json.review, targets: [{ arch: "x86_64", task: rb.task.id, publish: r.json.publish }] });
+    expect(rec.doc).toMatchObject({ schema: "omarchy-pool/decision/1", decision: "approve", name: "good", by: "m2", via: "web", passkey: r.json.passkey, agent: AGENT, note: "reads well", review: r.json.review, targets: [{ arch: "x86_64", task: rb.task.id, publish: r.json.publish }] });
     const l = await line("approve", "good");
     expect(l.summary).toContain(`approved by m2 (rebuilt with ${AGENT})`);
-    expect(l.payload).toMatchObject({ by: "m2", via: "token", agent: AGENT, review: r.json.review, record: r.json.record });
+    expect(l.payload).toMatchObject({ by: "m2", via: "web", passkey: r.json.passkey, agent: AGENT, review: r.json.review, record: r.json.record });
     expect(r.json.record).toMatch(new RegExp(`-approve-r${r.json.review}\\.json$`));
     // The approval's publish job is not the cancel door's: what takes an approval back is a block.
     const stop = await call("POST", `/factory/tasks/${r.json.publish}/cancel`, {}, "omc_m1");
@@ -422,7 +427,7 @@ describe("the three decisions of the workspace", () => {
     await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = 'not this story' WHERE status = 'queued' AND name != 'drift'").run();
     expect((await call("POST", "/factory/claim", { arch: "x86_64", agent: "openai/gpt-5", agent_status: "ok", kinds: ["build"] }, "omw_px")).status).toBe(204);
     expect(await env.DB.prepare("SELECT agent FROM build_workers WHERE id = 'px'").first()).toEqual({ agent: "openai/gpt-5" });
-    const r = await call("POST", `/factory/tasks/${rb.task.id}/approve`, { note: "reads well" }, "omc_m2");
+    const r = await decide("m2", `/factory/tasks/${rb.task.id}/approve`, { note: "reads well" });
     expect(r.json).toMatchObject({ decision: "approved", agent: AGENT });
     expect((await record(r.json.record)).doc).toMatchObject({ agent: AGENT, targets: [{ arch: "x86_64", task: rb.task.id, agent: AGENT }] });
     expect((await line("approve", "drift")).summary).toContain(`(rebuilt with ${AGENT})`);
@@ -433,7 +438,7 @@ describe("the three decisions of the workspace", () => {
     expect((await claim(id)).status).toBe(200);
     const rb = await claimAs("omw_px", "twin");
     await stage(rb, "the project");
-    const [a, b] = await Promise.all([call("POST", `/factory/tasks/${rb.task.id}/approve`, { note: "m1 approves" }, "omc_m1"), call("POST", `/factory/tasks/${rb.task.id}/approve`, { note: "m2 approves" }, "omc_m2")]);
+    const [a, b] = await Promise.all([decide("m1", `/factory/tasks/${rb.task.id}/approve`, { note: "m1 approves" }), decide("m2", `/factory/tasks/${rb.task.id}/approve`, { note: "m2 approves" })]);
     expect([a.status, b.status].sort()).toEqual([200, 409]);
     const won = a.status === 200 ? a : b, lost = won === a ? b : a;
     expect(lost.json.error).toMatch(new RegExp(`^(twin was decided a moment ago: approved by ${won.json.by}|already approved)$`));
@@ -453,15 +458,15 @@ describe("the three decisions of the workspace", () => {
     const nope = (await env.DB.prepare("SELECT id FROM build_tasks WHERE name = 'nope' AND status = 'cancelled' ORDER BY id LIMIT 1").first<{ id: number }>())!.id;
     for (const d of ["approve", "changes", "reject"]) expect((await call("POST", `/factory/tasks/${nope}/${d}`, { note: "again" }, "omc_m2")).json.error, d).toBe(`task ${nope} is cancelled, not staged`);
     // The block: the review withdrawn with its reason, the package back to the factory, and the block itself on the record with who and the door.
-    const b = await call("POST", "/factory/packages/good/block", { reason: "ships a binary the source does not build" }, "omc_m1");
+    const b = await decide("m1", "/factory/packages/good/block", { reason: "ships a binary the source does not build" });
     expect(b.status, JSON.stringify(b.json)).toBe(200);
     expect(await env.DB.prepare("SELECT withdrawn_by FROM reviews WHERE id = ?").bind(approved.review_id).first()).toEqual({ withdrawn_by: "m1" });
     // A fresh key: the record is at the edge for thirty seconds.
     expect((await call("GET", `/factory/approvals?t=${Date.now()}`)).json.approvals.find((a: any) => a.name === "good")).toMatchObject({ standing: false });
     const rec = await record(b.json.record);
     expect(rec.verified).toBe(true);
-    expect(rec.doc).toMatchObject({ decision: "block", name: "good", by: "m1", via: "token", agent: null });
-    expect((await line("block", "good")).payload).toMatchObject({ by: "m1", via: "token", agent: null });
+    expect(rec.doc).toMatchObject({ decision: "block", name: "good", by: "m1", via: "web", passkey: b.json.passkey, agent: null });
+    expect((await line("block", "good")).payload).toMatchObject({ by: "m1", via: "web", passkey: b.json.passkey, agent: null });
     // Lifted by another maintainer, on the record the same way.
     const lift = await call("POST", "/factory/packages/good/unblock", { reason: "the source builds it now" }, "omc_m2");
     expect((await record(lift.json.record)).doc).toMatchObject({ decision: "unblock", by: "m2", via: "token", agent: null });

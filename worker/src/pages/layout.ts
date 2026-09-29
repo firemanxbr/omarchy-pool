@@ -1116,10 +1116,10 @@ export const HELPERS = String.raw`
   }
   function wtShort(id) { var parts = String(id).split("-"); return parts.length > 3 ? parts.slice(-3).join("-") : id; }
 
-  // A line that says what happened, where the eye is: bottom right, gone in a few seconds (an error stays until clicked).
+  // A line that says what happened, where the eye is: bottom right, gone in a few seconds (an error stays until clicked, and is an alert a screen reader says).
   function toast(text, cls) {
     var box = $("#toasts"); if (!box) { box = document.createElement("div"); box.id = "toasts"; document.body.appendChild(box); }
-    var t = document.createElement("div"); t.className = "toast " + (cls || "ok"); t.innerHTML = text; box.appendChild(t);
+    var t = document.createElement("div"); t.className = "toast " + (cls || "ok"); if (cls === "error") t.setAttribute("role", "alert"); t.innerHTML = text; box.appendChild(t);
     var go = function () { t.classList.add("out"); setTimeout(function () { t.remove(); }, 300); };
     t.onclick = go; if (cls !== "error") setTimeout(go, 6000);
   }
@@ -1305,6 +1305,30 @@ export const HELPERS = String.raw`
   }
   // What a failure says: an Error's message (api()'s, the network's "Failed to fetch"), anything else as text.
   function errorText(e) { return e && e.message ? String(e.message) : String(e || "no answer"); }
+  // An act a passkey confirms (#271) — approve and block, a passkey added or removed, a reset: the pool's challenge for exactly this act (POST /auth/passkeys/assert, { for: what }), handed to navigator.credentials.get() with user verification required, and the act posted by post(assertion) with the answer. The server checks it; the page only carries it. Resolves with post's answer — or, refused before it (no passkey, a prompt cancelled, a browser without passkeys), with an answer of its own, { error, code }, as api() gives one, so a page says it where it says the pool's refusals.
+  function passkeyed(what, post) {
+    var no = function (text) { return { error: text + " Nothing changed.", code: "no_answer" }; };
+    if (!window.PublicKeyCredential || !navigator.credentials || !window.isSecureContext) return Promise.resolve(no("This browser cannot use a passkey on this page: it needs a secure address (https, or localhost) and passkey support."));
+    var b64 = function (buf) { var b = new Uint8Array(buf), s = ""; for (var i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); };
+    var bytes = function (v) { var t = String(v).replace(/-/g, "+").replace(/_/g, "/"); while (t.length % 4) t += "="; var bin = atob(t), out = new Uint8Array(bin.length); for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out; };
+    return api("POST", "/auth/passkeys/assert", { for: what }).then(function (o) {
+      if (o.error) return o;
+      var k = o.publicKey;
+      return navigator.credentials.get({ publicKey: { challenge: bytes(k.challenge), rpId: k.rpId, timeout: k.timeout, userVerification: k.userVerification, allowCredentials: k.allowCredentials.map(function (c) { return { type: c.type, id: bytes(c.id) }; }) } }).then(function (cred) {
+        if (!cred) return no("No passkey answered.");
+        var r = cred.response;
+        return post({ credential: b64(cred.rawId), client_data: b64(r.clientDataJSON), authenticator_data: b64(r.authenticatorData), signature: b64(r.signature), user_handle: r.userHandle ? b64(r.userHandle) : "" });
+      }, function (e) {
+        var n = e && e.name;
+        return no(n === "NotAllowedError" || n === "AbortError" ? "No passkey answered: the request was cancelled or timed out." : n === "SecurityError" ? "Your browser will not ask for a passkey on this address: open the pool's own." : n === "NotSupportedError" ? "This browser or device cannot use your passkey here." : "Your passkey could not be asked: " + errorText(e).replace(/[.\s]+$/, "") + ".");
+      });
+    });
+  }
+  // A refusal as HTML, as a page draws it (#271): the pool's words, escaped — and when the login holds no passkey (code no_passkey, with register: its own page's section), the way to add one as a link in place of the address the words carry, never an address to copy by hand.
+  function refusalHtml(d) {
+    var text = esc(d && d.error ? d.error : errorText(d)), to = d && typeof d.register === "string" && /^\/user\/[A-Za-z0-9-]{1,39}#passkeys$/.test(d.register) ? d.register : "";
+    return to ? text.split(" (" + esc(to) + ")").join("").replace(/[.\s]*$/, ".") + ' <a href="' + esc(to) + '">Register a passkey</a>' : text;
+  }
   // The line a page writes when a list did not answer — "the review list did not answer: internal error" — the list's name and the reason. The skeleton ends here, so nothing reads as still loading; what was drawn before stays, since a refresh that failed is not a list that emptied, and no empty state is drawn in its place: "nothing waiting" over a query that threw read as good news. Written to sel's text when a selector is given; returned for a page that draws it its own way.
   function noAnswer(what, e, sel) { endSkeleton(); var text = "the " + what + " did not answer: " + errorText(e); var el = sel ? $(sel) : null; if (el) el.textContent = text; return text; }
   // The tiles a list that never answered would have drawn: the same labels and links, "—" for every number and "did not answer" under it, the reason on hover — never a 0, which reads as nothing queued, nothing failed, nobody waiting, and never the whole sentence under every tile: the page's note says it once (the Pipeline's first screen said it seven times, 2026-09-18). A tile whose sixth element names another read ("stats": the /api/v1/stats poll) stays as computed — its series answered, and the chart beside it draws the same series; "the factory's lists did not answer" under the Builds tile named a list that never fed it. Takes and returns what setTiles takes.
@@ -1416,7 +1440,7 @@ export const HELPERS = String.raw`
     });
     if (what === "reject") return ask({ title: "Reject " + label, text: "Every build of the package in review stops, on every architecture. A request rejected frees its name; a package already in the pool keeps it. The contributor reads the note, and the rejection is on the record.", input: "required", placeholder: "what is wrong, in a line or two", confirm: "Reject", danger: true });
     if (what === "withdraw") return ask({ title: "Withdraw the approval of " + label, text: "The approval stays on the record and is void from now on, on every architecture it covered; the package leaves every ring it reached; another maintainer decides.", input: "required", placeholder: "why take it back", confirm: "Withdraw", danger: true });
-    return ask({ title: "Approve " + label, text: "One decision for the package: the project's build of every architecture it built again goes into edge, signed by the pool; one that did not build is not supported. The approval is on the record with your name.", input: "optional", confirm: "Approve" });
+    return ask({ title: "Approve " + label, text: "One decision for the package: the project's build of every architecture it built again goes into edge, signed by the pool; one that did not build is not supported. The approval is on the record with your name. Your passkey confirms it: your device asks for your fingerprint, face or PIN.", input: "optional", confirm: "Approve with your passkey" });
   }
   // What the toast says once the server said yes: where the builds went, the tasks the project builds it as and on what, what the withdrawal emptied, whether a rejection freed the name.
   function decidedText(what, d, dropped) {
@@ -1438,8 +1462,10 @@ export const HELPERS = String.raw`
       if (got === null) { b.disabled = false; return; }
       var body = { note: got && typeof got === "object" ? got.note : got };
       if (got && typeof got === "object" && got.pick) body.worker = got.pick;
-      return api("POST", "/api/v1/factory/tasks/" + id + "/" + what, body).then(function (d) {
-        if (d.error) { b.disabled = false; toast(esc(d.error), "error"); return; }
+      // Approve is confirmed with the maintainer's passkey (#271): the answer rides in the body; the other three post as they are.
+      var send = function (assertion) { if (assertion) body.assertion = assertion; return api("POST", "/api/v1/factory/tasks/" + id + "/" + what, body); };
+      return (what === "approve" ? passkeyed("approve:" + id, send) : send()).then(function (d) {
+        if (d.error) { b.disabled = false; toast(refusalHtml(d), "error"); return; }
         toast(decidedText(what, d, b.hasAttribute("data-note")), what === "withdraw" ? "warn" : "ok");
         DECIDED.forEach(function (fn) { fn(what, Number(id), d); });
       });

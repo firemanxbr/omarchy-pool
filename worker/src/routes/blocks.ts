@@ -8,18 +8,21 @@ import { standsSql } from "./story";
 import { settleTargets } from "../targets";
 import { throughWords, type Through } from "../agents";
 import { DISCARD_SQL } from "./agents";
+import { decidedWith, type PasskeyGate } from "./passkeys";
 
 /**
  * Blocking — the maintainers' brake (docs/GOVERNANCE.md, *Blocking*).
  *
- *   POST /factory/contributors/:login/block   {reason}  a maintainer, not the login itself: no more requests or builds;
- *                                                       their workers revoked, their queued and staged builds cancelled,
- *                                                       their packages rejected. The record: contributors/<login>/block-<t>.json
+ *   POST /factory/contributors/:login/block   {reason, assertion}  a maintainer, not the login itself, with their passkey:
+ *                                                       no more requests or builds; their workers revoked, their queued and
+ *                                                       staged builds cancelled, their packages rejected. The record:
+ *                                                       contributors/<login>/block-<t>.json
  *   POST /factory/contributors/:login/unblock {reason}  another maintainer than the one who blocked
- *   POST /factory/packages/:name/block        {reason}  any maintainer: the package — every architecture of it — leaves every
- *                                                       ring (a release per ring, edge re-rendered), its builds cancelled, the
- *                                                       review it stood on withdrawn, its bumps stopped, its project refused to
- *                                                       new requests. The record: factory/<name>/<request>/decision-<t>.json
+ *   POST /factory/packages/:name/block        {reason, assertion}  any maintainer, with their passkey: the package — every
+ *                                                       architecture of it — leaves every ring (a release per ring, edge
+ *                                                       re-rendered), its builds cancelled, the review it stood on withdrawn,
+ *                                                       its bumps stopped, its project refused to new requests. The record:
+ *                                                       factory/<name>/<request>/decision-<t>.json
  *   POST /factory/packages/:name/unblock      {reason}  another maintainer than the one who blocked: back to the factory,
  *                                                       registered (a new build and a new review follow)
  *   GET  /factory/blocks                                what is blocked, and by whom (public)
@@ -31,6 +34,12 @@ import { DISCARD_SQL } from "./agents";
  * routes/agents.ts) carries `through` — the agent, its client, the grant and
  * the draft — on its record and its line. A contributor's block ends their
  * agents' grants with their workers.
+ *
+ * A block — of a contributor or of a package — is decided with the
+ * maintainer's passkey (#271): the web's own Block posts an assertion for
+ * this act (`assertion`, routes/passkeys.ts webGate), a draft brings the one
+ * its confirmation was made with (`through.passkey`); the record and the
+ * line name it. A lift is not: it takes nothing out of a ring.
  */
 
 /** A blocked contributor's grants, every one not revoked yet — the live ones and a code not swapped — by the login's index: a maintainer's act, once per person. */
@@ -42,16 +51,19 @@ function need(c: Contributor): Response | null {
 
 const stamp = (): string => new Date().toISOString().replace(/[-:.Z]/g, "");
 
-export async function handleBlockContributor(c: Contributor, login: string, request: Request, env: Env): Promise<Response> {
+export async function handleBlockContributor(c: Contributor, login: string, request: Request, env: Env, gate?: PasskeyGate): Promise<Response> {
   const denied = need(c);
   if (denied) return denied;
-  const b = (await request.json().catch(() => ({}))) as { reason?: string };
+  const b = (await request.json().catch(() => ({}))) as { reason?: string; assertion?: unknown };
   if (!b.reason || b.reason.trim().length < 4) return json({ error: "a reason is required; it is on the record" }, 400);
   if (login === c.login) return json({ error: "nobody blocks themselves" }, 400);
   const who = await env.DB.prepare("SELECT login, role, blocked_at FROM contributors WHERE login = ?").bind(login).first<{ login: string; role: string; blocked_at: string | null }>();
   if (!who) return json({ error: `${login} has never signed in` }, 404);
   if (who.role === "maintainer") return json({ error: `${login} is a maintainer: that is a governance pull request (factory/MAINTAINERS.toml), not a block` }, 409);
   if (who.blocked_at) return json({ error: `${login} is already blocked (since ${who.blocked_at})` }, 409);
+  // The brake is decided with the maintainer's passkey (#271): checked once the block is allowed, before anything is written.
+  const passkey = await decidedWith(undefined, gate, b.assertion);
+  if (passkey instanceof Response) return passkey;
   const at = new Date().toISOString();
   const packages = (await env.DB.prepare("SELECT name FROM factory_packages WHERE owner = ?").bind(login).all<{ name: string }>()).results.map((r) => r.name);
   const workers = (await env.DB.prepare("SELECT id FROM build_workers WHERE owner = ? AND revoked_at IS NULL").bind(login).all<{ id: string }>()).results.map((r) => r.id);
@@ -72,11 +84,11 @@ export async function handleBlockContributor(c: Contributor, login: string, requ
   await settleTargets(env, packages);
   const key = `contributors/${login}/block-${stamp()}.json`;
   const via = viaOf(request);
-  const record = await putRecord(env, key, { schema: "omarchy-pool/block/1", kind: "contributor", login, by: c.login, via, agent: null, at, reason: b.reason, packages, workers_revoked: workers });
+  const record = await putRecord(env, key, { schema: "omarchy-pool/block/1", kind: "contributor", login, by: c.login, via, passkey, agent: null, at, reason: b.reason, packages, workers_revoked: workers });
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('block', NULL, 'factory', 'warn', ?, ?)")
-    .bind(`${login} blocked by ${c.login}: ${b.reason.slice(0, 140)} — ${packages.length} package(s) rejected, ${workers.length} worker(s) revoked`, JSON.stringify({ login, by: c.login, via, agent: null, reason: b.reason, packages, workers, record: recordUrl(env, record.key) }))
+    .bind(`${login} blocked by ${c.login}: ${b.reason.slice(0, 140)} — ${packages.length} package(s) rejected, ${workers.length} worker(s) revoked`, JSON.stringify({ login, by: c.login, via, passkey, agent: null, reason: b.reason, packages, workers, record: recordUrl(env, record.key) }))
     .run();
-  return json({ blocked: login, by: c.login, at, packages, workers_revoked: workers, record: recordUrl(env, record.key) });
+  return json({ blocked: login, by: c.login, at, passkey, packages, workers_revoked: workers, record: recordUrl(env, record.key) });
 }
 
 export async function handleUnblockContributor(c: Contributor, login: string, request: Request, env: Env): Promise<Response> {
@@ -142,10 +154,13 @@ export async function blockRefusal(c: Contributor, name: string, reason: unknown
   return pkg;
 }
 
-export async function handleBlockPackage(c: Contributor, name: string, request: Request, env: Env, through?: Through): Promise<Response> {
-  const b = (await request.json().catch(() => ({}))) as { reason?: string };
+export async function handleBlockPackage(c: Contributor, name: string, request: Request, env: Env, through?: Through, gate?: PasskeyGate): Promise<Response> {
+  const b = (await request.json().catch(() => ({}))) as { reason?: string; assertion?: unknown };
   const pkg = await blockRefusal(c, name, b.reason, env);
   if (pkg instanceof Response) return pkg;
+  // Every ring loses it: decided with a passkey (#271) — the draft's, or the web's own answer for this block — once the block is allowed, before anything is written.
+  const passkey = await decidedWith(through, gate, b.assertion);
+  if (passkey instanceof Response) return passkey;
   b.reason = b.reason!.trim();
   const at = new Date().toISOString();
   const note = `blocked by ${c.login}: ${b.reason.slice(0, 200)}`;
@@ -163,11 +178,11 @@ export async function handleBlockPackage(c: Contributor, name: string, request: 
   const key = pkg.request_id ? recordKey(name, pkg.request_id, `decision-${stamp()}.json`) : `factory/${name}/0/decision-${stamp()}.json`;
   const reviews = [...new Set(withdrawn.map((a) => a.review_id ?? a.id))];
   const via = viaOf(request);
-  const record = await putRecord(env, key, { schema: "omarchy-pool/decision/1", decision: "block", name, owner: pkg.owner, by: c.login, via, ...(through ? { through } : {}), agent: null, at, reason: b.reason, rings, withdrawn: { reviews, approvals: withdrawn.map((a) => a.id), arches: [...new Set(withdrawn.map((a) => a.arch))] } });
+  const record = await putRecord(env, key, { schema: "omarchy-pool/decision/1", decision: "block", name, owner: pkg.owner, by: c.login, via, ...(through ? { through } : { passkey }), agent: null, at, reason: b.reason, rings, withdrawn: { reviews, approvals: withdrawn.map((a) => a.id), arches: [...new Set(withdrawn.map((a) => a.arch))] } });
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('block', NULL, 'factory', 'warn', ?, ?)")
-    .bind(`${name} blocked by ${c.login}${throughWords(through)}: ${b.reason.slice(0, 140)}${rings.length ? " — pulled from " + rings.map((r) => r.ring).join(", ") : ""}${reviews.length ? ` — the approval withdrawn, back to the factory` : ""}`, JSON.stringify({ name, owner: pkg.owner, by: c.login, via, ...(through ? { through } : {}), agent: null, reason: b.reason, rings, withdrawn: reviews, record: recordUrl(env, record.key) }))
+    .bind(`${name} blocked by ${c.login}${throughWords(through)}: ${b.reason.slice(0, 140)}${rings.length ? " — pulled from " + rings.map((r) => r.ring).join(", ") : ""}${reviews.length ? ` — the approval withdrawn, back to the factory` : ""}`, JSON.stringify({ name, owner: pkg.owner, by: c.login, via, ...(through ? { through } : { passkey }), agent: null, reason: b.reason, rings, withdrawn: reviews, record: recordUrl(env, record.key) }))
     .run();
-  return json({ blocked: name, by: c.login, at, rings, withdrawn: reviews, ...(through ? { through } : {}), record: recordUrl(env, record.key) });
+  return json({ blocked: name, by: c.login, at, rings, withdrawn: reviews, ...(through ? { through } : { passkey }), record: recordUrl(env, record.key) });
 }
 
 export async function handleUnblockPackage(c: Contributor, name: string, request: Request, env: Env): Promise<Response> {

@@ -1025,7 +1025,7 @@ const PACKAGE_SCRIPT = String.raw`
     $("#you-icon").innerHTML = lucide(icon, 15);
     $("#you-who").textContent = who;
     $("#you").innerHTML = '<p>' + text + '</p>' + (btns.length ? '<div class="pkg-btns">' + btns.join("") + '</div>' : '') + (lock ? '<span class="pkg-lock">' + lucide("lock", 13) + esc(lock) + '</span>' : '') +
-      (ASK ? '<form class="pkg-ask" id="you-ask"><input id="you-why" placeholder="Why? This goes on the record." aria-label="the reason, on the record" aria-describedby="you-err" autocomplete="off" value="' + esc(DRAFT) + '"><p class="err" id="you-err" role="alert" hidden></p><div class="pkg-btns"><button type="submit" class="op-btn ' + (ASK === "block" ? "danger" : "primary") + '">' + esc(ASK === "block" ? "Block " + name : "Lift the block") + '</button><button type="button" class="op-btn" data-act="cancel">Cancel</button></div></form>' : '');
+      (ASK ? '<form class="pkg-ask" id="you-ask"><input id="you-why" placeholder="Why? This goes on the record." aria-label="the reason, on the record" aria-describedby="you-err" autocomplete="off" value="' + esc(DRAFT) + '"><p class="err" id="you-err" role="alert" hidden></p><div class="pkg-btns"><button type="submit" class="op-btn ' + (ASK === "block" ? "danger" : "primary") + '">' + (ASK === "block" ? lucide("key-round", 14) + esc("Block " + name + " with your passkey") : esc("Lift the block")) + '</button><button type="button" class="op-btn" data-act="cancel">Cancel</button></div></form>' : '');
     var f = $("#you-ask");
     if (f) {
       f.onsubmit = function (ev) { ev.preventDefault(); act(ASK, $("#you-why").value.trim()); };
@@ -1050,9 +1050,10 @@ const PACKAGE_SCRIPT = String.raw`
     if (what !== "adopt" && why.length < 4) { var e = $("#you-err"); e.hidden = false; e.textContent = "Say why, in a few words — the record keeps it."; $("#you-why").focus(); return; }
     document.querySelectorAll("#you button").forEach(function (b) { b.disabled = true; });
     var path = "/api/v1/factory/packages/" + encodeURIComponent(name) + "/" + what;
-    api("POST", path, what === "adopt" ? {} : { reason: why }).then(function (d) {
+    // A block is confirmed with the maintainer's passkey (#271): the answer rides with the reason. Adopt and a lift post as they are.
+    (what === "block" ? passkeyed("block:package:" + name, function (assertion) { return api("POST", path, { reason: why, assertion: assertion }); }) : api("POST", path, what === "adopt" ? {} : { reason: why })).then(function (d) {
       // Refused: said, and the form stays open with its words for another try.
-      if (d.error) { toast(esc(d.error), "error"); renderYou(); if (!ASK) refocus(what); return; }
+      if (d.error) { toast(refusalHtml(d), "error"); renderYou(); if (!ASK) refocus(what); return; }
       // Adopt makes you its maintainer in the pool: the package stays what it was, synced or built here — and a registration left unmaintained is yours as well (d.registration: whom it was taken from, where it stands now).
       if (what === "adopt") {
         var box = D || D404; box.maintenance = box.maintenance || {}; box.maintenance.maintainer = { login: WHO.login, since: d.since || new Date().toISOString(), adopted: true };
@@ -1365,11 +1366,11 @@ export const PACKAGE_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // You: the one card that changes with the viewer. A visitor signs in; the contributor who requested it asks for an update (the renewal, grey with the story's reason when it is not taken) and never reviews it; a maintainer blocks it with a reason on the record (a factory package: a synced one is grey with why), lifts a block another maintainer made, adopts a package the pool serves that nobody looks after, opens its review. The server refuses every act to anyone else.
+      // You: the one card that changes with the viewer. A visitor signs in; the contributor who requested it asks for an update (the renewal, grey with the story's reason when it is not taken) and never reviews it; a maintainer blocks it with a reason on the record and their passkey (#271) (a factory package: a synced one is grey with why), lifts a block another maintainer made, adopts a package the pool serves that nobody looks after, opens its review. The server refuses every act to anyone else.
       id: "package.you",
       page,
       anchor: ['id="you-section"', 'id="you"', 'id="you-who"'],
-      script: ["renderYou", "signInHref()", '"Sign in with GitHub"', '"Request an update"', "You can't review your own request.", '"Adopt"', '"Block"', '"Lift the block"', '"Open review"', "!!req.renewable && !b", "isMaintainer()", "Why? This goes on the record.", 'role="alert"', '"Left unmaintained by "', "d.registration"],
+      script: ["renderYou", "signInHref()", '"Sign in with GitHub"', '"Request an update"', "You can't review your own request.", '"Adopt"', '"Block"', '"Lift the block"', '"Open review"', "!!req.renewable && !b", "isMaintainer()", "Why? This goes on the record.", 'role="alert"', '"Left unmaintained by "', "d.registration", 'passkeyed("block:package:" + name', '" with your passkey"', 'toast(refusalHtml(d), "error")'],
       reads: [{ path: story, fields: ["request.renewable", "request.busy", "package.owner", "package.status"] }],
       acts: [
         // No reason, no block: the probes change nothing.

@@ -182,7 +182,7 @@ const POOL_CHAPTERS: DocChapter[] = [
     group: "pool",
     href: "/docs/governance",
     label: "Governance",
-    blurb: "Two roles, one file, decisions by pull request: contributors and maintainers, the project's workers, blocking, becoming a maintainer, the record.",
+    blurb: "Two roles, one file, decisions by pull request: contributors and maintainers, the project's workers, blocking, passkeys, becoming a maintainer, the record.",
     secs: [
       { id: "maintainers", title: "The maintainers", blurb: "read live from factory/MAINTAINERS.toml on main — one list, no areas, nobody above it" },
       { id: "learn", title: "We do not use what you built, we learn from it", blurb: "a contributor's build is evidence; the project builds it again on a trusted worker; the second agent's audit" },
@@ -192,6 +192,7 @@ const POOL_CHAPTERS: DocChapter[] = [
       { id: "workers", title: "Workers, compute and agents", blurb: "one image, the registration decides; yours and only yours; ready is not online; agent keys stay with the owner, on the broker" },
       { id: "bumps", title: "Bumps and packages nobody builds", blurb: "a new upstream release is built as evidence again; 14 days for the owner's worker, 30 days and the package is unmaintained" },
       { id: "blocking", title: "Blocking", blurb: "a contributor or a package out of the pool, the reason on the record, another maintainer lifts it" },
+      { id: "passkeys", title: "A passkey for approve and block", blurb: "the two decisions in the browser with the maintainer's passkey, no token; a lost one reset by another maintainer" },
       { id: "record", title: "The record and the score", blurb: "role lines, signed approvals, trust lines, signed blocks; one number from what the pool keeps anyway" },
     ],
   },
@@ -227,7 +228,7 @@ const POOL_CHAPTERS: DocChapter[] = [
       { id: "factory", title: "The factory (read)", blurb: "workers, the queue, the registry, what is staged for review, approvals, maintainers, trust, blocks" },
       { id: "examples", title: "Examples", blurb: "curl, jq, the thin client" },
       { id: "write-jobs", title: "Write (jobs only)", blurb: "what a worker calls with its lease and per-job token" },
-      { id: "write-people", title: "Write (people)", blurb: "register, request, build, approve, reject, trust, block — a contributor's or a maintainer's token" },
+      { id: "write-people", title: "Write (people)", blurb: "register, request, build, reject, trust — a contributor's or a maintainer's token; approve and block in the browser, with a passkey" },
     ],
   },
 ];

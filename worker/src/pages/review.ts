@@ -141,7 +141,7 @@ const BODY = String.raw`
         <textarea id="rv-note-in" rows="2" placeholder="The agent drafts a verdict when the rebuild ends"></textarea>
         <span id="rv-usedraft"></span>
         <div class="rv-btns" id="rv-btns">${DECIDE.map(([what, label, cls]) => `<button type="button" class="op-btn${cls}" data-decide="${what}" disabled aria-disabled="true" title="${NOTHING}">${label}</button>`).join("")}</div>
-        <p class="rv-err" id="rv-err"></p>
+        <p class="rv-err" id="rv-err" role="alert"></p>
         <div class="rv-confirm" id="rv-confirm" role="group" aria-labelledby="rv-confirm-t" hidden><span id="rv-confirm-t"></span><span class="rv-confirm-b"><button type="button" class="op-btn go" id="rv-confirm-go">Confirm</button><button type="button" class="op-btn" id="rv-confirm-no">Cancel</button></span></div>
       </div>
     </section>
@@ -737,8 +737,9 @@ const SCRIPT = String.raw`
       if (CONFIRM) {
         box.className = "rv-confirm" + (CONFIRM.what === "reject" ? " danger" : CONFIRM.what === "changes" ? " warn" : "");
         $("#rv-confirm-t").textContent = confirmText(CONFIRM.what, R, p);
-        // The confirmation takes the focus when it opens: Confirm, one Tab from Cancel; Escape closes it.
-        var go = $("#rv-confirm-go"); if (!was && go && go.focus) go.focus();
+        // The confirmation takes the focus when it opens: Confirm, one Tab from Cancel; Escape closes it. Approve's Confirm asks for the passkey (#271), and says so.
+        var go = $("#rv-confirm-go"); if (go) go.innerHTML = CONFIRM.what === "approve" ? lucide("key-round", 14) + "Confirm with your passkey" : "Confirm";
+        if (!was && go && go.focus) go.focus();
       }
     }
   }
@@ -748,7 +749,7 @@ const SCRIPT = String.raw`
   function confirmText(what, R, p) {
     var name = OPEN, ver = (p && p.version) || "", arches = R.filter(function (r) { return r.rebuild && r.rebuild.status === "staged"; }).map(function (r) { return r.arch; }), ns = notSupported(p ? p.targets : {}), owner = (STORY && STORY.package && STORY.package.owner) || (p && p.owner);
     var inPool = (APPROVALS || []).some(function (a) { return a.name === name && a.standing; }), mine = p && p.claim && isOwner(p.claim.by);
-    if (what === "approve") return "Approve " + name + " " + ver + " for " + (arches.join(" + ") || "every architecture rebuilt") + (ns.length ? " (" + ns.join(" · ") + " not supported)" : "") + "? " + (mine ? "Your build enters edge." : "The project's build enters edge.");
+    if (what === "approve") return "Approve " + name + " " + ver + " for " + (arches.join(" + ") || "every architecture rebuilt") + (ns.length ? " (" + ns.join(" · ") + " not supported)" : "") + "? " + (mine ? "Your build enters edge." : "The project's build enters edge.") + " Your passkey confirms it.";
     if (what === "reject") return inPool ? "Reject " + name + " " + ver + "? The version is rejected; " + name + " stays in the pool." : "Reject " + name + "? The name is freed and the requester is told why.";
     return "Send " + name + " back to the factory with your note? The name stays " + (owner ? "@" + owner + "'s" : "the requester's") + ".";
   }
@@ -756,8 +757,11 @@ const SCRIPT = String.raw`
     var note = ($("#rv-note-in").value || "").trim(), err = $("#rv-err");
     if (what !== "approve" && note.length < 4) { err.textContent = "Say why in a few words: the requester reads it, and it goes on the record."; return; }
     err.textContent = "";
-    api("POST", API + "/tasks/" + id + "/" + what, { note: note || undefined }).then(function (d) {
-      if (d.error) { err.textContent = d.error; toast(esc(d.error), "error"); return; }
+    // Approve is confirmed with the maintainer's passkey (#271): the answer rides in the body; changes and reject post as they are.
+    var body = { note: note || undefined }, send = function (assertion) { if (assertion) body.assertion = assertion; return api("POST", API + "/tasks/" + id + "/" + what, body); };
+    (what === "approve" ? passkeyed("approve:" + id, send) : send()).then(function (d) {
+      // Refused: said once, beside the buttons (an alert), with the way to add a passkey as a link when the maintainer holds none.
+      if (d.error) { err.innerHTML = refusalHtml(d); return; }
       CONFIRM = null; $("#rv-note-in").value = "";
       toast(what === "changes" ? "Sent back to the factory — the requester reads your note; the name stays theirs." : decidedText(what, d), what === "approve" ? "ok" : "warn");
       FRESH = "?after=" + Date.now(); load(); loadWork();
@@ -839,10 +843,11 @@ const SCRIPT = String.raw`
     var what = $("#block-what").value.trim(), why = $("#block-why").value.trim();
     if (!what || why.length < 4) return;
     busy(fetch("/api/v1/users/" + encodeURIComponent(what))).then(function (r) { return r.status === 200 ? "contributors" : "packages"; }).then(function (kind) {
-      ask({ title: "Block " + (kind === "contributors" ? "contributor " : "package ") + what + "?", text: (kind === "contributors" ? "Their builds stop and their packages leave the rings" : "Its builds stop and it leaves the rings") + "; another maintainer lifts it. The reason: <i>" + esc(why) + "</i>", confirm: "Block", danger: true }).then(function (go) {
+      ask({ title: "Block " + (kind === "contributors" ? "contributor " : "package ") + what + "?", text: (kind === "contributors" ? "Their builds stop and their packages leave the rings" : "Its builds stop and it leaves the rings") + "; another maintainer lifts it. The reason: <i>" + esc(why) + "</i>. Your passkey confirms it.", confirm: "Block with your passkey", danger: true }).then(function (go) {
         if (go === null) return;
-        api("POST", API + "/" + kind + "/" + encodeURIComponent(what) + "/block", { reason: why }).then(function (d) {
-          if (d.error) toast(esc(d.error), "error"); else { toast("Blocked."); $("#block-what").value = ""; $("#block-why").value = ""; }
+        // A block is confirmed with the maintainer's passkey (#271), for this contributor or this package.
+        passkeyed("block:" + (kind === "contributors" ? "contributor:" : "package:") + what, function (assertion) { return api("POST", API + "/" + kind + "/" + encodeURIComponent(what) + "/block", { reason: why, assertion: assertion }); }).then(function (d) {
+          if (d.error) toast(refusalHtml(d), "error"); else { toast("Blocked."); $("#block-what").value = ""; $("#block-why").value = ""; }
           load();
         }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
       });
@@ -960,7 +965,7 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     id: "review.blocked",
     page: "/review",
     anchor: ['id="brake"', 'id="block-form"', 'id="block-what"', 'id="block-why"', 'minlength="4"', `title="${BLOCK_WHY}"`],
-    script: ["function blockedRows()", "function liftBtn(kind, what, b)", '"another maintainer lifts it"', '"on the record"', "\"/unblock\"", '$("#block-form").innerHTML = gate(', '"/api/v1/users/"', 'r.status === 200 ? "contributors" : "packages"', '"/block"', 'noAnswer("brake\'s record", e)'],
+    script: ["function blockedRows()", "function liftBtn(kind, what, b)", '"another maintainer lifts it"', '"on the record"', "\"/unblock\"", '$("#block-form").innerHTML = gate(', '"/api/v1/users/"', 'r.status === 200 ? "contributors" : "packages"', '"/block"', 'noAnswer("brake\'s record", e)', 'passkeyed("block:" + (kind === "contributors" ? "contributor:" : "package:") + what', 'if (d.error) toast(refusalHtml(d), "error")'],
     reads: [
       { path: "/api/v1/factory/blocks", fields: ["contributors", "contributors.0.login", "contributors.0.blocked_at", "contributors.0.blocked_by", "contributors.0.blocked_reason", "packages.0.name", "packages.0.blocked_at", "packages.0.blocked_by", "packages.0.blocked_reason"] },
       { path: `/api/v1/users/${F.owner}`, fields: ["login"] },
@@ -1044,14 +1049,14 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // Below: the checklist, the verdict with the agent's draft, and the three decisions — each confirmed in place before it is posted, each grey with the server's reason where the viewer may not. The acts: approve on the project's build (409 once decided), changes on disposable's own row, a rejection of mine's later build.
+    // Below: the checklist, the verdict with the agent's draft, and the three decisions — each confirmed in place before it is posted, approve with the maintainer's passkey (#271), each grey with the server's reason where the viewer may not. The acts: approve on the project's build (409 once decided, 403 without a passkey's answer), changes on disposable's own row, a rejection of mine's later build.
     id: "review.decide",
     page: "/review",
-    anchor: ['id="rv-decide"', "Checklist", "Verdict · goes on the record", 'id="rv-note-in"', 'id="rv-btns"', 'data-decide="approve"', 'data-decide="changes"', 'data-decide="reject"', 'id="rv-confirm" role="group" aria-labelledby="rv-confirm-t"', 'id="rv-confirm-go"'],
-    script: ["function draftOf(R)", "Use the agent's draft", "function setGate(el, ok, why)", "ca.why.approve", "cl.why.changes", "cl.why.reject", '"Your build enters edge."', "? The name is freed and the requester is told why.", '" back to the factory with your note?', '" did not request it"', '"Rebuilt by the project, not the factory\'s package"', 'ev.key === "Escape"'],
+    anchor: ['id="rv-decide"', "Checklist", "Verdict · goes on the record", 'id="rv-note-in"', 'id="rv-btns"', 'data-decide="approve"', 'data-decide="changes"', 'data-decide="reject"', 'id="rv-err" role="alert"', 'id="rv-confirm" role="group" aria-labelledby="rv-confirm-t"', 'id="rv-confirm-go"'],
+    script: ["function draftOf(R)", "Use the agent's draft", "function setGate(el, ok, why)", "ca.why.approve", "cl.why.changes", "cl.why.reject", '"Your build enters edge."', "? The name is freed and the requester is told why.", '" back to the factory with your note?', '" did not request it"', '"Rebuilt by the project, not the factory\'s package"', 'ev.key === "Escape"', 'passkeyed("approve:" + id, send)', '"Confirm with your passkey"', "err.innerHTML = refusalHtml(d)"],
     reads: [{ path: "/api/v1/factory/review", fields: ["staged.0.can.approve", "staged.0.can.reject", "staged.0.can.changes", "staged.0.lead"] }],
     acts: [
-      { method: "POST", path: `/api/v1/factory/tasks/${F.projectTask}/approve`, body: { note: "reads well" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: [200, 409] } },
+      { method: "POST", path: `/api/v1/factory/tasks/${F.projectTask}/approve`, body: { note: "reads well" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: [403, 409] } },
       { method: "POST", path: `/api/v1/factory/tasks/${F.disposableTask}/changes`, body: { note: "pin the source to the release tag" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 200 } },
       { method: "POST", path: `/api/v1/factory/tasks/${F.stagedTask}/reject`, body: { note: "the source is not the upstream's" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: [200, 409] } },
     ],

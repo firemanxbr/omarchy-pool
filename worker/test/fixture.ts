@@ -29,7 +29,8 @@
  * block from before #242, which withdraws it now) — the two states of an
  * approval that stands outside every ring, written as rows; m1 and m2, the
  * maintainers — w1 is m1's project worker, m2 asked
- * for the project's builds and approved them. Every login signs in with the cookie
+ * for the project's builds and approved them; each holds a passkey, "laptop",
+ * made at their first decision (#271, decide.ts). Every login signs in with the cookie
  * `omc=oms_<login>` and the CLI token `omc_<login>`; the workers' tokens
  * are `omw_<id>`. `F.sessions` maps the three signed-in roles to their
  * cookie.
@@ -73,6 +74,7 @@ import type { Fixture } from "../src/pages/components";
 import { GO_MENU, HELPERS, THEME_BOOT } from "../src/pages/layout";
 import { KIT_HELPERS } from "../src/pages/kit";
 import { settleTargets } from "../src/targets";
+import { decider } from "./decide";
 
 export type { Fixture };
 
@@ -234,6 +236,8 @@ async function index(env: Env, source: string, arch: string, p: Pkg, token: stri
 
 export async function seedDashboard(env: Env): Promise<Fixture> {
   const arch = "x86_64";
+  // Approve and block are decided in the browser with the maintainer's passkey (#271): m2's and m1's are made at their first decision (decide.ts).
+  const { decide } = decider(env);
 
   // The pool signs in the tests too: a key of its own, made here (signing.test.ts makes one the same way).
   env.SIGNING_KEY = (await openpgp.generateKey({ type: "curve25519", userIDs: [{ name: "Pool Test", email: "test@omarchy.invalid" }], format: "armored" })).privateKey;
@@ -321,7 +325,7 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
     const trial = await claimProject(["trial"], `the trial of ${name}`);
     must(await call(env, "PUT", `/factory/tasks/${projectTask}/artifacts/trial.log`, undefined, trial.token, `== pacman -S ${name}\nTRIAL=ok`), 201, `trial.log of ${name}`);
     must(await call(env, "POST", `/factory/tasks/${trial.task.id}/complete`, { result: { verdict: "ok", packages: [name], task: projectTask }, duration_ms: 30000 }, trial.token), 200, `complete the trial of ${name}`);
-    const publish = must(await call(env, "POST", `/factory/tasks/${projectTask}/approve`, { note: "looks right" }, "omc_m2"), 200, `approve ${name}`).json.publish as number;
+    const publish = must(await decide("m2", `/factory/tasks/${projectTask}/approve`, { note: "looks right" }), 200, `approve ${name}`).json.publish as number;
     return { contributorTask, projectTask, publish, sha, audit: audited, trial: trial.task.id as number };
   };
 
@@ -406,8 +410,8 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
 
   // The brake: carol requested `hers`; m1 blocked the package, then her — m2 is the other maintainer who lifts a block.
   await request("hers", "0.1", "omc_carol");
-  must(await call(env, "POST", "/factory/packages/hers/block", { reason: "the source is not the project's" }, "omc_m1"), 200, "block hers");
-  must(await call(env, "POST", "/factory/contributors/carol/block", { reason: "requests under a name that is not hers" }, "omc_m1"), 200, "block carol");
+  must(await decide("m1", "/factory/packages/hers/block", { reason: "the source is not the project's" }), 200, "block hers");
+  must(await decide("m1", "/factory/contributors/carol/block", { reason: "requests under a name that is not hers" }), 200, "block carol");
 
   // An approval that stands and no ring serves, both ways it happens, written
   // as rows the way handleApprove and handleFail leave them: dave's `lost` —

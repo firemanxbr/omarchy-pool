@@ -393,6 +393,15 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
+    // An act a passkey confirms (#271): the shell asks the pool for the act's challenge, hands it to the browser and posts the answer with the act — Approve in the Decision cell, and each page's Block, passkey and reset. The tests' address is not a relying party, so every signed-in role is refused there (rp_unavailable) and nobody is asked to sign in.
+    id: "shell.passkey",
+    page: "/",
+    anchor: [],
+    script: ["function passkeyed(what, post)", 'api("POST", "/auth/passkeys/assert", { for: what })', "navigator.credentials.get", 'passkeyed("approve:" + id, send)', "function refusalHtml(d)", 'toast(refusalHtml(d), "error")', 'if (cls === "error") t.setAttribute("role", "alert")'],
+    acts: [{ method: "POST", path: "/auth/passkeys/assert", body: { for: `approve:${F.projectTask}` }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } }],
+    visible: EVERYONE,
+  },
+  {
     // The mark, as the head names it and as browsers ask for it by name (icons.ts).
     id: "icons.favicons",
     page: "/",
