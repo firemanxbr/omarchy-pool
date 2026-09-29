@@ -654,6 +654,9 @@ const CSS = String.raw`
   .role .kchart { margin-top: 4px; } .role .kchart svg { display: block; width: 100%; overflow: visible; } .role .mini { margin-top: 8px; gap: 6px; font-size: 10.5px; letter-spacing: .04em; white-space: nowrap; } .role .mini b { font-size: 16px; }
   /* The worker tables: the id whole and on one line, a state word in its own column, icons for what a word would only repeat, the machine's usage as three small meters. */
   .wtable { font-size: 12.5px; } .wtable .avatar { width: 24px; height: 24px; font-size: 10.5px; } .wtable td { white-space: nowrap; padding-left: 6px; padding-right: 6px; } .wtable th { padding-left: 6px; padding-right: 6px; white-space: normal; line-height: 1.25; vertical-align: bottom; } .wtable .wid { font-size: 11.5px; } .wtable .pill { vertical-align: middle; font-size: 10.5px; padding: 2px 7px; } .wtable a.pill { text-decoration: none; }
+  /* A worker's name and id link to its page (#277), in the text's own colour; the marks beside its state (wtMarks) are small and dashed, a word each. */
+  a.wid, a.mono[href^="/worker/"] { color: inherit; text-decoration: none; } a.wid:hover, a.mono[href^="/worker/"]:hover { color: var(--green); text-decoration: underline; }
+  .wmark { display: inline-block; margin-left: 4px; padding: 0 5px; border: 1px dashed var(--line); color: var(--dim); font-size: 10.5px; line-height: 1.5; white-space: nowrap; text-decoration: none; vertical-align: middle; } .wmark:hover { color: var(--text); border-color: var(--green); }
   .ic { display: inline-block; width: 14px; height: 14px; vertical-align: -3px; color: var(--muted); } .ic.emu { color: var(--amber); } .ic.shared { color: var(--lilac); } .ic + .ic { margin-left: 2px; }
   .agent { display: inline-flex; align-items: center; gap: 6px; } .agent .prov { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 3px; border: 1px solid var(--line); background: var(--panel-2); font-family: Geist, sans-serif; font-size: 9.5px; font-weight: 600; letter-spacing: .04em; } .agent .dot { margin-right: 0; }
   .usage { display: inline-grid; grid-template-columns: repeat(3, 28px); gap: 5px; } .usage .u1 { display: grid; gap: 3px; text-align: center; font-size: 12px; line-height: 1; } .usage .u1 i { display: block; height: 3px; background: var(--panel-2); position: relative; } .usage .u1 i::after { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: var(--v); background: var(--green); } .usage .u1.warn i::after { background: var(--amber); } .usage .u1.hot i::after { background: var(--red); }
@@ -1056,8 +1059,10 @@ export const HELPERS = String.raw`
     if (w.owner && s.indexOf(w.owner + "-") === 0) s = s.slice(w.owner.length + 1);
     s = s.replace(/-[a-z0-9]{4}$/, "");
     if (w.arch && s.endsWith("-" + w.arch)) s = s.slice(0, -(w.arch.length + 1));
-    return '<span class="mono" title="' + esc(id) + '">' + esc(s || id) + '</span>';
+    return '<a class="mono" href="' + workerHref(id) + '" title="' + esc(id) + '">' + esc(s || id) + '</a>';
   }
+  // A worker's page has one address (#277), written here and nowhere else: its name and its id link there on every page.
+  function workerHref(id) { return "/worker/" + encodeURIComponent(id); }
   // ---- decisions ask in the dashboard, never in the browser's own box: one dialog, a note when the action wants one, a promise of the note (null = cancelled).
   //   ask({ title, text, input: "required" | "optional" | false, placeholder, confirm: "Approve", danger: true })
   // The dashboard's question: a title, a line, a note when the action wants one (input: "required" | "optional"), a choice when there is one (select: { label, options: [{ value, text, disabled, selected }] }), the button. Resolves the note as a string — or, with a select, { note, pick } — and null when cancelled.
@@ -1127,8 +1132,12 @@ export const HELPERS = String.raw`
   // The kind: project (pool jobs) and review are the project's, told apart by the role the worker reported; everything else is a contributor's.
   function wtKind(w) { if (w.side !== "omarchy") return "community"; var r = w.labels && w.labels.role; return r === "review" ? "review" : "project"; }
   // The numbers every tile that counts workers says, counted once: registered (not revoked), alive (a heartbeat in the last WORKER_ALIVE_MINUTES, the listing's word), ready (alive and, where the work needs one, an agent that answered — the listing's ready), building (alive with a task in hand); and the same four per kind in byKind.project, .review and .community.
+  // …and, by each worker's one state (wtState), the alive ones that are idle, not ready, outdated and drained: a drained or outdated worker is never counted idle (#273's lesson, #277).
   function workerCounts(ws) {
-    var count = function (list) { var kept = list.filter(function (w) { return !w.revoked_at; }), alive = kept.filter(function (w) { return w.alive; }); return { registered: kept.length, alive: alive.length, ready: alive.filter(function (w) { return w.ready; }).length, building: alive.filter(function (w) { return w.current_task; }).length }; };
+    var count = function (list) {
+      var kept = list.filter(function (w) { return !w.revoked_at; }), alive = kept.filter(function (w) { return w.alive; }), by = function (st) { return alive.filter(function (w) { return wtState(w) === st; }).length; };
+      return { registered: kept.length, alive: alive.length, ready: alive.filter(function (w) { return w.ready; }).length, building: alive.filter(function (w) { return w.current_task; }).length, idle: by("idle"), notReady: by("not ready"), outdated: by("outdated"), drained: by("drained") };
+    };
     var all = count(ws || []); all.byKind = {};
     ["project", "review", "community"].forEach(function (k) { all.byKind[k] = count((ws || []).filter(function (w) { return wtKind(w) === k; })); });
     return all;
@@ -1142,19 +1151,42 @@ export const HELPERS = String.raw`
     var id = String(w.id || ""), shown = w.owner && id.indexOf(w.owner + "-") === 0 ? id.slice(w.owner.length + 1) : id, parts = shown.split("-");
     while (shown.length > 32 && parts.length > 3) { parts.splice(1, 1); shown = parts[0] + "-…-" + parts.slice(1).join("-"); }
     if (shown.length > 32) shown = shown.slice(0, 18) + "…" + shown.slice(-13);
-    return '<span class="mono wid" title="' + esc([id, tip].filter(Boolean).join(" · ")) + '">' + esc(shown) + '</span>';
+    return '<a class="mono wid" href="' + workerHref(id) + '" title="' + esc([id, tip].filter(Boolean).join(" · ")) + '">' + esc(shown) + '</a>';
   }
   // Why an alive worker is not ready, in the words every page says it — the tables' failed pill, the Factory's workers card, Status's workers list (#273): its agent's own error when it reported one, and when that was.
   function wtNotReady(w) { return (w.agent_error ? "its agent did not answer: " + w.agent_error : !w.agent ? "no agent: a contributor's builds and the audits need one that answers" : "not ready for the work it declares") + (w.agent_checked_at ? " · checked " + ago(w.agent_checked_at) : ""); }
-  // The state, one word: building (a task in hand), failed (alive but not ready — its agent did not answer), idle, offline (with how long). Seen-when on hover.
+  // One state per worker, everywhere (#277): the first that matches wins — revoked, offline, building, drained, outdated, not ready, idle. A drained worker gets nothing whatever its image or agent says, so drained outranks both; an outdated one gets nothing whatever its agent says, so it outranks not ready; a task in hand is what a person looks for first. The Workers tables' pill (wtStatus), the Factory's and Status's worker lines and every count (workerCounts) read it.
+  function wtState(w) {
+    if (w.revoked_at) return "revoked";
+    if (!w.alive) return "offline";
+    if (w.current_task) return "building";
+    if (w.drained) return "drained";
+    if (w.update && w.update.required) return "outdated";
+    if (!w.ready) return "not ready";
+    return "idle";
+  }
+  // The state, one word (wtState): building (a task in hand), drained, outdated, failed (alive but not ready — its agent did not answer), idle, offline (with how long). Seen-when on hover; beside it, the marks (wtMarks).
   function wtStatus(w) {
-    var seen = "seen " + ago(w.last_seen);
-    if (w.revoked_at) return '<span class="pill none" title="revoked ' + esc(ago(w.revoked_at)) + '">revoked</span>';
-    if (!w.alive) return '<span class="pill none" title="not seen in the last ' + WORKER_ALIVE_MINUTES + ' minutes">offline · ' + esc(ago(w.last_seen).replace(" ago", "")) + '</span>';
-    if (w.current_task) return '<a class="pill blue" href="/build/' + w.current_task + '" title="task #' + w.current_task + ' · ' + esc(seen) + '">building</a>';
-    if (w.update && w.update.required) return '<a class="pill warn" href="/docs/workers#update" title="' + esc("its image is " + w.update.yours + ", the pool is at " + w.update.latest + ": every worker follows the latest image — it is handed nothing until it updates · " + seen) + '">outdated</a>';
-    if (!w.ready) return '<span class="pill error" title="' + esc(wtNotReady(w) + " · " + seen) + '">failed</span>';
-    return '<span class="pill ok" title="' + esc("alive, nothing in hand · " + seen) + '">idle</span>';
+    var seen = "seen " + ago(w.last_seen), st = wtState(w);
+    if (st === "revoked") return '<span class="pill none" title="revoked ' + esc(ago(w.revoked_at)) + '">revoked</span>';
+    if (st === "offline") return '<span class="pill none" title="not seen in the last ' + WORKER_ALIVE_MINUTES + ' minutes">offline · ' + esc(ago(w.last_seen).replace(" ago", "")) + '</span>';
+    var pill = st === "building" ? '<a class="pill blue" href="/build/' + w.current_task + '" title="task #' + w.current_task + ' · ' + esc(seen) + '">building</a>'
+      : st === "drained" ? '<span class="pill warn" title="' + esc("drained by " + (w.drained.by || "?") + (w.drained.reason ? ": " + w.drained.reason : "") + " — handed nothing until it is resumed · " + seen) + '">drained</span>'
+      : st === "outdated" ? '<a class="pill warn" href="/docs/workers#update" title="' + esc("its image is " + w.update.yours + ", the pool is at " + w.update.latest + ": every worker follows the latest image — it is handed nothing until it updates · " + seen) + '">outdated</a>'
+      : st === "not ready" ? '<span class="pill error" title="' + esc(wtNotReady(w) + " · " + seen) + '">failed</span>'
+      : '<span class="pill ok" title="' + esc("alive, nothing in hand · " + seen) + '">idle</span>';
+    return pill + wtMarks(w);
+  }
+  // What the pool is doing about a worker, or saw of it (#277), drawn beside its state and never changing it: an order waiting or on its way, two processes on its token, a new process every few minutes, its watchdog's restarts, the pool that gave up. Each a small mark with the words on hover; nothing for a worker with nothing to say.
+  var ORDER_WORD = { "recheck-agent": "re-check", restart: "restart", "restart-agent": "restart of its agent service", drain: "drain", resume: "resume", update: "update", "stop-task": "stop of its task" };
+  function wtMarks(w) {
+    var m = [];
+    (w.open_orders || []).forEach(function (o) { m.push([(ORDER_WORD[o.kind] || o.kind) + (o.state === "delivered" ? " on its way" : " waiting"), "ordered by " + (o.by === "pool" ? "the pool" : o.by) + " " + ago(o.at) + (o.state === "delivered" ? " — its worker has it" : " — delivered with its next claim")]); });
+    if (w.two_processes_since) m.push(["two processes", "two processes share its token since " + ago(w.two_processes_since) + " — orders are held; revoke it if you did not start two"]);
+    if (w.crash_loop_since) m.push(["crash-looping?", "a new process every few minutes since " + ago(w.crash_loop_since) + ", none finished a task — its log has why"]);
+    if (w.watchdog && w.watchdog.n) m.push(["watchdog ×" + w.watchdog.n, "restarted by its watchdog " + w.watchdog.n + " time" + (w.watchdog.n === 1 ? "" : "s") + " since " + ago(w.watchdog.since) + (w.watchdog.stuck_in ? ", stuck in " + (w.watchdog.stuck_in === "task" ? "a task" : "its " + w.watchdog.stuck_in) : "")]);
+    if (w.pool_gave_up) m.push(["the pool gave up", "the pool stopped restarting it " + ago(w.pool_gave_up) + " — a person looks"]);
+    return m.map(function (x) { return ' <a class="wmark" href="' + workerHref(w.id) + '" title="' + esc(x[1]) + '">' + esc(x[0]) + '</a>'; }).join("");
   }
   function wtVersion(w) {
     if (!w.version || w.version === "container") return '<span class="muted" title="an image from before the version was reported">—</span>';
@@ -1220,7 +1252,7 @@ export const HELPERS = String.raw`
   }
   // What the pager's filter searches on a worker's row: its id, owner, arch, version, mode, agent, who trusted it, its last task, its labels.
   function wtText(w) { return [w.id, w.owner, w.arch, w.version, w.mode, w.agent, w.trusted_by, w.last_task && w.last_task.name, JSON.stringify(w.labels || {})].join(" "); }
-  var WT_LEGEND = '<p class="dim wt-legend">' + '<span>' + WICON.native + ' native</span><span>' + WICON.emu + ' emulated</span><span>' + WICON.shared + ' shared</span><span>' + WICON.own + ' own packages</span><span><span class="pill ok">idle</span> waiting</span><span><span class="pill blue">building</span> a task in hand</span><span><span class="pill error">failed</span> its agent does not answer</span><span><span class="pill warn">outdated</span> behind the latest image, handed nothing</span><span><span class="pill none">offline</span> not seen in ' + WORKER_ALIVE_MINUTES + ' minutes</span><span>' + WICON.log + ' its own log (its owner, the maintainers)</span></p>';
+  var WT_LEGEND = '<p class="dim wt-legend">' + '<span>' + WICON.native + ' native</span><span>' + WICON.emu + ' emulated</span><span>' + WICON.shared + ' shared</span><span>' + WICON.own + ' own packages</span><span><span class="pill ok">idle</span> waiting</span><span><span class="pill blue">building</span> a task in hand</span><span><span class="pill error">failed</span> its agent does not answer</span><span><span class="pill warn">outdated</span> behind the latest image, handed nothing</span><span><span class="pill warn">drained</span> handed nothing until resumed</span><span><span class="pill none">offline</span> not seen in ' + WORKER_ALIVE_MINUTES + ' minutes</span><span>' + WICON.log + ' its own log (its owner, the maintainers)</span></p>';
   // A person's login as a link to their page, the role on hover from the set (or the caller's word); a pill with a title. Shared by the pages that tell a package's story.
   // The role is the caller's word or the set's; anything else (map's index, when a list maps personLink) is none.
   function personLink(l, role) { if (typeof role !== "string") role = ""; return l ? '<a href="' + userHref(l) + '"' + whoAttr(l, role) + '>' + esc(l) + '</a>' : '<span class="muted">—</span>'; }

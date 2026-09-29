@@ -42,6 +42,7 @@ import { USER_COMPONENTS } from "./user";
 import { PEOPLE_COMPONENTS } from "./people";
 import { AGENTS_COMPONENTS } from "./agents";
 import { WORKERS_COMPONENTS } from "./workers";
+import { WORKER_COMPONENTS } from "./worker";
 import { STATUS_COMPONENTS } from "./status";
 import { DIFF_COMPONENTS } from "./diff";
 import { API_DOCS_COMPONENTS } from "./api-docs";
@@ -433,6 +434,7 @@ export function allComponents(F: Fixture): Component[] {
     ...PEOPLE_COMPONENTS(F),
     ...AGENTS_COMPONENTS(F),
     ...WORKERS_COMPONENTS(F),
+    ...WORKER_COMPONENTS(F),
     ...STATUS_COMPONENTS(F),
     ...DIFF_COMPONENTS(F),
     ...API_DOCS_COMPONENTS(F),

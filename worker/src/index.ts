@@ -33,6 +33,7 @@
  *   POST /auth/confirm/:id/challenge · POST /auth/passkeys/challenge · POST /auth/passkeys · POST /auth/passkeys/:id/remove   passkeys: approve and block confirmed with one (#257, routes/passkeys.ts)
  *   POST /auth/passkeys/assert · POST /auth/passkeys/reset   the web's approve and block, a passkey added or removed, with one; a lost one reset by another maintainer (#271)
  *   GET  /api/v1/factory/{packages,built,review,approvals,maintainers,trust,workers/self,me} · GET /api/v1/factory/tasks/:id/can · GET /api/v1/users/:login · GET /api/v1/users/:login/can · GET /api/v1/cost
+ *   GET  /api/v1/factory/workers/:id[/orders|/can] · POST /factory/workers/:id/orders · DELETE /factory/workers/:id/orders/:oid · POST /factory/workers/self/orders/:id   orders to a worker (#277, routes/orders.ts)
  *   GET  /api/v1/factory/names/:name?arches= · GET /api/v1/factory/source?url=   the Factory form's live checks: would the name be taken, what the repository says
  *                                                  the factory's brain: package requests, build tasks, pull-based workers
  *   GET  /api/v1/graph?targets=a,b&ring=stable
@@ -44,7 +45,7 @@
  *   POST /api/v1/pool/gc?keep=3&limit=200          delete it (objects, then rows)
  *   POST /api/v1/pool/relayout?phase=copy|purge     the one-time move to <source>/<arch>/ (the relayout job)
  *   GET  /                                         the dashboard: the Pool (users), /factory (contributors), /review (maintainers),
- *                                                  /docs, and the detail pages /packages /package/:name /status /agents /people /workers /user/:login /build/:id
+ *                                                  /docs, and the detail pages /packages /package/:name /status /agents /people /workers /worker/:id /user/:login /build/:id
  *                                                  (/pipeline, /journal, /security, /docs/api and /request redirect to the section they became: MOVED)
  *   GET  /pool/<source>/<arch>/<file>              fallback static origin (dev)
  *   GET  /assets/kit.<hash>.css                    the v1 kit's stylesheet (pages/kit.ts): its primitives and icons, immutable under its hash
@@ -99,6 +100,7 @@ import { governanceHtml } from "./pages/governance";
 import { docsHtml } from "./pages/docs";
 import { docsWorkersHtml } from "./pages/docs-workers";
 import { workersHtml } from "./pages/workers";
+import { workerHtml } from "./pages/worker";
 import { userHtml } from "./pages/user";
 import { peopleHtml } from "./pages/people";
 import { agentsHtml } from "./pages/agents";
@@ -328,6 +330,9 @@ export default {
       if (user) return html(userHtml(user[1], env.POOL_URL, version(env)));
       if (path.startsWith("/package/")) return html(packageHtml(decodeURIComponent(path.slice("/package/".length)), env.POOL_URL, version(env)));
       if (/^\/build\/\d+$/.test(path)) return html(buildHtml(Number(path.slice("/build/".length)), env.POOL_URL, version(env)));
+      // A worker's page (#277): the same shell for every id; its script reads the worker and what the viewer may press.
+      const wk = path.match(/^\/worker\/([A-Za-z0-9_.-]{1,120})$/);
+      if (wk) return html(workerHtml(wk[1], env.POOL_URL, version(env)));
       // What a crawler may read (pages/robots.ts): the rules for the name asked on, and the pages worth an index under the dashboard's name on production.
       if (path === "/robots.txt") return new Response(robotsTxt(url.hostname), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=86400" } });
       if (path === "/sitemap.xml") return new Response(sitemapXml(isProductionHost(url.hostname) ? `https://${DASHBOARD_HOST}` : url.origin), { headers: { "content-type": "application/xml; charset=utf-8", "cache-control": "public, max-age=86400" } });

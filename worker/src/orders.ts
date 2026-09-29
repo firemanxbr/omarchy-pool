@@ -500,7 +500,8 @@ export interface RuleInput {
   needsAgent: boolean;
 }
 
-const mins = (ms: number) => Math.max(0, Math.round(ms / MIN));
+/** A span as the reasons say it: seconds under a minute and a half (the rules' timings scaled in development), minutes past it. */
+const span = (ms: number) => (ms < 90000 ? `${Math.max(0, Math.round(ms / 1000))} s` : `${Math.round(ms / MIN)} min`);
 
 /**
  * The pool's rules for one claim, pure: a worker whose agent does not
@@ -524,7 +525,7 @@ export function decideAuto(x: RuleInput, now: number, scale = 1): Decision {
   const step = (m: number) => (m * MIN) / scale;
   const spellAge = now - Date.parse(x.spell);
   const dayOf = (k: "c" | "r") => auto.day.filter((d) => d.k === k).length;
-  const spellWords = `not ready for ${mins(spellAge)} min (${cls})`;
+  const spellWords = `not ready for ${span(spellAge)} (${cls})`;
   // Step 0: one re-check, only when the worker's own has stalled (the probe is old on the pool's clock) — before any restart of the spell: a restarted process probes at its start.
   if (spellAge >= step(RECHECK_AFTER_MIN) && auto.restarts === 0 && auto.rechecks < MAX_POOL_RECHECKS_PER_SPELL && claim.takes.includes("recheck-agent") && dayOf("c") < MAX_POOL_RECHECKS_PER_DAY) {
     const age = probeAge(row, claim.probe, now);
@@ -532,7 +533,7 @@ export function decideAuto(x: RuleInput, now: number, scale = 1): Decision {
       return {
         kind: "recheck-agent",
         rule: "recheck-stale",
-        reason: `${spellWords}: its own re-check has not run for ${Number.isFinite(age) ? mins(age) + " min" : "a while"} — the pool re-checks it`,
+        reason: `${spellWords}: its own re-check has not run for ${Number.isFinite(age) ? span(age) : "a while"} — the pool re-checks it`,
         unless: false,
         next: { ...auto, rechecks: auto.rechecks + 1, last_recheck: iso(now), day: [...auto.day, { k: "c", at: iso(now) }] },
         cls,
