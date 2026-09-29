@@ -52,6 +52,30 @@
 # when a role is set); in community mode they are ignored.
 set -euo pipefail
 : "${OMARCHY_API:=https://pkgs.omarchy-pool.org}"
+# Claude Code, for a Claude subscription as the agent (CLAUDE_CODE_OAUTH_TOKEN):
+# the image does not ship it (it is Anthropic's, under their terms); the
+# official installer fetches the release for this architecture, checksum
+# verified, into this container's home at first start. A binary that is
+# there but does not answer `claude --version` within 10 s — an install cut
+# short by a network error, which `docker restart` keeps, since it keeps the
+# container's filesystem — is removed and installed again (#277): a restart
+# of the agent service, by an order or by hand, then fixes that too.
+claude_answers() {
+  local bin; bin="$(command -v claude 2>/dev/null || true)"; [[ -n "$bin" ]] || bin="$HOME/.local/bin/claude"
+  [[ -x "$bin" ]] && timeout 10 "$bin" --version >/dev/null 2>&1
+}
+ensure_claude() { # returns non-zero when Claude Code is not there after it
+  [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" && -z "${CLAUDE_CODE_BIN:-}" ]] || return 0
+  if command -v claude >/dev/null 2>&1 || [[ -e "$HOME/.local/bin/claude" ]]; then
+    claude_answers && return 0
+    echo "omarchy-worker: Claude Code is here but does not answer --version (an install cut short?); installing it again" >&2
+    rm -f "$HOME/.local/bin/claude"
+  else
+    echo "omarchy-worker: CLAUDE_CODE_OAUTH_TOKEN is set; installing Claude Code (claude.ai/install.sh)" >&2
+  fi
+  curl -fsSL https://claude.ai/install.sh | bash >/dev/null 2>&1 && PATH="$HOME/.local/bin:$PATH" claude_answers
+}
+
 role="${OMARCHY_WORKER_ROLE:-}"
 case "$role" in ""|pool|review|community|agent|broker|updater) ;; *) echo "omarchy-worker: OMARCHY_WORKER_ROLE must be pool, review, community, broker, agent or updater (or unset)" >&2; exit 2 ;; esac
 # The updater: the compose project (COMPOSE_DIR, mounted at the same path)
@@ -66,9 +90,7 @@ fi
 if [[ "$role" == broker || "$role" == agent ]]; then
   # The broker: the credentials stay here. Claude Code is installed the
   # same way a worker installs it when the subscription token is the agent.
-  if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" && -z "${CLAUDE_CODE_BIN:-}" ]] && ! command -v claude >/dev/null 2>&1 && [[ ! -x "$HOME/.local/bin/claude" ]]; then
-    curl -fsSL https://claude.ai/install.sh | bash >/dev/null 2>&1 || echo "omarchy-worker: Claude Code did not install; the broker will answer 502 to the agent's calls until it does" >&2
-  fi
+  ensure_claude || echo "omarchy-worker: Claude Code did not install; the broker will answer 502 to the agent's calls until it does" >&2
   export PATH="$HOME/.local/bin:$PATH"
   exec python3 /usr/local/lib/omarchy-factory/bin/broker
 fi
@@ -118,14 +140,11 @@ fi
 agent=""; for k in ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY XAI_API_KEY; do [[ -n "${!k:-}" ]] && agent=1; done
 # A Claude subscription as the agent (CLAUDE_CODE_OAUTH_TOKEN, from `claude
 # setup-token` on the owner's machine): factory/bin/agent.py runs Claude
-# Code in print mode, so the binary must be here. The image does not ship
-# it (it is Anthropic's, under their terms); the official installer fetches
-# the release for this architecture, checksum verified, into this
-# container's home at first start. ~200 MB, once per container.
-if [[ "${FACTORY_PROVIDER:-claude-code}" == claude-code && -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" && -z "${CLAUDE_CODE_BIN:-}" ]] && ! command -v claude >/dev/null 2>&1 && [[ ! -x "$HOME/.local/bin/claude" ]]; then
-  echo "omarchy-worker: CLAUDE_CODE_OAUTH_TOKEN is set; installing Claude Code (claude.ai/install.sh) for the audits and drafts" >&2
-  if curl -fsSL https://claude.ai/install.sh | bash >/dev/null 2>&1 && [[ -x "$HOME/.local/bin/claude" ]]; then
-    echo "omarchy-worker: Claude Code $("$HOME/.local/bin/claude" --version 2>/dev/null | head -n1) installed" >&2
+# Code in print mode, so the binary must be here (ensure_claude, above:
+# ~200 MB, once per container, again when what is there does not answer).
+if [[ "${FACTORY_PROVIDER:-claude-code}" == claude-code ]]; then
+  if ensure_claude; then
+    [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" && -z "${CLAUDE_CODE_BIN:-}" ]] && echo "omarchy-worker: Claude Code $(PATH="$HOME/.local/bin:$PATH" claude --version 2>/dev/null | head -n1) is here for the audits and drafts" >&2
   else
     echo "omarchy-worker: Claude Code did not install; audits and drafts will fail until it does (CLAUDE_CODE_BIN can point at a mounted binary)" >&2
   fi

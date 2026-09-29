@@ -100,6 +100,49 @@ HELD = Held()
 SELF = {"id": None}
 
 
+class Delivered:
+    """The orders the pool handed this broker's builder (#277): an answer to
+    an order passes only for an id seen in a claim answer that went through
+    here, only while no task is held — a recipe runs only inside a held task,
+    and between tasks the container that ran it is gone — and only once. The
+    oldest are forgotten past 32. A notice (drain) is never answered."""
+
+    MOST = 32
+
+    def __init__(self):
+        self.kinds = {}
+        self.answered = []
+
+    def note(self, answer):
+        for o in (answer or {}).get("orders") or []:
+            if isinstance(o, dict) and not o.get("notice") and isinstance(o.get("id"), str) and re.fullmatch(r"wo_[0-9a-f]{32}", o["id"]):
+                self.kinds[o["id"]] = str(o.get("kind") or "")
+                while len(self.kinds) > self.MOST:
+                    self.kinds.pop(next(iter(self.kinds)))
+
+    def take(self, oid):
+        """(kind, None) when the answer may pass — the id is spent — or (None, (status, error)) when not."""
+        if oid in self.answered:
+            return None, (409, "answered already through this broker")
+        if oid not in self.kinds:
+            return None, (403, "the broker passes an answer only to an order it saw delivered to its builder")
+        self.answered = (self.answered + [oid])[-self.MOST:]
+        return self.kinds.pop(oid), None
+
+
+DELIVERED = Delivered()
+
+
+def pair_restart():
+    """The broker exits with its builder on a restart (#277): the agent is
+    the broker's, so a builder whose agent does not answer is restarted with
+    it, and the restart policy starts both again. The answer's reply goes
+    out first."""
+    sys.stderr.write("broker: the builder accepted a restart; exiting with it (75) so the restart policy starts both again\n")
+    sys.stderr.flush()
+    os._exit(75)
+
+
 def worker_id():
     """This worker's id, from the pool (once)."""
     if SELF["id"] is None and worker_token():
@@ -130,15 +173,17 @@ def adopt(task):
         return True
     return False
 
-# The pool's routes a build needs, and nothing else: (method, regex, pinned) — pinned means group 1 must be the held task's id.
+# The pool's routes a build needs, and nothing else: (method, regex, pin) — "task" means group 1 must be the held task's id,
+# "order" that group 1 is an order this broker saw delivered to its builder, answered while no task is held, once (#277).
 POOL_ROUTES = [
-    ("GET", re.compile(r"^factory/workers/self$"), False),
-    ("POST", re.compile(r"^factory/claim$"), False),
-    ("POST", re.compile(r"^factory/tasks/(\d+)/heartbeat$"), True),
-    ("POST", re.compile(r"^factory/tasks/(\d+)/complete$"), True),
-    ("POST", re.compile(r"^factory/tasks/(\d+)/fail$"), True),
-    ("PUT", re.compile(r"^factory/tasks/(\d+)/artifacts/[A-Za-z0-9][A-Za-z0-9._:+-]{0,200}$"), True),
-    ("POST", re.compile(r"^factory/tasks/(\d+)/artifacts/[A-Za-z0-9][A-Za-z0-9._:+-]{0,200}/multipart$"), True),
+    ("GET", re.compile(r"^factory/workers/self$"), None),
+    ("POST", re.compile(r"^factory/claim$"), None),
+    ("POST", re.compile(r"^factory/tasks/(\d+)/heartbeat$"), "task"),
+    ("POST", re.compile(r"^factory/tasks/(\d+)/complete$"), "task"),
+    ("POST", re.compile(r"^factory/tasks/(\d+)/fail$"), "task"),
+    ("PUT", re.compile(r"^factory/tasks/(\d+)/artifacts/[A-Za-z0-9][A-Za-z0-9._:+-]{0,200}$"), "task"),
+    ("POST", re.compile(r"^factory/tasks/(\d+)/artifacts/[A-Za-z0-9][A-Za-z0-9._:+-]{0,200}/multipart$"), "task"),
+    ("POST", re.compile(r"^factory/workers/self/orders/(wo_[0-9a-f]{32})$"), "order"),
 ]
 
 
@@ -249,26 +294,52 @@ class Handler(BaseHTTPRequestHandler):
         body = self._body()
         if not worker_token():
             return self._json(503, {"error": "this broker holds no worker token; it serves the agent and GitHub only"})
-        for m, rx, pinned in POOL_ROUTES:
+        for m, rx, pin in POOL_ROUTES:
             match = rx.match(rel)
             if m != method or not match:
                 continue
+            pinned = pin == "task"
+            kind = None
             if pinned:
                 held = HELD.current()
                 if held is None and adopt(int(match.group(1))):
                     held = HELD.current()
                 if held is None or int(match.group(1)) != held:
                     return self._json(403, {"error": f"the broker passes only the pool's calls for the task it claimed" + (f" ({held})" if held is not None else " (none held)")})
+            elif pin == "order":
+                # A recipe runs only inside a held task: while one is held, no answer passes.
+                held = HELD.current()
+                if held is not None:
+                    return self._json(403, {"error": f"the broker passes an order's answer only between tasks; it holds task {held}"})
+                kind, refused = DELIVERED.take(match.group(1))
+                if refused:
+                    return self._json(refused[0], {"error": refused[1]})
             elif rel == "factory/claim":
                 held = HELD.current()
                 if held is not None:
                     return self._json(409, {"error": f"the broker holds task {held} until its lease ends; one task at a time"})
             headers = {"authorization": "Bearer " + worker_token(), "content-type": self.headers.get("content-type", "application/json"), "user-agent": USER_AGENT}
+            if rel == "factory/claim":
+                # This broker exits with its builder on a restart (pair restart, #277): the pool may restart a builder whose agent — this
+                # broker's — does not answer. The header is the broker's own, never one the builder sent.
+                headers["x-omarchy-broker-takes"] = "pair-restart"
             url = POOL + "/" + rel + (("?" + split.query) if split.query else "")
             req = urllib.request.Request(url, data=body if body else None, headers=headers, method=method)
             status, ctype, out = self.upstream(req, UPSTREAM_TIMEOUT)
             # What the pool said back changes what this broker holds — and
             # the job token it hands out at claim and heartbeat stays here.
+            if rel == "factory/claim" and status in (200, 426):
+                try:
+                    DELIVERED.note(json.loads(out))
+                except (ValueError, AttributeError):
+                    pass
+            if pin == "order" and status == 200 and kind == "restart":
+                try:
+                    accepted = json.loads(body or b"{}").get("outcome") == "accepted"
+                except (ValueError, AttributeError):
+                    accepted = False
+                if accepted:
+                    threading.Timer(3.0, pair_restart).start()
             if status == 200 and rel == "factory/claim":
                 try:
                     answer = json.loads(out)
