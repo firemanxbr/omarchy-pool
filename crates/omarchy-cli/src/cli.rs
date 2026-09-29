@@ -93,27 +93,52 @@ pub enum Command {
     List,
     /// Serves status, check, info, search, list and security to an agent over
     /// MCP (JSON-RPC on stdin/stdout): what an assistant needs to reason
-    /// about this machine and the ring, read-only.
+    /// about this machine and the ring, read-only — and, after `login`, the
+    /// write tools its grant holds, which decide nothing without the person.
     Mcp,
+    /// Grants an agent a token to act as you through omarchy-cli's tools:
+    /// the pool's grant page opens in your browser (signed in with GitHub,
+    /// on this machine), and the code comes back to this command on
+    /// 127.0.0.1. The token is kept in ~/.config/omarchy-cli/credentials.toml.
+    /// The machine keeps one grant: logging in again under the same agent
+    /// name replaces it; another name, or another pool, needs `logout` first.
+    Login {
+        /// The agent's name, as the pool shows it on the grant page, on your page and on the record ("Claude Code").
+        #[arg(long)]
+        agent: String,
+        /// Also review and block, for a maintainer: the grant lives seven days.
+        #[arg(long)]
+        maintain: bool,
+        /// How many days a contribute-only grant lives (thirty by default, ninety at most).
+        #[arg(long)]
+        days: Option<u32>,
+        /// Print the grant page's address without opening a browser: open it yourself, in a browser on this machine.
+        #[arg(long)]
+        no_browser: bool,
+    },
+    /// Revokes the agent's grant on the pool, then deletes the credentials
+    /// file — kept, and a failure, when the pool could not revoke it.
+    Logout,
 }
 
 const EXIT_BLOCKED: i32 = 2;
 
-pub fn run(cli: Cli) -> Result<i32> {
+/// The config file with the command line's flags over it, checked.
+fn configured(cli: &mut Cli) -> Result<Config> {
     let mut config = Config::load(&cli.config)?;
-    if let Some(api) = cli.api {
+    if let Some(api) = cli.api.take() {
         config.api = api;
     }
-    if let Some(pool) = cli.pool {
+    if let Some(pool) = cli.pool.take() {
         config.pool = pool;
     }
-    if let Some(ring) = cli.ring {
+    if let Some(ring) = cli.ring.take() {
         config.ring = ring;
     }
-    if let Some(root) = cli.root {
+    if let Some(root) = cli.root.take() {
         config.root = root;
     }
-    if let Some(arch) = cli.arch {
+    if let Some(arch) = cli.arch.take() {
         config.arch = arch;
     }
     // The index serves three rings and the lab; a typo here would otherwise
@@ -128,6 +153,11 @@ pub fn run(cli: Cli) -> Result<i32> {
     if !["x86_64", "aarch64"].contains(&config.arch.as_str()) {
         bail!("arch must be x86_64 or aarch64 (got '{}')", config.arch);
     }
+    Ok(config)
+}
+
+pub fn run(mut cli: Cli) -> Result<i32> {
+    let config = configured(&mut cli)?;
     let api = Api::new(&config.api)?;
     let json = cli.json;
 
@@ -204,7 +234,195 @@ pub fn run(cli: Cli) -> Result<i32> {
         Command::Provenance { targets, quiet } => provenance(&config, &api, &targets, quiet, json),
         Command::List => list(&config, &api, json),
         Command::Mcp => crate::mcp::serve(&config, &api),
+        Command::Login {
+            agent,
+            maintain,
+            days,
+            no_browser,
+        } => login(&api, &agent, maintain, days, !no_browser, json),
+        Command::Logout => logout(json),
     }
+}
+
+/// Where the credentials live: `~/.config/omarchy-cli/credentials.toml`.
+fn credentials_path() -> Result<PathBuf> {
+    crate::credentials::default_path()
+        .context("neither XDG_CONFIG_HOME nor HOME is set: no place for the credentials")
+}
+
+/// Refuses a login that would leave the machine's grant live with nobody to end it — one of another agent name, or granted by another
+/// origin, which the pool does not replace — before the browser opens: `omarchy-cli logout` ends it first.
+fn refuse_orphan(path: &std::path::Path, api: &Api, agent: &str) -> Result<()> {
+    let origin = crate::credentials::origin_of(api.base())
+        .context("the API address is not an http(s) URL")?;
+    let held = crate::credentials::read_any(path)?;
+    if let Some(c) =
+        crate::credentials::orphaned_by(held, &origin, agent, crate::credentials::now_unix())
+    {
+        bail!(
+            "this machine holds the grant to {} ({}, {}) from {} until {}: a login {} would leave it live with nobody to end it. Run omarchy-cli logout first — the machine keeps one grant, and a login under the same agent name at the same pool replaces it",
+            c.agent,
+            c.login,
+            c.scopes.join(", "),
+            c.origin,
+            c.expires_at,
+            if c.origin == origin {
+                format!("as \"{}\"", crate::credentials::agent_name(agent))
+            } else {
+                format!("at {origin}")
+            }
+        );
+    }
+    Ok(())
+}
+
+fn login(
+    api: &Api,
+    agent: &str,
+    maintain: bool,
+    days: Option<u32>,
+    browser: bool,
+    json: bool,
+) -> Result<i32> {
+    let scopes: &[&str] = if maintain {
+        &["contribute", "review", "block"]
+    } else {
+        &["contribute"]
+    };
+    let ask = crate::login::Ask {
+        agent,
+        scopes,
+        days,
+    };
+    let path = credentials_path()?;
+    refuse_orphan(&path, api, agent)?;
+    let creds = crate::login::login(api, &ask, crate::login::WAIT, &|url: &str| {
+        eprintln!("Open this address in a browser signed in with GitHub, on this machine, and press Grant:\n\n  {url}\n\nWaiting for the browser (ten minutes)…");
+        if browser {
+            crate::login::open_browser(url);
+        }
+    })?;
+    crate::credentials::save(&path, &creds)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({ "login": creds.login, "agent": creds.agent, "scopes": creds.scopes, "grant": creds.grant, "expires_at": creds.expires_at, "origin": creds.origin, "credentials": path })
+        );
+    } else {
+        println!(
+            "Granted: {} acts as {} ({}) until {}.\nThe token is in {} (mode 0600); `omarchy-cli mcp` offers the tools it holds. Revoke it with `omarchy-cli logout`, or on your page.",
+            creds.agent,
+            creds.login,
+            creds.scopes.join(", "),
+            creds.expires_at,
+            path.display()
+        );
+    }
+    Ok(0)
+}
+
+fn logout(json: bool) -> Result<i32> {
+    logout_at(&credentials_path()?, json)
+}
+
+/// What became of a logout: the words, the grant revoked, whether the file was deleted, and the exit code.
+struct LoggedOut {
+    said: String,
+    revoked: Option<String>,
+    deleted: bool,
+    code: i32,
+}
+
+/// `logout` on the credentials at `path`: the grant revoked at the origin that granted it, then the file deleted — only when the pool
+/// revoked it, or says it was no longer live (revoked, replaced or expired: `grant_invalid`). Otherwise the file stays, so logout can be
+/// run again, and the exit says it failed: the machine's only copy of a live token is never deleted while the pool still takes it.
+fn logout_from(path: &std::path::Path) -> Result<LoggedOut> {
+    // A file others could read is still this machine's grant to end: read it anyway to revoke it, then delete it.
+    if !path.exists() {
+        return Ok(LoggedOut {
+            said: "No agent grant on this machine.".into(),
+            revoked: None,
+            deleted: false,
+            code: 0,
+        });
+    }
+    let creds = crate::credentials::read_any(path)?
+        .with_context(|| format!("{} holds no grant this command can read: delete it by hand, and revoke the grant on your page", path.display()))?;
+    // Revoked at the origin that granted it, whatever --api says: the token goes nowhere else.
+    let revoked = Api::new(&creds.origin).and_then(|api| {
+        api.call(
+            "POST",
+            "/auth/agent/revoke",
+            None,
+            Some(&crate::api::Auth {
+                token: &creds.token,
+                client: None,
+            }),
+        )
+    });
+    let gone = |e: &anyhow::Error| {
+        e.downcast_ref::<crate::api::Refused>()
+            .is_some_and(|r| r.status == 401 && r.code.as_deref() == Some("grant_invalid"))
+    };
+    match revoked {
+        Ok(_) => {
+            crate::credentials::remove(path)?;
+            Ok(LoggedOut {
+                said: format!(
+                    "Revoked the grant to {} ({}) and deleted {}.",
+                    creds.agent,
+                    creds.grant,
+                    path.display()
+                ),
+                revoked: Some(creds.grant),
+                deleted: true,
+                code: 0,
+            })
+        }
+        Err(e) if gone(&e) => {
+            crate::credentials::remove(path)?;
+            Ok(LoggedOut {
+                said: format!(
+                    "The grant to {} ({}) was no longer live on the pool — revoked, replaced or expired; deleted {}.",
+                    creds.agent,
+                    creds.grant,
+                    path.display()
+                ),
+                revoked: None,
+                deleted: true,
+                code: 0,
+            })
+        }
+        Err(e) => Ok(LoggedOut {
+            said: format!(
+                "Not revoked — the pool at {} said: {e:#}. The grant to {} ({}) still works, so {} is kept: run omarchy-cli logout again, or press Revoke beside {} on your page on the pool (/user/{}).",
+                creds.origin,
+                creds.agent,
+                creds.grant,
+                path.display(),
+                creds.agent,
+                creds.login
+            ),
+            revoked: None,
+            deleted: false,
+            code: 1,
+        }),
+    }
+}
+
+fn logout_at(path: &std::path::Path, json: bool) -> Result<i32> {
+    let out = logout_from(path)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({ "revoked": out.revoked, "deleted": out.deleted.then_some(path), "said": out.said })
+        );
+    } else if out.code == 0 {
+        println!("{}", out.said);
+    } else {
+        eprintln!("{}", out.said);
+    }
+    Ok(out.code)
 }
 
 /// The ring's packages whose name or description matches — what `search`
@@ -934,4 +1152,144 @@ fn now() -> String {
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = yoe + era * 400 + i64::from(month <= 2);
     format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::credentials::tests::{sample, scratch};
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// A pool that answers every request with `status` and `body`, and counts them.
+    fn pool(status: &'static str, body: &'static str) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let n = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&n);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                loop {
+                    let mut h = String::new();
+                    if reader.read_line(&mut h).unwrap() == 0 || h.trim().is_empty() {
+                        break;
+                    }
+                }
+                seen.fetch_add(1, Ordering::SeqCst);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        (base, n)
+    }
+
+    /// A grant from `origin` in the machine's credentials file.
+    fn held(dir: &Path, origin: &str) -> PathBuf {
+        let path = dir.join("omarchy-cli").join("credentials.toml");
+        crate::credentials::save(&path, &sample(origin, &["contribute"])).unwrap();
+        path
+    }
+
+    #[test]
+    fn logout_deletes_the_credential_only_when_the_pool_revoked_it_or_says_it_is_gone() {
+        let dir = scratch("logout");
+        // Revoked: deleted, and a success.
+        let (base, n) = pool("200 OK", r#"{"revoked":"g_1","login":"bob"}"#);
+        let path = held(&dir, &base);
+        let out = logout_from(&path).unwrap();
+        assert_eq!((out.code, out.deleted, path.exists()), (0, true, false));
+        assert!(
+            out.said.starts_with("Revoked the grant to Claude Code"),
+            "{}",
+            out.said
+        );
+        assert_eq!(
+            out.revoked.as_deref(),
+            Some(sample("x", &[]).grant.as_str())
+        );
+        assert_eq!(n.load(Ordering::SeqCst), 1);
+        // Revoked already, replaced or expired — grant_invalid: nothing left to end, deleted.
+        let (base, _) = pool(
+            "401 Unauthorized",
+            r#"{"error":"this agent token is not valid","code":"grant_invalid"}"#,
+        );
+        let path = held(&dir, &base);
+        let out = logout_from(&path).unwrap();
+        assert_eq!((out.code, out.deleted, path.exists()), (0, true, false));
+        assert!(out.said.contains("no longer live"), "{}", out.said);
+        // A pool that fails, another refusal, or no pool at all: the token may still work, so the file stays and the exit says so.
+        let (failing, _) = pool("500 Internal Server Error", r#"{"error":"internal error"}"#);
+        let (other, _) = pool("401 Unauthorized", r#"{"error":"who are you"}"#);
+        let closed = {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}", l.local_addr().unwrap())
+        };
+        for origin in [failing, other, closed] {
+            let path = held(&dir, &origin);
+            let out = logout_from(&path).unwrap();
+            assert_eq!(
+                (out.code, out.deleted, path.exists()),
+                (1, false, true),
+                "{origin}: {}",
+                out.said
+            );
+            assert!(
+                out.said.contains("still works") && out.said.contains("/user/bob"),
+                "{}",
+                out.said
+            );
+            assert_eq!(
+                crate::credentials::load(&path).unwrap().unwrap().origin,
+                origin
+            );
+        }
+        // Nothing on the machine: nothing to do.
+        std::fs::remove_file(dir.join("omarchy-cli").join("credentials.toml")).unwrap();
+        let out = logout_from(&dir.join("omarchy-cli").join("credentials.toml")).unwrap();
+        assert_eq!((out.code, out.deleted), (0, false));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn login_refuses_before_the_browser_to_leave_a_live_grant_of_another_name_or_pool_behind() {
+        let dir = scratch("login-orphan");
+        let (base, n) = pool("200 OK", "{}");
+        let path = held(&dir, &base);
+        let api = Api::new(&base).unwrap();
+        // Another agent name at the same pool: the pool would not replace it.
+        let e = refuse_orphan(&path, &api, "Codex").unwrap_err().to_string();
+        assert!(
+            e.contains("holds the grant to Claude Code")
+                && e.contains("as \"Codex\"")
+                && e.contains("Run omarchy-cli logout first"),
+            "{e}"
+        );
+        // Another pool: the same.
+        let elsewhere = Api::new("http://127.0.0.1:9").unwrap();
+        let e = refuse_orphan(&path, &elsewhere, "Claude Code")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("at http://127.0.0.1:9"), "{e}");
+        // The same name at the same pool is replaced there; an expired grant, or none, leaves nothing behind.
+        assert!(refuse_orphan(&path, &api, "Claude  Code").is_ok());
+        let mut old = sample(&base, &["contribute"]);
+        old.expires_at = "2001-01-01T00:00:00.000Z".into();
+        crate::credentials::save(&path, &old).unwrap();
+        assert!(refuse_orphan(&path, &api, "Codex").is_ok());
+        std::fs::remove_file(&path).unwrap();
+        assert!(refuse_orphan(&path, &api, "Codex").is_ok());
+        // Decided before anything is sent.
+        assert_eq!(n.load(Ordering::SeqCst), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

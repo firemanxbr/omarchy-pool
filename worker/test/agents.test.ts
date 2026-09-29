@@ -1,10 +1,10 @@
 /**
  * The Agents page (#249, src/pages/agents.ts): a page of its own at the
  * footer's /agents, drawn with the v1 kit and reading nothing; the tools it
- * calls available are the ones `omarchy-cli mcp` serves today (read from
- * mcp.rs itself), and the seven write tools #252 proposes are marked *
- * wherever they are named, the two role cards that need them saying so and
- * offering nothing to copy; every agent
+ * lists are the ones `omarchy-cli mcp` serves (read from mcp.rs itself): the
+ * six reads, then the seven write tools of #252 that a login grants, every
+ * role card with its prompt to copy and the login its tools need, and step 4
+ * the login with the chosen agent's name; every agent
  * it offers carries a mark from the kit, the documentation its snippet was
  * checked against and the day; the agent shown is the address's, and the
  * script switches it in place, leaving the focus where it scrolled; step 1
@@ -15,7 +15,7 @@
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import worker from "../src/index";
-import { AGENTS, FIRST_QUESTION, MCP_TOOLS, PROPOSAL_URL, PROPOSED_TOOLS, ROLES, SERVER_NAME, agentOf, isCommand } from "../src/pages/agents";
+import { AGENTS, FIRST_QUESTION, LOGIN_DOCS, MCP_TOOLS, ROLE_LOGIN, ROLES, SERVER_NAME, agentOf, isCommand } from "../src/pages/agents";
 import { AGENT_MARKS, KIT_HELPERS, KIT_SHEET_PATH } from "../src/pages/kit";
 import { ownScriptOf, scriptOf } from "./fixture";
 // The MCP server's own source, as text (Vite's ?raw): the tests run inside workerd, which has no filesystem.
@@ -37,10 +37,10 @@ const opening = (html: string, id: string) => new RegExp(`<[a-z]+\\b[^>]*\\bid="
 /** A role card, from its opening tag to its </article>. */
 const card = (html: string, role: string) => new RegExp(`<article class="op-card ag-role" id="role-${role}">[\\s\\S]*?</article>`).exec(html)?.[0] ?? "";
 
-/** The tools mcp.rs lists (tools()), in its order. */
-function servedTools(): string[] {
-  const body = /fn tools\(\) -> Value \{([\s\S]*?)\n\}/.exec(mcpSource)?.[1] ?? "";
-  return [...body.matchAll(/"name": "([a-z_]+)"/g)].map((m) => m[1]);
+/** The tools mcp.rs lists (read_tools(), then write_tools()), in its order. */
+function servedTools(which: "read" | "write" | "all" = "all"): string[] {
+  const of = (fn: string) => [...(new RegExp(`fn ${fn}\\(\\) -> Vec<Value> \\{([\\s\\S]*?)\\n\\}`).exec(mcpSource)?.[1] ?? "").matchAll(/"name": "([a-z_]+)"/g)].map((m) => m[1]);
+  return which === "read" ? of("read_tools") : which === "write" ? of("write_tools") : [...of("read_tools"), ...of("write_tools")];
 }
 
 describe("the Agents page", () => {
@@ -67,64 +67,51 @@ describe("the Agents page", () => {
     expect(shown(html)).not.toMatch(/\p{Extended_Pictographic}/u);
   });
 
-  it("calls available only what omarchy-cli mcp serves today, in its order, and marks every proposed tool * wherever it is named", async () => {
+  it("lists what omarchy-cli mcp serves, in its order — the six reads, then the seven write tools a login grants — none of them marked proposed", async () => {
     const served = servedTools();
-    expect(served.length).toBeGreaterThanOrEqual(6);
+    expect(servedTools("read")).toEqual(["status", "check", "info", "search", "list", "security"]);
+    // The seven of #252 as they were signed off on 2026-09-29 (PR #253), in their order, now served.
+    expect(servedTools("write")).toEqual(["request_package", "request_status", "review_claim", "review_release", "review_context", "submit_review", "block"]);
     expect(MCP_TOOLS.map((t) => t.name), "the page's list is mcp.rs's").toEqual(served);
-    // The proposal of #252 as it was signed off on 2026-09-29 (PR #253), its seven tools in its order: none of them is served — the day one is, it moves to MCP_TOOLS and loses its *.
-    expect(PROPOSED_TOOLS.map((t) => t.name)).toEqual(["request_package", "request_status", "review_claim", "review_release", "review_context", "submit_review", "block"]);
-    expect(PROPOSED_TOOLS.map((t) => t.role)).toEqual(["contribute", "contribute", "maintain", "maintain", "maintain", "maintain", "maintain"]);
-    for (const t of PROPOSED_TOOLS) expect(served, t.name).not.toContain(t.name);
+    expect(MCP_TOOLS.map((t) => t.role)).toEqual([...Array(6).fill("use"), "contribute", "contribute", "maintain", "maintain", "maintain", "maintain", "maintain"]);
     const html = await page(), tools = /<div class="op-card ag-tools" id="tools">[\s\S]*?<\/table>/.exec(html)![0];
-    const rows = [...tools.matchAll(/<tr( class="proposed")?><th scope="row"><code>([a-z_]+)(<span aria-hidden="true">\*<\/span>)?<\/code>/g)].map((m) => ({ name: m[2], proposed: !!m[1], star: !!m[3] }));
-    expect(rows.map((r) => r.name)).toEqual([...served, ...PROPOSED_TOOLS.map((t) => t.name)]);
-    for (const r of rows) {
-      const later = PROPOSED_TOOLS.some((t) => t.name === r.name);
-      expect(r.proposed, `${r.name}: drawn as ${later ? "proposed" : "available"}`).toBe(later);
-      expect(r.star, `${r.name}: its *`).toBe(later);
-    }
-    // The star says "proposed" to a screen reader, and the head says what it means and links the proposal by what it is, not by the star.
-    expect(tools.match(/<span class="ag-vh"> \(proposed\)<\/span>/g)?.length).toBe(PROPOSED_TOOLS.length);
-    expect(tools).toContain(`<small>* proposed, not built yet · <a href="${PROPOSAL_URL}">the proposal →</a></small>`);
-    // Every name the page writes with a star is proposed, and every proposed name it writes has one: the cards' feet too.
-    for (const m of html.matchAll(/<code>([a-z_]+)(<span aria-hidden="true">\*<\/span>)?<\/code>/g)) {
-      if (!served.includes(m[1]) && !PROPOSED_TOOLS.some((t) => t.name === m[1])) continue;
-      expect(!!m[2], `${m[1]}: its *`).toBe(PROPOSED_TOOLS.some((t) => t.name === m[1]));
-    }
+    const rows = [...tools.matchAll(/<tr><th scope="row"><code>([a-z_]+)<\/code><\/th><td>[^<]*<\/td><td class="ag-role-c">([a-z]+)<\/td><\/tr>/g)].map((m) => [m[1], m[2]]);
+    expect(rows).toEqual(MCP_TOOLS.map((t) => [t.name, t.role]));
+    // Nothing is proposed any more: no star, no "proposed", no link to the proposal.
+    expect(shown(html)).not.toMatch(/proposed|\*<\/span>|not built yet/);
+    expect(tools).toContain('<small>contribute and maintain after <a href="#login">step 4</a></small>');
     // The chapter says what each one answers, and its own example registers the server under the name every snippet here gives it: a reader who follows both has one name for it.
     expect(html).toContain('<a href="/docs/omarchy-cli-mcp">What each tool answers →</a>');
     const chapter = await page("/docs/omarchy-cli-mcp");
     expect(chapter).toContain(esc(`{ "mcpServers": { "${SERVER_NAME}": { "command": "omarchy-cli", "args": ["mcp"] } } }`));
     expect(chapter).not.toContain(esc(`"mcpServers": { "omarchy":`));
+    for (const t of served) expect(chapter, t).toContain(`<code>${t}</code>`);
   });
 
-  it("gives each role a prompt and the tools it needs, a prompt to copy only where they are served, and says where they are proposed and where the web does it today", async () => {
+  it("gives each role a prompt to copy and the tools it needs, and names the login the write tools need — step 4, with the chosen agent's name", async () => {
     const html = await page();
     expect(ROLES.map((r) => r.role)).toEqual(["use", "contribute", "maintain"]);
     for (const r of ROLES) {
       const c = card(html, r.role);
       expect(c, r.role).not.toBe("");
       expect(c).toContain(`<span class="op-prompt">› </span>${r.prompt}`);
-      // The kit's copy takes the attribute's text: the prompt, escaped once. Only where an agent could carry it out today.
-      const button = `<button type="button" class="op-copy ag-copy" data-op-copy="${r.prompt.replace(/"/g, "&quot;")}">copy prompt</button>`;
-      for (const t of r.tools) expect(c, `${r.role}: ${t}`).toContain(`<code>${t}`);
-      const later = r.tools.filter((t) => PROPOSED_TOOLS.some((p) => p.name === t));
-      if (r.role === "use") {
-        // Use asks only what the read-only tools answer.
-        expect(later, "use needs no proposed tool").toEqual([]);
-        for (const t of r.tools) expect(MCP_TOOLS.map((x) => x.name), t).toContain(t);
-        expect(c).not.toContain("proposed</span>");
-        expect(c).toContain(button);
-      } else {
-        expect(later, `${r.role}: every tool it needs is proposed`).toEqual(r.tools);
-        expect(c).toContain('<span class="op-pill wait">proposed</span>');
-        expect(c).toContain(`not built yet · on the web: <a href="${r.today!.href}">`);
-        // Shown as an example: nothing to copy that no agent could do yet.
-        expect(c, r.role).not.toContain("op-copy");
+      // The kit's copy takes the attribute's text: the prompt, escaped once.
+      expect(c).toContain(`<button type="button" class="op-copy ag-copy" data-op-copy="${r.prompt.replace(/"/g, "&quot;")}">copy prompt</button>`);
+      for (const t of r.tools) {
+        expect(c, `${r.role}: ${t}`).toContain(`<code>${t}</code>`);
+        expect(MCP_TOOLS.find((x) => x.name === t)?.role, `${r.role}: ${t}`).toBe(r.role);
       }
+      const login = ROLE_LOGIN[r.role];
+      if (login) expect(c).toContain(`<span class="ag-login">after <a href="#login"><code>${login}</code></a></span>`);
+      else expect(c).not.toContain("ag-login");
     }
-    // Step 3's question is one a served tool answers (status), not one that needs the proposal.
+    // Step 3's question is one a read answers (status); step 4 grants the rest, in the chosen agent's name.
     expect(html).toContain(`<span class="op-prompt">› </span>${FIRST_QUESTION}`);
+    const step4 = /<li id="login">([\s\S]*?)<\/li>/.exec(html)![1];
+    expect(step4).toContain(`<code>omarchy-cli login --agent "<span data-agent-name>${AGENTS[0].label}</span>"</code><button type="button" class="op-copy" data-op-copy>copy</button>`);
+    expect(step4).toContain("<code>--maintain</code>");
+    expect(step4).toContain(`<a href="${LOGIN_DOCS}">How it works →</a>`);
+    expect((await page("/agents?agent=codex")).match(/<span data-agent-name>([^<]*)<\/span>/)?.[1]).toBe("Codex");
   });
 
   it("offers only agents whose snippet was checked: a mark from the kit, the documentation, the day, and the server under one name", async () => {
@@ -181,10 +168,12 @@ describe("the Agents page", () => {
     const picker = AGENTS.map((a) => link(a.key, true)), marks = AGENTS.map((a) => link(a.key, false));
     picker[0].attrs["aria-current"] = "true";
     const steps = { scrolled: 0, scrollIntoView() { this.scrolled++; } };
+    // Step 4's agent name, in the login command: it follows the choice.
+    const names = [{ textContent: AGENTS[0].label }];
     let onClick: (ev: unknown) => void = () => {};
     const document = {
       getElementById: (id: string) => (id === "connect" ? steps : id.startsWith("agent-") ? panel[id.slice("agent-".length)] ?? null : null),
-      querySelectorAll: (sel: string) => (sel === ".ag-pick a[data-agent]" ? picker : []),
+      querySelectorAll: (sel: string) => (sel === ".ag-pick a[data-agent]" ? picker : sel === "[data-agent-name]" ? names : []),
       querySelector: (sel: string) => picker.find((l) => sel === `.ag-pick a[data-agent="${l.attrs["data-agent"]}"]`) ?? null,
       addEventListener: (type: string, f: (ev: unknown) => void) => { if (type === "click") onClick = f; },
     };
@@ -200,6 +189,7 @@ describe("the Agents page", () => {
     expect(visible()).toEqual([AGENTS[2].key]);
     expect(picker.filter((l) => l.attrs["aria-current"] === "true").map((l) => l.attrs["data-agent"])).toEqual([AGENTS[2].key]);
     expect(replaced.at(-1)).toBe(`?from=footer&agent=${AGENTS[2].key}#connect`);
+    expect(names[0].textContent).toBe(AGENTS[2].label);
     expect(steps.scrolled).toBe(0);
     expect(focused).toBeNull();
     // A mark under the title (a click, or Enter on it): the same, the steps brought into view, and the focus moved to that agent's link in the picker without a scroll of its own — so the next Tab goes on from step 2, not from the title.
@@ -223,7 +213,7 @@ describe("the Agents page", () => {
 
   it("installs the client the way the docs say — from the ring once it serves it, the release binary until then — then names the server once", async () => {
     const html = await page();
-    // Three steps a screen reader hears as a list in order: WebKit drops the list of an <ol> drawn without markers, and the drawn numbers are aria-hidden.
+    // Four steps a screen reader hears as a list in order: WebKit drops the list of an <ol> drawn without markers, and the drawn numbers are aria-hidden.
     expect(html).toContain('<ol class="ag-steps" role="list">');
     const step1 = /<h3>Install the client<\/h3>([\s\S]*?)<\/li>/.exec(html)![1];
     expect(step1).toContain('<div class="op-code"><code>sudo pacman -S omarchy-cli</code><button type="button" class="op-copy" data-op-copy>copy</button></div>');

@@ -82,6 +82,13 @@ const body = (login: string) => String.raw`
     <p class="sub" id="w-none" hidden style="margin:0">No worker registered under this name.</p>
   </section>
 
+  <section id="agents" hidden>
+    <div class="h2row"><h2>Agents</h2><a class="more-link" href="/agents#login">+ grant one →</a></div>
+    <p class="sub">The agents you let act as you through omarchy-cli's tools (<code>omarchy-cli login</code>), and the decisions they drafted for you. Only you see this section: nothing an agent drafts is decided, or on the record, until you confirm it in the browser. <a href="/docs/omarchy-cli-mcp#write-tools">How it works →</a></p>
+    <div class="table-wrap"><table id="grants"><thead><tr><th>Agent</th><th>Scopes</th><th>Granted</th><th>Expires</th><th>Last used</th><th>State</th></tr></thead><tbody></tbody></table></div>
+    <div class="table-wrap"><table id="drafts"><thead><tr><th>Drafted</th><th>Package</th><th>Verdict</th><th>Agent</th><th>State</th><th>Note</th></tr></thead><tbody></tbody></table></div>
+  </section>
+
   <section id="approvals-section" hidden>
     <h2>Approvals</h2>
     <p class="sub">Decisions this maintainer signed: what they let into the pool — and where it stands today, ring by ring — what they sent back, what they took back. A standing approval is taken back from here by a maintainer: the package leaves every ring, another maintainer decides.</p>
@@ -345,10 +352,25 @@ const SCRIPT = String.raw`
     endSkeleton();
   }).catch(function (e) { $("#line").textContent = "could not load: " + errorText(e); endSkeleton(); });
   }
-  // The staging quota is the owner's own (GET /factory/me answers for the caller): the figure on their page, a dash on it for everyone else.
+  // The staging quota is the owner's own (GET /factory/me answers for the caller): the figure on their page, a dash on it for everyone else. The same answer carries their agents' grants and drafts (#252), which only they see.
   function quota() {
     if (!isOwner(login)) { $("#quota").textContent = "—"; $("#quota").title = "only " + login + " sees their staging"; return; }
-    api("GET", API + "/me").then(function (d) { var st = d.staging; if (!st) return; $("#quota").textContent = "staging " + (st.bytes / 1048576).toFixed(1) + " MB of " + (st.quota_bytes / 1073741824).toFixed(0) + " GB · evidence expires after 30 days"; }).catch(function () {});
+    api("GET", API + "/me").then(function (d) { renderAgents(d); var st = d.staging; if (!st) return; $("#quota").textContent = "staging " + (st.bytes / 1048576).toFixed(1) + " MB of " + (st.quota_bytes / 1073741824).toFixed(0) + " GB · evidence expires after 30 days"; }).catch(function () {});
+  }
+  // ---- agents (#252): the owner's grants, each with Revoke while it lives, and the drafts their agents made — waiting ones with the link to confirm them, the rest with what became of them. Served hidden; shown to the owner only, from their own no-store /factory/me.
+  var DRAFT_PILL = { waiting: "warn", confirmed: "ok", refused: "error", discarded: "none", expired: "none" };
+  var VERDICT_WORDS = { approve: "approve", request_changes: "request changes", reject: "reject", block: "block" };
+  function renderAgents(d) {
+    if (!d.grants) return;
+    $("#agents").hidden = false;
+    pager("#grants", d.grants, function (g) {
+      var lives = g.state === "live" || g.state === "pending";
+      return '<tr><td><b>' + esc(g.agent) + '</b></td><td>' + (g.scopes || []).map(function (x) { return pillHtml(x === "contribute" ? "none" : "rec", x); }).join(" ") + '</td><td class="when">' + ago(g.created_at) + '</td><td class="when" title="' + esc(g.expires_at) + '">' + esc(String(g.expires_at).slice(0, 10)) + '</td><td class="when">' + (g.last_used ? ago(g.last_used) : '<span class="dim">never</span>') + '</td><td>' + (lives ? '<button type="button" class="btn ghost" data-grant-revoke="' + esc(g.id) + '" data-agent="' + esc(g.agent) + '" title="its token stops working at once">Revoke</button>' : taskPill(g.state === "revoked" ? "withdrawn" : "cancelled", g.state + (g.revoked_by ? " (" + g.revoked_by + ")" : ""))) + '</td></tr>';
+    }, { empty: "no agent granted — omarchy-cli login --agent \"<its name>\"" });
+    pager("#drafts", d.drafts || [], function (x) {
+      var said = x.state === "waiting" ? '<a href="/auth/confirm/' + esc(x.id) + '">confirm or discard →</a>' : esc((x.outcome && (x.outcome.error || x.outcome.decision)) || "");
+      return '<tr><td class="when">' + ago(x.created_at) + '</td><td><a href="' + pkgHref(x.name, null, null) + '"><b>' + esc(x.name) + '</b></a>' + (x.task_id ? ' <a class="dim" href="/build/' + x.task_id + '">#' + x.task_id + '</a>' : '') + '</td><td>' + esc(VERDICT_WORDS[x.verdict] || x.verdict) + '</td><td>' + esc(x.agent) + '</td><td>' + pillHtml(DRAFT_PILL[x.state] || "none", x.state) + ' <span class="muted">' + said + '</span></td><td class="muted">' + esc(x.note || "") + '</td></tr>';
+    }, { empty: "no draft yet" });
   }
   // Who is looking (the shell's whoami: one fetch of /auth/me per page) and what they may do, before the first draw — so the tables come with their buttons in the right state, drawn once.
   Promise.all([new Promise(function (r) { whoami(r); }), loadCan()]).then(function () {
@@ -363,6 +385,15 @@ const SCRIPT = String.raw`
   document.addEventListener("click", function (ev) {
     var x = ev.target.closest ? ev.target.closest("button[data-expand]") : null;
     if (x) { var n = x.getAttribute("data-expand"); OPEN[n] = !OPEN[n]; load(); return; }
+    var gr = ev.target.closest ? ev.target.closest("button[data-grant-revoke]") : null;
+    if (gr) {
+      var gid = gr.getAttribute("data-grant-revoke"), gagent = gr.getAttribute("data-agent");
+      ask({ title: "Revoke the grant to " + gagent + "?", text: "Its token stops working at once; what it did stays on the record. Grant it again with omarchy-cli login.", confirm: "Revoke", danger: true }).then(function (go) {
+        if (go === null) return;
+        api("POST", API + "/grants/" + encodeURIComponent(gid) + "/revoke", {}).then(function (r) { if (r.error) toast(esc(r.error), "error"); else toast("Revoked: " + esc(r.agent) + " acts as you no more."); quota(); }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+      });
+      return;
+    }
     var w = ev.target.closest ? ev.target.closest("button[data-withdraw]") : null;
     if (w) {
       var wid = w.getAttribute("data-withdraw"), wname = w.getAttribute("data-name");
@@ -668,6 +699,19 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
         { path: "/api/v1/factory/me", as: "owner", fields: ["staging.bytes", "staging.quota_bytes"] },
       ],
       visible: EVERYONE,
+    },
+    {
+      // The owner's agents (#252): their grants with Revoke while each lives, and the drafts their agents made with the link to confirm a waiting one — served hidden, drawn from the owner's own no-store /factory/me, which answers nobody else (the public profile never carries a draft).
+      id: "user.agents",
+      page,
+      anchor: ['<section id="agents" hidden>', 'href="/agents#login">+ grant one →</a>', 'id="grants"', 'id="drafts"', 'href="/docs/omarchy-cli-mcp#write-tools">How it works →</a>'],
+      script: ["function renderAgents(d)", '$("#agents").hidden = false', 'pager("#grants"', 'pager("#drafts"', "data-grant-revoke", "'<a href=\"/auth/confirm/' + esc(x.id)", 'api("POST", API + "/grants/" + encodeURIComponent(gid) + "/revoke", {})'],
+      reads: [
+        { path: "/api/v1/factory/me", status: 401 },
+        { path: "/api/v1/factory/me", as: "owner", fields: ["grants", "drafts"] },
+      ],
+      acts: [{ method: "POST", path: "/api/v1/factory/grants/g_00000000000000000000000000000000/revoke", expect: { anonymous: 401, contributor: 404, owner: 404, maintainer: 404 } }],
+      visible: ["owner"],
     },
     {
       // Share and Token for everyone: Share live for all (the page is public, its link anyone's — no door), Token served grey with whose it is and drawn again from the server's word; the token dialogs are this entry's, the share dialog only copies the page's address.

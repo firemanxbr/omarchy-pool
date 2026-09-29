@@ -542,6 +542,74 @@ bl=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/packages/e2e-ident/block" "${m
 jq -e '[.events[] | select(.kind == "block" and (.summary | startswith("e2e-ident blocked by e2e: the e2e test of the brake")))] | length == 1' <<<"$(curl -s "$OMARCHY_API/api/v1/events?kind=block&limit=5")" >/dev/null || { echo "the journal must say who blocked e2e-ident, and why"; exit 1; }
 echo "the package page: every architecture on its data, Adopt and Block on the journal"
 
+step "Agents (#252): omarchy-cli login in the browser, a request through the agent, a block it drafts and the person confirms"
+# The loopback login as a person runs it, the browser played by curl with
+# the person's session: omarchy-cli listens on 127.0.0.1 and prints the
+# grant page's address; the page's form is posted with the session, its
+# Origin and its nonce; the pool sends the browser to the command's
+# loopback address with the code; the command swaps it with its verifier.
+cargo build -q -p omarchy-cli
+CLI="$ROOT/target/debug/omarchy-cli"
+(cd "$ROOT/worker" && npx wrangler d1 execute omarchy-repo --local --persist-to "$WRANGLER_STATE" --command \
+  "UPDATE contributors SET session_hash = '$(printf %s oms_e2e_req | sha256sum | cut -d' ' -f1)' WHERE login = 'e2e-req';
+   UPDATE contributors SET session_hash = '$(printf %s oms_e2e_agent | sha256sum | cut -d' ' -f1)' WHERE login = 'e2e'" >/dev/null)
+# The page's hidden fields, as a browser would post them back.
+form_of() { python3 -c 'import html,re,sys,urllib.parse as u; print(u.urlencode([(k, html.unescape(v)) for k, v in re.findall(r"<input type=\"hidden\" name=\"([a-z_]+)\" value=\"([^\"]*)\">", sys.stdin.read())]))'; }
+agent_login() { # <config dir> <session> [--maintain]
+  local dir="$1" cookie="omc=$2"; shift 2
+  mkdir -p "$dir"
+  XDG_CONFIG_HOME="$dir" "$CLI" --api "$OMARCHY_API" login --agent "E2E Agent" --no-browser "$@" > "$dir/login.out" 2> "$dir/login.err" &
+  local pid=$! url="" i
+  for i in $(seq 1 50); do url=$(grep -o "$OMARCHY_API/auth/agent?[^[:space:]]*" "$dir/login.err" || true); [[ -n "$url" ]] && break; sleep 0.2; done
+  [[ -n "$url" ]] || { echo "omarchy-cli login printed no grant page: $(cat "$dir/login.err")"; return 1; }
+  grep -q "code_verifier\|verifier=" <<<"$url" && { echo "the verifier must never be in the browser's address: $url"; return 1; }
+  local page back
+  page=$(curl -s "$url" -H "cookie: $cookie")
+  grep -q "Let E2E Agent act as" <<<"$page" || { echo "the grant page did not ask: $(head -c 400 <<<"$page")"; return 1; }
+  back=$(curl -s -o /dev/null -w '%{redirect_url}' -X POST "$OMARCHY_API/auth/agent" -H "cookie: $cookie" -H "origin: $OMARCHY_API" --data "$(form_of <<<"$page")&action=grant")
+  [[ "$back" == http://127.0.0.1:*"/?state="*"&code="* ]] || { echo "Grant must send the browser to the command's loopback address: $back"; return 1; }
+  curl -s "$back" | grep -q "Granted" || { echo "the command did not take the code"; return 1; }
+  wait "$pid" || { echo "omarchy-cli login failed: $(cat "$dir/login.err")"; return 1; }
+  [[ "$(stat -c %a "$dir/omarchy-cli/credentials.toml" 2>/dev/null || stat -f %Lp "$dir/omarchy-cli/credentials.toml")" == 600 ]] || { echo "the credentials file must be 0600"; return 1; }
+}
+mcp_call() { # <config dir> <tool> <arguments JSON> → the tool's result
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"e2e","version":"1"}}}' \
+    "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"$2\",\"arguments\":$3}}" \
+    | XDG_CONFIG_HOME="$1" "$CLI" --api "$OMARCHY_API" mcp | jq -c 'select(.id == 2) | .result'
+}
+agent_login "$E2E/agent-contributor" oms_e2e_req || exit 1
+tl=$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | XDG_CONFIG_HOME="$E2E/agent-contributor" "$CLI" --api "$OMARCHY_API" mcp)
+[[ "$(jq -r '[.result.tools[].name] | join(",")' <<<"$tl")" == status,check,info,search,list,security,request_package,request_status ]] || { echo "a contributor's grant lists the six reads and its two tools: $tl"; exit 1; }
+# A request through the agent: not confirmed through a link, and said so on the row and the journal line.
+rq=$(mcp_call "$E2E/agent-contributor" request_package '{"url":"https://e2e-agent.example","source":"https://e2e-agent.example/e2e-agent-1.0.tar.gz","version":"1.0","name":"e2e-agent","description":"Requested through an agent, for the e2e","license":"MIT","arches":["x86_64"],"checklist":{"official":true,"license":true,"unshipped":true,"evidence":true}}')
+[[ "$(jq -r '.isError' <<<"$rq")" == false && "$(jq -r '.structuredContent.package.owner' <<<"$rq")" == e2e-req ]] || { echo "request_package through the agent failed: $rq"; exit 1; }
+grep -q "e2e-agent 1.0 requested by e2e-req through E2E Agent" <<<"$(curl -s "$OMARCHY_API/api/v1/events?kind=request&limit=5")" || { echo "the request's journal line must name the agent"; exit 1; }
+# The maintainer's agent: review and block, seven days; its token decides nothing on the web's doors.
+agent_login "$E2E/agent-maintainer" oms_e2e_agent --maintain || exit 1
+mtoken=$(sed -n 's/^token = "\(oma_[0-9a-f]*\)"$/\1/p' "$E2E/agent-maintainer/omarchy-cli/credentials.toml")
+refused=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$px/approve" -H "authorization: Bearer $mtoken" -H "content-type: application/json" -d '{}')
+[[ "$(jq -r .code <<<"$refused")" == agent_token ]] || { echo "an agent's token must be refused on approve: $refused"; exit 1; }
+blk=$(mcp_call "$E2E/agent-maintainer" block '{"name":"e2e-agent","reason":"the e2e blocks what its agent drafted"}')
+# The link names the dashboard's origin (wrangler dev serves this Worker under the first route's name); the draft is the same on this address.
+draft_id=$(jq -r '.structuredContent.draft' <<<"$blk")
+[[ "$draft_id" == d_* && "$(jq -r '.structuredContent.confirm_url' <<<"$blk")" == */auth/confirm/"$draft_id" ]] || { echo "the block must come back as a draft with its link: $blk"; exit 1; }
+curl_url="$OMARCHY_API/auth/confirm/$draft_id"
+# The package page's step blocked e2e-ident by e2e already: the draft's own package is what must be missing from the journal.
+grep -q "e2e-agent blocked by" <<<"$(curl -s "$OMARCHY_API/api/v1/events?kind=block&limit=5")" && { echo "a draft must write no journal line"; exit 1; }
+cpage=$(curl -s "$curl_url" -H "cookie: omc=oms_e2e_agent")
+grep -q "Block e2e-agent?" <<<"$cpage" || { echo "the confirm page did not show the draft: $(head -c 400 <<<"$cpage")"; exit 1; }
+[[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$curl_url" -H "authorization: Bearer $mtoken" -H "origin: $OMARCHY_API" --data "$(form_of <<<"$cpage")&action=confirm&name=e2e-agent")" == 403 ]] || { echo "a confirmation must refuse a token"; exit 1; }
+[[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$curl_url" -H "cookie: omc=oms_e2e_agent" -H "origin: $OMARCHY_API" --data "$(form_of <<<"$cpage")&action=confirm")" == 400 ]] || { echo "a block must be confirmed with the package's name typed"; exit 1; }
+[[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$curl_url" -H "cookie: omc=oms_e2e_agent" -H "origin: $OMARCHY_API" --data "$(form_of <<<"$cpage")&action=confirm&name=e2e-agent")" == 200 ]] || { echo "the person's confirmation must block it"; exit 1; }
+grep -q "e2e-agent blocked by e2e — drafted by E2E Agent, confirmed in the browser" <<<"$(curl -s "$OMARCHY_API/api/v1/events?kind=block&limit=5")" || { echo "the block's journal line must say it was drafted by the agent and confirmed in the browser"; exit 1; }
+[[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$curl_url" -H "cookie: omc=oms_e2e_agent" -H "origin: $OMARCHY_API" --data "$(form_of <<<"$cpage")&action=confirm&name=e2e-agent")" == 409 ]] || { echo "a draft decides once"; exit 1; }
+# Logout revokes on the pool, then deletes the file.
+ctoken=$(sed -n 's/^token = "\(oma_[0-9a-f]*\)"$/\1/p' "$E2E/agent-contributor/omarchy-cli/credentials.toml")
+XDG_CONFIG_HOME="$E2E/agent-contributor" "$CLI" --api "$OMARCHY_API" logout | grep -q "Revoked the grant to E2E Agent" || { echo "logout must revoke the grant"; exit 1; }
+[[ ! -e "$E2E/agent-contributor/omarchy-cli/credentials.toml" ]] || { echo "logout must delete the credentials"; exit 1; }
+[[ "$(curl -s -o /dev/null -w '%{http_code}' "$OMARCHY_API/api/v1/factory/me" -H "authorization: Bearer $ctoken")" == 401 ]] || { echo "a revoked agent token must stop working"; exit 1; }
+echo "agents: a grant in the browser, a request through the agent, a block drafted and confirmed once, logout"
+
 step "pacman in $IMAGE against the worker mirror"
 gpg --armor --export "$KEYID" > "$E2E/omarchy-poc.pub.asc"
 cat > "$E2E/pacman.conf" <<CONF

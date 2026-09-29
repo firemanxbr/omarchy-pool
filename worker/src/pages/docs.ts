@@ -286,7 +286,26 @@ export function docsHtml(poolUrl: string, version: RunningVersion): string {
  * or the code block that is the chapter's substance.
  */
 const CHAPTER_ANCHORS: Partial<Record<DocKey, string[]>> = {
-  "omarchy-cli-mcp": ["<th>Tool</th><th>Arguments</th><th>Answers</th>", '<pre><code class="lang-json">', `href="${REPO_URL}/blob/main/docs/omarchy-cli.config.toml"`],
+  // The write tools (#252) as they are built: the tables of the tools and their routes and scopes, how a grant is made and why not a device flow, the drafts the person confirms, releasing a claim, what each call costs and what the server enforces, and the sign-off they follow — so none of what the review of the design named drops out of the chapter unnoticed.
+  "omarchy-cli-mcp": [
+    "<th>Tool</th><th>Arguments</th><th>Answers</th>",
+    '<pre><code class="lang-json">',
+    `href="${REPO_URL}/blob/main/docs/omarchy-cli.config.toml"`,
+    'id="write-tools"',
+    "<th>Tool</th><th>Role</th><th>Input</th><th>Answers</th>",
+    "<th>Tool</th><th>Worker route</th><th>Scope</th>",
+    'id="who-the-agent-acts-as"',
+    "<p><strong>Why not a device flow.</strong>",
+    'id="the-agent-drafts-the-person-confirms"',
+    'id="signed-and-journaled"',
+    'id="limits-and-cost"',
+    'id="what-the-server-enforces"',
+    "<strong>No hint from an agent.</strong>",
+    'id="signed-off"',
+    "<p><strong>Releasing a claim.</strong>",
+    'href="https://github.com/firemanxbr/omarchy-pool/issues/257"',
+    'href="/docs/security-model#principles"',
+  ],
   // The score and who does what: /build and /packages link here.
   "what-we-test": ['id="the-score"', 'id="who-does-what"', "<th>The contributor's half</th><th>points</th><th>The maintainer's half</th><th>points</th>"],
   architecture: ['href="/docs/proof-of-concept#results"', 'href="/docs/omarchy-cli-mcp"', `href="${REPO_URL}/blob/main/docs/omarchy-cli.config.toml"`, "<th>Route</th><th>Purpose</th>", '<figure class="diagram">'],

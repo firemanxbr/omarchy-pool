@@ -14,12 +14,13 @@
  * and an address that is shared shows the agent it names; the script only
  * switches in place.
  *
- * It says only what exists. The tools are the ones mcp.rs serves today,
- * all read-only; the write tools Contribute and Maintain need are the
- * proposal of #252 (PR #253, signed off on 2026-09-29 and not built yet):
- * marked *, never drawn as available, and the two role cards say
- * "proposed", offer no prompt to copy, and name where the web does it
- * today. test/agents.test.ts reads mcp.rs and holds the table to it.
+ * It says only what exists. The tools are the ones mcp.rs serves: the six
+ * reads anyone's machine has, and the seven write tools of #252 a machine
+ * lists once `omarchy-cli login` granted its agent the scopes they need —
+ * contribute, or review and block for a maintainer (`--maintain`). Every
+ * role card offers its prompt to copy, and step 4 is the login, with the
+ * chosen agent's name. test/agents.test.ts reads mcp.rs and holds the table
+ * to it.
  */
 import { page } from "./layout";
 import { agentMark, lucide, type AgentMark } from "./kit";
@@ -31,8 +32,8 @@ import type { RunningVersion } from "../meta";
 export const SERVER_NAME = "omarchy-pool";
 export const SERVER_COMMAND = "omarchy-cli mcp";
 
-/** Where the proposal for the write tools is followed: #252, whose draft is PR #253. */
-export const PROPOSAL_URL = "https://github.com/firemanxbr/omarchy-pool/issues/252";
+/** Where the chapter says how an agent acts as its person: the grant, the scopes, the drafts the person confirms. */
+export const LOGIN_DOCS = "/docs/omarchy-cli-mcp#write-tools";
 
 export interface AgentConfig {
   /** The address's ?agent= and the panel's id (agent-<key>). */
@@ -161,9 +162,14 @@ export interface Tool {
 }
 
 /**
- * The tools `omarchy-cli mcp` serves today, in the order its tools/list
- * gives them (mcp.rs tools()): all read-only, all for using the pool.
- * test/agents.test.ts reads mcp.rs and holds this list to it.
+ * The tools `omarchy-cli mcp` serves, in the order its tools/list gives
+ * them (mcp.rs: read_tools(), then write_tools()): the six reads for using
+ * the pool, then the seven write tools of #252 — listed on a machine whose
+ * agent was granted their scope with `omarchy-cli login`. The agent drafts
+ * a decision and the person confirms it in the browser, which is why two
+ * of them end "you confirm"; letting go of a claim is not a decision, and
+ * asks for a reason on the record instead. test/agents.test.ts reads
+ * mcp.rs and holds this list to it.
  */
 export const MCP_TOOLS: Tool[] = [
   { name: "status", does: "your ring, its release and the updates waiting", role: "use" },
@@ -172,17 +178,6 @@ export const MCP_TOOLS: Tool[] = [
   { name: "search", does: "find packages in your ring", role: "use" },
   { name: "list", does: "installed from your ring: current, update or ahead", role: "use" },
   { name: "security", does: "open advisories on what is installed here", role: "use" },
-];
-
-/**
- * The write tools #252 proposes for the other two roles, the seven of the
- * proposal a maintainer signed off on 2026-09-29 (PR #253), in its order.
- * None is built yet, so the page marks each with * and links the proposal.
- * In it the agent drafts a decision and the person confirms it in the
- * browser, which is why two of them end "you confirm"; letting go of a
- * claim is not a decision, and asks for a reason on the record instead.
- */
-export const PROPOSED_TOOLS: Tool[] = [
   { name: "request_package", does: "send a request to the factory", role: "contribute" },
   { name: "request_status", does: "follow a request and its builds", role: "contribute" },
   { name: "review_claim", does: "claim a package that is ready", role: "maintain" },
@@ -192,25 +187,24 @@ export const PROPOSED_TOOLS: Tool[] = [
   { name: "block", does: "pull a package from every ring; you confirm", role: "maintain" },
 ];
 
+/** The login each role's tools need: none for the reads, the grant for the rest (review and block a maintainer's). */
+export const ROLE_LOGIN: Readonly<Record<ToolRole, string | null>> = { use: null, contribute: "omarchy-cli login", maintain: "omarchy-cli login --maintain" };
+
 interface RoleCard {
   role: ToolRole;
   eyebrow: string;
   title: string;
   prompt: string;
-  /** The tools the prompt needs, by name: MCP_TOOLS' or PROPOSED_TOOLS'. */
+  /** The tools the prompt needs, by name: MCP_TOOLS'. */
   tools: string[];
-  /** For a role whose tools are proposed: where the web does it today. */
-  today?: { href: string; label: string };
 }
 
 /**
- * One card per role, each with a prompt. Use asks only what the read-only
- * tools answer — installing stays with the person, as the server's own
- * instructions say — and its prompt is there to copy. Contribute and
- * Maintain need the proposed tools: their cards say so, name the page that
- * does it today, and show the prompt as an example with nothing to copy,
- * since no agent could carry it out yet. The day those tools are served,
- * their cards get the button back from the same rule.
+ * One card per role, each with a prompt to copy. Use asks only what the
+ * read-only tools answer — installing stays with the person, as the
+ * server's own instructions say. Contribute and Maintain need the write
+ * tools, so their card says which login grants them; a maintainer's
+ * verdict comes back as a link they confirm in the browser.
  */
 export const ROLES: RoleCard[] = [
   {
@@ -226,7 +220,6 @@ export const ROLES: RoleCard[] = [
     title: "Get your project in",
     prompt: "Request my-app on omarchy-pool: github.com/me/my-app, MIT, x86_64 and aarch64. Follow it until it is ready for review.",
     tools: ["request_package", "request_status"],
-    today: { href: "/factory", label: "the Factory" },
   },
   {
     role: "maintain",
@@ -234,33 +227,27 @@ export const ROLES: RoleCard[] = [
     title: "Review what others asked for",
     prompt: "Claim their-app for review, rebuild it from scratch, and show me the recipe, the logs and your verdict before I decide.",
     tools: ["review_claim", "review_context", "submit_review"],
-    today: { href: "/review", label: "Review" },
   },
 ];
 
 /** The question step 3 suggests: one the read-only tools answer (status). */
 export const FIRST_QUESTION = "which ring is this machine on, and what updates are waiting?";
 
-const proposed = (name: string) => PROPOSED_TOOLS.some((t) => t.name === name);
-
-/** A tool's name as the page writes it: a proposed one carries its *, and says "proposed" to a screen reader instead. */
+/** A tool's name as the page writes it. */
 function toolName(name: string): string {
-  return proposed(name)
-    ? `<code>${escapeHtml(name)}<span aria-hidden="true">*</span></code><span class="ag-vh"> (proposed)</span>`
-    : `<code>${escapeHtml(name)}</code>`;
+  return `<code>${escapeHtml(name)}</code>`;
 }
 
 /** A link to this page with that agent shown: what the script switches in place, and what a browser without script follows. */
 const agentHref = (a: AgentConfig) => `?agent=${encodeURIComponent(a.key)}#connect`;
 
 function roleCard(r: RoleCard): string {
-  const later = r.tools.some(proposed);
-  const copy = later ? "" : `<button type="button" class="op-copy ag-copy" data-op-copy="${escapeHtml(r.prompt)}">copy prompt</button>`;
+  const login = ROLE_LOGIN[r.role];
   return `<article class="op-card ag-role" id="role-${r.role}">
-        <div class="ag-role-h"><span class="ag-role-k">${escapeHtml(r.eyebrow)}</span>${later ? `<span class="op-pill wait">proposed</span>` : ""}</div>
+        <div class="ag-role-h"><span class="ag-role-k">${escapeHtml(r.eyebrow)}</span></div>
         <h2>${escapeHtml(r.title)}</h2>
         <div class="op-code"><code><span class="op-prompt">› </span>${escapeHtml(r.prompt)}</code></div>
-        <div class="ag-role-f"><span class="ag-uses">${r.tools.map(toolName).join(" · ")}${r.today ? `<span class="ag-today">not built yet · on the web: <a href="${escapeHtml(r.today.href)}">${escapeHtml(r.today.label)} →</a></span>` : ""}</span>${copy}</div>
+        <div class="ag-role-f"><span class="ag-uses">${r.tools.map(toolName).join(" · ")}${login ? `<span class="ag-login">after <a href="#login"><code>${escapeHtml(login)}</code></a></span>` : ""}</span><button type="button" class="op-copy ag-copy" data-op-copy="${escapeHtml(r.prompt)}">copy prompt</button></div>
       </article>`;
 }
 
@@ -275,8 +262,8 @@ function agentPanel(a: AgentConfig, chosen: AgentConfig): string {
             </div>`;
 }
 
-function toolRow(t: Tool, later: boolean): string {
-  return `<tr${later ? ' class="proposed"' : ""}><th scope="row">${toolName(t.name)}</th><td>${escapeHtml(t.does)}</td><td class="ag-role-c">${t.role}</td></tr>`;
+function toolRow(t: Tool): string {
+  return `<tr><th scope="row">${toolName(t.name)}</th><td>${escapeHtml(t.does)}</td><td class="ag-role-c">${t.role}</td></tr>`;
 }
 
 function body(chosen: AgentConfig): string {
@@ -314,16 +301,22 @@ function body(chosen: AgentConfig): string {
             <div class="op-code ag-ask"><code><span class="op-prompt">› </span>${escapeHtml(FIRST_QUESTION)}</code></div>
           </div>
         </li>
+        <li id="login"><span class="ag-n" aria-hidden="true">4</span>
+          <div class="ag-step">
+            <h3>Let it act as you</h3>
+            <div class="op-code"><code>omarchy-cli login --agent "<span data-agent-name>${escapeHtml(chosen.label)}</span>"</code><button type="button" class="op-copy" data-op-copy>copy</button></div>
+            <p class="ag-note">For Contribute and Maintain: your browser opens the pool's grant page, signed in with GitHub, and the token stays on this machine. A maintainer adds <code>--maintain</code> for review and block, granted for seven days. A verdict or a block the agent drafts waits for you to confirm it in the browser. <a href="${LOGIN_DOCS}">How it works →</a></p>
+          </div>
+        </li>
       </ol>
     </div>
 
     <div class="op-card ag-tools" id="tools">
-      <div class="op-card-h"><h2 class="ag-card-t">${lucide("wrench", 16)}Tools</h2><small>* proposed, not built yet · <a href="${PROPOSAL_URL}">the proposal →</a></small></div>
+      <div class="op-card-h"><h2 class="ag-card-t">${lucide("wrench", 16)}Tools</h2><small>contribute and maintain after <a href="#login">step 4</a></small></div>
       <table>
         <thead class="ag-vh"><tr><th scope="col">Tool</th><th scope="col">What it does</th><th scope="col">Role</th></tr></thead>
         <tbody>
-          ${MCP_TOOLS.map((t) => toolRow(t, false)).join("\n          ")}
-          ${PROPOSED_TOOLS.map((t) => toolRow(t, true)).join("\n          ")}
+          ${MCP_TOOLS.map(toolRow).join("\n          ")}
         </tbody>
       </table>
       <div class="op-card-f"><a href="/docs/omarchy-cli-mcp">What each tool answers →</a></div>
@@ -360,9 +353,9 @@ const CSS = String.raw`
   .ag-role .op-code code { font-size: 13px; }
   .ag-role-f { display: flex; justify-content: space-between; align-items: flex-start; gap: 6px 12px; flex-wrap: wrap; margin-top: 12px; padding: 12px 16px; border-top: 1px solid var(--line); font-size: 12px; color: var(--dim); }
   .ag-uses { flex: 1 1 180px; min-width: 0; } .ag-uses code { font: inherit; }
-  .ag-today { display: block; margin-top: 4px; }
-  .ag-today a, .ag-where a, .ag-note a, .ag-tools .op-card-h a, .ag-tools .op-card-f a { color: var(--green); text-decoration: none; }
-  .ag-today a:hover, .ag-where a:hover, .ag-note a:hover, .ag-tools .op-card-h a:hover, .ag-tools .op-card-f a:hover { text-decoration: underline; }
+  .ag-login { display: block; margin-top: 4px; } .ag-login code { font: inherit; white-space: nowrap; }
+  .ag-login a, .ag-where a, .ag-note a, .ag-tools .op-card-h a, .ag-tools .op-card-f a { color: var(--green); text-decoration: none; }
+  .ag-login a:hover, .ag-where a:hover, .ag-note a:hover, .ag-tools .op-card-h a:hover, .ag-tools .op-card-f a:hover { text-decoration: underline; }
   .op-copy.ag-copy { padding: 0; border: 0; background: none; color: var(--green); font-size: 12px; white-space: nowrap; }
   .op-copy.ag-copy:hover { text-decoration: underline; } .op-copy.ag-copy.copied { background: none; color: var(--green); }
   .ag-row { display: flex; flex-wrap: wrap; gap: 16px; align-items: stretch; }
@@ -389,7 +382,7 @@ const CSS = String.raw`
   .ag-tools tr > :first-child { padding-left: 16px; } .ag-tools tr > :last-child { padding-right: 16px; }
   .ag-tools tbody tr:last-child > * { border-bottom: 0; }
   .ag-tools tbody th { font-size: 13px; font-weight: 400; letter-spacing: normal; text-transform: none; color: inherit; white-space: nowrap; }
-  .ag-tools tbody th code { font-size: 12.5px; color: var(--green); } .ag-tools tr.proposed th code { color: var(--muted); }
+  .ag-tools tbody th code { font-size: 12.5px; color: var(--green); }
   .ag-tools td { color: var(--muted); font-size: 12.5px; }
   .ag-tools td.ag-role-c { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--dim); white-space: nowrap; text-align: right; }
   .ag-tools .op-card-f { justify-content: flex-start; }
@@ -419,11 +412,12 @@ const CSS = String.raw`
  * modifier (a new tab) is the browser's, and a key the list does not have
  * changes nothing.
  */
-const SCRIPT = (keys: string[]) => String.raw`
-  var AGENT_KEYS = ${JSON.stringify(keys)};
+const SCRIPT = (agents: AgentConfig[]) => String.raw`
+  var AGENT_KEYS = ${JSON.stringify(agents.map((a) => a.key))}, AGENT_NAMES = ${JSON.stringify(Object.fromEntries(agents.map((a) => [a.key, a.label])))};
   function showAgent(key) {
     if (AGENT_KEYS.indexOf(key) < 0) return false;
     AGENT_KEYS.forEach(function (k) { var panel = document.getElementById("agent-" + k); if (panel) panel.hidden = k !== key; });
+    document.querySelectorAll("[data-agent-name]").forEach(function (n) { n.textContent = AGENT_NAMES[key]; });
     document.querySelectorAll(".ag-pick a[data-agent]").forEach(function (a) { if (a.getAttribute("data-agent") === key) a.setAttribute("aria-current", "true"); else a.removeAttribute("aria-current"); });
     var q = new URLSearchParams(location.search); q.set("agent", key);
     history.replaceState(null, "", "?" + q + "#connect");
@@ -447,7 +441,7 @@ export function agentsHtml(poolUrl: string, version: RunningVersion, agent?: str
     description: "Use the pool from your own agent: omarchy-cli as an MCP server, how to add it to Claude Code, Codex, Cursor, Gemini CLI and more, and the tools it offers.",
     active: "none",
     body: body(agentOf(agent)),
-    script: SCRIPT(AGENTS.map((a) => a.key)),
+    script: SCRIPT(AGENTS),
     poolUrl,
     version,
     kit: true,
@@ -465,19 +459,18 @@ export const AGENTS_COMPONENTS = (_F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // One card per role with its prompt, the kit's copy putting Use's on the clipboard; the two whose tools are proposed say so, name the page that does it today, and offer nothing to copy.
+    // One card per role with its prompt, the kit's copy putting it on the clipboard; Contribute and Maintain name the login their tools need, step 4's.
     id: "agents.roles",
     page: "/agents",
-    anchor: ['id="role-use"', 'id="role-contribute"', 'id="role-maintain"', 'class="op-copy ag-copy" data-op-copy="', '<span class="op-pill wait">proposed</span>', 'href="/factory">the Factory →</a>', 'href="/review">Review →</a>'],
-    reads: [{ path: "/factory", json: false }, { path: "/review", json: false }],
+    anchor: ['id="role-use"', 'id="role-contribute"', 'id="role-maintain"', 'class="op-copy ag-copy" data-op-copy="', '<span class="ag-login">after <a href="#login"><code>omarchy-cli login</code></a></span>', '<span class="ag-login">after <a href="#login"><code>omarchy-cli login --maintain</code></a></span>'],
     visible: EVERYONE,
   },
   {
-    // The three steps: the client from the ring (the release binary until the reader's serves it), the server added to the agent, a first question.
+    // The four steps: the client from the ring (the release binary until the reader's serves it), the server added to the agent, a first question, and the login that grants the write tools, with the chosen agent's name.
     id: "agents.connect",
     page: "/agents",
-    anchor: ['id="connect"', '<ol class="ag-steps" role="list">', "<code>sudo pacman -S omarchy-cli</code>", 'href="/docs/get-started#cli">how to install it →</a>', `<small>one MCP server: ${SERVER_COMMAND}</small>`, FIRST_QUESTION],
-    reads: [{ path: "/docs/get-started", json: false }],
+    anchor: ['id="connect"', '<ol class="ag-steps" role="list">', "<code>sudo pacman -S omarchy-cli</code>", 'href="/docs/get-started#cli">how to install it →</a>', `<small>one MCP server: ${SERVER_COMMAND}</small>`, FIRST_QUESTION, '<li id="login">', `<code>omarchy-cli login --agent "<span data-agent-name>${AGENTS[0].label}</span>"</code>`, `<a href="${LOGIN_DOCS}">How it works →</a>`],
+    reads: [{ path: "/docs/get-started", json: false }, { path: "/docs/omarchy-cli-mcp", json: false }],
     visible: EVERYONE,
   },
   {
@@ -485,14 +478,14 @@ export const AGENTS_COMPONENTS = (_F: Fixture): Component[] => [
     id: "agents.picker",
     page: "/agents",
     anchor: ['<nav class="ag-pick" aria-labelledby="ag-pick-t">', ...AGENTS.map((a) => `id="agent-${a.key}"`), '<div class="op-code ag-file"><code>'],
-    script: ["function showAgent(", '"agent-" + k', 'a.setAttribute("aria-current", "true")', 'history.replaceState(null, "", "?" + q + "#connect")', 'closest("a[data-agent]")', "inPicker.focus({ preventScroll: true })"],
+    script: ["function showAgent(", '"agent-" + k', 'a.setAttribute("aria-current", "true")', 'history.replaceState(null, "", "?" + q + "#connect")', 'closest("a[data-agent]")', "inPicker.focus({ preventScroll: true })", 'document.querySelectorAll("[data-agent-name]")', "n.textContent = AGENT_NAMES[key]"],
     visible: EVERYONE,
   },
   {
-    // The tools: what omarchy-cli mcp serves today, then the proposal's, each marked *, and a link to the proposal; the chapter has the arguments and the answers.
+    // The tools: what omarchy-cli mcp serves, the reads then the write tools a login grants; the chapter has the arguments and the answers.
     id: "agents.tools",
     page: "/agents",
-    anchor: ['id="tools"', `<a href="${PROPOSAL_URL}">the proposal →</a>`, 'href="/docs/omarchy-cli-mcp">What each tool answers →</a>', ...MCP_TOOLS.map((t) => `<th scope="row"><code>${t.name}</code></th>`), ...PROPOSED_TOOLS.map((t) => `<tr class="proposed"><th scope="row"><code>${t.name}<span aria-hidden="true">*</span></code>`)],
+    anchor: ['id="tools"', '<small>contribute and maintain after <a href="#login">step 4</a></small>', 'href="/docs/omarchy-cli-mcp">What each tool answers →</a>', ...MCP_TOOLS.map((t) => `<tr><th scope="row"><code>${t.name}</code></th>`)],
     reads: [{ path: "/docs/omarchy-cli-mcp", json: false }],
     visible: EVERYONE,
   },

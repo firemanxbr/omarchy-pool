@@ -337,7 +337,11 @@ The client drives pacman rather than replacing it. What it adds:
 * **MCP** (`omarchy-cli mcp`): the same answers as tools for an assistant on
   the machine — `status`, `check`, `info`, `search`, `list`, `security` —
   over stdio (JSON-RPC, one message per line), read-only; installing and
-  upgrading stay with the person at the keyboard
+  upgrading stay with the person at the keyboard. After `omarchy-cli login`
+  (a grant made in the person's browser, handed back through 127.0.0.1 with
+  PKCE), the write tools its scopes hold: request and follow a package,
+  claim, read, release and draft a verdict or a block — which the person
+  confirms in the browser
   ([`docs/omarchy-cli-mcp.md`](omarchy-cli-mcp.md)).
 
 `vercmp` is a byte-for-byte port of `alpm_pkg_vercmp` so the client and pacman

@@ -13,6 +13,7 @@ import { isTextEvidence, reclaimStagingPackages, STAGING_DAYS, STAGING_QUOTA_BYT
 import { findLeak, leakMessage } from "../leak";
 import { CHECKLIST, LICENSE, PKGNAME, PKGNAME_RULE, forgeOf, sourceHasPath } from "../request";
 import { parseTargets, settleTargets } from "../targets";
+import { throughWords, type Through } from "../agents";
 
 /**
  * Contributors: anyone with a GitHub identity. No permission needed to
@@ -88,6 +89,9 @@ export const SEEN_MINUTES = 10;
  * The contributor behind the request — a `omc_…` bearer token (the CLI /
  * worker credential) or the sign-in cookie (a browser session, `oms_…`,
  * separate so signing in never invalidates a running worker) — or null.
+ * Never an agent's token (`oma_…`, #252): a request that carries one is
+ * nobody here, whatever cookie comes with it; the routes an agent may call
+ * read it with agentOf (agents.ts), and every other route refuses it.
  */
 export async function contributorOf(request: Request, env: Env): Promise<Contributor | null> {
   const token = bearer(request);
@@ -110,9 +114,10 @@ export async function contributorOf(request: Request, env: Env): Promise<Contrib
   return { login: row.login, name: row.name, avatar_url: row.avatar_url, role: row.role, blocked: row.blocked_at ? { at: row.blocked_at, reason: row.blocked_reason } : null };
 }
 
-/** The door a signed-in person came through, as contributorOf read them, for the record and the journal line of what they decide: the web (the dashboard's session cookie) or a token (`omc_…`, the command line's). */
-export function viaOf(request: Request): "web" | "token" {
-  return bearer(request) ? "token" : "web";
+/** The door a signed-in person came through, as contributorOf read them, for the record and the journal line of what they decide: the web (the dashboard's session cookie), a token (`omc_…`, the command line's) or an agent (`oma_…`, a grant the person made to an agent: agents.ts; what it wrote says `through` which). */
+export function viaOf(request: Request): "web" | "token" | "agent" {
+  const t = bearer(request);
+  return t.startsWith("oma_") ? "agent" : t ? "token" : "web";
 }
 
 // ---------- what a person may do on a person's page ----------
@@ -351,12 +356,68 @@ export async function handleNewToken(c: Contributor, env: Env): Promise<Response
   return json({ login: c.login, token, note: "Shown once; it replaces any earlier token. Use it as `Authorization: Bearer …` on the command line and for workers." }, 201);
 }
 
-export async function handleMe(c: Contributor, env: Env): Promise<Response> {
+/** A person's workers, newest first, through idx_build_workers_owner (owner, last_seen): it read every worker ever registered before (#252). */
+export const ME_WORKERS_SQL = "SELECT id, arch, mode, packages, labels, agent, last_seen, current_task, builds_done, builds_failed, revoked_at FROM build_workers WHERE owner = ? ORDER BY last_seen DESC";
+const GRANT_COLS = "id, agent, scopes, created_at, expires_at, revoked_at, revoked_by, last_used, token_hash IS NOT NULL AS swapped";
+/**
+ * A person's live agent grants — swapped, not revoked, not expired — by the
+ * partial index on (login, expires_at) that holds only unrevoked, swapped
+ * grants: three at most, however long the history behind them. Read apart
+ * from the history, so a live grant always has its Revoke on the page, and a
+ * login that re-grants every week never pushes an older live grant off it.
+ */
+export const ME_LIVE_GRANTS_SQL = `SELECT ${GRANT_COLS} FROM agent_grants WHERE login = ? AND revoked_at IS NULL AND token_hash IS NOT NULL AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ORDER BY expires_at DESC`;
+/** A person's agent grants, newest first, ten at most, by (login, created_at): the history the page lists after the live ones. */
+export const ME_GRANTS_SQL = `SELECT ${GRANT_COLS} FROM agent_grants WHERE login = ? ORDER BY created_at DESC LIMIT 10`;
+const DRAFT_COLS = "id, grant_id, agent, client, verdict, note, name, task_id, created_at, expires_at, used_at, state, outcome";
+/**
+ * A person's drafts still waiting — not spent, drafted within their thirty
+ * minutes (agents.ts DRAFT_MINUTES; a literal here, as this module is read
+ * before that one) — by the range of (login, created_at): only the last
+ * half hour's drafts are read, at most the day's thirty on either side of
+ * midnight. Read apart from the history, so an agent that drafts twenty
+ * more never pushes a waiting draft off the page.
+ */
+export const ME_WAITING_DRAFTS_SQL = `SELECT ${DRAFT_COLS} FROM drafts WHERE login = ? AND created_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 minutes') AND used_at IS NULL ORDER BY created_at DESC`;
+/** A person's drafts, newest first, twenty at most, by (login, created_at): shown to them only until confirmed. */
+export const ME_DRAFTS_SQL = `SELECT ${DRAFT_COLS} FROM drafts WHERE login = ? ORDER BY created_at DESC LIMIT 20`;
+
+/** The rows of the first list, then the second's that the first did not hold: live grants or waiting drafts before the history. */
+function firstThen<T extends { id: string }>(first: T[], then: T[]): T[] {
+  const seen = new Set(first.map((x) => x.id));
+  return [...first, ...then.filter((x) => !seen.has(x.id))];
+}
+
+/**
+ * The caller's own state, no-store: their packages, workers, builds, staging
+ * — and, since #252, the grants they made to agents and the drafts those
+ * agents made, which nobody else sees (the public journal records decisions,
+ * not drafts). A draft still waiting after its thirty minutes says expired.
+ */
+export async function handleMe(c: Contributor, env: Env, origin = ""): Promise<Response> {
   const packages = await env.DB.prepare("SELECT * FROM factory_packages WHERE owner = ? ORDER BY name").bind(c.login).all();
-  const workers = await env.DB.prepare("SELECT id, arch, mode, packages, labels, agent, last_seen, current_task, builds_done, builds_failed, revoked_at FROM build_workers WHERE owner = ? ORDER BY last_seen DESC").bind(c.login).all();
+  const workers = await env.DB.prepare(ME_WORKERS_SQL).bind(c.login).all();
   const tasks = await env.DB.prepare("SELECT id, name, arch, version, status, attempts, lease_owner, duration_ms, error, staged_prefix, created_at FROM build_tasks WHERE owner = ? ORDER BY id DESC LIMIT 50").bind(c.login).all();
   const staged = await env.DB.prepare("SELECT COALESCE(SUM(size), 0) AS bytes FROM staging_objects WHERE owner = ?").bind(c.login).first<{ bytes: number }>();
-  return json({ contributor: c, packages: packages.results.map((p) => ({ ...p, targets: parseTargets(p.targets) })), workers: workers.results.map((w) => ({ ...w, packages: w.packages ? JSON.parse(w.packages as string) : null, labels: w.labels ? JSON.parse(w.labels as string) : null })), tasks: tasks.results, staging: { bytes: staged?.bytes ?? 0, quota_bytes: STAGING_QUOTA_BYTES } });
+  type GrantRow = { id: string; agent: string; scopes: string; created_at: string; expires_at: string; revoked_at: string | null; revoked_by: string | null; last_used: string | null; swapped: number };
+  type DraftRow = { id: string; grant_id: string; agent: string; client: string | null; verdict: string; note: string; name: string; task_id: number | null; created_at: string; expires_at: string; used_at: string | null; state: string; outcome: string | null };
+  const [live, history, waiting, recent] = await Promise.all([
+    env.DB.prepare(ME_LIVE_GRANTS_SQL).bind(c.login).all<GrantRow>(),
+    env.DB.prepare(ME_GRANTS_SQL).bind(c.login).all<GrantRow>(),
+    env.DB.prepare(ME_WAITING_DRAFTS_SQL).bind(c.login).all<DraftRow>(),
+    env.DB.prepare(ME_DRAFTS_SQL).bind(c.login).all<DraftRow>(),
+  ]);
+  const grants = { results: firstThen(live.results, history.results) }, drafts = { results: firstThen(waiting.results, recent.results) };
+  const now = new Date().toISOString();
+  return json({
+    contributor: c,
+    packages: packages.results.map((p) => ({ ...p, targets: parseTargets(p.targets) })),
+    workers: workers.results.map((w) => ({ ...w, packages: w.packages ? JSON.parse(w.packages as string) : null, labels: w.labels ? JSON.parse(w.labels as string) : null })),
+    tasks: tasks.results,
+    staging: { bytes: staged?.bytes ?? 0, quota_bytes: STAGING_QUOTA_BYTES },
+    grants: grants.results.map((g) => ({ id: g.id, agent: g.agent, scopes: JSON.parse(g.scopes) as string[], created_at: g.created_at, expires_at: g.expires_at, revoked_at: g.revoked_at, revoked_by: g.revoked_by, last_used: g.last_used, state: g.revoked_at ? "revoked" : g.expires_at <= now ? "expired" : g.swapped ? "live" : "pending" })),
+    drafts: drafts.results.map((d) => ({ ...d, outcome: d.outcome ? JSON.parse(d.outcome) : null, state: d.state === "waiting" && d.expires_at <= now ? "expired" : d.state, confirm_url: `${origin}/auth/confirm/${d.id}` })),
+  }, 200, { "cache-control": "no-store" });
 }
 
 const GITHUB_URL = /^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/;
@@ -466,7 +527,7 @@ async function sourceAnswers(source: string, fetcher: typeof fetch = fetch): Pro
  * record written: request.json in the pool bucket, signed, written once;
  * the registration points at it and the build can start.
  */
-export async function handleRequestPackage(c: Contributor, request: Request, env: Env, fetcher: typeof fetch = fetch): Promise<Response> {
+export async function handleRequestPackage(c: Contributor, request: Request, env: Env, fetcher: typeof fetch = fetch, through?: Through): Promise<Response> {
   // A request is the caller's own (a blocked one is refused here, in the words the page greys the button with).
   const no = refused(workspace(c, c.login).request);
   if (no) return no;
@@ -542,9 +603,9 @@ export async function handleRequestPackage(c: Contributor, request: Request, env
     if (byName) await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = ?, finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ? AND kind = 'build' AND trust = 'community' AND status = 'queued'").bind(`superseded: the request was renewed by ${c.login}`, name).run();
     // The record, written once; then the registration that points at it.
     const req = await env.DB.prepare(
-      `INSERT INTO package_requests (name, owner, project, source, version, description, license, arches, checklist, detected) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id, created_at`,
+      `INSERT INTO package_requests (name, owner, project, source, version, description, license, arches, checklist, detected, agent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id, created_at`,
     )
-      .bind(name, c.login, parsed.project, source, tag, description, license, JSON.stringify(build), JSON.stringify(Object.fromEntries(Object.keys(CHECKLIST).map((k) => [k, true]))), JSON.stringify(detected))
+      .bind(name, c.login, parsed.project, source, tag, description, license, JSON.stringify(build), JSON.stringify(Object.fromEntries(Object.keys(CHECKLIST).map((k) => [k, true]))), JSON.stringify(detected), through ? JSON.stringify(through) : null)
       .first<{ id: number; created_at: string }>();
     if (!req) {
       await unreserve();
@@ -555,6 +616,8 @@ export async function handleRequestPackage(c: Contributor, request: Request, env
       schema: "omarchy-pool/package-request/1",
       request: req.id, name, project: parsed.project, source, version: tag, description, license, arches: build,
       requested_by: c.login, requested_at: req.created_at,
+      // A request an agent made (#252): the door and which agent, beside who — the four confirmations came through it, passed after it asked the person.
+      ...(through ? { via: "agent", through } : {}),
       checklist: Object.fromEntries(Object.keys(CHECKLIST).map((k) => [k, { confirmed: true, text: CHECKLIST[k] }])),
       detected, pool: version(env).version,
     });
@@ -570,7 +633,7 @@ export async function handleRequestPackage(c: Contributor, request: Request, env
       .bind(name, c.login, parsed.project, JSON.stringify(build), tag, detected.has_pkgbuild ? "PKGBUILD" : null, JSON.stringify(detected), req.id, parsed.project, source, description, license, byName?.status === "staged" ? `request renewed as #${req.id} (${tag}) by ${c.login}; the staged build stands` : `requested ${tag} by ${c.login}; press Build to build it`, byName?.status === "staged" ? "staged" : "registered")
       .first();
     await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('request', NULL, 'factory', 'ok', ?, ?)")
-      .bind(`${name} ${tag} requested by ${c.login} from ${parsed.project} (${license}; ${build.join(", ")}) — record ${req.id}${takeover ? ` — taken over from ${takeover.from}, ${takeover.why}` : ""}`, JSON.stringify({ request: req.id, name, owner: c.login, project: parsed.project, source, version: tag, license, arches: build, skipped: upstream, record: recordUrl(env, record.key), taken_over_from: takeover?.from ?? null }))
+      .bind(`${name} ${tag} requested by ${c.login}${throughWords(through)} from ${parsed.project} (${license}; ${build.join(", ")}) — record ${req.id}${takeover ? ` — taken over from ${takeover.from}, ${takeover.why}` : ""}`, JSON.stringify({ request: req.id, name, owner: c.login, project: parsed.project, source, version: tag, license, arches: build, skipped: upstream, record: recordUrl(env, record.key), taken_over_from: takeover?.from ?? null, ...(through ? { via: "agent", through } : {}) }))
       .run();
     // The build starts by itself: into the shared queue, the best idle shared worker first, the contributor's own worker at once. A renewal that keeps the version of a staged build keeps that build: nothing to queue.
     const keepsStaged = byName?.status === "staged" && (byName.release ?? "") === tag;
@@ -1210,14 +1273,31 @@ export async function handleStagingDelete(c: Contributor, taskId: number, env: E
   return json({ task: taskId, deleted: keys.length });
 }
 
-export async function handleStagingGet(taskId: number, filename: string, env: Env, maintainer: boolean): Promise<Response> {
+/** The most of a text evidence's tail one read asks for (review_context reads the last 64 KB of each log). */
+export const EVIDENCE_TAIL_MAX = 64 * 1024;
+
+/**
+ * A staged file. Text evidence — the log, the PKGBUILD, the reports — is
+ * public, so it answers `public, max-age=30` and the edge keeps it as it
+ * keeps the task (cachedApi keys by the URL, and anyone may read this one);
+ * `?tail=<bytes>` (64 KB at most) reads its last bytes as a ranged R2 get,
+ * so a long log's tail is not the whole log (#252: review_context). A
+ * package stays for maintainers only and no-store: the edge must keep only
+ * what anyone may read.
+ */
+export async function handleStagingGet(taskId: number, filename: string, env: Env, maintainer: boolean, tail: string | null = null): Promise<Response> {
   const row = await env.DB.prepare("SELECT key FROM staging_objects WHERE task_id = ? AND key LIKE ?").bind(taskId, `%/${filename}`).first<{ key: string }>();
   if (!row) return json({ error: "no such object" }, 404);
   const isText = isTextEvidence(filename);
   if (!isText && !maintainer) return json({ error: "packages in staging are for maintainers; the log and the PKGBUILD are public" }, 403);
-  const obj = await env.STAGING.get(row.key);
+  let suffix: number | null = null;
+  if (tail !== null) {
+    suffix = Number(tail);
+    if (!isText || !Number.isInteger(suffix) || suffix < 1 || suffix > EVIDENCE_TAIL_MAX) return json({ error: `tail: a number of bytes from 1 to ${EVIDENCE_TAIL_MAX}, on text evidence only` }, 400);
+  }
+  const obj = await env.STAGING.get(row.key, suffix !== null ? { range: { suffix } } : undefined);
   if (!obj) return json({ error: `gone (packages of decided builds are reclaimed; staging expires after ${STAGING_DAYS} days; the text evidence is on the record)` }, 404);
-  return new Response(obj.body, { headers: { "content-type": isText ? "text/plain; charset=utf-8" : "application/octet-stream", "cache-control": "no-store" } });
+  return new Response(obj.body, { headers: { "content-type": isText ? "text/plain; charset=utf-8" : "application/octet-stream", "cache-control": isText ? "public, max-age=30" : "no-store" } });
 }
 
 // ---------- maintainers ----------

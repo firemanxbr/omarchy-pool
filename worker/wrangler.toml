@@ -66,6 +66,20 @@ bucket_name = "omarchy-packages"
 binding = "STAGING"
 bucket_name = "omarchy-factory-staging"
 
+# The MCP write tools' limits (#252, routes/agents.ts), counted at the edge
+# with no D1 row: twenty calls a minute per login that carry an agent token,
+# and five token swaps a minute per address on POST /auth/agent/token, the
+# one route open without a credential. The namespace ids are this account's.
+[[ratelimits]]
+name = "AGENT_CALLS"
+namespace_id = "2521"
+simple = { limit = 20, period = 60 }
+
+[[ratelimits]]
+name = "AGENT_SWAPS"
+namespace_id = "2522"
+simple = { limit = 5, period = 60 }
+
 [vars]
 DEFAULT_RING = "stable"
 # Task kinds the scheduler creates as pulled jobs (pkg-repo work) instead of
