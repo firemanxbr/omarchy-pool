@@ -3,6 +3,7 @@ import { maintainersOf, roleFor, GOVERNANCE_FILE } from "../governance";
 import { CATEGORIES, isCategory } from "../categories";
 import { isRepoArch, REPO_ARCHES } from "../r2";
 import { providedBy } from "./factory";
+import { cancelOrdersOf, ORDERS_COLUMNS, type OrdersRow } from "../orders";
 import { pullFromRings } from "./blocks";
 import { queuePosition } from "../queue";
 import { standsSql } from "./story";
@@ -313,16 +314,18 @@ export interface WorkerIdentity {
   trust: string;
   /** Set when the caller is a job token rather than a registered worker: the job's kind. */
   job?: string;
+  /** The row as the orders path reads it (#277, orders.ts): read with the token, in the same seek, so a claim pays no read for its orders. */
+  orders?: OrdersRow;
 }
 
 /** The registered worker behind a `omw_…` token (not revoked), or null. */
 export async function workerOf(request: Request, env: Env): Promise<WorkerIdentity | null> {
   const token = bearer(request);
   if (!token.startsWith("omw_")) return null;
-  const row = await env.DB.prepare("SELECT id, owner, mode, mode_by, packages, arch, trust FROM build_workers WHERE token_hash = ? AND revoked_at IS NULL")
+  const row = await env.DB.prepare(`SELECT id, mode, mode_by, packages, arch, ${ORDERS_COLUMNS} FROM build_workers WHERE token_hash = ? AND revoked_at IS NULL`)
     .bind(await sha256Hex(token))
-    .first<{ id: string; owner: string | null; mode: string; mode_by: string | null; packages: string | null; arch: string; trust: string }>();
-  return row ? { ...row, packages: row.packages ? JSON.parse(row.packages) : [] } : null;
+    .first<OrdersRow & { mode: string; mode_by: string | null; packages: string | null; arch: string }>();
+  return row ? { id: row.id, owner: row.owner, mode: row.mode, mode_by: row.mode_by, packages: row.packages ? JSON.parse(row.packages) : [], arch: row.arch, trust: row.trust, orders: row } : null;
 }
 
 export async function handleRegister(request: Request, env: Env): Promise<Response> {
@@ -1066,7 +1069,12 @@ export async function handleRevokeWorker(c: Contributor, id: string, env: Env): 
   if (!w) return json({ error: "no such worker" }, 404);
   const no = refused(workspace(c, w.owner ?? "its owner", [], [w]).workers[w.id].revoke);
   if (no) return no;
-  const res = await env.DB.prepare("UPDATE build_workers SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND revoked_at IS NULL").bind(id).run();
+  // Its open orders are cancelled in the same batch, each with its line (#277): nothing waits for a worker that can never claim again.
+  const at = new Date().toISOString();
+  const [res] = await env.DB.batch([
+    env.DB.prepare("UPDATE build_workers SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL").bind(at, id),
+    ...cancelOrdersOf(env, { sql: "SELECT id FROM build_workers WHERE id = ? AND revoked_at = ?", binds: [id, at] }, c.login, at),
+  ]);
   let freed = 0;
   if (res.meta.changes) {
     // A build asked for this worker would wait for it forever: back to the rule, for the shared workers at once.

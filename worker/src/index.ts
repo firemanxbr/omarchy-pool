@@ -72,6 +72,7 @@ import {
   handleNameStanding,
 } from "./routes/contributors";
 import { handleSourceRead } from "./routes/sources";
+import { handleAnswerOrder, handleCancelOrder, handleIssueOrder, handleWorkerCan, handleWorkerOrders, handleWorkerPublic } from "./routes/orders";
 import type { Actor } from "./routes/factory";
 import { jobOf } from "./jobtoken";
 import { handleTrustWorker, handleTrustList, handleNewToken, handleWithdrawRecord, handleWorkerMode, handleWorkerLog, SIGN_IN } from "./routes/contributors";
@@ -160,6 +161,10 @@ export interface Env {
   /** The MCP write tools' bursts (wrangler.toml, rate limiting bindings; agents.ts): twenty calls a minute per login that carry an agent token, five token swaps a minute per address. Unset (a deploy before them): not counted. */
   AGENT_CALLS?: RateLimit;
   AGENT_SWAPS?: RateLimit;
+  /** "off" stops the pool's own orders to workers (#277, orders.ts); people's orders from a worker's page still work. */
+  WORKER_RULES?: string;
+  /** The rules' step timings divided by this (1–60), honoured only where POOL_VERSION is not a release tag: wrangler dev and the E2E. */
+  WORKER_RULES_SCALE?: string;
 }
 
 
@@ -409,10 +414,18 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
     const w = await workerOf(request, env);
     return w ? handleWorkerMode({ worker: w.id }, w.id, request, env) : json({ error: "a worker token is required" }, 401);
   }
+  // A worker answers an order it was handed (#277): its own token, never a job's — the process that took it says how it went.
+  if ((m = path.match(/^\/factory\/workers\/self\/orders\/([A-Za-z0-9_]{1,40})$/)) && method === "POST") {
+    const w = await workerOf(request, env);
+    return w ? handleAnswerOrder({ id: w.id, owner: w.owner, version: w.orders?.version ?? null }, m[1], request, env) : json({ error: "a worker token is required" }, 401);
+  }
   if (path === "/factory/packages" || path.startsWith("/factory/packages/") || path === "/factory/workers" || path.startsWith("/factory/workers/")) {
     const c = await contributorOf(request, env);
     if (!c) return nobody();
     if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)\/mode$/)) && method === "POST") return handleWorkerMode(c, m[1], request, env);
+    // Its owner or any maintainer gives a worker an order, or takes back one still waiting (#277, routes/orders.ts).
+    if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)\/orders$/)) && method === "POST") return handleIssueOrder(c, m[1], request, env, url);
+    if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)\/orders\/([A-Za-z0-9_]{1,40})$/)) && method === "DELETE") return handleCancelOrder(c, m[1], m[2], request, env, url);
     if (method === "POST" && path === "/factory/packages") return handleRequestPackage(c, request, env);
     if ((m = path.match(/^\/factory\/packages\/([a-z0-9@._+-]+)\/build$/)) && method === "POST") return handleBuildPackage(c, m[1], request, env);
     if ((m = path.match(/^\/factory\/packages\/([a-z0-9@._+-]+)$/)) && method === "DELETE") return handleDeletePackage(c, m[1], env);
@@ -611,6 +624,10 @@ async function api(method: string, path: string, url: URL, request: Request, env
     const w = await workerOf(request, env);
     return w ? json({ id: w.id, arch: w.arch, trust: w.trust, owner: w.owner, mode: w.mode, mode_by: w.mode_by ?? null }, 200, { "cache-control": "no-store" }) : json({ error: "a worker token is required" }, 401);
   }
+  // A worker's page (#277): its view and last orders, public and cached; the worker's own words with them for its owner and the maintainers; what the caller may press.
+  if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)$/)) && method === "GET") return handleWorkerPublic(m[1], url, env);
+  if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)\/orders$/)) && method === "GET") return handleWorkerOrders(await contributorOf(request, env), m[1], url, env);
+  if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)\/can$/)) && method === "GET") return handleWorkerCan(await contributorOf(request, env), m[1], env);
   if (method === "GET" && path === "/factory/me") {
     // request_status without a name (#252): the agent's person, read with contribute; their drafts ride here, no-store, nobody else's to read.
     if (hasAgentToken(request)) {

@@ -1552,6 +1552,29 @@ describe("a heartbeat is written when it says something new", () => {
     await touchWorker(env, { ...same(), kinds: ["build", "audit"], agent: null, log: "" }, null);
   });
 
+  it("what a claim says of its process (#277) is written when it is new — a process, the kinds it takes, a probe — and never again while it says the same, in whatever order", async () => {
+    const hex = (n: number) => n.toString(16).padStart(32, "0");
+    const said = (o: Record<string, unknown> = {}) => ({ arch: "aarch64", hostname: "studio", labels: { emulated: false }, version: "9.9.9", kinds: ["build", "audit"], orders: ["drain", "recheck-agent", "restart"], instance: hex(9), agent_via: "direct", ...o });
+    const row = async () => (await env.DB.prepare("SELECT last_seen, instance, instance_since, order_kinds, agent_probed_at FROM build_workers WHERE id = 'w2'").first<{ last_seen: string; instance: string | null; instance_since: string | null; order_kinds: string | null; agent_probed_at: string | null }>())!;
+    expect((await call("POST", "/factory/claim", said(), "omw_w2")).status).toBe(204);
+    const first = await row();
+    expect(first).toMatchObject({ instance: hex(9), order_kinds: '["drain","recheck-agent","restart"]' });
+    expect(first.instance_since).toBe(first.last_seen);
+    // The same words, the kinds shuffled or repeated, write nothing.
+    for (const orders of [["restart", "drain", "recheck-agent"], ["restart", "restart", "drain", "recheck-agent", "stop-task"]]) expect((await call("POST", "/factory/claim", said({ orders }), "omw_w2")).status).toBe(204);
+    expect((await row()).last_seen).toBe(first.last_seen);
+    // A new process is written at once, and so is a probe; the probe's age moves only with a new one.
+    await call("POST", "/factory/claim", said({ instance: hex(10) }), "omw_w2");
+    expect((await row()).instance).toBe(hex(10));
+    await call("POST", "/factory/claim", said({ instance: hex(10), agent: "claude-code/claude-sonnet-5", agent_status: "ok", agent_checked_at: "2026-09-29T12:00:00Z" }), "omw_w2");
+    const probed = await row();
+    expect(probed.agent_probed_at).toBe(probed.last_seen);
+    await call("POST", "/factory/claim", said({ instance: hex(10), agent: "claude-code/claude-sonnet-5", agent_status: "ok", agent_checked_at: "2026-09-29T12:00:00Z" }), "omw_w2");
+    expect((await row())).toEqual(probed);
+    // Back to what w2 said before.
+    await touchWorker(env, { worker: "w2", arch: "aarch64", hostname: "studio", labels: { emulated: false }, version: "9.9.9", kinds: ["build", "audit"], agent: null, log: "" }, null);
+  });
+
   it("a contributor's last_seen moves once per SEEN_MINUTES, not once per request", async () => {
     const at = async () => (await env.DB.prepare("SELECT last_seen FROM contributors WHERE login = 'm2'").first<{ last_seen: string }>())!.last_seen;
     const req = () => new Request(API + "/factory", { headers: { authorization: "Bearer omc_m2" } });
