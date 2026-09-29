@@ -182,9 +182,10 @@ const CSS = String.raw`
   .rv-rows { display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; }
   .rv-row { display: grid; grid-template-columns: minmax(140px, 1.1fr) minmax(0, 1.7fr) auto 44px auto; gap: 14px; align-items: center; padding: 11px 16px; border-bottom: 1px solid var(--line); font-size: 13px; }
   .rv-rows > .rv-row:last-child, .rv-mrows > .rv-mrow:last-child { border-bottom: 0; }
-  /* The name and its version, each whole: a version that does not fit beside the name wraps under it, never "0.0.1…" for 0.0.168 (#282); a name wider than the cell is cut, whole in its title. */
+  /* The name and its version, each whole: a version that does not fit beside the name wraps under it, never "0.0.1…" for 0.0.168 (#282); a name
+     or a version wider than the cell alone (an epoch or a git version) is cut there with an ellipsis, whole in its title, never drawn past it. */
   .rv-name { min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 6px; } .rv-name > :first-child { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .rv-name a { color: var(--text); } .rv-name a:hover { color: var(--green); } .rv-name b { font-weight: 600; } .rv-name .v { color: var(--dim); font-size: 12px; white-space: nowrap; }
+  .rv-name a { color: var(--text); } .rv-name a:hover { color: var(--green); } .rv-name b { font-weight: 600; } .rv-name .v { flex: none; max-width: 100%; overflow: hidden; text-overflow: ellipsis; color: var(--dim); font-size: 12px; white-space: nowrap; }
   .rv-sub { display: flex; align-items: center; gap: 7px; min-width: 0; font-size: 12.5px; color: var(--muted); } .rv-sub .t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .rv-sub a { color: inherit; } .rv-sub a:hover { color: var(--green); }
   .rv-av { flex: none; display: inline-grid; place-items: center; width: 18px; height: 18px; background: var(--bg-deep); color: var(--text); font-size: 8px; font-weight: 700; text-transform: uppercase; }
   .rv-av.lg { width: 26px; height: 26px; font-size: 11px; } .rv-av.sm { width: 16px; height: 16px; font-size: 7px; }
@@ -314,7 +315,7 @@ const SCRIPT = String.raw`
   }
   function notSupported(targets) { return ARCHES.filter(function (a) { return targets && targets[a] && targets[a].status === "not_supported"; }); }
   function row(name, href, ver, sub, archs, age, act, fresh) {
-    return '<div class="rv-row' + (fresh ? " op-fresh" : "") + '"><span class="rv-name">' + (href ? '<a href="' + esc(href) + '" title="' + esc(name) + '"><b>' + esc(name) + '</b></a>' : '<b title="' + esc(name) + '">' + esc(name) + '</b>') + (ver ? '<span class="v">' + esc(ver) + '</span>' : '') + '</span><span class="rv-sub">' + sub + '</span>' + (archs || '<span class="rv-archs"></span>') + '<span class="rv-age">' + esc(age || "") + '</span><span class="rv-act">' + act + '</span></div>';
+    return '<div class="rv-row' + (fresh ? " op-fresh" : "") + '"><span class="rv-name">' + (href ? '<a href="' + esc(href) + '" title="' + esc(name) + '"><b>' + esc(name) + '</b></a>' : '<b title="' + esc(name) + '">' + esc(name) + '</b>') + (ver ? '<span class="v" title="' + esc(ver) + '">' + esc(ver) + '</span>' : '') + '</span><span class="rv-sub">' + sub + '</span>' + (archs || '<span class="rv-archs"></span>') + '<span class="rv-age">' + esc(age || "") + '</span><span class="rv-act">' + act + '</span></div>';
   }
   // A row's one button: live where the viewer may, grey with the server's reason where not (gate); the label is the design's for each case, and its name says which package it acts on (a list of rows of "Claim" names nothing).
   function btn(label, attrs, ok, why, cls, named) { return gate('<button type="button" class="op-btn sm' + (cls ? " " + cls : "") + '"' + (attrs || "") + (named ? ' aria-label="' + esc(named) + '"' : '') + '>' + esc(label) + '</button>', ok, why || "not now"); }

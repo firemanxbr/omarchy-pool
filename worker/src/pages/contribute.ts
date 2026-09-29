@@ -254,9 +254,10 @@ const FACTORY_CSS = String.raw`
   .fx-wrow { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 12px; align-items: center; padding: 14px 16px; border-bottom: 1px solid var(--line); }
   .fx-wbox { display: grid; place-items: center; width: 30px; height: 30px; border: 1px solid var(--line); background: var(--bg-deep); color: var(--dim); font-size: 11px; }
   .fx-wmain { display: grid; gap: 5px; min-width: 0; }
-  /* The worker's name and its agent, each whole: the agent wraps under the name when both do not fit, never "AAR…" beside "CLAUDE-SONNET…" (#282). */
+  /* The worker's name and its agent, each whole: the agent wraps under the name when both do not fit, never "AAR…" beside "CLAUDE-SONNET…" (#282);
+     it keeps to the right edge on its own line too, so every row reads its agent in one place. */
   .fx-wtop { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 8px; min-width: 0; font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--dim); }
-  .fx-wtop > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .fx-wtop .mono { font-size: inherit; }
+  .fx-wtop > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .fx-wtop > span + span { margin-left: auto; } .fx-wtop .mono { font-size: inherit; }
   .fx-wjob { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--text); }
   .fx-wjob b { font-weight: 600; } .fx-wjob a { color: inherit; } .fx-wjob a:hover { color: var(--green); } .fx-wjob .fx-step { margin-left: 8px; color: var(--dim); }
   .fx-wrow.idle .fx-wjob { color: var(--dim); }

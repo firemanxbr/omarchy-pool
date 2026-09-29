@@ -590,7 +590,7 @@ describe("a dependency's name in the graph", () => {
     // Each node writes its name as a head and a tail, whole on hover with what the tag said.
     const tails: Record<string, string> = { "aarch64-linux-gnu-gcc": "gcc", "aarch64-linux-gnu-gdb": "gdb", "aarch64-linux-gnu-binutils": "binutils", [CROSS.declares]: "linux-api-headers" };
     for (const [name, tail] of Object.entries(tails)) {
-      expect(graph, name).toContain(`<span class="nm"><span class="nh">${name.slice(0, -tail.length)}</span><span class="nt">${tail}</span></span>`);
+      expect(graph, name).toContain(`<span class="nm"><span class="nh" style="--t:${tail.length}">${name.slice(0, -tail.length)}</span><span class="nt">${tail}</span></span>`);
       expect(graph, name).toMatch(new RegExp(`title="${name}( [^"·]+)? · (depends|declared)"`));
     }
     // What a reader sees in a node of w characters, as the stylesheet below draws it: whole when it fits, else the head cut with an ellipsis
@@ -610,13 +610,21 @@ describe("a dependency's name in the graph", () => {
     const html = (await call("GET", `/package/${F.pkg2}`)).text;
     // The stylesheet: the head shrinks with an ellipsis down to one character, the tail never shrinks.
     expect(declared(html, ".pkg-node .nh")).toMatchObject({ flex: "0 1 auto", "min-width": "1ch", overflow: "hidden", "text-overflow": "ellipsis" });
+    // Cut to a whole number of characters, so the ellipsis meets the tail: the box's width (its container, the node's line) less the tail's
+    // characters (--t, written on the head), rounded down to a character — no part-character blank that reads like a space (the #282 review).
+    expect(declared(html, ".pkg-node > .l")).toMatchObject({ "container-type": "inline-size" });
+    expect(declared(html, ".pkg-node .nh")["max-width"]).toBe("calc(round(down, 100cqw - var(--t, 0) * 1ch, 1ch) + .5px)");
     expect(declared(html, ".pkg-node .nt")).toMatchObject({ flex: "none", "max-width": "calc(100% - 1ch)" });
     // The side columns get the width first: the package between is at most 160px wide and its name wraps; it sits where the connectors meet, by the stylesheet, not by a margin the script works out for one line.
     expect(html, "the desktop's columns (a phone's is one column)").toMatch(/\.pkg-graph \{ display: grid; grid-template-columns: minmax\(0, 1fr\) 64px fit-content\(160px\) 64px minmax\(0, 1\.2fr\);/);
     const centre = declared(html, ".pkg-center");
     expect(centre["white-space"], "the package between wraps its name").toBeUndefined();
     expect(centre).toMatchObject({ "min-height": "36px", "overflow-wrap": "anywhere" });
-    expect(declared(html, ".pkg-graph > .pkg-center")).toMatchObject({ "align-self": "center" });
+    // The columns, the connectors and the package between sit in the middle of their row, each column padded to the connectors' height above
+    // and below: a name that wraps onto four lines makes the row taller than the connectors, and they still meet at its middle (the #282 review).
+    for (const box of [".pkg-graph > .pkg-gcol", ".pkg-graph > svg", ".pkg-graph > .pkg-center"]) expect(declared(html, box), box).toMatchObject({ "align-self": "center" });
+    expect(graph).toMatch(/<div class="pkg-gcol l" style="padding-block:[\d.]+px">/);
+    expect(graph).toMatch(/<div class="pkg-gcol r" style="padding-block:[\d.]+px">/);
     expect(graph).toMatch(/<div class="pkg-center[^"]*" title="xz">xz<\/div>/);
   });
 });

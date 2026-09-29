@@ -624,11 +624,12 @@ describe("the queue's rows and the maintainers' lines, read whole", () => {
     const drawn = runScript(scriptOf(html), { pathname: "/review", search: "?tab=review", functions: [], fetch: browser });
     for (let i = 0; i < 200 && !/reviewing longver/.test(drawn.nodes["#rv-maints"]?.innerHTML ?? ""); i++) await new Promise((r) => setTimeout(r, 5));
     const row = (drawn.nodes["#rv-rows"].innerHTML as string).split('<div class="rv-row').find((r) => r.includes("<b>longver</b>"));
-    expect(row, drawn.nodes["#rv-rows"].innerHTML).toContain('title="longver"><b>longver</b></a><span class="v">0.0.168-1</span></span>');
-    // The name's cell wraps the version under the name when both do not fit; the version never shrinks, the name is what is cut.
+    expect(row, drawn.nodes["#rv-rows"].innerHTML).toContain('title="longver"><b>longver</b></a><span class="v" title="0.0.168-1">0.0.168-1</span></span>');
+    // The name's cell wraps the version under the name when both do not fit; the version never shrinks beside the name, the name is what is cut.
     expect(declared(html, ".rv-name")).toMatchObject({ display: "flex", "flex-wrap": "wrap", "min-width": "0" });
-    expect(declared(html, ".rv-name .v")).toMatchObject({ "white-space": "nowrap" });
-    expect(declared(html, ".rv-name .v")).not.toHaveProperty("overflow");
+    // A version wider than the whole cell (an epoch or a git version, 1:2.44+r50+g1848099f063e-1) is cut there, whole in its title — never
+    // drawn past its cell into the requester's column (the #282 review, at 1024).
+    expect(declared(html, ".rv-name .v")).toMatchObject({ flex: "none", "max-width": "100%", overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" });
     expect(declared(html, ".rv-name > :first-child")).toMatchObject({ "max-width": "100%", overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" });
     // m1's line: what they review, their reviews, the packages they brought — each part whole, the line wrapping between them.
     const m1 = (drawn.nodes["#rv-maints"].innerHTML as string).split('<div class="rv-mrow">').find((r) => r.includes(">@m1<"));

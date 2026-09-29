@@ -442,6 +442,9 @@ describe("the page", () => {
     // The line wraps between the two, never inside one: each is cut only when it alone is wider than the card.
     expect(declared(html, ".fx-wtop")).toMatchObject({ display: "flex", "flex-wrap": "wrap", "justify-content": "space-between" });
     expect(declared(html, ".fx-wtop > span")).toMatchObject({ "max-width": "100%", overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" });
+    // Wrapped onto a line of its own, the agent keeps to the right edge, where the rows that fit on one line have it (the #282 review): alone
+    // on its line, space-between would have put it on the left.
+    expect(declared(html, ".fx-wtop > span + span")).toMatchObject({ "margin-left": "auto" });
   });
 
   it("draws a live worker whose agent did not answer as not ready, with the agent's error — never idle, waiting for work — and idle again once it answers (#273)", async () => {
