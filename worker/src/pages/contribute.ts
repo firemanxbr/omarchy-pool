@@ -609,7 +609,7 @@ const SCRIPT = String.raw`
     if (st === "not ready") { var why = wtNotReady(w); return '<div class="fx-wrow notready">' + box + '<div class="fx-wmain">' + top + '<div class="fx-wjob" title="' + esc(why) + '"><i class="fx-wmark" aria-hidden="true"></i><b>not ready</b><span class="fx-step">' + esc(why) + '</span>' + marks + '</div><div class="fx-bar"><i style="width:0%"></i></div></div></div>'; }
     if (!w.current_task) return '<div class="fx-wrow idle">' + box + '<div class="fx-wmain">' + top + '<div class="fx-wjob"><b>idle</b><span class="fx-step">waiting for work</span>' + marks + '</div><div class="fx-bar"><i style="width:0%"></i></div></div></div>';
     var p = progressOf(t);
-    return '<div class="fx-wrow">' + box + '<div class="fx-wmain">' + top + '<div class="fx-wjob"><a href="/build/' + esc(w.current_task) + '"><b>' + esc(t ? t.name : "#" + w.current_task) + '</b></a><span class="fx-step">' + esc(t ? stepOf(t) : "running") + '</span></div>'
+    return '<div class="fx-wrow">' + box + '<div class="fx-wmain">' + top + '<div class="fx-wjob"><a href="/build/' + esc(w.current_task) + '"><b>' + esc(t ? t.name : "#" + w.current_task) + '</b></a>' + marks + '<span class="fx-step">' + esc(t ? stepOf(t) : "running") + '</span></div>'
       + '<div class="fx-bar" title="' + esc(p.title) + '"><i' + (p.pct === null ? ' class="unknown"' : '') + ' style="width:' + (p.pct === null ? 100 : p.pct) + '%"></i></div></div></div>';
   }
   function drawWorkers() {

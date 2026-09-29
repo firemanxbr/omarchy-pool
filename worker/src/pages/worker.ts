@@ -273,11 +273,13 @@ const SCRIPT = String.raw`
   // The last orders: who (the pool, with its rule on hover), why, the state, the pool's sentence for the answer, and — for its owner and the maintainers — the worker's own words, as text; Cancel on one still waiting.
   function drawOrders() {
     var rows = ORDERS.map(function (o) {
-      var p = STATE_PILL[o.state] || ["na", o.state], said = SAID[o.id];
+      // A stop and a drain act from their issue (#277, part 2): waiting, a stop is stopping and a drain holds — neither is taken back (the door refuses; Resume ends a drain).
+      var acting = o.state === "pending" && (o.kind === "stop-task" || o.kind === "drain");
+      var p = acting ? (o.kind === "stop-task" ? ["run", "stopping"] : ["warn", "in force"]) : STATE_PILL[o.state] || ["na", o.state], said = SAID[o.id];
       var by = byPool(o.issued_by) ? '<span title="' + esc("the pool's rule: " + (o.rule || "?")) + '">the pool</span>' : personLink(o.issued_by);
       var state = '<span class="op-pill ' + p[0] + '">' + esc(o.state === "delivered" && o.accepted_at ? "on its way" : p[1]) + '</span>';
       var answer = (o.detail ? esc(o.detail) : '<span class="muted">—</span>') + (said ? '<details class="wk-said"><summary>what the worker said</summary><pre></pre></details>' : '');
-      var cancel = o.state === "pending" ? gate('<button type="button" class="op-chip" data-cancel="' + esc(o.id) + '">Cancel</button>', CAN ? CAN.can.cancel : false, CAN ? CAN.why.cancel || "" : "sign in with GitHub") : "";
+      var cancel = o.state === "pending" && !acting ? gate('<button type="button" class="op-chip" data-cancel="' + esc(o.id) + '">Cancel</button>', CAN ? CAN.can.cancel : false, CAN ? CAN.why.cancel || "" : "sign in with GitHub") : "";
       return '<tr data-id="' + esc(o.id) + '"><td class="o-at">' + when(o.issued_at) + '</td><td class="o-kind">' + esc(LABEL[o.kind] || o.kind) + (o.unless_agent_ok ? ' <span class="muted" title="only if its agent is down">· if down</span>' : '') + '</td><td class="o-by">' + by + '</td><td class="why o-why">' + esc(o.reason) + '</td><td class="o-state">' + state + '</td><td class="why o-answer">' + answer + '</td><td class="o-cancel">' + cancel + '</td></tr>';
     });
     $("#wk-orders-rows").innerHTML = rows.join("") || '<tr><td colspan="7" class="muted">no order yet — the pool orders a worker whose agent does not answer; its owner and the maintainers do, from here</td></tr>';
@@ -368,7 +370,7 @@ export const WORKER_COMPONENTS = (F: Fixture): Component[] => [
     id: "worker.orders",
     page: `/worker/${F.communityWorker}`,
     anchor: ['id="wk-orders"', 'id="wk-orders-rows"', 'href="/status#journal">The journal →</a>'],
-    script: ["function drawOrders()", 'api("GET", BASE + "/orders")', "SAID[o.id]", "pre.textContent = SAID[o.id]", 'data-cancel="', 'api("DELETE", BASE + "/orders/" + encodeURIComponent(', "o.accepted_at", "o.detail"],
+    script: ["function drawOrders()", 'api("GET", BASE + "/orders")', "SAID[o.id]", "pre.textContent = SAID[o.id]", 'data-cancel="', 'api("DELETE", BASE + "/orders/" + encodeURIComponent(', "o.accepted_at", "o.detail", 'o.kind === "stop-task" || o.kind === "drain"', 'o.state === "pending" && !acting'],
     reads: [
       { path: `/api/v1/factory/workers/${F.communityWorker}/orders`, status: 401 },
       { path: `/api/v1/factory/workers/${F.communityWorker}/orders`, as: "contributor", status: 403 },

@@ -539,8 +539,9 @@ __CHARTS__
       : held ? '<span class="st-dot warn" aria-hidden="true"></span><b>' + st + '</b><span class="st-dim">' + esc(st === "drained" ? "by " + (w.drained.by || "?") + " — handed nothing until resumed" : "behind the latest image, handed nothing") + '</span>' + wtMarks(w)
       : down ? '<span class="st-dot fail" aria-hidden="true"></span><b>not ready</b><span class="st-dim">' + esc(wtNotReady(w)) + '</span>' + wtMarks(w)
       : !working ? '<b>idle</b><span class="st-dim">waiting for work</span>' + wtMarks(w)
-      : !t ? '<a href="/build/' + Number(w.current_task) + '"><b>task #' + Number(w.current_task) + '</b></a>'
-      : '<a href="/build/' + t.id + '"><b>' + esc(t.kind === "build" ? t.name : t.kind) + '</b></a><span class="st-dim">' + esc([t.kind === "build" ? [t.version, t.arch].filter(Boolean).join(" · ") : paramsLabel(t), t.started_at ? span(Date.now() - Date.parse(t.started_at)) : ""].filter(Boolean).join(" · ")) + '</span>';
+      // Building: what it builds, the marks right beside its name (#277) — a stop that fences its task, a drain it takes after this one —, before the line's details that may be cut.
+      : !t ? '<a href="/build/' + Number(w.current_task) + '"><b>task #' + Number(w.current_task) + '</b></a>' + wtMarks(w)
+      : '<a href="/build/' + t.id + '"><b>' + esc(t.kind === "build" ? t.name : t.kind) + '</b></a>' + wtMarks(w) + '<span class="st-dim">' + esc([t.kind === "build" ? [t.version, t.arch].filter(Boolean).join(" · ") : paramsLabel(t), t.started_at ? span(Date.now() - Date.parse(t.started_at)) : ""].filter(Boolean).join(" · ")) + '</span>';
     return '<div class="st-w' + (working ? " busy" : "") + (w.alive ? "" : " off") + (down ? " notready" : "") + '"><span class="st-wbox">' + (w.agent ? agentOf(w.agent) : '<span class="st-ini" title="no agent: the pool\'s jobs need none">—</span>') + '</span>' +
       '<div class="st-wt"><div class="st-wl">' + workerName(w) + '<span>' + esc(model) + '</span></div><div class="st-wj"' + (down ? ' title="' + esc(wtNotReady(w)) + '"' : '') + '>' + doing + '</div><div class="st-wbar"><i></i></div></div></div>';
   }
