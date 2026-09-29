@@ -15,6 +15,7 @@ pub mod osv;
 pub mod reconcile;
 pub mod security;
 pub mod sign;
+pub mod stop;
 pub mod sync;
 pub mod syncdb;
 pub mod usage;
@@ -52,6 +53,9 @@ pub enum RepoError {
     },
     #[error("{file}: upstream signature rejected: {detail}")]
     Signature { file: String, detail: String },
+    /// The pool took this task back (#277): its client sends nothing more.
+    #[error("stopped: the pool took this task back, so this worker sends nothing more for it")]
+    Stopped,
 }
 
 /// Which archive to render.

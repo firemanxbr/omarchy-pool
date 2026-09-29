@@ -66,21 +66,25 @@ def worker_token():
 class Held:
     """The one task this broker's worker holds: its id and how long the
     lease runs (the claim says; every heartbeat extends it). A builder that
-    died mid-task leaves the lease to expire, as the pool does."""
+    died mid-task leaves the lease to expire, as the pool does. And whether
+    the claim that took it declared `orders` (#277): a builder from #277 on,
+    which stops on the pool's word — read from the builder's claim, made
+    before any recipe of the task ran, so no recipe can set it."""
 
     def __init__(self):
         self.task = None
         self.until = 0.0
         self.agent_calls = 0
+        self.orders = False
 
     def current(self):
         if self.task is not None and time.time() >= self.until:
             sys.stderr.write(f"broker: task {self.task}'s lease expired here; forgetting it\n")
-            self.task, self.until, self.agent_calls = None, 0.0, 0
+            self.task, self.until, self.agent_calls, self.orders = None, 0.0, 0, False
         return self.task
 
-    def take(self, task, lease_expires_at):
-        self.task, self.agent_calls = task, 0
+    def take(self, task, lease_expires_at, orders=False):
+        self.task, self.agent_calls, self.orders = task, 0, orders
         self.extend(lease_expires_at)
 
     def extend(self, lease_expires_at=None):
@@ -93,11 +97,54 @@ class Held:
         self.until = until
 
     def release(self):
-        self.task, self.until, self.agent_calls = None, 0.0, 0
+        self.task, self.until, self.agent_calls, self.orders = None, 0.0, 0, False
 
 
 HELD = Held()
 SELF = {"id": None}
+
+# How long after a stopped task is let go the broker passes no claim and no order's answer (#277): the builder kills its build and
+# exits within about 11 s, and with it every process of its container — a recipe still alive cannot claim, or answer, in between.
+STOP_FENCE_SECONDS = 30
+
+
+class Stopped:
+    """The tasks this broker let go on a stop (#277, part 2). The pool fences
+    a stopped task's lease: it stays leased to this worker until the worker
+    claims again or the lease ends. So until that lease's end — the released
+    hold's, since nothing renews it after the stop — every pinned call for
+    it is refused here, without asking the pool, and it is never adopted
+    again: a recipe's heartbeat, upload or fail in the seconds before its
+    container dies would otherwise take it up, and hold the next builder's
+    claim off for half an hour. An entry ends at its time, or when a claim
+    hands that task out again (a task pinned here comes back, under a new
+    lease). And for STOP_FENCE_SECONDS after a stop, no claim and no
+    order's answer passes."""
+
+    def __init__(self):
+        self.until = {}
+        self.fence = 0.0
+        self.task = None
+
+    def add(self, task, until):
+        self.until[task] = until
+        self.task, self.fence = task, time.time() + STOP_FENCE_SECONDS
+
+    def holds(self, task):
+        until = self.until.get(task)
+        if until is not None and time.time() >= until:
+            self.until.pop(task, None)
+            return False
+        return until is not None
+
+    def clear(self, task):
+        self.until.pop(task, None)
+
+    def fenced(self):
+        return self.fence if time.time() < self.fence else None
+
+
+STOPPED = Stopped()
 
 
 class Delivered:
@@ -158,14 +205,23 @@ def worker_id():
 def adopt(task):
     """A broker that restarted mid-build holds nothing, and the builder's next
     call names a task: the pool says whose lease it is. Ours — leased to this
-    worker, not yet over — is taken up again; anyone else's is not."""
+    worker, not yet over — is taken up again; anyone else's is not, and
+    neither is one the pool is stopping (#277): its view carries
+    `stop_order` while the fence holds — read past the view's 30 s edge
+    cache (a query of its own), since a copy from before the stop would show
+    none. A broker that restarted between a stop and the requeue has
+    forgotten STOPPED; this covers it. A pool from before #277 has no such
+    field, and fences nothing."""
     me = worker_id()
     if not me:
         return False
     try:
-        with urllib.request.urlopen(urllib.request.Request(POOL + f"/factory/tasks/{task}", headers={"user-agent": USER_AGENT}), timeout=30) as r:
+        with urllib.request.urlopen(urllib.request.Request(POOL + f"/factory/tasks/{task}?fresh={time.time_ns()}", headers={"user-agent": USER_AGENT}), timeout=30) as r:
             row = json.load(r).get("task") or {}
     except (urllib.error.URLError, OSError, ValueError):
+        return False
+    if row.get("stop_order"):
+        sys.stderr.write(f"broker: task {task} is being stopped by the pool; not taken up again\n")
         return False
     if row.get("status") == "leased" and row.get("lease_owner") == me:
         HELD.take(task, row.get("lease_expires_at"))
@@ -300,17 +356,24 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             pinned = pin == "task"
             kind = None
+            declared = False
             if pinned:
+                # A task this broker let go on a stop is never taken up again: refused here, the pool not asked (#277).
+                if STOPPED.holds(int(match.group(1))):
+                    return self._json(403, {"error": f"task {int(match.group(1))} was stopped by the pool; this broker does not take it up again"})
                 held = HELD.current()
                 if held is None and adopt(int(match.group(1))):
                     held = HELD.current()
                 if held is None or int(match.group(1)) != held:
                     return self._json(403, {"error": f"the broker passes only the pool's calls for the task it claimed" + (f" ({held})" if held is not None else " (none held)")})
             elif pin == "order":
-                # A recipe runs only inside a held task: while one is held, no answer passes.
+                # A recipe runs only inside a held task: while one is held, no answer passes — nor in the seconds after a stop, while the
+                # stopped builder's container may still run one (#277).
                 held = HELD.current()
                 if held is not None:
                     return self._json(403, {"error": f"the broker passes an order's answer only between tasks; it holds task {held}"})
+                if STOPPED.fenced():
+                    return self._json(403, {"error": f"task {STOPPED.task} was stopped; no order's answer passes until {time.strftime('%H:%M:%S', time.gmtime(STOPPED.fence))} UTC"})
                 kind, refused = DELIVERED.take(match.group(1))
                 if refused:
                     return self._json(refused[0], {"error": refused[1]})
@@ -318,6 +381,13 @@ class Handler(BaseHTTPRequestHandler):
                 held = HELD.current()
                 if held is not None:
                     return self._json(409, {"error": f"the broker holds task {held} until its lease ends; one task at a time"})
+                if STOPPED.fenced():
+                    return self._json(409, {"error": f"task {STOPPED.task} was stopped; the next builder claims from {time.strftime('%H:%M:%S', time.gmtime(STOPPED.fence))} UTC"})
+                # Whether this builder stops on the pool's word: its claim declares the orders it takes (#277).
+                try:
+                    declared = isinstance(json.loads(body or b"{}").get("orders"), list)
+                except (ValueError, AttributeError):
+                    declared = False
             headers = {"authorization": "Bearer " + worker_token(), "content-type": self.headers.get("content-type", "application/json"), "user-agent": USER_AGENT}
             if rel == "factory/claim":
                 # This broker exits with its builder on a restart (pair restart, #277): the pool may restart a builder whose agent — this
@@ -343,7 +413,9 @@ class Handler(BaseHTTPRequestHandler):
             if status == 200 and rel == "factory/claim":
                 try:
                     answer = json.loads(out)
-                    HELD.take(int(answer["task"]["id"]), answer.get("lease_expires_at"))
+                    HELD.take(int(answer["task"]["id"]), answer.get("lease_expires_at"), declared)
+                    # Handed out again (requeued, a new lease): no longer the one this broker let go.
+                    STOPPED.clear(HELD.task)
                     out = self.without_token(answer)
                     sys.stderr.write(f"broker: holding task {HELD.task}\n")
                 except (ValueError, KeyError, TypeError):
@@ -355,6 +427,19 @@ class Handler(BaseHTTPRequestHandler):
                     out = self.without_token(answer)
                 except (ValueError, AttributeError):
                     HELD.extend()
+            elif status == 409 and pinned and rel.endswith("/heartbeat"):
+                # The pool took the task back (#277): its heartbeat's 409 says stop — an answer to this broker's own request, with the
+                # worker's token, which neither the builder nor a recipe can fake. A builder that declared orders stops on it, so the hold
+                # goes, and the fence starts; one from before #277 builds on, so its hold stays until its own report or the lease's end —
+                # its recipe cannot claim in between. The 409 goes to the builder unchanged.
+                try:
+                    said = json.loads(out)
+                except ValueError:
+                    said = {}
+                if isinstance(said, dict) and said.get("stop") is True and HELD.task == int(match.group(1)) and HELD.orders:
+                    sys.stderr.write(f"broker: task {HELD.task} was stopped by the pool ({str(said.get('state') or 'stopping')[:16]}); released\n")
+                    STOPPED.add(HELD.task, HELD.until)
+                    HELD.release()
             elif pinned and (rel.endswith("/complete") or rel.endswith("/fail")) and status < 500:
                 sys.stderr.write(f"broker: task {HELD.task} {'done' if rel.endswith('/complete') else 'failed'} ({status}); released\n")
                 HELD.release()

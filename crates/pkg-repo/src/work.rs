@@ -23,6 +23,7 @@ use crate::client::{Api, ReleaseRequest};
 use crate::gate::{self, GateOptions, Verdict};
 use crate::ops;
 use crate::orders::{self, ClaimAnswer, Order, OrderKind};
+use crate::stop::{self, Beat, Phase, TaskStop, Watch};
 use crate::RepoError;
 
 /// The worker's own log — the lines between tasks — as the claim carries it
@@ -462,7 +463,15 @@ pub fn run(opts: &WorkOptions) -> Result<()> {
     };
     let mut brake = orders::Brake::default();
     let mut seen = orders::Seen::default();
+    // The watchdog (#277, part 2): no claim attempt between tasks, no heartbeat the pool accepted in a task, for its wait — which
+    // doubles with each watchdog exit of this container — and it exits 75 when a restart policy starts it again; it says so otherwise.
+    let watch = Watch::new(stop::Watchdog::new(
+        stop::read_count(&me.state_dir, epoch_now()),
+        me.takes.contains(&"restart"),
+    ));
+    watchdog(Arc::clone(&watch), me.state_dir.clone());
     loop {
+        watch.enter(Phase::Claim, None);
         if is_draining() {
             say(format!(
                 "draining: {done} task(s) done, none claimed since the stop signal; exiting"
@@ -486,6 +495,7 @@ pub fn run(opts: &WorkOptions) -> Result<()> {
             "log": log_chunk(),
         });
         me.say_in(&mut body);
+        watch.progress();
         let answer = match claimer.post_json_as(&opts.worker_token, "/factory/claim", &body) {
             Ok(Some(v)) => {
                 me.heard();
@@ -515,6 +525,7 @@ pub fn run(opts: &WorkOptions) -> Result<()> {
                 say(format!("update required: {why}"));
                 let list = orders::orders_in(&v).unwrap_or_default();
                 if !list.is_empty() {
+                    watch.enter(Phase::Order, None);
                     for o in &list {
                         if let Obeyed::Exit(code) = obey(&hands, &mut me, &mut check, &mut seen, o)
                         {
@@ -536,6 +547,7 @@ pub fn run(opts: &WorkOptions) -> Result<()> {
         let (task, token) = match answer {
             ClaimAnswer::Task(task, token) => (task, token),
             ClaimAnswer::Orders(list) => {
+                watch.enter(Phase::Order, None);
                 for o in &list {
                     if let Obeyed::Exit(code) = obey(&hands, &mut me, &mut check, &mut seen, o) {
                         std::process::exit(code);
@@ -576,12 +588,32 @@ pub fn run(opts: &WorkOptions) -> Result<()> {
             task.id, task.attempts, task.max_attempts
         ));
         let token = Arc::new(Mutex::new(token));
-        let stop = Arc::new(Mutex::new(false));
-        let beat = heartbeat(opts.api.clone(), task.id, token.clone(), stop.clone());
+        let finished = Arc::new(Mutex::new(false));
+        // The task's stop (#277, part 2): the heartbeat sets it when the pool says the task is no longer this worker's, and every
+        // child and every call of the task obeys it.
+        let task_stop = TaskStop::new(task.id);
+        watch.enter(Phase::Task(task.id), Some(Arc::clone(&task_stop)));
+        let beat = heartbeat(
+            opts.api.clone(),
+            task.id,
+            token.clone(),
+            finished.clone(),
+            Arc::clone(&task_stop),
+            Arc::clone(&watch),
+        );
         let started = Instant::now();
-        let outcome = execute(opts, &task, &token);
-        *stop.lock().unwrap() = true;
+        let outcome = stop::within(&task_stop, || execute(opts, &task, &token));
+        *finished.lock().unwrap() = true;
         let _ = beat.join();
+        watch.enter(Phase::Claim, None);
+        // Stopped: whatever the work returned, the task is no longer this worker's — its report is refused, and said.
+        let outcome = if task_stop.is_stopped() {
+            let why = task_stop.stopped();
+            say(why.to_string());
+            Err(why.into())
+        } else {
+            outcome
+        };
         let took = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let token = token.lock().unwrap().clone();
         // The report never ends the worker: a pool that refuses it (a task
@@ -1432,19 +1464,26 @@ fn hostname() -> String {
         .unwrap_or_else(|| "worker".to_owned())
 }
 
-/// Keeps the lease — and the job token, which moves with it — while the work runs.
+/// Keeps the lease — and the job token, which moves with it — while the
+/// work runs. The pool's answer is read (#277, part 2): a heartbeat it took
+/// is the watchdog's progress; a `404`, or a `409` with `"stop": true` — the
+/// task stopped from its worker's page, cancelled, requeued, leased to
+/// another — stops the task: its flag, its process groups, its containers.
+/// A network error, a `5xx`, or a `409` without `stop` stops nothing.
 fn heartbeat(
     api: String,
     task: u64,
     token: Arc<Mutex<String>>,
-    stop: Arc<Mutex<bool>>,
+    done: Arc<Mutex<bool>>,
+    task_stop: Arc<TaskStop>,
+    watch: Arc<Watch>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut waited = Duration::ZERO;
         loop {
             std::thread::sleep(Duration::from_secs(5));
             waited += Duration::from_secs(5);
-            if *stop.lock().unwrap() {
+            if *done.lock().unwrap() {
                 return;
             }
             if waited < HEARTBEAT {
@@ -1452,23 +1491,85 @@ fn heartbeat(
             }
             waited = Duration::ZERO;
             let current = token.lock().unwrap().clone();
-            if let Ok(client) = Api::new(&api, &current) {
-                if let Ok(Some(v)) = client.post_json_as(
-                    &current,
-                    &format!("/factory/tasks/{task}/heartbeat"),
-                    &serde_json::json!({}),
-                ) {
-                    if let Some(t) = v.get("token").and_then(|t| t.as_str()) {
-                        t.clone_into(&mut token.lock().unwrap());
+            let Ok(client) = Api::new(&api, &current) else {
+                continue;
+            };
+            let answer = client.post_json_as(
+                &current,
+                &format!("/factory/tasks/{task}/heartbeat"),
+                &serde_json::json!({}),
+            );
+            match stop::beat_of(&answer) {
+                Beat::Accepted(fresh) => {
+                    watch.progress();
+                    if let Some(t) = fresh {
+                        *token.lock().unwrap() = t;
                     }
                 }
+                Beat::Stop(state) => {
+                    say(format!(
+                        "task {task}: the pool took it back ({state}); stopping its processes"
+                    ));
+                    let removed = task_stop.stop(&state, &stop::real_engine, stop::KILL_GRACE);
+                    if !removed.is_empty() {
+                        say(format!(
+                            "task {task}: {} container(s) of it removed",
+                            removed.len()
+                        ));
+                    }
+                    return;
+                }
+                Beat::Nothing => {}
             }
         }
     })
 }
 
+/// The watchdog's own thread: it looks every 15 s, and acts on what it sees (stop.rs `on_tick`).
+fn watchdog(watch: Arc<Watch>, dir: PathBuf) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(15));
+        let (tick, task) = watch.tick();
+        if tick == stop::Tick::Nothing {
+            continue;
+        }
+        let exit = |code: i32| std::process::exit(code);
+        let log = |l: &str| say(l);
+        stop::on_tick(
+            tick,
+            task.as_deref(),
+            &stop::Fire {
+                dir: &dir,
+                now: epoch_now(),
+                at_iso: &chrono_now(),
+                engine: &stop::real_engine,
+                say: &log,
+                exit: &exit,
+            },
+        );
+    });
+}
+
+/// Seconds since the epoch, on the wall clock: what the watchdog's count across processes is kept in.
+fn epoch_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// The task's client: every request of it checks the task's stop first, so
+/// work in the worker's own process ends at its next call to the pool once
+/// the pool took the task back (#277). Outside a task, a plain client.
+fn task_api(opts: &WorkOptions, token: &str) -> Result<Api> {
+    let api = Api::new(&opts.api, token)?;
+    Ok(match stop::current() {
+        Some(s) => api.stopping(s.flag()),
+        None => api,
+    })
+}
+
 fn execute(opts: &WorkOptions, task: &Task, token: &Arc<Mutex<String>>) -> Result<Outcome> {
-    let job = Api::new(&opts.api, &token.lock().unwrap().clone())?;
+    let job = task_api(opts, &token.lock().unwrap().clone())?;
     match task.kind.as_str() {
         "sync" => sync_job(opts, &job, task),
         "render" => {
@@ -2148,8 +2249,8 @@ fn script(
     // rather than a /tmp the runtime on the host cannot see.
     let tmp = opts.work_dir.join("tmp");
     std::fs::create_dir_all(&tmp)?;
-    let status = Command::new("bash")
-        .arg(repo.join(rel))
+    let mut cmd = Command::new("bash");
+    cmd.arg(repo.join(rel))
         .args(args)
         .env("OMARCHY_API", &opts.api)
         .env("OMARCHY_POOL", &opts.pool)
@@ -2160,9 +2261,14 @@ fn script(
         .env("OMARCHY_CLI", bin.join("omarchy-cli"))
         .env("PKG_EXTRACT", bin.join("pkg-extract"))
         .env("TMPDIR", &tmp)
-        .current_dir(&repo)
-        .status()
-        .with_context(|| format!("running {rel}"))?;
+        .current_dir(&repo);
+    // The task's id names and labels every container the script starts or creates (#277): a stop removes them by it — a container
+    // outlives its killed client. Run by hand or in CI, without it, each script is as it was.
+    if let Some(t) = stop::current() {
+        cmd.env("OMARCHY_TASK_ID", t.task().to_string());
+    }
+    let status = stop::status(&mut cmd).with_context(|| format!("running {rel}"))?;
+    stop::check()?;
     Ok(status.success())
 }
 
@@ -2220,7 +2326,7 @@ fn rollback_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
 /// with the token it started with (task 275, 2026-09-15).
 fn relayout_job(opts: &WorkOptions, token: &Arc<Mutex<String>>) -> Result<Outcome> {
     let started = Instant::now();
-    let fresh = || Api::new(&opts.api, &token.lock().unwrap().clone());
+    let fresh = || task_api(opts, &token.lock().unwrap().clone());
     let (mut moved, mut ghosts, mut missing) = (0u64, 0u64, 0u64);
     let mut errors: Vec<String> = Vec::new();
     loop {
@@ -2414,6 +2520,7 @@ fn build_job(opts: &WorkOptions, task: &Task, token: &Arc<Mutex<String>>) -> Res
     };
     let log = std::fs::File::create(dir.join("build.log"))?;
     let mut run = Command::new(runtime);
+    // Named, and labelled with the task (#277): a stop removes the task's containers by that label — the build's container outlives a killed client.
     run.args([
         "run",
         "--rm",
@@ -2421,6 +2528,8 @@ fn build_job(opts: &WorkOptions, task: &Task, token: &Arc<Mutex<String>>) -> Res
         platform,
         "--name",
         &format!("omarchy-build-{}", task.id),
+        "--label",
+        &format!("{}={}", stop::TASK_LABEL, task.id),
         "-v",
     ])
     .arg(format!("{}:/task", dir.display()));
@@ -2474,16 +2583,15 @@ fn build_job(opts: &WorkOptions, task: &Task, token: &Arc<Mutex<String>>) -> Res
         run.arg("-v")
             .arg(format!("{}:/build/cache", cache.display()));
     }
-    let status = run
-        .args([image, "bash", "/task/worker.sh", "--inside"])
+    run.args([image, "bash", "/task/worker.sh", "--inside"])
         .stdout(log.try_clone()?)
-        .stderr(log)
-        .status()
-        .context("running the build container")?;
+        .stderr(log);
+    let status = stop::status(&mut run).context("running the build container")?;
+    stop::check()?;
     // The pool is spoken to only now, with the token the heartbeat last
     // renewed: the one the claim issued lives thirty minutes, and a build
     // is often longer — the lesson relayout learned on task 275.
-    let renewed = Api::new(&opts.api, &token.lock().unwrap().clone())?;
+    let renewed = task_api(opts, &token.lock().unwrap().clone())?;
     let job = &renewed;
     let log_text = std::fs::read_to_string(dir.join("build.log")).unwrap_or_default();
     if !status.success() {
@@ -2720,7 +2828,8 @@ fn audit_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
     if has_tests {
         cmd.arg("--tests").arg(&tests);
     }
-    let out = cmd.output().context("running audit-pkgbuild")?;
+    let out = stop::output(&mut cmd).context("running audit-pkgbuild")?;
+    stop::check()?;
     if !out.status.success() {
         return Err(anyhow!(
             "the audit produced no report (exit {:?}): {}",
@@ -4253,5 +4362,112 @@ mod orders_tests {
             matches!(body["code"].as_str(), Some("no-policy" | "too-young")),
             "{body}"
         );
+    }
+}
+
+/// Stop its task on the Rust worker (#277, part 2): the task's scripts are
+/// told their task, so the containers they start carry its label; a stop
+/// kills a script mid-run and its work returns the stop; the task's clients
+/// carry its stop, and a client outside a task does not.
+#[cfg(test)]
+mod stop_tests {
+    use super::{script, task_api, WorkOptions};
+    use crate::stop::{self, TaskStop};
+    use crate::RepoError;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::{ExitStatus, Output};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    fn checkout(name: &str, body: &str) -> (tempfile::TempDir, WorkOptions) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("tests")).unwrap();
+        std::fs::write(dir.path().join("tests").join(name), body).unwrap();
+        let opts = WorkOptions {
+            api: "http://127.0.0.1:1".into(),
+            pool: String::new(),
+            worker_token: String::new(),
+            arch: "aarch64".into(),
+            kinds: vec!["health".into()],
+            shared: false,
+            labels: serde_json::json!({}),
+            once: false,
+            idle_exit: 0,
+            work_dir: dir.path().into(),
+            sign: None,
+            repo_dir: Some(dir.path().into()),
+        };
+        (dir, opts)
+    }
+
+    #[test]
+    fn a_tasks_script_is_told_its_task_and_one_outside_a_task_is_not() {
+        let (dir, opts) = checkout(
+            "task-id.sh",
+            "printf '%s' \"${OMARCHY_TASK_ID-unset}\" > \"$OMARCHY_WORK_DIR/seen\"\n",
+        );
+        let token = Arc::new(Mutex::new("omj.t".to_owned()));
+        let stop = TaskStop::new(812);
+        assert!(stop::within(&stop, || script(&opts, &token, "tests/task-id.sh", &[])).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("seen")).unwrap(),
+            "812"
+        );
+        assert!(script(&opts, &token, "tests/task-id.sh", &[]).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("seen")).unwrap(),
+            "unset"
+        );
+    }
+
+    #[test]
+    fn a_script_stopped_mid_run_is_killed_and_its_work_returns_the_stop() {
+        let (_dir, opts) = checkout("hang.sh", "sleep 600\n");
+        let token = Arc::new(Mutex::new("omj.t".to_owned()));
+        let stop = TaskStop::new(812);
+        let s = Arc::clone(&stop);
+        let run = std::thread::spawn(move || {
+            let started = Instant::now();
+            let r = stop::within(&s, || script(&opts, &token, "tests/hang.sh", &[]));
+            (r.map_err(|e| e.to_string()), started.elapsed())
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        let none = |_: &str, _: &[&str], _: Instant| -> Option<Output> {
+            Some(Output {
+                status: ExitStatus::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        };
+        stop.stop("stopping", &none, Duration::from_secs(2));
+        let (r, took) = run.join().unwrap();
+        assert_eq!(
+            r.unwrap_err(),
+            "task 812 was stopped by the pool (stopping); stopped its processes"
+        );
+        assert!(took < Duration::from_secs(10), "{took:?}");
+    }
+
+    #[test]
+    fn a_tasks_client_carries_its_stop_and_one_outside_a_task_does_not() {
+        let (_dir, opts) = checkout("none.sh", "");
+        let stop = TaskStop::new(812);
+        let job = stop::within(&stop, || task_api(&opts, "omj.t")).unwrap();
+        stop.stop(
+            "stopping",
+            &|_: &str, _: &[&str], _: Instant| None,
+            Duration::ZERO,
+        );
+        // Stopped: nothing is sent — no connection is even tried.
+        assert!(matches!(
+            job.post_json("/factory/x", &serde_json::json!({})),
+            Err(RepoError::Stopped)
+        ));
+        // Outside a task: a plain client, which tries (and here finds nothing listening).
+        let plain = task_api(&opts, "omj.t").unwrap();
+        assert!(!matches!(
+            plain.post_json("/factory/x", &serde_json::json!({})),
+            Err(RepoError::Stopped)
+        ));
     }
 }

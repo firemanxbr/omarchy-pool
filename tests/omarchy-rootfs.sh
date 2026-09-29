@@ -93,7 +93,9 @@ echo "building the Omarchy reference from $RING ($(wc -l < "$WORK/install.txt" |
 # containers (one directory per architecture) — the reference downloads once.
 cache_mount=()
 if [[ -n "${OMARCHY_PKG_CACHE:-}" ]]; then mkdir -p "$OMARCHY_PKG_CACHE/x86_64"; cache_mount=(-v "$OMARCHY_PKG_CACHE/x86_64:/var/cache/pacman/pkg"); fi
-"$RUNTIME" run --rm --platform linux/amd64 -v "$WORK:/repo" ${cache_mount[@]+"${cache_mount[@]}"} "$ARCHLINUX_BASE" bash /repo/build.sh >&2 || exit 1
+# Run for a task's ABI gate (OMARCHY_TASK_ID, inherited from tests/abi-gate.sh, #277), the container carries the task's name and label:
+# a stop of the task removes it by that label — it installs for minutes, and outlives its killed client.
+"$RUNTIME" run --rm ${OMARCHY_TASK_ID:+--name "omarchy-task-$OMARCHY_TASK_ID-rootfs-$$" --label "com.omarchy.task=$OMARCHY_TASK_ID"} --platform linux/amd64 -v "$WORK:/repo" ${cache_mount[@]+"${cache_mount[@]}"} "$ARCHLINUX_BASE" bash /repo/build.sh >&2 || exit 1
 rm -rf "$CACHE"; mkdir -p "$CACHE"
 tar -xf "$WORK/rootfs.tar" -C "$CACHE"
 date +%s > "$CACHE/.built"

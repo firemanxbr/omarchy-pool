@@ -2,6 +2,8 @@
 
 use std::io::Read;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use pkg_manifest::PackageManifest;
@@ -25,6 +27,11 @@ pub struct Api {
     base: String,
     token: String,
     http: Client,
+    /// A task's stop (#277, part 2): set when the pool answers the task's
+    /// heartbeat that it is no longer this worker's. Every request checks it
+    /// before each attempt, so work in the worker's own process ends at its
+    /// next call to the pool. An `Api` outside a task carries none.
+    stop: Option<Arc<AtomicBool>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -240,11 +247,20 @@ struct StagingPartDone {
     etag: String,
 }
 
-/// Retries transient failures (network errors, 429, 5xx) with backoff.
-fn with_retry<T>(what: &str, mut f: impl FnMut() -> Result<T, RepoError>) -> Result<T, RepoError> {
+/// Retries transient failures (network errors, 429, 5xx) with backoff —
+/// unless the task this client works for was stopped: checked before each
+/// attempt, a retry's included, and never retried itself (#277).
+fn with_retry<T>(
+    stop: Option<&AtomicBool>,
+    what: &str,
+    mut f: impl FnMut() -> Result<T, RepoError>,
+) -> Result<T, RepoError> {
     let mut delay = Duration::from_millis(800);
     let mut attempt = 1;
     loop {
+        if stop.is_some_and(|s| s.load(Ordering::SeqCst)) {
+            return Err(RepoError::Stopped);
+        }
         match f() {
             Ok(v) => return Ok(v),
             Err(e) if attempt < ATTEMPTS && is_transient(&e) => {
@@ -275,7 +291,25 @@ impl Api {
                 .user_agent(concat!("pkg-repo/", env!("CARGO_PKG_VERSION")))
                 .timeout(Duration::from_secs(600))
                 .build()?,
+            stop: None,
         })
+    }
+
+    /// This client works for a task: once `stop` is set, no request of it is
+    /// sent any more — the one in flight ends as it would, the next returns
+    /// `RepoError::Stopped` (#277).
+    #[must_use]
+    pub fn stopping(mut self, stop: Arc<AtomicBool>) -> Self {
+        self.stop = Some(stop);
+        self
+    }
+
+    fn retry<T>(
+        &self,
+        what: &str,
+        f: impl FnMut() -> Result<T, RepoError>,
+    ) -> Result<T, RepoError> {
+        with_retry(self.stop.as_deref(), what, f)
     }
 
     pub fn base(&self) -> &str {
@@ -301,7 +335,7 @@ impl Api {
 
     /// Whether the index already knows this archive.
     pub fn is_indexed(&self, sha256: &str) -> Result<bool, RepoError> {
-        with_retry("is_indexed", || {
+        self.retry("is_indexed", || {
             let resp = self
                 .http
                 .get(self.url(&format!("/packages/{sha256}")))
@@ -344,7 +378,7 @@ impl Api {
             let name_chunk = filenames
                 .get(i..(i + 2000).min(filenames.len()))
                 .unwrap_or(&[]);
-            let k: Known = with_retry("known", || {
+            let k: Known = self.retry("known", || {
                 let resp = self
                     .http
                     .post(self.url("/packages/known"))
@@ -370,7 +404,7 @@ impl Api {
     ) -> Result<(), RepoError> {
         let len = std::fs::metadata(archive)?.len();
         if len <= SINGLE_PUT_MAX {
-            return with_retry("upload_pool", || {
+            return self.retry("upload_pool", || {
                 let file = std::fs::File::open(archive)?;
                 let resp = self
                     .http
@@ -384,7 +418,7 @@ impl Api {
             });
         }
 
-        let created: MultipartCreated = with_retry("multipart_create", || {
+        let created: MultipartCreated = self.retry("multipart_create", || {
             let resp = self
                 .http
                 .post(self.url(&format!("/pool/{sha256}/multipart")))
@@ -413,7 +447,7 @@ impl Api {
                     break;
                 }
                 let chunk = buf[..n].to_vec();
-                let done: PartDone = with_retry("multipart_part", || {
+                let done: PartDone = self.retry("multipart_part", || {
                     let resp = self
                         .http
                         .put(self.url(&format!(
@@ -430,7 +464,7 @@ impl Api {
                     .push(serde_json::json!({ "partNumber": done.part_number, "etag": done.etag }));
                 part_number += 1;
             }
-            with_retry("multipart_complete", || {
+            self.retry("multipart_complete", || {
                 let resp = self
                     .http
                     .post(self.url(&format!("/pool/multipart/{}/complete", upload.upload_id)))
@@ -453,7 +487,7 @@ impl Api {
         sig: &Path,
     ) -> Result<(), RepoError> {
         let bytes = std::fs::read(sig)?;
-        with_retry("upload_sig", || {
+        self.retry("upload_sig", || {
             let resp = self
                 .http
                 .put(self.url(&format!("/pool/{sha256}/sig")))
@@ -480,7 +514,7 @@ impl Api {
         source: &str,
         arch: &str,
     ) -> Result<(), RepoError> {
-        with_retry("sign_pool", || {
+        self.retry("sign_pool", || {
             let resp = self
                 .http
                 .post(self.url(&format!("/pool/{sha256}/sign")))
@@ -497,7 +531,7 @@ impl Api {
         source: &str,
         arch: &str,
     ) -> Result<(), RepoError> {
-        with_retry("index_manifest", || {
+        self.retry("index_manifest", || {
             let resp = self
                 .http
                 .post(self.url("/packages"))
@@ -521,7 +555,7 @@ impl Api {
             "arch": req.arch,
             "note": req.note,
         });
-        with_retry("create_release", || {
+        self.retry("create_release", || {
             let resp = self
                 .http
                 .post(self.url("/releases"))
@@ -533,7 +567,7 @@ impl Api {
     }
 
     pub fn history(&self, ring: &str) -> Result<History, RepoError> {
-        with_retry("history", || {
+        self.retry("history", || {
             let resp = self
                 .http
                 .get(self.url(&format!("/releases/{ring}/history")))
@@ -544,7 +578,7 @@ impl Api {
 
     /// Newest events of one kind (`limit` ≤ 200).
     pub fn events(&self, kind: &str, limit: u32) -> Result<Vec<Event>, RepoError> {
-        with_retry("events", || {
+        self.retry("events", || {
             let resp = self
                 .http
                 .get(self.url("/events"))
@@ -576,7 +610,7 @@ impl Api {
             if let Some(v) = &view {
                 query.push(("release_id", v.release.id.to_string()));
             }
-            let page: ReleaseView = with_retry("release", || {
+            let page: ReleaseView = self.retry("release", || {
                 let resp = self
                     .http
                     .get(self.url(&format!("/releases/{ring}")))
@@ -605,7 +639,7 @@ impl Api {
     }
 
     pub fn release_summary(&self, ring: &str) -> Result<Option<ReleaseSummaryView>, RepoError> {
-        with_retry("release_summary", || {
+        self.retry("release_summary", || {
             let resp = self
                 .http
                 .get(self.url(&format!("/releases/{ring}?fields=summary")))
@@ -623,7 +657,7 @@ impl Api {
         ring: &str,
         arch: &str,
     ) -> Result<Option<ReleaseSummaryView>, RepoError> {
-        with_retry("release_summary_arch", || {
+        self.retry("release_summary_arch", || {
             let resp = self
                 .http
                 .get(self.url(&format!("/releases/{ring}?fields=summary&arch={arch}")))
@@ -643,7 +677,7 @@ impl Api {
         arch: &str,
         bytes: &[u8],
     ) -> Result<(), RepoError> {
-        with_retry("upload_artifact", || {
+        self.retry("upload_artifact", || {
             let resp = self
                 .http
                 .put(self.url(&format!("/releases/{release_id}/artifacts/{kind}")))
@@ -656,7 +690,7 @@ impl Api {
     }
 
     pub fn unreferenced(&self, keep: u32) -> Result<serde_json::Value, RepoError> {
-        with_retry("unreferenced", || {
+        self.retry("unreferenced", || {
             let resp = self
                 .http
                 .get(self.url(&format!("/pool/unreferenced?keep={keep}")))
@@ -667,7 +701,7 @@ impl Api {
 
     /// One step of the relayout (`phase` copy or purge, routes/relayout.ts): what it moved or deleted, and whether more remains.
     pub fn relayout(&self, phase: &str, limit: u32) -> Result<serde_json::Value, RepoError> {
-        with_retry("relayout", || {
+        self.retry("relayout", || {
             let resp = self
                 .http
                 .post(self.url(&format!("/pool/relayout?phase={phase}&limit={limit}")))
@@ -678,7 +712,7 @@ impl Api {
     }
 
     pub fn gc(&self, keep: u32, limit: u32) -> Result<serde_json::Value, RepoError> {
-        with_retry("gc", || {
+        self.retry("gc", || {
             let resp = self
                 .http
                 .post(self.url(&format!("/pool/gc?keep={keep}&limit={limit}")))
@@ -690,7 +724,7 @@ impl Api {
 
     /// `GET` any JSON endpoint, retrying on 5xx.
     pub fn get_json(&self, path: &str) -> Result<serde_json::Value, RepoError> {
-        with_retry("get_json", || {
+        self.retry("get_json", || {
             let resp = self.http.get(self.url(path)).send()?;
             Ok(Self::check(resp)?.json()?)
         })
@@ -707,7 +741,7 @@ impl Api {
         url: &str,
         bearer: Option<&str>,
     ) -> Result<serde_json::Value, RepoError> {
-        with_retry("get_external_json", || {
+        self.retry("get_external_json", || {
             let mut req = self.http.get(url);
             if let Some(t) = bearer.filter(|t| !t.is_empty()) {
                 req = req.bearer_auth(t);
@@ -723,7 +757,7 @@ impl Api {
         url: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, RepoError> {
-        with_retry("post_external_json", || {
+        self.retry("post_external_json", || {
             let resp = self.http.post(url).json(body).send()?;
             Ok(Self::check(resp)?.json()?)
         })
@@ -731,7 +765,7 @@ impl Api {
 
     /// `PUT` raw bytes to an authenticated endpoint (a staging artifact), retrying on 5xx.
     pub fn put_bytes(&self, path: &str, bytes: &[u8]) -> Result<(), RepoError> {
-        with_retry("put_bytes", || {
+        self.retry("put_bytes", || {
             let resp = self
                 .http
                 .put(self.url(path))
@@ -763,7 +797,7 @@ impl Api {
         let len = std::fs::metadata(file)?.len();
         let path = format!("/factory/tasks/{task}/artifacts/{name}");
         if len <= single_max {
-            return with_retry("stage_file", || {
+            return self.retry("stage_file", || {
                 let f = std::fs::File::open(file)?;
                 let resp = self
                     .http
@@ -778,7 +812,7 @@ impl Api {
             });
         }
         let base = self.url(&format!("{path}/multipart"));
-        let created: StagingMultipartCreated = with_retry("staging_multipart_create", || {
+        let created: StagingMultipartCreated = self.retry("staging_multipart_create", || {
             let resp = self
                 .http
                 .post(&base)
@@ -809,7 +843,7 @@ impl Api {
                 }
                 let chunk = buf[..n].to_vec();
                 let part = part_number.to_string();
-                let done: StagingPartDone = with_retry("staging_multipart_part", || {
+                let done: StagingPartDone = self.retry("staging_multipart_part", || {
                     let resp = self
                         .http
                         .post(&base)
@@ -827,7 +861,7 @@ impl Api {
                 parts.push(serde_json::json!({ "partNumber": done.part, "etag": done.etag }));
                 part_number += 1;
             }
-            with_retry("staging_multipart_complete", || {
+            self.retry("staging_multipart_complete", || {
                 let resp = self
                     .http
                     .post(&base)
@@ -855,7 +889,7 @@ impl Api {
         path: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, RepoError> {
-        with_retry("put_json", || {
+        self.retry("put_json", || {
             let resp = self
                 .http
                 .put(self.url(path))
@@ -872,7 +906,7 @@ impl Api {
         path: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, RepoError> {
-        with_retry("patch_json", || {
+        self.retry("patch_json", || {
             let resp = self
                 .http
                 .patch(self.url(path))
@@ -889,7 +923,7 @@ impl Api {
         path: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, RepoError> {
-        with_retry("post_json", || {
+        self.retry("post_json", || {
             let resp = self
                 .http
                 .post(self.url(path))
@@ -908,7 +942,7 @@ impl Api {
         path: &str,
         body: &serde_json::Value,
     ) -> Result<Option<serde_json::Value>, RepoError> {
-        with_retry("post_json_as", || {
+        self.retry("post_json_as", || {
             let resp = self
                 .http
                 .post(self.url(path))
@@ -940,7 +974,7 @@ impl Api {
                 }
             }
         }
-        with_retry("post_event", || {
+        self.retry("post_event", || {
             let resp = self
                 .http
                 .post(self.url("/events"))
@@ -964,7 +998,7 @@ impl Api {
 
     fn download_with(&self, url: &str, dest: &Path, authed: bool) -> Result<String, RepoError> {
         use sha2::{Digest, Sha256};
-        with_retry("download", || {
+        self.retry("download", || {
             let req = self.http.get(url);
             let req = if authed {
                 req.bearer_auth(&self.token)
@@ -1014,7 +1048,7 @@ mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     /// One request as the test server saw it: method, path with query, body.
     #[derive(Debug, Clone)]
@@ -1230,5 +1264,62 @@ mod tests {
             upload_timeout(PART_SIZE),
             Duration::from_secs(120 + 64 * 1024 / 50)
         );
+    }
+
+    /// A task's client once its task was stopped (#277): the call in flight
+    /// ends as it would, the next is never sent — `RepoError::Stopped`, not
+    /// retried —; a client outside a task never stops.
+    #[test]
+    fn a_stopped_tasks_client_sends_nothing_more() {
+        let (base, seen) = staging_server(None, false, "500 Internal Server Error");
+        let flag = Arc::new(AtomicBool::new(false));
+        let api = Api::new(&base, "t").unwrap().stopping(Arc::clone(&flag));
+        api.put_bytes("/factory/tasks/7/artifacts/audit.json", b"{}")
+            .unwrap();
+        flag.store(true, Ordering::SeqCst);
+        let err = api
+            .put_bytes("/factory/tasks/7/artifacts/audit.md", b"#")
+            .unwrap_err();
+        assert!(matches!(err, RepoError::Stopped), "{err}");
+        assert!(!is_transient(&err));
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            1,
+            "the call after the stop was never sent"
+        );
+        // The same pool, a client of no task: it goes on.
+        Api::new(&base, "t")
+            .unwrap()
+            .put_bytes("/factory/tasks/7/artifacts/audit.md", b"#")
+            .unwrap();
+        assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+
+    /// The stop lands during a retry's backoff: the retry is not sent.
+    #[test]
+    fn a_stop_during_a_retrys_backoff_sends_no_retry() {
+        let (base, seen) = staging_server(Some(1), false, "503 Service Unavailable");
+        let flag = Arc::new(AtomicBool::new(false));
+        let api = Api::new(&base, "t").unwrap().stopping(Arc::clone(&flag));
+        let f = file_of(b"0123456789A");
+        let setter = {
+            let flag = Arc::clone(&flag);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                flag.store(true, Ordering::SeqCst);
+            })
+        };
+        let err = api
+            .stage_file_sized(7, "big.pkg.tar.zst", f.path(), 10, 4)
+            .unwrap_err();
+        setter.join().unwrap();
+        assert!(matches!(err, RepoError::Stopped), "{err}");
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen.iter().filter(|s| s.target.contains("part=1&")).count(),
+            1,
+            "one attempt, no retry after the stop"
+        );
+        assert!(!seen.iter().any(|s| s.target.contains("action=complete")));
     }
 }

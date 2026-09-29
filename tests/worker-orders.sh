@@ -13,7 +13,9 @@
 # process sends until the pool has answered a claim; a complete the pool
 # refuses is logged and the builder exits 0; a task it cannot read is
 # failed at once; an order riding a 426 is obeyed; an ordered probe that
-# fails after an answer leaves the worker's own first wait, not none.
+# fails after an answer leaves the worker's own first wait, not none. And
+# Stop its task (#277, part 2): the build runs in a process group of its
+# own, which the heartbeat's stop kills, and the builder exits 0.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
@@ -212,4 +214,66 @@ echo '503 {"error":"internal error"}' > "$STUB_ANSWERS"
 run_worker 60 "${common[@]}"
 [[ "$(claims | jq -r '.previous_exit.why // "none"' | tr '\n' ' ')" == "restart restart none " ]] || { echo "said until heard: $(claims | jq -c .previous_exit | tr '\n' ' ')"; exit 1; }
 rm -f "$tmp/state/last-exit"
+
+# 11. Stop its task (#277, part 2). The build runs as a job of its own process group — the subshell a fork, so the keys this shell
+#     holds unexported are still its own (with_secrets as before); the heartbeat reads the pool's answer: a 409 with "stop" (or a
+#     404) writes the state and sends SIGUSR1, which interrupts the main shell's wait at once — not when the build ends —; the build's
+#     group gets SIGTERM, then SIGKILL; no fail is posted, no note left, and the script exits 0 within about 11 s. A 409 without stop
+#     (a pool from before #277) or a 503 stops nothing; a SIGTERM (a drain) waits for the build, as before. (A recipe that detached
+#     into a session of its own dies with the container's first process, which this exit is: a container, not this harness, shows it.)
+build_run() { # heartbeat-code heartbeat-body build-seconds [drain]
+  rm -f "$tmp/stopped" "$tmp/child" "$tmp/secret" "$tmp/with" "$tmp/build-pgid"; : > "$STUB_LOG"
+  env WORKER_LOG="$tmp/worker.log" OMARCHY_STATE_DIR="$tmp/state" STUB_DIR="$tmp" STUB_HB_CODE="$1" STUB_HB_BODY="$2" STUB_BUILD_SECS="$3" STUB_DRAIN="${4:-}" bash -c '
+    set -euo pipefail
+    source "$0"
+    sleep() { /bin/sleep 0.2; }
+    api() { echo "call $1 $2" >> "$STUB_LOG"; if [[ "$2" == */heartbeat ]]; then printf "%s\n%s" "$STUB_HB_BODY" "$STUB_HB_CODE"; [[ "$STUB_HB_CODE" == 2* ]]; return; fi; printf "{}\n200"; }
+    build_with_retries() {
+      sh -c "ps -o pgid= -p \$\$" | tr -d " " > "$STUB_DIR/build-pgid"
+      [[ "${ANTHROPIC_API_KEY:-}" == held ]] && echo visible > "$STUB_DIR/secret"
+      with_secrets sh -c "echo \"\$ANTHROPIC_API_KEY\"" > "$STUB_DIR/with"
+      /bin/sleep 600 & echo $! > "$STUB_DIR/child"
+      /bin/sleep "$STUB_BUILD_SECS"; echo built
+    }
+    ANTHROPIC_API_KEY=held; export ANTHROPIC_API_KEY; hold_secrets
+    STOPPED_FILE="$STUB_DIR/stopped"; TASK_ID=812; REPORTED=0; DRAIN=0
+    trap "DRAIN=1" TERM INT
+    trap stop_build USR1
+    [[ "$STUB_HB_CODE" == none ]] || { heartbeat_loop 812 & BEAT=$!; }
+    [[ -z "$STUB_DRAIN" ]] || ( /bin/sleep 1; kill -TERM $$ ) &
+    ps -o pgid= -p $$ | tr -d " " > "$STUB_DIR/main-pgid"
+    set +e; build_job felix ref "$STUB_DIR/build.log"; status=$?; set -e
+    kill "${BEAT:-}" 2>/dev/null || true
+    echo "status $status drain $DRAIN" >&2
+  ' "$tmp/worker.sh" 2>"$tmp/stderr"
+}
+reap() { [[ -s "$tmp/child" ]] && kill "$(cat "$tmp/child")" 2>/dev/null; return 0; }
+started=$(date +%s)
+set +e; build_run 409 '{"error":"task 812 was stopped from its worker page","stop":true,"state":"stopping"}' 60; status=$?; set -e
+took=$(( $(date +%s) - started ))
+[[ "$status" == 0 ]] || { echo "a stopped build exits 0: $status $(cat "$tmp/stderr")"; exit 1; }
+(( took < 13 )) || { echo "the stop interrupts the wait at once, not when the build ends: ${took}s"; exit 1; }
+[[ "$(cat "$tmp/stopped")" == stopping ]] || { echo "the state is written: $(cat "$tmp/stopped" 2>/dev/null)"; exit 1; }
+grep -q 'task 812: stopped by the pool (stopping); stopped its build' "$tmp/stderr" || { echo "and said: $(cat "$tmp/stderr")"; exit 1; }
+! grep -q '^status ' "$tmp/stderr" || { echo "the script ended in the trap: $(cat "$tmp/stderr")"; exit 1; }
+[[ -s "$tmp/build-pgid" && "$(cat "$tmp/build-pgid")" != "$(cat "$tmp/main-pgid")" ]] || { echo "the build leads a process group of its own: $(cat "$tmp/build-pgid") vs $(cat "$tmp/main-pgid")"; exit 1; }
+[[ "$(cat "$tmp/secret")" == visible && "$(cat "$tmp/with")" == held ]] || { echo "the held keys are the build's, as before"; exit 1; }
+/bin/sleep 0.5
+! kill -0 "$(cat "$tmp/child")" 2>/dev/null || { reap; echo "the build's group was killed, its sleep 600 with it"; exit 1; }
+! grep -q '/fail' "$STUB_LOG" || { echo "no fail is posted: the pool already knows"; exit 1; }
+[[ ! -e "$tmp/state/last-exit" ]] || { echo "no note: the pool saw the stop"; exit 1; }
+# A task that is gone (404): the same.
+set +e; build_run 404 '{"error":"no such task"}' 60; status=$?; set -e
+[[ "$status" == 0 && "$(cat "$tmp/stopped")" == gone ]] || { reap; echo "a 404 stops too: $status $(cat "$tmp/stderr")"; exit 1; }
+# A 409 without stop (a pool from before #277), a 503: nothing is stopped, the build goes on to its end.
+for hb in '409 {"error":"task 812 is leased; the lease is not yours"}' '503 {"error":"internal"}'; do
+  set +e; build_run "${hb%% *}" "${hb#* }" 2; status=$?; set -e
+  reap
+  [[ "$status" == 0 ]] && grep -q '^status 0 drain 0$' "$tmp/stderr" && [[ ! -e "$tmp/stopped" ]] || { echo "${hb%% *} stops nothing: $status $(cat "$tmp/stderr")"; exit 1; }
+  grep -q '^built$' "$tmp/build.log" || { echo "the build ran to its end"; exit 1; }
+done
+# A SIGTERM during the build (a drain): the wait is interrupted, DRAIN=1, and it waits again for the build, which ends and is reported.
+set +e; build_run none '' 3 drain; status=$?; set -e
+reap
+grep -q '^status 0 drain 1$' "$tmp/stderr" && grep -q '^built$' "$tmp/build.log" || { echo "a drain waits for the build: $(cat "$tmp/stderr")"; exit 1; }
 echo "worker orders: ok"

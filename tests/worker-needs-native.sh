@@ -10,6 +10,7 @@
 # and a recipe's is neither. The log is on the record either way. The
 # labels the worker claims with (--labels, or WORKER_LABELS alone) are the
 # ones its build container gets, so the script's probe and the report agree.
+# And the container carries its task's label, which a stop removes it by.
 #
 # Requires: cargo (or PKG_REPO=<a built pkg-repo>), python3, jq.
 set -euo pipefail
@@ -114,6 +115,9 @@ expect '.error | contains("rustc cannot start on this worker")' "the report says
 grep -q '"path": "/api/v1/factory/tasks/7/artifacts/build.log"' "$tmp/requests" || { echo "the log is on the record: $(cat "$tmp/requests")"; exit 1; }
 grep -q 'back in the queue for a native x86_64 worker' "$tmp/stderr" || { echo "the worker's log says where the build went: $(cat "$tmp/stderr")"; exit 1; }
 claimed_and_probed "$emulated" "--labels, and no WORKER_LABELS in the worker's environment"
+# The build container is named and labelled with its task (#277): a stop removes the task's containers by that label.
+grep -qx 'omarchy-build-7' "$tmp/podman-args" && grep -qx 'com.omarchy.task=7' "$tmp/podman-args" \
+  || { echo "the build container carries its task's name and label: $(cat "$tmp/podman-args")"; exit 1; }
 
 # 2. Emulated, a library qemu could not map (no probe sees it coming): the same.
 run "$emulated" 4 "$sudo"
