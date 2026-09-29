@@ -14,6 +14,7 @@ import { allComponents } from "../src/pages/components";
 import { GO_MENU, HELPERS, MORE, NAV, termId } from "../src/pages/layout";
 import { DOCS_TREE, GLOSSARY } from "../src/pages/docs-tree";
 import { CHARTS } from "../src/pages/charts";
+import { KIT_HELPERS } from "../src/pages/kit";
 import { JOURNAL_KINDS } from "../src/meta";
 import { fetchPage, ownScriptOf, RETIRED_PAGES, scriptOf, seedDashboard, type Fixture } from "./fixture";
 // The router's own source, as text (Vite's ?raw): the routed pages are read from it, so a page added to index.ts without a way in fails here by name.
@@ -46,7 +47,7 @@ let PAGES: string[];
 let DRAWN: string[];
 beforeAll(async () => {
   F = await seedDashboard(env);
-  PAGES = ["/", "/factory", "/review", "/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/what-we-test", "/docs/governance", "/docs/security", "/docs/glossary", "/docs/architecture", "/docs/runbook", "/docs/testing", "/docs/migration", "/docs/factory", "/docs/worker-host", "/docs/security-model", "/docs/contributing", "/docs/proof-of-concept", "/docs/open-work", "/docs/omarchy-cli-mcp", "/packages", `/package/${F.pkg}`, `/build/${F.projectTask}`, "/status", "/workers", "/request", `/user/${F.owner}`, "/people", "/api", "/diff"];
+  PAGES = ["/", "/factory", "/review", "/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/what-we-test", "/docs/governance", "/docs/security", "/docs/glossary", "/docs/architecture", "/docs/runbook", "/docs/testing", "/docs/migration", "/docs/factory", "/docs/worker-host", "/docs/security-model", "/docs/contributing", "/docs/proof-of-concept", "/docs/open-work", "/docs/omarchy-cli-mcp", "/packages", `/package/${F.pkg}`, `/build/${F.projectTask}`, "/status", "/workers", "/request", `/user/${F.owner}`, "/people", "/agents", "/api", "/diff"];
   DRAWN = [...PAGES, ...Object.keys(RETIRED_PAGES)];
 });
 
@@ -85,7 +86,7 @@ describe("dashboard pages", () => {
       expect([...new Set(twice)], `${path} serves an id twice`).toEqual([]);
     }
     // The door a page lights (#240): a package and the packages list are the Pool's, the request and the workers the Factory's, a build Review's; a page the footer names (Status, People) and the docs light none.
-    const LIT: [string, string | null][] = [["/", "/"], ["/packages", "/"], [`/package/${F.pkg}`, "/"], ["/factory", "/factory"], ["/request", "/factory"], ["/workers", "/factory"], ["/review", "/review"], [`/build/${F.projectTask}`, "/review"], ["/status", null], ["/people", null], ["/docs", null], ["/diff", null]];
+    const LIT: [string, string | null][] = [["/", "/"], ["/packages", "/"], [`/package/${F.pkg}`, "/"], ["/factory", "/factory"], ["/request", "/factory"], ["/workers", "/factory"], ["/review", "/review"], [`/build/${F.projectTask}`, "/review"], ["/status", null], ["/people", null], ["/agents", null], ["/docs", null], ["/diff", null]];
     for (const [path, door] of LIT) {
       const header = /<header>[\s\S]*?<\/header>/.exec(await (await get(path)).text())?.[0] ?? "";
       expect([...header.matchAll(/<a href="([^"]*)" class="active" aria-current="page">/g)].map((m) => m[1]), path).toEqual(door ? [door] : []);
@@ -124,7 +125,7 @@ describe("dashboard pages", () => {
   });
 
   // The addresses #240 took out of the header and the footer are one redirect each, to the section they became (index.ts MOVED): a 301 with the section as the fragment and the query kept — a bookmark lands, a filtered journal stays filtered, a ring's advisories stay that ring's. A HEAD — a link checker's — is answered as a GET is. Asked through the handler itself (raw): the fixture's get() draws the retired pages.
-  it("redirects the Pipeline, the Journal, Security and /docs/api to the section each became, and the footer's Agents to the agents chapter until its page lands", async () => {
+  it("redirects the Pipeline, the Journal, Security and /docs/api to the section each became, and serves the footer's Agents as a page of its own", async () => {
     let res: Response;
     expect(MOVED).toEqual({ "/pipeline": "/status", "/journal": "/status#journal", "/security": "/status#advisories", "/docs/api": "/docs#api" });
     for (const [from, to] of [
@@ -143,14 +144,14 @@ describe("dashboard pages", () => {
     // Only those addresses: the API's own /security and /events, the API reference at /api and the page a redirect lands on answer as they did.
     for (const path of ["/api/v1/security?ring=stable&arch=x86_64", "/api/v1/events?limit=1", "/api", "/api/", "/status", "/docs"]) expect((await raw(path)).status, path).toBe(200);
     expect((await raw("/journal/x")).status, "a path under a moved address is no address").toBe(404);
-    // The footer's Agents is #249's page: until it lands the address is the chapter on connecting an agent today, a 302 no browser keeps — MORE's `until`, the one place the router reads it from, so every footer entry still standing in for its page is answered the same way.
-    expect(MORE.filter((m) => m.until).map((m) => [m.href, m.until])).toEqual([["/agents", "/docs/omarchy-cli-mcp"]]);
-    for (const m of MORE.filter((e) => e.until)) {
-      res = await raw(`${m.href}?from=footer`);
-      expect(res.status, m.href).toBe(302);
-      expect(res.headers.get("location"), m.href).toBe(`http://pool.test${m.until}?from=footer`);
-      expect((await raw(m.until!)).status, m.until).toBe(200);
+    // A footer entry whose page has not landed is a 302 to what stands in for it (MORE's `until`). None is left: the footer's Agents was the chapter on omarchy-cli as an MCP server until its page landed (#249), and it is the page now, with a query or without — the chapter still served, and linked from the page.
+    expect(MORE.filter((m) => m.until)).toEqual([]);
+    for (const path of ["/agents", "/agents?from=footer"]) {
+      res = await raw(path);
+      expect(res.status, path).toBe(200);
+      expect(await res.text(), path).toContain('<h1 class="op-hero">Use the pool with your agent</h1>');
     }
+    expect((await raw("/docs/omarchy-cli-mcp")).status).toBe(200);
   });
 
   // The header's Sign in names the page it is on, a build's page and a package's included — so a maintainer who signs in from a build lands on the build, not on Review. The served href is the path; the shell's script rewrites it to the whole address once the query is known, so /request?renew=zlib signs in and comes back to the renewal. The docs sidebar's hint is written from MORE, so it names every page the footer links and no other.
@@ -169,9 +170,9 @@ describe("dashboard pages", () => {
     expect(await (await get("/review")).text()).toContain('id="mine-ws" href="/me"');
     const docs = await (await get("/docs")).text();
     const hint = /<div class="docs-hint">([^<]*)<\/div>/.exec(docs)?.[1] ?? "";
-    // A footer entry whose address still stands in for its page (MORE's `until`: Agents, a docs chapter until #249) is not called a page of its own.
+    // A footer entry whose address still stands in for its page (MORE's `until`; Agents was one until #249) is not called a page of its own.
     for (const m of MORE) if (m.href !== "/docs") (m.until ? expect(hint, m.label).not : expect(hint, m.label)).toContain(m.label);
-    expect(hint).toBe("Packages, Status and People have their own pages, linked from the footer. The three doors are the header.");
+    expect(hint).toBe("Packages, Status, Agents and People have their own pages, linked from the footer. The three doors are the header.");
     for (const n of NAV) expect(hint, n.label).not.toContain(n.label);
     // The footer marks the entry the reader is on or under: the page's script says so for a chapter, for a package, for the API reference (a chapter of the docs, at an address of its own) and for a diff (Status's, where the journal went).
     expect(docs).toContain('here.indexOf(href + "/") === 0');
@@ -367,7 +368,7 @@ describe("dashboard pages", () => {
     const dupes = (a: string[]): string[] => [...new Set(a.filter((x, i) => a.indexOf(x) !== i))];
     const program = (code: string): N[] => (acorn.parse(code, { ecmaVersion: 2020, sourceType: "script" }) as unknown as N).body;
     // The shell first, by its own name: page() splices HELPERS whole, so a name it declared twice would fail every page. The ⌘K menu's script (GO_MENU) follows it on every page, one statement that declares nothing outside itself — nor, inside, a name the shell has.
-    const helpers = program(HELPERS), charts = program(CHARTS), menu = program(GO_MENU);
+    const helpers = program(HELPERS), charts = program(CHARTS), menu = program(GO_MENU), kit = program(KIT_HELPERS);
     const shellNames = top(declarations(helpers)), chartNames = top(declarations(charts));
     expect(dupes(shellNames), "HELPERS declares a name twice").toEqual([]);
     expect(dupes(chartNames), "CHARTS declares a name twice").toEqual([]);
@@ -384,11 +385,11 @@ describe("dashboard pages", () => {
     for (const path of DRAWN) {
       const code = scriptOf(await (await get(path)).text());
       if (!code.trim()) continue;
-      // page() wraps the footer's line, the shell, the ⌘K menu, then the page's script in one function: the page's own statements are what follows the menu's, less CHARTS where the page splices it.
+      // page() wraps the footer's line, the shell, the ⌘K menu, then the page's script in one function: the page's own statements are what follows the menu's — and the kit's helpers on a page drawn with the kit (page({ kit: true })), the frame's as the menu is (the fixture's ownScriptOf) — less CHARTS where the page splices it.
       const iife: N[] | undefined = program(code)[0]?.expression?.callee?.body?.body;
       expect(iife, `${path}: the page's script is not one IIFE`).toBeDefined();
       const cs = code.indexOf(CHARTS), withCharts = cs >= 0;
-      const own = iife!.slice(1 + helpers.length + menu.length).filter((st) => !(withCharts && st.start >= cs && st.end <= cs + CHARTS.length));
+      const own = iife!.slice(1 + helpers.length + menu.length + (code.includes(KIT_HELPERS) ? kit.length : 0)).filter((st) => !(withCharts && st.start >= cs && st.end <= cs + CHARTS.length));
       const has = new Set([...shell, ...(withCharts ? chartNames : [])]);
       const decls = declarations(own);
       for (const d of decls) {
@@ -467,11 +468,8 @@ describe("dashboard pages", () => {
     const frameHtml = (home.match(/<header>[\s\S]*?<\/header>/)?.[0] ?? "") + (home.match(/<footer>[\s\S]*?<\/footer>/)?.[0] ?? "");
     const frame = [...new Set([...frameHtml.matchAll(/href="(\/[^"]*)"/g)].map((m) => route(m[1])).filter((p): p is string => !!p))];
     for (const n of NAV) expect(frame, n.label).toContain(n.href);
-    // Every footer entry is a page in the frame, but Agents: its page is #249's, and until it lands /agents redirects to a chapter (an alias, below) — linked from the frame all the same.
-    for (const m of MORE) {
-      if (m.href === "/agents") expect(frameHtml, m.label).toContain(`href="${m.href}"`);
-      else expect(frame, m.label).toContain(m.href);
-    }
+    // Every footer entry is a page in the frame — Agents too since #249; until then /agents was an alias of the MCP chapter.
+    for (const m of MORE) expect(frame, m.label).toContain(m.href);
     // Breadth first from the frame: a page's own links are its body's, header, footer and scripts set aside; the rows a page's own script draws are the way to a page with a parameter — its own script, not the shell's, whose workerRow and avatar write a build's and a person's address on every page.
     const via = new Map<string, string>();
     for (const p of frame) via.set(p, "the frame");
@@ -485,8 +483,8 @@ describe("dashboard pages", () => {
     expect(unreached, `reached only by address: ${unreached.join(", ")}`).toEqual([]);
     const ways = [...routed].sort().map((p) => `${p} ← ${via.get(p)}${via.get(p) === "the frame" ? "" : " ← the frame"}`);
     console.log(`the way to every page:\n  ${ways.join("\n  ")}`);
-    // The pages nothing links, on purpose: an alias is a redirect to a page that is reached, never a page of its own — the old addresses, the pages that became sections (MOVED, #240) and, until #249, the footer's Agents. Asked through the handler itself: the fixture's get() would draw a retired page instead.
-    for (const alias of ["/me", "/contribute", "/index.html", "/get-started", "/how-it-works", "/governance", "/agents", ...Object.keys(MOVED)]) {
+    // The pages nothing links, on purpose: an alias is a redirect to a page that is reached, never a page of its own — the old addresses and the pages that became sections (MOVED, #240). Asked through the handler itself: the fixture's get() would draw a retired page instead.
+    for (const alias of ["/me", "/contribute", "/index.html", "/get-started", "/how-it-works", "/governance", ...Object.keys(MOVED)]) {
       const res = await raw(alias);
       expect([301, 302], alias).toContain(res.status);
       const to = new URL(res.headers.get("location") ?? "", "http://pool.test").pathname;
