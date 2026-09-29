@@ -1181,7 +1181,8 @@ export const HELPERS = String.raw`
   var ORDER_WORD = { "recheck-agent": "re-check", restart: "restart", "restart-agent": "restart of its agent service", drain: "drain", resume: "resume", update: "update", "stop-task": "stop of its task" };
   function wtMarks(w) {
     var m = [];
-    (w.open_orders || []).forEach(function (o) { m.push([(ORDER_WORD[o.kind] || o.kind) + (o.state === "delivered" ? " on its way" : " waiting"), "ordered by " + (/^pool:/.test(String(o.by || "")) ? "the pool" : o.by) + " " + ago(o.at) + (o.state === "delivered" ? " — its worker has it" : " — delivered with its next claim")]); });
+    // An Update is never the worker's: its set's updater takes it (#277), so the mark says who it waits for.
+    (w.open_orders || []).forEach(function (o) { var who = "ordered by " + (/^pool:/.test(String(o.by || "")) ? "the pool" : o.by) + " " + ago(o.at); m.push(o.kind === "update" ? ["update waiting for its set's updater", who + " — its set's updater replaces it within two minutes, and the order closes when it claims on the pool's release"] : [(ORDER_WORD[o.kind] || o.kind) + (o.state === "delivered" ? " on its way" : " waiting"), who + (o.state === "delivered" ? " — its worker has it" : " — delivered with its next claim")]); });
     if (w.two_processes_since) m.push(["two processes", "two processes share its token since " + ago(w.two_processes_since) + " — orders are held; revoke it if you did not start two"]);
     if (w.crash_loop_since) m.push(["crash-looping?", "a new process every few minutes since " + ago(w.crash_loop_since) + ", none finished a task — its log has why"]);
     if (w.watchdog && w.watchdog.n) m.push(["watchdog ×" + w.watchdog.n, "restarted by its watchdog " + w.watchdog.n + " time" + (w.watchdog.n === 1 ? "" : "s") + " since " + ago(w.watchdog.since) + (w.watchdog.stuck_in ? ", stuck in " + (w.watchdog.stuck_in === "task" ? "a task" : "its " + w.watchdog.stuck_in) : "")]);

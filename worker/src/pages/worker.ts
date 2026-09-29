@@ -13,12 +13,18 @@
  *   does nothing (an error a restart cannot help, an unknown one, a
  *   provider's outage the breaker holds), two processes on its token, a
  *   crash loop, its watchdog's restarts, the pool that gave up.
- * - Operate: Re-check agent, Restart (only if its agent is down, if asked)
- *   and Restart agent service — drawn for every viewer and grey with the
- *   door's own reason where the viewer may not press them (GET …/can, the
- *   predicate the door refuses with). Each asks in the dashboard's dialog
- *   with a reason for the journal, then posts the order; it reaches the
- *   worker with its next claim.
+ * - Its set: what rolls its set out, in the pool's words (#277, part 3) —
+ *   its updater and the release it runs, a host timer from before #277, both
+ *   at once, an updater that is not running, nothing; for a builder, which
+ *   has no socket, its set's updater, not visible from the pool.
+ * - Operate: Re-check agent, Restart (only if its agent is down, if asked),
+ *   Restart agent service and Update — drawn for every viewer and grey with
+ *   the door's own reason where the viewer may not press them (GET …/can,
+ *   the predicate the door refuses with). Each asks in the dashboard's
+ *   dialog with a reason for the journal, then posts the order; it reaches
+ *   the worker with its next claim — an Update its set's updater, which
+ *   replaces what runs an older image there within two minutes; the dialog
+ *   names the project workers of its host the updater replaces too.
  * - Orders: its last ten, with who and why, the state, the pool's words for
  *   the answer, and — for its owner and the maintainers — what the worker
  *   itself said, as text; Cancel on one still waiting.
@@ -44,6 +50,8 @@ const CSS = String.raw`
   .wk-title .op-hero { overflow-wrap: anywhere; }
   .wk-id { font: 12.5px var(--font-mono); color: var(--dim); overflow-wrap: anywhere; }
   .wk-lede { margin: 0; color: var(--muted); max-width: 760px; }
+  .wk-set { margin: 0; display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; font-size: 13px; color: var(--muted); max-width: 760px; }
+  .wk-set .op-label { margin: 0; }
   .wk-lines { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
   .wk-lines li { display: flex; gap: 10px; align-items: baseline; padding: 8px 12px; border: 1px solid var(--line); border-left-width: 3px; background: var(--panel); font-size: 13px; }
   .wk-lines li.warn { border-left-color: var(--amber); } .wk-lines li.fail { border-left-color: var(--red); } .wk-lines li.ok { border-left-color: var(--green); } .wk-lines li.info { border-left-color: var(--blue); }
@@ -78,6 +86,7 @@ const BODY = String.raw`
       <div class="wk-title"><h1 class="op-hero" id="wk-name"><span class="skl"></span></h1><span id="wk-state"></span><span id="wk-kind"></span></div>
       <p class="wk-id" id="wk-id"></p>
       <p class="wk-lede" id="wk-lede"></p>
+      <p class="wk-set"><span class="op-label">Its set</span><span id="wk-set"></span></p>
     </section>
 
     <div class="op-stats" id="wk-stats"></div>
@@ -92,6 +101,7 @@ const BODY = String.raw`
           <button type="button" class="op-btn danger" data-order="restart" disabled>${lucide("refresh-cw", 14)}Restart</button>
           <label><input type="checkbox" id="wk-unless" disabled> only if its agent is down</label>
           <button type="button" class="op-btn danger" data-order="restart-agent" disabled>${lucide("plug", 14)}Restart agent service</button>
+          <button type="button" class="op-btn" data-order="update" disabled>${lucide("download", 14)}Update</button>
         </div>
         <p class="wk-note" id="wk-note"></p>
       </div>
@@ -123,7 +133,7 @@ const SCRIPT = String.raw`
   function byPool(by) { return /^pool:/.test(String(by || "")); }
   // The kinds as the page and its dialogs name them.
   var LABEL = { "recheck-agent": "Re-check agent", restart: "Restart", "restart-agent": "Restart agent service", drain: "Drain", resume: "Resume", update: "Update", "stop-task": "Stop its task" };
-  var RIGHT = { "recheck-agent": "recheck", restart: "restart", "restart-agent": "restart_agent" };
+  var RIGHT = { "recheck-agent": "recheck", restart: "restart", "restart-agent": "restart_agent", update: "update" };
   var STATE_PILL = { pending: ["wait", "waiting"], delivered: ["run", "delivered"], done: ["ok", "done"], refused: ["warn", "refused"], failed: ["fail", "failed"], expired: ["na", "expired"], cancelled: ["na", "cancelled"] };
   // A worker's state (the shell's wtState) as the kit's pill.
   var PILL = { idle: "ok", building: "run", "not ready": "fail", outdated: "warn", drained: "warn", offline: "na", revoked: "na" };
@@ -158,6 +168,8 @@ const SCRIPT = String.raw`
     $("#wk-state").innerHTML = '<span class="op-pill ' + (PILL[st] || "na") + '">' + esc(st) + '</span>';
     $("#wk-kind").innerHTML = '<span class="op-chip">' + esc(kind === "community" ? (w.mode === "shared" ? "contributor's · shared" : "contributor's · own packages") : kind) + '</span>';
     $("#wk-id").textContent = w.id;
+    // What rolls its set out, in the pool's words (#277): its updater, a host timer from before #277, both, one that is not running, nothing.
+    $("#wk-set").textContent = w.set_line || "—";
     var emu = w.labels && w.labels.emulated ? "emulated" : "native";
     $("#wk-lede").innerHTML = (kind === "community" ? "A contributor's builder" : kind === "review" ? "The project's review worker" : "The project's pool worker") + " (" + esc(w.arch) + ", " + emu + ")" + (w.owner ? ", kept by " + personLink(w.owner) : "") + (w.labels && w.labels.where ? ", on " + esc(w.labels.where) : "") + ".";
     var agent = w.agent ? (w.agent_status === "ok" ? "answers" : w.agent_status === "error" ? "does not answer" : "not probed yet") : "no agent";
@@ -187,7 +199,8 @@ const SCRIPT = String.raw`
     if (w.two_processes_since) L.push(["warn", "Two processes share this token since " + ago(w.two_processes_since) + " — orders are held; revoke it if you did not start two."]);
     if (w.crash_loop_since) L.push(["warn", "A new process every few minutes since " + ago(w.crash_loop_since) + " (none finished a task, none explained) — it may be crash-looping; its log has why."]);
     if (w.watchdog && w.watchdog.n) L.push(["warn", "Restarted by its watchdog " + w.watchdog.n + " time" + (w.watchdog.n === 1 ? "" : "s") + " since " + ago(w.watchdog.since) + (w.watchdog.stuck_in ? " (stuck in " + (w.watchdog.stuck_in === "task" ? "a task" : "its " + w.watchdog.stuck_in) + ")" : "") + " — its log has why."]);
-    (w.open_orders || []).forEach(function (o) { L.push(["info", LABEL[o.kind] + " " + (o.state === "delivered" ? "on its way: the worker has it" : "waiting for its next claim") + " — ordered by " + (byPool(o.by) ? "the pool" : o.by) + " " + ago(o.at) + "."]); });
+    // An Update is never the worker's to take (#277): its set's updater carries it out, and the worker's claim on the pool's release closes it.
+    (w.open_orders || []).forEach(function (o) { L.push(["info", LABEL[o.kind] + " " + (o.kind === "update" ? "waiting for its set's updater — it replaces what runs an older image there within 2 min, and the order closes when this worker claims on the pool's release" : o.state === "delivered" ? "on its way: the worker has it" : "waiting for its next claim") + " — ordered by " + (byPool(o.by) ? "the pool" : o.by) + " " + ago(o.at) + "."]); });
     if (w.takes_orders === null && !w.revoked_at) L.push(["info", "Its image (" + (w.version || "unknown") + ") takes no orders: its host's updater replaces it with one that does."]);
     $("#wk-lines").innerHTML = L.map(function (x) { return '<li class="' + x[0] + '">' + esc(x[1]) + '</li>'; }).join("");
   }
@@ -199,22 +212,30 @@ const SCRIPT = String.raw`
       gate('<button type="button" class="op-btn" data-order="recheck-agent">' + lucide("activity", 14) + 'Re-check agent</button>', CAN.can.recheck, CAN.why.recheck),
       gate('<button type="button" class="op-btn danger" data-order="restart">' + lucide("refresh-cw", 14) + 'Restart</button>', CAN.can.restart, CAN.why.restart),
       gate('<label><input type="checkbox" id="wk-unless"' + (UNLESS ? " checked" : "") + '> only if its agent is down</label>', CAN.can.restart, CAN.why.restart),
-      gate('<button type="button" class="op-btn danger" data-order="restart-agent">' + lucide("plug", 14) + 'Restart agent service</button>', CAN.can.restart_agent, CAN.why.restart_agent)
+      gate('<button type="button" class="op-btn danger" data-order="restart-agent">' + lucide("plug", 14) + 'Restart agent service</button>', CAN.can.restart_agent, CAN.why.restart_agent),
+      gate('<button type="button" class="op-btn" data-order="update">' + lucide("download", 14) + 'Update</button>', CAN.can.update, CAN.why.update)
     ];
     $("#wk-ops").innerHTML = html.join("");
     $("#wk-note").textContent = CAN.note || "";
   }
-  // The dialog's words: what happens, whom it touches — the other workers of its host that call the same agent service, by name (the site's own read), never a number typed.
+  // A list as a sentence says it: "a", "a and b", "a, b and c".
+  function andList(a) { return a.length < 2 ? a.join("") : a.slice(0, -1).join(", ") + " and " + a[a.length - 1]; }
+  // The dialog's words: what happens, whom it touches — the other workers of its host that call the same agent service, or that its set's updater replaces too, by name (the site's own read), never a number typed.
   // "Only if its agent is down" is read once, when the button is pressed: the dialog says it, and the order carries it.
   function askOrder(kind) {
-    var name = W ? W.id : ID, shared = (CAN && CAN.shared_agent_with) || [];
+    var name = W ? W.id : ID, shared = (CAN && CAN.shared_agent_with) || [], sameSet = (CAN && CAN.update_with) || [];
     var unless = kind === "restart" && UNLESS;
     var text = kind === "recheck-agent" ? "It asks its agent now instead of at its next scheduled check. The answer is on its row with its next claim."
       : kind === "restart" ? "It finishes the task in hand, then exits; its restart policy starts it again, and the pool checks that it came back." + (unless ? " Only if its agent is down: it probes first, and stays up if the agent answers." : "")
+      // Update (#277): what the pool can see of the set, and the rest without a number — the pool does not know a set's builders, brokers or agent service, nor a host's profiles.
+      // A builder's set is not visible from the pool: its note says what else may replace it, and when the order gives up.
+      : kind === "update" ? (sameSet.length
+          ? "Within 2 min, its set's updater replaces every service there that runs an older image: the project workers " + andList([name].concat(sameSet).sort()) + " (as the pool sees them on this host), and the set's builders, brokers and agent service."
+          : "Within 2 min, its set's updater replaces " + name + " and whatever else its set runs, when it runs an older image.") + " A worker that is building finishes first (up to 3 h)." + (W && wtKind(W) === "community" && CAN && CAN.update_note ? " " + CAN.update_note.charAt(0).toUpperCase() + CAN.update_note.slice(1) + "." : "")
       : "It restarts the agent service it calls on its own host, waits for it to answer, and says how it went." + (shared.length ? " " + shared.join(", ") + (shared.length === 1 ? " also calls it" : " also call it") + "; a completion in flight fails and is retried." : "");
     ASKING = true;
     var done = function () { ASKING = false; drawOperate(); };
-    return ask({ title: LABEL[kind] + " " + name + "?", text: esc(text), input: "optional", placeholder: "why — it goes on the journal (optional)", confirm: LABEL[kind], danger: kind !== "recheck-agent" }).then(function (reason) {
+    return ask({ title: LABEL[kind] + " " + name + "?", text: esc(text), input: "optional", placeholder: "why — it goes on the journal (optional)", confirm: LABEL[kind], danger: kind !== "recheck-agent" && kind !== "update" }).then(function (reason) {
       done();
       if (reason === null) return;
       var body = { kind: kind }; if (reason) body.reason = reason;
@@ -264,7 +285,7 @@ export function workerHtml(id: string, poolUrl: string, version: RunningVersion)
   return page({
     path: `/worker/${id}`,
     title: "Worker · omarchy-pool",
-    description: "One worker of the pool: its state, what the pool does about it, its orders and its log — and, for its owner and the maintainers, Re-check agent, Restart and Restart agent service.",
+    description: "One worker of the pool: its state, what rolls its set out, what the pool does about it, its orders and its log — and, for its owner and the maintainers, Re-check agent, Restart, Restart agent service and Update.",
     active: "factory",
     body: BODY,
     script: SCRIPT,
@@ -288,10 +309,10 @@ export const WORKER_COMPONENTS = (F: Fixture): Component[] => [
   {
     id: "worker.head-stats",
     page: `/worker/${F.communityWorker}`,
-    anchor: ['<p class="op-eyebrow">Worker</p>', 'id="wk-name"', 'id="wk-state"', 'id="wk-kind"', 'id="wk-lede"', 'id="wk-stats"'],
-    script: ['var BASE = "/api/v1/factory/workers/" + encodeURIComponent(ID)', 'api("GET", BASE)', "wtState(w)", "wtKind(w)", "workerName(w)", '"This container since"', '"Up since"', "w.restarts_left", "w.up_since", "w.started_at", '"Done / failed"'],
+    anchor: ['<p class="op-eyebrow">Worker</p>', 'id="wk-name"', 'id="wk-state"', 'id="wk-kind"', 'id="wk-lede"', 'id="wk-stats"', '<p class="wk-set"><span class="op-label">Its set</span><span id="wk-set"></span></p>'],
+    script: ['var BASE = "/api/v1/factory/workers/" + encodeURIComponent(ID)', 'api("GET", BASE)', "wtState(w)", "wtKind(w)", "workerName(w)", '"This container since"', '"Up since"', "w.restarts_left", "w.up_since", "w.started_at", '"Done / failed"', '$("#wk-set").textContent = w.set_line || "—";'],
     reads: [
-      { path: `/api/v1/factory/workers/${F.communityWorker}`, fields: ["worker.id", "worker.owner", "worker.arch", "worker.alive", "worker.ready", "worker.agent", "worker.agent_status", "worker.version", "worker.update", "worker.up_since", "worker.started_at", "worker.takes_orders", "worker.open_orders", "worker.builds_done", "worker.builds_failed", "worker.last_task", "orders", "rules.on", "rules.max_pool_restarts_per_spell", "rules.min_uptime_s", "breaker"] },
+      { path: `/api/v1/factory/workers/${F.communityWorker}`, fields: ["worker.id", "worker.owner", "worker.arch", "worker.alive", "worker.ready", "worker.agent", "worker.agent_status", "worker.version", "worker.update", "worker.up_since", "worker.started_at", "worker.takes_orders", "worker.open_orders", "worker.builds_done", "worker.builds_failed", "worker.last_task", "worker.set_rollout", "worker.set_line", "orders", "rules.on", "rules.max_pool_restarts_per_spell", "rules.min_uptime_s", "breaker"] },
       { path: "/api/v1/factory/workers/nobody-here", status: 404 },
     ],
     visible: EVERYONE,
@@ -300,19 +321,21 @@ export const WORKER_COMPONENTS = (F: Fixture): Component[] => [
     id: "worker.lines",
     page: `/worker/${F.worker}`,
     anchor: ['<ul class="wk-lines" id="wk-lines" aria-label="What the pool sees and does"></ul>'],
-    script: ["function drawLines()", "w.not_ready_since", "w.pool_waits", "w.pool_gave_up", "w.two_processes_since", "w.crash_loop_since", "w.watchdog.n", '"Provider outage suspected since "', "BREAKER.scope", "if (SITE_WORD)", "w.takes_orders === null", "byPool(o.by)"],
+    script: ["function drawLines()", '"waiting for its set\'s updater — it replaces what runs an older image there within 2 min, and the order closes when this worker claims on the pool\'s release"', "w.not_ready_since", "w.pool_waits", "w.pool_gave_up", "w.two_processes_since", "w.crash_loop_since", "w.watchdog.n", '"Provider outage suspected since "', "BREAKER.scope", "if (SITE_WORD)", "w.takes_orders === null", "byPool(o.by)"],
     reads: [{ path: `/api/v1/factory/workers/${F.worker}`, fields: ["worker.not_ready_since", "worker.pool_waits", "worker.pool_gave_up", "worker.two_processes_since", "worker.crash_loop_since", "worker.watchdog", "worker.drained", "breaker", "site_word"] }],
     visible: EVERYONE,
   },
   {
     id: "worker.operate",
     page: `/worker/${F.communityWorker}`,
-    anchor: ['id="wk-operate"', "<b id=\"wk-operate-h\">Operate</b>", 'data-order="recheck-agent"', 'data-order="restart"', 'data-order="restart-agent"', 'id="wk-unless"', 'href="/docs/workers#orders"'],
-    script: ['api("GET", BASE + "/can")', "CAN.can.recheck", "CAN.can.restart", "CAN.can.restart_agent", "gate('<button", "function askOrder(kind)", 'api("POST", BASE + "/orders", body)', "body.unless_agent_ok = true", "CAN.shared_agent_with",
+    anchor: ['id="wk-operate"', "<b id=\"wk-operate-h\">Operate</b>", 'data-order="recheck-agent"', 'data-order="restart"', 'data-order="restart-agent"', 'data-order="update"', 'id="wk-unless"', 'href="/docs/workers#orders"'],
+    script: ['api("GET", BASE + "/can")', "CAN.can.recheck", "CAN.can.restart", "CAN.can.restart_agent", "CAN.can.update", "gate('<button", "function askOrder(kind)", 'api("POST", BASE + "/orders", body)', "body.unless_agent_ok = true", "CAN.shared_agent_with",
+      // Update's dialog names what the pool sees of the set — this worker and the project workers of its host — and the rest without a number (#277, P10).
+      "CAN.update_with", "andList([name].concat(sameSet).sort())", "(as the pool sees them on this host), and the set's builders, brokers and agent service.", '" and whatever else its set runs, when it runs an older image."', 'wtKind(W) === "community" && CAN && CAN.update_note',
       // The checkbox survives the page's refresh, and a dialog that asks is never redrawn under the person: what it says is what is posted.
       "var UNLESS = false, ASKING = false", "(UNLESS ? \" checked\" : \"\")", "if (!CAN || ASKING) return;", 'var unless = kind === "restart" && UNLESS;', "if (unless) body.unless_agent_ok = true;"],
     reads: [
-      { path: `/api/v1/factory/workers/${F.communityWorker}/can`, fields: ["can.recheck", "can.restart", "can.restart_agent", "can.cancel", "why", "details", "shared_agent_with", "note"] },
+      { path: `/api/v1/factory/workers/${F.communityWorker}/can`, fields: ["can.recheck", "can.restart", "can.restart_agent", "can.update", "can.cancel", "why", "why.update", "details", "shared_agent_with", "update_with", "update_note", "note"] },
       { path: `/api/v1/factory/workers/${F.communityWorker}/can`, as: "owner", fields: ["can.recheck", "details"] },
       { path: `/api/v1/factory/workers/${F.communityWorker}/can`, as: "maintainer", fields: ["can.restart", "details"] },
     ],

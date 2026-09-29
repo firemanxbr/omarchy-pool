@@ -541,6 +541,27 @@ __CHARTS__
     return '<div class="st-w' + (working ? " busy" : "") + (w.alive ? "" : " off") + (down ? " notready" : "") + '"><span class="st-wbox">' + (w.agent ? agentOf(w.agent) : '<span class="st-ini" title="no agent: the pool\'s jobs need none">—</span>') + '</span>' +
       '<div class="st-wt"><div class="st-wl">' + workerName(w) + '<span>' + esc(model) + '</span></div><div class="st-wj"' + (down ? ' title="' + esc(wtNotReady(w)) + '"' : '') + '>' + doing + '</div><div class="st-wbar"><i></i></div></div></div>';
   }
+  // What rolls each host out, and a release whose image does not start (#277): lines from the listing alone, a host once each — the host is
+  // the one its workers report (their "where" label). Error: two or more workers, or any project worker, alive in the hour before the latest
+  // deploy and silent for SILENT_AFTER_DEPLOY_MIN since (a worker that drains still heartbeats). Warn: a host with two rollouts (an
+  // updater and a timer's rollout.sh from before #277), a host whose updater is not running. Info: a host whose one-time step is not done.
+  var SILENT_AFTER_DEPLOY_MIN = 15;
+  function hostOf(w) { return (w.labels && w.labels.where) || w.hostname || "a host"; }
+  function fleetLines(ws, pool, now) {
+    var L = [], dep = pool && pool.deployed_at ? Date.parse(pool.deployed_at) : NaN;
+    if (Number.isFinite(dep) && now - dep >= SILENT_AFTER_DEPLOY_MIN * 60000) {
+      var silent = (ws || []).filter(function (w) { var seen = Date.parse(w.last_seen); return !w.revoked_at && seen >= dep - 3600e3 && now - seen >= SILENT_AFTER_DEPLOY_MIN * 60000; });
+      if (silent.length >= 2 || silent.some(function (w) { return wtKind(w) !== "community"; })) L.push(["fail", num(silent.length) + " worker" + (silent.length === 1 ? "" : "s") + " alive before the deploy of " + esc(pool.version) + " (" + esc(ago(pool.deployed_at)) + ") " + (silent.length === 1 ? "has" : "have") + " not claimed for " + SILENT_AFTER_DEPLOY_MIN + " min — if the image does not start, roll it back: the runbook's <a href=\"/docs/runbook#releasing-the-pool-itself\">Releasing the pool itself</a>"]);
+    }
+    var by = {};
+    (ws || []).filter(function (w) { return !w.revoked_at && w.alive && wtKind(w) !== "community"; }).forEach(function (w) { var h = hostOf(w); (by[h] = by[h] || {})[w.set_rollout] = true; });
+    Object.keys(by).sort().forEach(function (h) {
+      if (by[h].both) L.push(["warn", esc(h) + ": two rollouts run on this host (an updater, and a timer's rollout.sh from before #277) — finish the one-time step of the runbook's <a href=\"/docs/runbook#the-studio-host\">The Studio host</a>"]);
+      if (by[h].stopped) L.push(["warn", esc(h) + ": its updater is not running — releases do not reach it"]);
+      if (by[h].timer) L.push(["info", esc(h) + ": the one-time step of the runbook's <a href=\"/docs/runbook#the-studio-host\">The Studio host</a> is not done — Update is unavailable there; releases still arrive through its timer"]);
+    });
+    return L;
+  }
   function drawWorkers() {
     $("#workers-note").textContent = WC_DOWN || "";
     if (!FACTORY) { if (WC_DOWN) $("#workers-busy").textContent = "—"; return; }
@@ -551,7 +572,8 @@ __CHARTS__
     $("#workers-busy").textContent = num(c.building) + " of " + num(c.registered) + " busy" + (c.notReady ? " · " + num(c.notReady) + " not ready" : "") + (c.outdated ? " · " + num(c.outdated) + " outdated" : "") + (c.drained ? " · " + num(c.drained) + " drained" : "");
     // What a person must look at (#277): a worker that may be crash-looping, one its watchdog restarted twice or more in a day — each on its page.
     var looks = ws.filter(function (w) { return w.alive && !w.revoked_at && (w.crash_loop_since || (w.watchdog && w.watchdog.n >= 2)); });
-    if (looks.length && !WC_DOWN) $("#workers-note").innerHTML = looks.map(function (w) { return workerName(w) + (w.crash_loop_since ? ": a new process every few minutes since " + esc(ago(w.crash_loop_since)) + " — it may be crash-looping; its log has why" : ": restarted by its watchdog " + w.watchdog.n + " times since " + esc(ago(w.watchdog.since)) + " — it wedges the same way; its log has why"); }).join("<br>");
+    var notes = fleetLines(FACTORY.workers, FACTORY.pool, Date.now()).concat(looks.map(function (w) { return ["warn", workerName(w) + (w.crash_loop_since ? ": a new process every few minutes since " + esc(ago(w.crash_loop_since)) + " — it may be crash-looping; its log has why" : ": restarted by its watchdog " + w.watchdog.n + " times since " + esc(ago(w.watchdog.since)) + " — it wedges the same way; its log has why")]; }));
+    if (notes.length && !WC_DOWN) $("#workers-note").innerHTML = notes.map(function (n) { return '<span class="st-dot ' + (n[0] === "info" ? "run" : n[0]) + '" aria-hidden="true"></span>' + n[1]; }).join("<br>");
     $("#workers-list").innerHTML = ws.map(function (w) { return workerLine(w, tasks[w.current_task]); }).join("") || '<p class="st-empty">no project worker registered</p>';
   }
   function workerById(id) { return ((FACTORY || {}).workers || []).filter(function (w) { return w.id === id; })[0] || null; }
@@ -1157,9 +1179,11 @@ export const STATUS_COMPONENTS = (F: Fixture): Component[] => {
       id: "status.workers",
       page: "/status",
       anchor: ['id="workers"', 'id="workers-list"', 'id="workers-busy"', 'id="workers-note"', 'href="/workers"'],
-      script: ['api("GET", "/api/v1/factory?limit=" + (NUMBERS ? 100 : 10))', "setInterval(loadFactory, 60000)", 'wtKind(w) !== "community"', "workerCounts(ws)", '" busy"', "workerName(w)", "agentMark(mark, agentName(s))", "modelOf(w.agent)", "paramsLabel(t)", 'WC_DOWN = noAnswer("worker listing", e)', 'var down = st === "not ready"', "wtNotReady(w)", "<b>not ready</b>", '" not ready"', '" outdated"', '" drained"', "wtMarks(w)", "w.crash_loop_since", "w.watchdog.n >= 2"],
+      script: ['api("GET", "/api/v1/factory?limit=" + (NUMBERS ? 100 : 10))', "setInterval(loadFactory, 60000)", 'wtKind(w) !== "community"', "workerCounts(ws)", '" busy"', "workerName(w)", "agentMark(mark, agentName(s))", "modelOf(w.agent)", "paramsLabel(t)", 'WC_DOWN = noAnswer("worker listing", e)', 'var down = st === "not ready"', "wtNotReady(w)", "<b>not ready</b>", '" not ready"', '" outdated"', '" drained"', "wtMarks(w)", "w.crash_loop_since", "w.watchdog.n >= 2",
+        // What rolls each host out, and a release that does not start (#277, part 3): from the listing alone.
+        "function fleetLines(ws, pool, now)", "fleetLines(FACTORY.workers, FACTORY.pool, Date.now())", "w.set_rollout", "var SILENT_AFTER_DEPLOY_MIN = 15;"],
       reads: [
-        { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.id", "workers.0.arch", "workers.0.side", "workers.0.labels", "workers.0.alive", "workers.0.ready", "workers.0.agent_error", "workers.0.agent_checked_at", "workers.0.current_task", "workers.0.agent", "workers.0.last_seen", "tasks.0.id", "tasks.0.kind", "tasks.0.name", "tasks.0.started_at"] },
+        { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.id", "workers.0.arch", "workers.0.side", "workers.0.labels", "workers.0.alive", "workers.0.ready", "workers.0.agent_error", "workers.0.agent_checked_at", "workers.0.current_task", "workers.0.agent", "workers.0.last_seen", "workers.0.set_rollout", "pool.version", "pool.deployed_at", "tasks.0.id", "tasks.0.kind", "tasks.0.name", "tasks.0.started_at"] },
         { path: "/workers", json: false },
       ],
       visible: EVERYONE,

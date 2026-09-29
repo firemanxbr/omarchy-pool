@@ -12,9 +12,11 @@ import type { RunningVersion } from "./meta";
 
 /**
  * How long after a deploy the previous image may still claim: the Worker
- * is deployed once the images exist (release.yml), the updater polls every
- * fifteen minutes, and what changed is replaced together — each service
- * drains under its own grace, none idles on the old image meanwhile.
+ * is deployed once the images exist (release.yml), every set's updater
+ * sees the new release within two minutes (#277; one from before it, or a
+ * host's timer, within fifteen), and what changed is replaced together —
+ * each service drains under its own grace, none idles on the old image
+ * meanwhile.
  */
 export const UPDATE_GRACE_MINUTES = 45;
 
@@ -45,7 +47,7 @@ export interface UpdateState {
 }
 
 /** Where a worker's image stands against the pool, at `at` (now). */
-export function updateState(workerVersion: string | null | undefined, pool: RunningVersion, at = Date.now()): UpdateState {
+export function updateState(workerVersion: string | null | undefined, pool: Pick<RunningVersion, "version" | "deployed_at">, at = Date.now()): UpdateState {
   const yours = workerVersion && workerVersion !== "container" ? workerVersion : null;
   const w = parseTag(yours);
   const p = parseTag(pool.version);

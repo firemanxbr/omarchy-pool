@@ -411,4 +411,38 @@ describe("the Status page", () => {
     expect(read.results).toHaveLength(RINGS.length * RING_HISTORY);
     expect(read.meta.rows_read, "rows read for the windows").toBeLessThan(RINGS.length * RING_HISTORY * 6);
   });
+
+  // #277, part 3: what rolls each host out, and a release whose image does not start — lines from the listing alone.
+  it("says once per host what rolls it out when it is not an updater that follows the pool, and which workers went silent after a deploy", () => {
+    const { fleetLines } = runScript(SCRIPT, { pathname: "/status", functions: ["fleetLines"] }) as unknown as { fleetLines: (ws: unknown[], pool: unknown, now: number) => [string, string][] };
+    const now = Date.parse("2026-09-30T12:00:00Z"), min = 60000;
+    const ago = (m: number) => new Date(now - m * min).toISOString();
+    const w = (o: Record<string, unknown>) => ({ id: "w", alive: true, side: "omarchy", labels: { where: "omarchy-studio" }, last_seen: ago(1), set_rollout: "follows", ...o });
+    const pool = { version: "v1.0.3", deployed_at: ago(60) };
+    // Every project worker follows: nothing to say.
+    expect(fleetLines([w({}), w({ id: "w2" })], pool, now)).toEqual([]);
+    // The Studio before its one-time step: one info line for the host, however many of its workers say so; a contributor's worker never speaks for a host.
+    const timer = fleetLines([w({ set_rollout: "timer" }), w({ id: "w2", set_rollout: "timer" }), w({ id: "c", side: "community", set_rollout: "unknown" })], pool, now);
+    expect(timer).toHaveLength(1);
+    expect(timer[0][0]).toBe("info");
+    expect(timer[0][1]).toContain("omarchy-studio: the one-time step of the runbook's");
+    expect(timer[0][1]).toContain("Update is unavailable there; releases still arrive through its timer");
+    // Two rollouts, an updater not running: a warning each, per host; an offline worker says nothing of its host.
+    const warns = fleetLines([w({ set_rollout: "both" }), w({ id: "x", labels: { where: "box-2" }, set_rollout: "stopped" }), w({ id: "y", labels: { where: "box-3" }, set_rollout: "stopped", alive: false })], pool, now);
+    expect(warns.map((l) => l[0])).toEqual(["warn", "warn"]);
+    expect(warns[0][1]).toContain("box-2: its updater is not running — releases do not reach it");
+    expect(warns[1][1]).toContain("omarchy-studio: two rollouts run on this host");
+    // Silent since the deploy: two workers, or one of the project's, alive in the hour before it and not heard from for 15 min.
+    const silent = (ws: Record<string, unknown>[], p = pool) => fleetLines(ws.map(w), p, now).filter((l) => l[0] === "fail");
+    const c = { side: "community", set_rollout: "unknown" };
+    expect(silent([{ ...c, last_seen: ago(40) }])).toEqual([]);
+    expect(silent([{ ...c, last_seen: ago(40) }, { ...c, id: "c2", last_seen: ago(90) }])[0][1]).toContain("2 workers alive before the deploy of v1.0.3");
+    expect(silent([{ last_seen: ago(20) }])[0][1]).toContain("1 worker alive before the deploy of v1.0.3");
+    expect(silent([{ last_seen: ago(20) }])[0][1]).toContain("has not claimed for 15 min — if the image does not start, roll it back");
+    // One gone long before the deploy, one still heard from (a drain heartbeats), a deploy under 15 min old, a revoked one: nothing.
+    expect(silent([{ last_seen: ago(200) }, { id: "d", last_seen: ago(2) }])).toEqual([]);
+    expect(silent([{ last_seen: ago(20) }], { version: "v1.0.3", deployed_at: ago(10) })).toEqual([]);
+    expect(silent([{ last_seen: ago(20), revoked_at: ago(5) }])).toEqual([]);
+    expect(silent([{ last_seen: ago(20) }], { version: "dev", deployed_at: null })).toEqual([]);
+  });
 });

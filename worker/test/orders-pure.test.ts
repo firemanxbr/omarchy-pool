@@ -10,7 +10,7 @@
 import { describe, expect, it } from "vitest";
 import {
   answerCode, autoOf, breakerKey, breakerOfKey, breakerScope, canonicalKinds, claimFacts, cleanText, codeSentence, decideAuto, errorClass, instanceStep, isPool, orderVerdicts, parsePreviousExit, poolFor, probeAge, rulesScale,
-  siblingsAnswering, siteKey, sitesByProvider, siteVerdict, siteWords, versionWord,
+  parseRollout, rolloutJson, rolloutOf, rolloutRefusal, runsRelease, setLine, setRollout, siblingsAnswering, siteKey, sitesByProvider, siteVerdict, siteWords, versionWord, SET_ROLLOUTS, UPDATE_EXPIRED,
   CHURN_CLEAR_MIN, CONFLICT_WINDOW_MIN, CRASH_LOOP_AT, GIVE_UP_AFTER_MIN, MAX_POOL_RECHECKS_PER_DAY, MAX_POOL_RESTARTS_PER_DAY, MAX_POOL_RESTARTS_PER_SPELL, MIN_UPTIME_S, POOL_COMMUNITY, POOL_PROJECT, RECHECK_AFTER_MIN, RESTART_AFTER_MIN, RESTART_SPACING_MIN,
   type ClaimFacts, type InstanceStep, type OrderFacts, type OrdersRow, type RuleInput, type SiteRead, type SiteWorker,
 } from "../src/orders";
@@ -24,11 +24,11 @@ const row = (o: Partial<OrdersRow> = {}): OrdersRow => ({
   id: "studio-review-aarch64", owner: "m1", trust: "project", version: "v1.0.2", kinds: '["audit","build"]', agent: "claude-code/claude-sonnet-5",
   agent_status: null, agent_error: null, agent_checked_at: null, last_seen: at(0), last_task: null, open_orders: null, order_kinds: '["drain","recheck-agent","restart","restart-agent"]',
   instance: null, instance_prev: null, instance_since: null, instance_conflict_at: null, instance_other_at: null, instance_churn: 0, instance_finished: null,
-  crash_loop_since: null, watchdog_exits: null, started_at: null, agent_via: "direct", site: null, restarts_left: null, agent_error_since: null, agent_probed_at: null,
+  crash_loop_since: null, watchdog_exits: null, started_at: null, agent_via: "direct", site: null, restarts_left: null, rollout: null, agent_error_since: null, agent_probed_at: null,
   agent_error_class: null, drained_at: null, auto_orders: null, ...o,
 });
 const hex = (n: number) => n.toString(16).padStart(32, "0");
-const claim = (o: Partial<ClaimFacts> = {}): ClaimFacts => ({ takes: ["drain", "recheck-agent", "restart", "restart-agent"], instance: hex(1), started_at: null, agent_via: "direct", site: null, restarts_left: null, previous_exit: null, version: "v1.0.2", probe: undefined, pairRestart: false, ...o });
+const claim = (o: Partial<ClaimFacts> = {}): ClaimFacts => ({ takes: ["drain", "recheck-agent", "restart", "restart-agent"], instance: hex(1), started_at: null, agent_via: "direct", site: null, restarts_left: null, previous_exit: null, version: "v1.0.2", probe: undefined, pairRestart: false, rollout: null, ...o });
 
 describe("an agent's error, by class", () => {
   it("names what a restart can help and what it cannot, from the words and where the agent is", () => {
@@ -543,7 +543,114 @@ describe("who may press what", () => {
     expect(orderVerdicts(m, w, { ...f, restartsHour: 6, restartsFreeAt: at(30) }).restart).toMatchObject({ why: "restarted 6 times in the last hour; the next from 12:30" });
     expect(orderVerdicts(m, w, { ...f, rechecksHour: 6 }).recheck.ok).toBe(false);
     expect(orderVerdicts(m, w, { ...f, loginHour: 20 }).recheck).toMatchObject({ why: expect.stringContaining("reached 20 orders in an hour") });
-    for (const r of ["drain", "resume", "stop_task", "update"] as const) expect(orderVerdicts(m, w, f)[r]).toMatchObject({ status: 409, why: expect.stringContaining("not on this pool yet") });
+    for (const r of ["drain", "resume", "stop_task"] as const) expect(orderVerdicts(m, w, f)[r]).toMatchObject({ status: 409, why: expect.stringContaining("not on this pool yet") });
+  });
+
+  // Update (#277, part 3, §1.11.5): its set's updater executes it, so what the worker's process takes does not matter — a builder whose image
+  // takes no orders is updated like any other. A project worker needs an updater from #277 on beside it; a builder cannot see its set.
+  describe("Update", () => {
+    const pool = { version: "v1.0.3", deployed_at: at(-120) };
+    const fr: OrderFacts = { ...f, pool };
+    const m = { login: "m2", role: "maintainer" };
+    const report = (updater: { image: string | null; follows: boolean } | null, host_script: "kick-v1" | "old" | "none") => JSON.stringify({ updater, host_script });
+    const project = { ...w, trust: "project", version: "v1.0.2", rollout: report({ image: "v1.0.2", follows: true }, "none") };
+    const builder = { ...w, id: "alice-box", owner: "alice", trust: "community", version: "v1.0.2", order_kinds: null, rollout: null, agent_via: "broker" };
+    it("is allowed on an outdated worker whose set follows the pool, and on an outdated builder whatever its image takes", () => {
+      expect(orderVerdicts(m, project, fr).update).toEqual({ ok: true });
+      expect(orderVerdicts({ login: "alice", role: "contributor" }, builder, fr).update).toEqual({ ok: true });
+      expect(orderVerdicts({ login: "bob", role: "contributor" }, builder, fr).update).toMatchObject({ status: 403 });
+      expect(orderVerdicts(null, builder, fr).update).toMatchObject({ status: 401 });
+    });
+    it("is refused on a worker that runs the release, a newer one, one that reports none, and on a pool that runs none", () => {
+      expect(orderVerdicts(m, { ...project, version: "v1.0.3" }, fr).update).toMatchObject({ status: 409, why: "runs v1.0.3, the latest — its updater follows each release within 2 min" });
+      expect(orderVerdicts(m, { ...project, version: "v1.0.4" }, fr).update).toMatchObject({ status: 409, why: expect.stringContaining("newer than the pool's v1.0.3") });
+      expect(orderVerdicts(m, { ...project, version: "container" }, fr).update).toMatchObject({ status: 409, why: expect.stringContaining("reports no release (container)") });
+      expect(orderVerdicts(m, project, { ...f, pool: { version: "dev", deployed_at: null } }).update).toMatchObject({ status: 409, why: expect.stringContaining("the pool runs no release (dev)") });
+    });
+    it("is refused on a project worker whose set does not follow the pool, with the reason of each", () => {
+      const cases: [string | null, RegExp][] = [
+        [report(null, "old"), /own timer .* the one-time step/],
+        [report({ image: "v1.0.2", follows: true }, "old"), /two rollouts run on this host/],
+        [report({ image: "v1.0.1", follows: false }, "none"), /its updater \(v1\.0\.1\) is older than #277/],
+        [report(null, "kick-v1"), /none is running: releases do not reach it\. Its \.\/rollout\.sh starts it again/],
+        [report(null, "none"), /no updater runs beside it: omarchy-worker start adds one/],
+        [JSON.stringify({ unknown: "bare" }), /started without compose: nothing replaces it/],
+        [JSON.stringify({ unknown: "unidentified" }), /cannot identify its own container/],
+        [null, /its image \(v1\.0\.2\) does not report its set/],
+      ];
+      for (const [rollout, why] of cases) {
+        const v = orderVerdicts(m, { ...project, rollout }, fr).update;
+        expect(v, String(rollout)).toMatchObject({ ok: false, status: 409 });
+        expect((v as { why: string }).why, String(rollout)).toMatch(why);
+      }
+    });
+    it("waits for one open already, holds during two processes, and counts in the restart group's hourly cap", () => {
+      expect(orderVerdicts(m, { ...project, open_orders: JSON.stringify([{ id: "wo_u", kind: "update", state: "pending", by: "m1", at: at(0) }]) }, fr).update).toMatchObject({ why: expect.stringContaining("an update is waiting already (wo_u") });
+      expect(orderVerdicts(m, { ...project, instance_conflict_at: at(-5) }, fr).update).toMatchObject({ why: expect.stringContaining("two processes share this token") });
+      expect(orderVerdicts(m, project, { ...fr, restartsHour: 6 }).update).toMatchObject({ why: expect.stringContaining("restarted 6 times in the last hour") });
+      expect(orderVerdicts(m, project, { ...fr, loginHour: 20 }).update).toMatchObject({ why: expect.stringContaining("reached 20 orders in an hour") });
+    });
+  });
+});
+
+describe("what rolls a worker's set out (#277, part 3)", () => {
+  it("maps every pair of updater and host script, and a report that is not there, to exactly one word (the design's §1.2 table)", () => {
+    const updaters = { absent: null, follows: { image: "v1.0.3", follows: true }, "does not follow": { image: "v1.0.1", follows: false } } as const;
+    const want: Record<string, Record<string, string>> = {
+      absent: { none: "none", "kick-v1": "stopped", old: "timer" },
+      follows: { none: "follows", "kick-v1": "follows", old: "both" },
+      "does not follow": { none: "old-updater", "kick-v1": "old-updater", old: "both" },
+    };
+    for (const [u, updater] of Object.entries(updaters)) {
+      for (const script of ["none", "kick-v1", "old"] as const) {
+        const r = parseRollout({ updater, host_script: script });
+        expect(r, `${u} × ${script}`).not.toBeNull();
+        expect(setRollout(r), `${u} × ${script}`).toBe(want[u][script]);
+        expect(SET_ROLLOUTS).toContain(setRollout(r));
+      }
+    }
+    for (const unknown of [null, { unknown: "bare" }, { unknown: "unidentified" }]) expect(setRollout(parseRollout(unknown))).toBe("unknown");
+  });
+
+  it("reads a claim's report tolerantly: malformed is not reported, an image that is not a word is none, and one form whatever the key order", () => {
+    for (const bad of ["x", 42, [], {}, { updater: null }, { host_script: "none" }, { updater: null, host_script: "sudo" }, { updater: { image: "v1" }, host_script: "none" }, { updater: "yes", host_script: "none" }, { unknown: "why" }]) {
+      expect(parseRollout(bad), JSON.stringify(bad)).toBeNull();
+    }
+    expect(parseRollout({ updater: { image: "v1.0.3; rm -rf /", follows: true }, host_script: "none" })).toEqual({ updater: { image: null, follows: true }, host_script: "none" });
+    const a = rolloutJson(parseRollout({ host_script: "kick-v1", updater: { follows: true, image: "v1.0.3" } }));
+    const b = rolloutJson(parseRollout({ updater: { image: "v1.0.3", follows: true }, host_script: "kick-v1" }));
+    expect(a).toBe(b);
+    expect(rolloutOf(a)).toEqual({ updater: { image: "v1.0.3", follows: true }, host_script: "kick-v1" });
+    expect(rolloutOf("not json")).toBeNull();
+    // The claim's field: the canonical form, or nothing.
+    expect(claimFacts({ rollout: { updater: null, host_script: "old" } }, new Headers(), undefined).rollout).toBe(JSON.stringify({ updater: null, host_script: "old" }));
+    expect(claimFacts({}, new Headers(), undefined).rollout).toBeNull();
+  });
+
+  it("says in the page's words what rolls the set out, and in the door's why Update waits", () => {
+    const r = (updater: { image: string | null; follows: boolean } | null, host_script: "kick-v1" | "old" | "none") => parseRollout({ updater, host_script });
+    expect(setLine(r({ image: "v1.0.3", follows: true }, "kick-v1"), "v1.0.3", "project")).toBe("rolled out by its updater (v1.0.3) — follows each release within 2 min");
+    expect(setLine(r({ image: "v1.0.1", follows: false }, "none"), "v1.0.3", "project")).toBe("rolled out by an updater from before #277 (v1.0.1), every 15 min — its next round replaces it with one that follows the pool");
+    expect(setLine(r(null, "old"), "v1.0.3", "project")).toContain("rolled out by the host's timer");
+    expect(setLine(r(null, "kick-v1"), "v1.0.3", "project")).toBe("this host's updater is not running — releases do not reach it");
+    expect(setLine(r(null, "none"), "v1.0.3", "project")).toBe("no updater beside it");
+    expect(setLine(null, "v1.0.3", "community")).toBe("rolled out by its set's updater (not visible from the pool: a builder has no socket)");
+    expect(setLine(null, "v1.0.1", "project")).toBe("its image (v1.0.1) does not report its set: its host's updater or timer replaces it");
+    // An image word the pool did not parse is never said.
+    expect(setLine(r({ image: "latest", follows: true }, "none"), "v1.0.3", "project")).toBe("rolled out by its updater — follows each release within 2 min");
+    expect(rolloutRefusal(r({ image: "v1.0.3", follows: true }, "none"), "v1.0.2")).toBeNull();
+    expect(UPDATE_EXPIRED).toContain("not replaced within 6 h");
+  });
+
+  it("closes an Update on a claim of the pool's release: the same word, or a release the pool's is not newer than", () => {
+    const pool = { version: "v1.0.3", deployed_at: at(-60) };
+    expect(runsRelease("v1.0.3", pool)).toBe(true);
+    expect(runsRelease("v1.0.4", pool)).toBe(true);
+    expect(runsRelease("v1.0.2", pool)).toBe(false);
+    expect(runsRelease("container", pool)).toBe(false);
+    expect(runsRelease(null, pool)).toBe(false);
+    expect(runsRelease("dev", { version: "dev", deployed_at: null })).toBe(true);
+    expect(runsRelease("v1.0.2", { version: "dev", deployed_at: null })).toBe(false);
   });
 });
 

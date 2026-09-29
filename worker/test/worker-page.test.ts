@@ -70,6 +70,8 @@ describe("one state per worker", () => {
     for (const word of ["restart waiting", "two processes", "crash-looping?", "watchdog ×3", "the pool gave up"]) expect(marks).toContain(word);
     expect(wtStatus(w)).toContain(">failed<");
     expect(wtMarks({ id: "x" })).toBe("");
+    // An Update is its set's updater's, never the worker's: the mark says whom it waits for (#277, part 3).
+    expect(wtMarks({ id: "x", open_orders: [{ id: "wo_u", kind: "update", state: "pending", by: "m1", at: "2026-09-29T00:00:00Z" }] })).toContain("update waiting for its set's updater");
     expect(wtId(w)).toContain('href="/worker/studio-review-aarch64"');
     expect(workerName(w)).toContain('href="/worker/studio-review-aarch64"');
   });
@@ -118,6 +120,21 @@ describe("the worker's page", () => {
     // m1's project worker has never said it takes orders: its image takes none, for everyone.
     const old = JSON.parse((await get(`/api/v1/factory/workers/${F.worker}/can`, `omc=${F.sessions.maintainer}`)).text);
     expect(old.why.restart).toContain("takes no orders");
+    // Update (#277, part 3): grey with the door's reason — this pool runs no release to update to — and naming nobody else of the host.
+    expect(owner.can.update).toBe(false);
+    expect(owner.why.update).toBe("the pool runs no release (test): there is nothing to update to");
+    expect(owner.update_with).toEqual([]);
+  });
+
+  it("says what rolls the worker's set out, under its name: a builder's set is its updater's, not visible from the pool", async () => {
+    const page = await get(`/worker/${F.communityWorker}`);
+    expect(page.text).toContain('<p class="wk-set"><span class="op-label">Its set</span><span id="wk-set"></span></p>');
+    expect(page.text).toContain('data-order="update"');
+    const pub = JSON.parse((await get(`/api/v1/factory/workers/${F.communityWorker}`)).text);
+    expect(pub.worker).toMatchObject({ set_rollout: "unknown", set_line: "rolled out by its set's updater (not visible from the pool: a builder has no socket)" });
+    expect(pub.worker).not.toHaveProperty("rollout");
+    const project = JSON.parse((await get(`/api/v1/factory/workers/${F.worker}`)).text);
+    expect(project.worker.set_line).toContain("does not report its set");
   });
 
   it("says in the Factory's and Status's headers how many are drained and outdated, and never counts them idle", async () => {
