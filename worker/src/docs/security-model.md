@@ -35,7 +35,7 @@ please do not file a public issue for it.
 
 | Credential | Held by | Can do | Cannot do | Status |
 |---|---|---|---|---|
-| Contributor token `omc_…` | one person (GitHub identity read once, never stored) | register packages under their name, queue community builds, register and revoke their workers and give them orders from the worker's page or the API (re-check the agent, restart, restart the agent service; #277), read their own state | write to the pool, claim jobs, approve | live; replaced from the person's page, revoked by a reset of their passkeys (#284) — then made again on that page only, never with a GitHub token |
+| Contributor token `omc_…` | one person (GitHub identity read once, never stored) | register packages under their name, queue community builds, register and revoke their workers and give them orders from the worker's page or the API (re-check the agent, restart, restart the agent service, update; #277), read their own state | write to the pool, claim jobs, approve | live; replaced from the person's page, revoked by a reset of their passkeys (#284) — then made again on that page only, never with a GitHub token |
 | Worker token `omw_…` | one machine, registered by a contributor | claim tasks its trust allows (community: its owner's or shared builds; project: pool jobs too); heartbeat | write to the pool or staging directly | live |
 | Job token `omj.…` | the worker running one task, for the lease | the routes that task needs — e.g. `sync`: upload objects, index, create a release in one ring, store that ring's databases; community `build`: upload to that task's staging folder, and nothing into the journal (the health and abi rows the gate reads are the project's jobs' alone); a dry run (`publish` 0): its task and the journal, no pool and no ring (#284) | anything outside its scopes (403, journaled); anything after the lease (30 min, renewed by heartbeat) | live |
 | Maintainer role | a contributor listed in `factory/MAINTAINERS.toml` on `main` — one list, no groups (applied by the brain every ten minutes) | propose or confirm a worker's project trust (two of them), take it back alone; withdraw a record from the public bucket (a signed tombstone says why); approve or reject staged builds (recorded; approve, and a block, in the browser with their passkey, #271); queue any pool job by hand (`POST /factory/jobs`; a promotion forced past its evidence in the browser with their passkey, #284); queue a dry run by hand, cancel, remove a registration; give any worker orders (the same list), capped at 20 an hour per login and on the journal — none of them needs the passkey (#277); review governance pull requests | write to the pool with their own token (a job does); publish a build queued by hand (#284: a dry run only); write the gate's evidence (#284: a journal note only); roll a ring back to another ring's release; operate as a worker; grant a role | live |
@@ -155,8 +155,26 @@ secret). Everything travels in the `Authorization` header over TLS only.
   name, and an instance binds an order only for its own token — but they
   are cleared before a Worker from before #277 is deployed again
   (`UPDATE build_workers SET site = NULL, instance = NULL, instance_prev =
-  NULL, auto_orders = NULL`). The rollback workflow of #277's last part
-  takes this step; until then, a maintainer takes it by hand.
+  NULL, auto_orders = NULL`). The rollback workflow (`rollback.yml`,
+  `factory/bin/release-rollback`) takes this step itself when the release it
+  goes back to is from before #277, before that release's Worker is
+  deployed.
+- **An updater acts on a public answer, and holds no token (#277).** Every
+  set's updater asks `GET /factory/follow` with the ids of its set's workers:
+  the pool's release, and the id of an open Update. The answer carries no
+  image, service, path or command — the updater pulls what its own compose
+  file names — so the worst any answer can do is start a round the updater
+  would run within fifteen minutes anyway, and it tells nothing `/workers`
+  does not show (nothing says which workers share a host). The updater
+  learns its workers' ids from inside the set: a project worker's from the
+  file its entrypoint writes, a builder's from its broker, which adds the
+  token itself; nothing is ever read of a builder's container, where
+  strangers' recipes run, and the updater, on the set's default network,
+  serves nothing a builder could reach. It never adopts an image under which
+  what it replaced keeps restarting, and keeps the old images, so a rollback
+  reaches its set with no download. A stolen worker token can report a
+  `rollout` that enables Update for itself; the worst outcome is an Update
+  nothing executes, which expires.
 - **The Omarchy Packaging image is signed** (cosign, keyless, GitHub OIDC)
   so a contributor can verify the worker they run is the project's.
 

@@ -130,11 +130,20 @@ A release is `main` at the moment a maintainer dispatches one
    the source of truth and is compiled into the binaries as `POOL_VERSION`.
 3. Binaries (`pkg-repo`, `omarchy-cli`, `pkg-extract`) are built on x86_64 and
    aarch64 runners and attached to a GitHub release with notes generated from the
-   merged pull requests.
+   merged pull requests. The worker image is built from them on each
+   architecture and pushed as `:<arch>-vX.Y.Z` only. Every role is then
+   started from it on the runner (`tests/image-smoke.sh`: `pkg-repo work
+   --self-test` through the project worker's entrypoint, the broker answering
+   on `:8790`, the builder's and the updater's `--self-test`, and the
+   updater's `follows` label). Only then do `:<arch>` and `:latest` move. An
+   image whose roles do not start stops the release before any host can pull
+   it.
 4. The worker is migrated (`wrangler d1 migrations apply`) and deployed with
    `POOL_VERSION`, `POOL_COMMIT` and `POOL_DEPLOYED_AT`; the run verifies
    `/api/v1/version` reports the new tag and records a `deploy` event through
    `wrangler d1 execute` (the release holds no credential of the pool's API).
+5. Every set follows: its updater sees the new release within two minutes
+   (the Studio's too, since its one-time step, *The Studio host*).
 
 The deploy step needs the `CLOUDFLARE_API_TOKEN` repository secret (Account →
 Workers Scripts: Edit, D1: Edit, Account Settings: Read; Zone → Workers Routes:
@@ -144,9 +153,16 @@ the routes span them). It is an account-owned token: Cloudflare dashboard →
 Edit*, not *My Profile*. Without it the release is still published and the run
 ends with a warning instead of a deployment.
 
-Rolling the worker back is deploying an earlier release: re-run the Deploy job of
-that release's run, or `git checkout vX.Y.Z && cd worker && npx wrangler deploy
---var POOL_VERSION:vX.Y.Z`. Migrations are forward-only; keep them additive.
+Rolling back is `gh workflow run rollback.yml -f to=vX.Y.Z`. It re-points
+`:latest`, `:x86_64` and `:aarch64` at that release's images and deploys that
+release's Worker (both go back: a pool left at the newer release would refuse
+the older images as outdated), and records a `deploy` event, "rolled back to
+vX.Y.Z (from …)". The updaters follow the pool's release down as they follow it
+up, within two minutes. Migrations are forward-only; keep them additive. **A
+Worker from before #277 ignores drains**: to keep a worker out across a
+rollback, revoke it. The fallback, by hand, for the Worker alone: re-run the
+Deploy job of that release's run, or `git checkout vX.Y.Z && cd worker && npx
+wrangler deploy --var POOL_VERSION:vX.Y.Z`.
 
 ## Security data
 
@@ -227,7 +243,9 @@ The project's workers run on one machine — `omarchy-studio`, a Mac Studio
 on Arch Linux ARM (Asahi), 12 cores, 32 GB, on around the clock — as eight
 worker containers of the image: two pool, four review (two pairs, since
 2026-09-17: an audit waited 23 minutes on average behind builds and the
-pool's jobs), two community, one per architecture each
+pool's jobs), two community, one per architecture each (five of them run
+by default: the x86_64 review and community services are behind the
+`emulated` profile)
 ([factory/host/](../factory/host/README.md); the roles:
 [factory/README.md](../factory/README.md) *Three roles*):
 
@@ -269,18 +287,19 @@ and ccache caches the build containers mount at `/build/cache`:
 community's — a stranger's build never writes what the project's build
 reads; inside, one directory per package),
 `etc/` (the eight worker tokens and `agent.env`, mode 600, never in the
-repository). Day to day, on the host:
+repository). **On the host: setup, hardware, and a look when the pool cannot see**:
 
 ```bash
 cd /srv/omarchy-pool
-docker compose ps                                # eleven up (eight workers, two brokers, the agent proxy)?
+docker compose ps                                # eight up by default (five workers, one broker, the agent proxy, the updater); twelve with COMPOSE_PROFILES=emulated
 docker compose logs -f --tail 50 pool-aarch64    # one of them
-./rollout.sh                                     # a rolling upgrade to the latest image (a user timer runs it every 15 min)
+./rollout.sh                                     # wakes the updater now (--check: what it would do)
+docker kill <container>                          # a worker whose engine is stuck; everything else is on the worker's page
 ```
 
-Upgrades are **rolling**: a pool release publishes a new image, the timer
-notices within fifteen minutes, and `rollout.sh` replaces what changed in
-one `up` — every stop is a drain (SIGTERM: the worker finishes the task it
+Upgrades are **rolling**: a pool release publishes a new image, the
+`updater` service sees the pool's new release within two minutes and
+replaces what changed in one `up` — every stop is a drain (SIGTERM: the worker finishes the task it
 holds, reports it, claims nothing new and exits; the compose file allows
 three hours), each container on its own clock, the new ones starting as
 the old ones end while the unchanged keep working. No task is killed,
@@ -299,15 +318,17 @@ pages drew them *idle, waiting for work* — for half an hour, until a
 `docker compose restart` by hand. Three things now keep that from
 happening:
 
-- `rollout.sh` replaces `agent-proxy` and the community brokers first and
+- The rollout replaces `agent-proxy` and the community brokers first and
   waits until each answers on `:8790` from inside its container (a `curl`
   of `GET /`, never `/health`, which spends a completion of the agent),
   at most `ROLLOUT_BROKER_WAIT` seconds (300) for all of them together;
-  one that never answers is a `WARNING` line in the timer's journal and
+  one that never answers is a `WARNING` line in its log and
   the rollout goes on — it never hangs on a broker — and brokers compose
   could not start (`FAILED to replace`) are not waited for at all. Only
-  then are the workers that changed replaced, in one `up` as before. The updater of a contributor's set
-  (`factory/bin/omarchy-rollout`) does the same with its broker.
+  then are the workers that changed replaced, in one `up` as before.
+  `rollout.sh` did it on this host until its one-time step (#277); the
+  updater (`factory/bin/omarchy-rollout`) does it here since, as it does
+  in every contributor's set.
 - A worker whose agent does not answer checks it again after 15 s, then
   30 s, 60 s… doubling back to the thirty minutes a healthy agent is
   probed at, until it answers, and reports each result with its next claim
@@ -320,31 +341,8 @@ happening:
   of its thirty-minute probes, as before.
 - The Factory's workers card and Status's workers list draw a live worker
   that is not ready as **not ready**, with the agent's error, as the
-  Workers page's *failed* pill does.
-
-**After a release, until this host has the new `rollout.sh`.** `rollout.sh`
-and `compose.yml` are the host's copies: `setup.sh` put them in
-`/srv/omarchy-pool`, and a release changes the image, not them. The worker
-side ships in the image, so from the first release that carries the
-re-check the workers recover by themselves within minutes, whichever
-`rollout.sh` the host runs. To get the broker-first order, copy the file
-from a checkout at the release (compose.yml changed only in its comments):
-
-```bash
-install -m 755 factory/host/rollout.sh /srv/omarchy-pool/rollout.sh   # or run sudo factory/host/setup.sh again
-```
-
-Until then, and for any image from before the re-check, look after a
-rollout:
-
-```bash
-cd /srv/omarchy-pool
-docker compose logs --since 30m review-aarch64 | grep 'agent'      # "NOT ready — … Connection refused"?
-docker compose exec -T agent-proxy curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8790/   # 404: the proxy answers
-docker compose restart review-x86_64 review-aarch64 review2-x86_64 review2-aarch64   # only with an image from before the re-check; a drain, each finishes its task first
-```
-
-and no worker says *not ready* on the Factory's workers card or on Status.
+  Workers page's *failed* pill does. Every page gives a worker one state, in one
+  order: revoked, offline, building, drained, outdated, not ready, idle.
 
 **Every worker follows the latest image** (2026-09-17, after a
 contributor's worker sat ten releases behind for a day, drafting the
@@ -352,16 +350,82 @@ wrong version and linking the wrong objects while looking alive): the
 pool compares the release a worker reports at each claim with its own
 and, past the rollout's grace (`UPDATE_GRACE_MINUTES` = 45 after the
 deploy), hands it nothing — `426`, *outdated* on the Workers page, one
-journal line per release — until it updates. Contributors' sets carry an
+journal line per release — until it updates. Every set carries an
 **updater** container of the same image (`OMARCHY_WORKER_ROLE=updater`,
 `factory/bin/omarchy-rollout`: the same rolling replacement, itself
-last), written and started by `omarchy-worker start`; a set without one
+last) — contributors' sets since `omarchy-worker start` writes one, this
+host since its one-time step below. It asks the pool every two minutes
+(`GET /api/v1/factory/follow`) and follows its release, and an Update
+pressed on any of its workers' pages; it replaces itself last, and only
+with an image under which what it replaced stays up. A set without one
 idles until its owner pulls by hand.
 
 The Workers page lists them by role; the laptop runs nothing any more,
 and GitHub Actions runs CI and the release only — there is no hosted
 fallback worker: when the host is down, pool jobs wait, and the dashboard
 says so.
+
+### Once: the updater (#277)
+
+The Studio runs the same `updater` as every contributor's set, and a host
+timer no longer rolls it out. As the user who owns `/srv/omarchy-pool`,
+once:
+
+```bash
+TAG=v1.0.x   # the release that carries #277's Part 3, or any later one
+git clone --quiet --depth 1 --branch "$TAG" https://github.com/firemanxbr/omarchy-pool.git "/tmp/omarchy-pool-$TAG"
+sudo "/tmp/omarchy-pool-$TAG/factory/host/setup.sh" /srv/omarchy-pool   # the updater in, the timer out
+cd /srv/omarchy-pool && docker compose up -d --no-deps updater
+rm -rf "/tmp/omarchy-pool-$TAG"
+```
+
+The updater's first round may drain and recreate every service once (its
+compose computes configuration hashes its own way). Within ten minutes, each
+Studio worker's page says "rolled out by its updater", and Status's line
+about this step goes away.
+
+From then on, do not run a bare `docker compose up -d` on this host. It
+re-stamps every service's configuration hash with the host's compose, and
+the updater's next round drains and recreates every service once more. To
+start everything, run `./rollout.sh`. For one service, run `docker compose
+up -d --no-deps <service>`, which costs that one service a second
+replacement.
+
+Until this is done, releases still arrive through the timer, and every
+order but Update works. The pool knows whether it was done, because the
+workers report it with their claims.
+
+### After a release
+
+Nothing to do on any host. The pool is deployed once the images exist.
+Within two minutes, every updater sees the pool's new release and rolls
+its set out: every contributor's set, and the Studio's since its one-time
+step above. `agent-proxy` and the brokers go first, each answering before
+the workers that call them (#278), then the workers, each stop a drain.
+
+A worker whose agent does not answer re-checks it by itself (#278). The
+pool re-checks it too, and, only if that is not enough, restarts it or
+restarts `agent-proxy` through one of its workers (#277). The pool does so
+within bounds, and on the record: `order` lines in the journal.
+
+Where to look: Status (workers not ready, outdated, drained, silent since
+the deploy), the Factory's workers card, and a worker's page,
+`/worker/<id>`, with its last orders and its log. What a maintainer, or the
+worker's owner, presses there: Re-check agent, Restart, Restart agent
+service, Stop its task, Drain or Resume, Update. Stop its task is for a
+task that hangs: the worker stops a build, a trial, an audit or a check
+within five minutes while its container or script runs, and a build
+already uploading, a trial publishing into the lab, or a job it runs in its
+own process at its next call to the pool; the task goes back to the queue
+then, or when its lease ends at the latest. None of them needs the passkey
+that approve and block need (#283); each is on the journal with who pressed
+it.
+
+If the release's image does not start (Status: "N workers alive before the
+deploy … have not claimed for 15 min"), roll it back from anywhere:
+`gh workflow run rollback.yml -f to=<the previous tag>`. The images and the
+Worker go back, and the updaters follow within minutes (*Releasing the pool
+itself*).
 
 ## Maintainers: reviewing contributed builds
 
@@ -953,6 +1017,13 @@ show. The header of every page says so. To lift it by hand:
   and search, ten minutes for a package page, half an hour for security), so
   viewers do not multiply the load; the pages poll every 60–120 s and retry
   transient errors.
+* **The Studio's own `compose.yml` is the host's.** A release that adds a
+  service needs the one-time kind of step again (*Once: the updater*).
+  Releases keep behaviour in the image, and only topology in that file.
+* **A set whose updater is older than #277** follows at its own 15-minute
+  round and cannot take Update. Its first round after #277 replaces it.
+* **An updater that adopted a bad image before the guard existed** needs its
+  owner: `omarchy-worker update` after a rollback.
 
 ## Kill switch
 
@@ -963,6 +1034,11 @@ cd worker && npx wrangler secret put JOB_TOKEN_SECRET   # a new value: every job
 
 Reads keep working (static objects); workers find no work and their tokens
 buy nothing. Revoke a single worker with `DELETE /factory/workers/<id>`.
+
+The pool's own orders to its workers (#277) have a switch of their own:
+`WORKER_RULES = "off"` in `wrangler.toml` (and deploy). The pool then issues
+no automatic re-check or restart; people's orders from a worker's page still
+work.
 
 ## Reset (ephemeral by design)
 
