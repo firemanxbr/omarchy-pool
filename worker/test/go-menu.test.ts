@@ -30,7 +30,7 @@ import worker from "../src/index";
 import { EXPECTED_SOURCES, REPO_ARCHES } from "../src/meta";
 import { GO_ACTIONS, GO_MENU, GO_MENU_HTML, HELPERS } from "../src/pages/layout";
 import { KIT_SHEET_PATH, LUCIDE, lucide, type LucideName } from "../src/pages/kit";
-import { fetchPage, ownScriptOf, RETIRED_PAGES, runScript, scriptOf, seedDashboard, type Fixture } from "./fixture";
+import { fetchPage, ownScriptOf, runScript, scriptOf, seedDashboard, type Fixture } from "./fixture";
 
 async function get(path: string): Promise<Response> {
   const ctx = createExecutionContext();
@@ -38,7 +38,7 @@ async function get(path: string): Promise<Response> {
   await waitOnExecutionContext(ctx);
   return res;
 }
-// The Worker's own handler, for an address that redirects: the fixture's get() draws a retired page instead.
+// The Worker's own handler, for an address that redirects: its 301 or 302 is read as it is, never followed.
 async function raw(path: string): Promise<Response> {
   const ctx = createExecutionContext();
   const res = await worker.fetch(new Request(`http://pool.test${path}`), env, ctx);
@@ -52,7 +52,7 @@ let PAGES: string[];
 let SHELL: { esc: (s: unknown) => string; pkgHref: (name: string, ring?: string, arch?: string) => string; errorText: (e: unknown) => string };
 beforeAll(async () => {
   F = await seedDashboard(env);
-  PAGES = ["/", "/factory", "/review", "/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/glossary", "/docs/runbook", "/docs/omarchy-cli-mcp", "/packages", `/package/${F.pkg}`, `/build/${F.projectTask}`, "/status", "/workers", `/user/${F.owner}`, "/people", "/agents", "/api", "/diff", ...Object.keys(RETIRED_PAGES)];
+  PAGES = ["/", "/factory", "/review", "/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/glossary", "/docs/runbook", "/docs/omarchy-cli-mcp", "/packages", `/package/${F.pkg}`, `/build/${F.projectTask}`, "/status", "/workers", `/user/${F.owner}`, "/people", "/agents", "/api", "/diff"];
   const shell = runScript(scriptOf(await (await get("/docs")).text()), { pathname: "/docs", functions: ["esc", "pkgHref", "errorText"] });
   SHELL = { esc: shell.esc, pkgHref: shell.pkgHref, errorText: shell.errorText };
 });

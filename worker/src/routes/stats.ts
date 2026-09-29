@@ -10,6 +10,26 @@ export function advisoriesKnown(payload: Record<string, unknown>, at: string): {
   return { updated_at: at2, advisories: n("arch_advisories") + n("debian_advisories") + n("osv_advisories") };
 }
 
+/** How many of each ring's latest releases the stats carry: the Status page's strip of a ring's last releases. */
+export const RING_HISTORY = 20;
+
+/**
+ * The last RING_HISTORY releases of every ring, newest first — one window per
+ * ring on its (ring, seq) index, ?1 the window and ?2… the rings (RINGS), so
+ * the rows read are a few per ring whatever the table holds
+ * (test/status-page.test.ts reads its plan and its rows). A function, not a
+ * constant: RINGS is index.ts's, which imports this module.
+ */
+export const releaseWindowsSql = (): string => `SELECT r.id, r.ring, r.seq, r.parent_id, r.source_id, s.ring AS source_ring, r.note, r.created_at, r.package_count,
+            r.id IN (SELECT release_id FROM ring_heads) AS is_head
+       FROM releases r
+       JOIN (${RINGS.map((_, i) => `SELECT id FROM (SELECT id FROM releases WHERE ring = ?${i + 2} ORDER BY seq DESC LIMIT ?1)`).join(" UNION ALL ")}) w ON w.id = r.id
+       LEFT JOIN releases s ON s.id = r.source_id
+      ORDER BY r.id DESC`;
+
+/** The journal's newest lines the stats carry (the metrics snapshots left out): Status draws its journal's first lines from them and asks for no more until Show more. */
+export const RECENT_EVENTS = 40;
+
 /** Everything the dashboard shows, in one round trip. */
 export async function handleStats(env: Env): Promise<Response> {
   const rings = [];
@@ -49,15 +69,19 @@ export async function handleStats(env: Env): Promise<Response> {
   const referenced = { objects: n("referenced_objects"), bytes: n("referenced_bytes") };
   const reclaimable = { objects: n("reclaimable_objects") ?? 0, bytes: n("reclaimable_bytes") ?? 0 };
 
-  const releases = await env.DB.prepare(
-    `SELECT r.id, r.ring, r.seq, r.parent_id, r.source_id, r.note, r.created_at, r.package_count,
-            (h.release_id IS NOT NULL) AS is_head
-       FROM releases r LEFT JOIN ring_heads h ON h.release_id = r.id
-      ORDER BY r.id DESC LIMIT 15`,
-  ).all();
+  // The last RING_HISTORY releases of every ring, newest first: the Status
+  // page draws each ring's strip from them and its ring history below. Each
+  // ring's window is read on its (ring, seq) index, so the rows read stay
+  // bounded whatever the table holds; the newest releases of all rings come
+  // first, as the fifteen this list was before. source_ring says where a
+  // release's selection came from: another ring's head (a promotion) or an
+  // earlier release of its own ring (a rollback).
+  const releases = await env.DB.prepare(releaseWindowsSql())
+    .bind(RING_HISTORY, ...RINGS)
+    .all();
 
   // Activity: everything but the half-hourly metrics snapshots.
-  const events = await env.DB.prepare("SELECT * FROM events WHERE kind != 'metrics' ORDER BY id DESC LIMIT 40").all();
+  const events = await env.DB.prepare("SELECT * FROM events WHERE kind != 'metrics' ORDER BY id DESC LIMIT ?").bind(RECENT_EVENTS).all();
   // The latest event of every kind, source and ring: one row per group in
   // latest_events (a trigger keeps it, migration 0027) instead of a GROUP BY
   // over every event ever recorded, on every poll of this page.
@@ -108,17 +132,35 @@ export async function handleStats(env: Env): Promise<Response> {
       last_status: r?.status ?? null,
       // Said here, once: the page marks the row and the shell counts it from the same word.
       late: !!r && Date.now() - Date.parse(r.created_at) > LATE_AFTER_HOURS * 3600e3,
+      // What the source's syncs brought into the pool today (UTC), from the imports below.
+      today: 0,
     };
   });
 
-  // Series for the charts (small projections, never whole payloads).
-  const importsDaily = await env.DB.prepare(
-    `SELECT substr(created_at, 1, 10) AS day, COUNT(*) AS runs,
+  // Series for the charts (small projections, never whole payloads). The
+  // imports are grouped per source and architecture too and summed per day
+  // here: the same rows read as grouping by the day alone, and today's
+  // groups are what each coverage row brought today (the Status page's
+  // Sources card).
+  const importsBySource = await env.DB.prepare(
+    `SELECT substr(created_at, 1, 10) AS day, source, COALESCE(json_extract(payload, '$.arch'), 'x86_64') AS arch, COUNT(*) AS runs,
             COALESCE(SUM(json_extract(payload, '$.uploaded')), 0) AS packages,
             COALESCE(SUM(json_extract(payload, '$.bytes_uploaded')), 0) AS bytes
        FROM events WHERE kind = 'sync' AND created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-14 days')
-      GROUP BY day ORDER BY day`,
-  ).all();
+      GROUP BY day, source, arch ORDER BY day`,
+  ).all<{ day: string; source: string | null; arch: string; runs: number; packages: number; bytes: number }>();
+  const byDay = new Map<string, { day: string; runs: number; packages: number; bytes: number }>();
+  const today = new Date().toISOString().slice(0, 10);
+  for (const r of importsBySource.results) {
+    const d = byDay.get(r.day) ?? { day: r.day, runs: 0, packages: 0, bytes: 0 };
+    d.runs += Number(r.runs);
+    d.packages += Number(r.packages);
+    d.bytes += Number(r.bytes);
+    byDay.set(r.day, d);
+    const row = r.day === today ? coverage.find((c) => c.source === r.source && c.arch === r.arch) : undefined;
+    if (row) row.today += Number(r.packages);
+  }
+  const importsDaily = { results: [...byDay.values()] };
   const syncRuns = await env.DB.prepare(
     `SELECT id, created_at, source, status, duration_ms, COALESCE(json_extract(payload, '$.arch'), 'x86_64') AS arch,
             json_extract(payload, '$.uploaded') AS uploaded, json_extract(payload, '$.bytes_uploaded') AS bytes,

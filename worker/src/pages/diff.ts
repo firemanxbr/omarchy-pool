@@ -1,18 +1,16 @@
 /**
  * What changed between two releases of a ring: added, removed, upgraded —
- * the page the Journal opens, from its ring history's heading and from the
- * "diff" on every row with a parent, and what a promotion or rollback line
- * in the journal points at; the Journal is the crumb above it. Since #240
- * the Journal's address redirects to Status's journal, and Status is the
- * footer page this one is one hop from (its rings' heading). Reads
- * GET /releases/:ring/diff.
+ * the page Status opens from its Releases (the heading's "What stable last
+ * changed", a ring's last releases, the "diff" of every release in the ring
+ * history) and from a promotion or rollback line of its journal; Status's
+ * releases are the crumb above it (#248). Reads GET /releases/:ring/diff.
  */
 import { page } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 
 const BODY = String.raw`
-  <p class="crumbs"><a href="/journal">Journal</a> / <span id="crumb">diff</span></p>
+  <p class="crumbs"><a href="/status#releases">Releases</a> / <span id="crumb">diff</span></p>
   <h1 id="title">Release diff</h1>
   <p class="lede" id="line">Loading…</p>
   <div class="tiles" id="tiles"></div>
@@ -81,10 +79,10 @@ export const DIFF_COMPONENTS = (F: Fixture): Component[] => {
   const head = "/api/v1/releases/stable/diff";
   return [
     {
-      // The crumb's parent is the Journal (its address lands on Status's journal since #240); the crumb itself is the two releases, the ring being the title's first word.
+      // The crumb's parent is Status's releases, where the rings' history went with the Journal (#248); the crumb itself is the two releases, the ring being the title's first word.
       id: "diff.crumbs",
       page,
-      anchor: ['class="crumbs"', '<a href="/journal">Journal</a>', 'id="crumb"'],
+      anchor: ['class="crumbs"', '<a href="/status#releases">Releases</a>', 'id="crumb"'],
       script: ['$("#crumb")', 'd.from.id : "∅"', "d.to.id"],
       reads: [{ path: head, fields: ["from.id", "to.id"] }],
       visible: EVERYONE,

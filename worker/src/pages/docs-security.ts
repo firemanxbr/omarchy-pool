@@ -17,7 +17,7 @@ const FEEDS: [string, string, string][] = [
 
 const BODY = String.raw`
   <h1>Security</h1>
-  <p class="lede">Public advisories matched against what each ring serves, every three hours, on both architectures. A package with an open advisory also <em>exposes</em> what depends on it; a promotion that would replace a clean package with a vulnerable one is blocked; a confident fix is pulled forward. <a href="/security">Every advisory, per ring →</a></p>
+  <p class="lede">Public advisories matched against what each ring serves, every three hours, on both architectures. A package with an open advisory also <em>exposes</em> what depends on it; a promotion that would replace a clean package with a vulnerable one is blocked; a confident fix is pulled forward. <a href="/status#advisory-list">Every advisory, per ring →</a></p>
 
   <section id="feeds">
     <h2>The five feeds</h2>
@@ -37,7 +37,7 @@ const BODY = String.raw`
 
   <section id="exposure">
     <h2>Exposure through the graph</h2>
-    <p class="sub">Because the index knows what every binary loads, an advisory on a library also marks what <em>uses</em> it: the <a href="/security">Security</a> page shows the ring, the package page shows the chain, and <code>omarchy-cli security</code> shows what applies to one machine.</p>
+    <p class="sub">Because the index knows what every binary loads, an advisory on a library also marks what <em>uses</em> it: Status's <a href="/status#advisories">advisories</a> show the ring, the package page shows the chain, and <code>omarchy-cli security</code> shows what applies to one machine.</p>
   </section>
 
   <section id="fast-track">
@@ -86,7 +86,7 @@ export const DOCS_SECURITY_COMPONENTS = (_F: Fixture): Component[] => {
     {
       id: "docs-security.lede",
       page,
-      anchor: ["<h1>Security</h1>", '<p class="lede">Public advisories matched against what each ring serves', '<a href="/security">Every advisory, per ring →</a>'],
+      anchor: ["<h1>Security</h1>", '<p class="lede">Public advisories matched against what each ring serves', '<a href="/status#advisory-list">Every advisory, per ring →</a>'],
       visible: EVERYONE,
     },
     {
@@ -119,7 +119,7 @@ export const DOCS_SECURITY_COMPONENTS = (_F: Fixture): Component[] => {
     {
       id: "docs-security.exposure",
       page,
-      anchor: ['<section id="exposure">', "<h2>Exposure through the graph</h2>", '<a href="/security">Security</a>', "<code>omarchy-cli security</code>"],
+      anchor: ['<section id="exposure">', "<h2>Exposure through the graph</h2>", '<a href="/status#advisories">advisories</a>', "<code>omarchy-cli security</code>"],
       visible: EVERYONE,
     },
     {

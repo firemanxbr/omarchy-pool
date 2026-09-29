@@ -822,7 +822,7 @@ export const HELPERS = String.raw`
   var WICON = __WICON__;
   var $ = function (s) { return document.querySelector(s); };
   function esc(s) { return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
-  // A link a journal event carries (payload.ci.run_url) is drawn only when it is an https address: esc() keeps the quotes out of the attribute, not the scheme — a job token may post any payload, and a javascript: value would be a live link under the summary on the Journal, the Pipeline's feed and the Status incidents.
+  // A link a journal event carries (payload.ci.run_url) is drawn only when it is an https address: esc() keeps the quotes out of the attribute, not the scheme — a job token may post any payload, and a javascript: value would be a live link under the summary on Status's journal.
   function runHref(u) { return typeof u === "string" && /^https:\/\//i.test(u) ? u : ""; }
   function bytes(n) { n = Number(n || 0); var u = ["B", "KB", "MB", "GB", "TB"], i = 0; while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; } return (i === 0 ? n : n.toFixed(n >= 100 ? 0 : 1)) + " " + u[i]; }
   function num(n) { return Number(n || 0).toLocaleString("en-US"); }
@@ -1478,7 +1478,7 @@ export const HELPERS = String.raw`
   function endSkeleton() { document.querySelectorAll(".skel").forEach(function (el) { el.remove(); }); document.querySelectorAll(".empty.loading").forEach(function (el) { el.classList.remove("empty", "loading"); if (el.textContent === "Loading") el.textContent = ""; }); }
   // Numbers that change between refreshes flash briefly, so the page reads as live.
   function setTile(el, html) { el.classList.remove("skel"); if (el.innerHTML !== html) { el.innerHTML = html; el.classList.remove("bump"); void el.offsetWidth; el.classList.add("bump"); } }
-  // A poll that fails keeps what the last one drew; a page that has something to say about it (Home, whose every section waits on this read) passes failed, which gets the error.
+  // A poll that fails keeps what the last one drew; a page that has something to say about it passes failed, which gets the error — Home, whose every section waits on this read, and Status, which names it where its sections would be.
   function liveStats(render, everyMs, failed) {
     function load() {
       serviceStatus();

@@ -1,6 +1,7 @@
 /**
- * The Pipeline's Build tasks table words a pool job from its params and its
- * result — jobResult() and paramsLabel() in src/pages/pipeline.ts — and
+ * Status's jobs table (the Pipeline's Build tasks before #248) words a pool
+ * job from its params and its result — jobResult() and paramsLabel() in
+ * src/pages/status.ts — and
  * the shapes it reads are written elsewhere: the params by the brain when
  * it queues the job (src/scheduler.ts, src/jobs.ts), the result by the
  * Rust worker when it completes it (crates/pkg-repo/src/work.rs, every
@@ -15,7 +16,7 @@
  * two functions over the fixture's one done job of every kind
  * (test/fixture.ts, F.jobs: params and result copied from the writers —
  * the audit, the trial and the publish run for real through the API) and
- * expects the words; the manifest (pipeline.tasks-table) pins the same
+ * expects the words; the manifest (status.jobs-table) pins the same
  * fields on the same rows, so a rename fails by the field's name and this
  * file by the sentence. A release is named one way in the column: its id
  * first, the ring's head "(edge #346)" after it where the result carries
@@ -31,7 +32,7 @@ let jobResult: (t: unknown) => string;
 let paramsLabel: (t: unknown) => string;
 let tasks: Record<string, any>;
 
-// The Pipeline redirects to Status since #240; its table is drawn by the module #248 folds into it (the fixture's fetchPage).
+// A page or an API answer, through the Worker's handler.
 async function get(path: string): Promise<Response> {
   const ctx = createExecutionContext();
   const res = await fetchPage(new Request(`http://pool.test${path}`), env, ctx);
@@ -41,7 +42,7 @@ async function get(path: string): Promise<Response> {
 
 beforeAll(async () => {
   F = await seedDashboard(env);
-  const ran = runScript(scriptOf(await (await get("/pipeline")).text()), { pathname: "/pipeline", functions: ["jobResult", "paramsLabel"] });
+  const ran = runScript(scriptOf(await (await get("/status")).text()), { pathname: "/status", functions: ["jobResult", "paramsLabel"] });
   jobResult = ran.jobResult;
   paramsLabel = ran.paramsLabel;
   // The listing the table draws from: the fixture's done job of each kind, by its id.
@@ -49,7 +50,7 @@ beforeAll(async () => {
   tasks = Object.fromEntries(Object.entries(F.jobs).map(([kind, id]) => [kind, listing.tasks.find((t) => t.id === id)]));
 });
 
-describe("the Pipeline's table words every pool job from the shapes the jobs post", () => {
+describe("Status's jobs table words every pool job from the shapes the jobs post", () => {
   it("the listing hands every job's params and result as JSON, as the task's own page does", () => {
     for (const [kind, t] of Object.entries(tasks)) {
       expect(t, `the fixture's ${kind} job is in the listing`).toBeDefined();
@@ -83,7 +84,7 @@ describe("the Pipeline's table words every pool job from the shapes the jobs pos
   });
 
   it("the three jobs on a build: the audit's report, the trial's verdict, the file the publish put in the pool — every done row in words, none its JSON", () => {
-    // w1 ran these for ours in the fixture; the Pipeline lists them among the pool's jobs and read their JSON, cut at 90 characters, until 2026-09-18.
+    // w1 ran these for ours in the fixture; the table lists them among the pool's jobs, and the Pipeline's read their JSON, cut at 90 characters, until 2026-09-18.
     // The three are on one build, the project's build of ours: its id is in each job's params, as the brain queued them.
     const built = tasks.audit.params.task as number;
     expect(built).toBeGreaterThan(0);

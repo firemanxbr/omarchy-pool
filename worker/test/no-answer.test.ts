@@ -33,7 +33,7 @@ beforeAll(async () => {
   F = await seedDashboard(env);
 });
 
-/** The Worker's own answer to a path, as a browser on the dashboard would get it: nobody signed in. The Pipeline and the Journal redirect to Status since #240, and are drawn by their modules until #248 folds them into it (the fixture's fetchPage). */
+/** The Worker's own answer to a path, as a browser on the dashboard would get it: nobody signed in (the fixture's fetchPage). */
 async function real(path: string, init?: RequestInit): Promise<Response> {
   const ctx = createExecutionContext();
   const res = await fetchPage(new Request(`http://pool.test${path}`, init), env, ctx);
@@ -185,24 +185,21 @@ describe("a list that did not answer is said, not drawn", () => {
     expect(tiles(d)).toEqual(before);
   });
 
-  it("/pipeline: the state row's note names the factory's lists, the six tiles read —, the flow and the queue draw nothing in their place, and every other read says so where it draws", async () => {
-    const d = await run("/pipeline", { down: true });
+  it("/status: the Workers card, the rollbacks tile, the advisories and the journal each say which read did not answer — no 'no project worker', no 0, no 'nothing on the record'", async () => {
+    const d = await run("/status", { down: true });
     await settled();
-    const reason = `the factory's lists did not answer: ${INTERNAL}`;
-    expect(d.nodes["#lists-note"].textContent).toBe(reason);
-    expectDashes(d, 6, reason, "#tiles", 1);
-    expect(tiles(d)[3]).toContain("Waiting for review");
-    expect(html(d, "#flow")).toBe("");
-    expect(html(d, "#staged tbody")).not.toContain("nothing staged");
-    expect(html(d, "#tasks tbody")).not.toContain("nothing queued or built yet");
-    // The hint beside Operations still says who is looking.
-    expect(d.nodes["#ops-who"].textContent).toContain("read-only");
-    expect(html(d, "#registry tbody")).not.toContain("no package requested yet");
-    // The feed, the promotions chart and the budget each say which read did not answer, not an empty state.
-    expect(html(d, "#feed")).toContain(`the journal did not answer: ${INTERNAL}`);
-    expect(html(d, "#c-promos")).toContain(`the journal did not answer: ${INTERNAL}`);
-    expect(html(d, "#c-promos")).not.toContain("no promotion yet");
-    expect(html(d, "#budget")).toContain(`the cost estimate did not answer: ${INTERNAL}`);
+    // The worker listing: the card's foot says so, the busy count is a dash, no empty state stands in for the list.
+    expect(d.nodes["#workers-note"].textContent).toBe(`the worker listing did not answer: ${INTERNAL}`);
+    expect(d.nodes["#workers-busy"].textContent).toBe("—");
+    expect(html(d, "#workers-list")).not.toContain("no project worker");
+    // The rollbacks tile: a dash and the reason on hover, not "0 this month".
+    expect(d.nodes["#t-rollbacks-n"].textContent).toBe("—");
+    expect(html(d, "#t-rollbacks-s")).toBe(`<span title="the journal did not answer: ${INTERNAL}">did not answer</span>`);
+    // The advisories: the tile a dash, the card's line and the list's line say the report did not answer.
+    expect(d.nodes["#t-adv-n"].textContent).toBe("—");
+    expect(d.nodes["#updated"].textContent).toBe(`the security report did not answer: ${INTERNAL}`);
+    expect(html(d, "#adv-top")).toContain(`the security report did not answer: ${INTERNAL}`);
+    expect(d.nodes["#adv-fast"].textContent).toBe(`the journal did not answer: ${INTERNAL}`);
   });
 
   // The Factory (#246) draws from three lists: the registry (the line, three tiles), the review list (what waits for a maintainer) and the worker listing (the workers, and with the registry the Building now tile: what a worker holds of the line). Each one that did not answer is said where it would have drawn — the line's note, the tile's line with the reason on hover, the workers' card — and none reads as nothing: no 0, no empty column counted as none, no "no worker alive".
@@ -250,24 +247,12 @@ describe("a list that did not answer is said, not drawn", () => {
     expect(html(d, "#fx-wlist")).toContain(`the worker listing did not answer: ${INTERNAL}`);
   });
 
-  it("/pipeline, the lists failing and the stats poll answering: the tile the poll feeds keeps its number beside the chart that draws the same series", async () => {
-    const up = /^\/api\/v1\/(stats|status|cost|events)/;
-    const reason = `the factory's lists did not answer: ${INTERNAL}`;
-    const p = await run("/pipeline", { down: true, up });
+  it("/status?kind=role#journal (an old /journal?kind=role): the journal's count line says it did not answer; no 'nothing on the record yet'", async () => {
+    const res = await real("/status");
+    const d = runScript(scriptOf(await res.text()), { pathname: "/status", search: "?kind=role", functions: [], fetch: fetchThat({ down: true }) });
     await settled();
-    const pt = tiles(p);
-    expect(pt, "six tiles").toHaveLength(6);
-    expect(pt.filter((t) => t.includes(unanswered(reason)))).toHaveLength(5);
-    expect(pt[5]).toContain("Worker minutes · 7 d");
-    expect(pt[5]).toMatch(/<div class="v num">\d/);
-    expect(pt[5]).not.toContain("did not answer");
-  });
-
-  it("/journal: the count line says the journal did not answer; no 'nothing matches'", async () => {
-    const d = await run("/journal", { down: true });
-    await settled();
-    expect(d.nodes["#count"].textContent).toBe(`the journal did not answer: ${INTERNAL}`);
-    expect(html(d, "#events tbody")).not.toContain("nothing matches");
+    expect(d.nodes["#journal-count"].textContent).toBe(`the journal did not answer: ${INTERNAL}`);
+    expect(html(d, "#journal-list")).not.toContain("nothing on the record");
   });
 
   it("/workers: the note by Every worker, the four tiles read —, no table says 'no worker alive'", async () => {

@@ -33,7 +33,7 @@ async function call(method: string, path: string, as: Role = "anonymous", body?:
   // The browser's cookie, as tests/e2e-worker.sh sends it.
   if (as !== "anonymous") headers.cookie = `omc=${F.sessions[as]}`;
   const ctx = createExecutionContext();
-  // fetchPage: the Worker's handler, and the three pages whose address redirects since #240 drawn as they were — their manifests stand until #248 folds them into Status.
+  // fetchPage: the Worker's handler, as every page test asks it.
   const res = await fetchPage(new Request(`http://pool.test${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }), env, ctx);
   await waitOnExecutionContext(ctx);
   const type = res.headers.get("content-type") ?? "";
