@@ -182,7 +182,10 @@ const CSS = String.raw`
   .rv-rows { display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; }
   .rv-row { display: grid; grid-template-columns: minmax(140px, 1.1fr) minmax(0, 1.7fr) auto 44px auto; gap: 14px; align-items: center; padding: 11px 16px; border-bottom: 1px solid var(--line); font-size: 13px; }
   .rv-rows > .rv-row:last-child, .rv-mrows > .rv-mrow:last-child { border-bottom: 0; }
-  .rv-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .rv-name a { color: var(--text); } .rv-name a:hover { color: var(--green); } .rv-name b { font-weight: 600; } .rv-name .v { margin-left: 6px; color: var(--dim); font-size: 12px; }
+  /* The name and its version, each whole: a version that does not fit beside the name wraps under it, never "0.0.1…" for 0.0.168 (#282); a name
+     or a version wider than the cell alone (an epoch or a git version) is cut there with an ellipsis, whole in its title, never drawn past it. */
+  .rv-name { min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 6px; } .rv-name > :first-child { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rv-name a { color: var(--text); } .rv-name a:hover { color: var(--green); } .rv-name b { font-weight: 600; } .rv-name .v { flex: none; max-width: 100%; overflow: hidden; text-overflow: ellipsis; color: var(--dim); font-size: 12px; white-space: nowrap; }
   .rv-sub { display: flex; align-items: center; gap: 7px; min-width: 0; font-size: 12.5px; color: var(--muted); } .rv-sub .t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .rv-sub a { color: inherit; } .rv-sub a:hover { color: var(--green); }
   .rv-av { flex: none; display: inline-grid; place-items: center; width: 18px; height: 18px; background: var(--bg-deep); color: var(--text); font-size: 8px; font-weight: 700; text-transform: uppercase; }
   .rv-av.lg { width: 26px; height: 26px; font-size: 11px; } .rv-av.sm { width: 16px; height: 16px; font-size: 7px; }
@@ -201,7 +204,9 @@ const CSS = String.raw`
   .rv-maint .op-card-h b { display: inline-flex; align-items: center; gap: 10px; } .rv-maint .op-card-h .op-i { color: var(--dim); }
   .rv-mrow { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); }
   .rv-mwho { display: grid; min-width: 0; line-height: 1.35; } .rv-mwho > span { display: flex; align-items: center; gap: 6px; font-size: 13px; } .rv-mwho a { color: var(--text); } .rv-mwho a:hover { color: var(--green); }
-  .rv-mwho .you { color: var(--green); font-size: 11px; } .rv-mwho .s { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); font-size: 12px; }
+  .rv-mwho .you { color: var(--green); font-size: 11px; } .rv-mwho .s { display: block; color: var(--dim); font-size: 12px; }
+  /* The line under a maintainer wraps between its parts, never inside one: "reviewing bitwarden · 3 reviews · 1 package" read "1 p…" at 1280 (#282). */
+  .rv-mwho .s > span { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: top; }
   .rv-mag { display: grid; place-items: center; width: 24px; height: 24px; border: 1px solid var(--line); background: var(--bg-deep); } .rv-mag.none { border: 0; background: transparent; }
   .rv-steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; background: var(--line); border-top: 1px solid var(--line); }
   .rv-steps a { display: grid; gap: 2px; align-content: start; padding: 10px 12px; background: var(--panel-2); color: var(--muted); font-size: 12px; } .rv-steps a:hover { color: var(--text); } .rv-steps .op-i { color: var(--green); }
@@ -310,7 +315,7 @@ const SCRIPT = String.raw`
   }
   function notSupported(targets) { return ARCHES.filter(function (a) { return targets && targets[a] && targets[a].status === "not_supported"; }); }
   function row(name, href, ver, sub, archs, age, act, fresh) {
-    return '<div class="rv-row' + (fresh ? " op-fresh" : "") + '"><span class="rv-name">' + (href ? '<a href="' + esc(href) + '"><b>' + esc(name) + '</b></a>' : '<b>' + esc(name) + '</b>') + (ver ? '<span class="v">' + esc(ver) + '</span>' : '') + '</span><span class="rv-sub">' + sub + '</span>' + (archs || '<span class="rv-archs"></span>') + '<span class="rv-age">' + esc(age || "") + '</span><span class="rv-act">' + act + '</span></div>';
+    return '<div class="rv-row' + (fresh ? " op-fresh" : "") + '"><span class="rv-name">' + (href ? '<a href="' + esc(href) + '" title="' + esc(name) + '"><b>' + esc(name) + '</b></a>' : '<b title="' + esc(name) + '">' + esc(name) + '</b>') + (ver ? '<span class="v" title="' + esc(ver) + '">' + esc(ver) + '</span>' : '') + '</span><span class="rv-sub">' + sub + '</span>' + (archs || '<span class="rv-archs"></span>') + '<span class="rv-age">' + esc(age || "") + '</span><span class="rv-act">' + act + '</span></div>';
   }
   // A row's one button: live where the viewer may, grey with the server's reason where not (gate); the label is the design's for each case, and its name says which package it acts on (a list of rows of "Claim" names nothing).
   function btn(label, attrs, ok, why, cls, named) { return gate('<button type="button" class="op-btn sm' + (cls ? " " + cls : "") + '"' + (attrs || "") + (named ? ' aria-label="' + esc(named) + '"' : '') + '>' + esc(label) + '</button>', ok, why || "not now"); }
@@ -418,7 +423,7 @@ const SCRIPT = String.raw`
       el.innerHTML = logins.map(function (l) {
         var cur = claims.filter(function (p) { return p.claim.by === l; })[0], reviews = (APPROVALS || []).filter(function (a) { return a.by === l; }).length, brought = REGISTRY ? (REGISTRY.packages || []).filter(function (p) { return p.owner === l; }).length : 0;
         var agent = cur && cur.claim.agent;
-        return '<div class="rv-mrow">' + av(l, "lg") + '<div class="rv-mwho"><span>' + at(l) + (isOwner(l) ? '<span class="you">you</span>' : '') + '</span><span class="s" title="decisions in the record\'s newest hundred; packages they brought">' + (cur ? 'reviewing ' + esc(cur.name) + ' · ' : '') + num(reviews) + ' review' + (reviews === 1 ? '' : 's') + ' · ' + num(brought) + ' package' + (brought === 1 ? '' : 's') + '</span></div>' + (agent ? '<span class="rv-mag" title="' + esc(agent) + '">' + agentIcon(agent, 16) + '</span>' : '<span class="rv-mag none"></span>') + '</div>';
+        return '<div class="rv-mrow">' + av(l, "lg") + '<div class="rv-mwho"><span>' + at(l) + (isOwner(l) ? '<span class="you">you</span>' : '') + '</span><span class="s" title="decisions in the record\'s newest hundred; packages they brought">' + (cur ? ['reviewing ' + esc(cur.name)] : []).concat([num(reviews) + ' review' + (reviews === 1 ? '' : 's'), num(brought) + ' package' + (brought === 1 ? '' : 's')]).map(function (x, i, all) { return '<span>' + x + (i < all.length - 1 ? ' ·' : '') + '</span>'; }).join(" ") + '</span></div>' + (agent ? '<span class="rv-mag" title="' + esc(agent) + '">' + agentIcon(agent, 16) + '</span>' : '<span class="rv-mag none"></span>') + '</div>';
       }).join("") || '<p class="rv-empty">No maintainer listed yet.</p>';
     });
   }

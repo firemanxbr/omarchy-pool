@@ -14,6 +14,7 @@ import { requestChecks, type RequestRow, type RequestChecks } from "../request";
 import { recordUrl } from "../record";
 import { queuePosition } from "../queue";
 import { parseTargets } from "../targets";
+import { queueOfStory } from "./review";
 
 export interface TaskBrief {
   id: number;
@@ -167,7 +168,8 @@ export function chainOf(all: Chain[], taskId: number): Chain | null {
  * package: its registration, where each of its architectures stands
  * (`targets`, targets.ts — one package, a target per architecture), every
  * chain with its score, the class the package has today (its latest
- * decided chain, else its latest), the rings it is in. The package page
+ * decided chain, else its latest), the rings it is in, and where it
+ * stands in Review's queue (`review`, the list's rule). The package page
  * draws its factory section from this; a package that came from a source
  * has no story, and says so.
  */
@@ -189,6 +191,9 @@ export async function handlePackageStory(name: string, env: Env): Promise<Respon
       score: current ? current.score : null,
       rings,
       chains: all,
+      // Where it stands in Review's queue, by the list's own rule over the rows above (queueOfStory): the package page's chip and Review
+      // stage say the list's word (#282); null when the list would not name it.
+      review: queueOfStory(tasks, approvals, parseTargets(pkg?.targets)),
     },
     200,
     { "cache-control": "public, max-age=30" },

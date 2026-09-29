@@ -461,6 +461,8 @@ story=$(curl -s "$OMARCHY_API/api/v1/factory/packages/e2e-ident/story?at=built")
 [[ "$(jq -r '.targets.x86_64.status + " " + .targets.aarch64.status' <<<"$story")" == "built not_supported" && "$(jq -r .targets.aarch64.task <<<"$story")" == "$arm" ]] || { echo "the package must say x86_64 built, aarch64 not supported: $(jq -c .targets <<<"$story")"; exit 1; }
 rv=$(curl -s "$OMARCHY_API/api/v1/factory/review" "${mauth[@]}")
 [[ "$(jq -r '.packages[] | select(.name == "e2e-ident") | "\(.lead) \(.waits) \(.rows | length)"' <<<"$rv")" == "$x86 true 1" ]] || { echo "Review must list e2e-ident once, waiting, its x86_64 build speaking for it: $(jq -c '.packages' <<<"$rv")"; exit 1; }
+# The package's story says the list's word by the list's own rule (#282): ready for review, its x86_64 build speaking for it — what its page's chip and Review stage read.
+[[ "$(jq -r '"\(.review.state) \(.review.lead)"' <<<"$story")" == "ready $x86" ]] || { echo "e2e-ident's story must say ready, as Review's list does: $(jq -c .review <<<"$story")"; exit 1; }
 # The review: the project builds again what its contributor built — x86_64 only — on its own worker.
 # A claim can be let go (#247): the maintainer who claimed it releases it — the queued rebuild cancelled once, a second release refused,
 # a line in the journal and a record the pool signed — and the package is claimed again.
@@ -550,6 +552,7 @@ grep -q '"name":"e2e-ident"' <<<"$(curl -s "$OMARCHY_API/api/v1/releases/edge?fi
 ! grep -q '"name":"e2e-ident"' <<<"$(curl -s "$OMARCHY_API/api/v1/releases/edge?fields=summary&arch=aarch64")" || { echo "edge must not serve e2e-ident on aarch64"; exit 1; }
 story=$(curl -s "$OMARCHY_API/api/v1/factory/packages/e2e-ident/story?at=published")
 [[ "$(jq -r '.package.status + " " + .targets.x86_64.status + " " + .targets.aarch64.status' <<<"$story")" == "published published not_supported" ]] || { echo "the package must say published on x86_64, not supported on aarch64: $(jq -c '{status: .package.status, targets}' <<<"$story")"; exit 1; }
+[[ "$(jq -r '.review' <<<"$story")" == null ]] || { echo "a published package is in no review, and its story says so: $(jq -c .review <<<"$story")"; exit 1; }
 [[ "$(jq -r '[.rings[] | select(.arch == "aarch64")] | length' <<<"$story")" == 0 && "$(jq -r '[.rings[] | select(.arch == "x86_64" and .ring == "edge")] | length' <<<"$story")" == 1 ]] || { echo "the rings must serve e2e-ident on x86_64 only: $(jq -c .rings <<<"$story")"; exit 1; }
 decided=$(curl -s "$OMARCHY_API/api/v1/factory/approvals?at=published" | jq -c '.approvals[] | select(.name == "e2e-ident")')
 [[ "$(jq -r '"\(.standing) \(.arches | join(",")) \(.not_supported | keys | join(",")) \(.rings | join(","))"' <<<"$decided")" == "true x86_64 aarch64 edge" ]] || { echo "the record must hold one standing review of e2e-ident, x86_64 in edge, aarch64 not supported: $decided"; exit 1; }

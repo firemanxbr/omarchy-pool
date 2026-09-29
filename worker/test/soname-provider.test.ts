@@ -229,7 +229,7 @@ describe("zlib's page", () => {
     const header = tiles.match(/Depends on<\/span><span class="n [^"]*" title="(\d+)"/)?.[1];
     expect(header).toBe("1");
     expect(graph).toContain(`Depends on · ${header}</span>`);
-    expect(graph).toContain('<span class="nm">glibc</span>');
+    expect(graph).toContain('<span class="nm"><span class="nh">glibc</span></span>');
     expect(graph).not.toContain("aarch64-linux-gnu-glibc");
   });
 

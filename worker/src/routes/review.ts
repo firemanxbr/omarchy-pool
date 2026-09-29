@@ -5,7 +5,7 @@ import { requestChecks } from "../request";
 import { contributorOf, isMaintainer, MAINTAINER_DECIDES, sha256Hex, SIGN_IN, viaOf, type Contributor } from "./contributors";
 import { reclaimStagingPackages } from "../staging";
 import { pullFromRings } from "./blocks";
-import { chains, chainOf, storyRows, stands, standsSql, type Approval } from "./story";
+import { chains, chainOf, storyRows, stands, standsSql, type Approval, type TaskBrief } from "./story";
 export { stands };
 import { putRecord, recordKey, recordUrl } from "../record";
 import { packageRows, parseTargets, settleTargets, targetsOf, type PackageRows, type Target, type Targets } from "../targets";
@@ -304,13 +304,12 @@ export async function handleReviewList(env: Env, request: Request): Promise<Resp
   // staged rows the list shows (LIMIT above): past a hundred, the oldest is
   // the first left out.
   const col = (t: object, k: string) => (t as Record<string, unknown>)[k];
-  const lead = new Map<string, number>();
-  for (const kind of ["project", "contributor"]) {
-    for (const t of shaped) {
-      const name = col(t, "name") as string;
-      if (t.kind === kind && !lead.has(name) && t.ready && waitsForMaintainer({ ...t, lead: true })) lead.set(name, col(t, "id") as number);
-    }
+  // Each package's place in the queue by the one rule (queueOf) — the one a package's story weighs its own rows by (queueOfStory).
+  const queue = new Map<string, QueueState>();
+  for (const name of new Set(shaped.map((t) => col(t, "name") as string))) {
+    queue.set(name, queueOf(shaped.filter((t) => col(t, "name") === name).map((t) => ({ id: col(t, "id") as number, kind: t.kind, ready: t.ready, already: t.already, project_build: t.project_build, claim: t.claim }))));
   }
+  const lead = new Map([...queue].filter(([, q]) => q.lead !== null).map(([name, q]) => [name, q.lead as number]));
   const rows = shaped.map((t) => ({ ...t, ready: undefined, lead: lead.get(col(t, "name") as string) === col(t, "id") })).map((t) => ({ ...t, waits: waitsForMaintainer(t) }));
   const waiting = rows.filter((t) => t.waits);
   const ages = waiting.map((t) => Date.now() - Date.parse((t as { finished_at?: string | null }).finished_at ?? "")).filter((ms) => Number.isFinite(ms) && ms > 0);
@@ -328,12 +327,59 @@ export async function handleReviewList(env: Env, request: Request): Promise<Resp
     if (t.waits) p.waits = true;
     if (!p.claim && t.claim) p.claim = t.claim;
   }
-  for (const p of packages) p.state = p.claim ? "in_review" : p.waits ? "ready" : null;
+  for (const p of packages) p.state = queue.get(p.name)?.state ?? null;
   return json(
     { staged: rows, waiting: waiting.length, oldest_ms: ages.length ? Math.max(...ages) : null, ready: packages.filter((p) => p.state === "ready").length, in_review: packages.filter((p) => p.state === "in_review").length, packages },
     200,
     { "cache-control": "no-store" },
   );
+}
+
+/** A staged build no standing approval decided, as its package's place in the queue weighs it: whether it may speak for the package (`ready`: nothing else of the package builds, it is where its architecture stands, and a project's build has every architecture built again), a version already approved, the project's build of a contributor's build, whether a claim is on it. */
+export interface QueueRow { id: number; kind: string; ready: boolean; already: unknown; project_build: { status: string } | null; claim: unknown }
+/** Where a package stands in Review's queue: the row that speaks for it (`lead`), and the list's word — in_review, ready, or neither (null). */
+export interface QueueState { lead: number | null; state: "ready" | "in_review" | null }
+
+/**
+ * The one rule of a package's place in Review's queue, over its staged rows no standing approval decided, newest first. The row that speaks
+ * for it (`lead`): the project's newest build when the review can decide on it, else the contributor's newest build the project has yet to
+ * build again (waitsForMaintainer). The state: in_review while a claim is on one of its rows (the project's rebuild a maintainer asked for is
+ * queued, running or staged); ready, waiting for a claim, while a row speaks for it; else neither — an architecture still building, a build
+ * of a version already approved, a contributor's build the project built again and published. The list files every package by it, and a
+ * package's story weighs its own rows by it (queueOfStory): its page says the list's word without reading the list (#282).
+ */
+export function queueOf(rows: QueueRow[]): QueueState {
+  const lead = (["project", "contributor"] as const).map((kind) => rows.find((t) => t.kind === kind && t.ready && waitsForMaintainer({ ...t, lead: true }))).find(Boolean) ?? null;
+  return { lead: lead ? lead.id : null, state: rows.some((t) => t.claim) ? "in_review" : lead ? "ready" : null };
+}
+
+/**
+ * A package's place in Review's queue from its own story (story.ts: its newest tasks and approvals, its stored targets): the rows the list
+ * would hold of it — each staged build no standing approval decided, nor one on the project's build of it — with the facts the list reads
+ * of each (packageFacts, `already`, the project's build of it, the claim), weighed by queueOf. Null when the list would not name it: nothing
+ * of it is staged and undecided. No read of its own: a package's page gets it with the story it asks for anyway.
+ */
+export function queueOfStory(tasks: TaskBrief[], approvals: Approval[], targets: Targets): QueueState | null {
+  const builds = tasks.filter((t) => t.kind === "build").map((t) => ({ id: t.id, arch: t.arch, status: t.status, trust: t.trust, version: t.version ?? null, review: typeof t.params.review === "number" ? t.params.review : null }));
+  const p = buildsOfPackage({ builds, decisions: approvals });
+  const standsOn = (id: number) => approvals.some((a) => stands(a) && a.task_id === id);
+  const prior = approvals.filter(stands);
+  const rows: QueueRow[] = builds
+    .filter((b) => b.status === "staged" && !standsOn(b.id) && !builds.some((r) => r.trust === "project" && r.review === b.id && standsOn(r.id)))
+    .sort((x, y) => y.id - x.id)
+    .map((r) => {
+      const f = packageFacts(r, p, targets);
+      const pb = r.trust === "community" ? (p.project.find((b) => b.review === r.id) ?? null) : null;
+      return {
+        id: r.id,
+        kind: r.trust === "project" ? "project" : "contributor",
+        ready: !f.building && !f.rebuilding && !f.superseded && !(r.trust === "project" && f.unbuilt),
+        already: prior.some((a) => a.arch === r.arch && a.version === r.version && a.task_id !== r.id && a.rebuild_task !== r.id),
+        project_build: pb,
+        claim: r.trust === "project" || (!!pb && ["queued", "leased", "staged"].includes(pb.status)),
+      };
+    });
+  return rows.length ? queueOf(rows) : null;
 }
 
 /** A row of GET /factory/review that asks for a maintainer's decision now: its `waits`, and what `waiting` counts — the row that speaks for its package (`lead`), by the rule a row reads. */
@@ -517,7 +563,7 @@ export function packageFacts(t: { id: number; arch: string; trust: string; versi
  * A staged contributor's build is undecided while no standing approval is on
  * it or on a project's build of it.
  */
-export function buildsOfPackage(rows: Pick<PackageRows, "builds" | "decisions">): PackageBuilds {
+export function buildsOfPackage(rows: { builds: Omit<PackageRows["builds"][number], "publish">[]; decisions: PackageRows["decisions"] }): PackageBuilds {
   const standsOn = (id: number) => rows.decisions.some((a) => a.decision === "approved" && a.withdrawn_at === null && a.task_id === id);
   const newest = [...rows.builds].sort((x, y) => y.id - x.id);
   return {
