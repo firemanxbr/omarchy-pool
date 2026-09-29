@@ -693,7 +693,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       id: "pool.own",
       page: "/",
       anchor: ['<details class="home-own">', "Bring your own package", '<a class="op-btn primary" href="/factory">Request a package</a>', '<a class="op-btn" href="/agents">Ask your agent</a>'],
-      reads: [{ path: "/factory", json: false }, { path: "/agents", status: 302, json: false }],
+      reads: [{ path: "/factory", json: false }, { path: "/agents", json: false }],
       visible: EVERYONE,
     },
     {

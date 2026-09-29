@@ -2,8 +2,8 @@
  * The v1 kit (#238, #239): the pieces the v1.0 pages are drawn with, taken
  * from the handoff's prototype (design/Hi-fi v1.0.dc.html) once, here, so
  * the page pull requests share one set instead of each inventing its own.
- * A page adopts it when its own issue lands (Home first, #243), by
- * passing kit: true to page(), and declares what it draws in its own
+ * A page adopts it when its own issue lands, by passing kit: true to
+ * page(), and declares what it draws in its own
  * manifest entry (components.ts). A page that has not adopted it pays
  * nothing for it — no request, no bytes — and looks the same.
  *
@@ -345,7 +345,7 @@ export const KIT_CSS = String.raw`
   .op-code code { min-width: 0; color: var(--text); font: 13.5px/1.6 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
   .op-code .op-prompt { color: var(--dim); user-select: none; }
   .op-copy { flex: none; padding: 3px 12px; border: 1px solid var(--green); background: transparent; color: var(--green); font: 12.5px var(--font-mono); cursor: pointer; }
-  .op-copy.copied { background: var(--green); color: var(--green-ink); }
+  .op-copy.copied { background: var(--green); color: var(--green-ink); } .op-copy:focus-visible { outline: 1px solid var(--green); outline-offset: 2px; }
   .op-btn { display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px; border: 1px solid var(--line); background: transparent; color: var(--text); font: inherit; font-size: 13px; line-height: 1.5; cursor: pointer; text-decoration: none; white-space: nowrap; }
   .op-btn:hover { border-color: var(--green); }
   .op-btn.primary { background: var(--green); border-color: var(--green); color: var(--green-ink); } .op-btn.primary:hover { filter: brightness(1.08); }
@@ -409,15 +409,13 @@ export const KIT_HELPERS = String.raw`
   function countUp(el, to, fmt, ms) {
     if (!el) return;
     fmt = fmt || num; to = Number(to) || 0;
-    // The length is ms, not a local "dur": a kit page runs this beside the shell's dur(), and a name of its own here would hide it.
-    var run = el.opCount = (el.opCount || 0) + 1, start = null;
-    ms = ms || 1100;
+    var run = el.opCount = (el.opCount || 0) + 1, lasts = ms || 1100, start = null;
     if (!to || typeof requestAnimationFrame !== "function" || (window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches)) { el.textContent = fmt(to); return; }
     el.textContent = fmt(0);
     requestAnimationFrame(function step(t) {
       if (el.opCount !== run) return;
       if (start === null) start = t;
-      var p = Math.min(1, (t - start) / ms);
+      var p = Math.min(1, (t - start) / lasts);
       el.textContent = fmt(p < 1 ? Math.round(to * (1 - Math.pow(1 - p, 3))) : to);
       if (p < 1) requestAnimationFrame(step);
     });
