@@ -1,7 +1,7 @@
 /**
- * The journal's door and its rows: any job token may POST /events, and the
- * Journal, the Pipeline's feed and the Status incidents draw the payload for
- * every reader — so the two fields the pages write into an address are
+ * The journal's door and its rows: any job token may POST /events, and
+ * Status's journal draws the payload for every reader — so the two fields
+ * the page writes into an address are
  * checked at the door (an https run link, a release's id) and, for a row that
  * predates the check, drawn only when they are what the page expects.
  */
@@ -20,7 +20,7 @@ async function post(path: string, body: unknown, token: string): Promise<{ statu
   return { status: res.status, json: await res.json().catch(() => null) };
 }
 
-// The Journal and the Pipeline redirect to Status since #240; their rows are drawn by the modules #248 folds into it (the fixture's fetchPage).
+// A page or an API answer, through the Worker's handler.
 async function get(path: string): Promise<string> {
   const ctx = createExecutionContext();
   const res = await fetchPage(new Request(`http://pool.test${path}`), env, ctx);
@@ -66,27 +66,24 @@ describe("the journal's door", () => {
 });
 
 describe("the journal's rows", () => {
-  // A row written before the door checked, or by hand in D1: the shell's eventRow and the Pipeline's feedRow draw it without the link and without the id; the Status incidents row is inline and pinned by its manifest to runHref().
+  // A row written before the door checked, or by hand in D1: Status's journalRow draws it without the link and without the id — and a release it links is on a ring it names.
   const stored = { id: 1, kind: "promote", ring: "edge", source: null, status: "ok", summary: "promoted <b>x</b>", created_at: new Date().toISOString(), duration_ms: 10, payload: { ci: { run_url: BAD_URL }, release_id: BAD_ID } };
   const clean = { ...stored, payload: { ci: { run_url: "https://github.com/o/r/actions/runs/1" }, release_id: 42 } };
 
-  it("the shell's eventRow links only an https run and a numeric release", async () => {
-    const { eventRow } = runScript(scriptOf(await get("/journal")), { pathname: "/journal", functions: ["eventRow"] });
-    const bad = eventRow(stored);
+  it("Status's journalRow links only an https run and a numeric release, on a ring the pool promises", async () => {
+    const { journalRow } = runScript(scriptOf(await get("/status")), { pathname: "/status", functions: ["journalRow"] });
+    const bad = journalRow(stored, false);
     expect(bad).not.toContain("javascript:");
     expect(bad).not.toContain("<img");
     expect(bad).not.toContain("/diff?");
     expect(bad).toContain("promoted &lt;b&gt;x&lt;/b&gt;");
-    const good = eventRow(clean);
+    const good = journalRow(clean, false);
     expect(good).toContain('href="https://github.com/o/r/actions/runs/1"');
     expect(good).toContain('href="/diff?ring=edge&to=42"');
-  });
-
-  it("the Pipeline's feedRow links only an https run", async () => {
-    const { feedRow } = runScript(scriptOf(await get("/pipeline")), { pathname: "/pipeline", functions: ["feedRow"] });
-    const bad = feedRow(stored, false);
-    expect(bad).not.toContain("javascript:");
-    expect(bad).toContain("promoted &lt;b&gt;x&lt;/b&gt;");
-    expect(feedRow(clean, false)).toContain('href="https://github.com/o/r/actions/runs/1"');
+    // A ring the pool does not promise — a row posted with any ring at all — is never written into the address.
+    expect(journalRow({ ...clean, ring: 'edge"><img src=x>' }, false)).not.toMatch(/\/diff\?|<img/);
+    // A line that just arrived is highlighted; the others are not.
+    expect(journalRow(clean, true)).toContain('class="st-j op-fresh"');
+    expect(good).toContain('class="st-j"');
   });
 });

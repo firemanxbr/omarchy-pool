@@ -16,7 +16,7 @@ export async function handlePostEvent(request: Request, env: Env): Promise<Respo
   if (!e?.kind || !e.summary) return json({ error: "kind and summary are required" }, 400);
   const status = e.status ?? "ok";
   if (!["ok", "warn", "error"].includes(status)) return json({ error: "bad status" }, 400);
-  // The two payload fields the pages write into an address: a run's link must be an https URL and a release an id — any job token may post here, and the Journal, the Pipeline's feed and the Status incidents draw the payload for every reader.
+  // The two payload fields the pages write into an address: a run's link must be an https URL and a release an id — any job token may post here, and Status's journal draws the payload for every reader.
   const p = e.payload as { ci?: { run_url?: unknown }; release_id?: unknown } | null | undefined;
   const run = p?.ci?.run_url;
   if (run !== undefined && !(typeof run === "string" && /^https:\/\//i.test(run))) return json({ error: "payload.ci.run_url must be an https URL" }, 400);

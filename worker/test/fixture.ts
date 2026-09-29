@@ -15,7 +15,7 @@
  * so the ring's diff has all three kinds of row. xz declares zlib and loads
  * libz.so.1, so zlib's page has `required_by` and xz's has `depends` and
  * `links`. The advisory is on stable's zlib; edge serves a newer, clean
- * zlib, so the security page has a fix in another ring. The stable head has
+ * zlib, so Status's advisories have a fix in another ring. The stable head has
  * a rendered database (the pacman.conf sections), and the pool signs — a
  * key made here, so the seal, the artifacts and the signing-key endpoint
  * have something to say.
@@ -52,7 +52,7 @@
  *
  * One pool job of every kind sits done in the queue (F.jobs), its params
  * as the brain queues them and its result as the Rust worker posts it, so
- * the Pipeline's table has every shape it words — the three jobs on a
+ * the jobs table on Status has every shape it words — the three jobs on a
  * build among them: `ours`' audit, trial and publish, done by w1 through
  * the API above.
  *
@@ -72,33 +72,12 @@ import { syncJobFor } from "../src/scheduler";
 import type { Fixture } from "../src/pages/components";
 import { GO_MENU, HELPERS, THEME_BOOT } from "../src/pages/layout";
 import { KIT_HELPERS } from "../src/pages/kit";
-import { version } from "../src/meta";
-import { pipelineHtml } from "../src/pages/pipeline";
-import { journalHtml } from "../src/pages/journal";
-import { securityHtml } from "../src/pages/security";
 import { settleTargets } from "../src/targets";
 
 export type { Fixture };
 
-/**
- * The three pages whose address redirects since #240 (index.ts MOVED): the
- * Pipeline left the header, the Journal and Security the footer, and each
- * is a section of Status once #248 draws it there. Until then their modules
- * are what those sections are made from — the scripts, the manifests the
- * page tests bind to — so the tests keep reading them, drawn the way the
- * router drew them. fetchPage() answers these addresses with their page;
- * pages.test.ts asserts the redirects through the Worker's own handler.
- */
-export const RETIRED_PAGES: Readonly<Record<string, (env: Env) => string>> = {
-  "/pipeline": (e) => pipelineHtml(e.POOL_URL, version(e)),
-  "/journal": (e) => journalHtml(e.POOL_URL, version(e)),
-  "/security": (e) => securityHtml(e.POOL_URL, version(e)),
-};
-
-/** The Worker's fetch handler as the page tests call it: a GET of a retired page (RETIRED_PAGES) is answered with the page, as the router answered it before #240; every other request goes to the handler. */
+/** The Worker's fetch handler as the page tests call it: every page and every API answer from the router. The Pipeline, the Journal and Security were drawn here from their modules while their addresses redirected to Status and Status did not draw them yet (#240); #248 folded them into Status, and their modules are gone. */
 export function fetchPage(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-  const draw = request.method === "GET" ? RETIRED_PAGES[new URL(request.url).pathname] : undefined;
-  if (draw) return Promise.resolve(new Response(draw(env), { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=60" } }));
   return worker.fetch(request, env, ctx);
 }
 
@@ -364,7 +343,7 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
   const spareTask = await staged("spare", "1.0-1");
   await settleTargets(env, ["mine", "disposable", "spare"]);
 
-  // One done pool job of every kind the Pipeline's table words, as the
+  // One done pool job of every kind the Status page's jobs table words, as the
   // brain queued it (src/scheduler.ts, src/jobs.ts: the params) and the
   // Rust worker completed it (crates/pkg-repo/src/work.rs, every
   // `result: serde_json::json!`, copied field for field): the sync is the
@@ -372,7 +351,7 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
   // result per source with the releases it pinned — and the promotion is
   // the one the journal line below records. The rows are written as
   // handleComplete writes them, so the table's words (pool-jobs.test.ts)
-  // and the manifest's fields (pipeline.tasks-table) read what production
+  // and the manifest's fields (status.jobs-table) read what production
   // holds; a field renamed in work.rs is renamed here, and the test says
   // where the page still reads the old name.
   const sync = syncJobFor(arch);
