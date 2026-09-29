@@ -3,8 +3,14 @@
  * history — append-only, each row an immutable release. Filters by kind
  * and status; a signed-in maintainer rolls a ring back from here. The
  * history's heading opens the diff of stable's head against the release
- * before it, so /diff is a hop from this footer page for everyone, script
- * or not; every row with a parent opens its own.
+ * before it, for everyone, script or not; every row with a parent opens
+ * its own.
+ *
+ * Since #240 the router no longer serves this page: its address redirects
+ * to Status's journal, /status#journal (index.ts MOVED), and #248 folds
+ * what it draws into Status. Until then this module is what that section
+ * is made from, and the tests render it from here (test/fixture.ts
+ * RETIRED_PAGES).
  */
 import { page } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";

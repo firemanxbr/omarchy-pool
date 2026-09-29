@@ -190,7 +190,9 @@ describe("what a crawler may read", () => {
       const locs = [...xml.matchAll(/<url><loc>([^<]*)<\/loc><\/url>/g)].map((m) => m[1]);
       expect(locs, origin).toEqual(SITEMAP_PATHS.map((p) => `${base}${p}`));
       for (const c of DOCS_TREE) expect(locs, `${origin} ${c.key}`).toContain(`${base}${c.href}`);
-      for (const p of ["/", "/docs", "/packages", "/security", "/status", "/factory", "/pipeline", "/people"]) expect(locs, `${origin} ${p}`).toContain(`${base}${p}`);
+      for (const p of ["/", "/docs", "/packages", "/status", "/factory", "/people"]) expect(locs, `${origin} ${p}`).toContain(`${base}${p}`);
+      // An address that redirects is no page to list: the Pipeline and Security became sections of Status (#240, index.ts MOVED).
+      for (const p of ["/pipeline", "/security", "/journal"]) expect(locs, `${origin} ${p}`).not.toContain(`${base}${p}`);
       expect(locs.some((l) => l.includes("/package/") || l.includes("/user/") || l.includes("/build/") || l.includes("/api/")), origin).toBe(false);
       // Well-formed: every tag closed, nothing unescaped.
       expect((xml.match(/<url>/g) ?? []).length).toBe((xml.match(/<\/url>/g) ?? []).length);

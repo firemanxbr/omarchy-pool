@@ -6,6 +6,11 @@
  * people who run it, the operations: the queue, the charts, the ring
  * heads, the journal, what it costs — and how to help. The workers
  * themselves have a page of their own (/workers), by kind.
+ *
+ * Since #240 the router no longer serves this page: its address redirects
+ * to Status (index.ts MOVED), and #248 folds what it draws into Status. Until
+ * then this module is what that section is made from, and the tests render
+ * it from here (test/fixture.ts RETIRED_PAGES).
  */
 import { page } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
@@ -385,7 +390,7 @@ export function pipelineHtml(poolUrl: string, version: RunningVersion): string {
     path: "/pipeline",
     title: "Pipeline · omarchy-pool",
     description: "The pipeline as it runs: what is verified, promoted and checked right now, how fast maintainers decide, the charts, the cost.",
-    active: "pipeline",
+    active: "none",
     body: BODY,
     script: SCRIPT.replace("__CHARTS__", CHARTS),
     poolUrl,

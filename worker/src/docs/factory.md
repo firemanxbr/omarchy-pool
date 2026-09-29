@@ -124,8 +124,8 @@ The asker's own page follows a request per architecture, in the
 registration's own words: `registered`, then `waiting` or `building`,
 `staged` when the worker hands the evidence in, a maintainer's decision
 (`approved`, `rejected`) and `published` once the project's build is in
-edge — `unmaintained` after 30 days without a build; the
-[Pipeline](../../../../pipeline) lists every request and where it stands.
+edge — `unmaintained` after 30 days without a build;
+`GET /api/v1/factory/packages` lists every request and where it stands.
 One word for a package that may have a build per architecture: it follows
 the builds, not the last worker to speak. While any build of the name is
 staged for a maintainer, a failure on the other architecture leaves it
@@ -275,8 +275,9 @@ A **dry run** builds and measures but never publishes or renders: a
 maintainer queues it with `publish:false` —
 `curl -X POST $API/factory/enqueue -H "authorization: Bearer omc_…" -d '{"name":"chromium","pkgbuild_ref":"<commit>","version":"…","arches":["aarch64"],"reason":"sizing","publish":false,"override":true}'`
 (`override` when an upstream source ships the name). The worker keeps the
-result under its work directory; the Pipeline's build tasks show it with a
-*dry run* pill and how long it took. `factory/sizing/` holds recipes kept
+result under its work directory; the build's page (`/build/<id>`) shows how
+long it took and what it measured, and `GET /api/v1/factory` lists its task
+with `publish` 0. `factory/sizing/` holds recipes kept
 only for this (chromium, from Arch Linux ARM): the only recipes left in
 the repository, and the `enqueue` job never queues them.
 

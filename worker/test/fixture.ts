@@ -69,8 +69,34 @@ import { syncJobFor } from "../src/scheduler";
 import type { Fixture } from "../src/pages/components";
 import { HELPERS, THEME_BOOT } from "../src/pages/layout";
 import { KIT_HELPERS } from "../src/pages/kit";
+import { version } from "../src/meta";
+import { pipelineHtml } from "../src/pages/pipeline";
+import { journalHtml } from "../src/pages/journal";
+import { securityHtml } from "../src/pages/security";
 
 export type { Fixture };
+
+/**
+ * The three pages whose address redirects since #240 (index.ts MOVED): the
+ * Pipeline left the header, the Journal and Security the footer, and each
+ * is a section of Status once #248 draws it there. Until then their modules
+ * are what those sections are made from — the scripts, the manifests the
+ * page tests bind to — so the tests keep reading them, drawn the way the
+ * router drew them. fetchPage() answers these addresses with their page;
+ * pages.test.ts asserts the redirects through the Worker's own handler.
+ */
+export const RETIRED_PAGES: Readonly<Record<string, (env: Env) => string>> = {
+  "/pipeline": (e) => pipelineHtml(e.POOL_URL, version(e)),
+  "/journal": (e) => journalHtml(e.POOL_URL, version(e)),
+  "/security": (e) => securityHtml(e.POOL_URL, version(e)),
+};
+
+/** The Worker's fetch handler as the page tests call it: a GET of a retired page (RETIRED_PAGES) is answered with the page, as the router answered it before #240; every other request goes to the handler. */
+export function fetchPage(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const draw = request.method === "GET" ? RETIRED_PAGES[new URL(request.url).pathname] : undefined;
+  if (draw) return Promise.resolve(new Response(draw(env), { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=60" } }));
+  return worker.fetch(request, env, ctx);
+}
 
 /**
  * The inline scripts of a served page, joined: what the page runs, for the

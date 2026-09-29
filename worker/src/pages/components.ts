@@ -198,11 +198,24 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // Every page with a route of its own that is not a door: the footer is where a reader finds People and the Request, not only a page's content.
+    // The footer's five (#240): Packages, Status, Agents in green, Docs, People — what is not a door, one hop from every page; the rest of the pages are one hop from these or from a door (layout.ts MORE says which). The page the reader is on or under is marked, for a screen reader too: a package's page is Packages', the API reference Docs', a diff Status'.
     id: "shell.footer-more",
     page: "/",
-    anchor: MORE.map((m) => `href="${m.href}"`),
-    script: ['footer .more a', 'href === "/packages" && here.indexOf("/package/") === 0', 'href === "/journal" && here === "/diff"'],
+    anchor: [...MORE.map((m) => `href="${m.href}"`), '<a href="/agents" class="accent">Agents</a>', '<nav class="more" aria-label="Footer">'],
+    script: ['footer .more a', 'href === "/packages" && here.indexOf("/package/") === 0', 'href === "/docs" && here === "/api"', 'href === "/status" && here === "/diff"', 'a.setAttribute("aria-current", "page")'],
+    reads: [
+      // A footer page that has not landed yet (MORE's `until`: Agents, #249's) is a 302 to what stands in for it, one no browser keeps.
+      ...MORE.filter((m) => m.until).map((m) => ({ path: m.href, status: 302, json: false as const })),
+    ],
+    visible: EVERYONE,
+  },
+  {
+    // Go… (#240): served as a link to the packages, and the button the ⌘K menu (#241) opens from once the menu is on the page (window.opPalette) — only then does it name a key, the platform's, for the eye and as aria-keyshortcuts.
+    id: "shell.go",
+    page: "/",
+    anchor: ['<a class="go" id="go" href="/packages" title="find a package">Go…</a>'],
+    script: ['document.querySelector("header a.go")', "!window.opPalette", 'document.createElement("button")', "window.opPalette.open()", '"Ctrl K"', '"aria-keyshortcuts"'],
+    reads: [{ path: "/packages", json: false }],
     visible: EVERYONE,
   },
   {

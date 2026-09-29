@@ -28,7 +28,7 @@ const BODY = String.raw`
   </section>
 
   <section>
-    <h2>Rings</h2>
+    <div class="h2row"><h2>Rings</h2><a class="more-link" href="/diff">What stable last changed →</a></div>
     <p class="sub">Latest real-pacman check per ring and architecture, and when the ring last moved.</p>
     <div class="table-wrap"><table id="rings"><thead><tr><th>Ring</th><th>Arch</th><th>Health</th><th>Checked</th><th>Release</th><th>Moved</th><th>Databases</th></tr></thead><tbody></tbody></table></div>
   </section>
@@ -48,7 +48,7 @@ const BODY = String.raw`
   </section>
 
   <section>
-    <div class="h2row"><h2>The pipeline, in numbers</h2><a class="more-link" href="/pipeline">Watch it run →</a></div>
+    <h2>The pipeline, in numbers</h2>
     <p class="sub">The pool's own jobs, pulled by workers with a per-job credential: what ran this week, what failed, what is waiting — the tiles, the table and the charts are one count over the same rows. A snapshot every 30 minutes keeps the pool's history.</p>
     <div class="tiles" id="systiles"></div>
     <div class="charts">
@@ -282,9 +282,10 @@ export const STATUS_COMPONENTS = (_F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
+    // The rings' heading opens the diff of stable's head against the release before it — what plain /diff draws, so the link says that and not a choice of two releases the page does not offer: the Journal left the footer (#240), so /diff is one hop from the footer here until #248 draws the ring history on this page.
     id: "status.rings-table",
     page: "/status",
-    anchor: ['id="rings"', "<th>Health</th>", "<th>Databases</th>"],
+    anchor: ['id="rings"', "<th>Health</th>", "<th>Databases</th>", '<a class="more-link" href="/diff">What stable last changed →</a>'],
     script: ['"#rings tbody"', "PROMISED_RINGS.forEach(function (ring)", 'latest(d.latest, "health", ring, arch)', "pillHtml(h.status, HEALTH_WORD[h.status])", 'a.kind === "db"', "r.sources", "no rings yet"],
     reads: [
       {
@@ -295,6 +296,7 @@ export const STATUS_COMPONENTS = (_F: Fixture): Component[] => [
           "latest.0.kind", "latest.0.status", "latest.0.created_at", "latest.0.ring", "latest.0.source",
         ],
       },
+      { path: "/diff", json: false },
     ],
     visible: EVERYONE,
   },
@@ -337,9 +339,10 @@ export const STATUS_COMPONENTS = (_F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
+    // No "Watch it run →" beside it: /pipeline redirects here since #240, and a link from this page to itself goes nowhere.
     id: "status.numbers-heading",
     page: "/status",
-    anchor: ["<h2>The pipeline, in numbers</h2>", '<a class="more-link" href="/pipeline">Watch it run →</a>'],
+    anchor: ["<h2>The pipeline, in numbers</h2>"],
     visible: EVERYONE,
   },
   {

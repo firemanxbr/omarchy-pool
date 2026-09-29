@@ -70,7 +70,7 @@ import { snapshotMetrics } from "../src/metrics";
 import { allComponents } from "../src/pages/components";
 import { HELPERS } from "../src/pages/layout";
 import { CHARTS } from "../src/pages/charts";
-import { ownScriptOf, runScript, scriptOf, seedDashboard, type Fixture } from "./fixture";
+import { fetchPage, ownScriptOf, runScript, scriptOf, seedDashboard, type Fixture } from "./fixture";
 
 let F: Fixture;
 
@@ -324,9 +324,10 @@ describe("the maintainer set, the late mark and the budget lines are the server'
   });
 });
 
+// The Worker's handler, and the three pages whose address redirects since #240 drawn as they were (the fixture's fetchPage): what they say stays one truth with the rest until #248 folds them into Status.
 async function page(path: string): Promise<string> {
   const ctx = createExecutionContext();
-  const res = await worker.fetch(new Request(`http://pool.test${path}`), env, ctx);
+  const res = await fetchPage(new Request(`http://pool.test${path}`), env, ctx);
   await waitOnExecutionContext(ctx);
   expect(res.status, path).toBe(200);
   return res.text();

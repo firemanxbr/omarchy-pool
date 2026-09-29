@@ -2,6 +2,12 @@
  * Security: what a ring serves that has an open advisory, how sure we are,
  * whether a fixed version already sits in another ring, and how much of the
  * ring depends on it.
+ *
+ * Since #240 the router no longer serves this page: its address redirects
+ * to Status's advisories, /status#advisories (index.ts MOVED), and #248
+ * folds what it draws into Status. Until then this module is what that
+ * section is made from, and the tests render it from here
+ * (test/fixture.ts RETIRED_PAGES).
  */
 import { page } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";

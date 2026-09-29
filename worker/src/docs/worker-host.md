@@ -61,8 +61,8 @@ user-mode emulation, and on a 16K-page host qemu cannot map every x86_64
 library: `rustc` (through libedit), `sudo` (libldap) and others fail with
 *failed to map segment from shared object* — a C package builds, a Rust
 one does not. So the two x86_64 build services are behind the `emulated`
-profile and off by default: x86_64 build tasks stay queued, the Pipeline
-lists them as queued, and nothing burns attempts or agent
+profile and off by default: x86_64 build tasks stay queued (each build's
+page says so), and nothing burns attempts or agent
 calls on them. Any x86_64 machine with docker becomes the x86_64 build
 host in minutes: copy `compose.yml`, `.env`, `etc/agent.env`,
 `etc/community-x86_64.env` and `etc/review-x86_64.env` there, drop the

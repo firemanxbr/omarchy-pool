@@ -24,9 +24,8 @@
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
-import worker from "../src/index";
 import { HELPERS } from "../src/pages/layout";
-import { runScript, scriptOf, seedDashboard, type Fixture, type Ran } from "./fixture";
+import { fetchPage, runScript, scriptOf, seedDashboard, type Fixture, type Ran } from "./fixture";
 
 let F: Fixture;
 
@@ -34,10 +33,10 @@ beforeAll(async () => {
   F = await seedDashboard(env);
 });
 
-/** The Worker's own answer to a path, as a browser on the dashboard would get it: nobody signed in. */
+/** The Worker's own answer to a path, as a browser on the dashboard would get it: nobody signed in. The Pipeline and the Journal redirect to Status since #240, and are drawn by their modules until #248 folds them into it (the fixture's fetchPage). */
 async function real(path: string, init?: RequestInit): Promise<Response> {
   const ctx = createExecutionContext();
-  const res = await worker.fetch(new Request(`http://pool.test${path}`, init), env, ctx);
+  const res = await fetchPage(new Request(`http://pool.test${path}`, init), env, ctx);
   await waitOnExecutionContext(ctx);
   return res;
 }

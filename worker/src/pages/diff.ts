@@ -2,8 +2,10 @@
  * What changed between two releases of a ring: added, removed, upgraded —
  * the page the Journal opens, from its ring history's heading and from the
  * "diff" on every row with a parent, and what a promotion or rollback line
- * in the journal points at; the Journal is the crumb above it, the footer
- * page it is one hop from. Reads GET /releases/:ring/diff.
+ * in the journal points at; the Journal is the crumb above it. Since #240
+ * the Journal's address redirects to Status's journal, and Status is the
+ * footer page this one is one hop from (its rings' heading). Reads
+ * GET /releases/:ring/diff.
  */
 import { page } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
@@ -79,7 +81,7 @@ export const DIFF_COMPONENTS = (F: Fixture): Component[] => {
   const head = "/api/v1/releases/stable/diff";
   return [
     {
-      // The crumb's parent is the Journal, the footer page this one is a hop from; the crumb itself is the two releases, the ring being the title's first word.
+      // The crumb's parent is the Journal (its address lands on Status's journal since #240); the crumb itself is the two releases, the ring being the title's first word.
       id: "diff.crumbs",
       page,
       anchor: ['class="crumbs"', '<a href="/journal">Journal</a>', 'id="crumb"'],
