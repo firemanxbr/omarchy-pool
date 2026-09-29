@@ -154,7 +154,8 @@ const PACKAGE_CSS = String.raw`
   .pkg-node { height: 24px; border: 1px solid var(--line); background: var(--bg-deep); display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 8px; font: 12px var(--font-mono); color: var(--text); min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   a.pkg-node:hover { border-color: var(--green); }
   .pkg-node > span { display: flex; align-items: center; gap: 6px; min-width: 0; }
-  .pkg-node .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .pkg-node .v { font-size: 11px; color: var(--dim); white-space: nowrap; }
+  /* The name keeps its width and the version is cut: a long version (glibc's 2.44+r50+g1848099f063e-1) drew the dependency as "g…" (#274). A name longer than the node is cut last. */
+  .pkg-node .nm { flex: 0 0 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .pkg-node .v { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 11px; color: var(--dim); white-space: nowrap; }
   .pkg-node .t { font-size: 11px; white-space: nowrap; flex: none; } .pkg-node .t.decl { color: var(--blue); } .pkg-node .t.so { color: var(--green); } .pkg-node .t.none { color: var(--dim); }
   .pkg-node.adv { border-color: color-mix(in oklab, var(--red) 55%, var(--line)); } .pkg-node .dot { width: 7px; height: 7px; flex: none; background: var(--red); }
   .pkg-node.gone { color: var(--dim); } button.pkg-node { width: 100%; color: var(--green); cursor: pointer; text-align: left; } button.pkg-node:hover { border-color: var(--green); }

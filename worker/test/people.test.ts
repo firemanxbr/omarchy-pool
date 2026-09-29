@@ -20,7 +20,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { APPLY_URL } from "../src/governance";
 import { PACKAGES_PAGE, SIGN_IN, handleListPackages } from "../src/routes/contributors";
 import { APPROVALS_PAGE, handleApprovals } from "../src/routes/review";
-import { fetchPage, runScript, scriptOf, seedDashboard, type Fixture, type Ran } from "./fixture";
+import { declared, fetchPage, runScript, scriptOf, seedDashboard, type Fixture, type Ran } from "./fixture";
 
 let F: Fixture;
 let served: string;
@@ -266,6 +266,37 @@ describe("the People page", () => {
     expect(count()).toBe(20);
     expect(d.nodes["#contributors-all"].hidden).toBe(true);
     expect(focused, "the 17th row, the first Show all added, has the focus the hidden button had").toBe(true);
+  });
+
+  // The v1.0.0 production check (2026-09-29, #274): at 1280 the rows sit two to a line, and "maintainer" beside a long login was cut to
+  // "ma…". The role is a line of its own under the login, so it is whole at every width; the login is what is cut, whole in the row's
+  // title. No browser measures here: the page's stylesheet says it, and the row the page writes.
+  it("puts a maintainer's role under the login, on a line of its own, whole however long the login is", async () => {
+    const login = "a-maintainer-with-a-rather-long-login";
+    const d = await drawnAs(null, {
+      answers: {
+        "/api/v1/factory/maintainers": (j) => ({ ...j, maintainers: [...j.maintainers, { login, since: j.maintainers[0].since }] }),
+        "/api/v1/factory/packages": (j) => ({ ...j, packages: [...j.packages, { ...j.packages[0], name: "long-login-package", owner: login, landed: true }] }),
+      },
+    });
+    const list = d.nodes["#contributors-list"].innerHTML as string;
+    const row = list.split('<a class="pp-person"').find((r) => r.includes(`@${login}<`));
+    expect(row, "the maintainer's row").toBeDefined();
+    // The login in its own span, the role beside it in the name's box — never inside the span that is cut.
+    expect(row).toContain(`title="${login} · maintainer"`);
+    expect(row).toContain(`<span class="pp-name"><span>@${login}</span><em>maintainer</em></span>`);
+    // A contributor's row has no role line: the login alone.
+    expect(list).toContain(`<span class="pp-name"><span>@${F.owner}</span></span>`);
+    // The name's box stacks its two lines; the login is cut with an ellipsis, the role never is.
+    expect(declared(served, ".pp-name")).toMatchObject({ display: "grid", "min-width": "0" });
+    expect(declared(served, ".pp-name > span")).toMatchObject({ overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" });
+    const role = declared(served, ".pp-name em");
+    expect(role["white-space"]).toBe("nowrap");
+    expect(role, "the role is never cut").not.toHaveProperty("overflow");
+    expect(role).not.toHaveProperty("text-overflow");
+    // Nothing on the name's box cuts its lines: the box is a column the grid gives the rest of the row.
+    expect(declared(served, ".pp-name")).not.toHaveProperty("text-overflow");
+    expect(declared(served, ".pp-person")["grid-template-columns"]).toBe("24px minmax(0, 1fr) auto");
   });
 
   // The dashboard's rule: the same button for everyone; live for the one viewer who may apply, grey with the reason in its title for everyone else — nobody reads the sign-in first.

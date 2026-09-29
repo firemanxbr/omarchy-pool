@@ -90,7 +90,8 @@ const CSS = String.raw`
   .pp-list { flex: 1; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(250px, 100%), 1fr)); align-content: start; }
   .pp-person { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 9px 16px; border-bottom: 1px solid var(--line); font-size: 13px; color: var(--text); min-width: 0; }
   a.pp-person:hover { background: var(--panel-2); } .pp-person.skel .skl { grid-column: 1 / -1; width: 60%; }
-  .pp-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .pp-name em { margin-left: 6px; font-style: normal; font-size: 11px; color: var(--green); }
+  /* The role on its own line, under the login: beside it, a long login cut "maintainer" to "ma…" at 1280 (#274). The login is what is cut, and its title says it whole. */
+  .pp-name { display: grid; min-width: 0; line-height: 1.35; } .pp-name > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .pp-name em { font-style: normal; font-size: 11px; color: var(--green); white-space: nowrap; }
   .pp-st { font-size: 12px; color: var(--dim); white-space: nowrap; }
   .pp .pp-foot { justify-content: space-between; margin-top: auto; border-top: 0; } .pp-foot a { margin-left: auto; color: var(--dim); } .pp-foot a:hover { color: var(--green); }
   .pp-steps { list-style: none; margin: 0; padding: 0; display: grid; align-content: start; }
@@ -246,11 +247,11 @@ const SCRIPT = String.raw`
       '<p class="pp-pk">' + (names.join(" · ") || '<span class="pp-none">maintains nothing yet</span>') + '</p>' +
       '</article>';
   }
-  // A contributor's row: the square, @login with "maintainer" for one the file lists, and what they brought — approved packages, or the requests still on their way.
+  // A contributor's row: the square, @login with "maintainer" under it for one the file lists, and what they brought — approved packages, or the requests still on their way.
   function contributorRow(c) {
     var m = LISTED[c.login], st = c.approved ? num(c.approved) + " approved" : c.requests === 1 ? "first request in" : num(c.requests) + " requests in";
     var tip = num(c.approved) + " " + LANDED + " · " + num(c.requests) + " requested";
-    return '<a class="pp-person" href="' + userHref(c.login) + '" title="' + esc(c.login) + " · " + (m ? "maintainer" : "contributor") + '">' + initialsOf(c.login) + '<span class="pp-name">@' + esc(c.login) + (m ? '<em>maintainer</em>' : '') + '</span><span class="pp-st" title="' + esc(tip) + '">' + st + '</span></a>';
+    return '<a class="pp-person" href="' + userHref(c.login) + '" title="' + esc(c.login) + " · " + (m ? "maintainer" : "contributor") + '">' + initialsOf(c.login) + '<span class="pp-name"><span>@' + esc(c.login) + '</span>' + (m ? '<em>maintainer</em>' : '') + '</span><span class="pp-st" title="' + esc(tip) + '">' + st + '</span></a>';
   }
   function drawContributors() {
     var shown = ALL_ROWS ? RANKED : RANKED.slice(0, FIRST_ROWS), more = $("#contributors-all");
@@ -338,11 +339,11 @@ export const PEOPLE_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // Everyone with a request, ranked by the packages that landed (the registry's flag, captioned as what it counts), the file's logins tagged; the first rows, then Show all, which hands the keyboard to the first row it added.
+    // Everyone with a request, ranked by the packages that landed (the registry's flag, captioned as what it counts), the file's logins tagged on a line of their own under the login; the first rows, then Show all, which hands the keyboard to the first row it added.
     id: "people.contributors",
     page: "/people",
     anchor: ['<section class="op-card pp-contrib" id="contributors" aria-labelledby="contributors-h">', 'Contributors</h2><small id="contributors-by">by approved packages</small>', 'id="contributors-list"', '<button type="button" class="op-btn" id="contributors-all" hidden>Show all</button>'],
-    script: ['api("GET", "/api/v1/factory/packages")', "p.landed", "if (p.landed) c.approved++", '"approved by a maintainer, built by the project"', "b.approved - a.approved || b.requests - a.requests", '"#contributors-list"', "contributorRow", "userHref(c.login)", "<em>maintainer</em>", '"first request in"', "Show all ", "function showAll()", "next.focus()", 'noAnswer("people\'s lists", e)', '$("#maintainers-list").innerHTML = $("#contributors-list").innerHTML', 'href="/factory">bring the first package</a>'],
+    script: ['api("GET", "/api/v1/factory/packages")', "p.landed", "if (p.landed) c.approved++", '"approved by a maintainer, built by the project"', "b.approved - a.approved || b.requests - a.requests", '"#contributors-list"', "contributorRow", "userHref(c.login)", '<span class="pp-name"><span>@', "<em>maintainer</em>", '"first request in"', "Show all ", "function showAll()", "next.focus()", 'noAnswer("people\'s lists", e)', '$("#maintainers-list").innerHTML = $("#contributors-list").innerHTML', 'href="/factory">bring the first package</a>'],
     reads: [
       { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.owner", "packages.0.status", "packages.0.landed"] },
       { path: "/api/v1/factory/maintainers", fields: ["maintainers", "maintainers.0.login"] },

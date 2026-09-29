@@ -373,13 +373,16 @@ describe("the page", () => {
     expect(d.nodes["#col-2"].innerHTML).toContain(`href="/package/${F.disposablePkg}?ring=lab&amp;arch=${F.arch}"`);
     // An empty column says so.
     for (let i = 0; i < 5; i++) if (!Object.values(stage).some((s) => s === i)) expect(d.nodes[`#col-${i}`].innerHTML, `column ${i}`).toBe('<p class="fx-none">nothing here now</p>');
-    // The tiles: the line's own counts — a landed package on it again said so —, the builds a worker holds (none yet: lost's is queued), the review list's waiting, the registry's landed.
+    // The tiles: the line's own counts — a landed package on it again said so —, the builds a worker holds (none yet: lost's is queued), the review list's ready (Review's own tile: the Ready for review column, waiting for a claim), the registry's landed.
     const onLine = reg.filter((p) => d.stageOf(p) >= 0 && d.stageOf(p) < 4), again = onLine.filter((p) => p.landed).length;
     expect(d.nodes["#t-line-n"].textContent).toBe(String(onLine.length));
     expect(d.nodes["#t-line-s"].innerHTML).toBe(`requests on the line${again ? ` · ${again} of them new versions` : ""}`);
     expect(d.nodes["#t-building-n"].textContent).toBe("0");
     expect(d.nodes["#t-building-s"].innerHTML).toBe(`${Object.values(stage).filter((s) => s === 1).length} queued · 0 of 2 workers busy`);
-    expect(d.nodes["#t-ready-n"].textContent).toBe(String((await call("GET", "/api/v1/factory/review")).json.waiting));
+    const review = (await call("GET", "/api/v1/factory/review")).json;
+    expect(d.nodes["#t-ready-n"].textContent).toBe(String(review.ready));
+    expect(d.nodes["#t-ready-n"].textContent).toBe(d.nodes["#col-2-n"].textContent);
+    expect(d.nodes["#t-ready-s"].innerHTML).toBe("waiting for a claim");
     expect(d.nodes["#t-shipped-n"].textContent).toBe(String(reg.filter((p) => p.landed).length));
     expect(d.nodes["#t-shipped-s"].innerHTML).toMatch(/^approved by a maintainer, from \d+ contributors$/);
     expect(d.nodes["#t-shipped-n"].title, "the whole registry: an exact number").toBe("");

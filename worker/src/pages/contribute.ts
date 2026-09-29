@@ -80,7 +80,7 @@ const BODY = String.raw`
     <div class="op-stats fx-stats" id="tiles">
       <a class="op-stat" id="t-line" href="#line"><span class="k">In the factory</span><b class="n" id="t-line-n"><span class="skl"></span></b><span class="s" id="t-line-s">requests on the line</span></a>
       <a class="op-stat" id="t-building" href="#workers"><span class="k">Building now</span><b class="n" id="t-building-n"><span class="skl"></span></b><span class="s" id="t-building-s">workers busy</span></a>
-      <a class="op-stat" id="t-ready" href="/review"><span class="k">Ready for review</span><b class="n" id="t-ready-n"><span class="skl"></span></b><span class="s" id="t-ready-s">waiting for a maintainer</span></a>
+      <a class="op-stat" id="t-ready" href="/review"><span class="k">Ready for review</span><b class="n" id="t-ready-n"><span class="skl"></span></b><span class="s" id="t-ready-s">waiting for a claim</span></a>
       <a class="op-stat" id="t-shipped" href="/packages?origin=factory"><span class="k">Shipped</span><b class="n" id="t-shipped-n"><span class="skl"></span></b><span class="s" id="t-shipped-s">approved by a maintainer</span></a>
     </div>
   </section>
@@ -614,8 +614,8 @@ const SCRIPT = String.raw`
       + (DOWN.listing ? '<p class="fx-wempty">' + esc(DOWN.listing) + '</p>' : '');
   }
 
-  // ---- the line: where each package stands, from its targets (targets.ts — where each of its architectures stands, the server's one rule): building while an architecture builds, in review while the project builds it again, ready for review once it is built and nothing of it runs, shipped once approved; checking while nothing of it is in flight. Rejected, blocked and unmaintained registrations are off the line, and so is a request whose every build failed after its tries: nothing of it moves until its owner renews it.
-  var OFF = { rejected: 1, unmaintained: 1 }, SHIPPED = { approved: 1, published: 1 }, BUILT = { built: 1, reviewed: 1 }, RUNS = { building: 1, reviewing: 1 };
+  // ---- the line: where each package stands, from its targets (targets.ts — where each of its architectures stands, the server's one rule): building while an architecture builds, ready for review once it is built and nothing of it runs — waiting for a maintainer's claim —, in review from the claim until the decision: the project's rebuild a maintainer asked for is queued, running or staged (Review's in_review, the one meaning of the words on both pages, #274), shipped once approved; checking while nothing of it is in flight. Rejected, blocked and unmaintained registrations are off the line, and so is a request whose every build failed after its tries: nothing of it moves until its owner renews it.
+  var OFF = { rejected: 1, unmaintained: 1 }, SHIPPED = { approved: 1, published: 1 }, BUILT = { built: 1 }, CLAIMED = { reviewing: 1, reviewed: 1 }, RUNS = { building: 1, reviewing: 1 };
   // The one target word that says "in the pool" (targets.ts) — a target's, never the registry's status, and never a ring: where it is served is the approval's (approvalWhere).
   var IN_POOL = { published: 1 };
   function statuses(p) { var t = p.targets || {}; return Object.keys(t).map(function (a) { return t[a].status; }); }
@@ -624,7 +624,7 @@ const SCRIPT = String.raw`
     if (p.blocked_at || OFF[p.status]) return -1;
     var st = statuses(p), has = function (s) { return st.indexOf(s) >= 0; };
     if (has("building")) return 1;
-    if (has("reviewing")) return 3;
+    if (st.some(function (s) { return CLAIMED[s]; })) return 3;
     if (st.some(function (s) { return BUILT[s]; })) return 2;
     if (st.some(function (s) { return SHIPPED[s]; }) || (!st.length && p.landed)) return 4;
     if (allFailed(p)) return -1;
@@ -655,10 +655,9 @@ const SCRIPT = String.raw`
     }
     if (s === 2) {
       var built = arches.filter(function (a) { return BUILT[t[a].status]; });
-      if (arches.some(function (a) { return t[a].status === "reviewed"; })) return ["the project's build is staged · a maintainer decides", ""];
       return [(built.length === arches.length && arches.length > 1 ? "built on every architecture" : built.join(", ") + " built") + (off ? " · " + off : ""), off ? "warn" : ""];
     }
-    if (s === 3) return ["the project builds it again" + (off ? " · " + off : ""), ""];
+    if (s === 3) return [(arches.some(function (a) { return t[a].status === "reviewing"; }) ? "the project builds it again" : "the project's build is staged · a maintainer decides") + (off ? " · " + off : ""), ""];
     var a = standingOf(p);
     if (a) { var where = approvalWhere(a); return [where.word + (off ? " · " + off : ""), where.cls === "error" ? "bad" : ""]; }
     // No row to read yet: the targets' own word — in the pool once published; an approval alone promises nothing of its publish.
@@ -722,7 +721,7 @@ const SCRIPT = String.raw`
     if (shipped !== SHIPPED_SIG) { SHIPPED_SIG = shipped; if (shipped) loadApprovals(); }
   }
 
-  // ---- the four numbers: the line's own counts, the builds a worker holds now (the live read), the review list's waiting (one truth with Review), the registry's landed (approved by a maintainer — the Pool's and People's word). A list that did not answer reads "—", its reason on hover.
+  // ---- the four numbers: the line's own counts, the builds a worker holds now (the live read), the review list's ready (Review's own tile: waiting for a claim), the registry's landed (approved by a maintainer — the Pool's and People's word). A list that did not answer reads "—", its reason on hover.
   var LANDED_ONCE = {};
   function atLeast(n) { return num(n) + "+"; }
   function tile(key, row, why) {
@@ -738,8 +737,8 @@ const SCRIPT = String.raw`
     tile("line", COUNTS ? ["In the factory", num(COUNTS.line), "requests on the line" + (COUNTS.again ? " · " + num(COUNTS.again) + " of them new versions" : ""), COUNTS.line] : null, DOWN.reg);
     // Building now is what workers hold at this moment; the Building column's other cards wait in the queue.
     tile("building", COUNTS && wc && COUNTS.running !== null ? ["Building now", num(COUNTS.running), num(COUNTS.queued) + " queued · " + num(wc.building) + " of " + num(wc.alive) + " workers busy", COUNTS.running] : null, DOWN.reg || DOWN.listing);
-    // The oldest one's age rides on hover: the tile says what the number is, in a line.
-    tile("ready", REVIEW ? ["Ready for review", num(REVIEW.waiting), REVIEW.oldest_ms ? '<span title="the oldest has waited ' + esc(span(REVIEW.oldest_ms)) + '">waiting for a maintainer</span>' : "waiting for a maintainer", REVIEW.waiting] : null, DOWN.review);
+    // Ready for review is Review's own tile, word for word: the list's ready, waiting for a claim — a package claimed is in review on both pages, never counted here (#274).
+    tile("ready", REVIEW ? ["Ready for review", num(REVIEW.ready), "waiting for a claim", REVIEW.ready] : null, DOWN.review);
     var landed = COUNTS ? COUNTS.landed : [];
     // Counted over the registry's newest rows: when it was cut, at least that many, the reason on hover.
     tile("shipped", COUNTS ? ["Shipped", num(landed.length), "approved by a maintainer, from " + num(Object.keys(from).length) + (REG_CUT ? "+" : "") + " contributors", landed.length, REG_CUT ? atLeast : null, REG_CUT ? "at least: the registry read here is its newest " + num(REG.length) + " requests" : ""] : null, DOWN.reg);
@@ -897,14 +896,14 @@ export const FACTORY_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // Four numbers: the line's own counts — in the factory (a shipped package on the line again for a new version said so), building now (what a worker holds this moment: the live read's leased tasks behind a card's targets, the rest of the Building column queued) —, the review list's own `waiting` and `oldest_ms` — the number Review's and the Pipeline's tiles say — and the registry's `landed`, captioned as what it counts: approved by a maintainer, from the contributors who are not in the maintainer set. A list that did not answer reads "—" with its reason on hover.
+      // Four numbers: the line's own counts — in the factory (a shipped package on the line again for a new version said so), building now (what a worker holds this moment: the live read's leased tasks behind a card's targets, the rest of the Building column queued) —, the review list's own `ready` — Review's Ready for review tile, word for word: a package waiting for a claim, never one claimed, which is in review on both pages (#274) — and the registry's `landed`, captioned as what it counts: approved by a maintainer, from the contributors who are not in the maintainer set. A list that did not answer reads "—" with its reason on hover.
       id: "factory.tiles",
       page: "/factory",
       anchor: ['<div class="op-stats fx-stats" id="tiles">', 'id="t-line-n"', 'id="t-building-n"', 'id="t-ready-n"', 'id="t-shipped-n"', "In the factory", "Building now", "Ready for review", "Shipped"],
-      script: ["function drawTiles()", '"Ready for review"', "REVIEW.waiting", "REVIEW.oldest_ms", "span(REVIEW.oldest_ms)", "workerCounts(LISTING.workers || [])", "p.landed", "maintainerSet(function (m)", '"approved by a maintainer, from "', '" contributors"', "countUp(n, row[3], row[4])", "REG_CUT = !!d.truncated", "REG_CUT ? atLeast : null", "did not answer", "function running(p)", 'x.status === "leased"', '" of them new versions"', '" queued · "'],
+      script: ["function drawTiles()", '"Ready for review"', "num(REVIEW.ready)", '"waiting for a claim"', "workerCounts(LISTING.workers || [])", "p.landed", "maintainerSet(function (m)", '"approved by a maintainer, from "', '" contributors"', "countUp(n, row[3], row[4])", "REG_CUT = !!d.truncated", "REG_CUT ? atLeast : null", "did not answer", "function running(p)", 'x.status === "leased"', '" of them new versions"', '" queued · "'],
       reads: [
         { path: "/api/v1/factory/packages", fields: ["truncated", "packages", "packages.0.name", "packages.0.owner", "packages.0.landed", "packages.0.targets"] },
-        { path: "/api/v1/factory/review", fields: ["waiting", "oldest_ms"] },
+        { path: "/api/v1/factory/review", fields: ["ready"] },
         { path: "/api/v1/factory?live=1&limit=20", fields: ["workers", "workers.0.alive", "workers.0.current_task", "workers.0.revoked_at", "tasks", "tasks.0.id", "tasks.0.status"] },
         { path: "/api/v1/factory/maintainers", fields: ["maintainers", "maintainers.0.login"] },
       ],
@@ -1030,11 +1029,11 @@ export const FACTORY_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // The line: five columns, a card per package placed by its targets (targets.ts, the server's rule for where each architecture stands) — checking, building, ready for review, in review, shipped —, each counting its own cards, an empty one saying so; a request whose every build failed is off it. Each card links the package's one address, its architectures as the kit's squares with the shell's words; a shipped one says where its approval stands in the shell's one word (approvalWhere over GET /factory/approvals, read when the column changes) and leads to the ring that serves it or, in none, to its build. Read again when a build starts or ends, and a card that moved is lit.
+      // The line: five columns, a card per package placed by its targets (targets.ts, the server's rule for where each architecture stands) — checking, building, ready for review (built, waiting for a maintainer's claim), in review (claimed: the project's rebuild queued, running or staged — Review's in_review, #274), shipped —, each counting its own cards, an empty one saying so; a request whose every build failed is off it. Each card links the package's one address, its architectures as the kit's squares with the shell's words; a shipped one says where its approval stands in the shell's one word (approvalWhere over GET /factory/approvals, read when the column changes) and leads to the ring that serves it or, in none, to its build. Read again when a build starts or ends, and a card that moved is lit.
       id: "factory.line",
       page: "/factory",
       anchor: ['<section class="fx-line" id="line"', 'id="line-note"', "live · a card moves when its job ends", 'id="board"', ...LINE.map((_, i) => `id="col-${i}"`), ...LINE.map(([name]) => `<span>${escapeHtml(name)}</span>`)],
-      script: ['api("GET", "/api/v1/factory/packages")', "function stageOf(p)", 'has("building")', 'has("reviewing")', "if (allFailed(p)) return -1;", "TARGET_WORD[x.status]", "function hrefOf(p, s)", "approvalWhere(a)", "servedRing(rings)", '"/build/" + task', 'api("GET", "/api/v1/factory/approvals")', "avatarIcon(p.owner)", " op-fresh", "nothing here now", "if (SIG !== null && sig !== SIG) { loadRegistry();", 't.kind === "build"', "if (!document.hidden) loadRegistry();", 'noAnswer("registry", e)'],
+      script: ['api("GET", "/api/v1/factory/packages")', "function stageOf(p)", 'has("building")', "CLAIMED = { reviewing: 1, reviewed: 1 }", "BUILT = { built: 1 }", "if (allFailed(p)) return -1;", "TARGET_WORD[x.status]", "function hrefOf(p, s)", "approvalWhere(a)", "servedRing(rings)", '"/build/" + task', 'api("GET", "/api/v1/factory/approvals")', "avatarIcon(p.owner)", " op-fresh", "nothing here now", "if (SIG !== null && sig !== SIG) { loadRegistry();", 't.kind === "build"', "if (!document.hidden) loadRegistry();", 'noAnswer("registry", e)'],
       reads: [
         { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.name", "packages.0.owner", "packages.0.status", "packages.0.release", "packages.0.targets", "packages.0.updated_at", "packages.0.landed", "packages.0.blocked_at", "packages.0.detail"] },
         { path: "/api/v1/factory/review", fields: ["waiting"] },

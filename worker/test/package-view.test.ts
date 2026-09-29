@@ -16,7 +16,7 @@
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import worker from "../src/index";
-import { runScript, scriptOf, seedDashboard, type Fixture } from "./fixture";
+import { declared, runScript, scriptOf, seedDashboard, type Fixture } from "./fixture";
 
 let F: Fixture;
 type Who = "" | "bob" | "alice" | "carol" | "m1" | "m2";
@@ -512,5 +512,35 @@ describe("the page draws a factory package from its freshest word", () => {
     expect(lifted.nodes["#pkg-state"].innerHTML).not.toContain("in rings");
     expect(lifted.nodes["#install-b"].innerHTML).not.toContain("sudo pacman -S");
     expect(lifted.nodes["#pg-tiles"].innerHTML).not.toContain("edge #");
+  });
+});
+
+describe("a dependency's name in the graph", () => {
+  // The v1.0.0 production check (2026-09-29, #274) found glibc, whose version was 2.44+r50+g1848099f063e-1, drawn as "g…" at 1280: the name
+  // was the only part of a node that could shrink, the version never. The name keeps its width and the version is cut, at any width — what
+  // the page's stylesheet says, since no browser measures here, and what the page writes: the name before the version, both whole on hover.
+  const LONG = "2.44+r50+g1848099f063e-1";
+  it("keeps the name whole and cuts the version, however long it is", async () => {
+    const long = async (p: string, res: Response) => {
+      if (!p.startsWith(`/api/v1/package/${F.pkg2}?`)) return res;
+      const j = (await res.json()) as { depends: { name: string; provider: { version: string } | null }[] };
+      expect(j.depends.some((d) => d.provider), "a dependency the ring provides").toBe(true);
+      return Response.json({ ...j, depends: j.depends.map((d) => (d.provider ? { ...d, provider: { ...d.provider, version: LONG } } : d)) });
+    };
+    const p = await view(`/package/${F.pkg2}?ring=stable&arch=${F.arch}`, "", { edit: long });
+    const graph = p.nodes["#deps"].innerHTML as string;
+    expect(graph).toContain(`<span class="nm">${F.pkg}</span><span class="v">${LONG}</span>`);
+    expect(graph).toContain(`title="${F.pkg} ${LONG}`);
+    const html = (await call("GET", `/package/${F.pkg2}`)).text;
+    // The name never shrinks, and is cut only when it alone is wider than the node.
+    expect(declared(html, ".pkg-node .nm")).toMatchObject({ flex: "0 0 auto", "max-width": "100%", overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" });
+    // The version is what shrinks, to nothing if it must, and says so with an ellipsis.
+    const v = declared(html, ".pkg-node .v");
+    expect(v).toMatchObject({ "min-width": "0", overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" });
+    expect(v.flex ?? "0 1 auto", "the version may shrink").toMatch(/^\d+ [1-9]\d* /);
+    expect(v["flex-shrink"] ?? "1").not.toBe("0");
+    // The two sit in a box that may shrink inside the node, beside the tag, which never does.
+    expect(declared(html, ".pkg-node > span")).toMatchObject({ display: "flex", "min-width": "0" });
+    expect(declared(html, ".pkg-node .t")).toMatchObject({ flex: "none" });
   });
 });
