@@ -1,7 +1,7 @@
 /**
  * /request — the package request, on a page of its own: nothing to look at
- * but the four fields and the four confirmations. Linked from the footer
- * and from the Factory's first way; a contributor lands here to ask
+ * but the four fields and the four confirmations. Linked from the Factory's
+ * first way (its door is lit here) and from People; a contributor lands here to ask
  * for one thing. The page is the same for whoever opens it: the form is
  * served for everyone, its fields grey with the sign-in as the reason
  * until whoami answers with a person, live then — signed in with GitHub
@@ -125,7 +125,7 @@ export function requestHtml(poolUrl: string, version: RunningVersion): string {
     path: "/request",
     title: "Request a package · omarchy-pool",
     description: "Ask the Omarchy Pool for a package: the project's URL, a name, a description, the licence — checked, written once to the record, signed.",
-    active: "none",
+    active: "factory",
     body: BODY,
     script: SCRIPT,
     poolUrl,

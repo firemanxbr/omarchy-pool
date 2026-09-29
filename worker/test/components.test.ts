@@ -13,9 +13,8 @@
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
-import worker from "../src/index";
 import { allComponents, SHELL_COMPONENTS, type Component, type Role } from "../src/pages/components";
-import { scriptOf, seedDashboard, type Fixture } from "./fixture";
+import { fetchPage, scriptOf, seedDashboard, type Fixture } from "./fixture";
 
 let F: Fixture;
 let COMPONENTS: Component[];
@@ -34,7 +33,8 @@ async function call(method: string, path: string, as: Role = "anonymous", body?:
   // The browser's cookie, as tests/e2e-worker.sh sends it.
   if (as !== "anonymous") headers.cookie = `omc=${F.sessions[as]}`;
   const ctx = createExecutionContext();
-  const res = await worker.fetch(new Request(`http://pool.test${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }), env, ctx);
+  // fetchPage: the Worker's handler, and the three pages whose address redirects since #240 drawn as they were — their manifests stand until #248 folds them into Status.
+  const res = await fetchPage(new Request(`http://pool.test${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }), env, ctx);
   await waitOnExecutionContext(ctx);
   const type = res.headers.get("content-type") ?? "";
   // An icon is bytes, not text: read it as such so the runtime does not warn.

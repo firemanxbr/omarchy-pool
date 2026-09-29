@@ -420,7 +420,8 @@ export function packagesHtml(poolUrl: string, version: RunningVersion): string {
     path: "/packages",
     title: "Packages · omarchy-pool",
     description: "Search the packages a ring serves; versions per ring, dependencies, what loads them, files.",
-    active: "none",
+    // The packages list and a package's page are the Pool's: what a user comes to the pool for (#240).
+    active: "pool",
     body: SEARCH_BODY,
     script: SEARCH_SCRIPT.replace("__CHARTS__", CHARTS),
     poolUrl,
@@ -433,7 +434,7 @@ export function packageHtml(name: string, poolUrl: string, version: RunningVersi
     path: `/package/${name}`,
     title: `${name} · omarchy-pool`,
     description: `${name}: versions per ring, dependencies, what loads it, files.`,
-    active: "none",
+    active: "pool",
     body: PACKAGE_BODY,
     script: PACKAGE_SCRIPT,
     poolUrl,

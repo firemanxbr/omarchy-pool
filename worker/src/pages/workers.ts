@@ -138,7 +138,8 @@ export function workersHtml(poolUrl: string, version: RunningVersion): string {
     path: "/workers",
     title: "Workers · omarchy-pool",
     description: "Every worker building for the pool, by kind — the project's, the review ones two maintainers vouched for, the contributors' — alive or gone, how busy, what it built.",
-    active: "none",
+    // The machines are the Factory's: they build what contributors ask for, and the footer no longer names them (#240).
+    active: "factory",
     body: BODY,
     script: SCRIPT.replace("__CHARTS__", CHARTS),
     poolUrl,

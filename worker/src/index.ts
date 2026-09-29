@@ -37,8 +37,9 @@
  *   GET  /api/v1/pool/unreferenced?keep=3          retention: what GC would delete
  *   POST /api/v1/pool/gc?keep=3&limit=200          delete it (objects, then rows)
  *   POST /api/v1/pool/relayout?phase=copy|purge     the one-time move to <source>/<arch>/ (the relayout job)
- *   GET  /                                         the dashboard: the Pool (users), /factory (contributors), /pipeline (everyone, live),
- *                                                  /docs, and the detail pages /packages /package/:name /security /status /journal /workers /review /user/:login
+ *   GET  /                                         the dashboard: the Pool (users), /factory (contributors), /review (maintainers),
+ *                                                  /docs, and the detail pages /packages /package/:name /status /people /workers /request /user/:login /build/:id
+ *                                                  (/pipeline, /journal, /security and /docs/api redirect to the section they became: MOVED)
  *   GET  /pool/<source>/<arch>/<file>              fallback static origin (dev)
  *   GET  /assets/kit.<hash>.css                    the v1 kit's stylesheet (pages/kit.ts): its primitives and icons, immutable under its hash
  *   GET  /setup                                    the one-command setup script (curl … | sudo bash -s -- --ring stable)
@@ -99,12 +100,9 @@ import { docsSecurityHtml } from "./pages/docs-security";
 import { glossaryHtml } from "./pages/glossary";
 import { docHtml, mdChapterAt } from "./pages/doc";
 import { statusHtml } from "./pages/status";
-import { journalHtml } from "./pages/journal";
 import { apiDocsHtml } from "./pages/api-docs";
 import { diffHtml } from "./pages/diff";
 import { packageHtml, packagesHtml } from "./pages/packages";
-import { securityHtml } from "./pages/security";
-import { pipelineHtml } from "./pages/pipeline";
 import { factoryHtml as factoryPageHtml } from "./pages/contribute";
 import { DASHBOARD_HOST, LEGACY_DASHBOARD_HOSTS, isProductionHost, machineOrigin, version } from "./meta";
 import { handleStatic } from "./routes/static";
@@ -152,6 +150,24 @@ export { RINGS, PROMOTED_RINGS, RINGS_BY_STABILITY, isRing, type Ring } from "./
 
 const API = "/api/v1";
 
+/**
+ * The addresses #240 took out of the header and the footer, and the section
+ * each became: the Pipeline, the Journal and Security are Status's (#248
+ * draws them there), and /docs/api is the API section of the docs index
+ * (#250) — the reference itself is still served at /api, a chapter of the
+ * docs map. A 301 to the section with the query kept — /journal?kind=role
+ * is the journal filtered, /security?ring=rc the ring's advisories — so a
+ * bookmark and every link written before still land where the page went.
+ * The modules of the three pages stay until #248 folds them into Status;
+ * the router no longer serves them.
+ */
+export const MOVED: Readonly<Record<string, string>> = {
+  "/pipeline": "/status",
+  "/journal": "/status#journal",
+  "/security": "/status#advisories",
+  "/docs/api": "/docs#api",
+};
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -189,6 +205,19 @@ export default {
       if (path === "/index.html" || path === "/contribute") {
         url.pathname = path === "/contribute" ? "/factory" : "/";
         return Response.redirect(url.toString(), 301);
+      }
+      // A page that became a section of another (MOVED): one address per page, and the old one still lands. Every key starts with a slash, so no name of Object's prototype is one.
+      const moved = MOVED[path];
+      if (moved) {
+        const [to, section] = moved.split("#");
+        url.pathname = to;
+        url.hash = section ?? "";
+        return Response.redirect(url.toString(), 301);
+      }
+      // The footer's Agents is #249's page; until it lands the address is the chapter on connecting an agent today, omarchy-cli as an MCP server — a 302, so no browser keeps the move once the page is there.
+      if (path === "/agents") {
+        url.pathname = "/docs/omarchy-cli-mcp";
+        return Response.redirect(url.toString(), 302);
       }
       // One command to join a ring: the script, read by people before they pipe it into sudo.
       if (path === "/setup" || path === "/setup.sh") return new Response(setupScript(machineOrigin(url), env.POOL_URL.replace(/\/$/, "")), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300" } });
@@ -233,15 +262,12 @@ export default {
         return Response.redirect(url.toString(), 301);
       }
       if (path === "/status") return html(statusHtml(env.POOL_URL, version(env)));
-      if (path === "/journal") return html(journalHtml(env.POOL_URL, version(env)));
       if (path === "/workers") return html(workersHtml(env.POOL_URL, version(env)));
       if (path === "/diff") return html(diffHtml(env.POOL_URL, version(env)));
       if (path === "/api" || path === "/api/") return html(apiDocsHtml(env.POOL_URL, version(env)));
       if (path === "/packages") return html(packagesHtml(env.POOL_URL, version(env)));
-      if (path === "/security") return html(securityHtml(env.POOL_URL, version(env)));
       if (path === "/factory") return html(factoryPageHtml(env.POOL_URL, version(env)));
       if (path === "/people") return html(peopleHtml(env.POOL_URL, version(env)));
-      if (path === "/pipeline") return html(pipelineHtml(env.POOL_URL, version(env)));
       if (path === "/review") return html(reviewHtml(env.POOL_URL, version(env)));
       if (path === "/request") return html(requestHtml(env.POOL_URL, version(env)));
       const user = path.match(/^\/user\/([A-Za-z0-9-]{1,39})$/);

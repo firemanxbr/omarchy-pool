@@ -17,7 +17,6 @@
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
-import worker from "../src/index";
 import { CHECKLIST } from "../src/request";
 import { CATEGORIES } from "../src/categories";
 import { EXPECTED_SOURCES, JOURNAL_KINDS, LATE_AFTER_HOURS, PROMOTED_RINGS, REPO_ARCHES, RINGS_BY_STABILITY, RINGS_UPWARD, SEVERITIES, UPSTREAMS, WORKER_ALIVE_MINUTES } from "../src/meta";
@@ -29,7 +28,7 @@ import { escapeHtml } from "../src/html";
 import { allComponents } from "../src/pages/components";
 import { HELPERS } from "../src/pages/layout";
 import { CHARTS } from "../src/pages/charts";
-import { ownScriptOf, scriptOf, seedDashboard, type Fixture } from "./fixture";
+import { fetchPage, ownScriptOf, scriptOf, seedDashboard, type Fixture } from "./fixture";
 import routerSource from "../src/index.ts?raw";
 import jobsSource from "../src/jobs.ts?raw";
 import factorySource from "../src/routes/factory.ts?raw";
@@ -38,9 +37,10 @@ import metricsSource from "../src/metrics.ts?raw";
 import schedulerSource from "../src/scheduler.ts?raw";
 import auditPrompt from "../../factory/prompts/audit.md";
 
+// The Worker's handler, and the three pages whose address redirects since #240 drawn as they were (the fixture's fetchPage), until #248 folds them into Status.
 async function get(path: string): Promise<Response> {
   const ctx = createExecutionContext();
-  const res = await worker.fetch(new Request(`http://pool.test${path}`), env, ctx);
+  const res = await fetchPage(new Request(`http://pool.test${path}`), env, ctx);
   await waitOnExecutionContext(ctx);
   return res;
 }

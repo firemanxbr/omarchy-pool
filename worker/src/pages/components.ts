@@ -198,11 +198,24 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // Every page with a route of its own that is not a door: the footer is where a reader finds People and the Request, not only a page's content.
+    // The footer's five (#240): Packages, Status, Agents in green, Docs, People — what is not a door, one hop from every page; the rest of the pages are one hop from these or from a door (layout.ts MORE says which). The page the reader is on or under is marked: a package's page is Packages', the API reference Docs', a diff Status'.
     id: "shell.footer-more",
     page: "/",
-    anchor: MORE.map((m) => `href="${m.href}"`),
-    script: ['footer .more a', 'href === "/packages" && here.indexOf("/package/") === 0', 'href === "/journal" && here === "/diff"'],
+    anchor: [...MORE.map((m) => `href="${m.href}"`), '<a href="/agents" class="accent">Agents</a>', '<nav class="more" aria-label="Footer">'],
+    script: ['footer .more a', 'href === "/packages" && here.indexOf("/package/") === 0', 'href === "/docs" && here === "/api"', 'href === "/status" && here === "/diff"'],
+    reads: [
+      // Agents is #249's page; until it lands the address is the chapter on connecting an agent today, a 302 no browser keeps.
+      { path: "/agents", status: 302, json: false },
+    ],
+    visible: EVERYONE,
+  },
+  {
+    // Go… (#240): served as a link to the packages, a button once the frame's script runs — the one the ⌘K menu (#241) opens from, through window.opPalette; until the menu is on the page the button goes where the link went. The key it names is the platform's.
+    id: "shell.go",
+    page: "/",
+    anchor: ['<a class="go" id="go" href="/packages" title="find a package">Go…<kbd>⌘K</kbd></a>'],
+    script: ['document.querySelector("header a.go")', 'document.createElement("button")', "window.opPalette.open()", "location.href = go.href", '"Ctrl K"'],
+    reads: [{ path: "/packages", json: false }],
     visible: EVERYONE,
   },
   {
