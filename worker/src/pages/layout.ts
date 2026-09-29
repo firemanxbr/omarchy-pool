@@ -495,48 +495,6 @@ const CSS = String.raw`
   .avatar.lg { width: 64px; height: 64px; font-size: 24px; border-color: var(--green); } .avatar.m { background: var(--green); color: var(--green-ink); border-color: var(--green); }
   .people { display: flex; flex-wrap: wrap; gap: 10px; }
   .person { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); background: var(--panel); padding: 5px 10px 5px 5px; text-decoration: none; color: var(--text); font-size: 13px; max-width: 100%; } .person:hover { border-color: var(--green); } .person > b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .person .r { color: var(--dim); font-size: 11.5px; }
-  /* ---- People (pages/people.ts, #251), a kit page: what the kit has no piece for — the page's 1120px frame, a person's square, a maintainer's card, a contributor's row, the steps to join. Every rule sits under a pp- class, and .pp in front where it sets what a kit rule sets: the kit's sheet comes after this one, and this sheet is every page's, so no selector here names a kit class. */
-  .pp { max-width: 1056px; margin: 0 auto; padding-top: 12px; display: grid; gap: 36px; }
-  .pp section { margin: 0; } .pp a { text-decoration: none; }
-  .pp-hero { display: flex; flex-wrap: wrap; gap: 32px 40px; align-items: flex-end; }
-  .pp-lede { flex: 1 1 480px; min-width: 0; display: grid; gap: 14px; }
-  .pp-facts { margin: 0; display: flex; flex-wrap: wrap; gap: 10px 22px; font-size: 13.5px; color: var(--muted); }
-  .pp-facts a { display: inline-flex; align-items: center; gap: 8px; color: inherit; } .pp-facts a:hover { color: var(--green); } .pp-facts i { color: var(--green); }
-  /* The tiles take the width their words need (the kit lets a tile shrink to nothing): "MAINTAINERS.toml" is one word, and it ran into the next tile at 1024px. */
-  .pp .pp-stats { flex: 1 1 360px; grid-template-columns: repeat(3, 1fr); } .pp .pp-stats > * { min-width: auto; } .pp .pp-stats .skl { width: 40px; height: 26px; }
-  .pp .pp-label { margin: 0 0 12px; font-family: var(--font-mono); }
-  .pp-maints { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); gap: 12px; }
-  .pp .pp-mcard { padding: 14px 16px; display: grid; gap: 12px; align-content: start; }
-  .pp-mhead { display: flex; align-items: center; gap: 12px; min-width: 0; }
-  .pp-who { display: grid; min-width: 0; line-height: 1.35; } .pp-who span { font-size: 12px; color: var(--dim); }
-  .pp-who a { font: 600 15px var(--font-display); color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .pp-who a:hover { color: var(--green); }
-  .pp-av { display: grid; place-items: center; flex: none; width: 24px; height: 24px; background: var(--panel-2); color: var(--muted); font-size: 10px; font-weight: 700; }
-  .pp-av.lg { width: 36px; height: 36px; font-size: 15px; }
-  .pp-agent { margin-left: auto; flex: none; display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid var(--line); background: var(--bg-deep); color: var(--muted); font-size: 10px; font-weight: 700; }
-  .pp-agent.none { border-style: dashed; background: transparent; color: var(--dim); font-weight: 400; }
-  .pp-mstats { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--line); border: 1px solid var(--line); }
-  .pp-mstats > div { background: var(--panel-2); padding: 8px 10px; display: grid; } .pp-mstats b { font: 600 17px var(--font-display); }
-  .pp-mstats span { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--dim); }
-  .pp-pk { margin: 0; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .pp-pk a { color: inherit; } .pp-pk a:hover { color: var(--green); }
-  .pp-none, .pp-note { color: var(--dim); } .pp-maints > .pp-note, .pp-list > .pp-note { grid-column: 1 / -1; margin: 0; font-size: 13px; } .pp-list > .pp-note { padding: 12px 16px; }
-  .pp-pair { display: flex; flex-wrap: wrap; gap: 16px; align-items: stretch; }
-  .pp .pp-contrib { flex: 1 1 560px; display: flex; flex-direction: column; }
-  .pp .pp-become { flex: 1 1 360px; display: grid; grid-template-rows: auto 1fr auto; }
-  .pp-h { margin: 0; display: flex; align-items: center; gap: 10px; font: 600 15px var(--font-display); letter-spacing: 0; } .pp-h i { color: var(--dim); }
-  .pp-h + small a { color: var(--dim); } .pp-h + small a:hover { color: var(--green); }
-  .pp-list { flex: 1; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(250px, 100%), 1fr)); align-content: start; }
-  .pp-person { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 9px 16px; border-bottom: 1px solid var(--line); font-size: 13px; color: var(--text); min-width: 0; }
-  a.pp-person:hover { background: var(--panel-2); } .pp-person.skel .skl { grid-column: 1 / -1; width: 60%; }
-  .pp-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .pp-name em { margin-left: 6px; font-style: normal; font-size: 11px; color: var(--green); }
-  .pp-st { font-size: 12px; color: var(--dim); white-space: nowrap; }
-  .pp .pp-foot { justify-content: space-between; margin-top: auto; border-top: 0; } .pp-foot a { margin-left: auto; color: var(--dim); } .pp-foot a:hover { color: var(--green); }
-  .pp-steps { list-style: none; margin: 0; padding: 0; display: grid; align-content: start; }
-  .pp-steps li { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 12px; align-items: start; padding: 14px 16px; border-bottom: 1px solid var(--line); }
-  .pp-steps li > div { display: grid; gap: 2px; } .pp-steps b { font: 600 14px var(--font-display); } .pp-steps li > div > span { font-size: 12.5px; color: var(--dim); }
-  .pp .pp-box { width: 30px; height: 30px; }
-  .pp-apply { padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12.5px; color: var(--dim); }
-  /* A phone: the three tiles as two and one, so "MAINTAINERS.toml" keeps its line; the cards and the rows are one column already. */
-  @media (max-width: 520px) { .pp .pp-stats { grid-template-columns: 1fr 1fr; } .pp .pp-stats > :last-child { grid-column: 1 / -1; } }
   .landed { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); gap: 12px; }
   .land { border: 1px solid var(--line); background: var(--panel); padding: 12px 14px; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; align-items: center; }
   .land .avatar { grid-row: span 3; } .land .n { font-weight: 500; display: flex; justify-content: space-between; gap: 8px; align-items: baseline; } .land .n .v { color: var(--dim); font-size: 12px; } .land .n a { color: var(--text); text-decoration: none; } .land .n a:hover { color: var(--green); }
@@ -1509,19 +1467,21 @@ export const HELPERS = String.raw`
  * /me signs a visitor in and comes back to their own page, Review is a
  * queue anyone may read. `words` are what else a reader may type for it:
  * the Journal, the Pipeline and Security are sections of Status now
- * (index.ts MOVED), so "journal" finds Status. test/go-menu.test.ts opens
+ * (index.ts MOVED), so "journal" finds Status; the workers are the
+ * Factory's (the door the Workers page lights, its tile one hop from it),
+ * not People's since #251. test/go-menu.test.ts opens
  * every address and finds every fragment on its page — Home's #get-started
  * included, which #243 keeps on its "Point pacman at a ring".
  */
 export const GO_ACTIONS: { label: string; hint: string; icon: LucideName; href?: string; act?: "theme"; words: string[] }[] = [
   { label: "Browse packages", hint: "/", icon: "search", href: "/packages", words: ["search", "find", "list"] },
   { label: "Set up the pool", hint: "›", icon: "terminal", href: "/#get-started", words: ["setup", "install", "pacman", "ring", "command"] },
-  { label: "Request a package", hint: "factory", icon: "git-pull-request", href: "/factory", words: ["new", "add", "contribute", "bring"] },
+  { label: "Request a package", hint: "factory", icon: "git-pull-request", href: "/factory", words: ["new", "add", "contribute", "bring", "workers"] },
   { label: "Your requests", hint: "SIGNED IN", icon: "list-checks", href: "/me", words: ["mine", "my", "workspace", "builds"] },
   { label: "Review queue", hint: "MAINTAINERS", icon: "clipboard-check", href: "/review", words: ["approve", "maintain", "staged"] },
   { label: "Connect your agent", hint: "›", icon: "bot", href: "/agents", words: ["mcp", "ai", "assistant"] },
   { label: "Docs", hint: "", icon: "book-open", href: "/docs", words: ["documentation", "help", "api", "guide"] },
-  { label: "People", hint: "", icon: "users", href: "/people", words: ["maintainers", "contributors", "workers", "who"] },
+  { label: "People", hint: "", icon: "users", href: "/people", words: ["maintainers", "contributors", "who"] },
   { label: "Status", hint: "LIVE", icon: "activity", href: "/status", words: ["health", "journal", "pipeline", "security", "advisories", "releases"] },
   { label: "Theme: dark / light", hint: "", icon: "sun-moon", act: "theme", words: ["mode", "colour", "color"] },
 ];
@@ -1827,6 +1787,13 @@ export interface PageOptions {
    * not pays nothing for it: no request, no bytes.
    */
   kit?: boolean;
+  /**
+   * The page's own rules, for what the kit's primitives do not draw: a
+   * <style> after the frame's CSS and the kit's sheet, so a rule here
+   * refines theirs. It is served with this page only, and the other pages
+   * pay nothing for it.
+   */
+  css?: string;
 }
 
 /**
@@ -2021,7 +1988,7 @@ export function page(o: PageOptions): string {
 <script>${THEME_BOOT}</script>${analyticsTag(v)}
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Geist:wght@500;600;700&display=swap">
-<style>${CSS}</style>${o.kit ? `\n<link rel="stylesheet" href="${KIT_SHEET_PATH}">` : ""}
+<style>${CSS}</style>${o.kit ? `\n<link rel="stylesheet" href="${KIT_SHEET_PATH}">` : ""}${o.css ? `\n<style>${o.css}</style>` : ""}
 </head>
 <body>
 <div id="progress"></div>

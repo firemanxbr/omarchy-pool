@@ -5,9 +5,17 @@
 # (https://omarchy-pool.org/docs/governance#becoming). The People page's
 # "Open the issue" opens this form (worker/src/governance.ts, APPLY_URL),
 # and worker/test/governance.test.ts reads it.
+#
+# Who applies is who opens the issue: the form asks for no login, so an
+# application never names an account other than its author's, and the
+# maintainer's pull request adds the author's login.
+#
+# GitHub applies a label only when the repository has it, and skips one it
+# does not have without a word: maintainer-application is created once, by
+# a maintainer, in the repository's labels.
 name: Maintainer application
 description: Ask to become a maintainer. You need one package a maintainer approved.
-title: "Maintainer application: @"
+title: "Maintainer application"
 labels: ["maintainer-application"]
 body:
   - type: markdown
@@ -16,14 +24,8 @@ body:
         Maintainers read what contributors request, have the project build it again, and approve or reject that build. The rules are on the [Governance](https://omarchy-pool.org/docs/governance#becoming) page.
 
         This issue asks. It decides nothing. If a maintainer agrees, they open a pull request that adds your login to `factory/MAINTAINERS.toml`, and another maintainer approves it. Once it is merged, you are in: the pool applies the file within ten minutes.
-  - type: input
-    id: login
-    attributes:
-      label: GitHub login
-      description: The login you sign in to the pool with. It goes into MAINTAINERS.toml as you write it here.
-      placeholder: octocat
-    validations:
-      required: true
+
+        Open it from the GitHub account you sign in to the pool with. That account is the one that applies, and its login is the one the pull request adds.
   - type: textarea
     id: packages
     attributes:

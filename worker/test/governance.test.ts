@@ -25,7 +25,7 @@ describe("governance file", () => {
   });
 });
 
-// The way in (#251): the People page's Open the issue and the governance chapter open this form, and what it asks is what the maintainers decide on — who, the approved package, the agent, the architectures, the rules agreed to.
+// The way in (#251): the People page's Open the issue and the governance chapter open this form, and what it asks is what the maintainers decide on — the approved package, the agent, the architectures, the rules agreed to. Who applies is the issue's author: a login typed into the form could name another account than the one that applied, one with no record of its own.
 describe("maintainer application", () => {
   it("is the issue form the pages link, and asks what the maintainers decide on", () => {
     expect(APPLY_URL).toMatch(/\/issues\/new\?template=maintainer\.yml$/);
@@ -34,7 +34,10 @@ describe("maintainer application", () => {
     expect(applicationForm).toMatch(/^labels: \["maintainer-application"\]$/m);
     expect(applicationForm).toMatch(/^body:$/m);
     const ids = [...applicationForm.matchAll(/^ {4}id: ([a-z-]+)$/gm)].map((m) => m[1]);
-    expect(ids).toEqual(["login", "packages", "agent", "arches", "why", "rules"]);
+    expect(ids).toEqual(["packages", "agent", "arches", "why", "rules"]);
+    expect(applicationForm).toMatch(/^title: "Maintainer application"$/m);
+    expect(applicationForm, "the form asks for no login: the author is the applicant").not.toMatch(/^ {6}label: GitHub login$/m);
+    expect(applicationForm).toContain("Open it from the GitHub account you sign in to the pool with.");
     // The architectures are the pool's, every one of them.
     const arches = /id: arches[\s\S]*?options:\n((?: {8}- label: .+\n)+)/.exec(applicationForm)?.[1] ?? "";
     expect([...arches.matchAll(/- label: (.+)/g)].map((m) => m[1])).toEqual([...REPO_ARCHES]);
