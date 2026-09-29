@@ -25,9 +25,10 @@
  * them; carol, blocked by m1 with her package `hers` — the brake's table has
  * a row, and m2 is the other maintainer who could lift it; dave, whose two
  * packages m1 approved and neither ring serves: `lost`, whose publish job
- * failed on w1, and `pulled`, blocked by m2 with the approval standing —
- * the two states of an approval that stands outside every ring, written as
- * rows; m1 and m2, the maintainers — w1 is m1's project worker, m2 asked
+ * failed on w1, and `pulled`, blocked by m2 with the approval standing (a
+ * block from before #242, which withdraws it now) — the two states of an
+ * approval that stands outside every ring, written as rows; m1 and m2, the
+ * maintainers — w1 is m1's project worker, m2 asked
  * for the project's builds and approved them. Every login signs in with the cookie
  * `omc=oms_<login>` and the CLI token `omc_<login>`; the workers' tokens
  * are `omw_<id>`. `F.sessions` maps the three signed-in roles to their
@@ -43,9 +44,11 @@
  * (F.contributorTask, F.projectTask) stops before that: its
  * publish job sits in the queue, so its project build is still staged with
  * its evidence — what the build page, the review and the person's page
- * show. Three later community builds of `mine` are staged and undecided:
- * F.stagedTask for the probes that must not change anything,
- * F.disposableTask and F.spareTask for the acts that reject a row.
+ * show. A later community build of `mine` is staged and undecided,
+ * F.stagedTask, for the probes that must not change anything; and alice's
+ * `disposable` and `spare` have one staged build each, F.disposableTask
+ * and F.spareTask, for the acts that reject a row — a decision covers its
+ * whole package (#242), so a row one page rejects is a package of its own.
  *
  * One pool job of every kind sits done in the queue (F.jobs), its params
  * as the brain queues them and its result as the Rust worker posts it, so
@@ -73,6 +76,7 @@ import { version } from "../src/meta";
 import { pipelineHtml } from "../src/pages/pipeline";
 import { journalHtml } from "../src/pages/journal";
 import { securityHtml } from "../src/pages/security";
+import { settleTargets } from "../src/targets";
 
 export type { Fixture };
 
@@ -343,15 +347,22 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
   // `mine` stops at the approval: its publish job waits, its project build is staged with everything on it.
   const mine = await story("mine", "1.0");
 
-  // Three more of alice's builds of mine, staged and undecided — written as rows, the way a build older than the gate sits in the table.
-  const staged = async (version: string) =>
+  // A later build of mine, and one build each of alice's two other packages, staged and undecided — written as rows, the way a build older than the gate sits in the table.
+  // One decision covers a package (#242): the rows the acts reject are packages of their own, so rejecting one leaves the others as they were.
+  const staged = async (name: string, version: string) =>
     (await env.DB.prepare(
       `INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, lease_owner, staged_prefix, result, finished_at)
-       VALUES ('mine', ?, ?, 'draft:https://mine.example@latest', 'contributor', 100, 0, 'community', 'alice', 'build', 'staged', 'w3', ?, '{"vet":{"verdict":"pass","fails":0,"warnings":0,"failed":[],"warned":[]}}', ?) RETURNING id`,
-    ).bind(arch, version, `staging/alice/mine/${version}/`, new Date().toISOString()).first<{ id: number }>())!.id;
-  const stagedTask = await staged("1.0-2");
-  const disposableTask = await staged("1.0-3");
-  const spareTask = await staged("1.0-4");
+       VALUES (?, ?, ?, ?, 'contributor', 100, 0, 'community', 'alice', 'build', 'staged', 'w3', ?, '{"vet":{"verdict":"pass","fails":0,"warnings":0,"failed":[],"warned":[]}}', ?) RETURNING id`,
+    ).bind(name, arch, version, `draft:https://${name}.example@latest`, `staging/alice/${name}/${version}/`, new Date().toISOString()).first<{ id: number }>())!.id;
+  await env.DB.prepare(
+    `INSERT INTO factory_packages (name, owner, url, arches, status, detail, project, description, license) VALUES
+       ('disposable', 'alice', 'https://disposable.example', ?, 'staged', '1.0-1 built for ${arch} by w3; waiting for a maintainer', 'https://disposable.example', 'Disposable, a small tool for the tests', 'MIT'),
+       ('spare', 'alice', 'https://spare.example', ?, 'staged', '1.0-1 built for ${arch} by w3; waiting for a maintainer', 'https://spare.example', 'Spare, a small tool for the tests', 'MIT')`,
+  ).bind(JSON.stringify([arch]), JSON.stringify([arch])).run();
+  const stagedTask = await staged("mine", "1.0-2");
+  const disposableTask = await staged("disposable", "1.0-1");
+  const spareTask = await staged("spare", "1.0-1");
+  await settleTargets(env, ["mine", "disposable", "spare"]);
 
   // One done pool job of every kind the Pipeline's table words, as the
   // brain queued it (src/scheduler.ts, src/jobs.ts: the params) and the
@@ -404,10 +415,13 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
   // the project's build staged, m1's approval, the publish job it queued
   // failed on w1 (the registry stays "approved": a failed publish does not
   // touch it) — and `pulled`, the same up to a queued publish job, then
-  // blocked by m2 through the brake's own door, which cancels the job and
-  // pulls the package. GET /factory/approvals carries publish_status and
-  // blocked_at for them; the pages' one word for each is what
-  // one-truth.test.ts runs over these rows.
+  // blocked by m2 the way the brake's door did before #242: the job and the
+  // build cancelled, the package pulled (it was in no ring), the approval
+  // left standing. The door withdraws it now (routes/blocks.ts); the pool
+  // keeps the blocks made before, and "blocked" is their word.
+  // GET /factory/approvals carries publish_status and blocked_at for them;
+  // the pages' one word for each is what one-truth.test.ts runs over these
+  // rows.
   const approvedOutside = async (name: string, version: string) => {
     await request(name, version, "omc_dave");
     const built = (await env.DB.prepare(
@@ -424,7 +438,11 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
   const lost = await approvedOutside("lost", "0.3");
   await env.DB.prepare("UPDATE build_tasks SET status = 'failed', attempts = 3, error = 'the pool refused the object: signature check failed', finished_at = ?, lease_owner = 'w1' WHERE id = ?").bind(new Date().toISOString(), lost.publish).run();
   await approvedOutside("pulled", "0.2");
-  must(await call(env, "POST", "/factory/packages/pulled/block", { reason: "ships a binary the source does not build" }, "omc_m2"), 200, "block pulled");
+  const pulledNote = "blocked by m2: ships a binary the source does not build";
+  await env.DB.batch([
+    env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = ? WHERE name = 'pulled' AND kind IN ('build', 'publish') AND status IN ('queued', 'leased', 'staged')").bind(pulledNote),
+    env.DB.prepare("UPDATE factory_packages SET status = 'rejected', blocked_at = ?, blocked_by = 'm2', blocked_reason = 'ships a binary the source does not build', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = 'pulled'").bind(new Date().toISOString(), pulledNote),
+  ]);
 
   // The journal: one line of every kind the charts read, as the jobs write them (crates/pkg-repo, src/governance.ts, src/audience.ts).
   const today = new Date().toISOString().slice(0, 10);
@@ -454,7 +472,7 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
     arch, pkg: "zlib", pkg2: "xz", release, previousRelease, sha: zlib,
     contributor: "bob", owner: "alice", m1: "m1", m2: "m2",
     factoryPkg: "mine", publishedPkg: "ours", worker: "w1", communityWorker: "w3",
-    contributorTask: mine.contributorTask, projectTask: mine.projectTask, stagedTask, disposableTask, spareTask,
+    contributorTask: mine.contributorTask, projectTask: mine.projectTask, stagedTask, disposableTask, spareTask, disposablePkg: "disposable", sparePkg: "spare",
     blockedContributor: "carol", blockedPkg: "hers",
     outsider: "dave", failedPkg: "lost", pulledPkg: "pulled",
     jobs,
