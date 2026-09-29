@@ -9,9 +9,13 @@ name: Release
 # `release:minor` or `release:major`, or the bump given, moves the other
 # numbers), binaries are built for both architectures, a GitHub release is
 # published with notes from every pull request since the last tag, the worker
-# image is pushed for both architectures and the worker is deployed carrying
-# that version — every worker follows it. Versions start at v0.0.1 and grow
-# one step at a time. A merge alone changes nothing that runs.
+# image is pushed for both architectures — as `:<arch>-vX.Y.Z` first, every
+# role started from it on the runner (tests/image-smoke.sh), and only then
+# `:<arch>` and `:latest` (#277: an image that does not start stops here,
+# before any host can pull it) — and the worker is deployed carrying that
+# version: every set's updater follows it within two minutes. Versions start
+# at v0.0.1 and grow one step at a time. A merge alone changes nothing that
+# runs. Going back is rollback.yml.
 on:
   workflow_dispatch:
     inputs:
@@ -151,7 +155,13 @@ jobs:
     name: Worker image (${{ matrix.arch }})
     # The one image every worker runs — a contributor's or a maintainer's,
     # the registration decides — built from the binaries this release just
-    # published and tagged with its version; signed keyless.
+    # published and tagged with its version; signed keyless. Pushed as the
+    # version's tag only, then every role is started from it on this runner
+    # (#277): the project worker's self-test through its entrypoint, the
+    # broker answering, the builder's and the updater's self-tests. Only
+    # then does the architecture's tag move — the one the Studio's builders
+    # follow — and the manifest job moves :latest, the one every set's
+    # updater follows.
     needs: [version, publish]
     permissions:
       contents: read
@@ -175,13 +185,21 @@ jobs:
       - uses: sigstore/cosign-installer@v3
       - name: Log in to ghcr.io
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-      - name: Build, push, sign
+      - name: Build, push the version's tag only
         run: |
           set -euo pipefail
           tag="$IMAGE:${{ matrix.arch }}"
           docker build -f factory/image/Containerfile --build-arg BASE="${{ matrix.base }}" --build-arg ARCH="${{ matrix.arch }}" --build-arg POOL_RELEASE="$VERSION" \
-            -t "$tag" -t "$tag-$VERSION" .
-          docker push "$tag"; docker push "$tag-$VERSION"
+            -t "$tag-$VERSION" .
+          docker push "$tag-$VERSION"
+      - name: Every role starts from it, before any tag a host follows moves
+        run: bash tests/image-smoke.sh "$IMAGE:${{ matrix.arch }}-$VERSION"
+      - name: Move the architecture's tag, sign
+        run: |
+          set -euo pipefail
+          tag="$IMAGE:${{ matrix.arch }}"
+          docker tag "$tag-$VERSION" "$tag"
+          docker push "$tag"
           digest="$(docker inspect --format='{{index .RepoDigests 0}}' "$tag" | cut -d@ -f2)"
           cosign sign --yes "$IMAGE@$digest"
 
@@ -201,10 +219,11 @@ jobs:
       - name: Log in to ghcr.io
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: Publish latest and the version tag, sign them
+        # From the version's own images, which both architectures' smoke starts passed: :latest is what every set's updater follows.
         run: |
           set -euo pipefail
           for t in latest "$VERSION"; do
-            docker buildx imagetools create -t "$IMAGE:$t" "$IMAGE:x86_64" "$IMAGE:aarch64"
+            docker buildx imagetools create -t "$IMAGE:$t" "$IMAGE:x86_64-$VERSION" "$IMAGE:aarch64-$VERSION"
           done
           digest="$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{json .Manifest.Digest}}' | tr -d '"')"
           cosign sign --yes "$IMAGE@$digest"

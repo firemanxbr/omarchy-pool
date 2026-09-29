@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# release-rollback <vX.Y.Z> — what .github/workflows/rollback.yml runs
+# (#277): the pool goes back to an earlier release, the images and the
+# Worker together, from anywhere, with no host touched.
+#
+#   gh workflow run rollback.yml -f to=v1.0.2
+#
+# 1. The images: `:x86_64` and `:aarch64` re-pointed at that release's own
+#    (`:<arch>-v1.0.2`, pushed by its release and started by its smoke
+#    test), then `:latest` at both — each new digest signed, as a release
+#    signs its own.
+# 2. The Worker of that release, deployed from its tag with
+#    `POOL_VERSION=v1.0.2` and `POOL_DEPLOYED_AT` now: a pool left at the
+#    newer release would refuse the older images as outdated (426). No
+#    migration runs: they are forward-only and additive, and the database
+#    keeps the newer ones. A Worker from before #277 (a tag without
+#    worker/src/orders.ts) spreads a worker's whole row in its listing, so
+#    what #277 keeps to itself — a worker's site, its process, the rules'
+#    state — is cleared first (docs/security-model: *A Worker rolled back
+#    past #277*).
+# 3. A `deploy` event, "rolled back to v1.0.2 (from v1.0.3)", and the running
+#    version checked.
+#
+# Then the fleet follows the brain: every updater from #277 on sees the
+# pool's release change within two minutes and replaces what runs the other
+# image (the Studio's too, since its one-time step; an updater from before
+# #277 at its own fifteen-minute round).
+#
+# Needs: IMAGE (ghcr.io/<owner>/omarchy-worker), OMARCHY_API (the pool's API,
+# to read what runs), CLOUDFLARE_API_TOKEN (the deploy's), docker with
+# buildx, git with the tags, node; cosign to sign (ROLLBACK_SIGN=0 skips it).
+# A `to` that is not a release tag of this repository is refused before
+# anything moves.
+set -euo pipefail
+say() { printf '==> %s\n' "$*"; }
+die() { printf 'release-rollback: %s\n' "$*" >&2; exit 2; }
+to="${1:-}"
+[[ "$to" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "the release to go back to is a tag like v1.0.2 (got '${to}')"
+git rev-parse -q --verify "refs/tags/$to^{commit}" >/dev/null || die "$to is not a tag of this repository: nothing moved"
+: "${IMAGE:?IMAGE (ghcr.io/<owner>/omarchy-worker) is required}"
+[[ -n "${CLOUDFLARE_API_TOKEN:-}" ]] || die "CLOUDFLARE_API_TOKEN is not set: the Worker has to go back with the images, so nothing moved"
+: "${OMARCHY_API:=https://pkgs.omarchy-pool.org}"
+from="$(curl -fsS --max-time 30 "$OMARCHY_API/api/v1/version" 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true)"
+say "rolling the pool back to $to (from ${from:-an unknown release})"
+
+# 1. The images, each architecture's tag, then :latest at both.
+digests=()
+for arch in x86_64 aarch64; do
+  docker buildx imagetools inspect "$IMAGE:$arch-$to" >/dev/null || die "$IMAGE:$arch-$to does not exist: that release's image was never pushed"
+done
+for arch in x86_64 aarch64; do
+  docker buildx imagetools create -t "$IMAGE:$arch" "$IMAGE:$arch-$to"
+  say "$IMAGE:$arch → $arch-$to"
+done
+docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:x86_64-$to" "$IMAGE:aarch64-$to"
+say "$IMAGE:latest → $to (both architectures)"
+if [[ "${ROLLBACK_SIGN:-1}" == 1 ]]; then
+  for t in x86_64 aarch64 latest; do
+    digests+=("$(docker buildx imagetools inspect "$IMAGE:$t" --format '{{json .Manifest.Digest}}' | tr -d '"')")
+  done
+  for d in "${digests[@]}"; do cosign sign --yes "$IMAGE@$d"; done
+fi
+
+# 2. The Worker of that release, from its tag.
+at="$(mktemp -d)"
+trap 'git worktree remove --force "$at" >/dev/null 2>&1 || rm -rf "$at"' EXIT
+git worktree add --detach "$at" "$to" >/dev/null 2>&1 || die "could not check out $to"
+commit="$(git rev-parse "$to^{commit}")"
+deployed_at="$(date -u +%FT%TZ)"
+(
+  cd "$at/worker"
+  npm ci
+  if ! git cat-file -e "$to:worker/src/orders.ts" 2>/dev/null; then
+    npx wrangler d1 execute omarchy-repo --remote --command \
+      "UPDATE build_workers SET site = NULL, instance = NULL, instance_prev = NULL, auto_orders = NULL WHERE site IS NOT NULL OR instance IS NOT NULL OR instance_prev IS NOT NULL OR auto_orders IS NOT NULL" >/dev/null
+    echo "==> $to is from before #277: what its listing would serve of #277's columns (site, instance, the rules' state) is cleared"
+  fi
+  npx wrangler deploy --var "POOL_VERSION:$to" --var "POOL_COMMIT:$commit" --var "POOL_DEPLOYED_AT:$deployed_at"
+)
+say "the Worker of $to is deployed ($commit)"
+
+# 3. On the record, and what runs now.
+payload="$(jq -nc --arg v "$to" --arg from "${from:-}" --arg sha "$commit" --arg run "${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-firemanxbr/omarchy-pool}/actions/runs/${GITHUB_RUN_ID:-0}" \
+  '{version: $v, rolled_back_from: $from, commit: $sha, bump: "rollback", run_url: $run}' | sed "s/'/''/g")"
+(cd "$at/worker" && npx wrangler d1 execute omarchy-repo --remote --command \
+  "INSERT INTO events (kind, status, summary, payload) VALUES ('deploy', 'ok', 'omarchy-pool rolled back to $to (from ${from:-unknown})', '$payload')" >/dev/null)
+for _ in $(seq 1 12); do
+  running="$(curl -fsS --max-time 30 "$OMARCHY_API/api/v1/version" 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true)"
+  [[ "$running" == "$to" ]] && { say "running $running: every updater follows it within two minutes"; exit 0; }
+  sleep 5
+done
+die "expected $to running, got ${running:-nothing}"

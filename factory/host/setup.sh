@@ -13,8 +13,15 @@
 #     docker and binfmt services enabled — x86_64 containers on an aarch64
 #     host (and the other way round) run under user-mode emulation
 #   - the invoking user in the docker group (a new login picks it up)
-#   - compose.yml and register.sh copied to POOL_ROOT, .env with POOL_ROOT
-#     and WHERE, and one etc/*.env per service to fill in (mode 600)
+#   - compose.yml (with the `updater` service), register.sh and rollout.sh
+#     (which only wakes the updater) copied to POOL_ROOT, .env with
+#     POOL_ROOT and WHERE, and one etc/*.env per service to fill in (mode 600)
+#   - the systemd user timer of a host from before #277
+#     (omarchy-pool-rollout.timer and its service) disabled and removed:
+#     the updater rolls the host out now, following the pool's release
+#
+# Run again on a host that has run the pool since before #277, it is the
+# one-time step of the runbook's *The Studio host* (Once: the updater).
 #
 # It writes no secret: register.sh puts the worker tokens in etc/, and the
 # agent key goes in etc/agent.env by hand.
@@ -51,35 +58,20 @@ install -m 644 -o "$user" -g "$user" "$here/compose.yml" "$root/compose.yml"
 install -m 755 -o "$user" -g "$user" "$here/register.sh" "$root/register.sh"
 install -m 755 -o "$user" -g "$user" "$here/rollout.sh" "$root/rollout.sh"
 
-echo "==> rolling upgrades: omarchy-pool-rollout.timer (every 15 minutes, as $user)"
-# A user unit, so the docker group and the compose project are the user's;
-# linger keeps user units running without a login session.
+echo "==> rolling upgrades: the updater service (compose.yml), no host timer"
+# The updater (#277) follows the pool's release from inside the image. The
+# user timer a host from before #277 ran rollout.sh with is retired, as the
+# user who owns it: disabled, stopped and removed. One that somehow
+# survives runs the new rollout.sh, which only wakes the updater.
 home="$(getent passwd "$user" | cut -d: -f6)"
-install -d -o "$user" -g "$user" "$home/.config/systemd/user"
-cat > "$home/.config/systemd/user/omarchy-pool-rollout.service" <<UNIT
-[Unit]
-Description=Omarchy Pool: rolling upgrade of the workers to the latest image
-After=docker.service
-
-[Service]
-Type=oneshot
-WorkingDirectory=$root
-ExecStart=$root/rollout.sh
-UNIT
-cat > "$home/.config/systemd/user/omarchy-pool-rollout.timer" <<UNIT
-[Unit]
-Description=Omarchy Pool: check for a new worker image every 15 minutes
-
-[Timer]
-OnBootSec=5min
-OnUnitActiveSec=15min
-RandomizedDelaySec=2min
-
-[Install]
-WantedBy=timers.target
-UNIT
-chown "$user:$user" "$home/.config/systemd/user/omarchy-pool-rollout."{service,timer}
-loginctl enable-linger "$user" >/dev/null 2>&1 || true
+uid="$(id -u "$user")"
+units="$home/.config/systemd/user"
+if [[ -e "$units/omarchy-pool-rollout.timer" || -e "$units/omarchy-pool-rollout.service" ]]; then
+  runuser -u "$user" -- env XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user disable --now omarchy-pool-rollout.timer >/dev/null 2>&1 || true
+  rm -f "$units/omarchy-pool-rollout.timer" "$units/omarchy-pool-rollout.service"
+  runuser -u "$user" -- env XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user daemon-reload >/dev/null 2>&1 || true
+  echo "    omarchy-pool-rollout.timer retired (disabled, removed)"
+fi
 [[ -f "$root/.env" ]] || printf 'POOL_ROOT=%s\nWHERE=%s\n' "$root" "$(hostname -s)" > "$root/.env"
 chown "$user:$user" "$root/.env"
 for svc in pool-x86_64 pool-aarch64 review-x86_64 review-aarch64 community-x86_64 community-aarch64; do
@@ -121,7 +113,9 @@ Done. Next, as $user (log in again so the docker group applies):
   1. put your agent key in $root/etc/agent.env
   2. register the eight workers and trust the project's six:
        OMARCHY_CONTRIBUTOR_TOKEN=omc_… $root/register.sh        (a maintainer's token; from the profile page, shown once)
-  3. cd $root && docker compose pull && docker compose up -d
-  4. systemctl --user enable --now omarchy-pool-rollout.timer     (rolling upgrades from then on)
-  5. the Workers page lists them within a minute
+  3. cd $root && docker compose pull && docker compose up -d        (the only bare up -d: after it, ./rollout.sh)
+  4. the Workers page lists them within a minute; the updater keeps them on the pool's release from then on
+
+On a host that runs the pool already, the one-time step instead (runbook, The Studio host):
+  cd $root && docker compose up -d --no-deps updater
 NEXT
