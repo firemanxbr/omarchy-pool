@@ -57,9 +57,11 @@ describe("claims and leases", () => {
     expect(self.json).toMatchObject({ id: "w3", arch: "aarch64", trust: "community", owner: "alice", mode: "dedicated" });
   });
 
-  it("a maintainer enqueues a project build; a project worker takes it with a lease and a job token; a failure requeues it", async () => {
+  it("the enqueue job enqueues a project build; a project worker takes it with a lease and a job token; a failure requeues it", async () => {
     expect((await call("POST", "/factory/enqueue", { name: "tool", pkgbuild_ref: "abc123", reason: "test", arches: ["aarch64"] })).status).toBe(401);
-    const q = await call("POST", "/factory/enqueue", { name: "tool", pkgbuild_ref: "abc123", reason: "test", arches: ["aarch64"], version: "1.0-1" }, "omc_m1");
+    // The enqueue job's token (a recipe on main): a maintainer by hand queues a dry run only (#284, passkey-doors.test.ts).
+    const enqueueJob = await issueJobToken(env, { t: 1, k: "enqueue", s: scopesFor("enqueue", 1, "project", {}), e: Math.floor(Date.now() / 1000) + 3600, w: "w-pool" });
+    const q = await call("POST", "/factory/enqueue", { name: "tool", pkgbuild_ref: "abc123", reason: "test", arches: ["aarch64"], version: "1.0-1" }, enqueueJob);
     expect(q.status, JSON.stringify(q.json)).toBe(201);
     expect(q.json.tasks).toHaveLength(1);
     const id = q.json.tasks[0].id ?? q.json.tasks[0];

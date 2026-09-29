@@ -115,7 +115,7 @@ const CSS = String.raw`
   .st-next > .op-i { color: var(--dim); } .st-next > span { flex: 1; min-width: 0; } /* wrapped, never cut: "stable candidate · 1 of 2 green checks" is one fact */
   .st-next.warn > span { color: var(--amber); } .st-next.fail > span { color: var(--red); }
   .st-wait { margin: 0; font-size: 13px; color: var(--dim); }
-  .st .st-rb { flex: none; padding: 3px 10px; font-size: 12px; } .st-acts { display: flex; justify-content: flex-end; margin-top: -4px; } /* 26px tall: a destructive control keeps the 24px target */
+  .st .st-rb { flex: none; padding: 3px 10px; font-size: 12px; } .st-acts { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: -4px; } /* 26px tall: a destructive control keeps the 24px target */
   .st-hist td:nth-child(1), .st-hist td:nth-child(3), .st-hist td:nth-child(6), .st-hist td:nth-child(7) { white-space: nowrap; } .st-hist td:nth-child(7) .st-rb { margin-left: 8px; }
   .st-note { margin: 0; font-size: 12.5px; color: var(--muted); }
   .st-pair { display: flex; flex-wrap: wrap; gap: 16px; align-items: stretch; }
@@ -421,6 +421,21 @@ __CHARTS__
   }
   // The roll back a maintainer is offered: the shell's button (data-rollback; the click asks why, posts the job once and writes #rb-state). Drawn for a maintainer and nobody else — the action is theirs alone (POST /factory/jobs checks the role).
   function rollbackButton(ring, id, label) { return isMaintainer() ? ' <button type="button" class="op-btn danger st-rb" data-rollback="' + id + '" data-ring="' + ring + '" title="point ' + ring + ' back at release ' + id + '">' + esc(label) + '</button>' : ""; }
+  // A maintainer's forced promotion (#284): the ring's head into the ring above, past its evidence and the gate. Drawn for a maintainer on a ring that has one above; the click asks why, then their passkey (the shell's passkeyed, for exactly this promotion), and queues the promote job once — writing #rb-state as a roll back does.
+  function forceButton(ring, up) { return isMaintainer() ? '<button type="button" class="op-btn danger st-rb" data-force="' + ring + '" data-to="' + up + '" title="' + esc("promote " + ring + "'s head into " + up + " now, past its evidence and the gate") + '">' + esc("Force into " + up) + '</button>' : ""; }
+  document.addEventListener("click", function (ev) {
+    var b = ev.target.closest ? ev.target.closest("button[data-force]") : null; if (!b) return;
+    var from = b.getAttribute("data-force"), to = b.getAttribute("data-to"), el = $("#rb-state");
+    b.disabled = true;
+    ask({ title: "Force " + from + " into " + to + "?", text: esc(to + " serves " + from + "'s head at once, on both architectures, past the evidence and the gate. Its health check still rolls it back. Your passkey confirms it, and the journal keeps why."), input: "required", confirm: "Force with your passkey", danger: true }).then(function (note) {
+      if (note === null) { b.disabled = false; return; }
+      return passkeyed("promote:force:" + from + ":" + to, function (assertion) { return api("POST", "/api/v1/factory/jobs", { kind: "promote", params: { from: from, to: to, force: "yes", note: note }, assertion: assertion }); }).then(function (j) {
+        if (j.error) b.disabled = false;
+        el.hidden = false;
+        el.innerHTML = j.error ? pillHtml("error", "refused") + " " + refusalHtml(j) : pillHtml("ok", "queued") + " forced promotion of <b>" + esc(from) + "</b> into <b>" + esc(to) + "</b> is task #" + esc(j.task || "?") + " — a project worker runs it, the journal records it with your passkey";
+      });
+    }).catch(function (e) { b.disabled = false; toast("failed: " + esc(errorText(e)), "error"); });
+  });
   function ringCard(d, ring) {
     var r = ringOf(d, ring), rel = r.release, hist = historyOf(d, ring), rb = hist.filter(isRollback).length, next = nextOf(d, ring);
     var head = '<div class="st-ring-h"><span class="st-ring-t"><b class="op-ring-name ' + ring + '">' + ring + '</b>' + (rel ? '<span class="st-seq">#' + rel.seq + '</span>' : '') + '</span>';
@@ -440,11 +455,12 @@ __CHARTS__
     // The card's roll back points the ring at the release before its head, named by its sequence and its id — the dialog and the note after it say the id. A head that is a rollback has no such button: its parent is the release it rolled away from, the one that failed; the history offers every release, by name, to a maintainer who means it.
     var prev = hist.filter(function (x) { return x.id === rel.parent_id; })[0], headRow = hist.filter(function (x) { return x.id === rel.id; })[0];
     var back = rel.parent_id && !(headRow && isRollback(headRow)) ? rollbackButton(ring, rel.parent_id, "Roll back to " + (prev ? "#" + prev.seq + " (release " + rel.parent_id + ")" : "release " + rel.parent_id)) : "";
+    var up = PROMISED_UPWARD[PROMISED_UPWARD.indexOf(ring) + 1], acts = (up ? forceButton(ring, up) : "") + back;
     var rbWord = rb ? rb + (rb === 1 ? " rollback" : " rollbacks") : "no rollbacks";
     return head + '<span class="st-health">' + health + '<span>health</span></span></div>' +
       '<div class="st-ring-n"><div><span class="op-label">released</span><b>' + ago(rel.created_at) + '</b></div><div><span class="op-label">packages</span><b>' + num(r.package_count) + '</b></div></div>' +
       '<div class="st-strip"><div class="st-rs" role="img" aria-label="' + esc("the last " + hist.length + " releases of " + ring + ", " + rbWord) + '">' + slots + '</div><div class="st-strip-l"><span>last ' + HISTORY + ' releases</span><span>' + rbWord + '</span></div></div>' +
-      '<div class="st-next' + (next.tone ? " " + next.tone : "") + '">' + lucide("arrow-up-right", 13) + '<span title="' + esc(next.text) + '">' + esc(next.text) + '</span></div>' + (back ? '<div class="st-acts">' + back + '</div>' : "");
+      '<div class="st-next' + (next.tone ? " " + next.tone : "") + '">' + lucide("arrow-up-right", 13) + '<span title="' + esc(next.text) + '">' + esc(next.text) + '</span></div>' + (acts ? '<div class="st-acts">' + acts + '</div>' : "");
   }
   function drawRings(d) {
     $("#st-rings").innerHTML = PROMISED_UPWARD.map(function (ring) { return '<article class="op-card ' + ring + ' st-ring" id="ring-' + ring + '">' + ringCard(d, ring) + '</article>'; }).join("");
@@ -1029,7 +1045,8 @@ export function statusHtml(poolUrl: string, version: RunningVersion): string {
  * Everything reads what the dashboard already served — the stats (liveStats),
  * the worker listing, the journal by kind, an advisories report, the
  * service check, the bill — and nothing writes but a maintainer's roll back,
- * the shell's job (POST /factory/jobs). The stable ring is the third of
+ * the shell's job (POST /factory/jobs), and their forced promotion, the same
+ * job with their passkey (#284). The stable ring is the third of
  * RINGS (edge, rc, stable, lab), so a release's fields are read at
  * `rings.2`; the fixture's two stable releases are the ring's history.
  */
@@ -1094,6 +1111,16 @@ export const STATUS_COMPONENTS = (F: Fixture): Component[] => {
       script: ["function rollbackButton(ring, id, label) { return isMaintainer() ?", 'data-rollback="', 'data-ring="', '"Roll back to "', "!(headRow && isRollback(headRow))", 'whoami(function () { if (STATS) { drawRings(STATS); drawHistory(STATS); } })'],
       reads: [{ path: "/auth/me", as: "maintainer", fields: ["role"] }],
       acts: [{ method: "POST", path: "/api/v1/factory/jobs", body: { kind: "rollback", params: { ring: "stable", to: String(F.previousRelease), note: "the Status page's roll back, from the fixture" } }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 201 } }],
+      visible: ["maintainer"],
+    },
+    {
+      // A maintainer's forced promotion (#284): on edge's and rc's cards, the head into the ring above past its evidence and the gate — asked why, confirmed with the maintainer's passkey for exactly this promotion (the shell's passkeyed), queued once, written to #rb-state. The tests' pool.test is no relying party, so every maintainer is refused there (rp_unavailable) and nothing is queued; the passkey's door is passkey-doors.test.ts's.
+      id: "status.force-promotion",
+      page: "/status",
+      anchor: ['id="rb-state" hidden'],
+      script: ["function forceButton(ring, up) { return isMaintainer() ?", 'data-force="', '"Force into " + up', 'PROMISED_UPWARD[PROMISED_UPWARD.indexOf(ring) + 1]', 'passkeyed("promote:force:" + from + ":" + to', 'force: "yes"', '"Force with your passkey"', "refusalHtml(j)"],
+      reads: [{ path: "/auth/me", as: "maintainer", fields: ["role"] }],
+      acts: [{ method: "POST", path: "/api/v1/factory/jobs", body: { kind: "promote", params: { from: "rc", to: "stable", force: "yes", note: "the Status page's forced promotion, from the fixture" } }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } }],
       visible: ["maintainer"],
     },
     {

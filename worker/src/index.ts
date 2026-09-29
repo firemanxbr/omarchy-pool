@@ -648,11 +648,17 @@ async function api(method: string, path: string, url: URL, request: Request, env
     const hand = (await jobOf(request, env)) ? null : await contributorOf(request, env);
     return (hand && (await cancelByHand(hand, Number(m[1]), env))) ?? handleCancelTask(Number(m[1]), env);
   }
-  if (method === "POST" && path === "/factory/enqueue") return (await factoryWrite()) ?? handleEnqueue(request, env);
-  // A maintainer runs a pool job by hand: queued like the scheduler's, executed by a project worker.
+  if (method === "POST" && path === "/factory/enqueue") {
+    // The enqueue job (its token carries factory:write) publishes a recipe on main; a maintainer by hand queues a dry run only (#284).
+    if (await jobOf(request, env)) return (await factoryWrite()) ?? handleEnqueue(request, env, null);
+    const hand = await maintainerOf(request, env);
+    return hand instanceof Response ? hand : handleEnqueue(request, env, hand);
+  }
+  // A maintainer runs a pool job by hand: queued like the scheduler's, executed by a project worker. A promotion forced past its
+  // evidence is confirmed with the maintainer's passkey, in the browser (#284): webGate, for the promotion the body names.
   if (method === "POST" && path === "/factory/jobs") {
     const c = await maintainerOf(request, env);
-    return c instanceof Response ? c : handleQueueJob(c, request, env);
+    return c instanceof Response ? c : handleQueueJob(c, request, env, (subject) => webGate(request, url, env, c.login, subject));
   }
   if (method === "PUT" && path === "/security/advisories") return (await authorize(request, env, "security:write")) ?? handlePutAdvisories(request, env);
   if (method === "PUT" && path === "/security/matches") return (await authorize(request, env, "security:write")) ?? handlePutMatches(request, env);

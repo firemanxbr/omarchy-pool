@@ -1,7 +1,7 @@
 import { json, readJson, type Env } from "../index";
 import { writeAttestation, recipesDir } from "./seal";
 import { isRepoArch } from "../r2";
-import type { WorkerIdentity } from "./contributors";
+import { viaOf, type Contributor, type WorkerIdentity } from "./contributors";
 import { issueJobToken, scopesFor, type JobClaims } from "../jobtoken";
 import { isCategory } from "../categories";
 import { recordEvidence, vetSummary } from "../record";
@@ -28,7 +28,7 @@ import { parseTargets, settleTargets } from "../targets";
  * A lease that expires (worker died, build hung) goes back to the queue on
  * the scheduler's next tick. Maintainers (their token) or the enqueue job:
  *
- *   POST /factory/enqueue               {name, arches?, pkgbuild_ref, reason, version?, priority?}
+ *   POST /factory/enqueue               {name, arches?, pkgbuild_ref, reason, version?, priority?, publish?} — by hand, publish:false only (#284)
  *   POST /factory/tasks/:id/cancel
  *
  * Read:
@@ -161,16 +161,27 @@ async function enqueue(env: Env, t: { name: string; arches: string[]; pkgbuild_r
 
 // ---------- maintainers / pipeline ----------
 
-export async function handleEnqueue(request: Request, env: Env): Promise<Response> {
+/**
+ * POST /factory/enqueue — the project's build of a recipe, for its
+ * architectures. The enqueue job (`hand` null: its token carries
+ * factory:write) queues the recipes on main, and those publish into edge.
+ * A maintainer by hand — the session or an `omc_` token — queues a dry run
+ * only (#284): `publish: false`, built and reported, never published. What
+ * publishes comes from the enqueue job or from an approval, and an approval
+ * takes a passkey; so a build by hand that would publish is refused
+ * (`dry_run_only`) before anything is read.
+ */
+export async function handleEnqueue(request: Request, env: Env, hand: Contributor | null): Promise<Response> {
   const b = await readJson<{ name?: string; arches?: unknown; pkgbuild_ref?: string; reason?: string; version?: string; priority?: number; override?: boolean; publish?: boolean }>(request);
   if (b instanceof Response) return b;
   if (!b.name || !b.pkgbuild_ref || !b.reason) return json({ error: "name, pkgbuild_ref and reason are required" }, 400);
+  if (hand && b.publish !== false) return json({ error: `a build queued by hand is a dry run: send "publish": false — it builds and reports, and publishes nothing. What publishes comes from the enqueue job (a recipe on main) or from an approval, confirmed with a passkey; nothing was queued`, code: "dry_run_only" }, 403);
   const arches = parseArches(b.arches);
   const { build, skipped } = splitByUpstream(await providedBy(env, b.name), arches, b.override);
   if (!build.length) return nothingToBuild(skipped);
   const tasks = await enqueue(env, { name: b.name, arches: build, pkgbuild_ref: b.pkgbuild_ref, reason: b.reason, version: b.version ?? null, priority: b.priority, publish: b.publish });
   const note = (skipped.length ? `; ${skipped.map((s) => `${s.arch} skipped, ${s.source} ships ${s.version}`).join(", ")}` : "") + (b.publish === false ? "; dry run, nothing will be published" : "");
-  await event(env, "enqueue", "ok", `${b.name}${b.version ? " " + b.version : ""}: ${tasks.length} build task(s) queued for ${build.join(", ")} (${b.reason})${note}`, { name: b.name, arches: build, skipped, pkgbuild_ref: b.pkgbuild_ref, reason: b.reason, tasks });
+  await event(env, "enqueue", "ok", `${b.name}${b.version ? " " + b.version : ""}: ${tasks.length} build task(s) queued for ${build.join(", ")}${hand ? ` by ${hand.login}` : ""} (${b.reason})${note}`, { name: b.name, arches: build, skipped, pkgbuild_ref: b.pkgbuild_ref, reason: b.reason, tasks, ...(hand ? { by: hand.login, via: viaOf(request) } : {}) });
   return json({ tasks, arches: build, skipped }, 201);
 }
 
