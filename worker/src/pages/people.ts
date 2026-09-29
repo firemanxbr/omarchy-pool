@@ -143,7 +143,7 @@ const BODY = String.raw`
 const SCRIPT = String.raw`
   // The maintainer application (src/governance.ts APPLY_URL): the issue form on GitHub.
   var APPLY = ${JSON.stringify(APPLY_URL)};
-  // What an approved package is, the registry's own landed: the caption on every contributor's count, as on the Pool's and the Factory's tiles.
+  // What an approved package is, the registry's own landed: the caption on every contributor's count, as on the Factory's tiles.
   var LANDED = "approved by a maintainer, built by the project";
   // The contributors drawn before "Show all": the first rows of the ranking, two to a row on a wide screen.
   // The maps by login and by name have no prototype: a login or a package may be called constructor.
@@ -298,9 +298,10 @@ export function peopleHtml(poolUrl: string, version: RunningVersion): string {
  * profile, no act of its own (the button opens an issue on GitHub), and one
  * control that changes with the viewer — Open the issue, live for a
  * signed-in contributor with an approved package and grey with the reason
- * for everyone else, never hidden. The section ids are the targets the
- * Pool's tiles link to (#maintainers, #contributors); #workers, the link to
- * the Workers page, is where an older /people#workers still lands.
+ * for everyone else, never hidden. The section ids are the targets a link
+ * from elsewhere names (#maintainers, #contributors: the Pool's tiles until
+ * #243); #workers, the link to the Workers page, is where an older
+ * /people#workers still lands.
  */
 export const PEOPLE_COMPONENTS = (F: Fixture): Component[] => [
   {

@@ -306,12 +306,14 @@ describe("the /packages page", () => {
   });
 
   it("is one step from Home (All packages →), the footer and the ⌘K menu", async () => {
-    expect(await page("/")).toContain('<a class="more-link" href="/packages">All packages →</a>');
+    expect(await page("/")).toContain('<a class="home-more" href="/packages">All packages →</a>');
+    // Home's search hands the whole list the term alone: every ring and both architectures are the list's defaults, not a filter the link adds.
+    expect(scriptOf(await page("/"))).toContain('href="/packages?q=\' + encodeURIComponent(term) + \'">');
     expect(MORE[0]).toEqual({ href: "/packages", label: "Packages" });
     expect(/<footer>[\s\S]*?<\/footer>/.exec(await page("/status"))![0]).toContain('<a href="/packages">Packages</a>');
     expect(GO_ACTIONS.find((a) => a.label === "Browse packages")?.href).toBe("/packages");
-    // The Community packages tiles open the factory's packages, not a search for the word "factory" (Request "factory" on this list).
-    for (const path of ["/", "/factory"]) expect(scriptOf(await page(path)), path).toContain('"/packages?origin=factory"');
+    // The Factory's Community packages tile opens the factory's packages, not a search for the word "factory" (Request "factory" on this list). Home has no such tile since #243.
+    expect(scriptOf(await page("/factory"))).toContain('"/packages?origin=factory"');
   });
 
   it("says so when the list did not answer, and offers the same list again", () => {

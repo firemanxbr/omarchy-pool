@@ -854,7 +854,7 @@ export const HELPERS = String.raw`
   var LATE_MS = __LATE_AFTER_HOURS__ * 3600e3;
   // Whether a coverage row is late: the server's word when it sent one, else the same rule over last_sync. A source never synced is not late, it is missing — the sync line says so.
   function lateSync(c) { return typeof c.late === "boolean" ? c.late : !!c.last_sync && Date.now() - Date.parse(c.last_sync) > LATE_MS; }
-  // ---- a health check's result wears one word on every page that says it: the Pool's ring cards, the Pipeline's ring pills, its ring heads and its job's result, the Status rings table, and the 14-day grid both pages draw (the audit found it spelled three ways — ok on the cards and the table, healthy on the pill, healthy / unhealthy on the job, ok / warn / error on one grid and healthy / warning / failed on the other, over the same journal rows). The status is the journal's (events.ts: ok, warn, error); the word is what it means for a ring — healthy, warning, failed. The check (tests/health-check.sh) posts ok or error only — a ring with nothing rendered fails its check, since #47 — so warn is the journal's generic word, kept for a row a hand posts and drawn only where one is; a legend that advertised "nothing rendered" in amber named a state the check never produces while the state it named showed red. A cell or a pill wears the status as its class, the CSS paints it, PILL_COLOR says what it is painted.
+  // ---- a health check's result wears one word on every page that says it: the Pool's stable tile, the Pipeline's ring pills, its ring heads and its job's result, the Status rings table, and the 14-day grid both pages draw (the audit found it spelled three ways — ok on the cards and the table, healthy on the pill, healthy / unhealthy on the job, ok / warn / error on one grid and healthy / warning / failed on the other, over the same journal rows). The status is the journal's (events.ts: ok, warn, error); the word is what it means for a ring — healthy, warning, failed. The check (tests/health-check.sh) posts ok or error only — a ring with nothing rendered fails its check, since #47 — so warn is the journal's generic word, kept for a row a hand posts and drawn only where one is; a legend that advertised "nothing rendered" in amber named a state the check never produces while the state it named showed red. A cell or a pill wears the status as its class, the CSS paints it, PILL_COLOR says what it is painted.
   var HEALTH_WORD = { ok: "healthy", warn: "warning", error: "failed" };
   // The rings a health check covers — the ones that promise something, the scheduler's PROMOTED_RINGS — in the reader's order (RINGS_TEXT's, stable first), spliced in by page() so the list is typed once in meta.ts; the lab is promised nothing and is not checked, so no page draws a check for it.
   var PROMISED_RINGS = __PROMISED_RINGS__;
@@ -1189,7 +1189,7 @@ export const HELPERS = String.raw`
     return c;
   }
   function confWord(conf) { return (conf || SEC_CONF) === "all" ? "any confidence" : (conf || SEC_CONF); }
-  // ---- an advisory's severity wears one colour on every page that draws it — the pill on a row, the Pool's bars, the Security page's stack (the audit found three maps: critical + high red on one chart and amber on the next, low / unknown in two greys). SEV_PILL is the class the CSS paints a pill with, PILL_COLOR what that class is painted (the :root colours), SEV_COLOR the one following the other: critical and high red, medium amber, low blue, unknown grey; exploited red, the bucket a KEV package counts in. A chart stacks SEV_BUCKETS over advisoryCounts, a package once: the exploited first, then the not exploited by worst severity, critical with high and low with unknown — each bucket the word both charts say, the colour of its worst severity (as a package is coloured by its worst advisory) and the count read from the numbers. sevSeries(c) is the four rows a chart draws.
+  // ---- an advisory's severity wears one colour on every page that draws it — the pill on a row, the charts' bars, the Security page's stack (the audit found three maps: critical + high red on one chart and amber on the next, low / unknown in two greys). SEV_PILL is the class the CSS paints a pill with, PILL_COLOR what that class is painted (the :root colours), SEV_COLOR the one following the other: critical and high red, medium amber, low blue, unknown grey; exploited red, the bucket a KEV package counts in. A chart stacks SEV_BUCKETS over advisoryCounts, a package once: the exploited first, then the not exploited by worst severity, critical with high and low with unknown — each bucket the word both charts say, the colour of its worst severity (as a package is coloured by its worst advisory) and the count read from the numbers. sevSeries(c) is the four rows a chart draws.
   var SEV_PILL = { exploited: "error", critical: "error", high: "error", medium: "warn", low: "blue", unknown: "none" }, PILL_COLOR = { ok: "var(--green)", warn: "var(--amber)", error: "var(--red)", blue: "var(--blue)", none: "var(--dim)" };
   var SEV_COLOR = Object.keys(SEV_PILL).reduce(function (m, s) { m[s] = PILL_COLOR[SEV_PILL[s]]; return m; }, {});
   var SEV_BUCKETS = [["exploited", "exploited in the wild (KEV)", function (c) { return c.kev; }], ["critical", "critical + high", function (c) { return c.rest.critical + c.rest.high; }], ["medium", "medium", function (c) { return c.rest.medium; }], ["low", "low / unknown", function (c) { return c.rest.low + c.rest.unknown; }]];
@@ -1477,12 +1477,13 @@ export const HELPERS = String.raw`
   function endSkeleton() { document.querySelectorAll(".skel").forEach(function (el) { el.remove(); }); document.querySelectorAll(".empty.loading").forEach(function (el) { el.classList.remove("empty", "loading"); if (el.textContent === "Loading") el.textContent = ""; }); }
   // Numbers that change between refreshes flash briefly, so the page reads as live.
   function setTile(el, html) { el.classList.remove("skel"); if (el.innerHTML !== html) { el.innerHTML = html; el.classList.remove("bump"); void el.offsetWidth; el.classList.add("bump"); } }
-  function liveStats(render, everyMs) {
+  // A poll that fails keeps what the last one drew; a page that has something to say about it (Home, whose every section waits on this read) passes failed, which gets the error.
+  function liveStats(render, everyMs, failed) {
     function load() {
       serviceStatus();
       busy(fetch("/api/v1/stats")).then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
         .then(function (d) { pipelineFrom(d); render(d); endSkeleton(); })
-        .catch(function () {});
+        .catch(function (e) { if (failed) failed(e); });
     }
     load();
     setInterval(load, everyMs || 20000);
@@ -1985,9 +1986,8 @@ const DOCS_SEARCH = String.raw`
 
 /**
  * The page-view counter, when the deployment names one (ANALYTICS): Google
- * Analytics 4 for a G-… id — it sets cookies, so the Pool page's "no
- * cookies" line is only true without it — or Cloudflare Web Analytics for
- * a beacon token, which sets none. Nothing at all otherwise.
+ * Analytics 4 for a G-… id — it sets cookies — or Cloudflare Web Analytics
+ * for a beacon token, which sets none. Nothing at all otherwise.
  */
 function analyticsTag(v: RunningVersion): string {
   const id = v.analytics;

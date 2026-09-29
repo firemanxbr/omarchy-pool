@@ -82,7 +82,7 @@ describe("the People page", () => {
     // Served grey with the sign-in as the reason, its address set aside: what the shell's gate() draws for nobody, so the page reads the same before its script and without one.
     expect(served).toContain(`<a class="disabled op-btn" id="apply" data-href="${APPLY_URL}" tabindex="-1" aria-disabled="true" title="${SIGN_IN}">Open the issue</a>`);
     expect(APPLY_URL).toBe("https://github.com/firemanxbr/omarchy-pool/issues/new?template=maintainer.yml");
-    // No worker table here since #251: the Workers page is one link away, where the Pool's tile lands.
+    // No worker table here since #251: the Workers page is one link away.
     expect(served).not.toContain('class="wtable"');
     expect(served).toContain('<a id="workers" href="/workers">');
   });
@@ -119,15 +119,15 @@ describe("the People page", () => {
     expect(maint.length).toBeGreaterThan(0);
   });
 
-  it("says the number the Pool's Contributors tile says, and the Pool's workers tile opens the Workers page", async () => {
-    // Until #243 replaces the Pool's tiles: the tile that opens /people#contributors counts as this page counts — everyone with a request, a maintainer too.
+  it("is the one page that counts the contributors: the Pool's tiles that counted them left with #243", async () => {
+    // The Pool's Contributors tile opened /people#contributors and had to count as this page counts, so a click never landed on another number under the same word. #243 replaced the Pool's tiles with the pool's own numbers (names, arrivals, the stable release, the sources): the Pool draws no count of people and opens neither this page's contributors nor the Workers page from a tile, so this page's number is the only one.
+    const home = await (await real("/")).text();
+    expect(home).not.toContain('id="open-stats"');
+    expect(home).not.toContain("/people#contributors");
+    expect(home).not.toContain("/people#workers");
+    expect(home).not.toMatch(/"Contributors", num\(/);
     const people = await drawnAs(null);
-    const home = runScript(scriptOf(await (await real("/")).text()), { pathname: "/", functions: [], fetch: (path, init) => real(path, init) });
-    for (let i = 0; i < 300 && (home.nodes["#open-stats"]?.children?.length ?? 0) < 4; i++) await tick();
-    const tiles = home.nodes["#open-stats"].children as { href: string; innerHTML: string }[];
-    expect(tiles[0].href).toBe("/people#contributors");
-    expect(tiles[0].innerHTML).toContain(`<div class="v num">${people.nodes["#n-contributors"].textContent}</div><div class="s">with a request</div>`);
-    expect(tiles[2].href).toBe("/workers");
+    expect(people.nodes["#n-contributors"].textContent).toMatch(/^\d+$/);
   });
 
   it("draws a card per maintainer: since when, the agent of a worker of theirs, the decisions signed, what they maintain", async () => {

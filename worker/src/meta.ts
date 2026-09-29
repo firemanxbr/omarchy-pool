@@ -145,7 +145,7 @@ export const SEVERITIES = ["critical", "high", "medium", "low", "unknown"] as co
  * routes typed the four names by hand before (2026-09-18) — and eight page
  * modules after them: layout.ts now splices the promised rings in the
  * reader's order (PROMISED_RINGS) and every page reads that or the keys of
- * RING_TEXT, so a ring added here reaches the Pool's cards, the pickers,
+ * RING_TEXT, so a ring added here reaches the Pool's chain, the pickers,
  * the Security chart, the Status tables and the Pipeline's heads.
  */
 export const RINGS = ["edge", "rc", "stable", "lab"] as const;
@@ -186,7 +186,7 @@ export function sortRings<T extends string>(rings: T[]): T[] {
 }
 
 /**
- * What each ring is, said once: the Pool page's cards, the Docs, Get
+ * What each ring is, said once: the Pool's setup card, the Docs, Get
  * started and the status tiles read it from here (layout.ts hands it to
  * every page script as RINGS_TEXT). Promotion is by evidence, when the
  * evidence is there (scheduler.ts, gate.rs) — the words say so.
