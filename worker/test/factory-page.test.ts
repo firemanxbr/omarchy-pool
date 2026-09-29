@@ -373,13 +373,16 @@ describe("the page", () => {
     expect(d.nodes["#col-2"].innerHTML).toContain(`href="/package/${F.disposablePkg}?ring=lab&amp;arch=${F.arch}"`);
     // An empty column says so.
     for (let i = 0; i < 5; i++) if (!Object.values(stage).some((s) => s === i)) expect(d.nodes[`#col-${i}`].innerHTML, `column ${i}`).toBe('<p class="fx-none">nothing here now</p>');
-    // The tiles: the line's own counts — a landed package on it again said so —, the builds a worker holds (none yet: lost's is queued), the review list's waiting, the registry's landed.
+    // The tiles: the line's own counts — a landed package on it again said so —, the builds a worker holds (none yet: lost's is queued), the review list's ready (Review's own tile: the Ready for review column, waiting for a claim), the registry's landed.
     const onLine = reg.filter((p) => d.stageOf(p) >= 0 && d.stageOf(p) < 4), again = onLine.filter((p) => p.landed).length;
     expect(d.nodes["#t-line-n"].textContent).toBe(String(onLine.length));
     expect(d.nodes["#t-line-s"].innerHTML).toBe(`requests on the line${again ? ` · ${again} of them new versions` : ""}`);
     expect(d.nodes["#t-building-n"].textContent).toBe("0");
     expect(d.nodes["#t-building-s"].innerHTML).toBe(`${Object.values(stage).filter((s) => s === 1).length} queued · 0 of 2 workers busy`);
-    expect(d.nodes["#t-ready-n"].textContent).toBe(String((await call("GET", "/api/v1/factory/review")).json.waiting));
+    const review = (await call("GET", "/api/v1/factory/review")).json;
+    expect(d.nodes["#t-ready-n"].textContent).toBe(String(review.ready));
+    expect(d.nodes["#t-ready-n"].textContent).toBe(d.nodes["#col-2-n"].textContent);
+    expect(d.nodes["#t-ready-s"].innerHTML).toBe("waiting for a claim");
     expect(d.nodes["#t-shipped-n"].textContent).toBe(String(reg.filter((p) => p.landed).length));
     expect(d.nodes["#t-shipped-s"].innerHTML).toMatch(/^approved by a maintainer, from \d+ contributors$/);
     expect(d.nodes["#t-shipped-n"].title, "the whole registry: an exact number").toBe("");
@@ -427,6 +430,43 @@ describe("the page", () => {
     expect(d.nodes["#t-shipped-n"].textContent).toBe(`${reg.filter((p) => p.landed).length}+`);
     expect(d.nodes["#t-shipped-n"].title).toBe(`at least: the registry read here is its newest ${reg.length} requests`);
     expect(d.nodes["#t-shipped-s"].innerHTML).toMatch(/^approved by a maintainer, from \d+\+ contributors$/);
+  });
+
+  it("draws a live worker whose agent did not answer as not ready, with the agent's error — never idle, waiting for work — and idle again once it answers (#273)", async () => {
+    // The project's worker, as a review worker (it audits: its agent must answer), reported the refusal at its claim, as the Studio's did after v1.0.0 and v1.0.1.
+    const refused = "URLError: <urlopen error [Errno 111] Connection refused>";
+    const setAgent = (status: string, error: string | null) => env.DB.prepare("UPDATE build_workers SET agent_status = ?, agent_error = ?, agent_checked_at = ?, last_seen = ? WHERE id = ?").bind(status, error, new Date(Date.now() - 120e3).toISOString(), new Date().toISOString(), F.worker).run();
+    const before = await env.DB.prepare("SELECT agent_status, agent_error, agent_checked_at, current_task, kinds FROM build_workers WHERE id = ?").bind(F.worker).first<{ agent_status: string | null; agent_error: string | null; agent_checked_at: string | null; current_task: number | null; kinds: string | null }>();
+    await env.DB.prepare(`UPDATE build_workers SET current_task = NULL, kinds = '["build","publish","audit"]' WHERE id = ?`).bind(F.worker).run();
+    await setAgent("error", refused);
+    try {
+      const listed = (await call("GET", `/api/v1/factory?live=1&limit=20&t=${Math.random()}`)).json.workers.find((w: { id: string }) => w.id === F.worker);
+      expect(listed).toMatchObject({ alive: true, ready: false, agent_status: "error", agent_error: refused });
+      const d = await run({ functions: ["loadListing", "workerRowOf"] });
+      const list = d.nodes["#fx-wlist"].innerHTML as string;
+      const row = /<div class="fx-wrow notready">[\s\S]*?<div class="fx-bar">/.exec(list)?.[0] ?? "";
+      expect(row, list).toContain(`title="${F.worker}"`);
+      expect(row).toContain('<i class="fx-wmark" aria-hidden="true"></i><b>not ready</b>');
+      // The reason in the shell's words (wtNotReady, as /workers says it), whole on hover, with when it was checked.
+      const why = `its agent did not answer: ${refused.replace(/</g, "&lt;").replace(/>/g, "&gt;")} · checked 2m ago`;
+      expect(row).toContain(`<div class="fx-wjob" title="${why}">`);
+      expect(row).toContain(`<span class="fx-step">${why}</span>`);
+      expect(row).not.toContain("waiting for work");
+      // Counted apart from the idle, and listed before them.
+      expect(d.nodes["#fx-busy"].textContent).toMatch(/^\d+ busy · \d+ idle · 1 not ready$/);
+      const idleAt = list.indexOf('class="fx-wrow idle"');
+      if (idleAt >= 0) expect(list.indexOf('class="fx-wrow notready"')).toBeLessThan(idleAt);
+      // A task in hand wins, as on /workers: a busy worker is drawn at its job, whatever its last probe said.
+      expect(d.workerRowOf({ ...listed, current_task: 999999 })).not.toContain("not ready");
+      // The agent answers again (the worker's re-check): the next read draws it idle, the count gone.
+      await setAgent("ok", null);
+      await d.loadListing();
+      await settled();
+      expect(d.nodes["#fx-wlist"].innerHTML).not.toContain("notready");
+      expect(d.nodes["#fx-busy"].textContent).not.toContain("not ready");
+    } finally {
+      await env.DB.prepare("UPDATE build_workers SET agent_status = ?, agent_error = ?, agent_checked_at = ?, current_task = ?, kinds = ? WHERE id = ?").bind(before!.agent_status, before!.agent_error, before!.agent_checked_at, before!.current_task, before!.kinds, F.worker).run();
+    }
   });
 
   it("takes a request whose every build failed off the line, and tells its owner; an architecture nobody asked for is the faintest square", async () => {
@@ -556,7 +596,9 @@ describe("the page", () => {
     const bob = await run({ login: F.contributor });
     expect(bob.nodes["#mine-n"].textContent).toBe(String((await call("GET", "/api/v1/factory/packages")).json.packages.filter((p: { owner: string }) => p.owner === F.contributor).length));
     const m2 = await run({ login: F.m2 });
-    expect(m2.nodes["#mine-maint"].textContent).toMatch(/^Review queue · \d+ waiting ›$/);
+    // A maintainer's way to Review says Review's two numbers in Review's words: ready (waiting for a claim) and in review (claimed) — never `waiting`, which counts a claimed package whose rebuild is staged too (#274).
+    const review = (await call("GET", "/api/v1/factory/review")).json;
+    expect(m2.nodes["#mine-maint"].textContent).toBe(`Review queue · ${review.ready} ready · ${review.in_review} in review ›`);
   });
 
   it("fills a renewal from the record, and takes a name brought in the address", async () => {

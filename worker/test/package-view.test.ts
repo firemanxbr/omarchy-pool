@@ -16,7 +16,7 @@
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import worker from "../src/index";
-import { runScript, scriptOf, seedDashboard, type Fixture } from "./fixture";
+import { declared, runScript, scriptOf, seedDashboard, type Fixture } from "./fixture";
 
 let F: Fixture;
 type Who = "" | "bob" | "alice" | "carol" | "m1" | "m2";
@@ -284,6 +284,25 @@ describe("the package page, drawn for every viewer", () => {
     expect(p.nodes["#files"].innerHTML).toContain("Show all 450 files");
   });
 
+  it("says a package built and waiting for a claim is ready for review, and in review only once claimed: the Factory's and Review's words (#274)", async () => {
+    // spare is built and nobody claimed it: Review files it ready, the Factory's line Ready for review — the chip said "in review" until #274.
+    expect((await call("GET", "/api/v1/factory/review")).json.packages.find((x: { name: string }) => x.name === F.sparePkg)?.state).toBe("ready");
+    const p = await view(`/package/${F.sparePkg}`, "m1", { fresh: (a) => (a.includes("/story") ? `${a}?t=ready` : a) });
+    expect(p.nodes["#pkg-state"].innerHTML).toBe('<span class="op-pill warn">ready for review</span>');
+    expect(p.nodes["#you"].innerHTML).toContain("Ready for a maintainer: have the project build it again, then decide.");
+    // Claimed, the project builds it again: in review on every page, until the claim is let go.
+    const claimed = await call("POST", `/api/v1/factory/tasks/${F.spareTask}/build`, "m1", { note: "claimed by the package page's test" });
+    expect(claimed.status).toBe(200);
+    try {
+      expect((await call("GET", "/api/v1/factory/review")).json.packages.find((x: { name: string }) => x.name === F.sparePkg)?.state).toBe("in_review");
+      const q = await view(`/package/${F.sparePkg}`, "m1", { fresh: (a) => (a.includes("/story") ? `${a}?t=claimed` : a) });
+      expect(q.nodes["#pkg-state"].innerHTML).toBe('<span class="op-pill warn">in review</span>');
+      expect(q.nodes["#you"].innerHTML).toContain("The project builds it again; the decision follows.");
+    } finally {
+      expect((await call("POST", `/api/v1/factory/tasks/${F.spareTask}/release`, "m1", { reason: "let go by the package page's test" })).status).toBe(200);
+    }
+  });
+
   it("says a rejected package is rejected — not waiting for a worker, nor installable after an approval", async () => {
     expect((await call("POST", `/api/v1/factory/tasks/${F.spareTask}/reject`, "m1", { note: "the recipe fetches outside its sources" })).status).toBe(200);
     const p = await view(`/package/${F.sparePkg}`, "m1", { fresh: (a) => (a.includes("/story") ? `${a}?t=rejected` : a) });
@@ -297,8 +316,8 @@ describe("the package page, drawn for every viewer", () => {
 
   it("keeps the approval that stands and its publish on the page while a newer build of the package waits for a maintainer", async () => {
     const p = await view(`/package/${F.factoryPkg}`, "", { functions: ["timeline"] });
-    // The newer build is the review's (in review, waiting for a maintainer); m2's approval of 1.0 is what the rings will serve, its publish on its way.
-    expect(p.nodes["#pkg-state"].innerHTML).toContain("in review");
+    // The newer build is the review's (ready for review, waiting for a maintainer's claim); m2's approval of 1.0 is what the rings will serve, its publish on its way.
+    expect(p.nodes["#pkg-state"].innerHTML).toContain("ready for review");
     expect(p.nodes["#stages"].innerHTML).toContain("publishing into edge");
     expect(p.nodes["#stage-panel"].innerHTML).toContain('stays approved by <a href="/user/m2"');
     expect(p.nodes["#who"].innerHTML).toMatch(/reviewed by<\/span><span class="l"><a href="\/user\/m2"[^>]*>@m2<\/a>/);
@@ -512,5 +531,38 @@ describe("the page draws a factory package from its freshest word", () => {
     expect(lifted.nodes["#pkg-state"].innerHTML).not.toContain("in rings");
     expect(lifted.nodes["#install-b"].innerHTML).not.toContain("sudo pacman -S");
     expect(lifted.nodes["#pg-tiles"].innerHTML).not.toContain("edge #");
+  });
+});
+
+describe("a dependency's name in the graph", () => {
+  // The v1.0.0 production check (2026-09-29, #274) found glibc, whose version was 2.44+r50+g1848099f063e-1, drawn as "g…" at 1280: the name
+  // was the only part of a node that could shrink, the version never. The name keeps its width and the version is cut, at any width — what
+  // the page's stylesheet says, since no browser measures here, and what the page writes: the name before the version, both whole on hover.
+  const LONG = "2.44+r50+g1848099f063e-1";
+  it("keeps the name whole and cuts the version, however long it is", async () => {
+    const long = async (p: string, res: Response) => {
+      if (!p.startsWith(`/api/v1/package/${F.pkg2}?`)) return res;
+      const j = (await res.json()) as { depends: { name: string; provider: { version: string } | null }[] };
+      expect(j.depends.some((d) => d.provider), "a dependency the ring provides").toBe(true);
+      return Response.json({ ...j, depends: j.depends.map((d) => (d.provider ? { ...d, provider: { ...d.provider, version: LONG } } : d)) });
+    };
+    const p = await view(`/package/${F.pkg2}?ring=stable&arch=${F.arch}`, "", { edit: long });
+    const graph = p.nodes["#deps"].innerHTML as string;
+    expect(graph).toContain(`<span class="nm">${F.pkg}</span><span class="v">${LONG}</span>`);
+    expect(graph).toContain(`title="${F.pkg} ${LONG}`);
+    const html = (await call("GET", `/package/${F.pkg2}`)).text;
+    // The name never shrinks, and is cut only when it alone is wider than the node.
+    expect(declared(html, ".pkg-node .nm")).toMatchObject({ flex: "0 0 auto", "max-width": "100%", overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" });
+    // The version is what shrinks, to nothing if it must, and says so with an ellipsis.
+    const v = declared(html, ".pkg-node .v");
+    expect(v).toMatchObject({ "min-width": "0", overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" });
+    expect(v.flex ?? "0 1 auto", "the version may shrink").toMatch(/^\d+ [1-9]\d* /);
+    expect(v["flex-shrink"] ?? "1").not.toBe("0");
+    // Under three characters of room it wraps onto a line the box clips: never a few pixels of a digit with no ellipsis.
+    expect(v.flex).toBe("1 1 3ch");
+    expect(declared(html, ".pkg-node > span:has(> .nm)")).toMatchObject({ "flex-wrap": "wrap", height: "16px", overflow: "hidden" });
+    // The two sit in a box that may shrink inside the node, beside the tag, which never does.
+    expect(declared(html, ".pkg-node > span")).toMatchObject({ display: "flex", "min-width": "0" });
+    expect(declared(html, ".pkg-node .t")).toMatchObject({ flex: "none" });
   });
 });
