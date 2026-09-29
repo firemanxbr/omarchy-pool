@@ -11,7 +11,7 @@
  */
 import { describe, expect, it } from "vitest";
 import {
-  decodeCbor, decodeCborAll, derToRaw, fromB64url, importCoseKey, parseAuthenticatorData, toB64url, verifyAssertion, verifyRegistration, WebAuthnError,
+  decodeCbor, decodeCborAll, derToRaw, fromB64url, importCoseKey, parseAuthenticatorData, toB64url, verifyAssertion, verifyRegistration, verifySignature, WebAuthnError,
   ES256, EDDSA, RS256, FLAG_AT, FLAG_ED, FLAG_UP, FLAG_UV, type Cbor,
 } from "../src/webauthn";
 import { assert as answer, authenticatorData, b64url, cbor, clientDataJSON, concat, createAuthenticator, rawToDer, register, sha256, sign, AT, ED, UP, UV } from "./soft-authenticator.mjs";
@@ -221,6 +221,24 @@ describe("an assertion", () => {
     // An ES256 signature sent raw (r‖s), as a verifier that skips DER would take: not what an authenticator sends.
     const raw = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, a.keyPair.privateKey, concat(fromB64url(good.authenticatorData), await sha256(fromB64url(good.clientDataJSON)))));
     expect(await outcome(verifyAssertion({ ...good, signature: b64url(raw) }, RP, await stored(a)))).toBe("signature");
+  });
+
+  it("refuses a signature of the wrong length for each algorithm with the code signature — an EdDSA one that is not 64 bytes included, which WebCrypto throws on rather than answering false", async () => {
+    for (const alg of [ES256, RS256, EDDSA]) {
+      const a = await createAuthenticator({ alg });
+      const good = input(await answer(a, RP));
+      const sig = fromB64url(good.signature);
+      for (const n of [1, 10, 63, 65, 255, 257, 700]) {
+        const wrong = n < sig.length ? sig.slice(0, n) : concat(sig, new Uint8Array(n - sig.length));
+        expect(await outcome(verifyAssertion({ ...good, signature: b64url(wrong) }, RP, await stored(a))), `${alg}, ${n} bytes`).toBe("signature");
+      }
+      // …and verifySignature itself answers false or refuses, never with the runtime's own OperationError.
+      const { key } = await importCoseKey(a.cose);
+      for (const n of [0, 1, 63, 65, 700]) {
+        const said = await verifySignature(alg, key, new Uint8Array(n), new Uint8Array([1])).then((v) => String(v), (e) => (e instanceof WebAuthnError ? e.code : `threw ${e}`));
+        expect(["false", "signature"], `${alg}, ${n} bytes, direct: ${said}`).toContain(said);
+      }
+    }
   });
 
   it("verifies a signature an EdDSA or RS256 authenticator made over the exact bytes, and no other", async () => {

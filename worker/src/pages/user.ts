@@ -35,8 +35,26 @@ const TOKEN_BTN = `<button type="button" class="btn ghost" id="token-open" title
 const REQUEST_LINK = `<a class="more-link" id="pk-request" href="/factory#request">+ request one →</a>`;
 const REGISTER_TOGGLE = `<button type="button" class="more-link" id="w-toggle" title="the form: a name, an architecture, one command to run it">+ register one</button>`;
 const WORKER_FORM = `<label>Name <input type="text" id="w-name" placeholder="laptop" required></label> <label>Architecture <select id="w-arch"><option>x86_64</option><option>aarch64</option></select></label> <button type="submit" id="w-btn">Register worker</button>`;
-/** Add a passkey (#257): a name for it and the button that starts the browser's request — live for a maintainer, grey with why for a contributor (gate()). */
+/** Add a passkey (#257): a name for it and the button that starts the browser's request — a maintainer's. */
 const PASSKEY_FORM = `<label>Name <input type="text" id="pk-label" maxlength="40" placeholder="this laptop" autocomplete="off"></label> <button type="submit" id="pk-add">Add a passkey</button>`;
+/** …and what stands in its place for someone who is not a maintainer but still holds a passkey (a maintainer once): the reason, visible, and their Remove below. */
+const PASSKEY_NOT_A_MAINTAINER = `<p class="sub" id="pk-not" style="margin:0">Passkeys are for maintainers: they confirm the approve and block an agent drafts. You can remove the ones you hold below.</p>`;
+
+/**
+ * The page's own rules (#257): the passkeys' status line is always in the
+ * page — empty, it takes no room — so a screen reader hears each thing it
+ * says, and a failure is marked as one (the kit's red, as a refusal is); the
+ * action column is named for a screen reader; on a phone the algorithm
+ * column goes, so Remove stays on the screen; a heading a link landed on
+ * shows its focus square, as the kit's controls do.
+ */
+const CSS = String.raw`
+  .u-sr { position: absolute; width: 1px; height: 1px; margin: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  #passkeys > p#pk-said:empty { margin: 0; }
+  #passkeys > p#pk-said.err { color: var(--text); border: 1px solid var(--red); padding: 10px 12px; font-size: 13.5px; }
+  #passkeys h2:focus-visible, #agents h2:focus-visible { outline: 1px solid var(--green); outline-offset: 2px; }
+  @media (max-width: 520px) { #pk-table th:nth-child(2), #pk-table td:nth-child(2) { display: none; } }
+`;
 
 const body = (login: string) => String.raw`
   <div class="profile-head">
@@ -93,10 +111,10 @@ const body = (login: string) => String.raw`
 
   <section id="passkeys" hidden>
     <div class="h2row"><h2>Passkeys</h2></div>
-    <p class="sub">Approve and block that your agents draft are confirmed with a passkey: a touch and a PIN or a biometric on your device, which an agent's software cannot supply. The pool keeps each one's public key and credential id, nothing else, and the journal says when one is added or removed. Only you see this section. <a href="/docs/omarchy-cli-mcp#write-tools">How it works →</a></p>
+    <p class="sub">Approve and block that your agents draft are confirmed with a passkey, which an agent's software cannot supply: your device asks for your fingerprint, face or PIN. The pool keeps each one's public key and credential id, nothing else, and the journal says when one is added or removed. Only you see this section. <a href="/docs/omarchy-cli-mcp#write-tools">How it works →</a></p>
     <form id="pk-form" class="form" onsubmit="return false"></form>
-    <p class="sub" id="pk-said" role="status" aria-live="polite" hidden></p>
-    <div class="table-wrap"><table id="pk-table"><thead><tr><th>Name</th><th>Algorithm</th><th>Added</th><th>Last used</th><th></th></tr></thead><tbody></tbody></table></div>
+    <p class="sub" id="pk-said" role="status" aria-live="polite"></p>
+    <div class="table-wrap"><table id="pk-table"><thead><tr><th>Name</th><th>Algorithm</th><th>Added</th><th>Last used</th><th><span class="u-sr">Remove</span></th></tr></thead><tbody></tbody></table></div>
   </section>
 
   <section id="approvals-section" hidden>
@@ -381,40 +399,68 @@ const SCRIPT = String.raw`
       var said = x.state === "waiting" ? '<a href="/auth/confirm/' + esc(x.id) + '">confirm or discard →</a>' : esc((x.outcome && (x.outcome.error || x.outcome.decision)) || "");
       return '<tr><td class="when">' + ago(x.created_at) + '</td><td><a href="' + pkgHref(x.name, null, null) + '"><b>' + esc(x.name) + '</b></a>' + (x.task_id ? ' <a class="dim" href="/build/' + x.task_id + '">#' + x.task_id + '</a>' : '') + '</td><td>' + esc(VERDICT_WORDS[x.verdict] || x.verdict) + '</td><td>' + esc(x.agent) + '</td><td>' + pillHtml(DRAFT_PILL[x.state] || "none", x.state) + ' <span class="muted">' + said + '</span></td><td class="muted">' + esc(x.note || "") + '</td></tr>';
     }, { empty: "no draft yet" });
+    land("agents");
   }
-  // ---- passkeys (#257): the owner's, each with Remove, and Add a passkey — navigator.credentials.create() with the options the pool issued (user verification required), its answer posted for the pool to verify. Served hidden; shown to the owner only, from their own no-store /factory/me. A contributor sees the form grey with why: approve and block are a maintainer's.
-  var PASSKEY_FORM = ${JSON.stringify(PASSKEY_FORM)}, PK_DRAWN = null;
+  // A link to a section served hidden — "Your drafts" (#agents), "Register a passkey" (#passkeys) — found nothing to scroll to when the page loaded: once the section is drawn, the page goes there, once, and its heading takes the focus. The tables around it are still filling, so it is kept in place while the page grows — a few seconds at most, and never after the person scrolls, clicks or types.
+  var LANDED = {};
+  function land(id) {
+    if (LANDED[id] || location.hash !== "#" + id) return;
+    var sec = document.getElementById(id); if (!sec || sec.hidden) return;
+    LANDED[id] = true;
+    var h = sec.querySelector("h2"), there = function () { sec.scrollIntoView({ block: "start" }); };
+    there();
+    if (h) { h.setAttribute("tabindex", "-1"); h.focus({ preventScroll: true }); }
+    if (!window.ResizeObserver) return;
+    var ro = new ResizeObserver(there), by = ["wheel", "touchstart", "keydown", "mousedown"];
+    var stop = function () { ro.disconnect(); by.forEach(function (e) { window.removeEventListener(e, stop, true); }); };
+    ro.observe(document.body);
+    by.forEach(function (e) { window.addEventListener(e, stop, { capture: true, passive: true }); });
+    setTimeout(stop, 4000);
+  }
+  // ---- passkeys (#257): the owner's, each with Remove, and Add a passkey — navigator.credentials.create() with the options the pool issued (user verification required), its answer posted for the pool to verify. Served hidden; shown to the owner only, from their own no-store /factory/me, and only to a maintainer or someone who still holds one (a maintainer once, who is told why there is no Add). #pk-said is always in the page and says each step — a failure marked as one — while Add a passkey keeps the focus (aria-disabled while the browser asks, never disabled).
+  var PASSKEY_FORM = ${JSON.stringify(PASSKEY_FORM)}, PASSKEY_NOT_A_MAINTAINER = ${JSON.stringify(PASSKEY_NOT_A_MAINTAINER)}, PK_DRAWN = null, PK_BUSY = false;
   function pkB64(buf) { var b = new Uint8Array(buf), s = ""; for (var i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); }
   function pkBytes(s) { var t = String(s).replace(/-/g, "+").replace(/_/g, "/"); while (t.length % 4) t += "="; var bin = atob(t), out = new Uint8Array(bin.length); for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out; }
-  function pkSay(text) { var el = $("#pk-said"); el.hidden = !text; el.textContent = text || ""; }
+  function pkSentence(text) { return String(text || "").trim().replace(/[.\s]+$/, "") + "."; }
+  function pkSay(text, failed) { var el = $("#pk-said"); el.className = "sub" + (failed ? " err" : ""); el.textContent = text || ""; }
   function renderPasskeys(d) {
     if (!d.passkeys) return;
-    $("#passkeys").hidden = false;
     var maintainer = !!(d.contributor && d.contributor.role === "maintainer");
-    // The form is drawn again only when its gate changed: a name being typed stays through a refresh.
-    if (PK_DRAWN !== maintainer) { $("#pk-form").innerHTML = gate(PASSKEY_FORM, maintainer, "a passkey confirms the approve and block an agent drafts, which are a maintainer's"); PK_DRAWN = maintainer; }
+    // Nobody but a maintainer adds one: a section with nothing to add and nothing to remove is not drawn for them at all, as the Approvals are not — unless it is on the screen already (they just removed their last one: the status line says so).
+    if (!maintainer && !d.passkeys.length && $("#passkeys").hidden) return;
+    $("#passkeys").hidden = false;
+    // The form is drawn again only when it changed: a name being typed stays through a refresh.
+    if (PK_DRAWN !== maintainer) { $("#pk-form").innerHTML = maintainer ? PASSKEY_FORM : PASSKEY_NOT_A_MAINTAINER; PK_DRAWN = maintainer; }
     pager("#pk-table", d.passkeys, function (k) {
-      return '<tr><td><b>' + esc(k.label) + '</b></td><td class="mono">' + esc(k.alg) + '</td><td class="when" title="' + esc(k.created_at) + '">' + ago(k.created_at) + '</td><td class="when">' + (k.last_used ? ago(k.last_used) : '<span class="dim">never</span>') + '</td><td><button type="button" class="btn ghost" data-passkey-remove="' + esc(k.id) + '" data-label="' + esc(k.label) + '" title="it confirms nothing from now on">Remove</button></td></tr>';
+      return '<tr><td><b>' + esc(k.label) + '</b></td><td class="mono">' + esc(k.alg) + '</td><td class="when" title="' + esc(k.created_at) + '">' + ago(k.created_at) + '</td><td class="when">' + (k.last_used ? ago(k.last_used) : '<span class="dim">never</span>') + '</td><td><button type="button" class="btn ghost" data-passkey-remove="' + esc(k.id) + '" data-label="' + esc(k.label) + '" title="it confirms nothing from now on" aria-label="Remove ' + esc(k.label) + '">Remove</button></td></tr>';
     }, { empty: maintainer ? "no passkey yet: approve and block drafted by an agent wait until you add one" : "no passkey" });
+    land("passkeys");
   }
   function addPasskey() {
-    var btn = $("#pk-add"); if (!btn || btn.disabled) return;
-    if (!window.PublicKeyCredential || !navigator.credentials || !window.isSecureContext) { pkSay("This browser cannot make a passkey on this page: it needs a secure context (https, or localhost) and passkey support."); return; }
-    btn.disabled = true; pkSay("Answer your browser: a touch and a PIN or a biometric.");
+    var btn = $("#pk-add"); if (!btn || btn.disabled || PK_BUSY) return;
+    if (!window.PublicKeyCredential || !navigator.credentials || !window.isSecureContext) { pkSay("This browser cannot make a passkey on this page. It needs a secure address (https, or localhost) and passkey support.", true); return; }
+    PK_BUSY = true; btn.setAttribute("aria-disabled", "true"); pkSay("Answer your device: your fingerprint, face or PIN.");
+    var done = function () { PK_BUSY = false; btn.removeAttribute("aria-disabled"); };
     api("POST", "/auth/passkeys/challenge", {}).then(function (o) {
-      if (o.error) throw new Error(o.error);
+      if (o.error) { var x = new Error(o.error); x.pool = true; throw x; }
       var k = o.publicKey;
       return navigator.credentials.create({ publicKey: { challenge: pkBytes(k.challenge), rp: k.rp, user: { id: pkBytes(k.user.id), name: k.user.name, displayName: k.user.displayName }, pubKeyCredParams: k.pubKeyCredParams, timeout: k.timeout, attestation: k.attestation, authenticatorSelection: k.authenticatorSelection, excludeCredentials: k.excludeCredentials.map(function (c) { return { type: c.type, id: pkBytes(c.id) }; }) } });
     }).then(function (cred) {
-      if (!cred) throw new Error("no passkey was made");
+      if (!cred) { var x = new Error("no passkey was made"); x.name = "NotAllowedError"; throw x; }
       return api("POST", "/auth/passkeys", { label: $("#pk-label").value, id: pkB64(cred.rawId), clientDataJSON: pkB64(cred.response.clientDataJSON), attestationObject: pkB64(cred.response.attestationObject) });
     }).then(function (r) {
-      btn.disabled = false;
-      if (r.error) { pkSay("Not added: " + r.error); return; }
-      $("#pk-label").value = ""; pkSay(""); toast("Passkey added: " + esc(r.passkey.label) + ". Approve and block drafted by your agents ask for it."); quota();
+      done();
+      if (r.error) { pkSay("Not added: " + pkSentence(r.error), true); return; }
+      var said = "Passkey added: " + r.passkey.label + ". Approve and block drafted by your agents ask for it.";
+      $("#pk-label").value = ""; pkSay(said); toast(esc(said)); quota();
     }).catch(function (e) {
-      btn.disabled = false;
-      pkSay(e && e.name === "NotAllowedError" ? "No passkey was made: the request was cancelled or timed out." : e && e.name === "InvalidStateError" ? "This device holds a passkey of yours for the pool already." : "Not added: " + errorText(e));
+      done();
+      var n = e && e.name;
+      pkSay(n === "NotAllowedError" || n === "AbortError" ? "No passkey was made: the request was cancelled or timed out. Press Add a passkey to try again."
+        : n === "InvalidStateError" ? "This device holds a passkey of yours for the pool already. Use another device, or remove that one first."
+        : n === "SecurityError" ? "Your browser will not make a passkey on this address. Open your page on the pool's own address."
+        : n === "NotSupportedError" ? "This browser or device cannot make a passkey the pool takes."
+        : "Not added: " + pkSentence(e && e.pool ? e.message : errorText(e)), true);
     });
   }
   document.addEventListener("submit", function (ev) { if (ev.target && ev.target.id === "pk-form") { ev.preventDefault(); addPasskey(); } });
@@ -436,7 +482,10 @@ const SCRIPT = String.raw`
       var pid = pr.getAttribute("data-passkey-remove"), plabel = pr.getAttribute("data-label");
       ask({ title: "Remove the passkey " + plabel + "?", text: "It confirms nothing from now on, and the journal records that you removed it. Approve and block drafted by your agents need another passkey of yours.", confirm: "Remove", danger: true }).then(function (go) {
         if (go === null) return;
-        api("POST", "/auth/passkeys/" + encodeURIComponent(pid) + "/remove", {}).then(function (r) { if (r.error) toast(esc(r.error), "error"); else toast("Removed: " + esc(plabel) + "."); quota(); }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+        api("POST", "/auth/passkeys/" + encodeURIComponent(pid) + "/remove", {}).then(function (r) {
+          if (r.error) { pkSay("Not removed: " + pkSentence(r.error), true); toast(esc(r.error), "error"); } else { pkSay("Removed: " + plabel + ". It confirms nothing from now on."); toast("Removed: " + esc(plabel) + "."); }
+          quota();
+        }).catch(function (e) { pkSay("Not removed: " + pkSentence(errorText(e)), true); toast("failed: " + esc(errorText(e)), "error"); });
       });
       return;
     }
@@ -536,6 +585,7 @@ export function userHtml(login: string, poolUrl: string, version: RunningVersion
     description: `What ${login} contributes to and maintains in the pool.`,
     active: "factory",
     body: body(login),
+    css: CSS,
     script: SCRIPT,
     poolUrl,
     version,
@@ -769,11 +819,11 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       visible: ["owner"],
     },
     {
-      // The owner's passkeys (#257): each with Remove, and Add a passkey — live for a maintainer, grey with why for a contributor — served hidden and drawn from the owner's own no-store /factory/me. The three routes are the browser's session's only, on the relying party's address: the tests' pool.test is not one, so every signed-in role is refused there (rp_unavailable) and nobody signed in is asked to sign in.
+      // The owner's passkeys (#257): each with Remove, and Add a passkey — a maintainer's; someone else who still holds one is told why there is no Add, and a contributor who holds none is shown no section — served hidden and drawn from the owner's own no-store /factory/me, landed on when a link names #passkeys. The three routes are the browser's session's only, on the relying party's address: the tests' pool.test is not one, so every signed-in role is refused there (rp_unavailable) and nobody signed in is asked to sign in.
       id: "user.passkeys",
       page,
       anchor: ['<section id="passkeys" hidden>', 'id="pk-form"', 'id="pk-said"', 'id="pk-table"', 'href="/docs/omarchy-cli-mcp#write-tools">How it works →</a>'],
-      script: ["function renderPasskeys(d)", '$("#passkeys").hidden = false', 'gate(PASSKEY_FORM, maintainer,', 'pager("#pk-table"', "navigator.credentials.create", 'api("POST", "/auth/passkeys/challenge", {})', 'api("POST", "/auth/passkeys", {', "data-passkey-remove", 'api("POST", "/auth/passkeys/" + encodeURIComponent(pid) + "/remove", {})', '"#pk-label"', '"#pk-add"'],
+      script: ["function renderPasskeys(d)", '$("#passkeys").hidden = false', 'maintainer ? PASSKEY_FORM : PASSKEY_NOT_A_MAINTAINER', 'if (!maintainer && !d.passkeys.length && $("#passkeys").hidden) return;', 'land("passkeys")', 'pager("#pk-table"', "navigator.credentials.create", 'api("POST", "/auth/passkeys/challenge", {})', 'api("POST", "/auth/passkeys", {', "data-passkey-remove", 'api("POST", "/auth/passkeys/" + encodeURIComponent(pid) + "/remove", {})', '"#pk-label"', '"#pk-add"', 'btn.setAttribute("aria-disabled", "true")', '"Passkey added: " + r.passkey.label', 'pkSay(said)'],
       reads: [{ path: "/api/v1/factory/me", as: "owner", fields: ["passkeys", "contributor.role"] }],
       acts: [
         { method: "POST", path: "/auth/passkeys/challenge", expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },

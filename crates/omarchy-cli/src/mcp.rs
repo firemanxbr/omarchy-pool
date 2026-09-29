@@ -119,7 +119,7 @@ fn write_tools() -> Vec<Value> {
           "outputSchema": out(json!({ "name": { "type": "string" }, "request": { "type": ["object", "null"] }, "builds": { "type": "array" }, "untrusted": { "type": "string" } })),
           "annotations": { "readOnlyHint": true, "openWorldHint": true } }),
         json!({ "name": "submit_review", "title": "Draft a verdict",
-          "description": "Drafts a verdict on a package you may decide. It decides nothing: the answer is a link the person opens in a browser signed in with GitHub, and only their confirmation there decides (reject asks them to type the package's name). Approve takes the project's rebuild (the one review_claim queued); request_changes stops the round and keeps the name the requester's; reject frees the name.",
+          "description": "Drafts a verdict on a package you may decide. It decides nothing: the answer is a link the person opens in a browser signed in with GitHub, and only their confirmation there decides (approve asks for their passkey, reject for the package's name typed). Approve takes the project's rebuild (the one review_claim queued); request_changes stops the round and keeps the name the requester's; reject frees the name.",
           "inputSchema": { "type": "object", "properties": {
               "name": { "type": "string", "pattern": NAME },
               "verdict": { "enum": ["approve", "request_changes", "reject"] },
@@ -128,7 +128,7 @@ fn write_tools() -> Vec<Value> {
           "outputSchema": draft_out.clone(),
           "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true } }),
         json!({ "name": "block", "title": "Draft a block",
-          "description": "Drafts a block of a package: once the person confirms it in the browser (typing the package's name), it leaves every ring, its builds stop, the approval it stood on is withdrawn, and its project is refused to new requests until another maintainer lifts it. Decides nothing by itself.",
+          "description": "Drafts a block of a package: once the person confirms it in the browser (with their passkey, typing the package's name), it leaves every ring, its builds stop, the approval it stood on is withdrawn, and its project is refused to new requests until another maintainer lifts it. Decides nothing by itself.",
           "inputSchema": { "type": "object", "properties": { "name": { "type": "string", "pattern": NAME }, "reason": { "type": "string", "minLength": 4, "maxLength": 500 } }, "required": ["name", "reason"], "additionalProperties": false },
           "outputSchema": draft_out,
           "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true } }),

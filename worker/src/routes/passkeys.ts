@@ -2,9 +2,9 @@
  * Passkeys (#257; docs: worker/src/docs/omarchy-cli-mcp.md, *A passkey for
  * approve and block*). A maintainer registers a passkey on their own page,
  * and confirming an agent's draft of approve or block asks for it: a
- * WebAuthn assertion with user verification — a touch and a PIN or a
- * biometric that the agent's software cannot supply — verified here against
- * the key stored at registration (webauthn.ts, with WebCrypto).
+ * WebAuthn assertion with user verification — the person's fingerprint, face
+ * or PIN on their device, which the agent's token cannot supply — verified
+ * here against the key stored at registration (webauthn.ts, with WebCrypto).
  *
  *   POST /auth/passkeys/challenge     the options navigator.credentials.create() takes, for a maintainer
  *   POST /auth/passkeys               {label, id, clientDataJSON, attestationObject}: the passkey, registered and journaled
@@ -24,9 +24,12 @@
  * A challenge is issued for one purpose — a registration of the login, or
  * the confirmation of one draft of the login — lives five minutes, and is
  * deleted by the statement that takes it, whatever the answer turns out to
- * be: an answer is good for one request. The pool stores the credential's
- * id, its public key, the algorithm, the RP id, the counter, a label and
- * two dates; nothing of the authenticator's attestation.
+ * be: an answer is good for one request. A new one replaces the login's
+ * earlier one for the same purpose and draft — the page answers only the
+ * newest, so a prompt the person cancelled holds no slot of the five. The
+ * pool stores the credential's id, its public key, the algorithm, the RP id,
+ * the counter, a label and two dates; nothing of the authenticator's
+ * attestation.
  */
 import { json, type Env } from "../index";
 import { DASHBOARD_HOST, isProductionHost } from "../meta";
@@ -39,8 +42,10 @@ import { NO_PASSKEY, PASSKEY_ELSEWHERE } from "../pages/agent-auth";
 export const MAX_PASSKEYS = 10;
 /** A challenge's life: the browser's ceremony (two minutes) and time to spare. */
 export const CHALLENGE_MINUTES = 5;
-/** Challenges a login holds live at most: a sixth is refused until one is taken or expires. */
+/** Challenges a login holds live at most — one per purpose and draft, as a new one replaces the earlier — so a sixth ceremony at once is refused until one is taken or expires. */
 export const LIVE_CHALLENGES = 5;
+/** What a person is told when the five are live: in their words, and what to do. */
+export const TOO_MANY_CHALLENGES = `Too many passkey requests in the last ${CHALLENGE_MINUTES} minutes: wait a few minutes, then press again.`;
 /** How long the browser waits for the authenticator. */
 export const CEREMONY_MS = 120_000;
 /** The verdicts confirmed with a passkey: the two that change what users get. Request changes and reject keep the session and, for reject, the name typed. */
@@ -106,6 +111,13 @@ export const PASSKEY_REMOVE_SQL = "DELETE FROM passkeys WHERE id = ? AND login =
 export const PASSKEY_USED_SQL = `UPDATE passkeys SET counter = ?2, last_used = ${NOW} WHERE id = ?1 AND (counter < ?2 OR (counter = 0 AND ?2 = 0))`;
 /** A login's expired challenges, deleted when it asks for a new one. */
 export const CHALLENGE_PRUNE_SQL = `DELETE FROM passkey_challenges WHERE login = ? AND expires_at <= ${NOW}`;
+/**
+ * The login's earlier challenge for the same purpose and draft (NULL for a
+ * registration), deleted when a new one is issued: the page answers the
+ * newest only, so a cancelled or timed-out prompt frees its slot at the next
+ * press. Through (login, expires_at), five live rows a login at most.
+ */
+export const CHALLENGE_REPLACE_SQL = "DELETE FROM passkey_challenges WHERE login = ?1 AND purpose = ?2 AND draft_id IS ?3";
 /** A challenge issued, only while the login holds fewer than five live ones. */
 export const CHALLENGE_INSERT_SQL = `INSERT INTO passkey_challenges (challenge, login, purpose, draft_id, expires_at)
   SELECT ?1, ?2, ?3, ?4, ?5 WHERE (SELECT COUNT(*) FROM passkey_challenges WHERE login = ?2 AND expires_at > ${NOW}) < ${LIVE_CHALLENGES}`;
@@ -116,14 +128,15 @@ export const EXPIRED_CHALLENGES_SQL = `DELETE FROM passkey_challenges WHERE expi
 
 // ---------- challenges ----------
 
-/** A new challenge for the login, for a registration (draft null) or one draft's confirmation; null when five wait already. */
+/** A new challenge for the login, for a registration (draft null) or one draft's confirmation — replacing the earlier one for the same — or null when five other ceremonies wait already. */
 export async function issueChallenge(env: Env, login: string, purpose: "register" | "confirm", draft: string | null): Promise<string | null> {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
   const challenge = toB64url(bytes);
   const expires = new Date(Date.now() + CHALLENGE_MINUTES * 60_000).toISOString();
-  const [, ins] = await env.DB.batch([
+  const [, , ins] = await env.DB.batch([
     env.DB.prepare(CHALLENGE_PRUNE_SQL).bind(login),
+    env.DB.prepare(CHALLENGE_REPLACE_SQL).bind(login, purpose, draft),
     env.DB.prepare(CHALLENGE_INSERT_SQL).bind(challenge, login, purpose, draft, expires),
   ]);
   return ins.meta.changes ? challenge : null;
@@ -186,7 +199,7 @@ export async function handlePasskeyOptions(url: URL, request: Request, env: Env)
   const mine = (await env.DB.prepare(PASSKEYS_SQL).bind(c.login).all<{ credential_id: string }>()).results;
   if (mine.length >= MAX_PASSKEYS) return json({ error: `${c.login} holds ${MAX_PASSKEYS} passkeys: remove one first`, code: "passkey_limit" }, 409, NO_STORE);
   const challenge = await issueChallenge(env, c.login, "register", null);
-  if (!challenge) return json({ error: `${LIVE_CHALLENGES} passkey requests of ${c.login}'s wait already: finish one, or wait ${CHALLENGE_MINUTES} minutes`, code: "rate_limited" }, 429, { ...NO_STORE, "retry-after": String(CHALLENGE_MINUTES * 60) });
+  if (!challenge) return json({ error: TOO_MANY_CHALLENGES, code: "rate_limited" }, 429, { ...NO_STORE, "retry-after": String(CHALLENGE_MINUTES * 60) });
   return json({
     publicKey: {
       challenge,
@@ -256,9 +269,9 @@ export async function handlePasskeyRemove(id: string, url: URL, request: Request
 /** The options navigator.credentials.get() takes for one draft of the login: the challenge bound to the two, the login's passkeys, user verification required. */
 export async function assertionOptions(env: Env, rp: RelyingParty, login: string, draft: string): Promise<Response> {
   const keys = (await env.DB.prepare(PASSKEYS_SQL).bind(login).all<{ credential_id: string }>()).results;
-  if (!keys.length) return json({ error: NO_PASSKEY, code: "no_passkey", register: registerHref(login) }, 403, NO_STORE);
+  if (!keys.length) return json({ error: `${NO_PASSKEY} Nothing was decided.`, code: "no_passkey", register: registerHref(login) }, 403, NO_STORE);
   const challenge = await issueChallenge(env, login, "confirm", draft);
-  if (!challenge) return json({ error: `${LIVE_CHALLENGES} passkey requests of ${login}'s wait already: finish one, or wait ${CHALLENGE_MINUTES} minutes`, code: "rate_limited" }, 429, { ...NO_STORE, "retry-after": String(CHALLENGE_MINUTES * 60) });
+  if (!challenge) return json({ error: `${TOO_MANY_CHALLENGES} Nothing was decided.`, code: "rate_limited" }, 429, { ...NO_STORE, "retry-after": String(CHALLENGE_MINUTES * 60) });
   return json({ publicKey: { challenge, rpId: rp.id, timeout: CEREMONY_MS, userVerification: "required", allowCredentials: keys.map((k) => ({ type: "public-key", id: k.credential_id })) } }, 200, NO_STORE);
 }
 
@@ -277,11 +290,11 @@ export type PasskeyRefusal = { refused: true; status: number; heading: string; t
 export async function confirmPasskey(env: Env, url: URL, login: string, draft: string, form: URLSearchParams): Promise<{ passkey: string } | PasskeyRefusal> {
   const no = (text: string, heading = "The passkey was refused", status = 403): PasskeyRefusal => ({ refused: true, status, heading, text });
   const rp = relyingParty(url);
-  if (!rp) return no(PASSKEY_ELSEWHERE, "Not on this address");
+  if (!rp) return no(`${PASSKEY_ELSEWHERE} Nothing was decided.`, "Not on this address");
   const credential = form.get("credential") ?? "", clientData = form.get("client_data") ?? "", authData = form.get("authenticator_data") ?? "", signature = form.get("signature") ?? "";
   if (!credential || !clientData || !authData || !signature) {
-    if (!(await env.DB.prepare(HAS_PASSKEY_SQL).bind(login).first())) return { ...no(NO_PASSKEY, "Register a passkey first"), register: true };
-    return no("Approve and block are confirmed with your passkey: press Confirm on the draft's page and answer your browser — a touch and a PIN or a biometric. Nothing was decided.", "Confirm with your passkey");
+    if (!(await env.DB.prepare(HAS_PASSKEY_SQL).bind(login).first())) return { ...no(`${NO_PASSKEY} Nothing was decided.`, "Register a passkey first"), register: true };
+    return no("Approve and block are confirmed with your passkey: press Confirm on the draft's page, then answer your device with your fingerprint, face or PIN. Nothing was decided.", "Confirm with your passkey");
   }
   const challenge = challengeOf(clientData);
   if (!challenge || !(await takeChallenge(env, challenge, login, "confirm", draft))) {

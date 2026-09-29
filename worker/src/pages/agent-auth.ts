@@ -56,6 +56,10 @@ const CSS = String.raw`
   .aa ul.scopes code { color: var(--green); }
   .aa .note { white-space: pre-wrap; border-left: 2px solid var(--line); padding: 2px 0 2px 10px; color: var(--text); }
   .aa .said { font-size: 12.5px; color: var(--dim); margin: 0; }
+  .aa .aa-notes { display: flex; flex-direction: column; gap: 0; }
+  .aa #pk-said:not(:empty) { margin-bottom: 8px; }
+  .aa #pk-said.err { border: 1px solid var(--red); padding: 10px 12px; color: var(--text); font-size: 13.5px; }
+  .aa #pk-said.err a { color: var(--green); }
   .aa .refused { border: 1px solid var(--red); padding: 10px 12px; color: var(--text); font-size: 13.5px; }
   .aa .refused b { color: var(--red); }
   .aa .done { border: 1px solid var(--green); padding: 10px 12px; font-size: 13.5px; }
@@ -137,7 +141,7 @@ export function grantHtml(v: GrantView, path: string, poolUrl: string, version: 
     body: `<section>
     <p class="op-eyebrow">Agents</p>
     <h1>${lucide("key-round", 22)} Let ${esc(v.agent)} act as ${esc(v.login)}?</h1>
-    <p class="lead">omarchy-cli on this machine asks for a token for the agent you named. It acts as you through the tools below and nothing else; a verdict or a block it drafts waits for you to confirm it here, approve and block with your passkey.</p>
+    <p class="lead">omarchy-cli on this machine asks for a token for the agent you named. It acts as you through the tools below and nothing else. A verdict or a block it drafts waits for you to confirm it here. Approve and block also ask for your passkey.</p>
   </section>
   <section class="op-card">
     <div class="op-card-h"><b>What it asks for</b><small>read it before you grant</small></div>
@@ -174,10 +178,14 @@ export interface ConfirmEvidence {
   chains: ConfirmChain[];
 }
 
-/** What the confirmation says to a maintainer without a passkey (#257) — the page, the POST and the challenge in the same words. */
-export const NO_PASSKEY = "Approve and block are confirmed with a passkey: a touch and a PIN or a biometric on your device, which an agent's software cannot supply. You have none yet. Register one on your page, then open this draft again. Nothing was decided.";
-/** …and on an address where no passkey works. */
-export const PASSKEY_ELSEWHERE = `Approve and block are confirmed with a passkey, which works on ${DASHBOARD_HOST} only (and on localhost in development): open the draft's link there. Nothing was decided.`;
+/**
+ * What the confirmation says to a maintainer without a passkey (#257) — the
+ * page, the POST and the challenge in the same words; the POST and the
+ * challenge, which were tried, add "Nothing was decided."
+ */
+export const NO_PASSKEY = "Approve and block are confirmed with a passkey, which an agent's software cannot supply: your device asks for your fingerprint, face or PIN. You have none yet. Register one on your page, then open this draft again.";
+/** …and on an address where no passkey works (the POST adds "Nothing was decided." as well). */
+export const PASSKEY_ELSEWHERE = `Approve and block are confirmed with a passkey, which works on ${DASHBOARD_HOST} only (and on localhost in development): open the draft's link there.`;
 
 /**
  * What a waiting draft of approve or block asks for (#257): the person's
@@ -204,44 +212,68 @@ export interface ConfirmView {
 }
 
 /**
- * The passkey's half of a confirmation, in the page (#257): Confirm asks the
+ * The passkey's half of a confirmation, in the page (#257). Confirm is the
+ * form's first submit button, so Enter in the typed name confirms as a click
+ * does and never lands on Discard; the script takes that submission, asks the
  * pool for a challenge bound to this draft (POST /auth/confirm/<id>/challenge,
  * with the form's nonce), hands it to navigator.credentials.get() with user
- * verification required, and posts the answer with the form — the typed
- * name checked by the browser first. A person who cancels, or a browser
- * without passkeys, is told so, and nothing is sent. The server verifies
- * everything; the script only carries.
+ * verification required, and posts the answer with the form. Discard goes as
+ * it is. While the browser asks, Confirm keeps the focus (aria-disabled, not
+ * disabled), so a cancel leaves the keyboard where it was. What happened is
+ * said in #pk-said — always in the page, only its words change, so a screen
+ * reader hears each one — plainly, and marked as a failure when it is one;
+ * a login whose last passkey went meanwhile is given the link to register
+ * one. The server verifies everything; the script only carries.
  */
 export const CONFIRM_SCRIPT = String.raw`
   (function () {
     var btn = document.getElementById("pk-confirm"); if (!btn) return;
-    var form = btn.form, said = document.getElementById("pk-said");
-    function say(text) { said.hidden = false; said.textContent = text; }
+    var form = btn.form, said = document.getElementById("pk-said"), busy = false;
+    function sentence(text) { return String(text || "").trim().replace(/[.\s]+$/, "") + "."; }
+    function say(text, failed, link) {
+      said.className = "said" + (failed ? " err" : "");
+      said.textContent = text || "";
+      if (link) { said.appendChild(document.createTextNode(" ")); var a = document.createElement("a"); a.href = link.href; a.textContent = link.label; said.appendChild(a); }
+    }
+    function idle() { busy = false; btn.removeAttribute("aria-disabled"); }
     function b64(buf) { var b = new Uint8Array(buf), s = ""; for (var i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); }
     function bytes(s) { var t = String(s).replace(/-/g, "+").replace(/_/g, "/"); while (t.length % 4) t += "="; var bin = atob(t), out = new Uint8Array(bin.length); for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out; }
     function put(name, value) { var i = form.querySelector('input[type=hidden][name="' + name + '"]'); if (!i) { i = document.createElement("input"); i.type = "hidden"; i.name = name; form.appendChild(i); } i.value = value; }
-    btn.addEventListener("click", function () {
-      if (!form.reportValidity()) return;
-      if (!window.PublicKeyCredential || !navigator.credentials || !window.isSecureContext) { say("This browser cannot use a passkey on this page. Open the draft in a browser that can; nothing was decided."); return; }
-      btn.disabled = true; say("Waiting for your passkey: answer your browser.");
+    // What went wrong, in a person's words: the browser's refusals by their name, the pool's in its own sentence, never a raw message twice punctuated.
+    function failed(e) {
+      idle();
+      var n = e && e.name;
+      if (e && e.code === "no_passkey") return say(e.message, true, { href: e.register, label: "Register a passkey" });
+      if (e && e.pool) return say(/Nothing was decided\.$/.test(sentence(e.message)) ? sentence(e.message) : sentence(e.message) + " Nothing was decided.", true);
+      if (n === "NotAllowedError" || n === "AbortError") return say("No passkey answered: the request was cancelled or timed out. Nothing was decided. Press Confirm to try again.", true);
+      if (n === "SecurityError") return say("Your browser will not ask for a passkey on this address. Open the draft's link as your agent gave it. Nothing was decided.", true);
+      if (n === "NotSupportedError") return say("This browser or device cannot use your passkey here. Nothing was decided.", true);
+      say("Your passkey could not be asked: " + sentence(e && e.message ? e.message : String(e)) + " Nothing was decided.", true);
+    }
+    form.addEventListener("submit", function (ev) {
+      var by = ev.submitter || document.activeElement;
+      if (by && by !== btn && by.tagName === "BUTTON" && by.value === "discard") return;
+      ev.preventDefault();
+      if (busy) return;
+      if (!window.PublicKeyCredential || !navigator.credentials || !window.isSecureContext) { say("This browser cannot use a passkey on this page. Open the draft in a browser that can. Nothing was decided.", true); return; }
+      busy = true; btn.setAttribute("aria-disabled", "true"); say("Waiting for your passkey: answer your device.");
       fetch(form.getAttribute("action") + "/challenge", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/x-www-form-urlencoded" }, body: "nonce=" + encodeURIComponent(form.elements.nonce.value) })
-        .then(function (r) { return r.json().catch(function () { return {}; }).then(function (d) { if (!r.ok) throw new Error(d.error || "HTTP " + r.status); return d.publicKey; }); })
+        .then(function (r) { return r.json().catch(function () { return {}; }).then(function (d) { if (!r.ok) { var x = new Error(d.error || "the pool answered HTTP " + r.status); x.pool = true; x.code = d.code; x.register = d.register; throw x; } return d.publicKey; }); })
         .then(function (o) {
           return navigator.credentials.get({ publicKey: { challenge: bytes(o.challenge), rpId: o.rpId, timeout: o.timeout, userVerification: o.userVerification, allowCredentials: o.allowCredentials.map(function (c) { return { type: c.type, id: bytes(c.id) }; }) } });
         })
         .then(function (cred) {
-          if (!cred) throw new Error("no passkey answered");
+          if (!cred) { var x = new Error("no passkey answered"); x.name = "NotAllowedError"; throw x; }
           var r = cred.response;
           put("credential", b64(cred.rawId)); put("client_data", b64(r.clientDataJSON)); put("authenticator_data", b64(r.authenticatorData)); put("signature", b64(r.signature)); put("user_handle", r.userHandle ? b64(r.userHandle) : "");
           put("action", "confirm");
           say("Checking your passkey…");
           form.submit();
         })
-        .catch(function (e) {
-          btn.disabled = false;
-          say(e && e.name === "NotAllowedError" ? "No passkey answered, so nothing was decided. Press Confirm to try again." : "Your passkey could not be asked: " + (e && e.message ? e.message : String(e)) + ". Nothing was decided.");
-        });
+        .catch(failed);
     });
+    // Back to this page from the answer (the browser kept it): Confirm is live again, and nothing of the last answer is posted with Discard.
+    window.addEventListener("pageshow", function (ev) { if (!ev.persisted) return; idle(); say(""); var a = form.querySelector('input[type=hidden][name="action"]'); if (a) a.remove(); });
   })();
 `;
 
@@ -282,14 +314,14 @@ export function confirmHtml(v: ConfirmView, path: string, poolUrl: string, versi
   const pkNote = !pk
     ? ""
     : pk.state === "ready"
-      ? `<div class="aa-pk">${lucide("key-round", 16)}<p>Confirm asks for your passkey: a touch and a PIN or a biometric on your device, which no agent's software can supply. The pool checks it against the key you registered.</p></div>`
+      ? `<div class="aa-pk">${lucide("key-round", 16)}<p>Confirm asks for your passkey. Your device asks for your fingerprint, face or PIN, which no agent's software can supply. The pool checks the answer against the key you registered.</p></div>`
       : pk.state === "none"
         ? `<section class="refused" role="alert"><b>Register a passkey first.</b> ${esc(NO_PASSKEY)}</section>`
         : `<section class="refused" role="alert"><b>Not on this address.</b> ${esc(PASSKEY_ELSEWHERE)}</section>`;
   const confirmBtn = !offered
     ? pk && pk.state === "none" ? `<a class="op-btn primary" href="${esc(pk.register)}">${lucide("key-round", 14)}Register a passkey</a>` : ""
     : pk
-      ? `<button class="op-btn ${w.danger ? "danger" : "primary"}" type="button" id="pk-confirm">${lucide("key-round", 14)}Confirm with your passkey: ${esc(w.act)} ${esc(d.name)}</button>`
+      ? `<button class="op-btn ${w.danger ? "danger" : "primary"}" type="submit" name="action" value="confirm" id="pk-confirm">${lucide("key-round", 14)}Confirm with your passkey: ${esc(w.act)} ${esc(d.name)}</button>`
       : `<button class="op-btn ${w.danger ? "danger" : "primary"}" type="submit" name="action" value="confirm">Confirm: ${esc(w.act)} ${esc(d.name)}</button>`;
   const form = waiting
     ? `<form method="post" action="/auth/confirm/${esc(d.id)}">
@@ -297,9 +329,9 @@ export function confirmHtml(v: ConfirmView, path: string, poolUrl: string, versi
     ${v.refusal ? `<section class="refused" role="alert"><b>It cannot be confirmed now.</b> ${esc(v.refusal)}</section>` : ""}
     ${pkNote}
     ${w.typed && offered ? `<label><span>Type <b>${esc(d.name)}</b> to ${esc(w.label.toLowerCase())} it</span><input type="text" name="name" autocomplete="off" spellcheck="false" required pattern="${esc(d.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))}"></label>` : ""}
-    <div class="aa-acts">${confirmBtn}<button class="op-btn" type="submit" name="action" value="discard">Discard the draft</button></div>
-    ${pk && pk.state === "ready" ? `<p class="said" id="pk-said" role="status" aria-live="polite" hidden></p><noscript><p class="said">A passkey is asked for by this page's script: turn it on to confirm.</p></noscript>` : ""}
-    <p class="said">Drafts expire at ${esc(whenUtc(d.expires_at))}. Nothing is decided until you confirm, and a draft decides once.</p>
+    <div class="aa-acts">${confirmBtn}<button class="op-btn" type="submit" name="action" value="discard" formnovalidate>Discard the draft</button></div>
+    <div class="aa-notes">${pk && pk.state === "ready" ? `<p class="said" id="pk-said" role="status" aria-live="polite"></p><noscript><p class="said">A passkey is asked for by this page's script: turn it on to confirm.</p></noscript>` : ""}
+    <p class="said">Drafts expire at ${esc(whenUtc(d.expires_at))}. Nothing is decided until you confirm, and a draft decides once.</p></div>
   </form>`
     : "";
   return frame({

@@ -16,7 +16,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import worker from "../src/index";
 import { sha256Hex, ME_PASSKEYS_SQL } from "../src/routes/contributors";
 import {
-  CHALLENGE_INSERT_SQL, CHALLENGE_PRUNE_SQL, CHALLENGE_TAKE_SQL, EXPIRED_CHALLENGES_SQL, HAS_PASSKEY_SQL, MAX_PASSKEYS, OWN_PASSKEY_SQL, PASSKEY_BY_CREDENTIAL_SQL, PASSKEY_EVENT_SQL,
+  CHALLENGE_INSERT_SQL, CHALLENGE_PRUNE_SQL, CHALLENGE_REPLACE_SQL, CHALLENGE_TAKE_SQL, EXPIRED_CHALLENGES_SQL, HAS_PASSKEY_SQL, MAX_PASSKEYS, OWN_PASSKEY_SQL, PASSKEY_BY_CREDENTIAL_SQL, PASSKEY_EVENT_SQL,
   PASSKEY_INSERT_SQL, PASSKEY_REMOVE_SQL, PASSKEY_USED_SQL, PASSKEYS_SQL, relyingParty, userHandleOf,
 } from "../src/routes/passkeys";
 import { JOURNAL_KINDS } from "../src/meta";
@@ -216,24 +216,38 @@ describe("a registration", () => {
     }
   });
 
-  it("holds ten passkeys a login and five live challenges: the eleventh and the sixth are refused", async () => {
+  it("holds ten passkeys a login and five live challenges — one a purpose and draft, the newest — so the eleventh passkey and a sixth ceremony at once are refused, and retries never are", async () => {
     await env.DB.prepare("DELETE FROM passkey_challenges WHERE login = 'm3'").run();
     const have = (await env.DB.prepare("SELECT COUNT(*) AS n FROM passkeys WHERE login = 'm3'").first<{ n: number }>())!.n;
     for (let i = have; i < MAX_PASSKEYS; i++) expect((await registerAs("m3", { label: `key ${i}` })).res.status).toBe(201);
     const full = await options("m3");
     expect([full.status, full.json.code]).toEqual([409, "passkey_limit"]);
-    // The cap holds at the insert too: a challenge taken before the tenth was stored.
+    // The cap holds at the insert too: an answer whose challenge got past the options' check before the tenth was stored. The options keep one registration challenge a login (a new one replaces the earlier), so that challenge is written straight into the table.
     await env.DB.prepare("DELETE FROM passkeys WHERE id = (SELECT id FROM passkeys WHERE login = 'm3' ORDER BY created_at DESC LIMIT 1)").run();
-    const o = await options("m3");
     await registerAs("m3");
-    const eleventh = await page("/auth/passkeys", "m3", { label: "x", ...(await register(await createAuthenticator(), { challenge: o.json.publicKey.challenge, origin: ORIGIN, rpId: RP_ID })) });
+    const early = "r".repeat(43);
+    await env.DB.prepare("INSERT INTO passkey_challenges (challenge, login, purpose, draft_id, expires_at) VALUES (?, 'm3', 'register', NULL, ?)").bind(early, new Date(Date.now() + 5 * 60_000).toISOString()).run();
+    const eleventh = await page("/auth/passkeys", "m3", { label: "x", ...(await register(await createAuthenticator(), { challenge: early, origin: ORIGIN, rpId: RP_ID })) });
     expect([eleventh.status, eleventh.json.code]).toEqual([409, "passkey_limit"]);
     expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM passkeys WHERE login = 'm3'").first()).toEqual({ n: MAX_PASSKEYS });
-    // Five live challenges per login.
+    // Add a passkey pressed again and again, each prompt cancelled: the newest challenge replaces the one before, so the login holds one for a registration and is never locked out by its own retries; the one before answers nothing.
     await env.DB.prepare("DELETE FROM passkey_challenges WHERE login = 'm2'").run();
-    for (let i = 0; i < 5; i++) expect((await options("m2")).status).toBe(200);
+    const presses: string[] = [];
+    for (let i = 0; i < 8; i++) {
+      const o = await options("m2");
+      expect(o.status, `press ${i + 1}: ${JSON.stringify(o.json)}`).toBe(200);
+      presses.push(o.json.publicKey.challenge);
+    }
+    expect((await env.DB.prepare("SELECT challenge, purpose, draft_id FROM passkey_challenges WHERE login = 'm2'").all()).results).toEqual([{ challenge: presses[7], purpose: "register", draft_id: null }]);
+    const stale = await page("/auth/passkeys", "m2", { label: "x", ...(await register(await createAuthenticator(), { challenge: presses[6], origin: ORIGIN, rpId: RP_ID })) });
+    expect([stale.status, stale.json.code]).toEqual([403, "challenge"]);
+    // Five ceremonies live at once — confirmations of five drafts — and a sixth is refused, in a person's words.
+    await env.DB.prepare("DELETE FROM passkey_challenges WHERE login = 'm2'").run();
+    const later = new Date(Date.now() + 5 * 60_000).toISOString();
+    for (let i = 0; i < 5; i++) await env.DB.prepare("INSERT INTO passkey_challenges (challenge, login, purpose, draft_id, expires_at) VALUES (?, 'm2', 'confirm', ?, ?)").bind(String(i).repeat(43), `d_${i}`, later).run();
     const sixth = await options("m2");
     expect([sixth.status, sixth.json.code, sixth.headers.get("retry-after")]).toEqual([429, "rate_limited", "300"]);
+    expect(sixth.json.error).toBe("Too many passkey requests in the last 5 minutes: wait a few minutes, then press again.");
     // Expired ones do not count, and go at the login's next issue.
     await env.DB.prepare("UPDATE passkey_challenges SET expires_at = '2000-01-01T00:00:00.000Z' WHERE login = 'm2'").run();
     expect((await options("m2")).status).toBe(200);
@@ -286,6 +300,7 @@ describe("every new query", () => {
       ["a removal", PASSKEY_REMOVE_SQL, [/SEARCH passkeys USING INDEX sqlite_autoindex_passkeys_1 \(id=\?\)/]],
       ["a passkey used", PASSKEY_USED_SQL, [/SEARCH passkeys USING INDEX sqlite_autoindex_passkeys_1 \(id=\?\)/]],
       ["a login's expired challenges", CHALLENGE_PRUNE_SQL, [/SEARCH passkey_challenges USING (COVERING )?INDEX idx_passkey_challenges_login \(login=\? AND expires_at<\?\)/]],
+      ["the earlier challenge for the same purpose and draft", CHALLENGE_REPLACE_SQL, [/SEARCH passkey_challenges USING INDEX idx_passkey_challenges_login \(login=\?\)/]],
       ["a challenge issued", CHALLENGE_INSERT_SQL, [/SEARCH passkey_challenges USING COVERING INDEX idx_passkey_challenges_login \(login=\? AND expires_at>\?\)/]],
       ["a challenge taken", CHALLENGE_TAKE_SQL, [/SEARCH passkey_challenges USING INDEX sqlite_autoindex_passkey_challenges_1 \(challenge=\?\)/]],
       ["every expired challenge, in the gc", EXPIRED_CHALLENGES_SQL, [/SEARCH passkey_challenges USING (COVERING )?INDEX idx_passkey_challenges_expires \(expires_at<\?\)/]],

@@ -120,7 +120,7 @@ holds as it is.
 ```json
 {
   "name": "submit_review",
-  "description": "Drafts a verdict on a package you may decide. It decides nothing: the answer is a link the person opens in a browser signed in with GitHub, and only their confirmation there decides (reject asks them to type the package's name). Approve takes the project's rebuild (the one review_claim queued); request_changes stops the round and keeps the name the requester's; reject frees the name.",
+  "description": "Drafts a verdict on a package you may decide. It decides nothing: the answer is a link the person opens in a browser signed in with GitHub, and only their confirmation there decides (approve asks for their passkey, reject for the package's name typed). Approve takes the project's rebuild (the one review_claim queued); request_changes stops the round and keeps the name the requester's; reject frees the name.",
   "inputSchema": {
     "type": "object",
     "properties": {
@@ -146,9 +146,15 @@ and what it answers:
   "task": 1234,
   "confirm_url": "https://omarchy-pool.org/auth/confirm/d_5b1e0c9a4f7d2e8b6a3c1f0e9d8b7a6c",
   "expires_at": "2026-10-02T14:30:00.000Z",
-  "next": "Open the link in a browser signed in as bob and confirm. Nothing is decided until then."
+  "next": "Open the link in a browser signed in as bob and confirm with your passkey: your device asks for your fingerprint, face or PIN. Nothing is decided until then."
 }
 ```
+
+`next` is what the agent tells its person. For approve and block it names
+the passkey the confirmation asks for (*A passkey for approve and block*,
+below); a login that holds none yet is told so, with the address of the
+Passkeys section of their page, before they open the link. Request changes
+and reject say "Open the link … and confirm".
 
 `submit_review` has the three verdicts of #247. `request_changes` stops the
 round: the builds in review are cancelled, the note goes to the requester,
@@ -375,13 +381,18 @@ and the draft). `/auth/` is closed to crawlers (robots.txt), and the page
 says `noindex` and is never cached.
 
 **What the session cannot tell apart.** An agent that drives the person's own
-signed-in browser presses Confirm as well as the person does. For approve and
-block, the two decisions that change what users get, the passkey closes that:
-user verification is a touch and a PIN or a biometric on the person's device,
-which the agent's software cannot supply (*A passkey for approve and block*).
-Request changes and reject confirm with the session and, for reject, the
-package's name typed (*Signed off*, 4): neither ships anything, and the
-issue keeps them as they were.
+signed-in browser presses Confirm as well as the person does. The passkey of
+#257 does not stop that agent, and does not claim to: with the session it can
+press the web's own Approve and Block on Review, which decide with the
+session alone (they are outside #257), and it can register a passkey of its
+own (*A passkey for approve and block*, below). What the passkey closes is
+the agent's token: an agent that holds its `oma_` token and nothing else
+cannot turn its own draft of approve or block — the two decisions that
+change what users get — into a decision, because the confirmation needs an
+assertion with the user verified on the person's authenticator, which the
+token cannot supply. Request changes and reject confirm with the session
+and, for reject, the package's name typed (*Signed off*, 4): neither ships
+anything, and the issue keeps them as they were.
 
 **Not MCP elicitation.** The protocol lets a server ask the person a question
 through the agent's client (`elicitation/create`). The answer comes back
@@ -397,8 +408,10 @@ key the person registered. Without it nothing is decided, and the draft
 keeps waiting.
 
 - **Registering one.** A maintainer adds a passkey in the *Passkeys* section
-  of their own page (`/user/<login>#passkeys`, shown to them only): a name
-  for it, then the browser's own request. The page asks the pool for the
+  of their own page (`/user/<login>#passkeys`, shown to them only; a link
+  to that address lands on the section once it is drawn, and a contributor
+  who holds no passkey is shown no section): a name for it, then the
+  browser's own request. The page asks the pool for the
   options (`POST /auth/passkeys/challenge`: this relying party, a user
   handle that is a hash, not the login, ES256, EdDSA and RS256, user
   verification required, attestation `none`, the passkeys they hold
@@ -422,7 +435,12 @@ keeps waiting.
   for a challenge (`POST /auth/confirm/<id>/challenge`, with the session, the
   page's Origin and its nonce), hands it to `navigator.credentials.get()` with
   the person's passkeys and user verification required, and posts the answer
-  with the form. The server takes the challenge first — issued to this login
+  with the form. Confirm is the form's first submit button, so Enter in the
+  typed name confirms as a click does; Discard is never the default. A new
+  challenge for the draft replaces the login's earlier one, so a prompt the
+  person cancelled holds none of the five a login may have live. The page
+  says each step in a status line a screen reader hears, and a failure in the
+  person's words. The server takes the challenge first — issued to this login
   for this draft, five minutes old at most, deleted by the statement that
   reads it, so an answer is good for one request whatever that request
   decides — then the passkey by its credential, the login's own and for this
@@ -459,11 +477,21 @@ keeps waiting.
   `reflect-metadata`, a polyfill of the global `Reflect`, and an X.509 and
   ASN.1 stack for attestation chains the pool does not trust, some 300 KB
   minified in 25 packages beside the Worker's two.
-- **What it still cannot tell apart.** Registration is a session's act: an
-  agent driving the signed-in browser could register a key of its own. Every
-  registration is on the public journal, and the person's page lists their
-  passkeys with their last use, so a key the person did not add is seen and
-  removed.
+- **What it still cannot tell apart.** Registration and removal are the
+  session's acts, as the issue asks. An agent that drives the signed-in
+  browser can register a key of its own, even one made in software: the pool
+  asks for attestation `none`, so user verification is a flag the
+  authenticator reports about itself. Asking a passkey the person already
+  holds to vouch for a new one (a step-up) was weighed and left out of #257:
+  it closes nothing while the same session can remove that passkey first, or
+  press the web's own Approve and Block, and with removal gated as well, a
+  person who loses their only authenticator could never register another
+  without an operator. The stronger claim needs the three together — a
+  passkey on the web's own Approve and Block, an existing passkey to add or
+  remove one, and a way back for a lost one — and is a follow-up. Until
+  then, every registration and removal is a line on the public journal, and
+  the person's page lists their passkeys with their last use, so a key the
+  person did not add is seen and removed.
 
 `review_claim`, `review_release` and `request_package` are not confirmed this
 way; the issue names approve, reject and block (*Signed off*, 5). A claim
@@ -602,9 +630,11 @@ the day's five requests still hold.
   `(login, created_at)`, ten at most; one by its credential's unique index;
   one by its id (primary key) for its removal, its journal line and its
   counter; a challenge taken by its primary key; a login's live challenges
-  counted, and its expired ones deleted, by `(login, expires_at)`; every
-  expired one in the weekly gc by `expires_at`. A challenge is a row a
-  maintainer's page asks for, five live at most per login. The agent on a
+  counted, its expired ones deleted and its earlier one for the same purpose
+  and draft replaced, by `(login, expires_at)`; every expired one in the
+  weekly gc by `expires_at`. A challenge is a row a maintainer's page asks
+  for: one per purpose and draft, as a new one replaces the earlier (a
+  cancelled prompt holds no slot), and five live at most per login. The agent on a
   decision's rows is written by the decision's own statement. Nothing scans,
   nothing fans out per row;
   [agent-tools.test.ts](../worker/test/agent-tools.test.ts) asks each for its
@@ -764,7 +794,15 @@ The Worker's side, in vitest on a real local D1
   the POST and at the challenge — with the link, and offered no Confirm;
   another address says where passkeys work. Request changes and reject
   still confirm without one. The challenge route takes the session, the
-  Origin, the nonce and the same login, five live at most.
+  Origin, the nonce and the same login; a new challenge for the draft
+  replaces the earlier one, so presses that were cancelled never fill the
+  five a login holds, and the sixth ceremony at once is told to wait. The
+  confirm page's Confirm is the form's first submit button, so Enter in the
+  typed name confirms, never discards. A malformed signature of any
+  algorithm — an Ed25519 one that is not 64 bytes included — is a refusal
+  page, never a 500. `next` in a draft's answer names the passkey for
+  approve and block, and the Passkeys section's address when the login has
+  none.
 - Registration ([passkeys.test.ts](../worker/test/passkeys.test.ts)): the
   options (this RP, a hashed user handle, the three algorithms, user
   verification required, attestation none, the login's passkeys excluded); the
@@ -774,7 +812,7 @@ The Worker's side, in vitest on a real local D1
   for its login and a registration, within five minutes; an answer of
   another origin, RP id, type, or without the user verified or present,
   refused; a credential registered once; ten a login and five live
-  challenges. Registration and removal are journaled without the key, and
+  challenges, a new one replacing the earlier for the same purpose. Registration and removal are journaled without the key, and
   only the owner removes theirs.
 - The verifier ([webauthn.test.ts](../worker/test/webauthn.test.ts)): CBOR as
   authenticators write it and every malformed shape refused; authenticatorData;

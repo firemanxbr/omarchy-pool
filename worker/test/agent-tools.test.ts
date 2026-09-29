@@ -31,7 +31,7 @@ import { BLOCK_GRANTS_SQL } from "../src/routes/blocks";
 import { PENDING_CODES_SQL } from "../src/routes/gc";
 import { agentName, daySql, DRAFT_MINUTES, GRANT_SQL, s256 } from "../src/agents";
 import { forgetGuardWord } from "../src/cost";
-import { assert as answer, createAuthenticator, register, UP, UV } from "./soft-authenticator.mjs";
+import { assert as answer, b64url, concat, createAuthenticator, register, unb64url, EDDSA, RS256, UP, UV } from "./soft-authenticator.mjs";
 
 /** The dashboard as the tests reach it: localhost, where a passkey works (routes/passkeys.ts relyingParty), as wrangler dev's. */
 const ORIGIN = "http://localhost:8787";
@@ -76,6 +76,12 @@ async function browser(method: "GET" | "POST", path: string, login: string | nul
   return { status: res.status, text: await res.text(), location: res.headers.get("location"), headers: res.headers };
 }
 
+/** A page's form's submit buttons, in order — the first is what Enter presses — with what each posts, its id, and whether it skips the form's checks. */
+const submits = (html: string) =>
+  [...(/<form method="post"[\s\S]*?<\/form>/.exec(html)?.[0] ?? "").matchAll(/<button\b([^>]*)>/g)]
+    .map((m) => m[1])
+    .filter((a) => /type="submit"/.test(a))
+    .map((a) => ({ value: /value="([^"]*)"/.exec(a)?.[1] ?? null, id: /id="([^"]*)"/.exec(a)?.[1] ?? null, novalidate: /\bformnovalidate\b/.test(a) }));
 /** The hidden fields a served form carries. */
 const fields = (html: string): Record<string, string> => Object.fromEntries([...html.matchAll(/<input type="hidden" name="([a-z_]+)" value="([^"]*)">/g)].map((m) => [m[1], m[2].replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">")]));
 
@@ -143,8 +149,8 @@ type Authenticator = Awaited<ReturnType<typeof createAuthenticator>>;
 const passkeys: Record<string, { a: Authenticator; id: string }[]> = {};
 
 /** A passkey registered on the person's own page, as its script does it: the options, the authenticator's answer, the POST — the session, the page's Origin. */
-async function registerPasskey(login: string, o: { keepsCounter?: boolean } = {}): Promise<{ a: Authenticator; id: string }> {
-  const a = await createAuthenticator({ keepsCounter: o.keepsCounter ?? true });
+async function registerPasskey(login: string, o: { keepsCounter?: boolean; alg?: number } = {}): Promise<{ a: Authenticator; id: string }> {
+  const a = await createAuthenticator({ keepsCounter: o.keepsCounter ?? true, ...(o.alg ? { alg: o.alg } : {}) });
   const post = async (path: string, body: unknown) => {
     const res = await raw("POST", ORIGIN + path, { headers: { cookie: session(login), origin: ORIGIN, "content-type": "application/json" }, body: JSON.stringify(body) });
     return { status: res.status, json: (await res.json()) as any };
@@ -487,7 +493,8 @@ describe("a draft", () => {
     expect(d.json).toMatchObject({ state: "waiting", verdict: "approve", name: "drafted", task: project, confirm_url: `${ORIGIN}/auth/confirm/${d.json.draft}` });
     expect(d.json.draft).toMatch(/^d_[0-9a-f]{32}$/);
     expect(Math.abs(Date.parse(d.json.expires_at) - (Date.now() + 30 * 60_000))).toBeLessThan(60_000);
-    expect(d.json.next).toBe("Open the link in a browser signed in as m1 and confirm. Nothing is decided until then.");
+    // m1 holds a passkey: the agent is told the confirmation asks for it (#257).
+    expect(d.json.next).toBe("Open the link in a browser signed in as m1 and confirm with your passkey: your device asks for your fingerprint, face or PIN. Nothing is decided until then.");
     // Nothing decided, nothing journaled.
     expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM events").first()).toEqual(events);
     expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM approvals WHERE task_id = ?").bind(project).first()).toEqual({ n: 0 });
@@ -549,8 +556,11 @@ describe("a draft", () => {
     const { project } = await reviewed("atonce");
     const d = (await call("POST", "/factory/drafts", { name: "atonce", task: project, verdict: "approve", note: "reads well" }, m1.token)).json;
     const f = fields((await confirmPage(d.draft, "m1")).text);
-    // Two answers of the passkey that keeps no counter, each for a challenge of its own: both are good, and the draft decides once.
-    const [x, y] = [await signed(d.draft, "m1", { with: passkeys.m1[1].a }), await signed(d.draft, "m1", { with: passkeys.m1[1].a })];
+    // Two answers of the passkey that keeps no counter, each for a challenge of its own: both are good, and the draft decides once. The route keeps one live challenge a draft (a new one replaces the earlier), so the second is written beside the first straight into the table — the spend alone must still decide once.
+    const x = await signed(d.draft, "m1", { with: passkeys.m1[1].a });
+    const second = "s".repeat(43);
+    await env.DB.prepare("INSERT INTO passkey_challenges (challenge, login, purpose, draft_id, expires_at) VALUES (?, 'm1', 'confirm', ?, ?)").bind(second, d.draft, new Date(Date.now() + 5 * 60_000).toISOString()).run();
+    const y = await answer(passkeys.m1[1].a, { challenge: second, origin: ORIGIN, rpId: "localhost" });
     const [a, b] = await Promise.all([browser("POST", `/auth/confirm/${d.draft}`, "m1", { ...f, ...x, action: "confirm" }), browser("POST", `/auth/confirm/${d.draft}`, "m1", { ...f, ...y, action: "confirm" })]);
     expect([a.status, b.status].sort()).toEqual([200, 409]);
     expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM approvals WHERE name = 'atonce'").first()).toEqual({ n: 1 });
@@ -736,11 +746,13 @@ describe("a passkey for approve and block (#257)", () => {
     const was = await env.DB.prepare("SELECT counter FROM passkeys WHERE id = ?").bind(key.id).first<{ counter: number }>();
     const d = await approveDraft(m1, "pkapprove");
     const page = await confirmPage(d, "m1");
-    // The page asks for the passkey, with its script, and offers no Confirm without it.
+    // The page asks for the passkey, with its script: its one Confirm is the passkey's — the form's first submit button, so Enter confirms and never discards — and Discard skips the form's checks.
     expect(page.text).toContain('id="pk-confirm"');
     expect(page.text).toContain("Confirm with your passkey: approve pkapprove");
     expect(page.text).toContain("navigator.credentials.get");
-    expect(page.text).not.toContain('value="confirm"');
+    expect(submits(page.text)).toEqual([{ value: "confirm", id: "pk-confirm", novalidate: false }, { value: "discard", id: null, novalidate: true }]);
+    // Its status line is always in the page, empty until the script speaks, so a screen reader hears its first word.
+    expect(page.text).toMatch(/<p class="said" id="pk-said" role="status" aria-live="polite"><\/p>/);
     const ok = await post(d, "m1", await signed(d, "m1"));
     expect(ok.status, ok.text.slice(0, 600)).toBe(200);
     expect(ok.text).toContain("pkapprove approved by m1 — drafted by Claude Code, confirmed in the browser with a passkey.");
@@ -754,8 +766,14 @@ describe("a passkey for approve and block (#257)", () => {
     // The person's own /factory/me lists the passkey and its last use; the same answer to their agent carries none.
     expect((await call("GET", "/factory/me", undefined, "omc_m1")).json.passkeys.find((p: any) => p.id === key.id)).toMatchObject({ alg: "ES256", last_used: now!.last_used });
     expect((await call("GET", "/factory/me", undefined, m1.token)).json).not.toHaveProperty("passkeys");
-    // A block, the same way, with the name typed.
+    // A block, the same way, with the name typed. The typed name comes before the buttons, and Confirm is still the first submit button: Enter in the name is a Confirm, which the script turns into the passkey's request.
     const b = await blockDraft(m1, "pkblock");
+    const bpage = (await confirmPage(b, "m1")).text;
+    expect(submits(bpage).map((x) => x.value)).toEqual(["confirm", "discard"]);
+    expect(bpage.indexOf('name="name"')).toBeLessThan(bpage.indexOf('id="pk-confirm"'));
+    // The script leaves Discard alone and takes every other submission — an Enter, a click on Confirm — for the passkey.
+    expect(bpage).toContain('form.addEventListener("submit"');
+    expect(bpage).toContain('by.tagName === "BUTTON" && by.value === "discard"');
     const blocked = await post(b, "m1", { ...(await signed(b, "m1")), name: "pkblock" });
     expect(blocked.status, blocked.text.slice(0, 600)).toBe(200);
     expect(await env.DB.prepare("SELECT blocked_by FROM factory_packages WHERE name = 'pkblock'").first()).toEqual({ blocked_by: "m1" });
@@ -843,6 +861,35 @@ describe("a passkey for approve and block (#257)", () => {
     expect((await post(d, "m1", await signed(d, "m1"))).status).toBe(200);
   });
 
+  it("refuses a signature that is not one — cut short or too long, for each algorithm, an Ed25519 one that is not 64 bytes included — with the refusal page, never a 500; the draft still waits", async () => {
+    const ed = await registerPasskey("m1", { alg: EDDSA });
+    const rs = await registerPasskey("m1", { alg: RS256 });
+    const d = await approveDraft(m1, "pkmalformed");
+    for (const [what, key] of [["EdDSA", ed], ["RS256", rs], ["ES256", passkeys.m1[0]]] as const) {
+      for (const n of [1, 63, 65, 300]) {
+        const x = await signed(d, "m1", { with: key.a });
+        const sig = unb64url(x.signature);
+        const wrong = n < sig.length ? sig.slice(0, n) : concat(sig, new Uint8Array(n - sig.length));
+        const r = await post(d, "m1", { ...x, signature: b64url(wrong) });
+        expect(r.status, `${what}, ${n} bytes: ${r.text.slice(0, 300)}`).toBe(403);
+        expect(r.text, `${what}, ${n} bytes`).toContain("The passkey was refused");
+        expect(r.text, `${what}, ${n} bytes`).toContain("Nothing was decided.");
+        await nothing(d, "pkmalformed");
+      }
+    }
+    // The EdDSA passkey's own answer, whole, confirms it.
+    const ok = await post(d, "m1", await signed(d, "m1", { with: ed.a }));
+    expect(ok.status, ok.text.slice(0, 600)).toBe(200);
+    expect(JSON.parse((await env.DB.prepare("SELECT agent FROM approvals WHERE name = 'pkmalformed'").first<{ agent: string }>())!.agent)).toMatchObject({ passkey: ed.id });
+  });
+
+  it("guards an agent's drafts, not the web's own buttons: the session alone still approves on Review — outside #257, as the security model says", async () => {
+    const { project } = await reviewed("pkwebapprove");
+    const res = await raw("POST", `${API}/factory/tasks/${project}/approve`, { headers: { cookie: session("m1"), origin: ORIGIN, "content-type": "application/json" }, body: JSON.stringify({ note: "reads well" }) });
+    expect(res.status, await res.clone().text()).toBe(200);
+    expect((await line("approve", "pkwebapprove"))!.summary).not.toContain("passkey");
+  });
+
   it("is asked for, never skipped: a maintainer without a passkey is told to register one — on the page, at the POST and at the challenge — with the link, and nothing is decided", async () => {
     const d = await approveDraft(m3, "nopasskey");
     const page = await confirmPage(d, "m3");
@@ -852,6 +899,10 @@ describe("a passkey for approve and block (#257)", () => {
     expect(page.text).not.toContain('id="pk-confirm"');
     expect(page.text).not.toContain('value="confirm"');
     expect(page.text).toContain('value="discard"');
+    // On the page, before anything was tried, it says what to do — not that nothing was decided.
+    const asked = /<section class="refused" role="alert"><b>Register a passkey first\.<\/b>[^<]*<\/section>/.exec(page.text)![0];
+    expect(asked).toContain("your fingerprint, face or PIN");
+    expect(asked).not.toContain("Nothing was decided");
     const r = await post(d, "m3", {});
     expect(r.status).toBe(403);
     expect(r.text).toContain("Register a passkey first");
@@ -860,12 +911,19 @@ describe("a passkey for approve and block (#257)", () => {
     await nothing(d, "nopasskey");
     const ch = await challengeFor(d, "m3", fields(page.text).nonce);
     expect([ch.status, ch.json.code, ch.json.register]).toEqual([403, "no_passkey", "/user/m3#passkeys"]);
+    // One sentence, punctuated once, that the page's script shows with the link.
+    expect(ch.json.error).toMatch(/You have none yet\. Register one on your page, then open this draft again\. Nothing was decided\.$/);
+    expect(ch.json.error).not.toContain("..");
     // Somebody else's answer does not stand in for one: the passkey must be m3's.
     const forged = await post(d, "m3", await answer(passkeys.m1[0].a, { challenge: "x".repeat(43), origin: ORIGIN, rpId: "localhost" }));
     expect(forged.status).toBe(403);
     await nothing(d, "nopasskey");
-    // A block the same.
-    const b = await blockDraft(m3, "nopasskeyblock");
+    // A block the same — and the agent was told before the page: its draft's answer says m3 has no passkey yet, and where to register one.
+    await ready("nopasskeyblock");
+    const drafted = (await call("POST", "/factory/drafts", { name: "nopasskeyblock", verdict: "block", note: "ships a token stealer" }, m3.token)).json;
+    expect(drafted.state, JSON.stringify(drafted)).toBe("waiting");
+    expect(drafted.next).toBe(`m3 has no passkey yet, and a block is confirmed with one: register it first on ${ORIGIN}/user/m3#passkeys, then open the link in a browser signed in as m3 and confirm with it. Nothing is decided until then.`);
+    const b = drafted.draft as string;
     expect((await confirmPage(b, "m3")).text).toContain("Register a passkey first.");
     const rb = await post(b, "m3", { name: "nopasskeyblock" });
     expect([rb.status, rb.text.includes("Register a passkey first")]).toEqual([403, true]);
@@ -889,6 +947,8 @@ describe("a passkey for approve and block (#257)", () => {
   it("request changes and reject are confirmed as before — the session and, for a rejection, the name typed — by a maintainer without a passkey", async () => {
     const { contributor } = await reviewed("pkchanges");
     const c = (await call("POST", "/factory/drafts", { name: "pkchanges", task: contributor, verdict: "request_changes", note: "pin the tag" }, m3.token)).json;
+    // The agent's answer names no passkey either.
+    expect(c.next).toBe("Open the link in a browser signed in as m3 and confirm. Nothing is decided until then.");
     const page = await confirmPage(c.draft, "m3");
     expect(page.text).toContain("Confirm: request changes on pkchanges");
     expect(page.text).not.toContain("passkey");
@@ -904,7 +964,7 @@ describe("a passkey for approve and block (#257)", () => {
     expect((await line("approve", "pkreject"))!.summary).toMatch(/rejected by m3 — drafted by Codex, confirmed in the browser(?! with a passkey)/);
   });
 
-  it("its challenge is asked from the draft's own page: the session only, its Origin and nonce, the same login; five live at most", async () => {
+  it("its challenge is asked from the draft's own page: the session only, its Origin and nonce, the same login; one live a draft, the newest, and five ceremonies a login at once", async () => {
     const d = await approveDraft(m1, "pkchallenge");
     const nonce = fields((await confirmPage(d, "m1")).text).nonce;
     expect((await challengeFor(d, "m1", nonce, { bearer: m1.token })).json.code).toBe("session_only");
@@ -920,9 +980,28 @@ describe("a passkey for approve and block (#257)", () => {
     expect(first.json.publicKey.allowCredentials.map((c: any) => c.id).sort()).toEqual((await env.DB.prepare("SELECT credential_id FROM passkeys WHERE login = 'm1'").all<{ credential_id: string }>()).results.map((r) => r.credential_id).sort());
     expect(await env.DB.prepare("SELECT login, purpose, draft_id FROM passkey_challenges WHERE challenge = ?").bind(first.json.publicKey.challenge).first()).toEqual({ login: "m1", purpose: "confirm", draft_id: d });
     await env.DB.prepare("DELETE FROM passkey_challenges WHERE login = 'm1'").run();
-    for (let i = 0; i < 5; i++) expect((await challengeFor(d, "m1", nonce)).status).toBe(200);
+    // Pressed again and again, each prompt cancelled: the draft keeps one live challenge — the newest replaces the one before — so retries never fill the login's five, and the one before answers nothing.
+    const presses: string[] = [];
+    for (let i = 0; i < 8; i++) {
+      const r = await challengeFor(d, "m1", nonce);
+      expect(r.status, `press ${i + 1}: ${JSON.stringify(r.json)}`).toBe(200);
+      presses.push(r.json.publicKey.challenge);
+    }
+    expect((await env.DB.prepare("SELECT challenge FROM passkey_challenges WHERE login = 'm1'").all()).results).toEqual([{ challenge: presses[7] }]);
+    const stale = await post(d, "m1", await answer(passkeys.m1[0].a, { challenge: presses[6], origin: ORIGIN, rpId: "localhost" }));
+    expect([stale.status, stale.text.includes("press Confirm again")]).toEqual([403, true]);
+    await nothing(d, "pkchallenge");
+    // A registration's challenge is another ceremony: it does not replace the draft's.
+    const reg = await raw("POST", `${ORIGIN}/auth/passkeys/challenge`, { headers: { cookie: session("m1"), origin: ORIGIN, "content-type": "application/json" }, body: "{}" });
+    expect(reg.status).toBe(200);
+    expect((await env.DB.prepare("SELECT purpose, draft_id FROM passkey_challenges WHERE login = 'm1' ORDER BY purpose").all()).results).toEqual([{ purpose: "confirm", draft_id: d }, { purpose: "register", draft_id: null }]);
+    // Five ceremonies live at once — the login's other drafts — and a sixth is told, in a person's words, to wait.
+    await env.DB.prepare("DELETE FROM passkey_challenges WHERE login = 'm1'").run();
+    const later = new Date(Date.now() + 5 * 60_000).toISOString();
+    for (let i = 0; i < 5; i++) await env.DB.prepare("INSERT INTO passkey_challenges (challenge, login, purpose, draft_id, expires_at) VALUES (?, 'm1', 'confirm', ?, ?)").bind(String(i).repeat(43), `d_other${i}`, later).run();
     const sixth = await challengeFor(d, "m1", nonce);
-    expect([sixth.status, sixth.json.code]).toEqual([429, "rate_limited"]);
+    expect([sixth.status, sixth.json.code, sixth.headers.get("retry-after")]).toEqual([429, "rate_limited", "300"]);
+    expect(sixth.json.error).toBe("Too many passkey requests in the last 5 minutes: wait a few minutes, then press again. Nothing was decided.");
     await env.DB.prepare("DELETE FROM passkey_challenges WHERE login = 'm1'").run();
     // A draft decided or expired asks for none.
     await env.DB.prepare("UPDATE drafts SET expires_at = '2000-01-01T00:00:00.000Z' WHERE id = ?").bind(d).run();

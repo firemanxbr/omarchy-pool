@@ -313,12 +313,24 @@ export function derToRaw(der: Uint8Array, size = 32): Uint8Array {
   return concat(r, s);
 }
 
-/** Whether `signature` is the key's over `data`, in its algorithm's shape: DER for ES256, as it comes for RS256 and EdDSA. */
+/**
+ * Whether `signature` is the key's over `data`, in its algorithm's shape: DER
+ * for ES256, as it comes for RS256 and EdDSA. A signature WebCrypto cannot
+ * even read — not DER, an Ed25519 one that is not 64 bytes — is refused with
+ * the code `signature`, never thrown as the runtime's own error.
+ */
 export async function verifySignature(alg: number, key: CryptoKey, signature: Uint8Array, data: Uint8Array): Promise<boolean> {
-  if (alg === ES256) return crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key, derToRaw(signature), data);
-  if (alg === RS256) return crypto.subtle.verify({ name: "RSASSA-PKCS1-v1_5" }, key, signature, data);
-  if (alg === EDDSA) return crypto.subtle.verify({ name: "Ed25519" }, key, signature, data);
-  return fail("algorithm", `algorithm ${alg} is not one the pool takes`);
+  const params = alg === ES256 ? { name: "ECDSA", hash: "SHA-256" } : alg === RS256 ? { name: "RSASSA-PKCS1-v1_5" } : alg === EDDSA ? { name: "Ed25519" } : null;
+  if (!params) return fail("algorithm", `algorithm ${alg} is not one the pool takes`);
+  // An Ed25519 signature is 64 bytes (RFC 8032 §5.1.6); workerd throws on any other length instead of answering false.
+  if (alg === EDDSA && signature.length !== 64) return fail("signature", "the EdDSA signature is not 64 bytes");
+  const sig = alg === ES256 ? derToRaw(signature) : signature;
+  try {
+    return await crypto.subtle.verify(params, key, sig, data);
+  } catch {
+    // Whatever else the runtime refuses to read (an RSA signature of another length, say) is a signature that is not the passkey's: a refusal, never a 500.
+    return fail("signature", "the signature could not be read");
+  }
 }
 
 // ---------- the ceremonies ----------

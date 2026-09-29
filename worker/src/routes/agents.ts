@@ -351,7 +351,20 @@ export async function handleDraft(a: AgentCaller, request: Request, env: Env, or
   const row = await env.DB.prepare(`INSERT INTO drafts (id, grant_id, login, agent, client, verdict, note, name, task_id, facts, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${DRAFT_COLS}`)
     .bind(draft, a.grant, a.contributor.login, a.agent, a.client, verdict, note, name, task, facts, expires)
     .first<DraftRow>();
-  return json({ ...draftView(row!, origin), next: `Open the link in a browser signed in as ${a.contributor.login} and confirm. Nothing is decided until then.` }, 201, { "cache-control": "no-store" });
+  return json({ ...draftView(row!, origin), next: await nextStep(env, a.contributor.login, verdict, origin) }, 201, { "cache-control": "no-store" });
+}
+
+/**
+ * What the agent tells its person to do with a draft (the answer's `next`):
+ * open the link and confirm. For approve and block (#257) it says the
+ * confirmation asks for their passkey — and, when the login holds none yet,
+ * that one is registered first, and where — so the person hears it before
+ * the page, not from it.
+ */
+async function nextStep(env: Env, login: string, verdict: Verdict, origin: string): Promise<string> {
+  if (!PASSKEY_VERDICTS.includes(verdict)) return `Open the link in a browser signed in as ${login} and confirm. Nothing is decided until then.`;
+  if (await env.DB.prepare(HAS_PASSKEY_SQL).bind(login).first()) return `Open the link in a browser signed in as ${login} and confirm with your passkey: your device asks for your fingerprint, face or PIN. Nothing is decided until then.`;
+  return `${login} has no passkey yet, and ${verdict === "approve" ? "an approval" : "a block"} is confirmed with one: register it first on ${origin}${registerHref(login)}, then open the link in a browser signed in as ${login} and confirm with it. Nothing is decided until then.`;
 }
 
 /** GET /api/v1/factory/drafts/:id — the draft, to its own login's agent. */
