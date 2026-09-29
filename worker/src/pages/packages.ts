@@ -90,7 +90,8 @@ const PACKAGE_CSS = String.raw`
   .pkg-stage-a > span { margin-left: 4px; }
   .pkg-panel { border: 1px solid var(--line); border-top: 0; background: var(--panel); padding: 18px; display: grid; gap: 16px; min-width: 0; }
   .pkg-ph { display: flex; justify-content: space-between; align-items: center; gap: 10px 16px; flex-wrap: wrap; }
-  .pkg-ph > span { display: flex; align-items: center; gap: 10px; } .pkg-ph h3 { font: 600 17px var(--font-display); }
+  /* A panel's title and its tag: the tag goes under the title when one row cannot hold both (waiting for a native x86_64 worker, on a phone). */
+  .pkg-ph > span { display: flex; align-items: center; gap: 6px 10px; flex-wrap: wrap; min-width: 0; } .pkg-ph h3 { font: 600 17px var(--font-display); }
   .pkg-who { display: flex; gap: 6px; flex-wrap: wrap; }
   .pkg-whoc { display: inline-flex; align-items: center; gap: 7px; min-width: 0; border: 1px solid var(--line); background: var(--bg-deep); padding: 2px 9px 2px 3px; font-size: 12.5px; color: var(--text); }
   .pkg-whoc .r { color: var(--dim); } .pkg-whoc > a:not(.avatar) { color: var(--text); } .pkg-whoc > a:not(.avatar):hover { color: var(--green); } .pkg-whoc .avatar { width: 20px; height: 20px; font-size: 8.5px; }
@@ -499,13 +500,14 @@ const PACKAGE_SCRIPT = String.raw`
     var standing = ARCHES.map(approvedChain).filter(Boolean)[0], stood = standing ? standing.approval : null;
     var withdrawn = ((ST && ST.chains) || []).some(function (c) { return c.withdrawn; });
     // Undecided, it says Review's word — the chip's, unless a ring serves it — first, then where the claim stands, in the Factory card's words
-    // and by its order (#282): the project rebuilding while any architecture's rebuild is queued or running, else a new version building
-    // beside the claim, else the rebuild staged.
-    var reviewTone, reviewSum, inReview = reviewOf();
-    var claimAt = anyT(["reviewing"]) ? ["run", "project rebuilding"] : anyT(["building"]) ? ["run", "new version building"] : ["warn", "rebuild staged"];
+    // and by its order (#282): the native worker a rebuild an emulated worker sent back waits for (#281), else the project rebuilding while
+    // any architecture's rebuild is queued or running, else a new version building beside the claim, else the rebuild staged.
+    var reviewTone, reviewSum, reviewWhy = "", inReview = reviewOf();
+    var sentBack = function (a) { var k = status(a) === "reviewing" ? claimOf(a) : null; return k ? waitsForNative(k.project) : ""; }, waits = arches.map(sentBack).filter(Boolean)[0];
+    var claimAt = waits ? ["warn", waits] : anyT(["reviewing"]) ? ["run", "project rebuilding"] : anyT(["building"]) ? ["run", "new version building"] : ["warn", "rebuild staged"];
     if (b && !approval) { reviewTone = "na"; reviewSum = withdrawn ? "withdrawn by the block" : "never reviewed · blocked"; }
     else if (approval) { reviewTone = approval.decision === "approved" ? "ok" : "fail"; reviewSum = "@" + approval.by + (approval.decision === "approved" ? " · rebuilt · approved" : " · " + approval.decision); }
-    else if (inReview === "in-review") { reviewTone = claimAt[0]; reviewSum = STATE[inReview][1] + " · " + claimAt[1]; }
+    else if (inReview === "in-review") { reviewTone = claimAt[0]; reviewSum = STATE[inReview][1] + " · " + claimAt[1]; reviewWhy = waits; }
     else if (inReview === "ready") { reviewTone = "wait"; reviewSum = STATE[inReview][1] + " · waiting for a claim"; }
     else if (stood) { reviewTone = "ok"; reviewSum = "@" + stood.by + " · approved " + (stood.version || ""); }
     else { reviewTone = "wait"; reviewSum = "waiting for builds"; }
@@ -515,7 +517,7 @@ const PACKAGE_SCRIPT = String.raw`
     return [
       { id: "source", icon: "file-text", label: "Request", tone: req.complete ? "ok" : checks.length ? "fail" : "wait", sum: (owner ? "@" + owner + " · " : "") + okN + "/" + checks.length + " checks", when: onDay(req.created_at || ((ST && ST.package) || {}).created_at).replace(/ \d{4}$/, "") },
       { id: "build", icon: "hammer", label: "Factory build", tone: buildTone, sum: buildSum, archs: sq(function (a) { var s = status(a); return s === "building" ? ["run", "building"] : s === "not_supported" ? ["na", "not supported"] : ["built", "reviewing", "reviewed", "approved", "published"].indexOf(s) >= 0 ? ["ok", "built"] : rejected ? ["na", "rejected"] : s ? ["wait", s] : ["na", "not requested"]; }), when: since(((bc || chainFor(arches[0]) || {}).contributor || {}).finished_at) },
-      { id: "review", icon: "user-check", label: "Review", tone: reviewTone, sum: reviewSum, archs: sq(function (a) { var s = status(a), c = chainFor(a); return s === "not_supported" ? ["na", "not supported"] : s === "reviewing" ? ["run", "in review · project rebuilding"] : s === "reviewed" ? ["warn", "in review · rebuild staged"] : ["approved", "published"].indexOf(s) >= 0 ? ["ok", "approved"] : c && c.approval && c.approval.decision === "rejected" ? ["fail", "rejected"] : s === "built" ? (inReview === "ready" ? ["wait", "ready for review · waiting for a claim"] : inReview === "in-review" ? ["warn", "in review"] : anyT(["building"]) ? ["wait", "built · waiting for the others"] : ["wait", "built · nothing to decide"]) : approvedChain(a) ? ["ok", "approved"] : s ? ["wait", "not yet"] : ["na", "not requested"]; }), when: approval ? since(approval.created_at) : stood ? since(stood.created_at) : "" },
+      { id: "review", icon: "user-check", label: "Review", tone: reviewTone, sum: reviewSum, why: reviewWhy, archs: sq(function (a) { var s = status(a), c = chainFor(a); return s === "not_supported" ? ["na", "not supported"] : s === "reviewing" ? (sentBack(a) ? ["warn", "in review · " + sentBack(a)] : ["run", "in review · project rebuilding"]) : s === "reviewed" ? ["warn", "in review · rebuild staged"] : ["approved", "published"].indexOf(s) >= 0 ? ["ok", "approved"] : c && c.approval && c.approval.decision === "rejected" ? ["fail", "rejected"] : s === "built" ? (inReview === "ready" ? ["wait", "ready for review · waiting for a claim"] : inReview === "in-review" ? ["warn", "in review"] : anyT(["building"]) ? ["wait", "built · waiting for the others"] : ["wait", "built · nothing to decide"]) : approvedChain(a) ? ["ok", "approved"] : s ? ["wait", "not yet"] : ["na", "not requested"]; }), when: approval ? since(approval.created_at) : stood ? since(stood.created_at) : "" },
       { id: "rings", icon: "layers", label: "Rings", tone: ringsStage[0], sum: ringsStage[1], when: ringsStage[2] }
     ];
   }
@@ -526,7 +528,7 @@ const PACKAGE_SCRIPT = String.raw`
     $("#chain-note").textContent = stateOf() === "none" ? "not in the pool · nobody requested it" : fac ? peopleCount() : "mirrored from " + upstreamName() + " · verified here";
     $("#stages").innerHTML = list.map(function (s) {
       var on = s.id === STAGE;
-      return '<button type="button" role="tab" class="pkg-stage ' + s.tone + '" id="stage-' + s.id + '" aria-controls="stage-panel" aria-selected="' + on + '" tabindex="' + (on ? 0 : -1) + '" data-stage="' + s.id + '"><span class="pkg-stage-t"><span><span class="op-box ' + (s.dashed ? "na" : "") + '">' + lucide(s.icon, 15) + '</span><b>' + esc(s.label) + '</b></span>' + (s.tone === "warn" ? '<b class="op-mark warn" title="waiting for a decision">⟳</b>' : mark(s.tone)) + '</span><span class="pkg-stage-s" title="' + esc(s.sum) + '">' + esc(s.sum) + '</span><span class="pkg-stage-a">' + (s.archs || "") + (s.when ? '<span>' + esc(s.when) + '</span>' : '') + '</span></button>';
+      return '<button type="button" role="tab" class="pkg-stage ' + s.tone + '" id="stage-' + s.id + '" aria-controls="stage-panel" aria-selected="' + on + '" tabindex="' + (on ? 0 : -1) + '" data-stage="' + s.id + '"><span class="pkg-stage-t"><span><span class="op-box ' + (s.dashed ? "na" : "") + '">' + lucide(s.icon, 15) + '</span><b>' + esc(s.label) + '</b></span>' + (s.tone === "warn" ? '<b class="op-mark warn" title="' + esc(s.why || "waiting for a decision") + '">⟳</b>' : mark(s.tone)) + '</span><span class="pkg-stage-s" title="' + esc(s.sum) + '">' + esc(s.sum) + '</span><span class="pkg-stage-a">' + (s.archs || "") + (s.when ? '<span>' + esc(s.when) + '</span>' : '') + '</span></button>';
     }).join("");
     $("#stage-panel").setAttribute("aria-labelledby", "stage-" + STAGE);
     $("#stage-panel").innerHTML = panelOf(STAGE);
@@ -639,7 +641,7 @@ const PACKAGE_SCRIPT = String.raw`
   }
   function buildMark(b) {
     if (!b) return ["na", "", "no build"];
-    if (b.status === "queued") return ["wait", "queued", "waiting for a worker"];
+    if (b.status === "queued") return waitsForNative(b) ? ["wait", "native worker", waitsForNative(b) + ": it could not run emulated"] : ["wait", "queued", "waiting for a worker"];
     if (b.status === "leased" || b.status === "building") return ["run", "try " + Math.max(1, b.attempts || 1), "building"];
     if (b.status === "staged" || b.status === "done") return ["ok", "", "built"];
     if (b.status === "failed") return ["fail", (b.attempts || 1) + (b.attempts === 1 ? " try" : " tries"), b.error || "failed"];
@@ -704,9 +706,11 @@ const PACKAGE_SCRIPT = String.raw`
     if (blockedBy() && !ps.some(Boolean) && !ap) return panel({ title: "Review", tag: "blocked", tone: "na", note: "Blocked before any review decided it. Once another maintainer lifts the block, a new build and a new review start it over." });
     if (!ps.some(Boolean) && !ap && !ready) return panel({ title: "Review", tag: "waiting", tone: "wait", note: "Starts once every architecture is built or not supported. A maintainer who did not request the package has the project build it again on a trusted worker, then decides; " + (owner ? atLink(owner) + " can never review their own request." : "nobody reviews their own request.") + besides });
     var trials = cs.map(function (c) { return c && c.trial; }), pubs = cs.map(function (c) { return c && c.publish; }), audit = cs.map(function (c) { return c && c.audit; }).filter(Boolean)[0];
-    var tone = ap ? (ap.withdrawn_at ? "na" : ap.decision === "approved" ? "ok" : "fail") : ps.some(function (p) { return p && (p.status === "leased" || p.status === "queued"); }) ? "run" : ps.some(Boolean) ? "warn" : "wait";
-    // Undecided, the tag is Review's word, as the chip and the stage say it (#282).
-    var tag = ap ? (ap.withdrawn_at ? "withdrawn" : ap.decision) : reviewOf() === "in-review" ? (tone === "run" ? "in review · rebuilding" : "in review") : reviewOf() === "ready" ? "ready for review" : "waiting";
+    // A project build an emulated worker sent back (#281) says what it waits for, in the shell's words.
+    var wn = ps.map(function (p) { return waitsForNative(p); }).filter(Boolean)[0], rv = reviewOf();
+    var tone = ap ? (ap.withdrawn_at ? "na" : ap.decision === "approved" ? "ok" : "fail") : wn ? "warn" : ps.some(function (p) { return p && (p.status === "leased" || p.status === "queued"); }) ? "run" : ps.some(Boolean) ? "warn" : "wait";
+    // Undecided, the tag is Review's word, as the chip and the stage say it (#282), then what a rebuild sent back waits for (#281).
+    var tag = ap ? (ap.withdrawn_at ? "withdrawn" : ap.decision) : rv === "in-review" ? (wn ? "in review · " + wn : tone === "run" ? "in review · rebuilding" : "in review") : rv === "ready" ? "ready for review" : wn || "waiting";
     // A cell with no project build yet: to come on an architecture that is built, nothing on one that is not supported or not requested.
     var none = function (i, what) { var s = status(ARCHES[i]); return s === "not_supported" ? ["na", "", "not supported"] : !s ? ["na", "", "not requested"] : ["wait", "", what]; };
     var trialMark = function (t, i) { if (!ps[i]) return none(i, "tried once the project built it again"); if (!t) return ["wait", "", "not tried yet"]; var v = t.result && t.result.verdict; return t.status !== "done" ? ["run", t.status, "the trial is " + t.status] : v === "ok" ? ["ok", "", "a real pacman installed it in the lab"] : ["fail", v || "failed", "the trial did not install it"]; };
@@ -1256,11 +1260,11 @@ export const PACKAGE_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // How it got here: four stages, a tab each, with its state per architecture — the targets' word for a factory package, where it is served for a synced one — and the chosen one's panel below.
+      // How it got here: four stages, a tab each, with its state per architecture — the targets' word for a factory package, where it is served for a synced one — and the chosen one's panel below. A claim whose rebuild an emulated worker sent back says, on its Review stage, the native worker it waits for, as the Factory's card does (the shell's waitsForNative, #281).
       id: "package.stages",
       page,
       anchor: ['id="op-chain"', 'id="stages"', 'role="tablist"', 'id="stage-panel"', 'role="tabpanel"', 'id="chain-note"'],
-      script: ['"#stages"', "stagesOf()", "defaultStage()", '"Upstream"', '"Request"', '"Factory build"', '"Review"', '"Rings"', "not needed · mirrored", 'role="tab"', "aria-selected", "ArrowRight", "peopleCount()"],
+      script: ['"#stages"', "stagesOf()", "defaultStage()", '"Upstream"', '"Request"', '"Factory build"', '"Review"', '"Rings"', "not needed · mirrored", 'role="tab"', "aria-selected", "ArrowRight", "peopleCount()", "waitsForNative(k.project)", 'waits ? ["warn", waits]'],
       reads: [
         { path: story, fields: ["targets", "chains.0.contributor.status", "chains.0.contributor.attempts", "chains.0.contributor.finished_at", "chains.0.approval", "request.checks", "request.complete", "request.created_at", "package.owner", "review"] },
         { path: pkg, fields: ["seal.upstream.project", "manifest.pkginfo.builddate", "arches.x86_64.rings"] },
@@ -1299,11 +1303,11 @@ export const PACKAGE_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // The review: the project's build per architecture, its gate, the lab's trial, the decision and the reviewer's checklist — and the two recipes compared, read by the addresses the story gives when a reader asks to compare them.
+      // The review: the project's build per architecture, its gate, the lab's trial, the decision and the reviewer's checklist — and the two recipes compared, read by the addresses the story gives when a reader asks to compare them. A project build an emulated worker sent back tags the panel and its cell with the native worker it waits for (the shell's waitsForNative, #281).
       id: "package.review-panel",
       page,
       anchor: ['id="stage-panel"'],
-      script: ["reviewPanel()", "c.project", "c.trial", "c.publish", "ap.withdrawn_at", "evidenceHref(ps[i].id)", "data-recipes", "loadRecipes()", "c.recipes.contributor", "c.recipes.project", "diffHtml(two[0], two[1])", "Recipe vs the factory", "RECIPE_MAX"],
+      script: ["reviewPanel()", "ps.map(function (p) { return waitsForNative(p); })", "waitsForNative(b) ? [\"wait\", \"native worker\"", "c.project", "c.trial", "c.publish", "ap.withdrawn_at", "evidenceHref(ps[i].id)", "data-recipes", "loadRecipes()", "c.recipes.contributor", "c.recipes.project", "diffHtml(two[0], two[1])", "Recipe vs the factory", "RECIPE_MAX"],
       reads: [
         { path: shipped, fields: ["chains.0.project.status", "chains.0.project.result.vet.verdict", "chains.0.project.lease_owner", "chains.0.trial.status", "chains.0.trial.result.verdict", "chains.0.publish.status", "chains.0.approval.by", "chains.0.approval.note", "chains.0.approval.decision", "chains.0.audit.result.model", "chains.0.recipes.contributor", "chains.0.recipes.project"] },
         { path: story, fields: ["chains.0.recipes.contributor", "chains.0.recipes.project"] },

@@ -423,10 +423,8 @@ install_deps() {
 # and the report sends it back to the queue for a native worker. Its status
 # is nobody else's: makepkg's own 6 is a source file it cannot find.
 toolchains_start() {
-  local emulated t
-  emulated="$(jq -r '.emulated // false' <<<"${WORKER_LABELS:-"{}"}" 2>/dev/null || echo false)"
-  [[ "$emulated" == true ]] || return 0
-  local probe
+  local t probe
+  emulated_worker || return 0
   for t in rustc cargo clang gcc go node python3 zig; do
     command -v "$t" >/dev/null 2>&1 || continue
     case "$t" in go|zig) probe=version ;; *) probe=--version ;; esac
@@ -437,6 +435,26 @@ toolchains_start() {
     fi
   done
   return 0
+}
+
+# A library qemu cannot map dies in the loader, past any probe: sudo
+# through libldap, anything linking libedit. On an emulated worker that is
+# the worker's failure too — status 96, with the loader's own line, before
+# a drafter turn "corrects" a PKGBUILD that was never the problem. On a
+# native worker the same line is a real failure: nothing said, status 0.
+libraries_start() { # log
+  local line
+  emulated_worker || return 0
+  line="$(grep -m1 'failed to map segment from shared object' "$1")" || return 0
+  echo "==> a library cannot start on this worker ($line): emulated $(uname -m) under qemu on a host whose page size is not the guest's — a native worker is needed for this package"
+  return 96
+}
+
+# Whether this worker runs emulated: its labels' "emulated", read as the
+# pool reads it (routes/factory.ts: any value JavaScript counts true), so
+# the worker, `pkg-repo work` and the pool never disagree on which it is.
+emulated_worker() {
+  jq -e '(.emulated // false) as $e | $e != false and $e != 0 and $e != ""' <<<"${WORKER_LABELS:-"{}"}" >/dev/null 2>&1
 }
 
 run_makepkg() { # name → /build/out/*.pkg.tar.zst
@@ -725,8 +743,9 @@ build_attempts() { # name ref
       cp "$VET_LOG" /build/attempt.log
     else
       cat /build/attempt.log
-      # The worker itself cannot build this (a toolchain that does not start under emulation): no drafter turns it around.
+      # The worker itself cannot build this (a toolchain or a library that does not start under emulation): no drafter turns it around.
       if (( rc == 96 )); then return 96; fi
+      libraries_start /build/attempt.log || return 96
       if (( attempt >= max )); then return 4; fi
     fi
     attempt=$((attempt + 1))
@@ -845,9 +864,10 @@ container_worker() {
     # fails, fails the same way in the next fresh container: the report
     # says so (`final`) and the task fails now; the contributor fixes the
     # PKGBUILD (or sets GITHUB_TOKEN) and queues a new build. A toolchain
-    # that cannot start here (exit 96, toolchains_start's alone) is this
-    # worker's fault, not the recipe's: `needs_native` sends the build back
-    # to the queue for a native worker, and the pool does not count the attempt.
+    # or a library that cannot start here (exit 96, toolchains_start's and
+    # libraries_start's alone) is this worker's fault, not the recipe's:
+    # `needs_native` sends the build back to the queue for a native worker,
+    # and the pool does not count the attempt.
     local final=true native=false
     if grep -qE 'Failure while downloading|curl: \([0-9]+\)|failed retrieving file|failed to synchronize|Could not resolve host|Connection (timed out|refused|reset)|Temporary failure in name resolution' /build/build.log; then final=false; fi
     if (( status == 96 )); then final=false native=true; fi

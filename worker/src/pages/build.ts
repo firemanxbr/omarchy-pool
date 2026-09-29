@@ -88,7 +88,7 @@ const SCRIPT = String.raw`
     var sc = T.score;
     // The package's one address (the shell's pkgHref) with the ring this build is about (the shell's ringOfBuild): the most stable ring that serves the package — T.rings is the server's list — the lab for a staged build nobody decided yet, as Review and a person's builds link it, the shell's default for a build in no ring; the timeline's "the package →" is the same link.
     $("#title").innerHTML = isBuild ? '<a href="' + pkgHref(t.name, ringOfBuild(t.status, T.rings), t.arch) + '" title="the package, as Packages shows it — with where it came from">' + esc(t.name) + '</a> <span class="mono muted" style="font-size:.7em">' + esc(t.version || "") + '</span>' : esc(t.kind) + ' <span class="mono muted" style="font-size:.7em">#' + t.id + '</span>';
-    $("#badges").innerHTML = pillHtml("none", t.arch) + taskPill(t.status) + (isBuild ? pillHtml(project ? "ok" : "lilac", project ? "the project" : "evidence", project ? "built by the project on a trusted worker, from a contributor's evidence" : "a contributor's build: evidence for a maintainer, never what users get") : "")
+    $("#badges").innerHTML = pillHtml("none", t.arch) + taskPill(t.status) + nativePill(t) + (isBuild ? pillHtml(project ? "ok" : "lilac", project ? "the project" : "evidence", project ? "built by the project on a trusted worker, from a contributor's evidence" : "a contributor's build: evidence for a maintainer, never what users get") : "")
       + (isBuild && sc ? (sc.ready ? pillHtml("ok", "ready for a maintainer", "the contributor's half is complete: a build that passed the gate, audited") : t.status === "staged" || t.status === "leased" || t.status === "queued" ? pillHtml("warn", "not ready", "the contributor's half is not complete yet") : "") : "");
     // The worker as every table names it — the shell's wtId, its owner the shell's person — so the lede and the kv below read the same machine; a lease the record no longer lists is the bare id, whole, as the Pipeline and a person's builds draw it.
     var built = T.worker ? (T.worker.owner ? personLink(T.worker.owner) + "'s worker " : "worker ") + wtId(T.worker) : t.lease_owner ? "worker " + wtId(t.lease_owner) : esc(t.finished_at ? "a worker the record no longer names" : "no worker yet");
@@ -97,7 +97,7 @@ const SCRIPT = String.raw`
     $("#lede").innerHTML = (isBuild
       ? (project ? 'The project built <b>' + esc(t.name) + '</b> ' + esc(t.version || '') + ' for ' + esc(t.arch) + (T.from ? ' from the evidence in <a href="/build/' + T.from.id + '">#' + T.from.id + '</a> (' + personLink(T.from.owner) + '\'s build)' : '') : personLink(t.owner) + ' built <b>' + esc(t.name) + '</b> ' + esc(t.version || '') + ' for ' + esc(t.arch) + ' on ' + built)
       : 'A pool job: <b>' + esc(t.kind) + '</b>' + (p && p.from ? ' ' + esc(p.from) + ' → ' + esc(p.to) : '') + ', on ' + built)
-      + ' · ' + (t.status === "staged" ? (a ? 'decided' : wd ? 'the approval was withdrawn — waiting for another maintainer' : 'waiting for a maintainer') : t.status === "leased" ? 'building now' : t.status === "queued" ? 'queued' : t.status) + (t.finished_at ? ', ' + ago(t.finished_at) : '') + '.';
+      + ' · ' + (t.status === "staged" ? (a ? 'decided' : wd ? 'the approval was withdrawn — waiting for another maintainer' : 'waiting for a maintainer') : t.status === "leased" ? 'building now' : t.status === "queued" ? (waitsForNative(t) ? 'queued, ' + waitsForNative(t) + ': it could not run emulated' : 'queued') : t.status) + (t.finished_at ? ', ' + ago(t.finished_at) : '') + '.';
     if (isBuild) setTiles("#tiles", [
       ["Gate", vet ? (vet.verdict === "pass" ? "pass" : "fail") : "—", vet ? (vet.fails ? vet.fails + " failing" : (vet.warnings ? vet.warnings + " warning" + (vet.warnings === 1 ? "" : "s") : "clean")) : "built before the gate", vet ? (vet.verdict === "pass" ? "ok" : "bad") : ""],
       ["Audit", audit && audit.status === "done" && audit.result ? String(audit.result.verdict || "done") : audit ? audit.status : "—", audit && audit.result ? num((audit.result.findings || []).length) + " finding(s)" + (audit.result.model ? " · " + audit.result.model : "") : audit ? "the second agent" : project ? "audited on the contributor's build" : "no audit yet", audit && audit.result ? ({ ok: "ok", warn: "warn", block: "bad" }[audit.result.verdict] || "") : ""],
@@ -302,8 +302,9 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       id: "build.badges",
       page,
       anchor: ['id="badges"'],
-      script: ['"#badges"', "taskPill(t.status)", "sc.ready", '"ready for a maintainer"', '"not ready"'],
-      reads: [{ path: task, fields: ["task.arch", "task.status", "task.kind", "task.trust", "score.ready"] }],
+      // A build an emulated worker sent back wears the native worker it waits for (params.needs_native, the shell's nativePill — #281).
+      script: ['"#badges"', "taskPill(t.status)", "nativePill(t)", "sc.ready", '"ready for a maintainer"', '"not ready"'],
+      reads: [{ path: task, fields: ["task.arch", "task.status", "task.kind", "task.trust", "task.params", "score.ready"] }],
       visible: EVERYONE,
     },
     {
@@ -311,7 +312,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       id: "build.lede",
       page,
       anchor: ['id="lede"'],
-      script: ['"#lede"', "personLink(T.worker.owner)", "wtId(T.worker)", "wtId(t.lease_owner)", "T.from.owner", "T.approval.standing", "T.approval.withdrawn_at"],
+      script: ['"#lede"', "personLink(T.worker.owner)", "wtId(T.worker)", "wtId(t.lease_owner)", "T.from.owner", "T.approval.standing", "T.approval.withdrawn_at", "waitsForNative(t)", "': it could not run emulated'"],
       reads: [
         {
           path: task,

@@ -238,7 +238,18 @@ library — `rustc` and `sudo` fail with *failed to map segment* — so the
 two x86_64 build services sit behind the compose `emulated` profile, off
 by default: x86_64 build tasks wait for an x86_64 worker, and any x86_64
 machine with docker becomes one in minutes (factory/host/README.md,
-*x86_64 builds*) — the pool does not care where a worker runs. Everything lives under `/srv/omarchy-pool`
+*x86_64 builds*) — the pool does not care where a worker runs.
+`COMPOSE_PROFILES=emulated` in `.env` turns them on here anyway
+(`community-x86_64`, `review-x86_64`, `review2-x86_64`, labeled
+`"emulated":true`), for C-only packages. A build that dies of emulation
+there goes back to the queue for a native x86_64 worker, not retried and
+not failed: a toolchain that cannot start, or a library qemu cannot map.
+No emulated worker takes it again (#281). To see it: the Workers page says
+how many builds wait for a native worker, each linked. The build page and
+the Review workbench say *waiting for a native x86_64 worker*. The events
+log a `build` warning with `needs_native`. It waits until a native x86_64
+worker is online.
+Everything lives under `/srv/omarchy-pool`
 (a btrfs subvolume on the internal disk; the 4 TB drive joins when it has a
 USB enclosure — the Asahi kernel has no Thunderbolt tunnelling, so the NVMe
 slot of a Thunderbolt dock is invisible to it): `work/<service>` (the same

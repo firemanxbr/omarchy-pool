@@ -29,6 +29,10 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       - run: cargo build --release -p pkg-extract -p pkg-repo -p omarchy-cli
+      - name: The Rust worker sends a build that died of emulation back for a native one, against a stubbed pool and podman
+        run: bash tests/worker-needs-native.sh
+        env:
+          PKG_REPO: target/release/pkg-repo
       - uses: actions/upload-artifact@v4
         with:
           name: binaries-${{ matrix.os }}
