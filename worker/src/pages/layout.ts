@@ -9,6 +9,7 @@ import { DOCS_TREE, GLOSSARY, type DocKey } from "./docs-tree";
 import { EXPECTED_SOURCES, LATE_AFTER_HOURS, PROMOTED_RINGS, REPO_ARCHES, RING_TEXT, RINGS_BY_STABILITY, SEVERITIES, WORKER_ALIVE_MINUTES } from "../meta";
 import { escapeHtml } from "../html";
 import { KIT_HELPERS, KIT_SHEET_PATH, type LucideName } from "./kit";
+import { PKGNAME } from "../request";
 
 /**
  * The palette, typed once (#239, the handoff's "Design tokens"): every
@@ -1121,7 +1122,7 @@ export const HELPERS = String.raw`
   function servedRing(rings) { var order = Object.keys(RINGS_TEXT), best = null; (rings || []).forEach(function (r) { var i = order.indexOf(ringName(r)); if (i >= 0 && (best === null || i < order.indexOf(ringName(best)))) best = r; }); return best; }
   // The ring a build's package link is about: the most stable ring that serves it, the lab for a build nobody decided yet (staged: in the lab by the trial, in no ring otherwise), none for the rest — the shell's default then. Review's rows, a build's page and a person's builds say one ring for one build.
   function ringOfBuild(status, rings) { var r = servedRing(rings); return r !== null ? ringName(r) : status === "staged" ? "lab" : null; }
-  // Where a standing approval is today, one rule for every page that draws it (the Factory's Landed lately, Review's Decided line) from what the row of GET /factory/approvals knows: a ring serves the package — "in <rings>"; the package is blocked (the brake pulled it from every ring) — "blocked"; the publish job the approval queued gave up — "publish failed" or "publish cancelled"; otherwise that job is queued or running — "publishing". Never from the absence of a ring, and never from the registry's status: factory_packages.status stays "approved" after a failed publish and "published" after a block, and Review guessed ["edge"] from it, promising edge over a publish that failed while the Factory said failed (2026-09-18).
+  // Where a standing approval is today, one rule for every page that draws it (Review's Decided line; the Factory's Landed lately until #246) from what the row of GET /factory/approvals knows: a ring serves the package — "in <rings>"; the package is blocked (the brake pulled it from every ring) — "blocked"; the publish job the approval queued gave up — "publish failed" or "publish cancelled"; otherwise that job is queued or running — "publishing". Never from the absence of a ring, and never from the registry's status: factory_packages.status stays "approved" after a failed publish and "published" after a block, and Review guessed ["edge"] from it, promising edge over a publish that failed while the Factory said failed (2026-09-18).
   function approvalWhere(a) {
     var rings = a.rings || [];
     if (rings.length) return { word: "in " + rings.join(" · "), cls: "ok", title: "in " + rings.join(", ") + ", signed by the pool" };
@@ -1368,7 +1369,7 @@ export const HELPERS = String.raw`
     return '<div class="pkreq' + (q.complete ? '' : ' incomplete') + '"><div class="pkreq-head"><b>The request</b> '
       + (q.id ? '<a href="' + esc(q.record) + '" title="request.json, written once, signed by the pool">#' + q.id + '</a>' + (q.signature ? ' <a class="dim" href="' + esc(q.signature) + '">sig</a>' : '') : '') + (q.version ? ' · ' + esc(q.version) : '') + (q.created_at ? ' · ' + ago(q.created_at) : '')
       + ' ' + (q.complete ? pillHtml("ok", "complete", "what the form asks today, all on the record") : pillHtml("warn", bad + " to put right", "the form would not take it today"))
-      + (q.complete ? '' : ' ' + gate('<a class="btn small" href="/request?renew=' + encodeURIComponent(name) + '" title="the same form, filled from the record; the confirmations are yours to tick">Renew the request</a>', !!own && !!renewable, own ? (whyNot || "renew it once nothing of it is being built") : (why || orSignIn("only its owner renews the request"))))
+      + (q.complete ? '' : ' ' + gate('<a class="btn small" href="/factory?renew=' + encodeURIComponent(name) + '#request" title="the same form, filled from the record; the confirmations are yours to tick">Renew the request</a>', !!own && !!renewable, own ? (whyNot || "renew it once nothing of it is being built") : (why || orSignIn("only its owner renews the request"))))
       + '</div><ul class="pkreq-list">' + q.checks.map(function (c) { return '<li><i class="ck ' + (c.ok ? 'ok">✓' : 'bad">✗') + '</i><div><b>' + esc(c.item) + '</b> <span class="dim">' + esc(c.note) + '</span></div></li>'; }).join("") + '</ul></div>';
   }
   // A chain's state in one word and its colour — the pill an architecture wears.
@@ -1546,8 +1547,8 @@ const ORIGINS: Record<string, string> = Object.fromEntries(EXPECTED_SOURCES.map(
  * copy the edge keeps is the page's when the reader opens it). A miss there
  * is a few point reads by the packages' name index and the rings' key,
  * never a scan. A name found is its package's row, first; a name found
- * nowhere, and a pacman name (routes/contributors.ts's rule), is Request
- * "<name>".
+ * nowhere, and a pacman name (request.ts's PKGNAME, the request's own
+ * rule, spliced in), is Request "<name>".
  *
  * The order: the typed name when it is a package; an action whose label
  * starts with the line ("theme", "docs" — the search also matches
@@ -1558,8 +1559,8 @@ const ORIGINS: Record<string, string> = Object.fromEntries(EXPECTED_SOURCES.map(
  * first); the packages only their description matched; then Request
  * "<name>" — the first row with nothing else to show, as the handoff's
  * "zzfoo" has it, after the packages as its "mar" has them. Up to six
- * package rows. Request opens the Factory's form, /request, with the name
- * filled in from ?name= (pages/request.ts). ↵ opens the lit row, but waits
+ * package rows. Request opens the Factory's request card, /factory, with
+ * the name filled in from ?name= (pages/contribute.ts). ↵ opens the lit row, but waits
  * while the answer may still put the typed name first — with nothing shown
  * yet, or a package row lit that is not the name — so a fast "zzfoo↵" is
  * the request and a fast "linux-asahi↵" the package, as a slow one is.
@@ -1579,7 +1580,7 @@ export const GO_MENU = String.raw`
     if (!menu || typeof menu.showModal !== "function") return;
     var line = menu.querySelector("#go-q"), list = menu.querySelector("#go-list"), none = menu.querySelector(".go-none"), said = menu.querySelector(".go-said");
     var ACTIONS = ${JSON.stringify(GO_ACTIONS)}, SHEET = ${JSON.stringify(KIT_SHEET_PATH)}, ORIGIN = ${JSON.stringify(ORIGINS)};
-    var LIMIT = 9, SHOWN = 6, PAUSE_MS = 200, NAME = /^[a-z0-9][a-z0-9@._+-]{1,99}$/, MAC = /Mac|iPhone|iPad/.test(navigator.platform || "");
+    var LIMIT = 9, SHOWN = 6, PAUSE_MS = 200, NAME = ${String(PKGNAME)}, MAC = /Mac|iPhone|iPad/.test(navigator.platform || "");
     // answers: the search's, per term; places: where a name the search did not find is — its row, false for nowhere, null while asked; registered: the factory's names, asked once per page (again after a failure).
     var answers = new Map(), asking = new Set(), places = new Map(), registered = null, lastRows = [], failed = { term: "", why: "" }, timer = null, settled = "";
     var items = [], at = 0, moved = false, pending = false, enterLater = false, back = null;
@@ -1654,7 +1655,7 @@ export const GO_MENU = String.raw`
       var rest = rows.filter(function (p) { return p.name !== term; }).slice(0, SHOWN - first.length);
       var named = rest.filter(function (p) { return p.name.indexOf(term) >= 0; }), described = rest.filter(function (p) { return p.name.indexOf(term) < 0; });
       var out = first.concat(lead, named.map(pkgItem), other, described.map(pkgItem));
-      if (got && !exact && place === false && NAME.test(term)) out.push({ label: 'Request "' + term + '"', hint: "factory", icon: "git-pull-request", href: "/request?name=" + encodeURIComponent(term) });
+      if (got && !exact && place === false && NAME.test(term)) out.push({ label: 'Request "' + term + '"', hint: "factory", icon: "git-pull-request", href: "/factory?name=" + encodeURIComponent(term) });
       return out;
     }
     function draw() {
@@ -1785,6 +1786,13 @@ export interface PageOptions {
    * not pays nothing for it: no request, no bytes.
    */
   kit?: boolean;
+  /**
+   * The page's own rules, for what the kit's primitives do not draw: a
+   * <style> after the frame's CSS and the kit's sheet, so a rule here
+   * refines theirs. It is served with this page only, and the other pages
+   * pay nothing for it.
+   */
+  css?: string;
 }
 
 /**
@@ -1980,7 +1988,7 @@ export function page(o: PageOptions): string {
 <script>${THEME_BOOT}</script>${analyticsTag(v)}
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Geist:wght@500;600;700&display=swap">
-<style>${CSS}</style>${o.kit ? `\n<link rel="stylesheet" href="${KIT_SHEET_PATH}">` : ""}
+<style>${CSS}</style>${o.kit ? `\n<link rel="stylesheet" href="${KIT_SHEET_PATH}">` : ""}${o.css ? `\n<style>${o.css}</style>` : ""}
 </head>
 <body>
 <div id="progress"></div>

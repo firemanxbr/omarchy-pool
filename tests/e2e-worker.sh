@@ -204,9 +204,13 @@ dash_body=$(curl -s "$OMARCHY_API/")
 grep -q "tested before they reach you" <<<"$dash_body" || {
   echo "dashboard not served; response head:"; head -c 600 <<<"$dash_body"; echo
   echo "--- worker log tail ---"; tail -20 "$E2E/wrangler.log"; exit 1; }
-for p in /docs /docs/get-started /docs/workers /docs/how-it-works /docs/governance /docs/security /docs/glossary /docs/architecture /docs/runbook /docs/factory /status /api /factory /people /request; do
+for p in /docs /docs/get-started /docs/workers /docs/how-it-works /docs/governance /docs/security /docs/glossary /docs/architecture /docs/runbook /docs/factory /status /api /factory /people; do
   body=$(curl -s "$OMARCHY_API$p"); grep -q "omarchy-pool" <<<"$body" || { echo "page $p not served"; exit 1; }
 done
+# The Factory is where a package is requested (#246): its request card for everyone, the send a sign-in for nobody; the request's old page redirects there with its query.
+grep -q '>Sign in to send</a>' <<<"$(curl -s "$OMARCHY_API/factory")" || { echo "the Factory must offer a visitor Sign in to send"; exit 1; }
+moved=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$OMARCHY_API/request?name=e2e-x")
+[[ "${moved%#request}" == "301 $OMARCHY_API/factory?name=e2e-x" ]] || { echo "/request must redirect to the Factory's request card, the name kept: $moved"; exit 1; }
 # The old addresses of the documentation chapters redirect into the section; the old addresses of two doors redirect to the door, and /me to the sign-in until a session says whose page it is.
 [[ "$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$OMARCHY_API/contribute")" == "301 $OMARCHY_API/factory" ]] || { echo "/contribute must redirect to /factory"; exit 1; }
 [[ "$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$OMARCHY_API/index.html")" == "301 $OMARCHY_API/" ]] || { echo "/index.html must redirect to /"; exit 1; }
@@ -409,6 +413,9 @@ rq=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/packages" "${reqauth[@]}" -d "
 [[ "$(jq -r '.package.owner' <<<"$rq")" == e2e-req && "$(jq -r '.targets.x86_64.status + " " + .targets.aarch64.status' <<<"$rq")" == "building building" ]] || { echo "the request did not register e2e-ident for both architectures: $rq"; exit 1; }
 taken=$(curl -s -w '\n%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/packages" -H "authorization: Bearer omc_e2e_contributor" -H "content-type: application/json" -d "$ident_req")
 [[ "$(tail -n1 <<<"$taken")" == 409 && "$(head -n1 <<<"$taken" | jq -r .error)" == "e2e-ident is waiting, requested by e2e-req" ]] || { echo "the name must be reserved for its requester: $taken"; exit 1; }
+# The Factory's live check says the same, in the same words: reserved, whose, and why.
+named=$(curl -s "$OMARCHY_API/api/v1/factory/names/e2e-ident?arches=x86_64,aarch64")
+[[ "$(jq -r '.state + " " + .owner + " " + .why' <<<"$named")" == "reserved e2e-req e2e-ident is waiting, requested by e2e-req" ]] || { echo "the live check must call e2e-ident reserved, in the request's words: $named"; exit 1; }
 # x86_64: the requester's worker builds it and hands the evidence in; staged.
 cx=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/claim" "${wrx[@]}" -d "{\"arch\":\"x86_64\",$agent}")
 [[ "$(jq -r '.task.name + " " + .task.arch' <<<"$cx")" == "e2e-ident x86_64" ]] || { echo "the x86_64 worker did not get the x86_64 build: $cx"; exit 1; }

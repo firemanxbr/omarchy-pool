@@ -455,7 +455,7 @@ What no upstream ships is built by workers that pull tasks from the pool
 same door — a request on the dashboard; the repository holds no recipes
 but the sizing ones (`factory/sizing/`, benchmarks). Day to day:
 
-- **Add a package**: sign in and request it on `/request` (the project's
+- **Add a package**: sign in and request it on `/factory` (the project's
   URL, a description, the licence, the checklist — written once to the
   public record); the build starts by itself in the shared queue — the
   best idle shared worker of the architecture, or a worker of your own at

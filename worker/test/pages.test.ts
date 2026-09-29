@@ -46,7 +46,7 @@ let PAGES: string[];
 let DRAWN: string[];
 beforeAll(async () => {
   F = await seedDashboard(env);
-  PAGES = ["/", "/factory", "/review", "/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/what-we-test", "/docs/governance", "/docs/security", "/docs/glossary", "/docs/architecture", "/docs/runbook", "/docs/testing", "/docs/migration", "/docs/factory", "/docs/worker-host", "/docs/security-model", "/docs/contributing", "/docs/proof-of-concept", "/docs/open-work", "/docs/omarchy-cli-mcp", "/packages", `/package/${F.pkg}`, `/build/${F.projectTask}`, "/status", "/workers", "/request", `/user/${F.owner}`, "/people", "/api", "/diff"];
+  PAGES = ["/", "/factory", "/review", "/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/what-we-test", "/docs/governance", "/docs/security", "/docs/glossary", "/docs/architecture", "/docs/runbook", "/docs/testing", "/docs/migration", "/docs/factory", "/docs/worker-host", "/docs/security-model", "/docs/contributing", "/docs/proof-of-concept", "/docs/open-work", "/docs/omarchy-cli-mcp", "/packages", `/package/${F.pkg}`, `/build/${F.projectTask}`, "/status", "/workers", `/user/${F.owner}`, "/people", "/api", "/diff"];
   DRAWN = [...PAGES, ...Object.keys(RETIRED_PAGES)];
 });
 
@@ -84,8 +84,8 @@ describe("dashboard pages", () => {
       const twice = ids.filter((id, i) => ids.indexOf(id) !== i);
       expect([...new Set(twice)], `${path} serves an id twice`).toEqual([]);
     }
-    // The door a page lights (#240): a package and the packages list are the Pool's, the request and the workers the Factory's, a build Review's; a page the footer names (Status, People) and the docs light none.
-    const LIT: [string, string | null][] = [["/", "/"], ["/packages", "/"], [`/package/${F.pkg}`, "/"], ["/factory", "/factory"], ["/request", "/factory"], ["/workers", "/factory"], ["/review", "/review"], [`/build/${F.projectTask}`, "/review"], ["/status", null], ["/people", null], ["/docs", null], ["/diff", null]];
+    // The door a page lights (#240): a package and the packages list are the Pool's, the workers the Factory's (the request is the Factory's own card since #246), a build Review's; a page the footer names (Status, People) and the docs light none.
+    const LIT: [string, string | null][] = [["/", "/"], ["/packages", "/"], [`/package/${F.pkg}`, "/"], ["/factory", "/factory"], ["/workers", "/factory"], ["/review", "/review"], [`/build/${F.projectTask}`, "/review"], ["/status", null], ["/people", null], ["/docs", null], ["/diff", null]];
     for (const [path, door] of LIT) {
       const header = /<header>[\s\S]*?<\/header>/.exec(await (await get(path)).text())?.[0] ?? "";
       expect([...header.matchAll(/<a href="([^"]*)" class="active" aria-current="page">/g)].map((m) => m[1]), path).toEqual(door ? [door] : []);
@@ -116,23 +116,25 @@ describe("dashboard pages", () => {
     }
     expect((await get("/factory")).status).toBe(200);
     // The sign-in start keeps `next` for the callback in its state cookie: a page's path stays, its query too (a renewal's name); another host does not, nor a control character — a newline in the Location would make the callback throw after the session was replaced.
-    for (const [next, kept] of [["/workers", "/workers"], [`/build/${F.projectTask}`, `/build/${F.projectTask}`], ["/request?renew=zlib", "/request?renew=zlib"], ["//evil.example", "/factory"], ["/\\evil.example", "/factory"], ["https://evil.example/", "/factory"], ["/\nevil", "/factory"], ["/x\u0000y", "/factory"]]) {
+    for (const [next, kept] of [["/workers", "/workers"], [`/build/${F.projectTask}`, `/build/${F.projectTask}`], ["/factory?renew=zlib", "/factory?renew=zlib"], ["//evil.example", "/factory"], ["/\\evil.example", "/factory"], ["https://evil.example/", "/factory"], ["/\nevil", "/factory"], ["/x\u0000y", "/factory"]]) {
       res = await get(`/auth/github?next=${encodeURIComponent(next)}`);
       expect(res.status, next).toBe(302);
       expect(res.headers.get("set-cookie"), next).toContain(`:${encodeURIComponent(kept)};`);
     }
   });
 
-  // The addresses #240 took out of the header and the footer are one redirect each, to the section they became (index.ts MOVED): a 301 with the section as the fragment and the query kept — a bookmark lands, a filtered journal stays filtered, a ring's advisories stay that ring's. A HEAD — a link checker's — is answered as a GET is. Asked through the handler itself (raw): the fixture's get() draws the retired pages.
-  it("redirects the Pipeline, the Journal, Security and /docs/api to the section each became, and the footer's Agents to the agents chapter until its page lands", async () => {
+  // The addresses #240 took out of the header and the footer are one redirect each, to the section they became (index.ts MOVED): a 301 with the section as the fragment and the query kept — a bookmark lands, a filtered journal stays filtered, a ring's advisories stay that ring's. The request's own page is the Factory's request card since #246: the ⌘K menu's ?name= and a renewal's ?renew= ride along. A HEAD — a link checker's — is answered as a GET is. Asked through the handler itself (raw): the fixture's get() draws the retired pages.
+  it("redirects the Pipeline, the Journal, Security, /docs/api and the request to the section each became, and the footer's Agents to the agents chapter until its page lands", async () => {
     let res: Response;
-    expect(MOVED).toEqual({ "/pipeline": "/status", "/journal": "/status#journal", "/security": "/status#advisories", "/docs/api": "/docs#api" });
+    expect(MOVED).toEqual({ "/pipeline": "/status", "/journal": "/status#journal", "/security": "/status#advisories", "/docs/api": "/docs#api", "/request": "/factory#request" });
     for (const [from, to] of [
       ...Object.entries(MOVED),
       ["/journal?kind=role", "/status?kind=role#journal"],
       ["/security?ring=rc&arch=aarch64", "/status?ring=rc&arch=aarch64#advisories"],
       ["/pipeline?since=1", "/status?since=1"],
       ["/docs/api?x=1", "/docs?x=1#api"],
+      ["/request?name=zzfoo", "/factory?name=zzfoo#request"],
+      ["/request?renew=zlib", "/factory?renew=zlib#request"],
     ]) {
       for (const method of ["GET", "HEAD"]) {
         res = await raw(from, method);
@@ -141,7 +143,8 @@ describe("dashboard pages", () => {
       }
     }
     // Only those addresses: the API's own /security and /events, the API reference at /api and the page a redirect lands on answer as they did.
-    for (const path of ["/api/v1/security?ring=stable&arch=x86_64", "/api/v1/events?limit=1", "/api", "/api/", "/status", "/docs"]) expect((await raw(path)).status, path).toBe(200);
+    for (const path of ["/api/v1/security?ring=stable&arch=x86_64", "/api/v1/events?limit=1", "/api", "/api/", "/status", "/docs", "/factory"]) expect((await raw(path)).status, path).toBe(200);
+    expect(await (await raw("/factory")).text(), "the fragment the request lands on").toContain('<div class="op-card fx-request" id="request">');
     expect((await raw("/journal/x")).status, "a path under a moved address is no address").toBe(404);
     // The footer's Agents is #249's page: until it lands the address is the chapter on connecting an agent today, a 302 no browser keeps — MORE's `until`, the one place the router reads it from, so every footer entry still standing in for its page is answered the same way.
     expect(MORE.filter((m) => m.until).map((m) => [m.href, m.until])).toEqual([["/agents", "/docs/omarchy-cli-mcp"]]);
@@ -153,19 +156,19 @@ describe("dashboard pages", () => {
     }
   });
 
-  // The header's Sign in names the page it is on, a build's page and a package's included — so a maintainer who signs in from a build lands on the build, not on Review. The served href is the path; the shell's script rewrites it to the whole address once the query is known, so /request?renew=zlib signs in and comes back to the renewal. The docs sidebar's hint is written from MORE, so it names every page the footer links and no other.
+  // The header's Sign in names the page it is on, a build's page and a package's included — so a maintainer who signs in from a build lands on the build, not on Review. The served href is the path; the shell's script rewrites it to the whole address once the query is known, so /factory?renew=zlib signs in and comes back to the renewal. The docs sidebar's hint is written from MORE, so it names every page the footer links and no other.
   it("sends the sign-in back to the page it was pressed on, and the docs hint names the footer's pages", async () => {
-    for (const path of ["/workers", `/build/${F.projectTask}`, `/package/${F.pkg}`, `/user/${F.owner}`, "/docs/runbook", "/request", "/review"]) {
+    for (const path of ["/workers", `/build/${F.projectTask}`, `/package/${F.pkg}`, `/user/${F.owner}`, "/docs/runbook", "/factory", "/review"]) {
       const html = await (await get(path)).text();
       expect(html, path).toContain(`<a id="account" href="/auth/github?next=${path}" title=`);
       expect(html, path).not.toContain("next=/me");
       expect(scriptOf(html), path).toContain('if (location.search) document.querySelectorAll(\'a[href^="/auth/github?next="]\')');
     }
-    // The one place `next=/me` stays: the Factory gate's way to the reader's own page, whoever they turn out to be. The two workspace links — the Request's, Review's — are /me itself, one href for everyone.
+    // The Factory's send is the sign-in for nobody, and it comes back to the Factory — the name typed so far carried in the address by the script; the reader's own page is the account chip's, and Review's workspace link is /me itself, one href for everyone.
     const factory = await (await get("/factory")).text();
-    expect(factory).toContain('id="gate-btn" href="/auth/github?next=/me"');
+    expect(factory).toContain('<a class="op-btn" id="fx-send" href="/auth/github?next=/factory">Sign in to send</a>');
     expect(factory).toContain('id="account" href="/auth/github?next=/factory"');
-    expect(await (await get("/request")).text()).toContain('<a id="ws" href="/me">Your workspace</a>');
+    expect(factory).not.toContain("next=/me");
     expect(await (await get("/review")).text()).toContain('id="mine-ws" href="/me"');
     const docs = await (await get("/docs")).text();
     const hint = /<div class="docs-hint">([^<]*)<\/div>/.exec(docs)?.[1] ?? "";
@@ -419,7 +422,7 @@ describe("dashboard pages", () => {
     expect(problems, problems.join("\n")).toEqual([]);
   });
 
-  // The dashboard's rule for roles: every role sees every section and every control, the same for all; what a role cannot do is a disabled control with the reason in its title — never hidden, never absent, never a sentence in its place. So the sections that exist for everyone are never served `hidden`; the attribute stays for what does not exist yet (a result line before a POST, a blocked notice for nobody blocked). The list is the sections the redesign names per page — Review's Yours block, a maintainer's queue line, the audit legend, the brake; the Pipeline's queue-position card, its Operations hint; the Journal's releases with the rollback column; a build's page (#acts); a person's page (#pk-request, #w-toggle, #w-own); the request's gate and form (#gate, #ask, #pkg-form); the Factory gate with its hint (#gate-hint, once hidden for a session); the People page's three worker tables and their legend.
+  // The dashboard's rule for roles: every role sees every section and every control, the same for all; what a role cannot do is a disabled control with the reason in its title — never hidden, never absent, never a sentence in its place. So the sections that exist for everyone are never served `hidden`; the attribute stays for what does not exist yet (a result line before a POST, a blocked notice for nobody blocked). The list is the sections the redesign names per page — Review's Yours block, a maintainer's queue line, the audit legend, the brake; the Pipeline's queue-position card, its Operations hint; the Journal's releases with the rollback column; a build's page (#acts); a person's page (#pk-request, #w-toggle, #w-own); the Factory's tiles, its request card with every field and the send, its workers and its line (#246 — the reader's own requests alone are a session's: signed in only, as the issue asks, since a visitor has none); the People page's three worker tables and their legend.
   it("serves the sections everyone gets without hidden — a role that cannot act sees the control grey, never nothing", async () => {
     const ALWAYS: Record<string, string[]> = {
       "/review": ["mine", "mine-queue", "legend", "brake", "staged"],
@@ -427,8 +430,7 @@ describe("dashboard pages", () => {
       "/journal": ["releases", "compare"],
       [`/build/${F.projectTask}`]: ["acts"],
       [`/user/${F.owner}`]: ["pk-request", "w-toggle", "w-own", "share-btn"],
-      "/request": ["gate", "gate-who", "gate-cta", "gate-btn", "ask", "pkg-form", "pkg-checklist", "pkg-btn", "ws"],
-      "/factory": ["gate", "gate-btn", "gate-hint"],
+      "/factory": ["tiles", "request", "fx-form", "fx-name", "fx-url", "fx-license", "fx-desc", "fx-checklist", "fx-send", "workers", "fx-wlist", "line", "board"],
       "/people": ["w-project", "w-review", "w-community", "wt-legend"],
     };
     const problems: string[] = [];
@@ -496,29 +498,21 @@ describe("dashboard pages", () => {
     }
   });
 
-  // The request as nobody: the gate banner with the sign-in live, and the whole form served — every field, every confirmation and the button grey with the sign-in as the reason — so a person who is not in sees what a request asks, and a person who is sees the same page with its fields live.
-  it("serves the request to nobody as the gate banner and the form with every control grey", async () => {
-    const html = await (await get("/request")).text();
-    expect(html).toContain('<div id="gate" class="gate">');
-    expect(html).toContain('<a class="btn" id="gate-btn" href="/auth/github?next=/request">');
-    expect(html).toContain('<section id="ask">');
-    const form = /<form id="pkg-form" class="form" onsubmit="return false">([\s\S]*?)<\/form>/.exec(html)?.[1] ?? "";
+  // The request as nobody (#246): the Factory's request card with every field live — a visitor checks a name and builds the prompt for their agent, and nothing is written — and one control that is a person's, the send, served as "Sign in to send": the sign-in that comes back here. Signed in, the script puts the send in its place; nothing is greyed, nothing is hidden.
+  it("serves the request card to nobody with its fields live and the send as the sign-in", async () => {
+    const html = await (await get("/factory")).text();
+    expect(html).toContain('<div class="op-card fx-request" id="request">');
+    const form = /<form class="fx-form" id="fx-form"[^>]*>([\s\S]*?)<\/form>/.exec(html)?.[1] ?? "";
     const controls = [...form.matchAll(/<(?:input|button|select|textarea)\b[^>]*>/g)].map((m) => m[0]);
-    // Eight fields (two of them for a project not on GitHub), four confirmations, the button.
-    expect(controls.length).toBe(13);
-    // The reason is the shell's word for nobody — orSignIn's, the server's 401's — not a fourth spelling.
-    for (const c of controls) expect(c).toMatch(/ disabled aria-disabled="true" title="sign in with GitHub">$/);
-    expect(form).toContain('id="pkg-url"');
+    // Six fields (two of them for a release not on GitHub, GitLab or Codeberg), one toggle per architecture, four confirmations.
+    expect(controls.length).toBe(6 + 2 + 4);
+    for (const c of controls) expect(c, c).not.toMatch(/\sdisabled|aria-disabled/);
     expect(form).toContain('data-check="evidence"');
-    expect(form).toContain('<button type="submit" id="pkg-btn" disabled aria-disabled="true" title="sign in with GitHub">Request</button>');
-    // Signed in, the page is the same page: the script draws the fields again through the shell's gate(), live for a person; the workspace line is /me for everyone, rewritten for nobody.
+    expect(form).toContain('<span id="fx-send-slot"><a class="op-btn" id="fx-send" href="/auth/github?next=/factory">Sign in to send</a></span>');
     const script = ownScript(html);
-    expect(script).toContain('$("#pkg-form").innerHTML = gate(');
-    expect(script).toContain('$("#gate-cta").innerHTML = gate(');
-    expect(script).not.toContain('$("#ask").hidden');
-    expect(script).not.toContain('$("#ws").href');
-    expect(html).not.toContain("next=/me");
-    expect(html).not.toContain("/factory#gate");
+    expect(script).toContain('$("#fx-send-slot").innerHTML = \'<button type="button" class="op-btn" id="fx-send">\'');
+    expect(script).toContain('"Send request"');
+    expect(script).not.toContain("gate(");
   });
 
   // A worker's row is the shell's wherever it is drawn. The manifests say which pages draw the worker tables (`shared: "worker-table"`, the legend `"worker-legend"`) — the Workers page, the People page, a person's — and each is proved the same way: the panels served by workerPanels(), the head and the skeleton by wtTables(), every row by workerRow() over wtKind(), the filter by wtText, and no hand-written head, cell or filter left; a page that serves a worker table without claiming the shared name fails here by its address.
@@ -587,16 +581,15 @@ describe("dashboard pages", () => {
 
 // The diagrams size a box to its text; a line longer than planned widens the
 // box into its neighbour, and the labels between them end up on a border. A
-// box drawn inside a group (`d-group`: the Factory's "Build — your choice"
-// holds the two kinds of worker) is not two boxes over each other. Which
+// box drawn inside a group (`d-group`) is not two boxes over each other. Which
 // diagrams exist is what the manifests claim with `drawn`: a figure claimed
 // by no page, or a page claiming one nobody draws, fails here.
 // The documentation's figures are drawn the same way and checked the same way.
 describe("diagrams", () => {
   it("draws no two boxes over each other", async () => {
-    const { ringsDiagram, sourcesDiagram, liveDiagram, archDiagram, factoryDiagram } = await import("../src/pages/diagrams");
+    const { ringsDiagram, sourcesDiagram, liveDiagram, archDiagram } = await import("../src/pages/diagrams");
     const { DOC_DIAGRAMS } = await import("../src/pages/doc-diagrams");
-    const draw: Record<string, () => string> = { rings: ringsDiagram, "rings/promote": () => ringsDiagram("promote"), sources: sourcesDiagram, live: liveDiagram, arch: archDiagram, factory: factoryDiagram };
+    const draw: Record<string, () => string> = { rings: ringsDiagram, "rings/promote": () => ringsDiagram("promote"), sources: sourcesDiagram, live: liveDiagram, arch: archDiagram };
     for (const [name, fn] of Object.entries(DOC_DIAGRAMS)) draw[`docs/${name}`] = fn;
     const claimed = new Set(allComponents(F).map((c) => c.drawn).filter((k): k is string => k !== undefined));
     expect([...claimed].sort()).toEqual(Object.keys(draw).sort());

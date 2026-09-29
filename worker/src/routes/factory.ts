@@ -95,9 +95,14 @@ function parseArches(v: unknown): string[] {
  * exception — the factory is meant to take its names over.
  */
 export async function providedBy(env: Env, name: string): Promise<{ source: string; arch: string; version: string }[]> {
+  // From the name into edge, never edge into the name (CROSS JOIN is SQLite's word for "this order", as the package page's lookups say it):
+  // with no statistics to go by, the planner walked every package edge serves to find one name — a row read per package in edge, on
+  // every request and on every name the Factory's live check asks (#246); the name's rows through its index, each one's place in edge
+  // by the key, is a handful.
   const rows = await env.DB.prepare(
-    `SELECT p.source, p.repo_arch AS arch, p.version FROM ring_packages rp JOIN packages p ON p.id = rp.package_id
-      WHERE rp.ring = 'edge' AND p.name = ?`,
+    `SELECT p.source, p.repo_arch AS arch, p.version FROM packages p
+      CROSS JOIN ring_packages rp ON rp.ring = 'edge' AND rp.package_id = p.id
+      WHERE p.name = ?`,
   )
     .bind(name)
     .all<{ source: string; arch: string; version: string }>();

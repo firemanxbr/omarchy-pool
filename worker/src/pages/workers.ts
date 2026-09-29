@@ -41,7 +41,7 @@ const BODY = String.raw`
     ])}
   </section>
 
-  <div class="gate"><div><h3>Run one of your own</h3><p>The signed image, Docker Desktop or Podman, a token from your <a href="/factory">workspace</a>: it builds only your packages, with your agent, and your builds skip the queue. Share it, and it takes whatever is queued.</p></div><a class="btn ghost" href="/docs/workers">Run a worker →</a></div>
+  <div class="gate"><div><h3>Run one of your own</h3><p>The signed image, Docker Desktop or Podman, a token from your <a href="/me">workspace</a>: it builds only your packages, with your agent, and your builds skip the queue. Share it, and it takes whatever is queued.</p></div><a class="btn ghost" href="/docs/workers">Run a worker →</a></div>
 `;
 
 const SCRIPT = String.raw`
@@ -260,7 +260,7 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
   {
     id: "workers.run-one-gate",
     page: "/workers",
-    anchor: ["<h3>Run one of your own</h3>", '<a href="/factory">workspace</a>', '<a class="btn ghost" href="/docs/workers">Run a worker →</a>'],
+    anchor: ["<h3>Run one of your own</h3>", '<a href="/me">workspace</a>', '<a class="btn ghost" href="/docs/workers">Run a worker →</a>'],
     visible: EVERYONE,
   },
 ];

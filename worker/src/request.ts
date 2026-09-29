@@ -19,6 +19,20 @@ export const CHECKLIST: Record<string, string> = {
 /** SPDX identifier or expression; `custom:` is what Arch writes for the rest. */
 export const LICENSE = /^(custom:[A-Za-z0-9._+-]+|[A-Za-z0-9._+-]+(?:\s+(?:OR|AND|WITH)\s+[A-Za-z0-9._+-]+)*)$/;
 
+/**
+ * A package's name, the one rule: what makepkg takes as a pkgname —
+ * letters, digits and @ . _ + -, never a leading - or . — in lower case, as
+ * the pool keeps every name, and at most 100 characters. The request is
+ * refused by it (routes/contributors.ts), and every page that offers a name
+ * — the Factory's form and its live check, the ⌘K menu's Request "<name>" —
+ * splices this expression into its script instead of typing one: the
+ * request page and the menu each typed a copy, and the three disagreed on a
+ * leading "-", "." or "@" (2026-09-29).
+ */
+export const PKGNAME = /^[a-z0-9@_+][a-z0-9@._+-]{0,99}$/;
+/** What PKGNAME asks, in the words the request's refusal and the form's check both say. */
+export const PKGNAME_RULE = "lowercase letters, digits and @ . _ + -, not starting with - or ., at most 100";
+
 /** The registration's fields the checks read (factory_packages). */
 export interface RequestedPackage {
   project: string | null;

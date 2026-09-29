@@ -205,34 +205,48 @@ describe("a list that did not answer is said, not drawn", () => {
     expect(html(d, "#budget")).toContain(`the cost estimate did not answer: ${INTERNAL}`);
   });
 
-  it("/factory: the note beside Landed lately, the five tiles read —, Landed says why", async () => {
+  // The Factory (#246) draws from three lists: the registry (the line, three tiles), the review list (what waits for a maintainer) and the worker listing (the workers). Each one that did not answer is said where it would have drawn — the line's note, the tile's line with the reason on hover, the workers' card — and none reads as nothing: no 0, no empty column counted as none, no "no worker alive".
+  it("/factory: the line's note names the registry, the four tiles read —, the workers say the listing did not answer, no column counts 0", async () => {
     const d = await run("/factory", { down: true });
     await settled();
-    const reason = `the factory's lists did not answer: ${INTERNAL}`;
-    expect(d.nodes["#lists-note"].textContent).toBe(reason);
-    expectDashes(d, 5, reason, "#tiles", 1);
-    expect(tiles(d)[1]).toContain("Waiting for review");
-    expect(html(d, "#landed")).toContain(reason);
-    expect(html(d, "#landed")).not.toContain("nothing approved yet");
-    // The funnel reads the same lists: it says so in the chart's place, not a heading over nothing.
-    expect(html(d, "#c-funnel")).toContain(reason);
+    expect(d.nodes["#line-note"].textContent).toBe(`the registry did not answer: ${INTERNAL}`);
+    for (const [k, list] of [["line", "registry"], ["building", "registry"], ["ready", "review list"], ["shipped", "registry"]]) {
+      expect(d.nodes[`#t-${k}-n`].textContent, k).toBe("—");
+      expect(d.nodes[`#t-${k}-s`].innerHTML, k).toBe(`<span title="the ${list} did not answer: ${INTERNAL}">did not answer</span>`);
+    }
+    for (let i = 0; i < 5; i++) {
+      expect(d.nodes[`#col-${i}-n`].textContent, `column ${i}`).toBe("—");
+      expect(html(d, `#col-${i}`), `column ${i}`).toBe("");
+    }
+    expect(html(d, "#fx-wlist")).toContain(`the worker listing did not answer: ${INTERNAL}`);
+    expect(html(d, "#fx-wlist")).not.toContain("No worker is alive");
+    // The stats poll answering changes none of it: the workers are the listing's rows, the series only measures them.
+    const up = await run("/factory", { down: true, up: /^\/api\/v1\/(stats|status)/ });
+    await settled();
+    expect(html(up, "#fx-wlist")).toContain(`the worker listing did not answer: ${INTERNAL}`);
+    expect(up.nodes["#t-line-n"].textContent).toBe("—");
   });
 
-  it("/factory and /pipeline, the lists failing and the stats poll answering: the tile the poll feeds keeps its number beside the chart that draws the same series", async () => {
-    const up = /^\/api\/v1\/(stats|status|cost|events)/;
-    const f = await run("/factory", { down: true, up });
+  it("/factory: a refresh that fails leaves the last answer's cards, workers and numbers on screen, and says so", async () => {
+    const state = { down: false };
+    const d = await run("/factory", state, ["loadRegistry", "loadListing"]);
+    await settled(); await settled();
+    const cards = html(d, "#col-2"), workers = html(d, "#fx-wlist"), shipped = d.nodes["#t-shipped-n"].textContent;
+    expect(cards).toContain(`<b>${F.disposablePkg}</b>`);
+    expect(workers).toContain("fx-wrow");
+    state.down = true;
+    d.loadRegistry(); d.loadListing();
     await settled();
+    expect(d.nodes["#line-note"].textContent).toBe(`the registry did not answer: ${INTERNAL}`);
+    expect(html(d, "#col-2")).toBe(cards);
+    expect(d.nodes["#t-shipped-n"].textContent).toBe(shipped);
+    expect(html(d, "#fx-wlist")).toContain("fx-wrow");
+    expect(html(d, "#fx-wlist")).toContain(`the worker listing did not answer: ${INTERNAL}`);
+  });
+
+  it("/pipeline, the lists failing and the stats poll answering: the tile the poll feeds keeps its number beside the chart that draws the same series", async () => {
+    const up = /^\/api\/v1\/(stats|status|cost|events)/;
     const reason = `the factory's lists did not answer: ${INTERNAL}`;
-    expect(f.nodes["#lists-note"].textContent).toBe(reason);
-    const ft = tiles(f);
-    expect(ft, "five tiles").toHaveLength(5);
-    // The four the lists fed read "—"; Builds this week is the stats series summed — the chart beside it has its bars — and says so, not "the factory's lists did not answer" over the same series.
-    expect(ft.filter((t) => t.includes(unanswered(reason)))).toHaveLength(4);
-    expect(ft[3]).toContain("Builds this week");
-    expect(ft[3]).toMatch(/<div class="v num">\d/);
-    expect(ft[3]).toContain(" staged · ");
-    expect(ft[3]).not.toContain("did not answer");
-    expect(html(f, "#c-builds")).toContain("<svg");
     const p = await run("/pipeline", { down: true, up });
     await settled();
     const pt = tiles(p);

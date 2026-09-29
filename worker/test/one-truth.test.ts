@@ -179,7 +179,8 @@ describe("an approval stands or it does not, said once", () => {
     for (const a of rows) { expect(a).toHaveProperty("publish_status"); expect(a).toHaveProperty("blocked_at"); }
   });
 
-  it("where a standing approval is today is one word, the shell's approvalWhere over the row's rings, blocked_at and publish_status — said by the Factory's Landed lately and Review's Decided line alike; no page guesses a ring from the registry's status", async () => {
+  // The Factory listed approvals too (Landed lately) until #246: its line's Shipped column reads each architecture's target (targets.ts, the server's word), and the review list's rows are Review's alone.
+  it("where a standing approval is today is one word, the shell's approvalWhere over the row's rings, blocked_at and publish_status — said by Review's Decided line; no page guesses a ring from the registry's status", async () => {
     type Row = { name: string; task_id: number; standing: boolean; rings: string[]; publish_status: string | null; blocked_at: string | null };
     const rows = (await call("GET", "/factory/approvals")).json.approvals as Row[];
     const served = rows.find((a) => a.name === F.publishedPkg)!, failed = rows.find((a) => a.name === F.failedPkg)!, pulled = rows.find((a) => a.name === F.pulledPkg)!;
@@ -190,7 +191,7 @@ describe("an approval stands or it does not, said once", () => {
     // The registry's word for lost is still "approved" — the status the Review line read to promise edge — and no page reads it for this.
     const pkgs = (await call("GET", "/factory/packages")).json.packages as { name: string; status: string }[];
     expect(pkgs.find((p) => p.name === F.failedPkg)).toMatchObject({ status: "approved" });
-    for (const path of ["/review", "/factory"]) {
+    for (const path of ["/review"]) {
       const own = ownScript(await page(path));
       expect(own, `${path} guesses a ring from the registry`).not.toMatch(/\["edge"\]|status === "published"/);
       expect(own, `${path} words the state on its own`).not.toMatch(/"publishing"|on its way into edge|publish_status ===/);
@@ -204,7 +205,7 @@ describe("an approval stands or it does not, said once", () => {
     expect(shell.approvalWhere({ ...failed, publish_status: "cancelled" })).toMatchObject({ word: "publish cancelled", cls: "error" });
     for (const publish_status of ["queued", "leased", null]) expect(shell.approvalWhere({ ...failed, publish_status }), String(publish_status)).toMatchObject({ word: "publishing", cls: "blue" });
     expect(shell.approvalWhere({ ...served, rings: ["edge", "stable"] })).toMatchObject({ word: "in edge · stable", cls: "ok" });
-    // The two pages drawn over the Worker's answers, as the fixture's people see them: the Factory for anyone, Review as dave, whose two packages these are, and as alice, whose ours edge serves.
+    // Review drawn over the Worker's answers, as the fixture's people see it: as dave, whose two packages these are, and as alice, whose ours edge serves.
     const viewer = (login: string) => async (path: string, init?: RequestInit) => {
       const ctx = createExecutionContext();
       const res = await worker.fetch(new Request(`http://pool.test${path}`, { ...init, headers: { ...(init?.headers as Record<string, string> | undefined), ...(login ? { cookie: `omc=oms_${login}` } : {}) } }), env, ctx);
@@ -212,22 +213,21 @@ describe("an approval stands or it does not, said once", () => {
       return res;
     };
     const drawn = async (path: string, login: string) => { const d = runScript(scriptOf(await page(path)), { pathname: path, functions: [], fetch: viewer(login) }); await new Promise((r) => setTimeout(r, 80)); return d; };
-    const landed = (await drawn("/factory", "")).nodes["#landed"].innerHTML as string;
     const decided = (await drawn("/review", F.outsider)).nodes["#mine-decided"].innerHTML as string;
     // The pill as the shell draws it from the rule's answer — class and word; the title is left out, since "blocked 0s ago" is a clock read twice (once by the page, once here) and a second boundary between the two reads is not this test's to control.
     const pill = (a: Row) => { const w = shell.approvalWhere(a); return new RegExp(`<span class="pill ${w.cls}" title="[^"]*">${w.word}</span>`); };
-    // The row of one package, in the drawn list: the Factory's card (a div.land), Review's line (a div.rrow). The assertions on lost and pulled read their own rows, not the whole list — mine, alice's, may stand approved with its publish queued, and then wears the shell's "publishing" pill by right; whether it does depends on what the tests above did to the database, and this test holds either way (it failed alone, passing only after the withdrawal at the top of the file).
+    // The row of one package, in the drawn list: Review's line (a div.rrow). The assertions on lost and pulled read their own rows, not the whole list — mine, alice's, may stand approved with its publish queued, and then wears the shell's "publishing" pill by right; whether it does depends on what the tests above did to the database, and this test holds either way (it failed alone, passing only after the withdrawal at the top of the file).
     const rowOf = (html: string, name: string, cls: string, mark = "") => { const m = html.split(`<div class="${cls}`).find((r) => r.includes(`>${name}</`) && r.includes(mark)); expect(m, `a ${cls} row of ${name}`).toBeDefined(); return m!; };
     // Review's Decided holds two rows of pulled — the brake's, then the approval's (marked "approved"); the approval's is the one the rule words.
-    // The way out of a row: the Factory card's one link is the name's; Review's line has the package's story on the name and the way out on its `go` link.
-    for (const [what, html, cls, mark, out] of [["the Factory's Landed lately", landed, "land", "", ""], ["Review's Decided", decided, "rrow", ">approved</span>", '<a class="go" ']] as const) {
+    // The way out of a row: Review's line has the package's story on the name and the way out on its `go` link.
+    for (const [what, html, cls, mark, out] of [["Review's Decided", decided, "rrow", ">approved</span>", '<a class="go" ']] as const) {
       for (const [name, a] of [[F.failedPkg, failed], [F.pulledPkg, pulled]] as const) {
         const row = rowOf(html, name, cls, mark);
         expect(row, `${what}: ${name}`).toMatch(pill(a));
         // Neither row promises edge: the word for a publish that failed, or a package pulled, is never "publishing".
         expect(row, `${what}: ${name} promises edge`).not.toContain("on its way into edge");
         expect(row, `${what}: ${name} says publishing`).not.toContain(">publishing</span>");
-        // In no ring, the way out of both rows is the build — never a package address as if a ring served it (the Factory's card linked /package/lost?ring=stable, a ring no fact supports, while Review's line led to the build).
+        // In no ring, the way out of the row is the build — never a package address as if a ring served it (the Factory's old card linked /package/lost?ring=stable, a ring no fact supports, while Review's line led to the build).
         expect(row, `${what}: ${name} leads to the build`).toContain(`${out}href="/build/${a.task_id}"`);
         expect(row, `${what}: ${name} leads to a ring`).not.toContain(`${out}href="/package/${name}?`);
       }
@@ -235,9 +235,7 @@ describe("an approval stands or it does not, said once", () => {
     // A standing approval whose publish is queued wears the shell's "publishing" pill on both pages — the shape the two negatives above forbid on lost and pulled, drawn here from the row alone.
     const queued = { ...failed, publish_status: "queued" };
     expect(shell.approvalWhere(queued)).toMatchObject({ word: "publishing", cls: "blue", title: expect.stringContaining("on its way into edge") });
-    // ours is served: the Factory's card wears the ring badges and no pill; Review's line says the ring and its way out is the package's one address.
-    expect(landed).not.toMatch(pill(served));
-    expect(rowOf(landed, F.publishedPkg, "land")).toContain(`href="/package/${F.publishedPkg}?ring=edge&arch=${F.arch}"`);
+    // ours is served: Review's line says the ring and its way out is the package's one address.
     const alices = (await drawn("/review", F.owner)).nodes["#mine-decided"].innerHTML as string;
     expect(alices).toMatch(pill(served));
     expect(alices).toContain(`<a class="go" href="/package/${F.publishedPkg}?ring=edge&amp;arch=${F.arch}">`);
@@ -369,21 +367,22 @@ describe("the pages read the one answer instead of counting their own", () => {
     const components = allComponents(F);
     for (const [path, id] of Object.entries(TILES)) {
       const script = ownScript(await page(path));
-      // The tile's number is the field on the object the list answered, and its age the field beside it.
-      const tile = /"Waiting for review", num\((\w+(?:\.\w+)?)\.waiting\), \1\.oldest_ms/.exec(script);
+      // The tile's number is the field on the object the list answered, and its age the field beside it. The Factory's tile is the line's "Ready for review" (#246): the same number, under the handoff's word.
+      const label = path === "/factory" ? "Ready for review" : "Waiting for review";
+      const tile = new RegExp(`"${label}", num\\((\\w+(?:\\.\\w+)?)\\.waiting\\), \\1\\.oldest_ms`).exec(script);
       expect(tile, `${path} reads waiting and oldest_ms from one answer`).not.toBeNull();
       // Nothing on the page counts staged rows for that number.
-      expect(script, `${path} counts staged rows for the tile`).not.toMatch(/"Waiting for review", num\((?!\w+(?:\.\w+)?\.waiting\))/);
+      expect(script, `${path} counts staged rows for the tile`).not.toMatch(new RegExp(`"${label}", num\\((?!\\w+(?:\\.\\w+)?\\.waiting\\))`));
       // The manifest says so: the tile's literal and the field, read from the list.
       const c = components.find((x) => x.id === id);
-      expect(c?.script, id).toEqual(expect.arrayContaining(['"Waiting for review"', `${tile![1]}.waiting`, `${tile![1]}.oldest_ms`]));
+      expect(c?.script, id).toEqual(expect.arrayContaining([`"${label}"`, `${tile![1]}.waiting`, `${tile![1]}.oldest_ms`]));
       expect(c?.reads?.some((r) => r.path === "/api/v1/factory/review" && r.fields?.includes("waiting") && r.fields?.includes("oldest_ms")), `${id} reads waiting from the list`).toBe(true);
     }
   });
 
   it("every package address a page writes goes through pkgHref, and the page asked for the lab draws the lab chip beside the ring shown", async () => {
     const written: string[] = [];
-    for (const path of ["/", "/factory", "/review", "/pipeline", "/packages", `/package/${F.pkg}`, `/build/${F.projectTask}`, `/user/${F.owner}`, "/people", "/workers", "/security", "/status", "/journal", "/request", "/diff"]) {
+    for (const path of ["/", "/factory", "/review", "/pipeline", "/packages", `/package/${F.pkg}`, `/build/${F.projectTask}`, `/user/${F.owner}`, "/people", "/workers", "/security", "/status", "/journal", "/diff"]) {
       const script = ownScript(await page(path));
       // Any string a page's own script starts with the family's prefix is an address written by hand — the shell's footer match on it is the shell's.
       if (/["']\/package\//.test(script)) written.push(path);

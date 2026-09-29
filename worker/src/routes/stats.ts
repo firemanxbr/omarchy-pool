@@ -142,8 +142,9 @@ export async function handleStats(env: Env): Promise<Response> {
        FROM build_tasks WHERE kind != 'build' AND (created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days') OR status IN ('queued', 'leased'))
       GROUP BY day, kind, status ORDER BY day`,
   ).all();
+  // The builds carry their time too, as the jobs do (ms): the Factory's workers say how far a build is against what a build of its kind took this fortnight — the same rows, one more sum.
   const buildsDaily = await env.DB.prepare(
-    `SELECT substr(COALESCE(finished_at, created_at), 1, 10) AS day, trust, status, COUNT(*) AS n
+    `SELECT substr(COALESCE(finished_at, created_at), 1, 10) AS day, trust, status, COUNT(*) AS n, COALESCE(SUM(duration_ms), 0) AS ms
        FROM build_tasks WHERE kind = 'build' AND created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-14 days')
       GROUP BY day, trust, status ORDER BY day`,
   ).all();

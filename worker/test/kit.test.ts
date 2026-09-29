@@ -38,7 +38,7 @@ async function get(path: string, method = "GET"): Promise<Response> {
 }
 const page = async (path: string) => (await get(path)).text();
 const styleOf = (html: string) => /<style>([\s\S]*?)<\/style>/.exec(html)![1];
-/** A page drawn with the kit, as a page that adopts it will be served: page({ kit: true }). No page has adopted it yet. */
+/** A page drawn with the kit, as a page that adopts it is served: page({ kit: true }). */
 const kitPage = () => frame({ title: "kit", description: "a page drawn with the v1 kit", active: "none", body: "<p>kit</p>", script: "var own = 1;", poolUrl: "http://pool.test/pool", version: version(env), path: "/kit", kit: true });
 
 // WCAG 2's relative luminance and contrast ratio.
@@ -302,8 +302,8 @@ describe("the theme", () => {
 
 describe("the v1 kit", () => {
   it("is on the pages that ask for it, and costs the others nothing: its sheet after the frame's CSS, its helpers after the shell's", async () => {
-    // No page has adopted it yet: none links the sheet, carries a primitive or the kit's helpers. The one mention of the sheet is the ⌘K menu's (#241): its icons are the kit's, and it links the sheet the first time it opens — nothing is asked for before that (test/go-menu.test.ts opens it).
-    for (const path of ["/", "/factory", "/review", "/docs", "/status", "/package/zlib"]) {
+    // A page that has not adopted it links no sheet, carries no primitive and none of the kit's helpers. The one mention of the sheet is the ⌘K menu's (#241): its icons are the kit's, and it links the sheet the first time it opens — nothing is asked for before that (test/go-menu.test.ts opens it).
+    for (const path of ["/", "/review", "/docs", "/status", "/package/zlib"]) {
       const html = await page(path);
       expect(/<head>([\s\S]*?)<\/head>/.exec(html)![1], path).not.toContain("/assets/kit.");
       expect(html.split("/assets/kit.").length - 1, `${path}: the menu's mention only`).toBe(1);
@@ -318,6 +318,13 @@ describe("the v1 kit", () => {
     expect(styleOf(html)).not.toContain(".op-");
     expect(scriptOf(html)).toContain(KIT_HELPERS);
     expect(ownScriptOf(html)!.trim().startsWith("var own = 1;")).toBe(true);
+    // The Factory has adopted it (#246): the sheet once, after the frame's CSS, its own rules after the sheet (page()'s css), the helpers the shell's.
+    const factory = await page("/factory"), fhead = /<head>([\s\S]*?)<\/head>/.exec(factory)![1];
+    expect(fhead.match(/\/assets\/kit\./g)?.length).toBe(1);
+    expect(fhead.indexOf(link)).toBeGreaterThan(fhead.indexOf("</style>"));
+    expect(fhead.lastIndexOf("<style>")).toBeGreaterThan(fhead.indexOf(link));
+    expect(styleOf(factory)).not.toContain(".op-");
+    expect(scriptOf(factory)).toContain(KIT_HELPERS);
   });
 
   it("serves its sheet, immutable under its hash, and nothing else under /assets/", async () => {
