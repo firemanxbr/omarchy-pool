@@ -317,6 +317,7 @@ const PACKAGE_SCRIPT = String.raw`
   // A factory package: the story is its, or the object it serves came from the factory — decided by the data, never by what the page drew before.
   function isFactory() { var o = originOf(); return !!(ST && ST.package && ST.package.name) || !!(o && o.source === "factory"); }
   function blockedBy() { var p = ST && ST.package; return p && p.blocked_at ? p : null; }
+  function unmaintained() { var p = ST && ST.package; return !!(p && p.status === "unmaintained"); }
   function targetsOf() { var t = ST && (ST.targets || (ST.package || {}).targets); return t && Object.keys(t).length ? t : null; }
   // Where an architecture is served: the rings, most stable first, from the package's answer (every architecture rides it; one cached before it carried them has the asked architecture's rings alone), else the story's rings for a factory package no ring serves on this architecture. The story (30 s at the edge) is fresher than the package's answer (10 min): an architecture the story puts in no ring — blocked, or lifted and back in the factory — is served nowhere, whatever the older answer still says.
   function servedOn(a) {
@@ -917,10 +918,11 @@ const PACKAGE_SCRIPT = String.raw`
   }
 
   // ---- people and agents, and the facts.
-  // A package's maintainer in the pool, the server's word (D.maintenance.maintainer: who adopted it, or whose approval stands) — on the answer, or on the 404 of an architecture that does not serve it; a factory package no ring serves yet is its approver's, as the server says of one it serves.
+  // A package's maintainer in the pool, the server's word (D.maintenance.maintainer: who adopted it, or whose approval stands) — on the answer, or on the 404 of an architecture that does not serve it; a factory package no ring serves yet is its approver's, as the server says of one it serves. A registration its owner left unmaintained has nobody until a maintainer adopts it (#247), its approval standing or not — the server says so too.
   function maintainerOf() {
     var m = (D && D.maintenance && D.maintenance.maintainer) || (D404 && D404.maintenance && D404.maintenance.maintainer);
     if (m && m.login) return m;
+    if (unmaintained()) return null;
     var c = ARCHES.map(approvedChain).filter(Boolean)[0];
     return c ? { login: c.approval.by, since: c.approval.created_at, adopted: false } : null;
   }
@@ -936,7 +938,8 @@ const PACKAGE_SCRIPT = String.raw`
       var cs = ARCHES.map(sealChain).filter(Boolean), ap = cs.map(function (c) { return c.approval; }).filter(Boolean)[0], au = cs.map(function (c) { return c.audit && c.audit.result && c.audit.result.model; }).filter(Boolean)[0];
       var built = cs.map(function (c) { return c.contributor && c.contributor.lease_owner; }).filter(Boolean)[0], rebuilt = cs.map(function (c) { return c.project && c.project.lease_owner; }).filter(Boolean)[0];
       var reviewing = cs.some(function (c) { return c.project && !c.approval; });
-      if (pk.owner) rows.push(person("requested by", atLink(pk.owner), "", avatar(pk.owner)));
+      // A registration a maintainer adopted is theirs (#247): the maintainer row below names them, adopted — they did not request it.
+      if (pk.owner && !(mt && mt.adopted && mt.login === pk.owner)) rows.push(person("requested by", atLink(pk.owner), "", avatar(pk.owner)));
       if (sb && sb.agent) rows.push(person("drafted & built by", esc(sb.agent), built ? wtShort(built) : "", glyph(sb.agent, "agent")));
       else if (built || !rebuilt) rows.push(person("built on", built ? esc(wtShort(built)) : "not yet", built ? "its contributor's worker" : "", glyph("W", "", "W")));
       rows.push(ap ? person("reviewed by", atLink(ap.by), ap.decision === "approved" ? "rebuilt from scratch" : ap.decision, avatar(ap.by)) : person("reviewed by", reviewing ? "in progress" : "not yet", "", nobody));
@@ -987,20 +990,22 @@ const PACKAGE_SCRIPT = String.raw`
     if (!me) { text = st === "none" ? "Nobody requested " + esc(name) + " yet. Sign in to request it." : "Everything on this page is public. Sign in to request changes or review."; if (st === "none") btns.push(request); btns.push(btn("Sign in with GitHub", 'href="' + esc(signInHref()) + '" rel="nofollow"', st === "none" ? "" : "primary")); }
     else if (st === "none") { icon = "user"; who = "@" + login + (isMaintainer() ? " · maintainer" : " · contributor"); text = "No ring serves " + esc(name) + " and nobody requested it."; btns.push(request); }
     else if (pk.owner && pk.owner === login) {
-      icon = "user"; who = "@" + login + " · requester";
+      // A registration a maintainer adopted (#247) is theirs as a request is its requester's: its bumps come to their workers, and another maintainer reviews them.
+      var took = mt && mt.adopted && mt.login === login;
+      icon = "user"; who = "@" + login + (took ? " · maintainer" : " · requester");
       var req = (ST && ST.request) || {}, why = b ? "blocked: another maintainer lifts the block first" : req.busy ? "a build of it is running (#" + req.busy + "); ask again when it ends" : ["approved", "published"].indexOf(pk.status) >= 0 ? "approved: a new upstream release is built as a bump, by itself" : "not while it is " + (pk.status || "in the factory");
-      text = "You requested this package.";
+      text = took ? "You adopted this package: its registration is yours, and its bumps come to your workers." : "You requested this package.";
       // A block is refused by the server before anything else (routes/contributors.ts): the renewal is grey while it holds, whatever the registration's status says.
       btns.push(gate(btn("Request an update", 'href="/factory?renew=' + encodeURIComponent(name) + '#request"', "primary"), !!req.renewable && !b, why));
       btns.push(btn("Your requests", 'href="' + userHref(login) + '"'));
       if (isMaintainer()) btns.push(blockBtn);
-      lock = "You can't review your own request.";
+      lock = took ? "You can't review its builds: another maintainer does." : "You can't review your own request.";
     } else if (isMaintainer()) {
       icon = "shield"; who = "@" + login + " · maintainer";
       if (b) { text = b.blocked_by === login ? "You blocked it. Another maintainer lifts the block." : "Blocked by " + atLink(b.blocked_by) + ". You can lift the block; the reason goes on the record."; btns.push(gate(btn("Lift the block", 'data-act="unblock"', "primary"), b.blocked_by !== login, login + " blocked " + name + "; another maintainer lifts it")); }
       else if (st === "building") { text = "Builds are still running. Nothing to review yet."; btns.push(btn("Open the review queue", 'href="/review"')); btns.push(blockBtn); }
       else if (st === "in-review") { var tst = targetsOf() || {}, at = function (w) { return Object.keys(tst).some(function (a) { return tst[a].status === w; }); }; text = at("reviewed") ? "The project built it again: the decision is a maintainer's." : at("reviewing") ? "The project builds it again; the decision follows." : "Ready for a maintainer: have the project build it again, then decide."; var rb = reviewBuild(); btns.push(btn("Open review", 'href="' + (rb ? "/build/" + rb : "/review") + '"', "primary")); btns.push(blockBtn); }
-      else if (!mt && servedAnywhere()) { text = "No pool maintainer yet. Any maintainer can look after it."; btns.push(btn("Adopt", 'data-act="adopt"', "primary")); btns.push(blockBtn); }
+      else if (!mt && servedAnywhere()) { text = unmaintained() ? "Left unmaintained by " + atLink(pk.owner) + ". Adopt it: you look after it in the pool, and its registration and bumps become yours." : "No pool maintainer yet. Any maintainer can look after it."; btns.push(btn("Adopt", 'data-act="adopt"', "primary")); btns.push(blockBtn); }
       else {
         var decider = ((ST && ST.chains) || []).map(function (c) { return c.approval; }).filter(function (a) { return a && a.decision === "rejected"; })[0];
         text = mt ? (mt.login === login ? "You maintain this package." : "Maintained by " + atLink(mt.login) + ".") : st === "approved" || publishing() ? "Approved; its publish job carries it into edge." : st === "rejected" ? "Rejected" + (decider ? " by " + atLink(decider.by) : "") + "; back with its requester." : "Not in any ring.";
@@ -1039,8 +1044,12 @@ const PACKAGE_SCRIPT = String.raw`
     api("POST", path, what === "adopt" ? {} : { reason: why }).then(function (d) {
       // Refused: said, and the form stays open with its words for another try.
       if (d.error) { toast(esc(d.error), "error"); renderYou(); if (!ASK) refocus(what); return; }
-      // Adopt changes who looks after it and nothing else: the package stays what it was, synced or built here.
-      if (what === "adopt") { var box = D || D404; box.maintenance = box.maintenance || {}; box.maintenance.maintainer = { login: WHO.login, since: d.since || new Date().toISOString(), adopted: true }; toast("You now look after " + esc(name) + " in the pool."); renderAll(); refocus(what); return; }
+      // Adopt makes you its maintainer in the pool: the package stays what it was, synced or built here — and a registration left unmaintained is yours as well (d.registration: whom it was taken from, where it stands now).
+      if (what === "adopt") {
+        var box = D || D404; box.maintenance = box.maintenance || {}; box.maintenance.maintainer = { login: WHO.login, since: d.since || new Date().toISOString(), adopted: true };
+        if (d.registration && ST && ST.package) { ST.package.owner = WHO.login; ST.package.status = d.registration.status; }
+        toast("You now look after " + esc(name) + " in the pool" + (d.registration ? ", and its registration is yours." : ".")); renderAll(); refocus(what); return;
+      }
       // The brake is a factory package's (Block is grey on any other): its story, as the next read will tell it.
       ST = ST || { package: { name: name }, chains: [], rings: [] };
       // A block takes the package out of every ring and withdraws the approval it stood on; a lift leaves it out of them, back in the factory: the page draws it as the next read will, not from the answers it came with.
@@ -1351,13 +1360,13 @@ export const PACKAGE_COMPONENTS = (F: Fixture): Component[] => {
       id: "package.you",
       page,
       anchor: ['id="you-section"', 'id="you"', 'id="you-who"'],
-      script: ["renderYou", "signInHref()", '"Sign in with GitHub"', '"Request an update"', "You can't review your own request.", '"Adopt"', '"Block"', '"Lift the block"', '"Open review"', "!!req.renewable && !b", "isMaintainer()", "Why? This goes on the record.", 'role="alert"'],
+      script: ["renderYou", "signInHref()", '"Sign in with GitHub"', '"Request an update"', "You can't review your own request.", '"Adopt"', '"Block"', '"Lift the block"', '"Open review"', "!!req.renewable && !b", "isMaintainer()", "Why? This goes on the record.", 'role="alert"', '"Left unmaintained by "', "d.registration"],
       reads: [{ path: story, fields: ["request.renewable", "request.busy", "package.owner", "package.status"] }],
       acts: [
         // No reason, no block: the probes change nothing.
         { method: "POST", path: `/api/v1/factory/packages/${F.factoryPkg}/block`, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 400 } },
         { method: "POST", path: `/api/v1/factory/packages/${F.blockedPkg}/unblock`, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 400 } },
-        // ours is served under m2's approval: it has its maintainer, and the probe adopts nothing.
+        // ours is served under m2's approval: it has its maintainer, and the probe adopts nothing — the one Adopt, Review's No maintainer tab's too (routes/adopt.ts).
         { method: "POST", path: `/api/v1/factory/packages/${F.publishedPkg}/adopt`, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 409 } },
       ],
       visible: EVERYONE,

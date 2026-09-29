@@ -110,6 +110,11 @@ export async function contributorOf(request: Request, env: Env): Promise<Contrib
   return { login: row.login, name: row.name, avatar_url: row.avatar_url, role: row.role, blocked: row.blocked_at ? { at: row.blocked_at, reason: row.blocked_reason } : null };
 }
 
+/** The door a signed-in person came through, as contributorOf read them, for the record and the journal line of what they decide: the web (the dashboard's session cookie) or a token (`omc_…`, the command line's). */
+export function viaOf(request: Request): "web" | "token" {
+  return bearer(request) ? "token" : "web";
+}
+
 // ---------- what a person may do on a person's page ----------
 
 /** The two reasons every door shares, here and on a build's decisions (routes/review.ts): nobody signed in, or somebody who is not a maintainer. */
@@ -1019,11 +1024,16 @@ export const PACKAGES_PAGE = 200;
  * floor instead of passing it off as the whole. One row more is read to
  * know, never counted.
  */
-export async function handleListPackages(env: Env): Promise<Response> {
+export async function handleListPackages(env: Env, url?: URL): Promise<Response> {
+  // One status asked for — the registrations left unmaintained, Review's No maintainer tab (#247) — or the newest of all. A registration
+  // goes unmaintained when its status changes, so past PACKAGES_PAGE newer updates it drops out of the list of all; the page asks for
+  // them this way only when that list says it was truncated. The same walk of the registrations either way (the table is a few hundred
+  // rows), bounded the same.
+  const status = url?.searchParams.get("status") === "unmaintained" ? "unmaintained" : null;
   const rows = await env.DB.prepare(
     `SELECT p.*, (SELECT COUNT(*) FROM build_tasks t WHERE t.name = p.name AND t.status = 'staged') AS staged_builds
-       FROM factory_packages p ORDER BY updated_at DESC LIMIT ?`,
-  ).bind(PACKAGES_PAGE + 1).all();
+       FROM factory_packages p ${status ? "WHERE p.status = ?" : ""} ORDER BY updated_at DESC LIMIT ?`,
+  ).bind(...(status ? [status] : []), PACKAGES_PAGE + 1).all();
   return json({ truncated: rows.results.length > PACKAGES_PAGE, packages: rows.results.slice(0, PACKAGES_PAGE).map((r) => ({ ...r, arches: JSON.parse(r.arches as string), targets: parseTargets(r.targets), detected: r.detected ? JSON.parse(r.detected as string) : null, landed: landed(r.status as string) })) }, 200, { "cache-control": "public, max-age=30" });
 }
 

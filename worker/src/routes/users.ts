@@ -70,11 +70,11 @@ export async function recordOf(env: Env, login: string): Promise<TrackRecord> {
   return { ...r, score: scoreOf(r) };
 }
 
-/** A person's decisions as the record keeps them: each row with its review's own word on it — the architectures it decided, those not supported, whether it freed the name. */
+/** A person's decisions as the record keeps them: each row with its review's own word on it — the architectures it decided, those not supported, whether it freed the name, whether it asked for changes. */
 const DECISIONS = `SELECT a.id, a.task_id, a.name, a.arch, a.version, a.decision, a.by, a.note, a.rebuild_task, a.created_at, a.withdrawn_at, a.withdrawn_by, a.withdrawn_reason, a.review_id,
-                          v.arches AS review_arches, v.not_supported AS review_not_supported, v.released AS review_released
+                          v.arches AS review_arches, v.not_supported AS review_not_supported, v.released AS review_released, v.changes AS review_changes
                      FROM approvals a LEFT JOIN reviews v ON v.id = a.review_id`;
-type DecisionOf = { id: number; task_id: number; name: string; arch: string; version: string | null; decision: string; by: string; note: string | null; rebuild_task: number | null; created_at: string; withdrawn_at: string | null; withdrawn_by: string | null; withdrawn_reason: string | null; review_id: number | null; review_arches: string | null; review_not_supported: string | null; review_released: number | null };
+type DecisionOf = { id: number; task_id: number; name: string; arch: string; version: string | null; decision: string; by: string; note: string | null; rebuild_task: number | null; created_at: string; withdrawn_at: string | null; withdrawn_by: string | null; withdrawn_reason: string | null; review_id: number | null; review_arches: string | null; review_not_supported: string | null; review_released: number | null; review_changes: number | null };
 
 export async function handleUser(login: string, env: Env): Promise<Response> {
   const person = await env.DB.prepare("SELECT login, name, avatar_url, role, created_at, last_seen, blocked_at, blocked_by, blocked_reason FROM contributors WHERE login = ?")
@@ -168,7 +168,10 @@ export async function handleUserCan(c: Contributor | null, login: string, env: E
  * Who stands behind a package: its packager upstream, and its maintainer
  * in the pool (#244) — the maintainer who adopted it (routes/adopt.ts),
  * else, for what the factory built, the one whose approval stands; a
- * synced package nobody adopted has none. For a factory package also its
+ * synced package nobody adopted has none, and neither has a registration
+ * its owner left unmaintained until a maintainer adopts it (#247: Review's
+ * No maintainer tab and the package page's Adopt are the one door, and
+ * what it answers 409 for is what this names). For a factory package also its
  * owner, its category, the maintainers, the last approval that stands — a
  * withdrawn one is not the approval the package is served under, so the
  * package page's "reviewed by" and the Packages table's approver never
@@ -192,6 +195,6 @@ export async function maintenanceOf(env: Env, name: string, source: string, pack
     approved_version: approval?.version ?? null,
     task: approval?.task_id ?? null,
   };
-  if (!adopted && approval) out.maintainer = { login: approval.by, since: approval.created_at, adopted: false };
+  if (!adopted && approval && pkg?.status !== "unmaintained") out.maintainer = { login: approval.by, since: approval.created_at, adopted: false };
   return out;
 }

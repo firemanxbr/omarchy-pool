@@ -1,5 +1,5 @@
 import { json, type Env } from "../index";
-import { isMaintainer, type Contributor } from "./contributors";
+import { isMaintainer, viaOf, type Contributor } from "./contributors";
 import { handleCreateRelease } from "./releases";
 import { createJob } from "../scheduler";
 import { putRecord, recordKey, recordUrl } from "../record";
@@ -21,6 +21,10 @@ import { settleTargets } from "../targets";
  *   POST /factory/packages/:name/unblock      {reason}  another maintainer than the one who blocked: back to the factory,
  *                                                       registered (a new build and a new review follow)
  *   GET  /factory/blocks                                what is blocked, and by whom (public)
+ *
+ * Each is signed on the record and a journal line naming who and through
+ * which door (`via`, contributors.ts); `agent` is null — a block rests on no
+ * agent's rebuild, as Review's decisions do (routes/review.ts).
  */
 
 function need(c: Contributor): Response | null {
@@ -55,9 +59,10 @@ export async function handleBlockContributor(c: Contributor, login: string, requ
   // Their builds stopped: each package's architectures say so.
   await settleTargets(env, packages);
   const key = `contributors/${login}/block-${stamp()}.json`;
-  const record = await putRecord(env, key, { schema: "omarchy-pool/block/1", kind: "contributor", login, by: c.login, at, reason: b.reason, packages, workers_revoked: workers });
+  const via = viaOf(request);
+  const record = await putRecord(env, key, { schema: "omarchy-pool/block/1", kind: "contributor", login, by: c.login, via, agent: null, at, reason: b.reason, packages, workers_revoked: workers });
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('block', NULL, 'factory', 'warn', ?, ?)")
-    .bind(`${login} blocked by ${c.login}: ${b.reason.slice(0, 140)} — ${packages.length} package(s) rejected, ${workers.length} worker(s) revoked`, JSON.stringify({ login, by: c.login, reason: b.reason, packages, workers, record: recordUrl(env, record.key) }))
+    .bind(`${login} blocked by ${c.login}: ${b.reason.slice(0, 140)} — ${packages.length} package(s) rejected, ${workers.length} worker(s) revoked`, JSON.stringify({ login, by: c.login, via, agent: null, reason: b.reason, packages, workers, record: recordUrl(env, record.key) }))
     .run();
   return json({ blocked: login, by: c.login, at, packages, workers_revoked: workers, record: recordUrl(env, record.key) });
 }
@@ -72,9 +77,10 @@ export async function handleUnblockContributor(c: Contributor, login: string, re
   if (who.blocked_by === c.login) return json({ error: `${c.login} blocked ${login}; another maintainer lifts it` }, 403);
   const at = new Date().toISOString();
   await env.DB.prepare("UPDATE contributors SET blocked_at = NULL, blocked_by = NULL, blocked_reason = NULL WHERE login = ?").bind(login).run();
-  const record = await putRecord(env, `contributors/${login}/unblock-${stamp()}.json`, { schema: "omarchy-pool/block/1", kind: "contributor", login, by: c.login, at, reason: b.reason, lifted: { blocked_at: who.blocked_at, blocked_by: who.blocked_by } });
+  const via = viaOf(request);
+  const record = await putRecord(env, `contributors/${login}/unblock-${stamp()}.json`, { schema: "omarchy-pool/block/1", kind: "contributor", login, by: c.login, via, agent: null, at, reason: b.reason, lifted: { blocked_at: who.blocked_at, blocked_by: who.blocked_by } });
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('block', NULL, 'factory', 'ok', ?, ?)")
-    .bind(`${login} unblocked by ${c.login}: ${b.reason.slice(0, 140)} (blocked by ${who.blocked_by} since ${who.blocked_at}); workers and packages need registering again`, JSON.stringify({ login, by: c.login, reason: b.reason, record: recordUrl(env, record.key) }))
+    .bind(`${login} unblocked by ${c.login}: ${b.reason.slice(0, 140)} (blocked by ${who.blocked_by} since ${who.blocked_at}); workers and packages need registering again`, JSON.stringify({ login, by: c.login, via, agent: null, reason: b.reason, record: recordUrl(env, record.key) }))
     .run();
   return json({ unblocked: login, by: c.login, at, record: recordUrl(env, record.key) });
 }
@@ -130,9 +136,10 @@ export async function handleBlockPackage(c: Contributor, name: string, request: 
   await settleTargets(env, name);
   const key = pkg.request_id ? recordKey(name, pkg.request_id, `decision-${stamp()}.json`) : `factory/${name}/0/decision-${stamp()}.json`;
   const reviews = [...new Set(withdrawn.map((a) => a.review_id ?? a.id))];
-  const record = await putRecord(env, key, { schema: "omarchy-pool/decision/1", decision: "block", name, owner: pkg.owner, by: c.login, at, reason: b.reason, rings, withdrawn: { reviews, approvals: withdrawn.map((a) => a.id), arches: [...new Set(withdrawn.map((a) => a.arch))] } });
+  const via = viaOf(request);
+  const record = await putRecord(env, key, { schema: "omarchy-pool/decision/1", decision: "block", name, owner: pkg.owner, by: c.login, via, agent: null, at, reason: b.reason, rings, withdrawn: { reviews, approvals: withdrawn.map((a) => a.id), arches: [...new Set(withdrawn.map((a) => a.arch))] } });
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('block', NULL, 'factory', 'warn', ?, ?)")
-    .bind(`${name} blocked by ${c.login}: ${b.reason.slice(0, 140)}${rings.length ? " — pulled from " + rings.map((r) => r.ring).join(", ") : ""}${reviews.length ? ` — the approval withdrawn, back to the factory` : ""}`, JSON.stringify({ name, owner: pkg.owner, by: c.login, reason: b.reason, rings, withdrawn: reviews, record: recordUrl(env, record.key) }))
+    .bind(`${name} blocked by ${c.login}: ${b.reason.slice(0, 140)}${rings.length ? " — pulled from " + rings.map((r) => r.ring).join(", ") : ""}${reviews.length ? ` — the approval withdrawn, back to the factory` : ""}`, JSON.stringify({ name, owner: pkg.owner, by: c.login, via, agent: null, reason: b.reason, rings, withdrawn: reviews, record: recordUrl(env, record.key) }))
     .run();
   return json({ blocked: name, by: c.login, at, rings, withdrawn: reviews, record: recordUrl(env, record.key) });
 }
@@ -149,9 +156,10 @@ export async function handleUnblockPackage(c: Contributor, name: string, request
   // Back to the factory: registered, its owner's; a new build and a new review start it over.
   await env.DB.prepare("UPDATE factory_packages SET status = 'registered', blocked_at = NULL, blocked_by = NULL, blocked_reason = NULL, detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(`block lifted by ${c.login}: ${b.reason.slice(0, 200)}; a new build starts it over`, name).run();
   const key = pkg.request_id ? recordKey(name, pkg.request_id, `decision-${stamp()}.json`) : `factory/${name}/0/decision-${stamp()}.json`;
-  const record = await putRecord(env, key, { schema: "omarchy-pool/decision/1", decision: "unblock", name, owner: pkg.owner, by: c.login, at, reason: b.reason, lifted: { blocked_at: pkg.blocked_at, blocked_by: pkg.blocked_by } });
+  const via = viaOf(request);
+  const record = await putRecord(env, key, { schema: "omarchy-pool/decision/1", decision: "unblock", name, owner: pkg.owner, by: c.login, via, agent: null, at, reason: b.reason, lifted: { blocked_at: pkg.blocked_at, blocked_by: pkg.blocked_by } });
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('block', NULL, 'factory', 'ok', ?, ?)")
-    .bind(`${name} unblocked by ${c.login}: ${b.reason.slice(0, 140)} (blocked by ${pkg.blocked_by} since ${pkg.blocked_at})`, JSON.stringify({ name, by: c.login, reason: b.reason, record: recordUrl(env, record.key) }))
+    .bind(`${name} unblocked by ${c.login}: ${b.reason.slice(0, 140)} (blocked by ${pkg.blocked_by} since ${pkg.blocked_at})`, JSON.stringify({ name, by: c.login, via, agent: null, reason: b.reason, record: recordUrl(env, record.key) }))
     .run();
   return json({ unblocked: name, by: c.login, at, record: recordUrl(env, record.key) });
 }

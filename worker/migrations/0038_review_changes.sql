@@ -1,0 +1,18 @@
+-- Request changes (#247). Review's workspace decides a package three ways:
+-- approve, reject, and request changes. A rejection of a request frees the
+-- name (#242, reviews.released); changes asked for stop the same round — its
+-- builds in review cancelled, the note to the requester — and keep the name
+-- the requester's: the registration goes back to the factory, `registered`,
+-- theirs to build again. On the record it is a rejection that asked for
+-- changes: the review's word stays `rejected` (the CHECK on reviews and on
+-- approvals keeps its two words, and every reader of them reads it as it
+-- did), and this column says it asked for changes.
+--
+-- Additive only, as 0036: the previous Worker runs on this schema during the
+-- deploy minute, reads none of it and writes none of it; a review it writes
+-- then is a rejection that asked for nothing, which is what it was.
+--
+-- Numbered after 0037_package_maintainers (#244), which main applied first:
+-- D1 records an applied migration by its file name, and this one was never
+-- applied anywhere under the number it had on its branch.
+ALTER TABLE reviews ADD COLUMN changes INTEGER NOT NULL DEFAULT 0;   -- 1: a rejection that asked for changes: the name stayed the requester's

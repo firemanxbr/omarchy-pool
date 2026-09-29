@@ -366,6 +366,11 @@ mine=$(curl -s "$OMARCHY_API/api/v1/factory/review" | python3 -c 'import json,sy
 # a maintainer never has the project build their own package — with another maintainer around or as the sole one.
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/tasks/$mine/approve" "${mauth[@]}" -d '{}')" == 409 ]] || { echo "a contributor's build must never be approvable"; exit 1; }
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/tasks/$mine/build" "${mauth[@]}" -d '{}')" == 403 ]] || { echo "a maintainer must not have the project build their own package when another maintainer exists"; exit 1; }
+# The refusal names the conflict for an agent to read (#247): claiming one's own package, letting a claim on it go, asking for changes.
+for act in build release changes; do
+  own=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$mine/$act" "${mauth[@]}" -d '{"note":"my own","reason":"my own"}')
+  [[ "$(jq -r .code <<<"$own")" == conflict_of_interest ]] || { echo "the requester's $act must be refused as a conflict of interest: $own"; exit 1; }
+done
 (cd "$ROOT/worker" && npx wrangler d1 execute omarchy-repo --local --persist-to "$WRANGLER_STATE" --command "DELETE FROM factory_maintainers WHERE login = 'other'" >/dev/null)
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/tasks/$mine/build" "${mauth[@]}" -d '{}')" == 403 ]] || { echo "the sole maintainer must not have the project build their own package either"; exit 1; }
 # The owner never decides on their own package — a rejection included — and what the page reads (GET .../can) refuses in the POST's words.
@@ -448,10 +453,31 @@ story=$(curl -s "$OMARCHY_API/api/v1/factory/packages/e2e-ident/story?at=built")
 rv=$(curl -s "$OMARCHY_API/api/v1/factory/review" "${mauth[@]}")
 [[ "$(jq -r '.packages[] | select(.name == "e2e-ident") | "\(.lead) \(.waits) \(.rows | length)"' <<<"$rv")" == "$x86 true 1" ]] || { echo "Review must list e2e-ident once, waiting, its x86_64 build speaking for it: $(jq -c '.packages' <<<"$rv")"; exit 1; }
 # The review: the project builds again what its contributor built — x86_64 only — on its own worker.
+# A claim can be let go (#247): the maintainer who claimed it releases it — the queued rebuild cancelled once, a second release refused,
+# a line in the journal and a record the pool signed — and the package is claimed again.
+pb=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$x86/build" "${mauth[@]}" -d '{"note":"reads well"}')
+first=$(jq -r .task <<<"$pb")
+rl=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$x86/release" "${mauth[@]}" -d '{"reason":"released by the e2e, claimed again below"}')
+[[ "$(jq -r '"\(.released) \(.claimed_by) \(.by) \(.via) \(.tasks | map(tostring) | join(","))"' <<<"$rl")" == "e2e-ident e2e e2e token $first" ]] || { echo "the claim must be released: $rl"; exit 1; }
+[[ "$(d1n "SELECT COUNT(*) AS n FROM build_tasks WHERE id = $first AND status = 'cancelled'")" == 1 ]] || { echo "the released rebuild must be cancelled"; exit 1; }
+[[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/tasks/$x86/release" "${mauth[@]}" -d '{"reason":"a second release"}')" == 409 ]] || { echo "a second release must be refused"; exit 1; }
+grep -q "e2e's claim released" <<<"$(curl -s "$OMARCHY_API/api/v1/events?kind=review&limit=5")" || { echo "the release must be in the journal"; exit 1; }
+# A decision's record, signed by the pool's key: read from the local bucket, the detached signature verified with gpg.
+record_ok() {
+  local key="${1#*/pool/}" out="$E2E/record-$2"
+  (cd "$ROOT/worker" && npx wrangler r2 object get "omarchy-packages/$key" --local --persist-to "$WRANGLER_STATE" --file "$out.json" >/dev/null 2>&1 && npx wrangler r2 object get "omarchy-packages/$key.sig" --local --persist-to "$WRANGLER_STATE" --file "$out.sig" >/dev/null 2>&1) || { echo "the record $key is not in the bucket"; return 1; }
+  gpg --batch --verify "$out.sig" "$out.json" 2>/dev/null || { echo "the record $key does not verify with the pool's key"; return 1; }
+  jq -e --arg d "$2" '.decision == $d' "$out.json" >/dev/null || { echo "the record $key is not a $2: $(cat "$out.json")"; return 1; }
+}
+record_ok "$(jq -r .record <<<"$rl")" release || exit 1
 pb=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$x86/build" "${mauth[@]}" -d '{"note":"reads well"}')
 [[ "$(jq -c .arches <<<"$pb")" == '["x86_64"]' && "$(jq -r '.tasks | length' <<<"$pb")" == 1 ]] || { echo "the project must build x86_64 again, and nothing for aarch64: $pb"; exit 1; }
 px=$(jq -r .task <<<"$pb")
 [[ "$(d1n "SELECT COUNT(*) AS n FROM build_tasks WHERE name = 'e2e-ident' AND arch = 'aarch64' AND trust = 'project'")" == 0 ]] || { echo "no project build may be queued for an architecture that is not supported"; exit 1; }
+# The claim is a decision too, signed on the record; its rebuild is let go through a release, never stopped by the cancel door by hand.
+record_ok "$(jq -r .record <<<"$pb")" claim || exit 1
+byhand=$(curl -s -w '\n%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/tasks/$px/cancel" "${mauth[@]}")
+[[ "$(tail -n1 <<<"$byhand")" == 409 ]] && grep -q "/release" <<<"$(head -n1 <<<"$byhand")" || { echo "the cancel door must send a claim's rebuild to its release: $byhand"; exit 1; }
 cp=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/claim" "${wpx[@]}" -d "{\"arch\":\"x86_64\",\"kinds\":[\"build\"],$agent}")
 [[ "$(jq -r .task.id <<<"$cp")" == "$px" && "$(jq -r .task.pkgbuild_ref <<<"$cp")" == "review:$x86" ]] || { echo "the project's x86_64 worker did not get the review build: $cp"; exit 1; }
 cpj=(-H "authorization: Bearer $(jq -r .token <<<"$cp")")
@@ -471,6 +497,10 @@ ap=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$px/approve" "${mauth[@]
 pub=$(jq -r .publish <<<"$ap")
 [[ "$(d1n "SELECT COUNT(*) AS n FROM build_tasks WHERE name = 'e2e-ident' AND kind = 'publish'")" == 1 ]] || { echo "one publish job, and only one, for e2e-ident"; exit 1; }
 [[ "$(d1n "SELECT COUNT(*) AS n FROM reviews WHERE name = 'e2e-ident' AND decision = 'approved' AND arches = '[\"x86_64\"]'")" == 1 ]] || { echo "one review of e2e-ident on the record"; exit 1; }
+# Signed and journaled (#247): who, the door, and the agent of the review worker that rebuilt what ships.
+[[ "$(jq -r '"\(.by) \(.via) \(.agent)"' <<<"$ap")" == "e2e token e2e/agent" ]] || { echo "the approval must say who, the door and the agent: $ap"; exit 1; }
+record_ok "$(jq -r .record <<<"$ap")" approve || exit 1
+[[ "$(curl -s "$OMARCHY_API/api/v1/events?kind=approve&limit=5" | jq -r '[.events[] | select(.payload.name == "e2e-ident")][0].payload | "\(.by) \(.via) \(.agent)"')" == "e2e token e2e/agent" ]] || { echo "the approval's journal line must say who, the door and the agent"; exit 1; }
 # The publish job, as a project worker runs it: the staged package fetched with the job's token, published into edge as source factory (the pool signs), the job completed.
 cj=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/claim" "${wpx[@]}" -d '{"arch":"x86_64","kinds":["publish"]}')
 [[ "$(jq -r .task.id <<<"$cj")" == "$pub" && "$(jq -r .task.arch <<<"$cj")" == x86_64 ]] || { echo "the project's worker did not get the publish job: $cj"; exit 1; }

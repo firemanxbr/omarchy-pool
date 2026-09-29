@@ -296,8 +296,9 @@ the audit — and the worker and host behind it). A maintainer — a login
 listed in `factory/MAINTAINERS.toml`, signed in with GitHub — never
 decides on their own package, and never on a contributor's bytes:
 
-- **Build by the project** queues a project build (`pkgbuild_ref =
-  review:<task>`, trust `project`): a review worker (`pkg-repo work`)
+- **Claim** (Review's queue; *Build by the project* on a build's page)
+  queues a project build (`pkgbuild_ref = review:<task>`, trust `project`),
+  pinned to the review worker whose agent you chose: a review worker (`pkg-repo work`)
   starts a fresh container that holds nothing, where the project's agent
   writes its own recipe with the request's facts and the contributor's
   evidence as the lesson, builds it through the same gate and stages it
@@ -308,8 +309,36 @@ decides on their own package, and never on a contributor's bytes:
   `publish` job that carries it into `edge` as source `factory` — and, when
   the trial passed, into rc and stable with it (the fast lane). The pool
   signs; from there the package follows the rings like any other.
-- **Reject** needs a note; the package returns to *registered* with the
-  note in its detail, the staged objects expire with the rest.
+- **Reject** needs a note; a request rejected frees its name (a package in
+  the pool keeps it: the new version is what was rejected), the staged
+  objects expire with the rest.
+- **Request changes** needs a note too: the builds in review stop, the
+  package returns to *registered* with the note in its detail, and the name
+  stays the requester's.
+- **Release claim** (`POST /api/v1/factory/tasks/<id>/release {reason}`): the
+  maintainer who claimed it, or another, lets a claim go while a rebuild of it
+  is queued or running — the whole claim, a rebuild already staged too; a
+  claim whose rebuilds all staged is decided, not released. A claim's rebuild
+  is not stopped with `POST /tasks/<id>/cancel` by hand (it answers 409 and
+  names the release), nor is an approval's publish job (a block is what takes
+  an approval back).
+- **Adopt** (`POST /api/v1/factory/packages/<name>/adopt`), one door for the
+  package page's *Adopt* and Review's *No maintainer* tab: on a package a ring
+  serves you become its maintainer in the pool, and its page names you. A
+  package its owner left *unmaintained* becomes yours as well, its bumps with
+  it — once nothing of it is still in review (a build of the former owner's is
+  decided first). One `adopt` line in the journal says which of the two it
+  did; taking a registration is also a record the pool signs. A package no
+  ring serves answers 404, one with a maintainer 409 (who adopted it, or the
+  maintainer whose approval stands on one that is not unmaintained).
+- Each decision above is a record the pool signs beside the request, and a
+  journal line with who, the door and the agent that rebuilt the package. The
+  one who asked for the package — the registration's owner, or the
+  requester of the build in review — is refused a claim, an approval,
+  request changes, a rejection and a release with `code:
+  "conflict_of_interest"` when they are a maintainer (`maintainer_only`, as
+  anyone who is not, otherwise); an adoption of your own package is refused
+  the same way (`conflict_of_interest`).
 - **Withdraw a record** (`POST /api/v1/factory/record/withdraw {key,
   reason}`) when a log or a report must leave the public bucket: a signed
   tombstone takes its place, the staging copy goes with it.

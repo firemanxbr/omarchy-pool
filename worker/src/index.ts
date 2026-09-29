@@ -75,7 +75,7 @@ import { maintainersOf, GOVERNANCE_FILE } from "./governance";
 import { BUDGET_CAP_USD, BUDGET_GUARD_USD, BUDGET_WARN_USD, readGuard } from "./cost";
 import { handleQueueJob } from "./jobs";
 import { isMaintainer } from "./routes/contributors";
-import { handleReviewList, handleApprove, handleReject, handleApprovals, handleProjectBuild, handleWithdraw, handleTaskCan } from "./routes/review";
+import { handleReviewList, handleApprove, handleReject, handleChanges, handleRelease, handleApprovals, handleProjectBuild, handleWithdraw, handleTaskCan, cancelByHand } from "./routes/review";
 import { handleBlockContributor, handleUnblockContributor, handleBlockPackage, handleUnblockPackage, handleBlocks } from "./routes/blocks";
 import { handleAdoptPackage } from "./routes/adopt";
 import { handleAuthStart, handleAuthCallback, handleLogout } from "./routes/auth";
@@ -333,11 +333,12 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
     if (m[1] === "contributors") return m[3] === "block" ? handleBlockContributor(c, m[2], request, env) : handleUnblockContributor(c, m[2], request, env);
     return m[3] === "block" ? handleBlockPackage(c, m[2], request, env) : handleUnblockPackage(c, m[2], request, env);
   }
-  // Maintainers: a package the pool serves adopted — its maintainer in the pool (routes/adopt.ts).
+  // Maintainers: Adopt, the one door the package page and Review's No maintainer tab post to — the package's maintainer in the pool,
+  // and a registration its owner left unmaintained taken with it (routes/adopt.ts). The only route of the path.
   if ((m = path.match(/^\/factory\/packages\/([A-Za-z0-9@._+-]+)\/adopt$/)) && method === "POST") {
     const c = await contributorOf(request, env);
     if (!c) return nobody();
-    return handleAdoptPackage(c, m[1], env);
+    return handleAdoptPackage(c, m[1], request, env);
   }
   // Maintainers: a record withdrawn from the public bucket, a signed tombstone in its place.
   if (method === "POST" && path === "/factory/record/withdraw") {
@@ -386,6 +387,12 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
     const c = await contributorOf(request, env);
     if (!c) return nobody();
     return m[2] === "approve" ? handleApprove(c, Number(m[1]), request, env) : m[2] === "build" ? handleProjectBuild(c, Number(m[1]), request, env) : handleReject(c, Number(m[1]), request, env);
+  }
+  // Review's workspace (#247): changes requested on a package in review, a claim let go — the same predicate, the same words.
+  if ((m = path.match(/^\/factory\/tasks\/(\d+)\/(changes|release)$/)) && method === "POST") {
+    const c = await contributorOf(request, env);
+    if (!c) return nobody();
+    return m[2] === "changes" ? handleChanges(c, Number(m[1]), request, env) : handleRelease(c, Number(m[1]), request, env);
   }
   // Workers: registered ones only (own token), or a job's token. There is
   // no shared worker secret: every worker is somebody's registration.
@@ -519,7 +526,7 @@ async function api(method: string, path: string, url: URL, request: Request, env
   if (method === "GET" && path === "/factory") return handleFactory(env, url);
   if (method === "GET" && path === "/factory/blocks") return handleBlocks(env);
   if (method === "GET" && path === "/factory/built") return handleBuilt(env);
-  if (method === "GET" && path === "/factory/packages") return handleListPackages(env);
+  if (method === "GET" && path === "/factory/packages") return handleListPackages(env, url);
   // The Factory form's live checks (#246): the name by the request's own rule, and what the repository says.
   if ((m = path.match(/^\/factory\/names\/([^/]+)$/)) && method === "GET") return handleNameStanding(m[1], url, env);
   if (method === "GET" && path === "/factory/source") return handleSourceRead(url, request, env);
@@ -565,7 +572,13 @@ async function api(method: string, path: string, url: URL, request: Request, env
   }
   // The factory's writes: the enqueue job (its token carries factory:write) or a maintainer by hand.
   const factoryWrite = () => authorizeJobOrMaintainer(request, env, "factory:write");
-  if ((m = path.match(/^\/factory\/tasks\/(\d+)\/cancel$/)) && method === "POST") return (await factoryWrite()) ?? handleCancelTask(Number(m[1]), env);
+  if ((m = path.match(/^\/factory\/tasks\/(\d+)\/cancel$/)) && method === "POST") {
+    const no = await factoryWrite();
+    if (no) return no;
+    // By hand — a maintainer, not the enqueue job — a claim's rebuild and an approval's publish job have doors of their own, on the record (#247).
+    const hand = (await jobOf(request, env)) ? null : await contributorOf(request, env);
+    return (hand && (await cancelByHand(hand, Number(m[1]), env))) ?? handleCancelTask(Number(m[1]), env);
+  }
   if (method === "POST" && path === "/factory/enqueue") return (await factoryWrite()) ?? handleEnqueue(request, env);
   // A maintainer runs a pool job by hand: queued like the scheduler's, executed by a project worker.
   if (method === "POST" && path === "/factory/jobs") {
@@ -634,9 +647,9 @@ async function api(method: string, path: string, url: URL, request: Request, env
   return json({ error: "not found" }, 404);
 }
 
-/** Nobody at a door the dashboard greys: the refusal is the predicate's own first word (SIGN_IN — the title of every grey control for nobody signed in), the way in for a script beside it. */
+/** Nobody at a door the dashboard greys: the refusal is the predicate's own first word (SIGN_IN — the title of every grey control for nobody signed in), with its code for an agent (`sign_in`, as the predicate names it: routes/review.ts), the way in for a script beside it. */
 function nobody(): Response {
-  return json({ error: SIGN_IN, hint: "a contributor token (POST /factory/register with a GitHub token) as Authorization: Bearer, or the dashboard's session" }, 401);
+  return json({ error: SIGN_IN, code: "sign_in", hint: "a contributor token (POST /factory/register with a GitHub token) as Authorization: Bearer, or the dashboard's session" }, 401);
 }
 
 export function json(body: unknown, status = 200, extra: Record<string, string> = {}): Response {

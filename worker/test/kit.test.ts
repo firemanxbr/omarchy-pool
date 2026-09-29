@@ -304,8 +304,8 @@ describe("the theme", () => {
 
 describe("the v1 kit", () => {
   it("is on the pages that ask for it, and costs the others nothing: its sheet after the frame's CSS, its helpers after the shell's", async () => {
-    // A page that has not adopted it links no sheet, carries no primitive and not the kit's helpers (the docs index has, #250: test/docs-index.test.ts; Home, #243, the Factory, #246, Status, #248, and the package page, #244, have: below). The one mention of the sheet is the ⌘K menu's (#241): its icons are the kit's, and it links the sheet the first time it opens — nothing is asked for before that (test/go-menu.test.ts opens it).
-    for (const path of ["/review"]) {
+    // A page that has not adopted it links no sheet, carries no primitive and not the kit's helpers (the docs index has, #250: test/docs-index.test.ts; Home, #243, the Factory, #246, Status, #248, the package page, #244, and Review, #247, have: below). The one mention of the sheet is the ⌘K menu's (#241): its icons are the kit's, and it links the sheet the first time it opens — nothing is asked for before that (test/go-menu.test.ts opens it). Every page this test named before has adopted it; Workers and a person's page have not, and stand for the pages that have not.
+    for (const path of ["/workers", "/user/alice"]) {
       const html = await page(path);
       expect(/<head>([\s\S]*?)<\/head>/.exec(html)![1], path).not.toContain("/assets/kit.");
       expect(html.split("/assets/kit.").length - 1, `${path}: the menu's mention only`).toBe(1);
@@ -336,6 +336,14 @@ describe("the v1 kit", () => {
     expect(styleOf(home)).not.toContain(".op-");
     expect(scriptOf(home)).toContain(KIT_HELPERS);
     expect(ownScriptOf(home)).not.toContain(KIT_HELPERS.trim().slice(0, 80));
+    // Review is one (#247): the sheet once in its head, after the frame's <style>, its own rules after the sheet (page({ css })), the kit's helpers the frame's.
+    const review = await page("/review"), rhead = /<head>([\s\S]*?)<\/head>/.exec(review)![1];
+    expect(rhead.match(/\/assets\/kit\./g)?.length).toBe(1);
+    expect(rhead.indexOf(link)).toBeGreaterThan(rhead.indexOf("</style>"));
+    expect(rhead.lastIndexOf("<style>")).toBeGreaterThan(rhead.indexOf(link));
+    expect(styleOf(review)).not.toContain(".op-");
+    expect(scriptOf(review)).toContain(KIT_HELPERS);
+    expect(ownScriptOf(review)!.trim().startsWith('var API = "/api/v1/factory"')).toBe(true);
     // The Factory has adopted it (#246): the sheet once, after the frame's CSS, its own rules after the sheet (page()'s css), the helpers the shell's.
     const factory = await page("/factory"), fhead = /<head>([\s\S]*?)<\/head>/.exec(factory)![1];
     expect(fhead.match(/\/assets\/kit\./g)?.length).toBe(1);
