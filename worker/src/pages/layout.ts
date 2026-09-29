@@ -83,6 +83,15 @@ export const THEME_KEY = "op-theme";
  * made in another tab of the pool is followed here too (the storage event).
  * localStorage can throw (a private window, storage blocked): the choice
  * then lasts for the page.
+ *
+ * The boot also makes the header's switch live from the first paint: it marks
+ * <html> data-js, which is what draws the switch (the CSS hides it without
+ * it, so with script off nothing is drawn that could not switch), and it
+ * answers a press on the switch itself, from the document, so the switch
+ * works before the end-of-body script that names it (THEME_SWITCH) has run.
+ * The switch used to be served hidden and shown by that script: on a slow
+ * link the header was painted without it, and 0.5–2 s later it appeared and
+ * pushed Go… aside.
  */
 export const THEME_BOOT = `(function (d, KEY, BG) {
   var root = d.documentElement;
@@ -100,7 +109,9 @@ export const THEME_BOOT = `(function (d, KEY, BG) {
     toggle: function () { return window.opTheme.set(shown() === "dark" ? "light" : "dark"); }
   };
   window.addEventListener("storage", function (e) { if (e.key === KEY) apply(kept()); });
+  d.addEventListener("click", function (e) { var t = e.target; if (t && t.closest && t.closest("#theme")) window.opTheme.toggle(); });
   apply(kept());
+  root.setAttribute("data-js", "");
 })(document, ${JSON.stringify(THEME_KEY)}, ${JSON.stringify({ dark: PALETTE.bg.dark, light: PALETTE.bg.light })});`;
 
 /**
@@ -112,9 +123,12 @@ export const THEME_BOOT = `(function (d, KEY, BG) {
  * pressing does and the state now. It carries no aria-pressed: its name
  * changes with the theme, and a pressed state on top of a changing name
  * reads as two answers to one question. A native <button>: Tab reaches it,
- * Enter and Space press it, and the frame's focus rule gives it the green
- * line. It is served hidden and shown by this script, so with script off
- * (where nothing could switch) it is not drawn and the page stays dark.
+ * Enter and Space press it (THEME_BOOT answers the press), and the frame's
+ * focus rule gives it the green line. It is drawn from the first paint once
+ * THEME_BOOT has marked <html> data-js, and not at all with script off (where
+ * nothing could switch), so the page stays dark. It is served named for the
+ * default: this script names it for the theme shown, so a reader who chose
+ * light hears the right name once the page's script has run.
  * The icons are inline SVG from the kit's Lucide files (lucideSvg), not the
  * kit's sheet: the header is on every page, and most pages link no sheet.
  */
@@ -128,10 +142,8 @@ export const THEME_SWITCH = String.raw`
       sw.setAttribute("aria-label", name); sw.title = name;
       if (now) now.textContent = "The " + t + " theme is on.";
     }
-    sw.addEventListener("click", function () { window.opTheme.toggle(); });
     document.addEventListener("op-theme", show);
     show();
-    sw.hidden = false;
   })();
 `;
 
@@ -204,11 +216,14 @@ const CSS = String.raw`
   header .go kbd { padding: 0 5px; border: 1px solid var(--line); font: 11px/1.5 var(--font-mono); }
   @media (hover: none) and (pointer: coarse) { header .go kbd { display: none; } }
   /* The theme switch (#272, THEME_SWITCH): a square beside Go…, as tall as it, in Go…'s dim that brightens on hover, one 15px Lucide icon
-     in currentColor — the sun on a dark page, the moon on a light one: the theme a press switches to. Served hidden: with script off it is
-     not drawn. It changes nothing but the theme, at once: no transition, so there is no motion to reduce. */
+     in currentColor — the sun on a dark page, the moon on a light one: the theme a press switches to. Drawn from the first paint once
+     THEME_BOOT has marked <html> data-js, so it never appears late and pushes Go… aside; with script off it is not drawn. It changes
+     nothing but the theme, at once: no transition, so there is no motion to reduce. On a phone it sits at the end of the doors' row
+     (the media queries further down). */
   header .theme { flex: none; align-self: stretch; display: inline-grid; place-items: center; padding: 0 8px; border: 1px solid var(--line); border-radius: 0; -webkit-appearance: none; appearance: none; background: transparent; color: var(--dim); cursor: pointer; }
   header .theme:hover { color: var(--text); border-color: var(--green); }
   header .theme svg { display: block; width: 15px; height: 15px; }
+  :root:not([data-js]) header .theme { display: none; }
   header .theme .i-moon, :root[data-theme="light"] header .theme .i-sun { display: none; }
   :root[data-theme="light"] header .theme .i-moon { display: block; }
   header .account { flex: none; font-size: 13px; border: 1px solid var(--line); padding: 5px 11px; white-space: nowrap; display: inline-flex; align-items: center; max-width: min(46vw, 420px); }
@@ -408,6 +423,16 @@ const CSS = String.raw`
   h1, h2, h3 { text-wrap: balance; }
   /* A phone: a door's role goes under its name, so the version and the three doors share one row down to 360px instead of Review wrapping alone. */
   @media (max-width: 480px) { header nav a { display: inline-grid; line-height: 1.3; } }
+  /* A phone from 340px: the theme switch leaves Go…'s side for the end of the doors' row, which has the room (the doors end about 260px in).
+     Beside Go… its 43px pushed the right side off the mark's row — a visitor at 360px, a maintainer at 375–414px — and the header grew a
+     third row. The doors' row keeps the switch's width free, only when the switch is drawn, and the switch is centred on that row: two
+     lines of the doors (14px and 11px at 1.3) and their 3px underline, 35.5px, around Go…'s height (a 13px line at 1.6, 5px padding and
+     a 1px line each side). Below 340px the doors' row has no room left, and the switch stays beside Go…. */
+  @media (min-width: 340px) and (max-width: 480px) {
+    header { position: relative; }
+    :root[data-js] header .hmid { padding-right: 45px; }
+    header .theme { position: absolute; right: 16px; bottom: calc(12px + (25px * 1.3 + 3px - (13px * 1.6 + 12px)) / 2); height: calc(13px * 1.6 + 12px); }
+  }
   footer .fleft, footer .fright { display: grid; align-content: start; } footer .fleft { gap: 6px; justify-items: start; } footer .fright { gap: 4px; justify-items: end; }
   footer .fnote { color: var(--dim); line-height: 1.4; }
   footer .fbadge { display: inline-flex; align-items: center; } footer .fbadge svg { display: block; height: 20px; width: auto; } footer .fbadge:hover svg { filter: brightness(1.1); }
@@ -2096,7 +2121,7 @@ export function page(o: PageOptions): string {
   </div>
   <div class="hr">
     <a class="go" id="go" href="/packages" title="find a package">Go…</a>
-    <button class="theme" id="theme" type="button" hidden aria-label="Switch to the light theme" title="Switch to the light theme" aria-describedby="theme-now">${THEME_ICONS}<span id="theme-now" hidden>The dark theme is on.</span></button>
+    <button class="theme" id="theme" type="button" aria-label="Switch to the light theme" title="Switch to the light theme" aria-describedby="theme-now">${THEME_ICONS}<span id="theme-now" hidden>The dark theme is on.</span></button>
     <span class="account"><a id="account" href="/auth/github?next=${escapeHtml(nextOf(o.path))}" title="contributors and maintainers sign in with GitHub" rel="nofollow">Sign in</a><a id="signout" href="/auth/logout" hidden title="sign out of the dashboard on this browser">sign out</a></span>
   </div>
 </header>

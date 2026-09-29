@@ -228,8 +228,9 @@ describe("both themes", () => {
 
 /**
  * THEME_BOOT over a document of its own: the root's attributes, the theme-color meta, a localStorage that can refuse, the system's
- * preference (a matchMedia that answers light when asked to, and counts the asking), the document's events — and, with `withSwitch`,
- * the header's switch (THEME_SWITCH) run after it, over the button and its description as page() serves them.
+ * preference (a matchMedia that answers light when asked to, and counts the asking), the document's events (`press` clicks what it is
+ * given, the switch by default, through the document as a browser would) — and, with `withSwitch`, the header's switch (THEME_SWITCH)
+ * run after it, over the button and its description as page() serves them.
  */
 function boot(o: { stored?: string; prefersLight?: boolean; storageThrows?: boolean; withSwitch?: boolean; noBoot?: boolean } = {}) {
   const attrs: Record<string, string> = {};
@@ -242,22 +243,24 @@ function boot(o: { stored?: string; prefersLight?: boolean; storageThrows?: bool
   const matchMedia = (q: string) => { asked++; return { matches: q === "(prefers-color-scheme: light)" && !!o.prefersLight }; };
   const on: Record<string, (e: { key: string }) => void> = {};
   const heard: string[] = [];
-  const listeners: Record<string, ((e: { detail: string }) => void)[]> = {};
+  const listeners: Record<string, ((e: any) => void)[]> = {};
   class CustomEvent { type: string; detail: string; constructor(type: string, init: { detail: string }) { this.type = type; this.detail = init.detail; } }
-  // The switch as served: hidden, named for light, its description the dark theme's.
-  const sw = { hidden: true, title: "Switch to the light theme", attrs: { "aria-label": "Switch to the light theme" } as Record<string, string>, click: null as null | (() => void), setAttribute(k: string, v: string) { this.attrs[k] = v; }, addEventListener(t: string, f: () => void) { if (t === "click") this.click = f; } };
+  // The switch as served: named for light, its description the dark theme's; a press lands on it or on one of its icons (closest finds it).
+  const sw = { title: "Switch to the light theme", attrs: { "aria-label": "Switch to the light theme" } as Record<string, string>, setAttribute(k: string, v: string) { this.attrs[k] = v; }, closest: (sel: string) => (sel === "#theme" ? sw : null) };
+  const icon = { closest: (sel: string) => (sel === "#theme" ? sw : null) }, elsewhere = { closest: () => null };
   const now = { textContent: "The dark theme is on." };
   const window: Record<string, any> = { matchMedia, addEventListener: (t: string, f: (e: { key: string }) => void) => { on[t] = f; } };
   const document = {
     documentElement: root,
     querySelectorAll: (sel: string) => (sel === 'meta[name="theme-color"]' ? [meta] : []),
     querySelector: (sel: string) => (sel === "#theme" ? sw : sel === "#theme-now" ? now : null),
-    addEventListener: (t: string, f: (e: { detail: string }) => void) => { (listeners[t] = listeners[t] || []).push(f); },
+    addEventListener: (t: string, f: (e: any) => void) => { (listeners[t] = listeners[t] || []).push(f); },
     dispatchEvent: (e: CustomEvent) => { heard.push(`${e.type}:${e.detail}`); (listeners[e.type] || []).forEach((f) => f(e)); return true; },
   };
   if (!o.noBoot) new Function("document", "window", "localStorage", "matchMedia", "CustomEvent", THEME_BOOT)(document, window, localStorage, matchMedia, CustomEvent);
   if (o.withSwitch) new Function("document", "window", THEME_SWITCH)(document, window);
-  return { attrs, meta: () => meta.content, store, opTheme: window.opTheme as { get(): string; set(t: unknown): string; toggle(): string }, on, asked: () => asked, heard, sw, now };
+  const press = (target: unknown = sw) => (listeners.click || []).forEach((f) => f({ type: "click", target }));
+  return { attrs, meta: () => meta.content, store, opTheme: window.opTheme as { get(): string; set(t: unknown): string; toggle(): string }, on, asked: () => asked, heard, sw, now, press, icon, elsewhere };
 }
 
 describe("the theme", () => {
@@ -333,21 +336,31 @@ describe("the theme", () => {
     expect(b.attrs["data-theme"]).toBe("light");
   });
 
-  it("has a switch in the header that shows itself, names the theme it switches to, says the one that is on, toggles and keeps the choice", () => {
-    let b = boot({ withSwitch: true, prefersLight: true });
-    expect(b.sw.hidden, "drawn once the script runs").toBe(false);
+  it("has a switch in the header, live from the first paint, that names the theme it switches to, says the one that is on, toggles and keeps the choice", () => {
+    // The boot alone (the head's script, before the body is drawn) draws the switch — data-js on <html>, what the CSS shows it by — and
+    // answers a press on it: a slow link paints the header long before the end-of-body script, and the switch must not appear late.
+    let b = boot({ prefersLight: true });
+    expect(b.attrs["data-js"], "drawn from the first paint").toBe("");
+    b.press();
+    expect(b.opTheme.get(), "pressed before the page's script has run").toBe("light");
+    expect(b.store[THEME_KEY]).toBe("light");
+    b.press(b.icon);
+    expect(b.opTheme.get(), "a press on its icon is a press on it").toBe("dark");
+    b.press(b.elsewhere);
+    expect(b.opTheme.get(), "a click elsewhere switches nothing").toBe("dark");
+    b = boot({ withSwitch: true, prefersLight: true });
     expect(b.sw.attrs["aria-label"]).toBe("Switch to the light theme");
     expect(b.sw.title).toBe("Switch to the light theme");
     expect(b.now.textContent).toBe("The dark theme is on.");
-    // A press (a click, or Enter or Space on the native button) toggles and stores; the name and the state follow.
-    b.sw.click!();
+    // A press (a click, or Enter or Space on the native button) toggles and stores, once; the name and the state follow.
+    b.press();
     expect(b.opTheme.get()).toBe("light");
     expect(b.store[THEME_KEY]).toBe("light");
     expect(b.meta()).toBe(PALETTE.bg.light);
     expect(b.sw.attrs["aria-label"]).toBe("Switch to the dark theme");
     expect(b.sw.title).toBe("Switch to the dark theme");
     expect(b.now.textContent).toBe("The light theme is on.");
-    b.sw.click!();
+    b.press();
     expect(b.store[THEME_KEY]).toBe("dark");
     expect(b.sw.attrs["aria-label"]).toBe("Switch to the light theme");
     // The ⌘K menu's Theme (the same API) and another tab's choice move the switch too.
@@ -360,15 +373,19 @@ describe("the theme", () => {
     b = boot({ withSwitch: true, stored: "light" });
     expect(b.sw.attrs["aria-label"]).toBe("Switch to the dark theme");
     expect(b.now.textContent).toBe("The light theme is on.");
-    // Without the boot (no opTheme) the switch stays hidden: nothing could switch.
+    // Without the boot (script off, or the boot failed before opTheme) nothing marks <html>: the switch is not drawn, and nothing answers a press.
     b = boot({ withSwitch: true, noBoot: true });
-    expect(b.sw.hidden).toBe(true);
+    expect(b.attrs["data-js"]).toBeUndefined();
+    b.press();
+    expect(b.sw.attrs["aria-label"]).toBe("Switch to the light theme");
   });
 
-  it("serves the switch hidden, so with script off the page is dark and draws no control that does nothing", async () => {
+  it("serves the switch drawn only where script runs, so with script off the page is dark and draws no control that does nothing", async () => {
     const html = await page("/");
     const sw = /<button class="theme" id="theme"[^>]*>[\s\S]*?<\/button>/.exec(html)![0];
-    expect(sw).toMatch(/^<button class="theme" id="theme" type="button" hidden aria-label="Switch to the light theme" title="Switch to the light theme" aria-describedby="theme-now">/);
+    // Not served hidden (then only the end-of-body script could show it, late on a slow link): the CSS draws it once the head's boot marked <html>.
+    expect(sw).toMatch(/^<button class="theme" id="theme" type="button" aria-label="Switch to the light theme" title="Switch to the light theme" aria-describedby="theme-now">/);
+    expect(THEME_BOOT.indexOf('root.setAttribute("data-js", "")'), "marked once opTheme is there to answer").toBeGreaterThan(THEME_BOOT.indexOf("window.opTheme = {"));
     expect(sw).toContain('<span id="theme-now" hidden>The dark theme is on.</span>');
     // Its icons: Lucide's sun and moon, inline, in currentColor, decoration only; the CSS shows the sun on a dark page and the moon on a light one.
     expect(sw).toContain(lucideSvg("sun", 15, "i-sun"));
@@ -379,7 +396,12 @@ describe("the theme", () => {
       "header .theme:hover { color: var(--text); border-color: var(--green); }",
       'header .theme .i-moon, :root[data-theme="light"] header .theme .i-sun { display: none; }',
       ':root[data-theme="light"] header .theme .i-moon { display: block; }',
+      ":root:not([data-js]) header .theme { display: none; }",
       "[hidden] { display: none !important; }",
+      // A phone from 340px: the switch at the end of the doors' row, whose width it keeps free only when it is drawn, so the mark, Go… and the account keep one row.
+      "@media (min-width: 340px) and (max-width: 480px) {",
+      ":root[data-js] header .hmid { padding-right: 45px; }",
+      "header .theme { position: absolute; right: 16px;",
     ]) expect(style, rule).toContain(rule);
     expect(style).toMatch(/header \.theme \{[^}]*border: 1px solid var\(--line\); border-radius: 0;[^}]*color: var\(--dim\);/);
     // Its focus is the header's green line.

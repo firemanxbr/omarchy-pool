@@ -178,11 +178,11 @@ export interface Fixture {
  */
 export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
   {
-    // The theme (#239, #272): dark by default, for everyone — the handoff's rule, whatever the system prefers — or the one the reader chose, kept in this browser under THEME_KEY and applied in the head before the first paint, with the browser's chrome (theme-color) following. window.opTheme is the one way to choose: the header's switch beside Go… calls it, and so does the ⌘K menu; kit.test.ts runs the boot and the switch.
+    // The theme (#239, #272): dark by default, for everyone — the handoff's rule, whatever the system prefers — or the one the reader chose, kept in this browser under THEME_KEY and applied in the head before the first paint, with the browser's chrome (theme-color) following. window.opTheme is the one way to choose: the header's switch beside Go… calls it (the boot draws it and answers its press from the first paint), and so does the ⌘K menu; kit.test.ts runs the boot and the switch.
     id: "shell.theme",
     page: "/",
-    anchor: [`<meta name="theme-color" content="${PALETTE.bg.dark}">`, "window.opTheme = {", `"${THEME_KEY}"`, '[data-theme="light"] { color-scheme: light;', '<button class="theme" id="theme" type="button" hidden', 'aria-describedby="theme-now"'],
-    script: ['document.querySelector("#theme")', 'document.addEventListener("op-theme", show)', "sw.addEventListener(\"click\""],
+    anchor: [`<meta name="theme-color" content="${PALETTE.bg.dark}">`, "window.opTheme = {", `"${THEME_KEY}"`, '[data-theme="light"] { color-scheme: light;', '<button class="theme" id="theme" type="button" aria-label=', 'aria-describedby="theme-now"', 't.closest("#theme")', 'root.setAttribute("data-js", "")'],
+    script: ['document.querySelector("#theme")', 'document.addEventListener("op-theme", show)'],
     visible: EVERYONE,
   },
   {
