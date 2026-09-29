@@ -314,6 +314,8 @@ export interface WorkerIdentity {
   trust: string;
   /** Set when the caller is a job token rather than a registered worker: the job's kind. */
   job?: string;
+  /** …and the job token's own task (`t`, #277): an audit's or a trial's report is taken only while that task is still leased to the token's worker and not stopped. */
+  job_task?: number;
   /** The row as the orders path reads it (#277, orders.ts): read with the token, in the same seek, so a claim pays no read for its orders. */
   orders?: OrdersRow;
 }
@@ -889,12 +891,16 @@ export async function handleDeletePackage(c: Contributor, name: string, env: Env
  * rule, read the other way round): their own, and the ones anyone shares —
  * never the project's, which take the project's builds only.
  */
-export async function buildersFor(env: Env, login: string, arch: string): Promise<{ id: string; owner: string | null; mode: string | null; arch: string }[]> {
+export async function buildersFor(env: Env, login: string, arch: string): Promise<{ id: string; owner: string | null; mode: string | null; arch: string; drained_at: string | null; drained_by: string | null; drain_reason: string | null }[]> {
   const rows = await env.DB.prepare(
-    "SELECT id, owner, mode, arch FROM build_workers WHERE revoked_at IS NULL AND trust = 'community' AND arch = ? AND (owner = ? OR mode = 'shared')",
-  ).bind(arch, login).all<{ id: string; owner: string | null; mode: string | null; arch: string }>();
+    "SELECT id, owner, mode, arch, drained_at, drained_by, drain_reason FROM build_workers WHERE revoked_at IS NULL AND trust = 'community' AND arch = ? AND (owner = ? OR mode = 'shared')",
+  ).bind(arch, login).all<{ id: string; owner: string | null; mode: string | null; arch: string; drained_at: string | null; drained_by: string | null; drain_reason: string | null }>();
   return rows.results;
 }
+
+/** A drained worker named for a build (#277): the Build door and the project-build door refuse it in one sentence — pinned to it, the build would wait until it is resumed. */
+export const drainedRefusal = (w: { id: string; drained_at: string | null; drained_by: string | null; drain_reason: string | null }) =>
+  `${w.id} is drained (by ${w.drained_by ?? "?"}, ${(w.drained_at ?? "").slice(11, 16)}${w.drain_reason ? `: ${w.drain_reason}` : ""}) — pin another worker, or use the shared queue`;
 
 export interface QueueAsk { arches?: string[]; worker?: string | null; hint?: string | null; reason?: string; release?: string }
 export interface Queued { tasks: number[]; building: { task: number; arch: string; on: string | null }[]; arches: string[]; pkgbuild_ref: string; pinned_to: string | null; lessons: Record<string, number>; hint: string | null; queue: Record<string, { position: number; total: number }> }
@@ -930,6 +936,7 @@ export async function queueBuilds(env: Env, c: Contributor, name: string, ask: Q
     if (arches.length !== 1) return json({ error: "a worker builds one architecture: ask for that architecture alone" }, 400);
     const ok = (await buildersFor(env, c.login, arches[0])).find((w) => w.id === where);
     if (!ok) return json({ error: `${where} is not a worker of yours for ${arches[0]}, nor one anyone shares` }, 403);
+    if (ok.drained_at) return json({ error: drainedRefusal(ok) }, 409);
     pinned = ok.id;
   }
   const detected = pkg.detected ? (JSON.parse(pkg.detected) as { latest_tag?: string }) : {};
@@ -1164,8 +1171,11 @@ const AUDIT_FILES = ["audit.json", "audit.md"];
 /** What the trial job adds: the transcript of the real pacman that installed the build from the lab. */
 const TRIAL_FILES = ["trial.log"];
 
+/** A task stopped from its worker's page (#277): its uploads are refused, as its heartbeats and reports are — the worker stops on it. */
+const STOPPING = { error: "stopped from its worker's page: nothing of this task is taken any more — it goes back to the queue once its worker has stopped it", stop: true, state: "stopping" };
+
 export async function handleStagingPut(taskId: number, filename: string, request: Request, env: Env, w: WorkerIdentity): Promise<Response> {
-  const task = await env.DB.prepare("SELECT id, name, owner, status, lease_owner, trust, params FROM build_tasks WHERE id = ?").bind(taskId).first<{ id: number; name: string; owner: string; status: string; lease_owner: string; trust: string; params: string | null }>();
+  const task = await env.DB.prepare("SELECT id, name, owner, status, lease_owner, trust, params, stop_order FROM build_tasks WHERE id = ?").bind(taskId).first<{ id: number; name: string; owner: string; status: string; lease_owner: string; trust: string; params: string | null; stop_order: string | null }>();
   if (!task) return json({ error: "no such task" }, 404);
   const space = stagingOwner(task);
   if (!space) return json({ error: "project tasks publish to the pool, not to staging" }, 400);
@@ -1176,8 +1186,14 @@ export async function handleStagingPut(taskId: number, filename: string, request
     const allowed = w.job === "audit" ? AUDIT_FILES : TRIAL_FILES;
     if (task.status !== "staged") return json({ error: `task ${taskId} is ${task.status}; the ${w.job} reports on a staged build` }, 409);
     if (!allowed.includes(filename)) return json({ error: `a ${w.job} uploads ${allowed.join(" and ")}` }, 400);
+    // …and only while the job's own task is still this worker's (#277): the path names the staged build, not the job, so a stopped
+    // or requeued audit's token — valid until its lease's end — would otherwise overwrite the report its next run attaches.
+    const own = w.job_task ? await env.DB.prepare("SELECT status, lease_owner, stop_order FROM build_tasks WHERE id = ?").bind(w.job_task).first<{ status: string; lease_owner: string | null; stop_order: string | null }>() : null;
+    if (!own || own.status !== "leased" || own.lease_owner !== w.id) return json({ error: `the ${w.job}'s own task${w.job_task ? ` (${w.job_task})` : ""} is ${own?.status ?? "unknown"}: the lease is not yours`, stop: true, state: own?.status ?? "gone" }, 409);
+    if (own.stop_order) return json(STOPPING, 409);
   } else {
     if (task.status !== "leased" || task.lease_owner !== w.id) return json({ error: "the lease is not yours" }, 409);
+    if (task.stop_order) return json(STOPPING, 409);
     // The builder never writes the report about its own build.
     if (AUDIT_FILES.includes(filename) || TRIAL_FILES.includes(filename)) return json({ error: `${filename} is written by the audit or trial job, not by the build` }, 403);
   }
@@ -1209,10 +1225,11 @@ export async function handleStagingPut(taskId: number, filename: string, request
 }
 
 export async function handleStagingMultipart(taskId: number, filename: string, url: URL, request: Request, env: Env, w: WorkerIdentity): Promise<Response> {
-  const task = await env.DB.prepare("SELECT id, name, owner, status, lease_owner, trust, params FROM build_tasks WHERE id = ?").bind(taskId).first<{ id: number; name: string; owner: string; status: string; lease_owner: string; trust: string; params: string | null }>();
+  const task = await env.DB.prepare("SELECT id, name, owner, status, lease_owner, trust, params, stop_order FROM build_tasks WHERE id = ?").bind(taskId).first<{ id: number; name: string; owner: string; status: string; lease_owner: string; trust: string; params: string | null; stop_order: string | null }>();
   const space = task ? stagingOwner(task) : null;
   if (!task || !space) return json({ error: "no such staging task" }, 404);
   if (task.status !== "leased" || task.lease_owner !== w.id) return json({ error: "the lease is not yours" }, 409);
+  if (task.stop_order) return json(STOPPING, 409);
   if (!/^[A-Za-z0-9][A-Za-z0-9._:+-]{0,200}$/.test(filename) || AUDIT_FILES.includes(filename)) return json({ error: "bad filename" }, 400);
   // Text evidence is checked whole at the single PUT (leak.ts); a multipart upload of it would go around that.
   if (isTextEvidence(filename)) return json({ error: `${filename} is text evidence: one PUT, up to ${TEXT_EVIDENCE_MAX} bytes` }, 400);

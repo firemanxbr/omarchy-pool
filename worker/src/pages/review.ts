@@ -436,7 +436,8 @@ const SCRIPT = String.raw`
     return WORKERS_READ;
   }
   function agentWorkers(arch) {
-    return (WORKERS || []).filter(function (w) { return w.side === "omarchy" && !w.revoked_at && (!w.kinds || w.kinds.indexOf("build") >= 0) && w.alive && w.agent && w.agent_status === "ok" && !(w.update && w.update.required) && (!arch || w.arch === arch); });
+    // A drained worker (#277) is handed nothing until it is resumed: a claim never pins its rebuild to one.
+    return (WORKERS || []).filter(function (w) { return w.side === "omarchy" && !w.revoked_at && !w.drained && (!w.kinds || w.kinds.indexOf("build") >= 0) && w.alive && w.agent && w.agent_status === "ok" && !(w.update && w.update.required) && (!arch || w.arch === arch); });
   }
   function agentsFor(arch) { var seen = {}; return agentWorkers(arch).map(function (w) { return w.agent; }).filter(function (a) { if (seen[a]) return false; seen[a] = true; return true; }); }
   function keptAgent() { try { return localStorage.getItem(AGENT_KEY); } catch (e) { return null; } }

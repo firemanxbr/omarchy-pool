@@ -51,6 +51,8 @@ const BODY = String.raw`
 const SCRIPT = String.raw`
   var API = "/api/v1/factory", ID = Number(location.pathname.split("/").pop()), T = null;
   function when(iso) { return iso ? '<span class="when" title="' + esc(iso) + '">' + ago(iso) + '</span>' : ''; }
+  // A moment as a time of day, the reader's own clock.
+  function clockOf(iso) { var d = new Date(iso); return isNaN(d) ? "" : String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); }
   $("#json-link").href = API + "/tasks/" + ID; $("#json-link").textContent = API + "/tasks/" + ID;
   skeletonTiles("#tiles", 6);
 
@@ -152,7 +154,13 @@ const SCRIPT = String.raw`
     if (T.from && p.review !== undefined) add("ok", "Evidence", personLink(T.from.owner) + '\'s build <a href="/build/' + T.from.id + '">#' + T.from.id + '</a> was staged; a maintainer asked the project to build it again', T.from.finished_at);
     if (T.from && p.task !== undefined) add("ok", "Of build", 'this ' + esc(t.kind) + ' is of build <a href="/build/' + T.from.id + '">#' + T.from.id + '</a> (' + esc(T.from.name || t.name) + ' ' + esc(T.from.version || '') + ')', T.from.finished_at);
     add("ok", "Queued", esc(t.reason || "") + (isBuild ? ' · recipe <span class="mono">' + esc(String(t.pkgbuild_ref || "")) + '</span>' : ''), t.created_at);
-    if (t.started_at) add(t.status === "leased" ? "blue" : "ok", t.status === "leased" ? "Building" : "Started", (t.lease_owner ? 'on <span class="mono">' + esc(t.lease_owner) + '</span>' : 'on a worker the record no longer names') + ' · attempt ' + num(t.attempts) + ' of ' + num(t.max_attempts), t.started_at);
+    // The worker as every page names it (the shell's wtId, a link to its page, #277); while it runs, the way out of a task that hangs is on
+    // that page — Stop its task —, and while a stop fences the lease the step says when its worker was told and the latest it goes back.
+    var leased = t.status === "leased", stopping = leased && T.stopping;
+    var how = !leased || !t.lease_owner ? '' : stopping
+      ? ' · <b>stopping</b>: its worker was told at ' + esc(clockOf(T.stopping.since)) + ' (by ' + esc(T.stopping.by) + '); back in the queue once it has stopped, by ' + esc(clockOf(T.stopping.until)) + ' at the latest'
+      : ' · stuck? <a href="' + workerHref(t.lease_owner) + '">Stop its task on its worker\'s page</a>';
+    if (t.started_at) add(leased ? (stopping ? "warn" : "blue") : "ok", leased ? (stopping ? "Stopping" : "Building") : "Started", (t.lease_owner ? 'on ' + wtId(T.worker || t.lease_owner) : 'on a worker the record no longer names') + ' · attempt ' + num(t.attempts) + ' of ' + num(t.max_attempts) + how, t.started_at);
     if (t.finished_at) add(t.status === "failed" ? "error" : "ok", t.status === "failed" ? "Failed" : t.status === "staged" ? "Staged" : t.status === "cancelled" ? "Cancelled" : "Finished", (t.duration_ms ? 'after ' + dur(t.duration_ms) : '') + (t.error ? ' — ' + esc(t.error.slice(0, 200)) : '') + (t.status === "staged" ? ' · ' + esc(t.result_filename || "") + ' in the staging workspace' : ''), t.finished_at);
     var vet = t.result && t.result.vet;
     if (vet) add(vet.verdict === "pass" ? "ok" : "error", "The gate", vet.verdict === "pass" ? (vet.warnings ? vet.warnings + " warning(s): " + esc((vet.warned || []).join(", ")) : "every check passed") : "failed: " + esc((vet.failed || []).join(", ")), t.finished_at);
@@ -421,6 +429,8 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="timeline"', 'class="tl"'],
       script: [
         '"#timeline"', "T.package.request_id", "p.review !== undefined", "p.task !== undefined", "t.pkgbuild_ref",
+        // #277: the worker a link to its page, Stop its task there while the task runs, and when a stop fences it.
+        "wtId(T.worker || t.lease_owner)", "workerHref(t.lease_owner)", "Stop its task on its worker", "T.stopping.since", "T.stopping.until",
         "T.audit.slice().reverse()", "T.trial.slice().reverse()", "T.project_builds.slice().reverse()", "T.publish.slice().reverse()",
         "a.rebuild_task", "a.withdrawn_reason", "vet.warned", "vet.failed", "pkgHref(t.name, ringOfBuild(t.status, T.rings), t.arch)",
       ],
@@ -430,7 +440,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
           fields: [
             "package.request_id", "package.owner", "package.project", "package.created_at",
             "from.id", "from.owner", "from.version", "from.finished_at",
-            "task.params.review", "task.reason", "task.pkgbuild_ref", "task.created_at", "task.started_at", "task.status", "task.lease_owner", "task.attempts", "task.max_attempts",
+            "task.params.review", "task.reason", "task.pkgbuild_ref", "task.created_at", "task.started_at", "task.status", "task.lease_owner", "task.attempts", "task.max_attempts", "task.stop_order", "stopping",
             "task.finished_at", "task.duration_ms", "task.error", "task.result_filename",
             "task.result.vet.verdict", "task.result.vet.warnings", "task.result.vet.warned", "task.result.vet.failed",
             "audit.0.id", "audit.0.status", "audit.0.result.verdict", "audit.0.result.summary", "audit.0.result.model", "audit.0.error", "audit.0.finished_at", "audit.0.started_at",

@@ -10,7 +10,7 @@
 import { describe, expect, it } from "vitest";
 import {
   answerCode, autoOf, breakerKey, breakerOfKey, breakerScope, canonicalKinds, claimFacts, cleanText, codeSentence, decideAuto, errorClass, instanceStep, isPool, orderVerdicts, parsePreviousExit, poolFor, probeAge, rulesScale,
-  siblingsAnswering, siteKey, sitesByProvider, siteVerdict, siteWords, versionWord,
+  siblingsAnswering, siteKey, sitesByProvider, siteVerdict, siteWords, stopEnded, stopWay, versionWord, type HeldTask,
   CHURN_CLEAR_MIN, CONFLICT_WINDOW_MIN, CRASH_LOOP_AT, GIVE_UP_AFTER_MIN, MAX_POOL_RECHECKS_PER_DAY, MAX_POOL_RESTARTS_PER_DAY, MAX_POOL_RESTARTS_PER_SPELL, MIN_UPTIME_S, POOL_COMMUNITY, POOL_PROJECT, RECHECK_AFTER_MIN, RESTART_AFTER_MIN, RESTART_SPACING_MIN,
   type ClaimFacts, type InstanceStep, type OrderFacts, type OrdersRow, type RuleInput, type SiteRead, type SiteWorker,
 } from "../src/orders";
@@ -532,7 +532,7 @@ describe("who may press what", () => {
     expect(orderVerdicts({ login: "m2", role: "maintainer" }, w, f).restart_agent.ok).toBe(true);
     expect(orderVerdicts({ login: "m2", role: "maintainer" }, { ...w, revoked_at: at(0) }, f).restart).toMatchObject({ status: 404 });
   });
-  it("by the worker's state: an image that takes no orders, a kind it does not declare, one waiting, two processes, a policy running out, the caps; the later parts' kinds not yet", () => {
+  it("by the worker's state: an image that takes no orders, a kind it does not declare, one waiting, two processes, a policy running out, the caps; Update not yet", () => {
     const m = { login: "m2", role: "maintainer" };
     expect(orderVerdicts(m, { ...w, order_kinds: null }, f).recheck).toMatchObject({ status: 409, why: expect.stringContaining("takes no orders") });
     expect(orderVerdicts(m, { ...w, order_kinds: '["drain","restart"]' }, f).recheck).toMatchObject({ why: "it runs no agent to re-check" });
@@ -543,7 +543,60 @@ describe("who may press what", () => {
     expect(orderVerdicts(m, w, { ...f, restartsHour: 6, restartsFreeAt: at(30) }).restart).toMatchObject({ why: "restarted 6 times in the last hour; the next from 12:30" });
     expect(orderVerdicts(m, w, { ...f, rechecksHour: 6 }).recheck.ok).toBe(false);
     expect(orderVerdicts(m, w, { ...f, loginHour: 20 }).recheck).toMatchObject({ why: expect.stringContaining("reached 20 orders in an hour") });
-    for (const r of ["drain", "resume", "stop_task", "update"] as const) expect(orderVerdicts(m, w, f)[r]).toMatchObject({ status: 409, why: expect.stringContaining("not on this pool yet") });
+    expect(orderVerdicts(m, w, f).update).toMatchObject({ status: 409, why: expect.stringContaining("not on this pool yet") });
+  });
+
+  // #277, part 2: Drain, Resume and Stop its task are the pool's to carry out — on every image, whatever two processes do.
+  const held = (o: Partial<HeldTask> = {}): HeldTask => ({ id: 812, kind: "build", name: "felix", arch: "aarch64", version: "1.2-1", owner: "bob", trust: "community", status: "leased", lease_owner: "alice-box-1f2e", lease_expires_at: at(25), stop_order: null, attempts: 2, max_attempts: 3, params: null, ...o });
+  const cw = { ...w, id: "alice-box-1f2e", owner: "alice", trust: "community", agent_via: "broker", order_kinds: '["drain","recheck-agent","restart"]', current_task: 812 };
+  const alice = { login: "alice", role: "contributor" }, m1 = { login: "m1", role: "maintainer" }, bob = { login: "bob", role: "contributor" };
+  it("a drain: its owner and any maintainer, on any image and through two processes; never twice", () => {
+    for (const who of [alice, m1]) expect(orderVerdicts(who, cw, f).drain.ok).toBe(true);
+    expect(orderVerdicts(bob, cw, f).drain).toMatchObject({ status: 403 });
+    expect(orderVerdicts(m1, { ...cw, order_kinds: null }, f).drain.ok, "an image from before orders is drained too: the pool enforces it").toBe(true);
+    expect(orderVerdicts(m1, { ...cw, instance_conflict_at: at(-5) }, f).drain.ok).toBe(true);
+    expect(orderVerdicts(m1, { ...cw, drained_at: at(-20), drained_by: "alice", drain_reason: "disk" }, f).drain).toMatchObject({ status: 409, why: "drained already (by alice, 11:40: disk) — Resume ends it" });
+    expect(orderVerdicts(m1, cw, { ...f, loginHour: 20 }).drain).toMatchObject({ why: expect.stringContaining("reached 20 orders") });
+  });
+  it("a resume, by §1.10's table: a project worker any maintainer's; a contributor's machine its owner's, and a maintainer's only when a maintainer drained it; never counted against a login", () => {
+    const pw = { ...w, trust: "project", drained_at: at(-20), drained_by: "m2", drain_reason: "disk" };
+    // A project worker any maintainer drained: any maintainer resumes it.
+    expect(orderVerdicts({ login: "m3", role: "maintainer" }, pw, f).resume.ok).toBe(true);
+    expect(orderVerdicts(bob, pw, f).resume).toMatchObject({ status: 403 });
+    // A contributor's worker its owner drained: its owner only.
+    const own = { ...cw, drained_at: at(-20), drained_by: "alice", drain_reason: "my laptop's fans" };
+    expect(orderVerdicts(alice, own, f).resume.ok).toBe(true);
+    expect(orderVerdicts(m1, own, f).resume).toMatchObject({ status: 403, why: "alice drained it (11:40: my laptop's fans): putting their machine back to work is theirs — to keep it out, revoke it or set it to its owner's packages only" });
+    // A contributor's worker a maintainer drained: its owner, or any maintainer.
+    const theirs = { ...cw, drained_at: at(-20), drained_by: "m2", drain_reason: "breaks every build" };
+    expect(orderVerdicts(alice, theirs, f).resume.ok).toBe(true);
+    expect(orderVerdicts({ login: "m3", role: "maintainer" }, theirs, f).resume.ok).toBe(true);
+    for (const x of [pw, own, theirs]) expect(orderVerdicts(bob, x, f).resume.ok).toBe(false);
+    expect(orderVerdicts(alice, cw, f).resume).toMatchObject({ status: 409, why: "it is not drained: there is nothing to resume" });
+    // A login at its twenty still undoes a drain.
+    expect(orderVerdicts(alice, theirs, { ...f, loginHour: 20 }).resume.ok).toBe(true);
+  });
+  it("Stop its task: its owner and any maintainer — never the build's owner who does not own the worker —, only the task in hand, once, in the restart group", () => {
+    const g = { ...f, task: held() };
+    for (const who of [alice, m1]) expect(orderVerdicts(who, cw, g).stop_task.ok).toBe(true);
+    expect(orderVerdicts(bob, cw, g).stop_task).toMatchObject({ status: 403, why: "only alice or a maintainer gives it orders" });
+    expect(orderVerdicts(null, cw, g).stop_task).toMatchObject({ status: 401 });
+    expect(orderVerdicts(m1, { ...cw, current_task: null }, { ...f, task: null }).stop_task).toMatchObject({ status: 409, why: "idle: there is no task to stop" });
+    expect(orderVerdicts(m1, cw, { ...f, task: held({ lease_owner: "another" }) }).stop_task).toMatchObject({ why: "idle: there is no task to stop" });
+    expect(orderVerdicts(m1, cw, { ...f, task: held({ stop_order: "wo_x" }) }).stop_task).toMatchObject({ status: 409, why: expect.stringContaining("task #812 is being stopped already") });
+    expect(orderVerdicts(m1, { ...cw, order_kinds: null }, g).stop_task.ok, "an image from before #277: its lease's end gives the task back").toBe(true);
+    expect(orderVerdicts(m1, cw, { ...g, restartsHour: 6, restartsFreeAt: at(30) }).stop_task).toMatchObject({ why: "restarted 6 times in the last hour; the next from 12:30" });
+  });
+  it("how soon a stopped task stops, by what runs it: a child, a child with transfers around it, the worker's own process, or an image that does not stop — and a kind it does not know is never promised five minutes", () => {
+    const kinds = '["drain","restart"]';
+    expect([stopWay("audit", kinds), stopWay("health", kinds)]).toEqual(["child", "child"]);
+    expect([stopWay("build", kinds), stopWay("trial", kinds)]).toEqual(["child-or-call", "child-or-call"]);
+    expect(["promote", "sync", "render", "rollback", "gc", "enqueue", "publish", "verify", "relayout", "security"].map((k) => stopWay(k, kinds))).toEqual(Array(10).fill("next-call"));
+    expect(stopWay("something-new", kinds)).toBe("next-call");
+    expect(["audit", "build", "promote"].map((k) => stopWay(k, null))).toEqual(["lease-end", "lease-end", "lease-end"]);
+    // A stop whose lease ended first is failed, the task back in the queue by then; a cancelled task has nothing left to stop.
+    expect(stopEnded({ id: 812, status: "queued" }, at(0))).toMatchObject({ state: "failed", detail: expect.stringContaining("no claim before its lease ended at 12:30") });
+    expect(stopEnded({ id: 812, status: "cancelled" }, at(0))).toMatchObject({ state: "done" });
   });
 });
 

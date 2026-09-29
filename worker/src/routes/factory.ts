@@ -12,6 +12,7 @@ import { betterIdleWorker, FIRST_PICK_MINUTES } from "../queue";
 import { updateMessage, updateState } from "../update";
 import { version as running, RINGS, ringsSql, sortRings, REPO_ARCHES, WORKER_ALIVE_MINUTES, type RunningVersion } from "../meta";
 import { parseTargets, settleTargets } from "../targets";
+import { LEASE_MINUTES, packageAfterFailure, requeueLease, stopError } from "../lease";
 import {
   autoOf, breakerHolds, claimFacts, decideAuto, errorClass, instanceStep, issueOrder, NOTHING_CLASSES, openOrdersOf, outOf, poolFor, readSite, rulesOn, rulesScale, siblingsAnswering, siteVerdict, takeOrders,
   capRefusal, type AfterClaim, type AutoState, type ClaimFacts, type Decision, type InstanceStep, type OrderOut, type OrdersRow,
@@ -38,8 +39,6 @@ import {
  * Read:
  *   GET  /factory                       overview: queue, workers, recent tasks
  */
-
-const LEASE_MINUTES = 30;
 
 interface TaskRow {
   id: number;
@@ -73,6 +72,8 @@ interface TaskRow {
   owner: string | null;
   pinned_to: string | null;
   staged_prefix: string | null;
+  /** A Stop its task fenced this lease (#277): the open order's id — the task stays leased to its worker, and every heartbeat, report and upload of it is refused until it goes back to the queue. */
+  stop_order: string | null;
 }
 
 /** Who is calling a worker endpoint: a registered worker (own token) or a job (its per-task token). */
@@ -602,6 +603,12 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
       return json({ task: null, orders });
     }
   }
+  // Drained (#277): alive, and handed nothing until it is resumed — whatever its image, a column of the row the token was read
+  // with, so it holds for a worker from before orders too, and fails closed. Cheaper than a claim: no task statement runs.
+  if (row?.drained_at) {
+    await touch(null);
+    return new Response(null, { status: 204 });
+  }
   // A build asked for one worker (pinned_to) is claimed by that worker only; the rest is anyone's that qualifies.
   let scope = `kind IN (SELECT value FROM json_each(?)) AND (pinned_to IS NULL OR pinned_to = ?)`;
   const binds: unknown[] = [JSON.stringify(kinds), workerId];
@@ -708,7 +715,11 @@ async function owned(env: Env, id: number, actor: Actor): Promise<TaskRow | Resp
   const who = actor.kind === "worker" ? actor.w.id : actor.job.w;
   const task = await env.DB.prepare("SELECT * FROM build_tasks WHERE id = ?").bind(id).first<TaskRow>();
   if (!task) return json({ error: "no such task" }, 404);
-  if (task.status !== "leased" || task.lease_owner !== who) return json({ error: `task ${id} is ${task.status}${task.lease_owner ? " by " + task.lease_owner : ""}; the lease is not yours` }, 409);
+  // A task that is no longer the caller's says so, and says it on every call (#277): `stop` tells the worker to stop the task's
+  // processes — a child holding the job token cannot swallow it, it is not a one-time order — and `state` what became of it.
+  if (task.status !== "leased" || task.lease_owner !== who) return json({ error: `task ${id} is ${task.status}${task.lease_owner ? " by " + task.lease_owner : ""}; the lease is not yours`, stop: true, state: task.status }, 409);
+  // Stopped from its worker's page: still leased to this worker, so nobody else takes it, but nothing it sends is taken and nothing renews the lease or its token.
+  if (task.stop_order) return json({ error: `task ${id} was stopped from its worker's page: it goes back to the queue once this worker has stopped it`, stop: true, state: "stopping" }, 409);
   return task;
 }
 
@@ -942,41 +953,6 @@ export async function handleComplete(id: number, request: Request, env: Env, act
   return json({ task: id, status: "done", attested });
 }
 
-/**
- * The registration's one word after a community build of one architecture
- * failed. A package has one status and may have a build per architecture,
- * each on a worker of its own, so the word follows the builds, not the
- * last worker to speak: while any build of the name is staged for a
- * maintainer the package stays `staged` — Review counts it as waiting and
- * the tile must not count it as not built — and only the detail says what
- * the other architecture ran into; while another architecture's build is
- * still running or queued, it is `building` or `waiting` — one that failed
- * is not supported, and the others go on (#242); with nothing staged and
- * nothing in flight it goes to `fallback`: registered with the reason — no
- * architecture built, the request is back with its owner — or waiting when
- * the task is queued again. Each architecture's own word is its target
- * (targets.ts). omarchy-cli, 2026-09-18: aarch64 staged at 03:50, x86_64
- * gave up at 03:59 and the row read `registered` beside a build waiting for
- * review. The staging-drop handler (contributors.ts) keeps the same rule
- * from its side. `only` narrows the write to a package in that status (the
- * lease path touches a package it left `building`; a worker's own report
- * touches the package whatever the claim or the other architecture wrote
- * since).
- */
-async function packageAfterFailure(env: Env, name: string, fallback: "registered" | "waiting", detail: string, only?: "building"): Promise<void> {
-  await env.DB.prepare(
-    `UPDATE factory_packages SET
-       status = CASE WHEN EXISTS (SELECT 1 FROM build_tasks t WHERE t.kind = 'build' AND t.status = 'staged' AND t.name = factory_packages.name) THEN 'staged'
-                     WHEN EXISTS (SELECT 1 FROM build_tasks t WHERE t.status = 'leased' AND t.kind = 'build' AND t.trust = 'community' AND t.name = factory_packages.name) THEN 'building'
-                     WHEN EXISTS (SELECT 1 FROM build_tasks t WHERE t.status = 'queued' AND t.kind = 'build' AND t.trust = 'community' AND t.name = factory_packages.name) THEN 'waiting'
-                     ELSE ? END,
-       detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-     WHERE name = ?${only ? " AND status = ?" : ""}`,
-  )
-    .bind(fallback, detail, name, ...(only ? [only] : []))
-    .run();
-}
-
 export async function handleFail(id: number, request: Request, env: Env, actor: Actor): Promise<Response> {
   const b = await readJson<{ error?: string; duration_ms?: number; log_tail?: string; final?: boolean; needs_native?: boolean }>(request);
   if (b instanceof Response) return b;
@@ -1036,31 +1012,24 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
   return json({ task: id, status: exhausted ? "failed" : "queued", attempts });
 }
 
-/** Leases that expired go back to the queue (or fail when out of attempts). Called by the scheduler. */
+/**
+ * Leases that expired go back to the queue (or fail when out of attempts).
+ * Called by the scheduler. A lease a Stop its task fenced (#277) ends here
+ * when its worker did not claim again first: nothing renewed it, so every
+ * job token of it has expired by now, whatever the stopped process still
+ * runs — its line names the stop.
+ */
 export async function requeueExpiredLeases(env: Env): Promise<number> {
-  const expired = await env.DB.prepare("SELECT id, name, arch, lease_owner, attempts, max_attempts, trust, kind FROM build_tasks WHERE status = 'leased' AND lease_expires_at < ?")
+  const expired = await env.DB.prepare("SELECT id, name, arch, lease_owner, attempts, max_attempts, trust, kind, stop_order FROM build_tasks WHERE status = 'leased' AND lease_expires_at < ?")
     .bind(now())
-    .all<{ id: number; name: string; arch: string; lease_owner: string; attempts: number; max_attempts: number; trust: string; kind: string }>();
+    .all<{ id: number; name: string; arch: string; lease_owner: string; attempts: number; max_attempts: number; trust: string; kind: string; stop_order: string | null }>();
   for (const t of expired.results) {
-    const exhausted = t.attempts >= t.max_attempts;
-    const error = `lease by ${t.lease_owner} expired`;
-    await env.DB.prepare("UPDATE build_tasks SET status = ?, finished_at = ?, error = ?, lease_owner = ?, lease_expires_at = NULL, priority = priority + 10 WHERE id = ? AND status = 'leased'")
-      .bind(exhausted ? "failed" : "queued", exhausted ? now() : null, error, exhausted ? t.lease_owner : null, t.id)
-      .run();
-    await env.DB.prepare("UPDATE build_workers SET current_task = NULL WHERE id = ? AND current_task = ?").bind(t.lease_owner, t.id).run();
-    // The worker that died mid-upload leaves the package it landed behind
-    // — 2026-09-16, four of them at 720 MB. Out of attempts, it goes; queued
-    // again, the next lease writes over the same key and it counts once.
-    if (exhausted && t.kind === "build") await reclaimStagingPackages(env, [t.id]);
-    // The package follows its task, as it does when the worker reports the
-    // failure itself: back to waiting (queued again) or to registered with
-    // the reason. Left at "building", obsidian showed a build in progress
-    // for hours after its third lease had died (2026-09-15).
-    if (t.trust === "community" && t.kind === "build") {
-      await packageAfterFailure(env, t.name, exhausted ? "registered" : "waiting", exhausted ? `build failed on ${t.lease_owner}: ${error} (the worker stopped mid-build?)` : `${error}; queued again`, "building");
+    let error = `lease by ${t.lease_owner} expired`;
+    if (t.stop_order) {
+      const o = await env.DB.prepare("SELECT issued_by, reason FROM worker_orders WHERE id = ?").bind(t.stop_order).first<{ issued_by: string; reason: string }>();
+      error = stopError(t.lease_owner, o?.issued_by ?? "?", o?.reason ?? null, true);
     }
-    if (t.kind === "build") await settleTargets(env, t.name);
-    await event(env, "build", exhausted ? "error" : "warn", `${t.name} for ${t.arch}: ${error}${exhausted ? " — giving up" : " — back in the queue"}`, { task: t.id, worker: t.lease_owner, attempts: t.attempts });
+    await requeueLease(env, t, error, t.stop_order ?? null);
   }
   return expired.results.length;
 }
@@ -1090,6 +1059,12 @@ function poolWaits(w: WorkerRow): string | null {
   if (w.order_kinds === null || w.order_kinds === undefined) return "its image takes no orders: its host's updater replaces it";
   if (cls === "unknown") return "an error the pool does not know: it re-checks it at most once and does not restart on it — a person looks";
   return null;
+}
+
+/** The stop that fences a worker's task, from its open orders: which task, since when, and the latest it goes back to the queue. */
+export function stoppingOf(open: string | null): { task: number; order: string; by: string; since: string; until: string } | null {
+  const o = openOrdersOf(open).find((x) => x.kind === "stop-task" && typeof x.task === "number");
+  return o ? { task: o.task!, order: o.id, by: o.by, since: o.at, until: new Date(Date.parse(o.at) + LEASE_MINUTES * 60000).toISOString() } : null;
 }
 
 /** The moment a heartbeat must be younger than to count as alive: the one rule (meta.ts's WORKER_ALIVE_MINUTES), as a timestamp. */
@@ -1125,6 +1100,9 @@ export function workerView<W extends WorkerRow>(w: W, since: number, pool: Runni
     takes_orders: w.order_kinds ? (JSON.parse(w.order_kinds) as string[]) : null,
     open_orders: openOrdersOf(w.open_orders ?? null),
     drained: w.drained_at ? { at: w.drained_at, by: w.drained_by ?? null, reason: w.drain_reason ?? null } : null,
+    // A Stop its task that fences its task now (#277): from the open order the row carries, no read. Its task goes back to the queue
+    // once this worker has stopped it, and at the latest when the fenced lease ends — nothing renews it after the order.
+    stopping: stoppingOf(w.open_orders ?? null),
     not_ready_since: w.agent_status === "error" ? w.agent_error_since ?? null : null,
     pool_gave_up: auto?.gave_up ?? null,
     pool_waits: poolWaits(w),
@@ -1241,7 +1219,7 @@ export async function handleTask(id: number, env: Env): Promise<Response> {
   const brief = (r: { id: number; kind: string; status: string; error: string | null; result: string | null; lease_owner: string | null; started_at: string | null; finished_at: string | null; duration_ms: number | null }) => ({ id: r.id, kind: r.kind, status: r.status, error: r.error, result: parse(r), worker: r.lease_owner, started_at: r.started_at, finished_at: r.finished_at, duration_ms: r.duration_ms });
   const isBuild = task.kind === "build";
   const from = typeof params.review === "number" ? params.review : typeof params.task === "number" ? params.task : null;
-  const [worker, fromRow, audits, trials, projectBuilds, publishes, approval, pkg, objects] = await Promise.all([
+  const [worker, fromRow, audits, trials, projectBuilds, publishes, approval, pkg, objects, stop] = await Promise.all([
     task.lease_owner ? env.DB.prepare("SELECT id, owner, trust, trusted_by, agent, labels, hostname, version FROM build_workers WHERE id = ?").bind(task.lease_owner).first<{ id: string; owner: string | null; trust: string; trusted_by: string | null; agent: string | null; labels: string | null; hostname: string | null; version: string | null }>() : null,
     from ? env.DB.prepare("SELECT id, kind, status, owner, trust, version, finished_at FROM build_tasks WHERE id = ?").bind(from).first() : null,
     isBuild ? rel("audit", "task", task.id) : null,
@@ -1256,6 +1234,8 @@ export async function handleTask(id: number, env: Env): Promise<Response> {
       : null,
     env.DB.prepare("SELECT name, owner, url, status, category, request_id, description, license, project, targets, created_at FROM factory_packages WHERE name = ?").bind(task.name).first<Record<string, unknown>>(),
     env.DB.prepare("SELECT key, size, uploaded_at FROM staging_objects WHERE task_id = ? ORDER BY key").bind(task.id).all<{ key: string; size: number; uploaded_at: string }>(),
+    // A Stop its task that fences this lease (#277): who and when, by the order's key — the build's page says when its worker was told.
+    task.stop_order ? env.DB.prepare("SELECT id, issued_by, issued_at FROM worker_orders WHERE id = ?").bind(task.stop_order).first<{ id: string; issued_by: string; issued_at: string }>() : null,
   ]);
   // The chain this task is in — the contributor's build, the project's, the audit, the trial, the decision — and its score (score.ts), from the package's story.
   let chain: Chain | null = null, request: ReturnType<typeof requestView> = null;
@@ -1272,6 +1252,8 @@ export async function handleTask(id: number, env: Env): Promise<Response> {
   return json(
     {
       task: { ...task, params, result: parse(task) },
+      // Its lease fenced by a Stop its task (the row's stop_order, spread above): told when, back in the queue by when at the latest.
+      stopping: stop && task.status === "leased" ? { order: stop.id, by: stop.issued_by, since: stop.issued_at, until: new Date(Date.parse(stop.issued_at) + LEASE_MINUTES * 60000).toISOString() } : null,
       worker: worker ? { ...worker, labels: worker.labels ? JSON.parse(worker.labels) : null } : null,
       from: fromRow,
       audit: audits?.results.map(brief) ?? [],

@@ -76,7 +76,7 @@ describe("claims and leases", () => {
     expect(c.json.pkgbuild_path).toBe("factory/sizing/tool"); // a task made after the project's recipes left the repository
     // The task is leased: nobody else gets it; the job token heartbeats and moves the lease.
     expect((await call("POST", "/factory/claim", { arch: "aarch64" }, "omw_w2")).status).toBe(204);
-    expect((await call("POST", `/factory/tasks/${id}/heartbeat`, {}, "omw_w2")).status).toBe(409);
+    expect(await call("POST", `/factory/tasks/${id}/heartbeat`, {}, "omw_w2")).toMatchObject({ status: 409, json: { stop: true, state: "leased" } });
     const hb = await call("POST", `/factory/tasks/${id}/heartbeat`, {}, c.json.token);
     expect(hb.status).toBe(200);
     expect(hb.json.token).toMatch(/^omj\./);
@@ -104,8 +104,8 @@ describe("claims and leases", () => {
     const done = await call("POST", `/factory/tasks/${id}/complete`, { sha256: sha, filename, version: "1.0-1", duration_ms: 1200 }, c2.json.token);
     expect(done.json).toMatchObject({ task: id, status: "done" });
     expect((await call("GET", "/factory?limit=13")).json.workers.find((w: any) => w.id === "w2")).toMatchObject({ builds_done: 1, last_task: { id, kind: "build", name: "tool", version: "1.0-1", status: "done" } });
-    // The job token dies with the task.
-    expect((await call("POST", `/factory/tasks/${id}/heartbeat`, {}, c2.json.token)).status).toBe(409);
+    // The job token dies with the task — and the heartbeat says so on every call, with what became of it (#277): the worker stops the task's processes on it.
+    expect(await call("POST", `/factory/tasks/${id}/heartbeat`, {}, c2.json.token)).toMatchObject({ status: 409, json: { stop: true, state: "done" } });
     const built = await call("GET", "/factory/built");
     expect(built.json.built.some((t: any) => t.name === "tool" && t.arch === "aarch64")).toBe(true);
     // The lease is over, but who held it stays on the row: the load per worker and the seal read it later.

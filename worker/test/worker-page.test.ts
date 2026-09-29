@@ -19,9 +19,9 @@ beforeAll(async () => {
   F = await seedDashboard(env);
 });
 
-function shell(): { wtState: (w: unknown) => string; workerCounts: (ws: unknown[]) => any; wtStatus: (w: unknown) => string; wtMarks: (w: unknown) => string; wtId: (w: unknown) => string; workerName: (w: unknown) => string } {
+function shell(): { wtState: (w: unknown) => string; workerCounts: (ws: unknown[]) => any; wtStatus: (w: unknown) => string; wtMarks: (w: unknown) => string; wtId: (w: unknown) => string; workerName: (w: unknown) => string; drainedRoles: (ws: unknown[], kinds: string[]) => string[]; whereOptions: (...a: unknown[]) => any } {
   const src = HELPERS.split("__POOL_URL__").join("http://pool.test").split("__RINGS_TEXT__").join("{}").split("__WICON__").join("{}").split("__LATE_AFTER_HOURS__").join("9").split("__PROMISED_RINGS__").join("[]").split("__ARCHES__").join("[]").split("__SEVERITIES__").join("[]").split("__WORKER_ALIVE_MINUTES__").join("10");
-  return runScript(src, { pathname: "/workers", functions: ["wtState", "workerCounts", "wtStatus", "wtMarks", "wtId", "workerName"] }) as any;
+  return runScript(src, { pathname: "/workers", functions: ["wtState", "workerCounts", "wtStatus", "wtMarks", "wtId", "workerName", "drainedRoles", "whereOptions"] }) as any;
 }
 
 async function get(path: string, cookie?: string): Promise<{ status: number; text: string }> {
@@ -72,6 +72,45 @@ describe("one state per worker", () => {
     expect(wtMarks({ id: "x" })).toBe("");
     expect(wtId(w)).toContain('href="/worker/studio-review-aarch64"');
     expect(workerName(w)).toContain('href="/worker/studio-review-aarch64"');
+  });
+});
+
+describe("drain and stop on every page (#277, part 2)", () => {
+  const w = (o: Record<string, unknown>) => ({ id: "w", arch: "aarch64", side: "omarchy", labels: {}, alive: true, ready: true, current_task: null, drained: null, update: { required: false }, last_seen: "2026-09-30T12:00:00Z", open_orders: [], ...o });
+  it("marks a task being stopped, and a drain a building worker takes after its task — never as an order waiting", () => {
+    const { wtMarks, wtState } = shell();
+    const stopping = w({ current_task: 812, stopping: { task: 812, order: "wo_s", by: "alice", since: "2026-09-30T12:00:00Z", until: "2026-09-30T12:30:00Z" }, open_orders: [{ id: "wo_s", kind: "stop-task", state: "pending", by: "alice", at: "2026-09-30T12:00:00Z", task: 812 }] });
+    expect(wtState(stopping)).toBe("building");
+    expect(wtMarks(stopping)).toContain(">stopping #812<");
+    expect(wtMarks(stopping)).not.toContain("stop of its task waiting");
+    const drained = w({ current_task: 812, drained: { at: "2026-09-30T12:00:00Z", by: "m1", reason: "disk" }, open_orders: [{ id: "wo_d", kind: "drain", state: "pending", by: "m1", at: "2026-09-30T12:00:00Z" }] });
+    expect(wtState(drained)).toBe("building");
+    expect(wtMarks(drained)).toContain(">drained: takes nothing after this<");
+    expect(wtMarks(drained)).not.toContain("drain waiting");
+    expect(wtMarks(w({ drained: { at: "x", by: "m1" } }))).toBe("");
+  });
+  it("raises an error when every live pool or review worker of an architecture is drained, and not once one is resumed", () => {
+    const { drainedRoles } = shell();
+    const d = { at: "2026-09-30T12:40:00Z", by: "firemanxbr", reason: "rack move" };
+    const pool = [w({ id: "pool-a", drained: d }), w({ id: "pool-b", drained: d }), w({ id: "pool-x", arch: "x86_64" }), w({ id: "rev-a", labels: { role: "review" } }), w({ id: "old", drained: null, alive: false })];
+    const lines = drainedRoles(pool, ["project", "review"]);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^every pool worker for aarch64 is drained \(by firemanxbr, \d\d:\d\d\): sync, promote and security wait — resume one on its page$/);
+    expect(drainedRoles([pool[0], w({ id: "pool-b" })], ["project", "review"])).toEqual([]);
+    const review = [w({ id: "rev-a", labels: { role: "review" }, drained: d }), w({ id: "rev-b", labels: { role: "review" }, drained: d })];
+    expect(drainedRoles(review, ["review"])[0]).toContain("every review worker for aarch64 is drained (by firemanxbr, ");
+    expect(drainedRoles(review, ["review"])[0]).toContain("builds and audits wait");
+    // A contributor's worker is not the project's: never counted here.
+    expect(drainedRoles([w({ id: "c", side: "community", drained: d })], ["project", "review"])).toEqual([]);
+  });
+  it("offers a drained worker in the Build and project-build dialogs greyed, with the door's words", () => {
+    const { whereOptions } = shell();
+    const ws = [w({ id: "rev-a", agent: "claude-code/claude-sonnet-5", agent_status: "ok", drained: { at: "x", by: "m1", reason: "disk" } }), w({ id: "rev-b", agent: "claude-code/claude-sonnet-5", agent_status: "ok" })];
+    const o = whereOptions(ws, "aarch64", "m2", true);
+    const opt = (id: string) => o.options.find((x: any) => x.value === id);
+    expect(opt("rev-a")).toMatchObject({ disabled: true });
+    expect(opt("rev-a").text).toContain("drained by m1: disk — pin another worker, or use the shared queue");
+    expect(opt("rev-b").disabled).toBe(false);
   });
 });
 
