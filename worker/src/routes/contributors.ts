@@ -12,6 +12,7 @@ import { version, RINGS, ringsSql, sortRings } from "../meta";
 import { isTextEvidence, reclaimStagingPackages, STAGING_DAYS, STAGING_QUOTA_BYTES } from "../staging";
 import { findLeak, leakMessage } from "../leak";
 import { CHECKLIST, LICENSE, sourceHasPath } from "../request";
+import { parseTargets, settleTargets } from "../targets";
 
 /**
  * Contributors: anyone with a GitHub identity. No permission needed to
@@ -350,7 +351,7 @@ export async function handleMe(c: Contributor, env: Env): Promise<Response> {
   const workers = await env.DB.prepare("SELECT id, arch, mode, packages, labels, agent, last_seen, current_task, builds_done, builds_failed, revoked_at FROM build_workers WHERE owner = ? ORDER BY last_seen DESC").bind(c.login).all();
   const tasks = await env.DB.prepare("SELECT id, name, arch, version, status, attempts, lease_owner, duration_ms, error, staged_prefix, created_at FROM build_tasks WHERE owner = ? ORDER BY id DESC LIMIT 50").bind(c.login).all();
   const staged = await env.DB.prepare("SELECT COALESCE(SUM(size), 0) AS bytes FROM staging_objects WHERE owner = ?").bind(c.login).first<{ bytes: number }>();
-  return json({ contributor: c, packages: packages.results, workers: workers.results.map((w) => ({ ...w, packages: w.packages ? JSON.parse(w.packages as string) : null, labels: w.labels ? JSON.parse(w.labels as string) : null })), tasks: tasks.results, staging: { bytes: staged?.bytes ?? 0, quota_bytes: STAGING_QUOTA_BYTES } });
+  return json({ contributor: c, packages: packages.results.map((p) => ({ ...p, targets: parseTargets(p.targets) })), workers: workers.results.map((w) => ({ ...w, packages: w.packages ? JSON.parse(w.packages as string) : null, labels: w.labels ? JSON.parse(w.labels as string) : null })), tasks: tasks.results, staging: { bytes: staged?.bytes ?? 0, quota_bytes: STAGING_QUOTA_BYTES } });
 }
 
 const GITHUB_URL = /^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/;
@@ -442,9 +443,11 @@ async function sourceAnswers(source: string, fetcher: typeof fetch = fetch): Pro
  * the contributor is not blocked, the URL is a project's own, the source of
  * the version answers, the name and the project are not in the pool
  * already (a request of your own can be renewed; somebody else's is
- * theirs), no upstream the pool mirrors ships the name, and the checklist
- * is complete. Then the record: request.json in the pool bucket, signed,
- * written once; the registration points at it and the build can start.
+ * theirs, until it is left unmaintained or rejected), no upstream the pool
+ * mirrors ships the name, and the checklist is complete. Then the name is
+ * reserved, in one statement (#242: the name is the package), and the
+ * record written: request.json in the pool bucket, signed, written once;
+ * the registration points at it and the build can start.
  */
 export async function handleRequestPackage(c: Contributor, request: Request, env: Env, fetcher: typeof fetch = fetch): Promise<Response> {
   // A request is the caller's own (a blocked one is refused here, in the words the page greys the button with).
@@ -473,11 +476,12 @@ export async function handleRequestPackage(c: Contributor, request: Request, env
   ).bind(parsed.project, (parsed.source ?? (b.source ?? "").trim()), c.login).first<{ owner: string; name: string }>();
   if (tainted) return json({ error: `${parsed.project} was requested by ${tainted.owner}, who is blocked; a maintainer must lift that first` }, 403);
   // Who has this name, who has this project.
-  const byName = await env.DB.prepare("SELECT owner, status, project, release, blocked_at, blocked_reason FROM factory_packages WHERE name = ?").bind(name).first<{ owner: string; status: string; project: string | null; release: string | null; blocked_at: string | null; blocked_reason: string | null }>();
+  const byName = await env.DB.prepare("SELECT owner, status, detail, project, release, request_id, freed_by_review, blocked_at, blocked_reason FROM factory_packages WHERE name = ?").bind(name).first<Held & { project: string | null; release: string | null; blocked_at: string | null; blocked_reason: string | null }>();
   if (byName?.blocked_at) return json({ error: `${name} is blocked by a maintainer: ${byName.blocked_reason ?? ""}`.trim() }, 403);
   // An unmaintained name (thirty days without a build) is anyone's to take over: the registration becomes theirs, the package stays served until their build is decided.
-  if (byName && byName.owner !== c.login && byName.status !== "unmaintained") return json({ error: `${name} is ${byName.status}, requested by ${byName.owner}` }, 409);
-  const takeover = byName && byName.owner !== c.login ? byName.owner : null;
+  // A request a review rejected freed its name (#242): anyone may request it again — a package still in the pool keeps it (the approval, below), and a contributor's block frees none of theirs.
+  if (byName && byName.owner !== c.login && !nameIsFree(byName)) return json({ error: `${name} is ${byName.status}, requested by ${byName.owner}` }, 409);
+  const takeover = byName && byName.owner !== c.login ? { from: byName.owner, why: byName.status === "rejected" ? "whose request was rejected" : "who left it unmaintained" } : null;
   const byProject = await env.DB.prepare("SELECT name, owner, status, blocked_at, blocked_reason FROM factory_packages WHERE project = ? AND name != ?").bind(parsed.project, name).first<{ name: string; owner: string; status: string; blocked_at: string | null; blocked_reason: string | null }>();
   if (byProject?.blocked_at) return json({ error: `${parsed.project} is blocked by a maintainer as ${byProject.name}: ${byProject.blocked_reason ?? ""}`.trim() }, 403);
   if (byProject) return json({ error: `${parsed.project} is already in the pool as ${byProject.name} (${byProject.status}, requested by ${byProject.owner})` }, 409);
@@ -515,41 +519,105 @@ export async function handleRequestPackage(c: Contributor, request: Request, env
   const unanswered = env.SOURCE_CHECK === "off" ? null : await sourceAnswers(source, fetcher);
   if (unanswered) return json({ error: `the source does not answer: ${source} (${unanswered})` }, 400);
 
-  // Everything checked out: a build still waiting in the queue is the old request's — it leaves the queue, and the renewed request queues its own.
-  if (byName) await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = ?, finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ? AND kind = 'build' AND trust = 'community' AND status = 'queued'").bind(`superseded: the request was renewed by ${c.login}`, name).run();
-  // The record, written once; then the registration that points at it.
-  const req = await env.DB.prepare(
-    `INSERT INTO package_requests (name, owner, project, source, version, description, license, arches, checklist, detected) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id, created_at`,
-  )
-    .bind(name, c.login, parsed.project, source, tag, description, license, JSON.stringify(build), JSON.stringify(Object.fromEntries(Object.keys(CHECKLIST).map((k) => [k, true]))), JSON.stringify(detected))
-    .first<{ id: number; created_at: string }>();
-  if (!req) return json({ error: "the request could not be recorded" }, 500);
-  const key = recordKey(name, req.id, "request.json");
-  const record = await putRecord(env, key, {
-    schema: "omarchy-pool/package-request/1",
-    request: req.id, name, project: parsed.project, source, version: tag, description, license, arches: build,
-    requested_by: c.login, requested_at: req.created_at,
-    checklist: Object.fromEntries(Object.keys(CHECKLIST).map((k) => [k, { confirmed: true, text: CHECKLIST[k] }])),
-    detected, pool: version(env).version,
-  });
-  await env.DB.prepare("UPDATE package_requests SET record = ?, sha256 = ? WHERE id = ?").bind(record.key, record.sha256, req.id).run();
+  // Everything checked out: the name is the caller's from here (reserveName); the checks above read, this writes.
+  if (!(await reserveName(env, name, c.login, parsed.project, build))) {
+    const holder = await env.DB.prepare("SELECT owner, status FROM factory_packages WHERE name = ?").bind(name).first<{ owner: string; status: string }>();
+    return json({ error: `${name} is ${holder?.status ?? "reserved"}, requested by ${holder?.owner ?? "someone else"}` }, 409);
+  }
+  // The reservation undone when the request is not on the record after all: a new name is free again, a registration that was there is as it was — its owner, its word, its freed name.
+  const unreserve = async () => {
+    if (!byName) await env.DB.prepare("DELETE FROM factory_packages WHERE name = ? AND owner = ? AND request_id IS NULL").bind(name, c.login).run();
+    else await env.DB.prepare("UPDATE factory_packages SET owner = ?, status = ?, detail = ?, freed_by_review = ? WHERE name = ? AND owner = ? AND request_id IS ?").bind(byName.owner, byName.status, byName.detail, byName.freed_by_review, name, c.login, byName.request_id).run();
+  };
+  const recordRequest = async (): Promise<Response> => {
+    // A build still waiting in the queue is the old request's — it leaves the queue, and the renewed request queues its own.
+    if (byName) await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = ?, finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ? AND kind = 'build' AND trust = 'community' AND status = 'queued'").bind(`superseded: the request was renewed by ${c.login}`, name).run();
+    // The record, written once; then the registration that points at it.
+    const req = await env.DB.prepare(
+      `INSERT INTO package_requests (name, owner, project, source, version, description, license, arches, checklist, detected) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id, created_at`,
+    )
+      .bind(name, c.login, parsed.project, source, tag, description, license, JSON.stringify(build), JSON.stringify(Object.fromEntries(Object.keys(CHECKLIST).map((k) => [k, true]))), JSON.stringify(detected))
+      .first<{ id: number; created_at: string }>();
+    if (!req) {
+      await unreserve();
+      return json({ error: "the request could not be recorded" }, 500);
+    }
+    const key = recordKey(name, req.id, "request.json");
+    const record = await putRecord(env, key, {
+      schema: "omarchy-pool/package-request/1",
+      request: req.id, name, project: parsed.project, source, version: tag, description, license, arches: build,
+      requested_by: c.login, requested_at: req.created_at,
+      checklist: Object.fromEntries(Object.keys(CHECKLIST).map((k) => [k, { confirmed: true, text: CHECKLIST[k] }])),
+      detected, pool: version(env).version,
+    });
+    await env.DB.prepare("UPDATE package_requests SET record = ?, sha256 = ? WHERE id = ?").bind(record.key, record.sha256, req.id).run();
+    const row = await env.DB.prepare(
+      `INSERT INTO factory_packages (name, owner, url, arches, release, pkgbuild_path, detected, request_id, project, source, description, license, status, detail)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'registered', ?)
+       ON CONFLICT (name) DO UPDATE SET owner = excluded.owner, url = excluded.url, arches = excluded.arches, release = excluded.release, pkgbuild_path = excluded.pkgbuild_path, detected = excluded.detected,
+         request_id = excluded.request_id, project = excluded.project, source = excluded.source, description = excluded.description, license = excluded.license,
+         status = ?, detail = excluded.detail, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') RETURNING *`,
+    )
+      // A renewal keeps a staged package staged: its build stands, the record under it is new.
+      .bind(name, c.login, parsed.project, JSON.stringify(build), tag, detected.has_pkgbuild ? "PKGBUILD" : null, JSON.stringify(detected), req.id, parsed.project, source, description, license, byName?.status === "staged" ? `request renewed as #${req.id} (${tag}) by ${c.login}; the staged build stands` : `requested ${tag} by ${c.login}; press Build to build it`, byName?.status === "staged" ? "staged" : "registered")
+      .first();
+    await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('request', NULL, 'factory', 'ok', ?, ?)")
+      .bind(`${name} ${tag} requested by ${c.login} from ${parsed.project} (${license}; ${build.join(", ")}) — record ${req.id}${takeover ? ` — taken over from ${takeover.from}, ${takeover.why}` : ""}`, JSON.stringify({ request: req.id, name, owner: c.login, project: parsed.project, source, version: tag, license, arches: build, skipped: upstream, record: recordUrl(env, record.key), taken_over_from: takeover?.from ?? null }))
+      .run();
+    // The build starts by itself: into the shared queue, the best idle shared worker first, the contributor's own worker at once. A renewal that keeps the version of a staged build keeps that build: nothing to queue.
+    const keepsStaged = byName?.status === "staged" && (byName.release ?? "") === tag;
+    const queuedNow = keepsStaged ? { tasks: [], building: [], arches: [], pkgbuild_ref: "", pinned_to: null, lessons: {}, hint: null, queue: {} } as Queued : await queueBuilds(env, c, name, {});
+    const targets = (await settleTargets(env, name))[name] ?? {};
+    return json({ package: row ? { ...row, targets } : row, targets, request: { id: req.id, record: recordUrl(env, record.key), signature: record.signed ? recordUrl(env, `${record.key}.sig`) : null, sha256: record.sha256 }, skipped: upstream, build: queuedNow instanceof Response ? { error: (await queuedNow.json<{ error: string }>()).error } : queuedNow, next: `queued: the shared workers build it into your staging workspace (a worker of yours takes it at once); follow it on /user/${c.login}` }, byName ? 200 : 201);
+  };
+  try {
+    return await recordRequest();
+  } catch (e) {
+    // A name reserved a moment ago and never written: free again, or back to whoever held it.
+    await unreserve();
+    throw e;
+  }
+}
+
+/** A registration as the name's rule reads it: whose, its word, and what freed it. */
+interface Held { owner: string; status: string; detail: string | null; request_id: number | null; freed_by_review: number | null }
+
+/**
+ * Whether a registration's name is free for anyone to request: left
+ * unmaintained, or `rejected` by a review that freed it (#242) — a
+ * contributor's block writes `rejected` on their registrations too, and
+ * holds their names (docs/GOVERNANCE.md, *Blocking*). FREE_SQL is the same
+ * rule for the reservation's statement.
+ */
+export function nameIsFree(r: Pick<Held, "status" | "freed_by_review">): boolean {
+  return r.status === "unmaintained" || (r.status === "rejected" && r.freed_by_review !== null);
+}
+const FREE_SQL = "(factory_packages.status = 'unmaintained' OR (factory_packages.status = 'rejected' AND factory_packages.freed_by_review IS NOT NULL))";
+
+/**
+ * A request reserves its name, in one statement (#242: the name is the
+ * package): a new name is inserted as the caller's registration; an
+ * existing one is taken only while it is the caller's to take — their own
+ * (a renewal), or free (nameIsFree) — and not blocked. Taking it moves it
+ * out of the free set in the same statement — `registered`, no longer
+ * freed by anything — so the next request for it finds it held, not free:
+ * two requests for one name at the same moment, a new name or a freed one,
+ * and one of them has it; the other gets false and is told whose it is.
+ * The registration is written whole once the request is on the record.
+ */
+export async function reserveName(env: Env, name: string, login: string, url: string, arches: string[]): Promise<boolean> {
   const row = await env.DB.prepare(
-    `INSERT INTO factory_packages (name, owner, url, arches, release, pkgbuild_path, detected, request_id, project, source, description, license, status, detail)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'registered', ?)
-     ON CONFLICT (name) DO UPDATE SET owner = excluded.owner, url = excluded.url, arches = excluded.arches, release = excluded.release, pkgbuild_path = excluded.pkgbuild_path, detected = excluded.detected,
-       request_id = excluded.request_id, project = excluded.project, source = excluded.source, description = excluded.description, license = excluded.license,
-       status = ?, detail = excluded.detail, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') RETURNING *`,
+    `INSERT INTO factory_packages (name, owner, url, arches, status, detail) VALUES (?, ?, ?, ?, 'registered', ?)
+     ON CONFLICT (name) DO UPDATE SET owner = excluded.owner,
+        status = CASE WHEN ${FREE_SQL} THEN 'registered' ELSE factory_packages.status END,
+        detail = CASE WHEN ${FREE_SQL} THEN excluded.detail ELSE factory_packages.detail END,
+        freed_by_review = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      WHERE factory_packages.blocked_at IS NULL AND (factory_packages.owner = excluded.owner OR ${FREE_SQL})
+     RETURNING owner`,
   )
-    // A renewal keeps a staged package staged: its build stands, the record under it is new.
-    .bind(name, c.login, parsed.project, JSON.stringify(build), tag, detected.has_pkgbuild ? "PKGBUILD" : null, JSON.stringify(detected), req.id, parsed.project, source, description, license, byName?.status === "staged" ? `request renewed as #${req.id} (${tag}) by ${c.login}; the staged build stands` : `requested ${tag} by ${c.login}; press Build to build it`, byName?.status === "staged" ? "staged" : "registered")
-    .first();
-  await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('request', NULL, 'factory', 'ok', ?, ?)")
-    .bind(`${name} ${tag} requested by ${c.login} from ${parsed.project} (${license}; ${build.join(", ")}) — record ${req.id}${takeover ? ` — taken over from ${takeover}, who left it unmaintained` : ""}`, JSON.stringify({ request: req.id, name, owner: c.login, project: parsed.project, source, version: tag, license, arches: build, skipped: upstream, record: recordUrl(env, record.key), taken_over_from: takeover }))
-    .run();
-  // The build starts by itself: into the shared queue, the best idle shared worker first, the contributor's own worker at once. A renewal that keeps the version of a staged build keeps that build: nothing to queue.
-  const keepsStaged = byName?.status === "staged" && (byName.release ?? "") === tag;
-  const queuedNow = keepsStaged ? { tasks: [], building: [], arches: [], pkgbuild_ref: "", pinned_to: null, lessons: {}, hint: null, queue: {} } as Queued : await queueBuilds(env, c, name, {});
-  return json({ package: row, request: { id: req.id, record: recordUrl(env, record.key), signature: record.signed ? recordUrl(env, `${record.key}.sig`) : null, sha256: record.sha256 }, skipped: upstream, build: queuedNow instanceof Response ? { error: (await queuedNow.json<{ error: string }>()).error } : queuedNow, next: `queued: the shared workers build it into your staging workspace (a worker of yours takes it at once); follow it on /user/${c.login}` }, byName ? 200 : 201);
+    .bind(name, login, url, JSON.stringify(arches), `reserved by ${login}: the request is being written`)
+    .first<{ owner: string }>();
+  return row?.owner === login;
 }
 
 /**
@@ -703,6 +771,7 @@ export async function queueBuilds(env: Env, c: Contributor, name: string, ask: Q
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('enqueue', NULL, 'factory', 'ok', ?, ?)")
     .bind(`${name}${version ? " " + version : ""}: ${ids.length} community build(s) queued by ${c.login} for ${out.arches.join(", ")}${pinned ? ` on ${pinned}` : " — the shared queue"} — results go to staging`, JSON.stringify({ name, owner: c.login, arches: out.arches, tasks: ids, pkgbuild_ref: ref, pinned_to: pinned, lessons, hint, building, queue }))
     .run();
+  await settleTargets(env, name);
   return out;
 }
 
@@ -735,6 +804,7 @@ export async function handleDequeueBuild(c: Contributor, name: string, id: numbe
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('enqueue', NULL, 'factory', 'ok', ?, ?)")
     .bind(`${name} (${t.arch}): build ${id} taken out of the queue by ${c.login}`, JSON.stringify({ name, task: id, arch: t.arch, by: c.login }))
     .run();
+  await settleTargets(env, name);
   return json({ task: id, status: "cancelled", by: c.login });
 }
 
@@ -827,7 +897,7 @@ export async function handleListPackages(env: Env): Promise<Response> {
     `SELECT p.*, (SELECT COUNT(*) FROM build_tasks t WHERE t.name = p.name AND t.status = 'staged') AS staged_builds
        FROM factory_packages p ORDER BY updated_at DESC LIMIT 200`,
   ).all();
-  return json({ packages: rows.results.map((r) => ({ ...r, arches: JSON.parse(r.arches as string), detected: r.detected ? JSON.parse(r.detected as string) : null, landed: landed(r.status as string) })) }, 200, { "cache-control": "public, max-age=30" });
+  return json({ packages: rows.results.map((r) => ({ ...r, arches: JSON.parse(r.arches as string), targets: parseTargets(r.targets), detected: r.detected ? JSON.parse(r.detected as string) : null, landed: landed(r.status as string) })) }, 200, { "cache-control": "public, max-age=30" });
 }
 
 // ---------- staging uploads (worker token, own task only) ----------
@@ -998,6 +1068,7 @@ export async function handleStagingDelete(c: Contributor, taskId: number, env: E
              AND NOT EXISTS (SELECT 1 FROM build_tasks t WHERE t.kind = 'build' AND t.status = 'staged' AND t.name = factory_packages.name AND t.id != ?)`,
       ).bind(`staging dropped by ${c.login}`, task.name, taskId),
     ]);
+    await settleTargets(env, task.name);
   }
   return json({ task: taskId, deleted: keys.length });
 }

@@ -18,6 +18,7 @@
  */
 import type { Env } from "./index";
 import { standsSql } from "./routes/story";
+import { settleTargets } from "./targets";
 
 const SHARED_AFTER_DAYS = 14;
 const UNMAINTAINED_AFTER_DAYS = 30;
@@ -67,6 +68,7 @@ export async function checkUpdates(env: Env, now = new Date(), fetcher: typeof f
       env.DB.prepare("UPDATE factory_packages SET status = 'unmaintained', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(`no worker built the last bump in ${UNMAINTAINED_AFTER_DAYS} days; bumps stop until the owner builds again or a maintainer removes the registration`, name),
       env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('bump', NULL, 'factory', 'warn', ?, ?)").bind(`${name} is unmaintained: no worker built its bump in ${UNMAINTAINED_AFTER_DAYS} days`, JSON.stringify({ name, days: UNMAINTAINED_AFTER_DAYS })),
     ]);
+    await settleTargets(env, name);
     log.push(`${name}: unmaintained`);
   }
 
@@ -105,6 +107,7 @@ export async function checkUpdates(env: Env, now = new Date(), fetcher: typeof f
       env.DB.prepare("UPDATE factory_packages SET status = 'waiting', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(`${tag} released upstream; a build is queued for ${p.owner}'s worker (anyone's after ${SHARED_AFTER_DAYS} days)`, p.name),
       env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('bump', NULL, 'factory', 'ok', ?, ?)").bind(`${p.name}: upstream ${tag} (approved ${approved.version ?? "?"}); build queued for ${p.owner}'s worker on ${arches.join(", ")}`, JSON.stringify({ name: p.name, tag, approved: approved.version, arches, owner: p.owner, shared_after: sharedAfter })),
     ]);
+    await settleTargets(env, p.name);
     log.push(`${p.name}: ${tag} queued`);
   }
   await env.DB.prepare("INSERT INTO settings (key, value) VALUES ('updates_checked', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')").bind(day).run();

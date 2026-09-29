@@ -150,10 +150,13 @@ export interface Fixture {
   projectTask: number;
   /** A later staged community build of `mine`, undecided: probe "build by the project" and "approve" (409: a contributor's build) on it. */
   stagedTask: number;
-  /** Another one, to reject: an act that changes the fixture runs on this row. */
+  /** The staged build of alice's `disposable`, to reject: an act that changes the fixture runs on this row — a package of its own, since a decision covers the whole package (#242). */
   disposableTask: number;
-  /** A third, for a second page whose act rejects a row of its own. */
+  /** The staged build of alice's `spare`, for a second page whose act rejects a row of its own. */
   spareTask: number;
+  /** "disposable" and "spare", alice's two packages with one staged build each (F.disposableTask, F.spareTask). */
+  disposablePkg: string;
+  sparePkg: string;
   /** "carol", blocked by m1: the brake's table has a row, and m2 is the other maintainer who could lift it. */
   blockedContributor: string;
   /** "hers", carol's package, blocked by m1 before she was. */
@@ -162,7 +165,7 @@ export interface Fixture {
   outsider: string;
   /** "lost", dave's package: approved by m1, its publish job failed on w1 — the registry still says approved; the row of GET /factory/approvals says `publish_status: "failed"`. */
   failedPkg: string;
-  /** "pulled", dave's other package: approved by m1, then blocked by m2 with the approval standing — the row says `blocked_at`, its publish job is cancelled. */
+  /** "pulled", dave's other package: approved by m1, then blocked by m2 with the approval standing (a block from before #242; the door withdraws it now) — the row says `blocked_at`, its publish job is cancelled. */
   pulledPkg: string;
   /** The id of the one done pool job of each kind — sync, promote, rollback, render, health, gc, security, verify, relayout, enqueue, and the three on a build: audit, trial, publish (ours', run through the API) — its params as the brain queues them and its result as work.rs posts it: what the Pipeline's table words. */
   jobs: Record<string, number>;
@@ -261,6 +264,15 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     anchor: [],
     script: ["function approvalWhere(", 'a.publish_status === "failed" || a.publish_status === "cancelled"', 'word: "publishing"'],
     reads: [{ path: "/api/v1/factory/approvals", fields: ["approvals.0.rings", "approvals.0.blocked_at", "approvals.0.publish_status"] }],
+    visible: EVERYONE,
+  },
+  {
+    // A package's targets (targets.ts): one chip per architecture in the server's word — built, building, not supported (dashed), waiting — drawn the same by Review, the package page and a person's page (targetChips); a decision's architectures, as one line (archesOf). "marcelo, on x86_64", never "the x86_64 package".
+    id: "shell.target-chips",
+    page: "/",
+    anchor: [],
+    script: ["var TARGET_WORD = ", "function targetChips(targets)", '"· not supported"', '" dashed"', "function archesOf(a)"],
+    reads: [{ path: `/api/v1/factory/packages/${F.factoryPkg}/story`, fields: ["targets", "targets.x86_64.status", "targets.x86_64.task"] }],
     visible: EVERYONE,
   },
   {
