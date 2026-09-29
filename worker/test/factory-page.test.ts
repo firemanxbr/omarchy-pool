@@ -27,7 +27,7 @@ import { forgeOf, handleSourceRead, normaliseUrl, readSource, READS_PER_HOUR, sp
 import { parseProjectUrl } from "../src/routes/contributors";
 import { handleFactory } from "../src/routes/factory";
 import { BROWSE_NAME } from "../src/routes/browse";
-import { ownScriptOf, runScript, scriptOf, seedDashboard, type Fixture, type Ran } from "./fixture";
+import { declared, ownScriptOf, runScript, scriptOf, seedDashboard, type Fixture, type Ran } from "./fixture";
 
 // Every page module's source, as text: no page types a name rule of its own.
 const SOURCES = import.meta.glob("../src/pages/*.ts", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
@@ -430,6 +430,22 @@ describe("the page", () => {
     expect(d.nodes["#t-shipped-n"].textContent).toBe(`${reg.filter((p) => p.landed).length}+`);
     expect(d.nodes["#t-shipped-n"].title).toBe(`at least: the registry read here is its newest ${reg.length} requests`);
     expect(d.nodes["#t-shipped-s"].innerHTML).toMatch(/^approved by a maintainer, from \d+\+ contributors$/);
+  });
+
+  it("names a worker and its agent whole, the agent under the name when both do not fit: never \"AAR…\" beside \"CLAUDE-SONNET…\" (#282)", async () => {
+    // The v1.0.2 production check (2026-09-29): at 1280, the card's two labels shared one line, each cut to what was left of it.
+    const d = await run({ functions: ["workerRowOf"] });
+    const w = { id: "m1-aarch64-builder-hetzner-aarch64-k3v9", owner: "m1", arch: "aarch64", agent: "claude-code/claude-sonnet-4-5-20250929", alive: true, ready: true, current_task: null };
+    const top = /<div class="fx-wtop">([\s\S]*?)<\/div>/.exec(d.workerRowOf(w))![1];
+    // The name is a link to the worker's page (#277), whole on hover as before.
+    expect(top).toBe('<span><a class="mono" href="/worker/m1-aarch64-builder-hetzner-aarch64-k3v9" title="m1-aarch64-builder-hetzner-aarch64-k3v9">aarch64-builder-hetzner</a> · aarch64</span><span title="claude-code/claude-sonnet-4-5-20250929">claude-sonnet-4-5-20250929</span>');
+    const html = await page("/factory");
+    // The line wraps between the two, never inside one: each is cut only when it alone is wider than the card.
+    expect(declared(html, ".fx-wtop")).toMatchObject({ display: "flex", "flex-wrap": "wrap", "justify-content": "space-between" });
+    expect(declared(html, ".fx-wtop > span")).toMatchObject({ "max-width": "100%", overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" });
+    // Wrapped onto a line of its own, the agent keeps to the right edge, where the rows that fit on one line have it (the #282 review): alone
+    // on its line, space-between would have put it on the left.
+    expect(declared(html, ".fx-wtop > span + span")).toMatchObject({ "margin-left": "auto" });
   });
 
   it("draws a live worker whose agent did not answer as not ready, with the agent's error — never idle, waiting for work — and idle again once it answers (#273)", async () => {

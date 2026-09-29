@@ -1,7 +1,7 @@
 import { json, readJson, type Env } from "../index";
 import { writeAttestation, recipesDir } from "./seal";
 import { isRepoArch } from "../r2";
-import type { WorkerIdentity } from "./contributors";
+import { viaOf, type Contributor, type WorkerIdentity } from "./contributors";
 import { issueJobToken, scopesFor, type JobClaims } from "../jobtoken";
 import { isCategory } from "../categories";
 import { recordEvidence, vetSummary } from "../record";
@@ -32,7 +32,7 @@ import {
  * A lease that expires (worker died, build hung) goes back to the queue on
  * the scheduler's next tick. Maintainers (their token) or the enqueue job:
  *
- *   POST /factory/enqueue               {name, arches?, pkgbuild_ref, reason, version?, priority?}
+ *   POST /factory/enqueue               {name, arches?, pkgbuild_ref, reason, version?, priority?, publish?} — by hand, publish:false only (#284)
  *   POST /factory/tasks/:id/cancel
  *
  * Read:
@@ -140,14 +140,27 @@ function nothingToBuild(skipped: { arch: string; source: string; version: string
   );
 }
 
+/**
+ * The project's dry runs (#284): a build of its own that publishes nothing
+ * and is no review build — by hand, a maintainer's only build. Never what
+ * the factory built (`/factory/built`), and never the same task as a build
+ * that publishes (ENQUEUE_DUP_SQL).
+ */
+const dryRun = (t: string) => `(${t}.trust = 'project' AND ${t}.publish = 0 AND json_extract(${t}.params, '$.review') IS NULL)`;
+/**
+ * An identical task already queued or running: the same recipe, and the same
+ * `publish` — a maintainer's dry run never stands in for the enqueue job's
+ * build of a recipe on main, nor that build for a dry run (#284). Led by the
+ * name, (name, arch, id), as before; `+` keeps the planner there.
+ */
+export const ENQUEUE_DUP_SQL = "SELECT id FROM build_tasks WHERE name = ? AND arch = ? AND pkgbuild_ref = ? AND status IN ('queued', 'leased') AND +kind = 'build' AND +trust = 'project' AND +publish = ? LIMIT 1";
+
 /** Queue one task per architecture unless an identical one is already queued or running. */
 async function enqueue(env: Env, t: { name: string; arches: string[]; pkgbuild_ref: string; reason: string; version?: string | null; priority?: number; publish?: boolean }): Promise<number[]> {
   const ids: number[] = [];
   for (const arch of t.arches) {
-    const dup = await env.DB.prepare(
-      "SELECT id FROM build_tasks WHERE name = ? AND arch = ? AND pkgbuild_ref = ? AND status IN ('queued', 'leased') LIMIT 1",
-    )
-      .bind(t.name, arch, t.pkgbuild_ref)
+    const dup = await env.DB.prepare(ENQUEUE_DUP_SQL)
+      .bind(t.name, arch, t.pkgbuild_ref, t.publish === false ? 0 : 1)
       .first<{ id: number }>();
     if (dup) {
       ids.push(dup.id);
@@ -165,16 +178,27 @@ async function enqueue(env: Env, t: { name: string; arches: string[]; pkgbuild_r
 
 // ---------- maintainers / pipeline ----------
 
-export async function handleEnqueue(request: Request, env: Env): Promise<Response> {
+/**
+ * POST /factory/enqueue — the project's build of a recipe, for its
+ * architectures. The enqueue job (`hand` null: its token carries
+ * factory:write) queues the recipes on main, and those publish into edge.
+ * A maintainer by hand — the session or an `omc_` token — queues a dry run
+ * only (#284): `publish: false`, built and reported, never published. What
+ * publishes comes from the enqueue job or from an approval, and an approval
+ * takes a passkey; so a build by hand that would publish is refused
+ * (`dry_run_only`) before anything is read.
+ */
+export async function handleEnqueue(request: Request, env: Env, hand: Contributor | null): Promise<Response> {
   const b = await readJson<{ name?: string; arches?: unknown; pkgbuild_ref?: string; reason?: string; version?: string; priority?: number; override?: boolean; publish?: boolean }>(request);
   if (b instanceof Response) return b;
   if (!b.name || !b.pkgbuild_ref || !b.reason) return json({ error: "name, pkgbuild_ref and reason are required" }, 400);
+  if (hand && b.publish !== false) return json({ error: `a build queued by hand is a dry run: send "publish": false — it builds and reports, and publishes nothing. What publishes comes from the enqueue job (a recipe on main) or from an approval, confirmed with a passkey; nothing was queued`, code: "dry_run_only" }, 403);
   const arches = parseArches(b.arches);
   const { build, skipped } = splitByUpstream(await providedBy(env, b.name), arches, b.override);
   if (!build.length) return nothingToBuild(skipped);
   const tasks = await enqueue(env, { name: b.name, arches: build, pkgbuild_ref: b.pkgbuild_ref, reason: b.reason, version: b.version ?? null, priority: b.priority, publish: b.publish });
   const note = (skipped.length ? `; ${skipped.map((s) => `${s.arch} skipped, ${s.source} ships ${s.version}`).join(", ")}` : "") + (b.publish === false ? "; dry run, nothing will be published" : "");
-  await event(env, "enqueue", "ok", `${b.name}${b.version ? " " + b.version : ""}: ${tasks.length} build task(s) queued for ${build.join(", ")} (${b.reason})${note}`, { name: b.name, arches: build, skipped, pkgbuild_ref: b.pkgbuild_ref, reason: b.reason, tasks });
+  await event(env, "enqueue", "ok", `${b.name}${b.version ? " " + b.version : ""}: ${tasks.length} build task(s) queued for ${build.join(", ")}${hand ? ` by ${hand.login}` : ""} (${b.reason})${note}`, { name: b.name, arches: build, skipped, pkgbuild_ref: b.pkgbuild_ref, reason: b.reason, tasks, ...(hand ? { by: hand.login, via: viaOf(request) } : {}) });
   return json({ tasks, arches: build, skipped }, 201);
 }
 
@@ -619,7 +643,8 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   // The job's own credential: exactly the routes this task needs, until the lease ends.
   const params = task.params ? (JSON.parse(task.params) as Record<string, unknown>) : {};
   const expires = Math.floor(Date.now() / 1000) + LEASE_MINUTES * 60;
-  const token = await issueJobToken(env, { t: task.id, k: task.kind, s: scopesFor(task.kind, task.id, task.trust, params), e: expires, w: workerId });
+  // A dry run's (publish 0, #284) writes nothing to the pool nor a ring: scopesFor reads the row's publish.
+  const token = await issueJobToken(env, { t: task.id, k: task.kind, s: scopesFor(task.kind, task.id, task.trust, params, task.publish), e: expires, w: workerId });
   // A contributor's build lands in their workspace: how full it is travels
   // with the claim, so a worker whose owner is at the quota fails the task
   // at once instead of building for an hour into a 413.
@@ -668,7 +693,7 @@ export async function handleHeartbeat(id: number, env: Env, actor: Actor): Promi
   // The lease moved; so does the job's credential.
   const params = task.params ? (JSON.parse(task.params) as Record<string, unknown>) : {};
   const expires = Math.floor(Date.now() / 1000) + LEASE_MINUTES * 60;
-  const token = await issueJobToken(env, { t: task.id, k: task.kind, s: scopesFor(task.kind, task.id, task.trust, params), e: expires, w: who });
+  const token = await issueJobToken(env, { t: task.id, k: task.kind, s: scopesFor(task.kind, task.id, task.trust, params, task.publish), e: expires, w: who });
   return json({ task: id, lease_expires_at: until, token, token_expires_at: new Date(expires * 1000).toISOString() });
 }
 
@@ -1141,15 +1166,16 @@ export async function pruneWorkers(env: Env): Promise<number> {
 
 /**
  * Every (name, arch, version) the factory has a task for, with the latest
- * status. The enqueue job (by hand, for the sizing recipes) reconciles the
- * recipes on main against this.
+ * status. The enqueue job reconciles the recipes on main against this. A
+ * dry run is no build of the version (#284): listed, a maintainer's sizing
+ * run of a recipe on main would keep the enqueue job from ever queuing the
+ * build that publishes it.
  */
+export const BUILT_SQL = `SELECT name, arch, version, status, pkgbuild_ref, id FROM build_tasks t
+      WHERE kind = 'build' AND status != 'cancelled' AND NOT ${dryRun("t")} AND id = (SELECT MAX(id) FROM build_tasks u WHERE u.kind = 'build' AND u.name = t.name AND u.arch = t.arch AND u.version IS t.version AND u.status != 'cancelled' AND NOT ${dryRun("u")})
+      ORDER BY name, arch, id`;
 export async function handleBuilt(env: Env): Promise<Response> {
-  const rows = await env.DB.prepare(
-    `SELECT name, arch, version, status, pkgbuild_ref, id FROM build_tasks t
-      WHERE kind = 'build' AND status != 'cancelled' AND id = (SELECT MAX(id) FROM build_tasks u WHERE u.kind = 'build' AND u.name = t.name AND u.arch = t.arch AND u.version IS t.version AND u.status != 'cancelled')
-      ORDER BY name, arch, id`,
-  ).all();
+  const rows = await env.DB.prepare(BUILT_SQL).all();
   return json({ built: rows.results }, 200, { "cache-control": "no-store" });
 }
 

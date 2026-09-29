@@ -84,13 +84,17 @@ const PACKAGE_CSS = String.raw`
   .pkg-stage-t b { font: 600 15px var(--font-display); letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .pkg-stage-t .op-box { width: 26px; height: 26px; }
   .pkg-stage-t .op-box { color: var(--st); border-color: var(--st); }
-  .pkg-stage-s { font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* A stage's line wraps onto a second line before it is cut: "in review · rebuild staged" read "ready for a maintai…" at 1280 (#282). */
+  .pkg-stage-s { font-size: 12.5px; color: var(--muted); overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; }
   .pkg-stage-a { display: flex; gap: 4px; align-items: center; min-height: 16px; font-size: 11.5px; color: var(--dim); }
   .pkg-stage-a > span { margin-left: 4px; }
   .pkg-panel { border: 1px solid var(--line); border-top: 0; background: var(--panel); padding: 18px; display: grid; gap: 16px; min-width: 0; }
   .pkg-ph { display: flex; justify-content: space-between; align-items: center; gap: 10px 16px; flex-wrap: wrap; }
-  /* A panel's title and its tag: the tag goes under the title when one row cannot hold both (waiting for a native x86_64 worker, on a phone). */
+  /* A panel's title and its tag: the tag goes under the title when one row cannot hold both (waiting for a native x86_64 worker, on a phone),
+     and a tag wider than the panel wraps inside its own box: Review's word and the native wait, "in review · waiting for a native x86_64
+     worker", is wider than a phone's panel on one line. */
   .pkg-ph > span { display: flex; align-items: center; gap: 6px 10px; flex-wrap: wrap; min-width: 0; } .pkg-ph h3 { font: 600 17px var(--font-display); }
+  .pkg-ph > span > .op-pill { max-width: 100%; white-space: normal; }
   .pkg-who { display: flex; gap: 6px; flex-wrap: wrap; }
   .pkg-whoc { display: inline-flex; align-items: center; gap: 7px; min-width: 0; border: 1px solid var(--line); background: var(--bg-deep); padding: 2px 9px 2px 3px; font-size: 12.5px; color: var(--text); }
   .pkg-whoc .r { color: var(--dim); } .pkg-whoc > a:not(.avatar) { color: var(--text); } .pkg-whoc > a:not(.avatar):hover { color: var(--green); } .pkg-whoc .avatar { width: 20px; height: 20px; font-size: 8.5px; }
@@ -148,20 +152,31 @@ const PACKAGE_CSS = String.raw`
   /* Dependencies: required-by on the left, depends-on on the right, the package between, drawn by the SVG connectors; one column on a phone. */
   .pkg-legend { display: flex; gap: 6px 14px; flex-wrap: wrap; font-size: 12px; color: var(--dim); }
   .pkg-legend span { display: flex; align-items: center; gap: 6px; } .pkg-legend .ln { width: 14px; height: 2px; }
-  .pkg-graph { display: grid; grid-template-columns: minmax(0, 1fr) 64px auto 64px minmax(0, 1.2fr); align-items: start; }
+  /* The side columns get the width first: the package between is as wide as its name up to 160px, then its name wraps (#282). The columns,
+     the connectors and the package between all sit in the middle of their row, each column padded to the connectors' height above and below:
+     the connectors meet at the middle of the package between however many lines its name takes. */
+  .pkg-graph { display: grid; grid-template-columns: minmax(0, 1fr) 64px fit-content(160px) 64px minmax(0, 1.2fr); align-items: start; }
   .pkg-graph > .op-label { margin-bottom: 6px; } .pkg-graph > .gl { grid-area: 1 / 1; } .pkg-graph > .gr { grid-area: 1 / 5; }
   .pkg-graph > .pkg-gcol.l { grid-area: 2 / 1; } .pkg-graph > svg.l { grid-area: 2 / 2; } .pkg-graph > .pkg-center { grid-area: 2 / 3; } .pkg-graph > svg.r { grid-area: 2 / 4; } .pkg-graph > .pkg-gcol.r { grid-area: 2 / 5; }
+  .pkg-graph > .pkg-gcol, .pkg-graph > svg, .pkg-graph > .pkg-center { align-self: center; }
   .pkg-gcol { display: grid; gap: 2px; min-width: 0; }
-  .pkg-node { height: 24px; border: 1px solid var(--line); background: var(--bg-deep); display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 8px; font: 12px var(--font-mono); color: var(--text); min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pkg-node { height: 24px; border: 1px solid var(--line); background: var(--bg-deep); display: flex; align-items: center; gap: 6px; padding: 0 8px; font: 12px var(--font-mono); color: var(--text); min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   a.pkg-node:hover { border-color: var(--green); }
-  .pkg-node > span { display: flex; align-items: center; gap: 6px; min-width: 0; }
-  /* The name keeps its width and the version is cut: a long version (glibc's 2.44+r50+g1848099f063e-1) drew the dependency as "g…" (#274). A name longer than the node is cut last. With less than three characters left, the version wraps onto a line the box clips, never a stray digit without its ellipsis. */
-  .pkg-node > span:has(> .nm) { flex-wrap: wrap; align-content: flex-start; row-gap: 8px; height: 16px; overflow: hidden; }
-  .pkg-node .nm { flex: 0 0 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 16px; } .pkg-node .v { flex: 1 1 3ch; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 11px; line-height: 16px; color: var(--dim); white-space: nowrap; }
-  .pkg-node .t { font-size: 11px; white-space: nowrap; flex: none; } .pkg-node .t.decl { color: var(--blue); } .pkg-node .t.so { color: var(--green); } .pkg-node .t.none { color: var(--dim); }
+  /* The name keeps its width; the version and the tag give way first (#274, #282). Name, version and tag sit on one line the box clips: what
+     does not fit wraps onto the hidden line whole — the tag, and the version once less than three characters of it would show, never a stray
+     digit without its ellipsis — and the version is cut with an ellipsis. A name longer than the node is cut last, in the middle: its head
+     gives way and its tail stays (.nt, the part after the prefix it shares with another name in the graph), so aarch64-linux-gnu-gcc and
+     aarch64-linux-gnu-linux-api-headers never read the same "aarch64-linux-g…". The node's title says it all. The head is cut to a whole number
+     of characters — the box's width less the tail's (--t, its characters), rounded down to a character — so the ellipsis meets the tail
+     without the blank of a part-character, which read like a space in a name: "aarch64-linux… binutils" (the #282 review). */
+  .pkg-node > .l { container-type: inline-size; flex: 1 1 auto; display: flex; flex-wrap: wrap; align-content: flex-start; column-gap: 8px; row-gap: 8px; height: 16px; min-width: 0; overflow: hidden; line-height: 16px; }
+  .pkg-node .nm { flex: 0 0 auto; max-width: 100%; display: flex; min-width: 0; white-space: nowrap; }
+  .pkg-node .nh { flex: 0 1 auto; min-width: 1ch; max-width: calc(round(down, 100cqw - var(--t, 0) * 1ch, 1ch) + .5px); overflow: hidden; text-overflow: ellipsis; } .pkg-node .nt { flex: none; max-width: calc(100% - 1ch); overflow: hidden; text-overflow: ellipsis; }
+  .pkg-node .v { flex: 1 1 3ch; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 11px; color: var(--dim); white-space: nowrap; }
+  .pkg-node .t { font-size: 11px; white-space: nowrap; flex: none; max-width: 100%; margin-left: auto; overflow: hidden; } .pkg-node .t.decl { color: var(--blue); } .pkg-node .t.so { color: var(--green); } .pkg-node .t.none { color: var(--dim); }
   .pkg-node.adv { border-color: color-mix(in oklab, var(--red) 55%, var(--line)); } .pkg-node .dot { width: 7px; height: 7px; flex: none; background: var(--red); }
   .pkg-node.gone { color: var(--dim); } button.pkg-node { width: 100%; color: var(--green); cursor: pointer; text-align: left; } button.pkg-node:hover { border-color: var(--green); }
-  .pkg-center { height: 36px; display: grid; place-items: center; padding: 0 18px; background: var(--green); color: var(--green-ink); font: 600 14px var(--font-display); white-space: nowrap; } .pkg-center.fail { background: var(--red); }
+  .pkg-center { min-height: 36px; display: grid; place-items: center; padding: 6px 14px; background: var(--green); color: var(--green-ink); font: 600 14px/1.25 var(--font-display); text-align: center; overflow-wrap: anywhere; } .pkg-center.fail { background: var(--red); }
   .pkg-graph svg { display: block; overflow: visible; }
   .pkg-gfoot { display: flex; gap: 8px 24px; flex-wrap: wrap; font-size: 12.5px; color: var(--dim); margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
   .pkg-gfoot b { font-weight: 400; color: var(--text); overflow-wrap: anywhere; }
@@ -171,7 +186,7 @@ const PACKAGE_CSS = String.raw`
   .pkg-more ul { list-style: none; margin: 8px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr)); gap: 3px 20px; font-size: 12.5px; }
   .pkg-more li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .pkg-more li a { color: var(--text); } .pkg-more li a:hover { color: var(--green); } .pkg-more li span { color: var(--dim); }
   .pkg-more table { margin-top: 8px; }
-  @media (max-width: 719px) { .pkg-graph { grid-template-columns: minmax(0, 1fr); } .pkg-graph > * { grid-area: auto !important; } .pkg-graph > svg { display: none; } .pkg-graph > .pkg-gcol { padding-top: 0 !important; } .pkg-graph > .pkg-center { justify-self: start; margin: 12px 0 !important; } .pkg-graph > .gr { margin-top: 4px; } }
+  @media (max-width: 719px) { .pkg-graph { grid-template-columns: minmax(0, 1fr); } .pkg-graph > * { grid-area: auto !important; } .pkg-graph > svg { display: none; } .pkg-graph > .pkg-gcol { padding-block: 0 !important; } .pkg-graph > .pkg-center { justify-self: start; margin: 12px 0 !important; } .pkg-graph > .gr { margin-top: 4px; } }
   .pkg-files-t { font: inherit; }
   .pkg-files-h { width: 100%; display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 16px; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; text-align: left; }
   .pkg-files-h:hover { background: var(--panel-2); } .pkg-files-h .pkg-h small { font-size: 12.5px; } .pkg-files-h > span:last-child { font-size: 12.5px; color: var(--green); }
@@ -363,16 +378,32 @@ const PACKAGE_SCRIPT = String.raw`
   // A standing approval whose publish is still on its way: approved, not in edge yet.
   function publishing() { return ARCHES.map(approvedChain).some(function (c) { return c && c.publish && (c.publish.status === "queued" || c.publish.status === "leased"); }); }
   function archList() { var t = targetsOf(); return ARCHES.filter(function (a) { return !isFactory() || !t || t[a] || servedOn(a).length; }); }
-  // The package's state, one word for the chip: blocked, in rings (a promised ring serves it), else where its targets stand — ready for review while it waits for a claim, in review once the project rebuilds it for a maintainer's claim, the words the Factory and Review say (#274).
+  // A maintainer's claim on an architecture of it: the project's rebuild a maintainer asked for, queued, running or staged, and not decided yet
+  // (a failed one hands it back). It stands while a newer version of it builds: the review panel shows it until the decision (#282).
+  function claimOf(a) { return chainsOn(a).filter(function (c) { return c.project && ["queued", "leased", "staged"].indexOf(c.project.status) >= 0 && !c.approval && !c.withdrawn; })[0] || null; }
+  // Where it stands in Review's queue: the list's own state, weighed by the list's rule over the story's rows (the story's review, queueOf in
+  // routes/review.ts) — in review from the claim until the decision, ready for review while it waits for a claim, else neither (null: an
+  // architecture still building, a build of a version already approved). Never a rule of the page's own: its targets alone once called a
+  // build of an approved version ready (#282). One the list would not name, its targets' place, as the Factory's line files it (lineOf).
+  function reviewOf() {
+    var q = ST && ST.review;
+    if (q) return q.state === "in_review" ? "in-review" : q.state === "ready" ? "ready" : null;
+    var ts = targetsOf() || {}, st = Object.keys(ts).map(function (a) { return ts[a].status; });
+    return st.indexOf("building") >= 0 ? null : st.indexOf("reviewing") >= 0 || st.indexOf("reviewed") >= 0 ? "in-review" : st.indexOf("built") >= 0 ? "ready" : null;
+  }
+  // The package's state, one word for the chip and the Review stage: blocked, in rings (a promised ring serves it), else in review from a
+  // maintainer's claim until the decision, else where its targets stand — ready for review while it waits for a claim: the words the Factory
+  // and Review say (#274), the list's in_review and ready.
   var STATE = { "in-rings": ["ok", "in rings"], building: ["run", "building"], ready: ["warn", "ready for review"], "in-review": ["warn", "in review"], approved: ["ok", "approved"], blocked: ["fail", "blocked"], rejected: ["fail", "rejected"], requested: ["wait", "requested"], none: ["wait", "not in the pool"] };
   function stateOf() {
     if (blockedBy()) return "blocked";
     if (ARCHES.some(function (a) { return promised(servedOn(a)).length; })) return "in-rings";
     if (!ST) return D ? "in-rings" : "none";
     var ts = targetsOf() || {}, has = function (list) { return Object.keys(ts).some(function (a) { return list.indexOf(ts[a].status) >= 0; }); };
+    var r = reviewOf();
+    if (r === "in-review") return r;
     if (has(["building"])) return "building";
-    if (has(["reviewing", "reviewed"])) return "in-review";
-    if (has(["built"])) return "ready";
+    if (r) return r;
     if (has(["approved", "published"])) return "approved";
     return (ST.package || {}).status === "rejected" ? "rejected" : "requested";
   }
@@ -425,7 +456,7 @@ const PACKAGE_SCRIPT = String.raw`
     var tiles = [
       ["tag", "Version", D ? p.version : "—", D ? D.shown_ring + (row ? " #" + row.release_seq : "") + " · " + arch : b ? "out of every ring" : away || "not in a ring yet", "", "#op-chain", "rings"],
       ["hard-drive", "Size", D ? bytes(p.size_download) : "—", D ? bytes(p.size_installed) + " installed" : away || "no object in a ring yet", "", "#files-section"],
-      ["arrow-down-to-line", "Depends on", D ? num(dependsOn().length) : "—", D ? "loads " + num((D.links || []).length) + " libraries" : "read from the object", "", "#deps-section"],
+      ["arrow-down-to-line", "Depends on", D ? num(dependsOn().length) : "—", D ? "loads " + num((D.links || []).length) + ((D.links || []).length === 1 ? " library" : " libraries") : "read from the object", "", "#deps-section"],
       ["arrow-up-from-line", "Required by", D ? num(rb) + (rb >= 400 ? "+" : "") : "—", D ? "in " + D.shown_ring : "in the ring that serves it", "", "#deps-section"],
       ["shield", "Security", b ? "blocked" : !D ? "—" : own.length ? num(own.length) + " open" : "clean", b ? "revoked from every ring" : !D ? "checked once a ring serves it" : exp.length + " via dependencies", b || own.length ? "fail-t" : D ? "ok-t" : "", "#sec-section"]
     ];
@@ -471,20 +502,27 @@ const PACKAGE_SCRIPT = String.raw`
     var decided = arches.map(chainFor).filter(function (c) { return c && c.approval; })[0], approval = decided ? decided.approval : null;
     var standing = ARCHES.map(approvedChain).filter(Boolean)[0], stood = standing ? standing.approval : null;
     var withdrawn = ((ST && ST.chains) || []).some(function (c) { return c.withdrawn; });
-    var reviewTone, reviewSum;
+    // Undecided, it says Review's word — the chip's, unless a ring serves it — first, then where the claim stands, in the Factory card's words
+    // and by its order (#282): a rebuild an emulated worker sent back waiting for a native worker (#281), else the project rebuilding while
+    // any architecture's rebuild is queued or running, else a new version building beside the claim, else the rebuild staged. The native
+    // wait in the shell's short word, as Review's step and the review cell say it ("native worker"), so the line stays whole in its two
+    // lines; its whole words in the line's title, the mark's and the architecture's square.
+    var reviewTone, reviewSum, reviewWhy = "", reviewFull = "", inReview = reviewOf();
+    var sentBack = function (a) { var k = status(a) === "reviewing" ? claimOf(a) : null; return k ? waitsForNative(k.project) : ""; }, waits = arches.map(sentBack).filter(Boolean)[0] || "";
+    var claimAt = waits ? ["warn", "native worker"] : anyT(["reviewing"]) ? ["run", "project rebuilding"] : anyT(["building"]) ? ["run", "new version building"] : ["warn", "rebuild staged"];
     if (b && !approval) { reviewTone = "na"; reviewSum = withdrawn ? "withdrawn by the block" : "never reviewed · blocked"; }
     else if (approval) { reviewTone = approval.decision === "approved" ? "ok" : "fail"; reviewSum = "@" + approval.by + (approval.decision === "approved" ? " · rebuilt · approved" : " · " + approval.decision); }
-    else if (anyT(["reviewing"])) { reviewTone = "run"; reviewSum = "the project builds it again"; }
-    else if (anyT(["reviewed"])) { reviewTone = "warn"; reviewSum = "ready for a maintainer"; }
-    else if (anyT(["built"])) { reviewTone = "wait"; reviewSum = "built · waiting for a maintainer"; }
+    else if (inReview === "in-review") { reviewTone = claimAt[0]; reviewSum = STATE[inReview][1] + " · " + claimAt[1]; reviewWhy = waits; reviewFull = waits ? STATE[inReview][1] + " · " + waits : ""; }
+    else if (inReview === "ready") { reviewTone = "wait"; reviewSum = STATE[inReview][1] + " · waiting for a claim"; }
     else if (stood) { reviewTone = "ok"; reviewSum = "@" + stood.by + " · approved " + (stood.version || ""); }
     else { reviewTone = "wait"; reviewSum = "waiting for builds"; }
-    // A newer build waiting beside the approval the rings serve: the summary says both.
-    if (stood && !approval && anyT(["built", "reviewing", "reviewed"])) reviewSum += " · " + (stood.version || "the last") + " stays approved";
+    // A newer build waiting beside the approval the rings serve: the summary says both. One Review does not ask a maintainer about — a build
+    // of the version already approved (felix 2.16.1) — is that version built again, nothing to decide.
+    if (stood && !approval && anyT(["built", "reviewing", "reviewed"])) reviewSum += inReview || anyT(["building"]) ? " · " + (stood.version || "the last") + " stays approved" : " · built again";
     return [
       { id: "source", icon: "file-text", label: "Request", tone: req.complete ? "ok" : checks.length ? "fail" : "wait", sum: (owner ? "@" + owner + " · " : "") + okN + "/" + checks.length + " checks", when: onDay(req.created_at || ((ST && ST.package) || {}).created_at).replace(/ \d{4}$/, "") },
       { id: "build", icon: "hammer", label: "Factory build", tone: buildTone, sum: buildSum, archs: sq(function (a) { var s = status(a); return s === "building" ? ["run", "building"] : s === "not_supported" ? ["na", "not supported"] : ["built", "reviewing", "reviewed", "approved", "published"].indexOf(s) >= 0 ? ["ok", "built"] : rejected ? ["na", "rejected"] : s ? ["wait", s] : ["na", "not requested"]; }), when: since(((bc || chainFor(arches[0]) || {}).contributor || {}).finished_at) },
-      { id: "review", icon: "user-check", label: "Review", tone: reviewTone, sum: reviewSum, archs: sq(function (a) { var s = status(a), c = chainFor(a); return s === "not_supported" ? ["na", "not supported"] : s === "reviewing" ? ["run", "the project builds it again"] : s === "reviewed" ? ["warn", "built again; the review decides"] : ["approved", "published"].indexOf(s) >= 0 ? ["ok", "approved"] : c && c.approval && c.approval.decision === "rejected" ? ["fail", "rejected"] : s === "built" ? ["wait", "waiting for a maintainer"] : approvedChain(a) ? ["ok", "approved"] : s ? ["wait", "not yet"] : ["na", "not requested"]; }), when: approval ? since(approval.created_at) : stood ? since(stood.created_at) : "" },
+      { id: "review", icon: "user-check", label: "Review", tone: reviewTone, sum: reviewSum, why: reviewWhy, full: reviewFull, archs: sq(function (a) { var s = status(a), c = chainFor(a); return s === "not_supported" ? ["na", "not supported"] : s === "reviewing" ? (sentBack(a) ? ["warn", "in review · " + sentBack(a)] : ["run", "in review · project rebuilding"]) : s === "reviewed" ? ["warn", "in review · rebuild staged"] : ["approved", "published"].indexOf(s) >= 0 ? ["ok", "approved"] : c && c.approval && c.approval.decision === "rejected" ? ["fail", "rejected"] : s === "built" ? (inReview === "ready" ? ["wait", "ready for review · waiting for a claim"] : inReview === "in-review" ? ["warn", "in review"] : anyT(["building"]) ? ["wait", "built · waiting for the others"] : ["wait", "built · nothing to decide"]) : approvedChain(a) ? ["ok", "approved"] : s ? ["wait", "not yet"] : ["na", "not requested"]; }), when: approval ? since(approval.created_at) : stood ? since(stood.created_at) : "" },
       { id: "rings", icon: "layers", label: "Rings", tone: ringsStage[0], sum: ringsStage[1], when: ringsStage[2] }
     ];
   }
@@ -495,7 +533,7 @@ const PACKAGE_SCRIPT = String.raw`
     $("#chain-note").textContent = stateOf() === "none" ? "not in the pool · nobody requested it" : fac ? peopleCount() : "mirrored from " + upstreamName() + " · verified here";
     $("#stages").innerHTML = list.map(function (s) {
       var on = s.id === STAGE;
-      return '<button type="button" role="tab" class="pkg-stage ' + s.tone + '" id="stage-' + s.id + '" aria-controls="stage-panel" aria-selected="' + on + '" tabindex="' + (on ? 0 : -1) + '" data-stage="' + s.id + '"><span class="pkg-stage-t"><span><span class="op-box ' + (s.dashed ? "na" : "") + '">' + lucide(s.icon, 15) + '</span><b>' + esc(s.label) + '</b></span>' + (s.tone === "warn" ? '<b class="op-mark warn" title="waiting for a decision">⟳</b>' : mark(s.tone)) + '</span><span class="pkg-stage-s" title="' + esc(s.sum) + '">' + esc(s.sum) + '</span><span class="pkg-stage-a">' + (s.archs || "") + (s.when ? '<span>' + esc(s.when) + '</span>' : '') + '</span></button>';
+      return '<button type="button" role="tab" class="pkg-stage ' + s.tone + '" id="stage-' + s.id + '" aria-controls="stage-panel" aria-selected="' + on + '" tabindex="' + (on ? 0 : -1) + '" data-stage="' + s.id + '"><span class="pkg-stage-t"><span><span class="op-box ' + (s.dashed ? "na" : "") + '">' + lucide(s.icon, 15) + '</span><b>' + esc(s.label) + '</b></span>' + (s.tone === "warn" ? '<b class="op-mark warn" title="' + esc(s.why || "waiting for a decision") + '">⟳</b>' : mark(s.tone)) + '</span><span class="pkg-stage-s" title="' + esc(s.full || s.sum) + '">' + esc(s.sum) + '</span><span class="pkg-stage-a">' + (s.archs || "") + (s.when ? '<span>' + esc(s.when) + '</span>' : '') + '</span></button>';
     }).join("");
     $("#stage-panel").setAttribute("aria-labelledby", "stage-" + STAGE);
     $("#stage-panel").innerHTML = panelOf(STAGE);
@@ -657,7 +695,8 @@ const PACKAGE_SCRIPT = String.raw`
     });
   }
   // The review shown on an architecture: the one of the build its target names once that build is done (or decided); while a newer build is still on its way, the one the rings stand on.
-  function reviewChain(a) { var t = chainFor(a), s = ((targetsOf() || {})[a] || {}).status || ""; return t && (t.project || t.approval || t.withdrawn || ["building", "waiting", ""].indexOf(s) < 0) ? t : approvedChain(a) || t; }
+  // A maintainer's claim is the review until it is decided, even while a newer version of the package builds beside it (#282).
+  function reviewChain(a) { var k = claimOf(a), t = chainFor(a), s = ((targetsOf() || {})[a] || {}).status || ""; return k ? k : t && (t.project || t.approval || t.withdrawn || ["building", "waiting", ""].indexOf(s) < 0) ? t : approvedChain(a) || t; }
   function reviewPanel() {
     var ts = targetsOf() || {}, owner = (ST && ST.package && ST.package.owner) || "", status = function (a) { return (ts[a] || {}).status || ""; };
     var cur = ARCHES.map(chainFor), stand = ARCHES.map(approvedChain), cs = ARCHES.map(reviewChain);
@@ -672,10 +711,11 @@ const PACKAGE_SCRIPT = String.raw`
     if (blockedBy() && !ps.some(Boolean) && !ap) return panel({ title: "Review", tag: "blocked", tone: "na", note: "Blocked before any review decided it. Once another maintainer lifts the block, a new build and a new review start it over." });
     if (!ps.some(Boolean) && !ap && !ready) return panel({ title: "Review", tag: "waiting", tone: "wait", note: "Starts once every architecture is built or not supported. A maintainer who did not request the package has the project build it again on a trusted worker, then decides; " + (owner ? atLink(owner) + " can never review their own request." : "nobody reviews their own request.") + besides });
     var trials = cs.map(function (c) { return c && c.trial; }), pubs = cs.map(function (c) { return c && c.publish; }), audit = cs.map(function (c) { return c && c.audit; }).filter(Boolean)[0];
-    // A project build an emulated worker sent back (#281) tags the panel with what it waits for, in the shell's words.
-    var wn = ps.map(function (p) { return waitsForNative(p); }).filter(Boolean)[0];
+    // A project build an emulated worker sent back (#281) says what it waits for, in the shell's words.
+    var wn = ps.map(function (p) { return waitsForNative(p); }).filter(Boolean)[0], rv = reviewOf();
     var tone = ap ? (ap.withdrawn_at ? "na" : ap.decision === "approved" ? "ok" : "fail") : wn ? "warn" : ps.some(function (p) { return p && (p.status === "leased" || p.status === "queued"); }) ? "run" : ps.some(Boolean) ? "warn" : "wait";
-    var tag = ap ? (ap.withdrawn_at ? "withdrawn" : ap.decision) : wn ? wn : tone === "run" ? "rebuilding" : tone === "warn" ? "in progress" : "waiting for a maintainer";
+    // Undecided, the tag is Review's word, as the chip and the stage say it (#282), then what a rebuild sent back waits for (#281).
+    var tag = ap ? (ap.withdrawn_at ? "withdrawn" : ap.decision) : rv === "in-review" ? (wn ? "in review · " + wn : tone === "run" ? "in review · rebuilding" : "in review") : rv === "ready" ? "ready for review" : wn || "waiting";
     // A cell with no project build yet: to come on an architecture that is built, nothing on one that is not supported or not requested.
     var none = function (i, what) { var s = status(ARCHES[i]); return s === "not_supported" ? ["na", "", "not supported"] : !s ? ["na", "", "not requested"] : ["wait", "", what]; };
     var trialMark = function (t, i) { if (!ps[i]) return none(i, "tried once the project built it again"); if (!t) return ["wait", "", "not tried yet"]; var v = t.result && t.result.verdict; return t.status !== "done" ? ["run", t.status, "the trial is " + t.status] : v === "ok" ? ["ok", "", "a real pacman installed it in the lab"] : ["fail", v || "failed", "the trial did not install it"]; };
@@ -804,6 +844,19 @@ const PACKAGE_SCRIPT = String.raw`
     return order.map(function (k) { return right[k]; });
   }
 
+  // ---- a name in the graph cut in the middle, never at its end: where its tail starts — the word in which it parts from the name in the graph
+  // it shares the longest prefix with, else its last word; 0 for a name of one word (cut at its end). Two names that share a prefix keep what
+  // tells them apart: aarch64-linux-gnu-gcc and aarch64-linux-gnu-linux-api-headers read "aarch64-li…gcc" and "aarch64-li…linux-api-headers"
+  // in a narrow node, never both "aarch64-linux-g…" (#282).
+  function nameCut(names) {
+    return function (n) {
+      var common = 0;
+      names.forEach(function (m) { if (m === n) return; var i = 0; while (i < n.length && i < m.length && n.charAt(i) === m.charAt(i)) i++; if (i > common) common = i; });
+      var word = function (upTo) { for (var i = upTo - 1; i > 0; i--) if ("-_.+".indexOf(n.charAt(i - 1)) >= 0) return i; return 0; };
+      return (common && word(Math.min(common + 1, n.length))) || word(n.length);
+    };
+  }
+
   // ---- the dependencies: what requires it on the left, what it declares and loads on the right, connected; the rest in full below.
   function renderDeps() {
     var el = $("#deps");
@@ -811,9 +864,11 @@ const PACKAGE_SCRIPT = String.raw`
     var vuln = {}; ((D.security && D.security.exposed) || []).forEach(function (e) { vuln[e.via] = (vuln[e.via] || 0) + 1; });
     var MAX = 12, req = D.required_by || [], deps = dependsOn();
     var left = req.slice(0, req.length > MAX ? MAX - 1 : MAX), rightShown = deps.slice(0, deps.length > MAX * 2 ? MAX * 2 - 1 : MAX * 2);
+    var cut = nameCut([D.name].concat(left.map(function (x) { return x.name; }), rightShown.map(function (x) { return x.name; })));
     var node = function (x, side) {
       var tag = side === "left" ? (x.sonames.length ? ['so', x.sonames[0]] : ['decl', "depends"]) : (!x.provided ? ['none', "not in " + D.shown_ring] : x.sonames.length ? ['so', x.sonames[0]] : ['decl', "declared"]);
-      return '<a class="pkg-node' + (side === "right" && vuln[x.name] ? " adv" : "") + (side === "right" && !x.provided ? " gone" : "") + '" href="' + pkgHref(x.name, ring, arch) + '" title="' + esc(x.name + (x.version ? " " + x.version : "") + (x.sonames.length ? " · loads " + x.sonames.join(", ") : "") + (vuln[x.name] ? " · " + vuln[x.name] + " open advisor" + (vuln[x.name] > 1 ? "ies" : "y") : "")) + '"><span>' + (side === "right" && vuln[x.name] ? '<i class="dot"></i>' : '') + '<span class="nm">' + esc(x.name) + '</span>' + (side === "right" && x.version ? '<span class="v">' + esc(x.version) + '</span>' : '') + '</span><span class="t ' + tag[0] + '">' + esc(tag[1]) + '</span></a>';
+      var at = cut(x.name), nm = at ? '<span class="nh" style="--t:' + (x.name.length - at) + '">' + esc(x.name.slice(0, at)) + '</span><span class="nt">' + esc(x.name.slice(at)) + '</span>' : '<span class="nh">' + esc(x.name) + '</span>';
+      return '<a class="pkg-node' + (side === "right" && vuln[x.name] ? " adv" : "") + (side === "right" && !x.provided ? " gone" : "") + '" href="' + pkgHref(x.name, ring, arch) + '" title="' + esc(x.name + (x.version ? " " + x.version : "") + (x.sonames.length ? " · loads " + x.sonames.join(", ") : " · " + tag[1]) + (vuln[x.name] ? " · " + vuln[x.name] + " open advisor" + (vuln[x.name] > 1 ? "ies" : "y") : "")) + '">' + (side === "right" && vuln[x.name] ? '<i class="dot"></i>' : '') + '<span class="l"><span class="nm">' + nm + '</span>' + (side === "right" && x.version ? '<span class="v">' + esc(x.version) + '</span>' : '') + '<span class="t ' + tag[0] + '">' + esc(tag[1]) + '</span></span></a>';
     };
     var lNodes = left.map(function (x) { return node(x, "left"); }), rNodes = rightShown.map(function (x) { return node(x, "right"); });
     if (req.length > left.length) lNodes.push('<button type="button" class="pkg-node" data-more="rb">+' + num(req.length - left.length) + ' more</button>');
@@ -828,11 +883,11 @@ const PACKAGE_SCRIPT = String.raw`
     var full = function (id, title, items) { return '<details class="pkg-more" id="' + id + '"><summary>' + esc(title) + '</summary><ul>' + items.join("") + '</ul></details>'; };
     var comps = (D.manifest && D.manifest.components) || [];
     el.innerHTML = '<div class="pkg-graph"><span class="op-label gl">Required by · ' + num(req.length) + (req.length >= 400 ? "+" : "") + '</span>' +
-      '<div class="pkg-gcol l" style="padding-top:' + lPad + 'px">' + lNodes.join("") + '</div>' +
+      '<div class="pkg-gcol l" style="padding-block:' + lPad + 'px">' + lNodes.join("") + '</div>' +
       '<svg class="l" width="64" height="' + H + '" aria-hidden="true">' + paths(left, lPad, "left") + '</svg>' +
-      '<div class="pkg-center' + (ownOpen ? " fail" : "") + '" style="margin-top:' + (cy - 18) + 'px" title="' + esc(ownOpen ? "an advisory is open on this version" : D.name) + '">' + esc(D.name) + '</div>' +
+      '<div class="pkg-center' + (ownOpen ? " fail" : "") + '" title="' + esc(ownOpen ? "an advisory is open on this version" : D.name) + '">' + esc(D.name) + '</div>' +
       '<svg class="r" width="64" height="' + H + '" aria-hidden="true">' + paths(rightShown, rPad, "right") + '</svg>' +
-      '<span class="op-label gr">Depends on · ' + num(deps.length) + '</span><div class="pkg-gcol r" style="padding-top:' + rPad + 'px">' + rNodes.join("") + '</div></div>' +
+      '<span class="op-label gr">Depends on · ' + num(deps.length) + '</span><div class="pkg-gcol r" style="padding-block:' + rPad + 'px">' + rNodes.join("") + '</div></div>' +
       '<div class="pkg-gfoot"><span>provides <b>' + (provides.length ? esc(provides.join(" · ")) : "only itself") + '</b></span><span>loads <b>' + ((D.links || []).length ? (D.links || []).map(function (l) { return esc(l.soname); }).join(" · ") : "nothing dynamically") + '</b></span></div>' +
       (req.length > left.length ? full("rb-all", "Everything in " + D.shown_ring + " that requires it · " + num(req.length) + (req.length >= 400 ? "+" : ""), req.map(function (x) { return '<li>' + pkgLink(x.name) + ' <span title="' + esc(x.sonames.join(", ")) + '">' + (x.declared ? "declared" : "") + (x.declared && x.sonames.length ? " + " : "") + (x.sonames.length ? "loads " + x.sonames.length + " lib" + (x.sonames.length > 1 ? "s" : "") : "") + '</span></li>'; })) : "") +
       (deps.length > rightShown.length ? full("dep-all", "Everything it depends on · " + num(deps.length), deps.map(function (x) { return '<li>' + (x.provided ? pkgLink(x.name) + ' <span>' + esc(x.version) + '</span>' : esc(x.name) + ' <span>not in ' + esc(D.shown_ring) + '</span>') + '</li>'; })) : "") +
@@ -949,12 +1004,13 @@ const PACKAGE_SCRIPT = String.raw`
       var pk = (ST && ST.package) || {}, chain = D && D.seal && D.seal.chain, sb = chain && chain.source_build;
       var cs = ARCHES.map(sealChain).filter(Boolean), ap = cs.map(function (c) { return c.approval; }).filter(Boolean)[0], au = cs.map(function (c) { return c.audit && c.audit.result && c.audit.result.model; }).filter(Boolean)[0];
       var built = cs.map(function (c) { return c.contributor && c.contributor.lease_owner; }).filter(Boolean)[0], rebuilt = cs.map(function (c) { return c.project && c.project.lease_owner; }).filter(Boolean)[0];
-      var reviewing = cs.some(function (c) { return c.project && !c.approval; });
+      // Undecided: Review's word, the chip's (#282).
+      var rv = reviewOf();
       // A registration a maintainer adopted is theirs (#247): the maintainer row below names them, adopted — they did not request it.
       if (pk.owner && !(mt && mt.adopted && mt.login === pk.owner)) rows.push(person("requested by", atLink(pk.owner), "", avatar(pk.owner)));
       if (sb && sb.agent) rows.push(person("drafted & built by", esc(sb.agent), built ? wtShort(built) : "", glyph(sb.agent, "agent")));
       else if (built || !rebuilt) rows.push(person("built on", built ? esc(wtShort(built)) : "not yet", built ? "its contributor's worker" : "", glyph("W", "", "W")));
-      rows.push(ap ? person("reviewed by", atLink(ap.by), ap.decision === "approved" ? "rebuilt from scratch" : ap.decision, avatar(ap.by)) : person("reviewed by", reviewing ? "in progress" : "not yet", "", nobody));
+      rows.push(ap ? person("reviewed by", atLink(ap.by), ap.decision === "approved" ? "rebuilt from scratch" : ap.decision, avatar(ap.by)) : person("reviewed by", rv ? STATE[rv][1] : "not yet", "", nobody));
       if (au) rows.push(person("audit agent", esc(au), "second opinion", glyph(au, "agent")));
       if (rebuilt) rows.push(person("rebuilt on", esc(wtShort(rebuilt)), "a project worker", glyph("▣", "pool", "▣")));
       rows.push(mt ? person("maintainer", atLink(mt.login), mt.adopted ? "adopted " + since(mt.since) + " ago" : "", avatar(mt.login)) : person("maintainer", "none yet", "", nobody));
@@ -1167,10 +1223,10 @@ export const PACKAGE_COMPONENTS = (F: Fixture): Component[] => {
       id: "package.header",
       page,
       anchor: [`<h1 id="title">${F.pkg}</h1>`, 'id="pkg-ver"', 'id="pkg-state"', 'id="pkg-mark"', 'id="desc"', 'id="pkg-chips"'],
-      script: ['"#pkg-state"', "STATE[stateOf()]", "factory · only in the pool", "'synced · '", "sourceWords(o.source, o.arch)", "function originOf()", "SOURCE_WORDS = {", "targetChips(targetsOf())", "servedChips()", "m.description", "pk.description", "versionOf()"],
+      script: ['"#pkg-state"', "STATE[stateOf()]", "factory · only in the pool", "'synced · '", "sourceWords(o.source, o.arch)", "function originOf()", "SOURCE_WORDS = {", "targetChips(targetsOf())", "servedChips()", "m.description", "pk.description", "versionOf()", "ST.review"],
       reads: [
         { path: pkg, fields: ["name", "package.version", "package.source", "manifest.description", "seal.upstream.project", "arches.x86_64.rings.0.ring", "arches.aarch64.rings"] },
-        { path: story, fields: ["package.description", "package.status", "targets", "targets.x86_64.status", "request.version"] },
+        { path: story, fields: ["package.description", "package.status", "targets", "targets.x86_64.status", "request.version", "review"] },
         // A name no ring serves on this architecture: the answer says where the others serve it, and the page links there or to the factory.
         { path: `/api/v1/package/not-a-package?ring=stable&arch=${F.arch}`, status: 404, fields: ["error", "arches.x86_64.rings", "arches.aarch64.rings"] },
         // Served on another architecture: the answer also says where it comes from, whether an advisory is open there and who looks after it — what the page says of the package whichever architecture is read.
@@ -1209,13 +1265,13 @@ export const PACKAGE_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // How it got here: four stages, a tab each, with its state per architecture — the targets' word for a factory package, where it is served for a synced one — and the chosen one's panel below.
+      // How it got here: four stages, a tab each, with its state per architecture — the targets' word for a factory package, where it is served for a synced one — and the chosen one's panel below. A claim whose rebuild an emulated worker sent back says, on its Review stage, the native worker it waits for, as the Factory's card does (the shell's waitsForNative, #281).
       id: "package.stages",
       page,
       anchor: ['id="op-chain"', 'id="stages"', 'role="tablist"', 'id="stage-panel"', 'role="tabpanel"', 'id="chain-note"'],
-      script: ['"#stages"', "stagesOf()", "defaultStage()", '"Upstream"', '"Request"', '"Factory build"', '"Review"', '"Rings"', "not needed · mirrored", 'role="tab"', "aria-selected", "ArrowRight", "peopleCount()"],
+      script: ['"#stages"', "stagesOf()", "defaultStage()", '"Upstream"', '"Request"', '"Factory build"', '"Review"', '"Rings"', "not needed · mirrored", 'role="tab"', "aria-selected", "ArrowRight", "peopleCount()", "waitsForNative(k.project)", 'waits ? ["warn", "native worker"]', "s.full || s.sum"],
       reads: [
-        { path: story, fields: ["targets", "chains.0.contributor.status", "chains.0.contributor.attempts", "chains.0.contributor.finished_at", "chains.0.approval", "request.checks", "request.complete", "request.created_at", "package.owner"] },
+        { path: story, fields: ["targets", "chains.0.contributor.status", "chains.0.contributor.attempts", "chains.0.contributor.finished_at", "chains.0.approval", "request.checks", "request.complete", "request.created_at", "package.owner", "review"] },
         { path: pkg, fields: ["seal.upstream.project", "manifest.pkginfo.builddate", "arches.x86_64.rings"] },
       ],
       visible: EVERYONE,
@@ -1290,11 +1346,11 @@ export const PACKAGE_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // Left: what requires the page's package (zlib's side); right: what it declares and loads (xz's side), with the providers that carry an advisory; the SVG connectors between; the whole lists and the embedded libraries under it.
+      // Left: what requires the page's package (zlib's side); right: what it declares and loads (xz's side), with the providers that carry an advisory; the SVG connectors between; the whole lists and the embedded libraries under it. A name wider than its node is cut in the middle, its tail kept (nameCut, #282).
       id: "package.graph",
       page,
       anchor: ['id="deps-section"', 'id="deps"'],
-      script: ['"#deps"', "renderDeps", "D.required_by", "x.provider.name", "pkgHref(x.name, ring, arch)", "vuln[x.name]", 'data-more="rb"', 'data-more="dep"', '<svg class="l" width="64"', '<svg class="r" width="64"'],
+      script: ['"#deps"', "renderDeps", "D.required_by", "x.provider.name", "pkgHref(x.name, ring, arch)", "vuln[x.name]", 'data-more="rb"', 'data-more="dep"', '<svg class="l" width="64"', '<svg class="r" width="64"', "function nameCut(names)", '<span class="nh">', '<span class="nh" style="--t:', '<span class="nt">'],
       reads: [
         { path: pkg, fields: ["name", "shown_ring", "required_by", "required_by.0.name", "required_by.0.declared", "required_by.0.sonames", "manifest.provides", "security.advisories.0.status"] },
         { path: pkg2, fields: ["depends.0.name", "depends.0.provider.name", "depends.0.provider.version", "links.0.soname", "links.0.provider.name", "security.exposed.0.via"] },

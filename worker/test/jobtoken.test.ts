@@ -25,6 +25,9 @@ describe("job tokens", () => {
     expect(scopesFor("build", 7, "project", {})).toContain("events");
     expect(scopesFor("build", 7, "project", {})).toContain("pool:write");
     expect(scopesFor("build", 7, "community", {})).not.toContain("pool:write");
+    // A dry run (publish 0, #284): the project's build that publishes nothing, whatever recipe it names — no pool, no ring.
+    expect(scopesFor("build", 7, "project", {}, 0)).toEqual(["task:7", "events"]);
+    expect(scopesFor("build", 7, "project", { review: 3 }, 0)).toEqual(["task:7", "events", "staging:7"]);
     expect(scopesFor("promote", 8, "project", { from: "rc", to: "stable" })).toEqual(["task:8", "events", "release:stable", "artifacts:*:stable"]);
     expect(scopesFor("gc", 9, "project", {})).toEqual(["task:9", "events", "gc"]);
     // The publish job writes edge; with the trial's ok it writes rc and stable too (the fast lane), and nothing else opens them.

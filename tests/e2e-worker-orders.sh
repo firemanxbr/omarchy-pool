@@ -113,8 +113,11 @@ w5_stop() { # id — the supervisor, the worker under it, the stub
   local i; for i in $(seq 1 30); do kill -0 "$(cat "$W5/$1/pid")" 2>/dev/null || break; sleep 1; done
   kill -KILL "$(cat "$W5/$1/pid")" 2>/dev/null || true
 }
-w5_revoke() { # id...
-  local id; for id in "$@"; do curl -s -o /dev/null -X DELETE "$OMARCHY_API/api/v1/factory/workers/$id" -H "authorization: Bearer omc_e2e"; done
+w5_revoke() { # id... — its open orders cancelled with it, a line each
+  local id code; for id in "$@"; do
+    code="$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$OMARCHY_API/api/v1/factory/workers/$id" -H "authorization: Bearer omc_e2e")"
+    [[ "$code" == 200 ]] || { echo "revoking $id answered $code" >&2; return 1; }
+  done
 }
 w5_exits() { [[ -s "$W5/$1/exits" ]] && tr '\n' ' ' < "$W5/$1/exits" || true; }
 w5_fail() { echo "scenario $1: $2 — its orders: $(w5_orders "$1")" >&2; echo "--- $1's log:" >&2; tail -n 40 "$W5/$1/log" >&2; return 1; }

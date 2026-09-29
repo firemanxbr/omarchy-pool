@@ -8,7 +8,7 @@ interface CreateRelease {
   ring: string;
   /** Promote: start from this ring's head selection instead of our own. */
   from_ring?: string | null;
-  /** Roll back / pin: start from this exact release's selection (any ring). */
+  /** Roll back / pin: start from this exact release's selection — one of the same ring (#284). */
   from_release_id?: number | null;
   /**
    * Package sha256s to add; a package replaces the same-name entry of the
@@ -51,6 +51,8 @@ export async function handleCreateRelease(request: Request, env: Env): Promise<R
     if (!source) return json({ error: `release ${body.from_release_id} does not exist` }, 404);
     // A rollback stays inside its ring; nothing of the lab's history is a base for a promised ring.
     if (source.ring === "lab" && ring !== "lab") return json({ error: "a lab release is never the base of another ring: the lab is tried, not promoted" }, 400);
+    // Nor any other ring's (#284): stable pointed at an edge release would skip rc, the gate and the soak. The way up is from_ring.
+    if (source.ring !== ring) return json({ error: `release ${source.id} is ${source.ring}'s: a rollback points ${ring} at an earlier release of its own; a ring moves up by a promotion (from_ring)` }, 400);
   } else if (body.from_ring !== undefined && body.from_ring !== null) {
     if (!isRing(body.from_ring)) return json({ error: "from_ring must be edge, rc or stable" }, 400);
     // Promotion is the promise's path; the lab is beside it, never on it.

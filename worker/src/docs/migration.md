@@ -215,7 +215,15 @@ its project's keyring on the way in). With A–D in place:
 export OMARCHY_API=https://pkgs.example.org OMARCHY_TOKEN=omc_…
 pkg-repo job sync --param arch=x86_64 && pkg-repo job sync --param arch=aarch64   # hours; idempotent, queue again if it stops
 pkg-repo job promote --param from=edge --param to=rc --param note=seed
-pkg-repo job promote --param from=rc --param to=stable --param force=yes --param note=seed
+```
+
+The first stable release has no evidence to pass yet, so rc goes into
+stable forced past its gate: in the browser, signed in as a maintainer with
+a passkey registered on their page, *Force into stable* on rc's card of
+Status, with `seed` as the reason — a forced promotion takes the
+maintainer's passkey, and no token forces one (#284). Then:
+
+```bash
 pkg-repo job security
 ```
 

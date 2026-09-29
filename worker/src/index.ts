@@ -670,11 +670,17 @@ async function api(method: string, path: string, url: URL, request: Request, env
     const hand = (await jobOf(request, env)) ? null : await contributorOf(request, env);
     return (hand && (await cancelByHand(hand, Number(m[1]), env))) ?? handleCancelTask(Number(m[1]), env);
   }
-  if (method === "POST" && path === "/factory/enqueue") return (await factoryWrite()) ?? handleEnqueue(request, env);
-  // A maintainer runs a pool job by hand: queued like the scheduler's, executed by a project worker.
+  if (method === "POST" && path === "/factory/enqueue") {
+    // The enqueue job (its token carries factory:write) publishes a recipe on main; a maintainer by hand queues a dry run only (#284).
+    if (await jobOf(request, env)) return (await factoryWrite()) ?? handleEnqueue(request, env, null);
+    const hand = await maintainerOf(request, env);
+    return hand instanceof Response ? hand : handleEnqueue(request, env, hand);
+  }
+  // A maintainer runs a pool job by hand: queued like the scheduler's, executed by a project worker. A promotion forced past its
+  // evidence is confirmed with the maintainer's passkey, in the browser (#284): webGate, for the promotion the body names.
   if (method === "POST" && path === "/factory/jobs") {
     const c = await maintainerOf(request, env);
-    return c instanceof Response ? c : handleQueueJob(c, request, env);
+    return c instanceof Response ? c : handleQueueJob(c, request, env, (subject) => webGate(request, url, env, c.login, subject));
   }
   if (method === "PUT" && path === "/security/advisories") return (await authorize(request, env, "security:write")) ?? handlePutAdvisories(request, env);
   if (method === "PUT" && path === "/security/matches") return (await authorize(request, env, "security:write")) ?? handlePutMatches(request, env);
@@ -686,7 +692,12 @@ async function api(method: string, path: string, url: URL, request: Request, env
   if (method === "GET" && path === "/pool/unreferenced") return handleUnreferenced(url, env);
   if (method === "POST" && path === "/pool/gc") return (await authorize(request, env, "gc")) ?? handleGc(url, env);
   if (method === "POST" && path === "/pool/relayout") return (await authorize(request, env, "relayout")) ?? handleRelayout(url, env);
-  if (method === "POST" && path === "/events") return (await authorizeJobOrMaintainer(request, env, "events")) ?? handlePostEvent(request, env);
+  if (method === "POST" && path === "/events") {
+    // A job posts what it did — the rows the gate and Status read as evidence; a maintainer by hand writes a note, nothing else (#284).
+    if (await jobOf(request, env)) return (await authorize(request, env, "events")) ?? handlePostEvent(request, env, null);
+    const hand = await maintainerOf(request, env);
+    return hand instanceof Response ? hand : handlePostEvent(request, env, hand);
+  }
 
   if ((m = path.match(/^\/pool\/([0-9a-f]{64})$/)) && method === "PUT") {
     return (await authorize(request, env, "pool:write")) ?? handlePutPool(m[1], url, request, env);

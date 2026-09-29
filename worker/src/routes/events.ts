@@ -1,4 +1,5 @@
 import { json, readJson, type Env } from "../index";
+import type { Contributor } from "./contributors";
 
 interface EventIn {
   kind: string;
@@ -10,10 +11,21 @@ interface EventIn {
   duration_ms?: number | null;
 }
 
-export async function handlePostEvent(request: Request, env: Env): Promise<Response> {
+/**
+ * POST /events — a line of the journal. A job's token posts what the job
+ * did: a health check, an ABI check, a promotion, a sync — the rows the
+ * promotion gate reads as evidence (a health row's soak, an abi row's
+ * verdict) and Status draws as the rings' state. A maintainer by hand
+ * (`hand`: the session or an `omc_` token) writes a `note` and nothing
+ * else (#284): a health or abi row from a token would fill a soak or stand
+ * for an ABI check no job ran, and the gate would promote past evidence
+ * nobody made — a forced promotion without the passkey.
+ */
+export async function handlePostEvent(request: Request, env: Env, hand: Contributor | null): Promise<Response> {
   const e = await readJson<EventIn>(request);
   if (e instanceof Response) return e;
   if (!e?.kind || !e.summary) return json({ error: "kind and summary are required" }, 400);
+  if (hand && e.kind !== "note") return json({ error: `a maintainer writes a note to the journal (kind "note"); a ${e.kind} line is a job's — what the gate and Status read as evidence; nothing was written`, code: "note_only" }, 403);
   const status = e.status ?? "ok";
   if (!["ok", "warn", "error"].includes(status)) return json({ error: "bad status" }, 400);
   // The two payload fields the pages write into an address: a run's link must be an https URL and a release an id — any job token may post here, and Status's journal draws the payload for every reader.

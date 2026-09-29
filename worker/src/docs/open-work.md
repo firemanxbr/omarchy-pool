@@ -31,23 +31,25 @@ request (see [CONTRIBUTING.md](CONTRIBUTING.md)), and keep
       product decision first, then a door of its own with the same
       assertion.
 
-- [ ] **The other doors that ship without a passkey.** #271 guards approve
-      and block; a maintainer's session or `omc_` token alone still queues a
-      build by hand (`POST /factory/enqueue`: a project build of whatever
-      `pkgbuild_ref` names, `draft:` or any commit, which publishes into
-      edge with no approval), forces a promotion past its evidence and gate
-      (`POST /factory/jobs`, promote with `force`), and withdraws an
-      approval, as before #271 — and a reset leaves that token. Closing them
-      is a product decision first: a build by hand held to `publish:false`
-      or to a commit on `main` (the enqueue job's own), the same passkey's
-      assertion on each door (in the browser only, so no token presses
-      them), and whether a reset also replaces the login's token
-      ([the write tools](docs/omarchy-cli-mcp.md#write-tools)). #277's
-      orders to a worker (Re-check agent, Restart, Restart agent service,
-      and the kinds its next parts add) also take a session or an `omc_`
-      token without a passkey, on purpose: capped, on the journal, undone
-      by another order, and neither publishing nor deciding anything (its
-      design's Q12).
+- [x] ~~**The other doors that ship without a passkey.**~~ — closed by
+      #284. A build queued by hand is a dry run (`publish: false`; anything
+      else is refused, `dry_run_only`), and its job token writes no pool
+      and no ring: what publishes comes from the enqueue job (a recipe on
+      `main`) or from an approval. A promotion forced past its evidence
+      takes the maintainer's passkey, in the browser, for exactly that
+      promotion (Status's *Force into …*); a rollback stays inside its
+      ring, and a maintainer writes the journal's notes, never the gate's
+      evidence. A reset also revokes the login's `omc_` token and its
+      agents' grants, a journal line each, and no GitHub token mints the
+      login a new one until the person makes it on their page. A
+      withdrawal keeps the session or the token: it takes an approval back
+      and ships nothing
+      ([the security model](docs/security-model.md#the-doors-that-ship)).
+      #277's orders to a worker (Re-check agent, Restart, Restart agent
+      service, and the kinds its next parts add) also take a session or an
+      `omc_` token without a passkey, on purpose: capped, on the journal,
+      undone by another order, and neither publishing nor deciding anything
+      (its design's Q12).
 
 - [ ] **Production keys and hosting.** The staging database key is throwaway and
       the pool lives on a personal account; moving to omarchy.org means a key in

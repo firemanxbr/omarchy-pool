@@ -85,7 +85,8 @@ verify and attest the package faster and approve it with more confidence.
    page: a package built and waiting for a claim is *ready for review*; from
    the claim until the decision — the rebuild queued, running or staged —
    it is *in review*, on the Factory's line, on Review and on the package's
-   page alike; the Factory's line files a package by Review's own list. A
+   page alike — its chip and its Review stage, while a newer version builds
+   beside the claim too; the Factory's line files a package by Review's own list. A
    maintainer may also stop the round with a note: *Request changes* sends it back to the
    factory and the name stays the requester's; *Reject* frees a request's
    name. One review covers the package: it starts once every architecture
@@ -340,12 +341,17 @@ Who approves, and how one becomes a maintainer, is
 ## Sizing a package before committing to it
 
 A **dry run** builds and measures but never publishes or renders: a
-maintainer queues it with `publish:false` —
+maintainer queues it with `publish:false` — by hand, the only build a
+maintainer queues (#284: `publish` true or left out is refused,
+`dry_run_only`) —
 `curl -X POST $API/factory/enqueue -H "authorization: Bearer omc_…" -d '{"name":"chromium","pkgbuild_ref":"<commit>","version":"…","arches":["aarch64"],"reason":"sizing","publish":false,"override":true}'`
 (`override` when an upstream source ships the name). The worker keeps the
-result under its work directory; the build's page (`/build/<id>`) shows how
-long it took and what it measured, and `GET /api/v1/factory` lists its task
-with `publish` 0. `factory/sizing/` holds recipes kept
+packages under its work directory (`dry-run/task-<id>`) and the pool never
+receives them: the dry run's job token has no pool and no ring scope. The
+build's page (`/build/<id>`) shows how long it took and what it measured,
+and `GET /api/v1/factory` lists its task with `publish` 0. A dry run is
+never the build of its version: `GET /factory/built` leaves it out, so
+the enqueue job still queues the build that publishes a recipe on `main`. `factory/sizing/` holds recipes kept
 only for this (chromium, from Arch Linux ARM): the only recipes left in
 the repository, and the `enqueue` job never queues them.
 
@@ -436,7 +442,7 @@ The factory touches the pool through four things, all versioned in the API:
 | The factory uses | Meaning |
 |---|---|
 | `GET /api/v1/package/:name` | who ships a name already (the guard) |
-| `POST /api/v1/factory/{requests,enqueue}` · `/requests/:id/{approve,reject}` · `/tasks/:id/cancel` (a maintainer's token, or the enqueue job's) · `/tasks/:id/{build,approve,reject}` (a maintainer, never the owner) · `/{contributors,packages}/:x/{block,unblock}` (a maintainer — a block, like an approval, in the browser with their passkey; lifting by another) · `POST /factory/jobs` (a maintainer queues a pool job) · `GET /factory/built`, `/factory/maintainers`, `/factory/review`, `/factory/blocks` | maintainers and the enqueue job |
+| `POST /api/v1/factory/{requests,enqueue}` · `/requests/:id/{approve,reject}` · `/tasks/:id/cancel` (a maintainer's token — by hand, a dry run only (#284) — or the enqueue job's) · `/tasks/:id/{build,approve,reject}` (a maintainer, never the owner) · `/{contributors,packages}/:x/{block,unblock}` (a maintainer — a block, like an approval, in the browser with their passkey; lifting by another) · `POST /factory/jobs` (a maintainer queues a pool job; one that forces a promotion past its evidence in the browser with their passkey, #284) · `GET /factory/built`, `/factory/maintainers`, `/factory/review`, `/factory/blocks` | maintainers and the enqueue job |
 | `POST /api/v1/factory/claim` (a registered worker's token) · `/tasks/:id/{heartbeat,complete,fail}` (the claim's job token) | the worker protocol |
 | `POST /api/v1/factory/register` · `/factory/packages[/:name/build]` · `/factory/workers` (contributor token) · `PUT /factory/tasks/:id/artifacts/:file` (worker token) · `GET /factory/packages`, `/factory/me` | contributors: registry, own workers, staging uploads |
 | `pkg-repo publish --source factory --ring edge --arch …` · `pkg-repo render` | how a result enters the pool: as a source like any other |
