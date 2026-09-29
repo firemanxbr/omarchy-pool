@@ -419,7 +419,7 @@ describe("dashboard pages", () => {
     expect(problems, problems.join("\n")).toEqual([]);
   });
 
-  // The dashboard's rule for roles: every role sees every section and every control, the same for all; what a role cannot do is a disabled control with the reason in its title — never hidden, never absent, never a sentence in its place. So the sections that exist for everyone are never served `hidden`; the attribute stays for what does not exist yet (a result line before a POST, a blocked notice for nobody blocked). The list is the sections the redesign names per page — Review's Yours block, a maintainer's queue line, the audit legend, the brake; the Pipeline's queue-position card, its Operations hint; the Journal's releases with the rollback column; a build's page (#acts); a person's page (#pk-request, #w-toggle, #w-own); the request's gate and form (#gate, #ask, #pkg-form); the Factory gate with its hint (#gate-hint, once hidden for a session); the People page's three worker tables and their legend.
+  // The dashboard's rule for roles: every role sees every section and every control, the same for all; what a role cannot do is a disabled control with the reason in its title — never hidden, never absent, never a sentence in its place. So the sections that exist for everyone are never served `hidden`; the attribute stays for what does not exist yet (a result line before a POST, a blocked notice for nobody blocked). The list is the sections the redesign names per page — Review's Yours block, a maintainer's queue line, the audit legend, the brake; the Pipeline's queue-position card, its Operations hint; the Journal's releases with the rollback column; a build's page (#acts); a person's page (#pk-request, #w-toggle, #w-own); the request's gate and form (#gate, #ask, #pkg-form); the Factory gate with its hint (#gate-hint, once hidden for a session); the People page's sections and its Open the issue (#251: grey with the reason for a viewer who may not apply, never absent).
   it("serves the sections everyone gets without hidden — a role that cannot act sees the control grey, never nothing", async () => {
     const ALWAYS: Record<string, string[]> = {
       "/review": ["mine", "mine-queue", "legend", "brake", "staged"],
@@ -429,7 +429,7 @@ describe("dashboard pages", () => {
       [`/user/${F.owner}`]: ["pk-request", "w-toggle", "w-own", "share-btn"],
       "/request": ["gate", "gate-who", "gate-cta", "gate-btn", "ask", "pkg-form", "pkg-checklist", "pkg-btn", "ws"],
       "/factory": ["gate", "gate-btn", "gate-hint"],
-      "/people": ["w-project", "w-review", "w-community", "wt-legend"],
+      "/people": ["tiles", "maintainers", "contributors", "workers", "become", "apply"],
     };
     const problems: string[] = [];
     for (const [path, ids] of Object.entries(ALWAYS)) {
@@ -521,10 +521,10 @@ describe("dashboard pages", () => {
     expect(html).not.toContain("/factory#gate");
   });
 
-  // A worker's row is the shell's wherever it is drawn. The manifests say which pages draw the worker tables (`shared: "worker-table"`, the legend `"worker-legend"`) — the Workers page, the People page, a person's — and each is proved the same way: the panels served by workerPanels(), the head and the skeleton by wtTables(), every row by workerRow() over wtKind(), the filter by wtText, and no hand-written head, cell or filter left; a page that serves a worker table without claiming the shared name fails here by its address.
+  // A worker's row is the shell's wherever it is drawn. The manifests say which pages draw the worker tables (`shared: "worker-table"`, the legend `"worker-legend"`) — the Workers page and a person's; the People page links the Workers page since #251 and draws none — and each is proved the same way: the panels served by workerPanels(), the head and the skeleton by wtTables(), every row by workerRow() over wtKind(), the filter by wtText, and no hand-written head, cell or filter left; a page that serves a worker table without claiming the shared name fails here by its address.
   it("draws every worker table the manifests claim with the shell's panels, head and row, and no other page draws one", async () => {
     const claims = allComponents(F).filter((c) => c.shared === "worker-table");
-    expect(claims.map((c) => c.page).sort()).toEqual(["/people", `/user/${F.owner}`, "/workers"].sort());
+    expect(claims.map((c) => c.page).sort()).toEqual([`/user/${F.owner}`, "/workers"].sort());
     for (const c of claims) {
       const html = await (await get(c.page)).text(), script = ownScript(html);
       // The served frame: one panel per kind with the shell's table, the legend after them.
@@ -538,7 +538,7 @@ describe("dashboard pages", () => {
       expect(script, `${c.page} filter`).toContain("text: wtText");
       for (const hand of ["WT_HEAD", "WT_LEGEND", 'skeletonRows("#w-', 'colspan="9"', "#workers-table", "var text = function", "<th>Worker</th>"]) expect(script, `${c.page} writes ${hand} by hand`).not.toContain(hand);
     }
-    // Every page that serves a worker table claims it: a fourth page drawing rows of its own would be caught here.
+    // Every page that serves a worker table claims it: a third page drawing rows of its own would be caught here.
     for (const path of DRAWN) {
       const html = await (await get(path)).text();
       if (/class="wtable"/.test(html)) expect(claims.map((c) => c.page), `${path} serves a worker table and claims no shared component`).toContain(path);

@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { parseGovernance } from "../src/governance";
-// The repository's own file, as text (Vite's ?raw): the tests run inside workerd, which has no filesystem.
+import { APPLY_URL, parseGovernance } from "../src/governance";
+import { REPO_ARCHES } from "../src/meta";
+// The repository's own files, as text (Vite's ?raw): the tests run inside workerd, which has no filesystem.
 import repositoryFile from "../../factory/MAINTAINERS.toml?raw";
+import applicationForm from "../../.github/ISSUE_TEMPLATE/maintainer.yml?raw";
 
 describe("governance file", () => {
   it("parses the list of maintainers, sorted, without duplicates", () => {
@@ -20,5 +22,27 @@ describe("governance file", () => {
 
   it("accepts the repository's own file", () => {
     expect(parseGovernance(repositoryFile).length).toBeGreaterThan(0);
+  });
+});
+
+// The way in (#251): the People page's Open the issue and the governance chapter open this form, and what it asks is what the maintainers decide on — who, the approved package, the agent, the architectures, the rules agreed to.
+describe("maintainer application", () => {
+  it("is the issue form the pages link, and asks what the maintainers decide on", () => {
+    expect(APPLY_URL).toMatch(/\/issues\/new\?template=maintainer\.yml$/);
+    expect(applicationForm).toMatch(/^name: Maintainer application$/m);
+    expect(applicationForm).toMatch(/^description: .+$/m);
+    expect(applicationForm).toMatch(/^labels: \["maintainer-application"\]$/m);
+    expect(applicationForm).toMatch(/^body:$/m);
+    const ids = [...applicationForm.matchAll(/^ {4}id: ([a-z-]+)$/gm)].map((m) => m[1]);
+    expect(ids).toEqual(["login", "packages", "agent", "arches", "why", "rules"]);
+    // The architectures are the pool's, every one of them.
+    const arches = /id: arches[\s\S]*?options:\n((?: {8}- label: .+\n)+)/.exec(applicationForm)?.[1] ?? "";
+    expect([...arches.matchAll(/- label: (.+)/g)].map((m) => m[1])).toEqual([...REPO_ARCHES]);
+    // Every rule is a box that must be ticked.
+    const rules = /id: rules[\s\S]*$/.exec(applicationForm)?.[0] ?? "";
+    const boxes = [...rules.matchAll(/- label: (.+)\n( {10}required: true)?/g)];
+    expect(boxes.length).toBeGreaterThanOrEqual(3);
+    for (const b of boxes) expect(b[2], b[1]).toBeTruthy();
+    expect(applicationForm).toContain("https://omarchy-pool.org/docs/governance#becoming");
   });
 });

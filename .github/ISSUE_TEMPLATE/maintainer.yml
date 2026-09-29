@@ -1,0 +1,74 @@
+# The maintainer application (#251). A contributor with a package a
+# maintainer approved asks to become one. The issue asks and decides
+# nothing: a maintainer who agrees opens the pull request that adds the
+# login to factory/MAINTAINERS.toml, and another maintainer approves it
+# (https://omarchy-pool.org/docs/governance#becoming). The People page's
+# "Open the issue" opens this form (worker/src/governance.ts, APPLY_URL),
+# and worker/test/governance.test.ts reads it.
+name: Maintainer application
+description: Ask to become a maintainer. You need one package a maintainer approved.
+title: "Maintainer application: @"
+labels: ["maintainer-application"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Maintainers read what contributors request, have the project build it again, and approve or reject that build. The rules are on the [Governance](https://omarchy-pool.org/docs/governance#becoming) page.
+
+        This issue asks. It decides nothing. If a maintainer agrees, they open a pull request that adds your login to `factory/MAINTAINERS.toml`, and another maintainer approves it. Once it is merged, you are in: the pool applies the file within ten minutes.
+  - type: input
+    id: login
+    attributes:
+      label: GitHub login
+      description: The login you sign in to the pool with. It goes into MAINTAINERS.toml as you write it here.
+      placeholder: octocat
+    validations:
+      required: true
+  - type: textarea
+    id: packages
+    attributes:
+      label: Your approved packages
+      description: One per line, each a link to its page on the pool. A maintainer must have approved at least one.
+      placeholder: https://omarchy-pool.org/package/<name>
+    validations:
+      required: true
+  - type: dropdown
+    id: agent
+    attributes:
+      label: The agent you review with
+      description: The agent a review worker of yours would run. It audits staged builds and drafts the project's builds. Its key stays on your machine.
+      options:
+        - Claude Code (a Claude subscription)
+        - Claude (an Anthropic API key)
+        - OpenAI
+        - Gemini
+        - Grok (xAI)
+        - None yet
+    validations:
+      required: true
+  - type: checkboxes
+    id: arches
+    attributes:
+      label: Architectures you build and review on
+      description: Natively or emulated. Tick every one you can.
+      options:
+        - label: x86_64
+        - label: aarch64
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: What you would review, and how much time you have for it.
+    validations:
+      required: true
+  - type: checkboxes
+    id: rules
+    attributes:
+      label: The rules
+      options:
+        - label: I have read the governance rules and I agree to them.
+          required: true
+        - label: I will never decide on a package I requested.
+          required: true
+        - label: I will never use what a contributor built. The project builds it again, and I decide on that build.
+          required: true

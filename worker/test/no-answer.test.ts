@@ -269,14 +269,24 @@ describe("a list that did not answer is said, not drawn", () => {
     expect(t[3]).toMatch(/<div class="v num">\d/);
   });
 
-  it("/people: the two lists say so, the four tiles read —", async () => {
+  // A kit page (#251): its three tiles are served, and the script writes each number and the line under it — "—" and "did not answer" with the reason on hover, as the shell's tilesUnanswered says it; the Become card cannot tell a signed-in viewer whether they may apply, and says so.
+  it("/people: the two lists say so, the three tiles read —, and the way in says it could not check", async () => {
     const d = await run("/people", { down: true });
     await settled();
     const reason = `the people's lists did not answer: ${INTERNAL}`;
     expect(html(d, "#maintainers-list")).toContain(reason);
     expect(html(d, "#contributors-list")).toContain(reason);
-    expect(html(d, "#contributors-list")).not.toContain("be the first");
-    expectDashes(d, 4, reason);
+    expect(html(d, "#contributors-list")).not.toContain("bring the first package");
+    expect(html(d, "#maintainers-list")).not.toContain("nobody applied yet");
+    for (const k of ["maintainers", "contributors", "reviews"]) {
+      expect(d.nodes[`#n-${k}`].textContent, k).toBe("—");
+      expect(html(d, `#s-${k}`), k).toBe(`<span title="${reason}">did not answer</span>`);
+    }
+    const signedIn = await run("/people", { down: true, as: F.sessions.owner });
+    await settled();
+    expect(signedIn.nodes["#you"].textContent).toBe(`@${F.owner} · could not check`);
+    expect(html(signedIn, "#apply-slot")).toContain(`title="could not check: ${reason}"`);
+    expect(html(signedIn, "#apply-slot")).toContain('class="disabled op-btn"');
   });
 
   it("/: the Made-in-the-open row says so and its four tiles read —", async () => {

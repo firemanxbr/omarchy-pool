@@ -815,8 +815,9 @@ export async function handleRevokeWorker(c: Contributor, id: string, env: Env): 
  * once the project's build of it reached edge (factory.ts moves it from one
  * word to the other). The status words are the server's, so the rule is said
  * here once and every row of GET /factory/packages carries it as `landed` —
- * the Pool's, the Factory's, the Pipeline's and the People page's
- * "community packages" all read the flag, never the words.
+ * the Pool's, the Factory's and the Pipeline's "community packages" and
+ * the People page's ranking of contributors all read the flag, never the
+ * words.
  */
 export function landed(status: string): boolean {
   return status === "approved" || status === "published";
