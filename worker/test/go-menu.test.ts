@@ -10,18 +10,24 @@
  * cancel event close it, and the focus goes back where it was; the line
  * filters the actions and the packages, ↑ and ↓ move with the row named
  * for a screen reader, ↵ opens; the packages come from the one search
- * Home's box asks, at its very address, one request per pause in the
+ * Home's box asks, at its very address, one search per pause in the
  * typing, each term asked once, a term inside a whole answer narrowed
- * without asking; Request "<name>" once the search has said the name is
- * not a package, ↵ before that answer waiting for it; a search that did
- * not answer said, not drawn as "no package"; the theme through opTheme;
- * the kit's sheet linked the first time the menu opens, once; everything
- * the menu writes escaped; and a browser without <dialog> left as served.
+ * without asking, a package whose name holds the line above an action a
+ * hidden word found; a name the search did not find looked up — the
+ * factory's names, then the name on each architecture — and drawn first
+ * where it is, Request "<name>" only for a name found nowhere, landing on
+ * the request form with the name filled in, ↵ before that answer waiting
+ * for it; a package's origin in words; a search or a lookup that did not
+ * answer said, to a screen reader too, not drawn as "no package"; one
+ * letter asking for another; on a Mac, Ctrl+K left to a text field; the
+ * theme through opTheme; the kit's sheet linked the first time the menu
+ * opens, once; everything the menu writes escaped; and a browser without
+ * <dialog> left as served, its closed dialog hidden by the CSS.
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import worker from "../src/index";
-import { REPO_ARCHES } from "../src/meta";
+import { EXPECTED_SOURCES, REPO_ARCHES } from "../src/meta";
 import { GO_ACTIONS, GO_MENU, GO_MENU_HTML, HELPERS } from "../src/pages/layout";
 import { KIT_SHEET_PATH, LUCIDE, lucide, type LucideName } from "../src/pages/kit";
 import { fetchPage, ownScriptOf, RETIRED_PAGES, runScript, scriptOf, seedDashboard, type Fixture } from "./fixture";
@@ -106,8 +112,30 @@ describe("the ⌘K menu on the page", () => {
       if (path === "/me") expect(to, a.label).toBe("/auth/github?next=/me");
       else expect((await raw(new URL(to, "http://pool.test").pathname)).status, `${a.label} → ${to}`).toBe(200);
     }
-    // Request "<name>" lands on the Factory, whose form (#246) reads the name from ?name=.
-    expect((await raw("/factory?name=zzfoo")).status).toBe(200);
+  });
+
+  it("lands Request \"<name>\" on the Factory's form with the name filled in, for whoever is looking, and takes only a pacman name from the address", async () => {
+    const res = await raw("/request?name=zzfoo");
+    expect(res.status).toBe(200);
+    const script = scriptOf(await res.text());
+    const cases: [string, unknown, string][] = [
+      ["?name=zzfoo", { login: "alice", role: "contributor" }, "zzfoo"],
+      // Nobody signed in: the name is in the grey form, and the sign-in comes back to this address.
+      ["?name=zzfoo", null, "zzfoo"],
+      ["?name=%3Cb%3Ex", { login: "alice", role: "contributor" }, ""],
+      ["?name=ZZFOO", { login: "alice", role: "contributor" }, ""],
+      // A renewal fills the whole form from the record instead.
+      ["?renew=mine&name=zzfoo", { login: "alice", role: "contributor" }, ""],
+    ];
+    for (const [search, me, want] of cases) {
+      const ran = runScript(script, {
+        pathname: "/request", search, functions: [],
+        fetch: async (path: string) => (path === "/auth/me" ? (me ? Response.json(me) : Response.json({ error: "sign in" }, { status: 401 })) : new Promise<Response>(() => {})),
+      });
+      for (let i = 0; i < 20 && !ran.nodes["#pkg-form"]?.innerHTML; i++) await new Promise((r) => globalThis.setTimeout(r, 5));
+      expect(ran.nodes["#pkg-form"]?.innerHTML, `${search}: the form drawn`).toContain('id="pkg-name"');
+      expect(ran.nodes["#pkg-name"]?.value ?? "", search).toBe(want);
+    }
   });
 });
 
@@ -134,7 +162,7 @@ const unescape = (s: string) => s.replace(/&quot;/g, '"').replace(/&lt;/g, "<").
  * by hand, timers it runs by hand, the address the menu goes to, and
  * window.opTheme's toggles. rows() reads back what the list was drawn with.
  */
-function mount(o: { search?: boolean; searchHidden?: boolean; kitLinked?: boolean; noDialog?: boolean } = {}) {
+function mount(o: { search?: boolean; searchHidden?: boolean; kitLinked?: boolean; noDialog?: boolean; mac?: boolean } = {}) {
   const doc: any = target({ activeElement: null as any, body: { tagName: "BODY" }, head: { added: [] as any[], appendChild(c: any) { this.added.push(c); } }, otherDialog: false });
   doc.activeElement = doc.body;
   const focusable = (name: string, extra: object = {}) => ({ name, isConnected: true, focused: [] as any[], focus(opts?: unknown) { this.focused.push(opts ?? null); doc.activeElement = this; }, ...extra });
@@ -159,14 +187,15 @@ function mount(o: { search?: boolean; searchHidden?: boolean; kitLinked?: boolea
     if (sel === "dialog[open]") return doc.otherDialog ? {} : null;
     return null;
   };
-  const asked: string[] = [], replies: ((r: unknown) => void)[] = [];
+  const asked: string[] = [], replies: ((r: unknown) => void)[] = [], answered = new Set<number>();
   const fetch = (url: string) => { asked.push(url); return new Promise((res) => replies.push(res)); };
   let timers: { id: number; fn: () => void }[] = [], ids = 0;
   const setTimeout = (fn: () => void) => { const id = ++ids; timers.push({ id, fn }); return id; };
   const clearTimeout = (id: number) => { timers = timers.filter((t) => t.id !== id); };
   const window: any = { opTheme: { toggles: 0, toggle() { this.toggles++; return "light"; } } };
   const location = { assigned: [] as string[], assign(h: string) { this.assigned.push(h); } };
-  new Function("document", "window", "location", "fetch", "setTimeout", "clearTimeout", "esc", "pkgHref", "errorText", "ARCHES", GO_MENU)(doc, window, location, fetch, setTimeout, clearTimeout, SHELL.esc, SHELL.pkgHref, SHELL.errorText, [...REPO_ARCHES]);
+  const navigator = { platform: o.mac ? "MacIntel" : "Linux x86_64" };
+  new Function("document", "window", "location", "navigator", "fetch", "setTimeout", "clearTimeout", "esc", "pkgHref", "errorText", "ARCHES", GO_MENU)(doc, window, location, navigator, fetch, setTimeout, clearTimeout, SHELL.esc, SHELL.pkgHref, SHELL.errorText, [...REPO_ARCHES]);
   const rows = () => [...list.innerHTML.matchAll(/<(a|div) class="go-opt" id="go-o-(\d+)" role="option" aria-selected="(true|false)" data-i="\d+"(?: href="([^"]*)" tabindex="-1")?><span class="go-ic">(<i [^>]*><\/i>)<\/span><span class="go-l">([^<]*)<\/span><span class="go-h">([^<]*)<\/span><\/\1>/g)]
     .map((m) => ({ id: `go-o-${m[2]}`, selected: m[3] === "true", href: m[4] === undefined ? null : unescape(m[4]), icon: m[5], label: unescape(m[6]), hint: unescape(m[7]) }));
   return {
@@ -177,9 +206,34 @@ function mount(o: { search?: boolean; searchHidden?: boolean; kitLinked?: boolea
     keyOnLine: (k: string, extra: Record<string, unknown> = {}) => { const ev = line.fire("keydown", key(k, { target: line, ...extra })); doc.fire("keydown", ev); return ev; },
     type: (text: string) => { line.value = text; line.fire("input"); },
     tick: () => { const due = timers; timers = []; due.forEach((t) => t.fn()); },
-    answer: async (i: number, body: unknown, status = 200) => { replies[i]({ ok: status < 400, status, json: async () => body }); await new Promise((r) => globalThis.setTimeout(r, 0)); },
+    answer,
+    /** The last request to this address still waiting, answered; a test that answers what was never asked fails here. */
+    reply: async (url: string, body: unknown, status = 200) => {
+      await settle();
+      let i = asked.length - 1;
+      while (i >= 0 && (asked[i] !== url || answered.has(i))) i--;
+      if (i < 0) throw new Error(`nothing waits for ${url}; asked: ${asked.join(" ")}`);
+      await answer(i, body, status);
+    },
+    /** Whether a request to this address is still waiting. */
+    waits: (url: string) => asked.some((u, j) => u === url && !answered.has(j)),
+    /** The searches asked, in order: the requests the menu makes of the one search Home's box asks. */
+    searches: () => asked.filter((u) => u.startsWith("/api/v1/search?")),
   };
+  async function answer(i: number, body: unknown, status = 200) { answered.add(i); replies[i]({ ok: status < 400, status, json: async () => body }); await settle(); }
 }
+/** Every promise the menu chained on what was answered, run: the next request it makes is asked by then. */
+async function settle() { for (let k = 0; k < 4; k++) await new Promise((r) => globalThis.setTimeout(r, 0)); }
+const REGISTRY = "/api/v1/factory/packages";
+/** The package page's own address for a name, which the menu asks where the name is. */
+const lookup = (name: string, arch: string) => `/api/v1/package/${name}?ring=stable&arch=${arch}`;
+/** A name found nowhere: the factory's names (the first time the page asks them) hold it not, and no architecture serves it. */
+async function nowhere(m: ReturnType<typeof mount>, name: string, registered: string[] = []) {
+  await settle();
+  if (m.waits(REGISTRY)) await m.reply(REGISTRY, { packages: registered.map((n) => ({ name: n })) });
+  for (const arch of REPO_ARCHES) await m.reply(lookup(name, arch), { error: `${name} is not in any ring for ${arch}` }, 404);
+}
+const origin = (source: string, arch: string) => EXPECTED_SOURCES.find((e) => e.source === source && e.arch === arch)!.origin;
 const pkg = (name: string, source = "extra", description = `${name} for the menu's test`) => ({ name, version: "1.0-1", repo_arch: "x86_64", source, size_download: 1, sha256: "0".repeat(64), description });
 const homeSearch = (term: string) => `/api/v1/search?q=${encodeURIComponent(term)}&ring=stable&arch=${REPO_ARCHES[0]}&limit=9`;
 
@@ -292,6 +346,8 @@ describe("the ⌘K menu, run", () => {
     expect(m.rows().map((r) => r.label)).toEqual(["Browse packages", "Set up the pool", "Request a package", "People"]);
     m.tick();
     expect(m.asked).toEqual([]);
+    expect(m.none.hidden).toBe(true);
+    expect(m.said.textContent).toBe("4 results");
     m.keyOnLine("ArrowUp");
     expect(m.rows().map((r) => r.selected)).toEqual([false, false, false, true]);
     expect(m.line.attrs["aria-activedescendant"]).toBe("go-o-3");
@@ -311,7 +367,8 @@ describe("the ⌘K menu, run", () => {
     // The pointer moves the lit row too; a press opens it, and one with a modifier is the browser's.
     m.type("do");
     m.tick();
-    await m.answer(0, { packages: [] });
+    await m.reply(homeSearch("do"), { packages: [] });
+    await nowhere(m, "do");
     expect(m.rows().map((r) => r.label)).toEqual(["Docs", 'Request "do"']);
     m.list.fire("mousemove", { target: { closest: () => ({ getAttribute: () => "1" }) } });
     expect(m.rows().map((r) => r.selected)).toEqual([false, true]);
@@ -323,15 +380,86 @@ describe("the ⌘K menu, run", () => {
     expect(m.menu.open).toBe(false);
   });
 
+  it("asks for another letter when one matches no action, and never says nothing matches before the search has answered", () => {
+    const m = mount();
+    m.window.opPalette.open();
+    // "z": no action says it, and the search is not asked below two letters — zlib may well be there.
+    m.type("z");
+    m.tick();
+    expect(m.asked).toEqual([]);
+    expect(m.rows()).toEqual([]);
+    expect(m.none.hidden).toBe(false);
+    expect(m.none.textContent).toBe("type one more letter to search the packages");
+    expect(m.said.textContent, "a screen reader hears the same words").toBe("type one more letter to search the packages");
+    // Two letters, the search out: nothing said yet.
+    m.type("zl");
+    expect(m.none.hidden).toBe(true);
+    expect(m.said.textContent).toBe("");
+  });
+
   it("switches the theme through opTheme, in place", () => {
     const m = mount();
     m.window.opPalette.open();
     m.type("theme");
     expect(m.rows()[0]).toMatchObject({ label: "Theme: dark / light", href: null });
+    // An action lit opens at once: the search still out cannot put a package's name above it unless the name is the line.
     m.keyOnLine("Enter");
     expect(m.window.opTheme.toggles).toBe(1);
     expect(m.location.assigned).toEqual([]);
     expect(m.menu.open).toBe(false);
+  });
+
+  it("puts a package whose name holds the line above an action a hidden word found, and an action the line begins above them all", async () => {
+    const m = mount();
+    m.window.opPalette.open();
+    // "pacm" is in Set up the pool's words, and pacman is a package: pacman first, ↵ opens it.
+    m.type("pacm");
+    m.tick();
+    await m.reply(homeSearch("pacm"), { packages: [pkg("pacman", "core"), pkg("pacman-contrib"), pkg("yay", "chaotic", "a pacman wrapper")] });
+    await nowhere(m, "pacm");
+    expect(m.rows().map((r) => r.label)).toEqual(["pacman", "pacman-contrib", "Set up the pool", "yay", 'Request "pacm"']);
+    expect(m.rows().map((r) => r.hint)).toEqual([origin("core", REPO_ARCHES[0]), origin("extra", REPO_ARCHES[0]), "›", origin("chaotic", REPO_ARCHES[0]), "factory"]);
+    m.keyOnLine("Enter");
+    expect(m.location.assigned).toEqual([SHELL.pkgHref("pacman", "stable", REPO_ARCHES[0])]);
+    // "pac": the actions whose label holds it later, or whose words do, after the names and before what only a description matched.
+    m.window.opPalette.open();
+    m.type("pac");
+    m.tick();
+    await m.reply(homeSearch("pac"), { packages: [pkg("pacman", "core"), pkg("libalpm-pac"), pkg("yay", "chaotic", "a pacman wrapper")] });
+    await nowhere(m, "pac");
+    expect(m.rows().map((r) => r.label)).toEqual(["pacman", "libalpm-pac", "Browse packages", "Set up the pool", "Request a package", "yay", 'Request "pac"']);
+    // "ai" is Connect your agent's word, and cairo's name holds it.
+    m.type("ai");
+    m.tick();
+    await m.reply(homeSearch("ai"), { packages: [pkg("cairo")] });
+    await nowhere(m, "ai");
+    expect(m.rows().map((r) => r.label)).toEqual(["cairo", "Connect your agent", 'Request "ai"']);
+    // "theme": the Theme action begins with it, and goes before the packages whose names hold it.
+    m.type("theme");
+    m.tick();
+    await m.reply(homeSearch("theme"), { packages: [pkg("adwaita-icon-theme"), pkg("sddm", "extra", "a login manager with themes")] });
+    await nowhere(m, "theme");
+    expect(m.rows().map((r) => r.label)).toEqual(["Theme: dark / light", "adwaita-icon-theme", "sddm", 'Request "theme"']);
+    // The typed name that is a package goes first of all, before an action it begins.
+    m.type("docs");
+    m.tick();
+    await m.reply(homeSearch("docs"), { packages: [pkg("python-docs"), pkg("docs")] });
+    expect(m.rows().map((r) => r.label)).toEqual(["docs", "Docs", "python-docs"]);
+    expect(m.waits(lookup("docs", REPO_ARCHES[0])), "a name the search found is not looked up").toBe(false);
+  });
+
+  it("says where a package comes from in words, and the source's id only when the sources do not know it", async () => {
+    const m = mount();
+    m.window.opPalette.open();
+    m.type("hypr");
+    m.tick();
+    await m.reply(homeSearch("hypr"), { packages: [pkg("hyprland-qtutils", "packages"), pkg("hyprland", "extra"), pkg("hyprmon", "factory"), pkg("hyprx", "somewhere-new")] });
+    expect(m.rows().map((r) => [r.label, r.hint])).toEqual([
+      ["hyprland-qtutils", "Omarchy"],
+      ["hyprland", "Arch extra"],
+      ["hyprmon", "factory"],
+      ["hyprx", "somewhere-new"],
+    ]);
   });
 
   it("asks Home's search at its address, once per pause and once per term, and narrows a whole answer without asking", async () => {
@@ -341,42 +469,136 @@ describe("the ⌘K menu, run", () => {
     expect(m.asked, "nothing before the pause").toEqual([]);
     m.tick();
     expect(m.asked).toEqual([homeSearch("hypr")]);
-    // Nine rows — the limit, so not the whole answer: the first six packages, then Request, since no row is "hypr" itself.
+    // Nine rows — the limit, so not the whole answer: the first six packages, then — "hypr" itself found nowhere — Request.
     const nine = ["hyprland", "hyprlock", "hypridle", "hyprpaper", "hyprpicker", "hyprsunset", "hyprcursor", "hyprutils", "xdg-desktop-portal-hyprland"].map((n) => pkg(n));
     await m.answer(0, { packages: nine });
     let rows = m.rows();
+    expect(rows.map((r) => r.label), "no Request while the name is looked up").toEqual(nine.slice(0, 6).map((p) => p.name));
+    expect(m.said.textContent, "nothing said until the rows are settled").toBe("");
+    await nowhere(m, "hypr");
+    rows = m.rows();
     expect(rows.map((r) => r.label)).toEqual([...nine.slice(0, 6).map((p) => p.name), 'Request "hypr"']);
-    expect(rows[0]).toMatchObject({ hint: "extra", href: SHELL.pkgHref("hyprland", "stable", REPO_ARCHES[0]), icon: lucide("package", 16) });
-    expect(rows[6]).toMatchObject({ hint: "factory", href: "/factory?name=hypr", icon: lucide("git-pull-request", 16) });
+    expect(rows[0]).toMatchObject({ hint: origin("extra", REPO_ARCHES[0]), href: SHELL.pkgHref("hyprland", "stable", REPO_ARCHES[0]), icon: lucide("package", 16) });
+    expect(rows[6]).toMatchObject({ hint: "factory", href: "/request?name=hypr", icon: lucide("git-pull-request", 16) });
+    expect(m.said.textContent).toBe("7 results");
     // A longer term the answer does not hold whole: asked, and until then the rows of the last answer that still match — never a Request.
     m.type("hyprland");
     expect(m.rows().map((r) => r.label)).toEqual(["hyprland", "xdg-desktop-portal-hyprland"]);
     m.tick();
-    expect(m.asked).toEqual([homeSearch("hypr"), homeSearch("hyprland")]);
-    await m.answer(1, { packages: [pkg("hyprland-qtutils"), pkg("hyprland")] });
-    // The name itself first, whatever order the rows came in; no Request for a name that is a package.
+    expect(m.searches()).toEqual([homeSearch("hypr"), homeSearch("hyprland")]);
+    await m.reply(homeSearch("hyprland"), { packages: [pkg("hyprland-qtutils"), pkg("hyprland")] });
+    // The name itself first, whatever order the rows came in; no Request for a name that is a package, and nothing looked up.
     rows = m.rows();
     expect(rows.map((r) => r.label)).toEqual(["hyprland", "hyprland-qtutils"]);
+    expect(m.waits(lookup("hyprland", REPO_ARCHES[0]))).toBe(false);
     m.keyOnLine("Enter");
     expect(m.location.assigned).toEqual([SHELL.pkgHref("hyprland", "stable", REPO_ARCHES[0])]);
-    // Asked once per page: the same term again is answered from memory.
+    // Asked once per page: the same term again is answered from memory, the lookups too.
+    const before = m.asked.length;
     m.window.opPalette.open();
     m.type("hypr");
     m.tick();
-    expect(m.asked.length).toBe(2);
+    expect(m.asked.length).toBe(before);
     expect(m.rows().length).toBe(7);
-    // A whole answer (fewer rows than the limit) holds every answer to a term inside it: "zzfoo" is never asked.
+    // A whole answer (fewer rows than the limit) holds every answer to a term inside it: "zzfoo" is never searched, only looked up.
     m.type("zz");
     m.tick();
-    expect(m.asked[2]).toBe(homeSearch("zz"));
-    await m.answer(2, { packages: [] });
+    expect(m.searches()[2]).toBe(homeSearch("zz"));
+    await m.reply(homeSearch("zz"), { packages: [] });
+    await nowhere(m, "zz");
     expect(m.rows().map((r) => r.label)).toEqual(['Request "zz"']);
     m.type("zzfoo");
     m.tick();
-    expect(m.asked.length, "narrowed, not asked").toBe(3);
+    expect(m.searches().length, "narrowed, not searched").toBe(3);
+    await nowhere(m, "zzfoo");
     expect(m.rows().map((r) => [r.label, r.hint, r.selected])).toEqual([['Request "zzfoo"', "factory", true]]);
     m.keyOnLine("Enter");
-    expect(m.location.assigned[m.location.assigned.length - 1]).toBe("/factory?name=zzfoo");
+    expect(m.location.assigned[m.location.assigned.length - 1]).toBe("/request?name=zzfoo");
+    // The factory's names were asked once for the page, whatever was looked up.
+    expect(m.asked.filter((u) => u === REGISTRY).length).toBe(1);
+  });
+
+  it("uses a whole answer that lands in the pause for the line typed since, instead of asking for it", async () => {
+    const m = mount();
+    m.window.opPalette.open();
+    m.type("zz");
+    m.tick();
+    expect(m.searches()).toEqual([homeSearch("zz")]);
+    // "zz" is out when the reader types on; its whole answer lands before the pause is over.
+    m.type("zzfoo");
+    await m.reply(homeSearch("zz"), { packages: [] });
+    m.tick();
+    expect(m.searches(), "zzfoo is inside the whole answer to zz").toEqual([homeSearch("zz")]);
+    await nowhere(m, "zzfoo");
+    expect(m.rows().map((r) => r.label)).toEqual(['Request "zzfoo"']);
+  });
+
+  it("looks up a name the search did not find, and draws it first where it is: another architecture, a ring before stable, the factory's", async () => {
+    const m = mount();
+    m.window.opPalette.open();
+    // An aarch64 package: stable on the first architecture has no row, the factory does not know the name, the first architecture serves it nowhere, the second does.
+    m.type("linux-asahi");
+    m.keyOnLine("Enter");
+    m.tick();
+    await m.reply(homeSearch("linux-asahi"), { packages: [] });
+    expect(m.rows(), "nothing drawn while the name is looked up").toEqual([]);
+    expect(m.none.hidden, "and no 'nothing matches'").toBe(true);
+    expect(m.location.assigned, "↵ waits").toEqual([]);
+    await m.reply(REGISTRY, { packages: [{ name: "ours" }, { name: "caligula" }] });
+    await m.reply(lookup("linux-asahi", REPO_ARCHES[0]), { error: "linux-asahi is not in any ring" }, 404);
+    await m.reply(lookup("linux-asahi", REPO_ARCHES[1]), { name: "linux-asahi", shown_ring: "stable", package: { source: "asahi-alarm" } });
+    expect(m.location.assigned, "↵ opens the package, not a request").toEqual([SHELL.pkgHref("linux-asahi", "stable", REPO_ARCHES[1])]);
+    m.window.opPalette.open();
+    m.type("linux-asahi");
+    m.tick();
+    expect(m.rows().map((r) => [r.label, r.hint, r.href])).toEqual([["linux-asahi", origin("asahi-alarm", REPO_ARCHES[1]), SHELL.pkgHref("linux-asahi", "stable", REPO_ARCHES[1])]]);
+    // A package only in edge on the first architecture: its own lookup answers, the second architecture is not asked.
+    m.type("newtool");
+    m.tick();
+    await m.reply(homeSearch("newtool"), { packages: [] });
+    await m.reply(lookup("newtool", REPO_ARCHES[0]), { name: "newtool", shown_ring: "edge", package: { source: "extra" } });
+    expect(m.rows().map((r) => [r.label, r.hint, r.href])).toEqual([["newtool", origin("extra", REPO_ARCHES[0]), SHELL.pkgHref("newtool", "stable", REPO_ARCHES[0])]]);
+    expect(m.asked).not.toContain(lookup("newtool", REPO_ARCHES[1]));
+    // A factory name — in the lab, or reserved by a request and in no ring yet — is its package's page, before a row only its description found, and nothing else is asked. ↵ with that row lit waits for where the name is.
+    const f = mount();
+    f.window.opPalette.open();
+    f.type("ours");
+    f.tick();
+    await f.reply(homeSearch("ours"), { packages: [pkg("hourly", "extra", "counts the hours")] });
+    expect(f.rows().map((r) => r.label)).toEqual(["hourly"]);
+    f.keyOnLine("Enter");
+    expect(f.location.assigned, "↵ waits: the name may come first").toEqual([]);
+    await f.reply(REGISTRY, { packages: [{ name: "ours" }, { name: "caligula" }] });
+    expect(f.asked).not.toContain(lookup("ours", REPO_ARCHES[0]));
+    expect(f.location.assigned).toEqual([SHELL.pkgHref("ours", "stable", REPO_ARCHES[0])]);
+    f.window.opPalette.open();
+    f.type("ours");
+    expect(f.rows().map((r) => [r.label, r.hint])).toEqual([["ours", "factory"], ["hourly", origin("extra", REPO_ARCHES[0])]]);
+    f.type("caligula");
+    f.tick();
+    await f.reply(homeSearch("caligula"), { packages: [] });
+    expect(f.rows().map((r) => [r.label, r.hint, r.href])).toEqual([["caligula", "factory", SHELL.pkgHref("caligula", "stable", REPO_ARCHES[0])]]);
+    expect(f.rows().some((r) => r.label.startsWith("Request")), "a reserved name is not offered again").toBe(false);
+    // A row the reader moved to is theirs: ↵ opens it at once, whatever is still being looked up.
+    const g = mount();
+    g.window.opPalette.open();
+    g.type("ours");
+    g.tick();
+    await g.reply(homeSearch("ours"), { packages: [pkg("hourly", "extra", "counts the hours")] });
+    g.keyOnLine("ArrowDown");
+    g.keyOnLine("Enter");
+    expect(g.location.assigned).toEqual([SHELL.pkgHref("hourly", "stable", REPO_ARCHES[0])]);
+    // A ↵ still waiting is taken back by a move: the answer that lands opens nothing by itself.
+    const h = mount();
+    h.window.opPalette.open();
+    h.type("ours");
+    h.keyOnLine("Enter");
+    h.keyOnLine("ArrowDown");
+    h.tick();
+    await h.reply(homeSearch("ours"), { packages: [pkg("hourly", "extra", "counts the hours")] });
+    await h.reply(REGISTRY, { packages: [{ name: "ours" }] });
+    expect(h.location.assigned).toEqual([]);
+    expect(h.rows().map((r) => [r.label, r.selected])).toEqual([["ours", true], ["hourly", false]]);
   });
 
   it("waits for the answer when ↵ comes before it with nothing shown, and draws no answer for a line that moved on", async () => {
@@ -390,18 +612,20 @@ describe("the ⌘K menu, run", () => {
     m.keyOnLine("Enter");
     expect(m.location.assigned).toEqual([]);
     m.tick();
-    await m.answer(0, { packages: [] });
-    expect(m.location.assigned).toEqual(["/factory?name=qqq"]);
+    await m.reply(homeSearch("qqq"), { packages: [] });
+    expect(m.location.assigned, "the name is looked up first").toEqual([]);
+    await nowhere(m, "qqq");
+    expect(m.location.assigned).toEqual(["/request?name=qqq"]);
     // An answer that lands after the line changed does not draw over it.
     m.window.opPalette.open();
     m.type("abc");
     m.tick();
     m.type("peo");
-    await m.answer(1, { packages: [pkg("abc")] });
+    await m.reply(homeSearch("abc"), { packages: [pkg("abc")] });
     expect(m.rows().map((r) => r.label)).toEqual(["People"]);
   });
 
-  it("says a search that did not answer, and offers no Request over it", async () => {
+  it("says a search or a lookup that did not answer, to a screen reader too, and offers no Request over it", async () => {
     const m = mount();
     m.window.opPalette.open();
     m.type("ghostty");
@@ -410,11 +634,36 @@ describe("the ⌘K menu, run", () => {
     expect(m.rows()).toEqual([]);
     expect(m.none.hidden).toBe(false);
     expect(m.none.textContent).toBe("the package search did not answer: HTTP 500");
-    // Typing again asks again.
+    expect(m.said.textContent, "not 'no results'").toBe("the package search did not answer: HTTP 500");
+    // It is not asked again by itself; typing again asks again.
+    m.tick();
+    expect(m.asked.length).toBe(1);
     m.type("ghostt");
     m.tick();
     expect(m.asked.length).toBe(2);
     expect(m.none.hidden).toBe(true);
+    // With an action on the line, the failure is said beside the count.
+    m.type("status");
+    m.tick();
+    await m.reply(homeSearch("status"), { error: "internal error" }, 500);
+    expect(m.rows().map((r) => r.label)).toEqual(["Status"]);
+    expect(m.said.textContent).toBe("the package search did not answer: HTTP 500; 1 result");
+    // A lookup that did not answer: no Request over a name the menu could not place.
+    m.type("zzfoo");
+    m.tick();
+    await m.reply(homeSearch("zzfoo"), { packages: [] });
+    await m.reply(REGISTRY, { packages: [] });
+    await m.reply(lookup("zzfoo", REPO_ARCHES[0]), { error: "internal error" }, 503);
+    expect(m.rows()).toEqual([]);
+    expect(m.none.textContent).toBe("the package search did not answer: HTTP 503");
+    expect(m.said.textContent).toBe("the package search did not answer: HTTP 503");
+    // Typing it again looks it up again.
+    m.type("zzfo");
+    m.type("zzfoo");
+    m.tick();
+    await m.reply(lookup("zzfoo", REPO_ARCHES[0]), { error: "not in any ring" }, 404);
+    await m.reply(lookup("zzfoo", REPO_ARCHES[1]), { error: "not in any ring" }, 404);
+    expect(m.rows().map((r) => r.label)).toEqual(['Request "zzfoo"']);
   });
 
   it("escapes what it writes: a package's name and source, the typed line", async () => {
@@ -426,18 +675,48 @@ describe("the ⌘K menu, run", () => {
     expect(m.list.innerHTML).not.toMatch(/<img|<script|<b>/);
     expect(m.list.innerHTML).toContain("&lt;img src=x onerror=alert(1)&gt;");
     expect(m.list.innerHTML).toContain("&quot;&gt;&lt;script&gt;");
-    // Not a pacman name: no Request, and nothing to go to.
+    // Not a pacman name: no Request, nothing looked up, and nothing to go to.
     expect(m.rows().map((r) => r.label)).toEqual(['<img src=x onerror=alert(1)>']);
     m.type('"><i>');
     m.tick();
     await m.answer(1, { packages: [] });
+    expect(m.asked.length).toBe(2);
     expect(m.rows()).toEqual([]);
     expect(m.none.textContent).toBe('nothing matches “"><i>”');
+    expect(m.said.textContent).toBe("no results");
   });
 
-  it("leaves a browser without <dialog> as served: no menu, no key taken", () => {
+  it("leaves Ctrl+K to a Mac's text field, where it deletes to the end of the line, and takes ⌘K there", () => {
+    const m = mount({ mac: true });
+    const field = { tagName: "INPUT", name: "field", focus() { m.doc.activeElement = this; } };
+    m.doc.activeElement = field;
+    expect(m.press("k", { ctrlKey: true }).defaultPrevented).toBe(false);
+    expect(m.menu.open).toBe(false);
+    expect(m.press("k", { metaKey: true }).defaultPrevented).toBe(true);
+    expect(m.menu.open).toBe(true);
+    // In the menu's own line too; ⌘K closes it.
+    expect(m.keyOnLine("k", { ctrlKey: true }).defaultPrevented).toBe(false);
+    expect(m.menu.open).toBe(true);
+    m.keyOnLine("k", { metaKey: true });
+    expect(m.menu.open).toBe(false);
+    // Nowhere to type, Ctrl+K is the menu's on a Mac as well; and anywhere at all elsewhere.
+    m.doc.activeElement = m.doc.body;
+    expect(m.press("k", { ctrlKey: true }).defaultPrevented).toBe(true);
+    expect(m.menu.open).toBe(true);
+    const pc = mount();
+    pc.doc.activeElement = field;
+    expect(pc.press("k", { ctrlKey: true }).defaultPrevented).toBe(true);
+    expect(pc.menu.open).toBe(true);
+  });
+
+  it("leaves a browser without <dialog> as served: no menu, no key taken, the closed dialog hidden by the CSS", async () => {
     const m = mount({ noDialog: true });
     expect(m.window.opPalette).toBeUndefined();
     expect(m.doc.on.keydown ?? []).toEqual([]);
+    // Such a browser has no rule of its own for a closed <dialog>: the frame's CSS hides it, so neither the line nor the keys are drawn after the footer.
+    const css = /<style>([\s\S]*?)<\/style>/.exec(await (await get("/status")).text())![1];
+    expect(css).toContain("dialog.go-menu:not([open]) { display: none; }");
+    // On a touch screen the line is 16px, so a phone's browser does not zoom the page into it each time the menu opens.
+    expect(css).toMatch(/@media \(hover: none\) and \(pointer: coarse\) \{[^}]*\}[^}]*\.go-box input \{ font-size: 16px; \}/);
   });
 });

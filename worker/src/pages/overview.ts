@@ -289,6 +289,9 @@ __CHARTS__
   // The search box answers as you type: the first matches in stable for
   // x86_64, each a package page; the last line, and Enter, the full search
   // with its rings and architectures. Nothing is sent below two characters.
+  // The term goes in lower case — package names are, and the search's LIKE
+  // ignores case — so "Hypr" and "hypr" are one address, the ⌘K menu's too,
+  // and one copy at the edge.
   (function () {
     var box = $("#pool-q"), out = $("#pool-suggest"), timer = null, seq = 0;
     if (!box || !out) return;
@@ -302,11 +305,11 @@ __CHARTS__
     }
     box.addEventListener("input", function () {
       clearTimeout(timer);
-      var term = box.value.trim(), my = ++seq;
+      var term = box.value.trim().toLowerCase(), my = ++seq;
       if (term.length < 2) { hide(); return; }
       timer = setTimeout(function () {
         fetch("/api/v1/search?q=" + encodeURIComponent(term) + "&ring=stable&arch=" + ARCHES[0] + "&limit=9").then(function (r) { return r.json(); }).then(function (d) {
-          if (my !== seq || box.value.trim() !== term) return;
+          if (my !== seq || box.value.trim().toLowerCase() !== term) return;
           show(term, d.packages || []);
         }).catch(hide);
       }, 200);
@@ -348,11 +351,11 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // The box / focuses (aria-keyshortcuts="/", the ⌘K menu's hook: layout.ts GO_MENU), and the one search the menu asks too, at this very address, so the two share the edge's copy.
+      // The box / focuses (aria-keyshortcuts="/", the ⌘K menu's hook: layout.ts GO_MENU), and the one search the menu asks too, at this very address and in lower case, so the two share the edge's copy.
       id: "pool.search",
       page: "/",
       anchor: ['<form class="searchbar" action="/packages" method="get"', 'name="q"', 'id="pool-q"', 'aria-keyshortcuts="/"', 'id="pool-suggest"'],
-      script: ['"#pool-q"', '"#pool-suggest"', '"/api/v1/search?q="', '"&ring=stable&arch=" + ARCHES[0] + "&limit=9"', "d.packages", "p.description", 'pkgHref(p.name, "stable", ARCHES[0])'],
+      script: ['"#pool-q"', '"#pool-suggest"', '"/api/v1/search?q="', '"&ring=stable&arch=" + ARCHES[0] + "&limit=9"', "box.value.trim().toLowerCase()", "d.packages", "p.description", 'pkgHref(p.name, "stable", ARCHES[0])'],
       reads: [
         { path: `/api/v1/search?q=${F.pkg}&ring=stable&arch=${F.arch}&limit=9`, fields: ["packages", "packages.0.name", "packages.0.version", "packages.0.source", "packages.0.description"] },
         { path: `/packages?q=${F.pkg}`, json: false },
