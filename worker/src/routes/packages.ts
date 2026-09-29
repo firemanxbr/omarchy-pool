@@ -1,6 +1,7 @@
 import { json, readJson, type Env } from "../index";
 import { isRepoArch, packageKey, signatureKey } from "../r2";
 import { gzipJson } from "../gzip";
+import { elfClassOf } from "../elf";
 
 interface Rule {
   name: string;
@@ -24,7 +25,7 @@ interface Manifest {
   replaces?: string[];
   files?: string[];
   /** The `.PKGINFO` fields as written by makepkg; `provides` there is what pacman resolves through. */
-  pkginfo?: { provides?: string[] };
+  pkginfo?: { provides?: string[]; depends?: string[] };
   /** Go modules and crates.io crates the binaries embed (statically linked). */
   components?: { ecosystem: string; name: string; version: string }[];
 }
@@ -81,10 +82,10 @@ export async function handlePostPackage(url: URL, request: Request, env: Env): P
   const files = m.files ?? [];
   delete m.files;
   const inserted = await env.DB.prepare(
-    `INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+    `INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch, elf_class)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
   )
-    .bind(m.sha256, m.name, m.version, m.arch, m.filename, m.size_download, m.size_installed, hasSig, JSON.stringify(m), source, key, repoArch)
+    .bind(m.sha256, m.name, m.version, m.arch, m.filename, m.size_download, m.size_installed, hasSig, JSON.stringify(m), source, key, repoArch, elfClassOf(m))
     .first<{ id: number }>();
   const id = inserted!.id;
   const gz = await gzipJson(files);

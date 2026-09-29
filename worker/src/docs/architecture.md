@@ -70,7 +70,7 @@ Promoting a release copies and re-uploads most of that data, so a bump takes
 
 | table | purpose |
 |---|---|
-| `packages` | immutable rows keyed by `sha256`; `manifest_json` holds the full manifest |
+| `packages` | immutable rows keyed by `sha256`; `manifest_json` holds the full manifest; `elf_class`, its objects' ELF class when not the machine's own (see Architectures) |
 | `package_provides` / `package_requires` / `package_files` | normalized graph for queries |
 | `package_components` | what a package's statically linked binaries embed — Go modules (`debug/buildinfo`), crates.io crates (`cargo-auditable`) — one row per module or crate, for advisory matching against language ecosystems |
 | `releases` | `(ring, seq)` with `created_at`, optional `parent_id`, a note, the stored summary (`package_count`, `bytes`, `sources`) and `checkpoint` |
@@ -262,14 +262,38 @@ and Arch Linux ARM's `python-foo-1.0-1-any` are different objects in different
 directories. A ring holds both architectures; `render --arch` emits one database
 per source for that architecture.
 
-An `any` package that ships an ELF library ships another machine's: a cross
-toolchain's sysroot (`aarch64-linux-gnu-glibc` carries an aarch64 `libc.so.6`
-into x86_64's `extra`). So a soname a binary loads resolves only to a package
-whose own architecture is the page's; of those, to the one the package declares
-(zlib's `glibc`, a lib32 package's `lib32-glibc`), then by the include's order
-(`REPO_ORDER`, what pacman would pick), then by name. The sonames an `any`
-package ships bring it no dependent either: its page's *required by* counts
-its name and what its `.PKGINFO` declares (#275).
+A soname a binary loads resolves only to a library built for the binary's
+machine (#275, `worker/src/elf.ts`). pkg-extract records a shipped library
+as the soname and Arch's `libz.so=1-64`, whose suffix is its ELF class, and
+nothing of its ELF machine, so the machine is read from three facts:
+
+- An `any` package that ships an ELF library ships another machine's: a
+  cross toolchain's sysroot (`aarch64-linux-gnu-glibc` carries an aarch64
+  `libc.so.6` into x86_64's `extra`). Only a package whose own architecture
+  is the page's provides a loaded soname.
+- The ELF class. A 32-bit (lib32, i686) binary loads 32-bit libraries, a
+  64-bit one 64-bit libraries: lib32-curl's `libc.so.6` is lib32-glibc's,
+  whatever it declares. A package's class (`packages.elf_class`: `32`,
+  `32 64` for both, null for the machine's own 64-bit or nothing to tell
+  by) is read off its manifest at indexing: the class forms it ships and
+  declares, and the ones it depends on. A declared class form
+  (`libcrypto.so=3-32`) is answered as pacman answers it, by that provide.
+- A sysroot inside a package of the page's architecture:
+  `aarch64-linux-gnu-gcc` is an x86_64 package that carries an aarch64
+  `libstdc++.so.6` under `/usr/aarch64-linux-gnu/lib`. A library a package
+  ships only under `/usr/<target>/` is another machine's. The file list
+  says so; the page reads a candidate's list only when two or more could
+  answer a library, and then the winner's, a point read each.
+
+Of what is left, a loaded soname resolves by the include's order
+(`REPO_ORDER`, what pacman would pick), then by name. The reverse edges are
+the same rules read backwards: an `any` package's shipped sonames, and a
+library a package ships only in a sysroot, bring it no dependent (its name
+and what its `.PKGINFO` declares still do), and a loaded soname brings only
+dependents of its class. The Security page's exposure follows the class and
+the `any` rule; it reads no file list, so an x86_64 cross compiler's sysroot
+still counts there (it would unpack the list of every vulnerable package on
+each read).
 
 ## Extraction (`crates/pkg-extract`)
 

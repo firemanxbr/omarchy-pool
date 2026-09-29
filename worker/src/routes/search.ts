@@ -6,6 +6,7 @@ import { maintenanceOf } from "./users";
 import { sealOf } from "./seal";
 import { provenanceOf } from "../provenance";
 import { gunzipJson } from "../gzip";
+import { CLASS_FORM, classesMeet, classesMeetSql, elfClassOf, onlyInSysroot, sonameOf } from "../elf";
 
 /**
  * Package search and the package page's data, always within a ring's current
@@ -71,29 +72,30 @@ function capabilityOf(dep: string): string {
   return dep.split(/[<>=]/)[0].trim();
 }
 
-/** A package of the ring that answers a capability: by its name (`named`), or by something it provides. */
+/** A package of the ring that answers a capability: by its name (`named`), or by something it provides (`vc`, the provide's constraint). */
 interface ProviderCandidate {
+  id: number;
   name: string;
   version: string;
   source: string;
   named: number;
+  elf_class: string | null;
+  vc: string | null;
 }
 
 /**
  * The one package a capability resolves to, whatever order the rows came
  * in — they came in the index's, and the first won: a cross toolchain
  * indexed before glibc took zlib's libc.so.6 (#275). A package of that name
- * first, then one the package itself declares (zlib's glibc for its
- * libc.so.6, a lib32 package's lib32-glibc), then the include's order
- * (sourceRank: what pacman would pick), then the name.
+ * first, then the include's order (sourceRank: what pacman would pick),
+ * then the name.
  */
-export function pickProvider(candidates: ProviderCandidate[], preferred: Set<string>): { name: string; version: string } | undefined {
-  const rank = (c: ProviderCandidate) => [c.named ? 0 : 1, preferred.has(c.name) ? 0 : 1, sourceRank(c.source)];
-  const best = [...candidates].sort((a, b) => {
+export function pickProvider(candidates: ProviderCandidate[]): ProviderCandidate | undefined {
+  const rank = (c: ProviderCandidate) => [c.named ? 0 : 1, sourceRank(c.source)];
+  return [...candidates].sort((a, b) => {
     const [x, y] = [rank(a), rank(b)];
-    return x[0] - y[0] || x[1] - y[1] || x[2] - y[2] || a.name.localeCompare(b.name) || a.source.localeCompare(b.source);
+    return x[0] - y[0] || x[1] - y[1] || a.name.localeCompare(b.name) || a.source.localeCompare(b.source);
   })[0];
-  return best ? { name: best.name, version: best.version } : undefined;
 }
 
 /**
@@ -230,8 +232,12 @@ export async function handlePackage(name: string, url: URL, env: Env): Promise<R
   // Forward edges: declared dependencies and the sonames its binaries load,
   // each resolved to the package that provides it within this ring.
   const declared = (manifest.pkginfo?.depends ?? []).map(capabilityOf);
+  // A declared library in Arch's class form (lib32-curl's `libcrypto.so=3-32`) is answered, as pacman answers it, by a
+  // provide of that version and class: lib32-openssl's, never openssl's `libcrypto.so=3-64`.
+  const classForm = new Map((manifest.pkginfo?.depends ?? []).flatMap((d) => (CLASS_FORM.test(d) ? [[capabilityOf(d), d.slice(capabilityOf(d).length)] as const] : [])));
   const sonames = (manifest.requires ?? []).filter((r) => /\.so(\.|$|\()/.test(r)).map((r) => r.replace(/\(.*\)$/, ""));
   const wanted = [...new Set([...declared, ...sonames])];
+  const ownClass = elfClassOf(manifest);
   const candidates = new Map<string, ProviderCandidate[]>();
   for (let i = 0; i < wanted.length; i += 100) {
     const chunk = wanted.slice(i, i + 100);
@@ -243,34 +249,64 @@ export async function handlePackage(name: string, url: URL, env: Env): Promise<R
     // found in the ELF files counts only from a package built for this
     // architecture: an `any` package that ships one — a cross toolchain's
     // sysroot, aarch64-linux-gnu-glibc's libc.so.6 — carries another
-    // machine's library, and resolved zlib's libc.so.6 on x86_64 (#275).
+    // machine's library, and resolved zlib's libc.so.6 on x86_64 (#275);
+    // nor from a package of another ELF class (lib32-glibc's, for zlib),
+    // whose ring row is then never read. The class and the provide's
+    // constraint ride on the rows read anyway.
     const rows = await env.DB.prepare(
-      `SELECT DISTINCT capability, name, version, source, named FROM (
-         SELECT cap.value AS capability, p.name, p.version, p.source, 1 AS named
+      `SELECT DISTINCT capability, id, name, version, source, named, elf_class, vc FROM (
+         SELECT cap.value AS capability, p.id, p.name, p.version, p.source, 1 AS named, p.elf_class, NULL AS vc
            FROM json_each(?1) cap
            CROSS JOIN packages p ON p.name = cap.value AND p.repo_arch = ?2
            CROSS JOIN ring_packages rp ON rp.ring = '${ring}' AND rp.package_id = p.id
          UNION ALL
-         SELECT cap.value AS capability, p.name, p.version, p.source, 0 AS named
+         SELECT cap.value AS capability, p.id, p.name, p.version, p.source, 0 AS named, p.elf_class, pv.version_constraint AS vc
            FROM json_each(?1) cap
            CROSS JOIN package_provides pv ON pv.capability = cap.value AND (pv.declared = 1 OR cap.value GLOB '*.so.[0-9]*')
-           CROSS JOIN packages p ON p.id = pv.package_id AND p.repo_arch = ?2 AND (pv.declared = 1 OR p.arch = ?2)
+           CROSS JOIN packages p ON p.id = pv.package_id AND p.repo_arch = ?2 AND (pv.declared = 1 OR (p.arch = ?2 AND ${classesMeetSql("?3", "p.elf_class")}))
            CROSS JOIN ring_packages rp ON rp.ring = '${ring}' AND rp.package_id = p.id
        )`,
     )
-      .bind(JSON.stringify(chunk), s.arch)
+      .bind(JSON.stringify(chunk), s.arch, ownClass)
       .all<ProviderCandidate & { capability: string }>();
     for (const r of rows.results) candidates.set(r.capability, [...(candidates.get(r.capability) ?? []), r]);
   }
-  const providers = new Map<string, { name: string; version: string }>();
-  for (const c of declared) {
-    const p = pickProvider(candidates.get(c) ?? [], new Set());
-    if (p) providers.set(c, p);
+  // Which candidates may answer: a class form only its own provide; a loaded soname only a package of the binary's
+  // class (lib32-curl's libc.so.6 is lib32-glibc's, pigz's glibc's) — and never a library the package ships only in a
+  // sysroot, another machine's (aarch64-linux-gnu-gcc, an x86_64 package, carries an aarch64 libstdc++.so.6).
+  const lists = new Map<number, string[]>();
+  const fits = (key: string, loaded: boolean, c: ProviderCandidate): boolean => {
+    const form = loaded ? undefined : classForm.get(key);
+    if (form !== undefined && (c.named || c.vc !== form)) return false;
+    if (loaded && !classesMeet(ownClass, c.elf_class)) return false;
+    const so = loaded ? sonameOf(key) : form !== undefined ? sonameOf(key, form) : null;
+    return !so || !onlyInSysroot(lists.get(c.id) ?? [], so);
+  };
+  const wants: [string, boolean][] = [...declared.map((c) => [c, false] as [string, boolean]), ...[...new Set(sonames)].map((so) => [so, true] as [string, boolean])];
+  // The file list of a candidate that wins a choice between two or more, read only then: most sonames have one
+  // candidate left, and the one that wins among several is nearly always the machine's own (gcc-libs, one row).
+  for (;;) {
+    const read = new Set<number>();
+    for (const [key, loaded] of wants) {
+      if (!loaded && !classForm.has(key)) continue;
+      const fit = (candidates.get(key) ?? []).filter((c) => fits(key, loaded, c));
+      const best = new Set(fit.map((c) => c.id)).size > 1 ? pickProvider(fit) : undefined;
+      if (best && !lists.has(best.id)) read.add(best.id);
+    }
+    if (!read.size) break;
+    // A point read each, in one round trip: D1 counts a row per point read, two per row of one statement over several keys.
+    const ids = [...read];
+    const got = await env.DB.batch(ids.map((id) => env.DB.prepare("SELECT gz FROM package_file_lists WHERE package_id = ?").bind(id)));
+    for (const [i, r] of got.entries()) {
+      const gz = (r.results[0] as { gz?: ArrayBuffer | number[] } | undefined)?.gz;
+      lists.set(ids[i], gz ? await gunzipJson<string[]>(gz) : []);
+    }
   }
-  const declaredProviders = new Set([...providers.values()].map((p) => p.name));
-  for (const so of sonames) {
-    const p = providers.has(so) ? undefined : pickProvider(candidates.get(so) ?? [], declaredProviders);
-    if (p) providers.set(so, p);
+  const providers = new Map<string, { name: string; version: string }>();
+  for (const [key, loaded] of wants) {
+    if (providers.has(key)) continue;
+    const p = pickProvider((candidates.get(key) ?? []).filter((c) => fits(key, loaded, c)));
+    if (p) providers.set(key, { name: p.name, version: p.version });
   }
   const depends = declared.map((c) => ({ name: c, provider: providers.get(c) ?? null }));
   const links = [...new Set(sonames)].map((so) => ({ soname: so, provider: providers.get(so) ?? null }));
@@ -280,17 +316,38 @@ export async function handlePackage(name: string, url: URL, env: Env): Promise<R
   // Same forced order: capabilities → requirement index → ring (366 k rows
   // read per page before, seven for a package nothing depends on).
   // An `any` package is loaded through nothing it ships: its sonames are another machine's (the rule of the forward
-  // edges above), so only its name and what its .PKGINFO declares bring it a dependent.
-  const caps = [chosen.name, ...(chosen.arch === s.arch ? manifest.provides ?? [] : manifest.pkginfo?.provides ?? []).map(capabilityOf)];
+  // edges above), so only its name and what its .PKGINFO declares bring it a dependent. Nor is a library a package
+  // ships only in a sysroot (aarch64-linux-gnu-gcc's libstdc++.so.6): its file list says so. How many files the object
+  // installs comes from the same row (the list itself is the Files section's, on demand), unpacked only when the
+  // package ships a library.
+  const declaredCaps = new Set([chosen.name, ...(manifest.pkginfo?.provides ?? []).map(capabilityOf)]);
+  const offered = chosen.arch === s.arch ? manifest.provides ?? [] : manifest.pkginfo?.provides ?? [];
+  const shippedSoname = (p: string) => (declaredCaps.has(capabilityOf(p)) ? null : sonameOf(capabilityOf(p), p.slice(capabilityOf(p).length)));
+  const ships = offered.some((p) => shippedSoname(p));
+  const listRow = await env.DB.prepare(`SELECT count${ships ? ", gz" : ""} FROM package_file_lists WHERE package_id = ?`)
+    .bind(chosen.id)
+    .first<{ count: number; gz?: ArrayBuffer | number[] }>();
+  const ownFiles = listRow?.gz ? await gunzipJson<string[]>(listRow.gz) : [];
+  const provided = offered.filter((p) => {
+    const so = shippedSoname(p);
+    return !so || !onlyInSysroot(ownFiles, so);
+  });
+  const caps = [chosen.name, ...provided.map(capabilityOf)];
+  // And of its class: a soname brings the packages whose binaries are of the class of this package's (glibc is not
+  // loaded by lib32-zlib, lib32-glibc by nothing 64-bit); a class form a declared one of that version and class only
+  // (lib32-curl's `libz.so=1-32` is not zlib's `libz.so=1-64`). Both on the rows the join reads anyway.
   const reverse = await env.DB.prepare(
     `SELECT DISTINCT p.name, p.version, rq.requirement
        FROM json_each(?1) cap
        CROSS JOIN package_requires rq ON rq.requirement = cap.value AND rq.kind = 'depends'
        CROSS JOIN ring_packages rp ON rp.ring = '${ring}' AND rp.package_id = rq.package_id
        CROSS JOIN packages p ON p.id = rq.package_id AND p.repo_arch = ?2 AND p.name != ?3
+      WHERE (rq.requirement NOT GLOB '*.so.[0-9]*' OR ${classesMeetSql("p.elf_class", "?4")})
+        AND (rq.version_constraint IS NULL OR NOT (rq.requirement GLOB '*.so' AND (rq.version_constraint GLOB '=*-32' OR rq.version_constraint GLOB '=*-64'))
+             OR rq.requirement || rq.version_constraint IN (SELECT value FROM json_each(?5)))
       ORDER BY p.name LIMIT 400`,
   )
-    .bind(JSON.stringify([...new Set(caps)]), s.arch, chosen.name)
+    .bind(JSON.stringify([...new Set(caps)]), s.arch, chosen.name, elfClassOf(manifest), JSON.stringify(provided.filter((p) => CLASS_FORM.test(p))))
     .all<{ name: string; version: string; requirement: string }>();
   const requiredBy = new Map<string, { name: string; version: string; declared: boolean; sonames: string[] }>();
   for (const r of reverse.results) {
@@ -325,8 +382,6 @@ export async function handlePackage(name: string, url: URL, env: Env): Promise<R
     const n = await openOn(a, shownRing);
     if (n !== null) open[a] = n;
   }
-  // How many files the object installs, from its list's own row (the list itself is the Files section's, on demand).
-  const files = await env.DB.prepare("SELECT count FROM package_file_lists WHERE package_id = ?").bind(chosen.id).first<{ count: number }>();
   const providerNames = [...new Set([...depends, ...links].map((x) => x.provider?.name).filter((n): n is string => !!n))];
   const providerIds = providerNames.length ? (await providersInRing(env, ring, s.arch, providerNames)).results : [];
   const providerAdvisories = (await advisoriesOf(providerIds.map((p) => p.id))).filter((a) => a.object_status === "vulnerable");
@@ -352,7 +407,7 @@ export async function handlePackage(name: string, url: URL, env: Env): Promise<R
       rings: inRings,
       // Every architecture of the package: the rings that serve it there, and the advisories open on the object its page shows.
       arches: archesOf(served, open),
-      files: files?.count ?? null,
+      files: listRow?.count ?? null,
       maintenance: await maintenanceOf(env, chosen.name, chosen.source, manifest.pkginfo?.packager),
       // An OPR package: where its recipe comes from (omacom/omarchy-pkgs, read daily).
       provenance: chosen.source === "packages" ? await provenanceOf(env, chosen.name) : null,
