@@ -205,7 +205,7 @@ describe("a list that did not answer is said, not drawn", () => {
     expect(html(d, "#budget")).toContain(`the cost estimate did not answer: ${INTERNAL}`);
   });
 
-  // The Factory (#246) draws from three lists: the registry (the line, three tiles), the review list (what waits for a maintainer) and the worker listing (the workers). Each one that did not answer is said where it would have drawn — the line's note, the tile's line with the reason on hover, the workers' card — and none reads as nothing: no 0, no empty column counted as none, no "no worker alive".
+  // The Factory (#246) draws from three lists: the registry (the line, three tiles), the review list (what waits for a maintainer) and the worker listing (the workers, and with the registry the Building now tile: what a worker holds of the line). Each one that did not answer is said where it would have drawn — the line's note, the tile's line with the reason on hover, the workers' card — and none reads as nothing: no 0, no empty column counted as none, no "no worker alive".
   it("/factory: the line's note names the registry, the four tiles read —, the workers say the listing did not answer, no column counts 0", async () => {
     const d = await run("/factory", { down: true });
     await settled();
@@ -225,6 +225,12 @@ describe("a list that did not answer is said, not drawn", () => {
     await settled();
     expect(html(up, "#fx-wlist")).toContain(`the worker listing did not answer: ${INTERNAL}`);
     expect(up.nodes["#t-line-n"].textContent).toBe("—");
+    // The registry answering and the listing not: the line is drawn, and Building now — what a worker holds — names the listing.
+    const line = await run("/factory", { down: true, up: /^\/api\/v1\/factory\/packages$/ });
+    await settled();
+    expect(line.nodes["#t-line-n"].textContent).not.toBe("—");
+    expect(line.nodes["#t-building-n"].textContent).toBe("—");
+    expect(line.nodes["#t-building-s"].innerHTML).toBe(`<span title="the worker listing did not answer: ${INTERNAL}">did not answer</span>`);
   });
 
   it("/factory: a refresh that fails leaves the last answer's cards, workers and numbers on screen, and says so", async () => {

@@ -1655,7 +1655,7 @@ export const GO_MENU = String.raw`
       var rest = rows.filter(function (p) { return p.name !== term; }).slice(0, SHOWN - first.length);
       var named = rest.filter(function (p) { return p.name.indexOf(term) >= 0; }), described = rest.filter(function (p) { return p.name.indexOf(term) < 0; });
       var out = first.concat(lead, named.map(pkgItem), other, described.map(pkgItem));
-      if (got && !exact && place === false && NAME.test(term)) out.push({ label: 'Request "' + term + '"', hint: "factory", icon: "git-pull-request", href: "/factory?name=" + encodeURIComponent(term) });
+      if (got && !exact && place === false && NAME.test(term)) out.push({ label: 'Request "' + term + '"', hint: "factory", icon: "git-pull-request", href: "/factory?name=" + encodeURIComponent(term) + "#request" });
       return out;
     }
     function draw() {

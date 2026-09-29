@@ -11,7 +11,7 @@ import { putRecord, recordKey, recordUrl, withdrawRecord } from "../record";
 import { version, RINGS, ringsSql, sortRings } from "../meta";
 import { isTextEvidence, reclaimStagingPackages, STAGING_DAYS, STAGING_QUOTA_BYTES } from "../staging";
 import { findLeak, leakMessage } from "../leak";
-import { CHECKLIST, LICENSE, PKGNAME, PKGNAME_RULE, sourceHasPath } from "../request";
+import { CHECKLIST, LICENSE, PKGNAME, PKGNAME_RULE, forgeOf, sourceHasPath } from "../request";
 import { parseTargets, settleTargets } from "../targets";
 
 /**
@@ -356,8 +356,15 @@ export async function handleMe(c: Contributor, env: Env): Promise<Response> {
 
 const GITHUB_URL = /^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/;
 
-/** What the drafter needs to know, from the GitHub API: build system, license, latest release. The Factory's form reads the same through GET /factory/source (routes/sources.ts), with a fetch of the test's own when a test asks. */
-export async function detect(url: string, env: Env, fetcher: typeof fetch = fetch): Promise<Record<string, unknown>> {
+/**
+ * What the drafter needs to know, from the GitHub API: build system, license,
+ * latest release. The Factory's form reads the same through GET
+ * /factory/source (routes/sources.ts), with a fetch of the test's own when a
+ * test asks, and without the tree (`tree: false`): the card shows no build
+ * system, and a read it asks for costs the pool's token two or three calls,
+ * not four.
+ */
+export async function detect(url: string, env: Env, fetcher: typeof fetch = fetch, opts: { tree?: boolean } = {}): Promise<Record<string, unknown>> {
   const m = url.match(GITHUB_URL);
   if (!m) return { error: "not a GitHub repository URL" };
   const [, owner, repo] = m;
@@ -380,14 +387,14 @@ export async function detect(url: string, env: Env, fetcher: typeof fetch = fetc
       tag = tags?.[0]?.name ?? null;
     }
     const ref = tag ?? (meta.default_branch as string);
-    const tree = (await gh(`/repos/${owner}/${repo}/git/trees/${encodeURIComponent(ref)}`)) as { tree?: { path: string; type: string }[] } | null;
+    const tree = opts.tree === false ? null : ((await gh(`/repos/${owner}/${repo}/git/trees/${encodeURIComponent(ref)}`)) as { tree?: { path: string; type: string }[] } | null);
     const top = new Set((tree?.tree ?? []).filter((t) => t.type === "blob").map((t) => t.path));
     const assets = rel?.assets ?? [];
     const system = top.has("Cargo.toml") ? "rust" : top.has("go.mod") ? "go" : top.has("meson.build") ? "meson" : top.has("CMakeLists.txt") ? "cmake" : top.has("configure.ac") ? "autotools" : top.has("pyproject.toml") || top.has("setup.py") ? "python" : top.has("package.json") ? "node" : top.has("Makefile") ? "make" : assets.some((a) => /linux/i.test(a.name)) ? "binary" : "unknown";
     return {
       full_name: meta.full_name, description: meta.description ?? null, language: meta.language ?? null,
       license: (meta.license as { spdx_id?: string } | null)?.spdx_id ?? null, latest_tag: tag,
-      release_assets: assets.map((a) => a.name), build_system: system, has_pkgbuild: top.has("PKGBUILD"),
+      release_assets: assets.map((a) => a.name), build_system: opts.tree === false ? null : system, has_pkgbuild: top.has("PKGBUILD"),
       default_branch: meta.default_branch, stars: meta.stargazers_count ?? 0, archived: meta.archived ?? false,
     };
   } catch (e) {
@@ -401,7 +408,10 @@ export async function detect(url: string, env: Env, fetcher: typeof fetch = fetc
  * tarball or release page (the tag is in the URL), or — for a project that
  * is not on GitHub, a vendor's binary release — its home page, with the
  * source and version given separately. The project's home, normalised, is
- * what makes a package unique in the pool.
+ * what makes a package unique in the pool: a repository on GitLab or
+ * Codeberg is its repository whichever view of it was pasted (forgeOf, the
+ * rule the Factory's form reads it by) — /-/tree/main recorded as the
+ * project made one repository two projects, and "main" the default name.
  */
 export function parseProjectUrl(raw: string): { project: string; github: { owner: string; repo: string } | null; tag: string | null; source: string | null } | { error: string } {
   const u = raw.trim();
@@ -413,6 +423,8 @@ export function parseProjectUrl(raw: string): { project: string; github: { owner
   m = u.match(GITHUB_URL);
   if (m) return { project: `https://github.com/${m[1]}/${m[2]}`, github: { owner: m[1], repo: m[2] }, tag: null, source: null };
   if (/^https:\/\/github\.com\//.test(u)) return { error: "a GitHub URL must be the repository, a release page or a release tarball" };
+  const repo = forgeOf(u);
+  if (repo && repo.forge !== "github.com") return { project: `https://${repo.forge}/${repo.path}`, github: null, tag: null, source: null };
   try {
     const p = new URL(u);
     return { project: `${p.protocol}//${p.host.toLowerCase()}${p.pathname.replace(/\/+$/, "")}`, github: null, tag: null, source: null };
@@ -620,12 +632,12 @@ export interface NameFacts {
 }
 
 /**
- * The reads behind a name's rule, all by the name: the registration by its
- * key; for a name that has one, a standing approval (the approvals' name
- * index) and a running build (the builds' name index), each one row at
- * most; and the sources' rows of the name in edge (providedBy) — point
- * reads, a handful of rows, whether the request asks or the form's live
- * check does.
+ * The reads behind a name's rule: the registration by its key; for a name
+ * that has one, a standing approval (the approvals' name index, one row at
+ * most) and a running build of it — the leased builds, a handful bounded by
+ * the workers, walked by the queue's (kind, status) index and filtered by
+ * the name; and the sources' rows of the name in edge (providedBy) — a
+ * handful of rows, whether the request asks or the form's live check does.
  */
 export async function nameFacts(env: Env, name: string): Promise<NameFacts> {
   const byName = await env.DB.prepare("SELECT owner, status, detail, project, release, request_id, freed_by_review, blocked_at, blocked_reason FROM factory_packages WHERE name = ?").bind(name).first<NonNullable<NameFacts["byName"]>>();
@@ -689,7 +701,9 @@ export function nameInUse(f: NameFacts, name: string, arches: string[]): NameRef
  * by a source on every architecture asked), blocked, busy (being built) —
  * and `why` the request's refusal, word for word. The holder is named
  * (`owner`, `status`), with what a renewal of theirs would meet (`renew`,
- * null when it would be taken), so the form tells its owner "yours". The
+ * null when it would be taken), so the form tells its owner "yours";
+ * `in_edge` says where edge serves the name, the one ring a taken name is
+ * linked to. The
  * answer is the same for everyone, public for thirty seconds at the edge as
  * the registry is: the send itself reserves the name in one statement
  * (reserveName) and is the only word that counts.
@@ -716,6 +730,8 @@ export async function handleNameStanding(raw: string, url: URL, env: Env): Promi
     renew: b && !b.blocked_at ? (nameInUse(f, name, asked)?.error ?? null) : null,
     // What the sources ship of it in edge, every architecture — the form says which ones a request would skip.
     provided: upstreamOf(f.provided, [...REPO_ARCHES]),
+    // The architectures edge serves the name on, whoever ships it (the same rows, the factory's own included): the one ring the form may link a taken name to — a name in the pool by an approval alone may be in no ring (a publish that failed).
+    in_edge: REPO_ARCHES.filter((a) => f.provided.some((p) => p.arch === a)),
   }, 200, cache);
 }
 

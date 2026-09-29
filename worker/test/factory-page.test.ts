@@ -22,7 +22,9 @@ import { beforeAll, describe, expect, it } from "vitest";
 import worker, { type Env } from "../src/index";
 import { PKGNAME, PKGNAME_RULE } from "../src/request";
 import { GO_MENU } from "../src/pages/layout";
-import { forgeOf, handleSourceRead, normaliseUrl, readSource, spdxOf } from "../src/routes/sources";
+import { forgeOf, handleSourceRead, normaliseUrl, readSource, READS_PER_HOUR, spdxOf } from "../src/routes/sources";
+import { parseProjectUrl } from "../src/routes/contributors";
+import { handleFactory } from "../src/routes/factory";
 import { ownScriptOf, runScript, scriptOf, seedDashboard, type Fixture, type Ran } from "./fixture";
 
 // Every page module's source, as text: no page types a name rule of its own.
@@ -89,6 +91,10 @@ describe("a name, by one rule", () => {
     // The sources' rows are per architecture: zlib shipped by core on x86_64 is taken for x86_64, and the check names what a request would skip.
     const zlib = await call("GET", `/api/v1/factory/names/${F.pkg}?arches=${F.arch}`);
     expect(zlib.json.provided).toEqual([expect.objectContaining({ source: "core", arch: F.arch })]);
+    // Where edge serves a taken name — the one ring the card links it to: zlib and ours are there; lost, approved and its publish failed, is in no ring.
+    expect(zlib.json.in_edge).toEqual([F.arch]);
+    expect((await call("GET", `/api/v1/factory/names/${F.publishedPkg}?arches=${F.arch}`)).json).toMatchObject({ state: "taken", in_edge: [F.arch] });
+    expect((await call("GET", `/api/v1/factory/names/${F.failedPkg}?arches=${F.arch}`)).json).toMatchObject({ state: "taken", in_edge: [] });
     // The holder: alice's staged disposable is hers to renew (renew is null), her approved mine is not, in the request's words.
     const own = await call("GET", `/api/v1/factory/names/${F.disposablePkg}?arches=${F.arch}`);
     expect(own.json).toMatchObject({ owner: F.owner, status: "staged", renew: null });
@@ -143,6 +149,32 @@ describe("a name, by one rule", () => {
   });
 });
 
+describe("what runs now", () => {
+  it("is the listing's live read: the tasks in flight through the queue's index and no counts — never every task, as the whole listing reads them twice", async () => {
+    const seen: { sql: string; args: unknown[] }[] = [];
+    const DB = new Proxy(env.DB, {
+      get(target, key) {
+        if (key === "prepare") return (sql: string) => { const entry = { sql, args: [] as unknown[] }; seen.push(entry); const stmt = target.prepare(sql); return new Proxy(stmt, { get: (s, k) => (k === "bind" ? (...args: unknown[]) => { entry.args = args; return s.bind(...args); } : typeof Reflect.get(s, k) === "function" ? Reflect.get(s, k).bind(s) : Reflect.get(s, k)) }); };
+        const v = Reflect.get(target, key);
+        return typeof v === "function" ? v.bind(target) : v;
+      },
+    });
+    const live = (await (await handleFactory({ ...env, DB } as Env, new URL("http://pool.test/api/v1/factory?live=1&limit=20"))).json()) as { counts: unknown[]; tasks: { status: string }[]; workers: unknown[] };
+    expect(live.counts).toEqual([]);
+    expect(live.tasks.length).toBeGreaterThan(0);
+    for (const t of live.tasks) expect(["leased", "queued"]).toContain(t.status);
+    expect(live.workers.length).toBeGreaterThan(0);
+    for (const x of seen) {
+      const plan = (await env.DB.prepare(`EXPLAIN QUERY PLAN ${x.sql}`).bind(...x.args).all<{ detail: string }>()).results.map((r) => r.detail).join("; ");
+      expect(plan, x.sql).not.toMatch(/SCAN build_tasks\b/);
+    }
+    // The whole listing is as it was: the counts, and the tasks of every status.
+    const whole = (await call("GET", "/api/v1/factory?limit=60")).json;
+    expect(whole.counts.length).toBeGreaterThan(0);
+    expect(whole.tasks.some((t: { status: string }) => !["leased", "queued"].includes(t.status))).toBe(true);
+  });
+});
+
 describe("what the pool reads of a repository", () => {
   /** A fetch that answers the forges' API addresses from a table, 404 for the rest: the tests reach no network. */
   const forges = (table: Record<string, unknown>): typeof fetch => (async (input: RequestInfo | URL) => {
@@ -158,19 +190,27 @@ describe("what the pool reads of a repository", () => {
     expect(forgeOf("https://gitlab.com/group/sub/project/-/tree/main")).toEqual({ forge: "gitlab.com", path: "group/sub/project", repo: "project" });
     expect(forgeOf("https://codeberg.org/you/project/")).toEqual({ forge: "codeberg.org", path: "you/project", repo: "project" });
     for (const u of ["https://example.com/you/project", "http://github.com/you/project", "https://github.com/you", "not a url"]) expect(forgeOf(u), u).toBeNull();
+    // The request's project is the same repository the read names, whichever view was pasted: one project, one registration, and the repository's name the default.
+    expect(parseProjectUrl("https://gitlab.com/group/sub/project/-/tree/main")).toMatchObject({ project: "https://gitlab.com/group/sub/project", github: null });
+    expect(parseProjectUrl("https://codeberg.org/you/project/src/branch/main")).toMatchObject({ project: "https://codeberg.org/you/project", github: null });
+    expect(parseProjectUrl("https://www.gitlab.com/you/project.git/")).toMatchObject({ project: "https://gitlab.com/you/project" });
+    expect(parseProjectUrl("https://example.com/you/project/")).toMatchObject({ project: "https://example.com/you/project" });
     expect(spdxOf("gpl-3.0")).toBe("GPL-3.0");
     expect(spdxOf("mit")).toBe("MIT");
     expect(spdxOf("other")).toBeNull();
   });
 
-  it("reads GitHub by the request's own detect(): the words, the licence, the latest release — nothing for the card to send, the request reads GitHub itself", async () => {
-    const api = "https://api.github.com/repos/you/marcelo";
-    const got = await readSource("https://github.com/you/marcelo", env, forges({
+  it("reads GitHub by the request's own detect(), short of the tree: the words, the licence, the latest release — nothing for the card to send, the request reads GitHub itself", async () => {
+    const api = "https://api.github.com/repos/you/marcelo", asked: string[] = [];
+    const table = forges({
       [api]: { full_name: "you/marcelo", description: "A keyboard-first note taker ", license: { spdx_id: "MIT" }, default_branch: "main", archived: false },
       [`${api}/releases/latest`]: { tag_name: "v1.2.0", assets: [] },
       [`${api}/git/trees/v1.2.0`]: { tree: [{ path: "Cargo.toml", type: "blob" }] },
-    }));
-    expect(got).toEqual({ description: "A keyboard-first note taker", license: "MIT", version: "v1.2.0", source: "https://github.com/you/marcelo/archive/refs/tags/v1.2.0.tar.gz", archived: false, build_system: "rust", send: {} });
+    });
+    const got = await readSource("https://github.com/you/marcelo", env, (async (input: RequestInfo | URL, init?: RequestInit) => { asked.push(String(input)); return table(input, init); }) as typeof fetch);
+    // The card shows no build system: the tree is the request's to read, and the card's read costs the token two calls here, not three.
+    expect(got).toEqual({ description: "A keyboard-first note taker", license: "MIT", version: "v1.2.0", source: "https://github.com/you/marcelo/archive/refs/tags/v1.2.0.tar.gz", archived: false, build_system: null, send: {} });
+    expect(asked).toEqual([api, `${api}/releases/latest`]);
     expect(await readSource("https://github.com/you/nothing", env, forges({}))).toEqual({ error: "you/nothing not found on GitHub" });
   });
 
@@ -191,7 +231,8 @@ describe("what the pool reads of a repository", () => {
   it("reads only for a person, only the forges, never where SOURCE_CHECK is off — and keeps a read at the edge, an answer that read nothing never", async () => {
     // The Worker as the tests run it: SOURCE_CHECK is off, so nothing is read, whoever asks.
     let r = await call("GET", "/api/v1/factory/source?url=github.com/you/marcelo", undefined, "alice");
-    expect(r.json).toMatchObject({ url: "https://github.com/you/marcelo", project: "https://github.com/you/marcelo", forge: "GitHub", name: "marcelo", read: false, why: "this pool reads no repository (SOURCE_CHECK is off)" });
+    // Said in a reader's words: the setting's name is the operator's, not the card's.
+    expect(r.json).toMatchObject({ url: "https://github.com/you/marcelo", project: "https://github.com/you/marcelo", forge: "GitHub", name: "marcelo", read: false, why: "this pool reads no repository" });
     r = await call("GET", "/api/v1/factory/source?url=https://marcelo.example/");
     expect(r.json).toMatchObject({ forge: null, name: "marcelo.example", read: false });
     expect(r.json.why).toMatch(/^not on GitHub, GitLab or Codeberg: name the release/);
@@ -211,20 +252,69 @@ describe("what the pool reads of a repository", () => {
     expect(person.cache).toBe("public, max-age=600");
     expect(person.json).toMatchObject({ forge: "Codeberg", name: "marcelo", read: true, description: "Notes", license: "MIT", version: "v1", send: { version: "v1" } });
   });
+
+  it("keeps a read by the repository, not the address as typed; never reads for a blocked account; and asks a forge at most READS_PER_HOUR times an hour per person", async () => {
+    const reading = { ...env, SOURCE_CHECK: undefined } as Env;
+    const cb = "https://codeberg.org/api/v1/repos/keep/marcelo", asked: string[] = [];
+    const table = forges({ [cb]: { description: "Kept", licenses: ["MIT"] }, [`${cb}/releases/latest`]: { tag_name: "v2" } });
+    const counting = (async (input: RequestInfo | URL, init?: RequestInit) => { asked.push(String(input)); return table(input, init); }) as typeof fetch;
+    const ask = async (address: string, login?: string) => {
+      const res = await handleSourceRead(new URL(`http://pool.test/api/v1/factory/source?url=${encodeURIComponent(address)}`), new Request("http://pool.test/", { headers: login ? { cookie: `omc=oms_${login}` } : {} }), reading, counting);
+      return { cache: res.headers.get("cache-control"), edge: res.headers.get("x-pool-cache"), json: (await res.json()) as any };
+    };
+    // carol is blocked: the request refuses her, and so does the read — in the same words, and no forge is asked.
+    const carol = await ask("codeberg.org/keep/marcelo", "carol");
+    expect(carol.json).toMatchObject({ read: false, why: expect.stringMatching(/^carol is blocked by a maintainer/) });
+    expect(asked).toEqual([]);
+    // bob reads it; the same repository spelled otherwise — a scheme, a trailing ".git", a view, its case — is the same read, kept, for anyone: the forge is not asked again.
+    const bob = await ask("https://codeberg.org/keep/marcelo", "bob");
+    expect(bob).toMatchObject({ cache: "public, max-age=600", edge: "miss", json: { read: true, description: "Kept", version: "v2" } });
+    const calls = asked.length;
+    for (const spelled of ["codeberg.org/keep/marcelo.git", "https://codeberg.org/Keep/Marcelo/src/branch/main", "https://www.codeberg.org/keep/marcelo/"]) {
+      const again = await ask(spelled);
+      expect(again, spelled).toMatchObject({ edge: "hit", json: { read: true, description: "Kept", url: normaliseUrl(spelled) } });
+    }
+    expect(asked.length).toBe(calls);
+    // A repository that is not there is kept a minute: asked twice, the forge answers once.
+    const missing = await ask("https://codeberg.org/keep/nothing-here", "bob");
+    expect(missing).toMatchObject({ cache: "public, max-age=60", json: { read: false, why: "keep/nothing-here not found on Codeberg" } });
+    const n = asked.length;
+    expect((await ask("codeberg.org/keep/nothing-here/", "bob")).edge).toBe("hit");
+    expect(asked.length).toBe(n);
+    // The hour's reads: one person asks the forge READS_PER_HOUR times at most; the next address is not read, and says why.
+    for (let i = 0; i < READS_PER_HOUR; i++) await ask(`https://codeberg.org/spend/repo-${i}`, "dave");
+    const before = asked.length;
+    const spent = await ask("https://codeberg.org/spend/one-more", "dave");
+    expect(spent.json).toMatchObject({ read: false, why: `read ${READS_PER_HOUR} repositories for you this hour; fill the card in, and sending reads it` });
+    expect(asked.length).toBe(before);
+    // Someone else is not held by dave's hour.
+    expect((await ask("https://codeberg.org/spend/one-more", "bob")).json.why).toBe("spend/one-more not found on Codeberg");
+  });
+
+  it("records the repository whichever view was pasted: one project, one registration, the repository's name the default", async () => {
+    const off = { source: "https://gitlab.com/g/one-repo/-/archive/1.0/one-repo-1.0.tar.gz", version: "1.0", description: "One repository, pasted two ways", license: "MIT", arches: [F.arch], checklist };
+    const first = await call("POST", "/api/v1/factory/packages", { ...off, url: "https://gitlab.com/g/one-repo/-/tree/main" }, "bob");
+    expect(first.status, JSON.stringify(first.json)).toBe(201);
+    expect(first.json.package).toMatchObject({ name: "one-repo", project: "https://gitlab.com/g/one-repo" });
+    const second = await call("POST", "/api/v1/factory/packages", { ...off, url: "https://gitlab.com/g/one-repo", name: "one-repo-again" }, "alice");
+    expect(second.status).toBe(409);
+    expect(second.json.error).toMatch(/^https:\/\/gitlab\.com\/g\/one-repo is already in the pool as one-repo/);
+  });
 });
 
 describe("the page", () => {
-  /** The Worker's answers as a browser on the dashboard gets them, a login's session when given; a listing asked past the edge's ten seconds (a new query each time) so a test sees what it just changed. */
+  /** The Worker's answers as a browser on the dashboard gets them, a login's session when given; the live listing asked past the edge's ten seconds (a new query each time) so a test sees what it just changed. */
   const real = (login?: string, count?: Record<string, number>) => (path: string, init?: RequestInit) => {
-    const bare = path.split("?")[0];
+    // A read counted by its path, a write by its method too: a send is not a read of the registry.
+    const bare = (init?.method && init.method !== "GET" ? `${init.method} ` : "") + path.split("?")[0];
     if (count) count[bare] = (count[bare] ?? 0) + 1;
-    const asked = path === "/api/v1/factory?limit=10" ? `${path}&t=${Math.random()}` : path;
+    const asked = path === "/api/v1/factory?live=1&limit=20" ? `${path}&t=${Math.random()}` : path;
     return fetchAs(asked, init ?? {}, login);
   };
   const settled = (ms = 80) => new Promise((r) => setTimeout(r, ms));
-  const run = async (opts: { login?: string; search?: string; count?: Record<string, number>; functions?: string[] } = {}): Promise<Ran & Record<string, any>> => {
+  const run = async (opts: { login?: string; search?: string; count?: Record<string, number>; functions?: string[]; variables?: string[] } = {}): Promise<Ran & Record<string, any>> => {
     const html = await page(`/factory${opts.search ?? ""}`);
-    const d = runScript(scriptOf(html), { pathname: "/factory", search: opts.search ?? "", functions: opts.functions ?? [], fetch: real(opts.login, opts.count) });
+    const d = runScript(scriptOf(html), { pathname: "/factory", search: opts.search ?? "", functions: opts.functions ?? [], variables: opts.variables, fetch: real(opts.login, opts.count) });
     await settled();
     return d as Ran & Record<string, any>;
   };
@@ -249,17 +339,26 @@ describe("the page", () => {
   it("puts every package on the line where its targets say, draws the tiles from the line and the lists, and the workers from the listing — read again when a job starts or ends", async () => {
     const count: Record<string, number> = {};
     const d = await run({ count, functions: ["stageOf", "loadListing"] });
+    await settled();
     const reg = (await call("GET", "/api/v1/factory/packages")).json.packages as { name: string; landed: boolean }[];
     const stage = Object.fromEntries(reg.map((p) => [p.name, d.stageOf(p)]));
     // ours is in the pool; disposable and spare are built and wait; lost's next build is queued; hers and pulled are blocked, off the line.
     expect(stage).toMatchObject({ [F.publishedPkg]: 4, [F.disposablePkg]: 2, [F.sparePkg]: 2, [F.failedPkg]: 1, [F.blockedPkg]: -1, [F.pulledPkg]: -1 });
-    for (let i = 0; i < 4; i++) expect(d.nodes[`#col-${i}-n`].textContent, `column ${i}`).toBe(String(Object.values(stage).filter((s) => s === i).length));
-    // Shipped counts what a maintainer approved (landed), its cards the ones not back on the line.
-    expect(d.nodes["#col-4-n"].textContent).toBe(String(reg.filter((p) => p.landed).length));
+    // Every column counts its own cards — Shipped too: a shipped package on the line again (lost, approved, a new build queued) is a card in Building and only there, never "+1 earlier" under Shipped.
+    for (let i = 0; i < 5; i++) expect(d.nodes[`#col-${i}-n`].textContent, `column ${i}`).toBe(String(Object.values(stage).filter((s) => s === i).length));
+    expect(reg.filter((p) => p.landed).length, "a landed package is on the line again").toBeGreaterThan(Object.values(stage).filter((s) => s === 4).length);
+    expect(d.nodes["#col-4"].innerHTML).not.toContain("earlier");
+    // A shipped card leads to the ring its approval says serves it; one on its way, to the lab.
     expect(d.nodes["#col-4"].innerHTML).toContain(`href="/package/${F.publishedPkg}?ring=edge&amp;arch=${F.arch}"`);
     expect(d.nodes["#col-2"].innerHTML).toContain(`href="/package/${F.disposablePkg}?ring=lab&amp;arch=${F.arch}"`);
-    // The tiles: the line's own counts, the review list's waiting, the registry's landed.
-    expect(d.nodes["#t-line-n"].textContent).toBe(String(Object.values(stage).filter((s) => s >= 0 && s < 4).length));
+    // An empty column says so.
+    for (let i = 0; i < 5; i++) if (!Object.values(stage).some((s) => s === i)) expect(d.nodes[`#col-${i}`].innerHTML, `column ${i}`).toBe('<p class="fx-none">nothing here now</p>');
+    // The tiles: the line's own counts — a landed package on it again said so —, the builds a worker holds (none yet: lost's is queued), the review list's waiting, the registry's landed.
+    const onLine = reg.filter((p) => d.stageOf(p) >= 0 && d.stageOf(p) < 4), again = onLine.filter((p) => p.landed).length;
+    expect(d.nodes["#t-line-n"].textContent).toBe(String(onLine.length));
+    expect(d.nodes["#t-line-s"].innerHTML).toBe(`requests on the line${again ? ` · ${again} of them new versions` : ""}`);
+    expect(d.nodes["#t-building-n"].textContent).toBe("0");
+    expect(d.nodes["#t-building-s"].innerHTML).toBe(`${Object.values(stage).filter((s) => s === 1).length} queued · 0 of 2 workers busy`);
     expect(d.nodes["#t-ready-n"].textContent).toBe(String((await call("GET", "/api/v1/factory/review")).json.waiting));
     expect(d.nodes["#t-shipped-n"].textContent).toBe(String(reg.filter((p) => p.landed).length));
     expect(d.nodes["#t-shipped-s"].innerHTML).toMatch(/^approved by a maintainer, from \d+ contributors$/);
@@ -272,7 +371,12 @@ describe("the page", () => {
     await d.loadListing();
     await settled();
     expect(count["/api/v1/factory/packages"]).toBe(1);
-    // A job starts: alice's worker takes lost's queued build. The listing says so, and the line is read again.
+    // A pool job queued moves no card: the line is not read for it.
+    await env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, kind, params) VALUES ('sync', ?, '-', '-', 'the page test', 50, 0, 'project', 'sync', '{}')").bind(F.arch).run();
+    await d.loadListing();
+    await settled();
+    expect(count["/api/v1/factory/packages"]).toBe(1);
+    // A build starts: alice's worker takes lost's queued build. The live read says so, and the line is read again.
     const now = new Date().toISOString();
     await env.DB.batch([
       env.DB.prepare("UPDATE build_tasks SET status = 'leased', lease_owner = ?, started_at = ?, attempts = 1 WHERE name = ? AND kind = 'build' AND status = 'queued'").bind(F.communityWorker, now, F.failedPkg),
@@ -285,6 +389,124 @@ describe("the page", () => {
     expect(d.nodes["#fx-wlist"].innerHTML).toContain(`<b>${F.failedPkg}</b>`);
     expect(d.nodes["#fx-wlist"].innerHTML).toMatch(new RegExp(`on ${F.arch}`));
     expect(d.nodes["#col-1"].innerHTML).toMatch(new RegExp(`on ${F.arch}`));
+    // Building now is what a worker holds: lost's build, one.
+    expect(d.nodes["#t-building-n"].textContent).toBe("1");
+  });
+
+  it("takes a request whose every build failed off the line, and tells its owner; an architecture nobody asked for is the faintest square", async () => {
+    const d = await run({ login: F.owner, functions: ["stageOf", "squares", "drawMine"], variables: ["REG"] });
+    const failed = { name: "all-failed", owner: F.owner, status: "waiting", release: "1.0", targets: { [F.arch]: { status: "not_supported", task: 1 } }, updated_at: new Date().toISOString(), landed: false, blocked_at: null };
+    expect(d.stageOf(failed)).toBe(-1);
+    expect(d.stageOf({ ...failed, targets: { [F.arch]: { status: "not_supported", task: 1 }, aarch64: { status: "building", task: 2 } } })).toBe(1);
+    expect(d.stageOf({ ...failed, targets: { [F.arch]: { status: "waiting", task: null } } })).toBe(0);
+    d.setREG([failed]);
+    d.drawMine();
+    expect(d.nodes["#mine-list"].innerHTML).toContain("Not built");
+    expect(d.nodes["#mine-list"].innerHTML).toContain("every architecture's build failed after its tries");
+    // Not supported is the kit's dashed square; not requested is its own, apart from it.
+    expect(d.squares(failed)).toContain('<i class="op-arch na" title="x86_64 · its build failed');
+    expect(d.squares(failed)).toContain('<i class="op-arch off" title="aarch64 · not requested"></i>');
+  });
+
+  it("puts the card on the line the moment it is sent, the name the sender's on the card, the focus on what was sent, and a renewal's card back to a request's", async () => {
+    const count: Record<string, number> = {};
+    const d = await run({ login: F.contributor, count, functions: ["send", "checkName", "loadRegistry"], variables: ["checklist"] });
+    d.setchecklist(() => checklist);
+    const name = "sent-from-the-card";
+    d.nodes["#fx-name"].value = name;
+    d.nodes["#fx-url"].value = `https://${name}.example`;
+    d.nodes["#fx-source"].value = `https://${name}.example/${name}-1.0.tar.gz`;
+    d.nodes["#fx-version"].value = "1.0";
+    d.nodes["#fx-license"].value = "MIT";
+    d.nodes["#fx-desc"].value = "A request the card sends in the test";
+    d.checkName();
+    await settled(400);
+    const reads = count["/api/v1/factory/packages"];
+    d.send();
+    await settled(200);
+    expect(d.nodes["#fx-done"].hidden).toBe(false);
+    expect(d.nodes["#fx-done"].innerHTML).toContain(`<b>${name}</b> 1.0 sent · name reserved`);
+    // On the line at once, from the POST's own answer — the registry's copy at the edge is not asked for it.
+    expect(count["/api/v1/factory/packages"]).toBe(reads);
+    expect(count["POST /api/v1/factory/packages"]).toBe(1);
+    const line = [0, 1, 2, 3, 4].map((i) => d.nodes[`#col-${i}`].innerHTML).join("");
+    expect(line).toContain(`<b>${name}</b>`);
+    expect(d.nodes["#mine-list"].innerHTML).toContain(`<b>${name}</b>`);
+    // A registry answer from before the send (the edge's copy) does not take it off the line: it stays until an answer as new has it.
+    await d.loadRegistry();
+    await settled();
+    expect([0, 1, 2, 3, 4].map((i) => d.nodes[`#col-${i}`].innerHTML).join("")).toContain(`<b>${name}</b>`);
+    // The name typed again is the sender's, whatever the check's copy at the edge says.
+    d.nodes["#fx-name"].value = name;
+    d.checkName();
+    expect(d.nodes["#fx-name-say"].innerHTML).toBe("✓ yours · sending renews the request");
+    // A renewal sent: the card is a request's again.
+    const renew = await run({ login: F.owner, search: `?renew=${F.disposablePkg}`, functions: ["send"], variables: ["checklist"] });
+    await settled(400);
+    renew.setchecklist(() => checklist);
+    expect(renew.nodes["#fx-head"].textContent).toBe(`Renew the request for ${F.disposablePkg}`);
+    // disposable's record names no release (the fixture wrote the registration by hand), and its project is off GitHub: the card opens the release's fields and asks for them before anything is sent.
+    expect(renew.nodes["#fx-more"].open).toBe(true);
+    renew.send();
+    expect(renew.nodes["#fx-state"].textContent).toBe("Name the release: its source and its version.");
+    renew.nodes["#fx-source"].value = `https://${F.disposablePkg}.example/${F.disposablePkg}-1.0.tar.gz`;
+    renew.nodes["#fx-version"].value = "1.0";
+    renew.send();
+    await settled(200);
+    expect(renew.nodes["#fx-state"].textContent).toBe("");
+    expect(renew.nodes["#fx-head"].textContent).toBe("Request a package");
+    expect(renew.nodes["#fx-send"].textContent).toBe("Send request");
+  });
+
+  it("keeps the card across the sign-in: every field, the architectures and the confirmations, drawn again once and then forgotten", async () => {
+    const kept: Record<string, string> = {};
+    const store = { setItem: (k: string, v: string) => { kept[k] = v; }, getItem: (k: string) => kept[k] ?? null, removeItem: (k: string) => { delete kept[k]; } };
+    const before = await run({ functions: ["keepDraft", "signInLink"], variables: ["STORE"] });
+    before.setSTORE(store);
+    before.nodes["#fx-name"].value = "kept-name";
+    before.nodes["#fx-url"].value = "https://kept.example";
+    before.nodes["#fx-desc"].value = "Kept across the sign-in";
+    before.keepDraft();
+    before.signInLink();
+    // The way back lands on the card, the name in the address.
+    expect(Object.keys(kept)).toHaveLength(1);
+    const after = await run({ login: F.contributor, functions: ["draftBack"], variables: ["STORE"] });
+    after.setSTORE(store);
+    expect(after.draftBack()).toBe(true);
+    expect(after.nodes["#fx-name"].value).toBe("kept-name");
+    expect(after.nodes["#fx-url"].value).toBe("https://kept.example");
+    expect(after.nodes["#fx-desc"].value).toBe("Kept across the sign-in");
+    expect(after.draftBack(), "drawn once").toBe(false);
+    // A browser that refuses storage keeps nothing and draws nothing, and says nothing either.
+    const none = await run({ functions: ["keepDraft", "draftBack"], variables: ["STORE"] });
+    none.setSTORE(null);
+    none.keepDraft();
+    expect(none.draftBack()).toBe(false);
+  });
+
+  it("says a check in a few words beside the label and the reason under the field where the reader must act on it", async () => {
+    const d = await run({ login: F.owner, functions: ["nameSays", "urlSays"] });
+    await settled();
+    d.nameSays({ name: F.factoryPkg, state: "taken", owner: F.owner, status: "approved", renew: "mine is in the pool (approval #1); its record stays as it was", why: "x" });
+    expect(d.nodes["#fx-name-say"].innerHTML).toBe("✗ yours · can't renew now");
+    expect(d.nodes["#fx-name-why"].textContent).toBe("mine is in the pool (approval #1); its record stays as it was");
+    expect(d.nodes["#fx-name-why"].hidden).toBe(false);
+    d.nameSays({ name: "zlib", state: "available", owner: null, provided: [{ source: "core", arch: F.arch, version: "1.3" }] });
+    expect(d.nodes["#fx-name-say"].innerHTML).toBe(`✓ available · ${F.arch} skipped`);
+    expect(d.nodes["#fx-name-why"].textContent).toBe(`core ships 1.3 for ${F.arch}: the request builds the other architectures.`);
+    // Taken: linked to the package in edge only where edge serves it — never a ring no fact supports.
+    d.nameSays({ name: F.publishedPkg, state: "taken", owner: "someone", in_edge: [F.arch], why: "x" });
+    expect(d.nodes["#fx-name-say"].innerHTML).toBe(`<a href="/package/${F.publishedPkg}?ring=edge&amp;arch=${F.arch}">✗ taken · open it ›</a>`);
+    d.nameSays({ name: F.failedPkg, state: "taken", owner: "someone", in_edge: [], why: "x" });
+    expect(d.nodes["#fx-name-say"].innerHTML).toBe("✗ taken");
+    d.nameSays({ name: "free", state: "available", owner: null, provided: [] });
+    expect(d.nodes["#fx-name-why"].hidden).toBe(true);
+    d.urlSays({ forge: null, read: false, why: "not on GitHub, GitLab or Codeberg: name the release — its source and its version" });
+    expect(d.nodes["#fx-url-say"].innerHTML).toBe("name the release below");
+    expect(d.nodes["#fx-more"].open).toBe(true);
+    d.urlSays({ error: "a GitHub URL must be the repository, a release page or a release tarball" });
+    expect(d.nodes["#fx-url-say"].innerHTML).toBe("✗ not usable");
+    expect(d.nodes["#fx-url-why"].textContent).toBe("a GitHub URL must be the repository, a release page or a release tarball");
   });
 
   it("shows a person their own requests, with the rule and the way on: a contributor's approvals, a maintainer's queue", async () => {

@@ -9,21 +9,24 @@
  * request as the source tarball and its version (`send`): the request takes
  * a project that is not on GitHub by those two fields.
  *
- * Reading costs the pool a few calls to a forge's API, so it is kept cheap:
- * only a person signed in makes the pool read (a visitor gets what the
- * address alone says), only the three forges are asked — never an address
- * a caller made up —, nothing is read where SOURCE_CHECK is off (the tests,
- * the end-to-end run: no host is asked there), and an answer that read the
- * repository is public at the edge for ten minutes, one copy per address.
- * An answer that read nothing is never kept.
+ * Reading costs the pool two or three calls to a forge's API — on GitHub,
+ * the token the scheduler's reads share — so it is kept cheap: only a
+ * person signed in and not blocked makes the pool ask a forge, at most
+ * READS_PER_HOUR times an hour; only the three forges are asked — never an
+ * address a caller made up —; nothing is read where SOURCE_CHECK is off
+ * (the tests, the end-to-end run: no host is asked there); and what a read
+ * found is kept at the edge by the repository, not by the address as typed
+ * — ten minutes, a minute when it found nothing — and answered to whoever
+ * asks for that repository meanwhile, a visitor too: the repository's
+ * public words, read once.
  */
-import { json, type Env } from "../index";
-import { contributorOf, detect, parseProjectUrl } from "./contributors";
-import { LICENSE } from "../request";
+import { edgeHit, edgeStore, json, type Env } from "../index";
+import { machineOrigin } from "../meta";
+import { contributorOf, detect, parseProjectUrl, workspace } from "./contributors";
+import { FORGES, LICENSE, forgeOf, type Forge } from "../request";
 
-/** The forges the form reads, by their host: GitHub through the request's own detect(), the other two through their APIs. */
-export const FORGES = { "github.com": "GitHub", "gitlab.com": "GitLab", "codeberg.org": "Codeberg" } as const;
-export type Forge = keyof typeof FORGES;
+/** The forges the form reads, by their host — GitHub through the request's own detect(), the other two through their APIs — and where on one an address points: the request's own rule (request.ts), so the record and the read name one repository. */
+export { FORGES, forgeOf, type Forge };
 
 /** What a read found: the repository's words and its latest release. `send` is what the request needs from the form to build that release — nothing for GitHub, which the request reads itself; the tarball and the version elsewhere. */
 export interface SourceRead {
@@ -48,22 +51,6 @@ export function spdxOf(id: unknown): string | null {
 export function normaliseUrl(raw: string): string {
   const u = raw.trim();
   return u && !/^[a-z][a-z0-9+.-]*:\/\//i.test(u) ? `https://${u}` : u;
-}
-
-/** The forge an address is on and the repository's path there: GitHub's owner/repo, GitLab's group/…/project, Codeberg's owner/repo — the ".git", a trailing slash and a view (GitLab's /-/tree/main) set aside. */
-export function forgeOf(url: string): { forge: Forge; path: string; repo: string } | null {
-  let u: URL;
-  try { u = new URL(url); } catch { return null; }
-  const host = u.hostname.toLowerCase().replace(/^www\./, "");
-  if (u.protocol !== "https:" || !(host in FORGES)) return null;
-  let segs = u.pathname.split("/").filter(Boolean);
-  const view = segs.indexOf("-");
-  if (view >= 0) segs = segs.slice(0, view);
-  if (host !== "gitlab.com") segs = segs.slice(0, 2);
-  if (segs.length < 2) return null;
-  segs[segs.length - 1] = segs[segs.length - 1].replace(/\.git$/, "");
-  if (!segs.every((s) => /^[A-Za-z0-9_.-]+$/.test(s))) return null;
-  return { forge: host as Forge, path: segs.join("/"), repo: segs[segs.length - 1] };
 }
 
 async function getJson(fetcher: typeof fetch, url: string): Promise<unknown> {
@@ -96,9 +83,9 @@ async function readCodeberg(path: string, fetcher: typeof fetch): Promise<Source
   return { description: meta.description?.trim() || null, license: spdxOf(meta.licenses?.[0]), version: tag, source, archived: !!meta.archived, build_system: null, send: source && tag ? { source, version: tag } : {} };
 }
 
-/** A GitHub repository, read by the request's own detect(): the release the request would build (the tag in the address, else the latest), and nothing for the form to send — the request reads GitHub itself. */
+/** A GitHub repository, read by the request's own detect() short of the tree (the card shows no build system): the release the request would build (the tag in the address, else the latest), and nothing for the form to send — the request reads GitHub itself. */
 async function readGitHub(project: string, tagInUrl: string | null, sourceInUrl: string | null, env: Env, fetcher: typeof fetch): Promise<SourceRead | { error: string }> {
-  const d = await detect(project, env, fetcher);
+  const d = await detect(project, env, fetcher, { tree: false });
   if (d.error) return { error: String(d.error) };
   const tag = tagInUrl ?? (typeof d.latest_tag === "string" ? d.latest_tag : null);
   const license = typeof d.license === "string" && d.license !== "NOASSERTION" && LICENSE.test(d.license) ? d.license : null;
@@ -121,12 +108,46 @@ export async function readSource(url: string, env: Env, fetcher: typeof fetch = 
   }
 }
 
+/** How long a read is kept at the edge, by the repository it read (readKey): ten minutes; a read that failed — nothing there, the forge refusing — a minute, so a mistyped address typed again asks the forge nothing and a fixed one is read again soon. */
+export const KEEP_READ = 600, KEEP_FAILED = 60;
+/** The reads one person may have the pool ask a forge for in an hour: a person pasting a few projects asks a handful; a script asking thousands would spend the token the scheduler's GitHub reads live on (5000 an hour, shared by them all). */
+export const READS_PER_HOUR = 60;
+
+/** The edge key of a repository's read: the forge and the repository as forgeOf names them, in lower case (the three forges match a path so), and a tag the address named — never the address as typed, so a scheme, a slash, ".git", a view or a query more are the same read. Outside /api/v1, where no request's own URL is looked up (cachedApi), so only this handler reads it. */
+function readKey(origin: string, where: { forge: Forge; path: string }, tag: string | null): Request {
+  return new Request(`${origin}/_edge/source/${encodeURIComponent(`${where.forge}/${where.path}`.toLowerCase())}${tag ? `@${encodeURIComponent(tag)}` : ""}`);
+}
+
+/**
+ * One more forge read for this person this hour, if they have one left:
+ * the count is a number kept at the edge until the hour ends — per colo and
+ * a read-modify-write, so approximate, and never a D1 row: a count is not
+ * worth a write per read.
+ */
+async function spend(origin: string, login: string): Promise<boolean> {
+  const hour = Math.floor(Date.now() / 3600000);
+  const key = new Request(`${origin}/_edge/source-reads/${encodeURIComponent(login)}/${hour}`);
+  const hit = await edgeHit(key);
+  const n = hit ? Number(await hit.text()) || 0 : 0;
+  if (n >= READS_PER_HOUR) return false;
+  await edgeStore(key, new Response(String(n + 1)), Math.max(1, Math.ceil(((hour + 1) * 3600000 - Date.now()) / 1000)));
+  return true;
+}
+
 /**
  * GET /factory/source?url= — what the address says (`project`, the
- * `forge`, the `name` a request would take from it) and, for a person
- * signed in, what the repository says (`read`: true, with the fields of
- * SourceRead); `why` says why nothing was read. An address the request
- * would refuse is answered 400 in the request's words (parseProjectUrl).
+ * `forge`, the `name` a request would take from it) and what the repository
+ * says (`read`: true, with the fields of SourceRead); `why` says why nothing
+ * was read. An address the request would refuse is answered 400 in the
+ * request's words (parseProjectUrl).
+ *
+ * A read is kept at the edge by the repository (readKey), and whoever asks
+ * for that repository while it is kept gets it, a visitor too — the
+ * repository's public words, read once. Only a person signed in, and not
+ * blocked (the request refuses them the same way), makes the pool ask the
+ * forge, at most READS_PER_HOUR times an hour. What was read or not is kept
+ * under that key alone (x-pool-cache: cachedApi never keeps it under the
+ * address as typed).
  */
 export async function handleSourceRead(url: URL, request: Request, env: Env, fetcher: typeof fetch = fetch): Promise<Response> {
   const raw = normaliseUrl(url.searchParams.get("url") ?? "");
@@ -136,11 +157,25 @@ export async function handleSourceRead(url: URL, request: Request, env: Env, fet
   const where = forgeOf(raw);
   const name = (parsed.github?.repo ?? where?.repo ?? parsed.project.split("/").pop() ?? "").toLowerCase();
   const base = { url: raw, project: parsed.project, forge: where ? FORGES[where.forge] : null, name };
-  const unread = (why: string) => json({ ...base, read: false, why }, 200, { "cache-control": "no-store" });
+  const answer = (body: Record<string, unknown>, cache: string, edge: "hit" | "miss") => {
+    const res = json({ ...base, ...body }, 200, { "cache-control": cache });
+    res.headers.set("x-pool-cache", edge);
+    return res;
+  };
+  const unread = (why: string) => answer({ read: false, why }, "no-store", "miss");
   if (!where) return unread("not on GitHub, GitLab or Codeberg: name the release — its source and its version");
-  if (env.SOURCE_CHECK === "off") return unread("this pool reads no repository (SOURCE_CHECK is off)");
-  if (!(await contributorOf(request, env))) return unread("sign in, and the pool reads the repository");
+  if (env.SOURCE_CHECK === "off") return unread("this pool reads no repository");
+  const origin = machineOrigin(url), key = readKey(origin, where, parsed.tag);
+  const kept = await edgeHit(key);
+  if (kept) return answer((await kept.json()) as Record<string, unknown>, kept.headers.get("cache-control") ?? "no-store", "hit");
+  const c = await contributorOf(request, env);
+  if (!c) return unread("sign in, and the pool reads the repository");
+  const blocked = workspace(c, c.login).request;
+  if (!blocked.ok) return unread(blocked.why);
+  if (!(await spend(origin, c.login))) return unread(`read ${READS_PER_HOUR} repositories for you this hour; fill the card in, and sending reads it`);
   const got = await readSource(raw, env, fetcher);
-  if (!got || "error" in got) return unread(got ? got.error : "not read");
-  return json({ ...base, read: true, ...got }, 200, { "cache-control": "public, max-age=600" });
+  const body = got && !("error" in got) ? { read: true, ...got } : { read: false, why: got ? got.error : "not read" };
+  const keep = body.read ? KEEP_READ : KEEP_FAILED;
+  await edgeStore(key, Response.json(body), keep);
+  return answer(body, `public, max-age=${keep}`, "miss");
 }

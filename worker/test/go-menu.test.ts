@@ -482,7 +482,7 @@ describe("the ⌘K menu, run", () => {
     rows = m.rows();
     expect(rows.map((r) => r.label)).toEqual([...nine.slice(0, 6).map((p) => p.name), 'Request "hypr"']);
     expect(rows[0]).toMatchObject({ hint: origin("extra", REPO_ARCHES[0]), href: SHELL.pkgHref("hyprland", "stable", REPO_ARCHES[0]), icon: lucide("package", 16) });
-    expect(rows[6]).toMatchObject({ hint: "factory", href: "/factory?name=hypr", icon: lucide("git-pull-request", 16) });
+    expect(rows[6]).toMatchObject({ hint: "factory", href: "/factory?name=hypr#request", icon: lucide("git-pull-request", 16) });
     expect(m.said.textContent).toBe("7 results");
     // A longer term the answer does not hold whole: asked, and until then the rows of the last answer that still match — never a Request.
     m.type("hyprland");
@@ -516,7 +516,7 @@ describe("the ⌘K menu, run", () => {
     await nowhere(m, "zzfoo");
     expect(m.rows().map((r) => [r.label, r.hint, r.selected])).toEqual([['Request "zzfoo"', "factory", true]]);
     m.keyOnLine("Enter");
-    expect(m.location.assigned[m.location.assigned.length - 1]).toBe("/factory?name=zzfoo");
+    expect(m.location.assigned[m.location.assigned.length - 1]).toBe("/factory?name=zzfoo#request");
     // The factory's names were asked once for the page, whatever was looked up.
     expect(m.asked.filter((u) => u === REGISTRY).length).toBe(1);
   });
@@ -618,7 +618,7 @@ describe("the ⌘K menu, run", () => {
     await m.reply(homeSearch("qqq"), { packages: [] });
     expect(m.location.assigned, "the name is looked up first").toEqual([]);
     await nowhere(m, "qqq");
-    expect(m.location.assigned).toEqual(["/factory?name=qqq"]);
+    expect(m.location.assigned).toEqual(["/factory?name=qqq#request"]);
     // An answer that lands after the line changed does not draw over it.
     m.window.opPalette.open();
     m.type("abc");

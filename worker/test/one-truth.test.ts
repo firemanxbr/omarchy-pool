@@ -67,6 +67,7 @@ import { waitsForMaintainer, stands } from "../src/routes/review";
 import { maintenanceOf } from "../src/routes/users";
 import { landed } from "../src/routes/contributors";
 import { snapshotMetrics } from "../src/metrics";
+import { settleTargets } from "../src/targets";
 import { allComponents } from "../src/pages/components";
 import { HELPERS } from "../src/pages/layout";
 import { CHARTS } from "../src/pages/charts";
@@ -179,8 +180,8 @@ describe("an approval stands or it does not, said once", () => {
     for (const a of rows) { expect(a).toHaveProperty("publish_status"); expect(a).toHaveProperty("blocked_at"); }
   });
 
-  // The Factory listed approvals too (Landed lately) until #246: its line's Shipped column reads each architecture's target (targets.ts, the server's word), and the review list's rows are Review's alone.
-  it("where a standing approval is today is one word, the shell's approvalWhere over the row's rings, blocked_at and publish_status — said by Review's Decided line; no page guesses a ring from the registry's status", async () => {
+  // The Factory said it in Landed lately until #246; its line's Shipped column says it now, a card per package placed by its targets (targets.ts) and worded, where it stands today, by the same rule over the same rows.
+  it("where a standing approval is today is one word, the shell's approvalWhere over the row's rings, blocked_at and publish_status — said by the Factory's Shipped cards and Review's Decided line alike; no page guesses a ring from the registry's status", async () => {
     type Row = { name: string; task_id: number; standing: boolean; rings: string[]; publish_status: string | null; blocked_at: string | null };
     const rows = (await call("GET", "/factory/approvals")).json.approvals as Row[];
     const served = rows.find((a) => a.name === F.publishedPkg)!, failed = rows.find((a) => a.name === F.failedPkg)!, pulled = rows.find((a) => a.name === F.pulledPkg)!;
@@ -191,7 +192,7 @@ describe("an approval stands or it does not, said once", () => {
     // The registry's word for lost is still "approved" — the status the Review line read to promise edge — and no page reads it for this.
     const pkgs = (await call("GET", "/factory/packages")).json.packages as { name: string; status: string }[];
     expect(pkgs.find((p) => p.name === F.failedPkg)).toMatchObject({ status: "approved" });
-    for (const path of ["/review"]) {
+    for (const path of ["/review", "/factory"]) {
       const own = ownScript(await page(path));
       expect(own, `${path} guesses a ring from the registry`).not.toMatch(/\["edge"\]|status === "published"/);
       expect(own, `${path} words the state on its own`).not.toMatch(/"publishing"|on its way into edge|publish_status ===/);
@@ -205,7 +206,7 @@ describe("an approval stands or it does not, said once", () => {
     expect(shell.approvalWhere({ ...failed, publish_status: "cancelled" })).toMatchObject({ word: "publish cancelled", cls: "error" });
     for (const publish_status of ["queued", "leased", null]) expect(shell.approvalWhere({ ...failed, publish_status }), String(publish_status)).toMatchObject({ word: "publishing", cls: "blue" });
     expect(shell.approvalWhere({ ...served, rings: ["edge", "stable"] })).toMatchObject({ word: "in edge · stable", cls: "ok" });
-    // Review drawn over the Worker's answers, as the fixture's people see it: as dave, whose two packages these are, and as alice, whose ours edge serves.
+    // The two pages drawn over the Worker's answers, as the fixture's people see them: the Factory for anyone and as dave, Review as dave, whose two packages these are, and as alice, whose ours edge serves.
     const viewer = (login: string) => async (path: string, init?: RequestInit) => {
       const ctx = createExecutionContext();
       const res = await worker.fetch(new Request(`http://pool.test${path}`, { ...init, headers: { ...(init?.headers as Record<string, string> | undefined), ...(login ? { cookie: `omc=oms_${login}` } : {}) } }), env, ctx);
@@ -214,6 +215,38 @@ describe("an approval stands or it does not, said once", () => {
     };
     const drawn = async (path: string, login: string) => { const d = runScript(scriptOf(await page(path)), { pathname: path, functions: [], fetch: viewer(login) }); await new Promise((r) => setTimeout(r, 80)); return d; };
     const decided = (await drawn("/review", F.outsider)).nodes["#mine-decided"].innerHTML as string;
+    // The Factory: lost's targets as the rule says them now (the fixture wrote its approval by hand and left the request's "building" stored) — the project's build staged, an approval standing on it: approved, in the Shipped column, whose publish failed. Put back after, for the tests below.
+    const stored = await env.DB.prepare("SELECT targets FROM factory_packages WHERE name = ?").bind(F.failedPkg).first<{ targets: string | null }>();
+    expect((await settleTargets(env, F.failedPkg))[F.failedPkg]).toMatchObject({ [F.arch]: { status: "approved", task: failed.task_id } });
+    // The registry asked past its thirty seconds at the edge (a new query), so the page reads the targets just settled, not the copy this test read above.
+    const board = async (login: string) => {
+      const past = (path: string, init?: RequestInit) => viewer(login)(path === "/api/v1/factory/packages" ? `${path}?t=${Math.random()}` : path, init);
+      const d = runScript(scriptOf(await page("/factory")), { pathname: "/factory", functions: [], fetch: past });
+      await new Promise((r) => setTimeout(r, 250));
+      return d;
+    };
+    const visitor = await board(""), daves = await board(F.outsider);
+    await env.DB.prepare("UPDATE factory_packages SET targets = ? WHERE name = ?").bind(stored?.targets ?? null, F.failedPkg).run();
+    const shipped = visitor.nodes["#col-4"].innerHTML as string, hisRows = daves.nodes["#mine-list"].innerHTML as string;
+    // The card of one package on the line (an a.fx-card), and a row of one's own requests (an a.fx-mrow): the way out is the link itself.
+    const linkOf = (html: string, name: string, cls: string) => { const m = html.split(`<a class="${cls}`).find((r) => r.includes(`<b>${name}</b>`)); expect(m, `a ${cls} of ${name}`).toBeDefined(); return m!.split("</a>")[0]; };
+    for (const [what, html, cls] of [["the Factory's Shipped card", shipped, "fx-card"], ["dave's own row on the Factory", hisRows, "fx-mrow"]] as const) {
+      const card = linkOf(html, F.failedPkg, cls);
+      // The shell's word, in the tone of its class: publish failed, never a promise of edge.
+      expect(card, `${what}: lost`).toContain(">publish failed</span>");
+      expect(card, `${what}: lost promises edge`).not.toMatch(/into edge|>publishing</);
+      // In no ring, the way out is the build — never a package address as if a ring served it.
+      expect(card, `${what}: lost leads to the build`).toMatch(new RegExp(`^[^>]*href="/build/${failed.task_id}"`));
+      expect(card, `${what}: lost leads to a ring`).not.toContain(`href="/package/${F.failedPkg}?`);
+    }
+    expect(linkOf(shipped, F.failedPkg, "fx-card")).toContain('<span class="fx-note bad">publish failed</span>');
+    // pulled is blocked: off the line, no card at all.
+    expect(visitor.nodes["#board"]?.innerHTML ?? "", "pulled").not.toContain(`<b>${F.pulledPkg}</b>`);
+    for (let i = 0; i < 5; i++) expect(visitor.nodes[`#col-${i}`].innerHTML, `column ${i}: pulled`).not.toContain(`<b>${F.pulledPkg}</b>`);
+    // ours is served: its card says the ring and leads to the package's one address in it.
+    const ours = linkOf(shipped, F.publishedPkg, "fx-card");
+    expect(ours).toContain(`href="/package/${F.publishedPkg}?ring=edge&amp;arch=${F.arch}"`);
+    expect(ours).toContain('<span class="fx-note">in edge</span>');
     // The pill as the shell draws it from the rule's answer — class and word; the title is left out, since "blocked 0s ago" is a clock read twice (once by the page, once here) and a second boundary between the two reads is not this test's to control.
     const pill = (a: Row) => { const w = shell.approvalWhere(a); return new RegExp(`<span class="pill ${w.cls}" title="[^"]*">${w.word}</span>`); };
     // The row of one package, in the drawn list: Review's line (a div.rrow). The assertions on lost and pulled read their own rows, not the whole list — mine, alice's, may stand approved with its publish queued, and then wears the shell's "publishing" pill by right; whether it does depends on what the tests above did to the database, and this test holds either way (it failed alone, passing only after the withdrawal at the top of the file).

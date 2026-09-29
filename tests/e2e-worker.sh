@@ -420,6 +420,9 @@ named=$(curl -s "$OMARCHY_API/api/v1/factory/names/e2e-ident?arches=x86_64,aarch
 cx=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/claim" "${wrx[@]}" -d "{\"arch\":\"x86_64\",$agent}")
 [[ "$(jq -r '.task.name + " " + .task.arch' <<<"$cx")" == "e2e-ident x86_64" ]] || { echo "the x86_64 worker did not get the x86_64 build: $cx"; exit 1; }
 x86=$(jq -r .task.id <<<"$cx"); cxj=(-H "authorization: Bearer $(jq -r .token <<<"$cx")")
+# What runs now, as the Factory's workers card polls it (?live=1): the build the worker holds, only tasks in flight, no counts.
+live=$(curl -s "$OMARCHY_API/api/v1/factory?live=1&limit=20&t=$x86")
+[[ "$(jq -r --argjson id "$x86" '[.tasks[] | select(.id == $id) | .status] | join(",")' <<<"$live") $(jq -r '[.tasks[].status | select(. != "leased" and . != "queued")] | length' <<<"$live") $(jq -r '.counts | length' <<<"$live")" == "leased 0 0" ]] || { echo "the live read must show the x86_64 build leased, and nothing but tasks in flight: $live"; exit 1; }
 for f in PKGBUILD build.log PKGINFO e2e-ident-1.0-1-x86_64.pkg.tar.zst; do
   [[ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$OMARCHY_API/api/v1/factory/tasks/$x86/artifacts/$f" "${cxj[@]}" --data-binary "the contributor's $f")" == 201 ]] || { echo "the contributor's build could not stage $f"; exit 1; }
 done

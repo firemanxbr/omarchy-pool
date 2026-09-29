@@ -887,9 +887,18 @@ function parseJson(text: string | null): unknown {
   try { return text ? JSON.parse(text) : null; } catch { return null; }
 }
 
+/**
+ * GET /factory — the workers and the queue. `?live=1` is the read a page
+ * polls for what is running now (the Factory's workers card, #246): the
+ * tasks in flight only (queued or leased), found through the queue's
+ * status index, and no counts — the whole listing reads every task twice
+ * (the counts, then an order no index gives), about 2 000 rows a miss in
+ * production, the live read the queue's few rows.
+ */
 export async function handleFactory(env: Env, url?: URL): Promise<Response> {
   const limit = Math.min(200, Math.max(10, Number(url?.searchParams.get("limit") ?? 60) || 60));
-  const counts = await env.DB.prepare("SELECT status, arch, COUNT(*) AS n FROM build_tasks GROUP BY status, arch").all();
+  const live = url?.searchParams.get("live") === "1";
+  const counts = live ? { results: [] } : await env.DB.prepare("SELECT status, arch, COUNT(*) AS n FROM build_tasks GROUP BY status, arch").all();
   const alive = aliveSince();
   // Every worker belongs to someone: the project (trust project, granted by
   // a maintainer) or a contributor.
@@ -898,7 +907,7 @@ export async function handleFactory(env: Env, url?: URL): Promise<Response> {
   )
     .bind(new Date(alive).toISOString())
     .all<WorkerRow>();
-  const tasks = await env.DB.prepare("SELECT * FROM build_tasks ORDER BY CASE status WHEN 'leased' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, id DESC LIMIT ?").bind(limit).all<TaskRow>();
+  const tasks = await env.DB.prepare(`SELECT * FROM build_tasks ${live ? "WHERE status IN ('leased', 'queued') " : ""}ORDER BY CASE status WHEN 'leased' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, id DESC LIMIT ?`).bind(limit).all<TaskRow>();
   const pool = running(env);
   return json(
     {

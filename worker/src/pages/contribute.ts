@@ -18,12 +18,15 @@
  * (reserveName): two people sending one name at once, one of them has it.
  *
  * Everything is public and the same for everyone. What a session changes
- * is the send — "Sign in to send" for nobody, the POST for a person — and
- * the reader's own requests. The line and the workers are the pool's own
- * rows: the workers from the factory listing, polled as the Workers page
- * polls it; the line from the registry, where each package's targets say
- * where each architecture stands (targets.ts), read again when a job
- * starts or ends — a card moves when its job ends — and every five minutes.
+ * is the send — "Sign in to send" for nobody, the card kept across the
+ * sign-in; the POST for a person — and the reader's own requests. The line
+ * and the workers are the pool's own rows: the workers from the factory
+ * listing's live read (the tasks in flight, through the queue's index),
+ * every minute while the tab is shown; the line from the registry, where
+ * each package's targets say where each architecture stands (targets.ts),
+ * read again when a build starts or ends — a card moves when its job ends —
+ * and every five minutes; a shipped card worded, and linked, by where its
+ * approval stands today (approvalWhere over the approvals list).
  */
 import { page } from "./layout";
 import { EVERYONE, SIGNED_IN, type Component, type Fixture } from "./components";
@@ -79,7 +82,7 @@ const BODY = String.raw`
 
   <section class="fx-pair" aria-label="Request a package, and the workers">
     <div class="op-card fx-request" id="request">
-      <div class="op-card-h"><b id="fx-head">Request a package</b>
+      <div class="op-card-h"><h2 class="fx-h" id="fx-head">Request a package</h2>
         <div class="op-tabs" role="tablist" aria-label="How to send it">
           <button type="button" role="tab" id="tab-form" aria-selected="true" aria-controls="fx-form">Form</button>
           <button type="button" role="tab" id="tab-agent" aria-selected="false" aria-controls="fx-agent" tabindex="-1">Ask your agent</button>
@@ -88,11 +91,13 @@ const BODY = String.raw`
       <form class="fx-form" id="fx-form" role="tabpanel" aria-labelledby="tab-form" onsubmit="return false" novalidate>
         <div class="fx-field">
           <div class="fx-lab"><label class="op-label" for="fx-name">Name</label><span class="fx-say" id="fx-name-say" aria-live="polite"></span></div>
-          <div class="fx-in" id="fx-name-box">${lucide("package", 15)}<input id="fx-name" type="text" placeholder="the name people will pacman -S" maxlength="100" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+          <div class="fx-in" id="fx-name-box">${lucide("package", 15)}<input id="fx-name" type="text" placeholder="the name people will pacman -S" maxlength="100" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="fx-name-why"></div>
+          <p class="fx-why" id="fx-name-why" hidden></p>
         </div>
         <div class="fx-field">
           <div class="fx-lab"><label class="op-label" for="fx-url">Source</label><span class="fx-say" id="fx-url-say" aria-live="polite"></span></div>
-          <div class="fx-in" id="fx-url-box"><span class="fx-ic" id="fx-url-icon">${lucide("github", 15)}</span><input id="fx-url" type="text" inputmode="url" placeholder="github.com/you/project" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+          <div class="fx-in" id="fx-url-box"><span class="fx-ic" id="fx-url-icon">${lucide("github", 15)}</span><input id="fx-url" type="text" inputmode="url" placeholder="github.com/you/project" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="fx-url-why"></div>
+          <p class="fx-why" id="fx-url-why" hidden></p>
           <div class="fx-found" id="fx-found" hidden></div>
         </div>
         <div class="fx-row">
@@ -124,13 +129,13 @@ ${Object.entries(CHECKLIST).map(([key, text]) => `          <label><input type="
           <span id="fx-send-slot">${SIGN_IN_TO_SEND}</span>
         </div>
         <p class="fx-state" id="fx-state" role="status"></p>
-        <div class="fx-done" id="fx-done" hidden></div>
+        <div class="fx-done" id="fx-done" tabindex="-1" hidden></div>
       </form>
       <div class="fx-agent" id="fx-agent" role="tabpanel" aria-labelledby="tab-agent" hidden>
         <p>Your agent fills in the request and follows it for you.</p>
         <div class="op-code"><code><span class="op-prompt">› </span><span id="fx-prompt">Request &lt;name&gt; on omarchy-pool.</span></code><button type="button" class="op-copy" data-op-copy="">copy prompt</button></div>
         <div class="fx-with"><span>Works with</span>${WORKS_WITH.map(([label, mark]) => `<span class="fx-mark">${agentMark(mark, label, 22)}</span>`).join("")}</div>
-        <p class="fx-tools">${lucide("plug", 13)}<span>Through <code>omarchy-cli mcp</code> · <code>request_package</code> · <code>request_status</code></span><span class="op-pill na" title="signed off, not built yet: #252">proposed</span></p>
+        <p class="fx-tools"><span>${lucide("plug", 13)} Through <code>omarchy-cli mcp</code> · <code>request_package</code> · <code>request_status</code></span><span class="op-pill na" title="signed off, not built yet: #252">proposed</span></p>
         <p class="fx-tools-note">Those two tools are proposed, not built yet (<a href="/docs/omarchy-cli-mcp">the MCP chapter</a>). Until they are, an agent sends the same request with your token: <code>POST /api/v1/factory/packages</code> (<a href="/api">the API</a>).</p>
       </div>
       <ol class="fx-next" aria-label="What happens next">
@@ -142,7 +147,7 @@ ${Object.entries(CHECKLIST).map(([key, text]) => `          <label><input type="
     </div>
 
     <div class="op-card fx-workers" id="workers">
-      <div class="op-card-h"><b>Workers <span class="op-live-dot" title="live: the listing, every twenty seconds"></span></b><small id="fx-busy"></small></div>
+      <div class="op-card-h"><h2 class="fx-h">Workers <span class="op-live-dot" title="live: what runs now, every minute"></span></h2><small id="fx-busy"></small></div>
       <div class="fx-wlist" id="fx-wlist"><p class="fx-wempty"><span class="skl"></span></p></div>
       <div class="op-card-f fx-wfoot"><span>each with the agent it reports</span><a href="/workers">All workers →</a></div>
     </div>
@@ -175,6 +180,9 @@ const FACTORY_CSS = String.raw`
   .fx section { margin: 0; min-width: 0; }
   .fx a { text-decoration: none; }
   .fx h2.op-label { margin: 0; font-family: var(--font-mono); letter-spacing: var(--tracking-label); }
+  .fx .op-card-h > h2.fx-h { margin: 0; font: 600 15px var(--font-display); }
+  /* Focus is one 1px green line, square, on everything a reader can reach: the kit's button and copy well and the page's links included, which the browser drew its own rounded ring on. */
+  .fx a:focus-visible, .fx .op-btn:focus-visible, .fx .op-copy:focus-visible, .fx-done:focus-visible { outline: 1px solid var(--green); outline-offset: 1px; }
   .fx-hero { display: flex; flex-wrap: wrap; gap: 32px 40px; align-items: flex-end; }
   .fx-lede { flex: 1 1 480px; min-width: 0; display: grid; gap: 16px; }
   .fx .op-hero { max-width: 600px; }
@@ -191,12 +199,14 @@ const FACTORY_CSS = String.raw`
   .fx-say { min-width: 0; font-size: 12.5px; color: var(--dim); text-align: right; overflow-wrap: anywhere; }
   .fx-say a { color: inherit; } .fx-say a:hover { text-decoration: underline; }
   .fx-in { display: flex; align-items: center; gap: 10px; height: 42px; padding: 0 12px; min-width: 0; background: var(--bg-deep); border: 1px solid var(--line); color: var(--dim); }
-  .fx-in:focus-within { border-color: var(--green); }
+  /* The field's focus is an outline, so the border stays the check's (ok, bad, warn, run) and neither hides the other. */
+  .fx-in:focus-within { outline: 1px solid var(--green); outline-offset: 1px; }
   .fx-in input { flex: 1; min-width: 0; height: 100%; padding: 0; background: transparent; border: 0; outline: 0; color: var(--text); font: 14px var(--font-mono); }
   .fx-in input::placeholder { color: var(--dim); }
   .fx-ic { display: flex; }
   .fx-say.ok { color: var(--green); } .fx-say.bad { color: var(--red); } .fx-say.warn { color: var(--amber); } .fx-say.run { color: var(--blue); }
   .fx-in.ok { border-color: var(--green); } .fx-in.bad { border-color: var(--red); } .fx-in.warn { border-color: var(--amber); } .fx-in.run { border-color: var(--blue); }
+  .fx-why { margin: 0; font-size: 12px; color: var(--dim); overflow-wrap: anywhere; } .fx-why.bad { color: var(--red); } .fx-why.warn { color: var(--amber); }
   .fx-found { display: flex; flex-wrap: wrap; gap: 6px 16px; padding-top: 2px; font-size: 12.5px; color: var(--muted); }
   .fx-found > span { display: inline-flex; align-items: baseline; gap: 6px; min-width: 0; overflow-wrap: anywhere; }
   .fx-found b { font-weight: 700; } .fx-found .ok { color: var(--green); } .fx-found .bad { color: var(--red); } .fx-found .warn { color: var(--amber); }
@@ -207,14 +217,18 @@ const FACTORY_CSS = String.raw`
   .fx .fx-seg > button[aria-pressed="true"] { color: var(--text); }
   .fx-tick { width: 12px; text-align: center; } .fx-seg > [aria-pressed="false"] .fx-tick { visibility: hidden; }
   .fx-seg > button:focus-visible, .fx .op-tabs > button:focus-visible, .fx-more summary:focus-visible, .fx-confirm input:focus-visible { outline: 1px solid var(--green); outline-offset: 1px; }
+  /* The kit's tabs scroll sideways (overflow-x), which clips an outline to its box: two pixels of room inside it, given back outside. */
+  .fx .op-card-h .op-tabs { padding: 2px; margin: -2px; }
   .fx-more summary { cursor: pointer; font-size: 12.5px; color: var(--dim); } .fx-more summary:hover { color: var(--text); } .fx-more[open] summary { margin-bottom: 10px; }
   .fx-confirm { margin: 0; padding: 10px 12px; min-width: 0; display: grid; gap: 6px; border: 1px solid var(--line); background: var(--bg-deep); }
   .fx-confirm legend { padding: 0 4px; }
   .fx-confirm label { display: flex; align-items: flex-start; gap: 9px; font-size: 12.5px; line-height: 1.45; color: var(--muted); cursor: pointer; }
-  .fx-confirm input { flex: none; margin: 3px 0 0; accent-color: var(--green); }
+  /* A confirmation's box drawn square, as every box of the page: the browser's is rounded. */
+  .fx-confirm input { flex: none; display: grid; place-content: center; width: 14px; height: 14px; margin: 2px 0 0; -webkit-appearance: none; appearance: none; border: 1px solid var(--dim); background: var(--bg-deep); cursor: pointer; }
+  .fx-confirm input:checked { border-color: var(--green); } .fx-confirm input:checked::before { content: "✓"; color: var(--green); font: 700 11px/1 var(--font-mono); }
   .fx-send { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; padding-top: 14px; border-top: 1px solid var(--line); }
   .fx-lock, .fx-lockline { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 12.5px; color: var(--dim); }
-  .fx .fx-send .op-btn { padding: 7px 16px; font-size: 13.5px; }
+  .fx .fx-send .op-btn { padding: 7px 16px; font-size: 13.5px; } .fx .fx-send .op-btn[aria-disabled="true"] { opacity: .6; cursor: progress; }
   .fx-state { margin: 0; font-size: 12.5px; color: var(--muted); } .fx-state:empty { display: none; } .fx-state.bad { color: var(--red); }
   .fx-done { display: grid; gap: 6px; padding: 10px 12px; border: 1px solid var(--green); background: var(--bg-deep); font-size: 13px; }
   .fx-done > span { overflow-wrap: anywhere; } .fx-done a { color: var(--green); } .fx-done a:hover { text-decoration: underline; } .fx-done .warn { color: var(--amber); } .fx-done .dim { color: var(--dim); }
@@ -251,7 +265,7 @@ const FACTORY_CSS = String.raw`
   .fx-colh .op-i { color: var(--fx-c); } .fx-colh .n { margin-left: auto; font: 600 15px var(--font-display); letter-spacing: 0; color: var(--fx-c); }
   .fx-cards { display: grid; gap: 8px; min-width: 0; }
   .fx-card { display: grid; gap: 6px; min-width: 0; padding: 9px 10px; border: 1px solid var(--line); border-top: 2px solid var(--fx-c); background: var(--bg-deep); color: var(--text); }
-  .fx-card:hover { border-color: var(--green); border-top-color: var(--fx-c); } .fx-card:focus-visible { outline: 1px solid var(--green); outline-offset: -1px; }
+  .fx-card:hover { border-color: var(--green); border-top-color: var(--fx-c); } .fx a.fx-card:focus-visible { outline: 1px solid var(--green); outline-offset: -1px; }
   @keyframes fx-fresh { from { background-color: var(--panel-2); } to { background-color: var(--bg-deep); } }
   .fx-card.op-fresh { animation-name: fx-fresh; }
   .fx-c1, .fx-c2 { display: flex; justify-content: space-between; gap: 8px; min-width: 0; } .fx-c1 { align-items: baseline; } .fx-c2 { align-items: center; }
@@ -260,11 +274,14 @@ const FACTORY_CSS = String.raw`
   .fx-by { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; color: var(--muted); } .fx-by > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .fx .fx-by .avatar { width: 16px; height: 16px; font-size: 7px; font-weight: 700; }
   .fx-sq { display: flex; gap: 3px; } .fx .fx-sq .op-arch { width: 9px; height: 9px; } .fx .op-arch.wait { background: transparent; }
-  .fx-note { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--dim); } .fx-note.warn { color: var(--amber); }
+  /* An architecture nobody asked for: the faintest square, apart from one whose build failed (the kit's dashed na). */
+  .fx .op-arch.off { background: transparent; border: 1px solid var(--line); }
+  .fx-note { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--dim); } .fx-note.warn { color: var(--amber); } .fx-note.bad { color: var(--red); }
+  .fx-none { margin: 0; padding: 2px; font-size: 12px; color: var(--dim); }
   .fx-more-n { padding: 2px; font-size: 12px; color: var(--dim); }
   .fx-mlist { border: 1px solid var(--line); background: var(--panel); }
   .fx-mrow { display: grid; grid-template-columns: minmax(140px, 1.2fr) 170px auto minmax(0, 1.6fr) 14px; gap: 14px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); font-size: 13px; color: var(--text); }
-  .fx-mrow:last-child { border-bottom: 0; } .fx-mrow:hover { background: var(--panel-2); } .fx-mrow:focus-visible { outline: 1px solid var(--green); outline-offset: -1px; }
+  .fx-mrow:last-child { border-bottom: 0; } .fx-mrow:hover { background: var(--panel-2); } .fx a.fx-mrow:focus-visible, .fx a.op-stat:focus-visible, .fx .fx-wjob a:focus-visible { outline: 1px solid var(--green); outline-offset: -1px; }
   .fx-mrow .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .fx-mrow .nm b { font-weight: 600; } .fx-mrow .nm span { margin-left: 6px; font-size: 12px; color: var(--dim); }
   .fx-stage { display: flex; align-items: center; gap: 8px; font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--fx-c); }
   .fx-mrow .note { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; color: var(--dim); } .fx-mrow .go { color: var(--green); }
@@ -275,6 +292,8 @@ const FACTORY_CSS = String.raw`
     .fx { padding-top: 0; }
     .fx .op-hero { font-size: 30px; }
     .fx-mrow { grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; } .fx-mrow .note { grid-column: 1 / -1; } .fx-mrow .go { display: none; }
+    /* The prompt keeps the width: its copy button goes under it. */
+    .fx .op-code { flex-wrap: wrap; }
     /* On a phone the line wraps: its columns one under another, not a board to scroll sideways. */
     .fx-board { grid-template-columns: minmax(0, 1fr); min-width: 0; } .fx-col { min-height: 0; }
   }
@@ -305,17 +324,21 @@ const SCRIPT = String.raw`
   // An address as a person pastes it, the scheme added when there is none — the server's normaliseUrl (routes/sources.ts) says the same.
   function urlOf() { var u = val("#fx-url"); return u && !/^[a-z][a-z0-9+.-]*:\/\//i.test(u) ? "https://" + u : u; }
   function since(iso) { return iso ? ago(iso).replace(" ago", "") : ""; }
-  function said(sel, box, text, tone, title) {
+  // What a field's check says: a few words in the slot beside its label, the whole reason on hover — and, where the few words are not enough to act on, in the line under the field (the field's description, so a screen reader reads it with it).
+  function said(sel, box, text, tone, title, why) {
     var el = $(sel); if (el) { el.className = "fx-say" + (tone ? " " + tone : ""); el.innerHTML = text; el.title = title || ""; }
     var b = box ? $(box) : null; if (b) b.className = "fx-in" + (tone ? " " + tone : "");
+    var w = $(sel.replace("-say", "-why")); if (w) { w.textContent = why || ""; w.hidden = !why; w.className = "fx-why" + (tone === "bad" || tone === "warn" ? " " + tone : ""); }
   }
 
   // ---- the name: its rule first, in the page (PKGNAME), then the server's word on it (GET /factory/names/:name — the request's own rule over the registry, the approvals, the builds and the sources), asked once per name and architectures, a quarter of a second after the typing stops.
-  var NAMES = {}, nameTimer = null, NAME_STATE = null;
+  // SENT: the names this page sent and the pool reserved, the reader's from that answer on — the check's own answer is thirty seconds old at the edge, and said "available" of the name just reserved.
+  var NAMES = {}, SENT = {}, nameTimer = null, NAME_STATE = null;
   function checkName() {
     var n = nameOf(); clearTimeout(nameTimer);
     if (!n) { NAME_STATE = null; said("#fx-name-say", "#fx-name-box", "", ""); return ready(); }
     if (!NAME_RULE.test(n)) return nameSays({ name: n, state: "invalid" });
+    if (SENT[n]) return nameSays(SENT[n]);
     var key = n + "?" + archesOn().join(",");
     if (NAMES[key]) return nameSays(NAMES[key]);
     nameSays({ name: n, state: "checking" });
@@ -326,19 +349,26 @@ const SCRIPT = String.raw`
       }).catch(function (e) { if (nameOf() === n) nameSays({ name: n, state: "unknown", why: errorText(e) }); });
     }, 250);
   }
-  // What the check says, in the handoff's words: available, taken (linked to its page), reserved by a pending request, invalid characters — and the holder's own name as theirs. The title is the request's refusal, word for word.
+  // What the check says, in the handoff's words: available, taken (linked to its page), reserved by a pending request, invalid characters — and the holder's own name as theirs. The title is the request's refusal, word for word; the line under the field says it where the slot's words do not tell the reader what to do.
   function nameSays(d) {
     NAME_STATE = d;
     var n = d.name, own = !!d.owner && d.owner === WHO.login && d.state !== "blocked";
+    // What a source ships of the name on the architectures asked (the check's provided): the request skips those and builds the rest.
+    var skip = (d.provided || []).filter(function (p) { return archesOn().indexOf(p.arch) >= 0; });
+    var skipWhy = skip.map(function (p) { return p.source + " ships " + p.version + " for " + p.arch; }).join(" · ");
     if (d.state === "invalid") said("#fx-name-say", "#fx-name-box", "✗ invalid characters", "bad", "a pacman name: " + NAME_WORDS);
     else if (d.state === "checking") said("#fx-name-say", "#fx-name-box", "⟳ checking", "run");
-    else if (d.state === "unknown") said("#fx-name-say", "#fx-name-box", "could not check: " + esc(d.why), "");
-    else if (own) said("#fx-name-say", "#fx-name-box", d.renew ? "✗ yours · " + esc(d.renew) : "✓ yours · sending renews the request", d.renew ? "warn" : "ok");
-    else if (d.state === "available") said("#fx-name-say", "#fx-name-box", "✓ available" + (d.freed === "rejected" ? " · freed by a review" : d.freed === "unmaintained" ? " · unmaintained, yours to take over" : ""), "ok");
+    else if (d.state === "unknown") said("#fx-name-say", "#fx-name-box", "could not check", "", d.why, "The check did not answer (" + d.why + "); sending still checks the name.");
+    else if (own) said("#fx-name-say", "#fx-name-box", d.renew ? "✗ yours · can't renew now" : "✓ yours · sending renews the request", d.renew ? "warn" : "ok", d.renew || "", d.renew || "");
+    else if (d.state === "available") said("#fx-name-say", "#fx-name-box", "✓ available" + (skip.length ? " · " + esc(skip.map(function (p) { return p.arch; }).join(", ")) + " skipped" : d.freed === "rejected" ? " · freed by a review" : d.freed === "unmaintained" ? " · unmaintained, yours to take over" : ""), "ok", skipWhy, skipWhy ? skipWhy + ": the request builds the other architectures." : "");
     else if (d.state === "reserved") said("#fx-name-say", "#fx-name-box", "✗ reserved by a pending request", "warn", d.why);
-    else if (d.state === "taken") said("#fx-name-say", "#fx-name-box", '<a href="' + esc(pkgHref(n, "edge", archesOn()[0] || ARCHES[0])) + '">✗ taken · open it ›</a>', "bad", d.why);
+    // Taken: linked to the package in edge where edge serves it (the check's in_edge) — a name in the pool by an approval alone may be in no ring, and a link naming one would say what no fact does.
+    else if (d.state === "taken") {
+      var inEdge = (d.in_edge || []).filter(function (a) { return archesOn().indexOf(a) >= 0; }).concat(d.in_edge || [])[0];
+      said("#fx-name-say", "#fx-name-box", inEdge ? '<a href="' + esc(pkgHref(n, "edge", inEdge)) + '">✗ taken · open it ›</a>' : "✗ taken", "bad", d.why);
+    }
     else if (d.state === "blocked") said("#fx-name-say", "#fx-name-box", "✗ blocked by a maintainer", "bad", d.why);
-    else said("#fx-name-say", "#fx-name-box", "✗ being built · renew it once it is done", "warn", d.why);
+    else said("#fx-name-say", "#fx-name-box", "✗ being built now", "warn", d.why);
     ready(); signInLink();
   }
   // Whether the name may be sent: available, or the reader's own and renewable.
@@ -364,11 +394,11 @@ const SCRIPT = String.raw`
     var found = $("#fx-found"), icon = $("#fx-url-icon");
     if (icon) icon.innerHTML = lucide(d && d.forge && d.forge !== "GitHub" ? "git-fork" : "github", 15);
     if (!d) { said("#fx-url-say", "#fx-url-box", "", ""); if (found) found.hidden = true; return prompt(); }
-    if (d.reading) said("#fx-url-say", "#fx-url-box", "⟳ reading the address…", "run");
-    else if (d.error) said("#fx-url-say", "#fx-url-box", "✗ " + esc(d.error), "bad");
+    if (d.reading) said("#fx-url-say", "#fx-url-box", "⟳ reading…", "run");
+    else if (d.error) said("#fx-url-say", "#fx-url-box", "✗ not usable", "bad", d.error, d.error);
     else if (d.read) said("#fx-url-say", "#fx-url-box", "✓ found on " + esc(d.forge), "ok");
-    else if (d.forge) said("#fx-url-say", "#fx-url-box", "✓ " + esc(d.forge) + " · " + esc(d.why), "");
-    else { said("#fx-url-say", "#fx-url-box", esc(d.why), "warn"); var more = $("#fx-more"); if (more) more.open = true; }
+    else if (d.forge) said("#fx-url-say", "#fx-url-box", "✓ " + esc(d.forge), "", d.why, d.why);
+    else { said("#fx-url-say", "#fx-url-box", "name the release below", "warn", d.why); var more = $("#fx-more"); if (more) more.open = true; }
     if (found) {
       found.hidden = !d.read;
       if (d.read) found.innerHTML = [
@@ -404,7 +434,12 @@ const SCRIPT = String.raw`
   [["#tab-form", true], ["#tab-agent", false]].forEach(function (t) {
     var el = $(t[0]); if (!el) return;
     el.addEventListener("click", function () { tab(t[1]); });
-    el.addEventListener("keydown", function (ev) { if (ev.key === "ArrowRight" || ev.key === "ArrowLeft") { ev.preventDefault(); tab(!t[1]); var other = $(t[1] ? "#tab-agent" : "#tab-form"); if (other && other.focus) other.focus(); } });
+    // The tablist's keys: an arrow to the other tab, Home to the first, End to the last.
+    el.addEventListener("keydown", function (ev) {
+      var to = ev.key === "ArrowRight" || ev.key === "ArrowLeft" ? !t[1] : ev.key === "Home" ? true : ev.key === "End" ? false : null;
+      if (to === null) return;
+      ev.preventDefault(); tab(to); var go = $(to ? "#tab-form" : "#tab-agent"); if (go && go.focus) go.focus();
+    });
   });
   function prompt() {
     var on = archesOn(), el = $("#fx-prompt"); if (!el) return;
@@ -412,48 +447,92 @@ const SCRIPT = String.raw`
     el.textContent = "Request " + (nameOf() || "<name>") + " on omarchy-pool: source " + (urlOf() || "<repository URL>") + ", licence " + (val("#fx-license") || "<licence>") + ", " + archText + ". Follow it until it is ready for review, and tell me if a build fails.";
   }
 
-  // ---- sending: the sign-in for nobody (the name typed so far kept for the way back), the POST for a person. Sending reserves the name (reserveName, one statement): the server is the judge, the page only says what is missing first.
+  // ---- sending: the sign-in for nobody — the card kept for the way back (the name in the address, the rest in this tab's session storage, drawn again on return) and the card itself the landing (#request) —, the POST for a person. Sending reserves the name (reserveName, one statement): the server is the judge, the page only says what is missing first.
+  var FIELDS = ["#fx-name", "#fx-url", "#fx-license", "#fx-desc", "#fx-source", "#fx-version"], DRAFT = "omarchy-pool:factory-draft";
+  // The tab's session storage, or none where the browser refuses it (a private window, site data blocked): the card then comes back with its name only.
+  var STORE = (function () { try { return window.sessionStorage || null; } catch (e) { return null; } })();
   function signInLink() {
     var a = $("#fx-send"); if (!a || WHO.me) return;
-    var n = nameOf(), next = "/factory" + (NAME_RULE.test(n) ? "?name=" + encodeURIComponent(n) : location.search);
+    var n = nameOf(), next = "/factory" + (NAME_RULE.test(n) ? "?name=" + encodeURIComponent(n) : location.search) + "#request";
     a.setAttribute("href", "/auth/github?next=" + encodeURIComponent(next).replace(/%2F/g, "/"));
   }
+  function keepDraft() {
+    var d = { arches: archesOn(), checks: checklist(), more: !!($("#fx-more") && $("#fx-more").open) };
+    FIELDS.forEach(function (f) { d[f] = val(f); });
+    try { if (STORE) STORE.setItem(DRAFT, JSON.stringify(d)); } catch (e) {}
+  }
+  // The card as it was before the sign-in, once: every field, the architectures, the confirmations ticked — then the draft is gone.
+  function draftBack() {
+    var d = null;
+    try { d = STORE ? JSON.parse(STORE.getItem(DRAFT) || "null") : null; if (STORE) STORE.removeItem(DRAFT); } catch (e) { d = null; }
+    if (!d || typeof d !== "object") return false;
+    FIELDS.forEach(function (f) { var el = $(f); if (el && typeof d[f] === "string" && d[f]) el.value = d[f]; });
+    if (Array.isArray(d.arches) && d.arches.length) { ARCHES.forEach(function (a) { ON[a] = d.arches.indexOf(a) >= 0; }); pressed(); }
+    document.querySelectorAll("#fx-checklist input[data-check]").forEach(function (i) { i.checked = !!(d.checks && d.checks[i.getAttribute("data-check")]); });
+    if (d.more && $("#fx-more")) $("#fx-more").open = true;
+    return true;
+  }
+  function pressed() { document.querySelectorAll("#fx-form [data-arch]").forEach(function (b) { b.setAttribute("aria-pressed", ON[b.getAttribute("data-arch")] ? "true" : "false"); }); }
   function checklist() { var c = {}; document.querySelectorAll("#fx-checklist input[data-check]").forEach(function (i) { c[i.getAttribute("data-check")] = i.checked; }); return c; }
+  // A project off GitHub is built from the release the card names (the request refuses it without both); a GitLab or Codeberg read fills them in.
+  function offGitHub() { var u = urlOf(); return !!u && !/^https:\/\/(www\.)?github\.com\//i.test(u); }
   function missingOf() {
     var d = val("#fx-desc"), c = checklist(), n = NAME_STATE;
     // The name's check still out, or failed: the server decides on sending; a name the check refused is not sent.
     if (nameOf() && n && n.state === "checking") return "One moment: the name is being checked.";
     if (nameOf() && n && n.state !== "unknown" && !nameOk()) return "Pick a name that is available.";
     if (!urlOf()) return "Add the repository's address.";
+    if (offGitHub() && (!val("#fx-source") || !val("#fx-version"))) return "Name the release: its source and its version.";
     if (!val("#fx-license")) return "Add the licence, an SPDX identifier.";
     if (!archesOn().length) return "Pick at least one architecture.";
     if (d.length < 8) return "Add the description: one line, 8 to 120 characters.";
-    if (Object.keys(c).some(function (k) { return !c[k]; })) return "Confirm the four lines above.";
+    if (Object.keys(c).some(function (k) { return !c[k]; })) return "Tick every confirmation above.";
     return "";
   }
   function ready() { var b = $("#fx-send"); if (b && WHO.me && b.classList) b.classList.toggle("primary", !missingOf() && (nameOk() || !nameOf())); }
   function state(text, bad) { var el = $("#fx-state"); if (el) { el.textContent = text; el.className = "fx-state" + (bad ? " bad" : ""); } }
+  // While the POST is out the button says so (aria-disabled) and keeps the focus: a disabled button drops it to the page's top.
+  var SENDING = false;
   function send() {
-    var miss = missingOf(); if (miss) { state(miss, true); return; }
+    if (SENDING) return;
+    var miss = missingOf(); if (miss) { state(miss, true); if (/^Name the release/.test(miss) && $("#fx-more")) $("#fx-more").open = true; return; }
     var body = { url: urlOf(), description: val("#fx-desc"), license: val("#fx-license"), arches: archesOn(), checklist: checklist() };
     if (nameOf()) body.name = nameOf();
     if (val("#fx-source")) body.source = val("#fx-source");
     if (val("#fx-version")) body.version = val("#fx-version");
-    var btn = $("#fx-send"); btn.disabled = true; state("Checking the pool, the project and the source…"); $("#fx-done").hidden = true;
+    var btn = $("#fx-send"); SENDING = true; btn.setAttribute("aria-disabled", "true"); state("Checking the pool, the project and the source…"); $("#fx-done").hidden = true;
     api("POST", "/api/v1/factory/packages", body).then(function (d) {
-      btn.disabled = false;
+      SENDING = false; btn.setAttribute("aria-disabled", "false");
       if (d.error) { state(d.error, true); return; }
       state("");
-      var p = d.package || {}, b = d.build || {}, q = d.request || {};
+      var p = d.package || {}, b = d.build || {}, q = d.request || {}, detected = {};
+      try { detected = typeof p.detected === "string" ? JSON.parse(p.detected) || {} : p.detected || {}; } catch (e) { detected = {}; }
       $("#fx-done").hidden = false;
-      $("#fx-done").innerHTML = '<span class="fx-sent">' + lucide("circle-check", 15) + '<span><b>' + esc(p.name) + '</b> ' + esc(p.release || "") + ' sent · name reserved · <a href="' + esc(q.record) + '">request #' + esc(q.id) + '</a>' + (q.signature ? ' (<a href="' + esc(q.signature) + '">signature</a>)' : '') + '</span></span>'
+      $("#fx-done").innerHTML = '<span class="fx-sent">' + lucide("circle-check", 15) + '<span><b>' + esc(p.name) + '</b> ' + esc(p.release || "") + ' sent · name reserved · <a href="' + esc(q.record) + '">request #' + esc(q.id) + '</a>' + (q.signature ? ' (<a href="' + esc(q.signature) + '">signature</a>)' : '') + (detected.build_system && detected.build_system !== "unknown" ? ' · ' + esc(detected.build_system) + ' detected' : '') + '</span></span>'
         + (b.tasks && b.tasks.length ? '<span>' + taskPill("queued") + ' build ' + b.tasks.map(function (t) { return '<a href="/build/' + t + '">#' + t + '</a>'; }).join(", ") + ' for ' + esc((b.arches || []).join(", ")) + (b.queue ? ' · ' + esc(Object.keys(b.queue).map(function (a) { return a + ": " + b.queue[a].position + " of " + b.queue[a].total + " in the shared queue"; }).join(" · ")) : '') + '</span>' : b.error ? '<span class="warn">not queued: ' + esc(b.error) + '</span>' : '')
         + (d.skipped && d.skipped.length ? '<span class="dim">' + esc(d.skipped.map(function (s) { return s.arch + " skipped: " + s.source + " ships " + s.version; }).join(" · ")) + '</span>' : '')
         + '<span class="fx-follow"><a href="#line">Follow it on the line ›</a><a href="' + userHref(WHO.login) + '">Your page →</a></span>';
-      ["#fx-name", "#fx-url", "#fx-license", "#fx-desc", "#fx-source", "#fx-version"].forEach(function (s) { var el = $(s); if (el) el.value = ""; });
+      // The name is the reader's now, whatever the check's copy at the edge still says.
+      if (p.name) SENT[p.name] = { name: p.name, state: "reserved", owner: WHO.login, status: p.status, renew: null, why: p.name + " is " + p.status + ", requested by " + WHO.login, provided: [] };
+      // The card on the line at once — the POST's own registration, its targets settled — as a registry row: not landed (the request refuses a name in the pool). The registry's copy at the edge is thirty seconds old at most: read again once it has gone.
+      if (p.name) {
+        var row = { name: p.name, owner: p.owner, status: p.status, release: p.release, detail: p.detail, targets: d.targets || p.targets || {}, updated_at: p.updated_at || new Date().toISOString(), blocked_at: null, landed: false };
+        JUST[p.name] = row; REG = withJust(REG || []); FRESH[p.name] = Date.now(); draw();
+        clearTimeout(AGAIN); AGAIN = setTimeout(loadRegistry, 35000);
+      }
+      // The card starts over: the fields, the confirmations, every architecture on, and a renewal's heading and button back to a request's.
+      FIELDS.forEach(function (s) { var el = $(s); if (el) el.value = ""; });
       document.querySelectorAll("#fx-checklist input[data-check]").forEach(function (i) { i.checked = false; });
-      NAMES = {}; AUTO = {}; checkName(); urlSays(null); loadRegistry();
-    }).catch(function (e) { btn.disabled = false; state("failed: " + errorText(e), true); });
+      ARCHES.forEach(function (a) { ON[a] = true; }); pressed();
+      if (RENEW) {
+        RENEW = null; $("#fx-head").textContent = "Request a package"; btn.textContent = "Send request";
+        // The address without ?renew=: a reload draws a new request's card, not the renewal again.
+        if (window.history && window.history.replaceState) window.history.replaceState(null, "", location.pathname + location.hash);
+      }
+      NAMES = {}; AUTO = {}; checkName(); urlSays(null); prompt(); ready();
+      // What was sent is read out and the focus goes there, not back to the top of the page.
+      if ($("#fx-done").focus) $("#fx-done").focus();
+    }).catch(function (e) { SENDING = false; btn.setAttribute("aria-disabled", "false"); state("failed: " + errorText(e), true); });
   }
   // A renewal, filled from the record (the package's story): the fields as the record has them, the lines the checks marked, the confirmations the reader's to tick again.
   function prefill(name) {
@@ -467,11 +546,12 @@ const SCRIPT = String.raw`
       $("#fx-name").value = name; $("#fx-desc").value = p.description || ""; $("#fx-license").value = p.license || "";
       var arches = q.arches && q.arches.length ? q.arches : (p.arches || []);
       ARCHES.forEach(function (a) { ON[a] = arches.indexOf(a) >= 0; });
-      document.querySelectorAll("#fx-form [data-arch]").forEach(function (b) { b.setAttribute("aria-pressed", ON[b.getAttribute("data-arch")] ? "true" : "false"); });
+      pressed();
       var known = q.version && q.version !== "unknown";
       $("#fx-version").value = known ? q.version : "";
       $("#fx-source").value = known && p.source && p.source !== p.project ? p.source : "";
-      if ($("#fx-version").value || $("#fx-source").value) $("#fx-more").open = true;
+      // Off GitHub the release is the card's to name: its fields open, filled or not.
+      if ($("#fx-version").value || $("#fx-source").value || offGitHub()) $("#fx-more").open = true;
       var bad = q.checks ? q.checks.filter(function (c) { return !c.ok; }) : [];
       state(bad.length ? "The record's lines to put right: " + bad.map(function (c) { return c.item + " (" + c.note + ")"; }).join(" · ") : "");
       checkName(); prompt();
@@ -519,14 +599,18 @@ const SCRIPT = String.raw`
     var ws = (LISTING.workers || []).filter(function (w) { return w.alive && !w.revoked_at; }).sort(function (a, b) { return (b.current_task ? 1 : 0) - (a.current_task ? 1 : 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0); });
     var working = ws.filter(function (w) { return w.current_task; }).length, shown = ws.slice(0, 6);
     if (head) head.textContent = num(working) + " busy · " + num(ws.length - working) + " idle";
-    list.innerHTML = (shown.length ? shown.map(workerRowOf).join("") + (ws.length > shown.length ? '<p class="fx-wempty">' + num(ws.length - shown.length) + ' more alive · <a href="/workers">every worker</a></p>' : '') : '<p class="fx-wempty">No worker is alive right now. A request waits in the queue until one is.</p>')
+    // The rest are counted, not linked: the card's foot is the way to every worker.
+    list.innerHTML = (shown.length ? shown.map(workerRowOf).join("") + (ws.length > shown.length ? '<p class="fx-wempty">' + num(ws.length - shown.length) + ' more alive</p>' : '') : '<p class="fx-wempty">No worker is alive right now. A request waits in the queue until one is.</p>')
       // A refresh that did not answer leaves the last answer's rows, and says so.
       + (DOWN.listing ? '<p class="fx-wempty">' + esc(DOWN.listing) + '</p>' : '');
   }
 
-  // ---- the line: where each package stands, from its targets (targets.ts — where each of its architectures stands, the server's one rule): building while an architecture builds, in review while the project builds it again, ready for review once it is built and nothing of it runs, shipped once approved; checking while nothing of it is in flight. Rejected, blocked and unmaintained registrations are off the line.
-  var OFF = { rejected: 1, unmaintained: 1 }, SHIPPED = { approved: 1, published: 1 }, BUILT = { built: 1, reviewed: 1 };
+  // ---- the line: where each package stands, from its targets (targets.ts — where each of its architectures stands, the server's one rule): building while an architecture builds, in review while the project builds it again, ready for review once it is built and nothing of it runs, shipped once approved; checking while nothing of it is in flight. Rejected, blocked and unmaintained registrations are off the line, and so is a request whose every build failed after its tries: nothing of it moves until its owner renews it.
+  var OFF = { rejected: 1, unmaintained: 1 }, SHIPPED = { approved: 1, published: 1 }, BUILT = { built: 1, reviewed: 1 }, RUNS = { building: 1, reviewing: 1 };
+  // The one target word that says "in the pool" (targets.ts) — a target's, never the registry's status, and never a ring: where it is served is the approval's (approvalWhere).
+  var IN_POOL = { published: 1 };
   function statuses(p) { var t = p.targets || {}; return Object.keys(t).map(function (a) { return t[a].status; }); }
+  function allFailed(p) { var st = statuses(p); return st.length > 0 && st.every(function (s) { return s === "not_supported"; }); }
   function stageOf(p) {
     if (p.blocked_at || OFF[p.status]) return -1;
     var st = statuses(p), has = function (s) { return st.indexOf(s) >= 0; };
@@ -534,41 +618,59 @@ const SCRIPT = String.raw`
     if (has("reviewing")) return 3;
     if (st.some(function (s) { return BUILT[s]; })) return 2;
     if (st.some(function (s) { return SHIPPED[s]; }) || (!st.length && p.landed)) return 4;
+    if (allFailed(p)) return -1;
     return 0;
   }
-  // The architectures a card names: each one requested, in the pool's order, with the shell's word for where it stands.
+  // Whether a worker holds a build of the package right now — its contributor's or the project's: the live read's leased task behind one of its targets.
+  function running(p) { var t = p.targets || {}; return Object.keys(t).some(function (a) { var x = taskOf(t[a].task); return RUNS[t[a].status] && !!x && x.status === "leased"; }); }
+  // The architectures a card names: each one in the pool's order, with the shell's word for where it stands — and the faintest square for one nobody asked for. An approved one says where its approval stands today (approvalWhere's title), not the target's word, which promises edge of a publish that may have failed.
   function squares(p) {
-    var t = p.targets || {};
+    var t = p.targets || {}, a0 = standingOf(p);
     return '<span class="fx-sq">' + ARCHES.map(function (a) {
       var x = t[a], w = x ? TARGET_WORD[x.status] : null;
-      return '<i class="op-arch ' + (x ? SQUARE[x.status] || "wait" : "na") + '" title="' + esc(a + " · " + (x ? (w ? w[2] : x.status) : "not requested")) + '"></i>';
+      var word = !x ? "not requested" : x.status === "approved" ? (a0 ? approvalWhere(a0).title : "approved by a maintainer") : w ? w[2] : x.status;
+      return '<i class="op-arch ' + (x ? SQUARE[x.status] || "wait" : "off") + '" title="' + esc(a + " · " + word) + '"></i>';
     }).join("") + '</span>';
   }
-  // A card's line: what is happening to it now, in a few words — the running job's step from the listing, what is built and what is not supported.
+  // The standing approval of a shipped package, as the approvals list says it (the row Review's Decided line reads): null until that list answered, or for one older than its page.
+  function standingOf(p) { return APPROVED ? APPROVED[p.name] || null : null; }
+  // A card's line: what is happening to it now, in a few words — the running job's step from the listing, what is built and what is not supported; a shipped one where its approval stands today, in the shell's one word (approvalWhere: its rings, blocked, publish failed or cancelled, publishing). Its tone: "" (dim), warn or bad.
   function noteOf(p, s) {
     var t = p.targets || {}, arches = Object.keys(t), ns = arches.filter(function (a) { return t[a].status === "not_supported"; });
     var off = ns.length ? ns.join(", ") + " not supported" : "";
-    if (s === 0) return ns.length && ns.length === arches.length ? ["no architecture built · back to its owner", true] : ["on the record · no build yet", false];
+    if (s === 0) return ["on the record · no build yet", ""];
     if (s === 1) {
       var run = arches.filter(function (a) { return t[a].status === "building"; }).map(function (a) { return taskOf(t[a].task); }).filter(Boolean)[0];
       var doing = run ? (run.status === "leased" ? stepOf(run) : "queued for a worker") : "queued for a worker";
-      return [(off ? off + " · " : "") + doing, !!off];
+      return [(off ? off + " · " : "") + doing, off ? "warn" : ""];
     }
     if (s === 2) {
       var built = arches.filter(function (a) { return BUILT[t[a].status]; });
-      if (arches.some(function (a) { return t[a].status === "reviewed"; })) return ["the project's build is staged · a maintainer decides", false];
-      return [(built.length === arches.length && arches.length > 1 ? "built on every architecture" : built.join(", ") + " built") + (off ? " · " + off : ""), !!off];
+      if (arches.some(function (a) { return t[a].status === "reviewed"; })) return ["the project's build is staged · a maintainer decides", ""];
+      return [(built.length === arches.length && arches.length > 1 ? "built on every architecture" : built.join(", ") + " built") + (off ? " · " + off : ""), off ? "warn" : ""];
     }
-    if (s === 3) return ["the project builds it again" + (off ? " · " + off : ""), false];
-    var lead = arches.filter(function (a) { return SHIPPED[t[a].status]; })[0];
-    return [(lead ? TARGET_WORD[t[lead].status][2] : "approved by a maintainer") + (off ? " · " + off : ""), false];
+    if (s === 3) return ["the project builds it again" + (off ? " · " + off : ""), ""];
+    var a = standingOf(p);
+    if (a) { var where = approvalWhere(a); return [where.word + (off ? " · " + off : ""), where.cls === "error" ? "bad" : ""]; }
+    // No row to read yet: the targets' own word — in the pool once published; an approval alone promises nothing of its publish.
+    return [(arches.some(function (x) { return IN_POOL[t[x].status]; }) ? TARGET_WORD.published[2] : "approved by a maintainer") + (off ? " · " + off : ""), ""];
+  }
+  // Where a card leads: a package on its way, its page as the lab has it; a shipped one, the most stable ring its approval says serves it — and, served by none, its build, as Review's Decided line leads: never a package address naming a ring no fact supports (the card said edge of a publish that failed).
+  function hrefOf(p, s) {
+    var t = p.targets || {}, arch = Object.keys(t)[0] || ARCHES[0];
+    if (s !== 4) return pkgHref(p.name, "lab", arch);
+    var a = standingOf(p), rings = a ? a.rings || [] : [];
+    if (rings.length) return pkgHref(p.name, ringName(servedRing(rings)), a.arch || arch);
+    var task = a ? a.task_id : (t[arch] || {}).task;
+    return task ? "/build/" + task : pkgHref(p.name, "lab", arch);
   }
   function cardOf(p, s) {
-    var arch = Object.keys(p.targets || {})[0] || ARCHES[0], note = noteOf(p, s);
-    return '<a class="fx-card' + (FRESH[p.name] && Date.now() - FRESH[p.name] < 1600 ? " op-fresh" : "") + '" href="' + esc(pkgHref(p.name, s === 4 ? "edge" : "lab", arch)) + '">'
+    var note = noteOf(p, s);
+    // The owner's initials are a picture of the name beside them: hidden from a screen reader, which reads the card as name, version, owner, line.
+    return '<a class="fx-card' + (FRESH[p.name] && Date.now() - FRESH[p.name] < 1600 ? " op-fresh" : "") + '" href="' + esc(hrefOf(p, s)) + '">'
       + '<span class="fx-c1"><span><b>' + esc(p.name) + '</b><span class="v">' + esc(p.release || "") + '</span></span><span class="age" title="' + esc(p.updated_at || "") + '">' + esc(since(p.updated_at)) + '</span></span>'
-      + '<span class="fx-c2"><span class="fx-by">' + (p.owner ? avatarIcon(p.owner) : "") + '<span>' + esc(p.owner || "—") + '</span></span>' + squares(p) + '</span>'
-      + '<span class="fx-note' + (note[1] ? " warn" : "") + '">' + esc(note[0]) + '</span></a>';
+      + '<span class="fx-c2"><span class="fx-by">' + (p.owner ? '<span aria-hidden="true">' + avatarIcon(p.owner) + '</span>' : "") + '<span>' + esc(p.owner || "—") + '</span></span>' + squares(p) + '</span>'
+      + '<span class="fx-note' + (note[1] ? " " + note[1] : "") + '">' + esc(note[0]) + '</span></a>';
   }
   var COUNTS = null;
   function drawBoard() {
@@ -583,24 +685,35 @@ const SCRIPT = String.raw`
       SEEN[p.name] = s;
       if (s >= 0) cols[s].push(p);
     });
-    var landed = REG.filter(function (p) { return p.landed; });
     var older = function (a, b) { return String(a.updated_at || "") < String(b.updated_at || "") ? -1 : 1; };
     // The queue's order, oldest first — but what just moved and the reader's own come first, so "Follow it on the line" finds it.
     var pinned = function (p) { return (FRESH[p.name] && now - FRESH[p.name] < 60000) || (WHO.login && p.owner === WHO.login) ? 1 : 0; };
     cols.forEach(function (list, i) {
       list.sort(i === 4 ? function (a, b) { return older(b, a); } : function (a, b) { return pinned(b) - pinned(a) || older(a, b); });
-      var total = i === 4 ? Math.max(landed.length, list.length) : list.length, shown = list.slice(0, 5);
-      $("#col-" + i + "-n").textContent = num(total);
-      $("#col-" + i).innerHTML = shown.map(function (p) { return cardOf(p, i); }).join("") + (total > shown.length ? '<span class="fx-more-n">+' + num(total - shown.length) + (i === 4 ? " earlier" : " more") + '</span>' : '');
+      // A column counts its own cards: a shipped package being built again is a card in the column it is in, and only there.
+      var shown = list.slice(0, 5);
+      $("#col-" + i + "-n").textContent = num(list.length);
+      $("#col-" + i).innerHTML = list.length ? shown.map(function (p) { return cardOf(p, i); }).join("") + (list.length > shown.length ? '<span class="fx-more-n">+' + num(list.length - shown.length) + (i === 4 ? " earlier" : " more") + '</span>' : '') : '<p class="fx-none">nothing here now</p>';
     });
-    COUNTS = { line: cols[0].length + cols[1].length + cols[2].length + cols[3].length, building: cols[1].length, landed: landed };
+    var onLine = cols[0].concat(cols[1], cols[2], cols[3]);
+    COUNTS = {
+      line: onLine.length,
+      // On the line again: a shipped package with a new version on its way — in the factory and shipped both, and said so under the tile.
+      again: onLine.filter(function (p) { return p.landed; }).length,
+      running: LISTING ? onLine.filter(running).length : null,
+      queued: LISTING ? cols[1].filter(function (p) { return !running(p); }).length : null,
+      landed: REG.filter(function (p) { return p.landed; })
+    };
     // What waits for a maintainer is the review list's own count (one truth with Review's tile): read again when a package enters or leaves the two review columns, never on a clock.
     var inReview = cols[2].concat(cols[3]).map(function (p) { return p.name; }).sort().join(",");
     if (READY !== null && inReview !== READY) { clearTimeout(REVIEWING); REVIEWING = setTimeout(loadReview, 1500); }
     READY = inReview;
+    // Where a shipped card's approval stands is the approvals list's: read when the Shipped column changes, never on a clock.
+    var shipped = cols[4].map(function (p) { return p.name + ":" + statuses(p).join("/"); }).sort().join(",");
+    if (shipped !== SHIPPED_SIG) { SHIPPED_SIG = shipped; if (shipped) loadApprovals(); }
   }
 
-  // ---- the four numbers: the line's own counts, the listing's busy workers, the review list's waiting (one truth with Review), the registry's landed (approved by a maintainer — the Pool's and People's word). A list that did not answer reads "—", its reason on hover.
+  // ---- the four numbers: the line's own counts, the builds a worker holds now (the live read), the review list's waiting (one truth with Review), the registry's landed (approved by a maintainer — the Pool's and People's word). A list that did not answer reads "—", its reason on hover.
   var LANDED_ONCE = {};
   function tile(key, row, why) {
     var n = $("#t-" + key + "-n"), s = $("#t-" + key + "-s"); if (!n || !s) return;
@@ -611,8 +724,9 @@ const SCRIPT = String.raw`
   function drawTiles() {
     var wc = LISTING ? workerCounts(LISTING.workers || []) : null, from = {};
     if (COUNTS) COUNTS.landed.forEach(function (p) { if (p.owner && MAINT && !Object.prototype.hasOwnProperty.call(MAINT, p.owner)) from[p.owner] = 1; });
-    tile("line", COUNTS ? ["In the factory", num(COUNTS.line), "requests on the line", COUNTS.line] : null, DOWN.reg);
-    tile("building", COUNTS ? ["Building now", num(COUNTS.building), wc ? num(wc.building) + " of " + num(wc.alive) + " workers busy" : "packages building", COUNTS.building] : null, DOWN.reg);
+    tile("line", COUNTS ? ["In the factory", num(COUNTS.line), "requests on the line" + (COUNTS.again ? " · " + num(COUNTS.again) + " of them new versions" : ""), COUNTS.line] : null, DOWN.reg);
+    // Building now is what workers hold at this moment; the Building column's other cards wait in the queue.
+    tile("building", COUNTS && wc && COUNTS.running !== null ? ["Building now", num(COUNTS.running), num(COUNTS.queued) + " queued · " + num(wc.building) + " of " + num(wc.alive) + " workers busy", COUNTS.running] : null, DOWN.reg || DOWN.listing);
     // The oldest one's age rides on hover: the tile says what the number is, in a line.
     tile("ready", REVIEW ? ["Ready for review", num(REVIEW.waiting), REVIEW.oldest_ms ? '<span title="the oldest has waited ' + esc(span(REVIEW.oldest_ms)) + '">waiting for a maintainer</span>' : "waiting for a maintainer", REVIEW.waiting] : null, DOWN.review);
     var landed = COUNTS ? COUNTS.landed : [];
@@ -629,9 +743,10 @@ const SCRIPT = String.raw`
     var mine = REG.filter(function (p) { return p.owner === WHO.login; }).sort(function (a, b) { return String(b.updated_at || "") < String(a.updated_at || "") ? -1 : 1; });
     $("#mine-n").textContent = num(mine.length);
     list.innerHTML = mine.map(function (p) {
-      var s = stageOf(p), off = p.blocked_at ? OFF_WORD.blocked : OFF_WORD[p.status], word = s >= 0 ? LINE[s] : off || ["Off the line", "circle-slash"];
-      var note = s >= 0 ? noteOf(p, s)[0] : (p.detail || "");
-      return '<a class="fx-mrow ' + (s >= 0 ? "c" + s : "c-off") + '" href="' + esc(pkgHref(p.name, s === 4 ? "edge" : "lab", Object.keys(p.targets || {})[0] || ARCHES[0])) + '"><span class="nm"><b>' + esc(p.name) + '</b><span>' + esc(p.release || "") + '</span></span><span class="fx-stage">' + lucide(word[1], 13) + esc(word[0]) + '</span>' + squares(p) + '<span class="note">' + esc(note) + '</span><span class="go" aria-hidden="true">›</span></a>';
+      var s = stageOf(p), off = p.blocked_at ? OFF_WORD.blocked : OFF_WORD[p.status], failed = s < 0 && !off && allFailed(p);
+      var word = s >= 0 ? LINE[s] : off || (failed ? ["Not built", "circle-slash"] : ["Off the line", "circle-slash"]);
+      var note = s >= 0 ? noteOf(p, s)[0] : failed ? "every architecture's build failed after its tries · renew it to try again" : (p.detail || "");
+      return '<a class="fx-mrow ' + (s >= 0 ? "c" + s : "c-off") + '" href="' + esc(hrefOf(p, s)) + '"><span class="nm"><b>' + esc(p.name) + '</b><span>' + esc(p.release || "") + '</span></span><span class="fx-stage">' + lucide(word[1], 13) + esc(word[0]) + '</span>' + squares(p) + '<span class="note">' + esc(note) + '</span><span class="go" aria-hidden="true">›</span></a>';
     }).join("") || '<p class="fx-mempty">Nothing yet. Your first request shows up here.</p>';
     if (isMaintainer()) { maint.setAttribute("href", "/review"); maint.textContent = "Review queue" + (REVIEW ? " · " + num(REVIEW.waiting) + " waiting" : "") + " ›"; }
     else {
@@ -643,15 +758,29 @@ const SCRIPT = String.raw`
 
   function draw() { drawBoard(); drawTiles(); drawWorkers(); drawMine(); }
 
-  // ---- the reads. The registry: at load, again when a job starts or ends (its copy at the edge is thirty seconds old at most, so once more after that), and every five minutes for what moves no job (a rejection). The listing: every twenty seconds, the Workers page's rhythm and its very address. The review list: at load, and when a package enters or leaves the review columns.
+  // ---- the reads. The registry: at load, again when a build starts or ends (its copy at the edge is thirty seconds old at most, so once more after that), and every five minutes for what moves no build (a rejection). What runs now (the listing's live read: the workers and the tasks in flight, through the queue's index): every minute. A tab nobody looks at asks for neither; shown again, it asks for what is due. The review list: at load, and when a package enters or leaves the review columns; the approvals list: at load, and when the Shipped column changes.
+  var LIVE_MS = 60000, LAST_LISTING = 0, APPROVED = null, SHIPPED_SIG = null;
+  // JUST: the registrations this page sent, as the POST answered them, kept over a registry answer older than each (the edge's copy of the minute before) until one as new has it — the card never leaves the line and comes back.
+  var JUST = {};
+  function withJust(rows) {
+    var out = rows.slice();
+    Object.keys(JUST).forEach(function (n) {
+      var i = -1; out.forEach(function (p, k) { if (p.name === n) i = k; });
+      if (i >= 0 && String(out[i].updated_at || "") >= String(JUST[n].updated_at || "")) { delete JUST[n]; return; }
+      if (i >= 0) out[i] = JUST[n]; else out.push(JUST[n]);
+    });
+    return out;
+  }
   function loadRegistry() {
-    return api("GET", "/api/v1/factory/packages").then(function (d) { REG = d.packages || []; DOWN.reg = ""; draw(); })
+    return api("GET", "/api/v1/factory/packages").then(function (d) { REG = withJust(d.packages || []); DOWN.reg = ""; draw(); })
       .catch(function (e) { DOWN.reg = noAnswer("registry", e); draw(); });
   }
   function loadListing() {
-    return api("GET", "/api/v1/factory?limit=10").then(function (d) {
+    LAST_LISTING = Date.now();
+    return api("GET", "/api/v1/factory?live=1&limit=20").then(function (d) {
       LISTING = d; DOWN.listing = "";
-      var sig = (d.workers || []).map(function (w) { return w.id + ":" + (w.current_task || ""); }).concat((d.tasks || []).filter(function (t) { return t.status === "leased" || t.status === "queued"; }).map(function (t) { return "#" + t.id; })).sort().join(",");
+      // A build that starts or ends moves a card; a pool job moves none, and reads no registry.
+      var sig = (d.tasks || []).filter(function (t) { return t.kind === "build"; }).map(function (t) { return "#" + t.id + ":" + t.status; }).sort().join(",");
       if (SIG !== null && sig !== SIG) { loadRegistry(); clearTimeout(AGAIN); AGAIN = setTimeout(loadRegistry, 35000); }
       SIG = sig; draw();
     }).catch(function (e) { DOWN.listing = noAnswer("worker listing", e); draw(); });
@@ -660,8 +789,18 @@ const SCRIPT = String.raw`
     return api("GET", "/api/v1/factory/review").then(function (d) { REVIEW = d; DOWN.review = ""; drawTiles(); drawMine(); })
       .catch(function (e) { DOWN.review = noAnswer("review list", e); drawTiles(); });
   }
+  // The approvals that stand, first per name (the list is newest first). One that did not answer leaves the shipped cards with their targets' own word.
+  function loadApprovals() {
+    return api("GET", "/api/v1/factory/approvals").then(function (d) {
+      if (d.error) return;
+      var by = {}; (d.approvals || []).forEach(function (a) { if (a.standing && !by[a.name]) by[a.name] = a; });
+      APPROVED = by; drawBoard(); drawMine();
+    }).catch(function () {});
+  }
   loadRegistry(); loadListing(); loadReview();
-  setInterval(loadListing, 20000); setInterval(loadRegistry, 300000);
+  setInterval(function () { if (!document.hidden) loadListing(); }, LIVE_MS);
+  setInterval(function () { if (!document.hidden) loadRegistry(); }, 300000);
+  document.addEventListener("visibilitychange", function () { if (!document.hidden && Date.now() - LAST_LISTING >= LIVE_MS) loadListing(); });
   maintainerSet(function (m) { MAINT = m || {}; drawTiles(); });
   // The week's series: how long a job of a kind takes, what a worker's bar is measured against — the old Factory's rhythm, two minutes.
   liveStats(function (d) { STATS = d; drawWorkers(); }, 120000);
@@ -670,7 +809,18 @@ const SCRIPT = String.raw`
   var fields = [["#fx-name", function () { var el = $("#fx-name"), low = el.value.toLowerCase(); if (low !== el.value) el.value = low; AUTO["#fx-name"] = null; checkName(); prompt(); signInLink(); }], ["#fx-url", function () { readUrl(); prompt(); }], ["#fx-license", function () { prompt(); ready(); }], ["#fx-desc", ready], ["#fx-source", ready], ["#fx-version", ready]];
   fields.forEach(function (f) { var el = $(f[0]); if (el) el.addEventListener("input", f[1]); });
   document.querySelectorAll("#fx-checklist input[data-check]").forEach(function (i) { i.addEventListener("change", ready); });
-  if (NAMED && !RENEW) { $("#fx-name").value = NAMED; checkName(); }
+  // Enter in a field sends, as a form does — a person's; nobody's is told what sending takes.
+  $("#fx-form").addEventListener("keydown", function (ev) {
+    var el = ev.target;
+    if (ev.key !== "Enter" || ev.isComposing || !el || el.tagName !== "INPUT" || el.type === "checkbox") return;
+    ev.preventDefault();
+    if (WHO.me) send(); else state("Sign in to send: the card is kept for the way back.");
+  });
+  // The sign-in keeps the card: what it holds is drawn again when the reader comes back.
+  var signIn = $("#fx-send"); if (signIn) signIn.addEventListener("click", keepDraft);
+  if (NAMED && !RENEW) { $("#fx-name").value = NAMED; }
+  if (!RENEW && draftBack()) { readUrl(); ready(); }
+  if (nameOf()) checkName();
   prompt();
   // The agent's tab has an address of its own (/factory#fx-agent): a page that points a reader at their agent lands on it.
   if (location.hash === "#fx-agent") { tab(false); var card = $("#request"); if (card && card.scrollIntoView) card.scrollIntoView(); }
@@ -735,15 +885,15 @@ export const FACTORY_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // Four numbers: the line's own counts (in the factory, building now), the review list's own `waiting` and `oldest_ms` — the number Review's and the Pipeline's tiles say — and the registry's `landed`, captioned as what it counts: approved by a maintainer, from the contributors who are not in the maintainer set. A list that did not answer reads "—" with its reason on hover.
+      // Four numbers: the line's own counts — in the factory (a shipped package on the line again for a new version said so), building now (what a worker holds this moment: the live read's leased tasks behind a card's targets, the rest of the Building column queued) —, the review list's own `waiting` and `oldest_ms` — the number Review's and the Pipeline's tiles say — and the registry's `landed`, captioned as what it counts: approved by a maintainer, from the contributors who are not in the maintainer set. A list that did not answer reads "—" with its reason on hover.
       id: "factory.tiles",
       page: "/factory",
       anchor: ['<div class="op-stats fx-stats" id="tiles">', 'id="t-line-n"', 'id="t-building-n"', 'id="t-ready-n"', 'id="t-shipped-n"', "In the factory", "Building now", "Ready for review", "Shipped"],
-      script: ["function drawTiles()", '"Ready for review"', "REVIEW.waiting", "REVIEW.oldest_ms", "span(REVIEW.oldest_ms)", "workerCounts(LISTING.workers || [])", "p.landed", "maintainerSet(function (m)", '"approved by a maintainer, from "', '" contributors"', "countUp(n, row[3])", "did not answer"],
+      script: ["function drawTiles()", '"Ready for review"', "REVIEW.waiting", "REVIEW.oldest_ms", "span(REVIEW.oldest_ms)", "workerCounts(LISTING.workers || [])", "p.landed", "maintainerSet(function (m)", '"approved by a maintainer, from "', '" contributors"', "countUp(n, row[3])", "did not answer", "function running(p)", 'x.status === "leased"', '" of them new versions"', '" queued · "'],
       reads: [
         { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.name", "packages.0.owner", "packages.0.landed", "packages.0.targets"] },
         { path: "/api/v1/factory/review", fields: ["waiting", "oldest_ms"] },
-        { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.alive", "workers.0.current_task", "workers.0.revoked_at"] },
+        { path: "/api/v1/factory?live=1&limit=20", fields: ["workers", "workers.0.alive", "workers.0.current_task", "workers.0.revoked_at", "tasks", "tasks.0.id", "tasks.0.status"] },
         { path: "/api/v1/factory/maintainers", fields: ["maintainers", "maintainers.0.login"] },
       ],
       visible: EVERYONE,
@@ -758,13 +908,13 @@ export const FACTORY_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // The name's live check, by the request's own rule: PKGNAME spliced in (request.ts), then the server's word — available, reserved, taken (linked to its page), blocked, being built — asked once per name and architectures; the holder reads "yours".
+      // The name's live check, by the request's own rule: PKGNAME spliced in (request.ts), then the server's word — available (the architectures a source ships skipped), reserved, taken (linked to its page in edge where edge serves it), blocked, being built — asked once per name and architectures; the holder reads "yours", and the name just sent is the sender's.
       id: "factory.name-check",
       page: "/factory",
       anchor: ['id="fx-name-say"', 'id="fx-name-box"'],
       script: [`var NAME_RULE = ${String(PKGNAME)}`, `NAME_WORDS = ${JSON.stringify(PKGNAME_RULE)}`, '"/api/v1/factory/names/" + encodeURIComponent(n) + "?arches=" + archesOn().join(",")', '"✗ invalid characters"', '"✓ available"', '"✗ reserved by a pending request"', "✗ taken · open it ›", '"✗ blocked by a maintainer"', '"✓ yours · sending renews the request"'],
       reads: [
-        { path: `/api/v1/factory/names/${F.factoryPkg}?arches=${F.arch}`, fields: ["name", "arches", "state", "why", "owner", "status", "freed", "renew", "provided"] },
+        { path: `/api/v1/factory/names/${F.factoryPkg}?arches=${F.arch}`, fields: ["name", "arches", "state", "why", "owner", "status", "freed", "renew", "provided", "in_edge"] },
         { path: "/api/v1/factory/names/a-name-nobody-has", fields: ["state", "why"] },
       ],
       visible: EVERYONE,
@@ -800,11 +950,11 @@ export const FACTORY_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // The send: "Sign in to send" for nobody, served so and coming back to the Factory with the name typed so far; the button for a person, disabled while the POST is in flight, and what was sent — the record, its signature, the builds queued — once it is.
+      // The send: "Sign in to send" for nobody, served so and coming back to the Factory's card (#request) with the name typed so far in the address and the rest of the card in the tab's session storage; the button for a person — Enter in a field presses it —, aria-disabled while the POST is in flight so the focus stays, and what was sent — the record, its signature, the build system, the builds queued — once it is, the focus moved there; the name then the sender's on the card and the card on the line at once, whatever the edge's copies still say.
       id: "factory.send",
       page: "/factory",
       anchor: ['<span id="fx-send-slot"><a class="op-btn" id="fx-send" href="/auth/github?next=/factory">Sign in to send</a></span>', 'id="fx-state"', 'id="fx-done"'],
-      script: ["function signInLink()", '"/auth/github?next=" + encodeURIComponent(next)', '"Send request"', "btn.disabled = true", '"Checking the pool, the project and the source…"', "state(d.error, true)", "esc(q.record)", "q.signature", 'taskPill("queued")', "b.queue[a].position", "userHref(WHO.login)", "Follow it on the line ›"],
+      script: ["function signInLink()", '"/auth/github?next=" + encodeURIComponent(next)', '"#request"', "function keepDraft()", "function draftBack()", "window.sessionStorage", '"Send request"', 'btn.setAttribute("aria-disabled", "true")', '"Checking the pool, the project and the source…"', "state(d.error, true)", "esc(q.record)", "q.signature", "detected.build_system", 'taskPill("queued")', "b.queue[a].position", "userHref(WHO.login)", "Follow it on the line ›", 'SENT[p.name] = { name: p.name, state: "reserved", owner: WHO.login', 'FRESH[p.name] = Date.now(); draw();', '$("#fx-done").focus()', 'ev.key !== "Enter"'],
       reads: [
         { path: "/auth/github?next=/factory", status: 302, json: false },
         { path: "/auth/me", status: 401 },
@@ -852,14 +1002,14 @@ export const FACTORY_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // The workers, live: each one alive, busy first, with its agent's mark, its job and step from the listing's task, and how far it is against the week's time of a job of its kind (the stats series: jobs_daily and builds_daily carry ms). The listing is polled as the Workers page polls it, at its very address.
+      // The workers, live: each one alive, busy first, with its agent's mark, its job and step from the listing's task, and how far it is against the week's time of a job of its kind (the stats series: jobs_daily and builds_daily carry ms). What runs now is the listing's live read (the tasks in flight through the queue's index, no counts), every minute, and nothing while the tab is hidden: the whole listing read every task twice, and every twenty seconds was a page nobody watched costing the most.
       id: "factory.workers",
       page: "/factory",
       anchor: ['<div class="op-card fx-workers" id="workers">', 'id="fx-busy"', 'id="fx-wlist"', '<a href="/workers">All workers →</a>', 'class="op-live-dot"'],
-      script: ['api("GET", "/api/v1/factory?limit=10")', "setInterval(loadListing, 20000)", "function workerRowOf(w)", "agentMark(mark, w.agent, 22)", "workerName(w)", "function stepOf(t)", '"rebuilding from scratch"', '"writing the PKGBUILD"', "function typicalMs(t)", "s.builds_daily", "s.jobs_daily", "liveStats(function (d) { STATS = d; drawWorkers(); }, 120000)", 'noAnswer("worker listing", e)'],
+      script: ['api("GET", "/api/v1/factory?live=1&limit=20")', "LIVE_MS = 60000", "if (!document.hidden) loadListing();", '"visibilitychange"', "function workerRowOf(w)", "agentMark(mark, w.agent, 22)", "workerName(w)", "function stepOf(t)", '"rebuilding from scratch"', '"writing the PKGBUILD"', "function typicalMs(t)", "s.builds_daily", "s.jobs_daily", "liveStats(function (d) { STATS = d; drawWorkers(); }, 120000)", 'noAnswer("worker listing", e)'],
       reads: [
         {
-          path: "/api/v1/factory?limit=10",
+          path: "/api/v1/factory?live=1&limit=20",
           fields: ["workers", "workers.0.id", "workers.0.arch", "workers.0.agent", "workers.0.alive", "workers.0.current_task", "workers.0.revoked_at", "tasks", "tasks.0.id", "tasks.0.name", "tasks.0.kind", "tasks.0.trust", "tasks.0.status", "tasks.0.arch", "tasks.0.attempts", "tasks.0.max_attempts", "tasks.0.started_at", "tasks.0.pkgbuild_ref", "tasks.0.params"],
         },
         { path: "/api/v1/stats", fields: ["series.jobs_daily", "series.builds_daily", "series.builds_daily.0.ms", "series.builds_daily.0.trust", "series.builds_daily.0.status", "series.builds_daily.0.n"] },
@@ -868,14 +1018,15 @@ export const FACTORY_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // The line: five columns, a card per package placed by its targets (targets.ts, the server's rule for where each architecture stands) — checking, building, ready for review, in review, shipped — each card linking the package's one address, its architectures as the kit's squares with the shell's words; read again when a job starts or ends, and a card that moved is lit.
+      // The line: five columns, a card per package placed by its targets (targets.ts, the server's rule for where each architecture stands) — checking, building, ready for review, in review, shipped —, each counting its own cards, an empty one saying so; a request whose every build failed is off it. Each card links the package's one address, its architectures as the kit's squares with the shell's words; a shipped one says where its approval stands in the shell's one word (approvalWhere over GET /factory/approvals, read when the column changes) and leads to the ring that serves it or, in none, to its build. Read again when a build starts or ends, and a card that moved is lit.
       id: "factory.line",
       page: "/factory",
       anchor: ['<section class="fx-line" id="line"', 'id="line-note"', "live · a card moves when its job ends", 'id="board"', ...LINE.map((_, i) => `id="col-${i}"`), ...LINE.map(([name]) => `<span>${escapeHtml(name)}</span>`)],
-      script: ['api("GET", "/api/v1/factory/packages")', "function stageOf(p)", 'has("building")', 'has("reviewing")', "TARGET_WORD[x.status]", 'pkgHref(p.name, s === 4 ? "edge" : "lab", arch)', "avatarIcon(p.owner)", " op-fresh", "if (SIG !== null && sig !== SIG) { loadRegistry();", "setInterval(loadRegistry, 300000)", 'noAnswer("registry", e)'],
+      script: ['api("GET", "/api/v1/factory/packages")', "function stageOf(p)", 'has("building")', 'has("reviewing")', "if (allFailed(p)) return -1;", "TARGET_WORD[x.status]", "function hrefOf(p, s)", "approvalWhere(a)", "servedRing(rings)", '"/build/" + task', 'api("GET", "/api/v1/factory/approvals")', "avatarIcon(p.owner)", " op-fresh", "nothing here now", "if (SIG !== null && sig !== SIG) { loadRegistry();", 't.kind === "build"', "if (!document.hidden) loadRegistry();", 'noAnswer("registry", e)'],
       reads: [
         { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.name", "packages.0.owner", "packages.0.status", "packages.0.release", "packages.0.targets", "packages.0.updated_at", "packages.0.landed", "packages.0.blocked_at", "packages.0.detail"] },
         { path: "/api/v1/factory/review", fields: ["waiting"] },
+        { path: "/api/v1/factory/approvals", fields: ["approvals", "approvals.0.name", "approvals.0.standing", "approvals.0.rings", "approvals.0.task_id", "approvals.0.arch", "approvals.0.publish_status", "approvals.0.blocked_at"] },
       ],
       visible: EVERYONE,
     },
@@ -884,7 +1035,7 @@ export const FACTORY_COMPONENTS = (F: Fixture): Component[] => {
       id: "factory.mine",
       page: "/factory",
       anchor: ['<section class="fx-mine" id="mine" hidden', 'id="mine-n"', 'id="mine-list"', 'href="/docs/governance#becoming"', "You never review your own requests. Another maintainer picks them up."],
-      script: ["function drawMine()", "sec.hidden = !WHO.me", "p.owner === WHO.login", '"Review queue"', '" approved · you can apply to maintain ›"', '"Get one approved to become a maintainer ›"', "Nothing yet. Your first request shows up here."],
+      script: ["function drawMine()", "sec.hidden = !WHO.me", "p.owner === WHO.login", '"Not built"', '"Review queue"', '" approved · you can apply to maintain ›"', '"Get one approved to become a maintainer ›"', "Nothing yet. Your first request shows up here."],
       reads: [
         { path: "/api/v1/factory/packages", fields: ["packages.0.owner", "packages.0.landed"] },
         { path: "/docs/governance", json: false },
