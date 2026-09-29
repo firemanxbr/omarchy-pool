@@ -462,6 +462,9 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
  */
 async function cachedApi(method: string, path: string, url: URL, request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   if (method !== "GET") return api(method, path, url, request, env);
+  // An agent's token is refused on a read that is not the tools' before the cache is asked too (it reads no row): the answer never depends on whether someone else read the URL first.
+  const agentRefused = agentTokenRefusal(request, method, path);
+  if (agentRefused) return agentRefused;
   // The key names the API host whichever production name was asked: one copy per zone (the cache is the zone's), not per name.
   const key = new Request(`${machineOrigin(url)}${url.pathname}${url.search}`, { method: "GET" });
   const hit = await edgeHit(key);

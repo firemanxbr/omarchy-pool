@@ -23,10 +23,13 @@ import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import * as openpgp from "openpgp";
 import worker from "../src/index";
-import { contributorOf, ME_DRAFTS_SQL, ME_GRANTS_SQL, ME_WORKERS_SQL, sha256Hex } from "../src/routes/contributors";
-import { GRANT_INSERT_SQL, LIVE_GRANTS_SQL, SPEND_SQL, SWAP_SQL } from "../src/routes/agents";
+import { contributorOf, ME_DRAFTS_SQL, ME_GRANTS_SQL, ME_LIVE_GRANTS_SQL, ME_WAITING_DRAFTS_SQL, ME_WORKERS_SQL, sha256Hex } from "../src/routes/contributors";
+import {
+  DECIDED_BY_DRAFT_SQL, DISCARD_BY_TOKEN_SQL, DISCARD_SQL, DRAFT_GRANT_SQL, GRANT_INSERT_SQL, LIVE_GRANTS_SQL, LOGOUT_SQL, REPLACE_SQL, REVOKE_GRANT_SQL, SPEND_SQL, SWAP_SQL, UNSWAPPED_SQL,
+} from "../src/routes/agents";
+import { BLOCK_GRANTS_SQL } from "../src/routes/blocks";
 import { PENDING_CODES_SQL } from "../src/routes/gc";
-import { daySql, GRANT_SQL, s256 } from "../src/agents";
+import { agentName, daySql, DRAFT_MINUTES, GRANT_SQL, s256 } from "../src/agents";
 import { forgetGuardWord } from "../src/cost";
 
 const ORIGIN = "http://pool.test";
@@ -98,7 +101,7 @@ const request = (name: string, token: string, arches = ["x86_64"]) =>
   call("POST", "/factory/packages", { name, url: `https://${name}.example`, source: `https://${name}.example/${name}-1.0.tar.gz`, version: "1.0", description: `${name}, a tool for the agents' tests`, license: "MIT", arches, checklist }, token, { "x-omarchy-client": "claude-code/2.1.0" });
 const claimAs = async (workerToken: string, name: string, arch = "x86_64") => {
   await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = 'not this story' WHERE status IN ('queued', 'leased') AND name != ?").bind(name).run();
-  const c = await call("POST", "/factory/claim", { arch, agent: workerToken === "omw_px" ? AGENT : "openai/gpt-5", agent_status: "ok", kinds: ["build"] }, workerToken);
+  const c = await call("POST", "/factory/claim", { arch, agent: workerToken.startsWith("omw_px") ? AGENT : "openai/gpt-5", agent_status: "ok", kinds: ["build"] }, workerToken);
   expect(c.status, `${workerToken} claims ${name}: ${JSON.stringify(c.json)}`).toBe(200);
   expect(c.json.task).toMatchObject({ name, arch });
   return c.json as { task: { id: number; name: string; arch: string; params: Record<string, unknown> }; token: string };
@@ -142,14 +145,16 @@ beforeAll(async () => {
   env.AGENT_CALLS = unlimited;
   env.AGENT_SWAPS = unlimited;
   const h = (t: string) => sha256Hex(t);
-  const people = ["m1", "m2", "m3", "alice", "bob", "carol", "dave", "erin", "frank", "gina"];
+  const people = ["m1", "m2", "m3", "m4", "alice", "bob", "carol", "dave", "erin", "frank", "gina", "hana"];
   const role = (l: string) => (/^m\d$/.test(l) ? "maintainer" : "contributor");
   await env.DB.batch([
-    env.DB.prepare("INSERT INTO factory_maintainers (login) VALUES ('m1'), ('m2'), ('m3')"),
+    env.DB.prepare("INSERT INTO factory_maintainers (login) VALUES ('m1'), ('m2'), ('m3'), ('m4')"),
     ...(await Promise.all(people.map(async (l) => env.DB.prepare("INSERT INTO contributors (login, token_hash, session_hash, role) VALUES (?, ?, ?, ?)").bind(l, await h(`omc_${l}`), await h(`oms_${l}`), role(l))))),
     env.DB.prepare(`INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, trusted_by, last_seen, agent, agent_status, kinds) VALUES
       ('cx', 'x86_64', 'alice', ?, 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z', 'openai/gpt-5', 'ok', '["build"]'),
-      ('px', 'x86_64', 'm2', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z', ?, 'ok', '["build"]')`).bind(await h("omw_cx"), await h("omw_px"), AGENT),
+      ('px', 'x86_64', 'm2', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z', ?, 'ok', '["build"]'),
+      ('cxa', 'aarch64', 'alice', ?, 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z', 'openai/gpt-5', 'ok', '["build"]'),
+      ('pxa', 'aarch64', 'm2', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z', ?, 'ok', '["build"]')`).bind(await h("omw_cx"), await h("omw_px"), AGENT, await h("omw_cxa"), await h("omw_pxa"), AGENT),
   ]);
 });
 
@@ -273,6 +278,46 @@ describe("the grant", () => {
     expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM agent_grants WHERE login = 'erin' AND agent = 'Two' AND revoked_by = 'replaced'").first()).toEqual({ n: 1 });
     expect((await call("GET", "/factory/me", undefined, again.token)).status).toBe(200);
   });
+
+  it("replaces a grant of the same agent name at the swap, once the new token exists: a Grant whose code is never swapped leaves the old grant working", async () => {
+    const old = await login("dave", "Replace me");
+    const q = new URLSearchParams({ agent: "Replace me", scopes: "contribute", port: "52100", state: "r".repeat(20), challenge: await s256(verifierOf("never swapped")) });
+    const g = await browser("POST", "/auth/agent", "dave", { ...fields((await browser("GET", `/auth/agent?${q}`, "dave")).text), action: "grant" });
+    expect(g.status, g.text.slice(0, 400)).toBe(303);
+    // The command never swapped its code (closed, timed out, or its browser could not reach the loopback): the grant it was to replace still works.
+    expect((await call("GET", "/factory/me", undefined, old.token)).status).toBe(200);
+    expect(await env.DB.prepare("SELECT revoked_at FROM agent_grants WHERE id = ?").bind(old.grant).first()).toEqual({ revoked_at: null });
+    const again = await login("dave", "Replace me");
+    expect((await call("GET", "/factory/me", undefined, old.token)).json.code).toBe("grant_invalid");
+    expect(await env.DB.prepare("SELECT revoked_by FROM agent_grants WHERE id = ?").bind(old.grant).first()).toEqual({ revoked_by: "replaced" });
+    expect((await call("GET", "/factory/me", undefined, again.token)).status).toBe(200);
+  });
+
+  it("counts a login's Grants at the edge — the agents' binding, a key of its own — and writes no row past it", async () => {
+    const keys: string[] = [];
+    const q = new URLSearchParams({ agent: "Looping", scopes: "contribute", port: "52200", state: "l".repeat(20), challenge: await s256(verifierOf("looping")) });
+    const f = fields((await browser("GET", `/auth/agent?${q}`, "hana")).text);
+    env.AGENT_CALLS = { limit: async ({ key }: { key: string }) => (keys.push(key), { success: !key.startsWith("grant:") }) } as unknown as RateLimit;
+    const r = await browser("POST", "/auth/agent", "hana", { ...f, action: "grant" });
+    expect(r.status).toBe(429);
+    expect(keys).toEqual(["grant:hana"]);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM agent_grants WHERE login = 'hana'").first()).toEqual({ n: 0 });
+    // Deny writes nothing and is never counted.
+    expect((await browser("POST", "/auth/agent", "hana", { ...f, action: "deny" })).status).toBe(303);
+    expect(keys).toEqual(["grant:hana"]);
+  });
+
+  it("refuses an agent name that holds a control, format, private-use or lone surrogate character: a right-to-left override, a zero-width space, a C1 control", async () => {
+    for (const bad of ["\u202eedoC edualC", "Claude\u200bCode", "Claude\u0085Code", "Claude\u2066Code", "Claude\ue000", "Claude\ud800"]) expect(agentName(bad), JSON.stringify(bad)).toBeNull();
+    expect(agentName("  Claude\tCode\u00a0 ")).toBe("Claude Code");
+    expect(agentName("Clåude Cöde 日本")).toBe("Clåude Cöde 日本");
+    for (const bad of ["\u202eedoC edualC", "Claude\u200bCode", "Claude\u0085Code"]) {
+      const q = new URLSearchParams({ agent: bad, scopes: "contribute", port: "48123", state: "s".repeat(20), challenge: await s256(verifierOf("names")), method: "S256" });
+      const p = await browser("GET", `/auth/agent?${q}`, "hana");
+      expect(p.status, JSON.stringify(bad)).toBe(400);
+      expect(p.text).not.toContain('value="grant"');
+    }
+  });
 });
 
 describe("the token is worth the seven tools and nothing else", () => {
@@ -301,6 +346,15 @@ describe("the token is worth the seven tools and nothing else", () => {
     expect(await contributorOf(withCookie, env)).toBeNull();
     // Nor does the sign-in's own read of who is signed in take it.
     expect((await raw("GET", `${ORIGIN}/auth/me`, { headers: { authorization: `Bearer ${token}` } })).status).toBe(401);
+  });
+
+  it("is refused on a read the edge holds too: the answer never depends on whether someone read the URL first", async () => {
+    const url = `${API}/version?agent-tools=warm`;
+    expect((await raw("GET", url)).status).toBe(200);
+    const hit = await raw("GET", url);
+    expect([hit.status, hit.headers.get("x-pool-cache")]).toEqual([200, "hit"]);
+    const r = await raw("GET", url, { headers: { authorization: `Bearer ${token}` } });
+    expect([r.status, ((await r.json()) as { code: string }).code]).toEqual([403, "agent_token"]);
   });
 
   it("names the scope the route needs, and reads the role again on every call: a login taken out of MAINTAINERS.toml loses review and block at its next call", async () => {
@@ -508,9 +562,94 @@ describe("a draft", () => {
   });
 
   it("bad arguments are refused before the day counts or the predicate: a verdict outside the four, a short note, no task", async () => {
-    for (const body of [{ name: "x", verdict: "merge", note: "abcd" }, { name: "x", verdict: "approve", note: "ab", task: 1 }, { name: "x", verdict: "approve", note: "abcd" }]) {
+    const count = () => env.DB.prepare("SELECT agent_day, agent_drafts FROM contributors WHERE login = 'm1'").first();
+    const before = await count();
+    for (const body of [{ name: "x", verdict: "merge", note: "abcd" }, { name: "x", verdict: "approve", note: "ab", task: 1 }, { name: "x", verdict: "approve", note: "abcd" }, { name: "x", verdict: "reject", note: "abcd", task: "12" }]) {
       expect((await call("POST", "/factory/drafts", body, m1.token)).status, JSON.stringify(body)).toBe(400);
     }
+    expect(await count()).toEqual(before);
+  });
+
+  it("covers every architecture of the package: the confirm page draws each one the decision decides, and each of the decision's rows carries the agent — served as through, never as agent", async () => {
+    expect((await call("POST", "/factory/packages", { name: "twoarch", url: "https://twoarch.example", source: "https://twoarch.example/twoarch-1.0.tar.gz", version: "1.0", description: "twoarch, a tool for the agents' tests", license: "MIT", arches: ["x86_64", "aarch64"], checklist }, "omc_alice")).status).toBe(201);
+    const cx = await claimAs("omw_cx", "twoarch", "x86_64");
+    await stage(cx, "alice");
+    const ca = await claimAs("omw_cxa", "twoarch", "aarch64");
+    await stage(ca, "alice");
+    expect((await call("POST", `/factory/tasks/${cx.task.id}/build`, { worker: "px" }, "omc_m2")).status).toBe(200);
+    const px = await claimAs("omw_px", "twoarch", "x86_64");
+    await stage(px, "the project");
+    const pa = await claimAs("omw_pxa", "twoarch", "aarch64");
+    await stage(pa, "the project");
+    const d = (await call("POST", "/factory/drafts", { name: "twoarch", task: px.task.id, verdict: "approve", note: "reads well" }, m1.token)).json;
+    expect(d.state, JSON.stringify(d)).toBe("waiting");
+    const page = await confirmPage(d.draft, "m1");
+    expect(page.text).toContain("One review decides every architecture: confirming decides all 2 below.");
+    for (const id of [cx.task.id, ca.task.id, px.task.id, pa.task.id]) expect(page.text, String(id)).toContain(`href="/build/${id}"`);
+    expect(page.text.indexOf("<th colspan=\"2\">x86_64</th>")).toBeLessThan(page.text.indexOf("<th colspan=\"2\">aarch64</th>"));
+    const ok = await browser("POST", `/auth/confirm/${d.draft}`, "m1", { ...fields(page.text), action: "confirm" });
+    expect(ok.status, ok.text.slice(0, 800)).toBe(200);
+    const rows = (await env.DB.prepare("SELECT arch, agent FROM approvals WHERE name = 'twoarch' ORDER BY arch").all<{ arch: string; agent: string }>()).results;
+    expect(rows.map((r) => [r.arch, JSON.parse(r.agent).draft, JSON.parse(r.agent).agent])).toEqual([["aarch64", d.draft, "Claude Code"], ["x86_64", d.draft, "Claude Code"]]);
+    // The public record serves the column parsed, as `through`; `agent` keeps #247's meaning (the rebuild's), and is not the column.
+    const pub = (await call("GET", `/factory/approvals?t=${Date.now()}`)).json.approvals.find((a: any) => a.name === "twoarch");
+    expect(pub.through).toMatchObject({ agent: "Claude Code", client: null, grant: m1.grant, draft: d.draft });
+    expect(pub).not.toHaveProperty("agent");
+    const web = (await call("GET", `/factory/approvals?t=${Date.now()}`)).json.approvals.find((a: any) => a.name === "atonce");
+    expect(web.through).toMatchObject({ draft: expect.any(String) });
+    expect((await call("GET", `/users/m1?t=${Date.now()}`)).json.approvals.find((a: any) => a.name === "twoarch").through).toMatchObject({ draft: d.draft });
+  });
+
+  it("is refused when the package moved since the draft — here the project's rebuild staged while a request for changes waited — and nothing is decided", async () => {
+    const id = await ready("moved");
+    expect((await call("POST", `/factory/tasks/${id}/build`, { worker: "px", note: "pin the tag" }, "omc_m2")).status).toBe(200);
+    const rb = await claimAs("omw_px", "moved");
+    const d = (await call("POST", "/factory/drafts", { name: "moved", task: id, verdict: "request_changes", note: "pin the tag" }, m1.token)).json;
+    expect(d.state, JSON.stringify(d)).toBe("waiting");
+    await stage(rb, "the project");
+    const page = await confirmPage(d.draft, "m1");
+    expect(page.text).toContain("It cannot be confirmed now.");
+    expect(page.text).toContain("moved changed since Claude Code drafted this");
+    const r = await browser("POST", `/auth/confirm/${d.draft}`, "m1", { ...fields(page.text), action: "confirm" });
+    expect(r.status).toBe(409);
+    expect(await env.DB.prepare("SELECT state FROM drafts WHERE id = ?").bind(d.draft).first()).toEqual({ state: "refused" });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM approvals WHERE name = 'moved'").first()).toEqual({ n: 0 });
+    expect(await env.DB.prepare("SELECT status FROM build_tasks WHERE id = ?").bind(rb.task.id).first()).toEqual({ status: "staged" });
+  });
+
+  it("says what became of it when the decision's handler fails: refused with nothing decided before the decision, confirmed with the decision standing after it — never confirmed with nothing decided", async () => {
+    const real = env.DB;
+    const failing = (at: string) =>
+      new Proxy(real, {
+        get(t, p) {
+          if (p === "prepare") return (sql: string) => { if (sql.startsWith(at)) throw new Error("D1_ERROR: the database went away"); return t.prepare(sql); };
+          const v = Reflect.get(t, p, t);
+          return typeof v === "function" ? v.bind(t) : v;
+        },
+      }) as D1Database;
+    const attempt = async (name: string, at: string) => {
+      const { project } = await reviewed(name);
+      const d = (await call("POST", "/factory/drafts", { name, task: project, verdict: "approve", note: "reads well" }, m1.token)).json;
+      const f = fields((await confirmPage(d.draft, "m1")).text);
+      env.DB = failing(at);
+      try {
+        return { d, r: await browser("POST", `/auth/confirm/${d.draft}`, "m1", { ...f, action: "confirm" }) };
+      } finally {
+        env.DB = real;
+      }
+    };
+    // The handler's first read fails: nothing was decided, and the draft says refused.
+    const before = await attempt("failsbefore", "SELECT * FROM build_tasks WHERE id = ?");
+    expect(before.r.status).toBe(500);
+    expect(before.r.text).toContain("nothing was decided");
+    expect(await env.DB.prepare("SELECT state, json_extract(outcome, '$.status') AS status FROM drafts WHERE id = ?").bind(before.d.draft).first()).toEqual({ state: "refused", status: 500 });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM approvals WHERE name = 'failsbefore'").first()).toEqual({ n: 0 });
+    // The publish job's insert fails after the decision was taken: it stands, and the draft says confirmed, with what failed.
+    const after = await attempt("failsafter", "INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish");
+    expect(after.r.status).toBe(500);
+    expect(after.r.text).toContain("was decided, then the pool failed");
+    expect(await env.DB.prepare("SELECT state, json_extract(outcome, '$.status') AS status FROM drafts WHERE id = ?").bind(after.d.draft).first()).toEqual({ state: "confirmed", status: 500 });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM approvals WHERE name = 'failsafter' AND json_extract(agent, '$.draft') = ?").bind(after.d.draft).first()).toEqual({ n: 1 });
   });
 });
 
@@ -529,6 +668,77 @@ describe("revocation", () => {
     expect((await call("POST", "/factory/contributors/carol/block", { reason: "a token stealer" }, "omc_m1")).status).toBe(200);
     expect((await call("GET", "/factory/me", undefined, c.token)).status).toBe(401);
     expect(await env.DB.prepare("SELECT revoked_by FROM agent_grants WHERE id = ?").bind(c.grant).first()).toEqual({ revoked_by: "blocked" });
+  });
+
+  it("Revoke on the page, logout and a new login under the same name discard the grant's waiting drafts in the same batch; a draft whose grant was revoked otherwise is refused at the confirm", async () => {
+    const drafted = async (name: string, token: string) => {
+      const { project } = await reviewed(name);
+      const d = (await call("POST", "/factory/drafts", { name, task: project, verdict: "approve", note: "reads well" }, token)).json;
+      expect(d.state, JSON.stringify(d)).toBe("waiting");
+      return { d, f: fields((await confirmPage(d.draft, "m4")).text) };
+    };
+    const ended = async (draft: string, name: string) => {
+      expect(await env.DB.prepare("SELECT state, used_at IS NOT NULL AS spent, json_extract(outcome, '$.error') AS error FROM drafts WHERE id = ?").bind(draft).first()).toEqual({ state: "discarded", spent: 1, error: expect.stringMatching(/grant was revoked/) });
+      expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM approvals WHERE name = ?").bind(name).first()).toEqual({ n: 0 });
+    };
+    // Revoke on the person's page: the page opened before it confirms nothing, and says why.
+    const a = await login("m4", "Revoked on the page", "contribute,review,block");
+    const one = await drafted("revokedpage", a.token);
+    expect((await call("POST", `/factory/grants/${a.grant}/revoke`, {}, "omc_m4")).status).toBe(200);
+    await ended(one.d.draft, "revokedpage");
+    const r1 = await browser("POST", `/auth/confirm/${one.d.draft}`, "m4", { ...one.f, action: "confirm" });
+    expect([r1.status, r1.text.includes("grant was revoked")]).toEqual([409, true]);
+    expect((await confirmPage(one.d.draft, "m4")).text).toContain("grant was revoked");
+    expect((await call("GET", "/factory/me", undefined, "omc_m4")).json.drafts.find((x: any) => x.id === one.d.draft)).toMatchObject({ state: "discarded", outcome: { error: expect.stringMatching(/grant was revoked/) } });
+    await ended(one.d.draft, "revokedpage");
+    // omarchy-cli logout.
+    const b = await login("m4", "Logged out", "contribute,review,block");
+    const two = await drafted("loggedout", b.token);
+    expect((await raw("POST", `${ORIGIN}/auth/agent/revoke`, { headers: { authorization: `Bearer ${b.token}` } })).status).toBe(200);
+    await ended(two.d.draft, "loggedout");
+    // A new login under the same name, with contribute alone: the review draft of the grant it replaced goes with it.
+    const c = await login("m4", "Renamed", "contribute,review,block");
+    const three = await drafted("replacedname", c.token);
+    await login("m4", "Renamed");
+    await ended(three.d.draft, "replacedname");
+    // A revocation the batch did not see (it raced the draft): the confirm reads the draft's grant again, refuses, and decides nothing.
+    const e = await login("m4", "Raced", "contribute,review,block");
+    const four = await drafted("raced", e.token);
+    await env.DB.prepare("UPDATE agent_grants SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), revoked_by = 'm4' WHERE id = ?").bind(e.grant).run();
+    const page = await confirmPage(four.d.draft, "m4");
+    expect(page.text).toContain("It cannot be confirmed now.");
+    expect(page.text).toContain("the grant to Raced that drafted this was revoked since (revoked on m4's page)");
+    const r4 = await browser("POST", `/auth/confirm/${four.d.draft}`, "m4", { ...four.f, action: "confirm" });
+    expect(r4.status).toBe(409);
+    expect(await env.DB.prepare("SELECT state FROM drafts WHERE id = ?").bind(four.d.draft).first()).toEqual({ state: "refused" });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM approvals WHERE name = 'raced'").first()).toEqual({ n: 0 });
+  });
+});
+
+describe("the person's own page", () => {
+  it("lists every live grant, with its Revoke, and every waiting draft, however many newer rows are behind them", async () => {
+    const live = await login("hana", "Old but live", "contribute", { days: "90" });
+    // Eleven newer grants, each revoked: a login that re-grants every week piles up history the page shows ten of.
+    const at = (s: number) => new Date(Date.now() + s * 1000).toISOString();
+    for (let i = 1; i <= 11; i++) {
+      await env.DB.prepare("INSERT INTO agent_grants (id, login, agent, scopes, token_hash, created_at, expires_at, revoked_at, revoked_by) VALUES (?, 'hana', 'Weekly', '[\"contribute\"]', ?, ?, ?, ?, 'replaced')")
+        .bind(`g_${String(i).padStart(32, "0")}`, `hana-history-${i}`, at(i), at(7 * 86400), at(i + 1)).run();
+    }
+    // A draft still waiting, and twenty newer ones spent.
+    const draftRow = (id: string, created: string, used: string | null, state: string) =>
+      env.DB.prepare("INSERT INTO drafts (id, grant_id, login, agent, verdict, note, name, task_id, facts, created_at, expires_at, used_at, state) VALUES (?, ?, 'hana', 'Old but live', 'approve', 'reads well', 'x', 1, 'f', ?, ?, ?, ?)")
+        .bind(id, live.grant, created, new Date(Date.parse(created) + DRAFT_MINUTES * 60_000).toISOString(), used, state);
+    const waiting = `d_${"a".repeat(32)}`;
+    await draftRow(waiting, at(-60), null, "waiting").run();
+    for (let i = 1; i <= 20; i++) await draftRow(`d_${String(i).padStart(32, "0")}`, at(i), at(i), "discarded").run();
+    const me = (await call("GET", "/factory/me", undefined, "omc_hana")).json;
+    expect(me.grants[0]).toMatchObject({ id: live.grant, state: "live", agent: "Old but live" });
+    expect(me.grants).toHaveLength(11);
+    expect(me.grants.filter((g: any) => g.id === live.grant)).toHaveLength(1);
+    expect(me.drafts[0]).toMatchObject({ id: waiting, state: "waiting" });
+    expect(me.drafts).toHaveLength(21);
+    // The literal half hour of the waiting drafts' read and of the discard is the drafts' own life.
+    for (const sql of [ME_WAITING_DRAFTS_SQL, DISCARD_SQL, DISCARD_BY_TOKEN_SQL]) expect(sql).toContain(`'-${DRAFT_MINUTES} minutes'`);
   });
 });
 
@@ -612,8 +822,18 @@ describe("every new query", () => {
     const expected: [string, string, RegExp[]][] = [
       ["a grant by its token", GRANT_SQL, [/SEARCH g USING INDEX idx_agent_grants_token \(token_hash=\?\)/, /SEARCH c USING INDEX sqlite_autoindex_contributors_1 \(login=\?\)/]],
       ["the swap", SWAP_SQL, [/SEARCH agent_grants USING INDEX idx_agent_grants_code \(code_hash=\?\)/]],
-      ["a login's live grants", LIVE_GRANTS_SQL, [/SEARCH agent_grants USING INDEX idx_agent_grants_login \(login=\?\)/]],
-      ["the grant's insert", GRANT_INSERT_SQL, [/SEARCH agent_grants USING INDEX idx_agent_grants_login \(login=\?\)/]],
+      ["a login's live grants", LIVE_GRANTS_SQL, [/SEARCH agent_grants USING INDEX idx_agent_grants_live \(login=\? AND expires_at>\?\)/]],
+      ["the grant's insert", GRANT_INSERT_SQL, [/SEARCH agent_grants USING INDEX idx_agent_grants_live \(login=\? AND expires_at>\?\)/]],
+      ["a login's code nobody swapped, at Grant", UNSWAPPED_SQL, [/SEARCH agent_grants USING INDEX idx_agent_grants_unswapped \(login=\?\)/]],
+      ["the same name's grant replaced at the swap", REPLACE_SQL, [/SEARCH agent_grants USING INDEX idx_agent_grants_live \(login=\? AND expires_at>\?\)/, /SEARCH agent_grants USING INDEX idx_agent_grants_token \(token_hash=\?\)/]],
+      ["a revoked grant's waiting drafts, by the login", DISCARD_SQL, [/SEARCH drafts USING INDEX idx_drafts_login \(login=\? AND created_at>\?\)/, /SEARCH g USING INDEX sqlite_autoindex_agent_grants_1 \(id=\?\)/]],
+      ["a revoked grant's waiting drafts, by the token", DISCARD_BY_TOKEN_SQL, [/SEARCH drafts USING INDEX idx_drafts_login \(login=\? AND created_at>\?\)/, /SEARCH agent_grants USING INDEX idx_agent_grants_token \(token_hash=\?\)/]],
+      ["Revoke on the page", REVOKE_GRANT_SQL, [/SEARCH agent_grants USING INDEX sqlite_autoindex_agent_grants_1 \(id=\?\)/]],
+      ["a contributor's block", BLOCK_GRANTS_SQL, [/SEARCH agent_grants USING INDEX idx_agent_grants_login \(login=\?\)/]],
+      ["a draft's grant, at the confirm", DRAFT_GRANT_SQL, [/SEARCH agent_grants USING INDEX sqlite_autoindex_agent_grants_1 \(id=\?\)/]],
+      ["a draft's decision after its handler failed", DECIDED_BY_DRAFT_SQL, [/SEARCH approvals USING INDEX idx_approvals_name \(name=\? AND created_at>\?\)/]],
+      ["a person's live grants", ME_LIVE_GRANTS_SQL, [/SEARCH agent_grants USING INDEX idx_agent_grants_live \(login=\? AND expires_at>\?\)/]],
+      ["a person's waiting drafts", ME_WAITING_DRAFTS_SQL, [/SEARCH drafts USING INDEX idx_drafts_login \(login=\? AND created_at>\?\)/]],
       ["the day's count", daySql("drafts"), [/SEARCH contributors USING INDEX sqlite_autoindex_contributors_1 \(login=\?\)/]],
       ["a person's workers", ME_WORKERS_SQL, [/SEARCH build_workers USING INDEX idx_build_workers_owner \(owner=\?\)/]],
       ["a person's grants", ME_GRANTS_SQL, [/SEARCH agent_grants USING INDEX idx_agent_grants_login \(login=\?\)/]],
@@ -621,8 +841,7 @@ describe("every new query", () => {
       ["the draft spent", SPEND_SQL, [/SEARCH drafts USING INDEX sqlite_autoindex_drafts_1 \(id=\?\)/]],
       ["a draft by its id", "SELECT * FROM drafts WHERE id = ?", [/SEARCH drafts USING INDEX sqlite_autoindex_drafts_1 \(id=\?\)/]],
       ["the codes nobody took", PENDING_CODES_SQL, [/SEARCH agent_grants USING INDEX idx_agent_grants_pending \(code_expires_at<\?\)/]],
-      ["the agent on a decision's rows", "UPDATE approvals SET agent = ? WHERE review_id = ?", [/SEARCH approvals USING INDEX idx_approvals_review \(review_id=\?\)/]],
-      ["logout", "UPDATE agent_grants SET revoked_at = 'x', revoked_by = 'logout' WHERE token_hash = ? AND revoked_at IS NULL RETURNING id, login", [/SEARCH agent_grants USING INDEX idx_agent_grants_token \(token_hash=\?\)/]],
+      ["logout", LOGOUT_SQL, [/SEARCH agent_grants USING INDEX idx_agent_grants_token \(token_hash=\?\)/]],
     ];
     for (const [what, sql, want] of expected) {
       const p = await plan(sql);

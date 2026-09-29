@@ -358,10 +358,35 @@ export async function handleNewToken(c: Contributor, env: Env): Promise<Response
 
 /** A person's workers, newest first, through idx_build_workers_owner (owner, last_seen): it read every worker ever registered before (#252). */
 export const ME_WORKERS_SQL = "SELECT id, arch, mode, packages, labels, agent, last_seen, current_task, builds_done, builds_failed, revoked_at FROM build_workers WHERE owner = ? ORDER BY last_seen DESC";
-/** A person's agent grants, newest first, ten at most, by (login, created_at): what the page lists with Revoke. */
-export const ME_GRANTS_SQL = "SELECT id, agent, scopes, created_at, expires_at, revoked_at, revoked_by, last_used, token_hash IS NOT NULL AS swapped FROM agent_grants WHERE login = ? ORDER BY created_at DESC LIMIT 10";
+const GRANT_COLS = "id, agent, scopes, created_at, expires_at, revoked_at, revoked_by, last_used, token_hash IS NOT NULL AS swapped";
+/**
+ * A person's live agent grants — swapped, not revoked, not expired — by the
+ * partial index on (login, expires_at) that holds only unrevoked, swapped
+ * grants: three at most, however long the history behind them. Read apart
+ * from the history, so a live grant always has its Revoke on the page, and a
+ * login that re-grants every week never pushes an older live grant off it.
+ */
+export const ME_LIVE_GRANTS_SQL = `SELECT ${GRANT_COLS} FROM agent_grants WHERE login = ? AND revoked_at IS NULL AND token_hash IS NOT NULL AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ORDER BY expires_at DESC`;
+/** A person's agent grants, newest first, ten at most, by (login, created_at): the history the page lists after the live ones. */
+export const ME_GRANTS_SQL = `SELECT ${GRANT_COLS} FROM agent_grants WHERE login = ? ORDER BY created_at DESC LIMIT 10`;
+const DRAFT_COLS = "id, grant_id, agent, client, verdict, note, name, task_id, created_at, expires_at, used_at, state, outcome";
+/**
+ * A person's drafts still waiting — not spent, drafted within their thirty
+ * minutes (agents.ts DRAFT_MINUTES; a literal here, as this module is read
+ * before that one) — by the range of (login, created_at): only the last
+ * half hour's drafts are read, at most the day's thirty on either side of
+ * midnight. Read apart from the history, so an agent that drafts twenty
+ * more never pushes a waiting draft off the page.
+ */
+export const ME_WAITING_DRAFTS_SQL = `SELECT ${DRAFT_COLS} FROM drafts WHERE login = ? AND created_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 minutes') AND used_at IS NULL ORDER BY created_at DESC`;
 /** A person's drafts, newest first, twenty at most, by (login, created_at): shown to them only until confirmed. */
-export const ME_DRAFTS_SQL = "SELECT id, grant_id, agent, client, verdict, note, name, task_id, created_at, expires_at, used_at, state, outcome FROM drafts WHERE login = ? ORDER BY created_at DESC LIMIT 20";
+export const ME_DRAFTS_SQL = `SELECT ${DRAFT_COLS} FROM drafts WHERE login = ? ORDER BY created_at DESC LIMIT 20`;
+
+/** The rows of the first list, then the second's that the first did not hold: live grants or waiting drafts before the history. */
+function firstThen<T extends { id: string }>(first: T[], then: T[]): T[] {
+  const seen = new Set(first.map((x) => x.id));
+  return [...first, ...then.filter((x) => !seen.has(x.id))];
+}
 
 /**
  * The caller's own state, no-store: their packages, workers, builds, staging
@@ -374,10 +399,15 @@ export async function handleMe(c: Contributor, env: Env, origin = ""): Promise<R
   const workers = await env.DB.prepare(ME_WORKERS_SQL).bind(c.login).all();
   const tasks = await env.DB.prepare("SELECT id, name, arch, version, status, attempts, lease_owner, duration_ms, error, staged_prefix, created_at FROM build_tasks WHERE owner = ? ORDER BY id DESC LIMIT 50").bind(c.login).all();
   const staged = await env.DB.prepare("SELECT COALESCE(SUM(size), 0) AS bytes FROM staging_objects WHERE owner = ?").bind(c.login).first<{ bytes: number }>();
-  const [grants, drafts] = await Promise.all([
-    env.DB.prepare(ME_GRANTS_SQL).bind(c.login).all<{ id: string; agent: string; scopes: string; created_at: string; expires_at: string; revoked_at: string | null; revoked_by: string | null; last_used: string | null; swapped: number }>(),
-    env.DB.prepare(ME_DRAFTS_SQL).bind(c.login).all<{ id: string; grant_id: string; agent: string; client: string | null; verdict: string; note: string; name: string; task_id: number | null; created_at: string; expires_at: string; used_at: string | null; state: string; outcome: string | null }>(),
+  type GrantRow = { id: string; agent: string; scopes: string; created_at: string; expires_at: string; revoked_at: string | null; revoked_by: string | null; last_used: string | null; swapped: number };
+  type DraftRow = { id: string; grant_id: string; agent: string; client: string | null; verdict: string; note: string; name: string; task_id: number | null; created_at: string; expires_at: string; used_at: string | null; state: string; outcome: string | null };
+  const [live, history, waiting, recent] = await Promise.all([
+    env.DB.prepare(ME_LIVE_GRANTS_SQL).bind(c.login).all<GrantRow>(),
+    env.DB.prepare(ME_GRANTS_SQL).bind(c.login).all<GrantRow>(),
+    env.DB.prepare(ME_WAITING_DRAFTS_SQL).bind(c.login).all<DraftRow>(),
+    env.DB.prepare(ME_DRAFTS_SQL).bind(c.login).all<DraftRow>(),
   ]);
+  const grants = { results: firstThen(live.results, history.results) }, drafts = { results: firstThen(waiting.results, recent.results) };
   const now = new Date().toISOString();
   return json({
     contributor: c,

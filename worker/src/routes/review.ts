@@ -715,7 +715,12 @@ export const DRAFTED: Readonly<Record<"approve" | "request_changes" | "reject", 
  * when the person confirms it (routes/agents.ts): the task, and a digest of
  * the facts it was decided on — or the web's own refusal, with its status,
  * its words and its code (conflict_of_interest for the requester). The rule
- * stays decisions()'s; this only reads it.
+ * stays decisions()'s; this only reads it. The digest is what the confirm
+ * compares: the task, who brought it, the decisions on it, the claim, what
+ * is building or rebuilding, and where each architecture stands (the
+ * targets, by the one rule) — so a package that moved between the draft and
+ * the confirm (an architecture rebuilt, staged or failed) is not confirmed
+ * on facts the agent never saw.
  */
 export async function verdictOn(c: Contributor, id: number, word: "approve" | "changes" | "reject", env: Env): Promise<{ task: { id: number; name: string; arch: string; trust: string; status: string; version: string | null }; facts: string } | Response> {
   const t = await env.DB.prepare("SELECT id, name, arch, trust, status, owner, version, params FROM build_tasks WHERE id = ? AND kind = 'build'").bind(id).first<Decidable & { owner: string | null; version: string | null; params: string | null }>();
@@ -723,7 +728,8 @@ export async function verdictOn(c: Contributor, id: number, word: "approve" | "c
   const f = await factsOf(env, t);
   const no = refused(decisions(c, t, f)[word]);
   if (no) return no;
-  const facts = await sha256Hex(JSON.stringify({ task: t.id, status: t.status, version: t.version, owner: f.owner, requesters: f.requesters, standing: f.standing, already: f.already, claim: f.claim, inFlight: f.inFlight, building: f.building, rebuilding: f.rebuilding }));
+  const targets = Object.keys(f.targets).sort().map((a) => [a, f.targets[a].status, f.targets[a].task]);
+  const facts = await sha256Hex(JSON.stringify({ task: t.id, status: t.status, version: t.version, owner: f.owner, requesters: f.requesters, standing: f.standing, already: f.already, claim: f.claim, inFlight: f.inFlight, building: f.building, rebuilding: f.rebuilding, unbuilt: f.unbuilt, superseded: f.superseded, targets }));
   return { task: { id: t.id, name: t.name, arch: t.arch, trust: t.trust, status: t.status, version: t.version }, facts };
 }
 
@@ -870,9 +876,8 @@ export async function handleApprove(c: Contributor, id: number, request: Request
   }
   const arches = targets.map((x) => x.t.arch);
   // The review and its rows, taken at once: a second approval — or a rejection — of these builds sent at the same moment writes nothing.
-  const review = await takeRound(env, { name: t.name, version: t.version, decision: "approved", by: c.login, note, arches, notSupported, rows: targets.map((x) => ({ task: x.t.id, arch: x.t.arch, version: x.t.version, rebuild: x.t.id })) });
+  const review = await takeRound(env, { name: t.name, version: t.version, decision: "approved", by: c.login, note, arches, notSupported, through, rows: targets.map((x) => ({ task: x.t.id, arch: x.t.arch, version: x.t.version, rebuild: x.t.id })) });
   if (review === null) return decidedAlready(env, t.name, targets.map((x) => x.t.id));
-  await markThrough(env, review, through);
   const publishes: Record<string, number> = {};
   for (const x of targets) {
     // The review it publishes is `review_id`: `review` in a task's params names the contributor's build a project's build answers, and every reader of a task (its page's provenance, the claim's upload, the job's scopes) reads it so.
@@ -923,18 +928,19 @@ function withAgents(xs: { arch: string; agent: string | null }[]): string {
   return one.length === 1 ? ` (rebuilt with ${one[0]})` : ` (rebuilt with ${known.map((x) => `${x.agent} on ${x.arch}`).join(", ")})`;
 }
 
-/** The agent on a decision's rows (approvals.agent), by the review just written (its index): only for a decision an agent drafted. */
-async function markThrough(env: Env, review: number, through: Through | undefined): Promise<void> {
-  if (through) await env.DB.prepare("UPDATE approvals SET agent = ? WHERE review_id = ?").bind(JSON.stringify(through), review).run();
-}
-
 /** No live decision on any of the builds named — an approvals row not withdrawn: what both statements of a decision's batch write under. */
 const UNDECIDED = "NOT EXISTS (SELECT 1 FROM approvals a WHERE a.task_id IN (SELECT value FROM json_each(?)) AND a.withdrawn_at IS NULL)";
 /** A decision's review, written only while its builds are undecided (UNDECIDED; the approvals' task index). */
 export const REVIEW_SQL = `INSERT INTO reviews (name, version, decision, by, note, arches, not_supported, released, changes) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${UNDECIDED} RETURNING id`;
-/** Its rows, one per build decided, under the same condition, with the review just written (the name's newest, by the reviews' (name, id) index). */
-export const ROWS_SQL = `INSERT INTO approvals (task_id, name, arch, version, decision, by, note, rebuild_task, review_id)
-  SELECT json_extract(j.value, '$.task'), ?, json_extract(j.value, '$.arch'), json_extract(j.value, '$.version'), ?, ?, ?, json_extract(j.value, '$.rebuild'), (SELECT MAX(id) FROM reviews WHERE name = ?)
+/**
+ * Its rows, one per build decided, under the same condition, with the review
+ * just written (the name's newest, by the reviews' (name, id) index) — and,
+ * for a decision an agent drafted and the person confirmed (#252), the agent
+ * it came through (approvals.agent, each row's `through`), in the same
+ * statement: never a second write after the decision.
+ */
+export const ROWS_SQL = `INSERT INTO approvals (task_id, name, arch, version, decision, by, note, rebuild_task, review_id, agent)
+  SELECT json_extract(j.value, '$.task'), ?, json_extract(j.value, '$.arch'), json_extract(j.value, '$.version'), ?, ?, ?, json_extract(j.value, '$.rebuild'), (SELECT MAX(id) FROM reviews WHERE name = ?), json_extract(j.value, '$.through')
     FROM json_each(?) j WHERE ${UNDECIDED}`;
 
 /**
@@ -945,11 +951,11 @@ export const ROWS_SQL = `INSERT INTO approvals (task_id, name, arch, version, de
  * rejection) are one decision: the facts both read said "undecided", and the
  * second batch writes nothing. The review's id, or null: decided already.
  */
-async function takeRound(env: Env, r: { name: string; version: string | null; decision: "approved" | "rejected"; by: string; note: string | null; arches: string[]; notSupported?: Record<string, number | null>; released?: boolean; changes?: boolean; rows: { task: number; arch: string; version: string | null; rebuild: number | null }[] }): Promise<number | null> {
+async function takeRound(env: Env, r: { name: string; version: string | null; decision: "approved" | "rejected"; by: string; note: string | null; arches: string[]; notSupported?: Record<string, number | null>; released?: boolean; changes?: boolean; through?: Through; rows: { task: number; arch: string; version: string | null; rebuild: number | null }[] }): Promise<number | null> {
   const decided = JSON.stringify(r.rows.map((x) => x.task));
   const [review] = await env.DB.batch([
     env.DB.prepare(REVIEW_SQL).bind(r.name, r.version, r.decision, r.by, r.note, JSON.stringify(r.arches), JSON.stringify(r.notSupported ?? {}), r.released ? 1 : 0, r.changes ? 1 : 0, decided),
-    env.DB.prepare(ROWS_SQL).bind(r.name, r.decision, r.by, r.note, r.name, JSON.stringify(r.rows), decided),
+    env.DB.prepare(ROWS_SQL).bind(r.name, r.decision, r.by, r.note, r.name, JSON.stringify(r.rows.map((x) => (r.through ? { ...x, through: r.through } : x))), decided),
   ]);
   return (review.results[0] as { id?: number } | undefined)?.id ?? null;
 }
@@ -1063,9 +1069,8 @@ async function closeRound(c: Contributor, id: number, request: Request, env: Env
   const closes = !inPool;
   const done = word === "changes" ? `changes requested by ${c.login}` : `rejected by ${c.login}`;
   // The review and its rows, taken at once: changes and a rejection — or two of either — sent at the same moment are one decision.
-  const review = await takeRound(env, { name: t.name, version: t.version, decision: "rejected", by: c.login, note, arches: decided.map((x) => x.arch), released, changes: word === "changes", rows: decided.map((x) => ({ task: x.id, arch: x.arch, version: x.version, rebuild: null })) });
+  const review = await takeRound(env, { name: t.name, version: t.version, decision: "rejected", by: c.login, note, arches: decided.map((x) => x.arch), released, changes: word === "changes", through, rows: decided.map((x) => ({ task: x.id, arch: x.arch, version: x.version, rebuild: null })) });
   if (review === null) return decidedAlready(env, t.name, decided.map((x) => x.id));
-  await markThrough(env, review, through);
   // The round's last build, by the name's (name, arch, id) index: `+kind` keeps the planner off the index of every build's kind.
   const lastBuild = await env.DB.prepare("SELECT MAX(id) AS id FROM build_tasks WHERE name = ? AND +kind = 'build'").bind(t.name).first<{ id: number | null }>();
   await env.DB.batch([
@@ -1243,6 +1248,14 @@ interface DecisionRow {
   withdrawn_at: string | null; withdrawn_by: string | null; withdrawn_reason: string | null; review_id: number | null;
   rebuild_status?: string | null; rebuild_result?: string | null; blocked_at?: string | null; publish_status?: string | null;
   review_arches?: string | null; review_not_supported?: string | null; review_released?: number | null; review_changes?: number | null;
+  /** approvals.agent (#252): the agent a decision was drafted through, as JSON — served parsed, as `through`, never under `agent`, which is the rebuild's agent (#247). */
+  agent?: string | null;
+}
+
+/** The agent a decision came through (approvals.agent), parsed; null for the web's and the command line's. */
+function throughOf(v: string | null | undefined): Through | null {
+  if (!v) return null;
+  try { const t = JSON.parse(v) as unknown; return t && typeof t === "object" ? (t as Through) : null; } catch { return null; }
 }
 
 /**
@@ -1280,6 +1293,9 @@ export function asReviews<R extends DecisionRow>(rows: R[], ringsOf: (name: stri
       ...first,
       review: first.review_id,
       review_arches: undefined, review_not_supported: undefined, review_released: undefined, review_changes: undefined,
+      // Who a decision an agent drafted came through (#252) — the agent, its client, the grant, the draft — parsed; `agent` stays #247's word for the rebuild's agent, and is not the column's.
+      agent: undefined,
+      through: throughOf(first.agent),
       withdrawn_at: standing ? null : first.withdrawn_at,
       standing,
       arches: reviewArches(first.review_arches) ?? targets.map((x) => x.arch),

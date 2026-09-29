@@ -18,11 +18,15 @@
 -- same login. It is spent by one conditional update (used_at) before the
 -- decision's handler runs, so one draft decides once; it expires thirty
 -- minutes after it was drafted. A draft writes no journal line: until it is
--- confirmed it is on the person's own page only (GET /factory/me).
+-- confirmed it is on the person's own page only (GET /factory/me). A grant
+-- revoked — logout, Revoke, a replacement, a contributor's block — discards
+-- its waiting drafts in the same batch.
 --
 -- package_requests.agent, approvals.agent: the agent a write came through,
 -- as JSON {agent, client, grant[, draft]} — NULL for the web and the command
--- line, as every row before this migration.
+-- line, as every row before this migration. An approvals row gets it in the
+-- decision's own batch, and the API serves it parsed, as `through`: `agent`
+-- stays the rebuild's agent (#247).
 --
 -- contributors.agent_*: the day's counts of what agents wrote for the login
 -- (requests, claims — a release counts as one — and drafts), across all its
@@ -54,6 +58,13 @@ CREATE UNIQUE INDEX idx_agent_grants_code ON agent_grants (code_hash);
 CREATE INDEX idx_agent_grants_login ON agent_grants (login, created_at);
 -- The codes nobody swapped, by their expiry: the weekly gc deletes them.
 CREATE INDEX idx_agent_grants_pending ON agent_grants (code_expires_at) WHERE token_hash IS NULL;
+-- A login's code nobody swapped yet, by the login: the person's next Grant deletes it.
+CREATE INDEX idx_agent_grants_unswapped ON agent_grants (login) WHERE token_hash IS NULL;
+-- A login's live grants — swapped, not revoked — by the login and the expiry:
+-- the three-grant count at Grant, the same-name replacement at the swap and
+-- the person's page read these rows only (three at most), never the login's
+-- history of revoked, replaced and expired grants, which only grows.
+CREATE INDEX idx_agent_grants_live ON agent_grants (login, expires_at) WHERE revoked_at IS NULL AND token_hash IS NOT NULL;
 
 CREATE TABLE drafts (
     id           TEXT PRIMARY KEY,                    -- d_<32 hex>: unguessable, the confirm link's

@@ -21,8 +21,10 @@ use sha2::{Digest, Sha256};
 use crate::api::{urlencode, Api};
 use crate::credentials::{origin_of, Credentials};
 
-/// How long the command waits for the browser to come back.
-pub const WAIT: Duration = Duration::from_secs(300);
+/// How long the command waits for the browser to come back: as long as the
+/// pool's grant page keeps its form good for (ten minutes), so a person who
+/// reads the page before pressing Grant is never answered by a closed port.
+pub const WAIT: Duration = Duration::from_secs(600);
 
 /// What a login asks for.
 pub struct Ask<'a> {
@@ -166,7 +168,34 @@ fn accept_one(listener: &TcpListener, deadline: Instant) -> Result<TcpStream> {
     }
 }
 
-/// The whole login: listen on 127.0.0.1, send the person to the grant page (`open` is handed its address), take the one callback, check its state, swap the code with the verifier at the pool's own origin.
+/// The one callback with this login's state, and its query. Anything else is answered and the command waits on until the deadline: a
+/// connection that says nothing, a request for something else (a favicon) — and a callback with another state, which a local process or
+/// a page probing 127.0.0.1's ports may send: it grants nothing here, and it does not end the person's login either.
+fn callback(
+    listener: &TcpListener,
+    state: &str,
+    deadline: Instant,
+) -> Result<(TcpStream, Vec<(String, String)>)> {
+    loop {
+        let mut s = accept_one(listener, deadline)?;
+        match read_callback(&mut s) {
+            Ok(Some(q)) if q.iter().any(|(k, v)| k == "state" && v == state) => return Ok((s, q)),
+            Ok(Some(_)) => answer(
+                &mut s,
+                "400 Bad Request",
+                "This answer is not for the login this command started: nothing was granted here.",
+            ),
+            Ok(None) => answer(
+                &mut s,
+                "404 Not Found",
+                "Nothing here: this address takes the grant's answer only.",
+            ),
+            Err(_) => {}
+        }
+    }
+}
+
+/// The whole login: listen on 127.0.0.1, send the person to the grant page (`open` is handed its address), take the one callback that carries this login's state, swap the code with the verifier at the pool's own origin.
 pub fn login(api: &Api, ask: &Ask<'_>, wait: Duration, open: &dyn Fn(&str)) -> Result<Credentials> {
     let origin = origin_of(api.base()).context("the API address is not an http(s) URL")?;
     let verifier = b64url(&random_bytes(32)?);
@@ -181,26 +210,9 @@ pub fn login(api: &Api, ask: &Ask<'_>, wait: Duration, open: &dyn Fn(&str)) -> R
         &state,
         &challenge_of(&verifier),
     ));
-    // The one callback, then the address is closed: a connection that says nothing, or asks for something else (a favicon), is answered and the command waits on.
-    let deadline = Instant::now() + wait;
-    let (mut stream, q) = loop {
-        let mut s = accept_one(&listener, deadline)?;
-        match read_callback(&mut s) {
-            Ok(Some(q)) => break (s, q),
-            Ok(None) => answer(
-                &mut s,
-                "404 Not Found",
-                "Nothing here: this address takes the grant's answer only.",
-            ),
-            Err(_) => {}
-        }
-    };
+    let (mut stream, q) = callback(&listener, &state, Instant::now() + wait)?;
     drop(listener);
     let get = |k: &str| q.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
-    if get("state") != Some(state.as_str()) {
-        answer(&mut stream, "400 Bad Request", "This answer is not for the login this command started: nothing was granted here. Run omarchy-cli login again.");
-        bail!("the browser came back with another login's state: refused (run omarchy-cli login again)");
-    }
     if let Some(e) = get("error") {
         answer(
             &mut stream,
@@ -288,6 +300,9 @@ pub fn open_browser(url: &str) {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    /// The browser's thread, handed out of the `open` callback.
+    type Back<T> = Arc<Mutex<Option<std::thread::JoinHandle<T>>>>;
 
     #[test]
     fn pkce_is_rfc_7636s() {
@@ -386,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn listens_on_127_0_0_1_takes_one_request_and_swaps_the_verifier_at_the_pools_origin_only() {
+    fn listens_on_127_0_0_1_takes_one_callback_and_swaps_the_verifier_at_the_pools_origin_only() {
         let challenge = Arc::new(Mutex::new(String::new()));
         let (base, seen) = pool(Arc::clone(&challenge));
         let api = Api::new(&base).unwrap();
@@ -459,7 +474,7 @@ mod tests {
             ),
             ("bob", "Claude Code", vec!["contribute".to_owned()])
         );
-        // One request, then the address is closed.
+        // One callback, then the address is closed.
         let port: u16 = param(&url, "port").parse().unwrap();
         assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
     }
@@ -513,7 +528,50 @@ mod tests {
     }
 
     #[test]
-    fn a_callback_with_another_state_is_refused_and_nothing_is_swapped() {
+    fn a_callback_with_another_state_is_answered_400_and_the_login_waits_for_its_own() {
+        let challenge = Arc::new(Mutex::new(String::new()));
+        let (base, seen) = pool(Arc::clone(&challenge));
+        let api = Api::new(&base).unwrap();
+        let back: Back<(String, String)> = Arc::new(Mutex::new(None));
+        let (b, c) = (Arc::clone(&back), Arc::clone(&challenge));
+        // A page probing 127.0.0.1's ports, or another process, sends a callback with a state of its own first: answered 400, and the login waits on.
+        let creds = login(
+            &api,
+            &Ask {
+                agent: "Codex",
+                scopes: &["contribute"],
+                days: None,
+            },
+            Duration::from_secs(20),
+            &|url: &str| {
+                assert!(!url.contains("days="));
+                *c.lock().unwrap() = param(url, "challenge");
+                let url = url.to_owned();
+                *b.lock().unwrap() = Some(std::thread::spawn(move || {
+                    let stray = browser_back(&url, "code=the-code&state=somebody-elses")
+                        .join()
+                        .unwrap();
+                    let own = browser_back(
+                        &url,
+                        &format!("code=the-code&state={}", param(&url, "state")),
+                    )
+                    .join()
+                    .unwrap();
+                    (stray, own)
+                }));
+            },
+        )
+        .unwrap();
+        assert_eq!(creds.login, "bob");
+        let (stray, own) = back.lock().unwrap().take().unwrap().join().unwrap();
+        assert!(stray.starts_with("HTTP/1.1 400"), "{stray}");
+        assert!(own.starts_with("HTTP/1.1 200"), "{own}");
+        // One swap, the login's own: the stray callback's code went nowhere.
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_callback_with_another_state_alone_swaps_nothing_and_the_login_ends_at_its_deadline() {
         let challenge = Arc::new(Mutex::new(String::new()));
         let (base, seen) = pool(Arc::clone(&challenge));
         let api = Api::new(&base).unwrap();
@@ -526,15 +584,14 @@ mod tests {
                 scopes: &["contribute"],
                 days: None,
             },
-            Duration::from_secs(20),
+            Duration::from_secs(2),
             &|url: &str| {
-                assert!(!url.contains("days="));
                 *b.lock().unwrap() = Some(browser_back(url, "code=the-code&state=somebody-elses"));
             },
         )
         .unwrap_err()
         .to_string();
-        assert!(e.contains("another login's state"), "{e}");
+        assert!(e.contains("no answer from the browser"), "{e}");
         assert!(back
             .lock()
             .unwrap()
@@ -544,6 +601,14 @@ mod tests {
             .unwrap()
             .starts_with("HTTP/1.1 400"));
         assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_grant_denied_in_the_browser_is_said_and_nothing_is_swapped() {
+        let challenge = Arc::new(Mutex::new(String::new()));
+        let (base, seen) = pool(Arc::clone(&challenge));
+        let api = Api::new(&base).unwrap();
+        let back: Arc<Mutex<Option<std::thread::JoinHandle<String>>>> = Arc::new(Mutex::new(None));
         // Denied in the browser: said so, nothing swapped.
         let b2 = Arc::clone(&back);
         let e = login(

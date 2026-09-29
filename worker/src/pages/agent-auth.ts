@@ -145,13 +145,20 @@ export function grantHtml(v: GrantView, path: string, poolUrl: string, version: 
   });
 }
 
-export interface ConfirmEvidence {
-  /** The build the verdict was drafted on, and the chain it is in. */
-  task: { id: number; arch: string; trust: string; status: string; version: string | null };
+/** One architecture of the package in review: its contributor's build and the project's rebuild, their gates, the audit, the trial. */
+export interface ConfirmChain {
+  arch: string;
   contributor: { id: number; status: string; vet: string | null } | null;
   project: { id: number; status: string; vet: string | null } | null;
   audit: string | null;
   trial: string | null;
+}
+
+export interface ConfirmEvidence {
+  /** The build the verdict was drafted on. */
+  task: { id: number; arch: string; trust: string; status: string; version: string | null };
+  /** Every architecture the decision covers — one review decides them all — the draft's own first. */
+  chains: ConfirmChain[];
 }
 
 export interface ConfirmView {
@@ -175,12 +182,15 @@ export const VERDICT_WORDS: Readonly<Record<string, { label: string; act: string
 function evidenceRows(e: ConfirmEvidence, name: string): string {
   const build = (label: string, b: { id: number; status: string; vet: string | null } | null) =>
     b ? `<tr><td>${label}</td><td><a href="/build/${b.id}">#${b.id}</a> · ${esc(b.status)}${b.vet ? ` · gate ${esc(b.vet)}` : ""} · <a href="/api/v1/factory/tasks/${b.id}/artifacts/build.log">build.log</a> · <a href="/api/v1/factory/tasks/${b.id}/artifacts/PKGBUILD">PKGBUILD</a></td></tr>` : `<tr><td>${label}</td><td>none</td></tr>`;
-  return `<table class="op-table"><tbody>
-      ${build("Contributor's build", e.contributor)}
-      <tr><td>Audit</td><td>${esc(e.audit ?? "none")}</td></tr>
-      ${build("Project's rebuild", e.project)}
-      <tr><td>Trial</td><td>${esc(e.trial ?? "none")}</td></tr>
-    </tbody></table>
+  const arch = (c: ConfirmChain) => `<tbody>
+      <tr><th colspan="2">${esc(c.arch)}</th></tr>
+      ${build("Contributor's build", c.contributor)}
+      <tr><td>Audit</td><td>${esc(c.audit ?? "none")}</td></tr>
+      ${build("Project's rebuild", c.project)}
+      <tr><td>Trial</td><td>${esc(c.trial ?? "none")}</td></tr>
+    </tbody>`;
+  const many = e.chains.length > 1;
+  return `${many ? `<p class="said">One review decides every architecture: confirming decides all ${e.chains.length} below.</p>` : ""}<table class="op-table">${e.chains.map(arch).join("")}</table>
     <p class="said">The pool's own evidence, not the agent's reading of it. The whole workspace: <a href="/review?package=${encodeURIComponent(name)}">Review →</a></p>`;
 }
 
@@ -190,7 +200,7 @@ export function confirmHtml(v: ConfirmView, path: string, poolUrl: string, versi
   const ask = `${w.act.charAt(0).toUpperCase()}${w.act.slice(1)} ${d.name}?`;
   const waiting = d.state === "waiting";
   const outcome = !waiting
-    ? `<section class="${d.state === "confirmed" ? "done" : "refused"}" role="status"><b>${esc(d.state === "confirmed" ? "Confirmed" : d.state === "expired" ? "Expired" : d.state === "discarded" ? "Discarded" : "Refused")}.</b> ${esc(d.state === "expired" ? "Nobody confirmed it within thirty minutes; nothing was decided. Ask the agent for a new draft." : d.state === "discarded" ? "Nothing was decided." : String((d.outcome as { error?: string; summary?: string } | null)?.error ?? (d.outcome as { summary?: string } | null)?.summary ?? ""))}</section>`
+    ? `<section class="${d.state === "confirmed" ? "done" : "refused"}" role="status"><b>${esc(d.state === "confirmed" ? "Confirmed" : d.state === "expired" ? "Expired" : d.state === "discarded" ? "Discarded" : "Refused")}.</b> ${esc(d.state === "expired" ? "Nobody confirmed it within thirty minutes; nothing was decided. Ask the agent for a new draft." : d.state === "discarded" ? String((d.outcome as { error?: string } | null)?.error ?? "Nothing was decided.") : String((d.outcome as { error?: string; summary?: string } | null)?.error ?? (d.outcome as { summary?: string } | null)?.summary ?? ""))}</section>`
     : "";
   const form = waiting
     ? `<form method="post" action="/auth/confirm/${esc(d.id)}">
@@ -220,7 +230,7 @@ export function confirmHtml(v: ConfirmView, path: string, poolUrl: string, versi
       <dt>Drafted by</dt><dd>${esc(d.agent)}${d.client ? ` <span class="said">(its client says: ${esc(d.client)})</span>` : ""}, for ${esc(d.login)}, at ${esc(whenUtc(d.created_at))}</dd>
     </dl></div>
   </section>
-  ${v.evidence ? `<section class="op-card"><div class="op-card-h"><b>The evidence</b><small>build #${v.evidence.task.id}, ${esc(v.evidence.task.arch)}${v.evidence.task.version ? `, ${esc(v.evidence.task.version)}` : ""}</small></div><div class="aa-ev">${evidenceRows(v.evidence, d.name)}</div></section>` : ""}
+  ${v.evidence ? `<section class="op-card"><div class="op-card-h"><b>The evidence</b><small>drafted on build #${v.evidence.task.id}, ${esc(v.evidence.task.arch)}${v.evidence.task.version ? `, ${esc(v.evidence.task.version)}` : ""}${v.evidence.chains.length > 1 ? ` · ${v.evidence.chains.map((c) => esc(c.arch)).join(" · ")}` : ""}</small></div><div class="aa-ev">${evidenceRows(v.evidence, d.name)}</div></section>` : ""}
   ${outcome}${form}`,
   });
 }

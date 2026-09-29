@@ -23,18 +23,25 @@
  *                                  is the web's own handler called — one draft decides once
  *
  * The grant's row is written by the signed-in person's Grant only; the swap
- * writes nothing but that row, by the unique index on the code's hash, in
- * one conditional update. A draft writes no journal line: until it is
- * confirmed it is on the person's own page only (GET /factory/me).
+ * sets the token in that row, by the unique index on the code's hash, in
+ * one conditional update — and, in the same batch, replaces a live grant of
+ * the same agent name, so a login again under that name never leaves the
+ * person without one before the new token exists. A draft writes no journal
+ * line: until it is confirmed it is on the person's own page only (GET
+ * /factory/me). A grant revoked — logout, Revoke, a replacement, a
+ * contributor's block — discards its waiting drafts in the same batch, and a
+ * confirm reads the draft's grant again: a revoked agent's draft decides
+ * nothing.
  */
 import { json, type Env } from "../index";
+import { REPO_ARCHES } from "../r2";
 import { DASHBOARD_HOST, isProductionHost, type RunningVersion } from "../meta";
 import { contributorOf, sha256Hex, type Contributor } from "./contributors";
 import { handleApprove, handleChanges, handleReject, verdictOn, DRAFTED } from "./review";
 import { blockRefusal, handleBlockPackage } from "./blocks";
 import { chains, storyRows } from "./story";
 import {
-  agentName, browserSession, CHALLENGE, CODE_SECONDS, dayCount, DECISION_SCOPES, DRAFT_MINUTES, formNonce, grantExpiry, LIVE_GRANTS,
+  agentName, browserSession, CALLS_PER_MINUTE, CHALLENGE, CODE_SECONDS, dayCount, DECISION_SCOPES, DRAFT_MINUTES, formNonce, grantExpiry, LIVE_GRANTS,
   parseScopes, randomHex, s256, sameNonce, SWAPS_PER_MINUTE, VERIFIER, type AgentCaller, type Scope, type Through,
 } from "../agents";
 import { agentMessageHtml, confirmHtml, grantHtml, type ConfirmEvidence } from "../pages/agent-auth";
@@ -99,11 +106,33 @@ function grantAsk(p: URLSearchParams): GrantAsk | string {
 
 const grantParts = (session: string, a: GrantAsk, ts: string) => ["grant", session, a.agent, a.scopes.join(","), String(a.port), a.state, a.challenge, a.days === null ? "" : String(a.days), ts];
 
-/** How long the grant page's form is good for: ten minutes to read it and press a button. */
+/** How long the grant page's form is good for: ten minutes to read it and press a button — as long as omarchy-cli login waits for it (login.rs WAIT). */
 const GRANT_FORM_MS = 10 * 60_000;
 
-/** The login's live grants — swapped, not revoked, not expired — newest first, by (login, created_at). */
+/** The login's live grants — swapped, not revoked, not expired — by the partial index that holds only those (idx_agent_grants_live): three rows at most, whatever the login's history. */
 export const LIVE_GRANTS_SQL = "SELECT id, agent, created_at FROM agent_grants WHERE login = ? AND revoked_at IS NULL AND token_hash IS NOT NULL AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ORDER BY created_at DESC";
+
+/** Why a waiting draft ended when its grant was revoked: its outcome, on the person's page and in request_status. */
+const REVOKED_OUTCOME = JSON.stringify({ error: "the agent's grant was revoked before anyone confirmed this draft: nothing was decided" });
+
+/**
+ * A login's waiting drafts whose grant is revoked, discarded: run in the
+ * batch that revokes, after it. The drafts of the last thirty minutes by the
+ * range of (login, created_at) — older ones have expired — each grant by its
+ * primary key. `login` is how the statement finds the login: `?1`, or the
+ * login of the grant whose token hash is `?1` (logout and the swap know the
+ * token, not the login).
+ */
+const discardSql = (login: string) => `UPDATE drafts SET used_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), state = 'discarded', outcome = ?2
+ WHERE login = ${login} AND created_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 minutes') AND used_at IS NULL
+   AND EXISTS (SELECT 1 FROM agent_grants g WHERE g.id = drafts.grant_id AND g.revoked_at IS NOT NULL)`;
+/** The login's waiting drafts of revoked grants, discarded (?1 the login, ?2 the outcome): Revoke on the page, a contributor's block. The thirty minutes are agents.ts DRAFT_MINUTES (the tests hold the two together). */
+export const DISCARD_SQL = discardSql("?1");
+/** The same, the login found by a token's hash (?1): logout, and the swap's replacement. */
+export const DISCARD_BY_TOKEN_SQL = discardSql("(SELECT login FROM agent_grants WHERE token_hash = ?1)");
+
+/** A code nobody swapped, deleted by the person's next Grant: the login's own, through the partial index of unswapped codes — named, so the planner never walks the token's unique index for its NULLs, every login's. */
+export const UNSWAPPED_SQL = "DELETE FROM agent_grants INDEXED BY idx_agent_grants_unswapped WHERE login = ? AND token_hash IS NULL";
 
 /** Why Grant is refused to this person for these scopes, in the words the POST answers; null when it is not. */
 function grantRefusal(c: Contributor, a: GrantAsk, others: number): string | null {
@@ -144,13 +173,15 @@ export async function handleGrantPage(url: URL, request: Request, env: Env, v: R
 }
 
 /**
- * The grant, written: the person's codes nobody swapped go, a live grant of
- * the same agent name is replaced, and the new one is inserted only while
- * the login holds fewer than three live — one batch, one transaction.
+ * The grant, written: the person's code nobody swapped goes, and the new
+ * one is inserted only while the login holds fewer than three live grants
+ * under other agent names — a live grant of the same name is replaced at
+ * the swap, once the new token exists (REPLACE_SQL) — one batch, one
+ * transaction. The count reads the live grants' partial index only.
  */
 export const GRANT_INSERT_SQL = `INSERT INTO agent_grants (id, login, agent, scopes, code_hash, challenge, code_expires_at, expires_at)
   SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
-   WHERE (SELECT COUNT(*) FROM agent_grants WHERE login = ?2 AND revoked_at IS NULL AND token_hash IS NOT NULL AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) < ?9`;
+   WHERE (SELECT COUNT(*) FROM agent_grants WHERE login = ?2 AND revoked_at IS NULL AND token_hash IS NOT NULL AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now') AND agent != ?3) < ?9`;
 
 /** POST /auth/agent — Grant or Deny, from the grant page. */
 export async function handleGrant(url: URL, request: Request, env: Env, v: RunningVersion): Promise<Response> {
@@ -172,17 +203,20 @@ export async function handleGrant(url: URL, request: Request, env: Env, v: Runni
     back.searchParams.set("error", "access_denied");
     return new Response(null, { status: 303, headers: { location: back.toString(), "cache-control": "no-store" } });
   }
+  // The login's Grants, counted at the edge as its agents' calls are (the same binding, its own key): a page that loops Grant writes no row past it.
+  if (env.AGENT_CALLS && !(await env.AGENT_CALLS.limit({ key: `grant:${who.c.login}` })).success) {
+    return message(url, env, v, 429, "Wait a minute", esc(`${who.c.login} pressed Grant ${CALLS_PER_MINUTE} times this minute: wait a minute, then run omarchy-cli login again.`));
+  }
   const live = (await env.DB.prepare(LIVE_GRANTS_SQL).bind(who.c.login).all<{ id: string; agent: string; created_at: string }>()).results;
   const replaces = live.find((g) => g.agent === a.agent) ?? null;
   const no = grantRefusal(who.c, a, live.length - (replaces ? 1 : 0));
   if (no) return message(url, env, v, no.includes("live grants") ? 409 : 403, "Not granted", esc(no), "refused", [{ href: `/user/${encodeURIComponent(who.c.login)}#agents`, label: "Your grants" }]);
   const id = `g_${randomHex(16)}`, code = randomHex(32);
   const now = Date.now();
-  const [, , ins] = await env.DB.batch([
+  const [, ins] = await env.DB.batch([
     // A code nobody took is deleted by the person's next Grant.
-    env.DB.prepare("DELETE FROM agent_grants WHERE login = ? AND token_hash IS NULL").bind(who.c.login),
-    // Logging in again with the same agent name replaces that grant.
-    env.DB.prepare("UPDATE agent_grants SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), revoked_by = 'replaced' WHERE login = ? AND agent = ? AND revoked_at IS NULL").bind(who.c.login, a.agent),
+    env.DB.prepare(UNSWAPPED_SQL).bind(who.c.login),
+    // Logging in again with the same agent name replaces that grant — at the swap, once the new token exists (REPLACE_SQL).
     env.DB.prepare(GRANT_INSERT_SQL).bind(id, who.c.login, a.agent, JSON.stringify(a.scopes), await sha256Hex(code), a.challenge, new Date(now + CODE_SECONDS * 1000).toISOString(), grantExpiry(a.scopes, a.days, now), LIVE_GRANTS),
   ]);
   if (!ins.meta.changes) return message(url, env, v, 409, "Not granted", esc(`${who.c.login} holds ${LIVE_GRANTS} live grants already: revoke one on your page, or let one expire`));
@@ -195,6 +229,18 @@ export const SWAP_SQL = `UPDATE agent_grants SET token_hash = ?1, code_hash = NU
  WHERE code_hash = ?2 AND token_hash IS NULL AND revoked_at IS NULL AND challenge = ?3 AND code_expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
  RETURNING id, login, agent, scopes, expires_at`;
 
+/**
+ * Logging in again with the same agent name replaces that grant: the other
+ * live grants of the swapped grant's login and name (?1, the new token's
+ * hash) end as `replaced`, in the swap's own batch — after the new token is
+ * set, never before, so a login that never comes back (a closed command, a
+ * browser that cannot reach the loopback) leaves the old grant working.
+ * Through the live grants' partial index; nothing when the swap took no row.
+ */
+export const REPLACE_SQL = `UPDATE agent_grants SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), revoked_by = 'replaced'
+ WHERE login = (SELECT login FROM agent_grants WHERE token_hash = ?1) AND agent = (SELECT agent FROM agent_grants WHERE token_hash = ?1)
+   AND revoked_at IS NULL AND token_hash IS NOT NULL AND token_hash != ?1 AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`;
+
 /** POST /auth/agent/token — the code and its verifier for the token (JSON: {code, code_verifier}). */
 export async function handleSwap(request: Request, env: Env): Promise<Response> {
   // The address's limit before anything is read: five tries a minute.
@@ -205,25 +251,43 @@ export async function handleSwap(request: Request, env: Env): Promise<Response> 
   const b = (await request.json().catch(() => ({}))) as { code?: unknown; code_verifier?: unknown };
   const code = typeof b.code === "string" ? b.code : "", verifier = typeof b.code_verifier === "string" ? b.code_verifier : "";
   if (!/^[0-9a-f]{64}$/.test(code) || !VERIFIER.test(verifier)) return json({ error: "code and code_verifier are required: the code the grant page sent to the loopback address, and the verifier its challenge was made from (RFC 7636)", code: "invalid_request" }, 400, { "cache-control": "no-store" });
-  const token = `oma_${randomHex(24)}`;
-  const row = await env.DB.prepare(SWAP_SQL).bind(await sha256Hex(token), await sha256Hex(code), await s256(verifier)).first<{ id: string; login: string; agent: string; scopes: string; expires_at: string }>();
+  const token = `oma_${randomHex(24)}`, hash = await sha256Hex(token);
+  // The swap, the same name's grant replaced and its waiting drafts discarded: one batch, one transaction.
+  const [swapped] = await env.DB.batch([
+    env.DB.prepare(SWAP_SQL).bind(hash, await sha256Hex(code), await s256(verifier)),
+    env.DB.prepare(REPLACE_SQL).bind(hash),
+    env.DB.prepare(DISCARD_BY_TOKEN_SQL).bind(hash, REVOKED_OUTCOME),
+  ]);
+  const row = (swapped.results[0] as { id: string; login: string; agent: string; scopes: string; expires_at: string } | undefined) ?? null;
   if (!row) return json({ error: "the code is not valid — expired (a minute), taken already, or not for this verifier: run omarchy-cli login again", code: "invalid_grant" }, 400, { "cache-control": "no-store" });
   return json({ token, grant: row.id, login: row.login, agent: row.agent, scopes: JSON.parse(row.scopes), expires_at: row.expires_at, note: "Shown once; the pool keeps its hash. It acts as you through omarchy-cli's tools only." }, 200, { "cache-control": "no-store" });
 }
 
-/** POST /auth/agent/revoke — omarchy-cli logout: the grant of the token sent ends now. Always allowed: revoking only takes away. */
+/** Logout's revocation: the grant of the token sent, by the token's unique index. */
+export const LOGOUT_SQL = "UPDATE agent_grants SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), revoked_by = 'logout' WHERE token_hash = ? AND revoked_at IS NULL RETURNING id, login";
+
+/** POST /auth/agent/revoke — omarchy-cli logout: the grant of the token sent ends now, and its waiting drafts with it. Always allowed: revoking only takes away. */
 export async function handleAgentLogout(request: Request, env: Env): Promise<Response> {
   const h = request.headers.get("authorization") ?? "";
   const token = h.startsWith("Bearer ") ? h.slice(7) : "";
   if (!token.startsWith("oma_")) return json({ error: "an agent token is required: the one to revoke", code: "grant_invalid" }, 401);
-  const row = await env.DB.prepare("UPDATE agent_grants SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), revoked_by = 'logout' WHERE token_hash = ? AND revoked_at IS NULL RETURNING id, login").bind(await sha256Hex(token)).first<{ id: string; login: string }>();
+  const hash = await sha256Hex(token);
+  const [out] = await env.DB.batch([env.DB.prepare(LOGOUT_SQL).bind(hash), env.DB.prepare(DISCARD_BY_TOKEN_SQL).bind(hash, REVOKED_OUTCOME)]);
+  const row = (out.results[0] as { id: string; login: string } | undefined) ?? null;
   if (!row) return json({ error: "this agent token is not valid — revoked already, replaced, or never granted", code: "grant_invalid" }, 401);
   return json({ revoked: row.id, login: row.login }, 200, { "cache-control": "no-store" });
 }
 
-/** POST /api/v1/factory/grants/:id/revoke — Revoke on the person's own page: their own grants only. */
+/** Revoke on the person's page: one grant by its primary key, only the person's own, only while it is not revoked. */
+export const REVOKE_GRANT_SQL = "UPDATE agent_grants SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), revoked_by = ? WHERE id = ? AND login = ? AND revoked_at IS NULL RETURNING id, agent";
+
+/** POST /api/v1/factory/grants/:id/revoke — Revoke on the person's own page: their own grants only, and their waiting drafts with them. */
 export async function handleRevokeGrant(c: Contributor, id: string, env: Env): Promise<Response> {
-  const row = await env.DB.prepare("UPDATE agent_grants SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), revoked_by = ? WHERE id = ? AND login = ? AND revoked_at IS NULL RETURNING id, agent").bind(c.login, id, c.login).first<{ id: string; agent: string }>();
+  const [out] = await env.DB.batch([
+    env.DB.prepare(REVOKE_GRANT_SQL).bind(c.login, id, c.login),
+    env.DB.prepare(DISCARD_SQL).bind(c.login, REVOKED_OUTCOME),
+  ]);
+  const row = (out.results[0] as { id: string; agent: string } | undefined) ?? null;
   if (!row) return json({ error: `${id} is not a live grant of ${c.login}'s` }, 404);
   return json({ revoked: row.id, agent: row.agent, by: c.login });
 }
@@ -260,26 +324,27 @@ export async function handleDraft(a: AgentCaller, request: Request, env: Env, or
   if (!/^[a-z0-9@._+-]{1,100}$/.test(name)) return json({ error: "name: the package's name" }, 400);
   const note = typeof b.note === "string" ? b.note.trim() : "";
   if (note.length < 4 || note.length > 500) return json({ error: `${verdict === "block" ? "reason" : "note"}: 4 to 500 characters — it goes on the record` }, 400);
+  // A verdict is on a build: without one the arguments are wrong, and are refused before the day counts.
+  const id = typeof b.task === "number" && Number.isInteger(b.task) ? b.task : NaN;
+  if (verdict !== "block" && !Number.isInteger(id)) return json({ error: "task: the build the verdict is on (request_status and review_context name it)" }, 400);
   const counted = await dayCount(env, a.contributor.login, "drafts");
   if (counted) return counted;
   let task: number | null = null, facts: string;
   if (verdict === "block") {
     const pkg = await blockRefusal(a.contributor, name, note, env);
     if (pkg instanceof Response) return pkg;
-    facts = await sha256Hex(JSON.stringify({ name, owner: pkg.owner, request: pkg.request_id, blocked_at: pkg.blocked_at }));
+    facts = await blockFacts(name, pkg);
   } else {
-    const id = typeof b.task === "number" && Number.isInteger(b.task) ? b.task : NaN;
-    if (!Number.isInteger(id)) return json({ error: "task: the build the verdict is on (request_status and review_context name it)" }, 400);
     const ok = await verdictOn(a.contributor, id, DRAFTED[verdict], env);
     if (ok instanceof Response) return ok;
     if (ok.task.name !== name) return json({ error: `task ${id} is a build of ${ok.task.name}, not ${name}` }, 400);
     task = ok.task.id;
     facts = ok.facts;
   }
-  const id = `d_${randomHex(16)}`;
+  const draft = `d_${randomHex(16)}`;
   const expires = new Date(Date.now() + DRAFT_MINUTES * 60_000).toISOString();
   const row = await env.DB.prepare(`INSERT INTO drafts (id, grant_id, login, agent, client, verdict, note, name, task_id, facts, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${DRAFT_COLS}`)
-    .bind(id, a.grant, a.contributor.login, a.agent, a.client, verdict, note, name, task, facts, expires)
+    .bind(draft, a.grant, a.contributor.login, a.agent, a.client, verdict, note, name, task, facts, expires)
     .first<DraftRow>();
   return json({ ...draftView(row!, origin), next: `Open the link in a browser signed in as ${a.contributor.login} and confirm. Nothing is decided until then.` }, 201, { "cache-control": "no-store" });
 }
@@ -291,6 +356,11 @@ export async function handleGetDraft(a: AgentCaller, id: string, env: Env, origi
   return json(draftView(d, origin), 200, { "cache-control": "no-store" });
 }
 
+/** The facts a block is drafted on, and confirmed on only while they hold: the registration's owner, its request, whether it is blocked. */
+async function blockFacts(name: string, pkg: { owner: string; request_id: number | null; blocked_at: string | null }): Promise<string> {
+  return sha256Hex(JSON.stringify({ name, owner: pkg.owner, request: pkg.request_id, blocked_at: pkg.blocked_at }));
+}
+
 // ---------- the confirmation ----------
 
 /** The draft spent: only its login's, only once, only while it waits and has not expired. One draft decides once: this runs before the decision's handler, which reads then inserts. */
@@ -299,32 +369,86 @@ export const SPEND_SQL = `UPDATE drafts SET used_at = strftime('%Y-%m-%dT%H:%M:%
 
 const confirmParts = (session: string, id: string) => ["confirm", session, id];
 
-/** What the page shows beside the draft: the pool's own evidence of the build it is on — the chain's builds, their gates, the audit, the trial. */
+/** The builds of a chain in review: queued, running or staged. */
+const IN_REVIEW = ["queued", "leased", "staged"];
+
+/**
+ * What the page shows beside the draft: the pool's own evidence of every
+ * architecture the decision covers — one review decides them all (#242), so
+ * each chain of the package still in review (no approval standing on it, a
+ * build queued, running or staged: the round a decision closes, as
+ * closeRound reads it) — its builds, their gates, the audit, the trial. The
+ * draft's own build first, then by architecture.
+ */
 async function evidenceOf(env: Env, d: DraftRow): Promise<ConfirmEvidence | null> {
   if (d.task_id === null) return null;
   const story = await storyRows(env, d.name);
-  const chain = chains(story.tasks, story.approvals, story.pkg, story.request).find((c) => c.contributor?.id === d.task_id || c.project?.id === d.task_id);
   const t = story.tasks.find((x) => x.id === d.task_id);
-  if (!chain || !t) return null;
+  if (!t) return null;
+  const all = chains(story.tasks, story.approvals, story.pkg, story.request);
+  const own = all.find((c) => c.contributor?.id === d.task_id || c.project?.id === d.task_id);
+  const round = all.filter((c) => c === own || (!c.approval?.standing && [c.contributor, c.project].some((x) => x && IN_REVIEW.includes(x.status))));
+  const archOf = (c: (typeof all)[number]) => (c.contributor ?? c.project)?.arch ?? "";
+  round.sort((x, y) => (x === own ? -1 : y === own ? 1 : REPO_ARCHES.indexOf(archOf(x) as (typeof REPO_ARCHES)[number]) - REPO_ARCHES.indexOf(archOf(y) as (typeof REPO_ARCHES)[number])));
   const vet = (x: { result: Record<string, unknown> | null } | null) => ((x?.result?.vet as { verdict?: string } | undefined)?.verdict ?? null);
   const verdictOf = (x: { status: string; result: Record<string, unknown> | null } | null) => (x ? `${x.status}${(x.result as { verdict?: string } | null)?.verdict ? ` · ${(x.result as { verdict: string }).verdict}` : ""}` : null);
   return {
     task: { id: t.id, arch: t.arch, trust: t.trust, status: t.status, version: t.version },
-    contributor: chain.contributor ? { id: chain.contributor.id, status: chain.contributor.status, vet: vet(chain.contributor) } : null,
-    project: chain.project ? { id: chain.project.id, status: chain.project.status, vet: vet(chain.project) } : null,
-    audit: verdictOf(chain.audit),
-    trial: verdictOf(chain.trial),
+    chains: round.map((c) => ({
+      arch: archOf(c),
+      contributor: c.contributor ? { id: c.contributor.id, status: c.contributor.status, vet: vet(c.contributor) } : null,
+      project: c.project ? { id: c.project.id, status: c.project.status, vet: vet(c.project) } : null,
+      audit: verdictOf(c.audit),
+      trial: verdictOf(c.trial),
+    })),
   };
 }
 
-/** The predicate on the facts of now: null when the draft's verdict is still allowed, else the web's refusal in its words. */
+/** The grant a draft came through, by its primary key: a confirm reads it again. */
+export const DRAFT_GRANT_SQL = "SELECT revoked_at, revoked_by FROM agent_grants WHERE id = ?";
+
+/** Why the agent's grant is gone, in the person's words. */
+function revokedWords(by: string | null): string {
+  if (by === "logout") return "omarchy-cli logout";
+  if (by === "replaced") return "a new login under the same agent name replaced it";
+  if (by === "blocked") return "its person was blocked";
+  return by ? `revoked on ${by}'s page` : "revoked";
+}
+
+/**
+ * Whether the draft may be confirmed now: null when it may, else why not in
+ * words. Three things, in order. The agent's grant is still live — one the
+ * person revoked (or replaced, or lost to a block) since decides nothing
+ * through its drafts. The web's predicate allows the verdict on the facts of
+ * now, and refuses in its words. And the facts are the ones the draft was
+ * made on (drafts.facts): a package that moved in the meantime — an
+ * architecture built, rebuilt or failed, a claim taken or let go — is not
+ * what the agent drafted on, so it is refused and asked for again.
+ */
 async function nowRefusal(c: Contributor, d: DraftRow, env: Env): Promise<string | null> {
+  const g = await env.DB.prepare(DRAFT_GRANT_SQL).bind(d.grant_id).first<{ revoked_at: string | null; revoked_by: string | null }>();
+  if (!g || g.revoked_at) return `the grant to ${d.agent} that drafted this was revoked since (${revokedWords(g?.revoked_by ?? null)}): nothing is decided through a revoked agent's draft — grant it again and ask for a new one`;
+  const changed = `${d.name} changed since ${d.agent} drafted this — a build, an architecture or a decision moved: nothing was decided; ask the agent for a new draft on the facts of now`;
   if (d.verdict === "block") {
     const pkg = await blockRefusal(c, d.name, d.note, env);
-    return pkg instanceof Response ? ((await pkg.json()) as { error: string }).error : null;
+    if (pkg instanceof Response) return ((await pkg.json()) as { error: string }).error;
+    return (await blockFacts(d.name, pkg)) === d.facts ? null : changed;
   }
   const ok = await verdictOn(c, d.task_id ?? 0, DRAFTED[d.verdict], env);
-  return ok instanceof Response ? ((await ok.json()) as { error: string }).error : null;
+  if (ok instanceof Response) return ((await ok.json()) as { error: string }).error;
+  return ok.facts === d.facts ? null : changed;
+}
+
+/**
+ * Whether a confirmed draft's decision is in the database after its handler
+ * threw: the decision's rows carry the draft (approvals.agent, written in the
+ * decision's own batch), read by the name's index since the draft was made;
+ * a block is the registration's, by this person.
+ */
+export const DECIDED_BY_DRAFT_SQL = "SELECT 1 AS one FROM approvals WHERE name = ? AND created_at >= ? AND json_extract(agent, '$.draft') = ? LIMIT 1";
+async function decidedBy(env: Env, d: DraftRow, login: string): Promise<boolean> {
+  if (d.verdict === "block") return !!(await env.DB.prepare("SELECT 1 AS one FROM factory_packages WHERE name = ? AND blocked_at IS NOT NULL AND blocked_by = ?").bind(d.name, login).first());
+  return !!(await env.DB.prepare(DECIDED_BY_DRAFT_SQL).bind(d.name, d.created_at, d.id).first());
 }
 
 /** The draft by its id, for its own login in the browser — or the page that says why not (without a word of someone else's draft). */
@@ -379,7 +503,11 @@ export async function handleConfirm(id: string, url: URL, request: Request, env:
     const res = await env.DB.prepare(`UPDATE drafts SET used_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), state = 'discarded' WHERE id = ? AND login = ? AND used_at IS NULL`).bind(d.id, who.c.login).run();
     return res.meta.changes ? message(url, env, v, 200, "Discarded", `Nothing was decided on ${esc(d.name)}.`, "done", back) : message(url, env, v, 409, "Not discarded", "This draft was confirmed or discarded already.", "refused", back);
   }
-  if (d.used_at) return message(url, env, v, 409, "Confirmed already", "This draft was confirmed or discarded already: a draft decides once.", "refused", back);
+  if (d.used_at) {
+    // Spent already: said as what became of it — confirmed, refused, or discarded (by the person, or with its grant) — with why.
+    const why = d.outcome ? ((JSON.parse(d.outcome) as { error?: unknown }).error ?? null) : null;
+    return message(url, env, v, 409, d.state === "discarded" ? "Discarded" : d.state === "refused" ? "Refused" : "Confirmed already", esc(typeof why === "string" ? why : "This draft was confirmed or discarded already: a draft decides once."), "refused", back);
+  }
   if (d.expires_at <= new Date().toISOString()) return message(url, env, v, 410, "Expired", "Nobody confirmed this draft within thirty minutes; nothing was decided. Ask the agent for a new draft.", "refused", back);
   if ((d.verdict === "reject" || d.verdict === "block") && (form.get("name") ?? "").trim() !== d.name) {
     return message(url, env, v, 400, "Type the package's name", esc(`To ${d.verdict} it, type ${d.name} in the box: a rejection and a block are confirmed with the name typed.`), "refused", back);
@@ -396,9 +524,19 @@ export async function handleConfirm(id: string, url: URL, request: Request, env:
   const through: Through = { agent: d.agent, client: d.client, grant: d.grant_id, draft: d.id, drafted_at: d.created_at, confirmed_at: new Date().toISOString() };
   // The web's own handler, as the web calls it: the browser's session is the door (via: web), the draft rides on its record and its line.
   const inner = new Request(`${url.origin}/api/v1/`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(d.verdict === "block" ? { reason: d.note } : { note: d.note }) });
-  const res = d.verdict === "block"
-    ? await handleBlockPackage(who.c, d.name, inner, env, through)
-    : await (d.verdict === "approve" ? handleApprove : d.verdict === "reject" ? handleReject : handleChanges)(who.c, d.task_id!, inner, env, through);
+  let res: Response;
+  try {
+    res = d.verdict === "block"
+      ? await handleBlockPackage(who.c, d.name, inner, env, through)
+      : await (d.verdict === "approve" ? handleApprove : d.verdict === "reject" ? handleReject : handleChanges)(who.c, d.task_id!, inner, env, through);
+  } catch (e) {
+    // The handler failed on the pool's side (a database error, say): the draft says what became of it — confirmed only when the decision is in the database — never "confirmed" with nothing decided.
+    const decided = await decidedBy(env, d, who.c.login).catch(() => false);
+    const why = String(e instanceof Error ? e.message : e).slice(0, 200);
+    const said = decided ? `${d.name} was decided, then the pool failed before it finished (${why}): the decision stands; the Review workspace shows what is left to do` : `the pool failed before anything was decided (${why}): nothing was decided — ask the agent for a new draft`;
+    await env.DB.prepare("UPDATE drafts SET state = ?, outcome = ? WHERE id = ?").bind(decided ? "confirmed" : "refused", JSON.stringify({ status: 500, error: said }), d.id).run();
+    return message(url, env, v, 500, decided ? "Decided, not finished" : "Not decided", esc(said), "refused", back);
+  }
   const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   await env.DB.prepare("UPDATE drafts SET state = ?, outcome = ? WHERE id = ?").bind(res.ok ? "confirmed" : "refused", JSON.stringify({ status: res.status, ...body }), d.id).run();
   if (!res.ok) return message(url, env, v, res.status, "Not decided", esc(String(body.error ?? `HTTP ${res.status}`)), "refused", back);

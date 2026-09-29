@@ -165,6 +165,37 @@ pub fn load(path: &Path) -> Result<Option<Credentials>> {
     Ok(Some(c))
 }
 
+/// The credentials as the file holds them, whatever its mode — what `logout` and
+/// `login` read to end or keep a grant the file holds (a file others can read
+/// is still this machine's grant to end); None when there is no file, or one
+/// that does not parse (there is no grant in it to end).
+pub fn read_any(path: &Path) -> Result<Option<Credentials>> {
+    match std::fs::read_to_string(path) {
+        Ok(t) => Ok(toml::from_str(&t).ok()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+/// An agent's name as the pool keeps it: one line, its runs of white space one space.
+pub fn agent_name(raw: &str) -> String {
+    raw.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The grant a new login at `origin` for `agent` would leave live with no
+/// holder: the machine keeps one credential, and the pool replaces a grant
+/// only when the new one has the same agent name at the same origin. None
+/// when the file holds no grant, an expired one, or the one this login
+/// replaces.
+pub fn orphaned_by(
+    held: Option<Credentials>,
+    origin: &str,
+    agent: &str,
+    now: i64,
+) -> Option<Credentials> {
+    held.filter(|c| !(c.expired(now) || (c.origin == origin && c.agent == agent_name(agent))))
+}
+
 /// Writes the credentials, mode 0600 from the first byte (the directory 0700 when it is made).
 pub fn save(path: &Path, c: &Credentials) -> Result<()> {
     if let Some(dir) = path.parent() {
@@ -308,6 +339,66 @@ pub(crate) mod tests {
             origin_of("http://127.0.0.1:8880/api"),
             Some("http://127.0.0.1:8880".into())
         );
+    }
+
+    #[test]
+    fn a_new_login_orphans_a_live_grant_of_another_name_or_origin_and_replaces_its_own() {
+        let now = now_unix();
+        let held = sample("https://pkgs.omarchy-pool.org", &["contribute"]);
+        // The same name at the same origin: the pool replaces it at the swap.
+        assert_eq!(
+            orphaned_by(
+                Some(held.clone()),
+                "https://pkgs.omarchy-pool.org",
+                " Claude   Code ",
+                now
+            ),
+            None
+        );
+        // Another name, or another origin: it would stay live, with nobody holding its token.
+        assert_eq!(
+            orphaned_by(
+                Some(held.clone()),
+                "https://pkgs.omarchy-pool.org",
+                "Codex",
+                now
+            ),
+            Some(held.clone())
+        );
+        assert_eq!(
+            orphaned_by(
+                Some(held.clone()),
+                "http://127.0.0.1:8880",
+                "Claude Code",
+                now
+            ),
+            Some(held.clone())
+        );
+        // An expired grant, or none: nothing to orphan.
+        let mut old = held;
+        old.expires_at = "2001-01-01T00:00:00.000Z".into();
+        assert_eq!(
+            orphaned_by(Some(old), "https://pkgs.omarchy-pool.org", "Codex", now),
+            None
+        );
+        assert_eq!(
+            orphaned_by(None, "https://pkgs.omarchy-pool.org", "Codex", now),
+            None
+        );
+        // read_any reads a file whatever its mode, and a file that does not parse holds no grant.
+        let dir = scratch("read-any");
+        let path = dir.join("credentials.toml");
+        assert_eq!(read_any(&path).unwrap(), None);
+        save(&path, &sample("https://x", &["contribute"])).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        assert_eq!(read_any(&path).unwrap().unwrap().origin, "https://x");
+        std::fs::write(&path, "not toml [").unwrap();
+        assert_eq!(read_any(&path).unwrap(), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

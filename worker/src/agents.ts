@@ -173,11 +173,19 @@ export function clientOf(request: Request): string | null {
   return raw ? raw.slice(0, 80) : null;
 }
 
+/**
+ * What an agent's name may not hold: a control character (C0, DEL, C1), a
+ * format character — the bidirectional overrides and isolates that reverse
+ * how the rest of a public journal line reads, the zero-width ones that make
+ * two names look alike — a private-use character, or half a surrogate pair.
+ */
+const UNPRINTABLE = /[\p{Cc}\p{Cf}\p{Co}\p{Cs}]/u;
+
 /** An agent's name as the person gives it at login: printable, one line, 1 to 60 characters — escaped wherever a page shows it. */
 export function agentName(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
   const s = raw.replace(/\s+/g, " ").trim();
-  return s.length >= 1 && s.length <= 60 && !/[\x00-\x1f\x7f]/.test(s) ? s : null;
+  return s.length >= 1 && s.length <= 60 && !UNPRINTABLE.test(s) ? s : null;
 }
 
 /** The scopes a link asks for, in their order; null when one is not a scope. */

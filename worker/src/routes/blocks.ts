@@ -7,6 +7,7 @@ import { REPO_ARCHES } from "../r2";
 import { standsSql } from "./story";
 import { settleTargets } from "../targets";
 import { throughWords, type Through } from "../agents";
+import { DISCARD_SQL } from "./agents";
 
 /**
  * Blocking — the maintainers' brake (docs/GOVERNANCE.md, *Blocking*).
@@ -32,6 +33,9 @@ import { throughWords, type Through } from "../agents";
  * agents' grants with their workers.
  */
 
+/** A blocked contributor's grants, every one not revoked yet — the live ones and a code not swapped — by the login's index: a maintainer's act, once per person. */
+export const BLOCK_GRANTS_SQL = "UPDATE agent_grants SET revoked_at = ?, revoked_by = 'blocked' WHERE login = ? AND revoked_at IS NULL";
+
 function need(c: Contributor): Response | null {
   return isMaintainer(c) ? null : json({ error: "a maintainer is required" }, 403);
 }
@@ -54,8 +58,9 @@ export async function handleBlockContributor(c: Contributor, login: string, requ
   await env.DB.batch([
     env.DB.prepare("UPDATE contributors SET blocked_at = ?, blocked_by = ?, blocked_reason = ? WHERE login = ?").bind(at, c.login, b.reason, login),
     env.DB.prepare("UPDATE build_workers SET revoked_at = ? WHERE owner = ? AND revoked_at IS NULL").bind(at, login),
-    // Their agents' grants end with their workers (#252): the tokens stop at once, a code not yet swapped too.
-    env.DB.prepare("UPDATE agent_grants SET revoked_at = ?, revoked_by = 'blocked' WHERE login = ? AND revoked_at IS NULL").bind(at, login),
+    // Their agents' grants end with their workers (#252): the tokens stop at once, a code not yet swapped too — and what their agents drafted and nobody confirmed yet is discarded with them.
+    env.DB.prepare(BLOCK_GRANTS_SQL).bind(at, login),
+    env.DB.prepare(DISCARD_SQL).bind(login, JSON.stringify({ error: `${login} was blocked by a maintainer: the agent's grant ended, and nothing was decided` })),
     // Other people's builds asked of the blocked person's shared workers go back to the queue.
     env.DB.prepare("UPDATE build_tasks SET pinned_to = NULL, shared_after = NULL WHERE status = 'queued' AND pinned_to IN (SELECT id FROM build_workers WHERE owner = ?)").bind(login),
     env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = ? WHERE owner = ? AND trust = 'community' AND status IN ('queued', 'leased', 'staged')").bind(`${login} was blocked by ${c.login}: ${b.reason.slice(0, 200)}`, login),
