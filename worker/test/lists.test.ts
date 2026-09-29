@@ -200,7 +200,8 @@ describe("lists come from the code that owns them", () => {
     for (const [path, id, literal] of [
       ["/", "pool.get-started-step", "RINGS = Object.keys(RINGS_TEXT)"],
       ["/docs/get-started", "docs-get-started.ring-picker", "RINGS = Object.keys(RINGS_TEXT)"],
-      ["/packages", "packages.ring-arch-pickers", "RINGS = Object.keys(RINGS_TEXT)"],
+      // The list's Ring filter offers the promised rings (#245): the lab promises nothing and is not listed.
+      ["/packages", "packages.filters", "PROMISED_RINGS.indexOf("],
       ["/security", "security.pickers", "RINGS = PROMISED_RINGS"],
       ["/security", "security.per-ring-chart", "stacked(PROMISED_UPWARD"],
       ["/pipeline", "pipeline.ring-heads", "PROMISED_RINGS.map(function (n)"],
