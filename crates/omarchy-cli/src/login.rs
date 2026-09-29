@@ -76,12 +76,14 @@ pub fn grant_url(api: &str, ask: &Ask<'_>, port: u16, state: &str, challenge: &s
     url
 }
 
-/// The one request the browser makes to the loopback address: its query's code (or error) and state.
-fn read_callback(stream: &mut TcpStream) -> Result<Vec<(String, String)>> {
-    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+/// A request to the loopback address: the grant's callback — `GET /?…`, its query's code (or error) and state — or None for anything else a browser may ask on its own (a favicon, a speculative connection that says nothing).
+fn read_callback(stream: &mut TcpStream) -> Result<Option<Vec<(String, String)>>> {
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
-    reader.read_line(&mut line)?;
+    if reader.read_line(&mut line)? == 0 {
+        return Ok(None);
+    }
     // The headers, read and dropped: nothing in them is needed.
     loop {
         let mut h = String::new();
@@ -90,16 +92,20 @@ fn read_callback(stream: &mut TcpStream) -> Result<Vec<(String, String)>> {
         }
     }
     let mut words = line.split_whitespace();
-    if words.next() != Some("GET") {
-        bail!("the loopback address was asked something other than the grant's GET");
+    let (method, target) = (words.next().unwrap_or(""), words.next().unwrap_or(""));
+    let Some(query) = target.strip_prefix("/?") else {
+        return Ok(None);
+    };
+    if method != "GET" {
+        return Ok(None);
     }
-    let target = words.next().unwrap_or("/");
-    let query = target.split_once('?').map_or("", |(_, q)| q);
-    Ok(query
-        .split('&')
-        .filter_map(|kv| kv.split_once('='))
-        .map(|(k, v)| (k.to_owned(), percent_decode(v)))
-        .collect())
+    Ok(Some(
+        query
+            .split('&')
+            .filter_map(|kv| kv.split_once('='))
+            .map(|(k, v)| (k.to_owned(), percent_decode(v)))
+            .collect(),
+    ))
 }
 
 fn percent_decode(s: &str) -> String {
@@ -175,10 +181,21 @@ pub fn login(api: &Api, ask: &Ask<'_>, wait: Duration, open: &dyn Fn(&str)) -> R
         &state,
         &challenge_of(&verifier),
     ));
-    let mut stream = accept_one(&listener, Instant::now() + wait)?;
-    // One request, then the address is closed: the listener goes with this function.
+    // The one callback, then the address is closed: a connection that says nothing, or asks for something else (a favicon), is answered and the command waits on.
+    let deadline = Instant::now() + wait;
+    let (mut stream, q) = loop {
+        let mut s = accept_one(&listener, deadline)?;
+        match read_callback(&mut s) {
+            Ok(Some(q)) => break (s, q),
+            Ok(None) => answer(
+                &mut s,
+                "404 Not Found",
+                "Nothing here: this address takes the grant's answer only.",
+            ),
+            Err(_) => {}
+        }
+    };
     drop(listener);
-    let q = read_callback(&mut stream)?;
     let get = |k: &str| q.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
     if get("state") != Some(state.as_str()) {
         answer(&mut stream, "400 Bad Request", "This answer is not for the login this command started: nothing was granted here. Run omarchy-cli login again.");
@@ -445,6 +462,54 @@ mod tests {
         // One request, then the address is closed.
         let port: u16 = param(&url, "port").parse().unwrap();
         assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+    }
+
+    #[test]
+    fn a_request_that_is_not_the_callback_is_answered_and_the_login_waits_for_the_callback() {
+        let challenge = Arc::new(Mutex::new(String::new()));
+        let (base, _) = pool(Arc::clone(&challenge));
+        let api = Api::new(&base).unwrap();
+        let back: Arc<Mutex<Option<std::thread::JoinHandle<String>>>> = Arc::new(Mutex::new(None));
+        let (b, c) = (Arc::clone(&back), Arc::clone(&challenge));
+        let creds = login(
+            &api,
+            &Ask {
+                agent: "Codex",
+                scopes: &["contribute"],
+                days: None,
+            },
+            Duration::from_secs(20),
+            &|url: &str| {
+                *c.lock().unwrap() = param(url, "challenge");
+                // The browser, in its own thread while the command listens: a connection that says nothing, a favicon, then the callback.
+                let url = url.to_owned();
+                *b.lock().unwrap() = Some(std::thread::spawn(move || {
+                    let port: u16 = param(&url, "port").parse().unwrap();
+                    drop(TcpStream::connect(("127.0.0.1", port)).unwrap());
+                    let mut f = TcpStream::connect(("127.0.0.1", port)).unwrap();
+                    write!(f, "GET /favicon.ico HTTP/1.1\r\nhost: x\r\n\r\n").unwrap();
+                    let mut out = String::new();
+                    let _ = f.read_to_string(&mut out);
+                    assert!(out.starts_with("HTTP/1.1 404"), "{out}");
+                    browser_back(
+                        &url,
+                        &format!("code=the-code&state={}", param(&url, "state")),
+                    )
+                    .join()
+                    .unwrap()
+                }));
+            },
+        )
+        .unwrap();
+        assert_eq!(creds.login, "bob");
+        assert!(back
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap()
+            .join()
+            .unwrap()
+            .starts_with("HTTP/1.1 200"));
     }
 
     #[test]
