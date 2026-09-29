@@ -22,7 +22,7 @@ const BODY = String.raw`
       <span class="hint">No account, no sign-up. Just your Omarchy.</span>
     </div>
     <form class="searchbar" action="/packages" method="get" style="margin:6px 0 0">
-      <div class="pool-search"><input type="search" name="q" id="pool-q" placeholder="find a package — pacman, ghostty, openssl…" aria-label="find a package" autocomplete="off">${SEARCH_ICON}<div class="suggest" id="pool-suggest" hidden></div></div>
+      <div class="pool-search"><input type="search" name="q" id="pool-q" placeholder="find a package — pacman, ghostty, openssl…" aria-label="find a package" aria-keyshortcuts="/" autocomplete="off">${SEARCH_ICON}<div class="suggest" id="pool-suggest" hidden></div></div>
       <button type="submit" class="btn">Search</button>
       <span class="hint">every ring, both architectures</span>
     </form>
@@ -348,9 +348,10 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
+      // The box / focuses (aria-keyshortcuts="/", the ⌘K menu's hook: layout.ts GO_MENU), and the one search the menu asks too, at this very address, so the two share the edge's copy.
       id: "pool.search",
       page: "/",
-      anchor: ['<form class="searchbar" action="/packages" method="get"', 'name="q"', 'id="pool-q"', 'id="pool-suggest"'],
+      anchor: ['<form class="searchbar" action="/packages" method="get"', 'name="q"', 'id="pool-q"', 'aria-keyshortcuts="/"', 'id="pool-suggest"'],
       script: ['"#pool-q"', '"#pool-suggest"', '"/api/v1/search?q="', '"&ring=stable&arch=" + ARCHES[0] + "&limit=9"', "d.packages", "p.description", 'pkgHref(p.name, "stable", ARCHES[0])'],
       reads: [
         { path: `/api/v1/search?q=${F.pkg}&ring=stable&arch=${F.arch}&limit=9`, fields: ["packages", "packages.0.name", "packages.0.version", "packages.0.source", "packages.0.description"] },

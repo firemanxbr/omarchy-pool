@@ -67,7 +67,7 @@ import { packageKey } from "../src/r2";
 import { sha256Hex } from "../src/routes/contributors";
 import { syncJobFor } from "../src/scheduler";
 import type { Fixture } from "../src/pages/components";
-import { HELPERS, THEME_BOOT } from "../src/pages/layout";
+import { GO_MENU, HELPERS, THEME_BOOT } from "../src/pages/layout";
 import { KIT_HELPERS } from "../src/pages/kit";
 import { version } from "../src/meta";
 import { pipelineHtml } from "../src/pages/pipeline";
@@ -107,12 +107,13 @@ export function fetchPage(request: Request, env: Env, ctx: ExecutionContext): Pr
  */
 export const scriptOf = (html: string): string => [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map((m) => m[1]).filter((s) => s !== THEME_BOOT).join("\n");
 
-// The page's own script is what follows the shell: page() splices HELPERS whole, so its last lines mark where the page's statements begin — a check on what a page draws must not read the shell's workerRow, avatar or personLink as the page's. A kit page (page({ kit: true })) has the kit's helpers right after, and they are the shell's too. Null when the shell is not spliced whole.
+// The page's own script is what follows the shell: page() splices HELPERS whole, so its last lines mark where the page's statements begin — a check on what a page draws must not read the shell's workerRow, avatar or personLink as the page's. The ⌘K menu's script (GO_MENU) comes right after on every page, and a kit page (page({ kit: true })) has the kit's helpers after that: both are the frame's too. Null when the shell is not spliced whole.
 const shellEnd = HELPERS.slice(-120);
 export function ownScriptOf(html: string): string | null {
   const script = scriptOf(html), at = script.indexOf(shellEnd);
   if (at <= 0) return null;
-  const own = script.slice(at + shellEnd.length);
+  let own = script.slice(at + shellEnd.length);
+  if (own.startsWith(GO_MENU)) own = own.slice(GO_MENU.length);
   return own.startsWith(KIT_HELPERS) ? own.slice(KIT_HELPERS.length) : own;
 }
 

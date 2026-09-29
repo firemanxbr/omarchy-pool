@@ -30,7 +30,7 @@
  * script whose path no entry on that page (or the shell) claims fails by
  * the page's name, so a new read or act is declared the day it is written.
  */
-import { MORE, PALETTE, THEME_KEY } from "./layout";
+import { GO_ACTIONS, MORE, PALETTE, THEME_KEY } from "./layout";
 import { OVERVIEW_COMPONENTS } from "./overview";
 import { FACTORY_COMPONENTS } from "./contribute";
 import { REVIEW_COMPONENTS } from "./review";
@@ -210,12 +210,28 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // Go… (#240): served as a link to the packages, and the button the ⌘K menu (#241) opens from once the menu is on the page (window.opPalette) — only then does it name a key, the platform's, for the eye and as aria-keyshortcuts.
+    // Go… (#240): served as a link to the packages, and the button the ⌘K menu (#241) opens from once the menu is on the page (window.opPalette) — only then does it name a key, the platform's, for the eye and as aria-keyshortcuts, and say it opens a dialog.
     id: "shell.go",
     page: "/",
     anchor: ['<a class="go" id="go" href="/packages" title="find a package">Go…</a>'],
-    script: ['document.querySelector("header a.go")', "!window.opPalette", 'document.createElement("button")', "window.opPalette.open()", '"Ctrl K"', '"aria-keyshortcuts"'],
+    script: ['document.querySelector("header a.go")', "!window.opPalette", 'document.createElement("button")', "window.opPalette.open()", '"Ctrl K"', '"aria-keyshortcuts"', 'b.setAttribute("aria-haspopup", "dialog")'],
     reads: [{ path: "/packages", json: false }],
+    visible: EVERYONE,
+  },
+  {
+    // The ⌘K menu (#241, layout.ts GO_MENU): a closed dialog after the footer on every page — never drawn with script off —, opened by ⌘K or Ctrl+K, by / where the page marks no search of its own, and by Go…; a combobox over a listbox, the row the keyboard is on named by aria-activedescendant. It reads the one search Home's box reads, at the same address, so the two share the edge's copy; Request "<name>" is the Factory with the name, and every action lands on a page — a redirect where its address is one (/me, and a footer page still standing in for its own: MORE's `until`).
+    id: "shell.go-menu",
+    page: "/",
+    anchor: ['<dialog class="go-menu" id="go-menu" aria-label="Go to a package or a page" aria-modal="true">', 'id="go-q" role="combobox"', 'aria-controls="go-list"', '<div class="go-list" id="go-list" role="listbox" aria-label="Packages and pages">', '<span class="go-said" role="status">'],
+    script: ['document.querySelector("#go-menu")', 'typeof menu.showModal !== "function"', '"/api/v1/search?q=" + encodeURIComponent(term) + "&ring=stable&arch=" + ARCHES[0] + "&limit=" + LIMIT', 'role="option"', '"aria-activedescendant"', '"/factory?name=" + encodeURIComponent(term)', "window.opTheme.toggle()", `document.querySelector('[aria-keyshortcuts="/"]')`, "window.opPalette = {"],
+    reads: [
+      { path: `/api/v1/search?q=${F.pkg}&ring=stable&arch=${F.arch}&limit=9`, fields: ["packages", "packages.0.name", "packages.0.source", "packages.0.description"] },
+      ...GO_ACTIONS.filter((a) => a.href).map((a) => {
+        const path = a.href!.split("#")[0];
+        return { path, json: false as const, ...(path === "/me" || MORE.some((m) => m.href === path && m.until) ? { status: 302 } : {}) };
+      }),
+      { path: "/factory?name=zzfoo", json: false },
+    ],
     visible: EVERYONE,
   },
   {

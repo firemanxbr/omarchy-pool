@@ -11,7 +11,7 @@ import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:
 import { beforeAll, describe, expect, it } from "vitest";
 import worker, { MOVED } from "../src/index";
 import { allComponents } from "../src/pages/components";
-import { HELPERS, MORE, NAV, termId } from "../src/pages/layout";
+import { GO_MENU, HELPERS, MORE, NAV, termId } from "../src/pages/layout";
 import { DOCS_TREE, GLOSSARY } from "../src/pages/docs-tree";
 import { CHARTS } from "../src/pages/charts";
 import { JOURNAL_KINDS } from "../src/meta";
@@ -366,25 +366,29 @@ describe("dashboard pages", () => {
     const top = (ds: Decl[]): string[] => ds.filter((d) => d.inside === null && !d.loop).map((d) => d.name);
     const dupes = (a: string[]): string[] => [...new Set(a.filter((x, i) => a.indexOf(x) !== i))];
     const program = (code: string): N[] => (acorn.parse(code, { ecmaVersion: 2020, sourceType: "script" }) as unknown as N).body;
-    // The shell first, by its own name: page() splices HELPERS whole, so a name it declared twice would fail every page.
-    const helpers = program(HELPERS), charts = program(CHARTS);
+    // The shell first, by its own name: page() splices HELPERS whole, so a name it declared twice would fail every page. The ⌘K menu's script (GO_MENU) follows it on every page, one statement that declares nothing outside itself — nor, inside, a name the shell has.
+    const helpers = program(HELPERS), charts = program(CHARTS), menu = program(GO_MENU);
     const shellNames = top(declarations(helpers)), chartNames = top(declarations(charts));
     expect(dupes(shellNames), "HELPERS declares a name twice").toEqual([]);
     expect(dupes(chartNames), "CHARTS declares a name twice").toEqual([]);
     expect(shellNames.filter((n) => chartNames.includes(n)), "HELPERS and CHARTS share a name").toEqual([]);
     const shell = new Set(shellNames);
     expect(shell.has("pillHtml") && shell.has("whoami") && shell.has("pick") && chartNames.includes("stacked")).toBe(true);
+    expect(menu.length, "GO_MENU is one statement").toBe(1);
+    expect(top(declarations(menu)), "GO_MENU declares nothing outside itself").toEqual([]);
+    const menuShadows = declarations(menu).filter((d) => shell.has(d.name)).map((d) => d.name);
+    expect(menuShadows, `GO_MENU shadows the shell's ${menuShadows.join(", ")}`).toEqual([]);
     // The primitives a page draws only through CHARTS — a page that does not splice CHARTS and declares one of these has copied it.
     const CHART_ONLY = ["bars", "area", "hbars", "stacked", "lines", "hrows", "heatGrid", "buildsByDay", "jobsSummary", "workerMinutes", "worst", "lastDays"];
     const problems: string[] = [];
     for (const path of DRAWN) {
       const code = scriptOf(await (await get(path)).text());
       if (!code.trim()) continue;
-      // page() wraps the footer's line, the shell, then the page's script in one function: the page's own statements are what follows the shell's, less CHARTS where the page splices it.
+      // page() wraps the footer's line, the shell, the ⌘K menu, then the page's script in one function: the page's own statements are what follows the menu's, less CHARTS where the page splices it.
       const iife: N[] | undefined = program(code)[0]?.expression?.callee?.body?.body;
       expect(iife, `${path}: the page's script is not one IIFE`).toBeDefined();
       const cs = code.indexOf(CHARTS), withCharts = cs >= 0;
-      const own = iife!.slice(1 + helpers.length).filter((st) => !(withCharts && st.start >= cs && st.end <= cs + CHARTS.length));
+      const own = iife!.slice(1 + helpers.length + menu.length).filter((st) => !(withCharts && st.start >= cs && st.end <= cs + CHARTS.length));
       const has = new Set([...shell, ...(withCharts ? chartNames : [])]);
       const decls = declarations(own);
       for (const d of decls) {

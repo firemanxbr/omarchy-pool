@@ -26,7 +26,7 @@ import { BUDGET_CAP_USD, BUDGET_GUARD_USD, BUDGET_WARN_USD, ESTIMATE_CADENCE } f
 import { DOCUMENTED_ROUTES } from "../src/pages/api-docs";
 import { escapeHtml } from "../src/html";
 import { allComponents } from "../src/pages/components";
-import { HELPERS } from "../src/pages/layout";
+import { GO_MENU, HELPERS } from "../src/pages/layout";
 import { CHARTS } from "../src/pages/charts";
 import { fetchPage, ownScriptOf, scriptOf, seedDashboard, type Fixture } from "./fixture";
 import routerSource from "../src/index.ts?raw";
@@ -175,7 +175,7 @@ describe("lists come from the code that owns them", () => {
     expect(HELPERS).toContain("var SEVERITIES = __SEVERITIES__;");
     expect(HELPERS).toContain("var RINGS_UPWARD = Object.keys(RINGS_TEXT).reverse();");
     expect(HELPERS).toContain("var PROMISED_UPWARD = PROMISED_RINGS.slice().reverse();");
-    for (const src of [HELPERS, CHARTS]) { expect(src).not.toMatch(RING_LIST); expect(src).not.toMatch(ARCH_PAIR); expect(src).not.toMatch(SEV_LIST); }
+    for (const src of [HELPERS, GO_MENU, CHARTS]) { expect(src).not.toMatch(RING_LIST); expect(src).not.toMatch(ARCH_PAIR); expect(src).not.toMatch(SEV_LIST); }
     const promised = RINGS_BY_STABILITY.filter((r) => (PROMOTED_RINGS as readonly string[]).includes(r));
     const pages = [...new Set(allComponents(F).map((c) => c.page))];
     expect(pages.length).toBeGreaterThan(20);
@@ -218,6 +218,8 @@ describe("lists come from the code that owns them", () => {
     // The architectures' first is every default: a picker's, pkgHref's, the build dialogs' choice of workers, the Pool's search. No page and not the shell types "x86_64" as a fallback — `|| "x86_64"`, `: "x86_64"`, `?? "x86_64"` — in any spelling. The one typed word is the shell's NULL_SOURCE_ARCH, the architecture of a health row the journal wrote without one: a data rule, read by name where a source is missing.
     const typedDefault = /(?:\|\||\?\?|[?:]) "x86_64"/;
     expect(HELPERS).not.toMatch(typedDefault);
+    expect(GO_MENU).not.toMatch(typedDefault);
+    expect(GO_MENU).not.toContain('"x86_64"');
     expect(HELPERS).toContain('var NULL_SOURCE_ARCH = "x86_64";');
     expect(HELPERS).toContain("arch && arch !== \"all\" ? arch : ARCHES[0]");
     expect(HELPERS).toContain("opts.arch || ARCHES[0]");

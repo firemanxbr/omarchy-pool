@@ -1,14 +1,14 @@
 /**
  * Shared page frame of the dashboard: styles (omarchy.org's Tokyo Night look),
- * the header with the three doors and the running version, the footer,
- * and the small helpers every page script uses. No build step: each page is a
- * string with a <script> that reads /api/v1/stats.
+ * the header with the three doors and the running version, the footer, the
+ * ⌘K menu, and the small helpers every page script uses. No build step: each
+ * page is a string with a <script> that reads /api/v1/stats.
  */
 import type { RunningVersion } from "../meta";
 import { DOCS_TREE, GLOSSARY, type DocKey } from "./docs-tree";
 import { LATE_AFTER_HOURS, PROMOTED_RINGS, REPO_ARCHES, RING_TEXT, RINGS_BY_STABILITY, SEVERITIES, WORKER_ALIVE_MINUTES } from "../meta";
 import { escapeHtml } from "../html";
-import { KIT_HELPERS, KIT_SHEET_PATH } from "./kit";
+import { KIT_HELPERS, KIT_SHEET_PATH, type LucideName } from "./kit";
 
 /**
  * The palette, typed once (#239, the handoff's "Design tokens"): every
@@ -587,6 +587,27 @@ const CSS = String.raw`
   dialog.ask .val { display: flex; gap: 8px; align-items: stretch; } dialog.ask .val code { flex: 1; min-width: 0; overflow-wrap: anywhere; background: var(--bg-deep); border: 1px solid var(--line); padding: 8px 10px; font: 12.5px "JetBrains Mono", monospace; color: var(--text); } dialog.ask .row .grow { flex: 1; } dialog.ask .val .take { white-space: nowrap; } dialog.ask button.alt.danger { border-color: var(--red); color: var(--red); }
   dialog.ask .err { margin: 0; font-size: 12.5px; color: var(--red); } dialog.ask label.pick { display: grid; gap: 4px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; } dialog.ask label.pick select { width: 100%; box-sizing: border-box; background: var(--bg-deep); color: var(--text); border: 1px solid var(--line); padding: 7px 10px; font: 13px "JetBrains Mono", monospace; text-transform: none; letter-spacing: 0; } dialog.ask .row { display: flex; justify-content: flex-end; gap: 8px; } dialog.ask button.danger { border-color: var(--red); color: var(--red); } dialog.ask button.ghost { color: var(--muted); }
   #toasts { position: fixed; right: 16px; bottom: 16px; z-index: 90; display: grid; gap: 8px; max-width: min(460px, calc(100vw - 32px)); } .toast { border: 1px solid var(--line); background: var(--panel); padding: 10px 14px; font-size: 13px; border-left: 3px solid var(--green); cursor: pointer; transition: opacity .3s, transform .3s; } .toast.error { border-left-color: var(--red); } .toast.warn { border-left-color: var(--amber); } .toast.out { opacity: 0; transform: translateY(6px); }
+  /* The ⌘K menu (#241, GO_MENU below): the handoff's palette on the chrome's surface under the dialogs' veil — the reader's line, then what it
+     matches, the row the keyboard is on in --panel and green, and the keys in a footnote a touch screen does not need (the header's key is not
+     drawn there either). 530px wide as the handoff draws it (its 500 and the 14px sides), 14vh from the top, 16px from the sides on a phone;
+     the list gives way before the dialog outgrows the screen, and scrolls. The icons are the kit's: their 16px box is here, so nothing moves
+     when their shapes arrive with the kit's sheet, the first time the menu opens. A closed dialog is not drawn at all — with script off it
+     never opens — so only an open one is given a display. */
+  dialog.go-menu { width: min(530px, calc(100vw - 32px)); max-width: none; max-height: calc(86vh - 16px); max-height: calc(86dvh - 16px); margin: 14vh auto auto; padding: 0; border: 1px solid var(--line); background: var(--bg-deep); color: var(--text); overflow: hidden; }
+  dialog.go-menu[open] { display: flex; } dialog.go-menu::backdrop { background: var(--scrim); }
+  .go-box { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 2px; padding: 14px; font-size: 13.5px; }
+  .go-box input { flex: none; width: 100%; min-width: 0; padding: 4px 10px 10px; border: 0; border-radius: 0; outline: none; -webkit-appearance: none; appearance: none; background: transparent; color: var(--text); font: 14px var(--font-mono); }
+  .go-box input::placeholder { color: var(--dim); }
+  .go-list { min-height: 0; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; } .go-list:empty { display: none; }
+  .go-opt { flex: none; display: flex; align-items: center; gap: 12px; padding: 8px 10px; color: var(--text); text-decoration: none; cursor: pointer; }
+  .go-opt[aria-selected="true"] { background: var(--panel); color: var(--green); }
+  .go-ic { flex: none; display: inline-grid; place-items: center; width: 16px; height: 16px; }
+  .go-l { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .go-h { flex: none; color: var(--dim); font-size: 11.5px; }
+  .go-none { flex: none; margin: 0; padding: 8px 10px; color: var(--dim); font-size: 12.5px; }
+  .go-foot { flex: none; display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 8px; padding: 8px 10px 0; border-top: 1px solid var(--line); color: var(--dim); font-size: 11.5px; }
+  @media (hover: none) and (pointer: coarse) { .go-foot { display: none; } }
+  /* What a screen reader hears and the eye does not need: the count of what the line matches. */
+  .go-said { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   /* A person's page: the package rows open into the story and the next step. */
   table.pk td:first-child { width: 28px; padding-right: 0; } .expand { background: none; border: 0; color: var(--dim); font-size: 14px; cursor: pointer; padding: 2px 6px; } .expand:hover { color: var(--text); }
   tr.pkopen td { background: var(--bg-deep); padding: 12px 14px 14px; } .pkstory { display: grid; gap: 10px; } .pknext { display: flex; gap: 10px 16px; align-items: center; flex-wrap: wrap; font-size: 13px; } .pknext .acts-inline { margin-left: auto; display: inline-flex; gap: 8px; } .pknext button.ghost { color: var(--muted); }
@@ -1416,6 +1437,229 @@ export const HELPERS = String.raw`
   }
 `;
 
+/**
+ * What the ⌘K menu offers besides packages (#241), in the handoff's order
+ * and words: the label, the hint on the right, the kit's icon, and where it
+ * goes — an address, or `act` for what happens in place. Every reader gets
+ * every action, the dashboard's rule for controls: the hint says who one is
+ * for ("SIGNED IN", "MAINTAINERS"), and the page it opens says the rest —
+ * /me signs a visitor in and comes back to their own page, Review is a
+ * queue anyone may read. `words` are what else a reader may type for it:
+ * the Journal, the Pipeline and Security are sections of Status now
+ * (index.ts MOVED), so "journal" finds Status. test/go-menu.test.ts opens
+ * every address and finds every fragment on its page — Home's #get-started
+ * included, which #243 keeps on its "Point pacman at a ring".
+ */
+export const GO_ACTIONS: { label: string; hint: string; icon: LucideName; href?: string; act?: "theme"; words: string[] }[] = [
+  { label: "Browse packages", hint: "/", icon: "search", href: "/packages", words: ["search", "find", "list"] },
+  { label: "Set up the pool", hint: "›", icon: "terminal", href: "/#get-started", words: ["setup", "install", "pacman", "ring", "command"] },
+  { label: "Request a package", hint: "factory", icon: "git-pull-request", href: "/factory", words: ["new", "add", "contribute", "bring"] },
+  { label: "Your requests", hint: "SIGNED IN", icon: "list-checks", href: "/me", words: ["mine", "my", "workspace", "builds"] },
+  { label: "Review queue", hint: "MAINTAINERS", icon: "clipboard-check", href: "/review", words: ["approve", "maintain", "staged"] },
+  { label: "Connect your agent", hint: "›", icon: "bot", href: "/agents", words: ["mcp", "ai", "assistant"] },
+  { label: "Docs", hint: "", icon: "book-open", href: "/docs", words: ["documentation", "help", "api", "guide"] },
+  { label: "People", hint: "", icon: "users", href: "/people", words: ["maintainers", "contributors", "workers", "who"] },
+  { label: "Status", hint: "LIVE", icon: "activity", href: "/status", words: ["health", "journal", "pipeline", "security", "advisories", "releases"] },
+  { label: "Theme: dark / light", hint: "", icon: "sun-moon", act: "theme", words: ["mode", "colour", "color"] },
+];
+
+/**
+ * The ⌘K menu as the frame serves it, after the footer on every page: a
+ * dialog, closed — so with script off it is never drawn and Go… stays the
+ * link to the packages. A modal dialog with a name, the line a combobox
+ * that owns the list (aria-controls), says whether it has rows
+ * (aria-expanded) and points at the row the keyboard is on
+ * (aria-activedescendant) — GO_MENU keeps both —, the list a listbox of
+ * options, and a status line a screen reader hears the count from. The
+ * rows are the script's.
+ */
+export const GO_MENU_HTML = `<dialog class="go-menu" id="go-menu" aria-label="Go to a package or a page" aria-modal="true">
+  <div class="go-box">
+    <input type="text" id="go-q" role="combobox" aria-label="A package or a page" aria-autocomplete="list" aria-expanded="false" aria-controls="go-list" placeholder="Go…" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="go">
+    <div class="go-list" id="go-list" role="listbox" aria-label="Packages and pages"></div>
+    <p class="go-none" hidden></p>
+    <div class="go-foot"><span>↑↓ move</span><span>↵ open</span><span>esc close</span></div>
+    <span class="go-said" role="status"></span>
+  </div>
+</dialog>`;
+
+/**
+ * The ⌘K menu's script (#241), spliced by page() right after the shell's
+ * HELPERS, before the page's own script, so a page whose script throws
+ * still has it. It works like Omarchy's own menu: ⌘K or Ctrl+K opens and
+ * closes it on every page, `/` focuses the page's own search where the page
+ * marks one (aria-keyshortcuts="/": Home's box, which #243 keeps) and opens
+ * the menu everywhere else, Esc closes it. The line filters the actions
+ * (GO_ACTIONS) and the packages; ↑ and ↓ move, ↵ opens, and the focus goes
+ * back where it was.
+ *
+ * The packages are the search Home's box asks, the very address —
+ * `/api/v1/search?q=<term>&ring=stable&arch=<ARCHES[0]>&limit=9` — so the
+ * two share the edge's one-minute copy of every answer (index.ts
+ * cachedApi), and the menu adds no query of its own: nothing below two
+ * characters (the endpoint's floor), one request per pause in the typing
+ * (200 ms, Home's), each term asked once per page, and a term inside one
+ * whose answer came whole (fewer rows than the limit) is narrowed from that
+ * answer here, in the server's order, without asking — every row that
+ * holds "hyprl" holds "hypr".
+ *
+ * The order: the typed name when it is a package, the actions it names,
+ * the other packages, then — once the search has said it is not a package,
+ * and it is a pacman name (routes/contributors.ts's rule) — Request
+ * "<name>". With nothing else to show, that is the first row, as the
+ * handoff's "zzfoo" has it; package rows come before it, as its "mar" has
+ * them; an action comes first when the line names one, because the search
+ * also matches descriptions ("theme" is a page of themes, and the Theme
+ * action would be last). Request opens /factory?name=<name>: the Factory's
+ * form (#246) fills its name from ?name=. ↵ before the answer to a line
+ * that shows nothing yet waits for it, so a fast "zzfoo↵" is the request
+ * and a fast "hyprland↵" is the package.
+ *
+ * A browser without <dialog> keeps the frame as served: no key is taken,
+ * and Go… stays the link (the frame swaps it for the button only once
+ * window.opPalette is here). The icons are the kit's (pages/kit.ts): the
+ * rows write what lucide(name, 16) writes, and the kit's sheet is linked
+ * the first time the menu opens, where the page has not linked it — one
+ * immutable file, asked for once per browser.
+ */
+export const GO_MENU = String.raw`
+  // ---- the ⌘K menu (#241; layout.ts GO_MENU says how it works and why)
+  (function () {
+    var menu = document.querySelector("#go-menu");
+    if (!menu || typeof menu.showModal !== "function") return;
+    var line = menu.querySelector("#go-q"), list = menu.querySelector("#go-list"), none = menu.querySelector(".go-none"), said = menu.querySelector(".go-said");
+    var ACTIONS = ${JSON.stringify(GO_ACTIONS)}, SHEET = ${JSON.stringify(KIT_SHEET_PATH)};
+    var LIMIT = 9, SHOWN = 6, PAUSE_MS = 200, NAME = /^[a-z0-9][a-z0-9@._+-]{1,99}$/;
+    var answers = new Map(), asking = new Set(), lastRows = [], failed = { term: "", why: "" }, timer = null;
+    var items = [], at = 0, moved = false, enterLater = false, back = null;
+    function termOf() { return line.value.trim().toLowerCase(); }
+    // A row of the search holds the term in its name or its description; the server's order is the name itself, a name that starts with it, one that holds it, a description that does, then by name (routes/search.ts).
+    function holds(p, term) { return p.name.indexOf(term) >= 0 || String(p.description || "").toLowerCase().indexOf(term) >= 0; }
+    function rank(p, term) { return p.name === term ? 0 : p.name.indexOf(term) === 0 ? 1 : p.name.indexOf(term) >= 0 ? 2 : 3; }
+    function narrow(rows, term) { return rows.filter(function (p) { return holds(p, term); }).sort(function (a, b) { return rank(a, term) - rank(b, term) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0); }); }
+    // The answer for a term when it is known without asking: asked before, or held whole in the answer to a term inside it.
+    function known(term) {
+      if (answers.has(term)) return answers.get(term);
+      var found = null;
+      answers.forEach(function (a, t) { if (!found && a.whole && term.indexOf(t) >= 0) found = { rows: narrow(a.rows, term), whole: true }; });
+      if (found) answers.set(term, found);
+      return found;
+    }
+    // One request per term at a time: a term typed again while its answer is on the way waits for that answer.
+    function lookUp(term) {
+      if (asking.has(term)) return;
+      asking.add(term);
+      fetch("/api/v1/search?q=" + encodeURIComponent(term) + "&ring=stable&arch=" + ARCHES[0] + "&limit=" + LIMIT)
+        .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+        .then(function (d) { var rows = d.packages || []; answers.set(term, { rows: rows, whole: rows.length < LIMIT }); if (failed.term === term) failed = { term: "", why: "" }; }, function (e) { failed = { term: term, why: errorText(e) }; })
+        .then(function () { asking.delete(term); if (menu.open && termOf() === term) refresh(); });
+    }
+    function pkgItem(p) { return { label: p.name, hint: p.source || "", icon: "package", href: pkgHref(p.name, "stable", ARCHES[0]) }; }
+    function build() {
+      var term = termOf();
+      var acts = ACTIONS.filter(function (a) { return !term || a.label.toLowerCase().indexOf(term) >= 0 || (term.length > 1 && a.words.some(function (w) { return w.indexOf(term) === 0; })); });
+      if (term.length < 2) return acts;
+      var got = known(term), rows = got ? got.rows : narrow(lastRows, term);
+      var exact = rows.filter(function (p) { return p.name === term; })[0], first = exact ? [pkgItem(exact)] : [];
+      var out = first.concat(acts, rows.filter(function (p) { return p !== exact; }).slice(0, SHOWN - first.length).map(pkgItem));
+      if (got && !exact && NAME.test(term)) out.push({ label: 'Request "' + term + '"', hint: "factory", icon: "git-pull-request", href: "/factory?name=" + encodeURIComponent(term) });
+      return out;
+    }
+    function draw() {
+      list.innerHTML = items.map(function (it, i) {
+        var attrs = ' class="go-opt" id="go-o-' + i + '" role="option" aria-selected="' + (i === at) + '" data-i="' + i + '"';
+        var inner = '<span class="go-ic"><i class="op-i op-i-' + esc(it.icon) + '" style="--op-i-s:16px" aria-hidden="true"></i></span><span class="go-l">' + esc(it.label) + '</span><span class="go-h">' + esc(it.hint) + '</span>';
+        return it.href ? '<a' + attrs + ' href="' + esc(it.href) + '" tabindex="-1">' + inner + '</a>' : '<div' + attrs + '>' + inner + '</div>';
+      }).join("");
+      line.setAttribute("aria-expanded", items.length ? "true" : "false");
+      if (items.length) line.setAttribute("aria-activedescendant", "go-o-" + at); else line.removeAttribute("aria-activedescendant");
+      var row = items.length ? list.querySelector("#go-o-" + at) : null;
+      if (row && row.scrollIntoView) row.scrollIntoView({ block: "nearest" });
+    }
+    // The rows again, for the line as it is now; the row the reader moved to stays theirs while it is still there.
+    function refresh() {
+      var term = termOf(), kept = moved && items[at] ? items[at].href || items[at].act : null;
+      items = build();
+      at = 0;
+      for (var i = 0; kept && i < items.length; i++) if ((items[i].href || items[i].act) === kept) at = i;
+      if (!at) moved = false;
+      var got = term.length > 1 ? known(term) : null, down = term.length > 1 && failed.term === term, waiting = term.length > 1 && !got && !down;
+      if (got) lastRows = got.rows;
+      none.hidden = !down && (waiting || items.length > 0);
+      none.textContent = down ? "the package search did not answer: " + failed.why : "nothing matches “" + line.value.trim() + "”";
+      said.textContent = waiting ? "" : items.length ? items.length + (items.length === 1 ? " result" : " results") : "no results";
+      draw();
+      if (enterLater && !waiting) { enterLater = false; if (items[at]) go(items[at]); }
+    }
+    function go(it) {
+      close();
+      if (it.act === "theme") { if (window.opTheme) window.opTheme.toggle(); return; }
+      location.assign(it.href);
+    }
+    function open() {
+      if (menu.open) return;
+      back = document.activeElement;
+      line.value = ""; moved = false; enterLater = false;
+      if (!document.querySelector('link[href="' + SHEET + '"]')) { var sheet = document.createElement("link"); sheet.rel = "stylesheet"; sheet.href = SHEET; document.head.appendChild(sheet); }
+      menu.showModal();
+      refresh();
+      line.focus();
+    }
+    function close() { if (menu.open) menu.close(); }
+    // However it closes — Esc, ⌘K, a row, a press beside it — the focus goes back to what had it (Go… when that was nothing: a button Safari does not focus on a press).
+    menu.addEventListener("close", function () {
+      clearTimeout(timer); enterLater = false;
+      var to = back && back !== document.body && back.isConnected !== false ? back : document.querySelector("#go");
+      back = null;
+      if (to && to.focus) to.focus({ preventScroll: true });
+    });
+    menu.addEventListener("cancel", function (ev) { ev.preventDefault(); close(); });
+    menu.addEventListener("click", function (ev) { if (ev.target === menu) close(); });
+    line.addEventListener("input", function () {
+      var term = termOf();
+      clearTimeout(timer); moved = false; enterLater = false; failed = { term: "", why: "" };
+      if (term.length > 1 && !known(term)) timer = setTimeout(function () { if (termOf() === term) lookUp(term); }, PAUSE_MS);
+      refresh();
+    });
+    // The keys, on the line: the focus never leaves it — Tab stays, and a press anywhere else in the menu does not take it (below) — so the dialog is a trap with one way out.
+    line.addEventListener("keydown", function (ev) {
+      if (ev.isComposing) return;
+      var n = items.length;
+      if (ev.key === "ArrowDown" || ev.key === "ArrowUp") { ev.preventDefault(); if (n) { at = (at + (ev.key === "ArrowDown" ? 1 : n - 1)) % n; moved = true; draw(); } }
+      else if (ev.key === "Enter") { ev.preventDefault(); if (items[at]) go(items[at]); else enterLater = termOf().length > 1; }
+      else if (ev.key === "Escape") { ev.preventDefault(); close(); }
+      else if (ev.key === "Tab") ev.preventDefault();
+    });
+    menu.addEventListener("mousedown", function (ev) { if (ev.target !== line) ev.preventDefault(); });
+    list.addEventListener("mousemove", function (ev) {
+      var o = ev.target && ev.target.closest ? ev.target.closest('[role="option"]') : null, i = o ? Number(o.getAttribute("data-i")) : -1;
+      if (i >= 0 && i !== at) { at = i; moved = true; draw(); }
+    });
+    // A press opens the row; a link pressed with a modifier opens where the browser puts it, and the menu stays.
+    list.addEventListener("click", function (ev) {
+      var o = ev.target && ev.target.closest ? ev.target.closest('[role="option"]') : null, it = o ? items[Number(o.getAttribute("data-i"))] : null;
+      if (!it || (it.href && (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey))) return;
+      ev.preventDefault(); go(it);
+    });
+    function typing(el) { var t = el && el.tagName; return t === "INPUT" || t === "TEXTAREA" || t === "SELECT" || !!(el && el.isContentEditable); }
+    document.addEventListener("keydown", function (ev) {
+      if (ev.defaultPrevented || ev.isComposing) return;
+      if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && !ev.shiftKey && String(ev.key).toLowerCase() === "k") {
+        // Another dialog (a decision's question) answers first: the menu does not open over it.
+        if (!menu.open && document.querySelector("dialog[open]")) return;
+        ev.preventDefault();
+        if (menu.open) close(); else open();
+        return;
+      }
+      if (ev.key !== "/" || ev.metaKey || ev.ctrlKey || ev.altKey || menu.open || typing(ev.target) || document.querySelector("dialog[open]")) return;
+      ev.preventDefault();
+      var own = document.querySelector('[aria-keyshortcuts="/"]');
+      if (own && !own.disabled && own.getClientRects().length) own.focus(); else open();
+    });
+    window.opPalette = { open: open, close: close, toggle: function () { if (menu.open) close(); else open(); } };
+  })();
+`;
+
 export interface PageOptions {
   title: string;
   description: string;
@@ -1666,10 +1910,12 @@ ${body}
   <div class="fright"><a href="https://github.com/firemanxbr/omarchy-pool" title="omarchy-pool on GitHub">GitHub</a><a class="fnote" href="${LICENSE_URL}" title="the code is open source under the MIT licence">MIT License</a></div>
 </footer>
 
+${GO_MENU_HTML}
+
 <script>
 (function () {
   // The frame's own, one statement before the shell. The footer marks the entry the reader is on or under, for the eye and for a screen reader (aria-current): /package/<name> is Packages, /docs/<chapter> and the API reference are Docs, /diff is Status's (where the journal went); a build marks nothing here, its door is Review.
-  // Go… is served as a link to the packages, and stays one until the ⌘K menu is on the page (window.opPalette, #241): then it is the button the menu opens from, naming the platform's key. It is decided once the page's whole script has run (a microtask, through the Promise every page already uses), so a menu declared anywhere in it counts — and a page without one never shows a key that nothing answers.
+  // Go… is served as a link to the packages, and stays one until the ⌘K menu is on the page (window.opPalette, which GO_MENU sets where the browser has <dialog>, #241): then it is the button the menu opens from, naming the platform's key, and saying it opens a dialog. It is decided once the page's whole script has run (a microtask, through the Promise every page already uses), so a menu declared anywhere in it counts — and a page without one never shows a key that nothing answers.
   (function () {
     var here = location.pathname;
     document.querySelectorAll("footer .more a").forEach(function (a) { var href = a.getAttribute("href"); if (here === href || here.indexOf(href + "/") === 0 || (href === "/packages" && here.indexOf("/package/") === 0) || (href === "/docs" && here === "/api") || (href === "/status" && here === "/diff")) { a.classList.add("active"); a.setAttribute("aria-current", "page"); } });
@@ -1679,12 +1925,12 @@ ${body}
       var mac = /Mac|iPhone|iPad/.test(navigator.platform || ""), b = document.createElement("button"), key = document.createElement("kbd");
       b.type = "button"; b.className = go.className; b.id = go.id; b.title = "go to a package or a page"; b.textContent = go.textContent;
       key.textContent = mac ? "⌘K" : "Ctrl K"; key.setAttribute("aria-hidden", "true"); b.appendChild(key);
-      b.setAttribute("aria-keyshortcuts", mac ? "Meta+K" : "Control+K");
+      b.setAttribute("aria-keyshortcuts", mac ? "Meta+K" : "Control+K"); b.setAttribute("aria-haspopup", "dialog"); b.setAttribute("aria-controls", "go-menu");
       b.addEventListener("click", function () { window.opPalette.open(); });
       go.parentNode.replaceChild(b, go);
     });
   })();
-${HELPERS.split("__POOL_URL__").join(pool).split("__RINGS_TEXT__").join(JSON.stringify(RING_TEXT)).split("__WICON__").join(JSON.stringify(WORKER_ICONS)).split("__LATE_AFTER_HOURS__").join(String(LATE_AFTER_HOURS)).split("__PROMISED_RINGS__").join(JSON.stringify(RINGS_BY_STABILITY.filter((r) => (PROMOTED_RINGS as readonly string[]).includes(r)))).split("__ARCHES__").join(JSON.stringify(REPO_ARCHES)).split("__SEVERITIES__").join(JSON.stringify(SEVERITIES)).split("__WORKER_ALIVE_MINUTES__").join(String(WORKER_ALIVE_MINUTES))}${o.kit ? KIT_HELPERS : ""}
+${HELPERS.split("__POOL_URL__").join(pool).split("__RINGS_TEXT__").join(JSON.stringify(RING_TEXT)).split("__WICON__").join(JSON.stringify(WORKER_ICONS)).split("__LATE_AFTER_HOURS__").join(String(LATE_AFTER_HOURS)).split("__PROMISED_RINGS__").join(JSON.stringify(RINGS_BY_STABILITY.filter((r) => (PROMOTED_RINGS as readonly string[]).includes(r)))).split("__ARCHES__").join(JSON.stringify(REPO_ARCHES)).split("__SEVERITIES__").join(JSON.stringify(SEVERITIES)).split("__WORKER_ALIVE_MINUTES__").join(String(WORKER_ALIVE_MINUTES))}${GO_MENU}${o.kit ? KIT_HELPERS : ""}
 ${o.script ?? ""}
 ${docsSearch}
 })();
