@@ -594,7 +594,8 @@ blk=$(mcp_call "$E2E/agent-maintainer" block '{"name":"e2e-agent","reason":"the 
 draft_id=$(jq -r '.structuredContent.draft' <<<"$blk")
 [[ "$draft_id" == d_* && "$(jq -r '.structuredContent.confirm_url' <<<"$blk")" == */auth/confirm/"$draft_id" ]] || { echo "the block must come back as a draft with its link: $blk"; exit 1; }
 curl_url="$OMARCHY_API/auth/confirm/$draft_id"
-grep -q "blocked by e2e" <<<"$(curl -s "$OMARCHY_API/api/v1/events?kind=block&limit=5")" && { echo "a draft must write no journal line"; exit 1; }
+# The package page's step blocked e2e-ident by e2e already: the draft's own package is what must be missing from the journal.
+grep -q "e2e-agent blocked by" <<<"$(curl -s "$OMARCHY_API/api/v1/events?kind=block&limit=5")" && { echo "a draft must write no journal line"; exit 1; }
 cpage=$(curl -s "$curl_url" -H "cookie: omc=oms_e2e_agent")
 grep -q "Block e2e-agent?" <<<"$cpage" || { echo "the confirm page did not show the draft: $(head -c 400 <<<"$cpage")"; exit 1; }
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$curl_url" -H "authorization: Bearer $mtoken" -H "origin: $OMARCHY_API" --data "$(form_of <<<"$cpage")&action=confirm&name=e2e-agent")" == 403 ]] || { echo "a confirmation must refuse a token"; exit 1; }
