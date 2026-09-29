@@ -11,7 +11,8 @@
  * Codeberg through their APIs with the release named for the request —
  * never for a visitor, never where SOURCE_CHECK is off. The page, run over
  * the Worker's answers: "Sign in to send" for nobody, the prompt built from
- * the form, the proposed tools said as proposed; every package on the line
+ * the form, the two MCP tools said as served with the login that grants
+ * them; every package on the line
  * where its targets put it, the tiles the line's and the lists' own
  * numbers, the workers the listing's rows with their agent — and read again
  * when a job starts or ends; the reader's own requests, signed in only; a
@@ -323,11 +324,26 @@ describe("the page", () => {
     return d as Ran & Record<string, any>;
   };
 
-  it("serves the card to everyone: live fields, Sign in to send for nobody, the prompt built from the form, the proposed tools said as proposed", async () => {
+  it("serves the card to everyone: live fields, Sign in to send for nobody, the prompt built from the form, the two MCP tools said as served with the login that grants them", async () => {
     const html = await page("/factory");
     expect(html).toContain('<a class="op-btn" id="fx-send" href="/auth/github?next=/factory">Sign in to send</a>');
     expect(html).toContain("Sending reserves the name. It's freed if the request is rejected.");
-    expect(html).toContain('<span class="op-pill na" title="signed off, not built yet: #252">proposed</span>');
+    // The agent's tab (#268): the two tools #252 built, served by omarchy-cli mcp; what an agent needs for them — the login with its own name, in a well to copy —; the Agents page to connect it and the MCP chapter. Nothing of it proposed, no pill, no API to fall back on.
+    const agent = /<div class="fx-agent" id="fx-agent"[\s\S]*?<ol class="fx-next"/.exec(html)![0];
+    expect(agent).toContain('<p class="fx-tools"><span><i class="op-i op-i-plug"');
+    expect(agent).toContain("Through <code>omarchy-cli mcp</code> · <code>request_package</code> · <code>request_status</code></span></p>");
+    expect(agent).toContain('<p class="fx-tools-note">Your agent gets both tools once you log it in with its name. Your browser asks you to grant it, and the token stays on your machine.</p>');
+    expect(agent).toContain('<div class="op-code"><code>omarchy-cli login --agent "&lt;its name&gt;"</code><button type="button" class="op-copy" data-op-copy="">copy</button></div>');
+    expect(agent).toContain('<p class="fx-tools-note">Connect your agent on <a href="/agents#connect">the Agents page</a>. <a href="/docs/omarchy-cli-mcp#write-tools">The MCP chapter</a> says what each tool answers.</p>');
+    expect(agent).not.toMatch(/proposed|not built|op-pill|\/api\b|POST \/api/);
+    // The addresses it sends a reader to answer, and hold what the tab promises: step 4's login with the agent's name, and the write tools' section.
+    const agents = await page("/agents");
+    expect(agents).toContain('id="connect"');
+    expect(agents).toContain('<li id="login">');
+    expect(agents).toContain('<code>omarchy-cli login --agent "<span data-agent-name>');
+    const chapter = await page("/docs/omarchy-cli-mcp");
+    expect(chapter).toContain('id="write-tools"');
+    for (const tool of ["request_package", "request_status"]) expect(chapter, tool).toContain(`<code>${tool}</code>`);
     expect(html).toContain("You never review your own requests. Another maintainer picks them up.");
     const d = await run({ functions: ["prompt"] });
     d.nodes["#fx-name"].value = "marcelo";

@@ -16,6 +16,7 @@ import { DOCS_TREE, GLOSSARY } from "../src/pages/docs-tree";
 import { DOC_SECTIONS } from "../src/pages/docs";
 import { CHARTS } from "../src/pages/charts";
 import { KIT_HELPERS } from "../src/pages/kit";
+import { MCP_TOOLS } from "../src/pages/agents";
 import { JOURNAL_KINDS } from "../src/meta";
 import { fetchPage, ownScriptOf, runScript, scriptOf, seedDashboard, type Fixture } from "./fixture";
 // The router's own source, as text (Vite's ?raw): the routed pages are read from it, so a page added to index.ts without a way in fails here by name.
@@ -90,6 +91,26 @@ describe("dashboard pages", () => {
       const header = /<header>[\s\S]*?<\/header>/.exec(await (await get(path)).text())?.[0] ?? "";
       expect([...header.matchAll(/<a href="([^"]*)" class="active" aria-current="page">/g)].map((m) => m[1]), path).toEqual(door ? [door] : []);
     }
+  });
+
+  // The MCP write tools are served (#252, PR #253): no page calls them proposed or not built any more (#268) — the Factory's agent tab said so after they shipped. Every block a reader sees that names one of them, the write tools or the MCP is read; a sentence that says none is marked proposed (the Testing chapter's row for the Agents page) is not calling them so.
+  it("calls the MCP write tools proposed or not built on no page", async () => {
+    const write = MCP_TOOLS.filter((t) => t.role !== "use").map((t) => t.name);
+    expect(write).toEqual(["request_package", "request_status", "review_claim", "review_release", "review_context", "submit_review", "block"]);
+    const names = new RegExp(`\\b(${write.filter((t) => t !== "block").join("|")})\\b|<code>block</code>|write tools|\\bMCP\\b|omarchy-cli mcp`);
+    const said = /(?<!marked )\bproposed\b|\bnot built\b|\bnot yet built\b/i;
+    let read = 0;
+    for (const path of PAGES) {
+      const html = (await (await get(path)).text()).replace(/<script[\s\S]*?<\/script>/g, "").replace(/<style[\s\S]*?<\/style>/g, "").replace(/<svg[\s\S]*?<\/svg>/g, "");
+      for (const block of html.split(/<(?=(?:p|li|tr|h[1-6]|dt|dd|pre|blockquote|figcaption|div|section|article)\b)/)) {
+        if (!names.test(block)) continue;
+        read++;
+        const text = block.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ");
+        expect(text, `${path}: ${text.slice(0, 160)}`).not.toMatch(said);
+      }
+    }
+    // The pages that name them were read: the Factory's tab, the Agents page, the chapter.
+    expect(read).toBeGreaterThan(20);
   });
 
   // The pages nothing linked: /me is the reader's own page — a session decides where, the sign-in comes back to it without one; the two old addresses of a door are one redirect each, so a bookmark lands and no page has two addresses. The sign-in return is a same-origin path or the Factory: a second slash or a backslash after the first would name another host in the Location header.
