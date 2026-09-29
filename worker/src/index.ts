@@ -31,6 +31,7 @@
  *   POST /api/v1/factory/drafts · GET /factory/drafts/:id · POST /factory/grants/:id/revoke   an agent's drafts and grants (#252, routes/agents.ts)
  *   GET|POST /auth/agent · POST /auth/agent/token · POST /auth/agent/revoke · GET|POST /auth/confirm/:id   the grant, the swap, logout, a draft confirmed
  *   GET  /api/v1/factory/{packages,built,review,approvals,maintainers,trust,workers/self,me} · GET /api/v1/factory/tasks/:id/can · GET /api/v1/users/:login · GET /api/v1/users/:login/can · GET /api/v1/cost
+ *   GET  /api/v1/factory/names/:name?arches= · GET /api/v1/factory/source?url=   the Factory form's live checks: would the name be taken, what the repository says
  *                                                  the factory's brain: package requests, build tasks, pull-based workers
  *   GET  /api/v1/graph?targets=a,b&ring=stable
  *   POST /api/v1/events   GET /api/v1/events       activity log
@@ -41,8 +42,8 @@
  *   POST /api/v1/pool/gc?keep=3&limit=200          delete it (objects, then rows)
  *   POST /api/v1/pool/relayout?phase=copy|purge     the one-time move to <source>/<arch>/ (the relayout job)
  *   GET  /                                         the dashboard: the Pool (users), /factory (contributors), /review (maintainers),
- *                                                  /docs, and the detail pages /packages /package/:name /status /agents /people /workers /request /user/:login /build/:id
- *                                                  (/pipeline, /journal, /security and /docs/api redirect to the section they became: MOVED)
+ *                                                  /docs, and the detail pages /packages /package/:name /status /agents /people /workers /user/:login /build/:id
+ *                                                  (/pipeline, /journal, /security, /docs/api and /request redirect to the section they became: MOVED)
  *   GET  /pool/<source>/<arch>/<file>              fallback static origin (dev)
  *   GET  /assets/kit.<hash>.css                    the v1 kit's stylesheet (pages/kit.ts): its primitives and icons, immutable under its hash
  *   GET  /setup                                    the one-command setup script (curl … | sudo bash -s -- --ring stable)
@@ -66,7 +67,9 @@ import { authorize, authorizeRelease, authorizeArtifacts, authorizeJobOrMaintain
 import {
   contributorOf, workerOf, handleRegister, handleMe, handleRequestPackage, handleDeletePackage, handleSetCategory, handleBuildPackage, handleRegisterWorker,
   handleRevokeWorker, handleDequeueBuild, handleListPackages, handleStagingPut, handleStagingMultipart, handleStagingList, handleStagingGet, handleStagingDelete,
+  handleNameStanding,
 } from "./routes/contributors";
+import { handleSourceRead } from "./routes/sources";
 import type { Actor } from "./routes/factory";
 import { jobOf } from "./jobtoken";
 import { handleTrustWorker, handleTrustList, handleNewToken, handleWithdrawRecord, handleWorkerMode, handleWorkerLog, SIGN_IN } from "./routes/contributors";
@@ -74,8 +77,9 @@ import { maintainersOf, GOVERNANCE_FILE } from "./governance";
 import { BUDGET_CAP_USD, BUDGET_GUARD_USD, BUDGET_WARN_USD, readGuard } from "./cost";
 import { handleQueueJob } from "./jobs";
 import { isMaintainer } from "./routes/contributors";
-import { handleReviewList, handleApprove, handleReject, handleChanges, handleRelease, handleAdopt, handleApprovals, handleProjectBuild, handleWithdraw, handleTaskCan, cancelByHand } from "./routes/review";
+import { handleReviewList, handleApprove, handleReject, handleChanges, handleRelease, handleApprovals, handleProjectBuild, handleWithdraw, handleTaskCan, cancelByHand } from "./routes/review";
 import { handleBlockContributor, handleUnblockContributor, handleBlockPackage, handleUnblockPackage, handleBlocks } from "./routes/blocks";
+import { handleAdoptPackage } from "./routes/adopt";
 import { handleAuthStart, handleAuthCallback, handleLogout } from "./routes/auth";
 import { agentClaimOrRelease, dashboardOrigin, handleAgentLogout, handleConfirm, handleConfirmPage, handleDraft, handleGetDraft, handleGrant, handleGrantPage, handleRevokeGrant, handleSwap } from "./routes/agents";
 import { agentOf, agentTokenRefusal, dayCount, hasAgentToken } from "./agents";
@@ -87,7 +91,6 @@ import { handlePackageStory } from "./routes/story";
 import { icon } from "./pages/icons";
 import { kitAsset } from "./pages/kit";
 import { robotsTxt, sitemapXml } from "./pages/robots";
-import { requestHtml } from "./pages/request";
 import { governanceHtml } from "./pages/governance";
 import { docsHtml } from "./pages/docs";
 import { docsWorkersHtml } from "./pages/docs-workers";
@@ -167,17 +170,20 @@ const API = "/api/v1";
  * each became: the Pipeline, the Journal and Security are Status's (#248
  * draws them there), and /docs/api is the API section of the docs index
  * (#250) — the reference itself is still served at /api, a chapter of the
- * docs map. A 301 to the section with the query kept — /journal?kind=role
- * is the journal filtered, /security?ring=rc the ring's advisories — so a
- * bookmark and every link written before still land where the page went.
- * The modules of the three pages stay until #248 folds them into Status;
- * the router no longer serves them.
+ * docs map. The request's own page is the Factory's request card since
+ * #246: /request?name=… and /request?renew=… land on the card with the name
+ * filled in or the renewal drawn. A 301 to the section with the query kept
+ * — /journal?kind=role is the journal filtered, /security?ring=rc the
+ * ring's advisories — so a bookmark and every link written before still
+ * land where the page went. Status draws what the three pages drew (#248);
+ * their modules are gone.
  */
 export const MOVED: Readonly<Record<string, string>> = {
   "/pipeline": "/status",
   "/journal": "/status#journal",
   "/security": "/status#advisories",
   "/docs/api": "/docs#api",
+  "/request": "/factory#request",
 };
 
 export default {
@@ -300,7 +306,6 @@ export default {
       // Agents (#249): which agent's configuration it shows is the address's (?agent=), so the choice is a link that works with script off; the page reads nothing.
       if (path === "/agents") return html(agentsHtml(env.POOL_URL, version(env), url.searchParams.get("agent")));
       if (path === "/review") return html(reviewHtml(env.POOL_URL, version(env)));
-      if (path === "/request") return html(requestHtml(env.POOL_URL, version(env)));
       const user = path.match(/^\/user\/([A-Za-z0-9-]{1,39})$/);
       if (user) return html(userHtml(user[1], env.POOL_URL, version(env)));
       if (path.startsWith("/package/")) return html(packageHtml(decodeURIComponent(path.slice("/package/".length)), env.POOL_URL, version(env)));
@@ -366,6 +371,13 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
     if (m[1] === "contributors") return m[3] === "block" ? handleBlockContributor(c, m[2], request, env) : handleUnblockContributor(c, m[2], request, env);
     return m[3] === "block" ? handleBlockPackage(c, m[2], request, env) : handleUnblockPackage(c, m[2], request, env);
   }
+  // Maintainers: Adopt, the one door the package page and Review's No maintainer tab post to — the package's maintainer in the pool,
+  // and a registration its owner left unmaintained taken with it (routes/adopt.ts). The only route of the path.
+  if ((m = path.match(/^\/factory\/packages\/([A-Za-z0-9@._+-]+)\/adopt$/)) && method === "POST") {
+    const c = await contributorOf(request, env);
+    if (!c) return nobody();
+    return handleAdoptPackage(c, m[1], request, env);
+  }
   // Maintainers: a record withdrawn from the public bucket, a signed tombstone in its place.
   if (method === "POST" && path === "/factory/record/withdraw") {
     const c = await contributorOf(request, env);
@@ -390,8 +402,6 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
     if ((m = path.match(/^\/factory\/packages\/([a-z0-9@._+-]+)\/build$/)) && method === "POST") return handleBuildPackage(c, m[1], request, env);
     if ((m = path.match(/^\/factory\/packages\/([a-z0-9@._+-]+)$/)) && method === "DELETE") return handleDeletePackage(c, m[1], env);
     if ((m = path.match(/^\/factory\/packages\/([a-z0-9@._+-]+)\/category$/)) && method === "POST") return handleSetCategory(c, m[1], request, env);
-    // Review's No maintainer tab (#247): a maintainer takes a package its owner left unmaintained.
-    if ((m = path.match(/^\/factory\/packages\/([a-z0-9@._+-]+)\/adopt$/)) && method === "POST") return handleAdopt(c, m[1], request, env);
     if (method === "POST" && path === "/factory/workers") return handleRegisterWorker(c, request, env);
     if ((m = path.match(/^\/factory\/packages\/([A-Za-z0-9@._+-]+)\/builds\/(\d+)$/)) && method === "DELETE") return handleDequeueBuild(c, m[1], Number(m[2]), env);
     if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)$/)) && method === "DELETE") return handleRevokeWorker(c, m[1], env);
@@ -561,6 +571,9 @@ async function api(method: string, path: string, url: URL, request: Request, env
   if (method === "GET" && path === "/factory/blocks") return handleBlocks(env);
   if (method === "GET" && path === "/factory/built") return handleBuilt(env);
   if (method === "GET" && path === "/factory/packages") return handleListPackages(env, url);
+  // The Factory form's live checks (#246): the name by the request's own rule, and what the repository says.
+  if ((m = path.match(/^\/factory\/names\/([^/]+)$/)) && method === "GET") return handleNameStanding(m[1], url, env);
+  if (method === "GET" && path === "/factory/source") return handleSourceRead(url, request, env);
   if (method === "GET" && path === "/factory/trust") return handleTrustList(env);
   if ((m = path.match(/^\/users\/([A-Za-z0-9-]{1,39})$/)) && method === "GET") return handleUser(m[1], env);
   // The page is cached for everyone (public, max-age); what one caller may do on it is theirs alone, so it rides on a no-store answer of its own.

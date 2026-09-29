@@ -11,7 +11,7 @@ import { putRecord, recordKey, recordUrl, withdrawRecord } from "../record";
 import { version, RINGS, ringsSql, sortRings } from "../meta";
 import { isTextEvidence, reclaimStagingPackages, STAGING_DAYS, STAGING_QUOTA_BYTES } from "../staging";
 import { findLeak, leakMessage } from "../leak";
-import { CHECKLIST, LICENSE, sourceHasPath } from "../request";
+import { CHECKLIST, LICENSE, PKGNAME, PKGNAME_RULE, forgeOf, sourceHasPath } from "../request";
 import { parseTargets, settleTargets } from "../targets";
 import { throughWords, type Through } from "../agents";
 
@@ -422,8 +422,15 @@ export async function handleMe(c: Contributor, env: Env, origin = ""): Promise<R
 
 const GITHUB_URL = /^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/;
 
-/** What the drafter needs to know, from the GitHub API: build system, license, latest release. */
-async function detect(url: string, env: Env): Promise<Record<string, unknown>> {
+/**
+ * What the drafter needs to know, from the GitHub API: build system, license,
+ * latest release. The Factory's form reads the same through GET
+ * /factory/source (routes/sources.ts), with a fetch of the test's own when a
+ * test asks, and without the tree (`tree: false`): the card shows no build
+ * system, and a read it asks for costs the pool's token two or three calls,
+ * not four.
+ */
+export async function detect(url: string, env: Env, fetcher: typeof fetch = fetch, opts: { tree?: boolean } = {}): Promise<Record<string, unknown>> {
   const m = url.match(GITHUB_URL);
   if (!m) return { error: "not a GitHub repository URL" };
   const [, owner, repo] = m;
@@ -431,7 +438,7 @@ async function detect(url: string, env: Env): Promise<Record<string, unknown>> {
   // The scheduler's token raises the rate limit; public data either way.
   if (env.GITHUB_TOKEN) h.authorization = `Bearer ${env.GITHUB_TOKEN}`;
   const gh = async (path: string): Promise<Record<string, unknown> | null> => {
-    const res = await fetch(`https://api.github.com${path}`, { headers: h });
+    const res = await fetcher(`https://api.github.com${path}`, { headers: h });
     if (res.status === 404) return null;
     if (!res.ok) throw new Error(`GitHub ${path}: HTTP ${res.status}`);
     return (await res.json()) as Record<string, unknown>;
@@ -446,14 +453,14 @@ async function detect(url: string, env: Env): Promise<Record<string, unknown>> {
       tag = tags?.[0]?.name ?? null;
     }
     const ref = tag ?? (meta.default_branch as string);
-    const tree = (await gh(`/repos/${owner}/${repo}/git/trees/${encodeURIComponent(ref)}`)) as { tree?: { path: string; type: string }[] } | null;
+    const tree = opts.tree === false ? null : ((await gh(`/repos/${owner}/${repo}/git/trees/${encodeURIComponent(ref)}`)) as { tree?: { path: string; type: string }[] } | null);
     const top = new Set((tree?.tree ?? []).filter((t) => t.type === "blob").map((t) => t.path));
     const assets = rel?.assets ?? [];
     const system = top.has("Cargo.toml") ? "rust" : top.has("go.mod") ? "go" : top.has("meson.build") ? "meson" : top.has("CMakeLists.txt") ? "cmake" : top.has("configure.ac") ? "autotools" : top.has("pyproject.toml") || top.has("setup.py") ? "python" : top.has("package.json") ? "node" : top.has("Makefile") ? "make" : assets.some((a) => /linux/i.test(a.name)) ? "binary" : "unknown";
     return {
       full_name: meta.full_name, description: meta.description ?? null, language: meta.language ?? null,
       license: (meta.license as { spdx_id?: string } | null)?.spdx_id ?? null, latest_tag: tag,
-      release_assets: assets.map((a) => a.name), build_system: system, has_pkgbuild: top.has("PKGBUILD"),
+      release_assets: assets.map((a) => a.name), build_system: opts.tree === false ? null : system, has_pkgbuild: top.has("PKGBUILD"),
       default_branch: meta.default_branch, stars: meta.stargazers_count ?? 0, archived: meta.archived ?? false,
     };
   } catch (e) {
@@ -467,7 +474,10 @@ async function detect(url: string, env: Env): Promise<Record<string, unknown>> {
  * tarball or release page (the tag is in the URL), or — for a project that
  * is not on GitHub, a vendor's binary release — its home page, with the
  * source and version given separately. The project's home, normalised, is
- * what makes a package unique in the pool.
+ * what makes a package unique in the pool: a repository on GitLab or
+ * Codeberg is its repository whichever view of it was pasted (forgeOf, the
+ * rule the Factory's form reads it by) — /-/tree/main recorded as the
+ * project made one repository two projects, and "main" the default name.
  */
 export function parseProjectUrl(raw: string): { project: string; github: { owner: string; repo: string } | null; tag: string | null; source: string | null } | { error: string } {
   const u = raw.trim();
@@ -479,6 +489,8 @@ export function parseProjectUrl(raw: string): { project: string; github: { owner
   m = u.match(GITHUB_URL);
   if (m) return { project: `https://github.com/${m[1]}/${m[2]}`, github: { owner: m[1], repo: m[2] }, tag: null, source: null };
   if (/^https:\/\/github\.com\//.test(u)) return { error: "a GitHub URL must be the repository, a release page or a release tarball" };
+  const repo = forgeOf(u);
+  if (repo && repo.forge !== "github.com") return { project: `https://${repo.forge}/${repo.path}`, github: null, tag: null, source: null };
   try {
     const p = new URL(u);
     return { project: `${p.protocol}//${p.host.toLowerCase()}${p.pathname.replace(/\/+$/, "")}`, github: null, tag: null, source: null };
@@ -530,7 +542,7 @@ export async function handleRequestPackage(c: Contributor, request: Request, env
   const license = (b.license ?? "").trim();
   if (!LICENSE.test(license)) return json({ error: "license must be an SPDX identifier (MIT, GPL-3.0-or-later, Apache-2.0 …) or custom:<name>" }, 400);
   const name = (b.name ?? parsed.github?.repo ?? parsed.project.split("/").pop() ?? "").toLowerCase();
-  if (!/^[a-z0-9@._+-]+$/.test(name) || name.length > 100) return json({ error: "name must be a pacman package name (lowercase letters, digits, @ . _ + -)" }, 400);
+  if (!PKGNAME.test(name)) return json({ error: `name must be a pacman package name (${PKGNAME_RULE})` }, 400);
   const arches = (Array.isArray(b.arches) ? b.arches : [...REPO_ARCHES]).filter((a): a is string => typeof a === "string" && isRepoArch(a));
   if (!arches.length) return json({ error: "arches must include x86_64 and/or aarch64" }, 400);
 
@@ -541,27 +553,18 @@ export async function handleRequestPackage(c: Contributor, request: Request, env
       WHERE k.blocked_at IS NOT NULL AND (r.project = ?1 OR (?2 != '' AND r.source = ?2)) AND r.owner != ?3 LIMIT 1`,
   ).bind(parsed.project, (parsed.source ?? (b.source ?? "").trim()), c.login).first<{ owner: string; name: string }>();
   if (tainted) return json({ error: `${parsed.project} was requested by ${tainted.owner}, who is blocked; a maintainer must lift that first` }, 403);
-  // Who has this name, who has this project.
-  const byName = await env.DB.prepare("SELECT owner, status, detail, project, release, request_id, freed_by_review, blocked_at, blocked_reason FROM factory_packages WHERE name = ?").bind(name).first<Held & { project: string | null; release: string | null; blocked_at: string | null; blocked_reason: string | null }>();
-  if (byName?.blocked_at) return json({ error: `${name} is blocked by a maintainer: ${byName.blocked_reason ?? ""}`.trim() }, 403);
-  // An unmaintained name (thirty days without a build) is anyone's to take over: the registration becomes theirs, the package stays served until their build is decided.
-  // A request a review rejected freed its name (#242): anyone may request it again — a package still in the pool keeps it (the approval, below), and a contributor's block frees none of theirs.
-  if (byName && byName.owner !== c.login && !nameIsFree(byName)) return json({ error: `${name} is ${byName.status}, requested by ${byName.owner}` }, 409);
+  // Who has this name, who has this project. The name's rule is two halves (nameHeld, nameInUse), asked in the order a refusal names them — the name's holder first, the project second — and the same two the Factory's live check asks (handleNameStanding): one rule, never a page's copy of it.
+  const facts = await nameFacts(env, name);
+  const byName = facts.byName;
+  const held = nameHeld(facts, name, c.login);
+  if (held) return json({ error: held.error }, held.status);
   const takeover = byName && byName.owner !== c.login ? { from: byName.owner, why: byName.status === "rejected" ? "whose request was rejected" : "who left it unmaintained" } : null;
   const byProject = await env.DB.prepare("SELECT name, owner, status, blocked_at, blocked_reason FROM factory_packages WHERE project = ? AND name != ?").bind(parsed.project, name).first<{ name: string; owner: string; status: string; blocked_at: string | null; blocked_reason: string | null }>();
   if (byProject?.blocked_at) return json({ error: `${parsed.project} is blocked by a maintainer as ${byProject.name}: ${byProject.blocked_reason ?? ""}`.trim() }, 403);
   if (byProject) return json({ error: `${parsed.project} is already in the pool as ${byProject.name} (${byProject.status}, requested by ${byProject.owner})` }, 409);
-  if (byName && !["registered", "waiting", "rejected", "unmaintained", "staged"].includes(byName.status)) return json({ error: `${name} is ${byName.status}; a request can be renewed while it is registered, waiting, staged, rejected or unmaintained — not while it is being built, and not once it is in the pool` }, 409);
-  // A package in the pool passes through 'waiting' and 'staged' with every bump: the standing approval, not the status, says it is in the pool — its record stays as it was, new releases come as bumps.
-  const inPool = byName ? await env.DB.prepare(`SELECT id FROM approvals WHERE name = ? AND ${standsSql()} LIMIT 1`).bind(name).first<{ id: number }>() : null;
-  if (inPool) return json({ error: `${name} is in the pool (approval #${inPool.id}); its record stays as it was — new releases come as bumps, built from the approved recipe` }, 409);
-  // The package's status is one word for every architecture and every kind of build: the builds themselves say whether one runs (the project's included).
-  const running = byName ? await env.DB.prepare("SELECT id, status, trust FROM build_tasks WHERE name = ? AND kind = 'build' AND status = 'leased' ORDER BY id DESC LIMIT 1").bind(name).first<{ id: number; status: string; trust: string }>() : null;
-  if (running) return json({ error: `${name} is being built (task ${running.id}${running.trust === "project" ? ", the project's" : ""}); renew the request once it is done` }, 409);
-  const upstream = (await providedBy(env, name)).filter((p) => !["factory", "chaotic"].includes(p.source) && arches.includes(p.arch));
-  if (upstream.length === arches.length) {
-    return json({ error: `${upstream[0].source} already ships ${name} (${upstream.map((u) => `${u.version} for ${u.arch}`).join(", ")}); install it from the pool`, provided: upstream }, 409);
-  }
+  const inUse = nameInUse(facts, name, arches);
+  if (inUse) return json(inUse.provided ? { error: inUse.error, provided: inUse.provided } : { error: inUse.error }, inUse.status);
+  const upstream = upstreamOf(facts.provided, arches);
   const build = arches.filter((a) => !upstream.some((u) => u.arch === a));
 
   // The version and its source: from GitHub when the project is there, from the request otherwise.
@@ -686,6 +689,118 @@ export async function reserveName(env: Env, name: string, login: string, url: st
     .bind(name, login, url, JSON.stringify(arches), `reserved by ${login}: the request is being written`)
     .first<{ owner: string }>();
   return row?.owner === login;
+}
+
+/** What the pool knows of a name, as a request reads it: the registration (whose, its word, what freed it, a block), an approval standing on it, a build of it running, and what the sources ship of it in edge. */
+export interface NameFacts {
+  byName: (Held & { project: string | null; release: string | null; blocked_at: string | null; blocked_reason: string | null }) | null;
+  inPool: { id: number } | null;
+  running: { id: number; status: string; trust: string } | null;
+  provided: { source: string; arch: string; version: string }[];
+}
+
+/**
+ * The reads behind a name's rule: the registration by its key; for a name
+ * that has one, a standing approval (the approvals' name index, one row at
+ * most) and a running build of it — the leased builds, a handful bounded by
+ * the workers, walked by the queue's (kind, status) index and filtered by
+ * the name; and the sources' rows of the name in edge (providedBy) — a
+ * handful of rows, whether the request asks or the form's live check does.
+ */
+export async function nameFacts(env: Env, name: string): Promise<NameFacts> {
+  const byName = await env.DB.prepare("SELECT owner, status, detail, project, release, request_id, freed_by_review, blocked_at, blocked_reason FROM factory_packages WHERE name = ?").bind(name).first<NonNullable<NameFacts["byName"]>>();
+  const [inPool, running, provided] = await Promise.all([
+    // A package in the pool passes through 'waiting' and 'staged' with every bump: the standing approval, not the status, says it is in the pool.
+    byName ? env.DB.prepare(`SELECT id FROM approvals WHERE name = ? AND ${standsSql()} LIMIT 1`).bind(name).first<{ id: number }>() : null,
+    // The package's status is one word for every architecture and every kind of build: the builds themselves say whether one runs (the project's included).
+    byName ? env.DB.prepare("SELECT id, status, trust FROM build_tasks WHERE name = ? AND kind = 'build' AND status = 'leased' ORDER BY id DESC LIMIT 1").bind(name).first<{ id: number; status: string; trust: string }>() : null,
+    providedBy(env, name),
+  ]);
+  return { byName, inPool, running, provided };
+}
+
+/** Why a name cannot be requested now: the status and the words the request answers with, and the one word a page says it in. */
+export interface NameRefusal { status: 403 | 409; state: "blocked" | "reserved" | "taken" | "busy"; error: string; provided?: { source: string; arch: string; version: string }[] }
+
+/** What a source ships of the name on the architectures asked, for a source that is not the factory's own (nor chaotic, which rebuilds what others ship). */
+export function upstreamOf(provided: NameFacts["provided"], arches: string[]): NameFacts["provided"] {
+  return provided.filter((p) => !["factory", "chaotic"].includes(p.source) && arches.includes(p.arch));
+}
+
+/**
+ * The name's rule, first half: a maintainer blocked the name, or somebody
+ * else's registration holds it and it is not free (nameIsFree: a review's
+ * rejection freed it, or it was left unmaintained — thirty days without a
+ * build, anyone's to take over; the package stays served until their build
+ * is decided). A contributor's block frees none of their names. `login` is
+ * who asks; null is anyone who does not hold it — the live check's reader.
+ */
+export function nameHeld(f: NameFacts, name: string, login: string | null): NameRefusal | null {
+  const b = f.byName;
+  if (b?.blocked_at) return { status: 403, state: "blocked", error: `${name} is blocked by a maintainer: ${b.blocked_reason ?? ""}`.trim() };
+  // Held by someone else: in the pool once a maintainer approved it (landed), reserved by a request while it is on its way.
+  if (b && b.owner !== login && !nameIsFree(b)) return { status: 409, state: landed(b.status) ? "taken" : "reserved", error: `${name} is ${b.status}, requested by ${b.owner}` };
+  return null;
+}
+
+/**
+ * The name's rule, second half — who holds it matters no more: the
+ * registration's word allows a request (a renewal, or a free name taken),
+ * no approval stands on it (its record stays as it was, new releases come
+ * as bumps), none of its builds runs, and the sources do not ship it on
+ * every architecture asked.
+ */
+export function nameInUse(f: NameFacts, name: string, arches: string[]): NameRefusal | null {
+  const b = f.byName;
+  if (b && !["registered", "waiting", "rejected", "unmaintained", "staged"].includes(b.status)) return { status: 409, state: landed(b.status) ? "taken" : "busy", error: `${name} is ${b.status}; a request can be renewed while it is registered, waiting, staged, rejected or unmaintained — not while it is being built, and not once it is in the pool` };
+  if (f.inPool) return { status: 409, state: "taken", error: `${name} is in the pool (approval #${f.inPool.id}); its record stays as it was — new releases come as bumps, built from the approved recipe` };
+  if (f.running) return { status: 409, state: "busy", error: `${name} is being built (task ${f.running.id}${f.running.trust === "project" ? ", the project's" : ""}); renew the request once it is done` };
+  const upstream = upstreamOf(f.provided, arches);
+  if (upstream.length === arches.length) return { status: 409, state: "taken", error: `${upstream[0].source} already ships ${name} (${upstream.map((u) => `${u.version} for ${u.arch}`).join(", ")}); install it from the pool`, provided: upstream };
+  return null;
+}
+
+/**
+ * GET /factory/names/:name?arches= — the Factory form's live check: would
+ * a request for this name be taken now, by the request's own rule (PKGNAME,
+ * then nameHeld and nameInUse over nameFacts) asked for anyone who does not
+ * hold it. `state` is the word the form says it in — available, invalid,
+ * reserved (a request on its way holds it), taken (in the pool, or shipped
+ * by a source on every architecture asked), blocked, busy (being built) —
+ * and `why` the request's refusal, word for word. The holder is named
+ * (`owner`, `status`), with what a renewal of theirs would meet (`renew`,
+ * null when it would be taken), so the form tells its owner "yours";
+ * `in_edge` says where edge serves the name, the one ring a taken name is
+ * linked to. The
+ * answer is the same for everyone, public for thirty seconds at the edge as
+ * the registry is: the send itself reserves the name in one statement
+ * (reserveName) and is the only word that counts.
+ */
+export async function handleNameStanding(raw: string, url: URL, env: Env): Promise<Response> {
+  let name = "";
+  try { name = decodeURIComponent(raw).toLowerCase(); } catch { name = ""; }
+  const arches = (url.searchParams.get("arches") ?? "").split(",").filter(isRepoArch);
+  const asked = arches.length ? arches : [...REPO_ARCHES];
+  const cache = { "cache-control": "public, max-age=30" };
+  if (!PKGNAME.test(name)) return json({ name, arches: asked, state: "invalid", why: `name must be a pacman package name (${PKGNAME_RULE})`, owner: null, status: null, freed: null, renew: null, provided: [] }, 200, cache);
+  const f = await nameFacts(env, name);
+  const refusal = nameHeld(f, name, null) ?? nameInUse(f, name, asked);
+  const b = f.byName;
+  return json({
+    name, arches: asked,
+    state: refusal?.state ?? "available",
+    why: refusal?.error ?? null,
+    owner: b?.owner ?? null,
+    status: b?.status ?? null,
+    // Free to anyone: freed by a review's rejection, or left unmaintained.
+    freed: b && !b.blocked_at && nameIsFree(b) ? b.status : null,
+    // What its holder's renewal would meet: the second half, the holder's own name being theirs.
+    renew: b && !b.blocked_at ? (nameInUse(f, name, asked)?.error ?? null) : null,
+    // What the sources ship of it in edge, every architecture — the form says which ones a request would skip.
+    provided: upstreamOf(f.provided, [...REPO_ARCHES]),
+    // The architectures edge serves the name on, whoever ships it (the same rows, the factory's own included): the one ring the form may link a taken name to — a name in the pool by an approval alone may be in no ring (a publish that failed).
+    in_edge: REPO_ARCHES.filter((a) => f.provided.some((p) => p.arch === a)),
+  }, 200, cache);
 }
 
 /**

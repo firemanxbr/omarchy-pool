@@ -62,7 +62,7 @@ async function planOf(x: { sql: string; args: unknown[] }): Promise<string> {
   return (await env.DB.prepare(`EXPLAIN QUERY PLAN ${x.sql}`).bind(...x.args).all<{ detail: string }>()).results.map((r) => r.detail).join("; ");
 }
 
-/** What 0036 added, taken off again: the schema as production has it before the migration. */
+/** What 0036 added, taken off again, and what the migrations after it added (the package's maintainer in the pool, #244; the reviews table takes its changes column, #247, with it): the schema as production has it before the migration. */
 const REWIND = [
   // What 0039 added (the MCP write tools, #252) comes off first, so the migrations after 0036 run again in their order below.
   "DROP TABLE agent_grants",
@@ -80,6 +80,7 @@ const REWIND = [
   "ALTER TABLE factory_packages DROP COLUMN targets",
   "ALTER TABLE factory_packages DROP COLUMN closed_through",
   "ALTER TABLE factory_packages DROP COLUMN freed_by_review",
+  "DROP TABLE package_maintainers",
 ];
 
 const schema = async () => (await env.DB.prepare("SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' AND name != 'd1_migrations' ORDER BY type, name").all<{ type: string; name: string; sql: string | null }>()).results;
@@ -206,7 +207,7 @@ describe("migration 0036: one package per name, with a target per architecture",
     const m = env.TEST_MIGRATIONS.find((x) => x.name.startsWith("0036_"))!;
     expect(m, "migration 0036 is in the list").toBeTruthy();
     await env.DB.batch(m.queries.map((q) => env.DB.prepare(q)));
-    // The migrations after it run again too, in their order — what the rewind took off with the reviews table (0037's column, #247) and 0039's tables and columns (#252) come back as D1 applies them.
+    // The migrations after it run again too, in their order — what the rewind took off (the maintainers' table, #244; with the reviews table, its changes column, #247; 0039's tables and columns, #252) comes back as D1 applies it.
     for (const later of env.TEST_MIGRATIONS.filter((x) => x.name > m.name)) await env.DB.batch(later.queries.map((q) => env.DB.prepare(q)));
 
     // The schema is what every other test file runs on, and nothing of the rows it had changed.

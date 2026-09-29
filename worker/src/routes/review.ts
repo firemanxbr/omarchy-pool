@@ -48,16 +48,18 @@ import { throughWords, type Through } from "../agents";
  *                                           every rebuild of the claim is cancelled — the ones staged beside it too —
  *                                           and the package waits for a claim again (a claim whose rebuilds all staged
  *                                           is decided, not released)
- *   POST /factory/packages/:name/adopt {reason?} a maintainer takes a package its owner left unmaintained, with nothing
- *                                           of it in review: the registration becomes theirs, its bumps come to them
+ *   POST /factory/packages/:name/adopt {reason?} Review's No maintainer tab posts to the one Adopt (routes/adopt.ts): a
+ *                                           package its owner left unmaintained, with nothing of it in review, becomes
+ *                                           the adopter's — its maintainer in the pool, and the registration theirs
  *   GET  /factory/approvals                 the record (public), one row per review with its `targets`; `standing` on
  *                                           every row — a review not withdrawn
  *
- * Every decision — a claim, approve, changes, reject, release, adopt, a
- * withdrawal, and a block and its lift (routes/blocks.ts) — is written once
- * to the record, signed by the pool (record.ts), and is a journal line that
- * names who took it, through which door (`via`: the web's session or a
- * token) and the agent the review rests on: the one that rebuilt each
+ * Every decision — a claim, approve, changes, reject, release, an adoption
+ * that takes a registration (routes/adopt.ts), a withdrawal, and a block and
+ * its lift (routes/blocks.ts) — is written once to the record, signed by the
+ * pool (record.ts), and is a journal line that names who took it, through
+ * which door (`via`: the web's session or a token) and the agent the review
+ * rests on: the one that rebuilt each
  * architecture on the project's review worker (`built_with`, what the worker
  * ran when it staged the rebuild), else the maintainer's choice at the claim.
  * Review's decisions are beside the package's request
@@ -1194,53 +1196,6 @@ export const RELEASE_SQL = `UPDATE build_tasks SET status = 'cancelled', error =
   WHERE id IN (SELECT value FROM json_each(?)) AND +status IN ('queued', 'leased', 'staged')
     AND EXISTS (SELECT 1 FROM build_tasks l WHERE l.id IN (SELECT value FROM json_each(?)) AND +l.status IN ('queued', 'leased'))
   RETURNING id, arch`;
-
-/**
- * Adopt (#247): a maintainer takes a package its owner left unmaintained —
- * thirty days without a build of its bump (updates.ts) — so the pool has
- * someone for it again. The registration becomes theirs: its bumps come to
- * their workers, and a build of it is theirs to request, never theirs to
- * review (the owner rule holds for the new owner). It is where it was
- * before it went unmaintained: published or approved while a review stands,
- * registered otherwise. Not while a build of it is queued, running or in
- * review: that build is its requester's, and a maintainer decides it first
- * (the owner rule reads who asked for a build too, but an adoption with a
- * round open would leave that round with an owner who never asked for it).
- * One conditional update takes it, on both conditions, so two maintainers
- * adopting at once are one adoption and a 409. On the record and in the
- * journal, with whom it was taken from.
- */
-export async function handleAdopt(c: Contributor, name: string, request: Request, env: Env): Promise<Response> {
-  if (!isMaintainer(c)) return json({ error: MAINTAINER_DECIDES, code: "maintainer_only" }, 403);
-  const b = (await request.json().catch(() => ({}))) as { reason?: string };
-  const pkg = await env.DB.prepare("SELECT name, owner, status, blocked_at, targets FROM factory_packages WHERE name = ?").bind(name).first<{ name: string; owner: string; status: string; blocked_at: string | null; targets: string | null }>();
-  if (!pkg) return json({ error: `${name} was never requested` }, 404);
-  if (pkg.blocked_at) return json({ error: `${name} is blocked: another maintainer lifts the block first` }, 409);
-  if (pkg.status !== "unmaintained") return json({ error: `${name} has a maintainer: it is ${pkg.status}, ${pkg.owner}'s` }, 409);
-  if (pkg.owner === c.login) return json({ error: `${name} is yours already: build it to take it up again` }, 409);
-  const open = await env.DB.prepare(`SELECT t.id, t.status, t.owner FROM build_tasks t WHERE ${ROUND_OPEN} ORDER BY t.id DESC LIMIT 1`).bind(name).first<{ id: number; status: string; owner: string | null }>();
-  if (open) return json({ error: `build #${open.id} of ${name} is ${open.status}${open.owner ? `, ${open.owner}'s` : ""}: a maintainer decides it before anyone adopts ${name}` }, 409);
-  const standing = await env.DB.prepare(`SELECT id FROM approvals WHERE name = ? AND ${standsSql()} LIMIT 1`).bind(name).first<{ id: number }>();
-  const served = Object.values(parseTargets(pkg.targets)).some((x) => x.status === "published");
-  const status = standing ? (served ? "published" : "approved") : "registered";
-  const reason = typeof b.reason === "string" && b.reason.trim() ? b.reason.trim().slice(0, 300) : null;
-  const res = await env.DB.prepare(ADOPT_SQL)
-    .bind(c.login, status, `adopted by ${c.login} from ${pkg.owner}, who left it unmaintained${reason ? `: ${reason}` : ""}`, name, name)
-    .run();
-  if (!res.meta.changes) return json({ error: `${name} was taken a moment ago, or a build of it went into review: look again` }, 409);
-  const via = viaOf(request), at = new Date().toISOString();
-  const record = await decisionRecord(env, name, "adopt", c.login, { owner: c.login, from: pkg.owner, status, by: c.login, via, agent: null, at, reason });
-  await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('review', NULL, 'factory', 'ok', ?, ?)")
-    .bind(`${name}: adopted by ${c.login} from ${pkg.owner}, who left it unmaintained${reason ? ` — ${reason.slice(0, 120)}` : ""}`, JSON.stringify({ name, from: pkg.owner, by: c.login, via, agent: null, status, reason, record: record.url, ...(record.error ? { record_error: record.error } : {}) }))
-    .run();
-  return json({ adopted: name, from: pkg.owner, by: c.login, status, via, record: record.url });
-}
-
-/** A build of the package still open — queued, running, or staged with no approval standing on it — by the name's (name, arch, id) index: what an adoption waits for. */
-const ROUND_OPEN = `t.name = ? AND +t.kind = 'build' AND +t.status IN ('queued', 'leased', 'staged') AND NOT EXISTS (SELECT 1 FROM approvals a WHERE a.task_id = t.id AND a.decision = 'approved' AND a.withdrawn_at IS NULL)`;
-/** The adoption, by the registration's primary key: only while it is unmaintained, not blocked, and nothing of it is open (ROUND_OPEN). */
-export const ADOPT_SQL = `UPDATE factory_packages SET owner = ?, status = ?, detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-  WHERE name = ? AND status = 'unmaintained' AND blocked_at IS NULL AND NOT EXISTS (SELECT 1 FROM build_tasks t WHERE ${ROUND_OPEN})`;
 
 /** An approvals row as the record lists it: the row, the build it published and where its publish job is, the registration's block. */
 interface DecisionRow {

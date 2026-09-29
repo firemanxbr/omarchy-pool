@@ -1,5 +1,6 @@
 import { json, type Env } from "../index";
 import { PROMOTED_RINGS, REPO_ARCHES, RINGS, RINGS_BY_STABILITY, isRepoArch, ringsSql, sourceRank, type Ring } from "../meta";
+import { PKGNAME } from "../request";
 
 /**
  * The packages list (#245): every package the rings serve, one row per
@@ -82,8 +83,8 @@ export const BROWSE_MAX = 100;
 export const BROWSE_MIN_Q = 2;
 /** The longest search read, in characters (code points, so none is cut in half): a name is at most a hundred (the factory's rule); a longer search is read to its hundredth. */
 export const BROWSE_MAX_Q = 100;
-/** A name a request can carry — the ⌘K menu's rule for offering Request "<name>" (layout.ts GO_MENU's NAME, routes/contributors.ts's characters). */
-export const BROWSE_NAME = /^[a-z0-9][a-z0-9@._+-]{1,99}$/;
+/** A name a request can carry — the request's own rule (request.ts PKGNAME), which the ⌘K menu (layout.ts GO_MENU's NAME) and the Factory's card splice for offering Request "<name>". */
+export const BROWSE_NAME = PKGNAME;
 /** The highest page number read: a search's matches are counted and sorted in one pass whatever the page, so this only bounds its OFFSET; a cursor's page number is only said. */
 export const BROWSE_MAX_PAGE = 100000;
 
