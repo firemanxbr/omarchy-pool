@@ -67,6 +67,7 @@ import { waitsForMaintainer, stands } from "../src/routes/review";
 import { maintenanceOf } from "../src/routes/users";
 import { landed } from "../src/routes/contributors";
 import { snapshotMetrics } from "../src/metrics";
+import { settleTargets } from "../src/targets";
 import { allComponents } from "../src/pages/components";
 import { HELPERS } from "../src/pages/layout";
 import { CHARTS } from "../src/pages/charts";
@@ -179,7 +180,8 @@ describe("an approval stands or it does not, said once", () => {
     for (const a of rows) { expect(a).toHaveProperty("publish_status"); expect(a).toHaveProperty("blocked_at"); }
   });
 
-  it("where a standing approval is today is one word, the shell's approvalWhere over the row's rings, blocked_at and publish_status — said by the Factory's Landed lately and Review's Decided line alike; no page guesses a ring from the registry's status", async () => {
+  // The Factory said it in Landed lately until #246; its line's Shipped column says it now, a card per package placed by its targets (targets.ts) and worded, where it stands today, by the same rule over the same rows.
+  it("where a standing approval is today is one word, the shell's approvalWhere over the row's rings, blocked_at and publish_status — said by the Factory's Shipped cards and Review's Decided line alike; no page guesses a ring from the registry's status", async () => {
     type Row = { name: string; task_id: number; standing: boolean; rings: string[]; publish_status: string | null; blocked_at: string | null };
     const rows = (await call("GET", "/factory/approvals")).json.approvals as Row[];
     const served = rows.find((a) => a.name === F.publishedPkg)!, failed = rows.find((a) => a.name === F.failedPkg)!, pulled = rows.find((a) => a.name === F.pulledPkg)!;
@@ -204,7 +206,7 @@ describe("an approval stands or it does not, said once", () => {
     expect(shell.approvalWhere({ ...failed, publish_status: "cancelled" })).toMatchObject({ word: "publish cancelled", cls: "error" });
     for (const publish_status of ["queued", "leased", null]) expect(shell.approvalWhere({ ...failed, publish_status }), String(publish_status)).toMatchObject({ word: "publishing", cls: "blue" });
     expect(shell.approvalWhere({ ...served, rings: ["edge", "stable"] })).toMatchObject({ word: "in edge · stable", cls: "ok" });
-    // The two pages drawn over the Worker's answers, as the fixture's people see them: the Factory for anyone, Review as dave, whose two packages these are, and as alice, whose ours edge serves.
+    // The two pages drawn over the Worker's answers, as the fixture's people see them: the Factory for anyone and as dave, Review as dave, whose two packages these are, and as alice, whose ours edge serves.
     const viewer = (login: string) => async (path: string, init?: RequestInit) => {
       const ctx = createExecutionContext();
       const res = await worker.fetch(new Request(`http://pool.test${path}`, { ...init, headers: { ...(init?.headers as Record<string, string> | undefined), ...(login ? { cookie: `omc=oms_${login}` } : {}) } }), env, ctx);
@@ -212,22 +214,53 @@ describe("an approval stands or it does not, said once", () => {
       return res;
     };
     const drawn = async (path: string, login: string) => { const d = runScript(scriptOf(await page(path)), { pathname: path, functions: [], fetch: viewer(login) }); await new Promise((r) => setTimeout(r, 80)); return d; };
-    const landed = (await drawn("/factory", "")).nodes["#landed"].innerHTML as string;
     const decided = (await drawn("/review", F.outsider)).nodes["#mine-decided"].innerHTML as string;
+    // The Factory: lost's targets as the rule says them now (the fixture wrote its approval by hand and left the request's "building" stored) — the project's build staged, an approval standing on it: approved, in the Shipped column, whose publish failed. Put back after, for the tests below.
+    const stored = await env.DB.prepare("SELECT targets FROM factory_packages WHERE name = ?").bind(F.failedPkg).first<{ targets: string | null }>();
+    expect((await settleTargets(env, F.failedPkg))[F.failedPkg]).toMatchObject({ [F.arch]: { status: "approved", task: failed.task_id } });
+    // The registry asked past its thirty seconds at the edge (a new query), so the page reads the targets just settled, not the copy this test read above.
+    const board = async (login: string) => {
+      const past = (path: string, init?: RequestInit) => viewer(login)(path === "/api/v1/factory/packages" ? `${path}?t=${Math.random()}` : path, init);
+      const d = runScript(scriptOf(await page("/factory")), { pathname: "/factory", functions: [], fetch: past });
+      await new Promise((r) => setTimeout(r, 250));
+      return d;
+    };
+    const visitor = await board(""), daves = await board(F.outsider);
+    await env.DB.prepare("UPDATE factory_packages SET targets = ? WHERE name = ?").bind(stored?.targets ?? null, F.failedPkg).run();
+    const shipped = visitor.nodes["#col-4"].innerHTML as string, hisRows = daves.nodes["#mine-list"].innerHTML as string;
+    // The card of one package on the line (an a.fx-card), and a row of one's own requests (an a.fx-mrow): the way out is the link itself.
+    const linkOf = (html: string, name: string, cls: string) => { const m = html.split(`<a class="${cls}`).find((r) => r.includes(`<b>${name}</b>`)); expect(m, `a ${cls} of ${name}`).toBeDefined(); return m!.split("</a>")[0]; };
+    for (const [what, html, cls] of [["the Factory's Shipped card", shipped, "fx-card"], ["dave's own row on the Factory", hisRows, "fx-mrow"]] as const) {
+      const card = linkOf(html, F.failedPkg, cls);
+      // The shell's word, in the tone of its class: publish failed, never a promise of edge.
+      expect(card, `${what}: lost`).toContain(">publish failed</span>");
+      expect(card, `${what}: lost promises edge`).not.toMatch(/into edge|>publishing</);
+      // In no ring, the way out is the build — never a package address as if a ring served it.
+      expect(card, `${what}: lost leads to the build`).toMatch(new RegExp(`^[^>]*href="/build/${failed.task_id}"`));
+      expect(card, `${what}: lost leads to a ring`).not.toContain(`href="/package/${F.failedPkg}?`);
+    }
+    expect(linkOf(shipped, F.failedPkg, "fx-card")).toContain('<span class="fx-note bad">publish failed</span>');
+    // pulled is blocked: off the line, no card at all.
+    expect(visitor.nodes["#board"]?.innerHTML ?? "", "pulled").not.toContain(`<b>${F.pulledPkg}</b>`);
+    for (let i = 0; i < 5; i++) expect(visitor.nodes[`#col-${i}`].innerHTML, `column ${i}: pulled`).not.toContain(`<b>${F.pulledPkg}</b>`);
+    // ours is served: its card says the ring and leads to the package's one address in it.
+    const ours = linkOf(shipped, F.publishedPkg, "fx-card");
+    expect(ours).toContain(`href="/package/${F.publishedPkg}?ring=edge&amp;arch=${F.arch}"`);
+    expect(ours).toContain('<span class="fx-note">in edge</span>');
     // The pill as the shell draws it from the rule's answer — class and word; the title is left out, since "blocked 0s ago" is a clock read twice (once by the page, once here) and a second boundary between the two reads is not this test's to control.
     const pill = (a: Row) => { const w = shell.approvalWhere(a); return new RegExp(`<span class="pill ${w.cls}" title="[^"]*">${w.word}</span>`); };
-    // The row of one package, in the drawn list: the Factory's card (a div.land), Review's line (a div.rrow). The assertions on lost and pulled read their own rows, not the whole list — mine, alice's, may stand approved with its publish queued, and then wears the shell's "publishing" pill by right; whether it does depends on what the tests above did to the database, and this test holds either way (it failed alone, passing only after the withdrawal at the top of the file).
+    // The row of one package, in the drawn list: Review's line (a div.rrow). The assertions on lost and pulled read their own rows, not the whole list — mine, alice's, may stand approved with its publish queued, and then wears the shell's "publishing" pill by right; whether it does depends on what the tests above did to the database, and this test holds either way (it failed alone, passing only after the withdrawal at the top of the file).
     const rowOf = (html: string, name: string, cls: string, mark = "") => { const m = html.split(`<div class="${cls}`).find((r) => r.includes(`>${name}</`) && r.includes(mark)); expect(m, `a ${cls} row of ${name}`).toBeDefined(); return m!; };
     // Review's Decided holds two rows of pulled — the brake's, then the approval's (marked "approved"); the approval's is the one the rule words.
-    // The way out of a row: the Factory card's one link is the name's; Review's line has the package's story on the name and the way out on its `go` link.
-    for (const [what, html, cls, mark, out] of [["the Factory's Landed lately", landed, "land", "", ""], ["Review's Decided", decided, "rrow", ">approved</span>", '<a class="go" ']] as const) {
+    // The way out of a row: Review's line has the package's story on the name and the way out on its `go` link.
+    for (const [what, html, cls, mark, out] of [["Review's Decided", decided, "rrow", ">approved</span>", '<a class="go" ']] as const) {
       for (const [name, a] of [[F.failedPkg, failed], [F.pulledPkg, pulled]] as const) {
         const row = rowOf(html, name, cls, mark);
         expect(row, `${what}: ${name}`).toMatch(pill(a));
         // Neither row promises edge: the word for a publish that failed, or a package pulled, is never "publishing".
         expect(row, `${what}: ${name} promises edge`).not.toContain("on its way into edge");
         expect(row, `${what}: ${name} says publishing`).not.toContain(">publishing</span>");
-        // In no ring, the way out of both rows is the build — never a package address as if a ring served it (the Factory's card linked /package/lost?ring=stable, a ring no fact supports, while Review's line led to the build).
+        // In no ring, the way out of the row is the build — never a package address as if a ring served it (the Factory's old card linked /package/lost?ring=stable, a ring no fact supports, while Review's line led to the build).
         expect(row, `${what}: ${name} leads to the build`).toContain(`${out}href="/build/${a.task_id}"`);
         expect(row, `${what}: ${name} leads to a ring`).not.toContain(`${out}href="/package/${name}?`);
       }
@@ -235,9 +268,7 @@ describe("an approval stands or it does not, said once", () => {
     // A standing approval whose publish is queued wears the shell's "publishing" pill on both pages — the shape the two negatives above forbid on lost and pulled, drawn here from the row alone.
     const queued = { ...failed, publish_status: "queued" };
     expect(shell.approvalWhere(queued)).toMatchObject({ word: "publishing", cls: "blue", title: expect.stringContaining("on its way into edge") });
-    // ours is served: the Factory's card wears the ring badges and no pill; Review's line says the ring and its way out is the package's one address.
-    expect(landed).not.toMatch(pill(served));
-    expect(rowOf(landed, F.publishedPkg, "land")).toContain(`href="/package/${F.publishedPkg}?ring=edge&arch=${F.arch}"`);
+    // ours is served: Review's line says the ring and its way out is the package's one address.
     const alices = (await drawn("/review", F.owner)).nodes["#mine-decided"].innerHTML as string;
     expect(alices).toMatch(pill(served));
     expect(alices).toContain(`<a class="go" href="/package/${F.publishedPkg}?ring=edge&amp;arch=${F.arch}">`);
@@ -338,7 +369,7 @@ describe("the maintainer set, the late mark and the budget lines are the server'
   });
 });
 
-// The Worker's handler, and the three pages whose address redirects since #240 drawn as they were (the fixture's fetchPage): what they say stays one truth with the rest until #248 folds them into Status.
+// The Worker's handler (the fixture's fetchPage).
 async function page(path: string): Promise<string> {
   const ctx = createExecutionContext();
   const res = await fetchPage(new Request(`http://pool.test${path}`), env, ctx);
@@ -362,28 +393,29 @@ function served(script: string, name: string): string {
 }
 
 describe("the pages read the one answer instead of counting their own", () => {
-  // The doors that say how much waits for a maintainer: Review, the Pipeline and the Factory.
-  const TILES = { "/review": "review.tiles", "/pipeline": "pipeline.operations-tiles", "/factory": "factory.tiles" } as const;
+  // The doors that say how much waits for a maintainer: Review and the Factory (the Pipeline's tile went with the Pipeline, #248).
+  const TILES = { "/review": "review.tiles", "/factory": "factory.tiles" } as const;
 
-  it("the Review, Pipeline and Factory tiles say \"waiting for review\" from the review list's own `waiting` and `oldest_ms`, never a count of their own", async () => {
+  it("the Review and Factory tiles say \"waiting for review\" from the review list's own `waiting` and `oldest_ms`, never a count of their own", async () => {
     const components = allComponents(F);
     for (const [path, id] of Object.entries(TILES)) {
       const script = ownScript(await page(path));
-      // The tile's number is the field on the object the list answered, and its age the field beside it.
-      const tile = /"Waiting for review", num\((\w+(?:\.\w+)?)\.waiting\), \1\.oldest_ms/.exec(script);
+      // The tile's number is the field on the object the list answered, and its age the field beside it. The Factory's tile is the line's "Ready for review" (#246): the same number, under the handoff's word.
+      const label = path === "/factory" ? "Ready for review" : "Waiting for review";
+      const tile = new RegExp(`"${label}", num\\((\\w+(?:\\.\\w+)?)\\.waiting\\), \\1\\.oldest_ms`).exec(script);
       expect(tile, `${path} reads waiting and oldest_ms from one answer`).not.toBeNull();
       // Nothing on the page counts staged rows for that number.
-      expect(script, `${path} counts staged rows for the tile`).not.toMatch(/"Waiting for review", num\((?!\w+(?:\.\w+)?\.waiting\))/);
+      expect(script, `${path} counts staged rows for the tile`).not.toMatch(new RegExp(`"${label}", num\\((?!\\w+(?:\\.\\w+)?\\.waiting\\))`));
       // The manifest says so: the tile's literal and the field, read from the list.
       const c = components.find((x) => x.id === id);
-      expect(c?.script, id).toEqual(expect.arrayContaining(['"Waiting for review"', `${tile![1]}.waiting`, `${tile![1]}.oldest_ms`]));
+      expect(c?.script, id).toEqual(expect.arrayContaining([`"${label}"`, `${tile![1]}.waiting`, `${tile![1]}.oldest_ms`]));
       expect(c?.reads?.some((r) => r.path === "/api/v1/factory/review" && r.fields?.includes("waiting") && r.fields?.includes("oldest_ms")), `${id} reads waiting from the list`).toBe(true);
     }
   });
 
   it("every package address a page writes goes through pkgHref, and the page asked for the lab draws the lab chip beside the ring shown", async () => {
     const written: string[] = [];
-    for (const path of ["/", "/factory", "/review", "/pipeline", "/packages", `/package/${F.pkg}`, `/build/${F.projectTask}`, `/user/${F.owner}`, "/people", "/workers", "/security", "/status", "/journal", "/request", "/diff"]) {
+    for (const path of ["/", "/factory", "/review", "/packages", `/package/${F.pkg}`, `/build/${F.projectTask}`, `/user/${F.owner}`, "/people", "/workers", "/status", "/diff"]) {
       const script = ownScript(await page(path));
       // Any string a page's own script starts with the family's prefix is an address written by hand — the shell's footer match on it is the shell's.
       if (/["']\/package\//.test(script)) written.push(path);
@@ -406,15 +438,12 @@ describe("the pages read the one answer instead of counting their own", () => {
 
   it("no page types the budget's lines or an hour of its own: the lines ride /cost, the hour is the shell's LATE_MS", async () => {
     const typed: string[] = [];
-    for (const path of ["/", "/factory", "/review", "/pipeline", "/status", "/workers", "/people", "/security", "/journal"]) {
+    for (const path of ["/", "/factory", "/review", "/status", "/workers", "/people"]) {
       const script = ownScript(await page(path));
       if (/US\$\s*(?:25|40|50)\b|\b83\.3\b|\b(?:warn|guard|cap)\b[^;\n]{0,24}\b(?:25|40|50)\b/.test(script)) typed.push(`${path} types a budget line`);
       if (/\b6 \* 3600|\b21600\b|3600e3 \* 6\b|\b9 \* 3600/.test(script)) typed.push(`${path} types an hour`);
     }
     expect(typed, typed.join("\n")).toEqual([]);
-    // The Pipeline's budget panel fills its three slots from the answer, with and without an estimate.
-    const pipeline = ownScript(await page("/pipeline"));
-    for (const slot of ["cost-warn", "cost-guard", "cost-cap"]) expect(pipeline).toContain(`live("${slot}", num(budget.${slot.slice(5)}))`);
     // The shell types no hour either: the constant is spliced in from meta.ts, and the served value is the server's.
     expect(HELPERS).toContain("var LATE_MS = __LATE_AFTER_HOURS__ * 3600e3;");
     expect(HELPERS).not.toMatch(/var LATE_MS = \d/);
@@ -427,7 +456,7 @@ describe("the pages read the one answer instead of counting their own", () => {
     expect(own).toContain("lateSync(c)");
     expect(own).toContain('$("#late-after").textContent = Math.round(LATE_MS / 3600e3)');
     expect(own).not.toMatch(/function isLate|var isLate|last_sync\) >/);
-    expect(html).toContain('older than <span id="late-after">…</span> hours');
+    expect(html).toContain('late after <span id="late-after">…</span> hours without a sync');
     // The core sync aged past the constant: the server marks the row, the shell's lateSync agrees with the mark and, the mark withheld, with the same rule over last_sync; problemsOf (the pipeline pill) names the count and the constant.
     await env.DB.prepare("UPDATE events SET created_at = ? WHERE kind = 'sync' AND source = 'core'").bind(new Date(Date.now() - (LATE_AFTER_HOURS + 1) * 3600e3).toISOString()).run();
     const stats = (await call("GET", "/stats?after=status-page")).json;
@@ -444,7 +473,7 @@ describe("the pages read the one answer instead of counting their own", () => {
 });
 
 describe("three more facts, one source each", () => {
-  it("community packages, approved by a maintainer, is the registry's own `landed`, read by the Factory, the Pipeline and People — captioned as what it counts, never \"in the rings\"", async () => {
+  it("community packages, approved by a maintainer, is the registry's own `landed`, read by the Factory and People — captioned as what it counts, never \"in the rings\"", async () => {
     const pkgs = (await call("GET", "/factory/packages")).json.packages as { name: string; status: string; landed: boolean }[];
     // The server's rule on every row: ours published, hers registered — and mine, whose approval was withdrawn above, back to staged and not landed. lost is the registry's word too: approved, and a failed publish leaves it so (the approval's own row says where it is — the block below); pulled's block set it rejected. So the number is "approved", not "in the rings": the Factory's tile said "3 · in the rings" over a Landed lately reading "publish failed" on one of the three (2026-09-18).
     for (const p of pkgs) expect(p.landed, p.name).toBe(landed(p.status));
@@ -452,8 +481,8 @@ describe("three more facts, one source each", () => {
     expect(pkgs.find((p) => p.name === F.pulledPkg)).toMatchObject({ status: "rejected", landed: false });
     expect(pkgs.find((p) => p.name === F.factoryPkg)).toMatchObject({ status: "staged", landed: false });
     const components = allComponents(F);
-    // Home counts no community packages since #243: its numbers are the pool's (names, arrivals, the stable release, the sources). People counts the flag per contributor since #251 — the ranking by approved packages, the caption on each count — where it was a tile before.
-    for (const [path, id, caption] of [["/factory", "factory.tiles", '"approved by a maintainer, from "'], ["/pipeline", "pipeline.throughput-flow", '<span class="k">approved</span>'], ["/people", "people.contributors", '"approved by a maintainer, built by the project"']] as const) {
+    // Home counts no community packages since #243: its numbers are the pool's (names, arrivals, the stable release, the sources). People counts the flag per contributor since #251 — the ranking by approved packages, the caption on each count — where it was a tile before. The Pipeline's flow went with the Pipeline (#248).
+    for (const [path, id, caption] of [["/factory", "factory.tiles", '"approved by a maintainer, from "'], ["/people", "people.contributors", '"approved by a maintainer, built by the project"']] as const) {
       const own = ownScript(await page(path));
       expect(own, `${path} reads landed`).toContain("p.landed");
       expect(own, `${path} still types the status words`).not.toMatch(/status === "approved" \|\| p\.status === "published"|status === "approved"; \}\)\.length/);
@@ -469,9 +498,9 @@ describe("three more facts, one source each", () => {
     return [/^  function lastDays\(n\) [^\n]*$/m.exec(script)![0], /^  function jobBucket\(status\) [^\n]*$/m.exec(script)![0], /^  function jobsSummary\(series, days\) \{[\s\S]*?\n  \}$/m.exec(script)![0], /^  function workerMinutes\(series, days\) \{[\s\S]*?\n  \}$/m.exec(script)![0]];
   }
 
-  it("the worker minutes of the week are one sum over jobs_daily — the tile and the chart's bars — on the Workers page, the Pipeline and Status", async () => {
+  it("the worker minutes of the week are one sum over jobs_daily — the tile and the chart's bars — on the Workers page and Status", async () => {
     const stats = (await call("GET", "/stats")).json;
-    for (const path of ["/workers", "/pipeline", "/status"]) {
+    for (const path of ["/workers", "/status"]) {
       const html = await page(path), script = scriptOf(html), own = ownScript(html);
       expect(own, `${path} reads the snapshot's minutes`).not.toMatch(/\ba\.minutes\b|metrics\.jobs\.minutes/);
       expect(own, `${path} sums the series through the shell`).toMatch(/workerMinutes\((?:STATS|d)\.series, 7\)/);
@@ -483,7 +512,7 @@ describe("three more facts, one source each", () => {
     }
   });
 
-  it("the jobs of the week are one reduce over jobs_daily — the Status tiles, its table and its charts, the Pipeline's chart, the Workers page's cards — a cancelled job is a failed one everywhere, whatever the snapshot says, and a job queued longer than the week still waits", async () => {
+  it("the jobs of the week are one reduce over jobs_daily — the Status tiles, its table and its charts, the Workers page's cards — a cancelled job is a failed one everywhere, whatever the snapshot says, and a job queued longer than the week still waits", async () => {
     // A job cancelled this week, beside the fixture's done and queued ones, and a snapshot taken over it: the snapshot's "succeeded" (runs − failures − running) counts it as a success; the series counts it as failed. The two disagree from here on, on the same page if a page read both.
     await env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, finished_at, duration_ms) VALUES ('gc', ?, '', '', 'schedule', 0, 0, 'project', 'pool', 'gc', 'cancelled', ?, 60000)").bind(F.arch, new Date().toISOString()).run();
     // A security job queued ten days ago and never pulled — the pool's case when no worker of its architecture is alive: the snapshot took every queued or leased row whatever its age, and the tile that read it said so; the series carries it on today, so the reduce that replaced the snapshot counts it too.
@@ -520,7 +549,7 @@ describe("three more facts, one source each", () => {
     expect(stats.metrics.jobs.runs - stats.metrics.jobs.failures - stats.metrics.jobs.running).toBe(expected.done + cancelled);
     const components = allComponents(F);
     let js7!: { byKind: Record<string, { runs: number; done: number; failed: number; waiting: number }> };
-    for (const [path, ids] of [["/status", ["status.system-tiles", "status.chart-jobs", "status.chart-minutes", "status.workflows-table"]], ["/pipeline", ["pipeline.jobs-chart"]]] as const) {
+    for (const [path, ids] of [["/status", ["status.system-tiles", "status.chart-jobs", "status.chart-minutes", "status.workflows-table"]]] as const) {
       // The page's own statements, less CHARTS where it splices them: the reduce lives there, the page only reads it.
       const html = await page(path), script = scriptOf(html), own = ownScript(html).replace(CHARTS, "");
       // The served reduce, run over the server's series, is the rule above — in all, and its buckets sum to it.
@@ -569,7 +598,7 @@ describe("three more facts, one source each", () => {
     expect(allComponents(F).find((x) => x.id === "workers.kind-cards")?.script, "workers.kind-cards names the shell's bucket").toContain("jobBucket(r.status)");
   });
 
-  it("open advisories in stable are counted at the Security page's default confidence on the Pipeline, through the shell's one rule", async () => {
+  it("open advisories in stable are counted at the Security page's default confidence on Status, through the shell's one rule", async () => {
     const report = (await call("GET", `/security?ring=stable&arch=${F.arch}`)).json;
     const html = await page("/"), script = scriptOf(html);
     const fns = ["SEC_CONFS", "SEVERITIES", "confOk", "advisoriesAt", "advisoryCounts"].map((n) => (n === "SEC_CONFS" || n === "SEVERITIES" ? new RegExp(`^  var ${n} = [^\\n]*$`, "m") : new RegExp(`^  function ${n}\\([\\s\\S]*?\\n  \\}$`, "m")).exec(script)![0]);
@@ -594,18 +623,18 @@ describe("three more facts, one source each", () => {
     expect((at(made, "all") as { v: { name: string }; worst: string }[]).map((r) => [r.v.name, r.worst])).toEqual([["a", "critical"], ["b", "unknown"], ["c", "unknown"], ["d", "high"], ["e", "critical"]]);
     expect((at(made, "exact") as { v: { name: string }; worst: string; kev: boolean }[]).find((r) => r.v.name === "d")).toMatchObject({ worst: "high", kev: false });
     expect(count(made)).toEqual({ packages: 4, kev: 1, critical: 1, high: 1, medium: 0, low: 0, unknown: 2, rest: { critical: 1, high: 0, medium: 0, low: 0, unknown: 2 } });
-    // Home's advisories tile left with #243: the count is Status's section (the Pipeline's module until #248 folds it in).
-    for (const path of ["/pipeline"]) {
+    // Home's advisories tile left with #243: the count is Status's section (#248).
+    for (const path of ["/status"]) {
       const own = ownScript(await page(path));
       expect(own, `${path} reads the report's totals for the number`).not.toMatch(/totals\.packages|t\.packages \|\| 0/);
       expect(own, `${path} counts through the shell`).toContain("advisoryCounts(advisoriesAt(s))");
       expect(own, `${path} names the confidence`).toContain("confWord()");
     }
-    expect(ownScript(await page("/security"))).toContain("SEC_CONF");
+    expect(ownScript(await page("/status"))).toContain("SEC_CONF");
   });
 
-  it("an advisory's severity wears one colour: the shell's SEV_COLOR paints the pill, the bars and the Security page's stack, and no page types a colour of its own", async () => {
-    const html = await page("/security"), script = scriptOf(html);
+  it("an advisory's severity wears one colour: the shell's SEV_COLOR paints the pill, the bars and Status's counts, and no page types a colour of its own", async () => {
+    const html = await page("/status"), script = scriptOf(html);
     // The shell's map as served, run here: six keys — the five severities the server says and the exploited bucket — each a :root colour the CSS declares, by the class the pill wears.
     const shell = ["esc", "pillHtml", "SEV_PILL", "SEV_COLOR", "SEV_BUCKETS", "sevSeries", "sevPill"].map((n) => served(script, n));
     const sev = new Function([...shell, "return { SEV_PILL: SEV_PILL, PILL_COLOR: PILL_COLOR, SEV_COLOR: SEV_COLOR, buckets: SEV_BUCKETS.map(function (b) { return [b[0], b[1]]; }), sevSeries: sevSeries, sevPill: sevPill };"].join("\n"))();
@@ -638,9 +667,9 @@ describe("three more facts, one source each", () => {
     expect([...draw.security.matchAll(/<i style="background:(var\(--\w+\))"><\/i>([^<]+)</g)].map((m) => [m[1], m[2]])).toEqual(series.map((r) => [r.color, r.name]));
     // The pages read the shell's series and hand its colour to the chart; neither names a bucket or a colour of its own, and the manifests say so.
     const components = allComponents(F);
-    // Home's security chart left with #243; the bars are still the served CHARTS', drawn above.
-    for (const [path, id, reads] of [["/security", "security.per-ring-chart", ["sevSeries(tot[RINGS.indexOf(r)])", "b.color"]]] as const) {
-      const own = ownScript(await page(path)).replace(CHARTS, "");
+    // Home's security chart left with #243 and the Security page's stack with #248; the bars are still the served CHARTS', drawn above, and Status's counts and exposure bars take the shell's colour. What Status draws of a report is its drawAdvisories, read alone: the page's job charts paint done, failed and waiting — no severity — in the palette's names.
+    for (const [path, id, reads] of [["/status", "status.advisories", ["SEV_COLOR[s]", "SEV_COLOR[r.worst]"]]] as const) {
+      const own = /^  function drawAdvisories\(d, ring, arch\) \{[\s\S]*?\n  \}$/m.exec(ownScript(await page(path)))![0];
       for (const r of reads) expect(own, `${path} reads ${r}`).toContain(r);
       expect(own, `${path} names a bucket of its own`).not.toMatch(/"critical \+ high"|"low \/ unknown"|"exploited in the wild \(KEV\)"|name: "medium"/);
       expect(own, `${path} colours a severity of its own`).not.toMatch(/C\.(?:red|amber|blue|dim)|(?:critical|high|medium|low|unknown|kev)[^\n]{0,40}var\(--(?:red|amber|blue|dim)\)/);
@@ -653,7 +682,7 @@ describe("three more facts, one source each", () => {
     expect(ownScript(await page(`/package/${F.pkg}`))).not.toContain('style="color:var(--red)">exploited');
   });
 
-  it("the 14-day health grid is drawn once — the shell's heatGrid on the Pipeline and on Status, the rings in the reader's order — and a check's result is one word everywhere: HEALTH_WORD on the grid, the Pool's stable tile, the Pipeline's pills, heads and job results, the Status table", async () => {
+  it("the 14-day health grid is drawn once — the shell's heatGrid on Status, the rings in the reader's order — and a check's result is one word everywhere: HEALTH_WORD on the grid, the Pool's stable tile, and Status's ring cards, its checks and its jobs table", async () => {
     // Health checks beside the fixture's one: two on edge aarch64 yesterday, ok then failed — the day's cell is the worse; a warn on rc today, posted by hand (the check posts ok or error only: a ring with nothing rendered fails, since #47); and one on the lab, which no scheduler queues (the lab is promised nothing) and no grid draws a row for.
     const at = (hoursAgo: number) => new Date(Date.now() - hoursAgo * 3600e3).toISOString();
     const yesterday = new Date(Date.now() - 86400e3).toISOString().slice(0, 10), today = new Date().toISOString().slice(0, 10);
@@ -674,7 +703,7 @@ describe("three more facts, one source each", () => {
     const labels = promised.flatMap((r) => ["x86_64", "aarch64"].map((a) => `${r} ${a}`));
     const WORD = { ok: "healthy", warn: "warning", error: "failed" };
     const components = allComponents(F), grids: string[] = [];
-    for (const [path, id] of [["/pipeline", "pipeline.health-heatgrid"], ["/status", "status.chart-health"]] as const) {
+    for (const [path, id] of [["/status", "status.chart-health"]] as const) {
       const html = await page(path), script = scriptOf(html), own = ownScript(html).replace(CHARTS, "");
       // The shell's word and rings, as served: the one map, the promised rings in the reader's order.
       const shell = ["esc", "HEALTH_WORD", "PROMISED_RINGS", "ARCHES", "SEV_PILL"].map((n) => served(script, n));
@@ -712,12 +741,10 @@ describe("three more facts, one source each", () => {
       expect(c?.script, id).toEqual(expect.arrayContaining(["heatGrid(S.health)"]));
       expect(c?.script?.some((l) => l.includes("worst(cells")), `${id} pins a cell map of its own`).toBe(false);
     }
-    expect(grids[0], "the Status page's cells are the Pipeline's").toBe(grids[1]);
-    // Every other place a check's result is said reads HEALTH_WORD — the Pool's stable tile, the Pipeline's ring pills, its ring heads and a health job's result, the Status rings table — and no page draws the journal's status as text; the manifests name the read. (The Pool's Live lines are packages moving since #243's review: a check is the journal's, one link away.)
+    // Every other place a check's result is said reads HEALTH_WORD — the Pool's stable tile, Status's ring cards, its checks and a health job's result in its jobs table — and no page draws the journal's status as text; the manifests name the read. (The Pool's Live lines are packages moving since #243's review: a check is the journal's, one link away.)
     for (const [path, ids, reads] of [
       ["/", ["pool.tiles"], ["HEALTH_WORD[worst]"]],
-      ["/pipeline", ["pipeline.state-row", "pipeline.ring-heads", "pipeline.tasks-table"], ["HEALTH_WORD.ok", "HEALTH_WORD[h.status]", "HEALTH_WORD[e.status]", "r.ok ? HEALTH_WORD.ok : HEALTH_WORD.error", "PROMISED_RINGS.map(function (n)"]],
-      ["/status", ["status.rings-table"], ["pillHtml(h.status, HEALTH_WORD[h.status])", "PROMISED_RINGS.forEach(function (ring)"]],
+      ["/status", ["status.releases", "status.checks", "status.jobs-table"], ["HEALTH_WORD[h.status]", "HEALTH_WORD.error", "HEALTH_WORD[e.status]", "r.ok ? HEALTH_WORD.ok : HEALTH_WORD.error", "PROMISED_UPWARD.map(function (ring)"]],
     ] as const) {
       const html = await page(path), own = ownScript(html).replace(CHARTS, "");
       for (const r of reads) expect(own, `${path} reads ${r}`).toContain(r);
@@ -727,9 +754,9 @@ describe("three more facts, one source each", () => {
         expect(c?.script?.some((l) => l.includes("HEALTH_WORD")), `${id} names the shell's word`).toBe(true);
       }
     }
-    // The Pipeline's word for a health job, run as served over the two results a job has: the shell's, not one of its own.
-    const pipeline = scriptOf(await page("/pipeline"));
-    const jobResult = new Function("t", [served(pipeline, "HEALTH_WORD"), "function num(v) { return String(v); }", /^  function jobResult\(t\) \{[\s\S]*?\n  \}$/m.exec(pipeline)![0], "return jobResult(t);"].join("\n"));
+    // The jobs table's word for a health job, run as served over the two results a job has: the shell's, not one of its own.
+    const status = scriptOf(await page("/status"));
+    const jobResult = new Function("t", [served(status, "HEALTH_WORD"), "function num(v) { return String(v); }", /^  function jobResult\(t\) \{[\s\S]*?\n  \}$/m.exec(status)![0], "return jobResult(t);"].join("\n"));
     expect(jobResult({ kind: "health", result: { ok: true } })).toBe("healthy");
     expect(jobResult({ kind: "health", result: JSON.stringify({ ok: false }) })).toBe("failed");
   });
@@ -763,7 +790,7 @@ describe("three more facts, one source each", () => {
     expect(c?.reads?.some((r) => r.path === `/api/v1/users/${F.owner}` && ["workers.0.alive", "workers.0.ready", "workers.0.side"].every((f) => r.fields?.includes(f))), "user.tiles reads the listing's words").toBe(true);
   });
 
-  it("the bill wears one colour and one figure: the shell's costColor (the pill's colours by the status /cost says) and usd() on the Status tile and the Pipeline's panel, neither page mapping a status or formatting a sum of its own", async () => {
+  it("the bill wears one colour and one figure: the shell's costColor (the pill's colours by the status /cost says) and usd() on the Status tile, which maps no status and formats no sum of its own", async () => {
     const script = scriptOf(await page("/status"));
     const shell = new Function([served(script, "SEV_PILL") /* PILL_COLOR is declared beside it */, served(script, "usd"), served(script, "costColor"), "return { usd: usd, costColor: costColor, PILL_COLOR: PILL_COLOR };"].join("\n"))() as { usd: (n: unknown) => string; costColor: (c: unknown) => string; PILL_COLOR: Record<string, string> };
     expect(shell.usd(12.345)).toBe("US$ 12.35"); expect(shell.usd(0)).toBe("US$ 0.00"); expect(shell.usd(null)).toBe("US$ 0.00"); expect(shell.usd("7")).toBe("US$ 7.00");
@@ -776,7 +803,7 @@ describe("three more facts, one source each", () => {
     const cost = (await call("GET", "/cost")).json;
     expect(["ok", "warn", "error"]).toContain(cost.status);
     const components = allComponents(F);
-    for (const [path, id] of [["/status", "status.bill-tile"], ["/pipeline", "pipeline.budget"]] as const) {
+    for (const [path, id] of [["/status", "status.bill-tile"]] as const) {
       const own = ownScript(await page(path));
       for (const r of ["costColor(c)", "usd(c.projected_usd)", "usd(c.month_to_date_usd)"]) expect(own, `${path} reads ${r}`).toContain(r);
       expect(own, `${path} maps the status itself`).not.toMatch(/c\.status === "(?:error|warn|ok)"/);
@@ -784,19 +811,6 @@ describe("three more facts, one source each", () => {
       const c = components.find((x) => x.id === id);
       expect(c?.script, id).toEqual(expect.arrayContaining(["costColor(c)", "usd(c.projected_usd)", "usd(c.month_to_date_usd)"]));
     }
-    // The Pipeline's panel, run as served over the server's answer (api() stubbed with it): the cap and the guard on the panel are the lines the sentence's slots say, and the bar is a width. A name that resolves to something else spliced into the same script — `lines`, the chart — prints US$ 0 and NaN without throwing, so the text is read here, not trusted.
-    const pipeline = scriptOf(await page("/pipeline"));
-    const slots: Record<string, string> = {}, el = { innerHTML: "" };
-    const renderCost = /^  function renderCost\(\) \{[\s\S]*?\n  \}$/m.exec(pipeline)![0];
-    await new Promise<void>((done) => new Function("c", "$", "live", "api", "done", [served(pipeline, "esc"), served(pipeline, "num"), served(pipeline, "usd"), served(pipeline, "SEV_PILL"), served(pipeline, "costColor"), "function lines() {} /* CHARTS' chart, in the same scope as on the page */", renderCost, "renderCost(); setTimeout(done, 0);"].join("\n"))(cost, () => el, (k: string, v: string) => { slots[k] = v; }, () => Promise.resolve(cost), done));
-    expect(slots).toEqual({ "cost-warn": String(cost.lines_usd.warn), "cost-guard": String(cost.lines_usd.guard), "cost-cap": String(cost.lines_usd.cap) });
-    expect(el.innerHTML).toContain(`of a US$ ${cost.lines_usd.cap} hard cap`);
-    expect(el.innerHTML).toContain(cost.guard ? "over the guard" : `guard at US$ ${cost.lines_usd.guard}`);
-    expect(el.innerHTML).toContain(`<b style="color:${shell.costColor(cost)}">${shell.usd(cost.month_to_date_usd)}</b>`);
-    expect(el.innerHTML).toMatch(new RegExp(`<i style="width:${Math.min(100, (100 * cost.projected_usd) / cost.lines_usd.cap)}%;`));
-    expect(el.innerHTML).toContain(`<em style="left:${(100 * cost.lines_usd.guard) / cost.lines_usd.cap}%">`);
-    expect(el.innerHTML).not.toMatch(/NaN|US\$ 0 hard cap|guard at US\$ 0\b/);
-    expect(ownScript(await page("/pipeline"))).not.toMatch(/\blines\.(?:warn|guard|cap)\b/);
   });
 
   it("a build nobody decided yet links its package on the lab from Review, from its own page and from a person's builds table — one ringOfBuild", async () => {
@@ -819,7 +833,7 @@ describe("three more facts, one source each", () => {
     expect(whole.approval).toMatchObject({ decision: "approved", standing: stands(whole.approval) });
     const story = (await call("GET", `/factory/packages/${F.factoryPkg}/story`)).json;
     for (const c of story.chains) if (c.approval) expect(c.approval.standing).toBe(stands(c.approval));
-    for (const path of [`/build/${F.projectTask}`, `/user/${F.owner}`, "/review", "/pipeline", "/factory"]) {
+    for (const path of [`/build/${F.projectTask}`, `/user/${F.owner}`, "/review", "/status", "/factory"]) {
       expect(scriptOf(await page(path)), path).not.toMatch(/decision === "approved" && !\w+\.withdrawn_at/);
     }
   });
@@ -849,7 +863,7 @@ describe("a build's evidence has one address", () => {
     expect(scriptOf(html)).toContain("Nothing staged for this build");
   });
 
-  it("the shell writes the address, and the rows link it: a person's builds, the Pipeline's tasks, the checklist's build items — no page writes /artifacts/build.log by hand", async () => {
+  it("the shell writes the address, and the rows link it: a person's builds, Status's jobs table, the checklist's build items — no page writes /artifacts/build.log by hand", async () => {
     const script = scriptOf(await page("/"));
     const href = new Function("id", [served(script, "evidenceHref"), "return evidenceHref(id);"].join("\n"));
     expect(href(dead)).toBe(`/build/${dead}#evidence`);
@@ -864,11 +878,11 @@ describe("a build's evidence has one address", () => {
     expect(cell(row)).not.toContain("/artifacts/");
     expect(cell({ ...row, status: "staged" })).toContain(`href="/build/${dead}#evidence"`);
     expect(cell({ ...row, status: "queued" })).toBe("");
-    // The Pipeline's staged row and the checklist's build items go through the same link; the raw file links a page draws by hand are gone from every page's own script.
-    for (const path of ["/pipeline", `/user/${F.owner}`, `/build/${F.projectTask}`, "/review", "/factory", "/", "/packages", `/package/${F.pkg}`]) {
+    // Status's staged row and the checklist's build items go through the same link; the raw file links a page draws by hand are gone from every page's own script.
+    for (const path of ["/status", `/user/${F.owner}`, `/build/${F.projectTask}`, "/review", "/factory", "/", "/packages", `/package/${F.pkg}`]) {
       expect(ownScript(await page(path)), `${path} links a raw artifact by hand`).not.toMatch(/artifacts\//);
     }
-    expect(ownScript(await page("/pipeline"))).toContain("evidenceLink(t)");
+    expect(ownScript(await page("/status"))).toContain("evidenceLink(t)");
     expect(script).toContain("evidenceLink(cc)");
     expect(script).toContain("evidenceLink(pb)");
   });

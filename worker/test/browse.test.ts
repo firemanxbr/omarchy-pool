@@ -256,9 +256,9 @@ describe("the /packages page", () => {
   });
 
   it("offers the request when nothing matches — with the search when it is a name — and says a letter is not a search yet", async () => {
-    expect(await page("/packages?q=zzfoo")).toContain('<div class="pk-none"><span>Nothing matches.</span><a href="/request?name=zzfoo">Request "zzfoo" →</a></div>');
-    expect(await page("/packages?q=ZZFoo")).toContain('<a href="/request?name=zzfoo">Request "zzfoo" →</a>');
-    expect(await page("/packages?q=two%20words")).toContain('<div class="pk-none"><span>Nothing matches.</span><a href="/request">Request a package →</a></div>');
+    expect(await page("/packages?q=zzfoo")).toContain('<div class="pk-none"><span>Nothing matches.</span><a href="/factory?name=zzfoo#request">Request "zzfoo" →</a></div>');
+    expect(await page("/packages?q=ZZFoo")).toContain('<a href="/factory?name=zzfoo#request">Request "zzfoo" →</a>');
+    expect(await page("/packages?q=two%20words")).toContain('<div class="pk-none"><span>Nothing matches.</span><a href="/factory#request">Request a package →</a></div>');
     // A filter that leaves nothing is cleared, not requested around: the name may be on another ring, architecture or origin (zlib is, and wlctl on the other architecture). The search and the order stay.
     expect(await page("/packages?ring=rc")).toContain('<div class="pk-none"><span>Nothing matches these filters.</span><a href="/packages">Clear the filters →</a></div>');
     expect(await page(`/packages?q=${F.pkg}&origin=factory&sort=recent`)).toContain(`<div class="pk-none"><span>Nothing matches these filters.</span><a href="/packages?q=${F.pkg}&amp;sort=recent">Clear the filters →</a></div>`);
@@ -266,7 +266,7 @@ describe("the /packages page", () => {
     const status = (await env.DB.prepare("SELECT status FROM factory_packages WHERE name = ?").bind(F.factoryPkg).first<{ status: string }>())!.status;
     const mine = await page(`/packages?q=${F.factoryPkg}`);
     expect(mine).toContain(`<div class="pk-none"><span>${F.factoryPkg} is not in a ring. The factory has it: ${status}.</span><a href="/package/${F.factoryPkg}?ring=stable&amp;arch=${F.arch}">Its page →</a></div>`);
-    expect(mine).not.toContain(`/request?name=${F.factoryPkg}`);
+    expect(mine).not.toContain(`/factory?name=${F.factoryPkg}`);
     // One letter: the whole list, the letter kept in the box.
     const one = await page("/packages?q=z");
     expect(one).toContain('value="z"');
@@ -312,8 +312,8 @@ describe("the /packages page", () => {
     expect(MORE[0]).toEqual({ href: "/packages", label: "Packages" });
     expect(/<footer>[\s\S]*?<\/footer>/.exec(await page("/status"))![0]).toContain('<a href="/packages">Packages</a>');
     expect(GO_ACTIONS.find((a) => a.label === "Browse packages")?.href).toBe("/packages");
-    // The Factory's Community packages tile opens the factory's packages, not a search for the word "factory" (Request "factory" on this list). Home has no such tile since #243.
-    expect(scriptOf(await page("/factory"))).toContain('"/packages?origin=factory"');
+    // The Factory's Shipped tile opens the factory's packages, not a search for the word "factory" (Request "factory" on this list). Home has no such tile since #243.
+    expect(await page("/factory")).toContain('<a class="op-stat" id="t-shipped" href="/packages?origin=factory">');
   });
 
   it("says so when the list did not answer, and offers the same list again", () => {

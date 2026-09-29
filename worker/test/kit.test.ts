@@ -304,8 +304,8 @@ describe("the theme", () => {
 
 describe("the v1 kit", () => {
   it("is on the pages that ask for it, and costs the others nothing: its sheet after the frame's CSS, its helpers after the shell's", async () => {
-    // A page that has not adopted it links no sheet, carries no primitive and not the kit's helpers (the docs index has, #250: test/docs-index.test.ts; Home has, #243, and the package page, #244: below). The one mention of the sheet is the ⌘K menu's (#241): its icons are the kit's, and it links the sheet the first time it opens — nothing is asked for before that (test/go-menu.test.ts opens it).
-    for (const path of ["/factory", "/review", "/status"]) {
+    // A page that has not adopted it links no sheet, carries no primitive and not the kit's helpers (the docs index has, #250: test/docs-index.test.ts; Home, #243, the Factory, #246, Status, #248, and the package page, #244, have: below). The one mention of the sheet is the ⌘K menu's (#241): its icons are the kit's, and it links the sheet the first time it opens — nothing is asked for before that (test/go-menu.test.ts opens it).
+    for (const path of ["/review"]) {
       const html = await page(path);
       expect(/<head>([\s\S]*?)<\/head>/.exec(html)![1], path).not.toContain("/assets/kit.");
       expect(html.split("/assets/kit.").length - 1, `${path}: the menu's mention only`).toBe(1);
@@ -320,6 +320,14 @@ describe("the v1 kit", () => {
     expect(styleOf(html)).not.toContain(".op-");
     expect(scriptOf(html)).toContain(KIT_HELPERS);
     expect(ownScriptOf(html)!.trim().startsWith("var own = 1;")).toBe(true);
+    // Status is drawn with it (#248): the sheet in its head after the frame's CSS, its own rules (page({ css })) after the sheet, the helpers after the shell's, and its own script after them.
+    const status = await page("/status"), statusHead = /<head>([\s\S]*?)<\/head>/.exec(status)![1];
+    expect(statusHead.match(/\/assets\/kit\./g)?.length).toBe(1);
+    expect(statusHead.indexOf(link)).toBeGreaterThan(statusHead.indexOf("</style>"));
+    expect(statusHead.lastIndexOf("<style>")).toBeGreaterThan(statusHead.indexOf(link));
+    expect(/<body>[\s\S]*<\/body>/.exec(status)![0], "Status's rules are in its head").not.toContain("<style>");
+    expect(scriptOf(status)).toContain(KIT_HELPERS);
+    expect(ownScriptOf(status)).not.toContain(KIT_HELPERS.trim().slice(0, 80));
     // Home (#243), as served: the sheet once in its head, after the frame's <style>, and the page's own rules (page({ css })) after the sheet, so they refine the kit's; the helpers the shell's.
     const home = await page("/"), homeHead = /<head>([\s\S]*?)<\/head>/.exec(home)![1];
     expect(homeHead.match(/\/assets\/kit\./g)?.length).toBe(1);
@@ -328,6 +336,14 @@ describe("the v1 kit", () => {
     expect(styleOf(home)).not.toContain(".op-");
     expect(scriptOf(home)).toContain(KIT_HELPERS);
     expect(ownScriptOf(home)).not.toContain(KIT_HELPERS.trim().slice(0, 80));
+    // The Factory has adopted it (#246): the sheet once, after the frame's CSS, its own rules after the sheet (page()'s css), the helpers the shell's.
+    const factory = await page("/factory"), fhead = /<head>([\s\S]*?)<\/head>/.exec(factory)![1];
+    expect(fhead.match(/\/assets\/kit\./g)?.length).toBe(1);
+    expect(fhead.indexOf(link)).toBeGreaterThan(fhead.indexOf("</style>"));
+    expect(fhead.lastIndexOf("<style>")).toBeGreaterThan(fhead.indexOf(link));
+    expect(styleOf(factory)).not.toContain(".op-");
+    expect(scriptOf(factory)).toContain(KIT_HELPERS);
+    expect(ownScriptOf(factory)).not.toContain(KIT_HELPERS.trim().slice(0, 80));
     // A package's page is drawn with it (#244): the sheet in its head after the frame's CSS, then the page's own rules; the helpers after the shell's, and its own script after them.
     const pkg = await page("/package/zlib"), pkgHead = /<head>([\s\S]*?)<\/head>/.exec(pkg)![1];
     expect(pkgHead.match(/\/assets\/kit\./g)?.length).toBe(1);

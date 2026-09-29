@@ -20,13 +20,17 @@ verify and attest the package faster and approve it with more confidence.
 ## A package's life
 
 1. **Someone requests it.** A contributor signs in and asks, on the
-   dashboard: the project's URL (a GitHub repository or its release tarball
-   — for a project elsewhere, its home page and the release's source and
-   version), a name, one line of description, the licence (SPDX), the
-   architectures, and four things they confirm. The pool checks all of
-   it — a blocked contributor, a name or a project already in the pool,
-   an upstream that ships the name, a source that does not answer — and
-   only then writes the request **once** to the record,
+   Factory's request card (`/factory`): the project's URL (a GitHub
+   repository or its release tarball — for a project elsewhere, its home
+   page and the release's source and version; the card reads a repository
+   on GitHub, GitLab or Codeberg and fills in the licence, the description,
+   the name and, off GitHub, the release), a name — checked as it is typed,
+   by the request's own rule —, one line of description, the licence
+   (SPDX), the architectures, and four things they confirm. The pool
+   checks all of it — a blocked contributor, a name or a project already
+   in the pool, an upstream that ships the name, a source that does not
+   answer — and only then reserves the name, in one statement, and writes
+   the request **once** to the record,
    `factory/<name>/<id>/request.json` in the pool bucket with the pool's
    detached signature, public and immutable (`worker/src/record.ts`).
    Nothing about a request lives on GitHub. The build starts by itself,

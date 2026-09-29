@@ -84,10 +84,10 @@ ${sourceRows()}
       <div class="step"><h3>Signatures, twice</h3><p>Every package keeps its project's signature, and the pool verified it against that project's keyring when it entered. The pool signs the databases it renders with a key that never leaves the Worker; your <code>pacman.conf</code> trusts that key for the databases and the projects' keys for the packages. The pool cannot alter a package without breaking its signature.</p></div>
       <div class="step"><h3>A real pacman, before you</h3><p>Every promotion is preceded by an actual <code>pacman -Sy</code> and signed downloads on both architectures in a clean container. The most common breakage — a database that does not sync, a package that does not verify — never reaches rc.</p></div>
       <div class="step"><h3>The ABI check</h3><p>Every upgrade a ring would apply is checked at the ELF level against a reference system: a library that would leave a binary without the symbol version it needs blocks the promotion. <code>omarchy-cli check</code> runs the same check on your machine before an out-of-band install.</p></div>
-      <div class="step"><h3>The security layer</h3><p>The Arch and Debian security trackers, OSV, CISA KEV and EPSS, matched every three hours against what each ring serves; because the index knows what every binary loads, an advisory on a library also marks what <em>uses</em> it. A promotion that would replace a clean package with a vulnerable one is blocked; a confident fix is pulled forward. The <a href="/security">Security</a> page shows the ring, the package page the chain.</p></div>
+      <div class="step"><h3>The security layer</h3><p>The Arch and Debian security trackers, OSV, CISA KEV and EPSS, matched every three hours against what each ring serves; because the index knows what every binary loads, an advisory on a library also marks what <em>uses</em> it. A promotion that would replace a clean package with a vulnerable one is blocked; a confident fix is pulled forward. Status's <a href="/status#advisories">advisories</a> show the ring, the package page the chain.</p></div>
       <div class="step"><h3>Immutable releases, automatic rollback</h3><p>A ring never edits a release; it points at one. A failed health check after a promotion points it back — and the next <code>pacman -Syu</code> sees the restored release.</p></div>
       <div class="step"><h3>One rule between sources</h3><p>Two projects' builds of one name both stay in the pool; the include's order — Asahi's above the OPR's above Arch's — is the only thing that decides, and it is written in your <code>pacman.conf</code> where you can read it.</p></div>
-      <div class="step"><h3>Nothing skips the gates</h3><p>Not the OPR, not the factory, not a maintainer's own package. The evidence is on the <a href="/pipeline">Pipeline</a> page and in the <a href="/journal">journal</a>, for anyone.</p></div>
+      <div class="step"><h3>Nothing skips the gates</h3><p>Not the OPR, not the factory, not a maintainer's own package. The evidence is on <a href="/status">Status</a> and in its <a href="/status#journal">journal</a>, for anyone.</p></div>
     </div>
   </section>
 
@@ -328,9 +328,9 @@ export const HOW_IT_WORKS_COMPONENTS = (_F: Fixture): Component[] => {
         "<h3>Immutable releases, automatic rollback</h3>",
         "<h3>One rule between sources</h3>",
         "<h3>Nothing skips the gates</h3>",
-        'href="/security"',
-        'href="/pipeline"',
-        'href="/journal"',
+        'href="/status#advisories"',
+        'href="/status"',
+        'href="/status#journal"',
       ],
       visible: EVERYONE,
     },

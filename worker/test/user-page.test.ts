@@ -135,7 +135,7 @@ describe("a person's page draws every control for every viewer, grey with the se
     const e = await everything("");
     for (const [name, c] of Object.entries(e)) expect(c, name).toEqual(name === "Share" ? live : grey(name === "Build all (a build in flight)" ? "a build is in flight" : SIGN_IN));
     expect(d.nodes["#share-btn"].innerHTML).toBe('<button type="button" class="btn" id="share-open" title="the link to this page, to post anywhere">Share</button> <button type="button" class="btn ghost" id="token-open" disabled aria-disabled="true" title="sign in with GitHub">Token</button>');
-    expect(d.nodes["#pk-request"].outerHTML).toBe('<a class="disabled more-link" id="pk-request" data-href="/request" tabindex="-1" aria-disabled="true" title="sign in with GitHub">+ request one →</a>');
+    expect(d.nodes["#pk-request"].outerHTML).toBe('<a class="disabled more-link" id="pk-request" data-href="/factory#request" tabindex="-1" aria-disabled="true" title="sign in with GitHub">+ request one →</a>');
     // The toggle before the register form is served live for everyone and never drawn again: it only shows the form, whose fields are the ones served grey.
     const served = (await get(`/user/${F.owner}`, "")).text;
     expect(served).toContain('<button type="button" class="more-link" id="w-toggle" title="the form: a name, an architecture, one command to run it">+ register one</button>');
@@ -179,7 +179,7 @@ describe("a person's page draws every control for every viewer, grey with the se
     });
     // Live, the control is the served one with its own title: the owner's Token and request link untouched by the gate.
     expect(d.nodes["#share-btn"].innerHTML).toContain('<button type="button" class="btn ghost" id="token-open" title="a token for scripts and CI">Token</button>');
-    expect(d.nodes["#pk-request"].outerHTML).toBe('<a class="more-link" id="pk-request" href="/request">+ request one →</a>');
+    expect(d.nodes["#pk-request"].outerHTML).toBe('<a class="more-link" id="pk-request" href="/factory#request">+ request one →</a>');
   });
 
   it("m1, a maintainer on alice's page: revoke, own only, remove, withdraw and the log are theirs; the workspace and sharing a worker stay alice's", async () => {
