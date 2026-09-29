@@ -83,7 +83,7 @@ export async function handleAdoptPackage(c: Contributor, name: string, request: 
 }
 
 /** A package a ring serves that is no registration left unmaintained: the maintainer of record only — the package stays what it was, synced or built here. */
-async function adoptServed(c: Contributor, name: string, source: string, via: "web" | "token", reason: string | null, env: Env): Promise<Response> {
+async function adoptServed(c: Contributor, name: string, source: string, via: ReturnType<typeof viaOf>, reason: string | null, env: Env): Promise<Response> {
   // A package the factory built has its maintainer already: the one whose approval it is served under.
   const approval = await env.DB.prepare(`SELECT by FROM approvals WHERE name = ? AND ${standsSql()} ORDER BY id DESC LIMIT 1`).bind(name).first<{ by: string }>();
   if (approval) return json({ error: `${name} is maintained by ${approval.by}, whose approval it is served under` }, 409);
