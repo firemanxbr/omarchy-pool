@@ -12,6 +12,7 @@ import { version, RINGS, ringsSql, sortRings } from "../meta";
 import { isTextEvidence, reclaimStagingPackages, STAGING_DAYS, STAGING_QUOTA_BYTES } from "../staging";
 import { findLeak, leakMessage } from "../leak";
 import { CHECKLIST, LICENSE, PKGNAME, PKGNAME_RULE, forgeOf, sourceHasPath } from "../request";
+import { ALGORITHMS } from "../webauthn";
 import { parseTargets, settleTargets } from "../targets";
 import { throughWords, type Through } from "../agents";
 
@@ -382,6 +383,15 @@ export const ME_WAITING_DRAFTS_SQL = `SELECT ${DRAFT_COLS} FROM drafts WHERE log
 /** A person's drafts, newest first, twenty at most, by (login, created_at): shown to them only until confirmed. */
 export const ME_DRAFTS_SQL = `SELECT ${DRAFT_COLS} FROM drafts WHERE login = ? ORDER BY created_at DESC LIMIT 20`;
 
+/**
+ * A person's passkeys (#257, routes/passkeys.ts), newest first, by (login,
+ * created_at): ten at most — the cap, passkeys.ts MAX_PASSKEYS (a literal
+ * here, as this module is read before that one; the tests hold the two
+ * together). What the owner's page lists: the label, the algorithm, when it
+ * was registered and last used — never the key.
+ */
+export const ME_PASSKEYS_SQL = "SELECT id, label, alg, counter, created_at, last_used FROM passkeys WHERE login = ? ORDER BY created_at DESC LIMIT 10";
+
 /** The rows of the first list, then the second's that the first did not hold: live grants or waiting drafts before the history. */
 function firstThen<T extends { id: string }>(first: T[], then: T[]): T[] {
   const seen = new Set(first.map((x) => x.id));
@@ -393,19 +403,23 @@ function firstThen<T extends { id: string }>(first: T[], then: T[]): T[] {
  * — and, since #252, the grants they made to agents and the drafts those
  * agents made, which nobody else sees (the public journal records decisions,
  * not drafts). A draft still waiting after its thirty minutes says expired.
+ * Since #257, their passkeys: the label, the algorithm, the dates — to the
+ * person only: an agent's request_status is answered without them
+ * (`passkeys: false`), as nothing an agent does needs to know them.
  */
-export async function handleMe(c: Contributor, env: Env, origin = ""): Promise<Response> {
+export async function handleMe(c: Contributor, env: Env, origin = "", opts: { passkeys?: boolean } = {}): Promise<Response> {
   const packages = await env.DB.prepare("SELECT * FROM factory_packages WHERE owner = ? ORDER BY name").bind(c.login).all();
   const workers = await env.DB.prepare(ME_WORKERS_SQL).bind(c.login).all();
   const tasks = await env.DB.prepare("SELECT id, name, arch, version, status, attempts, lease_owner, duration_ms, error, staged_prefix, created_at FROM build_tasks WHERE owner = ? ORDER BY id DESC LIMIT 50").bind(c.login).all();
   const staged = await env.DB.prepare("SELECT COALESCE(SUM(size), 0) AS bytes FROM staging_objects WHERE owner = ?").bind(c.login).first<{ bytes: number }>();
   type GrantRow = { id: string; agent: string; scopes: string; created_at: string; expires_at: string; revoked_at: string | null; revoked_by: string | null; last_used: string | null; swapped: number };
   type DraftRow = { id: string; grant_id: string; agent: string; client: string | null; verdict: string; note: string; name: string; task_id: number | null; created_at: string; expires_at: string; used_at: string | null; state: string; outcome: string | null };
-  const [live, history, waiting, recent] = await Promise.all([
+  const [live, history, waiting, recent, passkeys] = await Promise.all([
     env.DB.prepare(ME_LIVE_GRANTS_SQL).bind(c.login).all<GrantRow>(),
     env.DB.prepare(ME_GRANTS_SQL).bind(c.login).all<GrantRow>(),
     env.DB.prepare(ME_WAITING_DRAFTS_SQL).bind(c.login).all<DraftRow>(),
     env.DB.prepare(ME_DRAFTS_SQL).bind(c.login).all<DraftRow>(),
+    opts.passkeys === false ? null : env.DB.prepare(ME_PASSKEYS_SQL).bind(c.login).all<{ id: string; label: string; alg: number; counter: number; created_at: string; last_used: string | null }>(),
   ]);
   const grants = { results: firstThen(live.results, history.results) }, drafts = { results: firstThen(waiting.results, recent.results) };
   const now = new Date().toISOString();
@@ -417,6 +431,7 @@ export async function handleMe(c: Contributor, env: Env, origin = ""): Promise<R
     staging: { bytes: staged?.bytes ?? 0, quota_bytes: STAGING_QUOTA_BYTES },
     grants: grants.results.map((g) => ({ id: g.id, agent: g.agent, scopes: JSON.parse(g.scopes) as string[], created_at: g.created_at, expires_at: g.expires_at, revoked_at: g.revoked_at, revoked_by: g.revoked_by, last_used: g.last_used, state: g.revoked_at ? "revoked" : g.expires_at <= now ? "expired" : g.swapped ? "live" : "pending" })),
     drafts: drafts.results.map((d) => ({ ...d, outcome: d.outcome ? JSON.parse(d.outcome) : null, state: d.state === "waiting" && d.expires_at <= now ? "expired" : d.state, confirm_url: `${origin}/auth/confirm/${d.id}` })),
+    ...(passkeys ? { passkeys: passkeys.results.map((p) => ({ ...p, alg: ALGORITHMS[p.alg] ?? String(p.alg) })) } : {}),
   }, 200, { "cache-control": "no-store" });
 }
 

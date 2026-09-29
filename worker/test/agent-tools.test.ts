@@ -20,7 +20,7 @@
  * for its plan.
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import * as openpgp from "openpgp";
 import worker from "../src/index";
 import { contributorOf, ME_DRAFTS_SQL, ME_GRANTS_SQL, ME_LIVE_GRANTS_SQL, ME_WAITING_DRAFTS_SQL, ME_WORKERS_SQL, sha256Hex } from "../src/routes/contributors";
@@ -31,8 +31,10 @@ import { BLOCK_GRANTS_SQL } from "../src/routes/blocks";
 import { PENDING_CODES_SQL } from "../src/routes/gc";
 import { agentName, daySql, DRAFT_MINUTES, GRANT_SQL, s256 } from "../src/agents";
 import { forgetGuardWord } from "../src/cost";
+import { assert as answer, createAuthenticator, register, UP, UV } from "./soft-authenticator.mjs";
 
-const ORIGIN = "http://pool.test";
+/** The dashboard as the tests reach it: localhost, where a passkey works (routes/passkeys.ts relyingParty), as wrangler dev's. */
+const ORIGIN = "http://localhost:8787";
 const API = `${ORIGIN}/api/v1`;
 const AGENT = "claude-code/claude-sonnet-5";
 const checklist = { official: true, license: true, unshipped: true, evidence: true };
@@ -135,9 +137,50 @@ const record = async (url: string) => {
 };
 /** The confirm page's form, and the POST of it. */
 const confirmPage = (id: string, who: string) => browser("GET", `/auth/confirm/${id}`, who);
+
+type Authenticator = Awaited<ReturnType<typeof createAuthenticator>>;
+/** The passkeys each login registered in this file (#257): the software authenticator and the pool's id for it, the first answering unless a test names another. */
+const passkeys: Record<string, { a: Authenticator; id: string }[]> = {};
+
+/** A passkey registered on the person's own page, as its script does it: the options, the authenticator's answer, the POST — the session, the page's Origin. */
+async function registerPasskey(login: string, o: { keepsCounter?: boolean } = {}): Promise<{ a: Authenticator; id: string }> {
+  const a = await createAuthenticator({ keepsCounter: o.keepsCounter ?? true });
+  const post = async (path: string, body: unknown) => {
+    const res = await raw("POST", ORIGIN + path, { headers: { cookie: session(login), origin: ORIGIN, "content-type": "application/json" }, body: JSON.stringify(body) });
+    return { status: res.status, json: (await res.json()) as any };
+  };
+  const opts = await post("/auth/passkeys/challenge", {});
+  expect(opts.status, JSON.stringify(opts.json)).toBe(200);
+  const reg = await post("/auth/passkeys", { label: `${login}'s key`, ...(await register(a, { challenge: opts.json.publicKey.challenge, origin: ORIGIN, rpId: "localhost" })) });
+  expect(reg.status, JSON.stringify(reg.json)).toBe(201);
+  const k = { a, id: reg.json.passkey.id as string };
+  (passkeys[login] ??= []).push(k);
+  return k;
+}
+
+/** POST /auth/confirm/:id/challenge, as the page's script asks it: the session, the page's Origin, the form's nonce. */
+async function challengeFor(id: string, who: string, nonce: string, opts: { origin?: string | null; bearer?: string } = {}): Promise<{ status: number; json: any; headers: Headers }> {
+  const headers: Record<string, string> = { cookie: session(who), "content-type": "application/x-www-form-urlencoded" };
+  const origin = opts.origin === undefined ? ORIGIN : opts.origin;
+  if (origin) headers.origin = origin;
+  if (opts.bearer) headers.authorization = `Bearer ${opts.bearer}`;
+  const res = await raw("POST", `${ORIGIN}/auth/confirm/${id}/challenge`, { headers, body: new URLSearchParams({ nonce }).toString() });
+  return { status: res.status, json: await res.json().catch(() => null), headers: res.headers };
+}
+
+/** The assertion the confirm page's script posts with the form: a challenge for this draft, answered by the login's passkey (or `with`), made wrong where a test says how. */
+async function signed(id: string, who: string, o: { with?: Authenticator; answer?: Record<string, unknown> } = {}): Promise<Record<string, string>> {
+  const nonce = fields((await confirmPage(id, who)).text).nonce;
+  const ch = await challengeFor(id, who, nonce);
+  expect(ch.status, JSON.stringify(ch.json)).toBe(200);
+  return answer(o.with ?? passkeys[who][0].a, { challenge: ch.json.publicKey.challenge, origin: ORIGIN, rpId: "localhost", ...(o.answer ?? {}) });
+}
+
+/** Confirm as the page does: its form, and for approve and block (the page offers the passkey's Confirm) the login's passkey's answer. */
 const confirm = async (id: string, who: string, extra: Record<string, string> = {}, opts: { origin?: string | null; bearer?: string } = {}) => {
   const p = await confirmPage(id, who);
-  return browser("POST", `/auth/confirm/${id}`, who, { ...fields(p.text), action: "confirm", ...extra }, opts);
+  const pk = p.text.includes('id="pk-confirm"') ? await signed(id, who) : {};
+  return browser("POST", `/auth/confirm/${id}`, who, { ...fields(p.text), ...pk, action: "confirm", ...extra }, opts);
 };
 
 beforeAll(async () => {
@@ -431,6 +474,9 @@ describe("a draft", () => {
   let m1 = { token: "", grant: "" };
   beforeAll(async () => {
     m1 = await login("m1", "Claude Code", "contribute,review,block");
+    // m1 confirms approve and block with a passkey (#257): a security key that counts, and a synced passkey that keeps no counter.
+    await registerPasskey("m1");
+    await registerPasskey("m1", { keepsCounter: false });
   });
 
   it("decides nothing, writes no journal line, and is shown to its own person only", async () => {
@@ -480,18 +526,18 @@ describe("a draft", () => {
     expect((await browser("POST", `/auth/confirm/${d.draft}`, "m1", { nonce: "x".repeat(43), action: "confirm" })).status).toBe(403);
     expect((await browser("POST", `/auth/confirm/${d.draft}`, "m2", { ...f, action: "confirm" })).status).toBe(403);
     expect(await env.DB.prepare("SELECT state, used_at FROM drafts WHERE id = ?").bind(d.draft).first()).toEqual({ state: "waiting", used_at: null });
-    // The person, in the browser.
-    const ok = await browser("POST", `/auth/confirm/${d.draft}`, "m1", { ...f, action: "confirm" });
+    // The person, in the browser, with their passkey.
+    const ok = await browser("POST", `/auth/confirm/${d.draft}`, "m1", { ...f, ...(await signed(d.draft, "m1")), action: "confirm" });
     expect(ok.status, ok.text.slice(0, 800)).toBe(200);
-    expect(ok.text).toContain("confirmed approved by m1 — drafted by Claude Code, confirmed in the browser.");
+    expect(ok.text).toContain("confirmed approved by m1 — drafted by Claude Code, confirmed in the browser with a passkey.");
     const row = await env.DB.prepare("SELECT agent, by FROM approvals WHERE task_id = ?").bind(project).first<{ agent: string; by: string }>();
     expect(row!.by).toBe("m1");
     expect(JSON.parse(row!.agent)).toMatchObject({ agent: "Claude Code", client: "claude-code/2.1.0", grant: m1.grant, draft: d.draft });
     const l = await line("approve", "confirmed");
     expect(l!.summary).toMatch(/^confirmed 1\.0 \(x86_64\) approved by m1 — drafted by Claude Code, confirmed in the browser/);
     const payload = JSON.parse(l!.payload);
-    expect(payload).toMatchObject({ by: "m1", via: "web", through: { agent: "Claude Code", draft: d.draft, drafted_at: expect.any(String), confirmed_at: expect.any(String) } });
-    expect(await record(payload.record)).toMatchObject({ decision: "approve", by: "m1", via: "web", through: { draft: d.draft, grant: m1.grant } });
+    expect(payload).toMatchObject({ by: "m1", via: "web", through: { agent: "Claude Code", draft: d.draft, drafted_at: expect.any(String), confirmed_at: expect.any(String), passkey: passkeys.m1[0].id } });
+    expect(await record(payload.record)).toMatchObject({ decision: "approve", by: "m1", via: "web", through: { draft: d.draft, grant: m1.grant, passkey: passkeys.m1[0].id } });
     expect(await env.DB.prepare("SELECT state FROM drafts WHERE id = ?").bind(d.draft).first()).toEqual({ state: "confirmed" });
     // Once: again is 409, and nothing more is decided.
     const again = await browser("POST", `/auth/confirm/${d.draft}`, "m1", { ...f, action: "confirm" });
@@ -503,7 +549,9 @@ describe("a draft", () => {
     const { project } = await reviewed("atonce");
     const d = (await call("POST", "/factory/drafts", { name: "atonce", task: project, verdict: "approve", note: "reads well" }, m1.token)).json;
     const f = fields((await confirmPage(d.draft, "m1")).text);
-    const [a, b] = await Promise.all([browser("POST", `/auth/confirm/${d.draft}`, "m1", { ...f, action: "confirm" }), browser("POST", `/auth/confirm/${d.draft}`, "m1", { ...f, action: "confirm" })]);
+    // Two answers of the passkey that keeps no counter, each for a challenge of its own: both are good, and the draft decides once.
+    const [x, y] = [await signed(d.draft, "m1", { with: passkeys.m1[1].a }), await signed(d.draft, "m1", { with: passkeys.m1[1].a })];
+    const [a, b] = await Promise.all([browser("POST", `/auth/confirm/${d.draft}`, "m1", { ...f, ...x, action: "confirm" }), browser("POST", `/auth/confirm/${d.draft}`, "m1", { ...f, ...y, action: "confirm" })]);
     expect([a.status, b.status].sort()).toEqual([200, 409]);
     expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM approvals WHERE name = 'atonce'").first()).toEqual({ n: 1 });
     expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM build_tasks WHERE name = 'atonce' AND kind = 'publish'").first()).toEqual({ n: 1 });
@@ -531,8 +579,8 @@ describe("a draft", () => {
     expect(b.status, b.text.slice(0, 600)).toBe(200);
     expect((await env.DB.prepare("SELECT blocked_by FROM factory_packages WHERE name = 'viaagent'").first())).toEqual({ blocked_by: "m1" });
     const l = await line("block", "viaagent");
-    expect(l!.summary).toMatch(/^viaagent blocked by m1 — drafted by Claude Code, confirmed in the browser: ships a token stealer/);
-    expect(await record(JSON.parse(l!.payload).record)).toMatchObject({ decision: "block", through: { draft: blk.draft } });
+    expect(l!.summary).toMatch(/^viaagent blocked by m1 — drafted by Claude Code, confirmed in the browser with a passkey: ships a token stealer/);
+    expect(await record(JSON.parse(l!.payload).record)).toMatchObject({ decision: "block", through: { draft: blk.draft, passkey: passkeys.m1[0].id } });
   });
 
   it("runs the predicate again on the facts of now, and is refused once decided in the meantime; discarded or expired, nothing is decided", async () => {
@@ -542,7 +590,8 @@ describe("a draft", () => {
     expect((await call("POST", `/factory/tasks/${contributor}/changes`, { note: "pin the tag" }, "omc_m3")).status).toBe(200);
     const page = await confirmPage(d.draft, "m1");
     expect(page.text).toContain("It cannot be confirmed now.");
-    const r = await browser("POST", `/auth/confirm/${d.draft}`, "m1", { ...fields(page.text), action: "confirm" });
+    // A page opened before, posted now: the passkey answers, and the predicate refuses.
+    const r = await browser("POST", `/auth/confirm/${d.draft}`, "m1", { ...fields(page.text), ...(await signed(d.draft, "m1")), action: "confirm" });
     expect(r.status).toBe(409);
     expect(await env.DB.prepare("SELECT state FROM drafts WHERE id = ?").bind(d.draft).first()).toEqual({ state: "refused" });
     expect((await call("GET", "/factory/me", undefined, "omc_m1")).json.drafts.find((x: any) => x.id === d.draft)).toMatchObject({ state: "refused", outcome: { error: expect.stringMatching(/not staged/) } });
@@ -587,7 +636,7 @@ describe("a draft", () => {
     expect(page.text).toContain("One review decides every architecture: confirming decides all 2 below.");
     for (const id of [cx.task.id, ca.task.id, px.task.id, pa.task.id]) expect(page.text, String(id)).toContain(`href="/build/${id}"`);
     expect(page.text.indexOf("<th colspan=\"2\">x86_64</th>")).toBeLessThan(page.text.indexOf("<th colspan=\"2\">aarch64</th>"));
-    const ok = await browser("POST", `/auth/confirm/${d.draft}`, "m1", { ...fields(page.text), action: "confirm" });
+    const ok = await browser("POST", `/auth/confirm/${d.draft}`, "m1", { ...fields(page.text), ...(await signed(d.draft, "m1")), action: "confirm" });
     expect(ok.status, ok.text.slice(0, 800)).toBe(200);
     const rows = (await env.DB.prepare("SELECT arch, agent FROM approvals WHERE name = 'twoarch' ORDER BY arch").all<{ arch: string; agent: string }>()).results;
     expect(rows.map((r) => [r.arch, JSON.parse(r.agent).draft, JSON.parse(r.agent).agent])).toEqual([["aarch64", d.draft, "Claude Code"], ["x86_64", d.draft, "Claude Code"]]);
@@ -630,7 +679,7 @@ describe("a draft", () => {
     const attempt = async (name: string, at: string) => {
       const { project } = await reviewed(name);
       const d = (await call("POST", "/factory/drafts", { name, task: project, verdict: "approve", note: "reads well" }, m1.token)).json;
-      const f = fields((await confirmPage(d.draft, "m1")).text);
+      const f = { ...fields((await confirmPage(d.draft, "m1")).text), ...(await signed(d.draft, "m1")) };
       env.DB = failing(at);
       try {
         return { d, r: await browser("POST", `/auth/confirm/${d.draft}`, "m1", { ...f, action: "confirm" }) };
@@ -650,6 +699,234 @@ describe("a draft", () => {
     expect(after.r.text).toContain("was decided, then the pool failed");
     expect(await env.DB.prepare("SELECT state, json_extract(outcome, '$.status') AS status FROM drafts WHERE id = ?").bind(after.d.draft).first()).toEqual({ state: "confirmed", status: 500 });
     expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM approvals WHERE name = 'failsafter' AND json_extract(agent, '$.draft') = ?").bind(after.d.draft).first()).toEqual({ n: 1 });
+  });
+});
+
+describe("a passkey for approve and block (#257)", () => {
+  let m1 = { token: "", grant: "" }, m3 = { token: "", grant: "" };
+  beforeAll(async () => {
+    m1 = await login("m1", "Claude Code", "contribute,review,block");
+    m3 = await login("m3", "Codex", "contribute,review,block");
+  });
+  // m3's grant goes when the passkey's tests are done: a login holds three live grants, and the limits' tests log m3 in again.
+  afterAll(async () => {
+    expect((await call("POST", `/factory/grants/${m3.grant}/revoke`, {}, "omc_m3")).status).toBe(200);
+  });
+  const approveDraft = async (as: { token: string }, name: string) => {
+    const { project } = await reviewed(name);
+    const d = (await call("POST", "/factory/drafts", { name, task: project, verdict: "approve", note: "reads well" }, as.token)).json;
+    expect(d.state, JSON.stringify(d)).toBe("waiting");
+    return d.draft as string;
+  };
+  const blockDraft = async (as: { token: string }, name: string) => {
+    await ready(name);
+    const d = (await call("POST", "/factory/drafts", { name, verdict: "block", note: "ships a token stealer" }, as.token)).json;
+    expect(d.state, JSON.stringify(d)).toBe("waiting");
+    return d.draft as string;
+  };
+  const post = async (id: string, who: string, extra: Record<string, string>) => browser("POST", `/auth/confirm/${id}`, who, { ...fields((await confirmPage(id, who)).text), action: "confirm", ...extra });
+  const nothing = async (id: string, name: string) => {
+    expect(await env.DB.prepare("SELECT state, used_at FROM drafts WHERE id = ?").bind(id).first(), `${name}'s draft`).toEqual({ state: "waiting", used_at: null });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM approvals WHERE name = ?").bind(name).first(), `${name}'s approvals`).toEqual({ n: 0 });
+    expect(await env.DB.prepare("SELECT blocked_at FROM factory_packages WHERE name = ?").bind(name).first(), `${name}'s block`).toEqual({ blocked_at: null });
+  };
+
+  it("confirms approve and block with a valid assertion — the stored key, a challenge for this draft, this origin and RP id, the user verified — and the decision's row, record and line say so; the passkey's counter and last use move", async () => {
+    const key = passkeys.m1[0];
+    const was = await env.DB.prepare("SELECT counter FROM passkeys WHERE id = ?").bind(key.id).first<{ counter: number }>();
+    const d = await approveDraft(m1, "pkapprove");
+    const page = await confirmPage(d, "m1");
+    // The page asks for the passkey, with its script, and offers no Confirm without it.
+    expect(page.text).toContain('id="pk-confirm"');
+    expect(page.text).toContain("Confirm with your passkey: approve pkapprove");
+    expect(page.text).toContain("navigator.credentials.get");
+    expect(page.text).not.toContain('value="confirm"');
+    const ok = await post(d, "m1", await signed(d, "m1"));
+    expect(ok.status, ok.text.slice(0, 600)).toBe(200);
+    expect(ok.text).toContain("pkapprove approved by m1 — drafted by Claude Code, confirmed in the browser with a passkey.");
+    const row = await env.DB.prepare("SELECT agent FROM approvals WHERE name = 'pkapprove'").first<{ agent: string }>();
+    expect(JSON.parse(row!.agent)).toMatchObject({ draft: d, passkey: key.id });
+    expect((await line("approve", "pkapprove"))!.summary).toContain("approved by m1 — drafted by Claude Code, confirmed in the browser with a passkey");
+    const now = await env.DB.prepare("SELECT counter, last_used FROM passkeys WHERE id = ?").bind(key.id).first<{ counter: number; last_used: string | null }>();
+    expect(now!.counter).toBe(key.a.counter);
+    expect(now!.counter).toBeGreaterThan(was!.counter);
+    expect(now!.last_used).not.toBeNull();
+    // The person's own /factory/me lists the passkey and its last use; the same answer to their agent carries none.
+    expect((await call("GET", "/factory/me", undefined, "omc_m1")).json.passkeys.find((p: any) => p.id === key.id)).toMatchObject({ alg: "ES256", last_used: now!.last_used });
+    expect((await call("GET", "/factory/me", undefined, m1.token)).json).not.toHaveProperty("passkeys");
+    // A block, the same way, with the name typed.
+    const b = await blockDraft(m1, "pkblock");
+    const blocked = await post(b, "m1", { ...(await signed(b, "m1")), name: "pkblock" });
+    expect(blocked.status, blocked.text.slice(0, 600)).toBe(200);
+    expect(await env.DB.prepare("SELECT blocked_by FROM factory_packages WHERE name = 'pkblock'").first()).toEqual({ blocked_by: "m1" });
+    const l = await line("block", "pkblock");
+    expect(l!.summary).toMatch(/^pkblock blocked by m1 — drafted by Claude Code, confirmed in the browser with a passkey: ships a token stealer/);
+    expect(JSON.parse(l!.payload).through).toMatchObject({ draft: b, passkey: key.id });
+  });
+
+  it("refuses a replayed answer: its challenge is taken by the first request that brings it, whatever that request decides", async () => {
+    const d = await blockDraft(m1, "pkreplay");
+    const x = await signed(d, "m1");
+    // The first request brings a good answer but no typed name: refused for the name, and the challenge is spent.
+    expect((await post(d, "m1", x)).status).toBe(400);
+    const again = await post(d, "m1", { ...x, name: "pkreplay" });
+    expect(again.status).toBe(403);
+    expect(again.text).toContain("was used already");
+    await nothing(d, "pkreplay");
+    // A challenge of another draft is not this one's.
+    const other = await approveDraft(m1, "pkother");
+    const theirs = await signed(other, "m1");
+    const crossed = await post(d, "m1", { ...theirs, name: "pkreplay" });
+    expect(crossed.status).toBe(403);
+    await nothing(d, "pkreplay");
+    // Nor is a challenge past its five minutes.
+    const nonce = fields((await confirmPage(d, "m1")).text).nonce;
+    const late = (await challengeFor(d, "m1", nonce)).json.publicKey.challenge;
+    await env.DB.prepare("UPDATE passkey_challenges SET expires_at = '2000-01-01T00:00:00.000Z' WHERE challenge = ?").bind(late).run();
+    const expired = await post(d, "m1", { ...(await answer(passkeys.m1[0].a, { challenge: late, origin: ORIGIN, rpId: "localhost" })), name: "pkreplay" });
+    expect(expired.status).toBe(403);
+    await nothing(d, "pkreplay");
+    // A fresh answer confirms it.
+    expect((await post(d, "m1", { ...(await signed(d, "m1")), name: "pkreplay" })).status).toBe(200);
+  });
+
+  it("refuses an answer made on another origin, for another RP id, without the user verified or present, or of a registration — the draft still waits, nothing is decided", async () => {
+    const d = await approveDraft(m1, "pkwrong");
+    const cases: [string, Record<string, unknown>, RegExp][] = [
+      ["another origin", { origin: "https://evil.example" }, /made on &quot;https:\/\/evil\.example&quot;/],
+      ["the right name over http on another port", { origin: "http://localhost:9999" }, /not http:\/\/localhost:8787/],
+      ["another RP id", { signRpId: "evil.example" }, /another relying party/],
+      ["no user verification", { flags: UP }, /did not verify the user/],
+      ["nobody present", { flags: UV }, /nobody was present/],
+      ["a registration's type", { type: "webauthn.create" }, /not webauthn\.get/],
+      ["a frame of another site", { crossOrigin: true }, /frame of another site/],
+    ];
+    for (const [what, wrong, said] of cases) {
+      const r = await post(d, "m1", await signed(d, "m1", { answer: wrong }));
+      expect(r.status, what).toBe(403);
+      expect(r.text, what).toMatch(said);
+      await nothing(d, "pkwrong");
+    }
+    // Without any answer: asked for, not skipped.
+    const none = await post(d, "m1", {});
+    expect([none.status, none.text.includes("Confirm with your passkey")]).toEqual([403, true]);
+    await nothing(d, "pkwrong");
+    expect((await post(d, "m1", await signed(d, "m1"))).status).toBe(200);
+  });
+
+  it("refuses a key of another login, a removed key, and a key whose counter went backwards", async () => {
+    const m2key = await registerPasskey("m2");
+    const d = await approveDraft(m1, "pkanother");
+    const theirs = await post(d, "m1", await signed(d, "m1", { with: m2key.a }));
+    expect([theirs.status, theirs.text.includes("not one of m1&#39;s") || theirs.text.includes("not one of m1's")]).toEqual([403, true]);
+    await nothing(d, "pkanother");
+    // A signature of m2's key under m1's credential id: the stored key does not verify it.
+    const forged = await post(d, "m1", await signed(d, "m1", { answer: { signer: m2key.a, credentialId: passkeys.m1[0].a.credentialId } }));
+    expect([forged.status, forged.text.includes("not the passkey")]).toEqual([403, true]);
+    await nothing(d, "pkanother");
+    // The counter: behind the stored one is a copy of the key.
+    const key = passkeys.m1[0];
+    const stored = (await env.DB.prepare("SELECT counter FROM passkeys WHERE id = ?").bind(key.id).first<{ counter: number }>())!.counter;
+    const back = await post(d, "m1", await signed(d, "m1", { answer: { counter: stored - 1 } }));
+    expect([back.status, back.text.includes("counter went from")]).toEqual([403, true]);
+    const same = await post(d, "m1", await signed(d, "m1", { answer: { counter: stored } }));
+    expect(same.status).toBe(403);
+    await nothing(d, "pkanother");
+    key.a.counter = stored;
+    // A passkey removed on the person's page answers nothing after.
+    const spare = await registerPasskey("m1");
+    const removed = await raw("POST", `${ORIGIN}/auth/passkeys/${spare.id}/remove`, { headers: { cookie: session("m1"), origin: ORIGIN } });
+    expect(removed.status).toBe(200);
+    const gone = await post(d, "m1", await signed(d, "m1", { with: spare.a }));
+    expect(gone.status).toBe(403);
+    await nothing(d, "pkanother");
+    expect((await post(d, "m1", await signed(d, "m1"))).status).toBe(200);
+  });
+
+  it("is asked for, never skipped: a maintainer without a passkey is told to register one — on the page, at the POST and at the challenge — with the link, and nothing is decided", async () => {
+    const d = await approveDraft(m3, "nopasskey");
+    const page = await confirmPage(d, "m3");
+    expect(page.status).toBe(200);
+    expect(page.text).toContain("Register a passkey first.");
+    expect(page.text).toContain('href="/user/m3#passkeys"');
+    expect(page.text).not.toContain('id="pk-confirm"');
+    expect(page.text).not.toContain('value="confirm"');
+    expect(page.text).toContain('value="discard"');
+    const r = await post(d, "m3", {});
+    expect(r.status).toBe(403);
+    expect(r.text).toContain("Register a passkey first");
+    expect(r.text).toContain("You have none yet.");
+    expect(r.text).toContain('href="/user/m3#passkeys"');
+    await nothing(d, "nopasskey");
+    const ch = await challengeFor(d, "m3", fields(page.text).nonce);
+    expect([ch.status, ch.json.code, ch.json.register]).toEqual([403, "no_passkey", "/user/m3#passkeys"]);
+    // Somebody else's answer does not stand in for one: the passkey must be m3's.
+    const forged = await post(d, "m3", await answer(passkeys.m1[0].a, { challenge: "x".repeat(43), origin: ORIGIN, rpId: "localhost" }));
+    expect(forged.status).toBe(403);
+    await nothing(d, "nopasskey");
+    // A block the same.
+    const b = await blockDraft(m3, "nopasskeyblock");
+    expect((await confirmPage(b, "m3")).text).toContain("Register a passkey first.");
+    const rb = await post(b, "m3", { name: "nopasskeyblock" });
+    expect([rb.status, rb.text.includes("Register a passkey first")]).toEqual([403, true]);
+    await nothing(b, "nopasskeyblock");
+  });
+
+  it("is offered on the relying party's address only: elsewhere the page says where, and a POST there decides nothing", async () => {
+    const d = await approveDraft(m1, "elsewhere");
+    const at = async (method: string, form?: Record<string, string>) => {
+      const res = await raw(method, `http://pool.test/auth/confirm/${d}`, { headers: { cookie: session("m1"), ...(form ? { origin: "http://pool.test", "content-type": "application/x-www-form-urlencoded" } : {}) }, body: form ? new URLSearchParams(form).toString() : undefined });
+      return { status: res.status, text: await res.text() };
+    };
+    const page = await at("GET");
+    expect(page.text).toContain("Not on this address.");
+    expect(page.text).not.toContain('id="pk-confirm"');
+    const r = await at("POST", { ...fields(page.text), action: "confirm", ...(await signed(d, "m1")) });
+    expect([r.status, r.text.includes("Not on this address")]).toEqual([403, true]);
+    await nothing(d, "elsewhere");
+  });
+
+  it("request changes and reject are confirmed as before — the session and, for a rejection, the name typed — by a maintainer without a passkey", async () => {
+    const { contributor } = await reviewed("pkchanges");
+    const c = (await call("POST", "/factory/drafts", { name: "pkchanges", task: contributor, verdict: "request_changes", note: "pin the tag" }, m3.token)).json;
+    const page = await confirmPage(c.draft, "m3");
+    expect(page.text).toContain("Confirm: request changes on pkchanges");
+    expect(page.text).not.toContain("passkey");
+    expect((await challengeFor(c.draft, "m3", fields(page.text).nonce)).json.code).toBe("no_passkey_needed");
+    const ok = await confirm(c.draft, "m3");
+    expect(ok.status, ok.text.slice(0, 600)).toBe(200);
+    expect(ok.text).toContain("confirmed in the browser.");
+    expect(ok.text).not.toContain("with a passkey");
+    const { contributor: r } = await reviewed("pkreject");
+    const rej = (await call("POST", "/factory/drafts", { name: "pkreject", task: r, verdict: "reject", note: "not a project of its own" }, m3.token)).json;
+    expect((await confirm(rej.draft, "m3")).status).toBe(400);
+    expect((await confirm(rej.draft, "m3", { name: "pkreject" })).status).toBe(200);
+    expect((await line("approve", "pkreject"))!.summary).toMatch(/rejected by m3 — drafted by Codex, confirmed in the browser(?! with a passkey)/);
+  });
+
+  it("its challenge is asked from the draft's own page: the session only, its Origin and nonce, the same login; five live at most", async () => {
+    const d = await approveDraft(m1, "pkchallenge");
+    const nonce = fields((await confirmPage(d, "m1")).text).nonce;
+    expect((await challengeFor(d, "m1", nonce, { bearer: m1.token })).json.code).toBe("session_only");
+    expect((await challengeFor(d, "m1", nonce, { origin: "https://evil.example" })).json.code).toBe("origin");
+    expect((await challengeFor(d, "m1", nonce, { origin: null })).json.code).toBe("origin");
+    expect((await challengeFor(d, "m1", "x".repeat(43))).json.code).toBe("nonce");
+    expect((await challengeFor(d, "m2", nonce)).status).toBe(404);
+    const anon = await raw("POST", `${ORIGIN}/auth/confirm/${d}/challenge`, { headers: { origin: ORIGIN, "content-type": "application/x-www-form-urlencoded" }, body: `nonce=${nonce}` });
+    expect(anon.status).toBe(401);
+    const first = await challengeFor(d, "m1", nonce);
+    expect(first.headers.get("cache-control")).toBe("no-store");
+    expect(first.json.publicKey).toMatchObject({ rpId: "localhost", userVerification: "required", timeout: 120000 });
+    expect(first.json.publicKey.allowCredentials.map((c: any) => c.id).sort()).toEqual((await env.DB.prepare("SELECT credential_id FROM passkeys WHERE login = 'm1'").all<{ credential_id: string }>()).results.map((r) => r.credential_id).sort());
+    expect(await env.DB.prepare("SELECT login, purpose, draft_id FROM passkey_challenges WHERE challenge = ?").bind(first.json.publicKey.challenge).first()).toEqual({ login: "m1", purpose: "confirm", draft_id: d });
+    await env.DB.prepare("DELETE FROM passkey_challenges WHERE login = 'm1'").run();
+    for (let i = 0; i < 5; i++) expect((await challengeFor(d, "m1", nonce)).status).toBe(200);
+    const sixth = await challengeFor(d, "m1", nonce);
+    expect([sixth.status, sixth.json.code]).toEqual([429, "rate_limited"]);
+    await env.DB.prepare("DELETE FROM passkey_challenges WHERE login = 'm1'").run();
+    // A draft decided or expired asks for none.
+    await env.DB.prepare("UPDATE drafts SET expires_at = '2000-01-01T00:00:00.000Z' WHERE id = ?").bind(d).run();
+    expect((await challengeFor(d, "m1", nonce)).status).toBe(410);
   });
 });
 
@@ -708,7 +985,8 @@ describe("revocation", () => {
     const page = await confirmPage(four.d.draft, "m4");
     expect(page.text).toContain("It cannot be confirmed now.");
     expect(page.text).toContain("the grant to Raced that drafted this was revoked since (revoked on m4's page)");
-    const r4 = await browser("POST", `/auth/confirm/${four.d.draft}`, "m4", { ...four.f, action: "confirm" });
+    await registerPasskey("m4");
+    const r4 = await browser("POST", `/auth/confirm/${four.d.draft}`, "m4", { ...four.f, ...(await signed(four.d.draft, "m4")), action: "confirm" });
     expect(r4.status).toBe(409);
     expect(await env.DB.prepare("SELECT state FROM drafts WHERE id = ?").bind(four.d.draft).first()).toEqual({ state: "refused" });
     expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM approvals WHERE name = 'raced'").first()).toEqual({ n: 0 });

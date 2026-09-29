@@ -2,6 +2,7 @@ import { json, type Env } from "../index";
 import { RINGS, ringsSql } from "../meta";
 import { sweepStaging } from "../staging";
 import { GRACE_DAYS, KEEP_RELEASES, outsideRetention, retention } from "../db";
+import { EXPIRED_CHALLENGES_SQL } from "./passkeys";
 
 /** The grants whose one-time code expired unswapped: the partial index on the code's expiry, where no token was taken (migration 0039) — named, so the planner never walks the token's index for its NULLs instead. */
 export const PENDING_CODES_SQL = "DELETE FROM agent_grants INDEXED BY idx_agent_grants_pending WHERE token_hash IS NULL AND code_expires_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
@@ -131,5 +132,7 @@ export async function handleGc(url: URL, env: Env): Promise<Response> {
   const staging = await sweepStaging(env);
   // An agent's grant nobody swapped (#252): its one-time code lived a minute; the row goes, found through the partial index on its expiry.
   const codes = await env.DB.prepare(PENDING_CODES_SQL).run();
-  return json({ keep, deleted, agent_codes_pruned: codes.meta.changes ?? 0, taken_back_by_a_ring: takenBack, objects_kept_for_another_row: objectsKept, bytes, remaining: packages.length - victims.length, protected_releases: protectedReleases, kept_checkpoints: keptCheckpoints, membership_rows_pruned: pruned.meta.changes ?? 0, delta_rows_pruned: deltasPruned, cve_meta_pruned: cves.meta.changes ?? 0, staging });
+  // A passkey's challenge nobody answered (#257): it lived five minutes; the row goes, found through the index on its expiry.
+  const challenges = await env.DB.prepare(EXPIRED_CHALLENGES_SQL).run();
+  return json({ keep, deleted, agent_codes_pruned: codes.meta.changes ?? 0, passkey_challenges_pruned: challenges.meta.changes ?? 0, taken_back_by_a_ring: takenBack, objects_kept_for_another_row: objectsKept, bytes, remaining: packages.length - victims.length, protected_releases: protectedReleases, kept_checkpoints: keptCheckpoints, membership_rows_pruned: pruned.meta.changes ?? 0, delta_rows_pruned: deltasPruned, cve_meta_pruned: cves.meta.changes ?? 0, staging });
 }

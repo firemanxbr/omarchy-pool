@@ -35,6 +35,8 @@ const TOKEN_BTN = `<button type="button" class="btn ghost" id="token-open" title
 const REQUEST_LINK = `<a class="more-link" id="pk-request" href="/factory#request">+ request one →</a>`;
 const REGISTER_TOGGLE = `<button type="button" class="more-link" id="w-toggle" title="the form: a name, an architecture, one command to run it">+ register one</button>`;
 const WORKER_FORM = `<label>Name <input type="text" id="w-name" placeholder="laptop" required></label> <label>Architecture <select id="w-arch"><option>x86_64</option><option>aarch64</option></select></label> <button type="submit" id="w-btn">Register worker</button>`;
+/** Add a passkey (#257): a name for it and the button that starts the browser's request — live for a maintainer, grey with why for a contributor (gate()). */
+const PASSKEY_FORM = `<label>Name <input type="text" id="pk-label" maxlength="40" placeholder="this laptop" autocomplete="off"></label> <button type="submit" id="pk-add">Add a passkey</button>`;
 
 const body = (login: string) => String.raw`
   <div class="profile-head">
@@ -87,6 +89,14 @@ const body = (login: string) => String.raw`
     <p class="sub">The agents you let act as you through omarchy-cli's tools (<code>omarchy-cli login</code>), and the decisions they drafted for you. Only you see this section: nothing an agent drafts is decided, or on the record, until you confirm it in the browser. <a href="/docs/omarchy-cli-mcp#write-tools">How it works →</a></p>
     <div class="table-wrap"><table id="grants"><thead><tr><th>Agent</th><th>Scopes</th><th>Granted</th><th>Expires</th><th>Last used</th><th>State</th></tr></thead><tbody></tbody></table></div>
     <div class="table-wrap"><table id="drafts"><thead><tr><th>Drafted</th><th>Package</th><th>Verdict</th><th>Agent</th><th>State</th><th>Note</th></tr></thead><tbody></tbody></table></div>
+  </section>
+
+  <section id="passkeys" hidden>
+    <div class="h2row"><h2>Passkeys</h2></div>
+    <p class="sub">Approve and block that your agents draft are confirmed with a passkey: a touch and a PIN or a biometric on your device, which an agent's software cannot supply. The pool keeps each one's public key and credential id, nothing else, and the journal says when one is added or removed. Only you see this section. <a href="/docs/omarchy-cli-mcp#write-tools">How it works →</a></p>
+    <form id="pk-form" class="form" onsubmit="return false"></form>
+    <p class="sub" id="pk-said" role="status" aria-live="polite" hidden></p>
+    <div class="table-wrap"><table id="pk-table"><thead><tr><th>Name</th><th>Algorithm</th><th>Added</th><th>Last used</th><th></th></tr></thead><tbody></tbody></table></div>
   </section>
 
   <section id="approvals-section" hidden>
@@ -355,7 +365,7 @@ const SCRIPT = String.raw`
   // The staging quota is the owner's own (GET /factory/me answers for the caller): the figure on their page, a dash on it for everyone else. The same answer carries their agents' grants and drafts (#252), which only they see.
   function quota() {
     if (!isOwner(login)) { $("#quota").textContent = "—"; $("#quota").title = "only " + login + " sees their staging"; return; }
-    api("GET", API + "/me").then(function (d) { renderAgents(d); var st = d.staging; if (!st) return; $("#quota").textContent = "staging " + (st.bytes / 1048576).toFixed(1) + " MB of " + (st.quota_bytes / 1073741824).toFixed(0) + " GB · evidence expires after 30 days"; }).catch(function () {});
+    api("GET", API + "/me").then(function (d) { renderAgents(d); renderPasskeys(d); var st = d.staging; if (!st) return; $("#quota").textContent = "staging " + (st.bytes / 1048576).toFixed(1) + " MB of " + (st.quota_bytes / 1073741824).toFixed(0) + " GB · evidence expires after 30 days"; }).catch(function () {});
   }
   // ---- agents (#252): the owner's grants, each with Revoke while it lives, and the drafts their agents made — waiting ones with the link to confirm them, the rest with what became of them. Served hidden; shown to the owner only, from their own no-store /factory/me.
   var DRAFT_PILL = { waiting: "warn", confirmed: "ok", refused: "error", discarded: "none", expired: "none" };
@@ -372,6 +382,42 @@ const SCRIPT = String.raw`
       return '<tr><td class="when">' + ago(x.created_at) + '</td><td><a href="' + pkgHref(x.name, null, null) + '"><b>' + esc(x.name) + '</b></a>' + (x.task_id ? ' <a class="dim" href="/build/' + x.task_id + '">#' + x.task_id + '</a>' : '') + '</td><td>' + esc(VERDICT_WORDS[x.verdict] || x.verdict) + '</td><td>' + esc(x.agent) + '</td><td>' + pillHtml(DRAFT_PILL[x.state] || "none", x.state) + ' <span class="muted">' + said + '</span></td><td class="muted">' + esc(x.note || "") + '</td></tr>';
     }, { empty: "no draft yet" });
   }
+  // ---- passkeys (#257): the owner's, each with Remove, and Add a passkey — navigator.credentials.create() with the options the pool issued (user verification required), its answer posted for the pool to verify. Served hidden; shown to the owner only, from their own no-store /factory/me. A contributor sees the form grey with why: approve and block are a maintainer's.
+  var PASSKEY_FORM = ${JSON.stringify(PASSKEY_FORM)}, PK_DRAWN = null;
+  function pkB64(buf) { var b = new Uint8Array(buf), s = ""; for (var i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); }
+  function pkBytes(s) { var t = String(s).replace(/-/g, "+").replace(/_/g, "/"); while (t.length % 4) t += "="; var bin = atob(t), out = new Uint8Array(bin.length); for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out; }
+  function pkSay(text) { var el = $("#pk-said"); el.hidden = !text; el.textContent = text || ""; }
+  function renderPasskeys(d) {
+    if (!d.passkeys) return;
+    $("#passkeys").hidden = false;
+    var maintainer = !!(d.contributor && d.contributor.role === "maintainer");
+    // The form is drawn again only when its gate changed: a name being typed stays through a refresh.
+    if (PK_DRAWN !== maintainer) { $("#pk-form").innerHTML = gate(PASSKEY_FORM, maintainer, "a passkey confirms the approve and block an agent drafts, which are a maintainer's"); PK_DRAWN = maintainer; }
+    pager("#pk-table", d.passkeys, function (k) {
+      return '<tr><td><b>' + esc(k.label) + '</b></td><td class="mono">' + esc(k.alg) + '</td><td class="when" title="' + esc(k.created_at) + '">' + ago(k.created_at) + '</td><td class="when">' + (k.last_used ? ago(k.last_used) : '<span class="dim">never</span>') + '</td><td><button type="button" class="btn ghost" data-passkey-remove="' + esc(k.id) + '" data-label="' + esc(k.label) + '" title="it confirms nothing from now on">Remove</button></td></tr>';
+    }, { empty: maintainer ? "no passkey yet: approve and block drafted by an agent wait until you add one" : "no passkey" });
+  }
+  function addPasskey() {
+    var btn = $("#pk-add"); if (!btn || btn.disabled) return;
+    if (!window.PublicKeyCredential || !navigator.credentials || !window.isSecureContext) { pkSay("This browser cannot make a passkey on this page: it needs a secure context (https, or localhost) and passkey support."); return; }
+    btn.disabled = true; pkSay("Answer your browser: a touch and a PIN or a biometric.");
+    api("POST", "/auth/passkeys/challenge", {}).then(function (o) {
+      if (o.error) throw new Error(o.error);
+      var k = o.publicKey;
+      return navigator.credentials.create({ publicKey: { challenge: pkBytes(k.challenge), rp: k.rp, user: { id: pkBytes(k.user.id), name: k.user.name, displayName: k.user.displayName }, pubKeyCredParams: k.pubKeyCredParams, timeout: k.timeout, attestation: k.attestation, authenticatorSelection: k.authenticatorSelection, excludeCredentials: k.excludeCredentials.map(function (c) { return { type: c.type, id: pkBytes(c.id) }; }) } });
+    }).then(function (cred) {
+      if (!cred) throw new Error("no passkey was made");
+      return api("POST", "/auth/passkeys", { label: $("#pk-label").value, id: pkB64(cred.rawId), clientDataJSON: pkB64(cred.response.clientDataJSON), attestationObject: pkB64(cred.response.attestationObject) });
+    }).then(function (r) {
+      btn.disabled = false;
+      if (r.error) { pkSay("Not added: " + r.error); return; }
+      $("#pk-label").value = ""; pkSay(""); toast("Passkey added: " + esc(r.passkey.label) + ". Approve and block drafted by your agents ask for it."); quota();
+    }).catch(function (e) {
+      btn.disabled = false;
+      pkSay(e && e.name === "NotAllowedError" ? "No passkey was made: the request was cancelled or timed out." : e && e.name === "InvalidStateError" ? "This device holds a passkey of yours for the pool already." : "Not added: " + errorText(e));
+    });
+  }
+  document.addEventListener("submit", function (ev) { if (ev.target && ev.target.id === "pk-form") { ev.preventDefault(); addPasskey(); } });
   // Who is looking (the shell's whoami: one fetch of /auth/me per page) and what they may do, before the first draw — so the tables come with their buttons in the right state, drawn once.
   Promise.all([new Promise(function (r) { whoami(r); }), loadCan()]).then(function () {
     DRAWN = true;
@@ -385,6 +431,15 @@ const SCRIPT = String.raw`
   document.addEventListener("click", function (ev) {
     var x = ev.target.closest ? ev.target.closest("button[data-expand]") : null;
     if (x) { var n = x.getAttribute("data-expand"); OPEN[n] = !OPEN[n]; load(); return; }
+    var pr = ev.target.closest ? ev.target.closest("button[data-passkey-remove]") : null;
+    if (pr) {
+      var pid = pr.getAttribute("data-passkey-remove"), plabel = pr.getAttribute("data-label");
+      ask({ title: "Remove the passkey " + plabel + "?", text: "It confirms nothing from now on, and the journal records that you removed it. Approve and block drafted by your agents need another passkey of yours.", confirm: "Remove", danger: true }).then(function (go) {
+        if (go === null) return;
+        api("POST", "/auth/passkeys/" + encodeURIComponent(pid) + "/remove", {}).then(function (r) { if (r.error) toast(esc(r.error), "error"); else toast("Removed: " + esc(plabel) + "."); quota(); }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+      });
+      return;
+    }
     var gr = ev.target.closest ? ev.target.closest("button[data-grant-revoke]") : null;
     if (gr) {
       var gid = gr.getAttribute("data-grant-revoke"), gagent = gr.getAttribute("data-agent");
@@ -711,6 +766,20 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
         { path: "/api/v1/factory/me", as: "owner", fields: ["grants", "drafts"] },
       ],
       acts: [{ method: "POST", path: "/api/v1/factory/grants/g_00000000000000000000000000000000/revoke", expect: { anonymous: 401, contributor: 404, owner: 404, maintainer: 404 } }],
+      visible: ["owner"],
+    },
+    {
+      // The owner's passkeys (#257): each with Remove, and Add a passkey — live for a maintainer, grey with why for a contributor — served hidden and drawn from the owner's own no-store /factory/me. The three routes are the browser's session's only, on the relying party's address: the tests' pool.test is not one, so every signed-in role is refused there (rp_unavailable) and nobody signed in is asked to sign in.
+      id: "user.passkeys",
+      page,
+      anchor: ['<section id="passkeys" hidden>', 'id="pk-form"', 'id="pk-said"', 'id="pk-table"', 'href="/docs/omarchy-cli-mcp#write-tools">How it works →</a>'],
+      script: ["function renderPasskeys(d)", '$("#passkeys").hidden = false', 'gate(PASSKEY_FORM, maintainer,', 'pager("#pk-table"', "navigator.credentials.create", 'api("POST", "/auth/passkeys/challenge", {})', 'api("POST", "/auth/passkeys", {', "data-passkey-remove", 'api("POST", "/auth/passkeys/" + encodeURIComponent(pid) + "/remove", {})', '"#pk-label"', '"#pk-add"'],
+      reads: [{ path: "/api/v1/factory/me", as: "owner", fields: ["passkeys", "contributor.role"] }],
+      acts: [
+        { method: "POST", path: "/auth/passkeys/challenge", expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
+        { method: "POST", path: "/auth/passkeys", expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
+        { method: "POST", path: "/auth/passkeys/pk_00000000000000000000000000000000/remove", expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
+      ],
       visible: ["owner"],
     },
     {

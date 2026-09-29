@@ -62,9 +62,10 @@ export const SWAPS_PER_MINUTE = 5;
  * journal line: the grant's agent name (what the person said the agent is),
  * the client's own name and version from MCP's initialize (what the agent
  * says it is, `x-omarchy-client`), the grant — and for a decision confirmed
- * in the browser, the draft and when it was drafted and confirmed. The door
- * (`via`, contributors.ts viaOf) says "agent" for a write the token made and
- * "web" for a draft confirmed in the browser.
+ * in the browser, the draft and when it was drafted and confirmed — and, for
+ * approve and block (#257), the passkey the person confirmed it with, its
+ * user verified. The door (`via`, contributors.ts viaOf) says "agent" for a
+ * write the token made and "web" for a draft confirmed in the browser.
  */
 export interface Through {
   agent: string;
@@ -73,17 +74,19 @@ export interface Through {
   draft?: string;
   drafted_at?: string;
   confirmed_at?: string;
+  passkey?: string;
 }
 
 /**
  * The journal's words for an agent a write came through: a draft confirmed
- * in the browser — " — drafted by Claude Code, confirmed in the browser" —
- * or a write the agent's token made (a request, a claim, a release) —
- * " through Claude Code"; nothing for the web and the command line.
+ * in the browser — " — drafted by Claude Code, confirmed in the browser",
+ * and " with a passkey" for approve and block (#257) — or a write the
+ * agent's token made (a request, a claim, a release) — " through Claude
+ * Code"; nothing for the web and the command line.
  */
 export function throughWords(t: Through | null | undefined): string {
   if (!t) return "";
-  return t.draft ? ` — drafted by ${t.agent}, confirmed in the browser` : ` through ${t.agent}`;
+  return t.draft ? ` — drafted by ${t.agent}, confirmed in the browser${t.passkey ? " with a passkey" : ""}` : ` through ${t.agent}`;
 }
 
 /** The caller behind an agent token, as agentOf read it. */
