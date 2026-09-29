@@ -543,7 +543,7 @@ async function factsOf(env: Env, t: Decidable & { owner: string | null; version?
     env.DB.prepare(`SELECT id FROM approvals WHERE task_id = ? AND ${standsSql()}`).bind(t.id).first(),
     standingApproval(env, t.name, t.id),
     t.trust === "project" ? env.DB.prepare("SELECT 1 AS one FROM staging_objects WHERE task_id = ? AND key LIKE '%.pkg.tar.zst' LIMIT 1").bind(t.id).first() : Promise.resolve(true),
-    packageRows(env, t.name),
+    packageRows(env, t.name, { unregistered: true }),
   ]);
   const builds = rows ? buildsOfPackage(rows) : { building: [], staged: [], project: [] };
   const targets = rows ? targetsOf(rows.arches, rows.builds, rows.decisions, rows.closedThrough) : {};
