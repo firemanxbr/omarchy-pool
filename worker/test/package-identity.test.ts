@@ -643,6 +643,24 @@ describe("a package built for two architectures", () => {
     for (const r of rows) expect(r.slice(0, r.indexOf(">")).match(/ class=/g)?.length ?? 0, r.slice(0, 80)).toBeLessThanOrEqual(1);
     await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = 'not this story' WHERE name = 'rows' AND status = 'queued'").run();
   });
+
+  it("has the project build a build whose name nobody registered once at a time: the decision reads its builds all the same", async () => {
+    // A build written before registrations, or by hand as tests/e2e-worker.sh writes one: no registration, so no targets — and the
+    // project's build of it in flight is still what refuses a second press (it was not, while the decision read the builds only through a registration).
+    const id = (await env.DB.prepare(
+      "INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, staged_prefix) VALUES ('stray', 'aarch64', '1.0-1', 'draft:https://stray.example@latest', 'contributor', 100, 0, 'community', 'alice', 'build', 'staged', 'staging/alice/stray/1/') RETURNING id",
+    ).first<{ id: number }>())!.id;
+    expect(await env.DB.prepare("SELECT 1 FROM factory_packages WHERE name = 'stray'").first()).toBeNull();
+    const first = await call("POST", `/factory/tasks/${id}/build`, {}, "omc_m1");
+    expect(first.status, JSON.stringify(first.json)).toBe(200);
+    expect(first.json).toMatchObject({ from: id, arches: ["aarch64"], tasks: [first.json.task] });
+    const again = await call("POST", `/factory/tasks/${id}/build`, {}, "omc_m1");
+    expect([again.status, again.json.error]).toEqual([409, `the project is already on it: task ${first.json.task} is queued`]);
+    expect((await call("GET", `/factory/tasks/${id}/can`, undefined, "omc_m1")).json.can.why.build).toBe(again.json.error);
+    // Nothing was registered by the decision: the targets are kept for a registration only.
+    expect(await env.DB.prepare("SELECT 1 FROM factory_packages WHERE name = 'stray'").first()).toBeNull();
+    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = 'not this story' WHERE name = 'stray' AND status = 'queued'").run();
+  });
 });
 
 describe("the rules, on rows", () => {
