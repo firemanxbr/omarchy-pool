@@ -549,11 +549,12 @@ describe("a dependency's name in the graph", () => {
     };
     const p = await view(`/package/${F.pkg2}?ring=stable&arch=${F.arch}`, "", { edit: long });
     const graph = p.nodes["#deps"].innerHTML as string;
-    expect(graph).toContain(`<span class="nm">${F.pkg}</span><span class="v">${LONG}</span>`);
+    expect(graph).toContain(`<span class="nm"><span class="nh">${F.pkg}</span></span><span class="v">${LONG}</span>`);
     expect(graph).toContain(`title="${F.pkg} ${LONG}`);
     const html = (await call("GET", `/package/${F.pkg2}`)).text;
-    // The name never shrinks, and is cut only when it alone is wider than the node.
-    expect(declared(html, ".pkg-node .nm")).toMatchObject({ flex: "0 0 auto", "max-width": "100%", overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" });
+    // The name never shrinks, and is cut only when it alone is wider than the node — its head, with an ellipsis (#282, below).
+    expect(declared(html, ".pkg-node .nm")).toMatchObject({ flex: "0 0 auto", "max-width": "100%", display: "flex", "white-space": "nowrap" });
+    expect(declared(html, ".pkg-node .nh")).toMatchObject({ overflow: "hidden", "text-overflow": "ellipsis" });
     // The version is what shrinks, to nothing if it must, and says so with an ellipsis.
     const v = declared(html, ".pkg-node .v");
     expect(v).toMatchObject({ "min-width": "0", overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" });
@@ -561,9 +562,78 @@ describe("a dependency's name in the graph", () => {
     expect(v["flex-shrink"] ?? "1").not.toBe("0");
     // Under three characters of room it wraps onto a line the box clips: never a few pixels of a digit with no ellipsis.
     expect(v.flex).toBe("1 1 3ch");
-    expect(declared(html, ".pkg-node > span:has(> .nm)")).toMatchObject({ "flex-wrap": "wrap", height: "16px", overflow: "hidden" });
-    // The two sit in a box that may shrink inside the node, beside the tag, which never does.
-    expect(declared(html, ".pkg-node > span")).toMatchObject({ display: "flex", "min-width": "0" });
+    // Name, version and tag sit in one box that may shrink inside the node and clips its second line: the tag never shrinks, it wraps away whole.
+    expect(declared(html, ".pkg-node > .l")).toMatchObject({ display: "flex", "flex-wrap": "wrap", height: "16px", overflow: "hidden", "min-width": "0" });
     expect(declared(html, ".pkg-node .t")).toMatchObject({ flex: "none" });
+    expect(graph).toMatch(/<span class="l"><span class="nm">.*?<\/span><span class="v">[^<]*<\/span><span class="t [a-z]+">[^<]*<\/span><\/span><\/a>/);
+  });
+
+  // The v1.0.2 production check (2026-09-29, #282): at 1280, the wide box of the package between the columns squeezed them, and every name
+  // on /package/aarch64-linux-gnu-glibc was cut at its end — aarch64-linux-gnu-gcc (it requires glibc) and aarch64-linux-gnu-linux-api-headers
+  // (glibc declares it) both read "aarch64-linux-g…". The side columns get the width first (the package between is at most 160px, its name
+  // wraps), the version and the tag give way before the name, and a name still wider than its node is cut in the middle: its head gives way,
+  // its tail — the word where it parts from the name it shares the longest prefix with — stays whole. Names that share a prefix stay apart.
+  const CROSS = { requires: ["aarch64-linux-gnu-gcc", "aarch64-linux-gnu-gdb", "aarch64-linux-gnu-binutils"], declares: "aarch64-linux-gnu-linux-api-headers" };
+  const cross = async (p: string, res: Response) => {
+    if (!p.startsWith(`/api/v1/package/${F.pkg2}?`)) return res;
+    const j = (await res.json()) as { required_by: unknown[]; depends: unknown[]; links: unknown[] };
+    return Response.json({
+      ...j,
+      required_by: CROSS.requires.map((name) => ({ name, version: "15.2.1+r22+gc4e96a094636-1", declared: true, sonames: [] })),
+      depends: [{ name: CROSS.declares, provider: { name: CROSS.declares, version: "6.16-1" } }],
+      links: [],
+    });
+  };
+  it("keeps two long names that share a prefix apart: the head gives way, the part that tells them apart stays whole", async () => {
+    const p = await view(`/package/${F.pkg2}?ring=stable&arch=${F.arch}`, "", { edit: cross, functions: ["nameCut"] });
+    const graph = p.nodes["#deps"].innerHTML as string;
+    // Each node writes its name as a head and a tail, whole on hover with what the tag said.
+    const tails: Record<string, string> = { "aarch64-linux-gnu-gcc": "gcc", "aarch64-linux-gnu-gdb": "gdb", "aarch64-linux-gnu-binutils": "binutils", [CROSS.declares]: "linux-api-headers" };
+    for (const [name, tail] of Object.entries(tails)) {
+      expect(graph, name).toContain(`<span class="nm"><span class="nh">${name.slice(0, -tail.length)}</span><span class="nt">${tail}</span></span>`);
+      expect(graph, name).toMatch(new RegExp(`title="${name}( [^"·]+)? · (depends|declared)"`));
+    }
+    // What a reader sees in a node of w characters, as the stylesheet below draws it: whole when it fits, else the head cut with an ellipsis
+    // (never under one character) and the tail whole. From the narrowest node that holds a tail and its ellipsis up, no two names read the same.
+    const seen = (name: string, w: number) => { const t = tails[name], h = name.slice(0, -t.length); return name.length <= w ? name : h.slice(0, Math.max(0, w - t.length - 1)) + "…" + t; };
+    for (let w = Math.max(...Object.values(tails).map((t) => t.length)) + 2; w <= 40; w++) {
+      const read = Object.keys(tails).map((n) => seen(n, w));
+      expect(new Set(read).size, `${w} characters: ${read.join(" | ")}`).toBe(read.length);
+    }
+    // A node of 16 characters, what production gave them at 1280: both read "aarch64-linux-g…"; now each keeps its tail.
+    expect([seen("aarch64-linux-gnu-gcc", 16), seen("aarch64-linux-gnu-gdb", 16)]).toEqual(["aarch64-linu…gcc", "aarch64-linu…gdb"]);
+    // The served rule, where names part in the middle, or share no prefix at all: the word where they part, else the last word; a name of one word is cut at its end.
+    const cut = (names: string[]) => names.map((n) => n.slice(p.fn.nameCut(names)(n)));
+    expect(cut(["aarch64-linux-gnu-gcc", "aarch64-linux-musl-gcc"])).toEqual(["gnu-gcc", "musl-gcc"]);
+    expect(cut(["visual-studio-code-bin", "zlib"])).toEqual(["bin", "zlib"]);
+    expect(cut(["lib32-acl", "lib32-attr", "libacl"])).toEqual(["acl", "attr", "libacl"]);
+    const html = (await call("GET", `/package/${F.pkg2}`)).text;
+    // The stylesheet: the head shrinks with an ellipsis down to one character, the tail never shrinks.
+    expect(declared(html, ".pkg-node .nh")).toMatchObject({ flex: "0 1 auto", "min-width": "1ch", overflow: "hidden", "text-overflow": "ellipsis" });
+    expect(declared(html, ".pkg-node .nt")).toMatchObject({ flex: "none", "max-width": "calc(100% - 1ch)" });
+    // The side columns get the width first: the package between is at most 160px wide and its name wraps; it sits where the connectors meet, by the stylesheet, not by a margin the script works out for one line.
+    expect(html, "the desktop's columns (a phone's is one column)").toMatch(/\.pkg-graph \{ display: grid; grid-template-columns: minmax\(0, 1fr\) 64px fit-content\(160px\) 64px minmax\(0, 1\.2fr\);/);
+    const centre = declared(html, ".pkg-center");
+    expect(centre["white-space"], "the package between wraps its name").toBeUndefined();
+    expect(centre).toMatchObject({ "min-height": "36px", "overflow-wrap": "anywhere" });
+    expect(declared(html, ".pkg-graph > .pkg-center")).toMatchObject({ "align-self": "center" });
+    expect(graph).toMatch(/<div class="pkg-center[^"]*" title="xz">xz<\/div>/);
+  });
+});
+
+describe("the Depends on tile", () => {
+  // The v1.0.2 production check (#282): zlib's and lib32-acl's tile said "loads 1 libraries"; the graph's rows already said "loads 1 lib".
+  const links = (n: number) => async (p: string, res: Response) => {
+    if (!p.startsWith(`/api/v1/package/${F.pkg2}?`)) return res;
+    const j = (await res.json()) as { links: { soname: string }[] };
+    return Response.json({ ...j, links: Array.from({ length: n }, (_, i) => ({ soname: `libx${i}.so.1`, provider: null })) });
+  };
+  it("says 1 library, and N libraries otherwise", async () => {
+    const tile = async (n: number) => (await view(`/package/${F.pkg2}?ring=stable&arch=${F.arch}`, "", { edit: links(n) })).nodes["#pg-tiles"].innerHTML as string;
+    const one = await tile(1);
+    expect(one).toContain("loads 1 library<");
+    expect(one).not.toContain("libraries");
+    expect(await tile(3)).toContain("loads 3 libraries<");
+    expect(await tile(0)).toContain("loads 0 libraries<");
   });
 });

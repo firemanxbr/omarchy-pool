@@ -85,7 +85,8 @@ verify and attest the package faster and approve it with more confidence.
    page: a package built and waiting for a claim is *ready for review*; from
    the claim until the decision — the rebuild queued, running or staged —
    it is *in review*, on the Factory's line, on Review and on the package's
-   page alike; the Factory's line files a package by Review's own list. A
+   page alike — its chip and its Review stage, while a newer version builds
+   beside the claim too; the Factory's line files a package by Review's own list. A
    maintainer may also stop the round with a note: *Request changes* sends it back to the
    factory and the name stays the requester's; *Reject* frees a request's
    name. One review covers the package: it starts once every architecture

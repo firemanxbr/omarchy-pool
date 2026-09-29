@@ -28,7 +28,7 @@ import { CLAIM_ROWS_SQL, CLAIM_SQL, RELEASE_SQL, REVIEW_SQL, ROWS_SQL } from "..
 import { ADOPT_SQL, MAINTAINER_SQL } from "../src/routes/adopt";
 import { maintenanceOf } from "../src/routes/users";
 import { putRecord } from "../src/record";
-import { ownScriptOf } from "./fixture";
+import { declared, ownScriptOf, runScript, scriptOf } from "./fixture";
 import { decider } from "./decide";
 
 const API = "http://pool.test/api/v1";
@@ -603,6 +603,41 @@ describe("a decision's round", () => {
       { task_id: 9001, by: review.results[0].by, review_id: review.results[0].id },
       { task_id: 9002, by: review.results[0].by, review_id: review.results[0].id },
     ]);
+  });
+});
+
+describe("the queue's rows and the maintainers' lines, read whole", () => {
+  // The v1.0.2 production check (2026-09-29, #282), at 1280: bitwarden's row in review read "0.0.1…" for 0.0.168, and the line under the
+  // maintainer who claimed it — "reviewing bitwarden · 3 reviews · 1 package" — ended "1 p…". A version that does not fit beside its name
+  // wraps under it, and the line wraps between its parts: each is whole, cut only when it alone is wider than its box.
+  it("writes the version beside the name, whole, and the maintainer's line as parts that wrap", async () => {
+    const id = await ready("longver");
+    await env.DB.prepare("UPDATE build_tasks SET version = '0.0.168-1' WHERE id = ?").bind(id).run();
+    expect((await claim(id)).status).toBe(200);
+    const browser = async (path: string, init?: RequestInit) => {
+      const ctx = createExecutionContext();
+      const res = await worker.fetch(new Request(`http://pool.test${path}`, { ...init, headers: { ...(init?.headers as Record<string, string> | undefined), cookie: "omc=oms_m1" } }), env, ctx);
+      await waitOnExecutionContext(ctx);
+      return res;
+    };
+    const html = await (await browser("/review")).text();
+    const drawn = runScript(scriptOf(html), { pathname: "/review", search: "?tab=review", functions: [], fetch: browser });
+    for (let i = 0; i < 200 && !/reviewing longver/.test(drawn.nodes["#rv-maints"]?.innerHTML ?? ""); i++) await new Promise((r) => setTimeout(r, 5));
+    const row = (drawn.nodes["#rv-rows"].innerHTML as string).split('<div class="rv-row').find((r) => r.includes("<b>longver</b>"));
+    expect(row, drawn.nodes["#rv-rows"].innerHTML).toContain('title="longver"><b>longver</b></a><span class="v">0.0.168-1</span></span>');
+    // The name's cell wraps the version under the name when both do not fit; the version never shrinks, the name is what is cut.
+    expect(declared(html, ".rv-name")).toMatchObject({ display: "flex", "flex-wrap": "wrap", "min-width": "0" });
+    expect(declared(html, ".rv-name .v")).toMatchObject({ "white-space": "nowrap" });
+    expect(declared(html, ".rv-name .v")).not.toHaveProperty("overflow");
+    expect(declared(html, ".rv-name > :first-child")).toMatchObject({ "max-width": "100%", overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" });
+    // m1's line: what they review, their reviews, the packages they brought — each part whole, the line wrapping between them.
+    const m1 = (drawn.nodes["#rv-maints"].innerHTML as string).split('<div class="rv-mrow">').find((r) => r.includes(">@m1<"));
+    expect(m1).toMatch(/<span class="s" title="[^"]*"><span>reviewing longver ·<\/span> <span>\d+ reviews? ·<\/span> <span>\d+ packages?<\/span><\/span>/);
+    const line = declared(html, ".rv-mwho .s");
+    expect(line["white-space"], "the line wraps").toBeUndefined();
+    expect(line["text-overflow"], "the line is never cut as one").toBeUndefined();
+    expect(declared(html, ".rv-mwho .s > span")).toMatchObject({ display: "inline-block", "max-width": "100%", "white-space": "nowrap", "text-overflow": "ellipsis" });
+    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled', error = 'not this story' WHERE name = 'longver' AND status IN ('queued', 'leased')").run();
   });
 });
 

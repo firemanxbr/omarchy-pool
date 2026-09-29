@@ -890,10 +890,12 @@ describe("one meaning of in review", () => {
   // alone once disagreed with the list (the #274 review): a new version building beside a standing claim, and a staged build of a version
   // already approved (felix 2.16.1, 2026-09-16). The line files a package the list names by the list's own state, never by its targets.
   // The page runs as m1, a maintainer: the way to Review under "Your requests" says the list's two numbers too.
+  // The package's own page says it too (#282): its chip and its How it got here Review stage — bitwarden, claimed and its rebuild staged, had
+  // the chip "in review" and the stage "ready for a maintainer" in production (v1.0.2).
   const viewer = async (path: string, init?: RequestInit) => {
     const ctx = createExecutionContext();
-    // The registry asked past its thirty seconds at the edge (a new query), so the page reads the targets each step settled.
-    const asked = path === "/api/v1/factory/packages" ? `${path}?t=${Math.random()}` : path;
+    // The registry and a story asked past their thirty seconds at the edge (a new query), so the pages read the targets each step settled.
+    const asked = path === "/api/v1/factory/packages" || path.endsWith("/story") ? `${path}?t=${Math.random()}` : path;
     const res = await worker.fetch(new Request(`http://pool.test${asked}`, { ...init, headers: { ...(init?.headers as Record<string, string> | undefined), cookie: `omc=oms_${F.m1}` } }), env, ctx);
     await waitOnExecutionContext(ctx);
     return res;
@@ -917,9 +919,32 @@ describe("one meaning of in review", () => {
     for (const p of review.packages.filter((x) => x.state === null)) expect([2, 3], `${step}: ${p.name}, neither ready nor in review`).not.toContain(d.stageOf(reg.find((r) => r.name === p.name)));
     // A maintainer's way to Review: the same two numbers, in the same words.
     expect(d.nodes["#mine-maint"].textContent, `${step}: the Review queue link`).toBe(`Review queue · ${review.ready} ready · ${review.in_review} in review ›`);
+    // spare's own page: the chip and the Review stage say the list's word, the stage first — then where the claim stands.
+    const state = spare(review);
+    if (state) {
+      const word = state === "in_review" ? "in review" : "ready for review";
+      const own = await packagePage(F.sparePkg);
+      expect(own.chip, `${step}: spare's chip`).toBe(word);
+      expect(own.review, `${step}: spare's Review stage`).toMatch(new RegExp(`^${word} · `));
+      expect(own.tag, `${step}: spare's review panel`).toMatch(new RegExp(`^${word}`));
+    }
     return { d, review, card: (name: string) => (d.nodes["#col-3"].innerHTML as string).split('<a class="fx-card').find((c) => c.includes(`<b>${name}</b>`)) ?? null };
   };
   const spare = (review: { packages: Pkg[] }) => review.packages.find((p) => p.name === F.sparePkg)?.state ?? null;
+  const STAGE_TAG = /<h3>Independent review<\/h3><span class="op-pill [a-z]+">([^<]*)<\/span>/;
+  // A package's page as m1 reads it, once its story landed: the chip's word, the Review stage's line, and the tag of the review's panel.
+  const packagePage = async (name: string) => {
+    const asked: string[] = [];
+    const d = runScript(scriptOf(await page(`/package/${name}`)), { pathname: `/package/${name}`, functions: [], fetch: (p: string, init?: RequestInit) => { asked.push(p); return viewer(p, init); } });
+    for (let i = 0; i < 200 && !(asked.some((p) => p.endsWith("/story")) && /id="stage-review"/.test(d.nodes["#stages"]?.innerHTML ?? "")); i++) await new Promise((r) => setTimeout(r, 5));
+    await new Promise((r) => setTimeout(r, 100));
+    const stages = d.nodes["#stages"].innerHTML as string;
+    return {
+      chip: /<span class="op-pill [a-z]+">([^<]*)<\/span>/.exec(d.nodes["#pkg-state"].innerHTML)?.[1],
+      review: /id="stage-review"[\s\S]*?class="pkg-stage-s" title="([^"]*)"/.exec(stages)?.[1],
+      tag: STAGE_TAG.exec(d.nodes["#stage-panel"].innerHTML)?.[1],
+    };
+  };
 
   it("files a package In review on the Factory's line exactly when Review does — from the claim, while the rebuild runs, once it is staged — and Ready for review exactly when Review's list says ready", async () => {
     let now = await agree("as the file above left the fixture");
