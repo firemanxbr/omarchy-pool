@@ -1,7 +1,7 @@
 import { isRing, json, RINGS, RINGS_BY_STABILITY, type Env, type Ring } from "../index";
 import { isRepoArch, packageKey } from "../r2";
 import { ringHead, ringMembers } from "../db";
-import { sourceRank } from "../meta";
+import { REPO_ARCHES, sourceRank } from "../meta";
 import { maintenanceOf } from "./users";
 import { sealOf } from "./seal";
 import { provenanceOf } from "../provenance";
@@ -95,6 +95,25 @@ export function providersInRing(env: Env, ring: Ring, arch: string, names: strin
     .all<{ id: number; name: string }>();
 }
 
+/**
+ * Where each architecture of a package is served, for the package page
+ * (#244): per architecture the rings, most stable first, with the object
+ * each serves — its version, release, sha256, source and whether it
+ * carries an upstream signature — and, when the answer has them, how many
+ * advisories are open on the object that architecture's page shows.
+ */
+function archesOf(served: Map<string, { ring: Ring; release_seq: number; row: PackageRow }[]>, open: Record<string, number> | null) {
+  return Object.fromEntries(
+    REPO_ARCHES.map((a) => [
+      a,
+      {
+        rings: RINGS_BY_STABILITY.flatMap((r) => (served.get(a) ?? []).filter((x) => x.ring === r)).map(({ ring, release_seq, row }) => ({ ring, release_seq, version: row.version, sha256: row.sha256, source: row.source, has_signature: row.has_signature === 1, size_download: row.size_download })),
+        open: open ? (open[a] ?? null) : null,
+      },
+    ]),
+  );
+}
+
 export async function handlePackage(name: string, url: URL, env: Env): Promise<Response> {
   const s = scope(url, env);
   if (s instanceof Response) return s;
@@ -111,16 +130,27 @@ export async function handlePackage(name: string, url: URL, env: Env): Promise<R
   const heads = await Promise.all(RINGS.map(async (ring) => ({ ring, head: await ringHead(env, ring) })));
   const inRings: { ring: string; release_id: number; release_seq: number; version: string; sha256: string; size_download: number; source: string; filename: string; created_at: string }[] = [];
   const rowsByRing = new Map<string, PackageRow>();
+  // One package, a target per architecture (#242): the page says where each architecture of it is served, so every
+  // architecture's rows come back from the same statement — the name's rows are a handful per architecture, each a
+  // point lookup on the ring's key, and the architecture asked for is the one the rest of the answer is about. The
+  // order is forced (CROSS JOIN), from the name's index into the ring: without the architecture in the WHERE the
+  // planner walked the ring's members instead — every row of the ring for every page view, the trap of providersInRing.
+  const served = new Map<string, { ring: Ring; release_seq: number; row: PackageRow }[]>();
   for (const { ring, head } of heads) {
     if (!head) continue;
     const rows = await env.DB.prepare(
       `SELECT p.id, p.name, p.version, p.arch, p.repo_arch, p.source, p.filename, p.sha256, p.size_download, p.size_installed, p.has_signature, p.created_at, p.r2_key
-         FROM ${ringMembers(ring)} rp JOIN packages p ON p.id = rp.package_id
-        WHERE p.name = ?1 AND p.repo_arch = ?2`,
+         FROM packages p CROSS JOIN ring_packages rp ON rp.ring = '${ring}' AND rp.package_id = p.id
+        WHERE p.name = ?1`,
     )
-      .bind(name, s.arch)
+      .bind(name)
       .all<PackageRow>();
-    const ordered = rows.results.sort((a, b) => sourceRank(a.source) - sourceRank(b.source) || a.source.localeCompare(b.source));
+    const byRank = rows.results.sort((a, b) => sourceRank(a.source) - sourceRank(b.source) || a.source.localeCompare(b.source));
+    for (const a of new Set(byRank.map((r) => r.repo_arch))) {
+      const mine = byRank.filter((r) => r.repo_arch === a);
+      served.set(a, [...(served.get(a) ?? []), { ring, release_seq: head.seq, row: mine.find((r) => r.source === wantSource) ?? mine[0] }]);
+    }
+    const ordered = byRank.filter((r) => r.repo_arch === s.arch);
     if (!ordered.length) continue;
     rowsByRing.set(ring, ordered.find((r) => r.source === wantSource) ?? ordered[0]);
     for (const row of ordered) {
@@ -130,7 +160,27 @@ export async function handlePackage(name: string, url: URL, env: Env): Promise<R
   const shownRing: Ring | undefined = rowsByRing.has(s.ring) ? s.ring : RINGS_BY_STABILITY.find((r) => rowsByRing.has(r));
   const chosen = shownRing ? rowsByRing.get(shownRing) : undefined;
   const pick = chosen ? inRings.find((r) => r.ring === shownRing && r.sha256 === chosen.sha256) : undefined;
-  if (!pick || !chosen || !shownRing) return json({ error: `${name} is not in any ring for ${s.arch}` }, 404);
+  // An architecture's object — the one its page would show: the ring `prefer` when it serves it there too, else its most
+  // stable — and whether an advisory is open on it: a count through the table's primary key, one per architecture.
+  const openOn = async (a: string, prefer: Ring | undefined): Promise<number | null> => {
+    const list = served.get(a) ?? [];
+    const at = list.find((x) => x.ring === prefer) ?? RINGS_BY_STABILITY.map((r) => list.find((x) => x.ring === r)).find((x) => !!x);
+    return at ? ((await env.DB.prepare("SELECT COUNT(*) AS n FROM package_advisories WHERE package_id = ? AND status = 'vulnerable'").bind(at.row.id).first<{ n: number }>())?.n ?? 0) : null;
+  };
+  // Not on this architecture: the answer still says where the package is served, and — when another architecture serves
+  // it — what the page says of the package whatever the architecture read: whether an advisory is open on each
+  // architecture's object and who looks after it. A name no ring serves anywhere reads nothing more.
+  if (!pick || !chosen || !shownRing) {
+    const error = `${name} is not in any ring for ${s.arch}`;
+    if (!served.size) return json({ error, arches: archesOf(served, null) }, 404);
+    const open: Record<string, number> = {};
+    for (const a of served.keys()) {
+      const n = await openOn(a, s.ring);
+      if (n !== null) open[a] = n;
+    }
+    const top = RINGS_BY_STABILITY.map((r) => [...served.values()].flat().find((x) => x.ring === r)).find((x) => !!x)!;
+    return json({ error, arches: archesOf(served, open), maintenance: await maintenanceOf(env, name, top.row.source, undefined) }, 404);
+  }
   const head = heads.find((h) => h.ring === pick.ring)?.head;
   if (!head) return json({ error: "ring vanished" }, 500);
   // The edges — what it depends on, what depends on it, what it is exposed
@@ -227,6 +277,15 @@ export async function handlePackage(name: string, url: URL, env: Env): Promise<R
         ).results.map((r) => ({ ...r, cves: JSON.parse(r.cves) as string[], kev: !!r.kev }))
       : [];
   const own = await advisoriesOf([chosen.id]);
+  // The other architecture's object — the one its page would show, the ring shown here first — and whether an advisory is open on it.
+  const open: Record<string, number> = { [s.arch]: own.filter((a) => a.object_status === "vulnerable").length };
+  for (const a of served.keys()) {
+    if (a === s.arch) continue;
+    const n = await openOn(a, shownRing);
+    if (n !== null) open[a] = n;
+  }
+  // How many files the object installs, from its list's own row (the list itself is the Files section's, on demand).
+  const files = await env.DB.prepare("SELECT count FROM package_file_lists WHERE package_id = ?").bind(chosen.id).first<{ count: number }>();
   const providerNames = [...new Set([...depends, ...links].map((x) => x.provider?.name).filter((n): n is string => !!n))];
   const providerIds = providerNames.length ? (await providersInRing(env, ring, s.arch, providerNames)).results : [];
   const providerAdvisories = (await advisoriesOf(providerIds.map((p) => p.id))).filter((a) => a.object_status === "vulnerable");
@@ -250,6 +309,9 @@ export async function handlePackage(name: string, url: URL, env: Env): Promise<R
         exposed,
       },
       rings: inRings,
+      // Every architecture of the package: the rings that serve it there, and the advisories open on the object its page shows.
+      arches: archesOf(served, open),
+      files: files?.count ?? null,
       maintenance: await maintenanceOf(env, chosen.name, chosen.source, manifest.pkginfo?.packager),
       // An OPR package: where its recipe comes from (omacom/omarchy-pkgs, read daily).
       provenance: chosen.source === "packages" ? await provenanceOf(env, chosen.name) : null,

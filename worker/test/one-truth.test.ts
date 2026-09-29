@@ -421,18 +421,19 @@ describe("the pages read the one answer instead of counting their own", () => {
       if (/["']\/package\//.test(script)) written.push(path);
     }
     expect(written, `a package address written by hand: ${written.join(", ")}`).toEqual([]);
-    // The page asked for the lab: its script keeps the ring (the lab is one of RINGS_TEXT, the server's order) and asks the API for it; the API shows stable, the most stable ring that has zlib; the chips are drawn from the served script — the lab's own address among them, the shown ring lit.
+    // The page asked for the lab: its script keeps the ring (the lab is one of RINGS_TEXT, the server's order) and asks the API for it; the API shows stable, the most stable ring that has zlib; the chips are drawn by the served script's ringChips — the lab's own address among them, the shown ring lit, a ring that does not serve it on this architecture dashed (na, #244).
     const html = await page(`/package/${F.pkg}?ring=lab`), script = scriptOf(html), own = ownScript(html);
     expect(own).toContain("RINGS = Object.keys(RINGS_TEXT)");
     expect(own).not.toMatch(/\["stable", "rc", "edge"\]/);
     const d = (await call("GET", `/package/${F.pkg}?ring=lab`)).json;
     expect(d).toMatchObject({ ring: "lab", shown_ring: "stable" });
-    const ringLine = /^  var ring = [^\n]*$/m.exec(own)![0], chipLine = /^    \$\("#pg-ring"\)\.innerHTML = [^\n]*$/m.exec(own)![0];
-    const draw = new Function("q", "d", "$", [served(script, "RINGS_TEXT"), served(script, "pkgHref"), "var RINGS = Object.keys(RINGS_TEXT);", ringLine, "var arch = 'x86_64';", chipLine, "return ring;"].join("\n"));
-    const el = { innerHTML: "" };
-    expect(draw(new URLSearchParams("?ring=lab"), d, () => el)).toBe("lab");
-    const chips = [...el.innerHTML.matchAll(/<a class="([^"]*)" href="([^"]*)"/g)].map((m) => [m[1], m[2]]);
-    expect(chips).toEqual(Object.keys(RING_TEXT).map((r) => [r === "stable" ? "on" : "", `/package/${F.pkg}?ring=${r}&arch=x86_64`]));
+    const ringLine = /^  var ring = [^\n]*$/m.exec(own)![0];
+    const draw = new Function("q", "d", "has", [served(script, "esc"), served(script, "RINGS_TEXT"), served(script, "pkgHref"), "var RINGS = Object.keys(RINGS_TEXT);", ringLine, "var arch = 'x86_64';", served(own, "ringChips"), "return [ring, ringChips(d, has)];"].join("\n"));
+    const serves = new Set((d.arches.x86_64.rings as { ring: string }[]).map((r) => r.ring));
+    const [asked, drawn] = draw(new URLSearchParams("?ring=lab"), d, (r: string) => serves.has(r)) as [string, string];
+    expect(asked).toBe("lab");
+    const chips = [...drawn.matchAll(/<a class="([^"]*)" href="([^"]*)"/g)].map((m) => [m[1], m[2]]);
+    expect(chips).toEqual(Object.keys(RING_TEXT).map((r) => [r === "stable" ? "stable on" : serves.has(r) ? r : `${r} na`, `/package/${F.pkg}?ring=${r}&arch=x86_64`]));
   });
 
   it("no page types the budget's lines or an hour of its own: the lines ride /cost, the hour is the shell's LATE_MS", async () => {

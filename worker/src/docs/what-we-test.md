@@ -61,7 +61,7 @@ on their own package**, whatever their role, so two people are always
 between a recipe and the rings.
 
 Until the maintainer decides, the project's build sits in the lab: pinned,
-tried, visible on the package's page under *From the factory*, never
+tried, visible on the package's page under *How it got here*, never
 promised and never promoted. Approved, it enters edge and earns rc and
 stable on the same evidence as every synced package. A maintainer can
 still block it later — the reason on the record, another maintainer lifts

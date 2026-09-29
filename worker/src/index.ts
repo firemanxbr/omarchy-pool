@@ -77,6 +77,7 @@ import { handleQueueJob } from "./jobs";
 import { isMaintainer } from "./routes/contributors";
 import { handleReviewList, handleApprove, handleReject, handleApprovals, handleProjectBuild, handleWithdraw, handleTaskCan } from "./routes/review";
 import { handleBlockContributor, handleUnblockContributor, handleBlockPackage, handleUnblockPackage, handleBlocks } from "./routes/blocks";
+import { handleAdoptPackage } from "./routes/adopt";
 import { handleAuthStart, handleAuthCallback, handleLogout } from "./routes/auth";
 import { handleSignPool } from "./routes/pool";
 import { signingEnabled, publicKey } from "./signing";
@@ -331,6 +332,12 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
     if (!c) return nobody();
     if (m[1] === "contributors") return m[3] === "block" ? handleBlockContributor(c, m[2], request, env) : handleUnblockContributor(c, m[2], request, env);
     return m[3] === "block" ? handleBlockPackage(c, m[2], request, env) : handleUnblockPackage(c, m[2], request, env);
+  }
+  // Maintainers: a package the pool serves adopted — its maintainer in the pool (routes/adopt.ts).
+  if ((m = path.match(/^\/factory\/packages\/([A-Za-z0-9@._+-]+)\/adopt$/)) && method === "POST") {
+    const c = await contributorOf(request, env);
+    if (!c) return nobody();
+    return handleAdoptPackage(c, m[1], env);
   }
   // Maintainers: a record withdrawn from the public bucket, a signed tombstone in its place.
   if (method === "POST" && path === "/factory/record/withdraw") {

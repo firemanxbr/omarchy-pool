@@ -492,6 +492,25 @@ story=$(curl -s "$OMARCHY_API/api/v1/factory/packages/e2e-ident/story?at=publish
 decided=$(curl -s "$OMARCHY_API/api/v1/factory/approvals?at=published" | jq -c '.approvals[] | select(.name == "e2e-ident")')
 [[ "$(jq -r '"\(.standing) \(.arches | join(",")) \(.not_supported | keys | join(",")) \(.rings | join(","))"' <<<"$decided")" == "true x86_64 aarch64 edge" ]] || { echo "the record must hold one standing review of e2e-ident, x86_64 in edge, aarch64 not supported: $decided"; exit 1; }
 echo "one name, one package: x86_64 published, aarch64 not supported, one review, one publish job"
+# The package page (#244): e2e-ident's data says where each architecture is served — x86_64 in edge, aarch64 nowhere — and whose it is in the pool: the maintainer whose approval stands. Its page is served.
+pv=$(curl -s "$OMARCHY_API/api/v1/package/e2e-ident?ring=edge&arch=x86_64&at=page")
+[[ "$(jq -r '"\(.arches.x86_64.rings | map(.ring) | join(",")) \(.arches.aarch64.rings | length) \(.maintenance.maintainer.login)"' <<<"$pv")" == "edge 0 e2e" ]] || { echo "the package page's data must say x86_64 in edge, aarch64 nowhere, e2e its maintainer: $(jq -c '{arches, maintenance}' <<<"$pv")"; exit 1; }
+grep -q '<h1 id="title">e2e-ident</h1>' <<<"$(curl -s "$OMARCHY_API/package/e2e-ident?ring=edge&arch=x86_64")" || { echo "the package page of e2e-ident is not served"; exit 1; }
+# aarch64 is not supported: its answer is a 404 that still says where e2e-ident is served, whether an advisory is open there and whose it is — the page reads the same package on either architecture.
+pa=$(curl -s "$OMARCHY_API/api/v1/package/e2e-ident?ring=edge&arch=aarch64&at=page")
+[[ "$(jq -r '"\(.arches.x86_64.rings | map(.ring) | join(",")) \(.arches.x86_64.open) \(.maintenance.maintainer.login)"' <<<"$pa")" == "edge 0 e2e" ]] || { echo "e2e-ident's aarch64 answer must say x86_64 in edge, nothing open there, e2e its maintainer: $(head -c 400 <<<"$pa")"; exit 1; }
+# Adopt: a synced package gets its maintainer in the pool — a maintainer's act, once, on the journal.
+[[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/packages/zlib/adopt" -H "authorization: Bearer omc_e2e_contributor" -H "content-type: application/json" -d '{}')" == 403 ]] || { echo "a contributor must not adopt a package"; exit 1; }
+ad=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/packages/zlib/adopt" "${mauth[@]}" -d '{}')
+[[ "$(jq -r '.adopted + " " + .by' <<<"$ad")" == "zlib e2e" ]] || { echo "the maintainer could not adopt zlib: $ad"; exit 1; }
+[[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/packages/zlib/adopt" "${mauth[@]}" -d '{}')" == 409 ]] || { echo "zlib is adopted once"; exit 1; }
+jq -e '[.events[] | select(.kind == "adopt" and .summary == "zlib adopted by e2e: its maintainer in the pool")] | length == 1' <<<"$(curl -s "$OMARCHY_API/api/v1/events?kind=adopt&limit=5")" >/dev/null || { echo "the journal must say who adopted zlib"; exit 1; }
+[[ "$(jq -r .maintenance.maintainer.login <<<"$(curl -s "$OMARCHY_API/api/v1/package/zlib?ring=stable&arch=x86_64&at=adopted")")" == e2e ]] || { echo "zlib's page must name its maintainer"; exit 1; }
+# Block, from the page's You: e2e-ident leaves every ring, its review withdrawn — on the journal, with the reason.
+bl=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/packages/e2e-ident/block" "${mauth[@]}" -d '{"reason":"the e2e test of the brake"}')
+[[ "$(jq -r '.blocked + " " + (.rings | map(.ring) | join(","))' <<<"$bl")" == "e2e-ident edge" ]] || { echo "the block must take e2e-ident out of edge: $bl"; exit 1; }
+jq -e '[.events[] | select(.kind == "block" and (.summary | startswith("e2e-ident blocked by e2e: the e2e test of the brake")))] | length == 1' <<<"$(curl -s "$OMARCHY_API/api/v1/events?kind=block&limit=5")" >/dev/null || { echo "the journal must say who blocked e2e-ident, and why"; exit 1; }
+echo "the package page: every architecture on its data, Adopt and Block on the journal"
 
 step "pacman in $IMAGE against the worker mirror"
 gpg --armor --export "$KEYID" > "$E2E/omarchy-poc.pub.asc"
