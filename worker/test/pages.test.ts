@@ -13,6 +13,7 @@ import worker, { MOVED } from "../src/index";
 import { allComponents } from "../src/pages/components";
 import { GO_MENU, HELPERS, MORE, NAV, termId } from "../src/pages/layout";
 import { DOCS_TREE, GLOSSARY } from "../src/pages/docs-tree";
+import { DOC_SECTIONS } from "../src/pages/docs";
 import { CHARTS } from "../src/pages/charts";
 import { KIT_HELPERS } from "../src/pages/kit";
 import { JOURNAL_KINDS } from "../src/meta";
@@ -182,7 +183,8 @@ describe("dashboard pages", () => {
     expect(factory).toContain('id="account" href="/auth/github?next=/factory"');
     expect(await (await get("/request")).text()).toContain('<a id="ws" href="/me">Your workspace</a>');
     expect(await (await get("/review")).text()).toContain('id="mine-ws" href="/me"');
-    const docs = await (await get("/docs")).text();
+    // The hint is the chapters' shell's: the index (/docs, #250) draws its own map of its sections, without it.
+    const docs = await (await get("/docs/get-started")).text();
     const hint = /<div class="docs-hint">([^<]*)<\/div>/.exec(docs)?.[1] ?? "";
     // A footer entry whose address still stands in for its page (MORE's `until`; Agents was one until #249) is not called a page of its own.
     for (const m of MORE) if (m.href !== "/docs") (m.until ? expect(hint, m.label).not : expect(hint, m.label)).toContain(m.label);
@@ -245,7 +247,7 @@ describe("dashboard pages", () => {
     }
   });
 
-  // The app is the truth and the text follows. Three rules over every served page, the markdown chapters included, and the pages' own scripts: (a) a link into the documentation lands — its path is a chapter of DOCS_TREE (or the index) and its fragment one of that chapter's sections, or a glossary term; the four `/docs#chapter/section` links written against the old one-page docs landed at the top of /docs for a day; (b) no page says what the app no longer does — the phrases below each name a page or a flow that moved, with why; (c) a `/journal?kind=<k>` link filters, because k is one of the journal's kinds — `kind=role` fell back to all for a day.
+  // The app is the truth and the text follows. Three rules over every served page, the markdown chapters included, and the pages' own scripts: (a) a link into the documentation lands — its path is a chapter of DOCS_TREE and its fragment one of that chapter's sections or a glossary term, or the index and one of its seven sections (docs.ts DOC_SECTIONS, #250: /docs/api is /docs#api); the four `/docs#chapter/section` links written against the old one-page docs landed at the top of /docs for a day; (b) no page says what the app no longer does — the phrases below each name a page or a flow that moved, with why; (c) a `/journal?kind=<k>` link filters, because k is one of the journal's kinds — `kind=role` fell back to all for a day.
   it("links the documentation where it is, says nothing the app no longer does, and links journal kinds the filter has", async () => {
     const chapters = new Map(DOCS_TREE.map((c) => [c.href, new Set(c.secs.map((sec) => sec.id))]));
     chapters.set("/docs/glossary", new Set(GLOSSARY.map(([term]) => termId(term))));
@@ -257,7 +259,6 @@ describe("dashboard pages", () => {
       [/press (?:<b>)?Build(?:<\/b>)? on your page|picks it up within a minute/, "a request builds by itself in the shared queue, the best idle worker first (#182); the owner's Build is for a worker of their own or a re-run"],
       [/rebuilds what a maintainer approves|[Aa]pprove queues a rebuild/, "approve queues a publish of the project's build; Build by the project is the separate action, and the one that queues a rebuild"],
       [/approve, trust and roll back|approving, trusting and rolling back/, "no page has a trust control: trust is through the API"],
-      [/href="\/docs#/, "the docs index has no ids: a chapter's page carries the anchors (DOCS_TREE)"],
       [/under a group in <code>factory\/MAINTAINERS\.toml/, "one list, no groups"],
       [/Journal's\s+(?:<em>)?Ring\s+history|overview's\s+roll\s+back/, "no served page has a roll back button until #248 draws the ring history on Status: a manual rollback is the rollback job (pkg-repo job rollback, POST /api/v1/factory/jobs), as the runbook says"],
       [/the\s+Pipeline\s+(?:follows|lists)|Pipeline\s+page\s+shows|Pipeline's\s+(?:build\s+tasks|counters)|Security\s+page\s+shows/, "the Pipeline and Security are not served since #240 (their addresses redirect to Status, index.ts MOVED): name Status, a build's page or the API"],
@@ -269,11 +270,14 @@ describe("dashboard pages", () => {
       const body = html.replace(/<script[\s\S]*?<\/script>/g, "");
       for (const m of body.matchAll(/href="(\/docs(?:\/[a-z-]+)?)(?:#([^"]*))?"/g)) {
         const [, chapter, frag] = m;
-        if (chapter === "/docs") { if (frag) problems.push(`${path}: href="/docs#${frag}" — the index has no anchors`); continue; }
+        if (chapter === "/docs") { if (frag && !DOC_SECTIONS.some((sec) => sec.id === frag)) problems.push(`${path}: href="/docs#${frag}" — the index's sections are ${DOC_SECTIONS.map((sec) => sec.id).join(", ")}`); continue; }
         const secs = chapters.get(chapter);
         if (!secs) { problems.push(`${path}: href="${chapter}" is no chapter of DOCS_TREE`); continue; }
         if (frag && !secs.has(frag)) problems.push(`${path}: href="${chapter}#${frag}" — no such section (${[...secs].join(", ")})`);
       }
+      // (a) again over the pages' scripts, for the index: a link a script writes into /docs# names one of its seven sections, as one the server writes does. A fragment the script computes cannot be checked, so it is refused.
+      for (const m of [...html.matchAll(/<script[\s\S]*?<\/script>/g)].map((x) => x[0]).join("\n").matchAll(/href=\\?"\/docs#([^"\\]*)/g))
+        if (!DOC_SECTIONS.some((sec) => sec.id === m[1])) problems.push(`${path}: a script writes href="/docs#${m[1]}" — the index's sections are ${DOC_SECTIONS.map((sec) => sec.id).join(", ")}`);
       // (b) the whole page, script included: a pill's word is as much a claim as a paragraph.
       for (const [re, why] of FORBIDDEN) { const hit = re.exec(html); if (hit) problems.push(`${path} says "${hit[0]}" — ${why}`); }
       // (c) every journal link, in HTML or script.
@@ -565,7 +569,8 @@ describe("dashboard pages", () => {
 
   it("every docs page carries the same shell — the map with every chapter's sections, the search — and the stages are on How it works", async () => {
     const { DOCS_TREE } = await import("../src/pages/docs-tree");
-    for (const path of ["/docs", "/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/governance", "/docs/security", "/docs/glossary", "/api", "/docs/architecture", "/docs/runbook"]) {
+    // Every chapter's page; the index (/docs, #250) has a map of its own sections and the search, not the shell (test/docs-index.test.ts).
+    for (const path of ["/docs/get-started", "/docs/workers", "/docs/how-it-works", "/docs/governance", "/docs/security", "/docs/glossary", "/api", "/docs/architecture", "/docs/runbook"]) {
       const html = await (await get(path)).text();
       expect(html, path).toContain('id="docs-q"');
       for (const c of DOCS_TREE) for (const sec of c.secs) expect(html, `${path}: ${c.key}#${sec.id}`).toContain(`href="${c.href}#${sec.id}"`);
