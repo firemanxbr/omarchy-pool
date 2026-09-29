@@ -1785,6 +1785,13 @@ export interface PageOptions {
    * not pays nothing for it: no request, no bytes.
    */
   kit?: boolean;
+  /**
+   * The page's own rules: its layout, and where it refines a primitive of
+   * the kit. They live in the page's module, not in the frame's CSS, and
+   * are served after the frame's CSS and the kit's sheet, so a rule here
+   * wins over theirs at equal weight. Tokens only, as the frame's.
+   */
+  css?: string;
 }
 
 /**
@@ -1804,9 +1811,9 @@ export const NAV: { key: PageOptions["active"]; href: string; label: string; sub
  * to use it through one's own agent, what explains it, who runs it. Agents
  * is drawn in green (`accent`). An entry whose page has not landed yet names
  * what stands in for it (`until`): the router answers its address with a
- * 302 there (index.ts) and the docs hint does not call it a page. Agents is
- * #249's page, and until then its address is the chapter on connecting an
- * agent today; #249 drops the `until`.
+ * 302 there (index.ts) and the docs hint does not call it a page. None does
+ * since Agents became a page of its own (#249, pages/agents.ts); until then
+ * its address was the chapter on omarchy-cli as an MCP server.
  *
  * The rest of what the footer linked before is one hop from the frame, not
  * in it: the request is the Factory's first step (and People's "Bring a
@@ -1823,7 +1830,7 @@ export const NAV: { key: PageOptions["active"]; href: string; label: string; sub
 export const MORE: { href: string; label: string; accent?: true; until?: string }[] = [
   { href: "/packages", label: "Packages" },
   { href: "/status", label: "Status" },
-  { href: "/agents", label: "Agents", accent: true, until: "/docs/omarchy-cli-mcp" },
+  { href: "/agents", label: "Agents", accent: true },
   { href: "/docs", label: "Docs" },
   { href: "/people", label: "People" },
 ];
@@ -1832,8 +1839,9 @@ export const MORE: { href: string; label: string; accent?: true; until?: string 
  * The line under the docs map that says where the rest is, written from
  * MORE so it cannot name a page the footer does not link (it once
  * said Review was in the footer), nor call an address that still stands in
- * for its page (`until`) a page of its own: "Packages, Status and People
- * have their own pages, linked from the footer. The three doors are the header."
+ * for its page (`until`) a page of its own: "Packages, Status, Agents and
+ * People have their own pages, linked from the footer. The three doors are
+ * the header."
  */
 export function docsHint(): string {
   const rest = MORE.filter((m) => m.href !== "/docs" && !m.until).map((m) => m.label);
@@ -1980,7 +1988,7 @@ export function page(o: PageOptions): string {
 <script>${THEME_BOOT}</script>${analyticsTag(v)}
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Geist:wght@500;600;700&display=swap">
-<style>${CSS}</style>${o.kit ? `\n<link rel="stylesheet" href="${KIT_SHEET_PATH}">` : ""}
+<style>${CSS}</style>${o.kit ? `\n<link rel="stylesheet" href="${KIT_SHEET_PATH}">` : ""}${o.css ? `\n<style>${o.css}</style>` : ""}
 </head>
 <body>
 <div id="progress"></div>
