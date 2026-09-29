@@ -93,7 +93,7 @@ describe("the review list counts what waits, once", () => {
     const r = await call("GET", "/factory/review");
     expect(r.status).toBe(200);
     expect(r.headers.get("cache-control")).toBe("no-store");
-    // Three of alice's builds of mine sit staged and undecided; the approved chain is not listed at all.
+    // Three of alice's packages have a build staged and undecided — mine's later one, disposable's and spare's; mine's approved chain is not listed at all.
     expect(r.json.staged.map((t: { id: number }) => t.id).sort()).toEqual([F.stagedTask, F.disposableTask, F.spareTask].sort());
     expect(r.json.waiting).toBe(3);
     expect(r.json.waiting).toBe(r.json.staged.filter(waitsForMaintainer).length);
@@ -105,28 +105,40 @@ describe("the review list counts what waits, once", () => {
     expect(Math.abs(r.json.oldest_ms - Math.max(...ages))).toBeLessThan(5000);
   });
 
-  it("a withdrawn approval puts the project's build back in the count; a project build in flight takes a contributor's out", async () => {
-    // m1 takes m2's approval of mine back: the project's build waits for a decision again, alice's evidence behind it is listed but not decidable — the project's row is.
+  it("a withdrawn approval puts the package back in the count, on the build its architecture stands on; a project build in flight takes a contributor's out", async () => {
+    // m1 takes m2's approval of mine back: mine waits for a decision again, once (#242: one package, one decision), and on the build its
+    // architecture stands on now — alice's later 1.0-2, the newest (targets.ts, the one rule). The project's build of 1.0 is history beside
+    // it: listed, never the row that speaks for mine, and not approvable, with the reason; alice's 1.0 behind it is listed and not decidable.
     expect((await call("POST", `/factory/tasks/${F.projectTask}/withdraw`, "m1", { note: "taken back by the test" })).status).toBe(200);
     let r = (await call("GET", "/factory/review")).json;
     expect(r.staged.map((t: { id: number }) => t.id).sort()).toEqual([F.contributorTask, F.projectTask, F.stagedTask, F.disposableTask, F.spareTask].sort());
-    expect(r.waiting).toBe(4);
+    expect(r.waiting).toBe(3);
+    expect(r.packages.map((p: { name: string; lead: number | null }) => [p.name, p.lead]).sort()).toEqual([[F.factoryPkg, F.stagedTask], [F.disposablePkg, F.disposableTask], [F.sparePkg, F.spareTask]].sort());
+    expect(r.staged.find((t: { id: number }) => t.id === F.stagedTask).waits).toBe(true);
     expect(r.staged.find((t: { id: number }) => t.id === F.contributorTask)).toMatchObject({ kind: "contributor", project_build: { id: F.projectTask, status: "staged" } });
     expect(waitsForMaintainer(r.staged.find((t: { id: number }) => t.id === F.contributorTask))).toBe(false);
-    expect(waitsForMaintainer(r.staged.find((t: { id: number }) => t.id === F.projectTask))).toBe(true);
-    // The oldest waiting row is now the project's build, staged before the three later ones.
-    const project = r.staged.find((t: { id: number }) => t.id === F.projectTask);
-    expect(Math.abs(r.oldest_ms - (Date.now() - Date.parse(project.finished_at)))).toBeLessThan(5000);
-    // m1 has the project build alice's 1.0-2 again: that row is the project's to build now, not a maintainer's to decide.
+    expect(waitsForMaintainer(r.staged.find((t: { id: number }) => t.id === F.projectTask))).toBe(false);
+    const asM2 = (await call("GET", "/factory/review", "m2")).json;
+    const stale = new RegExp(`^task ${F.projectTask} is not where ${F.arch} stands: its newer build, task ${F.stagedTask}, is built — one review covers where each architecture stands$`);
+    expect(asM2.staged.find((t: { id: number }) => t.id === F.projectTask).can).toMatchObject({ approve: false, why: { approve: expect.stringMatching(stale) } });
+    // The door refuses in the same words.
+    const refused = await call("POST", `/factory/tasks/${F.projectTask}/approve`, "m2", { note: "the old one" });
+    expect(refused.status).toBe(409);
+    expect(refused.json.error).toMatch(stale);
+    // The oldest waiting row is the oldest of the three that wait.
+    const waitingAges = r.staged.filter((t: { waits: boolean }) => t.waits).map((t: { finished_at: string }) => Date.now() - Date.parse(t.finished_at));
+    expect(Math.abs(r.oldest_ms - Math.max(...waitingAges))).toBeLessThan(5000);
+    // m1 has the project build alice's 1.0-2 again: that row is the project's to build now, not a maintainer's to decide — and one review covers mine, so nothing of it waits until that build is staged.
     expect((await call("POST", `/factory/tasks/${F.stagedTask}/build`, "m1", { note: "built again by the test" })).status).toBe(200);
     r = (await call("GET", "/factory/review")).json;
     expect(r.staged.find((t: { id: number }) => t.id === F.stagedTask).project_build).toMatchObject({ status: "queued" });
-    expect(r.waiting).toBe(3);
+    expect(r.waiting).toBe(2);
     expect(r.waiting).toBe(r.staged.filter(waitsForMaintainer).length);
-    // The rows moved and each row's word moved with them: the contributor's row behind a project build in flight says false, the project's row says true, the count is theirs.
+    // The rows moved and each row's word moved with them: the contributor's row behind a project build in flight says false, and so does the project's old row of the same package; the count is theirs.
     for (const t of r.staged) expect(t.waits, `#${t.id} waits`).toBe(waitsForMaintainer(t));
     expect(r.staged.find((t: { id: number }) => t.id === F.stagedTask).waits).toBe(false);
-    expect(r.staged.find((t: { id: number }) => t.id === F.projectTask).waits).toBe(true);
+    expect(r.staged.find((t: { id: number }) => t.id === F.projectTask).waits).toBe(false);
+    expect((await call("GET", "/factory/review", "m2")).json.staged.find((t: { id: number }) => t.id === F.projectTask).can.why.approve).toMatch(new RegExp(`^task ${F.projectTask} is not where ${F.arch} stands: its newer build, task \\d+, is reviewing`));
     expect(r.waiting).toBe(r.staged.filter((t: { waits: boolean }) => t.waits).length);
   });
 
@@ -238,7 +250,9 @@ describe("an approval stands or it does not, said once", () => {
     const mine = u.approvals.find((a: { name: string }) => a.name === F.factoryPkg);
     const ours = u.approvals.find((a: { name: string }) => a.name === F.publishedPkg);
     expect(mine).toMatchObject({ decision: "approved", standing: false });
-    expect(mine.rings).toBeUndefined();
+    // A decision is listed as the review it is on both lists (asReviews): one that does not stand is served nowhere.
+    expect(mine.rings).toEqual([]);
+    expect(mine).toMatchObject({ arches: [F.arch], targets: [{ arch: F.arch, task_id: F.projectTask, rings: [] }] });
     expect(ours).toMatchObject({ decision: "approved", standing: true, rings: ["edge"] });
     expect(u.approved_packages).toEqual([F.publishedPkg]);
   });

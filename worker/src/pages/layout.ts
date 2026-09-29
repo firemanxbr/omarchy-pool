@@ -244,6 +244,10 @@ const CSS = String.raw`
   dialog.ask.wide { width: min(880px, 94vw); } dialog.ask pre.block { max-height: 60vh; overflow: auto; margin: 0; background: var(--bg-deep); border: 1px solid var(--line); padding: 10px 12px; font: 12px/1.5 "JetBrains Mono", monospace; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
   .pill.error { color: var(--red); border-color: var(--red); }
   .pill.none { color: var(--dim); }
+  /* A package's targets: a chip per architecture, dashed when it is not supported (targetChips). */
+  .tgts { display: inline-flex; flex-wrap: wrap; gap: 4px; vertical-align: middle; } .pill.tgt { text-transform: none; letter-spacing: 0; font: 400 11.5px var(--font-mono); } .pill.tgt.dashed { border-style: dashed; }
+  /* One line per build of a decision (Review's Decided lately). */
+  .bl + .bl { margin-top: 6px; }
   .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 13.5px; }
   .kv dt { color: var(--dim); }
   .kv dd { margin: 0; }
@@ -457,7 +461,7 @@ const CSS = String.raw`
   .ring-head .k { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; } .ring-head b { font-family: Geist, sans-serif; font-size: 20px; font-weight: 600; line-height: 1.15; } .ring-head .s { font-size: 11.5px; color: var(--dim); line-height: 1.4; }
   .feed a.row { text-decoration: none; color: inherit; cursor: pointer; }
   /* An inset box-shadow with no blur and no offset is a 3px bar on a row's edge, not a shadow: it takes no room in the grid or the table, where a border would. */
-  tr.project-row td { background: var(--panel-2); } tr.project-row td:first-child { box-shadow: inset 3px 0 0 var(--green); } .feed a.row:hover .what { color: var(--text); }
+  tr.project-row td { background: var(--panel-2); } tr.project-row:not(.more) td:first-child { box-shadow: inset 3px 0 0 var(--green); } .feed a.row:hover .what { color: var(--text); }
   .charts.three { grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); }
   .charts.three .chart { display: flex; flex-direction: column; } .charts.three .chart > .mini { margin-top: auto; }
   .charts.three #c-sec { display: flex; flex-direction: column; flex: 1; } .charts.three #c-sec .hrows { flex: 1; align-content: space-evenly; } .charts.three #c-sec > p { margin-top: auto; }
@@ -570,7 +574,8 @@ const CSS = String.raw`
   .rrow .n { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .rrow .s { color: var(--muted); min-width: 0; } .rrow .s .pill { margin-right: 4px; }
   .rrow .go { font-size: 12.5px; color: var(--green); text-decoration: none; white-space: nowrap; justify-self: end; } .rrow .go:hover { text-decoration: underline; }
   .rrows > p { background: var(--panel); padding: 10px 14px; }
-  tr.for-you td:first-child { box-shadow: inset 3px 0 0 var(--amber); } tr.mine-row td:first-child { box-shadow: inset 3px 0 0 var(--line); }
+  /* A row's mark is on its first cell; a package's other builds in Review's table (tr.more) are rows under the cells the package spans, whose first cell carries the mark for them all. */
+  tr.for-you:not(.more) td:first-child { box-shadow: inset 3px 0 0 var(--amber); } tr.mine-row:not(.more) td:first-child { box-shadow: inset 3px 0 0 var(--line); }
   details.tool { border: 1px solid var(--line); background: var(--panel); padding: 12px 16px; } details.tool summary { cursor: pointer; font-weight: 500; } details.tool summary .dim { font-weight: 400; font-size: 12.5px; margin-left: 8px; } details.tool[open] summary { margin-bottom: 12px; }
   #mine-queue { margin: 0 0 18px; } #mine-queue b { color: var(--text); } #mine-queue a { color: var(--green); text-decoration: none; }
   .panel { border: 1px solid var(--line); background: var(--panel); padding: 16px 18px; min-width: 0; }
@@ -1278,6 +1283,18 @@ export const HELPERS = String.raw`
   // The reason a page gives its own gate, for whoever is looking: nobody signed in reads the sign-in first, as the server's own first refusal is the 401 — the same word on every grey control of a page, the Decision cell's included.
   function orSignIn(why) { return WHO.me ? why : "sign in with GitHub"; }
 
+  // ---- a package's targets (targets.ts): one package, an architecture per chip, the server's word for each — "x86_64 ✓" once it built (again by the project, approved, in the pool), "aarch64 ⟳" while it builds or the project builds it again, "aarch64 · not supported" dashed when its build failed after the tries it had, "x86_64 ○" while nothing of it is in flight. Review, the package page and a person's page draw the same chips; "marcelo, on x86_64", never "the x86_64 package".
+  var TARGET_WORD = { waiting: ["none", "○", "requested, nothing of it in flight"], building: ["blue", "⟳", "its contributor's build is queued or running"], built: ["ok", "✓", "built, ready for the review"], not_supported: ["none", "· not supported", "its build failed after the tries it had; the other architectures go on"], reviewing: ["blue", "⟳", "the project builds it again"], reviewed: ["ok", "✓", "built again by the project; the review decides"], approved: ["ok", "✓", "approved; its publish job carries it into edge"], published: ["ok", "✓", "in the pool"] };
+  function targetChips(targets) {
+    var arches = Object.keys(targets || {});
+    if (!arches.length) return "";
+    return '<span class="tgts">' + arches.map(function (a) {
+      var t = targets[a] || {}, w = TARGET_WORD[t.status] || ["none", "", t.status || ""];
+      return '<span class="pill tgt ' + w[0] + (t.status === "not_supported" ? " dashed" : "") + '" title="' + esc(a + ": " + w[2] + (t.task ? " (build #" + t.task + ")" : "")) + '">' + esc(a) + " " + esc(w[1]) + "</span>";
+    }).join("") + "</span>";
+  }
+  // The architectures a decision covered (a review of the package, GET /factory/approvals), as a row words them: "x86_64 · aarch64".
+  function archesOf(a) { return ((a && a.arches && a.arches.length ? a.arches : [a && a.arch]).filter(Boolean)).join(" · "); }
   // ---- the three verdicts on a staged build, as Review's table reads them: the gate (the worker's own checks on the build), the audit (the project's second agent), the trial (a real pacman installing the project's build in the lab). The pill, then the evidence as a link when the row has one (href: t.evidence.tests / .audit / .trial) — what warned or failed, the findings, the transcript — and as a word when it has none.
   function gatePill(v, href) {
     if (!v) return '<span class="dim" title="built before the gate existed">—</span>';
@@ -1328,18 +1345,19 @@ export const HELPERS = String.raw`
     opts = opts || {};
     if (opts.note) return Promise.resolve(opts.note);
     if (what === "build") return fetch("/api/v1/factory?limit=10").then(function (r) { return r.json(); }).then(function (d) { return d.workers || []; }).catch(function () { return []; }).then(function (ws) {
-      return ask({ title: "Have the project build " + label + " again", text: "A trusted review worker builds the recipe again with the project's agent — the contributor's bytes are never used. The result shows in review when it is staged.", select: whereOptions(ws, opts.arch || ARCHES[0], WHO.login, true), input: "optional", placeholder: "a hint for the project's agent (optional)", confirm: "Build by the project" });
+      return ask({ title: "Have the project build " + label + " again", text: "Trusted review workers build the recipe again with the project's agent, for every architecture its contributor built — the contributor's bytes are never used. One review covers them all; the results show in review when they are staged.", select: whereOptions(ws, opts.arch || ARCHES[0], WHO.login, true), input: "optional", placeholder: "a hint for the project's agent (optional)", confirm: "Build by the project" });
     });
-    if (what === "reject") return ask({ title: "Reject " + label, text: "The contributor reads the note and builds again. The rejection is on the record.", input: "required", placeholder: "what is wrong, in a line or two", confirm: "Reject", danger: true });
-    if (what === "withdraw") return ask({ title: "Withdraw the approval of " + label, text: "The approval stays on the record and is void from now on; the package leaves every ring it reached; another maintainer decides.", input: "required", placeholder: "why take it back", confirm: "Withdraw", danger: true });
-    return ask({ title: "Approve " + label, text: "The project's build goes into edge, signed by the pool; the approval is on the record with your name.", input: "optional", confirm: "Approve" });
+    if (what === "reject") return ask({ title: "Reject " + label, text: "Every build of the package in review stops, on every architecture. A request rejected frees its name; a package already in the pool keeps it. The contributor reads the note, and the rejection is on the record.", input: "required", placeholder: "what is wrong, in a line or two", confirm: "Reject", danger: true });
+    if (what === "withdraw") return ask({ title: "Withdraw the approval of " + label, text: "The approval stays on the record and is void from now on, on every architecture it covered; the package leaves every ring it reached; another maintainer decides.", input: "required", placeholder: "why take it back", confirm: "Withdraw", danger: true });
+    return ask({ title: "Approve " + label, text: "One decision for the package: the project's build of every architecture it built again goes into edge, signed by the pool; one that did not build is not supported. The approval is on the record with your name.", input: "optional", confirm: "Approve" });
   }
-  // What the toast says once the server said yes: where the build went, the task the project builds it as and on what, what the withdrawal emptied.
+  // What the toast says once the server said yes: where the builds went, the tasks the project builds it as and on what, what the withdrawal emptied, whether a rejection freed the name.
   function decidedText(what, d, dropped) {
-    if (what === "approve") return "Approved — the project's build goes into edge (publish job <a href=\"/build/" + d.publish + "\">#" + d.publish + "</a>).";
-    if (what === "build") return "The project is building it: task <a href=\"/build/" + d.task + "\">#" + d.task + "</a>, on " + (d.pinned_to ? esc(wtShort(d.pinned_to)) : "a review worker") + " with the project's agent.";
+    var jobs = function (ids) { return ids.map(function (id) { return "<a href=\"/build/" + id + "\">#" + id + "</a>"; }).join(", "); };
+    if (what === "approve") { var pubs = d.publishes ? Object.keys(d.publishes).map(function (a) { return d.publishes[a]; }) : [d.publish]; return "Approved — the project's build" + (pubs.length > 1 ? "s go" : " goes") + " into edge (publish job" + (pubs.length > 1 ? "s " : " ") + jobs(pubs) + ")."; }
+    if (what === "build") { var tasks = d.tasks && d.tasks.length ? d.tasks : [d.task]; return "The project is building it: task" + (tasks.length > 1 ? "s " : " ") + jobs(tasks) + ", on " + (d.pinned_to ? esc(wtShort(d.pinned_to)) : "a review worker") + " with the project's agent."; }
     if (what === "withdraw") return "Withdrawn — the approval is void; the package leaves " + esc((d.rings || []).map(function (r) { return r.ring; }).join(", ") || "no ring") + "; another maintainer decides.";
-    return dropped ? "Dropped." : "Rejected — the contributor sees the note.";
+    return dropped ? "Dropped." : "Rejected — the contributor sees the note." + (d.released ? " The name is free again." : "");
   }
   // The decision buttons are the shell's (data-approve / data-reject / data-build / data-withdraw = the task id, inside decisionCell's .decide): the click stops here, asks through decideDialog, posts once through api() and tells every fn a page gave onDecided — fn(what, id, answer) — to draw again. The button is disabled from the click and enabled again on cancel or refusal only, so a decision is never posted twice (a rejected row draws again without the button). A page's own Build buttons (a person's page names a package in data-build) are outside .decide and untouched.
   var DECIDED = [];

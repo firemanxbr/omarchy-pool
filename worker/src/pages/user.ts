@@ -315,12 +315,12 @@ const SCRIPT = String.raw`
         return '<tr><td>' + contributed + '</td><td>' + maintained + '</td><td class="num">' + num(r.score) + '</td></tr>';
       });
     }
-    // ---- packages: one row each, the stage from the latest builds per architecture, a row that opens into the story and the next step
+    // ---- packages: one row each, where each of its architectures stands — the server's targets (targetChips), else the stage from the latest builds per architecture — a row that opens into the story and the next step
     var byPkg = {}; d.builds.forEach(function (b) { var k = b.name + "/" + b.arch; if (!byPkg[k]) byPkg[k] = b; });
     LATEST = byPkg;
     pager("#packages", d.packages, function (p) {
       var arches = []; try { arches = JSON.parse(p.arches || "[]"); } catch (e) {}
-      var per = arches.map(function (a) { var b = byPkg[p.name + "/" + a]; return '<span class="arch-st" title="' + esc(a + ": " + (b ? b.status + (b.status === "leased" ? " (building)" : "") + " · #" + b.id : "no build yet")) + '">' + esc(a) + ' ' + (b ? taskPill(b.status) : pillHtml("none", "—")) + '</span>'; }).join("");
+      var per = targetChips(p.targets) || arches.map(function (a) { var b = byPkg[p.name + "/" + a]; return '<span class="arch-st" title="' + esc(a + ": " + (b ? b.status + (b.status === "leased" ? " (building)" : "") + " · #" + b.id : "no build yet")) + '">' + esc(a) + ' ' + (b ? taskPill(b.status) : pillHtml("none", "—")) + '</span>'; }).join("");
       var open = OPEN[p.name];
       // The name is the package's page (the shell's one address) on the first architecture the request names: a registration says no ring, so the shell's default asks for the most stable, and the server shows the most stable ring that serves it.
       return '<tr class="pkrow" data-pkg="' + esc(p.name) + '"><td><button type="button" class="expand" data-expand="' + esc(p.name) + '" title="' + (open ? "close" : "the story, and what comes next") + '">' + (open ? "▾" : "▸") + '</button></td><td><a href="' + pkgHref(p.name, null, arches[0]) + '"><b>' + esc(p.name) + '</b></a></td><td>' + (p.category ? pillHtml("none", p.category) : '<span class="dim">—</span>') + '</td><td>' + (p.url ? '<a href="' + esc(p.url) + '">' + esc(p.url.replace(/^https?:\/\/(www\.)?(github\.com\/)?/, "")) + '</a>' : '<span class="dim">—</span>') + '</td><td class="arches">' + per + '</td><td>' + taskPill(p.status) + '</td><td class="muted stands" title="' + esc(p.detail || "") + '">' + esc(p.detail || "") + '</td></tr>'
@@ -338,7 +338,7 @@ const SCRIPT = String.raw`
         var standing = a.standing;
         var where = standing ? (a.rings && a.rings.length ? a.rings.map(function (r) { return pillHtml(r === "stable" ? "ok" : r === "rc" ? "blue" : r === "edge" ? "lilac" : "warn", r); }).join(" ") : '<span class="muted" title="approved, not served: the publish job did not run, or a later release dropped it">not served</span>') : '<span class="muted">—</span>';
         var act = ' ' + withdrawBtn(a, standing);
-        return '<tr><td class="when">' + ago(a.created_at) + '</td><td><a href="' + pkgHref(a.name, servedRing(a.rings), a.arch) + '">' + esc(a.name) + '</a> <span class="mono muted">' + esc(a.version || "") + '</span> <a class="dim" href="/build/' + a.task_id + '">#' + a.task_id + '</a></td><td>' + esc(a.arch) + '</td><td>' + (a.withdrawn_at ? taskPill("withdrawn", "withdrawn " + ago(a.withdrawn_at) + " by " + a.withdrawn_by + ": " + (a.withdrawn_reason || "")) : taskPill(a.decision)) + '</td><td>' + where + act + '</td><td class="muted">' + esc(a.withdrawn_at ? (a.withdrawn_reason || "") : (a.note || "")) + '</td></tr>';
+        return '<tr><td class="when">' + ago(a.created_at) + '</td><td><a href="' + pkgHref(a.name, servedRing(a.rings), a.arch) + '">' + esc(a.name) + '</a> <span class="mono muted">' + esc(a.version || "") + '</span> <a class="dim" href="/build/' + a.task_id + '">#' + a.task_id + '</a></td><td>' + esc(archesOf(a)) + '</td><td>' + (a.withdrawn_at ? taskPill("withdrawn", "withdrawn " + ago(a.withdrawn_at) + " by " + a.withdrawn_by + ": " + (a.withdrawn_reason || "")) : taskPill(a.decision)) + '</td><td>' + where + act + '</td><td class="muted">' + esc(a.withdrawn_at ? (a.withdrawn_reason || "") : (a.note || "")) + '</td></tr>';
       }, { empty: "no decision yet" });
     }
     renderWorkers();
@@ -565,8 +565,8 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       id: "user.packages-table",
       page,
       anchor: ['id="pk-request"', 'data-href="/request"', `title="only ${F.owner} requests here"`, 'id="packages"'],
-      script: ['pager("#packages"', '"#pk-request"', 'href=\\"/request\\"', 'gate(REQUEST_LINK, may("request"), reason("request"))', "data-expand", 'JSON.parse(p.arches', "pkgHref(p.name, null, arches[0])", "p.detail", 'byPkg[p.name + "/" + a]', "data-story"],
-      reads: [{ path: profile, fields: ["packages.0.name", "packages.0.category", "packages.0.url", "packages.0.arches", "packages.0.status", "packages.0.detail", "builds.0.name", "builds.0.arch", "builds.0.status", "builds.0.id"] }],
+      script: ['pager("#packages"', '"#pk-request"', 'href=\\"/request\\"', 'gate(REQUEST_LINK, may("request"), reason("request"))', "data-expand", 'JSON.parse(p.arches', "pkgHref(p.name, null, arches[0])", "p.detail", "targetChips(p.targets)", 'byPkg[p.name + "/" + a]', "data-story"],
+      reads: [{ path: profile, fields: ["packages.0.name", "packages.0.category", "packages.0.url", "packages.0.arches", "packages.0.targets", "packages.0.status", "packages.0.detail", "builds.0.name", "builds.0.arch", "builds.0.status", "builds.0.id"] }],
       visible: EVERYONE,
     },
     {
@@ -723,8 +723,8 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       id: "user.approvals-table",
       page: `/user/${F.m2}`,
       anchor: ['id="approvals-section"', 'id="approvals"'],
-      script: ['"#approvals-section"', 'pager("#approvals"', "var standing = a.standing", "a.withdrawn_at", "a.rings", "pkgHref(a.name, servedRing(a.rings), a.arch)", "withdrawBtn(a, standing)", 'may("withdraw") && standing', '"nothing standing to withdraw"', "data-withdraw", '"/tasks/" + wid + "/withdraw"'],
-      reads: [{ path: `/api/v1/users/${F.m2}`, fields: ["role", "approvals.0.task_id", "approvals.0.name", "approvals.0.arch", "approvals.0.version", "approvals.0.decision", "approvals.0.standing", "approvals.0.note", "approvals.0.created_at", "approvals.0.withdrawn_at", "approvals.0.rings", "approved_packages.0"] }],
+      script: ['"#approvals-section"', 'pager("#approvals"', "var standing = a.standing", "a.withdrawn_at", "a.rings", "pkgHref(a.name, servedRing(a.rings), a.arch)", "esc(archesOf(a))", "withdrawBtn(a, standing)", 'may("withdraw") && standing', '"nothing standing to withdraw"', "data-withdraw", '"/tasks/" + wid + "/withdraw"'],
+      reads: [{ path: `/api/v1/users/${F.m2}`, fields: ["role", "approvals.0.task_id", "approvals.0.name", "approvals.0.arch", "approvals.0.arches", "approvals.0.version", "approvals.0.decision", "approvals.0.standing", "approvals.0.note", "approvals.0.created_at", "approvals.0.withdrawn_at", "approvals.0.rings", "approved_packages.0"] }],
       // The fixture's one approval was taken back by the build page's manifest, which walks before this one: nothing stands to withdraw.
       acts: [{ method: "POST", path: `/api/v1/factory/tasks/${F.projectTask}/withdraw`, body: { note: "the source is not the upstream's" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 404 } }],
       visible: EVERYONE,
