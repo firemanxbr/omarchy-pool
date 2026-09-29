@@ -70,7 +70,7 @@ Promoting a release copies and re-uploads most of that data, so a bump takes
 
 | table | purpose |
 |---|---|
-| `packages` | immutable rows keyed by `sha256`; `manifest_json` holds the full manifest |
+| `packages` | immutable rows keyed by `sha256`; `manifest_json` holds the full manifest; `elf_class`, its objects' ELF class when not the machine's own (see Architectures) |
 | `package_provides` / `package_requires` / `package_files` | normalized graph for queries |
 | `package_components` | what a package's statically linked binaries embed — Go modules (`debug/buildinfo`), crates.io crates (`cargo-auditable`) — one row per module or crate, for advisory matching against language ecosystems |
 | `releases` | `(ring, seq)` with `created_at`, optional `parent_id`, a note, the stored summary (`package_count`, `bytes`, `sources`) and `checkpoint` |
@@ -96,7 +96,7 @@ Migrations live in `worker/migrations/`.
 | `GET /api/v1/graph?targets=a,b&ring=stable&arch=` | dependency closure for the client's safety check — follows declared dependencies through *declared* provides (`package_provides.declared`, from `.PKGINFO`), as pacman does; the sonames a binary loads or ships never route the closure (a package bundling its own libstdc++ is not a provider of `libstdc++.so`) |
 | `GET /api/v1/packages/:sha256/provenance` | the seal of an object: a synced package's upstream project and the keyring its signature was verified against; a factory package's chain — the evidence build, the audit, the approval, the maintainer's recipe and the project's build of it — and the attestation the pool wrote next to the object (`<filename>.provenance.json`, an in-toto Statement, `.sig` by the pool's key; `routes/seal.ts`, written when the project's build completes, removed with the object by GC) |
 | `GET /api/v1/security?ring=&arch=` · `PUT /security/advisories` · `PUT /security/matches` | open advisories on what a ring serves (per package: confidence, severity, KEV/EPSS, rings already serving a clean version, how many packages depend on it or load one of its libraries); the writes are the Security workflow's |
-| `GET /api/v1/search?q=` · `/package/:name[/files]` | search within a ring; a package's versions per ring, manifest, forward edges (declared dependencies and loaded sonames resolved to providers) and reverse edges (declared, or by loading one of its libraries) — the package page and, later, CVE propagation |
+| `GET /api/v1/search?q=` · `/package/:name[/files]` | search within a ring; a package's versions per ring, manifest, forward edges (declared dependencies and loaded sonames resolved to providers) and reverse edges (declared, or by loading one of its libraries) — the package page and, later, CVE propagation. A loaded soname resolves to one package built for the page's architecture (see Architectures) |
 | `GET /api/v1/packages?q=&ring=&arch=&origin=&sort=` | the packages list (`routes/browse.ts`): one row per name over the rings picked, filtered and paged by the server — a page found by walking the name index (or the table in id order, for recency) from a cursor, a search by one read of the table — and the counts behind every filter kept in `settings` under the ring heads they were counted at; `/packages` draws its first page into the HTML from the same address, through the edge's copy |
 | `GET /api/v1/pool/unreferenced` · `POST /api/v1/pool/gc` | retention: what the last N releases do not reference |
 | `GET /api/v1/factory` · `POST /factory/{requests,enqueue,claim,jobs}` · `/factory/tasks/:id/{heartbeat,complete,fail,cancel,approve,reject}` · `/factory/tasks/:id/artifacts/<file>` · `/factory/{register,packages,workers,workers/self,maintainers,review,approvals,trust,me}` · `GET /api/v1/users/:login` · `GET /api/v1/cost` | the factory's brain: package requests, build tasks with leases, the workers pulling them, contributors and their packages, maintainers' approvals, jobs queued by hand, the daily cost estimate ([factory/README.md](../factory/README.md), [GOVERNANCE.md](GOVERNANCE.md)) |
@@ -261,6 +261,39 @@ the replacement key inside a ring. `any` packages are per-upstream builds: Arch'
 and Arch Linux ARM's `python-foo-1.0-1-any` are different objects in different
 directories. A ring holds both architectures; `render --arch` emits one database
 per source for that architecture.
+
+A soname a binary loads resolves only to a library built for the binary's
+machine (#275, `worker/src/elf.ts`). pkg-extract records a shipped library
+as the soname and Arch's `libz.so=1-64`, whose suffix is its ELF class, and
+nothing of its ELF machine, so the machine is read from three facts:
+
+- An `any` package that ships an ELF library ships another machine's: a
+  cross toolchain's sysroot (`aarch64-linux-gnu-glibc` carries an aarch64
+  `libc.so.6` into x86_64's `extra`). Only a package whose own architecture
+  is the page's provides a loaded soname.
+- The ELF class. A 32-bit (lib32, i686) binary loads 32-bit libraries, a
+  64-bit one 64-bit libraries: lib32-curl's `libc.so.6` is lib32-glibc's,
+  whatever it declares. A package's class (`packages.elf_class`: `32`,
+  `32 64` for both, null for the machine's own 64-bit or nothing to tell
+  by) is read off its manifest at indexing: the class forms it ships and
+  declares, and the ones it depends on. A declared class form
+  (`libcrypto.so=3-32`) is answered as pacman answers it, by that provide.
+- A sysroot inside a package of the page's architecture:
+  `aarch64-linux-gnu-gcc` is an x86_64 package that carries an aarch64
+  `libstdc++.so.6` under `/usr/aarch64-linux-gnu/lib`. A library a package
+  ships only under `/usr/<target>/` is another machine's. The file list
+  says so; the page reads a candidate's list only when two or more could
+  answer a library, and then the winner's, a point read each.
+
+Of what is left, a loaded soname resolves by the include's order
+(`REPO_ORDER`, what pacman would pick), then by name. The reverse edges are
+the same rules read backwards: an `any` package's shipped sonames, and a
+library a package ships only in a sysroot, bring it no dependent (its name
+and what its `.PKGINFO` declares still do), and a loaded soname brings only
+dependents of its class. The Security page's exposure follows the class and
+the `any` rule; it reads no file list, so an x86_64 cross compiler's sysroot
+still counts there (it would unpack the list of every vulnerable package on
+each read).
 
 ## Extraction (`crates/pkg-extract`)
 

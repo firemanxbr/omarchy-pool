@@ -3,6 +3,7 @@ import { isRing, json, readJson, RINGS, type Env, type Ring } from "../index";
 import { isRepoArch } from "../r2";
 import { SEVERITIES as META_SEVERITIES } from "../meta";
 import { ringHead, ringMembers } from "../db";
+import { classesMeetSql } from "../elf";
 
 /**
  * Security data.
@@ -299,23 +300,31 @@ export async function handleSecurity(url: URL, env: Env): Promise<Response> {
   // (2026-09-15, the day the cost guard tripped).
   // Only confident advisories (exact, name-version) propagate: a name-only
   // one on glibc would mark the whole ring as exposed and say nothing.
+  // The package page's rules hold here too (#275, elf.ts): an `any` package
+  // is loaded through nothing it ships, a library only by binaries of its
+  // class, a class form (`libz.so=1-32`) only by that provide. All three
+  // on rows the joins read anyway.
   const confident = vulnerable.filter((v) => (v.advisories as { match: string }[]).some((a) => a.match !== "name-only"));
   const exposure = new Map<string, { declared: number; loads: number }>();
   let exposedTotal = 0;
   if (confident.length) {
     const ex = await env.DB.prepare(
-      `WITH vuln(id, name) AS MATERIALIZED (
-             SELECT p.id, p.name FROM json_each(?2) j JOIN packages p ON p.id = j.value),
-           caps(vuln_id, vuln, capability) AS MATERIALIZED (
-             SELECT v.id, v.name, v.name FROM vuln v
+      `WITH vuln(id, name, arch, elf_class) AS MATERIALIZED (
+             SELECT p.id, p.name, p.arch, p.elf_class FROM json_each(?2) j JOIN packages p ON p.id = j.value),
+           caps(vuln_id, vuln, elf_class, capability, form) AS MATERIALIZED (
+             SELECT v.id, v.name, v.elf_class, v.name, NULL FROM vuln v
              UNION
-             SELECT v.id, v.name, pv.capability FROM vuln v JOIN package_provides pv ON pv.package_id = v.id AND pv.capability != v.name),
+             SELECT v.id, v.name, v.elf_class, pv.capability, pv.version_constraint FROM vuln v
+               JOIN package_provides pv ON pv.package_id = v.id AND pv.capability != v.name AND (pv.declared = 1 OR v.arch = ?1)),
            hits AS (
              SELECT c.vuln, c.capability = c.vuln AS declared, rq.package_id AS dep
                FROM caps c
                CROSS JOIN package_requires rq ON rq.requirement = c.capability AND rq.kind = 'depends'
                CROSS JOIN ring_packages rp ON rp.ring = '${ring}' AND rp.package_id = rq.package_id
-               CROSS JOIN packages d ON d.id = rq.package_id AND d.repo_arch = ?1 AND d.id != c.vuln_id)
+               CROSS JOIN packages d ON d.id = rq.package_id AND d.repo_arch = ?1 AND d.id != c.vuln_id
+              WHERE (c.capability NOT GLOB '*.so.[0-9]*' OR ${classesMeetSql("d.elf_class", "c.elf_class")})
+                AND (rq.version_constraint IS NULL OR NOT (rq.requirement GLOB '*.so' AND (rq.version_constraint GLOB '=*-32' OR rq.version_constraint GLOB '=*-64'))
+                     OR rq.version_constraint = c.form))
        SELECT NULL AS vuln, 0 AS declared, 0 AS loads, COUNT(DISTINCT dep) AS exposed FROM hits
        UNION ALL
        SELECT vuln,
