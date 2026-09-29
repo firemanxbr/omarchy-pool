@@ -870,6 +870,9 @@ export async function wholeReviews<R extends DecisionRow>(rows: R[], rest: (revi
   return [...rows, ...(await rest(cut, Math.min(...rows.map((r) => r.id))))];
 }
 
+/** The record's rows GET /factory/approvals answers, the newest first (a review cut by the page is completed). */
+export const APPROVALS_PAGE = 100;
+
 /**
  * The decisions, newest first — one per review, with its targets — and,
  * for each approval, the rings that serve the package today (`rings`), so a
@@ -885,7 +888,10 @@ export async function wholeReviews<R extends DecisionRow>(rows: R[], rest: (revi
  * blocked package. One query over the factory's packages in the four rings:
  * the ring table's key is (ring, package_id), so every factory package
  * costs four seeks; the publish job is found by the build's name, arch and
- * id (idx_build_tasks_name).
+ * id (idx_build_tasks_name). The record's newest APPROVALS_PAGE rows, each
+ * review whole; `truncated` says older decisions exist, so a page that
+ * counts over these (People's reviews and what each maintainer maintains)
+ * says its number is a floor. One row more is read to know.
  */
 export async function handleApprovals(env: Env): Promise<Response> {
   const select = `SELECT a.*, r.status AS rebuild_status, r.result_filename AS rebuild_result, fp.blocked_at,
@@ -893,7 +899,7 @@ export async function handleApprovals(env: Env): Promise<Response> {
               (SELECT p.status FROM build_tasks p WHERE p.name = a.name AND p.arch = a.arch AND p.id > a.task_id AND p.kind = 'publish' AND json_extract(p.params, '$.task') = a.task_id ORDER BY p.id DESC LIMIT 1) AS publish_status
          FROM approvals a LEFT JOIN build_tasks r ON r.id = a.rebuild_task LEFT JOIN factory_packages fp ON fp.name = a.name LEFT JOIN reviews v ON v.id = a.review_id`;
   const [page, served] = await Promise.all([
-    env.DB.prepare(`${select} ORDER BY a.id DESC LIMIT 100`).all<DecisionRow>(),
+    env.DB.prepare(`${select} ORDER BY a.id DESC LIMIT ?`).bind(APPROVALS_PAGE + 1).all<DecisionRow>(),
     env.DB.prepare(
       `SELECT rp.ring, p.name, p.repo_arch AS arch FROM packages p JOIN ring_packages rp ON rp.package_id = p.id AND rp.ring IN (${ringsSql(RINGS)}) WHERE p.source = 'factory'`,
     ).all<{ ring: string; name: string; arch: string }>(),
@@ -903,8 +909,8 @@ export async function handleApprovals(env: Env): Promise<Response> {
     const k = `${s.name}\t${s.arch}`;
     rings.set(k, sortRings([...(rings.get(k) ?? []), s.ring]));
   }
-  const rows = await wholeReviews(page.results, async (reviews, below) =>
+  const rows = await wholeReviews(page.results.slice(0, APPROVALS_PAGE), async (reviews, below) =>
     (await env.DB.prepare(`${select} WHERE a.review_id IN (SELECT value FROM json_each(?)) AND a.id < ?`).bind(JSON.stringify(reviews), below).all<DecisionRow>()).results);
   const approvals = asReviews(rows, (name, arch) => rings.get(`${name}\t${arch}`) ?? []);
-  return json({ approvals }, 200, { "cache-control": "public, max-age=30" });
+  return json({ truncated: page.results.length > APPROVALS_PAGE, approvals }, 200, { "cache-control": "public, max-age=30" });
 }

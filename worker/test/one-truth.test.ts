@@ -451,8 +451,8 @@ describe("three more facts, one source each", () => {
     expect(pkgs.find((p) => p.name === F.pulledPkg)).toMatchObject({ status: "rejected", landed: false });
     expect(pkgs.find((p) => p.name === F.factoryPkg)).toMatchObject({ status: "staged", landed: false });
     const components = allComponents(F);
-    // Home counts no community packages since #243: its numbers are the pool's (names, arrivals, the stable release, the sources).
-    for (const [path, id, caption] of [["/factory", "factory.tiles", '"approved by a maintainer, from "'], ["/pipeline", "pipeline.throughput-flow", '<span class="k">approved</span>'], ["/people", "people.tiles", '"approved by a maintainer, built by the project"']] as const) {
+    // Home counts no community packages since #243: its numbers are the pool's (names, arrivals, the stable release, the sources). People counts the flag per contributor since #251 — the ranking by approved packages, the caption on each count — where it was a tile before.
+    for (const [path, id, caption] of [["/factory", "factory.tiles", '"approved by a maintainer, from "'], ["/pipeline", "pipeline.throughput-flow", '<span class="k">approved</span>'], ["/people", "people.contributors", '"approved by a maintainer, built by the project"']] as const) {
       const own = ownScript(await page(path));
       expect(own, `${path} reads landed`).toContain("p.landed");
       expect(own, `${path} still types the status words`).not.toMatch(/status === "approved" \|\| p\.status === "published"|status === "approved"; \}\)\.length/);
