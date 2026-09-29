@@ -503,6 +503,11 @@ describe("adopt", () => {
     await env.DB.prepare(`INSERT INTO factory_packages (name, owner, url, arches, status, detail) VALUES
       ('orphan', 'dave', 'https://orphan.example', '["x86_64"]', 'unmaintained', 'no worker built its bump in 30 days'),
       ('kept', 'dave', 'https://kept.example', '["x86_64"]', 'published', '1.0-1 in edge')`).run();
+    // The No maintainer tab's own read, asked for when the list of all says it was truncated: the unmaintained registrations alone, paged the same way.
+    const unmaintained = (await call("GET", "/factory/packages?status=unmaintained")).json;
+    expect(unmaintained.truncated).toBe(false);
+    expect(unmaintained.packages.map((p: { name: string }) => p.name)).toContain("orphan");
+    expect(unmaintained.packages.every((p: { status: string }) => p.status === "unmaintained")).toBe(true);
     expect((await call("POST", "/factory/packages/orphan/adopt", {})).status).toBe(401);
     expect((await call("POST", "/factory/packages/orphan/adopt", {}, "omc_bob")).json).toEqual({ error: "a maintainer decides", code: "maintainer_only" });
     expect((await call("POST", "/factory/packages/kept/adopt", {}, "omc_m1")).json.error).toBe("kept has a maintainer: it is published, dave's");

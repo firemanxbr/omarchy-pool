@@ -106,14 +106,6 @@ export const LATE_AFTER_HOURS = 9;
 export const WORKER_ALIVE_MINUTES = 10;
 
 /**
- * GET /factory/packages lists the most recently updated registrations, this
- * many (routes/contributors.ts); a page that needs every one of a kind asks
- * for it by status when the list comes back full — Review's No maintainer
- * tab reads the unmaintained ones that way (#247).
- */
-export const PACKAGES_LIMIT = 200;
-
-/**
  * The architectures the pool serves, said once: the layout of the pool
  * (r2.ts, which re-exports it for the routes that check an arch), the jobs
  * the scheduler queues per architecture, the enqueue's default, and the
@@ -153,7 +145,7 @@ export const SEVERITIES = ["critical", "high", "medium", "low", "unknown"] as co
  * routes typed the four names by hand before (2026-09-18) — and eight page
  * modules after them: layout.ts now splices the promised rings in the
  * reader's order (PROMISED_RINGS) and every page reads that or the keys of
- * RING_TEXT, so a ring added here reaches the Pool's cards, the pickers,
+ * RING_TEXT, so a ring added here reaches the Pool's chain, the pickers,
  * the Security chart, the Status tables and the Pipeline's heads.
  */
 export const RINGS = ["edge", "rc", "stable", "lab"] as const;
@@ -194,7 +186,7 @@ export function sortRings<T extends string>(rings: T[]): T[] {
 }
 
 /**
- * What each ring is, said once: the Pool page's cards, the Docs, Get
+ * What each ring is, said once: the Pool's setup card, the Docs, Get
  * started and the status tiles read it from here (layout.ts hands it to
  * every page script as RINGS_TEXT). Promotion is by evidence, when the
  * evidence is there (scheduler.ts, gate.rs) — the words say so.

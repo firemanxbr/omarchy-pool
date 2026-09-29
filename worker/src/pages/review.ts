@@ -38,7 +38,7 @@
 import { page, servedGrey } from "./layout";
 import { EVERYONE, type Component, type Fixture } from "./components";
 import { lucide } from "./kit";
-import { PACKAGES_LIMIT, type RunningVersion } from "../meta";
+import type { RunningVersion } from "../meta";
 import { CATEGORIES } from "../categories";
 
 /** The brake's form (block a contributor or a package): served grey with the reason, drawn again through the shell's gate() once whoami answers — live for a maintainer. It is the Blocked tab's. */
@@ -266,7 +266,7 @@ const CSS = String.raw`
 `;
 
 const SCRIPT = String.raw`
-  var API = "/api/v1/factory", CATEGORIES = ${JSON.stringify(CATEGORIES)}, AGENT_KEY = "op-review-agent", PACKAGES_LIMIT = ${PACKAGES_LIMIT};
+  var API = "/api/v1/factory", CATEGORIES = ${JSON.stringify(CATEGORIES)}, AGENT_KEY = "op-review-agent";
   // The lists the page is drawn from, null until each answers: REVIEW the review list (its rows, what each viewer may do on them, and where each package stands — state, ready, in_review), APPROVALS the record, BLOCKS the brake's, REGISTRY the factory's registrations (the No maintainer tab; UNMAINTAINED its unmaintained ones, asked for only when the list of all came back full), WORKERS the project's workers (the agents a claim can choose, for a maintainer — read when a claim or the workspace first needs them, never with the queue). DOWN is why the review list did not answer, said once in #rv-note; a list that did not answer draws "—" and its reason, never an empty state.
   var REVIEW = null, APPROVALS = null, BLOCKS = null, REGISTRY = null, UNMAINTAINED = null, WORKERS = null, DOWN = null, BLOCKS_DOWN = null, REGISTRY_DOWN = null, DRAWN = false, SEEN = null, SAID = "";
   // The tab shown: the address's ?tab= (a tab is a link another page can give), Ready unless it names one of the four.
@@ -868,8 +868,8 @@ const SCRIPT = String.raw`
     api("GET", API + "/packages").then(function (d) {
       if (d.error) return;
       REGISTRY = d; REGISTRY_DOWN = null; renderQueue();
-      // The list of all is the newest PACKAGES_LIMIT registrations: when it came back full, the unmaintained ones are asked for on their own, so an older one still has its row.
-      if ((d.packages || []).length >= PACKAGES_LIMIT) api("GET", API + "/packages?status=unmaintained").then(function (u) { if (!u.error) { UNMAINTAINED = u; renderQueue(); } }).catch(function () { /* the list of all stands in for it */ });
+      // The list of all is the newest registrations, a page of them: when it says it was truncated, the unmaintained ones are asked for on their own, so an older one still has its row.
+      if (d.truncated) api("GET", API + "/packages?status=unmaintained").then(function (u) { if (!u.error) { UNMAINTAINED = u; renderQueue(); } }).catch(function () { /* the list of all stands in for it */ });
       else UNMAINTAINED = null;
     }).catch(function (e) { REGISTRY_DOWN = noAnswer("registry", e); renderQueue(); });
   }
@@ -979,7 +979,7 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     id: "review.unmaintained",
     page: "/review",
     anchor: ['data-tab="unmaintained"'],
-    script: ["function unmaintained()", 'p.status === "unmaintained"', '"maintainers adopt"', "data-adopt=", '"/adopt"', '"/packages?status=unmaintained"', ">= PACKAGES_LIMIT"],
+    script: ["function unmaintained()", 'p.status === "unmaintained"', '"maintainers adopt"', "data-adopt=", '"/adopt"', '"/packages?status=unmaintained"', "d.truncated"],
     reads: [
       { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.name", "packages.0.status", "packages.0.owner", "packages.0.detail", "packages.0.targets", "packages.0.updated_at", "packages.0.blocked_at"] },
       { path: "/api/v1/factory/packages?status=unmaintained", fields: ["packages"] },

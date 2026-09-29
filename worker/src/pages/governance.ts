@@ -9,6 +9,7 @@ import { EVERYONE, type Component, type Fixture } from "./components";
 import type { RunningVersion } from "../meta";
 import { REPO_URL } from "../meta";
 import { CATEGORIES } from "../categories";
+import { APPLY_URL } from "../governance";
 
 const FILE = `${REPO_URL}/blob/main/factory/MAINTAINERS.toml`;
 
@@ -50,9 +51,10 @@ const BODY = String.raw`
   <section id="becoming">
     <h2>Becoming a maintainer</h2>
     <div class="steps">
-      <div class="step"><h3>1. Contribute first</h3><p>Every maintainer was a contributor: packages registered, builds staged, reviews taken part in. Sign in, and the record of what you did is public on the <a href="/factory">Factory</a> page and your profile.</p></div>
-      <div class="step"><h3>2. A maintainer proposes you</h3><p>A pull request adding your login to <code>factory/MAINTAINERS.toml</code>, saying why. It is a decision people make, not a database write.</p></div>
-      <div class="step"><h3>3. Another maintainer approves</h3><p><code>main</code> takes pull requests only — green checks, squash, and one approval that GitHub never lets be the author's own — so at least one <em>other</em> maintainer approves, and the file (and <code>CODEOWNERS</code>, generated from it) asks for a code owner's: every maintainer is one. A maintainer reviews and merges what another opened; nothing is auto-merged. The merge is the promotion: within ten minutes the pool applies it and the next sign-in shows the role. A maintainer stepping down is the same pull request with the same review; <code>factory/bin/check-governance --write</code> regenerates <code>CODEOWNERS</code>, and CI fails when the two disagree.</p></div>
+      <div class="step"><h3>1. Get one package approved</h3><p>Every maintainer was a contributor first. Sign in, request a package on the <a href="/factory">Factory</a> page, and see it through until a maintainer approves the project's build of it. The record of what you did is public on your profile, and the <a href="/people">People</a> page opens the next step for you once a package of yours is approved.</p></div>
+      <div class="step"><h3>2. Open the issue</h3><p>The <a href="${APPLY_URL}">maintainer application</a>, an issue on GitHub opened from the account you sign in to the pool with: the package that was approved, the agent you review with, the architectures you build and review on, and that you agree to these rules. It asks; it decides nothing.</p></div>
+      <div class="step"><h3>3. A maintainer opens the pull request</h3><p>A pull request adding the login of the issue's author to <code>factory/MAINTAINERS.toml</code> — the account that applied, never a login written in the issue — linking the issue and saying why. It is a decision people make, not a database write.</p></div>
+      <div class="step"><h3>4. Another maintainer approves</h3><p><code>main</code> takes pull requests only — green checks, squash, and one approval that GitHub never lets be the author's own — so at least one <em>other</em> maintainer approves, and the file (and <code>CODEOWNERS</code>, generated from it) asks for a code owner's: every maintainer is one. A maintainer reviews and merges what another opened; nothing is auto-merged. The merge is the promotion: within ten minutes the pool applies it and the next sign-in shows the role. A maintainer stepping down is the same pull request with the same review; <code>factory/bin/check-governance --write</code> regenerates <code>CODEOWNERS</code>, and CI fails when the two disagree.</p></div>
       <div class="step"><h3>Bootstrap, and the one door left</h3><p>While the project had a single maintainer there was nobody else to approve <em>the pull request that adds the second one</em>: that maintainer merged it alone, and GitHub recorded the bypassed review (2026-09-17). The exception never extended to packages — a sole maintainer's own packages waited. What remains is the repository's admin, who can merge a pull request alone: GitHub writes <em>bypassed</em> on that pull request for everyone to see, and the project's rule is that it never happens to this file.</p></div>
     </div>
   </section>
@@ -197,7 +199,7 @@ export const GOVERNANCE_COMPONENTS = (_F: Fixture): Component[] => {
     {
       id: "governance.becoming",
       page,
-      anchor: ['id="becoming"', "<h2>Becoming a maintainer</h2>", "<h3>1. Contribute first</h3>", "<h3>2. A maintainer proposes you</h3>", "<h3>3. Another maintainer approves</h3>", "<h3>Bootstrap, and the one door left</h3>", 'href="/factory"'],
+      anchor: ['id="becoming"', "<h2>Becoming a maintainer</h2>", "<h3>1. Get one package approved</h3>", "<h3>2. Open the issue</h3>", `<a href="${APPLY_URL}">maintainer application</a>`, "<h3>3. A maintainer opens the pull request</h3>", "A pull request adding the login of the issue's author", "<h3>4. Another maintainer approves</h3>", 'href="/people"', "<h3>Bootstrap, and the one door left</h3>", 'href="/factory"'],
       visible: EVERYONE,
     },
     {

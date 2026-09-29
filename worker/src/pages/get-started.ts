@@ -80,7 +80,7 @@ const body = (sample: string | null) => String.raw`
 
     <div class="step" id="cli">
       <h3>Optional: omarchy-cli</h3>
-      <p>A thin client that knows about rings and releases: <code>status</code> shows what the ring would change on this machine, <code>check</code> runs the ABI safety check before an out-of-band install, <code>upgrade</code> drives pacman and pins the release you are on, <code>security</code> lists the advisories that apply here. A package of the factory, in every ring; not on your ring yet? Binaries for both architectures ship with every <a href="https://github.com/firemanxbr/omarchy-pool/releases">release</a>.</p>
+      <p>A thin client that knows about rings and releases: <code>status</code> shows what the ring would change on this machine, <code>check</code> runs the ABI safety check before an out-of-band install, <code>upgrade</code> drives pacman and pins the release you are on, <code>security</code> lists the advisories that apply here. A package of the factory once your ring serves it. Until then, the command below installs the binary from the latest <a href="https://github.com/firemanxbr/omarchy-pool/releases">release</a>, for the architecture picked in step 1.</p>
       <pre><span class="copy" data-copy="cli">copy</span><span id="cli-cmd"></span></pre>
     </div>
 
