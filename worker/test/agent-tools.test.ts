@@ -148,16 +148,26 @@ type Authenticator = Awaited<ReturnType<typeof createAuthenticator>>;
 /** The passkeys each login registered in this file (#257): the software authenticator and the pool's id for it, the first answering unless a test names another. */
 const passkeys: Record<string, { a: Authenticator; id: string }[]> = {};
 
-/** A passkey registered on the person's own page, as its script does it: the options, the authenticator's answer, the POST — the session, the page's Origin. */
+/** A JSON POST from the person's page: the session's cookie and the page's Origin. */
+async function fromPage(login: string, path: string, body: unknown): Promise<{ status: number; json: any }> {
+  const res = await raw("POST", ORIGIN + path, { headers: { cookie: session(login), origin: ORIGIN, "content-type": "application/json" }, body: JSON.stringify(body) });
+  return { status: res.status, json: (await res.json()) as any };
+}
+
+/** An answer from a passkey the login holds (its first, unless a test names another) for one act of theirs on the web (#271): the options POST /auth/passkeys/assert gives, as the pages' script asks for them. */
+async function assertionFor(login: string, subject: string, key = passkeys[login][0]): Promise<Record<string, string>> {
+  const o = await fromPage(login, "/auth/passkeys/assert", { for: subject });
+  expect(o.status, JSON.stringify(o.json)).toBe(200);
+  return answer(key.a, { challenge: o.json.publicKey.challenge, origin: ORIGIN, rpId: "localhost" });
+}
+
+/** A passkey registered on the person's own page, as its script does it: the options, the authenticator's answer, the POST — the session, the page's Origin — and, for a login that holds one already, that one's answer for adding another (#271). */
 async function registerPasskey(login: string, o: { keepsCounter?: boolean; alg?: number } = {}): Promise<{ a: Authenticator; id: string }> {
   const a = await createAuthenticator({ keepsCounter: o.keepsCounter ?? true, ...(o.alg ? { alg: o.alg } : {}) });
-  const post = async (path: string, body: unknown) => {
-    const res = await raw("POST", ORIGIN + path, { headers: { cookie: session(login), origin: ORIGIN, "content-type": "application/json" }, body: JSON.stringify(body) });
-    return { status: res.status, json: (await res.json()) as any };
-  };
-  const opts = await post("/auth/passkeys/challenge", {});
+  const vouch = passkeys[login]?.length ? { assertion: await assertionFor(login, "passkey:add") } : {};
+  const opts = await fromPage(login, "/auth/passkeys/challenge", {});
   expect(opts.status, JSON.stringify(opts.json)).toBe(200);
-  const reg = await post("/auth/passkeys", { label: `${login}'s key`, ...(await register(a, { challenge: opts.json.publicKey.challenge, origin: ORIGIN, rpId: "localhost" })) });
+  const reg = await fromPage(login, "/auth/passkeys", { label: `${login}'s key`, ...(await register(a, { challenge: opts.json.publicKey.challenge, origin: ORIGIN, rpId: "localhost" })), ...vouch });
   expect(reg.status, JSON.stringify(reg.json)).toBe(201);
   const k = { a, id: reg.json.passkey.id as string };
   (passkeys[login] ??= []).push(k);
@@ -853,8 +863,8 @@ describe("a passkey for approve and block (#257)", () => {
     key.a.counter = stored;
     // A passkey removed on the person's page answers nothing after.
     const spare = await registerPasskey("m1");
-    const removed = await raw("POST", `${ORIGIN}/auth/passkeys/${spare.id}/remove`, { headers: { cookie: session("m1"), origin: ORIGIN } });
-    expect(removed.status).toBe(200);
+    const removed = await fromPage("m1", `/auth/passkeys/${spare.id}/remove`, { assertion: await assertionFor("m1", `passkey:remove:${spare.id}`) });
+    expect(removed.status, JSON.stringify(removed.json)).toBe(200);
     const gone = await post(d, "m1", await signed(d, "m1", { with: spare.a }));
     expect(gone.status).toBe(403);
     await nothing(d, "pkanother");
@@ -883,11 +893,14 @@ describe("a passkey for approve and block (#257)", () => {
     expect(JSON.parse((await env.DB.prepare("SELECT agent FROM approvals WHERE name = 'pkmalformed'").first<{ agent: string }>())!.agent)).toMatchObject({ passkey: ed.id });
   });
 
-  it("guards an agent's drafts, not the web's own buttons: the session alone still approves on Review — outside #257, as the security model says", async () => {
+  it("guards the web's own buttons as well (#271): the session alone approves nothing on Review; the same passkey, asked for this build, does — the web's refusals are passkey-decisions.test.ts's", async () => {
     const { project } = await reviewed("pkwebapprove");
-    const res = await raw("POST", `${API}/factory/tasks/${project}/approve`, { headers: { cookie: session("m1"), origin: ORIGIN, "content-type": "application/json" }, body: JSON.stringify({ note: "reads well" }) });
-    expect(res.status, await res.clone().text()).toBe(200);
-    expect((await line("approve", "pkwebapprove"))!.summary).not.toContain("passkey");
+    const bare = await fromPage("m1", `/api/v1/factory/tasks/${project}/approve`, { note: "reads well" });
+    expect([bare.status, bare.json.code], JSON.stringify(bare.json)).toEqual([403, "passkey_required"]);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM approvals WHERE name = 'pkwebapprove'").first()).toEqual({ n: 0 });
+    const ok = await fromPage("m1", `/api/v1/factory/tasks/${project}/approve`, { note: "reads well", assertion: await assertionFor("m1", `approve:${project}`) });
+    expect(ok.status, JSON.stringify(ok.json)).toBe(200);
+    expect(JSON.parse((await line("approve", "pkwebapprove"))!.payload)).toMatchObject({ by: "m1", via: "web", passkey: passkeys.m1[0].id });
   });
 
   it("is asked for, never skipped: a maintainer without a passkey is told to register one — on the page, at the POST and at the challenge — with the link, and nothing is decided", async () => {
@@ -951,7 +964,10 @@ describe("a passkey for approve and block (#257)", () => {
     expect(c.next).toBe("Open the link in a browser signed in as m3 and confirm. Nothing is decided until then.");
     const page = await confirmPage(c.draft, "m3");
     expect(page.text).toContain("Confirm: request changes on pkchanges");
-    expect(page.text).not.toContain("passkey");
+    // Nothing on the page asks for a passkey, and its script is not there: the shell's helper for the web's approve and block (#271), on every page, is the only script that names one.
+    expect(page.text.replace(/<script[^>]*>[\s\S]*?<\/script>/g, "")).not.toContain("passkey");
+    expect(page.text).not.toContain('id="pk-confirm"');
+    expect(page.text).not.toContain("Waiting for your passkey");
     expect((await challengeFor(c.draft, "m3", fields(page.text).nonce)).json.code).toBe("no_passkey_needed");
     const ok = await confirm(c.draft, "m3");
     expect(ok.status, ok.text.slice(0, 600)).toBe(200);
@@ -1021,7 +1037,7 @@ describe("revocation", () => {
     expect((await call("POST", `/factory/grants/${b.grant}/revoke`, {}, "omc_carol")).json).toMatchObject({ revoked: b.grant, by: "carol" });
     expect((await call("GET", "/factory/me", undefined, b.token)).status).toBe(401);
     const c = await login("carol", "Three");
-    expect((await call("POST", "/factory/contributors/carol/block", { reason: "a token stealer" }, "omc_m1")).status).toBe(200);
+    expect((await fromPage("m1", "/api/v1/factory/contributors/carol/block", { reason: "a token stealer", assertion: await assertionFor("m1", "block:contributor:carol") })).status).toBe(200);
     expect((await call("GET", "/factory/me", undefined, c.token)).status).toBe(401);
     expect(await env.DB.prepare("SELECT revoked_by FROM agent_grants WHERE id = ?").bind(c.grant).first()).toEqual({ revoked_by: "blocked" });
   });

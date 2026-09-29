@@ -10,6 +10,7 @@ export { stands };
 import { putRecord, recordKey, recordUrl } from "../record";
 import { packageRows, parseTargets, settleTargets, targetsOf, type PackageRows, type Target, type Targets } from "../targets";
 import { throughWords, type Through } from "../agents";
+import { decidedWith, type PasskeyGate } from "./passkeys";
 
 /**
  * Review: what maintainers do with staged builds (docs/GOVERNANCE.md). A
@@ -30,10 +31,12 @@ import { throughWords, type Through } from "../agents";
  *                                           agent — every architecture its contributor built, once each is built or
  *                                           not supported: the request and the contributor's evidence as the lesson,
  *                                           its own recipe, the gate, staged like any build (review:<id>)
- *   POST /factory/tasks/:id/approve {note?} a maintainer, never the owner, on the *project's* staged build → one
- *                                           review of the package on the record, covering every architecture the
- *                                           project built again, and a publish job per architecture into edge; one
- *                                           that never built is not supported, outside the decision
+ *   POST /factory/tasks/:id/approve {note?, assertion} a maintainer, never the owner, on the *project's* staged build,
+ *                                           with their passkey (#271: the browser's session and an assertion for this
+ *                                           build, routes/passkeys.ts webGate) → one review of the package on the
+ *                                           record, covering every architecture the project built again, and a
+ *                                           publish job per architecture into edge; one that never built is not
+ *                                           supported, outside the decision
  *   POST /factory/tasks/:id/reject  {note}  a maintainer, never the owner, either kind of staged build → the package's
  *                                           builds in review stop, and a request is rejected: the name is free again
  *                                           (a package in the pool keeps it: a new version is what was rejected)
@@ -846,14 +849,17 @@ export const CLAIM_SQL = `INSERT INTO build_tasks (name, arch, version, pkgbuild
  * there), renders edge, and handleComplete marks the registration published
  * and links the review to the build (the seal and the track record read it).
  */
-export async function handleApprove(c: Contributor, id: number, request: Request, env: Env, through?: Through): Promise<Response> {
-  const b = (await request.json().catch(() => ({}))) as { note?: unknown };
+export async function handleApprove(c: Contributor, id: number, request: Request, env: Env, through?: Through, gate?: PasskeyGate): Promise<Response> {
+  const b = (await request.json().catch(() => ({}))) as { note?: unknown; assertion?: unknown };
   const note = typeof b.note === "string" ? b.note : null;
   const t = await env.DB.prepare("SELECT * FROM build_tasks WHERE id = ?").bind(id).first<Staged & { trust: string; params: string | null; result_filename: string | null }>();
   if (!t) return json({ error: "no such task" }, 404);
   const f = await factsOf(env, t);
   const no = refused(decisions(c, t, f).approve);
   if (no) return no;
+  // What users get changes here: decided with a passkey (#271) — the draft's, confirmed in the browser, or the web's own answer for this build — checked once the act is allowed and before anything is written; never skipped.
+  const passkey = await decidedWith(through, gate, b.assertion);
+  if (passkey instanceof Response) return passkey;
   const owner = f.owner;
   // The targets: this build for its architecture, and the project's staged build of each other architecture the review covers (othersOf).
   const others = othersOf(t, f.builds, f.targets).map((s) => f.builds.project.find((p) => p.review === s.id)).filter((p): p is PackageBuilds["project"][number] => !!p);
@@ -897,12 +903,12 @@ export async function handleApprove(c: Contributor, id: number, request: Request
   for (const x of targets) await cancelPendingAudit(env, x.t.id);
   // Signed and journaled: who, through which door, and the agent that rebuilt what ships — per architecture, what its review worker ran (rebuiltWith); `agent` is this build's.
   const via = viaOf(request), agent = targets.find((x) => x.t.id === id)?.agent ?? null, at = new Date().toISOString();
-  const record = await decisionRecord(env, t.name, "approve", `r${review}`, { version: t.version, arches, not_supported: notSupported, owner, review, targets: targets.map((x) => ({ arch: x.t.arch, task: x.t.id, files: x.files, trial: x.trial, publish: publishes[x.t.arch] ?? null, agent: x.agent })), by: c.login, via, ...(through ? { through } : {}), agent, at, note });
+  const record = await decisionRecord(env, t.name, "approve", `r${review}`, { version: t.version, arches, not_supported: notSupported, owner, review, targets: targets.map((x) => ({ arch: x.t.arch, task: x.t.id, files: x.files, trial: x.trial, publish: publishes[x.t.arch] ?? null, agent: x.agent })), by: c.login, via, ...(through ? { through } : { passkey }), agent, at, note });
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('approve', 'edge', 'factory', 'ok', ?, ?)")
-    .bind(`${t.name} ${t.version ?? ""} (${arches.join(", ")}${ns.length ? `; ${ns.join(", ")} not supported` : ""}) approved by ${c.login}${throughWords(through)}${withAgents(targets.map((x) => ({ arch: x.t.arch, agent: x.agent })))}${note ? " — " + note.slice(0, 120) : ""}; the project's build${arches.length > 1 ? "s" : ""} ${targets.map((x) => x.t.id).join(", ")} go${arches.length > 1 ? "" : "es"} into edge (job${arches.length > 1 ? "s" : ""} ${Object.values(publishes).join(", ")})`, JSON.stringify({ review, task: id, publish: publishes[t.arch], publishes, name: t.name, arch: t.arch, arches, not_supported: notSupported, by: c.login, via, ...(through ? { through } : {}), agent, agents: Object.fromEntries(targets.map((x) => [x.t.arch, x.agent])), owner, note, record: record.url, ...(record.error ? { record_error: record.error } : {}) }))
+    .bind(`${t.name} ${t.version ?? ""} (${arches.join(", ")}${ns.length ? `; ${ns.join(", ")} not supported` : ""}) approved by ${c.login}${throughWords(through)}${withAgents(targets.map((x) => ({ arch: x.t.arch, agent: x.agent })))}${note ? " — " + note.slice(0, 120) : ""}; the project's build${arches.length > 1 ? "s" : ""} ${targets.map((x) => x.t.id).join(", ")} go${arches.length > 1 ? "" : "es"} into edge (job${arches.length > 1 ? "s" : ""} ${Object.values(publishes).join(", ")})`, JSON.stringify({ review, task: id, publish: publishes[t.arch], publishes, name: t.name, arch: t.arch, arches, not_supported: notSupported, by: c.login, via, ...(through ? { through } : { passkey }), agent, agents: Object.fromEntries(targets.map((x) => [x.t.arch, x.agent])), owner, note, record: record.url, ...(record.error ? { record_error: record.error } : {}) }))
     .run();
   await settleTargets(env, t.name);
-  return json({ task: id, decision: "approved", by: c.login, publish: publishes[t.arch], publishes, review, arches, not_supported: notSupported, via, ...(through ? { through } : {}), agent, record: record.url });
+  return json({ task: id, decision: "approved", by: c.login, publish: publishes[t.arch], publishes, review, arches, not_supported: notSupported, via, ...(through ? { through } : { passkey }), agent, record: record.url });
 }
 
 /**

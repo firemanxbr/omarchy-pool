@@ -17,6 +17,7 @@ import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:
 import { beforeAll, describe, expect, it } from "vitest";
 import worker from "../src/index";
 import { runScript, scriptOf, seedDashboard, type Fixture } from "./fixture";
+import { decider } from "./decide";
 
 let F: Fixture;
 type Who = "" | "bob" | "alice" | "carol" | "m1" | "m2";
@@ -495,7 +496,7 @@ describe("the page draws a factory package from its freshest word", () => {
   it("takes a package out of the rings as the story says, however long the package's answer is kept, and after a lift pressed on the page", async () => {
     const pkgPath = `/api/v1/package/${F.publishedPkg}?ring=edge&arch=${F.arch}`;
     expect((await call("GET", pkgPath)).json.arches[F.arch].rings.map((r: { ring: string }) => r.ring)).toEqual(["edge"]);
-    expect((await call("POST", `/api/v1/factory/packages/${F.publishedPkg}/block`, "m1", { reason: "the test of a stale answer" })).status).toBe(200);
+    expect((await decider(env).decide("m1", `/api/v1/factory/packages/${F.publishedPkg}/block`, { reason: "the test of a stale answer" })).status).toBe(200);
     // The package's answer is still the one kept at the edge (in edge); the story is fresh: blocked, in no ring.
     expect((await call("GET", pkgPath)).json.arches[F.arch].rings).toHaveLength(1);
     const blocked = await view(`/package/${F.publishedPkg}?ring=edge&arch=${F.arch}`, "m2", { functions: ["act"], fresh: (a) => (a.includes("/story") ? `${a}?t=blocked` : a) });

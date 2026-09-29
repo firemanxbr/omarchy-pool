@@ -21,14 +21,15 @@ request (see [CONTRIBUTING.md](CONTRIBUTING.md)), and keep
       `.PKGINFO` against the staged ones) would catch a recipe that builds
       differently on the trusted worker.
 
-- [ ] **A passkey for the decisions an agent drafts.** An agent's verdict or
-      block is confirmed in the browser with the session and, for reject
-      and block, the package's name typed
-      ([the write tools](docs/omarchy-cli-mcp.md#write-tools),
-      #252). An agent that drives the person's own signed-in browser could
-      press Confirm; a passkey with user verification for approve and block
-      is issue #257. A way in for a machine without a browser (no loopback)
-      can come later if someone needs it.
+- [ ] **Deciding without a browser.** Approve and block are decided in the
+      browser with the maintainer's passkey — the web's own buttons and an
+      agent's drafts alike
+      ([the write tools](docs/omarchy-cli-mcp.md#write-tools), #257, #271),
+      and no token of any kind approves or blocks. A path for a machine
+      without a browser — a maintainer's token with an assertion made by a
+      local authenticator, or an agent's login with no loopback — is a
+      product decision first, then a door of its own with the same
+      assertion.
 
 - [ ] **Production keys and hosting.** The staging database key is throwaway and
       the pool lives on a personal account; moving to omarchy.org means a key in

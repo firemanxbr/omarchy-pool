@@ -78,7 +78,7 @@ const BODY = String.raw`
 
   <section id="blocking">
     <h2>Blocking</h2>
-    <p class="sub">The brake. It is on the <a href="/review">Review</a> page, its <em>Blocked</em> tab, and in the API; it takes a maintainer and a reason, and the reason is what the record and the contributor see.</p>
+    <p class="sub">The brake. It is on the <a href="/review">Review</a> page, its <em>Blocked</em> tab, on a package's page, and in the API; it takes a maintainer, their passkey in the browser, and a reason, and the reason is what the record and the contributor see.</p>
     <div class="steps">
       <div class="step"><h3>A contributor</h3><p><code>POST /api/v1/factory/contributors/&lt;login&gt;/block</code>. Nothing more in: no package request, no build, no worker registration — the pool answers <code>403</code> with the reason. Their workers are revoked at once, their queued and running tasks cancelled, their registrations rejected — the names still theirs: a block frees none of them — and their packages pulled from every ring. Their projects and source URLs stay closed: a new account asking for the same project gets <code>403 requested by &lt;login&gt;, who is blocked</code> — a fresh login does not open the door again. A maintainer cannot block themself or another maintainer; the latter is a governance pull request removing the name from the file.</p></div>
       <div class="step"><h3>A package</h3><p><code>POST /api/v1/factory/packages/&lt;name&gt;/block</code>. Out of every ring the same way, on every architecture, its tasks cancelled, the review it stood on withdrawn with the block's reason, its registration rejected; the project URL answers <code>403</code> to any new request until the block is lifted.</p></div>

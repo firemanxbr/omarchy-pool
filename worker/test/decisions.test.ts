@@ -12,8 +12,11 @@ import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:
 import { beforeAll, describe, expect, it } from "vitest";
 import worker from "../src/index";
 import { seedDashboard, type Fixture } from "./fixture";
+import { decider } from "./decide";
 
 let F: Fixture;
+/** Approve, decided in the browser with the maintainer's passkey (#271): decide.ts, on the fixture's keys. */
+const { decide } = decider(env);
 
 // In the order a row is consumed below: the claim (build) before its release, changes before the rejection they leave nothing to.
 const DECISIONS = ["approve", "build", "release", "changes", "reject", "withdraw"] as const;
@@ -183,7 +186,7 @@ describe("what a caller may do on a staged build", () => {
     expect(listed?.can).toEqual(after);
     expect(listed?.standing).toBe(false);
     // The one who approved may not be the owner; m1 is not, and approves.
-    const ap = await call("POST", `/factory/tasks/${F.projectTask}/approve`, "m1", { note: "approved by the test" });
+    const ap = await decide("m1", `/factory/tasks/${F.projectTask}/approve`, { note: "approved by the test" });
     expect(ap.status, JSON.stringify(ap.json)).toBe(200);
     const again = await canOf(F.projectTask, "m2");
     expect(again).toMatchObject({ approve: false, reject: false, withdraw: true });
@@ -201,7 +204,7 @@ describe("what a caller may do on a staged build", () => {
       expect(c).toMatchObject({ approve: false, reject: true, build: false, withdraw: false });
       expect(c.why.approve).toBe("the project's build left no package in staging");
       expect((await review("m1")).json.staged.find((t: any) => t.id === F.projectTask)?.can).toEqual(c);
-      const ap = await call("POST", `/factory/tasks/${F.projectTask}/approve`, "m1", { note: "approving what is not there" });
+      const ap = await decide("m1", `/factory/tasks/${F.projectTask}/approve`, { note: "approving what is not there" });
       expect(ap.status).toBe(409);
       expect(ap.json.error).toBe(c.why.approve);
     } finally {

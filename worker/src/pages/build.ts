@@ -365,7 +365,7 @@ export const BUILD_COMPONENTS = (F: Fixture): Component[] => {
         // The workers the "Build by the project" dialog offers are the shell's read (shell.decide), as the dialog is.
       ],
       acts: [
-        { method: "POST", path: `${task}/approve`, body: { note: "reads well" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: [200, 409] } },
+        { method: "POST", path: `${task}/approve`, body: { note: "reads well" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: [403, 409] } },
         // The gates of a rejection on this build: nobody but a maintainer is let through, so it stays as it is.
         { method: "POST", path: `${task}/reject`, body: { note: "the source is not the upstream's" }, expect: { anonymous: 401, contributor: 403, owner: 403 } },
         // The rejection itself, on the row made for it; 409 once another page's manifest rejected it first.

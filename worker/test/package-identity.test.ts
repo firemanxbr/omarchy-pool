@@ -23,8 +23,11 @@ import { asReviews, wholeReviews } from "../src/routes/review";
 import { settleTargets, targetsOf, type TargetBuild, type TargetDecision } from "../src/targets";
 import { packageKey } from "../src/r2";
 import { runScript, scriptOf } from "./fixture";
+import { decider } from "./decide";
 
 const API = "http://pool.test/api/v1";
+/** Approve and block, decided in the browser with the maintainer's passkey (#271): decide.ts. */
+const web = decider(env);
 
 async function call(method: string, path: string, body?: unknown, token?: string, raw?: string, on: Env = env): Promise<{ status: number; json: any }> {
   const headers: Record<string, string> = {};
@@ -91,8 +94,8 @@ beforeAll(async () => {
   const h = (t: string) => sha256Hex(t);
   await env.DB.batch([
     env.DB.prepare(`INSERT INTO factory_maintainers (login) VALUES ('m1'), ('m2')`),
-    env.DB.prepare(`INSERT INTO contributors (login, token_hash, role) VALUES ('m1', ?, 'maintainer'), ('m2', ?, 'maintainer'), ('alice', ?, 'contributor'), ('bob', ?, 'contributor'), ('carol', ?, 'contributor'), ('dave', ?, 'contributor')`)
-      .bind(await h("omc_m1"), await h("omc_m2"), await h("omc_alice"), await h("omc_bob"), await h("omc_carol"), await h("omc_dave")),
+    env.DB.prepare(`INSERT INTO contributors (login, token_hash, session_hash, role) VALUES ('m1', ?, ?, 'maintainer'), ('m2', ?, ?, 'maintainer'), ('alice', ?, NULL, 'contributor'), ('bob', ?, NULL, 'contributor'), ('carol', ?, NULL, 'contributor'), ('dave', ?, NULL, 'contributor')`)
+      .bind(await h("omc_m1"), await h("oms_m1"), await h("omc_m2"), await h("oms_m2"), await h("omc_alice"), await h("omc_bob"), await h("omc_carol"), await h("omc_dave")),
   ]);
 });
 
@@ -308,7 +311,7 @@ describe("migration 0036: one package per name, with a target per architecture",
 
   it("a block takes the review a package stood on back with it, every architecture, and another maintainer's lift sends it back to the factory", async () => {
     const t = traced();
-    const blocked = await call("POST", "/factory/packages/helix/block", { reason: "ships a binary the source does not build" }, "omc_m1", undefined, t.env);
+    const blocked = await web.decide("m1", "/factory/packages/helix/block", { reason: "ships a binary the source does not build" }, t.env);
     expect(blocked.status, JSON.stringify(blocked.json)).toBe(200);
     // Where the round closes, the package's last build, is found through the name's index, not the index of every build's kind.
     const closing = t.seen.filter((x) => x.sql.includes("closed_through = MAX(closed_through"));
@@ -442,7 +445,7 @@ describe("a package built for two architectures", () => {
     expect(c.task.id).toBe(px);
     await stage(c);
     expect(await targetsOf("duo")).toMatchObject({ x86_64: { status: "reviewed", task: px } });
-    const ok = await call("POST", `/factory/tasks/${px}/approve`, { note: "x86_64 only; aarch64 needs a linker" }, "omc_m2");
+    const ok = await web.decide("m2", `/factory/tasks/${px}/approve`, { note: "x86_64 only; aarch64 needs a linker" });
     expect(ok.status, JSON.stringify(ok.json)).toBe(200);
     expect(ok.json).toMatchObject({ decision: "approved", arches: ["x86_64"], not_supported: { aarch64: arm }, publishes: { x86_64: ok.json.publish } });
     // One review on the record, one row for its one target, one publish job — x86_64's.
@@ -497,7 +500,7 @@ describe("a package built for two architectures", () => {
     expect(early.json.error).toBe(`the project is still building aarch64 (task ${ra} is queued): one review covers every architecture — approve once it is staged`);
     expect((await call("GET", `/factory/tasks/${rx}/can`, undefined, "omc_m2")).json.can.why.approve).toBe(early.json.error);
     const ca = await build("omw_pa", "aarch64", "pair", ["build"]); await stage(ca);
-    const ok = await call("POST", `/factory/tasks/${ra}/approve`, { note: "both" }, "omc_m2");
+    const ok = await web.decide("m2", `/factory/tasks/${ra}/approve`, { note: "both" });
     expect(ok.status, JSON.stringify(ok.json)).toBe(200);
     expect(ok.json).toMatchObject({ arches: ["x86_64", "aarch64"], not_supported: {}, publishes: { x86_64: expect.any(Number), aarch64: expect.any(Number) } });
     expect((await env.DB.prepare("SELECT arch, task_id FROM approvals WHERE name = 'pair' AND review_id = ? ORDER BY arch DESC").bind(ok.json.review).all()).results).toEqual([{ arch: "x86_64", task_id: rx }, { arch: "aarch64", task_id: ra }]);
@@ -575,7 +578,7 @@ describe("a package built for two architectures", () => {
     const asked = await call("POST", `/factory/tasks/${x11.task.id}/build`, {}, "omc_m2");
     expect(asked.json).toMatchObject({ arches: ["x86_64"], tasks: [asked.json.task] });
     const p = await build("omw_px", "x86_64", "mix", ["build"]); await stage(p);
-    const ok = await call("POST", `/factory/tasks/${p.task.id}/approve`, {}, "omc_m2");
+    const ok = await web.decide("m2", `/factory/tasks/${p.task.id}/approve`);
     expect(ok.status, JSON.stringify(ok.json)).toBe(200);
     expect(ok.json).toMatchObject({ arches: ["x86_64"], not_supported: { aarch64: a11.task.id } });
     // One review of one version: 1.1 on x86_64, aarch64 not supported; nothing of 1.0 approved, nothing of it published.
@@ -613,7 +616,7 @@ describe("a package built for two architectures", () => {
     expect((await request("held", "omc_dave", ["x86_64"])).status).toBe(201);
     // One of dave's names a review had freed before the block, requested by nobody since: that one is free, and stays free.
     await env.DB.prepare("INSERT INTO factory_packages (name, owner, url, arches, status, detail, freed_by_review) VALUES ('let-go', 'dave', 'https://let-go.example', '[\"x86_64\"]', 'rejected', 'rejected by m2 — the name is free again', 1)").run();
-    expect((await call("POST", "/factory/contributors/dave/block", { reason: "requests packages that are not theirs" }, "omc_m1")).status).toBe(200);
+    expect((await web.decide("m1", "/factory/contributors/dave/block", { reason: "requests packages that are not theirs" })).status).toBe(200);
     expect(await env.DB.prepare("SELECT owner, status, freed_by_review FROM factory_packages WHERE name = 'held'").first()).toEqual({ owner: "dave", status: "rejected", freed_by_review: null });
     // bob asks for the names from another project: the blocked contributor's own is refused, as before #242; the one a review freed is his.
     const fork = (name: string) =>

@@ -16,8 +16,11 @@ import { requeueExpiredLeases, TOUCH_MINUTES, touchWorker, workerReady } from ".
 import { packageKey } from "../src/r2";
 import { issueJobToken, jobOf, scopesFor } from "../src/jobtoken";
 import { STAGING_QUOTA_BYTES, sweepStaging } from "../src/staging";
+import { decider } from "./decide";
 
 const API = "http://pool.test/api/v1";
+/** Approve and block, decided in the browser with the maintainer's passkey (#271): decide.ts. */
+const { decide } = decider(env);
 
 async function call(method: string, path: string, body?: unknown, token?: string, raw?: string): Promise<{ status: number; json: any }> {
   const headers: Record<string, string> = {};
@@ -41,7 +44,7 @@ beforeAll(async () => {
       ('w2', 'aarch64', 'm1', ?, 'shared', 'project', 'm1', '2000-01-01T00:00:00Z'),
       ('w3', 'aarch64', 'alice', ?, 'dedicated', 'community', NULL, '2000-01-01T00:00:00Z')`).bind(await h("omw_w1"), await h("omw_w2"), await h("omw_w3")),
     env.DB.prepare(`INSERT INTO factory_maintainers (login) VALUES ('m1')`),
-    env.DB.prepare(`INSERT INTO contributors (login, token_hash, role) VALUES ('m1', ?, 'maintainer'), ('m2', ?, 'maintainer'), ('alice', ?, 'contributor')`).bind(await h("omc_m1"), await h("omc_m2"), await h("omc_alice")),
+    env.DB.prepare(`INSERT INTO contributors (login, token_hash, session_hash, role) VALUES ('m1', ?, ?, 'maintainer'), ('m2', ?, ?, 'maintainer'), ('alice', ?, NULL, 'contributor')`).bind(await h("omc_m1"), await h("oms_m1"), await h("omc_m2"), await h("oms_m2"), await h("omc_alice")),
   ]);
 });
 
@@ -316,7 +319,7 @@ describe("a community build, its audit and the review", () => {
     expect(sole.status).toBe(403);
     expect(sole.json.error).toMatch(/with one maintainer, that maintainer.s own packages wait/);
     await env.DB.prepare(`INSERT OR IGNORE INTO factory_maintainers (login) VALUES ('m2')`).run();
-    const other = await call("POST", `/factory/tasks/${projectTask}/approve`, { note: "looks right" }, "omc_m2");
+    const other = await decide("m2", `/factory/tasks/${projectTask}/approve`, { note: "looks right" });
     expect(other.status, JSON.stringify(other.json)).toBe(200);
     expect(other.json).toMatchObject({ task: projectTask, decision: "approved", by: "m2", publish: expect.any(Number) });
     expect((await call("POST", `/factory/tasks/${projectTask}/approve`, {}, "omc_m2")).status).toBe(409);
@@ -370,7 +373,7 @@ describe("a community build, its audit and the review", () => {
     expect(await env.DB.prepare("SELECT status FROM factory_packages WHERE name = 'mine'").first()).toMatchObject({ status: "staged" });
     expect((await env.DB.prepare("SELECT summary FROM events WHERE kind = 'withdraw' ORDER BY id DESC LIMIT 1").first<{ summary: string }>())!.summary).toContain("withdrawn by m1");
     // …and approved again, by the other maintainer, for the rest of the story.
-    const back = await call("POST", `/factory/tasks/${projectTask}/approve`, { note: "looks right" }, "omc_m2");
+    const back = await decide("m2", `/factory/tasks/${projectTask}/approve`, { note: "looks right" });
     expect(back.status, JSON.stringify(back.json)).toBe(200);
     await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE id = ?").bind(other.json.publish).run(); // the first publish job, superseded by this one
     other.json.publish = back.json.publish;
@@ -991,7 +994,7 @@ describe("blocking", () => {
     ]);
     const before = (await env.DB.prepare("SELECT COUNT(*) AS n FROM ring_packages rp JOIN packages p ON p.id = rp.package_id WHERE p.name = 'mine' AND rp.ring = 'edge'").first<{ n: number }>())!.n;
     expect(before).toBe(1);
-    const blocked = await call("POST", "/factory/packages/mine/block", { reason: "ships a token stealer" }, "omc_m2");
+    const blocked = await decide("m2", "/factory/packages/mine/block", { reason: "ships a token stealer" });
     expect(blocked.status, JSON.stringify(blocked.json)).toBe(200);
     expect(blocked.json).toMatchObject({ blocked: "mine", by: "m2", rings: [{ ring: "edge", release: expect.any(Number) }] });
     expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM ring_packages rp JOIN packages p ON p.id = rp.package_id WHERE p.name = 'mine'").first<{ n: number }>())!.n).toBe(0);
@@ -1022,7 +1025,7 @@ describe("blocking", () => {
     expect((await call("POST", "/factory/contributors/bob/block", { reason: "spam requests" }, "omc_alice")).status).toBe(403);
     expect((await call("POST", "/factory/contributors/m2/block", { reason: "no reason at all" }, "omc_m1")).status).toBe(409); // a maintainer is a governance PR
     expect((await call("POST", "/factory/contributors/m1/block", { reason: "no reason at all" }, "omc_m1")).status).toBe(400);
-    const blocked = await call("POST", "/factory/contributors/bob/block", { reason: "spam requests" }, "omc_m1");
+    const blocked = await decide("m1", "/factory/contributors/bob/block", { reason: "spam requests" });
     expect(blocked.status, JSON.stringify(blocked.json)).toBe(200);
     expect(blocked.json).toMatchObject({ blocked: "bob", by: "m1", packages: ["tool"], workers_revoked: [w.json.worker] });
     expect(await env.PACKAGES.head(blocked.json.record.replace(`${env.POOL_URL}/`, ""))).not.toBeNull();

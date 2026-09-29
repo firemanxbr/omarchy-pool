@@ -31,6 +31,7 @@
  *   POST /api/v1/factory/drafts · GET /factory/drafts/:id · POST /factory/grants/:id/revoke   an agent's drafts and grants (#252, routes/agents.ts)
  *   GET|POST /auth/agent · POST /auth/agent/token · POST /auth/agent/revoke · GET|POST /auth/confirm/:id   the grant, the swap, logout, a draft confirmed
  *   POST /auth/confirm/:id/challenge · POST /auth/passkeys/challenge · POST /auth/passkeys · POST /auth/passkeys/:id/remove   passkeys: approve and block confirmed with one (#257, routes/passkeys.ts)
+ *   POST /auth/passkeys/assert · POST /auth/passkeys/reset   the web's approve and block, a passkey added or removed, with one; a lost one reset by another maintainer (#271)
  *   GET  /api/v1/factory/{packages,built,review,approvals,maintainers,trust,workers/self,me} · GET /api/v1/factory/tasks/:id/can · GET /api/v1/users/:login · GET /api/v1/users/:login/can · GET /api/v1/cost
  *   GET  /api/v1/factory/names/:name?arches= · GET /api/v1/factory/source?url=   the Factory form's live checks: would the name be taken, what the repository says
  *                                                  the factory's brain: package requests, build tasks, pull-based workers
@@ -83,7 +84,7 @@ import { handleBlockContributor, handleUnblockContributor, handleBlockPackage, h
 import { handleAdoptPackage } from "./routes/adopt";
 import { handleAuthStart, handleAuthCallback, handleLogout } from "./routes/auth";
 import { agentClaimOrRelease, dashboardOrigin, handleAgentLogout, handleConfirm, handleConfirmChallenge, handleConfirmPage, handleDraft, handleGetDraft, handleGrant, handleGrantPage, handleRevokeGrant, handleSwap } from "./routes/agents";
-import { handlePasskeyOptions, handlePasskeyRegister, handlePasskeyRemove } from "./routes/passkeys";
+import { handlePasskeyAssert, handlePasskeyOptions, handlePasskeyRegister, handlePasskeyRemove, handlePasskeyReset, webGate } from "./routes/passkeys";
 import { agentOf, agentTokenRefusal, dayCount, hasAgentToken } from "./agents";
 import { handleSignPool } from "./routes/pool";
 import { signingEnabled, publicKey } from "./signing";
@@ -264,6 +265,9 @@ export default {
       if (path === "/auth/passkeys" && method === "POST") return handlePasskeyRegister(url, request, env);
       const passkey = path.match(/^\/auth\/passkeys\/(pk_[0-9a-f]{32})\/remove$/);
       if (passkey && method === "POST") return handlePasskeyRemove(passkey[1], url, request, env);
+      // #271: the options for one act of the person's on the web — approve, block, a passkey added or removed, a reset — and the reset itself, another maintainer's.
+      if (path === "/auth/passkeys/assert" && method === "POST") return handlePasskeyAssert(url, request, env);
+      if (path === "/auth/passkeys/reset" && method === "POST") return handlePasskeyReset(url, request, env);
       if (path === "/auth/me" && method === "GET") {
         const c = await contributorOf(request, env);
         return c ? json({ login: c.login, name: c.name, avatar_url: c.avatar_url, role: c.role }, 200, { "cache-control": "no-store" }) : json({ error: "not signed in" }, 401, { "cache-control": "no-store" });
@@ -342,7 +346,8 @@ export default {
 
 /**
  * The factory's writes. Three kinds of caller: a maintainer (their own token
- * or session, for what maintainers decide), a registered worker (its own token; project
+ * or session, for what maintainers decide — approve and block with the
+ * session and their passkey only, #271), a registered worker (its own token; project
  * trust is a maintainer's decision on the registration) or a job (its
  * per-task token), and a contributor (their token).
  */
@@ -377,8 +382,9 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
   if ((m = path.match(/^\/factory\/(contributors|packages)\/([A-Za-z0-9@._+-]+)\/(block|unblock)$/)) && method === "POST") {
     const c = await contributorOf(request, env);
     if (!c) return nobody();
-    if (m[1] === "contributors") return m[3] === "block" ? handleBlockContributor(c, m[2], request, env) : handleUnblockContributor(c, m[2], request, env);
-    return m[3] === "block" ? handleBlockPackage(c, m[2], request, env) : handleUnblockPackage(c, m[2], request, env);
+    // A block is decided with the maintainer's passkey, in the browser (#271): the door's half is webGate, run by the handler once the block is allowed.
+    if (m[1] === "contributors") return m[3] === "block" ? handleBlockContributor(c, m[2], request, env, webGate(request, url, env, c.login, `block:contributor:${m[2]}`)) : handleUnblockContributor(c, m[2], request, env);
+    return m[3] === "block" ? handleBlockPackage(c, m[2], request, env, undefined, webGate(request, url, env, c.login, `block:package:${m[2]}`)) : handleUnblockPackage(c, m[2], request, env);
   }
   // Maintainers: Adopt, the one door the package page and Review's No maintainer tab post to — the package's maintainer in the pool,
   // and a registration its owner left unmaintained taken with it (routes/adopt.ts). The only route of the path.
@@ -433,7 +439,8 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
   if ((m = path.match(/^\/factory\/tasks\/(\d+)\/(approve|reject|build)$/)) && method === "POST") {
     const c = await contributorOf(request, env);
     if (!c) return nobody();
-    return m[2] === "approve" ? handleApprove(c, Number(m[1]), request, env) : m[2] === "build" ? handleProjectBuild(c, Number(m[1]), request, env) : handleReject(c, Number(m[1]), request, env);
+    // Approve is decided with the maintainer's passkey, in the browser (#271): webGate, run by the handler once the predicate allowed it.
+    return m[2] === "approve" ? handleApprove(c, Number(m[1]), request, env, undefined, webGate(request, url, env, c.login, `approve:${Number(m[1])}`)) : m[2] === "build" ? handleProjectBuild(c, Number(m[1]), request, env) : handleReject(c, Number(m[1]), request, env);
   }
   // Review's workspace (#247): changes requested on a package in review, a claim let go — the same predicate, the same words.
   if ((m = path.match(/^\/factory\/tasks\/(\d+)\/(changes|release)$/)) && method === "POST") {

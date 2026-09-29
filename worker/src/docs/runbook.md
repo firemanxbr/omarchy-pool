@@ -304,8 +304,11 @@ decides on their own package, and never on a contributor's bytes:
   evidence as the lesson, builds it through the same gate and stages it
   under `staging/@project/`; a second agent audits it, and the trial
   installs it with a real pacman from the lab.
-- **Approve** the project's build (a contributor's cannot be approved)
-  records the decision (`approvals`, with your login and note) and queues a
+- **Approve** the project's build (a contributor's cannot be approved), in
+  the browser with your passkey — your first is added on your own page
+  (`/user/<login>#passkeys`); a lost one is reset by another maintainer
+  there — records the decision (`approvals`, with your login, note and
+  passkey) and queues a
   `publish` job that carries it into `edge` as source `factory` — and, when
   the trial passed, into rc and stable with it (the fast lane). The pool
   signs; from there the package follows the rings like any other.
