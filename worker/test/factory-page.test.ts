@@ -432,6 +432,43 @@ describe("the page", () => {
     expect(d.nodes["#t-shipped-s"].innerHTML).toMatch(/^approved by a maintainer, from \d+\+ contributors$/);
   });
 
+  it("draws a live worker whose agent did not answer as not ready, with the agent's error — never idle, waiting for work — and idle again once it answers (#273)", async () => {
+    // The project's worker, as a review worker (it audits: its agent must answer), reported the refusal at its claim, as the Studio's did after v1.0.0 and v1.0.1.
+    const refused = "URLError: <urlopen error [Errno 111] Connection refused>";
+    const setAgent = (status: string, error: string | null) => env.DB.prepare("UPDATE build_workers SET agent_status = ?, agent_error = ?, agent_checked_at = ?, last_seen = ? WHERE id = ?").bind(status, error, new Date(Date.now() - 120e3).toISOString(), new Date().toISOString(), F.worker).run();
+    const before = await env.DB.prepare("SELECT agent_status, agent_error, agent_checked_at, current_task, kinds FROM build_workers WHERE id = ?").bind(F.worker).first<{ agent_status: string | null; agent_error: string | null; agent_checked_at: string | null; current_task: number | null; kinds: string | null }>();
+    await env.DB.prepare(`UPDATE build_workers SET current_task = NULL, kinds = '["build","publish","audit"]' WHERE id = ?`).bind(F.worker).run();
+    await setAgent("error", refused);
+    try {
+      const listed = (await call("GET", `/api/v1/factory?live=1&limit=20&t=${Math.random()}`)).json.workers.find((w: { id: string }) => w.id === F.worker);
+      expect(listed).toMatchObject({ alive: true, ready: false, agent_status: "error", agent_error: refused });
+      const d = await run({ functions: ["loadListing", "workerRowOf"] });
+      const list = d.nodes["#fx-wlist"].innerHTML as string;
+      const row = /<div class="fx-wrow notready">[\s\S]*?<div class="fx-bar">/.exec(list)?.[0] ?? "";
+      expect(row, list).toContain(`title="${F.worker}"`);
+      expect(row).toContain('<i class="fx-wmark" aria-hidden="true"></i><b>not ready</b>');
+      // The reason in the shell's words (wtNotReady, as /workers says it), whole on hover, with when it was checked.
+      const why = `its agent did not answer: ${refused.replace(/</g, "&lt;").replace(/>/g, "&gt;")} · checked 2m ago`;
+      expect(row).toContain(`<div class="fx-wjob" title="${why}">`);
+      expect(row).toContain(`<span class="fx-step">${why}</span>`);
+      expect(row).not.toContain("waiting for work");
+      // Counted apart from the idle, and listed before them.
+      expect(d.nodes["#fx-busy"].textContent).toMatch(/^\d+ busy · \d+ idle · 1 not ready$/);
+      const idleAt = list.indexOf('class="fx-wrow idle"');
+      if (idleAt >= 0) expect(list.indexOf('class="fx-wrow notready"')).toBeLessThan(idleAt);
+      // A task in hand wins, as on /workers: a busy worker is drawn at its job, whatever its last probe said.
+      expect(d.workerRowOf({ ...listed, current_task: 999999 })).not.toContain("not ready");
+      // The agent answers again (the worker's re-check): the next read draws it idle, the count gone.
+      await setAgent("ok", null);
+      await d.loadListing();
+      await settled();
+      expect(d.nodes["#fx-wlist"].innerHTML).not.toContain("notready");
+      expect(d.nodes["#fx-busy"].textContent).not.toContain("not ready");
+    } finally {
+      await env.DB.prepare("UPDATE build_workers SET agent_status = ?, agent_error = ?, agent_checked_at = ?, current_task = ?, kinds = ? WHERE id = ?").bind(before!.agent_status, before!.agent_error, before!.agent_checked_at, before!.current_task, before!.kinds, F.worker).run();
+    }
+  });
+
   it("takes a request whose every build failed off the line, and tells its owner; an architecture nobody asked for is the faintest square", async () => {
     const d = await run({ login: F.owner, functions: ["stageOf", "squares", "drawMine"], variables: ["REG"] });
     const failed = { name: "all-failed", owner: F.owner, status: "waiting", release: "1.0", targets: { [F.arch]: { status: "not_supported", task: 1 } }, updated_at: new Date().toISOString(), landed: false, blocked_at: null };
