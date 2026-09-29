@@ -595,7 +595,7 @@ What keeps the bill down:
   of a ring, then every 24th, and any older release read by id. A sync that
   moves a hundred packages writes a hundred rows, not thirty thousand; GC
   drops the checkpoints and deltas nothing inside retention starts from.
-  A diff (`/diff`, `pkg-repo diff`, the Packages page) is folded from the
+  A diff (`/diff`, `pkg-repo diff`) is folded from the
   deltas between its two releases and writes nothing: until 2026-09-20 it
   compared full lists, and every release's parent was written out (65 k
   rows, deleted again by the next GC) the first time its diff was viewed

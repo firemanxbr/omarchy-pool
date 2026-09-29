@@ -661,15 +661,6 @@ const CSS = String.raw`
   .whoc { border: 1px solid var(--line); background: var(--panel); padding: 16px 18px; display: grid; grid-template-columns: auto 1fr; gap: 14px; align-items: center; text-decoration: none; color: var(--text); }
   a.whoc:hover { border-color: var(--green); } .whoc .k { font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); } .whoc b { display: block; font-family: Geist, sans-serif; font-size: 18px; font-weight: 600; } .whoc span { font-size: 12.5px; color: var(--muted); }
   .whoc.wait { border-color: var(--amber); border-style: dashed; }
-  .whorow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; color: var(--muted); margin: -4px 0 12px; } .whorow .avatar { width: 24px; height: 24px; font-size: 10.5px; }
-  .pkname { font-weight: 600; color: var(--text); text-decoration: none; border-bottom: 1px dotted var(--dim); } .pkname:hover { color: var(--green); border-bottom-color: var(--green); } .pkname .go { color: var(--green); font-weight: 400; }
-  .by { display: inline-flex; gap: 4px; } .by .avatar { width: 24px; height: 24px; font-size: 10.5px; }
-  .pk-grid { grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr); align-items: start; margin-top: 4px; }
-  /* The results: the page's search box is the search, so the table's own filter stays hidden; its size and count remain. A description is two lines at most; who made it stays on one. */
-  .pk-results .pager { margin: 0 0 6px; } .pk-results .pager input { display: none; }
-  .pk-results td:nth-child(4) { white-space: nowrap; } .pk-results .clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .pk-grid + .tiles { margin-top: 28px; }
-  #results tr.sel td { background: var(--panel-2); }
 
   .docs { display: grid; grid-template-columns: 230px 1fr; gap: 24px; align-items: start; }
   .docs-side { position: sticky; top: 16px; display: grid; gap: 10px; }
@@ -1582,7 +1573,7 @@ const ORIGINS: Record<string, string> = Object.fromEntries(EXPECTED_SOURCES.map(
  * edge or the lab (a factory package on its way), one a request reserved.
  * Before the menu calls a name free it asks where the name is, at addresses
  * the pages already read: the factory's names (/api/v1/factory/packages,
- * the list /packages reads, 30 s at the edge — once per page), then the
+ * the list Home and the Factory read, 30 s at the edge — once per page), then the
  * name itself on each architecture in turn, until one serves it
  * (/api/v1/package/<name>, which answers from the most stable ring that has
  * it, the lab included: the package page's own address, so the ten-minute

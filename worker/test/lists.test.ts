@@ -201,7 +201,8 @@ describe("lists come from the code that owns them", () => {
       // Home's picker offers the rings that promise something (#243): the lab is picked on Get started, where it is explained.
       ["/", "pool.setup", 'PROMISED_RINGS.indexOf(q.get("ring"))'],
       ["/docs/get-started", "docs-get-started.ring-picker", "RINGS = Object.keys(RINGS_TEXT)"],
-      ["/packages", "packages.ring-arch-pickers", "RINGS = Object.keys(RINGS_TEXT)"],
+      // The list's Ring filter offers the promised rings (#245): the lab promises nothing and is not listed.
+      ["/packages", "packages.filters", "PROMISED_RINGS.indexOf("],
       // Status picks through its own choose(), the shell's pick() with the pressed state and the section kept in the address.
       ["/status", "status.advisory-list", 'choose("#pick-ring", PROMISED_RINGS, ADV_RING'],
       ["/status", "status.releases", "PROMISED_UPWARD.map(function (ring)"],

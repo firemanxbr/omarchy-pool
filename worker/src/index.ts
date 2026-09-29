@@ -21,6 +21,7 @@
  *   POST /api/v1/releases                          create / promote / roll back
  *   PUT  /api/v1/releases/:id/artifacts/:kind?repo=&arch=
  *   GET  /api/v1/search?q=&ring=&arch=          package search within a ring
+ *   GET  /api/v1/packages?q=&ring=&arch=&origin=&sort=   the packages list: one row per name, filtered and paged by the server (routes/browse.ts)
  *   GET  /api/v1/package/:name[/files]?ring=&arch=  package page data: rings, manifest, edges
  *   GET  /api/v1/security?ring=&arch=             open advisories in a ring and what they expose
  *   GET  /api/v1/security/components              what the rings' packages embed (Go modules, crates), for OSV
@@ -53,6 +54,7 @@ import { handleProvenance } from "./routes/seal";
 import { handleCreateRelease, handleGetRelease, handleReleaseHistory, handlePutArtifact, handleReleaseDiff } from "./routes/releases";
 import { handleGraph } from "./routes/graph";
 import { handlePackage, handlePackageFiles, handleSearch } from "./routes/search";
+import { browseQuery, browseSearch, handleBrowse, type BrowseAnswer } from "./routes/browse";
 import { handlePrune, handlePutAdvisories, handlePutMatches, handleSecurity, handleComponents } from "./routes/security";
 import {
   handleCancelTask, handleClaim, handleComplete, handleEnqueue, handleFactory, handleFail,
@@ -103,7 +105,8 @@ import { docHtml, mdChapterAt } from "./pages/doc";
 import { statusHtml } from "./pages/status";
 import { apiDocsHtml } from "./pages/api-docs";
 import { diffHtml } from "./pages/diff";
-import { packageHtml, packagesHtml } from "./pages/packages";
+import { packageHtml } from "./pages/packages";
+import { packagesHtml } from "./pages/browse";
 import { factoryHtml as factoryPageHtml } from "./pages/contribute";
 import { MORE } from "./pages/layout";
 import { DASHBOARD_HOST, LEGACY_DASHBOARD_HOSTS, isProductionHost, machineOrigin, version } from "./meta";
@@ -267,7 +270,15 @@ export default {
       if (path === "/workers") return html(workersHtml(env.POOL_URL, version(env)));
       if (path === "/diff") return html(diffHtml(env.POOL_URL, version(env)));
       if (path === "/api" || path === "/api/") return html(apiDocsHtml(env.POOL_URL, version(env)));
-      if (path === "/packages") return html(packagesHtml(env.POOL_URL, version(env)));
+      if (path === "/packages") {
+        // The list is drawn into the page (#245), so it works with script off: from the API's answer for the page's own query, through the API's edge cache under the address the page's script asks for the same list — one stored answer for the two, the list's reads paid once per colo per five minutes, not per view. A value the list does not know is its default here, where the API would refuse it.
+        const { query, typed } = browseQuery(url.searchParams);
+        // A list that threw is said as the API's own 500 says it — "internal error" — never with the database's words, which a public page would print.
+        const res = await cachedApi("GET", "/packages", new URL(`/api/v1/packages${browseSearch(query)}`, url), request, env, ctx).catch((e: unknown) => (console.error(e), json({ error: "internal error" }, 500)));
+        const answer = res.ok ? ((await res.json()) as BrowseAnswer) : null;
+        const error = answer ? null : (((await res.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${res.status}`);
+        return html(packagesHtml(env.POOL_URL, version(env), { query, typed, answer, error }));
+      }
       if (path === "/factory") return html(factoryPageHtml(env.POOL_URL, version(env)));
       if (path === "/people") return html(peopleHtml(env.POOL_URL, version(env)));
       // Agents (#249): which agent's configuration it shows is the address's (?agent=), so the choice is a link that works with script off; the page reads nothing.
@@ -491,6 +502,7 @@ async function api(method: string, path: string, url: URL, request: Request, env
   }
   if (method === "GET" && path === "/graph") return handleGraph(url, env);
   if (method === "GET" && path === "/search") return handleSearch(url, env);
+  if (method === "GET" && path === "/packages") return handleBrowse(url, env);
   if (method === "GET" && path === "/security") return handleSecurity(url, env);
   if (method === "GET" && path === "/factory") return handleFactory(env, url);
   if (method === "GET" && path === "/factory/blocks") return handleBlocks(env);
