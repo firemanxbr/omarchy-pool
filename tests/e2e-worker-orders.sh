@@ -11,17 +11,23 @@
 # to the worker), with AGENT_RETRY_FIRST_SECONDS=1800: the worker's own
 # re-check waits half an hour, so what brings it back is the pool alone. Its
 # agent is tests/agent-late.py, a stub the scenario switches down, up or to
-# a 402. The scenarios run side by side, each on a provider of its own where
-# the pool may restart, so one scenario's failing worker never counts in
-# another's breaker:
+# a 402. The scenarios run side by side. The breaker counts failing sites
+# per provider, and trips at three: D's provider (anthropic) is its own
+# among the scenarios that fail in a class it counts — E's anthropic agent
+# answers 402, which it does not count — and A and A′ share openai, two
+# sites that can never make three. So D's count is exactly its worker and
+# its two rows, and no scenario's worker holds another's restart:
 #
 #   A   a re-check is enough: up after the first failed probe; one re-check,
 #       no restart, no exit
 #   A′  up just after the re-check answered error: the conditional restart is
 #       refused (agent-ok) — "restarted only if needed"
-#   B   a restart is needed, on a worker whose clock is 10 min slow
+#   B   a restart is needed, on a worker whose clock is 10 min fast
 #       (libfaketime): re-check, restart, exit 75, a new process, ok — the
-#       order closed by observation, the re-check timed on the pool's clock
+#       order closed by observation. On the worker's own clock its probe
+#       would never look stale and its process would look ten minutes old:
+#       the re-check that comes, and the restart that waits 120 s of the
+#       pool's uptime, show both are measured on the pool's clock
 #   C   the bound: never up — exactly two restarts, one "stops restarting"
 #       line, then nothing
 #   D   the breaker holds an outage older than any window: two more sites of
@@ -31,7 +37,9 @@
 #       why
 #
 # Needs from the caller: ROOT, E2E, OMARCHY_API, PKG_REPO, WRANGLER_STATE, and
-# the maintainer's token omc_e2e. Needs libfaketime for B.
+# the maintainer's token omc_e2e. Needs libfaketime for B. A scenario that
+# fails still stops its worker and its stub agent (w5_cleanup, which the
+# E2E's own EXIT trap runs too): nothing of it keeps a port or a loop.
 
 W5_ARCH=x86_64; [[ "$(uname -m)" == arm64 || "$(uname -m)" == aarch64 ]] && W5_ARCH=aarch64
 W5="$E2E/w5"
@@ -84,7 +92,7 @@ w5_start() { # id provider port [skew]
   mkdir -p "$W5/$id/work/keyrings"
   # These workers run no sync: the keyrings' stamp stands in for GitHub's, so a start fetches nothing.
   touch "$W5/$id/work/keyrings/archlinux.gpg" "$W5/$id/work/keyrings/.fetched"
-  # A slow clock would see a stamp made now in its future, and not fresh: an hour old, it is fresh on either clock (GNU touch; the
+  # A skewed clock would see a stamp made now in its future or its past: an hour old, it is fresh on either clock (GNU touch; the
   # skew is Linux's alone).
   [[ -z "$skew" ]] || touch -d "@$(( $(date +%s) - 3600 ))" "$W5/$id/work/keyrings/.fetched"
   python3 "$ROOT/tests/agent-late.py" "$port" "$W5/$id/agent" > "$W5/$id/agent.log" 2>&1 &
@@ -126,7 +134,7 @@ w5_iso() { python3 -c 'import sys, datetime; print(int(datetime.datetime.fromiso
 # A: the agent answers after the first failed probe; the pool's re-check brings the worker back, with no restart and no exit.
 w5_scenario_a() {
   local id=w5a
-  mkdir -p "$W5/$id"; w5_agent $id down; w5_start $id anthropic 18801
+  mkdir -p "$W5/$id"; w5_agent $id down; w5_start $id openai 18801
   w5_until 120 "$id's first claim says its agent does not answer" w5_is $id .worker.agent_status error || w5_fail $id "no failed probe"
   w5_agent $id up
   w5_until 150 "the pool re-checks $id" w5_has $id recheck-agent done || w5_fail $id "no re-check"
@@ -154,23 +162,25 @@ w5_scenario_a2() {
   echo "A′: $id's restart refused by its own probe — restarted only if needed"
 }
 
-# B: a restart is needed, on a worker whose clock is 10 minutes slow: the re-check comes on the pool's clock, the restart after 120 s of the pool's uptime, exit 75, a new process, ok.
+# B: a restart is needed, on a worker whose clock is 10 minutes fast: the re-check comes on the pool's clock, the restart after 120 s of the pool's uptime, exit 75, a new process, ok.
 w5_scenario_b() {
   local id=w5b
   mkdir -p "$W5/$id"; w5_agent $id down
   printf '#!/usr/bin/env bash\nprintf up > %q\n' "$W5/$id/agent" > "$W5/$id/on-exit"; chmod +x "$W5/$id/on-exit"
-  w5_start $id gemini 18803 "-10m" || return 1
+  w5_start $id gemini 18803 "+10m" || return 1
   w5_until 120 "$id's first claim says its agent does not answer" w5_is $id .worker.agent_status error || w5_fail $id "no failed probe"
-  local spell up started
-  spell="$(w5_field $id .worker.not_ready_since)"; up="$(w5_field $id .worker.up_since)"; started="$(w5_field $id .worker.started_at)"
-  # Its own clock says it started ten minutes before the pool first heard of it.
-  (( $(w5_iso "$up") - $(w5_iso "$started") >= 9 * 60 )) || w5_fail $id "the worker's clock is not skewed: started $started, up since $up"
-  w5_until 150 "the pool re-checks $id" w5_has $id recheck-agent || w5_fail $id "no re-check"
+  local spell up checked started
+  spell="$(w5_field $id .worker.not_ready_since)"; up="$(w5_field $id .worker.up_since)"; checked="$(w5_field $id .worker.agent_checked_at)"; started="$(w5_field $id .worker.started_at)"
+  # Its own clock stamps its probe ten minutes after the pool first heard of it; a start in the pool's future is kept by nobody.
+  (( $(w5_iso "$checked") - $(w5_iso "$up") >= 9 * 60 )) || w5_fail $id "the worker's clock is not skewed: probed $checked, up since $up"
+  [[ "$started" == null ]] || w5_fail $id "a start ten minutes in the pool's future was kept: $started"
+  # On the worker's clock its probe is always fresh, so a re-check that comes is the pool's clock's: RECHECK_AFTER_MIN (scaled: 5 s) after the spell began.
+  w5_until 150 "the pool re-checks $id" w5_has $id recheck-agent || w5_fail $id "no re-check: the probe's age was read on the worker's clock"
   local recheck; recheck="$(w5_view $id | jq -r '[.orders[] | select(.kind == "recheck-agent")][0].issued_at')"
-  # On the pool's clock, RECHECK_AFTER_MIN (scaled: 5 s) after the spell began — not at the first claim, as a comparison with the worker's slow stamp would have it.
   (( $(w5_iso "$recheck") - $(w5_iso "$spell") >= 5 )) || w5_fail $id "the re-check came too soon: spell $spell, re-check $recheck"
   w5_until 240 "the pool restarts $id" w5_has $id restart || w5_fail $id "no restart"
   local restart; restart="$(w5_view $id | jq -r '[.orders[] | select(.kind == "restart")][0].issued_at')"
+  # On its own clock the process was ten minutes old at its first claim: a restart under 120 s of the pool's uptime would be that clock's.
   (( $(w5_iso "$restart") - $(w5_iso "$up") >= 120 )) || w5_fail $id "restarted under 120 s of uptime: up $up, restart $restart"
   w5_until 60 "$id exits 75" grep -qx 75 "$W5/$id/exits" || w5_fail $id "no exit 75"
   w5_until 90 "the restart closed when the new process claimed" w5_has $id restart done || w5_fail $id "the restart did not close"
@@ -224,6 +234,13 @@ w5_scenario_e() {
   echo "E: $id without credit: no order, and its page says why"
 }
 
+# Every scenario's worker, its supervisor and its stub agent stopped, whatever became of the scenario: a failed one returns before its
+# own w5_stop, and its loop would restart pkg-repo against a pool that is gone, its stub keeping its port for the next run.
+w5_cleanup() {
+  local id; for id in w5a w5a2 w5b w5c w5d w5e; do [[ -e "$W5/$id/pid" ]] && w5_stop "$id"; done
+  return 0
+}
+
 # All six side by side; each one's result, then the record: every order of theirs has one issue line and one final line.
 w5_scenarios() {
   mkdir -p "$W5"
@@ -237,6 +254,7 @@ w5_scenarios() {
     if wait "${pids[$i]}"; then cat "$W5/scenario-${names[$i]}.out"
     else failed=1; echo "scenario ${names[$i]} failed:" >&2; cat "$W5/scenario-${names[$i]}.out" >&2; fi
   done
+  w5_cleanup
   (( failed == 0 )) || return 1
   local bad tries
   for tries in 1 2 3; do bad="$(w5_d1_json "SELECT o.id, o.state, (SELECT COUNT(*) FROM events e WHERE e.kind = 'order' AND json_extract(e.payload, '\$.order') = o.id) AS lines FROM worker_orders o WHERE o.worker_id LIKE 'w5%'" | jq -c '[.[] | select(.lines != 2)]')" && break; sleep 3; done

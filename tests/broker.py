@@ -6,9 +6,10 @@ probe); the probe on /health; an agent failure as a 502 the client
 GitHub read-only with the token added here; and the pool's calls for one
 task at a time — the worker's token added here, the job token never handed
 on, another task's id refused, complete releasing the hold; and the orders
-of #277: an answer passes only for an order seen delivered, between tasks,
-once; the claim says the broker exits with its builder (pair restart), and
-it does once the builder accepted a restart and the pool took the answer.
+of #277: an answer passes only for an order seen delivered — in a claim's
+answer or a 426's —, between tasks, once; the claim says the broker exits
+with its builder (pair restart), and it does once the builder accepted a
+restart and the pool took the answer — not when the pool refused it.
 Run: python3 tests/broker.py"""
 import json
 import os
@@ -28,6 +29,8 @@ pool_seen = []
 ORDER_RESTART = "wo_" + "1" * 32
 ORDER_RECHECK = "wo_" + "2" * 32
 ORDER_DRAIN = "wo_" + "3" * 32
+ORDER_OUTDATED = "wo_" + "4" * 32  # rides a 426
+ORDER_GONE = "wo_" + "5" * 32  # closed at the pool before its answer came
 
 
 def fake_complete(system, user, max_tokens=4000, timeout=300):
@@ -71,11 +74,19 @@ class FakePool(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         body = self.record()
         if self.path.startswith("/api/v1/factory/workers/self/orders/"):
+            if self.path.endswith(ORDER_GONE):
+                return self._json(409, {"error": "closed meanwhile"})
             return self._json(200, {"order": self.path.rsplit("/", 1)[1], "state": json.loads(body).get("outcome")})
         if self.path == "/api/v1/factory/claim":
+            if json.loads(body).get("arch") == "outdated":
+                return self._json(426, {"error": "this worker runs v1.0.0; the pool is at v1.0.3", "latest": "v1.0.3", "orders": [
+                    {"id": ORDER_OUTDATED, "kind": "recheck-agent", "reason": "stale", "issued_by": "pool:community", "unless_agent_ok": False, "notice": False}]})
+            if json.loads(body).get("arch") == "gone":
+                return self._json(200, {"task": None, "orders": [
+                    {"id": ORDER_GONE, "kind": "restart", "reason": "not ready", "issued_by": "pool:community", "unless_agent_ok": True, "notice": False}]})
             if json.loads(body).get("arch") == "orders":
                 return self._json(200, {"task": None, "orders": [
-                    {"id": ORDER_RESTART, "kind": "restart", "reason": "not ready", "issued_by": "pool", "unless_agent_ok": True, "notice": False},
+                    {"id": ORDER_RESTART, "kind": "restart", "reason": "not ready", "issued_by": "pool:community", "unless_agent_ok": True, "notice": False},
                     {"id": ORDER_RECHECK, "kind": "recheck-agent", "reason": "stale", "issued_by": "m1", "unless_agent_ok": False, "notice": False},
                     {"id": ORDER_DRAIN, "kind": "drain", "reason": "disk", "issued_by": "m1", "unless_agent_ok": False, "notice": True}]})
             if json.loads(body).get("arch") == "nothing":
@@ -291,6 +302,17 @@ assert status == 409, "an id answers once, whichever claim delivered it again"
 broker.DELIVERED.answered.clear()
 status, out = call("POST", f"/pool/factory/workers/self/orders/{ORDER_RESTART}", {"instance": "a" * 32, "outcome": "accepted", "code": "exiting"})
 assert status == 200 and exits == [75], (out, exits)
+# 18b. An accepted restart the pool does not take (closed meanwhile: 409) leaves the broker up: the builder's restart was not the pool's order any more.
+exits.clear()
+status, out = call("POST", "/pool/factory/claim", {"arch": "gone"})
+assert status == 200 and out["orders"][0]["id"] == ORDER_GONE, out
+status, out = call("POST", f"/pool/factory/workers/self/orders/{ORDER_GONE}", {"instance": "a" * 32, "outcome": "accepted", "code": "exiting"})
+assert status == 409 and exits == [], (status, out, exits)
+# 18c. A 426 carries the orders waiting for an outdated builder: passed on as the pool said it, and the broker saw them delivered — their answer passes.
+status, out = call("POST", "/pool/factory/claim", {"arch": "outdated"})
+assert status == 426 and out["orders"][0]["id"] == ORDER_OUTDATED, (status, out)
+status, out = call("POST", f"/pool/factory/workers/self/orders/{ORDER_OUTDATED}", {"instance": "a" * 32, "outcome": "done", "code": "probed"})
+assert status == 200 and out["state"] == "done", out
 
 # 19. Without a worker token the pool path is off; the agent and GitHub stay.
 del os.environ["OMARCHY_WORKER_TOKEN"]

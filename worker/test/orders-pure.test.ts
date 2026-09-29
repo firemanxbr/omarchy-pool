@@ -9,9 +9,10 @@
  */
 import { describe, expect, it } from "vitest";
 import {
-  answerCode, autoOf, canonicalKinds, claimFacts, cleanText, codeSentence, decideAuto, errorClass, instanceStep, orderVerdicts, parsePreviousExit, probeAge, rulesScale,
-  CHURN_CLEAR_MIN, CRASH_LOOP_AT, GIVE_UP_AFTER_MIN, MAX_POOL_RECHECKS_PER_DAY, MAX_POOL_RESTARTS_PER_DAY, MAX_POOL_RESTARTS_PER_SPELL, MIN_UPTIME_S, RECHECK_AFTER_MIN, RESTART_AFTER_MIN, RESTART_SPACING_MIN,
-  type ClaimFacts, type OrderFacts, type OrdersRow, type RuleInput,
+  answerCode, autoOf, breakerKey, breakerOfKey, breakerScope, canonicalKinds, claimFacts, cleanText, codeSentence, decideAuto, errorClass, instanceStep, isPool, orderVerdicts, parsePreviousExit, poolFor, probeAge, rulesScale,
+  siblingsAnswering, siteKey, sitesByProvider, siteVerdict, siteWords, versionWord,
+  CHURN_CLEAR_MIN, CONFLICT_WINDOW_MIN, CRASH_LOOP_AT, GIVE_UP_AFTER_MIN, MAX_POOL_RECHECKS_PER_DAY, MAX_POOL_RESTARTS_PER_DAY, MAX_POOL_RESTARTS_PER_SPELL, MIN_UPTIME_S, POOL_COMMUNITY, POOL_PROJECT, RECHECK_AFTER_MIN, RESTART_AFTER_MIN, RESTART_SPACING_MIN,
+  type ClaimFacts, type InstanceStep, type OrderFacts, type OrdersRow, type RuleInput, type SiteRead, type SiteWorker,
 } from "../src/orders";
 
 const MIN = 60000;
@@ -77,7 +78,10 @@ describe("what a claim says of its process", () => {
 
   it("takes an instance, a site and a start only in their shape; a deliberate exit only with a known reason", () => {
     const f = claimFacts({ orders: ["restart"], instance: "ABC", site: "zz", started_at: new Date(T0 + 3600e3).toISOString(), restarts_left: -1, agent_via: "nowhere" }, new Headers(), undefined, T0);
-    expect(f).toMatchObject({ takes: ["restart"], instance: null, site: null, started_at: null, restarts_left: null, agent_via: null, pairRestart: false });
+    // No valid instance: the process declares nothing, whatever its orders field says — an order is bound to the process that took it.
+    expect(f).toMatchObject({ takes: null, instance: null, site: null, started_at: null, restarts_left: null, agent_via: null, pairRestart: false });
+    expect(claimFacts({ orders: ["restart"] }, new Headers(), undefined, T0).takes).toBeNull();
+    expect(claimFacts({ orders: ["restart"], instance: hex(3) }, new Headers(), undefined, T0).takes).toEqual(["restart"]);
     const g = claimFacts({ instance: hex(7), site: "5d0e4b1a9c7f2e36", agent_via: "broker", started_at: at(-3) }, new Headers({ "x-omarchy-broker-takes": "pair-restart" }), undefined, T0);
     expect(g).toMatchObject({ takes: null, instance: hex(7), site: "5d0e4b1a9c7f2e36", agent_via: "broker", started_at: at(-3), pairRestart: true });
     expect(parsePreviousExit({ why: "watchdog", at: at(0), stuck_in: "task", n: 2 })).toEqual({ why: "watchdog", at: at(0), stuck_in: "task", n: 2 });
@@ -94,12 +98,15 @@ describe("the instance step", () => {
     expect(same.set).toEqual({});
     expect(same.journal).toEqual([]);
     const next = instanceStep(r, claim({ instance: hex(2), agent_via: "sibling", site: "5d0e4b1a9c7f2e36", restarts_left: 4, started_at: at(4) }), T0 + 5 * MIN);
-    expect(next.set).toMatchObject({ instance: hex(2), instance_prev: hex(1), instance_since: at(5), agent_via: "sibling", site: "5d0e4b1a9c7f2e36", restarts_left: 4, started_at: at(4) });
+    // The site is kept under the name of who runs the worker: the project's, or the contributor's login.
+    expect(next.set).toMatchObject({ instance: hex(2), instance_prev: hex(1), instance_since: at(5), agent_via: "sibling", site: "project/5d0e4b1a9c7f2e36", restarts_left: 4, started_at: at(4) });
     expect(next.guard).toBe(hex(1));
+    expect(instanceStep(row({ trust: "community", owner: "alice", instance: hex(1) }), claim({ instance: hex(2), site: "5d0e4b1a9c7f2e36" }), T0).set.site).toBe("alice/5d0e4b1a9c7f2e36");
     // The same kinds in another order are the same words: nothing to write.
     expect(instanceStep(r, claim({ takes: canonicalKinds(["restart-agent", "restart", "drain", "recheck-agent", "restart"]) }), T0 + 6 * MIN).set).toEqual({});
-    // An image from before orders: its kinds become NULL, once.
-    expect(instanceStep(r, claim({ instance: null, takes: null }), T0).set).toEqual({ order_kinds: null });
+    // An image from before orders after one that took them: a process of its own, which declares nothing.
+    expect(instanceStep(r, claim({ instance: null, takes: null }), T0 + 20 * MIN).set).toMatchObject({ instance: null, instance_prev: hex(1), order_kinds: null });
+    // And one that goes on, on a row that never knew a process: nothing to write.
     expect(instanceStep(row({ order_kinds: null }), claim({ instance: null, takes: null }), T0).set).toEqual({});
   });
 
@@ -107,20 +114,100 @@ describe("the instance step", () => {
     let r = row({ instance: hex(2), instance_prev: hex(1), instance_since: at(0) });
     const conflict = instanceStep(r, claim({ instance: hex(1) }), T0 + 1 * MIN);
     expect(conflict.conflict).toBe(true);
-    expect(conflict.set).toEqual({ instance_conflict_at: at(1), instance_other_at: at(1) });
+    // The process that claims is recorded, and becomes the one the row names.
+    expect(conflict.set).toMatchObject({ instance_conflict_at: at(1), instance_other_at: at(1), instance: hex(1), instance_prev: hex(2) });
     expect(conflict.journal.map((l) => l.status)).toEqual(["warn"]);
     expect(conflict.journal[0].summary).toContain("two processes share this worker's token");
+    // The public record names a process by its first four digits, never the whole instance: a thief who read it could claim as the real one.
+    expect(JSON.stringify(conflict.journal)).not.toContain(hex(1));
+    expect(JSON.stringify(conflict.journal)).not.toContain(hex(2));
     r = { ...r, ...conflict.set, last_seen: at(1) } as OrdersRow;
-    // Alternating claims write nothing new (the liveness write every TOUCH_MINUTES carries the other's time).
-    for (const m of [1.5, 2, 2.5]) {
+    // Alternating claims write nothing new within TOUCH_MINUTES of the last record.
+    for (const m of [1.5, 2, 2.5, 3.5]) {
       expect(instanceStep(r, claim({ instance: hex(1) }), T0 + m * MIN).set).toEqual({});
       expect(instanceStep(r, claim({ instance: hex(2) }), T0 + m * MIN).set).toEqual({});
     }
-    // Ten minutes without the other: one process again, one line.
-    const alone = instanceStep({ ...r, last_seen: at(10) }, claim({ instance: hex(2) }), T0 + 12 * MIN);
+    // Past it, the other's claim is recorded, whatever the liveness write's rhythm: the row names it now.
+    const swap = instanceStep({ ...r, last_seen: at(3.9) }, claim({ instance: hex(2) }), T0 + 4 * MIN);
+    expect(swap).toMatchObject({ conflict: true, instance: hex(2), set: { instance: hex(2), instance_prev: hex(1), instance_other_at: at(4) } });
+    expect(swap.journal).toEqual([]);
+    r = { ...r, ...swap.set } as OrdersRow;
+    // The one left claims alone: one process again, once, CONFLICT_WINDOW_MIN after the other's last claim could have been recorded.
+    expect(instanceStep(r, claim({ instance: hex(2) }), T0 + (4 + CONFLICT_WINDOW_MIN) * MIN).conflict).toBe(true);
+    const alone = instanceStep(r, claim({ instance: hex(2) }), T0 + (4 + CONFLICT_WINDOW_MIN + 3) * MIN);
     expect(alone.conflict).toBe(false);
     expect(alone.set).toMatchObject({ instance_conflict_at: null, instance_other_at: null });
     expect(alone.journal.map((l) => l.summary)).toEqual([expect.stringContaining("one process again")]);
+  });
+
+  /**
+   * A worker's row under a stream of claims, written as touchWorker writes
+   * it: what the step sets, or the liveness write every TOUCH_MINUTES —
+   * and the lines, each only when the step wrote what it guards.
+   */
+  function simulate(claims: { t: number; instance: string | null }[]) {
+    let r = row({ instance: hex(1), instance_since: at(-60), last_seen: at(-1) });
+    let writes = 0, conflictAt: number | null = null;
+    const lines: string[] = [];
+    let heldFor = 0, lastT = claims[0].t;
+    for (const c of claims) {
+      const s: InstanceStep = instanceStep(r, claim({ instance: c.instance, takes: c.instance ? ["drain", "recheck-agent", "restart"] : null }), c.t);
+      const liveness = c.t - Date.parse(r.last_seen!) >= 3 * MIN;
+      if (Object.keys(s.set).length || liveness) { writes++; r = { ...r, ...s.set, last_seen: new Date(c.t).toISOString() } as OrdersRow; }
+      lines.push(...s.journal.map((l) => l.summary));
+      if (s.conflict) { heldFor += c.t - lastT; conflictAt ??= c.t; }
+      lastT = c.t;
+    }
+    return { lines, writes, heldFor, conflictAt, row: r };
+  }
+
+  it("two processes claiming every 30 s with their network's jitter, a day long: one line, the conflict never lifts, the other recorded at most once per TOUCH_MINUTES", () => {
+    for (let seed = 1; seed <= 15; seed++) {
+      const rnd = seeded(seed);
+      const rtt = [200, 400, 300][seed % 3], jitter = [50, 300, 150][seed % 3];
+      const claims: { t: number; instance: string | null }[] = [];
+      for (const [who, offset] of [[hex(1), 0], [hex(2), 11000]] as const) {
+        let t = T0 + offset;
+        while (t < T0 + 24 * 3600e3) { claims.push({ t, instance: who }); t += 30000 + rtt + Math.round((rnd() * 2 - 1) * jitter); }
+      }
+      claims.sort((a, b) => a.t - b.t);
+      const sim = simulate(claims);
+      expect(sim.lines.filter((l) => l.includes("two processes share")), `seed ${seed}`).toHaveLength(1);
+      expect(sim.lines.filter((l) => l.includes("one process again")), `seed ${seed}`).toEqual([]);
+      expect(sim.row.instance_conflict_at, `seed ${seed}`).not.toBeNull();
+      // The day's writes: the liveness write every TOUCH_MINUTES, and the other's record at most as often besides — while two share a token.
+      expect(sim.writes, `seed ${seed}`).toBeLessThanOrEqual(2 * 24 * 20 + 5);
+    }
+  });
+
+  it("a second process that draws a new instance at every claim, or names none: the conflict holds while it claims, and lifts once, after it stops", () => {
+    for (const other of ["rotating", "none"] as const) {
+      const claims: { t: number; instance: string | null }[] = [];
+      let k = 100;
+      for (let t = T0; t < T0 + 2 * 3600e3; t += 30000) {
+        claims.push({ t, instance: hex(1) });
+        claims.push({ t: t + 7000, instance: other === "rotating" ? hex(k++) : null });
+      }
+      // The real one goes on alone for 20 min.
+      for (let t = T0 + 2 * 3600e3; t < T0 + 2 * 3600e3 + 20 * MIN; t += 30000) claims.push({ t, instance: hex(1) });
+      const sim = simulate(claims);
+      expect(sim.lines.filter((l) => l.includes("two processes share")), other).toHaveLength(1);
+      expect(sim.lines.filter((l) => l.includes("one process again")), other).toHaveLength(1);
+      expect(sim.conflictAt! - T0, other).toBeLessThan(MIN);
+      // Two hours of two processes: held all along, at most two writes every TOUCH_MINUTES (the liveness write, the other's record).
+      expect(sim.heldFor, other).toBeGreaterThanOrEqual(2 * 3600e3 - 2 * MIN);
+      expect(sim.writes, other).toBeLessThanOrEqual(2 * 2 * 20 + 20 / 3 + 5);
+      expect(sim.row.instance, other).toBe(hex(1));
+    }
+  });
+
+  it("the process the row names stops and the other goes on: the conflict lifts on the one left", () => {
+    const claims: { t: number; instance: string | null }[] = [];
+    for (let t = T0; t < T0 + 30 * MIN; t += 30000) { claims.push({ t, instance: hex(1) }); claims.push({ t: t + 5000, instance: hex(2) }); }
+    for (let t = T0 + 30 * MIN; t < T0 + 60 * MIN; t += 30000) claims.push({ t, instance: hex(2) });
+    const sim = simulate(claims);
+    expect(sim.lines.filter((l) => l.includes("one process again"))).toHaveLength(1);
+    expect(sim.row).toMatchObject({ instance: hex(2), instance_conflict_at: null });
   });
 
   it("counts a crash loop only over processes that finished nothing and whose end nothing explains: a busy builder is none", () => {
@@ -295,6 +382,8 @@ describe("the step machine", () => {
     expect(first.kind).toBe("restart-agent");
     const next = { ...sibling, row: { ...sibling.row, auto_orders: JSON.stringify(first.kind === "restart-agent" ? first.next : null) }, instanceSince: at(20) };
     expect(decideAuto(next, T0 + 40 * MIN).kind).toBe("restart");
+    // The service answers another worker of the host: this worker's own process is what fails, restarted itself.
+    expect(decideAuto({ ...sibling, siblingAnswers: true }, T0 + 10 * MIN)).toMatchObject({ kind: "restart", rule: "restart-1of2", unless: true });
   });
 
   it("does nothing for a claim that takes no orders, two processes, an order open or an agent the worker does not need", () => {
@@ -353,6 +442,72 @@ describe("the step machine", () => {
   });
 });
 
+describe("a host's workers, and the breaker's scope", () => {
+  const sw = (id: string, o: Partial<SiteWorker> = {}): SiteWorker => ({ id, agent_via: "sibling", agent_status: "error", agent_error_class: "sibling", order_kinds: '["drain","recheck-agent","restart","restart-agent"]', instance_since: at(-30), agent_error_since: at(-20), auto_orders: null, ...o });
+  const read = (live: SiteWorker[], o: Partial<SiteRead> = {}): SiteRead => ({ live, last: null, open: 0, ...o });
+  it("restarts a shared agent service once, through the lowest id that declares it; the others wait and are told through whom", () => {
+    const r = read([sw("studio-review-aarch64"), sw("studio-review2-aarch64")]);
+    expect(siteVerdict({ id: "studio-review-aarch64" }, "restart-agent", r, T0, 1)).toEqual({ ok: true, others: ["studio-review2-aarch64"] });
+    expect(siteVerdict({ id: "studio-review2-aarch64" }, "restart-agent", r, T0, 1)).toEqual({ ok: false, why: "its agent service is shared with studio-review-aarch64; the pool restarts it once, through studio-review-aarch64" });
+    // The emulated profile's four: the same, the waiting ones' words name the others from the read.
+    const four = read(["studio-review-aarch64", "studio-review2-aarch64", "studio-review-x86_64", "studio-review2-x86_64"].map((id) => sw(id)));
+    const v = siteVerdict({ id: "studio-review2-x86_64" }, "restart-agent", four, T0, 1);
+    expect(v).toMatchObject({ ok: false, why: "its agent service is shared with studio-review-aarch64, studio-review-x86_64, studio-review2-aarch64; the pool restarts it once, through studio-review-aarch64" });
+    // The elected one gave up in its spell: the others stop too — the service was restarted as often as the pool restarts it.
+    const gave = read([sw("studio-review-aarch64", { auto_orders: JSON.stringify({ spell: at(-20), rechecks: 1, restarts: 2, last_recheck: at(-15), last_restart: at(-5), gave_up: at(-1), day: [] }) }), sw("studio-review2-aarch64")]);
+    expect(siteVerdict({ id: "studio-review2-aarch64" }, "restart-agent", gave, T0, 1)).toMatchObject({ ok: false, giveUp: true, why: expect.stringContaining("was restarted through studio-review-aarch64, which did not bring it back") });
+    // A give-up of an earlier spell is not this one's.
+    const old = read([sw("studio-review-aarch64", { auto_orders: JSON.stringify({ spell: at(-200), gave_up: at(-150), day: [] }) }), sw("studio-review2-aarch64")]);
+    expect(siteVerdict({ id: "studio-review2-aarch64" }, "restart-agent", old, T0, 1)).not.toMatchObject({ giveUp: true });
+  });
+  it("paces the host: one restart open at a time, anyone's, and SITE_SPACING_MIN between two of the pool's", () => {
+    expect(siteVerdict({ id: "a" }, "restart", read([], { open: 1 }), T0, 1)).toMatchObject({ ok: false, why: expect.stringContaining("one at a time") });
+    expect(siteVerdict({ id: "a" }, "restart", read([], { last: at(-2) }), T0, 1)).toMatchObject({ ok: false });
+    expect(siteVerdict({ id: "a" }, "restart", read([], { last: at(-6) }), T0, 1)).toMatchObject({ ok: true });
+  });
+  it("tells a worker whose own probe fails while the service answers another that it is its own process the pool restarts, and says so on its page", () => {
+    const r = read([sw("studio-review-aarch64", { agent_status: "ok" }), sw("studio-review2-aarch64")]);
+    expect(siblingsAnswering({ id: "studio-review2-aarch64" }, r.live)).toEqual(["studio-review-aarch64"]);
+    expect(siteWords({ id: "studio-review2-aarch64", order_kinds: '["drain","recheck-agent","restart","restart-agent"]' }, r, T0, 1)).toBe("its agent service answers for studio-review-aarch64: the pool restarts this worker's own process, not the service");
+    const both = read([sw("studio-review-aarch64"), sw("studio-review2-aarch64")]);
+    expect(siteWords({ id: "studio-review2-aarch64", order_kinds: '["drain","recheck-agent","restart","restart-agent"]' }, both, T0, 1)).toBe("its agent service is shared with studio-review-aarch64; the pool restarts it once, through studio-review-aarch64");
+    expect(siteWords({ id: "studio-review-aarch64", order_kinds: '["drain","recheck-agent","restart","restart-agent"]' }, both, T0, 1)).toBe("its agent service is shared with studio-review2-aarch64: the pool restarts it once, through this worker");
+  });
+  it("keeps a site under the name of who runs it: the project's workers share one namespace, a contributor's their own", () => {
+    expect(siteKey({ trust: "project", owner: "m1" }, "5d0e4b1a9c7f2e36")).toBe("project/5d0e4b1a9c7f2e36");
+    expect(siteKey({ trust: "project", owner: "m2" }, "5d0e4b1a9c7f2e36")).toBe("project/5d0e4b1a9c7f2e36");
+    expect(siteKey({ trust: "community", owner: "mallory" }, "5d0e4b1a9c7f2e36")).toBe("mallory/5d0e4b1a9c7f2e36");
+    expect(siteKey({ trust: "community", owner: "mallory" }, null)).toBeNull();
+  });
+  it("counts a project worker's breaker over the project's own spells, a contributor's over everyone's", () => {
+    const rows = [
+      { id: "p1", site: "project/aa", agent: "anthropic/x", trust: "project" },
+      { id: "p2", site: "project/aa", agent: "anthropic/x", trust: "project" },
+      { id: "c1", site: null, agent: "anthropic/x", trust: "community" },
+      { id: "c2", site: "mallory/bb", agent: "anthropic/x", trust: "community" },
+      { id: "c3", site: "mallory/cc", agent: "anthropic/x", trust: "community" },
+      { id: "o1", site: null, agent: "openai/y", trust: "community" },
+    ];
+    expect(sitesByProvider(rows, "project").get("anthropic")?.size).toBe(1);
+    expect(sitesByProvider(rows, "all").get("anthropic")?.size).toBe(4);
+    expect(sitesByProvider(rows, "all").get("openai")?.size).toBe(1);
+    expect([breakerScope("project"), breakerScope("community"), breakerScope(null)]).toEqual(["project", "all", "all"]);
+    expect(breakerKey("anthropic", "project")).toBe("worker-breaker:anthropic:project");
+    expect(breakerKey("claude-code", "all")).toBe("worker-breaker:claude-code");
+    expect(breakerOfKey("worker-breaker:claude-code:project")).toEqual({ provider: "claude-code", scope: "project" });
+    expect(breakerOfKey("worker-breaker:claude-code")).toEqual({ provider: "claude-code", scope: "all" });
+  });
+  it("names the pool on its own orders with what no GitHub login can be, one per trust", () => {
+    expect([poolFor("project"), poolFor("community"), poolFor(null)]).toEqual([POOL_PROJECT, POOL_COMMUNITY, POOL_COMMUNITY]);
+    for (const by of [POOL_PROJECT, POOL_COMMUNITY]) {
+      expect(isPool(by)).toBe(true);
+      // A GitHub login is letters, digits and single hyphens.
+      expect(/^[A-Za-z0-9](?:-?[A-Za-z0-9])*$/.test(by)).toBe(false);
+    }
+    for (const login of ["pool", "pool-project", "m1"]) expect(isPool(login)).toBe(false);
+  });
+});
+
 describe("the scale of the step timings", () => {
   it("is honoured only where the running Worker is not a release, from 1 to 60", () => {
     expect(rulesScale({ POOL_VERSION: "v1.0.3", WORKER_RULES_SCALE: "60" })).toEqual({ scale: 1, ignored: true });
@@ -402,6 +557,17 @@ describe("the pool's sentences", () => {
     expect(codeSentence("restart-agent", "restarted", "done", { service: "agent-proxy", seconds: 34 })).toBe("restarted agent-proxy; it answers again after 34 s");
     expect(codeSentence("restart-agent", "restarted", "done", { service: "evil; rm -rf", seconds: 1e9 })).toBe("restarted its agent service; it answers again");
     expect(codeSentence("recheck-agent", "unknown-kind", "refused", { version: "v1.0.2" })).toBe("does not know this order (v1.0.2)");
+    // A version is the worker's own string: the public sentence carries only a tag the pool parsed.
+    const hostile = "v9\u202e\n\x1b[31m" + "X".repeat(5000);
+    expect(codeSentence("recheck-agent", "unknown-kind", "refused", { version: hostile })).toBe("does not know this order (its version)");
+    expect(versionWord(hostile, "its image")).toBe("its image");
+    expect(versionWord("1.0.3")).toBe("v1.0.3");
+    // The crash-loop line and a refusal say the same.
+    let r = row({ instance: hex(1), instance_since: at(0), version: hostile });
+    const lines: string[] = [];
+    for (let i = 2; i <= 5; i++) { const st = instanceStep(r, claim({ instance: hex(i), version: hostile }), T0 + (i - 1) * 3 * MIN); lines.push(...st.journal.map((l) => l.summary + JSON.stringify(l.payload))); r = { ...r, ...st.set } as OrdersRow; }
+    expect(lines.join()).toContain("a new process every few minutes on its image");
+    expect(lines.join()).not.toContain("XXXX");
   });
 });
 

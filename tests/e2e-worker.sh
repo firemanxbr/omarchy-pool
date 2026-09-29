@@ -45,6 +45,8 @@ cleanup() {
     printf '\n\033[1;31m==> the local pool (wrangler dev) log, last 80 lines:\033[0m\n' >&2
     tail -n 80 "$E2E/wrangler.log" >&2
   fi
+  # The orders scenarios' workers, supervisors and stub agents, if a step failed while they ran (tests/e2e-worker-orders.sh).
+  if declare -F w5_cleanup >/dev/null; then w5_cleanup 2>/dev/null || true; fi
   if [[ -n "${WRANGLER_PID:-}" ]]; then kill "$WRANGLER_PID" 2>/dev/null || true; fi
 }
 trap cleanup EXIT

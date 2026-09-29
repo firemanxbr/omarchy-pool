@@ -143,11 +143,15 @@ agent_probe() {
   [[ "$status" != error || -n "$error" ]] || error="no answer"
   agent_checked "$who" "$status" "$error" "$ms"
 }
-agent_checked() { # who status error ms — what the claims report from now on, the log line on a change, when to check again
-  local who="$1" status="$2" error="$3" ms="$4" first="${AGENT_RETRY_SECONDS:-15}" most="${AGENT_RETRY_MAX_SECONDS:-$(( ${AGENT_PROBE_MINUTES:-30} * 60 ))}"
-  # The first re-check can only be made slower (#277): 15 s to 30 min, never spending more completions than the default.
+agent_first_wait() { # the first re-check after a failed probe: AGENT_RETRY_SECONDS can only make it slower (#277) — 15 s to 30 min, never spending more completions than the default
+  local first="${AGENT_RETRY_SECONDS:-15}"
   [[ "$first" =~ ^[0-9]+$ ]] || first=15
   (( first >= 15 )) || first=15; (( first <= 1800 )) || first=1800
+  echo "$first"
+}
+agent_checked() { # who status error ms — what the claims report from now on, the log line on a change, when to check again
+  local who="$1" status="$2" error="$3" ms="$4" first most="${AGENT_RETRY_MAX_SECONDS:-$(( ${AGENT_PROBE_MINUTES:-30} * 60 ))}"
+  first="$(agent_first_wait)"
   if [[ "$status" == error ]]; then
     AGENT_FAILS=$((AGENT_FAILS + 1))
     if (( AGENT_FAILS == 1 )); then AGENT_RETRY=$first; else AGENT_RETRY=$(( AGENT_RETRY * 2 )); fi
@@ -803,11 +807,14 @@ ORDER_STREAK=0
 leave_exit_note() { # why — before a deliberate exit (idle, drain, restart), for the next process to tell the pool
   { mkdir -p "$STATE_DIR" && jq -cn --arg w "$1" --arg a "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{why:$w,at:$a}' > "$STATE_DIR/last-exit"; } 2>/dev/null || true
 }
-take_exit_note() { # the previous process's note, once: read, removed, sent with the first claim
+take_exit_note() { # the previous process's note: said with its claims until the pool has heard one (exit_note_heard) — a first claim lost on the network does not lose it
   local f="$STATE_DIR/last-exit"
   [[ -s "$f" ]] || return 0
   PREVIOUS_EXIT="$(jq -c 'select(.why == "idle" or .why == "drain" or .why == "restart" or .why == "watchdog")' "$f" 2>/dev/null || true)"
-  rm -f "$f" 2>/dev/null || true
+}
+exit_note_heard() { # the pool answered a claim (a task, orders, nothing, a 426): it has the note, and the note goes
+  [[ -n "$PREVIOUS_EXIT" ]] || return 0
+  PREVIOUS_EXIT=""; rm -f "$STATE_DIR/last-exit" 2>/dev/null || true
 }
 # A line a person or the pool wrote, as this worker prints it: escape sequences and control characters out, one line, 300 characters.
 clean_line() { printf '%s' "$1" | sed $'s/\x1b\\[[0-9;?]*[ -\/]*[@-~]//g; s/\x1b\\][^\x07]*\x07//g' | tr '\n\r\t' '   ' | tr -d '\000-\010\013-\037\177' | cut -c1-300; }
@@ -820,7 +827,12 @@ answer_order() { # id outcome code detail [agent-json]
 agent_probe_ordered() { # a probe an order asked for: stored and logged, the worker's own backoff left on its schedule
   local fails=$AGENT_FAILS retry=$AGENT_RETRY
   agent_probe
-  if [[ "$AGENT_STATUS" == error ]]; then AGENT_FAILS=$fails; AGENT_RETRY=$retry; fi
+  if [[ "$AGENT_STATUS" == error ]]; then
+    AGENT_FAILS=$fails; AGENT_RETRY=$retry
+    # An agent that answered until this probe: its own backoff starts at the first wait, as after a failure of its own — a wait
+    # of 0 would probe again at the loop's next turn, a second completion two seconds after this one.
+    (( AGENT_RETRY > 0 )) || AGENT_RETRY="$(agent_first_wait)"
+  fi
   return 0
 }
 obey() { # one order, as the claim answer carries it (JSON)
@@ -835,7 +847,8 @@ obey() { # one order, as the claim answer carries it (JSON)
     drain) log "drained by $by — the pool hands me nothing until it is resumed" ;;
     recheck-agent)
       # A person's re-check reuses a probe under a minute old; the pool's asks: it comes only once the probe is stale on the pool's clock.
-      if [[ "$by" == pool ]] || (( $(date +%s) - AGENT_CHECKED >= 60 )); then agent_probe_ordered; fi
+      # The pool's orders name it pool:project or pool:community — no GitHub login has a colon, so a person named "pool" is a person.
+      if [[ "$by" == pool:* ]] || (( $(date +%s) - AGENT_CHECKED >= 60 )); then agent_probe_ordered; fi
       answer_order "$id" done probed "agent: ${AGENT_STATUS:-not probed}${AGENT_ERROR:+ — ${AGENT_ERROR:0:200}}" "$(jq -cn --arg s "$AGENT_STATUS" --arg e "$AGENT_ERROR" '{status:$s,error:$e}')" ;;
     restart)
       if (( SECONDS < 120 )); then answer_order "$id" refused too-young "started $SECONDS s ago: a restart this soon would loop"; return 0; fi
@@ -893,19 +906,20 @@ container_worker() {
     if [[ "$DRAIN" == 1 ]]; then log "draining: nothing claimed since the stop signal; exiting"; leave_exit_note drain; exit 0; fi
     agent_probe_if_due
     usage_sample
-    # The previous process's note goes with this claim only: whatever came of it, it is said once.
+    # The previous process's note goes with every claim until the pool has answered one: then it is said, and it goes.
     out="$(api POST /factory/claim "$(claim_body)")" \
-      || { code="${out##*$'\n'}"; body="${out%$'\n'*}"; PREVIOUS_EXIT=""
+      || { code="${out##*$'\n'}"; body="${out%$'\n'*}"
            # 426: this image is behind the pool's release past the rollout's grace — every worker follows the
            # latest image, and the pool hands this one nothing until the updater (or its owner) replaces it.
            # An order waiting for it rides the refusal: a re-check or a restart needs no new image (#277).
            if [[ "$code" == 426 ]]; then
+             exit_note_heard
              log "update required: $(jq -r '.error // .' <<<"$body" 2>/dev/null || echo "$body")"
              if [[ "$(jq -r '(.orders // []) | length' <<<"$body" 2>/dev/null || echo 0)" != 0 ]]; then obey_all "$body"; continue; fi
              sleep 300; continue
            fi
            log "claim failed: $code ${body:0:200}"; sleep 60; continue; }
-    code="${out##*$'\n'}"; body="${out%$'\n'*}"; PREVIOUS_EXIT=""
+    code="${out##*$'\n'}"; body="${out%$'\n'*}"; exit_note_heard
     if [[ "$code" == "204" ]]; then
       ORDER_STREAK=0
       idle=$((idle + 30))

@@ -123,14 +123,40 @@ secret). Everything travels in the `Authorization` header over TLS only.
   relayed, between two tasks, and once. What a worker says in its answer
   is cleaned (no escape or control characters, nothing that looks like a
   secret) and shown only to its owner and the maintainers; the public page
-  gets one sentence the pool wrote. Orders are capped inside the statement
-  that issues them — per worker, per login (20 an hour), and for the pool's
-  own (ten restarts an hour, sixty orders a day, a breaker while a provider
-  is down) — and each has one line on the journal when it is given and one
-  when it ends. A second process on the same token (a copied token, or an
-  old container that did not stop) shows on the worker's page as two
-  processes, and the pool gives such a worker no order until it is one
-  again.
+  gets one sentence the pool wrote — and never the worker's own version
+  string, only a release tag the pool parsed. Orders are capped inside the
+  statement that issues them — per worker, per login (20 an hour), and for
+  the pool's own (ten restarts an hour, sixty orders a day, a breaker while a
+  provider is down) — and each has one line on the journal when it is given
+  and one when it ends. The pool signs its own orders `pool:project` or
+  `pool:community`: no GitHub login has a colon, so nobody who signs in as
+  `pool` spends the pool's budget or escapes a person's cap. A second process
+  on the same token (a copied token, an old container that did not stop, or
+  one that names no process at all) shows on the worker's page as two
+  processes, and the pool gives such a worker no order until one has
+  claimed alone for ten minutes; the journal names a process by its first
+  four hex digits only, so it never tells a thief which process to pretend
+  to be.
+- **A contributor's workers can say an outage that is not there, and only
+  their own kind listens (#277).** A worker's agent error is its own word.
+  So a contributor's registrations count only toward the breaker that holds
+  contributors' workers, never the project's, and spend only the
+  community's share of the pool's own orders (forty of the sixty a day, six
+  of the ten restarts an hour); the project's workers keep the rest. A site
+  is kept under the name of who runs the worker: a leaked site of another
+  person's host joins neither its election nor its pacing. The worst a
+  hostile contributor does with free registrations is hold the pool's
+  automatic restarts of other contributors' workers — whose owners restart
+  them on their own host, or from their page — and put a warning on Status.
+- **A Worker rolled back past #277 lists what #277 keeps to itself.** The
+  Workers listing of a Worker from before #277 spreads the whole row, so it
+  would serve a worker's `site`, its process's `instance` and the rules'
+  state. Neither gives a power by itself — a site is kept under its owner's
+  name, and an instance binds an order only for its own token — but they
+  are cleared before a Worker from before #277 is deployed again
+  (`UPDATE build_workers SET site = NULL, instance = NULL, instance_prev =
+  NULL, auto_orders = NULL`). The rollback workflow of #277's last part
+  takes this step; until then, a maintainer takes it by hand.
 - **The Omarchy Packaging image is signed** (cosign, keyless, GitHub OIDC)
   so a contributor can verify the worker they run is the project's.
 

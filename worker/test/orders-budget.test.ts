@@ -229,7 +229,7 @@ describe("a fleet, on the worst days", () => {
       for (const [i, s] of sims.entries()) { vi.setSystemTime(t0 + m * MIN + i * 100); await s.tick(on, t0 + m * MIN, orders); }
       if (m % 10 === 0) await sweepOrders(on, t0 + m * MIN + 5000);
     }
-    const pool = (await env.DB.prepare("SELECT COUNT(*) AS n FROM worker_orders WHERE issued_by = 'pool' AND worker_id LIKE 'any-%'").first<{ n: number }>())!.n;
+    const pool = (await env.DB.prepare("SELECT COUNT(*) AS n FROM worker_orders WHERE issued_by IN ('pool:project', 'pool:community') AND worker_id LIKE 'any-%'").first<{ n: number }>())!.n;
     expect(pool).toBe(orders.length);
     expect(pool).toBeLessThanOrEqual(MAX_POOL_ORDERS_PER_DAY);
     const written = ran.filter((x) => ORDERS_SQL.test(x.sql)).reduce((n, x) => n + x.written, 0);

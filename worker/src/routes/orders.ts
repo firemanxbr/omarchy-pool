@@ -22,7 +22,7 @@ import { isMaintainer, viaOf, type Contributor } from "./contributors";
 import { aliveSince, workerView, type WorkerRow } from "./factory";
 import { version as running } from "../meta";
 import {
-  answerCode, breakerOf, capRefusal, cleanText, codeSentence, isOrderKind, loginCapWords, issueOrder, openOrdersOf, orderFacts, orderVerdicts, providerOf, refreshOpen,
+  answerCode, breakerKey, breakerOf, breakerScope, capRefusal, cleanText, codeSentence, isOrderKind, loginCapWords, issueOrder, openOrdersOf, orderFacts, orderVerdicts, providerOf, readSite, refreshOpen, rulesScale, siteWords,
   ORDER_KINDS, ORDER_RIGHTS, OUTCOMES, RIGHT_OF, SITE_WORKERS_SQL,
   ANSWER_WITHIN_MIN, GIVE_UP_AFTER_MIN, MAX_ORDERS_PER_LOGIN_HOUR, MAX_POOL_ORDERS_PER_DAY, MAX_POOL_RECHECKS_PER_DAY, MAX_POOL_RESTARTS_PER_DAY, MAX_POOL_RESTARTS_PER_SPELL, MAX_RECHECKS_PER_HOUR,
   MAX_RESTARTS_PER_HOUR, MIN_UPTIME_S, RECHECK_AFTER_MIN, RESTART_AFTER_MIN, RESTART_SPACING_MIN, TTL_PERSON_MIN,
@@ -102,6 +102,11 @@ export async function handleIssueOrder(c: Contributor, id: string, request: Requ
   }, 201);
 }
 
+/** An order of a worker by its id (the primary key): the Cancel's read. */
+export const ORDER_OF_WORKER_SQL = "SELECT id, kind, state, issued_by, via, rule, reason FROM worker_orders WHERE id = ? AND worker_id = ?";
+/** An order by its id (the primary key): the worker's answer's read. */
+export const ORDER_BY_ID_SQL = "SELECT id, worker_id, kind, state, delivered_to, accepted_at, issued_by, via, rule, reason FROM worker_orders WHERE id = ?";
+
 /** DELETE /factory/workers/:id/orders/:oid — a waiting order taken back, by its worker's owner or a maintainer; one final line. */
 export async function handleCancelOrder(c: Contributor, id: string, oid: string, request: Request, env: Env, url: URL): Promise<Response> {
   const gate = writeGate(request, url, false);
@@ -110,7 +115,7 @@ export async function handleCancelOrder(c: Contributor, id: string, oid: string,
   if (!w) return json({ error: "no such worker" }, 404);
   const v = orderVerdicts(c, w, { now: Date.now(), restartsHour: 0, rechecksHour: 0, loginHour: 0, restartsFreeAt: null, rechecksFreeAt: null, loginFreeAt: null }).cancel;
   if (!v.ok) return json({ error: v.why }, v.status);
-  const o = await env.DB.prepare("SELECT id, kind, state, issued_by, via, rule, reason FROM worker_orders WHERE id = ? AND worker_id = ?").bind(oid, w.id).first<{ id: string; kind: OrderKind; state: string; issued_by: string; via: string | null; rule: string | null; reason: string }>();
+  const o = await env.DB.prepare(ORDER_OF_WORKER_SQL).bind(oid, w.id).first<{ id: string; kind: OrderKind; state: string; issued_by: string; via: string | null; rule: string | null; reason: string }>();
   if (!o) return json({ error: "no such order on this worker" }, 404);
   if (o.state !== "pending") return json({ error: o.state === "delivered" ? "delivered already: its worker has it, and answers it" : `closed already: ${o.state}` }, 409);
   const at = new Date().toISOString();
@@ -138,7 +143,7 @@ export async function handleAnswerOrder(w: { id: string; owner: string | null; v
   const b = await readJson<{ instance?: unknown; outcome?: unknown; code?: unknown; detail?: unknown; agent?: unknown; service?: unknown; seconds?: unknown }>(request);
   if (b instanceof Response) return b;
   if (!/^wo_[0-9a-f]{32}$/.test(oid)) return json({ error: "no such order" }, 404);
-  const o = await env.DB.prepare("SELECT id, worker_id, kind, state, delivered_to, accepted_at, issued_by, via, rule, reason FROM worker_orders WHERE id = ?").bind(oid).first<{ id: string; worker_id: string; kind: OrderKind; state: string; delivered_to: string | null; accepted_at: string | null; issued_by: string; via: string | null; rule: string | null; reason: string }>();
+  const o = await env.DB.prepare(ORDER_BY_ID_SQL).bind(oid).first<{ id: string; worker_id: string; kind: OrderKind; state: string; delivered_to: string | null; accepted_at: string | null; issued_by: string; via: string | null; rule: string | null; reason: string }>();
   if (!o || o.worker_id !== w.id) return json({ error: "no such order" }, 404);
   if (!OUTCOMES.includes(b.outcome as Outcome)) return json({ error: `outcome is one of ${OUTCOMES.join(", ")}` }, 400);
   const outcome = b.outcome as Outcome;
@@ -193,19 +198,30 @@ async function lastOrders(env: Env, id: string, url: URL, withWorkerWords: boole
  * GET /factory/workers/:id — the worker's page's one read: the listing's
  * view of it (workerView), its last orders without the worker's own words,
  * the rules the page quotes, and, while its agent does not answer, the
- * provider's breaker when it stands (its key, by the primary key). Public,
- * like the journal it mirrors; cached ten seconds.
+ * provider's breaker of its scope when it stands (its key, by the primary
+ * key) and, for a worker that shares its host's agent service, what the
+ * host says — who restarts the service, or why the pool waits — in the
+ * rules' own words from the site's two reads (the site itself is never
+ * served). Public, like the journal it mirrors; cached ten seconds.
  */
 export async function handleWorkerPublic(id: string, url: URL, env: Env): Promise<Response> {
   const w = await workerRow(env, id);
   if (!w) return json({ error: "no such worker" }, 404);
   const view = workerView(w, aliveSince(), running(env));
-  const [orders, breaker] = await Promise.all([
+  const now = Date.now();
+  const failing = w.agent_status === "error" && !w.revoked_at;
+  const scope = breakerScope(w.trust);
+  const [orders, breaker, site] = await Promise.all([
     lastOrders(env, id, url, false),
-    w.agent_status === "error" && w.agent ? env.DB.prepare("SELECT value FROM settings WHERE key = ?").bind(`worker-breaker:${providerOf(w.agent)}`).first<{ value: string }>() : null,
+    failing && w.agent ? env.DB.prepare("SELECT value FROM settings WHERE key = ?").bind(breakerKey(providerOf(w.agent), scope)).first<{ value: string }>() : null,
+    failing && w.site && w.agent_via === "sibling" ? readSite(env, w.site, now) : null,
   ]);
   const b = breakerOf(breaker?.value);
-  return json({ worker: view, orders, rules: { on: (env.WORKER_RULES ?? "").toLowerCase() !== "off", ...RULES }, breaker: b ? { provider: providerOf(w.agent), since: b.since, peak: b.peak } : null }, 200, { "cache-control": "public, max-age=10" });
+  return json({
+    worker: view, orders, rules: { on: (env.WORKER_RULES ?? "").toLowerCase() !== "off", ...RULES },
+    breaker: b ? { provider: providerOf(w.agent), scope, since: b.since, peak: b.peak } : null,
+    site_word: site ? siteWords(w, site, now, rulesScale(env).scale) : null,
+  }, 200, { "cache-control": "public, max-age=10" });
 }
 
 /** GET /factory/workers/:id/orders — the same list with the worker's own words: its owner's and the maintainers', like its log. */

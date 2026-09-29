@@ -413,14 +413,23 @@ pub fn url_host(url: &str) -> Option<String> {
 
 // ---------- the note a deliberate exit leaves ----------
 
-/// Where a process leaves its `previous_exit` note: the container's own
-/// writable layer (`/var/lib/omarchy`), which a restart by the restart
+/// Whether this process runs in a container: docker's `/.dockerenv`, podman's `/run/.containerenv`.
+pub fn in_container() -> bool {
+    Path::new("/.dockerenv").exists() || Path::new("/run/.containerenv").exists()
+}
+
+/// Where a process leaves its `previous_exit` note: in a container, its
+/// own writable layer (`/var/lib/omarchy`), which a restart by the restart
 /// policy keeps and a recreated container does not; a bare binary keeps it
-/// beside its work directory.
+/// beside its work directory — two bare workers on one host never share
+/// a note, whoever may write `/var/lib/omarchy`.
 pub fn state_dir(work_dir: &Path) -> PathBuf {
-    let container = Path::new("/var/lib/omarchy");
-    if std::fs::create_dir_all(container).is_ok() && is_writable(container) {
-        return container.to_path_buf();
+    state_dir_for(work_dir, in_container(), Path::new("/var/lib/omarchy"))
+}
+
+pub fn state_dir_for(work_dir: &Path, container: bool, layer: &Path) -> PathBuf {
+    if container && std::fs::create_dir_all(layer).is_ok() && is_writable(layer) {
+        return layer.to_path_buf();
     }
     work_dir.join(".omarchy-state")
 }
@@ -441,17 +450,23 @@ pub fn leave_exit_note(dir: &Path, why: &str, at: &str) {
     );
 }
 
-/// Takes the previous process's note, once: read, removed, sent with this process's first claim.
-pub fn take_exit_note(dir: &Path) -> Option<Value> {
-    let path = dir.join("last-exit");
-    let text = std::fs::read_to_string(&path).ok()?;
-    let _ = std::fs::remove_file(&path);
+/// Reads the previous process's note: said with this process's claims until
+/// the pool has heard one (`clear_exit_note`), so a first claim lost on the
+/// network does not lose why the process before ended. A note of an
+/// unknown kind is none.
+pub fn read_exit_note(dir: &Path) -> Option<Value> {
+    let text = std::fs::read_to_string(dir.join("last-exit")).ok()?;
     let v: Value = serde_json::from_str(&text).ok()?;
     matches!(
         v.get("why").and_then(Value::as_str),
         Some("idle" | "drain" | "restart" | "watchdog")
     )
     .then_some(v)
+}
+
+/// The pool has heard the note: it goes.
+pub fn clear_exit_note(dir: &Path) {
+    let _ = std::fs::remove_file(dir.join("last-exit"));
 }
 
 /// `AGENT_RETRY_FIRST_SECONDS`: the first re-check after a failed probe, 15 s
@@ -653,17 +668,42 @@ mod tests {
     }
 
     #[test]
-    fn a_deliberate_exit_leaves_a_note_the_next_process_reads_once() {
+    fn a_deliberate_exit_leaves_a_note_the_next_process_reads_until_the_pool_has_heard_it() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(take_exit_note(dir.path()).is_none());
+        assert!(read_exit_note(dir.path()).is_none());
         leave_exit_note(dir.path(), "restart", "2026-09-29T13:36:02Z");
-        let v = take_exit_note(dir.path()).unwrap();
+        let v = read_exit_note(dir.path()).unwrap();
         assert_eq!(v["why"], "restart");
-        assert!(take_exit_note(dir.path()).is_none(), "once");
+        // A claim that did not reach the pool keeps it: the next claim says it again.
+        assert_eq!(read_exit_note(dir.path()).unwrap()["why"], "restart");
+        clear_exit_note(dir.path());
+        assert!(read_exit_note(dir.path()).is_none(), "once heard, gone");
         std::fs::write(dir.path().join("last-exit"), "{\"why\":\"crash\"}").unwrap();
         assert!(
-            take_exit_note(dir.path()).is_none(),
+            read_exit_note(dir.path()).is_none(),
             "a reason it does not know is not sent"
+        );
+    }
+
+    #[test]
+    fn a_bare_binary_keeps_its_note_beside_its_work_directory_even_where_it_could_write_a_containers(
+    ) {
+        let work = tempfile::tempdir().unwrap();
+        let layer = tempfile::tempdir().unwrap();
+        // Outside a container: beside the work directory, though the container's path is writable — two bare workers on one
+        // host never take each other's note.
+        assert_eq!(
+            state_dir_for(work.path(), false, layer.path()),
+            work.path().join(".omarchy-state")
+        );
+        // In a container: its own writable layer, which a restart by the restart policy keeps.
+        assert_eq!(state_dir_for(work.path(), true, layer.path()), layer.path());
+        // In a container whose layer it cannot write: beside the work directory again.
+        let file = layer.path().join("not-a-dir");
+        std::fs::write(&file, b"").unwrap();
+        assert_eq!(
+            state_dir_for(work.path(), true, &file.join("x")),
+            work.path().join(".omarchy-state")
         );
     }
 

@@ -22,12 +22,12 @@ CREATE TABLE worker_orders (
     worker_id     TEXT NOT NULL,                   -- build_workers.id; no FK (0035): history outlives a revoke
     kind          TEXT NOT NULL CHECK (kind IN ('recheck-agent','restart','restart-agent','drain','resume','update','stop-task')),
     reason        TEXT NOT NULL,                   -- <= 300, one line, stripped, leak-checked; public
-    issued_by     TEXT NOT NULL,                   -- a GitHub login, or 'pool'
+    issued_by     TEXT NOT NULL,                   -- a GitHub login, or the pool: 'pool:project' or 'pool:community' (no login has a colon)
     via           TEXT,                            -- web | token for a person; NULL for the pool
     rule          TEXT,                            -- the pool's rule name; NULL for a person
     unless_agent_ok INTEGER NOT NULL DEFAULT 0,    -- restart only: the worker probes first and refuses on ok
     task_id       INTEGER,                         -- stop-task only: the task it held at issue, whose lease the order fences until it goes back to the queue
-    site          TEXT,                            -- the worker's site at issue (per-site pacing; restart-agent's uniqueness); NULL without a stable engine id
+    site          TEXT,                            -- the worker's site at issue, as build_workers keeps it (per-site pacing; restart-agent's uniqueness); NULL without a stable engine id
     issued_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     expires_at    TEXT NOT NULL,
     baseline_at_issue TEXT,                        -- recheck: the row's agent_checked_at at issue (staleness)
@@ -51,7 +51,7 @@ CREATE UNIQUE INDEX uq_worker_orders_open_kind ON worker_orders (worker_id, kind
 CREATE UNIQUE INDEX uq_worker_orders_open_site_agent ON worker_orders (site) WHERE kind = 'restart-agent' AND state IN ('pending','delivered');
 -- The worker's page and the per-worker caps.
 CREATE INDEX idx_worker_orders_worker ON worker_orders (worker_id, issued_at DESC);
--- The per-issuer caps (a login; 'pool' for the fleet-wide caps and the daily budget).
+-- The per-issuer caps (a login; the pool's two identities for the fleet-wide caps, the daily budget and the community's share of them).
 CREATE INDEX idx_worker_orders_issuer ON worker_orders (issued_by, issued_at DESC);
 -- Per-site pacing of the pool's restarts.
 CREATE INDEX idx_worker_orders_site ON worker_orders (site, issued_at DESC) WHERE site IS NOT NULL;
@@ -69,18 +69,20 @@ ALTER TABLE build_workers ADD COLUMN crash_loop_since TEXT;   -- set (and journa
 ALTER TABLE build_workers ADD COLUMN watchdog_exits TEXT;     -- JSON {n, since, last, stuck_in}: watchdog exits reported by previous_exit in the last 24 h; NULL = none
 ALTER TABLE build_workers ADD COLUMN started_at TEXT;         -- display only: MAX of what its claims said
 ALTER TABLE build_workers ADD COLUMN agent_via TEXT;          -- direct | sibling | broker | none
-ALTER TABLE build_workers ADD COLUMN site TEXT;               -- sha256(engine id ‖ "\n" ‖ compose project)[:16]; NULL without a stable engine id: a site of its own
+ALTER TABLE build_workers ADD COLUMN site TEXT;               -- 'project/' or '<owner>/' then sha256(engine id ‖ "\n" ‖ compose project)[:16]: only workers the same people run share one; NULL without a stable engine id: a site of its own
 ALTER TABLE build_workers ADD COLUMN restarts_left INTEGER;   -- under on-failure:N; NULL otherwise
 ALTER TABLE build_workers ADD COLUMN rollout TEXT;            -- canonical JSON of the claim's rollout report; NULL = not reported
-ALTER TABLE build_workers ADD COLUMN agent_error_since TEXT;  -- the first failed probe of the current spell (pool time)
+ALTER TABLE build_workers ADD COLUMN agent_error_since TEXT;  -- the first failed probe of the current spell (pool time); assigned only by the write that begins or ends a spell, cleared by revoke
 ALTER TABLE build_workers ADD COLUMN agent_probed_at TEXT;    -- the pool's time of the claim that brought a new agent_checked_at: the probe's age on the pool's clock
 ALTER TABLE build_workers ADD COLUMN agent_error_class TEXT;  -- errorClass(agent_error, agent_via), written with agent_error
 ALTER TABLE build_workers ADD COLUMN drained_at TEXT;
 ALTER TABLE build_workers ADD COLUMN drained_by TEXT;
 ALTER TABLE build_workers ADD COLUMN drain_reason TEXT;
 ALTER TABLE build_workers ADD COLUMN auto_orders TEXT;        -- JSON AutoState; written only by compare-and-set
--- The breaker's open spells: its key moves only when a spell begins or ends, never at a liveness write.
-CREATE INDEX idx_build_workers_not_ready ON build_workers (agent_error_since) WHERE agent_status = 'error' AND revoked_at IS NULL;
+-- The breaker's open spells: its key and its WHERE name only the spell's start, which a claim assigns only when a spell
+-- begins or ends — a column an UPDATE assigns costs its index a row even when the value stays, and every claim assigns
+-- agent_status. So a liveness write never writes this index. Revoke and the weekly gc take dead spells out.
+CREATE INDEX idx_build_workers_not_ready ON build_workers (agent_error_since) WHERE agent_error_since IS NOT NULL;
 -- The site election and pacing.
 CREATE INDEX idx_build_workers_site ON build_workers (site) WHERE site IS NOT NULL;
 -- stop-task's fence: the open order that stopped this lease. While it is set, the task stays

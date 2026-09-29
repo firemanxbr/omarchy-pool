@@ -10,8 +10,10 @@
 # know is refused by name; a reason is printed stripped and never run; an
 # answer it cannot read is logged and slept on; three answers with orders in
 # a row slow it to the idle poll; a deliberate exit leaves a note the next
-# process sends once; a complete the pool refuses is logged and the builder
-# exits 0; a task it cannot read is failed at once.
+# process sends until the pool has answered a claim; a complete the pool
+# refuses is logged and the builder exits 0; a task it cannot read is
+# failed at once; an order riding a 426 is obeyed; an ordered probe that
+# fails after an answer leaves the worker's own first wait, not none.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
@@ -21,13 +23,16 @@ sed '/^hold_secrets$/,$d' "$script" > "$tmp/worker.sh"
 
 mkdir -p "$tmp/lib/bin" "$tmp/bin" "$tmp/state"
 touch "$tmp/lib/omarchy-staging.pub.asc"; printf '#!/bin/sh\n' > "$tmp/lib/bin/draft-pkgbuild"; chmod +x "$tmp/lib/bin/draft-pkgbuild"
-# The stub agent: refused while STUB_AGENT says down, answering otherwise; each probe noted with the fake time.
+# The stub agent: refused while STUB_AGENT says down, answering otherwise ("up-once": this once, then down); each probe noted with the fake time.
 cat > "$tmp/lib/bin/agent.py" <<'P'
 import json, os, sys
 now = int(open(os.environ["STUB_CLOCK"]).read())
 with open(os.environ["STUB_LOG"], "a") as f:
     f.write(f"probe {now}\n")
-if open(os.environ["STUB_AGENT"]).read().strip() == "down":
+state = open(os.environ["STUB_AGENT"]).read().strip()
+if state == "up-once":
+    open(os.environ["STUB_AGENT"], "w").write("down")
+elif state == "down":
     print(json.dumps({"ok": False, "error": "URLError: <urlopen error [Errno 111] Connection refused>"}))
     sys.exit(1)
 print(json.dumps({"ok": True, "ms": 42, "agent": "anthropic/claude-sonnet-5"}))
@@ -101,7 +106,7 @@ rm -f "$tmp/bin/curl" "$tmp/state/last-exit"
 
 # 2. A re-check: the pool's probes now, answered done with what the agent said — and the worker's own backoff does not move.
 echo down > "$STUB_AGENT"
-echo "200 $(orders "$(order "$ID" recheck-agent "stale" pool)")" > "$STUB_ANSWERS"
+echo "200 $(orders "$(order "$ID" recheck-agent "stale" pool:project)")" > "$STUB_ANSWERS"
 run_worker 100 "${common[@]}"
 # The start's probe and the ordered one at once; then the worker's own, at 15 s and 30 s after them, as if the ordered one had not
 # failed (counted, it would have made the second own re-check wait 60 s: +92).
@@ -109,6 +114,17 @@ run_worker 100 "${common[@]}"
 a="$(answers_to "$ID")"
 [[ "$(jq -r '"\(.outcome) \(.code) \(.instance == "'"$(claims | head -n1 | jq -r .instance)"'")"' <<<"$a")" == "done probed true" ]] || { echo "answered done/probed by this process: $a"; exit 1; }
 [[ "$(jq -r .agent.status <<<"$a")" == error ]] || { echo "with what the agent said: $a"; exit 1; }
+# A person's re-check reuses the probe under a minute old — a person whose login is "pool" too: the pool's orders name it pool:project.
+echo "200 $(orders "$(order "$ID" recheck-agent "is it up" pool)")" > "$STUB_ANSWERS"
+run_worker 30 "${common[@]}"
+[[ "$(grep -c '^probe ' "$STUB_LOG")" == 1 ]] || { echo "a person's re-check spent a completion on a probe 0 s old: $(grep '^probe ' "$STUB_LOG" | tr '\n' ' ')"; exit 1; }
+[[ "$(jq -r .code <<<"$(answers_to "$ID")")" == probed ]] || { echo "answered: $(answers_to "$ID")"; exit 1; }
+# An ordered probe that fails just after the agent answered: the worker's own next probe waits its first 15 s — not at the loop's
+# next turn, 2 s later (a second completion for nothing).
+echo up-once > "$STUB_AGENT"
+echo "200 $(orders "$(order "$ID" recheck-agent "stale" pool:project)")" > "$STUB_ANSWERS"
+run_worker 60 "${common[@]}"
+[[ "$(awk '/^probe / { print $2 - 1000000 }' "$STUB_LOG" | tr '\n' ' ')" == "0 0 32 " ]] || { echo "an ordered failure after an answer probed again at once: $(grep '^probe ' "$STUB_LOG" | tr '\n' ' ')"; exit 1; }
 
 # 3. A restart: refused when the process is under two minutes old; accepted and exit 0 otherwise, leaving its note; a conditional one refused when the agent answers.
 echo down > "$STUB_AGENT"
@@ -122,7 +138,7 @@ set +e; run_worker 600 "${common[@]}"; status=$?; set -e
 [[ "$(claims | wc -l | tr -d ' ')" == 1 ]] || { echo "nothing claimed after the restart"; exit 1; }
 rm -f "$tmp/state/last-exit"
 echo up > "$STUB_AGENT"
-echo "200 $(orders "$(order "$ID" restart "if down" pool true)")" > "$STUB_ANSWERS"
+echo "200 $(orders "$(order "$ID" restart "if down" pool:project true)")" > "$STUB_ANSWERS"
 run_worker 60 "${common[@]}"
 [[ "$(jq -r '"\(.outcome) \(.code)"' <<<"$(answers_to "$ID")")" == "refused agent-ok" ]] || { echo "a conditional restart with the agent answering: $(answers_to "$ID")"; exit 1; }
 
@@ -182,4 +198,18 @@ for refusal in '409 {"error":"task 813 is cancelled","stop":true,"state":"stoppi
   else grep -q "the pool refused the report of task 813: ${refusal%% *}" "$tmp/stderr" || { echo "and says so: $(cat "$tmp/stderr")"; exit 1; }; fi
   grep -q '/fail' "$STUB_LOG" && { echo "no fail after a refused complete"; exit 1; }
 done
+# 9. An order riding a 426 (the image is behind the pool's release) is obeyed: a re-check needs no new image.
+echo down > "$STUB_AGENT"
+echo "426 $(jq -cn --argjson o "[$(order "$ID" recheck-agent "stale" pool:project)]" '{error:"this worker runs v1.0.0; the pool is at v1.0.3",latest:"v1.0.3",orders:$o}')" > "$STUB_ANSWERS"
+run_worker 30 "${common[@]}"
+[[ "$(jq -r '"\(.outcome) \(.code)"' <<<"$(answers_to "$ID")")" == "done probed" ]] || { echo "the 426's order: $(answers_to "$ID") $(cat "$tmp/stderr")"; exit 1; }
+grep -q 'update required' "$tmp/stderr" || { echo "and the 426 said: $(cat "$tmp/stderr")"; exit 1; }
+
+# 10. Why the previous process ended is said until the pool answers a claim: a claim lost (a 503) says it again at the next.
+echo up > "$STUB_AGENT"
+jq -cn '{why:"restart",at:"2026-09-29T12:00:00Z"}' > "$tmp/state/last-exit"
+echo '503 {"error":"internal error"}' > "$STUB_ANSWERS"
+run_worker 60 "${common[@]}"
+[[ "$(claims | jq -r '.previous_exit.why // "none"' | tr '\n' ' ')" == "restart restart none " ]] || { echo "said until heard: $(claims | jq -c .previous_exit | tr '\n' ' ')"; exit 1; }
+rm -f "$tmp/state/last-exit"
 echo "worker orders: ok"

@@ -10,10 +10,11 @@
  *
  * The workers are the Studio's default set (#277's design, P10): four
  * project workers on one host — two pool workers and two review workers
- * behind agent-proxy — and a contributor's builder; a second fixture turns
- * the emulated profile on (two more review workers behind agent-proxy).
- * Their tokens are omw_<id>; the people's sessions oms_<login>, their CLI
- * tokens omc_<login>.
+ * behind agent-proxy — and a contributor's builder. The emulated profile's
+ * host, four review workers behind agent-proxy, is in
+ * worker-orders-bounds.test.ts, with the breaker's whole matrix, the
+ * budget's shares and the races. Their tokens are omw_<id>; the people's
+ * sessions oms_<login>, their CLI tokens omc_<login>.
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -21,11 +22,12 @@ import worker, { type Env } from "../src/index";
 import { handleClaim } from "../src/routes/factory";
 import { sha256Hex, workerOf } from "../src/routes/contributors";
 import {
-  BREAKER_KEYS_SQL, COUNT_ISSUER_SQL, COUNT_WORKER_SQL, DUE_ORDERS_SQL, ISSUE_SQL, OPEN_ORDERS_SQL, OPEN_SPELLS_SQL, REFRESH_OPEN_SQL, SITE_PACE_SQL, SITE_WORKERS_SQL,
+  BREAKER_KEYS_SQL, CANCEL_LINES_SQL, CANCEL_ORDERS_SQL, CANCEL_ROWS_SQL, COMMUNITY_RESTARTS_SQL, COUNT_ISSUER_SQL, COUNT_WORKER_SQL, DUE_ORDERS_SQL, ISSUE_SQL, OPEN_ORDERS_SQL, OPEN_SPELLS_SQL,
+  POOL_ORDERS_SQL, POOL_RESTARTS_SQL, REFRESH_OPEN_SQL, SITE_PACE_SQL, SITE_WORKERS_SQL,
   MAX_POOL_ORDERS_PER_DAY, MAX_POOL_RESTARTS_PER_HOUR, sweepOrders,
 } from "../src/orders";
-import { WORKER_ORDERS_SQL } from "../src/routes/orders";
-import { OLD_ORDERS_SQL } from "../src/routes/gc";
+import { ORDER_BY_ID_SQL, ORDER_OF_WORKER_SQL, WORKER_ORDERS_SQL } from "../src/routes/orders";
+import { DEAD_SPELLS_SQL, OLD_ORDER_KEYS_SQL, OLD_ORDERS_SQL } from "../src/routes/gc";
 
 const ORIGIN = "http://pool.test";
 const API = `${ORIGIN}/api/v1`;
@@ -474,19 +476,19 @@ describe("the pool's rules, on a fake clock", () => {
     expect(kinds.filter((k) => k === "recheck-agent").length).toBe(3);
     const trips = (await env.DB.prepare("SELECT summary FROM events WHERE kind = 'order' AND summary LIKE 'provider outage suspected: 3 brk sites%'").all()).results;
     expect(trips).toHaveLength(1);
-    expect(await env.DB.prepare("SELECT key FROM settings WHERE key = 'worker-breaker:brk'").first()).not.toBeNull();
+    expect(await env.DB.prepare("SELECT key FROM settings WHERE key = 'worker-breaker:brk:project'").first()).not.toBeNull();
     // The page says why.
     expect((await call("GET", "/factory/workers/brk-a")).json.breaker).toMatchObject({ provider: "brk" });
     // Two of three recover: one site left, below two — the next sweep marks it, fifteen minutes later the key goes, one clear line.
     let t = t0 + 181 * MIN;
     for (const [i, id] of ids.slice(0, 2).entries()) { vi.setSystemTime(t + i * 1000); await claim(id, { instance: 2000 + i, status: "ok", checked: "two", site: `b${i}`.padEnd(16, "0"), agent: "brk/model-1" }); }
     await sweepOrders(env, t + 10000);
-    expect(await env.DB.prepare("SELECT key FROM settings WHERE key = 'worker-breaker:brk'").first()).not.toBeNull();
+    expect(await env.DB.prepare("SELECT key FROM settings WHERE key = 'worker-breaker:brk:project'").first()).not.toBeNull();
     t += 16 * MIN;
     vi.setSystemTime(t);
     await turn(t, ["brk-c"]);
     await sweepOrders(env, t + 10000);
-    expect(await env.DB.prepare("SELECT key FROM settings WHERE key = 'worker-breaker:brk'").first()).toBeNull();
+    expect(await env.DB.prepare("SELECT key FROM settings WHERE key = 'worker-breaker:brk:project'").first()).toBeNull();
     expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM events WHERE kind = 'order' AND summary LIKE 'provider outage over: fewer than 2 brk%'").first<{ n: number }>())!.n).toBe(1);
     // The one left gets its restart at its next claim, under the usual caps.
     const after = await turn(t + MIN, ["brk-c"]);
@@ -528,8 +530,8 @@ describe("the caps and the budget", () => {
     const t0 = Date.now();
     const at = (m: number) => new Date(t0 - m * MIN).toISOString();
     // The pool's day: 59 orders already (the tests above gave some), none a restart within the hour.
-    const had = (await env.DB.prepare("SELECT COUNT(*) AS n FROM worker_orders WHERE issued_by = 'pool'").first<{ n: number }>())!.n;
-    const rows = Array.from({ length: MAX_POOL_ORDERS_PER_DAY - 1 - had }, (_, i) => `('wo_seed${String(i).padStart(29, "0")}', 'seeded', 'recheck-agent', 'seeded', 'pool', '${at(120 + i)}', '${at(0)}', 'done')`);
+    const had = (await env.DB.prepare("SELECT COUNT(*) AS n FROM worker_orders WHERE issued_by IN ('pool:project', 'pool:community')").first<{ n: number }>())!.n;
+    const rows = Array.from({ length: MAX_POOL_ORDERS_PER_DAY - 1 - had }, (_, i) => `('wo_seed${String(i).padStart(29, "0")}', 'seeded', 'recheck-agent', 'seeded', 'pool:project', '${at(120 + i)}', '${at(0)}', 'done')`);
     await env.DB.prepare(`INSERT INTO worker_orders (id, worker_id, kind, reason, issued_by, issued_at, expires_at, state) VALUES ${rows.join(", ")}`).run();
     const id = "budget-one";
     await seedWorker(id, "aarch64", "m1", "project");
@@ -625,12 +627,25 @@ describe("what the planner reads", () => {
       ["an issuer's cap", COUNT_ISSUER_SQL, ["m1", now], /idx_worker_orders_issuer \(issued_by=\? AND issued_at>\?\)/],
       ["the site's workers", SITE_WORKERS_SQL, ["s", now], /idx_build_workers_site \(site=\?\)/],
       ["the site's pacing", SITE_PACE_SQL, ["s", now], /idx_worker_orders_site \(site=\? AND issued_at>\?\)/],
-      ["the breaker's open spells", OPEN_SPELLS_SQL, [now], /idx_build_workers_not_ready/],
+      ["the breaker's open spells", OPEN_SPELLS_SQL, [now], /idx_build_workers_not_ready \(agent_error_since>\?\)/],
       ["the breakers standing", BREAKER_KEYS_SQL, [], /sqlite_autoindex_settings_1 \(key>\? AND key<\?\)/],
       ["the breaker's key", "SELECT value FROM settings WHERE key = ?", ["worker-breaker:x"], /sqlite_autoindex_settings_1 \(key=\?\)/],
       ["the sweep", DUE_ORDERS_SQL, [now, now], /uq_worker_orders_open_kind/],
       ["a worker's page", WORKER_ORDERS_SQL, ["w", 10], /idx_worker_orders_worker \(worker_id=\?\)/],
       ["the retention", OLD_ORDERS_SQL, [now], /idx_worker_orders_worker \(worker_id=\? AND issued_at<\?\)/],
+      ["the pool's day", POOL_ORDERS_SQL, [now], /idx_worker_orders_issuer \(issued_by=\? AND issued_at>\?\)/],
+      ["the pool's hour of restarts", POOL_RESTARTS_SQL, [now], /idx_worker_orders_issuer \(issued_by=\? AND issued_at>\?\)/],
+      ["the community's hour of restarts", COMMUNITY_RESTARTS_SQL, [now], /idx_worker_orders_issuer \(issued_by=\? AND issued_at>\?\)/],
+      ["an answer's order", ORDER_BY_ID_SQL, ["wo_x"], /sqlite_autoindex_worker_orders_1 \(id=\?\)/],
+      ["a cancel's order", ORDER_OF_WORKER_SQL, ["wo_x", "w"], /sqlite_autoindex_worker_orders_1 \(id=\?\)/],
+      ["a dead spell", DEAD_SPELLS_SQL, [now], /idx_build_workers_not_ready \(agent_error_since>\?\)/],
+      ...OLD_ORDER_KEYS_SQL.map((sql, i): [string, string, unknown[], RegExp] => [`a once-per-window key (${i})`, sql, [now], /sqlite_autoindex_settings_1 \(key>\? AND key<\?\)/]),
+      // Revoke (one worker) and block (an owner's): the workers' orders by their worker, the rows by their own index.
+      ...([["revoke", "SELECT id FROM build_workers WHERE id = ? AND revoked_at = ?", ["w", now], /sqlite_autoindex_build_workers_1 \(id=\?\)/], ["block", "SELECT id FROM build_workers WHERE owner = ? AND revoked_at = ?", ["alice", now], /idx_build_workers_owner \(owner=\?\)/]] as const).flatMap(([what, which, binds, rows]): [string, string, unknown[], RegExp][] => [
+        [`${what}: its lines`, CANCEL_LINES_SQL(which), ["d", ...binds], /SEARCH worker_orders USING INDEX idx_worker_orders_worker \(worker_id=\?\)/],
+        [`${what}: its orders`, CANCEL_ORDERS_SQL(which), [now, "d", ...binds], /SEARCH worker_orders USING INDEX idx_worker_orders_worker \(worker_id=\?\)/],
+        [`${what}: the rows`, CANCEL_ROWS_SQL(which), binds as unknown as unknown[], rows],
+      ]),
     ];
     for (const [what, sql, args, want] of cases) {
       const p = await plan(sql, args);

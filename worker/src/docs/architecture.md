@@ -267,9 +267,15 @@ order again before it acts, answers `POST /factory/workers/self/orders/:id`,
 and an order it never answers is closed by what its next claims show, or
 expires. Every claim also carries the process's `instance` (random at start),
 when it started, how its previous process ended, where its agent is (`direct`,
-`sibling`, `broker`) and its `site` (the engine it runs on): the pool learns a
-restart happened when the instance changes, and tells two processes on one
-token, and a crash loop, from a restart. Orders live in `worker_orders`
+`sibling`, `broker`) and its `site` (the engine it runs on, kept under the
+name of who runs the worker — the project's, or the contributor's login — so
+only one person's workers ever share a site): the pool learns a restart
+happened when the instance changes, and tells two processes on one token, and
+a crash loop, from a restart. A claim that names no instance declares
+nothing; beside a process that names one it is the second process. While two
+processes share a token nothing is delivered, the one that claimed last is
+recorded at most every three minutes, and the conflict lifts only once one
+has claimed alone for ten. Orders live in `worker_orders`
 (migration `0042`), one row per order with its state (`pending`, `delivered`,
 `done`, `refused`, `failed`, `expired`, `cancelled`), who gave it, why and the
 answer; at most one open per kind per worker, and per site and agent service.
@@ -288,11 +294,21 @@ says so. An error a restart cannot help (auth, credit, rate, the provider's
 own) gets no order. A **breaker** holds every automatic restart of a provider
 while three sites have an open spell on it, and releases when fewer than two
 have had one for 15 minutes: an outage of a provider is not the workers' to
-fix. Every cap sits inside the `INSERT` that issues the order — six restarts
-and six re-checks an hour per worker, twenty orders an hour per login, ten
-automatic restarts an hour and sixty automatic orders a day for the pool — so
-two claims at once cannot pass one together. The journal has exactly one line
-when an order is issued and one when it ends. `WORKER_RULES = "off"` stops the
+fix. A worker's error is its own word, so the breaker has two scopes: the
+project's workers are held only by the project's own spells
+(`worker-breaker:<provider>:project`), contributors' workers by everyone's
+(`worker-breaker:<provider>`). A host's shared agent service is restarted
+once, through its elected worker; the others wait, give up with it, or —
+when the service answers another of them — are restarted themselves. Every
+cap sits inside the `INSERT` that issues the order — six restarts and six
+re-checks an hour per worker, twenty orders an hour per login, ten automatic
+restarts an hour and sixty automatic orders a day for the pool, of which
+contributors' workers take six and forty — so two claims at once cannot pass
+one together. The pool signs its own orders `pool:project` or
+`pool:community`, which no GitHub login can be. The journal has exactly one
+line when an order is issued and one when it ends, whichever path closed it:
+each close is conditional on the order's state, and writes its line only
+when it changed it. `WORKER_RULES = "off"` stops the
 pool's own orders; people's still work. Drain and resume, Stop its task, and
 Update through the set's updater are the parts after this one: their kinds are
 in the schema already, and the pool refuses them for now.

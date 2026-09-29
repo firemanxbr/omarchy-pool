@@ -115,7 +115,12 @@ const SCRIPT = String.raw`
   // The worker this page is about: the address's last segment (the router serves the same shell for every id).
   var ID = decodeURIComponent(location.pathname.replace(/^\/worker\//, ""));
   var BASE = "/api/v1/factory/workers/" + encodeURIComponent(ID);
-  var W = null, ORDERS = [], RULES = null, BREAKER = null, CAN = null, SAID = {}, TIMER = null;
+  var W = null, ORDERS = [], RULES = null, BREAKER = null, SITE_WORD = null, CAN = null, SAID = {}, TIMER = null;
+  // "Only if its agent is down", as the viewer left it: the page's refresh redraws the buttons every 10 or 30 s, and must not untick it.
+  // While a dialog asks, the buttons are not redrawn at all: what the dialog says is what is posted.
+  var UNLESS = false, ASKING = false;
+  // The pool's own orders name it pool:project or pool:community (no login can): the page says "the pool".
+  function byPool(by) { return /^pool:/.test(String(by || "")); }
   // The kinds as the page and its dialogs name them.
   var LABEL = { "recheck-agent": "Re-check agent", restart: "Restart", "restart-agent": "Restart agent service", drain: "Drain", resume: "Resume", update: "Update", "stop-task": "Stop its task" };
   var RIGHT = { "recheck-agent": "recheck", restart: "restart", "restart-agent": "restart_agent" };
@@ -128,7 +133,7 @@ const SCRIPT = String.raw`
   function load() {
     api("GET", BASE).then(function (d) {
       if (d.__status === 404) { $("#wk-name").textContent = ID; $("#wk-lede").textContent = "no such worker: it was never registered, or its registration is gone"; endSkeleton(); return; }
-      W = d.worker; ORDERS = d.orders || []; RULES = d.rules; BREAKER = d.breaker;
+      W = d.worker; ORDERS = d.orders || []; RULES = d.rules; BREAKER = d.breaker; SITE_WORD = d.site_word || null;
       draw(); schedule();
     }).catch(function (e) { noAnswer("worker", e, "#wk-lede"); schedule(); });
     loadCan();
@@ -175,45 +180,52 @@ const SCRIPT = String.raw`
     else if (!w.alive) L.push(["warn", "Offline: not seen in " + WORKER_ALIVE_MINUTES + " minutes. An order waits up to " + (RULES ? Math.round(RULES.ttl_person_min / 60) : 6) + " h for it."]);
     if (w.drained) L.push(["warn", "Drained by " + (w.drained.by || "?") + " " + ago(w.drained.at) + (w.drained.reason ? ": " + w.drained.reason : "") + " — handed nothing until it is resumed."]);
     if (w.alive && w.agent_status === "error") L.push(["fail", "Not ready" + (w.not_ready_since ? " since " + ago(w.not_ready_since).replace(" ago", "") + " ago" : "") + ": " + wtNotReady(w) + "."]);
-    if (BREAKER) L.push(["warn", "Provider outage suspected since " + ago(BREAKER.since) + " (up to " + BREAKER.peak + " " + BREAKER.provider + " sites with an open agent error at once): the pool restarts none of this provider's workers until fewer than 2 sites have had one for 15 min."]);
+    if (BREAKER) L.push(["warn", "Provider outage suspected since " + ago(BREAKER.since) + " (up to " + BREAKER.peak + " " + BREAKER.provider + " sites " + (BREAKER.scope === "project" ? "of the project's own " : "") + "with an open agent error at once): the pool restarts none of this provider's " + (BREAKER.scope === "project" ? "project workers" : "contributors' workers") + " until fewer than 2 sites have had one for 15 min."]);
+    if (SITE_WORD) L.push(["info", SITE_WORD.charAt(0).toUpperCase() + SITE_WORD.slice(1) + "."]);
     if (w.pool_waits) L.push(["info", w.pool_waits.charAt(0).toUpperCase() + w.pool_waits.slice(1) + "."]);
     if (w.pool_gave_up) L.push(["warn", "The pool gave up " + ago(w.pool_gave_up) + " after its restarts in this spell: a person looks — its log below has why."]);
     if (w.two_processes_since) L.push(["warn", "Two processes share this token since " + ago(w.two_processes_since) + " — orders are held; revoke it if you did not start two."]);
     if (w.crash_loop_since) L.push(["warn", "A new process every few minutes since " + ago(w.crash_loop_since) + " (none finished a task, none explained) — it may be crash-looping; its log has why."]);
     if (w.watchdog && w.watchdog.n) L.push(["warn", "Restarted by its watchdog " + w.watchdog.n + " time" + (w.watchdog.n === 1 ? "" : "s") + " since " + ago(w.watchdog.since) + (w.watchdog.stuck_in ? " (stuck in " + (w.watchdog.stuck_in === "task" ? "a task" : "its " + w.watchdog.stuck_in) + ")" : "") + " — its log has why."]);
-    (w.open_orders || []).forEach(function (o) { L.push(["info", LABEL[o.kind] + " " + (o.state === "delivered" ? "on its way: the worker has it" : "waiting for its next claim") + " — ordered by " + (o.by === "pool" ? "the pool" : o.by) + " " + ago(o.at) + "."]); });
+    (w.open_orders || []).forEach(function (o) { L.push(["info", LABEL[o.kind] + " " + (o.state === "delivered" ? "on its way: the worker has it" : "waiting for its next claim") + " — ordered by " + (byPool(o.by) ? "the pool" : o.by) + " " + ago(o.at) + "."]); });
     if (w.takes_orders === null && !w.revoked_at) L.push(["info", "Its image (" + (w.version || "unknown") + ") takes no orders: its host's updater replaces it with one that does."]);
     $("#wk-lines").innerHTML = L.map(function (x) { return '<li class="' + x[0] + '">' + esc(x[1]) + '</li>'; }).join("");
   }
   // The three buttons, drawn for everyone, each grey with the door's own reason where this viewer may not press it (the shell's gate()).
   function drawOperate() {
     if (RULES) $("#wk-rules").textContent = RULES.on ? "The pool re-checks a worker whose own re-check has stalled, then restarts it only if its agent still does not answer — at most " + RULES.max_pool_restarts_per_spell + " times a spell, " + RULES.max_pool_restarts_per_day + " a day, never a process under " + Math.round(RULES.min_uptime_s / 60) + " min old." : "The pool's own orders are off (WORKER_RULES); people's still work.";
-    if (!CAN) return;
+    if (!CAN || ASKING) return;
     var html = [
       gate('<button type="button" class="op-btn" data-order="recheck-agent">' + lucide("activity", 14) + 'Re-check agent</button>', CAN.can.recheck, CAN.why.recheck),
       gate('<button type="button" class="op-btn danger" data-order="restart">' + lucide("refresh-cw", 14) + 'Restart</button>', CAN.can.restart, CAN.why.restart),
-      gate('<label><input type="checkbox" id="wk-unless"> only if its agent is down</label>', CAN.can.restart, CAN.why.restart),
+      gate('<label><input type="checkbox" id="wk-unless"' + (UNLESS ? " checked" : "") + '> only if its agent is down</label>', CAN.can.restart, CAN.why.restart),
       gate('<button type="button" class="op-btn danger" data-order="restart-agent">' + lucide("plug", 14) + 'Restart agent service</button>', CAN.can.restart_agent, CAN.why.restart_agent)
     ];
     $("#wk-ops").innerHTML = html.join("");
     $("#wk-note").textContent = CAN.note || "";
   }
   // The dialog's words: what happens, whom it touches — the other workers of its host that call the same agent service, by name (the site's own read), never a number typed.
+  // "Only if its agent is down" is read once, when the button is pressed: the dialog says it, and the order carries it.
   function askOrder(kind) {
     var name = W ? W.id : ID, shared = (CAN && CAN.shared_agent_with) || [];
+    var unless = kind === "restart" && UNLESS;
     var text = kind === "recheck-agent" ? "It asks its agent now instead of at its next scheduled check. The answer is on its row with its next claim."
-      : kind === "restart" ? "It finishes the task in hand, then exits; its restart policy starts it again, and the pool checks that it came back." + ($("#wk-unless") && $("#wk-unless").checked ? " Only if its agent is down: it probes first, and stays up if the agent answers." : "")
+      : kind === "restart" ? "It finishes the task in hand, then exits; its restart policy starts it again, and the pool checks that it came back." + (unless ? " Only if its agent is down: it probes first, and stays up if the agent answers." : "")
       : "It restarts the agent service it calls on its own host, waits for it to answer, and says how it went." + (shared.length ? " " + shared.join(", ") + (shared.length === 1 ? " also calls it" : " also call it") + "; a completion in flight fails and is retried." : "");
+    ASKING = true;
+    var done = function () { ASKING = false; drawOperate(); };
     return ask({ title: LABEL[kind] + " " + name + "?", text: esc(text), input: "optional", placeholder: "why — it goes on the journal (optional)", confirm: LABEL[kind], danger: kind !== "recheck-agent" }).then(function (reason) {
+      done();
       if (reason === null) return;
       var body = { kind: kind }; if (reason) body.reason = reason;
-      if (kind === "restart" && $("#wk-unless") && $("#wk-unless").checked) body.unless_agent_ok = true;
+      if (unless) body.unless_agent_ok = true;
       return api("POST", BASE + "/orders", body).then(function (d) {
         if (d.error) { toast(esc(d.error), "error"); return; }
         toast(esc(LABEL[kind] + " ordered — " + d.note)); load();
       });
-    }).catch(function (e) { toast("the order did not go: " + esc(errorText(e)), "error"); });
+    }, function (e) { done(); throw e; }).catch(function (e) { toast("the order did not go: " + esc(errorText(e)), "error"); });
   }
+  document.addEventListener("change", function (ev) { if (ev.target && ev.target.id === "wk-unless") UNLESS = !!ev.target.checked; });
   document.addEventListener("click", function (ev) {
     var b = ev.target.closest ? ev.target.closest("button[data-order]") : null;
     if (b && !b.disabled) { askOrder(b.getAttribute("data-order")); return; }
@@ -227,7 +239,7 @@ const SCRIPT = String.raw`
   function drawOrders() {
     var rows = ORDERS.map(function (o) {
       var p = STATE_PILL[o.state] || ["na", o.state], said = SAID[o.id];
-      var by = o.issued_by === "pool" ? '<span title="' + esc("the pool's rule: " + (o.rule || "?")) + '">the pool</span>' : personLink(o.issued_by);
+      var by = byPool(o.issued_by) ? '<span title="' + esc("the pool's rule: " + (o.rule || "?")) + '">the pool</span>' : personLink(o.issued_by);
       var state = '<span class="op-pill ' + p[0] + '">' + esc(o.state === "delivered" && o.accepted_at ? "on its way" : p[1]) + '</span>';
       var answer = (o.detail ? esc(o.detail) : '<span class="muted">—</span>') + (said ? '<details class="wk-said"><summary>what the worker said</summary><pre></pre></details>' : '');
       var cancel = o.state === "pending" ? gate('<button type="button" class="op-chip" data-cancel="' + esc(o.id) + '">Cancel</button>', CAN ? CAN.can.cancel : false, CAN ? CAN.why.cancel || "" : "sign in with GitHub") : "";
@@ -288,15 +300,17 @@ export const WORKER_COMPONENTS = (F: Fixture): Component[] => [
     id: "worker.lines",
     page: `/worker/${F.worker}`,
     anchor: ['<ul class="wk-lines" id="wk-lines" aria-label="What the pool sees and does"></ul>'],
-    script: ["function drawLines()", "w.not_ready_since", "w.pool_waits", "w.pool_gave_up", "w.two_processes_since", "w.crash_loop_since", "w.watchdog.n", '"Provider outage suspected since "', "w.takes_orders === null"],
-    reads: [{ path: `/api/v1/factory/workers/${F.worker}`, fields: ["worker.not_ready_since", "worker.pool_waits", "worker.pool_gave_up", "worker.two_processes_since", "worker.crash_loop_since", "worker.watchdog", "worker.drained", "breaker"] }],
+    script: ["function drawLines()", "w.not_ready_since", "w.pool_waits", "w.pool_gave_up", "w.two_processes_since", "w.crash_loop_since", "w.watchdog.n", '"Provider outage suspected since "', "BREAKER.scope", "if (SITE_WORD)", "w.takes_orders === null", "byPool(o.by)"],
+    reads: [{ path: `/api/v1/factory/workers/${F.worker}`, fields: ["worker.not_ready_since", "worker.pool_waits", "worker.pool_gave_up", "worker.two_processes_since", "worker.crash_loop_since", "worker.watchdog", "worker.drained", "breaker", "site_word"] }],
     visible: EVERYONE,
   },
   {
     id: "worker.operate",
     page: `/worker/${F.communityWorker}`,
     anchor: ['id="wk-operate"', "<b id=\"wk-operate-h\">Operate</b>", 'data-order="recheck-agent"', 'data-order="restart"', 'data-order="restart-agent"', 'id="wk-unless"', 'href="/docs/workers#orders"'],
-    script: ['api("GET", BASE + "/can")', "CAN.can.recheck", "CAN.can.restart", "CAN.can.restart_agent", "gate('<button", "function askOrder(kind)", 'api("POST", BASE + "/orders", body)', "body.unless_agent_ok = true", "CAN.shared_agent_with"],
+    script: ['api("GET", BASE + "/can")', "CAN.can.recheck", "CAN.can.restart", "CAN.can.restart_agent", "gate('<button", "function askOrder(kind)", 'api("POST", BASE + "/orders", body)', "body.unless_agent_ok = true", "CAN.shared_agent_with",
+      // The checkbox survives the page's refresh, and a dialog that asks is never redrawn under the person: what it says is what is posted.
+      "var UNLESS = false, ASKING = false", "(UNLESS ? \" checked\" : \"\")", "if (!CAN || ASKING) return;", 'var unless = kind === "restart" && UNLESS;', "if (unless) body.unless_agent_ok = true;"],
     reads: [
       { path: `/api/v1/factory/workers/${F.communityWorker}/can`, fields: ["can.recheck", "can.restart", "can.restart_agent", "can.cancel", "why", "details", "shared_agent_with", "note"] },
       { path: `/api/v1/factory/workers/${F.communityWorker}/can`, as: "owner", fields: ["can.recheck", "details"] },

@@ -13,8 +13,8 @@ import { updateMessage, updateState } from "../update";
 import { version as running, RINGS, ringsSql, sortRings, REPO_ARCHES, WORKER_ALIVE_MINUTES, type RunningVersion } from "../meta";
 import { parseTargets, settleTargets } from "../targets";
 import {
-  autoOf, breakerHolds, claimFacts, decideAuto, errorClass, instanceStep, issueOrder, NOTHING_CLASSES, openOrdersOf, outOf, rulesOn, rulesScale, siteWord, takeOrders,
-  capRefusal, type AfterClaim, type ClaimFacts, type InstanceStep, type OrderOut, type OrdersRow,
+  autoOf, breakerHolds, claimFacts, decideAuto, errorClass, instanceStep, issueOrder, NOTHING_CLASSES, openOrdersOf, outOf, poolFor, readSite, rulesOn, rulesScale, siblingsAnswering, siteVerdict, takeOrders,
+  capRefusal, type AfterClaim, type AutoState, type ClaimFacts, type Decision, type InstanceStep, type OrderOut, type OrdersRow,
 } from "../orders";
 
 /**
@@ -294,7 +294,7 @@ function workerLog(v: unknown): string {
  */
 export const TOUCH_MINUTES = 3;
 
-export async function touchWorker(env: Env, w: { worker: string; arch: string; hostname?: string; labels?: unknown; version?: string; mode?: string; agent?: string | null; kinds?: string[]; probe?: AgentReport; usage?: Usage | null; log?: string; agentVia?: string | null; at?: string }, currentTask: number | null, step?: Pick<InstanceStep, "set" | "guard"> | null): Promise<D1Meta> {
+export async function touchWorker(env: Env, w: { worker: string; arch: string; hostname?: string; labels?: unknown; version?: string; mode?: string; agent?: string | null; kinds?: string[]; probe?: AgentReport; usage?: Usage | null; log?: string; agentVia?: string | null; at?: string; spell?: { from: string | null; to: string | null } | null }, currentTask: number | null, step?: Pick<InstanceStep, "set" | "guard"> | null): Promise<D1Meta> {
   // The agent is what the worker says it runs ("<provider>/<model>"): a
   // worker that reports none ("" or null) clears it, one that says nothing
   // (an older client) keeps what it last reported. The probe's answer
@@ -306,8 +306,14 @@ export async function touchWorker(env: Env, w: { worker: string; arch: string; h
   // with the first failed probe and ends only with an answer; the probe's
   // age is measured from the claim that brought it, never from the worker's
   // own stamp, which is compared only for equality. The error's class rides
-  // the same write, and moves only with the error.
+  // the same write, and moves only with the error. The spell's start is
+  // assigned only in the write that begins or ends it (the caller says
+  // which, from the row it read; compare-and-set on the value it read): it
+  // keys the breaker's index, and a column an UPDATE assigns costs that
+  // index a row at every liveness write, even when its value stays.
   const cls = w.probe?.status === "error" ? errorClass(w.probe.error, w.agentVia ?? null) : null;
+  const spellSql = w.spell ? ", agent_error_since = CASE WHEN agent_error_since IS ? THEN ? ELSE agent_error_since END" : "";
+  const spellBinds = w.spell ? [w.spell.from, w.spell.to] : [];
   // What a new process declares, or two on one token (orders.ts instanceStep): only while the row still names the process the step read.
   const extra = step ? Object.entries(step.set) : [];
   const extraSql = extra.map(([col]) => `, ${col} = CASE WHEN instance IS ? THEN ? ELSE ${col} END`).join("");
@@ -323,9 +329,8 @@ export async function touchWorker(env: Env, w: { worker: string; arch: string; h
        agent_status = CASE WHEN ? THEN excluded.agent_status ELSE agent_status END, agent_error = CASE WHEN ? THEN excluded.agent_error ELSE agent_error END,
        agent_checked_at = CASE WHEN ? THEN excluded.agent_checked_at ELSE agent_checked_at END,
        usage = COALESCE(excluded.usage, usage), usage_at = CASE WHEN excluded.usage IS NULL THEN usage_at ELSE excluded.usage_at END,
-       agent_error_since = CASE WHEN ? THEN (CASE WHEN excluded.agent_status = 'error' THEN COALESCE(agent_error_since, excluded.last_seen) WHEN excluded.agent_status = 'ok' THEN NULL ELSE agent_error_since END) ELSE agent_error_since END,
        agent_error_class = CASE WHEN ? THEN ? ELSE agent_error_class END,
-       agent_probed_at = CASE WHEN ? AND agent_checked_at IS NOT excluded.agent_checked_at THEN excluded.last_seen ELSE agent_probed_at END${extraSql}
+       agent_probed_at = CASE WHEN ? AND agent_checked_at IS NOT excluded.agent_checked_at THEN excluded.last_seen ELSE agent_probed_at END${spellSql}${extraSql}
      WHERE current_task IS NOT excluded.current_task
        OR ?
        OR excluded.log_tail IS NOT NULL
@@ -344,8 +349,8 @@ export async function touchWorker(env: Env, w: { worker: string; arch: string; h
       w.kinds ? JSON.stringify(w.kinds) : null, w.probe?.status ?? null, w.probe?.error ?? null, w.probe?.checked_at ?? null,
       w.usage ? JSON.stringify(w.usage) : null, w.usage ? w.at ?? now() : null, w.log || null, w.log ? w.at ?? now() : null,
       w.mode ?? null, agent === undefined ? 0 : 1, w.probe === undefined ? 0 : 1, w.probe === undefined ? 0 : 1, w.probe === undefined ? 0 : 1,
-      w.probe === undefined ? 0 : 1, w.probe === undefined ? 0 : 1, cls, w.probe === undefined ? 0 : 1, ...extraBinds,
-      extra.length ? 1 : 0, agent === undefined ? 0 : 1, w.probe === undefined ? 0 : 1, w.mode ?? null, w.mode ?? null,
+      w.probe === undefined ? 0 : 1, cls, w.probe === undefined ? 0 : 1, ...spellBinds, ...extraBinds,
+      extra.length || w.spell ? 1 : 0, agent === undefined ? 0 : 1, w.probe === undefined ? 0 : 1, w.mode ?? null, w.mode ?? null,
     )
     .run();
   return res.meta;
@@ -417,12 +422,18 @@ async function ordersSafely(f: () => Promise<OrderOut[]>): Promise<OrderOut[]> {
   }
 }
 
+/** A not-ready spell after a claim's probe: it begins with the first failed probe (the claim's time, the pool's clock), goes on while the probe fails or is not taken yet, and ends with an answer. */
+function spellAfter(since: string | null, probe: AgentReport | undefined, at: string): string | null {
+  if (!probe) return since;
+  return probe.status === "error" ? since ?? at : probe.status === "ok" ? null : since;
+}
+
 /** The claim as the orders path reads it: the row with this claim's words on it — the probe, the process — as the write will leave it. */
 function afterClaim(row: OrdersRow, facts: ClaimFacts, step: InstanceStep | null, probe: AgentReport | undefined, at: string): AfterClaim & { error: string | null; spell: string | null } {
   const merged = { ...row, ...(step?.set ?? {}) } as OrdersRow;
   const status = probe ? probe.status : row.agent_status;
-  // The spell as touchWorker writes it, to the millisecond: it begins with the first failed probe (this claim's time), and ends only with an answer.
-  const spell = probe ? (probe.status === "error" ? row.agent_error_since ?? at : probe.status === "ok" ? null : row.agent_error_since) : row.agent_error_since;
+  // The spell as touchWorker writes it, to the millisecond (spellAfter): it begins with the first failed probe (this claim's time), and ends only with an answer.
+  const spell = spellAfter(row.agent_error_since, probe, at);
   return {
     row: merged,
     claim: facts,
@@ -440,44 +451,69 @@ function afterClaim(row: OrdersRow, facts: ClaimFacts, step: InstanceStep | null
  * The pool's rules at a claim that has nothing waiting (orders.ts
  * decideAuto): at most one order, delivered in this same answer. Only
  * when it proposes a restart-type order does the claim read more — the
- * provider's breaker, then the site's workers and its pacing — and a hold
- * issues and counts nothing. The rules' state is written with the order,
- * by compare-and-set: a claim that lost the race issues nothing, and the
- * next one decides again.
+ * provider's breaker in the worker's scope, then the site's workers and
+ * its pacing — and a hold issues and counts nothing. The site may turn a
+ * restart of the shared agent service into a restart of this worker's own
+ * process (the service answers for another of its workers), or end the
+ * spell's restarts for this worker too (the elected one gave up). The
+ * rules' state is written with the order, by compare-and-set: a claim that
+ * lost the race issues nothing, and the next one decides again.
  */
 async function autoOrder(env: Env, x: AfterClaim & { error: string | null; spell: string | null }, o: { agent: string | null; needsAgent: boolean; at: string }): Promise<OrderOut | null> {
   const now = Date.parse(o.at);
   const { scale } = rulesScale(env);
-  const d = decideAuto({ row: x.row, claim: x.claim, status: x.status, error: x.error, spell: x.spell, instanceSince: x.instanceSince, conflict: x.conflict, needsAgent: o.needsAgent }, now, scale);
+  const input = { row: x.row, claim: x.claim, status: x.status, error: x.error, spell: x.spell, instanceSince: x.instanceSince, conflict: x.conflict, needsAgent: o.needsAgent };
+  let d: Decision = decideAuto(input, now, scale);
   if (d.kind === null) return null;
   const w = x.row;
   if (d.kind === "give-up") {
-    const next = JSON.stringify(d.next);
-    await env.DB.batch([
-      env.DB.prepare("UPDATE build_workers SET auto_orders = ? WHERE id = ? AND auto_orders IS ?").bind(next, w.id, w.auto_orders),
-      env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) SELECT 'order', NULL, 'factory', 'warn', ?, ? WHERE (SELECT auto_orders FROM build_workers WHERE id = ?) IS ?")
-        .bind(d.summary, JSON.stringify({ worker: w.id, owner: w.owner, gave_up: d.next.gave_up, spell_since: x.spell }), w.id, next),
-    ]);
+    await giveUp(env, w, x.spell, d.next, d.summary);
     return null;
   }
   let reason = d.reason;
   if (d.kind !== "recheck-agent") {
-    if (await breakerHolds(env, { id: w.id, site: w.site, agent: o.agent, cls: d.cls }, now)) return null;
-    const site = await siteWord(env, { id: w.id, site: w.site }, d.kind, now, scale);
-    if (!site.ok) return null;
-    if (d.kind === "restart-agent" && site.others.length) reason += ` — shared by ${site.others.length + 1} workers (with ${site.others.join(", ")}), restarted once, through this one`;
+    if (await breakerHolds(env, { id: w.id, site: w.site, agent: o.agent, cls: d.cls, trust: w.trust }, now)) return null;
+    if (w.site) {
+      const site = await readSite(env, w.site, now);
+      // The agent service this worker shares answers for another of its workers: this worker's own process is what fails.
+      if (d.kind === "restart-agent" && siblingsAnswering(w, site.live).length) {
+        d = decideAuto({ ...input, siblingAnswers: true }, now, scale);
+        if (d.kind !== "restart") return null;
+        reason = d.reason;
+      }
+      const v = siteVerdict(w, d.kind, site, now, scale);
+      if (!v.ok) {
+        if (v.giveUp) {
+          const auto: AutoState = autoOf(w.auto_orders, x.spell, now);
+          await giveUp(env, w, x.spell, { ...auto, gave_up: new Date(now).toISOString() }, `${w.id}: the pool stops restarting it — ${v.why}; a person looks: /worker/${w.id}`);
+        }
+        return null;
+      }
+      if (d.kind === "restart-agent" && v.others.length) reason += ` — shared by ${v.others.length + 1} workers (with ${v.others.join(", ")}), restarted once, through this one`;
+    }
   }
+  const by = poolFor(w.trust);
   const issued = await issueOrder(env, {
-    worker: w.id, owner: w.owner, kind: d.kind, reason: reason.slice(0, 300), by: "pool", via: null, rule: d.rule, unless: d.unless, site: w.site,
+    worker: w.id, owner: w.owner, kind: d.kind, reason: reason.slice(0, 300), by, via: null, rule: d.rule, unless: d.unless, site: w.site,
     baselineAtIssue: x.checkedAt, auto: { old: w.auto_orders, next: JSON.stringify(d.next) },
     deliverTo: { instance: x.instance!, baseline: d.kind === "restart" ? x.instance : x.checkedAt }, now,
     line: { status: d.kind === "recheck-agent" ? "ok" : "warn", summary: `${w.id}: ${d.kind} ordered by the pool — ${reason.slice(0, 300)}` },
   });
   if (!issued.ok) {
-    if (issued.why === "cap") await capRefusal(env, { worker: w.id, kind: d.kind, by: "pool", now });
+    if (issued.why === "cap") await capRefusal(env, { worker: w.id, kind: d.kind, by, now });
     return null;
   }
-  return outOf({ id: issued.id, kind: d.kind, reason: reason.slice(0, 300), issued_by: "pool", issued_at: issued.issued_at, expires_at: issued.expires_at, unless_agent_ok: d.unless });
+  return outOf({ id: issued.id, kind: d.kind, reason: reason.slice(0, 300), issued_by: by, issued_at: issued.issued_at, expires_at: issued.expires_at, unless_agent_ok: d.unless });
+}
+
+/** The rules stop restarting a worker in this spell: its state says so (compare-and-set), and the journal once, by the write that said it. */
+async function giveUp(env: Env, w: OrdersRow, spell: string | null, next: AutoState, summary: string): Promise<void> {
+  const value = JSON.stringify(next);
+  await env.DB.batch([
+    env.DB.prepare("UPDATE build_workers SET auto_orders = ? WHERE id = ? AND auto_orders IS ?").bind(value, w.id, w.auto_orders),
+    env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) SELECT 'order', NULL, 'factory', 'warn', ?, ? WHERE (SELECT auto_orders FROM build_workers WHERE id = ?) IS ?")
+      .bind(summary, JSON.stringify({ worker: w.id, owner: w.owner, gave_up: next.gave_up, spell_since: spell }), w.id, value),
+  ]);
 }
 
 export async function handleClaim(request: Request, env: Env, actor: Actor): Promise<Response> {
@@ -526,7 +562,10 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
     console.error("orders:", e);
   }
   const agent = b.agent === undefined ? undefined : typeof b.agent === "string" ? b.agent : null;
-  const said = { worker: workerId, arch: b.arch, hostname: b.hostname, labels: b.labels, version: b.version, mode: trust === "community" ? (shared ? "shared" : "dedicated") : undefined, agent, kinds, probe, usage, log, agentVia: facts?.agent_via ?? row?.agent_via ?? null, at };
+  // The spell's start, written only by the claim that begins or ends it.
+  const spellFrom = row?.agent_error_since ?? null;
+  const spellTo = row ? spellAfter(spellFrom, probe, at) : spellFrom;
+  const said = { worker: workerId, arch: b.arch, hostname: b.hostname, labels: b.labels, version: b.version, mode: trust === "community" ? (shared ? "shared" : "dedicated") : undefined, agent, kinds, probe, usage, log, agentVia: facts?.agent_via ?? row?.agent_via ?? null, at, spell: spellTo !== spellFrom ? { from: spellFrom, to: spellTo } : null };
   const touch = (task: number | null) => touchSaying(env, said, task, step);
   const after = row && facts ? afterClaim(row, facts, step, probe, at) : null;
   // Every worker follows the latest image (update.ts): one behind past the
