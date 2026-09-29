@@ -149,7 +149,7 @@ describe("the package page, drawn for every viewer", () => {
     expect(p.nodes["#you-who"].textContent).toBe("@alice · requester");
     expect(you).toContain("You requested this package.");
     // mine is approved: its next version is a bump, so the renewal is grey with the reason.
-    expect(you).toContain('<a data-href="/request?renew=mine" class="disabled op-btn primary" tabindex="-1" aria-disabled="true" title="approved: a new upstream release is built as a bump, by itself">Request an update</a>');
+    expect(you).toContain('<a data-href="/factory?renew=mine#request" class="disabled op-btn primary" tabindex="-1" aria-disabled="true" title="approved: a new upstream release is built as a bump, by itself">Request an update</a>');
     expect(you).toContain(`<a href="/user/alice" class="op-btn">Your requests</a>`);
     expect(you).toContain("You can't review your own request.");
     expect(you).not.toContain('data-act="adopt"');
@@ -168,7 +168,7 @@ describe("the package page, drawn for every viewer", () => {
   it("gives the contributor who requested a blocked package the renewal grey, the block its reason: the server refuses it first", async () => {
     const p = await view(`/package/${F.blockedPkg}`, "carol");
     expect(p.nodes["#you-who"].textContent).toBe("@carol · requester");
-    expect(p.nodes["#you"].innerHTML).toContain(`<a data-href="/request?renew=${F.blockedPkg}" class="disabled op-btn primary" tabindex="-1" aria-disabled="true" title="blocked: another maintainer lifts the block first">Request an update</a>`);
+    expect(p.nodes["#you"].innerHTML).toContain(`<a data-href="/factory?renew=${F.blockedPkg}#request" class="disabled op-btn primary" tabindex="-1" aria-disabled="true" title="blocked: another maintainer lifts the block first">Request an update</a>`);
   });
 
   it("draws a name no ring serves and nobody requested as not in the pool — never as a mirror the pool verified", async () => {
@@ -180,8 +180,8 @@ describe("the package page, drawn for every viewer", () => {
     for (const claim of ["verified here", "mirrored", 'class="pkg-stage ok']) expect(stages).not.toContain(claim);
     expect(p.nodes["#who"].innerHTML).not.toContain("mirrored by");
     expect(p.nodes["#seal"].innerHTML).not.toContain("Mirrored as-is");
-    expect(p.nodes["#install-b"].innerHTML).toContain('href="/factory?name=zzfoo"');
-    expect(p.nodes["#you"].innerHTML).toContain('<a href="/factory?name=zzfoo" class="op-btn primary">Request zzfoo</a>');
+    expect(p.nodes["#install-b"].innerHTML).toContain('href="/factory?name=zzfoo#request"');
+    expect(p.nodes["#you"].innerHTML).toContain('<a href="/factory?name=zzfoo#request" class="op-btn primary">Request zzfoo</a>');
   });
 
   it("opens an address that names no architecture on the one that serves the package, and says the rest where it does not", async () => {

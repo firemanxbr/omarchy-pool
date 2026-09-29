@@ -409,7 +409,7 @@ const PACKAGE_SCRIPT = String.raw`
   function otherArch() {
     var there = elsewhere();
     if (there) return (ST ? ' — not served on ' + esc(arch) + '. ' : ' ') + there;
-    return ST ? "" : ' <a href="/factory?name=' + encodeURIComponent(name) + '">Request ' + esc(name) + ' →</a>';
+    return ST ? "" : ' <a href="/factory?name=' + encodeURIComponent(name) + '#request">Request ' + esc(name) + ' →</a>';
   }
 
   // ---- the five tiles, each a link to its section.
@@ -544,7 +544,7 @@ const PACKAGE_SCRIPT = String.raw`
   }
   // A name no ring serves and nobody requested: what the factory would do with it, and the way to ask.
   function nonePanel(id) {
-    var askFor = '<a href="/factory?name=' + encodeURIComponent(name) + '">Request ' + esc(name) + ' →</a>';
+    var askFor = '<a href="/factory?name=' + encodeURIComponent(name) + '#request">Request ' + esc(name) + ' →</a>';
     if (id === "source") return panel({ title: "Not in the pool", tag: "free name", tone: "wait", note: "No ring serves " + esc(name) + " and nobody requested it. " + askFor });
     if (id === "build") return panel({ title: "Build", tag: "nothing built", tone: "na", note: "Nothing is built before a request: the factory builds a package from its contributor's recipe, then the project builds it again. <a href=\"/docs/how-it-works\">How a package gets in ›</a>" });
     return panel({ title: "Review", tag: "nothing to review", tone: "na", note: "A maintainer who did not request it reviews a package once it is built." });
@@ -864,7 +864,7 @@ const PACKAGE_SCRIPT = String.raw`
     // Why there is nothing to install, in the words of where the package stands.
     var why = b ? "Blocked. Not installable from any ring."
       : D && PROMISED_RINGS.indexOf(D.shown_ring) < 0 ? "In the lab only: tried, not promised. Installable after approval."
-      : state === "none" ? 'Not in the pool: nothing to install. <a href="/factory?name=' + encodeURIComponent(name) + '">Request ' + esc(name) + ' →</a>'
+      : state === "none" ? 'Not in the pool: nothing to install. <a href="/factory?name=' + encodeURIComponent(name) + '#request">Request ' + esc(name) + ' →</a>'
       : state === "rejected" ? "Rejected: not installable. Its requester can send it again."
       : !D && servedAnywhere() ? "Not served on " + esc(arch) + (t && t.status === "not_supported" ? ": it did not build there" : "") + ". " + elsewhere()
       : publishing() ? "Approved: installable once its publish job lands it in edge."
@@ -982,7 +982,7 @@ const PACKAGE_SCRIPT = String.raw`
     var me = WHO.me, login = WHO.login, fac = isFactory(), b = blockedBy(), st = stateOf(), pk = (ST && ST.package) || {}, mt = maintainerOf();
     var icon = "eye", who = "not signed in", text = "", btns = [], lock = "";
     var blockBtn = gate(btn("Block", 'data-act="block"', "danger"), fac && !b, !fac ? "a synced package is served as its source publishes it; the brake blocks what the factory built" : "blocked already");
-    var request = btn("Request " + name, 'href="/factory?name=' + encodeURIComponent(name) + '"', "primary");
+    var request = btn("Request " + name, 'href="/factory?name=' + encodeURIComponent(name) + '#request"', "primary");
     // text is HTML: every login in it is atLink's, everything else escaped here.
     if (!me) { text = st === "none" ? "Nobody requested " + esc(name) + " yet. Sign in to request it." : "Everything on this page is public. Sign in to request changes or review."; if (st === "none") btns.push(request); btns.push(btn("Sign in with GitHub", 'href="' + esc(signInHref()) + '" rel="nofollow"', st === "none" ? "" : "primary")); }
     else if (st === "none") { icon = "user"; who = "@" + login + (isMaintainer() ? " · maintainer" : " · contributor"); text = "No ring serves " + esc(name) + " and nobody requested it."; btns.push(request); }
@@ -991,7 +991,7 @@ const PACKAGE_SCRIPT = String.raw`
       var req = (ST && ST.request) || {}, why = b ? "blocked: another maintainer lifts the block first" : req.busy ? "a build of it is running (#" + req.busy + "); ask again when it ends" : ["approved", "published"].indexOf(pk.status) >= 0 ? "approved: a new upstream release is built as a bump, by itself" : "not while it is " + (pk.status || "in the factory");
       text = "You requested this package.";
       // A block is refused by the server before anything else (routes/contributors.ts): the renewal is grey while it holds, whatever the registration's status says.
-      btns.push(gate(btn("Request an update", 'href="/request?renew=' + encodeURIComponent(name) + '"', "primary"), !!req.renewable && !b, why));
+      btns.push(gate(btn("Request an update", 'href="/factory?renew=' + encodeURIComponent(name) + '#request"', "primary"), !!req.renewable && !b, why));
       btns.push(btn("Your requests", 'href="' + userHref(login) + '"'));
       if (isMaintainer()) btns.push(blockBtn);
       lock = "You can't review your own request.";
