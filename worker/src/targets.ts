@@ -87,15 +87,21 @@ export interface PackageRows { arches: string[]; closedThrough: number; builds: 
 /**
  * What the rule reads of a package, bounded: the newest builds of each
  * architecture and every build an approval of it names; null for a name
- * with no registration. Every read leads with the name — a package's rows
- * are dozens, the table is every build ever — and says so to the planner:
- * with no statistics to go by (nothing runs ANALYZE), it chose the (kind,
- * status, id) index, every build of every package, over the name's own
- * until `+kind` took that term out of the index's reach.
+ * with no registration, unless the caller asks for its builds anyway
+ * (`unregistered`): the targets are kept for a registration only, but a
+ * decision on a build of a name nobody registered — a build queued before
+ * registrations, or written by hand — still has to see the project's build
+ * of it in flight, or a second press queues another. Such a name requested
+ * no architecture, so its rows say `arches: []`. Every read leads with the
+ * name — a package's rows are dozens, the table is every build ever — and
+ * says so to the planner: with no statistics to go by (nothing runs
+ * ANALYZE), it chose the (kind, status, id) index, every build of every
+ * package, over the name's own until `+kind` took that term out of the
+ * index's reach.
  */
-export async function packageRows(env: Env, name: string): Promise<PackageRows | null> {
+export async function packageRows(env: Env, name: string, opts: { unregistered?: boolean } = {}): Promise<PackageRows | null> {
   const pkg = await env.DB.prepare("SELECT arches, closed_through FROM factory_packages WHERE name = ?").bind(name).first<{ arches: string; closed_through: number | null }>();
-  if (!pkg) return null;
+  if (!pkg && !opts.unregistered) return null;
   // Each architecture's newest forty builds walk the (name, arch, id) index backwards; the decisions are the name's newest forty, by the (name, created_at) index.
   const cols = "id, arch, status, trust, publish, version, json_extract(params, '$.review') AS review";
   const [perArch, decisions] = await Promise.all([
@@ -110,8 +116,8 @@ export async function packageRows(env: Env, name: string): Promise<PackageRows |
     builds.push(...(await env.DB.prepare(`SELECT ${cols} FROM build_tasks WHERE id IN (SELECT value FROM json_each(?)) AND +kind = 'build'`).bind(JSON.stringify(named)).all<TargetBuild>()).results);
   }
   let arches: string[] = [];
-  try { arches = JSON.parse(pkg.arches) as string[]; } catch { arches = []; }
-  return { arches, closedThrough: pkg.closed_through ?? 0, builds, decisions: decisions.results };
+  try { arches = pkg ? (JSON.parse(pkg.arches) as string[]) : []; } catch { arches = []; }
+  return { arches, closedThrough: pkg?.closed_through ?? 0, builds, decisions: decisions.results };
 }
 
 /**
