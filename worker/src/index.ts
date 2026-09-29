@@ -70,7 +70,7 @@ import { maintainersOf, GOVERNANCE_FILE } from "./governance";
 import { BUDGET_CAP_USD, BUDGET_GUARD_USD, BUDGET_WARN_USD, readGuard } from "./cost";
 import { handleQueueJob } from "./jobs";
 import { isMaintainer } from "./routes/contributors";
-import { handleReviewList, handleApprove, handleReject, handleApprovals, handleProjectBuild, handleWithdraw, handleTaskCan } from "./routes/review";
+import { handleReviewList, handleApprove, handleReject, handleChanges, handleRelease, handleAdopt, handleApprovals, handleProjectBuild, handleWithdraw, handleTaskCan } from "./routes/review";
 import { handleBlockContributor, handleUnblockContributor, handleBlockPackage, handleUnblockPackage, handleBlocks } from "./routes/blocks";
 import { handleAuthStart, handleAuthCallback, handleLogout } from "./routes/auth";
 import { handleSignPool } from "./routes/pool";
@@ -338,6 +338,8 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
     if ((m = path.match(/^\/factory\/packages\/([a-z0-9@._+-]+)\/build$/)) && method === "POST") return handleBuildPackage(c, m[1], request, env);
     if ((m = path.match(/^\/factory\/packages\/([a-z0-9@._+-]+)$/)) && method === "DELETE") return handleDeletePackage(c, m[1], env);
     if ((m = path.match(/^\/factory\/packages\/([a-z0-9@._+-]+)\/category$/)) && method === "POST") return handleSetCategory(c, m[1], request, env);
+    // Review's No maintainer tab (#247): a maintainer takes a package its owner left unmaintained.
+    if ((m = path.match(/^\/factory\/packages\/([a-z0-9@._+-]+)\/adopt$/)) && method === "POST") return handleAdopt(c, m[1], request, env);
     if (method === "POST" && path === "/factory/workers") return handleRegisterWorker(c, request, env);
     if ((m = path.match(/^\/factory\/packages\/([A-Za-z0-9@._+-]+)\/builds\/(\d+)$/)) && method === "DELETE") return handleDequeueBuild(c, m[1], Number(m[2]), env);
     if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)$/)) && method === "DELETE") return handleRevokeWorker(c, m[1], env);
@@ -361,6 +363,12 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
     const c = await contributorOf(request, env);
     if (!c) return nobody();
     return m[2] === "approve" ? handleApprove(c, Number(m[1]), request, env) : m[2] === "build" ? handleProjectBuild(c, Number(m[1]), request, env) : handleReject(c, Number(m[1]), request, env);
+  }
+  // Review's workspace (#247): changes requested on a package in review, a claim let go — the same predicate, the same words.
+  if ((m = path.match(/^\/factory\/tasks\/(\d+)\/(changes|release)$/)) && method === "POST") {
+    const c = await contributorOf(request, env);
+    if (!c) return nobody();
+    return m[2] === "changes" ? handleChanges(c, Number(m[1]), request, env) : handleRelease(c, Number(m[1]), request, env);
   }
   // Workers: registered ones only (own token), or a job's token. There is
   // no shared worker secret: every worker is somebody's registration.

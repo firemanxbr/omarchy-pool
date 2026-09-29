@@ -1785,6 +1785,13 @@ export interface PageOptions {
    * not pays nothing for it: no request, no bytes.
    */
   kit?: boolean;
+  /**
+   * The page's own rules: its layout, and where it refines a primitive of
+   * the kit. They live in the page's module, not in the frame's CSS, and
+   * are served after the frame's CSS and the kit's sheet, so a rule here
+   * wins over theirs at equal weight. Tokens only, as the frame's.
+   */
+  css?: string;
 }
 
 /**
@@ -1980,7 +1987,7 @@ export function page(o: PageOptions): string {
 <script>${THEME_BOOT}</script>${analyticsTag(v)}
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Geist:wght@500;600;700&display=swap">
-<style>${CSS}</style>${o.kit ? `\n<link rel="stylesheet" href="${KIT_SHEET_PATH}">` : ""}
+<style>${CSS}</style>${o.kit ? `\n<link rel="stylesheet" href="${KIT_SHEET_PATH}">` : ""}${o.css ? `\n<style>${o.css}</style>` : ""}
 </head>
 <body>
 <div id="progress"></div>

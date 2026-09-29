@@ -68,13 +68,20 @@ verify and attest the package faster and approve it with more confidence.
    (`factory/bin/audit-pkgbuild`, `factory/prompts/audit.md`) and attaches
    `audit.json` / `audit.md` to the evidence. The Review page shows the
    verdict (`ok`, `warn`, `block`); nothing acts on it, the maintainer does.
-6. **A maintainer has the project build it — never their own package.** On
-   the Review page, a maintainer (`factory/MAINTAINERS.toml`) reads the
-   evidence and presses *Build by the project* (or rejects it with a note:
-   its builds in review stop, and a request rejected frees its name). One
-   review covers the package: it starts once every architecture requested
-   is built or *not supported*, and the project builds each built one
-   again. A review worker of each architecture takes its task (`review:<task>`): the project's
+6. **A maintainer claims it — never their own package.** On the Review
+   page, a maintainer (`factory/MAINTAINERS.toml`) claims a package that is
+   ready (*Build by the project* on a build's page is the same door): the
+   project builds it again on a review worker, with the agent the maintainer
+   chose — the worker the claim pins. The workspace puts the factory's build
+   beside the rebuild: the request as checked, both PKGBUILDs with the lines
+   that differ lit, both logs. A claim can be let go (*Release claim*) by the
+   maintainer who made it or another, while its rebuild is queued or running;
+   the rebuild stops and the package waits for a claim again. A maintainer may
+   also stop the round with a note: *Request changes* sends it back to the
+   factory and the name stays the requester's; *Reject* frees a request's
+   name. One review covers the package: it starts once every architecture
+   requested is built or *not supported*, and the project builds each built
+   one again. A review worker of each architecture takes its task (`review:<task>`): the project's
    agent gets the request and the contributor's PKGBUILD, log, gate and
    audit as the lesson — `draft-pkgbuild --evidence` — and writes the
    project's own recipe from the project's sources; the same gate runs;
@@ -89,8 +96,13 @@ verify and attest the package faster and approve it with more confidence.
    evidence (`trial.log`); the Review page shows *installs* or what stopped
    it. Nothing is published yet.
 7. **A maintainer approves the project's build.** With the project's
-   evidence in front of them (the Review page shows both rows), a
-   maintainer — not the owner — approves. The approval is one decision on
+   evidence in front of them (the workspace shows the factory's build and the
+   rebuild side by side), a maintainer — not the owner — approves, after a
+   confirmation. Every decision — approve, request changes, reject, a release,
+   a block and its lift, an adoption — is a record the pool signs
+   (`factory/<name>/<request>/decision-<time>-<word>.json`) and a journal line
+   with who, the door (`via`: the web or a token) and the agent that rebuilt
+   the package; none is undone by another decision. The approval is one decision on
    the record for the package — a review covering every architecture the
    project built again, one that never built named *not supported* — and a
    `publish` job per architecture: a project worker fetches the staged
@@ -111,7 +123,8 @@ verify and attest the package faster and approve it with more confidence.
    (`bump:<task>@<tag>`) — for the owner's worker first, for any `--shared`
    worker after 14 days — and a maintainer reviews it like the first time.
    30 days without a build and the package is *unmaintained* until someone
-   takes it (docs/GOVERNANCE.md). There is no second path: the project's own
+   takes it (docs/GOVERNANCE.md) — a maintainer, from Review's *No
+   maintainer* tab (*Adopt*: the registration and its bumps become theirs). There is no second path: the project's own
    recipes left the repository on 2026-09-17, and nothing in the factory's
    operation goes through GitHub Actions, issues or pull requests.
 9. **A worker builds it.** Any worker of that architecture claims the task,

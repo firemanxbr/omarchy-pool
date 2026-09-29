@@ -110,6 +110,11 @@ export async function contributorOf(request: Request, env: Env): Promise<Contrib
   return { login: row.login, name: row.name, avatar_url: row.avatar_url, role: row.role, blocked: row.blocked_at ? { at: row.blocked_at, reason: row.blocked_reason } : null };
 }
 
+/** The door a signed-in person came through, as contributorOf read them, for the record and the journal line of what they decide: the web (the dashboard's session cookie) or a token (`omc_…`, the command line's). */
+export function viaOf(request: Request): "web" | "token" {
+  return bearer(request) ? "token" : "web";
+}
+
 // ---------- what a person may do on a person's page ----------
 
 /** The two reasons every door shares, here and on a build's decisions (routes/review.ts): nobody signed in, or somebody who is not a maintainer. */

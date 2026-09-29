@@ -295,8 +295,9 @@ the audit — and the worker and host behind it). A maintainer — a login
 listed in `factory/MAINTAINERS.toml`, signed in with GitHub — never
 decides on their own package, and never on a contributor's bytes:
 
-- **Build by the project** queues a project build (`pkgbuild_ref =
-  review:<task>`, trust `project`): a review worker (`pkg-repo work`)
+- **Claim** (Review's queue; *Build by the project* on a build's page)
+  queues a project build (`pkgbuild_ref = review:<task>`, trust `project`),
+  pinned to the review worker whose agent you chose: a review worker (`pkg-repo work`)
   starts a fresh container that holds nothing, where the project's agent
   writes its own recipe with the request's facts and the contributor's
   evidence as the lesson, builds it through the same gate and stages it
@@ -307,8 +308,20 @@ decides on their own package, and never on a contributor's bytes:
   `publish` job that carries it into `edge` as source `factory` — and, when
   the trial passed, into rc and stable with it (the fast lane). The pool
   signs; from there the package follows the rings like any other.
-- **Reject** needs a note; the package returns to *registered* with the
-  note in its detail, the staged objects expire with the rest.
+- **Reject** needs a note; a request rejected frees its name (a package in
+  the pool keeps it: the new version is what was rejected), the staged
+  objects expire with the rest.
+- **Request changes** needs a note too: the builds in review stop, the
+  package returns to *registered* with the note in its detail, and the name
+  stays the requester's.
+- **Release claim** (`POST /api/v1/factory/tasks/<id>/release {reason}`): the
+  maintainer who claimed it, or another, lets a claim go while its rebuild is
+  queued or running; a staged rebuild is decided, not released.
+- **Adopt** (`POST /api/v1/factory/packages/<name>/adopt`): a package its
+  owner left *unmaintained* becomes yours, its bumps with it.
+- Each decision above is a record the pool signs beside the request, and a
+  journal line with who, the door and the agent that rebuilt the package; the
+  requester is refused every one of them with `code: "conflict_of_interest"`.
 - **Withdraw a record** (`POST /api/v1/factory/record/withdraw {key,
   reason}`) when a log or a report must leave the public bucket: a signed
   tombstone takes its place, the staging copy goes with it.

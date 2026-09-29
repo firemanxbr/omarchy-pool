@@ -14,6 +14,7 @@ import { allComponents } from "../src/pages/components";
 import { GO_MENU, HELPERS, MORE, NAV, termId } from "../src/pages/layout";
 import { DOCS_TREE, GLOSSARY } from "../src/pages/docs-tree";
 import { CHARTS } from "../src/pages/charts";
+import { KIT_HELPERS } from "../src/pages/kit";
 import { JOURNAL_KINDS } from "../src/meta";
 import { fetchPage, ownScriptOf, RETIRED_PAGES, scriptOf, seedDashboard, type Fixture } from "./fixture";
 // The router's own source, as text (Vite's ?raw): the routed pages are read from it, so a page added to index.ts without a way in fails here by name.
@@ -161,12 +162,12 @@ describe("dashboard pages", () => {
       expect(html, path).not.toContain("next=/me");
       expect(scriptOf(html), path).toContain('if (location.search) document.querySelectorAll(\'a[href^="/auth/github?next="]\')');
     }
-    // The one place `next=/me` stays: the Factory gate's way to the reader's own page, whoever they turn out to be. The two workspace links — the Request's, Review's — are /me itself, one href for everyone.
+    // The one place `next=/me` stays: the Factory gate's way to the reader's own page, whoever they turn out to be. The Request's workspace link is /me itself, one href for everyone; Review has none since #247 — a reader's own requests are in its queue, "yours · locked".
     const factory = await (await get("/factory")).text();
     expect(factory).toContain('id="gate-btn" href="/auth/github?next=/me"');
     expect(factory).toContain('id="account" href="/auth/github?next=/factory"');
     expect(await (await get("/request")).text()).toContain('<a id="ws" href="/me">Your workspace</a>');
-    expect(await (await get("/review")).text()).toContain('id="mine-ws" href="/me"');
+    expect(await (await get("/review")).text()).not.toContain('href="/me"');
     const docs = await (await get("/docs")).text();
     const hint = /<div class="docs-hint">([^<]*)<\/div>/.exec(docs)?.[1] ?? "";
     // A footer entry whose address still stands in for its page (MORE's `until`: Agents, a docs chapter until #249) is not called a page of its own.
@@ -367,7 +368,7 @@ describe("dashboard pages", () => {
     const dupes = (a: string[]): string[] => [...new Set(a.filter((x, i) => a.indexOf(x) !== i))];
     const program = (code: string): N[] => (acorn.parse(code, { ecmaVersion: 2020, sourceType: "script" }) as unknown as N).body;
     // The shell first, by its own name: page() splices HELPERS whole, so a name it declared twice would fail every page. The ⌘K menu's script (GO_MENU) follows it on every page, one statement that declares nothing outside itself — nor, inside, a name the shell has.
-    const helpers = program(HELPERS), charts = program(CHARTS), menu = program(GO_MENU);
+    const helpers = program(HELPERS), charts = program(CHARTS), menu = program(GO_MENU), kit = program(KIT_HELPERS);
     const shellNames = top(declarations(helpers)), chartNames = top(declarations(charts));
     expect(dupes(shellNames), "HELPERS declares a name twice").toEqual([]);
     expect(dupes(chartNames), "CHARTS declares a name twice").toEqual([]);
@@ -384,11 +385,11 @@ describe("dashboard pages", () => {
     for (const path of DRAWN) {
       const code = scriptOf(await (await get(path)).text());
       if (!code.trim()) continue;
-      // page() wraps the footer's line, the shell, the ⌘K menu, then the page's script in one function: the page's own statements are what follows the menu's, less CHARTS where the page splices it.
+      // page() wraps the footer's line, the shell, the ⌘K menu, then the page's script in one function: the page's own statements are what follows the menu's — and the kit's helpers on a page drawn with the kit (page({ kit: true })), the frame's as the menu is (the fixture's ownScriptOf) — less CHARTS where the page splices it.
       const iife: N[] | undefined = program(code)[0]?.expression?.callee?.body?.body;
       expect(iife, `${path}: the page's script is not one IIFE`).toBeDefined();
       const cs = code.indexOf(CHARTS), withCharts = cs >= 0;
-      const own = iife!.slice(1 + helpers.length + menu.length).filter((st) => !(withCharts && st.start >= cs && st.end <= cs + CHARTS.length));
+      const own = iife!.slice(1 + helpers.length + menu.length + (code.includes(KIT_HELPERS) ? kit.length : 0)).filter((st) => !(withCharts && st.start >= cs && st.end <= cs + CHARTS.length));
       const has = new Set([...shell, ...(withCharts ? chartNames : [])]);
       const decls = declarations(own);
       for (const d of decls) {
@@ -419,10 +420,10 @@ describe("dashboard pages", () => {
     expect(problems, problems.join("\n")).toEqual([]);
   });
 
-  // The dashboard's rule for roles: every role sees every section and every control, the same for all; what a role cannot do is a disabled control with the reason in its title — never hidden, never absent, never a sentence in its place. So the sections that exist for everyone are never served `hidden`; the attribute stays for what does not exist yet (a result line before a POST, a blocked notice for nobody blocked). The list is the sections the redesign names per page — Review's Yours block, a maintainer's queue line, the audit legend, the brake; the Pipeline's queue-position card, its Operations hint; the Journal's releases with the rollback column; a build's page (#acts); a person's page (#pk-request, #w-toggle, #w-own); the request's gate and form (#gate, #ask, #pkg-form); the Factory gate with its hint (#gate-hint, once hidden for a session); the People page's three worker tables and their legend.
+  // The dashboard's rule for roles: every role sees every section and every control, the same for all; what a role cannot do is a disabled control with the reason in its title — never hidden, never absent, never a sentence in its place. So the sections that exist for everyone are never served `hidden`; the attribute stays for what does not exist yet (a result line before a POST, a blocked notice for nobody blocked). The list is the sections the redesign names per page — Review's queue (its tiles, its tabs and rows, the maintainers, the brake on the Blocked tab; the workspace is served hidden until a package is opened, #247); the Pipeline's queue-position card, its Operations hint; the Journal's releases with the rollback column; a build's page (#acts); a person's page (#pk-request, #w-toggle, #w-own); the request's gate and form (#gate, #ask, #pkg-form); the Factory gate with its hint (#gate-hint, once hidden for a session); the People page's three worker tables and their legend.
   it("serves the sections everyone gets without hidden — a role that cannot act sees the control grey, never nothing", async () => {
     const ALWAYS: Record<string, string[]> = {
-      "/review": ["mine", "mine-queue", "legend", "brake", "staged"],
+      "/review": ["rv-queue", "rv-tiles", "rv-tabs", "rv-rows", "rv-maint", "brake"],
       "/pipeline": ["queue-pos", "ops-who", "staged", "heads"],
       "/journal": ["releases", "compare"],
       [`/build/${F.projectTask}`]: ["acts"],
