@@ -555,13 +555,13 @@ describe("adopt", () => {
     expect(again.status).toBe(409);
     expect(again.json.error).toMatch(/^tzdata is maintained by m1 \(since /);
 
-    // An unmaintained registration: its approver is no maintainer of it any more (its owner left it), so two maintainers at once, the approver among them, and one takes it — its maintainer of record and its registration, where it stood before: approved — and the other is told.
+    // An unmaintained registration: its approver is no maintainer of it any more (its owner left it), so two maintainers at once, the approver among them, and one takes it — its maintainer of record and its registration, where it stood before: published — and the other is told.
     const [a, b] = await Promise.all([call("POST", "/factory/packages/orphan/adopt", { reason: "I use it every day" }, "omc_m1"), call("POST", "/factory/packages/orphan/adopt", {}, "omc_m2")]);
     expect([a.status, b.status].sort()).toEqual([200, 409]);
     const won = a.status === 200 ? a : b;
     const by = won === a ? "m1" : "m2";
-    expect(won.json).toMatchObject({ adopted: "orphan", by, via: "token", registration: { from: "dave", status: "approved" } });
-    expect(await env.DB.prepare("SELECT owner, status FROM factory_packages WHERE name = 'orphan'").first()).toEqual({ owner: by, status: "approved" });
+    expect(won.json).toMatchObject({ adopted: "orphan", by, via: "token", registration: { from: "dave", status: "published" } });
+    expect(await env.DB.prepare("SELECT owner, status FROM factory_packages WHERE name = 'orphan'").first()).toEqual({ owner: by, status: "published" });
     expect((await env.DB.prepare("SELECT login FROM package_maintainers WHERE name = 'orphan'").all()).results).toEqual([{ login: by }]);
     const rec = await record(won.json.record);
     expect(rec.verified).toBe(true);
@@ -569,7 +569,7 @@ describe("adopt", () => {
     // One adopt line that says it took both, with who and from whom — and no line of any other kind about it.
     const took = await line("adopt", "orphan");
     expect(took.summary).toMatch(new RegExp(`^orphan adopted by ${by}: its maintainer in the pool, and its registration, taken from dave, who left it unmaintained`));
-    expect(took.payload).toMatchObject({ name: "orphan", by, source: "factory", via: "token", registration: { from: "dave", status: "approved" }, record: won.json.record });
+    expect(took.payload).toMatchObject({ name: "orphan", by, source: "factory", via: "token", registration: { from: "dave", status: "published" }, record: won.json.record });
     expect(await env.DB.prepare("SELECT kind, COUNT(*) AS n FROM events WHERE json_extract(payload, '$.name') = 'orphan' GROUP BY kind").all().then((r) => r.results)).toEqual([{ kind: "adopt", n: 1 }]);
     // The package's page names the adopter as its maintainer, for either path: the server's word it reads (maintenance on GET /package/:name).
     for (const [name, source, who] of [["orphan", "factory", by], ["tzdata", "core", "m1"]]) expect((await maintenanceOf(env, name, source, undefined)).maintainer, name).toMatchObject({ login: who, adopted: true });

@@ -1,6 +1,5 @@
 import { json, type Env } from "../index";
 import { PROMOTED_RINGS, ringsSql } from "../meta";
-import { parseTargets } from "../targets";
 import { isMaintainer, viaOf, type Contributor } from "./contributors";
 import { decisionRecord } from "./review";
 import { standsSql } from "./story";
@@ -49,7 +48,7 @@ export async function handleAdoptPackage(c: Contributor, name: string, request: 
     env.DB.prepare(`SELECT p.source FROM packages p WHERE p.name = ? AND EXISTS (SELECT 1 FROM ring_packages rp WHERE rp.ring IN (${ringsSql(PROMOTED_RINGS)}) AND rp.package_id = p.id) LIMIT 1`)
       .bind(name)
       .first<{ source: string }>(),
-    env.DB.prepare("SELECT owner, status, blocked_at, targets FROM factory_packages WHERE name = ?").bind(name).first<{ owner: string | null; status: string; blocked_at: string | null; targets: string | null }>(),
+    env.DB.prepare("SELECT owner, status, blocked_at FROM factory_packages WHERE name = ?").bind(name).first<{ owner: string | null; status: string; blocked_at: string | null }>(),
     env.DB.prepare("SELECT login, since FROM package_maintainers WHERE name = ?").bind(name).first<{ login: string; since: string }>(),
   ]);
   const unmaintained = pkg?.status === "unmaintained";
@@ -61,10 +60,9 @@ export async function handleAdoptPackage(c: Contributor, name: string, request: 
   if (pkg.blocked_at) return json({ error: `${name} is blocked: another maintainer lifts the block first` }, 409);
   const open = await env.DB.prepare(`SELECT t.id, t.status, t.owner FROM build_tasks t WHERE ${ROUND_OPEN} ORDER BY t.id DESC LIMIT 1`).bind(name).first<{ id: number; status: string; owner: string | null }>();
   if (open) return json({ error: `build #${open.id} of ${name} is ${open.status}${open.owner ? `, ${open.owner}'s` : ""}: a maintainer decides it before anyone adopts ${name}` }, 409);
-  // Where it was before it went unmaintained: published or approved while a review stands, registered otherwise.
+  // Where it was before it went unmaintained: published while a review stands — a ring serves it, as Adopt asks — registered otherwise.
   const standing = await env.DB.prepare(`SELECT id FROM approvals WHERE name = ? AND ${standsSql()} LIMIT 1`).bind(name).first<{ id: number }>();
-  const published = Object.values(parseTargets(pkg.targets)).some((x) => x.status === "published");
-  const status = standing ? (published ? "published" : "approved") : "registered";
+  const status = standing ? "published" : "registered";
   const from = pkg.owner;
   const [moved] = await env.DB.batch([
     env.DB.prepare(ADOPT_SQL).bind(c.login, status, `adopted by ${c.login} from ${from}, who left it unmaintained${reason ? `: ${reason}` : ""}`, name, name),
