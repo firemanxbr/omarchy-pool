@@ -56,7 +56,7 @@ describe("what a caller may do on a staged build", () => {
     const r = await review("");
     expect(r.status).toBe(200);
     expect(r.headers.get("cache-control")).toBe("no-store");
-    // The three undecided community builds of alice's `mine` (the decided chain is out of the list).
+    // The three undecided community builds of alice's — a later one of `mine`, `disposable`'s and `spare`'s (mine's decided chain is out of the list).
     expect(r.json.staged.map((t: any) => t.id).sort()).toEqual([F.stagedTask, F.disposableTask, F.spareTask].sort());
     for (const t of r.json.staged) nothing(t.can, "sign in with GitHub");
   });
@@ -106,7 +106,7 @@ describe("what a caller may do on a staged build", () => {
     try {
       for (const t of (await review("alice")).json.staged) {
         expect(t.can, `alice on ${t.id}`).toMatchObject({ approve: false, reject: false, build: false, withdraw: false });
-        expect(t.can.why).toMatchObject({ reject: OWNER(F.factoryPkg), build: OWNER(F.factoryPkg) });
+        expect(t.can.why).toMatchObject({ reject: OWNER(t.name), build: OWNER(t.name) });
         expect(t.can.why.approve).toMatch(/have the project build it first/); // a contributor's build: that comes before the owner
         const reject = await call("POST", `/factory/tasks/${t.id}/reject`, "alice", { note: "my own, rejected" });
         expect(reject.status).toBe(403);
