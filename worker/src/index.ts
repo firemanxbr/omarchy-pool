@@ -273,7 +273,8 @@ export default {
       if (path === "/packages") {
         // The list is drawn into the page (#245), so it works with script off: from the API's answer for the page's own query, through the API's edge cache under the address the page's script asks for the same list — one stored answer for the two, the list's reads paid once per colo per five minutes, not per view. A value the list does not know is its default here, where the API would refuse it.
         const { query, typed } = browseQuery(url.searchParams);
-        const res = await cachedApi("GET", "/packages", new URL(`/api/v1/packages${browseSearch(query)}`, url), request, env, ctx).catch((e: unknown) => json({ error: String(e) }, 500));
+        // A list that threw is said as the API's own 500 says it — "internal error" — never with the database's words, which a public page would print.
+        const res = await cachedApi("GET", "/packages", new URL(`/api/v1/packages${browseSearch(query)}`, url), request, env, ctx).catch((e: unknown) => (console.error(e), json({ error: "internal error" }, 500)));
         const answer = res.ok ? ((await res.json()) as BrowseAnswer) : null;
         const error = answer ? null : (((await res.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${res.status}`);
         return html(packagesHtml(env.POOL_URL, version(env), { query, typed, answer, error }));

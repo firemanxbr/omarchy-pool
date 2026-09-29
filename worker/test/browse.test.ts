@@ -15,7 +15,8 @@ import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:
 import { beforeAll, describe, expect, it } from "vitest";
 import worker from "../src/index";
 import { browse, browseCounts, browseQuery, browseSearch, type BrowseAnswer } from "../src/routes/browse";
-import { countText, listHtml, packagesHtml } from "../src/pages/browse";
+import { countText, listHtml, packagesHtml, titleHtml } from "../src/pages/browse";
+import { GO_ACTIONS, MORE } from "../src/pages/layout";
 import { version } from "../src/meta";
 import { runScript, scriptOf, seedDashboard, type Fixture } from "./fixture";
 
@@ -114,16 +115,62 @@ describe("GET /api/v1/packages over the fixture", () => {
     expect([names(d), d.count, d.pages, d.next, d.prev]).toEqual([["zstd", "ours", "xz"], 4, 2, { page: 2 }, null]);
     d = (await list("?q=st&limit=3&page=2")).d;
     expect([names(d), d.next, d.prev]).toEqual([["zlib"], null, {}]);
-    // Past the last match: nothing on the page, and still the count.
+    // Past the last match: nothing on the page, still the count, and the step back is the last page — page 4 was as empty as this one.
     d = (await list("?q=st&limit=3&page=5")).d;
-    expect([names(d), d.count, d.prev]).toEqual([[], 4, { page: 4 }]);
+    expect([names(d), d.count, d.pages, d.prev]).toEqual([[], 4, 2, { page: 2 }]);
+    d = (await list("?q=zl&page=9")).d;
+    expect([names(d), d.count, d.prev]).toEqual([[], 1, {}]);
   });
 
   it("refuses what it does not read, with the reason: one letter, a ring or a value it does not know, two cursors, a cursor with a search", async () => {
-    for (const q of ["?q=z", "?ring=lab", "?ring=nope", "?arch=riscv64", "?origin=aur", "?sort=size", "?page=0", "?page=x", "?limit=101", "?limit=0", "?after=a&before=b", "?q=zl&after=zlib", "?sort=recent&after=zlib"]) {
+    // Outside a search a page's number and its cursor go together, as next and prev give them: a number alone labelled the first page's rows "page 3", a cursor alone called a later page "page 1".
+    for (const q of ["?q=z", "?ring=lab", "?ring=nope", "?arch=riscv64", "?origin=aur", "?sort=size", "?page=0", "?page=x", "?limit=101", "?limit=0", "?after=a&before=b", "?q=zl&after=zlib", "?sort=recent&after=zlib", "?page=3", "?sort=recent&page=2", "?after=ours", "?before=zlib&page=1", "?sort=recent&after=5"]) {
       const { status, d } = await list(q);
       expect(status, q).toBe(400);
       expect(d.error, q).toMatch(/\w/);
+    }
+  });
+
+  it("searches words of any length — D1 refuses a LIKE pattern over 50 bytes, and the search uses none — and never cuts a character in half", async () => {
+    // A phrase longer than any pattern D1 takes, from a description, in capitals: found, not a 500.
+    const long = "a description long enough that no LIKE pattern D1 takes could hold it";
+    const obj = (await env.DB.prepare("INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES ('browse-long', 'longword', '1-1', 'x86_64', 'longword-1-1-x86_64.pkg.tar.zst', 1, 1, 1, ?, 'extra', 'extra/x86_64/longword', 'x86_64') RETURNING id").bind(JSON.stringify({ description: long })).first<{ id: number }>())!.id;
+    await env.DB.prepare("INSERT INTO ring_packages (ring, package_id) VALUES ('edge', ?)").bind(obj).run();
+    try {
+      const d = await browse(env, browseQuery(new URLSearchParams({ q: long.toUpperCase() })).query);
+      expect([names(d), d.count]).toEqual([["longword"], 1]);
+      // % and _ stay the reader's characters: "no_like" is not the description's "no LIKE", which LIKE's _ would have matched.
+      expect((await browse(env, browseQuery(new URLSearchParams({ q: "no_like" })).query)).count).toBe(0);
+    } finally {
+      // Where the fixture was: the object out of the ring and out of the table.
+      await env.DB.batch([env.DB.prepare("DELETE FROM ring_packages WHERE package_id = ?").bind(obj), env.DB.prepare("DELETE FROM packages WHERE id = ?").bind(obj)]);
+    }
+    // Through the router: 60 letters are a search like any other (they were a 500, "LIKE or GLOB pattern too complex").
+    const sixty = await list(`?q=${"a".repeat(60)}`);
+    expect([sixty.status, sixty.d.count, sixty.d.packages]).toEqual([200, 0, []]);
+    // A search is read to its hundredth character, never to half of one: an emoji there was a lone surrogate, and encodeURIComponent threw (a 500 for the page).
+    const emoji = "a".repeat(99) + "\u{1F600}";
+    const cut = await list(`?q=${encodeURIComponent(emoji + "b")}`);
+    expect([cut.status, cut.d.q]).toEqual([200, emoji]);
+    const res = await get(`/packages?q=${encodeURIComponent(emoji + "b")}`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain(`value="${emoji}"`);
+  });
+
+  it("says where the pool has a name the rings do not serve — the factory's, the lab's — for a search with no filter that found nothing, and asks nothing otherwise", async () => {
+    const status = (await env.DB.prepare("SELECT status FROM factory_packages WHERE name = ?").bind(F.factoryPkg).first<{ status: string }>())!.status;
+    // mine is the factory's, approved, and no ring serves it: the list finds nothing, and says where the name is.
+    expect((await list(`?q=${F.factoryPkg}`)).d).toMatchObject({ count: 0, packages: [], held: { name: F.factoryPkg, where: status, arch: F.arch } });
+    expect((await list(`?q=${F.factoryPkg.toUpperCase()}`)).d.held).toMatchObject({ name: F.factoryPkg });
+    // A name found nowhere, a filter, a search that is not a name, rows: nothing asked.
+    for (const q of ["?q=zzfoo", `?q=${F.factoryPkg}&ring=stable`, `?q=${F.factoryPkg}&origin=factory`, "?q=two%20words", `?q=${F.pkg}`]) expect((await list(q)).d.held, q).toBeNull();
+    // A build only in the lab: the lab's, on its architecture.
+    const obj = (await env.DB.prepare("INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch) VALUES ('browse-lab', 'labonly', '1-1', 'aarch64', 'labonly-1-1-aarch64.pkg.tar.zst', 1, 1, 1, '{\"description\":\"in the lab\"}', 'alarm', 'alarm/aarch64/labonly', 'aarch64') RETURNING id").first<{ id: number }>())!.id;
+    await env.DB.prepare("INSERT INTO ring_packages (ring, package_id) VALUES ('lab', ?)").bind(obj).run();
+    try {
+      expect((await browse(env, browseQuery(new URLSearchParams("q=labonly")).query)).held).toEqual({ name: "labonly", where: "lab", arch: "aarch64" });
+    } finally {
+      await env.DB.batch([env.DB.prepare("DELETE FROM ring_packages WHERE package_id = ?").bind(obj), env.DB.prepare("DELETE FROM packages WHERE id = ?").bind(obj)]);
     }
   });
 
@@ -171,8 +218,14 @@ describe("the /packages page", () => {
     expect(html).toContain(`<a class="pk-row" href="/package/${F.pkg2}?ring=stable&amp;arch=${F.arch}">`);
     expect(rows(html)).toBe(4);
     // The factory's package says so, in green, and a synced one names its source in the handoff's words.
-    expect(html).toContain('<span class="pk-o f" title="factory"><i class="op-i op-i-factory" style="--op-i-s:13px" aria-hidden="true"></i><span>factory</span></span>');
-    expect(html).toContain('<span class="pk-o" title="Arch core"><i class="op-i op-i-refresh-cw" style="--op-i-s:13px" aria-hidden="true"></i><span>Arch core</span></span>');
+    expect(html).toContain('<span class="pk-o f" title="factory"><i class="op-i op-i-factory" style="--op-i-s:13px" aria-hidden="true"></i><span class="pk-sr">from </span><span>factory</span></span>');
+    expect(html).toContain('<span class="pk-o" title="Arch core"><i class="op-i op-i-refresh-cw" style="--op-i-s:13px" aria-hidden="true"></i><span class="pk-sr">from </span><span>Arch core</span></span>');
+    // A row is one link and the head is not read out: its cells say what they are to a screen reader, out of sight.
+    expect(html).toMatch(/<span class="pk-v"><span class="pk-sr">version <\/span>1:1\.3\.2-4<\/span>/);
+    expect(html).toMatch(/<span class="pk-u" title="updated [^"]+ UTC"><span class="pk-sr">updated <\/span>\d+[smhd]<span class="pk-sr"> ago<\/span><\/span>/);
+    // A filter segment is a labelled group, not one of four navigation landmarks.
+    expect(html).toContain('<div class="op-seg" role="group" aria-labelledby="pk-l-ring">');
+    expect(html).not.toContain('<nav class="op-seg"');
     expect(html).toContain(`<span class="pk-a" role="img" aria-label="on ${F.arch}, not on aarch64" title="on ${F.arch}, not on aarch64"><i class="op-arch ok"></i><i class="op-arch na"></i></span>`);
     expect(html).toContain('<span class="pk-count pk-all" id="pk-count" aria-live="polite">every ring · both architectures</span>');
     expect(html).toContain('<div class="pk-foot"><span id="pk-at">page 1 of 1</span><span class="pk-pager"><span class="pk-p off" aria-disabled="true">← prev</span><span class="pk-p off" aria-disabled="true">next →</span></span></div>');
@@ -206,7 +259,14 @@ describe("the /packages page", () => {
     expect(await page("/packages?q=zzfoo")).toContain('<div class="pk-none"><span>Nothing matches.</span><a href="/request?name=zzfoo">Request "zzfoo" →</a></div>');
     expect(await page("/packages?q=ZZFoo")).toContain('<a href="/request?name=zzfoo">Request "zzfoo" →</a>');
     expect(await page("/packages?q=two%20words")).toContain('<div class="pk-none"><span>Nothing matches.</span><a href="/request">Request a package →</a></div>');
-    expect(await page("/packages?ring=rc")).toContain('<a href="/request">Request a package →</a>');
+    // A filter that leaves nothing is cleared, not requested around: the name may be on another ring, architecture or origin (zlib is, and wlctl on the other architecture). The search and the order stay.
+    expect(await page("/packages?ring=rc")).toContain('<div class="pk-none"><span>Nothing matches these filters.</span><a href="/packages">Clear the filters →</a></div>');
+    expect(await page(`/packages?q=${F.pkg}&origin=factory&sort=recent`)).toContain(`<div class="pk-none"><span>Nothing matches these filters.</span><a href="/packages?q=${F.pkg}&amp;sort=recent">Clear the filters →</a></div>`);
+    // A name the factory has is its page, not a request (the ⌘K menu's rule): mine is approved and in no ring.
+    const status = (await env.DB.prepare("SELECT status FROM factory_packages WHERE name = ?").bind(F.factoryPkg).first<{ status: string }>())!.status;
+    const mine = await page(`/packages?q=${F.factoryPkg}`);
+    expect(mine).toContain(`<div class="pk-none"><span>${F.factoryPkg} is not in a ring. The factory has it: ${status}.</span><a href="/package/${F.factoryPkg}?ring=stable&amp;arch=${F.arch}">Its page →</a></div>`);
+    expect(mine).not.toContain(`/request?name=${F.factoryPkg}`);
     // One letter: the whole list, the letter kept in the box.
     const one = await page("/packages?q=z");
     expect(one).toContain('value="z"');
@@ -216,6 +276,42 @@ describe("the /packages page", () => {
     const odd = await page("/packages?ring=lab&sort=size&page=zero");
     expect(rows(odd)).toBe(4);
     expect(odd).toContain('data-k="ring" data-v="all" aria-current="true"');
+  });
+
+  it("labels a page by the number that goes with its cursor: a number or a cursor alone is the first page", async () => {
+    for (const path of ["/packages?page=3&limit=1", "/packages?after=ours&limit=1", "/packages?before=zlib&page=1&limit=1"]) {
+      const html = await page(path);
+      expect(html, path).toContain('<span id="pk-at">page 1 of 4</span><span class="pk-pager"><span class="pk-p off" aria-disabled="true">← prev</span>');
+      expect(html, path).toContain(`<a class="pk-row" href="/package/${F.publishedPkg}?`);
+      expect(rows(html), path).toBe(1);
+    }
+  });
+
+  it("gives a crawler one address per page: the default list's steps forward are followed, a step back (before=) is not", async () => {
+    const html = await page("/packages?after=xz&page=3&limit=1");
+    expect(html).toContain('<a class="pk-p" href="/packages?before=zlib&amp;page=2&amp;limit=1" rel="prev nofollow">← prev</a><a class="pk-p" href="/packages?after=zlib&amp;page=4&amp;limit=1" rel="next">next →</a>');
+    // Back to the first page is its own address, followed.
+    expect(await page("/packages?after=ours&page=2&limit=1")).toContain('<a class="pk-p" href="/packages?limit=1" rel="prev">← prev</a>');
+  });
+
+  it("says the list did not answer without the database's words, when reading it threw", async () => {
+    const broken = { ...env, DB: { prepare: () => { throw new Error("D1_ERROR: a detail no reader should see"); } } } as unknown as typeof env;
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(new Request("http://pool.test/packages?q=unreadable"), broken, ctx);
+    await waitOnExecutionContext(ctx);
+    const html = await res.text();
+    expect(res.status).toBe(200);
+    expect(html).toContain('<div class="pk-none"><span>The packages list did not answer: internal error.</span><a href="/packages?q=unreadable">Try again →</a></div>');
+    expect(html).not.toContain("D1_ERROR");
+  });
+
+  it("is one step from Home (All packages →), the footer and the ⌘K menu", async () => {
+    expect(await page("/")).toContain('<a class="more-link" href="/packages">All packages →</a>');
+    expect(MORE[0]).toEqual({ href: "/packages", label: "Packages" });
+    expect(/<footer>[\s\S]*?<\/footer>/.exec(await page("/status"))![0]).toContain('<a href="/packages">Packages</a>');
+    expect(GO_ACTIONS.find((a) => a.label === "Browse packages")?.href).toBe("/packages");
+    // The Community packages tiles open the factory's packages, not a search for the word "factory" (Request "factory" on this list).
+    for (const path of ["/", "/factory"]) expect(scriptOf(await page(path)), path).toContain('"/packages?origin=factory"');
   });
 
   it("says so when the list did not answer, and offers the same list again", () => {
@@ -232,15 +328,16 @@ describe("the /packages page", () => {
 
   it("writes in the browser the characters the server writes: the rows, the pager, the empty list, the count, the address", async () => {
     const served = scriptOf(await page("/packages"));
-    const js = runScript(served, { pathname: "/packages", functions: ["pkList", "pkCount", "pkState", "pkQuery"] });
+    const js = runScript(served, { pathname: "/packages", functions: ["pkList", "pkCount", "pkTitle", "pkState", "pkQuery"] });
     const now = Date.now();
-    for (const q of ["", "?ring=stable", "?origin=factory&sort=recent", "?limit=1", "?after=ours&page=2&limit=1", "?before=zlib&page=2&limit=1", "?q=zzfoo", "?q=two%20words", "?q=st&limit=3&page=5", "?ring=rc", "?arch=x86_64&limit=2"]) {
+    for (const q of ["", "?ring=stable", "?origin=factory&sort=recent", "?limit=1", "?after=ours&page=2&limit=1", "?after=xz&page=3&limit=1", "?before=zlib&page=2&limit=1", "?q=zzfoo", "?q=two%20words", "?q=st&limit=3&page=5", "?ring=rc", "?arch=x86_64&limit=2", `?q=${F.factoryPkg}`, `?q=${F.pkg}&origin=factory&sort=recent`]) {
       const d = (await list(q)).d;
       expect(js.pkList(d, now), q).toBe(listHtml(d, now));
+      expect(js.pkTitle(d), q).toBe(titleHtml(d));
       for (const typed of ["", "z", d.q]) expect(js.pkCount(d, typed), `${q} ${typed}`).toBe(countText(d, typed));
     }
     // An address read the same way on both sides, written back the same way — the defaults dropped, the order the server's.
-    for (const q of ["", "q=zl", "q=z", "ring=stable&arch=aarch64&origin=factory&sort=recent", "sort=recent&ring=edge&after=12&page=3", "before=zlib&page=2", "ring=lab&arch=both&origin=all&sort=size", "limit=10&page=2&q=a%20b", "q=zl&after=zlib", "after=a&before=b", "sort=recent&after=zlib", "limit=500&page=0"]) {
+    for (const q of ["", "q=zl", "q=z", "ring=stable&arch=aarch64&origin=factory&sort=recent", "sort=recent&ring=edge&after=12&page=3", "before=zlib&page=2", "ring=lab&arch=both&origin=all&sort=size", "limit=10&page=2&q=a%20b", "q=zl&after=zlib", "after=a&before=b", "sort=recent&after=zlib", "limit=500&page=0", "page=3", "after=zlib", "before=xz&page=1", "q=zl&page=3", `q=${encodeURIComponent("a".repeat(99) + "\u{1F600}b")}`]) {
       const s = js.pkState("?" + q);
       expect(js.pkQuery(s, {}), q).toBe(browseSearch(browseQuery(new URLSearchParams(q)).query));
     }
@@ -308,7 +405,7 @@ describe("what a view reads", () => {
     expect(again.rows).toBeLessThan(10);
   });
 
-  it("reads a few hundred rows for a page wherever it is, and every statement goes through an index or the table's own order", async () => {
+  it("reads rows by the page, not by the pool, wherever the page is, and every statement goes through an index or the table's own order", async () => {
     await browseCounts(env);
     const views: [string, number][] = [
       ["", 30], ["after=bulk02900&page=117", 30], ["before=bulk01500&page=60", 30], ["ring=stable", 30], ["ring=edge&arch=aarch64", 30],
@@ -336,14 +433,26 @@ describe("what a view reads", () => {
     }
   });
 
-  it("reads the table once for a search — about a row per object in the pool — counting what matched in the same pass", async () => {
-    for (const q of ["q=bulk0123", "q=tool&ring=stable", "q=bulk01&sort=recent&page=3"]) {
+  it("reads the table once for a search and ranks what matched — so it costs by how much matches, never the pool twice", async () => {
+    // What the bound allows: the scan (a row per object), a probe of each ring picked per object that matched (at most: the OR stops at the first ring that serves it), the matched names grouped, counted and ordered (a few rows each), and the page's objects. A word every description holds, over every ring, reads about 3.7 rows per object here (37 k over 10 k objects) — routes/browse.ts's header gives production's shape.
+    for (const [q, rings] of [["q=bulk0123", 3], ["q=tool&ring=stable", 1], ["q=tool", 3], ["q=bulk01&sort=recent&page=3", 3]] as const) {
       const meter = { rows: 0 };
       const d = await browse(env, browseQuery(new URLSearchParams(q)).query, meter);
       expect(d.count, q).toBeGreaterThan(0);
-      // The table once, the matches' ring probes, and the page's objects: never the pool twice.
-      expect(meter.rows, q).toBeLessThan(objects + 3 * members / 2 + 1000);
+      expect(meter.rows, q).toBeLessThan(objects * (1 + rings) + 4 * d.count + 1000);
     }
     expect((await browse(env, browseQuery(new URLSearchParams("q=bulk0123")).query)).count).toBe(10);
+    // A word nothing holds reads the table and nothing else; with no filter, where the pool has the name is two point reads by key.
+    const { e, log } = recorded();
+    const meter = { rows: 0 };
+    const none = await browse(e, browseQuery(new URLSearchParams("q=zzfoo")).query, meter);
+    expect([none.count, none.held]).toEqual([0, null]);
+    expect(meter.rows).toBeLessThan(objects + 50);
+    const held = log.filter((l) => /factory_packages|ring_packages m WHERE m\.ring = 'lab'/.test(l.sql));
+    expect(held).toHaveLength(2);
+    expect((await plan(held[0].sql, held[0].binds)).join(" | ")).toMatch(/SEARCH factory_packages USING INDEX sqlite_autoindex_factory_packages_1 \(name=\?\)/);
+    const lab = (await plan(held[1].sql, held[1].binds)).join(" | ");
+    expect(lab).toMatch(/SEARCH p USING COVERING INDEX idx_packages_name_repo_arch_source \(name=\?\)/);
+    expect(lab).toMatch(/SEARCH m (EXISTS )?USING COVERING INDEX \w+ \(ring=\? AND package_id=\?\)/);
   });
 });

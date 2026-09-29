@@ -16,30 +16,49 @@ import { PROMOTED_RINGS, REPO_ARCHES, RINGS, RINGS_BY_STABILITY, isRepoArch, rin
  *   origin   all (default) | synced (from a source) | factory (built here)
  *   sort     name (default: a–z; with q the names that hold it first) | recent (the newest version first)
  *   after, before   the cursor of the next or previous page, as `next` and `prev` give it
- *   page     the page's number, as `next` and `prev` give it; with q, the page itself
+ *   page     the page's number, as `next` and `prev` give it — with its cursor; with q, the page itself
  *   limit    rows per page, 25 by default, at most 100
  *
  * What it costs, per page view (D1 bills every row read; test/browse.test.ts
- * measures each shape against a pool of its own, and bounds it):
+ * measures each shape against a pool of its own, and bounds it). The
+ * figures are rows_read on a pool shaped like production's — 19,000 names,
+ * 35,467 objects, 95,635 memberships, the newest 633 objects in edge only
+ * (measured 2026-09-29):
  *
  * - The page is found by walking an index from the cursor, never by an
  *   OFFSET: a–z walks the (name, repo_arch, source) index from the last
  *   name shown, recent walks the table's own order (an object's id grows
  *   with its arrival) down from the last object shown — each object asked
  *   whether a ring serves it with a probe of ring_packages' primary key,
- *   and stopped at the page's last row. A page reads a few hundred rows
- *   wherever it is; page 700 by OFFSET would have read the 17,000 names
- *   before it. The factory's few objects are walked through the source
- *   index instead of the whole list.
+ *   and stopped at the page's last row. An a–z page reads the same wherever
+ *   it is (365 rows; page 700 by OFFSET would have read the 17,000 names
+ *   before it), recent over every ring about as much (658). Recent in one
+ *   ring walks past every newer object that ring does not serve before its
+ *   first row: 4,057 for stable, whose newest object is older than edge's
+ *   last syncs (1,753 for rc on aarch64). The factory's few objects are
+ *   walked through the source index instead of the whole list (660–821).
  * - A search reads the packages table once (a description is text in the
- *   manifest, which no index holds): about a row per object in the pool,
- *   what the search Home's box reads per term (routes/search.ts walks a
- *   ring's members and their rows), with the count taken in the same pass.
+ *   manifest, which no index holds) and ranks every match: the scan (a row
+ *   per object), a ring probe per match, then the matches grouped by name,
+ *   counted and sorted — so it costs by how much matches. A word nothing
+ *   holds reads the table alone (35,477); "lib" 53,109; "p0" 99,730; a
+ *   word every description holds ("tool") 157,347, about four rows per
+ *   object. The search Home's box reads 63–82 k per term on the same pool
+ *   (routes/search.ts: one ring, one architecture, a hundred rows), so a
+ *   narrow search here costs less and a broad one about twice. A page past
+ *   the last match (an address the pager does not give) pays the pass
+ *   twice, to count. A search that matched nothing, with no filter, adds
+ *   two point reads to say where the pool has the name (heldElsewhere).
  * - The counts — the total in the page's title and "page 1 of N" — are
  *   not counted per view: browseCounts() counts every filter at once
- *   (one walk of the name index), keeps the answer in
- *   settings under the heads it was counted at, and counts again only
- *   once a head has moved: a sync or a promotion, a few times a day.
+ *   (one walk of the name index, 131,108 rows), keeps the answer in
+ *   settings under the heads it was counted at, and counts again at the
+ *   first view after a head has moved. Every sync and every promotion
+ *   moves one: about 30 a day on production (2026-09-28: edge 14, rc 8,
+ *   stable 8), so at most about 4 M rows a day, 120 M a month — some
+ *   US$0.12 a month at the overage rate (/api/v1/cost). They are not kept
+ *   per ring: over every ring a name counts once, which counts per ring
+ *   cannot add up to, so an edge sync would count those again anyway.
  * - The answer is kept at the edge for five minutes (index.ts cachedApi),
  *   under its URL: the page (index.ts, pages/browse.ts) asks this very
  *   address for its first drawing and its script asks it for every other,
@@ -61,8 +80,10 @@ export const BROWSE_LIMIT = 25;
 export const BROWSE_MAX = 100;
 /** A search is two characters or more, as the search Home's box asks (routes/search.ts): one letter holds nearly every name. */
 export const BROWSE_MIN_Q = 2;
-/** The longest search read: a name is at most a hundred characters (the factory's rule), and words longer than that match nothing. */
+/** The longest search read, in characters (code points, so none is cut in half): a name is at most a hundred (the factory's rule); a longer search is read to its hundredth. */
 export const BROWSE_MAX_Q = 100;
+/** A name a request can carry — the ⌘K menu's rule for offering Request "<name>" (layout.ts GO_MENU's NAME, routes/contributors.ts's characters). */
+export const BROWSE_NAME = /^[a-z0-9][a-z0-9@._+-]{1,99}$/;
 /** The highest page number read: a search's matches are counted and sorted in one pass whatever the page, so this only bounds its OFFSET; a cursor's page number is only said. */
 export const BROWSE_MAX_PAGE = 100000;
 
@@ -91,7 +112,8 @@ export const BROWSE_DEFAULT: BrowseQuery = { q: "", ring: "all", arch: "all", or
 export function browseQuery(params: URLSearchParams): { query: BrowseQuery; typed: string; problems: string[] } {
   const problems: string[] = [];
   const query: BrowseQuery = { ...BROWSE_DEFAULT };
-  const typed = (params.get("q") ?? "").trim().slice(0, BROWSE_MAX_Q);
+  // Cut by characters, not UTF-16 units: half an emoji is a lone surrogate, which encodeURIComponent (browseSearch) throws on.
+  const typed = Array.from((params.get("q") ?? "").trim()).slice(0, BROWSE_MAX_Q).join("");
   if (typed.length >= BROWSE_MIN_Q) query.q = typed;
   else if (typed) problems.push(`q must have at least ${BROWSE_MIN_Q} characters`);
   const ring = params.get("ring");
@@ -136,6 +158,17 @@ export function browseQuery(params: URLSearchParams): { query: BrowseQuery; type
   if (query.after !== null && query.before !== null) {
     problems.push("after and before are one page each: one of them");
     query.after = query.before = null;
+  }
+  // Outside a search the rows are the cursor's and the number only says where they are, so the two go together, as next and prev give them: a number with no cursor would label the first page's rows "page 3", a cursor with no number past the first would call a later page "page 1". Either is the first page, whose number is sure.
+  if (!query.q) {
+    const cursor = query.after !== null || query.before !== null;
+    if (!cursor && query.page > 1) {
+      problems.push("page goes with after or before, as next and prev give them (a search pages by page alone)");
+      query.page = 1;
+    } else if (cursor && query.page <= 1) {
+      problems.push("after and before go with the page they lead to, 2 or more, as next and prev give them");
+      query.after = query.before = null;
+    }
   }
   return { query, typed, problems };
 }
@@ -184,6 +217,13 @@ export interface BrowseRow {
 /** What the next or the previous page is: the fields to set on the query ({} is the first page). */
 export type BrowseStep = Partial<Pick<BrowseQuery, "after" | "before" | "page">>;
 
+/** A name the rings do not serve but the pool has: the factory's registration (`where` is its status) or a build in the lab (`where` is "lab"), and the architecture its page opens on. */
+export interface BrowseHeld {
+  name: string;
+  where: string;
+  arch: string;
+}
+
 export interface BrowseAnswer {
   q: string;
   ring: BrowseRing;
@@ -200,6 +240,8 @@ export interface BrowseAnswer {
   packages: BrowseRow[];
   next: BrowseStep | null;
   prev: BrowseStep | null;
+  /** For a search with no filter that matched nothing, where the pool has that name when it is one (a pacman name): what the page shows instead of Request "<name>". Null otherwise. */
+  held: BrowseHeld | null;
 }
 
 /** The counts, one per filter the page offers — `<ring>/<arch>/<origin>` — kept with the heads they were counted at. */
@@ -249,11 +291,6 @@ function candidate(alias: string, q: BrowseQuery): string {
 function measured<T>(meter: Meter | undefined, r: D1Result<T>): D1Result<T> {
   if (meter) meter.rows += r.meta?.rows_read ?? 0;
   return r;
-}
-
-/** A LIKE pattern that holds `s` anywhere, % and _ taken as they are. */
-function likeOf(s: string): string {
-  return `%${s.replace(/[%_\\]/g, (c) => "\\" + c)}%`;
 }
 
 /**
@@ -330,25 +367,24 @@ async function pageNames(env: Env, q: BrowseQuery, meter?: Meter): Promise<{ nam
   const factory = q.origin === "factory";
   if (q.q) {
     // A search: one pass over the table (the description is in the manifest), every match grouped by name and counted, then the page. The names that hold the words come first when sorting by name — the name itself, a name that starts with it, one that holds it — as the search Home's box orders them.
-    const like = likeOf(q.q);
-    const prefix = `${q.q.replace(/[%_\\]/g, (c) => "\\" + c)}%`;
+    // The words are found with instr() over lower() — the case of ASCII letters aside, as LIKE's is — not with LIKE: D1 refuses a LIKE pattern over 50 bytes, so a pasted sentence or a long factory name (a hundred characters) was a 500 with the database's words on the page; instr() takes the words as they are, % and _ included, at any length. What a row reads is the same: the table was scanned either way.
     const order = q.sort === "recent" ? "newest DESC" : "tier, p.name";
     const from = factory ? "packages p INDEXED BY idx_packages_source" : "packages p NOT INDEXED";
-    const where = `(p.name LIKE ?1 ESCAPE '\\' OR json_extract(p.manifest_json, '$.description') LIKE ?1 ESCAPE '\\') AND ${candidate("p", q)}`;
+    const where = `(instr(lower(p.name), lower(?1)) > 0 OR instr(lower(json_extract(p.manifest_json, '$.description')), lower(?1)) > 0) AND ${candidate("p", q)}`;
     const rows = measured(
       meter,
       await env.DB.prepare(
         `SELECT p.name, MAX(p.id) AS newest,
-                MIN(CASE WHEN p.name = ?2 THEN 0 WHEN p.name LIKE ?3 ESCAPE '\\' THEN 1 WHEN p.name LIKE ?1 ESCAPE '\\' THEN 2 ELSE 3 END) AS tier,
+                MIN(CASE WHEN lower(p.name) = lower(?1) THEN 0 WHEN instr(lower(p.name), lower(?1)) = 1 THEN 1 WHEN instr(lower(p.name), lower(?1)) > 0 THEN 2 ELSE 3 END) AS tier,
                 COUNT(*) OVER () AS matched
            FROM ${from}
           WHERE ${where}
-          GROUP BY p.name ORDER BY ${order} LIMIT ?4 OFFSET ?5`,
-      ).bind(like, q.q, prefix, q.limit, (q.page - 1) * q.limit).all<{ name: string; newest: number; matched: number }>(),
+          GROUP BY p.name ORDER BY ${order} LIMIT ?2 OFFSET ?3`,
+      ).bind(q.q, q.limit, (q.page - 1) * q.limit).all<{ name: string; newest: number; matched: number }>(),
     ).results;
     let matched = rows[0]?.matched;
-    // A page past the last match has no row to carry the count: asked for once more, the same pass.
-    if (matched === undefined) matched = q.page > 1 ? Number(measured(meter, await env.DB.prepare(`SELECT COUNT(DISTINCT p.name) AS n FROM ${from} WHERE ${where}`).bind(like).all<{ n: number }>()).results[0]?.n ?? 0) : 0;
+    // A page past the last match has no row to carry the count: asked for once more, the same pass (only an address the pager did not give lands there).
+    if (matched === undefined) matched = q.page > 1 ? Number(measured(meter, await env.DB.prepare(`SELECT COUNT(DISTINCT p.name) AS n FROM ${from} WHERE ${where}`).bind(q.q).all<{ n: number }>()).results[0]?.n ?? 0) : 0;
     return { names: rows.map((r) => r.name), cursor: [], more: q.page * q.limit < matched, matched };
   }
   if (q.sort === "name") {
@@ -441,6 +477,26 @@ function rowOf(name: string, objects: ObjectRow[], q: BrowseQuery): BrowseRow | 
   };
 }
 
+/**
+ * Where the pool has a name the rings do not serve: the factory's
+ * registration of it (any status — a name registered is reserved, and its
+ * page tells its story), else a build of it in the lab — the places the ⌘K
+ * menu asks before it offers Request "<name>" (layout.ts GO_MENU: the
+ * factory's names, then the package's own address, which answers from the
+ * lab too). Two point reads — factory_packages' primary key, then the name
+ * index with a probe of the lab's key — only for a search that matched
+ * nothing, and kept at the edge with the answer.
+ */
+async function heldElsewhere(env: Env, name: string, meter?: Meter): Promise<BrowseHeld | null> {
+  const reg = measured(meter, await env.DB.prepare("SELECT status FROM factory_packages WHERE name = ?").bind(name).all<{ status: string }>()).results[0];
+  if (reg) return { name, where: reg.status, arch: REPO_ARCHES[0] };
+  const lab = measured(
+    meter,
+    await env.DB.prepare(`SELECT p.repo_arch FROM packages p INDEXED BY idx_packages_name_repo_arch_source WHERE p.name = ? AND EXISTS (SELECT 1 FROM ring_packages m WHERE m.ring = ${ringsSql(["lab"])} AND m.package_id = p.id) LIMIT 1`).bind(name).all<{ repo_arch: string }>(),
+  ).results[0];
+  return lab ? { name, where: "lab", arch: lab.repo_arch } : null;
+}
+
 /** The list for a query: the counts, the page's names, their objects, the rows, and the two steps. */
 export async function browse(env: Env, query: BrowseQuery, meter?: Meter): Promise<BrowseAnswer> {
   const counts = await browseCounts(env, meter);
@@ -454,13 +510,15 @@ export async function browse(env: Env, query: BrowseQuery, meter?: Meter): Promi
   const objects = await objectsOf(env, found.names, q, meter);
   const packages = found.names.map((n) => rowOf(n, objects, q)).filter((r): r is BrowseRow => r !== null);
   const count = found.matched ?? counts.counts[`${q.ring}/${q.arch}/${q.origin}`] ?? 0;
+  const pages = Math.max(1, Math.ceil(count / q.limit));
   const first = found.cursor[0], last = found.cursor[found.cursor.length - 1];
   // The page before: by its number for a search, else before this page's first row — or the first page, when this one is the first or has no row to step back from (a cursor past the end).
   const back = (page: number): BrowseStep => (page <= 1 ? {} : q.q ? { page } : first === undefined ? {} : { before: String(first), page });
   let next: BrowseStep | null = null, prev: BrowseStep | null = null;
   if (q.q) {
     next = found.more ? { page: q.page + 1 } : null;
-    prev = q.page > 1 ? back(q.page - 1) : null;
+    // Past the last match (an address the pager did not give), the step back is the last page, not the empty one before this.
+    prev = q.page > 1 ? back(Math.min(q.page - 1, pages)) : null;
   } else if (q.before !== null) {
     // Walked backward: there is more before (else it would be the first page, above), and the page it came from after.
     prev = back(q.page - 1);
@@ -469,22 +527,24 @@ export async function browse(env: Env, query: BrowseQuery, meter?: Meter): Promi
     next = found.more ? { after: String(last), page: q.page + 1 } : null;
     prev = q.after !== null ? back(q.page - 1) : null;
   }
-  // A page after the first with a cursor is never "page 1": a hand-made address that skipped the number still steps back to a page before it.
-  if (prev && q.page <= 1) prev = {};
+  // Nothing matched a search with no filter: a name the pool has elsewhere is shown there rather than offered as a request (the ⌘K menu's rule). A list with a filter offers to clear it instead (pages/browse.ts), so it asks nothing.
+  const name = q.q.toLowerCase();
+  const held = !count && q.q && q.ring === "all" && q.arch === "all" && q.origin === "all" && BROWSE_NAME.test(name) ? await heldElsewhere(env, name, meter) : null;
   return {
     q: q.q, ring: q.ring, arch: q.arch, origin: q.origin, sort: q.sort, page: q.page, limit: q.limit,
     total: counts.counts["all/all/all"] ?? 0,
     count,
-    pages: Math.max(1, Math.ceil(count / q.limit)),
+    pages,
     packages,
     next,
     prev,
+    held,
   };
 }
 
 export async function handleBrowse(url: URL, env: Env): Promise<Response> {
   const { query, problems } = browseQuery(url.searchParams);
   if (problems.length) return json({ error: problems.join("; ") }, 400);
-  // Five minutes at the edge: what the list shows moves when a ring's head does, a few times a day.
+  // Five minutes at the edge: what the list shows moves when a ring's head does, about 30 times a day (the header above).
   return json(await browse(env, query), 200, { "cache-control": "public, max-age=300" });
 }

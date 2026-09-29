@@ -25,6 +25,7 @@ const BODY = String.raw`
       <div class="pool-search"><input type="search" name="q" id="pool-q" placeholder="find a package — pacman, ghostty, openssl…" aria-label="find a package" aria-keyshortcuts="/" autocomplete="off">${SEARCH_ICON}<div class="suggest" id="pool-suggest" hidden></div></div>
       <button type="submit" class="btn">Search</button>
       <span class="hint">every ring, both architectures</span>
+      <a class="more-link" href="/packages">All packages →</a>
     </form>
   </div>
 
@@ -261,7 +262,7 @@ __CHARTS__
       ["Contributors", num(Object.keys(contributors).length), "anyone with a package or a worker", "", "/people#contributors"],
       ["Maintainers", num(Object.keys(maintainers).length), "named in MAINTAINERS.toml", "", "/people#maintainers"],
       ["Workers alive", num(wc.alive), num(wc.registered) + " registered", "", "/people#workers"],
-      ["Community packages", num(landed), "approved, built by the project", "", "/packages?q=factory"]
+      ["Community packages", num(landed), "approved, built by the project", "", "/packages?origin=factory"]
     ];
   }
   Promise.all([
@@ -300,7 +301,7 @@ __CHARTS__
       if (!rows.length) { out.innerHTML = '<div class="none">nothing in stable matches “' + esc(term) + '”</div>'; out.hidden = false; return; }
       out.innerHTML = rows.slice(0, 8).map(function (p) {
         return '<a href="' + pkgHref(p.name, "stable", ARCHES[0]) + '"><b>' + esc(p.name) + '</b><span class="mono dim">' + esc(p.version) + '</span><span class="src">' + esc(p.source) + '</span><span class="d">' + esc(p.description || "") + '</span></a>';
-      }).join("") + '<a class="all" href="/packages?q=' + encodeURIComponent(term) + '&ring=stable&arch=' + ARCHES[0] + '">' + (rows.length >= 9 ? "More results" : "All " + rows.length + " results") + ' — every ring, both architectures →</a>';
+      }).join("") + '<a class="all" href="/packages?q=' + encodeURIComponent(term) + '">' + (rows.length >= 9 ? "More results" : "All " + rows.length + " results") + ' — every ring, both architectures →</a>';
       out.hidden = false;
     }
     box.addEventListener("input", function () {
@@ -351,10 +352,10 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // The box / focuses (aria-keyshortcuts="/", the ⌘K menu's hook: layout.ts GO_MENU), and the one search the menu asks too, at this very address and in lower case, so the two share the edge's copy.
+      // The box / focuses (aria-keyshortcuts="/", the ⌘K menu's hook: layout.ts GO_MENU), and the one search the menu asks too, at this very address and in lower case, so the two share the edge's copy. Beside it, the whole list (#245).
       id: "pool.search",
       page: "/",
-      anchor: ['<form class="searchbar" action="/packages" method="get"', 'name="q"', 'id="pool-q"', 'aria-keyshortcuts="/"', 'id="pool-suggest"'],
+      anchor: ['<form class="searchbar" action="/packages" method="get"', 'name="q"', 'id="pool-q"', 'aria-keyshortcuts="/"', 'id="pool-suggest"', '<a class="more-link" href="/packages">All packages →</a>'],
       script: ['"#pool-q"', '"#pool-suggest"', '"/api/v1/search?q="', '"&ring=stable&arch=" + ARCHES[0] + "&limit=9"', "box.value.trim().toLowerCase()", "d.packages", "p.description", 'pkgHref(p.name, "stable", ARCHES[0])'],
       reads: [
         { path: `/api/v1/search?q=${F.pkg}&ring=stable&arch=${F.arch}&limit=9`, fields: ["packages", "packages.0.name", "packages.0.version", "packages.0.source", "packages.0.description"] },
@@ -466,7 +467,7 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       id: "pool.open-stats",
       page: "/",
       anchor: ['<div class="tiles four" id="open-stats">'],
-      script: ['setTiles("#open-stats", openTiles(contributors, maintainers, wc, landed))', 'setTiles("#open-stats", tilesUnanswered(openTiles({}, {}, workerCounts([]), 0), down))', '"/people#contributors"', '"/people#maintainers"', '"/people#workers"', '"/packages?q=factory"', "p.landed", '"Workers alive", num(wc.alive), num(wc.registered) + " registered"'],
+      script: ['setTiles("#open-stats", openTiles(contributors, maintainers, wc, landed))', 'setTiles("#open-stats", tilesUnanswered(openTiles({}, {}, workerCounts([]), 0), down))', '"/people#contributors"', '"/people#maintainers"', '"/people#workers"', '"/packages?origin=factory"', "p.landed", '"Workers alive", num(wc.alive), num(wc.registered) + " registered"'],
       reads: [
         { path: "/api/v1/factory/packages", fields: ["packages.0.owner", "packages.0.status", "packages.0.landed"] },
         { path: "/api/v1/factory/maintainers", fields: ["maintainers.0.login"] },

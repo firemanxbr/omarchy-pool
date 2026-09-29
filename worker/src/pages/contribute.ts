@@ -68,7 +68,7 @@ __CHARTS__
     // Landed is the registry's own word (the Pool, the Pipeline and People count the same flag) — approved by a maintainer, which is what the caption says: an approval stands after a publish that failed and after a block, so the number is not "in the rings" (Landed lately below said "publish failed" under a tile that counted it as served, 2026-09-18). The contributors under it are the owners of those packages who are not in the maintainer set — the People page's and the Pool's word for a contributor.
     var landed = pkgs.filter(function (p) { return p.landed; }), from = {}; landed.forEach(function (p) { if (p.owner && !Object.prototype.hasOwnProperty.call(maint, p.owner)) from[p.owner] = 1; });
     var tiles = [
-      ["Community packages", num(landed.length), "approved by a maintainer, from " + num(Object.keys(from).length) + " contributors", "", "/packages?q=factory"],
+      ["Community packages", num(landed.length), "approved by a maintainer, from " + num(Object.keys(from).length) + " contributors", "", "/packages?origin=factory"],
       ["Waiting for review", num(review.waiting), review.oldest_ms ? "oldest " + span(review.oldest_ms) : "nothing waiting", review.waiting ? "warn" : "", "/review"],
       ["Shared workers alive", num(sw.alive), num(sw.byKind.community.alive) + " community · " + num(sw.byKind.project.alive + sw.byKind.review.alive) + " project", sw.alive ? "ok" : "", "/workers"],
       // Fed by the stats poll, not the lists: marked so, it keeps its number when the lists did not answer — the chart beside it draws the same series.
@@ -165,7 +165,7 @@ export const FACTORY_COMPONENTS = (_F: Fixture): Component[] => [
     id: "factory.tiles",
     page: "/factory",
     anchor: ['class="tiles five"', 'id="tiles"'],
-    script: ['api("GET", "/api/v1/factory")', 'api("GET", "/api/v1/factory/packages")', 'api("GET", "/api/v1/factory/review")', '"#tiles"', "function renderTiles()", 'setTiles("#tiles", FACTS ? tiles : tilesUnanswered(tiles, DOWN))', '"Community packages"', "p.landed", "maintainerSet(ok)", '"approved by a maintainer, from "', '" contributors"', '"Waiting for review"', "review.waiting", "review.oldest_ms", '"Shared workers alive"', "workerCounts(f.workers.filter(", "sw.byKind.community.alive", '"Builds this week"', "buildsByDay(STATS.series, 7).days", '"/journal?kind=build", "stats"]', '"Requested, not built yet"', '"/packages?q=factory"'],
+    script: ['api("GET", "/api/v1/factory")', 'api("GET", "/api/v1/factory/packages")', 'api("GET", "/api/v1/factory/review")', '"#tiles"', "function renderTiles()", 'setTiles("#tiles", FACTS ? tiles : tilesUnanswered(tiles, DOWN))', '"Community packages"', "p.landed", "maintainerSet(ok)", '"approved by a maintainer, from "', '" contributors"', '"Waiting for review"', "review.waiting", "review.oldest_ms", '"Shared workers alive"', "workerCounts(f.workers.filter(", "sw.byKind.community.alive", '"Builds this week"', "buildsByDay(STATS.series, 7).days", '"/journal?kind=build", "stats"]', '"Requested, not built yet"', '"/packages?origin=factory"'],
     reads: [
       { path: "/api/v1/factory", fields: ["workers", "workers.0.id", "workers.0.alive", "workers.0.ready", "workers.0.current_task", "workers.0.revoked_at", "workers.0.side", "workers.0.mode", "workers.0.labels", "workers.0.update"] },
       { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.name", "packages.0.owner", "packages.0.status", "packages.0.landed"] },
