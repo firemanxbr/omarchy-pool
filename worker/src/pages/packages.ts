@@ -289,7 +289,8 @@ const PACKAGE_SCRIPT = String.raw`
     var sec = $("#factory-section"); sec.hidden = false;
     var pkg = st.package || {}, rings = (st.rings || []).filter(function (r) { return r.arch === arch; }).map(function (r) { return r.ring; });
     var onlyLab = rings.length === 1 && rings[0] === "lab", none = !rings.length;
-    $("#factory-badge").innerHTML = (none ? pillHtml("lilac", "not in the pool yet", "a contributor's build is evidence; the project's build enters the lab") : onlyLab ? pillHtml("lab", "in the lab", "the fourth ring: the project's build, tried by a real pacman, waiting for a maintainer — not promised, not promoted") : pillHtml("ok", "in " + rings.join(" · "))) + (st.class ? ' ' + classPill(st.score, "class " + st.class, st.score.points + "/100 — What we test → The score") : '');
+    // One package, a target per architecture (#242): where each of them stands, beside where this architecture is served.
+    $("#factory-badge").innerHTML = (none ? pillHtml("lilac", "not in the pool yet", "a contributor's build is evidence; the project's build enters the lab") : onlyLab ? pillHtml("lab", "in the lab", "the fourth ring: the project's build, tried by a real pacman, waiting for a maintainer — not promised, not promoted") : pillHtml("ok", "in " + rings.join(" · "))) + (st.class ? ' ' + classPill(st.score, "class " + st.class, st.score.points + "/100 — What we test → The score") : '') + (st.targets ? ' ' + targetChips(st.targets) : '');
     if (none) {
       $("#desc").className = "lede"; $("#desc").innerHTML = esc(pkg.description || "") + (pkg.description ? ' — ' : '') + 'not in any ring for ' + esc(arch) + ' yet: a contributor\'s build is evidence, never in the pool; the project\'s build enters the lab.';
       $("#pg-tiles").innerHTML = ""; $("#who-section").hidden = true;
@@ -405,9 +406,10 @@ export const PACKAGE_COMPONENTS = (F: Fixture): Component[] => {
       id: "package.factory-badge",
       page,
       anchor: ['id="factory-section"', 'id="factory-badge"'],
-      script: ['"/api/v1/factory/packages/"', '"/story"', '"#factory-section"', '"#factory-badge"', "st.chains", "st.class", "classPill(st.score", "st.score.points", "not in the pool yet"],
+      // Beside the rings, where each architecture of the package stands: one package, a target per architecture (#242).
+      script: ['"/api/v1/factory/packages/"', '"/story"', '"#factory-section"', '"#factory-badge"', "st.chains", "st.class", "classPill(st.score", "st.score.points", "not in the pool yet", "targetChips(st.targets)"],
       reads: [
-        { path: story, fields: ["name", "chains", "rings", "class", "score.points"] },
+        { path: story, fields: ["name", "chains", "rings", "class", "score.points", "targets", "targets.x86_64.status", "targets.x86_64.task"] },
         // The badge names the rings once the package is in the pool.
         { path: shipped, fields: ["rings.0.ring", "rings.0.arch"] },
         // A package from a source has no story: the section stays hidden on the 404.

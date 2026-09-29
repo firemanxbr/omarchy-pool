@@ -104,9 +104,10 @@ const SCRIPT = String.raw`
     setTiles("#tiles", down ? tilesUnanswered(tiles, down) : tiles);
   }
 
-  // ---- yours: one line per package of yours in the flow — waiting first, then decided; the ring is the one the line is about (the lab for a build waiting, the ring an approval landed in).
-  function row(cls, name, version, ring, arch, state, line, link) {
-    return '<div class="rrow ' + cls + '"><div class="n">' + pkg(name, version, ring, arch) + '</div><span class="pill none">' + esc(arch) + '</span><div class="s">' + state + ' ' + line + '</div>' + (link ? '<a class="go" href="' + esc(link[0]) + '">' + link[1] + '</a>' : '<span></span>') + '</div>';
+  // ---- yours: one line per package of yours in the flow — waiting first, then decided; the ring is the one the line is about (the lab for a build waiting, the ring an approval landed in), the architecture the one the package's link opens on. Where the package's architectures stand is the chips (targetChips); a line without them names the architectures it is about (label, the architecture itself when none is given).
+  function row(cls, name, version, ring, arch, state, line, link, targets, label) {
+    var where = targetChips(targets) || '<span class="pill none">' + esc(label || arch) + '</span>';
+    return '<div class="rrow ' + cls + '"><div class="n">' + pkg(name, version, ring, arch) + '</div>' + where + '<div class="s">' + state + ' ' + line + '</div>' + (link ? '<a class="go" href="' + esc(link[0]) + '">' + link[1] + '</a>' : '<span></span>') + '</div>';
   }
   function short(t, n) { t = String(t || ""); return t.length > n ? '<span title="' + esc(t) + '">' + esc(t.slice(0, n - 1)) + '…</span>' : esc(t); }
   function renderMine() {
@@ -127,26 +128,28 @@ const SCRIPT = String.raw`
     (blocks.packages || []).filter(function (b) { return isOwner(b.owner); }).forEach(function (b) {
       decided.push(row("act", b.name, null, null, "all", '<span class="pill error">blocked</span>', ago(b.blocked_at) + ' by ' + personLink(b.blocked_by) + ': ' + short(b.blocked_reason, 90), ["/docs/governance", "What a block means →"]));
     });
-    // Staged builds of yours, one card per package and architecture: the project's build when there is one, your own otherwise.
+    // Packages of yours in review, one card each (one name, one package): the build that speaks for it — the project's when there is one, your own otherwise — and where each architecture stands.
     var seen = {};
-    STAGED.filter(function (t) { return isOwner(t.owner); }).sort(function (a, b) { return (b.kind === "project") - (a.kind === "project"); }).forEach(function (t) {
-      var key = t.name + "/" + t.arch; if (seen[key]) return; seen[key] = true;
-      var pb = t.project_build;
-      if (t.kind === "project") waiting.push(row("", t.name, t.version, "lab", t.arch, '<span class="pill ok">built again</span>', 'the project\'s ' + taskLink(t.id) + ' (from your ' + taskLink(t.from) + ') waits for approval', ["/build/" + t.id, "The build →"]));
-      else if (pb && (pb.status === "queued" || pb.status === "leased")) waiting.push(row("", t.name, t.version, "lab", t.arch, '<span class="pill blue">building again</span>', 'the project is building it again (' + taskLink(pb.id) + '), from your ' + taskLink(t.id), ["/build/" + t.id, "Your build →"]));
-      else if (pb && pb.status === "failed") waiting.push(row("", t.name, t.version, "lab", t.arch, taskPill("failed", pb.error), 'the project\'s ' + taskLink(pb.id) + ' (from your ' + taskLink(t.id) + ') failed — a maintainer decides', ["/build/" + pb.id, "The project's build →"]));
-      else if (t.already) waiting.push(row("", t.name, t.version, "lab", t.arch, '<span class="pill none">already approved</span>', 'your build ' + taskLink(t.id) + ' is of a version approved ' + ago(t.already.at) + ' as ' + taskLink(t.already.task) + ' — nothing to decide', ["/build/" + t.id, "The build →"]));
-      else waiting.push(row("", t.name, t.version, "lab", t.arch, taskPill("staged"), 'your build ' + taskLink(t.id) + ' waits for a maintainer' + (t.audit && t.audit.status === "done" && t.audit.verdict ? ' · audit <span class="pill ' + (t.audit.verdict === "ok" ? "ok" : t.audit.verdict === "warn" ? "warn" : "error") + '">' + esc(t.audit.verdict) + '</span>' : t.audit && t.audit.status === "queued" ? ' · audit waiting' : ''), ["/build/" + t.id, "Your build →"]));
+    STAGED.filter(function (t) { return isOwner(t.owner); }).sort(function (a, b) { return (b.lead === true) - (a.lead === true) || (b.kind === "project") - (a.kind === "project"); }).forEach(function (t) {
+      if (seen[t.name]) return; seen[t.name] = true;
+      var pb = t.project_build, tg = t.targets;
+      if (t.kind === "project") waiting.push(row("", t.name, t.version, "lab", t.arch, '<span class="pill ok">built again</span>', 'the project\'s ' + taskLink(t.id) + ' (from your ' + taskLink(t.from) + ') waits for approval', ["/build/" + t.id, "The build →"], tg));
+      else if (pb && (pb.status === "queued" || pb.status === "leased")) waiting.push(row("", t.name, t.version, "lab", t.arch, '<span class="pill blue">building again</span>', 'the project is building it again (' + taskLink(pb.id) + '), from your ' + taskLink(t.id), ["/build/" + t.id, "Your build →"], tg));
+      else if (pb && pb.status === "failed") waiting.push(row("", t.name, t.version, "lab", t.arch, taskPill("failed", pb.error), 'the project\'s ' + taskLink(pb.id) + ' (from your ' + taskLink(t.id) + ') failed — a maintainer decides', ["/build/" + pb.id, "The project's build →"], tg));
+      else if (t.already) waiting.push(row("", t.name, t.version, "lab", t.arch, '<span class="pill none">already approved</span>', 'your build ' + taskLink(t.id) + ' is of a version approved ' + ago(t.already.at) + ' as ' + taskLink(t.already.task) + ' — nothing to decide', ["/build/" + t.id, "The build →"], tg));
+      else waiting.push(row("", t.name, t.version, "lab", t.arch, taskPill("staged"), 'your build ' + taskLink(t.id) + ' waits for a maintainer' + (t.audit && t.audit.status === "done" && t.audit.verdict ? ' · audit <span class="pill ' + (t.audit.verdict === "ok" ? "ok" : t.audit.verdict === "warn" ? "warn" : "error") + '">' + esc(t.audit.verdict) + '</span>' : t.audit && t.audit.status === "queued" ? ' · audit waiting' : ''), ["/build/" + t.id, "Your build →"], tg));
     });
     // Decided: the record's latest word on each package of yours (a rejection carries the note; an approval, where the package is today — the shell's approvalWhere over the row's rings, blocked_at and publish_status, the word the Factory's Landed lately says of the same row; the registry's status is not read, it stays "approved" after a failed publish).
     var mine = {}; ((MINE && MINE.packages) || []).forEach(function (p) { mine[p.name] = p; });
+    // The record's latest word on each package of yours: one review covers the package, so one line per name, with the architectures it decided.
     var last = {};
-    APPROVALS.forEach(function (a) { if (mine[a.name] && !last[a.name + "/" + a.arch]) last[a.name + "/" + a.arch] = a; });
+    APPROVALS.forEach(function (a) { if (mine[a.name] && !last[a.name]) last[a.name] = a; });
     Object.keys(last).forEach(function (k) {
-      var a = last[k];
-      if (a.withdrawn_at) decided.push(row("act", a.name, a.version, servedRing(a.rings), a.arch, taskPill("withdrawn"), 'the approval by ' + personLink(a.by) + ' was withdrawn ' + ago(a.withdrawn_at) + ' by ' + personLink(a.withdrawn_by) + ': ' + short(a.withdrawn_reason, 100) + ' — another maintainer decides', ["/build/" + a.task_id, "The build →"]));
-      else if (a.decision === "rejected") decided.push(row("act", a.name, a.version, servedRing(a.rings), a.arch, taskPill("rejected"), ago(a.created_at) + ' by ' + personLink(a.by) + ': ' + short(a.note, 110), ["/factory", "Fix it, build again →"]));
-      else { var where = approvalWhere(a), served = !!(a.rings && a.rings.length); decided.push(row(where.cls === "error" ? "act" : "ok", a.name, a.version, servedRing(a.rings), a.arch, taskPill("approved"), ago(a.created_at) + ' by ' + personLink(a.by) + ' — ' + pillHtml(where.cls, where.word, where.title) + (a.note ? ' · ' + short(a.note, 80) : ''), served ? [pkgHref(a.name, servedRing(a.rings), a.arch), "The package →"] : ["/build/" + a.task_id, "The build →"])); }
+      var a = last[k], tg = mine[a.name] && mine[a.name].targets;
+      if (a.withdrawn_at) decided.push(row("act", a.name, a.version, servedRing(a.rings), a.arch, taskPill("withdrawn"), 'the approval by ' + personLink(a.by) + ' was withdrawn ' + ago(a.withdrawn_at) + ' by ' + personLink(a.withdrawn_by) + ': ' + short(a.withdrawn_reason, 100) + ' — another maintainer decides', ["/build/" + a.task_id, "The build →"], tg, archesOf(a)));
+      // A rejected request freed its name: request it again. A rejected new version of a package in the pool did not — the name and the approved version stay, the next version is built again.
+      else if (a.decision === "rejected") decided.push(row("act", a.name, a.version, servedRing(a.rings), a.arch, taskPill("rejected"), ago(a.created_at) + ' by ' + personLink(a.by) + ': ' + short(a.note, 110) + (a.released ? ' — the name is free again' : ''), a.released ? ["/request", "Request it again →"] : ["/factory", "Fix it, build again →"], tg, archesOf(a)));
+      else { var where = approvalWhere(a), served = !!(a.rings && a.rings.length); decided.push(row(where.cls === "error" ? "act" : "ok", a.name, a.version, servedRing(a.rings), a.arch, taskPill("approved"), ago(a.created_at) + ' by ' + personLink(a.by) + ' — ' + pillHtml(where.cls, where.word, where.title) + (a.note ? ' · ' + short(a.note, 80) : ''), served ? [pkgHref(a.name, servedRing(a.rings), a.arch), "The package →"] : ["/build/" + a.task_id, "The build →"], tg, archesOf(a))); }
     });
     $("#mine-waiting").innerHTML = waiting.join("") || '<p class="sub" style="margin:0">Nothing of yours waiting. <a href="/request">Request a package →</a></p>';
     // Both groups stay for a maintainer with nothing of their own too: the block reads the same for every role, the empty line included — once the reader's own packages answered; before, or when they did not, the line says that.
@@ -194,29 +197,50 @@ const SCRIPT = String.raw`
     var pb = t.project_build;
     return (pb && pb.status === "failed" ? '<span class="pill error" title="' + esc(pb.error || "") + '">project build #' + pb.id + ' failed</span> ' : '') + decisionCell(t);
   }
+  // One row per package (#242): a package is its name, and one review covers every architecture it was built for. The row is drawn from the build that speaks for the package — the server's lead, else its newest — with where each of its architectures stands under the name (targetChips); the Arch, Build, Gate, Audit and Trial cells list each build of it the table shows, one line per build.
+  function byPackage(rows) {
+    var out = [], at = {};
+    rows.forEach(function (t) { var p = at[t.name]; if (!p) { p = at[t.name] = { name: t.name, rows: [] }; out.push(p); } p.rows.push(t); });
+    out.forEach(function (p) { p.t = p.rows.filter(function (t) { return t.lead; })[0] || p.rows[0]; });
+    return out;
+  }
+  function buildCell(t) {
+    var project = t.kind === "project", pb = t.project_build;
+    return project ? '<span class="pill ok" title="the project\'s own build, from a contributor\'s evidence">the project</span> <span class="muted">' + taskLink(t.id) + ' from ' + taskLink(t.from) + '</span>' + builtOn(t)
+      : '<span class="muted">evidence · ' + taskLink(t.id) + (t.duration_ms ? ' · ' + Math.round(t.duration_ms / 1000) + ' s' : '') + '</span>' + builtOn(t) + (pb && (pb.status === "queued" || pb.status === "leased") ? ' <span class="pill blue">building again</span>' : pb && pb.status === "staged" ? ' <span class="pill ok">built again</span>' : '')
+      + (t.already ? ' <span class="pill none" title="approved ' + esc(ago(t.already.at)) + ' by ' + esc(t.already.by) + ' as build #' + t.already.task + (t.already.rebuild_task ? '; the project\'s build #' + t.already.rebuild_task + ' ' + esc(t.already.rebuild_status || '') : '') + ' — nothing to decide">already approved</span>' : '');
+  }
   function renderStaged() {
-    var rows = shown();
-    // The note beside the heading reads the same for everyone, as the queue line does: what waits for a maintainer — for you, as one — and how many rows are staged, the ones of a version already approved named.
+    var rows = shown(), pkgs = byPackage(rows);
+    // The note beside the heading reads the same for everyone, as the queue line does: what waits for a maintainer — for you, as one — and how many packages are in review, the builds of a version already approved named.
     var redundant = rows.filter(function (t) { return t.already; }).length;
-    $("#queue-note").textContent = rows.length ? num(forMe()) + " waiting for " + (isMaintainer() ? "your decision" : "a maintainer") + " · " + num(rows.length) + " staged" + (redundant ? " · " + num(redundant) + " of a version already approved" : "") : "";
-    pager("#staged", rows, function (t) {
-      var det = t.detected || {}, project = t.kind === "project", pb = t.project_build;
-      var build = project ? '<span class="pill ok" title="the project\'s own build, from a contributor\'s evidence">the project</span> <span class="muted">' + taskLink(t.id) + ' from ' + taskLink(t.from) + '</span>' + builtOn(t)
-        : '<span class="muted">evidence · ' + taskLink(t.id) + (t.duration_ms ? ' · ' + Math.round(t.duration_ms / 1000) + ' s' : '') + '</span>' + builtOn(t) + (pb && (pb.status === "queued" || pb.status === "leased") ? ' <span class="pill blue">building again</span>' : pb && pb.status === "staged" ? ' <span class="pill ok">built again</span>' : '')
-        + (t.already ? ' <span class="pill none" title="approved ' + esc(ago(t.already.at)) + ' by ' + esc(t.already.by) + ' as build #' + t.already.task + (t.already.rebuild_task ? '; the project\'s build #' + t.already.rebuild_task + ' ' + esc(t.already.rebuild_status || '') : '') + ' — nothing to decide">already approved</span>' : '');
-      var mine = isOwner(t.owner), forYou = isMaintainer() && !mine && decidable(t);
-      return '<tr id="t-' + t.id + '"' + (project ? ' class="project-row"' : '') + (forYou ? ' class="for-you"' : mine ? ' class="mine-row"' : '') + '><td>' + pkg(t.name, t.version, "lab", t.arch) + (det.license ? ' <span class="dim">' + esc(det.license) + '</span>' : '') + (t.url ? ' <a class="run dim" href="' + esc(t.url) + '" title="' + esc(t.url) + '">source</a>' : '') + '<br>' + category(t) + '</td><td>' + esc(t.arch) + '</td>' +
-        '<td>' + personLink(t.owner) + (mine ? ' <span class="pill none">you</span>' : '') + '</td><td>' + build + '</td><td>' + gatePill(t.vet, t.evidence.tests) + '</td><td>' + auditPill(t.audit, t.evidence.audit) + '</td><td>' + trialPill(t.trial, t.evidence.trial) + '</td>' +
-        '<td>' + klass(t) + '</td>' +
-        '<td class="when">' + ago(t.finished_at) + '</td><td class="decision">' + decision(t) + '</td></tr>';
-    }, { empty: "nothing waiting for review", text: function (t) { return [t.id, t.name, t.version, t.arch, t.owner, t.kind, t.category, t.score && t.score.class].join(" "); } });
+    $("#queue-note").textContent = rows.length ? num(forMe()) + " waiting for " + (isMaintainer() ? "your decision" : "a maintainer") + " · " + num(pkgs.length) + " in review" + (redundant ? " · " + num(redundant) + " of a version already approved" : "") : "";
+    pager("#staged", pkgs, function (p) {
+      var t = p.t, det = t.detected || {};
+      var mine = isOwner(t.owner), forYou = isMaintainer() && !mine && p.rows.some(decidable);
+      // One class per row: the lead's kind first, then whose it is — what a browser kept when the row carried two class attributes.
+      var cls = t.kind === "project" ? "project-row" : forYou ? "for-you" : mine ? "mine-row" : "";
+      // Each build of the package is a row of its own, so a long Build cell wraps and the Arch, Gate, Audit and Trial beside it stay on its line; the package's cells — its name and targets, who brought it, its class, since when, the decision — span them all.
+      var across = p.rows.length > 1 ? ' rowspan="' + p.rows.length + '"' : '';
+      var arch = function (r) { return '<td>' + esc(r.arch) + '</td>'; };
+      var build = function (r) { return '<td>' + buildCell(r) + '</td><td>' + gatePill(r.vet, r.evidence.tests) + '</td><td>' + auditPill(r.audit, r.evidence.audit) + '</td><td>' + trialPill(r.trial, r.evidence.trial) + '</td>'; };
+      return p.rows.map(function (r, i) {
+        if (i) return '<tr id="t-' + r.id + '" class="' + (cls ? cls + ' ' : '') + 'more">' + arch(r) + build(r) + '</tr>';
+        return '<tr id="t-' + r.id + '"' + (cls ? ' class="' + cls + '"' : '') + '><td' + across + '>' + pkg(t.name, t.version, "lab", t.arch) + (det.license ? ' <span class="dim">' + esc(det.license) + '</span>' : '') + (t.url ? ' <a class="run dim" href="' + esc(t.url) + '" title="' + esc(t.url) + '">source</a>' : '') + '<br>' + targetChips(t.targets) + ' ' + category(t) + '</td>' + arch(r) +
+          '<td' + across + '>' + personLink(t.owner) + (mine ? ' <span class="pill none">you</span>' : '') + '</td>' + build(r) +
+          '<td' + across + '>' + klass(t) + '</td>' +
+          '<td class="when"' + across + '>' + ago(t.finished_at) + '</td><td class="decision"' + across + '>' + decision(t) + '</td></tr>';
+      }).join("");
+    }, { empty: "nothing waiting for review", text: function (p) { return p.rows.map(function (t) { return [t.id, t.name, t.version, t.arch, t.owner, t.kind, t.category, t.score && t.score.class].join(" "); }).join(" "); } });
     endSkeleton();
   }
   // Every decision on the record, newest first: an approval taken back reads withdrawn; the last cell is the project's build the approval carries (rebuild_task, set by the approval itself) with its status and the file it left.
   function renderDecisions() {
     pager("#decisions", APPROVALS, function (a) {
-      return '<tr><td class="when">' + ago(a.created_at) + '</td><td>' + pkg(a.name, a.version, servedRing(a.rings), a.arch) + ' <span class="dim">' + taskLink(a.task_id) + '</span></td><td>' + esc(a.arch) + '</td><td>' + (a.withdrawn_at ? taskPill("withdrawn", "approved by " + a.by + ", withdrawn " + ago(a.withdrawn_at) + " by " + a.withdrawn_by + ": " + (a.withdrawn_reason || "")) : taskPill(a.decision)) + '</td><td>' + personLink(a.by) + (a.withdrawn_at ? ' <span class="dim">· withdrawn by ' + personLink(a.withdrawn_by) + '</span>' : '') + '</td><td class="muted">' + esc(a.withdrawn_at ? (a.withdrawn_reason || "") : (a.note || "")) + '</td><td>' + (a.rebuild_task ? taskLink(a.rebuild_task) + ' ' + esc(a.rebuild_status || "") + (a.rebuild_result ? ' <span class="mono">' + esc(a.rebuild_result) + '</span>' : '') : '—') + '</td></tr>';
-    }, { empty: "no decision yet", text: function (a) { return [a.name, a.version, a.arch, a.decision, a.by, a.note].join(" "); } });
+      // One row per review of a package: the architectures it decided, the ones never built beside them, the project's build of each.
+      var ns = Object.keys(a.not_supported || {}), built = (a.targets && a.targets.length ? a.targets : [a]).filter(function (x) { return x.rebuild_task; });
+      return '<tr><td class="when">' + ago(a.created_at) + '</td><td>' + pkg(a.name, a.version, servedRing(a.rings), a.arch) + ' <span class="dim">' + taskLink(a.task_id) + '</span></td><td>' + esc(archesOf(a)) + (ns.length ? ' <span class="dim" title="requested, never built — outside the decision">· ' + esc(ns.join(", ")) + ' not supported</span>' : '') + '</td><td>' + (a.withdrawn_at ? taskPill("withdrawn", "approved by " + a.by + ", withdrawn " + ago(a.withdrawn_at) + " by " + a.withdrawn_by + ": " + (a.withdrawn_reason || "")) : taskPill(a.decision)) + '</td><td>' + personLink(a.by) + (a.withdrawn_at ? ' <span class="dim">· withdrawn by ' + personLink(a.withdrawn_by) + '</span>' : '') + '</td><td class="muted">' + esc(a.withdrawn_at ? (a.withdrawn_reason || "") : (a.note || "")) + '</td><td>' + (built.length ? built.map(function (x) { return '<div class="bl">' + taskLink(x.rebuild_task) + ' ' + esc(x.rebuild_status || "") + (x.rebuild_result ? ' <span class="mono">' + esc(x.rebuild_result) + '</span>' : '') + '</div>'; }).join("") : '—') + '</td></tr>';
+    }, { empty: "no decision yet", text: function (a) { return [a.name, a.version, archesOf(a), a.decision, a.by, a.note].join(" "); } });
     endSkeleton();
   }
 
@@ -369,29 +393,30 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     id: "review.yours-waiting",
     page: "/review",
     anchor: ['id="g-waiting"', 'id="mine-waiting"'],
-    script: ['$("#mine-waiting")', "Nothing of yours waiting", "Nothing of yours here", 'href="/request"', "t.project_build", "t.already.task", ">built again<", "t.audit.verdict", 't.version, "lab", t.arch', 'if (!DRAWN) { $("#mine-waiting").innerHTML = unanswered(DOWN)', "function unanswered(why)"],
-    reads: [{ path: "/api/v1/factory/review", fields: ["staged.0.id", "staged.0.owner", "staged.0.name", "staged.0.version", "staged.0.arch", "staged.0.kind", "staged.0.from", "staged.0.project_build", "staged.0.already", "staged.0.audit.status"] }],
+    // One card per package of the reader's (one name, one package), with where each of its architectures stands.
+    script: ['$("#mine-waiting")', "Nothing of yours waiting", "Nothing of yours here", 'href="/request"', "t.project_build", "t.already.task", ">built again<", "t.audit.verdict", 't.version, "lab", t.arch', 'if (!DRAWN) { $("#mine-waiting").innerHTML = unanswered(DOWN)', "function unanswered(why)", "if (seen[t.name]) return;", "tg = t.targets", "targetChips(targets)"],
+    reads: [{ path: "/api/v1/factory/review", fields: ["staged.0.id", "staged.0.owner", "staged.0.name", "staged.0.version", "staged.0.arch", "staged.0.kind", "staged.0.from", "staged.0.project_build", "staged.0.already", "staged.0.audit.status", "staged.0.lead", "staged.0.targets"] }],
     visible: EVERYONE,
   },
   {
     id: "review.yours-decided",
     page: "/review",
     anchor: ['id="g-decided"', 'id="mine-decided"'],
-    script: ['$("#mine-decided")', "No decision on a package of yours yet", "once you are signed in", "MINE.packages", "a.withdrawn_at", "a.rings", "servedRing(a.rings)", "approvalWhere(a)", "pillHtml(where.cls, where.word, where.title)", "pkgHref(a.name, servedRing(a.rings), a.arch)", "blocks.packages", '$("#mine-decided").innerHTML = unanswered(DOWN)', 'noAnswer("list of your packages", e)', "unanswered(MINE_DOWN)"],
+    script: ['$("#mine-decided")', "No decision on a package of yours yet", "once you are signed in", "MINE.packages", "a.withdrawn_at", "a.rings", "servedRing(a.rings)", "approvalWhere(a)", "pillHtml(where.cls, where.word, where.title)", "pkgHref(a.name, servedRing(a.rings), a.arch)", "blocks.packages", '$("#mine-decided").innerHTML = unanswered(DOWN)', 'noAnswer("list of your packages", e)', "unanswered(MINE_DOWN)", "if (mine[a.name] && !last[a.name])", "archesOf(a)", "a.released", 'a.released ? ["/request", "Request it again →"] : ["/factory", "Fix it, build again →"]', "tg, archesOf(a)", "esc(label || arch)"],
     reads: [
-      { path: "/api/v1/factory/approvals", fields: ["approvals.0.name", "approvals.0.arch", "approvals.0.version", "approvals.0.decision", "approvals.0.by", "approvals.0.note", "approvals.0.created_at", "approvals.0.withdrawn_at", "approvals.0.withdrawn_by", "approvals.0.withdrawn_reason", "approvals.0.rings", "approvals.0.publish_status", "approvals.0.blocked_at", "approvals.0.task_id"] },
-      { path: "/api/v1/factory/me", as: "owner", fields: ["contributor.login", "packages", "packages.0.name"] },
+      { path: "/api/v1/factory/approvals", fields: ["approvals.0.name", "approvals.0.arch", "approvals.0.arches", "approvals.0.version", "approvals.0.decision", "approvals.0.by", "approvals.0.note", "approvals.0.created_at", "approvals.0.withdrawn_at", "approvals.0.withdrawn_by", "approvals.0.withdrawn_reason", "approvals.0.rings", "approvals.0.publish_status", "approvals.0.blocked_at", "approvals.0.task_id", "approvals.0.released"] },
+      { path: "/api/v1/factory/me", as: "owner", fields: ["contributor.login", "packages", "packages.0.name", "packages.0.targets"] },
       { path: "/api/v1/factory/me", as: "contributor", fields: ["contributor.login", "packages"] },
       { path: "/api/v1/factory/blocks", fields: ["packages", "packages.0.owner", "packages.0.name", "packages.0.blocked_at", "packages.0.blocked_by", "packages.0.blocked_reason"] },
     ],
     visible: EVERYONE,
   },
   {
-    // The note says the same number the queue line does — the list's `waiting`, less a maintainer's own rows — and how many rows are staged; when the lists did not answer, it says so and why (the shell's noAnswer), and the table draws no "nothing waiting" in their place.
+    // The note says the same number the queue line does — the list's `waiting`, less a maintainer's own rows — and how many packages are in review; when the lists did not answer, it says so and why (the shell's noAnswer), and the table draws no "nothing waiting" in their place.
     id: "review.queue-head",
     page: "/review",
     anchor: ['<section id="queue">', 'id="queue-note"'],
-    script: ['$("#queue-note")', "num(forMe())", '" waiting for "', '" staged"', "of a version already approved", 'noAnswer("review list", e, "#queue-note")'],
+    script: ['$("#queue-note")', "num(forMe())", '" waiting for "', '" in review"', "of a version already approved", 'noAnswer("review list", e, "#queue-note")'],
     reads: [{ path: "/api/v1/factory/review", fields: ["staged", "waiting", "staged.0.already", "staged.0.owner", "staged.0.waits"] }],
     visible: EVERYONE,
   },
@@ -399,14 +424,14 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     id: "review.staged-table",
     page: "/review",
     anchor: ['<table id="staged">', "<th>Gate</th><th>Audit</th><th>Trial</th>", '<th class="decision">Decision</th>'],
-    // The package's name is its page at the shell's one address (pkgHref), with the lab — the ring a build nobody decided yet is about — and the row's architecture. A row for a maintainer to decide is highlighted (for-you) by the row's own `waits`, the server's word, never a rule of the page's.
-    script: ['pager("#staged"', 'pkg(t.name, t.version, "lab", t.arch)', "function pkg(name, version, ring, arch)", "pkgHref(name, ring, arch)", "gatePill(t.vet, t.evidence.tests)", "auditPill(t.audit, t.evidence.audit)", "trialPill(t.trial, t.evidence.trial)", "t.built_by", "sc.projected", '"project-row"', '"mine-row"', '"for-you"', "!mine && decidable(t)"],
+    // One group of rows per package (#242): the build that speaks for it (the server's `lead`) draws the package's cells, which span the group, its targets say where each architecture stands under the name, and every build of it shown is a row of its own Arch, Build, Gate, Audit and Trial cells. The package's name is its page at the shell's one address (pkgHref), with the lab — the ring a build nobody decided yet is about — and the row's architecture. A package for a maintainer to decide is highlighted (for-you) by its rows' own `waits`, the server's word, never a rule of the page's.
+    script: ['pager("#staged", pkgs', "function byPackage(rows)", "p.rows.filter(function (t) { return t.lead; })[0] || p.rows[0]", "targetChips(t.targets)", 'pkg(t.name, t.version, "lab", t.arch)', "function pkg(name, version, ring, arch)", "pkgHref(name, ring, arch)", "gatePill(r.vet, r.evidence.tests)", "auditPill(r.audit, r.evidence.audit)", "trialPill(r.trial, r.evidence.trial)", "t.built_by", "sc.projected", '"project-row"', '"mine-row"', '"for-you"', "!mine && p.rows.some(decidable)", "' rowspan=\"' + p.rows.length", "'more\">' + arch(r) + build(r)"],
     reads: [
       {
         path: "/api/v1/factory/review",
         fields: [
           "staged", "staged.0.id", "staged.0.name", "staged.0.version", "staged.0.arch", "staged.0.owner", "staged.0.kind", "staged.0.from", "staged.0.url", "staged.0.detected", "staged.0.category", "staged.0.duration_ms", "staged.0.finished_at",
-          "staged.0.project_build", "staged.0.built_by", "staged.0.built_by.worker", "staged.0.built_by.owner", "staged.0.built_by.where", "staged.0.built_by.trusted_by", "staged.0.already", "staged.0.waits",
+          "staged.0.project_build", "staged.0.built_by", "staged.0.built_by.worker", "staged.0.built_by.owner", "staged.0.built_by.where", "staged.0.built_by.trusted_by", "staged.0.already", "staged.0.waits", "staged.0.lead", "staged.0.targets",
           "staged.0.vet.verdict", "staged.0.vet.warnings", "staged.0.vet.warned", "staged.0.vet.failed", "staged.0.audit.status", "staged.0.trial.status",
           "staged.0.score.points", "staged.0.score.class", "staged.0.score.projected", "staged.0.score.ready", "staged.0.evidence.tests", "staged.0.evidence.audit", "staged.0.evidence.trial",
         ],
@@ -493,12 +518,12 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // Every decision, an approval taken back read as withdrawn; the project's build the approval carries (`rebuild_task`) with its status; the package links the most stable ring that serves it (`rings`).
+    // Every decision — a review of a package, the architectures it covered and the ones never built beside them — an approval taken back read as withdrawn; the project's build of each architecture (`rebuild_task`) with its status; the package links the most stable ring that serves it (`rings`).
     id: "review.decisions-table",
     page: "/review",
     anchor: ['id="decisions"', "<h2>Decided lately</h2>", 'href="/journal"'],
-    script: ['pager("#decisions"', "pkg(a.name, a.version, servedRing(a.rings), a.arch)", "a.rebuild_task", "a.rebuild_status", "a.rebuild_result", "a.withdrawn_reason"],
-    reads: [{ path: "/api/v1/factory/approvals", fields: ["approvals", "approvals.0.created_at", "approvals.0.name", "approvals.0.version", "approvals.0.arch", "approvals.0.task_id", "approvals.0.decision", "approvals.0.rings", "approvals.0.by", "approvals.0.note", "approvals.0.withdrawn_at", "approvals.0.withdrawn_by", "approvals.0.withdrawn_reason", "approvals.0.rebuild_task", "approvals.0.rebuild_status", "approvals.0.rebuild_result"] }],
+    script: ['pager("#decisions"', "pkg(a.name, a.version, servedRing(a.rings), a.arch)", "archesOf(a)", "a.not_supported", " not supported</span>", "x.rebuild_task", "x.rebuild_status", "x.rebuild_result", "a.withdrawn_reason"],
+    reads: [{ path: "/api/v1/factory/approvals", fields: ["approvals", "approvals.0.created_at", "approvals.0.name", "approvals.0.version", "approvals.0.arch", "approvals.0.arches", "approvals.0.not_supported", "approvals.0.task_id", "approvals.0.decision", "approvals.0.rings", "approvals.0.by", "approvals.0.note", "approvals.0.withdrawn_at", "approvals.0.withdrawn_by", "approvals.0.withdrawn_reason", "approvals.0.targets", "approvals.0.targets.0.rebuild_task", "approvals.0.targets.0.rebuild_status", "approvals.0.targets.0.rebuild_result"] }],
     visible: EVERYONE,
   },
 ];

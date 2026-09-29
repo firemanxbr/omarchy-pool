@@ -244,6 +244,10 @@ const CSS = String.raw`
   dialog.ask.wide { width: min(880px, 94vw); } dialog.ask pre.block { max-height: 60vh; overflow: auto; margin: 0; background: var(--bg-deep); border: 1px solid var(--line); padding: 10px 12px; font: 12px/1.5 "JetBrains Mono", monospace; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
   .pill.error { color: var(--red); border-color: var(--red); }
   .pill.none { color: var(--dim); }
+  /* A package's targets: a chip per architecture, dashed when it is not supported (targetChips). */
+  .tgts { display: inline-flex; flex-wrap: wrap; gap: 4px; vertical-align: middle; } .pill.tgt { text-transform: none; letter-spacing: 0; font: 400 11.5px var(--font-mono); } .pill.tgt.dashed { border-style: dashed; }
+  /* One line per build of a decision (Review's Decided lately). */
+  .bl + .bl { margin-top: 6px; }
   .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 13.5px; }
   .kv dt { color: var(--dim); }
   .kv dd { margin: 0; }
@@ -457,7 +461,7 @@ const CSS = String.raw`
   .ring-head .k { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; } .ring-head b { font-family: Geist, sans-serif; font-size: 20px; font-weight: 600; line-height: 1.15; } .ring-head .s { font-size: 11.5px; color: var(--dim); line-height: 1.4; }
   .feed a.row { text-decoration: none; color: inherit; cursor: pointer; }
   /* An inset box-shadow with no blur and no offset is a 3px bar on a row's edge, not a shadow: it takes no room in the grid or the table, where a border would. */
-  tr.project-row td { background: var(--panel-2); } tr.project-row td:first-child { box-shadow: inset 3px 0 0 var(--green); } .feed a.row:hover .what { color: var(--text); }
+  tr.project-row td { background: var(--panel-2); } tr.project-row:not(.more) td:first-child { box-shadow: inset 3px 0 0 var(--green); } .feed a.row:hover .what { color: var(--text); }
   .charts.three { grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); }
   .charts.three .chart { display: flex; flex-direction: column; } .charts.three .chart > .mini { margin-top: auto; }
   .charts.three #c-sec { display: flex; flex-direction: column; flex: 1; } .charts.three #c-sec .hrows { flex: 1; align-content: space-evenly; } .charts.three #c-sec > p { margin-top: auto; }
@@ -528,7 +532,8 @@ const CSS = String.raw`
   .rrow .n { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .rrow .s { color: var(--muted); min-width: 0; } .rrow .s .pill { margin-right: 4px; }
   .rrow .go { font-size: 12.5px; color: var(--green); text-decoration: none; white-space: nowrap; justify-self: end; } .rrow .go:hover { text-decoration: underline; }
   .rrows > p { background: var(--panel); padding: 10px 14px; }
-  tr.for-you td:first-child { box-shadow: inset 3px 0 0 var(--amber); } tr.mine-row td:first-child { box-shadow: inset 3px 0 0 var(--line); }
+  /* A row's mark is on its first cell; a package's other builds in Review's table (tr.more) are rows under the cells the package spans, whose first cell carries the mark for them all. */
+  tr.for-you:not(.more) td:first-child { box-shadow: inset 3px 0 0 var(--amber); } tr.mine-row:not(.more) td:first-child { box-shadow: inset 3px 0 0 var(--line); }
   details.tool { border: 1px solid var(--line); background: var(--panel); padding: 12px 16px; } details.tool summary { cursor: pointer; font-weight: 500; } details.tool summary .dim { font-weight: 400; font-size: 12.5px; margin-left: 8px; } details.tool[open] summary { margin-bottom: 12px; }
   #mine-queue { margin: 0 0 18px; } #mine-queue b { color: var(--text); } #mine-queue a { color: var(--green); text-decoration: none; }
   .panel { border: 1px solid var(--line); background: var(--panel); padding: 16px 18px; min-width: 0; }
@@ -660,7 +665,7 @@ const CSS = String.raw`
   .docs { display: grid; grid-template-columns: 230px 1fr; gap: 24px; align-items: start; }
   .docs-side { position: sticky; top: 16px; display: grid; gap: 10px; }
   .docs-side input { background: var(--bg-deep); border: 1px solid var(--line); color: var(--text); padding: 8px 10px; font: inherit; font-size: 13.5px; width: 100%; } .docs-side input:focus { outline: none; border-color: var(--green); }
-  .docs-home { display: block; font-family: Geist, sans-serif; font-weight: 600; font-size: 14px; color: var(--muted); text-decoration: none; padding: 2px 10px 6px; } .docs-home.on, .docs-home:hover { color: var(--text); }
+  .docs-home { display: block; font-family: Geist, sans-serif; font-weight: 600; font-size: 14px; color: var(--muted); text-decoration: none; padding: 2px 10px 6px; } .docs-home:hover { color: var(--text); }
   .docs-nav { display: grid; gap: 2px; } .docs-nav details { border-left: 2px solid transparent; } .docs-nav details[open] { border-left-color: var(--green); background: var(--panel); }
   .docs-nav summary { list-style: none; cursor: pointer; display: flex; justify-content: space-between; align-items: baseline; gap: 8px; padding: 6px 10px; font-size: 13.5px; color: var(--muted); } .docs-nav summary::-webkit-details-marker { display: none; }
   .docs-nav summary::before { content: "›"; color: var(--dim); font-size: 13px; width: 8px; transition: transform .12s; } .docs-nav details[open] > summary::before { transform: rotate(90deg); }
@@ -678,10 +683,50 @@ const CSS = String.raw`
   .doc-figure { margin: 0 0 16px; background: var(--panel); border: 1px solid var(--line); padding: 10px; } .doc-figure img { display: block; width: 100%; max-width: 1100px; height: auto; margin: 0 auto; }
   .docs-hint { font-size: 12px; color: var(--dim); padding: 0 10px; } .docs-main { min-width: 0; }
   .docs-main > h1:first-child { margin-top: 2px; }
-  .doc-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 14px; }
-  .doc-card { border: 1px solid var(--line); background: var(--panel); padding: 16px 18px; display: grid; gap: 8px; align-content: start; } .doc-card h3 { margin: 0; } .doc-card h3 a { color: var(--text); text-decoration: none; } .doc-card h3 a:hover { color: var(--green); }
-  .doc-card p { margin: 0; font-size: 13.5px; color: var(--muted); } .doc-secs { display: flex; flex-wrap: wrap; gap: 4px 6px; margin-top: 4px; }
-  .doc-secs a { font-size: 12px; color: var(--dim); text-decoration: none; border: 1px solid var(--line); padding: 2px 8px; } .doc-secs a:hover { color: var(--text); border-color: var(--muted); }
+  .docs-said { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  /* The docs index (#250, pages/docs.ts): the title with the search beside it, then the map of the seven sections, sticky beside their
+     cards — the one the reader is in lit on --panel-2 —, each card its icon's square, a line or two, a command, a grid of facts or the API's
+     table, and the chapters that say more in green; the code's chapters one quiet line under them. 1120px wide with the frame's sides, as every
+     v1 page; the frame's main is wider, so the page narrows itself. Below 960px the map is on top, in four columns (two below 720px), and scrolls
+     with the page; below 640px a grid of facts is one column, the command scrolls in its well rather than break inside a word, and a row of the
+     API's table is its method and path, then what it returns, its head there for a screen reader only. */
+  .guide { max-width: calc(var(--content-max) - 2 * var(--gutter)); margin: 0 auto; padding: 12px 0 16px; display: grid; gap: 36px; }
+  .guide-head { display: flex; flex-wrap: wrap; gap: 24px 40px; align-items: flex-end; } .guide-head > div { flex: 1 1 480px; min-width: 0; display: grid; gap: 14px; }
+  .guide-search { flex: 0 1 340px; display: flex; align-items: center; gap: 10px; padding: 9px 12px; border: 1px solid var(--line); background: var(--bg-deep); color: var(--green); }
+  .guide-search:focus-within { border-color: var(--green); }
+  .guide-search input { flex: 1; min-width: 0; padding: 0; border: 0; border-radius: 0; outline: none; -webkit-appearance: none; appearance: none; background: transparent; color: var(--text); font: 14px var(--font-mono); }
+  .guide-search input::placeholder { color: var(--dim); } .guide-search input::-webkit-search-decoration, .guide-search input::-webkit-search-cancel-button { -webkit-appearance: none; }
+  .guide-body { display: grid; grid-template-columns: 218px minmax(0, 1fr); gap: 24px; align-items: start; }
+  .guide-nav { position: sticky; top: 16px; display: grid; gap: 2px; padding: 8px; border: 1px solid var(--line); background: var(--panel); }
+  .guide-nav a { display: flex; align-items: center; gap: 10px; padding: 7px 10px; font-size: 13px; line-height: 1.6; color: var(--muted); text-decoration: none; }
+  .guide-nav a:hover, .guide-nav a[aria-current="true"] { color: var(--text); } .guide-nav a[aria-current="true"] { background: var(--panel-2); }
+  .guide-nav a:focus-visible, .guide-more a:focus-visible, .guide-code a:focus-visible { outline: 1px solid var(--green); outline-offset: 1px; }
+  .guide-secs { display: grid; gap: 14px; min-width: 0; }
+  .guide-sec { margin: 0; padding: 18px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; scroll-margin-top: 16px; }
+  .guide-sec h2 { display: flex; align-items: center; gap: 10px; margin: 0; font: 600 18px/1.3 var(--font-display); letter-spacing: normal; }
+  .guide-sec > p { margin: 0; font-size: 13.5px; color: var(--muted); text-wrap: pretty; }
+  /* Two classes: the kit's sheet comes after this one, and its well's own rule for the code, one class and an element, would win a tie. */
+  .guide-sec .guide-well code { font-size: 12.5px; line-height: 1.7; }
+  /* The cells' lines are the grid's --line showing through a 1px gap, so an empty track would show as a block of it: three columns, one on a
+     phone, a count that divides every grid's cells (three rings, six gates; test/docs-index.test.ts holds them to it). */
+  .guide-items { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); }
+  .guide-items > div { display: grid; gap: 3px; align-content: start; padding: 10px 12px; background: var(--panel-2); }
+  .guide-items b { display: flex; align-items: center; gap: 8px; font: 600 13.5px/1.4 var(--font-display); color: var(--text); } .guide-items b > i { color: var(--green); }
+  .guide-items .edge b > i { color: var(--edge); } .guide-items .rc b > i { color: var(--rc); } .guide-items .stable b > i { color: var(--stable); }
+  .guide-items span { font-size: 12px; color: var(--dim); }
+  .guide-api { border: 1px solid var(--line); } .guide-api td { font-size: 12.5px; } .guide-api td:first-child { width: 44px; color: var(--green); font-size: 11.5px; }
+  .guide-api code { color: var(--text); white-space: nowrap; } .guide-api td:last-child { color: var(--dim); }
+  .guide-sec > p.guide-more { display: flex; flex-wrap: wrap; gap: 4px 20px; font-size: 13px; } .guide-more a { color: var(--green); text-decoration: none; } .guide-more a:hover { text-decoration: underline; }
+  .guide-code { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; margin: 6px 0 0; font-size: 12.5px; } .guide-code > span { flex-basis: 100%; }
+  .guide-code a { color: var(--muted); text-decoration: none; } .guide-code a:hover { color: var(--green); }
+  @media (max-width: 960px) { .guide-body { grid-template-columns: minmax(0, 1fr); } .guide-nav { position: static; grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+  @media (max-width: 720px) { .guide-nav { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 640px) {
+    .guide-items { grid-template-columns: minmax(0, 1fr); } .guide-sec .guide-well code { white-space: pre; overflow-wrap: normal; overflow-x: auto; }
+    .guide-api thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+    .guide-api tr { display: grid; grid-template-columns: 44px minmax(0, 1fr); } .guide-api code { white-space: normal; overflow-wrap: break-word; } .guide-api code > span { display: inline-block; }
+    .guide-api td:last-child { grid-column: 2; padding-top: 0; border-top: 0; }
+  }
   .docs-main h2 { margin-bottom: 4px; } .docs-main h3 { margin: 22px 0 8px; } .docs-main p { color: var(--muted); font-size: 14px; max-width: 78ch; margin: 0 0 10px; } .docs-main p code, .docs-main li code { color: var(--text); }
   .docs-main ul { margin: 0 0 12px; padding-left: 18px; color: var(--muted); font-size: 13.5px; }
   .doc-sec { border: 1px solid var(--line); background: var(--panel); padding: 18px 20px; margin-bottom: 16px; } .doc-sec h3:first-child { margin-top: 0; }
@@ -1227,6 +1272,18 @@ export const HELPERS = String.raw`
   // The reason a page gives its own gate, for whoever is looking: nobody signed in reads the sign-in first, as the server's own first refusal is the 401 — the same word on every grey control of a page, the Decision cell's included.
   function orSignIn(why) { return WHO.me ? why : "sign in with GitHub"; }
 
+  // ---- a package's targets (targets.ts): one package, an architecture per chip, the server's word for each — "x86_64 ✓" once it built (again by the project, approved, in the pool), "aarch64 ⟳" while it builds or the project builds it again, "aarch64 · not supported" dashed when its build failed after the tries it had, "x86_64 ○" while nothing of it is in flight. Review, the package page and a person's page draw the same chips; "marcelo, on x86_64", never "the x86_64 package".
+  var TARGET_WORD = { waiting: ["none", "○", "requested, nothing of it in flight"], building: ["blue", "⟳", "its contributor's build is queued or running"], built: ["ok", "✓", "built, ready for the review"], not_supported: ["none", "· not supported", "its build failed after the tries it had; the other architectures go on"], reviewing: ["blue", "⟳", "the project builds it again"], reviewed: ["ok", "✓", "built again by the project; the review decides"], approved: ["ok", "✓", "approved; its publish job carries it into edge"], published: ["ok", "✓", "in the pool"] };
+  function targetChips(targets) {
+    var arches = Object.keys(targets || {});
+    if (!arches.length) return "";
+    return '<span class="tgts">' + arches.map(function (a) {
+      var t = targets[a] || {}, w = TARGET_WORD[t.status] || ["none", "", t.status || ""];
+      return '<span class="pill tgt ' + w[0] + (t.status === "not_supported" ? " dashed" : "") + '" title="' + esc(a + ": " + w[2] + (t.task ? " (build #" + t.task + ")" : "")) + '">' + esc(a) + " " + esc(w[1]) + "</span>";
+    }).join("") + "</span>";
+  }
+  // The architectures a decision covered (a review of the package, GET /factory/approvals), as a row words them: "x86_64 · aarch64".
+  function archesOf(a) { return ((a && a.arches && a.arches.length ? a.arches : [a && a.arch]).filter(Boolean)).join(" · "); }
   // ---- the three verdicts on a staged build, as Review's table reads them: the gate (the worker's own checks on the build), the audit (the project's second agent), the trial (a real pacman installing the project's build in the lab). The pill, then the evidence as a link when the row has one (href: t.evidence.tests / .audit / .trial) — what warned or failed, the findings, the transcript — and as a word when it has none.
   function gatePill(v, href) {
     if (!v) return '<span class="dim" title="built before the gate existed">—</span>';
@@ -1277,18 +1334,19 @@ export const HELPERS = String.raw`
     opts = opts || {};
     if (opts.note) return Promise.resolve(opts.note);
     if (what === "build") return fetch("/api/v1/factory?limit=10").then(function (r) { return r.json(); }).then(function (d) { return d.workers || []; }).catch(function () { return []; }).then(function (ws) {
-      return ask({ title: "Have the project build " + label + " again", text: "A trusted review worker builds the recipe again with the project's agent — the contributor's bytes are never used. The result shows in review when it is staged.", select: whereOptions(ws, opts.arch || ARCHES[0], WHO.login, true), input: "optional", placeholder: "a hint for the project's agent (optional)", confirm: "Build by the project" });
+      return ask({ title: "Have the project build " + label + " again", text: "Trusted review workers build the recipe again with the project's agent, for every architecture its contributor built — the contributor's bytes are never used. One review covers them all; the results show in review when they are staged.", select: whereOptions(ws, opts.arch || ARCHES[0], WHO.login, true), input: "optional", placeholder: "a hint for the project's agent (optional)", confirm: "Build by the project" });
     });
-    if (what === "reject") return ask({ title: "Reject " + label, text: "The contributor reads the note and builds again. The rejection is on the record.", input: "required", placeholder: "what is wrong, in a line or two", confirm: "Reject", danger: true });
-    if (what === "withdraw") return ask({ title: "Withdraw the approval of " + label, text: "The approval stays on the record and is void from now on; the package leaves every ring it reached; another maintainer decides.", input: "required", placeholder: "why take it back", confirm: "Withdraw", danger: true });
-    return ask({ title: "Approve " + label, text: "The project's build goes into edge, signed by the pool; the approval is on the record with your name.", input: "optional", confirm: "Approve" });
+    if (what === "reject") return ask({ title: "Reject " + label, text: "Every build of the package in review stops, on every architecture. A request rejected frees its name; a package already in the pool keeps it. The contributor reads the note, and the rejection is on the record.", input: "required", placeholder: "what is wrong, in a line or two", confirm: "Reject", danger: true });
+    if (what === "withdraw") return ask({ title: "Withdraw the approval of " + label, text: "The approval stays on the record and is void from now on, on every architecture it covered; the package leaves every ring it reached; another maintainer decides.", input: "required", placeholder: "why take it back", confirm: "Withdraw", danger: true });
+    return ask({ title: "Approve " + label, text: "One decision for the package: the project's build of every architecture it built again goes into edge, signed by the pool; one that did not build is not supported. The approval is on the record with your name.", input: "optional", confirm: "Approve" });
   }
-  // What the toast says once the server said yes: where the build went, the task the project builds it as and on what, what the withdrawal emptied.
+  // What the toast says once the server said yes: where the builds went, the tasks the project builds it as and on what, what the withdrawal emptied, whether a rejection freed the name.
   function decidedText(what, d, dropped) {
-    if (what === "approve") return "Approved — the project's build goes into edge (publish job <a href=\"/build/" + d.publish + "\">#" + d.publish + "</a>).";
-    if (what === "build") return "The project is building it: task <a href=\"/build/" + d.task + "\">#" + d.task + "</a>, on " + (d.pinned_to ? esc(wtShort(d.pinned_to)) : "a review worker") + " with the project's agent.";
+    var jobs = function (ids) { return ids.map(function (id) { return "<a href=\"/build/" + id + "\">#" + id + "</a>"; }).join(", "); };
+    if (what === "approve") { var pubs = d.publishes ? Object.keys(d.publishes).map(function (a) { return d.publishes[a]; }) : [d.publish]; return "Approved — the project's build" + (pubs.length > 1 ? "s go" : " goes") + " into edge (publish job" + (pubs.length > 1 ? "s " : " ") + jobs(pubs) + ")."; }
+    if (what === "build") { var tasks = d.tasks && d.tasks.length ? d.tasks : [d.task]; return "The project is building it: task" + (tasks.length > 1 ? "s " : " ") + jobs(tasks) + ", on " + (d.pinned_to ? esc(wtShort(d.pinned_to)) : "a review worker") + " with the project's agent."; }
     if (what === "withdraw") return "Withdrawn — the approval is void; the package leaves " + esc((d.rings || []).map(function (r) { return r.ring; }).join(", ") || "no ring") + "; another maintainer decides.";
-    return dropped ? "Dropped." : "Rejected — the contributor sees the note.";
+    return dropped ? "Dropped." : "Rejected — the contributor sees the note." + (d.released ? " The name is free again." : "");
   }
   // The decision buttons are the shell's (data-approve / data-reject / data-build / data-withdraw = the task id, inside decisionCell's .decide): the click stops here, asks through decideDialog, posts once through api() and tells every fn a page gave onDecided — fn(what, id, answer) — to draw again. The button is disabled from the click and enabled again on cancel or refusal only, so a decision is never posted twice (a rejected row draws again without the button). A page's own Build buttons (a person's page names a package in data-build) are outside .decide and untouched.
   var DECIDED = [];
@@ -1736,7 +1794,7 @@ export interface PageOptions {
   description: string;
   /** Which of the three doors (or the docs) is highlighted: a page lights the door it belongs to — a package and the packages list the Pool, the request and the workers the Factory, a build Review — and a page the footer lights (Status, People) none. */
   active: "pool" | "factory" | "review" | "docs" | "none";
-  /** Documentation pages: which chapter, for the section's own navigation. */
+  /** Documentation pages: which chapter, for the section's own navigation — the map of every chapter beside the text (docsShell). The index ("index") draws its own map of its sections (docs.ts) and keeps the search. */
   doc?: DocKey;
   body: string;
   script?: string;
@@ -1758,6 +1816,13 @@ export interface PageOptions {
    * not pays nothing for it: no request, no bytes.
    */
   kit?: boolean;
+  /**
+   * The page's own rules: its layout, and where it refines a primitive of
+   * the kit. They live in the page's module, not in the frame's CSS, and
+   * are served after the frame's CSS and the kit's sheet, so a rule here
+   * wins over theirs at equal weight. Tokens only, as the frame's.
+   */
+  css?: string;
 }
 
 /**
@@ -1777,9 +1842,9 @@ export const NAV: { key: PageOptions["active"]; href: string; label: string; sub
  * to use it through one's own agent, what explains it, who runs it. Agents
  * is drawn in green (`accent`). An entry whose page has not landed yet names
  * what stands in for it (`until`): the router answers its address with a
- * 302 there (index.ts) and the docs hint does not call it a page. Agents is
- * #249's page, and until then its address is the chapter on connecting an
- * agent today; #249 drops the `until`.
+ * 302 there (index.ts) and the docs hint does not call it a page. None does
+ * since Agents became a page of its own (#249, pages/agents.ts); until then
+ * its address was the chapter on omarchy-cli as an MCP server.
  *
  * The rest of what the footer linked before is one hop from the frame, not
  * in it: the request is the Factory's first step (and People's "Bring a
@@ -1796,7 +1861,7 @@ export const NAV: { key: PageOptions["active"]; href: string; label: string; sub
 export const MORE: { href: string; label: string; accent?: true; until?: string }[] = [
   { href: "/packages", label: "Packages" },
   { href: "/status", label: "Status" },
-  { href: "/agents", label: "Agents", accent: true, until: "/docs/omarchy-cli-mcp" },
+  { href: "/agents", label: "Agents", accent: true },
   { href: "/docs", label: "Docs" },
   { href: "/people", label: "People" },
 ];
@@ -1805,8 +1870,9 @@ export const MORE: { href: string; label: string; accent?: true; until?: string 
  * The line under the docs map that says where the rest is, written from
  * MORE so it cannot name a page the footer does not link (it once
  * said Review was in the footer), nor call an address that still stands in
- * for its page (`until`) a page of its own: "Packages, Status and People
- * have their own pages, linked from the footer. The three doors are the header."
+ * for its page (`until`) a page of its own: "Packages, Status, Agents and
+ * People have their own pages, linked from the footer. The three doors are
+ * the header."
  */
 export function docsHint(): string {
   const rest = MORE.filter((m) => m.href !== "/docs" && !m.until).map((m) => m.label);
@@ -1846,12 +1912,14 @@ const BUILT_FOR_OMARCHY =
 export type { DocKey } from "./docs-tree";
 
 /**
- * The documentation's shell: every docs page — the index, a chapter — is
- * the same layout, the map beside the text. The sidebar carries the search
- * and the chapters; the current one is open on its sections, the others
- * open on a click; a section is a link to its anchor on its chapter's
- * page. The search (docsSearch, below) matches chapters, sections and the
- * glossary and answers with links, so a reader never leaves the shell.
+ * The documentation's shell: every chapter is the same layout, the map
+ * beside the text. The sidebar carries the search and the chapters; the
+ * current one is open on its sections, the others open on a click; a
+ * section is a link to its anchor on its chapter's page. The search
+ * (docsSearch, below) matches chapters, sections and the glossary and
+ * answers with links, so a reader never leaves the shell. The index
+ * (/docs, #250) is the one docs page without it: seven short sections with
+ * their own map, the search, and every chapter linked from its section.
  */
 function docsShell(current: DocKey, body: string): string {
   const tree = DOCS_TREE.map((c, i) => {
@@ -1864,8 +1932,9 @@ function docsShell(current: DocKey, body: string): string {
   });
   return `<div class="docs">
   <aside class="docs-side">
-    <a class="docs-home${current === "index" ? " on" : ""}" href="/docs">Documentation</a>
+    <a class="docs-home" href="/docs">Documentation</a>
     <input type="search" id="docs-q" placeholder="search the docs…" aria-label="search the docs" autocomplete="off">
+    <p class="docs-said" id="docs-said" role="status"></p>
     <div class="docs-hits" id="docs-hits" hidden></div>
     <nav class="docs-nav" id="docs-nav" aria-label="Chapters">${tree.join("")}</nav>
     <div class="docs-hint">${docsHint()}</div>
@@ -1881,10 +1950,16 @@ export function termId(term: string): string {
   return "term-" + term.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 }
 
-/** The search over the map, on every docs page: chapters, sections, the glossary — each hit a link. */
+/**
+ * The search over the map, on every docs page: chapters, sections, the
+ * glossary — each hit a link. Its answer takes the place of the map (on the
+ * index, of the whole page under the title), so a screen reader is told what
+ * came of each word (#docs-said, a status line the eye does not see): how
+ * many it found, or that nothing says it.
+ */
 const DOCS_SEARCH = String.raw`
   (function () {
-    var q = $("#docs-q"), hits = $("#docs-hits"), nav = $("#docs-nav"); if (!q || !hits || !nav) return;
+    var q = $("#docs-q"), hits = $("#docs-hits"), nav = $("#docs-nav"), said = $("#docs-said"); if (!q || !hits || !nav) return;
     var TREE = __DOCS_TREE__, GLOSSARY = __GLOSSARY__;
     var items = [];
     TREE.forEach(function (c) {
@@ -1895,12 +1970,13 @@ const DOCS_SEARCH = String.raw`
     function hl(t, needle) { var i = t.toLowerCase().indexOf(needle); return i < 0 ? esc(t) : esc(t.slice(0, i)) + "<mark>" + esc(t.slice(i, i + needle.length)) + "</mark>" + esc(t.slice(i + needle.length)); }
     q.oninput = function () {
       var needle = q.value.trim().toLowerCase();
-      if (!needle) { hits.hidden = true; nav.hidden = false; return; }
+      if (!needle) { hits.hidden = true; nav.hidden = false; if (said) said.textContent = ""; return; }
       var found = items.filter(function (it) { return (it.ch + " " + it.title + " " + it.text).toLowerCase().indexOf(needle) >= 0; }).slice(0, 12);
       hits.innerHTML = found.length
         ? found.map(function (it) { return '<a class="hit" href="' + it.href + '"><span class="ch">' + esc(it.ch) + '</span><b>' + hl(it.title, needle) + '</b><span>' + hl(it.text, needle) + '</span></a>'; }).join("")
         : '<div class="hit none">nothing in the docs says “' + esc(q.value.trim()) + '”</div>';
       hits.hidden = false; nav.hidden = true;
+      if (said) said.textContent = found.length ? found.length + (found.length === 1 ? " result" : " results") : "nothing in the docs says “" + q.value.trim() + "”";
     };
     q.onkeydown = function (e) { if (e.key === "Escape") { q.value = ""; q.oninput(); } };
   })();
@@ -1932,7 +2008,7 @@ export function page(o: PageOptions): string {
     : `<span class="ver" title="local build">${tag}</span>`;
   const nav = NAV.map((n) => `<a href="${n.href}"${n.key === o.active ? ' class="active" aria-current="page"' : ""}>${n.label}${n.sub ? `<small> ${n.sub}</small>` : ""}</a>`).join("\n      ");
   const more = MORE.map((m) => `<a href="${m.href}"${m.accent ? ' class="accent"' : ""}>${m.label}</a>`).join("");
-  const body = o.doc ? docsShell(o.doc, o.body) : o.body;
+  const body = o.doc && o.doc !== "index" ? docsShell(o.doc, o.body) : o.body;
   const pool = o.poolUrl.replace(/\/$/, "");
   const docsSearch = o.doc
     ? DOCS_SEARCH.replace("__DOCS_TREE__", JSON.stringify(DOCS_TREE.map((c) => ({ label: c.label, blurb: c.blurb, href: c.href, secs: c.secs })))).replace("__GLOSSARY__", JSON.stringify(GLOSSARY.map(([t, d]) => [t, d, termId(t)])))
@@ -1953,7 +2029,7 @@ export function page(o: PageOptions): string {
 <script>${THEME_BOOT}</script>${analyticsTag(v)}
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Geist:wght@500;600;700&display=swap">
-<style>${CSS}</style>${o.kit ? `\n<link rel="stylesheet" href="${KIT_SHEET_PATH}">` : ""}
+<style>${CSS}</style>${o.kit ? `\n<link rel="stylesheet" href="${KIT_SHEET_PATH}">` : ""}${o.css ? `\n<style>${o.css}</style>` : ""}
 </head>
 <body>
 <div id="progress"></div>

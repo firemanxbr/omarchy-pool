@@ -19,8 +19,8 @@ import { DOCS_TREE } from "./docs-tree";
 /** The paths no crawler indexes: the API, the sign-in, and what is a reader's own or a machine's — not a page for a search. */
 export const ROBOTS_DISALLOW: readonly string[] = ["/api/", "/auth/", "/me", "/diff", "/review", "/request", "/build/", "/user/", "/pool/", "/setup", "/omarchy-worker"];
 
-/** The pages a search engine may list — a fixed list, read from no database: the landing, the docs and every chapter of the map, the doors that are a page and not a reader's own. /packages is drawn from the API's answer (a D1 read on an edge miss, kept five minutes; routes/browse.ts), and a crawler walks its default pages forward only (pages/browse.ts). Package pages are found by the links, not listed here, and an address that redirects (index.ts MOVED: /pipeline and /security since #240) is not a page to list. */
-export const SITEMAP_PATHS: readonly string[] = ["/", "/docs", ...DOCS_TREE.map((c) => c.href), "/packages", "/status", "/factory", "/people"];
+/** The pages a search engine may list — a fixed list, read from no database: the landing, the docs and every chapter of the map, the doors that are a page and not a reader's own, and the footer's Agents (#249), which reads nothing at all. /packages is drawn from the API's answer (a D1 read on an edge miss, kept five minutes; routes/browse.ts), and a crawler walks its default pages forward only (pages/browse.ts). Package pages are found by the links, not listed here, and an address that redirects (index.ts MOVED: /pipeline and /security since #240) is not a page to list. */
+export const SITEMAP_PATHS: readonly string[] = ["/", "/docs", ...DOCS_TREE.map((c) => c.href), "/packages", "/status", "/factory", "/people", "/agents"];
 
 /** robots.txt for the name it was asked on: the dashboard's rules, or the API name's one line. */
 export function robotsTxt(host: string): string {
