@@ -692,28 +692,33 @@ const CSS = String.raw`
   .doc-figure { margin: 0 0 16px; background: var(--panel); border: 1px solid var(--line); padding: 10px; } .doc-figure img { display: block; width: 100%; max-width: 1100px; height: auto; margin: 0 auto; }
   .docs-hint { font-size: 12px; color: var(--dim); padding: 0 10px; } .docs-main { min-width: 0; }
   .docs-main > h1:first-child { margin-top: 2px; }
+  .docs-said { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   /* The docs index (#250, pages/docs.ts): the title with the search beside it, then the map of the seven sections, sticky beside their
      cards — the one the reader is in lit on --panel-2 —, each card its icon's square, a line or two, a command, a grid of facts or the API's
      table, and the chapters that say more in green; the code's chapters one quiet line under them. 1120px wide with the frame's sides, as every
-     v1 page; the frame's main is wider, so the page narrows itself. Below 960px the map is on top, in columns, and scrolls with the page; below
-     640px a row of the API's table is its method and path, then what it returns. */
+     v1 page; the frame's main is wider, so the page narrows itself. Below 960px the map is on top, in four columns (two below 720px), and scrolls
+     with the page; below 640px a grid of facts is one column, the command scrolls in its well rather than break inside a word, and a row of the
+     API's table is its method and path, then what it returns, its head there for a screen reader only. */
   .guide { max-width: calc(var(--content-max) - 2 * var(--gutter)); margin: 0 auto; padding: 12px 0 16px; display: grid; gap: 36px; }
   .guide-head { display: flex; flex-wrap: wrap; gap: 24px 40px; align-items: flex-end; } .guide-head > div { flex: 1 1 480px; min-width: 0; display: grid; gap: 14px; }
   .guide-search { flex: 0 1 340px; display: flex; align-items: center; gap: 10px; padding: 9px 12px; border: 1px solid var(--line); background: var(--bg-deep); color: var(--green); }
   .guide-search:focus-within { border-color: var(--green); }
   .guide-search input { flex: 1; min-width: 0; padding: 0; border: 0; border-radius: 0; outline: none; -webkit-appearance: none; appearance: none; background: transparent; color: var(--text); font: 14px var(--font-mono); }
-  .guide-search input::placeholder { color: var(--dim); }
+  .guide-search input::placeholder { color: var(--dim); } .guide-search input::-webkit-search-decoration, .guide-search input::-webkit-search-cancel-button { -webkit-appearance: none; }
   .guide-body { display: grid; grid-template-columns: 218px minmax(0, 1fr); gap: 24px; align-items: start; }
   .guide-nav { position: sticky; top: 16px; display: grid; gap: 2px; padding: 8px; border: 1px solid var(--line); background: var(--panel); }
   .guide-nav a { display: flex; align-items: center; gap: 10px; padding: 7px 10px; font-size: 13px; line-height: 1.6; color: var(--muted); text-decoration: none; }
   .guide-nav a:hover, .guide-nav a[aria-current="true"] { color: var(--text); } .guide-nav a[aria-current="true"] { background: var(--panel-2); }
   .guide-nav a:focus-visible, .guide-more a:focus-visible, .guide-code a:focus-visible { outline: 1px solid var(--green); outline-offset: 1px; }
   .guide-secs { display: grid; gap: 14px; min-width: 0; }
-  .guide-sec { margin: 0; padding: 18px; display: grid; gap: 12px; scroll-margin-top: 16px; }
+  .guide-sec { margin: 0; padding: 18px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; scroll-margin-top: 16px; }
   .guide-sec h2 { display: flex; align-items: center; gap: 10px; margin: 0; font: 600 18px/1.3 var(--font-display); letter-spacing: normal; }
   .guide-sec > p { margin: 0; font-size: 13.5px; color: var(--muted); text-wrap: pretty; }
-  .guide-well code { font-size: 12.5px; line-height: 1.7; }
-  .guide-items { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); }
+  /* Two classes: the kit's sheet comes after this one, and its well's own rule for the code, one class and an element, would win a tie. */
+  .guide-sec .guide-well code { font-size: 12.5px; line-height: 1.7; }
+  /* The cells' lines are the grid's --line showing through a 1px gap, so an empty track would show as a block of it: three columns, one on a
+     phone, a count that divides every grid's cells (three rings, six gates; test/docs-index.test.ts holds them to it). */
+  .guide-items { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); }
   .guide-items > div { display: grid; gap: 3px; align-content: start; padding: 10px 12px; background: var(--panel-2); }
   .guide-items b { display: flex; align-items: center; gap: 8px; font: 600 13.5px/1.4 var(--font-display); color: var(--text); } .guide-items b > i { color: var(--green); }
   .guide-items .edge b > i { color: var(--edge); } .guide-items .rc b > i { color: var(--rc); } .guide-items .stable b > i { color: var(--stable); }
@@ -723,9 +728,12 @@ const CSS = String.raw`
   .guide-sec > p.guide-more { display: flex; flex-wrap: wrap; gap: 4px 20px; font-size: 13px; } .guide-more a { color: var(--green); text-decoration: none; } .guide-more a:hover { text-decoration: underline; }
   .guide-code { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; margin: 6px 0 0; font-size: 12.5px; } .guide-code > span { flex-basis: 100%; }
   .guide-code a { color: var(--muted); text-decoration: none; } .guide-code a:hover { color: var(--green); }
-  @media (max-width: 960px) { .guide-body { grid-template-columns: minmax(0, 1fr); } .guide-nav { position: static; grid-template-columns: repeat(auto-fill, minmax(min(140px, 100%), 1fr)); } }
+  @media (max-width: 960px) { .guide-body { grid-template-columns: minmax(0, 1fr); } .guide-nav { position: static; grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+  @media (max-width: 720px) { .guide-nav { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   @media (max-width: 640px) {
-    .guide-api thead { display: none; } .guide-api tr { display: grid; grid-template-columns: 44px minmax(0, 1fr); } .guide-api code { white-space: normal; overflow-wrap: anywhere; }
+    .guide-items { grid-template-columns: minmax(0, 1fr); } .guide-sec .guide-well code { white-space: pre; overflow-wrap: normal; overflow-x: auto; }
+    .guide-api thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+    .guide-api tr { display: grid; grid-template-columns: 44px minmax(0, 1fr); } .guide-api code { white-space: normal; overflow-wrap: break-word; } .guide-api code > span { display: inline-block; }
     .guide-api td:last-child { grid-column: 2; padding-top: 0; border-top: 0; }
   }
   .docs-main h2 { margin-bottom: 4px; } .docs-main h3 { margin: 22px 0 8px; } .docs-main p { color: var(--muted); font-size: 14px; max-width: 78ch; margin: 0 0 10px; } .docs-main p code, .docs-main li code { color: var(--text); }
@@ -1927,6 +1935,7 @@ function docsShell(current: DocKey, body: string): string {
   <aside class="docs-side">
     <a class="docs-home" href="/docs">Documentation</a>
     <input type="search" id="docs-q" placeholder="search the docs…" aria-label="search the docs" autocomplete="off">
+    <p class="docs-said" id="docs-said" role="status"></p>
     <div class="docs-hits" id="docs-hits" hidden></div>
     <nav class="docs-nav" id="docs-nav" aria-label="Chapters">${tree.join("")}</nav>
     <div class="docs-hint">${docsHint()}</div>
@@ -1942,10 +1951,16 @@ export function termId(term: string): string {
   return "term-" + term.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 }
 
-/** The search over the map, on every docs page: chapters, sections, the glossary — each hit a link. */
+/**
+ * The search over the map, on every docs page: chapters, sections, the
+ * glossary — each hit a link. Its answer takes the place of the map (on the
+ * index, of the whole page under the title), so a screen reader is told what
+ * came of each word (#docs-said, a status line the eye does not see): how
+ * many it found, or that nothing says it.
+ */
 const DOCS_SEARCH = String.raw`
   (function () {
-    var q = $("#docs-q"), hits = $("#docs-hits"), nav = $("#docs-nav"); if (!q || !hits || !nav) return;
+    var q = $("#docs-q"), hits = $("#docs-hits"), nav = $("#docs-nav"), said = $("#docs-said"); if (!q || !hits || !nav) return;
     var TREE = __DOCS_TREE__, GLOSSARY = __GLOSSARY__;
     var items = [];
     TREE.forEach(function (c) {
@@ -1956,12 +1971,13 @@ const DOCS_SEARCH = String.raw`
     function hl(t, needle) { var i = t.toLowerCase().indexOf(needle); return i < 0 ? esc(t) : esc(t.slice(0, i)) + "<mark>" + esc(t.slice(i, i + needle.length)) + "</mark>" + esc(t.slice(i + needle.length)); }
     q.oninput = function () {
       var needle = q.value.trim().toLowerCase();
-      if (!needle) { hits.hidden = true; nav.hidden = false; return; }
+      if (!needle) { hits.hidden = true; nav.hidden = false; if (said) said.textContent = ""; return; }
       var found = items.filter(function (it) { return (it.ch + " " + it.title + " " + it.text).toLowerCase().indexOf(needle) >= 0; }).slice(0, 12);
       hits.innerHTML = found.length
         ? found.map(function (it) { return '<a class="hit" href="' + it.href + '"><span class="ch">' + esc(it.ch) + '</span><b>' + hl(it.title, needle) + '</b><span>' + hl(it.text, needle) + '</span></a>'; }).join("")
         : '<div class="hit none">nothing in the docs says “' + esc(q.value.trim()) + '”</div>';
       hits.hidden = false; nav.hidden = true;
+      if (said) said.textContent = found.length ? found.length + (found.length === 1 ? " result" : " results") : "nothing in the docs says “" + q.value.trim() + "”";
     };
     q.onkeydown = function (e) { if (e.key === "Escape") { q.value = ""; q.oninput(); } };
   })();

@@ -261,6 +261,9 @@ describe("dashboard pages", () => {
         if (!secs) { problems.push(`${path}: href="${chapter}" is no chapter of DOCS_TREE`); continue; }
         if (frag && !secs.has(frag)) problems.push(`${path}: href="${chapter}#${frag}" — no such section (${[...secs].join(", ")})`);
       }
+      // (a) again over the pages' scripts, for the index: a link a script writes into /docs# names one of its seven sections, as one the server writes does. A fragment the script computes cannot be checked, so it is refused.
+      for (const m of [...html.matchAll(/<script[\s\S]*?<\/script>/g)].map((x) => x[0]).join("\n").matchAll(/href=\\?"\/docs#([^"\\]*)/g))
+        if (!DOC_SECTIONS.some((sec) => sec.id === m[1])) problems.push(`${path}: a script writes href="/docs#${m[1]}" — the index's sections are ${DOC_SECTIONS.map((sec) => sec.id).join(", ")}`);
       // (b) the whole page, script included: a pill's word is as much a claim as a paragraph.
       for (const [re, why] of FORBIDDEN) { const hit = re.exec(html); if (hit) problems.push(`${path} says "${hit[0]}" — ${why}`); }
       // (c) every journal link, in HTML or script.

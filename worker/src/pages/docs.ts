@@ -44,13 +44,14 @@ interface Item {
   ring?: string;
 }
 
-/** One of the seven sections: its anchor on this page, its icon, its title, what it says, what it shows under that, and the chapters that say more. */
+/** One of the seven sections: its anchor on this page, its icon, its title, what it says, what it shows under that (a command and what its copy button copies, a grid, the API's table), and the chapters that say more. */
 export interface IndexSection {
   id: string;
   icon: LucideName;
   title: string;
   text: string;
   code?: string;
+  copy?: string;
   items?: Item[];
   api?: true;
   more: More[];
@@ -66,8 +67,13 @@ const SYNCED = Object.keys(UPSTREAMS).filter((u) => u !== "the factory").length;
  * The one command, as Home and Get started write it, for the dashboard's
  * name: the page's script puts the address it is served from in its place
  * (#guide-origin), so a local or a staging copy names itself, as those pages do.
+ * The well shows it with the install after it, and its copy button copies
+ * the command alone, as Home's and Get started's do: the two lines together
+ * would run the root pipeline the moment they are pasted into a shell that
+ * does not hold a paste back, and hand the second line to sudo's password prompt.
  */
-const SETUP = `<span class="op-prompt">$ </span>curl -fsSL <span id="guide-origin">https://${DASHBOARD_HOST}</span>/setup | sudo bash -s -- --ring stable
+const COMMAND = (origin: string) => `curl -fsSL ${origin}/setup | sudo bash -s -- --ring stable`;
+const SETUP = `<span class="op-prompt">$ </span>${COMMAND(`<span id="guide-origin">https://${DASHBOARD_HOST}</span>`)}
 <span class="op-prompt">$ </span>sudo pacman -S ghostty`;
 
 export const DOC_SECTIONS: IndexSection[] = [
@@ -77,6 +83,7 @@ export const DOC_SECTIONS: IndexSection[] = [
     title: "Set up",
     text: "One command points pacman at a ring. After that, install and update with pacman as usual.",
     code: SETUP,
+    copy: COMMAND(`https://${DASHBOARD_HOST}`),
     more: [chapter("get-started")],
   },
   {
@@ -98,7 +105,7 @@ export const DOC_SECTIONS: IndexSection[] = [
       { icon: "package-check", name: "Installs", line: "real pacman, every architecture" },
       { icon: "binary", name: "ABI", line: "symbol versions satisfied" },
       { icon: "heart-pulse", name: "Healthy", line: "green checks before each ring" },
-      { icon: "users", name: "Reviewed", line: "factory packages: two people" },
+      { icon: "users", name: "Reviewed", line: "factory packages: 2 people" },
     ],
     more: [chapter("how-it-works"), chapter("what-we-test")],
   },
@@ -136,10 +143,32 @@ export const DOC_SECTIONS: IndexSection[] = [
 /** The map beside the cards: one link per section, its icon first. The script lights the one the reader is in. */
 const NAV = `<nav class="guide-nav" aria-label="Sections">${DOC_SECTIONS.map((s) => `<a href="#${s.id}">${lucide(s.icon)}${escapeHtml(s.title)}</a>`).join("")}</nav>`;
 
-/** The API section's table: the reference's short list, a path under /api/v1 per row. */
-const API_TABLE = `<div class="guide-api"><table class="op-table"><thead><tr><th>Method</th><th>Path</th><th>Returns</th></tr></thead><tbody>${API_BRIEF.map(([route, returns]) => {
+/**
+ * A path as the API's table writes it, in pieces: each step up to its slash,
+ * then the query whole. A phone's narrow row breaks between the pieces
+ * (layout.ts draws them as blocks of their own there) and never inside
+ * one, so a route read off the screen is one that exists — never
+ * /api/v1/packages/:sha256/provenan on one line and ce on the next — and
+ * a query moves to the next line from its "?". The desktop table keeps
+ * each on one line. (A <wbr> would do the phone's half, but Chrome breaks
+ * at it inside white-space: nowrap too, and the desktop's paths wrapped.)
+ */
+const apiPath = (path: string) => {
+  const full = `/api/v1${path}`, q = full.indexOf("?");
+  const pieces = [...(q < 0 ? full : full.slice(0, q)).split(/(?<=[^/]\/)/), ...(q < 0 ? [] : [full.slice(q)])];
+  return pieces.map((p) => `<span>${escapeHtml(p)}</span>`).join("");
+};
+
+/**
+ * The API section's table: the reference's short list, a path under /api/v1
+ * per row. The roles are spelled out because a phone draws each row as a
+ * grid (layout.ts, below 640px), and WebKit stops reading a table as one
+ * once its rows are not table rows: with them, a screen reader still hears
+ * each cell under its column's name.
+ */
+const API_TABLE = `<div class="guide-api"><table class="op-table" role="table"><thead role="rowgroup"><tr role="row"><th role="columnheader">Method</th><th role="columnheader">Path</th><th role="columnheader">Returns</th></tr></thead><tbody role="rowgroup">${API_BRIEF.map(([route, returns]) => {
   const [method, path] = route.split(" ");
-  return `<tr><td>${method}</td><td><code>/api/v1${escapeHtml(path)}</code></td><td>${escapeHtml(returns)}</td></tr>`;
+  return `<tr role="row"><td role="cell">${method}</td><td role="cell"><code>${apiPath(path)}</code></td><td role="cell">${escapeHtml(returns)}</td></tr>`;
 }).join("")}</tbody></table></div>`;
 
 const item = (i: Item) => `<div${i.ring ? ` class="${i.ring}"` : ""}><b>${lucide(i.icon)}${escapeHtml(i.name)}</b><span>${escapeHtml(i.line)}</span></div>`;
@@ -147,7 +176,7 @@ const item = (i: Item) => `<div${i.ring ? ` class="${i.ring}"` : ""}><b>${lucide
 const card = (s: IndexSection) => `<section class="op-card guide-sec" id="${s.id}" aria-labelledby="${s.id}-h">
       <h2 id="${s.id}-h"><span class="op-box ok">${lucide(s.icon, 15)}</span>${escapeHtml(s.title)}</h2>
       <p>${escapeHtml(s.text)}</p>${s.code ? `
-      <div class="op-code guide-well"><code>${s.code}</code><button type="button" class="op-copy" data-op-copy>copy</button></div>` : ""}${s.items ? `
+      <div class="op-code guide-well"><code>${s.code}</code><button type="button" class="op-copy" data-op-copy${s.copy ? `="${escapeHtml(s.copy)}"` : ""}>copy</button></div>` : ""}${s.items ? `
       <div class="guide-items">${s.items.map(item).join("")}</div>` : ""}${s.api ? `
       ${API_TABLE}` : ""}
       <p class="guide-more">${s.more.map((m) => `<a href="${m.href}">${escapeHtml(m.label)} →</a>`).join("")}</p>
@@ -161,6 +190,7 @@ const BODY = `<div class="guide">
     <div><p class="op-eyebrow">Docs</p><h1 class="op-hero">How the pool works</h1></div>
     <label class="guide-search">${lucide("search", 16)}<input type="search" id="docs-q" placeholder="search the docs…" aria-label="search the docs" autocomplete="off"></label>
   </div>
+  <p class="docs-said" id="docs-said" role="status"></p>
   <div class="docs-hits" id="docs-hits" hidden></div>
   <div class="guide-body" id="docs-nav">
     ${NAV}
@@ -173,38 +203,60 @@ const BODY = `<div class="guide">
 
 /**
  * The page's own script: the setup command names the address the page is
- * served from, and the map lights the section the reader is in — the last
- * one whose top has passed a third of the window, or the last of all once
- * the page is scrolled to its end, where the short last cards can never
- * reach that line. A section chosen in the map (or named by the address's
- * fragment, /docs#api) stays lit while the page moves to it, until the
- * reader scrolls on their own: at the page's end the last card would
- * otherwise take the light from the one that was asked for. With no
+ * served from — in the well and in what its copy button copies —, and the
+ * map lights the section the reader is in: the first at the page's top,
+ * the last once it has been scrolled to its end, where the short last cards
+ * can never reach the line the others pass, and in between the last one
+ * whose top has passed a third of the window. A page that fits a tall
+ * window whole is at its top, not its end, and lights the first. A
+ * section chosen in the map (or named by the address's fragment, /docs#api)
+ * stays lit while the page moves to it: at the page's end the last card
+ * would otherwise take the light from the one that was asked for. The light
+ * is the reader's again as soon as the page is theirs: a wheel, a touch or
+ * a key; an address that names no section (Back to /docs); or, once the jump
+ * has come to rest, any scroll that moves the chosen card — the scrollbar,
+ * a middle-click, the browser putting the page back where it was — and
+ * at once if the card is not in the window when it comes to rest. With no
  * addEventListener on window (an old browser, the tests' own document)
  * nothing is lit, and the map is plain links.
  */
 const SCRIPT = String.raw`
-  var origin = $("#guide-origin"); if (origin) origin.textContent = location.origin;
+  var origin = $("#guide-origin"), copy = $(".guide-well [data-op-copy]"), copied = copy && copy.getAttribute("data-op-copy");
+  if (origin) { if (copied) copy.setAttribute("data-op-copy", copied.split(origin.textContent).join(location.origin)); origin.textContent = location.origin; }
   (function () {
     var nav = $(".guide-nav"); if (!nav || !window.addEventListener || !nav.querySelectorAll) return;
     var links = [].slice.call(nav.querySelectorAll('a[href^="#"]')), secs = links.map(function (a) { return document.getElementById(a.getAttribute("href").slice(1)); });
-    var asked = null, queued = false;
+    var asked = null, restTop = null, settling = 0, queued = false;
     function light(id) { links.forEach(function (a) { if (a.getAttribute("href") === "#" + id) a.setAttribute("aria-current", "true"); else a.removeAttribute("aria-current"); }); }
     function spy() {
       queued = false;
       if (asked) { light(asked); return; }
       var cur = secs[0], line = innerHeight / 3, root = document.documentElement;
-      secs.forEach(function (s) { if (s && s.getBoundingClientRect().top <= line) cur = s; });
-      if (innerHeight + scrollY >= root.scrollHeight - 2) cur = secs[secs.length - 1];
+      if (scrollY > 0) {
+        secs.forEach(function (s) { if (s && s.getBoundingClientRect().top <= line) cur = s; });
+        if (innerHeight + scrollY >= root.scrollHeight - 2) cur = secs[secs.length - 1];
+      }
       if (cur) light(cur.id);
     }
     function later() { if (!queued) { queued = true; requestAnimationFrame(spy); } }
-    function own() { if (asked) { asked = null; later(); } }
-    function choose(id) { if (secs.some(function (s) { return s && s.id === id; })) { asked = id; light(id); } }
+    function own() { if (asked) { asked = null; restTop = null; clearTimeout(settling); later(); } }
+    // Where the jump comes to rest: the first 150 ms without a scroll after the choice.
+    function settle() {
+      clearTimeout(settling);
+      settling = setTimeout(function () {
+        if (!asked) return;
+        var r = document.getElementById(asked).getBoundingClientRect();
+        if (r.bottom <= 0 || r.top >= innerHeight) own(); else restTop = r.top;
+      }, 150);
+    }
+    function choose(id) { if (secs.some(function (s) { return s && s.id === id; })) { asked = id; restTop = null; light(id); settle(); } else own(); }
     nav.addEventListener("click", function (e) { var a = e.target.closest ? e.target.closest("a") : null; if (a) choose(a.getAttribute("href").slice(1)); });
     window.addEventListener("hashchange", function () { choose(location.hash.slice(1)); });
     ["wheel", "touchmove", "keydown"].forEach(function (t) { window.addEventListener(t, own, { passive: true }); });
-    window.addEventListener("scroll", later, { passive: true });
+    window.addEventListener("scroll", function () {
+      if (asked) { if (restTop === null) settle(); else if (Math.abs(document.getElementById(asked).getBoundingClientRect().top - restTop) > 2) own(); }
+      later();
+    }, { passive: true });
     window.addEventListener("resize", later);
     if (location.hash) choose(location.hash.slice(1));
     spy();
@@ -308,26 +360,26 @@ export const DOCS_COMPONENTS = (F: Fixture): Component[] => {
     {
       id: "docs.search",
       page: "/docs",
-      // The search over every chapter, section and glossary term (layout.ts DOCS_SEARCH): its answer takes the place of the map and the cards (#docs-nav) while there is a word in the box.
-      anchor: ['<input type="search" id="docs-q"', 'aria-label="search the docs"', '<div class="docs-hits" id="docs-hits" hidden></div>', '<div class="guide-body" id="docs-nav">'],
-      script: ['var q = $("#docs-q"), hits = $("#docs-hits"), nav = $("#docs-nav")', 'var TREE = [{"label":"', '"/docs/glossary#" + g[2]', "nothing in the docs says", 'e.key === "Escape"'],
+      // The search over every chapter, section and glossary term (layout.ts DOCS_SEARCH): its answer takes the place of the map and the cards (#docs-nav) while there is a word in the box, and a screen reader is told how many it found (#docs-said).
+      anchor: ['<input type="search" id="docs-q"', 'aria-label="search the docs"', '<p class="docs-said" id="docs-said" role="status"></p>', '<div class="docs-hits" id="docs-hits" hidden></div>', '<div class="guide-body" id="docs-nav">'],
+      script: ['var q = $("#docs-q"), hits = $("#docs-hits"), nav = $("#docs-nav"), said = $("#docs-said")', 'var TREE = [{"label":"', '"/docs/glossary#" + g[2]', "nothing in the docs says", 'e.key === "Escape"'],
       visible: EVERYONE,
     },
     {
       id: "docs.map",
       page: "/docs",
-      // The sticky map: a link per section, in the cards' order; the script lights the one the reader is in.
+      // The sticky map: a link per section, in the cards' order; the script lights the one the reader is in, and gives a chosen one back to them once the page is theirs again.
       anchor: ['<nav class="guide-nav" aria-label="Sections">', ...DOC_SECTIONS.map((s) => `<a href="#${s.id}">`)],
-      script: ['$(".guide-nav")', 'a.setAttribute("aria-current", "true")', "innerHeight / 3", 'window.addEventListener("scroll", later, { passive: true })', 'window.addEventListener("hashchange"'],
+      script: ['$(".guide-nav")', 'a.setAttribute("aria-current", "true")', "innerHeight / 3", 'window.addEventListener("scroll", function () {', 'window.addEventListener("hashchange"', "else restTop = r.top"],
       visible: EVERYONE,
     },
     ...DOC_SECTIONS.map(section),
     {
       id: "docs.setup-command",
       page: "/docs",
-      // The one command in the kit's code well, its copy button the kit's, the address the page is served from put in by its script.
-      anchor: ['<div class="op-code guide-well"><code><span class="op-prompt">$ </span>curl -fsSL <span id="guide-origin">', "/setup | sudo bash -s -- --ring stable", '<button type="button" class="op-copy" data-op-copy>copy</button>'],
-      script: ['$("#guide-origin")', "origin.textContent = location.origin"],
+      // The one command in the kit's code well, its copy button the kit's and copying the command alone, the address the page is served from put in both by its script.
+      anchor: ['<div class="op-code guide-well"><code><span class="op-prompt">$ </span>curl -fsSL <span id="guide-origin">', "/setup | sudo bash -s -- --ring stable", `<button type="button" class="op-copy" data-op-copy="${escapeHtml(COMMAND(`https://${DASHBOARD_HOST}`))}">copy</button>`],
+      script: ['$("#guide-origin")', 'copy.setAttribute("data-op-copy", copied', "origin.textContent = location.origin"],
       reads: [{ path: "/setup", json: false }],
       visible: EVERYONE,
     },
@@ -335,7 +387,7 @@ export const DOCS_COMPONENTS = (F: Fixture): Component[] => {
       id: "docs.api-table",
       page: "/docs",
       // Every row of the reference's short list as the table draws it, and each route answering, on the fixture, what its row says it returns.
-      anchor: ['<div class="guide-api"><table class="op-table"><thead><tr><th>Method</th><th>Path</th><th>Returns</th></tr></thead>', ...API_BRIEF.map(([route]) => `<td>GET</td><td><code>/api/v1${escapeHtml(route.split(" ")[1])}</code></td>`)],
+      anchor: ['<div class="guide-api"><table class="op-table" role="table"><thead role="rowgroup"><tr role="row"><th role="columnheader">Method</th><th role="columnheader">Path</th><th role="columnheader">Returns</th></tr></thead>', ...API_BRIEF.map(([route]) => `<td role="cell">GET</td><td role="cell"><code>${apiPath(route.split(" ")[1])}</code></td>`)],
       reads: [
         { path: `/api/v1/package/${F.pkg}?${stable}`, fields: ["rings", "package.version", "depends", "security.advisories"] },
         { path: `/api/v1/search?q=${F.pkg}&${stable}&limit=10`, fields: ["packages.0.name", "packages.0.description"] },

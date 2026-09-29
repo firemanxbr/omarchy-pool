@@ -194,6 +194,8 @@ describe("both themes", () => {
     }
     expect(checked).toBeGreaterThanOrEqual(3);
     expect(rules.some((r) => r.sel === ".suggest a:focus-visible" && greenLine(r.body))).toBe(true);
+    // The kit's copy button is focused with the green line too, not the browser's own ring (the docs index's well is the first page to draw it, #250).
+    expect(rules.some((r) => parts(r.sel).includes(".op-copy:focus-visible") && greenLine(r.body)), ".op-copy:focus-visible").toBe(true);
   });
 
   it("draw the shell's own buttons in the palette's names, never the browser's: the decision dialog's and the Decision cell's", async () => {

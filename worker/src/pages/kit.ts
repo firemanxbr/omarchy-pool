@@ -345,7 +345,7 @@ export const KIT_CSS = String.raw`
   .op-code code { min-width: 0; color: var(--text); font: 13.5px/1.6 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
   .op-code .op-prompt { color: var(--dim); user-select: none; }
   .op-copy { flex: none; padding: 3px 12px; border: 1px solid var(--green); background: transparent; color: var(--green); font: 12.5px var(--font-mono); cursor: pointer; }
-  .op-copy.copied { background: var(--green); color: var(--green-ink); }
+  .op-copy.copied { background: var(--green); color: var(--green-ink); } .op-copy:focus-visible { outline: 1px solid var(--green); outline-offset: 2px; }
   .op-btn { display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px; border: 1px solid var(--line); background: transparent; color: var(--text); font: inherit; font-size: 13px; line-height: 1.5; cursor: pointer; text-decoration: none; white-space: nowrap; }
   .op-btn:hover { border-color: var(--green); }
   .op-btn.primary { background: var(--green); border-color: var(--green); color: var(--green-ink); } .op-btn.primary:hover { filter: brightness(1.08); }
