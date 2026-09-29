@@ -38,7 +38,7 @@
  *   POST /api/v1/pool/gc?keep=3&limit=200          delete it (objects, then rows)
  *   POST /api/v1/pool/relayout?phase=copy|purge     the one-time move to <source>/<arch>/ (the relayout job)
  *   GET  /                                         the dashboard: the Pool (users), /factory (contributors), /review (maintainers),
- *                                                  /docs, and the detail pages /packages /package/:name /status /people /workers /request /user/:login /build/:id
+ *                                                  /docs, and the detail pages /packages /package/:name /status /agents /people /workers /request /user/:login /build/:id
  *                                                  (/pipeline, /journal, /security and /docs/api redirect to the section they became: MOVED)
  *   GET  /pool/<source>/<arch>/<file>              fallback static origin (dev)
  *   GET  /assets/kit.<hash>.css                    the v1 kit's stylesheet (pages/kit.ts): its primitives and icons, immutable under its hash
@@ -88,6 +88,7 @@ import { docsWorkersHtml } from "./pages/docs-workers";
 import { workersHtml } from "./pages/workers";
 import { userHtml } from "./pages/user";
 import { peopleHtml } from "./pages/people";
+import { agentsHtml } from "./pages/agents";
 import { handleUser, handleUserCan } from "./routes/users";
 import { handleGetEvents, handlePostEvent } from "./routes/events";
 import { handleServiceStatus, handleStats } from "./routes/stats";
@@ -215,7 +216,7 @@ export default {
         url.hash = section ?? "";
         return Response.redirect(url.toString(), 301);
       }
-      // A footer page that has not landed yet (MORE's `until`) is a 302 to what stands in for it — Agents, #249's page, is the chapter on connecting an agent today, omarchy-cli as an MCP server — so no browser keeps the move once the page is there.
+      // A footer page that has not landed yet (MORE's `until`) is a 302 to what stands in for it, so no browser keeps the move once the page is there. None has since Agents landed (#249); until then /agents was the chapter on omarchy-cli as an MCP server.
       const interim = MORE.find((m) => m.href === path)?.until;
       if (interim) {
         url.pathname = interim;
@@ -270,6 +271,8 @@ export default {
       if (path === "/packages") return html(packagesHtml(env.POOL_URL, version(env)));
       if (path === "/factory") return html(factoryPageHtml(env.POOL_URL, version(env)));
       if (path === "/people") return html(peopleHtml(env.POOL_URL, version(env)));
+      // Agents (#249): which agent's configuration it shows is the address's (?agent=), so the choice is a link that works with script off; the page reads nothing.
+      if (path === "/agents") return html(agentsHtml(env.POOL_URL, version(env), url.searchParams.get("agent")));
       if (path === "/review") return html(reviewHtml(env.POOL_URL, version(env)));
       if (path === "/request") return html(requestHtml(env.POOL_URL, version(env)));
       const user = path.match(/^\/user\/([A-Za-z0-9-]{1,39})$/);

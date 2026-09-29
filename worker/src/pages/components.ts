@@ -39,6 +39,7 @@ import { PACKAGES_COMPONENTS, PACKAGE_COMPONENTS } from "./packages";
 import { BUILD_COMPONENTS } from "./build";
 import { USER_COMPONENTS } from "./user";
 import { PEOPLE_COMPONENTS } from "./people";
+import { AGENTS_COMPONENTS } from "./agents";
 import { WORKERS_COMPONENTS } from "./workers";
 import { SECURITY_COMPONENTS } from "./security";
 import { STATUS_COMPONENTS } from "./status";
@@ -207,7 +208,7 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     anchor: [...MORE.map((m) => `href="${m.href}"`), '<a href="/agents" class="accent">Agents</a>', '<nav class="more" aria-label="Footer">'],
     script: ['footer .more a', 'href === "/packages" && here.indexOf("/package/") === 0', 'href === "/docs" && here === "/api"', 'href === "/status" && here === "/diff"', 'a.setAttribute("aria-current", "page")'],
     reads: [
-      // A footer page that has not landed yet (MORE's `until`: Agents, #249's) is a 302 to what stands in for it, one no browser keeps.
+      // A footer page that has not landed yet (MORE's `until`; none since Agents landed, #249) is a 302 to what stands in for it, one no browser keeps.
       ...MORE.filter((m) => m.until).map((m) => ({ path: m.href, status: 302, json: false as const })),
     ],
     visible: EVERYONE,
@@ -423,6 +424,7 @@ export function allComponents(F: Fixture): Component[] {
     ...BUILD_COMPONENTS(F),
     ...USER_COMPONENTS(F),
     ...PEOPLE_COMPONENTS(F),
+    ...AGENTS_COMPONENTS(F),
     ...WORKERS_COMPONENTS(F),
     ...SECURITY_COMPONENTS(F),
     ...STATUS_COMPONENTS(F),
