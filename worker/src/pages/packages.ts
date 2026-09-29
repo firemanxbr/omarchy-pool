@@ -421,13 +421,13 @@ const PACKAGE_SCRIPT = String.raw`
     var tiles = [
       ["tag", "Version", D ? p.version : "—", D ? D.shown_ring + (row ? " #" + row.release_seq : "") + " · " + arch : b ? "out of every ring" : away || "not in a ring yet", "", "#op-chain", "rings"],
       ["hard-drive", "Size", D ? bytes(p.size_download) : "—", D ? bytes(p.size_installed) + " installed" : away || "no object in a ring yet", "", "#files-section"],
-      ["arrow-down-to-line", "Depends on", D ? num((D.depends || []).length) : "—", D ? "loads " + num((D.links || []).length) + " libraries" : "read from the object", "", "#deps-section"],
+      ["arrow-down-to-line", "Depends on", D ? num(dependsOn().length) : "—", D ? "loads " + num((D.links || []).length) + " libraries" : "read from the object", "", "#deps-section"],
       ["arrow-up-from-line", "Required by", D ? num(rb) + (rb >= 400 ? "+" : "") : "—", D ? "in " + D.shown_ring : "in the ring that serves it", "", "#deps-section"],
       ["shield", "Security", b ? "blocked" : !D ? "—" : own.length ? num(own.length) + " open" : "clean", b ? "revoked from every ring" : !D ? "checked once a ring serves it" : exp.length + " via dependencies", b || own.length ? "fail-t" : D ? "ok-t" : "", "#sec-section"]
     ];
     $("#pg-tiles").innerHTML = tiles.map(function (t) { return '<a class="op-stat" href="' + t[5] + '"' + (t[6] ? ' data-stage="' + t[6] + '"' : '') + '><span class="k">' + lucide(t[0], 14) + esc(t[1]) + '</span><span class="n ' + t[4] + '" title="' + esc(t[2]) + '">' + esc(t[2]) + '</span><span class="s">' + esc(t[3]) + '</span></a>'; }).join("");
     // The two counts land (the kit's countUp: at once for a reader who asked for less motion).
-    if (D) { var n = document.querySelectorAll("#pg-tiles .n"); countUp(n[2], (D.depends || []).length); countUp(n[3], rb, function (v) { return num(v) + (rb >= 400 ? "+" : ""); }); }
+    if (D) { var n = document.querySelectorAll("#pg-tiles .n"); countUp(n[2], dependsOn().length); countUp(n[3], rb, function (v) { return num(v) + (rb >= 400 ? "+" : ""); }); }
   }
   // The Version tile opens the Rings stage before it scrolls there.
   $("#pg-tiles").addEventListener("click", function (ev) { var a = ev.target.closest ? ev.target.closest("[data-stage]") : null; if (a) { STAGE = a.getAttribute("data-stage"); renderChain(); } });
@@ -789,15 +789,21 @@ const PACKAGE_SCRIPT = String.raw`
       (order.length ? order.map(function (v) { var g = groups[v]; return '<details class="pkg-adv"><summary><b>' + esc(v) + '</b><span class="via">' + esc(g.how) + '</span><span class="dots">' + g.items.map(function (a) { return '<i style="color:' + (SEV_COLOR[a.severity] || "var(--dim)") + '" title="' + esc(a.severity + " · " + (a.cves || []).join(", ")) + '"></i>'; }).join("") + '</span></summary><ul>' + g.items.map(function (a) { return advItem(a); }).join("") + '<li><a href="' + pkgHref(v, ring, arch) + '">' + esc(v) + '’s page →</a></li></ul></details>'; }).join("") : '<p>Nothing open on anything it depends on or loads.</p>');
   }
 
+  // ---- what it depends on, one per package: what it declares and the packages its libraries come from — the graph's
+  // right column and the header's count, one list, so the two never disagree (#275).
+  function dependsOn() {
+    var right = {}, order = [];
+    (D.depends || []).forEach(function (x) { var k = x.provider ? x.provider.name : x.name; if (!right[k]) { right[k] = { name: k, version: x.provider ? x.provider.version : "", provided: !!x.provider, declared: false, sonames: [] }; order.push(k); } right[k].declared = true; });
+    (D.links || []).forEach(function (x) { var k = x.provider ? x.provider.name : x.soname; if (!right[k]) { right[k] = { name: k, version: x.provider ? x.provider.version : "", provided: !!x.provider, declared: false, sonames: [] }; order.push(k); } right[k].sonames.push(x.soname); });
+    return order.map(function (k) { return right[k]; });
+  }
+
   // ---- the dependencies: what requires it on the left, what it declares and loads on the right, connected; the rest in full below.
   function renderDeps() {
     var el = $("#deps");
     if (!D) { el.innerHTML = '<p class="pkg-small" style="margin:0">The graph is drawn from the object a ring serves; no ring serves ' + esc(name) + ' on ' + esc(arch) + ' yet.</p>'; return; }
     var vuln = {}; ((D.security && D.security.exposed) || []).forEach(function (e) { vuln[e.via] = (vuln[e.via] || 0) + 1; });
-    var right = {}, order = [];
-    (D.depends || []).forEach(function (x) { var k = x.provider ? x.provider.name : x.name; if (!right[k]) { right[k] = { name: k, version: x.provider ? x.provider.version : "", provided: !!x.provider, declared: false, sonames: [] }; order.push(k); } right[k].declared = true; });
-    (D.links || []).forEach(function (x) { var k = x.provider ? x.provider.name : x.soname; if (!right[k]) { right[k] = { name: k, version: x.provider ? x.provider.version : "", provided: !!x.provider, declared: false, sonames: [] }; order.push(k); } right[k].sonames.push(x.soname); });
-    var MAX = 12, req = D.required_by || [], deps = order.map(function (k) { return right[k]; });
+    var MAX = 12, req = D.required_by || [], deps = dependsOn();
     var left = req.slice(0, req.length > MAX ? MAX - 1 : MAX), rightShown = deps.slice(0, deps.length > MAX * 2 ? MAX * 2 - 1 : MAX * 2);
     var node = function (x, side) {
       var tag = side === "left" ? (x.sonames.length ? ['so', x.sonames[0]] : ['decl', "depends"]) : (!x.provided ? ['none', "not in " + D.shown_ring] : x.sonames.length ? ['so', x.sonames[0]] : ['decl', "declared"]);

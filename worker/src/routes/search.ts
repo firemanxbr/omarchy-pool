@@ -71,6 +71,31 @@ function capabilityOf(dep: string): string {
   return dep.split(/[<>=]/)[0].trim();
 }
 
+/** A package of the ring that answers a capability: by its name (`named`), or by something it provides. */
+interface ProviderCandidate {
+  name: string;
+  version: string;
+  source: string;
+  named: number;
+}
+
+/**
+ * The one package a capability resolves to, whatever order the rows came
+ * in — they came in the index's, and the first won: a cross toolchain
+ * indexed before glibc took zlib's libc.so.6 (#275). A package of that name
+ * first, then one the package itself declares (zlib's glibc for its
+ * libc.so.6, a lib32 package's lib32-glibc), then the include's order
+ * (sourceRank: what pacman would pick), then the name.
+ */
+export function pickProvider(candidates: ProviderCandidate[], preferred: Set<string>): { name: string; version: string } | undefined {
+  const rank = (c: ProviderCandidate) => [c.named ? 0 : 1, preferred.has(c.name) ? 0 : 1, sourceRank(c.source)];
+  const best = [...candidates].sort((a, b) => {
+    const [x, y] = [rank(a), rank(b)];
+    return x[0] - y[0] || x[1] - y[1] || x[2] - y[2] || a.name.localeCompare(b.name) || a.source.localeCompare(b.source);
+  })[0];
+  return best ? { name: best.name, version: best.version } : undefined;
+}
+
 /**
  * The ring's objects of these names, one architecture: the rows the
  * package page resolves its providers' advisories through, with D1's count
@@ -207,31 +232,45 @@ export async function handlePackage(name: string, url: URL, env: Env): Promise<R
   const declared = (manifest.pkginfo?.depends ?? []).map(capabilityOf);
   const sonames = (manifest.requires ?? []).filter((r) => /\.so(\.|$|\()/.test(r)).map((r) => r.replace(/\(.*\)$/, ""));
   const wanted = [...new Set([...declared, ...sonames])];
-  const providers = new Map<string, { name: string; version: string }>();
+  const candidates = new Map<string, ProviderCandidate[]>();
   for (let i = 0; i < wanted.length; i += 100) {
     const chunk = wanted.slice(i, i + 100);
     // Two indexed lookups (by name, by provided capability) instead of one
     // OR that scanned every package of the architecture, in a forced order
     // (CROSS JOIN): from the wanted capabilities into the ring, never the
     // other way round — the planner's choice walked the ring's members and
-    // read 3.8 M rows for google-chrome's page; 1.4 k this way.
+    // read 3.8 M rows for google-chrome's page; 1.4 k this way. A soname
+    // found in the ELF files counts only from a package built for this
+    // architecture: an `any` package that ships one — a cross toolchain's
+    // sysroot, aarch64-linux-gnu-glibc's libc.so.6 — carries another
+    // machine's library, and resolved zlib's libc.so.6 on x86_64 (#275).
     const rows = await env.DB.prepare(
-      `SELECT DISTINCT capability, name, version FROM (
-         SELECT cap.value AS capability, p.name, p.version
+      `SELECT DISTINCT capability, name, version, source, named FROM (
+         SELECT cap.value AS capability, p.name, p.version, p.source, 1 AS named
            FROM json_each(?1) cap
            CROSS JOIN packages p ON p.name = cap.value AND p.repo_arch = ?2
            CROSS JOIN ring_packages rp ON rp.ring = '${ring}' AND rp.package_id = p.id
          UNION ALL
-         SELECT cap.value AS capability, p.name, p.version
+         SELECT cap.value AS capability, p.name, p.version, p.source, 0 AS named
            FROM json_each(?1) cap
            CROSS JOIN package_provides pv ON pv.capability = cap.value AND (pv.declared = 1 OR cap.value GLOB '*.so.[0-9]*')
-           CROSS JOIN packages p ON p.id = pv.package_id AND p.repo_arch = ?2
+           CROSS JOIN packages p ON p.id = pv.package_id AND p.repo_arch = ?2 AND (pv.declared = 1 OR p.arch = ?2)
            CROSS JOIN ring_packages rp ON rp.ring = '${ring}' AND rp.package_id = p.id
        )`,
     )
       .bind(JSON.stringify(chunk), s.arch)
-      .all<{ capability: string; name: string; version: string }>();
-    for (const r of rows.results) if (!providers.has(r.capability)) providers.set(r.capability, { name: r.name, version: r.version });
+      .all<ProviderCandidate & { capability: string }>();
+    for (const r of rows.results) candidates.set(r.capability, [...(candidates.get(r.capability) ?? []), r]);
+  }
+  const providers = new Map<string, { name: string; version: string }>();
+  for (const c of declared) {
+    const p = pickProvider(candidates.get(c) ?? [], new Set());
+    if (p) providers.set(c, p);
+  }
+  const declaredProviders = new Set([...providers.values()].map((p) => p.name));
+  for (const so of sonames) {
+    const p = providers.has(so) ? undefined : pickProvider(candidates.get(so) ?? [], declaredProviders);
+    if (p) providers.set(so, p);
   }
   const depends = declared.map((c) => ({ name: c, provider: providers.get(c) ?? null }));
   const links = [...new Set(sonames)].map((so) => ({ soname: so, provider: providers.get(so) ?? null }));
@@ -240,7 +279,9 @@ export async function handlePackage(name: string, url: URL, env: Env): Promise<R
   // by something it provides (a soname = a binary that actually loads it).
   // Same forced order: capabilities → requirement index → ring (366 k rows
   // read per page before, seven for a package nothing depends on).
-  const caps = [chosen.name, ...(manifest.provides ?? []).map(capabilityOf)];
+  // An `any` package is loaded through nothing it ships: its sonames are another machine's (the rule of the forward
+  // edges above), so only its name and what its .PKGINFO declares bring it a dependent.
+  const caps = [chosen.name, ...(chosen.arch === s.arch ? manifest.provides ?? [] : manifest.pkginfo?.provides ?? []).map(capabilityOf)];
   const reverse = await env.DB.prepare(
     `SELECT DISTINCT p.name, p.version, rq.requirement
        FROM json_each(?1) cap
