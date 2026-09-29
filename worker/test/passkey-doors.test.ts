@@ -20,16 +20,26 @@
  *   waiting drafts discarded, a code nobody swapped deleted — and the person
  *   makes a new token after signing in again.
  *
+ * The review of #284 found the side doors around them, closed here too: a
+ * dry run's job token wrote edge (it has no pool or ring scope now, and a
+ * dry run is never the build of its version, nor the same task as one that
+ * publishes); a rollback pointed a ring at another ring's release (a
+ * promotion past the gate, refused now); a maintainer's token wrote the
+ * health and abi rows the gate reads (a note only now); and a GitHub token
+ * minted a revoked login a new `omc_` token (not until the person makes
+ * one on their page).
+ *
  * Every new statement is asked for its plan. The reset's passkeys, record
  * and refusals are passkeys.test.ts's; approve and block, passkey-decisions'.
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import * as openpgp from "openpgp";
 import worker from "../src/index";
-import { contributorOf, sha256Hex } from "../src/routes/contributors";
+import { contributorOf, REGISTER_SQL, sha256Hex } from "../src/routes/contributors";
 import { handleQueueJob } from "../src/jobs";
 import { issueJobToken, scopesFor } from "../src/jobtoken";
+import { BUILT_SQL, ENQUEUE_DUP_SQL } from "../src/routes/factory";
 import { DISCARD_SQL, UNSWAPPED_SQL } from "../src/routes/agents";
 import { RESET_GRANT_EVENTS_SQL, RESET_GRANTS_SQL, RESET_TOKEN_SQL, SUBJECT, forcedSubject } from "../src/routes/passkeys";
 import { assert as answer, createAuthenticator, register, UP } from "./soft-authenticator.mjs";
@@ -180,6 +190,62 @@ describe("a build queued by hand (#284)", () => {
     // Its job token writes edge: what an approval ships.
     expect(scopesFor("publish", 1, "project", JSON.parse(pub!.params))).toEqual(expect.arrayContaining(["pool:write", "release:edge"]));
   });
+
+  /** The scopes a job token carries, read from its claims. */
+  const scopesOf = (token: string): string[] => JSON.parse(atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"))).s;
+
+  it("is claimed with a job token that writes no pool and no ring: the dry run completes, and edge never sees it", async () => {
+    const edge = () => count("SELECT COUNT(*) AS n FROM releases WHERE ring = 'edge'");
+    const was = await edge();
+    const q = await call("POST", "/factory/enqueue", { ...body("sizeme"), arches: ["x86_64"], priority: 1, publish: false }, "omc_m1");
+    expect(q.status, JSON.stringify(q.json)).toBe(201);
+    const id = q.json.tasks[0];
+    const c = await call("POST", "/factory/claim", { arch: "x86_64", agent: AGENT, agent_status: "ok", kinds: ["build"] }, "omw_px");
+    expect([c.status, c.json?.task?.id, c.json?.task?.publish], JSON.stringify(c.json)).toEqual([200, id, 0]);
+    // The claim's token, and the heartbeat's after it: this task's routes and the journal, nothing of the pool.
+    expect(scopesOf(c.json.token)).toEqual([`task:${id}`, "events"]);
+    const hb = await call("POST", `/factory/tasks/${id}/heartbeat`, {}, c.json.token);
+    expect(hb.status, JSON.stringify(hb.json)).toBe(200);
+    expect(scopesOf(hb.json.token)).toEqual([`task:${id}`, "events"]);
+    // What the review found it could do: index a package and put it in edge. Refused, both, with either token.
+    const file = "sizeme-1.0-1-x86_64.pkg.tar.zst", sha = "f".repeat(64);
+    for (const token of [c.json.token, hb.json.token]) {
+      const idx = await call("POST", "/packages?source=factory&arch=x86_64", { schema_version: 1, name: "sizeme", version: "1.0-1", arch: "x86_64", sha256: sha, filename: file, size_download: 4, size_installed: 4, description: "x", provides: ["sizeme"], requires: [], pkginfo: { provides: [] }, files: [], components: [] }, token);
+      expect(idx.status, JSON.stringify(idx.json)).toBe(403);
+      const rel = await call("POST", "/releases", { ring: "edge", note: "a dry run" }, token);
+      expect(rel.status, JSON.stringify(rel.json)).toBe(403);
+    }
+    // It completes as a dry run: done, the line says so, nothing indexed, edge as it was.
+    const done = await call("POST", `/factory/tasks/${id}/complete`, { sha256: sha, filename: file, version: "1.0-1", duration_ms: 60000 }, hb.json.token);
+    expect(done.json, JSON.stringify(done.json)).toMatchObject({ status: "done", attested: false });
+    expect((await lines("build")).find((l) => l.payload.task === id)!.summary).toBe("sizeme 1.0-1 built for x86_64 by px in 1 min (dry run, not published)");
+    expect(await count("SELECT COUNT(*) AS n FROM packages WHERE name = 'sizeme'")).toBe(0);
+    expect(await edge()).toBe(was);
+    // A build that publishes still gets its scopes: the enqueue job's recipe on main.
+    expect(scopesFor("build", 1, "project", {})).toEqual(expect.arrayContaining(["pool:write", "release:edge", "artifacts:*:edge"]));
+    expect(scopesFor("build", 1, "project", {}, 0)).toEqual(["task:1", "events"]);
+  });
+
+  it("is never the build of its version, nor the same task as one that publishes: the enqueue job still queues the recipe on main", async () => {
+    const built = async (name: string) => ((await raw("GET", `${ORIGIN}/api/v1/factory/built`, {})).json.built as { name: string; id: number }[]).filter((r) => r.name === name);
+    // sizeme's dry run is done: /factory/built does not list it, so the enqueue job's reconcile would queue the version.
+    expect(await built("sizeme")).toEqual([]);
+    const e = Math.floor(Date.now() / 1000) + 3600;
+    const job = await issueJobToken(env, { t: 902, k: "enqueue", s: scopesFor("enqueue", 902, "project", {}), e, w: "w-pool" });
+    const recipe = { ...body("sizeme2"), arches: ["x86_64"], pkgbuild_ref: "c0ffee" };
+    // A maintainer's dry run of the recipe on main waits; the enqueue job's build of the same recipe is a task of its own, and publishes.
+    const dry = await call("POST", "/factory/enqueue", { ...recipe, publish: false }, "omc_m1");
+    const pub = await call("POST", "/factory/enqueue", { ...recipe, reason: "pkgbuild-changed", publish: true }, job);
+    expect(pub.json.tasks[0]).not.toBe(dry.json.tasks[0]);
+    expect(await env.DB.prepare("SELECT publish FROM build_tasks WHERE id = ?").bind(pub.json.tasks[0]).first()).toEqual({ publish: 1 });
+    expect((await built("sizeme2")).map((r) => r.id)).toEqual([pub.json.tasks[0]]);
+    // The other way round: a dry run sent while the build that publishes waits is its own task, and says it is a dry run.
+    const dry2 = await call("POST", "/factory/enqueue", { ...recipe, publish: false }, "omc_m2");
+    expect(dry2.json.tasks).toEqual(dry.json.tasks);
+    const pub2 = await call("POST", "/factory/enqueue", { ...recipe, reason: "pkgbuild-changed", publish: true }, job);
+    expect(pub2.json.tasks).toEqual(pub.json.tasks);
+    expect(await env.DB.prepare("SELECT publish FROM build_tasks WHERE id = ?").bind(dry.json.tasks[0]).first()).toEqual({ publish: 0 });
+  });
 });
 
 describe("a forced promotion (#284)", () => {
@@ -251,6 +317,18 @@ describe("a forced promotion (#284)", () => {
     expect((await lines("dispatch")).length).toBe(dispatched);
   });
 
+  /** A release of each ring, as the jobs make them: edge's first, then stable's (its own history, empty here). */
+  const releases: Record<string, number> = {};
+  beforeAll(async () => {
+    const e = Math.floor(Date.now() / 1000) + 3600;
+    for (const ring of ["edge", "stable"]) {
+      const token = await issueJobToken(env, { t: 903, k: "test", s: [`release:${ring}`], e, w: "w-pool" });
+      const r = await call("POST", "/releases", { ring, note: `${ring}'s first` }, token);
+      expect(r.status, JSON.stringify(r.json)).toBe(201);
+      releases[ring] = r.json.release.id;
+    }
+  });
+
   it("leaves a promotion by evidence and every other job as they were: the session, or the maintainer's token, and no passkey", async () => {
     const byToken = await call("POST", "/factory/jobs", { kind: "promote", params: { from: "rc", to: "stable" } }, "omc_m1");
     expect(byToken.status, JSON.stringify(byToken.json)).toBe(201);
@@ -258,10 +336,33 @@ describe("a forced promotion (#284)", () => {
     expect(byToken.json.passkey).toBeUndefined();
     // force other than "yes" is no force, as before.
     expect((await call("POST", "/factory/jobs", { kind: "promote", params: { from: "edge", to: "rc", force: "no" } }, "omc_m1")).json.job.params.force).toBeUndefined();
-    expect((await post("m2", { kind: "rollback", params: { ring: "stable", to: "1" } })).status).toBe(201);
+    expect((await post("m2", { kind: "rollback", params: { ring: "stable", to: String(releases.stable) } })).status).toBe(201);
     expect((await call("POST", "/factory/jobs", { kind: "health", params: { ring: "stable", arch: "x86_64" } }, "omc_m2")).status).toBe(201);
     const line = (await lines("dispatch")).find((l) => l.payload.task === byToken.json.task)!;
     expect([line.status, line.summary]).toEqual(["ok", `promote queued by m1 as task ${byToken.json.task}`]);
+  });
+
+  it("never takes a rollback to another ring's release: stable pointed at edge's would be a promotion past rc and the gate, with no passkey", async () => {
+    const rollbacks = () => count("SELECT COUNT(*) AS n FROM build_tasks WHERE kind = 'rollback'");
+    const was = await rollbacks(), dispatched = (await lines("dispatch")).length;
+    for (const [what, to, said] of [["edge's release", releases.edge, `release ${releases.edge} is edge's`], ["no release", 999999, "release 999999 is no release"]] as const) {
+      for (const send of [() => call("POST", "/factory/jobs", { kind: "rollback", params: { ring: "stable", to: String(to) } }, "omc_m1"), () => post("m1", { kind: "rollback", params: { ring: "stable", to: String(to) } })]) {
+        const r = await send();
+        expect([r.status, r.json.code], `${what}: ${JSON.stringify(r.json)}`).toEqual([400, "another_ring"]);
+        expect(r.json.error).toBe(`${said}: a rollback points stable at an earlier release of its own, never another ring's (a promotion is the way up); nothing was queued`);
+      }
+    }
+    expect(await rollbacks()).toBe(was);
+    expect((await lines("dispatch")).length).toBe(dispatched);
+    // The job's own write says the same, whoever holds a stable token: the release's base is a release of its ring.
+    const e = Math.floor(Date.now() / 1000) + 3600;
+    const token = await issueJobToken(env, { t: 904, k: "rollback", s: scopesFor("rollback", 904, "project", { ring: "stable" }), e, w: "w-pool" });
+    const across = await call("POST", "/releases", { ring: "stable", from_release_id: releases.edge, note: "a rollback across rings" }, token);
+    expect([across.status, across.json.error]).toEqual([400, `release ${releases.edge} is edge's: a rollback points stable at an earlier release of its own; a ring moves up by a promotion (from_ring)`]);
+    const heads = await env.DB.prepare("SELECT ring, release_id FROM ring_heads WHERE ring = 'stable'").first<{ release_id: number }>();
+    expect(heads!.release_id).toBe(releases.stable);
+    const own = await call("POST", "/releases", { ring: "stable", from_release_id: releases.stable, note: "back to stable's first" }, token);
+    expect([own.status, own.json.release.source_id], JSON.stringify(own.json)).toEqual([201, releases.stable]);
   });
 
   it("a door that forgets the passkey queues nothing", async () => {
@@ -273,7 +374,35 @@ describe("a forced promotion (#284)", () => {
   });
 });
 
+describe("the gate's evidence (#284)", () => {
+  it("is the jobs' alone: a maintainer's session or token writes a note to the journal, and no health, abi or promote row", async () => {
+    const evidence = () => count("SELECT COUNT(*) AS n FROM events WHERE kind IN ('health', 'abi', 'promote', 'gate')");
+    const was = await evidence();
+    const forged = [
+      { kind: "abi", ring: "rc", source: "x86_64", status: "ok", summary: "abi ok (forged)" },
+      { kind: "health", ring: "rc", source: "x86_64", status: "ok", summary: "healthy (forged)" },
+      { kind: "promote", ring: "stable", source: "rc", status: "ok", summary: "promoted (forged)" },
+      { kind: "gate", ring: "stable", source: "rc", status: "ok", summary: "gate open (forged)" },
+    ];
+    for (const e of forged) {
+      for (const [who, send] of [["a token", () => call("POST", "/events", e, "omc_m1")], ["the session", () => fromPage("m2", "/api/v1/events", e)]] as const) {
+        const r = await send();
+        expect([r.status, r.json?.code], `${e.kind} by ${who}: ${JSON.stringify(r.json)}`).toEqual([403, "note_only"]);
+        expect(r.json.error).toBe(`a maintainer writes a note to the journal (kind "note"); a ${e.kind} line is a job's — what the gate and Status read as evidence; nothing was written`);
+      }
+    }
+    expect(await evidence()).toBe(was);
+    // A note, as before; and a job's token posts its evidence, as before. A contributor writes nothing.
+    expect((await call("POST", "/events", { kind: "note", status: "ok", summary: "a maintainer wrote this" }, "omc_m1")).status).toBe(201);
+    const health = await issueJobToken(env, { t: 905, k: "health", s: scopesFor("health", 905, "project", { ring: "rc", arch: "x86_64" }), e: Math.floor(Date.now() / 1000) + 3600, w: "w-pool" });
+    expect((await call("POST", "/events", { kind: "health", ring: "rc", source: "x86_64", status: "ok", summary: "rc healthy on x86_64" }, health)).status).toBe(201);
+    expect(await evidence()).toBe(was + 1);
+    expect((await call("POST", "/events", { kind: "note", summary: "not mine to write" }, "omc_alice")).status).toBe(403);
+  });
+});
+
 describe("a passkey reset (#284)", () => {
+  afterEach(() => vi.restoreAllMocks());
   const REASON = "lost the phone and the key on a train";
   /** A grant of the login's, as the swap leaves it: `oma_<name>` its token. */
   const grant = async (login: string, id: string, o: { token?: string | null; expires?: string; revoked?: string; code?: string } = {}) =>
@@ -329,6 +458,26 @@ describe("a passkey reset (#284)", () => {
     expect(doc.grants_revoked.map((g: any) => g.id).sort()).toEqual(["g_live1", "g_live2"]);
   });
 
+  it("mints no token with a GitHub token until the person makes one on their page: the lost device's gh token or PAT registers nothing", async () => {
+    // GitHub answers for m7, as it would for the gh CLI's token the lost laptop keeps.
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input instanceof Request ? input.url : input) === "https://api.github.com/user") return new Response(JSON.stringify({ login: "m7", name: "M Seven", type: "User" }), { status: 200 });
+      throw new Error(`unexpected fetch: ${String(input)}`);
+    });
+    const mark = await env.DB.prepare("SELECT token_hash FROM contributors WHERE login = 'm7'").first<{ token_hash: string }>();
+    expect(mark!.token_hash).toMatch(/^reset:[0-9a-f]{32}$/);
+    const r = await raw("POST", `${ORIGIN}/api/v1/factory/register`, { "content-type": "application/json" }, { github_token: "gho_the_lost_laptops" });
+    expect([r.status, r.json.code], JSON.stringify(r.json)).toEqual([403, "token_reset"]);
+    expect(r.json.error).toBe("m7's token was revoked with a reset of their passkeys: make a new one on your page (/user/m7, Token) after signing in with GitHub, never with a GitHub token alone; nothing was made");
+    expect(r.json.token).toBeUndefined();
+    expect(await env.DB.prepare("SELECT token_hash, role FROM contributors WHERE login = 'm7'").first()).toEqual({ token_hash: mark!.token_hash, role: "maintainer" });
+    // Anyone else registers as before: a first registration, and another login's again.
+    vi.mocked(globalThis.fetch).mockImplementation(async () => new Response(JSON.stringify({ login: "newcomer", type: "User" }), { status: 200 }));
+    const fresh = await raw("POST", `${ORIGIN}/api/v1/factory/register`, { "content-type": "application/json" }, { github_token: "gho_newcomer" });
+    expect([fresh.status, fresh.json.login, fresh.json.role], JSON.stringify(fresh.json)).toEqual([201, "newcomer", "contributor"]);
+    expect((await me(fresh.json.token)).status).toBe(200);
+  });
+
   it("the person makes a new token after signing in again, and it works; the revoked one stays revoked", async () => {
     expect((await raw("POST", `${ORIGIN}/api/v1/factory/token`, { cookie: "omc=oms_m7" })).status).toBe(401);
     // m7 signs in with GitHub again (the tests write the new session's hash, as the callback does).
@@ -339,6 +488,11 @@ describe("a passkey reset (#284)", () => {
     const back = await me(t.json.token);
     expect([back.status, back.json.contributor.login]).toEqual([200, "m7"]);
     expect((await me("omc_m7")).status).toBe(401);
+    // From then on a GitHub token registers the login again, as before the reset — why the runbook has the device's GitHub tokens revoked.
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ login: "m7", type: "User" }), { status: 200 }));
+    const again = await raw("POST", `${ORIGIN}/api/v1/factory/register`, { "content-type": "application/json" }, { github_token: "gho_m7_again" });
+    expect([again.status, again.json.role], JSON.stringify(again.json)).toEqual([201, "maintainer"]);
+    expect((await me(t.json.token)).status).toBe(401);
   });
 
   it("sent twice at once revokes once: one token line, one line a grant", async () => {
@@ -363,11 +517,17 @@ describe("a passkey reset (#284)", () => {
       ["the live grants revoked", RESET_GRANTS_SQL, [/SEARCH agent_grants USING INDEX idx_agent_grants_live \(login=\? AND expires_at>\?\)/, /SEARCH passkeys (EXISTS )?USING COVERING INDEX idx_passkeys_login \(login=\?\)/]],
       ["a code nobody swapped", UNSWAPPED_SQL, [/SEARCH agent_grants USING (COVERING )?INDEX idx_agent_grants_unswapped \(login=\?\)/]],
       ["the waiting drafts discarded", DISCARD_SQL, [/SEARCH drafts USING INDEX idx_drafts_login \(login=\? AND created_at>\?\)/]],
+      // The review's side doors: an identical build waiting, what the factory built, a rollback's release, a registration after a reset.
+      ["an identical build waiting", ENQUEUE_DUP_SQL, [/SEARCH build_tasks USING INDEX idx_build_tasks_name \(name=\? AND arch=\?\)/]],
+      ["what the factory built", BUILT_SQL, [/SEARCH t USING INDEX idx_build_tasks_kind \(kind=\?\)/, /SEARCH u USING INDEX idx_build_tasks_name \(name=\? AND arch=\?\)/]],
+      ["a rollback's release", "SELECT ring FROM releases WHERE id = ?", [/SEARCH releases USING INTEGER PRIMARY KEY \(rowid=\?\)/]],
+      // An insert by the primary key, its conflict on the same row: nothing to search.
+      ["a registration", REGISTER_SQL, []],
     ];
     for (const [what, sql, want] of expected) {
       const p = await plan(sql);
       for (const re of want) expect(p, `${what}: ${p}`).toMatch(re);
-      expect(p, `${what}: ${p}`).not.toMatch(/\bSCAN (contributors|agent_grants|passkeys|drafts)\b/);
+      expect(p, `${what}: ${p}`).not.toMatch(/\bSCAN (contributors|agent_grants|passkeys|drafts|build_tasks|releases|t|u)\b/);
     }
   });
 });

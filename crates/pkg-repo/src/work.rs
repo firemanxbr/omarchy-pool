@@ -171,6 +171,20 @@ pub struct Task {
     pub attempts: u32,
     #[serde(default)]
     pub max_attempts: u32,
+    /// The row's `publish`: `0` is a dry run (#284) — built and measured,
+    /// never published nor rendered, and the claim's token carries no pool
+    /// or ring scope for it. A pool that does not say: a build publishes.
+    #[serde(default)]
+    pub publish: Option<i64>,
+}
+
+impl Task {
+    /// A dry run: by hand, the only build a maintainer queues (#284). A
+    /// review build publishes nothing either, and stages its result instead.
+    #[must_use]
+    pub fn dry_run(&self) -> bool {
+        self.publish == Some(0) && self.params.get("review").is_none()
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -1547,7 +1561,7 @@ fn verify_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
 /// repository, a draft, or a staged build a maintainer approved) built in a
 /// fresh Arch container by the pipeline's own script, then signed,
 /// published into edge as source `factory` and rendered — by this worker,
-/// with the job's credential. Community builds stay with the container
+/// with the job's credential; a dry run is kept here instead (#284). Community builds stay with the container
 /// image (`omarchy-build-worker --container`); this executor takes only
 /// tasks a project-trusted worker may claim.
 #[allow(clippy::too_many_lines)]
@@ -1793,6 +1807,36 @@ fn build_job(opts: &WorkOptions, task: &Task, token: &Arc<Mutex<String>>) -> Res
             result: serde_json::json!({ "sha256": manifest.sha256, "filename": manifest.filename, "version": manifest.version, "review": from }),
         });
     }
+    if task.dry_run() {
+        // A dry run (#284): built and measured — the pool records its time,
+        // sha256 and version at complete — and kept under the work
+        // directory, never signed, published or rendered. The claim's token
+        // has no pool or ring scope for it either: a recipe queued by hand,
+        // whatever it names, reaches no ring.
+        let main = pkgs
+            .iter()
+            .find(|p| {
+                p.file_name()
+                    .is_some_and(|f| f.to_string_lossy().starts_with(&format!("{}-", task.name)))
+            })
+            .unwrap_or(&pkgs[0]);
+        let manifest = pkg_extract::extract_manifest(main)?;
+        let kept = dry_run_dir(&opts.work_dir, task.id);
+        let _ = std::fs::remove_dir_all(&kept);
+        std::fs::create_dir_all(opts.work_dir.join("dry-run"))?;
+        std::fs::rename(dir.join("out"), &kept).context("keeping the dry run's result")?;
+        let _ = std::fs::remove_dir_all(&dir);
+        return Ok(Outcome {
+            summary: format!(
+                "{} {} built for {} — a dry run, kept in {}; nothing published",
+                manifest.name,
+                manifest.version,
+                task.arch,
+                kept.display()
+            ),
+            result: serde_json::json!({ "sha256": manifest.sha256, "filename": manifest.filename, "version": manifest.version, "dry_run": true }),
+        });
+    }
     // The pool signs what it stores (/docs/security-model); a local key only covers
     // a pool that has none.
     if let Some(key) = &opts.sign {
@@ -1841,6 +1885,12 @@ fn build_job(opts: &WorkOptions, task: &Task, token: &Arc<Mutex<String>>) -> Res
         ),
         result: serde_json::json!({ "sha256": manifest.sha256, "filename": manifest.filename, "version": manifest.version, "rendered": rendered }),
     })
+}
+
+/// Where a dry run's packages stay (#284): `<work dir>/dry-run/task-<id>`,
+/// on the worker that built them — the pool never receives them.
+fn dry_run_dir(work_dir: &Path, id: u64) -> PathBuf {
+    work_dir.join("dry-run").join(format!("task-{id}"))
 }
 
 /// The second agent: reads the evidence a contributor staged (PKGBUILD,
@@ -2236,10 +2286,40 @@ fn security_job(opts: &WorkOptions, job: &Api, token: &Arc<Mutex<String>>) -> Re
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_retry_after, chrono_now, emulated, emulation_failure, fail_body, probe_agent,
-        AgentCheck, AgentProbe, NeedsNative, WorkOptions, AGENT_PROBE_EVERY, POLL,
+        agent_retry_after, chrono_now, dry_run_dir, emulated, emulation_failure, fail_body,
+        probe_agent, AgentCheck, AgentProbe, NeedsNative, Task, WorkOptions, AGENT_PROBE_EVERY,
+        POLL,
     };
     use std::time::{Duration, Instant};
+
+    /// #284: a build queued by hand is a dry run, `publish` 0 on the claim's
+    /// row — built, kept on the worker, never published. A build that
+    /// publishes says 1; a review build is 0 and stages; a pool that does
+    /// not say keeps the build publishing, as before.
+    #[test]
+    fn a_dry_run_is_the_claims_publish_0_and_nothing_else() {
+        let task = |extra: serde_json::Value| -> Task {
+            let mut t = serde_json::json!({ "id": 7, "kind": "build", "name": "chromium", "arch": "aarch64", "trust": "project", "pkgbuild_ref": "c0ffee", "params": {} });
+            t.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value(t).unwrap()
+        };
+        assert!(task(serde_json::json!({ "publish": 0 })).dry_run());
+        assert!(!task(serde_json::json!({ "publish": 1 })).dry_run());
+        assert!(
+            !task(serde_json::json!({})).dry_run(),
+            "a pool that does not say"
+        );
+        assert!(
+            !task(serde_json::json!({ "publish": 0, "params": { "review": 12 } })).dry_run(),
+            "a review build stages"
+        );
+        assert_eq!(
+            dry_run_dir(std::path::Path::new("/var/lib/omarchy-worker"), 7),
+            std::path::Path::new("/var/lib/omarchy-worker/dry-run/task-7")
+        );
+    }
 
     fn answer(status: &str, error: &str, at: Instant) -> AgentProbe {
         AgentProbe {

@@ -393,10 +393,11 @@ approves or blocks at all. Each of those needs an assertion with the user
 verified on the person's authenticator (*A passkey for approve and block*,
 below). Request changes and reject confirm with the session and, for
 reject, the package's name typed (*Signed off*, 4): neither ships anything,
-and both issues keep them as they were. Since #284 no other door ships
-without it either: a build queued by hand is a dry run, and a promotion
-forced past its evidence takes the maintainer's passkey (*The doors that
-ship*, below).
+and both issues keep them as they were. Since #284 no door ships bytes
+that no check and no approval passed without it: a build queued by hand is
+a dry run, and a promotion forced past its evidence takes the maintainer's
+passkey. A rollback keeps the session and the token: it points a ring at
+an earlier release of its own (*The doors that ship*, below).
 
 **Not MCP elicitation.** The protocol lets a server ask the person a question
 through the agent's client (`elicitation/create`). The answer comes back
@@ -562,12 +563,15 @@ another maintainer.
   `reflect-metadata`, a polyfill of the global `Reflect`, and an X.509 and
   ASN.1 stack for attestation chains the pool does not trust, some 300 KB
   minified in 25 packages beside the Worker's two.
-- **The doors that ship (#284).** #271 left two doors that put bytes in a
-  ring with the session or the `omc_` token alone, and #284 closes both. A
+- **The doors that ship (#284).** #271 left two doors that put bytes no
+  check and no approval passed in a ring with the session or the `omc_`
+  token alone, and #284 closes both. A
   build queued by hand (`POST /factory/enqueue`, a maintainer's session or
-  token) is a dry run: `publish: false` is queued, built and measured;
-  `publish` true or left out is refused with `dry_run_only`, and nothing is
-  queued. A build that publishes comes from the factory's enqueue job — its
+  token) is a dry run: `publish: false` is queued, built and measured, and
+  its job token has no pool and no ring scope, so the worker keeps what it
+  built; `publish` true or left out is refused with `dry_run_only`, and
+  nothing is queued. A dry run is never the build of its version: the
+  enqueue job's build of the same recipe is a task of its own. A build that publishes comes from the factory's enqueue job — its
   job token, issued to a project worker for a recipe on `main` — or from an
   approval, which takes a passkey. A promotion forced past its evidence and
   the gate (`POST /factory/jobs`, `promote` with `force: "yes"`) is
@@ -578,8 +582,16 @@ another maintainer.
   with `session_only`, each wrong answer with its code, ending "nothing was
   queued". The answer and the journal's `dispatch` line name the passkey.
   Status draws the button — *Force into rc* on edge's card, *Force into
-  stable* on rc's — for a maintainer. A promotion by evidence, a rollback
-  and every other pool job keep the session and the token.
+  stable* on rc's — for a maintainer, and asks which architectures: both,
+  or one. A promotion by evidence, a rollback and every other pool job keep
+  the session and the token; around them the review of #284 closed three
+  side doors. A rollback points a ring at an earlier release of its own —
+  another ring's is refused (`another_ring`), since stable pointed at an
+  edge release would be a forced promotion. The evidence the gate reads —
+  health and ABI rows — is the jobs' alone: a maintainer's session or
+  token writes a `note` to the journal and nothing else (`note_only`). And
+  after a reset, `POST /factory/register` mints the login no token with a
+  GitHub token (`token_reset`) until the person makes one on their page.
 - **What it still cannot tell apart.** #257 left three gaps open — the web's
   own Approve and Block, adding a passkey and removing one took the session
   alone — and #271 closes the three together: a session driven by someone

@@ -102,18 +102,22 @@ for pkg in "$E2E"/pkgs/*.pkg.tar.zst; do
   gpg --batch --yes --detach-sign --no-armor --local-user "$KEYID" --output "$pkg.sig" "$pkg"
 done
 
-step "Publish to edge (pool upload happens once)"
+step "Publish to edge (pool upload happens once), promote edge → rc → stable (index writes only)"
+# zlib alone first, all the way to stable: the release the rollback drill goes back to is stable's own.
 "$PKG_REPO" publish --ring edge --source packages --note "zlib" "$E2E/pkgs/zlib-1:1.3.2-3-x86_64.pkg.tar.zst"
-"$PKG_REPO" publish --ring edge --source packages --note "xz" "$E2E/pkgs/xz-5.8.4-1-x86_64.pkg.tar.zst"
-"$PKG_REPO" publish --ring edge --source packages --note "re-publish is idempotent" "$E2E/pkgs/zlib-1:1.3.2-3-x86_64.pkg.tar.zst"
-
-step "Promote edge → rc → stable (index writes only)"
 "$PKG_REPO" promote --from edge --to rc --note "rc cut"
 "$PKG_REPO" promote --from rc --to stable --note "ship"
+"$PKG_REPO" publish --ring edge --source packages --note "xz" "$E2E/pkgs/xz-5.8.4-1-x86_64.pkg.tar.zst"
+"$PKG_REPO" publish --ring edge --source packages --note "re-publish is idempotent" "$E2E/pkgs/zlib-1:1.3.2-3-x86_64.pkg.tar.zst"
+"$PKG_REPO" promote --from edge --to rc --note "rc cut, xz in"
+"$PKG_REPO" promote --from rc --to stable --note "ship xz"
 
-step "Rollback: stable back to the zlib-only release, then forward again"
+step "Rollback: stable back to its zlib-only release, then forward again"
 FIRST_EDGE=$("$PKG_REPO" releases --ring edge | awk '$2 == 1 {print $1}')
-"$PKG_REPO" rollback --ring stable --to "$FIRST_EDGE" --note "rollback drill"
+FIRST_STABLE=$("$PKG_REPO" releases --ring stable | awk '$2 == 1 {print $1}')
+# A rollback stays inside its ring (#284): stable pointed at an edge release would be a promotion past rc and the gate.
+"$PKG_REPO" rollback --ring stable --to "$FIRST_EDGE" --note "across rings" >/dev/null 2>&1 && { echo "a rollback to another ring's release must be refused"; exit 1; }
+"$PKG_REPO" rollback --ring stable --to "$FIRST_STABLE" --note "rollback drill"
 summary_body=$(curl -s "$OMARCHY_API/api/v1/releases/stable?fields=summary")
 grep -q '"name":"zlib"' <<<"$summary_body" || { echo "rollback lost zlib"; exit 1; }
 grep -q '"name":"xz"' <<<"$summary_body" && { echo "rollback still serves xz"; exit 1; }
@@ -353,17 +357,30 @@ qj=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/jobs" "${mauth[@]}" -d '{"kind
 grep -q '"task":' <<<"$qj" || { echo "a maintainer could not queue a job: $qj"; exit 1; }
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/jobs" -H "authorization: Bearer omc_e2e_contributor" -H "content-type: application/json" -d '{"kind":"gc"}')" == 403 ]] || { echo "a contributor must not queue jobs"; exit 1; }
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/jobs" "${mauth[@]}" -d '{"kind":"promote","params":{"from":"edge","to":"edge"}}')" == 400 ]] || { echo "bad job params must be refused"; exit 1; }
-rb=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/jobs" "${mauth[@]}" -d '{"kind":"rollback","params":{"ring":"stable","to":"1"}}'); grep -q '"kind":"rollback"' <<<"$rb" || { echo "a maintainer could not queue a rollback: $rb"; exit 1; }
+rb=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/jobs" "${mauth[@]}" -d "{\"kind\":\"rollback\",\"params\":{\"ring\":\"stable\",\"to\":\"$FIRST_STABLE\"}}"); grep -q '"kind":"rollback"' <<<"$rb" || { echo "a maintainer could not queue a rollback: $rb"; exit 1; }
+# …to a release of that ring only (#284): another ring's is refused, nothing queued.
+[[ "$(curl -s -X POST "$OMARCHY_API/api/v1/factory/jobs" "${mauth[@]}" -d "{\"kind\":\"rollback\",\"params\":{\"ring\":\"stable\",\"to\":\"$FIRST_EDGE\"}}" | jq -r .code)" == another_ring ]] || { echo "a rollback to another ring's release must be refused"; exit 1; }
 # A promotion forced past its evidence takes the maintainer's passkey, in the browser (#284): the token forces nothing.
 [[ "$(curl -s -X POST "$OMARCHY_API/api/v1/factory/jobs" "${mauth[@]}" -d '{"kind":"promote","params":{"from":"rc","to":"stable","force":"yes"}}' | jq -r .code)" == session_only ]] || { echo "a maintainer's token must not force a promotion"; exit 1; }
 # A build queued by hand is a dry run (#284): the enqueue job's token publishes (above), the maintainer's token queues publish:false only.
 [[ "$(curl -s -X POST "$OMARCHY_API/api/v1/factory/enqueue" "${mauth[@]}" -d '{"name":"e2e-sizing","pkgbuild_ref":"deadbeef","reason":"sizing","arches":["aarch64"]}' | jq -r .code)" == dry_run_only ]] || { echo "a build queued by hand must be a dry run"; exit 1; }
-dry=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/enqueue" "${mauth[@]}" -d '{"name":"e2e-sizing","pkgbuild_ref":"deadbeef","reason":"sizing","arches":["aarch64"],"publish":false}')
+dry=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/enqueue" "${mauth[@]}" -d '{"name":"e2e-sizing","pkgbuild_ref":"deadbeef","reason":"sizing","arches":["aarch64"],"publish":false,"priority":1}')
 dry_task=$(jq -r '.tasks[0]' <<<"$dry")
-[[ "$(cd "$ROOT/worker" && npx wrangler d1 execute omarchy-repo --local --persist-to "$WRANGLER_STATE" --json --command "SELECT publish AS n FROM build_tasks WHERE id = $dry_task" | jq -r '.[0].results[0].n')" == 0 ]] || { echo "a dry run by hand must never publish: $dry"; exit 1; }
-# Nothing of this run builds it: cancelled at once, so no later claim takes it.
-[[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/tasks/$dry_task/cancel" "${mauth[@]}")" == 200 ]] || { echo "the dry run could not be cancelled"; exit 1; }
+# A project worker claims it: the row says publish 0, and its job token writes no pool and no ring — edge refuses it, and the
+# dry run completes without a package the pool indexed; edge is where it was.
+edge_head=$(curl -s "$OMARCHY_API/api/v1/releases/edge?fields=summary" | jq -r .release.id)
+dclaim=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/claim" "${w1[@]}" -d '{"arch":"aarch64","kinds":["build"]}')
+[[ "$(jq -r '"\(.task.id) \(.task.publish)"' <<<"$dclaim")" == "$dry_task 0" ]] || { echo "the project worker must claim the dry run, publish 0: $dclaim"; exit 1; }
+djob=$(jq -r .token <<<"$dclaim")
+[[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/releases" -H "authorization: Bearer $djob" -H "content-type: application/json" -d '{"ring":"edge","note":"a dry run"}')" == 403 ]] || { echo "a dry run's token must not write edge"; exit 1; }
+[[ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$OMARCHY_API/api/v1/pool/$xz_sha?filename=e2e-sizing-1-1-aarch64.pkg.tar.zst&source=factory&arch=aarch64" -H "authorization: Bearer $djob" --data-binary 'not a package')" == 403 ]] || { echo "a dry run's token must not write the pool"; exit 1; }
+ddone=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$dry_task/complete" -H "authorization: Bearer $djob" -H "content-type: application/json" -d '{"sha256":"'"$(printf e2e-sizing | sha256sum | cut -d' ' -f1)"'","filename":"e2e-sizing-1-1-aarch64.pkg.tar.zst","version":"1-1"}')
+grep -q '"status":"done"' <<<"$ddone" || { echo "the dry run must complete: $ddone"; exit 1; }
+[[ "$(curl -s "$OMARCHY_API/api/v1/releases/edge?fields=summary" | jq -r .release.id)" == "$edge_head" ]] || { echo "a dry run must leave edge where it was"; exit 1; }
+curl -s "$OMARCHY_API/api/v1/factory/built" | jq -e '[.built[] | select(.name == "e2e-sizing")] | length == 0' >/dev/null || { echo "a dry run is no build of its version"; exit 1; }
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/events" "${mauth[@]}" -d '{"kind":"note","status":"ok","summary":"a maintainer wrote this"}')" == 201 ]] || { echo "a maintainer must be able to write a journal note"; exit 1; }
+# …a note, never the gate's evidence (#284): a health or abi row is a job's.
+[[ "$(curl -s -X POST "$OMARCHY_API/api/v1/events" "${mauth[@]}" -d '{"kind":"abi","ring":"rc","source":"x86_64","status":"ok","summary":"abi ok (forged)"}' | jq -r .code)" == note_only ]] || { echo "a maintainer must not write the gate's evidence"; exit 1; }
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/pool/gc" "${mauth[@]}")" == 401 ]] || { echo "a maintainer token must not write to the pool directly (jobs do)"; exit 1; }
 # Nobody approves their own package — and the only maintainer is no exception (docs/GOVERNANCE.md).
 (cd "$ROOT/worker" && npx wrangler d1 execute omarchy-repo --local --persist-to "$WRANGLER_STATE" --command \

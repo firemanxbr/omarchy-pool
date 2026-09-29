@@ -346,9 +346,12 @@ maintainer queues (#284: `publish` true or left out is refused,
 `dry_run_only`) —
 `curl -X POST $API/factory/enqueue -H "authorization: Bearer omc_…" -d '{"name":"chromium","pkgbuild_ref":"<commit>","version":"…","arches":["aarch64"],"reason":"sizing","publish":false,"override":true}'`
 (`override` when an upstream source ships the name). The worker keeps the
-result under its work directory; the build's page (`/build/<id>`) shows how
-long it took and what it measured, and `GET /api/v1/factory` lists its task
-with `publish` 0. `factory/sizing/` holds recipes kept
+packages under its work directory (`dry-run/task-<id>`) and the pool never
+receives them: the dry run's job token has no pool and no ring scope. The
+build's page (`/build/<id>`) shows how long it took and what it measured,
+and `GET /api/v1/factory` lists its task with `publish` 0. A dry run is
+never the build of its version: `GET /factory/built` leaves it out, so
+the enqueue job still queues the build that publishes a recipe on `main`. `factory/sizing/` holds recipes kept
 only for this (chromium, from Arch Linux ARM): the only recipes left in
 the repository, and the `enqueue` job never queues them.
 

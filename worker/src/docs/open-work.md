@@ -33,13 +33,17 @@ request (see [CONTRIBUTING.md](CONTRIBUTING.md)), and keep
 
 - [x] ~~**The other doors that ship without a passkey.**~~ — closed by
       #284. A build queued by hand is a dry run (`publish: false`; anything
-      else is refused, `dry_run_only`): what publishes comes from the
-      enqueue job (a recipe on `main`) or from an approval. A promotion
-      forced past its evidence takes the maintainer's passkey, in the
-      browser, for exactly that promotion (Status's *Force into …*). A
-      reset also revokes the login's `omc_` token and its agents' grants, a
-      journal line each. A withdrawal keeps the session or the token: it
-      takes an approval back and ships nothing
+      else is refused, `dry_run_only`), and its job token writes no pool
+      and no ring: what publishes comes from the enqueue job (a recipe on
+      `main`) or from an approval. A promotion forced past its evidence
+      takes the maintainer's passkey, in the browser, for exactly that
+      promotion (Status's *Force into …*); a rollback stays inside its
+      ring, and a maintainer writes the journal's notes, never the gate's
+      evidence. A reset also revokes the login's `omc_` token and its
+      agents' grants, a journal line each, and no GitHub token mints the
+      login a new one until the person makes it on their page. A
+      withdrawal keeps the session or the token: it takes an approval back
+      and ships nothing
       ([the security model](docs/security-model.md#the-doors-that-ship)).
 
 - [ ] **Production keys and hosting.** The staging database key is throwaway and

@@ -136,14 +136,27 @@ function nothingToBuild(skipped: { arch: string; source: string; version: string
   );
 }
 
+/**
+ * The project's dry runs (#284): a build of its own that publishes nothing
+ * and is no review build — by hand, a maintainer's only build. Never what
+ * the factory built (`/factory/built`), and never the same task as a build
+ * that publishes (ENQUEUE_DUP_SQL).
+ */
+const dryRun = (t: string) => `(${t}.trust = 'project' AND ${t}.publish = 0 AND json_extract(${t}.params, '$.review') IS NULL)`;
+/**
+ * An identical task already queued or running: the same recipe, and the same
+ * `publish` — a maintainer's dry run never stands in for the enqueue job's
+ * build of a recipe on main, nor that build for a dry run (#284). Led by the
+ * name, (name, arch, id), as before; `+` keeps the planner there.
+ */
+export const ENQUEUE_DUP_SQL = "SELECT id FROM build_tasks WHERE name = ? AND arch = ? AND pkgbuild_ref = ? AND status IN ('queued', 'leased') AND +kind = 'build' AND +trust = 'project' AND +publish = ? LIMIT 1";
+
 /** Queue one task per architecture unless an identical one is already queued or running. */
 async function enqueue(env: Env, t: { name: string; arches: string[]; pkgbuild_ref: string; reason: string; version?: string | null; priority?: number; publish?: boolean }): Promise<number[]> {
   const ids: number[] = [];
   for (const arch of t.arches) {
-    const dup = await env.DB.prepare(
-      "SELECT id FROM build_tasks WHERE name = ? AND arch = ? AND pkgbuild_ref = ? AND status IN ('queued', 'leased') LIMIT 1",
-    )
-      .bind(t.name, arch, t.pkgbuild_ref)
+    const dup = await env.DB.prepare(ENQUEUE_DUP_SQL)
+      .bind(t.name, arch, t.pkgbuild_ref, t.publish === false ? 0 : 1)
       .first<{ id: number }>();
     if (dup) {
       ids.push(dup.id);
@@ -474,7 +487,8 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   // The job's own credential: exactly the routes this task needs, until the lease ends.
   const params = task.params ? (JSON.parse(task.params) as Record<string, unknown>) : {};
   const expires = Math.floor(Date.now() / 1000) + LEASE_MINUTES * 60;
-  const token = await issueJobToken(env, { t: task.id, k: task.kind, s: scopesFor(task.kind, task.id, task.trust, params), e: expires, w: workerId });
+  // A dry run's (publish 0, #284) writes nothing to the pool nor a ring: scopesFor reads the row's publish.
+  const token = await issueJobToken(env, { t: task.id, k: task.kind, s: scopesFor(task.kind, task.id, task.trust, params, task.publish), e: expires, w: workerId });
   // A contributor's build lands in their workspace: how full it is travels
   // with the claim, so a worker whose owner is at the quota fails the task
   // at once instead of building for an hour into a 413.
@@ -523,7 +537,7 @@ export async function handleHeartbeat(id: number, env: Env, actor: Actor): Promi
   // The lease moved; so does the job's credential.
   const params = task.params ? (JSON.parse(task.params) as Record<string, unknown>) : {};
   const expires = Math.floor(Date.now() / 1000) + LEASE_MINUTES * 60;
-  const token = await issueJobToken(env, { t: task.id, k: task.kind, s: scopesFor(task.kind, task.id, task.trust, params), e: expires, w: who });
+  const token = await issueJobToken(env, { t: task.id, k: task.kind, s: scopesFor(task.kind, task.id, task.trust, params, task.publish), e: expires, w: who });
   return json({ task: id, lease_expires_at: until, token, token_expires_at: new Date(expires * 1000).toISOString() });
 }
 
@@ -952,15 +966,16 @@ export async function pruneWorkers(env: Env): Promise<number> {
 
 /**
  * Every (name, arch, version) the factory has a task for, with the latest
- * status. The enqueue job (by hand, for the sizing recipes) reconciles the
- * recipes on main against this.
+ * status. The enqueue job reconciles the recipes on main against this. A
+ * dry run is no build of the version (#284): listed, a maintainer's sizing
+ * run of a recipe on main would keep the enqueue job from ever queuing the
+ * build that publishes it.
  */
+export const BUILT_SQL = `SELECT name, arch, version, status, pkgbuild_ref, id FROM build_tasks t
+      WHERE kind = 'build' AND status != 'cancelled' AND NOT ${dryRun("t")} AND id = (SELECT MAX(id) FROM build_tasks u WHERE u.kind = 'build' AND u.name = t.name AND u.arch = t.arch AND u.version IS t.version AND u.status != 'cancelled' AND NOT ${dryRun("u")})
+      ORDER BY name, arch, id`;
 export async function handleBuilt(env: Env): Promise<Response> {
-  const rows = await env.DB.prepare(
-    `SELECT name, arch, version, status, pkgbuild_ref, id FROM build_tasks t
-      WHERE kind = 'build' AND status != 'cancelled' AND id = (SELECT MAX(id) FROM build_tasks u WHERE u.kind = 'build' AND u.name = t.name AND u.arch = t.arch AND u.version IS t.version AND u.status != 'cancelled')
-      ORDER BY name, arch, id`,
-  ).all();
+  const rows = await env.DB.prepare(BUILT_SQL).all();
   return json({ built: rows.results }, 200, { "cache-control": "no-store" });
 }
 

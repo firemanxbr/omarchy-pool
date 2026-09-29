@@ -48,7 +48,7 @@
 import { json, type Env } from "../index";
 import { DASHBOARD_HOST, isProductionHost, PROMOTED_RINGS, REPO_ARCHES } from "../meta";
 import { browserSession, randomHex, type Through } from "../agents";
-import { contributorOf, isMaintainer, sha256Hex, SIGN_IN, type Contributor } from "./contributors";
+import { contributorOf, isMaintainer, RESET_TOKEN_MARK, sha256Hex, SIGN_IN, type Contributor } from "./contributors";
 import { ALGORITHMS, OFFERED_ALGORITHMS, WebAuthnError, fromB64url, sha256, toB64url, verifyAssertion, verifyRegistration, type WebAuthnCode } from "../webauthn";
 import { NO_PASSKEY, PASSKEY_ELSEWHERE } from "../pages/agent-auth";
 import { putRecord, recordUrl } from "../record";
@@ -192,10 +192,11 @@ export const SIGN_OUT_SQL = "UPDATE contributors SET session_hash = NULL WHERE l
  * What the lost device may still hold outside the browser goes with the
  * passkeys (#284), each before the delete in the same batch and only while
  * the login still holds one (?1), so two resets at once revoke once. The
- * command line's token: replaced by the primary key with the hash of no
- * token (?2) — the sign-in's own way to say a login holds none, as
- * token_hash is NOT NULL — and the person makes a new one on their page
- * after signing in again.
+ * command line's token: replaced by the primary key with the reset's mark
+ * (?2, contributors.ts RESET_TOKEN_MARK and random hex), which no token
+ * hashes to — token_hash is NOT NULL and UNIQUE. While it stands, a GitHub
+ * token registers the login no new one (POST /factory/register): the person
+ * makes it on their page after signing in again.
  */
 export const RESET_TOKEN_SQL = "UPDATE contributors SET token_hash = ?2 WHERE login = ?1 AND EXISTS (SELECT 1 FROM passkeys WHERE login = ?1)";
 /** …the login's live agent grants — swapped, not revoked, not expired: three at most, through the partial index that holds only those — a journal line each (?2 the words before the agent's name, ?3 who reset, ?4 the record), written before they are revoked… */
@@ -542,7 +543,7 @@ export async function handlePasskeyReset(url: URL, request: Request, env: Env): 
     env.DB.prepare(RESET_GRANTS_SQL).bind(login),
     env.DB.prepare(DISCARD_SQL).bind(login, JSON.stringify({ error: `${login}'s passkeys were reset by ${c.login}: the agent's grant ended, and nothing was decided` })),
     env.DB.prepare(UNSWAPPED_SQL).bind(login),
-    env.DB.prepare(RESET_TOKEN_SQL).bind(login, await sha256Hex(`revoked:${crypto.randomUUID()}`)),
+    env.DB.prepare(RESET_TOKEN_SQL).bind(login, `${RESET_TOKEN_MARK}${randomHex(16)}`),
     env.DB.prepare(RESET_SQL).bind(login),
     env.DB.prepare(RESET_CHALLENGES_SQL).bind(login),
     env.DB.prepare(SIGN_OUT_SQL).bind(login),

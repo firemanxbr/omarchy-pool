@@ -78,8 +78,8 @@ export async function jobHas(request: Request, env: Env, scope: string): Promise
   return c && c.s.includes(scope) ? c : null;
 }
 
-/** The scopes a task of this kind needs, from its parameters. */
-export function scopesFor(kind: string, id: number, trust: string, params: Record<string, unknown>): string[] {
+/** The scopes a task of this kind needs, from its parameters — and, for a build, its row's `publish` (0: a dry run). */
+export function scopesFor(kind: string, id: number, trust: string, params: Record<string, unknown>, publish = 1): string[] {
   // The journal is the project's: its jobs post what they did (sync, promote, health, abi…) and the promotion gate and the Status page read those rows as evidence. A community build posts nothing — its worker writes through its task alone, and the Worker records the build — so its token carries no `events` scope: a contributor's worker could otherwise post a health row the gate would promote or block on.
   const s = [`task:${id}`];
   if (trust !== "community") s.push("events");
@@ -87,9 +87,10 @@ export function scopesFor(kind: string, id: number, trust: string, params: Recor
   switch (kind) {
     case "build":
       // A contributor's build, and the project's review build (review:<task>, params.review), stage: the
-      // result waits for a maintainer. A recipe on main publishes.
+      // result waits for a maintainer. A recipe on main publishes. A dry run (publish 0 — by hand, a
+      // maintainer's only build, #284) builds and reports: no pool, no ring, whatever recipe it names.
       if (trust === "community" || params.review !== undefined) s.push(`staging:${id}`);
-      else s.push("pool:write", `release:${ring}`, `artifacts:*:${ring}`);
+      else if (publish !== 0) s.push("pool:write", `release:${ring}`, `artifacts:*:${ring}`);
       break;
     case "publish":
       // The project's approved build, from staging into the pool: reads the staged package (staging:<task>), writes edge —

@@ -670,7 +670,12 @@ async function api(method: string, path: string, url: URL, request: Request, env
   if (method === "GET" && path === "/pool/unreferenced") return handleUnreferenced(url, env);
   if (method === "POST" && path === "/pool/gc") return (await authorize(request, env, "gc")) ?? handleGc(url, env);
   if (method === "POST" && path === "/pool/relayout") return (await authorize(request, env, "relayout")) ?? handleRelayout(url, env);
-  if (method === "POST" && path === "/events") return (await authorizeJobOrMaintainer(request, env, "events")) ?? handlePostEvent(request, env);
+  if (method === "POST" && path === "/events") {
+    // A job posts what it did — the rows the gate and Status read as evidence; a maintainer by hand writes a note, nothing else (#284).
+    if (await jobOf(request, env)) return (await authorize(request, env, "events")) ?? handlePostEvent(request, env, null);
+    const hand = await maintainerOf(request, env);
+    return hand instanceof Response ? hand : handlePostEvent(request, env, hand);
+  }
 
   if ((m = path.match(/^\/pool\/([0-9a-f]{64})$/)) && method === "PUT") {
     return (await authorize(request, env, "pool:write")) ?? handlePutPool(m[1], url, request, env);

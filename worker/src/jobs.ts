@@ -70,6 +70,10 @@ export async function handleQueueJob(c: Contributor, request: Request, env: Env,
     case "rollback": {
       const ring = s("ring"), to = s("to");
       if (!ALL_RINGS.includes(ring) || !/^\d+$/.test(to)) return json({ error: `rollback needs ring (${ALL_RINGS.join(", ")}) and to (a release id of that ring)` }, 400);
+      // An earlier release of the ring, never another ring's (#284): stable pointed at edge's selection would be a promotion past
+      // rc, the gate and the soak with no passkey — the forced promotion's door without its guard. The release by its primary key.
+      const of = await env.DB.prepare("SELECT ring FROM releases WHERE id = ?").bind(Number(to)).first<{ ring: string }>();
+      if (of?.ring !== ring) return json({ error: `release ${to} is ${of ? `${of.ring}'s` : "no release"}: a rollback points ${ring} at an earlier release of its own, never another ring's (a promotion is the way up); nothing was queued`, code: "another_ring" }, 400);
       const params: Record<string, string> = { ring, to, note: s("note") || `rollback to release ${to} by ${c.login}` };
       if (s("arch")) {
         if (!ARCHES.includes(s("arch"))) return json({ error: "arch must be x86_64 or aarch64" }, 400);

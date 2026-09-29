@@ -421,18 +421,21 @@ __CHARTS__
   }
   // The roll back a maintainer is offered: the shell's button (data-rollback; the click asks why, posts the job once and writes #rb-state). Drawn for a maintainer and nobody else — the action is theirs alone (POST /factory/jobs checks the role).
   function rollbackButton(ring, id, label) { return isMaintainer() ? ' <button type="button" class="op-btn danger st-rb" data-rollback="' + id + '" data-ring="' + ring + '" title="point ' + ring + ' back at release ' + id + '">' + esc(label) + '</button>' : ""; }
-  // A maintainer's forced promotion (#284): the ring's head into the ring above, past its evidence and the gate. Drawn for a maintainer on a ring that has one above; the click asks why, then their passkey (the shell's passkeyed, for exactly this promotion), and queues the promote job once — writing #rb-state as a roll back does.
+  // A maintainer's forced promotion (#284): the ring's head into the ring above, past its evidence and the gate. Drawn for a maintainer on a ring that has one above; the click asks why and which architectures — both, or one alone, its own act — then their passkey (the shell's passkeyed, for exactly this promotion), and queues the promote job once — writing #rb-state as a roll back does.
   function forceButton(ring, up) { return isMaintainer() ? '<button type="button" class="op-btn danger st-rb" data-force="' + ring + '" data-to="' + up + '" title="' + esc("promote " + ring + "'s head into " + up + " now, past its evidence and the gate") + '">' + esc("Force into " + up) + '</button>' : ""; }
   document.addEventListener("click", function (ev) {
     var b = ev.target.closest ? ev.target.closest("button[data-force]") : null; if (!b) return;
     var from = b.getAttribute("data-force"), to = b.getAttribute("data-to"), el = $("#rb-state");
     b.disabled = true;
-    ask({ title: "Force " + from + " into " + to + "?", text: esc(to + " serves " + from + "'s head at once, on both architectures, past the evidence and the gate. Its health check still rolls it back. Your passkey confirms it, and the journal keeps why."), input: "required", confirm: "Force with your passkey", danger: true }).then(function (note) {
-      if (note === null) { b.disabled = false; return; }
-      return passkeyed("promote:force:" + from + ":" + to, function (assertion) { return api("POST", "/api/v1/factory/jobs", { kind: "promote", params: { from: from, to: to, force: "yes", note: note }, assertion: assertion }); }).then(function (j) {
+    var both = [{ value: "", text: "Both architectures", selected: true }].concat(ARCHES.map(function (a) { return { value: a, text: a + " only" }; }));
+    ask({ title: "Force " + from + " into " + to + "?", text: esc(to + " serves " + from + "'s head at once, past the evidence and the gate: both architectures, or the one you pick. Its health check still rolls it back. Your passkey confirms it, and the journal keeps why."), select: { label: "Architectures", options: both }, input: "required", confirm: "Force with your passkey", danger: true }).then(function (go) {
+      if (go === null) { b.disabled = false; return; }
+      var arch = go.pick, params = { from: from, to: to, force: "yes", note: go.note };
+      if (arch) params.arch = arch;
+      return passkeyed("promote:force:" + from + ":" + to + (arch ? ":" + arch : ""), function (assertion) { return api("POST", "/api/v1/factory/jobs", { kind: "promote", params: params, assertion: assertion }); }).then(function (j) {
         if (j.error) b.disabled = false;
         el.hidden = false;
-        el.innerHTML = j.error ? pillHtml("error", "refused") + " " + refusalHtml(j) : pillHtml("ok", "queued") + " forced promotion of <b>" + esc(from) + "</b> into <b>" + esc(to) + "</b> is task #" + esc(j.task || "?") + " — a project worker runs it, the journal records it with your passkey";
+        el.innerHTML = j.error ? pillHtml("error", "refused") + " " + refusalHtml(j) : pillHtml("ok", "queued") + " forced promotion of <b>" + esc(from) + "</b> into <b>" + esc(to) + "</b>" + (arch ? " (" + esc(arch) + " only)" : "") + " is task #" + esc(j.task || "?") + " — a project worker runs it, the journal records it with your passkey";
       });
     }).catch(function (e) { b.disabled = false; toast("failed: " + esc(errorText(e)), "error"); });
   });
@@ -1114,11 +1117,11 @@ export const STATUS_COMPONENTS = (F: Fixture): Component[] => {
       visible: ["maintainer"],
     },
     {
-      // A maintainer's forced promotion (#284): on edge's and rc's cards, the head into the ring above past its evidence and the gate — asked why, confirmed with the maintainer's passkey for exactly this promotion (the shell's passkeyed), queued once, written to #rb-state. The tests' pool.test is no relying party, so every maintainer is refused there (rp_unavailable) and nothing is queued; the passkey's door is passkey-doors.test.ts's.
+      // A maintainer's forced promotion (#284): on edge's and rc's cards, the head into the ring above past its evidence and the gate — asked why and which architectures (both, or one), confirmed with the maintainer's passkey for exactly this promotion (the shell's passkeyed), queued once, written to #rb-state. The tests' pool.test is no relying party, so every maintainer is refused there (rp_unavailable) and nothing is queued; the passkey's door is passkey-doors.test.ts's.
       id: "status.force-promotion",
       page: "/status",
       anchor: ['id="rb-state" hidden'],
-      script: ["function forceButton(ring, up) { return isMaintainer() ?", 'data-force="', '"Force into " + up', 'PROMISED_UPWARD[PROMISED_UPWARD.indexOf(ring) + 1]', 'passkeyed("promote:force:" + from + ":" + to', 'force: "yes"', '"Force with your passkey"', "refusalHtml(j)"],
+      script: ["function forceButton(ring, up) { return isMaintainer() ?", 'data-force="', '"Force into " + up', 'PROMISED_UPWARD[PROMISED_UPWARD.indexOf(ring) + 1]', 'ARCHES.map(function (a) { return { value: a, text: a + " only" }; })', 'select: { label: "Architectures", options: both }', 'passkeyed("promote:force:" + from + ":" + to + (arch ? ":" + arch : "")', 'force: "yes"', "if (arch) params.arch = arch;", '"Force with your passkey"', "refusalHtml(j)"],
       reads: [{ path: "/auth/me", as: "maintainer", fields: ["role"] }],
       acts: [{ method: "POST", path: "/api/v1/factory/jobs", body: { kind: "promote", params: { from: "rc", to: "stable", force: "yes", note: "the Status page's forced promotion, from the fixture" } }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } }],
       visible: ["maintainer"],

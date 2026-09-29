@@ -77,11 +77,11 @@ pkg-repo job relayout                                                  # one-tim
 An emergency promotion forced past the gate is not on this list: it ships
 what no check passed, so it takes your passkey, in the browser (#284). On
 Status, *Force into rc* on edge's card or *Force into stable* on rc's asks
-why, then your passkey, and queues the same job with `force=yes` — both
-architectures; `POST /api/v1/factory/jobs` takes `arch` for one, with the
-answer for that promotion. The target's health check still rolls it back.
-`pkg-repo job promote --param force=yes` and any other token are refused
-(`session_only`).
+why and which architectures — both, or one alone — then your passkey, and
+queues the same job with `force=yes` (and `arch` for one). One architecture
+is its own act: the passkey answers for exactly that one. The target's
+health check still rolls it back. `pkg-repo job promote --param force=yes`
+and any other token are refused (`session_only`).
 
 Promotions are gated by evidence (see *Promotion by evidence* in
 [ARCHITECTURE.md](ARCHITECTURE.md)): the job first records fresh `health` and
@@ -437,14 +437,16 @@ a ring, and the one thing that must hold for it to open:
 |---|---|---|
 | **Approve** (Review, a build's page, an agent's draft confirmed) | the project's build, into edge — rc and stable too when its trial passed | the maintainer's passkey, in the browser; never their own package |
 | **The enqueue job** (`POST /factory/enqueue` with its job token) | a recipe on `main`, built by a project worker and published into edge | the job's token, issued only to a project worker at claim; the recipe is a reviewed commit on `main` |
-| **A build queued by hand** (`POST /factory/enqueue`, a maintainer's session or `omc_` token) | nothing: a dry run, built and measured (`publish: false`) | anything else is refused (`dry_run_only`) |
+| **A build queued by hand** (`POST /factory/enqueue`, a maintainer's session or `omc_` token) | nothing: a dry run, built, measured and kept on the worker (`publish: false`) | anything else is refused (`dry_run_only`); the dry run's job token has no pool and no ring scope |
 | **A sync** (the scheduler's, or `pkg-repo job sync`) | upstream's packages, into edge — the OPR's channels into their rings | every package verified against its upstream's keyring |
-| **A promotion** (the scheduler's, or `pkg-repo job promote`) | a ring's head, into the ring above | the gate: fresh health and ABI checks, the soak, no security regression |
-| **A forced promotion** (Status's *Force into …*, `force=yes`) | a ring's head, into the ring above, past the gate | the maintainer's passkey, in the browser; no token forces one. The target's health check still rolls it back |
-| **A rollback** (Status's *Roll back*, `pkg-repo job rollback`) | an earlier release of the ring, again | a maintainer's session or token; the journal keeps why |
+| **A promotion** (the scheduler's, or `pkg-repo job promote`) | a ring's head, into the ring above | the gate: fresh health and ABI checks, the soak, no security regression — rows the jobs write: your token writes a `note` to the journal, nothing else (`note_only`) |
+| **A forced promotion** (Status's *Force into …*, `force=yes`) | a ring's head, into the ring above, past the gate — both architectures, or one | the maintainer's passkey, in the browser; no token forces one. The target's health check still rolls it back |
+| **A rollback** (Status's *Roll back*, `pkg-repo job rollback`) | an earlier release of the ring, again | a maintainer's session or token; another ring's release is refused (`another_ring`); the journal keeps why |
+| **A trial** (after the project's review build, or `pkg-repo job trial`) | the project's staged build, into the lab — never a promised ring, never promoted | a staged build of the project's own; the lab promises nothing, and a machine takes it only with `--ring lab` |
 
 Taking out ships nothing: a block takes the maintainer's passkey (#271), a
-withdrawal the session or the token.
+withdrawal the session or the token. No door ships what no check and no
+approval passed without your passkey.
 
 **A lost passkey.** A maintainer who lost their only passkey — or every one
 — cannot approve, block, add or remove one. The way back is another
@@ -458,7 +460,11 @@ so it is done in this order:
 2. The person, on a device they trust, ends the lost device's GitHub
    sessions (github.com → *Settings* → *Sessions*: revoke the others). A
    sign-in with GitHub that is still live there would register the next
-   passkey for whoever holds it.
+   passkey for whoever holds it. They also revoke the GitHub tokens the
+   device held — *Settings* → *Applications* → *Authorized OAuth Apps*
+   (the GitHub CLI, any other) and *Developer settings* → *Personal access
+   tokens*: any of them registers the login (`POST /factory/register`) and
+   mints a new `omc_` token once the person has made theirs.
 3. The other maintainer opens the person's page, *A lost passkey*
    (`/user/<login>#pk-reset`, drawn for a maintainer on another
    maintainer's page), writes why — it goes on the public journal and a
@@ -470,7 +476,8 @@ so it is done in this order:
 4. The person signs in with GitHub at once and adds a new passkey on their
    page — the first again, with the session alone. On the same page they
    make a new command-line token (*Token*) and grant their agents again
-   (`omarchy-cli login`).
+   (`omarchy-cli login`). Until they do, a GitHub token registers the
+   login no new one (`token_reset`): the lost device cannot mint one back.
 5. Both read the journal (`/journal?kind=passkey`): after the reset's lines
    (the reset, the token, a grant each), the next *registered a passkey*
    line for the login is the person's own (its id is on their page). One
@@ -491,7 +498,9 @@ app's page (*Generate a new client secret*, set, then delete the old one).
 The logo is `docs/omarchy-pool-logo.png`.
 The session is an HttpOnly cookie on the dashboard's origin; the pages call
 the API same-origin. Without the app, `POST /api/v1/factory/register`
-still accepts a GitHub token used once.
+still accepts a GitHub token used once — except for a login whose token a
+reset of its passkeys revoked, until the person makes one on their page
+(`token_reset`, #284).
 
 Roles come from the repository, not from an API: `factory/MAINTAINERS.toml`
 lists the maintainers (one list, no areas), the brain reads `main` every
