@@ -89,7 +89,8 @@ const PACKAGE_CSS = String.raw`
   .pkg-stage-a > span { margin-left: 4px; }
   .pkg-panel { border: 1px solid var(--line); border-top: 0; background: var(--panel); padding: 18px; display: grid; gap: 16px; min-width: 0; }
   .pkg-ph { display: flex; justify-content: space-between; align-items: center; gap: 10px 16px; flex-wrap: wrap; }
-  .pkg-ph > span { display: flex; align-items: center; gap: 10px; } .pkg-ph h3 { font: 600 17px var(--font-display); }
+  /* A panel's title and its tag: the tag goes under the title when one row cannot hold both (waiting for a native x86_64 worker, on a phone). */
+  .pkg-ph > span { display: flex; align-items: center; gap: 6px 10px; flex-wrap: wrap; min-width: 0; } .pkg-ph h3 { font: 600 17px var(--font-display); }
   .pkg-who { display: flex; gap: 6px; flex-wrap: wrap; }
   .pkg-whoc { display: inline-flex; align-items: center; gap: 7px; min-width: 0; border: 1px solid var(--line); background: var(--bg-deep); padding: 2px 9px 2px 3px; font-size: 12.5px; color: var(--text); }
   .pkg-whoc .r { color: var(--dim); } .pkg-whoc > a:not(.avatar) { color: var(--text); } .pkg-whoc > a:not(.avatar):hover { color: var(--green); } .pkg-whoc .avatar { width: 20px; height: 20px; font-size: 8.5px; }
