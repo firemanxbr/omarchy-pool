@@ -302,10 +302,12 @@ describe("the theme", () => {
 
 describe("the v1 kit", () => {
   it("is on the pages that ask for it, and costs the others nothing: its sheet after the frame's CSS, its helpers after the shell's", async () => {
-    // No page has adopted it yet: none links the sheet, carries a primitive or the kit's helpers.
+    // No page has adopted it yet: none links the sheet, carries a primitive or the kit's helpers. The one mention of the sheet is the ⌘K menu's (#241): its icons are the kit's, and it links the sheet the first time it opens — nothing is asked for before that (test/go-menu.test.ts opens it).
     for (const path of ["/", "/factory", "/review", "/docs", "/status", "/package/zlib"]) {
       const html = await page(path);
-      expect(html, path).not.toContain("/assets/kit.");
+      expect(/<head>([\s\S]*?)<\/head>/.exec(html)![1], path).not.toContain("/assets/kit.");
+      expect(html.split("/assets/kit.").length - 1, `${path}: the menu's mention only`).toBe(1);
+      expect(scriptOf(html), path).toContain(`SHEET = ${JSON.stringify(KIT_SHEET_PATH)}`);
       expect(styleOf(html), path).not.toContain(".op-");
       expect(scriptOf(html), path).not.toContain(KIT_HELPERS.trim().slice(0, 80));
     }

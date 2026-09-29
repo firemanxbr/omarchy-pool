@@ -67,7 +67,7 @@ import { packageKey } from "../src/r2";
 import { sha256Hex } from "../src/routes/contributors";
 import { syncJobFor } from "../src/scheduler";
 import type { Fixture } from "../src/pages/components";
-import { HELPERS, THEME_BOOT } from "../src/pages/layout";
+import { GO_MENU, HELPERS, THEME_BOOT } from "../src/pages/layout";
 import { KIT_HELPERS } from "../src/pages/kit";
 import { version } from "../src/meta";
 import { pipelineHtml } from "../src/pages/pipeline";
@@ -107,12 +107,13 @@ export function fetchPage(request: Request, env: Env, ctx: ExecutionContext): Pr
  */
 export const scriptOf = (html: string): string => [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map((m) => m[1]).filter((s) => s !== THEME_BOOT).join("\n");
 
-// The page's own script is what follows the shell: page() splices HELPERS whole, so its last lines mark where the page's statements begin — a check on what a page draws must not read the shell's workerRow, avatar or personLink as the page's. A kit page (page({ kit: true })) has the kit's helpers right after, and they are the shell's too. Null when the shell is not spliced whole.
+// The page's own script is what follows the shell: page() splices HELPERS whole, so its last lines mark where the page's statements begin — a check on what a page draws must not read the shell's workerRow, avatar or personLink as the page's. The ⌘K menu's script (GO_MENU) comes right after on every page, and a kit page (page({ kit: true })) has the kit's helpers after that: both are the frame's too. Null when the shell is not spliced whole.
 const shellEnd = HELPERS.slice(-120);
 export function ownScriptOf(html: string): string | null {
   const script = scriptOf(html), at = script.indexOf(shellEnd);
   if (at <= 0) return null;
-  const own = script.slice(at + shellEnd.length);
+  let own = script.slice(at + shellEnd.length);
+  if (own.startsWith(GO_MENU)) own = own.slice(GO_MENU.length);
   return own.startsWith(KIT_HELPERS) ? own.slice(KIT_HELPERS.length) : own;
 }
 
@@ -129,10 +130,11 @@ export type Ran = { nodes: Record<string, any> } & Record<string, any>;
  * functions that draw are exercised. `functions` names the script's own
  * functions to hand back (decisionCell, gate, a page's button makers),
  * `variables` the script's variables to get a setter for (`setCAN(v)`,
- * `setWHO(v)`). decision-cell.test.ts runs the shell this way,
- * user-page.test.ts a person's page.
+ * `setWHO(v)`), `search` the address's query. decision-cell.test.ts runs
+ * the shell this way, user-page.test.ts a person's page, go-menu.test.ts
+ * the request form reached with ?name=.
  */
-export function runScript(code: string, opts: { pathname: string; functions: string[]; variables?: string[]; fetch?: (path: string, init?: RequestInit) => Promise<Response> }): Ran {
+export function runScript(code: string, opts: { pathname: string; search?: string; functions: string[]; variables?: string[]; fetch?: (path: string, init?: RequestInit) => Promise<Response> }): Ran {
   const trimmed = code.trim();
   const body = trimmed.startsWith("(function () {") && trimmed.endsWith("})();") ? trimmed.slice("(function () {".length, -"})();".length) : trimmed;
   const nodes: Record<string, any> = {};
@@ -160,7 +162,8 @@ export function runScript(code: string, opts: { pathname: string; functions: str
     ...(opts.variables ?? []).map((v) => `set${v}: function (x) { ${v} = x; }`),
   ].join(", ");
   const make = new Function("document", "window", "fetch", "location", "innerWidth", "nodes", `${body}\n return { ${out} };`);
-  return make(document, { matchMedia: null }, opts.fetch ?? (() => new Promise(() => {})), { pathname: opts.pathname, origin: "http://pool.test" }, 1024, nodes);
+  // The address as a browser's location has it: the path, and the query ("" when there is none) — a page reads ?renew= or ?name= from it.
+  return make(document, { matchMedia: null }, opts.fetch ?? (() => new Promise(() => {})), { pathname: opts.pathname, search: opts.search ?? "", origin: "http://pool.test" }, 1024, nodes);
 }
 
 const API = "http://pool.test/api/v1";

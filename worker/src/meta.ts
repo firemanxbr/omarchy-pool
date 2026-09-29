@@ -280,21 +280,26 @@ export type Upstream = keyof typeof UPSTREAMS;
 /**
  * Every upstream repository the pipeline mirrors (the SOURCES table of
  * SYNC_SOURCES in scheduler.ts), so the dashboard can show what has not been synced yet.
+ * `title` is the source in a sentence; `origin` is where a package comes
+ * from in the handoff's few words ("Arch extra", "Omarchy", "factory"),
+ * for a place with room for no more — the ⌘K menu's hint beside a
+ * package (layout.ts GO_MENU) — where the source's id ("packages",
+ * "extra") would say nothing to a reader.
  */
-export interface ExpectedSource { source: string; arch: string; upstream: Upstream; optional?: boolean; title: string }
+export interface ExpectedSource { source: string; arch: string; upstream: Upstream; optional?: boolean; title: string; origin: string }
 export const EXPECTED_SOURCES: ExpectedSource[] = [
-  { source: "core", arch: "x86_64", upstream: "mirror.omarchy.org", title: "Arch Linux core" },
-  { source: "extra", arch: "x86_64", upstream: "mirror.omarchy.org", title: "Arch Linux extra" },
-  { source: "multilib", arch: "x86_64", upstream: "mirror.omarchy.org", title: "Arch Linux multilib" },
-  { source: "packages", arch: "x86_64", upstream: "pkgs.omarchy.org", title: "Omarchy (OPR), the edge channel" },
-  { source: "chaotic", arch: "x86_64", upstream: "builds.garudalinux.org", optional: true, title: "chaotic-aur: prebuilt AUR packages (only names no other source provides)" },
-  { source: "core", arch: "aarch64", upstream: "os.archlinuxarm.org", title: "Arch Linux ARM core" },
-  { source: "extra", arch: "aarch64", upstream: "os.archlinuxarm.org", title: "Arch Linux ARM extra" },
-  { source: "alarm", arch: "aarch64", upstream: "os.archlinuxarm.org", title: "Arch Linux ARM alarm" },
-  { source: "packages", arch: "aarch64", upstream: "pkgs.omarchy.org", title: "Omarchy (OPR), the edge channel" },
-  { source: "asahi", arch: "aarch64", upstream: "github.com/maralcbr/omarchy-pkgs", title: "Omarchy for Apple Silicon: the fork's newest stable snapshot" },
-  { source: "asahi-alarm", arch: "aarch64", upstream: "github.com/asahi-alarm/asahi-alarm", title: "Asahi Linux for Arch Linux ARM: kernel, graphics, firmware" },
-  { source: "aur", arch: "aarch64", upstream: "os.archlinuxarm.org", optional: true, title: "Arch Linux ARM's prebuilt AUR selection (only names no other source provides)" },
-  { source: "factory", arch: "x86_64", upstream: "the factory", title: "Built by the factory from contributors' recipes, built again by the project and decided by a maintainer" },
-  { source: "factory", arch: "aarch64", upstream: "the factory", title: "Built by the factory from contributors' recipes, built again by the project and decided by a maintainer" },
+  { source: "core", arch: "x86_64", upstream: "mirror.omarchy.org", title: "Arch Linux core", origin: "Arch core" },
+  { source: "extra", arch: "x86_64", upstream: "mirror.omarchy.org", title: "Arch Linux extra", origin: "Arch extra" },
+  { source: "multilib", arch: "x86_64", upstream: "mirror.omarchy.org", title: "Arch Linux multilib", origin: "Arch multilib" },
+  { source: "packages", arch: "x86_64", upstream: "pkgs.omarchy.org", title: "Omarchy (OPR), the edge channel", origin: "Omarchy" },
+  { source: "chaotic", arch: "x86_64", upstream: "builds.garudalinux.org", optional: true, title: "chaotic-aur: prebuilt AUR packages (only names no other source provides)", origin: "Chaotic" },
+  { source: "core", arch: "aarch64", upstream: "os.archlinuxarm.org", title: "Arch Linux ARM core", origin: "Arch Linux ARM core" },
+  { source: "extra", arch: "aarch64", upstream: "os.archlinuxarm.org", title: "Arch Linux ARM extra", origin: "Arch Linux ARM extra" },
+  { source: "alarm", arch: "aarch64", upstream: "os.archlinuxarm.org", title: "Arch Linux ARM alarm", origin: "Arch Linux ARM" },
+  { source: "packages", arch: "aarch64", upstream: "pkgs.omarchy.org", title: "Omarchy (OPR), the edge channel", origin: "Omarchy" },
+  { source: "asahi", arch: "aarch64", upstream: "github.com/maralcbr/omarchy-pkgs", title: "Omarchy for Apple Silicon: the fork's newest stable snapshot", origin: "Asahi" },
+  { source: "asahi-alarm", arch: "aarch64", upstream: "github.com/asahi-alarm/asahi-alarm", title: "Asahi Linux for Arch Linux ARM: kernel, graphics, firmware", origin: "Asahi ALARM" },
+  { source: "aur", arch: "aarch64", upstream: "os.archlinuxarm.org", optional: true, title: "Arch Linux ARM's prebuilt AUR selection (only names no other source provides)", origin: "Arch Linux ARM AUR" },
+  { source: "factory", arch: "x86_64", upstream: "the factory", title: "Built by the factory from contributors' recipes, built again by the project and decided by a maintainer", origin: "factory" },
+  { source: "factory", arch: "aarch64", upstream: "the factory", title: "Built by the factory from contributors' recipes, built again by the project and decided by a maintainer", origin: "factory" },
 ];
