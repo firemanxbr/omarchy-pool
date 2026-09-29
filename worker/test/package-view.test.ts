@@ -19,7 +19,7 @@ import worker from "../src/index";
 import { runScript, scriptOf, seedDashboard, type Fixture } from "./fixture";
 
 let F: Fixture;
-type Who = "" | "bob" | "alice" | "m1" | "m2";
+type Who = "" | "bob" | "alice" | "carol" | "m1" | "m2";
 
 beforeAll(async () => {
   F = await seedDashboard(env);
@@ -54,10 +54,24 @@ function counting(db: D1Database): { db: D1Database; rows: () => number } {
   return { db: proxy as unknown as D1Database, rows: () => rows };
 }
 
-interface Page { nodes: Record<string, { innerHTML: string; textContent: string }>; asked: string[] }
+interface Page { nodes: Record<string, { innerHTML: string; textContent: string; hidden: boolean; onclick?: () => void }>; asked: string[]; fn: Record<string, (...a: any[]) => any> }
 
-/** The served page for `path`, run as `as` would see it: every read the script makes answered by the Worker with that viewer's cookie, until You and the stages are drawn. */
-async function view(path: string, as: Who): Promise<Page> {
+interface Seen {
+  /** The script's own functions, handed back to press what a reader presses. */
+  functions?: string[];
+  /** The script's variables, each settable through set<Name> (runScript's). */
+  variables?: string[];
+  /** An address rewritten before it is asked (a query of its own, past the edge cache): a read that must not be the one an earlier view kept. */
+  fresh?: (p: string) => string;
+  /** An answer changed before the script reads it: an older Worker's, or one that never comes. */
+  edit?: (p: string, res: Response) => Promise<Response>;
+}
+
+/**
+ * The served page for `path`, run as `as` would see it: every request the script makes — a GET, or an act's POST with
+ * its body — answered by the Worker with that viewer's cookie, until You and the stages are drawn.
+ */
+async function view(path: string, as: Who, o: Seen = {}): Promise<Page> {
   const page = await call("GET", path, as);
   expect(page.status).toBe(200);
   const asked: string[] = [];
@@ -65,21 +79,25 @@ async function view(path: string, as: Who): Promise<Page> {
   const ran = runScript(scriptOf(page.text), {
     pathname: url.pathname,
     search: url.search,
-    functions: [],
-    fetch: async (p: string) => {
-      asked.push(p);
+    functions: o.functions ?? [],
+    variables: o.variables,
+    fetch: async (p: string, init?: RequestInit) => {
+      asked.push(init?.method && init.method !== "GET" ? `${init.method} ${p}` : p);
+      const headers: Record<string, string> = { ...((init?.headers as Record<string, string>) ?? {}), ...(as ? { cookie: `omc=oms_${as}` } : {}) };
       const ctx = createExecutionContext();
-      const res = await worker.fetch(new Request(`http://pool.test${p}`, { headers: as ? { cookie: `omc=oms_${as}` } : {} }), env, ctx);
+      const res = await worker.fetch(new Request(`http://pool.test${o.fresh ? o.fresh(p) : p}`, { method: init?.method ?? "GET", headers, body: init?.body }), env, ctx);
       await waitOnExecutionContext(ctx);
-      return res;
+      return o.edit ? o.edit(p, res) : res;
     },
   });
   const nodes = ran.nodes as Page["nodes"];
-  for (let i = 0; i < 200; i++) {
-    if (nodes["#you"]?.innerHTML && nodes["#stages"]?.innerHTML && asked.includes("/auth/me") && (!as || (nodes["#you-who"]?.textContent ?? "").startsWith("@"))) break;
-    await new Promise((r) => setTimeout(r, 5));
-  }
-  return { nodes, asked };
+  await until(() => !!(nodes["#you"]?.innerHTML && nodes["#stages"]?.innerHTML && asked.includes("/auth/me") && (!as || (nodes["#you-who"]?.textContent ?? "").startsWith("@"))));
+  return { nodes, asked, fn: ran as unknown as Page["fn"] };
+}
+
+/** Waits (a second at most) for what a page draws after an answer lands. */
+async function until(done: () => boolean): Promise<void> {
+  for (let i = 0; i < 200 && !done(); i++) await new Promise((r) => setTimeout(r, 5));
 }
 
 describe("the package page, drawn for every viewer", () => {
@@ -115,7 +133,8 @@ describe("the package page, drawn for every viewer", () => {
 
   it("gives a maintainer Block on a factory package another maintainer looks after, and says whose it is", async () => {
     const p = await view(`/package/${F.publishedPkg}?ring=edge&arch=${F.arch}`, "m1");
-    expect(p.nodes["#you"].innerHTML).toContain("Maintained by m2.");
+    // A login is written one way on the page: @login, linked to the person's page.
+    expect(p.nodes["#you"].innerHTML).toContain('Maintained by <a href="/user/m2" data-who="m2" title="m2">@m2</a>.');
     expect(p.nodes["#you"].innerHTML).toMatch(/<button type="button" data-act="block" class="op-btn danger">Block<\/button>/);
     // A factory package's four stages; its story was read.
     for (const s of ["Request", "Factory build", "Review", "Rings"]) expect(p.nodes["#stages"].innerHTML).toContain(s);
@@ -139,11 +158,153 @@ describe("the package page, drawn for every viewer", () => {
   it("lets another maintainer lift a block, and the one who made it only read why not", async () => {
     const own = await view(`/package/${F.blockedPkg}`, "m1");
     expect(own.nodes["#pkg-state"].innerHTML).toContain("blocked");
-    expect(own.nodes["#pkg-blocked"].innerHTML).toContain("Blocked by m1");
+    expect(own.nodes["#pkg-blocked"].innerHTML).toContain('Blocked by <a href="/user/m1" data-who="m1" title="m1">@m1</a>');
     expect(own.nodes["#you"].innerHTML).toContain("You blocked it. Another maintainer lifts the block.");
     expect(own.nodes["#you"].innerHTML).toContain(`title="m1 blocked ${F.blockedPkg}; another maintainer lifts it"`);
     const other = await view(`/package/${F.blockedPkg}`, "m2");
     expect(other.nodes["#you"].innerHTML).toMatch(/<button type="button" data-act="unblock" class="op-btn primary">Lift the block<\/button>/);
+  });
+
+  it("gives the contributor who requested a blocked package the renewal grey, the block its reason: the server refuses it first", async () => {
+    const p = await view(`/package/${F.blockedPkg}`, "carol");
+    expect(p.nodes["#you-who"].textContent).toBe("@carol · requester");
+    expect(p.nodes["#you"].innerHTML).toContain(`<a data-href="/request?renew=${F.blockedPkg}" class="disabled op-btn primary" tabindex="-1" aria-disabled="true" title="blocked: another maintainer lifts the block first">Request an update</a>`);
+  });
+
+  it("draws a name no ring serves and nobody requested as not in the pool — never as a mirror the pool verified", async () => {
+    const p = await view("/package/zzfoo", "");
+    expect(p.nodes["#pkg-state"].innerHTML).toContain("not in the pool");
+    expect(p.nodes["#chain-note"].textContent).toBe("not in the pool · nobody requested it");
+    const stages = p.nodes["#stages"].innerHTML;
+    expect(stages).toContain("nobody requested it");
+    for (const claim of ["verified here", "mirrored", 'class="pkg-stage ok']) expect(stages).not.toContain(claim);
+    expect(p.nodes["#who"].innerHTML).not.toContain("mirrored by");
+    expect(p.nodes["#seal"].innerHTML).not.toContain("Mirrored as-is");
+    expect(p.nodes["#install-b"].innerHTML).toContain('href="/factory?name=zzfoo"');
+    expect(p.nodes["#you"].innerHTML).toContain('<a href="/factory?name=zzfoo" class="op-btn primary">Request zzfoo</a>');
+  });
+
+  it("opens an address that names no architecture on the one that serves the package, and says the rest where it does not", async () => {
+    const id = (await env.DB.prepare(
+      `INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch)
+       VALUES ('armonly-sha', 'armonly', '1.0-1', 'aarch64', 'armonly-1.0-1-aarch64.pkg.tar.zst', 40, 120, 1, '{"name":"armonly"}', 'core', 'core/aarch64/armonly-1.0-1-aarch64.pkg.tar.zst', 'aarch64') RETURNING id`,
+    ).first<{ id: number }>())!.id;
+    await env.DB.prepare("INSERT INTO ring_packages (ring, package_id) VALUES ('stable', ?)").bind(id).run();
+    // No architecture in the address: x86_64 has none, aarch64 is read and drawn — a synced package, so no story is asked.
+    const plain = await view("/package/armonly", "");
+    expect(plain.asked.filter((a) => a.startsWith("/api/v1/"))).toEqual(["/api/v1/package/armonly?ring=stable&arch=x86_64", "/api/v1/package/armonly?ring=stable&arch=aarch64"]);
+    expect(plain.nodes["#pkg-chips"].innerHTML).toContain("synced · Arch Linux ARM core");
+    expect(plain.nodes["#install-b"].innerHTML).toContain("sudo pacman -S armonly");
+    // x86_64 asked for: nothing there, and the page says what it knows of the package anyway — where it comes from, who looks after it (nobody: Adopt), where to install it.
+    const x86 = await view("/package/armonly?arch=x86_64", "m1");
+    expect(x86.asked.filter((a) => a.startsWith("/api/v1/"))).toEqual(["/api/v1/package/armonly?ring=stable&arch=x86_64"]);
+    expect(x86.nodes["#pkg-chips"].innerHTML).toContain("synced · Arch Linux ARM core");
+    expect(x86.nodes["#install-b"].innerHTML).toContain('Not served on x86_64. <a href="/package/armonly?ring=stable&arch=aarch64">Open it on aarch64 →</a>');
+    expect(x86.nodes["#who"].innerHTML).toContain("none yet");
+    expect(x86.nodes["#you"].innerHTML).toContain('data-act="adopt"');
+    expect(x86.nodes["#seal"].innerHTML).toContain("aarch64: no advisory open on it");
+  });
+
+  it("draws a package from an answer an older Worker cached — no `arches`, no `files` — as served where its rings say", async () => {
+    const older = async (p: string, res: Response) => {
+      if (!p.startsWith(`/api/v1/package/${F.pkg}?`)) return res;
+      const d = (await res.json()) as Record<string, unknown>;
+      delete d.arches; delete d.files;
+      return new Response(JSON.stringify(d), { status: res.status, headers: { "content-type": "application/json" } });
+    };
+    const p = await view(`/package/${F.pkg}?ring=stable&arch=${F.arch}`, "", { edit: older });
+    expect(p.nodes["#install-b"].innerHTML).toContain(`sudo pacman -S ${F.pkg}`);
+    expect(p.nodes["#pkg-chips"].innerHTML).toContain(`${F.arch} ✓`);
+    expect(p.nodes["#stages"].innerHTML).toContain(`${F.arch}: served`);
+    // The seal reads the same as from today's answer: the object's own signature, the advisory open on it.
+    expect(p.nodes["#seal"].innerHTML).toBe((await view(`/package/${F.pkg}?ring=stable&arch=${F.arch}`, "")).nodes["#seal"].innerHTML);
+    expect(p.nodes["#seal"].innerHTML).toContain(`${F.arch}: 1 open advisory`);
+  });
+
+  it("draws what a factory package's answer holds before its story lands, and the rest after", async () => {
+    let land: () => void = () => {};
+    const later = (p: string, res: Response) => (p.endsWith("/story") ? new Promise<Response>((r) => { land = () => r(res); }) : Promise.resolve(res));
+    const p = await view(`/package/${F.publishedPkg}?ring=edge&arch=${F.arch}`, "", { edit: later });
+    // The story is asked, not answered: the tiles and the graph are drawn from the package's answer, the stages wait for it.
+    expect(p.asked).toContain(`/api/v1/factory/packages/${F.publishedPkg}/story`);
+    expect(p.nodes["#pg-tiles"].innerHTML).toContain("2.0-1");
+    expect(p.nodes["#deps"].innerHTML).toContain("pkg-graph");
+    expect(p.nodes["#stages"]?.innerHTML ?? "").toBe("");
+    land();
+    await until(() => !!p.nodes["#stages"]?.innerHTML);
+    expect(p.nodes["#stages"].innerHTML).toContain("Factory build");
+  });
+
+  it("keeps the brake's reason across a redraw, says a refusal aloud, and closes on Escape", async () => {
+    const p = await view(`/package/${F.publishedPkg}?ring=edge&arch=${F.arch}`, "m1", { functions: ["renderYou"], variables: ["ASK"] });
+    p.fn.setASK("block");
+    p.fn.renderYou();
+    expect(p.nodes["#you"].innerHTML).toContain('<p class="err" id="you-err" role="alert" hidden></p>');
+    const why = p.nodes["#you-why"] as unknown as { value: string; oninput: () => void };
+    why.value = "the source moved";
+    why.oninput();
+    p.fn.renderYou();
+    expect(p.nodes["#you"].innerHTML).toContain('value="the source moved"');
+    (p.nodes["#you-ask"] as unknown as { onkeydown: (e: unknown) => void }).onkeydown({ key: "Escape", preventDefault() {} });
+    expect(p.nodes["#you"].innerHTML).not.toContain('id="you-ask"');
+  });
+
+  it("links every package on the page in the ring it shows, not the one the address asked", async () => {
+    const p = await view(`/package/${F.pkg}?ring=lab&arch=${F.arch}`, "");
+    expect(p.nodes["#deps"].innerHTML).toContain(`href="/package/${F.pkg2}?ring=stable&arch=${F.arch}"`);
+    expect(p.nodes["#deps"].innerHTML).not.toContain("ring=lab");
+  });
+
+  it("reads the two recipes of a review only when a reader asks to compare them", async () => {
+    // mine with its target on the approved project build: the page opens on the review, whose two recipes are both staged — and reads neither by itself.
+    const was = (await env.DB.prepare("SELECT targets FROM factory_packages WHERE name = ?").bind(F.factoryPkg).first<{ targets: string }>())!.targets;
+    await env.DB.prepare("UPDATE factory_packages SET targets = ? WHERE name = ?").bind(JSON.stringify({ [F.arch]: { status: "approved", task: F.projectTask } }), F.factoryPkg).run();
+    const opened = await view(`/package/${F.factoryPkg}`, "", { fresh: (a) => (a.includes("/story") ? `${a}?t=recipes` : a) });
+    await env.DB.prepare("UPDATE factory_packages SET targets = ? WHERE name = ?").bind(was, F.factoryPkg).run();
+    expect(opened.nodes["#stage-panel"].innerHTML).toContain('data-recipes>Compare the two recipes</button>');
+    expect(opened.asked.filter((a) => a.includes("/artifacts/"))).toEqual([]);
+    const p = await view(`/package/${F.publishedPkg}?ring=edge&arch=${F.arch}`, "", { functions: ["loadRecipes"] });
+    p.fn.loadRecipes();
+    await until(() => p.asked.filter((a) => a.includes("/artifacts/PKGBUILD")).length === 2);
+    expect(p.asked.filter((a) => a.includes("/artifacts/PKGBUILD"))).toHaveLength(2);
+  });
+
+  it("draws a long file list's first 400 paths and the rest as one block on demand, never an element per file", async () => {
+    const files = Array.from({ length: 450 }, (_, i) => `usr/share/big/file-${i}`);
+    const id = (await env.DB.prepare(
+      `INSERT INTO packages (sha256, name, version, arch, filename, size_download, size_installed, has_signature, manifest_json, source, r2_key, repo_arch)
+       VALUES ('bigfiles-sha', 'bigfiles', '1-1', ?, 'bigfiles-1-1-x86_64.pkg.tar.zst', 40, 120, 1, ?, 'extra', 'extra/x86_64/bigfiles-1-1-x86_64.pkg.tar.zst', ?) RETURNING id`,
+    ).bind(F.arch, JSON.stringify({ name: "bigfiles", files }), F.arch).first<{ id: number }>())!.id;
+    await env.DB.prepare("INSERT INTO ring_packages (ring, package_id) VALUES ('stable', ?)").bind(id).run();
+    const p = await view(`/package/bigfiles?ring=stable&arch=${F.arch}`, "");
+    p.nodes["#files"].hidden = true;
+    p.nodes["#load-files"].onclick!();
+    await until(() => p.nodes["#files"].innerHTML.includes("data-all-files"));
+    expect(p.nodes["#files"].innerHTML.match(/<span title="/g)).toHaveLength(400);
+    expect(p.nodes["#files"].innerHTML).toContain("Show all 450 files");
+  });
+
+  it("says a rejected package is rejected — not waiting for a worker, nor installable after an approval", async () => {
+    expect((await call("POST", `/api/v1/factory/tasks/${F.spareTask}/reject`, "m1", { note: "the recipe fetches outside its sources" })).status).toBe(200);
+    const p = await view(`/package/${F.sparePkg}`, "m1", { fresh: (a) => (a.includes("/story") ? `${a}?t=rejected` : a) });
+    expect(p.nodes["#pkg-state"].innerHTML).toContain("rejected");
+    expect(p.nodes["#stages"].innerHTML).toContain("rejected · back with its requester");
+    expect(p.nodes["#stages"].innerHTML).toContain("none · rejected");
+    expect(p.nodes["#stages"].innerHTML).not.toContain("waiting for a worker");
+    expect(p.nodes["#install-b"].innerHTML).toContain("Rejected: not installable. Its requester can send it again.");
+    expect(p.nodes["#you"].innerHTML).toContain('Rejected by <a href="/user/m1"');
+  });
+
+  it("keeps the approval that stands and its publish on the page while a newer build of the package waits for a maintainer", async () => {
+    const p = await view(`/package/${F.factoryPkg}`, "", { functions: ["timeline"] });
+    // The newer build is the review's (in review, waiting for a maintainer); m2's approval of 1.0 is what the rings will serve, its publish on its way.
+    expect(p.nodes["#pkg-state"].innerHTML).toContain("in review");
+    expect(p.nodes["#stages"].innerHTML).toContain("publishing into edge");
+    expect(p.nodes["#stage-panel"].innerHTML).toContain('stays approved by <a href="/user/m2"');
+    expect(p.nodes["#who"].innerHTML).toMatch(/reviewed by<\/span><span class="l"><a href="\/user\/m2"[^>]*>@m2<\/a>/);
+    const record = (p.fn.timeline() as string[][]).map((e) => `${e[2]} ${e[3]}`);
+    expect(record).toContain(`approved by @m2 · 1.0 · ${F.arch}`);
+    expect(record.some((e) => e.startsWith("publishing publish job #"))).toBe(true);
   });
 });
 
@@ -164,11 +325,15 @@ describe("what the page reads", () => {
     const a = (await call("GET", `/api/v1/package/zlib?ring=stable&arch=aarch64&t=arches`)).json;
     expect(a).toMatchObject({ arch: "aarch64", shown_ring: "stable", package: { sha256: "arm-zlib-sha" } });
     expect(a.arches.x86_64.rings.length).toBe(2);
-    // xz is not on aarch64: the 404 says where it is.
+    // xz is not on aarch64: the 404 says where it is, whether an advisory is open on the object x86_64 serves, and who looks after it — what the page says of xz on any architecture.
     const no = await call("GET", `/api/v1/package/xz?ring=stable&arch=aarch64`);
     expect(no.status).toBe(404);
     expect(no.json.arches.x86_64.rings.map((r: { ring: string }) => r.ring)).toContain("stable");
-    expect(no.json.arches.aarch64.rings).toEqual([]);
+    expect(no.json.arches.x86_64.open).toBe(0);
+    expect(no.json.arches.aarch64).toEqual({ rings: [], open: null });
+    expect(no.json.maintenance).toMatchObject({ maintainer: null });
+    // A name no ring serves anywhere reads nothing more.
+    expect((await call("GET", "/api/v1/package/no-such-name?ring=stable&arch=aarch64")).json).toEqual({ error: "no-such-name is not in any ring for aarch64", arches: { x86_64: { rings: [], open: null }, aarch64: { rings: [], open: null } } });
   });
 
   it("gives each chain the two recipes a review compares, once each build staged one", async () => {
@@ -203,19 +368,38 @@ describe("what the page reads", () => {
       await env.DB.prepare(`INSERT INTO ring_packages (ring, package_id) VALUES ${rc.slice(i, i + 400).join(",")}`).run();
     }
     await env.DB.prepare("INSERT INTO ring_heads (ring, release_id) SELECT 'rc', id FROM releases ORDER BY id LIMIT 1 ON CONFLICT (ring) DO NOTHING").run();
-    for (const name of ["viewpkg500", "no-such-package"]) {
+    // viewpkg500 on aarch64: the 404 of an architecture that does not serve it, with its open count and its maintainer — a few point reads more.
+    for (const [name, arch] of [["viewpkg500", "x86_64"], ["no-such-package", "x86_64"], ["viewpkg500", "aarch64"]]) {
       const { db, rows } = counting(env.DB);
       const ctx = createExecutionContext();
-      const res = await worker.fetch(new Request(`http://pool.test/api/v1/package/${name}?ring=rc&arch=x86_64`), { ...env, DB: db }, ctx);
+      const res = await worker.fetch(new Request(`http://pool.test/api/v1/package/${name}?ring=rc&arch=${arch}`), { ...env, DB: db }, ctx);
       await waitOnExecutionContext(ctx);
       expect([200, 404]).toContain(res.status);
       // The fixture's other rows and the four heads: a few dozen, never the thousand of the ring.
-      expect(rows(), `${name}: rows read`).toBeLessThan(120);
+      expect(rows(), `${name} on ${arch}: rows read`).toBeLessThan(120);
     }
   });
 });
 
 describe("Adopt: a package the pool serves gets its maintainer in the pool", () => {
+  it("pressed on a synced package's page, names its maintainer and leaves it the synced package it was", async () => {
+    const p = await view(`/package/zstd?ring=stable&arch=${F.arch}`, "m2", { functions: ["act"] });
+    expect(p.nodes["#you"].innerHTML).toContain('data-act="adopt"');
+    p.fn.act("adopt", "");
+    await until(() => p.nodes["#you"].innerHTML.includes("You maintain this package."));
+    expect(p.asked).toContain("POST /api/v1/factory/packages/zstd/adopt");
+    expect(p.nodes["#you"].innerHTML).toContain("You maintain this package.");
+    // Synced still: its origin, its four stages, its seal's last gate, its people — nothing of the factory's.
+    expect(p.nodes["#pkg-chips"].innerHTML).toContain("synced · Arch core");
+    expect(p.nodes["#pkg-chips"].innerHTML).not.toContain("factory");
+    expect(p.nodes["#stages"].innerHTML).toContain("Upstream");
+    expect(p.nodes["#stages"].innerHTML).not.toContain("Factory build");
+    expect(p.nodes["#seal"].innerHTML).toContain("Mirrored as-is");
+    expect(p.nodes["#who"].innerHTML).toContain("pool maintainer");
+    expect(p.nodes["#who"].innerHTML).toContain("@m2</a>");
+    expect(p.asked.filter((a) => a.includes("/story"))).toEqual([]);
+  });
+
   it("is a maintainer's: nobody signed in, a contributor and the one who requested it are refused", async () => {
     expect((await call("POST", `/api/v1/factory/packages/${F.pkg}/adopt`, "", {})).status).toBe(401);
     const bob = await call("POST", `/api/v1/factory/packages/${F.pkg}/adopt`, "bob", {});
@@ -256,5 +440,44 @@ describe("Adopt: a package the pool serves gets its maintainer in the pool", () 
     expect(both.map((r) => r.status).sort()).toEqual([200, 409]);
     expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM package_maintainers WHERE name = ?").bind(F.pkg2).first<{ n: number }>())!.n).toBe(1);
     expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM events WHERE kind = 'adopt' AND json_extract(payload, '$.name') = ?").bind(F.pkg2).first<{ n: number }>())!.n).toBe(1);
+  });
+});
+
+describe("the page draws a factory package from its freshest word", () => {
+  it("draws the seal and the people from the approval the rings serve while a newer build of it is in the factory", async () => {
+    // A bump of ours queued: its target names the new build, the rings still serve m2's approved 2.0-1.
+    const bump = (await env.DB.prepare(
+      `INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status) VALUES ('ours', ?, '2.1', 'bump:1@2.1', 'bump', 100, 0, 'community', 'alice', 'build', 'queued') RETURNING id`,
+    ).bind(F.arch).first<{ id: number }>())!.id;
+    await env.DB.prepare("UPDATE factory_packages SET targets = ? WHERE name = 'ours'").bind(JSON.stringify({ [F.arch]: { status: "building", task: bump } })).run();
+    const p = await view(`/package/${F.publishedPkg}?ring=edge&arch=${F.arch}`, "", { functions: ["gateCells"], fresh: (a) => (a.includes("/story") ? `${a}?t=bump` : a) });
+    expect(p.nodes["#stages"].innerHTML).toContain(`${F.arch} · try 1`);
+    expect(p.nodes["#stages"].innerHTML).toContain("@m2 · approved");
+    const gates = p.fn.gateCells(F.arch) as string[][];
+    expect(gates[1]).toEqual(["ok", "a real pacman installed it in the lab"]);
+    expect(gates[5]).toEqual(["ok", `brought by ${F.owner}, rebuilt and approved by ${F.m2}`]);
+    expect(p.nodes["#who"].innerHTML).toMatch(/reviewed by<\/span><span class="l"><a href="\/user\/m2"[^>]*>@m2<\/a>/);
+  });
+
+  it("takes a package out of the rings as the story says, however long the package's answer is kept, and after a lift pressed on the page", async () => {
+    const pkgPath = `/api/v1/package/${F.publishedPkg}?ring=edge&arch=${F.arch}`;
+    expect((await call("GET", pkgPath)).json.arches[F.arch].rings.map((r: { ring: string }) => r.ring)).toEqual(["edge"]);
+    expect((await call("POST", `/api/v1/factory/packages/${F.publishedPkg}/block`, "m1", { reason: "the test of a stale answer" })).status).toBe(200);
+    // The package's answer is still the one kept at the edge (in edge); the story is fresh: blocked, in no ring.
+    expect((await call("GET", pkgPath)).json.arches[F.arch].rings).toHaveLength(1);
+    const blocked = await view(`/package/${F.publishedPkg}?ring=edge&arch=${F.arch}`, "m2", { functions: ["act"], fresh: (a) => (a.includes("/story") ? `${a}?t=blocked` : a) });
+    expect(blocked.nodes["#pkg-state"].innerHTML).toContain("blocked");
+    expect(blocked.nodes["#install-b"].innerHTML).not.toContain("sudo pacman -S");
+    // m2 lifts it from the page: back in the factory, in no ring — no install, no "in rings", no maintainer's "You maintain it".
+    blocked.fn.act("unblock", "the reason is answered");
+    await until(() => blocked.asked.includes(`POST /api/v1/factory/packages/${F.publishedPkg}/unblock`) && !blocked.nodes["#pkg-state"].innerHTML.includes("blocked"));
+    expect(blocked.nodes["#pkg-state"].innerHTML).not.toContain("in rings");
+    expect(blocked.nodes["#install-b"].innerHTML).not.toContain("sudo pacman -S");
+    expect(blocked.nodes["#you"].innerHTML).not.toContain("You maintain this package.");
+    // A fresh load while the old answer is still kept: the story's word wins.
+    const lifted = await view(`/package/${F.publishedPkg}?ring=edge&arch=${F.arch}`, "m1", { fresh: (a) => (a.includes("/story") ? `${a}?t=lifted` : a) });
+    expect(lifted.nodes["#pkg-state"].innerHTML).not.toContain("in rings");
+    expect(lifted.nodes["#install-b"].innerHTML).not.toContain("sudo pacman -S");
+    expect(lifted.nodes["#pg-tiles"].innerHTML).not.toContain("edge #");
   });
 });

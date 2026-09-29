@@ -160,8 +160,27 @@ export async function handlePackage(name: string, url: URL, env: Env): Promise<R
   const shownRing: Ring | undefined = rowsByRing.has(s.ring) ? s.ring : RINGS_BY_STABILITY.find((r) => rowsByRing.has(r));
   const chosen = shownRing ? rowsByRing.get(shownRing) : undefined;
   const pick = chosen ? inRings.find((r) => r.ring === shownRing && r.sha256 === chosen.sha256) : undefined;
-  // Not on this architecture: the answer still says where the package is served, so the page can point to it.
-  if (!pick || !chosen || !shownRing) return json({ error: `${name} is not in any ring for ${s.arch}`, arches: archesOf(served, null) }, 404);
+  // An architecture's object — the one its page would show: the ring `prefer` when it serves it there too, else its most
+  // stable — and whether an advisory is open on it: a count through the table's primary key, one per architecture.
+  const openOn = async (a: string, prefer: Ring | undefined): Promise<number | null> => {
+    const list = served.get(a) ?? [];
+    const at = list.find((x) => x.ring === prefer) ?? RINGS_BY_STABILITY.map((r) => list.find((x) => x.ring === r)).find((x) => !!x);
+    return at ? ((await env.DB.prepare("SELECT COUNT(*) AS n FROM package_advisories WHERE package_id = ? AND status = 'vulnerable'").bind(at.row.id).first<{ n: number }>())?.n ?? 0) : null;
+  };
+  // Not on this architecture: the answer still says where the package is served, and — when another architecture serves
+  // it — what the page says of the package whatever the architecture read: whether an advisory is open on each
+  // architecture's object and who looks after it. A name no ring serves anywhere reads nothing more.
+  if (!pick || !chosen || !shownRing) {
+    const error = `${name} is not in any ring for ${s.arch}`;
+    if (!served.size) return json({ error, arches: archesOf(served, null) }, 404);
+    const open: Record<string, number> = {};
+    for (const a of served.keys()) {
+      const n = await openOn(a, s.ring);
+      if (n !== null) open[a] = n;
+    }
+    const top = RINGS_BY_STABILITY.map((r) => [...served.values()].flat().find((x) => x.ring === r)).find((x) => !!x)!;
+    return json({ error, arches: archesOf(served, open), maintenance: await maintenanceOf(env, name, top.row.source, undefined) }, 404);
+  }
   const head = heads.find((h) => h.ring === pick.ring)?.head;
   if (!head) return json({ error: "ring vanished" }, 500);
   // The edges — what it depends on, what depends on it, what it is exposed
@@ -258,13 +277,12 @@ export async function handlePackage(name: string, url: URL, env: Env): Promise<R
         ).results.map((r) => ({ ...r, cves: JSON.parse(r.cves) as string[], kev: !!r.kev }))
       : [];
   const own = await advisoriesOf([chosen.id]);
-  // The other architecture's object — the one its page would show: the ring shown here when it serves it there too, else
-  // its most stable — and whether an advisory is open on it: a count through the table's primary key, one per architecture.
+  // The other architecture's object — the one its page would show, the ring shown here first — and whether an advisory is open on it.
   const open: Record<string, number> = { [s.arch]: own.filter((a) => a.object_status === "vulnerable").length };
-  for (const [a, list] of served) {
+  for (const a of served.keys()) {
     if (a === s.arch) continue;
-    const at = list.find((x) => x.ring === shownRing) ?? RINGS_BY_STABILITY.map((r) => list.find((x) => x.ring === r)).find((x) => !!x);
-    if (at) open[a] = (await env.DB.prepare("SELECT COUNT(*) AS n FROM package_advisories WHERE package_id = ? AND status = 'vulnerable'").bind(at.row.id).first<{ n: number }>())?.n ?? 0;
+    const n = await openOn(a, shownRing);
+    if (n !== null) open[a] = n;
   }
   // How many files the object installs, from its list's own row (the list itself is the Files section's, on demand).
   const files = await env.DB.prepare("SELECT count FROM package_file_lists WHERE package_id = ?").bind(chosen.id).first<{ count: number }>();

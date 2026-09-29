@@ -481,6 +481,9 @@ echo "one name, one package: x86_64 published, aarch64 not supported, one review
 pv=$(curl -s "$OMARCHY_API/api/v1/package/e2e-ident?ring=edge&arch=x86_64&at=page")
 [[ "$(jq -r '"\(.arches.x86_64.rings | map(.ring) | join(",")) \(.arches.aarch64.rings | length) \(.maintenance.maintainer.login)"' <<<"$pv")" == "edge 0 e2e" ]] || { echo "the package page's data must say x86_64 in edge, aarch64 nowhere, e2e its maintainer: $(jq -c '{arches, maintenance}' <<<"$pv")"; exit 1; }
 grep -q '<h1 id="title">e2e-ident</h1>' <<<"$(curl -s "$OMARCHY_API/package/e2e-ident?ring=edge&arch=x86_64")" || { echo "the package page of e2e-ident is not served"; exit 1; }
+# aarch64 is not supported: its answer is a 404 that still says where e2e-ident is served, whether an advisory is open there and whose it is — the page reads the same package on either architecture.
+pa=$(curl -s "$OMARCHY_API/api/v1/package/e2e-ident?ring=edge&arch=aarch64&at=page")
+[[ "$(jq -r '"\(.arches.x86_64.rings | map(.ring) | join(",")) \(.arches.x86_64.open) \(.maintenance.maintainer.login)"' <<<"$pa")" == "edge 0 e2e" ]] || { echo "e2e-ident's aarch64 answer must say x86_64 in edge, nothing open there, e2e its maintainer: $(head -c 400 <<<"$pa")"; exit 1; }
 # Adopt: a synced package gets its maintainer in the pool — a maintainer's act, once, on the journal.
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/packages/zlib/adopt" -H "authorization: Bearer omc_e2e_contributor" -H "content-type: application/json" -d '{}')" == 403 ]] || { echo "a contributor must not adopt a package"; exit 1; }
 ad=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/packages/zlib/adopt" "${mauth[@]}" -d '{}')
