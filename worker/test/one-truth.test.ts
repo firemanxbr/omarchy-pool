@@ -634,9 +634,9 @@ describe("three more facts, one source each", () => {
     expect([...draw.security.matchAll(/<i style="background:(var\(--\w+\))"><\/i>([^<]+)</g)].map((m) => [m[1], m[2]])).toEqual(series.map((r) => [r.color, r.name]));
     // The pages read the shell's series and hand its colour to the chart; neither names a bucket or a colour of its own, and the manifests say so.
     const components = allComponents(F);
-    // Home's security chart left with #243 and the Security page's stack with #248; the bars are still the served CHARTS', drawn above, and Status's counts and exposure bars take the shell's colour.
+    // Home's security chart left with #243 and the Security page's stack with #248; the bars are still the served CHARTS', drawn above, and Status's counts and exposure bars take the shell's colour. What Status draws of a report is its drawAdvisories, read alone: the page's job charts paint done, failed and waiting — no severity — in the palette's names.
     for (const [path, id, reads] of [["/status", "status.advisories", ["SEV_COLOR[s]", "SEV_COLOR[r.worst]"]]] as const) {
-      const own = ownScript(await page(path)).replace(CHARTS, "");
+      const own = /^  function drawAdvisories\(d, ring, arch\) \{[\s\S]*?\n  \}$/m.exec(ownScript(await page(path)))![0];
       for (const r of reads) expect(own, `${path} reads ${r}`).toContain(r);
       expect(own, `${path} names a bucket of its own`).not.toMatch(/"critical \+ high"|"low \/ unknown"|"exploited in the wild \(KEV\)"|name: "medium"/);
       expect(own, `${path} colours a severity of its own`).not.toMatch(/C\.(?:red|amber|blue|dim)|(?:critical|high|medium|low|unknown|kev)[^\n]{0,40}var\(--(?:red|amber|blue|dim)\)/);

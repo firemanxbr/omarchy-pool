@@ -320,10 +320,12 @@ describe("the v1 kit", () => {
     expect(styleOf(html)).not.toContain(".op-");
     expect(scriptOf(html)).toContain(KIT_HELPERS);
     expect(ownScriptOf(html)!.trim().startsWith("var own = 1;")).toBe(true);
-    // Status is drawn with it (#248): the sheet in its head after the frame's CSS, the helpers after the shell's, and its own script after them.
+    // Status is drawn with it (#248): the sheet in its head after the frame's CSS, its own rules (page({ css })) after the sheet, the helpers after the shell's, and its own script after them.
     const status = await page("/status"), statusHead = /<head>([\s\S]*?)<\/head>/.exec(status)![1];
     expect(statusHead.match(/\/assets\/kit\./g)?.length).toBe(1);
     expect(statusHead.indexOf(link)).toBeGreaterThan(statusHead.indexOf("</style>"));
+    expect(statusHead.lastIndexOf("<style>")).toBeGreaterThan(statusHead.indexOf(link));
+    expect(/<body>[\s\S]*<\/body>/.exec(status)![0], "Status's rules are in its head").not.toContain("<style>");
     expect(scriptOf(status)).toContain(KIT_HELPERS);
     expect(ownScriptOf(status)).not.toContain(KIT_HELPERS.trim().slice(0, 80));
     // Home (#243), as served: the sheet once in its head, after the frame's <style>, and the page's own rules (page({ css })) after the sheet, so they refine the kit's; the helpers the shell's.

@@ -79,7 +79,9 @@ const FEEDS = ["Arch Security Tracker", "Debian Security Tracker", "OSV", "CISA 
  * The page's own rules, beside the kit's (#239): the handoff's Status —
  * 1120px wide, 40px between sections, square, 1px lines, green the one
  * accent — in the palette's names only, and motion only where the reader
- * did not ask for less (the frame stops every animation then).
+ * did not ask for less (the frame stops every animation then). Served in
+ * the head after the kit's sheet (page({ css })), as the other kit pages
+ * serve theirs, so a rule here refines a primitive at equal weight.
  */
 const CSS = String.raw`
   .st { max-width: calc(var(--content-max) - 2 * var(--gutter)); margin: 12px auto 16px; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--section-gap); }
@@ -199,7 +201,6 @@ const CSS = String.raw`
 `;
 
 const BODY = String.raw`
-<style>${CSS}</style>
 <div class="st">
   <section class="st-hero" aria-labelledby="headline">
     <div class="st-hero-t">
@@ -1003,6 +1004,7 @@ export function statusHtml(poolUrl: string, version: RunningVersion): string {
     description: "Whether every ring is healthy, each ring's releases, the sources and the workers, the health checks and rollbacks, the advisories, and the journal of everything the pool did.",
     active: "none",
     kit: true,
+    css: CSS,
     body: BODY,
     script: SCRIPT.replace("__CHARTS__", CHARTS)
       .replace("__KINDS__", JSON.stringify(JOURNAL_KINDS))
