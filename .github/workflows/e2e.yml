@@ -37,7 +37,7 @@ jobs:
           cache-dependency-path: worker/package-lock.json
       - run: npm ci
         working-directory: worker
-      # libfaketime: the orders scenario B runs a worker whose clock is ten minutes slow (#277).
+      # libfaketime: the orders scenario B runs a worker whose clock is ten minutes fast (#277).
       - run: sudo apt-get update -q && sudo apt-get install -y --no-install-recommends faketime
       - run: tests/e2e-worker.sh
 
