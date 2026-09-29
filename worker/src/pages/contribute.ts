@@ -309,6 +309,8 @@ const SCRIPT = String.raw`
   var SQUARE = { waiting: "wait", building: "run", reviewing: "run", built: "ok", reviewed: "ok", approved: "ok", published: "ok", not_supported: "na" };
   // The answers the page draws from, and why one did not come: the registry (the line, the tiles, your requests), the listing (the workers), the review list (what waits for a maintainer), the week's series (how long a job of a kind takes), the maintainer set.
   var REG = null, LISTING = null, REVIEW = null, STATS = null, MAINT = null, DOWN = { reg: "", listing: "", review: "" };
+  // The registry answers its most recently updated rows (the server's PACKAGES_PAGE) and says when it stopped before the last (truncated): a number counted over it is then a floor, drawn "12+" as People draws it.
+  var REG_CUT = false;
   // Where each package stood when the line was last drawn, and when a card moved: a card that moved is lit for a moment (the kit's op-fresh).
   var SEEN = {}, FRESH = {}, SIG = null, AGAIN = null, READY = null, REVIEWING = null;
   var ON = {}; ARCHES.forEach(function (a) { ON[a] = true; });
@@ -715,10 +717,12 @@ const SCRIPT = String.raw`
 
   // ---- the four numbers: the line's own counts, the builds a worker holds now (the live read), the review list's waiting (one truth with Review), the registry's landed (approved by a maintainer — the Pool's and People's word). A list that did not answer reads "—", its reason on hover.
   var LANDED_ONCE = {};
+  function atLeast(n) { return num(n) + "+"; }
   function tile(key, row, why) {
     var n = $("#t-" + key + "-n"), s = $("#t-" + key + "-s"); if (!n || !s) return;
     if (!row) { if (why) { n.textContent = "—"; s.innerHTML = '<span title="' + esc(why) + '">did not answer</span>'; } return; }
-    if (!LANDED_ONCE[key]) { LANDED_ONCE[key] = true; countUp(n, row[3]); } else n.textContent = row[1];
+    if (!LANDED_ONCE[key]) { LANDED_ONCE[key] = true; countUp(n, row[3], row[4]); } else n.textContent = row[4] ? row[4](row[3]) : row[1];
+    n.title = row[5] || "";
     s.innerHTML = row[2];
   }
   function drawTiles() {
@@ -730,7 +734,8 @@ const SCRIPT = String.raw`
     // The oldest one's age rides on hover: the tile says what the number is, in a line.
     tile("ready", REVIEW ? ["Ready for review", num(REVIEW.waiting), REVIEW.oldest_ms ? '<span title="the oldest has waited ' + esc(span(REVIEW.oldest_ms)) + '">waiting for a maintainer</span>' : "waiting for a maintainer", REVIEW.waiting] : null, DOWN.review);
     var landed = COUNTS ? COUNTS.landed : [];
-    tile("shipped", COUNTS ? ["Shipped", num(landed.length), "approved by a maintainer, from " + num(Object.keys(from).length) + " contributors", landed.length] : null, DOWN.reg);
+    // Counted over the registry's newest rows: when it was cut, at least that many, the reason on hover.
+    tile("shipped", COUNTS ? ["Shipped", num(landed.length), "approved by a maintainer, from " + num(Object.keys(from).length) + (REG_CUT ? "+" : "") + " contributors", landed.length, REG_CUT ? atLeast : null, REG_CUT ? "at least: the registry read here is its newest " + num(REG.length) + " requests" : ""] : null, DOWN.reg);
   }
 
   // ---- your requests: signed in only — each of your packages where it stands on the line, with the rule that you never decide your own, and the way to become a maintainer.
@@ -772,7 +777,7 @@ const SCRIPT = String.raw`
     return out;
   }
   function loadRegistry() {
-    return api("GET", "/api/v1/factory/packages").then(function (d) { REG = withJust(d.packages || []); DOWN.reg = ""; draw(); })
+    return api("GET", "/api/v1/factory/packages").then(function (d) { REG = withJust(d.packages || []); REG_CUT = !!d.truncated; DOWN.reg = ""; draw(); })
       .catch(function (e) { DOWN.reg = noAnswer("registry", e); draw(); });
   }
   function loadListing() {
@@ -889,9 +894,9 @@ export const FACTORY_COMPONENTS = (F: Fixture): Component[] => {
       id: "factory.tiles",
       page: "/factory",
       anchor: ['<div class="op-stats fx-stats" id="tiles">', 'id="t-line-n"', 'id="t-building-n"', 'id="t-ready-n"', 'id="t-shipped-n"', "In the factory", "Building now", "Ready for review", "Shipped"],
-      script: ["function drawTiles()", '"Ready for review"', "REVIEW.waiting", "REVIEW.oldest_ms", "span(REVIEW.oldest_ms)", "workerCounts(LISTING.workers || [])", "p.landed", "maintainerSet(function (m)", '"approved by a maintainer, from "', '" contributors"', "countUp(n, row[3])", "did not answer", "function running(p)", 'x.status === "leased"', '" of them new versions"', '" queued · "'],
+      script: ["function drawTiles()", '"Ready for review"', "REVIEW.waiting", "REVIEW.oldest_ms", "span(REVIEW.oldest_ms)", "workerCounts(LISTING.workers || [])", "p.landed", "maintainerSet(function (m)", '"approved by a maintainer, from "', '" contributors"', "countUp(n, row[3], row[4])", "REG_CUT = !!d.truncated", "REG_CUT ? atLeast : null", "did not answer", "function running(p)", 'x.status === "leased"', '" of them new versions"', '" queued · "'],
       reads: [
-        { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.name", "packages.0.owner", "packages.0.landed", "packages.0.targets"] },
+        { path: "/api/v1/factory/packages", fields: ["truncated", "packages", "packages.0.name", "packages.0.owner", "packages.0.landed", "packages.0.targets"] },
         { path: "/api/v1/factory/review", fields: ["waiting", "oldest_ms"] },
         { path: "/api/v1/factory?live=1&limit=20", fields: ["workers", "workers.0.alive", "workers.0.current_task", "workers.0.revoked_at", "tasks", "tasks.0.id", "tasks.0.status"] },
         { path: "/api/v1/factory/maintainers", fields: ["maintainers", "maintainers.0.login"] },

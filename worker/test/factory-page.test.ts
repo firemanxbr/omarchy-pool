@@ -25,6 +25,7 @@ import { GO_MENU } from "../src/pages/layout";
 import { forgeOf, handleSourceRead, normaliseUrl, readSource, READS_PER_HOUR, spdxOf } from "../src/routes/sources";
 import { parseProjectUrl } from "../src/routes/contributors";
 import { handleFactory } from "../src/routes/factory";
+import { BROWSE_NAME } from "../src/routes/browse";
 import { ownScriptOf, runScript, scriptOf, seedDashboard, type Fixture, type Ran } from "./fixture";
 
 // Every page module's source, as text: no page types a name rule of its own.
@@ -68,6 +69,9 @@ describe("a name, by one rule", () => {
     // One expression, served as it is: the Factory's script and the menu's carry PKGNAME itself.
     expect(ownScriptOf(await page("/factory"))).toContain(`var NAME_RULE = ${String(PKGNAME)}`);
     expect(GO_MENU).toContain(`NAME = ${String(PKGNAME)}`);
+    // Home's box and the packages list offer Request "<name>" by it too: Home's script splices it, the list's API and page read it as BROWSE_NAME.
+    expect(ownScriptOf(await page("/"))).toContain(`NAME = ${String(PKGNAME)}`);
+    expect(BROWSE_NAME).toBe(PKGNAME);
     // No page module types a pkgname's character class of its own: the request page and the menu each typed one, and the three disagreed (2026-09-29).
     const typed = Object.entries(SOURCES).filter(([, src]) => /@\._\+-\]/.test(src)).map(([file]) => file);
     expect(typed).toEqual([]);
@@ -362,6 +366,7 @@ describe("the page", () => {
     expect(d.nodes["#t-ready-n"].textContent).toBe(String((await call("GET", "/api/v1/factory/review")).json.waiting));
     expect(d.nodes["#t-shipped-n"].textContent).toBe(String(reg.filter((p) => p.landed).length));
     expect(d.nodes["#t-shipped-s"].innerHTML).toMatch(/^approved by a maintainer, from \d+ contributors$/);
+    expect(d.nodes["#t-shipped-n"].title, "the whole registry: an exact number").toBe("");
     // The workers: every one alive, its agent's mark, idle as the fixture leaves them.
     expect(d.nodes["#fx-busy"].textContent).toBe("0 busy · 2 idle");
     expect(d.nodes["#fx-wlist"].innerHTML).toContain("op-b-claude-color");
@@ -391,6 +396,21 @@ describe("the page", () => {
     expect(d.nodes["#col-1"].innerHTML).toMatch(new RegExp(`on ${F.arch}`));
     // Building now is what a worker holds: lost's build, one.
     expect(d.nodes["#t-building-n"].textContent).toBe("1");
+  });
+
+  it("counts Shipped as a floor when the registry says it stopped before its last row, as People counts its contributors", async () => {
+    // The registry answers its newest PACKAGES_PAGE rows (routes/contributors.ts); the fixture holds fewer, so the answer is cut here, the rows as served.
+    const cut = async (path: string, init?: RequestInit) => {
+      const res = await real()(path, init);
+      if (path !== "/api/v1/factory/packages" || (init?.method && init.method !== "GET")) return res;
+      return new Response(JSON.stringify({ ...((await res.json()) as object), truncated: true }), { status: res.status, headers: res.headers });
+    };
+    const d = runScript(scriptOf(await page("/factory")), { pathname: "/factory", functions: [], fetch: cut });
+    await settled();
+    const reg = (await call("GET", "/api/v1/factory/packages")).json.packages as { landed: boolean }[];
+    expect(d.nodes["#t-shipped-n"].textContent).toBe(`${reg.filter((p) => p.landed).length}+`);
+    expect(d.nodes["#t-shipped-n"].title).toBe(`at least: the registry read here is its newest ${reg.length} requests`);
+    expect(d.nodes["#t-shipped-s"].innerHTML).toMatch(/^approved by a maintainer, from \d+\+ contributors$/);
   });
 
   it("takes a request whose every build failed off the line, and tells its owner; an architecture nobody asked for is the faintest square", async () => {

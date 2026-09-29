@@ -15,6 +15,7 @@ import { EVERYONE, type Component, type Fixture } from "./components";
 import { agentMark, lucide, type AgentMark } from "./kit";
 import { escapeHtml } from "../html";
 import { KEEP_RELEASES } from "../db";
+import { PKGNAME } from "../request";
 import { DASHBOARD_HOST, EXPECTED_SOURCES, PROMOTED_RINGS, REPO_ARCHES, RING_TEXT, RINGS_BY_STABILITY, type RunningVersion, type Upstream } from "../meta";
 
 /**
@@ -245,7 +246,7 @@ const CSS = String.raw`
 
 const SCRIPT = String.raw`
   // ---- the Pool (#243). One poll of the stats, a minute apart as before, draws the four numbers, the chain, the rings' releases in the picker and the Live lines; what reached the rings is asked once per release of theirs, and the packages people asked for once per page.
-  var SOURCES = __SOURCES__, ORIGIN = __ORIGIN__, NAME = /^[a-z0-9][a-z0-9@._+-]{1,99}$/, CARDS = 12, SHOWN = 6, WEEK_MS = 7 * 86400e3;
+  var SOURCES = __SOURCES__, ORIGIN = __ORIGIN__, NAME = __NAME__, CARDS = 12, SHOWN = 6, WEEK_MS = 7 * 86400e3;
   var STILL = !!(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches);
   var q = new URLSearchParams(location.search), box = $("#pool-q"), out = $("#pool-results");
   var ring = PROMISED_RINGS.indexOf(q.get("ring")) >= 0 ? q.get("ring") : PROMISED_RINGS[0], mode = "command", total = 0, landed = false;
@@ -508,7 +509,7 @@ const SCRIPT = String.raw`
   }, function () {});
   $("#pool-asked").addEventListener("click", function (ev) { var b = ev.target.closest ? ev.target.closest("button[data-name]") : null; if (b) { box.value = b.getAttribute("data-name"); box.focus(); lookFor(box.value.trim().toLowerCase()); } });
 
-  // ---- the search box: as you type, the first matches in stable, each its package page; Enter is the whole search, on the Packages page. It asks what the ⌘K menu asks, at the very same address and in lower case, so the two share the edge's copy: nothing below two characters, one search per pause (200 ms). Stable on the first architecture first; when that finds nothing, the same search on the others (an Asahi or a Raspberry Pi package is on aarch64 alone), at the same address shape and as cached. A pacman name no row is named for may still be a package — only in edge or the lab, reserved by a request — so it is looked up at the package page's own address on each architecture, then among the factory's names, and drawn first where it is, as the menu draws it; "Request it" is offered only for a name found nowhere, beside the whole search, and the request form takes the name from ?name=. What the rows say is said to a screen reader too.
+  // ---- the search box: as you type, the first matches in stable, each its package page; Enter is the whole search, on the Packages page. It asks what the ⌘K menu asks, at the very same address and in lower case, so the two share the edge's copy: nothing below two characters, one search per pause (200 ms). Stable on the first architecture first; when that finds nothing, the same search on the others (an Asahi or a Raspberry Pi package is on aarch64 alone), at the same address shape and as cached. A pacman name (the request's own rule, request.ts PKGNAME, spliced in) no row is named for may still be a package — only in edge or the lab, reserved by a request — so it is looked up at the package page's own address on each architecture, then among the factory's names, and drawn first where it is, as the menu draws it; "Request it" is offered only for a name found nowhere, beside the whole search, and the Factory's request card takes the name from ?name=. What the rows say is said to a screen reader too.
   var timer = null, seq = 0, places = {};
   function closeResults() { out.hidden = true; out.innerHTML = ""; $("#pool-said").textContent = ""; }
   function showResults(html, words) { out.innerHTML = html; out.hidden = false; $("#pool-said").textContent = words; }
@@ -543,7 +544,7 @@ const SCRIPT = String.raw`
       return showResults(list.join("") + (cut ? '<a class="all" href="/packages?q=' + encodeURIComponent(term) + '">All results for “' + esc(term) + '” →</a>' : ""), list.length + (list.length === 1 ? " package" : " packages") + (cut ? ", and more on the Packages page" : ""));
     }
     if (!NAME.test(term)) return showResults('<div class="none"><span>Nothing in stable matches “' + esc(term) + '”.</span><span class="go">' + whole + '</span></div>', "Nothing in stable matches “" + term + "”");
-    showResults('<div class="none"><span>No “' + esc(term) + '” yet.</span><span class="go">' + whole + '<a href="' + "/request?name=" + encodeURIComponent(term) + '">Request it →</a></span></div>', "No “" + term + "” yet: you can request it");
+    showResults('<div class="none"><span>No “' + esc(term) + '” yet.</span><span class="go">' + whole + '<a href="' + "/factory?name=" + encodeURIComponent(term) + "#request" + '">Request it →</a></span></div>', "No “" + term + "” yet: you can request it");
   }
   function lookFor(term) {
     var my = ++seq;
@@ -590,7 +591,7 @@ export function overviewHtml(poolUrl: string, version: RunningVersion): string {
     kit: true,
     css: CSS,
     body: BODY,
-    script: SCRIPT.replace("__SOURCES__", () => JSON.stringify(SOURCES)).replace("__ORIGIN__", () => JSON.stringify(ORIGIN)).replace("__KEEP__", String(KEEP_RELEASES)),
+    script: SCRIPT.replace("__SOURCES__", () => JSON.stringify(SOURCES)).replace("__ORIGIN__", () => JSON.stringify(ORIGIN)).replace("__KEEP__", String(KEEP_RELEASES)).replace("__NAME__", () => String(PKGNAME)),
     poolUrl,
     version,
   });
@@ -615,18 +616,18 @@ export const OVERVIEW_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // The box / focuses (aria-keyshortcuts="/", the ⌘K menu's hook: layout.ts GO_MENU), and the one search the menu asks too, at this very address and in lower case, so the two share the edge's copy — on the other architectures at the same address shape when the first finds nothing; a pacman name no row is named for is looked up at the package page's own address, then among the factory's names, and drawn first where it is; Request is the menu's (the request form with the name), offered beside the whole search only for a name found nowhere; what the rows say is said to a screen reader too.
+      // The box / focuses (aria-keyshortcuts="/", the ⌘K menu's hook: layout.ts GO_MENU), and the one search the menu asks too, at this very address and in lower case, so the two share the edge's copy — on the other architectures at the same address shape when the first finds nothing; a pacman name no row is named for is looked up at the package page's own address, then among the factory's names, and drawn first where it is; Request is the menu's (the Factory's request card with the name, #246), offered beside the whole search only for a name found nowhere; what the rows say is said to a screen reader too.
       id: "pool.search",
       page: "/",
       anchor: ['<form class="home-search" action="/packages" method="get" role="search">', 'name="q"', 'id="pool-q"', 'aria-keyshortcuts="/"', 'id="pool-results"', '<span class="home-said" id="pool-said" role="status"></span>'],
-      script: ['"/api/v1/search?q=" + encodeURIComponent(term) + "&ring=stable&arch=" + arch + "&limit=9"', "search(term, ARCHES[0])", "ARCHES.slice(1).map(function (a) { return search(term, a); })", "box.value.trim().toLowerCase()", 'pkgHref(p.name, "stable", p.repo_arch)', '"/api/v1/package/" + term + "?ring=stable&arch=" + arch', "d.shown_ring", "NAME.test(term)", "rows.some(function (p) { return p.name === term; })", '"/request?name=" + encodeURIComponent(term)', "Request it →", "Search all packages →", "fromWhere(p.source, p.repo_arch)", '"factory · not in a ring yet"', '$("#pool-said").textContent'],
+      script: ['"/api/v1/search?q=" + encodeURIComponent(term) + "&ring=stable&arch=" + arch + "&limit=9"', "search(term, ARCHES[0])", "ARCHES.slice(1).map(function (a) { return search(term, a); })", "box.value.trim().toLowerCase()", 'pkgHref(p.name, "stable", p.repo_arch)', '"/api/v1/package/" + term + "?ring=stable&arch=" + arch', "d.shown_ring", "NAME.test(term)", "rows.some(function (p) { return p.name === term; })", '"/factory?name=" + encodeURIComponent(term) + "#request"', "Request it →", "Search all packages →", "fromWhere(p.source, p.repo_arch)", '"factory · not in a ring yet"', '$("#pool-said").textContent'],
       reads: [
         { path: `/api/v1/search?q=${F.pkg}&ring=stable&arch=${F.arch}&limit=9`, fields: ["packages", "packages.0.name", "packages.0.source", "packages.0.repo_arch", "packages.0.description"] },
         { path: `/api/v1/search?q=${F.pkg}&ring=stable&arch=aarch64&limit=9`, fields: ["packages"] },
         { path: `/api/v1/package/${F.pkg}?ring=stable&arch=${F.arch}`, fields: ["name", "shown_ring", "package.source", "manifest.description"] },
         { path: `/api/v1/package/zzfoo?ring=stable&arch=${F.arch}`, status: 404 },
         { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.name", "packages.0.arches", "packages.0.blocked_at", "packages.0.description"] },
-        { path: "/request?name=zzfoo", json: false },
+        { path: "/factory?name=zzfoo", json: false },
         { path: `/packages?q=${F.pkg}`, json: false },
       ],
       visible: EVERYONE,

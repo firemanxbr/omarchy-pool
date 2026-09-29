@@ -22,8 +22,8 @@ import { BROWSE_DEFAULT, BROWSE_LIMIT, BROWSE_MAX, BROWSE_MAX_PAGE, BROWSE_MAX_Q
 const ORIGIN_WORDS: Record<string, string> = Object.fromEntries(EXPECTED_SOURCES.map((e) => [`${e.source}/${e.arch}`, e.origin]));
 
 /**
- * A name a request can carry: the ⌘K menu's characters (routes/browse.ts
- * BROWSE_NAME). Like the menu, the list offers Request "<name>" only for a
+ * A name a request can carry: the request's own rule, request.ts PKGNAME,
+ * as the ⌘K menu splices it (routes/browse.ts BROWSE_NAME). Like the menu, the list offers Request "<name>" only for a
  * name the pool has nowhere: a search with a filter offers to clear the
  * filters, and a name the factory or the lab has is shown there — the API
  * looks it up (routes/browse.ts heldElsewhere) where the menu asks the
@@ -177,7 +177,7 @@ function noneHtml(d: BrowseAnswer): string {
   const h = d.held;
   if (h) return `<div class="pk-none"><span>${escapeHtml(h.name)} is not in a ring. ${h.where === "lab" ? "It is in the lab." : "The factory has it: " + escapeHtml(h.where) + "."}</span><a href="${escapeHtml(pkgHref(h.name, "stable", h.arch))}">Its page →</a></div>`;
   const name = d.q.toLowerCase();
-  const offer = REQUEST_NAME.test(name) ? `<a href="/request?name=${encodeURIComponent(name)}">Request "${escapeHtml(name)}" →</a>` : `<a href="/request">Request a package →</a>`;
+  const offer = REQUEST_NAME.test(name) ? `<a href="/factory?name=${encodeURIComponent(name)}#request">Request "${escapeHtml(name)}" →</a>` : `<a href="/factory#request">Request a package →</a>`;
   return `<div class="pk-none"><span>Nothing matches.</span>${offer}</div>`;
 }
 
@@ -305,7 +305,7 @@ const BROWSE_SCRIPT = String.raw`
     var h = d.held;
     if (h) return '<div class="pk-none"><span>' + esc(h.name) + ' is not in a ring. ' + (h.where === "lab" ? "It is in the lab." : "The factory has it: " + esc(h.where) + ".") + '</span><a href="' + esc(pkgHref(h.name, "stable", h.arch)) + '">Its page →</a></div>';
     var name = d.q.toLowerCase();
-    var offer = PK_NAME.test(name) ? '<a href="/request?name=' + encodeURIComponent(name) + '">Request "' + esc(name) + '" →</a>' : '<a href="/request">Request a package →</a>';
+    var offer = PK_NAME.test(name) ? '<a href="/factory?name=' + encodeURIComponent(name) + '#request">Request "' + esc(name) + '" →</a>' : '<a href="/factory#request">Request a package →</a>';
     return '<div class="pk-none"><span>Nothing matches.</span>' + offer + '</div>';
   }
   function pkList(d, now) {
@@ -455,12 +455,12 @@ export const PACKAGES_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
-    // Nothing matches: the request, with the name the search is when it is one — the ⌘K menu's Request "<name>", on the same form.
+    // Nothing matches: the request, with the name the search is when it is one — the ⌘K menu's Request "<name>", on the same card (the Factory's, #246).
     id: "packages.request",
     page: "/packages?q=zzfoo",
-    anchor: ['<div class="pk-none"><span>Nothing matches.</span><a href="/request?name=zzfoo">Request "zzfoo" →</a></div>'],
-    script: ["'<a href=\"/request?name=' + encodeURIComponent(name)", "'<a href=\"/request\">Request a package →</a>'", "PK_NAME.test(name)"],
-    reads: [{ path: "/api/v1/packages?q=zzfoo", fields: ["count", "packages", "held"] }, { path: "/request?name=zzfoo", json: false }],
+    anchor: ['<div class="pk-none"><span>Nothing matches.</span><a href="/factory?name=zzfoo#request">Request "zzfoo" →</a></div>'],
+    script: ["'<a href=\"/factory?name=' + encodeURIComponent(name) + '#request\">", "'<a href=\"/factory#request\">Request a package →</a>'", "PK_NAME.test(name)"],
+    reads: [{ path: "/api/v1/packages?q=zzfoo", fields: ["count", "packages", "held"] }, { path: "/factory?name=zzfoo", json: false }],
     visible: EVERYONE,
   },
   {
