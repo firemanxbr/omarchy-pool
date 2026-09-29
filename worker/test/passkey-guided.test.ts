@@ -6,18 +6,21 @@
  * the act completes:
  *
  * - /auth/me tells a maintainer's pages whether they hold one — one entry of
- *   the passkeys' index, asked for a maintainer only — and the shell's
- *   notice says what needs one and that nothing else does, with Register a
- *   passkey now: always on Review and on their own page, once anywhere else
- *   (this browser keeps that it was shown: nothing is written to the pool),
- *   gone once they hold one.
- * - The dialogs of approve, block and a forced promotion offer Register a
- *   passkey and approve (… and block, … and force). The first press makes
- *   the passkey with the session alone and the dialog stays open; the next
- *   answers the pool's challenge for exactly that act and login, and the act
- *   is done — no page left, nothing half decided. A cancelled registration
- *   decides nothing, and the dialog says so. The act's journal line says the
- *   passkey was registered just now.
+ *   the passkeys' index, asked for a maintainer only, and not asked again
+ *   once the browser knows they hold one (?held=) — and the shell's notice
+ *   says what needs one and that nothing else does, with Register a passkey
+ *   now: always on Review and on their own page, once anywhere else (this
+ *   browser keeps that it was shown: nothing is written to the pool), gone
+ *   once they hold one.
+ * - The dialogs of approve, block and a forced promotion, and an agent's
+ *   draft's page, offer Register a passkey and approve (… and block, … and
+ *   force). The first press makes the passkey with the session alone and the
+ *   dialog stays open; the next answers the pool's challenge for exactly
+ *   that act and login, and the act is done — no page left, nothing half
+ *   decided. A cancelled registration decides nothing, and the dialog says
+ *   so. A passkey the pool lists for the login already is used, never made
+ *   again, and the dialog says where it is listed. The act's journal line
+ *   says the passkey was registered just now.
  * - Everything else a maintainer does asks for no passkey: the list below is
  *   the pinned one.
  *
@@ -35,6 +38,8 @@ import worker from "../src/index";
 import { sha256Hex } from "../src/routes/contributors";
 import { HAS_PASSKEY_SQL, JUST_NOW_MINUTES, PASSKEY_BY_CREDENTIAL_SQL } from "../src/routes/passkeys";
 import { HELPERS } from "../src/pages/layout";
+import { CONFIRM_SCRIPT } from "../src/pages/agent-auth";
+import { s256 } from "../src/agents";
 import { CATEGORIES } from "../src/categories";
 import { runScript, scriptOf, seedDashboard, type Fixture } from "./fixture";
 import { decider } from "./decide";
@@ -74,16 +79,20 @@ const passkeysOf = async (login: string) => (await env.DB.prepare("SELECT id FRO
 const SHELL = HELPERS.split("__POOL_URL__").join("http://pool.test").split("__RINGS_TEXT__").join("{}").split("__WICON__").join("{}").split("__LATE_AFTER_HOURS__").join("9").split("__PROMISED_RINGS__").join("[]").split("__ARCHES__").join('["x86_64","aarch64"]').split("__SEVERITIES__").join("[]").split("__WORKER_ALIVE_MINUTES__").join("10");
 const FUNCTIONS = ["ask", "decideDialog", "passkeyed", "firstPasskey", "needsPasskey", "api", "whoami", "refusalHtml"];
 
-/** An element as the shell writes it: what it was given, its attributes, its focus. */
+/** An element as the shell writes it: what it was given, its attributes, its focus, the element it finds by a selector (the same one each time), whether it was removed. */
 function node(): any {
-  const attrs: Record<string, string> = {};
+  const attrs: Record<string, string> = {}, found: Record<string, any> = {};
   return {
     style: {}, classList: { add() {}, remove() {}, toggle() {}, contains: () => false }, children: [] as any[], hidden: false, innerHTML: "", textContent: "", title: "", className: "", value: "", id: "",
-    appendChild(c: any) { this.children.push(c); return c; }, insertBefore(n: any) { this.children.unshift(n); return n; }, removeChild() {}, remove() {},
+    appendChild(c: any) { this.children.push(c); return c; }, insertBefore(n: any) { this.children.unshift(n); return n; }, removeChild() {}, remove() { this.removed = true; },
     setAttribute(k: string, v: unknown) { attrs[k] = String(v); }, getAttribute: (k: string) => (k in attrs ? attrs[k] : null), removeAttribute(k: string) { delete attrs[k]; }, hasAttribute: (k: string) => k in attrs,
-    focus() { this.focused = true; }, closest: () => null, addEventListener() {}, querySelector: () => node(), querySelectorAll: () => [], firstChild: null,
+    focus() { this.focused = true; }, closest: () => null, addEventListener() {}, querySelector: (sel: string) => (found[sel] ||= node()), querySelectorAll: () => [], firstChild: null,
   };
 }
+
+/** What a device holds, as a browser's create() checks it (WebAuthn §6.3.2, step 3): an authenticator that holds a credential the options exclude refuses with InvalidStateError. */
+const excluded = (a: Authenticator | undefined, k: any) => !!a && (k.excludeCredentials ?? []).some((c: any) => b64url(c.id) === b64url(a.credentialId));
+const invalidState = () => Object.assign(new Error("The authenticator was previously registered."), { name: "InvalidStateError" });
 
 /** The dashboard's dialog (ask): the parts it has are the ones its HTML carries; the form's submit button starts with the words it was drawn with. */
 function dialog(): any {
@@ -108,16 +117,20 @@ function dialog(): any {
 
 /**
  * The shell for `login` on `pathname`: its fetch is the Worker with the
- * login's session and the page's Origin (what it posted is kept), its
- * navigator.credentials the software authenticator `a` — create() and get(),
- * each with the options it was handed kept — or what the test makes them
- * do; localStorage is `store`, or one that throws.
+ * login's session and the page's Origin (what it fetched and what it posted
+ * are kept), its navigator.credentials the software authenticator `a` —
+ * create() and get(), each with the options it was handed kept, create()
+ * refusing what the options exclude as a browser does — or what the test
+ * makes them do; localStorage is `store`, or one that throws. A page's own
+ * `script` runs after it, with the elements `byId` as getElementById finds
+ * them; click(target) is a click the document's listeners hear.
  */
-function shellAs(login: string | null, o: { pathname?: string; a?: Authenticator; store?: Map<string, string> | "blocked"; create?: (options: any) => Promise<unknown>; get?: (options: any) => Promise<unknown> } = {}) {
-  const posted: string[] = [], created: any[] = [], asked: any[] = [], dialogs: any[] = [], nodes: Record<string, any> = {};
+function shellAs(login: string | null, o: { pathname?: string; a?: Authenticator; store?: Map<string, string> | "blocked"; create?: (options: any) => Promise<unknown>; get?: (options: any) => Promise<unknown>; script?: string; byId?: Record<string, any> } = {}) {
+  const posted: string[] = [], fetched: string[] = [], created: any[] = [], asked: any[] = [], dialogs: any[] = [], nodes: Record<string, any> = {}, heard: Record<string, ((ev: unknown) => void)[]> = {};
   const document = {
     querySelector: (sel: string) => (nodes[sel] = nodes[sel] || node()),
-    querySelectorAll: () => [], addEventListener() {}, createElement: (tag: string) => (tag === "dialog" ? dialog() : node()),
+    querySelectorAll: () => [], addEventListener(t: string, f: (ev: unknown) => void) { (heard[t] ||= []).push(f); }, createElement: (tag: string) => (tag === "dialog" ? dialog() : node()),
+    getElementById: (id: string) => o.byId?.[id] ?? null,
     body: { appendChild(c: any) { if (c.isDialog) dialogs.push(c); return c; } }, documentElement: { getAttribute: () => null }, title: "",
   };
   const buf = (v: string) => unb64url(v).buffer;
@@ -126,6 +139,7 @@ function shellAs(login: string | null, o: { pathname?: string; a?: Authenticator
       create: async (options: any) => {
         created.push(options.publicKey);
         if (o.create) return o.create(options);
+        if (excluded(o.a, options.publicKey)) throw invalidState();
         const k = options.publicKey, r = await register(o.a!, { challenge: b64url(k.challenge), origin: WEB, rpId: k.rp.id });
         return { rawId: buf(r.id), response: { clientDataJSON: buf(r.clientDataJSON), attestationObject: buf(r.attestationObject) } };
       },
@@ -139,21 +153,23 @@ function shellAs(login: string | null, o: { pathname?: string; a?: Authenticator
   };
   const store = o.store ?? new Map<string, string>();
   const localStorage = store === "blocked"
-    ? { getItem() { throw new Error("SecurityError: storage is blocked"); }, setItem() { throw new Error("SecurityError: storage is blocked"); } }
-    : { getItem: (k: string) => (store.has(k) ? store.get(k) : null), setItem: (k: string, v: string) => void store.set(k, String(v)) };
+    ? { getItem() { throw new Error("SecurityError: storage is blocked"); }, setItem() { throw new Error("SecurityError: storage is blocked"); }, removeItem() { throw new Error("SecurityError: storage is blocked"); } }
+    : { getItem: (k: string) => (store.has(k) ? store.get(k) : null), setItem: (k: string, v: string) => void store.set(k, String(v)), removeItem: (k: string) => void store.delete(k) };
   const fetchAs = async (path: string, init?: RequestInit) => {
+    fetched.push(path);
     if (init?.method === "POST") posted.push(path);
-    const { cache: _cache, ...rest } = init ?? {};
+    const { cache: _cache, credentials: _credentials, ...rest } = init ?? {};
     const ctx = createExecutionContext();
     const res = await worker.fetch(new Request(WEB + path, { ...rest, headers: { ...(rest.headers as Record<string, string>), ...(login ? { cookie: `omc=oms_${login}` } : {}), origin: WEB } }), env, ctx);
     await waitOnExecutionContext(ctx);
     return res;
   };
-  const window = { matchMedia: null, PublicKeyCredential: function () {}, isSecureContext: true };
-  const make = new Function("document", "window", "fetch", "location", "innerWidth", "navigator", "localStorage", `${SHELL}\n return { ${[...FUNCTIONS.map((f) => `${f}: ${f}`), "who: function () { return WHO; }"].join(", ")} };`);
+  const window = { matchMedia: null, PublicKeyCredential: function () {}, isSecureContext: true, addEventListener() {} };
+  const make = new Function("document", "window", "fetch", "location", "innerWidth", "navigator", "localStorage", `${SHELL}\n${o.script ?? ""}\n return { ${[...FUNCTIONS.map((f) => `${f}: ${f}`), "who: function () { return WHO; }"].join(", ")} };`);
   const ran = make(document, window, fetchAs, { pathname: o.pathname ?? "/status", search: "", origin: WEB }, 1280, navigator, localStorage) as Record<string, any>;
   const ready = new Promise<void>((r) => ran.whoami(() => r()));
-  return { ...ran, ready, posted, created, asked, dialogs, nodes } as any;
+  const click = (target: unknown) => (heard.click ?? []).forEach((f) => f({ target }));
+  return { ...ran, ready, posted, fetched, created, asked, dialogs, nodes, click } as any;
 }
 
 /**
@@ -173,6 +189,7 @@ async function pageAs(path: string, login: string, a: Authenticator, o: { functi
   (globalThis as any).__pkPageNavigator = {
     credentials: {
       create: async (options: any) => {
+        if (excluded(a, options.publicKey)) throw invalidState();
         const k = options.publicKey, r = await register(a, { challenge: b64url(k.challenge), origin: WEB, rpId: k.rp.id });
         return { rawId: buf(r.id), response: { clientDataJSON: buf(r.clientDataJSON), attestationObject: buf(r.attestationObject) } };
       },
@@ -234,7 +251,7 @@ const reviewed = async (name: string) => {
 
 let F: Fixture;
 /** The maintainers of this file who hold no passkey when it starts: each test's own, so what one registers changes no other's. */
-const NEW = ["m3", "m4", "m5", "m6", "m7", "m8", "m9", "m10", "m11", "m12", "m13"];
+const NEW = ["m3", "m4", "m5", "m6", "m7", "m8", "m9", "m10", "m11", "m12", "m13", "m14", "m15", "m16", "m17", "m18", "m19", "m20"];
 
 beforeAll(async () => {
   F = await seedDashboard(env);
@@ -253,6 +270,11 @@ describe("told before it matters (#287)", () => {
     expect((await asPage("m8", "GET", "/auth/me")).json).toMatchObject({ login: "m8", role: "maintainer", passkey: false });
     // m1 holds one: the fixture's first decision registered it (decide.ts).
     expect((await asPage(F.m1, "GET", "/auth/me")).json).toMatchObject({ login: F.m1, role: "maintainer", passkey: true });
+    // A page whose browser knows the login holds one names it (?held=<login>): the pool reads nothing for it, so a maintainer's page view costs what it did before #287 — and another login's answer is read as before.
+    const known = (await asPage(F.m1, "GET", `/auth/me?held=${F.m1}`)).json;
+    expect(known).toMatchObject({ login: F.m1, role: "maintainer" });
+    expect("passkey" in known).toBe(false);
+    expect((await asPage("m8", "GET", `/auth/me?held=${F.m1}`)).json).toMatchObject({ login: "m8", role: "maintainer", passkey: false });
     // Nobody else is asked for one: a contributor's answer has no word of it, and nobody's is the 401.
     const bob = (await asPage(F.contributor, "GET", "/auth/me")).json;
     expect(bob).toMatchObject({ login: F.contributor, role: "contributor" });
@@ -330,6 +352,97 @@ describe("told before it matters (#287)", () => {
     await next.ready;
     expect(next.nodes["#pk-notice"]).toBeUndefined();
   });
+
+  it("this browser keeps that a maintainer holds one: its next pages ask the pool nothing for it; a refusal saying none, and a sign-out, make it forget", async () => {
+    const store = new Map<string, string>();
+    const a = await createAuthenticator();
+    const s = shellAs("m14", { pathname: "/status", a, store });
+    await s.ready;
+    // Nothing known yet: the pool is asked, and says none.
+    expect(s.fetched[0]).toBe("/auth/me");
+    expect(s.needsPasskey()).toBe(true);
+    expect(store.has("op-pk-held")).toBe(false);
+    expect((await s.firstPasskey()).passkey?.id).toMatch(/^pk_/);
+    expect(store.get("op-pk-held")).toBe("m14");
+    // The next page names the login, and the pool reads nothing for it: the page takes the browser's word.
+    const next = shellAs("m14", { pathname: "/review", store });
+    await next.ready;
+    expect(next.fetched[0]).toBe("/auth/me?held=m14");
+    expect(next.who().me.passkey).toBe(true);
+    expect(next.needsPasskey()).toBe(false);
+    expect(next.nodes["#pk-notice"]).toBeUndefined();
+    // Its passkey goes behind this browser's back (removed from another browser): the first act that asks for it is refused with none, and the page knows it from then on — the notice back on Review, the dialogs offering the registration, and the browser asking the pool again.
+    await env.DB.prepare("DELETE FROM passkeys WHERE login = 'm14'").run();
+    const refused = await next.passkeyed("approve:1", () => Promise.reject(new Error("nothing is posted without an answer")));
+    expect([refused.__status, refused.code], JSON.stringify(refused)).toEqual([403, "no_passkey"]);
+    expect(next.needsPasskey()).toBe(true);
+    expect(store.has("op-pk-held")).toBe(false);
+    await until(() => next.nodes["#pk-notice"]?.hidden === false, "the notice back on Review");
+    const again = shellAs("m14", { pathname: "/review", store });
+    await again.ready;
+    expect(again.fetched[0]).toBe("/auth/me");
+    expect(again.needsPasskey()).toBe(true);
+    // Signed out — a reset signs its login out — the browser forgets it.
+    store.set("op-pk-held", "m14");
+    const out = shellAs(null, { pathname: "/", store });
+    await out.ready;
+    expect(out.fetched[0]).toBe("/auth/me?held=m14");
+    expect(store.has("op-pk-held")).toBe(false);
+    // A login the browser does not know is read as before, whatever it remembers of another.
+    store.set("op-pk-held", F.m1);
+    const other = shellAs("m9", { pathname: "/status", store });
+    await other.ready;
+    expect(other.needsPasskey()).toBe(true);
+    expect(store.get("op-pk-held")).toBe(F.m1);
+  });
+
+  it("the notice's own button: the passkey made, the notice says so in its place and takes the keyboard; Not now hands the keyboard to the page's heading", async () => {
+    /** A click on the notice's button `cls`, as the document hears it. */
+    const pressIn = (s: any, cls: string) => {
+      const box = s.nodes["#pk-notice"];
+      const t: any = Object.assign(node(), { closest: (sel: string) => (sel === ".pk-notice" ? box : sel === cls ? t : null) });
+      s.click(t);
+      return t;
+    };
+    const a = await createAuthenticator();
+    const s = shellAs("m15", { pathname: "/review", a });
+    await s.ready;
+    await until(() => s.nodes["#pk-notice"]?.hidden === false, "the notice");
+    const box = s.nodes["#pk-notice"], b = pressIn(s, ".pk-now");
+    // While the device asks: the button stays where the keyboard is, and the notice says what to do.
+    expect(b.getAttribute("aria-disabled")).toBe("true");
+    expect(box.querySelector(".pk-said").textContent).toBe("Answer your device: your fingerprint, face or PIN.");
+    await until(() => box.className === "notice pk-notice ok", "the passkey registered");
+    // Done: still drawn, in green, its words saying so — the buttons gone, the keyboard on the words a screen reader reads out; nothing else to dismiss.
+    expect(box.hidden).toBe(false);
+    expect(box.querySelector(".pk-text").innerHTML).toBe("Your passkey is registered. Approve, block and a forced promotion ask for it from now on.");
+    expect(box.querySelector(".pk-text").focused).toBe(true);
+    expect(box.querySelector(".pk-text").getAttribute("tabindex")).toBe("-1");
+    expect(box.querySelector(".pk-btns").removed).toBe(true);
+    expect(box.querySelector(".pk-said").textContent).toBe("");
+    expect(box.getAttribute("data-registering")).toBeNull();
+    expect(s.nodes["#toasts"]).toBeUndefined();
+    expect(s.needsPasskey()).toBe(false);
+    expect(await passkeysOf("m15")).toHaveLength(1);
+    // Registered elsewhere since the page asked — another tab, or whoever else holds the session: none is made, and the notice says where it is listed and who resets one they did not make.
+    const t = shellAs("m16", { pathname: "/user/m16", a: await createAuthenticator() });
+    await t.ready;
+    await until(() => t.nodes["#pk-notice"]?.hidden === false, "the notice on their page");
+    const o = await asPage("m16", "POST", "/auth/passkeys/challenge", {});
+    expect((await asPage("m16", "POST", "/auth/passkeys", { label: "another tab", ...(await register(await createAuthenticator(), { challenge: o.json.publicKey.challenge, origin: WEB, rpId: "localhost" })) })).status).toBe(201);
+    pressIn(t, ".pk-now");
+    await until(() => t.nodes["#pk-notice"].className === "notice pk-notice warn", "the notice's word");
+    expect(t.created).toEqual([]);
+    expect(t.nodes["#pk-notice"].querySelector(".pk-text").innerHTML).toBe('You hold a passkey already, registered elsewhere: <a href="/user/m16#passkeys">your page</a> lists it. Approve, block and a forced promotion ask for it from now on. If you did not register it, ask another maintainer to reset your passkeys.');
+    // Not now, once elsewhere: the notice goes, and the keyboard goes on to the page's heading — never to nowhere.
+    const u = shellAs("m17", { pathname: "/status" });
+    await u.ready;
+    await until(() => u.nodes["#pk-notice"]?.hidden === false, "the notice once");
+    pressIn(u, ".pk-later");
+    expect(u.nodes["#pk-notice"].hidden).toBe(true);
+    expect(u.nodes["main h1"]).toMatchObject({ focused: true });
+    expect(u.nodes["main h1"].getAttribute("tabindex")).toBe("-1");
+  });
 });
 
 describe("registered at the moment of need (#287)", () => {
@@ -343,6 +456,8 @@ describe("registered at the moment of need (#287)", () => {
     expect(d.open).toBe(true);
     expect(d.submit().textContent).toBe("Register a passkey and approve");
     expect(d.querySelector(".pk").textContent).toBe("You hold no passkey yet. Your device makes one now, then confirms this with it.");
+    // The text says what the act does; its line about the passkey is the box's, not "Your passkey confirms it" over "You hold no passkey yet".
+    expect(d.querySelector(".t").innerHTML).toMatch(/The approval is on the record with your name\.$/);
     press(d);
     await until(() => d.querySelector(".pk").className === "pk ok", "the passkey registered");
     // Registered with the session alone, and the dialog is still open: nothing is decided yet.
@@ -350,7 +465,7 @@ describe("registered at the moment of need (#287)", () => {
     expect(d.open).toBe(true);
     expect(d.submit().textContent).toBe("Approve with your passkey");
     expect(d.submit().focused).toBe(true);
-    expect(d.querySelector(".pk").textContent).toBe("Your passkey is registered. Press Approve with your passkey: your device confirms this with it.");
+    expect(d.querySelector(".pk").innerHTML).toBe("Your passkey is registered. Press Approve with your passkey: your device confirms this with it.");
     const [held] = await passkeysOf("m4");
     expect(held).toMatch(/^pk_/);
     expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM approvals WHERE task_id = ?").bind(project).first<{ n: number }>()).toEqual({ n: 0 });
@@ -376,6 +491,14 @@ describe("registered at the moment of need (#287)", () => {
     const l2 = (await line("approve", "task", second.project))!;
     expect(l2.summary).toMatch(/approved by m4 \(rebuilt with/);
     expect(l2.payload.registered_just_now).toBeUndefined();
+    // Holding one, the dialog is the ordinary one: its line says the passkey confirms it, and no box of the first press.
+    const later = s.decideDialog("approve", `guidedagain 1.0-1 (build #${second.project})`, {});
+    const d2 = s.dialogs[1];
+    expect(d2.querySelector(".t").innerHTML).toMatch(/The approval is on the record with your name\. Your passkey confirms it: your device asks for your fingerprint, face or PIN\.$/);
+    expect(d2.querySelector(".pk")).toBeNull();
+    expect(d2.submit().textContent).toBe("Approve with your passkey");
+    d2.querySelector(".cancel").onclick();
+    expect(await later).toBeNull();
   });
 
   it("keeps the challenge bound to the act: the registration decides nothing, and an answer made for one act decides no other", async () => {
@@ -496,9 +619,10 @@ describe("registered at the moment of need (#287)", () => {
     await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE id = ?").bind(late.task).run();
   });
 
-  it("a passkey registered meanwhile, elsewhere: the dialog says the login holds one, and its next press confirms with it", async () => {
+  it("a passkey registered meanwhile — another tab on this device, or anyone with the session: the dialog makes none, says where it is listed and who resets one they did not make, and its next press confirms with it", async () => {
     const { project } = await reviewed("elsewhere");
     const a = await createAuthenticator();
+    // The browser's create() refuses a credential the options exclude that this device holds (InvalidStateError), as a real one does.
     const s = shellAs("m10", { pathname: "/review", a });
     await s.ready;
     expect(s.needsPasskey()).toBe(true);
@@ -509,16 +633,56 @@ describe("registered at the moment of need (#287)", () => {
     const d = s.dialogs[0];
     expect(d.submit().textContent).toBe("Register a passkey and approve");
     press(d);
-    await until(() => d.querySelector(".pk").className === "pk ok", "the dialog's word");
-    expect(d.querySelector(".pk").textContent).toBe("You hold a passkey already. Press Approve with your passkey: your device confirms this with it.");
-    expect(d.submit().textContent).toBe("Approve with your passkey");
-    expect(s.needsPasskey()).toBe(false);
-    // Nothing more was stored: a second passkey needs the first's answer, and none was given.
+    await until(() => d.submit().textContent === "Approve with your passkey", "the dialog's next press");
+    // The pool's options listed the passkey the login holds: the device was asked for nothing, and nothing more was stored.
+    expect(s.created).toEqual([]);
+    expect(s.posted).toEqual(["/auth/passkeys/challenge"]);
     expect((await passkeysOf("m10")).length).toBe(1);
+    expect(s.needsPasskey()).toBe(false);
+    // It may not be theirs — whoever holds the session can register the first: the words say where it is listed and who resets it, in amber.
+    expect(d.querySelector(".pk").className).toBe("pk");
+    expect(d.querySelector(".pk").innerHTML).toBe('You hold a passkey already, registered elsewhere: <a href="/user/m10#passkeys">your page</a> lists it. Press Approve with your passkey: your device confirms this with it. If you did not register it, ask another maintainer to reset your passkeys.');
+    expect(d.submit().focused).toBe(true);
     press(d);
     await done;
     const r = await s.passkeyed(`approve:${project}`, (assertion: unknown) => s.api("POST", `/api/v1/factory/tasks/${project}/approve`, { note: "reads well", assertion }));
     expect(r.__status, JSON.stringify(r)).toBe(200);
+  });
+
+  it("two first registrations racing: the one the pool refused as a second goes on with the one it holds; the one whose request a newer one replaced says so, and its next press goes on with the passkey held", async () => {
+    // A first registration of the same login stored while this device answered — the moment between this one's challenge and its answer (one registration challenge is live a login, so only the pool's own race gets there): the pool refuses this one as a second (passkey_required), and the dialog goes on with the one held.
+    const other = await createAuthenticator(), mine = await createAuthenticator();
+    const s = shellAs("m18", { pathname: "/review", a: mine, create: async (options: any) => {
+      await env.DB.prepare("INSERT INTO passkeys (id, login, credential_id, public_key, alg, rp_id, label) VALUES (?, 'm18', ?, ?, -7, 'localhost', 'another device')").bind(`pk_${"a".repeat(32)}`, b64url(other.credentialId), b64url(other.cose)).run();
+      const k = options.publicKey, r = await register(mine, { challenge: b64url(k.challenge), origin: WEB, rpId: k.rp.id });
+      return { rawId: unb64url(r.id).buffer, response: { clientDataJSON: unb64url(r.clientDataJSON).buffer, attestationObject: unb64url(r.attestationObject).buffer } };
+    } });
+    await s.ready;
+    expect(await s.firstPasskey("Nothing was decided.")).toEqual({ held: true });
+    expect(s.needsPasskey()).toBe(false);
+    expect(await passkeysOf("m18")).toHaveLength(1);
+    // Two tabs of one login press at once: the later request replaces the earlier's challenge, so the earlier's answer is refused — in the dialog's words, not the person page's — and its next press goes on with the passkey the later one stored, asking the device for nothing.
+    const a = await createAuthenticator();
+    let answer: () => void = () => {};
+    const waited = new Promise<void>((r) => (answer = r));
+    const first = shellAs("m19", { pathname: "/review", a, create: async (options: any) => {
+      await waited;
+      const k = options.publicKey, r = await register(a, { challenge: b64url(k.challenge), origin: WEB, rpId: k.rp.id });
+      return { rawId: unb64url(r.id).buffer, response: { clientDataJSON: unb64url(r.clientDataJSON).buffer, attestationObject: unb64url(r.attestationObject).buffer } };
+    } });
+    const later = shellAs("m19", { pathname: "/status", a });
+    await first.ready;
+    await later.ready;
+    const pending = first.firstPasskey("Nothing was decided.");
+    await until(() => first.created.length === 1, "the first tab's device asked");
+    expect((await later.firstPasskey("Nothing was queued.")).passkey?.id).toMatch(/^pk_/);
+    answer();
+    expect(await pending).toEqual({ error: "A newer passkey request of yours replaced this one: press again. Nothing was decided.", code: "challenge" });
+    expect(first.needsPasskey()).toBe(true);
+    expect(await first.firstPasskey("Nothing was decided.")).toEqual({ held: true });
+    expect(first.created).toHaveLength(1);
+    expect(first.needsPasskey()).toBe(false);
+    expect(await passkeysOf("m19")).toHaveLength(1);
   });
 
   it("Review's own confirmation: Register a passkey and approve, then Confirm with your passkey — the same workspace, the build approved", async () => {
@@ -531,11 +695,15 @@ describe("registered at the moment of need (#287)", () => {
     expect(p.nodes["#rv-confirm-go"].innerHTML).toContain("Register a passkey and approve");
     expect(p.nodes["#rv-confirm-t"].textContent).toContain("You hold no passkey yet: your device makes one now, then confirms the approval with it.");
     const go = p.nodes["#rv-confirm-go"];
-    go.disabled = true;
     p.ran.registerFirst(go);
+    // While the device asks, the confirmation says so where a screen reader hears it (#rv-confirm-pk, a status), and Confirm keeps the focus: never disabled.
+    expect(p.nodes["#rv-confirm-pk"].innerHTML).toBe("Answer your device: your fingerprint, face or PIN.");
+    expect(go.disabled).not.toBe(true);
     await until(() => (p.nodes["#rv-confirm-go"].innerHTML as string).includes("Confirm with your passkey"), "the confirmation's next press");
-    expect(go.disabled).toBe(false);
-    expect(p.nodes["#rv-confirm-t"].textContent).toContain("Your passkey is registered. Confirm, and your device approves with it.");
+    expect(go.disabled).not.toBe(true);
+    expect(p.nodes["#rv-confirm-pk"].innerHTML).toBe("Your passkey is registered. Confirm, and your device approves with it.");
+    // The text no longer says a passkey will be made, nor twice that one confirms it.
+    expect(p.nodes["#rv-confirm-t"].textContent).toMatch(/The project's build enters edge\.$/);
     expect(p.posted).toEqual(["/auth/passkeys/challenge", "/auth/passkeys"]);
     expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM approvals WHERE task_id = ?").bind(project).first<{ n: number }>()).toEqual({ n: 0 });
     p.ran.decide("approve", project);
@@ -557,6 +725,8 @@ describe("registered at the moment of need (#287)", () => {
     expect(you()).toContain("Register a passkey and block");
     expect(you()).toContain('<p class="pk" role="status" aria-live="polite">You hold no passkey yet. Your device makes one now, then confirms the block with it.</p>');
     p.ran.act("block", "ships a token stealer");
+    // While the device asks, the form says so in its status line, and Block keeps the focus.
+    expect(p.nodes["#you-ask .pk"].textContent).toBe("Answer your device: your fingerprint, face or PIN.");
     await until(() => you().includes("Block pageblock with your passkey"), "the form's next press");
     expect(you()).toContain('<p class="pk ok" role="status" aria-live="polite">Your passkey is registered. Press Block pageblock with your passkey: your device confirms it.</p>');
     expect(p.posted).toEqual(["/auth/passkeys/challenge", "/auth/passkeys"]);
@@ -567,6 +737,74 @@ describe("registered at the moment of need (#287)", () => {
     await until(() => !you().includes("Block pageblock with your passkey"), "the form closed");
     expect((await env.DB.prepare("SELECT blocked_by FROM factory_packages WHERE name = 'pageblock'").first<{ blocked_by: string }>())!.blocked_by).toBe("m13");
     expect((await line("block", "name", "pageblock"))!.summary).toMatch(/^pageblock blocked by m13 with a passkey registered just now: ships a token stealer/);
+  });
+
+  it("an agent's draft: its page offers Register a passkey and approve, then Confirm with your passkey — the draft confirmed with the passkey made there, the line saying so", async () => {
+    // m20's agent, logged in as omarchy-cli does it: the grant page, Grant, the loopback's code, the swap.
+    const page = async (method: "GET" | "POST", path: string, form?: Record<string, string>) => {
+      const ctx = createExecutionContext();
+      const res = await worker.fetch(new Request(WEB + path, { method, redirect: "manual", headers: { cookie: "omc=oms_m20", ...(form ? { origin: WEB, "content-type": "application/x-www-form-urlencoded" } : {}) }, body: form ? new URLSearchParams(form).toString() : undefined }), env, ctx);
+      await waitOnExecutionContext(ctx);
+      return { status: res.status, text: await res.text(), location: res.headers.get("location") };
+    };
+    const hidden = (html: string): Record<string, string> => Object.fromEntries([...html.matchAll(/<input type="hidden" name="([a-z_]+)" value="([^"]*)">/g)].map((m) => [m[1], m[2].replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">")]));
+    const verifier = "verifier-m20-guided-".padEnd(64, "x");
+    const q = new URLSearchParams({ agent: "Claude Code", scopes: "contribute,review,block", port: "48123", state: "state-" + "s".repeat(16), challenge: await s256(verifier), method: "S256" });
+    const granted = await page("POST", "/auth/agent", { ...hidden((await page("GET", `/auth/agent?${q}`)).text), action: "grant" });
+    expect(granted.status, granted.text.slice(0, 400)).toBe(303);
+    const swapped = await raw("POST", "/auth/agent/token", { "content-type": "application/json", "cf-connecting-ip": "10.20.0.1" }, { code: new URL(granted.location!).searchParams.get("code"), code_verifier: verifier });
+    expect(swapped.status, JSON.stringify(swapped.json)).toBe(200);
+    const { project } = await reviewed("agentfirst");
+    const drafted = await call("POST", "/factory/drafts", { name: "agentfirst", task: project, verdict: "approve", note: "reads well" }, swapped.json.token);
+    expect(drafted.json.state, JSON.stringify(drafted.json)).toBe("waiting");
+    // The agent tells its person before the page: the page registers the passkey, then confirms with it.
+    expect(drafted.json.next).toBe("m20 has no passkey yet, and an approval is confirmed with one: open the link in a browser signed in as m20. The page registers one on that device, then confirms with it: your device asks for your fingerprint, face or PIN. Nothing is decided until then.");
+    const d = drafted.json.draft as string;
+    const html = (await page("GET", `/auth/confirm/${d}`)).text;
+    expect(html).toContain('data-next="Confirm with your passkey: approve agentfirst"');
+    expect(html).toContain("Register a passkey and approve agentfirst</button>");
+    expect(html).toContain("You hold no passkey yet. The first press makes one on this device, and the next confirms the draft with it.");
+    expect(html).toMatch(/<p class="said" id="pk-said" role="status" aria-live="polite"><\/p>/);
+    expect(html).not.toContain("Register a passkey first.");
+    // The page's script, run as the browser runs it after the shell, with the form it serves and the software authenticator.
+    const inputs: Record<string, any> = {};
+    const form: any = {
+      heard: {} as Record<string, (ev: unknown) => void>, submitted: false, elements: { nonce: { value: hidden(html).nonce } },
+      addEventListener(t: string, f: (ev: unknown) => void) { this.heard[t] = f; }, getAttribute: (k: string) => (k === "action" ? `/auth/confirm/${d}` : null),
+      querySelector: (sel: string) => inputs[/name="([a-z_]+)"/.exec(sel)?.[1] ?? ""] ?? null, appendChild(i: any) { inputs[i.name] = i; return i; }, submit() { this.submitted = true; },
+    };
+    const label = { textContent: "Register a passkey and approve agentfirst" };
+    const btn = Object.assign(node(), { form, tagName: "BUTTON", value: "confirm", lastChild: label });
+    btn.setAttribute("data-next", "Confirm with your passkey: approve agentfirst");
+    const said = node(), note = node();
+    note.setAttribute("data-next", /<p id="pk-note" data-next="([^"]*)">/.exec(html)![1]);
+    const a = await createAuthenticator();
+    const s = shellAs("m20", { pathname: `/auth/confirm/${d}`, a, script: CONFIRM_SCRIPT, byId: { "pk-confirm": btn, "pk-said": said, "pk-note": note } });
+    await s.ready;
+    const submit = () => form.heard.submit({ submitter: btn, preventDefault() {} });
+    submit();
+    expect(said.textContent).toBe("Answer your device: your fingerprint, face or PIN.");
+    expect(btn.getAttribute("aria-disabled")).toBe("true");
+    await until(() => label.textContent === "Confirm with your passkey: approve agentfirst", "Confirm's next press");
+    expect(btn.getAttribute("data-next")).toBeNull();
+    expect(btn.getAttribute("aria-disabled")).toBeNull();
+    expect(said.innerHTML).toBe("Your passkey is registered. Press Confirm with your passkey: your device confirms the draft with it.");
+    // The note above it says what a holder's says: no "You hold no passkey yet" over "Your passkey is registered".
+    expect(note.textContent).toBe("Confirm asks for your passkey. Your device asks for your fingerprint, face or PIN, which no agent's software can supply. The pool checks the answer against the key you registered.");
+    expect(s.posted).toEqual(["/auth/passkeys/challenge", "/auth/passkeys"]);
+    expect(await env.DB.prepare("SELECT state FROM drafts WHERE id = ?").bind(d).first()).toEqual({ state: "waiting" });
+    // The next press: the draft's own challenge, the passkey's answer, the form posted.
+    submit();
+    await until(() => form.submitted, "the form posted");
+    expect(s.posted.slice(2)).toEqual([`/auth/confirm/${d}/challenge`]);
+    expect(Object.keys(inputs).sort()).toEqual(["action", "authenticator_data", "client_data", "credential", "signature", "user_handle"]);
+    const done = await page("POST", `/auth/confirm/${d}`, { ...hidden(html), ...Object.fromEntries(Object.entries(inputs).map(([k, i]) => [k, String(i.value)])) });
+    expect(done.status, done.text.slice(0, 600)).toBe(200);
+    expect(done.text).toContain("confirmed in the browser with a passkey registered just now.");
+    const [held] = await passkeysOf("m20");
+    const l = (await line("approve", "task", project))!;
+    expect(l.summary).toMatch(/^agentfirst 1\.0 \(x86_64\) approved by m20 — drafted by Claude Code, confirmed in the browser with a passkey registered just now/);
+    expect(l.payload.through).toMatchObject({ draft: d, passkey: held, registered_just_now: true });
   });
 
   it("every dialog of an act a passkey confirms offers the registration: Approve, Review's confirmation and brake, a package's Block, Status's Force, a reset", async () => {

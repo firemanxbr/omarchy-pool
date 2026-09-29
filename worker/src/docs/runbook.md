@@ -429,8 +429,8 @@ carries #271, a maintainer who holds no passkey is refused both
 on `/user/<login>#passkeys` before that release deploys (v1.0.1 offers it
 already). Since #287 a maintainer who holds none is told so — on Review, on
 their page, and once at their first page as a maintainer — and the Approve,
-Block and Force dialogs register the first one, then confirm the act with
-it, without leaving the page. A new maintainer named in
+Block and Force dialogs, and the page of an agent's draft, register the
+first one, then confirm the act with it, without leaving the page. A new maintainer named in
 `factory/MAINTAINERS.toml` needs nothing from an operator. Register two — a phone and a security key, say: the second is
 added with an answer from the first, and a lost one is then removed with
 the other, with no reset.

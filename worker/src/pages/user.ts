@@ -515,7 +515,7 @@ const SCRIPT = String.raw`
     ev.preventDefault();
     var why = $("#pk-reset-why").value.trim();
     if (why.length < 4) { resetSay(esc("Say why in a few words: it goes on the public journal and the signed record."), true); return; }
-    ask({ title: "Reset " + login + "'s passkeys?", text: "Every passkey of " + esc(login) + "'s goes, with their token and their agents' grants, and " + esc(login) + " is signed out. They add a new passkey and make a new token after signing in again. Your passkey confirms it. The reason: <i>" + esc(why) + "</i>", confirm: "Reset with your passkey", first: "Register a passkey and reset", nothing: "Nothing was reset.", danger: true }).then(function (go) {
+    ask({ title: "Reset " + login + "'s passkeys?", text: "Every passkey of " + esc(login) + "'s goes, with their token and their agents' grants, and " + esc(login) + " is signed out. They add a new passkey and make a new token after signing in again. The reason: <i>" + esc(why) + "</i>.", held: "Your passkey confirms it.", confirm: "Reset with your passkey", first: "Register a passkey and reset", nothing: "Nothing was reset.", danger: true }).then(function (go) {
       if (go === null) return;
       passkeyed("passkey:reset:" + login, function (assertion) { return api("POST", "/auth/passkeys/reset", { login: login, reason: why, assertion: assertion }); }).then(function (r) {
         if (r.error) { resetSay("Not reset: " + refusalHtml({ error: pkSentence(r.error), register: r.register }), true); return; }

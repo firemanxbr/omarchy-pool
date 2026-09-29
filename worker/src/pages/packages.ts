@@ -1085,7 +1085,7 @@ const PACKAGE_SCRIPT = String.raw`
     $("#you-icon").innerHTML = lucide(icon, 15);
     $("#you-who").textContent = who;
     $("#you").innerHTML = '<p>' + text + '</p>' + (btns.length ? '<div class="pkg-btns">' + btns.join("") + '</div>' : '') + (lock ? '<span class="pkg-lock">' + lucide("lock", 13) + esc(lock) + '</span>' : '') +
-      (ASK ? '<form class="pkg-ask" id="you-ask"><input id="you-why" placeholder="Why? This goes on the record." aria-label="the reason, on the record" aria-describedby="you-err" autocomplete="off" value="' + esc(DRAFT) + '"><p class="err" id="you-err" role="alert" hidden></p>' + (ASK === "block" && (needsPasskey() || PK_SAID) ? '<p class="pk' + (PK_SAID ? " ok" : "") + '" role="status" aria-live="polite">' + esc(PK_SAID || "You hold no passkey yet. Your device makes one now, then confirms the block with it.") + '</p>' : '') + '<div class="pkg-btns"><button type="submit" class="op-btn ' + (ASK === "block" ? "danger" : "primary") + '">' + (ASK === "block" ? lucide("key-round", 14) + esc(needsPasskey() ? "Register a passkey and block" : "Block " + name + " with your passkey") : esc("Lift the block")) + '</button><button type="button" class="op-btn" data-act="cancel">Cancel</button></div></form>' : '');
+      (ASK ? '<form class="pkg-ask" id="you-ask"><input id="you-why" placeholder="Why? This goes on the record." aria-label="the reason, on the record" aria-describedby="you-err" autocomplete="off" value="' + esc(DRAFT) + '"><p class="err" id="you-err" role="alert" hidden></p>' + (ASK === "block" && (needsPasskey() || PK_SAID) ? '<p class="pk' + (PK_SAID && PK_OK ? " ok" : "") + '" role="status" aria-live="polite">' + (PK_SAID || esc("You hold no passkey yet. Your device makes one now, then confirms the block with it.")) + '</p>' : '') + '<div class="pkg-btns"><button type="submit" class="op-btn ' + (ASK === "block" ? "danger" : "primary") + '">' + (ASK === "block" ? lucide("key-round", 14) + esc(needsPasskey() ? "Register a passkey and block" : "Block " + name + " with your passkey") : esc("Lift the block")) + '</button><button type="button" class="op-btn" data-act="cancel">Cancel</button></div></form>' : '');
     var f = $("#you-ask");
     if (f) {
       f.onsubmit = function (ev) { ev.preventDefault(); act(ASK, $("#you-why").value.trim()); };
@@ -1097,14 +1097,19 @@ const PACKAGE_SCRIPT = String.raw`
   }
   // The form closed (cancelled, or its act done): the focus goes back to the button that opened it, or to the card's heading when that button is gone or grey.
   function closeAsk() { var what = ASK; ASK = null; DRAFT = ""; PK_SAID = ""; renderYou(); refocus(what); }
-  // A maintainer with no passkey yet (#287): Block's first press registers one here, the form staying open with its reason — its next press blocks with it. PK_SAID is what the form says since.
-  var PK_SAID = "";
+  // A maintainer with no passkey yet (#287): Block's first press registers one here, the form staying open with its reason — its next press blocks with it. PK_SAID is what the form says since, as HTML (PK_OK: a passkey made here); while the device asks, the form says so and Block keeps the focus (aria-disabled, not disabled).
+  var PK_SAID = "", PK_OK = false;
   function registerFirst() {
+    var go = document.querySelector('#you-ask button[type="submit"]'), said = document.querySelector("#you-ask .pk");
+    if (go) { if (go.getAttribute("aria-disabled") === "true") return; go.setAttribute("aria-disabled", "true"); }
+    if (said) { said.className = "pk"; said.textContent = "Answer your device: your fingerprint, face or PIN."; }
     firstPasskey("Nothing was decided.").then(function (r) {
-      PK_SAID = r.error ? "" : (r.passkey ? "Your passkey is registered." : "You hold a passkey already.") + " Press Block " + name + " with your passkey: your device confirms it.";
+      // Cancelled while the device asked: the form is gone, and there is nothing more to say.
+      if (ASK !== "block") return;
+      PK_SAID = r.error ? "" : firstSaid(r, "Press Block " + name + " with your passkey: your device confirms it."); PK_OK = !!r.passkey;
       renderYou();
       if (r.error) { var e = $("#you-err"); e.hidden = false; e.textContent = r.error; }
-      var go = document.querySelector('#you-ask button[type="submit"]'); if (go) go.focus();
+      var again = document.querySelector('#you-ask button[type="submit"]'); if (again) again.focus();
     });
   }
   function refocus(what) { var b = what ? document.querySelector('#you [data-act="' + what + '"]:not([disabled])') : null; (b || $("#h-you")).focus(); }
@@ -1118,8 +1123,8 @@ const PACKAGE_SCRIPT = String.raw`
   });
   function act(what, why) {
     if (what !== "adopt" && why.length < 4) { var e = $("#you-err"); e.hidden = false; e.textContent = "Say why, in a few words — the record keeps it."; $("#you-why").focus(); return; }
-    document.querySelectorAll("#you button").forEach(function (b) { b.disabled = true; });
     if (what === "block" && needsPasskey()) { registerFirst(); return; }
+    document.querySelectorAll("#you button").forEach(function (b) { b.disabled = true; });
     var path = "/api/v1/factory/packages/" + encodeURIComponent(name) + "/" + what;
     // A block is confirmed with the maintainer's passkey (#271): the answer rides with the reason. Adopt and a lift post as they are.
     (what === "block" ? passkeyed("block:package:" + name, function (assertion) { return api("POST", path, { reason: why, assertion: assertion }); }) : api("POST", path, what === "adopt" ? {} : { reason: why })).then(function (d) {

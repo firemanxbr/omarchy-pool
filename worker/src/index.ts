@@ -270,8 +270,8 @@ export default {
       if (path === "/auth/passkeys/reset" && method === "POST") return handlePasskeyReset(url, request, env);
       if (path === "/auth/me" && method === "GET") {
         const c = await contributorOf(request, env);
-        // A maintainer's answer says whether they hold a passkey (#287): the acts that need one offer to register it in their own dialog, and a notice says so before it matters. One entry of the passkeys' index, asked for a maintainer only.
-        const passkey = c && isMaintainer(c) ? { passkey: await holdsPasskey(env, c.login) } : {};
+        // A maintainer's answer says whether they hold a passkey (#287): the acts that need one offer to register it in their own dialog, and a notice says so before it matters. One entry of the passkeys' index, asked for a maintainer only — and not when the page says its browser knows this login holds one (?held=<login>): a maintainer's page view costs what it did before, once they hold one.
+        const passkey = c && isMaintainer(c) && url.searchParams.get("held") !== c.login ? { passkey: await holdsPasskey(env, c.login) } : {};
         return c ? json({ login: c.login, name: c.name, avatar_url: c.avatar_url, role: c.role, ...passkey }, 200, { "cache-control": "no-store" }) : json({ error: "not signed in" }, 401, { "cache-control": "no-store" });
       }
       // The reader's own page: /me is the address the Factory's gate and the

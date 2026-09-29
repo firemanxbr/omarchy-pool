@@ -143,8 +143,10 @@ passed without the maintainer's passkey.
 ## A maintainer's first passkey
 
 Maintainers come from one place: the logins `factory/MAINTAINERS.toml`
-lists on `main`, changed only by a pull request another maintainer
-approves, and applied by the brain every ten minutes (a `role` line in the
+lists on `main`, changed only by a reviewed pull request (the repository
+admin's bypass stays visible on the pull request and is against the
+project's rules: see the Governance chapter's *Bootstrap, and the one door
+left*), and applied by the brain every ten minutes (a `role` line in the
 journal). Nothing on the site names one. A maintainer the file just named
 holds no passkey, and approve, block, a forced promotion and a reset of
 another maintainer's passkeys need one. The passkey stays required (#287,
@@ -153,22 +155,37 @@ instead of stopping them.
 
 - **Told before it matters.** `/auth/me` tells a maintainer's pages whether
   they hold one (`passkey`: one entry of the passkeys' index, and no other
-  role's answer carries it). A notice says what needs a passkey and that
-  nothing else does, with *Register a passkey now*: always on Review and on
-  their own page while they hold none, and once on the first page they see
-  as a maintainer. The browser keeps that it was shown (`localStorage`):
-  a page view writes nothing to the pool.
+  role's answer carries it). Once the browser knows the login holds one, it
+  says so (`?held=<login>`, kept in `localStorage` until a sign-out or a
+  refusal that says none) and the pool reads nothing for it: a maintainer
+  who holds a passkey costs the pool what a page view cost before #287. The
+  flag only draws the page; every act still checks the passkey itself. A
+  notice says what needs a passkey and that nothing else does, with
+  *Register a passkey now*: always on Review and on their own page while
+  they hold none, and once on the first page they see as a maintainer. The
+  browser keeps that it was shown (`localStorage`): a page view writes
+  nothing to the pool.
 - **Registered at the moment of need.** The Approve, Block and Force dialogs
-  (and a reset's) offer *Register a passkey and approve* (… and block, …
-  and force). The first press registers the passkey through the same two
-  routes as the person's page (`POST /auth/passkeys/challenge`,
-  `POST /auth/passkeys`): the session alone, and the first passkey only —
-  the insert still refuses a second without an answer from one the login
-  holds. The dialog stays open. Its next press asks for the assertion for
-  exactly that act and login (`POST /auth/passkeys/assert`), and the act is
+  (and a reset's), and the page of an agent's approve or block draft, offer
+  *Register a passkey and approve* (… and block, … and force). The first
+  press registers the passkey through the same two routes as the person's
+  page (`POST /auth/passkeys/challenge`, `POST /auth/passkeys`): the session
+  alone, and the first passkey only — the insert still refuses a second
+  without an answer from one the login holds. The dialog stays open. Its
+  next press asks for the assertion for exactly that act and login (`POST
+  /auth/passkeys/assert`, or the draft's own challenge), and the act is
   posted with it: the challenge is bound to the act, as for any passkey. A
   cancelled registration registers nothing and decides nothing, and the
   dialog says so.
+- **One registered elsewhere meanwhile.** The pool's options list the
+  passkeys the login holds (`excludeCredentials`). When they list one, it
+  was registered since the page loaded: in another tab, on another device,
+  or by whoever else holds the session. The dialog then asks the device for
+  nothing (a browser holding that passkey would refuse to make another) and
+  goes on with the one held. It says where that passkey is listed (the
+  person's page) and that one they did not register is another maintainer's
+  to reset: the one moment a planted key could be noticed is not spent
+  calling it theirs.
 - **No new door.** The flow adds no route and takes nothing the routes did
   not take before. A stolen session could register a first passkey on the
   person's page before #287, and it still can: the registration is a

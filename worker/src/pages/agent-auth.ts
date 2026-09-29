@@ -18,7 +18,9 @@
  * browser API, so the page asks the pool for a challenge, hands it to
  * navigator.credentials.get() and posts the answer with the form — the
  * server verifies it, the script decides nothing. A login without a passkey
- * is told so, with the way to register one, and offered no Confirm.
+ * is offered Register a passkey and approve (… and block, #287): the first
+ * press registers one on this device (the shell's firstPasskey, the session
+ * alone) and the page stays; the next confirms the draft with it.
  * Everything a person or an agent wrote — the agent's name, the note, a
  * package's name — is escaped. Neither page is for an index (noindex;
  * /auth/ is closed to crawlers), and neither is kept by any cache: they are
@@ -179,9 +181,9 @@ export interface ConfirmEvidence {
 }
 
 /**
- * What the confirmation says to a maintainer without a passkey (#257) — the
- * page, the POST and the challenge in the same words; the POST and the
- * challenge, which were tried, add "Nothing was decided."
+ * What the confirmation's refusals say to a maintainer without a passkey
+ * (#257) — the POST and the challenge, which add "Nothing was decided." The
+ * page itself offers to register one in place (#287).
  */
 export const NO_PASSKEY = "Approve and block are confirmed with a passkey, which an agent's software cannot supply: your device asks for your fingerprint, face or PIN. You have none yet. Register one on your page, then open this draft again.";
 /** …and on an address where no passkey works (the POST adds "Nothing was decided." as well). */
@@ -190,9 +192,10 @@ export const PASSKEY_ELSEWHERE = `Approve and block are confirmed with a passkey
 /**
  * What a waiting draft of approve or block asks for (#257): the person's
  * passkey. `ready` — they hold one: Confirm starts the browser's request;
- * `none` — they hold none: the page says so and links to their page's
- * Passkeys section, with no Confirm; `unavailable` — an address where no
- * passkey works. null for request changes and reject, which ask for none.
+ * `none` — they hold none: Confirm's first press registers one on this
+ * device, and its next confirms with it (#287); `unavailable` — an address
+ * where no passkey works. null for request changes and reject, which ask
+ * for none.
  */
 export interface ConfirmPasskey {
   state: "ready" | "none" | "unavailable";
@@ -223,12 +226,16 @@ export interface ConfirmView {
  * said in #pk-said — always in the page, only its words change, so a screen
  * reader hears each one — plainly, and marked as a failure when it is one;
  * a login whose last passkey went meanwhile is given the link to register
- * one. The server verifies everything; the script only carries.
+ * one. A login with none yet (#287, data-next on Confirm): the first press
+ * registers one on this device with the session alone (the shell's
+ * firstPasskey) and the page stays, saying so; Confirm and the note above
+ * it then read their data-next, and its next press confirms the draft with
+ * that passkey. The server verifies everything; the script only carries.
  */
 export const CONFIRM_SCRIPT = String.raw`
   (function () {
     var btn = document.getElementById("pk-confirm"); if (!btn) return;
-    var form = btn.form, said = document.getElementById("pk-said"), busy = false;
+    var form = btn.form, said = document.getElementById("pk-said"), busy = false, first = btn.hasAttribute("data-next");
     function sentence(text) { return String(text || "").trim().replace(/[.\s]+$/, "") + "."; }
     function say(text, failed, link) {
       said.className = "said" + (failed ? " err" : "");
@@ -256,7 +263,19 @@ export const CONFIRM_SCRIPT = String.raw`
       ev.preventDefault();
       if (busy) return;
       if (!window.PublicKeyCredential || !navigator.credentials || !window.isSecureContext) { say("This browser cannot use a passkey on this page. Open the draft in a browser that can. Nothing was decided.", true); return; }
-      busy = true; btn.setAttribute("aria-disabled", "true"); say("Waiting for your passkey: answer your device.");
+      busy = true; btn.setAttribute("aria-disabled", "true");
+      if (first) {
+        say("Answer your device: your fingerprint, face or PIN.");
+        firstPasskey("Nothing was decided.").then(function (r) {
+          idle();
+          if (r.error) { say(r.error, true); return; }
+          first = false; btn.lastChild.textContent = btn.getAttribute("data-next"); btn.removeAttribute("data-next");
+          var note = document.getElementById("pk-note"); if (note) note.textContent = note.getAttribute("data-next");
+          said.className = "said"; said.innerHTML = firstSaid(r, "Press Confirm with your passkey: your device confirms the draft with it.");
+        });
+        return;
+      }
+      say("Waiting for your passkey: answer your device.");
       fetch(form.getAttribute("action") + "/challenge", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/x-www-form-urlencoded" }, body: "nonce=" + encodeURIComponent(form.elements.nonce.value) })
         .then(function (r) { return r.json().catch(function () { return {}; }).then(function (d) { if (!r.ok) { var x = new Error(d.error || "the pool answered HTTP " + r.status); x.pool = true; x.code = d.code; x.register = d.register; throw x; } return d.publicKey; }); })
         .then(function (o) {
@@ -308,20 +327,22 @@ export function confirmHtml(v: ConfirmView, path: string, poolUrl: string, versi
   const outcome = !waiting
     ? `<section class="${d.state === "confirmed" ? "done" : "refused"}" role="status"><b>${esc(d.state === "confirmed" ? "Confirmed" : d.state === "expired" ? "Expired" : d.state === "discarded" ? "Discarded" : "Refused")}.</b> ${esc(d.state === "expired" ? "Nobody confirmed it within thirty minutes; nothing was decided. Ask the agent for a new draft." : d.state === "discarded" ? String((d.outcome as { error?: string } | null)?.error ?? "Nothing was decided.") : String((d.outcome as { error?: string; summary?: string } | null)?.error ?? (d.outcome as { summary?: string } | null)?.summary ?? ""))}</section>`
     : "";
-  // Approve and block ask for the person's passkey (#257): a Confirm that starts the browser's request when they hold one, the way to register one when they hold none — never a Confirm without it.
+  // Approve and block ask for the person's passkey (#257): a Confirm that starts the browser's request when they hold one — and, when they hold none, one whose first press registers it here before it confirms with it (#287) — never a Confirm without it.
   const pk = waiting && !v.refusal ? (v.passkey ?? null) : null;
-  const offered = !v.refusal && (!pk || pk.state === "ready");
+  const passkeyed = !!pk && (pk.state === "ready" || pk.state === "none");
+  const ready = "Confirm asks for your passkey. Your device asks for your fingerprint, face or PIN, which no agent's software can supply. The pool checks the answer against the key you registered.";
+  const offered = !v.refusal && (!pk || passkeyed);
   const pkNote = !pk
     ? ""
     : pk.state === "ready"
-      ? `<div class="aa-pk">${lucide("key-round", 16)}<p>Confirm asks for your passkey. Your device asks for your fingerprint, face or PIN, which no agent's software can supply. The pool checks the answer against the key you registered.</p></div>`
+      ? `<div class="aa-pk">${lucide("key-round", 16)}<p>${ready}</p></div>`
       : pk.state === "none"
-        ? `<section class="refused" role="alert"><b>Register a passkey first.</b> ${esc(NO_PASSKEY)}</section>`
+        ? `<div class="aa-pk">${lucide("key-round", 16)}<p id="pk-note" data-next="${esc(ready)}">You hold no passkey yet. The first press makes one on this device, and the next confirms the draft with it. Your device asks for your fingerprint, face or PIN, which no agent's software can supply.</p></div>`
         : `<section class="refused" role="alert"><b>Not on this address.</b> ${esc(PASSKEY_ELSEWHERE)}</section>`;
   const confirmBtn = !offered
-    ? pk && pk.state === "none" ? `<a class="op-btn primary" href="${esc(pk.register)}">${lucide("key-round", 14)}Register a passkey</a>` : ""
+    ? ""
     : pk
-      ? `<button class="op-btn ${w.danger ? "danger" : "primary"}" type="submit" name="action" value="confirm" id="pk-confirm">${lucide("key-round", 14)}Confirm with your passkey: ${esc(w.act)} ${esc(d.name)}</button>`
+      ? `<button class="op-btn ${w.danger ? "danger" : "primary"}" type="submit" name="action" value="confirm" id="pk-confirm"${pk.state === "none" ? ` data-next="${esc(`Confirm with your passkey: ${w.act} ${d.name}`)}"` : ""}>${lucide("key-round", 14)}${pk.state === "none" ? `Register a passkey and ${esc(w.act)} ${esc(d.name)}` : `Confirm with your passkey: ${esc(w.act)} ${esc(d.name)}`}</button>`
       : `<button class="op-btn ${w.danger ? "danger" : "primary"}" type="submit" name="action" value="confirm">Confirm: ${esc(w.act)} ${esc(d.name)}</button>`;
   const form = waiting
     ? `<form method="post" action="/auth/confirm/${esc(d.id)}">
@@ -330,7 +351,7 @@ export function confirmHtml(v: ConfirmView, path: string, poolUrl: string, versi
     ${pkNote}
     ${w.typed && offered ? `<label><span>Type <b>${esc(d.name)}</b> to ${esc(w.label.toLowerCase())} it</span><input type="text" name="name" autocomplete="off" spellcheck="false" required pattern="${esc(d.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))}"></label>` : ""}
     <div class="aa-acts">${confirmBtn}<button class="op-btn" type="submit" name="action" value="discard" formnovalidate>Discard the draft</button></div>
-    <div class="aa-notes">${pk && pk.state === "ready" ? `<p class="said" id="pk-said" role="status" aria-live="polite"></p><noscript><p class="said">A passkey is asked for by this page's script: turn it on to confirm.</p></noscript>` : ""}
+    <div class="aa-notes">${passkeyed ? `<p class="said" id="pk-said" role="status" aria-live="polite"></p><noscript><p class="said">A passkey is asked for by this page's script: turn it on to confirm.</p></noscript>` : ""}
     <p class="said">Drafts expire at ${esc(whenUtc(d.expires_at))}. Nothing is decided until you confirm, and a draft decides once.</p></div>
   </form>`
     : "";
@@ -355,6 +376,6 @@ export function confirmHtml(v: ConfirmView, path: string, poolUrl: string, versi
   </section>
   ${v.evidence ? `<section class="op-card"><div class="op-card-h"><b>The evidence</b><small>drafted on build #${v.evidence.task.id}, ${esc(v.evidence.task.arch)}${v.evidence.task.version ? `, ${esc(v.evidence.task.version)}` : ""}${v.evidence.chains.length > 1 ? ` · ${v.evidence.chains.map((c) => esc(c.arch)).join(" · ")}` : ""}</small></div><div class="aa-ev">${evidenceRows(v.evidence, d.name)}</div></section>` : ""}
   ${outcome}${form}`,
-    script: waiting && v.passkey?.state === "ready" && !v.refusal ? CONFIRM_SCRIPT : undefined,
+    script: waiting && (v.passkey?.state === "ready" || v.passkey?.state === "none") && !v.refusal ? CONFIRM_SCRIPT : undefined,
   });
 }
