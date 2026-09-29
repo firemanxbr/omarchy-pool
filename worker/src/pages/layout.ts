@@ -138,8 +138,10 @@ const CSS = String.raw`
   .num { font-variant-numeric: tabular-nums; }
 
   /* The header (#240): the mark on the left; the running version and the three doors in the middle; on the right Go… — the way to
-     any package or page, the ⌘K menu's (#241) — and the account. From 1120px it is one row, the two sides of equal width so the doors
-     sit in the middle; below that the doors drop to a row of their own (the media queries further down). It wraps, it never scrolls. */
+     any package or page, the ⌘K menu's (#241) — and the account. From 1120px it is one row whose two sides grow alike, so the doors sit
+     in the middle while each side fits its half; a side that does not (a long login near 1120px) keeps its width and moves the doors
+     aside rather than cut the name. Below 1120px the doors drop to a row of their own (the media queries further down). It wraps, it
+     never scrolls. */
   header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; padding: 14px var(--gutter); border-bottom: 1px solid var(--line); background: var(--bg-deep); }
   header .hl, header .hr { flex: 1 1 0; min-width: max-content; display: flex; align-items: center; }
   header .hmid { order: 2; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 34px; }
@@ -149,9 +151,11 @@ const CSS = String.raw`
   header nav { display: flex; flex-wrap: wrap; gap: 6px 22px; font-size: 14px; white-space: nowrap; }
   header nav a { color: var(--muted); text-decoration: none; padding-bottom: 2px; border-bottom: 1px solid transparent; }
   header nav a:hover { color: var(--text); }
-  header nav a.active { color: var(--text); border-bottom-color: var(--green); }
-  header nav a small { color: var(--dim); font-size: 11px; margin-left: 5px; letter-spacing: .06em; text-transform: uppercase; }
-  /* Go… is served as a link to the packages and becomes a button when the frame's script runs (page(), below). The key beside it is a hint for a keyboard: a touch screen has no key to press, so it is not drawn there. */
+  header nav a.active, header nav a[aria-current="page"] { color: var(--text); border-bottom-color: var(--green); }
+  /* A door's role follows its name after a real space (page() writes "Pool<small> use</small>"), so a screen reader names the link
+     "Pool use", not "Pooluse"; the space is the gap, so the role takes no margin of its own. */
+  header nav a small { color: var(--dim); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }
+  /* Go… is served as a link to the packages and becomes a button, with the key beside it, once the ⌘K menu is on the page (page(), below). The key is a hint for a keyboard: a touch screen has no key to press, so it is not drawn there. */
   header .go { display: inline-flex; align-items: center; gap: 12px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 0; -webkit-appearance: none; appearance: none; background: transparent; color: var(--dim); font: 13px/1.6 var(--font-mono); text-decoration: none; white-space: nowrap; cursor: pointer; }
   header .go:hover { color: var(--text); border-color: var(--green); }
   header .go kbd { padding: 0 5px; border: 1px solid var(--line); font: 11px/1.5 var(--font-mono); }
@@ -166,6 +170,8 @@ const CSS = String.raw`
   header .account a { color: var(--text); text-decoration: none; }
   header .account #signout { color: var(--muted); margin-left: 10px; padding-left: 10px; border-left: 1px solid var(--line); }
   header .account #signout:hover { color: var(--text); }
+  /* Keyboard focus in the frame is the design system's: a 1px green line, square, in both themes — not the browser's rounded blue ring. */
+  header a:focus-visible, header button:focus-visible, footer a:focus-visible { outline: 1px solid var(--green); outline-offset: 2px; }
   .status { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--dim); text-decoration: none; }
   /* A live light is a square that breathes (op-pulse: its opacity, 1.6 s), not a glow: no shadows, and it stops under prefers-reduced-motion. The frame declares it — every page's lights, skeletons and live marks breathe with it — and the kit's live dot uses the same. */
   @keyframes op-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
@@ -296,9 +302,13 @@ const CSS = String.raw`
   .kind { display: inline-block; min-width: 68px; color: var(--blue); }
   .when { color: var(--dim); white-space: nowrap; }
   .muted { color: var(--muted); }
-  /* The footer (#240): the badge and what the pool is not on the left, the five pages every page links in the middle, the code and its licence on the right. */
-  footer { border-top: 1px solid var(--line); background: var(--bg-deep); padding: 18px var(--gutter) 20px; font-size: 13px; color: var(--dim); display: grid; grid-template-columns: 1fr auto 1fr; align-items: start; gap: 16px 24px; }
-  footer .more { justify-self: center; } footer .fright { justify-self: end; }
+  /* The footer (#240): the badge and what the pool is not on the left, the five pages every page links in the middle, the code and its
+     licence on the right. A wrapping row, as the header is: the two sides grow alike and never narrower than what they say, so the note
+     stays one line and a whole block moves to the next row when the three do not fit — equal grid columns cut the note in two from 721
+     to about 1030px, the width the right side never needed. */
+  footer { border-top: 1px solid var(--line); background: var(--bg-deep); padding: 18px var(--gutter) 20px; font-size: 13px; color: var(--dim); display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 16px 24px; }
+  footer .fleft, footer .fright { flex: 1 1 0; min-width: max-content; }
+  footer .more { flex: 0 1 auto; display: flex; flex-wrap: wrap; justify-content: center; gap: 10px 18px; }
   footer a { color: var(--muted); text-decoration: none; } footer a:hover { color: var(--text); }
 
   .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(360px, 100%), 1fr)); gap: 16px; margin: 16px 0; }
@@ -326,7 +336,6 @@ const CSS = String.raw`
   }
   @media (max-width: 720px) {
     header { padding: 12px 16px; gap: 10px 12px; } header .hmid { column-gap: 20px; } header nav { column-gap: 16px; }
-    footer { grid-template-columns: 1fr; justify-items: start; }
     main { padding: 20px 16px 28px; }
     h1 { font-size: 22px; line-height: 1.25; } h2 { font-size: 19px; }
     .lede { font-size: 14px; }
@@ -335,22 +344,21 @@ const CSS = String.raw`
     .meta { margin-bottom: 24px; }
     ul.plain.cols { columns: 1; }
     .step pre { padding-right: 12px; padding-top: 34px; } .copy { top: 6px; }
-    footer { padding: 16px 16px 18px; gap: 12px 14px; } footer .more, footer .fright { justify-self: start; }
+    /* A phone: one block per row — the badge and the note, the five pages, then GitHub and the licence on the right, as the handoff has them — and the note may wrap below 340px rather than push the page sideways. */
+    footer { padding: 16px 16px 18px; gap: 12px 14px; } footer .fleft, footer .fright { flex-basis: 100%; min-width: 0; } footer .more { justify-content: flex-start; }
     section { margin-bottom: 32px; }
   }
   /* ---- the three doors: heroes, diagrams, cards, live pieces (v2 of the dashboard) ---- */
   @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
   h1, h2, h3 { text-wrap: balance; }
   /* A phone: a door's role goes under its name, so the version and the three doors share one row down to 360px instead of Review wrapping alone. */
-  @media (max-width: 480px) { header nav a { display: inline-grid; line-height: 1.3; } header nav a small { margin-left: 0; } }
+  @media (max-width: 480px) { header nav a { display: inline-grid; line-height: 1.3; } }
   footer .fleft, footer .fright { display: grid; align-content: start; } footer .fleft { gap: 6px; justify-items: start; } footer .fright { gap: 4px; justify-items: end; }
   footer .fnote { color: var(--dim); line-height: 1.4; }
   footer .fbadge { display: inline-flex; align-items: center; } footer .fbadge svg { display: block; height: 20px; width: auto; } footer .fbadge:hover svg { filter: brightness(1.1); }
   /* Agents is the footer's one accent: the way to use the pool the header does not name — one's own agent, in each of the three roles (#249). The page the reader is on or under is marked as a door is, a green line under it. */
-  footer .more { display: inline-flex; gap: 10px 18px; flex-wrap: wrap; } footer .more a:hover, footer .more a.accent { color: var(--green); }
-  footer .more a.active { color: var(--text); border-bottom: 1px solid var(--green); }
-  /* Stacked on a phone (the 720px rules above), the right column reads from the left like the other two. */
-  @media (max-width: 720px) { footer .fright { justify-items: start; } }
+  footer .more a:hover, footer .more a.accent { color: var(--green); }
+  footer .more a.active, footer .more a[aria-current="page"] { color: var(--text); border-bottom: 1px solid var(--green); }
   .hero { display: grid; gap: 14px; margin: 0 0 32px; max-width: 900px; }
   .hero h1 { font-size: 34px; line-height: 1.15; max-width: 22ch; }
   .hero.compact { margin-bottom: 22px; } .hero.compact h1 { font-size: 28px; }
@@ -1452,8 +1460,11 @@ export const NAV: { key: PageOptions["active"]; href: string; label: string; sub
 /**
  * The footer's five (#240): what the pool serves, how it is doing, the way
  * to use it through one's own agent, what explains it, who runs it. Agents
- * is drawn in green (`accent`); its page is #249's, and until it lands the
- * address is the chapter on connecting an agent today (index.ts).
+ * is drawn in green (`accent`). An entry whose page has not landed yet names
+ * what stands in for it (`until`): the router answers its address with a
+ * 302 there (index.ts) and the docs hint does not call it a page. Agents is
+ * #249's page, and until then its address is the chapter on connecting an
+ * agent today; #249 drops the `until`.
  *
  * The rest of what the footer linked before is one hop from the frame, not
  * in it: the request is the Factory's first step (and People's "Bring a
@@ -1467,10 +1478,10 @@ export const NAV: { key: PageOptions["active"]; href: string; label: string; sub
  * package's page marks Packages, a chapter or the API reference Docs, and a
  * diff Status (the journal it came from is Status's).
  */
-export const MORE: { href: string; label: string; accent?: true }[] = [
+export const MORE: { href: string; label: string; accent?: true; until?: string }[] = [
   { href: "/packages", label: "Packages" },
   { href: "/status", label: "Status" },
-  { href: "/agents", label: "Agents", accent: true },
+  { href: "/agents", label: "Agents", accent: true, until: "/docs/omarchy-cli-mcp" },
   { href: "/docs", label: "Docs" },
   { href: "/people", label: "People" },
 ];
@@ -1478,12 +1489,13 @@ export const MORE: { href: string; label: string; accent?: true }[] = [
 /**
  * The line under the docs map that says where the rest is, written from
  * MORE so it cannot name a page the footer does not link (it once
- * said Review was in the footer): "Packages, Status, Agents and People are
- * pages of their own — linked from the footer; the three doors are the header."
+ * said Review was in the footer), nor call an address that still stands in
+ * for its page (`until`) a page of its own: "Packages, Status and People
+ * have their own pages, linked from the footer. The three doors are the header."
  */
 export function docsHint(): string {
-  const rest = MORE.filter((m) => m.href !== "/docs").map((m) => m.label);
-  return `${rest.slice(0, -1).join(", ")} and ${rest[rest.length - 1]} are pages of their own — linked from the footer; the three doors are the header.`;
+  const rest = MORE.filter((m) => m.href !== "/docs" && !m.until).map((m) => m.label);
+  return `${rest.slice(0, -1).join(", ")} and ${rest[rest.length - 1]} have their own pages, linked from the footer. The three doors are the header.`;
 }
 
 /** The three kinds of worker, as their tables name them: the project's, the review ones, the contributors'. */
@@ -1603,7 +1615,7 @@ export function page(o: PageOptions): string {
   const chip = v.release_url
     ? `<a class="ver" href="${escapeHtml(v.release_url)}" title="running release">${tag}</a>`
     : `<span class="ver" title="local build">${tag}</span>`;
-  const nav = NAV.map((n) => `<a href="${n.href}"${n.key === o.active ? ' class="active"' : ""}>${n.label}${n.sub ? `<small>${n.sub}</small>` : ""}</a>`).join("\n      ");
+  const nav = NAV.map((n) => `<a href="${n.href}"${n.key === o.active ? ' class="active" aria-current="page"' : ""}>${n.label}${n.sub ? `<small> ${n.sub}</small>` : ""}</a>`).join("\n      ");
   const more = MORE.map((m) => `<a href="${m.href}"${m.accent ? ' class="accent"' : ""}>${m.label}</a>`).join("");
   const body = o.doc ? docsShell(o.doc, o.body) : o.body;
   const pool = o.poolUrl.replace(/\/$/, "");
@@ -1639,7 +1651,7 @@ export function page(o: PageOptions): string {
     </nav>
   </div>
   <div class="hr">
-    <a class="go" id="go" href="/packages" title="find a package">Go…<kbd>⌘K</kbd></a>
+    <a class="go" id="go" href="/packages" title="find a package">Go…</a>
     <span class="account"><a id="account" href="/auth/github?next=${escapeHtml(nextOf(o.path))}" title="contributors and maintainers sign in with GitHub" rel="nofollow">Sign in</a><a id="signout" href="/auth/logout" hidden title="sign out of the dashboard on this browser">sign out</a></span>
   </div>
 </header>
@@ -1656,18 +1668,21 @@ ${body}
 
 <script>
 (function () {
-  // The frame's own, one statement before the shell. The footer marks the entry the reader is on or under: /package/<name> is Packages, /docs/<chapter> and the API reference are Docs, /diff is Status's (where the journal went); a build marks nothing here, its door is Review.
-  // Go… is served as a link to the packages, so it goes somewhere with the script off; with it on it is a button, the one the ⌘K menu opens from once the menu is on the page (window.opPalette, #241) — until then it goes where the link went. The key it names is the platform's.
+  // The frame's own, one statement before the shell. The footer marks the entry the reader is on or under, for the eye and for a screen reader (aria-current): /package/<name> is Packages, /docs/<chapter> and the API reference are Docs, /diff is Status's (where the journal went); a build marks nothing here, its door is Review.
+  // Go… is served as a link to the packages, and stays one until the ⌘K menu is on the page (window.opPalette, #241): then it is the button the menu opens from, naming the platform's key. It is decided once the page's whole script has run (a microtask, through the Promise every page already uses), so a menu declared anywhere in it counts — and a page without one never shows a key that nothing answers.
   (function () {
     var here = location.pathname;
-    document.querySelectorAll("footer .more a").forEach(function (a) { var href = a.getAttribute("href"); if (here === href || here.indexOf(href + "/") === 0 || (href === "/packages" && here.indexOf("/package/") === 0) || (href === "/docs" && here === "/api") || (href === "/status" && here === "/diff")) a.classList.add("active"); });
-    var go = document.querySelector("header a.go");
-    if (!go || go.tagName !== "A" || !go.parentNode) return;
-    var b = document.createElement("button");
-    b.type = "button"; b.className = go.className; b.id = go.id; b.title = go.title; b.innerHTML = go.innerHTML;
-    if (!/Mac|iPhone|iPad/.test(navigator.platform || "")) b.querySelector("kbd").textContent = "Ctrl K";
-    b.addEventListener("click", function () { if (window.opPalette) window.opPalette.open(); else location.href = go.href; });
-    go.parentNode.replaceChild(b, go);
+    document.querySelectorAll("footer .more a").forEach(function (a) { var href = a.getAttribute("href"); if (here === href || here.indexOf(href + "/") === 0 || (href === "/packages" && here.indexOf("/package/") === 0) || (href === "/docs" && here === "/api") || (href === "/status" && here === "/diff")) { a.classList.add("active"); a.setAttribute("aria-current", "page"); } });
+    Promise.resolve().then(function () {
+      var go = document.querySelector("header a.go");
+      if (!window.opPalette || !go || !go.parentNode) return;
+      var mac = /Mac|iPhone|iPad/.test(navigator.platform || ""), b = document.createElement("button"), key = document.createElement("kbd");
+      b.type = "button"; b.className = go.className; b.id = go.id; b.title = "go to a package or a page"; b.textContent = go.textContent;
+      key.textContent = mac ? "⌘K" : "Ctrl K"; key.setAttribute("aria-hidden", "true"); b.appendChild(key);
+      b.setAttribute("aria-keyshortcuts", mac ? "Meta+K" : "Control+K");
+      b.addEventListener("click", function () { window.opPalette.open(); });
+      go.parentNode.replaceChild(b, go);
+    });
   })();
 ${HELPERS.split("__POOL_URL__").join(pool).split("__RINGS_TEXT__").join(JSON.stringify(RING_TEXT)).split("__WICON__").join(JSON.stringify(WORKER_ICONS)).split("__LATE_AFTER_HOURS__").join(String(LATE_AFTER_HOURS)).split("__PROMISED_RINGS__").join(JSON.stringify(RINGS_BY_STABILITY.filter((r) => (PROMOTED_RINGS as readonly string[]).includes(r)))).split("__ARCHES__").join(JSON.stringify(REPO_ARCHES)).split("__SEVERITIES__").join(JSON.stringify(SEVERITIES)).split("__WORKER_ALIVE_MINUTES__").join(String(WORKER_ALIVE_MINUTES))}${o.kit ? KIT_HELPERS : ""}
 ${o.script ?? ""}

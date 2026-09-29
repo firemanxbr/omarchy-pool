@@ -104,6 +104,7 @@ import { apiDocsHtml } from "./pages/api-docs";
 import { diffHtml } from "./pages/diff";
 import { packageHtml, packagesHtml } from "./pages/packages";
 import { factoryHtml as factoryPageHtml } from "./pages/contribute";
+import { MORE } from "./pages/layout";
 import { DASHBOARD_HOST, LEGACY_DASHBOARD_HOSTS, isProductionHost, machineOrigin, version } from "./meta";
 import { handleStatic } from "./routes/static";
 import { pacmanInclude, setupScript, workerCli, workerCompose } from "./routes/setup";
@@ -214,9 +215,10 @@ export default {
         url.hash = section ?? "";
         return Response.redirect(url.toString(), 301);
       }
-      // The footer's Agents is #249's page; until it lands the address is the chapter on connecting an agent today, omarchy-cli as an MCP server — a 302, so no browser keeps the move once the page is there.
-      if (path === "/agents") {
-        url.pathname = "/docs/omarchy-cli-mcp";
+      // A footer page that has not landed yet (MORE's `until`) is a 302 to what stands in for it — Agents, #249's page, is the chapter on connecting an agent today, omarchy-cli as an MCP server — so no browser keeps the move once the page is there.
+      const interim = MORE.find((m) => m.href === path)?.until;
+      if (interim) {
+        url.pathname = interim;
         return Response.redirect(url.toString(), 302);
       }
       // One command to join a ring: the script, read by people before they pipe it into sudo.

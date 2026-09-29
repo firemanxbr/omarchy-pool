@@ -249,8 +249,8 @@ rollback safety net as a promotion, and `omarchy-cli security` /
 Exposure is not stored: the index derives it from the same dependency and soname
 graph the package page draws — a package is *exposed* when it declares a
 vulnerable package or when one of its binaries loads a library the vulnerable
-package provides (the stronger evidence). The Security page shows both per ring,
-the package page shows the chain, and the graph marks the nodes.
+package provides (the stronger evidence). `GET /api/v1/security` reports both
+per ring, the package page shows the chain, and the graph marks the nodes.
 
 ### Architectures
 
