@@ -192,6 +192,8 @@ describe("POST /releases", () => {
     // The wrong scope for the target ring is refused even when from_ring is allowed.
     expect((await call("POST", "/releases", { ring: "stable", from_ring: "rc" }, rc)).status).toBe(403);
     expect((await call("POST", "/releases", { ring: "rc", from_release_id: 9999 }, rc)).status).toBe(404);
+    // A rollback stays inside its ring (#284): rc pointed at edge's release would be a promotion by another door.
+    expect((await call("POST", "/releases", { ring: "rc", from_release_id: edgeHead.id, note: "rollback" }, rc)).status).toBe(400);
     expect((await call("POST", "/releases", { ring: "rc", from_ring: "nope" }, rc)).status).toBe(400);
   });
 });

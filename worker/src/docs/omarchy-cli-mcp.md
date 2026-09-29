@@ -393,11 +393,11 @@ approves or blocks at all. Each of those needs an assertion with the user
 verified on the person's authenticator (*A passkey for approve and block*,
 below). Request changes and reject confirm with the session and, for
 reject, the package's name typed (*Signed off*, 4): neither ships anything,
-and both issues keep them as they were. The passkey does not guard every
-door that changes what users get: a maintainer's session or `omc_` token
-alone still queues a project build by hand that publishes into edge, forces
-a promotion past its evidence, and withdraws an approval (*What it still
-cannot tell apart*, below).
+and both issues keep them as they were. Since #284 no door ships bytes
+that no check and no approval passed without it: a build queued by hand is
+a dry run, and a promotion forced past its evidence takes the maintainer's
+passkey. A rollback keeps the session and the token: it points a ring at
+an earlier release of its own (*The doors that ship*, below).
 
 **Not MCP elicitation.** The protocol lets a server ask the person a question
 through the agent's client (`elicitation/create`). The answer comes back
@@ -502,8 +502,8 @@ another maintainer.
   decides. The command line never had an approve or a block (the MCP tools
   draft); what changed is `curl` with a maintainer's token. Request changes,
   reject, withdraw, a lift and every other maintainer's act keep their
-  doors as they were — a build queued by hand and a pool job by hand among
-  them (*What it still cannot tell apart*, below). Whether a non-browser
+  doors as they were — a pool job by hand among them, a promotion forced
+  past its evidence excepted (*The doors that ship*, below). Whether a non-browser
   path may ever approve again — a token with an assertion made by a local
   authenticator, say — is left open (*open-work.md*).
 - **Adding and removing (#271).** A login that holds a passkey adds another
@@ -528,10 +528,16 @@ another maintainer.
   login and its challenges, and ends its browser session: a registration
   already under way on that session stores nothing, since the insert asks
   for the session and for the passkey that vouched, both still the login's.
-  The command line's token and the agents' grants stay; the person replaces
-  them (the runbook's *A lost passkey*). The pool then signs the record at
+  The same batch revokes what the lost device may hold beside them (#284):
+  the login's `omc_` token (replaced by the hash of no token) and its
+  agents' live grants (`revoked_by` `reset`), a journal line each, their
+  waiting drafts discarded and a code nobody swapped yet deleted — all only
+  while the login still holds a passkey, so two resets at once revoke once.
+  The person makes a new token on their page after signing in, and grants
+  their agents again. The pool then signs the record at
   `contributors/<login>/passkeys-reset-<time>.json` (who, why, which
-  passkeys, when — nothing of the keys), whose address the line names; a
+  passkeys, when, the token and the grants revoked — nothing of the keys),
+  whose address the lines name; a
   record the bucket refused is said in the answer and on a line of its own,
   the reset standing. The person signs in with GitHub again and adds a first
   passkey with the session alone. Two resets at once are one. It is never an
@@ -557,6 +563,35 @@ another maintainer.
   `reflect-metadata`, a polyfill of the global `Reflect`, and an X.509 and
   ASN.1 stack for attestation chains the pool does not trust, some 300 KB
   minified in 25 packages beside the Worker's two.
+- **The doors that ship (#284).** #271 left two doors that put bytes no
+  check and no approval passed in a ring with the session or the `omc_`
+  token alone, and #284 closes both. A
+  build queued by hand (`POST /factory/enqueue`, a maintainer's session or
+  token) is a dry run: `publish: false` is queued, built and measured, and
+  its job token has no pool and no ring scope, so the worker keeps what it
+  built; `publish` true or left out is refused with `dry_run_only`, and
+  nothing is queued. A dry run is never the build of its version: the
+  enqueue job's build of the same recipe is a task of its own. A build that publishes comes from the factory's enqueue job — its
+  job token, issued to a project worker for a recipe on `main` — or from an
+  approval, which takes a passkey. A promotion forced past its evidence and
+  the gate (`POST /factory/jobs`, `promote` with `force: "yes"`) is
+  confirmed the way approve is, through `webGate`: the browser's session,
+  its page's Origin, an address the relying party list names, and an
+  assertion for exactly that promotion
+  (`promote:force:<from>:<to>[:<arch>]`) — a token of any kind is refused
+  with `session_only`, each wrong answer with its code, ending "nothing was
+  queued". The answer and the journal's `dispatch` line name the passkey.
+  Status draws the button — *Force into rc* on edge's card, *Force into
+  stable* on rc's — for a maintainer, and asks which architectures: both,
+  or one. A promotion by evidence, a rollback and every other pool job keep
+  the session and the token; around them the review of #284 closed three
+  side doors. A rollback points a ring at an earlier release of its own —
+  another ring's is refused (`another_ring`), since stable pointed at an
+  edge release would be a forced promotion. The evidence the gate reads —
+  health and ABI rows — is the jobs' alone: a maintainer's session or
+  token writes a `note` to the journal and nothing else (`note_only`). And
+  after a reset, `POST /factory/register` mints the login no token with a
+  GitHub token (`token_reset`) until the person makes one on their page.
 - **What it still cannot tell apart.** #257 left three gaps open — the web's
   own Approve and Block, adding a passkey and removing one took the session
   alone — and #271 closes the three together: a session driven by someone
@@ -570,15 +605,9 @@ another maintainer.
   registered on a fresh sign-in with GitHub. Every registration, removal and
   reset is a line on the public journal, and the person's page lists their
   passkeys with their last use, so a key the person did not add is seen, and
-  another maintainer resets it. Nor does the passkey guard a maintainer's
-  other doors that change what users get, which take the session or the
-  `omc_` token alone, as before #271: a build queued by hand
-  (`POST /factory/enqueue`) is a project build that publishes into edge
-  from whatever recipe its `pkgbuild_ref` names, with no approval; a
-  promotion queued by hand with `force` (`POST /factory/jobs`) skips the
-  evidence and the gate; a withdrawal takes an approved package out of every
-  ring. Each is on the journal; none asks for a passkey, and a reset leaves
-  the token that can press them (*open-work.md*).
+  another maintainer resets it. A withdrawal takes an approved package out
+  of every ring with the session or the `omc_` token alone, as before
+  #271: it ships nothing, and it is on the journal.
 
 `review_claim`, `review_release` and `request_package` are not confirmed this
 way; the issue names approve, reject and block (*Signed off*, 5). A claim

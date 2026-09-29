@@ -430,6 +430,7 @@ function revokedWords(by: string | null): string {
   if (by === "logout") return "omarchy-cli logout";
   if (by === "replaced") return "a new login under the same agent name replaced it";
   if (by === "blocked") return "its person was blocked";
+  if (by === "reset") return "its person's passkeys were reset";
   return by ? `revoked on ${by}'s page` : "revoked";
 }
 

@@ -16,7 +16,8 @@
  * (POST /auth/passkeys/assert) are bound to the login and the act. A lost
  * only passkey is reset by another maintainer, with their own passkey and a
  * reason: the login's passkeys, challenges and browser session go in one
- * batch with the journal's line, and the pool signs the record; every
+ * batch with the journal's line — its token and its agents' grants too
+ * since #284 (passkey-doors.test.ts) — and the pool signs the record; every
  * refusal of it removes nothing. Every new query is asked for its plan. The
  * confirmation of an agent's draft is agent-tools.test.ts's (*a passkey for
  * approve and block*), the web's own approve and block
@@ -468,12 +469,13 @@ describe("a reset, when the only passkey is lost (#271)", () => {
     expect(r.json.record).toMatch(new RegExp(`^${env.POOL_URL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/contributors/m7/passkeys-reset-\\d{8}T\\d{9}\\.json$`));
     expect(r.json.passkeys.map((k: any) => k.id).sort()).toEqual(ids);
     for (const k of r.json.passkeys) expect(Object.keys(k).sort().concat(k.alg)).toEqual(["alg", "created_at", "id", "last_used", "ES256"]);
-    // Gone: the passkeys, the challenge asked for before, the browser's session; the command line's token stays.
+    // Gone: the passkeys, the challenge asked for before, the browser's session — and since #284 the command line's token (passkey-doors.test.ts: the agents' grants too, a line each).
     expect(await countOf("m7")).toBe(0);
     expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM passkey_challenges WHERE login = 'm7'").first()).toEqual({ n: 0 });
     expect(await env.DB.prepare("SELECT session_hash FROM contributors WHERE login = 'm7'").first()).toEqual({ session_hash: null });
     expect((await raw("GET", `${ORIGIN}/auth/me`, { cookie: "omc=oms_m7" })).status).toBe(401);
-    expect((await raw("GET", `${ORIGIN}/api/v1/factory/me`, { authorization: "Bearer omc_m7" })).status).toBe(200);
+    expect((await raw("GET", `${ORIGIN}/api/v1/factory/me`, { authorization: "Bearer omc_m7" })).status).toBe(401);
+    expect(r.json).toMatchObject({ token_revoked: true, grants_revoked: [] });
     // Journaled with who and why — the public journal serves it — never a key.
     const [l] = await resetLines("m7");
     expect(l.status).toBe("warn");

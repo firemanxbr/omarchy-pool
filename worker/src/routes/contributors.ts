@@ -325,6 +325,21 @@ export async function workerOf(request: Request, env: Env): Promise<WorkerIdenti
   return row ? { ...row, packages: row.packages ? JSON.parse(row.packages) : [] } : null;
 }
 
+/**
+ * A token revoked by a reset of the login's passkeys (#284), as the reset
+ * writes it into token_hash: this mark and random hex, which no token hashes
+ * to (a sha256 is hex alone). While it stands, a GitHub token does not mint
+ * the login a new one here — a lost laptop keeps the `gh` CLI's token or a
+ * PAT — so the person makes it on their page, after signing in with GitHub
+ * again (handleNewToken replaces the mark).
+ */
+export const RESET_TOKEN_MARK = "reset:";
+/** Register, or register again: a new token replaces the login's — unless a reset of its passkeys revoked it (RESET_TOKEN_MARK), by the primary key. */
+export const REGISTER_SQL = `INSERT INTO contributors (login, name, avatar_url, token_hash, role) VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT (login) DO UPDATE SET name = excluded.name, avatar_url = excluded.avatar_url, token_hash = excluded.token_hash,
+       role = excluded.role, last_seen = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE substr(contributors.token_hash, 1, ${RESET_TOKEN_MARK.length}) != '${RESET_TOKEN_MARK}'`;
+
 export async function handleRegister(request: Request, env: Env): Promise<Response> {
   const b = await readJson<{ github_token?: string }>(request);
   if (b instanceof Response) return b;
@@ -337,13 +352,8 @@ export async function handleRegister(request: Request, env: Env): Promise<Respon
   if (!u.login || u.type === "Bot") return json({ error: "a user account is required" }, 400);
   const token = newToken("omc");
   const role = await roleFor(env, u.login);
-  await env.DB.prepare(
-    `INSERT INTO contributors (login, name, avatar_url, token_hash, role) VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT (login) DO UPDATE SET name = excluded.name, avatar_url = excluded.avatar_url, token_hash = excluded.token_hash,
-       role = excluded.role, last_seen = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
-  )
-    .bind(u.login, u.name ?? null, u.avatar_url ?? null, await sha256Hex(token), role)
-    .run();
+  const r = await env.DB.prepare(REGISTER_SQL).bind(u.login, u.name ?? null, u.avatar_url ?? null, await sha256Hex(token), role).run();
+  if (!r.meta.changes) return json({ error: `${u.login}'s token was revoked with a reset of their passkeys: make a new one on your page (/user/${u.login}, Token) after signing in with GitHub, never with a GitHub token alone; nothing was made`, code: "token_reset" }, 403);
   return json({ login: u.login, role, token, note: "Keep this token; registering again replaces it. Use it as `Authorization: Bearer …` for /factory/packages and /factory/workers." }, 201);
 }
 

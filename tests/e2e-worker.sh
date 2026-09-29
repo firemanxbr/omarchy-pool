@@ -102,18 +102,22 @@ for pkg in "$E2E"/pkgs/*.pkg.tar.zst; do
   gpg --batch --yes --detach-sign --no-armor --local-user "$KEYID" --output "$pkg.sig" "$pkg"
 done
 
-step "Publish to edge (pool upload happens once)"
+step "Publish to edge (pool upload happens once), promote edge → rc → stable (index writes only)"
+# zlib alone first, all the way to stable: the release the rollback drill goes back to is stable's own.
 "$PKG_REPO" publish --ring edge --source packages --note "zlib" "$E2E/pkgs/zlib-1:1.3.2-3-x86_64.pkg.tar.zst"
-"$PKG_REPO" publish --ring edge --source packages --note "xz" "$E2E/pkgs/xz-5.8.4-1-x86_64.pkg.tar.zst"
-"$PKG_REPO" publish --ring edge --source packages --note "re-publish is idempotent" "$E2E/pkgs/zlib-1:1.3.2-3-x86_64.pkg.tar.zst"
-
-step "Promote edge → rc → stable (index writes only)"
 "$PKG_REPO" promote --from edge --to rc --note "rc cut"
 "$PKG_REPO" promote --from rc --to stable --note "ship"
+"$PKG_REPO" publish --ring edge --source packages --note "xz" "$E2E/pkgs/xz-5.8.4-1-x86_64.pkg.tar.zst"
+"$PKG_REPO" publish --ring edge --source packages --note "re-publish is idempotent" "$E2E/pkgs/zlib-1:1.3.2-3-x86_64.pkg.tar.zst"
+"$PKG_REPO" promote --from edge --to rc --note "rc cut, xz in"
+"$PKG_REPO" promote --from rc --to stable --note "ship xz"
 
-step "Rollback: stable back to the zlib-only release, then forward again"
+step "Rollback: stable back to its zlib-only release, then forward again"
 FIRST_EDGE=$("$PKG_REPO" releases --ring edge | awk '$2 == 1 {print $1}')
-"$PKG_REPO" rollback --ring stable --to "$FIRST_EDGE" --note "rollback drill"
+FIRST_STABLE=$("$PKG_REPO" releases --ring stable | awk '$2 == 1 {print $1}')
+# A rollback stays inside its ring (#284): stable pointed at an edge release would be a promotion past rc and the gate.
+"$PKG_REPO" rollback --ring stable --to "$FIRST_EDGE" --note "across rings" >/dev/null 2>&1 && { echo "a rollback to another ring's release must be refused"; exit 1; }
+"$PKG_REPO" rollback --ring stable --to "$FIRST_STABLE" --note "rollback drill"
 summary_body=$(curl -s "$OMARCHY_API/api/v1/releases/stable?fields=summary")
 grep -q '"name":"zlib"' <<<"$summary_body" || { echo "rollback lost zlib"; exit 1; }
 grep -q '"name":"xz"' <<<"$summary_body" && { echo "rollback still serves xz"; exit 1; }
@@ -353,8 +357,30 @@ qj=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/jobs" "${mauth[@]}" -d '{"kind
 grep -q '"task":' <<<"$qj" || { echo "a maintainer could not queue a job: $qj"; exit 1; }
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/jobs" -H "authorization: Bearer omc_e2e_contributor" -H "content-type: application/json" -d '{"kind":"gc"}')" == 403 ]] || { echo "a contributor must not queue jobs"; exit 1; }
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/jobs" "${mauth[@]}" -d '{"kind":"promote","params":{"from":"edge","to":"edge"}}')" == 400 ]] || { echo "bad job params must be refused"; exit 1; }
-rb=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/jobs" "${mauth[@]}" -d '{"kind":"rollback","params":{"ring":"stable","to":"1"}}'); grep -q '"kind":"rollback"' <<<"$rb" || { echo "a maintainer could not queue a rollback: $rb"; exit 1; }
+rb=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/jobs" "${mauth[@]}" -d "{\"kind\":\"rollback\",\"params\":{\"ring\":\"stable\",\"to\":\"$FIRST_STABLE\"}}"); grep -q '"kind":"rollback"' <<<"$rb" || { echo "a maintainer could not queue a rollback: $rb"; exit 1; }
+# …to a release of that ring only (#284): another ring's is refused, nothing queued.
+[[ "$(curl -s -X POST "$OMARCHY_API/api/v1/factory/jobs" "${mauth[@]}" -d "{\"kind\":\"rollback\",\"params\":{\"ring\":\"stable\",\"to\":\"$FIRST_EDGE\"}}" | jq -r .code)" == another_ring ]] || { echo "a rollback to another ring's release must be refused"; exit 1; }
+# A promotion forced past its evidence takes the maintainer's passkey, in the browser (#284): the token forces nothing.
+[[ "$(curl -s -X POST "$OMARCHY_API/api/v1/factory/jobs" "${mauth[@]}" -d '{"kind":"promote","params":{"from":"rc","to":"stable","force":"yes"}}' | jq -r .code)" == session_only ]] || { echo "a maintainer's token must not force a promotion"; exit 1; }
+# A build queued by hand is a dry run (#284): the enqueue job's token publishes (above), the maintainer's token queues publish:false only.
+[[ "$(curl -s -X POST "$OMARCHY_API/api/v1/factory/enqueue" "${mauth[@]}" -d '{"name":"e2e-sizing","pkgbuild_ref":"deadbeef","reason":"sizing","arches":["aarch64"]}' | jq -r .code)" == dry_run_only ]] || { echo "a build queued by hand must be a dry run"; exit 1; }
+dry=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/enqueue" "${mauth[@]}" -d '{"name":"e2e-sizing","pkgbuild_ref":"deadbeef","reason":"sizing","arches":["aarch64"],"publish":false,"priority":1}')
+dry_task=$(jq -r '.tasks[0]' <<<"$dry")
+# A project worker claims it: the row says publish 0, and its job token writes no pool and no ring — edge refuses it, and the
+# dry run completes without a package the pool indexed; edge is where it was.
+edge_head=$(curl -s "$OMARCHY_API/api/v1/releases/edge?fields=summary" | jq -r .release.id)
+dclaim=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/claim" "${w1[@]}" -d '{"arch":"aarch64","kinds":["build"]}')
+[[ "$(jq -r '"\(.task.id) \(.task.publish)"' <<<"$dclaim")" == "$dry_task 0" ]] || { echo "the project worker must claim the dry run, publish 0: $dclaim"; exit 1; }
+djob=$(jq -r .token <<<"$dclaim")
+[[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/releases" -H "authorization: Bearer $djob" -H "content-type: application/json" -d '{"ring":"edge","note":"a dry run"}')" == 403 ]] || { echo "a dry run's token must not write edge"; exit 1; }
+[[ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$OMARCHY_API/api/v1/pool/$xz_sha?filename=e2e-sizing-1-1-aarch64.pkg.tar.zst&source=factory&arch=aarch64" -H "authorization: Bearer $djob" --data-binary 'not a package')" == 403 ]] || { echo "a dry run's token must not write the pool"; exit 1; }
+ddone=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$dry_task/complete" -H "authorization: Bearer $djob" -H "content-type: application/json" -d '{"sha256":"'"$(printf e2e-sizing | sha256sum | cut -d' ' -f1)"'","filename":"e2e-sizing-1-1-aarch64.pkg.tar.zst","version":"1-1"}')
+grep -q '"status":"done"' <<<"$ddone" || { echo "the dry run must complete: $ddone"; exit 1; }
+[[ "$(curl -s "$OMARCHY_API/api/v1/releases/edge?fields=summary" | jq -r .release.id)" == "$edge_head" ]] || { echo "a dry run must leave edge where it was"; exit 1; }
+curl -s "$OMARCHY_API/api/v1/factory/built" | jq -e '[.built[] | select(.name == "e2e-sizing")] | length == 0' >/dev/null || { echo "a dry run is no build of its version"; exit 1; }
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/events" "${mauth[@]}" -d '{"kind":"note","status":"ok","summary":"a maintainer wrote this"}')" == 201 ]] || { echo "a maintainer must be able to write a journal note"; exit 1; }
+# …a note, never the gate's evidence (#284): a health or abi row is a job's.
+[[ "$(curl -s -X POST "$OMARCHY_API/api/v1/events" "${mauth[@]}" -d '{"kind":"abi","ring":"rc","source":"x86_64","status":"ok","summary":"abi ok (forged)"}' | jq -r .code)" == note_only ]] || { echo "a maintainer must not write the gate's evidence"; exit 1; }
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/pool/gc" "${mauth[@]}")" == 401 ]] || { echo "a maintainer token must not write to the pool directly (jobs do)"; exit 1; }
 # Nobody approves their own package — and the only maintainer is no exception (docs/GOVERNANCE.md).
 (cd "$ROOT/worker" && npx wrangler d1 execute omarchy-repo --local --persist-to "$WRANGLER_STATE" --command \
@@ -569,7 +595,15 @@ jq -e '[.events[] | select(.kind == "adopt" and .summary == "zlib adopted by e2e
 bl=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/packages/e2e-ident/block" "${web[@]}" -d "$(jq -nc --argjson a "$(web_answer "block:package:e2e-ident")" '{reason: "the e2e test of the brake", assertion: $a}')")
 [[ "$(jq -r '.blocked + " " + (.rings | map(.ring) | join(",")) + " " + .passkey' <<<"$bl")" == "e2e-ident edge $pkid" ]] || { echo "the block must take e2e-ident out of edge, with e2e's passkey: $bl"; exit 1; }
 jq -e '[.events[] | select(.kind == "block" and (.summary | startswith("e2e-ident blocked by e2e: the e2e test of the brake")))] | length == 1' <<<"$(curl -s "$OMARCHY_API/api/v1/events?kind=block&limit=5")" >/dev/null || { echo "the journal must say who blocked e2e-ident, and why"; exit 1; }
-echo "the package page: every architecture on its data, Adopt and Block on the journal; approve and block with a passkey, never a token"
+# A promotion forced past its evidence (#284): the passkey's answer for exactly this promotion queues it, and the journal names the
+# passkey; an answer for another promotion forces nothing. No worker of this run promotes: the task is cancelled at once.
+[[ "$(curl -s -X POST "$OMARCHY_API/api/v1/factory/jobs" "${web[@]}" -d "$(jq -nc --argjson a "$(web_answer "promote:force:edge:rc")" '{kind: "promote", params: {from: "rc", to: "stable", force: "yes", note: "the e2e forces a promotion"}, assertion: $a}')" | jq -r .code)" == challenge ]] || { echo "an answer for another promotion must force nothing"; exit 1; }
+fp=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/jobs" "${web[@]}" -d "$(jq -nc --argjson a "$(web_answer "promote:force:rc:stable")" '{kind: "promote", params: {from: "rc", to: "stable", force: "yes", note: "the e2e forces a promotion"}, assertion: $a}')")
+[[ "$(jq -r '"\(.job.params.force) \(.passkey)"' <<<"$fp")" == "yes $pkid" ]] || { echo "a forced promotion must be queued with e2e's passkey: $fp"; exit 1; }
+fp_task=$(jq -r .task <<<"$fp")
+[[ "$(curl -s "$OMARCHY_API/api/v1/events?kind=dispatch&limit=5" | jq -r --argjson t "$fp_task" '[.events[] | select(.payload.task == $t)][0].payload | "\(.by) \(.via) \(.passkey)"')" == "e2e web $pkid" ]] || { echo "the forced promotion's journal line must name the passkey"; exit 1; }
+[[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/tasks/$fp_task/cancel" "${mauth[@]}")" == 200 ]] || { echo "the forced promotion could not be cancelled"; exit 1; }
+echo "the package page: every architecture on its data, Adopt and Block on the journal; approve, block and a forced promotion with a passkey, never a token"
 
 step "Agents (#252): omarchy-cli login in the browser, a request through the agent, a block it drafts and the person confirms with a passkey (#257)"
 # The loopback login as a person runs it, the browser played by curl with
@@ -626,7 +660,7 @@ curl_url="$OMARCHY_API/auth/confirm/$draft_id"
 # The package page's step blocked e2e-ident by e2e already: the draft's own package is what must be missing from the journal.
 grep -q "e2e-agent blocked by" <<<"$(curl -s "$OMARCHY_API/api/v1/events?kind=block&limit=5")" && { echo "a draft must write no journal line"; exit 1; }
 # e2e lost their passkey (#271): a second maintainer resets it — their own passkey, a reason — journaled, signed on the record, and
-# e2e signed out of the browser. Nobody resets their own.
+# e2e signed out of the browser; e2e's token and their agent's grant go with it, a line each (#284). Nobody resets their own.
 (cd "$ROOT/worker" && npx wrangler d1 execute omarchy-repo --local --persist-to "$WRANGLER_STATE" --command \
   "INSERT INTO factory_maintainers (login) VALUES ('e2e-second');
    INSERT INTO contributors (login, token_hash, session_hash, role) VALUES ('e2e-second', '$(printf %s omc_e2e_second | sha256sum | cut -d' ' -f1)', '$(printf %s oms_e2e_second | sha256sum | cut -d' ' -f1)', 'maintainer')" >/dev/null)
@@ -635,12 +669,28 @@ node "$ROOT/tests/passkey.mjs" register "$E2E/passkey-second.json" "$rp_origin" 
 [[ "$(curl -s -X POST "$OMARCHY_API/auth/passkeys/reset" -H "cookie: omc=oms_e2e_agent" -H "origin: $OMARCHY_API" -H "content-type: application/json" -d '{"login":"e2e","reason":"my own reset"}' | jq -r .code)" == second_maintainer ]] || { echo "nobody resets their own passkeys"; exit 1; }
 reset_answer=$(curl -s -X POST "$OMARCHY_API/auth/passkeys/assert" "${second[@]}" -d '{"for":"passkey:reset:e2e"}' | node "$ROOT/tests/passkey.mjs" assert "$E2E/passkey-second.json" "$rp_origin" json)
 rs=$(curl -s -X POST "$OMARCHY_API/auth/passkeys/reset" "${second[@]}" -d "$(jq -nc --argjson a "$reset_answer" '{login: "e2e", reason: "lost the e2e laptop", assertion: $a}')")
-[[ "$(jq -r '"\(.reset) \(.by) \(.passkeys | map(.id) | join(",")) \(.signed_out)"' <<<"$rs")" == "e2e e2e-second $pkid true" ]] || { echo "the second maintainer must reset e2e's passkeys: $rs"; exit 1; }
-grep -q "e2e-second reset e2e's passkeys (1 removed; e2e signed out): lost the e2e laptop" <<<"$(curl -s "$OMARCHY_API/api/v1/events?kind=passkey&limit=5")" || { echo "the reset must be journaled with who and why"; exit 1; }
+[[ "$(jq -r '"\(.reset) \(.by) \(.passkeys | map(.id) | join(",")) \(.signed_out) \(.token_revoked) \(.grants_revoked | map(.agent) | join(","))"' <<<"$rs")" == "e2e e2e-second $pkid true true E2E Agent" ]] || { echo "the second maintainer must reset e2e's passkeys, token and agent grant: $rs"; exit 1; }
+rs_lines=$(curl -s "$OMARCHY_API/api/v1/events?kind=passkey&limit=10")
+grep -q "e2e-second reset e2e's passkeys (1 removed; e2e signed out): lost the e2e laptop" <<<"$rs_lines" || { echo "the reset must be journaled with who and why"; exit 1; }
+grep -q "e2e-second reset e2e's passkeys: e2e's command-line token revoked" <<<"$rs_lines" || { echo "the token's revocation must be journaled"; exit 1; }
+grep -q "e2e-second reset e2e's passkeys: the grant to E2E Agent (g_[0-9a-f]*) revoked" <<<"$rs_lines" || { echo "the agent grant's revocation must be journaled"; exit 1; }
 record_ok "$(jq -r .record <<<"$rs")" "omarchy-pool/passkey-reset/1" || exit 1
 [[ "$(curl -s -o /dev/null -w '%{http_code}' "$OMARCHY_API/auth/me" -H "cookie: omc=oms_e2e_agent")" == 401 ]] || { echo "a reset must sign the login out of the browser"; exit 1; }
-# e2e signs in again with GitHub (seeded here, as every session of this run is) and opens the draft's link: no passkey any more.
+[[ "$(curl -s -o /dev/null -w '%{http_code}' "$OMARCHY_API/api/v1/factory/me" -H "authorization: Bearer omc_e2e")" == 401 ]] || { echo "a reset must revoke the login's token"; exit 1; }
+[[ "$(curl -s "$OMARCHY_API/api/v1/factory/me" -H "authorization: Bearer $mtoken" | jq -r .code)" == grant_invalid ]] || { echo "a reset must revoke the login's agent grants"; exit 1; }
+# e2e signs in again with GitHub (seeded here, as every session of this run is): the agent's draft was discarded with its grant, and
+# e2e makes a new token on their page — it works — and logs the agent in again, which drafts the block anew.
 (cd "$ROOT/worker" && npx wrangler d1 execute omarchy-repo --local --persist-to "$WRANGLER_STATE" --command "UPDATE contributors SET session_hash = '$(printf %s oms_e2e_agent | sha256sum | cut -d' ' -f1)' WHERE login = 'e2e'" >/dev/null)
+[[ "$(curl -s "$OMARCHY_API/api/v1/factory/me" -H "cookie: omc=oms_e2e_agent" | jq -r --arg d "$draft_id" '.drafts[] | select(.id == $d) | .state')" == discarded ]] || { echo "a reset must discard the waiting drafts of the grants it revokes"; exit 1; }
+newtok=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/token" -H "cookie: omc=oms_e2e_agent" -H "content-type: application/json" -d '{}' | jq -r .token)
+[[ "$newtok" == omc_* && "$(curl -s "$OMARCHY_API/api/v1/factory/me" -H "authorization: Bearer $newtok" | jq -r .contributor.login)" == e2e ]] || { echo "after a reset the person must be able to make a new token: $newtok"; exit 1; }
+agent_login "$E2E/agent-maintainer" oms_e2e_agent --maintain || exit 1
+mtoken=$(sed -n 's/^token = "\(oma_[0-9a-f]*\)"$/\1/p' "$E2E/agent-maintainer/omarchy-cli/credentials.toml")
+blk=$(mcp_call "$E2E/agent-maintainer" block '{"name":"e2e-agent","reason":"the e2e blocks what its agent drafted"}')
+draft_id=$(jq -r '.structuredContent.draft' <<<"$blk")
+[[ "$draft_id" == d_* ]] || { echo "the agent logged in again must draft the block: $blk"; exit 1; }
+curl_url="$OMARCHY_API/auth/confirm/$draft_id"
+# The draft's link: no passkey any more.
 cpage=$(curl -s "$curl_url" -H "cookie: omc=oms_e2e_agent")
 grep -q "Block e2e-agent?" <<<"$cpage" || { echo "the confirm page did not show the draft: $(head -c 400 <<<"$cpage")"; exit 1; }
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$curl_url" -H "authorization: Bearer $mtoken" -H "origin: $OMARCHY_API" --data "$(form_of <<<"$cpage")&action=confirm&name=e2e-agent")" == 403 ]] || { echo "a confirmation must refuse a token"; exit 1; }

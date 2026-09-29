@@ -114,7 +114,7 @@ const body = (login: string) => String.raw`
 
   <section id="passkeys" hidden>
     <div class="h2row"><h2>Passkeys</h2></div>
-    <p class="sub">Approve and block are confirmed with a passkey: on Review, on a package's page, and what your agents draft. Your device asks for your fingerprint, face or PIN, which no token and no agent can supply. Your first passkey is added with your session. Adding another, or removing one, asks for a passkey you hold. Lost your only one? Another maintainer resets them. The pool keeps each one's public key and credential id, nothing else, and the journal says when one is added, removed or reset. Only you see this section. <a href="/docs/omarchy-cli-mcp#write-tools">How it works →</a></p>
+    <p class="sub">Approve and block are confirmed with a passkey: on Review, on a package's page, and what your agents draft. Your device asks for your fingerprint, face or PIN, which no token and no agent can supply. Your first passkey is added with your session. Adding another, or removing one, asks for a passkey you hold. Lost your only one? Another maintainer resets them, and your token and your agents' grants go with them. The pool keeps each one's public key and credential id, nothing else, and the journal says when one is added, removed or reset. Only you see this section. <a href="/docs/omarchy-cli-mcp#write-tools">How it works →</a></p>
     <form id="pk-form" class="form" onsubmit="return false"></form>
     <p class="sub" id="pk-said" role="status" aria-live="polite"></p>
     <div class="table-wrap"><table id="pk-table"><thead><tr><th>Name</th><th>Algorithm</th><th>Added</th><th>Last used</th><th><span class="u-sr">Remove</span></th></tr></thead><tbody></tbody></table></div>
@@ -122,7 +122,7 @@ const body = (login: string) => String.raw`
 
   <section id="pk-reset" hidden>
     <div class="h2row"><h2>A lost passkey</h2></div>
-    <p class="sub">A maintainer who lost their only passkey gets a way back from another maintainer. Every passkey of theirs goes, and they are signed out. They add a new one after signing in with GitHub again. Your own passkey confirms the reset, and the reason goes on the public journal and on a record the pool signs.</p>
+    <p class="sub">A maintainer who lost their only passkey gets a way back from another maintainer. Every passkey of theirs goes, with their token and their agents' grants, and they are signed out. They add a new passkey and make a new token after signing in with GitHub again. Your own passkey confirms the reset, and the reason goes on the public journal and on a record the pool signs.</p>
     <form id="pk-reset-form" class="form" onsubmit="return false"><label>Why <input type="text" id="pk-reset-why" minlength="4" maxlength="300" placeholder="lost their phone and their key" autocomplete="off" required></label> <button type="submit" id="pk-reset-go" class="danger">Reset the passkeys</button></form>
     <p class="sub" id="pk-reset-said" role="status" aria-live="polite"></p>
   </section>
@@ -497,7 +497,7 @@ const SCRIPT = String.raw`
     });
   }
   document.addEventListener("submit", function (ev) { if (ev.target && ev.target.id === "pk-form") { ev.preventDefault(); addPasskey(); } });
-  // ---- a lost passkey (#271): another maintainer's way back for this one — every passkey of theirs removed and their browser session ended, in one step the journal and a signed record keep, confirmed with the resetting maintainer's own passkey. Drawn for a maintainer on another maintainer's page, and for nobody else; the server says when there is nothing to reset, before the resetting maintainer's device is asked (the page reads nothing more to know it).
+  // ---- a lost passkey (#271): another maintainer's way back for this one — every passkey of theirs removed, their token and their agents' grants revoked (#284), and their browser session ended, in one step the journal and a signed record keep, confirmed with the resetting maintainer's own passkey. Drawn for a maintainer on another maintainer's page, and for nobody else; the server says when there is nothing to reset, before the resetting maintainer's device is asked (the page reads nothing more to know it).
   function renderReset(d) {
     var show = d.role === "maintainer" && isMaintainer() && !isOwner(login);
     $("#pk-reset").hidden = !show;
@@ -510,12 +510,12 @@ const SCRIPT = String.raw`
     ev.preventDefault();
     var why = $("#pk-reset-why").value.trim();
     if (why.length < 4) { resetSay(esc("Say why in a few words: it goes on the public journal and the signed record."), true); return; }
-    ask({ title: "Reset " + login + "'s passkeys?", text: "Every passkey of " + esc(login) + "'s goes, and " + esc(login) + " is signed out. They add a new one after signing in again. Your passkey confirms it. The reason: <i>" + esc(why) + "</i>", confirm: "Reset with your passkey", danger: true }).then(function (go) {
+    ask({ title: "Reset " + login + "'s passkeys?", text: "Every passkey of " + esc(login) + "'s goes, with their token and their agents' grants, and " + esc(login) + " is signed out. They add a new passkey and make a new token after signing in again. Your passkey confirms it. The reason: <i>" + esc(why) + "</i>", confirm: "Reset with your passkey", danger: true }).then(function (go) {
       if (go === null) return;
       passkeyed("passkey:reset:" + login, function (assertion) { return api("POST", "/auth/passkeys/reset", { login: login, reason: why, assertion: assertion }); }).then(function (r) {
         if (r.error) { resetSay("Not reset: " + refusalHtml({ error: pkSentence(r.error), register: r.register }), true); return; }
         $("#pk-reset-why").value = "";
-        var said = esc("Reset: " + r.passkeys.length + " passkey" + (r.passkeys.length === 1 ? "" : "s") + " of " + login + "'s removed, and " + login + " signed out.");
+        var g = (r.grants_revoked || []).length, said = esc("Reset: " + r.passkeys.length + " passkey" + (r.passkeys.length === 1 ? "" : "s") + " of " + login + "'s removed, their token" + (g ? " and " + g + " agent grant" + (g === 1 ? "" : "s") : "") + " revoked, and " + login + " signed out.");
         resetSay(said + (r.record ? ' The journal says who and why, and so does <a href="' + esc(r.record) + '">the signed record</a>.' : esc(" The journal says who and why. The signed record was not written: " + pkSentence(r.record_error || "the bucket refused it"))));
       }).catch(function (e) { resetSay(esc("Not reset: " + pkSentence(errorText(e))), true); });
     });
@@ -889,11 +889,11 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       visible: ["owner"],
     },
     {
-      // A lost passkey (#271): another maintainer's reset of this person's passkeys, with a reason and their own passkey — served hidden, drawn for a maintainer on another maintainer's page. The route is the browser's session's only, on the relying party's address: every signed-in role is refused on pool.test (rp_unavailable), nobody signed in is asked to sign in.
+      // A lost passkey (#271): another maintainer's reset of this person's passkeys — their token and their agents' grants with them (#284) — with a reason and their own passkey — served hidden, drawn for a maintainer on another maintainer's page. The route is the browser's session's only, on the relying party's address: every signed-in role is refused on pool.test (rp_unavailable), nobody signed in is asked to sign in.
       id: "user.passkey-reset",
       page,
       anchor: ['<section id="pk-reset" hidden>', 'id="pk-reset-form"', 'id="pk-reset-why"', 'id="pk-reset-go" class="danger"', 'id="pk-reset-said"'],
-      script: ["function renderReset(d)", 'd.role === "maintainer" && isMaintainer() && !isOwner(login)', '"Reset " + login + "\'s passkeys"', 'passkeyed("passkey:reset:" + login', 'api("POST", "/auth/passkeys/reset", { login: login, reason: why, assertion: assertion })', "refusalHtml({ error: pkSentence(r.error), register: r.register })", '">the signed record</a>.', "The signed record was not written: "],
+      script: ["function renderReset(d)", 'd.role === "maintainer" && isMaintainer() && !isOwner(login)', '"Reset " + login + "\'s passkeys"', 'passkeyed("passkey:reset:" + login', 'api("POST", "/auth/passkeys/reset", { login: login, reason: why, assertion: assertion })', "refusalHtml({ error: pkSentence(r.error), register: r.register })", "r.grants_revoked", '" revoked, and "', '">the signed record</a>.', "The signed record was not written: "],
       acts: [{ method: "POST", path: "/auth/passkeys/reset", body: { login: F.m2, reason: "lost by the tests" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } }],
       visible: ["maintainer"],
     },

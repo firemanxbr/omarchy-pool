@@ -61,7 +61,6 @@ pkg-repo job sync --param arch=x86_64                                  # every s
 pkg-repo job sync --param source=packages --param arch=x86_64 --param ring=rc   # one source
 pkg-repo job promote --param from=edge --param to=rc --param note="…"
 pkg-repo job promote --param from=rc --param to=stable --param note="…"        # evidence-gated: two green checks of rc in a row (--param soak_checks=1 for one)
-pkg-repo job promote --param from=rc --param to=stable --param force=yes       # emergency: skips the gate (the target's health still rolls back)
 pkg-repo job promote --param from=rc --param to=stable --param arch=aarch64    # one architecture only: its evidence, its gate, its rows; x86_64 keeps what stable serves
 pkg-repo job rollback --param ring=stable --param to=<release id>              # then renders both architectures
 pkg-repo job rollback --param ring=stable --param to=<release id> --param arch=x86_64   # that architecture only
@@ -74,6 +73,15 @@ pkg-repo job trial --param task=<staged build>                         # the pro
 pkg-repo job gc --param keep=3
 pkg-repo job relayout                                                  # one-time: every object into its source's directory (below)
 ```
+
+An emergency promotion forced past the gate is not on this list: it ships
+what no check passed, so it takes your passkey, in the browser (#284). On
+Status, *Force into rc* on edge's card or *Force into stable* on rc's asks
+why and which architectures — both, or one alone — then your passkey, and
+queues the same job with `force=yes` (and `arch` for one). One architecture
+is its own act: the passkey answers for exactly that one. The target's
+health check still rolls it back. `pkg-repo job promote --param force=yes`
+and any other token are refused (`session_only`).
 
 Promotions are gated by evidence (see *Promotion by evidence* in
 [ARCHITECTURE.md](ARCHITECTURE.md)): the job first records fresh `health` and
@@ -422,6 +430,24 @@ already). Register two — a phone and a security key, say: the second is
 added with an answer from the first, and a lost one is then removed with
 the other, with no reset.
 
+**What ships, and what guards it (#284).** Every door that puts bytes in
+a ring, and the one thing that must hold for it to open:
+
+| Door | What it ships | What guards it |
+|---|---|---|
+| **Approve** (Review, a build's page, an agent's draft confirmed) | the project's build, into edge — rc and stable too when its trial passed | the maintainer's passkey, in the browser; never their own package |
+| **The enqueue job** (`POST /factory/enqueue` with its job token) | a recipe on `main`, built by a project worker and published into edge | the job's token, issued only to a project worker at claim; the recipe is a reviewed commit on `main` |
+| **A build queued by hand** (`POST /factory/enqueue`, a maintainer's session or `omc_` token) | nothing: a dry run, built, measured and kept on the worker (`publish: false`) | anything else is refused (`dry_run_only`); the dry run's job token has no pool and no ring scope |
+| **A sync** (the scheduler's, or `pkg-repo job sync`) | upstream's packages, into edge — the OPR's channels into their rings | every package verified against its upstream's keyring |
+| **A promotion** (the scheduler's, or `pkg-repo job promote`) | a ring's head, into the ring above | the gate: fresh health and ABI checks, the soak, no security regression — rows the jobs write: your token writes a `note` to the journal, nothing else (`note_only`) |
+| **A forced promotion** (Status's *Force into …*, `force=yes`) | a ring's head, into the ring above, past the gate — both architectures, or one | the maintainer's passkey, in the browser; no token forces one. The target's health check still rolls it back |
+| **A rollback** (Status's *Roll back*, `pkg-repo job rollback`) | an earlier release of the ring, again | a maintainer's session or token; another ring's release is refused (`another_ring`); the journal keeps why |
+| **A trial** (after the project's review build, or `pkg-repo job trial`) | the project's staged build, into the lab — never a promised ring, never promoted | a staged build of the project's own; the lab promises nothing, and a machine takes it only with `--ring lab` |
+
+Taking out ships nothing: a block takes the maintainer's passkey (#271), a
+withdrawal the session or the token. No door ships what no check and no
+approval passed without your passkey.
+
 **A lost passkey.** A maintainer who lost their only passkey — or every one
 — cannot approve, block, add or remove one. The way back is another
 maintainer's reset, and it hands the passkey back to a sign-in with GitHub,
@@ -434,22 +460,28 @@ so it is done in this order:
 2. The person, on a device they trust, ends the lost device's GitHub
    sessions (github.com → *Settings* → *Sessions*: revoke the others). A
    sign-in with GitHub that is still live there would register the next
-   passkey for whoever holds it.
+   passkey for whoever holds it. They also revoke the GitHub tokens the
+   device held — *Settings* → *Applications* → *Authorized OAuth Apps*
+   (the GitHub CLI, any other) and *Developer settings* → *Personal access
+   tokens*: any of them registers the login (`POST /factory/register`) and
+   mints a new `omc_` token once the person has made theirs.
 3. The other maintainer opens the person's page, *A lost passkey*
    (`/user/<login>#pk-reset`, drawn for a maintainer on another
    maintainer's page), writes why — it goes on the public journal and a
    record the pool signs — and confirms with their own passkey. Every
-   passkey of the login goes, and the login is signed out of the browser.
+   passkey of the login goes, the login is signed out of the browser, and
+   what the lost device may hold beside them goes too (#284): the
+   command-line token and every live agent grant are revoked, a journal
+   line each, and the agents' waiting drafts are discarded.
 4. The person signs in with GitHub at once and adds a new passkey on their
    page — the first again, with the session alone. On the same page they
-   replace their command-line token (*Token*: the old one stops working)
-   and revoke their agents' grants (*Agents*). The reset leaves both, and a
-   token that left with the device still rejects, withdraws, lifts, queues
-   builds and runs pool jobs.
-5. Both read the journal (`/journal?kind=passkey`): after the reset's line,
-   the next *registered a passkey* line for the login is the person's own
-   (its id is on their page). One they did not add is another reset, and
-   these steps again.
+   make a new command-line token (*Token*) and grant their agents again
+   (`omarchy-cli login`). Until they do, a GitHub token registers the
+   login no new one (`token_reset`): the lost device cannot mint one back.
+5. Both read the journal (`/journal?kind=passkey`): after the reset's lines
+   (the reset, the token, a grant each), the next *registered a passkey*
+   line for the login is the person's own (its id is on their page). One
+   they did not add is another reset, and these steps again.
 
 **Sign in with GitHub** (the header's *Sign in*) is the GitHub OAuth App
 `omarchy-pool` (registered under the GitHub account that runs the staging
@@ -466,7 +498,9 @@ app's page (*Generate a new client secret*, set, then delete the old one).
 The logo is `docs/omarchy-pool-logo.png`.
 The session is an HttpOnly cookie on the dashboard's origin; the pages call
 the API same-origin. Without the app, `POST /api/v1/factory/register`
-still accepts a GitHub token used once.
+still accepts a GitHub token used once — except for a login whose token a
+reset of its passkeys revoked, until the person makes one on their page
+(`token_reset`, #284).
 
 Roles come from the repository, not from an API: `factory/MAINTAINERS.toml`
 lists the maintainers (one list, no areas), the brain reads `main` every
@@ -601,8 +635,9 @@ but the sizing ones (`factory/sizing/`, benchmarks). Day to day:
   The person's page says where the build stands.
 - **Rebuild**: press *Build* on the person's page (the queue, or a worker
   of yours), or `POST $API/factory/packages/<name>/build`; a maintainer's
-  `POST $API/factory/enqueue` (`{"name","pkgbuild_ref":"<commit>","version","arches"}`)
-  queues a sizing recipe.
+  `POST $API/factory/enqueue` (`{"name","pkgbuild_ref":"<commit>","version","arches","publish":false}`)
+  queues a sizing recipe as a dry run: by hand a build never publishes
+  (#284, `dry_run_only`).
 - **A failed task**: the person's page says what stopped it and how to fix
   it (the build's page has the whole log); *Build* again starts from that
   build's PKGBUILD and log.

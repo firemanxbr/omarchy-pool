@@ -14,12 +14,14 @@
  *   POST /auth/passkeys/:id/remove    {assertion}: the person's own passkey removed, with an assertion from one they hold, journaled
  *   POST /auth/passkeys/assert        {for}: the options navigator.credentials.get() takes for one act of the person's on the web (#271)
  *   POST /auth/passkeys/reset         {login, reason, assertion}: a lost authenticator's way back — another maintainer removes
- *                                     every passkey of the login and signs it out, journaled and signed on the record (#271)
+ *                                     every passkey of the login and signs it out, journaled and signed on the record (#271);
+ *                                     the login's omc_ token and its agents' grants go with them, a line each (#284)
  *   POST /auth/confirm/:id/challenge  the options navigator.credentials.get() takes for one draft (routes/agents.ts)
  *
  * The web's approve and block (routes/review.ts, routes/blocks.ts) take the
  * assertion in their JSON body (`assertion`), through webGate below, once
- * their own predicate allowed the act and before they write anything.
+ * their own predicate allowed the act and before they write anything. So
+ * does a promotion forced past its evidence (jobs.ts, #284).
  *
  * Each takes the browser's session only — a request with an Authorization
  * header is refused, so no token of any kind registers a key, uses one, or
@@ -44,12 +46,13 @@
  * label and two dates; nothing of the authenticator's attestation.
  */
 import { json, type Env } from "../index";
-import { DASHBOARD_HOST, isProductionHost } from "../meta";
+import { DASHBOARD_HOST, isProductionHost, PROMOTED_RINGS, REPO_ARCHES } from "../meta";
 import { browserSession, randomHex, type Through } from "../agents";
-import { contributorOf, isMaintainer, sha256Hex, SIGN_IN, type Contributor } from "./contributors";
+import { contributorOf, isMaintainer, RESET_TOKEN_MARK, sha256Hex, SIGN_IN, type Contributor } from "./contributors";
 import { ALGORITHMS, OFFERED_ALGORITHMS, WebAuthnError, fromB64url, sha256, toB64url, verifyAssertion, verifyRegistration, type WebAuthnCode } from "../webauthn";
 import { NO_PASSKEY, PASSKEY_ELSEWHERE } from "../pages/agent-auth";
 import { putRecord, recordUrl } from "../record";
+import { DISCARD_SQL, UNSWAPPED_SQL } from "./agents";
 
 /** Passkeys a login holds at most: an eleventh is refused until one is removed. */
 export const MAX_PASSKEYS = 10;
@@ -100,19 +103,24 @@ export const registerHref = (login: string) => `/user/${encodeURIComponent(login
  * What an assertion on the web is for (#271), bound into its challenge
  * (passkey_challenges.draft_id, purpose 'confirm', beside a draft's id):
  * approving a build, blocking a package or a contributor, adding a passkey
- * to a login that holds one, removing one, and resetting another login's.
- * The door computes it from the route — `approve:<task>`,
- * `block:package:<name>`, `block:contributor:<login>`, `passkey:add`,
- * `passkey:remove:<id>`, `passkey:reset:<login>` — so an answer made for one
- * act decides no other.
+ * to a login that holds one, removing one, resetting another login's, and
+ * forcing a promotion past its evidence (#284). The door computes it from
+ * the route and the body — `approve:<task>`, `block:package:<name>`,
+ * `block:contributor:<login>`, `passkey:add`, `passkey:remove:<id>`,
+ * `passkey:reset:<login>`, `promote:force:<from>:<to>[:<arch>]` — so an
+ * answer made for one act decides no other.
  */
-export const SUBJECT = /^(?:approve:[1-9]\d{0,14}|block:(?:package|contributor):[A-Za-z0-9@._+-]{1,100}|passkey:add|passkey:remove:pk_[0-9a-f]{32}|passkey:reset:[A-Za-z0-9-]{1,39})$/;
+export const SUBJECT = new RegExp(String.raw`^(?:approve:[1-9]\d{0,14}|block:(?:package|contributor):[A-Za-z0-9@._+-]{1,100}|passkey:add|passkey:remove:pk_[0-9a-f]{32}|passkey:reset:[A-Za-z0-9-]{1,39}|promote:force:(?:${PROMOTED_RINGS.join("|")}):(?:${PROMOTED_RINGS.join("|")})(?::(?:${REPO_ARCHES.join("|")}))?)$`);
+
+/** A forced promotion's act (#284): the rings and the architecture it names, as the door and the Status page's button bind it. */
+export const forcedSubject = (from: string, to: string, arch?: string): string => `promote:force:${from}:${to}${arch ? `:${arch}` : ""}`;
 
 /** An act as a refusal names it — "approving build #12", "blocking hers" — and what did not happen when it is refused. */
 function actOf(subject: string): { act: string; nothing: string } {
-  const [kind, a, b] = subject.split(":");
+  const [kind, a, b, c, d] = subject.split(":");
   if (kind === "approve") return { act: `approving build #${a}`, nothing: "nothing was decided" };
   if (kind === "block") return { act: `blocking ${b}`, nothing: "nothing was decided" };
+  if (kind === "promote") return { act: `forcing ${b} into ${c}${d ? ` on ${d}` : ""}`, nothing: "nothing was queued" };
   if (a === "add") return { act: "adding a passkey", nothing: "no passkey was added" };
   if (a === "remove") return { act: "removing a passkey", nothing: "nothing was removed" };
   return { act: `resetting ${b}'s passkeys`, nothing: "nothing was reset" };
@@ -178,8 +186,26 @@ export const RESET_EVENT_SQL = `INSERT INTO events (kind, ring, source, status, 
 export const RESET_SQL = "DELETE FROM passkeys WHERE login = ? RETURNING id, alg, created_at, last_used";
 /** …the login's challenges with them, by (login, expires_at): a registration asked for before the reset answers nothing after it. */
 export const RESET_CHALLENGES_SQL = "DELETE FROM passkey_challenges WHERE login = ?";
-/** …and the login signed out of the browser, by its primary key: the first passkey after a reset is registered on a fresh sign-in with GitHub, never on a session that may have left with the lost device — a registration already under way on it stores nothing (PASSKEY_INSERT_SQL asks for the session). The command line's token stays: the runbook's *A lost passkey* has the person replace it. */
+/** …and the login signed out of the browser, by its primary key: the first passkey after a reset is registered on a fresh sign-in with GitHub, never on a session that may have left with the lost device — a registration already under way on it stores nothing (PASSKEY_INSERT_SQL asks for the session). */
 export const SIGN_OUT_SQL = "UPDATE contributors SET session_hash = NULL WHERE login = ?";
+/**
+ * What the lost device may still hold outside the browser goes with the
+ * passkeys (#284), each before the delete in the same batch and only while
+ * the login still holds one (?1), so two resets at once revoke once. The
+ * command line's token: replaced by the primary key with the reset's mark
+ * (?2, contributors.ts RESET_TOKEN_MARK and random hex), which no token
+ * hashes to — token_hash is NOT NULL and UNIQUE. While it stands, a GitHub
+ * token registers the login no new one (POST /factory/register): the person
+ * makes it on their page after signing in again.
+ */
+export const RESET_TOKEN_SQL = "UPDATE contributors SET token_hash = ?2 WHERE login = ?1 AND EXISTS (SELECT 1 FROM passkeys WHERE login = ?1)";
+/** …the login's live agent grants — swapped, not revoked, not expired: three at most, through the partial index that holds only those — a journal line each (?2 the words before the agent's name, ?3 who reset, ?4 the record), written before they are revoked… */
+export const RESET_GRANT_EVENTS_SQL = `INSERT INTO events (kind, ring, source, status, summary, payload)
+  SELECT 'passkey', NULL, 'factory', 'warn', ?2 || agent || ' (' || id || ') revoked', json_object('login', login, 'by', ?3, 'via', 'web', 'action', 'revoke_grant', 'grant', id, 'agent', agent, 'record', ?4)
+    FROM agent_grants WHERE login = ?1 AND revoked_at IS NULL AND token_hash IS NOT NULL AND expires_at > ${NOW} AND EXISTS (SELECT 1 FROM passkeys WHERE login = ?1)`;
+/** …and revoked, by the same index and read back as they go: `reset`, as a block's say `blocked`. Their waiting drafts are discarded after them (routes/agents.ts DISCARD_SQL), and a code nobody swapped yet is deleted (UNSWAPPED_SQL): swapped after the reset it would be a grant the lost device made. */
+export const RESET_GRANTS_SQL = `UPDATE agent_grants SET revoked_at = ${NOW}, revoked_by = 'reset'
+  WHERE login = ?1 AND revoked_at IS NULL AND token_hash IS NOT NULL AND expires_at > ${NOW} AND EXISTS (SELECT 1 FROM passkeys WHERE login = ?1) RETURNING id, agent`;
 
 // ---------- challenges ----------
 
@@ -433,8 +459,9 @@ export async function handlePasskeyRemove(id: string, url: URL, request: Request
  * POST /auth/passkeys/assert — {for}: the options navigator.credentials.get()
  * takes for one act of the signed-in person's on the web (#271, SUBJECT): a
  * challenge bound to this login and this act, their passkeys, user
- * verification required. Approve, block and a reset are a maintainer's;
- * adding a passkey too; removing one is anyone's who holds it. A login
+ * verification required. Approve, block, a reset and a forced promotion
+ * (#284) are a maintainer's; adding a passkey too; removing one is anyone's
+ * who holds it. A login
  * without a passkey is told to register one, with the link; its first is
  * added without one (409). Nobody resets their own: that is another
  * maintainer's act, so a stolen session cannot open its own way back; and a
@@ -447,7 +474,7 @@ export async function handlePasskeyAssert(url: URL, request: Request, env: Env):
   const { c, rp } = who;
   const b = (await request.json().catch(() => null)) as { for?: unknown } | null;
   const subject = typeof b?.for === "string" && SUBJECT.test(b.for) ? b.for : null;
-  if (!subject) return json({ error: "for: the act the passkey confirms — approve:<task>, block:package:<name>, block:contributor:<login>, passkey:add, passkey:remove:<id> or passkey:reset:<login>", code: "for" }, 400, NO_STORE);
+  if (!subject) return json({ error: "for: the act the passkey confirms — approve:<task>, block:package:<name>, block:contributor:<login>, passkey:add, passkey:remove:<id>, passkey:reset:<login> or promote:force:<from>:<to>[:<arch>]", code: "for" }, 400, NO_STORE);
   if (!subject.startsWith("passkey:remove:")) {
     const no = maintainerRefusal(c);
     if (no) return no;
@@ -478,10 +505,14 @@ const stamp = (): string => new Date().toISOString().replace(/[-:.Z]/g, "");
  * (who, whose, why, which passkeys), every passkey of the login, its
  * challenges, and its browser session — so its next passkey, the first
  * again and the session's alone, is registered after a fresh sign-in with
- * GitHub. Then the record, signed by the pool, at
- * contributors/<login>/passkeys-reset-<time>.json, whose address the line
- * names; a record the bucket refused is said in the answer and on a line
- * of its own, the reset standing. Never an operator's write to D1.
+ * GitHub — and what else the lost device may hold (#284): the login's
+ * `omc_` token and its agents' live grants, revoked with a journal line
+ * each, their waiting drafts discarded and a code nobody swapped deleted.
+ * The person makes a new token on their page after signing in, and grants
+ * their agents again. Then the record, signed by the pool, at
+ * contributors/<login>/passkeys-reset-<time>.json, whose address the lines
+ * name; a record the bucket refused is said in the answer and on a line of
+ * its own, the reset standing. Never an operator's write to D1.
  */
 export async function handlePasskeyReset(url: URL, request: Request, env: Env): Promise<Response> {
   const who = await personOnRp(request, url, env, "maintainer");
@@ -503,8 +534,16 @@ export async function handlePasskeyReset(url: URL, request: Request, env: Env): 
   const at = new Date().toISOString();
   const key = `contributors/${login}/passkeys-reset-${stamp()}.json`, address = recordUrl(env, key);
   const ids = held.map((k) => k.id);
-  const [line, del] = await env.DB.batch([
-    env.DB.prepare(RESET_EVENT_SQL).bind(`${c.login} reset ${login}'s passkeys (${ids.length} removed; ${login} signed out): ${reason.slice(0, 140)}`, JSON.stringify({ login, by: c.login, via: "web", action: "reset", passkeys: ids, reason, confirmed_with: ok.passkey, signed_out: true, record: address }), login),
+  const said = `${c.login} reset ${login}'s passkeys`;
+  const [line, , , revoked, , , , del] = await env.DB.batch([
+    env.DB.prepare(RESET_EVENT_SQL).bind(`${said} (${ids.length} removed; ${login} signed out): ${reason.slice(0, 140)}`, JSON.stringify({ login, by: c.login, via: "web", action: "reset", passkeys: ids, reason, confirmed_with: ok.passkey, signed_out: true, record: address }), login),
+    // What the lost device may hold outside the browser (#284): the command line's token and the agents' grants, a line each, before the passkeys go.
+    env.DB.prepare(RESET_EVENT_SQL).bind(`${said}: ${login}'s command-line token revoked`, JSON.stringify({ login, by: c.login, via: "web", action: "revoke_token", record: address }), login),
+    env.DB.prepare(RESET_GRANT_EVENTS_SQL).bind(login, `${said}: the grant to `, c.login, address),
+    env.DB.prepare(RESET_GRANTS_SQL).bind(login),
+    env.DB.prepare(DISCARD_SQL).bind(login, JSON.stringify({ error: `${login}'s passkeys were reset by ${c.login}: the agent's grant ended, and nothing was decided` })),
+    env.DB.prepare(UNSWAPPED_SQL).bind(login),
+    env.DB.prepare(RESET_TOKEN_SQL).bind(login, `${RESET_TOKEN_MARK}${randomHex(16)}`),
     env.DB.prepare(RESET_SQL).bind(login),
     env.DB.prepare(RESET_CHALLENGES_SQL).bind(login),
     env.DB.prepare(SIGN_OUT_SQL).bind(login),
@@ -513,9 +552,10 @@ export async function handlePasskeyReset(url: URL, request: Request, env: Env): 
   // Two resets sent at once: the second found nothing left, wrote no line, and says so.
   if (!line.meta.changes || !removed.length) return json({ error: `${login}'s passkeys were reset a moment ago: there is nothing left to reset`, code: "nothing_to_reset" }, 409, NO_STORE);
   const passkeys = removed.map((k) => ({ id: k.id, alg: ALGORITHMS[k.alg] ?? String(k.alg), created_at: k.created_at, last_used: k.last_used }));
+  const grants = (revoked.results as { id: string; agent: string }[]).map((g) => ({ id: g.id, agent: g.agent }));
   let record: string | null = address, recordError: string | undefined;
   try {
-    await putRecord(env, key, { schema: "omarchy-pool/passkey-reset/1", login, by: c.login, via: "web", at, reason, passkeys, confirmed_with: ok.passkey, signed_out: true });
+    await putRecord(env, key, { schema: "omarchy-pool/passkey-reset/1", login, by: c.login, via: "web", at, reason, passkeys, confirmed_with: ok.passkey, signed_out: true, token_revoked: true, grants_revoked: grants });
   } catch (e) {
     record = null;
     recordError = String(e instanceof Error ? e.message : e).slice(0, 200);
@@ -523,7 +563,7 @@ export async function handlePasskeyReset(url: URL, request: Request, env: Env): 
       .bind(`the record of ${c.login}'s reset of ${login}'s passkeys was not written: ${recordError}`, JSON.stringify({ login, by: c.login, action: "reset", record: null, record_error: recordError }))
       .run();
   }
-  return json({ reset: login, by: c.login, at, reason, passkeys, confirmed_with: ok.passkey, signed_out: true, record, ...(recordError ? { record_error: recordError } : {}) }, 200, NO_STORE);
+  return json({ reset: login, by: c.login, at, reason, passkeys, confirmed_with: ok.passkey, signed_out: true, token_revoked: true, grants_revoked: grants, record, ...(recordError ? { record_error: recordError } : {}) }, 200, NO_STORE);
 }
 
 // ---------- the web's approve and block (#271): routes/review.ts and routes/blocks.ts call them ----------
@@ -537,19 +577,22 @@ export type PasskeyGate = (assertion: unknown) => Promise<{ passkey: string } | 
  * approves or blocks, a maintainer's `omc_` included — from its page's
  * Origin, on an address the relying party list names, with an assertion
  * for a challenge issued to this login for exactly this act (`subject`:
- * `approve:<task>`, `block:package:<name>`, `block:contributor:<login>`).
- * The handler runs it once its own predicate allowed the act and before it
+ * `approve:<task>`, `block:package:<name>`, `block:contributor:<login>`,
+ * and since #284 `promote:force:<from>:<to>[:<arch>]`, jobs.ts). The
+ * handler runs it once its own predicate allowed the act and before it
  * writes anything (decidedWith), so a refusal of the act is said first and
  * in the same words as anywhere else.
  */
 export function webGate(request: Request, url: URL, env: Env, login: string, subject: string): PasskeyGate {
+  // The door's words: approve and block, or a promotion forced past its evidence (#284).
+  const [are, nothing] = subject.startsWith("promote:") ? ["a promotion forced past its evidence is", "nothing was queued"] : ["approve and block are", "nothing was decided"];
   return async (assertion) => {
     if (browserSession(request).bearer) {
-      return json({ error: "approve and block are decided in the browser, with its session and your passkey: a request that carries an Authorization header — a contributor's token, a script's — is refused; nothing was decided", code: "session_only" }, 403, NO_STORE);
+      return json({ error: `${are} confirmed in the browser, with its session and your passkey: a request that carries an Authorization header — a contributor's token, a script's — is refused; ${nothing}`, code: "session_only" }, 403, NO_STORE);
     }
     const rp = relyingParty(url);
-    if (!rp) return json({ error: `approve and block are confirmed with a passkey, which works on ${DASHBOARD_HOST} (and on localhost in development), not on ${url.hostname}; nothing was decided`, code: "rp_unavailable" }, 403, NO_STORE);
-    if (request.headers.get("origin") !== url.origin) return json({ error: `not from the pool's page: approve and block are confirmed on ${rp.origin}; nothing was decided`, code: "origin" }, 403, NO_STORE);
+    if (!rp) return json({ error: `${are} confirmed with a passkey, which works on ${DASHBOARD_HOST} (and on localhost in development), not on ${url.hostname}; ${nothing}`, code: "rp_unavailable" }, 403, NO_STORE);
+    if (request.headers.get("origin") !== url.origin) return json({ error: `not from the pool's page: ${are} confirmed on ${rp.origin}; ${nothing}`, code: "origin" }, 403, NO_STORE);
     const ok = await checkAssertion(env, rp, login, subject, assertionIn(assertion));
     return "refused" in ok ? refusedAct(ok, rp, login, subject) : ok;
   };
