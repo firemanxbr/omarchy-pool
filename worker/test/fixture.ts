@@ -102,6 +102,26 @@ export function ownScriptOf(html: string): string | null {
   return own.startsWith(KIT_HELPERS) ? own.slice(KIT_HELPERS.length) : own;
 }
 
+/**
+ * What a served page's stylesheets declare for one selector: every rule of
+ * its <style> blocks that names it — an @media's rules too, since a rule a
+ * width turns on is still a rule — merged in order, the later declaration
+ * winning, each value as written. What a layout test reads where no browser
+ * measures (package-view.test.ts, people.test.ts: #274).
+ */
+export function declared(html: string, selector: string): Record<string, string> {
+  const css = [...html.matchAll(/<style>([\s\S]*?)<\/style>/g)].map((m) => m[1]).join("\n").replace(/\/\*[\s\S]*?\*\//g, "");
+  const out: Record<string, string> = {};
+  for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    if (!m[1].split(",").map((x) => x.trim()).includes(selector)) continue;
+    for (const d of m[2].split(";")) {
+      const at = d.indexOf(":");
+      if (at > 0) out[d.slice(0, at).trim()] = d.slice(at + 1).trim();
+    }
+  }
+  return out;
+}
+
 /** What runScript hands back: the document's nodes by the selector they were asked for, the functions asked for by name, and a setter per variable asked for. */
 export type Ran = { nodes: Record<string, any> } & Record<string, any>;
 

@@ -91,44 +91,77 @@ agent_label() {
 # AGENT_PROBE_MINUTES (30) and after a build the agent failed in; its answer
 # goes with every claim, and the brain hands agent work — a draft, an audit
 # — only to a worker whose agent is ok (docs/GOVERNANCE.md, *Workers*).
-AGENT_STATUS=""; AGENT_ERROR=""; AGENT_CHECKED=0
+#
+# A probe that did not answer is not a verdict for half an hour: the agent
+# behind it may only be starting — a broker installing Claude Code, the
+# agent proxy replaced in the same rollout (both review workers on the
+# Studio refused at their only check and not ready for 35 minutes after
+# v1.0.0, and again after v1.0.1, until someone restarted them: #273). So
+# a failed probe is tried again after AGENT_RETRY_SECONDS (15), doubled at
+# each failure, until the agent answers — up to AGENT_RETRY_MAX_SECONDS,
+# by default the AGENT_PROBE_MINUTES a healthy agent is probed at: one
+# that is starting answers within the first few re-checks, and one that
+# fails for good (no credit, a revoked key) is asked no more often than
+# before, each probe a real completion (found in review). Every result
+# goes with the next claim as before. A failure is said once per change of
+# state — the first one, a different error, the answer again — never at
+# every re-check; a healthy agent is said at each of its probes, as before.
+AGENT_STATUS=""; AGENT_ERROR=""; AGENT_CHECKED=0; AGENT_RETRY=0; AGENT_FAILS=0
 agent_probe() {
-  local out
+  local out who status="" error="" ms="?"
   if [[ -n "${OMARCHY_BROKER:-}" ]]; then
     # The broker probes its own agent and says who it is; a broker without
     # an agent is a worker without one. It may still be starting (installing
-    # the agent): a while, not a verdict.
-    local tries=0
+    # the agent): a while, not a verdict — twenty tries at start; a re-check
+    # later is one try, and the backoff below spaces them.
+    local tries=0 most=1
+    (( AGENT_CHECKED == 0 )) && most=20
     while :; do
       out="$(curl -sS --max-time 180 "$OMARCHY_BROKER/health" 2>/dev/null || true)"
       [[ -n "$out" ]] && break
-      tries=$((tries + 1)); (( tries < 20 )) || break
+      tries=$((tries + 1)); (( tries < most )) || break
       sleep 15
     done
-    BROKER_AGENT="$(jq -r '.agent // ""' <<<"$out" 2>/dev/null || true)"
-    if [[ -z "$BROKER_AGENT" ]]; then AGENT_STATUS=""; AGENT_ERROR=""
-    elif [[ "$(jq -r '.ok' <<<"$out" 2>/dev/null)" == true ]]; then
-      AGENT_STATUS=ok; AGENT_ERROR=""; log "agent $BROKER_AGENT, through the broker: ok ($(jq -r '.ms // "?"' <<<"$out") ms)"
+    if [[ -z "$out" ]]; then
+      who="${BROKER_AGENT:-(not known yet)}, through the broker"; status=error; error="the broker at $OMARCHY_BROKER did not answer"
     else
-      AGENT_STATUS=error; AGENT_ERROR="$(jq -r '.error // "no answer"' <<<"$out" 2>/dev/null || echo "no answer")"
-      log "agent $BROKER_AGENT, through the broker: NOT ready — ${AGENT_ERROR:0:200}"
+      BROKER_AGENT="$(jq -r '.agent // ""' <<<"$out" 2>/dev/null || true)"; who="$BROKER_AGENT, through the broker"
+      if [[ -z "$BROKER_AGENT" ]]; then status=""
+      elif [[ "$(jq -r '.ok' <<<"$out" 2>/dev/null)" == true ]]; then status=ok; ms="$(jq -r '.ms // "?"' <<<"$out")"
+      else status=error; error="$(jq -r '.error // "no answer"' <<<"$out" 2>/dev/null || echo "no answer")"; fi
     fi
-    AGENT_CHECKED=$(date +%s)
-    return
-  fi
-  [[ -n "$(agent_label)" ]] || { AGENT_STATUS=""; AGENT_ERROR=""; return; }
-  factory_lib
-  if out="$(with_secrets timeout 120 python3 "$FACTORY_LIB"/bin/agent.py --probe 2>/dev/null)"; then
-    AGENT_STATUS=ok; AGENT_ERROR=""
-    log "agent $(agent_label): ok ($(jq -r '.ms' <<<"$out" 2>/dev/null || echo ?) ms)"
   else
-    AGENT_STATUS=error; AGENT_ERROR="$(jq -r '.error // "no answer"' <<<"$out" 2>/dev/null || echo "no answer")"
-    log "agent $(agent_label): NOT ready — ${AGENT_ERROR:0:200}"
+    [[ -n "$(agent_label)" ]] || { AGENT_STATUS=""; AGENT_ERROR=""; return; }
+    factory_lib
+    who="$(agent_label)"
+    if out="$(with_secrets timeout 120 python3 "$FACTORY_LIB"/bin/agent.py --probe 2>/dev/null)"; then
+      status=ok; ms="$(jq -r '.ms' <<<"$out" 2>/dev/null || echo ?)"
+    else
+      status=error; error="$(jq -r '.error // "no answer"' <<<"$out" 2>/dev/null || echo "no answer")"
+    fi
   fi
-  AGENT_CHECKED=$(date +%s)
+  [[ "$status" != error || -n "$error" ]] || error="no answer"
+  agent_checked "$who" "$status" "$error" "$ms"
 }
-agent_probe_if_due() {
+agent_checked() { # who status error ms — what the claims report from now on, the log line on a change, when to check again
+  local who="$1" status="$2" error="$3" ms="$4" first="${AGENT_RETRY_SECONDS:-15}" most="${AGENT_RETRY_MAX_SECONDS:-$(( ${AGENT_PROBE_MINUTES:-30} * 60 ))}"
+  if [[ "$status" == error ]]; then
+    AGENT_FAILS=$((AGENT_FAILS + 1))
+    if (( AGENT_FAILS == 1 )); then AGENT_RETRY=$first; else AGENT_RETRY=$(( AGENT_RETRY * 2 )); fi
+    (( AGENT_RETRY <= most )) || AGENT_RETRY=$most
+    if [[ "$AGENT_STATUS" != error || "$AGENT_ERROR" != "$error" ]]; then
+      log "agent $who: NOT ready — ${error:0:200}; checking again in $AGENT_RETRY s, then less often (up to every $most s) until it answers"
+    fi
+  else
+    if [[ "$status" == ok ]] && (( AGENT_FAILS > 0 )); then log "agent $who: ok ($ms ms) — answering again after $AGENT_FAILS failed check(s)"
+    elif [[ "$status" == ok ]]; then log "agent $who: ok ($ms ms)"; fi
+    AGENT_FAILS=0; AGENT_RETRY=0
+  fi
+  AGENT_STATUS="$status"; AGENT_ERROR="$error"; AGENT_CHECKED=$(date +%s)
+}
+agent_probe_if_due() { # every AGENT_PROBE_MINUTES while it answers; on the backoff while it does not
   local every=$(( ${AGENT_PROBE_MINUTES:-30} * 60 ))
+  [[ "$AGENT_STATUS" == error ]] && every=$AGENT_RETRY
   (( $(date +%s) - AGENT_CHECKED >= every )) && agent_probe
   return 0
 }

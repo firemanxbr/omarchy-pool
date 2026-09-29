@@ -81,8 +81,12 @@ verify and attest the package faster and approve it with more confidence.
    that differ lit, both logs. A claim can be let go (*Release claim*) by the
    maintainer who made it or another, while a rebuild of it is queued or
    running; every rebuild of the claim stops, one already staged too, and
-   the package waits for a claim again. A maintainer may
-   also stop the round with a note: *Request changes* sends it back to the
+   the package waits for a claim again. The words are the same on every
+   page: a package built and waiting for a claim is *ready for review*; from
+   the claim until the decision — the rebuild queued, running or staged —
+   it is *in review*, on the Factory's line, on Review and on the package's
+   page alike; the Factory's line files a package by Review's own list. A
+   maintainer may also stop the round with a note: *Request changes* sends it back to the
    factory and the name stays the requester's; *Reject* frees a request's
    name. One review covers the package: it starts once every architecture
    requested is built or *not supported*, and the project builds each built

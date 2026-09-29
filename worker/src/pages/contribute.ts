@@ -80,7 +80,7 @@ const BODY = String.raw`
     <div class="op-stats fx-stats" id="tiles">
       <a class="op-stat" id="t-line" href="#line"><span class="k">In the factory</span><b class="n" id="t-line-n"><span class="skl"></span></b><span class="s" id="t-line-s">requests on the line</span></a>
       <a class="op-stat" id="t-building" href="#workers"><span class="k">Building now</span><b class="n" id="t-building-n"><span class="skl"></span></b><span class="s" id="t-building-s">workers busy</span></a>
-      <a class="op-stat" id="t-ready" href="/review"><span class="k">Ready for review</span><b class="n" id="t-ready-n"><span class="skl"></span></b><span class="s" id="t-ready-s">waiting for a maintainer</span></a>
+      <a class="op-stat" id="t-ready" href="/review"><span class="k">Ready for review</span><b class="n" id="t-ready-n"><span class="skl"></span></b><span class="s" id="t-ready-s">waiting for a claim</span></a>
       <a class="op-stat" id="t-shipped" href="/packages?origin=factory"><span class="k">Shipped</span><b class="n" id="t-shipped-n"><span class="skl"></span></b><span class="s" id="t-shipped-s">approved by a maintainer</span></a>
     </div>
   </section>
@@ -259,6 +259,8 @@ const FACTORY_CSS = String.raw`
   .fx-wjob { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--text); }
   .fx-wjob b { font-weight: 600; } .fx-wjob a { color: inherit; } .fx-wjob a:hover { color: var(--green); } .fx-wjob .fx-step { margin-left: 8px; color: var(--dim); }
   .fx-wrow.idle .fx-wjob { color: var(--dim); }
+  .fx-wrow.notready .fx-wjob { color: var(--dim); } .fx-wrow.notready .fx-wjob b { color: var(--red); }
+  .fx-wmark { display: inline-block; width: 8px; height: 8px; margin-right: 8px; vertical-align: 1px; background: var(--red); }
   .fx-bar { height: 2px; background: var(--line); } .fx-bar i { display: block; height: 2px; background: var(--blue); transition: width .7s linear; } .fx-bar i.unknown { background: var(--dim); }
   .fx-wempty { margin: 0; padding: 14px 16px; font-size: 13px; color: var(--dim); } .fx-wempty a { color: var(--green); }
   .fx .fx-wfoot { flex-wrap: wrap; justify-content: space-between; border-top: 0; color: var(--dim); } .fx-wfoot a { color: var(--green); } .fx-wfoot a:hover { text-decoration: underline; }
@@ -319,7 +321,7 @@ const SCRIPT = String.raw`
   // The registry answers its most recently updated rows (the server's PACKAGES_PAGE) and says when it stopped before the last (truncated): a number counted over it is then a floor, drawn "12+" as People draws it.
   var REG_CUT = false;
   // Where each package stood when the line was last drawn, and when a card moved: a card that moved is lit for a moment (the kit's op-fresh).
-  var SEEN = {}, FRESH = {}, SIG = null, AGAIN = null, READY = null, REVIEWING = null;
+  var SEEN = {}, SEEN_REVIEW = false, FRESH = {}, SIG = null, AGAIN = null, READY = null, REVIEWING = null;
   var ON = {}; ARCHES.forEach(function (a) { ON[a] = true; });
   var params = new URLSearchParams(location.search);
   // A renewal (?renew=<name>, from "Renew the request" on the package's rows): the same card, filled from the record. A name brought here (?name=, the ⌘K menu's Request "<name>"): the card's name, as given — a pacman name only.
@@ -597,6 +599,8 @@ const SCRIPT = String.raw`
     var t = w.current_task ? taskOf(w.current_task) : null, mark = markOf(w.agent), model = w.agent ? String(w.agent).split("/").slice(1).join("/") || w.agent : "";
     var box = '<span class="fx-wbox">' + (mark ? agentMark(mark, w.agent, 22) : '<span title="' + esc(w.agent || "no agent reported") + '">—</span>') + '</span>';
     var top = '<div class="fx-wtop"><span>' + workerName(w) + ' · ' + esc(w.arch) + '</span><span title="' + esc(w.agent || "no agent reported") + '">' + esc(model || "—") + '</span></div>';
+    // Alive but not ready — what it declares needs an agent that did not answer (the listing's ready, the pool's workerReady; the shell's words for why, the agent's own error on hover), as the Workers page's failed pill says it: never "idle, waiting for work" (#273). It is handed no agent work — no draft, no audit — until its agent answers; work that needs none (a contributor's plain build) still comes.
+    if (!w.current_task && !w.ready) { var why = wtNotReady(w); return '<div class="fx-wrow notready">' + box + '<div class="fx-wmain">' + top + '<div class="fx-wjob" title="' + esc(why) + '"><i class="fx-wmark" aria-hidden="true"></i><b>not ready</b><span class="fx-step">' + esc(why) + '</span></div><div class="fx-bar"><i style="width:0%"></i></div></div></div>'; }
     if (!w.current_task) return '<div class="fx-wrow idle">' + box + '<div class="fx-wmain">' + top + '<div class="fx-wjob"><b>idle</b><span class="fx-step">waiting for work</span></div><div class="fx-bar"><i style="width:0%"></i></div></div></div>';
     var p = progressOf(t);
     return '<div class="fx-wrow">' + box + '<div class="fx-wmain">' + top + '<div class="fx-wjob"><a href="/build/' + esc(w.current_task) + '"><b>' + esc(t ? t.name : "#" + w.current_task) + '</b></a><span class="fx-step">' + esc(t ? stepOf(t) : "running") + '</span></div>'
@@ -605,31 +609,42 @@ const SCRIPT = String.raw`
   function drawWorkers() {
     var list = $("#fx-wlist"), head = $("#fx-busy"); if (!list) return;
     if (!LISTING) { if (DOWN.listing) { list.innerHTML = '<p class="fx-wempty">' + esc(DOWN.listing) + '</p>'; if (head) head.textContent = ""; } return; }
-    var ws = (LISTING.workers || []).filter(function (w) { return w.alive && !w.revoked_at; }).sort(function (a, b) { return (b.current_task ? 1 : 0) - (a.current_task ? 1 : 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0); });
-    var working = ws.filter(function (w) { return w.current_task; }).length, shown = ws.slice(0, 6);
-    if (head) head.textContent = num(working) + " busy · " + num(ws.length - working) + " idle";
+    // Busy first, then the ones not ready (what a maintainer looks at), then the idle.
+    var rank = function (w) { return w.current_task ? 0 : w.ready ? 2 : 1; };
+    var ws = (LISTING.workers || []).filter(function (w) { return w.alive && !w.revoked_at; }).sort(function (a, b) { return rank(a) - rank(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0); });
+    var working = ws.filter(function (w) { return w.current_task; }).length, down = ws.filter(function (w) { return !w.current_task && !w.ready; }).length, shown = ws.slice(0, 6);
+    if (head) head.textContent = num(working) + " busy · " + num(ws.length - working - down) + " idle" + (down ? " · " + num(down) + " not ready" : "");
     // The rest are counted, not linked: the card's foot is the way to every worker.
     list.innerHTML = (shown.length ? shown.map(workerRowOf).join("") + (ws.length > shown.length ? '<p class="fx-wempty">' + num(ws.length - shown.length) + ' more alive</p>' : '') : '<p class="fx-wempty">No worker is alive right now. A request waits in the queue until one is.</p>')
       // A refresh that did not answer leaves the last answer's rows, and says so.
       + (DOWN.listing ? '<p class="fx-wempty">' + esc(DOWN.listing) + '</p>' : '');
   }
 
-  // ---- the line: where each package stands, from its targets (targets.ts — where each of its architectures stands, the server's one rule): building while an architecture builds, in review while the project builds it again, ready for review once it is built and nothing of it runs, shipped once approved; checking while nothing of it is in flight. Rejected, blocked and unmaintained registrations are off the line, and so is a request whose every build failed after its tries: nothing of it moves until its owner renews it.
-  var OFF = { rejected: 1, unmaintained: 1 }, SHIPPED = { approved: 1, published: 1 }, BUILT = { built: 1, reviewed: 1 }, RUNS = { building: 1, reviewing: 1 };
+  // ---- the line: where each package stands, from its targets (targets.ts — where each of its architectures stands, the server's one rule): building while an architecture builds, ready for review once it is built and nothing of it runs, in review while the project's rebuild is queued, running or staged, shipped once approved; checking while nothing of it is in flight. Rejected, blocked and unmaintained registrations are off the line, and so is a request whose every build failed after its tries: nothing of it moves until its owner renews it.
+  var OFF = { rejected: 1, unmaintained: 1 }, SHIPPED = { approved: 1, published: 1 }, BUILT = { built: 1 }, CLAIMED = { reviewing: 1, reviewed: 1 }, RUNS = { building: 1, reviewing: 1 };
   // The one target word that says "in the pool" (targets.ts) — a target's, never the registry's status, and never a ring: where it is served is the approval's (approvalWhere).
   var IN_POOL = { published: 1 };
   function statuses(p) { var t = p.targets || {}; return Object.keys(t).map(function (a) { return t[a].status; }); }
   function allFailed(p) { var st = statuses(p); return st.length > 0 && st.every(function (s) { return s === "not_supported"; }); }
-  function stageOf(p) {
+  function lineOf(p) {
     if (p.blocked_at || OFF[p.status]) return -1;
     var st = statuses(p), has = function (s) { return st.indexOf(s) >= 0; };
     if (has("building")) return 1;
-    if (has("reviewing")) return 3;
+    if (st.some(function (s) { return CLAIMED[s]; })) return 3;
     if (st.some(function (s) { return BUILT[s]; })) return 2;
     if (st.some(function (s) { return SHIPPED[s]; }) || (!st.length && p.landed)) return 4;
     if (allFailed(p)) return -1;
     return 0;
   }
+  // The two review columns are Review's, word for word (#274): a package the review list names is filed by the list's own state (routes/review.ts, the one rule) — ready, waiting for a claim: Ready for review; in_review, from the claim until the decision, a new version building beside it too: In review; neither — a build of a version already approved, one whose gate or audit is not through yet —: in neither column, shipped once it landed, else still checking. One the list does not name (it holds the hundred newest staged builds), or before the list answered: its targets' place.
+  function stageOf(p) {
+    var s = lineOf(p), r = REVIEW && s >= 0 ? stateIn(p.name) : undefined;
+    if (r === undefined) return s;
+    if (r === "in_review") return 3;
+    if (r === "ready") return 2;
+    return s === 2 || s === 3 ? (p.landed ? 4 : 0) : s;
+  }
+  function stateIn(name) { var l = REVIEW.packages || []; for (var i = 0; i < l.length; i++) if (l[i].name === name) return l[i].state; return undefined; }
   // Whether a worker holds a build of the package right now — its contributor's or the project's: the live read's leased task behind one of its targets.
   function running(p) { var t = p.targets || {}; return Object.keys(t).some(function (a) { var x = taskOf(t[a].task); return RUNS[t[a].status] && !!x && x.status === "leased"; }); }
   // The architectures a card names: each one in the pool's order, with the shell's word for where it stands — and the faintest square for one nobody asked for. An approved one says where its approval stands today (approvalWhere's title), not the target's word, which promises edge of a publish that may have failed.
@@ -647,7 +662,7 @@ const SCRIPT = String.raw`
   function noteOf(p, s) {
     var t = p.targets || {}, arches = Object.keys(t), ns = arches.filter(function (a) { return t[a].status === "not_supported"; });
     var off = ns.length ? ns.join(", ") + " not supported" : "";
-    if (s === 0) return ["on the record · no build yet", ""];
+    if (s === 0) return [arches.some(function (a) { return BUILT[t[a].status]; }) ? "built · not ready yet" : "on the record · no build yet", ""];
     if (s === 1) {
       var run = arches.filter(function (a) { return t[a].status === "building"; }).map(function (a) { return taskOf(t[a].task); }).filter(Boolean)[0];
       var doing = run ? (run.status === "leased" ? stepOf(run) : "queued for a worker") : "queued for a worker";
@@ -655,10 +670,10 @@ const SCRIPT = String.raw`
     }
     if (s === 2) {
       var built = arches.filter(function (a) { return BUILT[t[a].status]; });
-      if (arches.some(function (a) { return t[a].status === "reviewed"; })) return ["the project's build is staged · a maintainer decides", ""];
       return [(built.length === arches.length && arches.length > 1 ? "built on every architecture" : built.join(", ") + " built") + (off ? " · " + off : ""), off ? "warn" : ""];
     }
-    if (s === 3) return ["the project builds it again" + (off ? " · " + off : ""), ""];
+    // In review: the project's rebuild running, or staged for a maintainer's decision — or a new version building while the claim on the last one stands. Short enough for the card's one line at 1024.
+    if (s === 3) { var at = function (w) { return arches.some(function (a) { return t[a].status === w; }); }; return [(at("reviewing") ? "project rebuilding" : at("building") ? "new version building" : "rebuild staged") + (off ? " · " + off : ""), ""]; }
     var a = standingOf(p);
     if (a) { var where = approvalWhere(a); return [where.word + (off ? " · " + off : ""), where.cls === "error" ? "bad" : ""]; }
     // No row to read yet: the targets' own word — in the pool once published; an approval alone promises nothing of its publish.
@@ -679,14 +694,16 @@ const SCRIPT = String.raw`
     return '<a class="fx-card' + (FRESH[p.name] && Date.now() - FRESH[p.name] < 1600 ? " op-fresh" : "") + '" href="' + esc(hrefOf(p, s)) + '">'
       + '<span class="fx-c1"><span><b>' + esc(p.name) + '</b><span class="v">' + esc(p.release || "") + '</span></span><span class="age" title="' + esc(p.updated_at || "") + '">' + esc(since(p.updated_at)) + '</span></span>'
       + '<span class="fx-c2"><span class="fx-by">' + (p.owner ? '<span aria-hidden="true">' + avatarIcon(p.owner) + '</span>' : "") + '<span>' + esc(p.owner || "—") + '</span></span>' + squares(p) + '</span>'
-      + '<span class="fx-note' + (note[1] ? " " + note[1] : "") + '">' + esc(note[0]) + '</span></a>';
+      + '<span class="fx-note' + (note[1] ? " " + note[1] : "") + '" title="' + esc(note[0]) + '">' + esc(note[0]) + '</span></a>';
   }
   var COUNTS = null;
   function drawBoard() {
     if (!REG) { if (DOWN.reg) { $("#line-note").textContent = DOWN.reg; for (var i = 0; i < LINE.length; i++) { $("#col-" + i + "-n").textContent = "—"; } } return; }
     // A refresh that did not answer leaves the last answer's cards, and says so.
     $("#line-note").textContent = DOWN.reg || "live · a card moves when its job ends";
-    var cols = [[], [], [], [], []], now = Date.now(), first = !Object.keys(SEEN).length;
+    // The first drawing with the review list is a first drawing too: a card the list files in another column did not move.
+    var cols = [[], [], [], [], []], now = Date.now(), first = !Object.keys(SEEN).length || SEEN_REVIEW !== !!REVIEW;
+    SEEN_REVIEW = !!REVIEW;
     REG.forEach(function (p) {
       var s = stageOf(p);
       // A card that moved, or one that arrived after the first drawing, is lit a moment and kept at the top of its column for a minute.
@@ -713,8 +730,8 @@ const SCRIPT = String.raw`
       queued: LISTING ? cols[1].filter(function (p) { return !running(p); }).length : null,
       landed: REG.filter(function (p) { return p.landed; })
     };
-    // What waits for a maintainer is the review list's own count (one truth with Review's tile): read again when a package enters or leaves the two review columns, never on a clock.
-    var inReview = cols[2].concat(cols[3]).map(function (p) { return p.name; }).sort().join(",");
+    // What waits for a maintainer is the review list's own count (one truth with Review's tile): read again when the targets move a package into, out of or between the two review columns — a claim —, never on a clock. The targets' place, not the list's: the list's own answer never asks for itself again.
+    var inReview = REG.map(function (p) { var s = lineOf(p); return s === 2 || s === 3 ? p.name + ":" + s : ""; }).filter(Boolean).sort().join(",");
     if (READY !== null && inReview !== READY) { clearTimeout(REVIEWING); REVIEWING = setTimeout(loadReview, 1500); }
     READY = inReview;
     // Where a shipped card's approval stands is the approvals list's: read when the Shipped column changes, never on a clock.
@@ -722,7 +739,7 @@ const SCRIPT = String.raw`
     if (shipped !== SHIPPED_SIG) { SHIPPED_SIG = shipped; if (shipped) loadApprovals(); }
   }
 
-  // ---- the four numbers: the line's own counts, the builds a worker holds now (the live read), the review list's waiting (one truth with Review), the registry's landed (approved by a maintainer — the Pool's and People's word). A list that did not answer reads "—", its reason on hover.
+  // ---- the four numbers: the line's own counts, the builds a worker holds now (the live read), the review list's ready (Review's own tile: waiting for a claim), the registry's landed (approved by a maintainer — the Pool's and People's word). A list that did not answer reads "—", its reason on hover.
   var LANDED_ONCE = {};
   function atLeast(n) { return num(n) + "+"; }
   function tile(key, row, why) {
@@ -738,8 +755,8 @@ const SCRIPT = String.raw`
     tile("line", COUNTS ? ["In the factory", num(COUNTS.line), "requests on the line" + (COUNTS.again ? " · " + num(COUNTS.again) + " of them new versions" : ""), COUNTS.line] : null, DOWN.reg);
     // Building now is what workers hold at this moment; the Building column's other cards wait in the queue.
     tile("building", COUNTS && wc && COUNTS.running !== null ? ["Building now", num(COUNTS.running), num(COUNTS.queued) + " queued · " + num(wc.building) + " of " + num(wc.alive) + " workers busy", COUNTS.running] : null, DOWN.reg || DOWN.listing);
-    // The oldest one's age rides on hover: the tile says what the number is, in a line.
-    tile("ready", REVIEW ? ["Ready for review", num(REVIEW.waiting), REVIEW.oldest_ms ? '<span title="the oldest has waited ' + esc(span(REVIEW.oldest_ms)) + '">waiting for a maintainer</span>' : "waiting for a maintainer", REVIEW.waiting] : null, DOWN.review);
+    // Ready for review is Review's own tile, word for word: the list's ready, waiting for a claim — a package claimed is in review on both pages, never counted here (#274).
+    tile("ready", REVIEW ? ["Ready for review", num(REVIEW.ready), "waiting for a claim", REVIEW.ready] : null, DOWN.review);
     var landed = COUNTS ? COUNTS.landed : [];
     // Counted over the registry's newest rows: when it was cut, at least that many, the reason on hover.
     tile("shipped", COUNTS ? ["Shipped", num(landed.length), "approved by a maintainer, from " + num(Object.keys(from).length) + (REG_CUT ? "+" : "") + " contributors", landed.length, REG_CUT ? atLeast : null, REG_CUT ? "at least: the registry read here is its newest " + num(REG.length) + " requests" : ""] : null, DOWN.reg);
@@ -760,7 +777,7 @@ const SCRIPT = String.raw`
       var note = s >= 0 ? noteOf(p, s)[0] : failed ? "every architecture's build failed after its tries · renew it to try again" : (p.detail || "");
       return '<a class="fx-mrow ' + (s >= 0 ? "c" + s : "c-off") + '" href="' + esc(hrefOf(p, s)) + '"><span class="nm"><b>' + esc(p.name) + '</b><span>' + esc(p.release || "") + '</span></span><span class="fx-stage">' + lucide(word[1], 13) + esc(word[0]) + '</span>' + squares(p) + '<span class="note">' + esc(note) + '</span><span class="go" aria-hidden="true">›</span></a>';
     }).join("") || '<p class="fx-mempty">Nothing yet. Your first request shows up here.</p>';
-    if (isMaintainer()) { maint.setAttribute("href", "/review"); maint.textContent = "Review queue" + (REVIEW ? " · " + num(REVIEW.waiting) + " waiting" : "") + " ›"; }
+    if (isMaintainer()) { maint.setAttribute("href", "/review"); maint.textContent = "Review queue" + (REVIEW ? " · " + num(REVIEW.ready) + " ready · " + num(REVIEW.in_review) + " in review" : "") + " ›"; }
     else {
       var approved = mine.filter(function (p) { return p.landed; }).length;
       maint.setAttribute("href", "/docs/governance#becoming");
@@ -798,7 +815,7 @@ const SCRIPT = String.raw`
     }).catch(function (e) { DOWN.listing = noAnswer("worker listing", e); draw(); });
   }
   function loadReview() {
-    return api("GET", "/api/v1/factory/review").then(function (d) { REVIEW = d; DOWN.review = ""; drawTiles(); drawMine(); })
+    return api("GET", "/api/v1/factory/review").then(function (d) { REVIEW = d; DOWN.review = ""; drawBoard(); drawTiles(); drawMine(); })
       .catch(function (e) { DOWN.review = noAnswer("review list", e); drawTiles(); });
   }
   // The approvals that stand, first per name (the list is newest first). One that did not answer leaves the shipped cards with their targets' own word.
@@ -897,14 +914,14 @@ export const FACTORY_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // Four numbers: the line's own counts — in the factory (a shipped package on the line again for a new version said so), building now (what a worker holds this moment: the live read's leased tasks behind a card's targets, the rest of the Building column queued) —, the review list's own `waiting` and `oldest_ms` — the number Review's and the Pipeline's tiles say — and the registry's `landed`, captioned as what it counts: approved by a maintainer, from the contributors who are not in the maintainer set. A list that did not answer reads "—" with its reason on hover.
+      // Four numbers: the line's own counts — in the factory (a shipped package on the line again for a new version said so), building now (what a worker holds this moment: the live read's leased tasks behind a card's targets, the rest of the Building column queued) —, the review list's own `ready` — Review's Ready for review tile, word for word: a package waiting for a claim, never one claimed, which is in review on both pages (#274) — and the registry's `landed`, captioned as what it counts: approved by a maintainer, from the contributors who are not in the maintainer set. A list that did not answer reads "—" with its reason on hover.
       id: "factory.tiles",
       page: "/factory",
       anchor: ['<div class="op-stats fx-stats" id="tiles">', 'id="t-line-n"', 'id="t-building-n"', 'id="t-ready-n"', 'id="t-shipped-n"', "In the factory", "Building now", "Ready for review", "Shipped"],
-      script: ["function drawTiles()", '"Ready for review"', "REVIEW.waiting", "REVIEW.oldest_ms", "span(REVIEW.oldest_ms)", "workerCounts(LISTING.workers || [])", "p.landed", "maintainerSet(function (m)", '"approved by a maintainer, from "', '" contributors"', "countUp(n, row[3], row[4])", "REG_CUT = !!d.truncated", "REG_CUT ? atLeast : null", "did not answer", "function running(p)", 'x.status === "leased"', '" of them new versions"', '" queued · "'],
+      script: ["function drawTiles()", '"Ready for review"', "num(REVIEW.ready)", '"waiting for a claim"', "workerCounts(LISTING.workers || [])", "p.landed", "maintainerSet(function (m)", '"approved by a maintainer, from "', '" contributors"', "countUp(n, row[3], row[4])", "REG_CUT = !!d.truncated", "REG_CUT ? atLeast : null", "did not answer", "function running(p)", 'x.status === "leased"', '" of them new versions"', '" queued · "'],
       reads: [
         { path: "/api/v1/factory/packages", fields: ["truncated", "packages", "packages.0.name", "packages.0.owner", "packages.0.landed", "packages.0.targets"] },
-        { path: "/api/v1/factory/review", fields: ["waiting", "oldest_ms"] },
+        { path: "/api/v1/factory/review", fields: ["ready"] },
         { path: "/api/v1/factory?live=1&limit=20", fields: ["workers", "workers.0.alive", "workers.0.current_task", "workers.0.revoked_at", "tasks", "tasks.0.id", "tasks.0.status"] },
         { path: "/api/v1/factory/maintainers", fields: ["maintainers", "maintainers.0.login"] },
       ],
@@ -1014,15 +1031,15 @@ export const FACTORY_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // The workers, live: each one alive, busy first, with its agent's mark, its job and step from the listing's task, and how far it is against the week's time of a job of its kind (the stats series: jobs_daily and builds_daily carry ms). What runs now is the listing's live read (the tasks in flight through the queue's index, no counts), every minute, and nothing while the tab is hidden: the whole listing read every task twice, and every twenty seconds was a page nobody watched costing the most.
+      // The workers, live: each one alive, busy first, then any not ready (its agent did not answer: the listing's ready, the shell's wtNotReady for why, the agent's error on hover — #273), with its agent's mark, its job and step from the listing's task, and how far it is against the week's time of a job of its kind (the stats series: jobs_daily and builds_daily carry ms). What runs now is the listing's live read (the tasks in flight through the queue's index, no counts), every minute, and nothing while the tab is hidden: the whole listing read every task twice, and every twenty seconds was a page nobody watched costing the most.
       id: "factory.workers",
       page: "/factory",
       anchor: ['<div class="op-card fx-workers" id="workers">', 'id="fx-busy"', 'id="fx-wlist"', '<a href="/workers">All workers →</a>', 'class="op-live-dot"'],
-      script: ['api("GET", "/api/v1/factory?live=1&limit=20")', "LIVE_MS = 60000", "if (!document.hidden) loadListing();", '"visibilitychange"', "function workerRowOf(w)", "agentMark(mark, w.agent, 22)", "workerName(w)", "function stepOf(t)", '"rebuilding from scratch"', '"writing the PKGBUILD"', "function typicalMs(t)", "s.builds_daily", "s.jobs_daily", "liveStats(function (d) { STATS = d; drawWorkers(); }, 120000)", 'noAnswer("worker listing", e)'],
+      script: ['api("GET", "/api/v1/factory?live=1&limit=20")', "LIVE_MS = 60000", "if (!document.hidden) loadListing();", '"visibilitychange"', "function workerRowOf(w)", "agentMark(mark, w.agent, 22)", "workerName(w)", "!w.current_task && !w.ready", "wtNotReady(w)", "<b>not ready</b>", '" not ready"', "function stepOf(t)", '"rebuilding from scratch"', '"writing the PKGBUILD"', "function typicalMs(t)", "s.builds_daily", "s.jobs_daily", "liveStats(function (d) { STATS = d; drawWorkers(); }, 120000)", 'noAnswer("worker listing", e)'],
       reads: [
         {
           path: "/api/v1/factory?live=1&limit=20",
-          fields: ["workers", "workers.0.id", "workers.0.arch", "workers.0.agent", "workers.0.alive", "workers.0.current_task", "workers.0.revoked_at", "tasks", "tasks.0.id", "tasks.0.name", "tasks.0.kind", "tasks.0.trust", "tasks.0.status", "tasks.0.arch", "tasks.0.attempts", "tasks.0.max_attempts", "tasks.0.started_at", "tasks.0.pkgbuild_ref", "tasks.0.params"],
+          fields: ["workers", "workers.0.id", "workers.0.arch", "workers.0.agent", "workers.0.alive", "workers.0.ready", "workers.0.agent_error", "workers.0.agent_checked_at", "workers.0.current_task", "workers.0.revoked_at", "tasks", "tasks.0.id", "tasks.0.name", "tasks.0.kind", "tasks.0.trust", "tasks.0.status", "tasks.0.arch", "tasks.0.attempts", "tasks.0.max_attempts", "tasks.0.started_at", "tasks.0.pkgbuild_ref", "tasks.0.params"],
         },
         { path: "/api/v1/stats", fields: ["series.jobs_daily", "series.builds_daily", "series.builds_daily.0.ms", "series.builds_daily.0.trust", "series.builds_daily.0.status", "series.builds_daily.0.n"] },
         { path: "/workers", json: false },
@@ -1030,26 +1047,27 @@ export const FACTORY_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // The line: five columns, a card per package placed by its targets (targets.ts, the server's rule for where each architecture stands) — checking, building, ready for review, in review, shipped —, each counting its own cards, an empty one saying so; a request whose every build failed is off it. Each card links the package's one address, its architectures as the kit's squares with the shell's words; a shipped one says where its approval stands in the shell's one word (approvalWhere over GET /factory/approvals, read when the column changes) and leads to the ring that serves it or, in none, to its build. Read again when a build starts or ends, and a card that moved is lit.
+      // The line: five columns, a card per package placed by its targets (targets.ts, the server's rule for where each architecture stands) — checking, building, ready for review, in review, shipped —, the two review columns filed by the review list's own `state` for every package it names (ready: waiting for a claim; in_review: claimed until the decision — routes/review.ts, the rule Review files by, #274), each counting its own cards, an empty one saying so; a request whose every build failed is off it. Each card links the package's one address, its architectures as the kit's squares with the shell's words; a shipped one says where its approval stands in the shell's one word (approvalWhere over GET /factory/approvals, read when the column changes) and leads to the ring that serves it or, in none, to its build. Read again when a build starts or ends, and a card that moved is lit.
       id: "factory.line",
       page: "/factory",
       anchor: ['<section class="fx-line" id="line"', 'id="line-note"', "live · a card moves when its job ends", 'id="board"', ...LINE.map((_, i) => `id="col-${i}"`), ...LINE.map(([name]) => `<span>${escapeHtml(name)}</span>`)],
-      script: ['api("GET", "/api/v1/factory/packages")', "function stageOf(p)", 'has("building")', 'has("reviewing")', "if (allFailed(p)) return -1;", "TARGET_WORD[x.status]", "function hrefOf(p, s)", "approvalWhere(a)", "servedRing(rings)", '"/build/" + task', 'api("GET", "/api/v1/factory/approvals")', "avatarIcon(p.owner)", " op-fresh", "nothing here now", "if (SIG !== null && sig !== SIG) { loadRegistry();", 't.kind === "build"', "if (!document.hidden) loadRegistry();", 'noAnswer("registry", e)'],
+      script: ['api("GET", "/api/v1/factory/packages")', "function stageOf(p)", "function lineOf(p)", 'has("building")', "CLAIMED = { reviewing: 1, reviewed: 1 }", "BUILT = { built: 1 }", 'if (r === "in_review") return 3;', 'if (r === "ready") return 2;', "return s === 2 || s === 3 ? (p.landed ? 4 : 0) : s;", "if (allFailed(p)) return -1;", "TARGET_WORD[x.status]", "function hrefOf(p, s)", "approvalWhere(a)", "servedRing(rings)", '"/build/" + task', 'api("GET", "/api/v1/factory/approvals")', "avatarIcon(p.owner)", " op-fresh", "nothing here now", "if (SIG !== null && sig !== SIG) { loadRegistry();", 't.kind === "build"', "if (!document.hidden) loadRegistry();", 'noAnswer("registry", e)'],
       reads: [
         { path: "/api/v1/factory/packages", fields: ["packages", "packages.0.name", "packages.0.owner", "packages.0.status", "packages.0.release", "packages.0.targets", "packages.0.updated_at", "packages.0.landed", "packages.0.blocked_at", "packages.0.detail"] },
-        { path: "/api/v1/factory/review", fields: ["waiting"] },
+        { path: "/api/v1/factory/review", fields: ["packages", "packages.0.name", "packages.0.state"] },
         { path: "/api/v1/factory/approvals", fields: ["approvals", "approvals.0.name", "approvals.0.standing", "approvals.0.rings", "approvals.0.task_id", "approvals.0.arch", "approvals.0.publish_status", "approvals.0.blocked_at"] },
       ],
       visible: EVERYONE,
     },
     {
-      // Your requests: signed in only — the reader's packages where they stand on the line (or off it, with the registration's own words), the rule that nobody reviews their own, and the way to the review queue for a maintainer or to becoming one for a contributor.
+      // Your requests: signed in only — the reader's packages where they stand on the line (or off it, with the registration's own words), the rule that nobody reviews their own, and the way to the review queue for a maintainer — the list's `ready` and `in_review`, Review's two tiles — or to becoming one for a contributor.
       id: "factory.mine",
       page: "/factory",
       anchor: ['<section class="fx-mine" id="mine" hidden', 'id="mine-n"', 'id="mine-list"', 'href="/docs/governance#becoming"', "You never review your own requests. Another maintainer picks them up."],
-      script: ["function drawMine()", "sec.hidden = !WHO.me", "p.owner === WHO.login", '"Not built"', '"Review queue"', '" approved · you can apply to maintain ›"', '"Get one approved to become a maintainer ›"', "Nothing yet. Your first request shows up here."],
+      script: ["function drawMine()", "sec.hidden = !WHO.me", "p.owner === WHO.login", '"Not built"', '"Review queue"', '" ready · "', "num(REVIEW.in_review)", '" approved · you can apply to maintain ›"', '"Get one approved to become a maintainer ›"', "Nothing yet. Your first request shows up here."],
       reads: [
         { path: "/api/v1/factory/packages", fields: ["packages.0.owner", "packages.0.landed"] },
+        { path: "/api/v1/factory/review", fields: ["ready", "in_review"] },
         { path: "/docs/governance", json: false },
       ],
       visible: SIGNED_IN,

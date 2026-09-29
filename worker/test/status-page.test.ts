@@ -303,6 +303,33 @@ describe("the Status page", () => {
     expect(d.whoOf({ kind: "approve", payload: { by: '"><img src=x>' } })).not.toMatch(/<img|href="\/user\//);
   });
 
+  it("draws a live project worker whose agent did not answer as not ready, with the agent's error — never idle, waiting for work (#273)", async () => {
+    // A review worker's claim after the rollout: its agent proxy refused the probe. It audits, so its agent must answer: not ready.
+    const refused = "URLError: <urlopen error [Errno 111] Connection refused>";
+    const before = await env.DB.prepare("SELECT agent_status, agent_error, agent_checked_at, current_task, kinds FROM build_workers WHERE id = ?").bind(F.worker).first<{ agent_status: string | null; agent_error: string | null; agent_checked_at: string | null; current_task: number | null; kinds: string | null }>();
+    await env.DB.prepare(`UPDATE build_workers SET agent_status = 'error', agent_error = ?, agent_checked_at = ?, current_task = NULL, kinds = '["build","publish","audit"]', last_seen = ? WHERE id = ?`)
+      .bind(refused, new Date(Date.now() - 5 * 60e3).toISOString(), new Date().toISOString(), F.worker).run();
+    try {
+      const d = await drawn();
+      for (let i = 0; i < 100 && !/st-w/.test(d.nodes["#workers-list"]?.innerHTML ?? ""); i++) await new Promise((r) => setTimeout(r, 30));
+      const list = d.nodes["#workers-list"].innerHTML as string;
+      const line = /<div class="st-w notready">[\s\S]*?<div class="st-wbar">/.exec(list)?.[0] ?? "";
+      expect(line, list).toContain(`title="${F.worker}"`);
+      // The reason in the shell's words (wtNotReady, as /workers says it), whole on hover, with when it was checked; a red mark and the word.
+      const why = `its agent did not answer: ${refused.replace(/</g, "&lt;").replace(/>/g, "&gt;")} · checked 5m ago`;
+      expect(line).toContain(`<div class="st-wj" title="${why}"><span class="st-dot fail" aria-hidden="true"></span><b>not ready</b><span class="st-dim">${why}</span></div>`);
+      expect(line).not.toContain("waiting for work");
+      expect(d.nodes["#workers-busy"].textContent).toMatch(/^\d+ of \d+ busy · 1 not ready$/);
+    } finally {
+      await env.DB.prepare("UPDATE build_workers SET agent_status = ?, agent_error = ?, agent_checked_at = ?, current_task = ?, kinds = ? WHERE id = ?").bind(before!.agent_status, before!.agent_error, before!.agent_checked_at, before!.current_task, before!.kinds, F.worker).run();
+    }
+    // Its agent answering again, the same worker is idle, and nothing is counted not ready.
+    const d = await drawn();
+    for (let i = 0; i < 100 && !/st-w/.test(d.nodes["#workers-list"]?.innerHTML ?? ""); i++) await new Promise((r) => setTimeout(r, 30));
+    expect(d.nodes["#workers-list"].innerHTML).not.toContain("not ready");
+    expect(d.nodes["#workers-busy"].textContent).not.toContain("not ready");
+  });
+
   it("keeps Show more under All while the journal holds more: a read that came back full, its metrics snapshots counted", async () => {
     // Three hundred lines, a metrics snapshot every twenty-fifth: /events answers the newest `limit` of them, snapshots and all, as it does.
     const journal = Array.from({ length: 300 }, (_, i) => ({ id: 100000 - i, kind: i % 25 === 3 ? "metrics" : "sync", ring: "edge", source: "extra", status: "ok", summary: `line ${i}`, payload: null, created_at: new Date(Date.now() - i * 60e3).toISOString() }));
