@@ -21,6 +21,7 @@
  *   POST /api/v1/releases                          create / promote / roll back
  *   PUT  /api/v1/releases/:id/artifacts/:kind?repo=&arch=
  *   GET  /api/v1/search?q=&ring=&arch=          package search within a ring
+ *   GET  /api/v1/packages?q=&ring=&arch=&origin=&sort=   the packages list: one row per name, filtered and paged by the server (routes/browse.ts)
  *   GET  /api/v1/package/:name[/files]?ring=&arch=  package page data: rings, manifest, edges
  *   GET  /api/v1/security?ring=&arch=             open advisories in a ring and what they expose
  *   GET  /api/v1/security/components              what the rings' packages embed (Go modules, crates), for OSV
@@ -38,7 +39,7 @@
  *   POST /api/v1/pool/gc?keep=3&limit=200          delete it (objects, then rows)
  *   POST /api/v1/pool/relayout?phase=copy|purge     the one-time move to <source>/<arch>/ (the relayout job)
  *   GET  /                                         the dashboard: the Pool (users), /factory (contributors), /review (maintainers),
- *                                                  /docs, and the detail pages /packages /package/:name /status /people /workers /request /user/:login /build/:id
+ *                                                  /docs, and the detail pages /packages /package/:name /status /agents /people /workers /request /user/:login /build/:id
  *                                                  (/pipeline, /journal, /security and /docs/api redirect to the section they became: MOVED)
  *   GET  /pool/<source>/<arch>/<file>              fallback static origin (dev)
  *   GET  /assets/kit.<hash>.css                    the v1 kit's stylesheet (pages/kit.ts): its primitives and icons, immutable under its hash
@@ -53,6 +54,7 @@ import { handleProvenance } from "./routes/seal";
 import { handleCreateRelease, handleGetRelease, handleReleaseHistory, handlePutArtifact, handleReleaseDiff } from "./routes/releases";
 import { handleGraph } from "./routes/graph";
 import { handlePackage, handlePackageFiles, handleSearch } from "./routes/search";
+import { browseQuery, browseSearch, handleBrowse, type BrowseAnswer } from "./routes/browse";
 import { handlePrune, handlePutAdvisories, handlePutMatches, handleSecurity, handleComponents } from "./routes/security";
 import {
   handleCancelTask, handleClaim, handleComplete, handleEnqueue, handleFactory, handleFail,
@@ -89,6 +91,7 @@ import { docsWorkersHtml } from "./pages/docs-workers";
 import { workersHtml } from "./pages/workers";
 import { userHtml } from "./pages/user";
 import { peopleHtml } from "./pages/people";
+import { agentsHtml } from "./pages/agents";
 import { handleUser, handleUserCan } from "./routes/users";
 import { handleGetEvents, handlePostEvent } from "./routes/events";
 import { handleServiceStatus, handleStats } from "./routes/stats";
@@ -103,7 +106,8 @@ import { docHtml, mdChapterAt } from "./pages/doc";
 import { statusHtml } from "./pages/status";
 import { apiDocsHtml } from "./pages/api-docs";
 import { diffHtml } from "./pages/diff";
-import { packageHtml, packagesHtml } from "./pages/packages";
+import { packageHtml } from "./pages/packages";
+import { packagesHtml } from "./pages/browse";
 import { factoryHtml as factoryPageHtml } from "./pages/contribute";
 import { MORE } from "./pages/layout";
 import { DASHBOARD_HOST, LEGACY_DASHBOARD_HOSTS, isProductionHost, machineOrigin, version } from "./meta";
@@ -216,7 +220,7 @@ export default {
         url.hash = section ?? "";
         return Response.redirect(url.toString(), 301);
       }
-      // A footer page that has not landed yet (MORE's `until`) is a 302 to what stands in for it — Agents, #249's page, is the chapter on connecting an agent today, omarchy-cli as an MCP server — so no browser keeps the move once the page is there.
+      // A footer page that has not landed yet (MORE's `until`) is a 302 to what stands in for it, so no browser keeps the move once the page is there. None has since Agents landed (#249); until then /agents was the chapter on omarchy-cli as an MCP server.
       const interim = MORE.find((m) => m.href === path)?.until;
       if (interim) {
         url.pathname = interim;
@@ -268,9 +272,19 @@ export default {
       if (path === "/workers") return html(workersHtml(env.POOL_URL, version(env)));
       if (path === "/diff") return html(diffHtml(env.POOL_URL, version(env)));
       if (path === "/api" || path === "/api/") return html(apiDocsHtml(env.POOL_URL, version(env)));
-      if (path === "/packages") return html(packagesHtml(env.POOL_URL, version(env)));
+      if (path === "/packages") {
+        // The list is drawn into the page (#245), so it works with script off: from the API's answer for the page's own query, through the API's edge cache under the address the page's script asks for the same list — one stored answer for the two, the list's reads paid once per colo per five minutes, not per view. A value the list does not know is its default here, where the API would refuse it.
+        const { query, typed } = browseQuery(url.searchParams);
+        // A list that threw is said as the API's own 500 says it — "internal error" — never with the database's words, which a public page would print.
+        const res = await cachedApi("GET", "/packages", new URL(`/api/v1/packages${browseSearch(query)}`, url), request, env, ctx).catch((e: unknown) => (console.error(e), json({ error: "internal error" }, 500)));
+        const answer = res.ok ? ((await res.json()) as BrowseAnswer) : null;
+        const error = answer ? null : (((await res.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${res.status}`);
+        return html(packagesHtml(env.POOL_URL, version(env), { query, typed, answer, error }));
+      }
       if (path === "/factory") return html(factoryPageHtml(env.POOL_URL, version(env)));
       if (path === "/people") return html(peopleHtml(env.POOL_URL, version(env)));
+      // Agents (#249): which agent's configuration it shows is the address's (?agent=), so the choice is a link that works with script off; the page reads nothing.
+      if (path === "/agents") return html(agentsHtml(env.POOL_URL, version(env), url.searchParams.get("agent")));
       if (path === "/review") return html(reviewHtml(env.POOL_URL, version(env)));
       if (path === "/request") return html(requestHtml(env.POOL_URL, version(env)));
       const user = path.match(/^\/user\/([A-Za-z0-9-]{1,39})$/);
@@ -496,6 +510,7 @@ async function api(method: string, path: string, url: URL, request: Request, env
   }
   if (method === "GET" && path === "/graph") return handleGraph(url, env);
   if (method === "GET" && path === "/search") return handleSearch(url, env);
+  if (method === "GET" && path === "/packages") return handleBrowse(url, env);
   if (method === "GET" && path === "/security") return handleSecurity(url, env);
   if (method === "GET" && path === "/factory") return handleFactory(env, url);
   if (method === "GET" && path === "/factory/blocks") return handleBlocks(env);

@@ -2,7 +2,7 @@ import { json, type Env } from "../index";
 import { version as running, RINGS, ringsSql, sortRings } from "../meta";
 import { queuePosition } from "../queue";
 import { maintainersOf } from "../governance";
-import { registrationsOf, rights, workersOf, workspace, type Contributor } from "./contributors";
+import { landed, registrationsOf, rights, workersOf, workspace, type Contributor } from "./contributors";
 import { asReviews, stands, wholeReviews } from "./review";
 import { aliveSince, workerView, type WorkerRow } from "./factory";
 import { standsSql } from "./story";
@@ -134,8 +134,8 @@ export async function handleUser(login: string, env: Env): Promise<Response> {
       maintainer_since: listed.find((m) => m.login === login)?.since ?? null,
       since: person.created_at,
       last_seen: person.last_seen,
-      // A registration is one package: where each of its architectures stands rides with it (targets.ts).
-      packages: packages.results.map((p) => ({ ...p, targets: parseTargets(p.targets) })),
+      // A registration is one package: where each of its architectures stands rides with it (targets.ts), and whether it landed, the registry's own flag (landed(), as GET /factory/packages says it) — the People page tells a signed-in viewer they may apply from it.
+      packages: packages.results.map((p) => ({ ...p, targets: parseTargets(p.targets), landed: landed(p.status as string) })),
       builds: await Promise.all(builds.results.map(async (b) => (b.status === "queued" && b.trust === "community" ? { ...b, queue: await queuePosition(env, b as { id: number; arch: string; priority?: number; shared_after?: string | null; pinned_to?: string | null }) } : b))),
       build_counts: counts ?? { staged: 0, published: 0, failed: 0, total: 0 },
       // Every decision as the review it is (one per package, its architectures in `arches` and `targets`), saying whether it stands (`standing`, as GET /factory/approvals says it), and a standing one where the package is today: the rings that serve it.

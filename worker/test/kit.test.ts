@@ -38,7 +38,7 @@ async function get(path: string, method = "GET"): Promise<Response> {
 }
 const page = async (path: string) => (await get(path)).text();
 const styleOf = (html: string) => /<style>([\s\S]*?)<\/style>/.exec(html)![1];
-/** A page drawn with the kit, as a page that adopts it will be served: page({ kit: true }). No page has adopted it yet. */
+/** A page drawn with the kit, as a page that adopts it is served: page({ kit: true }). */
 const kitPage = () => frame({ title: "kit", description: "a page drawn with the v1 kit", active: "none", body: "<p>kit</p>", script: "var own = 1;", poolUrl: "http://pool.test/pool", version: version(env), path: "/kit", kit: true });
 
 // WCAG 2's relative luminance and contrast ratio.
@@ -194,6 +194,8 @@ describe("both themes", () => {
     }
     expect(checked).toBeGreaterThanOrEqual(3);
     expect(rules.some((r) => r.sel === ".suggest a:focus-visible" && greenLine(r.body))).toBe(true);
+    // The kit's copy button is focused with the green line too, not the browser's own ring (the docs index's well is the first page to draw it, #250).
+    expect(rules.some((r) => parts(r.sel).includes(".op-copy:focus-visible") && greenLine(r.body)), ".op-copy:focus-visible").toBe(true);
   });
 
   it("draw the shell's own buttons in the palette's names, never the browser's: the decision dialog's and the Decision cell's", async () => {
@@ -302,8 +304,8 @@ describe("the theme", () => {
 
 describe("the v1 kit", () => {
   it("is on the pages that ask for it, and costs the others nothing: its sheet after the frame's CSS, its helpers after the shell's", async () => {
-    // A page that has not adopted it links no sheet and carries no primitive or kit helper of its own. The one mention of the sheet is the ⌘K menu's (#241): its icons are the kit's, and it links the sheet the first time it opens — nothing is asked for before that (test/go-menu.test.ts opens it).
-    for (const path of ["/", "/factory", "/review", "/docs", "/status"]) {
+    // A page that has not adopted it links no sheet, carries no primitive and not the kit's helpers (the docs index has, #250: test/docs-index.test.ts; Home has, #243, and the package page, #244: below). The one mention of the sheet is the ⌘K menu's (#241): its icons are the kit's, and it links the sheet the first time it opens — nothing is asked for before that (test/go-menu.test.ts opens it).
+    for (const path of ["/factory", "/review", "/status"]) {
       const html = await page(path);
       expect(/<head>([\s\S]*?)<\/head>/.exec(html)![1], path).not.toContain("/assets/kit.");
       expect(html.split("/assets/kit.").length - 1, `${path}: the menu's mention only`).toBe(1);
@@ -318,6 +320,14 @@ describe("the v1 kit", () => {
     expect(styleOf(html)).not.toContain(".op-");
     expect(scriptOf(html)).toContain(KIT_HELPERS);
     expect(ownScriptOf(html)!.trim().startsWith("var own = 1;")).toBe(true);
+    // Home (#243), as served: the sheet once in its head, after the frame's <style>, and the page's own rules (page({ css })) after the sheet, so they refine the kit's; the helpers the shell's.
+    const home = await page("/"), homeHead = /<head>([\s\S]*?)<\/head>/.exec(home)![1];
+    expect(homeHead.match(/\/assets\/kit\./g)?.length).toBe(1);
+    expect(homeHead.indexOf(link)).toBeGreaterThan(homeHead.indexOf("</style>"));
+    expect(homeHead.lastIndexOf("<style>")).toBeGreaterThan(homeHead.indexOf(link));
+    expect(styleOf(home)).not.toContain(".op-");
+    expect(scriptOf(home)).toContain(KIT_HELPERS);
+    expect(ownScriptOf(home)).not.toContain(KIT_HELPERS.trim().slice(0, 80));
     // A package's page is drawn with it (#244): the sheet in its head after the frame's CSS, then the page's own rules; the helpers after the shell's, and its own script after them.
     const pkg = await page("/package/zlib"), pkgHead = /<head>([\s\S]*?)<\/head>/.exec(pkg)![1];
     expect(pkgHead.match(/\/assets\/kit\./g)?.length).toBe(1);
