@@ -84,7 +84,7 @@ import { handleBlockContributor, handleUnblockContributor, handleBlockPackage, h
 import { handleAdoptPackage } from "./routes/adopt";
 import { handleAuthStart, handleAuthCallback, handleLogout } from "./routes/auth";
 import { agentClaimOrRelease, dashboardOrigin, handleAgentLogout, handleConfirm, handleConfirmChallenge, handleConfirmPage, handleDraft, handleGetDraft, handleGrant, handleGrantPage, handleRevokeGrant, handleSwap } from "./routes/agents";
-import { handlePasskeyAssert, handlePasskeyOptions, handlePasskeyRegister, handlePasskeyRemove, handlePasskeyReset, webGate } from "./routes/passkeys";
+import { handlePasskeyAssert, handlePasskeyOptions, handlePasskeyRegister, handlePasskeyRemove, handlePasskeyReset, holdsPasskey, webGate } from "./routes/passkeys";
 import { agentOf, agentTokenRefusal, dayCount, hasAgentToken } from "./agents";
 import { handleSignPool } from "./routes/pool";
 import { signingEnabled, publicKey } from "./signing";
@@ -270,7 +270,9 @@ export default {
       if (path === "/auth/passkeys/reset" && method === "POST") return handlePasskeyReset(url, request, env);
       if (path === "/auth/me" && method === "GET") {
         const c = await contributorOf(request, env);
-        return c ? json({ login: c.login, name: c.name, avatar_url: c.avatar_url, role: c.role }, 200, { "cache-control": "no-store" }) : json({ error: "not signed in" }, 401, { "cache-control": "no-store" });
+        // A maintainer's answer says whether they hold a passkey (#287): the acts that need one offer to register it in their own dialog, and a notice says so before it matters. One entry of the passkeys' index, asked for a maintainer only.
+        const passkey = c && isMaintainer(c) ? { passkey: await holdsPasskey(env, c.login) } : {};
+        return c ? json({ login: c.login, name: c.name, avatar_url: c.avatar_url, role: c.role, ...passkey }, 200, { "cache-control": "no-store" }) : json({ error: "not signed in" }, 401, { "cache-control": "no-store" });
       }
       // The reader's own page: /me is the address the Factory's gate and the
       // sign-in name before the login is known. With a session it is

@@ -8,7 +8,7 @@ import { standsSql } from "./story";
 import { settleTargets } from "../targets";
 import { throughWords, type Through } from "../agents";
 import { DISCARD_SQL } from "./agents";
-import { decidedWith, type PasskeyGate } from "./passkeys";
+import { decidedWith, justNowWords, type PasskeyGate } from "./passkeys";
 
 /**
  * Blocking — the maintainers' brake (docs/GOVERNANCE.md, *Blocking*).
@@ -62,9 +62,9 @@ export async function handleBlockContributor(c: Contributor, login: string, requ
   if (who.role === "maintainer") return json({ error: `${login} is a maintainer: that is a governance pull request (factory/MAINTAINERS.toml), not a block` }, 409);
   if (who.blocked_at) return json({ error: `${login} is already blocked (since ${who.blocked_at})` }, 409);
   // The brake is decided with the maintainer's passkey (#271): checked once the block is allowed, before anything is written.
-  const passkey = await decidedWith(undefined, gate, b.assertion);
-  if (passkey instanceof Response) return passkey;
-  const at = new Date().toISOString();
+  const confirmed = await decidedWith(undefined, gate, b.assertion);
+  if (confirmed instanceof Response) return confirmed;
+  const passkey = confirmed.passkey, at = new Date().toISOString();
   const packages = (await env.DB.prepare("SELECT name FROM factory_packages WHERE owner = ?").bind(login).all<{ name: string }>()).results.map((r) => r.name);
   const workers = (await env.DB.prepare("SELECT id FROM build_workers WHERE owner = ? AND revoked_at IS NULL").bind(login).all<{ id: string }>()).results.map((r) => r.id);
   await env.DB.batch([
@@ -86,7 +86,7 @@ export async function handleBlockContributor(c: Contributor, login: string, requ
   const via = viaOf(request);
   const record = await putRecord(env, key, { schema: "omarchy-pool/block/1", kind: "contributor", login, by: c.login, via, passkey, agent: null, at, reason: b.reason, packages, workers_revoked: workers });
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('block', NULL, 'factory', 'warn', ?, ?)")
-    .bind(`${login} blocked by ${c.login}: ${b.reason.slice(0, 140)} — ${packages.length} package(s) rejected, ${workers.length} worker(s) revoked`, JSON.stringify({ login, by: c.login, via, passkey, agent: null, reason: b.reason, packages, workers, record: recordUrl(env, record.key) }))
+    .bind(`${login} blocked by ${c.login}${justNowWords(confirmed)}: ${b.reason.slice(0, 140)} — ${packages.length} package(s) rejected, ${workers.length} worker(s) revoked`, JSON.stringify({ login, by: c.login, via, passkey, ...(confirmed.justNow ? { registered_just_now: true } : {}), agent: null, reason: b.reason, packages, workers, record: recordUrl(env, record.key) }))
     .run();
   return json({ blocked: login, by: c.login, at, passkey, packages, workers_revoked: workers, record: recordUrl(env, record.key) });
 }
@@ -159,8 +159,9 @@ export async function handleBlockPackage(c: Contributor, name: string, request: 
   const pkg = await blockRefusal(c, name, b.reason, env);
   if (pkg instanceof Response) return pkg;
   // Every ring loses it: decided with a passkey (#271) — the draft's, or the web's own answer for this block — once the block is allowed, before anything is written.
-  const passkey = await decidedWith(through, gate, b.assertion);
-  if (passkey instanceof Response) return passkey;
+  const confirmed = await decidedWith(through, gate, b.assertion);
+  if (confirmed instanceof Response) return confirmed;
+  const passkey = confirmed.passkey;
   b.reason = b.reason!.trim();
   const at = new Date().toISOString();
   const note = `blocked by ${c.login}: ${b.reason.slice(0, 200)}`;
@@ -180,7 +181,7 @@ export async function handleBlockPackage(c: Contributor, name: string, request: 
   const via = viaOf(request);
   const record = await putRecord(env, key, { schema: "omarchy-pool/decision/1", decision: "block", name, owner: pkg.owner, by: c.login, via, ...(through ? { through } : { passkey }), agent: null, at, reason: b.reason, rings, withdrawn: { reviews, approvals: withdrawn.map((a) => a.id), arches: [...new Set(withdrawn.map((a) => a.arch))] } });
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('block', NULL, 'factory', 'warn', ?, ?)")
-    .bind(`${name} blocked by ${c.login}${throughWords(through)}: ${b.reason.slice(0, 140)}${rings.length ? " — pulled from " + rings.map((r) => r.ring).join(", ") : ""}${reviews.length ? ` — the approval withdrawn, back to the factory` : ""}`, JSON.stringify({ name, owner: pkg.owner, by: c.login, via, ...(through ? { through } : { passkey }), agent: null, reason: b.reason, rings, withdrawn: reviews, record: recordUrl(env, record.key) }))
+    .bind(`${name} blocked by ${c.login}${justNowWords(confirmed)}${throughWords(through)}: ${b.reason.slice(0, 140)}${rings.length ? " — pulled from " + rings.map((r) => r.ring).join(", ") : ""}${reviews.length ? ` — the approval withdrawn, back to the factory` : ""}`, JSON.stringify({ name, owner: pkg.owner, by: c.login, via, ...(through ? { through } : { passkey }), ...(confirmed.justNow ? { registered_just_now: true } : {}), agent: null, reason: b.reason, rings, withdrawn: reviews, record: recordUrl(env, record.key) }))
     .run();
   return json({ blocked: name, by: c.login, at, rings, withdrawn: reviews, ...(through ? { through } : { passkey }), record: recordUrl(env, record.key) });
 }

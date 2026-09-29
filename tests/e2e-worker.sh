@@ -528,6 +528,8 @@ tok=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/tasks/$px/approve" "${mauth[@
 # Worker sees, wrangler dev's first route (the relying party's id, https): the agents' step below reads the same from a draft's link.
 (cd "$ROOT/worker" && npx wrangler d1 execute omarchy-repo --local --persist-to "$WRANGLER_STATE" --command "UPDATE contributors SET session_hash = '$(printf %s oms_e2e_web | sha256sum | cut -d' ' -f1)' WHERE login = 'e2e'" >/dev/null)
 web=(-H "cookie: omc=oms_e2e_web" -H "origin: $OMARCHY_API" -H "content-type: application/json")
+# A maintainer with no passkey is told so by /auth/me (#287): the pages offer to register the first where an act needs it.
+[[ "$(curl -s "$OMARCHY_API/auth/me" -H "cookie: omc=oms_e2e_web" | jq -r '"\(.role) \(.passkey)"')" == "maintainer false" ]] || { echo "/auth/me must say a maintainer holds no passkey yet"; exit 1; }
 pkopts=$(curl -s -X POST "$OMARCHY_API/auth/passkeys/challenge" "${web[@]}" -d '{}')
 [[ "$(jq -r '.publicKey.authenticatorSelection.userVerification + " " + .publicKey.attestation' <<<"$pkopts")" == "required none" ]] || { echo "a passkey's options must ask for user verification and no attestation: $pkopts"; exit 1; }
 rp_origin="https://$(jq -r .publicKey.rp.id <<<"$pkopts")"
@@ -535,6 +537,7 @@ pkreg=$(node "$ROOT/tests/passkey.mjs" register "$E2E/passkey.json" "$rp_origin"
 [[ "$(jq -r '.passkey.alg' <<<"$pkreg")" == ES256 ]] || { echo "e2e's first passkey must be registered with the session: $pkreg"; exit 1; }
 pkid=$(jq -r '.passkey.id' <<<"$pkreg")
 grep -q "e2e registered a passkey (ES256, $pkid)" <<<"$(curl -s "$OMARCHY_API/api/v1/events?kind=passkey&limit=5")" || { echo "the passkey's registration must be journaled"; exit 1; }
+[[ "$(curl -s "$OMARCHY_API/auth/me" -H "cookie: omc=oms_e2e_web" | jq -r .passkey)" == true ]] || { echo "/auth/me must say the maintainer holds a passkey now"; exit 1; }
 # A second passkey needs an answer from the first: the session alone enrols nothing more.
 pk2opts=$(curl -s -X POST "$OMARCHY_API/auth/passkeys/challenge" "${web[@]}" -d '{}')
 pk2=$(node "$ROOT/tests/passkey.mjs" register "$E2E/passkey-2.json" "$rp_origin" "E2E second" <<<"$pk2opts" | curl -s -X POST "$OMARCHY_API/auth/passkeys" "${web[@]}" --data-binary @-)
@@ -552,6 +555,8 @@ pub=$(jq -r .publish <<<"$ap")
 [[ "$(jq -r '"\(.by) \(.via) \(.passkey) \(.agent)"' <<<"$ap")" == "e2e web $pkid e2e/agent" ]] || { echo "the approval must say who, the door, the passkey and the agent: $ap"; exit 1; }
 record_ok "$(jq -r .record <<<"$ap")" approve || exit 1
 [[ "$(curl -s "$OMARCHY_API/api/v1/events?kind=approve&limit=5" | jq -r '[.events[] | select(.payload.name == "e2e-ident")][0].payload | "\(.by) \(.via) \(.passkey) \(.agent)"')" == "e2e web $pkid e2e/agent" ]] || { echo "the approval's journal line must say who, the door, the passkey and the agent"; exit 1; }
+# The passkey's first use, a moment after its registration (#287): the line says so; the block below, its next use, does not.
+jq -e '[.events[] | select(.payload.name == "e2e-ident")][0] | (.summary | contains("approved by e2e with a passkey registered just now")) and .payload.registered_just_now == true' <<<"$(curl -s "$OMARCHY_API/api/v1/events?kind=approve&limit=5")" >/dev/null || { echo "the approval's journal line must say the passkey was registered just now"; exit 1; }
 # The publish job, as a project worker runs it: the staged package fetched with the job's token, published into edge as source factory (the pool signs), the job completed.
 cj=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/claim" "${wpx[@]}" -d '{"arch":"x86_64","kinds":["publish"]}')
 [[ "$(jq -r .task.id <<<"$cj")" == "$pub" && "$(jq -r .task.arch <<<"$cj")" == x86_64 ]] || { echo "the project's worker did not get the publish job: $cj"; exit 1; }

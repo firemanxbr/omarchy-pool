@@ -10,7 +10,7 @@ export { stands };
 import { putRecord, recordKey, recordUrl } from "../record";
 import { packageRows, parseTargets, settleTargets, targetsOf, type PackageRows, type Target, type Targets } from "../targets";
 import { throughWords, type Through } from "../agents";
-import { decidedWith, type PasskeyGate } from "./passkeys";
+import { decidedWith, justNowWords, type PasskeyGate } from "./passkeys";
 
 /**
  * Review: what maintainers do with staged builds (docs/GOVERNANCE.md). A
@@ -904,9 +904,9 @@ export async function handleApprove(c: Contributor, id: number, request: Request
   const no = refused(decisions(c, t, f).approve);
   if (no) return no;
   // What users get changes here: decided with a passkey (#271) — the draft's, confirmed in the browser, or the web's own answer for this build — checked once the act is allowed and before anything is written; never skipped.
-  const passkey = await decidedWith(through, gate, b.assertion);
-  if (passkey instanceof Response) return passkey;
-  const owner = f.owner;
+  const confirmed = await decidedWith(through, gate, b.assertion);
+  if (confirmed instanceof Response) return confirmed;
+  const passkey = confirmed.passkey, owner = f.owner;
   // The targets: this build for its architecture, and the project's staged build of each other architecture the review covers (othersOf).
   const others = othersOf(t, f.builds, f.targets).map((s) => f.builds.project.find((p) => p.review === s.id)).filter((p): p is PackageBuilds["project"][number] => !!p);
   const staged = others.filter((p) => p.status === "staged");
@@ -950,8 +950,9 @@ export async function handleApprove(c: Contributor, id: number, request: Request
   // Signed and journaled: who, through which door, and the agent that rebuilt what ships — per architecture, what its review worker ran (rebuiltWith); `agent` is this build's.
   const via = viaOf(request), agent = targets.find((x) => x.t.id === id)?.agent ?? null, at = new Date().toISOString();
   const record = await decisionRecord(env, t.name, "approve", `r${review}`, { version: t.version, arches, not_supported: notSupported, owner, review, targets: targets.map((x) => ({ arch: x.t.arch, task: x.t.id, files: x.files, trial: x.trial, publish: publishes[x.t.arch] ?? null, agent: x.agent })), by: c.login, via, ...(through ? { through } : { passkey }), agent, at, note });
+  // A first use of a passkey registered just now — in the Approve dialog itself, #287 — says so on the line.
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('approve', 'edge', 'factory', 'ok', ?, ?)")
-    .bind(`${t.name} ${t.version ?? ""} (${arches.join(", ")}${ns.length ? `; ${ns.join(", ")} not supported` : ""}) approved by ${c.login}${throughWords(through)}${withAgents(targets.map((x) => ({ arch: x.t.arch, agent: x.agent })))}${note ? " — " + note.slice(0, 120) : ""}; the project's build${arches.length > 1 ? "s" : ""} ${targets.map((x) => x.t.id).join(", ")} go${arches.length > 1 ? "" : "es"} into edge (job${arches.length > 1 ? "s" : ""} ${Object.values(publishes).join(", ")})`, JSON.stringify({ review, task: id, publish: publishes[t.arch], publishes, name: t.name, arch: t.arch, arches, not_supported: notSupported, by: c.login, via, ...(through ? { through } : { passkey }), agent, agents: Object.fromEntries(targets.map((x) => [x.t.arch, x.agent])), owner, note, record: record.url, ...(record.error ? { record_error: record.error } : {}) }))
+    .bind(`${t.name} ${t.version ?? ""} (${arches.join(", ")}${ns.length ? `; ${ns.join(", ")} not supported` : ""}) approved by ${c.login}${justNowWords(confirmed)}${throughWords(through)}${withAgents(targets.map((x) => ({ arch: x.t.arch, agent: x.agent })))}${note ? " — " + note.slice(0, 120) : ""}; the project's build${arches.length > 1 ? "s" : ""} ${targets.map((x) => x.t.id).join(", ")} go${arches.length > 1 ? "" : "es"} into edge (job${arches.length > 1 ? "s" : ""} ${Object.values(publishes).join(", ")})`, JSON.stringify({ review, task: id, publish: publishes[t.arch], publishes, name: t.name, arch: t.arch, arches, not_supported: notSupported, by: c.login, via, ...(through ? { through } : { passkey }), ...(confirmed.justNow ? { registered_just_now: true } : {}), agent, agents: Object.fromEntries(targets.map((x) => [x.t.arch, x.agent])), owner, note, record: record.url, ...(record.error ? { record_error: record.error } : {}) }))
     .run();
   await settleTargets(env, t.name);
   return json({ task: id, decision: "approved", by: c.login, publish: publishes[t.arch], publishes, review, arches, not_supported: notSupported, via, ...(through ? { through } : { passkey }), agent, record: record.url });

@@ -271,15 +271,18 @@ describe("a forced promotion (#284)", () => {
     expect(await forced()).toBe(was + 1);
     const line = (await lines("dispatch")).find((l) => l.payload.task === r.json.task)!;
     expect(line.status).toBe("warn");
-    expect(line.summary).toBe(`promote rc → stable forced past its evidence, queued by m1 as task ${r.json.task} with their passkey (${keys.m1.id})`);
-    expect(line.payload).toMatchObject({ by: "m1", via: "web", passkey: keys.m1.id });
+    // m1's passkey was registered a moment ago (beforeAll) and this is its first use: the line says so (#287); the next forced promotion's does not.
+    expect(line.summary).toBe(`promote rc → stable forced past its evidence, queued by m1 as task ${r.json.task} with their passkey (${keys.m1.id}), registered just now`);
+    expect(line.payload).toMatchObject({ by: "m1", via: "web", passkey: keys.m1.id, registered_just_now: true });
     // One architecture: its own act, and an answer for both is not one for it.
     const one = promote({ arch: "aarch64" });
     expect((await post("m1", { ...one, assertion: await assertion("m1", "promote:force:rc:stable") })).json.code).toBe("challenge");
     const r2 = await post("m1", { ...one, assertion: await assertion("m1", "promote:force:rc:stable:aarch64") });
     expect(r2.status, JSON.stringify(r2.json)).toBe(201);
     expect(r2.json.job.params).toMatchObject({ arch: "aarch64", force: "yes" });
-    expect((await lines("dispatch")).find((l) => l.payload.task === r2.json.task)!.summary).toBe(`promote rc → stable (aarch64) forced past its evidence, queued by m1 as task ${r2.json.task} with their passkey (${keys.m1.id})`);
+    const line2 = (await lines("dispatch")).find((l) => l.payload.task === r2.json.task)!;
+    expect(line2.summary).toBe(`promote rc → stable (aarch64) forced past its evidence, queued by m1 as task ${r2.json.task} with their passkey (${keys.m1.id})`);
+    expect(line2.payload.registered_just_now).toBeUndefined();
   });
 
   it("queues nothing without a valid answer: a token, a token beside the session, none, another page, no Origin, another address, an answer for another promotion or act or login, another login's key, the user not verified — each with its code", async () => {

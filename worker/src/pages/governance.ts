@@ -89,8 +89,10 @@ const BODY = String.raw`
   <section id="passkeys">
     <h2>A passkey for approve and block</h2>
     <p class="sub">The two decisions that let a package in or take it out — approve and block — are a maintainer's in the browser, with their passkey: their device asks for their fingerprint, face or PIN, which no token and no agent can supply. No token approves or blocks. A promotion forced past its evidence asks for it too, and a build queued by hand only builds: it never publishes. Request changes and reject take the session, as before. <a href="/docs/omarchy-cli-mcp#write-tools">How it works →</a></p>
+    <p class="sub">Who is a maintainer is not the site's to say: only <a href="${FILE}"><code>factory/MAINTAINERS.toml</code></a> on <code>main</code> names one, through a pull request another maintainer approves. A maintainer the file just named holds no passkey yet. The passkey stays required, and the site guides them to it instead of stopping them.</p>
     <div class="steps">
       <div class="step"><h3>Yours, on your page</h3><p>The first passkey is added with your session. Adding another, or removing one, asks for a passkey you hold. Every change is a <code>passkey</code> line in the <a href="/journal?kind=passkey">journal</a>, with the passkey that vouched for it.</p></div>
+      <div class="step"><h3>None yet? Guided, not stopped</h3><p>Until you hold one, a notice says what needs a passkey and that nothing else does, with <em>Register a passkey now</em>: on Review, on your page, and once on the first page you see as a maintainer. The Approve, Block and Force dialogs offer <em>Register a passkey and approve</em> (or block, or force): the first press makes the passkey with your session, and the same dialog then asks it to confirm that exact act. Cancel, and nothing is decided. The act's journal line says the passkey was registered just now.</p></div>
       <div class="step"><h3>A lost one, reset by another maintainer</h3><p>Nobody resets their own: a session that left with the lost device must not open its own way back. Another maintainer confirms the request out of band, writes why and confirms with their own passkey. Every passkey of the person goes, with their token and their agents' grants, and they are signed out; the journal and a record the pool signs say who and why. They sign in with GitHub again, add a new one and make a new token — the same two-person rule as a lift.</p></div>
     </div>
   </section>
@@ -230,10 +232,10 @@ export const GOVERNANCE_COMPONENTS = (_F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // Approve and block with the maintainer's passkey (#271), and the two-person reset of a lost one.
+      // Approve and block with the maintainer's passkey (#271), a maintainer with none guided to their first (#287), and the two-person reset of a lost one.
       id: "governance.passkeys",
       page,
-      anchor: ['id="passkeys"', "<h2>A passkey for approve and block</h2>", "<h3>Yours, on your page</h3>", "<h3>A lost one, reset by another maintainer</h3>", 'href="/journal?kind=passkey"', 'href="/docs/omarchy-cli-mcp#write-tools"'],
+      anchor: ['id="passkeys"', "<h2>A passkey for approve and block</h2>", "<h3>Yours, on your page</h3>", "<h3>None yet? Guided, not stopped</h3>", "<em>Register a passkey and approve</em>", "<h3>A lost one, reset by another maintainer</h3>", 'href="/journal?kind=passkey"', 'href="/docs/omarchy-cli-mcp#write-tools"'],
       visible: EVERYONE,
     },
     {

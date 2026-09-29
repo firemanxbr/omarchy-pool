@@ -73,6 +73,7 @@ const NOTHING = "nothing of this package is in review";
 
 const BODY = String.raw`
 <div class="rv">
+  <div id="pk-notice" hidden></div>
   <div class="rv-view" id="rv-queue">
     <section class="rv-hero">
       <div class="rv-lede">
@@ -164,6 +165,7 @@ const CSS = String.raw`
   .rv :is(a, button, select, textarea, input):focus-visible { outline: 1px solid var(--green); outline-offset: 2px; }
   .rv-sr { position: absolute; width: 1px; height: 1px; margin: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .rv-view { display: grid; grid-template-columns: minmax(0, 1fr); gap: 40px; align-content: start; } .rv-view[hidden] { display: none; }
+  .rv > .pk-notice { margin-bottom: 28px; }
   .rv-hero > *, .rv-pair > *, .rv-whead > * { min-width: 0; }
   .rv-hero { display: flex; flex-wrap: wrap; gap: 32px 40px; align-items: flex-end; }
   .rv-lede { flex: 1 1 480px; min-width: 0; display: grid; gap: 16px; }
@@ -743,21 +745,32 @@ const SCRIPT = String.raw`
       if (CONFIRM) {
         box.className = "rv-confirm" + (CONFIRM.what === "reject" ? " danger" : CONFIRM.what === "changes" ? " warn" : "");
         $("#rv-confirm-t").textContent = confirmText(CONFIRM.what, R, p);
-        // The confirmation takes the focus when it opens: Confirm, one Tab from Cancel; Escape closes it. Approve's Confirm asks for the passkey (#271), and says so.
-        var go = $("#rv-confirm-go"); if (go) go.innerHTML = CONFIRM.what === "approve" ? lucide("key-round", 14) + "Confirm with your passkey" : "Confirm";
+        // The confirmation takes the focus when it opens: Confirm, one Tab from Cancel; Escape closes it. Approve's Confirm asks for the passkey (#271), and says so — and registers the first one, for a maintainer who holds none, before it approves with it (#287).
+        var go = $("#rv-confirm-go"); if (go) go.innerHTML = CONFIRM.what === "approve" ? lucide("key-round", 14) + (needsPasskey() ? "Register a passkey and approve" : "Confirm with your passkey") : "Confirm";
         if (!was && go && go.focus) go.focus();
       }
     }
   }
   // Out of the confirmation, the focus goes back to the decision it confirmed.
-  function unconfirm() { var what = CONFIRM && CONFIRM.what; CONFIRM = null; renderDecide(round(), workPkg()); var b = what ? $('#rv-btns [data-decide="' + what + '"]') : null; if (b && b.focus) b.focus(); }
+  function unconfirm() { var what = CONFIRM && CONFIRM.what; CONFIRM = null; PK_SAID = ""; renderDecide(round(), workPkg()); var b = what ? $('#rv-btns [data-decide="' + what + '"]') : null; if (b && b.focus) b.focus(); }
   // What the confirmation says the decision does: approve publishes the rebuild on every architecture it covers; reject frees a request's name (a package already in the pool keeps it); changes go back to the factory with the name kept.
   function confirmText(what, R, p) {
     var name = OPEN, ver = (p && p.version) || "", arches = R.filter(function (r) { return r.rebuild && r.rebuild.status === "staged"; }).map(function (r) { return r.arch; }), ns = notSupported(p ? p.targets : {}), owner = (STORY && STORY.package && STORY.package.owner) || (p && p.owner);
     var inPool = (APPROVALS || []).some(function (a) { return a.name === name && a.standing; }), mine = p && p.claim && isOwner(p.claim.by);
-    if (what === "approve") return "Approve " + name + " " + ver + " for " + (arches.join(" + ") || "every architecture rebuilt") + (ns.length ? " (" + ns.join(" · ") + " not supported)" : "") + "? " + (mine ? "Your build enters edge." : "The project's build enters edge.") + " Your passkey confirms it.";
+    if (what === "approve") return "Approve " + name + " " + ver + " for " + (arches.join(" + ") || "every architecture rebuilt") + (ns.length ? " (" + ns.join(" · ") + " not supported)" : "") + "? " + (mine ? "Your build enters edge." : "The project's build enters edge.") + (needsPasskey() ? " You hold no passkey yet: your device makes one now, then confirms the approval with it." : PK_SAID ? " " + PK_SAID : " Your passkey confirms it.");
     if (what === "reject") return inPool ? "Reject " + name + " " + ver + "? The version is rejected; " + name + " stays in the pool." : "Reject " + name + "? The name is freed and the requester is told why.";
     return "Send " + name + " back to the factory with your note? The name stays " + (owner ? "@" + owner + "'s" : "the requester's") + ".";
+  }
+  // A maintainer with no passkey yet (#287): the approval's Confirm registers the first one here, and the confirmation stays open — its next press approves with it. PK_SAID is what the confirmation says since.
+  var PK_SAID = "";
+  function registerFirst(go) {
+    var err = $("#rv-err"); err.textContent = ""; PK_SAID = "Answer your device: your fingerprint, face or PIN."; renderDecide(round(), workPkg());
+    firstPasskey("Nothing was decided.").then(function (r) {
+      go.disabled = false;
+      PK_SAID = r.error ? "" : (r.passkey ? "Your passkey is registered." : "You hold a passkey already.") + " Confirm, and your device approves with it.";
+      if (r.error) err.textContent = r.error;
+      renderDecide(round(), workPkg()); if (go.focus) go.focus();
+    });
   }
   function decide(what, id) {
     var note = ($("#rv-note-in").value || "").trim(), err = $("#rv-err");
@@ -768,7 +781,7 @@ const SCRIPT = String.raw`
     (what === "approve" ? passkeyed("approve:" + id, send) : send()).then(function (d) {
       // Refused: said once, beside the buttons (an alert), with the way to add a passkey as a link when the maintainer holds none.
       if (d.error) { err.innerHTML = refusalHtml(d); return; }
-      CONFIRM = null; $("#rv-note-in").value = "";
+      CONFIRM = null; PK_SAID = ""; $("#rv-note-in").value = "";
       toast(what === "changes" ? "Sent back to the factory — the requester reads your note; the name stays theirs." : decidedText(what, d), what === "approve" ? "ok" : "warn");
       FRESH = "?after=" + Date.now(); load(); loadWork();
     }).catch(function (e) { err.textContent = "failed: " + errorText(e); });
@@ -798,10 +811,10 @@ const SCRIPT = String.raw`
     if (la) { LOGARCH = la.getAttribute("data-logarch"); renderWork(); var again = $('#rv-f-tabs [data-logarch="' + LOGARCH + '"]'); if (again && again.focus) again.focus(); return; }
     if (t.closest("#rv-draft")) { var n = $("#rv-note-in"), R = round(); n.value = draftOf(R); renderDecide(R, workPkg()); if (n.focus) n.focus(); return; }
     var d = t.closest("button[data-decide]");
-    if (d && !d.disabled) { CONFIRM = { what: d.getAttribute("data-decide"), id: Number(d.getAttribute("data-task")) }; renderDecide(round(), workPkg()); return; }
+    if (d && !d.disabled) { CONFIRM = { what: d.getAttribute("data-decide"), id: Number(d.getAttribute("data-task")) }; PK_SAID = ""; renderDecide(round(), workPkg()); return; }
     if (t.closest("#rv-confirm-no")) { unconfirm(); return; }
     var go = t.closest("#rv-confirm-go");
-    if (go && CONFIRM) { go.disabled = true; decide(CONFIRM.what, CONFIRM.id); setTimeout(function () { go.disabled = false; }, 1500); return; }
+    if (go && CONFIRM) { go.disabled = true; if (CONFIRM.what === "approve" && needsPasskey()) { registerFirst(go); return; } decide(CONFIRM.what, CONFIRM.id); setTimeout(function () { go.disabled = false; }, 1500); return; }
     var rl = t.closest("#rv-release");
     if (rl && !rl.disabled) askRelease(Number(rl.getAttribute("data-task")));
   });
@@ -849,7 +862,7 @@ const SCRIPT = String.raw`
     var what = $("#block-what").value.trim(), why = $("#block-why").value.trim();
     if (!what || why.length < 4) return;
     busy(fetch("/api/v1/users/" + encodeURIComponent(what))).then(function (r) { return r.status === 200 ? "contributors" : "packages"; }).then(function (kind) {
-      ask({ title: "Block " + (kind === "contributors" ? "contributor " : "package ") + what + "?", text: (kind === "contributors" ? "Their builds stop and their packages leave the rings" : "Its builds stop and it leaves the rings") + "; another maintainer lifts it. The reason: <i>" + esc(why) + "</i>. Your passkey confirms it.", confirm: "Block with your passkey", danger: true }).then(function (go) {
+      ask({ title: "Block " + (kind === "contributors" ? "contributor " : "package ") + what + "?", text: (kind === "contributors" ? "Their builds stop and their packages leave the rings" : "Its builds stop and it leaves the rings") + "; another maintainer lifts it. The reason: <i>" + esc(why) + "</i>. Your passkey confirms it.", confirm: "Block with your passkey", first: "Register a passkey and block", danger: true }).then(function (go) {
         if (go === null) return;
         // A block is confirmed with the maintainer's passkey (#271), for this contributor or this package.
         passkeyed("block:" + (kind === "contributors" ? "contributor:" : "package:") + what, function (assertion) { return api("POST", API + "/" + kind + "/" + encodeURIComponent(what) + "/block", { reason: why, assertion: assertion }); }).then(function (d) {

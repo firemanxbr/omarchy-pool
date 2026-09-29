@@ -600,6 +600,13 @@ const CSS = String.raw`
   .two { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; }
   /* Review: yours first — two groups of one-line rows (waiting, decided) — then the one table everyone reads and maintainers act on. */
   .notice { border: 1px solid var(--line); background: var(--panel); padding: 12px 16px; font-size: 13.5px; color: var(--muted); margin: 0 0 16px; } .notice.warn { border-color: var(--amber); } .notice b { color: var(--text); }
+  /* The notice of #287, for a maintainer who holds no key yet: what one confirms, and the button that registers it — the words on one side, the buttons on the other, the outcome under both. At the top of the page, or where the page serves #pk-notice. Its buttons are drawn as the dialog's are. */
+  .pk-notice { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 24px; margin-bottom: 24px; }
+  :where(.pk-notice) button { background: var(--panel-2); border: 1px solid var(--line); color: var(--text); padding: 5px 12px; font: inherit; font-size: 13px; cursor: pointer; } :where(.pk-notice) button:hover { border-color: var(--green); }
+  .pk-notice .pk-text { flex: 1 1 440px; margin: 0; } .pk-notice .pk-text a { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
+  .pk-notice .pk-btns { display: flex; flex-wrap: wrap; gap: 8px; }
+  .pk-notice .pk-now { background: var(--green); border-color: var(--green); color: var(--green-ink); } .pk-notice .pk-now:hover { filter: brightness(1.08); } .pk-notice .pk-now[aria-disabled="true"] { opacity: .6; cursor: progress; }
+  .pk-notice .pk-said { flex: 1 1 100%; margin: 0; font-size: 12.5px; color: var(--text); } .pk-notice .pk-said:empty { display: none; } .pk-notice .pk-said.err { color: var(--red); } .pk-notice button.ghost { color: var(--muted); }
   .rgroups { display: grid; gap: 22px; margin-bottom: 44px; }
   .rgroup h3 { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 8px; } .rgroup h3 .dim { font-size: 12px; font-weight: 400; font-family: "JetBrains Mono", monospace; }
   .rrows { display: grid; gap: 1px; background: var(--line); border: 1px solid var(--line); }
@@ -666,6 +673,7 @@ const CSS = String.raw`
   dialog.ask { border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 0; width: min(520px, calc(100vw - 32px)); } dialog.ask::backdrop { background: var(--scrim); }
   dialog.ask form { padding: 20px 22px; display: grid; gap: 12px; } dialog.ask h3 { margin: 0; font-family: Geist, sans-serif; font-size: 17px; } dialog.ask .t { margin: 0; font-size: 13.5px; color: var(--muted); } dialog.ask textarea { width: 100%; box-sizing: border-box; background: var(--bg-deep); color: var(--text); border: 1px solid var(--line); padding: 8px 10px; font: 13px "JetBrains Mono", monospace; resize: vertical; }
   dialog.ask .val { display: flex; gap: 8px; align-items: stretch; } dialog.ask .val code { flex: 1; min-width: 0; overflow-wrap: anywhere; background: var(--bg-deep); border: 1px solid var(--line); padding: 8px 10px; font: 12.5px "JetBrains Mono", monospace; color: var(--text); } dialog.ask .row .grow { flex: 1; } dialog.ask .val .take { white-space: nowrap; } dialog.ask button.alt.danger { border-color: var(--red); color: var(--red); }
+  dialog.ask .pk { margin: 0; padding: 8px 10px; border: 1px solid var(--amber); font-size: 13px; color: var(--text); } dialog.ask .pk.ok { border-color: var(--green); } dialog.ask .pk.err { border-color: var(--red); }
   dialog.ask .err { margin: 0; font-size: 12.5px; color: var(--red); } dialog.ask label.pick { display: grid; gap: 4px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; } dialog.ask label.pick select { width: 100%; box-sizing: border-box; background: var(--bg-deep); color: var(--text); border: 1px solid var(--line); padding: 7px 10px; font: 13px "JetBrains Mono", monospace; text-transform: none; letter-spacing: 0; } dialog.ask .row { display: flex; justify-content: flex-end; gap: 8px; } dialog.ask button.danger { border-color: var(--red); color: var(--red); } dialog.ask button.ghost { color: var(--muted); }
   #toasts { position: fixed; right: 16px; bottom: 16px; z-index: 90; display: grid; gap: 8px; max-width: min(460px, calc(100vw - 32px)); } .toast { border: 1px solid var(--line); background: var(--panel); padding: 10px 14px; font-size: 13px; border-left: 3px solid var(--green); cursor: pointer; transition: opacity .3s, transform .3s; } .toast.error { border-left-color: var(--red); } .toast.warn { border-left-color: var(--amber); } .toast.out { opacity: 0; transform: translateY(6px); }
   /* The ⌘K menu (#241, GO_MENU below): the handoff's palette on the chrome's surface under the dialogs' veil — the reader's line, then what it
@@ -1061,8 +1069,10 @@ export const HELPERS = String.raw`
   // ---- decisions ask in the dashboard, never in the browser's own box: one dialog, a note when the action wants one, a promise of the note (null = cancelled).
   //   ask({ title, text, input: "required" | "optional" | false, placeholder, confirm: "Approve", danger: true })
   // The dashboard's question: a title, a line, a note when the action wants one (input: "required" | "optional"), a choice when there is one (select: { label, options: [{ value, text, disabled, selected }] }), the button. Resolves the note as a string — or, with a select, { note, pick } — and null when cancelled.
+  // An act a passkey confirms names its first-press words (first: "Register a passkey and approve", #287): for a maintainer who holds none, that press registers one here (firstPasskey) and the dialog stays open, saying so; its next press is confirm, the act, with that passkey. Cancelled, nothing is decided, and the dialog says so (nothing: "Nothing was decided.").
   function ask(o) {
     return new Promise(function (resolve) {
+      var first = !!o.first && o.confirm !== null && needsPasskey();
       var d = document.createElement("dialog"); d.className = "ask";
       var sel = o.select && o.select.options && o.select.options.length ? '<label class="pick"><span>' + esc(o.select.label || "Where") + '</span><select>' + o.select.options.map(function (x) { return '<option value="' + esc(x.value) + '"' + (x.disabled ? ' disabled' : '') + (x.selected ? ' selected' : '') + '>' + esc(x.text) + '</option>'; }).join("") + '</select></label>' : '';
       // A value to take away (a link, a token): shown once, copied with one press.
@@ -1071,8 +1081,10 @@ export const HELPERS = String.raw`
       var pre = o.pre !== undefined ? '<pre class="block"></pre>' : '';
       // A second way out (alt): the other thing this dialog can do — take a build out of the queue while the main button puts it back.
       var alt = o.alt ? '<button type="button" class="alt ' + (o.alt.danger ? "danger" : "ghost") + '">' + esc(o.alt.text) + '</button>' : '';
-      d.innerHTML = '<form method="dialog"><h3></h3><p class="t"></p>' + val + pre + sel + (o.input ? '<textarea rows="3" placeholder="' + esc(o.placeholder || (o.input === "required" ? "why — it goes on the record" : "a note for the record (optional)")) + '"></textarea><p class="err" hidden></p>' : '') + '<div class="row">' + alt + '<span class="grow"></span><button type="button" class="ghost cancel">' + esc(o.cancel || "Cancel") + '</button>' + (o.confirm === null ? '' : '<button type="submit" class="' + (o.danger ? "danger" : "") + '">' + esc(o.confirm || "OK") + '</button>') + '</div></form>';
+      d.innerHTML = '<form method="dialog"><h3></h3><p class="t"></p>' + (first ? '<p class="pk" role="status" aria-live="polite"></p>' : '') + val + pre + sel + (o.input ? '<textarea rows="3" placeholder="' + esc(o.placeholder || (o.input === "required" ? "why — it goes on the record" : "a note for the record (optional)")) + '"></textarea><p class="err" hidden></p>' : '') + '<div class="row">' + alt + '<span class="grow"></span><button type="button" class="ghost cancel">' + esc(o.cancel || "Cancel") + '</button>' + (o.confirm === null ? '' : '<button type="submit" class="' + (o.danger ? "danger" : "") + '">' + esc(first ? o.first : o.confirm || "OK") + '</button>') + '</div></form>';
       d.querySelector("h3").textContent = o.title || ""; d.querySelector(".t").innerHTML = o.text || "";
+      var pk = first ? d.querySelector(".pk") : null, say = function (text, cls) { pk.className = "pk" + (cls ? " " + cls : ""); pk.textContent = text; };
+      if (pk) say("You hold no passkey yet. Your device makes one now, then confirms this with it.");
       if (o.value !== undefined) d.querySelector(".val code").textContent = o.value;
       if (o.pre !== undefined) { var pr = d.querySelector("pre.block"); pr.textContent = o.pre; d.classList.add("wide"); setTimeout(function () { pr.scrollTop = pr.scrollHeight; }, 0); }
       document.body.appendChild(d);
@@ -1088,6 +1100,19 @@ export const HELPERS = String.raw`
         ev.preventDefault();
         var v = ta ? ta.value.trim() : "";
         if (o.input === "required" && v.length < 4) { d.querySelector(".err").hidden = false; d.querySelector(".err").textContent = "Say why, in a few words — the record keeps it."; ta.focus(); return; }
+        if (first) {
+          // The first press registers the passkey, and the dialog stays: the act waits for the next press, with it.
+          var go = form.querySelector('button[type="submit"]'); if (go.getAttribute("aria-disabled") === "true") return;
+          go.setAttribute("aria-disabled", "true"); say("Answer your device: your fingerprint, face or PIN.");
+          firstPasskey(o.nothing || "Nothing was decided.").then(function (r) {
+            go.removeAttribute("aria-disabled");
+            if (r.error) { say(r.error, "err"); return; }
+            first = false; go.textContent = o.confirm || "OK";
+            say((r.passkey ? "Your passkey is registered." : "You hold a passkey already.") + " Press " + (o.confirm || "OK") + ": your device confirms this with it.", "ok");
+            go.focus();
+          });
+          return;
+        }
         done(answer(false));
       };
       d.showModal(); if (ta) ta.focus();
@@ -1309,11 +1334,13 @@ export const HELPERS = String.raw`
   // What a failure says: an Error's message (api()'s, the network's "Failed to fetch"), anything else as text.
   function errorText(e) { return e && e.message ? String(e.message) : String(e || "no answer"); }
   // An act a passkey confirms (#271) — approve and block, a passkey added or removed, a reset: the pool's challenge for exactly this act (POST /auth/passkeys/assert, { for: what }), handed to navigator.credentials.get() with user verification required, and the act posted by post(assertion) with the answer. The server checks it; the page only carries it. Resolves with post's answer — or, refused before it (no passkey, a prompt cancelled, a browser without passkeys), with an answer of its own, { error, code }, as api() gives one, so a page says it where it says the pool's refusals.
+  // The bytes a ceremony takes and gives, as the pool writes them: base64url, both ways.
+  function webB64(buf) { var b = new Uint8Array(buf), s = ""; for (var i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); }
+  function webBytes(v) { var t = String(v).replace(/-/g, "+").replace(/_/g, "/"); while (t.length % 4) t += "="; var bin = atob(t), out = new Uint8Array(bin.length); for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out; }
   function passkeyed(what, post) {
     var no = function (text) { return { error: text + " Nothing changed.", code: "no_answer" }; };
     if (!window.PublicKeyCredential || !navigator.credentials || !window.isSecureContext) return Promise.resolve(no("This browser cannot use a passkey on this page: it needs a secure address (https, or localhost) and passkey support."));
-    var b64 = function (buf) { var b = new Uint8Array(buf), s = ""; for (var i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); };
-    var bytes = function (v) { var t = String(v).replace(/-/g, "+").replace(/_/g, "/"); while (t.length % 4) t += "="; var bin = atob(t), out = new Uint8Array(bin.length); for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out; };
+    var b64 = webB64, bytes = webBytes;
     return api("POST", "/auth/passkeys/assert", { for: what }).then(function (o) {
       if (o.error) return o;
       var k = o.publicKey;
@@ -1327,6 +1354,70 @@ export const HELPERS = String.raw`
       });
     });
   }
+  // ---- a maintainer with no passkey yet (#287): guided, not stopped. /auth/me says whether a maintainer holds one (WHO.me.passkey). The acts it confirms — approve, block, a forced promotion, a reset of another maintainer's — offer to register the first in their own dialog (ask's first, and Review's and the package page's own forms), then confirm with it at the next press; a notice says so before it matters. Nothing else a maintainer does asks for one.
+  function needsPasskey() { return isMaintainer() && !!WHO.me && WHO.me.passkey === false; }
+  // A page that draws what a passkey changes (the person's own table) is told when one is registered here: onPasskey(fn).
+  var PASSKEY_ADDED = [];
+  function onPasskey(fn) { PASSKEY_ADDED.push(fn); }
+  // What the maintainer holds now, as a page learnt it (a registration here, their own /factory/me): the notice goes once they hold one, and comes back on the pages that always draw it when the last one went.
+  function passkeyHeld(held) {
+    if (!WHO.me || !isMaintainer() || WHO.me.passkey === !!held) return;
+    WHO.me.passkey = !!held;
+    if (!held) { passkeyNotice(); return; }
+    var el = $("#pk-notice"); if (el) { el.hidden = true; el.innerHTML = ""; }
+  }
+  // The first passkey, registered where an act needs it (#287) — the notice's button, an act's dialog — as the person's page registers one: the pool's options (POST /auth/passkeys/challenge), navigator.credentials.create() with user verification required, the answer posted (POST /auth/passkeys) with the session alone. Resolves the pool's answer, { passkey } — { held: true } when a passkey of theirs was registered elsewhere meanwhile — or an answer of its own, { error, code }, its words ending with nothing (what did not happen: "Nothing was decided."). One passkey request per press (Safari's rule): the act's own answer is the next press's.
+  function firstPasskey(nothing) {
+    // Its words, as a sentence of the dialog's: the pool's own start in lower case.
+    var no = function (text, code) { var t = String(text).replace(/[.\s]+$/, ""); return { error: t.charAt(0).toUpperCase() + t.slice(1) + ". " + (nothing || "Nothing changed."), code: code || "no_answer" }; };
+    if (!window.PublicKeyCredential || !navigator.credentials || !window.isSecureContext) return Promise.resolve(no("This browser cannot make a passkey on this page: it needs a secure address (https, or localhost) and passkey support."));
+    return api("POST", "/auth/passkeys/challenge", {}).then(function (o) {
+      if (o.error) return no(o.error, o.code);
+      var k = o.publicKey;
+      return navigator.credentials.create({ publicKey: { challenge: webBytes(k.challenge), rp: k.rp, user: { id: webBytes(k.user.id), name: k.user.name, displayName: k.user.displayName }, pubKeyCredParams: k.pubKeyCredParams, timeout: k.timeout, attestation: k.attestation, authenticatorSelection: k.authenticatorSelection, excludeCredentials: k.excludeCredentials.map(function (c) { return { type: c.type, id: webBytes(c.id) }; }) } }).then(function (cred) {
+        if (!cred) return no("No passkey was registered");
+        return api("POST", "/auth/passkeys", { id: webB64(cred.rawId), clientDataJSON: webB64(cred.response.clientDataJSON), attestationObject: webB64(cred.response.attestationObject) }).then(function (r) {
+          // Refused as a second one: a passkey of theirs was registered elsewhere since this page asked. It is the one the act asks for.
+          if (r.error && r.code !== "passkey_required") return no(r.error, r.code);
+          passkeyHeld(true); PASSKEY_ADDED.forEach(function (fn) { fn(); });
+          return r.error ? { held: true } : r;
+        });
+      }, function (e) {
+        var n = e && e.name;
+        return no(n === "NotAllowedError" || n === "AbortError" ? "No passkey was registered: the request was cancelled or timed out" : n === "InvalidStateError" ? "This device holds a passkey of yours for the pool already" : n === "SecurityError" ? "Your browser will not make a passkey on this address: open the pool's own" : n === "NotSupportedError" ? "This browser or device cannot make a passkey the pool takes" : "No passkey was registered: " + errorText(e));
+      });
+    });
+  }
+  // The notice (#287): the acts a passkey confirms, that nothing else asks for one, and Register a passkey now — the first, made here. Drawn for a maintainer who holds none: always on Review and on their own page (the page's #pk-notice), once anywhere else — the first page they see as a maintainer; this browser keeps that it was shown (localStorage), so no page view asks the pool to remember anything. It goes once they hold one (passkeyHeld).
+  var PK_NOTICE = "<b>You hold no passkey yet.</b> Approve, block and a forced promotion are confirmed with one, and so is a reset of another maintainer's passkeys. Nothing else you do asks for it.";
+  function passkeyNotice() {
+    if (!needsPasskey()) return;
+    var always = location.pathname === "/review" || location.pathname === userHref(WHO.login);
+    if (!always) { try { var key = "op-pk-notice:" + WHO.login; if (localStorage.getItem(key)) return; localStorage.setItem(key, "shown"); } catch (e) { return; } }
+    var el = $("#pk-notice"), main = document.querySelector("main");
+    // Where the page serves no place for it: at the top of the page's own frame (main's first element, when it sets the page's width), so the notice lines up with what is under it.
+    if (!el) {
+      if (!main) return;
+      var frame = main.firstElementChild, box = frame && window.getComputedStyle && getComputedStyle(frame).maxWidth !== "none" ? frame : main;
+      el = document.createElement("div"); el.id = "pk-notice"; box.insertBefore(el, box.firstChild);
+    }
+    el.className = "notice warn pk-notice"; el.setAttribute("role", "region"); el.setAttribute("aria-label", "A passkey");
+    el.innerHTML = '<p class="pk-text">' + PK_NOTICE + ' <a href="/docs/governance#passkeys">How it works</a></p><span class="pk-btns"><button type="button" class="pk-now">Register a passkey now</button>' + (always ? '' : '<button type="button" class="ghost pk-later">Not now</button>') + '</span><p class="pk-said" role="status" aria-live="polite"></p>';
+    el.hidden = false;
+  }
+  whoami(passkeyNotice);
+  document.addEventListener("click", function (ev) {
+    var t = ev.target && ev.target.closest ? ev.target : null, box = t && t.closest(".pk-notice"); if (!box) return;
+    if (t.closest(".pk-later")) { box.hidden = true; return; }
+    var b = t.closest(".pk-now"); if (!b || b.getAttribute("aria-disabled") === "true") return;
+    var said = box.querySelector(".pk-said");
+    b.setAttribute("aria-disabled", "true"); said.className = "pk-said"; said.textContent = "Answer your device: your fingerprint, face or PIN.";
+    firstPasskey().then(function (r) {
+      b.removeAttribute("aria-disabled");
+      if (r.error) { said.className = "pk-said err"; said.textContent = r.error; return; }
+      toast(r.passkey ? "Passkey added: approve, block and a forced promotion ask for it from now on." : "You hold a passkey already: approve, block and a forced promotion ask for it.");
+    });
+  });
   // A refusal as HTML, as a page draws it (#271): the pool's words, escaped — and when the login holds no passkey (code no_passkey, with register: its own page's section), the way to add one as a link in place of the address the words carry, never an address to copy by hand.
   function refusalHtml(d) {
     var text = esc(d && d.error ? d.error : errorText(d)), to = d && typeof d.register === "string" && /^\/user\/[A-Za-z0-9-]{1,39}#passkeys$/.test(d.register) ? d.register : "";
@@ -1443,7 +1534,7 @@ export const HELPERS = String.raw`
     });
     if (what === "reject") return ask({ title: "Reject " + label, text: "Every build of the package in review stops, on every architecture. A request rejected frees its name; a package already in the pool keeps it. The contributor reads the note, and the rejection is on the record.", input: "required", placeholder: "what is wrong, in a line or two", confirm: "Reject", danger: true });
     if (what === "withdraw") return ask({ title: "Withdraw the approval of " + label, text: "The approval stays on the record and is void from now on, on every architecture it covered; the package leaves every ring it reached; another maintainer decides.", input: "required", placeholder: "why take it back", confirm: "Withdraw", danger: true });
-    return ask({ title: "Approve " + label, text: "One decision for the package: the project's build of every architecture it built again goes into edge, signed by the pool; one that did not build is not supported. The approval is on the record with your name. Your passkey confirms it: your device asks for your fingerprint, face or PIN.", input: "optional", confirm: "Approve with your passkey" });
+    return ask({ title: "Approve " + label, text: "One decision for the package: the project's build of every architecture it built again goes into edge, signed by the pool; one that did not build is not supported. The approval is on the record with your name. Your passkey confirms it: your device asks for your fingerprint, face or PIN.", input: "optional", confirm: "Approve with your passkey", first: "Register a passkey and approve" });
   }
   // What the toast says once the server said yes: where the builds went, the tasks the project builds it as and on what, what the withdrawal emptied, whether a rejection freed the name.
   function decidedText(what, d, dropped) {

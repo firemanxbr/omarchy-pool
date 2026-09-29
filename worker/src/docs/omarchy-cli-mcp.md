@@ -421,8 +421,9 @@ another maintainer.
   to that address lands on the section once it is drawn, and a contributor
   who holds no passkey is shown no section): a name for it, then the
   browser's own request. Their first passkey is added with the session
-  alone; any other asks first for an assertion from one they hold (*Adding
-  and removing*, below). The page asks the pool for the
+  alone — here, or from the notice or the dialog of the act that needs it
+  (*None yet*, below); any other asks first for an assertion from one they
+  hold (*Adding and removing*, below). The page asks the pool for the
   options (`POST /auth/passkeys/challenge`: this relying party, a user
   handle that is a hash, not the login, ES256, EdDSA and RS256, user
   verification required, attestation `none`, the passkeys they hold
@@ -494,6 +495,23 @@ another maintainer.
   record, its journal line and its answer name the passkey (`passkey`, where
   a draft's carry `through.passkey`). A handler called by a door that
   forgot the gate refuses (`decidedWith` fails closed).
+- **None yet: guided, not stopped (#287).** A maintainer who holds no
+  passkey is told before it matters: `/auth/me` says so to their pages
+  (`passkey: false`, a maintainer's answer only), and a notice — what needs
+  a passkey, that nothing else does, *Register a passkey now* — is drawn on
+  Review and on their own page while they hold none, and once on the first
+  page they see as a maintainer (the browser keeps that it was shown). The
+  dialogs of approve, block and a forced promotion (and a reset's) offer
+  *Register a passkey and approve* (… and block, … and force): the first
+  press registers the passkey through the page's own two routes, with the
+  session alone, and the dialog stays open; the next press asks for the
+  challenge of exactly that act (`passkeyed`) and posts the act with the
+  answer. One passkey request per press, as Safari wants it. A cancelled
+  registration decides nothing, and the dialog says so. The decision's
+  journal line says "… with a passkey registered just now" (and
+  `registered_just_now: true`) when it is the passkey's first use within ten
+  minutes of its registration. Nothing else a maintainer does asks for a
+  passkey; `passkey-guided.test.ts` pins the list.
 - **No token approves or blocks (#271).** A request that carries an
   `Authorization` header — a contributor's `omc_` token, a maintainer's
   included, or a script's — is refused on approve and block with

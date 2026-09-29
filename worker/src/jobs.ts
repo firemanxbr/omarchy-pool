@@ -14,7 +14,7 @@ import { json, readJson, type Env } from "./index";
 import { PROMOTED_RINGS, REPO_ARCHES, RINGS } from "./meta";
 import { createJob, SYNC_SOURCES, syncJobFor } from "./scheduler";
 import type { Contributor } from "./routes/contributors";
-import { forcedSubject, type PasskeyGate } from "./routes/passkeys";
+import { forcedSubject, type Confirmed, type PasskeyGate } from "./routes/passkeys";
 
 // The rings and the architectures are meta.ts's; the messages name them from the lists, so a ring or an architecture added there is named here.
 const PROMISED: readonly string[] = PROMOTED_RINGS;
@@ -31,8 +31,8 @@ export async function handleQueueJob(c: Contributor, request: Request, env: Env,
   const p = b.params ?? {};
   const s = (k: string) => (typeof p[k] === "string" ? (p[k] as string) : "");
   let job: { kind: string; params: Record<string, string>; arch: string };
-  /** The passkey a forced promotion was confirmed with (#284); null for every other job. */
-  let passkey: string | null = null;
+  /** The passkey a forced promotion was confirmed with (#284), and whether it was registered just now (#287); null for every other job. */
+  let confirmed: Confirmed | null = null;
   switch (b.kind) {
     case "sync": {
       // A whole architecture (one release per ring, like the scheduler's), or one source.
@@ -61,7 +61,7 @@ export async function handleQueueJob(c: Contributor, request: Request, env: Env,
         if (!gate) return json({ error: "a promotion forced past its evidence is confirmed with a passkey, and this door asks for none: nothing was queued", code: "passkey_required" }, 403);
         const ok = await gate(forcedSubject(from, to, params.arch))(b.assertion);
         if (ok instanceof Response) return ok;
-        passkey = ok.passkey;
+        confirmed = ok;
         params.force = "yes";
       }
       job = { kind: "promote", params, arch: "x86_64" };
@@ -122,10 +122,11 @@ export async function handleQueueJob(c: Contributor, request: Request, env: Env,
       return json({ error: `kind must be one of ${JOB_KINDS.join(", ")}` }, 400);
   }
   const id = await createJob(env, job, `queued by ${c.login}`);
-  // A forced promotion's line says so, amber, with the passkey that confirmed it (#284).
-  const forced = passkey ? { status: "warn", summary: `promote ${job.params.from} → ${job.params.to}${job.params.arch ? ` (${job.params.arch})` : ""} forced past its evidence, queued by ${c.login} as task ${id} with their passkey (${passkey})` } : { status: "ok", summary: `${job.kind} queued by ${c.login} as task ${id}` };
+  // A forced promotion's line says so, amber, with the passkey that confirmed it (#284) — and, on its first use just after its registration in the dialog, that too (#287).
+  const passkey = confirmed?.passkey ?? null;
+  const forced = passkey ? { status: "warn", summary: `promote ${job.params.from} → ${job.params.to}${job.params.arch ? ` (${job.params.arch})` : ""} forced past its evidence, queued by ${c.login} as task ${id} with their passkey (${passkey})${confirmed?.justNow ? ", registered just now" : ""}` } : { status: "ok", summary: `${job.kind} queued by ${c.login} as task ${id}` };
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('dispatch', ?, ?, ?, ?, ?)")
-    .bind(job.params.to ?? job.params.ring ?? null, job.params.source ?? null, forced.status, forced.summary, JSON.stringify({ task: id, job, by: c.login, ...(passkey ? { via: "web", passkey } : {}) }))
+    .bind(job.params.to ?? job.params.ring ?? null, job.params.source ?? null, forced.status, forced.summary, JSON.stringify({ task: id, job, by: c.login, ...(passkey ? { via: "web", passkey } : {}), ...(confirmed?.justNow ? { registered_just_now: true } : {}) }))
     .run();
   return json({ task: id, job, ...(passkey ? { passkey } : {}) }, 201);
 }

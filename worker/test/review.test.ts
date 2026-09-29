@@ -407,8 +407,9 @@ describe("the three decisions of the workspace", () => {
     expect(rec.verified).toBe(true);
     expect(rec.doc).toMatchObject({ schema: "omarchy-pool/decision/1", decision: "approve", name: "good", by: "m2", via: "web", passkey: r.json.passkey, agent: AGENT, note: "reads well", review: r.json.review, targets: [{ arch: "x86_64", task: rb.task.id, publish: r.json.publish }] });
     const l = await line("approve", "good");
-    expect(l.summary).toContain(`approved by m2 (rebuilt with ${AGENT})`);
-    expect(l.payload).toMatchObject({ by: "m2", via: "web", passkey: r.json.passkey, agent: AGENT, review: r.json.review, record: r.json.record });
+    // m2's first decision here: decide.ts registered their first passkey a moment before it, and the line says so (#287).
+    expect(l.summary).toContain(`approved by m2 with a passkey registered just now (rebuilt with ${AGENT})`);
+    expect(l.payload).toMatchObject({ by: "m2", via: "web", passkey: r.json.passkey, registered_just_now: true, agent: AGENT, review: r.json.review, record: r.json.record });
     expect(r.json.record).toMatch(new RegExp(`-approve-r${r.json.review}\\.json$`));
     // The approval's publish job is not the cancel door's: what takes an approval back is a block.
     const stop = await call("POST", `/factory/tasks/${r.json.publish}/cancel`, {}, "omc_m1");

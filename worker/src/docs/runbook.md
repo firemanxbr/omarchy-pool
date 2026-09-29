@@ -381,8 +381,9 @@ decides on their own package, and never on a contributor's bytes:
   installs it with a real pacman from the lab.
 - **Approve** the project's build (a contributor's cannot be approved), in
   the browser with your passkey — your first is added on your own page
-  (`/user/<login>#passkeys`); a lost one is reset by another maintainer
-  (*A lost passkey*, below) — records the decision (`approvals`, with your
+  (`/user/<login>#passkeys`), or in the Approve dialog itself, which
+  registers it and then approves with it (#287); a lost one is reset by
+  another maintainer (*A lost passkey*, below) — records the decision (`approvals`, with your
   login, note and passkey) and queues a
   `publish` job that carries it into `edge` as source `factory` — and, when
   the trial passed, into rc and stable with it (the fast lane). The pool
@@ -426,7 +427,11 @@ maintainer's passkey; no token approves or blocks. From the release that
 carries #271, a maintainer who holds no passkey is refused both
 (`no_passkey`, with the link to their page): each maintainer registers one
 on `/user/<login>#passkeys` before that release deploys (v1.0.1 offers it
-already). Register two — a phone and a security key, say: the second is
+already). Since #287 a maintainer who holds none is told so — on Review, on
+their page, and once at their first page as a maintainer — and the Approve,
+Block and Force dialogs register the first one, then confirm the act with
+it, without leaving the page. A new maintainer named in
+`factory/MAINTAINERS.toml` needs nothing from an operator. Register two — a phone and a security key, say: the second is
 added with an answer from the first, and a lost one is then removed with
 the other, with no reset.
 
