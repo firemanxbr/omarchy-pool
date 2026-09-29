@@ -35,6 +35,7 @@ import { REPO_ARCHES } from "../meta";
 import { CHECKLIST, PKGNAME, PKGNAME_RULE } from "../request";
 import { escapeHtml } from "../html";
 import { agentMark, lucide, type AgentMark, type LucideName } from "./kit";
+import { LOGIN_DOCS, SERVER_COMMAND } from "./agents";
 
 /** A confirmation as the form asks it: the checklist's sentence (src/request.ts, the one text) as a line — capitalised, a full stop, escaped as the chapter's copy is by the markdown renderer. */
 const asLine = (s: string) => escapeHtml(`${s.charAt(0).toUpperCase()}${s.slice(1)}.`);
@@ -53,6 +54,10 @@ const WORKS_WITH: [string, AgentMark][] = [
   ["Claude Code", "claude-color"], ["Codex", "openai"], ["Cursor", "cursor"], ["Gemini CLI", "gemini-color"], ["GitHub Copilot", "githubcopilot"],
   ["Grok", "grok"], ["OpenCode", "opencode"], ["Qwen Code", "qwen-color"], ["Kimi", "kimi"], ["Meta", "meta-color"],
 ];
+
+/** What an agent needs for the two tools (#252): the login with its own name, which grants them. The Agents page walks through it, step 4. */
+const AGENT_LOGIN = 'omarchy-cli login --agent "&lt;its name&gt;"';
+const AGENT_LOGIN_NOTE = "Your agent gets both tools once you log it in with its name. Your browser asks you to grant it, and the token stays on your machine.";
 
 /** The licences a request names most, offered as the field is typed in; any SPDX identifier is taken (request.ts LICENSE). */
 const SPDX = ["MIT", "Apache-2.0", "GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later", "LGPL-2.1-or-later", "LGPL-3.0-or-later", "AGPL-3.0-or-later", "BSD-2-Clause", "BSD-3-Clause", "MPL-2.0", "ISC", "Unlicense", "0BSD", "Zlib", "EUPL-1.2", "custom:proprietary"];
@@ -135,8 +140,10 @@ ${Object.entries(CHECKLIST).map(([key, text]) => `          <label><input type="
         <p>Your agent fills in the request and follows it for you.</p>
         <div class="op-code"><code><span class="op-prompt">› </span><span id="fx-prompt">Request &lt;name&gt; on omarchy-pool.</span></code><button type="button" class="op-copy" data-op-copy="">copy prompt</button></div>
         <div class="fx-with"><span>Works with</span>${WORKS_WITH.map(([label, mark]) => `<span class="fx-mark">${agentMark(mark, label, 22)}</span>`).join("")}</div>
-        <p class="fx-tools"><span>${lucide("plug", 13)} Through <code>omarchy-cli mcp</code> · <code>request_package</code> · <code>request_status</code></span><span class="op-pill na" title="signed off, not built yet: #252">proposed</span></p>
-        <p class="fx-tools-note">Those two tools are proposed, not built yet (<a href="/docs/omarchy-cli-mcp">the MCP chapter</a>). Until they are, an agent sends the same request with your token: <code>POST /api/v1/factory/packages</code> (<a href="/api">the API</a>).</p>
+        <p class="fx-tools"><span>${lucide("plug", 13)} Through <code>${SERVER_COMMAND}</code> · <code>request_package</code> · <code>request_status</code></span></p>
+        <p class="fx-tools-note">${AGENT_LOGIN_NOTE}</p>
+        <div class="op-code"><code>${AGENT_LOGIN}</code><button type="button" class="op-copy" data-op-copy="">copy</button></div>
+        <p class="fx-tools-note">Connect your agent on <a href="/agents#connect">the Agents page</a>. <a href="${LOGIN_DOCS}">The MCP chapter</a> says what each tool answers.</p>
       </div>
       <ol class="fx-next" aria-label="What happens next">
         <li>${lucide("file-search", 14)}<b>Checked</b><span>licence, source, name</span></li>
@@ -991,12 +998,12 @@ export const FACTORY_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // The other tab: a prompt built from the form, copied with the kit's well, the agents it works with, and the MCP tools it would use — proposed and not built (#252), said so, with the API that takes the same request today.
+      // The other tab: a prompt built from the form, copied with the kit's well, the agents it works with, and the two MCP tools it uses (#252, served by omarchy-cli mcp) — with what an agent needs for them: the login with its name, in a well of its own, and where to connect it (the Agents page) and read what each tool answers (the MCP chapter). None of it says proposed.
       id: "factory.agent-tab",
       page: "/factory",
-      anchor: ['id="tab-agent" aria-selected="false"', 'id="fx-agent" role="tabpanel"', '<button type="button" class="op-copy" data-op-copy="">copy prompt</button>', 'id="fx-prompt"', ...WORKS_WITH.map(([label, mark]) => `op-b-${mark}" style="--op-i-s:22px" role="img" aria-label="${label}"`), "<code>request_package</code>", "<code>request_status</code>", '<span class="op-pill na" title="signed off, not built yet: #252">proposed</span>', 'href="/docs/omarchy-cli-mcp"', "<code>POST /api/v1/factory/packages</code>"],
+      anchor: ['id="tab-agent" aria-selected="false"', 'id="fx-agent" role="tabpanel"', '<button type="button" class="op-copy" data-op-copy="">copy prompt</button>', 'id="fx-prompt"', ...WORKS_WITH.map(([label, mark]) => `op-b-${mark}" style="--op-i-s:22px" role="img" aria-label="${label}"`), `<code>${SERVER_COMMAND}</code> · <code>request_package</code> · <code>request_status</code>`, `<p class="fx-tools-note">${AGENT_LOGIN_NOTE}</p>`, `<code>${AGENT_LOGIN}</code><button type="button" class="op-copy" data-op-copy="">copy</button>`, 'href="/agents#connect"', `href="${LOGIN_DOCS}"`],
       script: ["function tab(form)", 'location.hash === "#fx-agent"', "function prompt()", '"Request " + (nameOf() || "<name>") + " on omarchy-pool: source "', "ARCHES.join(\" and \")"],
-      reads: [{ path: "/docs/omarchy-cli-mcp", json: false }, { path: "/api", json: false }],
+      reads: [{ path: "/agents", json: false }, { path: "/docs/omarchy-cli-mcp", json: false }],
       visible: EVERYONE,
     },
     {
