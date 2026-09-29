@@ -146,6 +146,20 @@ describe("dashboard pages", () => {
     expect((await raw("/journal/x")).status, "a path under a moved address is no address").toBe(404);
     // A footer entry whose page has not landed is a 302 to what stands in for it (MORE's `until`). None is left: the footer's Agents was the chapter on omarchy-cli as an MCP server until its page landed (#249), and it is the page now, with a query or without — the chapter still served, and linked from the page.
     expect(MORE.filter((m) => m.until)).toEqual([]);
+    // The rule stays for the next footer page that is linked before it lands, so it is asked with an entry of the test's own, taken out again: its address a 302 to what stands in for it, the query kept, and the docs hint not calling it a page.
+    const soon = { href: "/soon", label: "Soon", until: "/docs/omarchy-cli-mcp" };
+    MORE.push(soon);
+    try {
+      res = await raw("/soon?from=footer");
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toBe("http://pool.test/docs/omarchy-cli-mcp?from=footer");
+      const chapter = await (await raw("/docs/get-started?from=soon")).text();
+      expect(chapter).toContain('href="/soon"');
+      expect(/<div class="docs-hint">([^<]*)<\/div>/.exec(chapter)?.[1]).not.toContain("Soon");
+    } finally {
+      MORE.splice(MORE.indexOf(soon), 1);
+    }
+    expect((await raw("/soon")).status, "no entry, no address").toBe(404);
     for (const path of ["/agents", "/agents?from=footer"]) {
       res = await raw(path);
       expect(res.status, path).toBe(200);
