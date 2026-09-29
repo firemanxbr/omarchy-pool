@@ -21,7 +21,7 @@
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import * as openpgp from "openpgp";
-import worker from "../src/index";
+import worker, { MOVED } from "../src/index";
 import { sha256Hex } from "../src/routes/contributors";
 import { CLAIM_ROWS_SQL, CLAIM_SQL, RELEASE_SQL, REVIEW_SQL, ROWS_SQL } from "../src/routes/review";
 import { ADOPT_SQL, MAINTAINER_SQL } from "../src/routes/adopt";
@@ -494,6 +494,21 @@ describe("who asked for a build", () => {
       expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM approvals WHERE name = 'moved'").first()).toEqual({ n: 0 });
     } finally {
       await env.DB.prepare("UPDATE contributors SET role = 'contributor' WHERE login = 'alice'").run();
+    }
+  });
+});
+
+describe("Review's links", () => {
+  it("lead to the Factory's request card and to Status, never to an address that only redirects there (index.ts MOVED: /request since #265, /journal since #264)", async () => {
+    for (const path of ["/review", "/review?package=moved", "/review?tab=unmaintained"]) {
+      const ctx = createExecutionContext();
+      const html = await (await worker.fetch(new Request(`http://pool.test${path}`), env, ctx)).text();
+      await waitOnExecutionContext(ctx);
+      // Served or written by a script, the old addresses are gone: none of them opens a link, a string or a menu row.
+      for (const old of Object.keys(MOVED)) expect(html, `${path} links ${old}`).not.toMatch(new RegExp(`(?:href=|["'])${old.replace(/\//g, "\\/")}(?=[?#"'])`));
+      // The request's renewal (the workspace's request block) and the menu's Request open the Factory's request card, the name in its query.
+      expect(html, path).toContain(`href="/factory?renew=' + encodeURIComponent(name) + '#request"`);
+      expect(html, path).toContain(`href: "/factory?name=" + encodeURIComponent(term) + "#request"`);
     }
   });
 });
