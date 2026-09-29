@@ -57,6 +57,13 @@
  * now the shell's approvalWhere is the one rule, the fixture holds the two
  * states no ring serves (a failed publish, a block), and the second block
  * draws both pages over them.
+ * The v1.0.0 production check (#274) found "in review" meaning two things:
+ * the Factory's line filed a package there only while the project rebuilt
+ * it, Review from the claim, and the Factory's Ready for review tile read
+ * `waiting` — a claimed package whose rebuild was staged among them. Now
+ * Review's meaning is the one: the line files by it and the tile reads
+ * `ready`, and a block below moves a package through a claim, a release
+ * and a staged rebuild with both pages drawn at each step.
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -243,14 +250,14 @@ describe("an approval stands or it does not, said once", () => {
       expect(card, `${what}: lost leads to the build`).toMatch(new RegExp(`^[^>]*href="/build/${failed.task_id}"`));
       expect(card, `${what}: lost leads to a ring`).not.toContain(`href="/package/${F.failedPkg}?`);
     }
-    expect(linkOf(shipped, F.failedPkg, "fx-card")).toContain('<span class="fx-note bad">publish failed</span>');
+    expect(linkOf(shipped, F.failedPkg, "fx-card")).toContain('<span class="fx-note bad" title="publish failed">publish failed</span>');
     // pulled is blocked: off the line, no card at all.
     expect(visitor.nodes["#board"]?.innerHTML ?? "", "pulled").not.toContain(`<b>${F.pulledPkg}</b>`);
     for (let i = 0; i < 5; i++) expect(visitor.nodes[`#col-${i}`].innerHTML, `column ${i}: pulled`).not.toContain(`<b>${F.pulledPkg}</b>`);
     // ours is served: its card says the ring and leads to the package's one address in it.
     const ours = linkOf(shipped, F.publishedPkg, "fx-card");
     expect(ours).toContain(`href="/package/${F.publishedPkg}?ring=edge&amp;arch=${F.arch}"`);
-    expect(ours).toContain('<span class="fx-note">in edge</span>');
+    expect(ours).toContain('<span class="fx-note" title="in edge">in edge</span>');
     // Review's workspace of each (#247), as the package's own owner and as anyone: the state is the rule's word in the kit's pill — publish failed and blocked in red, in edge in green — never "publishing" for either of dave's.
     const tone: Record<string, string> = { ok: "ok", error: "fail", blue: "run" };
     for (const [name, a, login] of [[F.failedPkg, failed, F.outsider], [F.pulledPkg, pulled, ""], [F.publishedPkg, served, F.owner]] as const) {
@@ -380,24 +387,23 @@ function served(script: string, name: string): string {
 }
 
 describe("the pages read the one answer instead of counting their own", () => {
-  // The doors that say how much waits for a maintainer: the Factory. Review's own tiles split it since #247 — Ready for a claim, In review once claimed — and read the list's `ready` and `in_review`, counted beside `waiting` by the same list (the state test above holds them); the Pipeline's tile went with the Pipeline (#248).
-  const TILES = { "/factory": "factory.tiles" } as const;
-
-  it("the Factory's tile says \"waiting for review\" from the review list's own `waiting` and `oldest_ms`, never a count of its own", async () => {
+  // The doors that say how much waits for a maintainer: the Factory's Ready for review tile and Review's own two — Ready for a claim, In review once claimed (#247) —, each the list's `ready` or `in_review`, counted beside `waiting` by the same list (the state test above holds them); the Pipeline's tile went with the Pipeline (#248). The Factory's tile read `waiting` under the same words as Review's `ready` until #274: a package claimed, its rebuild staged, was "Ready for review" on the Factory and "In review" on Review.
+  it("the Factory's Ready for review tile is Review's, word for word: the list's own `ready`, never `waiting` nor a count of its own", async () => {
     const components = allComponents(F);
-    for (const [path, id] of Object.entries(TILES)) {
-      const script = ownScript(await page(path));
-      // The tile's number is the field on the object the list answered, and its age the field beside it. The Factory's tile is the line's "Ready for review" (#246): the same number, under the handoff's word.
-      const label = path === "/factory" ? "Ready for review" : "Waiting for review";
-      const tile = new RegExp(`"${label}", num\\((\\w+(?:\\.\\w+)?)\\.waiting\\), \\1\\.oldest_ms`).exec(script);
-      expect(tile, `${path} reads waiting and oldest_ms from one answer`).not.toBeNull();
-      // Nothing on the page counts staged rows for that number.
-      expect(script, `${path} counts staged rows for the tile`).not.toMatch(new RegExp(`"${label}", num\\((?!\\w+(?:\\.\\w+)?\\.waiting\\))`));
-      // The manifest says so: the tile's literal and the field, read from the list.
-      const c = components.find((x) => x.id === id);
-      expect(c?.script, id).toEqual(expect.arrayContaining([`"${label}"`, `${tile![1]}.waiting`, `${tile![1]}.oldest_ms`]));
-      expect(c?.reads?.some((r) => r.path === "/api/v1/factory/review" && r.fields?.includes("waiting") && r.fields?.includes("oldest_ms")), `${id} reads waiting from the list`).toBe(true);
+    const factory = ownScript(await page("/factory")), review = ownScript(await page("/review"));
+    // One label, one field, one caption on both pages.
+    expect(factory).toContain('"Ready for review", num(REVIEW.ready), "waiting for a claim", REVIEW.ready]');
+    expect(review).toContain('cell("Ready for review", REVIEW ? REVIEW.ready : null, "waiting for a claim"');
+    // Nothing on either page says Ready for review over another number: not `waiting`, which counts a claimed package whose rebuild is staged, and no rows of its own.
+    for (const [path, script] of [["/factory", factory], ["/review", review]] as const) {
+      expect(script, `${path} says Ready for review over another number`).not.toMatch(/"Ready for review", (?!(?:num\()?REVIEW(?: \? REVIEW)?\.ready\b)/);
     }
+    // The manifests say so: the tile's literal and the field, read from the list.
+    const c = components.find((x) => x.id === "factory.tiles");
+    expect(c?.script).toEqual(expect.arrayContaining(['"Ready for review"', "num(REVIEW.ready)", '"waiting for a claim"']));
+    expect(c?.reads?.find((r) => r.path === "/api/v1/factory/review")?.fields).toEqual(["ready"]);
+    // Served before the list answers, the caption is already Review's.
+    expect(await page("/factory")).toContain('<span class="s" id="t-ready-s">waiting for a claim</span>');
   });
 
   it("every package address a page writes goes through pkgHref, and the page asked for the lab draws the lab chip beside the ring shown", async () => {
@@ -872,6 +878,94 @@ describe("a build's evidence has one address", () => {
     expect(ownScript(await page("/status"))).toContain("evidenceLink(t)");
     expect(script).toContain("evidenceLink(cc)");
     expect(script).toContain("evidenceLink(pb)");
+  });
+});
+
+describe("one meaning of in review", () => {
+  // The v1.0.0 production check (2026-09-29, #274): bitwarden, claimed and its rebuild staged, read "Ready for review" on the Factory's line
+  // and "In review" on Review — the line filed a package In review only while the project rebuilt it, Review from the claim. One meaning
+  // now, Review's: in review from the claim until the decision (the project's rebuild queued, running or staged: the list's `in_review`);
+  // ready for review, built and waiting for a claim (the list's `ready`). The Factory's served stageOf runs here over the registry, beside
+  // the review list, as the package moves: claimed, let go, claimed again, its rebuild staged — then the two places where the targets
+  // alone once disagreed with the list (the #274 review): a new version building beside a standing claim, and a staged build of a version
+  // already approved (felix 2.16.1, 2026-09-16). The line files a package the list names by the list's own state, never by its targets.
+  // The page runs as m1, a maintainer: the way to Review under "Your requests" says the list's two numbers too.
+  const viewer = async (path: string, init?: RequestInit) => {
+    const ctx = createExecutionContext();
+    // The registry asked past its thirty seconds at the edge (a new query), so the page reads the targets each step settled.
+    const asked = path === "/api/v1/factory/packages" ? `${path}?t=${Math.random()}` : path;
+    const res = await worker.fetch(new Request(`http://pool.test${asked}`, { ...init, headers: { ...(init?.headers as Record<string, string> | undefined), cookie: `omc=oms_${F.m1}` } }), env, ctx);
+    await waitOnExecutionContext(ctx);
+    return res;
+  };
+  type Pkg = { name: string; state: string | null };
+  const agree = async (step: string) => {
+    const d = runScript(scriptOf(await page("/factory")), { pathname: "/factory", functions: ["stageOf"], fetch: viewer });
+    await new Promise((r) => setTimeout(r, 250));
+    const review = (await call("GET", "/factory/review")).json as { ready: number; in_review: number; packages: Pkg[] };
+    const reg = (await call("GET", `/factory/packages?t=${Math.random()}`)).json.packages as { name: string }[];
+    const line = (stage: number) => reg.filter((p) => d.stageOf(p) === stage).map((p) => p.name).sort();
+    const listed = (state: string) => review.packages.filter((p) => p.state === state).map((p) => p.name).sort();
+    // In review: the same packages on both pages, and the Factory's column counts what Review's tile says.
+    expect(line(3), `${step}: in review`).toEqual(listed("in_review"));
+    expect(d.nodes["#col-3-n"].textContent, `${step}: the In review column`).toBe(String(review.in_review));
+    // Ready for review: the same packages, and the Factory's tile is Review's number.
+    expect(line(2), `${step}: ready for review`).toEqual(listed("ready"));
+    expect(d.nodes["#t-ready-n"].textContent, `${step}: the Ready for review tile`).toBe(String(review.ready));
+    expect(d.nodes["#col-2-n"].textContent, `${step}: the Ready for review column`).toBe(String(review.ready));
+    // Neither: the list names it and files it in no review column — on the line's other columns only.
+    for (const p of review.packages.filter((x) => x.state === null)) expect([2, 3], `${step}: ${p.name}, neither ready nor in review`).not.toContain(d.stageOf(reg.find((r) => r.name === p.name)));
+    // A maintainer's way to Review: the same two numbers, in the same words.
+    expect(d.nodes["#mine-maint"].textContent, `${step}: the Review queue link`).toBe(`Review queue · ${review.ready} ready · ${review.in_review} in review ›`);
+    return { d, review, card: (name: string) => (d.nodes["#col-3"].innerHTML as string).split('<a class="fx-card').find((c) => c.includes(`<b>${name}</b>`)) ?? null };
+  };
+  const spare = (review: { packages: Pkg[] }) => review.packages.find((p) => p.name === F.sparePkg)?.state ?? null;
+
+  it("files a package In review on the Factory's line exactly when Review does — from the claim, while the rebuild runs, once it is staged — and Ready for review exactly when Review's list says ready", async () => {
+    let now = await agree("as the file above left the fixture");
+    expect(spare(now.review)).toBe("ready");
+    // m1 claims spare: the project builds it again (its target reviewing) — in review on both pages.
+    const claimed = await call("POST", `/factory/tasks/${F.spareTask}/build`, "m1", { note: "claimed by the one-truth test" });
+    expect(claimed.status).toBe(200);
+    now = await agree("claimed, the rebuild queued");
+    expect(spare(now.review)).toBe("in_review");
+    expect(now.card(F.sparePkg)).toContain("project rebuilding");
+    // Let go: the claim ends, spare waits for a claim again — ready for review on both.
+    expect((await call("POST", `/factory/tasks/${F.spareTask}/release`, "m1", { reason: "let go by the one-truth test" })).status).toBe(200);
+    now = await agree("released");
+    expect(spare(now.review)).toBe("ready");
+    // Claimed again, and the rebuild staged — bitwarden's case: its target reviewed, the review decides. Still in review on both, never ready.
+    const again = await call("POST", `/factory/tasks/${F.spareTask}/build`, "m2", { note: "claimed again by the one-truth test" });
+    expect(again.status).toBe(200);
+    await env.DB.prepare("UPDATE build_tasks SET status = 'staged', started_at = ?1, finished_at = ?1 WHERE id = ?2").bind(new Date().toISOString(), again.json.task).run();
+    expect((await settleTargets(env, F.sparePkg))[F.sparePkg]).toMatchObject({ [F.arch]: { status: "reviewed", task: again.json.task } });
+    now = await agree("claimed, the rebuild staged");
+    expect(spare(now.review)).toBe("in_review");
+    expect(now.card(F.sparePkg)).toContain(">rebuild staged</span>");
+    // The owner renews it while the claim is staged (a renewal is taken while nothing of it runs, story.ts): a new version is queued, its
+    // target building. The claim stands until a maintainer decides, so Review says in review — and so does the line, never Building.
+    const bump = (await env.DB.prepare(
+      `INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status) VALUES (?, ?, '1.1-1', 'bump:1@1.1', 'renewed by the one-truth test', 100, 0, 'community', ?, 'build', 'queued') RETURNING id`,
+    ).bind(F.sparePkg, F.arch, F.owner).first<{ id: number }>())!.id;
+    expect((await settleTargets(env, F.sparePkg))[F.sparePkg]).toMatchObject({ [F.arch]: { status: "building", task: bump } });
+    now = await agree("claimed and staged, a new version building");
+    expect(spare(now.review)).toBe("in_review");
+    expect(now.card(F.sparePkg)).toContain("new version building");
+    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE id = ?").bind(bump).run();
+    await settleTargets(env, F.sparePkg);
+    // A staged build of a version already approved (felix 2.16.1): built, by its targets, but nothing for a maintainer to claim — Review's
+    // state is null and its tile does not count it. The line files it Shipped, where its approved version is, never Ready for review.
+    const approved = (await call("GET", `/factory/approvals?t=${Math.random()}`)).json.approvals.find((a: { name: string; standing: boolean }) => a.name === F.publishedPkg && a.standing) as { version: string };
+    const again2 = (await env.DB.prepare(
+      `INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, publish, trust, owner, kind, status, lease_owner, staged_prefix, result, finished_at)
+       VALUES (?, ?, ?, '-', 'built again by the one-truth test', 100, 0, 'community', ?, 'build', 'staged', 'w3', ?, '{"vet":{"verdict":"pass","fails":0,"warnings":0,"failed":[],"warned":[]}}', ?) RETURNING id`,
+    ).bind(F.publishedPkg, F.arch, approved.version, F.owner, `staging/${F.owner}/${F.publishedPkg}/${approved.version}-again/`, new Date().toISOString()).first<{ id: number }>())!.id;
+    expect((await settleTargets(env, F.publishedPkg))[F.publishedPkg]).toMatchObject({ [F.arch]: { status: "built", task: again2 } });
+    now = await agree("a staged build of the version already approved");
+    expect(now.review.packages.find((p) => p.name === F.publishedPkg)).toMatchObject({ state: null });
+    expect(now.d.stageOf((await call("GET", `/factory/packages?t=${Math.random()}`)).json.packages.find((p: { name: string }) => p.name === F.publishedPkg))).toBe(4);
+    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE id = ?").bind(again2).run();
+    await settleTargets(env, F.publishedPkg);
   });
 });
 
