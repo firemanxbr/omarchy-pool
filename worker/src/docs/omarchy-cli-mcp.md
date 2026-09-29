@@ -47,7 +47,10 @@ below). A contributor's agent requests a package and follows it. A
 maintainer's agent claims a package that is ready, reads what the factory
 did, drafts a verdict, and lets go of a claim it will not finish. The person
 decides: approve, request changes, reject and block are drafted by the agent
-and confirmed by the person in a browser, outside the agent.
+and confirmed by the person in a browser, outside the agent — approve and
+block with a passkey
+([#257](https://github.com/firemanxbr/omarchy-pool/issues/257), *A passkey
+for approve and block*, below).
 
 The design keeps three things from the pool as it is. The server holds every
 rule, so an agent that skips the MCP server and calls the API itself gains
@@ -117,7 +120,7 @@ holds as it is.
 ```json
 {
   "name": "submit_review",
-  "description": "Drafts a verdict on a package you may decide. It decides nothing: the answer is a link the person opens in a browser signed in with GitHub, and only their confirmation there decides (reject asks them to type the package's name). Approve takes the project's rebuild (the one review_claim queued); request_changes stops the round and keeps the name the requester's; reject frees the name.",
+  "description": "Drafts a verdict on a package you may decide. It decides nothing: the answer is a link the person opens in a browser signed in with GitHub, and only their confirmation there decides (approve asks for their passkey, reject for the package's name typed). Approve takes the project's rebuild (the one review_claim queued); request_changes stops the round and keeps the name the requester's; reject frees the name.",
   "inputSchema": {
     "type": "object",
     "properties": {
@@ -143,9 +146,15 @@ and what it answers:
   "task": 1234,
   "confirm_url": "https://omarchy-pool.org/auth/confirm/d_5b1e0c9a4f7d2e8b6a3c1f0e9d8b7a6c",
   "expires_at": "2026-10-02T14:30:00.000Z",
-  "next": "Open the link in a browser signed in as bob and confirm. Nothing is decided until then."
+  "next": "Open the link in a browser signed in as bob and confirm with your passkey: your device asks for your fingerprint, face or PIN. Nothing is decided until then."
 }
 ```
+
+`next` is what the agent tells its person. For approve and block it names
+the passkey the confirmation asks for (*A passkey for approve and block*,
+below); a login that holds none yet is told so, with the address of the
+Passkeys section of their page, before they open the link. Request changes
+and reject say "Open the link … and confirm".
 
 `submit_review` has the three verdicts of #247. `request_changes` stops the
 round: the builds in review are cancelled, the note goes to the requester,
@@ -321,9 +330,15 @@ page shows them.
    decides them all, so each architecture still in review: the contributor's
    build and the project's rebuild with their gates, the audit, the trial,
    the logs, and the Review workspace — and who drafted it with which agent.
-   For reject and block, the person types the package's name.
+   For reject and block, the person types the package's name. For approve
+   and block, Confirm asks for the person's passkey (*A passkey for approve
+   and block*, below); a person without one is told to register one, and is
+   offered no Confirm.
 4. Confirm posts the form with the session cookie. The server reads the draft
-   by its id and checks that it is this person's and still waiting. It reads
+   by its id and checks that it is this person's and still waiting. For
+   approve and block it verifies the passkey's answer before anything else
+   about the draft, and refuses without one; nothing about the draft changes
+   when the passkey is refused. It reads
    the draft's grant again, by its primary key: a draft whose agent was
    revoked since decides nothing. It runs the predicate again on the facts of
    now: a build decided in the meantime is refused, with the reason, and the
@@ -365,17 +380,118 @@ and takes a nonce the page wrote into its own form (an HMAC over the session
 and the draft). `/auth/` is closed to crawlers (robots.txt), and the page
 says `noindex` and is never cached.
 
-**What it cannot tell apart.** An agent that drives the person's own signed-in
-browser. A passkey with user verification (WebAuthn) is a touch or a PIN the
-agent cannot supply; asking for one to confirm approve and block is the
-follow-up [#257](https://github.com/firemanxbr/omarchy-pool/issues/257). This
-version confirms with the session and, for reject and block, the package's
-name typed (*Signed off*, 4).
+**What the session cannot tell apart.** An agent that drives the person's own
+signed-in browser presses Confirm as well as the person does. The passkey of
+#257 does not stop that agent, and does not claim to: with the session it can
+press the web's own Approve and Block on Review, which decide with the
+session alone (they are outside #257), and it can register a passkey of its
+own (*A passkey for approve and block*, below). What the passkey closes is
+the agent's token: an agent that holds its `oma_` token and nothing else
+cannot turn its own draft of approve or block — the two decisions that
+change what users get — into a decision, because the confirmation needs an
+assertion with the user verified on the person's authenticator, which the
+token cannot supply. Request changes and reject confirm with the session
+and, for reject, the package's name typed (*Signed off*, 4): neither ships
+anything, and the issue keeps them as they were.
 
 **Not MCP elicitation.** The protocol lets a server ask the person a question
 through the agent's client (`elicitation/create`). The answer comes back
 through the agent's software, so it can show the link, never be the
 confirmation.
+
+### A passkey for approve and block
+
+[#257](https://github.com/firemanxbr/omarchy-pool/issues/257). Confirming an
+agent's draft of approve or block needs a WebAuthn assertion with
+`userVerification: "required"`, verified by the Worker against the public
+key the person registered. Without it nothing is decided, and the draft
+keeps waiting.
+
+- **Registering one.** A maintainer adds a passkey in the *Passkeys* section
+  of their own page (`/user/<login>#passkeys`, shown to them only; a link
+  to that address lands on the section once it is drawn, and a contributor
+  who holds no passkey is shown no section): a name for it, then the
+  browser's own request. The page asks the pool for the
+  options (`POST /auth/passkeys/challenge`: this relying party, a user
+  handle that is a hash, not the login, ES256, EdDSA and RS256, user
+  verification required, attestation `none`, the passkeys they hold
+  excluded), hands them to `navigator.credentials.create()`, and posts the
+  answer (`POST /auth/passkeys`). The pool verifies it: `webauthn.create`,
+  the challenge it issued to this login for a registration, the origin, the
+  RP id's hash, the user present and verified, the credential's id, a key it
+  takes. It stores the credential's id, the COSE public key as the
+  authenticator wrote it, the algorithm, the RP id, the counter, the name and
+  two dates — no attestation, no device name. Ten a login; a credential is
+  registered once. Remove is the owner's, on the same page
+  (`POST /auth/passkeys/<id>/remove`); another maintainer is told it is not
+  theirs. The person's `/factory/me` lists their passkeys — the name, the
+  algorithm, the dates, never the key — and the same answer to their agent
+  (`request_status`) leaves them out.
+- **Journaled.** A registration and a removal are journal lines of kind
+  `passkey`: "m1 registered a passkey (ES256, pk_…)", "m1 removed a passkey
+  (ES256, pk_…, registered 2026-09-29)", with who, when and which passkey —
+  never the key, the credential's id or the name the person gave it.
+- **Confirming with it.** On a draft of approve or block, Confirm asks the pool
+  for a challenge (`POST /auth/confirm/<id>/challenge`, with the session, the
+  page's Origin and its nonce), hands it to `navigator.credentials.get()` with
+  the person's passkeys and user verification required, and posts the answer
+  with the form. Confirm is the form's first submit button, so Enter in the
+  typed name confirms as a click does; Discard is never the default. A new
+  challenge for the draft replaces the login's earlier one, so a prompt the
+  person cancelled holds none of the five a login may have live. The page
+  says each step in a status line a screen reader hears, and a failure in the
+  person's words. The server takes the challenge first — issued to this login
+  for this draft, five minutes old at most, deleted by the statement that
+  reads it, so an answer is good for one request whatever that request
+  decides — then the passkey by its credential, the login's own and for this
+  relying party; then the assertion: `webauthn.get`, the challenge, the
+  origin, not in a frame of another site, the RP id's hash, the user present
+  and verified, a user handle that is the login's when one is returned, the
+  signature over `authenticatorData ‖ SHA-256(clientDataJSON)` with the
+  stored key, and the counter. A counter that did not move forward is a
+  copy of the key and is refused, unless the authenticator keeps none (zero
+  both times, as many synced passkeys); it moves in one conditional update.
+  Then the typed name, the predicate and the spend, as before. The decision's
+  `through` names the passkey (`through.passkey`), and its journal line says
+  "confirmed in the browser with a passkey".
+- **Without a passkey.** The draft's page says so — "Register a passkey
+  first" — links to the registration, and offers Discard only. A POST without
+  an answer is refused in the same words, with the same link, and the
+  challenge route answers `code: "no_passkey"` with the link: there is no
+  fallback to the session alone.
+- **The relying party.** One list, never the request's word: every production
+  name is `omarchy-pool.org` (origin `https://omarchy-pool.org`, where the
+  pages and the session live), and `localhost` on any port is itself, for
+  `wrangler dev` and the tests. WebAuthn needs a secure context and takes no
+  IP address, so a local preview is opened at `http://localhost:<port>`,
+  with `wrangler dev --local-upstream localhost:<port> --upstream-protocol
+  http` (wrangler otherwise hands the Worker the first route's name, and the
+  browser's origin is not that). On any other address the page says passkeys
+  work on `omarchy-pool.org` only, and nothing is confirmed there.
+- **The verifier is the pool's own.** [webauthn.ts](../worker/src/webauthn.ts)
+  checks what the Worker needs with WebCrypto: the CBOR authenticators write
+  (definite lengths; no tags, floats or duplicate keys), COSE keys (ES256 on
+  P-256, RS256 of 2048 bits or more for Windows Hello, EdDSA on Ed25519), the
+  authenticator data, and the DER-to-raw conversion of an ECDSA signature.
+  `@simplewebauthn/server` was weighed and left out: it imports
+  `reflect-metadata`, a polyfill of the global `Reflect`, and an X.509 and
+  ASN.1 stack for attestation chains the pool does not trust, some 300 KB
+  minified in 25 packages beside the Worker's two.
+- **What it still cannot tell apart.** Registration and removal are the
+  session's acts, as the issue asks. An agent that drives the signed-in
+  browser can register a key of its own, even one made in software: the pool
+  asks for attestation `none`, so user verification is a flag the
+  authenticator reports about itself. Asking a passkey the person already
+  holds to vouch for a new one (a step-up) was weighed and left out of #257:
+  it closes nothing while the same session can remove that passkey first, or
+  press the web's own Approve and Block, and with removal gated as well, a
+  person who loses their only authenticator could never register another
+  without an operator. The stronger claim needs the three together — a
+  passkey on the web's own Approve and Block, an existing passkey to add or
+  remove one, and a way back for a lost one — and is a follow-up. Until
+  then, every registration and removal is a line on the public journal, and
+  the person's page lists their passkeys with their last use, so a key the
+  person did not add is seen and removed.
 
 `review_claim`, `review_release` and `request_package` are not confirmed this
 way; the issue names approve, reject and block (*Signed off*, 5). A claim
@@ -418,7 +534,9 @@ the day's five requests still hold.
   with the maintainer — and gains `through`: the agent, the grant, the draft,
   and when it was drafted and confirmed. The pool's signature is the one
   every record carries; a person's own, with a key they publish on GitHub,
-  can come later (*Signed off*, 8).
+  can come later (*Signed off*, 8). Approve and block confirmed with a
+  passkey carry its id too, `through.passkey`, and the line says "confirmed
+  in the browser with a passkey".
 
 ### Limits and cost
 
@@ -508,9 +626,17 @@ the day's five requests still hold.
   ones — the ones a revocation discards — by its range over the last half
   hour; the day's counts by the `contributors` primary key; a person's
   workers by `(owner, last_seen)`; a draft's decision after a failed handler
-  by the approvals' `(name, created_at)`. The agent on a decision's rows is
-  written by the decision's own statement. Nothing scans, nothing fans out
-  per row;
+  by the approvals' `(name, created_at)`. The passkeys (#257): a login's by
+  `(login, created_at)`, ten at most; one by its credential's unique index;
+  one by its id (primary key) for its removal, its journal line and its
+  counter; a challenge taken by its primary key; a login's live challenges
+  counted, its expired ones deleted and its earlier one for the same purpose
+  and draft replaced, by `(login, expires_at)`; every expired one in the
+  weekly gc by `expires_at`. A challenge is a row a maintainer's page asks
+  for: one per purpose and draft, as a new one replaces the earlier (a
+  cancelled prompt holds no slot), and five live at most per login. The agent on a
+  decision's rows is written by the decision's own statement. Nothing scans,
+  nothing fans out per row;
   [agent-tools.test.ts](../worker/test/agent-tools.test.ts) asks each for its
   plan.
 
@@ -523,8 +649,9 @@ the day's five requests still hold.
   contributor's build is refused, as the web refuses it.
 - **Confirmation.** Approve, request changes, reject and block need the person
   in the browser. No route decides on an agent's token. A draft is spent
-  before its handler runs, so it decides once. This version confirms with
-  the session; a passkey for approve and block is #257.
+  before its handler runs, so it decides once. Approve and block need the
+  person's passkey, verified by the Worker (#257); request changes and reject
+  confirm with the session and, for reject, the name typed.
 - **Releasing.** The maintainer who claimed it, or another maintainer,
   releases a claim, and only while a rebuild of it is queued or leased; the
   journal line names the agent.
@@ -569,7 +696,13 @@ the day's five requests still hold.
   in `wrangler.toml`; `agentOf`, the token's refusal elsewhere and the day's
   counts in `agents.ts`; the grant, the swap, logout, the drafts and the
   confirmation in `routes/agents.ts`, their two pages in
-  `pages/agent-auth.ts`; `through` on the handlers of `routes/review.ts`,
+  `pages/agent-auth.ts`; the passkeys (#257): migration 0040 (`passkeys`,
+  `passkey_challenges`), the verifier in `webauthn.ts`, the relying party,
+  the challenges and the registration's three routes in
+  `routes/passkeys.ts`, the confirm page's script and its states in
+  `pages/agent-auth.ts`, the *Passkeys* section of the person's own page
+  (`pages/user.ts`), the journal's `passkey` kind, the expired challenges in
+  the weekly gc; `through` on the handlers of `routes/review.ts`,
   `routes/blocks.ts` and the request; no hint on an agent's claim; the tail
   read and the edge cache of text evidence in `handleStagingGet`; the grants
   and the drafts in `/factory/me` and on the person's own page; the expired
@@ -645,6 +778,46 @@ The Worker's side, in vitest on a real local D1
   Bad arguments — no task among them — are refused before the day counts.
 - A draft writes no journal line: `/events` and the person's public page
   never show it, and `/factory/me` shows it to its person only.
+- A passkey (#257), with a software authenticator the tests build
+  ([soft-authenticator.mjs](../worker/test/soft-authenticator.mjs): a
+  WebCrypto key pair, authenticatorData with the RP id's hash, the flags and
+  the counter, clientDataJSON, the signature). A valid assertion confirms
+  approve and block, and the decision's row, record and line name the
+  passkey; its counter and last use move. Refused, with nothing decided and
+  the draft still waiting: an answer replayed (its challenge was taken by the
+  first request, which decided nothing), a challenge of another draft or
+  past its five minutes, another origin, another RP id, no user
+  verification, nobody present, a registration's type, a frame of another
+  site, a key of another login, another key's signature under the login's
+  credential, a removed key, a counter that went backwards or stood still.
+  A maintainer without a passkey is told to register one — on the page, at
+  the POST and at the challenge — with the link, and offered no Confirm;
+  another address says where passkeys work. Request changes and reject
+  still confirm without one. The challenge route takes the session, the
+  Origin, the nonce and the same login; a new challenge for the draft
+  replaces the earlier one, so presses that were cancelled never fill the
+  five a login holds, and the sixth ceremony at once is told to wait. The
+  confirm page's Confirm is the form's first submit button, so Enter in the
+  typed name confirms, never discards. A malformed signature of any
+  algorithm — an Ed25519 one that is not 64 bytes included — is a refusal
+  page, never a 500. `next` in a draft's answer names the passkey for
+  approve and block, and the Passkeys section's address when the login has
+  none.
+- Registration ([passkeys.test.ts](../worker/test/passkeys.test.ts)): the
+  options (this RP, a hashed user handle, the three algorithms, user
+  verification required, attestation none, the login's passkeys excluded); the
+  row holds exactly what verification needs and `/factory/me` lists it to its
+  owner without the key; RS256 and EdDSA as well as ES256; the session only,
+  from the relying party's origin, a maintainer not blocked; a challenge once,
+  for its login and a registration, within five minutes; an answer of
+  another origin, RP id, type, or without the user verified or present,
+  refused; a credential registered once; ten a login and five live
+  challenges, a new one replacing the earlier for the same purpose. Registration and removal are journaled without the key, and
+  only the owner removes theirs.
+- The verifier ([webauthn.test.ts](../worker/test/webauthn.test.ts)): CBOR as
+  authenticators write it and every malformed shape refused; authenticatorData;
+  the three algorithms and DER-to-raw; each check of a registration and an
+  assertion, by its refusal code.
 - A claim with an `oma_` token leaves `params.hint` null and keeps its note
   in `params.note`; the same note through the web's button is still the hint.
 - A release through an agent names the agent on the row, the record and the
@@ -685,7 +858,8 @@ What is built follows the answers:
 4. **Confirmation.** The session link, with the package's name typed for
    reject and block, is enough for now. A passkey (WebAuthn user
    verification) for approve and block is the follow-up
-   [#257](https://github.com/firemanxbr/omarchy-pool/issues/257).
+   [#257](https://github.com/firemanxbr/omarchy-pool/issues/257), built:
+   *A passkey for approve and block*.
 5. **Requests.** `request_package` does not go through the confirm link; the
    daily limit stays.
 6. **Drafts.** Shown on the person's own page only until they are confirmed;

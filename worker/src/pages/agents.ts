@@ -305,7 +305,7 @@ function body(chosen: AgentConfig): string {
           <div class="ag-step">
             <h3>Let it act as you</h3>
             <div class="op-code"><code>omarchy-cli login --agent "<span data-agent-name>${escapeHtml(chosen.label)}</span>"</code><button type="button" class="op-copy" data-op-copy>copy</button></div>
-            <p class="ag-note">For Contribute and Maintain: your browser opens the pool's grant page, signed in with GitHub, and the token stays on this machine. A maintainer adds <code>--maintain</code> for review and block, granted for seven days. A verdict or a block the agent drafts waits for you to confirm it in the browser. <a href="${LOGIN_DOCS}">How it works →</a></p>
+            <p class="ag-note">For Contribute and Maintain: your browser opens the pool's grant page, signed in with GitHub, and the token stays on this machine. A maintainer adds <code>--maintain</code> for review and block, granted for seven days. A verdict or a block the agent drafts waits for you to confirm it in the browser; approve and block ask for your passkey, registered on your page. <a href="${LOGIN_DOCS}">How it works →</a></p>
           </div>
         </li>
       </ol>

@@ -30,6 +30,7 @@
  *   GET  /api/v1/factory · POST /factory/{claim,requests,enqueue,jobs} · /factory/tasks/:id/{heartbeat,complete,fail,cancel,approve,reject,artifacts/<file>}
  *   POST /api/v1/factory/drafts · GET /factory/drafts/:id · POST /factory/grants/:id/revoke   an agent's drafts and grants (#252, routes/agents.ts)
  *   GET|POST /auth/agent · POST /auth/agent/token · POST /auth/agent/revoke · GET|POST /auth/confirm/:id   the grant, the swap, logout, a draft confirmed
+ *   POST /auth/confirm/:id/challenge · POST /auth/passkeys/challenge · POST /auth/passkeys · POST /auth/passkeys/:id/remove   passkeys: approve and block confirmed with one (#257, routes/passkeys.ts)
  *   GET  /api/v1/factory/{packages,built,review,approvals,maintainers,trust,workers/self,me} · GET /api/v1/factory/tasks/:id/can · GET /api/v1/users/:login · GET /api/v1/users/:login/can · GET /api/v1/cost
  *   GET  /api/v1/factory/names/:name?arches= · GET /api/v1/factory/source?url=   the Factory form's live checks: would the name be taken, what the repository says
  *                                                  the factory's brain: package requests, build tasks, pull-based workers
@@ -81,7 +82,8 @@ import { handleReviewList, handleApprove, handleReject, handleChanges, handleRel
 import { handleBlockContributor, handleUnblockContributor, handleBlockPackage, handleUnblockPackage, handleBlocks } from "./routes/blocks";
 import { handleAdoptPackage } from "./routes/adopt";
 import { handleAuthStart, handleAuthCallback, handleLogout } from "./routes/auth";
-import { agentClaimOrRelease, dashboardOrigin, handleAgentLogout, handleConfirm, handleConfirmPage, handleDraft, handleGetDraft, handleGrant, handleGrantPage, handleRevokeGrant, handleSwap } from "./routes/agents";
+import { agentClaimOrRelease, dashboardOrigin, handleAgentLogout, handleConfirm, handleConfirmChallenge, handleConfirmPage, handleDraft, handleGetDraft, handleGrant, handleGrantPage, handleRevokeGrant, handleSwap } from "./routes/agents";
+import { handlePasskeyOptions, handlePasskeyRegister, handlePasskeyRemove } from "./routes/passkeys";
 import { agentOf, agentTokenRefusal, dayCount, hasAgentToken } from "./agents";
 import { handleSignPool } from "./routes/pool";
 import { signingEnabled, publicKey } from "./signing";
@@ -255,6 +257,13 @@ export default {
       const confirm = path.match(/^\/auth\/confirm\/([A-Za-z0-9_]{1,64})$/);
       if (confirm && method === "GET") return handleConfirmPage(confirm[1], url, request, env, version(env));
       if (confirm && method === "POST") return handleConfirm(confirm[1], url, request, env, version(env));
+      // Passkeys (#257, routes/passkeys.ts): approve and block drafted by an agent are confirmed with one — the challenge a draft's page asks for, and a maintainer's registration and removal on their own page; the browser's session only, posted from the page's own origin, on an address the relying party list names.
+      const assertion = path.match(/^\/auth\/confirm\/(d_[0-9a-f]{32})\/challenge$/);
+      if (assertion && method === "POST") return handleConfirmChallenge(assertion[1], url, request, env);
+      if (path === "/auth/passkeys/challenge" && method === "POST") return handlePasskeyOptions(url, request, env);
+      if (path === "/auth/passkeys" && method === "POST") return handlePasskeyRegister(url, request, env);
+      const passkey = path.match(/^\/auth\/passkeys\/(pk_[0-9a-f]{32})\/remove$/);
+      if (passkey && method === "POST") return handlePasskeyRemove(passkey[1], url, request, env);
       if (path === "/auth/me" && method === "GET") {
         const c = await contributorOf(request, env);
         return c ? json({ login: c.login, name: c.name, avatar_url: c.avatar_url, role: c.role }, 200, { "cache-control": "no-store" }) : json({ error: "not signed in" }, 401, { "cache-control": "no-store" });
@@ -599,7 +608,7 @@ async function api(method: string, path: string, url: URL, request: Request, env
     // request_status without a name (#252): the agent's person, read with contribute; their drafts ride here, no-store, nobody else's to read.
     if (hasAgentToken(request)) {
       const a = await agentOf(request, env, "contribute", { write: false });
-      return a instanceof Response ? a : handleMe(a.contributor, env, dashboardOrigin(url));
+      return a instanceof Response ? a : handleMe(a.contributor, env, dashboardOrigin(url), { passkeys: false });
     }
     const c = await contributorOf(request, env);
     return c ? handleMe(c, env, dashboardOrigin(url)) : json({ error: "a contributor token is required (POST /factory/register)" }, 401);

@@ -542,7 +542,7 @@ bl=$(curl -s -X POST "$OMARCHY_API/api/v1/factory/packages/e2e-ident/block" "${m
 jq -e '[.events[] | select(.kind == "block" and (.summary | startswith("e2e-ident blocked by e2e: the e2e test of the brake")))] | length == 1' <<<"$(curl -s "$OMARCHY_API/api/v1/events?kind=block&limit=5")" >/dev/null || { echo "the journal must say who blocked e2e-ident, and why"; exit 1; }
 echo "the package page: every architecture on its data, Adopt and Block on the journal"
 
-step "Agents (#252): omarchy-cli login in the browser, a request through the agent, a block it drafts and the person confirms"
+step "Agents (#252): omarchy-cli login in the browser, a request through the agent, a block it drafts and the person confirms with a passkey (#257)"
 # The loopback login as a person runs it, the browser played by curl with
 # the person's session: omarchy-cli listens on 127.0.0.1 and prints the
 # grant page's address; the page's form is posted with the session, its
@@ -599,16 +599,31 @@ grep -q "e2e-agent blocked by" <<<"$(curl -s "$OMARCHY_API/api/v1/events?kind=bl
 cpage=$(curl -s "$curl_url" -H "cookie: omc=oms_e2e_agent")
 grep -q "Block e2e-agent?" <<<"$cpage" || { echo "the confirm page did not show the draft: $(head -c 400 <<<"$cpage")"; exit 1; }
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$curl_url" -H "authorization: Bearer $mtoken" -H "origin: $OMARCHY_API" --data "$(form_of <<<"$cpage")&action=confirm&name=e2e-agent")" == 403 ]] || { echo "a confirmation must refuse a token"; exit 1; }
-[[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$curl_url" -H "cookie: omc=oms_e2e_agent" -H "origin: $OMARCHY_API" --data "$(form_of <<<"$cpage")&action=confirm")" == 400 ]] || { echo "a block must be confirmed with the package's name typed"; exit 1; }
-[[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$curl_url" -H "cookie: omc=oms_e2e_agent" -H "origin: $OMARCHY_API" --data "$(form_of <<<"$cpage")&action=confirm&name=e2e-agent")" == 200 ]] || { echo "the person's confirmation must block it"; exit 1; }
-grep -q "e2e-agent blocked by e2e — drafted by E2E Agent, confirmed in the browser" <<<"$(curl -s "$OMARCHY_API/api/v1/events?kind=block&limit=5")" || { echo "the block's journal line must say it was drafted by the agent and confirmed in the browser"; exit 1; }
-[[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$curl_url" -H "cookie: omc=oms_e2e_agent" -H "origin: $OMARCHY_API" --data "$(form_of <<<"$cpage")&action=confirm&name=e2e-agent")" == 409 ]] || { echo "a draft decides once"; exit 1; }
+# A block is confirmed with a passkey (#257), and e2e has none yet: the page says so and offers no Confirm, and the POST decides nothing.
+grep -q "Register a passkey first." <<<"$cpage" || { echo "the confirm page must ask for a passkey to be registered first: $(grep -o '<section class="refused"[^<]*<b>[^<]*' <<<"$cpage" | head -3)"; exit 1; }
+[[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$curl_url" -H "cookie: omc=oms_e2e_agent" -H "origin: $OMARCHY_API" --data "$(form_of <<<"$cpage")&action=confirm&name=e2e-agent")" == 403 ]] || { echo "a block must not be confirmed without a passkey"; exit 1; }
+# e2e registers one on their own page as the browser does — the pool's options, a software authenticator's answer (tests/passkey.mjs), the POST — and the pool verifies it. The page's origin is the one the Worker sees, wrangler dev's first route: the confirm link's.
+rp_origin="$(jq -r '.structuredContent.confirm_url' <<<"$blk")"; rp_origin="${rp_origin%%/auth/confirm/*}"
+pkopts=$(curl -s -X POST "$OMARCHY_API/auth/passkeys/challenge" -H "cookie: omc=oms_e2e_agent" -H "origin: $OMARCHY_API" -H "content-type: application/json" -d '{}')
+[[ "$(jq -r '.publicKey.authenticatorSelection.userVerification + " " + .publicKey.attestation' <<<"$pkopts")" == "required none" ]] || { echo "a passkey's options must ask for user verification and no attestation: $pkopts"; exit 1; }
+pkreg=$(node "$ROOT/tests/passkey.mjs" register "$E2E/passkey.json" "$rp_origin" "E2E key" <<<"$pkopts" | curl -s -X POST "$OMARCHY_API/auth/passkeys" -H "cookie: omc=oms_e2e_agent" -H "origin: $OMARCHY_API" -H "content-type: application/json" --data-binary @-)
+[[ "$(jq -r '.passkey.alg' <<<"$pkreg")" == ES256 ]] || { echo "e2e's passkey must be registered: $pkreg"; exit 1; }
+grep -q "e2e registered a passkey (ES256, $(jq -r '.passkey.id' <<<"$pkreg"))" <<<"$(curl -s "$OMARCHY_API/api/v1/events?kind=passkey&limit=5")" || { echo "the passkey's registration must be journaled"; exit 1; }
+cpage=$(curl -s "$curl_url" -H "cookie: omc=oms_e2e_agent")
+grep -q 'id="pk-confirm"' <<<"$cpage" || { echo "with a passkey, the confirm page must ask for it"; exit 1; }
+# The page's script, played by curl and the authenticator: a challenge for this draft, the passkey's answer, the form.
+passkey_answer() { curl -s -X POST "$curl_url/challenge" -H "cookie: omc=oms_e2e_agent" -H "origin: $OMARCHY_API" --data "$(form_of <<<"$cpage")" | node "$ROOT/tests/passkey.mjs" assert "$E2E/passkey.json" "$rp_origin"; }
+[[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$curl_url" -H "cookie: omc=oms_e2e_agent" -H "origin: $OMARCHY_API" --data "$(form_of <<<"$cpage")&$(passkey_answer)&action=confirm")" == 400 ]] || { echo "a block must be confirmed with the package's name typed"; exit 1; }
+answer=$(passkey_answer)
+[[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$curl_url" -H "cookie: omc=oms_e2e_agent" -H "origin: $OMARCHY_API" --data "$(form_of <<<"$cpage")&$answer&action=confirm&name=e2e-agent")" == 200 ]] || { echo "the person's confirmation with their passkey must block it"; exit 1; }
+grep -q "e2e-agent blocked by e2e — drafted by E2E Agent, confirmed in the browser with a passkey" <<<"$(curl -s "$OMARCHY_API/api/v1/events?kind=block&limit=5")" || { echo "the block's journal line must say it was drafted by the agent and confirmed in the browser with a passkey"; exit 1; }
+[[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$curl_url" -H "cookie: omc=oms_e2e_agent" -H "origin: $OMARCHY_API" --data "$(form_of <<<"$cpage")&$answer&action=confirm&name=e2e-agent")" == 409 ]] || { echo "a draft decides once"; exit 1; }
 # Logout revokes on the pool, then deletes the file.
 ctoken=$(sed -n 's/^token = "\(oma_[0-9a-f]*\)"$/\1/p' "$E2E/agent-contributor/omarchy-cli/credentials.toml")
 XDG_CONFIG_HOME="$E2E/agent-contributor" "$CLI" --api "$OMARCHY_API" logout | grep -q "Revoked the grant to E2E Agent" || { echo "logout must revoke the grant"; exit 1; }
 [[ ! -e "$E2E/agent-contributor/omarchy-cli/credentials.toml" ]] || { echo "logout must delete the credentials"; exit 1; }
 [[ "$(curl -s -o /dev/null -w '%{http_code}' "$OMARCHY_API/api/v1/factory/me" -H "authorization: Bearer $ctoken")" == 401 ]] || { echo "a revoked agent token must stop working"; exit 1; }
-echo "agents: a grant in the browser, a request through the agent, a block drafted and confirmed once, logout"
+echo "agents: a grant in the browser, a request through the agent, a block drafted and confirmed once with a passkey, logout"
 
 step "pacman in $IMAGE against the worker mirror"
 gpg --armor --export "$KEYID" > "$E2E/omarchy-poc.pub.asc"
