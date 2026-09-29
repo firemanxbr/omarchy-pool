@@ -31,7 +31,7 @@ what is running is always a commit that passed them twice.
 | `pkg-manifest` | dependency rule parsing, `vercmp` against pacman's own test table, manifest JSON round-trip | unit tests |
 | `pkg-extract` | `.PKGINFO` parsing, ELF magic detection, soname → Arch provide conversion, symbol version collapsing, Go build information (the `modinfo` string, replacements, the inline version header) | unit tests |
 | `pkg-extract` | end-to-end manifests from **real** `zlib` and `xz` packages (`tests/fixtures/`) | `tests/fixtures.rs` |
-| `pkg-repo` | `desc`/`files` rendering identical to `repo-add`, database determinism; the work loop's agent re-check (#273): 15 s, doubled, at most every five minutes while the agent does not answer, the half-hour probe once it does, logged once per change of state, and a stub `factory/bin/agent.py` in a checkout refused, then answering — ok with the next claim, no restart | unit + `tests/database.rs` |
+| `pkg-repo` | `desc`/`files` rendering identical to `repo-add`, database determinism; the work loop's agent re-check (#273): 15 s, doubled back to the half hour while the agent does not answer, the half-hour probe once it does, a failure logged once per change of state, and a stub `factory/bin/agent.py` in a checkout refused, then answering — ok with the next claim, no restart — and a slow one stamped when it answered, not when it was asked | unit + `tests/database.rs` |
 | `omarchy-cli` | the MCP server's protocol handling: initialize, notifications, ping, tools/list, unknown methods, tool errors as results (`isError`) not protocol errors, bad arguments refused before any request; the write tools (#252): listed by the credential's scopes and never for another origin, each against a one-thread pool on 127.0.0.1 — the method, path and body, the token on writes and the caller's own reads only, text evidence only and never a package, the drafts' route and never a decision's, the pool's refusals in its words, a minute's memory that keeps a read for its minute only, the edge cache passed after a write, a build picked from the story but never a call stopped by it, the gate's summary under `requester_text`; login's loopback (127.0.0.1 only, its own callback only — anything else answered while it waits, another `state` swapping nothing — the verifier only in the swap) and PKCE (RFC 7636's own example); the credentials file (0600, refused when others can read it, bound to its origin, an expired grant said without a request, read again by a running session after a login or a logout); `logout` deleting it only once the grant is revoked or gone, and `login` refusing to leave a live grant of another name or pool behind | unit tests |
 | `pkg-check` | pacman `desc` parsing, satisfiers, ABI check verdicts against a real `liblzma.so.5` | unit + `tests/check.rs` |
 | `pkg-store` (`poc/crates`) | install / upgrade / remove, collisions, `.pacnew`, I/O failure rollback, crash recovery before and after commit | `tests/transactions.rs` against a temp root |
@@ -401,15 +401,18 @@ up to its dispatch line, the pool a stub that answers every claim with 204,
 answering 100 s later (#273): the first claim says `error` with the
 refusal, a claim within a minute of the agent coming up says `ok`, no
 restart; four probes, then the half-hour one; a failure logged once; an
-agent that never answers probed at gaps that grow to five minutes and
-stay there; and the same through a broker's `/health`.
+agent that never answers probed at gaps that double back to the half hour
+and stay there (two probes in its second hour); and the same through a
+broker's `/health`.
 `bash tests/omarchy-rollout.sh` (CI) runs the updater and the Studio's
 `factory/host/rollout.sh` against a stubbed docker: the brokers
 (`agent-proxy`, `broker-*`, a service with the broker or agent role) in
 an `up` of their own, each asked from inside its container until it
 answers — the tries between the two `up`s, a pause between them — before
 the workers are replaced together; a broker that never answers said as a
-warning after `ROLLOUT_BROKER_WAIT`, and the workers replaced anyway.
+warning within `ROLLOUT_BROKER_WAIT` — one bound for all the brokers, not
+one each: the wait spent, the next broker is asked once — and the workers
+replaced anyway; brokers compose could not start said, not waited for.
 
 What the build sees is checked by hand in the worker image (SECURITY.md,
 *Isolation*): `hold_secrets` leaves a child with no secret, `as_builder`

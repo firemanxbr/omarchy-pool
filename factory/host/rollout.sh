@@ -4,10 +4,10 @@
 # size of one host.
 #
 # What the workers call goes first: agent-proxy and the community brokers
-# whose image (or configuration) changed are replaced, and each is waited
-# for until it answers on :8790 (ROLLOUT_BROKER_WAIT, 300 s; past it the
-# rollout says so and goes on — it never hangs on one), then every worker
-# that changed is replaced in one `up`: compose stops each running
+# whose image (or configuration) changed are replaced, and waited for until
+# each answers on :8790 (ROLLOUT_BROKER_WAIT, 300 s for all of them; past
+# it the rollout says so and goes on — it never hangs on one), then every
+# worker that changed is replaced in one `up`: compose stops each running
 # container — SIGTERM, which the worker takes as *drain*: it finishes the
 # task it holds, reports it, claims nothing new and exits (up to the
 # compose file's stop_grace_period) — and starts one from the new image,
@@ -98,11 +98,11 @@ for svc in "${replace[@]}"; do
   if [[ "$svc" == agent-proxy || "$svc" == broker-* || "$role" == broker || "$role" == agent ]]; then brokers+=("$svc"); else workers+=("$svc"); fi
 done
 # up -d recreates a container whose image changed: stop (drain), remove, start — all of the given ones at once.
-replace_now() { # service...
+replace_now() { # service... — 1 when compose did not replace them
   if docker compose up -d --no-deps --no-build "$@" >/dev/null 2>&1; then
     local svc; for svc in "$@"; do log "$svc: running $(docker inspect -f '{{.Image}}' "$(docker compose ps -q "$svc" | head -1)" 2>/dev/null | cut -c8-19)"; done
   else
-    log "FAILED to replace $* — docker compose logs"
+    log "FAILED to replace $* — docker compose logs"; return 1
   fi
 }
 # Does the broker answer? Any HTTP answer from inside its container (curl
@@ -113,23 +113,30 @@ answers() { # service
   local cid; cid="$(docker compose ps -q "$1" 2>/dev/null | head -1)"
   [[ -n "$cid" ]] && docker exec "$cid" curl -s -o /dev/null --max-time 3 http://127.0.0.1:8790/ >/dev/null 2>&1
 }
-wait_answering() { # service — bounded: ROLLOUT_BROKER_WAIT seconds, a try every 2
-  local svc="$1" most="${ROLLOUT_BROKER_WAIT:-300}" tries=0 deadline=$(( SECONDS + ${ROLLOUT_BROKER_WAIT:-300} ))
-  log "$svc: waiting until it answers on :8790 (at most ${most} s) before the workers that call it are replaced"
-  until answers "$svc"; do
-    tries=$((tries + 1))
-    if (( tries * 2 >= most || SECONDS >= deadline )); then
-      log "$svc: WARNING — not answering on :8790 after ${most} s; replacing the workers anyway (they check their agent again until it answers) — docker compose logs $svc"
-      return 0
-    fi
-    sleep 2
+# All the brokers within one ROLLOUT_BROKER_WAIT, not one each after
+# another (three that never answer held the workers back 900 s: found in
+# review); a try every 2 s.
+wait_answering() { # service... — all of them within one ROLLOUT_BROKER_WAIT, a try every 2 s
+  local most="${ROLLOUT_BROKER_WAIT:-300}" waited=0 deadline=$(( SECONDS + ${ROLLOUT_BROKER_WAIT:-300} )) svc tries
+  log "waiting for $* to answer on :8790 (at most ${most} s in all) before the workers that call them are replaced"
+  for svc in "$@"; do
+    tries=0
+    until answers "$svc"; do
+      if (( waited + 2 >= most || SECONDS >= deadline )); then
+        log "$svc: WARNING — not answering on :8790 within the ${most} s wait; replacing the workers anyway (they check their agent again until it answers) — docker compose logs $svc"
+        continue 2
+      fi
+      tries=$((tries + 1)); waited=$((waited + 2))
+      sleep 2
+    done
+    log "$svc: answering on :8790$( (( tries > 0 )) && echo " after about $((tries * 2)) s")"
   done
-  log "$svc: answering on :8790$( (( tries > 0 )) && echo " after about $((tries * 2)) s")"
 }
 if (( ${#brokers[@]} )); then
-  replace_now "${brokers[@]}"
-  for svc in "${brokers[@]}"; do wait_answering "$svc"; done
+  # Waited for only when they were replaced: a broker compose could not
+  # start will not answer, and the workers are not held back for nothing.
+  if replace_now "${brokers[@]}"; then wait_answering "${brokers[@]}"; else log "not waiting for ${brokers[*]}: replacing the workers anyway"; fi
 fi
-(( ${#workers[@]} == 0 )) || replace_now "${workers[@]}"
+(( ${#workers[@]} == 0 )) || replace_now "${workers[@]}" || true
 # Only what this run replaced goes.
 for img in "${old_images[@]}"; do docker image rm "$img" >/dev/null 2>&1 || true; done

@@ -511,7 +511,7 @@ __CHARTS__
   }
   function workerLine(w, t) {
     var working = w.alive && !!w.current_task, model = w.agent ? modelOf(w.agent) : "—";
-    // Alive, nothing in hand, not ready — its agent did not answer (the listing's ready; the shell's words for why, whole on hover): never "waiting for work" (#273).
+    // Alive, nothing in hand, not ready — what it declares needs an agent that did not answer (the listing's ready; the shell's words for why, whole on hover), as the Workers page's failed pill says it: never "idle, waiting for work" (#273). It is handed no agent work — no audit, no review: build — until its agent answers; the jobs that need none still come.
     var down = w.alive && !working && !w.ready;
     var doing = !w.alive ? '<b>offline</b><span class="st-dim">' + esc(span(Date.now() - Date.parse(w.last_seen))) + '</span>'
       : down ? '<span class="st-dot fail" aria-hidden="true"></span><b>not ready</b><span class="st-dim">' + esc(wtNotReady(w)) + '</span>'

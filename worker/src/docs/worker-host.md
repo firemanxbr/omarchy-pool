@@ -10,7 +10,7 @@ a machine to the project can use the same three files.
 |---|---|
 | `setup.sh` | run once with `sudo`: the directory tree (a btrfs subvolume where `/` is btrfs), docker + compose + user-mode emulation for the other architecture, the docker group, the env files to fill in |
 | `register.sh` | registers the six workers with the pool under a maintainer's token, trusts the four project ones, writes each worker token into `etc/<service>.env` — prints only the ids |
-| `rollout.sh` | a rolling upgrade to the image the latest release published: `agent-proxy` and the community brokers that changed first, each waited for until it answers on `:8790` (at most `ROLLOUT_BROKER_WAIT`, 300 s; past it a warning, and the rollout goes on), then every worker that changed in one `up`: a stop is a *drain* (SIGTERM — the worker finishes the task it holds, claims nothing new, exits; `stop_grace_period: 3h`), then the new container starts; the unchanged ones keep working. `--check` only reports. A systemd user timer runs it every 15 minutes |
+| `rollout.sh` | a rolling upgrade to the image the latest release published: `agent-proxy` and the community brokers that changed first, each waited for until it answers on `:8790` (at most `ROLLOUT_BROKER_WAIT`, 300 s for all of them; past it a warning, and the rollout goes on), then every worker that changed in one `up`: a stop is a *drain* (SIGTERM — the worker finishes the task it holds, claims nothing new, exits; `stop_grace_period: 3h`), then the new container starts; the unchanged ones keep working. `--check` only reports. A systemd user timer runs it every 15 minutes |
 | `compose.yml` | nine services (three of them, `community-x86_64`, its broker and `review-x86_64`, under the `emulated` profile: off unless `COMPOSE_PROFILES=emulated` is in `.env` — see *x86_64 builds* below): `pool-*`, `review-*` (project trust, the runtime's socket, a work directory at the same path on both sides, the shared package cache; their audits and build containers reach the agent through `agent-proxy` on the `review` network), `broker-community-*` + `community-*` (community trust, shared: the broker holds the token, the agent key and `GITHUB_TOKEN` and only receives, processes and answers; the builder beside it holds nothing, one task per container, on a network the two have to themselves); the x86_64 community builder is an emulated container on an aarch64 host, its broker native |
 
 ```
@@ -51,8 +51,8 @@ docker compose restart pool-x86_64                # a worker that looks stuck �
 The Workers page lists the six by role, with the agent each reports; a
 worker that is not alive there is not running here. One whose agent does
 not answer is *failed* there and *not ready* on the Factory and Status,
-with the agent's error: it checks its agent again (15 s, doubled, at most
-every five minutes) and is ready again by itself once the agent answers —
+with the agent's error: it checks its agent again (15 s, doubled, back to
+every thirty minutes) and is ready again by itself once the agent answers —
 `docker compose logs agent-proxy` says why the proxy does not.
 
 `rollout.sh` and `compose.yml` are this host's copies: a release changes

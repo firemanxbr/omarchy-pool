@@ -203,12 +203,22 @@ struct AgentProbe {
 /// checkout: one tiny completion. A key set is not an agent that works — a
 /// worker whose agent does not answer is not ready for an audit or a build
 /// (docs/GOVERNANCE.md, *Workers*); the brain reads this with every claim.
+///
+/// Stamped when the answer came, not when the question went: a probe can
+/// take its whole two minutes (`agent.py` waits 30, 60, 120 s on a 429 or
+/// a 5xx, and agent-proxy answers 502 until Claude Code is installed), and
+/// the next one is due that long after the last answer — measured from the
+/// start, a slow failing agent kept the claim loop inside the probe most of
+/// the time (found in review, #273).
 fn probe_agent(opts: &WorkOptions) -> AgentProbe {
-    let mut p = AgentProbe {
-        checked_at: Some(std::time::Instant::now()),
-        checked_iso: chrono_now(),
-        ..AgentProbe::default()
-    };
+    let mut p = ask_agent(opts);
+    p.checked_at = Some(Instant::now());
+    p.checked_iso = chrono_now();
+    p
+}
+
+fn ask_agent(opts: &WorkOptions) -> AgentProbe {
+    let mut p = AgentProbe::default();
     let script = match repo_dir(opts) {
         Ok(dir) => dir.join("factory/bin/agent.py"),
         Err(e) => {
@@ -265,16 +275,18 @@ fn probe_agent(opts: &WorkOptions) -> AgentProbe {
 /// same rollout refused both review workers on the Studio at their only
 /// check, and they stayed not ready for 35 minutes after v1.0.0 and again
 /// after v1.0.1, until someone restarted them (#273). A failed probe is
-/// tried again after 15 s, doubled at each failure up to five minutes,
-/// until the agent answers; an agent that answers is probed every
-/// `AGENT_PROBE_EVERY`. Every result goes with the next claim.
+/// tried again after 15 s, doubled at each failure, until the agent
+/// answers — and the doubling stops at `AGENT_PROBE_EVERY`, the half hour
+/// an agent that answers is probed at: an agent that is starting answers
+/// within the first few re-checks, and one that fails for good (no credit,
+/// a revoked key) is asked no more often than before, each probe a real
+/// completion (found in review). Every result goes with the next claim.
 const AGENT_RETRY_FIRST: Duration = Duration::from_secs(15);
-const AGENT_RETRY_MOST: Duration = Duration::from_secs(5 * 60);
 
-/// How long after the `failures`-th failed probe in a row the next one runs: 15 s, 30 s, 60 s … five minutes.
+/// How long after the `failures`-th failed probe in a row the next one runs: 15 s, 30 s, 60 s … 16 min, then every half hour.
 fn agent_retry_after(failures: u32) -> Duration {
     let doubled = AGENT_RETRY_FIRST.saturating_mul(1u32 << failures.saturating_sub(1).min(16));
-    doubled.min(AGENT_RETRY_MOST)
+    doubled.min(AGENT_PROBE_EVERY)
 }
 
 /// The agent's standing between probes: the last answer (what the claims
@@ -297,8 +309,10 @@ impl AgentCheck {
             .is_none_or(|t| now.saturating_duration_since(t) >= wait)
     }
 
-    /// Takes a probe's answer; the line to log, once per change of state —
-    /// the first failure, a different error, the answer — never per check.
+    /// Takes a probe's answer; the line to log. A failure is said once per
+    /// change of state — the first one, a different error, the answer
+    /// again — never at every re-check; a healthy agent is said at each of
+    /// its half-hour probes, as before.
     fn record(&mut self, p: AgentProbe) -> Option<String> {
         let who = if p.label.is_empty() {
             String::new()
@@ -313,7 +327,7 @@ impl AgentCheck {
                     "agent{who}: NOT ready — {}; checking again in {} s, then less often (up to every {} s) until it answers",
                     p.error,
                     agent_retry_after(self.failures).as_secs(),
-                    AGENT_RETRY_MOST.as_secs()
+                    AGENT_PROBE_EVERY.as_secs()
                 )
             })
         } else if self.failures > 0 {
@@ -2156,13 +2170,13 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_probe_is_tried_again_sooner_then_less_often_up_to_five_minutes() {
-        let secs: Vec<u64> = (1..=8).map(|n| agent_retry_after(n).as_secs()).collect();
-        assert_eq!(secs, [15, 30, 60, 120, 240, 300, 300, 300]);
+    fn a_failed_probe_is_tried_again_sooner_then_less_often_back_to_the_half_hour() {
+        let secs: Vec<u64> = (1..=10).map(|n| agent_retry_after(n).as_secs()).collect();
+        assert_eq!(secs, [15, 30, 60, 120, 240, 480, 960, 1800, 1800, 1800]);
         assert_eq!(
-            agent_retry_after(u32::MAX).as_secs(),
-            300,
-            "never overflows, never past the ceiling"
+            agent_retry_after(u32::MAX),
+            AGENT_PROBE_EVERY,
+            "never overflows, never past the healthy agent's half hour"
         );
     }
 
@@ -2212,12 +2226,15 @@ mod tests {
         );
     }
 
+    /// An agent that fails for good (no credit, a revoked key) is asked more
+    /// often only at first: by the second hour it is probed every half
+    /// hour, as a healthy one is — each probe is a real completion.
     #[test]
-    fn an_agent_that_never_answers_is_checked_at_most_every_five_minutes_and_logged_once() {
+    fn an_agent_that_never_answers_backs_off_to_the_half_hour_and_is_logged_once() {
         let t0 = Instant::now();
         let mut check = AgentCheck::default();
         let (mut probes, mut lines) = (Vec::new(), 0);
-        for k in 0..120u32 {
+        for k in 0..240u32 {
             let now = t0 + POLL * k;
             if check.due(now) {
                 probes.push((now - t0).as_secs());
@@ -2230,12 +2247,22 @@ mod tests {
             "never faster: {gaps:?}"
         );
         assert!(
-            gaps.iter().all(|&g| g <= 300 + POLL.as_secs()),
-            "never slower than the ceiling: {gaps:?}"
+            gaps.iter()
+                .all(|&g| g <= AGENT_PROBE_EVERY.as_secs() + POLL.as_secs()),
+            "never slower than the half-hour probe: {gaps:?}"
         );
-        assert!(
-            (10..=17).contains(&probes.len()),
-            "about one probe per five minutes in the hour: {probes:?}"
+        assert_eq!(
+            probes,
+            [0, 30, 60, 120, 240, 480, 960, 1920, 3720, 5520],
+            "15 s, doubled, at the loop's 30 s pace, then every half hour"
+        );
+        assert_eq!(
+            probes
+                .iter()
+                .filter(|&&t| (3600..7200).contains(&t))
+                .count(),
+            2,
+            "the second hour: two probes, a healthy agent's rate"
         );
         assert_eq!(lines, 1, "the same error is said once");
         // A different error is news.
@@ -2252,11 +2279,10 @@ mod tests {
         assert!(check.due(t0 + AGENT_PROBE_EVERY));
     }
 
-    /// The probe itself, against a stub `factory/bin/agent.py` in a checkout:
-    /// refused until a file says the agent is up, then answered — the same
-    /// check, no restart. Needs `timeout` and `python3`, as the image has.
-    #[test]
-    fn the_probe_runs_the_checkouts_agent_py_and_recovers() {
+    /// A checkout with a stub `factory/bin/agent.py` (the given Python), and
+    /// the options that probe it — `None` without `timeout` or `python3`,
+    /// which the image has.
+    fn stub_checkout(agent_py: &str) -> Option<(tempfile::TempDir, WorkOptions)> {
         let have = |c: &str| {
             std::process::Command::new("sh")
                 .args(["-c", &format!("command -v {c}")])
@@ -2265,18 +2291,12 @@ mod tests {
         };
         if !have("timeout") || !have("python3") {
             eprintln!("skipped: no timeout or python3 on this machine");
-            return;
+            return None;
         }
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("factory/bin");
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(
-            bin.join("agent.py"),
-            "import json, os, sys\n\
-             if os.path.exists(os.path.join(os.path.dirname(__file__), 'up')):\n    print(json.dumps({'ok': True, 'ms': 7, 'agent': 'anthropic/claude-sonnet-5'}))\n\
-             else:\n    print(json.dumps({'ok': False, 'error': 'URLError: [Errno 111] Connection refused'}))\n    sys.exit(1)\n",
-        )
-        .unwrap();
+        std::fs::write(bin.join("agent.py"), agent_py).unwrap();
         let opts = WorkOptions {
             api: String::new(),
             pool: String::new(),
@@ -2291,6 +2311,22 @@ mod tests {
             sign: None,
             repo_dir: Some(dir.path().into()),
         };
+        Some((dir, opts))
+    }
+
+    /// The probe itself, against a stub `factory/bin/agent.py` in a checkout:
+    /// refused until a file says the agent is up, then answered — the same
+    /// check, no restart.
+    #[test]
+    fn the_probe_runs_the_checkouts_agent_py_and_recovers() {
+        let Some((dir, opts)) = stub_checkout(
+            "import json, os, sys\n\
+             if os.path.exists(os.path.join(os.path.dirname(__file__), 'up')):\n    print(json.dumps({'ok': True, 'ms': 7, 'agent': 'anthropic/claude-sonnet-5'}))\n\
+             else:\n    print(json.dumps({'ok': False, 'error': 'URLError: [Errno 111] Connection refused'}))\n    sys.exit(1)\n",
+        ) else {
+            return;
+        };
+        let bin = dir.path().join("factory/bin");
         let mut check = AgentCheck::default();
         check.record(probe_agent(&opts));
         assert_eq!(
@@ -2307,6 +2343,42 @@ mod tests {
         assert_eq!(check.probe.status, "ok");
         assert_eq!(check.probe.label, "anthropic/claude-sonnet-5");
         assert_eq!(line.as_deref(), Some("agent anthropic/claude-sonnet-5: ok (7 ms) — answering again after 1 failed check(s)"));
+    }
+
+    /// A slow failure (agent.py waiting out a 502 from a proxy still
+    /// installing Claude Code) is stamped when it ended: the next re-check
+    /// is 15 s after the answer, not 15 s after the question — else the
+    /// claim loop would start the next two-minute probe as soon as the last
+    /// one ended (found in review).
+    #[test]
+    fn a_slow_probe_is_stamped_when_it_answered() {
+        let Some((_dir, opts)) = stub_checkout(
+            "import json, sys, time\n\
+             time.sleep(1.5)\n\
+             print(json.dumps({'ok': False, 'error': 'HTTP Error 502: Bad Gateway'}))\n\
+             sys.exit(1)\n",
+        ) else {
+            return;
+        };
+        let asked = Instant::now();
+        let mut check = AgentCheck::default();
+        check.record(probe_agent(&opts));
+        let answered = check.probe.checked_at.unwrap();
+        assert!(
+            answered >= asked + Duration::from_millis(1500),
+            "stamped after the probe's 1.5 s, not before: {:?}",
+            answered - asked
+        );
+        assert!(
+            !check.due(asked + Duration::from_secs(15))
+                && !check.due(answered + Duration::from_secs(14)),
+            "not due 15 s after the question"
+        );
+        assert!(
+            check.due(answered + Duration::from_secs(15)),
+            "due 15 s after the answer"
+        );
+        assert!(!check.probe.checked_iso.is_empty());
     }
 
     #[test]

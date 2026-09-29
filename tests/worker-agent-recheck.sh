@@ -4,10 +4,12 @@
 # stub agent that is refused at start — the agent proxy replaced in the same
 # rollout, not listening yet — and comes up a minute and a half later. The
 # worker must report `ok` with its next claim after that, with no restart;
-# the re-checks back off (15 s, doubled, at most every AGENT_RETRY_MAX_SECONDS)
-# instead of waiting AGENT_PROBE_MINUTES or spinning; the failure is logged
-# once, not once per check; a healthy agent keeps its half-hour probe. The
-# same through a broker whose agent does not answer yet.
+# the re-checks back off (15 s, doubled, back to AGENT_PROBE_MINUTES — an
+# agent that fails for good is asked no more often than a healthy one once
+# the backoff is spent) instead of waiting half an hour at once or
+# spinning; the failure is logged once, not at every re-check; a healthy
+# agent keeps its half-hour probe. The same through a broker whose agent
+# does not answer yet.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
@@ -72,17 +74,18 @@ grep -q 'key=yes' "$STUB_LOG" || { echo "the probe gets the agent's key (with_se
 # Probes at +0, +30, +60 (the 15 s and 30 s re-checks, at the loop's 30 s pace), +120 (60 s): ok. Then nothing for half an hour.
 [[ "$probes" == 4 ]] || { echo "four probes — three refused, one answered — then the healthy half-hour probe: $probes: $(grep '^probe ' "$STUB_LOG" | tr '\n' ' ')"; exit 1; }
 [[ "$(grep -c 'NOT ready' "$tmp/stderr")" == 1 ]] || { echo "the refusal is logged once, not once per check: $(grep 'agent' "$tmp/stderr")"; exit 1; }
-grep -q 'checking again in 15 s, then less often (up to every 300 s) until it answers' "$tmp/stderr" || { echo "the log says what happens next: $(cat "$tmp/stderr")"; exit 1; }
+grep -q 'checking again in 15 s, then less often (up to every 1800 s) until it answers' "$tmp/stderr" || { echo "the log says what happens next: $(cat "$tmp/stderr")"; exit 1; }
 grep -q 'agent anthropic/claude-sonnet-5: ok (42 ms) — answering again after 3 failed check(s)' "$tmp/stderr" || { echo "and when it answers again: $(cat "$tmp/stderr")"; exit 1; }
 
-# 2. Never up within the hour: bounded — gaps that grow to AGENT_RETRY_MAX_SECONDS and stay there, one log line.
-run_worker 3600 999999 "${common[@]}"
+# 2. Never up in two hours: bounded — gaps that double back to the half-hour
+# probe (AGENT_PROBE_MINUTES) and stay there, one log line.
+run_worker 7200 999999 "${common[@]}"
+at="$(awk '/^probe / { print $2 - 1000000 }' "$STUB_LOG" | tr '\n' ' ')"
 gaps="$(awk '/^probe / { if (last) print $2 - last; last = $2 }' "$STUB_LOG" | tr '\n' ' ')"
-probes="$(grep -c '^probe ' "$STUB_LOG")"
-(( probes >= 10 && probes <= 17 )) || { echo "about one probe per 300 s once the backoff is at its ceiling, never a spin: $probes probes, gaps $gaps"; exit 1; }
+[[ "$at" == "0 30 60 120 240 480 960 1920 3720 5520 " ]] || { echo "15 s, doubled, at the loop's 30 s pace, then every half hour: probes at $at"; exit 1; }
 prev=0; for g in $gaps; do
-  (( g >= prev || g >= 300 )) || { echo "the gaps never shrink while the agent is down: $gaps"; exit 1; }
-  (( g <= 330 )) || { echo "and never pass the ceiling (300 s, at the loop's 30 s pace): $gaps"; exit 1; }
+  (( g >= prev )) || { echo "the gaps never shrink while the agent is down: $gaps"; exit 1; }
+  (( g <= 1830 )) || { echo "and never pass the half-hour probe (at the loop's 30 s pace): $gaps"; exit 1; }
   prev=$g
 done
 [[ "$(grep -c 'NOT ready' "$tmp/stderr")" == 1 ]] || { echo "the same failure is logged once: $(grep -c 'NOT ready' "$tmp/stderr") lines"; exit 1; }

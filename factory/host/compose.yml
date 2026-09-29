@@ -2,7 +2,8 @@
 # (/docs/runbook, *The Studio host*; the roles: /docs/workers#roles).
 #
 #   docker compose up -d            start
-#   ./rollout.sh                    a rolling upgrade to the latest image, one worker at a time
+#   ./rollout.sh                    a rolling upgrade to the latest image: agent-proxy and the brokers
+#                                   first, each answering, then every worker that changed in one `up`
 #                                   (a systemd user timer runs it every 15 minutes: setup.sh)
 #   docker compose logs -f review-aarch64            one worker's log
 #
@@ -27,7 +28,8 @@
 
 # A stop is a drain: the worker finishes the task it holds, claims no new
 # one and exits (SIGTERM); the grace period is what the longest build may
-# take — rollout.sh replaces the six one at a time inside it.
+# take — rollout.sh replaces the workers that changed together, each
+# draining inside its own.
 x-project: &project
   image: ghcr.io/firemanxbr/omarchy-worker:latest
   restart: unless-stopped

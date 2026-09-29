@@ -283,17 +283,22 @@ happening:
 - `rollout.sh` replaces `agent-proxy` and the community brokers first and
   waits until each answers on `:8790` from inside its container (a `curl`
   of `GET /`, never `/health`, which spends a completion of the agent),
-  at most `ROLLOUT_BROKER_WAIT` seconds (300); one that never answers is a
-  `WARNING` line in the timer's journal and the rollout goes on — it never
-  hangs on a broker. Only then are the workers that changed replaced, in
-  one `up` as before. The updater of a contributor's set
+  at most `ROLLOUT_BROKER_WAIT` seconds (300) for all of them together;
+  one that never answers is a `WARNING` line in the timer's journal and
+  the rollout goes on — it never hangs on a broker — and brokers compose
+  could not start (`FAILED to replace`) are not waited for at all. Only
+  then are the workers that changed replaced, in one `up` as before. The updater of a contributor's set
   (`factory/bin/omarchy-rollout`) does the same with its broker.
 - A worker whose agent does not answer checks it again after 15 s, then
-  30 s, 60 s… at most every five minutes, until it answers, and reports
-  each result with its next claim (`pkg-repo work` for the pool and review
-  workers, `omarchy-build-worker.sh` for the community containers); the
-  failure is logged once, not once per check. A healthy agent keeps its
-  thirty-minute probe.
+  30 s, 60 s… doubling back to the thirty minutes a healthy agent is
+  probed at, until it answers, and reports each result with its next claim
+  (`pkg-repo work` for the pool and review workers,
+  `omarchy-build-worker.sh` for the community containers). An agent that
+  is starting answers within the first few re-checks; one that fails for
+  good (no credit, a revoked key) is asked every half hour again after
+  about thirty minutes, since each probe is a real completion. The failure
+  is logged once, not at every re-check; a healthy agent is logged at each
+  of its thirty-minute probes, as before.
 - The Factory's workers card and Status's workers list draw a live worker
   that is not ready as **not ready**, with the agent's error, as the
   Workers page's *failed* pill does.
@@ -304,7 +309,7 @@ and `compose.yml` are the host's copies: `setup.sh` put them in
 side ships in the image, so from the first release that carries the
 re-check the workers recover by themselves within minutes, whichever
 `rollout.sh` the host runs. To get the broker-first order, copy the file
-from a checkout at the release (compose.yml did not change for it):
+from a checkout at the release (compose.yml changed only in its comments):
 
 ```bash
 install -m 755 factory/host/rollout.sh /srv/omarchy-pool/rollout.sh   # or run sudo factory/host/setup.sh again
