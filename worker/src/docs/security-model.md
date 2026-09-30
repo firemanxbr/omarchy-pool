@@ -57,10 +57,11 @@ secret). Everything travels in the `Authorization` header over TLS only.
 
 | Who | Gets | How |
 |---|---|---|
-| Contributor | register packages, run community workers | GitHub account |
-| Community worker | community builds of its owner's packages; anyone's only when started with `--shared` / `WORKER_SHARED=1`; results go to a separate staging bucket in the owner's workspace | registered by its owner |
+| Contributor | submit packages only: request them, build them and follow them — on the pool's hosts. A contributor runs no worker: `POST /factory/workers` refuses them (403, *your packages build on the pool's hosts*) | GitHub account |
+| Host | the workers: every one is provided by a maintainer — the project's compute is its maintainers' hosts. A maintainer's host is trusted by the same act that makes them a maintainer | registered by a maintainer (`POST /factory/workers`), listed in `factory/MAINTAINERS.toml` at the last sync |
+| Community worker | none: the tier ends (#307). The registrations made before #331 — the maintainers' own — keep their claims (their owner's packages; anyone's when shared) until they retire | no new one |
 | Project worker | pool jobs (sync, render, promote, health, security, gc) and the rebuild of approved packages — never a build without evidence and review | two maintainers' word (`POST /factory/workers/:id/trust`): one proposes, another confirms, never the worker's owner; the trust is a signed record under `workers/<id>/`; one maintainer takes it back. The Review page names the worker and host behind every build |
-| Maintainer | approve the project's staged builds — never their own package — settle categories, block with a reason, vouch for a worker with a second maintainer, withdraw a record, review governance | listed in `factory/MAINTAINERS.toml`, merged with another maintainer's review |
+| Maintainer | provide the project's hosts, approve the project's staged builds — never their own package — settle categories, block with a reason, vouch for a worker with a second maintainer, withdraw a record, review governance | listed in `factory/MAINTAINERS.toml`, merged with another maintainer's review |
 | Agent key | drafts and corrects PKGBUILDs on a community worker; audits staged builds on a project worker | the worker owner's own key — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` or `XAI_API_KEY` — set in the container's environment; the pool and GitHub hold none. The worker reports only the provider and model name (`anthropic/claude-sonnet-5`) for the Workers page. An audit's report is evidence a maintainer reads, never something the pool acts on |
 
 ## Isolation

@@ -7,9 +7,10 @@ repository for now; it is designed to move out (see *The contract* and
 [docs/MIGRATION.md](../docs/MIGRATION.md)).
 
 The pool is the brain. GitHub holds PKGBUILDs and runs CI; it orchestrates
-nothing. Workers are ephemeral, live anywhere, and pull.
+nothing. Workers run on the maintainers' hosts, and pull: contributors
+submit packages and use the pool's workers, and run none (*Whose compute*).
 
-Contributors and maintainers use the same tools; maintainers never ship a
+Maintainers never ship a
 contributor's bytes — *we do not use what you built, we learn from it*
 ([Governance](../docs/GOVERNANCE.md)). A contributor's build is
 evidence: the recipe, the log, the manifest that let a maintainer rebuild,
@@ -34,9 +35,8 @@ verify and attest the package faster and approve it with more confidence.
    `factory/<name>/<id>/request.json` in the pool bucket with the pool's
    detached signature, public and immutable (`worker/src/record.ts`).
    Nothing about a request lives on GitHub. The build starts by itself,
-   in the shared queue: the best idle shared worker of the architecture
-   — anyone's, with its owner's agent — or one of the contributor's own,
-   at once. The four things, as the form asks them:
+   in the shared queue: the best idle worker of the architecture, on the
+   pool's hosts, with its agent. The four things, as the form asks them:
 <!-- checklist -->
 2. **Does someone ship it already?** The pool is asked first. If Arch, Arch
    Linux ARM or the OPR ship the name for an architecture it enters the pool's
@@ -232,10 +232,10 @@ shows the gate's verdict next to the audit's.
 
 ## Contribute a package
 
-You have something to package for Omarchy. No permission needed, nothing
-spent by the project until a maintainer approves a build: you register the
-package, you run the worker (on your machine, with your tokens), the result
-waits in your staging workspace.
+You have something to package for Omarchy. No permission needed, and
+nothing to run: you request the package, it builds on the pool's hosts (its
+maintainers provide them; contributors do not run workers), and the result
+waits in your staging workspace for a maintainer.
 
 ```bash
 API=https://pkgs.omarchy-pool.org/api/v1
@@ -254,41 +254,19 @@ curl -s -X POST $API/factory/packages -H "authorization: Bearer $OMC" -H 'conten
 #    → {"package":…,"request":{"id":12,"record":"https://pool.omarchy-pool.org/factory/<name>/12/request.json",…},
 #       "build":{"tasks":[57],"queue":{"aarch64":{"position":2,"total":3}},…}}   — queued at once, in the shared queue
 
-# 3. Register a worker (optional: the request above is already in the shared queue). It builds your packages at once; started with WORKER_SHARED=1 it builds everyone's queue too.
-curl -s -X POST $API/factory/workers -H "authorization: Bearer $OMC" -H 'content-type: application/json' \
-  -d '{"name":"laptop","arch":"aarch64"}'
-#    → {"worker":"you-laptop-ab12","token":"omw_…"}   shown once
-
-# 4. Queue the build(s).
+# 3. Build it again, after a failure or a fix (the request above is already in the shared queue).
 curl -s -X POST $API/factory/packages/project/build -H "authorization: Bearer $OMC"
 
-# 5. Run the worker: one command, wherever it lives (docker or podman, with compose). It writes the compose
-#    file and a .env, pulls the project's signed image and starts the set — the broker holds the token, your
-#    agent's key and GITHUB_TOKEN and only receives, processes and answers; the builder beside it is born with
-#    nothing, builds one task in a fresh container and exits (/docs/workers#secrets); the updater keeps both on
-#    the pool's latest image (every worker follows it: /docs/workers#update).
-#    GITHUB_TOKEN: the drafter reads GitHub's API for every package (the release, the files) through the
-#    broker — without one, 60 requests an hour from your address; a fine-grained token with no permissions.
-#    the agent key (--anthropic-key, --openai-key, --gemini-key or --xai-key — or --claude-token, a Claude
-#    subscription through Claude Code) is *yours*, on the broker: the pool never holds one.
-#    A worker is ready only when its agent answers the probe (the broker's /health): no agent, no draft.
-curl -fsSLo omarchy-worker https://omarchy-pool.org/omarchy-worker && chmod +x omarchy-worker
-./omarchy-worker start --token omw_… --github-token github_pat_… --anthropic-key sk-…
-./omarchy-worker status                                  # what runs, what the pool thinks; logs · share on · update · stop
-#    by hand, the same set: the compose file (served at /omarchy-worker/compose.yml) and a .env beside it —
-#    OMARCHY_WORKER_TOKEN, GITHUB_TOKEN, the agent key, COMPOSE_PROFILES=community and OMARCHY_WORKER_DIR=$PWD
-#    (the updater mounts the directory at the same path) — then `docker compose up -d` (podman compose the same).
-# 6. Follow it.
+# 4. Follow it.
 curl -s $API/factory/me -H "authorization: Bearer $OMC"       # your packages, workers, tasks, staging quota
 ```
 
-What happens: the worker claims your task (a dedicated worker only ever
-sees your packages; a shared one takes any community task), builds it in the
-container — from the `PKGBUILD` in your repository if you named one, else a
-PKGBUILD **drafted** from the project (with your agent key your agent
-writes it and corrects it from the build log, up to three times; without a
-key a template covers Rust, Go, CMake, Meson, autotools and release
-binaries) — and uploads the package, the PKGBUILD, `PKGINFO` and the build
+What happens: a worker on the pool's hosts claims your task, builds it in a
+fresh container — from the `PKGBUILD` in your repository if you named one,
+else a PKGBUILD **drafted** from the project (the host's agent writes it and
+corrects it from the build log, up to three times; without an agent a
+template covers Rust, Go, CMake, Meson, autotools and release binaries) —
+and uploads the package, the PKGBUILD, `PKGINFO` and the build
 log to `staging/<you>/<package>/<task>/`. The task is then **staged**: the
 Review page lists it, the log and the PKGBUILD are public, the package is
 for maintainers. Nothing you build reaches users: a maintainer reads it
@@ -325,11 +303,10 @@ every build of the name — queued, running, or staged and waiting for a
 maintainer — with the audits and trials queued for them: the packages
 leave staging, what a finished build had put on the record (the recipe,
 the log, the reports) stays, a build still running is cut off and leaves
-nothing, and anyone can register the name again. Your worker fails a task at claim time when your
+nothing, and anyone can register the name again. A worker fails your task at claim time when your
 workspace is full, and reports an upload the pool refused as the build's
-failure — the reason is on the build's page. A worker token is revocable
-(`DELETE /factory/workers/<id>`); registering again replaces your contributor
-token. `cosign verify ghcr.io/firemanxbr/omarchy-worker:latest
+failure — the reason is on the build's page. Registering again replaces your
+contributor token. `cosign verify ghcr.io/firemanxbr/omarchy-worker:latest
 --certificate-identity-regexp github.com/firemanxbr/omarchy-pool
 --certificate-oidc-issuer https://token.actions.githubusercontent.com` checks
 the image is the project's.
@@ -357,6 +334,14 @@ the repository, and the `enqueue` job never queues them.
 
 ## Run a worker
 
+**Maintainers only.** Contributors do not run workers: the project provides
+the workers for everyone, and its maintainers are their only providers — a
+maintainer is vetted by a pull request to `factory/MAINTAINERS.toml`, and
+their host is trusted by that same act. `POST /factory/workers` refuses
+anyone else (403, *your packages build on the pool's hosts*), and the
+worker form is on a maintainer's page only. What follows is for a
+maintainer's host.
+
 Anything with `podman` or `docker` and `curl` is a project worker: a
 laptop, a VM, a Droplet. **Every task builds in a fresh Arch container**
 (`archlinux:base-devel` for x86_64, `menci/archlinuxarm:base-devel` for
@@ -377,8 +362,8 @@ Without a container, the release binaries do the same:
 # once: the pool's publisher (from the releases, or cargo build --release -p pkg-repo)
 export OMARCHY_API=https://pkgs.omarchy-pool.org OMARCHY_POOL=https://pool.omarchy-pool.org
 
-# register (POST /factory/workers with your contributor token) and have a
-# maintainer trust it; then, native architecture:
+# register (POST /factory/workers with your maintainer token) and have a
+# second maintainer trust it; then, native architecture:
 pkg-repo work --worker-token omw_… --labels '{"where":"laptop"}'
 # the other one, emulated (Apple silicon builds x86_64 through podman machine)
 pkg-repo work --worker-token omw_… --arch x86_64 --labels '{"where":"laptop","emulated":true}'
@@ -428,9 +413,12 @@ does not match; project trust takes two maintainers' word. Two of each,
 one per architecture, plus the brokers, run on the project's own host
 (`factory/host/`, RUNBOOK *The Studio host*).
 
-**Whose compute.** Contributors build on their own workers (or a shared
-community worker someone else runs); project builds — the ones written
-from contributors' evidence — run on machines the project trusts. No GitHub runner ever builds a package: the project's compute is
+**Whose compute.** The project's compute is its maintainers' hosts.
+Contributors do not run workers: they submit packages, and every build —
+a contributor's evidence and the project's own build written from it —
+runs on a host a maintainer provides. The community workers registered
+before #331 are the maintainers' own and retire with the move to the host
+agent (#307). No GitHub runner ever builds a package: the project's compute is
 not for building everyone's software, and GitHub Actions runs CI and the
 release only — no worker, not even for the pool's own jobs: when the
 project's host is down they wait, and the Workers page says so.
