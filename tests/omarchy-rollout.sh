@@ -51,6 +51,11 @@
 # could not be made at start is made at a later round, the pull is bounded, a kick during the self-replacing round
 # starts no round, and the EXIT trap's lines are printed after a TERM
 # during a redirected call.
+#
+# #313: with the host agent's marker (.omarchy-agent) in the project
+# directory, --once, --check and the loop's rounds change nothing — no
+# changing call reaches the stub — and say why; --self-test says
+# stands-down. Without it, the same set rolls out as before.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
@@ -764,6 +769,71 @@ echo "ok: the guard"
 # --self-test: the socket answers, compose reads the project, and it follows.
 out="$("$R" --self-test)"
 [[ "$(tail -n1 <<<"$out")" == "follows 1" ]] || fail "--self-test says it follows: $out"
+
+# ------------------------------------------------------------ stand-down --
+# #313: the host agent's marker in the project directory — a set it retired. A round changes nothing (no lock, no pull, no up, no
+# one-off, no image removed: every call that changes something is absent from the stub log) and logs why; --check says the same;
+# --self-test says stands-down. Without the marker, the same set rolls out as before.
+changing() { grep -E '^docker (create|rm|kill|stop|start|restart|image rm|compose --project-directory [^ ]+ (up|run|pull|kill|stop|down|rm|restart|start|create)) ' "$STUB_LOG" || true; }
+# What a stand-down may still ask the engine: reads only — its own instance file, a worker's id (the loop's follow).
+not_reads() { grep -E '^docker exec ' "$STUB_LOG" | grep -vE " cat $tmp/run/instance$| cat /run/omarchy/worker-id$| curl -s --max-time 5 http://127.0.0.1:8790/pool/factory/workers/self$" || true; }
+retired_set() {
+  reset_lock
+  cat > "$STUB_STATE" <<'S'
+broker sha256:aaaaaaaaaaaaaaaa sha256:bbbbbbbbbbbbbbbb
+project sha256:aaaaaaaaaaaaaaaa sha256:bbbbbbbbbbbbbbbb
+updater sha256:aaaaaaaaaaaaaaaa sha256:bbbbbbbbbbbbbbbb
+S
+  cp "$STUB_STATE" "$tmp/state.before"
+  printf 'agent=0.1.0\nhost=h_0123456789abcdef\nsince=2026-10-15T12:00:00Z\n' > "$tmp/compose/.omarchy-agent"
+  : > "$STUB_LOG"
+}
+STANDS="standing down, changing nothing: this machine is a maintainer host managed by omarchy-agent, which retired this set ($tmp/compose/.omarchy-agent) — see: omarchy-agent status"
+# --once
+retired_set
+out="$("$R" --once)" || fail "a round that stands down is no failure: $out"
+grep -qF "$STANDS" <<<"$out" || fail "a round with the marker says why it changes nothing: $out"
+[[ -z "$(changing)" ]] || fail "a round with the marker changes nothing: $(changing)"
+[[ -z "$(not_reads)" ]] || fail "a round with the marker only reads: $(not_reads)"
+grep -q -- "--self-test" "$STUB_LOG" && fail "no self-test is asked of a new updater either"
+cmp -s "$STUB_STATE" "$tmp/state.before" && [[ ! -f "$STUB_STATE.lock" ]] || fail "the set and the lock stay as they were"
+# --check
+: > "$STUB_LOG"
+out="$("$R" --check)" || fail "--check with the marker is no failure: $out"
+grep -qF "$STANDS" <<<"$out" || fail "--check with the marker says it stands down: $out"
+grep -q "→" <<<"$out" && fail "--check with the marker names no change: $out"
+[[ -z "$(changing)" ]] || fail "--check with the marker changes nothing: $(changing)"
+# --self-test: stands-down, not follows 1, and it asks the engine nothing.
+: > "$STUB_LOG"
+out="$("$R" --self-test)" || fail "--self-test with the marker exits 0: $out"
+[[ "$(tail -n1 <<<"$out")" == "stands-down" ]] || fail "--self-test with the marker says stands-down: $out"
+grep -qx "follows 1" <<<"$out" && fail "a set that stands down does not follow: $out"
+[[ ! -s "$STUB_LOG" ]] || fail "--self-test with the marker asks the engine nothing: $(cat "$STUB_LOG")"
+# The loop: a new release, an Update for one of its workers and a kick are each a round that stands down; none changes anything.
+UPD313="wo_$(printf 'b%.0s' $(seq 1 32))"
+jq -cn --arg u "$UPD313" '{latest:"v1.0.9", deployed_at:"2026-10-15T12:00:00Z", workers:[{id:"w-project",version:"v1.0.2",outdated:true,update:$u}]}' > "$STUB_STATE.follow"
+: > "$STUB_LOG"
+ROLLOUT_POLL=1 ROLLOUT_EVERY=3600 start_loop
+until_rounds 1
+kill -USR1 "$LOOP_PID"
+until_rounds 2
+stop_loop
+grep -q "a round: the pool's release is v1.0.9" "$tmp/loop.out" && grep -q "a round: woken" "$tmp/loop.out" || fail "the loop's rounds come as before: $(cat "$tmp/loop.out")"
+[[ "$(grep -cF "$STANDS" "$tmp/loop.out")" -ge 2 ]] || fail "each of the loop's rounds says it stands down: $(cat "$tmp/loop.out")"
+[[ -z "$(changing)" ]] || fail "the loop with the marker changes nothing: $(changing)"
+[[ -z "$(not_reads)" ]] || fail "the loop with the marker only reads: $(not_reads)"
+cmp -s "$STUB_STATE" "$tmp/state.before" && [[ ! -f "$STUB_STATE.lock" ]] || fail "the loop with the marker leaves the set and the lock as they were"
+rm -f "$STUB_STATE.follow"
+# Without the marker, the same set: the round replaces what changed, --check names it, --self-test follows.
+rm -f "$tmp/compose/.omarchy-agent"
+out="$("$R" --check)"
+grep -q "broker: aaaaaaaaaaaa → bbbbbbbbbbbb" <<<"$out" && ! grep -qF "standing down" <<<"$out" || fail "--check without the marker names the change: $out"
+: > "$STUB_LOG"
+out="$("$R" --once)"
+grep -qF "standing down" <<<"$out" && fail "without the marker nothing stands down: $out"
+grep -qE " up -d --no-deps --no-build broker$" "$STUB_LOG" && grep -q "^docker create --name proj-rollout-lock " "$STUB_LOG" || fail "without the marker the round takes the lock and replaces what changed: $(changing)"
+[[ "$("$R" --self-test | tail -n1)" == "follows 1" ]] || fail "--self-test without the marker says it follows"
+echo "ok: the stand-down"
 
 # ---------------------------------------------------------------- the loop --
 # The loop's poll sleeps a little for real (STUB_POLL); everything else is counted.
