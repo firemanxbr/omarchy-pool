@@ -372,6 +372,17 @@ docker compose restart pool-aarch64              # a worker stuck in a task: a d
 docker kill <container>                          # one that must end now, or whose engine is stuck
 ```
 
+**On a host the agent manages, nothing needs to be run** (#313). Once
+`omarchy-agent` has retired this set (its `retire-legacy` order, after the
+switch and the 14 days the set stays as the way back), it leaves a marker,
+`/srv/omarchy-pool/.omarchy-agent`, with its version, the host id and the
+time. From then on `./rollout.sh` and `setup.sh` refuse there (exit 4),
+`omarchy-worker start|update|remove` refuse in a directory that holds it,
+each before it changes a file or a container, and the updater stands down:
+its rounds change nothing, and its `--self-test` says `stands-down`. What to
+look at instead: `omarchy-agent status`. Without the marker, all of them
+work as before, the legacy set's updater included.
+
 A worker's page, `/worker/<id>`, takes the rest: Re-check agent, Restart
 (between tasks), Restart agent service, Stop its task, Drain and Resume,
 Update. A task that hangs is stopped there: Stop its task gives it back to
@@ -674,8 +685,8 @@ the review2 pair with no profile, which would start it unregistered.
 
 ### After a release
 
-Nothing to do on any host. The pool is deployed once the images exist.
-Within two minutes, every updater sees the pool's new release and rolls
+Nothing to do on any host, and on a host the agent manages, nothing needs
+to be run either. The pool is deployed once the images exist. Within two minutes, every updater sees the pool's new release and rolls
 its set out: every contributor's set, and the Studio's since its one-time
 step above. `agent-proxy` and the brokers go first, each answering before
 the workers that call them (#278), then the workers, each stop a drain.

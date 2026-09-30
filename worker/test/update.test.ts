@@ -36,7 +36,7 @@ describe("the latest image", () => {
     expect(updateState("v0.0.170", pool("v0.0.177", null))).toMatchObject({ required: false });
   });
   it("says it in one line, with the count when it has one", () => {
-    expect(updateMessage(updateState("v0.0.167", pool("v0.0.177", 600)))).toBe("this worker runs v0.0.167; the pool is at v0.0.177 (10 releases behind) — every worker follows the latest image: update it (/docs/workers#update) and it works again");
+    expect(updateMessage(updateState("v0.0.167", pool("v0.0.177", 600)))).toBe("this worker runs v0.0.167; the pool is at v0.0.177 (10 releases behind) — every worker follows the latest image: update it (/docs/workers#update) and it works again; on a host the agent manages, nothing needs to be run");
     expect(updateMessage(updateState("v0.0.176", pool("v0.0.177", 600)))).toContain("(1 release behind)");
     expect(updateMessage(updateState("v0.0.177", pool("v0.1.0", 600)))).not.toContain("behind)");
   });
