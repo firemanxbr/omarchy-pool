@@ -17,13 +17,16 @@
 #     against a staged copy of this host's .env and etc/ (exit 4, nothing of
 #     the host's files, units or containers changed, when it does not load,
 #     under this host's profiles or under every profile it names, or when
-#     .env's POOL_ROOT is another directory)
+#     .env's POOL_ROOT is another directory); a container of the project
+#     whose service it does not run under this host's profiles is warned
+#     about (no rollout reaches it)
 #   - compose.yml (with the `updater` service), register.sh and rollout.sh
 #     (which only wakes the updater) copied to POOL_ROOT — the copies they
 #     replace kept in POOL_ROOT/setup-backup-<time>/, and the difference in
 #     compose.yml shown; .env with POOL_ROOT and WHERE; and one etc/*.env,
 #     mode 600, for every env_file compose.yml names (read from the file, so
-#     none is ever missing: compose refuses to load a project without one)
+#     none is ever missing: compose refuses to load a project without one),
+#     the ones it wrote listed in the backup's created-env-files
 #   - the systemd user timer of a host from before #277
 #     (omarchy-pool-rollout.timer and its service) retired, and the updater
 #     started in its place — see below
@@ -140,7 +143,9 @@ put_back() {
     # Before compose.yml goes back: compose leaves a running updater alone once the file no longer names it.
     compose_in "$root" stop updater >/dev/null 2>&1
     compose_in "$root" rm -f updater >/dev/null 2>&1
-    echo "    the updater it started: stopped and removed" >&2
+    # Its first round starts at once, and may be in the middle of a worker's drain: the stop cuts it short, and that worker may be
+    # left created and not started until the timer's next rollout starts what is not running.
+    echo "    the updater it started: stopped and removed (a worker its first round was replacing may stay stopped until the timer's next rollout, within 15 min)" >&2
   fi
   if (( installed )); then
     local f rel
@@ -176,16 +181,23 @@ refuse() { # why — before anything of the running host changed (only the updat
 }
 
 echo "==> the new compose.yml, checked against this host's .env and etc/ before anything changes"
-# A staged copy of the project: the new compose.yml, the host's override, .env and every env file there, and for each one that is
-# not there yet what setup.sh would write — the directory named as the host's, so compose names the project the same.
+# A staged copy of the project: the new compose.yml, a copy of .env, and a link to everything else of the host's directory and of
+# its etc/ — an override's own env_file, a file COMPOSE_FILE or an `extends:` names resolve there as they do in the host's — then,
+# for each env file compose.yml names that is not there yet, what setup.sh would write. The directory is named as the host's, so
+# compose names the project the same.
 stage_dir="$(mktemp -d "${TMPDIR:-/tmp}/omarchy-pool-setup.XXXXXX")"
 stage="$stage_dir/$(basename "$root")"
 mkdir -p "$stage/etc"
 cp "$here/compose.yml" "$stage/compose.yml"
-for f in compose.override.yml compose.override.yaml; do [[ ! -e "$root/$f" ]] || ln -s "$root/$f" "$stage/$f"; done
 if [[ -f "$root/.env" ]]; then cp "$root/.env" "$stage/.env"; else env_default > "$stage/.env"; fi
+for p in "$root"/* "$root"/.[!.]* "$root"/etc/* "$root"/etc/.[!.]*; do
+  [[ -e "$p" || -L "$p" ]] || continue
+  rel="${p#"$root"/}"
+  case "$rel" in compose.yml|compose.yaml|docker-compose.yml|docker-compose.yaml|.env|etc|setup-backup-*) continue ;; esac
+  ln -s "$p" "$stage/$rel"
+done
 for rel in $env_files; do
-  if [[ -f "$root/$rel" ]]; then ln -s "$root/$rel" "$stage/$rel"; else env_text "$rel" > "$stage/$rel"; fi
+  [[ -e "$stage/$rel" || -L "$stage/$rel" ]] || env_text "$rel" > "$stage/$rel"
 done
 out="$(compose_in "$stage" config -q 2>&1)" \
   || refuse "the new compose.yml does not load with this host's .env and etc/ ($(tail -n2 <<<"$out" | tr '\n' ' '))"
@@ -197,11 +209,22 @@ pool_root="$(sed -nE 's/^[[:space:]]*POOL_ROOT[[:space:]]*=[[:space:]]*//p' "$st
 [[ "${pool_root:-/srv/omarchy-pool}" == "$root" ]] \
   || refuse "$root/.env says POOL_ROOT=${pool_root:-(nothing: /srv/omarchy-pool)}, not $root — the updater would mount and read another directory; fix .env or run setup.sh with that root"
 echo "    it loads with this host's .env, etc/ and every profile ($(tr '\n' ' ' <<<"$profiles" | sed 's/ $//'))"
+config="$(compose_in "$stage" config --format json 2>/dev/null)" || refuse "compose did not print the new project"
+# A container of this project whose service the new compose.yml does not run under this host's profiles (review2 moved behind a
+# profile of its own, for one) keeps running on its image, outside every rollout: said, with what brings it back in.
+project="$(jq -r '.name // empty' <<<"$config")" || refuse "compose printed no project jq reads"
+services="$(jq -r '.services | keys[]' <<<"$config")" || refuse "compose printed no project jq reads"
+left=""
+if [[ -n "$project" ]]; then
+  for svc in $(docker ps -a --filter "label=com.docker.compose.project=$project" --format '{{.Label "com.docker.compose.service"}}' 2>/dev/null | sort -u); do
+    grep -qxF -- "$svc" <<<"$services" || left+="$svc "
+  done
+fi
+[[ -z "$left" ]] || echo "    WARNING: containers of services the new compose.yml does not run under this host's profiles: ${left}— they keep running on their image and no rollout reaches them. Add their profile to COMPOSE_PROFILES in $root/.env (review2: once etc/review2-*.env hold its tokens), or remove them (docker compose rm -sf <service>, before this step)." >&2
 if (( migrating )); then
   # The updater that takes over must follow the pool (#277): an image from before it rounds every fifteen minutes and no more.
   out="$(compose_in "$stage" pull -q updater 2>&1)" || refuse "the updater's image did not pull ($(tail -n1 <<<"$out"))"
   pulled=1
-  config="$(compose_in "$stage" config --format json 2>/dev/null)" || refuse "compose did not print the new project"
   image="$(jq -r '.services.updater.image // empty' <<<"$config")" || refuse "compose printed no project jq reads"
   [[ -n "$image" ]] || refuse "the new compose.yml names no updater image"
   follows="$(docker image inspect -f '{{index .Config.Labels "com.omarchy.updater.follows"}}' "$image" 2>/dev/null || true)"
@@ -223,8 +246,10 @@ if (( migrating )); then
   # draining (a drain takes up to 3 h; the old rollout pulls and waits for
   # its brokers too): this waits up to 4 h for it to end, so the updater
   # never rounds beside it. The timer is stopped, not disabled, until the
-  # updater is confirmed: a reboot, a power cut or a SIGKILL (no EXIT trap)
-  # at any point before then brings it back with the host's systemd.
+  # updater is confirmed: a reboot or a power cut at any point before then
+  # brings it back with the host's systemd. A SIGKILL (no EXIT trap) leaves
+  # it stopped until the next reboot, or until its user starts it again
+  # (the runbook says how).
   timer_left=""
   if user_systemctl stop omarchy-pool-rollout.timer >/dev/null 2>&1; then stopped=1; fi
   waited=0
@@ -234,7 +259,8 @@ if (( migrating )); then
   done
   state="$(state_of omarchy-pool-rollout.timer)"
   if [[ -z "$state" ]]; then
-    timer_left="$user's systemd did not answer: nothing was changed there"
+    if (( stopped )); then timer_left="$user's systemd stopped answering after the timer was stopped"
+    else timer_left="$user's systemd did not answer: nothing was changed there"; fi
   elif rolling; then
     timer_left="its last rollout, omarchy-pool-rollout.service, still runs after 4 h"
   elif [[ "$state" != inactive ]]; then
@@ -300,6 +326,9 @@ for rel in $env_files; do
   chown "$user:$user" "$f"; chmod 600 "$f"
 done
 (( ${#created[@]} == 0 )) || echo "    written, to fill in: ${created[*]}"
+# The way back removes the ones it wrote that still hold no token: an older compose.yml put back must not find a placeholder for a
+# pair nobody registered, and start it.
+if [[ -n "$backup" ]] && (( ${#created[@]} )); then printf '%s\n' "${created[@]}" > "$backup/created-env-files"; chown "$user:$user" "$backup/created-env-files"; fi
 
 if (( migrating )); then
   echo "==> the updater, started and checked before the timer's units go"

@@ -406,13 +406,18 @@ changes anything):
 
 ```bash
 cd /srv/omarchy-pool
-docker compose ps -a                              # what runs now: a container that restarts is fixed or removed first
+docker ps -a --filter label=com.docker.compose.project=omarchy-pool   # what runs now: a container that restarts is fixed or removed first
 pgrep -af rollout.sh                              # nothing, or the timer's own rollout (setup.sh waits for that one); stop one started by hand
 ls -l etc/                                        # the env files there; review2-*.env may be missing (setup.sh writes them)
 grep COMPOSE_PROFILES .env                        # emulated on the Studio; review2 stays off until it is registered
+grep -l '^OMARCHY_WORKER_TOKEN=omw_' etc/review2-*.env   # a review2 registered already: add review2 to COMPOSE_PROFILES first
 tag="$(curl -fsS https://pkgs.omarchy-pool.org/api/v1/version | sed -En 's/.*"version": *"(v[0-9.]+)".*/\1/p')"
 curl -fsS "https://raw.githubusercontent.com/firemanxbr/omarchy-pool/$tag/factory/host/compose.yml" | diff -u compose.yml -
 ```
+
+The first look uses `docker ps`, not `docker compose ps`: while an env file
+that this host's `compose.yml` names is missing (a review2 one, say), every
+`docker compose` command fails, and `setup.sh` is what writes it.
 
 A line the diff removes is either an upstream change since the release
 this host's copy came from (the review2 pair with no profile, a comment
@@ -454,27 +459,35 @@ What `setup.sh` does, in order, and what a failure leaves:
    and changes none of the host's files, units or containers (only the
    updater image may have been pulled): the timer runs on. Fix what it names (for a
    missing token: `register.sh`, or leave that service's profile out of
-   `COMPOSE_PROFILES`), then paste again.
+   `COMPOSE_PROFILES`), then paste again. It also warns about a container
+   of this project whose service the new `compose.yml` does not run under
+   this host's profiles (a registered review2, now behind a profile of its
+   own): no rollout reaches it until its profile is in `COMPOSE_PROFILES`.
 2. **It stops the timer**, as its user, then waits while a rollout the
    timer started is still draining. The timer is stopped, not disabled,
    until step 5: a reboot or a power cut before then brings it back. A
    drain takes up to 3 h; `setup.sh` waits up to 4 h (the old rollout also
    pulls and waits for its brokers). If the rollout still runs after 4 h,
    it enables the timer again, installs nothing, and exits 3. Paste again
-   later. If its user's systemd does not answer, it changes nothing there
-   and exits 3 with the commands to run.
+   later. If its user's systemd does not answer, it exits 3 with the
+   commands to run; if it stops answering once the timer was stopped, it
+   also tries to enable the timer again, and says whether it could. The
+   wait can last 4 h: run the paste in `tmux` (or `screen`).
 3. **It installs the files.** `compose.yml`, `rollout.sh` and
    `register.sh` go in, with an env file (mode 600) for every `env_file`
    `compose.yml` names. The copies it replaces go to
    `/srv/omarchy-pool/setup-backup-<time>/`, with the timer's two units
-   under `systemd-user/`.
+   under `systemd-user/` and, in `created-env-files`, the env files it
+   wrote.
 4. **It starts the updater** (`up -d --no-deps --no-recreate updater`)
    and checks that it stays running, with no restart, for 30 s, and that
    its `--self-test` says `follows 1`. If any of that fails, it stops and
    removes the updater, puts the old files back, enables the timer again
    and exits 5. The host rolls out through its timer as before. Read
    `docker compose logs updater` from the output, fix the cause, paste
-   again.
+   again. The updater's first round starts at once: if it was replacing a
+   worker when it was stopped, that worker can stay stopped until the
+   timer's next rollout starts it, within 15 minutes.
 5. **Only then does it disable the timer and remove its units**, and say
    it is retired.
 
@@ -483,6 +496,11 @@ session, or its output gone, such as a `| tee` stopped by Ctrl-C) puts
 back whatever was done so far: the updater it started stopped and
 removed, the old files back, the timer enabled again. It then exits 130,
 143, 129 or 141 (the signal's), never 0. Paste again.
+
+A `setup.sh` killed outright (`kill -9`, the OOM killer) puts nothing
+back: the timer stays stopped until the next reboot, and the new files
+may be in already. To bring the timer back, run this as the user:
+`systemctl --user start omarchy-pool-rollout.timer`. Then paste again.
 
 The `./rollout.sh` at the end then only wakes the updater. If it fails
 after `setup.sh` succeeded, the updater still runs and rolls the host out:
@@ -516,13 +534,34 @@ kept. Stop the updater first: compose leaves a running one alone once
 beside the timer.
 
 ```bash
-cd /srv/omarchy-pool
-b="$(dirname "$(ls -d setup-backup-*/systemd-user | tail -n1)")"   # the one the one-time step wrote (the timer's units in it)
-docker compose stop updater && docker compose rm -f updater
-cp -p "$b/compose.yml" "$b/rollout.sh" "$b/register.sh" .
-mkdir -p ~/.config/systemd/user && cp -p "$b"/systemd-user/omarchy-pool-rollout.* ~/.config/systemd/user/
-systemctl --user daemon-reload && systemctl --user enable --now omarchy-pool-rollout.timer
+(
+  set -euo pipefail
+  cd /srv/omarchy-pool
+  # The newest backup with the timer's units whose compose.yml has no updater: a step that was killed and pasted again
+  # wrote a newer one, holding the new files.
+  b=""
+  for d in $(ls -d setup-backup-*/systemd-user | sort -r); do
+    d="$(dirname "$d")"
+    if ! grep -q '^  updater:' "$d/compose.yml"; then b="$d"; break; fi
+  done
+  test -n "$b"
+  docker compose stop updater && docker compose rm -f updater
+  cp -p "$b/compose.yml" "$b/rollout.sh" .
+  if [ -f "$b/register.sh" ]; then cp -p "$b/register.sh" .; fi
+  # The env files the step wrote that still hold no token go: the old compose.yml starts no pair nobody registered.
+  if [ -f "$b/created-env-files" ]; then
+    while read -r f; do grep -q '^OMARCHY_WORKER_TOKEN=omw_' "$f" || rm -f "$f"; done < "$b/created-env-files"
+  fi
+  mkdir -p ~/.config/systemd/user && cp -p "$b"/systemd-user/omarchy-pool-rollout.* ~/.config/systemd/user/
+  systemctl --user daemon-reload && systemctl --user enable --now omarchy-pool-rollout.timer
+)
 ```
+
+Then `docker compose config -q` prints nothing. If it names a missing
+`etc/review2-*.env`, the old `compose.yml` names the review2 pair with no
+profile, and it did not load before the step either. Take the pair out of
+that file, or register it. Do not write an empty env file: that starts
+the pair unregistered.
 
 Do not run an older release's `setup.sh` for this. Its `compose.yml` has
 the review2 pair with no profile, which would start it unregistered.

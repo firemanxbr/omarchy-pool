@@ -31,6 +31,11 @@
 #   timer enabled again (exit 3, 143, 129, or 5) — all of it even when the
 #   output's reader is gone. On a fresh host it writes no timer and starts
 #   nothing.
+# - The staged copy links all of the host's directory and etc/, so an
+#   override's own env file loads; a container of a service the new
+#   compose.yml leaves out under the host's profiles is warned about; the
+#   env files it wrote are listed in the backup; and the runbook's way back
+#   runs as written against the result.
 # - rollout.sh only wakes the updater: SIGUSR1 to a running one, and one
 #   that is not running started as it is (`--no-recreate`: never recreated
 #   onto an image its guard has not passed); `--check` asks the updater's
@@ -58,9 +63,11 @@ stub() { # name body
 }
 stub pacman 'echo "pacman $*" >> "$STUB_LOG"'
 # The user's systemd: a unit's ActiveState from STUB_UNITS/<unit> — one line a call, the last one again and again — "inactive" when
-# there is no file; no answer at all (its bus unreachable) when STUB_UNITS/nobus exists. Each answer about the rollout's service
+# there is no file; no answer at all (its bus unreachable) when STUB_UNITS/nobus exists, or from the timer's stop on when
+# STUB_UNITS/nobus-after-stop does. Each answer about the rollout's service
 # notes whether the installed compose.yml has the updater yet.
 stub systemctl 'echo "systemctl $*" >> "$STUB_LOG"
+[[ "$*" == "--user stop omarchy-pool-rollout.timer" && -e "$STUB_UNITS/nobus-after-stop" ]] && { touch "$STUB_UNITS/nobus"; exit 0; }
 [[ "$1" == --user && -e "$STUB_UNITS/nobus" ]] && { echo "Failed to connect to bus: No such file or directory" >&2; exit 1; }
 if [[ "$1 $2 $3 $4" == "--user show -p ActiveState" ]]; then
   [[ "$6" == omarchy-pool-rollout.service ]] && { grep -q "^  updater:" "$STUB_POOL/compose.yml" 2>/dev/null && echo "compose has the updater" || echo "compose without the updater"; } >> "$STUB_LOG"
@@ -89,7 +96,7 @@ stub runuser 'echo "runuser $*" >> "$STUB_LOG"; shift 3; exec "$@"'
 stub id 'case "$1" in -u) [[ -n "${2:-}" ]] && echo 1000 || echo 1000 ;; -Gn) echo "firemanxbr docker" ;; -un) echo firemanxbr ;; *) exec /usr/bin/id "$@" ;; esac'
 # docker: setup.sh runs compose as the updater does, with no environment of its own (env -i), so the stub carries its paths. What
 # it answers, from files in STUB_DOCKER: config.fail, pull.fail, nolabel (the updater image from before #277), config.json (the
-# project compose prints), up.fail, restarting, selftest.fail; `running` while the updater it started runs; wait-reader: a stop of
+# project compose prints), containers (the services of the project's containers), up.fail, restarting, selftest.fail; `running` while the updater it started runs; wait-reader: a stop of
 # the updater first waits (up to 120 s, else reader.timeout) until reader.done says the reader of setup.sh's output is gone.
 cat > "$tmp/bin/docker" <<S
 #!/usr/bin/env bash
@@ -105,7 +112,7 @@ if [[ "$1" == compose && "$2" == --project-directory ]]; then
   case "$*" in
     "config -q")
       # As compose does: every env file the project names must be there, or nothing of it loads.
-      for rel in $(sed -nE 's/^[[:space:]]*env_file:[[:space:]]*\[(.*)\].*/\1/p' "$d/compose.yml" | tr ',' ' '); do
+      for rel in $(sed -nE 's/^[[:space:]]*env_file:[[:space:]]*\[(.*)\].*/\1/p' "$d/compose.yml" "$d"/compose.override.y*ml 2>/dev/null | tr ',' ' '); do
         [[ -e "$d/$rel" ]] || { echo "env file $d/$rel not found: stat $d/$rel: no such file or directory" >&2; exit 1; }
       done
       [[ -f "$STUB_DOCKER/config.fail" ]] && { echo "services.pool-aarch64 additional properties 'imgae' not allowed" >&2; exit 15; }
@@ -129,6 +136,8 @@ if [[ "$1" == compose && "$2" == --project-directory ]]; then
   exit 0
 fi
 case "$1 $2" in
+  # The project's containers, by the service each one belongs to: STUB_DOCKER/containers.
+  "ps -a") [[ ! -f "$STUB_DOCKER/containers" ]] || cat "$STUB_DOCKER/containers" ;;
   "image inspect") [[ -f "$STUB_DOCKER/nolabel" ]] && echo "<no value>" || echo 1 ;;
   "inspect -f") [[ -f "$STUB_DOCKER/restarting" ]] && echo "restarting 3" || echo "running 0" ;;
 esac
@@ -159,7 +168,7 @@ old_host() {
   for svc in pool-x86_64 pool-aarch64 review-x86_64 review-aarch64 community-x86_64 community-aarch64; do printf 'OMARCHY_WORKER_TOKEN=omw_%s0123456789\n' "$svc" > "$POOL/etc/$svc.env"; done
   printf 'GEMINI_API_KEY=k\n' > "$POOL/etc/agent.env"
   cp "$POOL/compose.yml" "$tmp/compose.before"; cp "$POOL/rollout.sh" "$tmp/rollout.before"
-  rm -f "$STUB_UNITS"/omarchy-pool-rollout.* "$STUB_UNITS/term-at" "$STUB_UNITS/sleeps" "$STUB_UNITS/sig"
+  rm -f "$STUB_UNITS"/omarchy-pool-rollout.* "$STUB_UNITS/term-at" "$STUB_UNITS/sleeps" "$STUB_UNITS/sig" "$STUB_UNITS/nobus" "$STUB_UNITS/nobus-after-stop"
   old_timer; : > "$STUB_LOG"
 }
 run_setup() { set +e; SUDO_USER=firemanxbr bash "$tmp/src/setup.sh" "${1:-$POOL}" > "$tmp/out" 2>&1; rc=$?; set -e; }
@@ -202,6 +211,16 @@ grep -q "^  updater:" "$POOL/compose.yml" && fail "nothing is installed while th
 [[ -e "$units/omarchy-pool-rollout.timer" ]] || fail "its units stay, for the next try"
 grep -q "up -d" "$STUB_LOG" && fail "no updater is started beside a timer that may still run"
 rm -f "$STUB_UNITS/nobus"
+# 1a'. Its user's systemd stops answering once the timer is stopped: not "nothing was changed there" — the timer was stopped — and
+#      the put-back tries to enable it again, and says it could not.
+old_host; touch "$STUB_UNITS/nobus-after-stop"
+run_setup
+(( rc == 3 )) || fail "a systemd that stops answering after the stop ends setup.sh with 3, not $rc: $(cat "$tmp/out")"
+grep -q "not retired: firemanxbr's systemd stopped answering after the timer was stopped" "$tmp/out" || fail "and says the timer was stopped: $(cat "$tmp/out")"
+grep -q "nothing was changed there" "$tmp/out" && fail "a stopped timer is a change: $(cat "$tmp/out")"
+grep -q "systemctl --user enable --now omarchy-pool-rollout.timer" "$STUB_LOG" && grep -q "WARNING: omarchy-pool-rollout.timer could not be enabled again" "$tmp/out" || fail "the put-back tries the timer again, and says it could not: $(cat "$tmp/out")"
+grep -q "^  updater:" "$POOL/compose.yml" && fail "nothing is installed"
+rm -f "$STUB_UNITS/nobus" "$STUB_UNITS/nobus-after-stop"
 # 1b. Its last rollout never ends: waited for four hours at most (a try every 15 s), then the same: exit 3, nothing installed — and the
 #     timer, which it disabled first, enabled again: the host goes on rolling out through it.
 old_host; echo activating > "$STUB_UNITS/omarchy-pool-rollout.service"
@@ -252,11 +271,23 @@ run_setup
 (( rc == 4 )) && grep -q "no worker token for pool-aarch64 review2-aarch64 — run register.sh" "$tmp/out" || fail "a service without a worker token is refused: $rc $(cat "$tmp/out")"
 grep -q "not-a-token-4711" "$tmp/out" && fail "a token's value is never printed"
 untouched "a service without a worker token"
+# An override with an env file of its own (the runbook sends local edits there): staged with the rest of etc/, so it loads — and
+# one whose env file is missing does not load here either, as it does not on the host.
+old_host; printf 'services:\n  pool-aarch64:\n    env_file: [etc/extra.env]\n' > "$POOL/compose.override.yml"
+run_setup
+(( rc == 4 )) && grep -q "does not load with this host's .env and etc/ (env file .*/etc/extra.env not found" "$tmp/out" || fail "an override whose env file is missing does not load: $rc $(cat "$tmp/out")"
+untouched "an override whose env file is missing"
+old_host; printf 'services:\n  pool-aarch64:\n    env_file: [etc/extra.env]\n' > "$POOL/compose.override.yml"; printf 'EXTRA=1\n' > "$POOL/etc/extra.env"
+run_setup
+(( rc == 0 )) || fail "an override with an env file of its own is no refusal: $rc $(cat "$tmp/out")"
+cmp -s "$POOL/compose.override.yml" <(printf 'services:\n  pool-aarch64:\n    env_file: [etc/extra.env]\n') || fail "the override is left alone"
 echo "ok: refused before the timer is touched"
 
 # 3. The one-time step on a host from before #277, while the timer's last rollout still drains: checked, disabled, waited for, the new
-#    files (the old ones kept, the difference shown), the updater started and checked, and only then the timer's units removed.
-old_host; printf 'activating\nactivating\ninactive\n' > "$STUB_UNITS/omarchy-pool-rollout.service"
+#    files (the old ones kept, the difference shown), the updater started and checked, and only then the timer's units removed. A
+#    review2 container that runs already, whose service the new compose.yml leaves behind a profile the host does not turn on, is
+#    warned about; the services compose runs are not.
+old_host; printf 'activating\nactivating\ninactive\n' > "$STUB_UNITS/omarchy-pool-rollout.service"; printf 'pool-aarch64\nreview2-aarch64\nagent-proxy\n' > "$tmp/docker/containers"
 run_setup
 (( rc == 0 )) || fail "setup.sh exited $rc: $(cat "$tmp/out")"
 [[ "$(grep -c '^sleep 15$' "$STUB_LOG")" == 2 ]] || fail "it waits while the rollout runs, and no longer: $(grep -c '^sleep 15$' "$STUB_LOG")"
@@ -317,7 +348,33 @@ done
 grep -qx "OMARCHY_WORKER_TOKEN=" "$POOL/etc/review2-aarch64.env" && grep -qx "OMARCHY_WORKER_TOKEN=" "$POOL/etc/review2-x86_64.env" || fail "review2's env files are written, for register.sh to fill in"
 grep -qx "OMARCHY_WORKER_TOKEN=omw_pool-aarch640123456789" "$POOL/etc/pool-aarch64.env" || fail "an env file there already is left alone"
 grep -q "COMPOSE_PROFILES=emulated" "$POOL/.env" || fail "the host's .env is kept"
+grep -q "WARNING: containers of services the new compose.yml does not run under this host's profiles: review2-aarch64 — " "$tmp/out" || fail "a container outside the new profiles is warned about, and only that one: $(cat "$tmp/out")"
+(( $(line 'ps -a --filter label=com.docker.compose.project=omarchy-pool') < dis )) || fail "the containers are read before the timer is touched"
+[[ "$(cat "$backup/created-env-files")" == "etc/review2-aarch64.env
+etc/review2-x86_64.env" ]] || fail "the backup lists the env files it wrote: $(cat "$backup/created-env-files" 2>/dev/null)"
 echo "ok: a host from before #277 — the updater in, the timer out"
+
+# 3b. The runbook's way back, as written, on that host: the backup from before the updater — not a newer one a step that was killed
+#     and pasted again wrote, holding the new files — the old files back, the env files it wrote that hold no token gone (one that
+#     register.sh filled in since stays), the timer's units back and enabled.
+rm -f "$tmp/docker/containers"
+printf 'OMARCHY_WORKER_TOKEN=omw_review2x0123456789\n' > "$POOL/etc/review2-x86_64.env"
+newer="$POOL/setup-backup-29990101T000000Z"; mkdir -p "$newer/systemd-user"
+cp "$POOL/compose.yml" "$POOL/rollout.sh" "$POOL/register.sh" "$newer/"; cp "$backup"/systemd-user/* "$newer/systemd-user/"
+undo="$(awk '/^To undo it/ { on = 1 } on && /^```bash$/ { code = 1; next } code && /^```$/ { exit } code { print }' "$root/worker/src/docs/runbook.md")"
+[[ -n "$undo" ]] || fail "the runbook has the way back"
+: > "$STUB_LOG"
+( cd "$tmp" && HOME="$tmp/home" bash -c "$(sed "s#/srv/omarchy-pool#$POOL#g" <<<"$undo")" ) > "$tmp/out" 2>&1 || fail "the way back ran: $(cat "$tmp/out")"
+cmp -s "$POOL/compose.yml" "$tmp/compose.before" && cmp -s "$POOL/rollout.sh" "$tmp/rollout.before" || fail "the way back restores the files from before the updater, not the newer backup's"
+[[ ! -e "$POOL/etc/review2-aarch64.env" ]] || fail "the way back removes an env file the step wrote that holds no token"
+grep -q omw_review2x "$POOL/etc/review2-x86_64.env" || fail "and keeps one register.sh filled in since"
+[[ -f "$units/omarchy-pool-rollout.timer" && -f "$units/omarchy-pool-rollout.service" ]] || fail "the way back puts the timer's units back"
+grep -q "^docker compose stop updater$" "$STUB_LOG" && grep -q "^systemctl --user enable --now omarchy-pool-rollout.timer$" "$STUB_LOG" || fail "the updater stopped, the timer enabled: $(cat "$STUB_LOG")"
+# With no backup from before the updater, it stops at once: nothing stopped, nothing copied.
+rm -rf "$backup"; : > "$STUB_LOG"
+( cd "$tmp" && HOME="$tmp/home" bash -c "$(sed "s#/srv/omarchy-pool#$POOL#g" <<<"$undo")" ) > "$tmp/out" 2>&1 && fail "the way back with only a backup holding the new files stops"
+grep -q "compose stop updater" "$STUB_LOG" && fail "and stops no updater: $(cat "$STUB_LOG")"
+echo "ok: the runbook's way back"
 
 # 4. The updater does not start, does not stay up, or fails its self-test: stopped and removed, the old files back, the timer enabled
 #    again (exit 5) — the host goes on rolling out through it.
@@ -396,8 +453,10 @@ echo "ok: rollout.sh only wakes the updater"
 step="$(awk '/^### Once: the updater/ { on = 1 } on && /^### / && !/Once: the updater/ { exit } on { print }' "$root/worker/src/docs/runbook.md" | tr '\n' ' ' | tr -s ' ')"
 grep -q "waits up to 4 h" <<<"$step" || fail "the runbook's one-time step says setup.sh waits up to 4 h"
 grep -q "draining (up to 3 h)" <<<"$step" && fail "the runbook's one-time step no longer says setup.sh waits up to 3 h"
-# An interrupt exits with its signal's code, not 3; and the way back takes the newest backup that has the timer's units — a later
-# setup.sh run whose files differ writes a newer one without them.
+# An interrupt exits with its signal's code, not 3 (the way back itself runs in 3b); a SIGKILL's recovery is said; the first look
+# works while an env file compose.yml names is missing (no docker compose command does then).
 grep -q "exits 130, 143, 129 or 141" <<<"$step" || fail "the runbook's one-time step gives an interrupt's exit codes"
-grep -qF 'b="$(dirname "$(ls -d setup-backup-*/systemd-user | tail -n1)")"' <<<"$step" || fail "the way back takes the newest backup with the timer's units"
+grep -q "killed outright .*systemctl --user start omarchy-pool-rollout.timer" <<<"$step" || fail "the runbook says how to bring the timer back after a SIGKILL"
+grep -qF "docker ps -a --filter label=com.docker.compose.project=omarchy-pool" <<<"$step" || fail "the first look lists the containers without loading compose.yml"
+grep -q "^docker compose ps -a" <<<"$(awk '/^### Once: the updater/ { on = 1 } on && /^### / && !/Once: the updater/ { exit } on { print }' "$root/worker/src/docs/runbook.md")" && fail "the first look runs no docker compose command"
 echo "HOST SETUP OK"
