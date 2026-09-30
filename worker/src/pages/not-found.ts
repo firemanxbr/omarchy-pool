@@ -16,7 +16,7 @@ const CSS = String.raw`
   .nf { max-width: 720px; min-height: calc(100vh - 224px); margin: 0 auto; padding: 48px 0 64px; display: grid; gap: 16px; align-content: center; }
   .nf .lead { margin: 0; color: var(--muted); font-size: 15px; }
   .nf .lead code { color: var(--text); overflow-wrap: anywhere; }
-  .nf .acts { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
+  .nf .acts { display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0 0; }
   @media (max-width: 520px) { .nf { min-height: calc(100vh - 320px); padding: 24px 0 40px; } .nf .op-hero { font-size: 28px; } }
 `;
 
