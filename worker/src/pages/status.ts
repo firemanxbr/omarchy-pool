@@ -318,7 +318,7 @@ __CHARTS__
   // The hours a source may go without a sync before it is late: the shell's one number (LATE_MS), the one problemsOf and the Sources card count with.
   $("#late-after").textContent = Math.round(LATE_MS / 3600e3);
 
-  // ---- the hero: all rings healthy, or what is not — worst first: a service check that did not answer, the pool's numbers that did not, a ring whose latest health check failed, rings with nothing to judge yet, syncs falling behind. A ring nobody has checked yet is not called unhealthy, and no ring is called healthy before a check said so.
+  // ---- the hero: all rings healthy, or what is not — worst first: a service check that did not answer, the pool's numbers that did not, a GitHub token of the pool's that can start workflows (the daily probe, tokenprobe.ts, #308), a ring whose latest health check failed, rings with nothing to judge yet, syncs falling behind. A ring nobody has checked yet is not called unhealthy, and no ring is called healthy before a check said so.
   function andList(list) { return list.length < 2 ? list.join("") : list.slice(0, -1).join(", ") + " and " + list[list.length - 1]; }
   // A failure's reason as the hero's one sentence: what the API answered (its status, and its error when it said one), or the browser's word for no answer at all.
   function reasonLine(e) {
@@ -332,8 +332,10 @@ __CHARTS__
     if (off) why.push(off + " of " + fams.length + " sources not on time");
     return why;
   }
+  // The tokens whose latest daily probe found they can start a workflow (a 422 where a read-only token gets 403), by name.
+  function writableTokens(d) { return (d.latest || []).filter(function (e) { return e.kind === "token" && e.status === "error"; }); }
   function drawHero() {
-    var d = STATS, why = d ? behindOf(d) : [], sick = [], failedOn = [], released = [], checked = [];
+    var d = STATS, why = d ? behindOf(d) : [], sick = [], failedOn = [], released = [], checked = [], tokens = d ? writableTokens(d) : [];
     if (d) PROMISED_RINGS.forEach(function (ring) {
       ARCHES.forEach(function (arch) {
         var h = latest(d.latest, "health", ring, arch); if (!h) return;
@@ -345,13 +347,18 @@ __CHARTS__
     var title = "Checking the rings…", tone = "", lede = "Every sync, release, check and decision is on the record.";
     if (SERVICE && SERVICE.down) { title = SERVICE.down; tone = "fail"; lede = SERVICE.why; }
     else if (!d && STATS_DOWN) { title = "The pool's numbers did not answer"; tone = "fail"; lede = STATS_DOWN; }
+    else if (tokens.length) {
+      title = tokens.length > 1 ? "Pool tokens can start workflows" : "A pool token can start workflows"; tone = "fail";
+      lede = andList(tokens.map(function (e) { return e.source; })) + " can start workflows on this repository: the daily probe got " + andList(tokens.map(function (e) { return "HTTP " + ((e.payload || {}).http || "?"); })) + " where a read-only token gets 403. Replace " + (tokens.length > 1 ? "them" : "it") + " with a read-only token.";
+    }
     else if (sick.length) { title = andList(sick) + " not healthy"; tone = "fail"; }
     else if (d && !checked.length) { title = released.length ? "No health check yet" : "No ring released yet"; }
     else if (why.length) { title = "All rings healthy, syncs behind"; tone = "warn"; }
     else if (d) { title = "All rings healthy"; tone = "ok"; }
-    // One sentence under it: where the check failed, or what is behind (a sentence that starts with "no sync" or a number, never a ring's name, so capitalising it is safe).
-    if (!(SERVICE && SERVICE.down) && d && failedOn.length) lede = "The latest health check failed on " + andList(failedOn) + (why.length ? "; " + why.join(" and ") : "") + ".";
-    else if (!(SERVICE && SERVICE.down) && d && why.length) { var line = why.join(" and "); lede = line.charAt(0).toUpperCase() + line.slice(1) + (released.length ? "; the rings keep serving what they have." : "."); }
+    // One sentence under it: where the check failed, or what is behind (a sentence that starts with "no sync" or a number, never a ring's name, so capitalising it is safe) — unless a service or a token said its own.
+    var mine = !(SERVICE && SERVICE.down) && d && !tokens.length;
+    if (mine && failedOn.length) lede = "The latest health check failed on " + andList(failedOn) + (why.length ? "; " + why.join(" and ") : "") + ".";
+    else if (mine && why.length) { var line = why.join(" and "); lede = line.charAt(0).toUpperCase() + line.slice(1) + (released.length ? "; the rings keep serving what they have." : "."); }
     $("#headline").textContent = title; $("#st-mark").className = "st-mark " + tone; $("#st-lede").textContent = lede;
   }
 
@@ -698,7 +705,7 @@ __CHARTS__
   var CHIPS = { all: "All", syncs: "Syncs", promotions: "Promotions", decisions: "Decisions", blocks: "Blocks" };
   // A kind whose word is a chip's comes under that chip (?kind=sync is Syncs); any other kind the address names is a chip of its own, named in words.
   var GROUP_OF = { sync: "syncs", promote: "promotions", block: "blocks" };
-  var KIND_CHIPS = { gate: "Gates", "fast-track": "Fast-tracks", health: "Health checks", trial: "Trials", abi: "ABI checks", security: "Security runs", render: "Renders", publish: "Publishes", verify: "Verifies", rollback: "Rollbacks", relayout: "Relayouts", gc: "Clean-ups", deploy: "Deploys", cost: "Bills", audience: "Audience", provenance: "Provenance", dispatch: "Dispatches", job: "Jobs", build: "Builds", enqueue: "Enqueues", request: "Requests", review: "Project builds", approve: "Approvals", withdraw: "Withdrawals", trust: "Trust", role: "Roles", category: "Categories", bump: "Bumps", worker: "Workers", leak: "Leaks" };
+  var KIND_CHIPS = { gate: "Gates", "fast-track": "Fast-tracks", health: "Health checks", trial: "Trials", abi: "ABI checks", security: "Security runs", render: "Renders", publish: "Publishes", verify: "Verifies", rollback: "Rollbacks", relayout: "Relayouts", gc: "Clean-ups", deploy: "Deploys", cost: "Bills", audience: "Audience", provenance: "Provenance", dispatch: "Dispatches", job: "Jobs", build: "Builds", enqueue: "Enqueues", request: "Requests", review: "Project builds", approve: "Approvals", withdraw: "Withdrawals", trust: "Trust", role: "Roles", category: "Categories", bump: "Bumps", worker: "Workers", leak: "Leaks", token: "Token probes" };
   var asked = q.get("kind");
   var JF = Object.prototype.hasOwnProperty.call(GROUPS, asked) ? asked : GROUP_OF[asked] || (KINDS.indexOf(asked) >= 0 ? asked : "all");
   // The window: twenty lines, up to the two hundred the Journal read; the stats carry the newest RECENT (stats.ts). JLAST is what is drawn, newest first; JFULL whether the read that filled the window came back full, so the journal may hold more; JTOP the newest line drawn, what a line that just arrived is newer than.
@@ -744,6 +751,7 @@ __CHARTS__
     if (e.kind === "bump") return e.status === "ok" ? "update queued" : "unmaintained";
     if (e.kind === "worker") return e.status === "warn" ? "update needed" : "worker told";
     if (e.kind === "leak") return "secret withheld";
+    if (e.kind === "token") return failed ? "token can start workflows" : e.status === "warn" ? "token probe unclear" : "token cannot start workflows";
     return e.kind + (failed ? " failed" : "");
   }
   // Its colour: a ring's hue for what moved a ring, red for what stopped something (a rollback, a block, a rejection, a withdrawal, a failure), green for an approval, amber for a warning.
@@ -1097,7 +1105,7 @@ export const STATUS_COMPONENTS = (F: Fixture): Component[] => {
       id: "status.hero",
       page: "/status",
       anchor: ['<p class="op-eyebrow">Status</p>', 'id="st-mark"', 'id="headline"', 'id="st-lede"', "Every sync, release, check and decision is on the record."],
-      script: ['"#headline"', "problemsOf(d)", '"All rings healthy"', '" not healthy"', 'latest(d.latest, "health", ring, arch)', "SERVICE.down", "liveStats(render, 60000, statsDown)", '"The pool\'s numbers did not answer"', "reasonLine(e)", '"No ring released yet"', '" sources not on time"'],
+      script: ['"#headline"', "problemsOf(d)", '"All rings healthy"', '" not healthy"', 'latest(d.latest, "health", ring, arch)', "SERVICE.down", "liveStats(render, 60000, statsDown)", '"The pool\'s numbers did not answer"', "reasonLine(e)", '"No ring released yet"', '" sources not on time"', "writableTokens(d)", '"A pool token can start workflows"'],
       reads: [{ path: stats, fields: ["latest", "latest.0.kind", "latest.0.status", "latest.0.ring", "latest.0.source", "latest.0.created_at", "coverage.0.last_sync", "coverage.0.late"] }],
       visible: EVERYONE,
     },

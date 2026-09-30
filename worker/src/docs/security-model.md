@@ -45,9 +45,23 @@ please do not file a public issue for it.
 | Signing key (OpenPGP) | the pool's Worker only (`SIGNING_KEY` secret, `worker/src/signing.ts`) | sign the databases it stores and the packages the factory builds (`POST /pool/:sha256/sign`) | — | live; no worker, runner or repository holds it |
 | `CLOUDFLARE_API_TOKEN` | the release workflow on GitHub | deploy the Worker, apply migrations, record the deploy | — | live; all GitHub holds (no hosted worker: Actions runs CI and the release only) |
 | `CLOUDFLARE_ANALYTICS_TOKEN` on the Worker | the daily cost estimate and the daily audience count | read the account's analytics (Account · Analytics · Read: the bill and the pool hosts' requests, in one scope) and the D1 file size | write anything | live |
-| `GITHUB_TOKEN` on the Worker | the governance sync, the update check, the provenance reads | a higher rate limit reading GitHub for the governance file, releases and provenance (the scheduler's dispatch path is gone, #308) | write to the repository | live |
+| `GITHUB_TOKEN` on the Worker | the governance sync, the update check, the provenance reads | a higher rate limit reading GitHub for the governance file, releases and provenance (the scheduler's dispatch path is gone, #308) | write to the repository; start a workflow (probed every day, below) | live |
 | `GITHUB_REPORT_TOKEN` on the Worker | the daily cost report (`cost.ts` `postCostReport`) | read and comment on this repository's issues — the one comment a day on the *Cost report* issue | anything else: start a workflow, read code, touch a release (Issues is its only permission; `GITHUB_TOKEN` is never widened for this) | live once the secret is set; until then `cost-report.yml` posts from GitHub's cron, late |
 | The broker's environment (`OMARCHY_WORKER_TOKEN`, an agent key, `GITHUB_TOKEN`) | one container per worker host that runs no build (`factory/bin/broker`); on the project's host also `agent-proxy`, without a worker token | the pool's calls for the one task it claimed, the agent, GitHub read-only; a builder's answer to an order the broker saw handed to it (#277) | be read by a build: the builder beside it holds nothing | live |
+
+**No token with a write scope on this repository exists outside GitHub
+Actions** (#308): no token with `actions`, `contents: write` or `workflows`
+on `firemanxbr/omarchy-pool` is held by the Worker, a host, a worker or a
+person's tooling; only the workflows' own `GITHUB_TOKEN` inside a run has
+one. Hosts trust what `release.yml` and `rollback.yml` sign on `main`, and a
+token that could dispatch `rollback.yml` could send every host back. The
+pool checks its own: once a day the cron probes each GitHub token it holds
+(`GITHUB_TOKEN`, `GITHUB_REPORT_TOKEN`; `src/tokenprobe.ts`) with a dispatch
+of `rollback.yml` to a ref that cannot exist. GitHub answers 403 to a token
+without `actions: write` and 422 to one with it; no run starts either way. A
+422 is an error on Status (the hero, and a `token` line in the journal) until
+the token is replaced. The `GITHUB_TOKEN` a host gives its agent sidecars is
+probed by the host agent's preflight (the P1 install issue, #307).
 
 Tokens are 192-bit random values shown once and stored as SHA-256 hashes;
 job tokens are HMAC-SHA256-signed claims (`JOB_TOKEN_SECRET`, a Worker

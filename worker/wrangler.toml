@@ -120,7 +120,8 @@ POOL_DEPLOYED_AT = ""
 # Secrets (set with `wrangler secret put <NAME>`):
 #   JOB_TOKEN_SECRET — signs the per-job tokens workers get at claim time (jobtoken.ts)
 #   SIGNING_KEY      — the pool's OpenPGP private key, armored (signing.ts)
-#   GITHUB_TOKEN     — fine-grained token, read-only: a higher rate limit for the reads the pool makes (never a write scope)
+#   GITHUB_TOKEN     — fine-grained token, read-only: a higher rate limit for the reads the pool makes (never a write scope;
+#                      the cron probes it and GITHUB_REPORT_TOKEN daily, tokenprobe.ts: one that can start a workflow is an error on Status)
 #   GITHUB_REPORT_TOKEN — a separate fine-grained token, Issues: Read and write only — the daily cost comment (cost.ts postCostReport)
 #   GITHUB_OAUTH_CLIENT_SECRET — the OAuth App behind "Sign in with GitHub"
 #   CLOUDFLARE_ANALYTICS_TOKEN — API token with Account · Analytics · Read, for the daily cost estimate and the audience count

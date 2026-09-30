@@ -277,6 +277,18 @@ start a workflow (`release.yml` is dispatch-only and deploys production).
 cd worker && npx wrangler secret put GITHUB_REPORT_TOKEN     # paste the token
 ```
 
+Once a day the cron checks that neither token can start a workflow
+(`src/tokenprobe.ts`, #308): a dispatch of `rollback.yml` to a ref that
+cannot exist, per token. GitHub answers 403 to a token without
+`actions: write` (a `token` line, ok) and 422 to one with it; no run starts
+either way. A 422 is an error: the Status hero says *A pool token can start
+workflows* until a later probe of that token gets 403. Replace the token with
+one that has only its listed permission (`wrangler secret put` as above);
+the next day's probe clears it. A 401 (expired or revoked) or any other
+answer is a `warn` line. The rule is the security model's: no token with
+`actions`, `contents: write` or `workflows` on this repository exists outside
+GitHub Actions (*The GitHub settings the signature relies on*, below).
+
 ## Pulled jobs (the pool without GitHub)
 
 The pool's own work — sync, promote, rollback, render, health, security,

@@ -9,6 +9,7 @@ import { checkUpdates } from "./updates";
 import { syncProvenance } from "./provenance";
 import { costGuard, dailyCost } from "./cost";
 import { dailyAudience } from "./audience";
+import { probeTokens } from "./tokenprobe";
 
 /**
  * The pool's own scheduler: a Cloudflare cron trigger, every ten minutes,
@@ -201,6 +202,12 @@ export async function runScheduler(env: Env, now = new Date()): Promise<string[]
     if (g !== "governance: unchanged") log.push(g);
   } catch (e) {
     log.push(`governance: ${String(e)}`);
+  }
+  // No write-scoped token outside GitHub Actions (#308): once a day, each GitHub token the pool holds is probed with a dispatch that cannot start a run; a token that could is an error on Status.
+  try {
+    log.push(...(await probeTokens(env, now)));
+  } catch (e) {
+    log.push(`token probe: ${String(e)}`);
   }
   // The record: registrations made before package requests existed
   // (2026-09-15) get their request.json written from what the pool knows.

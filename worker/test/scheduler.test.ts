@@ -2,6 +2,7 @@ import { env } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as scheduler from "../src/scheduler";
 import { isDue, RULES, runScheduler } from "../src/scheduler";
+import { PROBE_URL } from "../src/tokenprobe";
 
 const at = (iso: string) => new Date(iso);
 const run = (created_at: string, status = "completed") => ({ created_at, status });
@@ -58,6 +59,7 @@ describe("scheduler rules", () => {
     expect(log.join("\n")).not.toMatch(/dispatched/);
     const actions = sent.filter((r) => r.url.includes("/actions/"));
     expect(actions.filter((r) => r.url.endsWith("/runs") || r.url.includes("/runs?")), "no read of run history").toEqual([]);
-    expect(actions.filter((r) => r.method === "POST"), "no dispatch").toEqual([]);
+    // The one POST is the daily token probe's (tokenprobe.ts): rollback.yml to a ref that cannot exist, never a run.
+    expect(actions.filter((r) => r.method === "POST").map((r) => r.url), "no dispatch but the token probe's").toEqual([PROBE_URL]);
   });
 });
