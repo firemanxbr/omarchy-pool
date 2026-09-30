@@ -1204,9 +1204,34 @@ if [[ -n "${OMARCHY_BROKER:-}" ]]; then
 fi
 sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
 
+# The smoke start of this image's builder (#277): the release starts every role of the image before any tag moves
+# (tests/image-smoke.sh), and this is the builder's. It reads the claim answers a pool may send as the loop reads them — an order
+# and no task, a task, a task whose rest it cannot read, an answer it cannot read at all — builds the claim it would send, and exits
+# 0. Nothing reaches a pool or a broker; nothing is installed.
+self_test() {
+  local id orders task bad body
+  id="wo_$(printf '%032d' 0)"
+  WORKER_LOG="$(mktemp)"; INSTANCE="$(printf '%032d' 1)"; STARTED_AT="2026-01-01T00:00:00Z"; ARCH="$(uname -m)"; AGENT_STATUS=""; AGENT_ERROR=""; AGENT_CHECKED=0
+  orders="{\"task\":null,\"orders\":[{\"id\":\"$id\",\"kind\":\"recheck-agent\",\"reason\":\"self-test \\u001b[31m\",\"issued_by\":\"pool:project\"}]}"
+  jq -e 'type == "object"' >/dev/null 2>&1 <<<"$orders" && [[ "$(jq -r '.task == null and ((.orders // []) | length) > 0' <<<"$orders")" == true ]] \
+    || { echo "self-test: an answer with an order and no task is not read as one" >&2; exit 1; }
+  [[ "$(jq -c '.orders[]?' <<<"$orders" | head -1 | jq -r .id)" == "$id" ]] || { echo "self-test: the order's id is not read" >&2; exit 1; }
+  [[ "$(clean_line "$(jq -r '.orders[0].reason' <<<"$orders")")" == "self-test " ]] || { echo "self-test: a reason is not printed clean" >&2; exit 1; }
+  task='{"task":{"id":812,"name":"felix","pkgbuild_ref":"draft:x","future_field":true},"token":"omj.self-test"}'
+  [[ "$(jq -r '.task.id // empty | numbers' <<<"$task")" == 812 && "$(jq -er '.task.name | strings' <<<"$task")" == felix ]] || { echo "self-test: a task is not read as one" >&2; exit 1; }
+  bad='{"task":{"id":813,"name":42},"token":"omj.self-test"}'
+  [[ "$(jq -r '.task.id // empty | numbers' <<<"$bad")" == 813 ]] && ! jq -er '.task.name | strings' >/dev/null 2>&1 <<<"$bad" || { echo "self-test: a task it cannot read is not one it reports failed" >&2; exit 1; }
+  ! jq -e 'type == "object"' >/dev/null 2>&1 <<<"not json" || { echo "self-test: an answer it cannot read is taken for one" >&2; exit 1; }
+  body="$(claim_body)"
+  [[ "$(jq -r '.instance + " " + (.orders | join(","))' <<<"$body" 2>/dev/null)" == "$INSTANCE drain,"* ]] || { echo "self-test: the claim it would send does not say which process and what it takes: $body" >&2; exit 1; }
+  rm -f "$WORKER_LOG"
+  echo "omarchy-build-worker --self-test: ok ($(image_version)) — an order, a task, a task it cannot read and an answer it cannot read are each read as the loop needs; the claim says $(jq -c '.orders' <<<"$body")"
+}
+
 hold_secrets
 case "${1:-}" in
   --inside) inside ;;
   --container) container_worker ;;
-  *) echo "usage: $0 --inside | --container (project workers run 'pkg-repo work', which calls --inside)" >&2; exit 2 ;;
+  --self-test) self_test ;;
+  *) echo "usage: $0 --inside | --container | --self-test (project workers run 'pkg-repo work', which calls --inside)" >&2; exit 2 ;;
 esac

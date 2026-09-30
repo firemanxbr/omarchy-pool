@@ -29,14 +29,16 @@
  * drain and resume — states the pool enforces at the claim, whatever the
  * worker's image — and Stop its task: the pool fences the task's lease at
  * issue, the heartbeat's 409 stops it on the worker, and the worker's next
- * claim, or the lease's end, gives it back to the queue (lease.ts). Update
- * is the part after it; its kind is in the schema already (the CHECK cannot
- * widen), and the door refuses it with "not on this pool yet".
+ * claim, or the lease's end, gives it back to the queue (lease.ts). The
+ * third is Update: never delivered to the worker — its set's updater reads
+ * it from the public GET /factory/follow and replaces the set, and the pool
+ * closes it when the worker claims on the pool's release (setRollout says
+ * whether an updater stands beside a worker at all).
  */
 import type { Env } from "./index";
 import { findLeak } from "./leak";
-import { parseTag } from "./update";
-import { WORKER_ALIVE_MINUTES } from "./meta";
+import { parseTag, updateState } from "./update";
+import { WORKER_ALIVE_MINUTES, version as running, type RunningVersion } from "./meta";
 import { FIRST_PICK_MINUTES } from "./queue";
 import { afterRequeue, LEASE_MINUTES, requeueStatement, stopError, type LeasedTask } from "./lease";
 
@@ -56,7 +58,7 @@ export const isOrderKind = (k: unknown): k is OrderKind => typeof k === "string"
  */
 export const DECLARABLE = ["drain", "recheck-agent", "restart", "restart-agent", "stop-task"] as const;
 
-/** The kinds this pool gives today (#277, parts 1 and 2). Update answers "not on this pool yet". */
+/** The kinds this pool gives (#277, parts 1 and 2), delivered at the claim or carried out by the pool. Update is given too (part 3), but never delivered: its set's updater takes it. */
 export const LIVE_KINDS: readonly OrderKind[] = ["recheck-agent", "restart", "restart-agent", "drain", "resume", "stop-task"];
 /** The kinds the pool carries out itself: at issue (drain, resume, the stop's fence) and at the claim or the lease's end (the stop's requeue). They work on every image; the worker only hears a drain's notice, and obeys the heartbeat's 409. */
 export const POOL_KINDS: readonly OrderKind[] = ["drain", "resume", "stop-task"];
@@ -110,6 +112,10 @@ export const TTL_PERSON_MIN = 360;
 export const TTL_POOL_MIN = 30;
 export const TTL_UPDATE_MIN = 360;
 export const ANSWER_WITHIN_MIN = 30;
+/** How often a set's updater asks the pool (GET /factory/follow), in seconds: the fleet follows a release, a rollback and an Update within this (#277, Q5). Its own knob is ROLLOUT_POLL; the pages quote this. */
+export const FOLLOW_POLL_S = 120;
+/** How many workers one follow names at most: a default Studio names five, eight with the emulated profile; a contributor's set one or two. */
+export const FOLLOW_MAX_IDS = 16;
 /** A process that lived under CHURN_WINDOW_MIN, finished no task and whose end nothing explains counts toward a crash loop; one that lives CHURN_CLEAR_MIN ends it. */
 export const CHURN_WINDOW_MIN = 10;
 export const CHURN_CLEAR_MIN = 30;
@@ -194,6 +200,8 @@ export interface ClaimFacts {
   probe: Probe | undefined;
   /** The claim came through a broker that exits with its builder on a restart (x-omarchy-broker-takes: pair-restart), a header the broker writes itself. */
   pairRestart: boolean;
+  /** What rolls its set out (#277, part 3), as the row keeps it: canonical JSON, or null when the claim says nothing of it (rolloutJson). */
+  rollout: string | null;
 }
 
 export function claimFacts(b: Record<string, unknown>, headers: Headers, probe: Probe | undefined, now = Date.now()): ClaimFacts {
@@ -214,13 +222,123 @@ export function claimFacts(b: Record<string, unknown>, headers: Headers, probe: 
     version: typeof b.version === "string" ? b.version : null,
     probe,
     pairRestart: (headers.get("x-omarchy-broker-takes") ?? "").split(",").map((s) => s.trim()).includes("pair-restart"),
+    rollout: rolloutJson(parseRollout(b.rollout)),
   };
 }
+
+// ---------- the set's rollout (#277, part 3) ----------
+
+/**
+ * What rolls a worker's set out, in one word (the design's §1.2 table,
+ * total over what a claim can say): an updater from #277 on that follows the
+ * pool (`follows`); one from before it (`old-updater`), which rolls out at
+ * its own 15-minute round and ignores Update until that round replaces it;
+ * an updater and a host timer's rollout.sh from before #277 at once
+ * (`both`); the timer alone (`timer`, the Studio before its one-time step);
+ * a host moved to an updater with none running (`stopped`); nothing
+ * (`none`); or a worker that said nothing of it (`unknown`: a builder, which
+ * has no socket; a bare binary; an image from before part 3; a container
+ * that could not verify which one it is).
+ */
+export type SetRollout = "follows" | "old-updater" | "both" | "timer" | "stopped" | "none" | "unknown";
+export const SET_ROLLOUTS: readonly SetRollout[] = ["follows", "old-updater", "both", "timer", "stopped", "none", "unknown"];
+
+/**
+ * What a worker says of its set with its claims (part 3 of #277 on): the
+ * updater service of its own compose project — the release its image says
+ * it is (OMARCHY_IMAGE) and whether that image follows the pool
+ * (com.omarchy.updater.follows=1) — and the host's rollout.sh by its marker
+ * line (`kick-v1`: #277's wake-up; `old`: a script of its own, a timer's;
+ * `none`: no file it can read). Or, when it could not look, why: a bare
+ * binary, or a container that could not verify which one it is.
+ */
+export type RolloutReport =
+  | { updater: { image: string | null; follows: boolean } | null; host_script: "kick-v1" | "old" | "none" }
+  | { unknown: "bare" | "unidentified" };
+
+/** A claim's `rollout`, checked: anything malformed is not reported (null) — never a claim refused over it. */
+export function parseRollout(v: unknown): RolloutReport | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const o = v as Record<string, unknown>;
+  if (o.unknown === "bare" || o.unknown === "unidentified") return { unknown: o.unknown };
+  const script = o.host_script === "kick-v1" || o.host_script === "old" || o.host_script === "none" ? o.host_script : null;
+  if (!script || !("updater" in o)) return null;
+  if (o.updater === null) return { updater: null, host_script: script };
+  const u = o.updater;
+  if (!u || typeof u !== "object" || Array.isArray(u) || typeof (u as Record<string, unknown>).follows !== "boolean") return null;
+  const image = (u as Record<string, unknown>).image;
+  return { updater: { image: typeof image === "string" && /^[A-Za-z0-9._+-]{1,40}$/.test(image) ? image : null, follows: (u as { follows: boolean }).follows }, host_script: script };
+}
+
+/** The report as the row keeps it: one form, whatever order the claim's keys came in — so the same words never write. */
+export function rolloutJson(r: RolloutReport | null): string | null {
+  if (!r) return null;
+  if ("unknown" in r) return JSON.stringify({ unknown: r.unknown });
+  return JSON.stringify({ updater: r.updater ? { image: r.updater.image, follows: r.updater.follows } : null, host_script: r.host_script });
+}
+
+export function rolloutOf(v: string | null | undefined): RolloutReport | null {
+  try { return parseRollout(v ? JSON.parse(v) : null); } catch { return null; }
+}
+
+/** The one word, from the report (the design's §1.2 table, W3): every pair of updater and host script maps to exactly one. */
+export function setRollout(r: RolloutReport | null): SetRollout {
+  if (!r || "unknown" in r) return "unknown";
+  if (r.host_script === "old") return r.updater ? "both" : "timer";
+  if (!r.updater) return r.host_script === "kick-v1" ? "stopped" : "none";
+  return r.updater.follows ? "follows" : "old-updater";
+}
+
+/** Why a worker's set is unknown to the pool, by what its claims show: it runs outside a container, it could not verify its own container, or its image is from before it reported its set. */
+function unknownWhy(r: RolloutReport | null, version: string | null | undefined): string {
+  if (r && "unknown" in r && r.unknown === "bare") return "started without compose: nothing replaces it";
+  if (r && "unknown" in r) return "it cannot identify its own container (its log says why), so the pool cannot tell what replaces it";
+  return `its image (${versionWord(version, "unknown")}) does not report its set: its host's updater or timer replaces it`;
+}
+
+/** The door's word for a project worker whose set does not follow the pool (§1.11.5): Update is refused, and this says why and what would change it. */
+export function rolloutRefusal(r: RolloutReport | null, version: string | null | undefined): string | null {
+  const word = setRollout(r);
+  const image = r && !("unknown" in r) && r.updater ? versionWord(r.updater.image, "its image") : "its image";
+  switch (word) {
+    case "follows": return null;
+    case "timer": return "this host rolls out by its own timer (a rollout.sh from before #277) and has no updater: the runbook's The Studio host has the one-time step. Until then its timer updates it within 15 min of a release";
+    case "both": return "two rollouts run on this host (an updater, and a timer's rollout.sh from before #277): finish the one-time step of the runbook's The Studio host";
+    case "old-updater": return `its updater (${image}) is older than #277: it rolls this set out at its own 15-min round and cannot take Update. That round replaces it with one that can`;
+    case "stopped": return "this host was moved to an updater, but none is running: releases do not reach it. Its ./rollout.sh starts it again";
+    case "none": return "no updater runs beside it: omarchy-worker start adds one";
+    default: return unknownWhy(r, version);
+  }
+}
+
+/** The worker page's *Its set* line and Status's words (§5.1): what rolls this worker's set out, in the pool's words — a builder's set is not visible from the pool (it has no socket). */
+export function setLine(r: RolloutReport | null, version: string | null | undefined, trust: string | null | undefined): string {
+  const word = setRollout(r);
+  const image = r && !("unknown" in r) && r.updater && parseTag(r.updater.image) ? ` (${versionWord(r.updater.image)})` : "";
+  switch (word) {
+    case "follows": return `rolled out by its updater${image} — follows each release within ${FOLLOW_POLL_S / 60} min`;
+    case "old-updater": return `rolled out by an updater from before #277${image}, every 15 min — its next round replaces it with one that follows the pool`;
+    case "both": return "two rollouts on this host — finish the one-time step of the runbook's The Studio host";
+    case "timer": return "rolled out by the host's timer (a rollout.sh from before #277) — the one-time step of the runbook's The Studio host gives it an updater";
+    case "stopped": return "this host's updater is not running — releases do not reach it";
+    case "none": return "no updater beside it";
+    default: return trust !== "project" ? "rolled out by its set's updater (not visible from the pool: a builder has no socket)" : unknownWhy(r, version);
+  }
+}
+
+/** Whether a claim's version is the pool's release: the same word, or a release the pool's is not newer than — what closes an Update (§1.5). */
+export function runsRelease(v: string | null | undefined, pool: Pick<RunningVersion, "version" | "deployed_at">): boolean {
+  if (v && v === pool.version) return true;
+  return parseTag(v) !== null && parseTag(pool.version) !== null && !updateState(v, pool).outdated;
+}
+
+/** An Update nothing executed, in the words its final line keeps (§1.11.5). */
+export const UPDATE_EXPIRED = `not replaced within ${TTL_UPDATE_MIN / 60} h: no updater beside it took the order (one from before #277 takes none; it replaces its set at its own 15-min round)`;
 
 // ---------- the worker's row ----------
 
 /** The columns of a worker's row the orders path decides on: workerOf reads them with the token, in the same seek, so a claim pays no read for them. */
-export const ORDERS_COLUMNS = "owner, trust, version, kinds, agent, agent_status, agent_error, agent_checked_at, last_seen, last_task, open_orders, order_kinds, instance, instance_prev, instance_since, instance_conflict_at, instance_other_at, instance_churn, instance_finished, crash_loop_since, watchdog_exits, started_at, agent_via, site, restarts_left, agent_error_since, agent_probed_at, agent_error_class, drained_at, auto_orders, revoked_at";
+export const ORDERS_COLUMNS = "owner, trust, version, kinds, agent, agent_status, agent_error, agent_checked_at, last_seen, last_task, open_orders, order_kinds, instance, instance_prev, instance_since, instance_conflict_at, instance_other_at, instance_churn, instance_finished, crash_loop_since, watchdog_exits, started_at, agent_via, site, restarts_left, rollout, agent_error_since, agent_probed_at, agent_error_class, drained_at, auto_orders, revoked_at";
 
 export interface OrdersRow {
   id: string;
@@ -249,6 +367,7 @@ export interface OrdersRow {
   agent_via: string | null;
   site: string | null;
   restarts_left: number | null;
+  rollout: string | null;
   agent_error_since: string | null;
   agent_probed_at: string | null;
   agent_error_class: string | null;
@@ -661,21 +780,17 @@ export const ORDER_RIGHTS = ["recheck", "restart", "restart_agent", "drain", "re
 export type OrderRight = (typeof ORDER_RIGHTS)[number];
 export const RIGHT_OF: Record<OrderKind, OrderRight> = { "recheck-agent": "recheck", restart: "restart", "restart-agent": "restart_agent", drain: "drain", resume: "resume", "stop-task": "stop_task", update: "update" };
 
-/** The worker as the predicate reads it. Its trust, its drain and the task in hand (#277, part 2) decide Drain, Resume and Stop its task. */
+/** The worker as the predicate reads it. Its trust, its drain and the task in hand (#277, part 2) decide Drain, Resume and Stop its task; its trust and its set's report decide Update (part 3 — a builder's set is not visible from the pool). */
 export interface OrderWorker {
   id: string; owner: string | null; revoked_at: string | null; version: string | null; order_kinds: string | null; open_orders: string | null; instance_conflict_at: string | null; restarts_left: number | null; agent_via: string | null;
-  trust?: string | null; drained_at?: string | null; drained_by?: string | null; drain_reason?: string | null; current_task?: number | null;
+  trust?: string | null; drained_at?: string | null; drained_by?: string | null; drain_reason?: string | null; current_task?: number | null; rollout?: string | null;
 }
 
 /** The task a worker holds, as Stop its task reads it: by the worker row's current_task, the primary key. */
 export interface HeldTask { id: number; kind: string; name: string; arch: string; version: string | null; owner: string | null; trust: string; status: string; lease_owner: string | null; lease_expires_at: string | null; stop_order: string | null; attempts: number; max_attempts: number; params: string | null }
 
-/** What the counts say, read once for the door and /can: the worker's orders in the last hour by group — its drains too (#277, part 2) —, the caller's, and when the oldest of each leaves the window — and the task it holds (Stop its task). */
-export interface OrderFacts { now: number; restartsHour: number; rechecksHour: number; loginHour: number; restartsFreeAt: string | null; rechecksFreeAt: string | null; loginFreeAt: string | null; drainsHour?: number; drainsFreeAt?: string | null; task?: HeldTask | null }
-
-const NOT_YET: Partial<Record<OrderKind, string>> = {
-  update: "Update is not on this pool yet: its set's updater takes it from a later part of #277",
-};
+/** What the counts say, read once for the door and /can: the worker's orders in the last hour by group — its drains too (#277, part 2) —, the caller's, and when the oldest of each leaves the window — and the task it holds (Stop its task), and the release the pool runs, which Update compares with (part 3). */
+export interface OrderFacts { now: number; restartsHour: number; rechecksHour: number; loginHour: number; restartsFreeAt: string | null; rechecksFreeAt: string | null; loginFreeAt: string | null; drainsHour?: number; drainsFreeAt?: string | null; task?: HeldTask | null; pool?: Pick<RunningVersion, "version" | "deployed_at"> }
 
 /** The per-login cap's words, the same at the door, on /can and in the journal's one line. */
 export const loginCapWords = (login: string, freeAt: string | null) => `${login} reached ${MAX_ORDERS_PER_LOGIN_HOUR} orders in an hour; further orders refused until ${freeAt ? clock(freeAt) : "the hour ends"}`;
@@ -731,6 +846,10 @@ export function stopWay(kind: string, orderKinds: string | null | undefined): St
  *   it, or sets it to its owner's packages only;
  * - Stop its task needs a task in hand, not stopped already; it counts in
  *   the restart group, like a restart.
+ *
+ * Update (#277, part 3) is its set's updater's to carry out: it needs a
+ * worker behind the pool's release and, on a project worker, an updater
+ * from #277 on beside it (updateVerdict).
  */
 export function orderVerdicts(c: { login: string; role: string } | null, w: OrderWorker, f: OrderFacts): Record<OrderRight, Verdict> {
   const no = (status: 401 | 403 | 404 | 409, why: string): Verdict => ({ ok: false, status, why });
@@ -775,10 +894,29 @@ export function orderVerdicts(c: { login: string; role: string } | null, w: Orde
     if (t.stop_order) return no(409, `task #${t.id} is being stopped already: it goes back to the queue once this worker has stopped it`);
     return waiting(kind) ?? restartsCap ?? login ?? allow;
   };
-  const kindVerdict = (kind: OrderKind): Verdict => {
+  // Update (§1.11.5): its set's updater executes it, never the worker — so what the worker's process takes does not matter; what matters is
+  // that it is behind the pool's release, and, for a project worker, that an updater from #277 on stands beside it. A builder cannot see
+  // its set (no socket): outdated, it is allowed, and an Update nothing executes expires with UPDATE_EXPIRED's words.
+  const updateVerdict = (): Verdict => {
     if (first) return first;
-    const later = NOT_YET[kind];
-    if (later) return no(409, later);
+    const pool = f.pool;
+    if (!pool || !parseTag(pool.version)) return no(409, `the pool runs no release (${pool?.version ?? "unknown"}): there is nothing to update to`);
+    if (!parseTag(w.version)) return no(409, `its image reports no release (${w.version ?? "none"}): the pool cannot tell whether it is behind`);
+    const u = updateState(w.version, pool);
+    if (!u.outdated) {
+      return versionWord(w.version) === versionWord(pool.version)
+        ? no(409, `runs ${versionWord(w.version)}, the latest — its updater follows each release within ${FOLLOW_POLL_S / 60} min`)
+        : no(409, `runs ${versionWord(w.version)}, newer than the pool's ${versionWord(pool.version)} — its updater follows the pool back within ${FOLLOW_POLL_S / 60} min`);
+    }
+    if (w.trust === "project") {
+      const refused = rolloutRefusal(rolloutOf(w.rollout), w.version);
+      if (refused) return no(409, refused);
+    }
+    return waiting("update") ?? conflict ?? restartsCap ?? login ?? allow;
+  };
+  const kindVerdict = (kind: OrderKind): Verdict => {
+    if (kind === "update") return updateVerdict();
+    if (first) return first;
     if (POOL_KINDS.includes(kind)) return poolKind(kind);
     if (takes === null) return no(409, `its image (${w.version ?? "unknown"}) takes no orders — its host's updater replaces it`);
     if (!takes.includes(kind)) {
@@ -1030,6 +1168,7 @@ export async function orderFacts(env: Env, worker: string, login: string | null,
   return {
     now, restartsHour: r?.n ?? 0, rechecksHour: c?.n ?? 0, loginHour: l?.n ?? 0, drainsHour: d?.n ?? 0,
     restartsFreeAt: freeAt(r?.oldest ?? null), rechecksFreeAt: freeAt(c?.oldest ?? null), loginFreeAt: freeAt(l?.oldest ?? null), drainsFreeAt: freeAt(d?.oldest ?? null),
+    pool: running(env),
   };
 }
 
@@ -1157,6 +1296,7 @@ function refusedFor(kind: OrderKind, via: string | null): string {
  */
 export async function takeOrders(env: Env, x: AfterClaim, now: number): Promise<OrderOut[]> {
   if (!x.row.open_orders) return [];
+  const pool = running(env);
   const rows = (await env.DB.prepare(OPEN_ORDERS_SQL).bind(x.row.id).all<OpenRow>()).results;
   const at = iso(now);
   const closes: { r: OpenRow; state: "done" | "refused" | "failed" | "expired"; detail: string }[] = [];
@@ -1195,7 +1335,13 @@ export async function takeOrders(env: Env, x: AfterClaim, now: number): Promise<
       if (!x.conflict) stops.push(r);
       continue;
     }
-    if (Date.parse(r.expires_at) <= now) { closes.push({ r, state: "expired", detail: "not delivered in time: the worker did not claim" }); continue; }
+    if (Date.parse(r.expires_at) <= now) { closes.push({ r, state: "expired", detail: r.kind === "update" ? UPDATE_EXPIRED : "not delivered in time: the worker did not claim" }); continue; }
+    // An Update is never delivered: its set's updater takes it (GET /factory/follow). It is done once the worker claims on the pool's
+    // release — whatever its image takes, since the worker executes nothing of it — and waits for the updater otherwise.
+    if (r.kind === "update") {
+      if (!x.conflict && runsRelease(x.claim.version, pool)) closes.push({ r, state: "done", detail: `now runs ${versionWord(x.claim.version, x.claim.version ?? "the pool's release")}` });
+      continue;
+    }
     if (!LIVE_KINDS.includes(r.kind)) continue;
     // While two processes share the token, nothing a claim says closes a waiting order: which of them spoke is not known.
     if (x.conflict) continue;
@@ -1469,7 +1615,7 @@ export async function sweepOrders(env: Env & { WORKER_RULES_SCALE?: string }, no
   for (const o of due) {
     const drain = o.kind === "drain" && o.state === "pending";
     const state = drain ? "done" : o.state === "pending" || o.kind === "recheck-agent" ? "expired" : "failed";
-    const detail = drain ? "drained while it was not heard from: it is handed nothing until it is resumed" : o.state === "pending" ? "not delivered in time: the worker did not claim" : `no answer within ${ANSWER_WITHIN_MIN} min of delivery`;
+    const detail = drain ? "drained while it was not heard from: it is handed nothing until it is resumed" : o.state === "pending" ? (o.kind === "update" ? UPDATE_EXPIRED : "not delivered in time: the worker did not claim") : `no answer within ${ANSWER_WITHIN_MIN} min of delivery`;
     stmts.push(env.DB.prepare("UPDATE worker_orders SET state = ?, answered_at = ?, answered_by = 'pool', detail = ? WHERE id = ? AND state = ?").bind(state, at, detail, o.id, o.state));
     stmts.push(env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) SELECT 'order', NULL, 'factory', ?, ?, ? WHERE EXISTS (SELECT 1 FROM worker_orders WHERE id = ? AND answered_at = ? AND state = ?)").bind(
       STATUS_OF_STATE[state], `${o.worker_id}: ${o.kind} ${state} — ${detail} (order ${o.id})`, JSON.stringify({ order: o.id, worker: o.worker_id, kind: o.kind, by: o.issued_by, via: o.via, rule: o.rule, reason: o.reason, state, code: null }), o.id, at, state,

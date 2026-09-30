@@ -99,7 +99,7 @@ Migrations live in `worker/migrations/`.
 | `GET /api/v1/search?q=` · `/package/:name[/files]` | search within a ring; a package's versions per ring, manifest, forward edges (declared dependencies and loaded sonames resolved to providers) and reverse edges (declared, or by loading one of its libraries) — the package page and, later, CVE propagation. A loaded soname resolves to one package built for the page's architecture (see Architectures) |
 | `GET /api/v1/packages?q=&ring=&arch=&origin=&sort=` | the packages list (`routes/browse.ts`): one row per name over the rings picked, filtered and paged by the server — a page found by walking the name index (or the table in id order, for recency) from a cursor, a search by one read of the table — and the counts behind every filter kept in `settings` under the ring heads they were counted at; `/packages` draws its first page into the HTML from the same address, through the edge's copy |
 | `GET /api/v1/pool/unreferenced` · `POST /api/v1/pool/gc` | retention: what the last N releases do not reference |
-| `GET /api/v1/factory` · `POST /factory/{requests,enqueue,claim,jobs}` · `/factory/tasks/:id/{heartbeat,complete,fail,cancel,approve,reject}` · `/factory/tasks/:id/artifacts/<file>` · `/factory/{register,packages,workers,workers/self,maintainers,review,approvals,trust,me}` · `/factory/workers/:id/{orders,can}` · `/factory/workers/self/orders/:id` · `GET /api/v1/users/:login` · `GET /api/v1/cost` | the factory's brain: package requests, build tasks with leases, the workers pulling them, contributors and their packages, maintainers' approvals, jobs queued by hand, orders to a worker, the daily cost estimate ([factory/README.md](../factory/README.md), [GOVERNANCE.md](GOVERNANCE.md)) |
+| `GET /api/v1/factory` · `POST /factory/{requests,enqueue,claim,jobs}` · `/factory/tasks/:id/{heartbeat,complete,fail,cancel,approve,reject}` · `/factory/tasks/:id/artifacts/<file>` · `/factory/{register,packages,workers,workers/self,maintainers,review,approvals,trust,me}` · `/factory/workers/:id/{orders,can}` · `/factory/workers/self/orders/:id` · `GET /factory/follow` · `GET /api/v1/users/:login` · `GET /api/v1/cost` | the factory's brain: package requests, build tasks with leases, the workers pulling them, contributors and their packages, maintainers' approvals, jobs queued by hand, orders to a worker, what each set's updater follows, the daily cost estimate ([factory/README.md](../factory/README.md), [GOVERNANCE.md](GOVERNANCE.md)) |
 | `POST /api/v1/events` · `GET /api/v1/events` · `GET /api/v1/stats` | activity log and the dashboard's data |
 | `GET /` | the dashboard — three doors in the header, one per job: `/` the Pool (use it: a search, the pool's four numbers, the chain from the sources to your machine, the command that points pacman at a ring, Live and what is new in the rings; no account), `/factory` the Factory (contribute: the request with its live checks, the workers and what each is doing, the line from request to the pool), `/review` Review (maintain: the staged builds and the decisions). The footer links `/packages`, `/status`, `/agents`, `/docs` and `/people`; `/package/:name`, `/workers`, `/user/:login`, `/build/:id` and the API reference `/api` are one link from those. `/pipeline`, `/journal` and `/security` redirect to the sections of `/status` they became, `/docs/api` to the docs' API section and `/request` to the Factory's request card (`MOVED` in `index.ts`). Every page is a string with a `<script>` that reads the API; the diagrams are inline SVG drawn in `worker/src/pages/diagrams.ts`, the charts in `charts.ts`. Every colour is a named token (`layout.ts`): dark by default for everyone, its light twin only for a reader who chose it (the header's switch or the ⌘K menu), the choice kept in the browser. The v1 kit (`kit.ts`) holds the pieces the v1.0 pages are drawn with: a page drawn with it links one stylesheet, `/assets/kit.<hash>.css` (its primitives and its icons, immutable under its hash), and a page that is not pays nothing for it until the ⌘K menu opens. The menu (`GO_MENU` in `layout.ts`) is on every page: ⌘K or Ctrl+K open it (on a Mac, Ctrl+K in a text field stays the field's), and so does `/` on every page but Home, where it focuses the search. It goes to the pages and to packages through the same `/api/v1/search` address Home's box asks, the term in lower case (so the two share the edge's copy); a name that search does not find is looked up in the factory's names and at `/api/v1/package/:name` on each architecture before the menu offers to request it, on `/factory?name=`; and it links the kit's sheet for its icons the first time it opens |
 
@@ -350,8 +350,57 @@ that makes no progress — no claim between tasks, no heartbeat the pool
 accepted in a task — is restarted by its **watchdog** (exit 75), after 20
 minutes, then 40, 80, … at most a day (35 at least in a task), counted in its
 container's layer, so at most six in any day, each told to the pool by the
-next process. Update through the set's updater is the part after this one:
-its kind is in the schema already, and the pool refuses it for now.
+next process.
+
+**Versions follow the brain too: the set's updater.** Every set runs an
+`updater` service of the same image (`factory/bin/omarchy-rollout`): every
+contributor's set, and the Studio since its one-time step (the runbook's *The
+Studio host*). Every two minutes it asks `GET /api/v1/factory/follow?ids=…`,
+with no token — the pool's release, and for each worker of its set its
+release and the id of an open **Update**; the edge keeps an answer thirty
+seconds per release of the pool, so a deploy is never answered from before
+it — and runs a round when the release changes (a release, or a rollback),
+when an Update it has not acted on appears, and every fifteen minutes when
+the pool does not answer. A Worker from before #277 knows no follow: the
+updater reads its release from `/api/v1/version` instead. It names
+its workers by id from inside the set: a project worker's entrypoint writes
+its own to `/run/omarchy/worker-id`, and a builder's is asked of its broker,
+which holds the token; nothing is read of a builder's container. A round is
+#278's (brokers first, each answering, then the workers in one `up`, each stop
+a drain), inside a lock — a container created by name, labelled with its
+holder's container and start, broken at once (by the id it was judged by)
+when that holder is gone or restarted, released at every round's end — and
+followed by a guard: for 90 s
+every container of the set on the new image but the builders (which exit
+after every task) is sampled, and the updater replaces itself, and removes
+the old images, only when none restarts at two samples in a row, none
+restarts twice, none that ran stays down, every service was replaced, and the
+new image's own updater passes `--self-test` (one from before #277 has none,
+and is adopted on the rest: a rollback past #277). An Update is therefore never
+delivered to the worker: the updater executes it, and the pool closes it when
+the worker claims on the pool's release (or expires it after six hours). The
+door refuses it for a worker on the latest release, and for a project worker
+whose set nothing that follows the pool rolls out: each claim reports what
+does (`rollout`: its project's updater — its image, and whether that image
+carries `com.omarchy.updater.follows=1` — and the host's `rollout.sh` by its
+marker line), and the pool says it in one word, `set_rollout` (`follows`,
+`old-updater`, `both`, `timer`, `stopped`, `none`, `unknown`), on the worker's
+page and in Status's lines.
+
+**A release whose image does not start.** Prevented: the release pushes each
+architecture's image as `:<arch>-vX.Y.Z` only, starts every role from it on
+the runner (`tests/image-smoke.sh`, the project worker up to its first
+claim), and only once both architectures have started moves any tag a host
+follows — `:vX.Y.Z`, `:<arch>`, then `:latest`. Contained: an updater never
+adopts an image under which what it replaced keeps restarting, and keeps the
+old images. Detected: a process that lives minutes and finishes nothing is
+counted as churn; workers alive before the latest deploy, last heard during
+its rollout and silent for 15 minutes since are an error on Status.
+Remedied from anywhere: `gh workflow run rollback.yml -f to=vX.Y.Z` re-points
+the images and deploys that release's Worker — only to a release whose
+images passed both smoke starts, with its Worker built before any tag moves
+and the tags put back if its deploy fails — and every updater follows the
+pool's release down.
 
 ### Architectures
 

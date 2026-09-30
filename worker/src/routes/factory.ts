@@ -14,7 +14,7 @@ import { version as running, RINGS, ringsSql, sortRings, REPO_ARCHES, WORKER_ALI
 import { parseTargets, settleTargets } from "../targets";
 import { LEASE_MINUTES, packageAfterFailure, requeueLease, stopError } from "../lease";
 import {
-  autoOf, breakerHolds, claimFacts, decideAuto, errorClass, instanceStep, issueOrder, NOTHING_CLASSES, openOrdersOf, outOf, poolFor, readSite, rulesOn, rulesScale, siblingsAnswering, siteVerdict, takeOrders,
+  autoOf, breakerHolds, claimFacts, decideAuto, errorClass, instanceStep, issueOrder, NOTHING_CLASSES, openOrdersOf, outOf, poolFor, readSite, rolloutOf, rulesOn, rulesScale, setLine, setRollout, siblingsAnswering, siteVerdict, takeOrders,
   capRefusal, type AfterClaim, type AutoState, type ClaimFacts, type Decision, type InstanceStep, type OrderOut, type OrdersRow,
 } from "../orders";
 
@@ -518,7 +518,7 @@ async function giveUp(env: Env, w: OrdersRow, spell: string | null, next: AutoSt
 }
 
 export async function handleClaim(request: Request, env: Env, actor: Actor): Promise<Response> {
-  const b = await readJson<{ arch?: string; hostname?: string; labels?: unknown; version?: string; kinds?: unknown; shared?: unknown; agent?: unknown; agent_status?: unknown; agent_error?: unknown; agent_checked_at?: unknown; usage?: unknown; log?: unknown; orders?: unknown; instance?: unknown; started_at?: unknown; agent_via?: unknown; site?: unknown; restarts_left?: unknown; previous_exit?: unknown }>(request);
+  const b = await readJson<{ arch?: string; hostname?: string; labels?: unknown; version?: string; kinds?: unknown; shared?: unknown; agent?: unknown; agent_status?: unknown; agent_error?: unknown; agent_checked_at?: unknown; usage?: unknown; log?: unknown; orders?: unknown; instance?: unknown; started_at?: unknown; agent_via?: unknown; site?: unknown; restarts_left?: unknown; previous_exit?: unknown; rollout?: unknown }>(request);
   if (b instanceof Response) return b;
   if (!b.arch || !isRepoArch(b.arch)) return json({ error: "arch (x86_64|aarch64) is required" }, 400);
   if (actor.kind === "job") return json({ error: "a job token cannot claim; use the worker token" }, 403);
@@ -559,6 +559,10 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   try {
     facts = claimFacts(b as Record<string, unknown>, request.headers, probe);
     if (row) step = instanceStep(row, facts, Date.parse(at));
+    // What rolls its set out (#277, part 3) changes when its host does — the one-time step, an updater stopped or replaced: written with
+    // the claim's one write, only when it says something new (canonical form, so the same words never write), and never while two
+    // processes share the token — two hosts' reports would flip the row at every claim (PR #226).
+    if (row && step && !step.conflict && facts.rollout !== (row.rollout ?? null)) step.set.rollout = facts.rollout;
   } catch (e) {
     console.error("orders:", e);
   }
@@ -1137,6 +1141,9 @@ export function workerView<W extends WorkerRow>(w: W, since: number, pool: Runni
     crash_loop_since: w.crash_loop_since ?? null,
     watchdog: watchdog && Date.now() - Date.parse(watchdog.since) < 24 * 3600e3 ? watchdog : null,
     agent_via: w.agent_via ?? null,
+    // What rolls its set out (#277, part 3): one word, and the pool's line for it — the report itself stays the pool's.
+    set_rollout: setRollout(rolloutOf(w.rollout ?? null)),
+    set_line: setLine(rolloutOf(w.rollout ?? null), w.version ?? null, w.trust),
     labels: w.labels ? JSON.parse(w.labels) : null,
     packages: w.packages ? JSON.parse(w.packages) : null,
     alive: Date.parse(w.last_seen) > since,
@@ -1186,6 +1193,8 @@ export async function handleFactory(env: Env, url?: URL): Promise<Response> {
       lease_minutes: LEASE_MINUTES,
       limit,
       counts: counts.results,
+      // The release the workers are compared with, and when it was deployed: Status says which went silent since (#277).
+      pool: { version: pool.version, deployed_at: pool.deployed_at },
       workers: workers.results.map((w) => workerView(w, alive, pool)),
       // A task's params and result are JSON here as they are on the task's own page (handleTask): one shape for a task, whoever reads it.
       tasks: tasks.results.map((t) => ({ ...t, log_tail: undefined, params: parseJson(t.params), result: parseJson(t.result) })),

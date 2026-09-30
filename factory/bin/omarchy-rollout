@@ -1,33 +1,65 @@
 #!/usr/bin/env bash
 # omarchy-rollout — every worker follows the pool's latest image. A rolling
-# upgrade of a compose project's services, the way the Studio's
-# factory/host/rollout.sh does it, from inside the image: the `updater`
-# service of a contributor's or a maintainer's compose file runs this with
-# the runtime's socket and the project directory mounted at /compose.
+# upgrade of a compose project's services from inside the image: the
+# `updater` service of a contributor's set, a maintainer's project worker's
+# and, since its one-time step, the Studio's (#277) runs this with the
+# runtime's socket and the project directory mounted at the same path.
 #
-# For each service whose image (or configuration) changed, one at a time:
-# stop the running container — SIGTERM, which a worker takes as *drain*: it
-# finishes the task it holds, reports it, claims nothing new and exits, up
-# to the compose file's stop_grace_period — and start one from the new
-# image. The brokers first, each answering before anything that calls it
-# is replaced (nothing to drain; a builder mid-task takes its lease up
-# again through the new one), the builders next, the project
-# workers last, and the updater itself at the very end: replacing it ends
-# this run, and the next container carries on.
+# For each service whose image (or configuration) changed: stop the running
+# container — SIGTERM, which a worker takes as *drain*: it finishes the task
+# it holds, reports it, claims nothing new and exits, up to the compose
+# file's stop_grace_period — and start one from the new image. The brokers
+# first, each answering before anything that calls it is replaced (nothing
+# to drain; a builder mid-task takes its lease up again through the new
+# one), then every other service that changed in one `up`, and the updater
+# itself at the very end: replacing it ends this run, and the next
+# container carries on.
 #
-#   omarchy-rollout --once      upgrade what changed, once (also with no argument)
-#   omarchy-rollout --check     say what would change, change nothing
-#   omarchy-rollout --loop      every ROLLOUT_EVERY seconds (900), forever
+#   omarchy-rollout --once       one round, now (also with no argument)
+#   omarchy-rollout --check      say what would change, change nothing
+#   omarchy-rollout --loop       follow the pool: a round when its release changes, when an Update is open for a worker of this set,
+#                                every ROLLOUT_EVERY seconds (900) otherwise, and at SIGUSR1 (rollout.sh, omarchy-worker update)
+#   omarchy-rollout --self-test  the socket answers, compose reads this project, and this updater follows the pool
 #
-# The brokers that changed are replaced first and waited for until each
-# answers (bounded: ROLLOUT_BROKER_WAIT, 300 s for all of them), then the
-# other services that changed in one go — compose stops and recreates them
-# together, each draining under its own stop_grace_period — so a worker
-# never idles on the old image while another drains for hours (the pool
-# refuses an outdated worker 45 minutes after a deploy), and never checks
-# an agent whose broker is not listening yet (#273). The updater replaces
-# itself last, through a one-off container that outlives it: a container
-# cannot recreate itself from inside.
+# Following the pool (#277). Every ROLLOUT_POLL seconds (120) the loop asks
+# GET $OMARCHY_API/api/v1/factory/follow?ids=<its set's workers> — no token:
+# the answer is the pool's release and the open Update of each worker it
+# names, nothing more. The ids come from inside the set: a project worker's
+# entrypoint writes its own to /run/omarchy/worker-id; a builder's is asked
+# of its broker, which holds the token (`curl` of /pool/factory/workers/self
+# inside the broker's container). No token and no key leaves a container,
+# and nothing is ever read of a builder's container, where strangers'
+# recipes run. A pool that does not know follow (a Worker from before #277)
+# is asked its /version instead, which still says its release; one that
+# does not answer at all leaves the fifteen-minute round.
+#
+# The lock (#277). Every round that can change something takes it, --check
+# never: a container created by name — atomic in the engine —
+# <project>-rollout-lock, labelled with who holds it (loop or once), the
+# holder's container id and its StartedAt, and an expiry four hours out.
+# A round that finds it held breaks it at once when its holder is gone, not
+# running, or started again since (the process that took it is dead), or
+# once it outlived its expiry — by the id it judged, never by its name, so
+# two rounds that judged it dead never both take it; otherwise it skips.
+# A round releases it as its last step, just before a self-replacing
+# one-off, and an EXIT trap backs that up; a release removes only a lock
+# this process holds.
+#
+# The guard (#277). After a round that replaced something, and before the
+# updater replaces itself or removes an old image, it samples every
+# container of the project on the image its service now names — but its own
+# and the builders', which exit after every task (a builder is a container
+# whose role is community or whose environment sets OMARCHY_BROKER, both
+# read from the engine's config with a template that reads that one
+# variable) — for ROLLOUT_GUARD_SECONDS (90), every ROLLOUT_GUARD_EVERY (5).
+# It fails on a container seen restarting at two samples in a row, a
+# RestartCount that grows by two or more, one that was running and ends
+# exited non-zero, and a service this round failed to replace. Then the new
+# image's own updater must pass --self-test (an image from before #277 has
+# none — a rollback past it — and is adopted on the first check alone, as
+# every updater before #277 adopted every image). If either fails, the
+# updater stays on its image and keeps the old ones, so a rollback reaches
+# the set with no download, and tries again at its next round.
 #
 # The pool hands nothing to a worker behind its release for longer than
 # the rollout's grace (worker/src/update.ts), so a worker without this
@@ -37,9 +69,17 @@ set -euo pipefail
 log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 : "${COMPOSE_DIR:=/compose}"
 : "${ROLLOUT_EVERY:=900}"
+: "${ROLLOUT_POLL:=120}"
 : "${ROLLOUT_SELF:=updater}"
+: "${ROLLOUT_GUARD_SECONDS:=90}"
+: "${ROLLOUT_GUARD_EVERY:=5}"
+: "${ROLLOUT_LOCK_HOURS:=4}"
+: "${OMARCHY_API:=https://pkgs.omarchy-pool.org}"
+# Where this process leaves what proves which container it is (the design's §1.14), and where it reads its own mounts.
+: "${OMARCHY_RUN_DIR:=/run/omarchy}"
+: "${ROLLOUT_MOUNTINFO:=/proc/self/mountinfo}"
 mode=once
-case "${1:-}" in --check) mode=check ;; --loop) mode=loop ;; --once|"") ;; *) echo "usage: omarchy-rollout [--once|--check|--loop]" >&2; exit 2 ;; esac
+case "${1:-}" in --check) mode=check ;; --loop) mode=loop ;; --self-test) mode=self-test ;; --once|"") ;; *) echo "usage: omarchy-rollout [--once|--check|--loop|--self-test]" >&2; exit 2 ;; esac
 
 # The order services are named in (the log reads in it): the brokers,
 # the builders, the project workers; the updater last, on its own. Services
@@ -52,12 +92,122 @@ ORDER=(agent-proxy broker broker-community-x86_64 broker-community-aarch64 worke
 # maintainer's project worker into a second updater (found in review).
 compose() { env -i PATH="$PATH" HOME="${HOME:-/root}" DOCKER_HOST="${DOCKER_HOST:-}" DOCKER_CONFIG="${DOCKER_CONFIG:-}" docker compose --project-directory "$COMPOSE_DIR" "$@"; }
 
+# One variable of a container's environment, read by the engine with a template that prints that one and never the others (a
+# broker's or a worker's hold its keys); `set` for a variable that is there, whatever its value, when asked with `present`.
+ENV_ONE='{{range .Config.Env}}{{if eq (index (split . "=") 0) "%s"}}{{.}}{{end}}{{end}}'
+env_of() { # cid name → its value
+  local t; t="$(printf "$ENV_ONE" "$2")"
+  docker inspect -f "$t" "$1" 2>/dev/null | sed -n "s/^$2=//p" | head -1 || true
+}
+env_present() { # cid name → 0 when the container's environment sets it (its value is never read)
+  local t; t="$(printf '{{range .Config.Env}}{{if eq (index (split . "=") 0) "%s"}}set{{end}}{{end}}' "$2")"
+  [[ "$(docker inspect -f "$t" "$1" 2>/dev/null)" == *set* ]]
+}
+
+# ---------------------------------------------------------------- itself --
+# Which container this is (the design's §1.14): the source of the
+# /etc/hostname mount in this process's mountinfo, podman's containerenv,
+# the hostname — each verified by reading back, through the engine, a
+# random value this process wrote at start. The lock's holder; empty when
+# none answers, and the lock then falls back to its expiry alone.
+SELF_ID=""; SELF_STARTED=""
+identify_self() {
+  local nonce cid cands=()
+  nonce="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"; [[ -n "$nonce" ]] || nonce="$$-$(date +%s)"
+  mkdir -p "$OMARCHY_RUN_DIR" 2>/dev/null && printf '%s' "$nonce" > "$OMARCHY_RUN_DIR/instance" 2>/dev/null || return 0
+  if [[ -r "$ROLLOUT_MOUNTINFO" ]]; then
+    while read -r _ _ _ root mnt _; do
+      [[ "$mnt" == /etc/hostname && "$root" =~ containers/([0-9a-f]{64})/ ]] && cands+=("${BASH_REMATCH[1]}")
+    done < "$ROLLOUT_MOUNTINFO"
+  fi
+  [[ -r /run/.containerenv ]] && cid="$(sed -n 's/^id="\{0,1\}\([0-9a-f]\{12,64\}\)"\{0,1\}$/\1/p' /run/.containerenv | head -1)" && [[ -n "$cid" ]] && cands+=("$cid")
+  cid="$(cat /etc/hostname 2>/dev/null || true)"; [[ "$cid" =~ ^[0-9a-f]{12,64}$ ]] && cands+=("$cid")
+  for cid in "${cands[@]+"${cands[@]}"}"; do
+    if [[ "$(docker exec "$cid" cat "$OMARCHY_RUN_DIR/instance" 2>/dev/null || true)" == "$nonce" ]]; then
+      SELF_ID="$(docker inspect -f '{{.Id}}' "$cid" 2>/dev/null || echo "$cid")"
+      SELF_STARTED="$(docker inspect -f '{{.State.StartedAt}}' "$cid" 2>/dev/null || true)"
+      return 0
+    fi
+  done
+  log "cannot identify its own container (no mount or hostname that answers with this process's value): the lock it takes names no holder and ends at its expiry alone"
+}
+
+# ------------------------------------------------------------------ lock --
+LOCK=""; LOCK_NONCE=""; LOCK_HELD=0
+project_name() { compose config --format json 2>/dev/null | jq -r '.name // empty' 2>/dev/null || true; }
+lock_name() { [[ -n "$LOCK" ]] || LOCK="$(project_name)"; LOCK="${LOCK:-$(basename "$COMPOSE_DIR")}"; LOCK="${LOCK%-rollout-lock}-rollout-lock"; }
+# The image the lock is created from: this container's own, else the one its service names (it is here: this runs on it).
+lock_image() {
+  local img=""
+  [[ -n "$SELF_ID" ]] && img="$(docker inspect -f '{{.Image}}' "$SELF_ID" 2>/dev/null || true)"
+  [[ -n "$img" ]] || img="$(compose config --format json 2>/dev/null | jq -r --arg s "$ROLLOUT_SELF" '.services[$s].image // empty' 2>/dev/null || true)"
+  printf '%s' "${img:-ghcr.io/firemanxbr/omarchy-worker:latest}"
+}
+hhmm() { # an ISO time or epoch → HH:MM (UTC)
+  if [[ "$1" =~ ^[0-9]+$ ]]; then date -u -d "@$1" +%H:%M 2>/dev/null || date -u -r "$1" +%H:%M 2>/dev/null || echo "?"; else printf '%s' "${1:11:5}"; fi
+}
+lock_create() { # by
+  local until=$(( $(date +%s) + ROLLOUT_LOCK_HOURS * 3600 ))
+  LOCK_NONCE="$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"; [[ -n "$LOCK_NONCE" ]] || LOCK_NONCE="$$$(date +%s)"
+  docker create --name "$LOCK" --label "com.omarchy.lock.by=$1" --label "com.omarchy.lock.holder=$SELF_ID" --label "com.omarchy.lock.started=$SELF_STARTED" \
+    --label "com.omarchy.lock.until=$until" --label "com.omarchy.lock.nonce=$LOCK_NONCE" "$(lock_image)" true >/dev/null 2>&1
+}
+# Take the lock, or say why not: 0 taken, 1 held by a live round.
+lock_take() { # by
+  lock_name
+  if lock_create "$1"; then LOCK_HELD=1; return 0; fi
+  local labels by holder started until created lid state
+  labels="$(docker inspect -f '{{index .Config.Labels "com.omarchy.lock.by"}}|{{index .Config.Labels "com.omarchy.lock.holder"}}|{{index .Config.Labels "com.omarchy.lock.started"}}|{{index .Config.Labels "com.omarchy.lock.until"}}|{{.Created}}|{{.Id}}' "$LOCK" 2>/dev/null || true)"
+  if [[ -z "$labels" ]]; then
+    # Gone between the create and the read: one more try.
+    lock_create "$1" && { LOCK_HELD=1; return 0; }
+    log "the lock $LOCK could not be taken or read; skipping this round"; return 1
+  fi
+  IFS='|' read -r by holder started until created lid <<<"$labels"
+  [[ "$until" =~ ^[0-9]+$ ]] || until=0
+  local since; since="$(hhmm "$created")"
+  if [[ -n "$holder" ]]; then
+    state="$(docker inspect -f '{{.State.Running}} {{.State.StartedAt}}' "$holder" 2>/dev/null || true)"
+    if [[ -z "$state" || "${state%% *}" != true || "${state#* }" != "$started" ]]; then
+      log "a lock held by ${holder:0:12} (${by:-?}, since $since), which is not running any more: broken"
+    elif (( $(date +%s) < until )); then
+      if [[ "$by" == loop ]]; then log "a round runs already in the updater (loop, since $since)"; else log "a round runs already (${by:-?}, since $since)"; fi
+      return 1
+    else
+      log "a lock from $since outlived its ${ROLLOUT_LOCK_HOURS} h: broken"
+    fi
+  elif (( $(date +%s) >= until )); then
+    log "a lock from $since outlived its ${ROLLOUT_LOCK_HOURS} h: broken"
+  else
+    log "a round runs already (${by:-?}, since $since; its holder named no container, so the lock ends at its expiry)"
+    return 1
+  fi
+  # Broken by the id it was judged by, never by its name: another round that judged the same lock dead may have broken it and
+  # taken the lock meanwhile, and a removal by name would remove that round's lock too — two rounds would hold it. Removed
+  # already, this does nothing, and the create below decides.
+  docker rm -f "${lid:-$LOCK}" >/dev/null 2>&1 || true
+  if lock_create "$1"; then LOCK_HELD=1; return 0; fi
+  log "another round took the lock first; skipping"; return 1
+}
+# Release: only a lock this process holds — its holder, its start and its nonce — never one another round took after breaking this one.
+lock_release() {
+  (( LOCK_HELD )) || return 0
+  LOCK_HELD=0
+  local labels lid; labels="$(docker inspect -f '{{index .Config.Labels "com.omarchy.lock.holder"}}|{{index .Config.Labels "com.omarchy.lock.started"}}|{{index .Config.Labels "com.omarchy.lock.nonce"}}|{{.Id}}' "$LOCK" 2>/dev/null || true)"
+  lid="${labels##*|}"; labels="${labels%|*}"
+  # By the id it was read with, as a break is: the lock read here is the one removed.
+  if [[ "$labels" == "$SELF_ID|$SELF_STARTED|$LOCK_NONCE" ]]; then docker rm -f "${lid:-$LOCK}" >/dev/null 2>&1 || true
+  elif [[ -n "$labels" ]]; then log "the lock $LOCK is another round's now; leaving it"; fi
+}
+
+# ----------------------------------------------------------------- round --
 # up -d recreates a container whose image changed: stop (drain), remove, start — all of the given ones at once.
+FAILED=()
 replace_now() { # service... — 1 when compose did not replace them
   if compose up -d --no-deps --no-build "$@" >/dev/null 2>&1; then
     local svc; for svc in "$@"; do log "$svc: running $(docker inspect -f '{{.Image}}' "$(compose ps -q "$svc" | head -1)" 2>/dev/null | cut -c8-19)"; done
   else
-    log "FAILED to replace $* — docker compose logs"; return 1
+    log "FAILED to replace $* — docker compose logs"; FAILED+=("$@"); return 1
   fi
 }
 # Does the broker answer? Any HTTP answer from inside its container (curl
@@ -91,11 +241,14 @@ wait_answering() { # service... — all of them within one ROLLOUT_BROKER_WAIT, 
   done
 }
 
-rollout() { # → 0 changed something, 1 nothing to do, 2 docker unreachable
+# What a round saw: each service and the image id it now names ("svc id" lines), the images it replaced, and whether the updater changed.
+WANTED=""; OLD_IMAGES=(); SELF_CHANGED=0; REPLACED=0
+rollout() { # check → 0 changed something, 1 nothing to do, 2 docker unreachable
   local check="$1"
+  WANTED=""; OLD_IMAGES=(); SELF_CHANGED=0; REPLACED=0; FAILED=()
   docker info >/dev/null 2>&1 || { log "docker is not reachable through the socket: $(docker info 2>&1 | tail -n1)"; return 2; }
   [[ -f "$COMPOSE_DIR/compose.yml" || -f "$COMPOSE_DIR/compose.yaml" || -f "$COMPOSE_DIR/docker-compose.yml" ]] || { log "no compose file in $COMPOSE_DIR — mount the project directory there"; return 2; }
-  local enabled ordered=() svc self_changed=0 replace=() old_images=()
+  local enabled ordered=() svc replace=()
   enabled="$(compose config --services 2>/dev/null | tr '\n' ' ')"
   [[ -n "${enabled// /}" ]] || { log "the compose file names no service"; return 2; }
   for svc in "${ORDER[@]}"; do [[ " $enabled " == *" $svc "* ]] && ordered+=("$svc"); done
@@ -107,10 +260,12 @@ rollout() { # → 0 changed something, 1 nothing to do, 2 docker unreachable
     local image wanted cid running wanted_cfg running_cfg task
     image="$(jq -r ".services[\"$svc\"].image" <<<"$config")"
     wanted="$(docker image inspect -f '{{.Id}}' "$image" 2>/dev/null || true)"
+    WANTED+="$svc $wanted"$'\n'
     cid="$(compose ps -q "$svc" 2>/dev/null | head -1)"
     if [[ -z "$cid" ]]; then
       log "$svc: not running; starting"
-      [[ "$svc" == "$ROLLOUT_SELF" ]] && self_changed=1 || replace+=("$svc"); continue
+      if [[ "$svc" == "$ROLLOUT_SELF" ]]; then SELF_CHANGED=1; else replace+=("$svc"); fi
+      continue
     fi
     running="$(docker inspect -f '{{.Image}}' "$cid")"
     # The image, and the service's configuration: an environment or a
@@ -121,17 +276,17 @@ rollout() { # → 0 changed something, 1 nothing to do, 2 docker unreachable
     # The task the container holds, from its own log: "task 42: felix for aarch64 (draft:…)" (a builder) or "… (attempt 1/3)" (pkg-repo).
     task="$(docker logs --tail 40 "$cid" 2>&1 | grep -oE '^(\[[0-9:]+\] )?task [0-9]+: [^(]*\(' | tail -1 | sed -E 's/^\[[0-9:]+\] //; s/ ?\($//' || true)"
     log "$svc: ${running:7:12} → ${wanted:7:12}$( [[ "$running_cfg" != "$wanted_cfg" && -n "$wanted_cfg" ]] && echo " (configuration changed)")${task:+ (draining: $task)}"
-    old_images+=("$running")
-    if [[ "$svc" == "$ROLLOUT_SELF" ]]; then self_changed=1; else replace+=("$svc"); fi
+    [[ "$running" != "$wanted" ]] && OLD_IMAGES+=("$running")
+    if [[ "$svc" == "$ROLLOUT_SELF" ]]; then SELF_CHANGED=1; else replace+=("$svc"); fi
   done
-  if (( ${#replace[@]} == 0 && self_changed == 0 )); then log "nothing to roll out: every service runs the latest image"; return 1; fi
+  if (( ${#replace[@]} == 0 && SELF_CHANGED == 0 )); then log "nothing to roll out: every service runs the latest image"; return 1; fi
   [[ "$check" == 1 ]] && return 0
   # The brokers first, and each answering on :8790, before the builders
   # and workers that call them (#273: agent-proxy replaced in the same `up`
   # as the Studio's review workers refused their only agent check). A
   # broker holds no task: its stop takes seconds.
   local brokers=() workers=() role
-  for svc in "${replace[@]}"; do
+  for svc in "${replace[@]+"${replace[@]}"}"; do
     role="$(jq -r ".services[\"$svc\"].environment.OMARCHY_WORKER_ROLE // \"\"" <<<"$config" 2>/dev/null || true)"
     if [[ "$svc" == agent-proxy || "$svc" == broker || "$svc" == broker-* || "$role" == broker || "$role" == agent ]]; then brokers+=("$svc"); else workers+=("$svc"); fi
   done
@@ -143,27 +298,216 @@ rollout() { # → 0 changed something, 1 nothing to do, 2 docker unreachable
   # Then the rest in one call: compose stops and recreates them together,
   # each draining under its own grace, none idling refused meanwhile.
   (( ${#workers[@]} == 0 )) || replace_now "${workers[@]}" || true
-  # Only what this run replaced goes; a contributor's other images are theirs.
-  local img; for img in "${old_images[@]}"; do docker image rm "$img" >/dev/null 2>&1 || true; done
-  if (( self_changed )); then
-    # Last: this container — through a one-off that outlives it. compose
-    # stops this one first when recreating it, and a client stopped
-    # mid-recreate leaves the new container created and never started.
-    log "$ROLLOUT_SELF: replacing itself through a one-off; the next container carries on"
-    compose run -d --rm --no-deps --entrypoint sh "$ROLLOUT_SELF" -c "sleep 2; env -i PATH=\"\$PATH\" HOME=/root DOCKER_HOST=\"\${DOCKER_HOST:-}\" docker compose --project-directory \"$COMPOSE_DIR\" up -d --no-deps --no-build $ROLLOUT_SELF" >/dev/null 2>&1 \
-      || log "$ROLLOUT_SELF: FAILED to start the one-off that replaces it — docker compose up -d $ROLLOUT_SELF"
-  fi
+  REPLACED=$(( ${#replace[@]} ))
   return 0
 }
 
-case "$mode" in
-  check) rollout 1 || [[ $? -eq 1 ]] ;;
-  once) rollout 0 || [[ $? -eq 1 ]] ;;
-  loop)
-    log "updater: every $ROLLOUT_EVERY s, the services of $COMPOSE_DIR follow the latest image"
-    while :; do
-      rollout 0 || true
-      sleep "$ROLLOUT_EVERY"
+# ----------------------------------------------------------------- guard --
+# Whether everything of the set on the image its service now names stays up, but its builders and the updater itself (see the top).
+# 0 it does; 1 it does not, with why in GUARD_WHY.
+GUARD_WHY=""
+is_builder() { # cid
+  [[ "$(env_of "$1" OMARCHY_WORKER_ROLE)" == community ]] || env_present "$1" OMARCHY_BROKER
+}
+guard() {
+  GUARD_WHY=""
+  if (( ${#FAILED[@]} )); then GUARD_WHY="${FAILED[*]} not replaced this round"; return 1; fi
+  local project cids cid svc image wanted watched=() line
+  project="$(project_name)"
+  cids="$(docker ps -aq --filter "label=com.docker.compose.project=${project:-none}" 2>/dev/null || true)"
+  for cid in $cids; do
+    line="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}} {{.Image}} {{index .Config.Labels "com.docker.compose.oneoff"}}' "$cid" 2>/dev/null || true)"
+    read -r svc image oneoff <<<"$line"
+    [[ -n "$svc" && "$oneoff" != True && "$svc" != "$ROLLOUT_SELF" ]] || continue
+    [[ -n "$SELF_ID" && "$cid" == "${SELF_ID:0:${#cid}}" ]] && continue
+    wanted="$(awk -v s="$svc" '$1 == s { print $2 }' <<<"$WANTED")"
+    [[ -n "$wanted" && "$image" == "$wanted" ]] || continue
+    is_builder "$cid" && continue
+    watched+=("$cid $svc")
+  done
+  (( ${#watched[@]} )) || return 0
+  # Each watched container's first sample: its RestartCount, whether it ran; then every ROLLOUT_GUARD_EVERY seconds, whether it restarts.
+  local first="" last="" streaks="" t=0 w c s status count code
+  for w in "${watched[@]}"; do
+    read -r c s <<<"$w"
+    read -r status count code <<<"$(docker inspect -f '{{.State.Status}} {{.RestartCount}} {{.State.ExitCode}}' "$c" 2>/dev/null || echo "gone 0 0")"
+    first+="$c $s $status $count"$'\n'; streaks+="$c 0"$'\n'
+  done
+  while (( t < ROLLOUT_GUARD_SECONDS )); do
+    sleep "$ROLLOUT_GUARD_EVERY"; t=$(( t + ROLLOUT_GUARD_EVERY ))
+    last=""
+    for w in "${watched[@]}"; do
+      read -r c s <<<"$w"
+      read -r status count code <<<"$(docker inspect -f '{{.State.Status}} {{.RestartCount}} {{.State.ExitCode}}' "$c" 2>/dev/null || echo "gone 0 0")"
+      last+="$c $s $status $count $code"$'\n'
+      local n; n="$(awk -v c="$c" '$1 == c { print $2 }' <<<"$streaks")"
+      if [[ "$status" == restarting ]]; then n=$(( n + 1 )); else n=0; fi
+      streaks="$(awk -v c="$c" -v n="$n" '$1 == c { $2 = n } { print }' <<<"$streaks")"
+      if (( n >= 2 )); then GUARD_WHY="$s restarting"; return 1; fi
     done
+  done
+  for w in "${watched[@]}"; do
+    read -r c s <<<"$w"
+    local was then; was="$(awk -v c="$c" '$1 == c { print $3, $4 }' <<<"$first")"; then="$(awk -v c="$c" '$1 == c { print $3, $4, $5 }' <<<"$last")"
+    read -r status0 count0 <<<"$was"; read -r status count code <<<"$then"
+    [[ "$count" =~ ^[0-9]+$ && "$count0" =~ ^[0-9]+$ ]] || continue
+    if (( count - count0 >= 2 )); then GUARD_WHY="$s restarted $(( count - count0 )) times in ${ROLLOUT_GUARD_SECONDS} s"; return 1; fi
+    if [[ "$status0" == running && ( "$status" == exited || "$status" == dead ) && "$code" != 0 ]]; then GUARD_WHY="$s exited with $code and stays down"; return 1; fi
+  done
+  return 0
+}
+# A command with a deadline, where the system has `timeout` (the image does).
+with_timeout() { if command -v timeout >/dev/null 2>&1; then timeout "$@"; else shift; "$@"; fi; }
+# The new image's updater works here: the updater service's own one-off (its socket, its directory, the image it now names) passes --self-test within 60 s.
+# An image from before #277 — no com.omarchy.updater.follows=1 label, the one a release's smoke start checks on every image since —
+# has no --self-test (it answers any flag it does not know with its usage): that is the pool's release after a rollback past #277,
+# adopted on the guard of the set's containers alone, as every updater before #277 adopted every image. It follows the pool at its
+# own fifteen-minute round from then on, until a release brings an updater that follows again.
+new_updater_works() {
+  local out img follows
+  img="$(awk -v s="$ROLLOUT_SELF" '$1 == s { print $2 }' <<<"$WANTED")"
+  if [[ -n "$img" ]] && follows="$(docker image inspect -f '{{index .Config.Labels "com.omarchy.updater.follows"}}' "$img" 2>/dev/null)" && [[ "$follows" != 1 ]]; then
+    log "$ROLLOUT_SELF: the image it now names (${img:7:12}) is from before #277 — no --self-test to run: adopted on the guard alone, and it follows the pool at its own ${ROLLOUT_EVERY}-s round"
+    return 0
+  fi
+  if out="$(with_timeout 60 env -i PATH="$PATH" HOME="${HOME:-/root}" DOCKER_HOST="${DOCKER_HOST:-}" DOCKER_CONFIG="${DOCKER_CONFIG:-}" docker compose --project-directory "$COMPOSE_DIR" run --rm --no-deps -T --entrypoint /usr/local/lib/omarchy-factory/bin/omarchy-rollout "$ROLLOUT_SELF" --self-test 2>&1)" && grep -q '^follows 1$' <<<"$out"; then
+    return 0
+  fi
+  GUARD_WHY="its updater fails its self-test: $(tail -n1 <<<"$out")"
+  return 1
+}
+
+# One round that may change something: the lock, the rollout, the guard, and what the guard gates — the old images' removal and the
+# updater's replacement of itself. 0 ran (whatever it found), 1 skipped (the lock is another round's), 2 the engine did not answer.
+round() { # by
+  lock_take "$1" || return 1
+  local rc=0; rollout 0 || rc=$?
+  if (( rc == 2 )); then lock_release; return 2; fi
+  if (( rc == 0 )); then
+    local mine="${OMARCHY_IMAGE:-its image}"
+    if guard && { (( SELF_CHANGED == 0 )) || new_updater_works; }; then
+      # Only what this round replaced goes, and only now: a guard that failed keeps them, so a rollback round needs no download.
+      local img; for img in "${OLD_IMAGES[@]+"${OLD_IMAGES[@]}"}"; do docker image rm "$img" >/dev/null 2>&1 || true; done
+      if (( SELF_CHANGED )); then
+        # Last: this container — through a one-off that outlives it. compose
+        # stops this one first when recreating it, and a client stopped
+        # mid-recreate leaves the new container created and never started.
+        # The lock goes first: the one-off ends this process.
+        lock_release
+        log "$ROLLOUT_SELF: replacing itself through a one-off; the next container carries on"
+        compose run -d --rm --no-deps --entrypoint sh "$ROLLOUT_SELF" -c "sleep 2; env -i PATH=\"\$PATH\" HOME=/root DOCKER_HOST=\"\${DOCKER_HOST:-}\" docker compose --project-directory \"$COMPOSE_DIR\" up -d --no-deps --no-build $ROLLOUT_SELF" >/dev/null 2>&1 \
+          || log "$ROLLOUT_SELF: FAILED to start the one-off that replaces it — docker compose up -d $ROLLOUT_SELF"
+        return 0
+      fi
+    else
+      log "the new image does not stay up here ($GUARD_WHY): staying on ${mine} and keeping the old images, so a rollback reaches this set; trying again at the next round"
+    fi
+  fi
+  lock_release
+  return 0
+}
+
+# ---------------------------------------------------------------- follow --
+# The workers of this set, by id: a project worker's from its own /run/omarchy/worker-id, a builder's from its broker — cached per
+# container id, read again for a container that is new. Nothing is read of a builder's container. Into IDS, comma-separated, sorted,
+# at most 16 (the pool's bound): the same set asks the same address, which the edge keeps for thirty seconds.
+ID_CACHE=""; IDS=""
+set_ids() {
+  local project cids cid svc role id next=""
+  project="$(project_name)"
+  cids="$(docker ps -q --filter "label=com.docker.compose.project=${project:-none}" 2>/dev/null || true)"
+  for cid in $cids; do
+    id="$(awk -v c="$cid" '$1 == c { print $2 }' <<<"$ID_CACHE")"
+    if [[ -z "$id" ]]; then
+      svc="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$cid" 2>/dev/null || true)"
+      role="$(env_of "$cid" OMARCHY_WORKER_ROLE)"
+      case "$role" in
+        broker) id="$(docker exec "$cid" curl -s --max-time 5 http://127.0.0.1:8790/pool/factory/workers/self 2>/dev/null | jq -r '.id // empty' 2>/dev/null || true)" ;;
+        pool|review) id="$(docker exec "$cid" cat /run/omarchy/worker-id 2>/dev/null || true)" ;;
+        "") [[ "$svc" == project ]] && id="$(docker exec "$cid" cat /run/omarchy/worker-id 2>/dev/null || true)" ;;
+      esac
+      [[ "$id" =~ ^[A-Za-z0-9_.-]{1,128}$ ]] || id=""
+    fi
+    [[ -n "$id" ]] && next+="$cid $id"$'\n'
+  done
+  ID_CACHE="$next"
+  IDS="$(awk '{ print $2 }' <<<"$ID_CACHE" | grep . | sort -u | head -16 | paste -sd, - || true)"
+}
+# The pool's answer, or nothing when it does not answer or says what cannot be read. Without ids, or when follow does not answer
+# (a Worker from before #277 knows no follow: 404), its /version, which every Worker has: the pool's release, and no Update — so a
+# rollback past #277 still reaches this set within one poll, not at its fifteen-minute round.
+answer_of() { # url → a body that names the pool's release, or nothing
+  local body; body="$(curl -fsS --max-time 10 "$1" 2>/dev/null || true)"
+  jq -e '(.latest // .version) | strings' >/dev/null 2>&1 <<<"$body" && printf '%s' "$body" || true
+}
+ask_pool() { # ids
+  local body=""
+  [[ -z "$1" ]] || body="$(answer_of "$OMARCHY_API/api/v1/factory/follow?ids=$1")"
+  [[ -n "$body" ]] || body="$(answer_of "$OMARCHY_API/api/v1/version")"
+  printf '%s' "$body"
+}
+
+KICK=0; SLEEPER=""
+follow_loop() {
+  local last_latest="" acted=() fresh=() last_round=-1 answer latest update why ids
+  trap 'KICK=1' USR1
+  log "updater: the services of $COMPOSE_DIR follow the pool's release (asked every $ROLLOUT_POLL s; a round every $ROLLOUT_EVERY s without an answer)"
+  while :; do
+    why=""
+    if (( KICK )); then KICK=0; why="woken (rollout.sh, omarchy-worker update)"; fi
+    set_ids; ids="$IDS"
+    answer="$(ask_pool "$ids")"
+    latest=""; update=""; fresh=()
+    if [[ -n "$answer" ]]; then
+      latest="$(jq -r '.latest // .version // empty' <<<"$answer")"
+      if [[ -z "$why" && "$latest" != "$last_latest" ]]; then why="the pool's release is $latest"; [[ -z "$last_latest" ]] || why+=" (was $last_latest)"; fi
+      # An Update for a worker of this set that no round has run for yet: the order ids it acted on are kept, the last 64.
+      for update in $(jq -r '.workers[]? | select(.update != null) | "\(.id)=\(.update)"' <<<"$answer" 2>/dev/null || true); do
+        [[ "${update#*=}" =~ ^wo_[0-9a-f]{32}$ ]] || continue
+        [[ " ${acted[*]-} " == *" ${update#*=} "* ]] && continue
+        [[ -z "$why" ]] && why="Update ${update#*=} for ${update%%=*}"
+        fresh+=("${update#*=}")
+      done
+    fi
+    if [[ -z "$why" ]] && (( last_round < 0 || SECONDS - last_round >= ROLLOUT_EVERY )); then why="every $ROLLOUT_EVERY s"; [[ -n "$answer" ]] || why+=": the pool did not answer follow"; fi
+    if [[ -n "$why" ]]; then
+      log "a round: $why"
+      # A round that ran is the one for this release and these Updates; one skipped (another round holds the lock) or one the engine
+      # did not answer leaves them for the next poll to decide again.
+      if round loop; then
+        last_round=$SECONDS
+        [[ -n "$latest" ]] && last_latest="$latest"
+        acted+=("${fresh[@]+"${fresh[@]}"}"); while (( ${#acted[@]} > 64 )); do acted=("${acted[@]:1}"); done
+      fi
+      (( KICK )) && continue
+    fi
+    sleep "$ROLLOUT_POLL" & SLEEPER=$!
+    wait "$SLEEPER" 2>/dev/null || true
+    kill "$SLEEPER" 2>/dev/null || true; SLEEPER=""
+  done
+}
+
+self_test() {
+  docker info >/dev/null 2>&1 || { echo "self-test: the runtime's socket does not answer: $(docker info 2>&1 | tail -n1)" >&2; exit 1; }
+  compose config -q >/dev/null 2>&1 || { echo "self-test: compose does not read the project in $COMPOSE_DIR: $(compose config -q 2>&1 | tail -n1)" >&2; exit 1; }
+  echo "self-test: the socket answers; compose reads $COMPOSE_DIR"
+  echo "follows 1"
+}
+
+case "$mode" in
+  self-test) self_test ;;
+  check) rollout 1 || [[ $? -eq 1 ]] ;;
+  once)
+    identify_self
+    trap 'lock_release' EXIT
+    trap 'exit 143' TERM INT
+    rc=0; round once || rc=$?
+    (( rc != 2 ))
+    ;;
+  loop)
+    identify_self
+    trap 'lock_release; [[ -z "$SLEEPER" ]] || kill "$SLEEPER" 2>/dev/null || true' EXIT
+    trap 'exit 143' TERM INT
+    follow_loop
     ;;
 esac

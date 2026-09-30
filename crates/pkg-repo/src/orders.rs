@@ -411,6 +411,42 @@ pub fn url_host(url: &str) -> Option<String> {
     (!host.is_empty()).then(|| host.to_owned())
 }
 
+// ---------- what rolls this set out (#277, part 3) ----------
+
+/// The marker a host's `rollout.sh` carries on its second line once it only
+/// wakes the set's updater (#277): the Studio's after its one-time step.
+pub const KICK_MARKER: &str = "# omarchy-rollout: kick-v1";
+
+/// A host's `rollout.sh`, by what it says: `kick-v1` (#277's wake-up, the
+/// marker on its second line), `old` (a script of its own — #278's or
+/// earlier, a host timer running its own rollout), `none` (no file this
+/// process can read: every contributor's set).
+pub fn host_script(text: Option<&str>) -> &'static str {
+    match text {
+        None => "none",
+        Some(t) if t.lines().nth(1).map(str::trim_end) == Some(KICK_MARKER) => "kick-v1",
+        Some(_) => "old",
+    }
+}
+
+/// What a claim says of the set's rollout: the updater service of its own
+/// compose project — the release its image says it is and whether that
+/// image follows the pool — and the host's `rollout.sh`. The pool derives
+/// one word from it (`set_rollout`); the worker says only what it saw.
+pub fn rollout_report(updater: Option<(Option<String>, bool)>, script: &str) -> Value {
+    serde_json::json!({
+        "updater": updater.map(|(image, follows)| serde_json::json!({ "image": image, "follows": follows })),
+        "host_script": script,
+    })
+}
+
+/// What a claim says when this process could not look: a bare binary has
+/// no set, and a container that could not verify which one it is cannot
+/// tell whose updater stands beside it.
+pub fn rollout_unknown(bare: bool) -> Value {
+    serde_json::json!({ "unknown": if bare { "bare" } else { "unidentified" } })
+}
+
 // ---------- the note a deliberate exit leaves ----------
 
 /// Whether this process runs in a container: docker's `/.dockerenv`, podman's `/run/.containerenv`.

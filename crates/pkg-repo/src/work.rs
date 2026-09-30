@@ -418,6 +418,54 @@ fn chrono_now() -> String {
 
 const AGENT_PROBE_EVERY: Duration = Duration::from_secs(30 * 60);
 
+/// The smoke start of this binary's worker (#277): the release starts every
+/// role of the image before any tag moves (`tests/image-smoke.sh`), and this
+/// is the project worker's. It reads the claim answers a pool may send — an
+/// order and no task, a task, a task whose rest it cannot read, an answer it
+/// cannot read at all — as the claim loop reads them, and says what it
+/// reports of its set; nothing reaches a pool, and nothing ends it but a
+/// reading that is wrong.
+///
+/// # Errors
+/// When one of those answers is not read as the loop needs it read.
+pub fn self_test() -> Result<()> {
+    let id = format!("wo_{}", "0".repeat(32));
+    let order = serde_json::json!({ "task": null, "orders": [{ "id": id, "kind": "recheck-agent", "reason": "self-test", "issued_by": "pool:project", "unless_agent_ok": false, "notice": false }] });
+    anyhow::ensure!(
+        matches!(orders::read_claim::<Task>(&order), orders::ClaimAnswer::Orders(o) if o.len() == 1 && o[0].id == id),
+        "an answer with an order and no task is not read as one"
+    );
+    let task = serde_json::json!({ "task": { "id": 812, "kind": "gc", "name": "gc", "arch": "x86_64", "trust": "project" }, "token": "omj.self-test", "future_field": true });
+    anyhow::ensure!(
+        matches!(orders::read_claim::<Task>(&task), orders::ClaimAnswer::Task(t, _) if t.id == 812),
+        "an answer with a task is not read as one"
+    );
+    let bad = serde_json::json!({ "task": { "id": 813, "kind": 42 }, "token": "omj.self-test" });
+    anyhow::ensure!(
+        matches!(
+            orders::read_claim::<Task>(&bad),
+            orders::ClaimAnswer::BadTask { id: 813, .. }
+        ),
+        "a task it cannot read is not one it reports failed"
+    );
+    anyhow::ensure!(
+        matches!(
+            orders::read_claim::<Task>(&serde_json::json!("x")),
+            orders::ClaimAnswer::Unreadable(_)
+        ),
+        "an answer it cannot read ends it"
+    );
+    let set = orders::rollout_report(
+        None,
+        orders::host_script(Some("#!/usr/bin/env bash\n# omarchy-rollout: kick-v1\n")),
+    );
+    println!(
+        "pkg-repo work --self-test: ok ({}) — an order, a task, a task it cannot read and an answer it cannot read are each read as the loop needs; its set reported as {set}",
+        pkg_manifest::BUILD_VERSION
+    );
+    Ok(())
+}
+
 /// # Panics
 /// When the heartbeat thread's mutex is poisoned, which needs a panic in that thread first.
 #[allow(clippy::too_many_lines)] // the claim loop, read top to bottom: each way a claim can end is a few lines of its own
@@ -774,9 +822,12 @@ struct Process {
     agent_via: &'static str,
     site: Option<String>,
     restarts_left: Option<i64>,
-    /// Its own container, verified: the runtime that runs it, its id, its compose project.
+    /// Its own container, verified: the runtime that runs it, its id, its compose project and that project's directory.
     runtime: Option<String>,
     project: Option<String>,
+    working_dir: Option<String>,
+    /// What rolls its set out (#277, part 3): its project's updater and the host's rollout.sh, or why it could not look.
+    rollout: serde_json::Value,
     /// The agent service it calls, a service of its own project (restart-agent).
     sibling: Option<String>,
     state_dir: PathBuf,
@@ -828,7 +879,7 @@ impl Process {
             say("cannot identify its own container (no verified self-inspect): no site, no restart of its agent service; restart only under OMARCHY_SUPERVISED=1");
         }
         let base_url = std::env::var("ANTHROPIC_BASE_URL").ok();
-        Self::found(
+        let mut me = Self::found(
             instance,
             own,
             base_url.as_deref(),
@@ -837,7 +888,12 @@ impl Process {
             state_dir,
             previous_exit,
             hands,
-        )
+        );
+        // A bare binary has no set to report; a container that could not verify itself says that instead (found's word).
+        if me.runtime.is_none() && !orders::in_container() {
+            me.rollout = orders::rollout_unknown(true);
+        }
+        me
     }
 
     /// The process as its own container says it is: what it declares, where its agent is, its site.
@@ -861,6 +917,17 @@ impl Process {
         let site = own
             .as_ref()
             .and_then(|o| engine_site(hands, &o.runtime, o.inspect.project.as_deref()));
+        let rollout = own.as_ref().map_or_else(
+            || orders::rollout_unknown(false),
+            |o| {
+                rollout_of(
+                    hands,
+                    &o.runtime,
+                    o.inspect.project.as_deref(),
+                    o.inspect.working_dir.as_deref(),
+                )
+            },
+        );
         let (takes, agent_via) = declared(has_agent, restart, sibling.is_some());
         Self {
             instance,
@@ -871,7 +938,9 @@ impl Process {
             site,
             restarts_left,
             runtime: own.as_ref().map(|o| o.runtime.clone()),
+            working_dir: own.as_ref().and_then(|o| o.inspect.working_dir.clone()),
             project: own.and_then(|o| o.inspect.project),
+            rollout,
             sibling,
             state_dir,
             previous_exit,
@@ -880,7 +949,8 @@ impl Process {
         }
     }
 
-    /// The site again every ten minutes, from two reads of the engine's id that agree — so it cannot flip between claims.
+    /// The site again every ten minutes, from two reads of the engine's id that agree — so it cannot flip between claims — and what
+    /// rolls its set out, which changes when its host does (the one-time step, an updater stopped or replaced).
     fn reread(&mut self, hands: &dyn Hands) {
         if self.reread_at.elapsed() < Duration::from_secs(600) {
             return;
@@ -888,6 +958,12 @@ impl Process {
         self.reread_at = Instant::now();
         if let Some(rt) = &self.runtime {
             self.site = engine_site(hands, rt, self.project.as_deref());
+            self.rollout = rollout_of(
+                hands,
+                rt,
+                self.project.as_deref(),
+                self.working_dir.as_deref(),
+            );
         }
     }
 
@@ -901,6 +977,7 @@ impl Process {
         if let Some(site) = &self.site {
             body["site"] = serde_json::json!(site);
         }
+        body["rollout"] = self.rollout.clone();
         if let Some(prev) = &self.previous_exit {
             body["previous_exit"] = prev.clone();
         }
@@ -1017,6 +1094,66 @@ fn engine_site(hands: &dyn Hands, runtime: &str, project: Option<&str>) -> Optio
 
 /// The template that reads one variable of a container, its role, and never the others (they hold its keys).
 const ROLE_TEMPLATE: &str = r#"{{range .Config.Env}}{{if eq (index (split . "=") 0) "OMARCHY_WORKER_ROLE"}}{{.}}{{end}}{{end}}"#;
+/// The same for the release an image says it is (`OMARCHY_IMAGE`), and nothing else of the container's environment.
+const IMAGE_TEMPLATE: &str =
+    r#"{{range .Config.Env}}{{if eq (index (split . "=") 0) "OMARCHY_IMAGE"}}{{.}}{{end}}{{end}}"#;
+/// Whether a container's image follows the pool (#277): its label, from the image.
+const FOLLOWS_TEMPLATE: &str = r#"{{index .Config.Labels "com.omarchy.updater.follows"}}"#;
+
+/// The updater of this compose project (#277, part 3): the running container whose role is `updater` — the release its image says it
+/// is, and whether that image follows the pool. Read with templates that print those two and the role, never the rest. Running
+/// means the engine's `running` status: a container in restart back-off stays listed by a bare `ps` (the engine keeps it
+/// `Running` while it waits to start it again) but its status is `restarting`, so an updater that keeps restarting is none, and
+/// the set is reported as rolled out by nothing (`stopped`), not as following the pool.
+fn updater_of(hands: &dyn Hands, runtime: &str, project: &str) -> Option<(Option<String>, bool)> {
+    let label = format!("label=com.docker.compose.project={project}");
+    let out = hands.engine(
+        runtime,
+        &["ps", "-q", "--filter", &label, "--filter", "status=running"],
+    )?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = |o: Option<std::process::Output>| {
+        o.filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+            .unwrap_or_default()
+    };
+    for cid in String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+    {
+        if text(hands.engine(runtime, &["inspect", "-f", ROLE_TEMPLATE, cid]))
+            != "OMARCHY_WORKER_ROLE=updater"
+        {
+            continue;
+        }
+        let image = text(hands.engine(runtime, &["inspect", "-f", IMAGE_TEMPLATE, cid]));
+        let image = image
+            .strip_prefix("OMARCHY_IMAGE=")
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned);
+        let follows = text(hands.engine(runtime, &["inspect", "-f", FOLLOWS_TEMPLATE, cid])) == "1";
+        return Some((image, follows));
+    }
+    None
+}
+
+/// What rolls this set out, as the claim reports it: its project's updater, and the host's `rollout.sh` by its marker line, read
+/// through this container's own mounts (the Studio's project workers mount the project's directory at the same path; a
+/// contributor's does not, and says `none`).
+fn rollout_of(
+    hands: &dyn Hands,
+    runtime: &str,
+    project: Option<&str>,
+    working_dir: Option<&str>,
+) -> serde_json::Value {
+    let updater = project.and_then(|p| updater_of(hands, runtime, p));
+    let script =
+        working_dir.and_then(|d| std::fs::read_to_string(Path::new(d).join("rollout.sh")).ok());
+    orders::rollout_report(updater, orders::host_script(script.as_deref()))
+}
 
 /// The container of the service `host` of this project, when there is exactly one and its role is `agent` or `broker` — read with a template that extracts that one variable, never the others (they hold its keys).
 fn sibling_of(hands: &dyn Hands, runtime: &str, project: &str, host: &str) -> Option<String> {
@@ -3658,9 +3795,9 @@ mod tests {
 #[cfg(test)]
 mod orders_tests {
     use super::{
-        declared, heartbeat_every, obey, report, run, sibling_of, verified, AgentCheck, AgentProbe,
-        Hands, Obeyed, Outcome, Process, SharedEngine, Task, WorkOptions, CLAIM_RETRY,
-        CLAIM_TIMEOUT, ROLE_TEMPLATE,
+        declared, heartbeat_every, obey, report, rollout_of, run, self_test, sibling_of, verified,
+        AgentCheck, AgentProbe, Hands, Obeyed, Outcome, Process, SharedEngine, Task, WorkOptions,
+        CLAIM_RETRY, CLAIM_TIMEOUT, FOLLOWS_TEMPLATE, IMAGE_TEMPLATE, ROLE_TEMPLATE,
     };
     use crate::client::Api;
     use crate::orders::{self, Order, Seen};
@@ -3769,6 +3906,8 @@ mod orders_tests {
             restarts_left: None,
             runtime: own.map(|o| o.0.to_owned()),
             project: own.map(|o| o.1.to_owned()),
+            working_dir: None,
+            rollout: orders::rollout_unknown(own.is_none()),
             sibling: own.map(|o| o.2.to_owned()),
             state_dir: state.to_path_buf(),
             previous_exit: None,
@@ -4039,6 +4178,154 @@ mod orders_tests {
             declared(false, true, true),
             (vec!["drain", "restart", "stop-task"], "none")
         );
+    }
+
+    /// An engine whose project `studio` runs `u1` with the given role, `OMARCHY_IMAGE` and follows label; any other project runs nothing.
+    /// A role of `restarting-updater` is an updater in restart back-off: listed by a bare `ps`, never by `status=running`.
+    fn engine_updater(role: &'static str, image: &'static str, follows: &'static str) -> Engine {
+        let role = role
+            .strip_prefix("restarting-")
+            .map_or((role, false), |r| (r, true));
+        Box::new(move |_, args| match args {
+            ["ps", "-q", "--filter", p, "--filter", "status=running"]
+                if *p == "label=com.docker.compose.project=studio" =>
+            {
+                out(0, if role.1 { "p1\n" } else { "p1\nu1\n" })
+            }
+            ["ps", "-q", "--filter", p] if *p == "label=com.docker.compose.project=studio" => {
+                out(0, "p1\nu1\n")
+            }
+            ["ps", "-q", "--filter", ..] => out(0, ""),
+            ["inspect", "-f", t, "p1"] if *t == ROLE_TEMPLATE => {
+                out(0, "OMARCHY_WORKER_ROLE=pool\n")
+            }
+            ["inspect", "-f", t, "u1"] if *t == ROLE_TEMPLATE => {
+                out(0, &format!("OMARCHY_WORKER_ROLE={}\n", role.0))
+            }
+            ["inspect", "-f", t, "u1"] if *t == IMAGE_TEMPLATE => {
+                out(0, &format!("OMARCHY_IMAGE={image}\n"))
+            }
+            ["inspect", "-f", t, "u1"] if *t == FOLLOWS_TEMPLATE => out(0, &format!("{follows}\n")),
+            _ => out(1, ""),
+        })
+    }
+
+    #[test]
+    fn the_rollout_report_names_its_projects_updater_and_the_hosts_script_by_its_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let wd = dir.path().to_str().unwrap();
+        let report = |role, image, follows, wd: Option<&str>| {
+            let hands = Fake::new(&[("ok", "")], engine_updater(role, image, follows));
+            let v = rollout_of(&hands, "docker", Some("studio"), wd);
+            // Only the role, the release and the label are read: never a container's whole environment, never an exec.
+            assert!(hands.ran.borrow().iter().all(|c| !c.contains("exec")
+                && !c.contains("json .Config.Env")
+                && !c.starts_with("docker inspect u1\n")));
+            v
+        };
+        // An updater from #277 on: its image follows.
+        assert_eq!(
+            report("updater", "v1.0.3", "1", None),
+            serde_json::json!({ "updater": { "image": "v1.0.3", "follows": true }, "host_script": "none" })
+        );
+        // One from before: no label.
+        assert_eq!(
+            report("updater", "v1.0.1", "<no value>", None),
+            serde_json::json!({ "updater": { "image": "v1.0.1", "follows": false }, "host_script": "none" })
+        );
+        // No updater in the project (the Studio before its one-time step): null.
+        assert_eq!(
+            report("pool", "v1.0.3", "1", None)["updater"],
+            serde_json::Value::Null
+        );
+        // An updater that keeps restarting (in the engine's back-off between two starts): none that runs — null, so the pool says
+        // `stopped`, never `follows`. And the running one is asked by the engine's status, not by a bare listing.
+        assert_eq!(
+            report("restarting-updater", "v1.0.3", "1", None)["updater"],
+            serde_json::Value::Null
+        );
+        let hands = Fake::new(&[("ok", "")], engine_updater("updater", "v1.0.3", "1"));
+        rollout_of(&hands, "docker", Some("studio"), None);
+        assert!(
+            hands.ran.borrow().iter().any(|c| c.contains(
+                "ps -q --filter label=com.docker.compose.project=studio --filter status=running"
+            )),
+            "{:?}",
+            hands.ran.borrow()
+        );
+        // Another project: nothing of this one is read.
+        let hands = Fake::new(&[("ok", "")], engine_updater("updater", "v1.0.3", "1"));
+        assert_eq!(
+            rollout_of(&hands, "docker", Some("someone-else"), None)["updater"],
+            serde_json::Value::Null
+        );
+        // The host's rollout.sh, through the worker's own mounts: the marker, #278's script, none.
+        assert_eq!(report("pool", "", "", Some(wd))["host_script"], "none");
+        std::fs::write(
+            dir.path().join("rollout.sh"),
+            "#!/usr/bin/env bash\n# omarchy-rollout: kick-v1\n# rollout.sh — wakes this host's updater\n",
+        )
+        .unwrap();
+        assert_eq!(report("pool", "", "", Some(wd))["host_script"], "kick-v1");
+        std::fs::write(
+            dir.path().join("rollout.sh"),
+            "#!/usr/bin/env bash\n# rollout.sh — a rolling upgrade of the host's workers\nset -euo pipefail\n",
+        )
+        .unwrap();
+        assert_eq!(report("pool", "", "", Some(wd))["host_script"], "old");
+        // The marker anywhere but on the second line is not the wake-up.
+        std::fs::write(
+            dir.path().join("rollout.sh"),
+            "#!/usr/bin/env bash\n\n# omarchy-rollout: kick-v1\n",
+        )
+        .unwrap();
+        assert_eq!(report("pool", "", "", Some(wd))["host_script"], "old");
+        // Unreadable: none.
+        let unreadable = dir.path().join("nested");
+        std::fs::create_dir(&unreadable).unwrap();
+        std::fs::create_dir(unreadable.join("rollout.sh")).unwrap();
+        assert_eq!(
+            report("pool", "", "", unreadable.to_str())["host_script"],
+            "none"
+        );
+        // Could not look: why.
+        assert_eq!(
+            orders::rollout_unknown(true),
+            serde_json::json!({ "unknown": "bare" })
+        );
+        assert_eq!(
+            orders::rollout_unknown(false),
+            serde_json::json!({ "unknown": "unidentified" })
+        );
+    }
+
+    #[test]
+    fn the_claim_says_what_rolls_its_set_out_and_a_container_it_cannot_verify_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let hands = Fake::new(&[("ok", "")], engine_updater("updater", "v1.0.3", "1"));
+        let me = Process::found(
+            "ab".repeat(16),
+            None,
+            None,
+            false,
+            false,
+            dir.path().into(),
+            None,
+            &hands,
+        );
+        let mut body = serde_json::json!({});
+        me.say_in(&mut body);
+        assert_eq!(
+            body["rollout"],
+            serde_json::json!({ "unknown": "unidentified" })
+        );
+        // Nothing of the engine is asked for a container that could not verify itself.
+        assert!(hands.ran.borrow().iter().all(|c| !c.contains(" ps ")));
+    }
+
+    #[test]
+    fn the_self_test_reads_every_claim_answer_a_pool_may_send_and_asks_no_pool() {
+        self_test().unwrap();
     }
 
     #[test]

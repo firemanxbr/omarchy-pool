@@ -96,9 +96,47 @@ jobs:
       - name: The restart policy a worker counts on, on a real engine (on-failure:N runs out)
         working-directory: .
         run: bash tests/restart-policy.sh
-      - name: The updater and the host's rollout, brokers first, against a stubbed docker
+      - name: The updater follows the pool — brokers first, its lock and its guard — against a stubbed docker and pool
         working-directory: .
         run: bash tests/omarchy-rollout.sh
+      - name: The Studio's host files — the updater in, the timer out, rollout.sh a wake-up — against stubs
+        working-directory: .
+        run: bash tests/host-setup.sh
+      - name: The rollback — images and Worker back to a tag — against stubbed buildx and wrangler
+        working-directory: .
+        run: bash tests/rollback-workflow.sh
+      - name: The release — no tag a host follows moves before both architectures started every role
+        working-directory: .
+        run: bash tests/release-workflow.sh
       - name: The one command to run a worker, against a stubbed docker and pool
         working-directory: .
         run: bash tests/omarchy-worker-cli.sh
+
+  worker-image:
+    name: Worker image (a local build — every role starts)
+    # What the release does before any tag moves (#277), on this commit's own
+    # binaries: packaged as the release packages them and served to the build
+    # from this runner (TOOLS_URL), then tests/image-smoke.sh starts every role.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Keep in sync with rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p pkg-extract -p pkg-repo -p omarchy-cli
+      - name: Build the image from them, and start every role
+        run: |
+          set -euo pipefail
+          release=v0.0.0-ci; name="omarchy-pool-$release-x86_64-linux"
+          mkdir -p "dist/$name"
+          cp target/release/pkg-extract target/release/pkg-repo target/release/omarchy-cli "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          (cd dist && exec python3 -m http.server 8765 --bind 127.0.0.1) >/dev/null 2>&1 &
+          server=$!
+          trap 'kill "$server" 2>/dev/null || true' EXIT
+          docker build --network host -f factory/image/Containerfile --build-arg ARCH=x86_64 --build-arg POOL_RELEASE="$release" \
+            --build-arg TOOLS_URL=http://127.0.0.1:8765 -t omarchy-worker:ci .
+          bash tests/image-smoke.sh omarchy-worker:ci

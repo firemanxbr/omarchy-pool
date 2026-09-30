@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Workers follow the brain for their health (#277, parts 1 and 2) — the E2E's
+# Workers follow the brain for their health (#277, parts 1, 2 and 3) — the E2E's
 # scenarios, sourced by tests/e2e-worker.sh against its local pool (wrangler
 # dev with WORKER_RULES_SCALE=60: the rules' step timings divided by 60,
 # honoured because POOL_VERSION is "dev"; nothing else is scaled — the caps,
@@ -45,6 +45,14 @@
 #       leased to it — no second runner — until its next heartbeat brings the
 #       stop: the child's process group killed, the created container removed,
 #       and its next claim gives the task back to the queue
+#   H   (part 3) Update through the set's updater: the real
+#       factory/bin/omarchy-rollout --loop, against a stubbed engine whose
+#       broker answers for the builder w5h, asks this pool's follow with that
+#       id, runs one round for the Update and no second one; the round's
+#       replacement of the builder claims on the pool's release, and the
+#       Update closes done. This local pool runs no release (dev), so the
+#       door refuses Update ("nothing to update to") and the order is
+#       written as a release's door writes it — its issue line included.
 #
 # Needs from the caller: ROOT, E2E, OMARCHY_API, PKG_REPO, WRANGLER_STATE, and
 # the maintainer's token omc_e2e. Needs libfaketime for B. A scenario that
@@ -77,7 +85,7 @@ w5_has() { (( $(w5_count "$1" "$2" "${3:-}") >= ${4:-1} )); }
 # worker reports it while its agent does not answer). One statement: the local database takes one writer beside wrangler dev.
 w5_seed_all() {
   local id values=()
-  for id in w5a w5a2 w5b w5c w5d w5e w5f; do
+  for id in w5a w5a2 w5b w5c w5d w5e w5f w5h; do
     values+=("('$id', '$W5_ARCH', 'e2e-w5', '$(printf %s "omw_e2e_$id" | sha256sum | cut -d' ' -f1)', 'dedicated', 'community', NULL, NULL, NULL, NULL, NULL, NULL, '2000-01-01T00:00:00Z', NULL)")
   done
   # G's worker is the project's: it runs pool jobs, the check that hangs among them.
@@ -333,6 +341,92 @@ SH
   echo "G: $id's hung check stopped at its heartbeat — its child killed, its container removed — back in the queue, and done"
 }
 
+# H (#277, part 3): an Update, carried out by the set's updater — the real omarchy-rollout --loop against this pool — and closed by the claim that follows.
+w5_closed() { w5_view "$1" | jq -e --arg o "$2" '[.orders[] | select(.id == $o and .state == "done" and .detail == "now runs dev")] | length == 1' >/dev/null; }
+w5_scenario_h() {
+  local id=w5h dir="$W5/w5h" order
+  mkdir -p "$dir/bin" "$dir/set" "$dir/run"
+  : > "$dir/set/compose.yml"
+  # The builder claims on an older release; on a pool that runs no release, the door has nothing to update it to.
+  local claim; claim="$(jq -cn --arg a "$W5_ARCH" '{arch:$a, version:"v0.9.0"}')"
+  [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/claim" -H "authorization: Bearer omw_e2e_$id" -H 'content-type: application/json' -d "$claim")" == 204 ]] || w5_fail $id "its first claim"
+  local door; door="$(curl -s -X POST "$OMARCHY_API/api/v1/factory/workers/$id/orders" -H 'authorization: Bearer omc_e2e' -H 'content-type: application/json' -d '{"kind":"update"}')"
+  [[ "$(jq -r .error <<<"$door")" == "the pool runs no release (dev): there is nothing to update to" ]] || w5_fail $id "the door on a pool that runs no release: $door"
+  # The set: a broker that answers for the builder, the builder, and the updater. The engine is a stub: it records, answers from its
+  # state, and its `up` of the builder is the new container's first claim, on the pool's release.
+  cat > "$dir/bin/docker" <<S
+#!/usr/bin/env bash
+LOG="$dir/docker.log"; STATE="$dir/state"; API="$OMARCHY_API"; ARCH="$W5_ARCH"
+S
+  cat >> "$dir/bin/docker" <<'S'
+echo "docker $*" >> "$LOG"
+img() { awk -v s="$1" '$1==s {print $2}' "$STATE"; }
+case "$1" in
+  info) exit 0 ;;
+  compose) shift; [[ "$1" == --project-directory ]] && shift 2
+    case "$1" in
+      config) case "${2:-}" in
+          --services) printf '%s\n' broker worker updater ;;
+          --format) echo '{"name":"e2e-h","services":{"broker":{"image":"img","environment":{"OMARCHY_WORKER_ROLE":"broker"}},"worker":{"image":"img","environment":{}},"updater":{"image":"img","environment":{"OMARCHY_WORKER_ROLE":"updater"}}}}' ;;
+          --hash) echo "$3 cfg" ;;
+        esac ;;
+      ps) echo "cid-$3" ;;
+      up) for a in "$@"; do [[ "$a" == worker ]] || continue
+            awk '$1=="worker" {$2="sha256:new"} {print}' "$STATE" > "$STATE.n" && mv "$STATE.n" "$STATE"
+            body="$(jq -cn --arg a "$ARCH" '{arch:$a, version:"dev"}')"
+            curl -s -o /dev/null -X POST "$API/api/v1/factory/claim" -H "authorization: Bearer omw_e2e_w5h" -H 'content-type: application/json' -d "$body"; done ;;
+      run) [[ " $* " == *" --self-test "* ]] && echo "follows 1" ;;
+    esac ;;
+  image) [[ "$2" == inspect ]] && { [[ "$4" == *com.omarchy.updater.follows* ]] && echo 1 || echo sha256:new; } ;;
+  ps) printf '%s\n' cid-broker cid-worker cid-updater ;;
+  # The lock: created by name once, its labels read back as the engine would.
+  create) [[ -f "$STATE.lock" ]] && exit 1; by=""; holder=""; started=""; until=""; nonce=""
+    while [[ $# -gt 0 ]]; do [[ "$1" == --label ]] && { k="${2%%=*}"; v="${2#*=}"; case "$k" in *.by) by="$v" ;; *.holder) holder="$v" ;; *.started) started="$v" ;; *.until) until="$v" ;; *.nonce) nonce="$v" ;; esac; shift; }; shift; done
+    printf '%s|%s|%s|%s|2026-01-01T00:00:00Z|%s\n' "$by" "$holder" "$started" "$until" "$nonce" > "$STATE.lock" ;;
+  rm) rm -f "$STATE.lock" ;;
+  inspect) c="${@: -1}"; s="${c#cid-}"
+    case "$3" in
+      *com.omarchy.lock.by*) [[ -f "$STATE.lock" ]] || exit 1; IFS='|' read -r by holder started until created nonce < "$STATE.lock"; echo "$by|$holder|$started|$until|$created|lock-$nonce" ;;
+      *com.omarchy.lock.nonce*) [[ -f "$STATE.lock" ]] || exit 1; IFS='|' read -r by holder started until created nonce < "$STATE.lock"; echo "$holder|$started|$nonce|lock-$nonce" ;;
+      "{{.Image}}") img "$s" ;;
+      *config-hash*) echo cfg ;;
+      *'service"}} {{.Image}}'*) echo "$s $(img "$s") False" ;;
+      *compose.service*) echo "$s" ;;
+      *OMARCHY_WORKER_ROLE*) case "$s" in broker) echo OMARCHY_WORKER_ROLE=broker ;; updater) echo OMARCHY_WORKER_ROLE=updater ;; esac ;;
+      *OMARCHY_BROKER*) [[ "$s" == worker ]] && echo set ;;
+      *) echo "running 0 0" ;;
+    esac ;;
+  exec) [[ "$2" == cid-broker && "$*" == *"/pool/factory/workers/self" ]] && echo '{"id":"w5h"}' ;;
+  logs) : ;;
+esac
+exit 0
+S
+  chmod +x "$dir/bin/docker"
+  printf '%s\n' "broker sha256:new" "worker sha256:new" "updater sha256:new" > "$dir/state"
+  PATH="$dir/bin:$PATH" OMARCHY_API="$OMARCHY_API" COMPOSE_DIR="$dir/set" OMARCHY_RUN_DIR="$dir/run" ROLLOUT_POLL=2 ROLLOUT_EVERY=3600 ROLLOUT_GUARD_SECONDS=0 \
+    "$ROOT/factory/bin/omarchy-rollout" --loop > "$dir/updater.log" 2>&1 &
+  echo $! > "$dir/updater.pid"
+  w5_until 30 "the updater's first round" grep -q "a round: the pool's release is dev" "$dir/updater.log" || w5_fail $id "no first round: $(cat "$dir/updater.log")"
+  grep -q "^docker exec cid-broker curl -s --max-time 5 http://127.0.0.1:8790/pool/factory/workers/self$" "$dir/docker.log" || w5_fail $id "the builder's id is asked of its broker"
+  grep -qE "^docker exec cid-worker" "$dir/docker.log" && w5_fail $id "nothing is read of a builder's container"
+  # The Update, as a release's door writes it (its issue line too), and a builder behind the release: the updater's next poll past
+  # the edge's thirty seconds sees it.
+  order="wo_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+  awk '$1=="worker" {$2="sha256:old"} {print}' "$dir/state" > "$dir/state.n" && mv "$dir/state.n" "$dir/state"
+  # One command, three statements: the local database takes one writer beside wrangler dev.
+  w5_d1 "INSERT INTO worker_orders (id, worker_id, kind, reason, issued_by, via, expires_at) VALUES ('$order', '$id', 'update', 'the E2E: as a release''s door issues it', 'e2e', 'token', strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+6 hours'));
+    UPDATE build_workers SET open_orders = json_array(json_object('id', '$order', 'kind', 'update', 'state', 'pending', 'by', 'e2e', 'at', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))) WHERE id = '$id';
+    INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('order', NULL, 'factory', 'ok', '$id: update ordered by e2e — the E2E', json_object('order', '$order', 'worker', '$id', 'kind', 'update', 'by', 'e2e', 'state', 'pending'))"
+  w5_until 90 "the updater's round for the Update" grep -q "a round: Update $order for $id" "$dir/updater.log" || w5_fail $id "no round for the Update: $(cat "$dir/updater.log")"
+  w5_until 30 "the Update closed by the builder's claim on the pool's release" w5_closed $id "$order" || w5_fail $id "the Update did not close"
+  # The edge keeps follow's answer thirty seconds: the updater sees the same Update again, and runs no second round for it.
+  sleep 35
+  [[ "$(grep -c "a round: " "$dir/updater.log")" == 2 ]] || w5_fail $id "one round for the release, one for the Update, and no other: $(grep 'a round' "$dir/updater.log")"
+  kill -TERM "$(cat "$dir/updater.pid")" 2>/dev/null || true
+  w5_revoke $id
+  echo "H: the set's updater asked follow for $id, ran one round for its Update, and the Update closed on its claim of the pool's release"
+}
+
 # Every scenario's worker, its supervisor and its stub agent stopped, whatever became of the scenario: a failed one returns before its
 # own w5_stop, and its loop would restart pkg-repo against a pool that is gone, its stub keeping its port for the next run.
 w5_cleanup() {
@@ -340,15 +434,18 @@ w5_cleanup() {
   # G's hung child, if the scenario failed before its stop killed it. Under the E2E's set -e, a kill that fails as the last command
   # of an && list ends the script: after a stop that worked, the child is gone and kill answers 1.
   if [[ -s "$W5/w5g/child" ]]; then kill "$(cat "$W5/w5g/child")" 2>/dev/null || true; fi
+  # H's updater is gone already when H passed: a kill that finds nothing is not a failure (under set -e, the last command of an &&
+  # list that fails ends the E2E, with nothing said).
+  if [[ -e "$W5/w5h/updater.pid" ]]; then kill -TERM "$(cat "$W5/w5h/updater.pid")" 2>/dev/null || true; fi
   return 0
 }
 
-# All eight side by side; each one's result, then the record: every order of theirs has one issue line and one final line.
+# All nine side by side; each one's result, then the record: every order of theirs has one issue line and one final line.
 w5_scenarios() {
   mkdir -p "$W5"
   w5_seed_all
   local s pids=() names=() failed=0
-  for s in a a2 b c d e f g; do
+  for s in a a2 b c d e f g h; do
     ( set -eo pipefail; "w5_scenario_$s" ) > "$W5/scenario-$s.out" 2>&1 &
     pids+=("$!"); names+=("$s")
   done

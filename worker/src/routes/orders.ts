@@ -8,6 +8,7 @@
  *   GET    /factory/workers/:id                the worker's view and its last orders, public — never the worker's own words
  *   GET    /factory/workers/:id/orders         the same list with the worker's words, for its owner and the maintainers
  *   GET    /factory/workers/:id/can            what this caller may press, with the reason where not
+ *   GET    /factory/follow?ids=a,b             the pool's release and the open Updates of those workers: what a set's updater polls (#277, part 3)
  *
  * One predicate (orderVerdicts) answers the door and /can: a grey button is
  * one the door refuses in the same words. A write with the session comes
@@ -17,18 +18,19 @@
  * refused before any of this runs (agents.ts agentTokenRefusal): no route
  * here is an agent's.
  */
-import { json, readJson, type Env } from "../index";
+import { edgeHit, edgeStore, json, readJson, type Env } from "../index";
 import { isMaintainer, viaOf, type Contributor } from "./contributors";
 import { aliveSince, workerView, type WorkerRow } from "./factory";
-import { version as running } from "../meta";
+import { machineOrigin, version as running } from "../meta";
 import {
   answerCode, breakerKey, breakerOf, breakerScope, capRefusal, cleanText, codeSentence, drainWords, isOrderKind, loginCapWords, issueOrder, openOrdersOf, orderFacts, orderVerdicts, providerOf, readSite, refreshOpen, rulesScale, siteWords, stopWay,
-  ORDER_KINDS, ORDER_RIGHTS, OUTCOMES, RIGHT_OF, SITE_WORKERS_SQL,
+  ORDER_KINDS, ORDER_RIGHTS, OUTCOMES, RIGHT_OF, SITE_WORKERS_SQL, FOLLOW_MAX_IDS, FOLLOW_POLL_S, TTL_UPDATE_MIN,
   ANSWER_WITHIN_MIN, GIVE_UP_AFTER_MIN, MAX_ORDERS_PER_LOGIN_HOUR, MAX_POOL_ORDERS_PER_DAY, MAX_POOL_RECHECKS_PER_DAY, MAX_POOL_RESTARTS_PER_DAY, MAX_POOL_RESTARTS_PER_SPELL, MAX_RECHECKS_PER_HOUR,
   MAX_RESTARTS_PER_HOUR, MIN_UPTIME_S, RECHECK_AFTER_MIN, RESTART_AFTER_MIN, RESTART_SPACING_MIN, TTL_PERSON_MIN,
   type HeldTask, type OrderKind, type OrderWorker, type Outcome,
 } from "../orders";
 import { WORKER_ALIVE_MINUTES } from "../meta";
+import { updateState } from "../update";
 import { FIRST_PICK_MINUTES } from "../queue";
 import { LEASE_MINUTES } from "../lease";
 
@@ -87,6 +89,15 @@ export function writeGate(request: Request, url: URL, withBody: boolean): Respon
 }
 
 const KIND_LABEL: Record<OrderKind, string> = { "recheck-agent": "Re-check agent", restart: "Restart", "restart-agent": "Restart agent service", drain: "Drain", resume: "Resume", "stop-task": "Stop its task", update: "Update" };
+
+/** When an Update is carried out, in the words the page and the door say it: by the set's updater, never the worker (§1.11.5). */
+function updateNote(w: { trust: string; current_task: number | null }): string {
+  const soon = `within ${FOLLOW_POLL_S / 60} min`;
+  const drain = w.current_task ? ` — task #${w.current_task} finishes first (up to 3 h)` : "";
+  return w.trust === "project"
+    ? `its set's updater replaces it ${soon}, with every service there that runs an older image${drain}`
+    : `its set's updater replaces it ${soon} (an updater from before #277 replaces it at its own 15-min round)${drain}; if nothing does, the order expires in ${TTL_UPDATE_MIN / 60} h`;
+}
 
 /**
  * When the order reaches the worker, in the words the page and the door say
@@ -182,7 +193,8 @@ export async function handleIssueOrder(c: Contributor, id: string, request: Requ
   const note = stop ? `${w.id} hears it at its next heartbeat: ${stopNote(stop)}. Nothing is cancelled.`
     : kind === "drain" ? `the pool hands it nothing from its next claim${w.current_task ? `; task #${w.current_task} runs to its end` : ""}. Builds asked for it by name go to the shared queue after ${FIRST_PICK_MINUTES} min. Resume ends it.`
       : kind === "resume" ? "it is handed work again from its next claim"
-        : deliveryNote(w);
+        : kind === "update" ? updateNote(w)
+          : deliveryNote(w);
   return json({
     // A stop's `until`, the latest its task goes back to the queue: the page words it on its reader's clock, as its dialog did.
     order: { id: issued.id, worker: w.id, kind, reason, issued_by: c.login, via, issued_at: issued.issued_at, expires_at: issued.expires_at, unless_agent_ok: unless, state: kind === "resume" ? "done" : "pending", ...(stop ? { task: stop.task, until: stop.until } : {}) },
@@ -347,14 +359,69 @@ export async function handleWorkerCan(c: Contributor | null, id: string, env: En
     const x = v[r];
     if (!x.ok) why[r] = x.why;
   }
-  let shared: string[] = [];
-  if (v.restart_agent.ok && w.site) {
+  // The site's live workers, read once and only for a caller who may press a button whose dialog names them: Restart agent service (the
+  // workers that call the same service) and Update (the project workers its set's updater replaces too, as the pool sees them on this
+  // host). The site itself is never served.
+  let shared: string[] = [], sameSet: string[] = [];
+  if ((v.restart_agent.ok || v.update.ok) && w.site) {
     const rows = (await env.DB.prepare(SITE_WORKERS_SQL).bind(w.site, new Date(now - WORKER_ALIVE_MINUTES * MIN).toISOString()).all<{ id: string; agent_via: string | null }>()).results;
-    shared = rows.filter((r) => r.id !== w.id && r.agent_via === "sibling").map((r) => r.id).sort();
+    if (v.restart_agent.ok) shared = rows.filter((r) => r.id !== w.id && r.agent_via === "sibling").map((r) => r.id).sort();
+    if (v.update.ok) sameSet = rows.filter((r) => r.id !== w.id).map((r) => r.id).sort();
   }
   const details = !!c && (isMaintainer(c) || (w.owner !== null && w.owner === c.login));
   // The task it holds, as Stop its task's dialog words it (§1.16): which, its attempt, the latest it goes back to the queue, and how it
   // stops (stopWay) — for anyone, like the listing's current_task; whether they may press it is `can.stop_task`.
   const stop = held && held.status === "leased" && held.lease_owner === w.id ? { ...stopFacts(w, held), stopping: !!held.stop_order, note: stopNote(stopFacts(w, held)) } : null;
-  return json({ id: w.id, can, why, details, shared_agent_with: shared, note: deliveryNote(w), stop }, 200, NO_STORE);
+  return json({ id: w.id, can, why, details, shared_agent_with: shared, update_with: sameSet, update_note: updateNote(w), note: deliveryNote(w), stop }, 200, NO_STORE);
+}
+
+/** The workers a follow names, by the primary key (EXPLAIN QUERY PLAN pins it): their release and their open orders' list, which names an open Update. Revoked ones are left out. */
+export const FOLLOW_SQL = "SELECT id, version, open_orders FROM build_workers WHERE revoked_at IS NULL AND id IN (SELECT value FROM json_each(?1))";
+/** A worker id as registrations make them (routes/contributors.ts): the updater keeps only what matches it. */
+const WORKER_ID = /^[A-Za-z0-9_.-]{1,128}$/;
+
+/** How long the edge keeps a follow answer: well under an updater's poll, so its own polls never meet their previous copy. */
+const FOLLOW_EDGE_S = 30;
+
+/**
+ * GET /factory/follow?ids=a,b — what a set's updater polls every two
+ * minutes (#277, part 3): the pool's release, and for each worker it names,
+ * its release, whether it is behind, and the id of an open Update. The
+ * updater runs its round when the release changes — a release, or a
+ * rollback — or when an Update it has not acted on appears; it holds no
+ * token and answers nothing: the order closes when the worker claims on
+ * the pool's release. Public, like /workers, which shows all of it: ids,
+ * versions and open orders. Nothing here says which workers share a host
+ * (there is no site parameter: the updater names its workers by id). One
+ * statement by the primary key, no write; kept at the edge thirty seconds
+ * per set and per release of the pool.
+ */
+export async function handleFollow(url: URL, env: Env): Promise<Response> {
+  const raw = url.searchParams.get("ids") ?? "";
+  const ids = [...new Set(raw.split(",").map((s) => s.trim()).filter(Boolean))];
+  if (!ids.length) return json({ error: "ids: the workers of this set, 1 to 16, comma-separated" }, 400);
+  if (ids.length > FOLLOW_MAX_IDS) return json({ error: `ids: at most ${FOLLOW_MAX_IDS} workers` }, 400);
+  const bad = ids.find((id) => !WORKER_ID.test(id));
+  if (bad !== undefined) return json({ error: "ids: a worker id is letters, digits, '.', '_' and '-'" }, 400);
+  const pool = running(env);
+  // The edge keeps an answer FOLLOW_EDGE_S, under the URL and the pool's release together: a deploy or a rollback moves the key, so
+  // no updater is ever served an answer from before it, whoever asked the same URL last — the release is seen at the first poll
+  // after it, within FOLLOW_POLL_S. (An updater's own polls, FOLLOW_POLL_S apart, never meet its previous copy either.)
+  const key = new Request(`${machineOrigin(url)}${url.pathname}${url.search}&release=${encodeURIComponent(`${pool.version}@${pool.deployed_at ?? ""}`)}`, { method: "GET" });
+  const hit = await edgeHit(key);
+  if (hit) return hit;
+  const rows = (await env.DB.prepare(FOLLOW_SQL).bind(JSON.stringify(ids)).all<{ id: string; version: string | null; open_orders: string | null }>()).results;
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const res = json({
+    latest: pool.version,
+    deployed_at: pool.deployed_at,
+    poll_s: FOLLOW_POLL_S,
+    workers: ids.filter((id) => byId.has(id)).map((id) => {
+      const r = byId.get(id)!;
+      return { id, version: r.version, outdated: updateState(r.version, pool).outdated, update: openOrdersOf(r.open_orders).find((o) => o.kind === "update")?.id ?? null };
+    }),
+  }, 200, { "cache-control": `public, max-age=${FOLLOW_EDGE_S}` });
+  await edgeStore(key, res.clone(), FOLLOW_EDGE_S);
+  res.headers.set("x-pool-cache", "miss");
+  return res;
 }

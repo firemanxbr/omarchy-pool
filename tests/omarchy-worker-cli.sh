@@ -3,9 +3,10 @@
 # stubbed docker and pool: `start --token` writes compose.yml and a .env of
 # mode 600 with the token, the directory's absolute path (the updater mounts
 # it at the same path), the socket and the profile; the options land in
-# .env; `share on|off` flips the switch and restarts the builder; a token
-# for the other architecture is refused; a machine without a runtime is
-# told so.
+# .env; `share on|off` flips the switch and restarts the builder; `update`
+# wakes the running updater (#277), or runs one round when none runs; a
+# token for the other architecture is refused; a machine without a runtime
+# is told so.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
@@ -24,7 +25,8 @@ case "$1 ${2:-}" in
   "context inspect") echo "unix://$HOME/.docker/run/docker.sock" ;;
   "compose pull") exit 0 ;;
   "compose up") exit 0 ;;
-  "compose ps") printf 'broker Up 1 second\nworker Up 1 second\nupdater Up 1 second\n' ;;
+  # ps -q --status running updater: the running updater's id, none when STUB_NO_UPDATER; the table otherwise.
+  "compose ps") if [[ " $* " == *" -q "* ]]; then [[ -n "${STUB_NO_UPDATER:-}" ]] || echo cid-updater; else printf 'broker Up 1 second\nworker Up 1 second\nupdater Up 1 second\n'; fi ;;
   "compose down"|"compose --profile"|"compose run") exit 0 ;;
   *) exit 0 ;;
 esac
@@ -98,10 +100,20 @@ grep -q "switching from project to community: the project set drains and stops f
 : > "$STUB_LOG"
 "$tmp/omarchy-worker" --dir "$tmp/proj" stop >/dev/null
 grep -q "docker compose --profile \* down" "$STUB_LOG" || { echo "stop downs every profile: $(cat "$STUB_LOG")"; exit 1; }
-# update runs one round of the updater, not its loop.
+# update wakes the updater that runs (#277): a kick, and no round of its own beside it — the updater's lock and guard are its.
 : > "$STUB_LOG"
-"$tmp/omarchy-worker" update >/dev/null
-grep -q "docker compose run --rm --no-deps updater --once" "$STUB_LOG" || { echo "update runs the updater once: $(cat "$STUB_LOG")"; exit 1; }
+out="$("$tmp/omarchy-worker" update)"
+grep -q "docker compose kill -s USR1 updater" "$STUB_LOG" || { echo "update wakes the running updater: $(cat "$STUB_LOG")"; exit 1; }
+grep -q "docker compose run" "$STUB_LOG" && { echo "no round of its own beside a running updater: $(cat "$STUB_LOG")"; exit 1; }
+grep -q "woke the updater" <<<"$out" || { echo "update says it woke it: $out"; exit 1; }
+# No updater runs: one round of the updater, not its loop.
+export STUB_NO_UPDATER=1
+: > "$STUB_LOG"
+out="$("$tmp/omarchy-worker" update)"
+grep -q "docker compose run --rm --no-deps updater --once" "$STUB_LOG" || { echo "update runs the updater once when none runs: $(cat "$STUB_LOG")"; exit 1; }
+grep -q "docker compose kill" "$STUB_LOG" && { echo "nothing to wake: $(cat "$STUB_LOG")"; exit 1; }
+grep -q "no updater runs here" <<<"$out" || { echo "and says so: $out"; exit 1; }
+unset STUB_NO_UPDATER
 
 # The other architecture's token: refused before anything starts.
 export STUB_ARCH=$([[ "$STUB_ARCH" == aarch64 ]] && echo x86_64 || echo aarch64)

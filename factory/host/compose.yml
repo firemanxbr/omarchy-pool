@@ -1,11 +1,19 @@
 # The project's own host — two workers of each role, one per architecture
 # (/docs/runbook, *The Studio host*; the roles: /docs/workers#roles).
 #
-#   docker compose up -d            start
-#   ./rollout.sh                    a rolling upgrade to the latest image: agent-proxy and the brokers
-#                                   first, each answering, then every worker that changed in one `up`
-#                                   (a systemd user timer runs it every 15 minutes: setup.sh)
+#   ./rollout.sh                    start what is not running and wake the updater: a rolling upgrade to
+#                                   the latest image now (--check: what it would do)
 #   docker compose logs -f review-aarch64            one worker's log
+#
+# The updater (#277) rolls this host out, as it does every contributor's set:
+# it asks the pool every two minutes and, when its release changes or an
+# Update is pressed on the page of a worker here, replaces what changed —
+# agent-proxy and the brokers first, each answering, then every worker that
+# changed in one `up`, itself last. No timer, no rollout code on the host.
+# After the one-time step (the runbook's *The Studio host*), no bare
+# `docker compose up -d`: it re-stamps every service's configuration hash
+# with the host's compose, and the updater's next round replaces every
+# service once more. `./rollout.sh`, or `up -d --no-deps <service>`.
 #
 # Everything lives under POOL_ROOT (.env, written by setup.sh): the work
 # directories (the same path on the host and inside a project worker, so the
@@ -28,7 +36,7 @@
 
 # A stop is a drain: the worker finishes the task it holds, claims no new
 # one and exits (SIGTERM); the grace period is what the longest build may
-# take — rollout.sh replaces the workers that changed together, each
+# take — the updater replaces the workers that changed together, each
 # draining inside its own.
 x-project: &project
   image: ghcr.io/firemanxbr/omarchy-worker:latest
@@ -228,6 +236,24 @@ services:
       - ${POOL_ROOT:-/srv/omarchy-pool}/cache/pacman/aarch64:/var/cache/pacman/pkg
       - ${POOL_ROOT:-/srv/omarchy-pool}/cache/build/community/aarch64:/build/cache
     networks: [community-aarch64]
+    logging: *logging
+
+  # The rollout (#277): the same service as in every contributor's set
+  # (factory/image/compose.yml), with the runtime's socket and this
+  # directory at the same path, read-only — compose.yml, .env and etc/ are
+  # what it recreates the services from. No token, no key. On the default
+  # network: a builder's network and the review network cannot reach it,
+  # and it serves nothing. factory/bin/omarchy-rollout in the image.
+  updater:
+    image: ghcr.io/firemanxbr/omarchy-worker:latest
+    restart: unless-stopped
+    environment:
+      OMARCHY_WORKER_ROLE: updater
+      COMPOSE_DIR: ${POOL_ROOT:-/srv/omarchy-pool}
+    security_opt: [label=disable]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${POOL_ROOT:-/srv/omarchy-pool}:${POOL_ROOT:-/srv/omarchy-pool}:ro
     logging: *logging
 
 # One network per pair, and one for the review side: a builder reaches its

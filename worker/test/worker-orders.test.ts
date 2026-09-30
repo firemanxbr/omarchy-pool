@@ -24,9 +24,9 @@ import { sha256Hex, workerOf } from "../src/routes/contributors";
 import {
   BREAKER_KEYS_SQL, CANCEL_LINES_SQL, CANCEL_ORDERS_SQL, CANCEL_ROWS_SQL, COMMUNITY_RESTARTS_SQL, COUNT_ISSUER_SQL, COUNT_WORKER_SQL, DUE_ORDERS_SQL, ISSUE_SQL, OPEN_ORDERS_SQL, OPEN_SPELLS_SQL,
   POOL_ORDERS_SQL, POOL_RESTARTS_SQL, REFRESH_OPEN_SQL, SITE_PACE_SQL, SITE_WORKERS_SQL,
-  MAX_POOL_ORDERS_PER_DAY, MAX_POOL_RESTARTS_PER_HOUR, sweepOrders,
+  MAX_POOL_ORDERS_PER_DAY, MAX_POOL_RESTARTS_PER_HOUR, UPDATE_EXPIRED, sweepOrders,
 } from "../src/orders";
-import { ORDER_BY_ID_SQL, ORDER_OF_WORKER_SQL, WORKER_ORDERS_SQL } from "../src/routes/orders";
+import { FOLLOW_SQL, ORDER_BY_ID_SQL, ORDER_OF_WORKER_SQL, WORKER_ORDERS_SQL } from "../src/routes/orders";
 import { DEAD_SPELLS_SQL, OLD_ORDER_KEYS_SQL, OLD_ORDERS_SQL } from "../src/routes/gc";
 
 const ORIGIN = "http://pool.test";
@@ -55,17 +55,17 @@ const cli = (login: string): Who => ({ token: `omc_${login}` });
 const hex = (n: number) => n.toString(16).padStart(32, "0");
 const ARCH: Record<string, string> = {};
 
-/** What a worker says with a claim: its process, the kinds of order it takes, its agent's last probe. */
-function claimOf(id: string, o: { instance?: number | null; orders?: string[] | null; status?: "ok" | "error" | null; error?: string; checked?: string; via?: string; site?: string | null; version?: string; previous_exit?: unknown; kinds?: string[]; agent?: string } = {}) {
+/** What a worker says with a claim: its process, the kinds of order it takes, its agent's last probe — and what rolls its set out (#277, part 3). */
+function claimOf(id: string, o: { instance?: number | null; orders?: string[] | null; status?: "ok" | "error" | null; error?: string; checked?: string; via?: string; site?: string | null; version?: string; previous_exit?: unknown; kinds?: string[]; agent?: string; rollout?: unknown } = {}) {
   return {
     arch: ARCH[id], hostname: "studio", version: o.version ?? "v1.0.2", kinds: o.kinds,
     agent: o.agent ?? "claude-code/claude-sonnet-5", agent_status: o.status === undefined ? "ok" : o.status, agent_error: o.error ?? "", agent_checked_at: o.checked ?? "2026-09-29T12:00:00Z",
     ...(o.orders === null ? {} : { orders: o.orders ?? ["drain", "recheck-agent", "restart", "restart-agent"] }),
     ...(o.instance === null ? {} : { instance: hex(o.instance ?? 1) }),
-    agent_via: o.via ?? "direct", ...(o.site ? { site: o.site } : {}), ...(o.previous_exit ? { previous_exit: o.previous_exit } : {}),
+    agent_via: o.via ?? "direct", ...(o.site ? { site: o.site } : {}), ...(o.previous_exit ? { previous_exit: o.previous_exit } : {}), ...(o.rollout !== undefined ? { rollout: o.rollout } : {}),
   };
 }
-const claim = (id: string, o: Parameters<typeof claimOf>[1] = {}, headers?: Record<string, string>) => call("POST", "/factory/claim", claimOf(id, o), { token: `omw_${id}`, headers });
+const claim = (id: string, o: Parameters<typeof claimOf>[1] = {}, headers?: Record<string, string>, on: Env = env) => call("POST", "/factory/claim", claimOf(id, o), { token: `omw_${id}`, headers }, on);
 const answer = (id: string, oid: string, body: unknown) => call("POST", `/factory/workers/self/orders/${oid}`, body, { token: `omw_${id}` });
 const issue = (id: string, body: unknown, who: Who) => call("POST", `/factory/workers/${id}/orders`, body, who);
 const rowOf = (id: string) => env.DB.prepare("SELECT * FROM build_workers WHERE id = ?").bind(id).first<any>();
@@ -127,12 +127,11 @@ describe("the doors: who gives a worker an order", () => {
     }
   });
 
-  it("refuses an unknown worker, a kind it does not know, Update (a later part), an image that takes no orders, and a reason that looks like a secret", async () => {
+  it("refuses an unknown worker, a kind it does not know, an Update on a pool that runs no release, an image that takes no orders, and a reason that looks like a secret", async () => {
     expect((await issue("nobody-here", { kind: "restart" }, cli("m1"))).status).toBe(404);
     expect((await issue("studio-pool-x86_64", { kind: "reboot" }, cli("m1"))).status).toBe(400);
-    const later = await issue("studio-pool-x86_64", { kind: "update" }, cli("m1"));
-    expect(later.status).toBe(409);
-    expect(later.json.error).toContain("not on this pool yet");
+    // Every kind is on this pool (#277, parts 1 to 3): a pool that runs no release has nothing to update to.
+    expect((await issue("studio-pool-x86_64", { kind: "update" }, cli("m1")))).toMatchObject({ status: 409, json: { error: "the pool runs no release (test): there is nothing to update to" } });
     // studio-pool-x86_64 has never claimed with orders: its image takes none.
     const old = await issue("studio-pool-x86_64", { kind: "restart" }, cli("m1"));
     expect(old).toMatchObject({ status: 409, json: { error: expect.stringContaining("takes no orders") } });
@@ -637,6 +636,8 @@ describe("what the planner reads", () => {
       ["an answer's order", ORDER_BY_ID_SQL, ["wo_x"], /sqlite_autoindex_worker_orders_1 \(id=\?\)/],
       ["a cancel's order", ORDER_OF_WORKER_SQL, ["wo_x", "w"], /sqlite_autoindex_worker_orders_1 \(id=\?\)/],
       ["a dead spell", DEAD_SPELLS_SQL, [now], /idx_build_workers_not_ready \(agent_error_since>\?\)/],
+      // An updater's poll (#277, part 3): the workers it names, by the primary key — never a scan, whatever the fleet.
+      ["an updater's follow", FOLLOW_SQL, ['["a","b"]'], /sqlite_autoindex_build_workers_1 \(id=\?\)/],
       ...OLD_ORDER_KEYS_SQL.map((sql, i): [string, string, unknown[], RegExp] => [`a once-per-window key (${i})`, sql, [now], /sqlite_autoindex_settings_1 \(key>\? AND key<\?\)/]),
       // Revoke (one worker) and block (an owner's): the workers' orders by their worker, the rows by their own index.
       ...([["revoke", "SELECT id FROM build_workers WHERE id = ? AND revoked_at = ?", ["w", now], /sqlite_autoindex_build_workers_1 \(id=\?\)/], ["block", "SELECT id FROM build_workers WHERE owner = ? AND revoked_at = ?", ["alice", now], /idx_build_workers_owner \(owner=\?\)/]] as const).flatMap(([what, which, binds, rows]): [string, string, unknown[], RegExp][] => [
@@ -656,5 +657,170 @@ describe("what the planner reads", () => {
     expect(issuePlan).not.toMatch(/SCAN worker_orders(?! USING)/);
     const refresh = await plan(REFRESH_OPEN_SQL, ["w"]);
     expect(refresh).toMatch(/uq_worker_orders_open_kind/);
+  });
+});
+
+describe("Update through the set's updater (#277, part 3)", () => {
+  // A pool at a release, deployed two hours ago: a worker one behind is past the grace, handed nothing (426), and Update is what brings it.
+  const REL = { ...env, POOL_VERSION: "v1.0.3", POOL_DEPLOYED_AT: new Date(Date.now() - 2 * 3600e3).toISOString() } as Env;
+  let n = 0;
+  /** The updater's poll, past the edge's thirty seconds (the key includes the query). */
+  const follow = (q: string, on: Env = REL) => call("GET", `/factory/follow?${q}${q ? "&" : ""}n=${++n}`, undefined, {}, on);
+  const up = (id: string, body: unknown, who: Who) => call("POST", `/factory/workers/${id}/orders`, body, who, REL);
+  const can = (id: string, who: Who) => call("GET", `/factory/workers/${id}/can`, undefined, who, REL);
+  const report = (updater: { image: string | null; follows: boolean } | null, host_script: "kick-v1" | "old" | "none") => ({ updater, host_script });
+  const FOLLOWS = report({ image: "v1.0.2", follows: true }, "none");
+
+  it("on an outdated builder: its owner and a maintainer may; follow lists it; no claim answer carries it; a claim on the pool's release closes it done, with one final line", async () => {
+    const id = "upd-builder-aarch64-9a1b";
+    await seedWorker(id, "aarch64", "alice", "community");
+    // A builder from before orders: its image takes none — Update is its set's updater's, never the worker's.
+    const old = await claim(id, { instance: null, orders: null, version: "v1.0.2", via: "broker" }, undefined, REL);
+    expect(old.status).toBe(426);
+    expect((await up(id, { kind: "update" }, page("bob"))).status).toBe(403);
+    const mine = await up(id, { kind: "update", reason: "ten releases behind" }, page("alice"));
+    expect(mine.status).toBe(201);
+    expect(mine.json.order).toMatchObject({ kind: "update", state: "pending", issued_by: "alice" });
+    expect(mine.json.note).toContain("its set's updater replaces it within 2 min");
+    expect((await up(id, { kind: "update" }, cli("m2")))).toMatchObject({ status: 409, json: { error: expect.stringContaining("update is waiting already") } });
+    const o = mine.json.order;
+    expect(Date.parse((await orderOf(o.id)).expires_at) - Date.parse(o.issued_at)).toBe(360 * MIN);
+    // The updater's poll names it; the public view marks it; a site parameter changes nothing.
+    const f = await follow(`ids=${id}`);
+    expect(f).toMatchObject({ status: 200, json: { latest: "v1.0.3", deployed_at: REL.POOL_DEPLOYED_AT, poll_s: 120, workers: [{ id, version: "v1.0.2", outdated: true, update: o.id }] } });
+    expect((await follow(`ids=${id}&site=5d0e4b1a9c7f2e36`)).json.workers).toEqual(f.json.workers);
+    // The worker's claims never carry it: still behind, a 426 with no orders.
+    const again = await claim(id, { instance: 7001, orders: ["drain", "restart"], version: "v1.0.2", via: "broker" }, undefined, REL);
+    expect(again.status).toBe(426);
+    expect(again.json.orders).toBeUndefined();
+    expect((await orderOf(o.id)).state).toBe("pending");
+    // The updater replaced it: its next process claims on the release, and the order is done by observation.
+    const now = await claim(id, { instance: 7002, orders: ["drain", "restart"], version: "v1.0.3", via: "broker" }, undefined, REL);
+    expect(now.status).toBe(204);
+    expect(await orderOf(o.id)).toMatchObject({ state: "done", answered_by: "pool", detail: "now runs v1.0.3" });
+    expect((await linesOf(o.id)).map((l) => JSON.parse(l.payload).state)).toEqual(["pending", "done"]);
+    expect((await follow(`ids=${id}`)).json.workers).toEqual([{ id, version: "v1.0.3", outdated: false, update: null }]);
+    // On the release now: Update is refused, and says why.
+    expect((await up(id, { kind: "update" }, page("alice")))).toMatchObject({ status: 409, json: { error: "runs v1.0.3, the latest — its updater follows each release within 2 min" } });
+  });
+
+  it("on a project worker, only where an updater from #277 on rolls its set out — every other set refused with its reason; the report written only when it changes", async () => {
+    const cases: [string, unknown, string][] = [
+      ["timer", report(null, "old"), "the runbook's The Studio host has the one-time step"],
+      ["both", report({ image: "v1.0.2", follows: true }, "old"), "two rollouts run on this host"],
+      ["old-updater", report({ image: "v1.0.1", follows: false }, "none"), "its updater (v1.0.1) is older than #277"],
+      ["stopped", report(null, "kick-v1"), "releases do not reach it. Its ./rollout.sh starts it again"],
+      ["none", report(null, "none"), "omarchy-worker start adds one"],
+      ["bare", { unknown: "bare" }, "started without compose: nothing replaces it"],
+      ["unidentified", { unknown: "unidentified" }, "it cannot identify its own container"],
+      ["unreported", undefined, "its image (v1.0.2) does not report its set"],
+    ];
+    for (const [word, rollout, why] of cases) {
+      const id = `upd-p-${word}`;
+      await seedWorker(id, "aarch64", "m1", "project");
+      expect((await claim(id, { instance: 7100, version: "v1.0.2", rollout }, undefined, REL)).status).toBe(426);
+      const r = await up(id, { kind: "update" }, cli("m2"));
+      expect(r.status, word).toBe(409);
+      expect(r.json.error, word).toContain(why);
+      expect((await can(id, page("m2"))).json.why.update, word).toBe(r.json.error);
+      expect((await call("GET", `/factory/workers/${id}`, undefined, {}, REL)).json.worker.set_rollout, word).toBe(word === "bare" || word === "unidentified" || word === "unreported" ? "unknown" : word);
+    }
+    const id = "upd-p-follows";
+    await seedWorker(id, "aarch64", "m1", "project");
+    await claim(id, { instance: 7200, version: "v1.0.2", rollout: FOLLOWS }, undefined, REL);
+    const row = await rowOf(id);
+    expect(row.rollout).toBe(JSON.stringify(FOLLOWS));
+    // The same report in another key order, within the liveness write's minutes: nothing written. Another report: written.
+    await claim(id, { instance: 7200, version: "v1.0.2", rollout: { host_script: "none", updater: { follows: true, image: "v1.0.2" } } }, undefined, REL);
+    expect((await rowOf(id)).last_seen).toBe(row.last_seen);
+    await claim(id, { instance: 7200, version: "v1.0.2", rollout: report({ image: "v1.0.3", follows: true }, "kick-v1") }, undefined, REL);
+    expect((await rowOf(id)).rollout).toBe(JSON.stringify(report({ image: "v1.0.3", follows: true }, "kick-v1")));
+    expect((await call("GET", `/factory/workers/${id}`, undefined, {}, REL)).json.worker).toMatchObject({ set_rollout: "follows", set_line: "rolled out by its updater (v1.0.3) — follows each release within 2 min" });
+    expect((await call("GET", `/factory/workers/${id}`, undefined, {}, REL)).json.worker.rollout).toBeUndefined();
+    const ok = await up(id, { kind: "update" }, cli("m2"));
+    expect(ok.status).toBe(201);
+    expect(ok.json.note).toContain("with every service there that runs an older image");
+    expect((await follow(`ids=${id},upd-p-timer`)).json.workers.map((w: any) => [w.id, w.update])).toEqual([[id, ok.json.order.id], ["upd-p-timer", null]]);
+    // Two processes on one token (a copied token on another host) report two sets: the row keeps the one it had, and no claim flips it.
+    const two = "upd-p-two";
+    await seedWorker(two, "aarch64", "m1", "project");
+    const here = report({ image: "v1.0.2", follows: true }, "none"), there = report(null, "old");
+    await claim(two, { instance: 7500, version: "v1.0.2", rollout: here }, undefined, REL);
+    await claim(two, { instance: 7501, version: "v1.0.2", rollout: here }, undefined, REL);
+    await claim(two, { instance: 7500, version: "v1.0.2", rollout: there }, undefined, REL);
+    expect((await rowOf(two)).instance_conflict_at).not.toBeNull();
+    for (let i = 0; i < 4; i++) await claim(two, { instance: i % 2 ? 7501 : 7500, version: "v1.0.2", rollout: i % 2 ? here : there }, undefined, REL);
+    expect((await rowOf(two)).rollout).toBe(JSON.stringify(here));
+  });
+
+  it("an Update nothing carries out expires after six hours, with the words of why and one final line", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const id = "upd-builder-lonely-5c6d";
+    await seedWorker(id, "aarch64", "alice", "community");
+    await claim(id, { instance: 7300, version: "v1.0.1", via: "broker" }, undefined, REL);
+    const o = (await up(id, { kind: "update" }, cli("alice"))).json.order;
+    await sweepOrders(REL, Date.now() + 5 * 60 * MIN);
+    expect((await orderOf(o.id)).state).toBe("pending");
+    await sweepOrders(REL, Date.now() + 6 * 60 * MIN + 1000);
+    expect(await orderOf(o.id)).toMatchObject({ state: "expired", detail: UPDATE_EXPIRED });
+    const lines = await linesOf(o.id);
+    expect(lines.map((l) => JSON.parse(l.payload).state)).toEqual(["pending", "expired"]);
+    expect(lines[1].status).toBe("warn");
+  });
+
+  it("names in the dialog the project workers of its host the updater replaces too, from the site's read — the default Studio's four, the emulated profile's six, a builder alone — and never to a stranger", async () => {
+    const SITE2 = "a1b2c3d4e5f60718", SITE3 = "0f1e2d3c4b5a6978";
+    const def = ["set-pool-x86_64", "set-pool-aarch64", "set-review-aarch64", "set-review2-aarch64"];
+    const emu = ["emu-pool-x86_64", "emu-pool-aarch64", "emu-review-x86_64", "emu-review-aarch64", "emu-review2-x86_64", "emu-review2-aarch64"];
+    for (const [ids, site] of [[def, SITE2], [emu, SITE3]] as const) {
+      for (const [i, id] of ids.entries()) {
+        await seedWorker(id, id.endsWith("x86_64") ? "x86_64" : "aarch64", "m1", "project");
+        await claim(id, { instance: 7400 + i, version: "v1.0.2", site, rollout: FOLLOWS }, undefined, REL);
+      }
+    }
+    const named = async (id: string, who: Who) => { const c = (await can(id, who)).json; return [id, ...c.update_with].sort(); };
+    expect(await named("set-review-aarch64", page("m1"))).toEqual([...def].sort());
+    expect(await named("emu-review2-x86_64", page("m2"))).toEqual([...emu].sort());
+    const b = (await can("upd-builder-lonely-5c6d", page("alice"))).json;
+    expect(b.update_with).toEqual([]);
+    expect(b.update_note).toContain("an updater from before #277 replaces it at its own 15-min round");
+    const stranger = (await can("set-review-aarch64", page("bob"))).json;
+    expect(stranger.can.update).toBe(false);
+    expect(stranger.update_with).toEqual([]);
+  });
+
+  it("follow: 1 to 16 well-formed ids, unknown and revoked ones left out, the pool's release as /version says it", async () => {
+    expect((await follow("")).status).toBe(400);
+    expect((await follow("ids=")).status).toBe(400);
+    expect((await follow(`ids=${Array.from({ length: 17 }, (_, i) => `w${i}`).join(",")}`)).status).toBe(400);
+    expect((await follow(`ids=${Array.from({ length: 16 }, (_, i) => `w${i}`).join(",")}`)).status).toBe(200);
+    for (const bad of ["a%20b", "..%2Fx", "a;b", "%3Cscript%3E"]) expect((await follow(`ids=${bad}`)).status, bad).toBe(400);
+    await seedWorker("upd-revoked-1", "aarch64", "alice", "community", { revoked_at: new Date().toISOString(), version: "v1.0.2" });
+    expect((await follow("ids=upd-revoked-1,nobody-here,upd-p-follows")).json.workers.map((w: any) => w.id)).toEqual(["upd-p-follows"]);
+    const version = await call("GET", "/version", undefined, {}, REL);
+    const f = await follow("ids=upd-p-follows");
+    expect(f.json.latest).toBe(version.json.version);
+    expect(f.json.deployed_at).toBe(version.json.deployed_at);
+    // What the answer is made of: nothing the listing does not show already — no site, no process, no order but its id.
+    expect(Object.keys(f.json.workers[0]).sort()).toEqual(["id", "outdated", "update", "version"]);
+  });
+
+  it("follow: the edge keeps an answer thirty seconds per release — a deploy or a rollback is never served an answer from before it", async () => {
+    const get = async (on: Env) => {
+      const ctx = createExecutionContext();
+      const res = await worker.fetch(new Request(`${API}/factory/follow?ids=upd-p-follows&n=edge-release`), on, ctx);
+      await waitOnExecutionContext(ctx);
+      return { edge: res.headers.get("x-pool-cache"), cache: res.headers.get("cache-control"), latest: ((await res.json()) as any).latest };
+    };
+    const first = await get(REL);
+    expect(first).toMatchObject({ edge: "miss", latest: "v1.0.3" });
+    expect(first.cache).toBe("public, max-age=30");
+    expect(await get(REL)).toMatchObject({ edge: "hit", latest: "v1.0.3" });
+    // The pool moves on (a release) and back (a rollback), inside the thirty seconds: the same URL is read again each time.
+    const next = { ...env, POOL_VERSION: "v1.0.4", POOL_DEPLOYED_AT: new Date().toISOString() } as Env;
+    expect(await get(next)).toMatchObject({ edge: "miss", latest: "v1.0.4" });
+    const back = { ...env, POOL_VERSION: "v1.0.3", POOL_DEPLOYED_AT: new Date(Date.now() + 1000).toISOString() } as Env;
+    expect(await get(back)).toMatchObject({ edge: "miss", latest: "v1.0.3" });
+    expect(await get(back)).toMatchObject({ edge: "hit", latest: "v1.0.3" });
   });
 });
