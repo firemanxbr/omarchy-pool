@@ -325,7 +325,8 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
       return Response.redirect(url.toString(), 301);
     }
     if (path === "/status") return html(statusHtml(env.POOL_URL, version(env)));
-    if (path === "/workers") return html(workersHtml(env.POOL_URL, version(env)));
+    // The Workers list and a worker's page name each worker's owner and its host's label: not for an index (#299, pages/robots.ts), said on the page too.
+    if (path === "/workers") return html(workersHtml(env.POOL_URL, version(env)), NOINDEX);
     if (path === "/diff") return html(diffHtml(env.POOL_URL, version(env)));
     if (path === "/api" || path === "/api/") return html(apiDocsHtml(env.POOL_URL, version(env)));
     if (path === "/packages") {
@@ -348,7 +349,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     if (/^\/build\/\d+$/.test(path)) return html(buildHtml(Number(path.slice("/build/".length)), env.POOL_URL, version(env)));
     // A worker's page (#277): the same shell for every id; its script reads the worker and what the viewer may press.
     const wk = path.match(/^\/worker\/([A-Za-z0-9_.-]{1,120})$/);
-    if (wk) return html(workerHtml(wk[1], env.POOL_URL, version(env)));
+    if (wk) return html(workerHtml(wk[1], env.POOL_URL, version(env)), NOINDEX);
     // What a crawler may read (pages/robots.ts): the rules for the name asked on, and the pages worth an index under the dashboard's name on production.
     if (path === "/robots.txt") return new Response(robotsTxt(url.hostname), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=86400" } });
     if (path === "/sitemap.xml") return new Response(sitemapXml(isProductionHost(url.hostname) ? `https://${DASHBOARD_HOST}` : url.origin), { headers: { "content-type": "application/xml; charset=utf-8", "cache-control": "public, max-age=86400" } });
@@ -359,7 +360,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     if (asset) return asset;
     // Nothing here (#300): an address under /api/ is a machine's and keeps the JSON; any other is a person's, who gets the page, in the site's frame.
     if (path.startsWith("/api/")) return json({ error: "not found" }, 404);
-    return html(notFoundHtml(path, env.POOL_URL, version(env)), 404);
+    return html(notFoundHtml(path, env.POOL_URL, version(env)), undefined, 404);
   } catch (err) {
     console.error(err);
     return json({ error: "internal error", detail: String(err) }, 500);
@@ -564,12 +565,15 @@ export async function edgeStore(key: Request, res: Response, maxAge: number): Pr
   await caches.default.put(key, stored);
 }
 
-function html(body: string, status = 200): Response {
+function html(body: string, extra?: Record<string, string>, status = 200): Response {
   return new Response(body, {
     status,
-    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=60" },
+    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=60", ...extra },
   });
 }
+
+/** A page that is not for an index (pages/robots.ts): robots.txt asks, the header says it to a crawler that reads the page anyway. */
+const NOINDEX = { "x-robots-tag": "noindex" };
 
 function cors(): HeadersInit {
   return {

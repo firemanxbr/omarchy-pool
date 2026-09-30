@@ -537,9 +537,9 @@ What `setup.sh` does, in order, and what a failure leaves:
    removes the updater, puts the old files back, enables the timer again
    and exits 5. The host rolls out through its timer as before. Read
    `docker compose logs updater` from the output, fix the cause, paste
-   again. The updater's first round starts at once: if it was replacing a
-   worker when it was stopped, that worker can stay stopped until the
-   timer's next rollout starts it, within 15 minutes.
+   again. The updater's first round starts at once: if it was draining a
+   worker when it was stopped, that worker finishes its drain (up to 3 h),
+   and the timer's next rollout then starts it: up to about 3 h 20 min.
 5. **Only then does it disable the timer and remove its units**, and say
    it is retired.
 
@@ -581,39 +581,55 @@ order but Update works. The pool knows whether it was done, because the
 workers report it with their claims.
 
 To undo it (an updater that misbehaves here), use the copies `setup.sh`
-kept. Stop the updater first: compose leaves a running one alone once
-`compose.yml` no longer names it, and it would go on rolling the host out
-beside the timer.
+kept. The updater is stopped first, by its compose labels, before anything
+is copied: compose leaves a running one alone once `compose.yml` no longer
+names it, and it would go on rolling the host out beside the timer. A
+worker the updater was draining finishes its drain (up to 3 h), and the
+timer's next rollout then starts it: up to about 3 h 20 min.
 
 ```bash
 (
   set -euo pipefail
   cd /srv/omarchy-pool
-  # The newest backup with the timer's units whose compose.yml has no updater: a step that was killed and pasted again
-  # wrote a newer one, holding the new files.
+  # The newest backup with the timer's units whose compose.yml and rollout.sh are there and are not the updater's: a step
+  # that was killed and pasted again wrote a newer one, holding the new files.
   b=""
   for d in $(ls -d setup-backup-*/systemd-user | sort -r); do
     d="$(dirname "$d")"
-    if ! grep -q '^  updater:' "$d/compose.yml"; then b="$d"; break; fi
+    if [ -s "$d/compose.yml" ] && [ -s "$d/rollout.sh" ] && ! grep -q '^  updater:' "$d/compose.yml" && ! grep -qx '# omarchy-rollout: kick-v1' "$d/rollout.sh"; then b="$d"; break; fi
   done
   test -n "$b"
-  docker compose stop updater && docker compose rm -f updater
+  # The updater, by its labels: whichever compose.yml is in place, and while compose cannot load the project. None may still run.
+  ids="$(docker ps -q --filter label=com.docker.compose.project=omarchy-pool --filter label=com.docker.compose.service=updater)"
+  if [ -n "$ids" ]; then docker stop $ids; docker rm $ids || true; fi
+  ids="$(docker ps -q --filter label=com.docker.compose.project=omarchy-pool --filter label=com.docker.compose.service=updater)"
+  test -z "$ids"
   cp -p "$b/compose.yml" "$b/rollout.sh" .
   if [ -f "$b/register.sh" ]; then cp -p "$b/register.sh" .; fi
-  # The env files the step wrote that still hold no token go: the old compose.yml starts no pair nobody registered.
+  # The env files the step wrote that are still its untouched placeholder go: the old compose.yml starts no pair nobody registered.
   if [ -f "$b/created-env-files" ]; then
-    while read -r f; do grep -q '^OMARCHY_WORKER_TOKEN=omw_' "$f" || rm -f "$f"; done < "$b/created-env-files"
+    while read -r f; do if grep -qx 'OMARCHY_WORKER_TOKEN=' "$f"; then rm -f "$f"; fi; done < "$b/created-env-files"
   fi
   mkdir -p ~/.config/systemd/user && cp -p "$b"/systemd-user/omarchy-pool-rollout.* ~/.config/systemd/user/
-  systemctl --user daemon-reload && systemctl --user enable --now omarchy-pool-rollout.timer
+  systemctl --user daemon-reload
+  systemctl --user enable --now omarchy-pool-rollout.timer
+  docker compose config -q
 )
 ```
 
-Then `docker compose config -q` prints nothing. If it names a missing
-`etc/review2-*.env`, the old `compose.yml` names the review2 pair with no
-profile, and it did not load before the step either. Take the pair out of
-that file, or register it. Do not write an empty env file: that starts
-the pair unregistered.
+If it stops part way, paste it again: it stops only an updater that still
+runs, and the rest is idempotent. If it stops before its `cp` (at
+`docker ps`, `docker stop` or the check after them), nothing was copied:
+paste it again once docker answers. If its `docker rm` failed (it prints
+the error and goes on), the stopped updater container is left: remove it
+with `docker rm` before you run `setup.sh` again, whose
+`--no-recreate` would otherwise start that container as it is.
+
+Its last line, `docker compose config -q`, prints nothing. If it names a
+missing `etc/review2-*.env`, the old `compose.yml` names the review2 pair
+with no profile, and it did not load before the step either. Take the
+pair out of that file, or register it. Do not write an empty env file:
+that starts the pair unregistered.
 
 Do not run an older release's `setup.sh` for this. Its `compose.yml` has
 the review2 pair with no profile, which would start it unregistered.
@@ -1186,12 +1202,14 @@ names — about a fifth of it on `pkgs.omarchy-pool.org` — and read the
 rings' membership 25,000 times a day. Three layers keep that off the
 bill. The Worker serves `/robots.txt` on every name (`src/pages/robots.ts`):
 the dashboard's keeps the landing, the docs and `/package/<name>` open to
-search engines, closes `/api/`, `/auth/`, `/diff`, `/build/`, `/user/` and
-the rest to everyone, and closes the whole site to the AI and research
+search engines, closes `/api/`, `/auth/`, `/diff`, `/build/`, `/user/`,
+`/worker/`, `/workers` and the rest to everyone, and closes the whole site to the AI and research
 crawlers by name (`AI_CRAWLERS`, `src/meta.ts` — the read guard below
 sheds the same list); the API names deny
 everything; `/sitemap.xml` lists the fixed pages. Every `/api/v1` answer
-and the sign-in carry `x-robots-tag: noindex, nofollow`, and the header's
+and the sign-in carry `x-robots-tag: noindex, nofollow`, a worker's page
+and `/workers` (each names a worker's owner and its host's label)
+`x-robots-tag: noindex`, and the header's
 Sign in link says `rel="nofollow"` (19,800 crawler fetches of `/auth/github`
 in two days came from that one link). The bucket runs no code: its
 `robots.txt` is an object at the root of `omarchy-packages`

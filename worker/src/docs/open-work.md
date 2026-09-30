@@ -44,7 +44,7 @@ request (see [CONTRIBUTING.md](CONTRIBUTING.md)), and keep
       login a new one until the person makes it on their page. A
       withdrawal keeps the session or the token: it takes an approval back
       and ships nothing
-      ([the security model](docs/security-model.md#the-doors-that-ship)).
+      ([the security model](/docs/security-model#the-doors-that-ship)).
       #277's orders to a worker (Re-check agent, Restart, Restart agent
       service, Drain, Resume, Stop its task, Update) also take a session or an
       `omc_` token without a passkey, on purpose: capped, on the journal,

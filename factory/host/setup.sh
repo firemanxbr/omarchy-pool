@@ -143,9 +143,9 @@ put_back() {
     # Before compose.yml goes back: compose leaves a running updater alone once the file no longer names it.
     compose_in "$root" stop updater >/dev/null 2>&1
     compose_in "$root" rm -f updater >/dev/null 2>&1
-    # Its first round starts at once, and may be in the middle of a worker's drain: the stop cuts it short, and that worker may be
-    # left created and not started until the timer's next rollout starts what is not running.
-    echo "    the updater it started: stopped and removed (a worker its first round was replacing may stay stopped until the timer's next rollout, within 15 min)" >&2
+    # Its first round starts at once, and may be in the middle of a worker's drain: that worker finishes its drain (up to 3 h), and
+    # the timer's next rollout then starts what is not running.
+    echo "    the updater it started: stopped and removed (a worker its first round was draining finishes its drain, up to 3 h, and the timer's next rollout then starts it: up to about 3 h 20 min)" >&2
   fi
   if (( installed )); then
     local f rel
@@ -320,15 +320,19 @@ install -m 755 -o "$user" -g "$user" "$here/rollout.sh" "$root/rollout.sh"
 
 [[ -f "$root/.env" ]] || env_default > "$root/.env"
 chown "$user:$user" "$root/.env"
+# The way back removes the ones it wrote that are still the untouched placeholder: an older compose.yml put back must not find a
+# placeholder for a pair nobody registered, and start it. Listed in the backup before any of them is written, so a kill in between
+# leaves none that nothing lists; and each counted in created before it is written, so the put-back removes one an interrupt
+# catches right after its write.
+todo=()
+for rel in $env_files; do [[ -f "$root/$rel" ]] || todo+=("$rel"); done
+if [[ -n "$backup" ]] && (( ${#todo[@]} )); then printf '%s\n' "${todo[@]}" > "$backup/created-env-files"; chown "$user:$user" "$backup/created-env-files"; fi
 for rel in $env_files; do
   f="$root/$rel"
-  if [[ ! -f "$f" ]]; then env_text "$rel" > "$f"; created+=("$rel"); fi
+  if [[ ! -f "$f" ]]; then created+=("$rel"); env_text "$rel" > "$f"; fi
   chown "$user:$user" "$f"; chmod 600 "$f"
 done
 (( ${#created[@]} == 0 )) || echo "    written, to fill in: ${created[*]}"
-# The way back removes the ones it wrote that still hold no token: an older compose.yml put back must not find a placeholder for a
-# pair nobody registered, and start it.
-if [[ -n "$backup" ]] && (( ${#created[@]} )); then printf '%s\n' "${created[@]}" > "$backup/created-env-files"; chown "$user:$user" "$backup/created-env-files"; fi
 
 if (( migrating )); then
   echo "==> the updater, started and checked before the timer's units go"
