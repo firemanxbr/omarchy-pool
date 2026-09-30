@@ -6,7 +6,8 @@
 # .env; `share on|off` flips the switch and restarts the builder; `update`
 # wakes the running updater (#277), or runs one round when none runs; a
 # token for the other architecture is refused; a machine without a runtime
-# is told so.
+# is told so; in a set the host agent retired (its .omarchy-agent marker,
+# #313) start, update and remove refuse before they change anything.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
@@ -114,6 +115,31 @@ grep -q "docker compose run --rm --no-deps updater --once" "$STUB_LOG" || { echo
 grep -q "docker compose kill" "$STUB_LOG" && { echo "nothing to wake: $(cat "$STUB_LOG")"; exit 1; }
 grep -q "no updater runs here" <<<"$out" || { echo "and says so: $out"; exit 1; }
 unset STUB_NO_UPDATER
+
+# The switch guard (#313): in a set the host agent retired (its .omarchy-agent marker in the directory), start, update and remove
+# exit non-zero before they touch a file or a container — no docker or pool call, no file of the directory changed — and say what
+# to look at instead. The same directories without the marker: the runs above, and the update and remove right below.
+snapshot() { (cd "$1" && find . -print | LC_ALL=C sort && find . -type f -exec cksum {} + | LC_ALL=C sort); }
+for dir in "$d" "$tmp/proj"; do
+  printf 'agent=0.1.0\nhost=h_0123456789abcdef\nsince=2026-10-15T12:00:00Z\n' > "$dir/.omarchy-agent"
+  snapshot "$dir" > "$tmp/before"
+  for args in "start --token omw_again" "start --project" update remove; do
+    : > "$STUB_LOG"
+    # shellcheck disable=SC2086
+    if out="$("$tmp/omarchy-worker" --dir "$dir" $args 2>&1)"; then echo "$args with the marker must be refused: $out"; exit 1; fi
+    grep -qF "omarchy-worker: ${args%% *}: not done, and nothing changed: this machine is a maintainer host managed by omarchy-agent, which retired this set ($(cd "$dir" && pwd -P)/.omarchy-agent) — nothing needs to be run here; see: omarchy-agent status" <<<"$out" || { echo "$args with the marker says what to look at instead: $out"; exit 1; }
+    [[ ! -s "$STUB_LOG" ]] || { echo "$args with the marker calls no runtime and no pool: $(cat "$STUB_LOG")"; exit 1; }
+    snapshot "$dir" | cmp -s - "$tmp/before" || { echo "$args with the marker changes no file in $dir: $(snapshot "$dir" | diff "$tmp/before" - || true)"; exit 1; }
+  done
+  rm -f "$dir/.omarchy-agent"
+done
+# The marker gone: update wakes the updater again, remove removes the set's files.
+: > "$STUB_LOG"
+"$tmp/omarchy-worker" update >/dev/null
+grep -q "docker compose kill -s USR1 updater" "$STUB_LOG" || { echo "update without the marker wakes the updater: $(cat "$STUB_LOG")"; exit 1; }
+: > "$STUB_LOG"
+"$tmp/omarchy-worker" --dir "$tmp/proj" remove >/dev/null
+grep -q "docker compose --profile \* down" "$STUB_LOG" && [[ ! -e "$tmp/proj/.env" && ! -e "$tmp/proj/compose.yml" ]] || { echo "remove without the marker downs the set and removes its files: $(cat "$STUB_LOG")"; exit 1; }
 
 # The other architecture's token: refused before anything starts.
 export STUB_ARCH=$([[ "$STUB_ARCH" == aarch64 ]] && echo x86_64 || echo aarch64)
