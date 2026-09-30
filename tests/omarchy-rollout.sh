@@ -36,6 +36,18 @@
 # self-test — and a busy builder, which is none of those; an updater image
 # from before #277, which has no self-test, adopted on the set's guard
 # alone); --self-test.
+#
+# #301: an engine or a compose that does not answer is never read as "not
+# there" or "nothing" — only "No such object" / "No such container" is: a
+# holder or a lock that cannot be read is a skip, a StartedAt the engine
+# did not say leaves the lock nameless (never a holder with no start) until
+# the loop names itself again, the loop breaks its own lock that a lost
+# create left, a release not answered keeps the lock held (a warning on the
+# error output is no answer either), the lock is never named by a guess,
+# the guard fails on a set it cannot see, a scan not answered changes
+# nothing, the pull is bounded, a kick during the self-replacing round
+# starts no round, and the EXIT trap's lines are printed after a TERM
+# during a redirected call.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
@@ -570,6 +582,24 @@ grep -q "not running; starting" "$tmp/out" && fail "never read as not running: $
 grep -qE -- "--self-test| run -d " "$STUB_LOG" && fail "no self-test and no one-off: $(grep -E -- '--self-test| run -d ' "$STUB_LOG")"
 [[ ! -f "$STUB_STATE.lock" ]] || fail "the round releases its lock: $(cat "$STUB_STATE.lock")"
 echo "ok: a scan the engine did not answer"
+# Item 8: a pull that runs past ROLLOUT_PULL_TIMEOUT (a registry that stalls): said, and the round goes on with the images here.
+reset_lock; changed; : > "$STUB_LOG"
+echo 'exec /bin/sleep 30' > "$STUB_STATE.on-pull"
+run_bounded 20 env ROLLOUT_PULL_TIMEOUT=1 "$R" --once
+[[ ! -f "$STUB_STATE.on-pull" ]] || fail "the pull never stalled: $(cat "$tmp/out")"
+grep -q "the pull did not end within 1 s: rolling out the images that are here; the next round pulls again" "$tmp/out" || fail "a stalled pull is said: $(cat "$tmp/out")"
+grep -q " up -d --no-deps --no-build broker$" "$STUB_LOG" || fail "and the round goes on: $(cat "$tmp/out")"
+[[ ! -f "$STUB_STATE.lock" ]] || fail "and releases its lock: $(cat "$STUB_STATE.lock")"
+echo "ok: a pull that stalls"
+# Item 10: a TERM during an up whose output goes to /dev/null, then a release in the EXIT trap that fails: its line is printed.
+reset_lock; changed; : > "$STUB_LOG"
+echo 'kill -TERM $PPID' > "$STUB_STATE.on-up"; echo "$NOCONN" > "$STUB_STATE.on-release"
+run_bounded 60 "$R" --once
+[[ ! -f "$STUB_STATE.on-up" && ! -f "$STUB_STATE.on-release" ]] || fail "the TERM and the failed release were never injected: $(cat "$tmp/out")"
+(( RUN_RC == 143 )) || fail "the TERM ends the round: $RUN_RC"
+grep -q "the lock proj-rollout-lock could not be read to release it (Cannot connect to the Docker daemon.*); trying again before the next round" "$tmp/out" || fail "the EXIT trap's line is printed after a TERM during a redirected up: $(cat "$tmp/out")"
+reset_lock
+echo "ok: the EXIT trap's lines"
 
 # ------------------------------------------------------------------- guard --
 guarded() { # → the round's output; STUB_LOG holds its calls
@@ -737,5 +767,17 @@ sed -i.bak 's/^project .*/project sha256:aaaaaaaaaaaaaaaa sha256:bbbbbbbbbbbbbbb
 echo 'kill -USR1 $PPID' > "$STUB_STATE.on-up"
 start_loop; until_rounds 2; stop_loop
 [[ "$(grep -m2 "a round: " "$tmp/loop.out" | tail -1)" == *"a round: woken"* ]] || fail "a kick mid-round is one more round after it: $(cat "$tmp/loop.out")"
+# #301 item 9: a kick during the round that starts the updater's own replacement: no round after it while the one-off replaces
+# this container (ROLLOUT_REPLACE_WAIT) — the loop only pauses. Stopped after its third pause since the one-off.
+sed -i.bak -e 's/^project .*/project sha256:aaaaaaaaaaaaaaaa sha256:bbbbbbbbbbbbbbbb/' -e 's/^updater .*/updater sha256:aaaaaaaaaaaaaaaa sha256:bbbbbbbbbbbbbbbb/' "$STUB_STATE"
+reset_lock; echo 'kill -USR1 $PPID' > "$STUB_STATE.on-up"; : > "$STUB_LOG"
+pauses_since_oneoff() { awk '/ run -d --rm /{ seen = 1; n = 0; next } seen && /^sleep 1$/ { n++ } END { print n + 0 }' "$STUB_LOG"; }
+ROLLOUT_REPLACE_WAIT=3600 start_loop
+for i in $(seq 1 50); do (( $(pauses_since_oneoff) >= 3 )) && break; /bin/sleep 0.2; done
+(( $(pauses_since_oneoff) >= 3 )) || { stop_loop; fail "the loop pauses after the one-off: $(cat "$tmp/loop.out")"; }
+stop_loop
+[[ ! -f "$STUB_STATE.on-up" ]] || fail "the kick was never sent"
+(( $(rounds) == 1 )) || fail "no round after the one that started the one-off: $(cat "$tmp/loop.out")"
+[[ "$(grep -c ' run -d --rm ' "$STUB_LOG")" == 1 ]] || fail "one self-replacing one-off: $(grep ' run -d --rm ' "$STUB_LOG")"
 echo "ok: the loop follows the pool"
 echo "omarchy-rollout: ok"

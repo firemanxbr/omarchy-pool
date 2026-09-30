@@ -18,7 +18,8 @@
 #   omarchy-rollout --once       one round, now (also with no argument)
 #   omarchy-rollout --check      say what would change, change nothing
 #   omarchy-rollout --loop       follow the pool: a round when its release changes, when an Update is open for a worker of this set,
-#                                every ROLLOUT_EVERY seconds (900) otherwise, and at SIGUSR1 (rollout.sh, omarchy-worker update)
+#                                every ROLLOUT_EVERY seconds (900) otherwise, and at SIGUSR1 (rollout.sh, omarchy-worker update) —
+#                                none for ROLLOUT_REPLACE_WAIT seconds (300) once a round started the one-off that replaces it
 #   omarchy-rollout --self-test  the socket answers, compose reads this project, and this updater follows the pool
 #
 # Following the pool (#277). Every ROLLOUT_POLL seconds (120) the loop asks
@@ -96,6 +97,10 @@ log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 : "${ROLLOUT_GUARD_SECONDS:=90}"
 : "${ROLLOUT_GUARD_EVERY:=5}"
 : "${ROLLOUT_LOCK_HOURS:=4}"
+# A round's pull ends within this (a registry that stalls would otherwise hold the lock until another round breaks it as stuck).
+: "${ROLLOUT_PULL_TIMEOUT:=1800}"
+# After the round that started the one-off that replaces this container, no round for this long (it is about to be stopped).
+: "${ROLLOUT_REPLACE_WAIT:=300}"
 : "${OMARCHY_API:=https://pkgs.omarchy-pool.org}"
 # Where this process leaves what proves which container it is (the design's §1.14), and where it reads its own mounts.
 : "${OMARCHY_RUN_DIR:=/run/omarchy}"
@@ -348,7 +353,12 @@ rollout() { # check → 0 changed something, 1 nothing to do, 2 docker unreachab
   for svc in "${ORDER[@]}"; do [[ " $enabled " == *" $svc "* ]] && ordered+=("$svc"); done
   for svc in $enabled; do [[ " ${ordered[*]-} " == *" $svc "* || "$svc" == "$ROLLOUT_SELF" ]] || ordered+=("$svc"); done
   [[ " $enabled " == *" $ROLLOUT_SELF "* ]] && ordered+=("$ROLLOUT_SELF")
-  compose pull --quiet 2>&1 | grep -viE "pulled|pulling|^\s*$" || true
+  # Bounded (ROLLOUT_PULL_TIMEOUT): a pull that stalls on a registry would hold the lock until another round breaks it as stuck.
+  # One that runs out of time is said, and the images that are here are rolled out; the next round pulls again.
+  local pulled prc=0
+  pulled="$(with_timeout "$ROLLOUT_PULL_TIMEOUT" env -i PATH="$PATH" HOME="${HOME:-/root}" DOCKER_HOST="${DOCKER_HOST:-}" DOCKER_CONFIG="${DOCKER_CONFIG:-}" docker compose --project-directory "$COMPOSE_DIR" pull --quiet 2>&1)" || prc=$?
+  grep -viE "pulled|pulling|^\s*$" <<<"$pulled" || true
+  (( prc != 124 )) || log "the pull did not end within ${ROLLOUT_PULL_TIMEOUT} s: rolling out the images that are here; the next round pulls again"
   local config; config="$(compose config --format json 2>/dev/null || echo '{}')"
   for svc in "${ordered[@]}"; do
     local image wanted cid running wanted_cfg running_cfg task
@@ -491,6 +501,8 @@ new_updater_works() {
 
 # One round that may change something: the lock, the rollout, the guard, and what the guard gates — the old images' removal and the
 # updater's replacement of itself. 0 ran (whatever it found), 1 skipped (the lock is another round's), 2 the engine did not answer.
+# REPLACING is 1 once it started the one-off that replaces this container: the loop starts no round for a while (see follow_loop).
+REPLACING=0
 round() { # by
   lock_take "$1" || return 1
   local rc=0; rollout 0 || rc=$?
@@ -507,8 +519,11 @@ round() { # by
         # The lock goes first: the one-off ends this process.
         lock_release
         log "$ROLLOUT_SELF: replacing itself through a one-off; the next container carries on"
-        compose run -d --rm --no-deps --entrypoint sh "$ROLLOUT_SELF" -c "sleep 2; env -i PATH=\"\$PATH\" HOME=/root DOCKER_HOST=\"\${DOCKER_HOST:-}\" docker compose --project-directory \"$COMPOSE_DIR\" up -d --no-deps --no-build $ROLLOUT_SELF" >/dev/null 2>&1 \
-          || log "$ROLLOUT_SELF: FAILED to start the one-off that replaces it — docker compose up -d $ROLLOUT_SELF"
+        if compose run -d --rm --no-deps --entrypoint sh "$ROLLOUT_SELF" -c "sleep 2; env -i PATH=\"\$PATH\" HOME=/root DOCKER_HOST=\"\${DOCKER_HOST:-}\" docker compose --project-directory \"$COMPOSE_DIR\" up -d --no-deps --no-build $ROLLOUT_SELF" >/dev/null 2>&1; then
+          REPLACING=1
+        else
+          log "$ROLLOUT_SELF: FAILED to start the one-off that replaces it — docker compose up -d $ROLLOUT_SELF"
+        fi
         return 0
       fi
     else
@@ -560,8 +575,10 @@ ask_pool() { # ids
 }
 
 KICK=0; SLEEPER=""
+# The poll's pause; a SIGUSR1 ends it early.
+pause() { sleep "$ROLLOUT_POLL" & SLEEPER=$!; wait "$SLEEPER" 2>/dev/null || true; kill "$SLEEPER" 2>/dev/null || true; SLEEPER=""; }
 follow_loop() {
-  local last_latest="" acted=() fresh=() last_round=-1 answer latest update why ids
+  local last_latest="" acted=() fresh=() last_round=-1 answer latest update why ids until_replaced
   trap 'KICK=1' USR1
   log "updater: the services of $COMPOSE_DIR follow the pool's release (asked every $ROLLOUT_POLL s; a round every $ROLLOUT_EVERY s without an answer)"
   while :; do
@@ -594,11 +611,19 @@ follow_loop() {
         [[ -n "$latest" ]] && last_latest="$latest"
         acted+=("${fresh[@]+"${fresh[@]}"}"); while (( ${#acted[@]} > 64 )); do acted=("${acted[@]:1}"); done
       fi
+      if (( REPLACING )); then
+        # The one-off that replaces this container runs, and compose stops this one within seconds: no round meanwhile, a kick
+        # included (it would start a rollout, and maybe a second one-off, in a container about to stop). Still here after
+        # ROLLOUT_REPLACE_WAIT, the one-off did not replace it: the rounds go on, and a kick that came meanwhile is spent.
+        until_replaced=$(( SECONDS + ROLLOUT_REPLACE_WAIT ))
+        while (( SECONDS < until_replaced )); do pause; done
+        REPLACING=0; KICK=0
+        log "$ROLLOUT_SELF: still here ${ROLLOUT_REPLACE_WAIT} s after the one-off that replaces it started (docker compose logs $ROLLOUT_SELF); its rounds go on"
+        continue
+      fi
       (( KICK )) && continue
     fi
-    sleep "$ROLLOUT_POLL" & SLEEPER=$!
-    wait "$SLEEPER" 2>/dev/null || true
-    kill "$SLEEPER" 2>/dev/null || true; SLEEPER=""
+    pause
   done
 }
 
@@ -609,6 +634,9 @@ self_test() {
   echo "follows 1"
 }
 
+# The descriptors this process started with, for the EXIT traps: a TERM during a call whose output goes to /dev/null (compose is a
+# function, so its redirection holds in this shell while a trap runs) would otherwise send the traps' log lines there too.
+exec 3>&1 4>&2
 case "$mode" in
   self-test) self_test ;;
   check) rollout 1 || [[ $? -eq 1 ]] ;;
@@ -616,14 +644,14 @@ case "$mode" in
     identify_self
     # The EXIT trap ignores TERM and INT from its first command on, so one more that lands during the release does not cut it
     # short (one that lands before that first command still can; docker stop sends a single TERM).
-    trap 'trap "" TERM INT; lock_release' EXIT
+    trap 'trap "" TERM INT; exec 1>&3 2>&4; lock_release' EXIT
     trap 'exit 143' TERM INT
     rc=0; round once || rc=$?
     (( rc != 2 ))
     ;;
   loop)
     # Its own container is named before each round while it is not known (follow_loop): the first time before its first round.
-    trap 'trap "" TERM INT; lock_release; [[ -z "$SLEEPER" ]] || kill "$SLEEPER" 2>/dev/null || true' EXIT
+    trap 'trap "" TERM INT; exec 1>&3 2>&4; lock_release; [[ -z "$SLEEPER" ]] || kill "$SLEEPER" 2>/dev/null || true' EXIT
     trap 'exit 143' TERM INT
     follow_loop
     ;;
