@@ -204,38 +204,39 @@ secret). Everything travels in the `Authorization` header over TLS only.
   instance binds an order only for its own token. They are cleared anyway
   when a Worker from before #277 is deployed again (#295):
 
-  ```sql
-  UPDATE build_workers SET instance = NULL, instance_prev = NULL,
-    instance_since = NULL, instance_conflict_at = NULL, instance_other_at = NULL,
-    instance_churn = 0, instance_finished = NULL, site = NULL, auto_orders = NULL,
-    agent_error_since = NULL, agent_error_class = NULL, agent_probed_at = NULL,
-    rollout = NULL, order_kinds = NULL, watchdog_exits = NULL
-  WHERE instance IS NOT NULL OR instance_prev IS NOT NULL OR instance_since IS NOT NULL
-    OR instance_conflict_at IS NOT NULL OR instance_other_at IS NOT NULL
-    OR instance_churn != 0 OR instance_finished IS NOT NULL OR site IS NOT NULL
-    OR auto_orders IS NOT NULL OR agent_error_since IS NOT NULL
-    OR agent_error_class IS NOT NULL OR agent_probed_at IS NOT NULL
-    OR rollout IS NOT NULL OR order_kinds IS NOT NULL OR watchdog_exits IS NOT NULL;
-  UPDATE build_tasks SET stop_order = NULL WHERE stop_order IS NOT NULL;
-  ```
+```sql
+UPDATE build_workers SET instance = NULL, instance_prev = NULL,
+  instance_since = NULL, instance_conflict_at = NULL, instance_other_at = NULL,
+  instance_churn = 0, instance_finished = NULL, site = NULL, auto_orders = NULL,
+  agent_error_since = NULL, agent_error_class = NULL, agent_probed_at = NULL,
+  rollout = NULL, order_kinds = NULL, watchdog_exits = NULL
+WHERE instance IS NOT NULL OR instance_prev IS NOT NULL OR instance_since IS NOT NULL
+  OR instance_conflict_at IS NOT NULL OR instance_other_at IS NOT NULL
+  OR instance_churn != 0 OR instance_finished IS NOT NULL OR site IS NOT NULL
+  OR auto_orders IS NOT NULL OR agent_error_since IS NOT NULL
+  OR agent_error_class IS NOT NULL OR agent_probed_at IS NOT NULL
+  OR rollout IS NOT NULL OR order_kinds IS NOT NULL OR watchdog_exits IS NOT NULL;
+UPDATE build_tasks SET stop_order = NULL WHERE stop_order IS NOT NULL;
+```
 
-  `instance_churn` goes back to its default 0: it is NOT NULL, and a NULL
-  would fail the whole UPDATE. `drained_at`, `drained_by` and
-  `drain_reason` stay. They are a person's standing drain, this Worker
-  serves them as `drained`, and it needs them back after a roll-forward
-  (the older Worker does not honour a drain meanwhile). A task's
-  `stop_order` goes, because the older Worker never clears it, and a stale
-  fence would refuse a later lease after the roll-forward. The first claim
-  after a roll-forward declares everything again: a new process, its site,
-  its orders and its rollout. A worker test keeps this list in step with
-  what the listing withholds.
+`instance_churn` goes back to its default 0: it is NOT NULL, and a NULL
+would fail the whole UPDATE. `drained_at`, `drained_by` and
+`drain_reason` stay. They are a person's standing drain, this Worker
+serves them as `drained`, and it needs them back after a roll-forward
+(the older Worker does not honour a drain meanwhile). A task's
+`stop_order` goes, because the older Worker never clears it, and a stale
+fence would refuse a later lease after the roll-forward. The first claim
+after a roll-forward declares everything again: a new process, its site,
+its orders and its rollout. A worker test keeps this list in step with
+what the listing withholds.
 
-  The rollback workflow (`rollback.yml`, `factory/bin/release-rollback`)
-  takes this step itself when the release it goes back to is from before
-  #277. It runs just before that release's Worker is deployed, once more
-  right after it, and a third time once `/version` reports the older
-  release. Until the older Worker serves, the one from #277 writes these
-  columns back at every claim; the older one never writes them.
+The rollback workflow (`rollback.yml`, `factory/bin/release-rollback`)
+takes this step itself when the release it goes back to is from before
+#277. It runs just before that release's Worker is deployed, once more
+right after it, and a third time once `/version` reports the older
+release. Until the older Worker serves, the one from #277 writes these
+columns back at every claim; the older one never writes them.
+
 - **An updater acts on a public answer, and holds no token (#277).** Every
   set's updater asks `GET /factory/follow` with the ids of its set's workers:
   the pool's release, and the id of an open Update. The answer carries no
