@@ -241,6 +241,19 @@ describe("the worker's page", () => {
     expect((await drawn(F.worker))["#wk-stats"].innerHTML).toContain('<span class="k">Agent</span><span class="n">claude-sonnet-5</span>');
   });
 
+  it("is not for an index: robots.txt closes /worker/ and /workers, and both pages say noindex", async () => {
+    for (const path of [`/worker/${F.worker}`, "/workers"]) {
+      const ctx = createExecutionContext();
+      const res = await worker.fetch(new Request(`http://pool.test${path}`), env, ctx);
+      await waitOnExecutionContext(ctx);
+      expect(res.status, path).toBe(200);
+      expect(res.headers.get("x-robots-tag"), path).toBe("noindex");
+    }
+    const robots = (await get("/robots.txt")).text;
+    expect(robots).toContain("Disallow: /worker/\n");
+    expect(robots).toContain("Disallow: /workers\n");
+  });
+
   it("says in the Factory's and Status's headers how many are drained and outdated, and never counts them idle", async () => {
     const factory = scriptOf((await get("/factory")).text);
     expect(factory).toContain('(wc.outdated ? " · " + num(wc.outdated) + " outdated" : "") + (wc.drained ? " · " + num(wc.drained) + " drained" : "")');
