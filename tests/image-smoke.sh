@@ -7,8 +7,12 @@
 # it, and the fleet follows `:latest` within two minutes.
 #
 #   the label   com.omarchy.updater.follows=1: this image's updater follows the pool
-#   pool        the project worker's entrypoint, against a stub pool that answers who it is:
-#               it writes its id for the updater, then `pkg-repo work --self-test`
+#   pool        the project worker's entrypoint, against a stub pool that answers who it is and
+#               has no work: it writes its id for the updater; `pkg-repo work --self-test`; then
+#               `pkg-repo work` itself starts as a worker does — it identifies its container
+#               through the socket, reads its set, and sends its first claim (#277's fields in
+#               it) — and exits on the empty answer (--idle-exit): the startup a worker that
+#               crash-loops would never get through
 #   broker      starts and answers on :8790 (GET /, a 404: /health would spend a completion)
 #   builder     `omarchy-build-worker --self-test`
 #   updater     the updater's entrypoint, `omarchy-rollout --self-test`, against this runner's socket and a compose project
@@ -28,7 +32,8 @@ arch="$(uname -m)"; [[ "$arch" == arm64 ]] && arch=aarch64
 [[ "$("$RT" image inspect -f '{{index .Config.Labels "com.omarchy.updater.follows"}}' "$image")" == 1 ]] || fail "the image does not carry com.omarchy.updater.follows=1"
 echo "ok: the updater's label"
 
-# A stub pool on the runner: who a worker token is (a project registration of this architecture); nothing else.
+# A stub pool on the runner: who a worker token is (a project registration of this architecture), and no work for its claim (204,
+# the claim's body kept for the checks below); nothing else.
 cat > "$tmp/pool.py" <<'P'
 import json, sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -39,21 +44,37 @@ class H(BaseHTTPRequestHandler):
             self.send_response(200); self.send_header("content-type", "application/json"); self.end_headers(); self.wfile.write(body)
         else:
             self.send_response(404); self.end_headers()
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("content-length") or 0))
+        if self.path == "/api/v1/factory/claim" and self.headers.get("authorization") == "Bearer omw_smoke":
+            with open(sys.argv[2], "ab") as f: f.write(body + b"\n")
+            self.send_response(204); self.end_headers()
+        else:
+            self.send_response(404); self.end_headers()
     def log_message(self, *a): pass
 s = HTTPServer(("127.0.0.1", 0), H)
 print(s.server_address[1], flush=True)
 s.serve_forever()
 P
-python3 "$tmp/pool.py" "$arch" > "$tmp/port" & stub=$!
+python3 "$tmp/pool.py" "$arch" "$tmp/claims" > "$tmp/port" & stub=$!
 for _ in $(seq 1 50); do [[ -s "$tmp/port" ]] && break; sleep 0.1; done
 port="$(head -1 "$tmp/port")"; [[ -n "$port" ]] || fail "the stub pool did not start"
 
-# The project worker, through its entrypoint (the pool role): its id written for the updater, then pkg-repo work's self-test.
-out="$("$RT" run --rm --network host -v "$sock:/var/run/docker.sock" -e OMARCHY_API="http://127.0.0.1:$port" -e OMARCHY_WORKER_TOKEN=omw_smoke -e OMARCHY_WORKER_ROLE=pool \
-  --entrypoint bash "$image" -c 'omarchy-worker --self-test && cat /run/omarchy/worker-id' 2>&1)" || fail "the project worker did not start: $out"
+# The project worker, through its entrypoint (the pool role): its id written for the updater, pkg-repo work's self-test, then the
+# worker itself to its first claim and out on the empty answer. Its keyrings are marked fresh, so it fetches nothing upstream, and
+# every call goes to the stub (OMARCHY_API, OMARCHY_POOL): nothing here reaches a real pool.
+out="$("$RT" run --rm --network host -v "$sock:/var/run/docker.sock" -e OMARCHY_API="http://127.0.0.1:$port" -e OMARCHY_POOL="http://127.0.0.1:$port" \
+  -e OMARCHY_WORKER_TOKEN=omw_smoke -e OMARCHY_WORKER_ROLE=pool -e OMARCHY_WORK_DIR=/var/tmp/omarchy-smoke \
+  --entrypoint bash "$image" -c 'omarchy-worker --self-test && mkdir -p /var/tmp/omarchy-smoke/keyrings && touch /var/tmp/omarchy-smoke/keyrings/archlinux.gpg /var/tmp/omarchy-smoke/keyrings/.fetched && timeout 120 omarchy-worker --idle-exit 1 && cat /run/omarchy/worker-id' 2>&1)" \
+  || fail "the project worker did not start: $out"
 grep -q '^pkg-repo work --self-test: ok' <<<"$out" || fail "pkg-repo work's self-test: $out"
+grep -q "worker ($arch) ready" <<<"$out" || fail "pkg-repo work did not start as a worker: $out"
+grep -q "no work for 30s; exiting" <<<"$out" || fail "pkg-repo work did not claim and leave on the empty answer: $out"
+[[ -s "$tmp/claims" ]] || fail "the stub pool received no claim: $out"
+jq -e --arg a "$arch" '.arch == $a and (.instance != null) and (.orders | type == "array" and index("drain") != null) and (.rollout | type == "object")' <<<"$(head -n1 "$tmp/claims")" >/dev/null \
+  || fail "its first claim does not say which process it is, what it takes and what rolls its set out: $(head -n1 "$tmp/claims")"
 [[ "$(tail -n1 <<<"$out")" == "smoke-pool-$arch" ]] || fail "the project worker did not write its id for the updater: $out"
-echo "ok: the project worker ($(grep -o '^pkg-repo work --self-test: ok ([^)]*)' <<<"$out"))"
+echo "ok: the project worker ($(grep -o '^pkg-repo work --self-test: ok ([^)]*)' <<<"$out"); started, claimed, and left on no work)"
 
 # The broker: it starts and answers on :8790.
 broker="$("$RT" run -d -e OMARCHY_WORKER_ROLE=broker -e OMARCHY_WORKER_TOKEN=omw_smoke -e OMARCHY_API=http://127.0.0.1:9 "$image")"

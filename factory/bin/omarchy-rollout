@@ -29,8 +29,9 @@
 # of its broker, which holds the token (`curl` of /pool/factory/workers/self
 # inside the broker's container). No token and no key leaves a container,
 # and nothing is ever read of a builder's container, where strangers'
-# recipes run. A pool that does not answer, or does not know follow (a
-# Worker from before #277), leaves the fifteen-minute round.
+# recipes run. A pool that does not know follow (a Worker from before #277)
+# is asked its /version instead, which still says its release; one that
+# does not answer at all leaves the fifteen-minute round.
 #
 # The lock (#277). Every round that can change something takes it, --check
 # never: a container created by name — atomic in the engine —
@@ -38,9 +39,11 @@
 # holder's container id and its StartedAt, and an expiry four hours out.
 # A round that finds it held breaks it at once when its holder is gone, not
 # running, or started again since (the process that took it is dead), or
-# once it outlived its expiry; otherwise it skips. A round releases it as
-# its last step, just before a self-replacing one-off, and an EXIT trap
-# backs that up; a release removes only a lock this process holds.
+# once it outlived its expiry — by the id it judged, never by its name, so
+# two rounds that judged it dead never both take it; otherwise it skips.
+# A round releases it as its last step, just before a self-replacing
+# one-off, and an EXIT trap backs that up; a release removes only a lock
+# this process holds.
 #
 # The guard (#277). After a round that replaced something, and before the
 # updater replaces itself or removes an old image, it samples every
@@ -52,9 +55,11 @@
 # It fails on a container seen restarting at two samples in a row, a
 # RestartCount that grows by two or more, one that was running and ends
 # exited non-zero, and a service this round failed to replace. Then the new
-# image's own updater must pass --self-test. If either fails, the updater
-# stays on its image and keeps the old ones, so a rollback reaches the set
-# with no download, and tries again at its next round.
+# image's own updater must pass --self-test (an image from before #277 has
+# none — a rollback past it — and is adopted on the first check alone, as
+# every updater before #277 adopted every image). If either fails, the
+# updater stays on its image and keeps the old ones, so a rollback reaches
+# the set with no download, and tries again at its next round.
 #
 # The pool hands nothing to a worker behind its release for longer than
 # the rollout's grace (worker/src/update.ts), so a worker without this
@@ -151,14 +156,14 @@ lock_create() { # by
 lock_take() { # by
   lock_name
   if lock_create "$1"; then LOCK_HELD=1; return 0; fi
-  local labels by holder started until created state
-  labels="$(docker inspect -f '{{index .Config.Labels "com.omarchy.lock.by"}}|{{index .Config.Labels "com.omarchy.lock.holder"}}|{{index .Config.Labels "com.omarchy.lock.started"}}|{{index .Config.Labels "com.omarchy.lock.until"}}|{{.Created}}' "$LOCK" 2>/dev/null || true)"
+  local labels by holder started until created lid state
+  labels="$(docker inspect -f '{{index .Config.Labels "com.omarchy.lock.by"}}|{{index .Config.Labels "com.omarchy.lock.holder"}}|{{index .Config.Labels "com.omarchy.lock.started"}}|{{index .Config.Labels "com.omarchy.lock.until"}}|{{.Created}}|{{.Id}}' "$LOCK" 2>/dev/null || true)"
   if [[ -z "$labels" ]]; then
     # Gone between the create and the read: one more try.
     lock_create "$1" && { LOCK_HELD=1; return 0; }
     log "the lock $LOCK could not be taken or read; skipping this round"; return 1
   fi
-  IFS='|' read -r by holder started until created <<<"$labels"
+  IFS='|' read -r by holder started until created lid <<<"$labels"
   [[ "$until" =~ ^[0-9]+$ ]] || until=0
   local since; since="$(hhmm "$created")"
   if [[ -n "$holder" ]]; then
@@ -177,7 +182,10 @@ lock_take() { # by
     log "a round runs already (${by:-?}, since $since; its holder named no container, so the lock ends at its expiry)"
     return 1
   fi
-  docker rm -f "$LOCK" >/dev/null 2>&1 || true
+  # Broken by the id it was judged by, never by its name: another round that judged the same lock dead may have broken it and
+  # taken the lock meanwhile, and a removal by name would remove that round's lock too — two rounds would hold it. Removed
+  # already, this does nothing, and the create below decides.
+  docker rm -f "${lid:-$LOCK}" >/dev/null 2>&1 || true
   if lock_create "$1"; then LOCK_HELD=1; return 0; fi
   log "another round took the lock first; skipping"; return 1
 }
@@ -185,8 +193,10 @@ lock_take() { # by
 lock_release() {
   (( LOCK_HELD )) || return 0
   LOCK_HELD=0
-  local labels; labels="$(docker inspect -f '{{index .Config.Labels "com.omarchy.lock.holder"}}|{{index .Config.Labels "com.omarchy.lock.started"}}|{{index .Config.Labels "com.omarchy.lock.nonce"}}' "$LOCK" 2>/dev/null || true)"
-  if [[ "$labels" == "$SELF_ID|$SELF_STARTED|$LOCK_NONCE" ]]; then docker rm -f "$LOCK" >/dev/null 2>&1 || true
+  local labels lid; labels="$(docker inspect -f '{{index .Config.Labels "com.omarchy.lock.holder"}}|{{index .Config.Labels "com.omarchy.lock.started"}}|{{index .Config.Labels "com.omarchy.lock.nonce"}}|{{.Id}}' "$LOCK" 2>/dev/null || true)"
+  lid="${labels##*|}"; labels="${labels%|*}"
+  # By the id it was read with, as a break is: the lock read here is the one removed.
+  if [[ "$labels" == "$SELF_ID|$SELF_STARTED|$LOCK_NONCE" ]]; then docker rm -f "${lid:-$LOCK}" >/dev/null 2>&1 || true
   elif [[ -n "$labels" ]]; then log "the lock $LOCK is another round's now; leaving it"; fi
 }
 
@@ -349,8 +359,17 @@ guard() {
 # A command with a deadline, where the system has `timeout` (the image does).
 with_timeout() { if command -v timeout >/dev/null 2>&1; then timeout "$@"; else shift; "$@"; fi; }
 # The new image's updater works here: the updater service's own one-off (its socket, its directory, the image it now names) passes --self-test within 60 s.
+# An image from before #277 — no com.omarchy.updater.follows=1 label, the one a release's smoke start checks on every image since —
+# has no --self-test (it answers any flag it does not know with its usage): that is the pool's release after a rollback past #277,
+# adopted on the guard of the set's containers alone, as every updater before #277 adopted every image. It follows the pool at its
+# own fifteen-minute round from then on, until a release brings an updater that follows again.
 new_updater_works() {
-  local out
+  local out img follows
+  img="$(awk -v s="$ROLLOUT_SELF" '$1 == s { print $2 }' <<<"$WANTED")"
+  if [[ -n "$img" ]] && follows="$(docker image inspect -f '{{index .Config.Labels "com.omarchy.updater.follows"}}' "$img" 2>/dev/null)" && [[ "$follows" != 1 ]]; then
+    log "$ROLLOUT_SELF: the image it now names (${img:7:12}) is from before #277 — no --self-test to run: adopted on the guard alone, and it follows the pool at its own ${ROLLOUT_EVERY}-s round"
+    return 0
+  fi
   if out="$(with_timeout 60 env -i PATH="$PATH" HOME="${HOME:-/root}" DOCKER_HOST="${DOCKER_HOST:-}" DOCKER_CONFIG="${DOCKER_CONFIG:-}" docker compose --project-directory "$COMPOSE_DIR" run --rm --no-deps -T --entrypoint /usr/local/lib/omarchy-factory/bin/omarchy-rollout "$ROLLOUT_SELF" --self-test 2>&1)" && grep -q '^follows 1$' <<<"$out"; then
     return 0
   fi
@@ -414,12 +433,18 @@ set_ids() {
   ID_CACHE="$next"
   IDS="$(awk '{ print $2 }' <<<"$ID_CACHE" | grep . | sort -u | head -16 | paste -sd, - || true)"
 }
-# The pool's answer, or nothing when it does not answer, does not know follow (a Worker from before #277) or says what cannot be read.
-ask_pool() { # ids
-  local url body
-  if [[ -n "$1" ]]; then url="$OMARCHY_API/api/v1/factory/follow?ids=$1"; else url="$OMARCHY_API/api/v1/version"; fi
-  body="$(curl -fsS --max-time 10 "$url" 2>/dev/null || true)"
+# The pool's answer, or nothing when it does not answer or says what cannot be read. Without ids, or when follow does not answer
+# (a Worker from before #277 knows no follow: 404), its /version, which every Worker has: the pool's release, and no Update — so a
+# rollback past #277 still reaches this set within one poll, not at its fifteen-minute round.
+answer_of() { # url → a body that names the pool's release, or nothing
+  local body; body="$(curl -fsS --max-time 10 "$1" 2>/dev/null || true)"
   jq -e '(.latest // .version) | strings' >/dev/null 2>&1 <<<"$body" && printf '%s' "$body" || true
+}
+ask_pool() { # ids
+  local body=""
+  [[ -z "$1" ]] || body="$(answer_of "$OMARCHY_API/api/v1/factory/follow?ids=$1")"
+  [[ -n "$body" ]] || body="$(answer_of "$OMARCHY_API/api/v1/version")"
+  printf '%s' "$body"
 }
 
 KICK=0; SLEEPER=""

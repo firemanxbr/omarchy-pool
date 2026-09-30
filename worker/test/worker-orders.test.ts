@@ -809,4 +809,23 @@ describe("Update through the set's updater (#277, part 3)", () => {
     // What the answer is made of: nothing the listing does not show already — no site, no process, no order but its id.
     expect(Object.keys(f.json.workers[0]).sort()).toEqual(["id", "outdated", "update", "version"]);
   });
+
+  it("follow: the edge keeps an answer thirty seconds per release — a deploy or a rollback is never served an answer from before it", async () => {
+    const get = async (on: Env) => {
+      const ctx = createExecutionContext();
+      const res = await worker.fetch(new Request(`${API}/factory/follow?ids=upd-p-follows&n=edge-release`), on, ctx);
+      await waitOnExecutionContext(ctx);
+      return { edge: res.headers.get("x-pool-cache"), cache: res.headers.get("cache-control"), latest: ((await res.json()) as any).latest };
+    };
+    const first = await get(REL);
+    expect(first).toMatchObject({ edge: "miss", latest: "v1.0.3" });
+    expect(first.cache).toBe("public, max-age=30");
+    expect(await get(REL)).toMatchObject({ edge: "hit", latest: "v1.0.3" });
+    // The pool moves on (a release) and back (a rollback), inside the thirty seconds: the same URL is read again each time.
+    const next = { ...env, POOL_VERSION: "v1.0.4", POOL_DEPLOYED_AT: new Date().toISOString() } as Env;
+    expect(await get(next)).toMatchObject({ edge: "miss", latest: "v1.0.4" });
+    const back = { ...env, POOL_VERSION: "v1.0.3", POOL_DEPLOYED_AT: new Date(Date.now() + 1000).toISOString() } as Env;
+    expect(await get(back)).toMatchObject({ edge: "miss", latest: "v1.0.3" });
+    expect(await get(back)).toMatchObject({ edge: "hit", latest: "v1.0.3" });
+  });
 });

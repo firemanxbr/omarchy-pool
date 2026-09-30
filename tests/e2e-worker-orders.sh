@@ -286,7 +286,7 @@ case "$1" in
             curl -s -o /dev/null -X POST "$API/api/v1/factory/claim" -H "authorization: Bearer omw_e2e_w5f" -H 'content-type: application/json' -d "$body"; done ;;
       run) [[ " $* " == *" --self-test "* ]] && echo "follows 1" ;;
     esac ;;
-  image) [[ "$2" == inspect ]] && echo sha256:new ;;
+  image) [[ "$2" == inspect ]] && { [[ "$4" == *com.omarchy.updater.follows* ]] && echo 1 || echo sha256:new; } ;;
   ps) printf '%s\n' cid-broker cid-worker cid-updater ;;
   # The lock: created by name once, its labels read back as the engine would.
   create) [[ -f "$STATE.lock" ]] && exit 1; by=""; holder=""; started=""; until=""; nonce=""
@@ -295,8 +295,8 @@ case "$1" in
   rm) rm -f "$STATE.lock" ;;
   inspect) c="${@: -1}"; s="${c#cid-}"
     case "$3" in
-      *com.omarchy.lock.by*) [[ -f "$STATE.lock" ]] || exit 1; IFS='|' read -r by holder started until created nonce < "$STATE.lock"; echo "$by|$holder|$started|$until|$created" ;;
-      *com.omarchy.lock.nonce*) [[ -f "$STATE.lock" ]] || exit 1; IFS='|' read -r by holder started until created nonce < "$STATE.lock"; echo "$holder|$started|$nonce" ;;
+      *com.omarchy.lock.by*) [[ -f "$STATE.lock" ]] || exit 1; IFS='|' read -r by holder started until created nonce < "$STATE.lock"; echo "$by|$holder|$started|$until|$created|lock-$nonce" ;;
+      *com.omarchy.lock.nonce*) [[ -f "$STATE.lock" ]] || exit 1; IFS='|' read -r by holder started until created nonce < "$STATE.lock"; echo "$holder|$started|$nonce|lock-$nonce" ;;
       "{{.Image}}") img "$s" ;;
       *config-hash*) echo cfg ;;
       *'service"}} {{.Image}}'*) echo "$s $(img "$s") False" ;;

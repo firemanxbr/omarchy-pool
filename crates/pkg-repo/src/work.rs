@@ -1053,10 +1053,16 @@ const IMAGE_TEMPLATE: &str =
 const FOLLOWS_TEMPLATE: &str = r#"{{index .Config.Labels "com.omarchy.updater.follows"}}"#;
 
 /// The updater of this compose project (#277, part 3): the running container whose role is `updater` — the release its image says it
-/// is, and whether that image follows the pool. Read with templates that print those two and the role, never the rest.
+/// is, and whether that image follows the pool. Read with templates that print those two and the role, never the rest. Running
+/// means the engine's `running` status: a container in restart back-off stays listed by a bare `ps` (the engine keeps it
+/// `Running` while it waits to start it again) but its status is `restarting`, so an updater that keeps restarting is none, and
+/// the set is reported as rolled out by nothing (`stopped`), not as following the pool.
 fn updater_of(hands: &dyn Hands, runtime: &str, project: &str) -> Option<(Option<String>, bool)> {
     let label = format!("label=com.docker.compose.project={project}");
-    let out = hands.engine(runtime, &["ps", "-q", "--filter", &label])?;
+    let out = hands.engine(
+        runtime,
+        &["ps", "-q", "--filter", &label, "--filter", "status=running"],
+    )?;
     if !out.status.success() {
         return None;
     }
@@ -4014,17 +4020,26 @@ mod orders_tests {
     }
 
     /// An engine whose project `studio` runs `u1` with the given role, `OMARCHY_IMAGE` and follows label; any other project runs nothing.
+    /// A role of `restarting-updater` is an updater in restart back-off: listed by a bare `ps`, never by `status=running`.
     fn engine_updater(role: &'static str, image: &'static str, follows: &'static str) -> Engine {
+        let role = role
+            .strip_prefix("restarting-")
+            .map_or((role, false), |r| (r, true));
         Box::new(move |_, args| match args {
+            ["ps", "-q", "--filter", p, "--filter", "status=running"]
+                if *p == "label=com.docker.compose.project=studio" =>
+            {
+                out(0, if role.1 { "p1\n" } else { "p1\nu1\n" })
+            }
             ["ps", "-q", "--filter", p] if *p == "label=com.docker.compose.project=studio" => {
                 out(0, "p1\nu1\n")
             }
-            ["ps", "-q", "--filter", _] => out(0, ""),
+            ["ps", "-q", "--filter", ..] => out(0, ""),
             ["inspect", "-f", t, "p1"] if *t == ROLE_TEMPLATE => {
                 out(0, "OMARCHY_WORKER_ROLE=pool\n")
             }
             ["inspect", "-f", t, "u1"] if *t == ROLE_TEMPLATE => {
-                out(0, &format!("OMARCHY_WORKER_ROLE={role}\n"))
+                out(0, &format!("OMARCHY_WORKER_ROLE={}\n", role.0))
             }
             ["inspect", "-f", t, "u1"] if *t == IMAGE_TEMPLATE => {
                 out(0, &format!("OMARCHY_IMAGE={image}\n"))
@@ -4061,6 +4076,21 @@ mod orders_tests {
         assert_eq!(
             report("pool", "v1.0.3", "1", None)["updater"],
             serde_json::Value::Null
+        );
+        // An updater that keeps restarting (in the engine's back-off between two starts): none that runs — null, so the pool says
+        // `stopped`, never `follows`. And the running one is asked by the engine's status, not by a bare listing.
+        assert_eq!(
+            report("restarting-updater", "v1.0.3", "1", None)["updater"],
+            serde_json::Value::Null
+        );
+        let hands = Fake::new(&[("ok", "")], engine_updater("updater", "v1.0.3", "1"));
+        rollout_of(&hands, "docker", Some("studio"), None);
+        assert!(
+            hands.ran.borrow().iter().any(|c| c.contains(
+                "ps -q --filter label=com.docker.compose.project=studio --filter status=running"
+            )),
+            "{:?}",
+            hands.ran.borrow()
         );
         // Another project: nothing of this one is read.
         let hands = Fake::new(&[("ok", "")], engine_updater("updater", "v1.0.3", "1"));

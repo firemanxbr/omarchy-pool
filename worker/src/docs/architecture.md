@@ -318,21 +318,26 @@ pool refuses them until it lands.
 contributor's set, and the Studio since its one-time step (the runbook's *The
 Studio host*). Every two minutes it asks `GET /api/v1/factory/follow?ids=…`,
 with no token — the pool's release, and for each worker of its set its
-release and the id of an open **Update** — and runs a round when the release
-changes (a release, or a rollback), when an Update it has not acted on
-appears, and every fifteen minutes when the pool does not answer. It names
+release and the id of an open **Update**; the edge keeps an answer thirty
+seconds per release of the pool, so a deploy is never answered from before
+it — and runs a round when the release changes (a release, or a rollback),
+when an Update it has not acted on appears, and every fifteen minutes when
+the pool does not answer. A Worker from before #277 knows no follow: the
+updater reads its release from `/api/v1/version` instead. It names
 its workers by id from inside the set: a project worker's entrypoint writes
 its own to `/run/omarchy/worker-id`, and a builder's is asked of its broker,
 which holds the token; nothing is read of a builder's container. A round is
 #278's (brokers first, each answering, then the workers in one `up`, each stop
 a drain), inside a lock — a container created by name, labelled with its
-holder's container and start, broken at once when that holder is gone or
-restarted, released at every round's end — and followed by a guard: for 90 s
+holder's container and start, broken at once (by the id it was judged by)
+when that holder is gone or restarted, released at every round's end — and
+followed by a guard: for 90 s
 every container of the set on the new image but the builders (which exit
 after every task) is sampled, and the updater replaces itself, and removes
 the old images, only when none restarts at two samples in a row, none
 restarts twice, none that ran stays down, every service was replaced, and the
-new image's own updater passes `--self-test`. An Update is therefore never
+new image's own updater passes `--self-test` (one from before #277 has none,
+and is adopted on the rest: a rollback past #277). An Update is therefore never
 delivered to the worker: the updater executes it, and the pool closes it when
 the worker claims on the pool's release (or expires it after six hours). The
 door refuses it for a worker on the latest release, and for a project worker
@@ -345,13 +350,17 @@ page and in Status's lines.
 
 **A release whose image does not start.** Prevented: the release pushes each
 architecture's image as `:<arch>-vX.Y.Z` only, starts every role from it on
-the runner (`tests/image-smoke.sh`), and only then moves `:<arch>` and
-`:latest`. Contained: an updater never adopts an image under which what it
-replaced keeps restarting, and keeps the old images. Detected: a process that
-lives minutes and finishes nothing is counted as churn; workers alive before
-the latest deploy and silent for 15 minutes since are an error on Status.
+the runner (`tests/image-smoke.sh`, the project worker up to its first
+claim), and only once both architectures have started moves any tag a host
+follows — `:vX.Y.Z`, `:<arch>`, then `:latest`. Contained: an updater never
+adopts an image under which what it replaced keeps restarting, and keeps the
+old images. Detected: a process that lives minutes and finishes nothing is
+counted as churn; workers alive before the latest deploy, last heard during
+its rollout and silent for 15 minutes since are an error on Status.
 Remedied from anywhere: `gh workflow run rollback.yml -f to=vX.Y.Z` re-points
-the images and deploys that release's Worker, and every updater follows the
+the images and deploys that release's Worker — only to a release whose
+images passed both smoke starts, with its Worker built before any tag moves
+and the tags put back if its deploy fails — and every updater follows the
 pool's release down.
 
 ### Architectures

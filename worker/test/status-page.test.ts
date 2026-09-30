@@ -441,6 +441,13 @@ describe("the Status page", () => {
     expect(silent([{ last_seen: ago(20) }])[0][1]).toContain("has not claimed for 15 min — if the image does not start, roll it back");
     // One gone long before the deploy, one still heard from (a drain heartbeats), a deploy under 15 min old, a revoked one: nothing.
     expect(silent([{ last_seen: ago(200) }, { id: "d", last_seen: ago(2) }])).toEqual([]);
+    // Silent since a moment within the deploy's rollout (a drain of up to 3 h, then an image that does not start): still said, hours on.
+    const earlier = { version: "v1.0.3", deployed_at: ago(6 * 60) };
+    expect(silent([{ last_seen: ago(6 * 60 - 150) }], earlier)[0][1]).toContain("1 worker alive before the deploy of v1.0.3");
+    // Quiet only after the rollout was over — a host rebooted, a network out, a machine turned off days after a good release: no line
+    // that asks for a rollback.
+    expect(silent([{ last_seen: ago(60) }, { id: "d", last_seen: ago(20) }], earlier)).toEqual([]);
+    expect(silent([{ last_seen: ago(20) }, { id: "d", last_seen: ago(30) }], { version: "v1.0.3", deployed_at: ago(2 * 24 * 60) })).toEqual([]);
     expect(silent([{ last_seen: ago(20) }], { version: "v1.0.3", deployed_at: ago(10) })).toEqual([]);
     expect(silent([{ last_seen: ago(20), revoked_at: ago(5) }])).toEqual([]);
     expect(silent([{ last_seen: ago(20) }], { version: "dev", deployed_at: null })).toEqual([]);

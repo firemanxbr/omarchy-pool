@@ -543,14 +543,17 @@ __CHARTS__
   }
   // What rolls each host out, and a release whose image does not start (#277): lines from the listing alone, a host once each — the host is
   // the one its workers report (their "where" label). Error: two or more workers, or any project worker, alive in the hour before the latest
-  // deploy and silent for SILENT_AFTER_DEPLOY_MIN since (a worker that drains still heartbeats). Warn: a host with two rollouts (an
-  // updater and a timer's rollout.sh from before #277), a host whose updater is not running. Info: a host whose one-time step is not done.
-  var SILENT_AFTER_DEPLOY_MIN = 15;
+  // deploy and silent for SILENT_AFTER_DEPLOY_MIN since (a worker that drains still heartbeats), last heard within the deploy's rollout —
+  // DEPLOY_ROLLOUT_MIN, the 3 h a drain may take and a margin: a worker that goes quiet later (a host's reboot, an outage, a machine
+  // turned off days after a good release) is no sign that the release's image does not start, and never asks for a rollback. Warn: a host
+  // with two rollouts (an updater and a timer's rollout.sh from before #277), a host whose updater is not running. Info: a host whose
+  // one-time step is not done.
+  var SILENT_AFTER_DEPLOY_MIN = 15, DEPLOY_ROLLOUT_MIN = 240;
   function hostOf(w) { return (w.labels && w.labels.where) || w.hostname || "a host"; }
   function fleetLines(ws, pool, now) {
     var L = [], dep = pool && pool.deployed_at ? Date.parse(pool.deployed_at) : NaN;
     if (Number.isFinite(dep) && now - dep >= SILENT_AFTER_DEPLOY_MIN * 60000) {
-      var silent = (ws || []).filter(function (w) { var seen = Date.parse(w.last_seen); return !w.revoked_at && seen >= dep - 3600e3 && now - seen >= SILENT_AFTER_DEPLOY_MIN * 60000; });
+      var silent = (ws || []).filter(function (w) { var seen = Date.parse(w.last_seen); return !w.revoked_at && seen >= dep - 3600e3 && seen <= dep + DEPLOY_ROLLOUT_MIN * 60000 && now - seen >= SILENT_AFTER_DEPLOY_MIN * 60000; });
       if (silent.length >= 2 || silent.some(function (w) { return wtKind(w) !== "community"; })) L.push(["fail", num(silent.length) + " worker" + (silent.length === 1 ? "" : "s") + " alive before the deploy of " + esc(pool.version) + " (" + esc(ago(pool.deployed_at)) + ") " + (silent.length === 1 ? "has" : "have") + " not claimed for " + SILENT_AFTER_DEPLOY_MIN + " min — if the image does not start, roll it back: the runbook's <a href=\"/docs/runbook#releasing-the-pool-itself\">Releasing the pool itself</a>"]);
     }
     var by = {};
@@ -1181,7 +1184,7 @@ export const STATUS_COMPONENTS = (F: Fixture): Component[] => {
       anchor: ['id="workers"', 'id="workers-list"', 'id="workers-busy"', 'id="workers-note"', 'href="/workers"'],
       script: ['api("GET", "/api/v1/factory?limit=" + (NUMBERS ? 100 : 10))', "setInterval(loadFactory, 60000)", 'wtKind(w) !== "community"', "workerCounts(ws)", '" busy"', "workerName(w)", "agentMark(mark, agentName(s))", "modelOf(w.agent)", "paramsLabel(t)", 'WC_DOWN = noAnswer("worker listing", e)', 'var down = st === "not ready"', "wtNotReady(w)", "<b>not ready</b>", '" not ready"', '" outdated"', '" drained"', "wtMarks(w)", "w.crash_loop_since", "w.watchdog.n >= 2",
         // What rolls each host out, and a release that does not start (#277, part 3): from the listing alone.
-        "function fleetLines(ws, pool, now)", "fleetLines(FACTORY.workers, FACTORY.pool, Date.now())", "w.set_rollout", "var SILENT_AFTER_DEPLOY_MIN = 15;"],
+        "function fleetLines(ws, pool, now)", "fleetLines(FACTORY.workers, FACTORY.pool, Date.now())", "w.set_rollout", "var SILENT_AFTER_DEPLOY_MIN = 15, DEPLOY_ROLLOUT_MIN = 240;", "seen <= dep + DEPLOY_ROLLOUT_MIN * 60000"],
       reads: [
         { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.id", "workers.0.arch", "workers.0.side", "workers.0.labels", "workers.0.alive", "workers.0.ready", "workers.0.agent_error", "workers.0.agent_checked_at", "workers.0.current_task", "workers.0.agent", "workers.0.last_seen", "workers.0.set_rollout", "pool.version", "pool.deployed_at", "tasks.0.id", "tasks.0.kind", "tasks.0.name", "tasks.0.started_at"] },
         { path: "/workers", json: false },

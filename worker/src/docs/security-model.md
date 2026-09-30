@@ -153,12 +153,14 @@ secret). Everything travels in the `Authorization` header over TLS only.
   would serve a worker's `site`, its process's `instance` and the rules'
   state. Neither gives a power by itself — a site is kept under its owner's
   name, and an instance binds an order only for its own token — but they
-  are cleared before a Worker from before #277 is deployed again
+  are cleared when a Worker from before #277 is deployed again
   (`UPDATE build_workers SET site = NULL, instance = NULL, instance_prev =
   NULL, auto_orders = NULL`). The rollback workflow (`rollback.yml`,
   `factory/bin/release-rollback`) takes this step itself when the release it
-  goes back to is from before #277, before that release's Worker is
-  deployed.
+  goes back to is from before #277: just before that release's Worker is
+  deployed, and once more right after it — until the older Worker serves,
+  the one from #277 writes them back at every claim, and the older one
+  never writes them, so the second clear is final.
 - **An updater acts on a public answer, and holds no token (#277).** Every
   set's updater asks `GET /factory/follow` with the ids of its set's workers:
   the pool's release, and the id of an open Update. The answer carries no

@@ -18,16 +18,20 @@
 # out.
 #
 # #277: the loop follows the pool (a round for a new release, a rollback,
-# an Update not acted on yet; the fifteen-minute round without an answer;
-# SIGUSR1 now), names its set's workers by id (a project worker's from its
-# own file, a builder's from its broker, never from a builder's container);
-# the lock (a round that holds it, one whose holder is gone, not running,
-# started again or stuck past its expiry; released at the end of every
-# round and before the self-replacing one-off, never another round's; an
-# EXIT mid-round releases it); the guard (restarting at two samples in a
-# row, restarts that grow, a service that stays down, a service not
-# replaced, a new updater that fails its self-test — and a busy builder,
-# which is none of those); --self-test.
+# an Update not acted on yet; the pool's /version when follow is gone, a
+# rollback past #277 among them; the fifteen-minute round without an
+# answer; SIGUSR1 now), names its set's workers by id (a project worker's
+# from its own file, a builder's from its broker, never from a builder's
+# container); the lock (a round that holds it, one whose holder is gone,
+# not running, started again or stuck past its expiry — broken by the id
+# it was judged by, so two rounds that judged it dead never both hold it;
+# released at the end of every round and before the self-replacing
+# one-off, never another round's; an EXIT mid-round releases it); the
+# guard (restarting at two samples in a row, restarts that grow, a service
+# that stays down, a service not replaced, a new updater that fails its
+# self-test — and a busy builder, which is none of those; an updater image
+# from before #277, which has no self-test, adopted on the set's guard
+# alone); --self-test.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
@@ -83,22 +87,28 @@ case "$1" in
         exit 0 ;;
     esac ;;
   image)
-    if [[ "$2" == inspect ]]; then wanted "${5#img-}"; else exit 0; fi ;;
+    # inspect -f {{.Id}} img-<service>: the id it names; inspect -f <the follows label> <id>: "1", "<no value>" for an image from before #277.
+    if [[ "$2" == inspect && "$4" == *com.omarchy.updater.follows* ]]; then [[ -f "$STUB_STATE.nolabel" ]] && echo "<no value>" || echo 1
+    elif [[ "$2" == inspect ]]; then wanted "${5#img-}"; else exit 0; fi ;;
   ps)
     # The project's containers: running ones (-q), or all of them (-aq); those in STUB_STATE.stopped are not running.
     for s in $(services); do if [[ "$2" == -aq ]] || ! grep -qx "$s" "$STUB_STATE.stopped" 2>/dev/null; then echo "cid-$s"; fi; done ;;
   create)
-    # The lock: one container by name, atomic — a second create fails while it exists.
+    # The lock: one container by name, atomic — a second create fails while it exists; each one created gets an id of its own.
     shift; name=""; by=""; holder=""; started=""; until=""; nonce=""
     while [[ $# -gt 0 ]]; do case "$1" in --name) name="$2"; shift 2 ;; --label) k="${2%%=*}"; v="${2#*=}"; case "$k" in *.by) by="$v" ;; *.holder) holder="$v" ;; *.started) started="$v" ;; *.until) until="$v" ;; *.nonce) nonce="$v" ;; esac; shift 2 ;; *) shift ;; esac; done
     [[ -f "$STUB_STATE.lock" ]] && { echo "Conflict. The container name \"/$name\" is already in use" >&2; exit 1; }
-    printf '%s|%s|%s|%s|2026-09-30T13:47:05.000Z|%s\n' "$by" "$holder" "$started" "$until" "$nonce" > "$STUB_STATE.lock" ;;
-  rm) [[ "$2" == -f ]] && rm -f "$STUB_STATE.lock" ;;
+    printf '%s|%s|%s|%s|2026-09-30T13:47:05.000Z|%s|lock%s\n' "$by" "$holder" "$started" "$until" "$nonce" "$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')" > "$STUB_STATE.lock" ;;
+  # rm -f <the lock's id, or its name>: only that container — an id another lock has since replaced removes nothing. A hook first.
+  rm) hook rm; [[ -f "$STUB_STATE.lock" ]] || { echo "Error: No such container: $3" >&2; exit 1; }
+    IFS='|' read -r _ _ _ _ _ _ lid < "$STUB_STATE.lock"
+    [[ "$3" == "$lid" || "$3" == proj-rollout-lock ]] || { echo "Error: No such container: $3" >&2; exit 1; }
+    rm -f "$STUB_STATE.lock" ;;
   inspect)
     t="$3"; cid="${@: -1}"; svc="${cid#cid-}"
     case "$t" in
-      *com.omarchy.lock.by*) [[ -f "$STUB_STATE.lock" ]] || exit 1; IFS='|' read -r by holder started until created nonce < "$STUB_STATE.lock"; echo "$by|$holder|$started|$until|$created" ;;
-      *com.omarchy.lock.nonce*) [[ -f "$STUB_STATE.lock" ]] || exit 1; IFS='|' read -r by holder started until created nonce < "$STUB_STATE.lock"; echo "$holder|$started|$nonce" ;;
+      *com.omarchy.lock.by*) [[ -f "$STUB_STATE.lock" ]] || exit 1; IFS='|' read -r by holder started until created nonce lid < "$STUB_STATE.lock"; echo "$by|$holder|$started|$until|$created|$lid" ;;
+      *com.omarchy.lock.nonce*) [[ -f "$STUB_STATE.lock" ]] || exit 1; IFS='|' read -r by holder started until created nonce lid < "$STUB_STATE.lock"; echo "$holder|$started|$nonce|$lid" ;;
       "{{.State.Running}} {{.State.StartedAt}}") line="$(awk -v c="$cid" '$1==c {print $2, $3}' "$STUB_STATE.holders" 2>/dev/null)"; [[ -n "$line" ]] || { echo "Error: No such object: $cid" >&2; exit 1; }; echo "$line" ;;
       "{{.Id}}") echo "$cid" ;;
       "{{.State.StartedAt}}") [[ "$cid" == "$STUB_SELF" ]] && echo "$STUB_SELF_STARTED" ;;
@@ -140,6 +150,8 @@ STUB_LOG="$STUB_LOG"; STUB_STATE="$STUB_STATE"
 S
 cat >> "$tmp/bin/curl" <<'S'
 url="${@: -1}"; echo "curl $url" >> "$STUB_LOG"
+# /api/v1/version: what STUB_STATE.version says, nothing when it is not there.
+if [[ "$url" == */api/v1/version ]]; then [[ -f "$STUB_STATE.version" ]] || exit 7; cat "$STUB_STATE.version"; exit 0; fi
 [[ -f "$STUB_STATE.follow" ]] || exit 7
 [[ "$(cat "$STUB_STATE.follow")" == 404 ]] && exit 22
 cat "$STUB_STATE.follow"
@@ -193,7 +205,7 @@ grep -q ENVLEAK "$STUB_LOG" && fail "the container's own environment reached com
 create="$(grep -n '^docker create --name proj-rollout-lock ' "$STUB_LOG" || true)"
 [[ -n "$create" ]] || fail "a round takes the lock: $(grep create "$STUB_LOG")"
 grep -q -- "--label com.omarchy.lock.by=once --label com.omarchy.lock.holder=$SELF --label com.omarchy.lock.started=$STUB_SELF_STARTED" <<<"$create" || fail "the lock names its holder and when it started: $create"
-rm_at="$(grep -n '^docker rm -f proj-rollout-lock$' "$STUB_LOG" | cut -d: -f1 | tail -1)"; run_at="$(grep -n ' run -d --rm ' "$STUB_LOG" | cut -d: -f1)"
+rm_at="$(grep -nE '^docker rm -f lock[0-9a-f]+$' "$STUB_LOG" | cut -d: -f1 | tail -1)"; run_at="$(grep -n ' run -d --rm ' "$STUB_LOG" | cut -d: -f1)"
 [[ -n "$rm_at" && -n "$run_at" ]] && (( rm_at < run_at )) || fail "the lock is released before the one-off that replaces the updater: rm at ${rm_at:-never}, run at ${run_at:-never}"
 [[ ! -f "$STUB_STATE.lock" ]] || fail "no lock is left after the round"
 # The guard ran before it: the new updater's self-test, and the samples, before any image went.
@@ -304,7 +316,7 @@ S
 changed() { sed -i.bak -e 's/^broker .*/broker sha256:aaaaaaaaaaaaaaaa sha256:bbbbbbbbbbbbbbbb/' -e 's/^project .*/project sha256:aaaaaaaaaaaaaaaa sha256:bbbbbbbbbbbbbbbb/' "$STUB_STATE"; }
 future=$(( $(date +%s) + 3600 )); past=$(( $(date +%s) - 60 ))
 lock_held() { # by holder started until
-  printf '%s|%s|%s|%s|2026-09-30T13:47:05.000Z|n0\n' "$1" "$2" "$3" "$4" > "$STUB_STATE.lock"
+  printf '%s|%s|%s|%s|2026-09-30T13:47:05.000Z|n0|lockheld0\n' "$1" "$2" "$3" "$4" > "$STUB_STATE.lock"
 }
 # A round runs already in the loop, its holder alive and the lock before its expiry: --once skips, and says so.
 reset_lock; changed
@@ -324,6 +336,18 @@ for holders in "" "cid-updater false 2026-09-30T13:40:00Z" "cid-updater true 202
   grep -q " up -d --no-deps --no-build broker$" "$STUB_LOG" || fail "and the round runs (${holders:-gone})"
   [[ ! -f "$STUB_STATE.lock" ]] || fail "and releases the lock it took (${holders:-gone})"
 done
+# Two rounds that both judged the same dead lock: the other broke it and took the lock between this round's read and its removal.
+# This round removes the lock it judged by its id — gone already, so nothing — and the create decides: it skips, and the other
+# round's lock stays. (Removed by name, it would remove the other's fresh lock and take one too: two rounds holding the lock.)
+reset_lock; changed
+lock_held once cid-updater 2026-09-30T13:40:00Z "$future"
+echo "printf '%s\n' 'loop|cid-other|2026-09-30T14:00:00Z|$future|2026-09-30T14:00:01.000Z|n9|lockother9' > \"\$STUB_STATE.lock\"; echo 'cid-other true 2026-09-30T14:00:00Z' > \"\$STUB_STATE.holders\"" > "$STUB_STATE.on-rm"
+: > "$STUB_LOG"
+out="$("$R" --once)" || fail "a round that lost the lock is no failure: $out"
+grep -q " up -d " "$STUB_LOG" && fail "two rounds hold the lock: the one that lost the race replaced services too: $(grep ' up ' "$STUB_LOG")"
+[[ "$(cut -d'|' -f7 "$STUB_STATE.lock")" == lockother9 ]] || fail "the other round's lock stays: $(cat "$STUB_STATE.lock")"
+grep -q "another round took the lock first; skipping" <<<"$out" || fail "the round that lost says so: $out"
+grep -q "^docker rm -f lockheld0$" "$STUB_LOG" && ! grep -q "^docker rm -f proj-rollout-lock$" "$STUB_LOG" || fail "the dead lock is removed by the id it was judged by, never by its name: $(grep '^docker rm' "$STUB_LOG")"
 # Its holder alive, past its expiry: stuck — broken, with the line.
 reset_lock; changed
 lock_held loop cid-updater 2026-09-30T13:40:00Z "$past"; echo "cid-updater true 2026-09-30T13:40:00Z" > "$STUB_STATE.holders"
@@ -340,7 +364,7 @@ out="$("$R" --once)"
 grep -q "a lock from 13:47 outlived its 4 h: broken" <<<"$out" || fail "and broken after it: $out"
 # A release never removes a lock that is not its own: another round broke this one's and took it meanwhile.
 reset_lock; changed
-echo "printf '%s\n' 'loop|cid-other|2026-09-30T14:00:00Z|$future|2026-09-30T14:00:01.000Z|n9' > \"\$STUB_STATE.lock\"" > "$STUB_STATE.on-up"
+echo "printf '%s\n' 'loop|cid-other|2026-09-30T14:00:00Z|$future|2026-09-30T14:00:01.000Z|n9|lockother9' > \"\$STUB_STATE.lock\"" > "$STUB_STATE.on-up"
 : > "$STUB_LOG"
 out="$("$R" --once)"
 grep -q "the lock proj-rollout-lock is another round's now; leaving it" <<<"$out" || fail "a lock another round took is not released: $out"
@@ -401,6 +425,22 @@ out="$("$R" --once)"
 grep -q "does not stay up here (its updater fails its self-test: self-test: the runtime's socket does not answer)" <<<"$out" || fail "a new updater that fails its self-test is not adopted: $out"
 grep -qE ' run -d |image rm' "$STUB_LOG" && fail "no self-replacement and no image removed"
 rm -f "$STUB_STATE.selftest-fail"
+# The image its service now names is from before #277 (a rollback past it: no com.omarchy.updater.follows label, and an updater
+# that answers --self-test with its usage): adopted on the guard of the set alone, said, and the old images go — never a rollback
+# the set refuses, round after round, with a self-test the older updater cannot run.
+reset_lock; changed; touch "$STUB_STATE.nolabel" "$STUB_STATE.selftest-fail"
+sed -i.bak 's/^updater .*/updater sha256:aaaaaaaaaaaaaaaa sha256:bbbbbbbbbbbbbbbb/' "$STUB_STATE"; : > "$STUB_LOG"
+out="$("$R" --once)"
+grep -q "updater: the image it now names (bbbbbbbbbbbb) is from before #277 — no --self-test to run: adopted on the guard alone" <<<"$out" || fail "an updater from before #277 is adopted on the guard alone: $out"
+grep -q -- "--self-test" "$STUB_LOG" && fail "and no self-test is asked of it: $(grep -- --self-test "$STUB_LOG")"
+grep -q "updater: replacing itself through a one-off" <<<"$out" && grep -q 'image rm sha256:aaaaaaaaaaaaaaaa' "$STUB_LOG" || fail "it replaces itself, and the old images go: $out"
+# But the guard of the set still holds it back: an older image under which a service keeps restarting is not adopted either.
+reset_lock; changed; touch "$STUB_STATE.nolabel"
+sed -i.bak 's/^updater .*/updater sha256:aaaaaaaaaaaaaaaa sha256:bbbbbbbbbbbbbbbb/' "$STUB_STATE"
+printf 'running 0 0\nrestarting 1 1\nrestarting 3 1\n' > "$STUB_STATE.status-project"; : > "$STUB_LOG"
+out="$("$R" --once)"
+grep -q "does not stay up here (project restarting)" <<<"$out" && ! grep -qE ' run -d |image rm' "$STUB_LOG" || fail "the set's guard holds for an older image too: $out"
+rm -f "$STUB_STATE.nolabel" "$STUB_STATE.selftest-fail"
 echo "ok: the guard"
 
 # --self-test: the socket answers, compose reads the project, and it follows.
@@ -454,12 +494,22 @@ grep -q "a round runs already" "$tmp/loop.out" && fail "a round's own next round
 follow v1.0.2 "$UPD"
 until_rounds 3
 grep -q "a round: the pool's release is v1.0.2 (was v1.0.3)" "$tmp/loop.out" || fail "a rollback is a round: $(cat "$tmp/loop.out")"
-# The pool answering 404 (a Worker from before #277), garbage or nothing: no round until ROLLOUT_EVERY.
+# The pool answering 404 (a Worker from before #277), garbage or nothing, and no /version either: no round until ROLLOUT_EVERY.
 for answer in 404 "not json" ""; do
   if [[ -n "$answer" ]]; then printf '%s' "$answer" > "$STUB_STATE.follow"; else rm -f "$STUB_STATE.follow"; fi
   /bin/sleep 1.2
   (( $(rounds) == 3 )) || fail "a pool that says ${answer:-nothing} starts no round before ROLLOUT_EVERY: $(cat "$tmp/loop.out")"
 done
+# A rollback past #277: follow is gone (404), and the older Worker's /version says its release. The same release, no round; a
+# lower one, a round at the next poll — not at the fifteen-minute round.
+echo 404 > "$STUB_STATE.follow"; echo '{"version":"v1.0.2","commit":"abc"}' > "$STUB_STATE.version"; : > "$STUB_LOG"
+/bin/sleep 1.2
+grep -q '^curl http://pool.test/api/v1/version$' "$STUB_LOG" || fail "without follow, the pool's /version is asked: $(grep curl "$STUB_LOG" | sort -u)"
+(( $(rounds) == 3 )) || fail "the release /version says is the one the last round ran for: no round: $(cat "$tmp/loop.out")"
+echo '{"version":"v1.0.1","commit":"def"}' > "$STUB_STATE.version"
+until_rounds 4
+grep -q "a round: the pool's release is v1.0.1 (was v1.0.2)" "$tmp/loop.out" || fail "a rollback past #277 is a round within one poll: $(cat "$tmp/loop.out")"
+rm -f "$STUB_STATE.version"
 stop_loop
 [[ ! -f "$STUB_STATE.lock" ]] || fail "a stopped loop leaves no lock"
 # A malformed id file is skipped: the set's other ids are asked.

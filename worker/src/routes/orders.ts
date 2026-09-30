@@ -18,10 +18,10 @@
  * refused before any of this runs (agents.ts agentTokenRefusal): no route
  * here is an agent's.
  */
-import { json, readJson, type Env } from "../index";
+import { edgeHit, edgeStore, json, readJson, type Env } from "../index";
 import { isMaintainer, viaOf, type Contributor } from "./contributors";
 import { aliveSince, workerView, type WorkerRow } from "./factory";
-import { version as running } from "../meta";
+import { machineOrigin, version as running } from "../meta";
 import {
   answerCode, breakerKey, breakerOf, breakerScope, capRefusal, cleanText, codeSentence, isOrderKind, loginCapWords, issueOrder, openOrdersOf, orderFacts, orderVerdicts, providerOf, readSite, refreshOpen, rulesScale, siteWords,
   ORDER_KINDS, ORDER_RIGHTS, OUTCOMES, RIGHT_OF, SITE_WORKERS_SQL, FOLLOW_MAX_IDS, FOLLOW_POLL_S, TTL_UPDATE_MIN,
@@ -282,6 +282,9 @@ export const FOLLOW_SQL = "SELECT id, version, open_orders FROM build_workers WH
 /** A worker id as registrations make them (routes/contributors.ts): the updater keeps only what matches it. */
 const WORKER_ID = /^[A-Za-z0-9_.-]{1,128}$/;
 
+/** How long the edge keeps a follow answer: well under an updater's poll, so its own polls never meet their previous copy. */
+const FOLLOW_EDGE_S = 30;
+
 /**
  * GET /factory/follow?ids=a,b — what a set's updater polls every two
  * minutes (#277, part 3): the pool's release, and for each worker it names,
@@ -292,7 +295,8 @@ const WORKER_ID = /^[A-Za-z0-9_.-]{1,128}$/;
  * the pool's release. Public, like /workers, which shows all of it: ids,
  * versions and open orders. Nothing here says which workers share a host
  * (there is no site parameter: the updater names its workers by id). One
- * statement by the primary key, no write; cached thirty seconds per set.
+ * statement by the primary key, no write; kept at the edge thirty seconds
+ * per set and per release of the pool.
  */
 export async function handleFollow(url: URL, env: Env): Promise<Response> {
   const raw = url.searchParams.get("ids") ?? "";
@@ -301,10 +305,16 @@ export async function handleFollow(url: URL, env: Env): Promise<Response> {
   if (ids.length > FOLLOW_MAX_IDS) return json({ error: `ids: at most ${FOLLOW_MAX_IDS} workers` }, 400);
   const bad = ids.find((id) => !WORKER_ID.test(id));
   if (bad !== undefined) return json({ error: "ids: a worker id is letters, digits, '.', '_' and '-'" }, 400);
-  const rows = (await env.DB.prepare(FOLLOW_SQL).bind(JSON.stringify(ids)).all<{ id: string; version: string | null; open_orders: string | null }>()).results;
   const pool = running(env);
+  // The edge keeps an answer FOLLOW_EDGE_S, under the URL and the pool's release together: a deploy or a rollback moves the key, so
+  // no updater is ever served an answer from before it, whoever asked the same URL last — the release is seen at the first poll
+  // after it, within FOLLOW_POLL_S. (An updater's own polls, FOLLOW_POLL_S apart, never meet its previous copy either.)
+  const key = new Request(`${machineOrigin(url)}${url.pathname}${url.search}&release=${encodeURIComponent(`${pool.version}@${pool.deployed_at ?? ""}`)}`, { method: "GET" });
+  const hit = await edgeHit(key);
+  if (hit) return hit;
+  const rows = (await env.DB.prepare(FOLLOW_SQL).bind(JSON.stringify(ids)).all<{ id: string; version: string | null; open_orders: string | null }>()).results;
   const byId = new Map(rows.map((r) => [r.id, r]));
-  return json({
+  const res = json({
     latest: pool.version,
     deployed_at: pool.deployed_at,
     poll_s: FOLLOW_POLL_S,
@@ -312,5 +322,8 @@ export async function handleFollow(url: URL, env: Env): Promise<Response> {
       const r = byId.get(id)!;
       return { id, version: r.version, outdated: updateState(r.version, pool).outdated, update: openOrdersOf(r.open_orders).find((o) => o.kind === "update")?.id ?? null };
     }),
-  }, 200, { "cache-control": "public, max-age=30" });
+  }, 200, { "cache-control": `public, max-age=${FOLLOW_EDGE_S}` });
+  await edgeStore(key, res.clone(), FOLLOW_EDGE_S);
+  res.headers.set("x-pool-cache", "miss");
+  return res;
 }

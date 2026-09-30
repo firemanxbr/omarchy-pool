@@ -5,24 +5,35 @@
 #
 #   gh workflow run rollback.yml -f to=v1.0.2
 #
+# 0. Before anything moves: that release's images passed both smoke starts
+#    — its multi-arch `:v1.0.2` exists, which release.yml writes only once
+#    both architectures started every role (a release whose smoke start
+#    failed left `:<arch>-v1.0.2` pushed and no `:v1.0.2`, and is refused
+#    here) — and its Worker is checked out, installed (`npm ci`) and built
+#    (`wrangler deploy --dry-run`). A failure there moves nothing.
 # 1. The images: `:x86_64` and `:aarch64` re-pointed at that release's own
-#    (`:<arch>-v1.0.2`, pushed by its release and started by its smoke
-#    test), then `:latest` at both — each new digest signed, as a release
-#    signs its own.
+#    (`:<arch>-v1.0.2`, a copy), then `:latest` at its `:v1.0.2` — each new
+#    digest signed, as a release signs its own. What each tag named before
+#    is noted first.
 # 2. The Worker of that release, deployed from its tag with
 #    `POOL_VERSION=v1.0.2` and `POOL_DEPLOYED_AT` now: a pool left at the
 #    newer release would refuse the older images as outdated (426). No
 #    migration runs: they are forward-only and additive, and the database
-#    keeps the newer ones. A Worker from before #277 (a tag without
-#    worker/src/orders.ts) spreads a worker's whole row in its listing, so
-#    what #277 keeps to itself — a worker's site, its process, the rules'
-#    state — is cleared first (docs/security-model: *A Worker rolled back
-#    past #277*).
+#    keeps the newer ones. A deploy that fails puts the three tags back
+#    where they were, so the fleet never follows images the pool refuses;
+#    re-running the rollback is safe. A Worker from before #277 (a tag
+#    without worker/src/orders.ts) spreads a worker's whole row in its
+#    listing, so what #277 keeps to itself — a worker's site, its process,
+#    the rules' state — is cleared just before that Worker is deployed and
+#    once more right after: until it serves, the Worker from #277 writes
+#    them back at every claim, and the older one never writes them
+#    (docs/security-model: *A Worker rolled back past #277*).
 # 3. A `deploy` event, "rolled back to v1.0.2 (from v1.0.3)", and the running
 #    version checked.
 #
 # Then the fleet follows the brain: every updater from #277 on sees the
-# pool's release change within two minutes and replaces what runs the other
+# pool's release change within two minutes (through /version when the
+# Worker it went back to knows no follow) and replaces what runs the other
 # image (the Studio's too, since its one-time step; an updater from before
 # #277 at its own fifteen-minute round).
 #
@@ -42,42 +53,68 @@ git rev-parse -q --verify "refs/tags/$to^{commit}" >/dev/null || die "$to is not
 : "${OMARCHY_API:=https://pkgs.omarchy-pool.org}"
 from="$(curl -fsS --max-time 30 "$OMARCHY_API/api/v1/version" 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true)"
 say "rolling the pool back to $to (from ${from:-an unknown release})"
+digest_of() { docker buildx imagetools inspect "$1" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"'; }
 
-# 1. The images, each architecture's tag, then :latest at both.
-digests=()
+# 0. What must hold before anything moves.
+docker buildx imagetools inspect "$IMAGE:$to" >/dev/null 2>&1 \
+  || die "$IMAGE:$to does not exist: $to's images never passed both architectures' smoke starts (or were never pushed) — go back to the release before it; nothing moved"
 for arch in x86_64 aarch64; do
-  docker buildx imagetools inspect "$IMAGE:$arch-$to" >/dev/null || die "$IMAGE:$arch-$to does not exist: that release's image was never pushed"
+  docker buildx imagetools inspect "$IMAGE:$arch-$to" >/dev/null 2>&1 || die "$IMAGE:$arch-$to does not exist: that release's image was never pushed; nothing moved"
 done
-for arch in x86_64 aarch64; do
-  docker buildx imagetools create -t "$IMAGE:$arch" "$IMAGE:$arch-$to"
-  say "$IMAGE:$arch → $arch-$to"
-done
-docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:x86_64-$to" "$IMAGE:aarch64-$to"
-say "$IMAGE:latest → $to (both architectures)"
-if [[ "${ROLLBACK_SIGN:-1}" == 1 ]]; then
-  for t in x86_64 aarch64 latest; do
-    digests+=("$(docker buildx imagetools inspect "$IMAGE:$t" --format '{{json .Manifest.Digest}}' | tr -d '"')")
-  done
-  for d in "${digests[@]}"; do cosign sign --yes "$IMAGE@$d"; done
-fi
-
-# 2. The Worker of that release, from its tag.
 at="$(mktemp -d)"
 trap 'git worktree remove --force "$at" >/dev/null 2>&1 || rm -rf "$at"' EXIT
-git worktree add --detach "$at" "$to" >/dev/null 2>&1 || die "could not check out $to"
+git worktree add --detach "$at" "$to" >/dev/null 2>&1 || die "could not check out $to: nothing moved"
 commit="$(git rev-parse "$to^{commit}")"
-deployed_at="$(date -u +%FT%TZ)"
-(
-  cd "$at/worker"
-  npm ci
-  if ! git cat-file -e "$to:worker/src/orders.ts" 2>/dev/null; then
-    npx wrangler d1 execute omarchy-repo --remote --command \
-      "UPDATE build_workers SET site = NULL, instance = NULL, instance_prev = NULL, auto_orders = NULL WHERE site IS NOT NULL OR instance IS NOT NULL OR instance_prev IS NOT NULL OR auto_orders IS NOT NULL" >/dev/null
-    echo "==> $to is from before #277: what its listing would serve of #277's columns (site, instance, the rules' state) is cleared"
+(cd "$at/worker" && npm ci) || die "$to's Worker did not install (npm ci): nothing moved"
+(cd "$at/worker" && npx wrangler deploy --dry-run --outdir "$at/dry-run" >/dev/null) || die "$to's Worker does not build (wrangler deploy --dry-run): nothing moved"
+pre277=0; git cat-file -e "$to:worker/src/orders.ts" 2>/dev/null || pre277=1
+
+# 1. The images: what each tag names now, then each architecture's tag, then :latest.
+tags=(x86_64 aarch64 latest); before=()
+for t in "${tags[@]}"; do before+=("$(digest_of "$IMAGE:$t" || true)"); done
+restore() { # the three tags back where they were — each by the digest it named, a copy
+  local i ok=1
+  for i in "${!tags[@]}"; do
+    [[ -n "${before[$i]}" ]] || continue
+    docker buildx imagetools create --prefer-index=false -t "$IMAGE:${tags[$i]}" "$IMAGE@${before[$i]}" >/dev/null || ok=0
+  done
+  (( ok ))
+}
+# Fails when a step fails (never on the first, errexit is off inside an `if`): each step says so itself.
+move_images() {
+  local arch t
+  for arch in x86_64 aarch64; do
+    docker buildx imagetools create --prefer-index=false -t "$IMAGE:$arch" "$IMAGE:$arch-$to" || return 1
+    say "$IMAGE:$arch → $arch-$to"
+  done
+  docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:$to" || return 1
+  say "$IMAGE:latest → $to (both architectures)"
+  if [[ "${ROLLBACK_SIGN:-1}" == 1 ]]; then
+    for t in "${tags[@]}"; do cosign sign --yes "$IMAGE@$(digest_of "$IMAGE:$t")" || return 1; done
   fi
-  npx wrangler deploy --var "POOL_VERSION:$to" --var "POOL_COMMIT:$commit" --var "POOL_DEPLOYED_AT:$deployed_at"
-)
+}
+undo() { # why — the images back, and the rollback ends: nothing else moved
+  if restore; then die "$1: the images are back where they were, and the pool still runs ${from:-its release}; nothing else moved — re-running rollback.yml -f to=$to is safe"
+  else die "$1, and the images could not all be put back: re-run rollback.yml -f to=$to (safe), or re-run the latest release's manifest job"; fi
+}
+move_images || undo "the images did not all move to $to"
+
+# 2. The Worker of that release, from its tag; #277's columns cleared around the deploy when it is from before #277.
+clear_277() {
+  npx wrangler d1 execute omarchy-repo --remote --command \
+    "UPDATE build_workers SET site = NULL, instance = NULL, instance_prev = NULL, auto_orders = NULL WHERE site IS NOT NULL OR instance IS NOT NULL OR instance_prev IS NOT NULL OR auto_orders IS NOT NULL" >/dev/null
+}
+deployed_at="$(date -u +%FT%TZ)"
+# (Inside the `if`, errexit is off: each step is chained. A first clear that fails is no reason to stop; the one after the deploy is.)
+if ! (
+  cd "$at/worker" && { (( pre277 == 0 )) || clear_277 || true; } \
+    && npx wrangler deploy --var "POOL_VERSION:$to" --var "POOL_COMMIT:$commit" --var "POOL_DEPLOYED_AT:$deployed_at"
+); then undo "the Worker of $to did not deploy"; fi
 say "the Worker of $to is deployed ($commit)"
+if (( pre277 )); then
+  (cd "$at/worker" && clear_277) || die "the Worker of $to is deployed, but #277's columns were not cleared after it: run the UPDATE of docs/security-model (A Worker rolled back past #277) by hand"
+  echo "==> $to is from before #277: what its listing would serve of #277's columns (site, instance, the rules' state) is cleared, before and after its deploy"
+fi
 
 # 3. On the record, and what runs now.
 payload="$(jq -nc --arg v "$to" --arg from "${from:-}" --arg sha "$commit" --arg run "${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-firemanxbr/omarchy-pool}/actions/runs/${GITHUB_RUN_ID:-0}" \

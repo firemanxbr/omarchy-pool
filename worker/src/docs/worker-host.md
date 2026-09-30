@@ -42,8 +42,9 @@ cd /srv/omarchy-pool && docker compose pull && docker compose up -d
 `docker compose up -d` starts the updater with the rest, and from then on it
 keeps the host on the pool's release. This is the only bare `up -d`. Its
 configuration hashes are the host compose's, so the updater's first round
-replaces every service once. After it, use `./rollout.sh`, or `docker compose
-up -d --no-deps <service>` for one service: a bare `up -d` re-stamps every
+replaces every service once. After it, use `./rollout.sh` (it wakes the
+updater, or starts it as it is, never recreated), or `docker compose up -d
+--no-deps <service>` for one service: a bare `up -d` re-stamps every
 service's hash with the host's compose, and the updater's next round drains
 and recreates every service once more. A host installed before #277 does the
 runbook's one-time step instead (*The Studio host*, *Once: the updater*).
@@ -53,18 +54,17 @@ Operate:
 ```bash
 docker compose ps                                 # the eight that run by default (the updater among them), and whether they are up
 docker compose logs -f --tail 50 review-aarch64   # one worker; docker compose logs -f updater for the rollout
-./rollout.sh                                      # wakes the updater: a rolling upgrade now (it follows each release within 2 minutes by itself); --check to only look
-docker kill <container>                           # only for a stall of the engine itself
+./rollout.sh                                      # wakes the updater: a rolling upgrade now (it follows each release within 2 minutes by itself), or starts it as it is; --check to only look
+docker compose restart pool-x86_64                # a worker stuck in a task — a drain: it finishes its task first (up to 3 h)
+docker kill <container>                           # one that must end now, or a stall of the engine itself
 ```
 
-A worker that looks stuck is operated from its page, `/worker/<id>`: **Stop
-its task** if the task hangs (a build, a trial, an audit or a check stops
-within 5 minutes while its container or script runs; a build already
-uploading once its container has ended, a trial publishing into the lab, and
-a pool job in the worker's own process stop at their next call to the pool;
-the task goes back to the queue then, or when its lease ends), then
-**Restart**; **Restart agent service** for `agent-proxy`; **Update** once its
-set's updater follows the pool.
+A worker that looks stuck between tasks is operated from its page,
+`/worker/<id>`: **Re-check agent**, **Restart**, **Restart agent service**
+for `agent-proxy`, and **Update** once its set's updater follows the pool.
+One stuck inside a task claims nothing, so no order reaches it: `docker
+compose restart` above until Stop its task, on the same page, comes with
+#277's next part.
 
 The Workers page lists them by role, with the agent each reports; a
 worker that is not alive there is not running here. One whose agent does
