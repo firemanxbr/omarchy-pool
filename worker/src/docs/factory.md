@@ -330,9 +330,11 @@ workspace is full, and reports an upload the pool refused as the build's
 failure — the reason is on the build's page. A worker token is revocable
 (`DELETE /factory/workers/<id>`); registering again replaces your contributor
 token. `cosign verify ghcr.io/firemanxbr/omarchy-worker:latest
---certificate-identity-regexp github.com/firemanxbr/omarchy-pool
+--certificate-identity https://github.com/firemanxbr/omarchy-pool/.github/workflows/release.yml@refs/heads/main
 --certificate-oidc-issuer https://token.actions.githubusercontent.com` checks
-the image is the project's.
+the image is the project's: signed by `release.yml` on `main`, and by nothing
+else (after a rollback, by `rollback.yml@refs/heads/main`: the same command
+with that file).
 
 Who approves, and how one becomes a maintainer, is
 [Governance](../docs/GOVERNANCE.md): a file in this repository,

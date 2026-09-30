@@ -49,7 +49,9 @@
 #
 # Needs: IMAGE (ghcr.io/<owner>/omarchy-worker), OMARCHY_API (the pool's API,
 # to read what runs), CLOUDFLARE_API_TOKEN (the deploy's), docker with
-# buildx, git with the tags, node; cosign to sign (ROLLBACK_SIGN=0 skips it).
+# buildx, git with the tags, node; cosign to sign (ROLLBACK_SIGN=0 skips it),
+# the exact cosign rollback.yml installs, against the public-good Fulcio and
+# Rekor named on the call as release.yml names them (#308).
 # A `to` that is not a release tag of this repository is refused before
 # anything moves.
 set -euo pipefail
@@ -100,7 +102,7 @@ move_images() {
   docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:$to" || return 1
   say "$IMAGE:latest → $to (both architectures)"
   if [[ "${ROLLBACK_SIGN:-1}" == 1 ]]; then
-    for t in "${tags[@]}"; do cosign sign --yes "$IMAGE@$(digest_of "$IMAGE:$t")" || return 1; done
+    for t in "${tags[@]}"; do cosign sign --yes --fulcio-url=https://fulcio.sigstore.dev --rekor-url=https://rekor.sigstore.dev "$IMAGE@$(digest_of "$IMAGE:$t")" || return 1; done
   fi
 }
 undo() { # why — the images back, and the rollback ends: nothing else moved

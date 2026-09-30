@@ -110,6 +110,9 @@ jobs:
       - name: The release — no tag a host follows moves before both architectures started every role
         working-directory: .
         run: bash tests/release-workflow.sh
+      - name: What the hosts' trust relies on — one exact cosign, signing only in reviewed environments, the exact identity, pinned images
+        working-directory: .
+        run: bash tests/trust-pins.sh
       - name: The one command to run a worker, against a stubbed docker and pool
         working-directory: .
         run: bash tests/omarchy-worker-cli.sh

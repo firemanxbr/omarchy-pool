@@ -254,7 +254,9 @@ columns back at every claim; the older one never writes them.
   `rollout` that enables Update for itself; the worst outcome is an Update
   nothing executes, which expires.
 - **The Omarchy Packaging image is signed** (cosign, keyless, GitHub OIDC)
-  so a contributor can verify the worker they run is the project's.
+  so a contributor can verify the worker they run is the project's: by one
+  exact cosign, only from `release.yml` (or `rollback.yml`) on `main`, and
+  checked against that exact identity, never a pattern (#308).
 
 ## After approval, the gates still hold
 

@@ -69,7 +69,7 @@ creates="$(grep 'imagetools create' "$STUB_LOG")"
 docker buildx imagetools create --prefer-index=false -t $IMAGE:aarch64 $IMAGE:aarch64-v1.0.2
 docker buildx imagetools create -t $IMAGE:latest $IMAGE:v1.0.2" ]] || fail "the three tags re-pointed at v1.0.2's images, the architectures first: $creates"
 grep -q "^docker buildx imagetools inspect $IMAGE:v1.0.2$" "$STUB_LOG" || fail "the release's multi-arch tag, the mark that both smoke starts passed, is asked for first"
-[[ "$(grep -cE "^cosign sign --yes $IMAGE@sha256:[0-9a-f]{64}$" "$STUB_LOG")" == 3 ]] || fail "each new digest signed"
+[[ "$(grep -cE "^cosign sign --yes --fulcio-url=https://fulcio.sigstore.dev --rekor-url=https://rekor.sigstore.dev $IMAGE@sha256:[0-9a-f]{64}$" "$STUB_LOG")" == 3 ]] || fail "each new digest signed"
 grep -q "npm ci (in repo-at/worker, null)" <<<"$(sed -E 's#\(in [^/]+/worker#(in repo-at/worker#' "$STUB_LOG")" || fail "the Worker is built from the tag's own tree (v1.0.2's package.json): $(grep npm "$STUB_LOG")"
 deploy="$(grep 'npx wrangler deploy --var' "$STUB_LOG")"
 [[ "$deploy" == "npx wrangler deploy --var POOL_VERSION:v1.0.2 --var POOL_COMMIT:$(git -C "$tmp/repo" rev-parse 'v1.0.2^{commit}') --var POOL_DEPLOYED_AT:"* ]] || fail "the Worker deployed with the release's version and commit: $deploy"
