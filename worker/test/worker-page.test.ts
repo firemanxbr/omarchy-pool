@@ -24,6 +24,23 @@ function shell(): { wtState: (w: unknown) => string; workerCounts: (ws: unknown[
   return runScript(src, { pathname: "/workers", functions: ["wtState", "workerCounts", "wtStatus", "wtMarks", "wtId", "workerName", "drainedRoles", "whereOptions"] }) as any;
 }
 
+/** The Worker's own answer, as the page's script gets it in a browser: nobody signed in, or the session `cookie` names. */
+async function real(path: string, init?: RequestInit, cookie?: string): Promise<Response> {
+  const ctx = createExecutionContext();
+  const headers = { ...(init?.headers as Record<string, string> | undefined), ...(cookie ? { cookie } : {}) };
+  const res = await worker.fetch(new Request(`http://pool.test${path}`, { ...init, headers }), env, ctx);
+  await waitOnExecutionContext(ctx);
+  return res;
+}
+
+/** /worker/:id's served script, run over the Worker's own answers, and what it drew once they are in. */
+async function drawn(id: string, cookie?: string): Promise<Record<string, { innerHTML: string; textContent: string }>> {
+  const html = (await get(`/worker/${id}`)).text;
+  const d = runScript(scriptOf(html), { pathname: `/worker/${id}`, functions: [], fetch: (path, init) => real(path, init, cookie) });
+  await new Promise((r) => setTimeout(r, 60));
+  return d.nodes;
+}
+
 async function get(path: string, cookie?: string): Promise<{ status: number; text: string }> {
   const ctx = createExecutionContext();
   const res = await worker.fetch(new Request(`http://pool.test${path}`, { headers: cookie ? { cookie } : {} }), env, ctx);
@@ -188,6 +205,40 @@ describe("the worker's page", () => {
     expect(pub.worker).not.toHaveProperty("rollout");
     const project = JSON.parse((await get(`/api/v1/factory/workers/${F.worker}`)).text);
     expect(project.worker.set_line).toContain("does not report its set");
+  });
+
+  // v1.0.4's production check (#299): an unknown id's /can answers 404, and the page read CAN.can.recheck off that body — a TypeError printed under Operate.
+  it("shows an unknown worker the page's own \"no such worker\", with nothing to press and no script error: /can's 404 is not a verdict", async () => {
+    expect((await get("/api/v1/factory/workers/nobody-at-all/can")).status).toBe(404);
+    const n = await drawn("nobody-at-all");
+    expect(n["#wk-name"].textContent).toBe("nobody-at-all");
+    expect(n["#wk-lede"].textContent).toBe("no such worker: it was never registered, or its registration is gone");
+    const all = Object.values(n).map((x) => `${x.innerHTML} ${x.textContent}`).join(" ");
+    for (const word of ["did not answer", "TypeError", "Cannot read", "undefined"]) expect(all).not.toContain(word);
+    // The buttons stay as served: grey.
+    expect(n["#wk-ops"]?.innerHTML ?? "").toBe("");
+    expect(n["#wk-stats"]?.innerHTML ?? "").toBe("");
+  });
+
+  it("tells a visitor, without a hover, why Operate is grey and where to sign in — and a signed-in reader only when an order arrives", async () => {
+    const visitor = (await drawn(F.communityWorker))["#wk-note"].innerHTML;
+    expect(visitor).toMatch(new RegExp(`^<a href="/auth/github\\?next=/worker/${F.communityWorker}" rel="nofollow">Sign in</a> to order this worker — an order is delivered with its next claim — .+\\.$`));
+    const owner = (await drawn(F.communityWorker, `omc=${F.sessions.owner}`))["#wk-note"].innerHTML;
+    expect(owner).toMatch(/^delivered with its next claim — /);
+    expect(owner).not.toContain("Sign in");
+  });
+
+  it("draws its five tiles with no empty cell at any width, and the agent's whole name", async () => {
+    const html = (await get(`/worker/${F.worker}`)).text;
+    const style = [...html.matchAll(/<style>([\s\S]*?)<\/style>/g)].map((m) => m[1]).join("\n");
+    // The kit's grid draws its lines as the --line behind a 1px gap, so a track the tiles leave empty is a grey block: five columns, or two with the fifth across both.
+    expect(style).toContain("#wk-stats { grid-template-columns: repeat(5, minmax(0, 1fr)); }");
+    expect(style).toContain("@media (max-width: 899px) { #wk-stats { grid-template-columns: 1fr 1fr; } #wk-stats > .op-stat:last-child:nth-child(odd) { grid-column: 1 / -1; } }");
+    const tiles = (await drawn(F.worker))["#wk-stats"].innerHTML.match(/<div class="op-stat"/g) ?? [];
+    expect(tiles).toHaveLength(5);
+    // The kit cuts a tile's number with an ellipsis; the worker's page wraps it, so "claude-sonnet-5" is never "claude-son…".
+    expect(style).toContain("#wk-stats .op-stat .n { white-space: normal; overflow-wrap: anywhere; }");
+    expect((await drawn(F.worker))["#wk-stats"].innerHTML).toContain('<span class="k">Agent</span><span class="n">claude-sonnet-5</span>');
   });
 
   it("says in the Factory's and Status's headers how many are drained and outdated, and never counts them idle", async () => {
