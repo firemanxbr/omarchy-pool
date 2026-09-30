@@ -21,7 +21,7 @@ const BODY = String.raw`
   <div class="hero compact">
     <p class="eyebrow">Workers</p>
     <h1>Three kinds of worker, and whose they are</h1>
-    <p class="lede">The project's take the pool's jobs. The review ones — trusted on two maintainers' word, never the owner's alone — build again what a maintainer asked for, and write the audit. A contributor's build their own packages, or whatever is queued when shared. Every worker by its id, its state in one word, and what its machine uses. <a href="/docs/workers">Run one →</a></p>
+    <p class="lede">The project's take the pool's jobs. The review ones — trusted on two maintainers' word, never the owner's alone — build again what a maintainer asked for, and write the audit. The community ones, legacy sets until they retire, build their owner's packages, or whatever is queued when shared. Every worker runs on a maintainer's host: contributors run none. Every worker by its id, its state in one word, and what its machine uses. <a href="/docs/workers">Run one (maintainers only) →</a></p>
   </div>
 
   <div class="tiles four" id="tiles"></div>
@@ -39,11 +39,11 @@ const BODY = String.raw`
     ${workerPanels([
       { kind: "project", blurb: "the pool's own jobs — sync, render, promote, health, security, gc — on the host a maintainer keeps" },
       { kind: "review", blurb: "the maintainers' side: builds again, publishes, audits — the agent through a proxy that holds the key" },
-      { kind: "community", blurb: "their own machines: their packages, or whatever is queued when shared" },
+      { kind: "community", blurb: "legacy community sets, until they retire: their owner's packages, or whatever is queued when shared" },
     ])}
   </section>
 
-  <div class="gate"><div><h3>Run one of your own</h3><p>The signed image, Docker Desktop or Podman, a token from your <a href="/me">workspace</a>: it builds only your packages, with your agent, and your builds skip the queue. Share it, and it takes whatever is queued.</p></div><a class="btn ghost" href="/docs/workers">Run a worker →</a></div>
+  <div class="gate"><div><h3>Your packages build on the pool's hosts</h3><p>Contributors do not run workers: the project provides them for everyone, and its maintainers are their only providers. Request a package and it builds here. A maintainer adds a host with the signed image (<a href="/docs/workers">Run a worker</a>, maintainers only).</p></div><a class="btn ghost" href="/docs/factory#contribute-a-package">How packaging works →</a></div>
 `;
 
 const SCRIPT = String.raw`
@@ -108,7 +108,7 @@ __CHARTS__
     $("#kinds").innerHTML =
       card("project", "Project", kinds.project, "The pool's own jobs, on the host a maintainer keeps.") +
       card("review", "Review", kinds.review, "Rebuilds, publishes and audits, on two maintainers' word.") +
-      card("community", "Contributors", kinds.community, "Their machines: their packages, or whatever is queued when shared.");
+      card("community", "Contributors", kinds.community, "Legacy community sets, until they retire: their owner's packages, or whatever is queued when shared.");
     // The load per worker, the busiest first: the name with the kind and the architecture, the bar in the kind's colour, and what it did in the tooltip.
     var ranked = d.workers.filter(function (w) { return w.alive || LOAD[w.id]; }).sort(function (a, b) { return busyOf(b) - busyOf(a); }).slice(0, 10);
     $("#c-perworker").innerHTML = ranked.length ? hrows(ranked.map(function (w) {
@@ -176,7 +176,7 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
   {
     id: "workers.hero",
     page: "/workers",
-    anchor: ["<h1>Three kinds of worker, and whose they are</h1>", '<a href="/docs/workers">Run one →</a>'],
+    anchor: ["<h1>Three kinds of worker, and whose they are</h1>", "contributors run none", '<a href="/docs/workers">Run one (maintainers only) →</a>'],
     visible: EVERYONE,
   },
   {
@@ -283,9 +283,10 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
+    // The workers are the maintainers' hosts (#331): the gate invites no one to run one, it says where a contributor's packages build and links the packaging docs; "Run a worker" is marked maintainers only.
     id: "workers.run-one-gate",
     page: "/workers",
-    anchor: ["<h3>Run one of your own</h3>", '<a href="/me">workspace</a>', '<a class="btn ghost" href="/docs/workers">Run a worker →</a>'],
+    anchor: ["<h3>Your packages build on the pool's hosts</h3>", "Contributors do not run workers", '(<a href="/docs/workers">Run a worker</a>, maintainers only)', '<a class="btn ghost" href="/docs/factory#contribute-a-package">How packaging works →</a>'],
     visible: EVERYONE,
   },
 ];

@@ -107,9 +107,9 @@ ${sourceRows()}
     <div class="cando">
       <div><h4>for contributors</h4><ul class="yes">
         <li><b>Ask for a package, on the record.</b> A request is a signed record; the project's agent drafts a recipe from the project's sources.</li>
-        <li><b>Build it at home with the same tools.</b> The same signed worker image, the same conventions, <code>namcap</code>, the same build — on your machine, with your compute. Your build is <em>evidence</em>, never the product: nothing you built is served to anyone.</li>
+        <li><b>Built on the pool's hosts, nothing to run.</b> Your request builds on the workers the maintainers provide — the same signed image, the same conventions, <code>namcap</code>, a fresh container per build. That build is <em>evidence</em>, never the product: nothing it built is served to anyone.</li>
         <li><b>A second pair of eyes before a human's.</b> When your build is staged, the pool's agent audits the recipe, the log and the metadata and attaches a report beside it.</li>
-        <li><b>Watch it happen.</b> Your workspace, your packages, your workers and every step of every build on the <a href="/factory">Factory</a> and <a href="/review">Review</a> pages; the journal keeps the record.</li>
+        <li><b>Watch it happen.</b> Your workspace, your packages and every step of every build on the <a href="/factory">Factory</a> and <a href="/review">Review</a> pages; the journal keeps the record.</li>
       </ul></div>
       <div><h4>for maintainers</h4><ul class="yes">
         <li><b>The evidence in front of you.</b> The contributor's build, the gate's verdict, the audit, the log and the recipe on one row — and <em>Build by the project</em> one press away. What the gate checks and what the agents are told is one page: <a href="/docs/what-we-test">What we test</a>.</li>
@@ -186,7 +186,7 @@ Server = ${pool}/multilib/$arch
       <tr><td>Index</td><td>A D1 (SQLite) database: one row per package object with its manifest, dependency edges, sonames; releases and ring heads; every event the pipeline records.</td></tr>
       <tr><td>API + this site</td><td>One Cloudflare Worker serving <code>/api/v1</code> and these pages.</td></tr>
       <tr><td>Pipeline</td><td>Jobs the pool queues on its own clock and project workers pull: sync (every 3 h, one release per ring), the evidence and the promotion it earns (after every sync that changed edge; rc checked every 3 h), health, security (every 3 h), the trial of every review build, GC (weekly); a metrics snapshot every 30 min and the daily cost estimate by the pool itself. GitHub only releases the code, when a maintainer dispatches it.</td></tr>
-      <tr><td>Factory</td><td>The build queue lives in the index (requests, tasks, leases); workers are containers anywhere — a contributor's laptop for their own packages, machines the project trusts for what maintainers approved — that claim a task, build it in a fresh Arch container and report; the pool signs what a project worker publishes. A lease that expires goes back to the queue.</td></tr>
+      <tr><td>Factory</td><td>The build queue lives in the index (requests, tasks, leases); workers are containers on the maintainers' hosts — the only providers of the project's compute; contributors run none — that claim a task, build it in a fresh Arch container and report; the pool signs what a project worker publishes. A lease that expires goes back to the queue.</td></tr>
       <tr><td>Tools</td><td><code>pkg-repo</code> (the publisher: sync, promote, gate, trial, render, security, gc), <code>pkg-extract</code> (manifests), <code>pkg-check</code> (the ABI check), <code>omarchy-cli</code> (the thin client) — Rust, built for both architectures on every release.</td></tr>
     </tbody></table></div>
   </section>
