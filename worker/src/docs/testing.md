@@ -99,6 +99,7 @@ the network. Two kinds of tests live there:
 | `worker-orders-bounds.test.ts` | orders at their edges (#277), on a database of their own: a person's Cancel between a claim's read and its close (one final line, the claim's close writes none); a delivered order keeping its half hour past its TTL; the breaker's matrix — which rows count (not seen for 11 minutes, revoked, a class it does not count, another provider, a spell ended, two workers of one site), a contributor's three registrations holding contributors' workers and never the project's, hysteresis (a count back at two starts the wait again, no flap), a dead site, a development pool's scale leaving it alone, two claims tripping it at once, a key the weekly gc keeps; a host's agent service restarted through its elected worker, then the other restarted itself once the service answers the first, and the page's words at each step; the emulated profile's four review workers — one service restart, the others' give-up with it, and nothing read after; a person's restart of the service holding the rules' without an issue that fails; a person whose login is `pool` a person; the community's share of the day and of the hour; a claim that names no process; a failing worker's liveness write costing what a ready one's does (the breaker's index unwritten); the kill switch; the breaker's key, the open spells or the site's workers throwing; an order riding a 426; and the caps, a rule beside a person, and two claims deciding at once |
 | `orders-budget.test.ts` | what orders cost D1 (#277), rows counted through a proxy over the real statements: an order about twenty rows written, indexes included; fifty workers without credit for a day, no order and nothing written the claims would not write anyway; an outage across twelve hosts, the breaker tripped once before any restart and a held claim writing nothing; two hosts failing a day, three restarts and three re-checks per worker at most; the pool's orders under sixty a day whatever the fleet does |
 | `worker-drain-stop.test.ts` | Drain, Resume and Stop its task (#277, part 2), on a database of their own: the owner of a contributor's worker stopping a stranger's build it runs — still leased, fenced, `lease_expires_at` unchanged, one issue line, nothing cancelled, nobody else's claim taking it; while fenced, every heartbeat `409 stopping` renewing nothing, a staging `PUT`, a multipart, `complete` and `fail` refused, and the stop not taken back; the worker's next claim giving it back (queued, `priority + 10`, the fence gone, its hand emptied, the package waiting again, one `build` line, the order done with one final line); a maintainer's stop of a project worker's job, a stale page's task refused, two stops at once fencing once; a last attempt failed at the requeue and its staged packages reclaimed; a claim's rebuild back in the queue still pinned, with its params, and an approved publish job still a publish; the ring race of rc#34 (a stopped promote holding its ring for 29 minutes, its token valid until its end, then the lease's end giving it back — the token dead, the order failed —, and only then another worker taking it); a two-process conflict requeuing nothing, a revoked worker's stop cancelled and its lease still ending, a stop counted in the restart group's six; an audit's and a trial's report taken before the stop, refused once the job's own task is fenced (the staged object unchanged) and after, to the stopped token, once another run holds it; `/can`'s `stops` per kind; the heartbeat's `stop` with `queued`, `leased` and `cancelled`; a drain held at the claim for every image — its notice once, then `204` while a task waits —, resumed, a resume before the notice closing the drain too; who resumes, the five cells of the table and nobody else, a project worker whose owner is not a maintainer lifting only a drain of their own (a maintainer's refused at the door and greyed on `/can` in the same words), and a login at its twenty still resuming; a seventh drain of a worker in an hour refused in words `/can` greys Drain with first, and six resumes in an hour never keeping a worker drained; the Build and project-build doors refusing a drained worker, the other architecture not pinned to one; a build pinned to a worker drained three minutes unpinned at the sweep with one line, and not before; the stop's `201` carrying the latest its task goes back (`until`, the page's toast on its reader's clock) and the door's note saying that time in UTC, `/can`'s note while a stop is under way, and the task view's `stop_order` gone once the task is back in the queue; an image of #277's first part (orders, but no `stop-task`) given back at its lease's end; a stop that lands between a heartbeat's, a `complete`'s or a `fail`'s read and its write (through a proxy over the DB) — nothing renewed, no token, no report taken; a heartbeat that renews an expired lease between the cron's read and its requeue keeping the lease; a fence a Worker from before it left on a queued task gone with the next lease; a stop whose lease ends on the task's last attempt saying the task failed, not that it went back; exactly one issue line and one final line for every order; and every new statement by its index, a resume's close of its drain through the open orders' index |
+| `rollback-clear.test.ts` | a rollback past #277 (#295): the UPDATE `factory/bin/release-rollback` runs around an older Worker's deploy clears every column `workerView` withholds, keeps `drained_at`, `drained_by` and `drain_reason` (a person's standing drain) and touches nothing the view serves; a column the view withholds that the clear neither clears nor keeps fails it. On a real D1: what the older Worker's `SELECT *` serves afterwards (a revoked worker's too, which `/users/:login` lists) holds none of them and no process id, `instance_churn` is 0, a task's `stop_order` is gone, and a second run changes nothing. The security model's UPDATE is the script's |
 | `worker-page.test.ts` | a worker's page (#277, `pages/worker.ts`) and its one state everywhere (`wtState` in `layout.ts`): the first of revoked, offline, building, drained, outdated, not ready, idle over every combination, a drained or outdated worker never counted idle, the pool's marks beside the state and never instead of it, every worker's name a link to its page; the page served for any id, the worker's own words never shown to the public, every button greyed with the door's own reason, and the Factory's and Status's headers; a task being stopped and a drain a building worker takes after its task drawn as marks, the error when every live pool or review worker of an architecture is drained (and not once one is resumed), and a drained worker greyed in the Build and project-build dialogs with the door's words |
 | `review.test.ts` | Review's decisions through their doors (#247): the requester refused a claim, changes, a rejection, a release and the cancel door on the claim's rebuild with the reason and the code `conflict_of_interest` (`sign_in` for nobody); who asked for a build in review still refused once the registration moved, and no adoption while a build of it is open; a claim pinned to the review worker whose agent the maintainer chose, signed and in the journal with it, two at once one claim; the rebuild's inputs carrying no staged object of the factory's build and its job's token unable to read one; a release by the maintainer who claimed it or another — a queued rebuild cancelled once, a running one's lease voided and what it staged taken, a claim on two architectures half staged let go whole and ready again, one all staged or a second release refused, two at once one release; request changes (the round stopped, the name kept, said as changes on the story, the build and the maintainer's record), reject (the name freed), approve (its publish job not the cancel door's); a note that is not text refused before any write; two approvals, or changes and a rejection, at once one decision; the agent on the record the one the rebuild ran; every decision — an adoption that takes a registration, block and lift too — a record whose signature verifies with the pool's key, written once even by two writers at once, and a journal line with who, the door and the agent; none taken back but by a block; Adopt, one door for the package page and the No maintainer tab (`routes/adopt.ts`): a synced package's maintainer of record alone, an unmaintained registration taken with its maintainer of record — signed, one `adopt` line that says which, taken once by two maintainers at once — and refused to a contributor, to the registration's owner (`conflict_of_interest`), to a package with its maintainer and to one in no ring; the queue's row writing a version whole beside its name, wrapping under it rather than cut, and a maintainer's line wrapping between its parts (#282, the stylesheet through `declared`); the handlers' own statements asked for their plans |
 | `package-view.test.ts` | a package's page (#244), the served script run over the Worker's answers for every viewer: one layout for every package, only You changing with who reads it; where each architecture is served, the files, a review's two recipes, the package's maintainer in the pool (`maintenance.maintainer`); Adopt from the page — a synced package named its maintainer and left what it was, a registration its owner left unmaintained taken with it (the one door Review's No maintainer tab posts to; the evidence an approved rebuild answered does not hold it up), refused to a contributor, the requester, a package in no ring and one with its maintainer, once when two press at once; the reads bounded by the name; a dependency's name kept whole in the graph and its version cut instead, however long (#274: the page's stylesheet, read through the fixture's `declared`, and the node the page writes); the state chip's *ready for review* and *in review* in the Factory's and Review's meaning (#274); two long names that share a prefix told apart in the graph — the side columns first, the package between wrapping its name, and a name wider than its node cut in the middle with the word that parts it from the others kept (#282: the served `nameCut`, the node's head and tail, what a reader sees at each width, the stylesheet) —; the Depends on tile's *1 library* and *N libraries* (#282) |
@@ -565,7 +566,15 @@ stuck past its expiry, kept until then when it names no holder — broken by
 the id it was judged by, so a round that lost the race to break it skips
 and leaves the other's lock; released at each round's end and before the
 self-replacing one-off, never when another round holds it, and by an EXIT
-mid-round); the guard (restarting at two samples in a row, restarts that
+mid-round — and by a TERM that lands as the engine creates it or as the
+release reads it back, in `--once` and the loop, sent at that point by a
+stub hook with no sleep, while a TERM during a failed create leaves
+another round's live lock alone: #295; a release whose read or removal the
+engine did not answer keeps it held, removed by `--once`'s EXIT trap and
+by the loop's next round, which runs rather than taking its own lock for
+another round's; every run that must end on its own, and every stop of
+the loop, bounded at 60 s, so a TERM no longer honoured fails the test
+instead of hanging it); the guard (restarting at two samples in a row, restarts that
 grow on a service this round did not replace, one that ran and stays down,
 one not replaced, a new updater that fails its self-test — each keeping the
 old images and the updater's own; one restart, a busy builder and a service
@@ -575,15 +584,41 @@ like any other); and `--self-test`.
 `bash tests/host-setup.sh` (CI) runs the Studio's `factory/host/setup.sh`
 with stubs, as the one-time step: the installed `compose.yml`'s `updater`
 has the socket and `POOL_ROOT` at the same path, read-only, and no token;
-`rollout.sh` carries `# omarchy-rollout: kick-v1` on its second line; the
-user timer of a host from before #277 is disabled as its user before
-anything is installed, a rollout it started waited for (a try every 15 s,
-four hours at most), then removed, and said retired only once its user's
-systemd says it is stopped; a systemd that does not answer, or a rollout
-still running after four hours, ends `setup.sh` with 3 and nothing
-installed; a fresh host gets no timer; `rollout.sh` wakes a running updater
-and starts one that is not running as it is (`--no-recreate`), never both,
-and `--check` asks it, nothing more.
+`rollout.sh` carries `# omarchy-rollout: kick-v1` on its second line; an
+env file, mode 600, for every `env_file` `compose.yml` names, and the
+review2 pair behind its own profile (#295); before the timer is touched,
+the new `compose.yml` checked against a staged copy of the host's `.env`
+and `etc/` under its profiles and under every profile (an override's own
+env file staged with the rest of `etc/`), a container of a service it
+leaves out under the host's profiles warned about, and a compose that
+does not load, another `POOL_ROOT`, an updater image from before #277 or
+one that does not pull, or a service without a worker token (its value
+never printed) refused with 4 and nothing changed (after the pull, said
+to have pulled the image); the user timer of a host from before #277
+stopped as its user before anything is installed, and disabled only after
+the updater's self-test (a reboot before then brings it back), a rollout
+it started waited for (a try every 15 s, four hours at most),
+the files installed with the old ones kept in `setup-backup-<time>/`, the
+env files it wrote listed there, and the lines of `compose.yml` they replace shown, the updater started, seen
+running at every look for 30 s and passing its `--self-test`, and only
+then the timer's units removed and the timer said retired once its user's
+systemd says it is stopped; a systemd that does not answer ends
+`setup.sh` with 3 and nothing installed (one that stops answering after
+the stop says so, and the timer is tried again); a rollout still running after
+four hours, an interrupt during the wait (TERM: 143, HUP: 129), or an
+updater that does not start, restarts or fails its self-test (3, or 5)
+putting everything back — the updater it started stopped and removed, the
+old files and no new env file, the timer enabled again and never disabled
+— the last also with the reader of its output gone before the put-back
+writes a word; a fresh host gets no timer and starts
+nothing; `rollout.sh` wakes a running updater and starts one that is not
+running as it is (`--no-recreate`), never both, and `--check` asks it,
+nothing more; the runbook's way back run as written (the backup from
+before the updater even beside a newer one, the env files the step wrote
+that hold no token removed, and no such backup: it stops before anything);
+and the runbook's one-time step says `setup.sh` waits up to 4 h, how to
+bring the timer back after a SIGKILL, and looks first with no `docker
+compose` command.
 `bash tests/rollback-workflow.sh` (CI) runs `factory/bin/release-rollback`,
 what `rollback.yml` runs, against stubbed buildx, cosign and wrangler in a
 repository with release tags: the release's `:vX.Y.Z` asked for and its
@@ -593,7 +628,11 @@ signed, then its Worker deployed from the tag with its version and no
 migration, a `deploy` event and the running version checked; a deploy that
 fails putting each tag back on the digest it named, recording nothing; back
 past #277, the columns its listing would serve cleared just before the
-deploy and again after it; a `to` that is no release tag, a release whose
+deploy, again after it and once more once `/version` says the older
+release, the UPDATE run against a database built from every migration
+(every column the newer Worker withholds empty but a person's drain,
+`instance_churn` 0, a task's stop fence gone, the rest of the row
+unchanged, a second run changing nothing: #295); a `to` that is no release tag, a release whose
 smoke start failed (its `:<arch>-vX.Y.Z` pushed, no `:vX.Y.Z`), an image
 never pushed, a Worker that does not install or no deploy token moving
 nothing.

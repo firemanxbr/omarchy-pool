@@ -98,6 +98,8 @@ jobs:
         run: bash tests/restart-policy.sh
       - name: The updater follows the pool — brokers first, its lock and its guard — against a stubbed docker and pool
         working-directory: .
+        # A loop that stopped honouring its TERM fails within the test's own bounds; this caps anything they miss.
+        timeout-minutes: 10
         run: bash tests/omarchy-rollout.sh
       - name: The Studio's host files — the updater in, the timer out, rollout.sh a wake-up — against stubs
         working-directory: .

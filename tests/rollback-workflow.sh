@@ -13,7 +13,9 @@
 # records a deploy event and checks the running version. A deploy that
 # fails puts the three tags back where they were. Back past #277, the
 # columns an older Worker's listing would serve are cleared before its
-# deploy and again after it. A `to` that is not a release tag of the
+# deploy, again after it and once more once it runs — every column the
+# Worker from #277 withholds but a person's drain, run here against a
+# database built from the migrations (#295). A `to` that is not a release tag of the
 # repository, a release whose images did not pass both smoke starts, a
 # Worker that does not install or build, or a missing deploy token, moves
 # nothing.
@@ -88,11 +90,58 @@ echo "ok: the images and the Worker go back"
 # after — until it serves, the Worker from #277 writes them back at every claim, and the older one never writes them.
 echo v1.0.3 > "$STUB_VERSION"; : > "$STUB_LOG"
 out="$(cd "$tmp/repo" && "$R" v1.0.1 2>&1)" || fail "release-rollback v1.0.1 exited $?: $out"
-clears="$(grep -n "npx wrangler d1 execute omarchy-repo --remote --command UPDATE build_workers SET site = NULL, instance = NULL, instance_prev = NULL, auto_orders = NULL" "$STUB_LOG" | cut -d: -f1 | tr '\n' ' ')"
-[[ "$(wc -w <<<"$clears" | tr -d ' ')" == 2 ]] || fail "a Worker from before #277: site, instance and the rules' state cleared twice: $(grep d1 "$STUB_LOG")"
-dep="$(line 'wrangler deploy --var')"; read -r c1 c2 <<<"$clears"
+clears="$(grep -n "^npx wrangler d1 execute omarchy-repo --remote --command UPDATE build_workers SET " "$STUB_LOG" | cut -d: -f1 | tr '\n' ' ')"
+[[ "$(wc -w <<<"$clears" | tr -d ' ')" == 3 ]] || fail "a Worker from before #277: #277's columns cleared three times: $(grep d1 "$STUB_LOG")"
+dep="$(line 'wrangler deploy --var')"; read -r c1 c2 c3 <<<"$clears"
+last_version="$(grep -n '^curl http://pool.test/api/v1/version$' "$STUB_LOG" | tail -n1 | cut -d: -f1)"
 (( c1 < dep && dep < c2 )) || fail "cleared just before that Worker is deployed, and again after: clears at $clears, deploy at $dep"
+(( c2 < last_version && last_version < c3 )) || fail "and once more once it runs (an isolate of the newer Worker may have served a claim meanwhile): clears at $clears, the last /version at $last_version"
 grep -q "is from before #277" <<<"$out" || fail "and says so: $out"
+# The SQL itself, run for real against a database built from every migration (a grep cannot catch a NOT NULL it breaks): every
+# column the Worker from #277 withholds is empty afterwards in what the older Worker's SELECT * serves, but drained_* — a person's
+# standing drain — and instance_churn is its default 0; nothing else of the row changes; a task's stop fence is gone; a second run
+# changes nothing.
+sql="$(grep "^npx wrangler d1 execute omarchy-repo --remote --command UPDATE build_workers SET " "$STUB_LOG" | head -n1 | sed 's/^npx wrangler d1 execute omarchy-repo --remote --command //')"
+python3 - "$root/worker/migrations" "$sql" <<'PY' || fail "the clear, run against the migrations' schema"
+import glob, sqlite3, sys
+migrations, sql = sys.argv[1], sys.argv[2]
+db = sqlite3.connect(":memory:")
+for f in sorted(glob.glob(migrations + "/*.sql")):
+    db.executescript(open(f).read())
+def seed(table, values):
+    cols = [(r[1], r[2]) for r in db.execute(f"PRAGMA table_info({table})")]
+    row = {c: values.get(c, 2 if t.upper() == "INTEGER" else f"x-{c}-{values['id']}") for c, t in cols}
+    db.execute(f"INSERT INTO {table} ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})", list(row.values()))
+    return row
+pid = "0123456789abcdef0123456789abcdef"
+common = {"arch": "aarch64", "mode": "project", "trust": "project", "instance": pid, "instance_finished": pid}
+worker = seed("build_workers", {**common, "id": "w-1", "revoked_at": None})
+revoked = seed("build_workers", {**common, "id": "w-2"})  # /users/:login lists revoked workers too
+task = seed("build_tasks", {"id": 1, "arch": "aarch64", "status": "leased", "trust": "project", "kind": "build", "lease_owner": "w-1", "stop_order": "o-1"})
+db.commit()
+withheld = ["instance", "instance_prev", "instance_since", "instance_conflict_at", "instance_other_at", "instance_churn", "instance_finished",
+            "site", "auto_orders", "agent_error_class", "agent_probed_at", "rollout", "order_kinds", "watchdog_exits", "agent_error_since"]
+kept = ["drained_at", "drained_by", "drain_reason"]
+db.executescript(sql)
+bad = []
+db.row_factory = sqlite3.Row
+for seeded in (worker, revoked):
+    got = dict(db.execute("SELECT * FROM build_workers WHERE id = ?", (seeded["id"],)).fetchone())
+    for c, v in got.items():
+        want = (0 if c == "instance_churn" else None) if c in withheld else seeded[c]
+        if v != want: bad.append(f"{seeded['id']}.{c} = {v!r}, not {want!r}")
+    for c in kept:
+        if got[c] is None: bad.append(f"{seeded['id']}.{c} was cleared: a person's drain")
+t = dict(db.execute("SELECT * FROM build_tasks WHERE id = 1").fetchone())
+for c, v in t.items():
+    want = None if c == "stop_order" else task[c]
+    if v != want: bad.append(f"task.{c} = {v!r}, not {want!r}")
+before = db.total_changes
+db.executescript(sql)
+if db.total_changes != before: bad.append(f"a second run changed {db.total_changes - before} rows")
+if bad:
+    print("\n".join(bad), file=sys.stderr); sys.exit(1)
+PY
 
 # The deploy fails: the three tags go back to the digests they named before, nothing is recorded, and re-running is said safe.
 echo v1.0.3 > "$STUB_VERSION"; : > "$STUB_LOG"

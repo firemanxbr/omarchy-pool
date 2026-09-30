@@ -43,7 +43,8 @@
 # two rounds that judged it dead never both take it; otherwise it skips.
 # A round releases it as its last step, just before a self-replacing
 # one-off, and an EXIT trap backs that up; a release removes only a lock
-# this process holds.
+# this process holds, and one the engine did not let it remove stays held:
+# its next round removes it first (never taking it for another round's).
 #
 # The guard (#277). After a round that replaced something, and before the
 # updater replaces itself or removes an old image, it samples every
@@ -149,19 +150,30 @@ hhmm() { # an ISO time or epoch → HH:MM (UTC)
 lock_create() { # by
   local until=$(( $(date +%s) + ROLLOUT_LOCK_HOURS * 3600 ))
   LOCK_NONCE="$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"; [[ -n "$LOCK_NONCE" ]] || LOCK_NONCE="$$$(date +%s)"
+  # Held from before the create, not after it: a TERM that lands while the engine creates it runs the trap only once the create has
+  # returned, and the release it runs then removes the lock the create made — or nothing, as it checks holder, start and nonce.
+  LOCK_HELD=1
   docker create --name "$LOCK" --label "com.omarchy.lock.by=$1" --label "com.omarchy.lock.holder=$SELF_ID" --label "com.omarchy.lock.started=$SELF_STARTED" \
     --label "com.omarchy.lock.until=$until" --label "com.omarchy.lock.nonce=$LOCK_NONCE" "$(lock_image)" true >/dev/null 2>&1
 }
 # Take the lock, or say why not: 0 taken, 1 held by a live round.
 lock_take() { # by
   lock_name
-  if lock_create "$1"; then LOCK_HELD=1; return 0; fi
+  # Its own lock from its last round, still held: that release could not remove it (the engine did not answer). Removed now, or
+  # this round is skipped and the next one tries again — never taken for another round's, which would skip every round until
+  # its expiry.
+  if (( LOCK_HELD )); then
+    lock_release
+    if (( LOCK_HELD )); then log "this updater's own lock $LOCK from its last round could not be removed yet; skipping this round"; return 1; fi
+  fi
+  if lock_create "$1"; then return 0; fi
+  LOCK_HELD=0
   local labels by holder started until created lid state
   labels="$(docker inspect -f '{{index .Config.Labels "com.omarchy.lock.by"}}|{{index .Config.Labels "com.omarchy.lock.holder"}}|{{index .Config.Labels "com.omarchy.lock.started"}}|{{index .Config.Labels "com.omarchy.lock.until"}}|{{.Created}}|{{.Id}}' "$LOCK" 2>/dev/null || true)"
   if [[ -z "$labels" ]]; then
     # Gone between the create and the read: one more try.
-    lock_create "$1" && { LOCK_HELD=1; return 0; }
-    log "the lock $LOCK could not be taken or read; skipping this round"; return 1
+    lock_create "$1" && return 0
+    LOCK_HELD=0; log "the lock $LOCK could not be taken or read; skipping this round"; return 1
   fi
   IFS='|' read -r by holder started until created lid <<<"$labels"
   [[ "$until" =~ ^[0-9]+$ ]] || until=0
@@ -186,18 +198,30 @@ lock_take() { # by
   # taken the lock meanwhile, and a removal by name would remove that round's lock too — two rounds would hold it. Removed
   # already, this does nothing, and the create below decides.
   docker rm -f "${lid:-$LOCK}" >/dev/null 2>&1 || true
-  if lock_create "$1"; then LOCK_HELD=1; return 0; fi
-  log "another round took the lock first; skipping"; return 1
+  if lock_create "$1"; then return 0; fi
+  LOCK_HELD=0; log "another round took the lock first; skipping"; return 1
 }
 # Release: only a lock this process holds — its holder, its start and its nonce — never one another round took after breaking this one.
+# Held until it is known gone — removed, not there, or another round's: a read or a removal the engine did not answer keeps it
+# held, and the next round's take (or the EXIT trap) tries again.
 lock_release() {
   (( LOCK_HELD )) || return 0
-  LOCK_HELD=0
-  local labels lid; labels="$(docker inspect -f '{{index .Config.Labels "com.omarchy.lock.holder"}}|{{index .Config.Labels "com.omarchy.lock.started"}}|{{index .Config.Labels "com.omarchy.lock.nonce"}}|{{.Id}}' "$LOCK" 2>/dev/null || true)"
+  local labels lid
+  if ! labels="$(docker inspect -f '{{index .Config.Labels "com.omarchy.lock.holder"}}|{{index .Config.Labels "com.omarchy.lock.started"}}|{{index .Config.Labels "com.omarchy.lock.nonce"}}|{{.Id}}' "$LOCK" 2>&1)"; then
+    if grep -qi 'no such' <<<"$labels"; then LOCK_HELD=0
+    else log "the lock $LOCK could not be read to release it ($(head -n1 <<<"$labels")); trying again before the next round"; fi
+    return 0
+  fi
   lid="${labels##*|}"; labels="${labels%|*}"
-  # By the id it was read with, as a break is: the lock read here is the one removed.
-  if [[ "$labels" == "$SELF_ID|$SELF_STARTED|$LOCK_NONCE" ]]; then docker rm -f "${lid:-$LOCK}" >/dev/null 2>&1 || true
+  # By the id it was read with, as a break is: the lock read here is the one removed. A removal that failed while the lock is
+  # still there keeps it held.
+  if [[ "$labels" == "$SELF_ID|$SELF_STARTED|$LOCK_NONCE" ]]; then
+    if ! docker rm -f "${lid:-$LOCK}" >/dev/null 2>&1 && docker inspect -f '{{.Id}}' "${lid:-$LOCK}" >/dev/null 2>&1; then
+      log "the lock $LOCK could not be removed; trying again before the next round"; return 0
+    fi
   elif [[ -n "$labels" ]]; then log "the lock $LOCK is another round's now; leaving it"; fi
+  # Cleared only now: a TERM during the read or the removal exits through the EXIT trap, whose release reads it again.
+  LOCK_HELD=0
 }
 
 # ----------------------------------------------------------------- round --
@@ -252,7 +276,7 @@ rollout() { # check → 0 changed something, 1 nothing to do, 2 docker unreachab
   enabled="$(compose config --services 2>/dev/null | tr '\n' ' ')"
   [[ -n "${enabled// /}" ]] || { log "the compose file names no service"; return 2; }
   for svc in "${ORDER[@]}"; do [[ " $enabled " == *" $svc "* ]] && ordered+=("$svc"); done
-  for svc in $enabled; do [[ " ${ordered[*]} " == *" $svc "* || "$svc" == "$ROLLOUT_SELF" ]] || ordered+=("$svc"); done
+  for svc in $enabled; do [[ " ${ordered[*]-} " == *" $svc "* || "$svc" == "$ROLLOUT_SELF" ]] || ordered+=("$svc"); done
   [[ " $enabled " == *" $ROLLOUT_SELF "* ]] && ordered+=("$ROLLOUT_SELF")
   compose pull --quiet 2>&1 | grep -viE "pulled|pulling|^\s*$" || true
   local config; config="$(compose config --format json 2>/dev/null || echo '{}')"
@@ -499,14 +523,16 @@ case "$mode" in
   check) rollout 1 || [[ $? -eq 1 ]] ;;
   once)
     identify_self
-    trap 'lock_release' EXIT
+    # The EXIT trap ignores TERM and INT from its first command on, so one more that lands during the release does not cut it
+    # short (one that lands before that first command still can; docker stop sends a single TERM).
+    trap 'trap "" TERM INT; lock_release' EXIT
     trap 'exit 143' TERM INT
     rc=0; round once || rc=$?
     (( rc != 2 ))
     ;;
   loop)
     identify_self
-    trap 'lock_release; [[ -z "$SLEEPER" ]] || kill "$SLEEPER" 2>/dev/null || true' EXIT
+    trap 'trap "" TERM INT; lock_release; [[ -z "$SLEEPER" ]] || kill "$SLEEPER" 2>/dev/null || true' EXIT
     trap 'exit 143' TERM INT
     follow_loop
     ;;

@@ -15,6 +15,10 @@
 # with the host's compose, and the updater's next round replaces every
 # service once more. `./rollout.sh`, or `up -d --no-deps <service>`.
 #
+# Local changes belong in compose.override.yml beside this file: compose and
+# the updater read it, and setup.sh, which installs this file over the
+# host's copy (keeping the old one in setup-backup-<time>/), never touches it.
+#
 # Everything lives under POOL_ROOT (.env, written by setup.sh): the work
 # directories (the same path on the host and inside a project worker, so the
 # sibling build containers it starts can mount subdirectories), one pacman
@@ -112,9 +116,16 @@ services:
   # audit waited 23 minutes on average behind builds and the pool's jobs
   # (2026-09-16/17); the host has the room (12 cores, 32 GB). Same shape,
   # own registration and working directory.
+  #
+  # Behind the `review2` profile, both of them: off until register.sh has
+  # registered them (a worker with no token exits at start, and the updater
+  # holds back a set where one restarts). To turn it on: ./register.sh, then
+  # COMPOSE_PROFILES=emulated,review2 in .env (or review2 alone), then
+  # ./rollout.sh. review2-x86_64's builds run emulated here, as
+  # review-x86_64's do under `emulated` (#295).
   review2-x86_64:
     <<: *project
-    profiles: [emulated]
+    profiles: [review2]
     env_file: [etc/review2-x86_64.env]
     depends_on: [agent-proxy]
     networks: [default, review]
@@ -135,6 +146,7 @@ services:
       WORKER_LABELS: '{"where":"${WHERE:-omarchy-studio}","emulated":true}'
   review2-aarch64:
     <<: *project
+    profiles: [review2]
     env_file: [etc/review2-aarch64.env]
     depends_on: [agent-proxy]
     networks: [default, review]

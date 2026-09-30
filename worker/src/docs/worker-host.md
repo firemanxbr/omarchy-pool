@@ -1,8 +1,9 @@
 # The project's host
 
 What the project runs its workers on: one machine, containers of the one
-worker image — eight worker registrations, of which five run by default
-(the x86_64 build services are behind the `emulated` profile), their
+worker image — eight worker registrations, of which four run by default
+(the x86_64 build services are behind the `emulated` profile, the second
+review pair behind `review2`), their
 brokers, `agent-proxy`, and the `updater` that rolls them out (the roles:
 [factory/README.md](../README.md) *Three roles*; how the day goes:
 [docs/RUNBOOK.md](../../docs/RUNBOOK.md) *The Studio host*). Anyone donating
@@ -10,15 +11,16 @@ a machine to the project can use the same four files.
 
 | File | What |
 |---|---|
-| `setup.sh` | run once with `sudo`: the directory tree (a btrfs subvolume where `/` is btrfs), docker + compose + user-mode emulation for the other architecture, the docker group, the env files to fill in |
+| `setup.sh` | run once with `sudo`: the directory tree (a btrfs subvolume where `/` is btrfs), docker + compose + jq + user-mode emulation for the other architecture, the docker group, an env file (mode 600) to fill in for every `env_file` `compose.yml` names. It checks the new `compose.yml` against the host's `.env` and `etc/` before it changes anything (exit 4), keeps the files it replaces in `setup-backup-<time>/` and prints the lines of `compose.yml` it replaces. On a host from before #277 it is the one-time step, which starts and checks the updater before it retires the old timer, and puts everything back when that fails (the runbook, *Once: the updater*) |
 | `register.sh` | registers the eight workers with the pool under a maintainer's token, trusts the six project ones, writes each worker token into `etc/<service>.env` — prints only the ids |
 | `rollout.sh` | wakes the `updater` service now (`--check`: asks it what it would do). The rollout itself runs in the image (`omarchy-rollout`), brokers first: `agent-proxy` and the community brokers that changed, each waited for until it answers on `:8790` (at most `ROLLOUT_BROKER_WAIT`, 300 s for all of them; past it a warning, and the rollout goes on), then every worker that changed in one `up`: a stop is a *drain* (SIGTERM — the worker finishes the task it holds, claims nothing new, exits; `stop_grace_period: 3h`), then the new container starts; the unchanged ones keep working |
-| `compose.yml` | twelve services, eight of them run by default — four under the `emulated` profile, `review-x86_64`, `review2-x86_64`, `community-x86_64` and `broker-community-x86_64`: off unless `COMPOSE_PROFILES=emulated` is in `.env` (see *x86_64 builds* below): `pool-*`, `review-*`, `review2-*` (project trust, the runtime's socket, a work directory at the same path on both sides, the shared package cache; their audits and build containers reach the agent through `agent-proxy` on the `review` network), `broker-community-*` + `community-*` (community trust, shared: the broker holds the token, the agent key and `GITHUB_TOKEN` and only receives, processes and answers; the builder beside it holds nothing, one task per container, on a network the two have to themselves; the x86_64 community builder is an emulated container on an aarch64 host, its broker native), `agent-proxy`, plus `updater`: the rollout, following the pool's release, no token |
+| `compose.yml` | twelve services, seven of them run by default — three under the `emulated` profile, `review-x86_64`, `community-x86_64` and `broker-community-x86_64`: off unless `COMPOSE_PROFILES=emulated` is in `.env` (see *x86_64 builds* below); the second review pair, `review2-x86_64` and `review2-aarch64`, under `review2`: off until `register.sh` has registered it, then `COMPOSE_PROFILES=emulated,review2` (or `review2`) and `./rollout.sh` (until then its two registrations show offline on the Workers page; revoke them there on a host that will not run the pair): `pool-*`, `review-*`, `review2-*` (project trust, the runtime's socket, a work directory at the same path on both sides, the shared package cache; their audits and build containers reach the agent through `agent-proxy` on the `review` network), `broker-community-*` + `community-*` (community trust, shared: the broker holds the token, the agent key and `GITHUB_TOKEN` and only receives, processes and answers; the builder beside it holds nothing, one task per container, on a network the two have to themselves; the x86_64 community builder is an emulated container on an aarch64 host, its broker native), `agent-proxy`, plus `updater`: the rollout, following the pool's release, no token |
 
 ```
 POOL_ROOT (/srv/omarchy-pool)
-├── .env                 POOL_ROOT and WHERE (the label in the worker's tooltip on the Workers page)
+├── .env                 POOL_ROOT and WHERE (the label in the worker's tooltip on the Workers page), COMPOSE_PROFILES when a profile is on
 ├── compose.yml
+├── compose.override.yml local changes, if any: compose and the updater read it, setup.sh never touches it
 ├── register.sh
 ├── rollout.sh           wakes the updater (# omarchy-rollout: kick-v1 on its second line, which the project workers report)
 ├── etc/                 mode 700; secrets, yours: one worker token per worker, agent.env with the agent key — read by the brokers, agent-proxy and the review workers' tokens only; no builder reads etc/
@@ -52,7 +54,7 @@ runbook's one-time step instead (*The Studio host*, *Once: the updater*).
 Operate:
 
 ```bash
-docker compose ps                                 # the eight that run by default (the updater among them), and whether they are up
+docker compose ps                                 # the seven that run by default (the updater among them), and whether they are up
 docker compose logs -f --tail 50 review-aarch64   # one worker; docker compose logs -f updater for the rollout
 ./rollout.sh                                      # wakes the updater: a rolling upgrade now (it follows each release within 2 minutes by itself), or starts it as it is; --check to only look
 docker kill pool-x86_64                           # only for a stall of the engine itself: everything else is on the worker's page
