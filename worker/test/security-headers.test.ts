@@ -7,7 +7,8 @@
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import worker from "../src/index";
-import { CSP_REPORT_ONLY, SECURITY_HEADERS } from "../src/headers";
+import { SECURITY_HEADERS } from "../src/headers";
+import { KIT_SHEET_PATH } from "../src/pages/kit";
 import { DASHBOARD_HOST, LEGACY_DASHBOARD_HOSTS } from "../src/meta";
 import { seedDashboard } from "./fixture";
 
@@ -24,6 +25,11 @@ const EXPECTED = {
   "referrer-policy": "strict-origin-when-cross-origin",
   "x-frame-options": "DENY",
   "content-security-policy": "frame-ancestors 'none'",
+  // Passkeys stay allowed on the site's own origin; what the site never uses is off.
+  "permissions-policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=(), publickey-credentials-get=(self), publickey-credentials-create=(self)",
+  // The site's own origin and Google Fonts, never frame-ancestors (ignored in a Report-Only policy).
+  "content-security-policy-report-only":
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'",
 };
 
 function headersOf(res: Response): Record<string, string | null> {
@@ -35,12 +41,12 @@ beforeAll(async () => {
 });
 
 describe("the security headers", () => {
-  // A sample of every kind of route: pages, a page with a parameter, the API (a read, a write refused, a 404), redirects, the scripts, an icon, the kit's sheet, robots, a preflight, and the 404 page.
+  // A sample of every kind of route: pages, a page with a parameter, the API (a read, a write refused, a 404), redirects (the sign-in's among them), the scripts, an icon, the kit's sheet, robots, the sitemap, a preflight, the pool's fallback, and the 404 page.
   const SAMPLE: [string, RequestInit?, string?][] = [
     ["/"], ["/packages"], ["/docs"], ["/status"], ["/review"], ["/package/zlib"], ["/user/alice"], ["/build/9"], ["/worker/w1"],
     ["/api/v1/version"], ["/api/v1/stats"], ["/api/v1/packages?q=zlib"], ["/api/v1/releases", { method: "POST" }], ["/api/v1/nope"],
     ["/api/v1/version", { method: "OPTIONS" }], ["/journal"], ["/index.html"], ["/me"], ["/setup"], ["/omarchy-worker"], ["/robots.txt"], ["/favicon.svg"],
-    ["/nope"], ["/", {}, `https://${LEGACY_DASHBOARD_HOSTS[0]}`],
+    ["/auth/github?next=/"], ["/sitemap.xml"], [KIT_SHEET_PATH], ["/pool/core.db"], ["/nope"], ["/", {}, `https://${LEGACY_DASHBOARD_HOSTS[0]}`],
   ];
 
   it("are on every answer of the sample", async () => {
@@ -48,25 +54,8 @@ describe("the security headers", () => {
       const res = await call(path, init, origin);
       const got = headersOf(res);
       const name = `${init?.method ?? "GET"} ${origin ?? ""}${path} (${res.status})`;
-      expect.soft(got, name).toMatchObject(EXPECTED);
-      expect.soft(got["content-security-policy-report-only"], name).toBe(CSP_REPORT_ONLY);
-      expect.soft(got["permissions-policy"], name).toBe(SECURITY_HEADERS["permissions-policy"]);
+      expect.soft(got, name).toEqual(EXPECTED);
     }
-  });
-
-  it("keep passkeys allowed on the site's own origin and turn off what the site never uses", () => {
-    const policy = SECURITY_HEADERS["permissions-policy"].split(", ");
-    expect(policy).toContain("publickey-credentials-get=(self)");
-    expect(policy).toContain("publickey-credentials-create=(self)");
-    for (const off of ["camera=()", "microphone=()", "geolocation=()"]) expect(policy).toContain(off);
-  });
-
-  it("name the site's own origin and Google Fonts in the Report-Only CSP, and never frame-ancestors (ignored there)", () => {
-    expect(CSP_REPORT_ONLY).toContain("default-src 'self'");
-    expect(CSP_REPORT_ONLY).toContain("object-src 'none'");
-    expect(CSP_REPORT_ONLY).toContain("https://fonts.googleapis.com");
-    expect(CSP_REPORT_ONLY).toContain("https://fonts.gstatic.com");
-    expect(CSP_REPORT_ONLY).not.toContain("frame-ancestors");
   });
 
   it("leave the agent pages' stricter referrer policy as they set it", async () => {
@@ -93,13 +82,16 @@ describe("an address nothing answers", () => {
       expect(text, path).toContain(`<code>${path}</code>`);
       // Dark unless the reader chose light: the page is served with no theme of its own on <html>.
       expect(text, path).toMatch(/^<!doctype html>\n<html lang="en">\n/);
-      for (const href of ['<a class="op-btn primary" href="/">Home</a>', 'href="/packages">', 'id="nf-go"', "<kbd>⌘K</kbd>"]) expect(text, path).toContain(href);
+      for (const href of ['<a class="op-btn primary" href="/">Home</a>', '<a class="op-btn" href="/packages">', "Or use Go… at the top of the page", '<a class="go" id="go" href="/packages"']) expect(text, path).toContain(href);
+      // Signing in from here leads home, not back to the dead address.
+      expect(text, path).toContain('href="/auth/github?next=/"');
     }
   });
 
   it("escapes the address it names", async () => {
-    const text = await (await call("/%22%3E%3Cb%3Ex")).text();
-    expect(text).not.toContain("<b>x");
+    // The URL percent-encodes " < and > in a path; & reaches the page raw, so it is the character that shows the escaping.
+    const text = await (await call("/a&b")).text();
+    expect(text).toContain("<code>/a&amp;b</code>");
   });
 
   it("stays the JSON 404 under /api/, for a machine", async () => {
