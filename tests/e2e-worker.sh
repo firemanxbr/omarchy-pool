@@ -4,7 +4,8 @@
 #   → render databases (signed by the pool's own key) → pacman in a container
 #   syncs from the worker mirror.
 #
-# Requires: cargo, gpg, node (worker deps installed), podman or docker.
+# Requires: cargo, gpg, node (worker deps installed), podman or docker, jq,
+# python3, and libfaketime (the orders scenarios: tests/e2e-worker-orders.sh).
 # Usage: tests/e2e-worker.sh
 set -euo pipefail
 
@@ -44,6 +45,8 @@ cleanup() {
     printf '\n\033[1;31m==> the local pool (wrangler dev) log, last 80 lines:\033[0m\n' >&2
     tail -n 80 "$E2E/wrangler.log" >&2
   fi
+  # The orders scenarios' workers, supervisors and stub agents, if a step failed while they ran (tests/e2e-worker-orders.sh).
+  if declare -F w5_cleanup >/dev/null; then w5_cleanup 2>/dev/null || true; fi
   if [[ -n "${WRANGLER_PID:-}" ]]; then kill "$WRANGLER_PID" 2>/dev/null || true; fi
 }
 trap cleanup EXIT
@@ -85,8 +88,10 @@ npx wrangler d1 execute omarchy-repo --local --persist-to "$WRANGLER_STATE" --co
    INSERT INTO contributors (login, token_hash, session_hash, role) VALUES ('e2e', '$C_HASH', '$(printf %s oms_e2e | sha256sum | cut -d' ' -f1)', 'maintainer'),
      ('e2e-contributor', '$(printf %s omc_e2e_contributor | sha256sum | cut -d' ' -f1)', NULL, 'contributor')" >/dev/null
 # SOURCE_CHECK off: the package requests below name a source on a host nobody serves, and the pool would ask it (the vitest pool runs the same way).
+# WORKER_RULES_SCALE: the pool's rules for its workers' health (#277) at 60 times their pace — their step timings only; honoured
+# here because the local pool is no release (POOL_VERSION "dev"). The orders scenarios below lean on it.
 npx wrangler dev --ip 0.0.0.0 --port "$PORT" --persist-to "$WRANGLER_STATE" \
-  --env-file "$E2E/.dev.vars" --var "POOL_URL:http://$HOST_FROM_CONTAINER:$PORT/pool" --var "SOURCE_CHECK:off" > "$E2E/wrangler.log" 2>&1 &
+  --env-file "$E2E/.dev.vars" --var "POOL_URL:http://$HOST_FROM_CONTAINER:$PORT/pool" --var "SOURCE_CHECK:off" --var "WORKER_RULES_SCALE:60" > "$E2E/wrangler.log" 2>&1 &
 WRANGLER_PID=$!
 for _ in $(seq 1 60); do
   if grep -q "no release" <<<"$(curl -s "$OMARCHY_API/api/v1/releases/stable")"; then break; fi
@@ -604,6 +609,13 @@ fp_task=$(jq -r .task <<<"$fp")
 [[ "$(curl -s "$OMARCHY_API/api/v1/events?kind=dispatch&limit=5" | jq -r --argjson t "$fp_task" '[.events[] | select(.payload.task == $t)][0].payload | "\(.by) \(.via) \(.passkey)"')" == "e2e web $pkid" ]] || { echo "the forced promotion's journal line must name the passkey"; exit 1; }
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/tasks/$fp_task/cancel" "${mauth[@]}")" == 200 ]] || { echo "the forced promotion could not be cancelled"; exit 1; }
 echo "the package page: every architecture on its data, Adopt and Block on the journal; approve, block and a forced promotion with a passkey, never a token"
+
+step "Workers follow the brain (#277): the pool re-checks a worker, restarts it only if needed, within its bounds, and holds through an outage"
+# Real pkg-repo work processes against stub agents, a fresh worker per scenario, side by side (tests/e2e-worker-orders.sh) — before
+# the agents' steps, whose passkey reset revokes e2e's token (#284): the scenarios revoke their workers with it.
+# shellcheck source=tests/e2e-worker-orders.sh
+source "$ROOT/tests/e2e-worker-orders.sh"
+w5_scenarios
 
 step "Agents (#252): omarchy-cli login in the browser, a request through the agent, a block it drafts and the person confirms with a passkey (#257)"
 # The loopback login as a person runs it, the browser played by curl with

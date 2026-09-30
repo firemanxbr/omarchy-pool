@@ -67,7 +67,34 @@ async function planOf(x: { sql: string; args: unknown[] }): Promise<string> {
 
 /** What 0036 added, taken off again, and what the migrations after it added (the package's maintainer in the pool, #244; the reviews table takes its changes column, #247, with it): the schema as production has it before the migration. */
 const REWIND = [
-  // What 0041 added (a package's ELF class, #275) comes off first, then 0040's (passkeys for approve and block, #257), then 0039's (the MCP write tools, #252), so the migrations after 0036 run again in their order below.
+  // What 0042 added (orders to workers, #277) comes off first, then 0041's (a package's ELF class, #275), then 0040's (passkeys for approve and block, #257), then 0039's (the MCP write tools, #252), so the migrations after 0036 run again in their order below.
+  "ALTER TABLE build_tasks DROP COLUMN stop_order",
+  "DROP INDEX idx_build_workers_site",
+  "DROP INDEX idx_build_workers_not_ready",
+  "ALTER TABLE build_workers DROP COLUMN auto_orders",
+  "ALTER TABLE build_workers DROP COLUMN drain_reason",
+  "ALTER TABLE build_workers DROP COLUMN drained_by",
+  "ALTER TABLE build_workers DROP COLUMN drained_at",
+  "ALTER TABLE build_workers DROP COLUMN agent_error_class",
+  "ALTER TABLE build_workers DROP COLUMN agent_probed_at",
+  "ALTER TABLE build_workers DROP COLUMN agent_error_since",
+  "ALTER TABLE build_workers DROP COLUMN rollout",
+  "ALTER TABLE build_workers DROP COLUMN restarts_left",
+  "ALTER TABLE build_workers DROP COLUMN site",
+  "ALTER TABLE build_workers DROP COLUMN agent_via",
+  "ALTER TABLE build_workers DROP COLUMN started_at",
+  "ALTER TABLE build_workers DROP COLUMN watchdog_exits",
+  "ALTER TABLE build_workers DROP COLUMN crash_loop_since",
+  "ALTER TABLE build_workers DROP COLUMN instance_finished",
+  "ALTER TABLE build_workers DROP COLUMN instance_churn",
+  "ALTER TABLE build_workers DROP COLUMN instance_other_at",
+  "ALTER TABLE build_workers DROP COLUMN instance_conflict_at",
+  "ALTER TABLE build_workers DROP COLUMN instance_since",
+  "ALTER TABLE build_workers DROP COLUMN instance_prev",
+  "ALTER TABLE build_workers DROP COLUMN instance",
+  "ALTER TABLE build_workers DROP COLUMN order_kinds",
+  "ALTER TABLE build_workers DROP COLUMN open_orders",
+  "DROP TABLE worker_orders",
   "ALTER TABLE packages DROP COLUMN elf_class",
   "DROP TABLE passkeys",
   "DROP TABLE passkey_challenges",
@@ -213,13 +240,14 @@ describe("migration 0036: one package per name, with a target per architecture",
     const m = env.TEST_MIGRATIONS.find((x) => x.name.startsWith("0036_"))!;
     expect(m, "migration 0036 is in the list").toBeTruthy();
     await env.DB.batch(m.queries.map((q) => env.DB.prepare(q)));
-    // The migrations after it run again too, in their order — what the rewind took off (the maintainers' table, #244; with the reviews table, its changes column, #247; 0039's tables and columns, #252; 0040's passkeys, #257; 0041's ELF class, #275) comes back as D1 applies it.
+    // The migrations after it run again too, in their order — what the rewind took off (the maintainers' table, #244; with the reviews table, its changes column, #247; 0039's tables and columns, #252; 0040's passkeys, #257; 0041's ELF class, #275; 0042's orders to workers, #277) comes back as D1 applies it.
     for (const later of env.TEST_MIGRATIONS.filter((x) => x.name > m.name)) await env.DB.batch(later.queries.map((q) => env.DB.prepare(q)));
 
     // The schema is what every other test file runs on, and nothing of the rows it had changed.
     expect(await schema()).toEqual(after0036);
     const now = await read();
-    expect(now.tasks).toEqual(before.tasks);
+    // 0042 adds a task's stop fence (#277), NULL on every row it finds.
+    expect(now.tasks.map(({ stop_order: so, ...t }) => (expect(so).toBeNull(), t))).toEqual(before.tasks);
     expect(now.approvals.map(({ review_id: _, agent: _a, ...a }) => a)).toEqual(before.approvals);
     expect(now.packages.map(({ targets: _t, closed_through: _c, freed_by_review: _f, ...p }) => p)).toEqual(before.packages);
     // A rejection before #242 freed no name: every name is held as it was.

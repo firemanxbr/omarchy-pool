@@ -529,12 +529,13 @@ __CHARTS__
     return mark ? agentMark(mark, agentName(s)) : '<span class="st-ini" title="' + esc(agentName(s)) + '">' + esc((cut > 0 ? s.slice(cut + 1) : s).slice(0, 2).toUpperCase()) + '</span>';
   }
   function workerLine(w, t) {
-    var working = w.alive && !!w.current_task, model = w.agent ? modelOf(w.agent) : "—";
-    // Alive, nothing in hand, not ready — what it declares needs an agent that did not answer (the listing's ready; the shell's words for why, whole on hover), as the Workers page's failed pill says it: never "idle, waiting for work" (#273). It is handed no agent work — no audit, no review: build — until its agent answers; the jobs that need none still come.
-    var down = w.alive && !working && !w.ready;
+    var working = w.alive && !!w.current_task, model = w.agent ? modelOf(w.agent) : "—", st = wtState(w);
+    // Its one state (the shell's wtState, #277): drained or outdated, it takes nothing whatever its agent says. Alive, nothing in hand, not ready — what it declares needs an agent that did not answer (the listing's ready; the shell's words for why, whole on hover), as the Workers page's failed pill says it: never "idle, waiting for work" (#273). It is handed no agent work — no audit, no review: build — until its agent answers; the jobs that need none still come. What the pool does about it rides beside (wtMarks).
+    var down = st === "not ready", held = st === "drained" || st === "outdated";
     var doing = !w.alive ? '<b>offline</b><span class="st-dim">' + esc(span(Date.now() - Date.parse(w.last_seen))) + '</span>'
-      : down ? '<span class="st-dot fail" aria-hidden="true"></span><b>not ready</b><span class="st-dim">' + esc(wtNotReady(w)) + '</span>'
-      : !working ? '<b>idle</b><span class="st-dim">waiting for work</span>'
+      : held ? '<span class="st-dot warn" aria-hidden="true"></span><b>' + st + '</b><span class="st-dim">' + esc(st === "drained" ? "by " + (w.drained.by || "?") + " — handed nothing until resumed" : "behind the latest image, handed nothing") + '</span>' + wtMarks(w)
+      : down ? '<span class="st-dot fail" aria-hidden="true"></span><b>not ready</b><span class="st-dim">' + esc(wtNotReady(w)) + '</span>' + wtMarks(w)
+      : !working ? '<b>idle</b><span class="st-dim">waiting for work</span>' + wtMarks(w)
       : !t ? '<a href="/build/' + Number(w.current_task) + '"><b>task #' + Number(w.current_task) + '</b></a>'
       : '<a href="/build/' + t.id + '"><b>' + esc(t.kind === "build" ? t.name : t.kind) + '</b></a><span class="st-dim">' + esc([t.kind === "build" ? [t.version, t.arch].filter(Boolean).join(" · ") : paramsLabel(t), t.started_at ? span(Date.now() - Date.parse(t.started_at)) : ""].filter(Boolean).join(" · ")) + '</span>';
     return '<div class="st-w' + (working ? " busy" : "") + (w.alive ? "" : " off") + (down ? " notready" : "") + '"><span class="st-wbox">' + (w.agent ? agentOf(w.agent) : '<span class="st-ini" title="no agent: the pool\'s jobs need none">—</span>') + '</span>' +
@@ -547,8 +548,10 @@ __CHARTS__
     (FACTORY.tasks || []).forEach(function (t) { tasks[t.id] = t; });
     var ws = (FACTORY.workers || []).filter(function (w) { return wtKind(w) !== "community"; }).sort(function (a, b) { return rank[wtKind(a)] - rank[wtKind(b)] || ARCHES.indexOf(a.arch) - ARCHES.indexOf(b.arch) || (a.id < b.id ? -1 : 1); });
     var c = workerCounts(ws);
-    var down = ws.filter(function (w) { return w.alive && !w.revoked_at && !w.current_task && !w.ready; }).length;
-    $("#workers-busy").textContent = num(c.building) + " of " + num(c.registered) + " busy" + (down ? " · " + num(down) + " not ready" : "");
+    $("#workers-busy").textContent = num(c.building) + " of " + num(c.registered) + " busy" + (c.notReady ? " · " + num(c.notReady) + " not ready" : "") + (c.outdated ? " · " + num(c.outdated) + " outdated" : "") + (c.drained ? " · " + num(c.drained) + " drained" : "");
+    // What a person must look at (#277): a worker that may be crash-looping, one its watchdog restarted twice or more in a day — each on its page.
+    var looks = ws.filter(function (w) { return w.alive && !w.revoked_at && (w.crash_loop_since || (w.watchdog && w.watchdog.n >= 2)); });
+    if (looks.length && !WC_DOWN) $("#workers-note").innerHTML = looks.map(function (w) { return workerName(w) + (w.crash_loop_since ? ": a new process every few minutes since " + esc(ago(w.crash_loop_since)) + " — it may be crash-looping; its log has why" : ": restarted by its watchdog " + w.watchdog.n + " times since " + esc(ago(w.watchdog.since)) + " — it wedges the same way; its log has why"); }).join("<br>");
     $("#workers-list").innerHTML = ws.map(function (w) { return workerLine(w, tasks[w.current_task]); }).join("") || '<p class="st-empty">no project worker registered</p>';
   }
   function workerById(id) { return ((FACTORY || {}).workers || []).filter(function (w) { return w.id === id; })[0] || null; }
@@ -1154,7 +1157,7 @@ export const STATUS_COMPONENTS = (F: Fixture): Component[] => {
       id: "status.workers",
       page: "/status",
       anchor: ['id="workers"', 'id="workers-list"', 'id="workers-busy"', 'id="workers-note"', 'href="/workers"'],
-      script: ['api("GET", "/api/v1/factory?limit=" + (NUMBERS ? 100 : 10))', "setInterval(loadFactory, 60000)", 'wtKind(w) !== "community"', "workerCounts(ws)", '" busy"', "workerName(w)", "agentMark(mark, agentName(s))", "modelOf(w.agent)", "paramsLabel(t)", 'WC_DOWN = noAnswer("worker listing", e)', "w.alive && !working && !w.ready", "wtNotReady(w)", "<b>not ready</b>", '" not ready"'],
+      script: ['api("GET", "/api/v1/factory?limit=" + (NUMBERS ? 100 : 10))', "setInterval(loadFactory, 60000)", 'wtKind(w) !== "community"', "workerCounts(ws)", '" busy"', "workerName(w)", "agentMark(mark, agentName(s))", "modelOf(w.agent)", "paramsLabel(t)", 'WC_DOWN = noAnswer("worker listing", e)', 'var down = st === "not ready"', "wtNotReady(w)", "<b>not ready</b>", '" not ready"', '" outdated"', '" drained"', "wtMarks(w)", "w.crash_loop_since", "w.watchdog.n >= 2"],
       reads: [
         { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.id", "workers.0.arch", "workers.0.side", "workers.0.labels", "workers.0.alive", "workers.0.ready", "workers.0.agent_error", "workers.0.agent_checked_at", "workers.0.current_task", "workers.0.agent", "workers.0.last_seen", "tasks.0.id", "tasks.0.kind", "tasks.0.name", "tasks.0.started_at"] },
         { path: "/workers", json: false },

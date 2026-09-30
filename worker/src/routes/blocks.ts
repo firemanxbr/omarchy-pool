@@ -9,6 +9,7 @@ import { settleTargets } from "../targets";
 import { throughWords, type Through } from "../agents";
 import { DISCARD_SQL } from "./agents";
 import { decidedWith, type PasskeyGate } from "./passkeys";
+import { cancelOrdersOf } from "../orders";
 
 /**
  * Blocking — the maintainers' brake (docs/GOVERNANCE.md, *Blocking*).
@@ -70,6 +71,8 @@ export async function handleBlockContributor(c: Contributor, login: string, requ
   await env.DB.batch([
     env.DB.prepare("UPDATE contributors SET blocked_at = ?, blocked_by = ?, blocked_reason = ? WHERE login = ?").bind(at, c.login, b.reason, login),
     env.DB.prepare("UPDATE build_workers SET revoked_at = ? WHERE owner = ? AND revoked_at IS NULL").bind(at, login),
+    // Their workers' open orders are cancelled with them, each with its line (#277).
+    ...cancelOrdersOf(env, { sql: "SELECT id FROM build_workers WHERE owner = ? AND revoked_at = ?", binds: [login, at] }, c.login, at),
     // Their agents' grants end with their workers (#252): the tokens stop at once, a code not yet swapped too — and what their agents drafted and nobody confirmed yet is discarded with them.
     env.DB.prepare(BLOCK_GRANTS_SQL).bind(at, login),
     env.DB.prepare(DISCARD_SQL).bind(login, JSON.stringify({ error: `${login} was blocked by a maintainer: the agent's grant ended, and nothing was decided` })),

@@ -103,6 +103,15 @@ POOL_URL = "https://pool.omarchy-pool.org"
 # (32 hex characters — sets none; Analytics → Web Analytics in the Cloudflare
 # dashboard, add omarchy-pool.org). Empty: no script on any page.
 ANALYTICS = ""
+# Workers follow the brain (#277, src/orders.ts): "off" stops the pool's own
+# orders to its workers (the re-check and the restart of a worker whose agent
+# does not answer); people's orders from a worker's page still work.
+WORKER_RULES = "on"
+# The rules' step timings divided by this (1 to 60), for `wrangler dev` and the
+# E2E only: a release (POOL_VERSION a tag) runs them at their real pace and
+# says once in the journal that it ignored the setting. Caps, counts, the
+# uptime gate, the breaker's windows and every TTL are never divided.
+WORKER_RULES_SCALE = "1"
 # Overridden by the Release workflow (`wrangler deploy --var POOL_VERSION:v0.0.1 ...`).
 POOL_VERSION = "dev"
 POOL_COMMIT = ""

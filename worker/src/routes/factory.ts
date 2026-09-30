@@ -12,6 +12,10 @@ import { betterIdleWorker, FIRST_PICK_MINUTES } from "../queue";
 import { updateMessage, updateState } from "../update";
 import { version as running, RINGS, ringsSql, sortRings, REPO_ARCHES, WORKER_ALIVE_MINUTES, type RunningVersion } from "../meta";
 import { parseTargets, settleTargets } from "../targets";
+import {
+  autoOf, breakerHolds, claimFacts, decideAuto, errorClass, instanceStep, issueOrder, NOTHING_CLASSES, openOrdersOf, outOf, poolFor, readSite, rulesOn, rulesScale, siblingsAnswering, siteVerdict, takeOrders,
+  capRefusal, type AfterClaim, type AutoState, type ClaimFacts, type Decision, type InstanceStep, type OrderOut, type OrdersRow,
+} from "../orders";
 
 /**
  * The factory's brain. Cloudflare is the source of truth for package
@@ -290,7 +294,7 @@ function workerLog(v: unknown): string {
  */
 export const TOUCH_MINUTES = 3;
 
-export async function touchWorker(env: Env, w: { worker: string; arch: string; hostname?: string; labels?: unknown; version?: string; mode?: string; agent?: string | null; kinds?: string[]; probe?: AgentReport; usage?: Usage | null; log?: string }, currentTask: number | null): Promise<D1Meta> {
+export async function touchWorker(env: Env, w: { worker: string; arch: string; hostname?: string; labels?: unknown; version?: string; mode?: string; agent?: string | null; kinds?: string[]; probe?: AgentReport; usage?: Usage | null; log?: string; agentVia?: string | null; at?: string; spell?: { from: string | null; to: string | null } | null }, currentTask: number | null, step?: Pick<InstanceStep, "set" | "guard"> | null): Promise<D1Meta> {
   // The agent is what the worker says it runs ("<provider>/<model>"): a
   // worker that reports none ("" or null) clears it, one that says nothing
   // (an older client) keeps what it last reported. The probe's answer
@@ -298,6 +302,22 @@ export async function touchWorker(env: Env, w: { worker: string; arch: string; h
   // "claude-code/claude-sonnet-5" has a hyphen in the provider: the older
   // pattern refused it, and every Studio worker showed no agent (2026-09-15).
   const agent = w.agent === undefined ? undefined : typeof w.agent === "string" && /^[a-z0-9-]+\/[A-Za-z0-9._:-]{1,60}$/.test(w.agent) ? w.agent : null;
+  // The spell and the probe's age on the pool's clock (#277): a spell begins
+  // with the first failed probe and ends only with an answer; the probe's
+  // age is measured from the claim that brought it, never from the worker's
+  // own stamp, which is compared only for equality. The error's class rides
+  // the same write, and moves only with the error. The spell's start is
+  // assigned only in the write that begins or ends it (the caller says
+  // which, from the row it read; compare-and-set on the value it read): it
+  // keys the breaker's index, and a column an UPDATE assigns costs that
+  // index a row at every liveness write, even when its value stays.
+  const cls = w.probe?.status === "error" ? errorClass(w.probe.error, w.agentVia ?? null) : null;
+  const spellSql = w.spell ? ", agent_error_since = CASE WHEN agent_error_since IS ? THEN ? ELSE agent_error_since END" : "";
+  const spellBinds = w.spell ? [w.spell.from, w.spell.to] : [];
+  // What a new process declares, or two on one token (orders.ts instanceStep): only while the row still names the process the step read.
+  const extra = step ? Object.entries(step.set) : [];
+  const extraSql = extra.map(([col]) => `, ${col} = CASE WHEN instance IS ? THEN ? ELSE ${col} END`).join("");
+  const extraBinds = extra.flatMap(([, v]) => [step!.guard, v]);
   const res = await env.DB.prepare(
     `INSERT INTO build_workers (id, arch, hostname, labels, version, last_seen, current_task, agent, kinds, agent_status, agent_error, agent_checked_at, usage, usage_at, log_tail, log_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT (id) DO UPDATE SET arch = excluded.arch, hostname = COALESCE(excluded.hostname, hostname), labels = COALESCE(excluded.labels, labels),
@@ -308,8 +328,11 @@ export async function touchWorker(env: Env, w: { worker: string; arch: string; h
        agent = CASE WHEN ? THEN excluded.agent ELSE agent END, kinds = COALESCE(excluded.kinds, kinds),
        agent_status = CASE WHEN ? THEN excluded.agent_status ELSE agent_status END, agent_error = CASE WHEN ? THEN excluded.agent_error ELSE agent_error END,
        agent_checked_at = CASE WHEN ? THEN excluded.agent_checked_at ELSE agent_checked_at END,
-       usage = COALESCE(excluded.usage, usage), usage_at = CASE WHEN excluded.usage IS NULL THEN usage_at ELSE excluded.usage_at END
+       usage = COALESCE(excluded.usage, usage), usage_at = CASE WHEN excluded.usage IS NULL THEN usage_at ELSE excluded.usage_at END,
+       agent_error_class = CASE WHEN ? THEN ? ELSE agent_error_class END,
+       agent_probed_at = CASE WHEN ? AND agent_checked_at IS NOT excluded.agent_checked_at THEN excluded.last_seen ELSE agent_probed_at END${spellSql}${extraSql}
      WHERE current_task IS NOT excluded.current_task
+       OR ?
        OR excluded.log_tail IS NOT NULL
        OR COALESCE(excluded.version, version) IS NOT version
        OR (? AND excluded.agent IS NOT agent)
@@ -322,11 +345,12 @@ export async function touchWorker(env: Env, w: { worker: string; arch: string; h
        OR last_seen < strftime('%Y-%m-%dT%H:%M:%fZ', excluded.last_seen, '-${TOUCH_MINUTES} minutes')`,
   )
     .bind(
-      w.worker, w.arch, w.hostname ?? null, w.labels ? JSON.stringify(w.labels) : null, w.version ?? null, now(), currentTask, agent ?? null,
+      w.worker, w.arch, w.hostname ?? null, w.labels ? JSON.stringify(w.labels) : null, w.version ?? null, w.at ?? now(), currentTask, agent ?? null,
       w.kinds ? JSON.stringify(w.kinds) : null, w.probe?.status ?? null, w.probe?.error ?? null, w.probe?.checked_at ?? null,
-      w.usage ? JSON.stringify(w.usage) : null, w.usage ? now() : null, w.log || null, w.log ? now() : null,
+      w.usage ? JSON.stringify(w.usage) : null, w.usage ? w.at ?? now() : null, w.log || null, w.log ? w.at ?? now() : null,
       w.mode ?? null, agent === undefined ? 0 : 1, w.probe === undefined ? 0 : 1, w.probe === undefined ? 0 : 1, w.probe === undefined ? 0 : 1,
-      agent === undefined ? 0 : 1, w.probe === undefined ? 0 : 1, w.mode ?? null, w.mode ?? null,
+      w.probe === undefined ? 0 : 1, cls, w.probe === undefined ? 0 : 1, ...spellBinds, ...extraBinds,
+      extra.length || w.spell ? 1 : 0, agent === undefined ? 0 : 1, w.probe === undefined ? 0 : 1, w.mode ?? null, w.mode ?? null,
     )
     .run();
   return res.meta;
@@ -335,11 +359,14 @@ export async function touchWorker(env: Env, w: { worker: string; arch: string; h
 /**
  * The worker row after a task: the lease is over, the counter moves, and the
  * row remembers what it just did — the Workers page reads the last task
- * there, one row per worker, not from build_tasks.
+ * there, one row per worker, not from build_tasks. The process that claimed
+ * last is the one that held the task: it finished one (#277), so a
+ * community builder, one task per container, is never a crash loop however
+ * short each container's life — the same write, no statement of its own.
  */
 async function workerFinished(env: Env, who: string, task: TaskRow, status: "done" | "staged" | "failed", version?: string | null): Promise<void> {
   const last = JSON.stringify({ id: task.id, kind: task.kind, name: task.name, version: version ?? task.version ?? null, status, at: now() });
-  await env.DB.prepare(`UPDATE build_workers SET last_seen = ?, current_task = NULL, ${status === "failed" ? "builds_failed = builds_failed + 1" : "builds_done = builds_done + 1"}, last_task = ? WHERE id = ?`)
+  await env.DB.prepare(`UPDATE build_workers SET last_seen = ?, current_task = NULL, ${status === "failed" ? "builds_failed = builds_failed + 1" : "builds_done = builds_done + 1"}, last_task = ?, instance_finished = instance WHERE id = ?`)
     .bind(now(), last, who)
     .run();
 }
@@ -361,8 +388,136 @@ const ANY_ARCH_KINDS = "'metrics', 'gc', 'security', 'promote', 'audit', 'verify
 /** Jobs that move a ring — one at a time per ring (the claim's lock). */
 const RING_MOVERS = "'promote', 'rollback', 'render', 'security'";
 
+/**
+ * The claim's one write (touchWorker), with what the instance step says of
+ * the process (orders.ts instanceStep) — and its journal lines, each
+ * written only when the row holds what the step wrote, so a claim that lost
+ * the race writes none. A step that fails to write is dropped, never the
+ * claim: the liveness write goes again without it (the orders path fails
+ * open).
+ */
+async function touchSaying(env: Env, said: Parameters<typeof touchWorker>[1], task: number | null, step: InstanceStep | null): Promise<void> {
+  if (!step || (!Object.keys(step.set).length && !step.journal.length)) {
+    await touchWorker(env, said, task);
+    return;
+  }
+  try {
+    await touchWorker(env, said, task, step);
+    if (step.journal.length) {
+      await env.DB.batch(step.journal.map((l) => env.DB.prepare(`INSERT INTO events (kind, ring, source, status, summary, payload) SELECT 'worker', NULL, 'factory', ?, ?, ? WHERE (SELECT ${l.guard[0]} FROM build_workers WHERE id = ?) IS ?`).bind(l.status, l.summary, JSON.stringify(l.payload), said.worker, l.guard[1])));
+    }
+  } catch (e) {
+    console.error("orders:", e);
+    await touchWorker(env, said, task);
+  }
+}
+
+/** The orders path, fail open: whatever it throws is logged, and the claim goes on as if nothing were waiting. */
+async function ordersSafely(f: () => Promise<OrderOut[]>): Promise<OrderOut[]> {
+  try {
+    return await f();
+  } catch (e) {
+    console.error("orders:", e);
+    return [];
+  }
+}
+
+/** A not-ready spell after a claim's probe: it begins with the first failed probe (the claim's time, the pool's clock), goes on while the probe fails or is not taken yet, and ends with an answer. */
+function spellAfter(since: string | null, probe: AgentReport | undefined, at: string): string | null {
+  if (!probe) return since;
+  return probe.status === "error" ? since ?? at : probe.status === "ok" ? null : since;
+}
+
+/** The claim as the orders path reads it: the row with this claim's words on it — the probe, the process — as the write will leave it. */
+function afterClaim(row: OrdersRow, facts: ClaimFacts, step: InstanceStep | null, probe: AgentReport | undefined, at: string): AfterClaim & { error: string | null; spell: string | null } {
+  const merged = { ...row, ...(step?.set ?? {}) } as OrdersRow;
+  const status = probe ? probe.status : row.agent_status;
+  // The spell as touchWorker writes it, to the millisecond (spellAfter): it begins with the first failed probe (this claim's time), and ends only with an answer.
+  const spell = spellAfter(row.agent_error_since, probe, at);
+  return {
+    row: merged,
+    claim: facts,
+    instance: step ? step.instance : row.instance,
+    instanceSince: step ? step.instanceSince : row.instance_since,
+    conflict: step ? step.conflict : !!row.instance_conflict_at,
+    status,
+    checkedAt: probe ? probe.checked_at : row.agent_checked_at,
+    error: probe ? probe.error : row.agent_error,
+    spell,
+  };
+}
+
+/**
+ * The pool's rules at a claim that has nothing waiting (orders.ts
+ * decideAuto): at most one order, delivered in this same answer. Only
+ * when it proposes a restart-type order does the claim read more — the
+ * provider's breaker in the worker's scope, then the site's workers and
+ * its pacing — and a hold issues and counts nothing. The site may turn a
+ * restart of the shared agent service into a restart of this worker's own
+ * process (the service answers for another of its workers), or end the
+ * spell's restarts for this worker too (the elected one gave up). The
+ * rules' state is written with the order, by compare-and-set: a claim that
+ * lost the race issues nothing, and the next one decides again.
+ */
+async function autoOrder(env: Env, x: AfterClaim & { error: string | null; spell: string | null }, o: { agent: string | null; needsAgent: boolean; at: string }): Promise<OrderOut | null> {
+  const now = Date.parse(o.at);
+  const { scale } = rulesScale(env);
+  const input = { row: x.row, claim: x.claim, status: x.status, error: x.error, spell: x.spell, instanceSince: x.instanceSince, conflict: x.conflict, needsAgent: o.needsAgent };
+  let d: Decision = decideAuto(input, now, scale);
+  if (d.kind === null) return null;
+  const w = x.row;
+  if (d.kind === "give-up") {
+    await giveUp(env, w, x.spell, d.next, d.summary);
+    return null;
+  }
+  let reason = d.reason;
+  if (d.kind !== "recheck-agent") {
+    if (await breakerHolds(env, { id: w.id, site: w.site, agent: o.agent, cls: d.cls, trust: w.trust }, now)) return null;
+    if (w.site) {
+      const site = await readSite(env, w.site, now);
+      // The agent service this worker shares answers for another of its workers: this worker's own process is what fails.
+      if (d.kind === "restart-agent" && siblingsAnswering(w, site.live).length) {
+        d = decideAuto({ ...input, siblingAnswers: true }, now, scale);
+        if (d.kind !== "restart") return null;
+        reason = d.reason;
+      }
+      const v = siteVerdict(w, d.kind, site, now, scale);
+      if (!v.ok) {
+        if (v.giveUp) {
+          const auto: AutoState = autoOf(w.auto_orders, x.spell, now);
+          await giveUp(env, w, x.spell, { ...auto, gave_up: new Date(now).toISOString() }, `${w.id}: the pool stops restarting it — ${v.why}; a person looks: /worker/${w.id}`);
+        }
+        return null;
+      }
+      if (d.kind === "restart-agent" && v.others.length) reason += ` — shared by ${v.others.length + 1} workers (with ${v.others.join(", ")}), restarted once, through this one`;
+    }
+  }
+  const by = poolFor(w.trust);
+  const issued = await issueOrder(env, {
+    worker: w.id, owner: w.owner, kind: d.kind, reason: reason.slice(0, 300), by, via: null, rule: d.rule, unless: d.unless, site: w.site,
+    baselineAtIssue: x.checkedAt, auto: { old: w.auto_orders, next: JSON.stringify(d.next) },
+    deliverTo: { instance: x.instance!, baseline: d.kind === "restart" ? x.instance : x.checkedAt }, now,
+    line: { status: d.kind === "recheck-agent" ? "ok" : "warn", summary: `${w.id}: ${d.kind} ordered by the pool — ${reason.slice(0, 300)}` },
+  });
+  if (!issued.ok) {
+    if (issued.why === "cap") await capRefusal(env, { worker: w.id, kind: d.kind, by, now });
+    return null;
+  }
+  return outOf({ id: issued.id, kind: d.kind, reason: reason.slice(0, 300), issued_by: by, issued_at: issued.issued_at, expires_at: issued.expires_at, unless_agent_ok: d.unless });
+}
+
+/** The rules stop restarting a worker in this spell: its state says so (compare-and-set), and the journal once, by the write that said it. */
+async function giveUp(env: Env, w: OrdersRow, spell: string | null, next: AutoState, summary: string): Promise<void> {
+  const value = JSON.stringify(next);
+  await env.DB.batch([
+    env.DB.prepare("UPDATE build_workers SET auto_orders = ? WHERE id = ? AND auto_orders IS ?").bind(value, w.id, w.auto_orders),
+    env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) SELECT 'order', NULL, 'factory', 'warn', ?, ? WHERE (SELECT auto_orders FROM build_workers WHERE id = ?) IS ?")
+      .bind(summary, JSON.stringify({ worker: w.id, owner: w.owner, gave_up: next.gave_up, spell_since: spell }), w.id, value),
+  ]);
+}
+
 export async function handleClaim(request: Request, env: Env, actor: Actor): Promise<Response> {
-  const b = await readJson<{ arch?: string; hostname?: string; labels?: unknown; version?: string; kinds?: unknown; shared?: unknown; agent?: unknown; agent_status?: unknown; agent_error?: unknown; agent_checked_at?: unknown; usage?: unknown; log?: unknown }>(request);
+  const b = await readJson<{ arch?: string; hostname?: string; labels?: unknown; version?: string; kinds?: unknown; shared?: unknown; agent?: unknown; agent_status?: unknown; agent_error?: unknown; agent_checked_at?: unknown; usage?: unknown; log?: unknown; orders?: unknown; instance?: unknown; started_at?: unknown; agent_via?: unknown; site?: unknown; restarts_left?: unknown; previous_exit?: unknown }>(request);
   if (b instanceof Response) return b;
   if (!b.arch || !isRepoArch(b.arch)) return json({ error: "arch (x86_64|aarch64) is required" }, 400);
   if (actor.kind === "job") return json({ error: "a job token cannot claim; use the worker token" }, 403);
@@ -391,12 +546,36 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   // brain — the page, or the worker's own command line — the registration's
   // mode is what counts, at this claim and every one after.
   const shared = trust === "community" && (actor.w.mode_by ? actor.w.mode === "shared" : b.shared === true);
+  // Workers follow the brain for their health (#277): what the claim says of
+  // its process — the kinds of order it takes, which process it is, where
+  // its agent is — against the row workerOf read with the token. The whole
+  // orders path fails open: an exception delivers nothing, is logged, and
+  // the claim goes on to its task or its 204.
+  const at = now();
+  const row = actor.w.orders ?? null;
+  let facts: ClaimFacts | null = null;
+  let step: InstanceStep | null = null;
+  try {
+    facts = claimFacts(b as Record<string, unknown>, request.headers, probe);
+    if (row) step = instanceStep(row, facts, Date.parse(at));
+  } catch (e) {
+    console.error("orders:", e);
+  }
+  const agent = b.agent === undefined ? undefined : typeof b.agent === "string" ? b.agent : null;
+  // The spell's start, written only by the claim that begins or ends it.
+  const spellFrom = row?.agent_error_since ?? null;
+  const spellTo = row ? spellAfter(spellFrom, probe, at) : spellFrom;
+  const said = { worker: workerId, arch: b.arch, hostname: b.hostname, labels: b.labels, version: b.version, mode: trust === "community" ? (shared ? "shared" : "dedicated") : undefined, agent, kinds, probe, usage, log, agentVia: facts?.agent_via ?? row?.agent_via ?? null, at, spell: spellTo !== spellFrom ? { from: spellFrom, to: spellTo } : null };
+  const touch = (task: number | null) => touchSaying(env, said, task, step);
+  const after = row && facts ? afterClaim(row, facts, step, probe, at) : null;
   // Every worker follows the latest image (update.ts): one behind past the
   // rollout's grace is touched — alive, and the Workers page says why it
   // idles — told once per release in the journal, and handed nothing.
   const update = updateState(b.version, running(env));
   if (update.required) {
-    await touchWorker(env, { worker: workerId, arch: b.arch, hostname: b.hostname, labels: b.labels, version: b.version, mode: trust === "community" ? (shared ? "shared" : "dedicated") : undefined, agent: b.agent === undefined ? undefined : typeof b.agent === "string" ? b.agent : null, kinds, probe, usage, log }, null);
+    // Handed nothing, but an order waiting for it rides the refusal: a restart or a re-check does not need the latest image.
+    const orders = after ? await ordersSafely(() => takeOrders(env, after, Date.parse(at))) : [];
+    await touch(null);
     const told = await env.DB.prepare("SELECT told_update FROM build_workers WHERE id = ?").bind(workerId).first<{ told_update: string | null }>();
     if (told?.told_update !== update.latest) {
       await env.DB.batch([
@@ -405,7 +584,23 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
           .bind(`${workerId}: handed nothing — ${updateMessage(update)}`, JSON.stringify({ worker: workerId, owner: actor.w.owner, yours: update.yours, latest: update.latest, behind: update.behind })),
       ]);
     }
-    return json({ error: updateMessage(update), latest: update.latest, yours: update.yours, behind: update.behind, update: "/docs/workers#update" }, 426);
+    return json({ error: updateMessage(update), latest: update.latest, yours: update.yours, behind: update.behind, update: "/docs/workers#update", ...(orders.length ? { orders } : {}) }, 426);
+  }
+  // An order waiting for this worker is delivered before any task, and an
+  // answer that carries orders carries no task: the task stays queued for
+  // the next claim. With nothing waiting, the pool's rules may give one.
+  if (after) {
+    const kindsNeedAgent = kinds.includes("audit") || (kinds.includes("build") && trust !== "project");
+    const orders = await ordersSafely(async () => {
+      const waiting = await takeOrders(env, after, Date.parse(at));
+      if (waiting.length || after.claim.takes === null || !rulesOn(env)) return waiting;
+      const auto = await autoOrder(env, after, { agent: agent ?? row!.agent, needsAgent: kindsNeedAgent, at });
+      return auto ? [auto] : [];
+    });
+    if (orders.length) {
+      await touch(null);
+      return json({ task: null, orders });
+    }
   }
   // A build asked for one worker (pinned_to) is claimed by that worker only; the rest is anyone's that qualifies.
   let scope = `kind IN (SELECT value FROM json_each(?)) AND (pinned_to IS NULL OR pinned_to = ?)`;
@@ -477,7 +672,7 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
   )
     .bind(workerId, plusMinutes(LEASE_MINUTES), now(), b.arch, ...binds)
     .first<TaskRow>();
-  await touchWorker(env, { worker: workerId, arch: b.arch, hostname: b.hostname, labels: b.labels, version: b.version, mode: trust === "community" ? (shared ? "shared" : "dedicated") : undefined, agent: b.agent === undefined ? undefined : typeof b.agent === "string" ? b.agent : null, kinds, probe, usage, log }, task?.id ?? null);
+  await touch(task?.id ?? null);
   if (!task) return new Response(null, { status: 204 });
   if (task.trust === "community" && task.kind === "build") {
     await env.DB.prepare("UPDATE factory_packages SET status = 'building', detail = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE name = ?").bind(`building on ${workerId} (${task.arch})`, task.name).run();
@@ -873,7 +1068,29 @@ export async function requeueExpiredLeases(env: Env): Promise<number> {
 // ---------- read ----------
 
 /** A build_workers row as the API serves it. */
-export interface WorkerRow { last_seen: string; labels: string | null; owner: string | null; trust: string; packages: string | null; kinds: string | null; agent: string | null; agent_status: string | null; usage: string | null; last_task: string | null; version?: string | null }
+export interface WorkerRow {
+  last_seen: string; labels: string | null; owner: string | null; trust: string; packages: string | null; kinds: string | null; agent: string | null; agent_status: string | null; usage: string | null; last_task: string | null; version?: string | null;
+  // #277's columns (0042): what the view derives its words from, and strips.
+  open_orders?: string | null; order_kinds?: string | null; instance?: string | null; instance_prev?: string | null; instance_since?: string | null; instance_conflict_at?: string | null; instance_other_at?: string | null;
+  instance_churn?: number | null; instance_finished?: string | null; crash_loop_since?: string | null; watchdog_exits?: string | null; started_at?: string | null; agent_via?: string | null; site?: string | null;
+  restarts_left?: number | null; rollout?: string | null; agent_error?: string | null; agent_error_since?: string | null; agent_probed_at?: string | null; agent_error_class?: string | null;
+  drained_at?: string | null; drained_by?: string | null; drain_reason?: string | null; auto_orders?: string | null;
+}
+
+/**
+ * What the pool does for a worker whose agent does not answer, in its own
+ * words, from the row (orders.ts): nothing for an error a restart cannot
+ * help, gave up after its restarts, or nothing said — the rules are on it.
+ * Read on every listing, so it reads nothing more.
+ */
+function poolWaits(w: WorkerRow): string | null {
+  if (w.agent_status !== "error" || !w.agent_error_since) return null;
+  const cls = (w.agent_error_class ?? null) as (typeof NOTHING_CLASSES)[number] | null;
+  if (cls && NOTHING_CLASSES.includes(cls)) return `the pool does nothing for this error (${cls}): a restart cannot help — its own re-check runs every 30 min`;
+  if (w.order_kinds === null || w.order_kinds === undefined) return "its image takes no orders: its host's updater replaces it";
+  if (cls === "unknown") return "an error the pool does not know: it re-checks it at most once and does not restart on it — a person looks";
+  return null;
+}
 
 /** The moment a heartbeat must be younger than to count as alive: the one rule (meta.ts's WORKER_ALIVE_MINUTES), as a timestamp. */
 export function aliveSince(at = Date.now()): number {
@@ -889,11 +1106,33 @@ export function aliveSince(at = Date.now()): number {
  * its own and without ready or side (2026-09-18).
  */
 export function workerView<W extends WorkerRow>(w: W, since: number, pool: RunningVersion) {
+  const auto = w.agent_error_since ? autoOf(w.auto_orders, w.agent_error_since, Date.now()) : null;
+  let watchdog: { n: number; since: string; last: string; stuck_in: string | null } | null = null;
+  try { watchdog = w.watchdog_exits ? JSON.parse(w.watchdog_exits) : null; } catch { watchdog = null; }
   return {
     ...w,
     token_hash: undefined, // the hash of a worker's token is the pool's to compare, nobody's to see
     log_tail: undefined, // the worker's own log is its owner's and the maintainers' (GET /factory/workers/:id/log), not the listing's
     log_at: undefined,
+    // #277: the process and the rules' bookkeeping are the pool's; the site is never served (it would say which workers share a host).
+    instance: undefined, instance_prev: undefined, instance_since: undefined, instance_conflict_at: undefined, instance_other_at: undefined, instance_churn: undefined, instance_finished: undefined,
+    site: undefined, auto_orders: undefined, agent_error_class: undefined, agent_probed_at: undefined, rollout: undefined, order_kinds: undefined, watchdog_exits: undefined,
+    drained_at: undefined, drained_by: undefined, drain_reason: undefined, agent_error_since: undefined,
+    // Up since: the pool's clock, from the process's first claim; started_at is the worker's own word, for the title.
+    up_since: w.instance_since ?? null,
+    started_at: w.started_at ?? null,
+    // The orders it takes (null: an image from before orders), the ones waiting, and what the pool is doing or not doing about its agent.
+    takes_orders: w.order_kinds ? (JSON.parse(w.order_kinds) as string[]) : null,
+    open_orders: openOrdersOf(w.open_orders ?? null),
+    drained: w.drained_at ? { at: w.drained_at, by: w.drained_by ?? null, reason: w.drain_reason ?? null } : null,
+    not_ready_since: w.agent_status === "error" ? w.agent_error_since ?? null : null,
+    pool_gave_up: auto?.gave_up ?? null,
+    pool_waits: poolWaits(w),
+    two_processes_since: w.instance_conflict_at ?? null,
+    restarts_left: w.restarts_left ?? null,
+    crash_loop_since: w.crash_loop_since ?? null,
+    watchdog: watchdog && Date.now() - Date.parse(watchdog.since) < 24 * 3600e3 ? watchdog : null,
+    agent_via: w.agent_via ?? null,
     labels: w.labels ? JSON.parse(w.labels) : null,
     packages: w.packages ? JSON.parse(w.packages) : null,
     alive: Date.parse(w.last_seen) > since,

@@ -263,7 +263,9 @@ describe("lists come from the code that owns them", () => {
     const script = scriptOf(await text("/workers"));
     expect(script).toContain(`var WORKER_ALIVE_MINUTES = ${WORKER_ALIVE_MINUTES};`);
     const wtStatus = /^  function wtStatus\(w\) \{[\s\S]*?\n  \}$/m.exec(script)![0], legend = /^  var WT_LEGEND = [^\n]*$/m.exec(script)![0];
-    const run = new Function("w", ["function esc(s) { return String(s); } function ago() { return '3h ago'; } var WICON = { native: '', emu: '', shared: '', own: '', log: '' };", `var WORKER_ALIVE_MINUTES = ${WORKER_ALIVE_MINUTES};`, wtStatus, legend, "return { pill: wtStatus(w), legend: WT_LEGEND };"].join("\n"))({ alive: false, last_seen: "2026-01-01T00:00:00Z" }) as { pill: string; legend: string };
+    // The pill reads the worker's one state (wtState, #277).
+    const wtState = /^  function wtState\(w\) \{[\s\S]*?\n  \}$/m.exec(script)![0];
+    const run = new Function("w", ["function esc(s) { return String(s); } function ago() { return '3h ago'; } var WICON = { native: '', emu: '', shared: '', own: '', log: '' };", `var WORKER_ALIVE_MINUTES = ${WORKER_ALIVE_MINUTES};`, wtState, wtStatus, legend, "return { pill: wtStatus(w), legend: WT_LEGEND };"].join("\n"))({ alive: false, last_seen: "2026-01-01T00:00:00Z" }) as { pill: string; legend: string };
     expect(run.pill).toContain(`title="not seen in the last ${WORKER_ALIVE_MINUTES} minutes"`);
     expect(run.legend).toContain(`offline</span> not seen in ${WORKER_ALIVE_MINUTES} minutes`);
   });

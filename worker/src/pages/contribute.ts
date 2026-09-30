@@ -601,9 +601,11 @@ const SCRIPT = String.raw`
     var t = w.current_task ? taskOf(w.current_task) : null, mark = markOf(w.agent), model = w.agent ? String(w.agent).split("/").slice(1).join("/") || w.agent : "";
     var box = '<span class="fx-wbox">' + (mark ? agentMark(mark, w.agent, 22) : '<span title="' + esc(w.agent || "no agent reported") + '">—</span>') + '</span>';
     var top = '<div class="fx-wtop"><span>' + workerName(w) + ' · ' + esc(w.arch) + '</span><span title="' + esc(w.agent || "no agent reported") + '">' + esc(model || "—") + '</span></div>';
-    // Alive but not ready — what it declares needs an agent that did not answer (the listing's ready, the pool's workerReady; the shell's words for why, the agent's own error on hover), as the Workers page's failed pill says it: never "idle, waiting for work" (#273). It is handed no agent work — no draft, no audit — until its agent answers; work that needs none (a contributor's plain build) still comes.
-    if (!w.current_task && !w.ready) { var why = wtNotReady(w); return '<div class="fx-wrow notready">' + box + '<div class="fx-wmain">' + top + '<div class="fx-wjob" title="' + esc(why) + '"><i class="fx-wmark" aria-hidden="true"></i><b>not ready</b><span class="fx-step">' + esc(why) + '</span></div><div class="fx-bar"><i style="width:0%"></i></div></div></div>'; }
-    if (!w.current_task) return '<div class="fx-wrow idle">' + box + '<div class="fx-wmain">' + top + '<div class="fx-wjob"><b>idle</b><span class="fx-step">waiting for work</span></div><div class="fx-bar"><i style="width:0%"></i></div></div></div>';
+    // Its one state (the shell's wtState, #277). Drained or outdated, it is handed nothing whatever its agent says. Alive but not ready — what it declares needs an agent that did not answer (the listing's ready, the pool's workerReady; the shell's words for why, the agent's own error on hover), as the Workers page's failed pill says it: never "idle, waiting for work" (#273). It is handed no agent work — no draft, no audit — until its agent answers; work that needs none (a contributor's plain build) still comes. What the pool does about it rides beside (wtMarks).
+    var st = wtState(w), marks = wtMarks(w);
+    if (st === "drained" || st === "outdated") { var held = st === "drained" ? "by " + (w.drained.by || "?") + (w.drained.reason ? ": " + w.drained.reason : "") + " — handed nothing until resumed" : "behind the latest image (" + (w.update.latest || "") + "), handed nothing until it updates"; return '<div class="fx-wrow notready">' + box + '<div class="fx-wmain">' + top + '<div class="fx-wjob" title="' + esc(held) + '"><i class="fx-wmark" aria-hidden="true"></i><b>' + st + '</b><span class="fx-step">' + esc(held) + '</span>' + marks + '</div><div class="fx-bar"><i style="width:0%"></i></div></div></div>'; }
+    if (st === "not ready") { var why = wtNotReady(w); return '<div class="fx-wrow notready">' + box + '<div class="fx-wmain">' + top + '<div class="fx-wjob" title="' + esc(why) + '"><i class="fx-wmark" aria-hidden="true"></i><b>not ready</b><span class="fx-step">' + esc(why) + '</span>' + marks + '</div><div class="fx-bar"><i style="width:0%"></i></div></div></div>'; }
+    if (!w.current_task) return '<div class="fx-wrow idle">' + box + '<div class="fx-wmain">' + top + '<div class="fx-wjob"><b>idle</b><span class="fx-step">waiting for work</span>' + marks + '</div><div class="fx-bar"><i style="width:0%"></i></div></div></div>';
     var p = progressOf(t);
     return '<div class="fx-wrow">' + box + '<div class="fx-wmain">' + top + '<div class="fx-wjob"><a href="/build/' + esc(w.current_task) + '"><b>' + esc(t ? t.name : "#" + w.current_task) + '</b></a><span class="fx-step">' + esc(t ? stepOf(t) : "running") + '</span></div>'
       + '<div class="fx-bar" title="' + esc(p.title) + '"><i' + (p.pct === null ? ' class="unknown"' : '') + ' style="width:' + (p.pct === null ? 100 : p.pct) + '%"></i></div></div></div>';
@@ -611,11 +613,11 @@ const SCRIPT = String.raw`
   function drawWorkers() {
     var list = $("#fx-wlist"), head = $("#fx-busy"); if (!list) return;
     if (!LISTING) { if (DOWN.listing) { list.innerHTML = '<p class="fx-wempty">' + esc(DOWN.listing) + '</p>'; if (head) head.textContent = ""; } return; }
-    // Busy first, then the ones not ready (what a maintainer looks at), then the idle.
-    var rank = function (w) { return w.current_task ? 0 : w.ready ? 2 : 1; };
+    // Busy first, then the ones that take nothing (not ready, outdated, drained — what a maintainer looks at), then the idle: each by its one state (wtState), counted by the shell's workerCounts, a count of zero left out.
+    var rank = function (w) { var st = wtState(w); return st === "building" ? 0 : st === "idle" ? 2 : 1; };
     var ws = (LISTING.workers || []).filter(function (w) { return w.alive && !w.revoked_at; }).sort(function (a, b) { return rank(a) - rank(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0); });
-    var working = ws.filter(function (w) { return w.current_task; }).length, down = ws.filter(function (w) { return !w.current_task && !w.ready; }).length, shown = ws.slice(0, 6);
-    if (head) head.textContent = num(working) + " busy · " + num(ws.length - working - down) + " idle" + (down ? " · " + num(down) + " not ready" : "");
+    var wc = workerCounts(ws), shown = ws.slice(0, 6);
+    if (head) head.textContent = num(wc.building) + " busy · " + num(wc.idle) + " idle" + (wc.notReady ? " · " + num(wc.notReady) + " not ready" : "") + (wc.outdated ? " · " + num(wc.outdated) + " outdated" : "") + (wc.drained ? " · " + num(wc.drained) + " drained" : "");
     // The rest are counted, not linked: the card's foot is the way to every worker.
     list.innerHTML = (shown.length ? shown.map(workerRowOf).join("") + (ws.length > shown.length ? '<p class="fx-wempty">' + num(ws.length - shown.length) + ' more alive</p>' : '') : '<p class="fx-wempty">No worker is alive right now. A request waits in the queue until one is.</p>')
       // A refresh that did not answer leaves the last answer's rows, and says so.
@@ -1047,7 +1049,7 @@ export const FACTORY_COMPONENTS = (F: Fixture): Component[] => {
       id: "factory.workers",
       page: "/factory",
       anchor: ['<div class="op-card fx-workers" id="workers">', 'id="fx-busy"', 'id="fx-wlist"', '<a href="/workers">All workers →</a>', 'class="op-live-dot"'],
-      script: ['api("GET", "/api/v1/factory?live=1&limit=20")', "LIVE_MS = 60000", "if (!document.hidden) loadListing();", '"visibilitychange"', "function workerRowOf(w)", "agentMark(mark, w.agent, 22)", "workerName(w)", "!w.current_task && !w.ready", "wtNotReady(w)", "<b>not ready</b>", '" not ready"', "function stepOf(t)", '"rebuilding from scratch"', '"writing the PKGBUILD"', "function typicalMs(t)", "s.builds_daily", "s.jobs_daily", "liveStats(function (d) { STATS = d; drawWorkers(); }, 120000)", 'noAnswer("worker listing", e)'],
+      script: ['api("GET", "/api/v1/factory?live=1&limit=20")', "LIVE_MS = 60000", "if (!document.hidden) loadListing();", '"visibilitychange"', "function workerRowOf(w)", "agentMark(mark, w.agent, 22)", "workerName(w)", "var st = wtState(w), marks = wtMarks(w)", 'st === "not ready"', "wtNotReady(w)", "<b>not ready</b>", "wc = workerCounts(ws)", '" not ready"', '" outdated"', '" drained"', "function stepOf(t)", '"rebuilding from scratch"', '"writing the PKGBUILD"', "function typicalMs(t)", "s.builds_daily", "s.jobs_daily", "liveStats(function (d) { STATS = d; drawWorkers(); }, 120000)", 'noAnswer("worker listing", e)'],
       reads: [
         {
           path: "/api/v1/factory?live=1&limit=20",

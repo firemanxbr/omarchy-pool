@@ -22,6 +22,7 @@ use serde::Deserialize;
 use crate::client::{Api, ReleaseRequest};
 use crate::gate::{self, GateOptions, Verdict};
 use crate::ops;
+use crate::orders::{self, ClaimAnswer, Order, OrderKind};
 use crate::RepoError;
 
 /// The worker's own log — the lines between tasks — as the claim carries it
@@ -187,12 +188,6 @@ impl Task {
     }
 }
 
-#[derive(Deserialize, Debug)]
-struct Claimed {
-    task: Task,
-    token: String,
-}
-
 /// What a job reports back: a one-line summary and a JSON result.
 pub struct Outcome {
     pub summary: String,
@@ -298,8 +293,17 @@ fn ask_agent(opts: &WorkOptions) -> AgentProbe {
 const AGENT_RETRY_FIRST: Duration = Duration::from_secs(15);
 
 /// How long after the `failures`-th failed probe in a row the next one runs: 15 s, 30 s, 60 s … 16 min, then every half hour.
+#[cfg(test)]
 fn agent_retry_after(failures: u32) -> Duration {
-    let doubled = AGENT_RETRY_FIRST.saturating_mul(1u32 << failures.saturating_sub(1).min(16));
+    agent_retry_from(AGENT_RETRY_FIRST, failures)
+}
+
+/// The same schedule from another first delay (`AGENT_RETRY_FIRST_SECONDS`,
+/// #277: 15 s unless told, never under it — the E2E waits half an hour, so
+/// the pool alone brings a worker back): doubled at each failure, never past
+/// the healthy agent's half hour.
+fn agent_retry_from(first: Duration, failures: u32) -> Duration {
+    let doubled = first.saturating_mul(1u32 << failures.saturating_sub(1).min(16));
     doubled.min(AGENT_PROBE_EVERY)
 }
 
@@ -309,12 +313,14 @@ fn agent_retry_after(failures: u32) -> Duration {
 struct AgentCheck {
     probe: AgentProbe,
     failures: u32,
+    /// The first re-check after a failure; 15 s when unset.
+    first: Option<Duration>,
 }
 
 impl AgentCheck {
     fn due(&self, now: Instant) -> bool {
         let wait = if self.probe.status == "error" {
-            agent_retry_after(self.failures)
+            agent_retry_from(self.first.unwrap_or(AGENT_RETRY_FIRST), self.failures)
         } else {
             AGENT_PROBE_EVERY
         };
@@ -340,7 +346,7 @@ impl AgentCheck {
                 format!(
                     "agent{who}: NOT ready — {}; checking again in {} s, then less often (up to every {} s) until it answers",
                     p.error,
-                    agent_retry_after(self.failures).as_secs(),
+                    agent_retry_from(self.first.unwrap_or(AGENT_RETRY_FIRST), self.failures).as_secs(),
                     AGENT_PROBE_EVERY.as_secs()
                 )
             })
@@ -356,6 +362,23 @@ impl AgentCheck {
         };
         self.probe = p;
         line
+    }
+
+    /// Takes the answer of a probe an order asked for (#277): stored and
+    /// logged as `record` does, but a failure leaves the count alone, so the
+    /// worker's own backoff keeps its schedule; an answer resets it.
+    fn record_ordered(&mut self, p: AgentProbe) -> Option<String> {
+        let failures = self.failures;
+        let line = self.record(p);
+        if self.probe.status == "error" {
+            self.failures = failures;
+        }
+        line
+    }
+
+    /// The last probe, if it is younger than `max`: a re-check that one answered a moment ago spends no completion.
+    fn fresh(&self, max: Duration) -> bool {
+        self.probe.checked_at.is_some_and(|t| t.elapsed() < max)
     }
 }
 
@@ -387,6 +410,7 @@ const AGENT_PROBE_EVERY: Duration = Duration::from_secs(30 * 60);
 
 /// # Panics
 /// When the heartbeat thread's mutex is poisoned, which needs a panic in that thread first.
+#[allow(clippy::too_many_lines)] // the claim loop, read top to bottom: each way a claim can end is a few lines of its own
 pub fn run(opts: &WorkOptions) -> Result<()> {
     std::fs::create_dir_all(&opts.work_dir)?;
     let claimer = Api::new(&opts.api, &opts.worker_token)?;
@@ -395,8 +419,16 @@ pub fn run(opts: &WorkOptions) -> Result<()> {
     let agent = agent_label();
     // What the machine uses, averaged on the worker's own clock; the claim reports it.
     let usage = crate::usage::Sampler::start(opts.work_dir.clone());
+    // What this process is, for the pool (#277): which process, what it
+    // takes, where its agent is — found from its own container when it can
+    // verify which one it is — and why the one before it ended, once.
+    let hands = Real {
+        opts,
+        claimer: &claimer,
+    };
+    let mut me = Process::start(opts, agent.is_some(), &hands);
     eprintln!(
-        "worker ({}) ready — {} — asking {} for {}{}",
+        "worker ({}) ready — {} — asking {} for {}{} — takes orders: {}",
         opts.arch,
         version,
         opts.api,
@@ -404,7 +436,8 @@ pub fn run(opts: &WorkOptions) -> Result<()> {
         agent
             .as_deref()
             .map(|a| format!(" — agent {a}"))
-            .unwrap_or_default()
+            .unwrap_or_default(),
+        me.takes.join(", ")
     );
     // The keyrings the health check and the sync need, before the first job.
     if let Err(e) = keyrings(opts) {
@@ -421,33 +454,50 @@ pub fn run(opts: &WorkOptions) -> Result<()> {
     let is_draining = || draining.load(std::sync::atomic::Ordering::Relaxed);
     let mut idle = 0u64;
     let mut done = 0u32;
-    let mut check = AgentCheck::default();
+    let mut check = AgentCheck {
+        first: Some(orders::agent_retry_first(
+            std::env::var("AGENT_RETRY_FIRST_SECONDS").ok().as_deref(),
+        )),
+        ..AgentCheck::default()
+    };
+    let mut brake = orders::Brake::default();
+    let mut seen = orders::Seen::default();
     loop {
         if is_draining() {
             say(format!(
                 "draining: {done} task(s) done, none claimed since the stop signal; exiting"
             ));
+            me.leave("drain");
             return Ok(());
         }
         if agent.is_some() && check.due(Instant::now()) {
             if let Some(line) = check.record(probe_agent(opts)) {
                 say(line);
             }
+            me.relay_sibling_log(&check, &hands);
         }
+        me.reread(&hands);
         let probe = &check.probe;
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "arch": opts.arch, "hostname": hostname, "version": version, "labels": opts.labels, "kinds": opts.kinds, "shared": opts.shared,
             "agent": if probe.label.is_empty() { agent.clone().unwrap_or_default() } else { probe.label.clone() },
             "agent_status": probe.status, "agent_error": probe.error, "agent_checked_at": probe.checked_iso,
             "usage": usage.report(),
             "log": log_chunk(),
         });
-        let claimed = match claimer.post_json_as(&opts.worker_token, "/factory/claim", &body) {
-            Ok(Some(v)) => serde_json::from_value::<Claimed>(v).context("claim response")?,
+        me.say_in(&mut body);
+        let answer = match claimer.post_json_as(&opts.worker_token, "/factory/claim", &body) {
+            Ok(Some(v)) => {
+                me.heard();
+                orders::read_claim::<Task>(&v)
+            }
             Ok(None) => {
+                me.heard();
+                brake.after(false, POLL);
                 idle += POLL.as_secs();
                 if opts.idle_exit > 0 && idle >= opts.idle_exit {
                     say(format!("no work for {idle}s; exiting"));
+                    me.leave("idle");
                     return Ok(());
                 }
                 sleep_unless(POLL, &is_draining);
@@ -455,13 +505,25 @@ pub fn run(opts: &WorkOptions) -> Result<()> {
             }
             // 426: this binary is behind the pool's release past the rollout's
             // grace — every worker follows the latest image, and the pool hands
-            // this one nothing until the updater (or its owner) replaces it.
+            // this one nothing until the updater (or its owner) replaces it. An
+            // order waiting for it rides the refusal: a re-check or a restart
+            // needs no new image.
             Err(RepoError::Api { status: 426, body }) => {
-                let why = serde_json::from_str::<serde_json::Value>(&body)
-                    .ok()
-                    .and_then(|v| v["error"].as_str().map(str::to_owned))
-                    .unwrap_or(body);
+                me.heard();
+                let v = serde_json::from_str::<serde_json::Value>(&body).unwrap_or_default();
+                let why = v["error"].as_str().map_or(body.clone(), str::to_owned);
                 say(format!("update required: {why}"));
+                let list = orders::orders_in(&v).unwrap_or_default();
+                if !list.is_empty() {
+                    for o in &list {
+                        if let Obeyed::Exit(code) = obey(&hands, &mut me, &mut check, &mut seen, o)
+                        {
+                            std::process::exit(code);
+                        }
+                    }
+                    sleep_unless(brake.after(true, POLL), &is_draining);
+                    continue;
+                }
                 sleep_unless(Duration::from_secs(300), &is_draining);
                 continue;
             }
@@ -471,14 +533,49 @@ pub fn run(opts: &WorkOptions) -> Result<()> {
                 continue;
             }
         };
+        let (task, token) = match answer {
+            ClaimAnswer::Task(task, token) => (task, token),
+            ClaimAnswer::Orders(list) => {
+                for o in &list {
+                    if let Obeyed::Exit(code) = obey(&hands, &mut me, &mut check, &mut seen, o) {
+                        std::process::exit(code);
+                    }
+                }
+                let gap = brake.after(true, POLL);
+                if brake.slowed() {
+                    say("the pool keeps sending orders; slowing to 30 s");
+                }
+                sleep_unless(gap, &is_draining);
+                continue;
+            }
+            // A task it cannot read, with a token it can: failed at once, so
+            // its lease is not held for half an hour, and the next claim waits.
+            ClaimAnswer::BadTask { id, token, why } => {
+                say(format!(
+                    "task {id}: this worker ({version}) could not read it: {why}; reported failed"
+                ));
+                if let Ok(job) = Api::new(&opts.api, &token) {
+                    let _ = job.post_json_as(&token, &format!("/factory/tasks/{id}/fail"), &serde_json::json!({ "error": format!("worker {version} could not read this task: {why}"), "final": false }));
+                }
+                sleep_unless(POLL, &is_draining);
+                continue;
+            }
+            ClaimAnswer::Unreadable(what) => {
+                say(format!(
+                    "claim answer not understood ({what}); waiting 30 s"
+                ));
+                sleep_unless(POLL, &is_draining);
+                continue;
+            }
+        };
+        brake.after(false, POLL);
         idle = 0;
-        let task = claimed.task;
         let label = task_label(&task);
         say(format!(
             "task {}: {label} (attempt {}/{})",
             task.id, task.attempts, task.max_attempts
         ));
-        let token = Arc::new(Mutex::new(claimed.token));
+        let token = Arc::new(Mutex::new(token));
         let stop = Arc::new(Mutex::new(false));
         let beat = heartbeat(opts.api.clone(), task.id, token.clone(), stop.clone());
         let started = Instant::now();
@@ -486,8 +583,17 @@ pub fn run(opts: &WorkOptions) -> Result<()> {
         *stop.lock().unwrap() = true;
         let _ = beat.join();
         let took = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let job = Api::new(&opts.api, &token.lock().unwrap().clone())?;
-        report(&job, &token.lock().unwrap().clone(), &task, outcome, took)?;
+        let token = token.lock().unwrap().clone();
+        // The report never ends the worker: a pool that refuses it (a task
+        // cancelled, or taken back just as it finished: 409) or does not
+        // answer (5xx) is logged, and the loop claims again (#277).
+        match Api::new(&opts.api, &token) {
+            Ok(job) => report(&job, &token, &task, outcome, took),
+            Err(e) => say(format!(
+                "task {}: could not report it ({e}); its lease ends by itself",
+                task.id
+            )),
+        }
         done += 1;
         if opts.once {
             eprintln!("{done} task(s) done; exiting");
@@ -498,31 +604,46 @@ pub fn run(opts: &WorkOptions) -> Result<()> {
 
 /// Tells the pool how the task ended: complete with the outcome, or fail
 /// with the error (the pool requeues or gives up by the attempt count).
-fn report(job: &Api, token: &str, task: &Task, outcome: Result<Outcome>, took: u64) -> Result<()> {
+/// Whatever the pool answers is logged, never a reason to exit: a `complete`
+/// refused with 409 or 5xx used to end the process under `?`, and the
+/// restart policy started it again (#277).
+fn report(job: &Api, token: &str, task: &Task, outcome: Result<Outcome>, took: u64) {
     match outcome {
         Ok(o) => {
             let field =
                 |k: &str, default: serde_json::Value| o.result.get(k).cloned().unwrap_or(default);
             let dash = || serde_json::Value::String("-".into());
-            job.post_json_as(
+            match job.post_json_as(
                 token,
                 &format!("/factory/tasks/{}/complete", task.id),
                 &serde_json::json!({ "summary": o.summary, "result": o.result, "duration_ms": took,
                     "sha256": field("sha256", dash()), "filename": field("filename", dash()), "version": field("version", serde_json::Value::Null) }),
-            )?;
-            say(format!(
-                "task {}: done — {} ({} s)",
-                task.id,
-                o.summary,
-                took / 1000
-            ));
+            ) {
+                Ok(_) => say(format!(
+                    "task {}: done — {} ({} s)",
+                    task.id,
+                    o.summary,
+                    took / 1000
+                )),
+                Err(e) => say(format!(
+                    "the pool refused the report of task {}: {}; moving on",
+                    task.id,
+                    orders::clean_line(&e.to_string())
+                )),
+            }
         }
         Err(e) => {
-            let _ = job.post_json_as(
+            if let Err(refused) = job.post_json_as(
                 token,
                 &format!("/factory/tasks/{}/fail", task.id),
                 &fail_body(&e, took),
-            );
+            ) {
+                say(format!(
+                    "the pool refused the report of task {}: {}; moving on",
+                    task.id,
+                    orders::clean_line(&refused.to_string())
+                ));
+            }
             if e.downcast_ref::<NeedsNative>().is_some() {
                 say(format!(
                     "task {}: failed, this worker's — back in the queue for a native {} worker — {e:#}",
@@ -533,7 +654,661 @@ fn report(job: &Api, token: &str, task: &Task, outcome: Result<Outcome>, took: u
             }
         }
     }
-    Ok(())
+}
+
+/// A process under this many seconds old refuses a restart: a restart this
+/// soon would loop, and the engine applies a restart policy only after 10 s.
+const RESTART_MIN_UPTIME: Duration = Duration::from_secs(120);
+/// A re-check reuses a probe under a minute old; a conditional restart's check, one under 15 s.
+const RECHECK_REUSE: Duration = Duration::from_secs(60);
+const RESTART_REUSE: Duration = Duration::from_secs(15);
+/// How long a restarted agent service has to answer on its port.
+const SIBLING_WAIT: Duration = Duration::from_secs(180);
+
+/// What obeying an order touches outside this process (§1.8.2 and §1.13 of
+/// #277's design): the agent's probe, the container engine, the pool's
+/// answer route, and the clock a wait sleeps on. The worker's hands are the
+/// real ones (`Real`); the tests' record what they were asked and answer as
+/// a fixture says, so every way an order ends is tested without an engine,
+/// an agent or a pool.
+trait Hands {
+    /// One probe of the agent: one small completion.
+    fn probe(&self) -> AgentProbe;
+    /// `<runtime> <args…>`, its output; None when it did not run.
+    fn engine(&self, runtime: &str, args: &[&str]) -> Option<std::process::Output>;
+    /// `POST /factory/workers/self/orders/<id>` with this body, through the worker's own token.
+    fn answer(&self, id: &str, body: &serde_json::Value) -> std::result::Result<(), String>;
+    fn pause(&self, d: Duration);
+}
+
+/// The worker's own hands: its checkout's `agent.py`, the engine on its socket, the pool with its token.
+struct Real<'a> {
+    opts: &'a WorkOptions,
+    claimer: &'a Api,
+}
+
+impl Hands for Real<'_> {
+    fn probe(&self) -> AgentProbe {
+        probe_agent(self.opts)
+    }
+    fn engine(&self, runtime: &str, args: &[&str]) -> Option<std::process::Output> {
+        Command::new(runtime).args(args).output().ok()
+    }
+    fn answer(&self, id: &str, body: &serde_json::Value) -> std::result::Result<(), String> {
+        self.claimer
+            .post_json_as(
+                &self.opts.worker_token,
+                &format!("/factory/workers/self/orders/{id}"),
+                body,
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    fn pause(&self, d: Duration) {
+        std::thread::sleep(d);
+    }
+}
+
+/// How obeying an order ends for the process: it goes on, or it exits with
+/// this code — the caller exits, after the note for the next process is
+/// left and the answer is sent.
+#[derive(Debug, PartialEq, Eq)]
+enum Obeyed {
+    GoOn,
+    Exit(i32),
+}
+
+/// What this process is, for the pool (#277, the design's §1.2 and §1.14):
+/// drawn once at start and said with every claim; the pool writes it only
+/// when it changes.
+struct Process {
+    instance: String,
+    started: Instant,
+    started_iso: String,
+    /// The kinds this process executes, and drain (it understands notices).
+    takes: Vec<&'static str>,
+    agent_via: &'static str,
+    site: Option<String>,
+    restarts_left: Option<i64>,
+    /// Its own container, verified: the runtime that runs it, its id, its compose project.
+    runtime: Option<String>,
+    project: Option<String>,
+    /// The agent service it calls, a service of its own project (restart-agent).
+    sibling: Option<String>,
+    state_dir: PathBuf,
+    /// Why the process before this one ended on purpose: said with every claim until the pool has heard one.
+    previous_exit: Option<serde_json::Value>,
+    reread_at: Instant,
+    /// The spell whose sibling's log went to this worker's log already: once per spell.
+    relayed: bool,
+}
+
+/// What a process declares, from what it found of its own container (§1.2):
+/// `recheck-agent` with an agent, `restart` where the engine or a
+/// supervisor starts it again, `restart-agent` with an agent service of its
+/// own project — and drain, which is a notice every process understands.
+fn declared(has_agent: bool, restart: bool, sibling: bool) -> (Vec<&'static str>, &'static str) {
+    let mut takes = vec!["drain"];
+    if has_agent {
+        takes.push("recheck-agent");
+    }
+    if restart {
+        takes.push("restart");
+    }
+    if has_agent && sibling {
+        takes.push("restart-agent");
+    }
+    takes.sort_unstable();
+    let via = if !has_agent {
+        "none"
+    } else if sibling {
+        "sibling"
+    } else {
+        "direct"
+    };
+    (takes, via)
+}
+
+impl Process {
+    fn start(opts: &WorkOptions, has_agent: bool, hands: &dyn Hands) -> Self {
+        let instance = orders::new_instance();
+        let state_dir = orders::state_dir(&opts.work_dir);
+        let previous_exit = orders::read_exit_note(&state_dir);
+        let supervised = std::env::var("OMARCHY_SUPERVISED").is_ok_and(|v| v == "1");
+        let own = identify(&instance, hands);
+        if own.is_none() && orders::in_container() {
+            say("cannot identify its own container (no verified self-inspect): no site, no restart of its agent service; restart only under OMARCHY_SUPERVISED=1");
+        }
+        let base_url = std::env::var("ANTHROPIC_BASE_URL").ok();
+        Self::found(
+            instance,
+            own,
+            base_url.as_deref(),
+            has_agent,
+            supervised,
+            state_dir,
+            previous_exit,
+            hands,
+        )
+    }
+
+    /// The process as its own container says it is: what it declares, where its agent is, its site.
+    #[allow(clippy::too_many_arguments)] // what a process is made of, each from its own source
+    fn found(
+        instance: String,
+        own: Option<Own>,
+        base_url: Option<&str>,
+        has_agent: bool,
+        supervised: bool,
+        state_dir: PathBuf,
+        previous_exit: Option<serde_json::Value>,
+        hands: &dyn Hands,
+    ) -> Self {
+        let (restart, restarts_left) =
+            orders::declares_restart(own.as_ref().map(|o| &o.inspect), supervised);
+        let sibling = own.as_ref().and_then(|o| {
+            let host = base_url.and_then(orders::url_host)?;
+            sibling_of(hands, &o.runtime, o.inspect.project.as_deref()?, &host).map(|_| host)
+        });
+        let site = own
+            .as_ref()
+            .and_then(|o| engine_site(hands, &o.runtime, o.inspect.project.as_deref()));
+        let (takes, agent_via) = declared(has_agent, restart, sibling.is_some());
+        Self {
+            instance,
+            started: Instant::now(),
+            started_iso: chrono_now(),
+            takes,
+            agent_via,
+            site,
+            restarts_left,
+            runtime: own.as_ref().map(|o| o.runtime.clone()),
+            project: own.and_then(|o| o.inspect.project),
+            sibling,
+            state_dir,
+            previous_exit,
+            reread_at: Instant::now(),
+            relayed: false,
+        }
+    }
+
+    /// The site again every ten minutes, from two reads of the engine's id that agree — so it cannot flip between claims.
+    fn reread(&mut self, hands: &dyn Hands) {
+        if self.reread_at.elapsed() < Duration::from_secs(600) {
+            return;
+        }
+        self.reread_at = Instant::now();
+        if let Some(rt) = &self.runtime {
+            self.site = engine_site(hands, rt, self.project.as_deref());
+        }
+    }
+
+    /// What the claim says of this process; the previous one's end until the pool has heard it.
+    fn say_in(&self, body: &mut serde_json::Value) {
+        body["orders"] = serde_json::json!(self.takes);
+        body["instance"] = serde_json::json!(self.instance);
+        body["started_at"] = serde_json::json!(self.started_iso);
+        body["agent_via"] = serde_json::json!(self.agent_via);
+        body["restarts_left"] = serde_json::json!(self.restarts_left);
+        if let Some(site) = &self.site {
+            body["site"] = serde_json::json!(site);
+        }
+        if let Some(prev) = &self.previous_exit {
+            body["previous_exit"] = prev.clone();
+        }
+    }
+
+    /// The pool answered a claim (a task, orders, nothing, or a 426): it has
+    /// heard why the previous process ended, and the note goes. A claim
+    /// that did not reach it (a network error, a 5xx) keeps the note for the
+    /// next one.
+    fn heard(&mut self) {
+        if self.previous_exit.take().is_some() {
+            orders::clear_exit_note(&self.state_dir);
+        }
+    }
+
+    /// Before a deliberate exit: why, for the next process to tell the pool.
+    fn leave(&self, why: &str) {
+        orders::leave_exit_note(&self.state_dir, why, &chrono_now());
+    }
+
+    /// Once per not-ready spell, the sibling agent service's last lines go into this worker's log (its owner and the maintainers read it): what `docker compose logs agent-proxy` over SSH used to show.
+    fn relay_sibling_log(&mut self, check: &AgentCheck, hands: &dyn Hands) {
+        if check.probe.status != "error" {
+            self.relayed = false;
+            return;
+        }
+        if self.relayed {
+            return;
+        }
+        if let (Some(rt), Some(project), Some(host)) = (&self.runtime, &self.project, &self.sibling)
+        {
+            if let Some(cid) = sibling_of(hands, rt, project, host) {
+                self.relayed = true;
+                if let Some(out) = hands.engine(rt, &["logs", "--tail", "50", &cid]) {
+                    let text = [
+                        String::from_utf8_lossy(&out.stdout),
+                        String::from_utf8_lossy(&out.stderr),
+                    ]
+                    .concat();
+                    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                        say(format!("[{host}] {}", orders::clean_line(line)));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Its own container, verified: the runtime, the id, what inspect says.
+struct Own {
+    runtime: String,
+    inspect: orders::Inspect,
+}
+
+/// Which container this process runs in (§1.14 of #277's design): the
+/// candidates from its own mounts, each verified by reading back, through
+/// the runtime, the instance this process wrote at start — a candidate that
+/// does not answer with it is not this container. None without a runtime
+/// that answers, or without a verified candidate.
+fn identify(instance: &str, hands: &dyn Hands) -> Option<Own> {
+    let dir = Path::new("/run/omarchy");
+    if std::fs::create_dir_all(dir).is_err()
+        || std::fs::write(dir.join("instance"), instance).is_err()
+    {
+        return None;
+    }
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+    let env = std::fs::read_to_string("/run/.containerenv").ok();
+    let host = std::fs::read_to_string("/etc/hostname").ok();
+    let candidates = orders::container_candidates(&mountinfo, env.as_deref(), host.as_deref());
+    verified(instance, &candidates, hands)
+}
+
+/// The candidate that answers, through the first runtime that runs, with this process's own instance — and what inspect says of it.
+fn verified(instance: &str, candidates: &[String], hands: &dyn Hands) -> Option<Own> {
+    if candidates.is_empty() {
+        return None;
+    }
+    let runtime = ["docker", "podman"].into_iter().find(|r| {
+        hands
+            .engine(r, &["--version"])
+            .is_some_and(|o| o.status.success())
+    })?;
+    for cid in candidates {
+        let read = hands.engine(runtime, &["exec", cid, "cat", "/run/omarchy/instance"]);
+        if !read.is_some_and(|o| {
+            o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == instance
+        }) {
+            continue;
+        }
+        let out = hands.engine(runtime, &["inspect", cid])?;
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+        return orders::parse_inspect(&v).map(|inspect| Own {
+            runtime: runtime.to_owned(),
+            inspect,
+        });
+    }
+    None
+}
+
+/// The site of this compose project on this engine: only from an engine id two reads a second apart agree on.
+fn engine_site(hands: &dyn Hands, runtime: &str, project: Option<&str>) -> Option<String> {
+    let project = project?;
+    let read = || {
+        hands
+            .engine(runtime, &["info", "-f", "{{.ID}}"])
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+            .unwrap_or_default()
+    };
+    let a = read();
+    hands.pause(Duration::from_secs(1));
+    orders::site_of(&a, &read(), project)
+}
+
+/// The template that reads one variable of a container, its role, and never the others (they hold its keys).
+const ROLE_TEMPLATE: &str = r#"{{range .Config.Env}}{{if eq (index (split . "=") 0) "OMARCHY_WORKER_ROLE"}}{{.}}{{end}}{{end}}"#;
+
+/// The container of the service `host` of this project, when there is exactly one and its role is `agent` or `broker` — read with a template that extracts that one variable, never the others (they hold its keys).
+fn sibling_of(hands: &dyn Hands, runtime: &str, project: &str, host: &str) -> Option<String> {
+    let project_label = format!("label=com.docker.compose.project={project}");
+    let service_label = format!("label=com.docker.compose.service={host}");
+    let out = hands.engine(
+        runtime,
+        &[
+            "ps",
+            "-q",
+            "--filter",
+            &project_label,
+            "--filter",
+            &service_label,
+        ],
+    )?;
+    let ids: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let [cid] = ids.as_slice() else { return None };
+    let role = hands.engine(runtime, &["inspect", "-f", ROLE_TEMPLATE, cid])?;
+    let role = String::from_utf8_lossy(&role.stdout);
+    matches!(
+        role.trim(),
+        "OMARCHY_WORKER_ROLE=agent" | "OMARCHY_WORKER_ROLE=broker"
+    )
+    .then(|| cid.clone())
+}
+
+/// The worker's answer to an order: an outcome, the kind's code, its own
+/// words (private to its owner and the maintainers), and what else it has
+/// (its agent's answer, the service it restarted) — with this process's
+/// instance: only its answer counts.
+fn answer(
+    hands: &dyn Hands,
+    me: &Process,
+    o: &Order,
+    outcome: &str,
+    code: &str,
+    detail: &str,
+    extra: &serde_json::Value,
+) {
+    let mut body = serde_json::json!({ "instance": me.instance, "outcome": outcome, "code": code, "detail": detail });
+    if let (Some(b), Some(x)) = (body.as_object_mut(), extra.as_object()) {
+        for (k, v) in x {
+            b.insert(k.clone(), v.clone());
+        }
+    }
+    if let Err(e) = hands.answer(&o.id, &body) {
+        say(format!(
+            "order {}: the answer did not reach the pool ({}); it closes the order by what it sees",
+            o.id,
+            orders::clean_line(&e)
+        ));
+    }
+}
+
+/// The worker's refusal of an order, with the kind's code and its own words.
+fn refuse(hands: &dyn Hands, me: &Process, o: &Order, code: &str, detail: &str) {
+    answer(
+        hands,
+        me,
+        o,
+        "refused",
+        code,
+        detail,
+        &serde_json::json!({}),
+    );
+}
+
+fn agent_json(p: &AgentProbe) -> serde_json::Value {
+    serde_json::json!({ "agent": { "status": p.status, "error": p.error, "ms": p.ms, "checked_at": p.checked_iso } })
+}
+
+/// A probe an order asked for, unless one younger than `reuse` answered already: stored and logged, the worker's own backoff left alone.
+fn probe_for_order(hands: &dyn Hands, check: &mut AgentCheck, reuse: Duration) {
+    if !check.fresh(reuse) {
+        if let Some(line) = check.record_ordered(hands.probe()) {
+            say(line);
+        }
+    }
+}
+
+/// The pool's own orders name it `pool:project` or `pool:community`: no GitHub login has a colon, so nobody signs in as the pool.
+fn from_pool(o: &Order) -> bool {
+    o.issued_by.starts_with("pool:")
+}
+
+/// Obeys one order (§1.8.2 of #277's design): re-check the agent, restart —
+/// conditionally when asked, never a process under two minutes old — or
+/// restart the agent service of its own host; a drain is a notice; a kind it
+/// does not know is refused by name. Each id at most once. What it returns
+/// says whether the process goes on or exits.
+fn obey(
+    hands: &dyn Hands,
+    me: &mut Process,
+    check: &mut AgentCheck,
+    seen: &mut orders::Seen,
+    o: &Order,
+) -> Obeyed {
+    if !seen.first(&o.id) {
+        say(format!("order {}: executed already; ignored", o.id));
+        return Obeyed::GoOn;
+    }
+    say(format!(
+        "order {}: {} from {} — {}",
+        o.id,
+        o.kind.name(),
+        if o.issued_by.is_empty() {
+            "?"
+        } else {
+            &o.issued_by
+        },
+        o.reason
+    ));
+    let takes = |k: &str| me.takes.contains(&k);
+    match &o.kind {
+        OrderKind::Drain => say(format!(
+            "drained by {} — the pool hands me nothing until it is resumed",
+            o.issued_by
+        )),
+        OrderKind::RecheckAgent if takes("recheck-agent") => {
+            // A person's re-check reuses a probe under a minute old: it spends no completion for nothing. The pool's is
+            // issued only once the probe is stale on the pool's clock (its RECHECK_AFTER_MIN), and always asks.
+            probe_for_order(
+                hands,
+                check,
+                if from_pool(o) {
+                    Duration::ZERO
+                } else {
+                    RECHECK_REUSE
+                },
+            );
+            let p = check.probe.clone();
+            let detail = if p.status == "ok" {
+                format!("agent answers ({} ms)", p.ms)
+            } else {
+                format!("agent does not answer: {}", p.error)
+            };
+            answer(hands, me, o, "done", "probed", &detail, &agent_json(&p));
+        }
+        OrderKind::Restart if takes("restart") => return restart_self(hands, me, check, o),
+        OrderKind::RestartAgent if takes("restart-agent") => restart_agent(hands, me, check, o),
+        other => {
+            let code = match other {
+                OrderKind::Unknown(_) => "unknown-kind",
+                OrderKind::Restart => "no-policy",
+                OrderKind::RestartAgent => "not-a-sibling",
+                _ => "other",
+            };
+            let detail = format!(
+                "this worker ({}) does not take {}",
+                pkg_manifest::BUILD_VERSION,
+                other.name()
+            );
+            refuse(hands, me, o, code, &detail);
+        }
+    }
+    Obeyed::GoOn
+}
+
+/// A restart (§1.8.2): refused by a process under two minutes old — a
+/// restart this soon would loop — and, when the order asks, by one whose
+/// agent answers now; otherwise accepted, the note left for the next
+/// process, and exit 75: the restart policy starts it again.
+fn restart_self(hands: &dyn Hands, me: &Process, check: &mut AgentCheck, o: &Order) -> Obeyed {
+    if me.started.elapsed() < RESTART_MIN_UPTIME {
+        let detail = format!(
+            "started {} s ago: a restart this soon would loop",
+            me.started.elapsed().as_secs()
+        );
+        refuse(hands, me, o, "too-young", &detail);
+        return Obeyed::GoOn;
+    }
+    if o.unless_agent_ok {
+        probe_for_order(hands, check, RESTART_REUSE);
+        if check.probe.status == "ok" {
+            let p = check.probe.clone();
+            let detail = format!("agent answers now ({} ms): no restart needed", p.ms);
+            answer(
+                hands,
+                me,
+                o,
+                "refused",
+                "agent-ok",
+                &detail,
+                &agent_json(&p),
+            );
+            return Obeyed::GoOn;
+        }
+    }
+    answer(
+        hands,
+        me,
+        o,
+        "accepted",
+        "exiting",
+        "exit 75; the restart policy starts it again",
+        &serde_json::json!({}),
+    );
+    say(format!(
+        "order {}: restarting — exit 75, the restart policy starts this worker again",
+        o.id
+    ));
+    me.leave("restart");
+    Obeyed::Exit(75)
+}
+
+/// After the agent service restarted and answered (or three minutes passed): the worker's own agent asked again, and the answer — restarted, or still not answering.
+fn after_sibling_restart(
+    hands: &dyn Hands,
+    me: &Process,
+    check: &mut AgentCheck,
+    o: &Order,
+    host: &str,
+    seconds: u64,
+) {
+    if let Some(line) = check.record_ordered(hands.probe()) {
+        say(line);
+    }
+    let p = check.probe.clone();
+    let mut extra = agent_json(&p);
+    extra["service"] = serde_json::json!(host);
+    extra["seconds"] = serde_json::json!(seconds);
+    if p.status == "ok" {
+        let detail = format!("restarted {host}; it answers after {seconds} s");
+        answer(hands, me, o, "done", "restarted", &detail, &extra);
+    } else {
+        let detail = format!(
+            "restarted {host}; the agent still does not answer after {seconds} s: {}",
+            p.error
+        );
+        answer(hands, me, o, "failed", "not-answering", &detail, &extra);
+    }
+}
+
+/// Does the agent service answer on its port, from inside its own container — the rollout's own test (`answers()`, #278).
+fn sibling_answers(hands: &dyn Hands, rt: &str, cid: &str) -> bool {
+    hands
+        .engine(
+            rt,
+            &[
+                "exec",
+                cid,
+                "curl",
+                "-s",
+                "-o",
+                "/dev/null",
+                "--max-time",
+                "3",
+                "http://127.0.0.1:8790/",
+            ],
+        )
+        .is_some_and(|r| r.status.success())
+}
+
+/// Restarts the agent service this worker calls on its own host (§1.13): a
+/// fresh probe first — an agent that answers is not restarted —, the service
+/// found again as at start, restarted, waited for on its port (at most
+/// three minutes), and the worker's own agent asked again. The service's
+/// last lines go to this worker's log first.
+fn restart_agent(hands: &dyn Hands, me: &mut Process, check: &mut AgentCheck, o: &Order) {
+    if let Some(line) = check.record_ordered(hands.probe()) {
+        say(line);
+    }
+    if check.probe.status == "ok" {
+        let p = check.probe.clone();
+        let detail = format!("agent answers now ({} ms): nothing to restart", p.ms);
+        answer(
+            hands,
+            me,
+            o,
+            "refused",
+            "agent-ok",
+            &detail,
+            &agent_json(&p),
+        );
+        return;
+    }
+    let (Some(rt), Some(project), Some(host)) =
+        (me.runtime.clone(), me.project.clone(), me.sibling.clone())
+    else {
+        refuse(
+            hands,
+            me,
+            o,
+            "not-a-sibling",
+            "it calls no agent service of its own host",
+        );
+        return;
+    };
+    let Some(cid) = sibling_of(hands, &rt, &project, &host) else {
+        let detail = format!("{host} is no agent service of this project now");
+        refuse(hands, me, o, "not-a-sibling", &detail);
+        return;
+    };
+    me.relayed = false;
+    me.relay_sibling_log(check, hands);
+    answer(
+        hands,
+        me,
+        o,
+        "accepted",
+        "restarting",
+        &format!("restarting {host}"),
+        &serde_json::json!({ "service": host }),
+    );
+    let started = Instant::now();
+    let restarted = hands.engine(&rt, &["restart", "-t", "30", &cid]);
+    if !restarted.as_ref().is_some_and(|r| r.status.success()) {
+        let why = restarted.map_or_else(
+            || "it did not run".to_owned(),
+            |r| String::from_utf8_lossy(&r.stderr).trim().to_owned(),
+        );
+        let detail = format!("{rt} restart {host}: {}", orders::clean_line(&why));
+        answer(
+            hands,
+            me,
+            o,
+            "failed",
+            "docker-error",
+            &detail,
+            &serde_json::json!({ "service": host }),
+        );
+        return;
+    }
+    // At most three minutes: counted by the waits too, so a wait that sleeps less than it says still ends.
+    let mut waited = Duration::ZERO;
+    while !sibling_answers(hands, &rt, &cid)
+        && waited < SIBLING_WAIT
+        && started.elapsed() < SIBLING_WAIT
+    {
+        hands.pause(Duration::from_secs(2));
+        waited += Duration::from_secs(2);
+    }
+    let seconds = started.elapsed().as_secs().max(waited.as_secs());
+    after_sibling_restart(hands, me, check, o, &host, seconds);
 }
 
 /// What `/factory/tasks/:id/fail` hears. A failed gate is the recipe's
@@ -2286,9 +3061,9 @@ fn security_job(opts: &WorkOptions, job: &Api, token: &Arc<Mutex<String>>) -> Re
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_retry_after, chrono_now, dry_run_dir, emulated, emulation_failure, fail_body,
-        probe_agent, AgentCheck, AgentProbe, NeedsNative, Task, WorkOptions, AGENT_PROBE_EVERY,
-        POLL,
+        agent_retry_after, agent_retry_from, chrono_now, dry_run_dir, emulated, emulation_failure,
+        fail_body, probe_agent, AgentCheck, AgentProbe, NeedsNative, Task, WorkOptions,
+        AGENT_PROBE_EVERY, POLL,
     };
     use std::time::{Duration, Instant};
 
@@ -2345,6 +3120,43 @@ mod tests {
             AGENT_PROBE_EVERY,
             "never overflows, never past the healthy agent's half hour"
         );
+    }
+
+    /// #277: `AGENT_RETRY_FIRST_SECONDS` only makes the backoff slower — the
+    /// E2E sets it to half an hour, so the pool alone brings a worker back.
+    #[test]
+    fn the_first_recheck_is_a_setting_that_only_slows_the_schedule() {
+        let half = Duration::from_secs(1800);
+        assert!((1..=10).all(|n| agent_retry_from(half, n) == half));
+        let secs: Vec<u64> = (1..=4)
+            .map(|n| agent_retry_from(Duration::from_secs(60), n).as_secs())
+            .collect();
+        assert_eq!(secs, [60, 120, 240, 480]);
+    }
+
+    /// #277: a probe an order asked for is stored and logged like the
+    /// worker's own, but a failure leaves the count alone — the worker's own
+    /// backoff keeps its schedule, measured from the last probe — and an
+    /// answer resets it, as always.
+    #[test]
+    fn an_ordered_probe_leaves_the_backoff_alone() {
+        let t0 = Instant::now();
+        let mut check = AgentCheck::default();
+        for k in 0..3u64 {
+            check.record(answer("error", "refused", t0 + Duration::from_secs(k)));
+        }
+        assert_eq!(check.failures, 3);
+        let ordered = t0 + Duration::from_secs(10);
+        check.record_ordered(answer("error", "refused", ordered));
+        assert_eq!(check.failures, 3, "an ordered failure is not counted");
+        assert!(!check.due(
+            (ordered + agent_retry_after(3))
+                .checked_sub(Duration::from_secs(1))
+                .unwrap()
+        ));
+        assert!(check.due(ordered + agent_retry_after(3)));
+        check.record_ordered(answer("ok", "", ordered + Duration::from_secs(1)));
+        assert_eq!(check.failures, 0, "an answer resets it");
     }
 
     /// #273: the agent proxy replaced in the same rollout refuses the first
@@ -2681,6 +3493,765 @@ mod tests {
         assert_eq!(
             (b["final"].clone(), b["needs_native"].clone()),
             (serde_json::json!(false), serde_json::json!(false))
+        );
+    }
+}
+
+/// #277's orders on the worker's side, with hands that record: what each
+/// kind does, what it refuses and why, what it asks the engine — the
+/// service of its own project whose role is agent or broker, and no other —
+/// and the claim loop's reports and 426, which never end the process.
+#[cfg(test)]
+mod orders_tests {
+    use super::{
+        declared, obey, report, run, sibling_of, verified, AgentCheck, AgentProbe, Hands, Obeyed,
+        Outcome, Process, Task, WorkOptions, ROLE_TEMPLATE,
+    };
+    use crate::client::Api;
+    use crate::orders::{self, Order, Seen};
+    use std::cell::{Cell, RefCell};
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::os::unix::process::ExitStatusExt;
+    use std::path::Path;
+    use std::process::{ExitStatus, Output};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    #[allow(clippy::unnecessary_wraps)] // what an engine that ran answers, as `Hands::engine` returns it
+    fn out(code: i32, stdout: &str) -> Option<Output> {
+        Some(Output {
+            status: ExitStatus::from_raw(code << 8),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: b"it said no".to_vec(),
+        })
+    }
+
+    type Engine = Box<dyn Fn(&str, &[&str]) -> Option<Output>>;
+
+    /// Hands that record what they were asked, and answer as the test says:
+    /// the agent's probes in turn (the last one again and again), the
+    /// engine by its arguments, every answer taken.
+    struct Fake {
+        probes: RefCell<Vec<(&'static str, &'static str)>>,
+        probed: Cell<u32>,
+        engine: Engine,
+        ran: RefCell<Vec<String>>,
+        answers: RefCell<Vec<(String, serde_json::Value)>>,
+        paused: Cell<u64>,
+    }
+
+    impl Fake {
+        fn new(probes: &[(&'static str, &'static str)], engine: Engine) -> Self {
+            Self {
+                probes: RefCell::new(probes.to_vec()),
+                probed: Cell::new(0),
+                engine,
+                ran: RefCell::new(Vec::new()),
+                answers: RefCell::new(Vec::new()),
+                paused: Cell::new(0),
+            }
+        }
+        fn outcomes(&self) -> Vec<(String, String)> {
+            self.answers
+                .borrow()
+                .iter()
+                .map(|(_, b)| {
+                    (
+                        b["outcome"].as_str().unwrap_or_default().to_owned(),
+                        b["code"].as_str().unwrap_or_default().to_owned(),
+                    )
+                })
+                .collect()
+        }
+    }
+
+    impl Hands for Fake {
+        fn probe(&self) -> AgentProbe {
+            self.probed.set(self.probed.get() + 1);
+            let mut q = self.probes.borrow_mut();
+            let (status, error) = if q.len() > 1 { q.remove(0) } else { q[0] };
+            AgentProbe {
+                status: status.into(),
+                error: error.into(),
+                label: String::new(),
+                checked_at: Some(Instant::now()),
+                checked_iso: "2026-09-29T12:00:00Z".into(),
+                ms: 42,
+            }
+        }
+        fn engine(&self, runtime: &str, args: &[&str]) -> Option<Output> {
+            self.ran
+                .borrow_mut()
+                .push(format!("{runtime} {}", args.join(" ")));
+            (self.engine)(runtime, args)
+        }
+        fn answer(&self, id: &str, body: &serde_json::Value) -> Result<(), String> {
+            self.answers
+                .borrow_mut()
+                .push((id.to_owned(), body.clone()));
+            Ok(())
+        }
+        fn pause(&self, d: Duration) {
+            self.paused.set(self.paused.get() + d.as_secs());
+        }
+    }
+
+    /// A process `age` old that takes `takes`, in its container `own` (runtime, project, agent service) or none, its notes in `state`.
+    fn process(
+        takes: &[&'static str],
+        age: Duration,
+        own: Option<(&str, &str, &str)>,
+        state: &Path,
+    ) -> Process {
+        Process {
+            instance: "ab".repeat(16),
+            started: Instant::now().checked_sub(age).unwrap(),
+            started_iso: "2026-09-29T12:00:00Z".into(),
+            takes: takes.to_vec(),
+            agent_via: if own.is_some() { "sibling" } else { "direct" },
+            site: None,
+            restarts_left: None,
+            runtime: own.map(|o| o.0.to_owned()),
+            project: own.map(|o| o.1.to_owned()),
+            sibling: own.map(|o| o.2.to_owned()),
+            state_dir: state.to_path_buf(),
+            previous_exit: None,
+            reread_at: Instant::now(),
+            relayed: false,
+        }
+    }
+
+    fn order(kind: &str, by: &str, unless: bool, n: u32) -> Order {
+        let v = serde_json::json!({ "orders": [{ "id": format!("wo_{n:032x}"), "kind": kind, "reason": "why \u{1b}[31mnow", "issued_by": by, "unless_agent_ok": unless, "notice": false }] });
+        orders::orders_in(&v).unwrap().remove(0)
+    }
+
+    const RESTARTS: [&str; 3] = ["drain", "recheck-agent", "restart"];
+    const OLD_ENOUGH: Duration = Duration::from_secs(300);
+
+    #[test]
+    fn a_restart_is_refused_by_a_process_under_two_minutes_old_and_nothing_exits() {
+        let dir = tempfile::tempdir().unwrap();
+        let hands = Fake::new(&[("error", "refused")], Box::new(|_, _| None));
+        let mut me = process(&RESTARTS, Duration::from_secs(30), None, dir.path());
+        let got = obey(
+            &hands,
+            &mut me,
+            &mut AgentCheck::default(),
+            &mut Seen::default(),
+            &order("restart", "pool:project", true, 1),
+        );
+        assert_eq!(got, Obeyed::GoOn);
+        assert_eq!(hands.outcomes(), [("refused".into(), "too-young".into())]);
+        assert_eq!(
+            hands.probed.get(),
+            0,
+            "no completion for a restart it refuses anyway"
+        );
+        assert!(orders::read_exit_note(dir.path()).is_none());
+    }
+
+    #[test]
+    fn a_conditional_restart_whose_agent_answers_now_is_refused_and_nothing_exits() {
+        let dir = tempfile::tempdir().unwrap();
+        let hands = Fake::new(&[("ok", "")], Box::new(|_, _| None));
+        let mut me = process(&RESTARTS, OLD_ENOUGH, None, dir.path());
+        let mut check = AgentCheck::default();
+        let got = obey(
+            &hands,
+            &mut me,
+            &mut check,
+            &mut Seen::default(),
+            &order("restart", "pool:project", true, 2),
+        );
+        assert_eq!(got, Obeyed::GoOn);
+        assert_eq!(hands.outcomes(), [("refused".into(), "agent-ok".into())]);
+        assert_eq!(hands.probed.get(), 1);
+        assert_eq!(hands.answers.borrow()[0].1["agent"]["status"], "ok");
+        assert!(
+            orders::read_exit_note(dir.path()).is_none(),
+            "no exit, no note"
+        );
+    }
+
+    #[test]
+    fn an_accepted_restart_says_so_leaves_its_note_and_exits_75() {
+        let dir = tempfile::tempdir().unwrap();
+        let hands = Fake::new(
+            &[("error", "URLError: [Errno 111] Connection refused")],
+            Box::new(|_, _| None),
+        );
+        let mut me = process(&RESTARTS, OLD_ENOUGH, None, dir.path());
+        let mut check = AgentCheck::default();
+        let got = obey(
+            &hands,
+            &mut me,
+            &mut check,
+            &mut Seen::default(),
+            &order("restart", "m1", true, 3),
+        );
+        assert_eq!(got, Obeyed::Exit(75));
+        assert_eq!(hands.outcomes(), [("accepted".into(), "exiting".into())]);
+        assert_eq!(hands.answers.borrow()[0].1["instance"], "ab".repeat(16));
+        assert_eq!(
+            orders::read_exit_note(dir.path()).unwrap()["why"],
+            "restart"
+        );
+        // An unconditional one does not probe first.
+        let dir = tempfile::tempdir().unwrap();
+        let hands = Fake::new(&[("ok", "")], Box::new(|_, _| None));
+        let mut me = process(&RESTARTS, OLD_ENOUGH, None, dir.path());
+        assert_eq!(
+            obey(
+                &hands,
+                &mut me,
+                &mut check,
+                &mut Seen::default(),
+                &order("restart", "m1", false, 4)
+            ),
+            Obeyed::Exit(75)
+        );
+        assert_eq!(hands.probed.get(), 0);
+    }
+
+    #[test]
+    fn a_persons_recheck_reuses_a_probe_under_a_minute_old_and_the_pools_always_asks() {
+        let dir = tempfile::tempdir().unwrap();
+        let hands = Fake::new(&[("error", "refused")], Box::new(|_, _| None));
+        let mut me = process(&RESTARTS, OLD_ENOUGH, None, dir.path());
+        let mut check = AgentCheck {
+            probe: AgentProbe {
+                status: "error".into(),
+                error: "refused".into(),
+                checked_at: Instant::now().checked_sub(Duration::from_secs(30)),
+                ..AgentProbe::default()
+            },
+            failures: 3,
+            first: None,
+        };
+        let mut seen = Seen::default();
+        // A person's, and a person whose login is "pool": the probe 30 s old answers, no completion spent.
+        for (n, by) in [(5, "m1"), (6, "pool")] {
+            assert_eq!(
+                obey(
+                    &hands,
+                    &mut me,
+                    &mut check,
+                    &mut seen,
+                    &order("recheck-agent", by, false, n)
+                ),
+                Obeyed::GoOn
+            );
+        }
+        assert_eq!(hands.probed.get(), 0);
+        // The pool's: it comes only once the probe is stale on the pool's clock, and always asks.
+        obey(
+            &hands,
+            &mut me,
+            &mut check,
+            &mut seen,
+            &order("recheck-agent", "pool:community", false, 7),
+        );
+        assert_eq!(hands.probed.get(), 1);
+        assert_eq!(
+            hands.outcomes(),
+            vec![("done".to_owned(), "probed".to_owned()); 3]
+        );
+        // An ordered failure leaves the worker's own backoff where it was.
+        assert_eq!(check.failures, 3);
+    }
+
+    #[test]
+    fn an_order_it_does_not_take_is_refused_by_name_and_one_it_executed_is_not_executed_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let hands = Fake::new(&[("error", "refused")], Box::new(|_, _| None));
+        let mut me = process(&["drain", "recheck-agent"], OLD_ENOUGH, None, dir.path());
+        let mut check = AgentCheck::default();
+        let mut seen = Seen::default();
+        for (n, kind) in [(8, "restart"), (9, "restart-agent"), (10, "reboot")] {
+            assert_eq!(
+                obey(
+                    &hands,
+                    &mut me,
+                    &mut check,
+                    &mut seen,
+                    &order(kind, "m1", false, n)
+                ),
+                Obeyed::GoOn
+            );
+        }
+        assert_eq!(
+            hands.outcomes(),
+            [
+                ("refused", "no-policy"),
+                ("refused", "not-a-sibling"),
+                ("refused", "unknown-kind")
+            ]
+            .map(|(a, b)| (a.to_owned(), b.to_owned()))
+        );
+        assert_eq!(
+            obey(
+                &hands,
+                &mut me,
+                &mut check,
+                &mut seen,
+                &order("restart", "m1", false, 8)
+            ),
+            Obeyed::GoOn
+        );
+        assert_eq!(hands.answers.borrow().len(), 3, "once per id");
+        // A drain is a notice: no answer.
+        obey(
+            &hands,
+            &mut me,
+            &mut check,
+            &mut seen,
+            &order("drain", "m1", false, 11),
+        );
+        assert_eq!(hands.answers.borrow().len(), 3);
+    }
+
+    /// An engine with one project `studio` whose service `agent-proxy` is `cid1` with the role `role`; `ps` for any other project finds nothing.
+    fn engine_with(role: &'static str, containers: &'static str) -> Engine {
+        Box::new(move |_, args| match args {
+            ["ps", "-q", "--filter", p, "--filter", s] => out(
+                0,
+                if *p == "label=com.docker.compose.project=studio"
+                    && *s == "label=com.docker.compose.service=agent-proxy"
+                {
+                    containers
+                } else {
+                    ""
+                },
+            ),
+            ["inspect", "-f", t, "cid1"] if *t == ROLE_TEMPLATE => {
+                out(0, &format!("OMARCHY_WORKER_ROLE={role}\n"))
+            }
+            ["logs", "--tail", "50", "cid1"] => out(
+                0,
+                "proxy: listening on :8790\n\u{1b}[31mclaude: not installed\n",
+            ),
+            ["restart", "-t", "30", "cid1"] => out(0, "cid1\n"),
+            ["exec", "cid1", "curl", ..] => out(0, ""),
+            _ => out(1, ""),
+        })
+    }
+
+    #[test]
+    fn restart_agent_finds_the_service_of_its_own_project_whose_role_is_agent_or_broker_and_no_other(
+    ) {
+        for (role, containers, want) in [
+            ("agent", "cid1\n", true),
+            ("broker", "cid1\n", true),
+            ("review", "cid1\n", false),
+            ("agent", "cid1\ncid2\n", false),
+        ] {
+            let hands = Fake::new(&[("ok", "")], engine_with(role, containers));
+            assert_eq!(
+                sibling_of(&hands, "docker", "studio", "agent-proxy").is_some(),
+                want,
+                "{role} {containers:?}"
+            );
+            // The role is read with the one-variable template, never the container's whole environment.
+            assert!(hands
+                .ran
+                .borrow()
+                .iter()
+                .all(|c| !c.starts_with("docker inspect cid") && !c.contains("json .Config.Env")));
+        }
+        // Another project's service of the same name: not its own.
+        let hands = Fake::new(&[("ok", "")], engine_with("agent", "cid1\n"));
+        assert!(sibling_of(&hands, "docker", "someone-else", "agent-proxy").is_none());
+        assert_eq!(
+            declared(true, true, true),
+            (
+                vec!["drain", "recheck-agent", "restart", "restart-agent"],
+                "sibling"
+            )
+        );
+        assert_eq!(
+            declared(true, false, false),
+            (vec!["drain", "recheck-agent"], "direct")
+        );
+        assert_eq!(
+            declared(false, true, true),
+            (vec!["drain", "restart"], "none")
+        );
+    }
+
+    #[test]
+    fn a_container_it_cannot_verify_gives_no_site_and_no_restart_agent_and_one_it_can_gives_both() {
+        let instance = "cd".repeat(16);
+        let inspect = r#"[{"HostConfig":{"RestartPolicy":{"Name":"unless-stopped","MaximumRetryCount":0}},"RestartCount":0,"Config":{"Labels":{"com.docker.compose.project":"studio"}}}]"#;
+        let engine = |answers_with: String| -> Engine {
+            let inner = engine_with("agent", "cid1\n");
+            Box::new(move |rt, args| match args {
+                ["--version"] => out(i32::from(rt != "docker"), "Docker version 27\n"),
+                ["exec", "self1", "cat", "/run/omarchy/instance"] => out(0, &answers_with),
+                ["inspect", "self1"] => out(0, inspect),
+                ["info", "-f", "{{.ID}}"] => out(0, "ENGINE:ID\n"),
+                _ => inner(rt, args),
+            })
+        };
+        let dir = tempfile::tempdir().unwrap();
+        // The exec check answers with another process's instance: not this container.
+        let hands = Fake::new(&[("ok", "")], engine("ef".repeat(16)));
+        let own = verified(&instance, &["self1".to_owned()], &hands);
+        assert!(own.is_none());
+        assert!(!hands
+            .ran
+            .borrow()
+            .iter()
+            .any(|c| c == "docker inspect self1"));
+        let me = Process::found(
+            instance.clone(),
+            own,
+            Some("http://agent-proxy:8790"),
+            true,
+            false,
+            dir.path().into(),
+            None,
+            &hands,
+        );
+        assert_eq!(
+            (me.takes.clone(), me.agent_via, me.site.clone()),
+            (vec!["drain", "recheck-agent"], "direct", None)
+        );
+        // It answers with this one's: its policy, its agent service, its site.
+        let hands = Fake::new(&[("ok", "")], engine(format!("{instance}\n")));
+        let own = verified(&instance, &["self1".to_owned()], &hands);
+        assert!(own.is_some());
+        let me = Process::found(
+            instance.clone(),
+            own,
+            Some("http://agent-proxy:8790"),
+            true,
+            false,
+            dir.path().into(),
+            None,
+            &hands,
+        );
+        assert_eq!(
+            me.takes,
+            ["drain", "recheck-agent", "restart", "restart-agent"]
+        );
+        assert_eq!(me.agent_via, "sibling");
+        assert_eq!(me.site, orders::site_of("ENGINE:ID", "ENGINE:ID", "studio"));
+        assert_eq!(
+            hands.paused.get(),
+            1,
+            "the engine's id read twice, a second apart"
+        );
+    }
+
+    #[test]
+    fn restart_agent_restarts_the_service_waits_for_it_and_asks_its_own_agent_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let own = Some(("docker", "studio", "agent-proxy"));
+        let takes = ["drain", "recheck-agent", "restart", "restart-agent"];
+        // Down, then up once the service is back.
+        let hands = Fake::new(
+            &[("error", "HTTP Error 502: Bad Gateway"), ("ok", "")],
+            engine_with("agent", "cid1\n"),
+        );
+        let mut me = process(&takes, OLD_ENOUGH, own, dir.path());
+        let mut check = AgentCheck::default();
+        assert_eq!(
+            obey(
+                &hands,
+                &mut me,
+                &mut check,
+                &mut Seen::default(),
+                &order("restart-agent", "pool:project", false, 12)
+            ),
+            Obeyed::GoOn
+        );
+        assert_eq!(
+            hands.outcomes(),
+            [("accepted", "restarting"), ("done", "restarted")]
+                .map(|(a, b)| (a.to_owned(), b.to_owned()))
+        );
+        assert_eq!(hands.answers.borrow()[1].1["service"], "agent-proxy");
+        let ran = hands.ran.borrow();
+        assert!(ran.contains(&"docker restart -t 30 cid1".to_owned()));
+        assert!(
+            ran.contains(&"docker logs --tail 50 cid1".to_owned()),
+            "the service's lines relayed to this worker's log"
+        );
+        assert!(!ran
+            .iter()
+            .any(|c| c.contains(" kill ") || c.contains(" rm ")));
+        drop(ran);
+        // The engine refuses the restart: failed, with its words.
+        let refusing: Engine = {
+            let inner = engine_with("agent", "cid1\n");
+            Box::new(move |rt, args| {
+                if args.first() == Some(&"restart") {
+                    out(1, "")
+                } else {
+                    inner(rt, args)
+                }
+            })
+        };
+        let hands = Fake::new(&[("error", "HTTP Error 502: Bad Gateway")], refusing);
+        let mut me = process(&takes, OLD_ENOUGH, own, dir.path());
+        obey(
+            &hands,
+            &mut me,
+            &mut check,
+            &mut Seen::default(),
+            &order("restart-agent", "m1", false, 13),
+        );
+        assert_eq!(
+            hands.outcomes(),
+            [("accepted", "restarting"), ("failed", "docker-error")]
+                .map(|(a, b)| (a.to_owned(), b.to_owned()))
+        );
+    }
+
+    #[test]
+    fn restart_agent_that_cannot_help_waits_its_three_minutes_or_refuses_without_restarting_anything(
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let own = Some(("docker", "studio", "agent-proxy"));
+        let takes = ["drain", "recheck-agent", "restart", "restart-agent"];
+        let mut check = AgentCheck::default();
+        // The service never answers on its port: three minutes of waiting, then its own agent asked again, still down.
+        let silent: Engine = {
+            let inner = engine_with("agent", "cid1\n");
+            Box::new(move |rt, args| {
+                if args.get(2) == Some(&"curl") {
+                    out(7, "")
+                } else {
+                    inner(rt, args)
+                }
+            })
+        };
+        let hands = Fake::new(&[("error", "HTTP Error 502: Bad Gateway")], silent);
+        let mut me = process(&takes, OLD_ENOUGH, own, dir.path());
+        obey(
+            &hands,
+            &mut me,
+            &mut check,
+            &mut Seen::default(),
+            &order("restart-agent", "m1", false, 14),
+        );
+        assert_eq!(
+            hands.outcomes(),
+            [("accepted", "restarting"), ("failed", "not-answering")]
+                .map(|(a, b)| (a.to_owned(), b.to_owned()))
+        );
+        assert_eq!(hands.paused.get(), 180);
+        // Its agent answers at the fresh probe: nothing to restart.
+        let hands = Fake::new(&[("ok", "")], engine_with("agent", "cid1\n"));
+        let mut me = process(&takes, OLD_ENOUGH, own, dir.path());
+        obey(
+            &hands,
+            &mut me,
+            &mut check,
+            &mut Seen::default(),
+            &order("restart-agent", "m1", false, 15),
+        );
+        assert_eq!(
+            hands.outcomes(),
+            [("refused".to_owned(), "agent-ok".to_owned())]
+        );
+        assert!(!hands.ran.borrow().iter().any(|c| c.contains("restart")));
+        // The service is no agent service of this project any more: refused, nothing restarted.
+        let hands = Fake::new(
+            &[("error", "HTTP Error 502: Bad Gateway")],
+            engine_with("review", "cid1\n"),
+        );
+        let mut me = process(&takes, OLD_ENOUGH, own, dir.path());
+        obey(
+            &hands,
+            &mut me,
+            &mut check,
+            &mut Seen::default(),
+            &order("restart-agent", "m1", false, 16),
+        );
+        assert_eq!(
+            hands.outcomes(),
+            [("refused".to_owned(), "not-a-sibling".to_owned())]
+        );
+    }
+
+    #[test]
+    fn why_the_previous_process_ended_is_said_until_the_pool_has_heard_a_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        orders::leave_exit_note(dir.path(), "idle", "2026-09-29T12:00:00Z");
+        let mut me = process(&RESTARTS, OLD_ENOUGH, None, dir.path());
+        me.previous_exit = orders::read_exit_note(dir.path());
+        let said = |me: &Process| {
+            let mut body = serde_json::json!({});
+            me.say_in(&mut body);
+            body.get("previous_exit").cloned()
+        };
+        // A first claim lost on the network: the next says it again.
+        assert_eq!(said(&me).unwrap()["why"], "idle");
+        assert_eq!(said(&me).unwrap()["why"], "idle");
+        me.heard();
+        assert!(said(&me).is_none());
+        assert!(orders::read_exit_note(dir.path()).is_none());
+    }
+
+    /// A pool on a local port: each request answered as `answer(method, path, how many of that path before)` says, and kept.
+    struct FakePool {
+        url: String,
+        seen: Arc<Mutex<Vec<(String, String, String)>>>,
+    }
+
+    fn fake_pool(answer: impl Fn(&str, &str, usize) -> (u16, String) + Send + 'static) -> FakePool {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() {
+                    continue;
+                }
+                let mut parts = line.split_whitespace();
+                let method = parts.next().unwrap_or_default().to_owned();
+                let path = parts.next().unwrap_or_default().to_owned();
+                let mut len = 0usize;
+                loop {
+                    let mut h = String::new();
+                    if reader.read_line(&mut h).is_err() || h == "\r\n" || h.is_empty() {
+                        break;
+                    }
+                    if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") {
+                        len = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0; len];
+                let _ = reader.read_exact(&mut body);
+                let before = log
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(_, p, _): &&(String, String, String)| *p == path)
+                    .count();
+                let (status, reply) = answer(&method, &path, before);
+                log.lock().unwrap().push((
+                    method,
+                    path,
+                    String::from_utf8_lossy(&body).into_owned(),
+                ));
+                let _ = write!(stream, "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}", reply.len());
+            }
+        });
+        FakePool { url, seen }
+    }
+
+    fn task() -> Task {
+        serde_json::from_value(serde_json::json!({ "id": 812, "kind": "build", "name": "felix", "arch": "aarch64", "trust": "community" })).unwrap()
+    }
+
+    #[test]
+    fn a_report_the_pool_refuses_or_does_not_take_is_logged_and_the_worker_goes_on() {
+        let pool = fake_pool(|_, path, _| {
+            if path.ends_with("/complete") {
+                (
+                    409,
+                    r#"{"error":"the task is cancelled","stop":true,"state":"cancelled"}"#.into(),
+                )
+            } else {
+                (503, r#"{"error":"try later"}"#.into())
+            }
+        });
+        let job = Api::new(&pool.url, "omj.x").unwrap();
+        report(
+            &job,
+            "omj.x",
+            &task(),
+            Ok(Outcome {
+                summary: "built".into(),
+                result: serde_json::json!({}),
+            }),
+            1000,
+        );
+        report(
+            &job,
+            "omj.x",
+            &task(),
+            Err(anyhow::anyhow!("the build failed")),
+            1000,
+        );
+        let seen = pool.seen.lock().unwrap();
+        assert_eq!(
+            seen.iter()
+                .filter(|(_, p, _)| p.ends_with("/complete"))
+                .count(),
+            1
+        );
+        // A 503 is a pool that did not answer: retried, then logged — never the end of the process.
+        assert!(seen.iter().filter(|(_, p, _)| p.ends_with("/fail")).count() >= 2);
+    }
+
+    #[test]
+    fn an_order_riding_a_426_is_obeyed_the_previous_exit_is_said_once_heard_and_the_loop_claims_on()
+    {
+        let restart = format!("wo_{:032x}", 426);
+        let id = restart.clone();
+        let pool = fake_pool(move |_, path, before| {
+            match path {
+            "/api/v1/factory/claim" if before == 0 => (426, serde_json::json!({ "error": "this worker runs v0.0.1; the pool is at v9.9.9", "latest": "v9.9.9", "orders": [{ "id": id, "kind": "restart", "reason": "stuck", "issued_by": "m1", "unless_agent_ok": false, "notice": false }] }).to_string()),
+            "/api/v1/factory/claim" => (204, String::new()),
+            _ => (200, "{}".into()),
+        }
+        });
+        let work = tempfile::tempdir().unwrap();
+        // No sync runs here: the keyrings' stamp stands in for GitHub's.
+        std::fs::create_dir_all(work.path().join("keyrings")).unwrap();
+        std::fs::write(work.path().join("keyrings/archlinux.gpg"), b"").unwrap();
+        std::fs::write(work.path().join("keyrings/.fetched"), b"").unwrap();
+        let state = orders::state_dir(work.path());
+        orders::leave_exit_note(&state, "idle", "2026-09-29T12:00:00Z");
+        let opts = WorkOptions {
+            api: pool.url.clone(),
+            pool: String::new(),
+            worker_token: "omw_test".into(),
+            arch: "aarch64".into(),
+            kinds: vec!["gc".into()],
+            shared: false,
+            labels: serde_json::json!({}),
+            once: false,
+            idle_exit: 30,
+            work_dir: work.path().into(),
+            sign: None,
+            repo_dir: Some(work.path().into()),
+        };
+        run(&opts).unwrap();
+        let seen = pool.seen.lock().unwrap();
+        let claims: Vec<serde_json::Value> = seen
+            .iter()
+            .filter(|(_, p, _)| p == "/api/v1/factory/claim")
+            .map(|(_, _, b)| serde_json::from_str(b).unwrap())
+            .collect();
+        assert_eq!(claims.len(), 2);
+        assert_eq!(claims[0]["previous_exit"]["why"], "idle");
+        assert!(
+            claims[1].get("previous_exit").is_none(),
+            "said until heard, then gone"
+        );
+        // The note left now is this process's own: its idle exit, for the next one.
+        assert_ne!(
+            orders::read_exit_note(&state).unwrap()["at"],
+            "2026-09-29T12:00:00Z"
+        );
+        let answer = seen
+            .iter()
+            .find(|(_, p, _)| p == &format!("/api/v1/factory/workers/self/orders/{restart}"))
+            .expect("the order riding the 426 is answered");
+        let body: serde_json::Value = serde_json::from_str(&answer.2).unwrap();
+        assert_eq!(body["outcome"], "refused");
+        assert!(
+            matches!(body["code"].as_str(), Some("no-policy" | "too-young")),
+            "{body}"
         );
     }
 }

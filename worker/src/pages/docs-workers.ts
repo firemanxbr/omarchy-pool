@@ -168,6 +168,24 @@ FACTORY_PROVIDER=claude-code</pre>
       <div class="step"><h3>Something is off</h3><p><em>the pool did not accept this token</em>: it was revoked, or mistyped. <em>registered for aarch64 but this machine is x86_64</em>: register a worker for this machine. <em>mount its socket</em>: the registration is project-trusted and needs the runtime's socket (above). <em>permission denied … docker.sock</em>: add <code>--security-opt label=disable</code> (Podman) or check the socket path. <em>No task for a while</em>: a contributor's worker only sees its owner's tasks unless started shared; a project worker only claims once trusted. The <a href="/pipeline">Pipeline</a> lists every queued task, the <a href="/workers">Workers</a> page every worker the pool has heard from.</p></div>
     </div>
   </section>
+
+  <section id="orders">
+    <h2>When the pool steps in: orders</h2>
+    <p class="sub">The pool sees every worker's claims, so it knows before anyone when one has stopped working. It says so with an <b>order</b>, carried on the answer to the worker's own next claim: nothing new listens on your machine, and nothing reaches it but its own token's answers. The worker checks whether the order is still needed, carries it out or refuses it, and answers; the order, who gave it, why and how it ended are on the worker's page, <code>/worker/&lt;id&gt;</code>, and in the journal.</p>
+    <div class="table-wrap"><table><thead><tr><th>Order</th><th>Who carries it out</th><th>What it does</th></tr></thead><tbody>
+      <tr><td><b>Re-check agent</b></td><td>the worker</td><td>asks its agent now, instead of at its next re-check, and answers with what the agent said</td></tr>
+      <tr><td><b>Restart</b></td><td>the worker, then its restart policy</td><td>the worker ends with exit 75 and its restart policy starts it again, a new process with a fresh agent client; "only if its agent is down" makes it ask its agent first and refuse when the agent answers. A builder behind a broker ends with 0, and its broker starts again beside it</td></tr>
+      <tr><td><b>Restart agent service</b></td><td>a worker whose agent is a service beside it</td><td>restarts that service on its own engine (the project host's <code>agent-proxy</code>), waits for it, and asks its agent again; one worker of the host does it for all of them</td></tr>
+      <tr><td>Drain, Resume, Stop its task, Update</td><td>—</td><td>not on this pool yet: they come with the next parts of #277; the pool refuses them and the page greys them out</td></tr>
+    </tbody></table></div>
+    <div class="steps">
+      <div class="step"><h3>Who gives them</h3><p>The pool, by itself (below); the worker's owner, on the worker's page or with <code>POST /factory/workers/&lt;id&gt;/orders</code>; any maintainer, on any worker. None of them needs a passkey: an order publishes nothing and decides nothing, and another order undoes it. Every one is bounded — six restarts and six re-checks an hour per worker, twenty orders an hour per login — and on the journal with who gave it; one its worker has not taken yet can be cancelled from the page.</p></div>
+      <div class="step"><h3>What the pool does by itself</h3><p>A worker whose agent stops answering re-checks it by itself: 15 s, doubling, up to every 30 minutes. When that is not enough, the pool steps in, one step at a time. After <b>5 minutes</b> not ready, if the worker's own re-check has stalled, the pool re-checks it once. After <b>10 minutes</b>, if the error is one a restart can help — the agent refused the connection, its name did not resolve, its install is broken, the service beside it does not answer — it restarts the worker, or the agent service through it, only if the agent still does not answer; a second time 30 minutes later; after that it stops, and the page says a person looks. It never restarts a process under 2 minutes old, and never more than three times a day per worker.</p>
+      <p>An error a restart cannot help — a key refused, credit out, a rate limit, the provider's own failure — gets no order at all, and the page says why. When workers at <b>three sites</b> fail on the same provider at once, the pool takes it for the provider's outage, not theirs, and orders nothing for that provider until fewer than two are failing for 15 minutes. A worker's error is its own word, so the project's workers are held only by the project's own sites; contributors' workers, by every site. At one site, one worker is restarted at a time, five minutes apart — a site is your host as <em>your</em> workers name it, never shared with another person's; across the pool, ten restarts an hour and sixty orders a day at most, of which contributors' workers take six and forty: the project's workers always keep the rest. <code>WORKER_RULES = "off"</code> in the pool's configuration stops the pool's own orders; people's still work.</p></div>
+      <div class="step"><h3>What a restart needs from you</h3><p>A <b>restart policy</b> that starts the container again: <code>--restart unless-stopped</code>, as every command on this page has it, or <code>restart: unless-stopped</code> in compose. A worker checks its own container's policy and says what it can survive: without a policy it takes no restart, and the page says why. Under <code>on-failure:N</code>, every exit spends one of the N for the container's whole life — a healthy run in between gives none back — so it takes a restart only with three or more left, and the page shows how many. <code>pkg-repo work</code> run outside a container, under a supervisor that starts it again (a systemd unit with <code>Restart=always</code>), says so with <code>OMARCHY_SUPERVISED=1</code>.</p>
+      <p><code>AGENT_RETRY_FIRST_SECONDS</code> sets a project worker's first re-check after a failed probe (15 s by default, up to 30 minutes; a community builder's is <code>AGENT_RETRY_SECONDS</code>); it only makes the worker wait longer, never ask more often. A Claude Code that does not answer <code>claude --version</code> — an install cut short — is removed and installed again when its container starts, so a restart fixes that too.</p></div>
+    </div>
+  </section>
 `;
 
 export function docsWorkersHtml(poolUrl: string, version: RunningVersion): string {
@@ -203,9 +221,9 @@ export const DOCS_WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     anchor: [
       '<a class="docs-home" href="/docs">Documentation</a>',
       '<nav class="docs-nav" id="docs-nav" aria-label="Chapters">',
-      '<details open><summary><a href="/docs/workers" class="on">Run a worker</a><small>8</small></summary>',
+      '<details open><summary><a href="/docs/workers" class="on">Run a worker</a><small>9</small></summary>',
       'href="/docs/workers#registration"', 'href="/docs/workers#roles"', 'href="/docs/workers#before"', 'href="/docs/workers#contributor"',
-      'href="/docs/workers#project"', 'href="/docs/workers#claude-code"', 'href="/docs/workers#secrets"', 'href="/docs/workers#running"',
+      'href="/docs/workers#project"', 'href="/docs/workers#claude-code"', 'href="/docs/workers#secrets"', 'href="/docs/workers#running"', 'href="/docs/workers#orders"',
       '<div class="docs-group">For people working on the pool</div>',
       '<div class="docs-hint">',
     ],
@@ -429,6 +447,18 @@ export const DOCS_WORKERS_COMPONENTS = (F: Fixture): Component[] => [
       "<h3>Stop, remove, revoke</h3>", "<code>./omarchy-worker remove</code>",
       "<h3>Disk</h3>", "<code>docker system prune</code> / <code>podman system prune</code>",
       "<h3>Something is off</h3>", "<em>the pool did not accept this token</em>", "<em>registered for aarch64 but this machine is x86_64</em>", "<em>mount its socket</em>",
+    ],
+    visible: EVERYONE,
+  },
+  {
+    id: "docs-workers.orders",
+    page: "/docs/workers",
+    anchor: [
+      '<section id="orders">', "<h2>When the pool steps in: orders</h2>", "<code>/worker/&lt;id&gt;</code>",
+      "<td><b>Re-check agent</b></td>", "<td><b>Restart</b></td>", "<td><b>Restart agent service</b></td>", "not on this pool yet",
+      "<h3>Who gives them</h3>", "<code>POST /factory/workers/&lt;id&gt;/orders</code>", "twenty orders an hour per login",
+      "<h3>What the pool does by itself</h3>", "15 s, doubling, up to every 30 minutes", "<b>three sites</b>", '<code>WORKER_RULES = "off"</code>',
+      "<h3>What a restart needs from you</h3>", "<code>--restart unless-stopped</code>", "<code>on-failure:N</code>", "<code>OMARCHY_SUPERVISED=1</code>", "<code>AGENT_RETRY_FIRST_SECONDS</code>",
     ],
     visible: EVERYONE,
   },

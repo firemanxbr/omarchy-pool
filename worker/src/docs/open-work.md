@@ -45,6 +45,11 @@ request (see [CONTRIBUTING.md](CONTRIBUTING.md)), and keep
       withdrawal keeps the session or the token: it takes an approval back
       and ships nothing
       ([the security model](docs/security-model.md#the-doors-that-ship)).
+      #277's orders to a worker (Re-check agent, Restart, Restart agent
+      service, and the kinds its next parts add) also take a session or an
+      `omc_` token without a passkey, on purpose: capped, on the journal,
+      undone by another order, and neither publishing nor deciding anything
+      (its design's Q12).
 
 - [ ] **Production keys and hosting.** The staging database key is throwaway and
       the pool lives on a personal account; moving to omarchy.org means a key in
