@@ -141,9 +141,14 @@ env_present() { # cid name → 0 when the container's environment sets it (its v
 #   not-found   it failed, and the engine said what was asked for is not there: "No such object", "No such container" — nothing
 #               else ("dial unix …: no such file or directory" or "no such host" is a connection that failed, not an answer);
 #   no-answer   anything else, among them a failure whose error output could not be kept apart.
-# 0 when answered. The error output goes to one file of this process's own, made at start and removed by its EXIT trap.
-ANSWER=""; ANSWER_ERR=""; OUTCOME=""
-ERRF="$(mktemp "${TMPDIR:-/tmp}/omarchy-rollout.XXXXXX" 2>/dev/null)" || ERRF=""
+# 0 when answered. The error output goes to one file of this process's own, made at start and removed by its EXIT trap. One that
+# cannot be made is said, and made again before each round of the loop: without it no failure is ever "not there".
+ANSWER=""; ANSWER_ERR=""; OUTCOME=""; ERRF=""
+errf() {
+  [[ -z "$ERRF" ]] || return 0
+  ERRF="$(mktemp "${TMPDIR:-/tmp}/omarchy-rollout.XXXXXX" 2>/dev/null)" || ERRF=""
+  [[ -n "$ERRF" ]] || log "cannot make a file in ${TMPDIR:-/tmp} for the engine's error output: every call that fails counts as not answered until it can"
+}
 trap 'rm -f "$ERRF"' EXIT
 ask() { # docker|compose args...
   local rc=0
@@ -362,7 +367,8 @@ rollout() { # check → 0 changed something, 1 nothing to do, 2 docker unreachab
   for svc in $enabled; do [[ " ${ordered[*]-} " == *" $svc "* || "$svc" == "$ROLLOUT_SELF" ]] || ordered+=("$svc"); done
   [[ " $enabled " == *" $ROLLOUT_SELF "* ]] && ordered+=("$ROLLOUT_SELF")
   # Bounded (ROLLOUT_PULL_TIMEOUT): a pull that stalls on a registry would hold the lock until another round breaks it as stuck.
-  # One that runs out of time is said, and the images that are here are rolled out; the next round pulls again.
+  # One that runs out of time is said, and the images that are here are rolled out; the next round pulls again. timeout runs it
+  # in a process group of its own, so a ^C at a terminal (an interactive --once) takes effect once the pull has ended.
   local pulled prc=0
   pulled="$(with_timeout "$ROLLOUT_PULL_TIMEOUT" "${COMPOSE[@]}" pull --quiet 2>&1)" || prc=$?
   grep -viE "pulled|pulling|^\s*$" <<<"$pulled" || true
@@ -374,9 +380,10 @@ rollout() { # check → 0 changed something, 1 nothing to do, 2 docker unreachab
     local image wanted cid running wanted_cfg running_cfg task
     image="$(jq -r ".services[\"$svc\"].image // empty" <<<"$config" 2>/dev/null || true)"
     # The image the service names, as the engine says; one that is not here (the pull did not bring it) leaves the service as it
-    # is this round — never read as an image to replace it with.
+    # is this round — never read as an image to replace it with — and the next round pulls it again. docker says "No such image",
+    # podman's compat socket "image not known".
     if ! ask docker image inspect -f '{{.Id}}' "${image:-none}"; then
-      if grep -qi 'no such image' <<<"$ANSWER_ERR"; then log "$svc: its image ${image:-(none named)} is not here: leaving it as it is this round"; continue; fi
+      if grep -qiE 'no such image|image not known' <<<"$ANSWER_ERR"; then log "$svc: its image ${image:-(none named)} is not here: leaving it as it is this round"; continue; fi
       log "$svc: the engine did not answer which image it names ($(said)): $noanswer"; return 2
     fi
     wanted="$ANSWER"
@@ -625,6 +632,7 @@ follow_loop() {
       # did not answer leaves them for the next poll to decide again. Its own container is named first while it is not known — the
       # first round, and every one after a start the engine did not say — but never while it holds a lock it took nameless: that
       # lock's release reads it back by the holder it was taken with.
+      errf
       if [[ -z "$SELF_ID" ]] && (( ! LOCK_HELD )); then identify_self; fi
       if round loop; then
         last_round=$SECONDS
@@ -663,9 +671,9 @@ self_test() {
 exec 3>&1 4>&2
 case "$mode" in
   self-test) self_test ;;
-  check) rollout 1 || [[ $? -eq 1 ]] ;;
+  check) errf; rollout 1 || [[ $? -eq 1 ]] ;;
   once)
-    identify_self
+    errf; identify_self
     # The EXIT trap ignores TERM and INT from its first command on, so one more that lands during the release does not cut it
     # short (one that lands before that first command still can; docker stop sends a single TERM).
     trap 'trap "" TERM INT; exec 1>&3 2>&4; lock_release; rm -f "$ERRF"' EXIT

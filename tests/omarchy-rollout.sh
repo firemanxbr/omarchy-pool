@@ -46,8 +46,9 @@
 # a release not answered keeps the lock held (a warning on the error output
 # is no answer either) and the loop tries again at its next poll, the lock
 # is never named by a guess, the guard fails on a set it cannot see, a scan
-# not answered changes nothing (an image not here leaves its service as it
-# is), the pull is bounded, a kick during the self-replacing round
+# not answered changes nothing (an image not here, as docker or podman
+# words it, leaves its service as it is), a file for the error output that
+# could not be made at start is made at a later round, the pull is bounded, a kick during the self-replacing round
 # starts no round, and the EXIT trap's lines are printed after a TERM
 # during a redirected call.
 set -euo pipefail
@@ -217,7 +218,9 @@ until_rounds() { # n [seconds] — up to 10 s unless said
   local i; for (( i = 0; i < ${2:-10} * 5; i++ )); do (( $(rounds) >= $1 )) && return 0; /bin/sleep 0.2; done
   fail "waited for $1 round(s), saw $(rounds): $(cat "$tmp/loop.out")"
 }
-start_loop() { STUB_POLL="$ROLLOUT_POLL" "$R" --loop > "$tmp/loop.out" 2>&1 & LOOP_PID=$!; }
+# Emptied here, before the loop starts: the background child truncates it only once it runs, and until then until_rounds would
+# count the rounds of the loop before it.
+start_loop() { : > "$tmp/loop.out"; STUB_POLL="$ROLLOUT_POLL" "$R" --loop > "$tmp/loop.out" 2>&1 & LOOP_PID=$!; }
 stop_loop() { # bounded: a loop that ignores the TERM fails the test within 60 s, never hangs it
   local i; kill -TERM "$LOOP_PID" 2>/dev/null || true
   for (( i = 0; i < 600; i++ )); do kill -0 "$LOOP_PID" 2>/dev/null || break; /bin/sleep 0.1; done
@@ -467,7 +470,7 @@ done
 reset_lock; rm -f "$STUB_STATE.follow"; : > "$STUB_LOG"
 echo "$STUB_SELF true $STUB_SELF_STARTED" > "$STUB_STATE.holders"   # the loop's own container, running: its lock looks live
 echo 'exit 1' > "$STUB_STATE.on-rm"
-ROLLOUT_POLL=1 ROLLOUT_EVERY=2 STUB_POLL=1 "$R" --loop > "$tmp/loop.out" 2>&1 & LOOP_PID=$!
+ROLLOUT_POLL=1 ROLLOUT_EVERY=2 start_loop
 until_rounds 2; /bin/sleep 0.5
 stop_loop
 grep -q "the lock proj-rollout-lock could not be removed; trying again before the next round" "$tmp/loop.out" || fail "the loop's failed removal is said: $(cat "$tmp/loop.out")"
@@ -484,7 +487,7 @@ NOCONN='echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock
 # has ended — and bounded like every loop here (60 s: each round is a whole rollout and guard, slow on a loaded machine).
 loop_rounds() { # n
   rm -f "$STUB_STATE.follow"
-  ROLLOUT_POLL=1 ROLLOUT_EVERY=0 STUB_POLL=1 "$R" --loop > "$tmp/loop.out" 2>&1 & LOOP_PID=$!
+  ROLLOUT_POLL=1 ROLLOUT_EVERY=0 start_loop
   until_rounds "$1" 60; stop_loop
 }
 # Up to 60 s for a condition, polled; the test fails past it.
@@ -523,6 +526,19 @@ run_bounded 60 "$R" --once
 grep -q "a lock from 13:47 outlived its 4 h: broken" "$tmp/out" || fail "a lock past its expiry is broken whatever its holder's read: $(cat "$tmp/out")"
 grep -q " up -d --no-deps --no-build broker$" "$STUB_LOG" || fail "and the round runs: $(cat "$tmp/out")"
 [[ ! -f "$STUB_STATE.lock" ]] || fail "and releases its lock: $(cat "$STUB_STATE.lock")"
+# No file for the error output at start (its directory is not there yet): said, and every failure is no answer — the dead
+# holder's lock stays that round — until a later round makes the file, and then the engine's "No such object" breaks it.
+reset_lock; changed; : > "$STUB_LOG"
+sed -i.bak 's/^updater .*/updater sha256:bbbbbbbbbbbbbbbb sha256:bbbbbbbbbbbbbbbb/' "$STUB_STATE"   # no round that replaces the updater
+lock_held loop cid-gone 2026-09-30T14:00:00Z "$future"
+printf 'mkdir -p "%s"; echo "Error: No such object: cid-gone" >&2; exit 1\n' "$tmp/tmp-late" > "$STUB_STATE.on-holder"
+TMPDIR="$tmp/tmp-late" loop_rounds 3
+[[ ! -f "$STUB_STATE.on-holder" ]] || fail "the holder's read never ran without the file: $(cat "$tmp/loop.out")"
+grep -q "cannot make a file in $tmp/tmp-late for the engine's error output" "$tmp/loop.out" || fail "no file for the error output is said: $(cat "$tmp/loop.out")"
+grep -q "the lock's holder cid-gone could not be read (no error output); skipping this round" "$tmp/loop.out" || fail "without it, a failure is no answer: $(cat "$tmp/loop.out")"
+grep -q "a lock held by cid-gone (loop, since 13:47), which is not running any more: broken" "$tmp/loop.out" || fail "a later round makes the file and breaks the dead holder's lock: $(cat "$tmp/loop.out")"
+grep -q " up -d --no-deps --no-build broker$" "$STUB_LOG" || fail "and runs: $(cat "$tmp/loop.out")"
+[[ ! -f "$STUB_STATE.lock" ]] || fail "a stopped loop leaves no lock: $(cat "$STUB_STATE.lock")"
 echo "ok: a holder or a lock that cannot be read"
 # Item 2: a StartedAt read that fails as the loop starts: said, and its lock names no holder and no start — never a holder with no
 # start — until it names itself at a later round.
@@ -594,7 +610,7 @@ rm -f "$STUB_STATE.warn"
 reset_lock; changed; self_alive; : > "$STUB_LOG"
 echo '{"latest":"v1.0.3","workers":[]}' > "$STUB_STATE.follow"
 echo "$NOCONN" > "$STUB_STATE.on-rm"; echo "$NOCONN" > "$STUB_STATE.on-id"
-ROLLOUT_POLL=1 ROLLOUT_EVERY=3600 STUB_POLL=1 "$R" --loop > "$tmp/loop.out" 2>&1 & LOOP_PID=$!
+ROLLOUT_POLL=1 ROLLOUT_EVERY=3600 start_loop
 within_60s "the failed release" grep -q "the lock proj-rollout-lock could not be removed; trying again" "$tmp/loop.out"
 within_60s "the held lock to go at a poll" test ! -f "$STUB_STATE.lock"
 stop_loop
@@ -635,13 +651,17 @@ for at in image-updater cfg-updater config; do
   grep -qE -- "--self-test| run -d | up -d |image rm" "$STUB_LOG" && fail "no self-test, no one-off, no up and no image removed ($at): $(grep -E -- '--self-test| run -d | up -d |image rm' "$STUB_LOG")"
   [[ ! -f "$STUB_STATE.lock" ]] || fail "the round releases its lock ($at): $(cat "$STUB_STATE.lock")"
 done
-# An image the engine says is not here (the pull did not bring it): that service is left as it is this round, the others go on.
-reset_lock; changed; : > "$STUB_LOG"
-echo 'echo "Error response from daemon: No such image: img-project:latest" >&2; exit 1' > "$STUB_STATE.on-image-project"
-run_bounded 60 "$R" --once
-grep -q "project: its image img-project is not here: leaving it as it is this round" "$tmp/out" || fail "an image that is not here is said: $(cat "$tmp/out")"
-grep -q " up -d --no-deps --no-build project" "$STUB_LOG" && fail "and its service is not replaced: $(grep ' up -d ' "$STUB_LOG")"
-grep -q " up -d --no-deps --no-build broker$" "$STUB_LOG" || fail "the other services go on: $(cat "$tmp/out")"
+# An image the engine says is not here (the pull did not bring it) — docker's words, and podman's compat socket's: that service is
+# left as it is this round, the others go on.
+for said in "No such image: img-project:latest" "failed to find image img-project: img-project: image not known"; do
+  reset_lock; changed; : > "$STUB_LOG"
+  printf 'echo "Error response from daemon: %s" >&2; exit 1\n' "$said" > "$STUB_STATE.on-image-project"
+  run_bounded 60 "$R" --once
+  [[ ! -f "$STUB_STATE.on-image-project" ]] || fail "the image read never failed ($said): $(cat "$tmp/out")"
+  grep -q "project: its image img-project is not here: leaving it as it is this round" "$tmp/out" || fail "an image that is not here is said ($said): $(cat "$tmp/out")"
+  grep -q " up -d --no-deps --no-build project" "$STUB_LOG" && fail "and its service is not replaced ($said): $(grep ' up -d ' "$STUB_LOG")"
+  grep -q " up -d --no-deps --no-build broker$" "$STUB_LOG" || fail "the other services go on ($said): $(cat "$tmp/out")"
+done
 echo "ok: a scan the engine did not answer"
 # Item 8: a pull that runs past ROLLOUT_PULL_TIMEOUT (a registry that stalls): said, and the round goes on with the images here.
 reset_lock; changed; : > "$STUB_LOG"
