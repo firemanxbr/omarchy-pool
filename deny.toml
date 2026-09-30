@@ -1,0 +1,34 @@
+# cargo deny check (ci.yml, the `supply-chain` job): the whole dependency tree of the
+# workspace, the omarchy-agent's sigstore-verify tree included (design v2 §11.3, D2).
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[bans]
+multiple-versions = "allow"
+# The workspace's crates reach each other by path, which cargo deny counts as a wildcard;
+# none is published, and every registry dependency is pinned by Cargo.lock (--locked).
+wildcards = "allow"
+# Named by the design as outside the agent's trusted core; nothing in the tree uses it.
+deny = [{ crate = "bollard" }]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
