@@ -558,6 +558,18 @@ grep -q "compose did not name the project, so its lock has no name; skipping thi
 names="$(grep '^docker create ' "$STUB_LOG" | sed -E 's/^docker create --name ([^ ]+) .*/\1/' | sort -u)"
 [[ "$names" == proj-rollout-lock ]] || fail "every later lock is the project's own: ${names:-none}"
 echo "ok: a lock compose did not name"
+# Item 7: compose ps of the updater fails once in the scan (everything current): not "not running; starting" — the round says the
+# engine did not answer, runs no self-test and no one-off, and releases its lock.
+reset_lock; : > "$STUB_LOG"
+sed -i.bak -e 's/^broker .*/broker sha256:bbbbbbbbbbbbbbbb sha256:bbbbbbbbbbbbbbbb/' -e 's/^project .*/project sha256:bbbbbbbbbbbbbbbb sha256:bbbbbbbbbbbbbbbb/' "$STUB_STATE"
+echo "$NOCONN" > "$STUB_STATE.on-ps-updater"
+run_bounded 60 "$R" --once
+[[ ! -f "$STUB_STATE.on-ps-updater" ]] || fail "compose ps never failed: $(cat "$tmp/out")"
+grep -q "updater: the engine did not answer whether it runs (Cannot connect to the Docker daemon.*): changing nothing; the next round tries again" "$tmp/out" || fail "a scan the engine did not answer is said: $(cat "$tmp/out")"
+grep -q "not running; starting" "$tmp/out" && fail "never read as not running: $(cat "$tmp/out")"
+grep -qE -- "--self-test| run -d " "$STUB_LOG" && fail "no self-test and no one-off: $(grep -E -- '--self-test| run -d ' "$STUB_LOG")"
+[[ ! -f "$STUB_STATE.lock" ]] || fail "the round releases its lock: $(cat "$STUB_STATE.lock")"
+echo "ok: a scan the engine did not answer"
 
 # ------------------------------------------------------------------- guard --
 guarded() { # → the round's output; STUB_LOG holds its calls
@@ -623,6 +635,19 @@ printf 'running 0 0\nrestarting 1 1\nrestarting 3 1\n' > "$STUB_STATE.status-pro
 out="$("$R" --once)"
 grep -q "does not stay up here (project restarting)" <<<"$out" && ! grep -qE ' run -d |image rm' "$STUB_LOG" || fail "the set's guard holds for an older image too: $out"
 rm -f "$STUB_STATE.nolabel" "$STUB_STATE.selftest-fail"
+# #301 item 6: an engine or a compose that does not show the set is no set that stays up — the list of its containers, a sample,
+# or its name (the third config call of a round: its lock, its scan, its guard) that fails once: the guard fails, no image goes
+# and no one-off starts. (Removed meanwhile — the engine's "No such object" — a container still counts as gone.)
+for at in ps sample config; do
+  reset_lock; changed; sed -i.bak 's/^updater .*/updater sha256:aaaaaaaaaaaaaaaa sha256:bbbbbbbbbbbbbbbb/' "$STUB_STATE"; : > "$STUB_LOG"
+  echo 'echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" >&2; exit 1' > "$STUB_STATE.on-$at"
+  [[ "$at" != config ]] || echo 2 > "$STUB_STATE.on-config.skip"
+  run_bounded 60 "$R" --once
+  [[ ! -f "$STUB_STATE.on-$at" ]] || fail "the guard's $at never failed: $(cat "$tmp/out")"
+  grep -q "the new image does not stay up here (.*): staying on v1.0.2 and keeping the old images" "$tmp/out" || fail "a set the guard cannot see ($at) fails it: $(cat "$tmp/out")"
+  grep -qE ' run -d |image rm' "$STUB_LOG" && fail "no image removed and no one-off ($at): $(grep -E 'run -d|image rm' "$STUB_LOG")"
+  [[ ! -f "$STUB_STATE.lock" ]] || fail "the lock is released ($at)"
+done
 echo "ok: the guard"
 
 # --self-test: the socket answers, compose reads the project, and it follows.

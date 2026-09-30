@@ -56,7 +56,7 @@
 # logs one line, and the next round tries again. So a holder that cannot
 # be read is not dead, a lock whose removal was not answered stays held,
 # a lock named by a guess is never taken (compose names it, or the round
-# is skipped). Its own container
+# is skipped), and a guard that cannot see the set fails. Its own container
 # is named by an id and a start the engine both answered, or not at all
 # (asked again before the loop's next round), and a lock that names a
 # holder with no start is broken only when that holder is not there or not
@@ -74,7 +74,9 @@
 # variable) — for ROLLOUT_GUARD_SECONDS (90), every ROLLOUT_GUARD_EVERY (5).
 # It fails on a container seen restarting at two samples in a row, a
 # RestartCount that grows by two or more, one that was running and ends
-# exited non-zero, and a service this round failed to replace. Then the new
+# exited non-zero, a service this round failed to replace, and an engine
+# or a compose that does not answer about the set (a container the engine
+# says is not there counts as gone, as before). Then the new
 # image's own updater must pass --self-test (an image from before #277 has
 # none — a rollback past it — and is adopted on the first check alone, as
 # every updater before #277 adopted every image). If either fails, the
@@ -353,13 +355,18 @@ rollout() { # check → 0 changed something, 1 nothing to do, 2 docker unreachab
     image="$(jq -r ".services[\"$svc\"].image" <<<"$config")"
     wanted="$(docker image inspect -f '{{.Id}}' "$image" 2>/dev/null || true)"
     WANTED+="$svc $wanted"$'\n'
-    cid="$(compose ps -q "$svc" 2>/dev/null | head -1)"
-    if [[ -z "$cid" ]]; then
+    # Not running only when compose and the engine say so: a call they did not answer changes nothing this round (2).
+    if ! ask compose ps -q "$svc"; then log "$svc: the engine did not answer whether it runs ($(said)): changing nothing; the next round tries again"; return 2; fi
+    cid="$(head -1 <<<"$ANSWER")"; running=""
+    if [[ -n "$cid" ]]; then
+      if ask docker inspect -f '{{.Image}}' "$cid"; then running="$ANSWER"
+      elif [[ "$OUTCOME" != not-found ]]; then log "$svc: the engine did not answer what it runs ($(said)): changing nothing; the next round tries again"; return 2; fi
+    fi
+    if [[ -z "$running" ]]; then
       log "$svc: not running; starting"
       if [[ "$svc" == "$ROLLOUT_SELF" ]]; then SELF_CHANGED=1; else replace+=("$svc"); fi
       continue
     fi
-    running="$(docker inspect -f '{{.Image}}' "$cid")"
     # The image, and the service's configuration: an environment or a
     # volume changed in the compose file is a container to replace too.
     wanted_cfg="$(compose config --hash "$svc" 2>/dev/null | awk '{print $2}')"
@@ -401,14 +408,27 @@ GUARD_WHY=""
 is_builder() { # cid
   [[ "$(env_of "$1" OMARCHY_WORKER_ROLE)" == community ]] || env_present "$1" OMARCHY_BROKER
 }
+# One sample of a watched container into SAMPLE, "status restarts exitcode": "gone 0 0" when the engine says it is not there; 1,
+# with why in GUARD_WHY, when it did not answer.
+SAMPLE=""
+sample() { # cid service
+  if ask docker inspect -f '{{.State.Status}} {{.RestartCount}} {{.State.ExitCode}}' "$1"; then SAMPLE="$ANSWER"
+  elif [[ "$OUTCOME" == not-found ]]; then SAMPLE="gone 0 0"
+  else GUARD_WHY="the engine did not answer about $2: $(said)"; return 1; fi
+}
 guard() {
   GUARD_WHY=""
   if (( ${#FAILED[@]} )); then GUARD_WHY="${FAILED[*]} not replaced this round"; return 1; fi
+  # A set the engine or compose did not show is no set that stays up: the guard fails, and the next round tries again.
   local project cids cid svc image wanted watched=() line
   project="$(project_name)"
-  cids="$(docker ps -aq --filter "label=com.docker.compose.project=${project:-none}" 2>/dev/null || true)"
+  [[ -n "$project" ]] || { GUARD_WHY="compose did not name the project, so its containers could not be listed"; return 1; }
+  if ! ask docker ps -aq --filter "label=com.docker.compose.project=$project"; then GUARD_WHY="the engine did not list the project's containers: $(said)"; return 1; fi
+  cids="$ANSWER"
   for cid in $cids; do
-    line="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}} {{.Image}} {{index .Config.Labels "com.docker.compose.oneoff"}}' "$cid" 2>/dev/null || true)"
+    if ask docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}} {{.Image}} {{index .Config.Labels "com.docker.compose.oneoff"}}' "$cid"; then line="$ANSWER"
+    elif [[ "$OUTCOME" == not-found ]]; then continue
+    else GUARD_WHY="the engine did not say what ${cid:0:12} is: $(said)"; return 1; fi
     read -r svc image oneoff <<<"$line"
     [[ -n "$svc" && "$oneoff" != True && "$svc" != "$ROLLOUT_SELF" ]] || continue
     [[ -n "$SELF_ID" && "$cid" == "${SELF_ID:0:${#cid}}" ]] && continue
@@ -422,7 +442,7 @@ guard() {
   local first="" last="" streaks="" t=0 w c s status count code
   for w in "${watched[@]}"; do
     read -r c s <<<"$w"
-    read -r status count code <<<"$(docker inspect -f '{{.State.Status}} {{.RestartCount}} {{.State.ExitCode}}' "$c" 2>/dev/null || echo "gone 0 0")"
+    sample "$c" "$s" || return 1; read -r status count code <<<"$SAMPLE"
     first+="$c $s $status $count"$'\n'; streaks+="$c 0"$'\n'
   done
   while (( t < ROLLOUT_GUARD_SECONDS )); do
@@ -430,7 +450,7 @@ guard() {
     last=""
     for w in "${watched[@]}"; do
       read -r c s <<<"$w"
-      read -r status count code <<<"$(docker inspect -f '{{.State.Status}} {{.RestartCount}} {{.State.ExitCode}}' "$c" 2>/dev/null || echo "gone 0 0")"
+      sample "$c" "$s" || return 1; read -r status count code <<<"$SAMPLE"
       last+="$c $s $status $count $code"$'\n'
       local n; n="$(awk -v c="$c" '$1 == c { print $2 }' <<<"$streaks")"
       if [[ "$status" == restarting ]]; then n=$(( n + 1 )); else n=0; fi
