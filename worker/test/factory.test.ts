@@ -17,6 +17,7 @@ import { packageKey } from "../src/r2";
 import { issueJobToken, jobOf, scopesFor } from "../src/jobtoken";
 import { STAGING_QUOTA_BYTES, sweepStaging } from "../src/staging";
 import { decider } from "./decide";
+import { legacyWorker } from "./fixture";
 
 const API = "http://pool.test/api/v1";
 /** Approve and block, decided in the browser with the maintainer's passkey (#271): decide.ts. */
@@ -1060,12 +1061,11 @@ describe("blocking", () => {
   });
 
   it("a maintainer blocks a contributor: nothing more from them, their workers revoked, their packages rejected — and their sources stay closed to other accounts", async () => {
-    // bob requests something, registers a worker, then gets blocked by m1.
+    // bob requests something, has a worker registered before #331 closed the door to contributors, then gets blocked by m1.
     await env.DB.prepare(`INSERT INTO contributors (login, token_hash, role) VALUES ('bob', ?, 'contributor')`).bind(await sha256Hex("omc_bob")).run();
     const req = await call("POST", "/factory/packages", { url: "https://evil.example/tool", source: "https://evil.example/tool-1.0.tar.gz", version: "1.0", description: "A tool of dubious intent", license: "MIT", arches: ["aarch64"], checklist }, "omc_bob");
     expect(req.status, JSON.stringify(req.json)).toBe(201);
-    const w = await call("POST", "/factory/workers", { name: "box", arch: "aarch64" }, "omc_bob");
-    expect(w.status).toBe(201);
+    const w = { json: { worker: await legacyWorker(env, "bob", "box", "aarch64") } };
     expect((await call("POST", "/factory/contributors/bob/block", { reason: "spam requests" }, "omc_alice")).status).toBe(403);
     expect((await call("POST", "/factory/contributors/m2/block", { reason: "no reason at all" }, "omc_m1")).status).toBe(409); // a maintainer is a governance PR
     expect((await call("POST", "/factory/contributors/m1/block", { reason: "no reason at all" }, "omc_m1")).status).toBe(400);
@@ -1075,7 +1075,7 @@ describe("blocking", () => {
     expect(await env.PACKAGES.head(blocked.json.record.replace(`${env.POOL_URL}/`, ""))).not.toBeNull();
     expect(await env.DB.prepare("SELECT status FROM factory_packages WHERE name = 'tool'").first()).toEqual({ status: "rejected" });
     expect(await env.DB.prepare("SELECT revoked_at IS NOT NULL AS revoked FROM build_workers WHERE id = ?").bind(w.json.worker).first()).toEqual({ revoked: 1 });
-    // Every door: request, build, a worker — refused with the reason.
+    // Every door: request, build — refused with the reason; a worker is a maintainer's anyway (#331).
     expect((await call("POST", "/factory/packages", { url: "https://evil.example/other", source: "https://evil.example/o.tar.gz", version: "1", description: "Another tool of intent", license: "MIT", checklist }, "omc_bob")).json.error).toMatch(/blocked by a maintainer: spam requests/);
     expect((await call("POST", "/factory/workers", { name: "box2", arch: "aarch64" }, "omc_bob")).status).toBe(403);
     expect((await call("GET", "/factory/blocks")).json.contributors).toEqual([expect.objectContaining({ login: "bob", blocked_by: "m1", blocked_reason: "spam requests" })]);

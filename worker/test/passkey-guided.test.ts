@@ -42,7 +42,7 @@ import { HELPERS } from "../src/pages/layout";
 import { CONFIRM_SCRIPT } from "../src/pages/agent-auth";
 import { s256 } from "../src/agents";
 import { CATEGORIES } from "../src/categories";
-import { runScript, scriptOf, seedDashboard, type Fixture } from "./fixture";
+import { legacyWorker, runScript, scriptOf, seedDashboard, type Fixture } from "./fixture";
 import { decider } from "./decide";
 import { assert as answer, b64url, createAuthenticator, register, unb64url } from "./soft-authenticator.mjs";
 
@@ -849,11 +849,9 @@ describe("everything else stays free (#287)", () => {
     await ready("freeblocked");
     await env.DB.prepare("UPDATE factory_packages SET blocked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), blocked_by = 'm1', blocked_reason = 'the tests', status = 'rejected' WHERE name = 'freeblocked'").run();
     await env.DB.prepare("INSERT INTO contributors (login, token_hash, session_hash, role, blocked_at, blocked_by, blocked_reason) VALUES ('dana', ?, ?, 'contributor', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'm1', 'the tests')").bind(await h("omc_dana"), await h("oms_dana")).run();
-    const revokeMe = await call("POST", "/factory/workers", { name: "spare", arch: "x86_64" }, `omc_${F.contributor}`);
-    expect(revokeMe.status, JSON.stringify(revokeMe.json)).toBe(201);
-    // A worker that takes orders (#277): its owner's, and any maintainer may order it — the session alone (the maintainer's decision: no passkey for an order).
-    const orderMe = await call("POST", "/factory/workers", { name: "orders", arch: "x86_64" }, `omc_${F.contributor}`);
-    expect(orderMe.status, JSON.stringify(orderMe.json)).toBe(201);
+    // Two workers the contributor registered before #331 closed the door to contributors: one to revoke, and one that takes orders (#277): its owner's, and any maintainer may order it — the session alone (the maintainer's decision: no passkey for an order).
+    const revokeMe = { json: { worker: await legacyWorker(env, F.contributor, "spare", "x86_64") } };
+    const orderMe = { json: { worker: await legacyWorker(env, F.contributor, "orders", "x86_64") } };
     // It is set up to take every kind (#277, parts 1 to 3): its process takes the worker's own kinds (a re-check, a restart, a restart of its
     // host's agent service) and declares part 2's stop, so a build it runs stops on the pool's word — it holds one, leased to it, for "stop
     // its task" below. Its image reports v1.0.2 while the pool runs v1.0.3, so an Update has something to update to: a community worker's

@@ -234,6 +234,22 @@ async function index(env: Env, source: string, arch: string, p: Pkg, token: stri
   return sha;
 }
 
+/**
+ * A contributor's worker registered before #331 closed POST /factory/workers
+ * to maintainers: the row the door wrote then (community, dedicated), with
+ * the token `omw_<id>`. Such registrations stay until P3 — their owner or a
+ * maintainer revokes them and sets their mode, and they claim as before.
+ */
+export async function legacyWorker(env: Env, owner: string, name: string, arch = "x86_64"): Promise<string> {
+  const id = `${owner}-${name}-legacy`;
+  await env.DB.prepare(
+    `INSERT INTO build_workers (id, arch, hostname, labels, owner, token_hash, mode, packages, last_seen) VALUES (?, ?, NULL, NULL, ?, ?, 'dedicated', '[]', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`,
+  )
+    .bind(id, arch, owner, await sha256Hex(`omw_${id}`))
+    .run();
+  return id;
+}
+
 export async function seedDashboard(env: Env): Promise<Fixture> {
   const arch = "x86_64";
   // Approve and block are decided in the browser with the maintainer's passkey (#271): m2's and m1's are made at their first decision (decide.ts).
