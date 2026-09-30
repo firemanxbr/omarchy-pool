@@ -66,15 +66,15 @@ describe("a build waiting for a native worker", () => {
   it("the Workers page says how many wait, per architecture, each linked", async () => {
     const d = await drawn("/workers", (x) => !!x.nodes["#native-wait"]?.innerHTML);
     expect(d.nodes["#native-wait"].hidden).toBe(false);
-    expect(d.nodes["#native-wait"].innerHTML).toBe(`<b>1 build waits for a native ${F.arch} worker.</b> It could not run emulated: <a href="/build/${waiting}">#${waiting}</a>. <a href="/docs/workers">Run one →</a>`);
+    expect(d.nodes["#native-wait"].innerHTML).toBe(`<b>1 build waits for a native ${F.arch} worker.</b> It could not run emulated: <a href="/build/${waiting}">#${waiting}</a>. <a href="/docs/workers">Run one (maintainers only) →</a>`);
     // Two of them, and a full live read: "at least".
     const w = await drawn("/workers", (x) => !!x.nodes["#native-wait"]?.innerHTML, { functions: ["drawNativeWait"], variables: ["LISTED"] });
     const t = (id: number, arch: string) => ({ id, arch, status: "queued", params: { needs_native: 1 } });
     w.drawNativeWait({ tasks: [t(7, "x86_64"), t(9, "x86_64"), { id: 8, arch: "x86_64", status: "leased", params: { needs_native: 1 } }, { id: 10, arch: "aarch64", status: "queued", params: {} }] });
-    expect(w.nodes["#native-wait"].innerHTML).toBe('<b>2 builds wait for a native x86_64 worker.</b> They could not run emulated: <a href="/build/7">#7</a>, <a href="/build/9">#9</a>. <a href="/docs/workers">Run one →</a>');
+    expect(w.nodes["#native-wait"].innerHTML).toBe('<b>2 builds wait for a native x86_64 worker.</b> They could not run emulated: <a href="/build/7">#7</a>, <a href="/build/9">#9</a>. <a href="/docs/workers">Run one (maintainers only) →</a>');
     w.setLISTED(4);
     w.drawNativeWait({ tasks: [t(7, "x86_64"), t(9, "aarch64"), t(11, "x86_64"), t(12, "x86_64")] });
-    expect(w.nodes["#native-wait"].innerHTML).toBe('<b>At least 1 build waits for a native aarch64 worker.</b> It could not run emulated: <a href="/build/9">#9</a>.<br><b>At least 3 builds wait for a native x86_64 worker.</b> They could not run emulated: <a href="/build/7">#7</a>, <a href="/build/11">#11</a>, <a href="/build/12">#12</a>. <a href="/docs/workers">Run one →</a>');
+    expect(w.nodes["#native-wait"].innerHTML).toBe('<b>At least 1 build waits for a native aarch64 worker.</b> It could not run emulated: <a href="/build/9">#9</a>.<br><b>At least 3 builds wait for a native x86_64 worker.</b> They could not run emulated: <a href="/build/7">#7</a>, <a href="/build/11">#11</a>, <a href="/build/12">#12</a>. <a href="/docs/workers">Run one (maintainers only) →</a>');
     w.drawNativeWait({ tasks: [] });
     expect(w.nodes["#native-wait"].hidden).toBe(true);
   });

@@ -46,6 +46,7 @@ interface Drawn {
   identity(me: unknown): unknown;
   renderTop(): void;
   renderRegister(): void;
+  renderPoolLine(role: string): void;
   buildBtn(name: string, arch: string | null, stopped: string | null, title: string): string;
   removeBtn(name: string): string;
   workerActs(w: unknown): string;
@@ -59,7 +60,7 @@ async function drawn(login = F.owner): Promise<Drawn> {
   expect(page.status).toBe(200);
   return runScript(scriptOf(page.text), {
     pathname: `/user/${login}`,
-    functions: ["identity", "renderTop", "renderRegister", "buildBtn", "removeBtn", "workerActs", "withdrawBtn", "wtLog"],
+    functions: ["identity", "renderTop", "renderRegister", "renderPoolLine", "buildBtn", "removeBtn", "workerActs", "withdrawBtn", "wtLog"],
     variables: ["CAN", "WHO"],
   }) as Drawn;
 }
@@ -240,15 +241,23 @@ describe("the workers are the maintainers' (#331): \"Run a worker\" and the work
     expect(await section("bob", F.contributor)).toEqual({ slot: "", own: "", form: "" });
   });
 
-  it("a maintainer: \"Run a worker\", the toggle and the form — live on their own page, grey with whose it is on someone else's", async () => {
+  it("a maintainer: \"Run a worker\", the toggle and the form — live on their own page, and nothing drawn on anyone else's", async () => {
     const own = await section("m1", F.m1);
     expect(own.slot).toContain('id="w-toggle"');
     expect(own.own).toContain('<a href="/docs/workers">Run a worker →</a>');
     expect(own.own).toContain('<form id="worker-form"');
     expect(own.own).toContain("Maintainers only");
     expect(controls(own.form)).toEqual([expect.objectContaining({ text: "Register worker", grey: false })]);
-    const other = await section("m1", F.owner);
-    expect(other.own).toContain('<a href="/docs/workers">Run a worker →</a>');
-    expect(controls(other.form)).toEqual([expect.objectContaining({ text: "Register worker", grey: true, title: "only alice registers a worker here — yours is on /user/m1" })]);
+    // A contributor's page and another maintainer's: the served line stays, nothing is drawn over it — no form greyed with a reason that is not alice's.
+    expect(await section("m1", F.owner)).toEqual({ slot: "", own: "", form: "" });
+    expect(await section("m1", F.m2)).toEqual({ slot: "", own: "", form: "" });
+  });
+
+  it("the served line is hidden on a maintainer's page, whose section lists the hosts they provide, and kept on a contributor's", async () => {
+    for (const [role, hidden] of [["maintainer", true], ["contributor", false]] as const) {
+      const d = await drawn(role === "maintainer" ? F.m1 : F.owner);
+      d.renderPoolLine(role);
+      expect((d.nodes["#w-pool"] as unknown as { hidden: boolean }).hidden, role).toBe(hidden);
+    }
   });
 });

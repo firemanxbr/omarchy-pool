@@ -44,7 +44,8 @@ the other's part.
 **The contributor** — anyone signed in, a maintainer included — requests
 the package on the record (the project, the licence, the source) from the
 dashboard or through the API, and brings **a build that passes the gate**
-on their own worker: the recipe, the log, the manifest, the gate's verdict
+— built in the shared queue, on the pool's hosts, which the maintainers
+provide (a contributor runs no worker, #331): the recipe, the log, the manifest, the gate's verdict
 and the second agent's audit are the evidence, staged in their workspace.
 A build that fails, or fails the gate, is the contributor's to fix; it
 never reaches a maintainer's queue. When the evidence is complete the
@@ -89,22 +90,19 @@ can be ready while the other failed). The tools, in the order to try them:
    repository ships its own PKGBUILD is built as it is, with no drafting:
    the fix is made there, tagged, and the request renewed with the tag.)
 3. **Choose the worker.** A request lands in the **shared queue** the
-   moment its record is written — every contributor's shared worker takes
-   from it, the best idle one of the architecture first (native before
+   moment its record is written — the shared workers, on the hosts the
+   maintainers provide, take from it, the best idle one of the architecture first (native before
    emulated, then the most cores), the others after three minutes; the
    page says where a build stands ("3 of 7"). The Build dialog offers the
-   queue or one of the contributor's own workers, which takes it at once;
+   queue, or a legacy community worker registered under the contributor's
+   name before #331, which takes it at once;
    a queued build can be taken out and put back from the same dialog —
    nothing puts it back by itself. A build that ran *emulated* (x86_64
    under qemu on an aarch64 host) may need nothing but a native worker: a
    toolchain that cannot start there ends the build as soon as it is
    installed, with the reason — before any correction turn of the drafter —
    and the build goes back to the queue for a native worker, the attempt
-   uncounted (*Run a worker* in the docs). Revoking a worker frees the
-   builds asked for it.
-4. **Build it at home first.** The same image runs on any machine with
-   the contributor's own agent key (*Workers* in the docs): what passes
-   there is what they queue here.
+   uncounted. Revoking a worker frees the builds asked for it.
 
 A maintainer chooses the same way for the project's build: which of the
 project's workers — one that builds and whose agent answers, native or

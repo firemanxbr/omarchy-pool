@@ -78,3 +78,27 @@ describe("POST /factory/workers is for maintainers only (#331)", () => {
     expect((await call("POST", "/factory/claim", { token: before.json.token }, { arch: F.arch })).status).toBe(204);
   });
 });
+
+describe("the site and the docs no longer invite a contributor to run a worker (#331)", () => {
+  // The sentences the review found left over, each on a page it was on: none may come back.
+  const GONE = [
+    "runs workers on their own machines",
+    "Build it at home first",
+    "run the same image at home",
+    "on their own worker",
+    "one of the contributor's own workers",
+    "a contributor can verify the worker they run",
+    "a contributor's and a maintainer's",
+    "The agent's key is the contributor's, on their machine",
+  ];
+  it("Governance, How it works, Workers, a person's page and the served docs carry none of them", async () => {
+    for (const path of ["/docs/governance", "/docs/how-it-works", "/workers", `/user/${F.owner}`, "/docs/what-we-test", "/docs/security-model", "/docs/factory", "/docs/workers", "/docs/worker-host"]) {
+      const ctx = createExecutionContext();
+      const res = await worker.fetch(new Request(`http://pool.test${path}`), env, ctx);
+      await waitOnExecutionContext(ctx);
+      expect(res.status, path).toBe(200);
+      const text = await res.text();
+      for (const s of GONE) expect(text, `${path}: ${s}`).not.toContain(s);
+    }
+  });
+});

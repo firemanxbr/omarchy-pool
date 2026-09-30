@@ -41,10 +41,12 @@ const WORKER_FORM = `<label>Name <input type="text" id="w-name" placeholder="lap
  * provides them for everyone and its maintainers are their only providers.
  * The one exception to the page's rule that every control is drawn for
  * every viewer: "Run a worker" and the worker form are not served, and the
- * script draws them for a maintainer only (the shell's isMaintainer(), from
- * /auth/me); everyone else reads that their packages build on the pool's
- * hosts, with the way to the packaging docs. POST /factory/workers refuses
- * a contributor with the same sentence (POOL_HOSTS).
+ * script draws them for a maintainer on their own page only (the shell's
+ * isMaintainer() and isOwner(), from /auth/me); everyone else reads that
+ * their packages build on the pool's hosts, with the way to the packaging
+ * docs — except on a maintainer's page, whose section lists the hosts they
+ * provide, where the line is hidden. POST /factory/workers refuses a
+ * contributor with the same sentence (POOL_HOSTS).
  */
 const poolHostsLine = () => `<p class="sub" id="w-pool" style="margin:0 0 10px;font-size:12.5px">Nothing to run here: ${POOL_HOSTS}, which the maintainers provide. Request a package and the pool builds it. <a href="/docs/factory#contribute-a-package">How packaging works →</a></p>`;
 const WORKER_OWN = `<p class="sub" style="margin:0 0 10px;font-size:12.5px">Maintainers only: the project's compute is its maintainers' hosts. Register one and run the signed image with the token it gives you, shown once. <a href="/docs/workers">Run a worker →</a></p><form id="worker-form" class="form" onsubmit="return false" hidden></form><div id="w-new" hidden><p class="sub">Your worker token, shown once. One command wherever the worker lives (docker or podman):</p><pre id="w-cmd"></pre></div>`;
@@ -191,10 +193,10 @@ const SCRIPT = String.raw`
       });
     };
   }
-  // The way to request a package, for everyone, the owner's to press: served grey with whose it is, drawn again from the server's word. The way in for a worker — "Run a worker", the toggle and the form behind it — is a maintainer's (#331): drawn for a maintainer only, the form's fields grey with why where the server says no (another maintainer's page); everyone else keeps the served line, their packages build on the pool's hosts.
+  // The way to request a package, for everyone, the owner's to press: served grey with whose it is, drawn again from the server's word. The way in for a worker — "Run a worker", the toggle and the form behind it — is a maintainer's (#331): drawn for a maintainer on their own page only, the form's fields grey with why where the server says no (blocked); everyone else keeps the served line, their packages build on the pool's hosts.
   function renderRegister() {
     $("#pk-request").outerHTML = gate(REQUEST_LINK, may("request"), reason("request"));
-    if (!isMaintainer()) return;
+    if (!isMaintainer() || !isOwner(login)) return;
     if (!WORKER_DRAWN) {
       WORKER_DRAWN = true;
       $("#w-own").innerHTML = WORKER_OWN; $("#w-slot").innerHTML = REGISTER_TOGGLE;
@@ -202,6 +204,8 @@ const SCRIPT = String.raw`
     }
     $("#worker-form").innerHTML = gate(WORKER_FORM, may("register"), reason("register"));
   }
+  // The served line tells a contributor their packages build on the pool's hosts: on a maintainer's page — whose section lists the hosts they provide — it is hidden for every reader (#331); on their own page renderRegister has drawn the maintainer's block over it already.
+  function renderPoolLine(role) { var line = $("#w-pool"); if (line && role === "maintainer") line.hidden = true; }
   // The workers under this name, from the same listing the Workers page reads — the same rows, by kind, in the order that reads for a person: theirs, the review ones, the pool's.
   function renderWorkers() {
     if (!FACTORY) return;
@@ -343,6 +347,7 @@ const SCRIPT = String.raw`
     $("#title").innerHTML = esc(d.name || d.login) + ' <span class="dim" style="font-weight:500">@' + esc(d.login) + '</span>';
     // An icon, never a photo: two letters, green for a maintainer.
     $("#avatar").textContent = d.login.slice(0, 2); if (d.role === "maintainer") $("#avatar").classList.add("m");
+    renderPoolLine(d.role);
     $("#line").innerHTML = pillHtml(d.role === "maintainer" ? "rec" : "ok", d.role) +
       (d.blocked ? pillHtml("error", "blocked: " + (d.blocked.reason || ""), "by " + (d.blocked.by || "") + ", " + (d.blocked.at || "")) : '') +
       (d.maintainer_since ? pillHtml("none", "since " + ago(d.maintainer_since), "listed in factory/MAINTAINERS.toml") : '') +
@@ -927,11 +932,11 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       visible: EVERYONE,
     },
     {
-      // The way in for a worker is a maintainer's (#331): served, the line that a contributor's packages build on the pool's hosts, with the packaging docs; drawn for a maintainer only, "Run a worker", the toggle and the form, its fields grey with the server's word where it says no. The door refuses a contributor with the same sentence.
+      // The way in for a worker is a maintainer's (#331): served, the line that a contributor's packages build on the pool's hosts, with the packaging docs; hidden on a maintainer's page, whose section lists the hosts they provide; drawn for a maintainer on their own page only, "Run a worker", the toggle and the form, its fields grey with the server's word where it says no. The door refuses a contributor with the same sentence.
       id: "user.workers-register",
       page,
       anchor: ['id="w-slot"', 'id="w-own"', 'id="w-pool"', `Nothing to run here: ${POOL_HOSTS}, which the maintainers provide.`, 'href="/docs/factory#contribute-a-package"'],
-      script: ["if (!isMaintainer()) return;", "WORKER_OWN", "REGISTER_TOGGLE", '"#w-slot"', '"#w-toggle"', 'gate(WORKER_FORM, may("register"), reason("register"))', '"#worker-form"', '"#w-name"', '"#w-arch"', '"#w-btn"', 'api("POST", API + "/workers", body)', '\\"/docs/workers\\"'],
+      script: ["if (!isMaintainer() || !isOwner(login)) return;", 'function renderPoolLine(role) { var line = $("#w-pool"); if (line && role === "maintainer") line.hidden = true; }', "renderPoolLine(d.role);", "WORKER_OWN", "REGISTER_TOGGLE", '"#w-slot"', '"#w-toggle"', 'gate(WORKER_FORM, may("register"), reason("register"))', '"#worker-form"', '"#w-name"', '"#w-arch"', '"#w-btn"', 'api("POST", API + "/workers", body)', '\\"/docs/workers\\"'],
       acts: [{ method: "POST", path: "/api/v1/factory/workers", body: { name: "laptop", arch: F.arch }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 201 } }],
       visible: ["maintainer"],
     },

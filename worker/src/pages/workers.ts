@@ -21,7 +21,7 @@ const BODY = String.raw`
   <div class="hero compact">
     <p class="eyebrow">Workers</p>
     <h1>Three kinds of worker, and whose they are</h1>
-    <p class="lede">The project's take the pool's jobs. The review ones — trusted on two maintainers' word, never the owner's alone — build again what a maintainer asked for, and write the audit. The community ones, legacy sets until they retire, build their owner's packages, or whatever is queued when shared. Every worker runs on a maintainer's host: contributors run none. Every worker by its id, its state in one word, and what its machine uses. <a href="/docs/workers">Run one (maintainers only) →</a></p>
+    <p class="lede">The project's take the pool's jobs. The review ones — trusted on two maintainers' word, never the owner's alone — build again what a maintainer asked for, and write the audit. The community ones, legacy sets until they retire, build their owner's packages, or whatever is queued when shared. All run on the maintainers' hosts — contributors run none. Every worker by its id, its state in one word, and what its machine uses. <a href="/docs/workers">Run one (maintainers only) →</a></p>
   </div>
 
   <div class="tiles four" id="tiles"></div>
@@ -108,19 +108,19 @@ __CHARTS__
     $("#kinds").innerHTML =
       card("project", "Project", kinds.project, "The pool's own jobs, on the host a maintainer keeps.") +
       card("review", "Review", kinds.review, "Rebuilds, publishes and audits, on two maintainers' word.") +
-      card("community", "Contributors", kinds.community, "Legacy community sets, until they retire: their owner's packages, or whatever is queued when shared.");
+      card("community", "Community", kinds.community, "Legacy community sets, until they retire: their owner's packages, or whatever is queued when shared.");
     // The load per worker, the busiest first: the name with the kind and the architecture, the bar in the kind's colour, and what it did in the tooltip.
     var ranked = d.workers.filter(function (w) { return w.alive || LOAD[w.id]; }).sort(function (a, b) { return busyOf(b) - busyOf(a); }).slice(0, 10);
     $("#c-perworker").innerHTML = ranked.length ? hrows(ranked.map(function (w) {
       var k = wtKind(w), l = LOAD[w.id] || { ms: 0, done: 0 };
       return [workerName(w), (k === "community" ? (w.mode === "shared" ? "shared" : "own") : k) + " · " + esc(w.arch), busyOf(w), COLOR[k], null,
         w.id + ": " + busyOf(w) + "% of the last day with a lease · " + num(l.done) + " task(s) finished, " + Math.round(l.ms / 60000) + " min" + (w.current_task ? " · building #" + w.current_task + " now" : "") + " · " + num(w.builds_done) + " done / " + num(w.builds_failed) + " failed all time"];
-    }), { w: 150, html: true }) + '<div class="legend"><span><i style="background:' + COLOR.project + '"></i>project</span><span><i style="background:' + COLOR.review + '"></i>review</span><span><i style="background:' + COLOR.community + '"></i>contributors</span></div>' : '<div class="empty">no worker alive, nothing leased in the last day</div>';
+    }), { w: 150, html: true }) + '<div class="legend"><span><i style="background:' + COLOR.project + '"></i>project</span><span><i style="background:' + COLOR.review + '"></i>review</span><span><i style="background:' + COLOR.community + '"></i>community</span></div>' : '<div class="empty">no worker alive, nothing leased in the last day</div>';
     // The three tables.
     var seen = function (ws) { return ws.filter(function (w) { return showAll || w.alive; }); };
     pager("#w-project", seen(kinds.project), function (w) { return workerRow(w, "project"); }, { empty: showAll ? "no project worker registered" : "no project worker alive — the host is off; pool jobs wait", text: wtText });
     pager("#w-review", seen(kinds.review), function (w) { return workerRow(w, "review"); }, { empty: showAll ? "no review worker registered" : "no review worker alive — the project's builds and the audits wait", text: wtText });
-    pager("#w-community", seen(kinds.community), function (w) { return workerRow(w, "community"); }, { empty: showAll ? "no contributor's worker registered yet" : "no contributor's worker alive right now", text: wtText });
+    pager("#w-community", seen(kinds.community), function (w) { return workerRow(w, "community"); }, { empty: showAll ? "no community worker registered" : "no community worker alive right now", text: wtText });
     endSkeleton();
   }
   // The builds an emulated worker sent back (params.needs_native, #281): how many wait for a native worker, per architecture, each linked. The live read lists every task in flight up to its limit; a full page says "at least".
@@ -132,7 +132,7 @@ __CHARTS__
     el.innerHTML = arches.map(function (a) {
       var n = by[a].length;
       return '<b>' + (ts.length >= LISTED ? "At least " : "") + num(n) + (n === 1 ? " build waits" : " builds wait") + ' for a native ' + esc(a) + ' worker.</b> ' + (n === 1 ? "It" : "They") + ' could not run emulated: ' + by[a].map(function (id) { return '<a href="/build/' + id + '">#' + id + '</a>'; }).join(", ") + '.';
-    }).join("<br>") + (arches.length ? ' <a href="/docs/workers">Run one →</a>' : "");
+    }).join("<br>") + (arches.length ? ' <a href="/docs/workers">Run one (maintainers only) →</a>' : "");
   }
   // Worker minutes per day, the shell's one sum over the jobs series (workerMinutes) — the tile above is its total.
   function renderMinutes(d) {
