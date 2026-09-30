@@ -56,6 +56,12 @@ const CSS = String.raw`
   .wk-lede { margin: 0; color: var(--muted); max-width: 760px; }
   .wk-set { margin: 0; display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; font-size: 13px; color: var(--muted); max-width: 760px; }
   .wk-set .op-label { margin: 0; }
+  /* Five tiles, in five columns, or on a phone or a narrow window in two with the fifth across both: never a track they leave empty, which shows the grid's line colour (#299) — auto-fit left one at 390 px. None for a worker the pool does not know. */
+  #wk-stats { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  #wk-stats:empty { display: none; }
+  @media (max-width: 899px) { #wk-stats { grid-template-columns: 1fr 1fr; } #wk-stats > .op-stat:last-child:nth-child(odd) { grid-column: 1 / -1; } }
+  /* A value is shown whole — the agent's model, a version — on a second line where it does not fit, never cut (#299). */
+  #wk-stats .op-stat .n { white-space: normal; overflow-wrap: anywhere; }
   .wk-lines { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
   .wk-lines li { display: flex; gap: 10px; align-items: baseline; padding: 8px 12px; border: 1px solid var(--line); border-left-width: 3px; background: var(--panel); font-size: 13px; }
   .wk-lines li.warn { border-left-color: var(--amber); } .wk-lines li.fail { border-left-color: var(--red); } .wk-lines li.ok { border-left-color: var(--green); } .wk-lines li.info { border-left-color: var(--blue); }
@@ -63,6 +69,7 @@ const CSS = String.raw`
   .wk-ops label { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); }
   .wk-ops label:has(input:disabled) { color: var(--dim); }
   .wk-note { margin: 12px 0 0; font-size: 12.5px; color: var(--dim); }
+  .wk-note a { color: var(--green); }
   .wk-rules { color: var(--dim); } .wk-rules a { color: var(--dim); }
   .wk-table { overflow-x: auto; }
   .wk-table td { font-size: 12.5px; } .wk-table td.why { min-width: 180px; max-width: 360px; overflow-wrap: anywhere; }
@@ -158,6 +165,8 @@ const SCRIPT = String.raw`
   // What this viewer may press: the door's own verdicts; the worker's words and its log only where can.details says the viewer reads them.
   function loadCan() {
     api("GET", BASE + "/can").then(function (c) {
+      // Not a verdict (a 404 for an id the pool does not know): nothing to press — the buttons stay as served, grey, and the main read says why.
+      if (c.__status !== 200) return;
       CAN = c; drawOperate(); if (W) drawLines();
       if (c.details) {
         api("GET", BASE + "/orders").then(function (p) { SAID = {}; (p.orders || []).forEach(function (o) { SAID[o.id] = o.worker_detail; }); drawOrders(); }).catch(function () {});
@@ -238,7 +247,9 @@ const SCRIPT = String.raw`
     // Update (#277, part 3): its set's updater carries it out, never the worker.
     html.push(gate('<button type="button" class="op-btn" data-order="update">' + lucide("download", 14) + 'Update</button>', CAN.can.update, CAN.why.update));
     $("#wk-ops").innerHTML = html.join("");
-    $("#wk-note").textContent = CAN.note || "";
+    // A visitor reads why the buttons are grey without a hover a touch screen cannot make (#299): the sign-in, and only that — when an order
+    // arrives is for a reader who may press.
+    $("#wk-note").innerHTML = WHO.me ? esc(CAN.note || "") : '<a href="' + esc(signInHref()) + '" rel="nofollow">Sign in</a> to order this worker.';
   }
   // How a stop goes, by what runs the task (/can's stop.stops, the pool's stopWay): a child within five minutes; a build or a trial within five
   // minutes while its container or check runs, at its next call to the pool while it transfers; a pool job at its next call; an image from before
@@ -380,7 +391,7 @@ export const WORKER_COMPONENTS = (F: Fixture): Component[] => [
     id: "worker.operate",
     page: `/worker/${F.communityWorker}`,
     anchor: ['id="wk-operate"', "<b id=\"wk-operate-h\">Operate</b>", 'data-order="recheck-agent"', 'data-order="restart"', 'data-order="restart-agent"', 'data-order="drain"', 'data-order="update"', 'id="wk-unless"', 'href="/docs/workers#orders"'],
-    script: ['api("GET", BASE + "/can")', "CAN.can.recheck", "CAN.can.restart", "CAN.can.restart_agent", "CAN.can.update", "gate('<button", "function askOrder(kind)", 'api("POST", BASE + "/orders", body)', "body.unless_agent_ok = true", "CAN.shared_agent_with",
+    script: ['api("GET", BASE + "/can")', "if (c.__status !== 200) return;", "esc(signInHref())", 'rel="nofollow">Sign in</a> to order this worker.', "CAN.can.recheck", "CAN.can.restart", "CAN.can.restart_agent", "CAN.can.update", "gate('<button", "function askOrder(kind)", 'api("POST", BASE + "/orders", body)', "body.unless_agent_ok = true", "CAN.shared_agent_with",
       // Update's dialog names what the pool sees of the set — this worker and the project workers of its host — and the rest without a number (#277, P10).
       "CAN.update_with", "andList([name].concat(sameSet).sort())", "(as the pool sees them on this host), and the set's builders, brokers and agent service.", '" and whatever else its set runs, when it runs an older image."', 'wtKind(W) === "community" && CAN && CAN.update_note',
       // The checkbox survives the page's refresh, and a dialog that asks is never redrawn under the person: what it says is what is posted.
