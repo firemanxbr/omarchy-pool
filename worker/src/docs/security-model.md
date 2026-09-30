@@ -61,7 +61,7 @@ of `rollback.yml` to a ref that cannot exist. GitHub answers 403 to a token
 without `actions: write` and 422 to one with it; no run starts either way. A
 422 is an error on Status (the hero, and a `token` line in the journal) until
 the token is replaced. The `GITHUB_TOKEN` a host gives its agent sidecars is
-probed by the host agent's preflight (the P1 install issue, #307).
+probed by the host agent's preflight (#317).
 
 Tokens are 192-bit random values shown once and stored as SHA-256 hashes;
 job tokens are HMAC-SHA256-signed claims (`JOB_TOKEN_SECRET`, a Worker

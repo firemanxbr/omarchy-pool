@@ -59,7 +59,13 @@ gh variable set OMARCHY_API  -b "https://pkgs.example.org" -R NEWORG/omarchy-poo
 gh variable set OMARCHY_POOL -b "https://pool.example.org" -R NEWORG/omarchy-pool
 gh secret set CLOUDFLARE_API_TOKEN   < cloudflare-token -R NEWORG/omarchy-pool   # B6
 gh api -X PUT "repos/NEWORG/omarchy-pool/environments/pool" >/dev/null           # the release's deploy environment
+gh api -X PUT "repos/NEWORG/omarchy-pool/environments/release" >/dev/null        # the release's signing environment
 ```
+
+Then give both environments a `main`-only branch policy and a required
+reviewer, put `CLOUDFLARE_API_TOKEN` in `pool` rather than the repository,
+and turn on immutable releases (RUNBOOK, *The GitHub settings the signature
+relies on*, with `NEWORG` for `firemanxbr` and the new maintainers' user ids).
 
 GitHub keeps only that token and, once the factory's hosted fallback is set
 up (F2), the two worker tokens. Nothing on GitHub can write to the pool.
@@ -70,6 +76,7 @@ The ruleset is versioned in the repository:
 
 ```bash
 gh api -X POST repos/NEWORG/omarchy-pool/rulesets --input .github/rulesets/main.json
+gh api -X POST repos/NEWORG/omarchy-pool/rulesets --input .github/rulesets/tags.json   # v* tags: GitHub Actions only, never moved or deleted
 ```
 
 From here on every change is a pull request with the six required checks and,

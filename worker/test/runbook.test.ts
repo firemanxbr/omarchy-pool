@@ -90,3 +90,24 @@ describe("the runbook's After a release (AC4 of #277)", () => {
     expect(HOST_COMMANDS.some((c) => clean.includes(c))).toBe(false);
   });
 });
+
+describe("the runbook's GitHub settings the signature relies on (#308)", () => {
+  const section = cut(runbook, "the-github-settings-the-signature-relies-on");
+
+  it("is a real section, and names the exact identity hosts check", () => {
+    expect(outline(runbook).filter((h) => h.id === "the-github-settings-the-signature-relies-on").map((h) => h.level)).toEqual([2]);
+    expect(section).toContain("https://github.com/firemanxbr/omarchy-pool/.github/workflows/release.yml@refs/heads/main");
+    expect(section).toContain("https://token.actions.githubusercontent.com");
+  });
+
+  it("lists every setting, how to apply it and a gh api command that checks it", () => {
+    // The settings: the reviewed environments, the tag ruleset, immutable releases, the main ruleset's code owners, the token rule.
+    for (const setting of ["`release` and `pool` environments", "A tag ruleset on `v*`", "Immutable releases", "code owner", "No token with `actions`, `contents: write` or `workflows`"]) expect(section, setting).toContain(setting);
+    // Applied with these…
+    for (const apply of ['gh api -X PUT "$R/environments/$env"', '"$R/environments/$env/deployment-branch-policies" -f name=main -f type=branch', 'gh api -X POST "$R/rulesets" --input .github/rulesets/tags.json', 'gh api -X PUT "$R/immutable-releases"', "gh secret set CLOUDFLARE_API_TOKEN --env pool"]) expect(section, apply).toContain(apply);
+    // …and checked with these.
+    for (const check of ['gh api "$R/environments"', '/deployment-branch-policies" --jq', 'gh api "$R/rulesets"', 'gh api "$R/immutable-releases"', 'gh api "$R/keys"']) expect(section, check).toContain(check);
+    // Honest about what the repository cannot do alone.
+    expect(section).toContain("Until the admin applies them");
+  });
+});

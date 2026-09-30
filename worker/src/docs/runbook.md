@@ -179,6 +179,119 @@ fallback, by hand, for the Worker alone: re-run the Deploy job of that
 release's run, or `git checkout vX.Y.Z && cd worker && npx wrangler deploy
 --var POOL_VERSION:vX.Y.Z`.
 
+## The GitHub settings the signature relies on
+
+Hosts will trust one thing: a keyless Sigstore signature made by
+`release.yml` (or `rollback.yml`) on `main` of this repository, checked
+against that exact identity
+(`https://github.com/firemanxbr/omarchy-pool/.github/workflows/release.yml@refs/heads/main`,
+issuer `https://token.actions.githubusercontent.com`). That signature is only
+as strong as the settings around it (#308, design v2 §20). Part of them is in
+the repository and CI holds it (`tests/trust-pins.sh`): one exact cosign
+(v2.6.5, through `sigstore/cosign-installer` pinned by commit) in both
+workflows, the Fulcio and Rekor named on every `cosign sign`, the one
+release job that signs (`worker-image-manifest`) in the `release`
+environment and the rollback in `pool`, the base images by digest and the
+docker CLI by SHA-256, and CODEOWNERS giving every maintainer
+`.github/workflows/`, `crates/omarchy-agent/`, `crates/pkg-repo/src/dispatch*`
+and `factory/sets/`. The rest lives on GitHub, and only the repository's
+admin can set it:
+
+| Setting | What it gives | Checked by |
+|---|---|---|
+| `release` and `pool` environments: `main` only, a required reviewer (either maintainer, self-approval allowed until both approve dispatches in practice; then `prevent_self_review`, D18), no admin bypass | a dispatch from any other branch is refused before its job starts; one from `main` waits for a maintainer, so a holder of `actions: write` cannot sign or send every host back alone | `gh api …/environments`, `…/deployment-branch-policies` |
+| `CLOUDFLARE_API_TOKEN` an environment secret of `pool`, not a repository secret | only a run the `pool` environment admitted can deploy | `gh secret list` (repository and `--env pool`) |
+| A tag ruleset on `v*` (`.github/rulesets/tags.json`): creation, update and deletion refused to everyone but GitHub Actions | a `v*` tag is not created by hand; with immutable releases, a released tag is never moved or deleted, not even by a workflow | `gh api …/rulesets` |
+| Immutable releases | a published release's assets and tag cannot change | `gh api …/immutable-releases` |
+| The main ruleset (`.github/rulesets/main.json`, already applied) requires a pull request review and a code owner's | a change to what signs, or to what a host runs, is a decision another maintainer approves | `gh api …/rulesets/<id>` |
+| No token with `actions`, `contents: write` or `workflows` on this repository outside GitHub Actions | no one can dispatch `release.yml` or `rollback.yml`, or push a workflow, from outside a reviewed run | the daily token probe on Status (*The pool's own scheduler*); `gh api …/keys`; each maintainer's token pages |
+
+Until the admin applies them, the environment, tag, immutable-release and
+token criteria of #308 are not met, whatever the repository holds.
+
+**Apply** (the repository's admin, once; user ids: firemanxbr 2116404,
+maralcbr 116872):
+
+```bash
+R=repos/firemanxbr/omarchy-pool
+# 1. The signing environments: main only, a required reviewer, no admin bypass.
+for env in release pool; do
+  gh api -X PUT "$R/environments/$env" --input - <<'JSON'
+{
+  "reviewers": [{ "type": "User", "id": 2116404 }, { "type": "User", "id": 116872 }],
+  "prevent_self_review": false,
+  "can_admins_bypass": false,
+  "deployment_branch_policy": { "protected_branches": false, "custom_branch_policies": true }
+}
+JSON
+  gh api -X POST "$R/environments/$env/deployment-branch-policies" -f name=main -f type=branch
+done
+# 2. The deploy token only where the pool environment admits the run.
+gh secret set CLOUDFLARE_API_TOKEN --env pool -R firemanxbr/omarchy-pool < cloudflare-token
+gh secret delete CLOUDFLARE_API_TOKEN -R firemanxbr/omarchy-pool
+# 3. The v* tag ruleset (GitHub Actions, integration 15368, is its only bypass).
+gh api -X POST "$R/rulesets" --input .github/rulesets/tags.json
+# 4. Immutable releases.
+gh api -X PUT "$R/immutable-releases"
+# 5. Tokens: delete or narrow any personal access token (fine-grained or
+#    classic) or deploy key that can write to this repository — see Check.
+```
+
+**Check** (anyone with read access; the admin's view shows the environments'
+secrets too):
+
+```bash
+R=repos/firemanxbr/omarchy-pool
+gh api "$R/environments" --jq '.environments[] | select(.name == "release" or .name == "pool")
+  | { name, can_admins_bypass, branch_policy: .deployment_branch_policy,
+      reviewers: [.protection_rules[] | select(.type == "required_reviewers") | .reviewers[].reviewer.login] }'
+# release and pool: can_admins_bypass false, custom_branch_policies true, reviewers [firemanxbr, maralcbr]
+for env in release pool; do gh api "$R/environments/$env/deployment-branch-policies" --jq '[.branch_policies[] | .name]'; done
+# ["main"] twice
+gh secret list -R firemanxbr/omarchy-pool; gh secret list -R firemanxbr/omarchy-pool --env pool
+# CLOUDFLARE_API_TOKEN under pool, not in the repository's list
+gh api "$R/rulesets" --jq '.[] | { id, name, target, enforcement }'
+gh api "$R/rulesets/$(gh api "$R/rulesets" --jq '.[] | select(.target == "tag") | .id')" \
+  --jq '{ include: .conditions.ref_name.include, rules: [.rules[].type], bypass: .bypass_actors }'
+# include ["refs/tags/v*"], rules [creation, update, deletion], bypass [Integration 15368]
+gh api "$R/rulesets/$(gh api "$R/rulesets" --jq '.[] | select(.target == "branch") | .id')" \
+  --jq '.rules[] | select(.type == "pull_request") | .parameters | { required_approving_review_count, require_code_owner_review }'
+# 1 and true
+gh api "$R/immutable-releases"
+# {"enabled": true, ...}
+gh api "$R/keys" --jq '[.[] | select(.read_only == false) | .title]'
+# [] — no deploy key that writes
+```
+
+Personal access tokens are not listed by the API on a user's repository:
+each maintainer reviews their own (*Settings → Developer settings → Personal
+access tokens*, fine-grained and classic) and keeps none with `actions`,
+`contents: write` or `workflows` on this repository (a classic `repo` or
+`workflow` scope counts). The Worker's own tokens are probed every day; a
+host's agent sidecar token is probed by the host agent's preflight (#317).
+
+**A dry run of the refusal**, once the checks above pass: dispatch the
+rollback from a throwaway branch, to the release that runs now, so even a
+misconfigured environment would change nothing:
+
+```bash
+git push origin HEAD:refs/heads/env-refusal-check
+gh workflow run rollback.yml --ref env-refusal-check -R firemanxbr/omarchy-pool \
+  -f to="$(curl -s https://pkgs.omarchy-pool.org/api/v1/version | jq -r .version)"
+gh run list -R firemanxbr/omarchy-pool --workflow rollback.yml --limit 1   # failure: the branch may not deploy to pool
+git push origin --delete env-refusal-check
+```
+
+The next release from `main` shows its signing job *Waiting for review*
+(`release`), then the deploy (`pool`); approve each on the run's page.
+
+What is not covered yet: `release.yml`'s `publish` job creates the GitHub
+release and its tag before the first reviewed job, so a dispatch from another
+branch publishes a release from that branch before the `release` environment
+refuses it (nothing it made is signed with the `main` identity, so no host
+would take it). #311 (the signed host bundle, a draft release published only
+after it is signed) moves publishing behind the same environment.
+
 ## Security data
 
 The `security` job (every 3 h, pulled by a project worker; `pkg-repo job

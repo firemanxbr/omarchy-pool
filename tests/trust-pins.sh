@@ -13,10 +13,12 @@
 # - the worker image's base images are pinned by digest and the docker CLI
 #   download by SHA-256;
 # - every maintainer owns the workflows, the host agent, the dispatcher that
-#   starts task containers and the host sets (CODEOWNERS).
+#   starts task containers and the host sets (CODEOWNERS);
+# - the v* tag ruleset the admin applies (.github/rulesets/tags.json) leaves
+#   tags to GitHub Actions alone.
 #
 # The GitHub settings around them (the environments' reviewers and branch
-# policy, the v* tag ruleset, immutable releases) live on GitHub, not here:
+# policy, the applied tag ruleset, immutable releases) live on GitHub, not here:
 # the runbook's *The GitHub settings the signature relies on* checks them.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -112,4 +114,14 @@ for path in .github/workflows/ crates/omarchy-agent/ 'crates/pkg-repo/src/dispat
   grep -qxE "$(sed 's/[.*]/\\&/g' <<<"$path") +$owners" "$root/.github/CODEOWNERS" || fail "CODEOWNERS gives $path to every maintainer ($owners)"
 done
 echo "ok: code owners cover the workflows, the host agent, the dispatcher and the host sets"
+# --- the v* tag ruleset the admin applies (runbook) ------------------------------
+python3 - "$root/.github/rulesets/tags.json" <<'PY' || fail "the v* tag ruleset: GitHub Actions alone creates v* tags, nobody moves or deletes them"
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r["target"] == "tag" and r["enforcement"] == "active", r
+assert r["conditions"]["ref_name"]["include"] == ["refs/tags/v*"], r["conditions"]
+assert sorted(x["type"] for x in r["rules"]) == ["creation", "deletion", "update"], r["rules"]
+assert r["bypass_actors"] == [{"actor_id": 15368, "actor_type": "Integration", "bypass_mode": "always"}], r["bypass_actors"]
+PY
+echo "ok: the v* tag ruleset lets only GitHub Actions create, move or delete a v* tag"
 echo "TRUST PINS OK"
