@@ -45,7 +45,8 @@
 #   whose docker hangs ends. A step killed after it installed a file, a
 #   second run beside one that holds the lock, a rollout.sh started by
 #   hand and a COMPOSE_FILE with an absolute or ../ path are refused (exit
-#   4) before the timer is touched.
+#   4) before the timer is touched; the runbook sends a killed step with
+#   the new files in to the way back, never to the timer.
 # - rollout.sh only wakes the updater: SIGUSR1 to a running one, and one
 #   that is not running started as it is (`--no-recreate`: never recreated
 #   onto an image its guard has not passed); `--check` asks the updater's
@@ -764,5 +765,12 @@ grep -q "If it stops part way, paste it again" <<<"$step" || fail "the runbook s
 grep -q "up to about 3 h 20 min" <<<"$step" || fail "the runbook says a worker stopped mid-drain can take up to about 3 h 20 min"
 grep -qE "within 15 min" <<<"$step" && fail "the runbook no longer promises 15 min for a worker stopped mid-drain"
 grep -q "within 15 min" "$root/factory/host/setup.sh" && fail "setup.sh no longer promises 15 min for a worker stopped mid-drain"
+# A kill or a reboot mid-step (#298): the runbook asks whether compose.yml names the updater, and when it does, sends the operator to
+# the way back and never tells them to start the timer.
+grep -qF "grep -c '^  updater:' compose.yml" "$root/worker/src/docs/runbook.md" || fail "the runbook's kill paragraph asks whether compose.yml names the updater"
+one="$(awk '/^- \*\*It prints 1\*\*/ { on = 1 } on && (/^$/ || (/^- / && !/It prints 1/)) { exit } on { print }' "$root/worker/src/docs/runbook.md" | tr '\n' ' ')"
+grep -q "Take the way back" <<<"$one" || fail "when compose.yml names the updater, the runbook sends the operator to the way back: $one"
+grep -q "Do not start the" <<<"$one" && ! grep -q "systemctl --user start" <<<"$one" || fail "and never tells them to start the timer: $one"
+grep -q "a reboot or a power cut before then brings it back:" <<<"$step" && fail "the runbook no longer presents a reboot mid-step as safe"
 grep -q "^docker compose ps -a" <<<"$(awk '/^### Once: the updater/ { on = 1 } on && /^### / && !/Once: the updater/ { exit } on { print }' "$root/worker/src/docs/runbook.md")" && fail "the first look runs no docker compose command"
 echo "HOST SETUP OK"
