@@ -36,6 +36,21 @@
 # self-test — and a busy builder, which is none of those; an updater image
 # from before #277, which has no self-test, adopted on the set's guard
 # alone); --self-test.
+#
+# #301: an engine or a compose that does not answer is never read as "not
+# there" or "nothing" — only "No such object" / "No such container" is: a
+# holder or a lock that cannot be read is a skip, a StartedAt the engine
+# did not say leaves the lock nameless (never a holder with no start) until
+# the loop names itself again, a round breaks its own lock that a lost
+# create left, a lock past its expiry is broken whatever its holder's read,
+# a release not answered keeps the lock held (a warning on the error output
+# is no answer either) and the loop tries again at its next poll, the lock
+# is never named by a guess, the guard fails on a set it cannot see, a scan
+# not answered changes nothing (an image not here, as docker or podman
+# words it, leaves its service as it is), a file for the error output that
+# could not be made at start is made at a later round, the pull is bounded, a kick during the self-replacing round
+# starts no round, and the EXIT trap's lines are printed after a TERM
+# during a redirected call.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
@@ -43,7 +58,9 @@ tmp="$(mktemp -d)"
 LOOP_PID=""
 cleanup() { [[ -z "$LOOP_PID" ]] || kill "$LOOP_PID" 2>/dev/null || true; rm -rf "$tmp"; }
 trap cleanup EXIT
-mkdir -p "$tmp/bin" "$tmp/compose" "$tmp/run"
+mkdir -p "$tmp/bin" "$tmp/compose" "$tmp/run" "$tmp/tmp"
+# The rollout keeps a call's error output in a file of its own for a moment: here, so a run cut short leaves none behind.
+export TMPDIR="$tmp/tmp"
 export STUB_LOG="$tmp/log" STUB_STATE="$tmp/state"
 : > "$STUB_LOG"
 # The state: one line per service — running image id, wanted image id.
@@ -65,14 +82,21 @@ S
 cat >> "$tmp/bin/docker" <<'S'
 # A docker that answers what omarchy-rollout asks, from STUB_STATE; every call is logged.
 echo "docker $*" >> "$STUB_LOG"
+# A CLI that warns on its error output at every call, whatever the call (a config-file warning, podman-docker's banner).
+[[ ! -f "$STUB_STATE.warn" ]] || echo "WARNING: Error loading config file: /root/.docker/config.json: permission denied" >&2
 # The container's own environment must not reach compose (it would be interpolated into the file).
 [[ "$1" != compose || -z "${OMARCHY_WORKER_ROLE:-}${OMARCHY_WORK_DIR:-}" ]] || echo "ENVLEAK ${OMARCHY_WORKER_ROLE:-}${OMARCHY_WORK_DIR:-}" >> "$STUB_LOG"
 running() { awk -v s="$1" '$1==s {print $2}' "$STUB_STATE"; }
 wanted() { awk -v s="$1" '$1==s {print $3}' "$STUB_STATE"; }
 services() { awk '{print $1}' "$STUB_STATE"; }
 role_of() { case "$1" in broker*|agent-proxy) echo broker ;; keyholder) echo agent ;; community-*) echo community ;; updater) echo updater ;; pool-*) echo pool ;; review-*) echo review ;; *) echo "" ;; esac; }
-# A hook: once, what the file says, on the call it names (up, run).
-hook() { [[ -f "$STUB_STATE.on-$1" ]] || return 0; local h; h="$(cat "$STUB_STATE.on-$1")"; rm -f "$STUB_STATE.on-$1"; eval "$h"; }
+# A hook: once, what the file says, on the call it names (up, run) — after the first n such calls when on-<name>.skip says n.
+hook() {
+  [[ -f "$STUB_STATE.on-$1" ]] || return 0
+  local h n; n="$(cat "$STUB_STATE.on-$1.skip" 2>/dev/null || echo 0)"
+  if (( n > 0 )); then echo $(( n - 1 )) > "$STUB_STATE.on-$1.skip"; return 0; fi
+  h="$(cat "$STUB_STATE.on-$1")"; rm -f "$STUB_STATE.on-$1" "$STUB_STATE.on-$1.skip"; eval "$h"
+}
 case "$1" in
   info) exit 0 ;;
   compose)
@@ -80,11 +104,11 @@ case "$1" in
     case "$1" in
       config)
         if [[ "${2:-}" == --services ]]; then services
-        elif [[ "${2:-}" == --format ]]; then printf '{"name":"proj","services":{'; first=1; while read -r s _; do (( first )) || printf ','; first=0; r="$(role_of "$s")"; printf '"%s":{"image":"img-%s","environment":{"OMARCHY_WORKER_ROLE":"%s"}}' "$s" "$s" "$r"; done < "$STUB_STATE"; printf '}}\n'
+        elif [[ "${2:-}" == --format ]]; then hook config; printf '{"name":"proj","services":{'; first=1; while read -r s _; do (( first )) || printf ','; first=0; r="$(role_of "$s")"; printf '"%s":{"image":"img-%s","environment":{"OMARCHY_WORKER_ROLE":"%s"}}' "$s" "$s" "$r"; done < "$STUB_STATE"; printf '}}\n'
         elif [[ "${2:-}" == --hash ]]; then echo "$3 cfg-$3"
         elif [[ "${2:-}" == -q ]]; then exit 0; fi ;;
-      pull) exit 0 ;;
-      ps) echo "cid-$3" ;;
+      pull) hook pull; exit 0 ;;
+      ps) hook "ps-$3"; echo "cid-$3" ;;
       up) hook up; shift; while [[ "$1" == -* ]]; do shift; done; for svc in "$@"; do [[ "$svc" == updater ]] && exit 137; grep -qx "$svc" "$STUB_STATE.upfail" 2>/dev/null && exit 1; awk -v s="$svc" '$1==s {$2=$3} {print}' "$STUB_STATE" > "$STUB_STATE.new" && mv "$STUB_STATE.new" "$STUB_STATE"; done ;;
       run)
         if [[ " $* " == *" --self-test "* ]]; then [[ -f "$STUB_STATE.selftest-fail" ]] && { echo "self-test: the runtime's socket does not answer"; exit 1; }; echo "self-test: the socket answers; compose reads /compose"; echo "follows 1"; exit 0; fi
@@ -93,10 +117,10 @@ case "$1" in
   image)
     # inspect -f {{.Id}} img-<service>: the id it names; inspect -f <the follows label> <id>: "1", "<no value>" for an image from before #277.
     if [[ "$2" == inspect && "$4" == *com.omarchy.updater.follows* ]]; then [[ -f "$STUB_STATE.nolabel" ]] && echo "<no value>" || echo 1
-    elif [[ "$2" == inspect ]]; then wanted "${5#img-}"; else exit 0; fi ;;
+    elif [[ "$2" == inspect ]]; then hook "image-${5#img-}"; wanted "${5#img-}"; else exit 0; fi ;;
   ps)
     # The project's containers: running ones (-q), or all of them (-aq); those in STUB_STATE.stopped are not running.
-    for s in $(services); do if [[ "$2" == -aq ]] || ! grep -qx "$s" "$STUB_STATE.stopped" 2>/dev/null; then echo "cid-$s"; fi; done ;;
+    hook ps; for s in $(services); do if [[ "$2" == -aq ]] || ! grep -qx "$s" "$STUB_STATE.stopped" 2>/dev/null; then echo "cid-$s"; fi; done ;;
   create)
     # The lock: one container by name, atomic — a second create fails while it exists; each one created gets an id of its own.
     shift; name=""; by=""; holder=""; started=""; until=""; nonce=""
@@ -112,22 +136,22 @@ case "$1" in
   inspect)
     t="$3"; cid="${@: -1}"; svc="${cid#cid-}"
     case "$t" in
-      *com.omarchy.lock.by*) [[ -f "$STUB_STATE.lock" ]] || exit 1; IFS='|' read -r by holder started until created nonce lid < "$STUB_STATE.lock"; echo "$by|$holder|$started|$until|$created|$lid" ;;
+      *com.omarchy.lock.by*) hook read; [[ -f "$STUB_STATE.lock" ]] || exit 1; IFS='|' read -r by holder started until created nonce lid < "$STUB_STATE.lock"; l="$by|$holder|$started|$until|$created|$lid"; [[ "$t" != *lock.nonce* ]] || l+="|$nonce"; echo "$l" ;;
       *com.omarchy.lock.nonce*) [[ -f "$STUB_STATE.lock" ]] || { echo "Error: No such object: $cid" >&2; exit 1; }; hook release; IFS='|' read -r by holder started until created nonce lid < "$STUB_STATE.lock"; echo "$holder|$started|$nonce|$lid" ;;
-      "{{.State.Running}} {{.State.StartedAt}}") line="$(awk -v c="$cid" '$1==c {print $2, $3}' "$STUB_STATE.holders" 2>/dev/null)"; [[ -n "$line" ]] || { echo "Error: No such object: $cid" >&2; exit 1; }; echo "$line" ;;
+      "{{.State.Running}} {{.State.StartedAt}}") hook holder; line="$(awk -v c="$cid" '$1==c {print $2, $3}' "$STUB_STATE.holders" 2>/dev/null)"; [[ -n "$line" ]] || { echo "Error: No such object: $cid" >&2; exit 1; }; echo "$line" ;;
       # A lock by its id: there while the lock file carries that id.
-      "{{.Id}}") if [[ "$cid" == lock* ]]; then lid=""; [[ -f "$STUB_STATE.lock" ]] && IFS='|' read -r _ _ _ _ _ _ lid < "$STUB_STATE.lock"; [[ "$lid" == "$cid" ]] || { echo "Error: No such object: $cid" >&2; exit 1; }; fi
+      "{{.Id}}") if [[ "$cid" == lock* ]]; then hook id; lid=""; [[ -f "$STUB_STATE.lock" ]] && IFS='|' read -r _ _ _ _ _ _ lid < "$STUB_STATE.lock"; [[ "$lid" == "$cid" ]] || { echo "Error: No such object: $cid" >&2; exit 1; }; fi
         echo "$cid" ;;
-      "{{.State.StartedAt}}") [[ "$cid" == "$STUB_SELF" ]] && echo "$STUB_SELF_STARTED" ;;
+      "{{.State.StartedAt}}") hook started; [[ "$cid" == "$STUB_SELF" ]] && echo "$STUB_SELF_STARTED" ;;
       "{{.Image}}") if [[ "$cid" == "$STUB_SELF" ]]; then echo sha256:self; else running "$svc"; fi ;;
-      *com.docker.compose.config-hash*) if [[ "$svc" == worker && -f "$STUB_STATE.cfgold" ]]; then echo "cfg-old"; else echo "cfg-$svc"; fi ;;
+      *com.docker.compose.config-hash*) hook "cfg-$svc"; if [[ "$svc" == worker && -f "$STUB_STATE.cfgold" ]]; then echo "cfg-old"; else echo "cfg-$svc"; fi ;;
       *"com.docker.compose.service\"}} {{.Image}}"*) echo "$svc $(running "$svc") False" ;;
       *com.docker.compose.service*) echo "$svc" ;;
       *OMARCHY_WORKER_ROLE*) r="$(role_of "$svc")"; [[ -n "$r" ]] && echo "OMARCHY_WORKER_ROLE=$r" ;;
       *OMARCHY_BROKER*) [[ "$svc" == worker ]] && echo set ;;
       "{{.State.Status}} {{.RestartCount}} {{.State.ExitCode}}")
         # A sequence per service, one line a call, the last one again and again.
-        f="$STUB_STATE.status-$svc"; [[ -f "$f" ]] || { echo "running 0 0"; exit 0; }
+        hook sample; f="$STUB_STATE.status-$svc"; [[ -f "$f" ]] || { echo "running 0 0"; exit 0; }
         n=$(( $(cat "$f.n" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$f.n"
         line="$(sed -n "${n}p" "$f")"; [[ -n "$line" ]] || line="$(tail -n1 "$f")"; echo "$line" ;;
       *) echo "unexpected inspect $*" >&2; exit 9 ;;
@@ -187,14 +211,16 @@ run_bounded() { # seconds command...
   if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fail "still running after ${secs} s: $* — $(tail -n 20 "$tmp/out")"; fi
   RUN_RC=0; wait "$pid" || RUN_RC=$?
 }
-reset_lock() { rm -f "$STUB_STATE.lock" "$STUB_STATE.holders" "$STUB_STATE".status-* "$STUB_STATE.stopped" "$STUB_STATE.selftest-fail" "$STUB_STATE".on-*; }
+reset_lock() { rm -f "$STUB_STATE.lock" "$STUB_STATE.holders" "$STUB_STATE".status-* "$STUB_STATE.stopped" "$STUB_STATE.selftest-fail" "$STUB_STATE".on-* "$STUB_STATE.warn"; }
 # The loop: its rounds in $tmp/loop.out.
 rounds() { grep -c "a round: " "$tmp/loop.out" || true; }
-until_rounds() { # n — up to 10 s
-  local i; for i in $(seq 1 50); do (( $(rounds) >= $1 )) && return 0; /bin/sleep 0.2; done
+until_rounds() { # n [seconds] — up to 10 s unless said
+  local i; for (( i = 0; i < ${2:-10} * 5; i++ )); do (( $(rounds) >= $1 )) && return 0; /bin/sleep 0.2; done
   fail "waited for $1 round(s), saw $(rounds): $(cat "$tmp/loop.out")"
 }
-start_loop() { STUB_POLL="$ROLLOUT_POLL" "$R" --loop > "$tmp/loop.out" 2>&1 & LOOP_PID=$!; }
+# Emptied here, before the loop starts: the background child truncates it only once it runs, and until then until_rounds would
+# count the rounds of the loop before it.
+start_loop() { : > "$tmp/loop.out"; STUB_POLL="$ROLLOUT_POLL" "$R" --loop > "$tmp/loop.out" 2>&1 & LOOP_PID=$!; }
 stop_loop() { # bounded: a loop that ignores the TERM fails the test within 60 s, never hangs it
   local i; kill -TERM "$LOOP_PID" 2>/dev/null || true
   for (( i = 0; i < 600; i++ )); do kill -0 "$LOOP_PID" 2>/dev/null || break; /bin/sleep 0.1; done
@@ -444,7 +470,7 @@ done
 reset_lock; rm -f "$STUB_STATE.follow"; : > "$STUB_LOG"
 echo "$STUB_SELF true $STUB_SELF_STARTED" > "$STUB_STATE.holders"   # the loop's own container, running: its lock looks live
 echo 'exit 1' > "$STUB_STATE.on-rm"
-ROLLOUT_POLL=1 ROLLOUT_EVERY=2 STUB_POLL=1 "$R" --loop > "$tmp/loop.out" 2>&1 & LOOP_PID=$!
+ROLLOUT_POLL=1 ROLLOUT_EVERY=2 start_loop
 until_rounds 2; /bin/sleep 0.5
 stop_loop
 grep -q "the lock proj-rollout-lock could not be removed; trying again before the next round" "$tmp/loop.out" || fail "the loop's failed removal is said: $(cat "$tmp/loop.out")"
@@ -452,6 +478,209 @@ grep -qE "a round runs already|could not be removed yet; skipping" "$tmp/loop.ou
 [[ "$(grep -c '^docker rm -f lock' "$STUB_LOG")" -ge 2 ]] || fail "the next round removes the lock the last one could not: $(grep '^docker rm' "$STUB_LOG")"
 [[ ! -f "$STUB_STATE.lock" ]] || fail "a stopped loop leaves no lock, after a failed removal: $(cat "$STUB_STATE.lock")"
 echo "ok: the lock"
+
+# ------------------------------------------ an engine that does not answer --
+# #301: a docker or compose call that fails is an answer only when the engine says "No such object" / "No such container";
+# anything else is no answer, and the round changes nothing and the next one tries again. Each failure is a once-only hook.
+NOCONN='echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" >&2; exit 1'
+# A loop with a round at every poll (ROLLOUT_EVERY=0, no pool), stopped once its round $1 has begun — so every round before it
+# has ended — and bounded like every loop here (60 s: each round is a whole rollout and guard, slow on a loaded machine).
+loop_rounds() { # n
+  rm -f "$STUB_STATE.follow"
+  ROLLOUT_POLL=1 ROLLOUT_EVERY=0 start_loop
+  until_rounds "$1" 60; stop_loop
+}
+# Up to 60 s for a condition, polled; the test fails past it.
+within_60s() { # what command...
+  local what="$1" i; shift
+  for (( i = 0; i < 300; i++ )); do "$@" && return 0; /bin/sleep 0.2; done
+  fail "waited 60 s for $what: $(cat "$tmp/loop.out" 2>/dev/null)"
+}
+self_alive() { echo "$STUB_SELF true $STUB_SELF_STARTED" > "$STUB_STATE.holders"; }   # the loop's own container, running
+# Item 1: a live round's holder whose read fails once: --once skips, replaces nothing, and leaves that round's lock.
+reset_lock; changed; : > "$STUB_LOG"
+lock_held loop cid-other 2026-09-30T14:00:00Z "$future"; echo "cid-other true 2026-09-30T14:00:00Z" > "$STUB_STATE.holders"
+echo "$NOCONN" > "$STUB_STATE.on-holder"
+run_bounded 60 "$R" --once
+[[ ! -f "$STUB_STATE.on-holder" ]] || fail "the holder's read never failed: $(cat "$tmp/out")"
+grep -q "the lock's holder cid-other could not be read (Cannot connect to the Docker daemon.*); skipping this round" "$tmp/out" || fail "a holder that cannot be read is a skip: $(cat "$tmp/out")"
+grep -q " up -d " "$STUB_LOG" && fail "a round whose lock is not known free replaces nothing: $(grep ' up -d ' "$STUB_LOG")"
+[[ "$(cut -d'|' -f7 "$STUB_STATE.lock" 2>/dev/null)" == lockheld0 ]] || fail "the other round's lock stays: $(cat "$STUB_STATE.lock" 2>/dev/null || echo gone)"
+# (A holder the engine says is not there is still broken: "its holder is gone" above.) After a create conflict, a read of the
+# lock that fails: a skip, and no second create — a create on a flaky engine that could itself be lost.
+reset_lock; changed; : > "$STUB_LOG"
+lock_held loop cid-other 2026-09-30T14:00:00Z "$future"; echo "cid-other true 2026-09-30T14:00:00Z" > "$STUB_STATE.holders"
+echo "$NOCONN" > "$STUB_STATE.on-read"
+run_bounded 60 "$R" --once
+[[ ! -f "$STUB_STATE.on-read" ]] || fail "the lock's read never failed: $(cat "$tmp/out")"
+grep -q "the lock proj-rollout-lock could not be read (Cannot connect to the Docker daemon.*); skipping this round" "$tmp/out" || fail "a lock that cannot be read is a skip: $(cat "$tmp/out")"
+[[ "$(grep -c '^docker create ' "$STUB_LOG")" == 1 ]] || fail "exactly one create when the lock cannot be read: $(grep '^docker create ' "$STUB_LOG")"
+grep -q " up -d " "$STUB_LOG" && fail "and nothing replaced"
+[[ "$(cut -d'|' -f7 "$STUB_STATE.lock" 2>/dev/null)" == lockheld0 ]] || fail "and the other round's lock stays"
+# Past its expiry, a lock is broken even while its holder cannot be read: a holder read that keeps failing never keeps the set
+# waiting longer than the expiry.
+reset_lock; changed; : > "$STUB_LOG"
+lock_held loop cid-other 2026-09-30T14:00:00Z "$past"; echo "cid-other true 2026-09-30T14:00:00Z" > "$STUB_STATE.holders"
+echo "$NOCONN" > "$STUB_STATE.on-holder"
+run_bounded 60 "$R" --once
+grep -q "a lock from 13:47 outlived its 4 h: broken" "$tmp/out" || fail "a lock past its expiry is broken whatever its holder's read: $(cat "$tmp/out")"
+grep -q " up -d --no-deps --no-build broker$" "$STUB_LOG" || fail "and the round runs: $(cat "$tmp/out")"
+[[ ! -f "$STUB_STATE.lock" ]] || fail "and releases its lock: $(cat "$STUB_STATE.lock")"
+# No file for the error output at start (its directory is not there yet): said, and every failure is no answer — the dead
+# holder's lock stays that round — until a later round makes the file, and then the engine's "No such object" breaks it.
+reset_lock; changed; : > "$STUB_LOG"
+sed -i.bak 's/^updater .*/updater sha256:bbbbbbbbbbbbbbbb sha256:bbbbbbbbbbbbbbbb/' "$STUB_STATE"   # no round that replaces the updater
+lock_held loop cid-gone 2026-09-30T14:00:00Z "$future"
+printf 'mkdir -p "%s"; echo "Error: No such object: cid-gone" >&2; exit 1\n' "$tmp/tmp-late" > "$STUB_STATE.on-holder"
+TMPDIR="$tmp/tmp-late" loop_rounds 3
+[[ ! -f "$STUB_STATE.on-holder" ]] || fail "the holder's read never ran without the file: $(cat "$tmp/loop.out")"
+grep -q "cannot make a file in $tmp/tmp-late for the engine's error output" "$tmp/loop.out" || fail "no file for the error output is said: $(cat "$tmp/loop.out")"
+grep -q "the lock's holder cid-gone could not be read (no error output); skipping this round" "$tmp/loop.out" || fail "without it, a failure is no answer: $(cat "$tmp/loop.out")"
+grep -q "a lock held by cid-gone (loop, since 13:47), which is not running any more: broken" "$tmp/loop.out" || fail "a later round makes the file and breaks the dead holder's lock: $(cat "$tmp/loop.out")"
+grep -q " up -d --no-deps --no-build broker$" "$STUB_LOG" || fail "and runs: $(cat "$tmp/loop.out")"
+[[ ! -f "$STUB_STATE.lock" ]] || fail "a stopped loop leaves no lock: $(cat "$STUB_STATE.lock")"
+echo "ok: a holder or a lock that cannot be read"
+# Item 2: a StartedAt read that fails as the loop starts: said, and its lock names no holder and no start — never a holder with no
+# start — until it names itself at a later round.
+reset_lock; changed; : > "$STUB_LOG"
+echo "$NOCONN" > "$STUB_STATE.on-started"
+loop_rounds 3
+[[ ! -f "$STUB_STATE.on-started" ]] || fail "the StartedAt read never failed: $(cat "$tmp/loop.out")"
+grep -q "its own container cccccccccccc answers, but the engine did not say its id and when it started (Cannot connect to the Docker daemon.*): the lock it takes names no holder" "$tmp/loop.out" || fail "a failed StartedAt read is said: $(cat "$tmp/loop.out")"
+creates="$(grep '^docker create ' "$STUB_LOG")"
+grep -q -- "--label com.omarchy.lock.holder= --label com.omarchy.lock.started= --label" <<<"$(head -1 <<<"$creates")" || fail "the first lock names no holder and no start: $(head -1 <<<"$creates")"
+grep -q -- "--label com.omarchy.lock.holder=$SELF --label com.omarchy.lock.started=$STUB_SELF_STARTED --label" <<<"$(tail -n +2 <<<"$creates")" || fail "the loop names itself at a later round: $creates"
+grep -q -- "--label com.omarchy.lock.holder=$SELF --label com.omarchy.lock.started= --label" <<<"$creates" && fail "never a holder with no start: $creates"
+[[ ! -f "$STUB_STATE.lock" ]] || fail "a stopped loop leaves no lock: $(cat "$STUB_STATE.lock")"
+# A live holder whose lock has an empty start (one taken by an updater from before #301): --once does not break it.
+reset_lock; changed; : > "$STUB_LOG"
+lock_held loop cid-other "" "$future"; echo "cid-other true 2026-09-30T14:00:00Z" > "$STUB_STATE.holders"
+run_bounded 60 "$R" --once
+grep -q "a round runs already in the updater (loop, since 13:47)" "$tmp/out" || fail "a live holder with no start on its lock is a round that runs: $(cat "$tmp/out")"
+grep -q " up -d " "$STUB_LOG" && fail "its lock is not broken: $(grep ' up -d ' "$STUB_LOG")"
+[[ "$(cut -d'|' -f7 "$STUB_STATE.lock" 2>/dev/null)" == lockheld0 ]] || fail "and it stays"
+echo "ok: a start the engine did not say"
+# Item 3: the loop's create reports a failure though the engine made the lock — and, the second time, the read after it is lost
+# too. Its own lock is broken — at once, by the nonce that take drew, or at the next take — and the rounds run: never "a round
+# runs already" until the lock's expiry.
+for lost in create create+read; do
+  reset_lock; changed; self_alive; : > "$STUB_LOG"
+  echo 'echo "Error response from daemon: context deadline exceeded" >&2; exit 1' > "$STUB_STATE.on-create"
+  [[ "$lost" == create ]] || echo "$NOCONN" > "$STUB_STATE.on-read"
+  loop_rounds 3
+  [[ ! -f "$STUB_STATE.on-create" && ! -f "$STUB_STATE.on-read" ]] || fail "the lost create ($lost) was never injected: $(cat "$tmp/loop.out")"
+  grep -q "the lock proj-rollout-lock is this updater's own (loop, since 13:47), left by a create whose answer was lost: broken" "$tmp/loop.out" || fail "the loop breaks its own lost lock ($lost): $(cat "$tmp/loop.out")"
+  grep -q " up -d --no-deps --no-build broker$" "$STUB_LOG" || fail "and runs ($lost): $(cat "$tmp/loop.out")"
+  grep -q "a round runs already" "$tmp/loop.out" && fail "its own lost lock is never another round's ($lost): $(cat "$tmp/loop.out")"
+  [[ ! -f "$STUB_STATE.lock" ]] || fail "a stopped loop leaves no lock ($lost): $(cat "$STUB_STATE.lock")"
+done
+# --once too, named or nameless (its StartedAt not said): the lock carries the nonce its create just drew, so it is its own —
+# broken, and the round runs; never "a round runs already" until the lock's expiry.
+for named in yes no; do
+  reset_lock; changed; self_alive; : > "$STUB_LOG"
+  echo 'echo "Error response from daemon: context deadline exceeded" >&2; exit 1' > "$STUB_STATE.on-create"
+  [[ "$named" == yes ]] || echo "$NOCONN" > "$STUB_STATE.on-started"
+  run_bounded 60 "$R" --once
+  [[ ! -f "$STUB_STATE.on-create" && ! -f "$STUB_STATE.on-started" ]] || fail "the lost create (--once, named: $named) was never injected: $(cat "$tmp/out")"
+  grep -q "the lock proj-rollout-lock is this updater's own (once, since 13:47), left by a create whose answer was lost: broken" "$tmp/out" || fail "--once breaks its own lost lock (named: $named): $(cat "$tmp/out")"
+  grep -q " up -d --no-deps --no-build broker$" "$STUB_LOG" || fail "and runs (--once, named: $named): $(cat "$tmp/out")"
+  [[ ! -f "$STUB_STATE.lock" ]] || fail "and leaves no lock (--once, named: $named): $(cat "$STUB_STATE.lock")"
+done
+echo "ok: a create whose answer was lost"
+# Item 4: a release the engine did not answer keeps the lock held, and the loop's next round removes it — never "runs already",
+# and not through the lost-create break either: the removal whose confirming read failed too, a read that failed on a socket
+# that is not there ("no such file or directory" is no "no such container"), and a CLI that warns on its error output.
+for kind in rm+id socket warn; do
+  reset_lock; changed; self_alive; : > "$STUB_LOG"
+  case "$kind" in
+    rm+id) echo "$NOCONN" > "$STUB_STATE.on-rm"; echo "$NOCONN" > "$STUB_STATE.on-id" ;;
+    socket) echo 'echo "error during connect: Get \"http://%2Fvar%2Frun%2Fdocker.sock/v1.47/containers/json\": dial unix /var/run/docker.sock: connect: no such file or directory" >&2; exit 1' > "$STUB_STATE.on-release" ;;
+    warn) touch "$STUB_STATE.warn" ;;
+  esac
+  loop_rounds 3
+  [[ ! -f "$STUB_STATE.on-rm" && ! -f "$STUB_STATE.on-id" && ! -f "$STUB_STATE.on-release" ]] || fail "the failed release ($kind) was never injected: $(cat "$tmp/loop.out")"
+  grep -qE "a round runs already|could not be removed yet; skipping|left by a create whose answer was lost" "$tmp/loop.out" && fail "the loop's next round releases its own lock and runs ($kind): $(cat "$tmp/loop.out")"
+  grep -q "is another round's now" "$tmp/loop.out" && fail "its own lock is never another round's ($kind): $(cat "$tmp/loop.out")"
+  [[ "$kind" == warn ]] || grep -q "the lock proj-rollout-lock could not be \(read to release it\|removed\)" "$tmp/loop.out" || fail "the failed release is said ($kind): $(cat "$tmp/loop.out")"
+  [[ ! -f "$STUB_STATE.lock" ]] || fail "a stopped loop leaves no lock ($kind): $(cat "$STUB_STATE.lock")"
+done
+rm -f "$STUB_STATE.warn"
+# With no round to come (the same release, ROLLOUT_EVERY far off), the loop removes that held lock at its next poll: it does not
+# look like a live round's until the next round, which would have a --once skip meanwhile.
+reset_lock; changed; self_alive; : > "$STUB_LOG"
+echo '{"latest":"v1.0.3","workers":[]}' > "$STUB_STATE.follow"
+echo "$NOCONN" > "$STUB_STATE.on-rm"; echo "$NOCONN" > "$STUB_STATE.on-id"
+ROLLOUT_POLL=1 ROLLOUT_EVERY=3600 start_loop
+within_60s "the failed release" grep -q "the lock proj-rollout-lock could not be removed; trying again" "$tmp/loop.out"
+within_60s "the held lock to go at a poll" test ! -f "$STUB_STATE.lock"
+stop_loop
+(( $(rounds) == 1 )) || fail "the held lock goes at a poll, with no round: $(cat "$tmp/loop.out")"
+rm -f "$STUB_STATE.follow"
+echo "ok: a release the engine did not answer"
+# Item 5: compose config fails once, at the loop's first lock: that round is skipped, and every lock is the project's own — never
+# one named after the directory (the first config call of the loop names its workers; the second, the lock).
+reset_lock; changed; : > "$STUB_LOG"
+echo 'echo "compose: open .env: text file busy" >&2; exit 1' > "$STUB_STATE.on-config"; echo 1 > "$STUB_STATE.on-config.skip"
+loop_rounds 3
+[[ ! -f "$STUB_STATE.on-config" ]] || fail "compose config never failed: $(cat "$tmp/loop.out")"
+grep -q "compose did not name the project, so its lock has no name; skipping this round" "$tmp/loop.out" || fail "a lock compose did not name is a skip: $(cat "$tmp/loop.out")"
+names="$(grep '^docker create ' "$STUB_LOG" | sed -E 's/^docker create --name ([^ ]+) .*/\1/' | sort -u)"
+[[ "$names" == proj-rollout-lock ]] || fail "every later lock is the project's own: ${names:-none}"
+echo "ok: a lock compose did not name"
+# Item 7: compose ps of the updater fails once in the scan (everything current): not "not running; starting" — the round says the
+# engine did not answer, runs no self-test and no one-off, and releases its lock.
+reset_lock; : > "$STUB_LOG"
+sed -i.bak -e 's/^broker .*/broker sha256:bbbbbbbbbbbbbbbb sha256:bbbbbbbbbbbbbbbb/' -e 's/^project .*/project sha256:bbbbbbbbbbbbbbbb sha256:bbbbbbbbbbbbbbbb/' "$STUB_STATE"
+echo "$NOCONN" > "$STUB_STATE.on-ps-updater"
+run_bounded 60 "$R" --once
+[[ ! -f "$STUB_STATE.on-ps-updater" ]] || fail "compose ps never failed: $(cat "$tmp/out")"
+grep -q "updater: the engine did not answer whether it runs (Cannot connect to the Docker daemon.*): changing nothing; the next round tries again" "$tmp/out" || fail "a scan the engine did not answer is said: $(cat "$tmp/out")"
+grep -q "not running; starting" "$tmp/out" && fail "never read as not running: $(cat "$tmp/out")"
+grep -qE -- "--self-test| run -d " "$STUB_LOG" && fail "no self-test and no one-off: $(grep -E -- '--self-test| run -d ' "$STUB_LOG")"
+[[ ! -f "$STUB_STATE.lock" ]] || fail "the round releases its lock: $(cat "$STUB_STATE.lock")"
+# The scan's other calls the same way, everything current: the image the updater names, its config-hash label, and the project's
+# configuration (the second config call of a round: its lock, then its scan) — each failing once.
+for at in image-updater cfg-updater config; do
+  reset_lock; : > "$STUB_LOG"
+  echo "$NOCONN" > "$STUB_STATE.on-$at"
+  [[ "$at" != config ]] || echo 1 > "$STUB_STATE.on-config.skip"
+  run_bounded 60 "$R" --once
+  [[ ! -f "$STUB_STATE.on-$at" ]] || fail "the scan's $at never failed: $(cat "$tmp/out")"
+  (( RUN_RC != 0 )) || fail "a round the engine did not answer ($at) is a failed run: $(cat "$tmp/out")"
+  grep -q "(Cannot connect to the Docker daemon.*): changing nothing; the next round tries again" "$tmp/out" || fail "a scan not answered ($at) is said: $(cat "$tmp/out")"
+  grep -qE -- "--self-test| run -d | up -d |image rm" "$STUB_LOG" && fail "no self-test, no one-off, no up and no image removed ($at): $(grep -E -- '--self-test| run -d | up -d |image rm' "$STUB_LOG")"
+  [[ ! -f "$STUB_STATE.lock" ]] || fail "the round releases its lock ($at): $(cat "$STUB_STATE.lock")"
+done
+# An image the engine says is not here (the pull did not bring it) — docker's words, and podman's compat socket's: that service is
+# left as it is this round, the others go on.
+for said in "No such image: img-project:latest" "failed to find image img-project: img-project: image not known"; do
+  reset_lock; changed; : > "$STUB_LOG"
+  printf 'echo "Error response from daemon: %s" >&2; exit 1\n' "$said" > "$STUB_STATE.on-image-project"
+  run_bounded 60 "$R" --once
+  [[ ! -f "$STUB_STATE.on-image-project" ]] || fail "the image read never failed ($said): $(cat "$tmp/out")"
+  grep -q "project: its image img-project is not here: leaving it as it is this round" "$tmp/out" || fail "an image that is not here is said ($said): $(cat "$tmp/out")"
+  grep -q " up -d --no-deps --no-build project" "$STUB_LOG" && fail "and its service is not replaced ($said): $(grep ' up -d ' "$STUB_LOG")"
+  grep -q " up -d --no-deps --no-build broker$" "$STUB_LOG" || fail "the other services go on ($said): $(cat "$tmp/out")"
+done
+echo "ok: a scan the engine did not answer"
+# Item 8: a pull that runs past ROLLOUT_PULL_TIMEOUT (a registry that stalls): said, and the round goes on with the images here.
+reset_lock; changed; : > "$STUB_LOG"
+echo 'exec /bin/sleep 30' > "$STUB_STATE.on-pull"
+run_bounded 20 env ROLLOUT_PULL_TIMEOUT=1 "$R" --once
+[[ ! -f "$STUB_STATE.on-pull" ]] || fail "the pull never stalled: $(cat "$tmp/out")"
+grep -q "the pull did not end within 1 s: rolling out the images that are here; the next round pulls again" "$tmp/out" || fail "a stalled pull is said: $(cat "$tmp/out")"
+grep -q " up -d --no-deps --no-build broker$" "$STUB_LOG" || fail "and the round goes on: $(cat "$tmp/out")"
+[[ ! -f "$STUB_STATE.lock" ]] || fail "and releases its lock: $(cat "$STUB_STATE.lock")"
+echo "ok: a pull that stalls"
+# Item 10: a TERM during an up whose output goes to /dev/null, then a release in the EXIT trap that fails: its line is printed.
+reset_lock; changed; : > "$STUB_LOG"
+echo 'kill -TERM $PPID' > "$STUB_STATE.on-up"; echo "$NOCONN" > "$STUB_STATE.on-release"
+run_bounded 60 "$R" --once
+[[ ! -f "$STUB_STATE.on-up" && ! -f "$STUB_STATE.on-release" ]] || fail "the TERM and the failed release were never injected: $(cat "$tmp/out")"
+(( RUN_RC == 143 )) || fail "the TERM ends the round: $RUN_RC"
+grep -q "the lock proj-rollout-lock could not be read to release it (Cannot connect to the Docker daemon.*); trying again before the next round" "$tmp/out" || fail "the EXIT trap's line is printed after a TERM during a redirected up: $(cat "$tmp/out")"
+reset_lock
+echo "ok: the EXIT trap's lines"
 
 # ------------------------------------------------------------------- guard --
 guarded() { # → the round's output; STUB_LOG holds its calls
@@ -517,6 +746,19 @@ printf 'running 0 0\nrestarting 1 1\nrestarting 3 1\n' > "$STUB_STATE.status-pro
 out="$("$R" --once)"
 grep -q "does not stay up here (project restarting)" <<<"$out" && ! grep -qE ' run -d |image rm' "$STUB_LOG" || fail "the set's guard holds for an older image too: $out"
 rm -f "$STUB_STATE.nolabel" "$STUB_STATE.selftest-fail"
+# #301 item 6: an engine or a compose that does not show the set is no set that stays up — the list of its containers, a sample,
+# or its name (the third config call of a round: its lock, its scan, its guard) that fails once: the guard fails, no image goes
+# and no one-off starts. (Removed meanwhile — the engine's "No such object" — a container still counts as gone.)
+for at in ps sample config; do
+  reset_lock; changed; sed -i.bak 's/^updater .*/updater sha256:aaaaaaaaaaaaaaaa sha256:bbbbbbbbbbbbbbbb/' "$STUB_STATE"; : > "$STUB_LOG"
+  echo 'echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" >&2; exit 1' > "$STUB_STATE.on-$at"
+  [[ "$at" != config ]] || echo 2 > "$STUB_STATE.on-config.skip"
+  run_bounded 60 "$R" --once
+  [[ ! -f "$STUB_STATE.on-$at" ]] || fail "the guard's $at never failed: $(cat "$tmp/out")"
+  grep -q "the new image does not stay up here (.*): staying on v1.0.2 and keeping the old images" "$tmp/out" || fail "a set the guard cannot see ($at) fails it: $(cat "$tmp/out")"
+  grep -qE ' run -d |image rm' "$STUB_LOG" && fail "no image removed and no one-off ($at): $(grep -E 'run -d|image rm' "$STUB_LOG")"
+  [[ ! -f "$STUB_STATE.lock" ]] || fail "the lock is released ($at)"
+done
 echo "ok: the guard"
 
 # --self-test: the socket answers, compose reads the project, and it follows.
@@ -606,5 +848,17 @@ sed -i.bak 's/^project .*/project sha256:aaaaaaaaaaaaaaaa sha256:bbbbbbbbbbbbbbb
 echo 'kill -USR1 $PPID' > "$STUB_STATE.on-up"
 start_loop; until_rounds 2; stop_loop
 [[ "$(grep -m2 "a round: " "$tmp/loop.out" | tail -1)" == *"a round: woken"* ]] || fail "a kick mid-round is one more round after it: $(cat "$tmp/loop.out")"
+# #301 item 9: a kick during the round that starts the updater's own replacement: no round after it while the one-off replaces
+# this container (ROLLOUT_REPLACE_WAIT) — the loop only pauses. Stopped after its third pause since the one-off.
+sed -i.bak -e 's/^project .*/project sha256:aaaaaaaaaaaaaaaa sha256:bbbbbbbbbbbbbbbb/' -e 's/^updater .*/updater sha256:aaaaaaaaaaaaaaaa sha256:bbbbbbbbbbbbbbbb/' "$STUB_STATE"
+reset_lock; echo 'kill -USR1 $PPID' > "$STUB_STATE.on-up"; : > "$STUB_LOG"
+pauses_since_oneoff() { awk '/ run -d --rm /{ seen = 1; n = 0; next } seen && /^sleep 1$/ { n++ } END { print n + 0 }' "$STUB_LOG"; }
+ROLLOUT_REPLACE_WAIT=3600 start_loop
+for i in $(seq 1 50); do (( $(pauses_since_oneoff) >= 3 )) && break; /bin/sleep 0.2; done
+(( $(pauses_since_oneoff) >= 3 )) || { stop_loop; fail "the loop pauses after the one-off: $(cat "$tmp/loop.out")"; }
+stop_loop
+[[ ! -f "$STUB_STATE.on-up" ]] || fail "the kick was never sent"
+(( $(rounds) == 1 )) || fail "no round after the one that started the one-off: $(cat "$tmp/loop.out")"
+[[ "$(grep -c ' run -d --rm ' "$STUB_LOG")" == 1 ]] || fail "one self-replacing one-off: $(grep ' run -d --rm ' "$STUB_LOG")"
 echo "ok: the loop follows the pool"
 echo "omarchy-rollout: ok"
