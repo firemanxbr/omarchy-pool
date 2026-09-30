@@ -399,5 +399,5 @@ grep -q "draining (up to 3 h)" <<<"$step" && fail "the runbook's one-time step n
 # An interrupt exits with its signal's code, not 3; and the way back takes the newest backup that has the timer's units — a later
 # setup.sh run whose files differ writes a newer one without them.
 grep -q "exits 130, 143, 129 or 141" <<<"$step" || fail "the runbook's one-time step gives an interrupt's exit codes"
-grep -qF 'b="$(ls -d setup-backup-*/systemd-user | tail -n1)"; b="${b%/systemd-user}"' <<<"$step" || fail "the way back takes the newest backup with the timer's units"
+grep -qF 'b="$(dirname "$(ls -d setup-backup-*/systemd-user | tail -n1)")"' <<<"$step" || fail "the way back takes the newest backup with the timer's units"
 echo "HOST SETUP OK"

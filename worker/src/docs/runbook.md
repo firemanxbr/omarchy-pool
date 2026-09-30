@@ -517,7 +517,7 @@ beside the timer.
 
 ```bash
 cd /srv/omarchy-pool
-b="$(ls -d setup-backup-*/systemd-user | tail -n1)"; b="${b%/systemd-user}"   # the one the one-time step wrote (the timer's units in it)
+b="$(dirname "$(ls -d setup-backup-*/systemd-user | tail -n1)")"   # the one the one-time step wrote (the timer's units in it)
 docker compose stop updater && docker compose rm -f updater
 cp -p "$b/compose.yml" "$b/rollout.sh" "$b/register.sh" .
 mkdir -p ~/.config/systemd/user && cp -p "$b"/systemd-user/omarchy-pool-rollout.* ~/.config/systemd/user/
