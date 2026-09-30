@@ -340,7 +340,9 @@ S
 # own w5_stop, and its loop would restart pkg-repo against a pool that is gone, its stub keeping its port for the next run.
 w5_cleanup() {
   local id; for id in w5a w5a2 w5b w5c w5d w5e; do [[ -e "$W5/$id/pid" ]] && w5_stop "$id"; done
-  [[ -e "$W5/w5f/updater.pid" ]] && kill -TERM "$(cat "$W5/w5f/updater.pid")" 2>/dev/null
+  # F's updater is gone already when F passed: a kill that finds nothing is not a failure (under set -e, the last command of an &&
+  # list that fails ends the E2E, with nothing said).
+  if [[ -e "$W5/w5f/updater.pid" ]]; then kill -TERM "$(cat "$W5/w5f/updater.pid")" 2>/dev/null || true; fi
   return 0
 }
 
