@@ -46,6 +46,25 @@
 # this process holds, and one the engine did not let it remove stays held:
 # its next round removes it first (never taking it for another round's).
 #
+# An engine or a compose that does not answer (#301). Every call of the
+# lock, the guard and the scan goes through one helper, `ask`, that keeps
+# the answer (stdout) apart from the error output and tells three outcomes
+# apart: answered, not found (the engine's own "No such object" / "No such
+# container", nothing else) and no answer (anything else). No answer is
+# never read as "not there" or "nothing": the round changes nothing — it
+# breaks no lock, forgets no lock, starts no service, removes no image —
+# logs one line, and the next round tries again. So a holder that cannot
+# be read is not dead, a lock whose removal was not answered stays held,
+# a lock named by a guess is never taken (compose names it, or the round
+# is skipped). Its own container
+# is named by an id and a start the engine both answered, or not at all
+# (asked again before the loop's next round), and a lock that names a
+# holder with no start is broken only when that holder is not there or not
+# running. One lock is the loop's own to break: one its create made though
+# the create's answer was lost — `by` loop, this process's holder and
+# start, and no lock held — since only the loop takes a loop lock and it
+# runs one round at a time.
+#
 # The guard (#277). After a round that replaced something, and before the
 # updater replaces itself or removes an old image, it samples every
 # container of the project on the image its service now names — but its own
@@ -105,17 +124,48 @@ env_present() { # cid name → 0 when the container's environment sets it (its v
   [[ "$(docker inspect -f "$t" "$1" 2>/dev/null)" == *set* ]]
 }
 
+# A docker or compose call whose answer decides something (#301): its output in ANSWER, its error output apart in ANSWER_ERR —
+# never compared as an answer (a CLI's warning on a call that worked is no answer) — and what came back in OUTCOME:
+#   answered    it exited 0;
+#   not-found   it failed, and the engine said what was asked for is not there: "No such object", "No such container" — nothing
+#               else ("dial unix …: no such file or directory" or "no such host" is a connection that failed, not an answer);
+#   no-answer   anything else, among them a failure whose error output could not be kept apart.
+# 0 when answered.
+ANSWER=""; ANSWER_ERR=""; OUTCOME=""
+ask() { # docker|compose args...
+  local f rc=0
+  ANSWER=""; ANSWER_ERR=""; OUTCOME=no-answer
+  f="$(mktemp "${TMPDIR:-/tmp}/omarchy-rollout.XXXXXX" 2>/dev/null)" || f=""
+  if [[ -n "$f" ]]; then
+    ANSWER="$("$@" 2>"$f")" || rc=$?
+    ANSWER_ERR="$(cat "$f" 2>/dev/null || true)"; rm -f "$f"
+  else
+    ANSWER="$("$@" 2>/dev/null)" || rc=$?
+  fi
+  if (( rc == 0 )); then OUTCOME=answered; return 0; fi
+  if [[ -n "$f" ]] && grep -qiE 'no such (object|container)' <<<"$ANSWER_ERR"; then OUTCOME=not-found; fi
+  return 1
+}
+# The last line of what the engine said on its error output, for a log line.
+said() { local l; l="$(tail -n1 <<<"$ANSWER_ERR")"; printf '%s' "${l:-no error output}"; }
+
 # ---------------------------------------------------------------- itself --
 # Which container this is (the design's §1.14): the source of the
 # /etc/hostname mount in this process's mountinfo, podman's containerenv,
 # the hostname — each verified by reading back, through the engine, a
 # random value this process wrote at start. The lock's holder; empty when
-# none answers, and the lock then falls back to its expiry alone.
+# none answers, and the lock then falls back to its expiry alone. Its id and
+# its start both as the engine answered them, or neither: a lock naming its
+# holder with no start would have every other round judge that live holder
+# dead. The loop asks again before a round while it is empty (#301).
 SELF_ID=""; SELF_STARTED=""
+NAMELESS="the lock it takes names no holder and ends at its expiry alone; the loop asks again before its next round"
 identify_self() {
-  local nonce cid cands=()
+  local nonce cid cands=() id
   nonce="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"; [[ -n "$nonce" ]] || nonce="$$-$(date +%s)"
-  mkdir -p "$OMARCHY_RUN_DIR" 2>/dev/null && printf '%s' "$nonce" > "$OMARCHY_RUN_DIR/instance" 2>/dev/null || return 0
+  if ! { mkdir -p "$OMARCHY_RUN_DIR" 2>/dev/null && printf '%s' "$nonce" > "$OMARCHY_RUN_DIR/instance" 2>/dev/null; }; then
+    log "cannot identify its own container ($OMARCHY_RUN_DIR/instance cannot be written): $NAMELESS"; return 0
+  fi
   if [[ -r "$ROLLOUT_MOUNTINFO" ]]; then
     while read -r _ _ _ root mnt _; do
       [[ "$mnt" == /etc/hostname && "$root" =~ containers/([0-9a-f]{64})/ ]] && cands+=("${BASH_REMATCH[1]}")
@@ -125,18 +175,26 @@ identify_self() {
   cid="$(cat /etc/hostname 2>/dev/null || true)"; [[ "$cid" =~ ^[0-9a-f]{12,64}$ ]] && cands+=("$cid")
   for cid in "${cands[@]+"${cands[@]}"}"; do
     if [[ "$(docker exec "$cid" cat "$OMARCHY_RUN_DIR/instance" 2>/dev/null || true)" == "$nonce" ]]; then
-      SELF_ID="$(docker inspect -f '{{.Id}}' "$cid" 2>/dev/null || echo "$cid")"
-      SELF_STARTED="$(docker inspect -f '{{.State.StartedAt}}' "$cid" 2>/dev/null || true)"
+      if ask docker inspect -f '{{.Id}}' "$cid" && id="$ANSWER" && [[ -n "$id" ]] && ask docker inspect -f '{{.State.StartedAt}}' "$cid" && [[ -n "$ANSWER" ]]; then
+        SELF_ID="$id"; SELF_STARTED="$ANSWER"; return 0
+      fi
+      log "its own container ${cid:0:12} answers, but the engine did not say its id and when it started ($(said)): $NAMELESS"
       return 0
     fi
   done
-  log "cannot identify its own container (no mount or hostname that answers with this process's value): the lock it takes names no holder and ends at its expiry alone"
+  log "cannot identify its own container (no mount or hostname that answers with this process's value): $NAMELESS"
 }
 
 # ------------------------------------------------------------------ lock --
 LOCK=""; LOCK_NONCE=""; LOCK_HELD=0
-project_name() { compose config --format json 2>/dev/null | jq -r '.name // empty' 2>/dev/null || true; }
-lock_name() { [[ -n "$LOCK" ]] || LOCK="$(project_name)"; LOCK="${LOCK:-$(basename "$COMPOSE_DIR")}"; LOCK="${LOCK%-rollout-lock}-rollout-lock"; }
+project_name() { if ask compose config --format json; then jq -r '.name // empty' <<<"$ANSWER" 2>/dev/null || true; fi; }
+# From compose's own answer only, and kept once it has one: never guessed from the directory (omarchy-worker names a set in a
+# directory of its own omarchy-worker-<hash>, and a guessed name would never meet the lock a --once takes). 1 when compose did not name it.
+lock_name() {
+  [[ -z "$LOCK" ]] || return 0
+  local p; p="$(project_name)"; [[ -n "$p" ]] || return 1
+  LOCK="${p%-rollout-lock}-rollout-lock"
+}
 # The image the lock is created from: this container's own, else the one its service names (it is here: this runs on it).
 lock_image() {
   local img=""
@@ -153,12 +211,12 @@ lock_create() { # by
   # Held from before the create, not after it: a TERM that lands while the engine creates it runs the trap only once the create has
   # returned, and the release it runs then removes the lock the create made — or nothing, as it checks holder, start and nonce.
   LOCK_HELD=1
-  docker create --name "$LOCK" --label "com.omarchy.lock.by=$1" --label "com.omarchy.lock.holder=$SELF_ID" --label "com.omarchy.lock.started=$SELF_STARTED" \
-    --label "com.omarchy.lock.until=$until" --label "com.omarchy.lock.nonce=$LOCK_NONCE" "$(lock_image)" true >/dev/null 2>&1
+  ask docker create --name "$LOCK" --label "com.omarchy.lock.by=$1" --label "com.omarchy.lock.holder=$SELF_ID" --label "com.omarchy.lock.started=$SELF_STARTED" \
+    --label "com.omarchy.lock.until=$until" --label "com.omarchy.lock.nonce=$LOCK_NONCE" "$(lock_image)" true
 }
 # Take the lock, or say why not: 0 taken, 1 held by a live round.
 lock_take() { # by
-  lock_name
+  if ! lock_name; then log "compose did not name the project, so its lock has no name; skipping this round"; return 1; fi
   # Its own lock from its last round, still held: that release could not remove it (the engine did not answer). Removed now, or
   # this round is skipped and the next one tries again — never taken for another round's, which would skip every round until
   # its expiry.
@@ -168,19 +226,27 @@ lock_take() { # by
   fi
   if lock_create "$1"; then return 0; fi
   LOCK_HELD=0
-  local labels by holder started until created lid state
-  labels="$(docker inspect -f '{{index .Config.Labels "com.omarchy.lock.by"}}|{{index .Config.Labels "com.omarchy.lock.holder"}}|{{index .Config.Labels "com.omarchy.lock.started"}}|{{index .Config.Labels "com.omarchy.lock.until"}}|{{.Created}}|{{.Id}}' "$LOCK" 2>/dev/null || true)"
-  if [[ -z "$labels" ]]; then
-    # Gone between the create and the read: one more try.
+  local by holder started until created lid state since
+  if ! ask docker inspect -f '{{index .Config.Labels "com.omarchy.lock.by"}}|{{index .Config.Labels "com.omarchy.lock.holder"}}|{{index .Config.Labels "com.omarchy.lock.started"}}|{{index .Config.Labels "com.omarchy.lock.until"}}|{{.Created}}|{{.Id}}' "$LOCK"; then
+    if [[ "$OUTCOME" != not-found ]]; then log "the lock $LOCK could not be read ($(said)); skipping this round"; return 1; fi
+    # Gone between the create and the read, as the engine says: one more try.
     lock_create "$1" && return 0
     LOCK_HELD=0; log "the lock $LOCK could not be taken or read; skipping this round"; return 1
   fi
-  IFS='|' read -r by holder started until created lid <<<"$labels"
+  IFS='|' read -r by holder started until created lid <<<"$ANSWER"
   [[ "$until" =~ ^[0-9]+$ ]] || until=0
-  local since; since="$(hhmm "$created")"
-  if [[ -n "$holder" ]]; then
-    state="$(docker inspect -f '{{.State.Running}} {{.State.StartedAt}}' "$holder" 2>/dev/null || true)"
-    if [[ -z "$state" || "${state%% *}" != true || "${state#* }" != "$started" ]]; then
+  since="$(hhmm "$created")"
+  if [[ "$1" == loop && "$by" == loop && -n "$SELF_ID" && -n "$SELF_STARTED" && "$holder|$started" == "$SELF_ID|$SELF_STARTED" ]]; then
+    # The loop's own, while it holds none (its own held lock was removed above, or this round skipped): only the loop takes a loop
+    # lock and it runs one round at a time, so no live round holds this one — a create of its own made it and its answer was lost.
+    log "the lock $LOCK is this updater's own (loop, since $since), left by a create whose answer was lost: broken"
+  elif [[ -n "$holder" ]]; then
+    # Dead only on the engine's word: a holder it says is not there, not running, or started again — and a lock that names its
+    # holder with no start, only the first two. A read it did not answer says nothing of the holder.
+    if ask docker inspect -f '{{.State.Running}} {{.State.StartedAt}}' "$holder"; then state="$ANSWER"
+    elif [[ "$OUTCOME" == not-found ]]; then state=""
+    else log "the lock's holder ${holder:0:12} could not be read ($(said)); skipping this round"; return 1; fi
+    if [[ -z "$state" || "${state%% *}" != true || ( -n "$started" && "${state#* }" != "$started" ) ]]; then
       log "a lock held by ${holder:0:12} (${by:-?}, since $since), which is not running any more: broken"
     elif (( $(date +%s) < until )); then
       if [[ "$by" == loop ]]; then log "a round runs already in the updater (loop, since $since)"; else log "a round runs already (${by:-?}, since $since)"; fi
@@ -197,27 +263,29 @@ lock_take() { # by
   # Broken by the id it was judged by, never by its name: another round that judged the same lock dead may have broken it and
   # taken the lock meanwhile, and a removal by name would remove that round's lock too — two rounds would hold it. Removed
   # already, this does nothing, and the create below decides.
-  docker rm -f "${lid:-$LOCK}" >/dev/null 2>&1 || true
+  if ! ask docker rm -f "${lid:-$LOCK}" && [[ "$OUTCOME" != not-found ]]; then log "the lock $LOCK could not be broken ($(said)); skipping this round"; return 1; fi
   if lock_create "$1"; then return 0; fi
   LOCK_HELD=0; log "another round took the lock first; skipping"; return 1
 }
 # Release: only a lock this process holds — its holder, its start and its nonce — never one another round took after breaking this one.
-# Held until it is known gone — removed, not there, or another round's: a read or a removal the engine did not answer keeps it
-# held, and the next round's take (or the EXIT trap) tries again.
+# Held until it is known gone — removed, not there as the engine says, or another round's: a read or a removal the engine did not
+# answer keeps it held, and the next round's take (or the EXIT trap) tries again.
 lock_release() {
   (( LOCK_HELD )) || return 0
   local labels lid
-  if ! labels="$(docker inspect -f '{{index .Config.Labels "com.omarchy.lock.holder"}}|{{index .Config.Labels "com.omarchy.lock.started"}}|{{index .Config.Labels "com.omarchy.lock.nonce"}}|{{.Id}}' "$LOCK" 2>&1)"; then
-    if grep -qi 'no such' <<<"$labels"; then LOCK_HELD=0
-    else log "the lock $LOCK could not be read to release it ($(head -n1 <<<"$labels")); trying again before the next round"; fi
+  if ! ask docker inspect -f '{{index .Config.Labels "com.omarchy.lock.holder"}}|{{index .Config.Labels "com.omarchy.lock.started"}}|{{index .Config.Labels "com.omarchy.lock.nonce"}}|{{.Id}}' "$LOCK"; then
+    if [[ "$OUTCOME" == not-found ]]; then LOCK_HELD=0
+    else log "the lock $LOCK could not be read to release it ($(said)); trying again before the next round"; fi
     return 0
   fi
-  lid="${labels##*|}"; labels="${labels%|*}"
-  # By the id it was read with, as a break is: the lock read here is the one removed. A removal that failed while the lock is
-  # still there keeps it held.
+  labels="$ANSWER"; lid="${labels##*|}"; labels="${labels%|*}"
+  # By the id it was read with, as a break is: the lock read here is the one removed. Gone when the removal answered, or when it
+  # or a read by that id says it is not there; held on any other answer, a read by id that failed too among them.
   if [[ "$labels" == "$SELF_ID|$SELF_STARTED|$LOCK_NONCE" ]]; then
-    if ! docker rm -f "${lid:-$LOCK}" >/dev/null 2>&1 && docker inspect -f '{{.Id}}' "${lid:-$LOCK}" >/dev/null 2>&1; then
-      log "the lock $LOCK could not be removed; trying again before the next round"; return 0
+    if ! ask docker rm -f "${lid:-$LOCK}" && [[ "$OUTCOME" != not-found ]]; then
+      if ask docker inspect -f '{{.Id}}' "${lid:-$LOCK}" || [[ "$OUTCOME" != not-found ]]; then
+        log "the lock $LOCK could not be removed; trying again before the next round"; return 0
+      fi
     fi
   elif [[ -n "$labels" ]]; then log "the lock $LOCK is another round's now; leaving it"; fi
   # Cleared only now: a TERM during the read or the removal exits through the EXIT trap, whose release reads it again.
@@ -497,7 +565,10 @@ follow_loop() {
     if [[ -n "$why" ]]; then
       log "a round: $why"
       # A round that ran is the one for this release and these Updates; one skipped (another round holds the lock) or one the engine
-      # did not answer leaves them for the next poll to decide again.
+      # did not answer leaves them for the next poll to decide again. Its own container is named first while it is not known — the
+      # first round, and every one after a start the engine did not say — but never while it holds a lock it took nameless: that
+      # lock's release reads it back by the holder it was taken with.
+      if [[ -z "$SELF_ID" ]] && (( ! LOCK_HELD )); then identify_self; fi
       if round loop; then
         last_round=$SECONDS
         [[ -n "$latest" ]] && last_latest="$latest"
@@ -531,7 +602,7 @@ case "$mode" in
     (( rc != 2 ))
     ;;
   loop)
-    identify_self
+    # Its own container is named before each round while it is not known (follow_loop): the first time before its first round.
     trap 'trap "" TERM INT; lock_release; [[ -z "$SLEEPER" ]] || kill "$SLEEPER" 2>/dev/null || true' EXIT
     trap 'exit 143' TERM INT
     follow_loop
