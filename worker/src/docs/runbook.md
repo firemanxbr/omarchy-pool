@@ -191,6 +191,58 @@ tracker's mistake or a name collision: open an issue with the package and the
 advisory id shown on the package page; the `same_project` heuristic in
 `crates/pkg-repo/src/security.rs` is where collisions are rejected.
 
+## Response headers
+
+Every answer the Worker gives — a page, the API, a redirect, a script, an
+icon, a 404 — leaves through one function (`secured()` in
+`worker/src/headers.ts`, #300), which adds what the answer does not already
+set:
+
+| header | value |
+|---|---|
+| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` (no preload) |
+| `X-Content-Type-Options` | `nosniff` |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` |
+| `X-Frame-Options` | `DENY` |
+| `Content-Security-Policy` | `frame-ancestors 'none'` (enforced) |
+| `Content-Security-Policy-Report-Only` | the policy below |
+| `Permissions-Policy` | camera, microphone, geolocation, payment and usb off; `publickey-credentials-get=(self)`, `publickey-credentials-create=(self)` for passkeys |
+
+The agent-grant and confirm pages (`personal()` in `routes/agents.ts`) keep
+their own, stricter `Referrer-Policy: same-origin` and `no-store`. API
+answers also carry `access-control-allow-origin: *` and `x-robots-tag`. The
+pool's objects on `pool.omarchy-pool.org` are R2's, not the Worker's: none of
+these is sent with them, though a browser that has seen `omarchy-pool.org`
+keeps to https there too (`includeSubDomains`).
+
+`includeSubDomains` holds because every name under both zones is served over
+https only: the six Worker names (`wrangler.toml` routes), the bucket's two,
+*Always Use HTTPS* on both zones, and no `http://` address to any of them in
+the code, the docs or the setup script. A new name under `omarchy-pool.org`
+must be https from its first day. On the `firemanxbr.org` names the header
+covers only their own subdomains, never `firemanxbr.org` itself.
+
+**The CSP, report-only until 2026-10-31.** The policy is `default-src 'self';
+script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'
+https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com;
+img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'`
+— what the pages already meet (on the seeded preview of #300, every main
+page as a visitor, a contributor and a maintainer: no violation). There is
+no report endpoint (Cloudflare's `cf-nel` group is Cloudflare's, not ours):
+a browser shows a violation in DevTools (Issues), and a page's script sees
+it as a `securitypolicyviolation` event. The plan:
+
+1. Now: Report-Only. The production check after each release loads the
+   main pages with a `securitypolicyviolation` listener (or DevTools open)
+   and notes any violation.
+2. 2026-10-31: with no violation seen, the same policy moves to
+   `Content-Security-Policy` — one header name in `headers.ts`, its test
+   with it. A violation found before then is fixed in the page, or the policy
+   names the source, first.
+3. After that, a separate issue: nonces on the inline scripts, so
+   `script-src` drops `'unsafe-inline'`. If `ANALYTICS` is ever set, its
+   script's origin joins `script-src` and `connect-src` in the same change.
+
 ## The pool's own scheduler
 
 GitHub's cron is best-effort (on 2026-09-12 it delayed the hourly sync by an

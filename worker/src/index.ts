@@ -123,6 +123,8 @@ import { packageHtml } from "./pages/packages";
 import { packagesHtml } from "./pages/browse";
 import { factoryHtml as factoryPageHtml } from "./pages/contribute";
 import { MORE } from "./pages/layout";
+import { notFoundHtml } from "./pages/not-found";
+import { secured } from "./headers";
 import { DASHBOARD_HOST, LEGACY_DASHBOARD_HOSTS, isProductionHost, machineOrigin, version } from "./meta";
 import { handleStatic } from "./routes/static";
 import { pacmanInclude, setupScript, workerCli, workerCompose } from "./routes/setup";
@@ -198,158 +200,9 @@ export const MOVED: Readonly<Record<string, string>> = {
 };
 
 export default {
+  /** Every answer leaves through secured() (headers.ts, #300): the security headers are on each one, whichever route drew it. */
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(request.url);
-    const path = url.pathname;
-    const { method } = request;
-
-    // A page on a legacy dashboard name moves to the dashboard, path and
-    // query kept — 301 for a read, 308 so a client that follows keeps its
-    // method; /api/v1/* on them is answered (why: LEGACY_DASHBOARD_HOSTS).
-    // http→https is the zone setting Always Use HTTPS at the edge, on both
-    // zones, not here.
-    if (LEGACY_DASHBOARD_HOSTS.includes(url.hostname) && !path.startsWith(API + "/")) {
-      return Response.redirect(`https://${DASHBOARD_HOST}${path}${url.search}`, method === "GET" || method === "HEAD" ? 301 : 308);
-    }
-
-    try {
-      // While the cost guard is up, an anonymous machine reading a package
-      // page or its data is shed here (cost.ts readGuard) — before the API
-      // branch, so the 503 is never looked up or stored by cachedApi.
-      const shed = await readGuard(request, url, env);
-      if (shed) return shed;
-      if (path.startsWith(API + "/")) {
-        const res = await cachedApi(method, path.slice(API.length), url, request, env, ctx);
-        res.headers.set("access-control-allow-origin", "*");
-        // No API answer is a page for an index (pages/robots.ts): said on the answer too, for a crawler that reads the API from a page's script.
-        res.headers.set("x-robots-tag", "noindex, nofollow");
-        return res;
-      }
-      if (method === "OPTIONS") return new Response(null, { status: 204, headers: cors() });
-      if (path.startsWith("/pool/") && (method === "GET" || method === "HEAD")) {
-        return await handleStatic(decodeURIComponent(path.slice("/pool/".length)), request, env);
-      }
-      if (path === "/") return html(overviewHtml(env.POOL_URL, version(env)));
-      // The two old addresses of a door are redirects, not a second page: one page, one address, and a bookmark still lands.
-      if (path === "/index.html" || path === "/contribute") {
-        url.pathname = path === "/contribute" ? "/factory" : "/";
-        return Response.redirect(url.toString(), 301);
-      }
-      // A page that became a section of another (MOVED): one address per page, and the old one still lands. Every key starts with a slash, so no name of Object's prototype is one.
-      const moved = MOVED[path];
-      if (moved) {
-        const [to, section] = moved.split("#");
-        url.pathname = to;
-        url.hash = section ?? "";
-        return Response.redirect(url.toString(), 301);
-      }
-      // A footer page that has not landed yet (MORE's `until`) is a 302 to what stands in for it, so no browser keeps the move once the page is there. None has since Agents landed (#249); until then /agents was the chapter on omarchy-cli as an MCP server.
-      const interim = MORE.find((m) => m.href === path)?.until;
-      if (interim) {
-        url.pathname = interim;
-        return Response.redirect(url.toString(), 302);
-      }
-      // One command to join a ring: the script, read by people before they pipe it into sudo.
-      if (path === "/setup" || path === "/setup.sh") return new Response(setupScript(machineOrigin(url), env.POOL_URL.replace(/\/$/, "")), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300" } });
-      // One command to run a worker: the script (read before it is run) and the compose file it writes.
-      if (path === "/omarchy-worker" || path === "/omarchy-worker.sh") return new Response(workerCli(machineOrigin(url)), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300" } });
-      if (path === "/omarchy-worker/compose.yml") return new Response(workerCompose(), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300" } });
-      // Sign in with GitHub: cookie session for the dashboard's pages.
-      if (path === "/auth/github" && method === "GET") return handleAuthStart(url, env);
-      if (path === "/auth/github/callback" && method === "GET") return handleAuthCallback(url, request, env);
-      if (path === "/auth/logout") return handleLogout(url, request, env);
-      // An agent's grant and its drafts (#252, routes/agents.ts): the grant page and its form, the loopback code's swap, logout, and a draft's confirmation — the browser's session only, except the swap (no credential: the code and its verifier) and logout (the agent's token it revokes).
-      if (path === "/auth/agent" && method === "GET") return handleGrantPage(url, request, env, version(env));
-      if (path === "/auth/agent" && method === "POST") return handleGrant(url, request, env, version(env));
-      if (path === "/auth/agent/token" && method === "POST") return handleSwap(request, env);
-      if (path === "/auth/agent/revoke" && method === "POST") return handleAgentLogout(request, env);
-      const confirm = path.match(/^\/auth\/confirm\/([A-Za-z0-9_]{1,64})$/);
-      if (confirm && method === "GET") return handleConfirmPage(confirm[1], url, request, env, version(env));
-      if (confirm && method === "POST") return handleConfirm(confirm[1], url, request, env, version(env));
-      // Passkeys (#257, routes/passkeys.ts): approve and block drafted by an agent are confirmed with one — the challenge a draft's page asks for, and a maintainer's registration and removal on their own page; the browser's session only, posted from the page's own origin, on an address the relying party list names.
-      const assertion = path.match(/^\/auth\/confirm\/(d_[0-9a-f]{32})\/challenge$/);
-      if (assertion && method === "POST") return handleConfirmChallenge(assertion[1], url, request, env);
-      if (path === "/auth/passkeys/challenge" && method === "POST") return handlePasskeyOptions(url, request, env);
-      if (path === "/auth/passkeys" && method === "POST") return handlePasskeyRegister(url, request, env);
-      const passkey = path.match(/^\/auth\/passkeys\/(pk_[0-9a-f]{32})\/remove$/);
-      if (passkey && method === "POST") return handlePasskeyRemove(passkey[1], url, request, env);
-      // #271: the options for one act of the person's on the web — approve, block, a passkey added or removed, a reset — and the reset itself, another maintainer's.
-      if (path === "/auth/passkeys/assert" && method === "POST") return handlePasskeyAssert(url, request, env);
-      if (path === "/auth/passkeys/reset" && method === "POST") return handlePasskeyReset(url, request, env);
-      if (path === "/auth/me" && method === "GET") {
-        const c = await contributorOf(request, env);
-        // A maintainer's answer says whether they hold a passkey (#287): the acts that need one offer to register it in their own dialog, and a notice says so before it matters. One entry of the passkeys' index, asked for a maintainer only — and not when the page says its browser knows this login holds one (?held=<login>): a maintainer's page view costs what it did before, once they hold one.
-        const passkey = c && isMaintainer(c) && url.searchParams.get("held") !== c.login ? { passkey: await holdsPasskey(env, c.login) } : {};
-        return c ? json({ login: c.login, name: c.name, avatar_url: c.avatar_url, role: c.role, ...passkey }, 200, { "cache-control": "no-store" }) : json({ error: "not signed in" }, 401, { "cache-control": "no-store" });
-      }
-      // The reader's own page: /me is the address the Factory's gate and the
-      // sign-in name before the login is known. With a session it is
-      // /user/<login>; without one it is the sign-in, which comes back here.
-      // The answer depends on the cookie, so no cache keeps it; the Location
-      // is relative, as the sign-in's own redirects are.
-      if (path === "/me" && (method === "GET" || method === "HEAD")) {
-        const c = await contributorOf(request, env);
-        return new Response(null, { status: 302, headers: { location: c ? `/user/${encodeURIComponent(c.login)}` : "/auth/github?next=/me", "cache-control": "no-store" } });
-      }
-      // Documentation: one section, its chapters under /docs; the old addresses redirect.
-      if (path === "/docs" || path === "/docs/") return html(docsHtml(env.POOL_URL, version(env)));
-      if (path === "/docs/get-started") {
-        // The include is the API's answer for the pick, through the API's edge cache under the address the script fetches: one stored answer for the page and its script, pacmanInclude's reads paid once per colo per two minutes, not per view.
-        const pick = picked(url, env);
-        const res = await cachedApi("GET", "/pacman.conf", sampleUrl(url, pick), request, env, ctx);
-        return html(getStartedHtml(env.POOL_URL, version(env), pick, res.ok ? await res.text() : null));
-      }
-      if (path === "/docs/workers") return html(docsWorkersHtml(env.POOL_URL, version(env)));
-      if (path === "/docs/how-it-works") return html(howItWorksHtml(env.POOL_URL, version(env)));
-      if (path === "/docs/security") return html(docsSecurityHtml(env.POOL_URL, version(env)));
-      if (path === "/docs/glossary") return html(glossaryHtml(env.POOL_URL, version(env)));
-      // The chapters written in markdown, their diagrams drawn in place.
-      const md = mdChapterAt(path);
-      if (md) return html(docHtml(md, env.POOL_URL, version(env)));
-      if (path === "/docs/governance") return html(governanceHtml(env.POOL_URL, version(env)));
-      if (path === "/get-started" || path === "/how-it-works" || path === "/governance") {
-        url.pathname = `/docs${path}`;
-        return Response.redirect(url.toString(), 301);
-      }
-      if (path === "/status") return html(statusHtml(env.POOL_URL, version(env)));
-      // The Workers list and a worker's page name each worker's owner and its host's label: not for an index (#299, pages/robots.ts), said on the page too.
-      if (path === "/workers") return html(workersHtml(env.POOL_URL, version(env)), NOINDEX);
-      if (path === "/diff") return html(diffHtml(env.POOL_URL, version(env)));
-      if (path === "/api" || path === "/api/") return html(apiDocsHtml(env.POOL_URL, version(env)));
-      if (path === "/packages") {
-        // The list is drawn into the page (#245), so it works with script off: from the API's answer for the page's own query, through the API's edge cache under the address the page's script asks for the same list — one stored answer for the two, the list's reads paid once per colo per five minutes, not per view. A value the list does not know is its default here, where the API would refuse it.
-        const { query, typed } = browseQuery(url.searchParams);
-        // A list that threw is said as the API's own 500 says it — "internal error" — never with the database's words, which a public page would print.
-        const res = await cachedApi("GET", "/packages", new URL(`/api/v1/packages${browseSearch(query)}`, url), request, env, ctx).catch((e: unknown) => (console.error(e), json({ error: "internal error" }, 500)));
-        const answer = res.ok ? ((await res.json()) as BrowseAnswer) : null;
-        const error = answer ? null : (((await res.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${res.status}`);
-        return html(packagesHtml(env.POOL_URL, version(env), { query, typed, answer, error }));
-      }
-      if (path === "/factory") return html(factoryPageHtml(env.POOL_URL, version(env)));
-      if (path === "/people") return html(peopleHtml(env.POOL_URL, version(env)));
-      // Agents (#249): which agent's configuration it shows is the address's (?agent=), so the choice is a link that works with script off; the page reads nothing.
-      if (path === "/agents") return html(agentsHtml(env.POOL_URL, version(env), url.searchParams.get("agent")));
-      if (path === "/review") return html(reviewHtml(env.POOL_URL, version(env)));
-      const user = path.match(/^\/user\/([A-Za-z0-9-]{1,39})$/);
-      if (user) return html(userHtml(user[1], env.POOL_URL, version(env)));
-      if (path.startsWith("/package/")) return html(packageHtml(decodeURIComponent(path.slice("/package/".length)), env.POOL_URL, version(env)));
-      if (/^\/build\/\d+$/.test(path)) return html(buildHtml(Number(path.slice("/build/".length)), env.POOL_URL, version(env)));
-      // A worker's page (#277): the same shell for every id; its script reads the worker and what the viewer may press.
-      const wk = path.match(/^\/worker\/([A-Za-z0-9_.-]{1,120})$/);
-      if (wk) return html(workerHtml(wk[1], env.POOL_URL, version(env)), NOINDEX);
-      // What a crawler may read (pages/robots.ts): the rules for the name asked on, and the pages worth an index under the dashboard's name on production.
-      if (path === "/robots.txt") return new Response(robotsTxt(url.hostname), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=86400" } });
-      if (path === "/sitemap.xml") return new Response(sitemapXml(isProductionHost(url.hostname) ? `https://${DASHBOARD_HOST}` : url.origin), { headers: { "content-type": "application/xml; charset=utf-8", "cache-control": "public, max-age=86400" } });
-      const ic = icon(path);
-      if (ic) return ic;
-      // The v1 kit's one stylesheet (pages/kit.ts): immutable under its content's hash, so a browser asks for it once per change of the kit.
-      const asset = kitAsset(path, method);
-      if (asset) return asset;
-      return json({ error: "not found" }, 404);
-    } catch (err) {
-      console.error(err);
-      return json({ error: "internal error", detail: String(err) }, 500);
-    }
+    return secured(await route(request, env, ctx));
   },
 
   /** Cloudflare cron trigger (every ten minutes): dispatch overdue workflows. */
@@ -357,6 +210,162 @@ export default {
     ctx.waitUntil(runScheduler(env).then((log) => console.log(log.join("\n"))));
   },
 } satisfies ExportedHandler<Env>;
+
+async function route(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const url = new URL(request.url);
+  const path = url.pathname;
+  const { method } = request;
+
+  // A page on a legacy dashboard name moves to the dashboard, path and
+  // query kept — 301 for a read, 308 so a client that follows keeps its
+  // method; /api/v1/* on them is answered (why: LEGACY_DASHBOARD_HOSTS).
+  // http→https is the zone setting Always Use HTTPS at the edge, on both
+  // zones, not here.
+  if (LEGACY_DASHBOARD_HOSTS.includes(url.hostname) && !path.startsWith(API + "/")) {
+    return Response.redirect(`https://${DASHBOARD_HOST}${path}${url.search}`, method === "GET" || method === "HEAD" ? 301 : 308);
+  }
+
+  try {
+    // While the cost guard is up, an anonymous machine reading a package
+    // page or its data is shed here (cost.ts readGuard) — before the API
+    // branch, so the 503 is never looked up or stored by cachedApi.
+    const shed = await readGuard(request, url, env);
+    if (shed) return shed;
+    if (path.startsWith(API + "/")) {
+      const res = await cachedApi(method, path.slice(API.length), url, request, env, ctx);
+      res.headers.set("access-control-allow-origin", "*");
+      // No API answer is a page for an index (pages/robots.ts): said on the answer too, for a crawler that reads the API from a page's script.
+      res.headers.set("x-robots-tag", "noindex, nofollow");
+      return res;
+    }
+    if (method === "OPTIONS") return new Response(null, { status: 204, headers: cors() });
+    if (path.startsWith("/pool/") && (method === "GET" || method === "HEAD")) {
+      return await handleStatic(decodeURIComponent(path.slice("/pool/".length)), request, env);
+    }
+    if (path === "/") return html(overviewHtml(env.POOL_URL, version(env)));
+    // The two old addresses of a door are redirects, not a second page: one page, one address, and a bookmark still lands.
+    if (path === "/index.html" || path === "/contribute") {
+      url.pathname = path === "/contribute" ? "/factory" : "/";
+      return Response.redirect(url.toString(), 301);
+    }
+    // A page that became a section of another (MOVED): one address per page, and the old one still lands. Every key starts with a slash, so no name of Object's prototype is one.
+    const moved = MOVED[path];
+    if (moved) {
+      const [to, section] = moved.split("#");
+      url.pathname = to;
+      url.hash = section ?? "";
+      return Response.redirect(url.toString(), 301);
+    }
+    // A footer page that has not landed yet (MORE's `until`) is a 302 to what stands in for it, so no browser keeps the move once the page is there. None has since Agents landed (#249); until then /agents was the chapter on omarchy-cli as an MCP server.
+    const interim = MORE.find((m) => m.href === path)?.until;
+    if (interim) {
+      url.pathname = interim;
+      return Response.redirect(url.toString(), 302);
+    }
+    // One command to join a ring: the script, read by people before they pipe it into sudo.
+    if (path === "/setup" || path === "/setup.sh") return new Response(setupScript(machineOrigin(url), env.POOL_URL.replace(/\/$/, "")), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300" } });
+    // One command to run a worker: the script (read before it is run) and the compose file it writes.
+    if (path === "/omarchy-worker" || path === "/omarchy-worker.sh") return new Response(workerCli(machineOrigin(url)), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300" } });
+    if (path === "/omarchy-worker/compose.yml") return new Response(workerCompose(), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300" } });
+    // Sign in with GitHub: cookie session for the dashboard's pages.
+    if (path === "/auth/github" && method === "GET") return handleAuthStart(url, env);
+    if (path === "/auth/github/callback" && method === "GET") return handleAuthCallback(url, request, env);
+    if (path === "/auth/logout") return handleLogout(url, request, env);
+    // An agent's grant and its drafts (#252, routes/agents.ts): the grant page and its form, the loopback code's swap, logout, and a draft's confirmation — the browser's session only, except the swap (no credential: the code and its verifier) and logout (the agent's token it revokes).
+    if (path === "/auth/agent" && method === "GET") return handleGrantPage(url, request, env, version(env));
+    if (path === "/auth/agent" && method === "POST") return handleGrant(url, request, env, version(env));
+    if (path === "/auth/agent/token" && method === "POST") return handleSwap(request, env);
+    if (path === "/auth/agent/revoke" && method === "POST") return handleAgentLogout(request, env);
+    const confirm = path.match(/^\/auth\/confirm\/([A-Za-z0-9_]{1,64})$/);
+    if (confirm && method === "GET") return handleConfirmPage(confirm[1], url, request, env, version(env));
+    if (confirm && method === "POST") return handleConfirm(confirm[1], url, request, env, version(env));
+    // Passkeys (#257, routes/passkeys.ts): approve and block drafted by an agent are confirmed with one — the challenge a draft's page asks for, and a maintainer's registration and removal on their own page; the browser's session only, posted from the page's own origin, on an address the relying party list names.
+    const assertion = path.match(/^\/auth\/confirm\/(d_[0-9a-f]{32})\/challenge$/);
+    if (assertion && method === "POST") return handleConfirmChallenge(assertion[1], url, request, env);
+    if (path === "/auth/passkeys/challenge" && method === "POST") return handlePasskeyOptions(url, request, env);
+    if (path === "/auth/passkeys" && method === "POST") return handlePasskeyRegister(url, request, env);
+    const passkey = path.match(/^\/auth\/passkeys\/(pk_[0-9a-f]{32})\/remove$/);
+    if (passkey && method === "POST") return handlePasskeyRemove(passkey[1], url, request, env);
+    // #271: the options for one act of the person's on the web — approve, block, a passkey added or removed, a reset — and the reset itself, another maintainer's.
+    if (path === "/auth/passkeys/assert" && method === "POST") return handlePasskeyAssert(url, request, env);
+    if (path === "/auth/passkeys/reset" && method === "POST") return handlePasskeyReset(url, request, env);
+    if (path === "/auth/me" && method === "GET") {
+      const c = await contributorOf(request, env);
+      // A maintainer's answer says whether they hold a passkey (#287): the acts that need one offer to register it in their own dialog, and a notice says so before it matters. One entry of the passkeys' index, asked for a maintainer only — and not when the page says its browser knows this login holds one (?held=<login>): a maintainer's page view costs what it did before, once they hold one.
+      const passkey = c && isMaintainer(c) && url.searchParams.get("held") !== c.login ? { passkey: await holdsPasskey(env, c.login) } : {};
+      return c ? json({ login: c.login, name: c.name, avatar_url: c.avatar_url, role: c.role, ...passkey }, 200, { "cache-control": "no-store" }) : json({ error: "not signed in" }, 401, { "cache-control": "no-store" });
+    }
+    // The reader's own page: /me is the address the Factory's gate and the
+    // sign-in name before the login is known. With a session it is
+    // /user/<login>; without one it is the sign-in, which comes back here.
+    // The answer depends on the cookie, so no cache keeps it; the Location
+    // is relative, as the sign-in's own redirects are.
+    if (path === "/me" && (method === "GET" || method === "HEAD")) {
+      const c = await contributorOf(request, env);
+      return new Response(null, { status: 302, headers: { location: c ? `/user/${encodeURIComponent(c.login)}` : "/auth/github?next=/me", "cache-control": "no-store" } });
+    }
+    // Documentation: one section, its chapters under /docs; the old addresses redirect.
+    if (path === "/docs" || path === "/docs/") return html(docsHtml(env.POOL_URL, version(env)));
+    if (path === "/docs/get-started") {
+      // The include is the API's answer for the pick, through the API's edge cache under the address the script fetches: one stored answer for the page and its script, pacmanInclude's reads paid once per colo per two minutes, not per view.
+      const pick = picked(url, env);
+      const res = await cachedApi("GET", "/pacman.conf", sampleUrl(url, pick), request, env, ctx);
+      return html(getStartedHtml(env.POOL_URL, version(env), pick, res.ok ? await res.text() : null));
+    }
+    if (path === "/docs/workers") return html(docsWorkersHtml(env.POOL_URL, version(env)));
+    if (path === "/docs/how-it-works") return html(howItWorksHtml(env.POOL_URL, version(env)));
+    if (path === "/docs/security") return html(docsSecurityHtml(env.POOL_URL, version(env)));
+    if (path === "/docs/glossary") return html(glossaryHtml(env.POOL_URL, version(env)));
+    // The chapters written in markdown, their diagrams drawn in place.
+    const md = mdChapterAt(path);
+    if (md) return html(docHtml(md, env.POOL_URL, version(env)));
+    if (path === "/docs/governance") return html(governanceHtml(env.POOL_URL, version(env)));
+    if (path === "/get-started" || path === "/how-it-works" || path === "/governance") {
+      url.pathname = `/docs${path}`;
+      return Response.redirect(url.toString(), 301);
+    }
+    if (path === "/status") return html(statusHtml(env.POOL_URL, version(env)));
+    // The Workers list and a worker's page name each worker's owner and its host's label: not for an index (#299, pages/robots.ts), said on the page too.
+    if (path === "/workers") return html(workersHtml(env.POOL_URL, version(env)), NOINDEX);
+    if (path === "/diff") return html(diffHtml(env.POOL_URL, version(env)));
+    if (path === "/api" || path === "/api/") return html(apiDocsHtml(env.POOL_URL, version(env)));
+    if (path === "/packages") {
+      // The list is drawn into the page (#245), so it works with script off: from the API's answer for the page's own query, through the API's edge cache under the address the page's script asks for the same list — one stored answer for the two, the list's reads paid once per colo per five minutes, not per view. A value the list does not know is its default here, where the API would refuse it.
+      const { query, typed } = browseQuery(url.searchParams);
+      // A list that threw is said as the API's own 500 says it — "internal error" — never with the database's words, which a public page would print.
+      const res = await cachedApi("GET", "/packages", new URL(`/api/v1/packages${browseSearch(query)}`, url), request, env, ctx).catch((e: unknown) => (console.error(e), json({ error: "internal error" }, 500)));
+      const answer = res.ok ? ((await res.json()) as BrowseAnswer) : null;
+      const error = answer ? null : (((await res.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${res.status}`);
+      return html(packagesHtml(env.POOL_URL, version(env), { query, typed, answer, error }));
+    }
+    if (path === "/factory") return html(factoryPageHtml(env.POOL_URL, version(env)));
+    if (path === "/people") return html(peopleHtml(env.POOL_URL, version(env)));
+    // Agents (#249): which agent's configuration it shows is the address's (?agent=), so the choice is a link that works with script off; the page reads nothing.
+    if (path === "/agents") return html(agentsHtml(env.POOL_URL, version(env), url.searchParams.get("agent")));
+    if (path === "/review") return html(reviewHtml(env.POOL_URL, version(env)));
+    const user = path.match(/^\/user\/([A-Za-z0-9-]{1,39})$/);
+    if (user) return html(userHtml(user[1], env.POOL_URL, version(env)));
+    if (path.startsWith("/package/")) return html(packageHtml(decodeURIComponent(path.slice("/package/".length)), env.POOL_URL, version(env)));
+    if (/^\/build\/\d+$/.test(path)) return html(buildHtml(Number(path.slice("/build/".length)), env.POOL_URL, version(env)));
+    // A worker's page (#277): the same shell for every id; its script reads the worker and what the viewer may press.
+    const wk = path.match(/^\/worker\/([A-Za-z0-9_.-]{1,120})$/);
+    if (wk) return html(workerHtml(wk[1], env.POOL_URL, version(env)), NOINDEX);
+    // What a crawler may read (pages/robots.ts): the rules for the name asked on, and the pages worth an index under the dashboard's name on production.
+    if (path === "/robots.txt") return new Response(robotsTxt(url.hostname), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=86400" } });
+    if (path === "/sitemap.xml") return new Response(sitemapXml(isProductionHost(url.hostname) ? `https://${DASHBOARD_HOST}` : url.origin), { headers: { "content-type": "application/xml; charset=utf-8", "cache-control": "public, max-age=86400" } });
+    const ic = icon(path);
+    if (ic) return ic;
+    // The v1 kit's one stylesheet (pages/kit.ts): immutable under its content's hash, so a browser asks for it once per change of the kit.
+    const asset = kitAsset(path, method);
+    if (asset) return asset;
+    // Nothing here (#300): an address under /api/ is a machine's and keeps the JSON; any other is a person's, who gets the page, in the site's frame.
+    if (path.startsWith("/api/")) return json({ error: "not found" }, 404);
+    return html(notFoundHtml(path, env.POOL_URL, version(env)), undefined, 404);
+  } catch (err) {
+    console.error(err);
+    return json({ error: "internal error", detail: String(err) }, 500);
+  }
+}
 
 /**
  * The factory's writes. Three kinds of caller: a maintainer (their own token
@@ -556,8 +565,9 @@ export async function edgeStore(key: Request, res: Response, maxAge: number): Pr
   await caches.default.put(key, stored);
 }
 
-function html(body: string, extra?: Record<string, string>): Response {
+function html(body: string, extra?: Record<string, string>, status = 200): Response {
   return new Response(body, {
+    status,
     headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=60", ...extra },
   });
 }
