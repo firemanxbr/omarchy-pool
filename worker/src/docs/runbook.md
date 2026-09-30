@@ -516,8 +516,12 @@ stopped until the next reboot; after a reboot, it is back. What else it
 left depends on when it stopped. If
 `~/.config/systemd/user/omarchy-pool-rollout.timer` is gone, the step had
 finished (it removes the timer's units last): the updater rolls the host
-out (`docker compose ps updater`). Otherwise, as the user, run
-`cd /srv/omarchy-pool && grep -c '^  updater:' compose.yml`:
+out (`docker compose ps updater`). Otherwise, as the user, run this (two
+spaces before `updater:`):
+
+```bash
+cd /srv/omarchy-pool && grep -c '^  updater:' compose.yml
+```
 
 - **It prints 0**: nothing was installed. After a kill, bring the timer
   back, `systemctl --user start omarchy-pool-rollout.timer`, then paste
