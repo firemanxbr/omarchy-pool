@@ -99,4 +99,32 @@ describe("the daily token probe (#308)", () => {
     expect(log.join("\n")).toContain("token probe: TypeError: network down");
     expect(await lines("2026-10-04")).toHaveLength(0);
   });
+  // Dated after the tests above: a probe is skipped when its token has a line from that day on.
+  it("an answer that cannot tell clears no error; removing the token does, once", async () => {
+    const latest = async () => (await env.DB.prepare("SELECT e.status, e.summary, e.payload FROM latest_events l JOIN events e ON e.id = l.id WHERE l.kind = 'token' AND l.src = 'GITHUB_REPORT_TOKEN'").first<{ status: string; summary: string; payload: string }>())!;
+    github(422);
+    await probeTokens(withTokens({ GITHUB_REPORT_TOKEN: "github_pat_writes" }), new Date("2026-10-11T00:10:00Z"));
+    expect((await latest()).status).toBe("error");
+    // A 502, then a 401, the next days: neither says the token lost actions: write, so the error stands.
+    for (const [http, day] of [[502, "2026-10-12"], [401, "2026-10-13"]] as const) {
+      vi.restoreAllMocks();
+      github(http);
+      await probeTokens(withTokens({ GITHUB_REPORT_TOKEN: "github_pat_writes" }), new Date(`${day}T00:10:00Z`));
+      expect(await latest(), String(http)).toMatchObject({ status: "error", summary: expect.stringContaining("stands until GitHub answers 403") });
+      // The answer that raised it is kept for the Status hero, beside the one that could not tell.
+      expect(JSON.parse((await latest()).payload), String(http)).toEqual(expect.objectContaining({ http, error_http: 422 }));
+    }
+    // The secret deleted instead of replaced: an ok line clears the error, and nothing is written after it.
+    vi.restoreAllMocks();
+    const sent = github(403);
+    expect(await probeTokens(withTokens({}), new Date("2026-10-14T00:10:00Z"))).toEqual(["token GITHUB_REPORT_TOKEN: GITHUB_REPORT_TOKEN is no longer set: nothing to probe, and nothing it could start"]);
+    expect((await latest()).status).toBe("ok");
+    expect(await probeTokens(withTokens({}), new Date("2026-10-15T00:10:00Z"))).toEqual([]);
+    expect(sent).toHaveLength(0);
+    // Without an earlier error, a warn is only a warn.
+    vi.restoreAllMocks();
+    github(502);
+    await probeTokens(withTokens({ GITHUB_REPORT_TOKEN: "github_pat_reads" }), new Date("2026-10-16T00:10:00Z"));
+    expect((await latest()).status).toBe("warn");
+  });
 });

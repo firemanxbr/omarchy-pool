@@ -49,19 +49,23 @@ please do not file a public issue for it.
 | `GITHUB_REPORT_TOKEN` on the Worker | the daily cost report (`cost.ts` `postCostReport`) | read and comment on this repository's issues — the one comment a day on the *Cost report* issue | anything else: start a workflow, read code, touch a release (Issues is its only permission; `GITHUB_TOKEN` is never widened for this) | live once the secret is set; until then `cost-report.yml` posts from GitHub's cron, late |
 | The broker's environment (`OMARCHY_WORKER_TOKEN`, an agent key, `GITHUB_TOKEN`) | one container per worker host that runs no build (`factory/bin/broker`); on the project's host also `agent-proxy`, without a worker token | the pool's calls for the one task it claimed, the agent, GitHub read-only; a builder's answer to an order the broker saw handed to it (#277) | be read by a build: the builder beside it holds nothing | live |
 
-**No token with a write scope on this repository exists outside GitHub
-Actions** (#308): no token with `actions`, `contents: write` or `workflows`
-on `firemanxbr/omarchy-pool` is held by the Worker, a host, a worker or a
-person's tooling; only the workflows' own `GITHUB_TOKEN` inside a run has
-one. Hosts trust what `release.yml` and `rollback.yml` sign on `main`, and a
-token that could dispatch `rollback.yml` could send every host back. The
-pool checks its own: once a day the cron probes each GitHub token it holds
+**No stored or automated token with a write scope on this repository exists
+outside GitHub Actions** (#308): no token with `actions`, `contents: write`
+or `workflows` on `firemanxbr/omarchy-pool` is held by the Worker, a host, a
+worker, a deploy key or CI tooling; only the workflows' own `GITHUB_TOKEN`
+inside a run has one. A maintainer dispatches and approves as a person, in
+their own interactive session or the web UI, and what they dispatch still
+waits for the signing environment's reviewer. Hosts trust what
+`release.yml` and `rollback.yml` sign on `main`, and a token that could
+dispatch `rollback.yml` could send every host back. The pool checks its own: once a day the cron probes each GitHub token it holds
 (`GITHUB_TOKEN`, `GITHUB_REPORT_TOKEN`; `src/tokenprobe.ts`) with a dispatch
 of `rollback.yml` to a ref that cannot exist. GitHub answers 403 to a token
 without `actions: write` and 422 to one with it; no run starts either way. A
 422 is an error on Status (the hero, and a `token` line in the journal) until
-the token is replaced. The `GITHUB_TOKEN` a host gives its agent sidecars is
-probed by the host agent's preflight (#317).
+the token is replaced or removed. The probe detects `actions: write` only;
+`contents: write` and `workflows` are the maintainers' manual token review.
+The `GITHUB_TOKEN` a host gives its agent sidecars is probed by the host
+agent's preflight (#317).
 
 Tokens are 192-bit random values shown once and stored as SHA-256 hashes;
 job tokens are HMAC-SHA256-signed claims (`JOB_TOKEN_SECRET`, a Worker

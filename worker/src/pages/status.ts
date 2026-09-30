@@ -349,7 +349,7 @@ __CHARTS__
     else if (!d && STATS_DOWN) { title = "The pool's numbers did not answer"; tone = "fail"; lede = STATS_DOWN; }
     else if (tokens.length) {
       title = tokens.length > 1 ? "Pool tokens can start workflows" : "A pool token can start workflows"; tone = "fail";
-      lede = andList(tokens.map(function (e) { return e.source; })) + " can start workflows on this repository: the daily probe got " + andList(tokens.map(function (e) { return "HTTP " + ((e.payload || {}).http || "?"); })) + " where a read-only token gets 403. Replace " + (tokens.length > 1 ? "them" : "it") + " with a read-only token.";
+      lede = andList(tokens.map(function (e) { return e.source; })) + " can start workflows on this repository: the daily probe got " + andList(tokens.map(function (e) { var p = e.payload || {}; return "HTTP " + (p.error_http || p.http || "?"); })) + " where a read-only token gets 403. Replace " + (tokens.length > 1 ? "them" : "it") + " with a read-only token.";
     }
     else if (sick.length) { title = andList(sick) + " not healthy"; tone = "fail"; }
     else if (d && !checked.length) { title = released.length ? "No health check yet" : "No ring released yet"; }

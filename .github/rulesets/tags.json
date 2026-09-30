@@ -1,5 +1,5 @@
 {
-  "name": "v* tags: created by the release workflow only, never moved or deleted",
+  "name": "v* tags: created by GitHub Actions only",
   "target": "tag",
   "enforcement": "active",
   "conditions": {
@@ -20,12 +20,6 @@
   "rules": [
     {
       "type": "creation"
-    },
-    {
-      "type": "update"
-    },
-    {
-      "type": "deletion"
     }
   ]
 }

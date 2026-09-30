@@ -1,8 +1,10 @@
 import { env } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import * as scheduler from "../src/scheduler";
 import { isDue, RULES, runScheduler } from "../src/scheduler";
 import { PROBE_URL } from "../src/tokenprobe";
+
+// The Worker's code (not its pages or docs), as text (Vite's ?raw): the tests run inside workerd, which has no filesystem.
+const SOURCES = import.meta.glob("../src/{*,routes/*}.ts", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
 
 const at = (iso: string) => new Date(iso);
 const run = (created_at: string, status = "completed") => ({ created_at, status });
@@ -44,22 +46,26 @@ describe("scheduler rules", () => {
     expect(isDue(gc, [], at("2026-09-13T05:00:00Z")).due).toBe(true); // Sunday
   });
 
-  it("has no dispatch path: every rule is a pulled job, and the cron starts nothing on GitHub (#308)", async () => {
-    for (const rule of RULES) expect(rule.job?.kind, rule.workflow).toBeTruthy();
-    expect(Object.keys(scheduler)).not.toContain("dispatch");
+  it("has no dispatch path: no Worker source starts or reads a workflow but the token probe, and the cron starts nothing on GitHub (#308)", async () => {
+    // The source itself: only tokenprobe.ts names GitHub's workflow API (its probe, a dispatch to a ref that cannot exist).
+    for (const [file, text] of Object.entries(SOURCES)) {
+      if (file.endsWith("/tokenprobe.ts")) continue;
+      expect(text, file).not.toMatch(/actions\/workflows|\/dispatches\b|\/actions\/runs/);
+    }
+    expect(SOURCES["../src/scheduler.ts"]).toBeTruthy();
+    expect(SOURCES["../src/scheduler.ts"]).not.toMatch(/api\.github\.com|method: "POST"/);
     const sent: { url: string; method: string }[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = input instanceof Request ? input.url : String(input);
       sent.push({ url, method: (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase() });
       return new Response("not found", { status: 404 });
     });
-    // A token set and no job kind listed: the old loop dispatched a workflow for any rule left out of JOB_KINDS; now nothing runs it, and it says so.
+    // A token set and no job kind listed: nothing runs the rules, and the log says so.
     const log = await runScheduler({ ...env, GITHUB_TOKEN: "github_pat_test", JOB_KINDS: "" }, at("2026-09-12T01:00:00Z"));
     expect(log).toContain("sync: not in JOB_KINDS; nothing runs it");
     expect(log.join("\n")).not.toMatch(/dispatched/);
     const actions = sent.filter((r) => r.url.includes("/actions/"));
-    expect(actions.filter((r) => r.url.endsWith("/runs") || r.url.includes("/runs?")), "no read of run history").toEqual([]);
-    // The one POST is the daily token probe's (tokenprobe.ts): rollback.yml to a ref that cannot exist, never a run.
-    expect(actions.filter((r) => r.method === "POST").map((r) => r.url), "no dispatch but the token probe's").toEqual([PROBE_URL]);
+    // The one request to GitHub's Actions API is the daily token probe's POST (tokenprobe.ts): rollback.yml to a ref that cannot exist, never a run.
+    expect(actions.map((r) => `${r.method} ${r.url}`)).toEqual([`POST ${PROBE_URL}`]);
   });
 });

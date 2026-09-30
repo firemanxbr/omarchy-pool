@@ -221,6 +221,10 @@ describe("the Status page", () => {
     expect(d.nodes["#headline"].textContent).toBe("A pool token can start workflows");
     expect(d.nodes["#st-mark"].className).toBe("st-mark fail");
     expect(d.nodes["#st-lede"].textContent).toBe("GITHUB_TOKEN can start workflows on this repository: the daily probe got HTTP 422 where a read-only token gets 403. Replace it with a read-only token.");
+    // An error kept by a later answer that could not tell (a 502 after the 422): the hero names the 422 that raised it.
+    d.setSTATS({ ...stats, latest: [...stats.latest, { ...probe("GITHUB_TOKEN", "error", 502), payload: { http: 502, error_http: 422 } }] });
+    d.drawHero();
+    expect(d.nodes["#st-lede"].textContent).toBe("GITHUB_TOKEN can start workflows on this repository: the daily probe got HTTP 422 where a read-only token gets 403. Replace it with a read-only token.");
     // Its latest probe got 403 (the latest line per token is all the stats carry): the hero is the rings' again.
     d.setSTATS({ ...stats, latest: [...stats.latest, probe("GITHUB_TOKEN", "ok", 403), probe("GITHUB_REPORT_TOKEN", "ok", 403)] });
     d.drawHero();

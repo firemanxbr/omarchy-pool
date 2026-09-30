@@ -14,8 +14,11 @@
 #   download by SHA-256;
 # - every maintainer owns the workflows, the host agent, the dispatcher that
 #   starts task containers and the host sets (CODEOWNERS);
-# - the v* tag ruleset the admin applies (.github/rulesets/tags.json) leaves
-#   tags to GitHub Actions alone.
+# - the v* tag rulesets the admin applies (.github/rulesets/tags.json,
+#   tags-locked.json) leave creating tags to GitHub Actions alone, and moving
+#   or deleting them to nobody;
+# - release.yml's jobs that publish wait behind its gate, the `version` job
+#   in the release environment, and nothing writes by default.
 #
 # The GitHub settings around them (the environments' reviewers and branch
 # policy, the applied tag ruleset, immutable releases) live on GitHub, not here:
@@ -71,11 +74,29 @@ done
 (( signers >= 1 )) || fail "release.yml has a signing job"
 grep -qE '^  id-token: write$' "$RELEASE" && fail "release.yml gives no job an OIDC token by default"
 grep -v '^ *#' <<<"$(job "$RELEASE" worker-image)" | grep -q 'cosign' && fail "the image legs sign nothing and install no cosign"
+# The gate before anything is published: `version`, which every other job
+# needs, runs in the release environment, so a dispatch from another branch
+# is refused and one from main waits before a binary is built, a tag or a
+# release created or an image pushed; nothing writes by default.
+awk '/^permissions:$/ { on = 1; next } on && /^[^ ]/ { exit } on { print }' "$RELEASE" | grep -q 'write' && fail "release.yml's default permissions are read-only"
+grep -qE '^    environment: release$' <<<"$(job "$RELEASE" version)" || fail "release.yml's version job, the gate, runs in the release environment"
+grep -qE '^    needs: \[ci, e2e\]$' <<<"$(job "$RELEASE" version)" || fail "release.yml's version job needs only ci and e2e"
+writers=0
+for j in $(jobs_of "$RELEASE"); do
+  [[ "$j" == ci || "$j" == e2e || "$j" == version ]] && continue
+  block="$(job "$RELEASE" "$j")"
+  grep -qE '^    needs: (version|\[(.*, )?version(, .*)?\])$' <<<"$block" || fail "release.yml's $j waits behind the gate (needs: version)"
+  grep -qE '^      (contents|packages): write$' <<<"$block" && writers=$((writers + 1))
+done
+(( writers >= 2 )) || fail "release.yml has its publishing jobs (contents: write, packages: write)"
+for j in ci e2e version; do
+  grep -qE '^      [a-z-]+: write$' <<<"$(job "$RELEASE" "$j")" && fail "release.yml's $j writes nothing: it runs before the gate or is the gate"
+done
 for j in $(jobs_of "$ROLLBACK"); do
   block="$(job "$ROLLBACK" "$j")"
   grep -qE '^      name: pool$' <<<"$block" || fail "rollback.yml's $j signs and deploys outside the pool environment"
 done
-echo "ok: every job that can sign runs in a reviewed environment (release.yml: release; rollback.yml: pool)"
+echo "ok: every job that can sign runs in a reviewed environment (release.yml: release; rollback.yml: pool), and every release.yml job that publishes waits behind the release environment's gate"
 
 # --- the exact identity in the docs --------------------------------------------
 IDENTITY='https://github.com/firemanxbr/omarchy-pool/.github/workflows/release.yml@refs/heads/main'
@@ -114,14 +135,20 @@ for path in .github/workflows/ crates/omarchy-agent/ 'crates/pkg-repo/src/dispat
   grep -qxE "$(sed 's/[.*]/\\&/g' <<<"$path") +$owners" "$root/.github/CODEOWNERS" || fail "CODEOWNERS gives $path to every maintainer ($owners)"
 done
 echo "ok: code owners cover the workflows, the host agent, the dispatcher and the host sets"
-# --- the v* tag ruleset the admin applies (runbook) ------------------------------
-python3 - "$root/.github/rulesets/tags.json" <<'PY' || fail "the v* tag ruleset: GitHub Actions alone creates v* tags, nobody moves or deletes them"
+# --- the v* tag rulesets the admin applies (runbook) -----------------------------
+# Two rulesets: creation, which GitHub Actions alone bypasses (release.yml's
+# publish creates the tag with its release), and update and deletion, which
+# nobody bypasses (no workflow moves or deletes a git tag).
+python3 - "$root/.github/rulesets/tags.json" "$root/.github/rulesets/tags-locked.json" <<'PY' || fail "the v* tag rulesets: GitHub Actions alone creates v* tags, nobody moves or deletes them"
 import json, sys
-r = json.load(open(sys.argv[1]))
-assert r["target"] == "tag" and r["enforcement"] == "active", r
-assert r["conditions"]["ref_name"]["include"] == ["refs/tags/v*"], r["conditions"]
-assert sorted(x["type"] for x in r["rules"]) == ["creation", "deletion", "update"], r["rules"]
-assert r["bypass_actors"] == [{"actor_id": 15368, "actor_type": "Integration", "bypass_mode": "always"}], r["bypass_actors"]
+create, locked = (json.load(open(p)) for p in sys.argv[1:3])
+for r in (create, locked):
+    assert r["target"] == "tag" and r["enforcement"] == "active", r
+    assert r["conditions"]["ref_name"]["include"] == ["refs/tags/v*"], r["conditions"]
+assert [x["type"] for x in create["rules"]] == ["creation"], create["rules"]
+assert create["bypass_actors"] == [{"actor_id": 15368, "actor_type": "Integration", "bypass_mode": "always"}], create["bypass_actors"]
+assert sorted(x["type"] for x in locked["rules"]) == ["deletion", "update"], locked["rules"]
+assert locked["bypass_actors"] == [], locked["bypass_actors"]
 PY
-echo "ok: the v* tag ruleset lets only GitHub Actions create, move or delete a v* tag"
+echo "ok: the v* tag rulesets let only GitHub Actions create a v* tag, and nobody move or delete one"
 echo "TRUST PINS OK"

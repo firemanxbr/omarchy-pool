@@ -191,7 +191,10 @@ the repository and CI holds it (`tests/trust-pins.sh`): one exact cosign
 (v2.6.5, through `sigstore/cosign-installer` pinned by commit) in both
 workflows, the Fulcio and Rekor named on every `cosign sign`, the one
 release job that signs (`worker-image-manifest`) in the `release`
-environment and the rollback in `pool`, the base images by digest and the
+environment and the rollback in `pool`, `release.yml`'s `version` job (the
+gate every other job waits behind) in `release` too, so nothing is built,
+tagged, published or pushed before the environment admits the run, and no
+write permission by default, the base images by digest and the
 docker CLI by SHA-256, and CODEOWNERS giving every maintainer
 `.github/workflows/`, `crates/omarchy-agent/`, `crates/pkg-repo/src/dispatch*`
 and `factory/sets/`. The rest lives on GitHub, and only the repository's
@@ -201,13 +204,16 @@ admin can set it:
 |---|---|---|
 | `release` and `pool` environments: `main` only, a required reviewer (either maintainer, self-approval allowed until both approve dispatches in practice; then `prevent_self_review`, D18), no admin bypass | a dispatch from any other branch is refused before its job starts; one from `main` waits for a maintainer, so a holder of `actions: write` cannot sign or send every host back alone | `gh api …/environments`, `…/deployment-branch-policies` |
 | `CLOUDFLARE_API_TOKEN` an environment secret of `pool`, not a repository secret | only a run the `pool` environment admitted can deploy | `gh secret list` (repository and `--env pool`) |
-| A tag ruleset on `v*` (`.github/rulesets/tags.json`): creation, update and deletion refused to everyone but GitHub Actions | a `v*` tag is not created by hand; with immutable releases, a released tag is never moved or deleted, not even by a workflow | `gh api …/rulesets` |
+| A tag ruleset on `v*`, in two parts: creation refused to everyone but GitHub Actions (`.github/rulesets/tags.json`), update and deletion refused to everyone (`.github/rulesets/tags-locked.json`, no bypass; no workflow moves or deletes a git tag) | a `v*` tag is not created by hand, and never moved or deleted, not even by a workflow; with immutable releases, a published release cannot change either | `gh api …/rulesets` |
 | Immutable releases | a published release's assets and tag cannot change | `gh api …/immutable-releases` |
-| The main ruleset (`.github/rulesets/main.json`, already applied) requires a pull request review and a code owner's | a change to what signs, or to what a host runs, is a decision another maintainer approves | `gh api …/rulesets/<id>` |
-| No token with `actions`, `contents: write` or `workflows` on this repository outside GitHub Actions | no one can dispatch `release.yml` or `rollback.yml`, or push a workflow, from outside a reviewed run | the daily token probe on Status (*The pool's own scheduler*); `gh api …/keys`; each maintainer's token pages |
+| The main ruleset (`.github/rulesets/main.json`, already applied) requires a pull request review and a code owner's | a change to what signs, or to what a host runs, is a decision another maintainer approves — except that the admin keeps a pull-request bypass (repository role 5), accepted under D18 like self-approval, and removed when D18 moves to two-person approval | `gh api …/rulesets/<id>` |
+| No stored or automated token with `actions`, `contents: write` or `workflows` on this repository outside GitHub Actions — not the Worker's, a host's, a worker's, a deploy key or CI tooling's; a maintainer dispatches and approves as a person, in their own interactive session (`gh auth login`) or the web UI | no process can dispatch `release.yml` or `rollback.yml`, or push a workflow, on its own; what a maintainer dispatches still waits for the environment's reviewer | the daily token probe on Status (*The pool's own scheduler*; it detects `actions: write` only, `contents` and `workflows` are the manual review's); `gh api …/keys`; each maintainer's token pages |
 
 Until the admin applies them, the environment, tag, immutable-release and
-token criteria of #308 are not met, whatever the repository holds.
+token criteria of #308 are not met, whatever the repository holds. Apply the
+environments (step 1) **before** #308 merges, or at the latest before the
+next release dispatch: a workflow that names an environment that does not
+exist makes GitHub create it, with no reviewer and no branch policy.
 
 **Apply** (the repository's admin, once; user ids: firemanxbr 2116404,
 maralcbr 116872):
@@ -229,16 +235,18 @@ done
 # 2. The deploy token only where the pool environment admits the run.
 gh secret set CLOUDFLARE_API_TOKEN --env pool -R firemanxbr/omarchy-pool < cloudflare-token
 gh secret delete CLOUDFLARE_API_TOKEN -R firemanxbr/omarchy-pool
-# 3. The v* tag ruleset (GitHub Actions, integration 15368, is its only bypass).
+# 3. The v* tag rulesets: creation (GitHub Actions, integration 15368, is its
+#    only bypass), then update and deletion (no bypass at all).
 gh api -X POST "$R/rulesets" --input .github/rulesets/tags.json
+gh api -X POST "$R/rulesets" --input .github/rulesets/tags-locked.json
 # 4. Immutable releases.
 gh api -X PUT "$R/immutable-releases"
 # 5. Tokens: delete or narrow any personal access token (fine-grained or
 #    classic) or deploy key that can write to this repository — see Check.
 ```
 
-**Check** (anyone with read access; the admin's view shows the environments'
-secrets too):
+**Check** (the commands marked *admin* need the repository's admin; the rest
+work with read access):
 
 ```bash
 R=repos/firemanxbr/omarchy-pool
@@ -248,27 +256,32 @@ gh api "$R/environments" --jq '.environments[] | select(.name == "release" or .n
 # release and pool: can_admins_bypass false, custom_branch_policies true, reviewers [firemanxbr, maralcbr]
 for env in release pool; do gh api "$R/environments/$env/deployment-branch-policies" --jq '[.branch_policies[] | .name]'; done
 # ["main"] twice
-gh secret list -R firemanxbr/omarchy-pool; gh secret list -R firemanxbr/omarchy-pool --env pool
+gh secret list -R firemanxbr/omarchy-pool; gh secret list -R firemanxbr/omarchy-pool --env pool   # admin
 # CLOUDFLARE_API_TOKEN under pool, not in the repository's list
 gh api "$R/rulesets" --jq '.[] | { id, name, target, enforcement }'
-gh api "$R/rulesets/$(gh api "$R/rulesets" --jq '.[] | select(.target == "tag") | .id')" \
-  --jq '{ include: .conditions.ref_name.include, rules: [.rules[].type], bypass: .bypass_actors }'
-# include ["refs/tags/v*"], rules [creation, update, deletion], bypass [Integration 15368]
+for id in $(gh api "$R/rulesets" --jq '.[] | select(.target == "tag") | .id'); do
+  gh api "$R/rulesets/$id" --jq '{ name, include: .conditions.ref_name.include, rules: [.rules[].type], bypass: .bypass_actors }'
+done
+# include ["refs/tags/v*"] twice: rules [creation] with bypass [Integration 15368], and rules [update, deletion] with bypass []
 gh api "$R/rulesets/$(gh api "$R/rulesets" --jq '.[] | select(.target == "branch") | .id')" \
   --jq '.rules[] | select(.type == "pull_request") | .parameters | { required_approving_review_count, require_code_owner_review }'
 # 1 and true
-gh api "$R/immutable-releases"
+gh api "$R/immutable-releases"   # admin
 # {"enabled": true, ...}
-gh api "$R/keys" --jq '[.[] | select(.read_only == false) | .title]'
+gh api "$R/keys" --jq '[.[] | select(.read_only == false) | .title]'   # admin
 # [] — no deploy key that writes
 ```
 
 Personal access tokens are not listed by the API on a user's repository:
 each maintainer reviews their own (*Settings → Developer settings → Personal
-access tokens*, fine-grained and classic) and keeps none with `actions`,
+access tokens*, fine-grained and classic) and stores none with `actions`,
 `contents: write` or `workflows` on this repository (a classic `repo` or
-`workflow` scope counts). The Worker's own tokens are probed every day; a
-host's agent sidecar token is probed by the host agent's preflight (#317).
+`workflow` scope counts) in a script, a CI system, a host or any other
+automation. Their own interactive session — the `gh auth login` token, the
+web UI — is how they dispatch, apply and approve (the commands on this page),
+and it is not left anywhere a process could use it unattended. The Worker's
+own tokens are probed every day; a host's agent sidecar token is probed by
+the host agent's preflight (#317).
 
 **A dry run of the refusal**, once the checks above pass: dispatch the
 rollback from a throwaway branch, to the release that runs now, so even a
@@ -282,15 +295,19 @@ gh run list -R firemanxbr/omarchy-pool --workflow rollback.yml --limit 1   # fai
 git push origin --delete env-refusal-check
 ```
 
-The next release from `main` shows its signing job *Waiting for review*
-(`release`), then the deploy (`pool`); approve each on the run's page.
+The next release from `main` shows *Next version* *Waiting for review*
+(`release`) once CI and E2E pass, before anything is built, then its signing
+job (`release`), then the deploy (`pool`); approve each on the run's page.
+A dispatch of `release.yml` from another branch stops at *Next version*:
+nothing is built, tagged, published or pushed.
 
-What is not covered yet: `release.yml`'s `publish` job creates the GitHub
-release and its tag before the first reviewed job, so a dispatch from another
-branch publishes a release from that branch before the `release` environment
-refuses it (nothing it made is signed with the `main` identity, so no host
-would take it). #311 (the signed host bundle, a draft release published only
-after it is signed) moves publishing behind the same environment.
+What is not covered yet: the gate lives in `release.yml` itself, and a
+dispatch runs the dispatched branch's copy of the file, so a writer could
+dispatch a copy without it from their own branch and publish a release and
+its `v*` tag from that branch (GitHub Actions may create `v*` tags). Nothing
+it made is signed with the `main` identity, so no host would take it. #311
+(the signed host bundle, a draft release published only after it is signed)
+is where publishing moves behind the signature itself.
 
 ## Security data
 
@@ -395,12 +412,17 @@ Once a day the cron checks that neither token can start a workflow
 cannot exist, per token. GitHub answers 403 to a token without
 `actions: write` (a `token` line, ok) and 422 to one with it; no run starts
 either way. A 422 is an error: the Status hero says *A pool token can start
-workflows* until a later probe of that token gets 403. Replace the token with
-one that has only its listed permission (`wrangler secret put` as above);
-the next day's probe clears it. A 401 (expired or revoked) or any other
-answer is a `warn` line. The rule is the security model's: no token with
-`actions`, `contents: write` or `workflows` on this repository exists outside
-GitHub Actions (*The GitHub settings the signature relies on*, below).
+workflows* until a later probe of that token gets 403, or the token is
+removed (`wrangler secret delete`; the next day's tick writes an ok line
+saying so). Replace the token with one that has only its listed permission
+(`wrangler secret put` as above); the next day's probe clears it. A 401
+(expired or revoked) or any other answer is a `warn` line, and it does not
+clear an earlier error: the line stays an error that says the answer could
+not tell. The probe detects `actions: write` only; `contents: write` and
+`workflows` are the maintainers' manual review of the tokens. The rule is
+the security model's: no stored or automated token with `actions`,
+`contents: write` or `workflows` on this repository exists outside GitHub
+Actions (*The GitHub settings the signature relies on*, below).
 
 ## Pulled jobs (the pool without GitHub)
 

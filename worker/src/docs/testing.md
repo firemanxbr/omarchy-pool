@@ -130,7 +130,7 @@ the network. Two kinds of tests live there:
 | `hosts.test.ts` | the pool's names (`src/meta.ts`): a page on an old dashboard name or www moves to omarchy-pool.org with its path and query (301 for a read, 308 otherwise) and its `/api/v1/*` is answered in place; the API's two names and the tests' pool.test serve without a redirect; a sign-in pressed on the API host starts over on the dashboard before any cookie; the setup script, the worker CLI and the include's comment name the API host on every production name, the request's own elsewhere; one edge key serves every name |
 | `read-guard.test.ts` | the read guard (`src/cost.ts` `readGuard`): with the cost guard up, an anonymous machine — curl, an empty user-agent, an AI crawler by name, a verified bot of any category but a search engine's — asking `/api/v1/package/<name>` or `/package/<name>` gets a 503 with `retry-after: 3600`, `no-store` and `noindex`, and the next request, a browser's, is a real 200 (nothing was stored at the edge); a browser, an `omc` session, a bearer token, `omarchy-cli/`, `pkg-repo/` and a search engine's verified crawler read on; the file list, the graph, the search, the include and every page stay open to a machine; with the guard down nothing changes; and the guard word is read once a minute, not once a request |
 | `provenance.test.ts` | the OPR provenance scan against a stubbed GitHub: origin per package from the tree and `.omarchy/package.json`, only changed packages fetched again, packages gone from the repository dropped, the per-ring counts |
-| `token-probe.test.ts` | the daily probe of the pool's own GitHub tokens (#308), against stubbed GitHub answers: run by the cron once a day per token, a 422 an `error` line the Status hero reads (`status-page.test.ts` draws it), a 403 an `ok` line that clears it, a 401 or a 5xx a `warn`, no answer nothing written; the probe itself a dispatch of `rollback.yml` to a ref that cannot exist |
+| `token-probe.test.ts` | the daily probe of the pool's own GitHub tokens (#308), against stubbed GitHub answers: run by the cron once a day per token, a 422 an `error` line the Status hero reads (`status-page.test.ts` draws it), a 403 an `ok` line that clears it, a 401 or a 5xx a `warn` (an `error` still, after an error: it clears nothing), the token removed after an error an `ok` line, once, no answer nothing written; the probe itself a dispatch of `rollback.yml` to a ref that cannot exist |
 | `jobtoken`, `scheduler`, `governance`, `updates`, `metrics`, `cost`, `signing` | the pure functions: tokens and scopes, the scheduler's rules and that it has no dispatch path (#308), the governance file, bump detection, the metrics snapshot shape, the bill estimate — and its daily report on GitHub: the comment's markdown (the twin of the workflow's jq), posted once with the day's line after the issue is checked for today's comment, never twice, nothing without `GITHUB_REPORT_TOKEN`, a refused post one `warn` line —, OpenPGP signing |
 
 Both page tests run over one fixture (`test/fixture.ts`): a dashboard's
@@ -677,9 +677,12 @@ repository (#308): `release.yml` and `rollback.yml` install one exact cosign
 through the installer pinned by commit, every `cosign sign` (there and in
 `release-rollback`) names its Fulcio and Rekor, every job that can mint an
 OIDC token runs in a reviewed environment (`release`, or `pool` for the
-rollback), the docs show the exact identity and no regexp, the base images are
-pinned by digest and the docker CLI by SHA-256, and CODEOWNERS gives every
-maintainer the workflows, the host agent, the dispatcher and the host sets.
+rollback), `release.yml` writes nothing by default and every job that
+publishes waits behind `version`, which runs in `release`, the docs show the
+exact identity and no regexp, the base images are pinned by digest and the
+docker CLI by SHA-256, CODEOWNERS gives every maintainer the workflows, the
+host agent, the dispatcher and the host sets, and the two `v*` tag rulesets
+leave creating a tag to GitHub Actions and moving or deleting one to nobody.
 `bash tests/image-smoke.sh <image>` (the release, on each architecture's
 `:<arch>-vX.Y.Z` before any tag moves; CI, on a local build of the commit)
 starts every role from the image: the updater's `follows` label, the project
