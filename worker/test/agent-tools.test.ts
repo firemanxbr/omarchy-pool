@@ -903,19 +903,22 @@ describe("a passkey for approve and block (#257)", () => {
     expect(JSON.parse((await line("approve", "pkwebapprove"))!.payload)).toMatchObject({ by: "m1", via: "web", passkey: passkeys.m1[0].id });
   });
 
-  it("is asked for, never skipped: a maintainer without a passkey is told to register one — on the page, at the POST and at the challenge — with the link, and nothing is decided", async () => {
+  it("is asked for, never skipped: a maintainer without a passkey is offered to register one on the page (#287), and a POST or a challenge without one is refused with the link — nothing is decided", async () => {
     const d = await approveDraft(m3, "nopasskey");
     const page = await confirmPage(d, "m3");
     expect(page.status).toBe(200);
-    expect(page.text).toContain("Register a passkey first.");
-    expect(page.text).toContain('href="/user/m3#passkeys"');
-    expect(page.text).not.toContain('id="pk-confirm"');
-    expect(page.text).not.toContain('value="confirm"');
-    expect(page.text).toContain('value="discard"');
-    // On the page, before anything was tried, it says what to do — not that nothing was decided.
-    const asked = /<section class="refused" role="alert"><b>Register a passkey first\.<\/b>[^<]*<\/section>/.exec(page.text)![0];
+    // The page offers the registration in place (#287): its one Confirm registers the passkey at the first press — the page's script, passkey-guided.test.ts runs it — and confirms with it at the next; never a Confirm without one.
+    expect(submits(page.text)).toEqual([{ value: "confirm", id: "pk-confirm", novalidate: false }, { value: "discard", id: null, novalidate: true }]);
+    expect(page.text).toContain('data-next="Confirm with your passkey: approve nopasskey"');
+    expect(page.text).toContain("Register a passkey and approve nopasskey</button>");
+    expect(page.text).toMatch(/<p class="said" id="pk-said" role="status" aria-live="polite"><\/p>/);
+    expect(page.text).not.toContain("Register a passkey first.");
+    // On the page, before anything was tried, it says what the press does — not that nothing was decided.
+    const asked = /<div class="aa-pk">[\s\S]*?<\/div>/.exec(page.text)![0];
+    expect(asked).toContain("You hold no passkey yet.");
     expect(asked).toContain("your fingerprint, face or PIN");
     expect(asked).not.toContain("Nothing was decided");
+    // A POST without an answer — a browser without the page's script — is refused, with the way to register one.
     const r = await post(d, "m3", {});
     expect(r.status).toBe(403);
     expect(r.text).toContain("Register a passkey first");
@@ -931,13 +934,16 @@ describe("a passkey for approve and block (#257)", () => {
     const forged = await post(d, "m3", await answer(passkeys.m1[0].a, { challenge: "x".repeat(43), origin: ORIGIN, rpId: "localhost" }));
     expect(forged.status).toBe(403);
     await nothing(d, "nopasskey");
-    // A block the same — and the agent was told before the page: its draft's answer says m3 has no passkey yet, and where to register one.
+    // A block the same — and the agent was told before the page: its draft's answer says m3 has no passkey yet, and that the page registers one first.
     await ready("nopasskeyblock");
     const drafted = (await call("POST", "/factory/drafts", { name: "nopasskeyblock", verdict: "block", note: "ships a token stealer" }, m3.token)).json;
     expect(drafted.state, JSON.stringify(drafted)).toBe("waiting");
-    expect(drafted.next).toBe(`m3 has no passkey yet, and a block is confirmed with one: register it first on ${ORIGIN}/user/m3#passkeys, then open the link in a browser signed in as m3 and confirm with it. Nothing is decided until then.`);
+    expect(drafted.next).toBe("m3 has no passkey yet, and a block is confirmed with one: open the link in a browser signed in as m3. The page registers one on that device, then confirms with it: your device asks for your fingerprint, face or PIN. Nothing is decided until then.");
     const b = drafted.draft as string;
-    expect((await confirmPage(b, "m3")).text).toContain("Register a passkey first.");
+    const bpage = (await confirmPage(b, "m3")).text;
+    expect(bpage).toContain("Register a passkey and block nopasskeyblock</button>");
+    // The name is typed before the first press, as for a Confirm.
+    expect(bpage.indexOf('name="name"')).toBeLessThan(bpage.indexOf('id="pk-confirm"'));
     const rb = await post(b, "m3", { name: "nopasskeyblock" });
     expect([rb.status, rb.text.includes("Register a passkey first")]).toEqual([403, true]);
     await nothing(b, "nopasskeyblock");

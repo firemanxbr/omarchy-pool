@@ -64,8 +64,10 @@ export const SWAPS_PER_MINUTE = 5;
  * says it is, `x-omarchy-client`), the grant — and for a decision confirmed
  * in the browser, the draft and when it was drafted and confirmed — and, for
  * approve and block (#257), the passkey the person confirmed it with, its
- * user verified. The door (`via`, contributors.ts viaOf) says "agent" for a
- * write the token made and "web" for a draft confirmed in the browser.
+ * user verified — registered just now when it was that passkey's first use,
+ * minutes after its registration (#287: the draft's page registers a first
+ * one). The door (`via`, contributors.ts viaOf) says "agent" for a write the
+ * token made and "web" for a draft confirmed in the browser.
  */
 export interface Through {
   agent: string;
@@ -75,6 +77,7 @@ export interface Through {
   drafted_at?: string;
   confirmed_at?: string;
   passkey?: string;
+  registered_just_now?: true;
 }
 
 /**
@@ -86,7 +89,7 @@ export interface Through {
  */
 export function throughWords(t: Through | null | undefined): string {
   if (!t) return "";
-  return t.draft ? ` — drafted by ${t.agent}, confirmed in the browser${t.passkey ? " with a passkey" : ""}` : ` through ${t.agent}`;
+  return t.draft ? ` — drafted by ${t.agent}, confirmed in the browser${t.passkey ? ` with a passkey${t.registered_just_now ? " registered just now" : ""}` : ""}` : ` through ${t.agent}`;
 }
 
 /** The caller behind an agent token, as agentOf read it. */

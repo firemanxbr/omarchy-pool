@@ -68,6 +68,14 @@ export const CEREMONY_MS = 120_000;
 export const PASSKEY_VERDICTS: readonly string[] = ["approve", "block"];
 /** A reset's reason, as the record keeps it: one line of 4 to 300 printable characters. */
 export const RESET_REASON = { min: 4, max: 300 };
+/**
+ * A passkey registered just now (#287): its first use, within ten minutes of
+ * its registration — a maintainer who held none registers it in the act's
+ * own dialog, then confirms the act with it at the next press. The act's
+ * journal line says so ("… with a passkey registered just now"), from the
+ * row the assertion reads anyway: nothing more is read or stored.
+ */
+export const JUST_NOW_MINUTES = 10;
 
 const NO_STORE = { "cache-control": "no-store" };
 
@@ -98,6 +106,11 @@ export async function userHandleOf(login: string): Promise<Uint8Array> {
 
 /** Where a person registers a passkey: the section of their own page. */
 export const registerHref = (login: string) => `/user/${encodeURIComponent(login)}#passkeys`;
+
+/** Whether a login holds a passkey at all, as /auth/me tells a maintainer's pages (#287): one entry of the (login, created_at) index. */
+export async function holdsPasskey(env: Env, login: string): Promise<boolean> {
+  return !!(await env.DB.prepare(HAS_PASSKEY_SQL).bind(login).first());
+}
 
 /**
  * What an assertion on the web is for (#271), bound into its challenge
@@ -134,8 +147,8 @@ const NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 export const PASSKEYS_SQL = `SELECT id, credential_id, alg, label, counter, created_at, last_used FROM passkeys WHERE login = ? ORDER BY created_at DESC LIMIT ${MAX_PASSKEYS}`;
 /** Whether a login holds a passkey at all: one entry of (login, created_at). */
 export const HAS_PASSKEY_SQL = "SELECT 1 AS one FROM passkeys WHERE login = ? LIMIT 1";
-/** A passkey by the credential that answered: the unique index on its id. */
-export const PASSKEY_BY_CREDENTIAL_SQL = "SELECT id, login, public_key, alg, counter, rp_id FROM passkeys WHERE credential_id = ?";
+/** A passkey by the credential that answered: the unique index on its id — with its two dates, for a first use just after its registration (#287). */
+export const PASSKEY_BY_CREDENTIAL_SQL = "SELECT id, login, public_key, alg, counter, rp_id, created_at, last_used FROM passkeys WHERE credential_id = ?";
 /** A login's own passkey by its id (primary key), for its removal. */
 export const OWN_PASSKEY_SQL = "SELECT id, alg, created_at FROM passkeys WHERE id = ? AND login = ?";
 /**
@@ -254,6 +267,18 @@ export interface AssertionFields {
 /** Why an assertion was refused, in a word: no passkey at all, none sent, a challenge not for this, a key not the login's (or another relying party's), a counter a racing answer moved first, or the verifier's own code. */
 export type AssertionRefusal = { refused: "no_passkey" | "passkey_required" | "challenge" | "not_yours" | "other_rp" | WebAuthnCode; detail?: string };
 
+/** The passkey an act was confirmed with (#271): its id — and, on its first use minutes after its registration (JUST_NOW_MINUTES), that it was registered just now (#287). */
+export interface Confirmed {
+  passkey: string;
+  justNow?: true;
+}
+
+/** A passkey's first use, minutes after its registration: the row as the assertion read it, before its use is written. */
+const justRegistered = (k: { created_at: string; last_used: string | null }): boolean => k.last_used === null && Date.now() - Date.parse(k.created_at) < JUST_NOW_MINUTES * 60_000;
+
+/** An act's journal words for a passkey registered just now (#287): " with a passkey registered just now", or nothing. */
+export const justNowWords = (c: Confirmed): string => (c.justNow ? " with a passkey registered just now" : "");
+
 /**
  * The assertion for one draft or act of this login, verified — the passkey
  * that made it, or why not. The challenge is taken first (issued to this
@@ -263,13 +288,13 @@ export type AssertionRefusal = { refused: "no_passkey" | "passkey_required" | "c
  * answer is refused. Nothing sent is `no_passkey` when the login holds none
  * — the way to register one — else `passkey_required`.
  */
-async function checkAssertion(env: Env, rp: RelyingParty, login: string, bound: string, f: AssertionFields): Promise<{ passkey: string } | AssertionRefusal> {
+async function checkAssertion(env: Env, rp: RelyingParty, login: string, bound: string, f: AssertionFields): Promise<Confirmed | AssertionRefusal> {
   const s = (v: unknown) => (typeof v === "string" ? v : "");
   const credential = s(f.credential), clientData = s(f.client_data), authData = s(f.authenticator_data), signature = s(f.signature);
   if (!credential || !clientData || !authData || !signature) return { refused: (await env.DB.prepare(HAS_PASSKEY_SQL).bind(login).first()) ? "passkey_required" : "no_passkey" };
   const challenge = challengeOf(clientData);
   if (!challenge || !(await takeChallenge(env, challenge, login, "confirm", bound))) return { refused: "challenge" };
-  const key = credential.length <= 1400 ? await env.DB.prepare(PASSKEY_BY_CREDENTIAL_SQL).bind(credential).first<{ id: string; login: string; public_key: string; alg: number; counter: number; rp_id: string }>() : null;
+  const key = credential.length <= 1400 ? await env.DB.prepare(PASSKEY_BY_CREDENTIAL_SQL).bind(credential).first<{ id: string; login: string; public_key: string; alg: number; counter: number; rp_id: string; created_at: string; last_used: string | null }>() : null;
   if (!key || key.login !== login) return { refused: "not_yours" };
   if (key.rp_id !== rp.id) return { refused: "other_rp", detail: key.rp_id };
   let counter: number;
@@ -281,7 +306,7 @@ async function checkAssertion(env: Env, rp: RelyingParty, login: string, bound: 
   }
   const moved = await env.DB.prepare(PASSKEY_USED_SQL).bind(key.id, counter).run();
   if (!moved.meta.changes) return { refused: "counter" };
-  return { passkey: key.id };
+  return justRegistered(key) ? { passkey: key.id, justNow: true } : { passkey: key.id };
 }
 
 /** A JSON body's `assertion`, as checkAssertion reads it: anything that is not an object is none. */
@@ -569,7 +594,7 @@ export async function handlePasskeyReset(url: URL, request: Request, env: Env): 
 // ---------- the web's approve and block (#271): routes/review.ts and routes/blocks.ts call them ----------
 
 /** The door's half of an act a passkey confirms: given the assertion the page put in the body, the passkey that made it — or the JSON refusal. */
-export type PasskeyGate = (assertion: unknown) => Promise<{ passkey: string } | Response>;
+export type PasskeyGate = (assertion: unknown) => Promise<Confirmed | Response>;
 
 /**
  * The web's own approve and block (#271): the browser's session only — a
@@ -602,14 +627,14 @@ export function webGate(request: Request, url: URL, env: Env, login: string, sub
  * The passkey an approve or a block is decided with, whoever calls its
  * handler (#271): an agent's draft confirmed with one in the browser
  * (through.passkey, routes/agents.ts), or the web's own act with its
- * assertion (the door's gate). A caller with neither is refused — fail
+ * assertion (the door's gate) — which says too when the passkey was
+ * registered just now (#287). A caller with neither is refused — fail
  * closed: a door that forgets the gate decides nothing.
  */
-export async function decidedWith(through: Through | undefined, gate: PasskeyGate | undefined, assertion: unknown): Promise<string | Response> {
-  if (through?.passkey) return through.passkey;
+export async function decidedWith(through: Through | undefined, gate: PasskeyGate | undefined, assertion: unknown): Promise<Confirmed | Response> {
+  if (through?.passkey) return { passkey: through.passkey };
   if (!gate) return json({ error: "approve and block are confirmed with a passkey, and this door asks for none: nothing was decided", code: "passkey_required" }, 403, NO_STORE);
-  const g = await gate(assertion);
-  return g instanceof Response ? g : g.passkey;
+  return gate(assertion);
 }
 
 // ---------- the confirmation's two halves (routes/agents.ts calls them) ----------
@@ -637,7 +662,7 @@ export type PasskeyRefusal = { refused: true; status: number; heading: string; t
  * (credential, client_data, authenticator_data, signature, user_handle),
  * checked for this login and this draft (checkAssertion).
  */
-export async function confirmPasskey(env: Env, url: URL, login: string, draft: string, form: URLSearchParams): Promise<{ passkey: string } | PasskeyRefusal> {
+export async function confirmPasskey(env: Env, url: URL, login: string, draft: string, form: URLSearchParams): Promise<Confirmed | PasskeyRefusal> {
   const no = (text: string, heading = "The passkey was refused", status = 403): PasskeyRefusal => ({ refused: true, status, heading, text });
   const rp = relyingParty(url);
   if (!rp) return no(`${PASSKEY_ELSEWHERE} Nothing was decided.`, "Not on this address");

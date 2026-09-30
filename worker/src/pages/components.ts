@@ -403,6 +403,19 @@ export const SHELL_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
+    // A maintainer with no passkey yet (#287): /auth/me says whether they hold one (not asked again once this browser knows they do: ?held=); the notice — always on Review and their own page, once anywhere else — and the dialog of an act a passkey confirms register the first one in place (firstPasskey, the session alone; none made when the pool lists one the login holds), and the act is confirmed with it at the next press. The tests' address is not a relying party, so every signed-in role is refused there (rp_unavailable) and nobody is asked to sign in.
+    id: "shell.first-passkey",
+    page: "/",
+    anchor: [".pk-notice {", "dialog.ask .pk {"],
+    script: ["function needsPasskey()", "WHO.me.passkey === false", "function firstPasskey(nothing)", 'api("POST", "/auth/passkeys/challenge", {})', "navigator.credentials.create", 'api("POST", "/auth/passkeys", {', "function passkeyNotice()", 'class="pk-now">Register a passkey now</button>', '"op-pk-notice:" + WHO.login', "whoami(passkeyNotice)", "var first = !!o.first && o.confirm !== null && needsPasskey();", 'first: "Register a passkey and approve"', '"?held=" + encodeURIComponent(held)', "if (k.excludeCredentials.length) return held();", "function firstSaid(r, then)"],
+    reads: [{ path: "/auth/me", as: "maintainer", fields: ["login", "role", "passkey"] }],
+    acts: [
+      { method: "POST", path: "/auth/passkeys/challenge", expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
+      { method: "POST", path: "/auth/passkeys", expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } },
+    ],
+    visible: ["maintainer"],
+  },
+  {
     // The mark, as the head names it and as browsers ask for it by name (icons.ts).
     id: "icons.favicons",
     page: "/",

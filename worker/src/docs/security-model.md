@@ -40,7 +40,7 @@ please do not file a public issue for it.
 | Job token `omj.…` | the worker running one task, for the lease | the routes that task needs — e.g. `sync`: upload objects, index, create a release in one ring, store that ring's databases; community `build`: upload to that task's staging folder, and nothing into the journal (the health and abi rows the gate reads are the project's jobs' alone); a dry run (`publish` 0): its task and the journal, no pool and no ring (#284) | anything outside its scopes (403, journaled); anything after the lease (30 min, renewed by heartbeat) — a task stopped from its worker's page is not renewed, and goes back to the queue only once its worker has stopped or the lease has ended, so no second runner overlaps its token; an audit's or a trial's report beside a staged build is taken only while the job's own task is still leased to its worker and not stopped (#277) | live |
 | Maintainer role | a contributor listed in `factory/MAINTAINERS.toml` on `main` — one list, no groups (applied by the brain every ten minutes) | propose or confirm a worker's project trust (two of them), take it back alone; withdraw a record from the public bucket (a signed tombstone says why); approve or reject staged builds (recorded; approve, and a block, in the browser with their passkey, #271); queue any pool job by hand (`POST /factory/jobs`; a promotion forced past its evidence in the browser with their passkey, #284); queue a dry run by hand, cancel, remove a registration; give any worker orders (the same list), capped at 20 an hour per login and on the journal — none of them needs the passkey (#277); review governance pull requests | write to the pool with their own token (a job does); publish a build queued by hand (#284: a dry run only); write the gate's evidence (#284: a journal note only); roll a ring back to another ring's release; operate as a worker; grant a role | live |
 | Agent token `oma_…` | one agent on one person's machine, granted by that person in their signed-in browser (`omarchy-cli login`: a loopback address and PKCE), kept in `~/.config/omarchy-cli/credentials.toml` (0600) and bound to the origin that granted it | the tools of `omarchy-cli mcp` its scopes hold, as that person: request and follow packages (`contribute`); claim, release, read evidence and draft a verdict (`review`) or a block (`block`) — the two a maintainer's only, read again on every call; twenty calls a minute, five requests, ten claims and thirty drafts a day | decide anything — approve, request changes, reject and block are drafts the person confirms in the browser, approve and block with the person's passkey; every other route (403); give the project's agent a hint; outlive seven days with `review` or `block`, ninety with `contribute` | live; revoked by `omarchy-cli logout`, the person's page, a block of the person, or a reset of their passkeys (#284) |
-| Passkey (WebAuthn) | one maintainer's authenticator — a security key, a phone, a laptop's platform authenticator — registered on their own page with the browser's session; the pool keeps the credential's id, its public key, the algorithm (ES256, EdDSA, RS256), the RP id `omarchy-pool.org`, the counter, a name and two dates (`passkeys`, migration 0040) | decide approve and block — an agent's draft confirmed (#257), and the web's own buttons (#271): an assertion with the user verified — the person's fingerprint, face or PIN, as the authenticator reports it (attestation `none`: the pool takes the authenticator's word on that) — for a challenge bound to that login and that draft or act, checked by the Worker against the stored key (`webauthn.ts`), the counter moving forward; vouch for a second passkey of the same login, and for a removal; confirm another maintainer's reset of a lost one (#271); force a promotion past its evidence, for exactly that promotion (#284) | be registered or used with a token of any kind, from another origin, or for another relying party; stand in for the session (every door takes both); confirm another act than the one its challenge was issued for; be replayed (each challenge is taken once) | live; ten per maintainer; the first registered with the session, every other with one the login holds; removed by its owner with one they hold, or reset by another maintainer with a reason (the login signed out, its token and its agents' grants revoked, #284, a signed record); registration, removal and reset are journal lines (`passkey`) without the key |
+| Passkey (WebAuthn) | one maintainer's authenticator — a security key, a phone, a laptop's platform authenticator — registered with the browser's session, on their own page or, the first one, in the dialog of the act that needs it (#287); the pool keeps the credential's id, its public key, the algorithm (ES256, EdDSA, RS256), the RP id `omarchy-pool.org`, the counter, a name and two dates (`passkeys`, migration 0040) | decide approve and block — an agent's draft confirmed (#257), and the web's own buttons (#271): an assertion with the user verified — the person's fingerprint, face or PIN, as the authenticator reports it (attestation `none`: the pool takes the authenticator's word on that) — for a challenge bound to that login and that draft or act, checked by the Worker against the stored key (`webauthn.ts`), the counter moving forward; vouch for a second passkey of the same login, and for a removal; confirm another maintainer's reset of a lost one (#271); force a promotion past its evidence, for exactly that promotion (#284) | be registered or used with a token of any kind, from another origin, or for another relying party; stand in for the session (every door takes both); confirm another act than the one its challenge was issued for; be replayed (each challenge is taken once) | live; ten per maintainer; the first registered with the session, every other with one the login holds; removed by its owner with one they hold, or reset by another maintainer with a reason (the login signed out, its token and its agents' grants revoked, #284, a signed record); registration, removal and reset are journal lines (`passkey`) without the key |
 | Session cookie `oms_…` | one person's browser, after Sign in with GitHub | what that person's contributor token can, from the dashboard's pages | — | live; separate from the CLI token, so signing in never invalidates a worker; *sign out* (in the header of every page) invalidates it on the server, not only in that browser |
 | Signing key (OpenPGP) | the pool's Worker only (`SIGNING_KEY` secret, `worker/src/signing.ts`) | sign the databases it stores and the packages the factory builds (`POST /pool/:sha256/sign`) | — | live; no worker, runner or repository holds it |
 | `CLOUDFLARE_API_TOKEN` | the release workflow on GitHub | deploy the Worker, apply migrations, record the deploy | — | live; all GitHub holds (no hosted worker: Actions runs CI and the release only) |
@@ -230,6 +230,66 @@ passed without the maintainer's passkey.
 | A forced promotion — Status's *Force into …*, `promote` with `force: "yes"` | a ring's head, into the ring above, past the gate — both architectures, or one | the maintainer's passkey, in the browser, for exactly that promotion (#284); no token forces one; the target's health check still rolls it back |
 | A rollback — Status's *Roll back*, a job by hand | an earlier release of the ring, again | a maintainer's session or token; a release of another ring is refused (`another_ring`, #284: stable pointed at edge's would be a promotion past the gate); the journal keeps why |
 | A trial — after the project's review build, or a job by hand | the project's staged build, into the lab — never a promised ring, never promoted | a staged build of the project's own, never a contributor's bytes; the lab promises nothing, and a machine takes it only with `--ring lab` |
+
+## A maintainer's first passkey
+
+Maintainers come from one place: the logins `factory/MAINTAINERS.toml`
+lists on `main`, changed only by a reviewed pull request (the repository
+admin's bypass stays visible on the pull request and is against the
+project's rules: see the Governance chapter's *Bootstrap, and the one door
+left*), and applied by the brain every ten minutes (a `role` line in the
+journal). Nothing on the site names one. A maintainer the file just named
+holds no passkey, and approve, block, a forced promotion and a reset of
+another maintainer's passkeys need one. The passkey stays required (#287,
+option A, decided on 2026-09-29): the site guides the maintainer to it
+instead of stopping them.
+
+- **Told before it matters.** `/auth/me` tells a maintainer's pages whether
+  they hold one (`passkey`: one entry of the passkeys' index, and no other
+  role's answer carries it). Once the browser knows the login holds one, it
+  says so (`?held=<login>`, kept in `localStorage` until a sign-out or a
+  refusal that says none) and the pool reads nothing for it: a maintainer
+  who holds a passkey costs the pool what a page view cost before #287. The
+  flag only draws the page; every act still checks the passkey itself. A
+  notice says what needs a passkey and that nothing else does, with
+  *Register a passkey now*: always on Review and on their own page while
+  they hold none, and once on the first page they see as a maintainer. The
+  browser keeps that it was shown (`localStorage`): a page view writes
+  nothing to the pool.
+- **Registered at the moment of need.** The Approve, Block and Force dialogs
+  (and a reset's), and the page of an agent's approve or block draft, offer
+  *Register a passkey and approve* (… and block, … and force). The first
+  press registers the passkey through the same two routes as the person's
+  page (`POST /auth/passkeys/challenge`, `POST /auth/passkeys`): the session
+  alone, and the first passkey only — the insert still refuses a second
+  without an answer from one the login holds. The dialog stays open. Its
+  next press asks for the assertion for exactly that act and login (`POST
+  /auth/passkeys/assert`, or the draft's own challenge), and the act is
+  posted with it: the challenge is bound to the act, as for any passkey. A
+  cancelled registration registers nothing and decides nothing, and the
+  dialog says so.
+- **One registered elsewhere meanwhile.** The pool's options list the
+  passkeys the login holds (`excludeCredentials`). When they list one, it
+  was registered since the page loaded: in another tab, on another device,
+  or by whoever else holds the session. The dialog then asks the device for
+  nothing (a browser holding that passkey would refuse to make another) and
+  goes on with the one held. It says where that passkey is listed (the
+  person's page) and that one they did not register is another maintainer's
+  to reset: the one moment a planted key could be noticed is not spent
+  calling it theirs.
+- **No new door.** The flow adds no route and takes nothing the routes did
+  not take before. A stolen session could register a first passkey on the
+  person's page before #287, and it still can: the registration is a
+  `passkey` line on the public journal, and another maintainer resets it.
+- **On the record.** A decision confirmed with a passkey's first use, within
+  ten minutes of its registration, says so on its journal line ("… with a
+  passkey registered just now", `registered_just_now` in the payload), read
+  from the row the assertion reads anyway.
+- **Everything else stays free.** Claiming, the review workspace, request
+  changes, reject, adopt, lifting a block, a category, withdrawing an
+  approval, a worker's trust and its revocation, an order to a worker and
+  taking one back (#277), a dry run, a rollback, a promotion the gate
+  decides, a cancel and a note take the session or the token and no passkey. `worker/test/passkey-guided.test.ts` pins the list.
 
 ## What a compromise costs
 

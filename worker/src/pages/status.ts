@@ -431,7 +431,7 @@ __CHARTS__
     var from = b.getAttribute("data-force"), to = b.getAttribute("data-to"), el = $("#rb-state");
     b.disabled = true;
     var both = [{ value: "", text: "Both architectures", selected: true }].concat(ARCHES.map(function (a) { return { value: a, text: a + " only" }; }));
-    ask({ title: "Force " + from + " into " + to + "?", text: esc(to + " serves " + from + "'s head at once, past the evidence and the gate: both architectures, or the one you pick. Its health check still rolls it back. Your passkey confirms it, and the journal keeps why."), select: { label: "Architectures", options: both }, input: "required", confirm: "Force with your passkey", danger: true }).then(function (go) {
+    ask({ title: "Force " + from + " into " + to + "?", text: esc(to + " serves " + from + "'s head at once, past the evidence and the gate: both architectures, or the one you pick. Its health check still rolls it back, and the journal keeps why."), held: "Your passkey confirms it.", select: { label: "Architectures", options: both }, input: "required", confirm: "Force with your passkey", first: "Register a passkey and force", nothing: "Nothing was queued.", danger: true }).then(function (go) {
       if (go === null) { b.disabled = false; return; }
       var arch = go.pick, params = { from: from, to: to, force: "yes", note: go.note };
       if (arch) params.arch = arch;

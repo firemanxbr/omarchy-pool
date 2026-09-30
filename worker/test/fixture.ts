@@ -154,7 +154,7 @@ export function runScript(code: string, opts: { pathname: string; search?: strin
     get parentElement() { return (this._parent = this._parent || node()); },
     previousElementSibling: null,
     get tBodies() { return sel ? [document.querySelector(`${sel} tbody`)] : [node()]; },
-    setAttribute() {}, getAttribute: () => null, insertAdjacentHTML() {}, remove() {}, focus() {}, closest: () => null, addEventListener() {},
+    setAttribute() {}, getAttribute: () => null, removeAttribute() {}, insertAdjacentHTML() {}, remove() {}, focus() {}, closest: () => null, addEventListener() {},
     querySelector: () => node(), querySelectorAll: () => [],
   });
   const document = {

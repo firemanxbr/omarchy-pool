@@ -153,9 +153,9 @@ and what it answers:
 
 `next` is what the agent tells its person. For approve and block it names
 the passkey the confirmation asks for (*A passkey for approve and block*,
-below); a login that holds none yet is told so, with the address of the
-Passkeys section of their page, before they open the link. Request changes
-and reject say "Open the link … and confirm".
+below); a login that holds none yet is told so before they open the link,
+and that the page registers one on their device first (#287). Request
+changes and reject say "Open the link … and confirm".
 
 `submit_review` has the three verdicts of #247. `request_changes` stops the
 round: the builds in review are cancelled, the note goes to the requester,
@@ -333,8 +333,9 @@ page shows them.
    the logs, and the Review workspace — and who drafted it with which agent.
    For reject and block, the person types the package's name. For approve
    and block, Confirm asks for the person's passkey (*A passkey for approve
-   and block*, below); a person without one is told to register one, and is
-   offered no Confirm.
+   and block*, below); a person without one is offered *Register a passkey
+   and approve* (or block): its first press registers one on their device,
+   its next confirms with it (#287).
 4. Confirm posts the form with the session cookie. The server reads the draft
    by its id and checks that it is this person's and still waiting. For
    approve and block it verifies the passkey's answer before anything else
@@ -421,8 +422,9 @@ another maintainer.
   to that address lands on the section once it is drawn, and a contributor
   who holds no passkey is shown no section): a name for it, then the
   browser's own request. Their first passkey is added with the session
-  alone; any other asks first for an assertion from one they hold (*Adding
-  and removing*, below). The page asks the pool for the
+  alone — here, or from the notice or the dialog of the act that needs it
+  (*None yet*, below); any other asks first for an assertion from one they
+  hold (*Adding and removing*, below). The page asks the pool for the
   options (`POST /auth/passkeys/challenge`: this relying party, a user
   handle that is a hash, not the login, ES256, EdDSA and RS256, user
   verification required, attestation `none`, the passkeys they hold
@@ -467,9 +469,14 @@ another maintainer.
   Then the typed name, the predicate and the spend, as before. The decision's
   `through` names the passkey (`through.passkey`), and its journal line says
   "confirmed in the browser with a passkey".
-- **Without a passkey.** The draft's page says so — "Register a passkey
-  first" — links to the registration, and offers Discard only. A POST without
-  an answer is refused in the same words, with the same link, and the
+- **Without a passkey.** The draft's page offers *Register a passkey and
+  approve* (… and block, #287): Confirm's first press registers one on this
+  device with the session alone (the shell's `firstPasskey`) and the page
+  stays, saying so; its next press confirms the draft with it, as above, and
+  the decision's line says "with a passkey registered just now" on the
+  passkey's first use within ten minutes (`through.registered_just_now`). A
+  POST without an answer — a browser without the page's script — is refused
+  ("Register a passkey first", with the link to the registration), and the
   challenge route answers `code: "no_passkey"` with the link: there is no
   fallback to the session alone.
 - **The web's own Approve and Block (#271).** Approve on Review and on a
@@ -494,6 +501,30 @@ another maintainer.
   record, its journal line and its answer name the passkey (`passkey`, where
   a draft's carry `through.passkey`). A handler called by a door that
   forgot the gate refuses (`decidedWith` fails closed).
+- **None yet: guided, not stopped (#287).** A maintainer who holds no
+  passkey is told before it matters: `/auth/me` says so to their pages
+  (`passkey: false`, a maintainer's answer only; a page whose browser knows
+  the login holds one sends `?held=<login>`, and the pool reads nothing for
+  it), and a notice — what needs a passkey, that nothing else does,
+  *Register a passkey now* — is drawn on Review and on their own page while
+  they hold none, and once on the first page they see as a maintainer (the
+  browser keeps that it was shown). The dialogs of approve, block and a
+  forced promotion (and a reset's), and an agent's draft's page (above),
+  offer *Register a passkey and approve* (… and block, … and force): the
+  first press registers the passkey through the page's own two routes, with
+  the session alone, and the dialog stays open; the next press asks for the
+  challenge of exactly that act (`passkeyed`) and posts the act with the
+  answer. One passkey request per press, as Safari wants it. A cancelled
+  registration decides nothing, and the dialog says so. When the pool's
+  options already list a passkey of the login's (registered since the page
+  loaded — another tab, another device, or whoever holds the session), the
+  device is asked for nothing: the dialog goes on with that one and says
+  where it is listed, and that one they did not register is another
+  maintainer's to reset. The decision's
+  journal line says "… with a passkey registered just now" (and
+  `registered_just_now: true`) when it is the passkey's first use within ten
+  minutes of its registration. Nothing else a maintainer does asks for a
+  passkey; `passkey-guided.test.ts` pins the list.
 - **No token approves or blocks (#271).** A request that carries an
   `Authorization` header — a contributor's `omc_` token, a maintainer's
   included, or a script's — is refused on approve and block with
@@ -920,8 +951,9 @@ The Worker's side, in vitest on a real local D1
   verification, nobody present, a registration's type, a frame of another
   site, a key of another login, another key's signature under the login's
   credential, a removed key, a counter that went backwards or stood still.
-  A maintainer without a passkey is told to register one — on the page, at
-  the POST and at the challenge — with the link, and offered no Confirm;
+  A maintainer without a passkey is offered the registration on the page
+  (#287), and refused at the POST and at the challenge without an answer,
+  with the link;
   another address says where passkeys work. Request changes and reject
   still confirm without one. The challenge route takes the session, the
   Origin, the nonce and the same login; a new challenge for the draft

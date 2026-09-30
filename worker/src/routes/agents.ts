@@ -351,20 +351,20 @@ export async function handleDraft(a: AgentCaller, request: Request, env: Env, or
   const row = await env.DB.prepare(`INSERT INTO drafts (id, grant_id, login, agent, client, verdict, note, name, task_id, facts, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${DRAFT_COLS}`)
     .bind(draft, a.grant, a.contributor.login, a.agent, a.client, verdict, note, name, task, facts, expires)
     .first<DraftRow>();
-  return json({ ...draftView(row!, origin), next: await nextStep(env, a.contributor.login, verdict, origin) }, 201, { "cache-control": "no-store" });
+  return json({ ...draftView(row!, origin), next: await nextStep(env, a.contributor.login, verdict) }, 201, { "cache-control": "no-store" });
 }
 
 /**
  * What the agent tells its person to do with a draft (the answer's `next`):
  * open the link and confirm. For approve and block (#257) it says the
  * confirmation asks for their passkey — and, when the login holds none yet,
- * that one is registered first, and where — so the person hears it before
+ * that the page registers one first (#287) — so the person hears it before
  * the page, not from it.
  */
-async function nextStep(env: Env, login: string, verdict: Verdict, origin: string): Promise<string> {
+async function nextStep(env: Env, login: string, verdict: Verdict): Promise<string> {
   if (!PASSKEY_VERDICTS.includes(verdict)) return `Open the link in a browser signed in as ${login} and confirm. Nothing is decided until then.`;
   if (await env.DB.prepare(HAS_PASSKEY_SQL).bind(login).first()) return `Open the link in a browser signed in as ${login} and confirm with your passkey: your device asks for your fingerprint, face or PIN. Nothing is decided until then.`;
-  return `${login} has no passkey yet, and ${verdict === "approve" ? "an approval" : "a block"} is confirmed with one: register it first on ${origin}${registerHref(login)}, then open the link in a browser signed in as ${login} and confirm with it. Nothing is decided until then.`;
+  return `${login} has no passkey yet, and ${verdict === "approve" ? "an approval" : "a block"} is confirmed with one: open the link in a browser signed in as ${login}. The page registers one on that device, then confirms with it: your device asks for your fingerprint, face or PIN. Nothing is decided until then.`;
 }
 
 /** GET /api/v1/factory/drafts/:id — the draft, to its own login's agent. */
@@ -575,11 +575,13 @@ export async function handleConfirm(id: string, url: URL, request: Request, env:
   }
   if (d.expires_at <= new Date().toISOString()) return message(url, env, v, 410, "Expired", "Nobody confirmed this draft within thirty minutes; nothing was decided. Ask the agent for a new draft.", "refused", back);
   // Approve and block: the passkey first — its challenge is taken whatever comes next, so an answer is good for one request — and nothing about the draft changes when it is refused.
-  let passkey: string | null = null;
+  let passkey: string | null = null, justNow = false;
   if (PASSKEY_VERDICTS.includes(d.verdict)) {
     const pk = await confirmPasskey(env, url, who.c.login, d.id, form);
     if ("refused" in pk) return message(url, env, v, pk.status, pk.heading, esc(pk.text), "refused", pk.register ? [{ href: registerHref(who.c.login), label: "Register a passkey" }, ...back] : back);
     passkey = pk.passkey;
+    // The passkey's first use, minutes after its registration (#287: the draft's page registers a first one): the record and the line say so.
+    justNow = !!pk.justNow;
   }
   if ((d.verdict === "reject" || d.verdict === "block") && (form.get("name") ?? "").trim() !== d.name) {
     return message(url, env, v, 400, "Type the package's name", esc(`To ${d.verdict} it, type ${d.name} in the box: a rejection and a block are confirmed with the name typed.`), "refused", back);
@@ -593,7 +595,7 @@ export async function handleConfirm(id: string, url: URL, request: Request, env:
   // Spent before anything is decided: a second confirm — a double click, a retried request — changes nothing and is told so.
   const spent = await env.DB.prepare(SPEND_SQL).bind(d.id, who.c.login, "confirmed").run();
   if (spent.meta.changes !== 1) return message(url, env, v, 409, "Confirmed already", "This draft was confirmed or discarded already: a draft decides once.", "refused", back);
-  const through: Through = { agent: d.agent, client: d.client, grant: d.grant_id, draft: d.id, drafted_at: d.created_at, confirmed_at: new Date().toISOString(), ...(passkey ? { passkey } : {}) };
+  const through: Through = { agent: d.agent, client: d.client, grant: d.grant_id, draft: d.id, drafted_at: d.created_at, confirmed_at: new Date().toISOString(), ...(passkey ? { passkey } : {}), ...(justNow ? { registered_just_now: true as const } : {}) };
   // The web's own handler, as the web calls it: the browser's session is the door (via: web), the draft rides on its record and its line.
   const inner = new Request(`${url.origin}/api/v1/`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(d.verdict === "block" ? { reason: d.note } : { note: d.note }) });
   let res: Response;
@@ -613,7 +615,7 @@ export async function handleConfirm(id: string, url: URL, request: Request, env:
   await env.DB.prepare("UPDATE drafts SET state = ?, outcome = ? WHERE id = ?").bind(res.ok ? "confirmed" : "refused", JSON.stringify({ status: res.status, ...body }), d.id).run();
   if (!res.ok) return message(url, env, v, res.status, "Not decided", esc(String(body.error ?? `HTTP ${res.status}`)), "refused", back);
   const words: Record<Verdict, string> = { approve: "approved", request_changes: "sent back with changes requested", reject: "rejected", block: "blocked" };
-  return message(url, env, v, 200, `${d.name} ${words[d.verdict]}`, esc(`${d.name} ${words[d.verdict]} by ${who.c.login} — drafted by ${d.agent}, confirmed in the browser${passkey ? " with a passkey" : ""}.`) + (typeof body.record === "string" ? ` <a href="${esc(body.record)}">The signed record →</a>` : ""), "done", [{ href: `/package/${encodeURIComponent(d.name)}`, label: d.name }, back[1]]);
+  return message(url, env, v, 200, `${d.name} ${words[d.verdict]}`, esc(`${d.name} ${words[d.verdict]} by ${who.c.login} — drafted by ${d.agent}, confirmed in the browser${passkey ? ` with a passkey${justNow ? " registered just now" : ""}` : ""}.`) + (typeof body.record === "string" ? ` <a href="${esc(body.record)}">The signed record →</a>` : ""), "done", [{ href: `/package/${encodeURIComponent(d.name)}`, label: d.name }, back[1]]);
 }
 
 // ---------- the tools' routes, with an agent's token ----------

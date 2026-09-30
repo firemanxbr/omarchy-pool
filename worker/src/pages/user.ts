@@ -60,6 +60,7 @@ const CSS = String.raw`
 `;
 
 const body = (login: string) => String.raw`
+  <div id="pk-notice" hidden></div>
   <div class="profile-head">
     <span class="avatar lg" id="avatar">…</span>
     <div><p class="crumbs"><a href="/factory">Factory</a> / <span id="crumb"></span></p><h1 id="title">…</h1><p class="line" id="line"></p></div>
@@ -445,6 +446,8 @@ const SCRIPT = String.raw`
     if (!maintainer && !d.passkeys.length && $("#passkeys").hidden) return;
     $("#passkeys").hidden = false;
     PK_HELD = d.passkeys.length;
+    // The shell's word on it follows the owner's own list (#287): the notice at the top goes once they hold one, and comes back when the last one went.
+    passkeyHeld(PK_HELD > 0);
     // The form is drawn again only when it changed: a name being typed stays through a refresh.
     if (PK_DRAWN !== maintainer) { $("#pk-form").innerHTML = maintainer ? PASSKEY_FORM : PASSKEY_NOT_A_MAINTAINER; PK_DRAWN = maintainer; }
     pager("#pk-table", d.passkeys, function (k) {
@@ -497,6 +500,8 @@ const SCRIPT = String.raw`
     });
   }
   document.addEventListener("submit", function (ev) { if (ev.target && ev.target.id === "pk-form") { ev.preventDefault(); addPasskey(); } });
+  // One registered from the notice at the top of the page (#287): the table says so at once.
+  onPasskey(function () { quota(); });
   // ---- a lost passkey (#271): another maintainer's way back for this one — every passkey of theirs removed, their token and their agents' grants revoked (#284), and their browser session ended, in one step the journal and a signed record keep, confirmed with the resetting maintainer's own passkey. Drawn for a maintainer on another maintainer's page, and for nobody else; the server says when there is nothing to reset, before the resetting maintainer's device is asked (the page reads nothing more to know it).
   function renderReset(d) {
     var show = d.role === "maintainer" && isMaintainer() && !isOwner(login);
@@ -510,7 +515,7 @@ const SCRIPT = String.raw`
     ev.preventDefault();
     var why = $("#pk-reset-why").value.trim();
     if (why.length < 4) { resetSay(esc("Say why in a few words: it goes on the public journal and the signed record."), true); return; }
-    ask({ title: "Reset " + login + "'s passkeys?", text: "Every passkey of " + esc(login) + "'s goes, with their token and their agents' grants, and " + esc(login) + " is signed out. They add a new passkey and make a new token after signing in again. Your passkey confirms it. The reason: <i>" + esc(why) + "</i>", confirm: "Reset with your passkey", danger: true }).then(function (go) {
+    ask({ title: "Reset " + login + "'s passkeys?", text: "Every passkey of " + esc(login) + "'s goes, with their token and their agents' grants, and " + esc(login) + " is signed out. They add a new passkey and make a new token after signing in again. The reason: <i>" + esc(why) + "</i>.", held: "Your passkey confirms it.", confirm: "Reset with your passkey", first: "Register a passkey and reset", nothing: "Nothing was reset.", danger: true }).then(function (go) {
       if (go === null) return;
       passkeyed("passkey:reset:" + login, function (assertion) { return api("POST", "/auth/passkeys/reset", { login: login, reason: why, assertion: assertion }); }).then(function (r) {
         if (r.error) { resetSay("Not reset: " + refusalHtml({ error: pkSentence(r.error), register: r.register }), true); return; }
