@@ -4,6 +4,13 @@ import { sweepStaging } from "../staging";
 import { GRACE_DAYS, KEEP_RELEASES, outsideRetention, retention } from "../db";
 import { EXPIRED_CHALLENGES_SQL } from "./passkeys";
 
+/** Closed orders to workers past 90 days (#277): worker by worker, through idx_worker_orders_worker (worker_id, issued_at) — the workers are a few hundred rows, the orders of one a range of its index. */
+export const OLD_ORDERS_SQL = "DELETE FROM worker_orders WHERE worker_id IN (SELECT id FROM build_workers) AND issued_at < ? AND state NOT IN ('pending', 'delivered')";
+/** The keys that said a cap or a budget was hit once per window, or that a release ignored the rules' scale once per deploy: past a week, by a range on the settings' key. A tripped breaker's key (worker-breaker:) is never pruned here: only the sweep's clear removes it. */
+export const OLD_ORDER_KEYS_SQL = ["order-cap:", "order-budget:", "rules-scale-ignored:"].map((p) => `DELETE FROM settings WHERE key >= '${p}' AND key < '${p.slice(0, -1)};' AND updated_at < ?`);
+/** A spell a worker left open when it stopped claiming (#277): past a week unseen, closed — through the breaker's own index (idx_build_workers_not_ready), which then holds the fleet's failing workers, not its history. The breaker never counted it (it counts the alive only); a worker that comes back and fails begins a new spell. */
+export const DEAD_SPELLS_SQL = "UPDATE build_workers SET agent_error_since = NULL WHERE agent_error_since IS NOT NULL AND last_seen < ?";
+
 /** The grants whose one-time code expired unswapped: the partial index on the code's expiry, where no token was taken (migration 0039) — named, so the planner never walks the token's index for its NULLs instead. */
 export const PENDING_CODES_SQL = "DELETE FROM agent_grants INDEXED BY idx_agent_grants_pending WHERE token_hash IS NULL AND code_expires_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 
@@ -134,5 +141,10 @@ export async function handleGc(url: URL, env: Env): Promise<Response> {
   const codes = await env.DB.prepare(PENDING_CODES_SQL).run();
   // A passkey's challenge nobody answered (#257): it lived five minutes; the row goes, found through the index on its expiry.
   const challenges = await env.DB.prepare(EXPIRED_CHALLENGES_SQL).run();
-  return json({ keep, deleted, agent_codes_pruned: codes.meta.changes ?? 0, passkey_challenges_pruned: challenges.meta.changes ?? 0, taken_back_by_a_ring: takenBack, objects_kept_for_another_row: objectsKept, bytes, remaining: packages.length - victims.length, protected_releases: protectedReleases, kept_checkpoints: keptCheckpoints, membership_rows_pruned: pruned.meta.changes ?? 0, delta_rows_pruned: deltasPruned, cve_meta_pruned: cves.meta.changes ?? 0, staging });
+  // Workers' orders (#277): the closed ones past 90 days, the once-per-window keys past a week, and the spells of workers gone a week.
+  const orders = await env.DB.prepare(OLD_ORDERS_SQL).bind(new Date(Date.now() - 90 * 86400000).toISOString()).run();
+  const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString();
+  await env.DB.batch(OLD_ORDER_KEYS_SQL.map((sql) => env.DB.prepare(sql).bind(weekAgo)));
+  const spells = await env.DB.prepare(DEAD_SPELLS_SQL).bind(weekAgo).run();
+  return json({ keep, deleted, agent_codes_pruned: codes.meta.changes ?? 0, passkey_challenges_pruned: challenges.meta.changes ?? 0, orders_pruned: orders.meta.changes ?? 0, dead_spells_closed: spells.meta.changes ?? 0, taken_back_by_a_ring: takenBack, objects_kept_for_another_row: objectsKept, bytes, remaining: packages.length - victims.length, protected_releases: protectedReleases, kept_checkpoints: keptCheckpoints, membership_rows_pruned: pruned.meta.changes ?? 0, delta_rows_pruned: deltasPruned, cve_meta_pruned: cves.meta.changes ?? 0, staging });
 }

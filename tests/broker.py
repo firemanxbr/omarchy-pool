@@ -5,7 +5,11 @@ probe); the probe on /health; an agent failure as a 502 the client
 (agent.py's anthropic path) understands; agent.py end to end through it;
 GitHub read-only with the token added here; and the pool's calls for one
 task at a time — the worker's token added here, the job token never handed
-on, another task's id refused, complete releasing the hold.
+on, another task's id refused, complete releasing the hold; and the orders
+of #277: an answer passes only for an order seen delivered — in a claim's
+answer or a 426's —, between tasks, once; the claim says the broker exits
+with its builder (pair restart), and it does once the builder accepted a
+restart and the pool took the answer — not when the pool refused it.
 Run: python3 tests/broker.py"""
 import json
 import os
@@ -22,6 +26,11 @@ sys.path.insert(0, os.path.join(ROOT, "factory", "bin"))
 # ---------------------------------------------------------------- fakes --
 seen = []
 pool_seen = []
+ORDER_RESTART = "wo_" + "1" * 32
+ORDER_RECHECK = "wo_" + "2" * 32
+ORDER_DRAIN = "wo_" + "3" * 32
+ORDER_OUTDATED = "wo_" + "4" * 32  # rides a 426
+ORDER_GONE = "wo_" + "5" * 32  # closed at the pool before its answer came
 
 
 def fake_complete(system, user, max_tokens=4000, timeout=300):
@@ -49,7 +58,7 @@ class FakePool(BaseHTTPRequestHandler):
     def record(self):
         n = int(self.headers.get("content-length", "0") or 0)
         body = self.rfile.read(n) if n else b""
-        pool_seen.append({"method": self.command, "path": self.path, "auth": self.headers.get("authorization"), "body": body, "type": self.headers.get("content-type"), "ua": self.headers.get("user-agent")})
+        pool_seen.append({"method": self.command, "path": self.path, "auth": self.headers.get("authorization"), "body": body, "type": self.headers.get("content-type"), "ua": self.headers.get("user-agent"), "takes": self.headers.get("x-omarchy-broker-takes")})
         return body
 
     def do_GET(self):  # noqa: N802
@@ -64,7 +73,22 @@ class FakePool(BaseHTTPRequestHandler):
 
     def do_POST(self):  # noqa: N802
         body = self.record()
+        if self.path.startswith("/api/v1/factory/workers/self/orders/"):
+            if self.path.endswith(ORDER_GONE):
+                return self._json(409, {"error": "closed meanwhile"})
+            return self._json(200, {"order": self.path.rsplit("/", 1)[1], "state": json.loads(body).get("outcome")})
         if self.path == "/api/v1/factory/claim":
+            if json.loads(body).get("arch") == "outdated":
+                return self._json(426, {"error": "this worker runs v1.0.0; the pool is at v1.0.3", "latest": "v1.0.3", "orders": [
+                    {"id": ORDER_OUTDATED, "kind": "recheck-agent", "reason": "stale", "issued_by": "pool:community", "unless_agent_ok": False, "notice": False}]})
+            if json.loads(body).get("arch") == "gone":
+                return self._json(200, {"task": None, "orders": [
+                    {"id": ORDER_GONE, "kind": "restart", "reason": "not ready", "issued_by": "pool:community", "unless_agent_ok": True, "notice": False}]})
+            if json.loads(body).get("arch") == "orders":
+                return self._json(200, {"task": None, "orders": [
+                    {"id": ORDER_RESTART, "kind": "restart", "reason": "not ready", "issued_by": "pool:community", "unless_agent_ok": True, "notice": False},
+                    {"id": ORDER_RECHECK, "kind": "recheck-agent", "reason": "stale", "issued_by": "m1", "unless_agent_ok": False, "notice": False},
+                    {"id": ORDER_DRAIN, "kind": "drain", "reason": "disk", "issued_by": "m1", "unless_agent_ok": False, "notice": True}]})
             if json.loads(body).get("arch") == "nothing":
                 self.send_response(204)
                 self.send_header("content-length", "0")
@@ -239,7 +263,58 @@ status, out = call("POST", "/pool/factory/tasks/44/heartbeat", {})
 assert status == 403 and "(43)" in out["error"], out
 broker.HELD.release()
 
-# 13. Without a worker token the pool path is off; the agent and GitHub stay.
+# ---------------------------------------------------------------- orders (#277) --
+# 13. An answer for an order this broker never saw delivered: refused before the pool hears of it.
+status, out = call("POST", f"/pool/factory/workers/self/orders/{ORDER_RECHECK}", {"instance": "a" * 32, "outcome": "done", "code": "probed"})
+assert status == 403 and "saw delivered" in out["error"], out
+# 14. A claim the pool answers with orders: passed on; the claim said the broker exits with its builder — its own header, never the builder's.
+status, out = call("POST", "/pool/factory/claim", {"arch": "orders"}, {"x-omarchy-broker-takes": "something-else"})
+assert status == 200 and [o["kind"] for o in out["orders"]] == ["restart", "recheck-agent", "drain"], out
+assert pool_seen[-1]["takes"] == "pair-restart", pool_seen[-1]
+assert call("GET", "/health")[1]["task"] is None
+# 15. The re-check's answer passes, with the worker's token added here — once.
+status, out = call("POST", f"/pool/factory/workers/self/orders/{ORDER_RECHECK}", {"instance": "a" * 32, "outcome": "done", "code": "probed"})
+assert status == 200 and out["state"] == "done", out
+assert pool_seen[-1]["auth"] == "Bearer omw_THE_WORKERS", pool_seen[-1]
+status, out = call("POST", f"/pool/factory/workers/self/orders/{ORDER_RECHECK}", {"instance": "a" * 32, "outcome": "done", "code": "probed"})
+assert status == 409 and "answered already" in out["error"], out
+# 16. A notice is never answered.
+status, out = call("POST", f"/pool/factory/workers/self/orders/{ORDER_DRAIN}", {"instance": "a" * 32, "outcome": "done"})
+assert status == 403, out
+# 17. While a task is held no answer passes — a recipe runs only inside a held task — and the worker's own id still does (the updater reads it).
+status, out = call("POST", "/pool/factory/claim", {"arch": "aarch64"})
+assert status == 200 and out["task"]["id"] == 41, out
+status, out = call("POST", f"/pool/factory/workers/self/orders/{ORDER_RESTART}", {"instance": "a" * 32, "outcome": "accepted", "code": "exiting"})
+assert status == 403 and "between tasks" in out["error"], out
+assert call("GET", "/pool/factory/workers/self")[0] == 200
+broker.HELD.release()
+# 18. Pair restart: a restart refused (its agent answered) leaves the broker up; one accepted, and taken by the pool, takes it down with the builder.
+exits = []
+broker.pair_restart = lambda: exits.append(75)
+broker.threading = type("Now", (), {"Timer": staticmethod(lambda secs, f: type("T", (), {"start": staticmethod(f)})())})
+status, out = call("POST", "/pool/factory/claim", {"arch": "orders"})
+assert status == 200, out
+status, out = call("POST", f"/pool/factory/workers/self/orders/{ORDER_RESTART}", {"instance": "a" * 32, "outcome": "refused", "code": "agent-ok"})
+assert status == 200 and exits == [], (out, exits)
+status, out = call("POST", "/pool/factory/claim", {"arch": "orders"})
+status, out = call("POST", f"/pool/factory/workers/self/orders/{ORDER_RESTART}", {"instance": "a" * 32, "outcome": "accepted", "code": "exiting"})
+assert status == 409, "an id answers once, whichever claim delivered it again"
+broker.DELIVERED.answered.clear()
+status, out = call("POST", f"/pool/factory/workers/self/orders/{ORDER_RESTART}", {"instance": "a" * 32, "outcome": "accepted", "code": "exiting"})
+assert status == 200 and exits == [75], (out, exits)
+# 18b. An accepted restart the pool does not take (closed meanwhile: 409) leaves the broker up: the builder's restart was not the pool's order any more.
+exits.clear()
+status, out = call("POST", "/pool/factory/claim", {"arch": "gone"})
+assert status == 200 and out["orders"][0]["id"] == ORDER_GONE, out
+status, out = call("POST", f"/pool/factory/workers/self/orders/{ORDER_GONE}", {"instance": "a" * 32, "outcome": "accepted", "code": "exiting"})
+assert status == 409 and exits == [], (status, out, exits)
+# 18c. A 426 carries the orders waiting for an outdated builder: passed on as the pool said it, and the broker saw them delivered — their answer passes.
+status, out = call("POST", "/pool/factory/claim", {"arch": "outdated"})
+assert status == 426 and out["orders"][0]["id"] == ORDER_OUTDATED, (status, out)
+status, out = call("POST", f"/pool/factory/workers/self/orders/{ORDER_OUTDATED}", {"instance": "a" * 32, "outcome": "done", "code": "probed"})
+assert status == 200 and out["state"] == "done", out
+
+# 19. Without a worker token the pool path is off; the agent and GitHub stay.
 del os.environ["OMARCHY_WORKER_TOKEN"]
 status, out = call("GET", "/pool/factory/workers/self")
 assert status == 503 and "no worker token" in out["error"], out

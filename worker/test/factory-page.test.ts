@@ -437,7 +437,8 @@ describe("the page", () => {
     const d = await run({ functions: ["workerRowOf"] });
     const w = { id: "m1-aarch64-builder-hetzner-aarch64-k3v9", owner: "m1", arch: "aarch64", agent: "claude-code/claude-sonnet-4-5-20250929", alive: true, ready: true, current_task: null };
     const top = /<div class="fx-wtop">([\s\S]*?)<\/div>/.exec(d.workerRowOf(w))![1];
-    expect(top).toBe('<span><span class="mono" title="m1-aarch64-builder-hetzner-aarch64-k3v9">aarch64-builder-hetzner</span> · aarch64</span><span title="claude-code/claude-sonnet-4-5-20250929">claude-sonnet-4-5-20250929</span>');
+    // The name is a link to the worker's page (#277), whole on hover as before.
+    expect(top).toBe('<span><a class="mono" href="/worker/m1-aarch64-builder-hetzner-aarch64-k3v9" title="m1-aarch64-builder-hetzner-aarch64-k3v9">aarch64-builder-hetzner</a> · aarch64</span><span title="claude-code/claude-sonnet-4-5-20250929">claude-sonnet-4-5-20250929</span>');
     const html = await page("/factory");
     // The line wraps between the two, never inside one: each is cut only when it alone is wider than the card.
     expect(declared(html, ".fx-wtop")).toMatchObject({ display: "flex", "flex-wrap": "wrap", "justify-content": "space-between" });

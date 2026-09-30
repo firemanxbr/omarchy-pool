@@ -33,6 +33,7 @@
  *   POST /auth/confirm/:id/challenge · POST /auth/passkeys/challenge · POST /auth/passkeys · POST /auth/passkeys/:id/remove   passkeys: approve and block confirmed with one (#257, routes/passkeys.ts)
  *   POST /auth/passkeys/assert · POST /auth/passkeys/reset   the web's approve and block, a passkey added or removed, with one; a lost one reset by another maintainer (#271)
  *   GET  /api/v1/factory/{packages,built,review,approvals,maintainers,trust,workers/self,me} · GET /api/v1/factory/tasks/:id/can · GET /api/v1/users/:login · GET /api/v1/users/:login/can · GET /api/v1/cost
+ *   GET  /api/v1/factory/workers/:id[/orders|/can] · POST /factory/workers/:id/orders · DELETE /factory/workers/:id/orders/:oid · POST /factory/workers/self/orders/:id   orders to a worker (#277, routes/orders.ts)
  *   GET  /api/v1/factory/names/:name?arches= · GET /api/v1/factory/source?url=   the Factory form's live checks: would the name be taken, what the repository says
  *                                                  the factory's brain: package requests, build tasks, pull-based workers
  *   GET  /api/v1/graph?targets=a,b&ring=stable
@@ -44,7 +45,7 @@
  *   POST /api/v1/pool/gc?keep=3&limit=200          delete it (objects, then rows)
  *   POST /api/v1/pool/relayout?phase=copy|purge     the one-time move to <source>/<arch>/ (the relayout job)
  *   GET  /                                         the dashboard: the Pool (users), /factory (contributors), /review (maintainers),
- *                                                  /docs, and the detail pages /packages /package/:name /status /agents /people /workers /user/:login /build/:id
+ *                                                  /docs, and the detail pages /packages /package/:name /status /agents /people /workers /worker/:id /user/:login /build/:id
  *                                                  (/pipeline, /journal, /security, /docs/api and /request redirect to the section they became: MOVED)
  *   GET  /pool/<source>/<arch>/<file>              fallback static origin (dev)
  *   GET  /assets/kit.<hash>.css                    the v1 kit's stylesheet (pages/kit.ts): its primitives and icons, immutable under its hash
@@ -72,6 +73,7 @@ import {
   handleNameStanding,
 } from "./routes/contributors";
 import { handleSourceRead } from "./routes/sources";
+import { handleAnswerOrder, handleCancelOrder, handleIssueOrder, handleWorkerCan, handleWorkerOrders, handleWorkerPublic } from "./routes/orders";
 import type { Actor } from "./routes/factory";
 import { jobOf } from "./jobtoken";
 import { handleTrustWorker, handleTrustList, handleNewToken, handleWithdrawRecord, handleWorkerMode, handleWorkerLog, SIGN_IN } from "./routes/contributors";
@@ -98,6 +100,7 @@ import { governanceHtml } from "./pages/governance";
 import { docsHtml } from "./pages/docs";
 import { docsWorkersHtml } from "./pages/docs-workers";
 import { workersHtml } from "./pages/workers";
+import { workerHtml } from "./pages/worker";
 import { userHtml } from "./pages/user";
 import { peopleHtml } from "./pages/people";
 import { agentsHtml } from "./pages/agents";
@@ -160,6 +163,10 @@ export interface Env {
   /** The MCP write tools' bursts (wrangler.toml, rate limiting bindings; agents.ts): twenty calls a minute per login that carry an agent token, five token swaps a minute per address. Unset (a deploy before them): not counted. */
   AGENT_CALLS?: RateLimit;
   AGENT_SWAPS?: RateLimit;
+  /** "off" stops the pool's own orders to workers (#277, orders.ts); people's orders from a worker's page still work. */
+  WORKER_RULES?: string;
+  /** The rules' step timings divided by this (1–60), honoured only where POOL_VERSION is not a release tag: wrangler dev and the E2E. */
+  WORKER_RULES_SCALE?: string;
 }
 
 
@@ -325,6 +332,9 @@ export default {
       if (user) return html(userHtml(user[1], env.POOL_URL, version(env)));
       if (path.startsWith("/package/")) return html(packageHtml(decodeURIComponent(path.slice("/package/".length)), env.POOL_URL, version(env)));
       if (/^\/build\/\d+$/.test(path)) return html(buildHtml(Number(path.slice("/build/".length)), env.POOL_URL, version(env)));
+      // A worker's page (#277): the same shell for every id; its script reads the worker and what the viewer may press.
+      const wk = path.match(/^\/worker\/([A-Za-z0-9_.-]{1,120})$/);
+      if (wk) return html(workerHtml(wk[1], env.POOL_URL, version(env)));
       // What a crawler may read (pages/robots.ts): the rules for the name asked on, and the pages worth an index under the dashboard's name on production.
       if (path === "/robots.txt") return new Response(robotsTxt(url.hostname), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=86400" } });
       if (path === "/sitemap.xml") return new Response(sitemapXml(isProductionHost(url.hostname) ? `https://${DASHBOARD_HOST}` : url.origin), { headers: { "content-type": "application/xml; charset=utf-8", "cache-control": "public, max-age=86400" } });
@@ -411,10 +421,18 @@ async function factoryRoutes(method: string, path: string, url: URL, request: Re
     const w = await workerOf(request, env);
     return w ? handleWorkerMode({ worker: w.id }, w.id, request, env) : json({ error: "a worker token is required" }, 401);
   }
+  // A worker answers an order it was handed (#277): its own token, never a job's — the process that took it says how it went.
+  if ((m = path.match(/^\/factory\/workers\/self\/orders\/([A-Za-z0-9_]{1,40})$/)) && method === "POST") {
+    const w = await workerOf(request, env);
+    return w ? handleAnswerOrder({ id: w.id, owner: w.owner, version: w.orders?.version ?? null }, m[1], request, env) : json({ error: "a worker token is required" }, 401);
+  }
   if (path === "/factory/packages" || path.startsWith("/factory/packages/") || path === "/factory/workers" || path.startsWith("/factory/workers/")) {
     const c = await contributorOf(request, env);
     if (!c) return nobody();
     if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)\/mode$/)) && method === "POST") return handleWorkerMode(c, m[1], request, env);
+    // Its owner or any maintainer gives a worker an order, or takes back one still waiting (#277, routes/orders.ts).
+    if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)\/orders$/)) && method === "POST") return handleIssueOrder(c, m[1], request, env, url);
+    if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)\/orders\/([A-Za-z0-9_]{1,40})$/)) && method === "DELETE") return handleCancelOrder(c, m[1], m[2], request, env, url);
     if (method === "POST" && path === "/factory/packages") return handleRequestPackage(c, request, env);
     if ((m = path.match(/^\/factory\/packages\/([a-z0-9@._+-]+)\/build$/)) && method === "POST") return handleBuildPackage(c, m[1], request, env);
     if ((m = path.match(/^\/factory\/packages\/([a-z0-9@._+-]+)$/)) && method === "DELETE") return handleDeletePackage(c, m[1], env);
@@ -613,6 +631,10 @@ async function api(method: string, path: string, url: URL, request: Request, env
     const w = await workerOf(request, env);
     return w ? json({ id: w.id, arch: w.arch, trust: w.trust, owner: w.owner, mode: w.mode, mode_by: w.mode_by ?? null }, 200, { "cache-control": "no-store" }) : json({ error: "a worker token is required" }, 401);
   }
+  // A worker's page (#277): its view and last orders, public and cached; the worker's own words with them for its owner and the maintainers; what the caller may press.
+  if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)$/)) && method === "GET") return handleWorkerPublic(m[1], url, env);
+  if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)\/orders$/)) && method === "GET") return handleWorkerOrders(await contributorOf(request, env), m[1], url, env);
+  if ((m = path.match(/^\/factory\/workers\/([A-Za-z0-9_.-]+)\/can$/)) && method === "GET") return handleWorkerCan(await contributorOf(request, env), m[1], env);
   if (method === "GET" && path === "/factory/me") {
     // request_status without a name (#252): the agent's person, read with contribute; their drafts ride here, no-store, nobody else's to read.
     if (hasAgentToken(request)) {

@@ -1,6 +1,7 @@
 import type { Env } from "./index";
 import { PROMOTED_RINGS, REPO_ARCHES, WORKER_ALIVE_MINUTES } from "./meta";
 import { requeueExpiredLeases, pruneWorkers } from "./routes/factory";
+import { sweepOrders } from "./orders";
 import { snapshotMetrics } from "./metrics";
 import { syncGovernance } from "./governance";
 import { backfillRequests } from "./requests";
@@ -219,6 +220,12 @@ export async function runScheduler(env: Env, now = new Date()): Promise<string[]
     if (gone) log.push(`factory: ${gone} unregistered worker(s) forgotten`);
   } catch (e) {
     log.push(`factory requeue: ${String(e)}`);
+  }
+  // Workers follow the brain (#277): orders past their time closed with their lines, a tripped breaker cleared once the outage is over.
+  try {
+    log.push(await sweepOrders(env, now.getTime()));
+  } catch (e) {
+    log.push(`orders sweep: ${String(e)}`);
   }
   // Governance: who maintains what, from the file on main.
   try {

@@ -460,6 +460,19 @@ export async function seedDashboard(env: Env): Promise<Fixture> {
   ]);
   await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('promote', 'stable', ?, 'ok', 'stable: 2 packages from core', ?)")
     .bind(arch, JSON.stringify({ release_id: release, from_release_id: previousRelease, note: "xz 5.8.5, zstd in, bzip2 out", arch })).run();
+  // Workers follow the brain (#277): alice's worker declares the orders its process takes, and has two on its record, both through the
+  // doors: m2's re-check, answered with what its agent said, and m1's restart, accepted, then seen done when its next process claimed —
+  // each with its issue line and its final line. Nothing is left waiting, so no claim of w3 after this one is handed an order.
+  const w3claim = { arch, ...agent, orders: ["drain", "recheck-agent", "restart"], instance: "3b1f0c9e2a7d4e55a1c0f6e2d9b84a17", agent_via: "broker" };
+  must(await call(env, "POST", "/factory/claim", w3claim, "omw_w3"), 204, "w3 declares the orders it takes");
+  const recheck = must(await call(env, "POST", "/factory/workers/w3/orders", { kind: "recheck-agent", reason: "its agent took 40 s to answer this morning" }, "omc_m2"), 201, "m2's re-check of w3").json.order.id as string;
+  must(await call(env, "POST", "/factory/claim", w3claim, "omw_w3"), 200, "w3 takes the re-check");
+  must(await call(env, "POST", `/factory/workers/self/orders/${recheck}`, { instance: w3claim.instance, outcome: "done", code: "probed", detail: "agent openai/gpt-5: ok (812 ms)", agent: { status: "ok", ms: 812 } }, "omw_w3"), 200, "w3 answers the re-check");
+  const restart = must(await call(env, "POST", "/factory/workers/w3/orders", { kind: "restart", reason: "a new image is on the host; take it now" }, "omc_m1"), 201, "m1's restart of w3").json.order.id as string;
+  must(await call(env, "POST", "/factory/claim", w3claim, "omw_w3"), 200, "w3 takes the restart");
+  must(await call(env, "POST", `/factory/workers/self/orders/${restart}`, { instance: w3claim.instance, outcome: "accepted", code: "exiting", detail: "exit 0 in a moment; the restart policy starts the next container" }, "omw_w3"), 200, "w3 accepts the restart");
+  must(await call(env, "POST", "/factory/claim", { ...w3claim, instance: "9c07d2e41b3a4f6d8e5c7b1a0f2e3d4c", previous_exit: { why: "restart" } }, "omw_w3"), 204, "w3's next process claims");
+
   await env.DB.prepare("INSERT INTO settings (key, value) VALUES ('cost_latest', ?)").bind(JSON.stringify({ estimated_at: "2026-09-16T12:00:00Z", status: "ok", month: "2026-09", month_to_date_usd: 8.86, projected_usd: 17.5 })).run();
 
   // One advisory on zlib, matched on the object stable serves.

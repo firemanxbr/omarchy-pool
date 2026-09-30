@@ -156,6 +156,7 @@ const POOL_CHAPTERS: DocChapter[] = [
       { id: "claude-code", title: "A Claude subscription as the agent", blurb: "claude setup-token, Claude Code in print mode, no tools — your subscription, your terms" },
       { id: "secrets", title: "What a build can see", blurb: "nothing the log cannot show: no token, no key, no credential of the host" },
       { id: "running", title: "Keeping it running", blurb: "restart policies, the stop timeout a build needs, the image's updates, cosign" },
+      { id: "orders", title: "When the pool steps in: orders", blurb: "re-check, restart, restart the agent service — by the pool within its bounds, by the owner or a maintainer on the worker's page" },
     ],
   },
   {
@@ -189,7 +190,7 @@ const POOL_CHAPTERS: DocChapter[] = [
       { id: "roles", title: "What each role does", blurb: "contributor, maintainer, the project's workers — what each does, and what none may" },
       { id: "categories", title: "Categories, not groups", blurb: "what a package is about — one of a fixed list, proposed by the project's agent, settled by a maintainer; never who may approve" },
       { id: "becoming", title: "Becoming a maintainer", blurb: "one package approved, then an issue on GitHub; a maintainer opens the pull request, another approves; the bootstrap exception, and the one door left" },
-      { id: "workers", title: "Workers, compute and agents", blurb: "one image, the registration decides; yours and only yours; ready is not online; agent keys stay with the owner, on the broker" },
+      { id: "workers", title: "Workers, compute and agents", blurb: "one image, the registration decides; yours and only yours; ready is not online; the pool steps in when one stops working; agent keys stay with the owner, on the broker" },
       { id: "bumps", title: "Bumps and packages nobody builds", blurb: "a new upstream release is built as evidence again; 14 days for the owner's worker, 30 days and the package is unmaintained" },
       { id: "blocking", title: "Blocking", blurb: "a contributor or a package out of the pool, the reason on the record, another maintainer lifts it" },
       { id: "passkeys", title: "A passkey for approve and block", blurb: "the two decisions in the browser with the maintainer's passkey, no token; a lost one reset by another maintainer" },

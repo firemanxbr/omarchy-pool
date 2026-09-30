@@ -258,7 +258,7 @@ export function sourceOfRepo(repo: string): string | null {
  * missing here is a filter that falls back to all without a word. The
  * metrics snapshot is left out: it is a number, not a line.
  */
-export const JOURNAL_KINDS = ["all", "sync", "gate", "promote", "fast-track", "health", "trial", "abi", "security", "render", "publish", "verify", "rollback", "relayout", "gc", "deploy", "cost", "audience", "provenance", "dispatch", "job", "build", "enqueue", "request", "review", "approve", "withdraw", "trust", "role", "block", "adopt", "category", "bump", "worker", "leak", "passkey"];
+export const JOURNAL_KINDS = ["all", "sync", "gate", "promote", "fast-track", "health", "trial", "abi", "security", "render", "publish", "verify", "rollback", "relayout", "gc", "deploy", "cost", "audience", "provenance", "dispatch", "job", "build", "enqueue", "request", "review", "approve", "withdraw", "trust", "role", "block", "adopt", "category", "bump", "worker", "order", "leak", "passkey"];
 
 /**
  * The projects the pool takes packages from, by the host a sync reads, each

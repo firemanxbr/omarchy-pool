@@ -143,8 +143,15 @@ agent_probe() {
   [[ "$status" != error || -n "$error" ]] || error="no answer"
   agent_checked "$who" "$status" "$error" "$ms"
 }
+agent_first_wait() { # the first re-check after a failed probe: AGENT_RETRY_SECONDS can only make it slower (#277) — 15 s to 30 min, never spending more completions than the default
+  local first="${AGENT_RETRY_SECONDS:-15}"
+  [[ "$first" =~ ^[0-9]+$ ]] || first=15
+  (( first >= 15 )) || first=15; (( first <= 1800 )) || first=1800
+  echo "$first"
+}
 agent_checked() { # who status error ms — what the claims report from now on, the log line on a change, when to check again
-  local who="$1" status="$2" error="$3" ms="$4" first="${AGENT_RETRY_SECONDS:-15}" most="${AGENT_RETRY_MAX_SECONDS:-$(( ${AGENT_PROBE_MINUTES:-30} * 60 ))}"
+  local who="$1" status="$2" error="$3" ms="$4" first most="${AGENT_RETRY_MAX_SECONDS:-$(( ${AGENT_PROBE_MINUTES:-30} * 60 ))}"
+  first="$(agent_first_wait)"
   if [[ "$status" == error ]]; then
     AGENT_FAILS=$((AGENT_FAILS + 1))
     if (( AGENT_FAILS == 1 )); then AGENT_RETRY=$first; else AGENT_RETRY=$(( AGENT_RETRY * 2 )); fi
@@ -778,6 +785,99 @@ inside() {
   cp /build/out/*.pkg.tar.zst /task/out/ && cp /build/pkg/PKGBUILD /task/out/PKGBUILD && ls /task/out
 }
 
+# ---------------------------------------------------------------- orders ---
+# Workers follow the brain for their health (#277): the pool orders this
+# worker only in the answer to its own claim, and only when the claim says
+# what this process takes — here re-check agent, restart (exit 0: the
+# restart policy starts the next container, as after every task) and drain
+# (a notice). Which process this is (INSTANCE, drawn once), when it started,
+# where its agent is, and — once, with the first claim — why the process
+# before it ended on purpose (its note in STATE_DIR, the container's own
+# writable layer: a restart keeps it, a new container starts without). The
+# answer goes through the worker's token (the broker's, behind one), with
+# this process's instance: only its answer counts. Nothing the pool answers
+# ends this script: an answer it cannot read is logged and slept on.
+INSTANCE="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+[[ "$INSTANCE" =~ ^[0-9a-f]{32}$ ]] || INSTANCE="$(printf '%s' "$RANDOM$RANDOM$$$(date +%s)" | sha256sum | cut -c1-32)"
+STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+STATE_DIR="${OMARCHY_STATE_DIR:-/var/lib/omarchy}"
+PREVIOUS_EXIT=""
+ORDERS_SEEN=()
+ORDER_STREAK=0
+leave_exit_note() { # why — before a deliberate exit (idle, drain, restart), for the next process to tell the pool
+  { mkdir -p "$STATE_DIR" && jq -cn --arg w "$1" --arg a "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{why:$w,at:$a}' > "$STATE_DIR/last-exit"; } 2>/dev/null || true
+}
+take_exit_note() { # the previous process's note: said with its claims until the pool has heard one (exit_note_heard) — a first claim lost on the network does not lose it
+  local f="$STATE_DIR/last-exit"
+  [[ -s "$f" ]] || return 0
+  PREVIOUS_EXIT="$(jq -c 'select(.why == "idle" or .why == "drain" or .why == "restart" or .why == "watchdog")' "$f" 2>/dev/null || true)"
+}
+exit_note_heard() { # the pool answered a claim (a task, orders, nothing, a 426): it has the note, and the note goes
+  [[ -n "$PREVIOUS_EXIT" ]] || return 0
+  PREVIOUS_EXIT=""; rm -f "$STATE_DIR/last-exit" 2>/dev/null || true
+}
+# A line a person or the pool wrote, as this worker prints it: escape sequences and control characters out, one line, 300 characters.
+clean_line() { printf '%s' "$1" | sed $'s/\x1b\\[[0-9;?]*[ -\/]*[@-~]//g; s/\x1b\\][^\x07]*\x07//g' | tr '\n\r\t' '   ' | tr -d '\000-\010\013-\037\177' | cut -c1-300; }
+agent_via() { if [[ -n "${OMARCHY_BROKER:-}" ]]; then echo broker; elif [[ -n "$(agent_label)" ]]; then echo direct; else echo none; fi; }
+order_kinds() { if [[ -n "${OMARCHY_BROKER:-}" || -n "$(agent_label)" ]]; then echo '["drain","recheck-agent","restart"]'; else echo '["drain","restart"]'; fi; }
+answer_order() { # id outcome code detail [agent-json]
+  api POST "/factory/workers/self/orders/$1" "$(jq -cn --arg i "$INSTANCE" --arg o "$2" --arg c "$3" --arg d "$4" --argjson a "${5:-null}" '{instance:$i,outcome:$o,code:$c,detail:$d} + (if $a == null then {} else {agent:$a} end)')" >/dev/null 2>&1 \
+    || log "order $1: the answer did not reach the pool; it closes the order by what it sees"
+}
+agent_probe_ordered() { # a probe an order asked for: stored and logged, the worker's own backoff left on its schedule
+  local fails=$AGENT_FAILS retry=$AGENT_RETRY
+  agent_probe
+  if [[ "$AGENT_STATUS" == error ]]; then
+    AGENT_FAILS=$fails; AGENT_RETRY=$retry
+    # An agent that answered until this probe: its own backoff starts at the first wait, as after a failure of its own — a wait
+    # of 0 would probe again at the loop's next turn, a second completion two seconds after this one.
+    (( AGENT_RETRY > 0 )) || AGENT_RETRY="$(agent_first_wait)"
+  fi
+  return 0
+}
+obey() { # one order, as the claim answer carries it (JSON)
+  local o="$1" id kind reason by unless s
+  id="$(jq -r '.id // ""' <<<"$o" 2>/dev/null || true)"; kind="$(jq -r '.kind // ""' <<<"$o" 2>/dev/null || true)"
+  [[ "$id" =~ ^wo_[0-9a-f]{32}$ ]] || { log "an order without an id this worker can use: ignored"; return 0; }
+  for s in "${ORDERS_SEEN[@]+"${ORDERS_SEEN[@]}"}"; do [[ "$s" == "$id" ]] && { log "order $id: executed already; ignored"; return 0; }; done
+  ORDERS_SEEN+=("$id"); (( ${#ORDERS_SEEN[@]} <= 64 )) || ORDERS_SEEN=("${ORDERS_SEEN[@]:1}")
+  reason="$(clean_line "$(jq -r '.reason // ""' <<<"$o")")"; by="$(clean_line "$(jq -r '.issued_by // "?"' <<<"$o")")"; unless="$(jq -r '.unless_agent_ok // false' <<<"$o")"
+  log "order $id: $(clean_line "$kind") from $by — $reason"
+  case "$kind" in
+    drain) log "drained by $by — the pool hands me nothing until it is resumed" ;;
+    recheck-agent)
+      # A person's re-check reuses a probe under a minute old; the pool's asks: it comes only once the probe is stale on the pool's clock.
+      # The pool's orders name it pool:project or pool:community — no GitHub login has a colon, so a person named "pool" is a person.
+      if [[ "$by" == pool:* ]] || (( $(date +%s) - AGENT_CHECKED >= 60 )); then agent_probe_ordered; fi
+      answer_order "$id" done probed "agent: ${AGENT_STATUS:-not probed}${AGENT_ERROR:+ — ${AGENT_ERROR:0:200}}" "$(jq -cn --arg s "$AGENT_STATUS" --arg e "$AGENT_ERROR" '{status:$s,error:$e}')" ;;
+    restart)
+      if (( SECONDS < 120 )); then answer_order "$id" refused too-young "started $SECONDS s ago: a restart this soon would loop"; return 0; fi
+      if [[ "$unless" == true ]]; then
+        (( $(date +%s) - AGENT_CHECKED < 15 )) || agent_probe_ordered
+        if [[ "$AGENT_STATUS" == ok ]]; then answer_order "$id" refused agent-ok "agent answers now: no restart needed"; return 0; fi
+      fi
+      answer_order "$id" accepted exiting "exit 0; the restart policy starts the next container"
+      log "order $id: restarting — exit 0, the restart policy starts the next container"
+      leave_exit_note restart
+      exit 0 ;;
+    *) answer_order "$id" refused unknown-kind "this worker ($(image_version)) does not take $(clean_line "$kind")" ;;
+  esac
+  return 0
+}
+obey_all() { # an answer's orders, each once; then the brake: 2 s, and after three answers with orders in a row, 30 s
+  local body="$1" o
+  while IFS= read -r o; do [[ -n "$o" ]] && obey "$o"; done < <(jq -c '.orders[]?' <<<"$body" 2>/dev/null || true)
+  ORDER_STREAK=$((ORDER_STREAK + 1))
+  if (( ORDER_STREAK >= 3 )); then log "the pool keeps sending orders; slowing to 30 s"; sleep 30; else sleep 2; fi
+}
+claim_body() {
+  local body pe="${PREVIOUS_EXIT:-null}"
+  body="$(jq -n --arg a "$ARCH" --arg h "$(hostname -s 2>/dev/null || echo ?)" --arg v "$(image_version)" --arg g "$(agent_label)" --arg as "$AGENT_STATUS" --arg ae "$AGENT_ERROR" --arg ac "$( (( AGENT_CHECKED > 0 )) && date -u -d "@$AGENT_CHECKED" +%Y-%m-%dT%H:%M:%SZ || echo "")" --argjson l "${WORKER_LABELS:-"{}"}" --argjson s "$( [[ "${WORKER_SHARED:-0}" == 1 ]] && echo true || echo false)" --argjson u "$(usage_json)" --arg lg "$(log_chunk)" \
+    --argjson o "$(order_kinds)" --arg i "$INSTANCE" --arg sa "$STARTED_AT" --arg via "$(agent_via)" --argjson pe "$pe" \
+    '{arch:$a,hostname:$h,version:$v,labels:$l,shared:$s,agent:$g,agent_status:$as,agent_error:$ae,agent_checked_at:$ac,usage:$u,log:$lg,orders:$o,instance:$i,started_at:$sa,agent_via:$via} + (if $pe == null then {} else {previous_exit:$pe} end)')"
+  printf '%s' "$body"
+}
+
 # ------------------------------------------------------------- container ---
 # The Omarchy Packaging image runs this: one container, one task. It claims
 # a task for its registered worker, builds it right here (the container is
@@ -800,28 +900,48 @@ container_worker() {
   prepare_container
   add_pool_repos "$ARCH" "$OMARCHY_POOL"
   agent_probe
+  take_exit_note
   local idle=0 out code body task id name ref version
   while :; do
-    if [[ "$DRAIN" == 1 ]]; then log "draining: nothing claimed since the stop signal; exiting"; exit 0; fi
+    if [[ "$DRAIN" == 1 ]]; then log "draining: nothing claimed since the stop signal; exiting"; leave_exit_note drain; exit 0; fi
     agent_probe_if_due
     usage_sample
-    out="$(api POST /factory/claim "$(jq -n --arg a "$ARCH" --arg h "$(hostname -s 2>/dev/null || echo ?)" --arg v "$(image_version)" --arg g "$(agent_label)" --arg as "$AGENT_STATUS" --arg ae "$AGENT_ERROR" --arg ac "$( (( AGENT_CHECKED > 0 )) && date -u -d "@$AGENT_CHECKED" +%Y-%m-%dT%H:%M:%SZ || echo "")" --argjson l "${WORKER_LABELS:-"{}"}" --argjson s "$( [[ "${WORKER_SHARED:-0}" == 1 ]] && echo true || echo false)" --argjson u "$(usage_json)" --arg lg "$(log_chunk)" '{arch:$a,hostname:$h,version:$v,labels:$l,shared:$s,agent:$g,agent_status:$as,agent_error:$ae,agent_checked_at:$ac,usage:$u,log:$lg}')")" \
+    # The previous process's note goes with every claim until the pool has answered one: then it is said, and it goes.
+    out="$(api POST /factory/claim "$(claim_body)")" \
       || { code="${out##*$'\n'}"; body="${out%$'\n'*}"
            # 426: this image is behind the pool's release past the rollout's grace — every worker follows the
            # latest image, and the pool hands this one nothing until the updater (or its owner) replaces it.
-           if [[ "$code" == 426 ]]; then log "update required: $(jq -r '.error // .' <<<"$body" 2>/dev/null || echo "$body")"; sleep 300; continue; fi
+           # An order waiting for it rides the refusal: a re-check or a restart needs no new image (#277).
+           if [[ "$code" == 426 ]]; then
+             exit_note_heard
+             log "update required: $(jq -r '.error // .' <<<"$body" 2>/dev/null || echo "$body")"
+             if [[ "$(jq -r '(.orders // []) | length' <<<"$body" 2>/dev/null || echo 0)" != 0 ]]; then obey_all "$body"; continue; fi
+             sleep 300; continue
+           fi
            log "claim failed: $code ${body:0:200}"; sleep 60; continue; }
-    code="${out##*$'\n'}"; body="${out%$'\n'*}"
+    code="${out##*$'\n'}"; body="${out%$'\n'*}"; exit_note_heard
     if [[ "$code" == "204" ]]; then
+      ORDER_STREAK=0
       idle=$((idle + 30))
-      if [[ "${IDLE_EXIT:-0}" -gt 0 && "$idle" -ge "${IDLE_EXIT:-0}" ]]; then log "no work for ${idle}s; exiting"; exit 0; fi
+      if [[ "${IDLE_EXIT:-0}" -gt 0 && "$idle" -ge "${IDLE_EXIT:-0}" ]]; then log "no work for ${idle}s; exiting"; leave_exit_note idle; exit 0; fi
       for _ in $(seq 1 30); do [[ "$DRAIN" == 1 ]] && break; sleep 1; done
       continue
     fi
+    # What the pool answered is read, never trusted to parse (#277): orders and no task, a task, or nothing this worker understands — logged and slept on, never the end of it.
+    if ! jq -e 'type == "object"' >/dev/null 2>&1 <<<"$body"; then log "claim answer not understood ($(clean_line "${body:0:200}")); waiting 30 s"; sleep 30; continue; fi
+    if [[ "$(jq -r '.task == null and ((.orders // []) | length) > 0' <<<"$body" 2>/dev/null || echo false)" == true ]]; then obey_all "$body"; continue; fi
+    ORDER_STREAK=0
     break
   done
   task="$body"
-  id="$(jq -r .task.id <<<"$task")"; name="$(jq -r .task.name <<<"$task")"; ref="$(jq -r .task.pkgbuild_ref <<<"$task")"
+  # A task without a readable id is not one: said, and the next container claims. One whose id reads and whose rest does not is failed at once, so its lease is not held.
+  id="$(jq -r '.task.id // empty | numbers' <<<"$task" 2>/dev/null || true)"
+  if [[ -z "$id" ]]; then log "claim answer not understood ($(clean_line "${task:0:200}")); exiting — the next container claims"; exit 0; fi
+  if ! name="$(jq -er '.task.name | strings' <<<"$task" 2>/dev/null)" || ! ref="$(jq -er '.task.pkgbuild_ref | strings' <<<"$task" 2>/dev/null)"; then
+    log "task $id: this worker ($(image_version)) could not read it; reported failed"
+    api POST "/factory/tasks/$id/fail" "$(jq -cn --arg e "worker $(image_version) could not read this task" '{error:$e,final:false}')" >/dev/null 2>&1 || true
+    exit 0
+  fi
   # What the asker put with the build: the failed build to learn from, a word for the agent (fetch_pkgbuild reads both).
   LESSON_TASK="$(jq -r '.task.params.lesson // empty' <<<"$task")"; export LESSON_TASK
   BUILD_HINT="$(jq -r '.task.params.hint // empty' <<<"$task")"; export BUILD_HINT
@@ -911,8 +1031,23 @@ container_worker() {
   fi
   kill "$BEAT" 2>/dev/null || true
   REPORTED=1
-  api POST "/factory/tasks/$id/complete" "$(jq -n --arg s "$sha" --arg f "$filename" --arg v "$version" --argjson d "$took" --argjson t "$tail" '{sha256:$s,filename:$f,version:$v,duration_ms:$d,log_tail:$t}')" >/dev/null
-  log "task $id: staged — a maintainer takes it from here"
+  report_complete "$id" "$sha" "$filename" "$version" "$took" "$tail"
+}
+
+# The report of a staged build. What the pool answers is its word, not a
+# crash (#277): a complete refused — the task stopped, cancelled or taken
+# back just as it finished (409), or a pool that did not answer (5xx) — is
+# logged, and the builder exits 0 as after every task. Under set -e it
+# ended the builder with curl's 22, silently (REPORTED was already 1), and
+# the engine, the updater and the pool saw a crash.
+report_complete() { # task-id sha256 filename version took-ms log-tail-json
+  local said
+  if said="$(api POST "/factory/tasks/$1/complete" "$(jq -n --arg s "$2" --arg f "$3" --arg v "$4" --argjson d "$5" --argjson t "$6" '{sha256:$s,filename:$f,version:$v,duration_ms:$d,log_tail:$t}')")"; then
+    log "task $1: staged — a maintainer takes it from here"
+  else
+    log "the pool refused the report of task $1: ${said##*$'\n'} $(clean_line "${said%$'\n'*}" | cut -c1-200); moving on"
+  fi
+  return 0
 }
 
 # The shell's last words, from the EXIT trap: the task fails now with the

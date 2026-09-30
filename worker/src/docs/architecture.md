@@ -99,7 +99,7 @@ Migrations live in `worker/migrations/`.
 | `GET /api/v1/search?q=` · `/package/:name[/files]` | search within a ring; a package's versions per ring, manifest, forward edges (declared dependencies and loaded sonames resolved to providers) and reverse edges (declared, or by loading one of its libraries) — the package page and, later, CVE propagation. A loaded soname resolves to one package built for the page's architecture (see Architectures) |
 | `GET /api/v1/packages?q=&ring=&arch=&origin=&sort=` | the packages list (`routes/browse.ts`): one row per name over the rings picked, filtered and paged by the server — a page found by walking the name index (or the table in id order, for recency) from a cursor, a search by one read of the table — and the counts behind every filter kept in `settings` under the ring heads they were counted at; `/packages` draws its first page into the HTML from the same address, through the edge's copy |
 | `GET /api/v1/pool/unreferenced` · `POST /api/v1/pool/gc` | retention: what the last N releases do not reference |
-| `GET /api/v1/factory` · `POST /factory/{requests,enqueue,claim,jobs}` · `/factory/tasks/:id/{heartbeat,complete,fail,cancel,approve,reject}` · `/factory/tasks/:id/artifacts/<file>` · `/factory/{register,packages,workers,workers/self,maintainers,review,approvals,trust,me}` · `GET /api/v1/users/:login` · `GET /api/v1/cost` | the factory's brain: package requests, build tasks with leases, the workers pulling them, contributors and their packages, maintainers' approvals, jobs queued by hand, the daily cost estimate ([factory/README.md](../factory/README.md), [GOVERNANCE.md](GOVERNANCE.md)) |
+| `GET /api/v1/factory` · `POST /factory/{requests,enqueue,claim,jobs}` · `/factory/tasks/:id/{heartbeat,complete,fail,cancel,approve,reject}` · `/factory/tasks/:id/artifacts/<file>` · `/factory/{register,packages,workers,workers/self,maintainers,review,approvals,trust,me}` · `/factory/workers/:id/{orders,can}` · `/factory/workers/self/orders/:id` · `GET /api/v1/users/:login` · `GET /api/v1/cost` | the factory's brain: package requests, build tasks with leases, the workers pulling them, contributors and their packages, maintainers' approvals, jobs queued by hand, orders to a worker, the daily cost estimate ([factory/README.md](../factory/README.md), [GOVERNANCE.md](GOVERNANCE.md)) |
 | `POST /api/v1/events` · `GET /api/v1/events` · `GET /api/v1/stats` | activity log and the dashboard's data |
 | `GET /` | the dashboard — three doors in the header, one per job: `/` the Pool (use it: a search, the pool's four numbers, the chain from the sources to your machine, the command that points pacman at a ring, Live and what is new in the rings; no account), `/factory` the Factory (contribute: the request with its live checks, the workers and what each is doing, the line from request to the pool), `/review` Review (maintain: the staged builds and the decisions). The footer links `/packages`, `/status`, `/agents`, `/docs` and `/people`; `/package/:name`, `/workers`, `/user/:login`, `/build/:id` and the API reference `/api` are one link from those. `/pipeline`, `/journal` and `/security` redirect to the sections of `/status` they became, `/docs/api` to the docs' API section and `/request` to the Factory's request card (`MOVED` in `index.ts`). Every page is a string with a `<script>` that reads the API; the diagrams are inline SVG drawn in `worker/src/pages/diagrams.ts`, the charts in `charts.ts`. Every colour is a named token (`layout.ts`): dark by default for everyone, its light twin only for a reader who chose it (the header's switch or the ⌘K menu), the choice kept in the browser. The v1 kit (`kit.ts`) holds the pieces the v1.0 pages are drawn with: a page drawn with it links one stylesheet, `/assets/kit.<hash>.css` (its primitives and its icons, immutable under its hash), and a page that is not pays nothing for it until the ⌘K menu opens. The menu (`GO_MENU` in `layout.ts`) is on every page: ⌘K or Ctrl+K open it (on a Mac, Ctrl+K in a text field stays the field's), and so does `/` on every page but Home, where it focuses the search. It goes to the pages and to packages through the same `/api/v1/search` address Home's box asks, the term in lower case (so the two share the edge's copy); a name that search does not find is looked up in the factory's names and at `/api/v1/package/:name` on each architecture before the menu offers to request it, on `/factory?name=`; and it links the kit's sheet for its icons the first time it opens |
 
@@ -252,6 +252,66 @@ graph the package page draws — a package is *exposed* when it declares a
 vulnerable package or when one of its binaries loads a library the vulnerable
 package provides (the stronger evidence). `GET /api/v1/security` reports both
 per ring, the package page shows the chain, and the graph marks the nodes.
+
+#### Workers follow the brain (#277)
+
+The pool sees every worker's claims, so it knows first when one has stopped
+working: after the v1.0.0 and v1.0.1 releases two review workers sat not ready
+until a maintainer reached the Studio host by hand (#273). Now the pool tells
+them. An **order** rides the answer to the worker's own claim, `{"task": null,
+"orders": [...]}` (and the `426` of an outdated worker), and nothing else: no
+new connection to a host, no listener on the worker, only that worker's own
+token. A claim says which orders its process carries out (`orders`, canonical
+and sorted), so an older worker is never handed one; the worker checks each
+order again before it acts, answers `POST /factory/workers/self/orders/:id`,
+and an order it never answers is closed by what its next claims show, or
+expires. Every claim also carries the process's `instance` (random at start),
+when it started, how its previous process ended, where its agent is (`direct`,
+`sibling`, `broker`) and its `site` (the engine it runs on, kept under the
+name of who runs the worker — the project's, or the contributor's login — so
+only one person's workers ever share a site): the pool learns a restart
+happened when the instance changes, and tells two processes on one token, and
+a crash loop, from a restart. A claim that names no instance declares
+nothing; beside a process that names one it is the second process. While two
+processes share a token nothing is delivered, the one that claimed last is
+recorded at most every three minutes, and the conflict lifts only once one
+has claimed alone for ten. Orders live in `worker_orders`
+(migration `0042`), one row per order with its state (`pending`, `delivered`,
+`done`, `refused`, `failed`, `expired`, `cancelled`), who gave it, why and the
+answer; at most one open per kind per worker, and per site and agent service.
+
+Three kinds ship first: **Re-check agent** (probe now), **Restart** (exit 75,
+and the restart policy starts it again; a builder exits 0 and its broker
+restarts beside it) and **Restart agent service** (a review worker restarts the
+project host's `agent-proxy` on its own engine). Its owner or any maintainer
+gives them from the worker's page, `/worker/:id`, or the API; the pool gives
+them itself (`orders.ts`, run at the claim, swept by the cron): after 5 minutes
+not ready it re-checks a worker whose own re-check stalled, after 10 it
+restarts one whose error a restart can help (refused, DNS, a broken install, a
+sibling), only if the agent still does not answer — twice a spell, 30 minutes
+apart, never a process under 2 minutes old, three a day — and then gives up and
+says so. An error a restart cannot help (auth, credit, rate, the provider's
+own) gets no order. A **breaker** holds every automatic restart of a provider
+while three sites have an open spell on it, and releases when fewer than two
+have had one for 15 minutes: an outage of a provider is not the workers' to
+fix. A worker's error is its own word, so the breaker has two scopes: the
+project's workers are held only by the project's own spells
+(`worker-breaker:<provider>:project`), contributors' workers by everyone's
+(`worker-breaker:<provider>`). A host's shared agent service is restarted
+once, through its elected worker; the others wait, give up with it, or —
+when the service answers another of them — are restarted themselves. Every
+cap sits inside the `INSERT` that issues the order — six restarts and six
+re-checks an hour per worker, twenty orders an hour per login, ten automatic
+restarts an hour and sixty automatic orders a day for the pool, of which
+contributors' workers take six and forty — so two claims at once cannot pass
+one together. The pool signs its own orders `pool:project` or
+`pool:community`, which no GitHub login can be. The journal has exactly one
+line when an order is issued and one when it ends, whichever path closed it:
+each close is conditional on the order's state, and writes its line only
+when it changed it. `WORKER_RULES = "off"` stops the
+pool's own orders; people's still work. Drain and resume, Stop its task, and
+Update through the set's updater are the parts after this one: their kinds are
+in the schema already, and the pool refuses them for now.
 
 ### Architectures
 
