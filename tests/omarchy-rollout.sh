@@ -397,7 +397,9 @@ done
 reset_lock; : > "$STUB_LOG"
 lock_held loop cid-other 2026-09-30T14:00:00Z "$future"; echo "cid-other true 2026-09-30T14:00:00Z" > "$STUB_STATE.holders"
 echo 'kill -TERM "$(cat "$STUB_STATE.pid")"' > "$STUB_STATE.on-create-conflict"
-set +e; bash -c 'echo $$ > "$STUB_STATE.pid"; exec "$0" --once' "$R" > "$tmp/out" 2>&1; set -e
+set +e; bash -c 'echo $$ > "$STUB_STATE.pid"; exec "$0" --once' "$R" > "$tmp/out" 2>&1; rc=$?; set -e
+[[ ! -f "$STUB_STATE.on-create-conflict" ]] || fail "the TERM at the failed create was never sent: $(cat "$tmp/out")"
+[[ "$rc" == 143 ]] || fail "a TERM at the failed create ends the rollout with 143: $rc"
 [[ "$(cut -d'|' -f7 "$STUB_STATE.lock" 2>/dev/null)" == lockheld0 ]] || fail "a TERM while another round holds the lock leaves that lock: $(cat "$STUB_STATE.lock" 2>/dev/null || echo gone)"
 cp "$STUB_STATE.keep" "$STUB_STATE"
 echo "ok: the lock"

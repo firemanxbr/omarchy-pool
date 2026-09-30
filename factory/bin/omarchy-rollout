@@ -504,7 +504,8 @@ case "$mode" in
   check) rollout 1 || [[ $? -eq 1 ]] ;;
   once)
     identify_self
-    # A second TERM while the EXIT trap releases the lock would end it there: the trap ignores them.
+    # The EXIT trap ignores TERM and INT from its first command on, so one more that lands during the release does not cut it
+    # short (one that lands before that first command still can; docker stop sends a single TERM).
     trap 'trap "" TERM INT; lock_release' EXIT
     trap 'exit 143' TERM INT
     rc=0; round once || rc=$?
