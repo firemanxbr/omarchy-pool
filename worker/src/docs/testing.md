@@ -566,7 +566,10 @@ stuck past its expiry, kept until then when it names no holder — broken by
 the id it was judged by, so a round that lost the race to break it skips
 and leaves the other's lock; released at each round's end and before the
 self-replacing one-off, never when another round holds it, and by an EXIT
-mid-round); the guard (restarting at two samples in a row, restarts that
+mid-round — and by a TERM that lands as the engine creates it or as the
+release reads it back, in `--once` and the loop, sent at that point by a
+stub hook with no sleep, while a TERM during a failed create leaves
+another round's live lock alone: #295); the guard (restarting at two samples in a row, restarts that
 grow on a service this round did not replace, one that ran and stays down,
 one not replaced, a new updater that fails its self-test — each keeping the
 old images and the updater's own; one restart, a busy builder and a service
@@ -576,15 +579,30 @@ like any other); and `--self-test`.
 `bash tests/host-setup.sh` (CI) runs the Studio's `factory/host/setup.sh`
 with stubs, as the one-time step: the installed `compose.yml`'s `updater`
 has the socket and `POOL_ROOT` at the same path, read-only, and no token;
-`rollout.sh` carries `# omarchy-rollout: kick-v1` on its second line; the
-user timer of a host from before #277 is disabled as its user before
-anything is installed, a rollout it started waited for (a try every 15 s,
-four hours at most), then removed, and said retired only once its user's
-systemd says it is stopped; a systemd that does not answer, or a rollout
-still running after four hours, ends `setup.sh` with 3 and nothing
-installed; a fresh host gets no timer; `rollout.sh` wakes a running updater
-and starts one that is not running as it is (`--no-recreate`), never both,
-and `--check` asks it, nothing more.
+`rollout.sh` carries `# omarchy-rollout: kick-v1` on its second line; an
+env file, mode 600, for every `env_file` `compose.yml` names, and the
+review2 pair behind its own profile (#295); before the timer is touched,
+the new `compose.yml` checked against a staged copy of the host's `.env`
+and `etc/` under its profiles and under every profile, and a compose that
+does not load, another `POOL_ROOT`, an updater image from before #277 or
+one that does not pull, or a service without a worker token (its value
+never printed) refused with 4 and nothing changed; the user timer of a
+host from before #277 disabled as its user before anything is installed,
+a rollout it started waited for (a try every 15 s, four hours at most),
+the files installed with the old ones kept in `setup-backup-<time>/` and
+the lines of `compose.yml` they replace shown, the updater started, seen
+running at every look for 30 s and passing its `--self-test`, and only
+then the timer's units removed and the timer said retired once its user's
+systemd says it is stopped; a systemd that does not answer ends
+`setup.sh` with 3 and nothing installed; a rollout still running after
+four hours, an interrupt during the wait, or an updater that does not
+start, restarts or fails its self-test (3, or 5) putting everything back —
+the updater it started stopped and removed, the old files and no new env
+file, the timer enabled again; a fresh host gets no timer and starts
+nothing; `rollout.sh` wakes a running updater and starts one that is not
+running as it is (`--no-recreate`), never both, and `--check` asks it,
+nothing more; and the runbook's one-time step says `setup.sh` waits up to
+4 h.
 `bash tests/rollback-workflow.sh` (CI) runs `factory/bin/release-rollback`,
 what `rollback.yml` runs, against stubbed buildx, cosign and wrangler in a
 repository with release tags: the release's `:vX.Y.Z` asked for and its

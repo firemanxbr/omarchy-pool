@@ -251,9 +251,10 @@ The project's workers run on one machine — `omarchy-studio`, a Mac Studio
 on Arch Linux ARM (Asahi), 12 cores, 32 GB, on around the clock — as eight
 worker containers of the image: two pool, four review (two pairs, since
 2026-09-17: an audit waited 23 minutes on average behind builds and the
-pool's jobs), two community, one per architecture each (five of them run
+pool's jobs), two community, one per architecture each (four of them run
 by default: the x86_64 review and community services are behind the
-`emulated` profile)
+`emulated` profile, and the second review pair behind its own `review2`
+profile, off until `register.sh` has registered it)
 ([factory/host/](../factory/host/README.md); the roles:
 [factory/README.md](../factory/README.md) *Three roles*):
 
@@ -274,8 +275,14 @@ by default: x86_64 build tasks wait for an x86_64 worker, and any x86_64
 machine with docker becomes one in minutes (factory/host/README.md,
 *x86_64 builds*) — the pool does not care where a worker runs.
 `COMPOSE_PROFILES=emulated` in `.env` turns them on here anyway
-(`community-x86_64`, `review-x86_64`, `review2-x86_64`, labeled
-`"emulated":true`), for C-only packages. A build that dies of emulation
+(`community-x86_64`, `review-x86_64`, labeled `"emulated":true`), for
+C-only packages. The second review pair has a profile of its own,
+`review2` (#295): until it is registered, a worker with no token would
+exit at start and restart, and the updater holds back a set where one
+restarts. To turn it on, run `./register.sh` (it registers only the
+services whose env file has no token yet), then set
+`COMPOSE_PROFILES=emulated,review2` in `.env`, then run `./rollout.sh`.
+`review2-x86_64` is labeled `"emulated":true` too. A build that dies of emulation
 there goes back to the queue for a native x86_64 worker, not retried and
 not failed: a toolchain that cannot start, or a library qemu cannot map.
 No emulated worker takes it again (#281). To see it: the Workers page says
@@ -299,7 +306,7 @@ repository). **On the host: setup, hardware, and a look when the pool cannot see
 
 ```bash
 cd /srv/omarchy-pool
-docker compose ps                                # eight up by default (five workers, one broker, the agent proxy, the updater); twelve with COMPOSE_PROFILES=emulated
+docker compose ps                                # seven up by default (four workers, one broker, the agent proxy, the updater); ten with COMPOSE_PROFILES=emulated, twelve with emulated,review2
 docker compose logs -f --tail 50 pool-aarch64    # one of them
 ./rollout.sh                                     # wakes the updater now, or starts it (--check: what it would do)
 docker compose restart pool-aarch64              # a worker stuck in a task: a drain, it finishes the task first (up to 3 h)
@@ -383,10 +390,29 @@ says so.
 ### Once: the updater (#277)
 
 The Studio runs the same `updater` as every contributor's set, and a host
-timer no longer rolls it out. Once the release that carries #277's last part
-is out, paste this as the user who owns `/srv/omarchy-pool` (any later
-release will do: it takes the release the pool runs, and stops at the first
-step that fails):
+timer no longer rolls it out. Do this once the release that carries #277's
+last part is out. Any later release will do: the step takes the release
+the pool runs.
+
+**First, look** (as the user who owns `/srv/omarchy-pool`; nothing here
+changes anything):
+
+```bash
+cd /srv/omarchy-pool
+docker compose ps -a                              # what runs now: a container that restarts is fixed or removed first
+ls -l etc/                                        # the env files there; review2-*.env may be missing (setup.sh writes them)
+grep COMPOSE_PROFILES .env                        # emulated on the Studio; review2 stays off until it is registered
+tag="$(curl -fsS https://pkgs.omarchy-pool.org/api/v1/version | sed -En 's/.*"version": *"(v[0-9.]+)".*/\1/p')"
+curl -fsS "https://raw.githubusercontent.com/firemanxbr/omarchy-pool/$tag/factory/host/compose.yml" | diff -u compose.yml -
+```
+
+Every line the diff removes that is not in the release's `compose.yml` is
+a local edit. Put it in `compose.override.yml` beside `compose.yml`:
+compose and the updater read that file, and `setup.sh` never touches it.
+`setup.sh` keeps the old `compose.yml` anyway (see below) and prints the
+lines it replaces.
+
+**Then paste this** (it stops at the first step that fails):
 
 ```bash
 (
@@ -397,18 +423,58 @@ step that fails):
   src="$(mktemp -d)"; trap 'rm -rf "$src"' EXIT
   git clone --quiet --depth 1 --branch "$tag" https://github.com/firemanxbr/omarchy-pool.git "$src"
   grep -qx '# omarchy-rollout: kick-v1' "$src/factory/host/rollout.sh"
-  # The timer stopped (its last rollout waited for), then the updater's files.
+  # Checked, the timer stopped (its last rollout waited for), the files, the updater started and checked, the timer removed.
   sudo "$src/factory/host/setup.sh" /srv/omarchy-pool
-  ./rollout.sh   # starts the updater
+  ./rollout.sh   # wakes the updater: a round now
 )
 ```
 
-`setup.sh` waits while a rollout the timer started is still draining (up to
-3 h), and stops with a warning, installing nothing, when it cannot confirm
-the timer stopped. The updater's first round may drain and recreate every
-service once (its compose computes configuration hashes its own way).
-Within ten minutes, each Studio worker's page says "rolled out by its
-updater", and Status's line about this step goes away.
+What `setup.sh` does, in order, and what a failure leaves:
+
+1. **It checks before it touches anything.** The release's `compose.yml`
+   is loaded against a staged copy of this host's `.env` and `etc/`, with
+   the env files it would write for any that are missing. It loads under
+   this host's profiles and under every profile the file names. It also
+   checks that `.env`'s `POOL_ROOT` is this directory, that the updater
+   image here (pulled first) is from #277 on, and that every service
+   compose would run holds a worker token. Any of these fails with exit 4
+   and changes nothing: the timer runs on. Fix what it names (for a
+   missing token: `register.sh`, or leave that service's profile out of
+   `COMPOSE_PROFILES`), then paste again.
+2. **It stops and disables the timer**, as its user, then waits while a
+   rollout the timer started is still draining. A drain takes up to 3 h;
+   `setup.sh` waits up to 4 h (the old rollout also pulls and waits for
+   its brokers). If the rollout still runs after 4 h, or the step is
+   interrupted (Ctrl-C, a dropped session), it enables the timer again,
+   installs nothing, and exits 3. Paste again later. If its user's systemd
+   does not answer, it changes nothing there and exits 3 with the
+   commands to run.
+3. **It installs the files.** `compose.yml`, `rollout.sh` and
+   `register.sh` go in, with an env file (mode 600) for every `env_file`
+   `compose.yml` names. The copies it replaces go to
+   `/srv/omarchy-pool/setup-backup-<time>/`, with the timer's two units
+   under `systemd-user/`.
+4. **It starts the updater** (`up -d --no-deps --no-recreate updater`)
+   and checks that it stays running, with no restart, for 30 s, and that
+   its `--self-test` says `follows 1`. If any of that fails, it stops and
+   removes the updater, puts the old files back, enables the timer again
+   and exits 5. The host rolls out through its timer as before. Read
+   `docker compose logs updater` from the output, fix the cause, paste
+   again.
+5. **Only then does it remove the timer's units** and say it is retired.
+
+The `./rollout.sh` at the end then only wakes the updater. If it fails
+after `setup.sh` succeeded, the updater still runs and rolls the host out:
+`docker compose ps updater` says so, and `docker compose logs -f updater`
+shows its rounds. If the updater is not running, `./rollout.sh` starts
+it as it is. When that fails too, run
+`docker compose up -d --no-deps --no-recreate updater` and read its error.
+If the updater cannot run here, take the way back below.
+
+The updater's first round may drain and recreate every service once
+(its compose computes configuration hashes its own way). Within ten
+minutes, each Studio worker's page says "rolled out by its updater", and
+Status's line about this step goes away.
 
 From then on, do not run a bare `docker compose up -d` on this host. It
 re-stamps every service's configuration hash with the host's compose, and
@@ -423,12 +489,22 @@ Until this is done, releases still arrive through the timer, and every
 order but Update works. The pool knows whether it was done, because the
 workers report it with their claims.
 
-To undo it (an updater that misbehaves here): `docker compose stop updater
-&& docker compose rm -f updater`, then run the previous release's
-`factory/host/setup.sh` from a clone at that tag, and `systemctl --user
-enable --now omarchy-pool-rollout.timer` as this user. Stop the updater
-first: compose leaves a running one alone once `compose.yml` no longer
-names it, and it would go on rolling the host out beside the timer.
+To undo it (an updater that misbehaves here), use the copies `setup.sh`
+kept. Stop the updater first: compose leaves a running one alone once
+`compose.yml` no longer names it, and it would go on rolling the host out
+beside the timer.
+
+```bash
+cd /srv/omarchy-pool
+b="$(ls -d setup-backup-* | tail -n1)"            # the one the one-time step wrote
+docker compose stop updater && docker compose rm -f updater
+cp -p "$b/compose.yml" "$b/rollout.sh" "$b/register.sh" .
+mkdir -p ~/.config/systemd/user && cp -p "$b"/systemd-user/omarchy-pool-rollout.* ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now omarchy-pool-rollout.timer
+```
+
+Do not run an older release's `setup.sh` for this. Its `compose.yml` has
+the review2 pair with no profile, which would start it unregistered.
 
 ### After a release
 
