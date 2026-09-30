@@ -123,6 +123,7 @@ import { packageHtml } from "./pages/packages";
 import { packagesHtml } from "./pages/browse";
 import { factoryHtml as factoryPageHtml } from "./pages/contribute";
 import { MORE } from "./pages/layout";
+import { notFoundHtml } from "./pages/not-found";
 import { secured } from "./headers";
 import { DASHBOARD_HOST, LEGACY_DASHBOARD_HOSTS, isProductionHost, machineOrigin, version } from "./meta";
 import { handleStatic } from "./routes/static";
@@ -356,7 +357,9 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     // The v1 kit's one stylesheet (pages/kit.ts): immutable under its content's hash, so a browser asks for it once per change of the kit.
     const asset = kitAsset(path, method);
     if (asset) return asset;
-    return json({ error: "not found" }, 404);
+    // Nothing here (#300): an address under /api/ is a machine's and keeps the JSON; any other is a person's, who gets the page, in the site's frame.
+    if (path.startsWith("/api/")) return json({ error: "not found" }, 404);
+    return html(notFoundHtml(path, env.POOL_URL, version(env)), 404);
   } catch (err) {
     console.error(err);
     return json({ error: "internal error", detail: String(err) }, 500);
@@ -561,8 +564,9 @@ export async function edgeStore(key: Request, res: Response, maxAge: number): Pr
   await caches.default.put(key, stored);
 }
 
-function html(body: string): Response {
+function html(body: string, status = 200): Response {
   return new Response(body, {
+    status,
     headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=60" },
   });
 }

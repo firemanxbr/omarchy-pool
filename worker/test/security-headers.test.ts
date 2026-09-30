@@ -1,6 +1,8 @@
 /**
  * #300: every answer carries the security headers (src/headers.ts) — a
- * page, the API, a redirect, a script, an icon, a 404.
+ * page, the API, a redirect, a script, an icon, a 404 — and a person at an
+ * address nothing answers gets the site's own 404 page, while a machine
+ * under /api/ keeps the JSON 404.
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -75,5 +77,37 @@ describe("the security headers", () => {
     expect(res.headers.get("referrer-policy")).toBe("same-origin");
     expect(res.headers.get("cache-control")).toBe("no-store");
     expect(headersOf(res)).toMatchObject({ ...EXPECTED, "referrer-policy": "same-origin" });
+  });
+});
+
+describe("an address nothing answers", () => {
+  it("is the themed 404 page for a person: the frame, dark by default, and the way back", async () => {
+    for (const path of ["/nope", "/build/abc", "/user/not_a_login", `/worker/${"x".repeat(121)}`, "/docs/nope"]) {
+      const res = await call(path);
+      expect(res.status, path).toBe(404);
+      expect(res.headers.get("content-type"), path).toBe("text/html; charset=utf-8");
+      const text = await res.text();
+      expect(text, path).toContain("<title>Not found · omarchy-pool</title>");
+      expect(text, path).toContain('<a class="brand" href="/">');
+      expect(text, path).toContain('<meta name="robots" content="noindex, nofollow">');
+      expect(text, path).toContain(`<code>${path}</code>`);
+      // Dark unless the reader chose light: the page is served with no theme of its own on <html>.
+      expect(text, path).toMatch(/^<!doctype html>\n<html lang="en">\n/);
+      for (const href of ['<a class="op-btn primary" href="/">Home</a>', 'href="/packages">', 'id="nf-go"', "<kbd>⌘K</kbd>"]) expect(text, path).toContain(href);
+    }
+  });
+
+  it("escapes the address it names", async () => {
+    const text = await (await call("/%22%3E%3Cb%3Ex")).text();
+    expect(text).not.toContain("<b>x");
+  });
+
+  it("stays the JSON 404 under /api/, for a machine", async () => {
+    for (const path of ["/api/v1/nope", "/api/v2/anything", "/api/v1/packages/zzz/nope"]) {
+      const res = await call(path);
+      expect(res.status, path).toBe(404);
+      expect(res.headers.get("content-type"), path).toBe("application/json; charset=utf-8");
+      expect(await res.json(), path).toEqual({ error: "not found" });
+    }
   });
 });
