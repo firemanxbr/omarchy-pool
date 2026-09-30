@@ -73,6 +73,9 @@ describe("the runbook's After a release (AC4 of #277)", () => {
     expect(text).toContain("`omarchy-worker start|update|remove`");
     expect(text).toContain("`stands-down`");
     expect(text).toContain("`omarchy-agent status`");
+    // The host's installed copies learn the marker only from a new setup.sh run or a new download.
+    expect(text).toContain("`grep -q omarchy-agent /srv/omarchy-pool/rollout.sh`");
+    expect(text).toContain("Fetch an `omarchy-worker` downloaded before this release");
     expect(cut(runbook, "after-a-release")).toContain("on a host the agent manages, nothing needs\nto be run");
   });
 
