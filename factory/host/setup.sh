@@ -17,9 +17,12 @@
 #     against a staged copy of this host's .env and etc/ (exit 4, nothing of
 #     the host's files, units or containers changed, when it does not load,
 #     under this host's profiles or under every profile it names, or when
-#     .env's POOL_ROOT is another directory); a container of the project
-#     whose service it does not run under this host's profiles is warned
-#     about (no rollout reaches it)
+#     .env's POOL_ROOT is another directory, or .env's COMPOSE_FILE names a
+#     file by an absolute or ../ path); a container of the project whose
+#     service it does not run under this host's profiles is warned about (no
+#     rollout reaches it)
+#   - one run at a time: a second one while another holds
+#     POOL_ROOT/.setup.lock is refused (exit 4, nothing changed)
 #   - compose.yml (with the `updater` service), register.sh and rollout.sh
 #     (which only wakes the updater) copied to POOL_ROOT — the copies they
 #     replace kept in POOL_ROOT/setup-backup-<time>/, and the difference in
@@ -34,8 +37,9 @@
 # Run again on a host that has run the pool since before #277, it is the
 # one-time step of the runbook's *The Studio host* (Once: the updater). Then,
 # before the timer is touched, it also checks that the updater image here
-# (pulled first) is one from #277 on and that every service compose would
-# run holds a worker token (exit 4, and only that image pulled); stops the
+# (pulled first) is one from #277 on, that every service compose would
+# run holds a worker token and that no rollout.sh started by hand still
+# runs (exit 4, and only that image pulled); stops the
 # timer — stopped, not disabled, so a reboot at any point before the updater
 # is confirmed brings it back — and waits while a rollout it started still
 # drains (a drain takes up to 3 h; it waits up to 4 h); installs the files;
@@ -51,6 +55,10 @@
 # (their rollout.sh only wakes the updater) and the timer is enabled all
 # the same: never both rollouts, never neither. The put-back's docker and
 # systemctl calls each end within 60 s.
+#
+# A step killed outright (kill -9, the OOM killer, a reboot) puts nothing
+# back; run again while the new files it installed are in, setup.sh refuses
+# (exit 4) before anything else, and points to the runbook's way back.
 #
 # It writes no secret: register.sh puts the worker tokens in etc/, and the
 # agent key goes in etc/agent.env by hand.
@@ -103,6 +111,15 @@ AGENT
   fi
 }
 env_default() { printf 'POOL_ROOT=%s\nWHERE=%s\n' "$root" "$(hostname -s)"; }
+pulled=0
+refuse() { # why — before anything of the running host changed (only the updater image, once pulled)
+  if (( pulled )); then
+    printf '\nNot done, and nothing of the host'"'"'s files, units or containers changed (the updater image was pulled): %s\n' "$1" >&2
+  else
+    printf '\nNot done, and nothing changed: %s\n' "$1" >&2
+  fi
+  exit 4
+}
 
 echo "==> $root"
 if [[ ! -d "$root" ]]; then
@@ -112,6 +129,22 @@ if [[ ! -d "$root" ]]; then
   else
     mkdir -p "$root"
   fi
+fi
+# One run at a time: a second paste (another tmux window, during the wait of up to 4 h) would interleave its backup, install and
+# put-back with this one's.
+exec 9>"$root/.setup.lock"
+flock -n 9 || refuse "another setup.sh runs on $root (it holds $root/.setup.lock)"
+home="$(getent passwd "$user" | cut -d: -f6)"
+uid="$(id -u "$user")"
+units="$home/.config/systemd/user"
+# A host from before #277: the timer that ran the old rollout.sh is there.
+migrating=0
+[[ -e "$units/omarchy-pool-rollout.timer" || -e "$units/omarchy-pool-rollout.service" ]] && migrating=1
+# The first check of the one-time step: a step killed outright (kill -9, the OOM killer, a reboot) after it installed a file left
+# the new files in, or some of them. Run again from there, its backup, its put-back and its messages would all take the new files
+# for the host's own. No release before #277 has the updater in compose.yml, so this never refuses a host that was not touched.
+if (( migrating )) && { grep -q '^  updater:' "$root/compose.yml" 2>/dev/null || grep -qx '# omarchy-rollout: kick-v1' "$root/rollout.sh" 2>/dev/null; }; then
+  refuse "a killed step (or a put-back that kept them) left the new files in $root (the timer may be stopped): take the runbook's way back (The Studio host, Once: the updater), then paste again"
 fi
 for d in work cache/pacman/x86_64 cache/pacman/aarch64 cache/build/project/x86_64 cache/build/project/aarch64 cache/build/community/x86_64 cache/build/community/aarch64 etc; do mkdir -p "$root/$d"; done
 chown -R "$user:$user" "$root"
@@ -125,9 +158,6 @@ usermod -aG docker "$user"
 other=x86_64; [[ "$arch" == x86_64 ]] && other=aarch64
 if [[ -f "/proc/sys/fs/binfmt_misc/qemu-$other" ]]; then echo "    $other containers: emulated (binfmt)"; else echo "    WARNING: no binfmt handler for $other — $other builds will fail on this host" >&2; fi
 
-home="$(getent passwd "$user" | cut -d: -f6)"
-uid="$(id -u "$user")"
-units="$home/.config/systemd/user"
 # The put-back's docker, compose and systemctl calls: each ends within 60 s (a timeout counts as no answer). Set in put_back only:
 # timeout runs a command, not a shell function, so it goes on the commands inside these.
 limit=()
@@ -137,12 +167,9 @@ state_of() { user_systemctl show -p ActiveState --value "$1" 2>/dev/null || true
 rolling() { [[ "$(state_of omarchy-pool-rollout.service)" =~ ^(active|activating|deactivating|reloading)$ ]]; }
 # compose as the updater runs it: the project's .env and nothing of this shell's environment (COMPOSE_PROFILES among it).
 compose_in() { local d="$1"; shift; ${limit[@]+"${limit[@]}"} env -i PATH="$PATH" HOME=/root docker compose --project-directory "$d" "$@"; }
-# A host from before #277: the timer that ran the old rollout.sh is there.
-migrating=0
-[[ -e "$units/omarchy-pool-rollout.timer" || -e "$units/omarchy-pool-rollout.service" ]] && migrating=1
 
 # What was done so far, and what the EXIT trap puts back when setup.sh ends before the updater is confirmed (see the top).
-stage_dir=""; stopped=0; installed=0; started=0; retired=0; pulled=0; backup=""; created=()
+stage_dir=""; stopped=0; installed=0; started=0; retired=0; backup=""; created=()
 # It runs with errexit off and INT, TERM, HUP and PIPE caught by a handler that does nothing (the trap sets that): with its terminal
 # or its reader gone, a message it cannot write fails that message alone, and every step still runs. Caught, not ignored: its
 # children start with those signals at their default. The messages come after the steps they report.
@@ -180,7 +207,7 @@ put_back() {
       echo "    compose.yml, rollout.sh and register.sh: back as they were (copies in $backup)" >&2
     else
       rm -f "$root/.compose.yml.put-back" "$root/.rollout.sh.put-back" "$root/.register.sh.put-back"
-      echo "    WARNING: $keep. The new compose.yml, rollout.sh and register.sh stay (their rollout.sh only wakes the updater). Once docker answers, take the runbook's way back (The Studio host, Once: the updater); then paste again" >&2
+      echo "    WARNING: $keep. The new compose.yml, rollout.sh and register.sh stay (their rollout.sh only wakes the updater). Once docker answers, take the runbook's way back (The Studio host, Once: the updater); setup.sh refuses to run again until then" >&2
     fi
   fi
   if (( stopped )); then
@@ -200,14 +227,6 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 trap 'exit 141' PIPE
-refuse() { # why — before anything of the running host changed (only the updater image, once pulled)
-  if (( pulled )); then
-    printf '\nNot done, and nothing of the host'"'"'s files, units or containers changed (the updater image was pulled): %s\n' "$1" >&2
-  else
-    printf '\nNot done, and nothing changed: %s\n' "$1" >&2
-  fi
-  exit 4
-}
 
 echo "==> the new compose.yml, checked against this host's .env and etc/ before anything changes"
 # A staged copy of the project: the new compose.yml, a copy of .env, and a link to everything else of the host's directory and of
@@ -219,6 +238,17 @@ stage="$stage_dir/$(basename "$root")"
 mkdir -p "$stage/etc"
 cp "$here/compose.yml" "$stage/compose.yml"
 if [[ -f "$root/.env" ]]; then cp "$root/.env" "$stage/.env"; else env_default > "$stage/.env"; fi
+# .env's COMPOSE_FILE names compose files relative to the project directory, here the staged copy's. One named by an absolute path
+# would not be the staged file (into POOL_ROOT: the host's old compose.yml would be checked), and one named by ../ resolves beside
+# the stage, where it is not.
+compose_file="$(sed -nE 's/^[[:space:]]*COMPOSE_FILE[[:space:]]*=[[:space:]]*//p' "$stage/.env" | tail -n1 | tr -d "\"'")"
+sep="$(sed -nE 's/^[[:space:]]*COMPOSE_PATH_SEPARATOR[[:space:]]*=[[:space:]]*//p' "$stage/.env" | tail -n1 | tr -d "\"'")"
+IFS="${sep:-:}" read -r -a cfiles <<<"$compose_file"
+for f in ${cfiles[@]+"${cfiles[@]}"}; do
+  case "$f" in
+    /*|..|../*|*/../*|*/..) refuse "$root/.env's COMPOSE_FILE names $f by an absolute or ../ path, which the check of the new compose.yml cannot follow: name the files relative to $root (COMPOSE_FILE=compose.yml:compose.override.yml, say), then run setup.sh again" ;;
+  esac
+done
 for p in "$root"/* "$root"/.[!.]* "$root"/etc/* "$root"/etc/.[!.]*; do
   [[ -e "$p" || -L "$p" ]] || continue
   rel="${p#"$root"/}"
@@ -263,6 +293,9 @@ if (( migrating )); then
   missing="$(jq -r '[.services | to_entries[] | select((.value.environment // {}) | has("OMARCHY_WORKER_TOKEN")) | select((.value.environment.OMARCHY_WORKER_TOKEN // "") | startswith("omw_") | not) | .key] | sort | map(. + " ") | add // ""' <<<"$config")" \
     || refuse "compose printed no project jq reads"
   [[ -z "$missing" ]] || refuse "no worker token for ${missing}— run register.sh (a maintainer's token) or leave those services out of COMPOSE_PROFILES in $root/.env"
+  # A rollout.sh started by hand (not the timer's, which is waited for below) would drain beside the updater's first round.
+  hand="$(pgrep -f 'rollout\.sh' | tr '\n' ' ' || true)"
+  [[ -z "$hand" ]] || rolling || refuse "a rollout.sh runs outside the timer (pids ${hand}— pgrep -af rollout.sh): let it end, or stop it, then run setup.sh again"
   echo "    the updater image follows the pool, and every service it would run has its worker token"
 fi
 
@@ -277,8 +310,9 @@ if (( migrating )); then
   # never rounds beside it. The timer is stopped, not disabled, until the
   # updater is confirmed: a reboot or a power cut at any point before then
   # brings it back with the host's systemd. A SIGKILL (no EXIT trap) leaves
-  # it stopped until the next reboot, or until its user starts it again
-  # (the runbook says how).
+  # it stopped until the next reboot, or until its user starts it again —
+  # only while no new file is in: the runbook says which, and sends a host
+  # with the new files in to the way back.
   timer_left=""
   # Counted as stopped before the stop, whatever it answers: a signal during the stop runs the EXIT trap before anything after
   # it, and a client that timed out while systemd carried the stop out left the timer stopped all the same. The put-back's
