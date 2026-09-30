@@ -640,8 +640,8 @@ enables the timer and names the way back, and a paste again is then
 refused; one whose docker hangs on the updater's stop ends through its
 timeout (shortened by `SETUP_PUT_BACK_TIMEOUT`). A `setup.sh` killed by
 its recorded PID after the install, or between the `compose.yml` and
-`rollout.sh` installs, then pasted again exits 4 before any pull or
-`systemctl`, and after the way back a paste again finishes with a Done
+`rollout.sh` installs, then pasted again (or a host with only the
+kick-v1 `rollout.sh`) exits 4 before any pull or `systemctl`, and after the way back a paste again finishes with a Done
 line that names a backup without the updater. A second `setup.sh` while
 one holds `.setup.lock`, a `rollout.sh` started by hand (a stub `pgrep`)
 while the timer's service is inactive, and a `COMPOSE_FILE` with an

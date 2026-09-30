@@ -52,7 +52,7 @@
 # rollout; exit 5: the updater; 130, 143, 129 or 141: the signal). When the
 # updater cannot be confirmed stopped (docker does not answer, or it still
 # runs) or an old file does not copy back, the new files stay instead
-# (their rollout.sh only wakes the updater) and the timer is enabled all
+# (their rollout.sh only wakes or starts the updater) and the timer is enabled all
 # the same: never both rollouts, never neither. The put-back's docker and
 # systemctl calls each end within 60 s.
 #
@@ -159,7 +159,8 @@ other=x86_64; [[ "$arch" == x86_64 ]] && other=aarch64
 if [[ -f "/proc/sys/fs/binfmt_misc/qemu-$other" ]]; then echo "    $other containers: emulated (binfmt)"; else echo "    WARNING: no binfmt handler for $other — $other builds will fail on this host" >&2; fi
 
 # The put-back's docker, compose and systemctl calls: each ends within 60 s (a timeout counts as no answer). Set in put_back only:
-# timeout runs a command, not a shell function, so it goes on the commands inside these.
+# timeout runs a command, not a shell function, so it goes on the commands inside these. timeout runs them in a process group of their
+# own, so a Ctrl-C at the terminal does not reach them: this bound is what ends a call that hangs.
 limit=()
 user_systemctl() { ${limit[@]+"${limit[@]}"} runuser -u "$user" -- env XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user "$@"; }
 # A unit's ActiveState as its user's systemd says it; empty when that systemd does not answer.
@@ -182,7 +183,7 @@ put_back() {
     compose_in "$root" stop updater >/dev/null 2>&1
     compose_in "$root" rm -f updater >/dev/null 2>&1
     # Confirmed by its labels (running containers only). One that still runs, or an engine that does not answer, keeps the new
-    # files, whose rollout.sh only wakes the updater: the old rollout.sh never rolls out beside it (restart: unless-stopped).
+    # files, whose rollout.sh only wakes or starts the updater: the old rollout.sh never rolls out beside it (restart: unless-stopped).
     if ids="$("${limit[@]}" docker ps -q --filter "label=com.docker.compose.project=${project:-$(basename "$root")}" --filter label=com.docker.compose.service=updater 2>/dev/null)" && [[ -z "$ids" ]]; then
       # Its first round starts at once, and may be in the middle of a worker's drain: that worker finishes its drain (up to 3 h),
       # and the timer's next rollout then starts what is not running.
@@ -207,13 +208,13 @@ put_back() {
       echo "    compose.yml, rollout.sh and register.sh: back as they were (copies in $backup)" >&2
     else
       rm -f "$root/.compose.yml.put-back" "$root/.rollout.sh.put-back" "$root/.register.sh.put-back"
-      echo "    WARNING: $keep. The new compose.yml, rollout.sh and register.sh stay (their rollout.sh only wakes the updater). Once docker answers, take the runbook's way back (The Studio host, Once: the updater); setup.sh refuses to run again until then" >&2
+      echo "    WARNING: $keep. The new compose.yml, rollout.sh and register.sh stay (their rollout.sh only wakes or starts the updater). Once that is fixed (docker answers, or the copy can succeed), take the runbook's way back (The Studio host, Once: the updater); setup.sh refuses to run again until then" >&2
     fi
   fi
   if (( stopped )); then
     # enable as well as start: a timer its operator disabled by hand, as an earlier exit 3 told them to, comes back after a reboot too.
     if user_systemctl enable --now omarchy-pool-rollout.timer >/dev/null 2>&1; then
-      if [[ -n "$keep" ]]; then echo "    omarchy-pool-rollout.timer is enabled again: it runs the new rollout.sh, which only wakes the updater" >&2
+      if [[ -n "$keep" ]]; then echo "    omarchy-pool-rollout.timer is enabled again: it runs the new rollout.sh, which only wakes or starts the updater" >&2
       else echo "    omarchy-pool-rollout.timer is enabled again: this host still rolls out through it" >&2; fi
     else
       echo "    WARNING: omarchy-pool-rollout.timer could not be enabled again — as $user: systemctl --user enable --now omarchy-pool-rollout.timer" >&2
@@ -242,13 +243,9 @@ if [[ -f "$root/.env" ]]; then cp "$root/.env" "$stage/.env"; else env_default >
 # would not be the staged file (into POOL_ROOT: the host's old compose.yml would be checked), and one named by ../ resolves beside
 # the stage, where it is not.
 compose_file="$(sed -nE 's/^[[:space:]]*COMPOSE_FILE[[:space:]]*=[[:space:]]*//p' "$stage/.env" | tail -n1 | tr -d "\"'")"
-sep="$(sed -nE 's/^[[:space:]]*COMPOSE_PATH_SEPARATOR[[:space:]]*=[[:space:]]*//p' "$stage/.env" | tail -n1 | tr -d "\"'")"
-IFS="${sep:-:}" read -r -a cfiles <<<"$compose_file"
-for f in ${cfiles[@]+"${cfiles[@]}"}; do
-  case "$f" in
-    /*|..|../*|*/../*|*/..) refuse "$root/.env's COMPOSE_FILE names $f by an absolute or ../ path, which the check of the new compose.yml cannot follow: name the files relative to $root (COMPOSE_FILE=compose.yml:compose.override.yml, say), then run setup.sh again" ;;
-  esac
-done
+case ":$compose_file" in
+  *:/*|*:../*) refuse "$root/.env's COMPOSE_FILE=$compose_file names a file by an absolute or ../ path, which the check of the new compose.yml cannot follow: name the files relative to $root (COMPOSE_FILE=compose.yml:compose.override.yml, say), then run setup.sh again" ;;
+esac
 for p in "$root"/* "$root"/.[!.]* "$root"/etc/* "$root"/etc/.[!.]*; do
   [[ -e "$p" || -L "$p" ]] || continue
   rel="${p#"$root"/}"

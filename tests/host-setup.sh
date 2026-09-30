@@ -597,7 +597,7 @@ echo "ok: an updater that does not work here puts the timer back"
 
 # 4c. The step never leaves the host with both rollouts or neither (#298): the timer counts as stopped from its stop on; a put-back
 #     that cannot confirm the updater stopped, or cannot copy an old file back, keeps the new files (their rollout.sh only wakes
-#     the updater) and enables the timer; a put-back whose docker hangs still ends.
+#     or starts the updater) and enables the timer; a put-back whose docker hangs still ends.
 new_files() { # why — the new compose.yml and rollout.sh in place, the timer enabled after its stop, and no "back as they were"
   cmp -s "$POOL/compose.yml" "$root/factory/host/compose.yml" && cmp -s "$POOL/rollout.sh" "$root/factory/host/rollout.sh" || fail "$1: the new compose.yml and rollout.sh stay"
   [[ -f "$POOL/etc/review2-aarch64.env" ]] || fail "$1: the env files the new compose.yml names stay"
@@ -605,7 +605,7 @@ new_files() { # why — the new compose.yml and rollout.sh in place, the timer e
   local stp en; stp="$(line 'systemctl --user stop omarchy-pool-rollout.timer')"; en="$(line 'systemctl --user enable --now omarchy-pool-rollout.timer')"
   [[ -n "$stp" && -n "$en" ]] && (( stp < en )) || fail "$1: the timer is enabled again after it was stopped: stop at ${stp:-never}, enable at ${en:-never}"
   grep -q "back as they were" "$tmp/out" && fail "$1: nothing says the old files are back: $(cat "$tmp/out")"
-  grep -q "omarchy-pool-rollout.timer is enabled again: it runs the new rollout.sh, which only wakes the updater" "$tmp/out" || fail "$1: and it says what the timer runs: $(cat "$tmp/out")"
+  grep -q "omarchy-pool-rollout.timer is enabled again: it runs the new rollout.sh, which only wakes or starts the updater" "$tmp/out" || fail "$1: and it says what the timer runs: $(cat "$tmp/out")"
   grep -q "take the runbook's way back" "$tmp/out" || fail "$1: and names the way back: $(cat "$tmp/out")"
   true
 }
@@ -684,6 +684,10 @@ old_host; echo register.sh > "$STUB_UNITS/kill-at-install"
 (( rc == 137 )) && grep -q "^  updater:" "$POOL/compose.yml" && cmp -s "$POOL/rollout.sh" "$tmp/rollout.before" || fail "setup.sh was killed between the two installs: $rc $(cat "$tmp/out")"
 killed; run_setup
 refused_new_files "killed between the compose.yml and rollout.sh installs"
+# The kick-v1 rollout.sh beside the old compose.yml (a put-back killed between its two renames): refused in the same way.
+old_host; cp "$root/factory/host/rollout.sh" "$POOL/rollout.sh"; mkdir -p "$POOL/setup-backup-20260101T000000Z"
+killed; run_setup
+refused_new_files "the kick-v1 rollout.sh beside the old compose.yml"
 # A second setup.sh while another holds the lock: exit 4 at once, nothing changed.
 old_host
 exec 8>"$POOL/.setup.lock"; flock -n 8 || fail "the lock is taken here, as a first setup.sh takes it"
@@ -705,7 +709,7 @@ run_setup
 for cf in /abs/compose.yml compose.yml:../shared/compose.extra.yml; do
   old_host; echo "COMPOSE_FILE=$cf" >> "$POOL/.env"
   run_setup
-  (( rc == 4 )) && grep -q "COMPOSE_FILE names ${cf#compose.yml:} by an absolute or ../ path" "$tmp/out" || fail "COMPOSE_FILE=$cf is refused: $rc $(cat "$tmp/out")"
+  (( rc == 4 )) && grep -qF "COMPOSE_FILE=$cf names a file by an absolute or ../ path" "$tmp/out" || fail "COMPOSE_FILE=$cf is refused: $rc $(cat "$tmp/out")"
   untouched "COMPOSE_FILE=$cf"
 done
 old_host; echo "COMPOSE_FILE=compose.yml:compose.override.yml" >> "$POOL/.env"

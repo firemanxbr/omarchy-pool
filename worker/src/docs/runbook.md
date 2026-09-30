@@ -495,8 +495,9 @@ What `setup.sh` does, in order, and what a failure leaves:
    answer, or the updater still runs), or an old file does not copy back,
    it keeps all the new files instead, never one old file beside a new
    one, and still enables the timer, which then runs the new `rollout.sh`:
-   it only wakes the updater. It says so; take the way back below once
-   docker answers, then paste again. Each docker and systemctl call of
+   it only wakes or starts the updater. It says so; take the way back
+   below once that is fixed (docker answers, or the copy can succeed),
+   then paste again. Each docker and systemctl call of
    this put-back ends within 60 s. The updater's first round starts at once: if it was draining a
    worker when it was stopped, that worker finishes its drain (up to 3 h),
    and the timer's next rollout then starts it: up to about 3 h 20 min.
@@ -533,6 +534,11 @@ cd /srv/omarchy-pool && grep -c '^  updater:' compose.yml
   below (it picks the backup from before the updater, stops any updater
   and enables the timer), then paste again. Until then, `setup.sh`
   refuses (exit 4) and says so.
+
+Right after a kill, a paste again may say that another `setup.sh` runs:
+a child of the killed one (a `docker` call waiting on the engine) still
+holds `.setup.lock`. `fuser -v /srv/omarchy-pool/.setup.lock` names it;
+end it, or wait until docker answers, then paste again.
 
 The `./rollout.sh` at the end then only wakes the updater. If it fails
 after `setup.sh` succeeded, the updater still runs and rolls the host out:
