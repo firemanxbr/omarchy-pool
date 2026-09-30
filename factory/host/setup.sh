@@ -45,7 +45,12 @@
 # once the timer was stopped: the updater it started is stopped and removed,
 # the old files are put back and the timer is enabled and started again, so
 # the host goes on rolling out through it (exit 3: the timer or its last
-# rollout; exit 5: the updater; 130, 143, 129 or 141: the signal).
+# rollout; exit 5: the updater; 130, 143, 129 or 141: the signal). When the
+# updater cannot be confirmed stopped (docker does not answer, or it still
+# runs) or an old file does not copy back, the new files stay instead
+# (their rollout.sh only wakes the updater) and the timer is enabled all
+# the same: never both rollouts, never neither. The put-back's docker and
+# systemctl calls each end within 60 s.
 #
 # It writes no secret: register.sh puts the worker tokens in etc/, and the
 # agent key goes in etc/agent.env by hand.
@@ -123,48 +128,72 @@ if [[ -f "/proc/sys/fs/binfmt_misc/qemu-$other" ]]; then echo "    $other contai
 home="$(getent passwd "$user" | cut -d: -f6)"
 uid="$(id -u "$user")"
 units="$home/.config/systemd/user"
-user_systemctl() { runuser -u "$user" -- env XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user "$@"; }
+# The put-back's docker, compose and systemctl calls: each ends within 60 s (a timeout counts as no answer). Set in put_back only:
+# timeout runs a command, not a shell function, so it goes on the commands inside these.
+limit=()
+user_systemctl() { ${limit[@]+"${limit[@]}"} runuser -u "$user" -- env XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user "$@"; }
 # A unit's ActiveState as its user's systemd says it; empty when that systemd does not answer.
 state_of() { user_systemctl show -p ActiveState --value "$1" 2>/dev/null || true; }
 rolling() { [[ "$(state_of omarchy-pool-rollout.service)" =~ ^(active|activating|deactivating|reloading)$ ]]; }
 # compose as the updater runs it: the project's .env and nothing of this shell's environment (COMPOSE_PROFILES among it).
-compose_in() { local d="$1"; shift; env -i PATH="$PATH" HOME=/root docker compose --project-directory "$d" "$@"; }
+compose_in() { local d="$1"; shift; ${limit[@]+"${limit[@]}"} env -i PATH="$PATH" HOME=/root docker compose --project-directory "$d" "$@"; }
 # A host from before #277: the timer that ran the old rollout.sh is there.
 migrating=0
 [[ -e "$units/omarchy-pool-rollout.timer" || -e "$units/omarchy-pool-rollout.service" ]] && migrating=1
 
 # What was done so far, and what the EXIT trap puts back when setup.sh ends before the updater is confirmed (see the top).
 stage_dir=""; stopped=0; installed=0; started=0; retired=0; pulled=0; backup=""; created=()
-# It runs with errexit off and SIGPIPE and SIGHUP ignored (the trap sets that): with its terminal or its reader gone, a message it
-# cannot write fails that message alone, and every step still runs. The messages come after the steps they report.
+# It runs with errexit off and INT, TERM, HUP and PIPE caught by a handler that does nothing (the trap sets that): with its terminal
+# or its reader gone, a message it cannot write fails that message alone, and every step still runs. Caught, not ignored: its
+# children start with those signals at their default. The messages come after the steps they report.
 put_back() {
   (( migrating && ! retired )) || return 0
+  limit=(timeout "${SETUP_PUT_BACK_TIMEOUT:-60}")
+  local keep="" f rel ids
   if (( started )); then
     # Before compose.yml goes back: compose leaves a running updater alone once the file no longer names it.
     compose_in "$root" stop updater >/dev/null 2>&1
     compose_in "$root" rm -f updater >/dev/null 2>&1
-    # Its first round starts at once, and may be in the middle of a worker's drain: that worker finishes its drain (up to 3 h), and
-    # the timer's next rollout then starts what is not running.
-    echo "    the updater it started: stopped and removed (a worker its first round was draining finishes its drain, up to 3 h, and the timer's next rollout then starts it: up to about 3 h 20 min)" >&2
+    # Confirmed by its labels (running containers only). One that still runs, or an engine that does not answer, keeps the new
+    # files, whose rollout.sh only wakes the updater: the old rollout.sh never rolls out beside it (restart: unless-stopped).
+    if ids="$("${limit[@]}" docker ps -q --filter "label=com.docker.compose.project=${project:-$(basename "$root")}" --filter label=com.docker.compose.service=updater 2>/dev/null)" && [[ -z "$ids" ]]; then
+      # Its first round starts at once, and may be in the middle of a worker's drain: that worker finishes its drain (up to 3 h),
+      # and the timer's next rollout then starts what is not running.
+      echo "    the updater it started: stopped and removed (a worker its first round was draining finishes its drain, up to 3 h, and the timer's next rollout then starts it: up to about 3 h 20 min)" >&2
+    else
+      keep="the updater it started could not be confirmed stopped (docker did not answer, or it still runs)"
+    fi
   fi
   if (( installed )); then
-    local f rel
-    for f in compose.yml rollout.sh register.sh; do
-      if [[ -f "$backup/$f" ]]; then cp -p "$backup/$f" "$root/$f"; else rm -f "$root/$f"; fi
-    done
-    for rel in ${created[@]+"${created[@]}"}; do rm -f "$root/$rel"; done
-    echo "    compose.yml, rollout.sh and register.sh: back as they were (copies in $backup)" >&2
+    # Each old file copied beside its place first, and renamed into it only once all of them copied: never one old file beside a
+    # new one.
+    if [[ -z "$keep" ]]; then
+      for f in compose.yml rollout.sh register.sh; do
+        [[ ! -f "$backup/$f" ]] || cp -p "$backup/$f" "$root/.$f.put-back" || { keep="$f did not come back from $backup"; break; }
+      done
+    fi
+    if [[ -z "$keep" ]]; then
+      for f in compose.yml rollout.sh register.sh; do
+        if [[ -f "$backup/$f" ]]; then mv -f "$root/.$f.put-back" "$root/$f"; else rm -f "$root/$f"; fi
+      done
+      for rel in ${created[@]+"${created[@]}"}; do rm -f "$root/$rel"; done
+      echo "    compose.yml, rollout.sh and register.sh: back as they were (copies in $backup)" >&2
+    else
+      rm -f "$root/.compose.yml.put-back" "$root/.rollout.sh.put-back" "$root/.register.sh.put-back"
+      echo "    WARNING: $keep. The new compose.yml, rollout.sh and register.sh stay (their rollout.sh only wakes the updater). Once docker answers, take the runbook's way back (The Studio host, Once: the updater); then paste again" >&2
+    fi
   fi
   if (( stopped )); then
     # enable as well as start: a timer its operator disabled by hand, as an earlier exit 3 told them to, comes back after a reboot too.
     if user_systemctl enable --now omarchy-pool-rollout.timer >/dev/null 2>&1; then
-      echo "    omarchy-pool-rollout.timer is enabled again: this host still rolls out through it" >&2
+      if [[ -n "$keep" ]]; then echo "    omarchy-pool-rollout.timer is enabled again: it runs the new rollout.sh, which only wakes the updater" >&2
+      else echo "    omarchy-pool-rollout.timer is enabled again: this host still rolls out through it" >&2; fi
     else
       echo "    WARNING: omarchy-pool-rollout.timer could not be enabled again — as $user: systemctl --user enable --now omarchy-pool-rollout.timer" >&2
     fi
   fi
 }
-trap 'rc=$?; set +e; trap "" INT TERM HUP PIPE; put_back; [[ -z "$stage_dir" ]] || rm -rf "$stage_dir"; exit $rc' EXIT
+trap 'rc=$?; set +e; trap : INT TERM HUP PIPE; put_back; [[ -z "$stage_dir" ]] || rm -rf "$stage_dir"; exit $rc' EXIT
 # Every interrupt ends through the EXIT trap with its own code, never 0: a hung-up session (HUP) and a reader that is gone (PIPE,
 # a `| tee` stopped by Ctrl-C) too — left to their default, a HUP runs it with $? 0 and a PIPE kills setup.sh with no trap at all.
 trap 'exit 130' INT
@@ -251,7 +280,12 @@ if (( migrating )); then
   # it stopped until the next reboot, or until its user starts it again
   # (the runbook says how).
   timer_left=""
-  if user_systemctl stop omarchy-pool-rollout.timer >/dev/null 2>&1; then stopped=1; fi
+  # Counted as stopped before the stop, whatever it answers: a signal during the stop runs the EXIT trap before anything after
+  # it, and a client that timed out while systemd carried the stop out left the timer stopped all the same. The put-back's
+  # enable --now costs nothing on a timer that never stopped. In a subshell, so no redirection of a function call is in effect
+  # when the trap runs the put-back.
+  stopped=1; stop_ok=0
+  if ( user_systemctl stop omarchy-pool-rollout.timer ) >/dev/null 2>&1; then stop_ok=1; fi
   waited=0
   while rolling && (( waited < 4 * 3600 )); do
     (( waited )) || echo "    the timer's last rollout still runs (a drain takes up to 3 h): waiting for it to end before the updater takes over"
@@ -259,8 +293,8 @@ if (( migrating )); then
   done
   state="$(state_of omarchy-pool-rollout.timer)"
   if [[ -z "$state" ]]; then
-    if (( stopped )); then timer_left="$user's systemd stopped answering after the timer was stopped"
-    else timer_left="$user's systemd did not answer: nothing was changed there"; fi
+    if (( stop_ok )); then timer_left="$user's systemd stopped answering after the timer was stopped"
+    else timer_left="$user's systemd did not answer, and its stop of the timer may have taken all the same"; fi
   elif rolling; then
     timer_left="its last rollout, omarchy-pool-rollout.service, still runs after 4 h"
   elif [[ "$state" != inactive ]]; then
@@ -271,18 +305,8 @@ if (( migrating )); then
   fi
   if [[ -n "$timer_left" ]]; then
     echo "    WARNING: omarchy-pool-rollout.timer is not retired: $timer_left" >&2
-    if (( stopped )); then
-      # Not done, and nothing installed; the EXIT trap enables the timer again, so the host goes on rolling out through it.
-      printf '\nNot done, and nothing installed: the timer that ran the old rollout.sh is not retired (%s).\nIt is enabled again, so this host still rolls out through it. Run this setup.sh again once its last rollout has ended\n(systemctl --user status omarchy-pool-rollout.service, as %s).\n' "$timer_left" "$user" >&2
-    else
-      # Not done, and nothing installed: an updater started now would round beside the old timer's rollout.sh (the pool would say "two rollouts").
-      cat >&2 <<LEFT
-
-Not done, and nothing installed: the timer that ran the old rollout.sh is not retired ($timer_left).
-Do not start the updater beside it. As $user: systemctl --user stop omarchy-pool-rollout.timer
-(and systemctl --user stop omarchy-pool-rollout.service for a rollout that never ends), then run this setup.sh again.
-LEFT
-    fi
+    # Not done, and nothing installed; the EXIT trap enables the timer again, so the host goes on rolling out through it.
+    printf '\nNot done, and nothing installed: the timer that ran the old rollout.sh is not retired (%s).\nIt is being enabled again (see below), so this host rolls out through it. Run this setup.sh again once its last rollout has ended\n(systemctl --user status omarchy-pool-rollout.service, as %s).\n' "$timer_left" "$user" >&2
     exit 3
   fi
 fi
