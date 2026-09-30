@@ -516,5 +516,5 @@ factory/
   prompts/pkgbuild.md             the packaging rules the drafter follows
   bin/audit-pkgbuild              the second agent: staged PKGBUILD + log + .PKGINFO → audit.json / audit.md
   prompts/audit.md                what the auditor looks for, and the report's shape
-.github/CODEOWNERS                      every maintainer owns the governance file and the sizing recipes
+.github/CODEOWNERS                      every maintainer owns the governance file, the sizing recipes, the workflows, the host agent, the dispatcher and the host sets
 ```

@@ -11,7 +11,9 @@
 # - the documented identity is exact: release.yml on main, the GitHub
 #   issuer, never a regexp;
 # - the worker image's base images are pinned by digest and the docker CLI
-#   download by SHA-256.
+#   download by SHA-256;
+# - every maintainer owns the workflows, the host agent, the dispatcher that
+#   starts task containers and the host sets (CODEOWNERS).
 #
 # The GitHub settings around them (the environments' reviewers and branch
 # policy, the v* tag ruleset, immutable releases) live on GitHub, not here:
@@ -102,4 +104,12 @@ grep -qE 'x86_64\) sum=[0-9a-f]{64}' <<<"$docker_run" && grep -qE 'aarch64\) sum
 grep -qF 'sha256sum -c -' <<<"$docker_run" || fail "the docker CLI download is checked before it is unpacked"
 grep -qE 'curl [^|]*download\.docker\.com[^|]*\|' <<<"$docker_run" && fail "the docker CLI is never piped straight into tar"
 echo "ok: the base images are pinned by digest and the docker CLI download by SHA-256"
+# --- code owners for what the hosts run and trust -------------------------------
+# CODEOWNERS is generated from factory/MAINTAINERS.toml (factory/bin/check-governance,
+# which CI runs too); every maintainer owns each of these paths.
+owners="$(python3 -c 'import tomllib,sys; print(" ".join("@" + m for m in sorted(dict.fromkeys(tomllib.load(open(sys.argv[1], "rb"))["maintainers"]), key=str.lower)))' "$root/factory/MAINTAINERS.toml")"
+for path in .github/workflows/ crates/omarchy-agent/ 'crates/pkg-repo/src/dispatch*' factory/sets/; do
+  grep -qxE "$(sed 's/[.*]/\\&/g' <<<"$path") +$owners" "$root/.github/CODEOWNERS" || fail "CODEOWNERS gives $path to every maintainer ($owners)"
+done
+echo "ok: code owners cover the workflows, the host agent, the dispatcher and the host sets"
 echo "TRUST PINS OK"

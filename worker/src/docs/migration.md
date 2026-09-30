@@ -73,7 +73,8 @@ gh api -X POST repos/NEWORG/omarchy-pool/rulesets --input .github/rulesets/main.
 ```
 
 From here on every change is a pull request with the six required checks and,
-for the files `CODEOWNERS` names (the governance file, the recipes), a review
+for the files `CODEOWNERS` names (the governance file, the recipes, the
+workflows, the host agent, the dispatcher, the host sets), a review
 by a maintainer other than the author (CONTRIBUTING.md, GOVERNANCE.md). Do the
 remaining edits of this guide on a branch. Put the new maintainers in
 `factory/MAINTAINERS.toml` and run `factory/bin/check-governance --write`.
