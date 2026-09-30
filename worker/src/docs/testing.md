@@ -614,8 +614,17 @@ writes a word; a fresh host gets no timer and starts
 nothing; `rollout.sh` wakes a running updater and starts one that is not
 running as it is (`--no-recreate`), never both, and `--check` asks it,
 nothing more; the runbook's way back run as written (the backup from
-before the updater even beside a newer one, the env files the step wrote
-that hold no token removed, and no such backup: it stops before anything);
+before the updater even beside a newer one or one with no `compose.yml`,
+the updater stopped by its compose labels before any copy even while
+compose cannot load the project, a `docker ps` or `docker stop` that
+fails ending it non-zero with nothing copied, a `docker rm` that fails
+and a paste again after it stopped before `enable --now` both reaching
+its last line, `docker compose config -q`, after the timer is enabled;
+only the env files the step wrote that still hold the untouched
+placeholder removed, so a created `etc/agent.env` with a key and a quoted
+token stay, even after a `setup.sh` killed as it wrote its first
+placeholder, which the backup lists already; and no such backup: it
+stops before anything);
 and the runbook's one-time step says `setup.sh` waits up to 4 h, how to
 bring the timer back after a SIGKILL, and looks first with no `docker
 compose` command.

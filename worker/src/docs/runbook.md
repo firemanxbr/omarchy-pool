@@ -529,9 +529,11 @@ order but Update works. The pool knows whether it was done, because the
 workers report it with their claims.
 
 To undo it (an updater that misbehaves here), use the copies `setup.sh`
-kept. Stop the updater first: compose leaves a running one alone once
-`compose.yml` no longer names it, and it would go on rolling the host out
-beside the timer.
+kept. The updater is stopped first, by its compose labels, before anything
+is copied: compose leaves a running one alone once `compose.yml` no longer
+names it, and it would go on rolling the host out beside the timer. A
+worker the updater was draining finishes its drain (up to 3 h), and the
+timer's next rollout then starts it: up to about 3 h 20 min.
 
 ```bash
 (
@@ -542,26 +544,37 @@ beside the timer.
   b=""
   for d in $(ls -d setup-backup-*/systemd-user | sort -r); do
     d="$(dirname "$d")"
-    if ! grep -q '^  updater:' "$d/compose.yml"; then b="$d"; break; fi
+    if [ -s "$d/compose.yml" ] && [ -s "$d/rollout.sh" ] && ! grep -q '^  updater:' "$d/compose.yml" && ! grep -qx '# omarchy-rollout: kick-v1' "$d/rollout.sh"; then b="$d"; break; fi
   done
   test -n "$b"
-  docker compose stop updater && docker compose rm -f updater
+  # The updater, by its labels: whichever compose.yml is in place, and while compose cannot load the project. None may still run.
+  ids="$(docker ps -q --filter label=com.docker.compose.project=omarchy-pool --filter label=com.docker.compose.service=updater)"
+  if [ -n "$ids" ]; then docker stop $ids; docker rm $ids || true; fi
+  ids="$(docker ps -q --filter label=com.docker.compose.project=omarchy-pool --filter label=com.docker.compose.service=updater)"
+  test -z "$ids"
   cp -p "$b/compose.yml" "$b/rollout.sh" .
   if [ -f "$b/register.sh" ]; then cp -p "$b/register.sh" .; fi
-  # The env files the step wrote that still hold no token go: the old compose.yml starts no pair nobody registered.
+  # The env files the step wrote that are still its untouched placeholder go: the old compose.yml starts no pair nobody registered.
   if [ -f "$b/created-env-files" ]; then
-    while read -r f; do grep -q '^OMARCHY_WORKER_TOKEN=omw_' "$f" || rm -f "$f"; done < "$b/created-env-files"
+    while read -r f; do if grep -qx 'OMARCHY_WORKER_TOKEN=' "$f"; then rm -f "$f"; fi; done < "$b/created-env-files"
   fi
   mkdir -p ~/.config/systemd/user && cp -p "$b"/systemd-user/omarchy-pool-rollout.* ~/.config/systemd/user/
-  systemctl --user daemon-reload && systemctl --user enable --now omarchy-pool-rollout.timer
+  systemctl --user daemon-reload
+  systemctl --user enable --now omarchy-pool-rollout.timer
+  docker compose config -q
 )
 ```
 
-Then `docker compose config -q` prints nothing. If it names a missing
-`etc/review2-*.env`, the old `compose.yml` names the review2 pair with no
-profile, and it did not load before the step either. Take the pair out of
-that file, or register it. Do not write an empty env file: that starts
-the pair unregistered.
+If it stops part way, paste it again: it stops only an updater that still
+runs, and the rest is idempotent. If it stops at `docker ps` or
+`docker stop`, docker is not answering: nothing was copied, so paste it
+again once docker answers.
+
+Its last line, `docker compose config -q`, prints nothing. If it names a
+missing `etc/review2-*.env`, the old `compose.yml` names the review2 pair
+with no profile, and it did not load before the step either. Take the
+pair out of that file, or register it. Do not write an empty env file:
+that starts the pair unregistered.
 
 Do not run an older release's `setup.sh` for this. Its `compose.yml` has
 the review2 pair with no profile, which would start it unregistered.
