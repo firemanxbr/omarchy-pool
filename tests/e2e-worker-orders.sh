@@ -67,6 +67,9 @@ w5_until() { # seconds what command... — polls every 2 s
   until "$@"; do (( SECONDS < deadline )) || { echo "timed out after $most s waiting for: $what" >&2; return 1; }; sleep 2; done
 }
 w5_is() { [[ "$(w5_field "$1" "$2")" == "$3" ]]; }
+# A task's status, past the edge's cache: the URL in double quotes, so the cache-buster is expanded here — inside a bash -c string's
+# single quotes it went to curl as "$(date +%s%N)", a URL with a space that curl refuses (exit 3), and the wait read nothing for its whole time.
+w5_task_is() { [[ "$(curl -s "$OMARCHY_API/api/v1/factory/tasks/$1?fresh=$(date +%s%N)" | jq -r .task.status)" == "$2" ]]; }
 w5_has() { (( $(w5_count "$1" "$2" "${3:-}") >= ${4:-1} )); }
 
 # Every scenario's worker, registered at once (a community registration of a login with nothing queued: it is handed no task), and
@@ -299,7 +302,7 @@ SH
   local task; task="$(w5_d1_json "INSERT INTO build_tasks (name, arch, pkgbuild_ref, reason, priority, status, publish, trust, kind, params) VALUES ('health', '$W5_ARCH', '-', 'e2e: a check that hangs', 1, 'queued', 1, 'project', 'health', '{\"ring\":\"edge\",\"arch\":\"$W5_ARCH\"}') RETURNING id" | jq -r '.[0].id')"
   [[ "$task" =~ ^[0-9]+$ ]] || w5_fail $id "the task was not queued: $task"
   W5_KIND=health W5_REPO="$repo" w5_start $id anthropic 18808
-  w5_until 120 "$id takes task $task" bash -c "[[ \"\$(curl -s '$OMARCHY_API/api/v1/factory/workers/$id?fresh=\$(date +%s%N)' | jq -r .worker.current_task)\" == $task ]]" || w5_fail $id "it never took the check"
+  w5_until 120 "$id takes task $task" w5_is $id .worker.current_task "$task" || w5_fail $id "it never took the check"
   w5_until 60 "the check hangs" test -s "$W5/$id/child" || w5_fail $id "the stub check never ran"
   [[ "$(cat "$W5/$id/hung")" == "$task" ]] || w5_fail $id "the script was not told its task: $(cat "$W5/$id/hung")"
   # It says it stops on the pool's word — its claim declares stop-task —, so /can words a check's stop as a child's: within 5 minutes.
@@ -324,7 +327,7 @@ SH
   fi
   w5_lines "health for $W5_ARCH" build | grep -q "stopped on $id by e2e: e2e: a check that hangs — back in the queue" || w5_fail $id "the build line names the stop"
   # Back in the queue, it runs again — the script does not hang twice — and is done: nothing was cancelled.
-  w5_until 90 "the check runs again, done" bash -c "[[ \"\$(curl -s '$OMARCHY_API/api/v1/factory/tasks/$task?fresh=\$(date +%s%N)' | jq -r .task.status)\" == done ]]" || w5_fail $id "the task did not run again"
+  w5_until 90 "the check runs again, done" w5_task_is "$task" done || w5_fail $id "the task did not run again"
   [[ -z "$(w5_exits $id)" ]] || w5_fail $id "it exited: $(w5_exits $id)"
   w5_stop $id; w5_revoke $id
   echo "G: $id's hung check stopped at its heartbeat — its child killed, its container removed — back in the queue, and done"
