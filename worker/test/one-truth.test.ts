@@ -677,10 +677,12 @@ describe("three more facts, one source each", () => {
 
   it("the 14-day health grid is drawn once — the shell's heatGrid on Status, the rings in the reader's order — and a check's result is one word everywhere: HEALTH_WORD on the grid, the Pool's stable tile, and Status's ring cards, its checks and its jobs table", async () => {
     // Health checks beside the fixture's one: two on edge aarch64 yesterday, ok then failed — the day's cell is the worse; a warn on rc today, posted by hand (the check posts ok or error only: a ring with nothing rendered fails, since #47); and one on the lab, which no scheduler queues (the lab is promised nothing) and no grid draws a row for.
-    const at = (hoursAgo: number) => new Date(Date.now() - hoursAgo * 3600e3).toISOString();
-    const yesterday = new Date(Date.now() - 86400e3).toISOString().slice(0, 10), today = new Date().toISOString().slice(0, 10);
+    // Placed on the calendar (UTC), not so many hours ago: in the first hours of a day, 25 hours ago is two days back and one hour ago is yesterday.
+    const midnight = Date.parse(`${new Date().toISOString().slice(0, 10)}T00:00:00.000Z`), H = 3600e3;
+    const at = (ms: number) => new Date(ms).toISOString();
+    const yesterday = at(midnight - 24 * H).slice(0, 10), today = at(midnight).slice(0, 10);
     const ins = (ring: string, arch: string, status: string, when: string) => env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload, created_at) VALUES ('health', ?, ?, ?, ?, '{}', ?)").bind(ring, arch, status, `${ring} ${arch}: ${status}`, when);
-    await env.DB.batch([ins("edge", "aarch64", "ok", at(26)), ins("edge", "aarch64", "error", at(25)), ins("rc", "x86_64", "warn", at(1)), ins("lab", "x86_64", "ok", at(1))]);
+    await env.DB.batch([ins("edge", "aarch64", "ok", at(midnight - 13 * H)), ins("edge", "aarch64", "error", at(midnight - 12 * H)), ins("rc", "x86_64", "warn", at(midnight)), ins("lab", "x86_64", "ok", at(midnight))]);
     const stats = (await call("GET", "/stats?after=health")).json;
     const rows = stats.series.health as { ring: string; arch: string; created_at: string; status: string }[];
     expect(rows.map((r) => r.status).sort()).toEqual(["error", "ok", "ok", "ok", "warn"]);
