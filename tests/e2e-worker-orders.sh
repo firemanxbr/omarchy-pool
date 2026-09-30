@@ -337,7 +337,9 @@ SH
 # own w5_stop, and its loop would restart pkg-repo against a pool that is gone, its stub keeping its port for the next run.
 w5_cleanup() {
   local id; for id in w5a w5a2 w5b w5c w5d w5e w5f w5g; do [[ -e "$W5/$id/pid" ]] && w5_stop "$id"; done
-  [[ -s "$W5/w5g/child" ]] && kill "$(cat "$W5/w5g/child")" 2>/dev/null
+  # G's hung child, if the scenario failed before its stop killed it. Under the E2E's set -e, a kill that fails as the last command
+  # of an && list ends the script: after a stop that worked, the child is gone and kill answers 1.
+  if [[ -s "$W5/w5g/child" ]]; then kill "$(cat "$W5/w5g/child")" 2>/dev/null || true; fi
   return 0
 }
 
