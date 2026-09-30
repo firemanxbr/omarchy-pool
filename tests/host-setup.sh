@@ -108,7 +108,8 @@ stub id 'case "$1" in -u) [[ -n "${2:-}" ]] && echo 1000 || echo 1000 ;; -Gn) ec
 # the updater first waits (up to 120 s, else reader.timeout) until reader.done says the reader of setup.sh's output is gone.
 # The runbook's way back: a docker compose in the current directory loads no project whose env file is missing; docker ps -q by the
 # updater's labels lists it while `running` exists (ps.fail: the engine does not answer); docker stop of it (stop.fail: it fails)
-# removes `running` and notes whether the installed compose.yml has the updater yet; docker rm of it fails with rm.fail.
+# removes `running` (stop.keep: it exits 0 and an updater still runs) and notes whether the installed compose.yml has the updater yet;
+# docker rm of it fails with rm.fail.
 cat > "$tmp/bin/docker" <<S
 #!/usr/bin/env bash
 STUB_LOG="$STUB_LOG"; STUB_DOCKER="$tmp/docker"
@@ -158,7 +159,7 @@ case "$1 $2" in
   "stop 5d0e1f2a3b4c")
     { grep -q "^  updater:" "$STUB_POOL/compose.yml" 2>/dev/null && echo "compose has the updater" || echo "compose without the updater"; } >> "$STUB_LOG"
     [[ ! -f "$STUB_DOCKER/stop.fail" ]] || { echo "Error response from daemon: cannot stop container: 5d0e1f2a3b4c: tried to kill container, but did not receive an exit event" >&2; exit 1; }
-    rm -f "$STUB_DOCKER/running" ;;
+    [[ -f "$STUB_DOCKER/stop.keep" ]] || rm -f "$STUB_DOCKER/running" ;;
   "rm 5d0e1f2a3b4c") [[ ! -f "$STUB_DOCKER/rm.fail" ]] || { echo "Error response from daemon: removal of container 5d0e1f2a3b4c is already in progress" >&2; exit 1; } ;;
   # The project's containers, by the service each one belongs to: STUB_DOCKER/containers.
   "ps -a") [[ ! -f "$STUB_DOCKER/containers" ]] || cat "$STUB_DOCKER/containers" ;;
@@ -432,6 +433,11 @@ migrated; touch "$tmp/docker/stop.fail"
 way_back
 (( rc != 0 )) || fail "a docker stop that fails ends the way back non-zero: $(cat "$tmp/out")"
 nothing_copied "a docker stop that fails"
+# docker stop reports success, yet an updater still runs at the check after it: non-zero, nothing copied.
+migrated; touch "$tmp/docker/stop.keep"
+way_back
+(( rc != 0 )) || fail "an updater still running after a docker stop that succeeded ends the way back non-zero: $(cat "$tmp/out")"
+nothing_copied "an updater still running after docker stop"
 # compose cannot load the project (an env file compose.yml names is missing) while the updater runs: it is stopped all the same, by its
 # labels, while the new compose.yml is still in place, and the way back finishes.
 migrated; rm -f "$POOL/etc/community-aarch64.env"
@@ -465,12 +471,21 @@ way_back
 (( rc == 0 )) || fail "pasted again, the way back finishes: $rc $(cat "$tmp/out")"
 grep -q "^docker stop" "$STUB_LOG" && fail "pasted again, it stops no updater that is not running: $(cat "$STUB_LOG")"
 done_back "pasted again"
-# A newer setup-backup-*/systemd-user with no compose.yml (a hand-edited backup): skipped for the one from before the updater.
+# A newer setup-backup-*/systemd-user with no compose.yml (a hand-edited backup, its old rollout.sh there): skipped for the one from
+# before the updater.
 migrated
 mkdir -p "$POOL/setup-backup-29990101T000000Z/systemd-user"; cp "$backup"/systemd-user/* "$POOL/setup-backup-29990101T000000Z/systemd-user/"
+cp "$backup/rollout.sh" "$POOL/setup-backup-29990101T000000Z/"
 way_back
 (( rc == 0 )) || fail "a newer backup with no compose.yml does not stop the way back: $rc $(cat "$tmp/out")"
 done_back "a newer backup with no compose.yml"
+# A newer one whose compose.yml has no updater but whose rollout.sh is the updater's kick-v1 one: skipped too.
+migrated
+mkdir -p "$POOL/setup-backup-29990101T000000Z/systemd-user"; cp "$backup"/systemd-user/* "$POOL/setup-backup-29990101T000000Z/systemd-user/"
+cp "$backup/compose.yml" "$root/factory/host/rollout.sh" "$POOL/setup-backup-29990101T000000Z/"
+way_back
+(( rc == 0 )) || fail "a newer backup with the kick-v1 rollout.sh does not stop the way back: $rc $(cat "$tmp/out")"
+done_back "a newer backup with the kick-v1 rollout.sh"
 # A created etc/agent.env filled in with a key, and a token written by hand, quoted, in review2-x86_64.env: both stay; the review2
 # placeholder left untouched goes.
 old_host; rm -f "$POOL/etc/agent.env"; run_setup
@@ -489,7 +504,8 @@ grep -q omw_review2x "$POOL/etc/review2-x86_64.env" || fail "a token written by 
 done_back "filled env files"
 # setup.sh killed outright as it writes the first placeholder: the backup lists it already, and the way back leaves no review2 one.
 old_host; touch "$STUB_UNITS/kill-at-placeholder"
-TMPDIR="$tmp" run_setup
+# Its shell's own "Killed: 9" report of the job is expected, and silenced.
+{ TMPDIR="$tmp" run_setup; } 2>/dev/null
 (( rc == 137 )) || fail "setup.sh was killed as it wrote its first placeholder: $rc $(cat "$tmp/out")"
 backup="$(ls -d "$POOL"/setup-backup-* | head -n1)"
 [[ -f "$POOL/etc/review2-aarch64.env" && ! -e "$POOL/etc/review2-x86_64.env" ]] || fail "killed after its first placeholder, before its second: $(ls "$POOL/etc")"
@@ -499,7 +515,6 @@ way_back
 (( rc == 0 )) || fail "the way back after a kill exited $rc: $(cat "$tmp/out")"
 ls "$POOL"/etc/review2-*.env >/dev/null 2>&1 && fail "no etc/review2-*.env placeholder is left: $(ls "$POOL/etc")"
 done_back "after a kill"
-rm -f "$tmp/docker/stop.fail" "$tmp/docker/rm.fail" "$tmp/docker/ps.fail"
 echo "ok: the way back stops the updater first, and a paste again finishes it"
 
 # 4. The updater does not start, does not stay up, or fails its self-test: stopped and removed, the old files back, the timer enabled

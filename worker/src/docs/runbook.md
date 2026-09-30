@@ -566,9 +566,12 @@ timer's next rollout then starts it: up to about 3 h 20 min.
 ```
 
 If it stops part way, paste it again: it stops only an updater that still
-runs, and the rest is idempotent. If it stops at `docker ps` or
-`docker stop`, docker is not answering: nothing was copied, so paste it
-again once docker answers.
+runs, and the rest is idempotent. If it stops before its `cp` (at
+`docker ps`, `docker stop` or the check after them), nothing was copied:
+paste it again once docker answers. If its `docker rm` failed (it prints
+the error and goes on), the stopped updater container is left: remove it
+with `docker rm` before you run `setup.sh` again, whose
+`--no-recreate` would otherwise start that container as it is.
 
 Its last line, `docker compose config -q`, prints nothing. If it names a
 missing `etc/review2-*.env`, the old `compose.yml` names the review2 pair
