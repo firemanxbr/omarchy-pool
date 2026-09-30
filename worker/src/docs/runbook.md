@@ -539,8 +539,8 @@ timer's next rollout then starts it: up to about 3 h 20 min.
 (
   set -euo pipefail
   cd /srv/omarchy-pool
-  # The newest backup with the timer's units whose compose.yml has no updater: a step that was killed and pasted again
-  # wrote a newer one, holding the new files.
+  # The newest backup with the timer's units whose compose.yml and rollout.sh are there and are not the updater's: a step
+  # that was killed and pasted again wrote a newer one, holding the new files.
   b=""
   for d in $(ls -d setup-backup-*/systemd-user | sort -r); do
     d="$(dirname "$d")"
