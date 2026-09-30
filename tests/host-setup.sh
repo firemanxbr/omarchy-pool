@@ -34,8 +34,10 @@
 # - The staged copy links all of the host's directory and etc/, so an
 #   override's own env file loads; a container of a service the new
 #   compose.yml leaves out under the host's profiles is warned about; the
-#   env files it wrote are listed in the backup; and the runbook's way back
-#   runs as written against the result.
+#   env files it wrote are listed in the backup, before any is written; and
+#   the runbook's way back runs as written against the result: the updater
+#   stopped by its labels before any copy, a failure of docker there ending
+#   it with nothing copied, a paste again finishing it (#297).
 # - rollout.sh only wakes the updater: SIGUSR1 to a running one, and one
 #   that is not running started as it is (`--no-recreate`: never recreated
 #   onto an image its guard has not passed); `--check` asks the updater's
@@ -69,6 +71,8 @@ stub pacman 'echo "pacman $*" >> "$STUB_LOG"'
 stub systemctl 'echo "systemctl $*" >> "$STUB_LOG"
 [[ "$*" == "--user stop omarchy-pool-rollout.timer" && -e "$STUB_UNITS/nobus-after-stop" ]] && { touch "$STUB_UNITS/nobus"; exit 0; }
 [[ "$1" == --user && -e "$STUB_UNITS/nobus" ]] && { echo "Failed to connect to bus: No such file or directory" >&2; exit 1; }
+# STUB_UNITS/reload.fail: a daemon-reload that fails (the way back stopped between its cp and its enable --now).
+[[ "$*" == "--user daemon-reload" && -e "$STUB_UNITS/reload.fail" ]] && { echo "Failed to reload daemon: Connection timed out" >&2; exit 1; }
 if [[ "$1 $2 $3 $4" == "--user show -p ActiveState" ]]; then
   [[ "$6" == omarchy-pool-rollout.service ]] && { grep -q "^  updater:" "$STUB_POOL/compose.yml" 2>/dev/null && echo "compose has the updater" || echo "compose without the updater"; } >> "$STUB_LOG"
   f="$STUB_UNITS/$6"; [[ -f "$f" ]] || { echo inactive; exit 0; }
@@ -82,7 +86,11 @@ stub sleep 'echo "sleep $*" >> "$STUB_LOG"
 if [[ -f "$STUB_UNITS/term-at" ]]; then n=$(( $(cat "$STUB_UNITS/sleeps" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$STUB_UNITS/sleeps"; (( n == $(cat "$STUB_UNITS/term-at") )) && kill -"$(cat "$STUB_UNITS/sig" 2>/dev/null || echo TERM)" "$PPID"; fi
 exit 0'
 stub usermod 'echo "usermod $*" >> "$STUB_LOG"'
-stub chown 'echo "chown $*" >> "$STUB_LOG"'
+# chown: with STUB_UNITS/kill-at-placeholder, its first call on an etc/review2-*.env of the host (setup.sh hands over the placeholder it
+# has just written) kills setup.sh outright — its caller, by the PID the kernel recorded as this stub's parent.
+stub chown 'echo "chown $*" >> "$STUB_LOG"
+[[ -e "$STUB_UNITS/kill-at-placeholder" && "${2:-}" == "$STUB_POOL"/etc/review2-*.env ]] && { rm -f "$STUB_UNITS/kill-at-placeholder"; kill -KILL "$PPID"; }
+exit 0'
 stub loginctl 'echo "loginctl $*" >> "$STUB_LOG"'
 stub btrfs 'echo "btrfs $*" >> "$STUB_LOG"; mkdir -p "${@: -1}"'
 stub hostname 'echo omarchy-studio'
@@ -98,6 +106,10 @@ stub id 'case "$1" in -u) [[ -n "${2:-}" ]] && echo 1000 || echo 1000 ;; -Gn) ec
 # it answers, from files in STUB_DOCKER: config.fail, pull.fail, nolabel (the updater image from before #277), config.json (the
 # project compose prints), containers (the services of the project's containers), up.fail, restarting, selftest.fail; `running` while the updater it started runs; wait-reader: a stop of
 # the updater first waits (up to 120 s, else reader.timeout) until reader.done says the reader of setup.sh's output is gone.
+# The runbook's way back: a docker compose in the current directory loads no project whose env file is missing; docker ps -q by the
+# updater's labels lists it while `running` exists (ps.fail: the engine does not answer); docker stop of it (stop.fail: it fails)
+# removes `running` (stop.keep: it exits 0 and an updater still runs) and notes whether the installed compose.yml has the updater yet;
+# docker rm of it fails with rm.fail.
 cat > "$tmp/bin/docker" <<S
 #!/usr/bin/env bash
 STUB_LOG="$STUB_LOG"; STUB_DOCKER="$tmp/docker"
@@ -106,6 +118,11 @@ cat >> "$tmp/bin/docker" <<'S'
 echo "docker $*" >> "$STUB_LOG"
 # rollout.sh (the host's own shell, from POOL_ROOT): the updater's container when STUB_UPDATER says it runs.
 [[ "$*" == "compose ps -q --status running updater" ]] && { [[ "${STUB_UPDATER:-}" == running ]] && echo 3f9c2a8e1b7d; exit 0; }
+if [[ "$1" == compose && "${2:-}" != --project-directory ]]; then
+  for rel in $(sed -nE 's/^[[:space:]]*env_file:[[:space:]]*\[(.*)\].*/\1/p' compose.yml compose.override.y*ml 2>/dev/null | tr ',' ' '); do
+    [[ -e "$rel" ]] || { echo "env file $PWD/$rel not found: stat $PWD/$rel: no such file or directory" >&2; exit 1; }
+  done
+fi
 if [[ "$1" == compose && "$2" == --project-directory ]]; then
   d="$3"; shift 3; flags=""
   while [[ "$1" == --profile ]]; do flags+="$1 $2 "; shift 2; done
@@ -136,6 +153,14 @@ if [[ "$1" == compose && "$2" == --project-directory ]]; then
   exit 0
 fi
 case "$1 $2" in
+  "ps -q")
+    [[ ! -f "$STUB_DOCKER/ps.fail" ]] || { echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" >&2; exit 1; }
+    [[ "$*" == "ps -q --filter label=com.docker.compose.project=omarchy-pool --filter label=com.docker.compose.service=updater" && -f "$STUB_DOCKER/running" ]] && echo 5d0e1f2a3b4c ;;
+  "stop 5d0e1f2a3b4c")
+    { grep -q "^  updater:" "$STUB_POOL/compose.yml" 2>/dev/null && echo "compose has the updater" || echo "compose without the updater"; } >> "$STUB_LOG"
+    [[ ! -f "$STUB_DOCKER/stop.fail" ]] || { echo "Error response from daemon: cannot stop container: 5d0e1f2a3b4c: tried to kill container, but did not receive an exit event" >&2; exit 1; }
+    [[ -f "$STUB_DOCKER/stop.keep" ]] || rm -f "$STUB_DOCKER/running" ;;
+  "rm 5d0e1f2a3b4c") [[ ! -f "$STUB_DOCKER/rm.fail" ]] || { echo "Error response from daemon: removal of container 5d0e1f2a3b4c is already in progress" >&2; exit 1; } ;;
   # The project's containers, by the service each one belongs to: STUB_DOCKER/containers.
   "ps -a") [[ ! -f "$STUB_DOCKER/containers" ]] || cat "$STUB_DOCKER/containers" ;;
   "image inspect") [[ -f "$STUB_DOCKER/nolabel" ]] && echo "<no value>" || echo 1 ;;
@@ -369,12 +394,128 @@ cmp -s "$POOL/compose.yml" "$tmp/compose.before" && cmp -s "$POOL/rollout.sh" "$
 [[ ! -e "$POOL/etc/review2-aarch64.env" ]] || fail "the way back removes an env file the step wrote that holds no token"
 grep -q omw_review2x "$POOL/etc/review2-x86_64.env" || fail "and keeps one register.sh filled in since"
 [[ -f "$units/omarchy-pool-rollout.timer" && -f "$units/omarchy-pool-rollout.service" ]] || fail "the way back puts the timer's units back"
-grep -q "^docker compose stop updater$" "$STUB_LOG" && grep -q "^systemctl --user enable --now omarchy-pool-rollout.timer$" "$STUB_LOG" || fail "the updater stopped, the timer enabled: $(cat "$STUB_LOG")"
+grep -q "^docker stop 5d0e1f2a3b4c$" "$STUB_LOG" && grep -q "^systemctl --user enable --now omarchy-pool-rollout.timer$" "$STUB_LOG" || fail "the updater stopped, the timer enabled: $(cat "$STUB_LOG")"
 # With no backup from before the updater, it stops at once: nothing stopped, nothing copied.
 rm -rf "$backup"; : > "$STUB_LOG"
 ( cd "$tmp" && HOME="$tmp/home" bash -c "$(sed "s#/srv/omarchy-pool#$POOL#g" <<<"$undo")" ) > "$tmp/out" 2>&1 && fail "the way back with only a backup holding the new files stops"
-grep -q "compose stop updater" "$STUB_LOG" && fail "and stops no updater: $(cat "$STUB_LOG")"
+grep -q "^docker stop" "$STUB_LOG" && fail "and stops no updater: $(cat "$STUB_LOG")"
 echo "ok: the runbook's way back"
+
+# 3c. The way back when docker, compose or systemd fail part way (#297): the updater is stopped by its labels, before anything is
+#     copied; a failure there stops it with nothing changed, and a paste again finishes the job. Each case starts from a host that
+#     took the one-time step (the updater running, the new files in, the timer's units gone).
+migrated() {
+  old_host; run_setup
+  (( rc == 0 )) || fail "setup.sh exited $rc: $(cat "$tmp/out")"
+  backup="$(ls -d "$POOL"/setup-backup-* | head -n1)"; : > "$STUB_LOG"
+}
+way_back() { set +e; ( cd "$tmp" && HOME="$tmp/home" bash -c "$(sed "s#/srv/omarchy-pool#$POOL#g" <<<"$undo")" ) > "$tmp/out" 2>&1; rc=$?; set -e; }
+# Nothing changed by a way back that stopped before its cp: the new files, no timer unit, no systemctl.
+nothing_copied() { # why
+  cmp -s "$POOL/compose.yml" "$root/factory/host/compose.yml" && cmp -s "$POOL/rollout.sh" "$root/factory/host/rollout.sh" || fail "$1: compose.yml and rollout.sh stay the new ones"
+  [[ ! -e "$units/omarchy-pool-rollout.timer" && ! -e "$units/omarchy-pool-rollout.service" ]] || fail "$1: the timer's units are not put back"
+  grep -q "^systemctl" "$STUB_LOG" && fail "$1: systemctl is not run: $(cat "$STUB_LOG")"
+  true
+}
+# Done: the old files back, the units back, the timer enabled, and the last command, docker compose config -q, after it.
+done_back() { # why
+  cmp -s "$POOL/compose.yml" "$tmp/compose.before" && cmp -s "$POOL/rollout.sh" "$tmp/rollout.before" || fail "$1: compose.yml and rollout.sh are back as they were"
+  [[ -f "$units/omarchy-pool-rollout.timer" && -f "$units/omarchy-pool-rollout.service" ]] || fail "$1: the timer's units are back"
+  local en cfg; en="$(line '^systemctl --user enable --now omarchy-pool-rollout.timer$')"; cfg="$(line '^docker compose config -q$')"
+  [[ -n "$en" && -n "$cfg" ]] && (( en < cfg )) || fail "$1: the timer enabled, then docker compose config -q: enable at ${en:-never}, config at ${cfg:-never}"
+  [[ "$(tail -n1 "$STUB_LOG")" == "docker compose config -q" ]] || fail "$1: docker compose config -q is the last command: $(tail -n3 "$STUB_LOG")"
+  true
+}
+# The recipe's last command is docker compose config -q.
+[[ "$(grep -v '^)$' <<<"$undo" | tail -n1)" == "  docker compose config -q" ]] || fail "the way back ends with docker compose config -q: $(tail -n2 <<<"$undo")"
+# docker stop of the updater fails: non-zero, nothing copied, systemd untouched — the updater still rolls the host out alone.
+migrated; touch "$tmp/docker/stop.fail"
+way_back
+(( rc != 0 )) || fail "a docker stop that fails ends the way back non-zero: $(cat "$tmp/out")"
+nothing_copied "a docker stop that fails"
+# docker stop reports success, yet an updater still runs at the check after it: non-zero, nothing copied.
+migrated; touch "$tmp/docker/stop.keep"
+way_back
+(( rc != 0 )) || fail "an updater still running after a docker stop that succeeded ends the way back non-zero: $(cat "$tmp/out")"
+nothing_copied "an updater still running after docker stop"
+# compose cannot load the project (an env file compose.yml names is missing) while the updater runs: it is stopped all the same, by its
+# labels, while the new compose.yml is still in place, and the way back finishes.
+migrated; rm -f "$POOL/etc/community-aarch64.env"
+( cd "$POOL" && docker compose ps ) > /dev/null 2>&1 && fail "the stub's compose loads no project whose env file is missing (else this case proves nothing)"
+: > "$STUB_LOG"
+way_back
+(( rc == 0 )) || fail "a project compose cannot load does not stop the way back: $rc $(cat "$tmp/out")"
+[[ "$(sed -n '/^docker stop 5d0e1f2a3b4c$/{n;p;}' "$STUB_LOG")" == "compose has the updater" ]] || fail "the updater is stopped before any cp: $(cat "$STUB_LOG")"
+[[ ! -f "$tmp/docker/running" ]] || fail "no updater is left running beside the timer"
+done_back "a project compose cannot load"
+# docker rm fails after a good stop: the stopped updater stays stopped (unless-stopped), and the way back goes on to its end.
+migrated; touch "$tmp/docker/rm.fail"
+way_back
+(( rc == 0 )) || fail "a docker rm that fails after a good stop does not stop the way back: $rc $(cat "$tmp/out")"
+grep -q "^docker rm 5d0e1f2a3b4c$" "$STUB_LOG" || fail "the way back tried to remove the updater: $(cat "$STUB_LOG")"
+done_back "a docker rm that fails"
+# docker ps itself fails: non-zero before any cp.
+migrated; touch "$tmp/docker/ps.fail"
+way_back
+(( rc != 0 )) || fail "a docker ps that fails ends the way back non-zero: $(cat "$tmp/out")"
+grep -q "^docker stop" "$STUB_LOG" && fail "and stops nothing: $(cat "$STUB_LOG")"
+nothing_copied "a docker ps that fails"
+# Stopped between its cp and enable --now (the old compose.yml back already), then pasted again: it finishes, the timer enabled.
+migrated; touch "$STUB_UNITS/reload.fail"
+way_back
+(( rc != 0 )) || fail "a daemon-reload that fails ends the way back non-zero: $(cat "$tmp/out")"
+cmp -s "$POOL/compose.yml" "$tmp/compose.before" || fail "the first paste put the old compose.yml back"
+grep -q "enable --now" "$STUB_LOG" && fail "and stopped before enable --now: $(cat "$STUB_LOG")"
+rm -f "$STUB_UNITS/reload.fail"; : > "$STUB_LOG"
+way_back
+(( rc == 0 )) || fail "pasted again, the way back finishes: $rc $(cat "$tmp/out")"
+grep -q "^docker stop" "$STUB_LOG" && fail "pasted again, it stops no updater that is not running: $(cat "$STUB_LOG")"
+done_back "pasted again"
+# A newer setup-backup-*/systemd-user with no compose.yml (a hand-edited backup, its old rollout.sh there): skipped for the one from
+# before the updater.
+migrated
+mkdir -p "$POOL/setup-backup-29990101T000000Z/systemd-user"; cp "$backup"/systemd-user/* "$POOL/setup-backup-29990101T000000Z/systemd-user/"
+cp "$backup/rollout.sh" "$POOL/setup-backup-29990101T000000Z/"
+way_back
+(( rc == 0 )) || fail "a newer backup with no compose.yml does not stop the way back: $rc $(cat "$tmp/out")"
+done_back "a newer backup with no compose.yml"
+# A newer one whose compose.yml has no updater but whose rollout.sh is the updater's kick-v1 one: skipped too.
+migrated
+mkdir -p "$POOL/setup-backup-29990101T000000Z/systemd-user"; cp "$backup"/systemd-user/* "$POOL/setup-backup-29990101T000000Z/systemd-user/"
+cp "$backup/compose.yml" "$root/factory/host/rollout.sh" "$POOL/setup-backup-29990101T000000Z/"
+way_back
+(( rc == 0 )) || fail "a newer backup with the kick-v1 rollout.sh does not stop the way back: $rc $(cat "$tmp/out")"
+done_back "a newer backup with the kick-v1 rollout.sh"
+# A created etc/agent.env filled in with a key, and a token written by hand, quoted, in review2-x86_64.env: both stay; the review2
+# placeholder left untouched goes.
+old_host; rm -f "$POOL/etc/agent.env"; run_setup
+(( rc == 0 )) || fail "setup.sh exited $rc: $(cat "$tmp/out")"
+backup="$(ls -d "$POOL"/setup-backup-* | head -n1)"
+grep -qx "etc/agent.env" "$backup/created-env-files" || fail "the backup lists the etc/agent.env it wrote: $(cat "$backup/created-env-files")"
+printf 'GEMINI_API_KEY=k2
+' > "$POOL/etc/agent.env"; printf 'OMARCHY_WORKER_TOKEN="omw_review2x0123456789"
+' > "$POOL/etc/review2-x86_64.env"
+: > "$STUB_LOG"
+way_back
+(( rc == 0 )) || fail "the way back exited $rc: $(cat "$tmp/out")"
+grep -qx "GEMINI_API_KEY=k2" "$POOL/etc/agent.env" || fail "a created etc/agent.env filled in with a key stays"
+grep -q omw_review2x "$POOL/etc/review2-x86_64.env" || fail "a token written by hand, quoted, stays"
+[[ ! -e "$POOL/etc/review2-aarch64.env" ]] || fail "an untouched review2 placeholder goes"
+done_back "filled env files"
+# setup.sh killed outright as it writes the first placeholder: the backup lists it already, and the way back leaves no review2 one.
+old_host; touch "$STUB_UNITS/kill-at-placeholder"
+# Its shell's own "Killed: 9" report of the job is expected, and silenced.
+{ TMPDIR="$tmp" run_setup; } 2>/dev/null
+(( rc == 137 )) || fail "setup.sh was killed as it wrote its first placeholder: $rc $(cat "$tmp/out")"
+backup="$(ls -d "$POOL"/setup-backup-* | head -n1)"
+[[ -f "$POOL/etc/review2-aarch64.env" && ! -e "$POOL/etc/review2-x86_64.env" ]] || fail "killed after its first placeholder, before its second: $(ls "$POOL/etc")"
+grep -qx "etc/review2-aarch64.env" "$backup/created-env-files" || fail "the backup lists the placeholder before it is written: $(cat "$backup/created-env-files" 2>/dev/null)"
+: > "$STUB_LOG"
+way_back
+(( rc == 0 )) || fail "the way back after a kill exited $rc: $(cat "$tmp/out")"
+ls "$POOL"/etc/review2-*.env >/dev/null 2>&1 && fail "no etc/review2-*.env placeholder is left: $(ls "$POOL/etc")"
+done_back "after a kill"
+echo "ok: the way back stops the updater first, and a paste again finishes it"
 
 # 4. The updater does not start, does not stay up, or fails its self-test: stopped and removed, the old files back, the timer enabled
 #    again (exit 5) — the host goes on rolling out through it.
@@ -458,5 +599,10 @@ grep -q "draining (up to 3 h)" <<<"$step" && fail "the runbook's one-time step n
 grep -q "exits 130, 143, 129 or 141" <<<"$step" || fail "the runbook's one-time step gives an interrupt's exit codes"
 grep -q "killed outright .*systemctl --user start omarchy-pool-rollout.timer" <<<"$step" || fail "the runbook says how to bring the timer back after a SIGKILL"
 grep -qF "docker ps -a --filter label=com.docker.compose.project=omarchy-pool" <<<"$step" || fail "the first look lists the containers without loading compose.yml"
+# The way back: pasted again when it stops part way; a worker stopped mid-drain is not promised back within 15 min (#297).
+grep -q "If it stops part way, paste it again" <<<"$step" || fail "the runbook says to paste the way back again if it stops part way"
+grep -q "up to about 3 h 20 min" <<<"$step" || fail "the runbook says a worker stopped mid-drain can take up to about 3 h 20 min"
+grep -qE "within 15 min" <<<"$step" && fail "the runbook no longer promises 15 min for a worker stopped mid-drain"
+grep -q "within 15 min" "$root/factory/host/setup.sh" && fail "setup.sh no longer promises 15 min for a worker stopped mid-drain"
 grep -q "^docker compose ps -a" <<<"$(awk '/^### Once: the updater/ { on = 1 } on && /^### / && !/Once: the updater/ { exit } on { print }' "$root/worker/src/docs/runbook.md")" && fail "the first look runs no docker compose command"
 echo "HOST SETUP OK"

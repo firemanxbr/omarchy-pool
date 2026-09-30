@@ -613,12 +613,23 @@ old files and no new env file, the timer enabled again and never disabled
 writes a word; a fresh host gets no timer and starts
 nothing; `rollout.sh` wakes a running updater and starts one that is not
 running as it is (`--no-recreate`), never both, and `--check` asks it,
-nothing more; the runbook's way back run as written (the backup from
-before the updater even beside a newer one, the env files the step wrote
-that hold no token removed, and no such backup: it stops before anything);
+nothing more; the runbook's way back run as written (see below);
 and the runbook's one-time step says `setup.sh` waits up to 4 h, how to
 bring the timer back after a SIGKILL, and looks first with no `docker
 compose` command.
+The way back picks the backup from before the updater, even beside a
+newer one, one with no `compose.yml` or one with the updater's `rollout.sh`,
+and with no such backup it stops before anything. It stops the updater by
+its compose labels before any copy, even while compose cannot load the
+project; a `docker ps` or `docker stop` that fails, or an updater still
+running after a `docker stop` that succeeded, ends it non-zero with
+nothing copied. A `docker rm` that fails, and a paste again after it
+stopped before `enable --now`, both reach its last line,
+`docker compose config -q`, after the timer is enabled. It removes only
+the env files the step wrote that still hold the untouched placeholder:
+a created `etc/agent.env` with a key and a quoted token stay, and after a
+`setup.sh` killed as it wrote its first placeholder, which the backup
+lists already, no review2 placeholder is left.
 `bash tests/rollback-workflow.sh` (CI) runs `factory/bin/release-rollback`,
 what `rollback.yml` runs, against stubbed buildx, cosign and wrangler in a
 repository with release tags: the release's `:vX.Y.Z` asked for and its
