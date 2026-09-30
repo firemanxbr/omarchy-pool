@@ -241,9 +241,9 @@ instead of stopping them.
   from the row the assertion reads anyway.
 - **Everything else stays free.** Claiming, the review workspace, request
   changes, reject, adopt, lifting a block, a category, withdrawing an
-  approval, a worker's trust and its revocation, a dry run, a rollback, a
-  promotion the gate decides, a cancel and a note take the session or the
-  token and no passkey. `worker/test/passkey-guided.test.ts` pins the list.
+  approval, a worker's trust and its revocation, an order to a worker and
+  taking one back (#277), a dry run, a rollback, a promotion the gate
+  decides, a cancel and a note take the session or the token and no passkey. `worker/test/passkey-guided.test.ts` pins the list.
 
 ## What a compromise costs
 

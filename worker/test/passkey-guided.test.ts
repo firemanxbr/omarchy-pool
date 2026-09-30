@@ -829,7 +829,7 @@ describe("registered at the moment of need (#287)", () => {
 });
 
 describe("everything else stays free (#287)", () => {
-  it("pins the list: a maintainer with no passkey claims, reviews, requests changes, rejects, adopts, lifts a block, sets a category, withdraws, vouches for and revokes a worker, queues and cancels — and only approve, block, a forced promotion and a reset ask for one", async () => {
+  it("pins the list: a maintainer with no passkey claims, reviews, requests changes, rejects, adopts, lifts a block, sets a category, withdraws, vouches for and revokes a worker, gives a worker an order and takes it back, queues and cancels — and only approve, block, a forced promotion and a reset ask for one", async () => {
     const who = "m3b";
     const h = (t: string) => sha256Hex(t);
     await env.DB.batch([
@@ -850,6 +850,11 @@ describe("everything else stays free (#287)", () => {
     await env.DB.prepare("INSERT INTO contributors (login, token_hash, session_hash, role, blocked_at, blocked_by, blocked_reason) VALUES ('dana', ?, ?, 'contributor', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'm1', 'the tests')").bind(await h("omc_dana"), await h("oms_dana")).run();
     const revokeMe = await call("POST", "/factory/workers", { name: "spare", arch: "x86_64" }, `omc_${F.contributor}`);
     expect(revokeMe.status, JSON.stringify(revokeMe.json)).toBe(201);
+    // A worker that takes orders (#277): its owner's, and any maintainer may order it — the session alone (the maintainer's decision: no passkey for an order).
+    const orderMe = await call("POST", "/factory/workers", { name: "orders", arch: "x86_64" }, `omc_${F.contributor}`);
+    expect(orderMe.status, JSON.stringify(orderMe.json)).toBe(201);
+    await env.DB.prepare("UPDATE build_workers SET order_kinds = ? WHERE id = ?").bind('["recheck-agent","restart"]', orderMe.json.worker).run();
+    let order = "";
     const act = (method: string, path: string, body?: unknown) => asPage(who, method, path, body);
     const PASSKEY_CODES = ["no_passkey", "passkey_required", "session_only"];
     // The free list, in the order the issue names it: each done by a maintainer who holds no passkey, with the session alone.
@@ -867,6 +872,12 @@ describe("everything else stays free (#287)", () => {
       ["withdraw an approval", () => act("POST", `/api/v1/factory/tasks/${approved.project}/withdraw`, { note: "approved before the trial was read" }), 200],
       ["vouch for a worker (a worker order): the first word, a second maintainer's to follow", () => act("POST", "/api/v1/factory/workers/cx/trust", { trust: "project" }), 202],
       ["revoke a worker (a worker order)", () => act("DELETE", `/api/v1/factory/workers/${revokeMe.json.worker}`), 200],
+      ["give a worker an order from its page (#277)", async () => {
+        const r = await act("POST", `/api/v1/factory/workers/${orderMe.json.worker}/orders`, { kind: "recheck-agent", reason: "the tests re-check its agent" });
+        order = r.json?.order?.id ?? "";
+        return r;
+      }, 201],
+      ["take back an order still waiting (#277)", () => act("DELETE", `/api/v1/factory/workers/${orderMe.json.worker}/orders/${order}`), 200],
       ["queue a dry run by hand (the queue)", () => act("POST", "/api/v1/factory/enqueue", { name: "freesize", pkgbuild_ref: "abc123", reason: "sizing", arches: ["x86_64"], version: "1.0-1", publish: false }), 201],
       ["roll a ring back (the queue)", () => act("POST", "/api/v1/factory/jobs", { kind: "rollback", params: { ring: "stable", to: String(F.previousRelease), note: "the tests roll back" } }), 201],
       ["promote by evidence (the queue)", () => act("POST", "/api/v1/factory/jobs", { kind: "promote", params: { from: "rc", to: "stable" } }), 201],
