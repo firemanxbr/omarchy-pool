@@ -1188,12 +1188,14 @@ names — about a fifth of it on `pkgs.omarchy-pool.org` — and read the
 rings' membership 25,000 times a day. Three layers keep that off the
 bill. The Worker serves `/robots.txt` on every name (`src/pages/robots.ts`):
 the dashboard's keeps the landing, the docs and `/package/<name>` open to
-search engines, closes `/api/`, `/auth/`, `/diff`, `/build/`, `/user/` and
-the rest to everyone, and closes the whole site to the AI and research
+search engines, closes `/api/`, `/auth/`, `/diff`, `/build/`, `/user/`,
+`/worker/`, `/workers` and the rest to everyone, and closes the whole site to the AI and research
 crawlers by name (`AI_CRAWLERS`, `src/meta.ts` — the read guard below
 sheds the same list); the API names deny
 everything; `/sitemap.xml` lists the fixed pages. Every `/api/v1` answer
-and the sign-in carry `x-robots-tag: noindex, nofollow`, and the header's
+and the sign-in carry `x-robots-tag: noindex, nofollow`, a worker's page
+and `/workers` (each names a worker's owner and its host's label)
+`x-robots-tag: noindex`, and the header's
 Sign in link says `rel="nofollow"` (19,800 crawler fetches of `/auth/github`
 in two days came from that one link). The bucket runs no code: its
 `robots.txt` is an object at the root of `omarchy-packages`
