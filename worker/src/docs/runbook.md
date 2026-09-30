@@ -167,7 +167,14 @@ they were, and running the rollback again is safe. The updaters follow the
 pool's release down as they follow it up, within two minutes. Back past
 #277's last part, the updater that comes back is the older one: it follows
 at its own fifteen-minute round and takes no Update, until a release brings
-one that follows again. Migrations are forward-only; keep them additive. The
+one that follows again. That older Worker lists a worker's whole row, so the
+rollback clears every column the newer one keeps to itself — a worker's
+site, its process, the rules' state, its rollout report — before its deploy,
+after it and once more once it runs; a task's stop fence goes too. A
+worker's drain stays, but the older Worker does not honour it: drained
+workers take work until the roll-forward, which declares everything else
+again at each worker's first claim (security model, *A Worker rolled back
+past #277*; #295). Migrations are forward-only; keep them additive. The
 fallback, by hand, for the Worker alone: re-run the Deploy job of that
 release's run, or `git checkout vX.Y.Z && cd worker && npx wrangler deploy
 --var POOL_VERSION:vX.Y.Z`.
