@@ -28,7 +28,9 @@
 # released at the end of every round and before the self-replacing
 # one-off, never another round's; an EXIT mid-round releases it, and so
 # does a TERM that lands as the engine creates the lock or as the release
-# reads it back — #295's F1, a flake that held CI before it); the
+# reads it back — #295's F1, a flake that held CI before it; a release
+# the engine did not answer keeps it held, and the EXIT trap or the loop's
+# next round removes it — never taken for another round's); the
 # guard (restarting at two samples in a row, restarts that grow, a service
 # that stays down, a service not replaced, a new updater that fails its
 # self-test — and a busy builder, which is none of those; an updater image
@@ -111,9 +113,11 @@ case "$1" in
     t="$3"; cid="${@: -1}"; svc="${cid#cid-}"
     case "$t" in
       *com.omarchy.lock.by*) [[ -f "$STUB_STATE.lock" ]] || exit 1; IFS='|' read -r by holder started until created nonce lid < "$STUB_STATE.lock"; echo "$by|$holder|$started|$until|$created|$lid" ;;
-      *com.omarchy.lock.nonce*) [[ -f "$STUB_STATE.lock" ]] || exit 1; hook release; IFS='|' read -r by holder started until created nonce lid < "$STUB_STATE.lock"; echo "$holder|$started|$nonce|$lid" ;;
+      *com.omarchy.lock.nonce*) [[ -f "$STUB_STATE.lock" ]] || { echo "Error: No such object: $cid" >&2; exit 1; }; hook release; IFS='|' read -r by holder started until created nonce lid < "$STUB_STATE.lock"; echo "$holder|$started|$nonce|$lid" ;;
       "{{.State.Running}} {{.State.StartedAt}}") line="$(awk -v c="$cid" '$1==c {print $2, $3}' "$STUB_STATE.holders" 2>/dev/null)"; [[ -n "$line" ]] || { echo "Error: No such object: $cid" >&2; exit 1; }; echo "$line" ;;
-      "{{.Id}}") echo "$cid" ;;
+      # A lock by its id: there while the lock file carries that id.
+      "{{.Id}}") if [[ "$cid" == lock* ]]; then lid=""; [[ -f "$STUB_STATE.lock" ]] && IFS='|' read -r _ _ _ _ _ _ lid < "$STUB_STATE.lock"; [[ "$lid" == "$cid" ]] || { echo "Error: No such object: $cid" >&2; exit 1; }; fi
+        echo "$cid" ;;
       "{{.State.StartedAt}}") [[ "$cid" == "$STUB_SELF" ]] && echo "$STUB_SELF_STARTED" ;;
       "{{.Image}}") if [[ "$cid" == "$STUB_SELF" ]]; then echo sha256:self; else running "$svc"; fi ;;
       *com.docker.compose.config-hash*) if [[ "$svc" == worker && -f "$STUB_STATE.cfgold" ]]; then echo "cfg-old"; else echo "cfg-$svc"; fi ;;
@@ -173,7 +177,30 @@ export PATH="$tmp/bin:$PATH" COMPOSE_DIR="$tmp/compose" OMARCHY_WORKER_ROLE=upda
 export ROLLOUT_GUARD_SECONDS=10 ROLLOUT_GUARD_EVERY=5
 R="$root/factory/bin/omarchy-rollout"
 fail() { echo "FAIL: $*" >&2; echo "--- log ---" >&2; tail -n 60 "$STUB_LOG" >&2; exit 1; }
+# A run that must end on its own (a TERM it sends itself, a round): in the background, waited for up to $1 s — past that it is
+# killed and the test fails, rather than hanging the job. Its exit status in RUN_RC, its output in $tmp/out. (bash reaps a child
+# that ended, so kill -0 fails once it has.)
+run_bounded() { # seconds command...
+  local secs="$1" pid i; shift
+  "$@" > "$tmp/out" 2>&1 & pid=$!
+  for (( i = 0; i < secs * 10; i++ )); do kill -0 "$pid" 2>/dev/null || break; /bin/sleep 0.1; done
+  if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fail "still running after ${secs} s: $* — $(tail -n 20 "$tmp/out")"; fi
+  RUN_RC=0; wait "$pid" || RUN_RC=$?
+}
 reset_lock() { rm -f "$STUB_STATE.lock" "$STUB_STATE.holders" "$STUB_STATE".status-* "$STUB_STATE.stopped" "$STUB_STATE.selftest-fail" "$STUB_STATE".on-*; }
+# The loop: its rounds in $tmp/loop.out.
+rounds() { grep -c "a round: " "$tmp/loop.out" || true; }
+until_rounds() { # n — up to 10 s
+  local i; for i in $(seq 1 50); do (( $(rounds) >= $1 )) && return 0; /bin/sleep 0.2; done
+  fail "waited for $1 round(s), saw $(rounds): $(cat "$tmp/loop.out")"
+}
+start_loop() { STUB_POLL="$ROLLOUT_POLL" "$R" --loop > "$tmp/loop.out" 2>&1 & LOOP_PID=$!; }
+stop_loop() { # bounded: a loop that ignores the TERM fails the test within 60 s, never hangs it
+  local i; kill -TERM "$LOOP_PID" 2>/dev/null || true
+  for (( i = 0; i < 600; i++ )); do kill -0 "$LOOP_PID" 2>/dev/null || break; /bin/sleep 0.1; done
+  if kill -0 "$LOOP_PID" 2>/dev/null; then kill -KILL "$LOOP_PID" 2>/dev/null || true; fail "the loop did not stop within 60 s of its TERM: $(tail -n 20 "$tmp/loop.out")"; fi
+  wait "$LOOP_PID" 2>/dev/null || true; LOOP_PID=""
+}
 
 # ------------------------------------------------------------- #278's order --
 # --check: says what would change, changes nothing, takes no lock.
@@ -387,7 +414,8 @@ for mode in --once --loop; do
   for at in create release; do
     reset_lock; rm -f "$STUB_STATE.follow"; : > "$STUB_LOG"
     echo 'kill -TERM "$(cat "$STUB_STATE.pid")"' > "$STUB_STATE.on-$at"
-    set +e; ROLLOUT_POLL=1 ROLLOUT_EVERY=3600 bash -c 'echo $$ > "$STUB_STATE.pid"; exec "$0" "$1"' "$R" "$mode" > "$tmp/out" 2>&1; rc=$?; set -e
+    # Bounded: a loop that ignored the TERM would poll on forever (the stubbed sleep returns at once).
+    run_bounded 60 env ROLLOUT_POLL=1 ROLLOUT_EVERY=3600 bash -c 'echo $$ > "$STUB_STATE.pid"; exec "$0" "$1"' "$R" "$mode"; rc=$RUN_RC
     [[ ! -f "$STUB_STATE.on-$at" ]] || fail "the TERM at $at ($mode) was never sent: $(cat "$tmp/out")"
     [[ "$rc" == 143 ]] || fail "a TERM at $at ($mode) ends the rollout with 143: $rc"
     [[ ! -f "$STUB_STATE.lock" ]] || fail "a TERM at $at ($mode) leaves no lock: $(cat "$STUB_STATE.lock")"
@@ -397,11 +425,32 @@ done
 reset_lock; : > "$STUB_LOG"
 lock_held loop cid-other 2026-09-30T14:00:00Z "$future"; echo "cid-other true 2026-09-30T14:00:00Z" > "$STUB_STATE.holders"
 echo 'kill -TERM "$(cat "$STUB_STATE.pid")"' > "$STUB_STATE.on-create-conflict"
-set +e; bash -c 'echo $$ > "$STUB_STATE.pid"; exec "$0" --once' "$R" > "$tmp/out" 2>&1; rc=$?; set -e
+run_bounded 60 bash -c 'echo $$ > "$STUB_STATE.pid"; exec "$0" --once' "$R"; rc=$RUN_RC
 [[ ! -f "$STUB_STATE.on-create-conflict" ]] || fail "the TERM at the failed create was never sent: $(cat "$tmp/out")"
 [[ "$rc" == 143 ]] || fail "a TERM at the failed create ends the rollout with 143: $rc"
 [[ "$(cut -d'|' -f7 "$STUB_STATE.lock" 2>/dev/null)" == lockheld0 ]] || fail "a TERM while another round holds the lock leaves that lock: $(cat "$STUB_STATE.lock" 2>/dev/null || echo gone)"
 cp "$STUB_STATE.keep" "$STUB_STATE"
+# A release the engine did not answer — the read or the removal failed — keeps the lock held: the EXIT trap of --once removes it,
+# and the loop's next round removes it first and runs, never taking its own lock for another round's.
+for at in release rm; do
+  reset_lock; changed; : > "$STUB_LOG"
+  echo 'echo "Cannot connect to the Docker daemon" >&2; exit 1' > "$STUB_STATE.on-$at"
+  run_bounded 60 "$R" --once
+  (( RUN_RC == 0 )) || fail "a release that failed ($at) is no failed round: $RUN_RC: $(cat "$tmp/out")"
+  [[ ! -f "$STUB_STATE.on-$at" ]] || fail "the failure at $at was never injected: $(cat "$tmp/out")"
+  grep -q "the lock proj-rollout-lock could not be \(read to release it\|removed\)" "$tmp/out" || fail "a release that failed ($at) says so: $(cat "$tmp/out")"
+  [[ ! -f "$STUB_STATE.lock" ]] || fail "the EXIT trap removes a lock whose release failed ($at): $(cat "$STUB_STATE.lock")"
+done
+reset_lock; rm -f "$STUB_STATE.follow"; : > "$STUB_LOG"
+echo "$STUB_SELF true $STUB_SELF_STARTED" > "$STUB_STATE.holders"   # the loop's own container, running: its lock looks live
+echo 'exit 1' > "$STUB_STATE.on-rm"
+ROLLOUT_POLL=1 ROLLOUT_EVERY=2 STUB_POLL=1 "$R" --loop > "$tmp/loop.out" 2>&1 & LOOP_PID=$!
+until_rounds 2; /bin/sleep 0.5
+stop_loop
+grep -q "the lock proj-rollout-lock could not be removed; trying again before the next round" "$tmp/loop.out" || fail "the loop's failed removal is said: $(cat "$tmp/loop.out")"
+grep -qE "a round runs already|could not be removed yet; skipping" "$tmp/loop.out" && fail "the loop's next round removes its own lock and runs: $(cat "$tmp/loop.out")"
+[[ "$(grep -c '^docker rm -f lock' "$STUB_LOG")" -ge 2 ]] || fail "the next round removes the lock the last one could not: $(grep '^docker rm' "$STUB_LOG")"
+[[ ! -f "$STUB_STATE.lock" ]] || fail "a stopped loop leaves no lock, after a failed removal: $(cat "$STUB_STATE.lock")"
 echo "ok: the lock"
 
 # ------------------------------------------------------------------- guard --
@@ -488,13 +537,6 @@ UPD="wo_$(printf 'a%.0s' $(seq 1 32))"
 follow() { # latest [update-for-w-project]
   jq -cn --arg l "$1" --arg u "${2:-}" '{latest:$l, deployed_at:"2026-09-30T14:02:11Z", workers:[{id:"w-broker",version:$l,outdated:false,update:null},{id:"w-project",version:"v1.0.2",outdated:true,update:(if $u == "" then null else $u end)}]}' > "$STUB_STATE.follow"
 }
-rounds() { grep -c "a round: " "$tmp/loop.out" || true; }
-until_rounds() { # n — up to 10 s
-  local i; for i in $(seq 1 50); do (( $(rounds) >= $1 )) && return 0; /bin/sleep 0.2; done
-  fail "waited for $1 round(s), saw $(rounds): $(cat "$tmp/loop.out")"
-}
-start_loop() { STUB_POLL="$ROLLOUT_POLL" "$R" --loop > "$tmp/loop.out" 2>&1 & LOOP_PID=$!; }
-stop_loop() { kill -TERM "$LOOP_PID" 2>/dev/null || true; wait "$LOOP_PID" 2>/dev/null || true; LOOP_PID=""; }
 
 follow v1.0.3
 : > "$STUB_LOG"

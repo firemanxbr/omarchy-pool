@@ -43,7 +43,8 @@
 # two rounds that judged it dead never both take it; otherwise it skips.
 # A round releases it as its last step, just before a self-replacing
 # one-off, and an EXIT trap backs that up; a release removes only a lock
-# this process holds.
+# this process holds, and one the engine did not let it remove stays held:
+# its next round removes it first (never taking it for another round's).
 #
 # The guard (#277). After a round that replaced something, and before the
 # updater replaces itself or removes an old image, it samples every
@@ -158,6 +159,13 @@ lock_create() { # by
 # Take the lock, or say why not: 0 taken, 1 held by a live round.
 lock_take() { # by
   lock_name
+  # Its own lock from its last round, still held: that release could not remove it (the engine did not answer). Removed now, or
+  # this round is skipped and the next one tries again — never taken for another round's, which would skip every round until
+  # its expiry.
+  if (( LOCK_HELD )); then
+    lock_release
+    if (( LOCK_HELD )); then log "this updater's own lock $LOCK from its last round could not be removed yet; skipping this round"; return 1; fi
+  fi
   if lock_create "$1"; then return 0; fi
   LOCK_HELD=0
   local labels by holder started until created lid state
@@ -194,12 +202,23 @@ lock_take() { # by
   LOCK_HELD=0; log "another round took the lock first; skipping"; return 1
 }
 # Release: only a lock this process holds — its holder, its start and its nonce — never one another round took after breaking this one.
+# Held until it is known gone — removed, not there, or another round's: a read or a removal the engine did not answer keeps it
+# held, and the next round's take (or the EXIT trap) tries again.
 lock_release() {
   (( LOCK_HELD )) || return 0
-  local labels lid; labels="$(docker inspect -f '{{index .Config.Labels "com.omarchy.lock.holder"}}|{{index .Config.Labels "com.omarchy.lock.started"}}|{{index .Config.Labels "com.omarchy.lock.nonce"}}|{{.Id}}' "$LOCK" 2>/dev/null || true)"
+  local labels lid
+  if ! labels="$(docker inspect -f '{{index .Config.Labels "com.omarchy.lock.holder"}}|{{index .Config.Labels "com.omarchy.lock.started"}}|{{index .Config.Labels "com.omarchy.lock.nonce"}}|{{.Id}}' "$LOCK" 2>&1)"; then
+    if grep -qi 'no such' <<<"$labels"; then LOCK_HELD=0
+    else log "the lock $LOCK could not be read to release it ($(head -n1 <<<"$labels")); trying again before the next round"; fi
+    return 0
+  fi
   lid="${labels##*|}"; labels="${labels%|*}"
-  # By the id it was read with, as a break is: the lock read here is the one removed.
-  if [[ "$labels" == "$SELF_ID|$SELF_STARTED|$LOCK_NONCE" ]]; then docker rm -f "${lid:-$LOCK}" >/dev/null 2>&1 || true
+  # By the id it was read with, as a break is: the lock read here is the one removed. A removal that failed while the lock is
+  # still there keeps it held.
+  if [[ "$labels" == "$SELF_ID|$SELF_STARTED|$LOCK_NONCE" ]]; then
+    if ! docker rm -f "${lid:-$LOCK}" >/dev/null 2>&1 && docker inspect -f '{{.Id}}' "${lid:-$LOCK}" >/dev/null 2>&1; then
+      log "the lock $LOCK could not be removed; trying again before the next round"; return 0
+    fi
   elif [[ -n "$labels" ]]; then log "the lock $LOCK is another round's now; leaving it"; fi
   # Cleared only now: a TERM during the read or the removal exits through the EXIT trap, whose release reads it again.
   LOCK_HELD=0

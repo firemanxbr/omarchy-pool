@@ -569,7 +569,12 @@ self-replacing one-off, never when another round holds it, and by an EXIT
 mid-round — and by a TERM that lands as the engine creates it or as the
 release reads it back, in `--once` and the loop, sent at that point by a
 stub hook with no sleep, while a TERM during a failed create leaves
-another round's live lock alone: #295); the guard (restarting at two samples in a row, restarts that
+another round's live lock alone: #295; a release whose read or removal the
+engine did not answer keeps it held, removed by `--once`'s EXIT trap and
+by the loop's next round, which runs rather than taking its own lock for
+another round's; every run that must end on its own, and every stop of
+the loop, bounded at 60 s, so a TERM no longer honoured fails the test
+instead of hanging it); the guard (restarting at two samples in a row, restarts that
 grow on a service this round did not replace, one that ran and stays down,
 one not replaced, a new updater that fails its self-test — each keeping the
 old images and the updater's own; one restart, a busy builder and a service
