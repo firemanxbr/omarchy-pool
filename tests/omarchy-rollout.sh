@@ -26,7 +26,9 @@
 # not running, started again or stuck past its expiry — broken by the id
 # it was judged by, so two rounds that judged it dead never both hold it;
 # released at the end of every round and before the self-replacing
-# one-off, never another round's; an EXIT mid-round releases it); the
+# one-off, never another round's; an EXIT mid-round releases it, and so
+# does a TERM that lands as the engine creates the lock or as the release
+# reads it back — #295's F1, a flake that held CI before it); the
 # guard (restarting at two samples in a row, restarts that grow, a service
 # that stays down, a service not replaced, a new updater that fails its
 # self-test — and a busy builder, which is none of those; an updater image
@@ -97,8 +99,9 @@ case "$1" in
     # The lock: one container by name, atomic — a second create fails while it exists; each one created gets an id of its own.
     shift; name=""; by=""; holder=""; started=""; until=""; nonce=""
     while [[ $# -gt 0 ]]; do case "$1" in --name) name="$2"; shift 2 ;; --label) k="${2%%=*}"; v="${2#*=}"; case "$k" in *.by) by="$v" ;; *.holder) holder="$v" ;; *.started) started="$v" ;; *.until) until="$v" ;; *.nonce) nonce="$v" ;; esac; shift 2 ;; *) shift ;; esac; done
-    [[ -f "$STUB_STATE.lock" ]] && { echo "Conflict. The container name \"/$name\" is already in use" >&2; exit 1; }
-    printf '%s|%s|%s|%s|2026-09-30T13:47:05.000Z|%s|lock%s\n' "$by" "$holder" "$started" "$until" "$nonce" "$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')" > "$STUB_STATE.lock" ;;
+    [[ -f "$STUB_STATE.lock" ]] && { hook create-conflict; echo "Conflict. The container name \"/$name\" is already in use" >&2; exit 1; }
+    printf '%s|%s|%s|%s|2026-09-30T13:47:05.000Z|%s|lock%s\n' "$by" "$holder" "$started" "$until" "$nonce" "$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')" > "$STUB_STATE.lock"; hook create ;;
+  # (create and the release's read run the hook "create" / "release" once the engine has answered.)
   # rm -f <the lock's id, or its name>: only that container — an id another lock has since replaced removes nothing. A hook first.
   rm) hook rm; [[ -f "$STUB_STATE.lock" ]] || { echo "Error: No such container: $3" >&2; exit 1; }
     IFS='|' read -r _ _ _ _ _ _ lid < "$STUB_STATE.lock"
@@ -108,7 +111,7 @@ case "$1" in
     t="$3"; cid="${@: -1}"; svc="${cid#cid-}"
     case "$t" in
       *com.omarchy.lock.by*) [[ -f "$STUB_STATE.lock" ]] || exit 1; IFS='|' read -r by holder started until created nonce lid < "$STUB_STATE.lock"; echo "$by|$holder|$started|$until|$created|$lid" ;;
-      *com.omarchy.lock.nonce*) [[ -f "$STUB_STATE.lock" ]] || exit 1; IFS='|' read -r by holder started until created nonce lid < "$STUB_STATE.lock"; echo "$holder|$started|$nonce|$lid" ;;
+      *com.omarchy.lock.nonce*) [[ -f "$STUB_STATE.lock" ]] || exit 1; hook release; IFS='|' read -r by holder started until created nonce lid < "$STUB_STATE.lock"; echo "$holder|$started|$nonce|$lid" ;;
       "{{.State.Running}} {{.State.StartedAt}}") line="$(awk -v c="$cid" '$1==c {print $2, $3}' "$STUB_STATE.holders" 2>/dev/null)"; [[ -n "$line" ]] || { echo "Error: No such object: $cid" >&2; exit 1; }; echo "$line" ;;
       "{{.Id}}") echo "$cid" ;;
       "{{.State.StartedAt}}") [[ "$cid" == "$STUB_SELF" ]] && echo "$STUB_SELF_STARTED" ;;
@@ -375,6 +378,28 @@ echo 'kill -TERM $PPID' > "$STUB_STATE.on-up"
 set +e; "$R" --once > "$tmp/out" 2>&1; rc=$?; set -e
 (( rc == 143 )) || fail "the stop ends the round: exit $rc: $(cat "$tmp/out")"
 [[ ! -f "$STUB_STATE.lock" ]] || fail "an EXIT mid-round releases the lock: $(cat "$STUB_STATE.lock")"
+# A TERM that lands just after the engine created the lock (before the round knew it held it), or while the release reads the
+# lock back (after it stopped counting it as held): the EXIT trap still removes it — in a round of --once and of the loop. The
+# signal goes to the rollout itself, by the pid it had before exec (a stub run inside a command substitution has a subshell for
+# its parent): the hook fires at that exact point, with no sleep.
+printf 'broker sha256:bbbbbbbbbbbbbbbb sha256:bbbbbbbbbbbbbbbb\nupdater sha256:bbbbbbbbbbbbbbbb sha256:bbbbbbbbbbbbbbbb\n' > "$STUB_STATE.term"; cp "$STUB_STATE" "$STUB_STATE.keep"; cp "$STUB_STATE.term" "$STUB_STATE"
+for mode in --once --loop; do
+  for at in create release; do
+    reset_lock; rm -f "$STUB_STATE.follow"; : > "$STUB_LOG"
+    echo 'kill -TERM "$(cat "$STUB_STATE.pid")"' > "$STUB_STATE.on-$at"
+    set +e; ROLLOUT_POLL=1 ROLLOUT_EVERY=3600 bash -c 'echo $$ > "$STUB_STATE.pid"; exec "$0" "$1"' "$R" "$mode" > "$tmp/out" 2>&1; rc=$?; set -e
+    [[ ! -f "$STUB_STATE.on-$at" ]] || fail "the TERM at $at ($mode) was never sent: $(cat "$tmp/out")"
+    [[ "$rc" == 143 ]] || fail "a TERM at $at ($mode) ends the rollout with 143: $rc"
+    [[ ! -f "$STUB_STATE.lock" ]] || fail "a TERM at $at ($mode) leaves no lock: $(cat "$STUB_STATE.lock")"
+  done
+done
+# And a TERM while another round's live lock is in the way: that lock stays.
+reset_lock; : > "$STUB_LOG"
+lock_held loop cid-other 2026-09-30T14:00:00Z "$future"; echo "cid-other true 2026-09-30T14:00:00Z" > "$STUB_STATE.holders"
+echo 'kill -TERM "$(cat "$STUB_STATE.pid")"' > "$STUB_STATE.on-create-conflict"
+set +e; bash -c 'echo $$ > "$STUB_STATE.pid"; exec "$0" --once' "$R" > "$tmp/out" 2>&1; set -e
+[[ "$(cut -d'|' -f7 "$STUB_STATE.lock" 2>/dev/null)" == lockheld0 ]] || fail "a TERM while another round holds the lock leaves that lock: $(cat "$STUB_STATE.lock" 2>/dev/null || echo gone)"
+cp "$STUB_STATE.keep" "$STUB_STATE"
 echo "ok: the lock"
 
 # ------------------------------------------------------------------- guard --
