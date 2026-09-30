@@ -320,15 +320,19 @@ install -m 755 -o "$user" -g "$user" "$here/rollout.sh" "$root/rollout.sh"
 
 [[ -f "$root/.env" ]] || env_default > "$root/.env"
 chown "$user:$user" "$root/.env"
+# The way back removes the ones it wrote that are still the untouched placeholder: an older compose.yml put back must not find a
+# placeholder for a pair nobody registered, and start it. Listed in the backup before any of them is written, so a kill in between
+# leaves none that nothing lists; and each counted in created before it is written, so the put-back removes one an interrupt
+# catches right after its write.
+todo=()
+for rel in $env_files; do [[ -f "$root/$rel" ]] || todo+=("$rel"); done
+if [[ -n "$backup" ]] && (( ${#todo[@]} )); then printf '%s\n' "${todo[@]}" > "$backup/created-env-files"; chown "$user:$user" "$backup/created-env-files"; fi
 for rel in $env_files; do
   f="$root/$rel"
-  if [[ ! -f "$f" ]]; then env_text "$rel" > "$f"; created+=("$rel"); fi
+  if [[ ! -f "$f" ]]; then created+=("$rel"); env_text "$rel" > "$f"; fi
   chown "$user:$user" "$f"; chmod 600 "$f"
 done
 (( ${#created[@]} == 0 )) || echo "    written, to fill in: ${created[*]}"
-# The way back removes the ones it wrote that still hold no token: an older compose.yml put back must not find a placeholder for a
-# pair nobody registered, and start it.
-if [[ -n "$backup" ]] && (( ${#created[@]} )); then printf '%s\n' "${created[@]}" > "$backup/created-env-files"; chown "$user:$user" "$backup/created-env-files"; fi
 
 if (( migrating )); then
   echo "==> the updater, started and checked before the timer's units go"
