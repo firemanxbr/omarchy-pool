@@ -20,7 +20,7 @@
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import worker from "../src/index";
-import { DASHBOARD_HOST, PROMOTED_RINGS, RING_TEXT } from "../src/meta";
+import { DASHBOARD_HOST, PROMOTED_RINGS, REPO_URL, RING_TEXT } from "../src/meta";
 import { DOCS_TREE, GLOSSARY } from "../src/pages/docs-tree";
 import { DOCS_COMPONENTS, DOC_SECTIONS } from "../src/pages/docs";
 import { API_BRIEF } from "../src/pages/api-docs";
@@ -40,6 +40,35 @@ const docs = async () => (await get("/docs")).text();
 const bodyOf = (html: string) => html.replace(/<script[\s\S]*?<\/script>/g, "").replace(/<header>[\s\S]*?<\/header>/, "").replace(/<footer>[\s\S]*?<\/footer>/, "");
 /** A card's HTML, by its section's id. */
 const cardOf = (html: string, id: string) => new RegExp(`<section class="op-card guide-sec" id="${id}"[\\s\\S]*?</section>`).exec(html)?.[0] ?? "";
+
+/**
+ * Every file of the repository, by its path from the root: the glob's keys (relative to this file), nothing loaded. A chapter's link to the
+ * code on GitHub must name one of them (#299: /docs/open-work linked docs/security-model.md, a file the repo never
+ * had — the chapters live in worker/src/docs/).
+ */
+const REPO_FILES = Object.keys(import.meta.glob(["../../**", "!**/node_modules/**", "!**/target/**"])).map((k) => new URL(k, "http://repo/worker/test/").pathname.slice(1));
+
+describe("the docs' links to the code", () => {
+  it("name a file or a directory the repository has, on every page of the docs", async () => {
+    expect(REPO_FILES).toContain("worker/src/docs/security-model.md");
+    const pages = ["/docs", ...new Set(DOCS_TREE.map((c) => c.href.replace(/#.*$/, "")))];
+    let seen = 0;
+    for (const path of pages) {
+      const res = await get(path);
+      expect(res.status, path).toBe(200);
+      for (const m of (await res.text()).matchAll(new RegExp(`href="${REPO_URL}/(?:blob|tree)/main/([^"#?]+)`, "g"))) {
+        const target = decodeURIComponent(m[1]).replace(/\/$/, "");
+        expect(REPO_FILES.some((f) => f === target || f.startsWith(`${target}/`)), `${path} links ${m[1]}, which the repository does not have`).toBe(true);
+        seen++;
+      }
+    }
+    // The check reads real links: the chapters link the code in many places (the MCP chapter's sources, the proof of concept's crates).
+    expect(seen).toBeGreaterThan(10);
+    // Open work's link to the security model is the chapter's own, on the heading it names.
+    expect(await (await get("/docs/open-work")).text()).toContain('href="/docs/security-model#the-doors-that-ship"');
+    expect(await (await get("/docs/security-model")).text()).toContain('id="the-doors-that-ship"');
+  });
+});
 
 describe("the docs index", () => {
   it("is one page of seven sections, in the order the map lists them, with no chapter shell around them", async () => {
