@@ -220,7 +220,7 @@ if [[ -n "$project" ]]; then
     grep -qxF -- "$svc" <<<"$services" || left+="$svc "
   done
 fi
-[[ -z "$left" ]] || echo "    WARNING: containers of services the new compose.yml does not run under this host's profiles: ${left}— they keep running on their image and no rollout reaches them. Add their profile to COMPOSE_PROFILES in $root/.env (review2: once etc/review2-*.env hold its tokens), or remove them (docker compose rm -sf <service>, before this step)." >&2
+[[ -z "$left" ]] || echo "    WARNING: containers of services the new compose.yml does not run under this host's profiles: ${left}— they keep running on their image and no rollout reaches them. Add their profile to COMPOSE_PROFILES in $root/.env (review2: once etc/review2-*.env hold its tokens), or remove them (docker ps -a --filter label=com.docker.compose.service=<service>, then docker rm -f <that container>)." >&2
 if (( migrating )); then
   # The updater that takes over must follow the pool (#277): an image from before it rounds every fifteen minutes and no more.
   out="$(compose_in "$stage" pull -q updater 2>&1)" || refuse "the updater's image did not pull ($(tail -n1 <<<"$out"))"
