@@ -34,7 +34,8 @@
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
-import worker from "../src/index";
+import worker, { type Env } from "../src/index";
+import { ORDER_KINDS } from "../src/orders";
 import { sha256Hex } from "../src/routes/contributors";
 import { HAS_PASSKEY_SQL, JUST_NOW_MINUTES, PASSKEY_BY_CREDENTIAL_SQL } from "../src/routes/passkeys";
 import { HELPERS } from "../src/pages/layout";
@@ -53,14 +54,14 @@ const checklist = { official: true, license: true, unshipped: true, evidence: tr
 type Authenticator = Awaited<ReturnType<typeof createAuthenticator>>;
 type Answer = { status: number; json: any };
 
-async function raw(method: string, path: string, headers: Record<string, string>, body?: unknown): Promise<Answer> {
+async function raw(method: string, path: string, headers: Record<string, string>, body?: unknown, on: Env = env): Promise<Answer> {
   const ctx = createExecutionContext();
-  const res = await worker.fetch(new Request(WEB + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }), env, ctx);
+  const res = await worker.fetch(new Request(WEB + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }), on, ctx);
   await waitOnExecutionContext(ctx);
   return { status: res.status, json: await res.json().catch(() => null) };
 }
 /** A call as the login's page makes it: the session's cookie, the page's Origin, JSON. */
-const asPage = (login: string, method: string, path: string, body?: unknown) => raw(method, path, { cookie: `omc=oms_${login}`, origin: WEB, "content-type": "application/json" }, body);
+const asPage = (login: string, method: string, path: string, body?: unknown, on: Env = env) => raw(method, path, { cookie: `omc=oms_${login}`, origin: WEB, "content-type": "application/json" }, body, on);
 /** A call with a token — a contributor's, a worker's — as a script makes it. */
 const call = (method: string, path: string, body: unknown, token: string) => raw(method, `/api/v1${path}`, { "content-type": "application/json", authorization: `Bearer ${token}` }, body);
 
@@ -829,7 +830,7 @@ describe("registered at the moment of need (#287)", () => {
 });
 
 describe("everything else stays free (#287)", () => {
-  it("pins the list: a maintainer with no passkey claims, reviews, requests changes, rejects, adopts, lifts a block, sets a category, withdraws, vouches for and revokes a worker, gives a worker an order and takes it back, queues and cancels — and only approve, block, a forced promotion and a reset ask for one", async () => {
+  it("pins the list: a maintainer with no passkey claims, reviews, requests changes, rejects, adopts, lifts a block, sets a category, withdraws, vouches for and revokes a worker, gives a worker an order of every kind and takes one back, queues and cancels — and only approve, block, a forced promotion and a reset ask for one", async () => {
     const who = "m3b";
     const h = (t: string) => sha256Hex(t);
     await env.DB.batch([
@@ -853,9 +854,23 @@ describe("everything else stays free (#287)", () => {
     // A worker that takes orders (#277): its owner's, and any maintainer may order it — the session alone (the maintainer's decision: no passkey for an order).
     const orderMe = await call("POST", "/factory/workers", { name: "orders", arch: "x86_64" }, `omc_${F.contributor}`);
     expect(orderMe.status, JSON.stringify(orderMe.json)).toBe(201);
-    await env.DB.prepare("UPDATE build_workers SET order_kinds = ? WHERE id = ?").bind('["recheck-agent","restart"]', orderMe.json.worker).run();
+    // It is set up to take every kind (#277, parts 1 to 3): its process takes the worker's own kinds (a re-check, a restart, a restart of its
+    // host's agent service) and declares part 2's stop, so a build it runs stops on the pool's word — it holds one, leased to it, for "stop
+    // its task" below. Its image reports v1.0.2 while the pool runs v1.0.3, so an Update has something to update to: a community worker's
+    // Update is its set's updater's, and asks nothing more of it (a project worker's would also need a rollout that follows the pool).
+    const running = (await env.DB.prepare("INSERT INTO build_tasks (name, arch, version, pkgbuild_ref, reason, priority, status, publish, trust, owner, kind, lease_owner, lease_expires_at, started_at, attempts) VALUES ('freestop', 'x86_64', '1.0-1', 'abc123', 'the tests', 100, 'leased', 0, 'community', ?, 'build', ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+30 minutes'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 1) RETURNING id").bind(F.contributor, orderMe.json.worker).first<{ id: number }>())!.id;
+    await env.DB.prepare("UPDATE build_workers SET order_kinds = ?, current_task = ?, version = 'v1.0.2' WHERE id = ?").bind('["drain","recheck-agent","restart","restart-agent","stop-task"]', running, orderMe.json.worker).run();
+    expect(await env.DB.prepare("SELECT trust FROM build_workers WHERE id = ?").bind(orderMe.json.worker).first()).toEqual({ trust: "community" });
+    /** The pool as it runs a release: what an Update is measured against. */
+    const REL = { ...env, POOL_VERSION: "v1.0.3", POOL_DEPLOYED_AT: new Date(Date.now() - 2 * 3600e3).toISOString() } as Env;
     let order = "";
     const act = (method: string, path: string, body?: unknown) => asPage(who, method, path, body);
+    /** An order of one kind to that worker from its page, the session alone, on the pool as it runs a release; each kind sent is kept, so the list below is checked against ORDER_KINDS. */
+    const sent: string[] = [];
+    const give = (kind: (typeof ORDER_KINDS)[number], body: Record<string, unknown> = {}) => {
+      sent.push(kind);
+      return asPage(who, "POST", `/api/v1/factory/workers/${orderMe.json.worker}/orders`, { kind, reason: `the tests order a ${kind}`, ...body }, REL);
+    };
     const PASSKEY_CODES = ["no_passkey", "passkey_required", "session_only"];
     // The free list, in the order the issue names it: each done by a maintainer who holds no passkey, with the session alone.
     const FREE: [string, () => Promise<Answer>, number][] = [
@@ -872,12 +887,19 @@ describe("everything else stays free (#287)", () => {
       ["withdraw an approval", () => act("POST", `/api/v1/factory/tasks/${approved.project}/withdraw`, { note: "approved before the trial was read" }), 200],
       ["vouch for a worker (a worker order): the first word, a second maintainer's to follow", () => act("POST", "/api/v1/factory/workers/cx/trust", { trust: "project" }), 202],
       ["revoke a worker (a worker order)", () => act("DELETE", `/api/v1/factory/workers/${revokeMe.json.worker}`), 200],
-      ["give a worker an order from its page (#277)", async () => {
-        const r = await act("POST", `/api/v1/factory/workers/${orderMe.json.worker}/orders`, { kind: "recheck-agent", reason: "the tests re-check its agent" });
+      // Every order kind (#277) rides the same door, the session alone (the maintainer's decision: no passkey for an order of any kind).
+      ["give a worker an order from its page: re-check its agent (#277)", async () => {
+        const r = await give("recheck-agent");
         order = r.json?.order?.id ?? "";
         return r;
       }, 201],
       ["take back an order still waiting (#277)", () => act("DELETE", `/api/v1/factory/workers/${orderMe.json.worker}/orders/${order}`), 200],
+      ["restart a worker (#277)", () => give("restart"), 201],
+      ["restart its host's agent service (#277)", () => give("restart-agent"), 201],
+      ["drain a worker (#277)", () => give("drain"), 201],
+      ["resume a drained worker (#277)", () => give("resume"), 201],
+      ["stop the task a worker holds (#277)", () => give("stop-task", { task: running }), 201],
+      ["update a worker behind the pool's release (#277)", () => give("update"), 201],
       ["queue a dry run by hand (the queue)", () => act("POST", "/api/v1/factory/enqueue", { name: "freesize", pkgbuild_ref: "abc123", reason: "sizing", arches: ["x86_64"], version: "1.0-1", publish: false }), 201],
       ["roll a ring back (the queue)", () => act("POST", "/api/v1/factory/jobs", { kind: "rollback", params: { ring: "stable", to: String(F.previousRelease), note: "the tests roll back" } }), 201],
       ["promote by evidence (the queue)", () => act("POST", "/api/v1/factory/jobs", { kind: "promote", params: { from: "rc", to: "stable" } }), 201],
@@ -888,6 +910,16 @@ describe("everything else stays free (#287)", () => {
       expect(PASSKEY_CODES, `${what}: ${JSON.stringify(r.json)}`).not.toContain(r.json?.code);
       expect(r.status, `${what}: ${JSON.stringify(r.json)}`).toBe(want);
     }
+    // Every kind was sent: a kind added to ORDER_KINDS fails here until it is pinned above.
+    expect([...sent].sort()).toEqual([...ORDER_KINDS].sort());
+    // Each order is on the record, issued by the maintainer from the web; the one taken back is cancelled.
+    const orders = (await env.DB.prepare("SELECT kind, state, issued_by, via FROM worker_orders WHERE worker_id = ? ORDER BY issued_at, kind").bind(orderMe.json.worker).all<{ kind: string; state: string; issued_by: string; via: string }>()).results;
+    expect(orders.map((o) => o.kind).sort()).toEqual([...ORDER_KINDS].sort());
+    for (const o of orders) expect([o.issued_by, o.via], o.kind).toEqual([who, "web"]);
+    expect(orders.find((o) => o.kind === "recheck-agent")!.state).toBe("cancelled");
+    // Part 2's kinds acted at issue: the worker is back to work, and the task it holds is fenced for its stop.
+    expect(await env.DB.prepare("SELECT drained_at FROM build_workers WHERE id = ?").bind(orderMe.json.worker).first()).toEqual({ drained_at: null });
+    expect((await env.DB.prepare("SELECT stop_order FROM build_tasks WHERE id = ?").bind(running).first<{ stop_order: string | null }>())!.stop_order).toMatch(/^wo_/);
     // Cancel what the queue just took: a task of the queue is cancelled with the session too.
     const queued = (await env.DB.prepare("SELECT id FROM build_tasks WHERE name = 'freesize' AND status = 'queued'").first<{ id: number }>())!.id;
     const cancelled = await act("POST", `/api/v1/factory/tasks/${queued}/cancel`);
