@@ -143,9 +143,9 @@ put_back() {
     # Before compose.yml goes back: compose leaves a running updater alone once the file no longer names it.
     compose_in "$root" stop updater >/dev/null 2>&1
     compose_in "$root" rm -f updater >/dev/null 2>&1
-    # Its first round starts at once, and may be in the middle of a worker's drain: the stop cuts it short, and that worker may be
-    # left created and not started until the timer's next rollout starts what is not running.
-    echo "    the updater it started: stopped and removed (a worker its first round was replacing may stay stopped until the timer's next rollout, within 15 min)" >&2
+    # Its first round starts at once, and may be in the middle of a worker's drain: that worker finishes its drain (up to 3 h), and
+    # the timer's next rollout then starts what is not running.
+    echo "    the updater it started: stopped and removed (a worker its first round was draining finishes its drain, up to 3 h, and the timer's next rollout then starts it: up to about 3 h 20 min)" >&2
   fi
   if (( installed )); then
     local f rel

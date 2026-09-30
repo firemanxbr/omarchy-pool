@@ -485,9 +485,9 @@ What `setup.sh` does, in order, and what a failure leaves:
    removes the updater, puts the old files back, enables the timer again
    and exits 5. The host rolls out through its timer as before. Read
    `docker compose logs updater` from the output, fix the cause, paste
-   again. The updater's first round starts at once: if it was replacing a
-   worker when it was stopped, that worker can stay stopped until the
-   timer's next rollout starts it, within 15 minutes.
+   again. The updater's first round starts at once: if it was draining a
+   worker when it was stopped, that worker finishes its drain (up to 3 h),
+   and the timer's next rollout then starts it: up to about 3 h 20 min.
 5. **Only then does it disable the timer and remove its units**, and say
    it is retired.
 
