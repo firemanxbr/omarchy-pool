@@ -247,9 +247,9 @@ const SCRIPT = String.raw`
     // Update (#277, part 3): its set's updater carries it out, never the worker.
     html.push(gate('<button type="button" class="op-btn" data-order="update">' + lucide("download", 14) + 'Update</button>', CAN.can.update, CAN.why.update));
     $("#wk-ops").innerHTML = html.join("");
-    // A visitor reads why the buttons are grey without a hover a touch screen cannot make (#299): the sign-in, then when an order arrives.
-    var note = CAN.note || "";
-    $("#wk-note").innerHTML = WHO.me ? esc(note) : '<a href="' + esc(signInHref()) + '" rel="nofollow">Sign in</a> to order this worker' + (note ? " — an order is " + esc(note) : "") + ".";
+    // A visitor reads why the buttons are grey without a hover a touch screen cannot make (#299): the sign-in, and only that — when an order
+    // arrives is for a reader who may press.
+    $("#wk-note").innerHTML = WHO.me ? esc(CAN.note || "") : '<a href="' + esc(signInHref()) + '" rel="nofollow">Sign in</a> to order this worker.';
   }
   // How a stop goes, by what runs the task (/can's stop.stops, the pool's stopWay): a child within five minutes; a build or a trial within five
   // minutes while its container or check runs, at its next call to the pool while it transfers; a pool job at its next call; an image from before
@@ -391,7 +391,7 @@ export const WORKER_COMPONENTS = (F: Fixture): Component[] => [
     id: "worker.operate",
     page: `/worker/${F.communityWorker}`,
     anchor: ['id="wk-operate"', "<b id=\"wk-operate-h\">Operate</b>", 'data-order="recheck-agent"', 'data-order="restart"', 'data-order="restart-agent"', 'data-order="drain"', 'data-order="update"', 'id="wk-unless"', 'href="/docs/workers#orders"'],
-    script: ['api("GET", BASE + "/can")', "if (c.__status !== 200) return;", "esc(signInHref())", 'rel="nofollow">Sign in</a> to order this worker', "CAN.can.recheck", "CAN.can.restart", "CAN.can.restart_agent", "CAN.can.update", "gate('<button", "function askOrder(kind)", 'api("POST", BASE + "/orders", body)', "body.unless_agent_ok = true", "CAN.shared_agent_with",
+    script: ['api("GET", BASE + "/can")', "if (c.__status !== 200) return;", "esc(signInHref())", 'rel="nofollow">Sign in</a> to order this worker.', "CAN.can.recheck", "CAN.can.restart", "CAN.can.restart_agent", "CAN.can.update", "gate('<button", "function askOrder(kind)", 'api("POST", BASE + "/orders", body)', "body.unless_agent_ok = true", "CAN.shared_agent_with",
       // Update's dialog names what the pool sees of the set — this worker and the project workers of its host — and the rest without a number (#277, P10).
       "CAN.update_with", "andList([name].concat(sameSet).sort())", "(as the pool sees them on this host), and the set's builders, brokers and agent service.", '" and whatever else its set runs, when it runs an older image."', 'wtKind(W) === "community" && CAN && CAN.update_note',
       // The checkbox survives the page's refresh, and a dialog that asks is never redrawn under the person: what it says is what is posted.

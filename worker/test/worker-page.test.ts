@@ -222,7 +222,8 @@ describe("the worker's page", () => {
 
   it("tells a visitor, without a hover, why Operate is grey and where to sign in — and a signed-in reader only when an order arrives", async () => {
     const visitor = (await drawn(F.communityWorker))["#wk-note"].innerHTML;
-    expect(visitor).toMatch(new RegExp(`^<a href="/auth/github\\?next=/worker/${F.communityWorker}" rel="nofollow">Sign in</a> to order this worker — an order is delivered with its next claim — .+\\.$`));
+    // One sentence, the sign-in: when an order arrives is for a reader who may press.
+    expect(visitor).toBe(`<a href="/auth/github?next=/worker/${F.communityWorker}" rel="nofollow">Sign in</a> to order this worker.`);
     const owner = (await drawn(F.communityWorker, `omc=${F.sessions.owner}`))["#wk-note"].innerHTML;
     expect(owner).toMatch(/^delivered with its next claim — /);
     expect(owner).not.toContain("Sign in");
