@@ -1,0 +1,21 @@
+# The host set as design v2 §4.2 sketches it: one service, the dispatcher.
+services:
+  dispatcher:
+    image: ghcr.io/firemanxbr/omarchy-worker@RELEASE@
+    labels: { org.omarchy-pool.role: dispatcher }
+    environment:
+      OMARCHY_WORKER_ROLE: ${ANTHROPIC_API_KEY}
+      OMARCHY_WORK_ROOT: ${OMARCHY_WORK_ROOT}
+      OMARCHY_SECRETS_DIR: ${OMARCHY_SECRETS_DIR}      # a path only: never mounted here
+      OMARCHY_CAPACITY_FILE: /run/omarchy/capacity.json
+      OMARCHY_BUILD_IMAGE_AARCH64: "@BUILD_AARCH64@"
+      OMARCHY_BUILD_IMAGE_X86_64: "@BUILD_X86_64@"
+      OMARCHY_WORKER_IMAGE: "@RELEASE_IMAGE@"
+      OMARCHY_TASK_SUBNETS: ${OMARCHY_TASK_SUBNETS:-10.231.0.0/16}
+    env_file: [etc/dispatcher.env]
+    volumes:
+      - ${OMARCHY_SOCKET}:/var/run/docker.sock
+      - ${OMARCHY_WORK_ROOT}:${OMARCHY_WORK_ROOT}
+      - ./run/capacity.json:/run/omarchy/capacity.json:ro
+    restart: unless-stopped
+    stop_grace_period: 60s

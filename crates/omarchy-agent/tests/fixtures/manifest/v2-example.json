@@ -1,0 +1,135 @@
+{
+  "schema": 2,
+  "release": "v1.20.0",
+  "created": "2026-11-10T12:00:00Z",
+  "min_agent": "0.1.0",
+  "agent": {
+    "version": "0.1.0",
+    "urgent": false,
+    "x86_64-linux": {
+      "sha256": "f55ff16f66f43360266b95db6f8fec01d76031054306ae4a4b380598f6cfd114",
+      "asset": "omarchy-agent-x86_64-linux-musl"
+    },
+    "aarch64-linux": {
+      "sha256": "2c3a4249d77070058649dbd822dcaf7957586fce428cfb2ca88b94741eda8b07",
+      "asset": "omarchy-agent-aarch64-linux-musl"
+    },
+    "aarch64-darwin": {
+      "sha256": "f46dd28a5499d8efef0b8fb8ee1ec1c5a5e407c9381741d576ba8deb4f59ec3f",
+      "asset": "omarchy-agent-aarch64-darwin"
+    }
+  },
+  "inner": {
+    "schema": 3,
+    "min_release": "v1.18.0",
+    "revoked": [
+      "v1.19.1"
+    ],
+    "pools": [
+      "https://omarchy-pool.example.org"
+    ],
+    "images": {
+      "worker": {
+        "repo": "ghcr.io/firemanxbr/omarchy-worker",
+        "index": "sha256:1bc04b5291c26a46d918139138b992d2de976d6851d0893b0476b85bfbdfc6e6",
+        "platforms": {
+          "aarch64": {
+            "manifest": "sha256:4ae9fabed083eaac1c66f8c020965a0d30f8b7c16335d947a41e68a7a1edf638",
+            "config": "sha256:87052919223f50f90e932c645eab4855c7b7f82b811000f3aa4c482b95c5ab69"
+          },
+          "x86_64": {
+            "manifest": "sha256:c871e7f1c2b39591a4abeba6698ad38bd8e2d44a029507cd2c54ad879aecc19f",
+            "config": "sha256:4973ec2fb194c03558044b08bd88653b2a84cd28ee72da5b2c9fb374e508a73a"
+          }
+        }
+      },
+      "build": {
+        "aarch64": "docker.io/menci/archlinuxarm@sha256:15fa2527d481a6b8ddce7d49c535bfd3a2a63a6d7d840ace551fd21c1827c08b",
+        "x86_64": "docker.io/library/archlinux@sha256:64b24587e2ec8bb619b79542591e28f38515fbe9dcb546460c7fec193a15f157"
+      }
+    },
+    "capacity": {
+      "min": {
+        "cpus": 4,
+        "mem_gb": 8,
+        "work_disk_gb": 60,
+        "engine_disk_gb": 40
+      },
+      "reserve": {
+        "cpus": 1,
+        "mem_gb": 2
+      },
+      "unit": {
+        "cpus": 1,
+        "mem_gb": 2
+      },
+      "units": {
+        "build_per_size": 2,
+        "trial": 2,
+        "audit": 1,
+        "job": 1,
+        "job_reserved": 1
+      },
+      "disk": {
+        "build_gb_per_size": 20,
+        "floor_gb": 10
+      },
+      "sidecars": {
+        "egress": {
+          "cpus": 0.1,
+          "mem_mb": 64
+        },
+        "agent": {
+          "cpus": 0.25,
+          "mem_mb": 256
+        }
+      },
+      "emulated": {
+        "share_when_native_waits": 0.5
+      },
+      "max_size": 4,
+      "community_max_size": 2
+    },
+    "tools": {
+      "x86_64-linux": {
+        "docker-compose": {
+          "url": "https://github.com/docker/compose/releases/download/v2.40.0/docker-compose-x86_64-linux",
+          "sha256": "fae7234073c5bbf8c1dbfa14a6ef53de9603f117fd80bda472fc7d175945fa85"
+        },
+        "docker": {
+          "url": "https://download.docker.com/x86_64-linux/docker-28.5.0.tgz",
+          "sha256": "24a7154983fde305c54d56cf5f2ed6cb397cd1d0b12b0364b22b2b24f0cbdef7"
+        }
+      },
+      "aarch64-linux": {
+        "docker-compose": {
+          "url": "https://github.com/docker/compose/releases/download/v2.40.0/docker-compose-aarch64-linux",
+          "sha256": "c5ef2552eb79634ee1307ee91273e5af3df0b00548eaa2d3b3f49a2a422070d6"
+        },
+        "docker": {
+          "url": "https://download.docker.com/aarch64-linux/docker-28.5.0.tgz",
+          "sha256": "4c1ea1bcf7bd4bc286a7931e0fe3e12c79bbd3f68d9cdaba2b8205bc43bfffc8"
+        }
+      },
+      "aarch64-darwin": {
+        "docker-compose": {
+          "url": "https://github.com/docker/compose/releases/download/v2.40.0/docker-compose-aarch64-darwin",
+          "sha256": "1e243bd4afeebb7f39ac866b202b58fbb897e159057d5c1ba1ab6238d29d1af3"
+        },
+        "docker": {
+          "url": "https://download.docker.com/aarch64-darwin/docker-28.5.0.tgz",
+          "sha256": "ac19f0f21369b3cb6a15f87a3aa26a50fbbb51895156e1839b77e47d78727691"
+        }
+      }
+    },
+    "runtimes": {},
+    "sets": {
+      "host": {
+        "files": {
+          "compose.yml": "sha256:db669af634b75c7f298400f3b6c2aa8ba54998bac83e23d10ab4eaadc4b50ccf",
+          "set.toml": "sha256:6ee0eb490ff832101cf82a3d387c35f29e4230be786978f7acf9e811febf6723"
+        }
+      }
+    }
+  }
+}

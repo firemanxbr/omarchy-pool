@@ -1,0 +1,4 @@
+services:
+  dispatcher:
+    environment:
+      OMARCHY_TASK_SUBNETS: ${OMARCHY_TASK_SUBNETS:-${GITHUB_TOKEN}}

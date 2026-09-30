@@ -1,0 +1,4 @@
+services:
+  dispatcher:
+    labels:
+      - org.omarchy-pool.role=builder

@@ -1,0 +1,31 @@
+# The envelope design v2 §12 shows for the Studio.
+pool    = "https://omarchy-pool.example.org"
+host_id = "h_7f3k2m9q"
+
+[set]
+name         = "host"
+dir          = "/home/omarchy/.local/share/omarchy-agent/sets/host"
+work_root    = "/srv/omarchy-pool/host"
+secrets_dir  = "/srv/omarchy-pool/host-secrets"
+project      = "omarchy-host"
+driver       = "compose"
+socket_cli   = "/var/run/docker.sock"
+socket_mount = "/var/run/docker.sock"
+
+[envelope]
+max_units    = 11
+max_cpus     = 12
+max_mem_gb   = 32
+emulate      = ["x86_64"]
+agent_slots  = 2
+agent_budget = { calls_per_task = 200, calls_per_day = 5000 }
+cache_caps   = { pacman_gb = 40, build_gb = 120 }
+task_subnets = "10.232.0.0/16"
+allow_socket = true
+rootful_ack  = true
+dedicated    = true
+userns_remap = false
+drivers      = ["compose"]
+paths        = ["/srv/omarchy-pool/host", "/srv/omarchy-pool/host-secrets"]
+diagnostics  = false
+soak_minutes = 0

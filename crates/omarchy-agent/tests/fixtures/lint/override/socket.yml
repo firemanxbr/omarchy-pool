@@ -1,0 +1,4 @@
+services:
+  dispatcher:
+    volumes:
+      - ${OMARCHY_SOCKET}:/var/run/docker.sock
