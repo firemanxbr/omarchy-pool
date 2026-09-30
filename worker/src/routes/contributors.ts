@@ -900,7 +900,7 @@ export async function buildersFor(env: Env, login: string, arch: string): Promis
 
 /** A drained worker named for a build (#277): the Build door and the project-build door refuse it in one sentence — pinned to it, the build would wait until it is resumed. */
 export const drainedRefusal = (w: { id: string; drained_at: string | null; drained_by: string | null; drain_reason: string | null }) =>
-  `${w.id} is drained (by ${w.drained_by ?? "?"}, ${(w.drained_at ?? "").slice(11, 16)}${w.drain_reason ? `: ${w.drain_reason}` : ""}) — pin another worker, or use the shared queue`;
+  `${w.id} is drained (by ${w.drained_by ?? "?"}, ${w.drained_at ? `${w.drained_at.slice(11, 16)} UTC` : "?"}${w.drain_reason ? `: ${w.drain_reason}` : ""}) — pin another worker, or use the shared queue`;
 
 export interface QueueAsk { arches?: string[]; worker?: string | null; hint?: string | null; reason?: string; release?: string }
 export interface Queued { tasks: number[]; building: { task: number; arch: string; on: string | null }[]; arches: string[]; pkgbuild_ref: string; pinned_to: string | null; lessons: Record<string, number>; hint: string | null; queue: Record<string, { position: number; total: number }> }

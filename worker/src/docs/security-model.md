@@ -151,17 +151,34 @@ secret). Everything travels in the `Authorization` header over TLS only.
   stopped. On the worker, the stop kills the task's process groups and
   removes every container labelled with the task (`com.omarchy.task`,
   created ones too); in a builder's broker, a stopped task's hold is let go
-  only for a builder that declared orders — one that stops on the word —,
-  then for thirty seconds no claim and no order's answer passes, and the
-  broker never takes that task up again (its pinned calls refused until the
-  lease's end, and a view that carries `stop_order` never adopted). A
-  builder from before #277 builds on: its broker keeps the hold, so its
-  recipe claims nothing, and the lease's end gives the task back.
+  only for a builder whose claim declared `stop-task` — one that stops on
+  the word; declaring orders alone is not that, since #277's first part
+  takes orders and builds a stopped task on —, then no claim and no order's
+  answer passes while a call of that task is still in flight through the
+  broker (an upload the stopped builder's shell is inside: bash runs the
+  stop's trap only once that `curl` returns) and for thirty seconds after
+  the stop or that call's return, whichever is later, and the broker never
+  takes that task up again (its pinned calls refused until the lease's end,
+  and a view that carries `stop_order` never adopted). A builder from before
+  #277, or from its first part, builds on: its broker keeps the hold, so its
+  recipe claims nothing, and the lease's end gives the task back. What stays
+  open: the worker's next claim is taken as the proof that the stopped
+  task's processes are gone, which holds for the one process a token is
+  meant to have. A copied token whose second process starts claiming while
+  the first is inside a task is not seen as two processes — only the second
+  claims —, and its claim after a stop gives the task back while the first
+  may still run it, until its next heartbeat (within 5 minutes) or its
+  token's end. Two processes on one token is a token to revoke, as the pages
+  say whenever they see one.
 - **Drains and stops are the pool's, and bounded (#277, part 2).** A drain
   holds at the claim for every image, until a Resume: a contributor's
   machine its owner drained goes back to work on its owner's word only; a
   maintainer who must keep it out revokes it, or sets it to its owner's
-  packages only. Stop its task counts with the restarts (six an hour per
+  packages only. A project worker — trusted on two maintainers' word, and
+  it may be a contributor's machine — goes back to work on a maintainer's
+  word: its owner lifts only a drain of their own. Six drains an hour per
+  worker at most; a resume is never counted, not in the login's twenty nor
+  in the worker's hour, so no run of drains can keep a worker out. Stop its task counts with the restarts (six an hour per
   worker) and in the login's twenty; it never cancels — a stranger's build
   goes back to the queue, where another worker takes it. When every live
   pool or review worker of an architecture is drained, Status says so as an

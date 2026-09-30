@@ -112,6 +112,20 @@ describe("drain and stop on every page (#277, part 2)", () => {
     expect(opt("rev-a").text).toContain("drained by m1: disk — pin another worker, or use the shared queue");
     expect(opt("rev-b").disabled).toBe(false);
   });
+  it("never lets Review's claim pin its rebuild to a drained worker: agentWorkers leaves it out, and the agents it offers are the others'", async () => {
+    const html = (await get("/review")).text;
+    const d = runScript(scriptOf(html), { pathname: "/review", functions: ["agentWorkers", "agentsFor"], variables: ["WORKERS"] });
+    const rev = (o: Record<string, unknown>) => w({ side: "omarchy", kinds: ["build"], agent: "claude-code/claude-sonnet-5", agent_status: "ok", ...o });
+    d.setWORKERS([
+      rev({ id: "rev-a", drained: { at: "2026-09-30T12:00:00Z", by: "m1", reason: "disk" } }),
+      rev({ id: "rev-b" }),
+      rev({ id: "rev-c", agent: "codex/gpt-6", drained: { at: "2026-09-30T12:00:00Z", by: "m1" } }),
+    ]);
+    expect(d.agentWorkers("aarch64").map((x: { id: string }) => x.id)).toEqual(["rev-b"]);
+    expect(d.agentsFor("aarch64")).toEqual(["claude-code/claude-sonnet-5"]);
+    d.setWORKERS([rev({ id: "rev-a", drained: { at: "2026-09-30T12:00:00Z", by: "m1" } })]);
+    expect(d.agentWorkers("aarch64")).toEqual([]);
+  });
 });
 
 describe("the worker's page", () => {

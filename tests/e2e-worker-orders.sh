@@ -40,7 +40,8 @@
 #       issue — the worker never exits
 #   G   (part 2) Stop its task: a project worker runs a check that hangs (a
 #       stub checkout's health script, which creates a labelled container and
-#       leaves a child that never ends); a maintainer stops it; the task stays
+#       leaves a child that never ends); its claim declares stop-task, so the
+#       dialog words the stop as a child's; a maintainer stops it; the task stays
 #       leased to it — no second runner — until its next heartbeat brings the
 #       stop: the child's process group killed, the created container removed,
 #       and its next claim gives the task back to the queue
@@ -301,10 +302,17 @@ SH
   w5_until 120 "$id takes task $task" bash -c "[[ \"\$(curl -s '$OMARCHY_API/api/v1/factory/workers/$id?fresh=\$(date +%s%N)' | jq -r .worker.current_task)\" == $task ]]" || w5_fail $id "it never took the check"
   w5_until 60 "the check hangs" test -s "$W5/$id/child" || w5_fail $id "the stub check never ran"
   [[ "$(cat "$W5/$id/hung")" == "$task" ]] || w5_fail $id "the script was not told its task: $(cat "$W5/$id/hung")"
+  # It says it stops on the pool's word — its claim declares stop-task —, so /can words a check's stop as a child's: within 5 minutes.
+  [[ "$(w5_field $id '.worker.takes_orders | index("stop-task") != null')" == true ]] || w5_fail $id "its claim declares stop-task: $(w5_view $id | jq -c .worker.takes_orders)"
+  local can; can="$(curl -s "$OMARCHY_API/api/v1/factory/workers/$id/can" -H "authorization: Bearer omc_e2e")"
+  [[ "$(jq -r '"\(.stop.task) \(.stop.stops)"' <<<"$can")" == "$task child" ]] || w5_fail $id "a check stops as a child: $(jq -c .stop <<<"$can")"
   local s; s="$(curl -s -X POST "$OMARCHY_API/api/v1/factory/workers/$id/orders" -H "authorization: Bearer omc_e2e" -H "content-type: application/json" -d "{\"kind\":\"stop-task\",\"task\":$task,\"reason\":\"e2e: a check that hangs\"}")"
   [[ "$(jq -r .order.kind <<<"$s")" == stop-task ]] || w5_fail $id "the stop was refused: $s"
   local tv; tv="$(curl -s "$OMARCHY_API/api/v1/factory/tasks/$task?fresh=$(date +%s%N)")"
   [[ "$(jq -r '"\(.task.status) \(.task.lease_owner) \(.task.stop_order != null)"' <<<"$tv")" == "leased $id true" ]] || w5_fail $id "fenced, still its worker's: $(jq -c '.task | {status, lease_owner, stop_order}' <<<"$tv")"
+  # The latest it goes back to the queue: the fenced lease's end, never renewed — the page says it on its reader's clock, the door's note in UTC.
+  [[ "$(jq -r .order.until <<<"$s")" == "$(jq -r .task.lease_expires_at <<<"$tv")" ]] || w5_fail $id "the stop's until is its lease's end: $s"
+  jq -r .note <<<"$s" | grep -q " UTC at the latest)" || w5_fail $id "the door's note says the pool's clock: $(jq -r .note <<<"$s")"
   [[ "$(w5_field $id .worker.stopping.task)" == "$task" ]] || w5_fail $id "its page says it is stopping"
   # The next heartbeat brings the stop (within 5 min of the task's start), then the claim after it gives the task back.
   w5_until 420 "$id hears the stop at its heartbeat" grep -q "task $task: the pool took it back (stopping); stopping its processes" "$W5/$id/log" || w5_fail $id "no stop in its log"

@@ -23,7 +23,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import { sha256Hex } from "../src/routes/contributors";
 import { requeueExpiredLeases } from "../src/routes/factory";
-import { DRAINED_PINS_SQL, ISSUE_SQL, OPEN_ORDERS_SQL, STOPPED_TASK_SQL, STOPS_DUE_SQL, UNPIN_DRAINED_SQL, sweepOrders } from "../src/orders";
+import { DRAINED_PINS_SQL, ISSUE_SQL, OPEN_ORDERS_SQL, RESUME_DRAIN_CLOSE_SQL, RESUME_DRAIN_LINE_SQL, STOPPED_TASK_SQL, STOPS_DUE_SQL, UNPIN_DRAINED_SQL, sweepOrders } from "../src/orders";
 import { HELD_TASK_SQL } from "../src/routes/orders";
 import { REQUEUE_SQL } from "../src/lease";
 import { authorize } from "../src/auth";
@@ -50,11 +50,11 @@ async function call(method: string, path: string, body?: unknown, who: Who = {},
 const cli = (login: string): Who => ({ token: `omc_${login}` });
 const page = (login: string): Who => ({ cookie: `omc=oms_${login}`, origin: ORIGIN });
 const ARCH: Record<string, string> = {};
-/** A claim of a worker that takes orders (instance n), its agent answering. */
+/** A claim of a worker that takes orders (instance n), its agent answering — and stops a task on the heartbeat's 409 (it declares stop-task, #277 part 2). */
 const claimBody = (id: string, o: { instance?: number | null; orders?: string[] | null; kinds?: string[]; shared?: boolean } = {}) => ({
   arch: ARCH[id], version: "v1.0.2", agent: "claude-code/claude-sonnet-5", agent_status: "ok", agent_error: "", agent_checked_at: "2026-09-30T12:00:00Z", agent_via: "direct",
   ...(o.kinds ? { kinds: o.kinds } : {}), ...(o.shared ? { shared: true } : {}),
-  ...(o.orders === null ? {} : { orders: o.orders ?? ["drain", "recheck-agent", "restart"] }),
+  ...(o.orders === null ? {} : { orders: o.orders ?? ["drain", "recheck-agent", "restart", "stop-task"] }),
   ...(o.instance === null ? {} : { instance: hex(o.instance ?? 1) }),
 });
 const claim = (id: string, o: Parameters<typeof claimBody>[1] = {}) => call("POST", "/factory/claim", claimBody(id, o), { token: `omw_${id}` });
@@ -62,6 +62,32 @@ const issue = (id: string, body: unknown, who: Who) => call("POST", `/factory/wo
 const taskOf = (id: number) => env.DB.prepare("SELECT * FROM build_tasks WHERE id = ?").bind(id).first<any>();
 const rowOf = (id: string) => env.DB.prepare("SELECT * FROM build_workers WHERE id = ?").bind(id).first<any>();
 const orderOf = (oid: string) => env.DB.prepare("SELECT * FROM worker_orders WHERE id = ?").bind(oid).first<any>();
+/**
+ * env.DB, but the first statement whose SQL starts with `trigger` runs `before` first: what lands between a handler's read and the write
+ * that follows it — a stop, a heartbeat —, as two requests interleave in production.
+ */
+function racing(trigger: string, before: () => Promise<unknown>): D1Database {
+  let fired = false;
+  return new Proxy(env.DB, {
+    get(target, key) {
+      if (key === "prepare") return (sql: string) => {
+        const st = target.prepare(sql);
+        if (fired || !sql.startsWith(trigger)) return st;
+        fired = true;
+        return { bind: (...a: unknown[]) => { const b = st.bind(...a); return { run: async () => { await before(); return b.run(); }, first: async () => { await before(); return b.first(); }, all: async () => { await before(); return b.all(); } }; } };
+      };
+      const v = Reflect.get(target, key);
+      return typeof v === "function" ? v.bind(target) : v;
+    },
+  }) as D1Database;
+}
+/** A request through the Worker with another DB binding. */
+async function callWith(db: D1Database, method: string, path: string, body: unknown, token: string): Promise<{ status: number; json: any }> {
+  const ctx = createExecutionContext();
+  const res = await worker.fetch(new Request(API + path, { method, headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify(body) }), { ...env, DB: db }, ctx);
+  await waitOnExecutionContext(ctx);
+  return { status: res.status, json: await res.json().catch(() => null) };
+}
 const linesOf = async (oid: string) => (await env.DB.prepare("SELECT status, summary, payload FROM events WHERE kind = 'order' AND json_extract(payload, '$.order') = ? ORDER BY id").bind(oid).all<{ status: string; summary: string; payload: string }>()).results;
 
 async function seedWorker(id: string, arch: string, owner: string | null, trust: "project" | "community", extra: Record<string, unknown> = {}) {
@@ -81,9 +107,10 @@ async function seedTask(t: { name: string; arch?: string; kind?: string; trust?:
 beforeAll(async () => {
   const h = (t: string) => sha256Hex(t);
   await env.DB.batch([
-    env.DB.prepare(`INSERT INTO factory_maintainers (login) VALUES ('m1'), ('m2'), ('m3')`),
-    env.DB.prepare(`INSERT INTO contributors (login, token_hash, session_hash, role) VALUES ('m1', ?, ?, 'maintainer'), ('m2', ?, ?, 'maintainer'), ('m3', ?, ?, 'maintainer'), ('alice', ?, ?, 'contributor'), ('bob', ?, ?, 'contributor'), ('carol', ?, ?, 'contributor')`)
-      .bind(await h("omc_m1"), await h("oms_m1"), await h("omc_m2"), await h("oms_m2"), await h("omc_m3"), await h("oms_m3"), await h("omc_alice"), await h("oms_alice"), await h("omc_bob"), await h("oms_bob"), await h("omc_carol"), await h("oms_carol")),
+    // m4 and m5 press the stops of the crossing cases: each login has its twenty orders an hour.
+    env.DB.prepare(`INSERT INTO factory_maintainers (login) VALUES ('m1'), ('m2'), ('m3'), ('m4'), ('m5')`),
+    env.DB.prepare(`INSERT INTO contributors (login, token_hash, session_hash, role) VALUES ('m1', ?, ?, 'maintainer'), ('m2', ?, ?, 'maintainer'), ('m3', ?, ?, 'maintainer'), ('m4', ?, ?, 'maintainer'), ('m5', ?, ?, 'maintainer'), ('alice', ?, ?, 'contributor'), ('bob', ?, ?, 'contributor'), ('carol', ?, ?, 'contributor')`)
+      .bind(await h("omc_m1"), await h("oms_m1"), await h("omc_m2"), await h("oms_m2"), await h("omc_m3"), await h("oms_m3"), await h("omc_m4"), await h("oms_m4"), await h("omc_m5"), await h("oms_m5"), await h("omc_alice"), await h("oms_alice"), await h("omc_bob"), await h("oms_bob"), await h("omc_carol"), await h("oms_carol")),
     env.DB.prepare(`INSERT INTO factory_packages (name, owner, url, arches, status) VALUES ('felix', 'bob', 'https://github.com/bob/felix', '["aarch64"]', 'waiting'), ('gus', 'bob', 'https://github.com/bob/gus', '["aarch64"]', 'waiting'), ('hana', 'bob', 'https://github.com/bob/hana', '["aarch64"]', 'waiting')`),
   ]);
 });
@@ -114,8 +141,10 @@ describe("Stop its task: the lease fenced, the task back in the queue once its w
     expect(can.json.stop).toMatchObject({ task: t, kind: "build", stops: "child-or-call", attempt: 1, max_attempts: 3, words: "felix 1.2-1, aarch64, bob's build", stopping: false });
     const r = await issue("alice-box", { kind: "stop-task", task: t, reason: "hangs in check()" }, page("alice"));
     expect(r.status, JSON.stringify(r.json)).toBe(201);
-    expect(r.json.order).toMatchObject({ kind: "stop-task", task: t, issued_by: "alice", state: "pending" });
+    // The latest it goes back to the queue, for the page to say on its reader's clock; the door's own note says the pool's, and says so.
+    expect(r.json.order).toMatchObject({ kind: "stop-task", task: t, issued_by: "alice", state: "pending", until: before.lease_expires_at });
     expect(r.json.note).toContain("Nothing is cancelled");
+    expect(r.json.note).toContain(`(by ${before.lease_expires_at.slice(11, 16)} UTC at the latest)`);
     const after = await taskOf(t);
     expect(after).toMatchObject({ status: "leased", lease_owner: "alice-box", stop_order: r.json.order.id, lease_expires_at: before.lease_expires_at });
     const lines = await linesOf(r.json.order.id);
@@ -126,11 +155,15 @@ describe("Stop its task: the lease fenced, the task back in the queue once its w
     // The page sees it stopping, from the row alone; /can greys the button with why.
     const view = await call("GET", "/factory/workers/alice-box");
     expect(view.json.worker.stopping).toMatchObject({ task: t, order: r.json.order.id, by: "alice" });
-    expect((await call("GET", "/factory/workers/alice-box/can", undefined, page("alice"))).json).toMatchObject({ can: { stop_task: false }, stop: { stopping: true } });
+    const stoppingCan = (await call("GET", "/factory/workers/alice-box/can", undefined, page("alice"))).json;
+    expect(stoppingCan).toMatchObject({ can: { stop_task: false }, stop: { stopping: true } });
+    // An order given now goes once the task is back in the queue: the stop is under way, so the page no longer offers a stop to deliver it sooner.
+    expect(stoppingCan.note).toBe(`delivered with its next claim — once task #${t}, which is being stopped, is back in the queue: the claim that gives it back carries the order`);
     // The task view spreads the row: it carries stop_order, which a broker's adopt() reads.
     const tv = await call("GET", `/factory/tasks/${t}?fresh=1`);
     expect(tv.json.task.stop_order).toBe(r.json.order.id);
-    expect(tv.json.stopping).toMatchObject({ order: r.json.order.id, by: "alice" });
+    // Back in the queue by the fenced lease's own end, which nothing renews: the time the door answered and the worker's page says.
+    expect(tv.json.stopping).toMatchObject({ order: r.json.order.id, by: "alice", until: before.lease_expires_at });
 
     // While it is fenced: every heartbeat refused, the lease not renewed, no token; the uploads and the reports refused.
     for (let i = 0; i < 2; i++) {
@@ -154,6 +187,10 @@ describe("Stop its task: the lease fenced, the task back in the queue once its w
     expect(await taskOf(t)).toMatchObject({ status: "queued", lease_owner: null, lease_expires_at: null, stop_order: null, priority: before.priority + 10 });
     expect((await taskOf(t)).error).toBe("stopped on alice-box by alice: hangs in check()");
     expect((await rowOf("alice-box")).current_task).toBeNull();
+    // The task view, read past its edge cache as a broker's adopt() reads it: the fence is gone with the requeue.
+    const back = await call("GET", `/factory/tasks/${t}?fresh=2`);
+    expect(back.json.task).toMatchObject({ status: "queued", stop_order: null });
+    expect(back.json.stopping).toBeNull();
     expect((await env.DB.prepare("SELECT status FROM factory_packages WHERE name = 'felix'").first<{ status: string }>())!.status).toBe("waiting");
     const o = await orderOf(r.json.order.id);
     expect(o).toMatchObject({ state: "done", answered_by: "pool" });
@@ -401,7 +438,7 @@ describe("Drain and Resume: states the pool enforces at the claim", () => {
     expect((await claim("pool-dr", { kinds: ["sync"], instance: 110 })).status).toBe(204);
     expect((await taskOf(t)).status).toBe("queued");
     // Drained twice: refused with who and why; a drain cannot be taken back — Resume ends it.
-    expect((await issue("pool-dr", { kind: "drain" }, cli("m1"))).json.error).toMatch(/^drained already \(by m2, \d\d:\d\d: disk swap\) — Resume ends it$/);
+    expect((await issue("pool-dr", { kind: "drain" }, cli("m1"))).json.error).toMatch(/^drained already \(by m2, \d\d:\d\d UTC: disk swap\) — Resume ends it$/);
     // The listing says so, and never counts it idle.
     const view = (await call("GET", "/factory/workers/pool-dr")).json.worker;
     expect(view.drained).toMatchObject({ by: "m2", reason: "disk swap" });
@@ -466,7 +503,37 @@ describe("Drain and Resume: states the pool enforces at the claim", () => {
     for (let i = 0; i < 6; i++) {
       await env.DB.prepare("INSERT INTO worker_orders (id, worker_id, kind, reason, issued_by, issued_at, expires_at, state) VALUES (?, 'proj-cap', 'drain', 'r', 'someone', ?, ?, 'done')").bind(`wo_cap_drain_${i}`, new Date(Date.now() - (10 - i) * MIN).toISOString(), new Date(Date.now() + 60 * MIN).toISOString()).run();
     }
-    expect((await issue("proj-cap", { kind: "drain" }, cli("m2"))).json.error).toMatch(/^drained 6 times in the last hour; the next from \d\d:\d\d$/);
+    const seventh = await issue("proj-cap", { kind: "drain" }, cli("m2"));
+    expect(seventh.json.error).toMatch(/^drained 6 times in the last hour; the next from \d\d:\d\d UTC$/);
+    // /can greys Drain first, in the door's own words.
+    const capped = (await call("GET", "/factory/workers/proj-cap/can", undefined, cli("m2"))).json;
+    expect(capped.can.drain).toBe(false);
+    expect(capped.why.drain).toBe(seventh.json.error);
+    // Six resumes of a worker in an hour never keep it drained: a resume is not counted, at the door, on /can, nor in the INSERT.
+    await seedWorker("proj-res", "aarch64", "m1", "project");
+    for (let i = 0; i < 6; i++) {
+      await env.DB.prepare("INSERT INTO worker_orders (id, worker_id, kind, reason, issued_by, issued_at, expires_at, state) VALUES (?, 'proj-res', 'resume', 'r', 'someone', ?, ?, 'done')").bind(`wo_cap_resume_${i}`, new Date(Date.now() - (10 - i) * MIN).toISOString(), new Date(Date.now() + 60 * MIN).toISOString()).run();
+    }
+    expect((await issue("proj-res", { kind: "drain" }, cli("m2"))).status).toBe(201);
+    expect((await call("GET", "/factory/workers/proj-res/can", undefined, cli("m3"))).json.can.resume).toBe(true);
+    expect((await issue("proj-res", { kind: "resume" }, cli("m3"))).status).toBe(201);
+    expect((await rowOf("proj-res")).drained_at).toBeNull();
+  });
+
+  it("a project worker whose owner is not a maintainer: a maintainer's drain is lifted by a maintainer only, at the door and on /can; its owner lifts a drain of their own", async () => {
+    await env.DB.prepare(`INSERT INTO contributors (login, token_hash, session_hash, role) VALUES ('dave', ?, ?, 'contributor')`).bind(await sha256Hex("omc_dave"), await sha256Hex("oms_dave")).run();
+    await seedWorker("dave-proj", "aarch64", "dave", "project");
+    expect((await issue("dave-proj", { kind: "drain", reason: "publishes broken builds" }, cli("m1"))).status).toBe(201);
+    const refused = await issue("dave-proj", { kind: "resume" }, cli("dave"));
+    expect(refused).toMatchObject({ status: 403, json: { error: expect.stringMatching(/^m1 drained it \(\d\d:\d\d UTC: publishes broken builds\): a project worker goes back to work on a maintainer's word$/) } });
+    const can = (await call("GET", "/factory/workers/dave-proj/can", undefined, cli("dave"))).json;
+    expect(can.can.resume).toBe(false);
+    expect(can.why.resume).toBe(refused.json.error);
+    expect((await rowOf("dave-proj")).drained_at).not.toBeNull();
+    expect((await issue("dave-proj", { kind: "resume" }, cli("m2"))).status).toBe(201);
+    // Its own drain is its owner's to lift.
+    expect((await issue("dave-proj", { kind: "drain", reason: "moving it" }, cli("dave"))).status).toBe(201);
+    expect((await issue("dave-proj", { kind: "resume" }, cli("dave"))).status).toBe(201);
   });
 
   it("the Build door and the project-build door refuse to pin a drained worker, and the other architecture is not pinned to one", async () => {
@@ -474,7 +541,7 @@ describe("Drain and Resume: states the pool enforces at the claim", () => {
     expect((await issue("bob-shared", { kind: "drain", reason: "moving house" }, cli("bob"))).status).toBe(201);
     await env.DB.prepare(`INSERT INTO factory_packages (name, owner, url, arches, status, pkgbuild_path) VALUES ('ivy', 'alice', 'https://github.com/alice/ivy', '["aarch64"]', 'registered', 'PKGBUILD')`).run();
     const built = await call("POST", "/factory/packages/ivy/build", { worker: "bob-shared", arches: ["aarch64"] }, cli("alice"));
-    expect(built).toMatchObject({ status: 409, json: { error: expect.stringMatching(/^bob-shared is drained \(by bob, \d\d:\d\d: moving house\) — pin another worker, or use the shared queue$/) } });
+    expect(built).toMatchObject({ status: 409, json: { error: expect.stringMatching(/^bob-shared is drained \(by bob, \d\d:\d\d UTC: moving house\) — pin another worker, or use the shared queue$/) } });
     // The project-build door: the named review worker is drained; another architecture's live one with the same agent is, too.
     await seedWorker("rev-a", "aarch64", "m1", "project", { agent: "claude-code/claude-sonnet-5", agent_status: "ok", kinds: '["build"]' });
     await seedWorker("rev-x", "x86_64", "m1", "project", { agent: "claude-code/claude-sonnet-5", agent_status: "ok", kinds: '["build"]' });
@@ -510,6 +577,93 @@ describe("Drain and Resume: states the pool enforces at the claim", () => {
   });
 });
 
+describe("a stop, a report and a requeue that cross", () => {
+  it("an image of #277's first part takes orders but does not stop on the pool's word: /can and the door say its lease's end", async () => {
+    await seedWorker("pool-p1", "aarch64", "m1", "project");
+    const h = await seedTask({ name: "health", kind: "health", trust: "project", params: { ring: "edge", arch: "aarch64" } });
+    expect((await claim("pool-p1", { kinds: ["health"], instance: 130, orders: ["drain", "recheck-agent", "restart"] })).json.task.id).toBe(h);
+    const can = (await call("GET", "/factory/workers/pool-p1/can", undefined, cli("m1"))).json;
+    expect(can.stop).toMatchObject({ stops: "lease-end" });
+    const r = await issue("pool-p1", { kind: "stop-task", task: h }, cli("m5"));
+    expect(r.status).toBe(201);
+    expect(r.json.note).toContain("does not stop on the pool's word");
+    await claim("pool-p1", { kinds: ["none"], instance: 130, orders: ["drain", "recheck-agent", "restart"] });
+    await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE id = ?").bind(h).run();
+  });
+
+  it("a stop that lands between a heartbeat's, a complete's or a fail's read and its write: nothing renewed, no token, no report taken — the stop said", async () => {
+    await seedWorker("pool-race", "aarch64", "m1", "project");
+    for (const [what, trigger] of [["heartbeat", "UPDATE build_tasks SET lease_expires_at"], ["complete", "UPDATE build_tasks SET status = 'done'"], ["fail", "UPDATE build_tasks SET status = ?"]] as const) {
+      const t = await seedTask({ name: "render", kind: "render", trust: "project", params: { ring: "edge", arch: "aarch64" } });
+      const c = await claim("pool-race", { kinds: ["render"], instance: 140 });
+      expect(c.json.task.id, what).toBe(t);
+      const before = await taskOf(t);
+      let oid = "";
+      const db = racing(trigger, async () => { oid = (await issue("pool-race", { kind: "stop-task", task: t }, cli("m4"))).json.order.id; });
+      const body = what === "complete" ? { summary: "rendered" } : what === "fail" ? { error: "late" } : {};
+      const r = await callWith(db, "POST", `/factory/tasks/${t}/${what}`, body, c.json.token);
+      expect(oid, what).toMatch(/^wo_[0-9a-f]{32}$/);
+      expect(r, what).toMatchObject({ status: 409, json: { stop: true, state: "stopping" } });
+      expect(r.json.token, what).toBeUndefined();
+      // Still the stopped worker's lease, fenced, never renewed; the attempt not spent twice, nothing journaled as done.
+      expect(await taskOf(t), what).toMatchObject({ status: "leased", lease_owner: "pool-race", stop_order: oid, lease_expires_at: before.lease_expires_at, attempts: before.attempts, finished_at: null });
+      expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM events WHERE kind IN ('job', 'build') AND json_extract(payload, '$.task') = ?").bind(t).first<{ n: number }>())!.n, what).toBe(0);
+      // Its worker's next claim gives it back, as after any stop.
+      await claim("pool-race", { kinds: ["none"], instance: 140 });
+      expect((await taskOf(t)).status, what).toBe("queued");
+      await env.DB.prepare("UPDATE build_tasks SET status = 'cancelled' WHERE id = ?").bind(t).run();
+    }
+  });
+
+  it("a heartbeat that renews an expired lease between the cron's read and its requeue keeps the lease, and the token it was handed stays the lease's", async () => {
+    await seedWorker("pool-cron", "aarch64", "m1", "project");
+    const t = await seedTask({ name: "render", kind: "render", trust: "project", params: { ring: "edge", arch: "aarch64" } });
+    const c = await claim("pool-cron", { kinds: ["render"], instance: 150 });
+    expect(c.json.task.id).toBe(t);
+    await env.DB.prepare("UPDATE build_tasks SET lease_expires_at = ? WHERE id = ?").bind(new Date(Date.now() - MIN).toISOString(), t).run();
+    let beat: { status: number; json: any } | null = null;
+    const db = racing("UPDATE build_tasks SET\n    status = CASE", async () => { beat = await call("POST", `/factory/tasks/${t}/heartbeat`, {}, { token: c.json.token }); });
+    await requeueExpiredLeases({ ...env, DB: db } as typeof env);
+    expect(beat).toMatchObject({ status: 200, json: { task: t } });
+    expect(beat!.json.token).toMatch(/^omj\./);
+    const row = await taskOf(t);
+    expect(row).toMatchObject({ status: "leased", lease_owner: "pool-cron" });
+    expect(Date.parse(row.lease_expires_at)).toBeGreaterThan(Date.now());
+    await call("POST", `/factory/tasks/${t}/fail`, { error: "test", final: true }, { token: beat!.json.token });
+  });
+
+  it("a fence a Worker from before it left on a queued task goes with the next lease: nobody stopped the worker that claims it", async () => {
+    await seedWorker("pool-left", "aarch64", "m1", "project");
+    const t = await seedTask({ name: "render", kind: "render", trust: "project", params: { ring: "edge", arch: "aarch64" } });
+    await env.DB.prepare("UPDATE build_tasks SET stop_order = ? WHERE id = ?").bind(`wo_${"e".repeat(32)}`, t).run();
+    const c = await claim("pool-left", { kinds: ["render"], instance: 160 });
+    expect(c.json.task.id).toBe(t);
+    expect((await taskOf(t)).stop_order).toBeNull();
+    expect((await call("POST", `/factory/tasks/${t}/heartbeat`, {}, { token: c.json.token })).status).toBe(200);
+    await call("POST", `/factory/tasks/${t}/fail`, { error: "test", final: true }, { token: c.json.token });
+  });
+
+  it("a stop whose lease ends on the task's last attempt: the task fails, and the order's final words say so, not that it went back to the queue", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.now();
+    await seedWorker("pool-last", "aarch64", "m1", "project");
+    const t = await seedTask({ name: "render", kind: "render", trust: "project", params: { ring: "edge", arch: "aarch64" }, attempts: 2, max_attempts: 3 });
+    expect((await claim("pool-last", { kinds: ["render"], instance: 170 })).json.task.id).toBe(t);
+    const r = await issue("pool-last", { kind: "stop-task", task: t }, cli("m5"));
+    expect(r.status, JSON.stringify(r.json)).toBe(201);
+    vi.setSystemTime(t0 + 31 * MIN);
+    await requeueExpiredLeases(env);
+    expect((await taskOf(t)).status).toBe("failed");
+    await sweepOrders(env, t0 + 31 * MIN);
+    const o = await orderOf(r.json.order.id);
+    expect(o.state).toBe("failed");
+    expect(o.detail).toMatch(new RegExp(`^no claim before its lease ended at \\d\\d:\\d\\d UTC: .*\\. Task #${t} failed then: that was its last attempt$`));
+    const lines = await linesOf(r.json.order.id);
+    expect(lines.map((l) => JSON.parse(l.payload).state)).toEqual(["pending", "failed"]);
+    expect(lines[1].summary).not.toContain("back to the queue");
+  });
+});
+
 describe("the record, and what the planner reads", () => {
   it("every order of this part has exactly one issue line and exactly one final line — the claim's requeue, the lease's end, a resume, revoke", async () => {
     const orders = (await env.DB.prepare("SELECT id, state, kind FROM worker_orders WHERE id NOT LIKE 'wo\\_cap%' ESCAPE '\\'").all<{ id: string; state: string; kind: string }>()).results;
@@ -532,7 +686,11 @@ describe("the record, and what the planner reads", () => {
       ["their unpin", UNPIN_DRAINED_SQL, ["{}", "w"], /SEARCH build_tasks USING INDEX idx_build_tasks_(queue|lease) \(status=\?\)/],
       ["a stopped task, by key", STOPPED_TASK_SQL, [1], /SEARCH build_tasks USING INTEGER PRIMARY KEY/],
       ["the task a worker holds", HELD_TASK_SQL, [1], /SEARCH build_tasks USING INTEGER PRIMARY KEY/],
-      ["the requeue", REQUEUE_SQL, [now, "e", 1, "w", null], /SEARCH build_tasks USING INTEGER PRIMARY KEY/],
+      ["the requeue", REQUEUE_SQL, [now, "e", 1, "w", null, null], /SEARCH build_tasks USING INTEGER PRIMARY KEY/],
+      ["the cron's requeue, only while expired", REQUEUE_SQL, [now, "e", 1, "w", null, now], /SEARCH build_tasks USING INTEGER PRIMARY KEY/],
+      // A resume's close of the drain it ends: the worker's open drain through the partial index of the open ones, never its whole history.
+      ["a resume's line for the drain it ends", RESUME_DRAIN_LINE_SQL, ["d", "w", "wo_x"], /SEARCH worker_orders USING INDEX uq_worker_orders_open_kind \(worker_id=\? AND kind=\?\)/],
+      ["a resume's close of that drain", RESUME_DRAIN_CLOSE_SQL, [now, "d", "w", "wo_x"], /SEARCH worker_orders USING INDEX uq_worker_orders_open_kind \(worker_id=\? AND kind=\?\)/],
       ["delivery, with the stop's task", OPEN_ORDERS_SQL, ["w"], /uq_worker_orders_open_kind/],
     ];
     for (const [what, sql, args, want] of cases) {

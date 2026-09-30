@@ -71,7 +71,9 @@ describe("text a person or a worker gave", () => {
 describe("what a claim says of its process", () => {
   it("declares its kinds in one form whatever the order or repetition, and none when it has no orders field", () => {
     expect(canonicalKinds(["restart", "drain", "recheck-agent"])).toEqual(["drain", "recheck-agent", "restart"]);
-    expect(canonicalKinds(["recheck-agent", "restart", "drain", "restart", "update", "stop-task", 7])).toEqual(["drain", "recheck-agent", "restart"]);
+    expect(canonicalKinds(["recheck-agent", "restart", "drain", "restart", "update", "resume", 7])).toEqual(["drain", "recheck-agent", "restart"]);
+    // stop-task (#277, part 2): a process that stops a task on the heartbeat's 409 says so — part 1's images take orders and never do.
+    expect(canonicalKinds(["stop-task", "restart", "drain", "stop-task"])).toEqual(["drain", "restart", "stop-task"]);
     expect(canonicalKinds(undefined)).toBeNull();
     expect(canonicalKinds("restart")).toBeNull();
   });
@@ -555,8 +557,11 @@ describe("who may press what", () => {
     expect(orderVerdicts(bob, cw, f).drain).toMatchObject({ status: 403 });
     expect(orderVerdicts(m1, { ...cw, order_kinds: null }, f).drain.ok, "an image from before orders is drained too: the pool enforces it").toBe(true);
     expect(orderVerdicts(m1, { ...cw, instance_conflict_at: at(-5) }, f).drain.ok).toBe(true);
-    expect(orderVerdicts(m1, { ...cw, drained_at: at(-20), drained_by: "alice", drain_reason: "disk" }, f).drain).toMatchObject({ status: 409, why: "drained already (by alice, 11:40: disk) — Resume ends it" });
+    expect(orderVerdicts(m1, { ...cw, drained_at: at(-20), drained_by: "alice", drain_reason: "disk" }, f).drain).toMatchObject({ status: 409, why: "drained already (by alice, 11:40 UTC: disk) — Resume ends it" });
     expect(orderVerdicts(m1, cw, { ...f, loginHour: 20 }).drain).toMatchObject({ why: expect.stringContaining("reached 20 orders") });
+    // Six drains of the worker in the last hour: grey on /can in the door's own words — the INSERT's cap, given as a fact.
+    expect(orderVerdicts(m1, cw, { ...f, drainsHour: 6, drainsFreeAt: at(30) }).drain).toMatchObject({ status: 409, why: "drained 6 times in the last hour; the next from 12:30 UTC" });
+    expect(orderVerdicts(m1, cw, { ...f, drainsHour: 5 }).drain.ok).toBe(true);
   });
   it("a resume, by §1.10's table: a project worker any maintainer's; a contributor's machine its owner's, and a maintainer's only when a maintainer drained it; never counted against a login", () => {
     const pw = { ...w, trust: "project", drained_at: at(-20), drained_by: "m2", drain_reason: "disk" };
@@ -566,15 +571,24 @@ describe("who may press what", () => {
     // A contributor's worker its owner drained: its owner only.
     const own = { ...cw, drained_at: at(-20), drained_by: "alice", drain_reason: "my laptop's fans" };
     expect(orderVerdicts(alice, own, f).resume.ok).toBe(true);
-    expect(orderVerdicts(m1, own, f).resume).toMatchObject({ status: 403, why: "alice drained it (11:40: my laptop's fans): putting their machine back to work is theirs — to keep it out, revoke it or set it to its owner's packages only" });
+    expect(orderVerdicts(m1, own, f).resume).toMatchObject({ status: 403, why: "alice drained it (11:40 UTC: my laptop's fans): putting their machine back to work is theirs — to keep it out, revoke it or set it to its owner's packages only" });
     // A contributor's worker a maintainer drained: its owner, or any maintainer.
     const theirs = { ...cw, drained_at: at(-20), drained_by: "m2", drain_reason: "breaks every build" };
     expect(orderVerdicts(alice, theirs, f).resume.ok).toBe(true);
     expect(orderVerdicts({ login: "m3", role: "maintainer" }, theirs, f).resume.ok).toBe(true);
     for (const x of [pw, own, theirs]) expect(orderVerdicts(bob, x, f).resume.ok).toBe(false);
     expect(orderVerdicts(alice, cw, f).resume).toMatchObject({ status: 409, why: "it is not drained: there is nothing to resume" });
-    // A login at its twenty still undoes a drain.
+    // A login at its twenty still undoes a drain — and so does a worker at six drains an hour: a resume is never counted.
     expect(orderVerdicts(alice, theirs, { ...f, loginHour: 20 }).resume.ok).toBe(true);
+    expect(orderVerdicts(alice, theirs, { ...f, drainsHour: 6, restartsHour: 6 }).resume.ok).toBe(true);
+    // A project worker whose owner is not a maintainer (project trust on two maintainers' word): a maintainer's drain is lifted by a
+    // maintainer only; its owner lifts a drain of their own.
+    const carol = { login: "carol", role: "contributor" };
+    const cp = { ...w, owner: "carol", trust: "project", drained_at: at(-20), drained_by: "m2", drain_reason: "publishes broken builds" };
+    expect(orderVerdicts(carol, cp, f).resume).toMatchObject({ status: 403, why: "m2 drained it (11:40 UTC: publishes broken builds): a project worker goes back to work on a maintainer's word" });
+    expect(orderVerdicts({ login: "m3", role: "maintainer" }, cp, f).resume.ok).toBe(true);
+    expect(orderVerdicts(carol, { ...cp, drained_by: "carol" }, f).resume.ok).toBe(true);
+    expect(orderVerdicts(carol, cp, f).drain).toMatchObject({ status: 409, why: expect.stringContaining("drained already") });
   });
   it("Stop its task: its owner and any maintainer — never the build's owner who does not own the worker —, only the task in hand, once, in the restart group", () => {
     const g = { ...f, task: held() };
@@ -588,14 +602,24 @@ describe("who may press what", () => {
     expect(orderVerdicts(m1, cw, { ...g, restartsHour: 6, restartsFreeAt: at(30) }).stop_task).toMatchObject({ why: "restarted 6 times in the last hour; the next from 12:30" });
   });
   it("how soon a stopped task stops, by what runs it: a child, a child with transfers around it, the worker's own process, or an image that does not stop — and a kind it does not know is never promised five minutes", () => {
-    const kinds = '["drain","restart"]';
+    const kinds = '["drain","restart","stop-task"]';
     expect([stopWay("audit", kinds), stopWay("health", kinds)]).toEqual(["child", "child"]);
     expect([stopWay("build", kinds), stopWay("trial", kinds)]).toEqual(["child-or-call", "child-or-call"]);
     expect(["promote", "sync", "render", "rollback", "gc", "enqueue", "publish", "verify", "relayout", "security"].map((k) => stopWay(k, kinds))).toEqual(Array(10).fill("next-call"));
     expect(stopWay("something-new", kinds)).toBe("next-call");
     expect(["audit", "build", "promote"].map((k) => stopWay(k, null))).toEqual(["lease-end", "lease-end", "lease-end"]);
-    // A stop whose lease ended first is failed, the task back in the queue by then; a cancelled task has nothing left to stop.
-    expect(stopEnded({ id: 812, status: "queued" }, at(0))).toMatchObject({ state: "failed", detail: expect.stringContaining("no claim before its lease ended at 12:30") });
+    // An image of #277's first part takes orders but runs a stopped task on: only a declared stop-task is a process that stops.
+    expect(["audit", "build", "promote"].map((k) => stopWay(k, '["drain","recheck-agent","restart"]'))).toEqual(["lease-end", "lease-end", "lease-end"]);
+    expect(stopWay("audit", "not json")).toBe("lease-end");
+    // A stop whose lease ended first is failed, and says what became of the task — back in the queue, or failed on its last
+    // attempt, as the build's own line says; a cancelled task has nothing left to stop.
+    expect(stopEnded({ id: 812, status: "queued" }, at(0))).toMatchObject({ state: "failed", detail: expect.stringContaining("no claim before its lease ended at 12:30 UTC") });
+    expect(stopEnded({ id: 812, status: "queued" }, at(0)).detail).toMatch(/\. Task #812 went back to the queue then$/);
+    expect(stopEnded({ id: 812, status: "leased" }, at(0)).detail).toMatch(/\. Task #812 went back to the queue then$/);
+    expect(stopEnded({ id: 812, status: "failed" }, at(0)).detail).toMatch(/\. Task #812 failed then: that was its last attempt$/);
+    expect(stopEnded({ id: 812, status: "failed" }, at(0)).detail).not.toContain("back to the queue");
+    expect(stopEnded({ id: 812, status: "staged" }, at(0)).detail).toMatch(/went back to the queue then, and has run to its end since$/);
+    expect(stopEnded(null, at(0)).detail).not.toContain("Task #");
     expect(stopEnded({ id: 812, status: "cancelled" }, at(0))).toMatchObject({ state: "done" });
   });
 });

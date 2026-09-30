@@ -147,7 +147,7 @@ const SCRIPT = String.raw`
   // What this viewer may press: the door's own verdicts; the worker's words and its log only where can.details says the viewer reads them.
   function loadCan() {
     api("GET", BASE + "/can").then(function (c) {
-      CAN = c; drawOperate();
+      CAN = c; drawOperate(); if (W) drawLines();
       if (c.details) {
         api("GET", BASE + "/orders").then(function (p) { SAID = {}; (p.orders || []).forEach(function (o) { SAID[o.id] = o.worker_detail; }); drawOrders(); }).catch(function () {});
         loadLog();
@@ -185,8 +185,10 @@ const SCRIPT = String.raw`
     if (w.revoked_at) L.push(["na", "Revoked " + ago(w.revoked_at) + ": it can never claim again."]);
     else if (!w.alive) L.push(["warn", "Offline: not seen in " + WORKER_ALIVE_MINUTES + " minutes. An order waits up to " + (RULES ? Math.round(RULES.ttl_person_min / 60) : 6) + " h for it."]);
     if (w.drained) L.push(["warn", "Drained by " + (byPool(w.drained.by) ? "the pool" : w.drained.by || "?") + " " + ago(w.drained.at) + (w.drained.reason ? ": " + w.drained.reason : "") + " — handed nothing until it is resumed" + (w.current_task ? "; task #" + w.current_task + " runs to its end" : "") + ". Builds asked for it by name go to the shared queue after " + (RULES ? RULES.first_pick_minutes : 3) + " min."]);
-    // Stop its task (#277): the fence holds until this worker has stopped — its next claim — or the lease it can no longer renew ends.
-    if (w.stopping) L.push(["warn", "Stopping task #" + w.stopping.task + " (by " + (w.stopping.by || "?") + ", " + hm(w.stopping.since) + "): its worker hears it at its next heartbeat; the task goes back to the queue once it has stopped, by " + hm(w.stopping.until) + " at the latest."]);
+    // Stop its task (#277): the fence holds until this worker has stopped — its next claim — or the lease it can no longer renew ends: that
+    // lease's end, as /can reads it from the task, which the button and the stop's dialog say too; the listing's bound until /can answers.
+    var until = w.stopping && CAN && CAN.stop && CAN.stop.task === w.stopping.task && CAN.stop.until ? CAN.stop.until : w.stopping && w.stopping.until;
+    if (w.stopping) L.push(["warn", "Stopping task #" + w.stopping.task + " (by " + (w.stopping.by || "?") + ", " + hm(w.stopping.since) + "): its worker hears it at its next heartbeat; the task goes back to the queue once it has stopped, by " + hm(until) + " at the latest."]);
     if (w.alive && w.agent_status === "error") L.push(["fail", "Not ready" + (w.not_ready_since ? " since " + ago(w.not_ready_since).replace(" ago", "") + " ago" : "") + ": " + wtNotReady(w) + "."]);
     if (BREAKER) L.push(["warn", "Provider outage suspected since " + ago(BREAKER.since) + " (up to " + BREAKER.peak + " " + BREAKER.provider + " sites " + (BREAKER.scope === "project" ? "of the project's own " : "") + "with an open agent error at once): the pool restarts none of this provider's " + (BREAKER.scope === "project" ? "project workers" : "contributors' workers") + " until fewer than 2 sites have had one for 15 min."]);
     if (SITE_WORD) L.push(["info", SITE_WORD.charAt(0).toUpperCase() + SITE_WORD.slice(1) + "."]);
@@ -233,6 +235,12 @@ const SCRIPT = String.raw`
     if (st.stops === "child-or-call") return what + " stops within 5 minutes while its " + (st.kind === "trial" ? "check runs. If it is publishing the build into the lab, or attaching its transcript" : "build runs. If its build has already ended and it is uploading") + ", it stops at its next call to the pool instead: usually within 5 minutes, more with a large upload in flight. " + back + end + " Nothing is cancelled.";
     return what + " runs in the worker's own process: it stops at its next call to the pool once the worker hears of it, usually within 5 minutes, about 15 if a call to the pool hangs. " + back + end + " Nothing is cancelled.";
   }
+  // What the page says once the stop is issued: the latest the task goes back to the queue (the door's until), on the reader's clock.
+  function stopDone(name, task, until, stops) {
+    return stops === "lease-end"
+      ? "its image does not stop on the pool's word: task #" + task + " goes back to the queue when its lease ends, by " + hm(until) + ". Nothing is cancelled."
+      : name + " hears it at its next heartbeat; task #" + task + " goes back to the queue once it has stopped, by " + hm(until) + " at the latest. Nothing is cancelled.";
+  }
   // The dialog's words: what happens, whom it touches — the other workers of its host that call the same agent service, by name (the site's own read), never a number typed.
   // "Only if its agent is down" is read once, when the button is pressed: the dialog says it, and the order carries it.
   function askOrder(kind) {
@@ -256,7 +264,9 @@ const SCRIPT = String.raw`
       if (kind === "stop-task" && st) body.task = st.task;
       return api("POST", BASE + "/orders", body).then(function (d) {
         if (d.error) { toast(esc(d.error), "error"); return; }
-        toast(esc((kind === "stop-task" ? "Stopping — " : kind === "drain" ? "Drained — " : kind === "resume" ? "Resumed — " : LABEL[kind] + " ordered — ") + d.note)); load();
+        // A stop is said in the page's own words, on the reader's clock as its dialog was — the door's note says the pool's (UTC).
+        var said = kind === "stop-task" && d.order && d.order.until ? stopDone(name, d.order.task, d.order.until, st && st.stops) : d.note;
+        toast(esc((kind === "stop-task" ? "Stopping — " : kind === "drain" ? "Drained — " : kind === "resume" ? "Resumed — " : LABEL[kind] + " ordered — ") + said)); load();
       });
     }, function (e) { done(); throw e; }).catch(function (e) { toast("the order did not go: " + esc(errorText(e)), "error"); });
   }
@@ -339,7 +349,7 @@ export const WORKER_COMPONENTS = (F: Fixture): Component[] => [
     anchor: ['<ul class="wk-lines" id="wk-lines" aria-label="What the pool sees and does"></ul>'],
     script: ["function drawLines()", "w.not_ready_since", "w.pool_waits", "w.pool_gave_up", "w.two_processes_since", "w.crash_loop_since", "w.watchdog.n", '"Provider outage suspected since "', "BREAKER.scope", "if (SITE_WORD)", "w.takes_orders === null", "byPool(o.by)",
       // #277, part 2: a drain and a stop are the pool's own, each a line of its own.
-      "if (w.drained)", "RULES.first_pick_minutes", "if (w.stopping)", "w.stopping.task", "hm(w.stopping.until)"],
+      "if (w.drained)", "RULES.first_pick_minutes", "if (w.stopping)", "w.stopping.task", "CAN.stop.task === w.stopping.task && CAN.stop.until", "hm(until)"],
     reads: [{ path: `/api/v1/factory/workers/${F.worker}`, fields: ["worker.not_ready_since", "worker.pool_waits", "worker.pool_gave_up", "worker.two_processes_since", "worker.crash_loop_since", "worker.watchdog", "worker.drained", "worker.stopping", "worker.current_task", "breaker", "site_word", "rules.first_pick_minutes", "rules.lease_minutes"] }],
     visible: EVERYONE,
   },
@@ -352,7 +362,9 @@ export const WORKER_COMPONENTS = (F: Fixture): Component[] => [
       "var UNLESS = false, ASKING = false", "(UNLESS ? \" checked\" : \"\")", "if (!CAN || ASKING) return;", 'var unless = kind === "restart" && UNLESS;', "if (unless) body.unless_agent_ok = true;",
       // Stop its task while it holds one, grey "Stopping #812…" while the fence holds, its dialog worded by how the task stops; Drain, or Resume once drained (#277, part 2).
       "var st = CAN.stop;", "st && st.stopping", "'Stopping #'", "CAN.can.stop_task", "function stopText(st)", 'st.stops === "lease-end"', 'st.stops === "child"', 'st.stops === "child-or-call"', 'if (kind === "stop-task" && st) body.task = st.task;',
-      "W && W.drained", "CAN.can.resume", "CAN.can.drain", '" Nothing is cancelled."'],
+      "W && W.drained", "CAN.can.resume", "CAN.can.drain", '" Nothing is cancelled."',
+      // Once issued, the stop's toast says the latest it goes back on the reader's clock, as the dialog did — never the door's UTC words beside it.
+      "function stopDone(name, task, until, stops)", "stopDone(name, d.order.task, d.order.until, st && st.stops)", "hm(until)"],
     reads: [
       { path: `/api/v1/factory/workers/${F.communityWorker}/can`, fields: ["can.recheck", "can.restart", "can.restart_agent", "can.drain", "can.resume", "can.stop_task", "can.cancel", "why", "details", "shared_agent_with", "note", "stop"] },
       { path: `/api/v1/factory/workers/${F.communityWorker}/can`, as: "owner", fields: ["can.recheck", "details"] },

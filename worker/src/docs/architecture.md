@@ -318,9 +318,11 @@ notices hears it once —, the Build door and the project-build door refuse to
 pin it, the cron's sweep sends the builds already pinned to it to the shared
 queue once it has been drained three minutes (`FIRST_PICK_MINUTES`), and
 Status raises an error when every live pool or review worker of an
-architecture is drained. Who resumes: any maintainer a project worker; a
-contributor's worker its owner, and a maintainer only when a maintainer
-drained it. **Stop its task** is the way out of a task that hangs, which
+architecture is drained. Who resumes: any maintainer a project worker (its
+owner, when not a maintainer, only a drain of their own); a contributor's
+worker its owner, and a maintainer only when a maintainer drained it. A
+drain counts toward six an hour per worker, a resume toward nothing, so a
+drain can always be undone. **Stop its task** is the way out of a task that hangs, which
 every other order waits for: it **fences** the lease (`build_tasks.stop_order`)
 instead of giving it back — still the worker's, so nobody else takes it and
 the ring lock holds, but every heartbeat, report and staging upload of it is
@@ -331,10 +333,19 @@ kills the task's process groups and removes the containers labelled with
 the task (`com.omarchy.task`, a created one included), and its calls to the
 pool stop at the next one (every `Api` of a task checks its stop before each
 attempt); a builder runs its build as a job of its own process group, which
-the heartbeat's signal kills, and exits. The worker's next claim proves its
+the heartbeat's signal kills, and exits. A process says it stops on that
+word by declaring `stop-task` with its claim — every image from #277's
+second part on; one that does not (from before it, or from its first part,
+which takes orders but runs a stopped task on) is given back at its lease's
+end, and its broker keeps its hold. The worker's next claim proves its
 processes are gone and gives the task back to the queue (`lease.ts`,
 `requeueLease`, the same statements as an expired lease); so does the lease's
-end, when the worker does not claim first. It never cancels. And a process
+end, when the worker does not claim first — the cron's requeue only while
+that lease has still expired, so a heartbeat that renewed it just before
+keeps it. Every write that renews or ends a lease (a heartbeat, `complete`,
+`fail`) is conditional on the lease the handler read — still the caller's,
+not fenced —, so a stop that lands in between is never renewed past, and a
+claim's lease starts with no fence of an older one. It never cancels. And a process
 that makes no progress — no claim between tasks, no heartbeat the pool
 accepted in a task — is restarted by its **watchdog** (exit 75), after 20
 minutes, then 40, 80, … at most a day (35 at least in a task), counted in its

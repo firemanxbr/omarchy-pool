@@ -85,7 +85,7 @@ answers_to() { grep "^call POST /factory/workers/self/orders/$1 " "$STUB_LOG" | 
 echo down > "$STUB_AGENT"; : > "$STUB_ANSWERS"
 run_worker 60 "${common[@]}"
 first="$(claims | head -n1)"
-[[ "$(jq -c .orders <<<"$first")" == '["drain","recheck-agent","restart"]' ]] || { echo "the claim declares the orders it takes: $first"; exit 1; }
+[[ "$(jq -c .orders <<<"$first")" == '["drain","recheck-agent","restart","stop-task"]' ]] || { echo "the claim declares the orders it takes, and that it stops a task on the pool's word: $first"; exit 1; }
 instance="$(jq -r .instance <<<"$first")"
 [[ "$instance" =~ ^[0-9a-f]{32}$ ]] || { echo "an instance of 32 hex digits: $instance"; exit 1; }
 [[ "$(jq -r .agent_via <<<"$first")" == direct && "$(jq -r .started_at <<<"$first")" =~ ^20[0-9-]+T ]] || { echo "agent_via and started_at: $first"; exit 1; }

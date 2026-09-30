@@ -27,9 +27,15 @@ export interface LeasedTask { id: number; name: string; arch: string; kind: stri
 /**
  * The requeue itself, one statement, only while the lease is still the one
  * read — leased to this worker, fenced by this order or not fenced at all —
- * so a heartbeat, a report or the other path that got there first makes it
- * change nothing. Behind its peers (priority + 10); failed when that was its
- * last attempt, with who held it kept on the row. The fence goes with it.
+ * so a report or the other path that got there first makes it change
+ * nothing. The cron's also only while the lease has still expired
+ * (`expiredBefore`, its own now): a heartbeat that renewed it between the
+ * cron's read and this write keeps it, with the job token it was just
+ * handed — never a fresh token for a task back in the queue. The claim that
+ * ends a fence passes none: the fenced lease is never renewed, and the
+ * claim itself is the proof its processes are gone. Behind its peers
+ * (priority + 10); failed when that was its last attempt, with who held it
+ * kept on the row. The fence goes with it.
  */
 export const REQUEUE_SQL = `UPDATE build_tasks SET
     status = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'queued' END,
@@ -37,11 +43,11 @@ export const REQUEUE_SQL = `UPDATE build_tasks SET
     error = ?2,
     lease_owner = CASE WHEN attempts >= max_attempts THEN lease_owner ELSE NULL END,
     lease_expires_at = NULL, priority = priority + 10, stop_order = NULL
-  WHERE id = ?3 AND status = 'leased' AND lease_owner = ?4 AND stop_order IS ?5
+  WHERE id = ?3 AND status = 'leased' AND lease_owner = ?4 AND stop_order IS ?5 AND (?6 IS NULL OR lease_expires_at < ?6)
   RETURNING id, status`;
 
-export function requeueStatement(env: Env, t: Pick<LeasedTask, "id" | "lease_owner">, error: string, stopOrder: string | null, at: string): D1PreparedStatement {
-  return env.DB.prepare(REQUEUE_SQL).bind(at, error, t.id, t.lease_owner, stopOrder);
+export function requeueStatement(env: Env, t: Pick<LeasedTask, "id" | "lease_owner">, error: string, stopOrder: string | null, at: string, expiredBefore: string | null = null): D1PreparedStatement {
+  return env.DB.prepare(REQUEUE_SQL).bind(at, error, t.id, t.lease_owner, stopOrder, expiredBefore);
 }
 
 /** What a stop's requeue says of the task, on its row and in the journal: who stopped it, on which worker, and why. */
@@ -111,10 +117,11 @@ export async function afterRequeue(env: Env, t: LeasedTask, failed: boolean, err
 /**
  * One lease given back, by the cron or by a claim: the requeue, and — only
  * when it took the task back — what follows. False when the lease had moved
- * (renewed, reported, or given back by the other path first).
+ * (renewed, reported, or given back by the other path first). The cron
+ * passes `expiredBefore`, its now: a lease renewed since its read is kept.
  */
-export async function requeueLease(env: Env, t: LeasedTask, error: string, stopOrder: string | null, at = new Date().toISOString()): Promise<boolean> {
-  const row = await requeueStatement(env, t, error, stopOrder, at).first<{ id: number; status: string }>();
+export async function requeueLease(env: Env, t: LeasedTask, error: string, stopOrder: string | null, at = new Date().toISOString(), expiredBefore: string | null = null): Promise<boolean> {
+  const row = await requeueStatement(env, t, error, stopOrder, at, expiredBefore).first<{ id: number; status: string }>();
   if (!row) return false;
   await afterRequeue(env, t, row.status === "failed", error, stopOrder !== null);
   return true;

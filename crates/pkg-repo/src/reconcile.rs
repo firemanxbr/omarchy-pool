@@ -82,12 +82,30 @@ for f in /repo/factory/pkgbuilds/*/PKGBUILD; do (
   d=${f%/PKGBUILD}; d=${d#/repo/factory/pkgbuilds/}
   printf '%s\t%s\t%s\t%s\t%s\n' "$d" "${arch[*]:-}" "${pkgver:-}" "${pkgrel:-1}" "${epoch:-}"
 ); done"#;
-    let out = Command::new(runtime)
-        .args(["run", "--rm", "--platform", platform, "-v"])
+    let mut cmd = Command::new(runtime);
+    cmd.args(["run", "--rm", "--platform", platform]);
+    // In a task (the enqueue job, #277): named and labelled with it, and run
+    // as the task's child — a stop kills its client's process group and
+    // removes the container by its label, as every container a task starts.
+    let task = crate::stop::current();
+    if let Some(t) = &task {
+        cmd.args([
+            "--name",
+            &format!("omarchy-task-{}-meta-{}", t.task(), std::process::id()),
+            "--label",
+            &format!("{}={}", crate::stop::TASK_LABEL, t.task()),
+        ]);
+    }
+    cmd.arg("-v")
         .arg(format!("{}:/repo:ro", repo.display()))
-        .args([image, "bash", "-c", script])
-        .output()
-        .context("reading the PKGBUILDs in a container")?;
+        .args([image, "bash", "-c", script]);
+    let out = if task.is_some() {
+        crate::stop::output(&mut cmd)
+    } else {
+        cmd.output()
+    }
+    .context("reading the PKGBUILDs in a container")?;
+    crate::stop::check()?;
     anyhow::ensure!(
         out.status.success(),
         "pkgbuild meta: {}",

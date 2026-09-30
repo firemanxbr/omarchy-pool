@@ -11,10 +11,13 @@ answer or a 426's —, between tasks, once; the claim says the broker exits
 with its builder (pair restart), and it does once the builder accepted a
 restart and the pool took the answer — not when the pool refused it. And
 a stop (#277, part 2): the pool's 409 with "stop" on the held task's
-heartbeat releases the hold for a builder that declared orders, then a
-fence refuses claims and answers for STOP_FENCE_SECONDS; the task is never
-taken up again (STOPPED, and adopt() refuses a view with stop_order, read
-past the edge cache); a builder from before #277 keeps its hold.
+heartbeat releases the hold for a builder that declared stop-task, then a
+fence refuses claims and answers for STOP_FENCE_SECONDS — and for as long
+as a call of the stopped task is still in flight here, an upload the
+stopped builder's shell is inside; the task is never taken up again
+(STOPPED, and adopt() refuses a view with stop_order, read past the edge
+cache); a builder from before #277, or from its first part (orders but no
+stop-task), keeps its hold.
 Run: python3 tests/broker.py"""
 import json
 import os
@@ -37,6 +40,7 @@ ORDER_DRAIN = "wo_" + "3" * 32
 ORDER_OUTDATED = "wo_" + "4" * 32  # rides a 426
 ORDER_GONE = "wo_" + "5" * 32  # closed at the pool before its answer came
 HEARTBEATS = {}  # path → (status, body): the pool's answer to a heartbeat, where a test sets one (#277)
+SLOW = threading.Event()  # an upload the fake pool answers only once it is set: a builder's shell inside its curl when the stop comes (#277)
 
 
 def fake_complete(system, user, max_tokens=4000, timeout=300):
@@ -100,7 +104,7 @@ class FakePool(BaseHTTPRequestHandler):
                     {"id": ORDER_RESTART, "kind": "restart", "reason": "not ready", "issued_by": "pool:community", "unless_agent_ok": True, "notice": False},
                     {"id": ORDER_RECHECK, "kind": "recheck-agent", "reason": "stale", "issued_by": "m1", "unless_agent_ok": False, "notice": False},
                     {"id": ORDER_DRAIN, "kind": "drain", "reason": "disk", "issued_by": "m1", "unless_agent_ok": False, "notice": True}]})
-            if json.loads(body).get("arch") in ("t51", "t52"):  # #277: a task a stop takes back, claimed by a builder that declared orders (t51), or not (t52)
+            if json.loads(body).get("arch") in ("t51", "t52"):  # #277: a task a stop takes back, claimed by a builder that declared stop-task (t51), or not (t52)
                 task = int(json.loads(body)["arch"][1:])
                 return self._json(200, {"task": {"id": task, "name": "stopped", "arch": "aarch64", "pkgbuild_ref": "x"}, "token": "omj.SECRET", "lease_expires_at": "2099-01-01T00:30:00Z"})
             if json.loads(body).get("arch") == "nothing":
@@ -125,6 +129,9 @@ class FakePool(BaseHTTPRequestHandler):
 
     def do_PUT(self):  # noqa: N802
         body = self.record()
+        if self.path == "/api/v1/factory/tasks/51/artifacts/slow.pkg.tar.zst":  # a large upload: answered once SLOW is set, refused as the pool refuses a stopped task's
+            SLOW.wait(20)
+            return self._json(409, {"error": "task 51 was stopped from its worker's page", "stop": True, "state": "stopping"})
         if self.path == "/api/v1/factory/tasks/41/artifacts/build.log":
             if b"omw_" in body:
                 return self._json(422, {"error": "build.log carries what looks like a pool token", "kind": "a pool token", "line": 1})
@@ -339,10 +346,11 @@ broker.threading = threading
 broker.DELIVERED.answered.clear()
 STOP = (409, {"error": "task 51 was stopped from its worker's page", "stop": True, "state": "stopping"})
 
-# 20. A stopped task releases the hold, for a builder that declared orders (it stops on the pool's word): the 409 goes to it unchanged,
+# 20. A stopped task releases the hold, for a builder that declared stop-task (it stops on the pool's word): the 409 goes to it unchanged,
 #     the hold goes, and for the fence no claim and no order's answer passes.
-status, out = call("POST", "/pool/factory/claim", {"arch": "t51", "orders": ["drain", "recheck-agent", "restart"]})
-assert status == 200 and out["task"]["id"] == 51 and broker.HELD.orders is True, out
+STOPS = ["drain", "recheck-agent", "restart", "stop-task"]
+status, out = call("POST", "/pool/factory/claim", {"arch": "t51", "orders": STOPS})
+assert status == 200 and out["task"]["id"] == 51 and broker.HELD.stops is True, out
 HEARTBEATS["/api/v1/factory/tasks/51/heartbeat"] = (503, {"error": "internal"})
 assert call("POST", "/pool/factory/tasks/51/heartbeat", {})[0] == 503 and call("GET", "/health")[1]["task"] == 51, "a 503 leaves the hold"
 HEARTBEATS["/api/v1/factory/tasks/51/heartbeat"] = (409, {"error": "task 51 is leased by w2; the lease is not yours"})
@@ -380,16 +388,19 @@ broker.STOPPED.add(51, time.time() - 1)
 assert not broker.STOPPED.holds(51), "its time has passed"
 time.sleep(2.1)
 
-# 23. A builder from before #277 (its claim declared no orders) builds on after the stop: the broker keeps its hold, so its recipe cannot
-#     claim — the same 409 forwarded, "holds task 52" until its own report passes or the lease ends.
-status, out = call("POST", "/pool/factory/claim", {"arch": "t52"})
-assert status == 200 and out["task"]["id"] == 52 and broker.HELD.orders is False, out
+# 23. A builder from before #277 (its claim declared no orders), or from its first part (orders, but not stop-task: it builds a stopped
+#     task on), keeps building after the stop: the broker keeps its hold, so its recipe cannot claim — the same 409 forwarded, "holds
+#     task 52" until its own report passes or the lease ends.
 HEARTBEATS["/api/v1/factory/tasks/52/heartbeat"] = (409, {"error": "stopped", "stop": True, "state": "stopping"})
-status, out = call("POST", "/pool/factory/tasks/52/heartbeat", {})
-assert status == 409 and out["stop"] is True and call("GET", "/health")[1]["task"] == 52, (status, out)
-status, out = call("POST", "/pool/factory/claim", {"arch": "aarch64"})
-assert status == 409 and "holds task 52" in out["error"], out
-broker.HELD.release()
+for claimed in ({"arch": "t52"}, {"arch": "t52", "orders": ["drain", "recheck-agent", "restart"]}):
+    status, out = call("POST", "/pool/factory/claim", claimed)
+    assert status == 200 and out["task"]["id"] == 52 and broker.HELD.stops is False, (claimed, out)
+    status, out = call("POST", "/pool/factory/tasks/52/heartbeat", {})
+    assert status == 409 and out["stop"] is True and call("GET", "/health")[1]["task"] == 52, (claimed, status, out)
+    status, out = call("POST", "/pool/factory/claim", {"arch": "aarch64", "orders": STOPS})
+    assert status == 409 and "holds task 52" in out["error"], (claimed, out)
+    broker.HELD.release()
+assert not broker.STOPPED.holds(52), "never let go on the stop: not the broker's to fence"
 
 # 24. A broker started fresh (its STOPPED gone: a pair restart, a crash) whose builder names a task the pool is stopping: the view, read past
 #     its edge cache, carries stop_order — not adopted, a pinned call is refused, and a claim passes. Without stop_order: adopted, as before.
@@ -404,6 +415,38 @@ assert status == 200 and out["task"]["id"] == 41, out
 broker.HELD.release()
 status, out = call("POST", "/pool/factory/tasks/43/heartbeat", {})
 assert status == 200 and out["task"] == 43, out
+broker.HELD.release()
+
+# 25. A stop that comes while the stopped builder's shell is inside an upload through here: bash runs the stop's trap only once that curl
+#     returns, and the builder lives on until then. The fence stands while the upload is in flight — past STOP_FENCE_SECONDS — and runs
+#     STOP_FENCE_SECONDS from its return; only then does a claim pass.
+SLOW.clear()
+HEARTBEATS["/api/v1/factory/tasks/51/heartbeat"] = STOP
+status, out = call("POST", "/pool/factory/claim", {"arch": "t51", "orders": STOPS})
+assert status == 200 and out["task"]["id"] == 51 and broker.HELD.stops is True, out
+uploaded = {}
+upload = threading.Thread(target=lambda: uploaded.update(r=call("PUT", "/pool/factory/tasks/51/artifacts/slow.pkg.tar.zst", raw=b"a large package", headers={"content-type": "application/octet-stream"})))
+upload.start()
+for _ in range(100):
+    if broker.INFLIGHT.of(51):
+        break
+    time.sleep(0.05)
+assert broker.INFLIGHT.of(51) == 1, "the upload is in flight"
+status, out = call("POST", "/pool/factory/tasks/51/heartbeat", {})
+assert status == 409 and out == STOP[1] and call("GET", "/health")[1]["task"] is None, (status, out)
+time.sleep(2.1)  # past STOP_FENCE_SECONDS: a fence on a timer alone would open the claim door here, the builder still alive
+status, out = call("POST", "/pool/factory/claim", {"arch": "aarch64", "orders": STOPS})
+assert status == 409 and "task 51 was stopped; a call of it is still in flight here" in out["error"], out
+status, out = call("POST", f"/pool/factory/workers/self/orders/{ORDER_RECHECK}", {"instance": "a" * 32, "outcome": "done", "code": "probed"})
+assert status == 403 and "still in flight" in out["error"], out
+SLOW.set()
+upload.join(10)
+assert uploaded["r"][0] == 409 and broker.INFLIGHT.of(51) == 0, uploaded
+status, out = call("POST", "/pool/factory/claim", {"arch": "aarch64", "orders": STOPS})
+assert status == 409 and "task 51 was stopped; the next builder claims from" in out["error"], "the fence runs from the upload's return"
+time.sleep(2.1)
+status, out = call("POST", "/pool/factory/claim", {"arch": "aarch64", "orders": STOPS})
+assert status == 200 and out["task"]["id"] == 41, out
 broker.HELD.release()
 
 # 19. Without a worker token the pool path is off; the agent and GitHub stay.

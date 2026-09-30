@@ -11,7 +11,11 @@
 #    its own tests call it otherwise), and the scripts those run, name
 #    and label every `"$RUNTIME" run` and `"$RUNTIME" create`; a script of the
 #    list that runs another script under tests/ the list does not name fails
-#    too, so a container added or created later cannot escape a stop.
+#    too, so a container added or created later cannot escape a stop. And the
+#    containers the Rust worker starts itself (crates/pkg-repo/src/*.rs): a
+#    `Command::new(<runtime>)` that runs or creates one carries the task's
+#    label (stop::TASK_LABEL) — the build's container, the enqueue job's
+#    PKGBUILD reader.
 # 2. tests/health-check.sh against a stub docker first on PATH and a stub
 #    pool: with OMARCHY_TASK_ID=812 its run carries the task's name and
 #    label; without it, the arguments it always had.
@@ -46,6 +50,34 @@ for s in "${list[@]}"; do
   done < <(grep -vE '^[[:space:]]*#' "$root/$s" | grep -oE '(\$ROOT|\$root|\$here|\./)?/?tests/[a-z0-9-]+\.sh' | grep -oE 'tests/[a-z0-9-]+\.sh' | grep -vx "$s" | sort -u || true)
 done
 echo "task-containers: every container of ${list[*]} carries the task's label"
+
+# The containers the Rust worker starts or creates itself: every `Command::new(<a runtime variable>)` whose next lines say "run" or
+# "create" carries the task's label in them too.
+rust_check() { # dir → the unlabelled ones, one per line
+  python3 - "$1" <<'RS'
+import pathlib, re, sys
+for f in sorted(pathlib.Path(sys.argv[1]).glob("*.rs")):
+    lines = f.read_text().splitlines()
+    for i, line in enumerate(lines):
+        if not re.search(r'Command::new\((?!")[^)]*\)', line):
+            continue
+        # The statement's lines: up to 16, and never past the next Command::new — a runtime's `--version` probe is not the run after it.
+        span = lines[i:i + 16]
+        for j in range(1, len(span)):
+            if "Command::new(" in span[j]:
+                span = span[:j]
+                break
+        window = "\n".join(span)
+        if re.search(r'"(run|create)"', window) and "TASK_LABEL" not in window and "com.omarchy.task" not in window:
+            print(f"{f.name}:{i + 1}: {line.strip()}")
+RS
+}
+bad_rust="$(rust_check "$root/crates/pkg-repo/src")"
+[[ -z "$bad_rust" ]] || fail "the Rust worker starts or creates a container without the task's label (a stop could not remove it): $bad_rust"
+mkdir -p "$tmp/rs"
+printf '%s\n' 'fn meta(runtime: &str) {' '    let out = Command::new(runtime)' '        .args(["run", "--rm", "image"])' '        .output();' '}' > "$tmp/rs/bad.rs"
+[[ "$(rust_check "$tmp/rs")" == "bad.rs:2: let out = Command::new(runtime)" ]] || fail "the Rust check would miss an unlabelled run: $(rust_check "$tmp/rs")"
+echo "task-containers: every container the Rust worker starts itself carries the task's label"
 
 # The static check catches what it is for: a script with an unlabelled run, and one with an unlabelled create.
 for bad in 'out=$("$RUNTIME" run --rm "$IMAGE" true)' 'cid="$("$RUNTIME" create "$IMAGE" true)"'; do

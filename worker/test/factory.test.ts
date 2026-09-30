@@ -1563,7 +1563,7 @@ describe("a heartbeat is written when it says something new", () => {
     expect(first).toMatchObject({ instance: hex(9), order_kinds: '["drain","recheck-agent","restart"]' });
     expect(first.instance_since).toBe(first.last_seen);
     // The same words, the kinds shuffled or repeated, write nothing.
-    for (const orders of [["restart", "drain", "recheck-agent"], ["restart", "restart", "drain", "recheck-agent", "stop-task"]]) expect((await call("POST", "/factory/claim", said({ orders }), "omw_w2")).status).toBe(204);
+    for (const orders of [["restart", "drain", "recheck-agent"], ["restart", "restart", "drain", "recheck-agent", "update", "resume"]]) expect((await call("POST", "/factory/claim", said({ orders }), "omw_w2")).status).toBe(204);
     expect((await row()).last_seen).toBe(first.last_seen);
     // A new process is written at once, and so is a probe; the probe's age moves only with a new one.
     await call("POST", "/factory/claim", said({ instance: hex(10) }), "omw_w2");

@@ -46,8 +46,15 @@ export const ORDER_KINDS = ["recheck-agent", "restart", "restart-agent", "drain"
 export type OrderKind = (typeof ORDER_KINDS)[number];
 export const isOrderKind = (k: unknown): k is OrderKind => typeof k === "string" && (ORDER_KINDS as readonly string[]).includes(k);
 
-/** What a claim may declare: the kinds the process executes, and drain ("I understand notices"). Update, resume and stop-task are never declared: the updater, the pool and the lease carry them out. */
-export const DECLARABLE = ["drain", "recheck-agent", "restart", "restart-agent"] as const;
+/**
+ * What a claim may declare: the kinds the process executes, drain ("I
+ * understand notices"), and stop-task ("I stop a task on the heartbeat's
+ * `409` with `stop`", #277, part 2) — which the pool and the broker read as
+ * the one proof that a process stops on the pool's word: part 1's images
+ * declare orders, and run a stopped task on to its lease's end. Update and
+ * resume are never declared: the updater and the pool carry them out.
+ */
+export const DECLARABLE = ["drain", "recheck-agent", "restart", "restart-agent", "stop-task"] as const;
 
 /** The kinds this pool gives today (#277, parts 1 and 2). Update answers "not on this pool yet". */
 export const LIVE_KINDS: readonly OrderKind[] = ["recheck-agent", "restart", "restart-agent", "drain", "resume", "stop-task"];
@@ -122,6 +129,8 @@ const HOUR = 60 * MIN;
 const DAY = 24 * HOUR;
 const iso = (t: number) => new Date(t).toISOString();
 const clock = (t: string | number) => new Date(t).toISOString().slice(11, 16);
+/** A time of day the pool says to a person who may read it on another clock — a page's dialog says the same moment in the reader's own: "14:17 UTC". */
+export const utc = (t: string | number) => `${clock(t)} UTC`;
 
 // ---------- text hygiene ----------
 
@@ -661,8 +670,8 @@ export interface OrderWorker {
 /** The task a worker holds, as Stop its task reads it: by the worker row's current_task, the primary key. */
 export interface HeldTask { id: number; kind: string; name: string; arch: string; version: string | null; owner: string | null; trust: string; status: string; lease_owner: string | null; lease_expires_at: string | null; stop_order: string | null; attempts: number; max_attempts: number; params: string | null }
 
-/** What the counts say, read once for the door and /can: the worker's orders in the last hour by group, the caller's, and when the oldest of each leaves the window — and the task it holds (Stop its task). */
-export interface OrderFacts { now: number; restartsHour: number; rechecksHour: number; loginHour: number; restartsFreeAt: string | null; rechecksFreeAt: string | null; loginFreeAt: string | null; task?: HeldTask | null }
+/** What the counts say, read once for the door and /can: the worker's orders in the last hour by group — its drains too (#277, part 2) —, the caller's, and when the oldest of each leaves the window — and the task it holds (Stop its task). */
+export interface OrderFacts { now: number; restartsHour: number; rechecksHour: number; loginHour: number; restartsFreeAt: string | null; rechecksFreeAt: string | null; loginFreeAt: string | null; drainsHour?: number; drainsFreeAt?: string | null; task?: HeldTask | null }
 
 const NOT_YET: Partial<Record<OrderKind, string>> = {
   update: "Update is not on this pool yet: its set's updater takes it from a later part of #277",
@@ -673,8 +682,10 @@ export const loginCapWords = (login: string, freeAt: string | null) => `${login}
 
 const KIND_WORD: Record<OrderKind, string> = { "recheck-agent": "a re-check", restart: "a restart", "restart-agent": "a restart of its agent service", drain: "a drain", resume: "a resume", "stop-task": "a stop of its task", update: "an update" };
 
-/** Who drained a worker, when, and why, as the refusals and the lines say it. */
-export const drainWords = (w: { drained_by?: string | null; drained_at?: string | null; drain_reason?: string | null }) => `by ${w.drained_by ?? "?"}, ${w.drained_at ? clock(w.drained_at) : "?"}${w.drain_reason ? `: ${w.drain_reason}` : ""}`;
+/** Who drained a worker, when (on the pool's clock, said so), and why, as the refusals and the lines say it. */
+export const drainWords = (w: { drained_by?: string | null; drained_at?: string | null; drain_reason?: string | null }) => `by ${w.drained_by ?? "?"}, ${w.drained_at ? utc(w.drained_at) : "?"}${w.drain_reason ? `: ${w.drain_reason}` : ""}`;
+/** A seventh drain of a worker in an hour, the same words at the door and on /can. */
+export const drainCapWords = (freeAt: string | null | undefined) => `drained ${MAX_RESTARTS_PER_HOUR} times in the last hour; the next from ${freeAt ? utc(freeAt) : "within the hour"}`;
 
 /**
  * How soon a stopped task stops, by what runs it (§1.12 of #277's design):
@@ -683,15 +694,18 @@ export const drainWords = (w: { drained_by?: string | null; drained_at?: string 
  * its own the worker kills within one heartbeat; `child-or-call`, a child
  * with transfers in the worker's own process around it; `next-call`, work in
  * the worker's own process, which ends at its next call to the pool; and
- * `lease-end`, an image from before #277 (its claim declares no orders),
- * which does not stop on the pool's word and is given back when its lease,
- * which nothing renews, ends. A kind this map does not know gets
- * `next-call`: no kind is promised five minutes it may not keep.
+ * `lease-end`, an image whose last claim did not declare `stop-task` — one
+ * from before #277, or from its first part, which takes orders but runs a
+ * stopped task on — which does not stop on the pool's word and is given
+ * back when its lease, which nothing renews, ends. A kind this map does not
+ * know gets `next-call`: no kind is promised five minutes it may not keep.
  */
 export type StopWay = "child" | "child-or-call" | "next-call" | "lease-end";
 const STOP_WAYS: Record<string, StopWay> = { audit: "child", health: "child", build: "child-or-call", trial: "child-or-call" };
 export function stopWay(kind: string, orderKinds: string | null | undefined): StopWay {
-  if (orderKinds === null || orderKinds === undefined) return "lease-end";
+  let takes: unknown = null;
+  try { takes = orderKinds ? JSON.parse(orderKinds) : null; } catch { takes = null; }
+  if (!Array.isArray(takes) || !takes.includes("stop-task")) return "lease-end";
   return STOP_WAYS[kind] ?? "next-call";
 }
 
@@ -707,12 +721,14 @@ export function stopWay(kind: string, orderKinds: string | null | undefined): St
  *
  * Drain, Resume and Stop its task (#277, part 2) are the pool's to carry
  * out, so they work on every image and whatever two processes do:
- * - a drain holds at once, until a Resume;
- * - who resumes (§1.10's table): a project worker, any maintainer (and its
- *   owner); a contributor's worker its owner always — putting a machine
- *   back to work is its owner's word, the rule of sharing (0032) — and a
- *   maintainer only when a maintainer drained it; a maintainer who must keep
- *   it out revokes it, or sets it to its owner's packages only;
+ * - a drain holds at once, until a Resume; at most six an hour per worker;
+ * - who resumes (§1.10's table): a project worker, any maintainer — its
+ *   owner, when not a maintainer, only a drain of their own: project trust
+ *   is the maintainers' word, and so is keeping such a worker out; a
+ *   contributor's worker its owner always — putting a machine back to work
+ *   is its owner's word, the rule of sharing (0032) — and a maintainer only
+ *   when a maintainer drained it; a maintainer who must keep it out revokes
+ *   it, or sets it to its owner's packages only;
  * - Stop its task needs a task in hand, not stopped already; it counts in
  *   the restart group, like a restart.
  */
@@ -736,16 +752,21 @@ export function orderVerdicts(c: { login: string; role: string } | null, w: Orde
   const poolKind = (kind: OrderKind): Verdict => {
     if (kind === "drain") {
       if (w.drained_at) return no(409, `drained already (${drainWords(w)}) — Resume ends it`);
-      return waiting(kind) ?? login ?? allow;
+      const drainsCap = (f.drainsHour ?? 0) >= MAX_RESTARTS_PER_HOUR ? no(409, drainCapWords(f.drainsFreeAt)) : null;
+      return waiting(kind) ?? drainsCap ?? login ?? allow;
     }
     if (kind === "resume") {
       if (!w.drained_at) return no(409, "it is not drained: there is nothing to resume");
-      // A contributor's machine its owner drained goes back to work on its owner's word only.
       const owner = w.owner !== null && c!.login === w.owner;
-      if (w.trust !== "project" && !owner && w.owner !== null && w.drained_by === w.owner) {
-        return no(403, `${w.owner} drained it (${clock(w.drained_at)}${w.drain_reason ? `: ${w.drain_reason}` : ""}): putting their machine back to work is theirs — to keep it out, revoke it or set it to its owner's packages only`);
+      // A project worker is the maintainers' to keep out: its owner, when not a maintainer, lifts only a drain of their own.
+      if (w.trust === "project" && c!.role !== "maintainer" && w.drained_by !== c!.login) {
+        return no(403, `${w.drained_by ?? "a maintainer"} drained it (${w.drained_at ? utc(w.drained_at) : "?"}${w.drain_reason ? `: ${w.drain_reason}` : ""}): a project worker goes back to work on a maintainer's word`);
       }
-      // A resume is never counted against a login's twenty: undoing a drain must stay possible.
+      // A contributor's machine its owner drained goes back to work on its owner's word only.
+      if (w.trust !== "project" && !owner && w.owner !== null && w.drained_by === w.owner) {
+        return no(403, `${w.owner} drained it (${utc(w.drained_at)}${w.drain_reason ? `: ${w.drain_reason}` : ""}): putting their machine back to work is theirs — to keep it out, revoke it or set it to its owner's packages only`);
+      }
+      // A resume is never counted — not against a login's twenty, not against the worker's hour: undoing a drain must stay possible.
       return allow;
     }
     // Stop its task: the task it holds now, not stopped already.
@@ -865,9 +886,10 @@ export const POOL_RESTARTS_SQL = `SELECT COUNT(*) AS n FROM worker_orders WHERE 
 export const COMMUNITY_RESTARTS_SQL = `SELECT COUNT(*) AS n FROM worker_orders WHERE issued_by = '${POOL_COMMUNITY}' AND kind IN ('restart', 'restart-agent') AND issued_at > ?1`;
 
 /**
- * The INSERT, only under every cap: the worker's group in the last hour,
- * the issuer's twenty (a person), the pool's ten restart-type orders an
- * hour and its sixty a day — of which the community's workers may take six
+ * The INSERT, only under every cap: the worker's group in the last hour
+ * (never a resume's: undoing a drain must stay possible, and a resume
+ * needs a drain, which is capped), the issuer's twenty (a person), the
+ * pool's ten restart-type orders an hour and its sixty a day — of which the community's workers may take six
  * and forty —, the rules' compare-and-set on auto_orders. The
  * unique indexes add one open per kind per worker and one restart-agent per
  * site. D1 runs a batch in one transaction and serialises writers, so two
@@ -878,7 +900,7 @@ export const COMMUNITY_RESTARTS_SQL = `SELECT COUNT(*) AS n FROM worker_orders W
  */
 export const ISSUE_SQL = `INSERT INTO worker_orders (id, worker_id, kind, reason, issued_by, via, rule, unless_agent_ok, task_id, site, issued_at, expires_at, baseline_at_issue, state, delivered_at, delivered_to, baseline)
 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17
- WHERE (SELECT COUNT(*) FROM worker_orders WHERE worker_id = ?2 AND kind IN (SELECT value FROM json_each(?18)) AND issued_at > ?19) < ?20
+ WHERE (?3 = 'resume' OR (SELECT COUNT(*) FROM worker_orders WHERE worker_id = ?2 AND kind IN (SELECT value FROM json_each(?18)) AND issued_at > ?19) < ?20)
    AND (?5 IN ${POOL_IN} OR ?3 = 'resume' OR (SELECT COUNT(*) FROM worker_orders WHERE issued_by = ?5 AND kind != 'resume' AND issued_at > ?19) < ${MAX_ORDERS_PER_LOGIN_HOUR})
    AND (?5 NOT IN ${POOL_IN} OR ?3 NOT IN ('restart', 'restart-agent') OR (SELECT COUNT(*) FROM worker_orders WHERE issued_by IN ${POOL_IN} AND kind IN ('restart', 'restart-agent') AND issued_at > ?19) < ${MAX_POOL_RESTARTS_PER_HOUR})
    AND (?5 != '${POOL_COMMUNITY}' OR ?3 NOT IN ('restart', 'restart-agent') OR (SELECT COUNT(*) FROM worker_orders WHERE issued_by = '${POOL_COMMUNITY}' AND kind IN ('restart', 'restart-agent') AND issued_at > ?19) < ${MAX_POOL_COMMUNITY_RESTARTS_PER_HOUR})
@@ -924,6 +946,21 @@ export function orderId(): string {
   return "wo_" + [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
 }
 
+/**
+ * A resume closes the drain it ends when that one still waits for a claim:
+ * its final line first, while it is open, then the close — each only when
+ * the resume's own INSERT went in. The worker's open drain, through the
+ * partial index of the open ones (uq_worker_orders_open_kind): the
+ * `state IN (…)` term is the index's own, so the planner may use it, and
+ * the `state = 'pending'` term keeps a delivered order out.
+ */
+export const RESUME_DRAIN_LINE_SQL = `INSERT INTO events (kind, ring, source, status, summary, payload)
+  SELECT 'order', NULL, 'factory', 'ok', worker_id || ': drain done — ' || ?1 || ' (order ' || id || ')',
+         json_object('order', id, 'worker', worker_id, 'kind', kind, 'by', issued_by, 'via', via, 'rule', rule, 'reason', reason, 'state', 'done', 'code', NULL)
+    FROM worker_orders WHERE worker_id = ?2 AND kind = 'drain' AND state IN ('pending', 'delivered') AND state = 'pending' AND EXISTS (SELECT 1 FROM worker_orders WHERE id = ?3)`;
+export const RESUME_DRAIN_CLOSE_SQL = `UPDATE worker_orders SET state = 'done', answered_at = ?1, answered_by = 'pool', detail = ?2
+  WHERE worker_id = ?3 AND kind = 'drain' AND state IN ('pending', 'delivered') AND state = 'pending' AND EXISTS (SELECT 1 FROM worker_orders WHERE id = ?4)`;
+
 /** One order, issued atomically with its line (§4.2 of the design): nothing is written unless the INSERT is. */
 export async function issueOrder(env: Env, a: IssueAsk): Promise<IssueResult> {
   const id = orderId();
@@ -951,11 +988,8 @@ export async function issueOrder(env: Env, a: IssueAsk): Promise<IssueResult> {
     ...(task ? [env.DB.prepare(`UPDATE build_tasks SET stop_order = ? WHERE id = ? AND status = 'leased' AND lease_owner = ? AND stop_order IS NULL AND ${exists}`).bind(id, task, a.worker, id)] : []),
     // A resume ends the drain now: the drain order, if it still waits for a claim, closes with it — its final line first, while it is open.
     ...(a.kind === "resume" && a.resumed ? [
-      env.DB.prepare(`INSERT INTO events (kind, ring, source, status, summary, payload)
-        SELECT 'order', NULL, 'factory', 'ok', worker_id || ': drain done — ' || ? || ' (order ' || id || ')',
-               json_object('order', id, 'worker', worker_id, 'kind', kind, 'by', issued_by, 'via', via, 'rule', rule, 'reason', reason, 'state', 'done', 'code', NULL)
-          FROM worker_orders WHERE worker_id = ? AND kind = 'drain' AND state = 'pending' AND ${exists}`).bind(a.resumed.drain, a.worker, id),
-      env.DB.prepare(`UPDATE worker_orders SET state = 'done', answered_at = ?, answered_by = 'pool', detail = ? WHERE worker_id = ? AND kind = 'drain' AND state = 'pending' AND ${exists}`).bind(at, a.resumed.drain, a.worker, id),
+      env.DB.prepare(RESUME_DRAIN_LINE_SQL).bind(a.resumed.drain, a.worker, id),
+      env.DB.prepare(RESUME_DRAIN_CLOSE_SQL).bind(at, a.resumed.drain, a.worker, id),
       env.DB.prepare(`UPDATE build_workers SET drained_at = NULL, drained_by = NULL, drain_reason = NULL WHERE id = ? AND drained_at IS NOT NULL AND ${exists}`).bind(a.worker, id),
       env.DB.prepare("UPDATE worker_orders SET state = 'done', answered_at = ?, answered_by = 'pool', detail = ? WHERE id = ? AND state = 'pending'").bind(at, a.resumed.detail, id),
     ] : []),
@@ -987,12 +1021,16 @@ export async function issueOrder(env: Env, a: IssueAsk): Promise<IssueResult> {
 export async function orderFacts(env: Env, worker: string, login: string | null, now: number): Promise<OrderFacts> {
   const hourAgo = iso(now - HOUR);
   const freeAt = (oldest: string | null) => (oldest ? iso(Date.parse(oldest) + HOUR) : null);
-  const [r, c, l] = await Promise.all([
+  const [r, c, d, l] = await Promise.all([
     env.DB.prepare(COUNT_WORKER_SQL).bind(worker, JSON.stringify(RESTART_GROUP), hourAgo).first<{ n: number; oldest: string | null }>(),
     env.DB.prepare(COUNT_WORKER_SQL).bind(worker, JSON.stringify(["recheck-agent"]), hourAgo).first<{ n: number; oldest: string | null }>(),
+    env.DB.prepare(COUNT_WORKER_SQL).bind(worker, JSON.stringify(["drain"]), hourAgo).first<{ n: number; oldest: string | null }>(),
     login ? env.DB.prepare(COUNT_ISSUER_SQL).bind(login, hourAgo).first<{ n: number; oldest: string | null }>() : null,
   ]);
-  return { now, restartsHour: r?.n ?? 0, rechecksHour: c?.n ?? 0, loginHour: l?.n ?? 0, restartsFreeAt: freeAt(r?.oldest ?? null), rechecksFreeAt: freeAt(c?.oldest ?? null), loginFreeAt: freeAt(l?.oldest ?? null) };
+  return {
+    now, restartsHour: r?.n ?? 0, rechecksHour: c?.n ?? 0, loginHour: l?.n ?? 0, drainsHour: d?.n ?? 0,
+    restartsFreeAt: freeAt(r?.oldest ?? null), rechecksFreeAt: freeAt(c?.oldest ?? null), loginFreeAt: freeAt(l?.oldest ?? null), drainsFreeAt: freeAt(d?.oldest ?? null),
+  };
 }
 
 /** A cap the pool hit is journaled once per window: the key decides. */
@@ -1049,11 +1087,8 @@ export async function capRefusal(env: Env, a: Pick<IssueAsk, "worker" | "kind" |
   }
   if (a.kind === "recheck-agent" && f.rechecksHour >= MAX_RECHECKS_PER_HOUR) return `re-checked ${MAX_RECHECKS_PER_HOUR} times in the last hour; the next from ${f.rechecksFreeAt ? clock(f.rechecksFreeAt) : "within the hour"}`;
   if (RESTART_GROUP.includes(a.kind) && f.restartsHour >= MAX_RESTARTS_PER_HOUR) return `restarted ${MAX_RESTARTS_PER_HOUR} times in the last hour; the next from ${f.restartsFreeAt ? clock(f.restartsFreeAt) : "within the hour"}`;
-  // A drain and a resume are their own group (#277, part 2): six of each an hour per worker, like every other kind.
-  if (a.kind === "drain" || a.kind === "resume") {
-    const own = await env.DB.prepare(COUNT_WORKER_SQL).bind(a.worker, JSON.stringify([a.kind]), hourAgo).first<{ n: number; oldest: string | null }>();
-    if ((own?.n ?? 0) >= MAX_RESTARTS_PER_HOUR) return `${a.kind === "drain" ? "drained" : "resumed"} ${MAX_RESTARTS_PER_HOUR} times in the last hour; the next from ${own?.oldest ? clock(Date.parse(own.oldest) + HOUR) : "within the hour"}`;
-  }
+  // A drain is its own group (#277, part 2): six an hour per worker. A resume is never counted: undoing a drain must stay possible.
+  if (a.kind === "drain" && (f.drainsHour ?? 0) >= MAX_RESTARTS_PER_HOUR) return drainCapWords(f.drainsFreeAt);
   return "the rules' state moved under this order: the next claim decides again";
 }
 
@@ -1073,13 +1108,19 @@ type StoppedTask = LeasedTask & { status: string; lease_owner: string | null; st
 
 /**
  * A stop whose task is no longer fenced by it, in the pool's words: the
- * lease ended first — the cron gave the task back, every token of it
- * expired — or the task was cancelled, or is gone.
+ * lease ended first — the cron gave the task back, or failed it on its last
+ * attempt, every token of it expired — or the task was cancelled, or is
+ * gone. What became of the task is said from its status, as the build's own
+ * line says it.
  */
 export function stopEnded(t: Pick<StoppedTask, "id" | "status"> | null, issuedAt: string): { state: "done" | "failed"; detail: string } {
   if (t && t.status === "cancelled") return { state: "done", detail: `task #${t.id} was cancelled meanwhile: nothing left to stop` };
-  const end = clock(Date.parse(issuedAt) + LEASE_MINUTES * MIN);
-  return { state: "failed", detail: `no claim before its lease ended at ${end}: its image may not stop on the heartbeat's answer (before #277), or the process is wedged (its watchdog restarts it)${t ? `. Task #${t.id} went back to the queue then` : ""}` };
+  const end = utc(Date.parse(issuedAt) + LEASE_MINUTES * MIN);
+  const then = !t ? ""
+    : t.status === "failed" ? `. Task #${t.id} failed then: that was its last attempt`
+      : t.status === "done" || t.status === "staged" ? `. Task #${t.id} went back to the queue then, and has run to its end since`
+        : `. Task #${t.id} went back to the queue then`;
+  return { state: "failed", detail: `no claim before its lease ended at ${end}: its image may not stop on the heartbeat's answer (before #277), or the process is wedged (its watchdog restarts it)${then}` };
 }
 
 /** The claim, after its own words: what staleness and observation compare with. */

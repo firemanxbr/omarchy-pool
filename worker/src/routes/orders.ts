@@ -88,14 +88,24 @@ export function writeGate(request: Request, url: URL, withBody: boolean): Respon
 
 const KIND_LABEL: Record<OrderKind, string> = { "recheck-agent": "Re-check agent", restart: "Restart", "restart-agent": "Restart agent service", drain: "Drain", resume: "Resume", "stop-task": "Stop its task", update: "Update" };
 
-/** When the order reaches the worker, in the words the page and the door say it. */
-function deliveryNote(w: { last_seen: string; current_task: number | null }): string {
+/**
+ * When the order reaches the worker, in the words the page and the door say
+ * it — and, while a Stop its task fences the task it holds (its open
+ * stop-task, from the row alone), that the order goes once that task is
+ * back in the queue: the stop is under way already.
+ */
+function deliveryNote(w: { last_seen: string; current_task: number | null; open_orders?: string | null }): string {
   const alive = Date.parse(w.last_seen) > aliveSince();
   if (!alive) return `delivered with its next claim — it is offline now; the order waits up to ${TTL_PERSON_MIN / 60} h for it`;
-  return w.current_task ? `delivered with its next claim — after task #${w.current_task}, which it builds now (Stop its task to deliver it sooner)` : "delivered with its next claim — within 30 s while it is idle";
+  if (!w.current_task) return "delivered with its next claim — within 30 s while it is idle";
+  const stopping = openOrdersOf(w.open_orders ?? null).some((o) => o.kind === "stop-task");
+  return stopping
+    ? `delivered with its next claim — once task #${w.current_task}, which is being stopped, is back in the queue: the claim that gives it back carries the order`
+    : `delivered with its next claim — after task #${w.current_task}, which it builds now (Stop its task to deliver it sooner)`;
 }
 
-const clockOf = (iso: string) => iso.slice(11, 16);
+/** A time of day the door says, on the pool's clock and saying so: the page words the same moment on its reader's. */
+const clockOf = (iso: string) => `${iso.slice(11, 16)} UTC`;
 
 /** What happens after a stop, per how its work runs (§1.16): the door's note, the page's dialog says the same. */
 function stopNote(f: ReturnType<typeof stopFacts>): string {
@@ -174,7 +184,8 @@ export async function handleIssueOrder(c: Contributor, id: string, request: Requ
       : kind === "resume" ? "it is handed work again from its next claim"
         : deliveryNote(w);
   return json({
-    order: { id: issued.id, worker: w.id, kind, reason, issued_by: c.login, via, issued_at: issued.issued_at, expires_at: issued.expires_at, unless_agent_ok: unless, state: kind === "resume" ? "done" : "pending", ...(stop ? { task: stop.task } : {}) },
+    // A stop's `until`, the latest its task goes back to the queue: the page words it on its reader's clock, as its dialog did.
+    order: { id: issued.id, worker: w.id, kind, reason, issued_by: c.login, via, issued_at: issued.issued_at, expires_at: issued.expires_at, unless_agent_ok: unless, state: kind === "resume" ? "done" : "pending", ...(stop ? { task: stop.task, until: stop.until } : {}) },
     note,
   }, 201);
 }

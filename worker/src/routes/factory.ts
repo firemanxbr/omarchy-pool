@@ -671,9 +671,13 @@ export async function handleClaim(request: Request, env: Env, actor: Actor): Pro
     }
   }
   // One statement claims the next queued task of this architecture: D1
-  // serialises writes, so two workers never get the same one.
+  // serialises writes, so two workers never get the same one. A fence
+  // belongs to one lease (#277): a queued task never carries one — the
+  // requeue clears it — but one a Worker from before the fence requeued
+  // would stop the new lease on a worker nobody stopped, so the lease
+  // starts without it.
   const task = await env.DB.prepare(
-    `UPDATE build_tasks SET status = 'leased', lease_owner = ?, lease_expires_at = ?, started_at = ?, attempts = attempts + 1, error = NULL
+    `UPDATE build_tasks SET status = 'leased', lease_owner = ?, lease_expires_at = ?, started_at = ?, attempts = attempts + 1, error = NULL, stop_order = NULL
       WHERE id = (SELECT c.id FROM build_tasks c WHERE c.status = 'queued' AND (c.arch = ? OR c.kind IN (${ANY_ARCH_KINDS})) AND ${scope} ORDER BY c.priority, c.id LIMIT 1) AND status = 'queued'
       RETURNING *`,
   )
@@ -727,6 +731,20 @@ function workerName(actor: Actor): string {
   return actor.kind === "worker" ? actor.w.id : actor.job.w;
 }
 
+/**
+ * A write that ends or renews a lease is conditional on the lease owned()
+ * read (#277): still leased to the caller, and not fenced. A stop, a cancel
+ * or a requeue that landed between that read and the write makes it change
+ * nothing — never a lease renewed, a token handed out, or a report taken
+ * for a task stopped meanwhile —, and the caller hears what became of the
+ * task, in owned()'s words.
+ */
+const LEASE_HELD = "status = 'leased' AND lease_owner = ? AND stop_order IS NULL";
+async function leaseMoved(env: Env, id: number, actor: Actor): Promise<Response> {
+  const again = await owned(env, id, actor);
+  return again instanceof Response ? again : json({ error: `task ${id}'s lease moved meanwhile; send it again` }, 409);
+}
+
 /** What the worker registered about itself: x86_64 under qemu on an aarch64 host, or not. */
 async function emulated(env: Env, workerId: string): Promise<boolean> {
   const w = await env.DB.prepare("SELECT labels FROM build_workers WHERE id = ?").bind(workerId).first<{ labels: string | null }>();
@@ -738,7 +756,8 @@ export async function handleHeartbeat(id: number, env: Env, actor: Actor): Promi
   if (task instanceof Response) return task;
   const who = workerName(actor);
   const until = plusMinutes(LEASE_MINUTES);
-  await env.DB.prepare("UPDATE build_tasks SET lease_expires_at = ? WHERE id = ?").bind(until, id).run();
+  const renewed = await env.DB.prepare(`UPDATE build_tasks SET lease_expires_at = ? WHERE id = ? AND ${LEASE_HELD}`).bind(until, id, who).run();
+  if (!renewed.meta.changes) return leaseMoved(env, id, actor);
   await env.DB.prepare("UPDATE build_workers SET last_seen = ?, current_task = ? WHERE id = ?").bind(now(), id, who).run();
   // The lease moved; so does the job's credential.
   const params = task.params ? (JSON.parse(task.params) as Record<string, unknown>) : {};
@@ -774,9 +793,10 @@ export async function handleComplete(id: number, request: Request, env: Env, act
     // A pool job: what it did is its result; the journal gets one line.
     // The lease ends with the status; who held it stays on the row — the
     // journal, the seal and the load per worker read it later.
-    await env.DB.prepare("UPDATE build_tasks SET status = 'done', finished_at = ?, duration_ms = ?, log_tail = ?, result = ?, lease_expires_at = NULL WHERE id = ?")
-      .bind(now(), b.duration_ms ?? null, tail, b.result ? JSON.stringify(b.result) : null, id)
+    const ended = await env.DB.prepare(`UPDATE build_tasks SET status = 'done', finished_at = ?, duration_ms = ?, log_tail = ?, result = ?, lease_expires_at = NULL WHERE id = ? AND ${LEASE_HELD}`)
+      .bind(now(), b.duration_ms ?? null, tail, b.result ? JSON.stringify(b.result) : null, id, who)
       .run();
+    if (!ended.meta.changes) return leaseMoved(env, id, actor);
     await workerFinished(env, who, task, "done");
     const p = task.params ? (JSON.parse(task.params) as Record<string, string>) : {};
     // Promotion by evidence, when the evidence can exist: the last sync of
@@ -854,11 +874,12 @@ export async function handleComplete(id: number, request: Request, env: Env, act
     // keeps the agent its worker ran (built_with, the worker's own word with
     // its claim): the agent a maintainer's decision on it is signed with
     // (#247), whatever the worker runs by then.
-    await env.DB.prepare(
-      "UPDATE build_tasks SET status = 'staged', finished_at = ?, result_sha256 = ?, result_filename = ?, result_version = ?, version = COALESCE(version, ?), duration_ms = ?, log_tail = ?, staged_prefix = ?, result = ?, lease_expires_at = NULL, params = CASE WHEN ? THEN json_set(COALESCE(params, '{}'), '$.built_with', (SELECT agent FROM build_workers WHERE id = ?)) ELSE params END WHERE id = ?",
+    const staged = await env.DB.prepare(
+      `UPDATE build_tasks SET status = 'staged', finished_at = ?, result_sha256 = ?, result_filename = ?, result_version = ?, version = COALESCE(version, ?), duration_ms = ?, log_tail = ?, staged_prefix = ?, result = ?, lease_expires_at = NULL, params = CASE WHEN ? THEN json_set(COALESCE(params, '{}'), '$.built_with', (SELECT agent FROM build_workers WHERE id = ?)) ELSE params END WHERE id = ? AND ${LEASE_HELD}`,
     )
-      .bind(now(), b.sha256, b.filename, b.version ?? null, b.version ?? null, b.duration_ms ?? null, tail, prefix, vet ? JSON.stringify({ vet }) : null, review !== undefined ? 1 : 0, who, id)
+      .bind(now(), b.sha256, b.filename, b.version ?? null, b.version ?? null, b.duration_ms ?? null, tail, prefix, vet ? JSON.stringify({ vet }) : null, review !== undefined ? 1 : 0, who, id, who)
       .run();
+    if (!staged.meta.changes) return leaseMoved(env, id, actor);
     // The evidence outlives staging: on the record, signed.
     await recordEvidence(env, task.name, await requestOf(env, task.name), id, prefix);
     await workerFinished(env, who, task, "staged", b.version);
@@ -918,11 +939,12 @@ export async function handleComplete(id: number, request: Request, env: Env, act
       .first<{ sha256: string }>();
   }
   if (!indexed) return json({ error: "publish the package to the pool first (pkg-repo publish --source factory), then complete" }, 409);
-  await env.DB.prepare(
-    "UPDATE build_tasks SET status = 'done', finished_at = ?, result_sha256 = ?, result_filename = ?, result_version = ?, duration_ms = ?, log_tail = ?, lease_expires_at = NULL WHERE id = ?",
+  const done = await env.DB.prepare(
+    `UPDATE build_tasks SET status = 'done', finished_at = ?, result_sha256 = ?, result_filename = ?, result_version = ?, duration_ms = ?, log_tail = ?, lease_expires_at = NULL WHERE id = ? AND ${LEASE_HELD}`,
   )
-    .bind(now(), indexed.sha256, b.filename, b.version ?? null, b.duration_ms ?? null, tail, id)
+    .bind(now(), indexed.sha256, b.filename, b.version ?? null, b.duration_ms ?? null, tail, id, who)
     .run();
+  if (!done.meta.changes) return leaseMoved(env, id, actor);
   await workerFinished(env, who, task, "done", b.version);
   if (task.publish !== 0) {
     // What users get. A contributor's registration of this name is now
@@ -975,21 +997,23 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
   // would be handed the same build back for ever.
   const needsNative = b.needs_native === true && (await emulated(env, who));
   const exhausted = !needsNative && (b.final === true || task.attempts >= task.max_attempts);
-  // What the worker uploaded before giving up — the log, the PKGBUILD, the
-  // gate's verdict — is evidence too: a failed attempt is on the record.
   const review = task.kind === "build" && task.params ? (JSON.parse(task.params) as { review?: number }).review : undefined;
-  if (task.kind === "build" && (task.trust === "community" ? task.owner : review !== undefined)) {
-    await recordEvidence(env, task.name, await requestOf(env, task.name), id, `staging/${review !== undefined ? "@project" : task.owner}/${task.name}/${task.id}/`, ["PKGBUILD", "build.log", "vet.json", "tests.log"]);
-  }
   // A requeued task goes behind its peers (priority + 10) so one broken
   // PKGBUILD does not hold the queue. One sent back for a native worker
   // waits for no other: not the worker it was pinned to, not the owner's
   // fourteen days of a bump — the one that had it is the one that cannot.
-  await env.DB.prepare(
-    `UPDATE build_tasks SET status = ?, finished_at = ?, error = ?, log_tail = ?, duration_ms = ?, lease_owner = ?, lease_expires_at = NULL, priority = priority + 10${needsNative ? ", attempts = attempts - 1, pinned_to = NULL, shared_after = NULL, params = json_set(COALESCE(params, '{}'), '$.needs_native', 1)" : ""} WHERE id = ?`,
+  const failed = await env.DB.prepare(
+    `UPDATE build_tasks SET status = ?, finished_at = ?, error = ?, log_tail = ?, duration_ms = ?, lease_owner = ?, lease_expires_at = NULL, priority = priority + 10${needsNative ? ", attempts = attempts - 1, pinned_to = NULL, shared_after = NULL, params = json_set(COALESCE(params, '{}'), '$.needs_native', 1)" : ""} WHERE id = ? AND ${LEASE_HELD}`,
   )
-    .bind(exhausted ? "failed" : "queued", exhausted ? now() : null, error, tail, b.duration_ms ?? null, exhausted ? task.lease_owner : null, id)
+    .bind(exhausted ? "failed" : "queued", exhausted ? now() : null, error, tail, b.duration_ms ?? null, exhausted ? task.lease_owner : null, id, who)
     .run();
+  if (!failed.meta.changes) return leaseMoved(env, id, actor);
+  // What the worker uploaded before giving up — the log, the PKGBUILD, the
+  // gate's verdict — is evidence too: a failed attempt is on the record (a
+  // report the pool took: not one of a lease stopped meanwhile).
+  if (task.kind === "build" && (task.trust === "community" ? task.owner : review !== undefined)) {
+    await recordEvidence(env, task.name, await requestOf(env, task.name), id, `staging/${review !== undefined ? "@project" : task.owner}/${task.name}/${task.id}/`, ["PKGBUILD", "build.log", "vet.json", "tests.log"]);
+  }
   await workerFinished(env, who, task, "failed");
   // A build that failed for good may have staged its package before the
   // gate or the quota stopped it: the log and the recipe stay, the package goes.
@@ -1020,8 +1044,9 @@ export async function handleFail(id: number, request: Request, env: Env, actor: 
  * runs — its line names the stop.
  */
 export async function requeueExpiredLeases(env: Env): Promise<number> {
+  const at = now();
   const expired = await env.DB.prepare("SELECT id, name, arch, lease_owner, attempts, max_attempts, trust, kind, stop_order FROM build_tasks WHERE status = 'leased' AND lease_expires_at < ?")
-    .bind(now())
+    .bind(at)
     .all<{ id: number; name: string; arch: string; lease_owner: string; attempts: number; max_attempts: number; trust: string; kind: string; stop_order: string | null }>();
   for (const t of expired.results) {
     let error = `lease by ${t.lease_owner} expired`;
@@ -1029,7 +1054,8 @@ export async function requeueExpiredLeases(env: Env): Promise<number> {
       const o = await env.DB.prepare("SELECT issued_by, reason FROM worker_orders WHERE id = ?").bind(t.stop_order).first<{ issued_by: string; reason: string }>();
       error = stopError(t.lease_owner, o?.issued_by ?? "?", o?.reason ?? null, true);
     }
-    await requeueLease(env, t, error, t.stop_order ?? null);
+    // Only while it has still expired: a heartbeat that renewed it since the read above keeps it, and its fresh token stays the lease's.
+    await requeueLease(env, t, error, t.stop_order ?? null, at, at);
   }
   return expired.results.length;
 }
@@ -1252,8 +1278,9 @@ export async function handleTask(id: number, env: Env): Promise<Response> {
   return json(
     {
       task: { ...task, params, result: parse(task) },
-      // Its lease fenced by a Stop its task (the row's stop_order, spread above): told when, back in the queue by when at the latest.
-      stopping: stop && task.status === "leased" ? { order: stop.id, by: stop.issued_by, since: stop.issued_at, until: new Date(Date.parse(stop.issued_at) + LEASE_MINUTES * 60000).toISOString() } : null,
+      // Its lease fenced by a Stop its task (the row's stop_order, spread above): told when, back in the queue by when at the latest — the
+      // fenced lease's own end, which nothing renews (the order's issue plus a lease only bounds it): what the worker's page and the stop's dialog say.
+      stopping: stop && task.status === "leased" ? { order: stop.id, by: stop.issued_by, since: stop.issued_at, until: task.lease_expires_at ?? new Date(Date.parse(stop.issued_at) + LEASE_MINUTES * 60000).toISOString() } : null,
       worker: worker ? { ...worker, labels: worker.labels ? JSON.parse(worker.labels) : null } : null,
       from: fromRow,
       audit: audits?.results.map(brief) ?? [],

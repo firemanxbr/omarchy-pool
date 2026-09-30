@@ -274,6 +274,21 @@ fn with_retry<T>(
     }
 }
 
+/// The longest one call can take, its retries included: `ATTEMPTS`
+/// attempts of at most `timeout` each, and the waits between them (800 ms,
+/// doubling). A caller that must hear back within a bound — the claim loop,
+/// whose watchdog counts a claim attempt as its progress (#277) — builds its
+/// client with a timeout this keeps under that bound.
+pub fn longest_call(timeout: Duration) -> Duration {
+    let mut total = timeout * ATTEMPTS;
+    let mut delay = Duration::from_millis(800);
+    for _ in 1..ATTEMPTS {
+        total += delay;
+        delay *= 2;
+    }
+    total
+}
+
 fn is_transient(e: &RepoError) -> bool {
     match e {
         RepoError::Http(_) | RepoError::Io(_) => true,
@@ -290,6 +305,23 @@ impl Api {
             http: Client::builder()
                 .user_agent(concat!("pkg-repo/", env!("CARGO_PKG_VERSION")))
                 .timeout(Duration::from_secs(600))
+                .build()?,
+            stop: None,
+        })
+    }
+
+    /// A client whose every attempt ends within `timeout` — connecting
+    /// within 30 s of it at most —, so one call ends within
+    /// [`longest_call`]`(timeout)`: small calls that must come back within a
+    /// bound (the claim loop's, #277), never an upload.
+    pub fn with_timeout(base: &str, token: &str, timeout: Duration) -> Result<Self, RepoError> {
+        Ok(Self {
+            base: base.trim_end_matches('/').to_owned(),
+            token: token.to_owned(),
+            http: Client::builder()
+                .user_agent(concat!("pkg-repo/", env!("CARGO_PKG_VERSION")))
+                .timeout(timeout)
+                .connect_timeout(timeout.min(Duration::from_secs(30)))
                 .build()?,
             stop: None,
         })
@@ -1049,6 +1081,44 @@ mod tests {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
     use std::sync::Mutex;
+    use std::time::Instant;
+
+    /// A pool that takes the connection and never answers — a stalled edge:
+    /// each attempt ends at the client's timeout, and the call, its retries
+    /// included, within `longest_call` of it. The claim loop's watchdog counts
+    /// on it: a claim that hangs ends well before its first wait (#277).
+    #[test]
+    fn a_call_to_a_pool_that_never_answers_ends_within_its_longest() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let held = Arc::new(Mutex::new(Vec::new()));
+        let keep = held.clone();
+        std::thread::spawn(move || {
+            for s in listener.incoming().flatten() {
+                keep.lock().unwrap().push(s);
+            }
+        });
+        let timeout = Duration::from_millis(300);
+        let api = Api::with_timeout(&base, "omw_t", timeout).unwrap();
+        let started = Instant::now();
+        let r = api.post_json_as("omw_t", "/factory/claim", &serde_json::json!({}));
+        let took = started.elapsed();
+        assert!(matches!(r, Err(RepoError::Http(_))), "{r:?}");
+        assert!(took >= timeout * ATTEMPTS, "{took:?}");
+        assert!(
+            took < longest_call(timeout) + Duration::from_secs(2),
+            "{took:?}"
+        );
+        assert_eq!(held.lock().unwrap().len(), ATTEMPTS as usize);
+    }
+
+    #[test]
+    fn the_longest_call_is_every_attempt_and_the_waits_between() {
+        assert_eq!(
+            longest_call(Duration::from_secs(120)),
+            Duration::from_secs(480) + Duration::from_millis(800 + 1600 + 3200)
+        );
+    }
 
     /// One request as the test server saw it: method, path with query, body.
     #[derive(Debug, Clone)]

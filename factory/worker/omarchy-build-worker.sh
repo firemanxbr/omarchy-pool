@@ -873,7 +873,9 @@ exit_note_heard() { # the pool answered a claim (a task, orders, nothing, a 426)
 # A line a person or the pool wrote, as this worker prints it: escape sequences and control characters out, one line, 300 characters.
 clean_line() { printf '%s' "$1" | sed $'s/\x1b\\[[0-9;?]*[ -\/]*[@-~]//g; s/\x1b\\][^\x07]*\x07//g' | tr '\n\r\t' '   ' | tr -d '\000-\010\013-\037\177' | cut -c1-300; }
 agent_via() { if [[ -n "${OMARCHY_BROKER:-}" ]]; then echo broker; elif [[ -n "$(agent_label)" ]]; then echo direct; else echo none; fi; }
-order_kinds() { if [[ -n "${OMARCHY_BROKER:-}" || -n "$(agent_label)" ]]; then echo '["drain","recheck-agent","restart"]'; else echo '["drain","restart"]'; fi; }
+# What this process takes: the kinds it executes, drain (it understands the notice), and stop-task (#277, part 2) — it stops its build on
+# the heartbeat's 409 with stop (heartbeat_loop, stop_build), the one word the pool and a broker read as a builder that stops.
+order_kinds() { if [[ -n "${OMARCHY_BROKER:-}" || -n "$(agent_label)" ]]; then echo '["drain","recheck-agent","restart","stop-task"]'; else echo '["drain","restart","stop-task"]'; fi; }
 answer_order() { # id outcome code detail [agent-json]
   api POST "/factory/workers/self/orders/$1" "$(jq -cn --arg i "$INSTANCE" --arg o "$2" --arg c "$3" --arg d "$4" --argjson a "${5:-null}" '{instance:$i,outcome:$o,code:$c,detail:$d} + (if $a == null then {} else {agent:$a} end)')" >/dev/null 2>&1 \
     || log "order $1: the answer did not reach the pool; it closes the order by what it sees"
