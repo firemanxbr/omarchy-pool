@@ -163,8 +163,8 @@ curl -s https://pkgs.example.org/api/v1/status      # {"ok":true,...} once D1 an
 
 ## C. The GitHub token
 
-Nothing starts on GitHub by dispatch any more (RUNBOOK, *The pool's own
-scheduler*): since 2026-09-17 the pool's operation does not go through GitHub
+Nothing starts on GitHub by dispatch, and the code that could is gone
+(RUNBOOK, *The pool's own scheduler*, #308): since 2026-09-17 the pool's operation does not go through GitHub
 Actions, and the worker secret `GITHUB_TOKEN` only raises the rate limit of
 the reads the pool still makes — the governance file, upstream releases for
 the bumps, provenance. Create a **fine-grained personal access token** (or a

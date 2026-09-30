@@ -253,7 +253,7 @@ sync, rc→stable every 3 h), daily slots for health (08:30) and the Sunday GC �
 pulled job (below) when due and never doubled while one is queued or
 running. The metrics snapshot (30 min), the governance sync (10 min), the
 update check (05:45) and the cost estimate (<!-- estimate-cadence -->) it does itself. Nothing starts on GitHub by
-dispatch any more: since 2026-09-17 the pool's operation — requests,
+dispatch, and the code that could is gone (#308): since 2026-09-17 the pool's operation — requests,
 builds, bumps, promotion — does not go through GitHub Actions, issues or
 pull requests, so a GitHub outage stops the code from changing and nothing
 else (sign-in, the governance file and the worker image stay on GitHub, by

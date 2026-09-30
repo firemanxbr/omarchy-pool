@@ -15,31 +15,28 @@ import { dailyAudience } from "./audience";
  * queues the pool's jobs (sync, promote, health, security, gc, verify) for
  * the project's workers when they are due, and never doubles one queued or
  * running. It began as a dispatcher of GitHub workflows (GitHub's cron is
- * best-effort: on 2026-09-12 it delayed the hourly sync by an hour); since
- * 2026-09-17 nothing is dispatched on GitHub any more — the dispatch path
- * stays for a rule without a job, should one return.
+ * best-effort: on 2026-09-12 it delayed the hourly sync by an hour); nothing
+ * was dispatched on GitHub after 2026-09-17, and the dispatch path is gone
+ * (#308): no token the pool holds may start a workflow, and the daily probe
+ * (tokenprobe.ts) says so on Status when one could.
  *
  * GITHUB_TOKEN (fine-grained, read-only) only raises the rate limit of the
  * reads the pool makes; without it everything still runs, anonymously.
  */
 
-const REPO = "firemanxbr/omarchy-pool";
-const API = `https://api.github.com/repos/${REPO}/actions/workflows`;
-
 interface Rule {
-  /** The rule's name — a workflow file for the two GitHub still starts, otherwise the job it queues. */
+  /** The rule's name: the job it queues. */
   workflow: string;
   /** Run when the last run is older than this many minutes… */
   every?: number;
   /** …or once a day after this UTC time (hour, minute), when nothing ran since. */
   at?: { hour: number; minute: number; weekday?: number };
-  inputs?: Record<string, string>;
   /**
-   * The same work as a pulled job (kind + params) for a trusted worker.
-   * Used instead of the workflow when JOB_KINDS lists the kind: the cron
-   * creates the task, GitHub is not involved.
+   * The work as a pulled job (kind + params) for a trusted worker, queued
+   * when JOB_KINDS lists the kind: the cron creates the task, GitHub is not
+   * involved.
    */
-  job?: { kind: string; params: Record<string, string>; arch?: string };
+  job: { kind: string; params: Record<string, string>; arch?: string };
 }
 
 /**
@@ -96,7 +93,6 @@ export const RULES: Rule[] = [
 /** The tasks a rule expands to in job mode: sync is one per architecture (all its sources), health one per ring and architecture. */
 export function jobsOf(rule: Rule): { kind: string; params: Record<string, string>; arch: string }[] {
   const j = rule.job;
-  if (!j) return [];
   if (j.kind === "sync") return REPO_ARCHES.map((arch) => syncJobFor(arch));
   if (j.kind === "health") {
     const out: { kind: string; params: Record<string, string>; arch: string }[] = [];
@@ -117,12 +113,12 @@ function jobMode(env: Env, kind: string): boolean {
   return (env.JOB_KINDS ?? "").split(",").map((k) => k.trim()).includes(kind);
 }
 
-/** Recent tasks of a kind with these parameters, shaped like workflow runs so isDue() applies. */
+/** Recent tasks of a kind with these parameters, as isDue() reads them. */
 async function recentJobs(env: Env, kind: string, params: Record<string, string>): Promise<RunSummary[]> {
   const rows = await env.DB.prepare("SELECT created_at, status FROM build_tasks WHERE kind = ? AND params = ? ORDER BY id DESC LIMIT 10")
     .bind(kind, JSON.stringify(params))
     .all<{ created_at: string; status: string }>();
-  return rows.results.map((r) => ({ created_at: r.created_at, status: r.status === "queued" || r.status === "leased" ? "in_progress" : "completed", event: "schedule" }));
+  return rows.results.map((r) => ({ created_at: r.created_at, status: r.status === "queued" || r.status === "leased" ? "in_progress" : "completed" }));
 }
 
 export async function createJob(env: Env, job: { kind: string; params: Record<string, string>; arch: string }, reason = "scheduled"): Promise<number> {
@@ -137,43 +133,14 @@ export async function createJob(env: Env, job: { kind: string; params: Record<st
 interface RunSummary {
   created_at: string;
   status: string;
-  event: string;
-  display_title?: string;
 }
 
-/** Latest runs of a workflow (newest first), skipping pull-request runs. */
-async function recentRuns(env: Env, workflow: string): Promise<RunSummary[]> {
-  const res = await fetch(`${API}/${workflow}/runs?per_page=10&exclude_pull_requests=true`, {
-    headers: { authorization: `Bearer ${env.GITHUB_TOKEN}`, accept: "application/vnd.github+json", "user-agent": "omarchy-pool-scheduler" },
-  });
-  if (!res.ok) throw new Error(`runs of ${workflow}: HTTP ${res.status}`);
-  return ((await res.json()) as { workflow_runs: RunSummary[] }).workflow_runs;
-}
-
-async function dispatch(env: Env, workflow: string, inputs: Record<string, string> | undefined): Promise<void> {
-  const res = await fetch(`${API}/${workflow}/dispatches`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${env.GITHUB_TOKEN}`, accept: "application/vnd.github+json", "content-type": "application/json", "user-agent": "omarchy-pool-scheduler" },
-    body: JSON.stringify({ ref: "main", inputs: inputs ?? {} }),
-  });
-  if (!res.ok) throw new Error(`dispatch ${workflow}: HTTP ${res.status} ${await res.text()}`);
-}
-
-/** Does a rule with inputs match a run? (Two promote rules share a workflow.) */
-function matches(rule: Rule, run: RunSummary): boolean {
-  if (!rule.inputs?.to) return true;
-  // The plan step titles a promotion run by its note; the schedule form runs
-  // carry the same intent, so a promote run of any kind counts for the slot.
-  return run.event === "schedule" || (run.display_title ?? "").includes(rule.inputs.note ?? "") || run.event === "workflow_dispatch";
-}
-
-/** Decide, pure: is the rule due at `now`, given the workflow's recent runs? */
+/** Decide, pure: is the rule due at `now`, given its recent runs (newest first)? */
 export function isDue(rule: Rule, runs: RunSummary[], now: Date): { due: boolean; why: string } {
-  const relevant = runs.filter((r) => matches(rule, r));
-  if (relevant.some((r) => r.status === "queued" || r.status === "in_progress" || r.status === "waiting" || r.status === "pending")) {
+  if (runs.some((r) => r.status === "queued" || r.status === "in_progress" || r.status === "waiting" || r.status === "pending")) {
     return { due: false, why: "a run is queued or in progress" };
   }
-  const last = relevant[0] ? Date.parse(relevant[0].created_at) : 0;
+  const last = runs[0] ? Date.parse(runs[0].created_at) : 0;
   if (rule.every !== undefined) {
     const overdueBy = (now.getTime() - last) / 60000 - rule.every;
     return overdueBy >= 5 ? { due: true, why: `last run ${Math.round((now.getTime() - last) / 60000)} min ago, expected every ${rule.every}` } : { due: false, why: "on time" };
@@ -296,11 +263,14 @@ export async function runScheduler(env: Env, now = new Date()): Promise<string[]
   // Rules whose kind runs as pulled jobs: the cron creates the tasks; a
   // trusted worker anywhere does the work. No GitHub in the loop.
   for (const rule of RULES) {
-    if (!rule.job || !jobMode(env, rule.job.kind)) continue;
+    if (!jobMode(env, rule.job.kind)) {
+      log.push(`${rule.workflow}: not in JOB_KINDS; nothing runs it`);
+      continue;
+    }
     if (guard && ["sync", "promote", "render", "security", "enqueue"].includes(rule.job.kind)) continue;
     for (const job of jobsOf(rule)) {
       try {
-        const { due, why } = isDue({ ...rule, inputs: undefined }, await recentJobs(env, job.kind, job.params), now);
+        const { due, why } = isDue(rule, await recentJobs(env, job.kind, job.params), now);
         const label = `${job.kind}${job.params.source ? " " + job.params.source + "/" + job.arch : job.params.to ? " → " + job.params.to : job.params.ring ? " " + job.params.ring + "/" + job.arch : ""}`;
         if (!due) {
           log.push(`job ${label}: ${why}`);
@@ -314,38 +284,6 @@ export async function runScheduler(env: Env, now = new Date()): Promise<string[]
       } catch (e) {
         log.push(`job ${job.kind}: ${String(e)}`);
       }
-    }
-  }
-  if (!env.GITHUB_TOKEN) {
-    log.push("GITHUB_TOKEN not set; nothing to dispatch on GitHub (the jobs above ran)");
-    return log;
-  }
-  // Nothing starts on GitHub by dispatch any more (the recipe bumps went with
-  // factory/pkgbuilds, 2026-09-17: the pool bumps registered packages
-  // itself, updates.ts); the loop stays for a rule without a job, should
-  // one return. A job kind left out of JOB_KINDS simply does not run.
-  const cache = new Map<string, RunSummary[]>();
-  for (const rule of RULES) {
-    if (rule.job) {
-      if (!jobMode(env, rule.job.kind)) log.push(`${rule.workflow}: not in JOB_KINDS; nothing runs it`);
-      continue;
-    }
-    try {
-      const runs = cache.get(rule.workflow) ?? (await recentRuns(env, rule.workflow));
-      cache.set(rule.workflow, runs);
-      const { due, why } = isDue(rule, runs, now);
-      if (!due) {
-        log.push(`${rule.workflow}${rule.inputs?.to ? " → " + rule.inputs.to : ""}: ${why}`);
-        continue;
-      }
-      await dispatch(env, rule.workflow, rule.inputs);
-      cache.delete(rule.workflow);
-      log.push(`${rule.workflow}: dispatched (${why})`);
-      await env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('dispatch', ?, NULL, 'ok', ?, ?)")
-        .bind(rule.inputs?.to ?? null, `${rule.workflow} dispatched by the pool scheduler — ${why}`, JSON.stringify({ workflow: rule.workflow, inputs: rule.inputs ?? {}, why }))
-        .run();
-    } catch (e) {
-      log.push(`${rule.workflow}: ${String(e)}`);
     }
   }
   try {
