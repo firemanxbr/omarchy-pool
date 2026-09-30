@@ -586,19 +586,23 @@ the new `compose.yml` checked against a staged copy of the host's `.env`
 and `etc/` under its profiles and under every profile, and a compose that
 does not load, another `POOL_ROOT`, an updater image from before #277 or
 one that does not pull, or a service without a worker token (its value
-never printed) refused with 4 and nothing changed; the user timer of a
-host from before #277 disabled as its user before anything is installed,
-a rollout it started waited for (a try every 15 s, four hours at most),
+never printed) refused with 4 and nothing changed (after the pull, said
+to have pulled the image); the user timer of a host from before #277
+stopped as its user before anything is installed, and disabled only after
+the updater's self-test (a reboot before then brings it back), a rollout
+it started waited for (a try every 15 s, four hours at most),
 the files installed with the old ones kept in `setup-backup-<time>/` and
 the lines of `compose.yml` they replace shown, the updater started, seen
 running at every look for 30 s and passing its `--self-test`, and only
 then the timer's units removed and the timer said retired once its user's
 systemd says it is stopped; a systemd that does not answer ends
 `setup.sh` with 3 and nothing installed; a rollout still running after
-four hours, an interrupt during the wait, or an updater that does not
-start, restarts or fails its self-test (3, or 5) putting everything back —
-the updater it started stopped and removed, the old files and no new env
-file, the timer enabled again; a fresh host gets no timer and starts
+four hours, an interrupt during the wait (TERM: 143, HUP: 129), or an
+updater that does not start, restarts or fails its self-test (3, or 5)
+putting everything back — the updater it started stopped and removed, the
+old files and no new env file, the timer enabled again and never disabled
+— the last also with the reader of its output gone before the put-back
+writes a word; a fresh host gets no timer and starts
 nothing; `rollout.sh` wakes a running updater and starts one that is not
 running as it is (`--no-recreate`), never both, and `--check` asks it,
 nothing more; and the runbook's one-time step says `setup.sh` waits up to

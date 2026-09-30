@@ -407,15 +407,21 @@ changes anything):
 ```bash
 cd /srv/omarchy-pool
 docker compose ps -a                              # what runs now: a container that restarts is fixed or removed first
+pgrep -af rollout.sh                              # nothing, or the timer's own rollout (setup.sh waits for that one); stop one started by hand
 ls -l etc/                                        # the env files there; review2-*.env may be missing (setup.sh writes them)
 grep COMPOSE_PROFILES .env                        # emulated on the Studio; review2 stays off until it is registered
 tag="$(curl -fsS https://pkgs.omarchy-pool.org/api/v1/version | sed -En 's/.*"version": *"(v[0-9.]+)".*/\1/p')"
 curl -fsS "https://raw.githubusercontent.com/firemanxbr/omarchy-pool/$tag/factory/host/compose.yml" | diff -u compose.yml -
 ```
 
-Every line the diff removes that is not in the release's `compose.yml` is
-a local edit. Put it in `compose.override.yml` beside `compose.yml`:
-compose and the updater read that file, and `setup.sh` never touches it.
+A line the diff removes is either an upstream change since the release
+this host's copy came from (the review2 pair with no profile, a comment
+rewritten) or a local edit. To tell them apart, diff the host's copy
+against the release it came from, for example the one before:
+`curl -fsS https://raw.githubusercontent.com/firemanxbr/omarchy-pool/<that tag>/factory/host/compose.yml | diff -u - compose.yml`.
+The lines that diff adds are the local edits. Put those, and only those,
+in `compose.override.yml` beside `compose.yml`: compose and the updater
+read that file, and `setup.sh` never touches it.
 `setup.sh` keeps the old `compose.yml` anyway (see below) and prints the
 lines it replaces.
 
@@ -445,17 +451,18 @@ What `setup.sh` does, in order, and what a failure leaves:
    checks that `.env`'s `POOL_ROOT` is this directory, that the updater
    image here (pulled first) is from #277 on, and that every service
    compose would run holds a worker token. Any of these fails with exit 4
-   and changes nothing: the timer runs on. Fix what it names (for a
+   and changes none of the host's files, units or containers (only the
+   updater image may have been pulled): the timer runs on. Fix what it names (for a
    missing token: `register.sh`, or leave that service's profile out of
    `COMPOSE_PROFILES`), then paste again.
-2. **It stops and disables the timer**, as its user, then waits while a
-   rollout the timer started is still draining. A drain takes up to 3 h;
-   `setup.sh` waits up to 4 h (the old rollout also pulls and waits for
-   its brokers). If the rollout still runs after 4 h, or the step is
-   interrupted (Ctrl-C, a dropped session), it enables the timer again,
-   installs nothing, and exits 3. Paste again later. If its user's systemd
-   does not answer, it changes nothing there and exits 3 with the
-   commands to run.
+2. **It stops the timer**, as its user, then waits while a rollout the
+   timer started is still draining. The timer is stopped, not disabled,
+   until step 5: a reboot or a power cut before then brings it back. A
+   drain takes up to 3 h; `setup.sh` waits up to 4 h (the old rollout also
+   pulls and waits for its brokers). If the rollout still runs after 4 h,
+   it enables the timer again, installs nothing, and exits 3. Paste again
+   later. If its user's systemd does not answer, it changes nothing there
+   and exits 3 with the commands to run.
 3. **It installs the files.** `compose.yml`, `rollout.sh` and
    `register.sh` go in, with an env file (mode 600) for every `env_file`
    `compose.yml` names. The copies it replaces go to
@@ -468,7 +475,14 @@ What `setup.sh` does, in order, and what a failure leaves:
    and exits 5. The host rolls out through its timer as before. Read
    `docker compose logs updater` from the output, fix the cause, paste
    again.
-5. **Only then does it remove the timer's units** and say it is retired.
+5. **Only then does it disable the timer and remove its units**, and say
+   it is retired.
+
+An interrupt at any point before step 5 (Ctrl-C, a stop, a dropped
+session, or its output gone, such as a `| tee` stopped by Ctrl-C) puts
+back whatever was done so far: the updater it started stopped and
+removed, the old files back, the timer enabled again. It then exits 130,
+143, 129 or 141 (the signal's), never 0. Paste again.
 
 The `./rollout.sh` at the end then only wakes the updater. If it fails
 after `setup.sh` succeeded, the updater still runs and rolls the host out:
@@ -503,7 +517,7 @@ beside the timer.
 
 ```bash
 cd /srv/omarchy-pool
-b="$(ls -d setup-backup-* | tail -n1)"            # the one the one-time step wrote
+b="$(ls -d setup-backup-*/systemd-user | tail -n1)"; b="${b%/systemd-user}"   # the one the one-time step wrote (the timer's units in it)
 docker compose stop updater && docker compose rm -f updater
 cp -p "$b/compose.yml" "$b/rollout.sh" "$b/register.sh" .
 mkdir -p ~/.config/systemd/user && cp -p "$b"/systemd-user/omarchy-pool-rollout.* ~/.config/systemd/user/

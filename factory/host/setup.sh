@@ -14,9 +14,10 @@
 #     host (and the other way round) run under user-mode emulation
 #   - the invoking user in the docker group (a new login picks it up)
 #   - before anything of a running host changes, the new compose.yml checked
-#     against a staged copy of this host's .env and etc/ (exit 4, nothing
-#     changed, when it does not load, under this host's profiles or under
-#     every profile it names, or when .env's POOL_ROOT is another directory)
+#     against a staged copy of this host's .env and etc/ (exit 4, nothing of
+#     the host's files, units or containers changed, when it does not load,
+#     under this host's profiles or under every profile it names, or when
+#     .env's POOL_ROOT is another directory)
 #   - compose.yml (with the `updater` service), register.sh and rollout.sh
 #     (which only wakes the updater) copied to POOL_ROOT — the copies they
 #     replace kept in POOL_ROOT/setup-backup-<time>/, and the difference in
@@ -29,16 +30,19 @@
 #
 # Run again on a host that has run the pool since before #277, it is the
 # one-time step of the runbook's *The Studio host* (Once: the updater). Then,
-# before the timer is touched, it also checks that the updater image here is
-# one from #277 on and that every service compose would run holds a worker
-# token (exit 4, nothing changed); disables the timer and waits while a
-# rollout it started still drains (a drain takes up to 3 h; it waits up to
-# 4 h); installs the files; starts the updater and checks it stays up and
-# passes its --self-test; and only then removes the timer's units. When any
-# of that fails, or it is interrupted, once the timer was disabled: the
-# updater it started is stopped and removed, the old files are put back and
-# the timer is enabled again, so the host goes on rolling out through it
-# (exit 3: the timer or its last rollout; exit 5: the updater).
+# before the timer is touched, it also checks that the updater image here
+# (pulled first) is one from #277 on and that every service compose would
+# run holds a worker token (exit 4, and only that image pulled); stops the
+# timer — stopped, not disabled, so a reboot at any point before the updater
+# is confirmed brings it back — and waits while a rollout it started still
+# drains (a drain takes up to 3 h; it waits up to 4 h); installs the files;
+# starts the updater and checks it stays up and passes its --self-test; and
+# only then disables the timer and removes its units. When any of that
+# fails, or it is interrupted (INT, TERM, HUP, or its output gone: PIPE),
+# once the timer was stopped: the updater it started is stopped and removed,
+# the old files are put back and the timer is enabled and started again, so
+# the host goes on rolling out through it (exit 3: the timer or its last
+# rollout; exit 5: the updater; 130, 143, 129 or 141: the signal).
 #
 # It writes no secret: register.sh puts the worker tokens in etc/, and the
 # agent key goes in etc/agent.env by hand.
@@ -127,24 +131,27 @@ migrating=0
 [[ -e "$units/omarchy-pool-rollout.timer" || -e "$units/omarchy-pool-rollout.service" ]] && migrating=1
 
 # What was done so far, and what the EXIT trap puts back when setup.sh ends before the updater is confirmed (see the top).
-stage_dir=""; disabled=0; installed=0; started=0; retired=0; backup=""; created=()
+stage_dir=""; stopped=0; installed=0; started=0; retired=0; pulled=0; backup=""; created=()
+# It runs with errexit off and SIGPIPE and SIGHUP ignored (the trap sets that): with its terminal or its reader gone, a message it
+# cannot write fails that message alone, and every step still runs. The messages come after the steps they report.
 put_back() {
   (( migrating && ! retired )) || return 0
   if (( started )); then
     # Before compose.yml goes back: compose leaves a running updater alone once the file no longer names it.
-    compose_in "$root" stop updater >/dev/null 2>&1 || true
-    compose_in "$root" rm -f updater >/dev/null 2>&1 || true
+    compose_in "$root" stop updater >/dev/null 2>&1
+    compose_in "$root" rm -f updater >/dev/null 2>&1
     echo "    the updater it started: stopped and removed" >&2
   fi
   if (( installed )); then
     local f rel
     for f in compose.yml rollout.sh register.sh; do
-      if [[ -f "$backup/$f" ]]; then cp -p "$backup/$f" "$root/$f" || true; else rm -f "$root/$f"; fi
+      if [[ -f "$backup/$f" ]]; then cp -p "$backup/$f" "$root/$f"; else rm -f "$root/$f"; fi
     done
     for rel in ${created[@]+"${created[@]}"}; do rm -f "$root/$rel"; done
     echo "    compose.yml, rollout.sh and register.sh: back as they were (copies in $backup)" >&2
   fi
-  if (( disabled )); then
+  if (( stopped )); then
+    # enable as well as start: a timer its operator disabled by hand, as an earlier exit 3 told them to, comes back after a reboot too.
     if user_systemctl enable --now omarchy-pool-rollout.timer >/dev/null 2>&1; then
       echo "    omarchy-pool-rollout.timer is enabled again: this host still rolls out through it" >&2
     else
@@ -152,11 +159,19 @@ put_back() {
     fi
   fi
 }
-trap 'rc=$?; trap "" INT TERM; put_back; [[ -z "$stage_dir" ]] || rm -rf "$stage_dir"; exit $rc' EXIT
+trap 'rc=$?; set +e; trap "" INT TERM HUP PIPE; put_back; [[ -z "$stage_dir" ]] || rm -rf "$stage_dir"; exit $rc' EXIT
+# Every interrupt ends through the EXIT trap with its own code, never 0: a hung-up session (HUP) and a reader that is gone (PIPE,
+# a `| tee` stopped by Ctrl-C) too — left to their default, a HUP runs it with $? 0 and a PIPE kills setup.sh with no trap at all.
 trap 'exit 130' INT
 trap 'exit 143' TERM
-refuse() { # why — before anything of the running host changed
-  printf '\nNot done, and nothing changed: %s\n' "$1" >&2
+trap 'exit 129' HUP
+trap 'exit 141' PIPE
+refuse() { # why — before anything of the running host changed (only the updater image, once pulled)
+  if (( pulled )); then
+    printf '\nNot done, and nothing of the host'"'"'s files, units or containers changed (the updater image was pulled): %s\n' "$1" >&2
+  else
+    printf '\nNot done, and nothing changed: %s\n' "$1" >&2
+  fi
   exit 4
 }
 
@@ -185,6 +200,7 @@ echo "    it loads with this host's .env, etc/ and every profile ($(tr '\n' ' ' 
 if (( migrating )); then
   # The updater that takes over must follow the pool (#277): an image from before it rounds every fifteen minutes and no more.
   out="$(compose_in "$stage" pull -q updater 2>&1)" || refuse "the updater's image did not pull ($(tail -n1 <<<"$out"))"
+  pulled=1
   config="$(compose_in "$stage" config --format json 2>/dev/null)" || refuse "compose did not print the new project"
   image="$(jq -r '.services.updater.image // empty' <<<"$config")" || refuse "compose printed no project jq reads"
   [[ -n "$image" ]] || refuse "the new compose.yml names no updater image"
@@ -206,9 +222,11 @@ if (( migrating )); then
   # start the updater beside itself. A rollout it started may still be
   # draining (a drain takes up to 3 h; the old rollout pulls and waits for
   # its brokers too): this waits up to 4 h for it to end, so the updater
-  # never rounds beside it. Its units stay until the updater is confirmed.
+  # never rounds beside it. The timer is stopped, not disabled, until the
+  # updater is confirmed: a reboot, a power cut or a SIGKILL (no EXIT trap)
+  # at any point before then brings it back with the host's systemd.
   timer_left=""
-  if user_systemctl disable --now omarchy-pool-rollout.timer >/dev/null 2>&1; then disabled=1; fi
+  if user_systemctl stop omarchy-pool-rollout.timer >/dev/null 2>&1; then stopped=1; fi
   waited=0
   while rolling && (( waited < 4 * 3600 )); do
     (( waited )) || echo "    the timer's last rollout still runs (a drain takes up to 3 h): waiting for it to end before the updater takes over"
@@ -223,11 +241,11 @@ if (( migrating )); then
     timer_left="$user's systemd says the timer is $state"
   else
     (( waited == 0 )) || echo "    it ended after about $(( waited / 60 )) min"
-    echo "    omarchy-pool-rollout.timer stopped and disabled; its units stay until the updater runs"
+    echo "    omarchy-pool-rollout.timer stopped, not disabled (a reboot brings it back); disabled and removed once the updater runs"
   fi
   if [[ -n "$timer_left" ]]; then
     echo "    WARNING: omarchy-pool-rollout.timer is not retired: $timer_left" >&2
-    if (( disabled )); then
+    if (( stopped )); then
       # Not done, and nothing installed; the EXIT trap enables the timer again, so the host goes on rolling out through it.
       printf '\nNot done, and nothing installed: the timer that ran the old rollout.sh is not retired (%s).\nIt is enabled again, so this host still rolls out through it. Run this setup.sh again once its last rollout has ended\n(systemctl --user status omarchy-pool-rollout.service, as %s).\n' "$timer_left" "$user" >&2
     else
@@ -235,7 +253,7 @@ if (( migrating )); then
       cat >&2 <<LEFT
 
 Not done, and nothing installed: the timer that ran the old rollout.sh is not retired ($timer_left).
-Do not start the updater beside it. As $user: systemctl --user disable --now omarchy-pool-rollout.timer
+Do not start the updater beside it. As $user: systemctl --user stop omarchy-pool-rollout.timer
 (and systemctl --user stop omarchy-pool-rollout.service for a rollout that never ends), then run this setup.sh again.
 LEFT
     fi
@@ -303,8 +321,9 @@ if (( migrating )); then
   out="$(compose_in "$root" exec -T updater /usr/local/lib/omarchy-factory/bin/omarchy-rollout --self-test 2>&1)" && grep -qx 'follows 1' <<<"$out" \
     || { printf '\nNot done: the updater fails its self-test (%s). Putting back what was here.\n' "$(tail -n1 <<<"$out")" >&2; exit 5; }
   echo "    the updater runs, stays up and passes its self-test"
-  # From here on, nothing is put back: the updater rolls the host out.
+  # From here on, nothing is put back: the updater rolls the host out. Only now is the timer disabled (it was stopped) and removed.
   retired=1
+  user_systemctl disable --now omarchy-pool-rollout.timer >/dev/null 2>&1 || true
   rm -f "$units/omarchy-pool-rollout.timer" "$units/omarchy-pool-rollout.service"
   user_systemctl daemon-reload >/dev/null 2>&1 || true
   state="$(state_of omarchy-pool-rollout.timer)"

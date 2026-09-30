@@ -17,18 +17,20 @@
 #   profile, and .env's POOL_ROOT; on a host from before #277 also that the
 #   updater image follows the pool and that every service compose would run
 #   holds a worker token. Any of those: exit 4, the timer untouched.
-# - On a host from before #277 it disables and stops the user timer that
-#   ran the old rollout.sh, as the user who owns it, waits while a rollout
-#   that timer started still runs, installs the new files (the old ones
-#   kept in setup-backup-<time>/, the difference in compose.yml shown),
-#   starts the updater and checks it stays up and passes its self-test,
-#   and only then removes the timer's units — said retired only when that
-#   user's systemd says it is stopped. A timer it cannot confirm stopped:
-#   said, exit 3, nothing installed. A rollout still running after 4 h, an
-#   interrupt during the wait, or an updater that does not start, restarts
-#   or fails its self-test: the updater stopped and removed, the old files
-#   back, the timer enabled again (exit 3, or 5). On a fresh host it writes
-#   no timer and starts nothing.
+# - On a host from before #277 it stops (never disables) the user timer
+#   that ran the old rollout.sh, as the user who owns it, so a reboot
+#   brings it back; waits while a rollout that timer started still runs,
+#   installs the new files (the old ones kept in setup-backup-<time>/, the
+#   difference in compose.yml shown), starts the updater and checks it
+#   stays up and passes its self-test, and only then disables the timer and
+#   removes its units — said retired only when that user's systemd says it
+#   is stopped. A timer it cannot confirm stopped: said, exit 3, nothing
+#   installed. A rollout still running after 4 h, an interrupt during the
+#   wait (TERM, HUP), or an updater that does not start, restarts or fails
+#   its self-test: the updater stopped and removed, the old files back, the
+#   timer enabled again (exit 3, 143, 129, or 5) — all of it even when the
+#   output's reader is gone. On a fresh host it writes no timer and starts
+#   nothing.
 # - rollout.sh only wakes the updater: SIGUSR1 to a running one, and one
 #   that is not running started as it is (`--no-recreate`: never recreated
 #   onto an image its guard has not passed); `--check` asks the updater's
@@ -67,9 +69,10 @@ if [[ "$1 $2 $3 $4" == "--user show -p ActiveState" ]]; then
   line="$(sed -n "${n}p" "$f")"; [[ -n "$line" ]] || line="$(tail -n1 "$f")"; echo "$line"
 fi
 exit 0'
-# sleep: instant; on the call STUB_UNITS/term-at names, a TERM to the script that called it (an operator's Ctrl-C, a dropped session).
+# sleep: instant; on the call STUB_UNITS/term-at names, a signal to the script that called it — STUB_UNITS/sig names it, TERM when
+# it names none (an operator's Ctrl-C, a stop; HUP: a dropped session).
 stub sleep 'echo "sleep $*" >> "$STUB_LOG"
-if [[ -f "$STUB_UNITS/term-at" ]]; then n=$(( $(cat "$STUB_UNITS/sleeps" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$STUB_UNITS/sleeps"; (( n == $(cat "$STUB_UNITS/term-at") )) && kill -TERM "$PPID"; fi
+if [[ -f "$STUB_UNITS/term-at" ]]; then n=$(( $(cat "$STUB_UNITS/sleeps" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$STUB_UNITS/sleeps"; (( n == $(cat "$STUB_UNITS/term-at") )) && kill -"$(cat "$STUB_UNITS/sig" 2>/dev/null || echo TERM)" "$PPID"; fi
 exit 0'
 stub usermod 'echo "usermod $*" >> "$STUB_LOG"'
 stub chown 'echo "chown $*" >> "$STUB_LOG"'
@@ -86,7 +89,8 @@ stub runuser 'echo "runuser $*" >> "$STUB_LOG"; shift 3; exec "$@"'
 stub id 'case "$1" in -u) [[ -n "${2:-}" ]] && echo 1000 || echo 1000 ;; -Gn) echo "firemanxbr docker" ;; -un) echo firemanxbr ;; *) exec /usr/bin/id "$@" ;; esac'
 # docker: setup.sh runs compose as the updater does, with no environment of its own (env -i), so the stub carries its paths. What
 # it answers, from files in STUB_DOCKER: config.fail, pull.fail, nolabel (the updater image from before #277), config.json (the
-# project compose prints), up.fail, restarting, selftest.fail; `running` while the updater it started runs.
+# project compose prints), up.fail, restarting, selftest.fail; `running` while the updater it started runs; wait-reader: a stop of
+# the updater first waits (up to 120 s, else reader.timeout) until reader.done says the reader of setup.sh's output is gone.
 cat > "$tmp/bin/docker" <<S
 #!/usr/bin/env bash
 STUB_LOG="$STUB_LOG"; STUB_DOCKER="$tmp/docker"
@@ -115,7 +119,10 @@ if [[ "$1" == compose && "$2" == --project-directory ]]; then
     "exec -T updater /usr/local/lib/omarchy-factory/bin/omarchy-rollout --self-test")
       [[ -f "$STUB_DOCKER/selftest.fail" ]] && { echo "self-test: compose does not read the project in /srv/omarchy-pool" >&2; exit 1; }
       echo "self-test: the socket answers; compose reads /srv/omarchy-pool"; echo "follows 1" ;;
-    "stop updater") ;;
+    "stop updater")
+      if [[ -f "$STUB_DOCKER/wait-reader" ]]; then
+        n=0; until [[ -f "$STUB_DOCKER/reader.done" ]]; do (( n++ < 1200 )) || { touch "$STUB_DOCKER/reader.timeout"; break; }; /bin/sleep 0.1; done
+      fi ;;
     "rm -f updater") rm -f "$STUB_DOCKER/running" ;;
     *) echo "unexpected compose $*" >&2; exit 9 ;;
   esac
@@ -152,7 +159,7 @@ old_host() {
   for svc in pool-x86_64 pool-aarch64 review-x86_64 review-aarch64 community-x86_64 community-aarch64; do printf 'OMARCHY_WORKER_TOKEN=omw_%s0123456789\n' "$svc" > "$POOL/etc/$svc.env"; done
   printf 'GEMINI_API_KEY=k\n' > "$POOL/etc/agent.env"
   cp "$POOL/compose.yml" "$tmp/compose.before"; cp "$POOL/rollout.sh" "$tmp/rollout.before"
-  rm -f "$STUB_UNITS"/omarchy-pool-rollout.* "$STUB_UNITS/term-at" "$STUB_UNITS/sleeps"
+  rm -f "$STUB_UNITS"/omarchy-pool-rollout.* "$STUB_UNITS/term-at" "$STUB_UNITS/sleeps" "$STUB_UNITS/sig"
   old_timer; : > "$STUB_LOG"
 }
 run_setup() { set +e; SUDO_USER=firemanxbr bash "$tmp/src/setup.sh" "${1:-$POOL}" > "$tmp/out" 2>&1; rc=$?; set -e; }
@@ -161,20 +168,26 @@ untouched() { # why
   cmp -s "$POOL/compose.yml" "$tmp/compose.before" && cmp -s "$POOL/rollout.sh" "$tmp/rollout.before" || fail "$1: the host's compose.yml and rollout.sh stay as they were"
   [[ -e "$units/omarchy-pool-rollout.timer" && -e "$units/omarchy-pool-rollout.service" ]] || fail "$1: the timer's units stay"
   [[ ! -e "$POOL/etc/review2-aarch64.env" ]] || fail "$1: no env file is written"
-  grep -q "systemctl --user disable" "$STUB_LOG" && fail "$1: the timer is not touched"
+  grep -qE "systemctl --user (stop|disable|enable)" "$STUB_LOG" && fail "$1: the timer is not touched"
   grep -q "up -d" "$STUB_LOG" && fail "$1: no updater is started"
   ls -d "$POOL"/setup-backup-* >/dev/null 2>&1 && fail "$1: nothing is backed up either"
   true
 }
-# Put back: the updater it started gone, the old files back, the timer enabled again (after it was disabled), its units still there.
+# Put back: the updater it started gone, the old files back, the timer enabled again (after it was stopped, and never disabled), its
+# units still there.
 put_back() { # why
-  local dis en; dis="$(line 'systemctl --user disable --now omarchy-pool-rollout.timer')"; en="$(line 'systemctl --user enable --now omarchy-pool-rollout.timer')"
-  [[ -n "$dis" && -n "$en" ]] && (( dis < en )) || fail "$1: the timer is enabled again after it was disabled: disable at ${dis:-never}, enable at ${en:-never}"
+  put_back_quiet "$1"
+  grep -q "omarchy-pool-rollout.timer is enabled again: this host still rolls out through it" "$tmp/out" || fail "$1: and it says so: $(cat "$tmp/out")"
+  grep -q "timer retired" "$tmp/out" && fail "$1: a timer put back is not called retired"
+  true
+}
+put_back_quiet() { # why — the same, with nothing asked of what it said
+  local stp en; stp="$(line 'systemctl --user stop omarchy-pool-rollout.timer')"; en="$(line 'systemctl --user enable --now omarchy-pool-rollout.timer')"
+  [[ -n "$stp" && -n "$en" ]] && (( stp < en )) || fail "$1: the timer is enabled again after it was stopped: stop at ${stp:-never}, enable at ${en:-never}"
+  grep -q "systemctl --user disable" "$STUB_LOG" && fail "$1: a timer that is put back was never disabled (a reboot would have lost it): $(grep -n 'systemctl --user' "$STUB_LOG")"
   cmp -s "$POOL/compose.yml" "$tmp/compose.before" && cmp -s "$POOL/rollout.sh" "$tmp/rollout.before" || fail "$1: compose.yml and rollout.sh are back as they were"
   [[ -e "$units/omarchy-pool-rollout.timer" && -e "$units/omarchy-pool-rollout.service" ]] || fail "$1: the timer's units stay"
   [[ ! -e "$POOL/etc/review2-aarch64.env" ]] || fail "$1: the env files it wrote are gone again"
-  grep -q "omarchy-pool-rollout.timer is enabled again: this host still rolls out through it" "$tmp/out" || fail "$1: and it says so: $(cat "$tmp/out")"
-  grep -q "timer retired" "$tmp/out" && fail "$1: a timer put back is not called retired"
   true
 }
 
@@ -183,7 +196,7 @@ old_host; touch "$STUB_UNITS/nobus"
 run_setup
 (( rc == 3 )) || fail "a timer not confirmed stopped ends setup.sh with 3, not $rc: $(cat "$tmp/out")"
 grep -q "WARNING: omarchy-pool-rollout.timer is not retired: firemanxbr's systemd did not answer: nothing was changed there" "$tmp/out" || fail "and says why: $(cat "$tmp/out")"
-grep -q "Not done, and nothing installed" "$tmp/out" && grep -q "systemctl --user disable --now omarchy-pool-rollout.timer" "$tmp/out" || fail "and what to run: $(cat "$tmp/out")"
+grep -q "Not done, and nothing installed" "$tmp/out" && grep -q "systemctl --user stop omarchy-pool-rollout.timer" "$tmp/out" || fail "and what to run: $(cat "$tmp/out")"
 grep -q "timer retired" "$tmp/out" && fail "a timer nobody confirmed stopped is not called retired: $(cat "$tmp/out")"
 grep -q "^  updater:" "$POOL/compose.yml" && fail "nothing is installed while the timer may still run"
 [[ -e "$units/omarchy-pool-rollout.timer" ]] || fail "its units stay, for the next try"
@@ -199,14 +212,17 @@ grep -q "not retired: its last rollout, omarchy-pool-rollout.service, still runs
 grep -q "^  updater:" "$POOL/compose.yml" && fail "nothing is installed while the old rollout runs"
 put_back "a rollout still running after 4 h"
 grep -q "Run this setup.sh again once its last rollout has ended" "$tmp/out" || fail "and what to do next: $(tail -n5 "$tmp/out")"
-# 1c. Interrupted during the wait (Ctrl-C, a dropped session): the timer enabled again, nothing installed.
-old_host; echo activating > "$STUB_UNITS/omarchy-pool-rollout.service"; echo 3 > "$STUB_UNITS/term-at"
-run_setup
-(( rc != 0 )) || fail "an interrupted setup.sh does not succeed"
-[[ "$(grep -c '^sleep 15$' "$STUB_LOG")" == 3 ]] || fail "it ends at the interrupt: $(grep -c '^sleep 15$' "$STUB_LOG") waits"
-grep -q "^  updater:" "$POOL/compose.yml" && fail "nothing is installed after an interrupt"
-put_back "an interrupt during the wait"
-rm -f "$STUB_UNITS/term-at" "$STUB_UNITS/sleeps"
+# 1c. Interrupted during the wait (a stop: TERM; a dropped session: HUP): the timer enabled again, nothing installed, and the exit
+#     the signal's own — never 0.
+for sig in TERM:143 HUP:129; do
+  old_host; echo activating > "$STUB_UNITS/omarchy-pool-rollout.service"; echo 3 > "$STUB_UNITS/term-at"; echo "${sig%:*}" > "$STUB_UNITS/sig"
+  run_setup
+  [[ "$rc" == "${sig#*:}" ]] || fail "a $sig during the wait ends setup.sh with ${sig#*:}, not $rc: $(tail -n5 "$tmp/out")"
+  [[ "$(grep -c '^sleep 15$' "$STUB_LOG")" == 3 ]] || fail "$sig: it ends at the interrupt: $(grep -c '^sleep 15$' "$STUB_LOG") waits"
+  grep -q "^  updater:" "$POOL/compose.yml" && fail "$sig: nothing is installed after an interrupt"
+  put_back "a $sig during the wait"
+done
+rm -f "$STUB_UNITS/term-at" "$STUB_UNITS/sleeps" "$STUB_UNITS/sig"
 echo "ok: a timer that is not retired stays the host's rollout"
 
 # 2. Refused before the timer is touched (exit 4, nothing changed): a compose.yml that does not load with the host's .env and etc/;
@@ -223,6 +239,7 @@ untouched "another POOL_ROOT"
 old_host; touch "$tmp/docker/nolabel"
 run_setup
 (( rc == 4 )) && grep -q "is from before #277 (no com.omarchy.updater.follows=1): wait until the release that carries #277 is out" "$tmp/out" || fail "an updater image from before #277 is refused: $rc $(cat "$tmp/out")"
+grep -q "Not done, and nothing of the host's files, units or containers changed (the updater image was pulled)" "$tmp/out" || fail "a refusal after the pull says the image was pulled: $(cat "$tmp/out")"
 (( $(line 'pull -q updater') < $(line 'image inspect') )) || fail "the updater image is pulled first, then read"
 untouched "an updater image from before #277"
 old_host; touch "$tmp/docker/pull.fail"
@@ -244,7 +261,7 @@ run_setup
 (( rc == 0 )) || fail "setup.sh exited $rc: $(cat "$tmp/out")"
 [[ "$(grep -c '^sleep 15$' "$STUB_LOG")" == 2 ]] || fail "it waits while the rollout runs, and no longer: $(grep -c '^sleep 15$' "$STUB_LOG")"
 grep -q "the timer's last rollout still runs (a drain takes up to 3 h): waiting for it to end before the updater takes over" "$tmp/out" || fail "the wait is said: $(cat "$tmp/out")"
-dis="$(line 'systemctl --user disable --now omarchy-pool-rollout.timer')"; first="$(line '^systemctl --user show -p ActiveState --value omarchy-pool-rollout.service$')"
+dis="$(line 'systemctl --user stop omarchy-pool-rollout.timer')"; first="$(line '^systemctl --user show -p ActiveState --value omarchy-pool-rollout.service$')"
 [[ -n "$dis" && -n "$first" ]] && (( dis < first )) || fail "the timer is stopped before the wait, so it starts no other rollout: disable at ${dis:-never}, wait from ${first:-never}"
 grep -q "compose has the updater" "$STUB_LOG" && fail "the new compose.yml is installed only once the old rollout has ended: $(grep compose "$STUB_LOG")"
 # Checked first, against the staged copy (the host's .env: emulated), then with every profile — while the host's etc/ had no review2 files.
@@ -258,6 +275,10 @@ up="$(line 'up -d --no-deps --no-recreate updater')"; st="$(line 'exec -T update
 [[ "$(grep -c '^sleep 5$' "$STUB_LOG")" == 6 ]] || fail "a look every 5 s: $(grep -c '^sleep 5$' "$STUB_LOG")"
 reload="$(line 'systemctl --user daemon-reload')"
 [[ -n "$reload" ]] && (( st < reload )) || fail "the timer's units go only once the updater is confirmed: self-test at $st, daemon-reload at ${reload:-never}"
+# Disabled only then too: until the updater is confirmed a reboot must bring the timer back, so nothing disables it before that.
+off="$(line 'systemctl --user disable')"
+[[ -n "$off" ]] && (( st < off && off < reload )) || fail "the timer is disabled only after the self-test, before the reload: self-test at $st, disable at ${off:-never}, reload at $reload"
+[[ "$(grep -c '^systemctl --user disable' "$STUB_LOG")" == 1 ]] || fail "and only once: $(grep -n 'systemctl --user disable' "$STUB_LOG")"
 grep -qE "stop updater|rm -f updater|--user enable" "$STUB_LOG" && fail "nothing is put back after a step that worked: $(grep -E 'stop|rm -f|enable' "$STUB_LOG")"
 grep -q "the updater runs, stays up and passes its self-test" "$tmp/out" || fail "and says so: $(cat "$tmp/out")"
 # The compose file has the updater: the socket, the directory at the same path read-only, the role, no token.
@@ -275,7 +296,8 @@ grep -q "stop_grace_period" <<<"$updater" && fail "the updater drains nothing: $
 (( $(wc -l < "$POOL/rollout.sh") <= 15 )) || fail "rollout.sh is a wake-up, not a rollout: $(wc -l < "$POOL/rollout.sh") lines"
 grep -qE "pull|image rm|config --hash" "$POOL/rollout.sh" && fail "rollout.sh pulls and replaces nothing itself"
 # The timer is retired, as its user, and its units are gone — said once its user's systemd says it is stopped; nothing writes a new one.
-grep -q "runuser -u firemanxbr -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user disable --now omarchy-pool-rollout.timer" "$STUB_LOG" || fail "the timer is disabled and stopped as its user"
+grep -q "runuser -u firemanxbr -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user stop omarchy-pool-rollout.timer" "$STUB_LOG" || fail "the timer is stopped as its user"
+grep -q "runuser -u firemanxbr -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user disable --now omarchy-pool-rollout.timer" "$STUB_LOG" || fail "and disabled as its user, once the updater runs"
 grep -q "^systemctl --user show -p ActiveState --value omarchy-pool-rollout.timer$" "$STUB_LOG" || fail "and asked whether it is stopped"
 [[ ! -e "$units/omarchy-pool-rollout.timer" && ! -e "$units/omarchy-pool-rollout.service" ]] || fail "the timer's units are removed"
 grep -q "omarchy-pool-rollout.timer retired (stopped, disabled, removed)" "$tmp/out" || fail "setup.sh says so: $(cat "$tmp/out")"
@@ -305,7 +327,7 @@ for why in up.fail restarting selftest.fail; do
   (( rc == 5 )) || fail "$why: setup.sh ends with 5, not $rc: $(cat "$tmp/out")"
   grep -q "Not done: the updater" "$tmp/out" || fail "$why: and says why: $(cat "$tmp/out")"
   up="$(line 'up -d --no-deps --no-recreate updater')"; en="$(line 'systemctl --user enable --now omarchy-pool-rollout.timer')"
-  (( $(line 'systemctl --user disable --now') < up && up < en )) || fail "$why: disabled, the updater tried, then the timer back"
+  (( $(line 'systemctl --user stop omarchy-pool-rollout.timer') < up && up < en )) || fail "$why: stopped, the updater tried, then the timer back"
   if [[ "$why" != up.fail ]]; then
     stop="$(line 'compose --project-directory .* stop updater$')"; rmu="$(line 'compose --project-directory .* rm -f updater$')"
     [[ -n "$stop" && -n "$rmu" ]] && (( up < stop && stop < rmu && rmu < en )) || fail "$why: the updater it started is stopped and removed before the timer comes back: $(grep -nE 'updater|enable' "$STUB_LOG")"
@@ -313,6 +335,23 @@ for why in up.fail restarting selftest.fail; do
   fi
   put_back "$why"
 done
+# 4b. The same with the output's reader gone by then (a `| tee` stopped by Ctrl-C, a hung-up terminal): a message the put-back can no
+#     longer write stops nothing of it — the updater removed, the files back, the timer enabled again, the exit still 5. The reader
+#     leaves at the self-test's failure, and the stub's stop of the updater waits until it is gone, so every message after it fails.
+old_host; touch "$tmp/docker/selftest.fail" "$tmp/docker/wait-reader"; rm -f "$tmp/docker/reader.done" "$tmp/docker/reader.timeout" "$tmp/fifo"
+mkfifo "$tmp/fifo"
+( awk '{ print; fflush() } /fails its self-test/ { exit }' < "$tmp/fifo" > "$tmp/out"; touch "$tmp/docker/reader.done" ) &
+reader=$!
+set +e; SUDO_USER=firemanxbr bash "$tmp/src/setup.sh" "$POOL" > "$tmp/fifo" 2>&1; rc=$?; set -e
+wait "$reader"
+[[ ! -f "$tmp/docker/reader.timeout" ]] || fail "the reader of setup.sh's output left at the self-test's failure: $(cat "$tmp/out")"
+(( rc == 5 )) || fail "with its reader gone, the put-back still ends setup.sh with 5, not $rc: $(cat "$tmp/out")"
+grep -q "Not done: the updater fails its self-test" "$tmp/out" || fail "the reader saw the failure: $(cat "$tmp/out")"
+grep -q "enabled again" "$tmp/out" && fail "the put-back's messages came after the reader left (else this case proves nothing): $(cat "$tmp/out")"
+rmu="$(line 'compose --project-directory .* rm -f updater$')"; en="$(line 'systemctl --user enable --now omarchy-pool-rollout.timer')"
+[[ -n "$rmu" && -n "$en" ]] && (( rmu < en )) || fail "with its reader gone, the updater is removed and the timer enabled again: $(grep -nE 'updater|systemctl' "$STUB_LOG")"
+put_back_quiet "the reader gone"
+rm -f "$tmp/docker/wait-reader" "$tmp/docker/reader.done" "$tmp/fifo"
 echo "ok: an updater that does not work here puts the timer back"
 
 # 5. A fresh host: no timer to retire, and none written; the env files compose.yml names; nothing started.
@@ -357,4 +396,8 @@ echo "ok: rollout.sh only wakes the updater"
 step="$(awk '/^### Once: the updater/ { on = 1 } on && /^### / && !/Once: the updater/ { exit } on { print }' "$root/worker/src/docs/runbook.md" | tr '\n' ' ' | tr -s ' ')"
 grep -q "waits up to 4 h" <<<"$step" || fail "the runbook's one-time step says setup.sh waits up to 4 h"
 grep -q "draining (up to 3 h)" <<<"$step" && fail "the runbook's one-time step no longer says setup.sh waits up to 3 h"
+# An interrupt exits with its signal's code, not 3; and the way back takes the newest backup that has the timer's units — a later
+# setup.sh run whose files differ writes a newer one without them.
+grep -q "exits 130, 143, 129 or 141" <<<"$step" || fail "the runbook's one-time step gives an interrupt's exit codes"
+grep -qF 'b="$(ls -d setup-backup-*/systemd-user | tail -n1)"; b="${b%/systemd-user}"' <<<"$step" || fail "the way back takes the newest backup with the timer's units"
 echo "HOST SETUP OK"
