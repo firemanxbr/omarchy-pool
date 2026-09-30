@@ -456,6 +456,9 @@ describe("the pool's own names, and the community's share of its budget", () => 
 
   it("contributors' workers spend at most their share of the day and of the hour; the project's keep the rest", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
+    // A minute into the next hour: the run spans 42 minutes of it, and the once-per-hour and once-per-day lines it counts are keyed by
+    // the hour and the day — started at the wall clock's minute, a run near the hour crossed into the next one and wrote a second line.
+    vi.setSystemTime(Math.ceil(Date.now() / (60 * MIN)) * 60 * MIN + MIN);
     const t0 = Date.now();
     // The pool's orders of the tests before this one, out of every window: this test counts its own.
     const aside = () => env.DB.prepare("UPDATE worker_orders SET issued_at = '2000-01-01T00:00:00.000Z' WHERE issued_by IN (?, ?) AND worker_id != 'share-seeded'").bind(POOL_PROJECT, POOL_COMMUNITY).run();

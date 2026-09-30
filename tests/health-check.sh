@@ -127,7 +127,9 @@ echo "TOTAL=$total"
 CHECK
 [[ -s "$WORK/check.sh" ]] || { echo "check script was not written"; exit 1; }
 
-out=$("$RUNTIME" run --rm --platform "$PLATFORM" -e KEYRING="$KEYRING" -v "$WORK:/repo:ro" "$IMAGE" bash /repo/check.sh 2>&1)
+# Run by a worker for a task (OMARCHY_TASK_ID, #277), the container is named and labelled with it: a stop of the task removes its
+# containers by that label, since a container outlives its killed client. By hand or in CI, without the variable, as before.
+out=$("$RUNTIME" run --rm ${OMARCHY_TASK_ID:+--name "omarchy-task-$OMARCHY_TASK_ID-check-$$" --label "com.omarchy.task=$OMARCHY_TASK_ID"} --platform "$PLATFORM" -e KEYRING="$KEYRING" -v "$WORK:/repo:ro" "$IMAGE" bash /repo/check.sh 2>&1)
 code=$?
 total=$(grep -oE 'TOTAL=[0-9]+' <<<"$out" | tail -1 | cut -d= -f2)
 echo "$out"

@@ -127,14 +127,12 @@ describe("the doors: who gives a worker an order", () => {
     }
   });
 
-  it("refuses an unknown worker, a kind it does not know, the later parts' kinds, an image that takes no orders, and a reason that looks like a secret", async () => {
+  it("refuses an unknown worker, a kind it does not know, Update (a later part), an image that takes no orders, and a reason that looks like a secret", async () => {
     expect((await issue("nobody-here", { kind: "restart" }, cli("m1"))).status).toBe(404);
     expect((await issue("studio-pool-x86_64", { kind: "reboot" }, cli("m1"))).status).toBe(400);
-    for (const kind of ["drain", "resume", "stop-task", "update"]) {
-      const r = await issue("studio-pool-x86_64", { kind }, cli("m1"));
-      expect(r.status, kind).toBe(409);
-      expect(r.json.error).toContain("not on this pool yet");
-    }
+    const later = await issue("studio-pool-x86_64", { kind: "update" }, cli("m1"));
+    expect(later.status).toBe(409);
+    expect(later.json.error).toContain("not on this pool yet");
     // studio-pool-x86_64 has never claimed with orders: its image takes none.
     const old = await issue("studio-pool-x86_64", { kind: "restart" }, cli("m1"));
     expect(old).toMatchObject({ status: 409, json: { error: expect.stringContaining("takes no orders") } });

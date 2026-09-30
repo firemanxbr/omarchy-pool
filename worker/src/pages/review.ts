@@ -436,7 +436,8 @@ const SCRIPT = String.raw`
     return WORKERS_READ;
   }
   function agentWorkers(arch) {
-    return (WORKERS || []).filter(function (w) { return w.side === "omarchy" && !w.revoked_at && (!w.kinds || w.kinds.indexOf("build") >= 0) && w.alive && w.agent && w.agent_status === "ok" && !(w.update && w.update.required) && (!arch || w.arch === arch); });
+    // A drained worker (#277) is handed nothing until it is resumed: a claim never pins its rebuild to one.
+    return (WORKERS || []).filter(function (w) { return w.side === "omarchy" && !w.revoked_at && !w.drained && (!w.kinds || w.kinds.indexOf("build") >= 0) && w.alive && w.agent && w.agent_status === "ok" && !(w.update && w.update.required) && (!arch || w.arch === arch); });
   }
   function agentsFor(arch) { var seen = {}; return agentWorkers(arch).map(function (w) { return w.agent; }).filter(function (a) { if (seen[a]) return false; seen[a] = true; return true; }); }
   function keptAgent() { try { return localStorage.getItem(AGENT_KEY); } catch (e) { return null; } }
@@ -1044,9 +1045,11 @@ export const REVIEW_COMPONENTS = (F: Fixture): Component[] => [
     id: "review.rebuild-pane",
     page: "/review",
     anchor: ['id="rv-yours"', '<b id="rv-y-title">The rebuild</b>', 'id="rv-agents"', 'id="rv-steps"', 'id="rv-progress"', 'id="rv-y-pkgbuild"', 'id="rv-diffnote"', 'id="rv-y-log"', "If approved, this build is the one that ships."],
-    script: ["function diff(a, b)", '"s differ"', '" from the factory\'s"', '"Your rebuild"', "\"'s rebuild\"", '"Re-check the request"', '"Derive the recipe from scratch"', '"Install with a real pacman"', '"Compare with the factory"', ">Claim and rebuild</button>", "data-agent=", '"/workers/"', '"/log"', "localStorage.getItem(AGENT_KEY)", "function needWorkers()", "RECIPE_LINES = 1000", '"native worker"', "waitsForNative(b)", "waitsForNative(r.rebuild)"],
+    script: ["function diff(a, b)", '"s differ"', '" from the factory\'s"', '"Your rebuild"', "\"'s rebuild\"", '"Re-check the request"', '"Derive the recipe from scratch"', '"Install with a real pacman"', '"Compare with the factory"', ">Claim and rebuild</button>", "data-agent=", '"/workers/"', '"/log"', "localStorage.getItem(AGENT_KEY)", "function needWorkers()", "RECIPE_LINES = 1000", '"native worker"', "waitsForNative(b)", "waitsForNative(r.rebuild)",
+      // The claim never pins its rebuild to a drained worker (#277): the door refuses one, and the page never offers it.
+      "function agentWorkers(arch)", "!w.drained"],
     reads: [
-      { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.id", "workers.0.arch", "workers.0.side", "workers.0.kinds", "workers.0.alive", "workers.0.agent", "workers.0.agent_status"] },
+      { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.id", "workers.0.arch", "workers.0.side", "workers.0.kinds", "workers.0.alive", "workers.0.agent", "workers.0.agent_status", "workers.0.drained"] },
       { path: `/api/v1/factory/tasks/${F.projectTask}/artifacts/PKGBUILD`, json: false },
       { path: `/api/v1/factory/tasks/${F.projectTask}/artifacts/build.log`, json: false },
       { path: `/api/v1/factory/tasks/${F.projectTask}/artifacts/trial.log`, json: false },

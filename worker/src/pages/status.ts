@@ -118,6 +118,8 @@ const CSS = String.raw`
   .st .st-rb { flex: none; padding: 3px 10px; font-size: 12px; } .st-acts { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: -4px; } /* 26px tall: a destructive control keeps the 24px target */
   .st-hist td:nth-child(1), .st-hist td:nth-child(3), .st-hist td:nth-child(6), .st-hist td:nth-child(7) { white-space: nowrap; } .st-hist td:nth-child(7) .st-rb { margin-left: 8px; }
   .st-note { margin: 0; font-size: 12.5px; color: var(--muted); }
+  /* An error the workers card raises (#277): every live worker of a role and an architecture drained — the work only they take waits. */
+  .st-alert { margin: 0; padding: 10px 16px; border-bottom: 1px solid var(--line); border-left: 3px solid var(--red); font-size: 12.5px; color: var(--text); overflow-wrap: anywhere; }
   .st-pair { display: flex; flex-wrap: wrap; gap: 16px; align-items: stretch; }
   .st-src { flex: 1 1 560px; } .st-wk { flex: 1 1 360px; display: grid; grid-template-rows: auto 1fr auto; }
   .st-chk { flex: 1 1 520px; } .st-adv { flex: 1 1 400px; display: grid; grid-template-rows: auto auto 1fr auto; grid-template-columns: minmax(0, 1fr); }
@@ -234,6 +236,7 @@ const BODY = String.raw`
     </section>
     <section class="op-card st-wk" id="workers" aria-labelledby="workers-h">
       <div class="op-card-h"><span class="st-h">${lucide("cpu", 16)}<h2 class="st-t" id="workers-h">Workers</h2></span><small id="workers-busy"></small></div>
+      <p class="st-alert" id="workers-alert" role="alert" hidden></p>
       <div id="workers-list"></div>
       <div class="op-card-f"><span class="st-note" id="workers-note"></span><a class="st-link" href="/workers">Every worker →</a></div>
     </section>
@@ -536,8 +539,9 @@ __CHARTS__
       : held ? '<span class="st-dot warn" aria-hidden="true"></span><b>' + st + '</b><span class="st-dim">' + esc(st === "drained" ? "by " + (w.drained.by || "?") + " — handed nothing until resumed" : "behind the latest image, handed nothing") + '</span>' + wtMarks(w)
       : down ? '<span class="st-dot fail" aria-hidden="true"></span><b>not ready</b><span class="st-dim">' + esc(wtNotReady(w)) + '</span>' + wtMarks(w)
       : !working ? '<b>idle</b><span class="st-dim">waiting for work</span>' + wtMarks(w)
-      : !t ? '<a href="/build/' + Number(w.current_task) + '"><b>task #' + Number(w.current_task) + '</b></a>'
-      : '<a href="/build/' + t.id + '"><b>' + esc(t.kind === "build" ? t.name : t.kind) + '</b></a><span class="st-dim">' + esc([t.kind === "build" ? [t.version, t.arch].filter(Boolean).join(" · ") : paramsLabel(t), t.started_at ? span(Date.now() - Date.parse(t.started_at)) : ""].filter(Boolean).join(" · ")) + '</span>';
+      // Building: what it builds, the marks right beside its name (#277) — a stop that fences its task, a drain it takes after this one —, before the line's details that may be cut.
+      : !t ? '<a href="/build/' + Number(w.current_task) + '"><b>task #' + Number(w.current_task) + '</b></a>' + wtMarks(w)
+      : '<a href="/build/' + t.id + '"><b>' + esc(t.kind === "build" ? t.name : t.kind) + '</b></a>' + wtMarks(w) + '<span class="st-dim">' + esc([t.kind === "build" ? [t.version, t.arch].filter(Boolean).join(" · ") : paramsLabel(t), t.started_at ? span(Date.now() - Date.parse(t.started_at)) : ""].filter(Boolean).join(" · ")) + '</span>';
     return '<div class="st-w' + (working ? " busy" : "") + (w.alive ? "" : " off") + (down ? " notready" : "") + '"><span class="st-wbox">' + (w.agent ? agentOf(w.agent) : '<span class="st-ini" title="no agent: the pool\'s jobs need none">—</span>') + '</span>' +
       '<div class="st-wt"><div class="st-wl">' + workerName(w) + '<span>' + esc(model) + '</span></div><div class="st-wj"' + (down ? ' title="' + esc(wtNotReady(w)) + '"' : '') + '>' + doing + '</div><div class="st-wbar"><i></i></div></div></div>';
   }
@@ -550,6 +554,9 @@ __CHARTS__
     var c = workerCounts(ws);
     $("#workers-busy").textContent = num(c.building) + " of " + num(c.registered) + " busy" + (c.notReady ? " · " + num(c.notReady) + " not ready" : "") + (c.outdated ? " · " + num(c.outdated) + " outdated" : "") + (c.drained ? " · " + num(c.drained) + " drained" : "");
     // What a person must look at (#277): a worker that may be crash-looping, one its watchdog restarted twice or more in a day — each on its page.
+    // Every live pool (or review) worker of an architecture drained: an error, with who and when — the work only they take waits (#277, part 2).
+    var held = drainedRoles(ws, ["project", "review"]), alert = $("#workers-alert");
+    if (alert) { alert.hidden = !held.length; alert.textContent = held.map(function (l) { return l.charAt(0).toUpperCase() + l.slice(1) + "."; }).join(" "); }
     var looks = ws.filter(function (w) { return w.alive && !w.revoked_at && (w.crash_loop_since || (w.watchdog && w.watchdog.n >= 2)); });
     if (looks.length && !WC_DOWN) $("#workers-note").innerHTML = looks.map(function (w) { return workerName(w) + (w.crash_loop_since ? ": a new process every few minutes since " + esc(ago(w.crash_loop_since)) + " — it may be crash-looping; its log has why" : ": restarted by its watchdog " + w.watchdog.n + " times since " + esc(ago(w.watchdog.since)) + " — it wedges the same way; its log has why"); }).join("<br>");
     $("#workers-list").innerHTML = ws.map(function (w) { return workerLine(w, tasks[w.current_task]); }).join("") || '<p class="st-empty">no project worker registered</p>';
@@ -1156,8 +1163,8 @@ export const STATUS_COMPONENTS = (F: Fixture): Component[] => {
       // The project's workers, live (the listing once a minute): the agent's mark (the kit's agentMark) and the model, both named as a reader says them, the worker's name, what each is doing and for how long, a bar that runs while it works; one alive but not ready said so, with why (the shell's wtNotReady, the agent's error on hover — #273), and counted beside the busy; how many are busy (the shell's workerCounts); the listing that did not answer said in the card's foot.
       id: "status.workers",
       page: "/status",
-      anchor: ['id="workers"', 'id="workers-list"', 'id="workers-busy"', 'id="workers-note"', 'href="/workers"'],
-      script: ['api("GET", "/api/v1/factory?limit=" + (NUMBERS ? 100 : 10))', "setInterval(loadFactory, 60000)", 'wtKind(w) !== "community"', "workerCounts(ws)", '" busy"', "workerName(w)", "agentMark(mark, agentName(s))", "modelOf(w.agent)", "paramsLabel(t)", 'WC_DOWN = noAnswer("worker listing", e)', 'var down = st === "not ready"', "wtNotReady(w)", "<b>not ready</b>", '" not ready"', '" outdated"', '" drained"', "wtMarks(w)", "w.crash_loop_since", "w.watchdog.n >= 2"],
+      anchor: ['id="workers"', 'id="workers-list"', 'id="workers-busy"', 'id="workers-note"', 'id="workers-alert"', 'href="/workers"'],
+      script: ['api("GET", "/api/v1/factory?limit=" + (NUMBERS ? 100 : 10))', "setInterval(loadFactory, 60000)", 'wtKind(w) !== "community"', "workerCounts(ws)", '" busy"', "workerName(w)", "agentMark(mark, agentName(s))", "modelOf(w.agent)", "paramsLabel(t)", 'WC_DOWN = noAnswer("worker listing", e)', 'var down = st === "not ready"', "wtNotReady(w)", "<b>not ready</b>", '" not ready"', '" outdated"', '" drained"', "wtMarks(w)", "w.crash_loop_since", "w.watchdog.n >= 2", 'drainedRoles(ws, ["project", "review"])', '$("#workers-alert")'],
       reads: [
         { path: "/api/v1/factory?limit=10", fields: ["workers", "workers.0.id", "workers.0.arch", "workers.0.side", "workers.0.labels", "workers.0.alive", "workers.0.ready", "workers.0.agent_error", "workers.0.agent_checked_at", "workers.0.current_task", "workers.0.agent", "workers.0.last_seen", "tasks.0.id", "tasks.0.kind", "tasks.0.name", "tasks.0.started_at"] },
         { path: "/workers", json: false },

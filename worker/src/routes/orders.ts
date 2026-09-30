@@ -22,13 +22,15 @@ import { isMaintainer, viaOf, type Contributor } from "./contributors";
 import { aliveSince, workerView, type WorkerRow } from "./factory";
 import { version as running } from "../meta";
 import {
-  answerCode, breakerKey, breakerOf, breakerScope, capRefusal, cleanText, codeSentence, isOrderKind, loginCapWords, issueOrder, openOrdersOf, orderFacts, orderVerdicts, providerOf, readSite, refreshOpen, rulesScale, siteWords,
+  answerCode, breakerKey, breakerOf, breakerScope, capRefusal, cleanText, codeSentence, drainWords, isOrderKind, loginCapWords, issueOrder, openOrdersOf, orderFacts, orderVerdicts, providerOf, readSite, refreshOpen, rulesScale, siteWords, stopWay,
   ORDER_KINDS, ORDER_RIGHTS, OUTCOMES, RIGHT_OF, SITE_WORKERS_SQL,
   ANSWER_WITHIN_MIN, GIVE_UP_AFTER_MIN, MAX_ORDERS_PER_LOGIN_HOUR, MAX_POOL_ORDERS_PER_DAY, MAX_POOL_RECHECKS_PER_DAY, MAX_POOL_RESTARTS_PER_DAY, MAX_POOL_RESTARTS_PER_SPELL, MAX_RECHECKS_PER_HOUR,
   MAX_RESTARTS_PER_HOUR, MIN_UPTIME_S, RECHECK_AFTER_MIN, RESTART_AFTER_MIN, RESTART_SPACING_MIN, TTL_PERSON_MIN,
-  type OrderKind, type OrderWorker, type Outcome,
+  type HeldTask, type OrderKind, type OrderWorker, type Outcome,
 } from "../orders";
 import { WORKER_ALIVE_MINUTES } from "../meta";
+import { FIRST_PICK_MINUTES } from "../queue";
+import { LEASE_MINUTES } from "../lease";
 
 const NO_STORE = { "cache-control": "no-store" };
 const MIN = 60000;
@@ -36,6 +38,36 @@ const MIN = 60000;
 /** The worker's row as the doors read it, by the primary key. */
 async function workerRow(env: Env, id: string): Promise<(WorkerRow & OrderWorker & { id: string; current_task: number | null; site: string | null; agent_checked_at: string | null; arch: string }) | null> {
   return env.DB.prepare("SELECT * FROM build_workers WHERE id = ?").bind(id).first();
+}
+
+/** The task a worker holds, by its row's current_task (the primary key): what Stop its task decides on and says. */
+export const HELD_TASK_SQL = "SELECT id, kind, name, arch, version, owner, trust, status, lease_owner, lease_expires_at, stop_order, attempts, max_attempts, params FROM build_tasks WHERE id = ?";
+async function heldTask(env: Env, w: { current_task: number | null }): Promise<HeldTask | null> {
+  return w.current_task ? env.DB.prepare(HELD_TASK_SQL).bind(w.current_task).first<HeldTask>() : null;
+}
+
+/** A task as a stop's words name it: a build by its package, version, architecture and whose it is; a pool job by what it does. */
+export function taskWords(t: Pick<HeldTask, "id" | "kind" | "name" | "arch" | "version" | "owner" | "trust" | "params">): string {
+  let p: Record<string, unknown> = {};
+  try { p = t.params ? (JSON.parse(t.params) as Record<string, unknown>) : {}; } catch { p = {}; }
+  const str = (k: string) => (typeof p[k] === "string" || typeof p[k] === "number" ? String(p[k]) : "");
+  if (t.kind === "build") return `${t.name}${t.version ? ` ${t.version}` : ""}, ${t.arch}, ${t.trust === "community" ? `${t.owner ?? "?"}'s build` : "the project's build"}`;
+  if (t.kind === "audit" || t.kind === "trial") return `the ${t.kind} of #${str("task") || "?"}, ${str("name") || t.name} for ${str("arch") || t.arch}`;
+  if (t.kind === "promote") return `promote ${str("from") || "?"} → ${str("to") || "?"}`;
+  if (t.kind === "rollback") return `rollback of ${str("ring") || "?"}`;
+  if (t.kind === "sync") return `sync ${[str("source"), str("arch")].filter(Boolean).join("/") || t.arch}`;
+  if (t.kind === "render" || t.kind === "health") return `${t.kind} ${[str("ring"), str("arch")].filter(Boolean).join("/")}`;
+  return t.kind;
+}
+
+/** What a stop says it does, by how the task's work runs (orders.ts stopWay, §1.16): the dialog, the door's note and the page read it. */
+export function stopFacts(w: { version: string | null; order_kinds: string | null }, t: HeldTask) {
+  return {
+    task: t.id, kind: t.kind, words: taskWords(t), attempt: t.attempts, max_attempts: t.max_attempts, last: t.attempts >= t.max_attempts,
+    // The latest it goes back to the queue: nothing renews the lease once it is stopped, so it ends when this lease does.
+    until: t.lease_expires_at ?? new Date(Date.now() + LEASE_MINUTES * MIN).toISOString(),
+    stops: stopWay(t.kind, w.order_kinds), version: w.version,
+  };
 }
 
 /**
@@ -56,37 +88,76 @@ export function writeGate(request: Request, url: URL, withBody: boolean): Respon
 
 const KIND_LABEL: Record<OrderKind, string> = { "recheck-agent": "Re-check agent", restart: "Restart", "restart-agent": "Restart agent service", drain: "Drain", resume: "Resume", "stop-task": "Stop its task", update: "Update" };
 
-/** When the order reaches the worker, in the words the page and the door say it. */
-function deliveryNote(w: { last_seen: string; current_task: number | null }): string {
+/**
+ * When the order reaches the worker, in the words the page and the door say
+ * it — and, while a Stop its task fences the task it holds (its open
+ * stop-task, from the row alone), that the order goes once that task is
+ * back in the queue: the stop is under way already.
+ */
+function deliveryNote(w: { last_seen: string; current_task: number | null; open_orders?: string | null }): string {
   const alive = Date.parse(w.last_seen) > aliveSince();
   if (!alive) return `delivered with its next claim — it is offline now; the order waits up to ${TTL_PERSON_MIN / 60} h for it`;
-  return w.current_task ? `delivered with its next claim — after task #${w.current_task}, which it builds now` : "delivered with its next claim — within 30 s while it is idle";
+  if (!w.current_task) return "delivered with its next claim — within 30 s while it is idle";
+  const stopping = openOrdersOf(w.open_orders ?? null).some((o) => o.kind === "stop-task");
+  return stopping
+    ? `delivered with its next claim — once task #${w.current_task}, which is being stopped, is back in the queue: the claim that gives it back carries the order`
+    : `delivered with its next claim — after task #${w.current_task}, which it builds now (Stop its task to deliver it sooner)`;
 }
 
-/** POST /factory/workers/:id/orders — a person's order (#277): its owner or any maintainer, under every cap, on the record. */
+/** A time of day the door says, on the pool's clock and saying so: the page words the same moment on its reader's. */
+const clockOf = (iso: string) => `${iso.slice(11, 16)} UTC`;
+
+/** What happens after a stop, per how its work runs (§1.16): the door's note, the page's dialog says the same. */
+function stopNote(f: ReturnType<typeof stopFacts>): string {
+  const back = `it goes back to the queue once this worker has stopped it (by ${clockOf(f.until)} at the latest)`;
+  const end = f.last ? " — that was its last attempt: it fails then" : ` — attempt ${f.attempt} of ${f.max_attempts}`;
+  if (f.stops === "lease-end") return `its image (${f.version ?? "unknown"}) does not stop on the pool's word: it runs task #${f.task} on, but can no longer report or upload it; the task goes back to the queue when its lease ends, by ${clockOf(f.until)}${end}`;
+  if (f.stops === "child") return `task #${f.task} stops within 5 minutes; ${back}${end}`;
+  if (f.stops === "child-or-call") return `task #${f.task} stops within 5 minutes while its ${f.kind === "trial" ? "check" : "build"} runs, or at its next call to the pool while it transfers; ${back}${end}`;
+  return `task #${f.task} runs in the worker's own process: it stops at its next call to the pool once the worker hears of it, usually within 5 minutes; ${back}${end}`;
+}
+
+/**
+ * POST /factory/workers/:id/orders — a person's order (#277): its owner or
+ * any maintainer, under every cap, on the record. Drain, Resume and Stop its
+ * task (part 2) act at issue, in the same batch: a drain holds from the
+ * worker's next claim; a resume ends it; a stop fences the task the worker
+ * holds (`task`, when given, must be it: the page may be stale).
+ */
 export async function handleIssueOrder(c: Contributor, id: string, request: Request, env: Env, url: URL): Promise<Response> {
   const gate = writeGate(request, url, true);
   if (gate) return gate;
-  const b = await readJson<{ kind?: unknown; reason?: unknown; unless_agent_ok?: unknown }>(request);
+  const b = await readJson<{ kind?: unknown; reason?: unknown; unless_agent_ok?: unknown; task?: unknown }>(request);
   if (b instanceof Response) return b;
   if (!isOrderKind(b.kind)) return json({ error: `kind is one of ${ORDER_KINDS.join(", ")}` }, 400);
   const kind = b.kind;
   const w = await workerRow(env, id);
   if (!w) return json({ error: "no such worker" }, 404);
   const now = Date.now();
-  const facts = await orderFacts(env, w.id, c.login, now);
+  const [facts, held] = await Promise.all([orderFacts(env, w.id, c.login, now), kind === "stop-task" ? heldTask(env, w) : null]);
+  facts.task = held;
   const verdict = orderVerdicts(c, w, facts)[RIGHT_OF[kind]];
   // The login's cap is journaled once per hour whichever check met it first: this one, or the INSERT's.
   if (!verdict.ok && verdict.status === 409 && facts.loginHour >= MAX_ORDERS_PER_LOGIN_HOUR && verdict.why === loginCapWords(c.login, facts.loginFreeAt)) return json({ error: await capRefusal(env, { worker: w.id, kind, by: c.login, now }) }, 409);
   if (!verdict.ok) return json({ error: verdict.why }, verdict.status);
+  // The task the page saw: only a restriction — the stop is of the task the worker holds now, or of none.
+  if (kind === "stop-task" && b.task !== undefined && b.task !== null && Number(b.task) !== held!.id) return json({ error: `it holds #${held!.id} now, not #${String(b.task).slice(0, 20)}` }, 409);
   let reason = b.reason === undefined || b.reason === null ? "" : cleanText(b.reason, 300);
   if (reason === null) return json({ error: "the reason looks like it carries a secret, and it is public: say it without" }, 400);
   if (!reason) reason = `${KIND_LABEL[kind]} from the worker's page`;
   const unless = kind === "restart" && b.unless_agent_ok === true;
   const via = viaOf(request) === "web" ? "web" : "token";
+  const stop = kind === "stop-task" ? stopFacts(w, held!) : null;
+  const summary = stop
+    ? `${w.id}: task #${stop.task} (${stop.words}) stopped by ${c.login} — ${reason}; back in the queue once this worker has stopped it${stop.last ? "; it fails then: that was its last attempt" : ` (attempt ${stop.attempt} of ${stop.max_attempts})`}`
+    : kind === "resume"
+      ? `${w.id}: resume ordered by ${c.login} — ${reason}${w.drained_by && w.drained_by !== c.login ? ` (drained ${drainWords(w)})` : ""}`
+      : `${w.id}: ${kind} ordered by ${c.login} — ${reason}${unless ? " (only if its agent is down)" : ""}`;
   const issued = await issueOrder(env, {
     worker: w.id, owner: w.owner, kind, reason, by: c.login, via, rule: null, unless, site: w.site, baselineAtIssue: w.agent_checked_at, now,
-    line: { status: "ok", summary: `${w.id}: ${kind} ordered by ${c.login} — ${reason}${unless ? " (only if its agent is down)" : ""}` },
+    task: stop ? stop.task : null,
+    resumed: kind === "resume" ? { detail: `resumed by ${c.login}: it is handed work again from its next claim`, drain: `resumed by ${c.login} before its next claim` } : undefined,
+    line: { status: kind === "drain" || kind === "stop-task" ? "warn" : "ok", summary },
   });
   if (!issued.ok) {
     if (issued.why === "open") {
@@ -94,16 +165,33 @@ export async function handleIssueOrder(c: Contributor, id: string, request: Requ
       return json({ error: `${KIND_LABEL[kind].toLowerCase()} is waiting already${open ? ` (${open.id}, by ${open.by})` : ""}` }, 409);
     }
     if (issued.why === "site") return json({ error: "a restart of this host's agent service is waiting already, through another of its workers" }, 409);
+    // The state a pool's kind acts on moved between the read and the INSERT: said as it is now.
+    if (kind === "drain" || kind === "resume" || kind === "stop-task") {
+      const again = await workerRow(env, w.id);
+      if (kind === "drain" && again?.drained_at) return json({ error: `drained already (${drainWords(again)}) — Resume ends it` }, 409);
+      if (kind === "resume" && again && !again.drained_at) return json({ error: "it is not drained: there is nothing to resume" }, 409);
+      if (kind === "stop-task") {
+        const now2 = again ? await heldTask(env, again) : null;
+        if (!now2 || now2.status !== "leased" || now2.lease_owner !== w.id) return json({ error: "idle: there is no task to stop" }, 409);
+        if (now2.id !== stop!.task) return json({ error: `it holds #${now2.id} now, not #${stop!.task}` }, 409);
+        if (now2.stop_order) return json({ error: `task #${now2.id} is being stopped already: it goes back to the queue once this worker has stopped it` }, 409);
+      }
+    }
     return json({ error: await capRefusal(env, { worker: w.id, kind, by: c.login, now }) }, 409);
   }
+  const note = stop ? `${w.id} hears it at its next heartbeat: ${stopNote(stop)}. Nothing is cancelled.`
+    : kind === "drain" ? `the pool hands it nothing from its next claim${w.current_task ? `; task #${w.current_task} runs to its end` : ""}. Builds asked for it by name go to the shared queue after ${FIRST_PICK_MINUTES} min. Resume ends it.`
+      : kind === "resume" ? "it is handed work again from its next claim"
+        : deliveryNote(w);
   return json({
-    order: { id: issued.id, worker: w.id, kind, reason, issued_by: c.login, via, issued_at: issued.issued_at, expires_at: issued.expires_at, unless_agent_ok: unless, state: "pending" },
-    note: deliveryNote(w),
+    // A stop's `until`, the latest its task goes back to the queue: the page words it on its reader's clock, as its dialog did.
+    order: { id: issued.id, worker: w.id, kind, reason, issued_by: c.login, via, issued_at: issued.issued_at, expires_at: issued.expires_at, unless_agent_ok: unless, state: kind === "resume" ? "done" : "pending", ...(stop ? { task: stop.task, until: stop.until } : {}) },
+    note,
   }, 201);
 }
 
 /** An order of a worker by its id (the primary key): the Cancel's read. */
-export const ORDER_OF_WORKER_SQL = "SELECT id, kind, state, issued_by, via, rule, reason FROM worker_orders WHERE id = ? AND worker_id = ?";
+export const ORDER_OF_WORKER_SQL = "SELECT id, kind, state, issued_by, via, rule, reason, task_id FROM worker_orders WHERE id = ? AND worker_id = ?";
 /** An order by its id (the primary key): the worker's answer's read. */
 export const ORDER_BY_ID_SQL = "SELECT id, worker_id, kind, state, delivered_to, accepted_at, issued_by, via, rule, reason FROM worker_orders WHERE id = ?";
 
@@ -115,9 +203,13 @@ export async function handleCancelOrder(c: Contributor, id: string, oid: string,
   if (!w) return json({ error: "no such worker" }, 404);
   const v = orderVerdicts(c, w, { now: Date.now(), restartsHour: 0, rechecksHour: 0, loginHour: 0, restartsFreeAt: null, rechecksFreeAt: null, loginFreeAt: null }).cancel;
   if (!v.ok) return json({ error: v.why }, v.status);
-  const o = await env.DB.prepare(ORDER_OF_WORKER_SQL).bind(oid, w.id).first<{ id: string; kind: OrderKind; state: string; issued_by: string; via: string | null; rule: string | null; reason: string }>();
+  const o = await env.DB.prepare(ORDER_OF_WORKER_SQL).bind(oid, w.id).first<{ id: string; kind: OrderKind; state: string; issued_by: string; via: string | null; rule: string | null; reason: string; task_id: number | null }>();
   if (!o) return json({ error: "no such order on this worker" }, 404);
   if (o.state !== "pending") return json({ error: o.state === "delivered" ? "delivered already: its worker has it, and answers it" : `closed already: ${o.state}` }, 409);
+  // The pool's own kinds acted at issue (#277): a stop told the worker to stop, which may have killed the task already — lifting the fence
+  // could leave the task leased to a process that is gone; a drain holds until a Resume, which is the way to end it.
+  if (o.kind === "stop-task") return json({ error: `${o.task_id ? `task #${o.task_id}` : "its task"} is being stopped already: it goes back to the queue once this worker has stopped it` }, 409);
+  if (o.kind === "drain") return json({ error: "a drain holds from its issue: Resume ends it" }, 409);
   const at = new Date().toISOString();
   const detail = `cancelled by ${c.login}`;
   const res = await env.DB.batch([
@@ -180,7 +272,7 @@ const RULES = {
   recheck_after_min: RECHECK_AFTER_MIN, restart_after_min: RESTART_AFTER_MIN, restart_spacing_min: RESTART_SPACING_MIN, give_up_after_min: GIVE_UP_AFTER_MIN, min_uptime_s: MIN_UPTIME_S,
   max_pool_restarts_per_spell: MAX_POOL_RESTARTS_PER_SPELL, max_pool_restarts_per_day: MAX_POOL_RESTARTS_PER_DAY, max_pool_rechecks_per_day: MAX_POOL_RECHECKS_PER_DAY,
   max_restarts_per_hour: MAX_RESTARTS_PER_HOUR, max_rechecks_per_hour: MAX_RECHECKS_PER_HOUR, max_orders_per_login_hour: MAX_ORDERS_PER_LOGIN_HOUR, max_pool_orders_per_day: MAX_POOL_ORDERS_PER_DAY,
-  answer_within_min: ANSWER_WITHIN_MIN, ttl_person_min: TTL_PERSON_MIN,
+  answer_within_min: ANSWER_WITHIN_MIN, ttl_person_min: TTL_PERSON_MIN, lease_minutes: LEASE_MINUTES, first_pick_minutes: FIRST_PICK_MINUTES,
 };
 
 /** A worker's last orders, newest first, through idx_worker_orders_worker (worker_id, issued_at). */
@@ -245,7 +337,9 @@ export async function handleWorkerCan(c: Contributor | null, id: string, env: En
   const w = await workerRow(env, id);
   if (!w) return json({ error: "no such worker" }, 404, NO_STORE);
   const now = Date.now();
-  const v = orderVerdicts(c, w, await orderFacts(env, w.id, c?.login ?? null, now));
+  const [facts, held] = await Promise.all([orderFacts(env, w.id, c?.login ?? null, now), heldTask(env, w)]);
+  facts.task = held;
+  const v = orderVerdicts(c, w, facts);
   const can: Record<string, boolean> = {};
   const why: Record<string, string> = {};
   for (const r of ORDER_RIGHTS) {
@@ -259,5 +353,8 @@ export async function handleWorkerCan(c: Contributor | null, id: string, env: En
     shared = rows.filter((r) => r.id !== w.id && r.agent_via === "sibling").map((r) => r.id).sort();
   }
   const details = !!c && (isMaintainer(c) || (w.owner !== null && w.owner === c.login));
-  return json({ id: w.id, can, why, details, shared_agent_with: shared, note: deliveryNote(w) }, 200, NO_STORE);
+  // The task it holds, as Stop its task's dialog words it (§1.16): which, its attempt, the latest it goes back to the queue, and how it
+  // stops (stopWay) — for anyone, like the listing's current_task; whether they may press it is `can.stop_task`.
+  const stop = held && held.status === "leased" && held.lease_owner === w.id ? { ...stopFacts(w, held), stopping: !!held.stop_order, note: stopNote(stopFacts(w, held)) } : null;
+  return json({ id: w.id, can, why, details, shared_agent_with: shared, note: deliveryNote(w), stop }, 200, NO_STORE);
 }

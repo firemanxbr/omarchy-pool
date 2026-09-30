@@ -2,7 +2,7 @@ import { json, type Env } from "../index";
 import { REPO_ARCHES, RINGS, ringsSql, sortRings, WORKER_ALIVE_MINUTES } from "../meta";
 import { scoreChain } from "../score";
 import { requestChecks } from "../request";
-import { contributorOf, isMaintainer, MAINTAINER_DECIDES, sha256Hex, SIGN_IN, viaOf, type Contributor } from "./contributors";
+import { contributorOf, drainedRefusal, isMaintainer, MAINTAINER_DECIDES, sha256Hex, SIGN_IN, viaOf, type Contributor } from "./contributors";
 import { reclaimStagingPackages } from "../staging";
 import { pullFromRings } from "./blocks";
 import { chains, chainOf, storyRows, stands, standsSql, type Approval, type TaskBrief } from "./story";
@@ -805,6 +805,9 @@ export async function verdictOn(c: Contributor, id: number, word: "approve" | "c
  * same moment is refused with whose it is. Claiming is deciding on the
  * package, so it is signed on the record and a journal line like the rest.
  */
+/** Another architecture's rebuild goes to a live project worker of it with the same agent, an idle one first — never a drained one (#277): it would wait until it is resumed. */
+export const SAME_AGENT_SQL = "SELECT id FROM build_workers WHERE arch = ? AND trust = 'project' AND revoked_at IS NULL AND drained_at IS NULL AND agent = ? AND agent_status = 'ok' AND last_seen > ? AND (kinds IS NULL OR EXISTS (SELECT 1 FROM json_each(kinds) WHERE value = 'build')) ORDER BY current_task IS NOT NULL, last_seen DESC LIMIT 1";
+
 export async function handleProjectBuild(c: Contributor, id: number, request: Request, env: Env, through?: Through): Promise<Response> {
   const b = (await request.json().catch(() => ({}))) as { note?: unknown; worker?: unknown };
   const note = typeof b.note === "string" && b.note.trim() ? b.note.trim() : null;
@@ -817,8 +820,10 @@ export async function handleProjectBuild(c: Contributor, id: number, request: Re
   // Where it runs: one of the project's workers that builds this architecture, when the maintainer says which (the native one, not the emulated one).
   let pinned: string | null = null, agent: string | null = null;
   if (typeof b.worker === "string" && b.worker.trim()) {
-    const w = await env.DB.prepare("SELECT id, arch, kinds, agent, agent_status FROM build_workers WHERE id = ? AND revoked_at IS NULL AND trust = 'project'").bind(b.worker.trim()).first<{ id: string; arch: string; kinds: string | null; agent: string | null; agent_status: string | null }>();
+    const w = await env.DB.prepare("SELECT id, arch, kinds, agent, agent_status, drained_at, drained_by, drain_reason FROM build_workers WHERE id = ? AND revoked_at IS NULL AND trust = 'project'").bind(b.worker.trim()).first<{ id: string; arch: string; kinds: string | null; agent: string | null; agent_status: string | null; drained_at: string | null; drained_by: string | null; drain_reason: string | null }>();
     if (!w || w.arch !== t.arch) return json({ error: `${b.worker} is not a project worker for ${t.arch}` }, 400);
+    // A drained worker is handed nothing until it is resumed (#277): pinned to it, the rebuild would wait for it.
+    if (w.drained_at) return json({ error: drainedRefusal(w) }, 409);
     // The claim gives a review build only to a worker that declares builds and whose agent answered; pinned to another, it would wait forever.
     const kinds = w.kinds ? (JSON.parse(w.kinds) as string[]) : [];
     if (kinds.length && !kinds.includes("build")) return json({ error: `${w.id} does not take builds (it declares ${kinds.join(", ")})` }, 400);
@@ -835,11 +840,7 @@ export async function handleProjectBuild(c: Contributor, id: number, request: Re
   // The same agent on the other architectures: a live project worker of that architecture that builds, whose agent answered — an idle one first. build_workers is the project's and the contributors' machines, a few dozen rows.
   const alive = new Date(Date.now() - WORKER_ALIVE_MINUTES * 60000).toISOString();
   const sameAgent = async (arch: string): Promise<string | null> =>
-    agent
-      ? ((await env.DB.prepare(
-          "SELECT id FROM build_workers WHERE arch = ? AND trust = 'project' AND revoked_at IS NULL AND agent = ? AND agent_status = 'ok' AND last_seen > ? AND (kinds IS NULL OR EXISTS (SELECT 1 FROM json_each(kinds) WHERE value = 'build')) ORDER BY current_task IS NOT NULL, last_seen DESC LIMIT 1",
-        ).bind(arch, agent, alive).first<{ id: string }>())?.id ?? null)
-      : null;
+    agent ? ((await env.DB.prepare(SAME_AGENT_SQL).bind(arch, agent, alive).first<{ id: string }>())?.id ?? null) : null;
   const queued: { task: number; arch: string; from: number; pinned_to: string | null; agent: string | null }[] = [];
   for (const s of from) {
     const pin = s.id === id ? pinned : await sameAgent(s.arch);

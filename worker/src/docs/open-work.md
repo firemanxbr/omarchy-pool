@@ -46,7 +46,7 @@ request (see [CONTRIBUTING.md](CONTRIBUTING.md)), and keep
       and ships nothing
       ([the security model](docs/security-model.md#the-doors-that-ship)).
       #277's orders to a worker (Re-check agent, Restart, Restart agent
-      service, and the kinds its next parts add) also take a session or an
+      service, Drain, Resume, Stop its task, and Update with its part) also take a session or an
       `omc_` token without a passkey, on purpose: capped, on the journal,
       undone by another order, and neither publishing nor deciding anything
       (its design's Q12).
