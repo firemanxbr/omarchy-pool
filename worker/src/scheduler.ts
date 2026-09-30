@@ -199,11 +199,12 @@ export function isDue(rule: Rule, runs: RunSummary[], now: Date): { due: boolean
  */
 export async function factoryDemand(env: Env, now = new Date()): Promise<{ arch: string; queued: number; alive: number; pool: number }[]> {
   // "alive" here means alive *and idle*: a worker busy with a nine-hour
-  // build does not serve the queue behind it. Pool jobs (sync, promote…)
-  // need project trust; community workers do not count for them.
+  // build does not serve the queue behind it, and a drained one (#277) is
+  // handed nothing. Pool jobs (sync, promote…) need project trust;
+  // community workers do not count for them.
   const rows = await env.DB.prepare(
     `SELECT arch, COUNT(*) AS queued, SUM(CASE WHEN kind != 'build' OR trust = 'project' THEN 1 ELSE 0 END) AS pool,
-            (SELECT COUNT(*) FROM build_workers w WHERE w.arch = t.arch AND w.last_seen > ? AND w.current_task IS NULL AND w.trust = 'project' AND w.revoked_at IS NULL) AS alive
+            (SELECT COUNT(*) FROM build_workers w WHERE w.arch = t.arch AND w.last_seen > ? AND w.current_task IS NULL AND w.trust = 'project' AND w.revoked_at IS NULL AND w.drained_at IS NULL) AS alive
        FROM build_tasks t WHERE status = 'queued' AND (kind != 'build' OR trust = 'project') GROUP BY arch`,
   )
     .bind(new Date(now.getTime() - WORKER_ALIVE_MINUTES * 60000).toISOString())

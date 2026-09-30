@@ -307,8 +307,10 @@ docker kill <container>                          # one that must end now, or who
 ```
 
 A worker's page, `/worker/<id>`, takes the rest: Re-check agent, Restart
-(between tasks), Restart agent service, Update. A task that hangs has no
-button there yet: stopping it from the page comes with #277's next part.
+(between tasks), Restart agent service, Stop its task, Drain and Resume,
+Update. A task that hangs is stopped there: Stop its task gives it back to
+the queue once its worker has stopped it, with no restart and no three-hour
+wait.
 
 Upgrades are **rolling**: a pool release publishes a new image, the
 `updater` service sees the pool's new release within two minutes and
@@ -444,10 +446,11 @@ within bounds, and on the record: `order` lines in the journal.
 Where to look: Status (workers not ready, outdated, silent since the
 deploy), the Factory's workers card, and a worker's page, `/worker/<id>`,
 with its last orders and its log. What a maintainer, or the worker's owner,
-presses there: Re-check agent, Restart, Restart agent service, Update. None
-of them needs the passkey that approve and block need (#283); each is on the
-journal with who pressed it. A worker whose task hangs through the release
-is replaced when its drain's three hours end.
+presses there: Re-check agent, Restart, Restart agent service, Stop its
+task, Drain, Resume, Update. None of them needs the passkey that approve and
+block need (#283); each is on the journal with who pressed it. A worker
+whose task hangs through the release is replaced when its drain's three
+hours end — or sooner, once Stop its task has given that task back.
 
 If the release's image does not start (Status: "N workers alive before the
 deploy … have not claimed for 15 min"), roll it back from anywhere:

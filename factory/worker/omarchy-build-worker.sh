@@ -396,12 +396,66 @@ as_builder() { runuser -u builder -- env -i PATH="$PATH" HOME=/home/builder USER
 
 # Extends the task's lease while the build runs (every five minutes; the
 # lease is thirty): a build longer than the lease is not handed to another
-# worker. Killed when the task ends.
+# worker. Killed when the task ends. And it reads the answer (#277): a task
+# that is no longer this worker's — gone (404), or taken back (409 with
+# "stop": stopped from its worker's page, cancelled, requeued, leased to
+# another) — has its state written to STOPPED_FILE, and the main shell is
+# told with SIGUSR1, which interrupts its `wait` at once (stop_build). A
+# 409 without stop (a pool from before #277), a 5xx or a network error
+# stops nothing.
+STOPPED_FILE=/build/stopped
 heartbeat_loop() { # task-id
+  local out code body state
   while :; do
     sleep 300
-    api POST "/factory/tasks/$1/heartbeat" '{}' >/dev/null 2>&1 || true
+    out="$(api POST "/factory/tasks/$1/heartbeat" '{}' 2>/dev/null)" && continue
+    code="${out##*$'\n'}"; body="${out%$'\n'*}"
+    if [[ "$code" == 404 ]] || { [[ "$code" == 409 ]] && [[ "$(jq -r '.stop // false' <<<"$body" 2>/dev/null || echo false)" == true ]]; }; then
+      if [[ "$code" == 404 ]]; then state=gone; else state="$(jq -r '.state // "stopping"' <<<"$body" 2>/dev/null || echo stopping)"; fi
+      [[ "$state" =~ ^[a-z]{1,16}$ ]] || state=stopping
+      printf '%s\n' "$state" > "$STOPPED_FILE" 2>/dev/null || true
+      # In a subshell $$ is the main shell: the container's first process, which traps it.
+      kill -USR1 $$ 2>/dev/null || true
+      return 0
+    fi
   done
+}
+
+# The build, as a job of its own (#277): job control on for its start only,
+# so the build's subshell — a fork, with the functions and the unexported
+# keys it always had — leads a process group a stop can kill whole. The
+# main shell waits for it; a trapped signal interrupts the wait at once
+# (bash would run a trap only once a foreground command returned). A
+# SIGTERM (a drain) interrupts it too: DRAIN=1, and it waits again for the
+# build to end, as before.
+BUILD=""
+build_job() { # name ref log → the build's status
+  set -m; ( set -e; build_with_retries "$1" "$2" ) </dev/null > "$3" 2>&1 & BUILD=$!; set +m
+  local s
+  while :; do wait "$BUILD"; s=$?; (( s > 128 )) && kill -0 "$BUILD" 2>/dev/null && continue; break; done
+  return "$s"
+}
+
+# The pool took the task back (the heartbeat's SIGUSR1): the build's process
+# group gets SIGTERM, SIGKILL after 10 s, and this shell exits 0 — within
+# about 11 s. The pool already knows, so there are no last words and no
+# note for the next container; when this, the container's first process,
+# exits, every process left in the container dies with it, a recipe that
+# detached into a session of its own included. The next container claims,
+# and that claim gives the task back to the queue.
+stop_build() {
+  local state i
+  state="$(head -n1 "$STOPPED_FILE" 2>/dev/null || true)"; [[ "$state" =~ ^[a-z]{1,16}$ ]] || state=stopping
+  trap - USR1
+  if [[ -n "$BUILD" ]]; then
+    kill -TERM -- "-$BUILD" 2>/dev/null || true
+    for i in $(seq 1 10); do kill -0 -- "-$BUILD" 2>/dev/null || break; sleep 1; done
+    kill -KILL -- "-$BUILD" 2>/dev/null || true
+  fi
+  kill "${BEAT:-}" 2>/dev/null || true
+  REPORTED=1
+  log "task ${TASK_ID:-?}: stopped by the pool ($state); stopped its build"
+  exit 0
 }
 
 # What `makepkg --syncdeps` would install, installed by root instead: the
@@ -819,7 +873,9 @@ exit_note_heard() { # the pool answered a claim (a task, orders, nothing, a 426)
 # A line a person or the pool wrote, as this worker prints it: escape sequences and control characters out, one line, 300 characters.
 clean_line() { printf '%s' "$1" | sed $'s/\x1b\\[[0-9;?]*[ -\/]*[@-~]//g; s/\x1b\\][^\x07]*\x07//g' | tr '\n\r\t' '   ' | tr -d '\000-\010\013-\037\177' | cut -c1-300; }
 agent_via() { if [[ -n "${OMARCHY_BROKER:-}" ]]; then echo broker; elif [[ -n "$(agent_label)" ]]; then echo direct; else echo none; fi; }
-order_kinds() { if [[ -n "${OMARCHY_BROKER:-}" || -n "$(agent_label)" ]]; then echo '["drain","recheck-agent","restart"]'; else echo '["drain","restart"]'; fi; }
+# What this process takes: the kinds it executes, drain (it understands the notice), and stop-task (#277, part 2) — it stops its build on
+# the heartbeat's 409 with stop (heartbeat_loop, stop_build), the one word the pool and a broker read as a builder that stops.
+order_kinds() { if [[ -n "${OMARCHY_BROKER:-}" || -n "$(agent_label)" ]]; then echo '["drain","recheck-agent","restart","stop-task"]'; else echo '["drain","restart","stop-task"]'; fi; }
 answer_order() { # id outcome code detail [agent-json]
   api POST "/factory/workers/self/orders/$1" "$(jq -cn --arg i "$INSTANCE" --arg o "$2" --arg c "$3" --arg d "$4" --argjson a "${5:-null}" '{instance:$i,outcome:$o,code:$c,detail:$d} + (if $a == null then {} else {agent:$a} end)')" >/dev/null 2>&1 \
     || log "order $1: the answer did not reach the pool; it closes the order by what it sees"
@@ -964,12 +1020,15 @@ container_worker() {
   # same worker took it and died the same way, three times (omarchy-cli on
   # the Studio, 2026-09-17: a `tar` on the wrong file, exit 2). Now the
   # pool hears which command it was, at once, and the dashboard shows it.
+  # The pool may take the task back while it runs (#277): the heartbeat says so, and stop_build ends the build and this container.
+  TASK_ID="$id"
+  trap 'stop_build' USR1
   heartbeat_loop "$id" & BEAT=$!; disown "$BEAT"
   REPORTED=0
   trap 's=$?; c=$BASH_COMMAND; kill "${BEAT:-}" 2>/dev/null || true; (( REPORTED )) || last_words "$id" "$s" "$c"' EXIT
   local started=$SECONDS status=0
   set +e
-  ( set -e; build_with_retries "$name" "$ref" ) > /build/build.log 2>&1
+  build_job "$name" "$ref" /build/build.log
   status=$?
   set -e
   local took=$(( (SECONDS - started) * 1000 )) tail; tail="$(tail -n 80 /build/build.log | jq -Rs .)"

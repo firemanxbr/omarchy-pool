@@ -35,9 +35,9 @@ please do not file a public issue for it.
 
 | Credential | Held by | Can do | Cannot do | Status |
 |---|---|---|---|---|
-| Contributor token `omc_…` | one person (GitHub identity read once, never stored) | register packages under their name, queue community builds, register and revoke their workers and give them orders from the worker's page or the API (re-check the agent, restart, restart the agent service, update; #277), read their own state | write to the pool, claim jobs, approve | live; replaced from the person's page, revoked by a reset of their passkeys (#284) — then made again on that page only, never with a GitHub token |
+| Contributor token `omc_…` | one person (GitHub identity read once, never stored) | register packages under their name, queue community builds, register and revoke their workers and give them orders from the worker's page or the API (re-check the agent, restart, restart the agent service, drain and resume, stop the task in hand, update; #277), read their own state | write to the pool, claim jobs, approve | live; replaced from the person's page, revoked by a reset of their passkeys (#284) — then made again on that page only, never with a GitHub token |
 | Worker token `omw_…` | one machine, registered by a contributor | claim tasks its trust allows (community: its owner's or shared builds; project: pool jobs too); heartbeat | write to the pool or staging directly | live |
-| Job token `omj.…` | the worker running one task, for the lease | the routes that task needs — e.g. `sync`: upload objects, index, create a release in one ring, store that ring's databases; community `build`: upload to that task's staging folder, and nothing into the journal (the health and abi rows the gate reads are the project's jobs' alone); a dry run (`publish` 0): its task and the journal, no pool and no ring (#284) | anything outside its scopes (403, journaled); anything after the lease (30 min, renewed by heartbeat) | live |
+| Job token `omj.…` | the worker running one task, for the lease | the routes that task needs — e.g. `sync`: upload objects, index, create a release in one ring, store that ring's databases; community `build`: upload to that task's staging folder, and nothing into the journal (the health and abi rows the gate reads are the project's jobs' alone); a dry run (`publish` 0): its task and the journal, no pool and no ring (#284) | anything outside its scopes (403, journaled); anything after the lease (30 min, renewed by heartbeat) — a task stopped from its worker's page is not renewed, and goes back to the queue only once its worker has stopped or the lease has ended, so no second runner overlaps its token; an audit's or a trial's report beside a staged build is taken only while the job's own task is still leased to its worker and not stopped (#277) | live |
 | Maintainer role | a contributor listed in `factory/MAINTAINERS.toml` on `main` — one list, no groups (applied by the brain every ten minutes) | propose or confirm a worker's project trust (two of them), take it back alone; withdraw a record from the public bucket (a signed tombstone says why); approve or reject staged builds (recorded; approve, and a block, in the browser with their passkey, #271); queue any pool job by hand (`POST /factory/jobs`; a promotion forced past its evidence in the browser with their passkey, #284); queue a dry run by hand, cancel, remove a registration; give any worker orders (the same list), capped at 20 an hour per login and on the journal — none of them needs the passkey (#277); review governance pull requests | write to the pool with their own token (a job does); publish a build queued by hand (#284: a dry run only); write the gate's evidence (#284: a journal note only); roll a ring back to another ring's release; operate as a worker; grant a role | live |
 | Agent token `oma_…` | one agent on one person's machine, granted by that person in their signed-in browser (`omarchy-cli login`: a loopback address and PKCE), kept in `~/.config/omarchy-cli/credentials.toml` (0600) and bound to the origin that granted it | the tools of `omarchy-cli mcp` its scopes hold, as that person: request and follow packages (`contribute`); claim, release, read evidence and draft a verdict (`review`) or a block (`block`) — the two a maintainer's only, read again on every call; twenty calls a minute, five requests, ten claims and thirty drafts a day | decide anything — approve, request changes, reject and block are drafts the person confirms in the browser, approve and block with the person's passkey; every other route (403); give the project's agent a hint; outlive seven days with `review` or `block`, ninety with `contribute` | live; revoked by `omarchy-cli logout`, the person's page, a block of the person, or a reset of their passkeys (#284) |
 | Passkey (WebAuthn) | one maintainer's authenticator — a security key, a phone, a laptop's platform authenticator — registered on their own page with the browser's session; the pool keeps the credential's id, its public key, the algorithm (ES256, EdDSA, RS256), the RP id `omarchy-pool.org`, the counter, a name and two dates (`passkeys`, migration 0040) | decide approve and block — an agent's draft confirmed (#257), and the web's own buttons (#271): an assertion with the user verified — the person's fingerprint, face or PIN, as the authenticator reports it (attestation `none`: the pool takes the authenticator's word on that) — for a challenge bound to that login and that draft or act, checked by the Worker against the stored key (`webauthn.ts`), the counter moving forward; vouch for a second passkey of the same login, and for a removal; confirm another maintainer's reset of a lost one (#271); force a promotion past its evidence, for exactly that promotion (#284) | be registered or used with a token of any kind, from another origin, or for another relying party; stand in for the session (every door takes both); confirm another act than the one its challenge was issued for; be replayed (each challenge is taken once) | live; ten per maintainer; the first registered with the session, every other with one the login holds; removed by its owner with one they hold, or reset by another maintainer with a reason (the login signed out, its token and its agents' grants revoked, #284, a signed record); registration, removal and reset are journal lines (`passkey`) without the key |
@@ -137,6 +137,52 @@ secret). Everything travels in the `Authorization` header over TLS only.
   claimed alone for ten minutes; the journal names a process by its first
   four hex digits only, so it never tells a thief which process to pretend
   to be.
+- **A stopped task never has two runners (#277, part 2).** A job token is
+  stateless and checked for its scopes only, so a process that was stopped
+  keeps what its token allows until the token's end. Stop its task therefore
+  never gives the task back at once: it fences the lease — still the
+  stopped worker's, so no other worker takes it and the ring lock still
+  holds its ring —, and every heartbeat, report and staging upload of it is
+  refused with the pool's `stop`, and renews nothing. The task goes back to
+  the queue at the worker's next claim, which proves its processes are gone,
+  or when the lease ends, when every token of it has expired. An audit's or
+  a trial's report names the staged build, not the job, so it is taken only
+  while the job's own task (the token's) is still its worker's and not
+  stopped. On the worker, the stop kills the task's process groups and
+  removes every container labelled with the task (`com.omarchy.task`,
+  created ones too); in a builder's broker, a stopped task's hold is let go
+  only for a builder whose claim declared `stop-task` — one that stops on
+  the word; declaring orders alone is not that, since #277's first part
+  takes orders and builds a stopped task on —, then no claim and no order's
+  answer passes while a call of that task is still in flight through the
+  broker (an upload the stopped builder's shell is inside: bash runs the
+  stop's trap only once that `curl` returns) and for thirty seconds after
+  the stop or that call's return, whichever is later, and the broker never
+  takes that task up again (its pinned calls refused until the lease's end,
+  and a view that carries `stop_order` never adopted). A builder from before
+  #277, or from its first part, builds on: its broker keeps the hold, so its
+  recipe claims nothing, and the lease's end gives the task back. What stays
+  open: the worker's next claim is taken as the proof that the stopped
+  task's processes are gone, which holds for the one process a token is
+  meant to have. A copied token whose second process starts claiming while
+  the first is inside a task is not seen as two processes — only the second
+  claims —, and its claim after a stop gives the task back while the first
+  may still run it, until its next heartbeat (within 5 minutes) or its
+  token's end. Two processes on one token is a token to revoke, as the pages
+  say whenever they see one.
+- **Drains and stops are the pool's, and bounded (#277, part 2).** A drain
+  holds at the claim for every image, until a Resume: a contributor's
+  machine its owner drained goes back to work on its owner's word only; a
+  maintainer who must keep it out revokes it, or sets it to its owner's
+  packages only. A project worker — trusted on two maintainers' word, and
+  it may be a contributor's machine — goes back to work on a maintainer's
+  word: its owner lifts only a drain of their own. Six drains an hour per
+  worker at most; a resume is never counted, not in the login's twenty nor
+  in the worker's hour, so no run of drains can keep a worker out. Stop its task counts with the restarts (six an hour per
+  worker) and in the login's twenty; it never cancels — a stranger's build
+  goes back to the queue, where another worker takes it. When every live
+  pool or review worker of an architecture is drained, Status says so as an
+  error.
 - **A contributor's workers can say an outage that is not there, and only
   their own kind listens (#277).** A worker's agent error is its own word.
   So a contributor's registrations count only toward the breaker that holds
@@ -211,9 +257,9 @@ passed without the maintainer's passkey.
 |---|---|---|
 | a contributor's token | their registrations and their staging folder | they register again (the old token dies) |
 | a community worker's token | claims of that owner's tasks; uploads to those tasks' staging | its owner or a maintainer revokes the worker |
-| a job token | that task's writes, until its lease ends | expires by itself; the task can be cancelled |
+| a job token | that task's writes, until its lease ends | expires by itself; the task can be cancelled, or stopped from its worker's page (its lease is fenced — nothing it sends is taken, nothing renews it — until the worker has stopped, #277) |
 | a project worker's token | claims of pool jobs — each still executed with a scoped job token — until revoked | a maintainer revokes the worker |
-| a maintainer's token | rejections and requests for changes (never on their own package), one word on a worker's trust, withdrawals, lifts, a pool job by hand — a rollback inside its ring, a promotion the gate still decides —, a dry run by hand and a note on the journal (#284: a build queued by hand never publishes, and the gate's evidence is the jobs' alone), and orders to any worker, 20 an hour (#277: a restart or a re-check at worst, never a publish or a cancel) — not an approval, a block nor a forced promotion: those take the browser's session and the maintainer's passkey (#271, #284) | the person replaces the token (their page's *Token*: the old one stops working), and a reset of their passkeys revokes it (#284); a governance pull request removes the login; decisions and builds are journaled and reversible (rollback); trust takes a second maintainer |
+| a maintainer's token | rejections and requests for changes (never on their own package), one word on a worker's trust, withdrawals, lifts, a pool job by hand — a rollback inside its ring, a promotion the gate still decides —, a dry run by hand and a note on the journal (#284: a build queued by hand never publishes, and the gate's evidence is the jobs' alone), and orders to any worker, 20 an hour (#277: a restart, a drain or a stopped task at worst — a delay, and a drain of everything is an error on Status —, never a publish or a cancel) — not an approval, a block nor a forced promotion: those take the browser's session and the maintainer's passkey (#271, #284) | the person replaces the token (their page's *Token*: the old one stops working), and a reset of their passkeys revokes it (#284); a governance pull request removes the login; decisions and builds are journaled and reversible (rollback); trust takes a second maintainer |
 | a maintainer's agent token (`oma_`) | drafts; request changes and reject once the person confirms them in the browser — approve and block drafted by the agent also need the maintainer's passkey, which the token cannot answer (user verification) | revoke the grant on the person's page or `omarchy-cli logout` |
 | a maintainer's signed-in browser, driven by an agent | what the session decides alone: request changes, reject, withdraw, a lift, a claim, a pool job by hand other than a forced promotion, a dry run by hand, and orders to any worker (20 an hour). Approve, block and a forced promotion need the person's passkey (#257, #271, #284), and so do adding a second passkey and removing one; only a login that holds none yet registers its first with the session | sign out (the session ends on the server); a first passkey registered meanwhile is on the public journal (`passkey`), and another maintainer resets it |
 | a maintainer's authenticator, lost or stolen | nothing without its user verification (a PIN or a biometric on the device); with it, what the person decides — approve, block and a forced promotion | another maintainer resets the login's passkeys with a reason (#271), after confirming the request out of band: every one removed, the login signed out, its `omc_` token and its agents' live grants revoked (#284), the journal — a line each — and a signed record say who and why; the person ends the device's GitHub sessions and revokes the GitHub tokens it held (the GitHub CLI's authorization, personal access tokens) — until they make a new token on their page, `POST /factory/register` mints the login none (`token_reset`) —, signs in again, registers a new one, makes a new token and grants their agents again (RUNBOOK, *A lost passkey*) |

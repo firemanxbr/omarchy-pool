@@ -265,6 +265,8 @@ const FACTORY_CSS = String.raw`
   .fx-wmark { display: inline-block; width: 8px; height: 8px; margin-right: 8px; vertical-align: 1px; background: var(--red); }
   .fx-bar { height: 2px; background: var(--line); } .fx-bar i { display: block; height: 2px; background: var(--blue); transition: width .7s linear; } .fx-bar i.unknown { background: var(--dim); }
   .fx-wempty { margin: 0; padding: 14px 16px; font-size: 13px; color: var(--dim); } .fx-wempty a { color: var(--green); }
+  /* Every live review worker of an architecture drained (#277): builds and audits wait — an error above the list. */
+  .fx-walert { margin: 0; padding: 10px 16px; border-bottom: 1px solid var(--line); border-left: 3px solid var(--red); font-size: 12.5px; color: var(--text); overflow-wrap: anywhere; }
   .fx .fx-wfoot { flex-wrap: wrap; justify-content: space-between; border-top: 0; color: var(--dim); } .fx-wfoot a { color: var(--green); } .fx-wfoot a:hover { text-decoration: underline; }
   .fx-shead { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
   .fx-hint { font-size: 12px; color: var(--dim); }
@@ -607,7 +609,7 @@ const SCRIPT = String.raw`
     if (st === "not ready") { var why = wtNotReady(w); return '<div class="fx-wrow notready">' + box + '<div class="fx-wmain">' + top + '<div class="fx-wjob" title="' + esc(why) + '"><i class="fx-wmark" aria-hidden="true"></i><b>not ready</b><span class="fx-step">' + esc(why) + '</span>' + marks + '</div><div class="fx-bar"><i style="width:0%"></i></div></div></div>'; }
     if (!w.current_task) return '<div class="fx-wrow idle">' + box + '<div class="fx-wmain">' + top + '<div class="fx-wjob"><b>idle</b><span class="fx-step">waiting for work</span>' + marks + '</div><div class="fx-bar"><i style="width:0%"></i></div></div></div>';
     var p = progressOf(t);
-    return '<div class="fx-wrow">' + box + '<div class="fx-wmain">' + top + '<div class="fx-wjob"><a href="/build/' + esc(w.current_task) + '"><b>' + esc(t ? t.name : "#" + w.current_task) + '</b></a><span class="fx-step">' + esc(t ? stepOf(t) : "running") + '</span></div>'
+    return '<div class="fx-wrow">' + box + '<div class="fx-wmain">' + top + '<div class="fx-wjob"><a href="/build/' + esc(w.current_task) + '"><b>' + esc(t ? t.name : "#" + w.current_task) + '</b></a>' + marks + '<span class="fx-step">' + esc(t ? stepOf(t) : "running") + '</span></div>'
       + '<div class="fx-bar" title="' + esc(p.title) + '"><i' + (p.pct === null ? ' class="unknown"' : '') + ' style="width:' + (p.pct === null ? 100 : p.pct) + '%"></i></div></div></div>';
   }
   function drawWorkers() {
@@ -618,8 +620,11 @@ const SCRIPT = String.raw`
     var ws = (LISTING.workers || []).filter(function (w) { return w.alive && !w.revoked_at; }).sort(function (a, b) { return rank(a) - rank(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0); });
     var wc = workerCounts(ws), shown = ws.slice(0, 6);
     if (head) head.textContent = num(wc.building) + " busy · " + num(wc.idle) + " idle" + (wc.notReady ? " · " + num(wc.notReady) + " not ready" : "") + (wc.outdated ? " · " + num(wc.outdated) + " outdated" : "") + (wc.drained ? " · " + num(wc.drained) + " drained" : "");
+    // Every live review worker of an architecture drained (#277): builds and audits wait — an error above the list, with who and when.
+    var held = drainedRoles(ws, ["review"]);
     // The rest are counted, not linked: the card's foot is the way to every worker.
-    list.innerHTML = (shown.length ? shown.map(workerRowOf).join("") + (ws.length > shown.length ? '<p class="fx-wempty">' + num(ws.length - shown.length) + ' more alive</p>' : '') : '<p class="fx-wempty">No worker is alive right now. A request waits in the queue until one is.</p>')
+    list.innerHTML = held.map(function (l) { return '<p class="fx-walert" role="alert">' + esc(l.charAt(0).toUpperCase() + l.slice(1)) + '.</p>'; }).join("")
+      + (shown.length ? shown.map(workerRowOf).join("") + (ws.length > shown.length ? '<p class="fx-wempty">' + num(ws.length - shown.length) + ' more alive</p>' : '') : '<p class="fx-wempty">No worker is alive right now. A request waits in the queue until one is.</p>')
       // A refresh that did not answer leaves the last answer's rows, and says so.
       + (DOWN.listing ? '<p class="fx-wempty">' + esc(DOWN.listing) + '</p>' : '');
   }
@@ -1049,7 +1054,7 @@ export const FACTORY_COMPONENTS = (F: Fixture): Component[] => {
       id: "factory.workers",
       page: "/factory",
       anchor: ['<div class="op-card fx-workers" id="workers">', 'id="fx-busy"', 'id="fx-wlist"', '<a href="/workers">All workers →</a>', 'class="op-live-dot"'],
-      script: ['api("GET", "/api/v1/factory?live=1&limit=20")', "LIVE_MS = 60000", "if (!document.hidden) loadListing();", '"visibilitychange"', "function workerRowOf(w)", "agentMark(mark, w.agent, 22)", "workerName(w)", "var st = wtState(w), marks = wtMarks(w)", 'st === "not ready"', "wtNotReady(w)", "<b>not ready</b>", "wc = workerCounts(ws)", '" not ready"', '" outdated"', '" drained"', "function stepOf(t)", '"rebuilding from scratch"', '"writing the PKGBUILD"', "function typicalMs(t)", "s.builds_daily", "s.jobs_daily", "liveStats(function (d) { STATS = d; drawWorkers(); }, 120000)", 'noAnswer("worker listing", e)'],
+      script: ['api("GET", "/api/v1/factory?live=1&limit=20")', "LIVE_MS = 60000", "if (!document.hidden) loadListing();", '"visibilitychange"', "function workerRowOf(w)", "agentMark(mark, w.agent, 22)", "workerName(w)", "var st = wtState(w), marks = wtMarks(w)", 'st === "not ready"', "wtNotReady(w)", "<b>not ready</b>", "wc = workerCounts(ws)", '" not ready"', '" outdated"', '" drained"', 'drainedRoles(ws, ["review"])', 'class="fx-walert" role="alert"', "function stepOf(t)", '"rebuilding from scratch"', '"writing the PKGBUILD"', "function typicalMs(t)", "s.builds_daily", "s.jobs_daily", "liveStats(function (d) { STATS = d; drawWorkers(); }, 120000)", 'noAnswer("worker listing", e)'],
       reads: [
         {
           path: "/api/v1/factory?live=1&limit=20",

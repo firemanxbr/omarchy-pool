@@ -1105,9 +1105,10 @@ export const HELPERS = String.raw`
     var can = (workers || []).filter(function (w) { return w.arch === arch && !w.revoked_at && (forProject ? (w.side === "omarchy" && (!w.kinds || w.kinds.indexOf("build") >= 0)) : (w.side !== "omarchy" && (w.owner === login || w.mode === "shared"))); });
     // A drafted build (the project's always) goes only to a worker whose agent answered: pinned to another it would wait forever.
     // An outdated worker (behind the latest image past the grace) is handed nothing: pinned to it a build would wait until it updates.
+    // A drained one (#277) is handed nothing until it is resumed: both doors refuse to pin it, in the words said here.
     var stale = function (w) { return !!(w.update && w.update.required); };
-    var fit = function (w) { return w.alive && !stale(w) && (!needsAgent || w.agent_status === "ok"); };
-    var word = function (w) { return (w.owner && w.owner !== login ? w.owner + "'s " : forProject ? "" : "your ") + wtShort(w.id) + " · " + (w.alive ? (stale(w) ? "outdated — update it" : w.current_task ? "building" : "idle") : "offline") + " · " + (w.labels && w.labels.emulated ? "emulated" : "native") + (w.agent ? " · " + w.agent + (w.agent_status !== "ok" ? " (not answering)" : "") : " · no agent"); };
+    var fit = function (w) { return w.alive && !stale(w) && !w.drained && (!needsAgent || w.agent_status === "ok"); };
+    var word = function (w) { return (w.owner && w.owner !== login ? w.owner + "'s " : forProject ? "" : "your ") + wtShort(w.id) + " · " + (w.drained ? "drained by " + (w.drained.by || "?") + (w.drained.reason ? ": " + w.drained.reason : "") + " — pin another worker, or use the shared queue" : w.alive ? (stale(w) ? "outdated — update it" : w.current_task ? "building" : "idle") : "offline") + " · " + (w.labels && w.labels.emulated ? "emulated" : "native") + (w.agent ? " · " + w.agent + (w.agent_status !== "ok" ? " (not answering)" : "") : " · no agent"); };
     var mine = can.filter(function (w) { return w.owner === login && !forProject; }), shared = can.filter(function (w) { return w.mode === "shared" && !forProject; }), project = forProject ? can : [];
     var online = shared.filter(fit), idle = online.filter(function (w) { return !w.current_task; }), native = idle.filter(function (w) { return !(w.labels && w.labels.emulated); });
     var state = idle.length ? idle.length + " idle now, " + native.length + " native" : online.length ? "all " + online.length + " online busy" : shared.length ? "none of " + shared.length + " online" : "no shared worker for " + arch;
@@ -1177,12 +1178,31 @@ export const HELPERS = String.raw`
       : '<span class="pill ok" title="' + esc("alive, nothing in hand · " + seen) + '">idle</span>';
     return pill + wtMarks(w);
   }
-  // What the pool is doing about a worker, or saw of it (#277), drawn beside its state and never changing it: an order waiting or on its way, two processes on its token, a new process every few minutes, its watchdog's restarts, the pool that gave up. Each a small mark with the words on hover; nothing for a worker with nothing to say.
+  // What the pool is doing about a worker, or saw of it (#277), drawn beside its state and never changing it: its task being stopped, a drain it takes after its task, an order waiting or on its way, two processes on its token, a new process every few minutes, its watchdog's restarts, the pool that gave up. Each a small mark with the words on hover; nothing for a worker with nothing to say.
   var ORDER_WORD = { "recheck-agent": "re-check", restart: "restart", "restart-agent": "restart of its agent service", drain: "drain", resume: "resume", update: "update", "stop-task": "stop of its task" };
+  // A moment as a time of day on the reader's clock, "13:40".
+  function hourOf(iso) { var d = new Date(iso); return isNaN(d) ? "" : String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); }
+  // Every live project worker of one role and architecture drained (#277, §1.10): the work only they take waits — an error line on Status
+  // (both roles) and on the Factory (the review workers), computed from the listing each page reads anyway, with no read and no write of its own.
+  function drainedRoles(ws, kinds) {
+    var groups = {}, keys = [];
+    (ws || []).forEach(function (w) {
+      var k = wtKind(w); if (kinds.indexOf(k) < 0 || w.revoked_at || !w.alive) return;
+      var key = k + " " + w.arch; if (!groups[key]) { groups[key] = { kind: k, arch: w.arch, all: [] }; keys.push(key); }
+      groups[key].all.push(w);
+    });
+    return keys.sort().map(function (key) { return groups[key]; }).filter(function (g) { return g.all.every(function (w) { return !!w.drained; }); }).map(function (g) {
+      var d = g.all.map(function (w) { return w.drained; }).sort(function (a, b) { return a.at < b.at ? -1 : a.at > b.at ? 1 : 0; })[0];
+      return "every " + (g.kind === "review" ? "review" : "pool") + " worker for " + g.arch + " is drained (by " + (d.by || "?") + ", " + hourOf(d.at) + "): " + (g.kind === "review" ? "builds and audits wait" : "sync, promote and security wait") + " — resume one on its page";
+    });
+  }
   function wtMarks(w) {
     var m = [];
-    // An Update is never the worker's: its set's updater takes it (#277), so the mark says who it waits for.
-    (w.open_orders || []).forEach(function (o) { var who = "ordered by " + (/^pool:/.test(String(o.by || "")) ? "the pool" : o.by) + " " + ago(o.at); m.push(o.kind === "update" ? ["update waiting for its set's updater", who + " — its set's updater replaces it within two minutes, and the order closes when it claims on the pool's release"] : [(ORDER_WORD[o.kind] || o.kind) + (o.state === "delivered" ? " on its way" : " waiting"), who + (o.state === "delivered" ? " — its worker has it" : " — delivered with its next claim")]); });
+    // A stop and a drain are the pool's own (#277, part 2): said as what they do — "stopping #812" while the fence holds; "drained" beside a task it finishes.
+    if (w.stopping) m.push(["stopping #" + w.stopping.task, "stopped by " + (w.stopping.by || "?") + " " + ago(w.stopping.since) + " — back in the queue once its worker has stopped it, by " + hourOf(w.stopping.until) + " at the latest"]);
+    if (w.drained && w.current_task) m.push(["drained: takes nothing after this", "drained by " + (w.drained.by || "?") + (w.drained.reason ? ": " + w.drained.reason : "") + " — it finishes task #" + w.current_task + ", then is handed nothing until it is resumed"]);
+    // An Update is never the worker's: its set's updater takes it (#277, part 3), so the mark says who it waits for.
+    (w.open_orders || []).forEach(function (o) { if (o.kind === "stop-task" || o.kind === "drain") return; var who = "ordered by " + (/^pool:/.test(String(o.by || "")) ? "the pool" : o.by) + " " + ago(o.at); m.push(o.kind === "update" ? ["update waiting for its set's updater", who + " — its set's updater replaces it within two minutes, and the order closes when it claims on the pool's release"] : [(ORDER_WORD[o.kind] || o.kind) + (o.state === "delivered" ? " on its way" : " waiting"), who + (o.state === "delivered" ? " — its worker has it" : " — delivered with its next claim")]); });
     if (w.two_processes_since) m.push(["two processes", "two processes share its token since " + ago(w.two_processes_since) + " — orders are held; revoke it if you did not start two"]);
     if (w.crash_loop_since) m.push(["crash-looping?", "a new process every few minutes since " + ago(w.crash_loop_since) + ", none finished a task — its log has why"]);
     if (w.watchdog && w.watchdog.n) m.push(["watchdog ×" + w.watchdog.n, "restarted by its watchdog " + w.watchdog.n + " time" + (w.watchdog.n === 1 ? "" : "s") + " since " + ago(w.watchdog.since) + (w.watchdog.stuck_in ? ", stuck in " + (w.watchdog.stuck_in === "task" ? "a task" : "its " + w.watchdog.stuck_in) : "")]);

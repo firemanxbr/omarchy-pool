@@ -127,15 +127,10 @@ describe("the doors: who gives a worker an order", () => {
     }
   });
 
-  it("refuses an unknown worker, a kind it does not know, the next part's kinds, an image that takes no orders, and a reason that looks like a secret", async () => {
+  it("refuses an unknown worker, a kind it does not know, an Update on a pool that runs no release, an image that takes no orders, and a reason that looks like a secret", async () => {
     expect((await issue("nobody-here", { kind: "restart" }, cli("m1"))).status).toBe(404);
     expect((await issue("studio-pool-x86_64", { kind: "reboot" }, cli("m1"))).status).toBe(400);
-    for (const kind of ["drain", "resume", "stop-task"]) {
-      const r = await issue("studio-pool-x86_64", { kind }, cli("m1"));
-      expect(r.status, kind).toBe(409);
-      expect(r.json.error).toContain("not on this pool yet");
-    }
-    // Update is on this pool (#277, part 3), and a pool that runs no release has nothing to update to.
+    // Every kind is on this pool (#277, parts 1 to 3): a pool that runs no release has nothing to update to.
     expect((await issue("studio-pool-x86_64", { kind: "update" }, cli("m1")))).toMatchObject({ status: 409, json: { error: "the pool runs no release (test): there is nothing to update to" } });
     // studio-pool-x86_64 has never claimed with orders: its image takes none.
     const old = await issue("studio-pool-x86_64", { kind: "restart" }, cli("m1"));

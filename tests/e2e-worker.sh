@@ -610,7 +610,7 @@ fp_task=$(jq -r .task <<<"$fp")
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$OMARCHY_API/api/v1/factory/tasks/$fp_task/cancel" "${mauth[@]}")" == 200 ]] || { echo "the forced promotion could not be cancelled"; exit 1; }
 echo "the package page: every architecture on its data, Adopt and Block on the journal; approve, block and a forced promotion with a passkey, never a token"
 
-step "Workers follow the brain (#277): the pool re-checks a worker, restarts it only if needed, within its bounds, and holds through an outage; a set's updater carries out an Update"
+step "Workers follow the brain (#277): the pool re-checks a worker, restarts it only if needed, within its bounds, and holds through an outage; a worker drained and resumed, and a task that hangs stopped from its worker's page; a set's updater carries out an Update"
 # Real pkg-repo work processes against stub agents, a fresh worker per scenario, side by side (tests/e2e-worker-orders.sh) — before
 # the agents' steps, whose passkey reset revokes e2e's token (#284): the scenarios revoke their workers with it.
 # shellcheck source=tests/e2e-worker-orders.sh

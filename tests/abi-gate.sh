@@ -88,7 +88,9 @@ print(b, w)
 PY
 
 # Reference 1: the distribution's base image.
-cid="$("$RUNTIME" create --platform "$PLATFORM" "$IMAGE" true)"
+# Created, never started, then removed below: a kill in between would leave it behind, which `ps` without -a does not list and `kill`
+# cannot end. Run by a worker for a task (OMARCHY_TASK_ID, #277), it carries the task's name and label, and a stop removes it by that label.
+cid="$("$RUNTIME" create ${OMARCHY_TASK_ID:+--name "omarchy-task-$OMARCHY_TASK_ID-ref-$$" --label "com.omarchy.task=$OMARCHY_TASK_ID"} --platform "$PLATFORM" "$IMAGE" true)"
 mkdir -p "$WORK/rootfs"
 if tar --version 2>/dev/null | grep -q GNU; then
   "$RUNTIME" export "$cid" | tar -x -C "$WORK/rootfs" --wildcards 'var/lib/pacman/local/*' 'usr/lib/lib*.so*' 2>/dev/null || true

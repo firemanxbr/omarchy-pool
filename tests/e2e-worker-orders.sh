@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Workers follow the brain for their health (#277, parts 1 and 3) — the E2E's
+# Workers follow the brain for their health (#277, parts 1, 2 and 3) — the E2E's
 # scenarios, sourced by tests/e2e-worker.sh against its local pool (wrangler
 # dev with WORKER_RULES_SCALE=60: the rules' step timings divided by 60,
 # honoured because POOL_VERSION is "dev"; nothing else is scaled — the caps,
@@ -35,9 +35,19 @@
 #       is held, one trip line, none after
 #   E   a class the pool cannot help (402): no order at all, and the page says
 #       why
-#   F   Update through the set's updater (#277, part 3): the real
+#   F   (part 2) drain and resume: a maintainer drains a worker; its next claim
+#       hears the notice once and the drain is done; Resume ends it, done at
+#       issue — the worker never exits
+#   G   (part 2) Stop its task: a project worker runs a check that hangs (a
+#       stub checkout's health script, which creates a labelled container and
+#       leaves a child that never ends); its claim declares stop-task, so the
+#       dialog words the stop as a child's; a maintainer stops it; the task stays
+#       leased to it — no second runner — until its next heartbeat brings the
+#       stop: the child's process group killed, the created container removed,
+#       and its next claim gives the task back to the queue
+#   H   (part 3) Update through the set's updater: the real
 #       factory/bin/omarchy-rollout --loop, against a stubbed engine whose
-#       broker answers for the builder w5f, asks this pool's follow with that
+#       broker answers for the builder w5h, asks this pool's follow with that
 #       id, runs one round for the Update and no second one; the round's
 #       replacement of the builder claims on the pool's release, and the
 #       Update closes done. This local pool runs no release (dev), so the
@@ -65,6 +75,9 @@ w5_until() { # seconds what command... — polls every 2 s
   until "$@"; do (( SECONDS < deadline )) || { echo "timed out after $most s waiting for: $what" >&2; return 1; }; sleep 2; done
 }
 w5_is() { [[ "$(w5_field "$1" "$2")" == "$3" ]]; }
+# A task's status, past the edge's cache: the URL in double quotes, so the cache-buster is expanded here — inside a bash -c string's
+# single quotes it went to curl as "$(date +%s%N)", a URL with a space that curl refuses (exit 3), and the wait read nothing for its whole time.
+w5_task_is() { [[ "$(curl -s "$OMARCHY_API/api/v1/factory/tasks/$1?fresh=$(date +%s%N)" | jq -r .task.status)" == "$2" ]]; }
 w5_has() { (( $(w5_count "$1" "$2" "${3:-}") >= ${4:-1} )); }
 
 # Every scenario's worker, registered at once (a community registration of a login with nothing queued: it is handed no task), and
@@ -72,13 +85,15 @@ w5_has() { (( $(w5_count "$1" "$2" "${3:-}") >= ${4:-1} )); }
 # worker reports it while its agent does not answer). One statement: the local database takes one writer beside wrangler dev.
 w5_seed_all() {
   local id values=()
-  for id in w5a w5a2 w5b w5c w5d w5e w5f; do
-    values+=("('$id', '$W5_ARCH', 'e2e-w5', '$(printf %s "omw_e2e_$id" | sha256sum | cut -d' ' -f1)', 'dedicated', 'community', NULL, NULL, NULL, NULL, NULL, '2000-01-01T00:00:00Z', NULL)")
+  for id in w5a w5a2 w5b w5c w5d w5e w5f w5h; do
+    values+=("('$id', '$W5_ARCH', 'e2e-w5', '$(printf %s "omw_e2e_$id" | sha256sum | cut -d' ' -f1)', 'dedicated', 'community', NULL, NULL, NULL, NULL, NULL, NULL, '2000-01-01T00:00:00Z', NULL)")
   done
+  # G's worker is the project's: it runs pool jobs, the check that hangs among them.
+  values+=("('w5g', '$W5_ARCH', 'e2e', '$(printf %s "omw_e2e_w5g" | sha256sum | cut -d' ' -f1)', 'shared', 'project', 'e2e', NULL, NULL, NULL, NULL, NULL, '2000-01-01T00:00:00Z', NULL)")
   for id in 1 2; do
-    values+=("('w5d$id', '$W5_ARCH', 'e2e-w5', NULL, 'dedicated', 'community', 'anthropic/claude-sonnet-5', 'error', 'URLError: <urlopen error [Errno 111] Connection refused>', 'refused', strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hour'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'e2e-d$id')")
+    values+=("('w5d$id', '$W5_ARCH', 'e2e-w5', NULL, 'dedicated', 'community', NULL, 'anthropic/claude-sonnet-5', 'error', 'URLError: <urlopen error [Errno 111] Connection refused>', 'refused', strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hour'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'e2e-d$id')")
   done
-  w5_d1 "INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, agent, agent_status, agent_error, agent_error_class, agent_error_since, last_seen, site) VALUES $(IFS=,; echo "${values[*]}")"
+  w5_d1 "INSERT INTO build_workers (id, arch, owner, token_hash, mode, trust, trusted_by, agent, agent_status, agent_error, agent_error_class, agent_error_since, last_seen, site) VALUES $(IFS=,; echo "${values[*]}")"
 }
 w5_agent() { # id mode — the stub's word: down, up, credit
   printf %s "$2" > "$W5/$1/agent"
@@ -121,7 +136,7 @@ w5_start() { # id provider port [skew]
       env -i PATH="$PATH" HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" ${preload[@]+"${preload[@]}"} \
         OMARCHY_WORKER_TOKEN="omw_e2e_$id" OMARCHY_SUPERVISED=1 AGENT_RETRY_FIRST_SECONDS=1800 \
         FACTORY_PROVIDER="$provider" "$key=stub-key" "$base=http://127.0.0.1:$port" \
-        "$PKG_REPO" work --api "$OMARCHY_API" --arch "$W5_ARCH" --kind build --repo-dir "$ROOT" --work-dir "$W5/$id/work" >> "$W5/$id/log" 2>&1 || code=$?
+        "$PKG_REPO" work --api "$OMARCHY_API" --arch "$W5_ARCH" --kind "${W5_KIND:-build}" --repo-dir "${W5_REPO:-$ROOT}" --work-dir "$W5/$id/work" >> "$W5/$id/log" 2>&1 || code=$?
       echo "$code" >> "$W5/$id/exits"
       [[ -e "$W5/$id/stop" ]] && break
       [[ -x "$W5/$id/on-exit" ]] && "$W5/$id/on-exit"
@@ -250,10 +265,86 @@ w5_scenario_e() {
   echo "E: $id without credit: no order, and its page says why"
 }
 
-# F: an Update, carried out by the set's updater — the real omarchy-rollout --loop against this pool — and closed by the claim that follows.
-w5_closed() { w5_view "$1" | jq -e --arg o "$2" '[.orders[] | select(.id == $o and .state == "done" and .detail == "now runs dev")] | length == 1' >/dev/null; }
+# F (#277, part 2): a maintainer drains a worker — it hears the notice with its next claim, once, and the drain is done — then resumes it,
+# done at issue. The worker never exits: the pool holds both.
 w5_scenario_f() {
-  local id=w5f dir="$W5/w5f" order
+  local id=w5f
+  mkdir -p "$W5/$id"; w5_agent $id up; w5_start $id openai 18807
+  w5_until 120 "$id's first claim" w5_is $id .worker.agent_status ok || w5_fail $id "no claim"
+  local d; d="$(curl -s -X POST "$OMARCHY_API/api/v1/factory/workers/$id/orders" -H "authorization: Bearer omc_e2e" -H "content-type: application/json" -d '{"kind":"drain","reason":"e2e: a disk swap"}')"
+  [[ "$(jq -r .order.kind <<<"$d")" == drain ]] || w5_fail $id "the drain was refused: $d"
+  [[ "$(w5_field $id .worker.drained.by)" == e2e ]] || w5_fail $id "drained at once, by whom"
+  w5_until 90 "$id hears the drain with its next claim" grep -q "drained by e2e — the pool hands me nothing until it is resumed" "$W5/$id/log" || w5_fail $id "no notice in its log"
+  w5_until 30 "the drain is done" w5_has $id drain done || w5_fail $id "the drain did not close"
+  [[ "$(grep -c "drained by e2e" "$W5/$id/log")" == 1 ]] || w5_fail $id "the notice came more than once"
+  local r; r="$(curl -s -X POST "$OMARCHY_API/api/v1/factory/workers/$id/orders" -H "authorization: Bearer omc_e2e" -H "content-type: application/json" -d '{"kind":"resume"}')"
+  [[ "$(jq -r .order.state <<<"$r")" == done ]] || w5_fail $id "the resume: $r"
+  [[ "$(w5_field $id .worker.drained)" == null ]] || w5_fail $id "still drained after the resume"
+  sleep 35
+  [[ -z "$(w5_exits $id)" ]] || w5_fail $id "it exited: $(w5_exits $id)"
+  w5_stop $id; w5_revoke $id
+  echo "F: $id drained, heard it once, resumed — no exit"
+}
+
+# G (#277, part 2): Stop its task. A project worker takes a health check from a stub checkout whose script hangs: it creates a container
+# labelled with its task (when the runner has an engine) and leaves a child that never ends. A maintainer stops the task: it stays leased
+# to the worker until the worker's next heartbeat (every 5 min) brings the stop — the script's process group killed, the task's container
+# removed — and the worker's next claim gives it back to the queue. The script does not hang a second time, so the task runs again, done.
+w5_scenario_g() {
+  local id=w5g repo="$W5/w5g/repo"
+  mkdir -p "$W5/$id" "$repo/tests"; w5_agent $id up
+  cat > "$repo/tests/health-check.sh" <<SH
+#!/usr/bin/env bash
+# The E2E's check that hangs, once (#277, part 2).
+set -u
+source "$ROOT/tests/images.env"
+[[ -e "$W5/$id/hung" ]] && exit 0
+echo "\${OMARCHY_TASK_ID:-none}" > "$W5/$id/hung"
+if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
+  docker create --name "omarchy-task-\$OMARCHY_TASK_ID-e2e-\$\$" --label "com.omarchy.task=\$OMARCHY_TASK_ID" "\$ARCHLINUX_BASE" true > "$W5/$id/created" 2>/dev/null || true
+fi
+sleep 900 & echo \$! > "$W5/$id/child"
+wait
+SH
+  chmod +x "$repo/tests/health-check.sh"
+  local task; task="$(w5_d1_json "INSERT INTO build_tasks (name, arch, pkgbuild_ref, reason, priority, status, publish, trust, kind, params) VALUES ('health', '$W5_ARCH', '-', 'e2e: a check that hangs', 1, 'queued', 1, 'project', 'health', '{\"ring\":\"edge\",\"arch\":\"$W5_ARCH\"}') RETURNING id" | jq -r '.[0].id')"
+  [[ "$task" =~ ^[0-9]+$ ]] || w5_fail $id "the task was not queued: $task"
+  W5_KIND=health W5_REPO="$repo" w5_start $id anthropic 18808
+  w5_until 120 "$id takes task $task" w5_is $id .worker.current_task "$task" || w5_fail $id "it never took the check"
+  w5_until 60 "the check hangs" test -s "$W5/$id/child" || w5_fail $id "the stub check never ran"
+  [[ "$(cat "$W5/$id/hung")" == "$task" ]] || w5_fail $id "the script was not told its task: $(cat "$W5/$id/hung")"
+  # It says it stops on the pool's word — its claim declares stop-task —, so /can words a check's stop as a child's: within 5 minutes.
+  [[ "$(w5_field $id '.worker.takes_orders | index("stop-task") != null')" == true ]] || w5_fail $id "its claim declares stop-task: $(w5_view $id | jq -c .worker.takes_orders)"
+  local can; can="$(curl -s "$OMARCHY_API/api/v1/factory/workers/$id/can" -H "authorization: Bearer omc_e2e")"
+  [[ "$(jq -r '"\(.stop.task) \(.stop.stops)"' <<<"$can")" == "$task child" ]] || w5_fail $id "a check stops as a child: $(jq -c .stop <<<"$can")"
+  local s; s="$(curl -s -X POST "$OMARCHY_API/api/v1/factory/workers/$id/orders" -H "authorization: Bearer omc_e2e" -H "content-type: application/json" -d "{\"kind\":\"stop-task\",\"task\":$task,\"reason\":\"e2e: a check that hangs\"}")"
+  [[ "$(jq -r .order.kind <<<"$s")" == stop-task ]] || w5_fail $id "the stop was refused: $s"
+  local tv; tv="$(curl -s "$OMARCHY_API/api/v1/factory/tasks/$task?fresh=$(date +%s%N)")"
+  [[ "$(jq -r '"\(.task.status) \(.task.lease_owner) \(.task.stop_order != null)"' <<<"$tv")" == "leased $id true" ]] || w5_fail $id "fenced, still its worker's: $(jq -c '.task | {status, lease_owner, stop_order}' <<<"$tv")"
+  # The latest it goes back to the queue: the fenced lease's end, never renewed — the page says it on its reader's clock, the door's note in UTC.
+  [[ "$(jq -r .order.until <<<"$s")" == "$(jq -r .task.lease_expires_at <<<"$tv")" ]] || w5_fail $id "the stop's until is its lease's end: $s"
+  jq -r .note <<<"$s" | grep -q " UTC at the latest)" || w5_fail $id "the door's note says the pool's clock: $(jq -r .note <<<"$s")"
+  [[ "$(w5_field $id .worker.stopping.task)" == "$task" ]] || w5_fail $id "its page says it is stopping"
+  # The next heartbeat brings the stop (within 5 min of the task's start), then the claim after it gives the task back.
+  w5_until 420 "$id hears the stop at its heartbeat" grep -q "task $task: the pool took it back (stopping); stopping its processes" "$W5/$id/log" || w5_fail $id "no stop in its log"
+  w5_until 60 "the stop is done: $id claimed again" w5_has $id stop-task done || w5_fail $id "the stop did not close"
+  w5_view $id | jq -r '[.orders[] | select(.kind == "stop-task")][0].detail' | grep -q "task #$task is back in the queue" || w5_fail $id "the stop's words"
+  ! kill -0 "$(cat "$W5/$id/child")" 2>/dev/null || w5_fail $id "the check's child outlived the stop"
+  if [[ -s "$W5/$id/created" ]]; then
+    [[ -z "$(docker ps -aq --filter "label=com.omarchy.task=$task")" ]] || w5_fail $id "the task's created container outlived the stop"
+  fi
+  w5_lines "health for $W5_ARCH" build | grep -q "stopped on $id by e2e: e2e: a check that hangs — back in the queue" || w5_fail $id "the build line names the stop"
+  # Back in the queue, it runs again — the script does not hang twice — and is done: nothing was cancelled.
+  w5_until 90 "the check runs again, done" w5_task_is "$task" done || w5_fail $id "the task did not run again"
+  [[ -z "$(w5_exits $id)" ]] || w5_fail $id "it exited: $(w5_exits $id)"
+  w5_stop $id; w5_revoke $id
+  echo "G: $id's hung check stopped at its heartbeat — its child killed, its container removed — back in the queue, and done"
+}
+
+# H (#277, part 3): an Update, carried out by the set's updater — the real omarchy-rollout --loop against this pool — and closed by the claim that follows.
+w5_closed() { w5_view "$1" | jq -e --arg o "$2" '[.orders[] | select(.id == $o and .state == "done" and .detail == "now runs dev")] | length == 1' >/dev/null; }
+w5_scenario_h() {
+  local id=w5h dir="$W5/w5h" order
   mkdir -p "$dir/bin" "$dir/set" "$dir/run"
   : > "$dir/set/compose.yml"
   # The builder claims on an older release; on a pool that runs no release, the door has nothing to update it to.
@@ -276,14 +367,14 @@ case "$1" in
     case "$1" in
       config) case "${2:-}" in
           --services) printf '%s\n' broker worker updater ;;
-          --format) echo '{"name":"e2e-f","services":{"broker":{"image":"img","environment":{"OMARCHY_WORKER_ROLE":"broker"}},"worker":{"image":"img","environment":{}},"updater":{"image":"img","environment":{"OMARCHY_WORKER_ROLE":"updater"}}}}' ;;
+          --format) echo '{"name":"e2e-h","services":{"broker":{"image":"img","environment":{"OMARCHY_WORKER_ROLE":"broker"}},"worker":{"image":"img","environment":{}},"updater":{"image":"img","environment":{"OMARCHY_WORKER_ROLE":"updater"}}}}' ;;
           --hash) echo "$3 cfg" ;;
         esac ;;
       ps) echo "cid-$3" ;;
       up) for a in "$@"; do [[ "$a" == worker ]] || continue
             awk '$1=="worker" {$2="sha256:new"} {print}' "$STATE" > "$STATE.n" && mv "$STATE.n" "$STATE"
             body="$(jq -cn --arg a "$ARCH" '{arch:$a, version:"dev"}')"
-            curl -s -o /dev/null -X POST "$API/api/v1/factory/claim" -H "authorization: Bearer omw_e2e_w5f" -H 'content-type: application/json' -d "$body"; done ;;
+            curl -s -o /dev/null -X POST "$API/api/v1/factory/claim" -H "authorization: Bearer omw_e2e_w5h" -H 'content-type: application/json' -d "$body"; done ;;
       run) [[ " $* " == *" --self-test "* ]] && echo "follows 1" ;;
     esac ;;
   image) [[ "$2" == inspect ]] && { [[ "$4" == *com.omarchy.updater.follows* ]] && echo 1 || echo sha256:new; } ;;
@@ -305,7 +396,7 @@ case "$1" in
       *OMARCHY_BROKER*) [[ "$s" == worker ]] && echo set ;;
       *) echo "running 0 0" ;;
     esac ;;
-  exec) [[ "$2" == cid-broker && "$*" == *"/pool/factory/workers/self" ]] && echo '{"id":"w5f"}' ;;
+  exec) [[ "$2" == cid-broker && "$*" == *"/pool/factory/workers/self" ]] && echo '{"id":"w5h"}' ;;
   logs) : ;;
 esac
 exit 0
@@ -333,25 +424,28 @@ S
   [[ "$(grep -c "a round: " "$dir/updater.log")" == 2 ]] || w5_fail $id "one round for the release, one for the Update, and no other: $(grep 'a round' "$dir/updater.log")"
   kill -TERM "$(cat "$dir/updater.pid")" 2>/dev/null || true
   w5_revoke $id
-  echo "F: the set's updater asked follow for $id, ran one round for its Update, and the Update closed on its claim of the pool's release"
+  echo "H: the set's updater asked follow for $id, ran one round for its Update, and the Update closed on its claim of the pool's release"
 }
 
 # Every scenario's worker, its supervisor and its stub agent stopped, whatever became of the scenario: a failed one returns before its
 # own w5_stop, and its loop would restart pkg-repo against a pool that is gone, its stub keeping its port for the next run.
 w5_cleanup() {
-  local id; for id in w5a w5a2 w5b w5c w5d w5e; do [[ -e "$W5/$id/pid" ]] && w5_stop "$id"; done
-  # F's updater is gone already when F passed: a kill that finds nothing is not a failure (under set -e, the last command of an &&
+  local id; for id in w5a w5a2 w5b w5c w5d w5e w5f w5g; do [[ -e "$W5/$id/pid" ]] && w5_stop "$id"; done
+  # G's hung child, if the scenario failed before its stop killed it. Under the E2E's set -e, a kill that fails as the last command
+  # of an && list ends the script: after a stop that worked, the child is gone and kill answers 1.
+  if [[ -s "$W5/w5g/child" ]]; then kill "$(cat "$W5/w5g/child")" 2>/dev/null || true; fi
+  # H's updater is gone already when H passed: a kill that finds nothing is not a failure (under set -e, the last command of an &&
   # list that fails ends the E2E, with nothing said).
-  if [[ -e "$W5/w5f/updater.pid" ]]; then kill -TERM "$(cat "$W5/w5f/updater.pid")" 2>/dev/null || true; fi
+  if [[ -e "$W5/w5h/updater.pid" ]]; then kill -TERM "$(cat "$W5/w5h/updater.pid")" 2>/dev/null || true; fi
   return 0
 }
 
-# All seven side by side; each one's result, then the record: every order of theirs has one issue line and one final line.
+# All nine side by side; each one's result, then the record: every order of theirs has one issue line and one final line.
 w5_scenarios() {
   mkdir -p "$W5"
   w5_seed_all
   local s pids=() names=() failed=0
-  for s in a a2 b c d e f; do
+  for s in a a2 b c d e f g h; do
     ( set -eo pipefail; "w5_scenario_$s" ) > "$W5/scenario-$s.out" 2>&1 &
     pids+=("$!"); names+=("$s")
   done

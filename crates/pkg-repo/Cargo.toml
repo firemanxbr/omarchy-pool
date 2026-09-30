@@ -29,6 +29,8 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 sha2 = { workspace = true }
 hex = { workspace = true }
 signal-hook = "0.3"
+# A stopped task's process groups are signalled without unsafe code (#277): kill(2) on a group, and whether it is still there.
+rustix = { version = "1", default-features = false, features = ["std", "process"] }
 
 [dev-dependencies]
 tempfile = "3"

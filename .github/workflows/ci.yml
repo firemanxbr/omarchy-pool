@@ -84,9 +84,12 @@ jobs:
       - name: The worker checks its agent again until it answers, against a stub agent that comes up late
         working-directory: .
         run: bash tests/worker-agent-recheck.sh
-      - name: The community builder takes the pool's orders — re-check, restart, a notice — and nothing the pool answers ends it
+      - name: The community builder takes the pool's orders — re-check, restart, a notice, a stop of its task — and nothing the pool answers ends it
         working-directory: .
         run: bash tests/worker-orders.sh
+      - name: Every container a task starts or creates carries the task's label, so a stop removes it
+        working-directory: .
+        run: bash tests/task-containers.sh
       - name: The image reinstalls a Claude Code that does not answer, so a restart of the agent service fixes a broken install
         working-directory: .
         run: bash tests/entrypoint-agent.sh

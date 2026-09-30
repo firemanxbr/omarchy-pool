@@ -55,16 +55,21 @@ Operate:
 docker compose ps                                 # the eight that run by default (the updater among them), and whether they are up
 docker compose logs -f --tail 50 review-aarch64   # one worker; docker compose logs -f updater for the rollout
 ./rollout.sh                                      # wakes the updater: a rolling upgrade now (it follows each release within 2 minutes by itself), or starts it as it is; --check to only look
-docker compose restart pool-x86_64                # a worker stuck in a task — a drain: it finishes its task first (up to 3 h)
-docker kill <container>                           # one that must end now, or a stall of the engine itself
+docker kill pool-x86_64                           # only for a stall of the engine itself: everything else is on the worker's page
 ```
 
-A worker that looks stuck between tasks is operated from its page,
-`/worker/<id>`: **Re-check agent**, **Restart**, **Restart agent service**
-for `agent-proxy`, and **Update** once its set's updater follows the pool.
-One stuck inside a task claims nothing, so no order reaches it: `docker
-compose restart` above until Stop its task, on the same page, comes with
-#277's next part.
+A worker that looks stuck is operated from its page, `/worker/<id>`, not
+from here: **Stop its task** if the task hangs — a build, a trial, an
+audit or a check stops within 5 minutes while its container or script
+runs (its process group killed, the containers labelled with the task
+removed); a build already uploading once its container has ended, a trial
+publishing into the lab, and a pool job in the worker's own process stop at
+their next call to the pool; the task goes back to the queue then, or when
+its lease ends — then **Restart**, and **Restart agent service** for
+`agent-proxy`. **Drain** keeps a worker out of work until **Resume**,
+across its restarts; **Update** replaces it once its set's updater follows
+the pool; a worker that wedges is restarted by its own watchdog (20 minutes
+without progress, then ever more slowly), and its page says so.
 
 The Workers page lists them by role, with the agent each reports; a
 worker that is not alive there is not running here. One whose agent does
