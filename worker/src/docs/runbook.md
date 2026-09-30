@@ -407,7 +407,7 @@ changes anything):
 ```bash
 cd /srv/omarchy-pool
 docker ps -a --filter label=com.docker.compose.project=omarchy-pool   # what runs now: a container that restarts is fixed or removed first
-pgrep -af rollout.sh                              # nothing, or the timer's own rollout (setup.sh waits for that one); stop one started by hand
+pgrep -af rollout.sh                              # nothing, or the timer's own rollout (setup.sh waits for that one); setup.sh refuses while one started by hand runs
 ls -l etc/                                        # the env files there; review2-*.env may be missing (setup.sh writes them)
 grep COMPOSE_PROFILES .env                        # emulated on the Studio; review2 stays off until it is registered
 grep -l '^OMARCHY_WORKER_TOKEN=omw_' etc/review2-*.env   # a review2 registered already: add review2 to COMPOSE_PROFILES first
@@ -455,7 +455,12 @@ What `setup.sh` does, in order, and what a failure leaves:
    this host's profiles and under every profile the file names. It also
    checks that `.env`'s `POOL_ROOT` is this directory, that the updater
    image here (pulled first) is from #277 on, and that every service
-   compose would run holds a worker token. Any of these fails with exit 4
+   compose would run holds a worker token. It also refuses when another
+   `setup.sh` runs on this directory, when a `rollout.sh` started by hand
+   still runs, when `.env`'s `COMPOSE_FILE` names a file by an absolute or
+   `../` path (name the files relative to `/srv/omarchy-pool` instead), and,
+   before anything else, when the new files are in already (a killed step:
+   see below). Any of these fails with exit 4
    and changes none of the host's files, units or containers (only the
    updater image may have been pulled): the timer runs on. Fix what it names (for a
    missing token: `register.sh`, or leave that service's profile out of
@@ -465,13 +470,14 @@ What `setup.sh` does, in order, and what a failure leaves:
    own): no rollout reaches it until its profile is in `COMPOSE_PROFILES`.
 2. **It stops the timer**, as its user, then waits while a rollout the
    timer started is still draining. The timer is stopped, not disabled,
-   until step 5: a reboot or a power cut before then brings it back. A
+   until step 5: a reboot or a power cut before then brings it back (after
+   step 3 has begun, see below what else it leaves). A
    drain takes up to 3 h; `setup.sh` waits up to 4 h (the old rollout also
    pulls and waits for its brokers). If the rollout still runs after 4 h,
    it enables the timer again, installs nothing, and exits 3. Paste again
-   later. If its user's systemd does not answer, it exits 3 with the
-   commands to run; if it stops answering once the timer was stopped, it
-   also tries to enable the timer again, and says whether it could. The
+   later. If its user's systemd does not answer, it exits 3 and tries to
+   enable the timer again (its stop may have taken all the same), and says
+   whether it could. The
    wait can last 4 h: run the paste in `tmux` (or `screen`).
 3. **It installs the files.** `compose.yml`, `rollout.sh` and
    `register.sh` go in, with an env file (mode 600) for every `env_file`
@@ -485,7 +491,14 @@ What `setup.sh` does, in order, and what a failure leaves:
    removes the updater, puts the old files back, enables the timer again
    and exits 5. The host rolls out through its timer as before. Read
    `docker compose logs updater` from the output, fix the cause, paste
-   again. The updater's first round starts at once: if it was draining a
+   again. If it cannot confirm the updater stopped (docker does not
+   answer, or the updater still runs), or an old file does not copy back,
+   it keeps all the new files instead, never one old file beside a new
+   one, and still enables the timer, which then runs the new `rollout.sh`:
+   it only wakes or starts the updater. It says so; take the way back
+   below once that is fixed (docker answers, or the copy can succeed),
+   then paste again. Each docker and systemctl call of
+   this put-back ends within 60 s. The updater's first round starts at once: if it was draining a
    worker when it was stopped, that worker finishes its drain (up to 3 h),
    and the timer's next rollout then starts it: up to about 3 h 20 min.
 5. **Only then does it disable the timer and remove its units**, and say
@@ -494,13 +507,38 @@ What `setup.sh` does, in order, and what a failure leaves:
 An interrupt at any point before step 5 (Ctrl-C, a stop, a dropped
 session, or its output gone, such as a `| tee` stopped by Ctrl-C) puts
 back whatever was done so far: the updater it started stopped and
-removed, the old files back, the timer enabled again. It then exits 130,
+removed, the old files back, the timer enabled again (or, as in step 4,
+the new files kept when that is not safe). It then exits 130,
 143, 129 or 141 (the signal's), never 0. Paste again.
 
-A `setup.sh` killed outright (`kill -9`, the OOM killer) puts nothing
-back: the timer stays stopped until the next reboot, and the new files
-may be in already. To bring the timer back, run this as the user:
-`systemctl --user start omarchy-pool-rollout.timer`. Then paste again.
+A `setup.sh` killed outright (`kill -9`, the OOM killer), or cut off by a
+reboot or a power cut, puts nothing back. After a kill, the timer stays
+stopped until the next reboot; after a reboot, it is back. What else it
+left depends on when it stopped. If
+`~/.config/systemd/user/omarchy-pool-rollout.timer` is gone, the step had
+finished (it removes the timer's units last): the updater rolls the host
+out (`docker compose ps updater`). Otherwise, as the user, run this (two
+spaces before `updater:`):
+
+```bash
+cd /srv/omarchy-pool && grep -c '^  updater:' compose.yml
+```
+
+- **It prints 0**: nothing was installed. After a kill, bring the timer
+  back, `systemctl --user start omarchy-pool-rollout.timer`, then paste
+  again. After a reboot the timer is back already: paste again.
+- **It prints 1**: the new files are in, or some of them. Do not start the
+  timer: it would run the old `rollout.sh` beside the updater, or the new
+  one, which starts an updater that passed none of the checks. After a
+  reboot it runs already, which the way back fixes. Take the way back
+  below (it picks the backup from before the updater, stops any updater
+  and enables the timer), then paste again. Until then, `setup.sh`
+  refuses (exit 4) and says so.
+
+Right after a kill, a paste again may say that another `setup.sh` runs:
+a child of the killed one (a `docker` call waiting on the engine) still
+holds `.setup.lock`. `fuser -v /srv/omarchy-pool/.setup.lock` names it;
+end it, or wait until docker answers, then paste again.
 
 The `./rollout.sh` at the end then only wakes the updater. If it fails
 after `setup.sh` succeeded, the updater still runs and rolls the host out:

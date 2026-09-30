@@ -630,6 +630,25 @@ the env files the step wrote that still hold the untouched placeholder:
 a created `etc/agent.env` with a key and a quoted token stay, and after a
 `setup.sh` killed as it wrote its first placeholder, which the backup
 lists already, no review2 placeholder is left.
+The one-time step never leaves the host with both rollouts or neither
+(#298). A TERM during the timer's stop, and a stop that exits 1 while the
+timer ends inactive, both end with the timer enabled again. A put-back
+whose `docker compose stop`/`rm` of the updater fails while it still
+runs, or whose `docker ps` check gets no answer, or whose copy of an old
+file fails, keeps every new file (never one old file beside a new one),
+enables the timer and names the way back, and a paste again is then
+refused; one whose docker hangs on the updater's stop ends through its
+timeout (shortened by `SETUP_PUT_BACK_TIMEOUT`). A `setup.sh` killed by
+its recorded PID after the install, or between the `compose.yml` and
+`rollout.sh` installs, then pasted again (or a host with only the
+kick-v1 `rollout.sh`) exits 4 before any pull or `systemctl`, and after the way back a paste again finishes with a Done
+line that names a backup without the updater. A second `setup.sh` while
+one holds `.setup.lock`, a `rollout.sh` started by hand (a stub `pgrep`)
+while the timer's service is inactive, and a `COMPOSE_FILE` with an
+absolute or `../` path are refused with 4 before the timer is touched.
+The runbook's kill paragraph checks `grep -c '^  updater:' compose.yml`
+and, when it prints 1, sends the operator to the way back and never to
+the timer.
 `bash tests/rollback-workflow.sh` (CI) runs `factory/bin/release-rollback`,
 what `rollback.yml` runs, against stubbed buildx, cosign and wrangler in a
 repository with release tags: the release's `:vX.Y.Z` asked for and its
