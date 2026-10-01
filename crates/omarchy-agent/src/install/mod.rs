@@ -390,15 +390,28 @@ pub(crate) fn measure(
             Err(e) => r.blockers.push(e),
         }
         let exe = o.exe.clone().or_else(|| std::env::current_exe().ok());
-        match exe {
+        match &exe {
             Some(exe) => {
-                if let Err(e) = own_hash(m, &exe) {
+                if let Err(e) = own_hash(m, exe) {
                     r.blockers.push(e);
                 }
             }
             None => r
                 .blockers
                 .push("this binary's path is unknown, so its hash cannot be checked".into()),
+        }
+        // The unit starts `<data>/current/omarchy-agent`, where install.sh puts it: a
+        // `--data-dir` or `OMARCHY_AGENT_DATA` other than install.sh's has no agent there.
+        let current = p.data.join("current").join("omarchy-agent");
+        let same = |a: &Path| a.canonicalize().ok() == current.canonicalize().ok();
+        if !exe.as_deref().is_some_and(same) {
+            if let Err(e) = own_hash(m, &current) {
+                r.blockers.push(format!(
+                    "the unit would start {}, which is not this release's agent ({e}); run install.sh, or give the data directory it used ({})",
+                    current.display(),
+                    p.data.display()
+                ));
+            }
         }
     }
 
@@ -472,11 +485,28 @@ pub(crate) fn measure(
     }
     // The directories install would write into, where they exist already (prep-root.sh
     // makes the work root): the agent's own, writable by it alone.
-    for d in [&p.data, &set_dir, &work_root, &secrets_dir] {
+    // Nothing in a data directory that fails it is run (its tools/ above all).
+    let tools_dir = p.data.join("tools");
+    let mut trusted = true;
+    for d in [&p.data, &tools_dir, &set_dir, &work_root, &secrets_dir] {
         if d.exists() {
             if let Err(e) = files::owned_dir(d) {
+                trusted &= *d != p.data && *d != tools_dir;
                 r.blockers.push(e);
             }
+        }
+    }
+    // A work root to make (prep-root.sh makes it where root owns the parent) must be
+    // makeable by this user, or apply would fail after the person confirmed.
+    if !work_root.exists() {
+        let parent = existing_ancestor(&work_root);
+        if rustix::fs::access(&parent, rustix::fs::Access::WRITE_OK).is_err() {
+            r.blockers.push(format!(
+                "the work root {} does not exist and {} is not writable by this user: run factory/host/prep-root.sh --work-root {}",
+                work_root.display(),
+                parent.display(),
+                work_root.display()
+            ));
         }
     }
 
@@ -497,10 +527,16 @@ pub(crate) fn measure(
         }
     };
     let cli = match (docker_cli, &manifest) {
+        _ if !trusted => {
+            r.notes.push(
+                "the engine was not measured: the data directory's tools are not run until it is fixed".into(),
+            );
+            None
+        }
         (Some(c), _) => Some(c.to_path_buf()),
         (None, Some(m)) => match tools::platform() {
             Some(platform) => {
-                match tools::ensure(&p.data.join("tools"), m, platform, &mut |u| sys.download(u)) {
+                match tools::ensure(&tools_dir, m, platform, &mut |u| sys.download(u)) {
                     Ok(t) => Some(t.docker),
                     Err(e) => {
                         r.blockers
@@ -618,20 +654,30 @@ pub(crate) fn measure(
         r.notes.push("egress: not probed without an engine".into());
     }
 
-    // A GITHUB_TOKEN in the file to copy is probed now, before anything is written.
-    if let Some(f) = &o.agent_env_from {
-        match std::fs::read_to_string(f)
+    // A GITHUB_TOKEN in the file to copy, or in the agent.env a re-run keeps, is probed
+    // now, before anything is written: its scopes can widen on GitHub with the same value.
+    let kept = secrets_dir.join("agent.env");
+    let keys_from = o
+        .agent_env_from
+        .as_ref()
+        .map(|f| ("--agent-env-from", f.clone()))
+        .or_else(|| {
+            (kept.is_file() && files::check_owner_file(&kept).is_ok())
+                .then_some(("agent.env", kept))
+        });
+    if let Some((what, f)) = keys_from {
+        match std::fs::read_to_string(&f)
             .map_err(|e| format!("{}: {e}", f.display()))
             .and_then(|t| secrets::parse(&t))
         {
             Ok(keys) => {
                 if let Some((_, t)) = keys.iter().find(|(k, _)| k == "GITHUB_TOKEN") {
                     if let Err(e) = checks::github_token(sys.github_scopes(t)) {
-                        r.blockers.push(e);
+                        r.blockers.push(format!("{}: {e}", f.display()));
                     }
                 }
             }
-            Err(e) => r.blockers.push(format!("--agent-env-from: {e}")),
+            Err(e) => r.blockers.push(format!("{what}: {e}")),
         }
     }
 
@@ -714,10 +760,16 @@ pub(crate) fn apply(
 
     // The envelope, confirmed before anything is written.
     let shown = envelope::render(ready.existing.as_deref(), v, None).map_err(Failure::Refused)?;
+    let exception = ready.legacy.is_some() && ready.facts.isolation() == capacity::Isolation::Root;
     let ask = format!(
-        "{shown}\nThe host's envelope{}. Write it and enroll this host?",
+        "{shown}\nThe host's envelope{}{}. Write it and enroll this host?",
         if v.rootful {
             " (rootful: the dispatcher holds a root daemon's socket, root-equivalent)"
+        } else {
+            ""
+        },
+        if exception {
+            "; --legacy makes this daemon without userns-remap the recorded exception until P6"
         } else {
             ""
         }
@@ -904,7 +956,8 @@ fn agent_keys(
 }
 
 /// `omarchy-agent uninstall`: stops the agent, removes its unit, the bundle's containers
-/// and networks, task containers and sidecars (only here), and the bundle's files. The
+/// and networks, task containers and sidecars (only here), an egress probe's leftovers,
+/// and the bundle's files. A user manager it cannot reach stops it before anything goes. The
 /// recorded legacy project is never touched; the host identity, agent.toml, the agent
 /// binaries and the secrets directory stay, so a new install keeps the identity.
 pub fn uninstall(
@@ -913,7 +966,7 @@ pub fn uninstall(
     out: &mut dyn Write,
 ) -> Result<Vec<String>, String> {
     let mut left = Vec::new();
-    unit::stop(sys);
+    unit::stop(sys)?;
     files::remove(&places.unit_dir(), unit::NAME)?;
     unit::reload(sys);
     say(out, &format!("stopped and removed {}", unit::NAME));
@@ -937,12 +990,18 @@ pub fn uninstall(
         .and_then(|s| s.tools)
         .and_then(|pins| tools::open(&places.data.join("tools"), &pins).ok())
         .map(|t| t.docker);
+    // Containers that could not be removed keep their set (its dispatcher.env) until a
+    // later uninstall removes them.
+    let mut keep_set = false;
     match (socket, cli) {
         (Some(socket), Some(cli)) => {
             let d = Docker { cli, socket };
             match remove_containers(&d, &project, host.as_deref(), legacy_project.as_deref()) {
                 Ok(n) => say(out, &format!("removed {n} container(s) of {project} and its tasks")),
-                Err(e) => left.push(format!("needs a person: the containers were not removed ({e})")),
+                Err(e) => {
+                    keep_set = true;
+                    left.push(format!("needs a person: the containers were not removed ({e}); sets/ is kept, run uninstall again"));
+                }
             }
         }
         _ => left.push(format!(
@@ -950,6 +1009,9 @@ pub fn uninstall(
         )),
     }
     for d in ["bundles", "staging", "last-good", "sets"] {
+        if keep_set && d == "sets" {
+            continue;
+        }
         let path = places.data.join(d);
         match std::fs::symlink_metadata(&path) {
             Ok(m) if m.is_dir() => {
@@ -1024,6 +1086,7 @@ fn remove_containers(
     if let Some(h) = host {
         filters.push(format!("label={HOST_LABEL}={h}"));
     }
+    egress::sweep(d)?;
     let containers = labelled(d, &["ps"], &filters)?;
     let ids = legacy::removable(&containers, legacy);
     if !ids.is_empty() {

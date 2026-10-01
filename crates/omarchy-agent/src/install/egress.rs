@@ -9,6 +9,11 @@
 //! DOCKER-USER rules guard on a rootful host. Seam for the egress sidecar's issue: once
 //! the worker image has the sidecar, the probe runs on an internal network behind it, as
 //! every task will, and must reach the public address through it.
+//!
+//! Until then a rootless host is refused here: rootless podman's network (pasta) carries
+//! the host's own address into the task's namespace, so the LAN target answers `refused`
+//! from inside it, and prep-root.sh's DOCKER-USER rules are rootful only. Seam for the
+//! egress sidecar's issue too: a rootless host passes once its tasks egress through it.
 
 use std::net::Ipv4Addr;
 
@@ -53,18 +58,46 @@ impl Targets {
     }
 }
 
-/// The probe task's script: busybox's `nc -z`, or bash's `/dev/tcp` where there is no nc
-/// (the Arch build image). Each target prints `egress <name> open|refused|blocked`.
+/// The probe task's script: bash's `/dev/tcp` where there is bash (the Arch build image),
+/// else `nc -z`. Each target prints `egress <name> open|refused|blocked`. busybox's and
+/// OpenBSD's `nc -z` print nothing for a refused connection and return at once, while a
+/// target that does not answer takes the whole `-w 4`: a quiet failure in under 3 s is a
+/// refusal.
 pub(crate) const SCRIPT: &str = r#"reach() {
-  if command -v nc >/dev/null 2>&1; then out=$(nc -z -w 4 "$2" "$3" 2>&1 </dev/null); rc=$?
-  else out=$(timeout 5 bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$2" "$3" 2>&1); rc=$?; fi
+  if command -v bash >/dev/null 2>&1; then out=$(timeout 5 bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$2" "$3" 2>&1); rc=$?
+  else s=$(date +%s); out=$(nc -z -w 4 "$2" "$3" 2>&1 </dev/null); rc=$?
+    if [ "$rc" != 0 ] && [ -z "$out" ] && [ $(( $(date +%s) - s )) -lt 3 ]; then out=refused; fi; fi
   if [ "$rc" = 0 ]; then r=open; else case "$out" in *efused*) r=refused ;; *) r=blocked ;; esac; fi
   echo "egress $1 $r"
 }
 while [ $# -ge 3 ]; do reach "$1" "$2" "$3"; shift 3; done
 "#;
 
-/// Runs the probe task on its own network in `subnet`, and removes both.
+const LABEL: &str = "org.omarchy-pool.probe=egress";
+
+/// Removes every probe container and network, this run's or one an earlier run left
+/// behind (interrupted, or its engine did not answer): a leftover network would hold the
+/// probe's /28 and refuse every later install. Uninstall calls it too.
+pub(crate) fn sweep(docker: &Docker) -> Result<(), String> {
+    let filter = format!("label={LABEL}");
+    let ids = docker.run(&["ps", "-aq", "--no-trunc", "--filter", &filter])?;
+    let ids: Vec<&str> = ids.split_whitespace().collect();
+    if !ids.is_empty() {
+        let mut args = vec!["rm", "-f"];
+        args.extend(&ids);
+        docker.run(&args)?;
+    }
+    for n in docker
+        .run(&["network", "ls", "-q", "--filter", &filter])?
+        .split_whitespace()
+    {
+        docker.run(&["network", "rm", n])?;
+    }
+    Ok(())
+}
+
+/// Runs the probe task on its own network in `subnet`, and removes both: a network it
+/// could not remove is reported, not left behind silently.
 pub(crate) fn probe(
     docker: &Docker,
     image: &str,
@@ -72,8 +105,8 @@ pub(crate) fn probe(
     t: &Targets,
 ) -> Result<String, String> {
     let net = format!("omarchy-egress-probe-{}", std::process::id());
-    let label = "org.omarchy-pool.probe=egress";
-    let _ = docker.run(&["network", "rm", &net]);
+    let label = LABEL;
+    sweep(docker).map_err(|e| format!("an earlier egress probe's leftovers: {e}"))?;
     docker
         .run(&[
             "network",
@@ -104,9 +137,16 @@ pub(crate) fn probe(
     .collect();
     args.extend(t.args());
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let out = docker.run(&refs);
-    let _ = docker.run(&["network", "rm", &net]);
-    out.map_err(|e| format!("the egress probe task: {e}"))
+    let out = docker
+        .run(&refs)
+        .map_err(|e| format!("the egress probe task: {e}"));
+    let removed = sweep(docker).map_err(|e| {
+        format!(
+            "the egress probe's network {net} was not removed ({e}); the next preflight removes it"
+        )
+    });
+    let out = out?;
+    removed.map(|()| out)
 }
 
 /// What the probe's output says: the blockers, none when only the public address answered.

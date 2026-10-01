@@ -623,7 +623,11 @@ fn host_min(info: &str, egress: &str, min_cpus: u32) -> Host {
         "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n",
     )
     .unwrap();
-    fs::write(root.join("agent"), b"the agent this release ships").unwrap();
+    // Where install.sh puts the agent: `<data>/versions/<v>/`, `current` pointing at it.
+    let agent = root.join("data/versions/v1.0.0/omarchy-agent");
+    fs::create_dir_all(agent.parent().unwrap()).unwrap();
+    fs::write(&agent, b"the agent this release ships").unwrap();
+    std::os::unix::fs::symlink("versions/v1.0.0", root.join("data/current")).unwrap();
     let mut m = tests_support::manifest_json("v1.20.0", "v1.0.0", &[]);
     m["created"] = "2027-01-14T08:00:00Z".into();
     m["agent"]["version"] = crate::AGENT_VERSION.into();
@@ -652,7 +656,7 @@ fn host_min(info: &str, egress: &str, min_cpus: u32) -> Host {
     fs::write(
         &docker,
         format!(
-            "#!/bin/sh\necho \"$*\" >> {r}/docker.log\ncase \" $* \" in\n  *\" info \"*) cat {r}/info ;;\n  *\" network create \"*|*\" network rm \"*) ;;\n  *\" network ls \"*|*\" network inspect \"*) ;;\n  *omarchy-egress-probe-*) cat {r}/egress ;;\n  *\" run \"*) cat {r}/probe ;;\n  *) exit 2 ;;\nesac\n",
+            "#!/bin/sh\necho \"$*\" >> {r}/docker.log\ncase \" $* \" in\n  *\" info \"*) cat {r}/info ;;\n  *\" network ls -q --filter label=org.omarchy-pool.probe=egress \"*) cat {r}/stale 2>/dev/null || true ;;\n  *\" network create \"*|*\" network rm \"*|*\" ps \"*) ;;\n  *\" network ls \"*|*\" network inspect \"*) ;;\n  *omarchy-egress-probe-*) cat {r}/egress ;;\n  *\" run \"*) cat {r}/probe ;;\n  *) exit 2 ;;\nesac\n",
             r = root.display()
         ),
     )
@@ -690,7 +694,7 @@ fn host_min(info: &str, egress: &str, min_cpus: u32) -> Host {
         token: None,
         wait: Duration::ZERO,
         poll: Duration::from_millis(10),
-        exe: Some(root.join("agent")),
+        exe: Some(agent),
     };
     Host {
         root,
@@ -799,10 +803,17 @@ fn preflight_fails_the_install_when_a_task_reaches_the_lan_and_checks_the_releas
     );
     let log = fs::read_to_string(h.root.join("docker.log")).unwrap();
     assert!(log.contains("network create --subnet 10.231.255.240/28 --label org.omarchy-pool.probe=egress omarchy-egress-probe-"), "{log}");
-    assert!(log.contains("network rm omarchy-egress-probe-"), "{log}");
+    // Swept before and after: every labelled probe container and network.
+    let sweep = "network ls -q --filter label=org.omarchy-pool.probe=egress";
+    assert_eq!(log.matches(sweep).count(), 2, "{log}");
+    assert!(
+        log.contains("ps -aq --no-trunc --filter label=org.omarchy-pool.probe=egress"),
+        "{log}"
+    );
 
     let mut h = host(INFO, EGRESS_OK);
     fs::write(h.root.join("agent"), "another binary").unwrap();
+    h.options.exe = Some(h.root.join("agent"));
     h.options.pool = Some("https://evil.example".into());
     let (r, _) = measure_on(&h, &mut Fake::default());
     let s = r.screen();
@@ -828,6 +839,79 @@ fn preflight_fails_the_install_when_a_task_reaches_the_lan_and_checks_the_releas
     assert!(
         r.screen()
             .contains("GITHUB_TOKEN carries the scopes repo, workflow"),
+        "{}",
+        r.screen()
+    );
+}
+
+#[test]
+fn an_earlier_probes_network_is_removed_before_the_probe_needs_its_subnet() {
+    let h = host(INFO, EGRESS_OK);
+    // Left by an install interrupted mid-probe (another pid): it holds the probe's /28.
+    fs::write(h.root.join("stale"), "omarchy-egress-probe-1\n").unwrap();
+    let (r, ready) = measure_on(&h, &mut Fake::default());
+    assert!(r.ok() && ready.is_some(), "{}", r.screen());
+    let log = fs::read_to_string(h.root.join("docker.log")).unwrap();
+    let rm = log.find("network rm omarchy-egress-probe-1").expect(&log);
+    assert!(rm < log.find("network create --subnet").unwrap(), "{log}");
+}
+
+#[test]
+fn preflight_refuses_what_apply_would_fail_on_and_runs_nothing_from_a_foreign_data_dir() {
+    // A data directory other than install.sh's: the unit's binary is not there.
+    let mut h = host(INFO, EGRESS_OK);
+    h.options.places.data = h.root.join("elsewhere");
+    let (r, _) = measure_on(&h, &mut Fake::default());
+    assert!(
+        r.screen().contains("the unit would start") && r.screen().contains("run install.sh"),
+        "{}",
+        r.screen()
+    );
+
+    // A work root under a directory this user cannot write: prep-root.sh's.
+    let mut h = host(INFO, EGRESS_OK);
+    fs::create_dir_all(h.root.join("srv")).unwrap();
+    fs::set_permissions(h.root.join("srv"), fs::Permissions::from_mode(0o555)).unwrap();
+    h.options.work_root = Some(h.root.join("srv/omarchy-pool/host"));
+    let (r, _) = measure_on(&h, &mut Fake::default());
+    fs::set_permissions(h.root.join("srv"), fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        r.screen()
+            .contains("is not writable by this user: run factory/host/prep-root.sh"),
+        "{}",
+        r.screen()
+    );
+
+    // A data directory others may write: its tools are not run, the engine not asked.
+    let h = host(INFO, EGRESS_OK);
+    fs::set_permissions(&h.options.places.data, fs::Permissions::from_mode(0o775)).unwrap();
+    let (r, ready) = measure_on(&h, &mut Fake::default());
+    assert!(ready.is_none());
+    assert!(
+        r.screen().contains("group- or world-writable"),
+        "{}",
+        r.screen()
+    );
+    assert!(!h.root.join("docker.log").exists());
+
+    // The agent.env a re-run keeps is probed too: a token's scopes widen on GitHub.
+    let h = host(INFO, EGRESS_OK);
+    fs::create_dir_all(h.root.join("secrets")).unwrap();
+    fs::set_permissions(h.root.join("secrets"), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(h.root.join("secrets/agent.env"), "GITHUB_TOKEN=ghp_x\n").unwrap();
+    fs::set_permissions(
+        h.root.join("secrets/agent.env"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let mut sys = Fake {
+        scopes: Ok(Some("repo".into())),
+        ..Fake::default()
+    };
+    let (r, _) = measure_on(&h, &mut sys);
+    assert!(
+        r.screen()
+            .contains("agent.env: GITHUB_TOKEN carries the scopes repo"),
         "{}",
         r.screen()
     );
@@ -1092,11 +1176,34 @@ fn uninstall_removes_the_unit_and_the_bundle_and_keeps_the_identity() {
     assert!(!p.data.join("bundles").exists() && !p.set_dir().exists());
     assert!(p.data.join("state/host.json").exists() && p.data.join("agent.toml").exists());
     assert_eq!(
-        sys.calls[0],
+        sys.calls[1],
         "systemctl --user disable --now omarchy-agent.service"
     );
     // No pinned CLI recorded in state.json: the containers are a person's, named.
     assert!(left[0].contains("org.omarchy-pool.agent.host"), "{left:?}");
+}
+
+#[test]
+fn uninstall_without_the_user_manager_removes_nothing_and_says_where_to_run_it() {
+    let h = host(INFO, EGRESS_OK);
+    let ready = ready_to_enroll(&h, r#"{"status":"active","token":null}"#);
+    apply(&h.options, &ready, &mut Fake::default(), &mut Vec::new())
+        .map_err(|e| e.to_string())
+        .unwrap();
+    let p = &h.options.places;
+    fs::create_dir_all(p.data.join("bundles")).unwrap();
+    // `sudo -iu omarchy`: no user bus, the agent still running under linger.
+    let mut sys = Fake {
+        systemd: false,
+        ..Fake::default()
+    };
+    let e = uninstall(p, &mut sys, &mut Vec::new()).unwrap_err();
+    assert!(
+        e.contains("needs a person") && e.contains("login session"),
+        "{e}"
+    );
+    assert!(p.unit_dir().join(unit::NAME).exists());
+    assert!(p.data.join("bundles").exists() && p.set_dir().exists());
 }
 
 /// The egress probe and a legacy project on a real engine (`tests/agent-install.sh`; it
@@ -1178,6 +1285,7 @@ mod engine_tests {
         let lp = format!("com.docker.compose.project={legacy_project}");
         let net = format!("{legacy_project}_default");
         let target_net = format!("{ours}-target");
+        let stale_net = format!("omarchy-egress-probe-stale-{id}");
         // Everything this test made goes, however it ends (labels and names are its own).
         let filters = vec![
             format!("label={lp}"),
@@ -1186,9 +1294,13 @@ mod engine_tests {
         drop(Cleanup(
             d.clone(),
             filters.clone(),
-            vec![net.clone(), target_net.clone()],
+            vec![net.clone(), target_net.clone(), stale_net.clone()],
         ));
-        let _cleanup = Cleanup(d.clone(), filters, vec![net.clone(), target_net.clone()]);
+        let _cleanup = Cleanup(
+            d.clone(),
+            filters,
+            vec![net.clone(), target_net.clone(), stale_net.clone()],
+        );
 
         // The legacy set: two containers on its own network, one bind mount.
         let work = tempdir();
@@ -1340,13 +1452,31 @@ mod engine_tests {
         };
         let b = probe_on(&reach_lan);
         assert!(b.len() == 1 && b[0].contains("LAN address"), "{b:?}");
+        // A closed port on it answers too: refused, not blocked.
+        let closed = egress::Targets {
+            forbidden: vec![("lan", "10.198.7.10".into(), 8081)],
+            public: ("10.198.7.10".into(), 8080),
+        };
+        let b = probe_on(&closed);
+        assert!(b.len() == 1 && b[0].contains("port 8081: refused"), "{b:?}");
         let only_public = egress::Targets {
             forbidden: vec![("metadata", "192.0.2.1".into(), 80)],
             public: ("10.198.7.10".into(), 8080),
         };
         let b = probe_on(&only_public);
         assert!(b.is_empty(), "{b:?}");
-        // And the probe itself, on its own network: it is created and removed again.
+        // And the probe itself, on its own network: it is created and removed again, and
+        // a network an interrupted probe left on its /28 is no reason to refuse.
+        d.run(&[
+            "network",
+            "create",
+            "--subnet",
+            "10.197.7.240/28",
+            "--label",
+            "org.omarchy-pool.probe=egress",
+            &stale_net,
+        ])
+        .unwrap();
         let t = egress::Targets {
             forbidden: vec![("metadata", "192.0.2.1".into(), 80)],
             public: ("192.0.2.2".into(), 80),

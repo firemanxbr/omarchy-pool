@@ -75,9 +75,28 @@ pub(crate) fn start(sys: &mut dyn Sys) -> Result<(), String> {
     Ok(())
 }
 
-/// The unit stopped and disabled (uninstall); a unit that is not there is no error.
-pub(crate) fn stop(sys: &mut dyn Sys) {
-    let _ = sys.run("systemctl", &["--user", "disable", "--now", NAME]);
+/// The unit stopped and disabled (uninstall). A unit the user manager does not know is
+/// no error; a user manager this session cannot reach (no user bus: `sudo -iu`, no
+/// `XDG_RUNTIME_DIR`) is a person's, before anything is removed: the agent would go on
+/// running, and roll the bundle out again.
+pub(crate) fn stop(sys: &mut dyn Sys) -> Result<(), String> {
+    let person = |e: String| {
+        format!(
+            "needs a person: systemctl --user could not be reached ({e}); run uninstall in a login session of this user; nothing was removed"
+        )
+    };
+    let load = sys
+        .run(
+            "systemctl",
+            &["--user", "show", "--property=LoadState", "--value", NAME],
+        )
+        .map_err(person)?;
+    if load.trim() == "not-found" {
+        return Ok(());
+    }
+    sys.run("systemctl", &["--user", "disable", "--now", NAME])
+        .map(drop)
+        .map_err(person)
 }
 
 pub(crate) fn reload(sys: &mut dyn Sys) {

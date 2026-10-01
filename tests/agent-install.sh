@@ -3,9 +3,10 @@
 # §13.2, §13.3), with the pinned docker CLI of factory/bundle/manifest.toml:
 #
 #   - the egress probe: a task that reaches a stand-in "LAN" address (a
-#     container answering on the probe's network) fails it; one that reaches
-#     only the stand-in public address passes; the probe's own network is
-#     created in the task subnets and removed again;
+#     container answering on the probe's network, on an open port or a closed
+#     one) fails it; one that reaches only the stand-in public address passes;
+#     the probe's own network is created in the task subnets and removed
+#     again, after a network a probe left on its /28 was swept;
 #   - a stand-in legacy compose project (two containers, a network, a bind
 #     mount) is read as preflight reads it, and uninstall's removal takes the
 #     new host's task container but leaves every legacy container running,

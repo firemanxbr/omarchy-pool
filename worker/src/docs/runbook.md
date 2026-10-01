@@ -625,7 +625,7 @@ curl -fsSL https://github.com/firemanxbr/omarchy-pool/releases/latest/download/i
 | `--agent-env-from <file>` | copies the agent keys from an existing file (the Studio's `etc/agent.env`) after showing which keys it holds; without it they are asked for on `/dev/tty`, not shown |
 | `--max-units`, `--max-cpus`, `--max-mem-gb` | the owner's caps, lower than detected only |
 | `--yes` | confirms the envelope (and the keys' copy) without a terminal |
-| `--pool <origin>`, `--data-dir <dir>`, `--wait-minutes <n>` | a pool the release signs; the data directory; how long to wait for your Confirm |
+| `--pool <origin>`, `--data-dir <dir>`, `--wait-minutes <n>` | a pool the release signs; the data directory (it must be the one install.sh put the agent in, `omarchy-agent` under `XDG_DATA_HOME` or `~/.local/share`: the unit starts `<data>/current/omarchy-agent`); how long to wait for your Confirm |
 
 It verifies the release bundle and that it is the agent that release ships,
 fetches the release's pinned docker CLI and compose plugin into `tools/`,
@@ -639,12 +639,18 @@ credentials within the user's reach (SSH keys, a `gh` login, stored git
 credentials, browser profiles: a warning on a dedicated host, a blocker
 otherwise), the user manager (`XDG_RUNTIME_DIR` and its D-Bus), the task
 subnets against the host's routes and other projects' networks, the owner
-files' owners and modes, the legacy project, a `GITHUB_TOKEN` to copy
-(public read only: a classic token with no scope; any scope, or a token
+files' owners and modes, the legacy project, a `GITHUB_TOKEN` to copy or in
+the `agent.env` a re-run keeps (public read only: a classic token with no scope; any scope, or a token
 GitHub names no scopes for, is refused), and the **egress probe**: a task
 on its own network in the task subnets must fail to reach `169.254.169.254`,
 the default gateway and the host's LAN address and must reach GitHub, which
-on a rootful host is what prep-root.sh's `DOCKER-USER` rules give. A socket
+on a rootful host is what prep-root.sh's `DOCKER-USER` rules give. Until the
+egress sidecar lands, a rootless host fails it and is refused: rootless
+podman's network carries the host's own address into the task's namespace,
+and the `DOCKER-USER` rules are rootful only. Leftovers of an interrupted
+probe (labelled `org.omarchy-pool.probe=egress`) are removed before it
+runs. A work root that does not exist under a directory the user cannot
+write is a blocker naming prep-root.sh. A socket
 that refuses the user (`EACCES`) is "needs a person: log out and back in,
 or reboot", not a crash loop.
 
@@ -669,7 +675,10 @@ identity, the agent keys and your edits to `agent.toml`.
 containers and networks, task containers and sidecars (labelled
 `org.omarchy-pool.agent.host=<host>`) and the bundle's files; it never
 touches the legacy project, and keeps the identity, `agent.toml` and the
-secrets directory.
+secrets directory. Run it in a login session of the agent's user: without
+a reachable `systemctl --user` (`sudo -iu`, no `XDG_RUNTIME_DIR`) it stops
+as "needs a person" before removing anything, since the agent would keep
+running under linger.
 
 `tests/agent-install.sh` runs the egress probe and the legacy project against
 a real engine in CI. What needs a VM, by hand on Ubuntu LTS, Fedora and
