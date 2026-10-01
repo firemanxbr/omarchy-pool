@@ -17,7 +17,7 @@ import { AI_CRAWLERS, API_HOST, DASHBOARD_HOST, LEGACY_API_HOST } from "../meta"
 import { DOCS_TREE } from "./docs-tree";
 
 /** The paths no crawler indexes: the API, the sign-in, and what is a reader's own or a machine's — not a page for a search. A worker's page and the Workers list name each worker's owner and its host's label (#299): people's pages, as /user/ is. */
-export const ROBOTS_DISALLOW: readonly string[] = ["/api/", "/auth/", "/me", "/diff", "/review", "/request", "/build/", "/user/", "/worker/", "/workers", "/pool/", "/setup", "/omarchy-worker"];
+export const ROBOTS_DISALLOW: readonly string[] = ["/api/", "/auth/", "/me", "/diff", "/review", "/request", "/build/", "/user/", "/worker/", "/hosts/", "/workers", "/pool/", "/setup", "/omarchy-worker"];
 
 /** The pages a search engine may list — a fixed list, read from no database: the landing, the docs and every chapter of the map, the doors that are a page and not a reader's own, and the footer's Agents (#249), which reads nothing at all. /packages is drawn from the API's answer (a D1 read on an edge miss, kept five minutes; routes/browse.ts), and a crawler walks its default pages forward only (pages/browse.ts). Package pages are found by the links, not listed here, and an address that redirects (index.ts MOVED: /pipeline and /security since #240) is not a page to list. */
 export const SITEMAP_PATHS: readonly string[] = ["/", "/docs", ...DOCS_TREE.map((c) => c.href), "/packages", "/status", "/factory", "/people", "/agents"];

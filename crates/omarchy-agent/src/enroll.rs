@@ -1,0 +1,596 @@
+//! Enrollment, the agent's half (#321, design v2 §6.1 steps 1-5, §13.2 step 6): the
+//! host key, `POST /api/v1/hosts/enroll` with the one-time token from the environment
+//! (never argv), the fingerprint printed for the owner to compare, the wait for the
+//! owner's Confirm, and the host worker token written for the dispatcher.
+//!
+//! What comes before it at install — the verified bundle, preflight, the runtime and
+//! the capacity detection that writes `run/capacity.json` — is #317's and #333's; the
+//! rotation every 30 days is called from the run loop (#315) through [`fetch_token`].
+//! Re-running it keeps the identity: a machine that enrolled goes straight to the wait
+//! or the token — and keeps the worker token it holds, since every fetch rotates it
+//! (the one it replaces works ten more minutes only, so two fetches in a row would cut
+//! off a running dispatcher). Rotation is `omarchy-agent token`, and the run loop's
+//! (#315).
+
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use crate::host::{self, HostKey, Identity};
+use crate::pool::{shown, Answer, Pool};
+
+/// Where the agent keeps its files, under its data directory (install.sh's
+/// `${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-agent`).
+#[derive(Debug, Clone)]
+pub struct Paths {
+    /// The host key and `host.json`.
+    pub state: PathBuf,
+    /// The host set: `etc/dispatcher.env`, `run/capacity.json`.
+    pub set: PathBuf,
+}
+
+impl Paths {
+    pub fn under(data: &Path) -> Self {
+        Self {
+            state: data.join("state"),
+            set: data.join("sets").join("host"),
+        }
+    }
+    pub fn capacity(&self) -> PathBuf {
+        self.set.join("run").join("capacity.json")
+    }
+    pub fn dispatcher_env(&self) -> PathBuf {
+        self.set.join("etc").join("dispatcher.env")
+    }
+}
+
+pub struct Options {
+    /// The pool's origin; `None` keeps the one this machine enrolled with, or the default.
+    pub pool: Option<String>,
+    pub paths: Paths,
+    /// The `ome_` token, from `OMARCHY_ENROLL`; needed only for a machine not enrolled yet.
+    pub token: Option<String>,
+    /// How long to wait for the owner's Confirm, and how often to ask.
+    pub wait: Duration,
+    pub poll: Duration,
+}
+
+#[derive(Debug)]
+pub enum Failure {
+    /// The pool, or this machine, said no: the reason, as it was given.
+    Refused(String),
+    /// Nothing was decided before the wait ran out; re-running continues where it stopped.
+    TimedOut(String),
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Failure::Refused(s) | Failure::TimedOut(s) => f.write_str(s),
+        }
+    }
+}
+
+impl From<String> for Failure {
+    fn from(s: String) -> Self {
+        Failure::Refused(s)
+    }
+}
+
+impl From<&str> for Failure {
+    fn from(s: &str) -> Self {
+        Failure::Refused(s.to_owned())
+    }
+}
+
+/// A token as the site prints it: `ome_` and 48 hex digits.
+pub fn valid_token(t: &str) -> bool {
+    t.strip_prefix("ome_")
+        .is_some_and(|h| all_of(h, 48, 48, lower_hex))
+}
+
+/// Whether every byte of `s` is one `ok` takes, and it has `min..=max` of them.
+fn all_of(s: &str, min: usize, max: usize, ok: impl Fn(u8) -> bool) -> bool {
+    (min..=max).contains(&s.len()) && s.bytes().all(ok)
+}
+
+fn lower_hex(b: u8) -> bool {
+    b.is_ascii_digit() || (b'a'..=b'f').contains(&b)
+}
+
+/// A host id as the pool mints it: `h_` and 10 base36 characters. It goes into
+/// `host.json` and every signed request's header, so nothing else is taken.
+pub fn valid_host(h: &str) -> bool {
+    h.strip_prefix("h_")
+        .is_some_and(|r| all_of(r, 10, 10, |b| b.is_ascii_digit() || b.is_ascii_lowercase()))
+}
+
+/// A host worker token as the pool mints it: `omw_` and 48 hex digits.
+pub fn valid_worker_token(t: &str) -> bool {
+    t.strip_prefix("omw_")
+        .is_some_and(|h| all_of(h, 48, 48, lower_hex))
+}
+
+/// A registration's id (`<login>-<host name>-<4 base36>`): letters, digits and dashes.
+pub fn valid_worker_id(w: &str) -> bool {
+    all_of(w, 1, 120, |b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// What the agent opens with: its key, which pool and which host — the identity this
+/// machine has, if it has one.
+fn open(o: &Options) -> Result<(HostKey, Option<Identity>, Pool), Failure> {
+    host::private_dir(&o.paths.state)?;
+    let identity = Identity::read(&o.paths.state)?;
+    let origin = match (&identity, &o.pool) {
+        (Some(id), Some(p)) if crate::pool::check_origin(p)? != id.pool => {
+            return Err(Failure::Refused(format!(
+                "this machine is {} on {}; enrolling it with {p} needs a new install",
+                id.host, id.pool
+            )))
+        }
+        (Some(id), _) => id.pool.clone(),
+        (None, Some(p)) => p.clone(),
+        (None, None) => crate::pool::DEFAULT_POOL.to_owned(),
+    };
+    let pool = Pool::new(&origin)?;
+    let key_path = o.paths.state.join(host::KEY_FILE);
+    // No identity yet: this enrollment's own key. One kept from an enrollment whose
+    // answer never arrived may be a host's already (the pool's key_taken).
+    let key = if identity.is_some() {
+        HostKey::load_or_create(&key_path)?
+    } else {
+        HostKey::create_fresh(&key_path)?
+    };
+    Ok((key, identity, pool))
+}
+
+/// The whole enrollment: enroll (once), wait for the owner's Confirm, write the token.
+pub fn run(o: &Options, out: &mut impl Write) -> Result<(), Failure> {
+    let (key, identity, pool) = open(o)?;
+    let id = if let Some(id) = identity {
+        say(
+            out,
+            &format!("this machine is host {} on {}", id.host, id.pool),
+        );
+        id
+    } else {
+        let id = enroll(o, &key, &pool, out)?;
+        id.write(&o.paths.state)?;
+        id
+    };
+    say(out, &format!("host key fingerprint: {}", key.fingerprint()));
+    let state = wait_for_confirm(o, &key, &pool, &id, out)?;
+    if !state["token"].is_null() && holds_token(&o.paths.dispatcher_env()) {
+        say(
+            out,
+            &format!(
+                "host {} keeps its worker token ({}); `omarchy-agent token` rotates it",
+                id.host,
+                o.paths.dispatcher_env().display()
+            ),
+        );
+        return Ok(());
+    }
+    fetch_token(o, &key, &pool, &id, out)
+}
+
+/// Whether the dispatcher's env file holds a worker token already.
+fn holds_token(env: &Path) -> bool {
+    std::fs::read_to_string(env).is_ok_and(|s| {
+        s.lines()
+            .filter_map(|l| l.strip_prefix("OMARCHY_WORKER_TOKEN="))
+            .any(valid_worker_token)
+    })
+}
+
+/// The host worker token, fetched again (a rotation): only for a machine that enrolled.
+pub fn rotate(o: &Options, out: &mut impl Write) -> Result<(), Failure> {
+    let (key, identity, pool) = open(o)?;
+    let id = identity.ok_or_else(|| {
+        Failure::Refused("this machine has not enrolled: run the command the site printed".into())
+    })?;
+    fetch_token(o, &key, &pool, &id, out)
+}
+
+fn say(out: &mut impl Write, line: &str) {
+    let _ = writeln!(out, "omarchy-agent: {line}");
+}
+
+fn enroll(
+    o: &Options,
+    key: &HostKey,
+    pool: &Pool,
+    out: &mut impl Write,
+) -> Result<Identity, Failure> {
+    let token = o.token.as_deref().ok_or_else(|| {
+        Failure::Refused(
+            "this machine has not enrolled yet, and OMARCHY_ENROLL is not set: add the host on your page and paste the command it prints"
+                .into(),
+        )
+    })?;
+    if !valid_token(token) {
+        return Err(Failure::Refused(
+            "OMARCHY_ENROLL is not a token the site prints (ome_ and 48 hex digits)".into(),
+        ));
+    }
+    let cap_path = o.paths.capacity();
+    let capacity: serde_json::Value = match std::fs::read(&cap_path) {
+        Ok(b) => serde_json::from_slice(&b).map_err(|e| format!("{}: {e}", cap_path.display()))?,
+        Err(e) => {
+            return Err(Failure::Refused(format!(
+                "{}: {e} — the capacity report comes from the capacity detection at install (#333)",
+                cap_path.display()
+            )))
+        }
+    };
+    let page_kb = capacity["page_kb"]
+        .as_u64()
+        .ok_or_else(|| format!("{}: no page_kb", cap_path.display()))?;
+    let isolation = capacity["isolation"]
+        .as_str()
+        .ok_or_else(|| format!("{}: no isolation", cap_path.display()))?;
+    let pubkey = key.public_b64u();
+    let body = serde_json::json!({
+        "token": token,
+        "pubkey": pubkey,
+        "sig": key.sign(&host::enroll_message(token, &pubkey)),
+        "hostname": hostname(),
+        "os": if cfg!(target_os = "macos") { "macos" } else { "linux" },
+        "arch": std::env::consts::ARCH,
+        "page_kb": page_kb,
+        "isolation": isolation,
+        "dedicated": capacity["dedicated"].as_bool(),
+        "runtime": capacity.get("runtime").cloned().unwrap_or(serde_json::Value::Null),
+        "agent_version": crate::AGENT_VERSION,
+        "capacity": capacity,
+    });
+    let a = pool.post("/api/v1/hosts/enroll", &body)?;
+    if !a.ok() {
+        return Err(Failure::Refused(format!(
+            "the pool refused the enrollment: {}",
+            a.why()
+        )));
+    }
+    let host = a.json["host"]
+        .as_str()
+        .filter(|h| valid_host(h))
+        .ok_or("the pool's answer names no host id (h_ and 10 base36 characters)")?
+        .to_owned();
+    say(
+        out,
+        &format!(
+            "enrolled as host {host} ({}) of {}, {} units; the pool says {}",
+            shown(a.json["name"].as_str().unwrap_or("?")),
+            shown(a.json["owner"].as_str().unwrap_or("?")),
+            a.json["units"]
+                .as_u64()
+                .map_or("?".into(), |u| u.to_string()),
+            shown(a.json["fingerprint"].as_str().unwrap_or("?")),
+        ),
+    );
+    if a.json["fingerprint"].as_str() != Some(key.fingerprint().as_str()) {
+        return Err(Failure::Refused(format!(
+            "the pool holds another key for {host} than this machine's {}: do not confirm it",
+            key.fingerprint()
+        )));
+    }
+    if let Some(url) = a.json["confirm"].as_str() {
+        say(
+            out,
+            &format!(
+                "confirm it at {}, after comparing the fingerprint below",
+                shown(url)
+            ),
+        );
+    }
+    Ok(Identity {
+        pool: pool.origin().to_owned(),
+        host,
+    })
+}
+
+fn wait_for_confirm(
+    o: &Options,
+    key: &HostKey,
+    pool: &Pool,
+    id: &Identity,
+    out: &mut impl Write,
+) -> Result<serde_json::Value, Failure> {
+    let until = Instant::now() + o.wait;
+    let mut said = false;
+    loop {
+        match pool.signed(key, &id.host, "GET", "/api/v1/hosts/self/state", None) {
+            Ok(Answer { status: 200, json }) => match json["status"].as_str() {
+                Some("active") => return Ok(json),
+                Some("pending-owner") => {
+                    if !said {
+                        say(
+                            out,
+                            &format!(
+                                "waiting for {} to confirm this host on the site",
+                                shown(json["owner"].as_str().unwrap_or("its owner"))
+                            ),
+                        );
+                        said = true;
+                    }
+                }
+                Some(other) => {
+                    return Err(Failure::Refused(format!("the host is {}", shown(other))))
+                }
+                None => {}
+            },
+            // The clock is the machine's to fix; nothing a retry changes.
+            Ok(a) if a.json["code"] == "clock" => return Err(Failure::Refused(a.why())),
+            Ok(a) if a.status == 401 || a.status == 403 => return Err(Failure::Refused(a.why())),
+            // A 5xx, or no answer: the pool comes back; the wait goes on.
+            Ok(_) | Err(_) => {}
+        }
+        if Instant::now() >= until {
+            return Err(Failure::TimedOut(format!(
+                "nobody confirmed host {} within {} min: confirm it on the site, then run `omarchy-agent enroll` again (the identity is kept)",
+                id.host,
+                o.wait.as_secs() / 60
+            )));
+        }
+        std::thread::sleep(o.poll);
+    }
+}
+
+/// `POST /api/v1/hosts/self/token`, signed: a new host worker token, written for the
+/// dispatcher (`etc/dispatcher.env`, 0600). The one it replaces works ten more minutes,
+/// in which the run loop recreates the dispatcher (#315).
+pub fn fetch_token(
+    o: &Options,
+    key: &HostKey,
+    pool: &Pool,
+    id: &Identity,
+    out: &mut impl Write,
+) -> Result<(), Failure> {
+    let a = pool.signed(key, &id.host, "POST", "/api/v1/hosts/self/token", None)?;
+    if !a.ok() {
+        return Err(Failure::Refused(format!(
+            "the pool did not give the host worker token: {}",
+            a.why()
+        )));
+    }
+    // Both go into the dispatcher's env_file: anything but the pool's own shapes — a
+    // newline above all, which would add a variable of the pool's choosing to a
+    // container that holds the engine's socket — is refused, and nothing is written.
+    let worker = a.json["worker"]
+        .as_str()
+        .filter(|w| valid_worker_id(w))
+        .ok_or("the answer names no registration (letters, digits and dashes)")?;
+    let token = a.json["token"]
+        .as_str()
+        .filter(|t| valid_worker_token(t))
+        .ok_or("the answer carries no worker token (omw_ and 48 hex digits)")?;
+    let env = o.paths.dispatcher_env();
+    host::private_dir(env.parent().ok_or("no etc directory")?)?;
+    host::replace(
+        &env,
+        format!(
+            "# The host worker token (omarchy-agent, #321): the dispatcher's only, rotated every 30 days.\n# worker: {worker}\nOMARCHY_WORKER_TOKEN={token}\n"
+        )
+        .as_bytes(),
+    )?;
+    say(
+        out,
+        &format!(
+            "host {} is registration {worker}; its token is in {} (0600), next rotation after {}",
+            id.host,
+            env.display(),
+            shown(a.json["rotate_after"].as_str().unwrap_or("?"))
+        ),
+    );
+    Ok(())
+}
+
+/// The machine's name as the pool takes it: a DNS label's characters, at most 63.
+fn hostname() -> String {
+    let raw = std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .or_else(|_| std::fs::read_to_string("/etc/hostname"))
+        .ok()
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .unwrap_or_default();
+    let name: String = raw
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '.')
+        .take(63)
+        .collect();
+    let name = name.trim_start_matches(['-', '.']).to_owned();
+    if name.is_empty() {
+        "host".to_owned()
+    } else {
+        name
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_token_is_ome_and_48_hex_digits() {
+        assert!(valid_token(&format!("ome_{}", "a1".repeat(24))));
+        assert!(!valid_token(&format!("ome_{}", "A1".repeat(24))));
+        assert!(!valid_token(&format!("omw_{}", "a1".repeat(24))));
+        assert!(!valid_token("ome_short"));
+    }
+
+    #[test]
+    fn what_the_pool_answers_is_taken_in_its_own_shapes_only() {
+        let omw = format!("omw_{}", "0f".repeat(24));
+        assert!(valid_worker_token(&omw));
+        assert!(!valid_worker_token(&format!("{omw}\nBASH_ENV=/tmp/x")));
+        assert!(!valid_worker_token(&format!("omw_{}", "0F".repeat(24))));
+        assert!(!valid_worker_token("omw_x"));
+        assert!(valid_worker_id("m1-rack-0a9z"));
+        assert!(!valid_worker_id("m1-rack\nBASH_ENV=x"));
+        assert!(!valid_worker_id(""));
+        assert!(valid_host("h_0123456789"));
+        assert!(!valid_host("h_012345678"));
+        assert!(!valid_host("h_01234567\n9"));
+        assert!(!valid_host("../../x"));
+    }
+
+    /// A pool on loopback that gives every request the same answer.
+    fn pool_answering(body: String) -> String {
+        use std::io::{BufRead, BufReader, Read};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", l.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for c in l.incoming().flatten() {
+                let mut r = BufReader::new(c.try_clone().unwrap());
+                let mut len = 0;
+                loop {
+                    let mut line = String::new();
+                    if r.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        len = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                let _ = r.take(len).read_to_end(&mut Vec::new());
+                let _ = (&c).write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        origin
+    }
+
+    #[test]
+    fn a_token_or_registration_with_a_newline_is_refused_and_nothing_is_written() {
+        let omw = "0f".repeat(24);
+        for (answer, why) in [
+            (
+                format!(r#"{{"worker":"m1-rack-0a9z","token":"omw_{omw}\nBASH_ENV=/tmp/x"}}"#),
+                "no worker token",
+            ),
+            (
+                format!(r#"{{"worker":"m1\nBASH_ENV=/tmp/x","token":"omw_{omw}"}}"#),
+                "no registration",
+            ),
+        ] {
+            let d = std::env::temp_dir().join(format!(
+                "omarchy-agent-token-{}-{}",
+                std::process::id(),
+                why.len()
+            ));
+            let _ = std::fs::remove_dir_all(&d);
+            let o = Options {
+                pool: None,
+                paths: Paths::under(&d),
+                token: None,
+                wait: Duration::from_secs(0),
+                poll: Duration::from_millis(10),
+            };
+            host::private_dir(&o.paths.state).unwrap();
+            let key = HostKey::create_fresh(&o.paths.state.join(host::KEY_FILE)).unwrap();
+            let pool = Pool::new(&pool_answering(answer)).unwrap();
+            let id = Identity {
+                pool: pool.origin().to_owned(),
+                host: "h_0123456789".into(),
+            };
+            let e = fetch_token(&o, &key, &pool, &id, &mut Vec::new())
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains(why), "{e}");
+            assert!(!o.paths.dispatcher_env().exists());
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
+    #[test]
+    fn a_machine_with_no_identity_enrolls_with_a_new_key() {
+        let d = std::env::temp_dir().join(format!("omarchy-agent-fresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let o = Options {
+            pool: Some("http://127.0.0.1:9".into()),
+            paths: Paths::under(&d),
+            token: None,
+            wait: Duration::from_secs(0),
+            poll: Duration::from_millis(10),
+        };
+        let first = open(&o).unwrap().0.public_b64u();
+        assert_ne!(open(&o).unwrap().0.public_b64u(), first);
+        Identity {
+            pool: "http://127.0.0.1:9".into(),
+            host: "h_0123456789".into(),
+        }
+        .write(&o.paths.state)
+        .unwrap();
+        let kept = open(&o).unwrap().0.public_b64u();
+        assert_eq!(open(&o).unwrap().0.public_b64u(), kept);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_worker_token_in_the_env_file_is_kept_and_anything_else_is_not() {
+        let d = std::env::temp_dir().join(format!("omarchy-agent-holds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let env = d.join("dispatcher.env");
+        assert!(!holds_token(&env));
+        std::fs::write(&env, "# worker: m1-rack-0a9z\nOMARCHY_WORKER_TOKEN=\n").unwrap();
+        assert!(!holds_token(&env));
+        std::fs::write(
+            &env,
+            format!(
+                "# worker: m1-rack-0a9z\nOMARCHY_WORKER_TOKEN=omw_{}\n",
+                "0f".repeat(24)
+            ),
+        )
+        .unwrap();
+        assert!(holds_token(&env));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_hostname_is_a_dns_label_s_characters() {
+        let h = hostname();
+        assert!(!h.is_empty() && h.len() <= 63);
+        assert!(h
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.'));
+    }
+
+    #[test]
+    fn no_token_and_no_identity_is_refused_before_anything_is_sent() {
+        let d = std::env::temp_dir().join(format!("omarchy-agent-enroll-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let o = Options {
+            pool: Some("http://127.0.0.1:9".into()),
+            paths: Paths::under(&d),
+            token: None,
+            wait: Duration::from_secs(0),
+            poll: Duration::from_millis(10),
+        };
+        let mut out = Vec::new();
+        let e = run(&o, &mut out).unwrap_err().to_string();
+        assert!(e.contains("OMARCHY_ENROLL is not set"), "{e}");
+        let o = Options {
+            token: Some("nope".into()),
+            ..o
+        };
+        assert!(run(&o, &mut out)
+            .unwrap_err()
+            .to_string()
+            .contains("not a token"));
+        let o = Options {
+            token: Some(format!("ome_{}", "0".repeat(48))),
+            ..o
+        };
+        assert!(run(&o, &mut out)
+            .unwrap_err()
+            .to_string()
+            .contains("capacity detection"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}

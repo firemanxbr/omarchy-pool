@@ -7,18 +7,23 @@
 //!   leniently, `inner` strictly, into types nothing unverified can build.
 //! - [`lint`]: check the host set template (and the owner's override) against its
 //!   invariants, on variable references, before any interpolation.
-//!
+//! - [`capacity`]: detect the host's CPUs, memory, disks and limits and turn them, with the
+//!   owner's caps and the release's verified constants, into units (P1, #333).
 //! - [`run`]: the run loop (P1, #315): the host bundle rolled out by a state machine with
 //!   a guard, revert, quarantine and preemption, on the pinned compose driver.
 //!
-//! - [`capacity`]: detect the host's CPUs, memory, disks and limits and turn them, with the
-//!   owner's caps and the release's verified constants, into units (P1, #333).
+//! And the host's identity (#321): [`host`] (its Ed25519 key and the signed request),
+//! [`pool`] (HTTPS to the pool) and [`enroll`] (the one-time token, the owner's Confirm,
+//! the host worker token).
 //!
 //! Install and self-update come in their own P1 issues and build on the types defined here.
 
 pub mod capacity;
+pub mod enroll;
+pub mod host;
 pub mod lint;
 pub mod manifest;
+pub mod pool;
 pub mod run;
 pub mod statement;
 pub mod verify;

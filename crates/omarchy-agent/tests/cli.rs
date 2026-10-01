@@ -15,6 +15,62 @@ fn run(args: &[&str]) -> Output {
         .unwrap()
 }
 
+/// The binary with its data directory under `data` (`XDG_DATA_HOME`) and, when given, an
+/// enrollment token in its environment.
+fn run_env(args: &[&str], data: &Path, enroll: Option<&str>) -> Output {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_omarchy-agent"));
+    c.args(args)
+        .env("XDG_DATA_HOME", data)
+        .env_remove("OMARCHY_ENROLL");
+    if let Some(t) = enroll {
+        c.env("OMARCHY_ENROLL", t);
+    }
+    c.output().unwrap()
+}
+
+#[test]
+fn enroll_needs_the_token_in_the_environment_and_a_capacity_report_before_it_sends_anything() {
+    let data =
+        std::env::temp_dir().join(format!("omarchy-agent-enroll-cli-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let o = run_env(&["enroll", "--pool", "http://127.0.0.1:9"], &data, None);
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(
+        text(&o).contains("OMARCHY_ENROLL is not set"),
+        "{}",
+        text(&o)
+    );
+    let token = format!("ome_{}", "ab".repeat(24));
+    let o = run_env(
+        &["install", "--pool", "http://127.0.0.1:9"],
+        &data,
+        Some(&token),
+    );
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(text(&o).contains("capacity.json"), "{}", text(&o));
+    // The token is never printed; the key was made, 0600, and nothing else claims an identity.
+    assert!(!text(&o).contains(&token));
+    let key = data.join("omarchy-agent/state/host.ed25519");
+    assert_eq!(
+        std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&key).unwrap().permissions())
+            & 0o777,
+        0o600
+    );
+    assert!(!data.join("omarchy-agent/state/host.json").exists());
+    // A pool over plain http elsewhere than this machine is refused.
+    let o = run_env(
+        &["enroll", "--pool", "http://pkgs.omarchy-pool.org"],
+        &data,
+        Some(&token),
+    );
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    // Rotating needs an enrolled machine.
+    let o = run_env(&["token"], &data, None);
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o));
+    assert!(text(&o).contains("has not enrolled"), "{}", text(&o));
+    let _ = std::fs::remove_dir_all(&data);
+}
+
 fn text(o: &Output) -> String {
     format!(
         "{}{}",
@@ -172,10 +228,24 @@ fn usage_errors_exit_2() {
         let o = run(args);
         assert_eq!(o.status.code(), Some(2), "{args:?}: {}", text(&o));
     }
-    // install.sh's last step: a stub until P1 that changes nothing.
-    let o = run(&["install", "--any-option"]);
+    // install.sh's last step: without a token or an identity it changes nothing yet (#317);
+    // an option it does not know is a usage error, a token on the command line too (#321).
+    let data = std::env::temp_dir().join(format!("omarchy-agent-cli-{}", std::process::id()));
+    let o = run_env(&["install"], &data, None);
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
     assert!(text(&o).contains("arrives in P1"), "{}", text(&o));
+    assert!(!data.join("omarchy-agent").exists(), "nothing was written");
+    for args in [
+        &["install", "--any-option"][..],
+        &["enroll", "--token", "ome_x"],
+        &["token", "extra"],
+    ] {
+        assert_eq!(
+            run_env(args, &data, None).status.code(),
+            Some(2),
+            "{args:?}"
+        );
+    }
 
     let o = run(&["--version"]);
     assert_eq!(

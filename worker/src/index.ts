@@ -36,6 +36,8 @@
  *   GET  /api/v1/factory/workers/:id[/orders|/can] · POST /factory/workers/:id/orders · DELETE /factory/workers/:id/orders/:oid · POST /factory/workers/self/orders/:id   orders to a worker (#277, routes/orders.ts)
  *   GET  /api/v1/factory/follow?ids=a,b          the pool's release and those workers' open Updates: what each set's updater polls (#277)
  *   GET  /api/v1/factory/rollback/:to            the latest rollback statement rollback.yml signed for going back to :to, and its bundle, from R2 (#314)
+ *   POST /api/v1/hosts/enrollments · POST /hosts/enroll · GET /hosts[/:id] · POST /hosts/:id/confirm   maintainer hosts: a one-time token, the machine's enrollment, the owner's Confirm (#321, routes/hosts.ts)
+ *   GET  /api/v1/hosts/self/state · POST /hosts/self/token · POST /hosts/self/report   a host's calls, signed with its key (Omarchy-Host)
  *   GET  /api/v1/factory/names/:name?arches= · GET /api/v1/factory/source?url=   the Factory form's live checks: would the name be taken, what the repository says
  *                                                  the factory's brain: package requests, build tasks, pull-based workers
  *   GET  /api/v1/graph?targets=a,b&ring=stable
@@ -77,6 +79,7 @@ import {
 import { handleSourceRead } from "./routes/sources";
 import { handleAnswerOrder, handleCancelOrder, handleFollow, handleIssueOrder, handleWorkerCan, handleWorkerOrders, handleWorkerPublic } from "./routes/orders";
 import { handleRollbackStatement } from "./routes/rollback";
+import { handleConfirmHost, handleEnroll, handleHostGet, handleHostReport, handleHostState, handleHostToken, handleHostsList, handleMintEnrollment, signedHost } from "./routes/hosts";
 import type { Actor } from "./routes/factory";
 import { jobOf } from "./jobtoken";
 import { handleTrustWorker, handleTrustList, handleNewToken, handleWithdrawRecord, handleWorkerMode, handleWorkerLog, SIGN_IN } from "./routes/contributors";
@@ -104,6 +107,7 @@ import { docsHtml } from "./pages/docs";
 import { docsWorkersHtml } from "./pages/docs-workers";
 import { workersHtml } from "./pages/workers";
 import { workerHtml } from "./pages/worker";
+import { hostHtml } from "./pages/host";
 import { userHtml } from "./pages/user";
 import { peopleHtml } from "./pages/people";
 import { agentsHtml } from "./pages/agents";
@@ -352,6 +356,9 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     // A worker's page (#277): the same shell for every id; its script reads the worker and what the viewer may press.
     const wk = path.match(/^\/worker\/([A-Za-z0-9_.-]{1,120})$/);
     if (wk) return html(workerHtml(wk[1], env.POOL_URL, version(env)), NOINDEX);
+    // A maintainer host's page (#321): the same shell for every id; its script reads the host, with the details for its owner and the maintainers.
+    const hp = path.match(/^\/hosts\/(h_[0-9a-z]{10})$/);
+    if (hp) return html(hostHtml(hp[1], env.POOL_URL, version(env)), NOINDEX);
     // What a crawler may read (pages/robots.ts): the rules for the name asked on, and the pages worth an index under the dashboard's name on production.
     if (path === "/robots.txt") return new Response(robotsTxt(url.hostname), { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=86400" } });
     if (path === "/sitemap.xml") return new Response(sitemapXml(isProductionHost(url.hostname) ? `https://${DASHBOARD_HOST}` : url.origin), { headers: { "content-type": "application/xml; charset=utf-8", "cache-control": "public, max-age=86400" } });
@@ -681,6 +688,21 @@ async function api(method: string, path: string, url: URL, request: Request, env
   // The task is cached for everyone (public, max-age); what one caller may do on it is theirs alone, so it rides on a no-store answer of its own.
   if ((m = path.match(/^\/factory\/tasks\/(\d+)\/can$/)) && method === "GET") return handleTaskCan(await contributorOf(request, env), Number(m[1]), env);
   if ((m = path.match(/^\/factory\/packages\/([A-Za-z0-9@._+-]+)\/story$/)) && method === "GET") return handlePackageStory(m[1], env);
+  // Maintainer hosts (#321, routes/hosts.ts): a maintainer's enrollment token and Confirm, the machine's own enrollment with that token, and the host's calls signed with its key — its state, its worker token, its report.
+  if (method === "POST" && path === "/hosts/enrollments") {
+    const c = await contributorOf(request, env);
+    return c ? handleMintEnrollment(c, request, env, url) : json({ error: SIGN_IN }, 401);
+  }
+  if (method === "POST" && path === "/hosts/enroll") return handleEnroll(request, env, url);
+  if (method === "GET" && path === "/hosts/self/state") { const s = await signedHost(request, env, url); return s instanceof Response ? s : handleHostState(s, env); }
+  if (method === "POST" && path === "/hosts/self/token") { const s = await signedHost(request, env, url); return s instanceof Response ? s : handleHostToken(s, env); }
+  if (method === "POST" && path === "/hosts/self/report") { const s = await signedHost(request, env, url); return s instanceof Response ? s : handleHostReport(s, env); }
+  if (method === "GET" && path === "/hosts") return handleHostsList(await contributorOf(request, env), url, env);
+  if ((m = path.match(/^\/hosts\/(h_[0-9a-z]{10})$/)) && method === "GET") return handleHostGet(await contributorOf(request, env), m[1], env);
+  if ((m = path.match(/^\/hosts\/(h_[0-9a-z]{10})\/confirm$/)) && method === "POST") {
+    const c = await contributorOf(request, env);
+    return c ? handleConfirmHost(c, m[1], request, env, url) : json({ error: SIGN_IN }, 401);
+  }
   if (path.startsWith("/factory/") && (method === "POST" || method === "PUT" || method === "DELETE" || method === "PATCH")) {
     const r = await factoryRoutes(method, path, url, request, env);
     if (r) return r;

@@ -1,0 +1,428 @@
+/**
+ * Maintainer hosts (#321, epic #307, design v2 §6.1, §6.3, §17.2, §18.1):
+ * only a maintainer enrolls a host, and the host is trusted by the same act
+ * that made them a maintainer — a pull request to factory/MAINTAINERS.toml
+ * another maintainer approved — so there is no per-host trust grant.
+ *
+ *   POST /hosts/enrollments      a maintainer, from their page: {name, where?} → a one-time ome_ token, 15 minutes,
+ *                                bound to their login and GitHub user id, and the one command to paste on the machine
+ *   POST /hosts/enroll           the machine's agent, with the token, its new Ed25519 key, what it is and its capacity,
+ *                                and a proof it holds the key: the host waits in pending-owner
+ *   GET  /hosts[?owner=]         the hosts — for the owner and the maintainers with the details (the fingerprint the
+ *                                owner compares, the capacity), and for a maintainer the other maintainers' new ones
+ *   GET  /hosts/:id              one host, and its leases (the host page)
+ *   POST /hosts/:id/confirm      its owner, once: the host's one worker registration (kind host, project trust)
+ *   GET  /hosts/self/state       signed by the host key: what the pool says of the host
+ *   POST /hosts/self/token       signed: mint the host worker token (first fetch and every rotation alike); the one it
+ *                                replaces stays valid ten minutes, so only the dispatcher is recreated
+ *   POST /hosts/self/report      signed: the host report (design v2 §17.2), at most 16 KiB
+ *
+ * A signed request (hosts.ts) can read the host's state, fetch or rotate its
+ * worker token and report — nothing else: it cannot claim (a claim needs the
+ * worker token, which only the dispatcher holds), change the maintainer list,
+ * or widen anything.
+ */
+import { json, readJson, type Env } from "../index";
+import { roleFor } from "../governance";
+import { findLeak } from "../leak";
+import { machineOrigin, version, API_HOST } from "../meta";
+import { putRecord } from "../record";
+import { writeGate } from "./orders";
+import { sha256Hex, viaOf, workspace, type Contributor } from "./contributors";
+import { dashboardOrigin } from "./agents";
+import {
+  belowMinimum, enrollMessage, fingerprint, hostLine, installCommand, newHostId, parseCapacity, parseHostHeader, publicKeyBytes, sha256HexOf, shortId, signedMessage,
+  unitsOf, verifySignature, ENROLL_TTL_MIN, MIN_HOST, HOST_NAME, HOST_REPORT_FRESH_MIN, ISOLATIONS, NONCE_KEEP_MIN, OLD_TOKEN_GRACE_MIN, REPORT_MAX_BYTES, SIGNED_SKEW_S, TOKEN_ROTATE_DAYS,
+  type Capacity, type Isolation,
+} from "../hosts";
+
+const NO_STORE = { "cache-control": "no-store" };
+const MIN = 60000;
+const iso = (ms: number) => new Date(ms).toISOString();
+
+/** The words for a person who is no maintainer, as the page says why the button is not theirs. */
+export const HOSTS_ARE_MAINTAINERS = "only a maintainer enrolls a host: a maintainer is named by a pull request to factory/MAINTAINERS.toml that another maintainer approves";
+
+export interface HostRow {
+  id: string; owner_login: string; owner_github_id: number; name: string; where: string | null; pubkey: string; status: string;
+  hostname: string | null; os: string | null; arch: string | null; page_kb: number | null; runtime: string | null; isolation: string | null; dedicated: number | null;
+  capacity: string | null; lanes: string | null; units: number | null; agent_slots: number | null; disk_free: string | null; pool_cap_units: number | null;
+  provider: string | null; model: string | null; agent_version: string | null; release_applied: string | null; release_target: string | null; rolled_back_from: string | null;
+  report: string | null; reported_at: string | null; last_seen: string | null; enrolled_at: string; confirmed_at: string | null; worker_id: string | null; token_issued_at: string | null;
+}
+
+function newToken(prefix: string): string {
+  const b = new Uint8Array(24);
+  crypto.getRandomValues(b);
+  return `${prefix}_${[...b].map((x) => x.toString(16).padStart(2, "0")).join("")}`;
+}
+
+/** One line of a person's words: what the page shows and the journal keeps — no control character, no secret. */
+function oneLine(v: unknown, max: number): string | null | undefined {
+  if (v === undefined || v === null || v === "") return null;
+  if (typeof v !== "string") return undefined;
+  const s = v.trim();
+  if (!s || s.length > max || /[\x00-\x1f\x7f]/.test(s) || findLeak(s)) return undefined;
+  return s;
+}
+
+async function githubIdOf(env: Env, login: string): Promise<number | null> {
+  const r = await env.DB.prepare("SELECT github_id FROM contributors WHERE login = ?").bind(login).first<{ github_id: number | null }>();
+  return r?.github_id ?? null;
+}
+
+// ---------- the person's side ----------
+
+/**
+ * POST /hosts/enrollments — a maintainer mints a one-time enrollment token
+ * (design v2 §6.1). The browser session only, as Confirm: a bearer token (an
+ * omc_ CLI token) could otherwise leave hosts waiting on the owner's page,
+ * with a name and a "where" of its choosing, for a careless Confirm.
+ */
+export async function handleMintEnrollment(c: Contributor, request: Request, env: Env, url: URL): Promise<Response> {
+  if (viaOf(request) !== "web") return json({ error: "a host is added on its owner's page, signed in in the browser: a token does not add one", code: "web_only" }, 403, NO_STORE);
+  const gate = writeGate(request, url, true);
+  if (gate) return gate;
+  // The page's own reason first (a contributor, a blocked maintainer), then the synced list itself, read again: the role on the row is the last sign-in's.
+  const v = workspace(c, c.login).register;
+  if (!v.ok) return json({ error: c.role === "maintainer" ? v.why : HOSTS_ARE_MAINTAINERS, code: "maintainers_only" }, v.status, NO_STORE);
+  if ((await roleFor(env, c.login)) !== "maintainer") return json({ error: HOSTS_ARE_MAINTAINERS, code: "maintainers_only" }, 403, NO_STORE);
+  const b = await readJson<{ name?: unknown; where?: unknown }>(request);
+  if (b instanceof Response) return b;
+  if (typeof b.name !== "string" || !HOST_NAME.test(b.name)) return json({ error: "name: lowercase letters, digits and dashes, 1 to 32 (\"studio\", \"vps-1\")" }, 400);
+  const where = oneLine(b.where, 80);
+  if (where === undefined) return json({ error: "where: one line of at most 80 characters, no secret" }, 400);
+  if (await env.DB.prepare("SELECT 1 FROM hosts WHERE owner_login = ? AND name = ? AND status != 'retired'").bind(c.login, b.name).first()) {
+    return json({ error: `you have a host named ${b.name} already: give this one another name`, code: "name_taken" }, 409, NO_STORE);
+  }
+  const github = await githubIdOf(env, c.login);
+  if (github === null) return json({ error: "the pool has no GitHub user id for you yet: sign in with GitHub again, then add the host", code: "github_id" }, 409, NO_STORE);
+  const token = newToken("ome");
+  const id = `he_${newToken("x").slice(2, 18)}`;
+  const now = Date.now();
+  const expires = iso(now + ENROLL_TTL_MIN * MIN);
+  await env.DB.prepare("INSERT INTO host_enrollments (token_hash, id, login, github_id, name, \"where\", created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+    .bind(await sha256Hex(token), id, c.login, github, b.name, where, iso(now), expires)
+    .run();
+  const pool = machineOrigin(url);
+  return json(
+    {
+      enrollment: id,
+      token,
+      name: b.name,
+      expires_at: expires,
+      command: installCommand(version(env).version, token, pool === `https://${API_HOST}` ? null : pool),
+      note: `The token works once, for ${ENROLL_TTL_MIN} minutes.`,
+    },
+    201,
+    NO_STORE,
+  );
+}
+
+/** What anyone sees of a host, and what its owner and the maintainers see besides (design v2 §18.1). */
+async function hostView(h: HostRow, detailed: boolean, now: number) {
+  const alive = !!h.reported_at && now - Date.parse(h.reported_at) < HOST_REPORT_FRESH_MIN * MIN;
+  const capacity = h.capacity ? (JSON.parse(h.capacity) as Capacity & { below_minimum?: string | null }) : null;
+  const lanes = h.lanes ? (JSON.parse(h.lanes) as Capacity["lanes"]) : [];
+  const out: Record<string, unknown> = {
+    id: h.id, name: h.name, owner: h.owner_login, status: h.status, arches: lanes.map((l) => l.arch), release_applied: h.release_applied, alive,
+    worker: h.worker_id, enrolled_at: h.enrolled_at, confirmed_at: h.confirmed_at,
+  };
+  if (!detailed) return out;
+  const raw = publicKeyBytes(h.pubkey)!;
+  return {
+    ...out,
+    where: h.where, hostname: h.hostname, os: h.os, arch: h.arch, page_kb: h.page_kb, isolation: h.isolation, dedicated: h.dedicated === null ? null : !!h.dedicated,
+    fingerprint: await fingerprint(raw),
+    capacity, lanes, units: h.units, agent_slots: h.agent_slots, disk_free: h.disk_free ? JSON.parse(h.disk_free) : null, pool_cap_units: h.pool_cap_units,
+    below_minimum: capacity?.below_minimum ?? null,
+    runtime: h.runtime ? JSON.parse(h.runtime) : null, provider: h.provider, model: h.model,
+    agent_version: h.agent_version, release_target: h.release_target, rolled_back_from: h.rolled_back_from,
+    round: h.report ? ((JSON.parse(h.report) as { round?: unknown }).round ?? null) : null,
+    reported_at: h.reported_at, last_seen: h.last_seen, token_issued_at: h.token_issued_at,
+    summary: capacity ? hostLine(capacity, h.isolation, h.dedicated === null ? null : !!h.dedicated) : null,
+  };
+}
+
+const mayDetail = (c: Contributor | null, h: Pick<HostRow, "owner_login">) => !!c && (c.role === "maintainer" || c.login === h.owner_login);
+
+/**
+ * GET /hosts[?owner=<login>] — the hosts that are not retired, newest first;
+ * the details for their owner and the maintainers. A maintainer also gets the
+ * notices of the last week: the hosts other maintainers confirmed (D40).
+ */
+export async function handleHostsList(c: Contributor | null, url: URL, env: Env): Promise<Response> {
+  const owner = url.searchParams.get("owner");
+  if (owner !== null && !/^[A-Za-z0-9-]{1,39}$/.test(owner)) return json({ error: "owner is a GitHub login" }, 400);
+  const rows = (await (owner
+    ? env.DB.prepare("SELECT * FROM hosts WHERE owner_login = ? AND status != 'retired' ORDER BY enrolled_at DESC LIMIT 50").bind(owner)
+    : env.DB.prepare("SELECT * FROM hosts WHERE status != 'retired' ORDER BY enrolled_at DESC LIMIT 100")
+  ).all<HostRow>()).results;
+  const now = Date.now();
+  const hosts = await Promise.all(rows.map((h) => hostView(h, mayDetail(c, h), now)));
+  let notices: { host: string; owner: string; line: string; at: string }[] = [];
+  if (c && c.role === "maintainer") {
+    const recent = (await env.DB.prepare("SELECT * FROM hosts WHERE confirmed_at > ? AND owner_login != ? ORDER BY confirmed_at DESC LIMIT 10").bind(iso(now - 7 * 24 * 60 * MIN), c.login).all<HostRow>()).results;
+    notices = recent.map((h) => ({ host: h.id, owner: h.owner_login, at: h.confirmed_at!, line: newHostLine(h) }));
+  }
+  return json({ hosts, notices, minimum: MIN_HOST, fresh_minutes: HOST_REPORT_FRESH_MIN }, 200, NO_STORE);
+}
+
+/** The new-host line, the journal's and the notice's (D40). */
+function newHostLine(h: HostRow): string {
+  const c = h.capacity ? (JSON.parse(h.capacity) as Capacity) : null;
+  return `new host of ${h.owner_login}: ${c ? hostLine(c, h.isolation, h.dedicated === null ? null : !!h.dedicated) : h.name}`;
+}
+
+/** GET /hosts/:id — one host and the leases its registration holds (the minimal host page, design v2 §18.1). */
+export async function handleHostGet(c: Contributor | null, id: string, env: Env): Promise<Response> {
+  const h = await env.DB.prepare("SELECT * FROM hosts WHERE id = ?").bind(id).first<HostRow>();
+  if (!h) return json({ error: "no such host" }, 404, NO_STORE);
+  const leases = h.worker_id
+    ? (await env.DB.prepare("SELECT id, kind, name, arch, started_at, lease_expires_at FROM build_tasks WHERE lease_owner = ? AND status = 'leased' ORDER BY id").bind(h.worker_id).all()).results
+    : [];
+  return json({ host: await hostView(h, mayDetail(c, h), Date.now()), leases, pool: { version: version(env).version } }, 200, NO_STORE);
+}
+
+/**
+ * POST /hosts/:id/confirm — the host's owner, from the page that shows its
+ * fingerprint: the host becomes active and gets its one worker registration
+ * (`<login>-<host name>-<4 base36>`, kind host, project trust from
+ * MAINTAINERS.toml, decision S2). Its token is minted when the agent asks for
+ * it with a signed request (POST /hosts/self/token), never shown here.
+ *
+ * The browser session only, from the pool's own page (writeGate's Origin):
+ * Confirm gives project trust, so a bearer token — an omc_ CLI token, or a
+ * GitHub token turned into one — is refused (403 web_only). A passkey
+ * assertion, as approve's (#271), is the stronger seam, for a later issue.
+ * The signed trust record the per-worker door writes is written here too
+ * (workers/<id>/trust-<time>.json), so who vouched for a machine that
+ * publishes stays readable.
+ */
+export async function handleConfirmHost(c: Contributor, id: string, request: Request, env: Env, url: URL): Promise<Response> {
+  if (viaOf(request) !== "web") return json({ error: "a host is confirmed on its owner's page, signed in in the browser: a token does not confirm one", code: "web_only" }, 403, NO_STORE);
+  const gate = writeGate(request, url, false);
+  if (gate) return gate;
+  const h = await env.DB.prepare("SELECT * FROM hosts WHERE id = ?").bind(id).first<HostRow>();
+  if (!h) return json({ error: "no such host" }, 404, NO_STORE);
+  if (c.login !== h.owner_login) return json({ error: `only ${h.owner_login} confirms their host`, code: "not_owner" }, 403, NO_STORE);
+  if ((await githubIdOf(env, c.login)) !== h.owner_github_id) return json({ error: `this host was enrolled by GitHub user id ${h.owner_github_id}, not by the account signed in as ${c.login}: sign in with that account`, code: "owner_changed" }, 403, NO_STORE);
+  if ((await roleFor(env, c.login)) !== "maintainer") return json({ error: HOSTS_ARE_MAINTAINERS, code: "maintainers_only" }, 403, NO_STORE);
+  if (h.status !== "pending-owner") return json({ error: `${h.name} is ${h.status} already`, code: "not_pending" }, 409, NO_STORE);
+  const worker = `${h.owner_login}-${h.name}-${shortId()}`;
+  const at = iso(Date.now());
+  const line = newHostLine(h);
+  const [res] = await env.DB.batch([
+    env.DB.prepare("UPDATE hosts SET status = 'active', confirmed_at = ?, worker_id = ? WHERE id = ? AND status = 'pending-owner' AND owner_login IN (SELECT login FROM factory_maintainers)").bind(at, worker, id),
+    // The registration, only if this batch confirmed the host: its owner's, project trust on the owner's word as a maintainer (S2), no token until the agent's signed fetch.
+    env.DB.prepare(
+      `INSERT INTO build_workers (id, arch, hostname, labels, owner, token_hash, mode, packages, last_seen, trust, trusted_by, trusted_at, host_id, kind)
+       SELECT ?, arch, hostname, json_object('where', name), owner_login, NULL, 'dedicated', '[]', ?, 'project', owner_login, ?, id, 'host' FROM hosts WHERE id = ? AND worker_id = ? AND confirmed_at = ?`,
+    ).bind(worker, at, at, id, worker, at),
+    env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) SELECT 'host', NULL, 'factory', 'ok', ?, ? WHERE (SELECT worker_id FROM hosts WHERE id = ?) = ?")
+      .bind(line, JSON.stringify({ host: id, worker, owner: h.owner_login, by: c.login }), id, worker),
+  ]);
+  if (!res.meta.changes) return json({ error: `${h.name} was not confirmed: it is no longer waiting, or ${h.owner_login} is no longer a maintainer`, code: "not_pending" }, 409, NO_STORE);
+  await putRecord(env, `workers/${worker}/trust-${at}.json`, {
+    schema: "omarchy-pool/worker-trust/1", worker, owner: h.owner_login, trust: "project", host: id, fingerprint: await fingerprint(publicKeyBytes(h.pubkey)!), confirmed_by: c.login, basis: "factory/MAINTAINERS.toml", at,
+  }).catch(() => null);
+  return json({ host: id, status: "active", worker, line, note: "The agent fetches the host's worker token with its next signed request, writes it for the dispatcher, and the host claims from then on." }, 200, NO_STORE);
+}
+
+// ---------- the host's side ----------
+
+const ENROLL_FIELDS = "the token, pubkey, sig, hostname, os, arch, page_kb, isolation, agent_version and capacity";
+
+/**
+ * POST /hosts/enroll — the machine's agent (design v2 §6.1 steps 2-3): the
+ * token, its public key and a signature of enrollMessage() with it, what the
+ * machine is, and its capacity report. In one batch the pool checks the token
+ * is live and unused, its login is still a maintainer and still the same
+ * GitHub user, burns it, and creates the host in pending-owner. A host below
+ * the signed minimum is refused before anything is written.
+ */
+export async function handleEnroll(request: Request, env: Env, url: URL): Promise<Response> {
+  const bytes = await request.arrayBuffer();
+  if (bytes.byteLength > REPORT_MAX_BYTES) return json({ error: `an enrollment is at most ${REPORT_MAX_BYTES} bytes` }, 413);
+  let b: Record<string, unknown>;
+  try {
+    b = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    return json({ error: "a JSON body is required" }, 400);
+  }
+  if (!b || typeof b !== "object") return json({ error: `${ENROLL_FIELDS} are required` }, 400);
+  const token = typeof b.token === "string" && /^ome_[0-9a-f]{48}$/.test(b.token) ? b.token : null;
+  if (!token) return json({ error: "token: the ome_ token the site printed", code: "token_unknown" }, 401);
+  const raw = publicKeyBytes(b.pubkey);
+  if (!raw) return json({ error: "pubkey: the host's Ed25519 public key, 32 bytes, base64url" }, 400);
+  const pubkey = b.pubkey as string;
+  if (typeof b.sig !== "string" || !(await verifySignature(raw, b.sig, enrollMessage(token, pubkey)))) return json({ error: "sig: no proof the host holds that key (the key's signature of the enrollment)", code: "proof" }, 401);
+  const cap = parseCapacity(b.capacity);
+  if (typeof cap === "string") return json({ error: cap }, 400);
+  const hostname = typeof b.hostname === "string" && /^[A-Za-z0-9][A-Za-z0-9.-]{0,62}$/.test(b.hostname) ? b.hostname : null;
+  const os = b.os === "linux" || b.os === "macos" ? b.os : null;
+  const arch = b.arch === "x86_64" || b.arch === "aarch64" ? b.arch : null;
+  const isolation = ISOLATIONS.includes(b.isolation as Isolation) ? (b.isolation as Isolation) : null;
+  const agent = typeof b.agent_version === "string" && /^\d{1,4}\.\d{1,4}\.\d{1,6}$/.test(b.agent_version) ? b.agent_version : null;
+  const pageKb = Number.isInteger(b.page_kb) && (b.page_kb as number) >= 4 && (b.page_kb as number) <= 64 ? (b.page_kb as number) : null;
+  if (!hostname || !os || !arch || !isolation || !agent || !pageKb) return json({ error: `${ENROLL_FIELDS} are required (hostname a DNS label, os linux | macos, arch x86_64 | aarch64, isolation root | user | subuid)` }, 400);
+  if (!cap.lanes.some((l) => l.mode === "native" && l.arch === arch)) return json({ error: `capacity.lanes: the native lane is not ${arch}` }, 400);
+  const runtime = b.runtime === undefined || b.runtime === null ? null : JSON.stringify(b.runtime);
+  if (runtime !== null && (typeof b.runtime !== "object" || runtime.length > 2048)) return json({ error: "runtime: an object of at most 2 KiB" }, 400);
+  const leak = findLeak(new TextDecoder().decode(bytes).replace(token, ""));
+  if (leak) return json({ error: `the enrollment carries what looks like ${leak.kind}; nothing was written` }, 422);
+
+  const hash = await sha256Hex(token);
+  const e = await env.DB.prepare("SELECT login, github_id, name, \"where\", expires_at, used_at FROM host_enrollments WHERE token_hash = ?").bind(hash)
+    .first<{ login: string; github_id: number; name: string; where: string | null; expires_at: string; used_at: string | null }>();
+  if (!e) return json({ error: "this token was never issued", code: "token_unknown" }, 401);
+  if (e.used_at) return json({ error: "this token was used already: a token enrolls one host, once; add the host again on your page for a new one", code: "token_used" }, 401);
+  const now = Date.now();
+  if (Date.parse(e.expires_at) <= now) return json({ error: `this token expired at ${e.expires_at} (${ENROLL_TTL_MIN} minutes): add the host again on your page for a new one`, code: "token_expired" }, 401);
+  if ((await roleFor(env, e.login)) !== "maintainer") return json({ error: `${e.login} is no longer a maintainer (factory/MAINTAINERS.toml): ${HOSTS_ARE_MAINTAINERS}`, code: "not_maintainer" }, 403);
+  if ((await githubIdOf(env, e.login)) !== e.github_id) return json({ error: `${e.login} is no longer the GitHub account that asked for this token`, code: "owner_changed" }, 403);
+  const below = belowMinimum(cap);
+  if (below) return json({ error: `${below}; nothing was registered, and the token is still good until it expires`, code: "below_minimum" }, 422);
+  if (await env.DB.prepare("SELECT 1 FROM hosts WHERE pubkey = ?").bind(pubkey).first()) return json({ error: "this key is a host's already: an enrollment needs a key no host holds (the agent makes one whenever the machine has no host.json)", code: "key_taken" }, 409);
+
+  const id = newHostId();
+  const at = iso(now);
+  const units = unitsOf(cap);
+  const capacity = JSON.stringify({ ...cap, below_minimum: null });
+  const [burn] = await env.DB.batch([
+    // The checks again, in the statement that burns: live, unused, its login listed and still the same GitHub user.
+    env.DB.prepare(
+      `UPDATE host_enrollments SET used_at = ?, host_id = ? WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?
+         AND login IN (SELECT login FROM factory_maintainers) AND github_id = (SELECT github_id FROM contributors WHERE login = host_enrollments.login)`,
+    ).bind(at, id, hash, at),
+    env.DB.prepare(
+      `INSERT INTO hosts (id, owner_login, owner_github_id, name, "where", pubkey, status, hostname, os, arch, page_kb, runtime, isolation, dedicated, capacity, lanes, units, agent_slots, disk_free, agent_version, enrolled_at, last_seen)
+       SELECT ?, login, github_id, name, "where", ?, 'pending-owner', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM host_enrollments WHERE token_hash = ? AND host_id = ?`,
+    ).bind(id, pubkey, hostname, os, arch, pageKb, runtime, isolation, b.dedicated === true ? 1 : b.dedicated === false ? 0 : null, capacity, JSON.stringify(cap.lanes), units, cap.agent_slots, JSON.stringify(cap.disk_free_gb), agent, at, at, hash, id),
+  ]);
+  if (!burn.meta.changes) return json({ error: "this token was used already, or expired, a moment ago", code: "token_used" }, 401);
+  const fp = await fingerprint(raw);
+  return json(
+    { host: id, status: "pending-owner", owner: e.login, name: e.name, fingerprint: fp, units, confirm: `${dashboardOrigin(url)}/user/${e.login}#hosts`, note: `waiting for ${e.login} to confirm ${fp} on the site; nothing claims before that` },
+    201,
+    NO_STORE,
+  );
+}
+
+export interface SignedHost { host: HostRow; body: Uint8Array }
+
+/**
+ * The host behind a signed request, or the refusal: its key, a time within
+ * 120 seconds of the pool's, a nonce never seen, over the method, the path
+ * and the body as sent. A suspended or retired host is refused (403).
+ */
+export async function signedHost(request: Request, env: Env, url: URL): Promise<SignedHost | Response> {
+  const hdr = parseHostHeader(request.headers.get("omarchy-host"));
+  if (!hdr) return json({ error: "a host's signed request is required: Omarchy-Host: <host>; ts=<unix>; nonce=<32 hex>; sig=<base64url>", code: "host_signature" }, 401, NO_STORE);
+  const body = new Uint8Array(await request.arrayBuffer());
+  if (body.byteLength > REPORT_MAX_BYTES) return json({ error: `at most ${REPORT_MAX_BYTES} bytes` }, 413, NO_STORE);
+  const now = Date.now();
+  if (Math.abs(hdr.ts - Math.floor(now / 1000)) > SIGNED_SKEW_S) return json({ error: `the request's time is more than ${SIGNED_SKEW_S} s from the pool's (${iso(now)}): set the host's clock`, code: "clock", now: iso(now) }, 401, NO_STORE);
+  const h = await env.DB.prepare("SELECT * FROM hosts WHERE id = ?").bind(hdr.host).first<HostRow>();
+  const raw = h ? publicKeyBytes(h.pubkey) : null;
+  if (!h || !raw) return json({ error: "no such host", code: "host_signature" }, 401, NO_STORE);
+  const message = signedMessage(h.id, request.method, url.pathname, await sha256HexOf(body), hdr.ts, hdr.nonce);
+  if (!(await verifySignature(raw, hdr.sig, message))) return json({ error: "the signature is not this host's over this request", code: "host_signature" }, 401, NO_STORE);
+  if (h.status === "suspended" || h.status === "retired") return json({ error: `${h.name} is ${h.status}`, code: "host_status" }, 403, NO_STORE);
+  const fresh = await env.DB.prepare("INSERT INTO host_nonces (host_id, nonce, at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING").bind(h.id, hdr.nonce, iso(now)).run();
+  if (!fresh.meta.changes) return json({ error: "this request was seen already (its nonce)", code: "replay" }, 401, NO_STORE);
+  return { host: h, body };
+}
+
+/** GET /hosts/self/state — what the pool says of the host. Host orders join it in P3 (#344). */
+export async function handleHostState(s: SignedHost, env: Env): Promise<Response> {
+  const h = s.host;
+  const at = iso(Date.now());
+  await env.DB.prepare("UPDATE hosts SET last_seen = ? WHERE id = ?").bind(at, h.id).run();
+  const raw = publicKeyBytes(h.pubkey)!;
+  return json({
+    host: h.id, status: h.status, name: h.name, owner: h.owner_login, worker: h.worker_id, fingerprint: await fingerprint(raw),
+    token: h.token_issued_at ? { issued_at: h.token_issued_at, rotate_after: iso(Date.parse(h.token_issued_at) + TOKEN_ROTATE_DAYS * 24 * 60 * MIN) } : null,
+    report_every_s: 300,
+  }, 200, NO_STORE);
+}
+
+/**
+ * POST /hosts/self/token — the host worker token, for the dispatcher only: a
+ * new one at every call, the first fetch after Confirm and every rotation
+ * alike. The token it replaces keeps working for ten minutes, so the agent
+ * recreates only the dispatcher and the dispatcher's running tasks — whose
+ * job tokens do not depend on it — never notice.
+ */
+export async function handleHostToken(s: SignedHost, env: Env): Promise<Response> {
+  const h = s.host;
+  if (h.status !== "active" || !h.worker_id) return json({ error: `${h.name} waits for ${h.owner_login} to confirm it on the site`, code: "pending_owner" }, 409, NO_STORE);
+  const token = newToken("omw");
+  const now = Date.now();
+  const grace = iso(now + OLD_TOKEN_GRACE_MIN * MIN);
+  const [, res] = await env.DB.batch([
+    // The token it replaces, first: valid ten more minutes (none before the first fetch).
+    env.DB.prepare("UPDATE hosts SET prev_token_hash = w.token_hash, prev_token_until = CASE WHEN w.token_hash IS NULL THEN NULL ELSE ? END, token_issued_at = ?, last_seen = ? FROM (SELECT token_hash FROM build_workers WHERE id = ? AND revoked_at IS NULL) AS w WHERE hosts.id = ?")
+      .bind(grace, iso(now), iso(now), h.worker_id, h.id),
+    env.DB.prepare("UPDATE build_workers SET token_hash = ? WHERE id = ? AND host_id = ? AND revoked_at IS NULL").bind(await sha256Hex(token), h.worker_id, h.id),
+  ]);
+  if (!res.meta.changes) return json({ error: `${h.worker_id} is revoked`, code: "revoked" }, 409, NO_STORE);
+  return json({ worker: h.worker_id, token, issued_at: iso(now), rotate_after: iso(now + TOKEN_ROTATE_DAYS * 24 * 60 * MIN), previous_valid_until: h.token_issued_at ? grace : null }, 200, NO_STORE);
+}
+
+/**
+ * POST /hosts/self/report — the host report (design v2 §17.2), on every
+ * change and at least every five minutes, at most 16 KiB. A report that
+ * carries what looks like a secret is refused whole (leak.ts). The pool keeps
+ * the last one and the columns its pages read; the units are its own count
+ * from the reported totals.
+ */
+export async function handleHostReport(s: SignedHost, env: Env): Promise<Response> {
+  const h = s.host;
+  const text = new TextDecoder().decode(s.body);
+  let r: Record<string, any>;
+  try {
+    r = JSON.parse(text);
+  } catch {
+    return json({ error: "a JSON body is required" }, 400, NO_STORE);
+  }
+  if (!r || typeof r !== "object" || Array.isArray(r)) return json({ error: "the report is an object" }, 400, NO_STORE);
+  const leak = findLeak(text);
+  if (leak) return json({ error: `the report carries what looks like ${leak.kind} (line ${leak.line}); nothing was written`, code: "leak" }, 422, NO_STORE);
+  const str = (v: unknown, re: RegExp) => (typeof v === "string" && re.test(v) ? v : null);
+  const tag = /^v\d+\.\d+\.\d+$/;
+  const cap = r.capacity === undefined ? null : parseCapacity(r.capacity);
+  if (typeof cap === "string") return json({ error: cap }, 400, NO_STORE);
+  // As at enrollment: the native lane is the host's own architecture.
+  if (cap && !cap.lanes.some((l) => l.mode === "native" && l.arch === h.arch)) return json({ error: `capacity.lanes: the native lane is not ${h.arch}` }, 400, NO_STORE);
+  const runtime = r.runtime && typeof r.runtime === "object" ? r.runtime : null;
+  // As the enrollment: whole or refused — a cut one would not parse on the hosts' pages.
+  if (runtime && JSON.stringify(runtime).length > 2048) return json({ error: "runtime: an object of at most 2 KiB" }, 400, NO_STORE);
+  const isolation = runtime && ISOLATIONS.includes(runtime.isolation) ? (runtime.isolation as string) : h.isolation;
+  const dedicated = runtime && typeof runtime.dedicated === "boolean" ? (runtime.dedicated ? 1 : 0) : h.dedicated;
+  const round = r.round && typeof r.round === "object" ? r.round : null;
+  const at = iso(Date.now());
+  await env.DB.prepare(
+    `UPDATE hosts SET report = ?, reported_at = ?, last_seen = ?, agent_version = COALESCE(?, agent_version), release_applied = ?, release_target = ?, rolled_back_from = ?,
+       isolation = ?, dedicated = ?, runtime = COALESCE(?, runtime), provider = ?, model = ?,
+       capacity = COALESCE(?, capacity), lanes = COALESCE(?, lanes), units = COALESCE(?, units), agent_slots = COALESCE(?, agent_slots), disk_free = COALESCE(?, disk_free)
+     WHERE id = ?`,
+  )
+    .bind(
+      text, at, at, str(r.agent?.version, /^\d{1,4}\.\d{1,4}\.\d{1,6}$/), str(r.release?.applied, tag), str(r.release?.target, tag), round?.outcome === "rolled-back" ? str(round.from, tag) : null,
+      isolation, dedicated, runtime ? JSON.stringify(runtime) : null, str(r.agent?.provider, /^[a-z0-9-]{1,40}$/), str(r.agent?.model, /^[A-Za-z0-9._:-]{1,80}$/),
+      cap ? JSON.stringify({ ...cap, below_minimum: belowMinimum(cap) }) : null, cap ? JSON.stringify(cap.lanes) : null, cap ? unitsOf(cap) : null, cap ? cap.agent_slots : null, cap ? JSON.stringify(cap.disk_free_gb) : null,
+      h.id,
+    )
+    .run();
+  return json({ ok: true, at, units: cap ? unitsOf(cap) : h.units, below_minimum: cap ? belowMinimum(cap) : null }, 200, NO_STORE);
+}
+
+/** The cron's share (scheduler.ts): nonces past the window, and enrollment tokens nobody used a day after they expired. */
+export async function pruneHosts(env: Env, now = Date.now()): Promise<number> {
+  const [a, b] = await env.DB.batch([
+    env.DB.prepare("DELETE FROM host_nonces WHERE at < ?").bind(iso(now - NONCE_KEEP_MIN * MIN)),
+    env.DB.prepare("DELETE FROM host_enrollments WHERE used_at IS NULL AND expires_at < ?").bind(iso(now - 24 * 60 * MIN)),
+  ]);
+  return (a.meta.changes ?? 0) + (b.meta.changes ?? 0);
+}
