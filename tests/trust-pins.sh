@@ -14,9 +14,10 @@
 #   download by SHA-256;
 # - every maintainer owns the workflows, the host agent, the dispatcher that
 #   starts task containers and the host sets (CODEOWNERS);
-# - the v* tag rulesets the admin applies (.github/rulesets/tags.json,
-#   tags-locked.json) leave creating tags to GitHub Actions alone, and moving
-#   or deleting them to nobody;
+# - the one v* tag ruleset the admin applies (.github/rulesets/tags-locked.json)
+#   lets nobody move or delete a tag; no ruleset file restricts creation, which
+#   this user-owned repository cannot apply (#351), and the host agent trusts
+#   release.yml on refs/heads/main, never a tag;
 # - release.yml's jobs that publish wait behind its gate, the `version` job
 #   in the release environment, and nothing writes by default.
 #
@@ -135,20 +136,31 @@ for path in .github/workflows/ crates/omarchy-agent/ 'crates/pkg-repo/src/dispat
   grep -qxE "$(sed 's/[.*]/\\&/g' <<<"$path") +$owners" "$root/.github/CODEOWNERS" || fail "CODEOWNERS gives $path to every maintainer ($owners)"
 done
 echo "ok: code owners cover the workflows, the host agent, the dispatcher and the host sets"
-# --- the v* tag rulesets the admin applies (runbook) -----------------------------
-# Two rulesets: creation, which GitHub Actions alone bypasses (release.yml's
-# publish creates the tag with its release), and update and deletion, which
-# nobody bypasses (no workflow moves or deletes a git tag).
-python3 - "$root/.github/rulesets/tags.json" "$root/.github/rulesets/tags-locked.json" <<'PY' || fail "the v* tag rulesets: GitHub Actions alone creates v* tags, nobody moves or deletes them"
-import json, sys
-create, locked = (json.load(open(p)) for p in sys.argv[1:3])
-for r in (create, locked):
-    assert r["target"] == "tag" and r["enforcement"] == "active", r
-    assert r["conditions"]["ref_name"]["include"] == ["refs/tags/v*"], r["conditions"]
-assert [x["type"] for x in create["rules"]] == ["creation"], create["rules"]
-assert create["bypass_actors"] == [{"actor_id": 15368, "actor_type": "Integration", "bypass_mode": "always"}], create["bypass_actors"]
+# --- the v* tag ruleset the admin applies (runbook, #351) ----------------------
+# Update and deletion, which nobody bypasses (no workflow moves or deletes a git
+# tag). No creation ruleset: GitHub accepts GitHub Actions as a ruleset bypass
+# actor only in an organization (HTTP 422 on this user-owned repository), and a
+# creation rule without that bypass would refuse release.yml's own tag. Creating
+# a v* tag stays open to write access (the maintainers); a hand-made tag carries
+# no bundle a host accepts, because the agent pins release.yml on refs/heads/main.
+python3 - "$root/.github/rulesets" <<'PY' || fail "the v* tag ruleset: tags-locked.json alone, nobody moves or deletes a v* tag, no bypass this repository cannot apply"
+import json, os, sys
+d = sys.argv[1]
+rulesets = {f: json.load(open(os.path.join(d, f))) for f in sorted(os.listdir(d)) if f.endswith(".json")}
+tag = {f: r for f, r in rulesets.items() if r["target"] == "tag"}
+assert list(tag) == ["tags-locked.json"], f"one tag ruleset, tags-locked.json: {list(tag)}"
+locked = tag["tags-locked.json"]
+assert locked["enforcement"] == "active", locked
+assert locked["conditions"]["ref_name"]["include"] == ["refs/tags/v*"], locked["conditions"]
 assert sorted(x["type"] for x in locked["rules"]) == ["deletion", "update"], locked["rules"]
 assert locked["bypass_actors"] == [], locked["bypass_actors"]
+for f, r in rulesets.items():
+    assert not any(a["actor_type"] == "Integration" for a in r.get("bypass_actors", [])), f"{f}: an integration bypass, refused on a user-owned repository"
 PY
-echo "ok: the v* tag rulesets let only GitHub Actions create a v* tag, and nobody move or delete one"
+if grep -rn -- 'rulesets/tags\.json' "$root/worker/src/docs" "$root/README.md" "$root/SECURITY.md" "$root/CONTRIBUTING.md"; then
+  fail "no doc applies the creation ruleset this repository cannot apply (#351)"
+fi
+pinned_ref="$(awk '/^pub const RELEASE: Pins = Pins \{$/ { on = 1; next } on && /^\};$/ { exit } on && /git_ref:/ { print }' "$root/crates/omarchy-agent/src/verify/identity.rs")"
+[[ "$pinned_ref" == '    git_ref: "refs/heads/main",' ]] || fail "the host agent pins release.yml on refs/heads/main, never a tag: $pinned_ref"
+echo "ok: the one v* tag ruleset lets nobody move or delete a v* tag, and hosts trust release.yml on refs/heads/main whatever tags exist"
 echo "TRUST PINS OK"

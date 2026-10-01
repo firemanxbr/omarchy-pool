@@ -681,8 +681,10 @@ rollback), `release.yml` writes nothing by default and every job that
 publishes waits behind `version`, which runs in `release`, the docs show the
 exact identity and no regexp, the base images are pinned by digest and the
 docker CLI by SHA-256, CODEOWNERS gives every maintainer the workflows, the
-host agent, the dispatcher and the host sets, and the two `v*` tag rulesets
-leave creating a tag to GitHub Actions and moving or deleting one to nobody.
+host agent, the dispatcher and the host sets, the one `v*` tag ruleset
+lets nobody move or delete a tag (no ruleset file restricts creation, which a
+user-owned repository cannot apply, #351), and the host agent pins `release.yml`
+on `refs/heads/main`, never a tag.
 `bash tests/image-smoke.sh <image>` (the release, on each architecture's
 `:<arch>-vX.Y.Z` before any tag moves; CI, on a local build of the commit)
 starts every role from the image: the updater's `follows` label, the project

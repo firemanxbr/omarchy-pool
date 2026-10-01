@@ -76,7 +76,6 @@ The ruleset is versioned in the repository:
 
 ```bash
 gh api -X POST repos/NEWORG/omarchy-pool/rulesets --input .github/rulesets/main.json
-gh api -X POST repos/NEWORG/omarchy-pool/rulesets --input .github/rulesets/tags.json          # v* tags: created by GitHub Actions only
 gh api -X POST repos/NEWORG/omarchy-pool/rulesets --input .github/rulesets/tags-locked.json   # v* tags: never moved or deleted, by anyone
 ```
 
