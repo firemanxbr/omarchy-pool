@@ -3,7 +3,7 @@ name = "omarchy-agent"
 description = "The host agent's trust core: verify a signed host bundle or rollback statement, lint the host set"
 # The agent's own semver (design v2 D17), bumped only when its code changes; never the
 # release tag, so an unchanged agent keeps its hash from release to release.
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -33,6 +33,9 @@ yaml-rust2 = { version = "0.13", default-features = false }
 # is under cargo deny (deny.toml).
 sigstore-verify = { version = "=0.14.0", default-features = false }
 x509-cert = "0.2"
+# capacity/ only: statvfs on the work root and the engine's data root, and the page size,
+# without unsafe code.
+rustix = { version = "1", default-features = false, features = ["std", "fs", "param"] }
 
 [dev-dependencies]
 rcgen = "0.14"
