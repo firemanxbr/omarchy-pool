@@ -254,7 +254,17 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .ok_or_else(|| format!("{}: not a file path", path.display()))?;
     let tmp = path.with_file_name(format!(".{}.tmp", name.to_string_lossy()));
     let err = |e: std::io::Error| format!("{}: {e}", path.display());
-    let mut f = fs::File::create(&tmp).map_err(err)?;
+    // A fresh file, never one a link at the temporary name points to (O_EXCL does not
+    // follow it); the rename replaces a link at `path` rather than writing through it.
+    match fs::remove_file(&tmp) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(err(e)),
+        _ => {}
+    }
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .map_err(err)?;
     f.write_all(bytes).map_err(err)?;
     f.sync_all().map_err(err)?;
     fs::rename(&tmp, path).map_err(err)
@@ -304,6 +314,21 @@ mod tests {
         assert!(parse(br#"{"floor": "latest"}"#).is_err());
         fs::write(&path, b"{not json").unwrap();
         assert!(load(&path).is_err());
+    }
+
+    #[test]
+    fn an_atomic_write_never_writes_through_a_link() {
+        let dir = tempdir();
+        let outside = dir.join("outside");
+        fs::write(&outside, b"untouched").unwrap();
+        // A link at the temporary name, and one at the destination.
+        std::os::unix::fs::symlink(&outside, dir.join(".compose.yml.tmp")).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("compose.yml")).unwrap();
+        write_atomic(&dir.join("compose.yml"), b"new").unwrap();
+        assert_eq!(fs::read(&outside).unwrap(), b"untouched");
+        let meta = fs::symlink_metadata(dir.join("compose.yml")).unwrap();
+        assert!(meta.file_type().is_file());
+        assert_eq!(fs::read(dir.join("compose.yml")).unwrap(), b"new");
     }
 
     pub(crate) fn tempdir() -> std::path::PathBuf {

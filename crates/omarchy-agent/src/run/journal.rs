@@ -10,6 +10,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub(crate) const ROTATE_AT: u64 = 10 << 20;
+/// The longest text kept of an error (an engine's stderr line, say).
+pub(crate) const MAX_TEXT: usize = 1000;
 
 pub(crate) struct Journal {
     path: PathBuf,
@@ -37,10 +39,15 @@ impl Journal {
         self.secrets = secrets;
     }
 
+    /// `text` with every secret replaced, then cut to [`MAX_TEXT`] characters: cut only
+    /// after the scrub, so a secret is never split where it would no longer match.
     pub fn scrub(&self, text: &str) -> String {
         let mut out = text.to_owned();
         for s in &self.secrets {
             out = out.replace(s.as_str(), "[redacted]");
+        }
+        if out.chars().count() > MAX_TEXT {
+            out = out.chars().take(MAX_TEXT).collect();
         }
         out
     }
@@ -127,6 +134,11 @@ mod tests {
         let text = fs::read_to_string(&path).unwrap();
         assert!(!text.contains("omw_secret_value_123"), "{text}");
         assert!(text.contains("[redacted] abc"), "{text}");
+        // A secret straddling the length bound is scrubbed before the cut.
+        let long = format!("{}omw_secret_value_123", "x".repeat(MAX_TEXT - 5));
+        let cut = j.scrub(&long);
+        assert_eq!(cut.chars().count(), MAX_TEXT);
+        assert!(cut.ends_with("[reda") && !cut.contains("omw_s"), "{cut}");
         for i in 0..20 {
             j.write(i, "tick", serde_json::json!({"n": i}));
         }

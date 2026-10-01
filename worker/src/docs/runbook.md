@@ -612,7 +612,8 @@ the manifest names; no other docker or compose binary is ever run),
 
 Each round goes `render → lint → plan → pull → replace → guard → commit`,
 or `revert`, each step written to `state.json` before it acts, so a restart
-anywhere resumes it. The pool's `follow` names the target (until P3's host
+anywhere resumes it (a ready wait or a guard in flight starts its clock again:
+after a reboot the dispatcher is still re-adopting its leases). The pool's `follow` names the target (until P3's host
 state); the bundle must verify against `release.yml` on main, the pool's
 origin must be in its `pools`, and the target must be at or above the floor
 (the highest release applied), `min_release` and outside `revoked` (both
@@ -629,6 +630,10 @@ lost `/ready` revert to `last-good/` and quarantine the release for an hour
 worker lifts every quarantine and starts a round. A changed
 `compose.override.yml`, `etc/` file or `run/capacity.json` starts a round
 too, and the running set is compared with `last-good/` every 15 minutes.
+Two known gaps: a round preempted during its replace leaves the dispatcher
+stopped (its leases saved) until the new round's replace, and a release's
+pinned docker and compose roll forward only — tools that cannot talk to the
+engine leave the round at `engine-unreachable` until a newer release.
 
 | The last round says | What it means |
 |---|---|

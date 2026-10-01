@@ -139,6 +139,14 @@ fn go(state: &mut State, ctx: &Ctx, step: Step) {
     state.rollout.since = ctx.now;
 }
 
+/// The revert step, its reason scrubbed: it is kept in `state.json` (and in
+/// `rollout.reverting`), which the host report (#321) is built from.
+fn revert_step(ctx: &Ctx, why: &str) -> Step {
+    Step::Revert {
+        why: ctx.journal.scrub(why),
+    }
+}
+
 /// Steps a round may be preempted at: everything before `commit` (design v2 §16.2).
 pub(crate) fn preemptible(step: &Step) -> bool {
     matches!(
@@ -435,7 +443,9 @@ fn render(state: &mut State, pending: Option<&Target>, ctx: &mut Ctx) -> Result<
             );
             f
         }
-        None if state.applied == Some(target) && good.join(PINS).exists() => read_tree(&good)?,
+        None if state.applied == Some(target) && pins_release(&good) == Some(target) => {
+            read_tree(&good)?
+        }
         None => {
             finish(
                 state,
@@ -827,13 +837,7 @@ fn ready_wait(set: &SetToml) -> i64 {
 fn fail_replace(state: &mut State, ctx: &mut Ctx, files: Files, why: &str) -> Result<(), String> {
     match files {
         Files::Staging => {
-            go(
-                state,
-                ctx,
-                Step::Revert {
-                    why: format!("replace: {why}"),
-                },
-            );
+            go(state, ctx, revert_step(ctx, &format!("replace: {why}")));
             Ok(())
         }
         Files::LastGood => {
@@ -891,8 +895,7 @@ fn guard(state: &mut State, ctx: &mut Ctx, mut g: Guard) {
         return;
     }
     let revert = |state: &mut State, ctx: &Ctx, why: &str| {
-        let why = format!("guard: {why}");
-        go(state, ctx, Step::Revert { why });
+        go(state, ctx, revert_step(ctx, &format!("guard: {why}")));
     };
     let (http, guard_s, wait_s) = match project(ctx, Files::Staging) {
         Ok((_, set, services)) => (

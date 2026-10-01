@@ -5,7 +5,7 @@ use std::fs;
 
 use crate::run::fake::{publish, relay_statement, rendered_compose, World, T0, TOKEN};
 use crate::run::pool::{Follow, Net};
-use crate::run::state::Step;
+use crate::run::state::{Files, Phase, Step};
 use crate::version::Release;
 
 fn r(s: &str) -> Option<Release> {
@@ -649,6 +649,50 @@ fn the_agent_resumes_a_round_after_a_restart_at_every_step() {
             ("v1.1.0", "running")
         );
         assert_eq!(e.tasks()[0].id, task, "restart at {step}");
+    }
+}
+
+#[test]
+fn a_reboot_during_the_ready_wait_or_the_guard_does_not_revert_a_good_release() {
+    for at in ["ready", "guard"] {
+        let mut w = World::running_v1();
+        w.release("v1.1.0");
+        w.follow("v1.1.0", None);
+        w.round_now();
+        let reached = |w: &World| match &w.agent.state.rollout.step {
+            Step::Replace {
+                files: Files::Staging,
+                phase: Phase::Ready { .. },
+            } => at == "ready",
+            Step::Guard(_) => at == "guard",
+            _ => false,
+        };
+        while !reached(&w) {
+            assert_ne!(w.step(), "idle", "{at}");
+            w.tick(3);
+        }
+        // The host is down for five minutes; at boot the engine brings the dispatcher
+        // back, which answers /ready once it re-adopted its leases, 15 s later.
+        w.now += 300;
+        {
+            let mut e = w.engine.borrow_mut();
+            e.clock = w.now;
+            let d = e
+                .containers
+                .iter_mut()
+                .find(|c| c.service == "dispatcher")
+                .unwrap();
+            d.ready_at = w.now + 15;
+        }
+        let before = w.changes().len();
+        w.restart();
+        while w.step() != "idle" {
+            w.tick(3);
+        }
+        assert_eq!(w.outcome().0, "ok", "{at}: {:?}", w.outcome());
+        assert_eq!(w.applied().as_deref(), Some("v1.1.0"), "{at}");
+        assert!(w.agent.state.quarantine.is_empty(), "{at}");
+        assert_eq!(w.changes().len(), before, "{at}: nothing replaced again");
     }
 }
 

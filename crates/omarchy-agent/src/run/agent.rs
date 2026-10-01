@@ -5,6 +5,8 @@
 //! hourly; both recover by themselves at the next answer.
 
 use std::fs;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 
 use crate::manifest::Manifest;
 use crate::verify::{self, BundleOutcome, Rejection, StatementOutcome, VerifiedBundle};
@@ -16,7 +18,7 @@ use super::driver::{Answer, Driver};
 use super::journal::{env_secrets, Journal};
 use super::pool::{Follow, Net, Pool};
 use super::rollout::{self, Ctx, Outcome};
-use super::state::{self, State, Step};
+use super::state::{self, Files, Phase, State, Step};
 use super::target::Target;
 use super::tools;
 use super::trust::{self, Refusal};
@@ -71,6 +73,9 @@ pub(crate) struct Agent {
     /// every tick: the next change of an input starts the next one.
     last_inputs: Option<String>,
     announced: Option<version::Version>,
+    /// The watchdog's clock of the loop's last progress, moved on before each pinned
+    /// tool's download too: one tick may hold two of them.
+    pub progress: Option<Arc<AtomicI64>>,
 }
 
 enum Fetched {
@@ -103,6 +108,29 @@ impl Agent {
             last_drift: 0,
             last_inputs: None,
             announced: None,
+            progress: None,
+        }
+    }
+
+    /// At start: a step bounded by the wall clock is timed again from now. While the
+    /// agent was down (a reboot) the engine brought the dispatcher back, and it is still
+    /// re-adopting its leases: a ready wait or a guard that ran on meanwhile would revert
+    /// a good release. The guard begins again at the ready wait, so its evidence (exits,
+    /// `RestartCount`) counts from when the agent is back to watch.
+    pub fn resume(&mut self, now: i64) {
+        let step = &mut self.state.rollout.step;
+        match step {
+            Step::Replace {
+                phase: Phase::Create { since } | Phase::Ready { since },
+                ..
+            } => *since = now,
+            Step::Guard(_) => {
+                *step = Step::Replace {
+                    files: Files::Staging,
+                    phase: Phase::Ready { since: now },
+                };
+            }
+            _ => {}
         }
     }
 
@@ -161,16 +189,17 @@ impl Agent {
             return Ok(());
         }
         let pool = &mut self.pool;
-        let t = tools::ensure(
-            &self.paths.tools(),
-            m,
-            platform,
-            &mut |url| match pool.download(url) {
+        let progress = self.progress.clone();
+        let t = tools::ensure(&self.paths.tools(), m, platform, &mut |url| {
+            if let Some(p) = &progress {
+                p.store(super::now(), Ordering::Relaxed);
+            }
+            match pool.download(url) {
                 Net::Ok(b) => Ok(b),
                 Net::NoAnswer(e) => Err(format!("{url}: {e}")),
                 Net::Unauthorized(s) => Err(format!("{url}: HTTP {s}")),
-            },
-        )?;
+            }
+        })?;
         self.journal.write(
             now,
             "tools",

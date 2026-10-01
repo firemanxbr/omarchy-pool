@@ -20,7 +20,8 @@ use super::state::{self, State};
 pub const CONFIG_ERROR: u8 = 78;
 /// The loop ticks this often; nothing in a tick blocks longer than one timed-out call.
 const TICK: Duration = Duration::from_secs(3);
-/// The watchdog aborts a loop that made no progress for this long.
+/// The watchdog aborts a loop that made no progress for this long. A pinned tool's
+/// download (600 s at most) moves the progress on before it starts.
 const WATCHDOG_S: i64 = 15 * 60;
 
 fn paths(data: Option<&str>) -> Result<Paths, String> {
@@ -79,6 +80,7 @@ fn setup(data: Option<&str>) -> Result<(Agent, Arc<AtomicBool>), String> {
     let pool = Box::new(Https::new(&cfg.pool));
     let mut agent = Agent::new(cfg, paths, state, pool, Box::new(Sigstore), Drivers::Pinned);
     agent.open_tools();
+    agent.resume(super::now());
     agent.journal.write(
         super::now(),
         "start",
@@ -90,6 +92,7 @@ fn setup(data: Option<&str>) -> Result<(Agent, Arc<AtomicBool>), String> {
 fn loop_forever(agent: &mut Agent, usr1: &AtomicBool) -> u8 {
     let progress = Arc::new(AtomicI64::new(super::now()));
     let seen = Arc::clone(&progress);
+    agent.progress = Some(Arc::clone(&progress));
     thread::spawn(move || loop {
         thread::sleep(Duration::from_secs(30));
         let idle = super::now() - seen.load(Ordering::Relaxed);

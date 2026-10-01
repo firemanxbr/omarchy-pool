@@ -6,12 +6,15 @@
 //! Seams left for later issues, each named where it sits:
 //! - install, preflight and runtime discovery (#317): agent.toml, the first tools and the
 //!   engine kind arrive from there; until then the lint holds every host to the rootful
-//!   (strict) case;
+//!   (strict) case. Its preflight also checks who owns (and may write) the set directory,
+//!   `compose.override.yml` and `etc/*.env`: today only agent.toml and the data
+//!   directory are checked;
 //! - enrollment and the host report (#321): `agent.toml`'s `worker_id`, and
 //!   `POST /hosts/self/report` built from `state.json`'s `round` and `rollout`;
 //! - capacity detection (#333): `run/capacity.json`, hashed as an input of the set;
 //! - self-update (#316): a bundle with a newer agent is noted, and rolled out by this
-//!   agent meanwhile (its `min_agent` admits it);
+//!   agent meanwhile (its `min_agent` admits it). A release's pinned docker and compose
+//!   roll forward only: they are switched before its round and not reverted with it;
 //! - the host state (#344) replaces `follow.latest` as the target.
 
 pub mod config;

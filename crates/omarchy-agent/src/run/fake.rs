@@ -609,6 +609,7 @@ impl World {
             &self.remote,
             &self.signed_at,
         );
+        self.agent.resume(self.now);
     }
 
     pub fn set_dir(&self) -> PathBuf {

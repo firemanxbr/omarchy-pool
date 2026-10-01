@@ -173,7 +173,7 @@ fn failed(o: &exec::Output) -> String {
     format!(
         "exit {}: {}",
         o.code.map_or_else(|| "by signal".into(), |c| c.to_string()),
-        last.chars().take(300).collect::<String>()
+        last
     )
 }
 
@@ -415,8 +415,11 @@ impl Driver for Compose {
         if !is_container_id(id) {
             return Answer::NoAnswer(format!("{id:?} is not a container id"));
         }
-        let until = super::now();
-        // Bounded by --until, so the engine sends what it has and closes.
+        // Bounded by --until, so the engine sends what it has and closes. One second past
+        // now: the engine drops events after `until` to the nanosecond, and a `die` from
+        // earlier in this second must count (the guard reads its restart from inspect
+        // just before), so the call waits out at most the rest of the second.
+        let until = super::now() + 1;
         let mut c = self.docker();
         c.args(["events", "--since", &since.to_string(), "--until"])
             .arg(until.to_string())
@@ -439,7 +442,7 @@ impl Driver for Compose {
         }
         let url = format!("http://{http}");
         // curl is in the worker image; a minimal image (a stand-in) may have only
-        // busybox wget. 126/127: the command is not there.
+        // busybox wget.
         for probe in [
             vec!["curl", "-fsS", "-m", "2", "-o", "/dev/null", url.as_str()],
             vec!["wget", "-q", "-T", "2", "-O", "/dev/null", url.as_str()],
@@ -448,9 +451,13 @@ impl Driver for Compose {
             c.args(["exec", id]).args(&probe);
             match exec::run(c, CALL) {
                 Ok(o) if o.ok() => return Answer::Yes(true),
-                Ok(o) if matches!(o.code, Some(126 | 127)) => {}
+                // 126/127 and "not found": the probe is not in the image.
+                Ok(o) if matches!(o.code, Some(126 | 127)) && o.stderr.contains("not found") => {}
                 Ok(o) if not_found(&o.stderr) => return Answer::NotFound,
-                Ok(_) => return Answer::Yes(false),
+                Ok(o) if probe_said_no(&o) => return Answer::Yes(false),
+                // The engine failed, not the probe (the daemon did not answer, an exec
+                // did not start): change nothing.
+                Ok(o) => return Answer::NoAnswer(failed(&o)),
                 Err(e) => return Answer::NoAnswer(e),
             }
         }
@@ -467,14 +474,28 @@ impl Driver for Compose {
     }
 }
 
-/// A `die` event's time and exit code.
+/// Whether a failed probe is curl's or wget's own "no" (it ran; the URL did not answer):
+/// their messages start with their name, and GNU wget's `-q` says nothing. Anything else
+/// on stderr is docker's or podman's.
+fn probe_said_no(o: &exec::Output) -> bool {
+    let last = o.stderr.lines().rev().find(|l| !l.trim().is_empty());
+    !matches!(o.code, Some(125..=127) | None)
+        && last.is_none_or(|l| l.starts_with("curl:") || l.starts_with("wget:"))
+}
+
+/// A `die` event's time and exit code (podman's compatible API names it
+/// `containerExitCode`).
 fn parse_die(line: &str) -> Option<Exit> {
     let v: serde_json::Value = serde_json::from_str(line).ok()?;
-    let code = v.pointer("/Actor/Attributes/exitCode").and_then(|c| {
-        c.as_str()
-            .and_then(|s| s.parse().ok())
-            .or_else(|| c.as_i64())
-    })?;
+    let attrs = v.pointer("/Actor/Attributes")?;
+    let code = attrs
+        .get("exitCode")
+        .or_else(|| attrs.get("containerExitCode"))
+        .and_then(|c| {
+            c.as_str()
+                .and_then(|s| s.parse().ok())
+                .or_else(|| c.as_i64())
+        })?;
     let at = v.get("time").and_then(serde_json::Value::as_i64)?;
     Some(Exit { at, code })
 }
@@ -584,6 +605,65 @@ mod tests {
         assert_eq!(fs::read_to_string(&log).unwrap().lines().count(), 2);
     }
 
+    /// A driver whose pinned docker is `body` (a shell script).
+    fn docker_doing(body: &str) -> Compose {
+        let (d, _) = recording();
+        let p = d.tools().docker.clone();
+        fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        d
+    }
+
+    #[test]
+    fn exits_are_asked_up_to_a_second_past_now() {
+        // The engine drops events after --until to the nanosecond: a `die` from earlier
+        // in this second must be in the answer.
+        let (mut d, log) = recording();
+        let before = crate::run::now();
+        assert_eq!(d.exits_since(&"a".repeat(64), 100), Answer::Yes(Vec::new()));
+        let argv = fs::read_to_string(&log).unwrap();
+        let until: i64 = argv
+            .split_whitespace()
+            .skip_while(|a| *a != "--until")
+            .nth(1)
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(until > before, "{argv}");
+    }
+
+    #[test]
+    fn a_ready_probe_that_the_engine_failed_is_no_answer() {
+        let id = "a".repeat(64);
+        let http = "127.0.0.1:8791/ready";
+        let ready = |body: &str| docker_doing(body).ready(&id, http);
+        // The probe ran and the dispatcher said no: curl's and wget's own words, or
+        // GNU wget's silence.
+        assert_eq!(
+            ready("echo 'curl: (7) Failed to connect to 127.0.0.1 port 8791' >&2; exit 7"),
+            Answer::Yes(false)
+        );
+        assert_eq!(ready("exit 8"), Answer::Yes(false));
+        // curl missing from the image: wget answers.
+        assert_eq!(
+            ready(
+                r#"case "$*" in *" curl "*) echo 'exec: "curl": executable file not found in $PATH' >&2; exit 126;; *) echo 'wget: server returned error: HTTP/1.1 503' >&2; exit 1;; esac"#
+            ),
+            Answer::Yes(false)
+        );
+        // The engine did not answer, or the exec did not start: change nothing.
+        for body in [
+            "echo 'Cannot connect to the Docker daemon at unix:///run/user/1000/docker.sock. Is the docker daemon running?' >&2; exit 1",
+            "echo 'Error response from daemon: container is restarting' >&2; exit 1",
+            "echo 'OCI runtime exec failed: exec failed: cannot allocate memory' >&2; exit 126",
+        ] {
+            assert!(matches!(ready(body), Answer::NoAnswer(_)), "{body}");
+        }
+        assert_eq!(
+            ready("echo 'Error: No such container: aaa' >&2; exit 1"),
+            Answer::NotFound
+        );
+    }
+
     #[test]
     fn reads_inspect_lines_and_die_events() {
         let u = parse_unit(
@@ -600,6 +680,15 @@ mod tests {
             ),
             Some(Exit {
                 at: 1_700_000_000,
+                code: 75
+            })
+        );
+        assert_eq!(
+            parse_die(
+                r#"{"status":"die","id":"x","Actor":{"ID":"x","Attributes":{"containerExitCode":"75"}},"time":1700000001}"#
+            ),
+            Some(Exit {
+                at: 1_700_000_001,
                 code: 75
             })
         );
