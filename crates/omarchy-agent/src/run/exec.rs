@@ -2,6 +2,7 @@
 //! call with a timeout (design v2 §16.1). A child that outlives its deadline is killed.
 
 use std::io::Read;
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -9,6 +10,8 @@ use std::time::{Duration, Instant};
 /// What a finished child said. `code` is `None` when a signal ended it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Output {
+    /// The file name of the binary that ran (`docker`, `docker-compose`).
+    pub program: String,
     pub code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
@@ -36,12 +39,31 @@ fn drain(r: Option<impl Read + Send + 'static>) -> thread::JoinHandle<String> {
     })
 }
 
+/// The file name of `cmd`'s binary.
+fn program(cmd: &Command) -> String {
+    let p = Path::new(cmd.get_program());
+    p.file_name()
+        .unwrap_or(p.as_os_str())
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Starts `cmd`; the error names the binary and why it could not be started.
+fn spawn(cmd: &mut Command) -> Result<Child, String> {
+    cmd.spawn().map_err(|e| {
+        format!(
+            "could not start {}: {e}",
+            Path::new(cmd.get_program()).display()
+        )
+    })
+}
+
 /// Runs `cmd` to its end or its deadline. `Err` when it could not start or was killed.
 pub(crate) fn run(mut cmd: Command, timeout: Duration) -> Result<Output, String> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = cmd.spawn().map_err(|e| format!("could not start: {e}"))?;
+    let mut child = spawn(&mut cmd)?;
     let out = drain(child.stdout.take());
     let err = drain(child.stderr.take());
     let status = wait(&mut child, timeout);
@@ -51,11 +73,16 @@ pub(crate) fn run(mut cmd: Command, timeout: Duration) -> Result<Output, String>
     );
     match status {
         Some(s) => Ok(Output {
+            program: program(&cmd),
             code: s.code(),
             stdout,
             stderr,
         }),
-        None => Err(format!("no answer within {} s", timeout.as_secs())),
+        None => Err(format!(
+            "{}: no answer within {} s",
+            program(&cmd),
+            timeout.as_secs()
+        )),
     }
 }
 
@@ -79,6 +106,7 @@ fn wait(child: &mut Child, timeout: Duration) -> Option<std::process::ExitStatus
 #[derive(Debug)]
 pub(crate) struct Background {
     child: Child,
+    program: String,
     started: Instant,
     limit: Duration,
     stderr: Option<thread::JoinHandle<String>>,
@@ -98,10 +126,11 @@ impl Background {
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
-        let mut child = cmd.spawn().map_err(|e| format!("could not start: {e}"))?;
+        let mut child = spawn(&mut cmd)?;
         let stderr = Some(drain(child.stderr.take()));
         Ok(Background {
             child,
+            program: program(&cmd),
             started: Instant::now(),
             limit,
             stderr,
@@ -111,6 +140,7 @@ impl Background {
     pub fn poll(&mut self) -> Progress {
         match self.child.try_wait() {
             Ok(Some(s)) => Progress::Done(Output {
+                program: self.program.clone(),
                 code: s.code(),
                 stdout: String::new(),
                 stderr: self
