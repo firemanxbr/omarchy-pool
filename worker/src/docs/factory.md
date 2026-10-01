@@ -395,8 +395,10 @@ pacman package cache (a directory per architecture) with every build
 container it starts, so a dependency downloads once; `OMARCHY_BUILD_CACHE`
 likewise mounts a build cache at `/build/cache` — cargo's registry, Go's
 module and build caches, ccache's objects — so a Rust or Go package
-rebuilds in minutes. A build container uses every core it sees
-(`MAKEFLAGS`, `NINJAFLAGS`, `CARGO_BUILD_JOBS`) with ccache on.
+rebuilds in minutes. A build container runs make, ninja and cargo with
+the job count its dispatcher set to match the task's CPUs (`MAKEFLAGS`,
+`NINJAFLAGS`, `CARGO_BUILD_JOBS`), or with every core it sees when none was
+set, with ccache on.
 
 **Three roles.** The project runs its workers as three kinds of container
 of that same image, `OMARCHY_WORKER_ROLE` set (`factory/image/entrypoint.sh`;

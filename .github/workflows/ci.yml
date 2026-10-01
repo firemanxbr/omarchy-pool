@@ -182,6 +182,9 @@ jobs:
       - name: The gate's reading of namcap, and namcap's library map on aarch64
         working-directory: .
         run: bash tests/worker-gate-namcap.sh
+      - name: A build container runs make, ninja and cargo with the job count the dispatcher set for its share
+        working-directory: .
+        run: bash tests/worker-build-jobs.sh
       - name: The worker checks its agent again until it answers, against a stub agent that comes up late
         working-directory: .
         run: bash tests/worker-agent-recheck.sh
