@@ -14,8 +14,10 @@
 #   immutable GitHub release, must verify both or answer "needs a newer agent"
 #   (exit 3: it reads the outer layer and updates itself first); a refusal
 #   (exit 1) or an error (exit 2) fails the release. Releases from before the
-#   agent existed carry none and are skipped; one binary is run once however
-#   many releases ship it.
+#   agent existed carry none and are skipped, read from the release's asset
+#   list: an agent the list names but that cannot be downloaded fails the
+#   release (a network error is not "no agent"). One binary is run once
+#   however many releases ship it.
 #
 # The runner is x86_64, so it runs each version's x86_64-linux build: the
 # verifier's code is the same on every platform.
@@ -51,9 +53,15 @@ tags="$(gh release list --exclude-drafts --limit 200 --json tagName,publishedAt 
 seen=" $(sha256 "$new") "
 checked=0
 for tag in $tags; do
-  if ! gh release download "$tag" --pattern "$asset" --dir "$work/$tag" >/dev/null 2>&1 || [[ ! -f "$work/$tag/$asset" ]]; then
+  names="$(gh release view "$tag" --json assets --jq '.assets[].name')" \
+    || { echo "verify-with-agents: cannot list $tag's assets" >&2; exit 1; }
+  if ! grep -qxF -- "$asset" <<<"$names"; then
     echo "skip: $tag ships no agent"
     continue
+  fi
+  if ! gh release download "$tag" --pattern "$asset" --dir "$work/$tag" >/dev/null || [[ ! -f "$work/$tag/$asset" ]]; then
+    echo "verify-with-agents: $tag ships $asset but it cannot be downloaded" >&2
+    exit 1
   fi
   agent="$work/$tag/$asset"
   sum="$(sha256 "$agent")"

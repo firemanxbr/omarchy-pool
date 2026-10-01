@@ -75,6 +75,8 @@ echo "ok: the release is created as a draft"
 
 leg="$(job worker-image)"
 needs_has "$leg" build || fail "worker-image builds from the run's binaries: $(needs_of "$leg")"
+needs_has "$leg" publish || fail "worker-image waits for publish: a run on a published release pushes no image: $(needs_of "$leg")"
+grep -qF 'name: image-digest-${{ matrix.arch }}' <<<"$leg" || fail "each leg hands host-bundle the digest it pushed"
 grep -qF 'name: dist-${{ matrix.arch }}' <<<"$leg" && grep -qF -- '--build-arg TOOLS_URL=http://127.0.0.1:8765' <<<"$leg" \
   || fail "worker-image serves the run's own binaries to the build (the draft serves nothing)"
 echo "ok: the worker image is built from the run's own binaries"
@@ -103,11 +105,24 @@ upload="$(line_of "$hbj" 'gh release upload "$VERSION"')"
   || fail "host-bundle lints, writes, signs, verifies, then uploads: ${lint:-never} ${build:-never} ${sign:-never} ${verify:-never} ${upload:-never}"
 grep -qF -- '--new-bundle-format --bundle "$b.sigstore.json" "$b"' <<<"$hbj" || fail "the bundle is signed into a Sigstore bundle (v0.3), the format verify reads"
 grep -qF 'factory/bin/host-bundle check-tools' <<<"$hbj" || fail "host-bundle checks the pinned tools against their downloads"
-grep -qF 'factory/bin/host-bundle worker-image "$IMAGE" "$VERSION"' <<<"$hbj" || fail "host-bundle reads the pushed worker image's digests"
+grep -qF 'factory/bin/host-bundle worker-image "$IMAGE" "$VERSION" --index "$INDEX"' <<<"$hbj" \
+  && grep -qF 'INDEX: ${{ needs.worker-image-manifest.outputs.index }}' <<<"$hbj" \
+  && grep -qF -- '--aarch64 "$(cat image-digest/aarch64)" --x86_64 "$(cat image-digest/x86_64)"' <<<"$hbj" \
+  || fail "host-bundle signs the digests the image jobs handed over, not what a tag says after its review"
+grep -qF 'index: ${{ steps.tags.outputs.index }}' <<<"$man" || fail "worker-image-manifest hands host-bundle the index it signed"
+grep -q 'setup-buildx-action' <<<"$hbj" && fail "host-bundle runs no unpinned buildx setup with its signing token"
+attest="$(line_of "$hbj" 'uses: actions/attest-build-provenance@')"
+[[ -n "$attest" ]] && (( verify < attest && attest < upload )) && sed -n "${attest},\$p" <<<"$hbj" | grep -qE '^ +out/install.sh$' \
+  || fail "host-bundle attests install.sh with the agents, after it is written and verified, before the upload"
 grep -qF -- '--probe' <<<"$hbj" || fail "host-bundle writes the probe (an extra outer field) and verifies it too"
 up="$(sed -n "${upload},\$p" <<<"$hbj")"
 for a in omarchy-agent-x86_64-linux-musl omarchy-agent-aarch64-linux-musl omarchy-agent-aarch64-darwin 'omarchy-host-$VERSION.tar.gz"' 'omarchy-host-$VERSION.tar.gz.sigstore.json' out/install.sh; do
   grep -qF -- "$a" <<<"$up" || fail "host-bundle uploads $a to the draft"
+done
+# Every file the upload names is one publish-release waits for (one list drifting from the other keeps the release a draft).
+for a in $(sed -n "${upload},\$p" <<<"$hbj" | tr -d '\\"' | tr ' ' '\n' | grep -E '^(agents|out)/'); do
+  name="$(basename "$a")"; name="${name//\$VERSION/\$v}"
+  grep -qF -- "$name" "$here/../factory/bin/publish-release" || fail "publish-release waits for $name, which host-bundle uploads"
 done
 echo "ok: host-bundle lints, writes, signs, verifies with the fleet's agents, then adds everything to the draft"
 
@@ -128,7 +143,7 @@ case "$1 $2" in
   "release view")
     case "$*" in
       *isDraft*) cat "$GH_STATE" ;;
-      *assets*) cat "$GH_ASSETS" ;;
+      *assets*) if [[ -f "$GH_ASSETS_DIR/$3" ]]; then cat "$GH_ASSETS_DIR/$3"; else cat "$GH_ASSETS"; fi ;;
     esac ;;
   "release edit") [[ "$*" == *"--draft=false"* ]] && echo false > "$GH_STATE" ;;
   "release list") cat "$GH_RELEASES" ;;
@@ -140,7 +155,7 @@ case "$1 $2" in
 esac
 STUB
 chmod +x "$tmp/bin/gh"
-export GH_LOG="$tmp/gh.log" GH_STATE="$tmp/state" GH_ASSETS="$tmp/assets" GH_RELEASES="$tmp/releases" STUB_AGENTS="$tmp/agents"
+export GH_LOG="$tmp/gh.log" GH_STATE="$tmp/state" GH_ASSETS="$tmp/assets" GH_ASSETS_DIR="$tmp/assets.d" GH_RELEASES="$tmp/releases" STUB_AGENTS="$tmp/agents"
 v=v1.2.3
 all="omarchy-pool-$v-x86_64-linux.tar.gz omarchy-pool-$v-x86_64-linux.tar.gz.sha256 omarchy-pool-$v-aarch64-linux.tar.gz omarchy-pool-$v-aarch64-linux.tar.gz.sha256 omarchy-staging.pub.asc omarchy-agent-x86_64-linux-musl omarchy-agent-aarch64-linux-musl omarchy-agent-aarch64-darwin omarchy-host-$v.tar.gz omarchy-host-$v.tar.gz.sigstore.json install.sh"
 publish() { PATH="$tmp/bin:$PATH" "$here/../factory/bin/publish-release" "$v" > "$tmp/out" 2>&1; }
@@ -170,6 +185,9 @@ mkdir -p "$tmp/out-bundle/probe"; touch "$tmp/out-bundle/b.tar.gz" "$tmp/out-bun
 withagents() { PATH="$tmp/bin:$PATH" "$here/../factory/bin/verify-with-agents" "$tmp/out-bundle/b.tar.gz" "$tmp/out-bundle/probe/b.tar.gz" "$tmp/new" > "$tmp/out" 2>&1; }
 # Releases: v1.0.2 (2 days ago, an agent), v1.0.1 (2 days ago, no agent), the jq filter drops older ones.
 printf 'v1.0.2\nv1.0.1\n' > "$GH_RELEASES"
+mkdir -p "$GH_ASSETS_DIR"
+printf 'install.sh\nomarchy-agent-x86_64-linux-musl\n' > "$GH_ASSETS_DIR/v1.0.2"
+printf 'omarchy-pool-v1.0.1-x86_64-linux.tar.gz\n' > "$GH_ASSETS_DIR/v1.0.1"
 agent_stub "$tmp/new" 0 0; agent_stub "$STUB_AGENTS/v1.0.2" 0 0
 withagents || fail "every agent takes the bundle: $(cat "$tmp/out")"
 grep -qF "skip: v1.0.1 ships no agent" "$tmp/out" && grep -qF "and 1 earlier agent(s)" "$tmp/out" || fail "a release with no agent is skipped: $(cat "$tmp/out")"
@@ -186,5 +204,8 @@ withagents && fail "the new agent must verify the bundle itself (exit 0), not as
 agent_stub "$tmp/new" 0 0; cp "$tmp/new" "$STUB_AGENTS/v1.0.2"
 withagents || fail "an earlier release shipping this very agent: $(cat "$tmp/out")"
 grep -qF "skip: v1.0.2's agent was already run" "$tmp/out" || fail "one binary runs once: $(cat "$tmp/out")"
+rm "$STUB_AGENTS/v1.0.2"
+withagents && fail "a release listing an agent that cannot be downloaded fails the release (a network error is not 'no agent')"
+grep -qF "v1.0.2 ships omarchy-agent-x86_64-linux-musl but it cannot be downloaded" "$tmp/out" || fail "the failure names the release: $(cat "$tmp/out")"
 echo "ok: verify-with-agents: the new agent and every earlier one of the last 30 days, the probe included; a refusal fails"
 echo "RELEASE WORKFLOW OK"

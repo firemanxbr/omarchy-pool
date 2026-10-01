@@ -6,7 +6,9 @@
 # binaries, the signed host bundle and its Sigstore bundle, and install.sh.
 # A release missing one stays a draft, and the pool stays on the previous
 # release (deploy needs this job). Run again on a published release with
-# every asset, it changes nothing.
+# every asset, it changes nothing. want=() must name what release.yml's
+# publish and host-bundle jobs upload: tests/release-workflow.sh checks that
+# every asset host-bundle uploads is here.
 set -euo pipefail
 v="${1:?usage: publish-release vX.Y.Z}"
 [[ "$v" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "publish-release: $v is not vX.Y.Z" >&2; exit 2; }

@@ -166,8 +166,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      # Keep in sync with rust-toolchain.toml.
-      - uses: dtolnay/rust-toolchain@master
+      # Keep in sync with rust-toolchain.toml. Pinned by commit: this binary is
+      # what every host trusts (the build job's @master is a follow-up).
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
         with:
           toolchain: 1.98.1
           targets: ${{ matrix.target }}
@@ -239,8 +240,12 @@ jobs:
     # cosign: only worker-image-manifest signs, in the release environment.
     # The release is still a draft here (#311), so the build takes the
     # binaries it publishes from this run's artifacts, served from the
-    # runner (TOOLS_URL), as CI's local image build does.
-    needs: [version, build]
+    # runner (TOOLS_URL), as CI's local image build does. It still waits for
+    # publish: a run on a commit whose release is already published (and
+    # immutable) stops there, before any image tag is pushed or moved.
+    # Each leg hands the digest it pushed to host-bundle (image-digest-<arch>),
+    # which signs that digest, never what a tag says hours later.
+    needs: [version, build, publish]
     permissions:
       contents: read
       packages: write
@@ -276,6 +281,17 @@ jobs:
           docker build --network host -f factory/image/Containerfile --build-arg BASE="${{ matrix.base }}" --build-arg ARCH="${{ matrix.arch }}" --build-arg POOL_RELEASE="$VERSION" \
             --build-arg TOOLS_URL=http://127.0.0.1:8765 -t "$tag-$VERSION" .
           docker push "$tag-$VERSION"
+      - name: Record the digest it pushed
+        run: |
+          set -euo pipefail
+          mkdir -p image-digest
+          docker buildx imagetools inspect "$IMAGE:${{ matrix.arch }}-$VERSION" --format '{{json .Manifest.Digest}}' | tr -d '"' > "image-digest/${{ matrix.arch }}"
+          cat "image-digest/${{ matrix.arch }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-digest-${{ matrix.arch }}
+          path: image-digest/${{ matrix.arch }}
+          if-no-files-found: error
       - name: Every role starts from it, before any tag a host follows moves
         run: bash tests/image-smoke.sh "$IMAGE:${{ matrix.arch }}-$VERSION"
 
@@ -302,6 +318,10 @@ jobs:
       packages: write
       id-token: write
     runs-on: ubuntu-latest
+    # The version's index digest, for host-bundle (#311): it signs this
+    # digest into the bundle, not whatever :vX.Y.Z points at after its review.
+    outputs:
+      index: ${{ steps.tags.outputs.index }}
     env:
       IMAGE: ghcr.io/${{ github.repository_owner }}/omarchy-worker
       VERSION: ${{ needs.version.outputs.version }}
@@ -313,11 +333,13 @@ jobs:
       - name: Log in to ghcr.io
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: Publish the version tag, move the architectures' tags and latest, sign them
+        id: tags
         run: |
           set -euo pipefail
           sign() { cosign sign --yes --fulcio-url=https://fulcio.sigstore.dev --rekor-url=https://rekor.sigstore.dev "$IMAGE@$(docker buildx imagetools inspect "$1" --format '{{json .Manifest.Digest}}' | tr -d '"')"; }
           docker buildx imagetools create -t "$IMAGE:$VERSION" "$IMAGE:x86_64-$VERSION" "$IMAGE:aarch64-$VERSION"
           sign "$IMAGE:$VERSION"
+          echo "index=$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest.Digest}}' | tr -d '"')" >> "$GITHUB_OUTPUT"
           for arch in x86_64 aarch64; do
             docker buildx imagetools create --prefer-index=false -t "$IMAGE:$arch" "$IMAGE:$arch-$VERSION"
             sign "$IMAGE:$arch"
@@ -335,9 +357,10 @@ jobs:
     #     downloads;
     #  2. lint-set passes on every set as written (the template the agent
     #     lints, factory/sets/*), then factory/bin/host-bundle renders the
-    #     image placeholders to digests (the worker image's index and each
-    #     platform's manifest and config, read from the registry and checked
-    #     against the images worker-image pushed; the task build images) and
+    #     image placeholders to digests (the worker image's index as
+    #     worker-image-manifest signed it and each platform's manifest as
+    #     worker-image pushed it, both handed over by the jobs, never re-read
+    #     from a tag; each platform's config; the task build images) and
     #     writes manifest.json (factory/bundle/manifest.toml's capacity
     #     constants, pins and floor), omarchy-host-vX.Y.Z.tar.gz and
     #     install.sh with the three agent SHA-256;
@@ -347,7 +370,10 @@ jobs:
     #     production pins on both, with the new agent and every agent
     #     released in the last 30 days: any refusal fails the release here,
     #     before it is published;
-    #  5. everything is added to the draft.
+    #  5. the agent binaries' and install.sh's provenance is attested (a
+    #     branch's copy of this file attests @refs/heads/<branch>, which the
+    #     runbook's verifying install refuses), and everything is added to
+    #     the draft.
     needs: [version, publish, agent, worker-image-manifest]
     environment: release
     permissions:
@@ -373,13 +399,19 @@ jobs:
       - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
         with:
           cosign-release: v2.6.5
-      - uses: docker/setup-buildx-action@v3
+      # `docker buildx imagetools` is the runner's own buildx plugin: no
+      # builder to set up, so no unpinned action runs with this job's tokens.
       - name: Log in to ghcr.io
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - uses: actions/download-artifact@v4
         with:
           path: agents
           pattern: agent-*
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          path: image-digest
+          pattern: image-digest-*
           merge-multiple: true
       - name: The agent binaries are this commit's agent
         run: |
@@ -389,16 +421,16 @@ jobs:
           got="$(agents/omarchy-agent-x86_64-linux-musl --version)"
           [[ "$got" == "$want" ]] || { echo "the built agent says $got, crates/omarchy-agent says $want"; exit 1; }
           sha256sum agents/*
-      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-path: agents/omarchy-agent-*
       - name: The container tools match their pinned SHA-256
         run: factory/bin/host-bundle check-tools
       - name: Lint every set, write the bundle and install.sh
+        env:
+          INDEX: ${{ needs.worker-image-manifest.outputs.index }}
         run: |
           set -euo pipefail
           for set in factory/sets/*/; do agents/omarchy-agent-x86_64-linux-musl lint-set "$set"; done
-          factory/bin/host-bundle worker-image "$IMAGE" "$VERSION" > worker.json
+          factory/bin/host-bundle worker-image "$IMAGE" "$VERSION" --index "$INDEX" \
+            --aarch64 "$(cat image-digest/aarch64)" --x86_64 "$(cat image-digest/x86_64)" > worker.json
           printf '{"aarch64": "%s", "x86_64": "%s"}\n' "$BUILD_AARCH64" "$BUILD_X86_64" > build-images.json
           factory/bin/host-bundle build --release "$VERSION" --worker worker.json --build-images build-images.json \
             --agents agents --out out --probe
@@ -411,6 +443,11 @@ jobs:
           done
       - name: Verify with the new agent and every agent of the last 30 days
         run: bash factory/bin/verify-with-agents "out/omarchy-host-$VERSION.tar.gz" "out/probe/omarchy-host-$VERSION.tar.gz" agents/omarchy-agent-x86_64-linux-musl
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            agents/omarchy-agent-*
+            out/install.sh
       - name: Add them to the draft
         run: |
           set -euo pipefail

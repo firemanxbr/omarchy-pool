@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """host-bundle: what release.yml's host-bundle job runs (design v2 §4.4; #311).
 
-    host-bundle worker-image IMAGE vX.Y.Z > worker.json
-        The worker image as the manifest lists it: IMAGE:vX.Y.Z's index digest,
-        and each platform's manifest and config digest, each platform's checked
-        against the image the release pushed for it (IMAGE:<arch>-vX.Y.Z).
-        Reads the registry through `docker buildx imagetools inspect`.
+    host-bundle worker-image IMAGE vX.Y.Z --index D --aarch64 D --x86_64 D > worker.json
+        The worker image as the manifest lists it: the index digest
+        worker-image-manifest signed (D, which IMAGE:vX.Y.Z must still name),
+        and each platform's manifest and config digest, each platform's the
+        digest worker-image pushed for it (--aarch64, --x86_64). The digests
+        come from the jobs that made the images, never from a tag alone: a tag
+        moved while the job waited for its review fails here. Reads the
+        registry through `docker buildx imagetools inspect`.
 
     host-bundle check-tools
         Downloads every container tool factory/bundle/manifest.toml pins and
@@ -122,12 +125,17 @@ def inspect(ref, raw=False):
     return digest
 
 
-def worker_image(image, tag, inspect=inspect):
+def worker_image(image, tag, index, pushed, inspect=inspect):
     release(tag)
     repo = image.split("@")[0]
     if ":" in repo.rsplit("/", 1)[-1]:
         fail(f"{image}: give the repository without a tag")
-    index = inspect(f"{repo}:{tag}")
+    for what, digest in [("the index", index)] + sorted(pushed.items()):
+        if not DIGEST.fullmatch(digest or ""):
+            fail(f"{what}: not a digest: {digest!r}")
+    now = inspect(f"{repo}:{tag}")
+    if now != index:
+        fail(f"{repo}:{tag} names {now}, not {index}, the index the release signed: it moved")
     platforms = {}
     for m in inspect(f"{repo}@{index}", raw=True).get("manifests", []):
         p = m.get("platform", {})
@@ -139,9 +147,8 @@ def worker_image(image, tag, inspect=inspect):
         digest = m.get("digest", "")
         if not DIGEST.fullmatch(digest):
             fail(f"{repo}:{tag}: {arch}'s manifest is not a digest: {digest!r}")
-        pushed = inspect(f"{repo}:{arch}-{tag}")
-        if pushed != digest:
-            fail(f"{repo}:{tag}'s {arch} manifest {digest} is not the image pushed as {repo}:{arch}-{tag} ({pushed})")
+        if pushed.get(arch) != digest:
+            fail(f"{repo}:{tag}'s {arch} manifest {digest} is not the image the release pushed for {arch} ({pushed.get(arch)})")
         config = inspect(f"{repo}@{digest}", raw=True).get("config", {}).get("digest", "")
         if not DIGEST.fullmatch(config):
             fail(f"{repo}@{digest}: its config is not a digest: {config!r}")
@@ -378,6 +385,9 @@ def main(argv=None):
     w = sub.add_parser("worker-image")
     w.add_argument("image")
     w.add_argument("tag")
+    w.add_argument("--index", required=True)
+    w.add_argument("--aarch64", required=True)
+    w.add_argument("--x86_64", required=True)
     c = sub.add_parser("check-tools")
     c.add_argument("--policy", default=POLICY)
     b = sub.add_parser("build")
@@ -394,7 +404,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
     try:
         if args.cmd == "worker-image":
-            print(json.dumps(worker_image(args.image, args.tag), indent=2))
+            pushed = {"aarch64": args.aarch64, "x86_64": args.x86_64}
+            print(json.dumps(worker_image(args.image, args.tag, args.index, pushed), indent=2))
         elif args.cmd == "check-tools":
             check_tools(load_policy(args.policy)["tools"])
         else:

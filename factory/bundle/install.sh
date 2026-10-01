@@ -8,6 +8,10 @@
 #   curl -fsSL https://github.com/firemanxbr/omarchy-pool/releases/latest/download/install.sh | sh
 #   curl -fsSL https://github.com/firemanxbr/omarchy-pool/releases/latest/download/install.sh | OMARCHY_ENROLL=... sh -s -- [install options]
 #
+# This file itself is not signed: its provenance is attested by release.yml on
+# main, and the runbook (*The host bundle*) gives the install that checks that
+# attestation before it runs it.
+#
 # It refuses root, downloads the agent into a fresh `mktemp -d` under the
 # agent's data directory (never a predictable /tmp path), checks its SHA-256,
 # installs it as versions/<agent version>/omarchy-agent, points `current` at
@@ -58,7 +62,7 @@ main() {
   trap 'rm -rf "$tmp"' EXIT
   trap 'exit 1' HUP INT TERM
 
-  base="${OMARCHY_AGENT_BASE_URL:-https://github.com/firemanxbr/omarchy-pool/releases/download/$RELEASE}"
+  base="https://github.com/firemanxbr/omarchy-pool/releases/download/$RELEASE"
   curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp/omarchy-agent" "$base/$asset" || die "the download of $base/$asset failed"
   got="$(sha256_of "$tmp/omarchy-agent")"
   [ "$got" = "$want" ] || die "$asset: SHA-256 $got is not the one release $RELEASE carries ($want); nothing was installed"

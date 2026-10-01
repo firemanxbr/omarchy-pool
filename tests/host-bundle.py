@@ -71,7 +71,7 @@ X86_BUILD = "docker.io/library/archlinux@" + d("b")
 
 # --- the worker image, against a stubbed registry ------------------------------------
 def registry(**over):
-    digests = {f"{REPO}:v1.2.3": INDEX, f"{REPO}:aarch64-v1.2.3": ARM_M, f"{REPO}:x86_64-v1.2.3": X86_M}
+    digests = {f"{REPO}:v1.2.3": INDEX}
     digests.update(over.pop("digests", {}))
     manifests = over.pop("manifests", [
         {"digest": ARM_M, "platform": {"os": "linux", "architecture": "arm64"}},
@@ -91,18 +91,27 @@ def registry(**over):
     return lambda ref, raw=False: inspect(ref, raw)
 
 
-worker = hb.worker_image(REPO, "v1.2.3", inspect=registry())
+PUSHED = {"aarch64": ARM_M, "x86_64": X86_M}
+
+
+def worker_image(image=REPO, tag="v1.2.3", index=INDEX, pushed=PUSHED, **reg):
+    return hb.worker_image(image, tag, index, pushed, inspect=registry(**reg))
+
+
+worker = worker_image()
 ok(worker == {"repo": REPO, "index": INDEX, "platforms": {"aarch64": {"manifest": ARM_M, "config": ARM_C},
                                                          "x86_64": {"manifest": X86_M, "config": X86_C}}},
    f"the worker image: index, then each platform's manifest and config ({worker})")
-refused(lambda: hb.worker_image(REPO, "v1.2.3", inspect=registry(digests={f"{REPO}:aarch64-v1.2.3": d("7")})),
-        "is not the image pushed as", "a platform manifest that is not the pushed architecture image")
-refused(lambda: hb.worker_image(REPO, "v1.2.3", inspect=registry(manifests=[
-    {"digest": X86_M, "platform": {"os": "linux", "architecture": "amd64"}}])),
-    "must carry linux/arm64 and linux/amd64", "an index without one architecture")
-refused(lambda: hb.worker_image(REPO + ":latest", "v1.2.3", inspect=registry()), "without a tag", "a repository with a tag")
-refused(lambda: hb.worker_image(REPO, "latest", inspect=registry()), "is not vX.Y.Z", "a tag that is not a release")
-print("ok: the worker image by index, platform manifest and config, each checked against the pushed image")
+refused(lambda: worker_image(pushed={"aarch64": d("7"), "x86_64": X86_M}),
+        "is not the image the release pushed for aarch64", "a platform manifest that is not the digest the leg pushed")
+refused(lambda: worker_image(digests={f"{REPO}:v1.2.3": d("8")}), "it moved",
+        "a version tag moved off the index worker-image-manifest signed (while host-bundle waited for review)")
+refused(lambda: worker_image(index="latest"), "not a digest", "an index that is not a digest")
+refused(lambda: worker_image(manifests=[{"digest": X86_M, "platform": {"os": "linux", "architecture": "amd64"}}]),
+        "must carry linux/arm64 and linux/amd64", "an index without one architecture")
+refused(lambda: worker_image(image=REPO + ":latest"), "without a tag", "a repository with a tag")
+refused(lambda: worker_image(tag="latest"), "is not vX.Y.Z", "a tag that is not a release")
+print("ok: the worker image by the digests the release made: index, platform manifest and config, a moved tag refused")
 
 # --- a bundle ------------------------------------------------------------------------
 tmp = Path(tempfile.mkdtemp())
@@ -259,6 +268,11 @@ try:
     print("ok: check-tools: every download against its pinned SHA-256")
 
     # --- the agent reads it whole ------------------------------------------------------
+    # This runs the current tree's parser. Earlier agents' parsers run on the
+    # probe in release.yml (factory/bin/verify-with-agents, every agent of the
+    # last 30 days; tests/release-workflow.sh covers that script with stubs).
+    # Until the first release ships an agent, the current parser is the only
+    # one there is.
     if shutil.which("cargo"):
         env = dict(os.environ, OMARCHY_HOST_BUNDLE=str(tmp / "one" / name), OMARCHY_HOST_BUNDLE_PROBE=str(tmp / "one/probe" / name))
         r = subprocess.run(["cargo", "test", "-q", "--locked", "-p", "omarchy-agent", "--lib", "--", "--ignored",

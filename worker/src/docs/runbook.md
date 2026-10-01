@@ -323,11 +323,18 @@ nothing is built, tagged, published or pushed.
 What is not covered yet: the gate lives in `release.yml` itself, and a
 dispatch runs the dispatched branch's copy of the file, so a writer could
 dispatch a copy without it from their own branch and publish a release and
-its `v*` tag from that branch (GitHub Actions may create `v*` tags). Nothing
-it made is signed with the `main` identity, so no host would take it: since
-#311 a host takes a release only through its host bundle, signed by
-`release.yml` on main in the reviewed environment, and a release is published
-only after that bundle is signed and verified.
+its `v*` tag from that branch (GitHub Actions may create `v*` tags; the
+ruleset that would refuse their creation cannot be applied on a repository a
+user owns). Nothing it made is signed or attested with the `main` identity,
+so an installed agent would not take its host bundle: since #311 an agent
+takes a release only through a host bundle signed by `release.yml` on main.
+What stays open: such a release can be marked *latest*, and then
+`releases/latest/download/install.sh` serves that branch's `install.sh` and
+agent to anyone who runs the plain `curl … | sh`. `install.sh` checks the
+agent against the SHA-256 written inside itself, which proves nothing about
+`install.sh`. The verifying install (*The host bundle*) closes that for
+whoever uses it: it refuses an `install.sh` whose provenance is not
+`release.yml` on `refs/heads/main`.
 
 ## Security data
 
@@ -511,7 +518,7 @@ Every release carries what a maintainer host takes from it (#311, design v2
 | `omarchy-host-vX.Y.Z.tar.gz` | `manifest.json` and every set under `sets/<name>/`: `factory/sets/host` with the worker image and the task build images rendered to digests |
 | `omarchy-host-vX.Y.Z.tar.gz.sigstore.json` | its keyless signature (a Sigstore bundle) by `release.yml` on main |
 | `omarchy-agent-x86_64-linux-musl`, `omarchy-agent-aarch64-linux-musl`, `omarchy-agent-aarch64-darwin` | the agent, the same bytes as long as the agent does not change; their provenance is attested |
-| `install.sh` | the one command, with that release's agent version and the three binaries' SHA-256 embedded |
+| `install.sh` | the one command, with that release's agent version and the three binaries' SHA-256 embedded; its provenance is attested |
 
 The manifest's outer layer names the release, the agent and each binary's
 SHA-256; its `inner` carries the floor (`min_release`, `revoked`), the pool
@@ -532,6 +539,19 @@ curl -fsSL https://github.com/firemanxbr/omarchy-pool/releases/latest/download/i
 It refuses root, checks the binary against the embedded SHA-256 and installs
 it under `~/.local/share/omarchy-agent/versions/<agent version>/`. Until P1
 (#317) the agent's `install` only says so.
+
+`install.sh` itself is not signed, and *latest* is whatever release was
+published last, so the plain command trusts that release (*What is not
+covered yet*, above). The verifying install checks the script's provenance
+first, which a copy of `release.yml` dispatched from another branch cannot
+give (its attestation names `@refs/heads/<branch>`):
+
+```bash
+curl -fsSLO https://github.com/firemanxbr/omarchy-pool/releases/latest/download/install.sh
+gh attestation verify install.sh -R firemanxbr/omarchy-pool \
+  --signer-workflow firemanxbr/omarchy-pool/.github/workflows/release.yml --source-ref refs/heads/main \
+  && sh install.sh
+```
 
 Anyone can check a bundle by hand with cosign:
 
