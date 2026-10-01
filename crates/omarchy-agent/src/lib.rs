@@ -11,9 +11,12 @@
 //! - [`run`]: the run loop (P1, #315): the host bundle rolled out by a state machine with
 //!   a guard, revert, quarantine and preemption, on the pinned compose driver.
 //!
-//! Install, capacity detection and self-update come in their own P1 issues and build on
-//! the types defined here.
+//! - [`capacity`]: detect the host's CPUs, memory, disks and limits and turn them, with the
+//!   owner's caps and the release's verified constants, into units (P1, #333).
+//!
+//! Install and self-update come in their own P1 issues and build on the types defined here.
 
+pub mod capacity;
 pub mod lint;
 pub mod manifest;
 pub mod run;

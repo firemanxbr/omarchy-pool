@@ -20,6 +20,15 @@ rendered template (`tests/host-set.sh`). The root-only steps a new host
 needs once are `factory/host/prep-root.sh`, run by a person, never by the
 agent.
 
+`run/capacity.json` (schema 2, design v2 §7.3) is the agent's, never the
+release's: it detects the host's CPUs, memory, both free disks and limits,
+turns them into units with the release's signed constants and the owner's
+caps, and rewrites the file only when something in it changed (#333). The
+dispatcher reads it read-only; `below_minimum` (with `units` 0) means it
+claims nothing. `omarchy-agent capacity --work-root <dir>` prints what the
+probes see on a host; with `--bundle`/`--sig` of a release, the units, the
+preflight blockers and, with `--write <set dir>`, the file.
+
 On a rootful daemon with `userns-remap` on (what prep-root.sh turns on for a
 new daemon, design v2 §19.1), the dispatcher alone needs `userns_mode: host`
 to use the socket and the work root. The template leaves it out (design v2

@@ -32,6 +32,10 @@ jobs:
         run: bash tests/host-set.sh
       - name: The host bundle's writer — the manifest with its capacity block, the set rendered to digests, a reproducible archive, install.sh — and the agent reads what it writes
         run: python3 tests/host-bundle.py
+      - name: The agent's capacity probes on docker, inside a systemd scope with CPUQuota and MemoryMax, and on rootless podman — both free-disk values and the limits
+        run: |
+          command -v podman >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q podman; }
+          bash tests/agent-capacity.sh
       - run: cargo build --release -p pkg-extract -p pkg-repo -p omarchy-cli
       - name: The Rust worker sends a build that died of emulation back for a native one, against a stubbed pool and podman
         run: bash tests/worker-needs-native.sh
@@ -200,6 +204,9 @@ jobs:
       - name: The gate's reading of namcap, and namcap's library map on aarch64
         working-directory: .
         run: bash tests/worker-gate-namcap.sh
+      - name: A build container runs make, ninja and cargo with the job count the dispatcher set for its share
+        working-directory: .
+        run: bash tests/worker-build-jobs.sh
       - name: The worker checks its agent again until it answers, against a stub agent that comes up late
         working-directory: .
         run: bash tests/worker-agent-recheck.sh

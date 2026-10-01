@@ -38,6 +38,9 @@ x509-cert = "0.2"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 # SIGUSR1 (`omarchy-agent round`) as a flag the loop reads, without unsafe code here.
 signal-hook = { version = "0.3", default-features = false }
+# capacity/ only: statvfs on the work root and the engine's data root, and the page size,
+# without unsafe code.
+rustix = { version = "1", default-features = false, features = ["std", "fs", "param"] }
 
 [dev-dependencies]
 rcgen = "0.14"

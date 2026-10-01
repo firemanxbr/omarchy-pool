@@ -11,7 +11,9 @@
 //!   directory are checked;
 //! - enrollment and the host report (#321): `agent.toml`'s `worker_id`, and
 //!   `POST /hosts/self/report` built from `state.json`'s `round` and `rollout`;
-//! - capacity detection (#333): `run/capacity.json`, hashed as an input of the set;
+//! - capacity detection (#333): `run/capacity.json`, hashed as an input of the set, so a
+//!   file `capacity::write_if_changed` rewrote (`omarchy-agent capacity --write`) starts
+//!   a round; the loop does not run the detection itself yet;
 //! - self-update (#316): a bundle with a newer agent is noted, and rolled out by this
 //!   agent meanwhile (its `min_agent` admits it). A release's pinned docker and compose
 //!   roll forward only: they are switched before its round and not reverted with it;
