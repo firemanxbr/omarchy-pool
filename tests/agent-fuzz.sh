@@ -39,9 +39,13 @@ done
 cd "$crate"
 # cargo fuzz has no --locked: fail here if fuzz/Cargo.lock would have to change.
 cargo "+$toolchain" metadata --locked --manifest-path fuzz/Cargo.toml --format-version 1 >/dev/null
+# cargo fuzz builds for the triple it was itself built for unless told otherwise,
+# and a prebuilt cargo-fuzz (ci.yml's) is a musl binary: the sanitizers need the
+# toolchain's own host triple.
+host="$(rustc "+$toolchain" -vV | sed -n 's/^host: //p')"
 for target in manifest statement bundle set; do
   echo "fuzz: $target for ${seconds}s"
-  cargo "+$toolchain" fuzz run "$target" "fuzz/corpus/$target" -- \
+  cargo "+$toolchain" fuzz run --target "$host" "$target" "fuzz/corpus/$target" -- \
     -max_total_time="$seconds" -rss_limit_mb=2048 -timeout=10 -print_final_stats=1 2>&1 | tail -n 12
 done
 echo "fuzz: every target ran ${seconds}s without a finding"
