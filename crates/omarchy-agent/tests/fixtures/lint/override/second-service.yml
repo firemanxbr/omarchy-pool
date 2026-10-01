@@ -1,0 +1,4 @@
+services:
+  helper:
+    image: ghcr.io/firemanxbr/omarchy-worker@RELEASE@
+    labels: { org.omarchy-pool.role: dispatcher }

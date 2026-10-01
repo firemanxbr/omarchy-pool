@@ -1,0 +1,49 @@
+# Fuzz targets for every parser the agent runs on signed or owner-written input (design
+# v2 §11.3). Its own workspace, built with the pinned nightly `cargo fuzz` needs:
+#   cd crates/omarchy-agent && cargo +nightly-2026-09-25 fuzz run manifest -- -max_total_time=60
+[package]
+name = "omarchy-agent-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+omarchy-agent = { path = "..", features = ["fuzzing"] }
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "manifest"
+path = "fuzz_targets/manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "statement"
+path = "fuzz_targets/statement.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bundle"
+path = "fuzz_targets/bundle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "set"
+path = "fuzz_targets/set.rs"
+test = false
+doc = false
+bench = false

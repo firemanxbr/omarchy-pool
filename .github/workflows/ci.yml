@@ -41,6 +41,86 @@ jobs:
             target/release/pkg-repo
             target/release/omarchy-cli
 
+  agent:
+    name: Host agent (${{ matrix.target }})
+    # The omarchy-agent's trust core (#309), on each platform release.yml will
+    # ship it for (#311): two builds of this commit give one binary, and its
+    # Sigstore check holds against the conformance suite at a pinned commit (not
+    # copied here: that repository carries no license file). Its unit tests run
+    # in the rust job.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      # Keep in sync with rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          targets: ${{ matrix.target }}
+      - name: musl's C compiler, for aws-lc
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Two builds of this commit, in two directories, give one binary
+        run: bash tests/agent-reproducible.sh ${{ matrix.target }}
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+      - uses: actions/checkout@v4
+        with:
+          repository: sigstore/sigstore-conformance
+          ref: 1bdbfd9a2837434268553d3fe22aea93fec4ba2d
+          path: sigstore-conformance
+          persist-credentials: false
+      - name: The Sigstore check against every message-signature vector of sigstore-conformance
+        run: cargo test --locked -p omarchy-agent --lib -- --ignored conformance
+        env:
+          OMARCHY_SIGSTORE_CONFORMANCE: ${{ github.workspace }}/sigstore-conformance
+
+  agent-fuzz:
+    name: Host agent fuzzing (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v4
+      # Keep in sync with tests/agent-fuzz.sh.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-09-25
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz@0.13.2
+      - name: The manifest, statement, bundle and set parsers, 60 seconds each
+        run: bash tests/agent-fuzz.sh 60
+
+  supply-chain:
+    name: Supply chain (cargo deny, cargo audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Keep in sync with rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2,cargo-audit@0.22.2
+      - name: cargo deny (advisories, licenses, bans, sources; sigstore-verify's tree included)
+        run: cargo deny --locked check
+      - name: cargo audit
+        run: cargo audit
+      - name: The agent's core carries no async runtime, HTTP stack, Docker client or OpenSSL
+        run: bash tests/agent-deps.sh
+
   worker:
     name: Worker
     runs-on: ubuntu-latest

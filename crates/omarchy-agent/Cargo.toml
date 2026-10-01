@@ -1,0 +1,41 @@
+[package]
+name = "omarchy-agent"
+description = "The host agent's trust core: verify a signed host bundle or rollback statement, lint the host set"
+# The agent's own semver (design v2 D17), bumped only when its code changes; never the
+# release tag, so an unchanged agent keeps its hash from release to release.
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+# sigstore-verify needs 1.86; the pinned toolchain (rust-toolchain.toml) is newer.
+rust-version = "1.86"
+
+[[bin]]
+name = "omarchy-agent"
+path = "src/main.rs"
+
+[features]
+# Exposes the parsers to the fuzz targets (fuzz/), and nothing else: no verified type can
+# be built through it.
+fuzzing = []
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+toml = "0.9"
+tar = "0.4"
+flate2 = "1"
+yaml-rust2 = { version = "0.13", default-features = false }
+# verify/ only. Pinned exactly and with no default features (design v2 D2): Sigstore's
+# verification crate, offline, with no HTTP client and no async runtime. The whole tree
+# is under cargo deny (deny.toml).
+sigstore-verify = { version = "=0.14.0", default-features = false }
+x509-cert = "0.2"
+
+[dev-dependencies]
+rcgen = "0.14"
+
+[lints]
+workspace = true
