@@ -91,6 +91,13 @@
 # the rollout's grace (worker/src/update.ts), so a worker without this
 # beside it idles with "outdated" on the Workers page until someone
 # updates it by hand.
+#
+# Standing down (#313). A set the host agent retired carries its marker,
+# .omarchy-agent, in the project directory: a round there changes nothing
+# (no lock, no pull, no engine call that changes anything) and logs why,
+# --check says the same, and --self-test says `stands-down` instead of
+# `follows 1`. The agent writes the marker only when it removes the set;
+# until then this updater keeps the legacy set current, as its way back.
 set -euo pipefail
 log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 : "${COMPOSE_DIR:=/compose}"
@@ -105,6 +112,8 @@ log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 # After the round that started the one-off that replaces this container, no round for this long (it is about to be stopped).
 : "${ROLLOUT_REPLACE_WAIT:=300}"
 : "${OMARCHY_API:=https://pkgs.omarchy-pool.org}"
+# The host agent's marker in a set it retired (#313).
+MARKER="$COMPOSE_DIR/.omarchy-agent"
 # Where this process leaves what proves which container it is (the design's §1.14), and where it reads its own mounts.
 : "${OMARCHY_RUN_DIR:=/run/omarchy}"
 : "${ROLLOUT_MOUNTINFO:=/proc/self/mountinfo}"
@@ -531,6 +540,7 @@ new_updater_works() {
 # REPLACING is 1 once it started the one-off that replaces this container: the loop starts no round for a while (see follow_loop).
 REPLACING=0
 round() { # by
+  if stands_down; then return 0; fi
   local rc=0; lock_take "$1" || return $?
   rollout 0 || rc=$?
   if (( rc == 2 )); then lock_release; return 2; fi
@@ -559,6 +569,12 @@ round() { # by
   fi
   lock_release
   return 0
+}
+
+# 0, with the line, when the host agent retired this set (#313): nothing of it is to change.
+stands_down() {
+  [[ -e "$MARKER" ]] || return 1
+  log "standing down, changing nothing: this machine is a maintainer host managed by omarchy-agent, which retired this set ($MARKER) — see: omarchy-agent status"
 }
 
 # ---------------------------------------------------------------- follow --
@@ -660,6 +676,7 @@ follow_loop() {
 }
 
 self_test() {
+  if [[ -e "$MARKER" ]]; then echo "self-test: omarchy-agent retired this set ($MARKER): this updater changes nothing"; echo "stands-down"; exit 0; fi
   docker info >/dev/null 2>&1 || { echo "self-test: the runtime's socket does not answer: $(docker info 2>&1 | tail -n1)" >&2; exit 1; }
   compose config -q >/dev/null 2>&1 || { echo "self-test: compose does not read the project in $COMPOSE_DIR: $(compose config -q 2>&1 | tail -n1)" >&2; exit 1; }
   echo "self-test: the socket answers; compose reads $COMPOSE_DIR"
@@ -671,7 +688,7 @@ self_test() {
 exec 3>&1 4>&2
 case "$mode" in
   self-test) self_test ;;
-  check) errf; rollout 1 || [[ $? -eq 1 ]] ;;
+  check) stands_down || { errf; rollout 1 || [[ $? -eq 1 ]]; } ;;
   once)
     errf; identify_self
     # The EXIT trap ignores TERM and INT from its first command on, so one more that lands during the release does not cut it

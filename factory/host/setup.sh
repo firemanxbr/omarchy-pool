@@ -62,10 +62,15 @@
 #
 # It writes no secret: register.sh puts the worker tokens in etc/, and the
 # agent key goes in etc/agent.env by hand.
+#
+# A POOL_ROOT the host agent retired carries its marker, .omarchy-agent
+# (#313): setup.sh refuses there (exit 4) before it changes anything — the
+# agent manages this machine, and this set stays retired.
 set -euo pipefail
 [[ $EUID -eq 0 ]] || { echo "run with sudo"; exit 2; }
 user="${SUDO_USER:-}"; [[ -n "$user" && "$user" != root ]] || { echo "run with sudo from your own user, not as root"; exit 2; }
 root="${1:-/srv/omarchy-pool}"; root="${root%/}"
+[[ ! -e "$root/.omarchy-agent" ]] || { printf '\nNot done, and nothing changed: this machine is a maintainer host managed by omarchy-agent, which retired this set (%s) — nothing needs to be run here; see: omarchy-agent status\n' "$root/.omarchy-agent" >&2; exit 4; }
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 arch="$(uname -m)"; [[ "$arch" == arm64 ]] && arch=aarch64
 

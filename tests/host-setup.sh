@@ -51,6 +51,10 @@
 #   that is not running started as it is (`--no-recreate`: never recreated
 #   onto an image its guard has not passed); `--check` asks the updater's
 #   own omarchy-rollout; it runs no rollout of its own.
+# - The switch guard (#313): with the host agent's marker (.omarchy-agent)
+#   in POOL_ROOT, rollout.sh and setup.sh exit 4 before any command runs or
+#   any file changes, and say what to look at instead; without it they run
+#   as before.
 #
 # setup.sh runs as root on a real host: here its root check is lifted in a
 # copy, and pacman, systemctl, runuser, chown, install's owner, docker and
@@ -754,6 +758,45 @@ grep -qE "up -d( --no-deps)? updater$" "$tmp/srv/fresh/rollout.sh" && fail "roll
 bash "$tmp/srv/fresh/rollout.sh" --check || fail "rollout.sh --check exited $?"
 [[ "$(cat "$STUB_LOG")" == "docker compose exec -T updater /usr/local/lib/omarchy-factory/bin/omarchy-rollout --check" ]] || fail "--check asks the updater what it would do: $(cat "$STUB_LOG")"
 echo "ok: rollout.sh only wakes the updater"
+
+# 6b. The switch guard (#313): in a set the host agent retired (its .omarchy-agent marker in POOL_ROOT), rollout.sh and setup.sh
+#     refuse (exit 4) and say what to look at instead, before any command runs — no docker, systemctl, pacman or chown call, no file
+#     of the directory written, the lock file included. The same directories without the marker: sections 1 to 6 above, and the
+#     rollout.sh and setup.sh runs right below.
+marker() { printf 'agent=0.1.0\nhost=h_0123456789abcdef\nsince=2026-10-15T12:00:00Z\n' > "$1/.omarchy-agent"; }
+snapshot() { (cd "$1" && find . -print | LC_ALL=C sort && find . -type f -exec cksum {} + | LC_ALL=C sort); }
+SAYS="this machine is a maintainer host managed by omarchy-agent, which retired this set"
+fresh="$tmp/srv/fresh"
+marker "$fresh"; snapshot "$fresh" > "$tmp/fresh.before"
+for args in "" --check; do
+  for upd in running ""; do
+    : > "$STUB_LOG"
+    set +e; STUB_UPDATER="$upd" bash "$fresh/rollout.sh" $args > "$tmp/out" 2>&1; rc=$?; set -e
+    (( rc == 4 )) || fail "rollout.sh ${args:-(a round)} with the marker (updater ${upd:-not running}) exits 4, not $rc: $(cat "$tmp/out")"
+    grep -qF "$SAYS ($fresh/.omarchy-agent) — nothing needs to be run here; see: omarchy-agent status" "$tmp/out" || fail "rollout.sh with the marker says what to look at instead: $(cat "$tmp/out")"
+    [[ ! -s "$STUB_LOG" ]] || fail "rollout.sh ${args:-(a round)} with the marker runs nothing: $(cat "$STUB_LOG")"
+  done
+done
+: > "$STUB_LOG"
+run_setup "$fresh"
+(( rc == 4 )) || fail "setup.sh on a set with the marker exits 4, not $rc: $(cat "$tmp/out")"
+grep -qF "Not done, and nothing changed: $SAYS ($fresh/.omarchy-agent) — nothing needs to be run here; see: omarchy-agent status" "$tmp/out" || fail "setup.sh with the marker says what to look at instead: $(cat "$tmp/out")"
+[[ ! -s "$STUB_LOG" ]] || fail "setup.sh with the marker runs nothing: $(cat "$STUB_LOG")"
+snapshot "$fresh" | cmp -s - "$tmp/fresh.before" || fail "setup.sh with the marker changes no file of the set: $(snapshot "$fresh" | diff "$tmp/fresh.before" - || true)"
+# A host from before #277 with the marker (its timer's units there): refused the same way, the timer untouched.
+old_host; marker "$POOL"; snapshot "$POOL" > "$tmp/old.before"; snapshot "$units" > "$tmp/units.before"
+run_setup
+(( rc == 4 )) && grep -qF "Not done, and nothing changed: $SAYS" "$tmp/out" || fail "setup.sh on a host from before #277 with the marker exits 4 and says why: $rc $(cat "$tmp/out")"
+[[ ! -s "$STUB_LOG" ]] || fail "setup.sh with the marker touches no timer, docker or package: $(cat "$STUB_LOG")"
+snapshot "$POOL" | cmp -s - "$tmp/old.before" && snapshot "$units" | cmp -s - "$tmp/units.before" || fail "setup.sh with the marker changes no file of the set or of the timer"
+# The marker gone: the same rollout.sh wakes the updater again, and the same setup.sh runs.
+rm -f "$fresh/.omarchy-agent"; rm -rf "$units"; : > "$STUB_LOG"
+STUB_UPDATER=running bash "$fresh/rollout.sh" || fail "rollout.sh without the marker exited $?"
+[[ "$(tail -n1 "$STUB_LOG")" == "docker compose kill -s USR1 updater" ]] || fail "rollout.sh without the marker wakes the updater: $(cat "$STUB_LOG")"
+: > "$STUB_LOG"
+run_setup "$fresh"
+(( rc == 0 )) || fail "setup.sh without the marker runs as before: $rc $(cat "$tmp/out")"
+echo "ok: the switch guard — rollout.sh and setup.sh refuse in a set the agent retired"
 
 # 7. The runbook's one-time step says what setup.sh does: a drain takes up to 3 h, setup.sh waits up to 4 h (not "up to 3 h").
 step="$(awk '/^### Once: the updater/ { on = 1 } on && /^### / && !/Once: the updater/ { exit } on { print }' "$root/worker/src/docs/runbook.md" | tr '\n' ' ' | tr -s ' ')"
