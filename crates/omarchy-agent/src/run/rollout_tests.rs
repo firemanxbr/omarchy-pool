@@ -180,7 +180,7 @@ fn the_guard_forgives_ordered_restarts_and_nothing_else() {
         release: String::new(),
     };
     let exit = |at, code| Exit { at, code };
-    let judged = |u: &Unit, exits: &[Exit]| judge(&mut g0.clone(), u, exits);
+    let judged = |u: &Unit, exits: &[Exit]| judge(&mut g0.clone(), u, exits, false);
     // Two ordered restarts (exit 75): not a failure.
     assert_eq!(
         judged(&unit("running", 5), &[exit(110, 75), exit(130, 75)]),
@@ -200,18 +200,27 @@ fn the_guard_forgives_ordered_restarts_and_nothing_else() {
         .contains("not restarting"));
     // Restarting once is a sample to wait on; twice in a row is a streak.
     let mut g = g0.clone();
-    assert_eq!(judge(&mut g, &unit("restarting", 3), &[]), Ok(false));
-    assert!(judge(&mut g, &unit("restarting", 3), &[])
+    assert_eq!(judge(&mut g, &unit("restarting", 3), &[], false), Ok(false));
+    assert!(judge(&mut g, &unit("restarting", 3), &[], false)
         .unwrap_err()
         .contains("keeps restarting"));
     let mut g = g0;
     assert_eq!(
-        judge(&mut g, &unit("restarting", 4), &[exit(110, 75)]),
+        judge(&mut g, &unit("restarting", 4), &[exit(110, 75)], true),
         Ok(false)
     );
     assert_eq!(
-        judge(&mut g, &unit("running", 4), &[exit(110, 75)]),
+        judge(&mut g, &unit("running", 4), &[exit(110, 75)], true),
         Ok(true)
     );
     assert_eq!(g.streak, 0);
+    // Podman has no `restarting`: right after an ordered restart a stopped sample is the
+    // gap before the engine restarts it, not a failure; outside that window it is.
+    assert_eq!(
+        judge(&mut g, &unit("exited", 4), &[exit(110, 75)], true),
+        Ok(false)
+    );
+    assert!(judge(&mut g, &unit("exited", 4), &[exit(110, 75)], false)
+        .unwrap_err()
+        .contains("not restarting"));
 }

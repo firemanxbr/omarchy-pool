@@ -50,11 +50,27 @@ fn setup(data: Option<&str>) -> Result<(Agent, Arc<AtomicBool>), String> {
     for d in [paths.bundles(), paths.tools(), paths.docker_config()] {
         fs::create_dir_all(&d).map_err(|e| format!("{}: {e}", d.display()))?;
     }
+    if let Some(pid) = running_agent(&paths) {
+        return Err(format!(
+            "another agent runs on {} as pid {pid}",
+            paths.data.display()
+        ));
+    }
     // The pid file is the agent's own: its owner is the uid agent.toml must have.
     state::write_atomic(&paths.pid(), std::process::id().to_string().as_bytes())?;
     let uid = fs::metadata(paths.pid())
         .map_err(|e| format!("{}: {e}", paths.pid().display()))?
         .uid();
+    // What the data directory holds is trusted without another check (state.json,
+    // last-good/, the tools' hashes): nobody else may write there.
+    let meta = fs::metadata(&paths.data).map_err(|e| format!("{}: {e}", paths.data.display()))?;
+    if meta.uid() != uid || meta.mode() & 0o022 != 0 {
+        return Err(format!(
+            "{} must be owned by uid {uid} and writable by it alone (mode {:o})",
+            paths.data.display(),
+            meta.mode() & 0o7777
+        ));
+    }
     let cfg = Config::load(&paths.agent_toml(), uid)?;
     let state = state::load(&paths.state())?.unwrap_or_default();
     let usr1 = Arc::new(AtomicBool::new(false));
@@ -82,11 +98,18 @@ fn loop_forever(agent: &mut Agent, usr1: &AtomicBool) -> u8 {
             std::process::abort();
         }
     });
+    let mut failing: Option<String> = None;
     loop {
         let now = super::now();
-        if let Err(e) = agent.tick(now, usr1.swap(false, Ordering::Relaxed)) {
-            eprintln!("omarchy-agent run: {e}");
-            return CONFIG_ERROR;
+        // A local write that failed (a full disk) is not a configuration error: the
+        // state stays unsaved in memory and the step runs again at the next tick.
+        match agent.tick(now, usr1.swap(false, Ordering::Relaxed)) {
+            Ok(()) => failing = None,
+            Err(e) if failing.as_ref() != Some(&e) => {
+                eprintln!("omarchy-agent run: {e}; retrying every tick");
+                failing = Some(e);
+            }
+            Err(_) => {}
         }
         progress.store(super::now(), Ordering::Relaxed);
         let mut slept = Duration::ZERO;
@@ -225,22 +248,43 @@ pub(crate) fn summary(s: &State, now: i64) -> String {
     out
 }
 
+/// The pid of another `omarchy-agent` process that agent.pid names, if one runs: a
+/// stale pid file never names a process that is not the agent.
+fn running_agent(paths: &Paths) -> Option<String> {
+    let pid = fs::read_to_string(paths.pid()).ok()?;
+    let pid = pid.trim();
+    if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if pid == std::process::id().to_string() {
+        return None;
+    }
+    let comm = fs::read_to_string(format!("/proc/{pid}/comm")).or_else(|_| {
+        let o = std::process::Command::new("ps")
+            .args(["-o", "comm=", "-p", pid])
+            .output()?;
+        Ok::<_, std::io::Error>(String::from_utf8_lossy(&o.stdout).into_owned())
+    });
+    let comm = comm.ok()?;
+    (comm.trim().rsplit('/').next() == Some("omarchy-agent")).then(|| pid.to_owned())
+}
+
 /// `omarchy-agent round`: asks the running agent for a round now (SIGUSR1).
 pub fn round(data: Option<&str>) -> u8 {
     let result = paths(data).and_then(|p| {
-        let pid = fs::read_to_string(p.pid())
-            .map_err(|e| format!("{}: {e} (is the agent running?)", p.pid().display()))?;
-        let pid = pid.trim();
-        if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(format!("{}: not a pid", p.pid().display()));
-        }
+        let pid = running_agent(&p).ok_or_else(|| {
+            format!(
+                "{} names no running agent (is the agent running?)",
+                p.pid().display()
+            )
+        })?;
         let ok = std::process::Command::new("/bin/kill")
-            .args(["-USR1", pid])
+            .args(["-USR1", &pid])
             .status()
             .map_err(|e| format!("kill: {e}"))?
             .success();
         if ok {
-            Ok(pid.to_owned())
+            Ok(pid)
         } else {
             Err(format!("no agent runs as pid {pid}"))
         }

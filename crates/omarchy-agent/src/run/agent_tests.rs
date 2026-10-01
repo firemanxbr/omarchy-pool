@@ -746,3 +746,119 @@ fn a_follow_answer_without_a_release_changes_nothing() {
     assert_eq!(w.changes().len(), changes);
     assert_eq!(w.step(), "idle");
 }
+
+#[test]
+fn an_older_release_does_not_preempt_a_round() {
+    let mut w = World::running_v1();
+    w.release("v1.1.0");
+    w.release("v1.2.0");
+    w.follow("v1.2.0", None);
+    w.round_now();
+    while w.step() != "pull" {
+        w.tick(3);
+    }
+    // Admitted, but neither newer nor under a rollback statement: the round goes on.
+    w.follow("v1.1.0", None);
+    w.round_now();
+    assert_eq!(w.agent.state.rollout.target, r("v1.2.0"));
+    assert!(!w.journal().contains("\"preempted\""), "{}", w.journal());
+    while w.step() != "idle" {
+        w.tick(3);
+    }
+    assert_eq!(w.applied().as_deref(), Some("v1.2.0"));
+}
+
+#[test]
+fn an_update_order_seen_while_a_revert_finishes_is_kept_for_the_next_poll() {
+    let mut w = World::running_v1();
+    publish(
+        &w.remote,
+        "v1.1.0",
+        "2027-01-14T08:00:00Z",
+        "v1.0.0",
+        &[],
+        "    command: [broken]\n",
+    );
+    w.follow("v1.1.0", None);
+    w.round_now();
+    while !matches!(
+        w.agent.state.rollout.step,
+        Step::Replace {
+            files: crate::run::state::Files::LastGood,
+            ..
+        }
+    ) {
+        w.tick(3);
+    }
+    w.follow("v1.1.0", Some("ord_1"));
+    w.round_now();
+    assert_eq!(w.agent.state.update_seen, None);
+    while w.step() != "idle" {
+        w.tick(3);
+    }
+    assert_eq!(w.outcome().0, "rolled-back");
+    assert!(!w.agent.state.quarantine.is_empty());
+    // The next poll takes the order: the quarantine is lifted and the retry starts.
+    w.round_now();
+    assert_eq!(w.agent.state.update_seen.as_deref(), Some("ord_1"));
+    assert_eq!(w.agent.state.rollout.target, r("v1.1.0"));
+    assert_ne!(w.step(), "idle");
+    assert!(w.journal().contains("quarantine-lifted"), "{}", w.journal());
+}
+
+/// Ticks a round to v1.1.0 until it is at `commit`.
+fn at_commit() -> World {
+    let mut w = World::running_v1();
+    w.release("v1.1.0");
+    w.follow("v1.1.0", None);
+    w.round_now();
+    while w.step() != "commit" {
+        w.tick(3);
+    }
+    w
+}
+
+fn assert_committed(w: &World) {
+    assert_eq!(w.step(), "idle");
+    assert_eq!(w.applied().as_deref(), Some("v1.1.0"), "{:?}", w.outcome());
+    let good = w.agent.paths.last_good(&w.agent.cfg.set_name);
+    assert!(good.join("compose.yml").exists());
+    let overlay = fs::read_to_string(w.set_dir().join("agent.yml")).unwrap();
+    assert!(
+        overlay.contains("org.omarchy-pool.agent.release: \"v1.1.0\""),
+        "{overlay}"
+    );
+}
+
+#[test]
+fn a_commit_that_died_after_its_rename_finishes_after_a_restart() {
+    let mut w = at_commit();
+    // What commit does up to its rename, then the process dies before state.json is saved.
+    let (staging, good) = (
+        w.agent.paths.staging(&w.agent.cfg.set_name),
+        w.agent.paths.last_good(&w.agent.cfg.set_name),
+    );
+    fs::remove_dir_all(&good).unwrap();
+    fs::rename(&staging, &good).unwrap();
+    w.restart();
+    assert_eq!(w.step(), "commit");
+    w.tick(3);
+    assert_committed(&w);
+}
+
+#[test]
+fn a_commit_whose_set_directory_write_failed_finishes_once_it_can_write() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mut w = at_commit();
+    let set = w.set_dir();
+    fs::set_permissions(&set, fs::Permissions::from_mode(0o500)).unwrap();
+    w.now += 3;
+    let failed = w.agent.tick(w.now, false);
+    fs::set_permissions(&set, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(failed.is_err(), "{failed:?}");
+    // The step was not saved as done: it runs again, after a restart too.
+    w.restart();
+    assert_eq!(w.step(), "commit");
+    w.tick(3);
+    assert_committed(&w);
+}

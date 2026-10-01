@@ -194,7 +194,8 @@ pub(crate) fn start(
 }
 
 /// One step of the round in flight. `pending` is the verified target in memory, when the
-/// round renders from a bundle. Errors are local (the disk): the caller exits 78.
+/// round renders from a bundle. Errors are local (the disk): the loop retries the step
+/// at its next tick, so every step is safe to run again.
 pub(crate) fn step(
     state: &mut State,
     pending: Option<&Target>,
@@ -849,8 +850,10 @@ fn fail_replace(state: &mut State, ctx: &mut Ctx, files: Files, why: &str) -> Re
 /// One guard sample of the dispatcher, from its state and its exits since the guard
 /// began: `Ok(true)` it runs, `Ok(false)` the engine is restarting it (once), `Err` why
 /// the guard fails. An ordered restart (#277) exits 75 and is restarted by the engine:
-/// neither its exit nor its restart counts.
-fn judge(g: &mut Guard, u: &Unit, exits: &[Exit]) -> Result<bool, String> {
+/// neither its exit nor its restart counts. `settling`: an ordered restart happened
+/// within the ready wait, so a stopped sample is the gap before the engine restarts it
+/// (podman reports `exited` there, docker `restarting`).
+fn judge(g: &mut Guard, u: &Unit, exits: &[Exit], settling: bool) -> Result<bool, String> {
     if let Some(e) = exits.iter().find(|e| e.code != 0 && e.code != 75) {
         return Err(format!("the dispatcher exited with {}", e.code));
     }
@@ -875,6 +878,8 @@ fn judge(g: &mut Guard, u: &Unit, exits: &[Exit]) -> Result<bool, String> {
     g.streak = 0;
     if u.running() {
         Ok(true)
+    } else if settling {
+        Ok(false)
     } else {
         Err(format!("the dispatcher is {} and not restarting", u.status))
     }
@@ -919,7 +924,9 @@ fn guard(state: &mut State, ctx: &mut Ctx, mut g: Guard) {
         Answer::NoAnswer(e) => return engine_wait(state, ctx, "guard", &e),
     };
     g.last_sample = now;
-    match judge(&mut g, &u, &exits) {
+    let last75 = exits.iter().filter(|e| e.code == 75).map(|e| e.at).max();
+    let settling = last75.is_some_and(|t| now - t <= wait_s);
+    match judge(&mut g, &u, &exits, settling) {
         Err(why) => return revert(state, ctx, &why),
         Ok(false) => {
             state.rollout.step = Step::Guard(g);
@@ -927,13 +934,12 @@ fn guard(state: &mut State, ctx: &mut Ctx, mut g: Guard) {
         }
         Ok(true) => {}
     }
-    let last75 = exits.iter().filter(|e| e.code == 75).map(|e| e.at).max();
     if let Some(http) = http {
         match d.ready(&g.container, &http) {
             Answer::Yes(true) => {}
             // After an ordered restart the dispatcher answers again once it has
             // re-adopted its leases: it has the ready wait for that.
-            Answer::Yes(false) | Answer::NotFound if last75.is_some_and(|t| now - t <= wait_s) => {
+            Answer::Yes(false) | Answer::NotFound if settling => {
                 state.rollout.step = Step::Guard(g);
                 return;
             }
@@ -958,14 +964,33 @@ fn write_set_dir(ctx: &Ctx) -> Result<(), String> {
     write_files(&ctx.cfg.set_dir, &files)
 }
 
+/// The release a rendered directory's `pins.json` names.
+fn pins_release(dir: &Path) -> Option<Release> {
+    let pins: Pins = serde_json::from_slice(&fs::read(dir.join(PINS)).ok()?).ok()?;
+    Some(pins.release)
+}
+
 fn commit(state: &mut State, ctx: &mut Ctx) -> Result<(), String> {
     let Some(target) = state.rollout.target else {
         finish(state, ctx, Outcome::Refused, None, "a round with no target");
         return Ok(());
     };
     let (dir, good) = (staging(ctx), last_good(ctx));
-    reset_dir(&good)?;
-    fs::rename(&dir, &good).map_err(|e| format!("{}: {e}", dir.display()))?;
+    // Safe to run again: a commit that stopped after the rename (a restart, a failed
+    // write of the set directory) finds staging gone and last-good already the target.
+    if dir.join("compose.yml").exists() {
+        reset_dir(&good)?;
+        fs::rename(&dir, &good).map_err(|e| format!("{}: {e}", dir.display()))?;
+    } else if pins_release(&good) != Some(target) {
+        go(
+            state,
+            ctx,
+            Step::Revert {
+                why: "commit: staging is gone and last-good is not the target".into(),
+            },
+        );
+        return Ok(());
+    }
     write_set_dir(ctx)?;
     let from = state.rollout.from;
     state.floor = Some(state.floor.map_or(target, |f| f.max(target)));

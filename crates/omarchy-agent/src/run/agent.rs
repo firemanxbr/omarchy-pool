@@ -180,7 +180,8 @@ impl Agent {
         Ok(())
     }
 
-    /// One tick. `Err` only for a local error (the disk): the loop exits 78.
+    /// One tick. `Err` only for a local error (the disk): nothing is saved and the loop
+    /// retries at its next tick.
     pub fn tick(&mut self, now: i64, round_now: bool) -> Result<(), String> {
         if round_now || now >= self.state.poll.next_at {
             self.poll(now, round_now);
@@ -303,9 +304,13 @@ impl Agent {
     fn on_follow(&mut self, f: Follow, now: i64, round_now: bool) {
         let mut force: Option<String> =
             round_now.then(|| "a round was asked for (SIGUSR1)".to_owned());
+        // An Update order waits while commit or a revert finishes (a revert quarantines
+        // again): the next poll sees it unconsumed.
+        let busy = self.state.rollout.step != Step::Idle
+            && !rollout::preemptible(&self.state.rollout.step);
         if let Some(id) = f
             .update
-            .filter(|id| self.state.update_seen.as_ref() != Some(id))
+            .filter(|id| !busy && self.state.update_seen.as_ref() != Some(id))
         {
             if !self.state.quarantine.is_empty() {
                 self.journal.write(
@@ -329,6 +334,16 @@ impl Agent {
         // The round in flight goes there already; commit and revert finish first (the
         // next poll sees the target again).
         if in_flight == Some(target) || (in_flight.is_some() && !rollout::preemptible(&step)) {
+            return;
+        }
+        // Only a newer release or a rollback statement preempts (a target below the
+        // floor needs one): an older admitted release waits for the round to end.
+        if in_flight.is_some_and(|cur| target < cur)
+            && !matches!(
+                trust::admit(&self.state, target),
+                Err(Refusal::BelowFloor { .. })
+            )
+        {
             return;
         }
         if in_flight.is_none() && self.state.applied == Some(target) && force.is_none() {

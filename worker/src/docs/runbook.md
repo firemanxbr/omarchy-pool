@@ -619,7 +619,7 @@ origin must be in its `pools`, and the target must be at or above the floor
 merged from every verified manifest and never lowered) — or covered by a
 rollback statement (*Rollback statements* in the security model), which
 preempts a round in flight, as a newer release does, at any step before
-`commit`. The dispatcher alone is replaced: stopped (it saves its leases
+`commit` (an older release waits for the round to end). The dispatcher alone is replaced: stopped (it saves its leases
 and exits within 60 s), created from the new files and waited for on
 `/ready`; task containers are never part of a plan and keep running. The
 guard then samples it for `guard_s`: a restart streak, two restarts that
@@ -643,9 +643,11 @@ too, and the running set is compared with `last-good/` every 15 minutes.
 On the host: `omarchy-agent status` (from `state.json` and
 `run/capacity.json`, with the pool and the engine down), `omarchy-agent
 round` (a round now: SIGUSR1 to the running agent) and `omarchy-agent logs
-[-n N]`. Exit 78 means a local configuration error — `agent.toml`, the data
-directory, an unreadable `state.json` — that stops the loop until a person
-fixes it; no network answer ever does. `tests/agent-run-loop.sh` runs the
+[-n N]`. Exit 78 means a local configuration error at start — `agent.toml`,
+a data directory others may write, an unreadable `state.json`, another agent
+running on the same data directory — that stops the agent until a person
+fixes it; no network answer ever does, and a write that fails while it runs
+(a full disk) is retried every tick, each step being safe to run again. `tests/agent-run-loop.sh` runs the
 loop against a real engine in CI (rootful docker and rootless podman).
 
 ## The Studio host

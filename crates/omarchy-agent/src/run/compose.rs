@@ -63,8 +63,8 @@ impl Compose {
         self.base(&self.tools.docker)
     }
 
-    /// `docker-compose --project-name .. --project-directory .. -f ..` with the set's
-    /// interpolation variables.
+    /// `docker-compose --project-name .. --env-file /dev/null --project-directory .. -f ..`
+    /// with the set's interpolation variables.
     fn compose(&self, p: &Project) -> Result<Command, String> {
         if !is_project(&p.name) {
             return Err(format!("{:?} is not a compose project name", p.name));
@@ -76,6 +76,9 @@ impl Compose {
             "never",
             "--project-name",
             &p.name,
+            // Interpolation comes from agent.toml alone, never the set's own `.env`.
+            "--env-file",
+            "/dev/null",
             "--project-directory",
         ])
         .arg(&p.dir);
@@ -542,7 +545,7 @@ mod tests {
             "{argv}"
         );
         assert!(argv.ends_with(
-            "--ansi never --project-name omarchy-host --project-directory /srv/set \
+            "--ansi never --project-name omarchy-host --env-file /dev/null --project-directory /srv/set \
              --file /data/staging/host/compose.yml up --detach --no-deps --no-build --pull never dispatcher"
         ), "{argv}");
         let env = lines.next().unwrap();
