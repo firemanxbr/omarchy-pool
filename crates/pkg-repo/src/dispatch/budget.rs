@@ -12,7 +12,8 @@
 //!   and the claim offers no agent slot until the next day. A sidecar's
 //!   usage comes back in `<task dir>/agent/usage.json`, which the sidecar
 //!   writes and the task container does not mount; a usage that does not
-//!   read counts as the whole cap it was given.
+//!   read counts as the whole cap it was given. Each probe that ran counts
+//!   one call (its one tiny completion).
 //!
 //! Seam (#317): the caps come from the envelope's `agent_budget`, which the
 //! install writes into the dispatcher's environment.
@@ -77,7 +78,7 @@ impl Ledger {
         self.read(now).calls
     }
 
-    /// Adds an ended sidecar's calls to today's.
+    /// Adds an ended sidecar's calls (or a probe's one) to today's.
     pub fn add(&self, now: u64, calls: u32) {
         let mut d = self.read(now);
         d.calls = d.calls.saturating_add(calls);
@@ -99,12 +100,31 @@ pub fn grant(caps: &Caps, spent_today: u32, reserved: u32) -> u32 {
 }
 
 /// The calls an ended sidecar made, from the file it wrote; its whole cap when the file does not read.
+/// The sidecar writes that directory, so the file is opened without following a symlink and
+/// without blocking on a FIFO, must be a regular file, and is read up to 4 KiB.
 pub fn used(task_dir: &Path, cap: u32) -> u32 {
-    std::fs::read(task_dir.join("agent").join("usage.json"))
-        .ok()
+    read_usage(&task_dir.join("agent").join("usage.json"))
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
         .and_then(|v| v.get("calls").and_then(serde_json::Value::as_u64))
         .map_or(cap, |c| u32::try_from(c).unwrap_or(u32::MAX).min(cap))
+}
+
+fn read_usage(path: &Path) -> Option<Vec<u8>> {
+    use rustix::fs::{Mode, OFlags};
+    use std::io::Read;
+    let fd = rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .ok()?;
+    let file = std::fs::File::from(fd);
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut out = Vec::new();
+    file.take(4096).read_to_end(&mut out).ok()?;
+    Some(out)
 }
 
 #[cfg(test)]
@@ -156,5 +176,27 @@ mod tests {
             200,
             "never more than the cap it was given"
         );
+    }
+
+    #[test]
+    fn a_usage_that_is_a_symlink_a_fifo_or_too_long_counts_as_the_whole_cap() {
+        let t = tempfile::tempdir().unwrap();
+        let agent = t.path().join("agent");
+        std::fs::create_dir_all(&agent).unwrap();
+        let elsewhere = t.path().join("elsewhere.json");
+        std::fs::write(&elsewhere, r#"{"calls":3}"#).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, agent.join("usage.json")).unwrap();
+        assert_eq!(used(t.path(), 200), 200, "a symlink is not followed");
+        std::fs::remove_file(agent.join("usage.json")).unwrap();
+        let made = std::process::Command::new("mkfifo")
+            .arg(agent.join("usage.json"))
+            .status()
+            .unwrap();
+        assert!(made.success());
+        assert_eq!(used(t.path(), 200), 200, "a FIFO does not block the read");
+        std::fs::remove_file(agent.join("usage.json")).unwrap();
+        let long = format!(r#"{{"calls":3,"pad":"{}"}}"#, "x".repeat(8192));
+        std::fs::write(agent.join("usage.json"), long).unwrap();
+        assert_eq!(used(t.path(), 200), 200, "at most 4 KiB is read");
     }
 }

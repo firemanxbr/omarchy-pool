@@ -156,9 +156,14 @@ tasks share one, and the dispatcher itself never holds the key. Per task a
 sidecar makes at most `OMARCHY_AGENT_CALLS_PER_TASK` calls (200),
 `OMARCHY_AGENT_TOKENS_PER_TASK` tokens (2 000 000) and runs
 `OMARCHY_AGENT_MINUTES_PER_TASK` (120); the host makes at most
-`OMARCHY_AGENT_CALLS_PER_DAY` calls a day (5000, UTC), after which it takes
-no model work until the next day. Recommended: a **separate, spend-capped
-key for contributor drafts** (the provider's own spending limit), since a
+`OMARCHY_AGENT_CALLS_PER_DAY` calls a day (5000, UTC, the probe's one call
+each run included), after which it takes no model work until the next
+day. The sidecars run as root with no capabilities (no `CAP_DAC_OVERRIDE`),
+so `agent.env` must be owned by the uid their root maps to (root on a rootful
+engine, the maintainer on a rootless one) at 0600, or be 0644 inside the 0700
+`etc/`; otherwise the probe fails and the host takes no model work (#317's
+install writes it so). Recommended: a **separate, spend-capped key for
+contributor drafts** (the provider's own spending limit), since a
 recipe that compromises its draft's sidecar can use that key until the caps
 stop it; and a `GITHUB_TOKEN` in `agent.env` with no write scope and no
 private-repository read (a fine-grained token, "public repositories,

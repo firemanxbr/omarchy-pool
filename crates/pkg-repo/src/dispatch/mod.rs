@@ -577,6 +577,10 @@ impl Dispatcher {
             return;
         };
         self.probe.holds = None;
+        if r.ran {
+            // A probe that ran made (at most) one model call: the day's budget counts it.
+            self.ledger.add(now, 1);
+        }
         self.probe.failures = if r.ok { 0 } else { self.probe.failures + 1 };
         self.probe.next_at = probe::next_after(now, self.probe.failures);
         let changed = self

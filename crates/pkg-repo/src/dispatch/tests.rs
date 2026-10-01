@@ -2338,11 +2338,16 @@ fn per_task_caps_go_to_the_sidecar_and_the_per_day_budget_stops_new_model_tasks(
         })
     };
     assert_eq!(caps(&sidecar(9, GEN, "agent")), ["200", "50000", "1800"]);
-    // A second model task while the first runs: what the day has left once the first's cap is set aside.
+    // The probe sidecar's call at start is the day's too.
+    assert_eq!(
+        super::budget::Ledger::new(&h.work).spent(h.now.load(Ordering::SeqCst)),
+        1
+    );
+    // A second model task while the first runs: what the day has left once the first's cap and the probe's call are set aside.
     h.give(review(10, 6, GEN2));
     h.advance(31);
     h.ticks(&mut d, 3);
-    assert_eq!(caps(&sidecar(10, GEN2, "agent"))[0], "50");
+    assert_eq!(caps(&sidecar(10, GEN2, "agent"))[0], "49");
     // The day is spoken for: the claims offer no agent slot, and a model task handed anyway does not start.
     h.advance(31);
     h.ticks(&mut d, 1);
@@ -2361,7 +2366,7 @@ fn per_task_caps_go_to_the_sidecar_and_the_per_day_budget_stops_new_model_tasks(
     h.advance(31);
     h.ticks(&mut d, 3);
     assert!(h.engine.has(12, "g_00000000000000d4"));
-    // The audit ends having made 17 calls (its sidecar's usage file): the day counts 17, and 33 are free again.
+    // The audit ends having made 17 calls (its sidecar's usage file): the day counts 17 more, and 32 are free again.
     std::fs::write(
         h.tdir(9, GEN).join("agent/usage.json"),
         r#"{"calls":17,"tokens":4000}"#,
@@ -2381,7 +2386,7 @@ fn per_task_caps_go_to_the_sidecar_and_the_per_day_budget_stops_new_model_tasks(
     assert!(!h.engine.has(9, GEN));
     assert_eq!(
         super::budget::Ledger::new(&h.work).spent(h.now.load(Ordering::SeqCst)),
-        17
+        18
     );
     h.advance(31);
     h.ticks(&mut d, 1);
@@ -2566,8 +2571,8 @@ fn a_sidecar_that_does_not_start_loses_the_lease_and_leaves_nothing() {
     );
     assert_eq!(
         super::budget::Ledger::new(&h.work).spent(h.now.load(Ordering::SeqCst)),
-        0,
-        "nothing of the day spent"
+        1,
+        "nothing of the day spent but the probe's call"
     );
 }
 

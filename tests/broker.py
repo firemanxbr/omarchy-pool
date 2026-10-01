@@ -492,6 +492,15 @@ broker.AGENT_CALLS = 100
 status, out = call("POST", "/v1/messages", {"model": "x", "max_tokens": 8, "messages": [{"role": "user", "content": "one more"}]})
 assert status == 429 and "tokens" in out["error"]["message"], out
 assert json.load(open(usage)) == {"calls": 3, "tokens": 12}
+# Its /health is liveness only: the task container reaches it, so no completion goes through it.
+probes = []
+real_probe = broker.agent.probe
+broker.agent.probe = lambda timeout=90: probes.append(1) or real_probe(timeout)
+for _ in range(5):
+    status, out = call("GET", "/health")
+    assert status == 200 and out["ok"] is True and out["agent"].startswith("claude-code/"), out
+assert probes == [] and json.load(open(usage)) == {"calls": 3, "tokens": 12}, "a sidecar's /health made a model call"
+broker.agent.probe = real_probe
 # Past its wall time.
 broker.SPENT = broker.Spent()
 broker.SPENT.started -= 3601

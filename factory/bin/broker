@@ -18,7 +18,8 @@ dies; whatever the recipe or the upstream's build does with `env` or
                                           names (factory/bin/agent.py) — the Anthropic Messages shape
                                           in and out, so the builder speaks to it as FACTORY_PROVIDER=
                                           anthropic, ANTHROPIC_BASE_URL=http://broker:8790 and any key
-                 GET  /health           → the probe, plus who the agent really is ("agent": provider/model)
+                 GET  /health           → the probe, plus who the agent really is ("agent": provider/model);
+                                          on an agent sidecar, liveness only (no completion)
     GitHub       GET  /github/<path>    → https://api.github.com/<path> with GITHUB_TOKEN (read-only)
 
 Without OMARCHY_WORKER_TOKEN the pool path is off and this is the agent
@@ -427,9 +428,15 @@ class Handler(BaseHTTPRequestHandler):
         if not found:
             body["error"] = "no agent key on the broker"
             return self._json(200 if worker_token() else 503, body)
+        name, p = found
+        if SPENT.on():
+            # An agent sidecar's /health is liveness only: its task container reaches it, and a probe
+            # here is a completion outside the caps and the usage file. The probe sidecar's own
+            # `agent.py --probe` is the host's real model check (#336).
+            body.update({"ok": True, "agent": f"{name}/{agent.model_for(name, p)}"})
+            return self._json(200, body)
         with LOCK:
             ok, detail = agent.probe()
-        name, p = found
         body.update({"ok": ok, **detail, "agent": detail.get("agent") or f"{name}/{detail.get('model') or agent.model_for(name, p)}"})
         return self._json(200 if ok else 503, body)
 
