@@ -121,6 +121,11 @@ impl Facts {
         self.limits
     }
 
+    /// A rootless runtime: no root daemon behind the socket (install's `rootful_ack`, #317).
+    pub fn rootless(&self) -> bool {
+        self.engine.rootless
+    }
+
     /// The facts as `omarchy-agent capacity` prints them without a release.
     pub fn report(&self) -> serde_json::Value {
         let (cpus, mem_gb) = self.totals();
@@ -426,7 +431,8 @@ pub(super) fn df_free(out: &str) -> Option<u64> {
 }
 
 /// Runs a command with a deadline, killing it when the deadline passes; its stdout.
-fn run(mut c: Command, timeout: Duration) -> Result<String, String> {
+/// Install's engine calls (#317) go through it too.
+pub(crate) fn run(mut c: Command, timeout: Duration) -> Result<String, String> {
     let mut child = c
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

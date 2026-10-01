@@ -4,11 +4,11 @@
 //! commit or revert — on the pinned compose driver.
 //!
 //! Seams left for later issues, each named where it sits:
-//! - install, preflight and runtime discovery (#317): agent.toml, the first tools and the
-//!   engine kind arrive from there; until then the lint holds every host to the rootful
-//!   (strict) case. Its preflight also checks who owns (and may write) the set directory,
-//!   `compose.override.yml` and `etc/*.env`: today only agent.toml and the data
-//!   directory are checked;
+//! - install, preflight and runtime discovery (#317, `crate::install`): agent.toml (with
+//!   `host_id` and `worker_id` from enrollment, and `set.engine`, the engine kind the
+//!   lint holds the set to) and the first tools arrive from there. Preflight checks who
+//!   owns (and may write) agent.toml, `compose.override.yml`, `.env` and
+//!   `etc/dispatcher.env`;
 //! - enrollment and the host report (#321): `agent.toml`'s `worker_id`, and
 //!   `POST /hosts/self/report` built from `state.json`'s `round` and `rollout`;
 //! - capacity detection (#333): `run/capacity.json`, hashed as an input of the set, so a
@@ -37,6 +37,11 @@ mod agent;
 mod cli;
 
 pub use cli::{logs, round, run, self_test, status};
+
+// What install (#317) shares with the loop: the verifier, the release assets' names and
+// where they are, and the pinned tools.
+pub(crate) use agent::{bundle_names, Sigstore, Verifier};
+pub(crate) use pool::RELEASES;
 
 /// Unix seconds now.
 pub(crate) fn now() -> i64 {

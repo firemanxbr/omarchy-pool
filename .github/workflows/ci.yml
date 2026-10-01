@@ -114,6 +114,29 @@ jobs:
       - name: The run loop on ${{ matrix.engine }}, with only the pinned tools and a task that survives every rollout
         run: bash tests/agent-run-loop.sh ${{ matrix.engine }}
 
+  agent-install:
+    name: Host agent install on a real engine (${{ matrix.engine }})
+    # #317: preflight's egress probe — a task that reaches a stand-in LAN
+    # address fails it, one that reaches only the public stand-in passes —
+    # and a stand-in legacy compose project left running with the same
+    # container ids while uninstall removes the new host's task container;
+    # with the pinned docker CLI, on rootful docker and rootless podman's API
+    # socket.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [docker, podman]
+    steps:
+      - uses: actions/checkout@v4
+      # Keep in sync with rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: The egress probe and a legacy project on ${{ matrix.engine }}
+        run: bash tests/agent-install.sh ${{ matrix.engine }}
+
   agent-self-update:
     name: Host agent self-update under systemd --user
     # #316: deliberately broken builds of a higher agent — a panic while it

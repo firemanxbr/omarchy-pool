@@ -183,6 +183,21 @@ fn holds_token(env: &Path) -> bool {
     })
 }
 
+/// The registration a valid worker token in the dispatcher's env file belongs to (the
+/// `# worker:` line [`fetch_token`] writes): what install puts in agent.toml's
+/// `worker_id` (#317).
+pub fn worker_of(env: &Path) -> Option<String> {
+    if !holds_token(env) {
+        return None;
+    }
+    std::fs::read_to_string(env).ok()?.lines().find_map(|l| {
+        l.strip_prefix("# worker: ")
+            .map(str::trim)
+            .filter(|w| valid_worker_id(w))
+            .map(str::to_owned)
+    })
+}
+
 /// The host worker token, fetched again (a rotation): only for a machine that enrolled.
 pub fn rotate(o: &Options, out: &mut impl Write) -> Result<(), Failure> {
     let (key, identity, pool) = open(o)?;

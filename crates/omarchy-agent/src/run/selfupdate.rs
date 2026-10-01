@@ -553,7 +553,7 @@ impl Agent {
             .map_err(|e| format!("{}: {e}", bin.display()))?;
         let mut c = Command::new(&bin);
         c.arg("self-test")
-            .arg("--data")
+            .arg("--data-dir")
             .arg(&self.paths.data)
             .args(["--release", &release.to_string()]);
         let o = super::exec::run(c, SELF_TEST).map_err(|e| format!("self-test: {e}"))?;

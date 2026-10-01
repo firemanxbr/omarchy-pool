@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest as _, Sha256};
 
-use crate::lint::{self, Engine, SetToml};
+use crate::lint::{self, SetToml};
 use crate::version::Release;
 
 use super::config::{Config, Paths};
@@ -513,8 +513,8 @@ fn violations(cfg: &Config, pins: &Pins, compose: &str, set: &str) -> Result<Vec
     let compose = pins.lint_view(compose);
     let over = cfg.set_dir.join("compose.override.yml");
     let over = over.exists().then(|| read_text(&over)).transpose()?;
-    // The engine is linted strictly (rootful) until runtime discovery (#317) says which.
-    let mut v = lint::lint_compose(&compose, over.as_deref(), &cfg.envelope, Engine::Rootful)
+    // The engine install detected (#317); strictly rootful when agent.toml does not say.
+    let mut v = lint::lint_compose(&compose, over.as_deref(), &cfg.envelope, cfg.engine)
         .err()
         .unwrap_or_default();
     v.extend(lint::lint_set_toml(set, &compose).err().unwrap_or_default());
@@ -575,8 +575,19 @@ fn engine_wait(state: &mut State, ctx: &Ctx, what: &str, why: &str) {
             ctx.now,
             Outcome::EngineUnreachable,
             None,
-            &format!("{what}: {why}"),
+            &engine_detail(what, why),
         );
+    }
+}
+
+/// What an engine that did not answer says. A socket that refuses this user (`EACCES`:
+/// the docker group applies to new logins only) is a person's to fix, and says so; the
+/// agent keeps running and asks again (#317).
+pub(crate) fn engine_detail(what: &str, why: &str) -> String {
+    if why.to_ascii_lowercase().contains("permission denied") {
+        format!("needs a person: {what}: the engine's socket refuses this user (EACCES); log out and back in, or reboot, so the docker group applies ({why})")
+    } else {
+        format!("{what}: {why}")
     }
 }
 

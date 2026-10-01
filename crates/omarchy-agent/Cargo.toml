@@ -44,9 +44,11 @@ ureq = { version = "3.4", default-features = false, features = ["rustls-no-provi
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 # run/ only: SIGUSR1 (`omarchy-agent round`) as a flag the loop reads, without unsafe code here.
 signal-hook = { version = "0.3", default-features = false }
-# capacity/ only: statvfs on the work root and the engine's data root, and the page size,
-# without unsafe code.
-rustix = { version = "1", default-features = false, features = ["std", "fs", "param"] }
+# capacity/: statvfs on the work root and the engine's data root, and the page size;
+# install/ (#317): owner files written through openat with O_NOFOLLOW in a directory the
+# agent owns (its effective uid), and secrets typed on /dev/tty without echo. No unsafe
+# code here.
+rustix = { version = "1", default-features = false, features = ["std", "fs", "param", "process", "termios"] }
 
 [dev-dependencies]
 rcgen = "0.14"

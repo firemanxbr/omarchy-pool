@@ -565,9 +565,10 @@ curl -fsSL https://github.com/firemanxbr/omarchy-pool/releases/latest/download/i
 curl -fsSL https://github.com/firemanxbr/omarchy-pool/releases/latest/download/install.sh | OMARCHY_ENROLL=... sh -s -- --help
 ```
 
-It refuses root, checks the binary against the embedded SHA-256 and installs
-it under `~/.local/share/omarchy-agent/versions/<agent version>/`. Until P1
-(#317) the agent's `install` only says so.
+It refuses root, checks the binary against the embedded SHA-256, installs
+it under `~/.local/share/omarchy-agent/versions/<agent version>/` and runs
+`omarchy-agent install --release <that release>` (*Installing a host*,
+below).
 
 `install.sh` itself is not signed, and *latest* is whatever release was
 published last, so the plain command trusts that release (*What is not
@@ -602,13 +603,90 @@ days before it publishes anything. An earlier agent runs only once
 (a release that ships any other one stops, for a person to look), and in a
 job of its own that holds no signing identity and no token that writes.
 
+### Installing a host
+
+`omarchy-agent install` (#317; design v2 §13) is what install.sh runs, on
+Linux (macOS is P3). Run as the user the agent will run as — a dedicated
+machine or VM, or a dedicated `omarchy` user on a shared machine, never your
+daily login — after `factory/host/prep-root.sh` did the root-only steps:
+
+```bash
+curl -fsSL https://github.com/firemanxbr/omarchy-pool/releases/latest/download/install.sh \
+  | OMARCHY_ENROLL=ome_... sh -s -- --dedicated --work-root /srv/omarchy-pool/host
+```
+
+| Option | What it does |
+|---|---|
+| `--dedicated` | this machine or VM is used only as a pool host (design v2 §19.1); without it the host must be a dedicated user at the `subuid` level holding no credentials |
+| `--work-root <dir>`, `--secrets-dir <dir>` | where tasks work (default `<data>/work`) and where `agent.env` goes (default `<data>/secrets`); the secrets directory must be outside the work root and the set directory |
+| `--socket <path>` | the engine's socket; otherwise the first that answers of rootless podman's API socket, rootless docker, `/var/run/docker.sock` |
+| `--task-subnets <cidr>[,<cidr>]` | the task networks' range (default `10.231.0.0/16`, as prep-root.sh's) |
+| `--legacy <compose project>` | a set already running beside the new bundle (the Studio): recorded in `legacy.json`, nothing in it changed; its rootful daemon without userns-remap is the recorded exception until P6 |
+| `--agent-env-from <file>` | copies the agent keys from an existing file (the Studio's `etc/agent.env`) after showing which keys it holds; without it they are asked for on `/dev/tty`, not shown |
+| `--max-units`, `--max-cpus`, `--max-mem-gb` | the owner's caps, lower than detected only |
+| `--yes` | confirms the envelope (and the keys' copy) without a terminal |
+| `--pool <origin>`, `--data-dir <dir>`, `--wait-minutes <n>` | a pool the release signs; the data directory; how long to wait for your Confirm |
+
+It verifies the release bundle and that it is the agent that release ships,
+fetches the release's pinned docker CLI and compose plugin into `tools/`,
+then runs **preflight** — `omarchy-agent preflight` with the same options
+runs it alone — and stops with one screen listing everything to fix when
+anything blocks, having written nothing else: the engine and the hosting
+requirement (`root` or `user` isolation without `--dedicated` is a daily
+login and refused; a rootful daemon on a new host needs userns-remap), the
+release's minimum and whether `--cpus`, `--memory` and `--pids-limit` hold,
+credentials within the user's reach (SSH keys, a `gh` login, stored git
+credentials, browser profiles: a warning on a dedicated host, a blocker
+otherwise), the user manager (`XDG_RUNTIME_DIR` and its D-Bus), the task
+subnets against the host's routes and other projects' networks, the owner
+files' owners and modes, the legacy project, a `GITHUB_TOKEN` to copy
+(public read only: a classic token with no scope; any scope, or a token
+GitHub names no scopes for, is refused), and the **egress probe**: a task
+on its own network in the task subnets must fail to reach `169.254.169.254`,
+the default gateway and the host's LAN address and must reach GitHub, which
+on a rootful host is what prep-root.sh's `DOCKER-USER` rules give. A socket
+that refuses the user (`EACCES`) is "needs a person: log out and back in,
+or reboot", not a crash loop.
+
+Then it prints the envelope (`agent.toml`) to confirm, writes
+`run/capacity.json`, enrolls ([Maintainer hosts](/docs/worker-host#maintainer-hosts):
+the fingerprint, your Confirm on the site, the host worker token) and only then writes `agent.toml` with
+the `host_id` and `worker_id` the enrollment gave — before your Confirm
+there is no run loop, no dispatcher and nothing that claims. It writes the
+agent keys to `OMARCHY_SECRETS_DIR/agent.env` (0600), `legacy.json` with
+`--legacy`, and the unit `~/.config/systemd/user/omarchy-agent.service`
+(`Type=notify`, `Restart=always`, `WatchdogSec=300`,
+`RestartPreventExitStatus=78`, `UMask=0077`, `NoNewPrivileges=yes`), enables
+linger (`loginctl enable-linger` where polkit allows it, otherwise it prints
+`sudo loginctl enable-linger <user>` and exits 1 as "needs a person") and
+starts the service, whose first round renders, pulls and starts the bundle.
+Every owner file is written through `openat` with `O_NOFOLLOW` in a
+directory the agent owns; a symbolic link, another user's file or one others
+may write is refused. Running it again repairs the install and keeps the
+identity, the agent keys and your edits to `agent.toml`.
+
+`omarchy-agent uninstall` stops the agent, removes the unit, the bundle's
+containers and networks, task containers and sidecars (labelled
+`org.omarchy-pool.agent.host=<host>`) and the bundle's files; it never
+touches the legacy project, and keeps the identity, `agent.toml` and the
+secrets directory.
+
+`tests/agent-install.sh` runs the egress probe and the legacy project against
+a real engine in CI. What needs a VM, by hand on Ubuntu LTS, Fedora and
+Arch (Asahi on the Studio's hardware) before P1 is called done: install
+from nothing with the pasted command and confirm on the site, then
+`sudo reboot` and check `systemctl --user status omarchy-agent` and
+`omarchy-agent status` come back without a login; and on a host with a
+stand-in legacy compose project, `--legacy` leaves its container ids the
+same before and after.
+
 ### The run loop
 
 `omarchy-agent run` (#315; design v2 §16) keeps the host on the pool's
 release. It ticks every few seconds and never blocks longer than one engine
 or HTTP call with a timeout; a watchdog thread ends a loop that made no
 progress for 15 minutes so the service manager starts it again. Everything
-lives under the data directory (`~/.local/share/omarchy-agent`, or `--data`):
+lives under the data directory (`~/.local/share/omarchy-agent`, or `--data-dir`):
 `agent.toml` (the owner's envelope, refused when others may write it),
 `state.json`, `journal.ndjson` (rotated at 10 MiB), the verified bundles it
 fetched, the pinned docker CLI and compose plugin (`tools/`, by the SHA-256

@@ -1,7 +1,7 @@
 //! The agent's local configuration: `agent.toml` (design v2 §12) and the data directory.
 //!
-//! agent.toml is written by `omarchy-agent install` (#317) and by a person at the host,
-//! never by the pool. It is refused when group- or world-writable or owned by another
+//! agent.toml is written by `omarchy-agent install` (#317: with the `host_id` and
+//! `worker_id` the enrollment gave, #321) and by a person at the host, never by the pool. It is refused when group- or world-writable or owned by another
 //! user. Unknown keys are left alone (capacity caps are #333's, settings P4's). Any
 //! problem here is a local configuration error: the loop exits 78 and says why.
 
@@ -11,10 +11,11 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::lint::Envelope;
+use crate::lint::{Engine, Envelope};
 
-/// Where the agent keeps everything (design v2 §13.1): `--data`, `$OMARCHY_AGENT_DATA`,
-/// `$XDG_DATA_HOME/omarchy-agent`, or `~/.local/share/omarchy-agent`.
+/// Where the agent keeps everything (design v2 §13.1), for every command: `--data-dir`,
+/// `$OMARCHY_AGENT_DATA`, `$XDG_DATA_HOME/omarchy-agent`, or
+/// `~/.local/share/omarchy-agent` (install.sh's).
 pub fn data_dir(flag: Option<&str>) -> Result<PathBuf, String> {
     if let Some(d) = flag.map(PathBuf::from).or_else(|| {
         std::env::var_os("OMARCHY_AGENT_DATA")
@@ -29,7 +30,9 @@ pub fn data_dir(flag: Option<&str>) -> Result<PathBuf, String> {
     std::env::var_os("HOME")
         .filter(|v| !v.is_empty())
         .map(|h| PathBuf::from(h).join(".local/share/omarchy-agent"))
-        .ok_or_else(|| "no data directory: give --data, or set OMARCHY_AGENT_DATA or HOME".into())
+        .ok_or_else(|| {
+            "no data directory: give --data-dir, or set OMARCHY_AGENT_DATA or HOME".into()
+        })
 }
 
 /// The files under the data directory.
@@ -104,6 +107,9 @@ pub struct Config {
     pub socket_mount: PathBuf,
     pub task_subnets: Option<String>,
     pub envelope: Envelope,
+    /// What install detected behind the socket (`set.engine`, #317): the lint holds a
+    /// rootful one to `rootful_ack` and `dedicated`. Absent, the strict (rootful) case.
+    pub engine: Engine,
 }
 
 #[derive(Deserialize)]
@@ -127,6 +133,7 @@ struct SetPart {
     driver: Option<String>,
     socket_cli: Option<PathBuf>,
     socket_mount: Option<PathBuf>,
+    engine: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -197,6 +204,15 @@ impl Config {
                 "agent.toml: set.driver {d:?}: this agent has the compose driver only"
             ));
         }
+        let engine = match f.set.engine.as_deref() {
+            None | Some("rootful") => Engine::Rootful,
+            Some("rootless") => Engine::Rootless,
+            Some(other) => {
+                return Err(format!(
+                    "agent.toml: set.engine {other:?} is neither \"rootful\" nor \"rootless\""
+                ))
+            }
+        };
         let socket_cli = need_path(f.set.socket_cli, "set.socket_cli")?;
         let socket_mount = match f.set.socket_mount {
             None => socket_cli.clone(),
@@ -215,6 +231,7 @@ impl Config {
             socket_mount,
             task_subnets: f.envelope.task_subnets,
             envelope,
+            engine,
         })
     }
 
