@@ -23,7 +23,7 @@ import { contributorOf, sha256Hex } from "../src/routes/contributors";
 import { handleApprove } from "../src/routes/review";
 import { handleBlockContributor, handleBlockPackage } from "../src/routes/blocks";
 import { HELPERS } from "../src/pages/layout";
-import { runScript } from "./fixture";
+import { legacyWorker, runScript } from "./fixture";
 import { assert as answer, b64url, createAuthenticator, register, unb64url, UP } from "./soft-authenticator.mjs";
 
 /** The dashboard as the tests reach it: localhost, where a passkey works (relyingParty), as wrangler dev's. */
@@ -249,8 +249,8 @@ describe("block on the web (#271)", () => {
   });
 
   it("of a contributor: refused without the passkey — nothing revoked, nothing cancelled; with it, blocked and named on the record", async () => {
-    const w = await call("POST", "/factory/workers", { name: "box", arch: "x86_64" }, "omc_carl");
-    expect(w.status).toBe(201);
+    // A worker carl registered before #331 closed the door to contributors: the block revokes it.
+    const w = { json: { worker: await legacyWorker(env, "carl", "box", "x86_64") } };
     const block = (body: Record<string, unknown>) => fromPage("m2", "/api/v1/factory/contributors/carl/block", { reason: "requests under a name that is not his", ...body });
     const intact = async (what: string) => {
       expect(await env.DB.prepare("SELECT blocked_at FROM contributors WHERE login = 'carl'").first(), what).toEqual({ blocked_at: null });

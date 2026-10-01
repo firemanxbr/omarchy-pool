@@ -6,14 +6,18 @@
  * /users/alice/can for what they may do here. The rule it proves is the
  * dashboard's first: every viewer gets every control, the same for all, and
  * the one who may not press one gets it disabled, grey, with the server's
- * reason in its title — never hidden, never a sentence in its place. The
+ * reason in its title — never hidden, never a sentence in its place. One
+ * exception, the last block below (#331): "Run a worker" and the worker
+ * form are a maintainer's, drawn for a maintainer only; everyone else
+ * keeps the served line that their packages build on the pool's hosts. The
  * script is the served page's, run as a browser would (runScript in
  * test/fixture.ts); the build page's Decision cell is decision-cell.test.ts.
  */
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import worker from "../src/index";
-import { runScript, scriptOf, seedDashboard, type Fixture } from "./fixture";
+import { POOL_HOSTS } from "../src/routes/contributors";
+import { legacyWorker, runScript, scriptOf, seedDashboard, type Fixture } from "./fixture";
 
 let F: Fixture;
 type Who = "" | "bob" | "alice" | "m1" | "m2";
@@ -42,6 +46,7 @@ interface Drawn {
   identity(me: unknown): unknown;
   renderTop(): void;
   renderRegister(): void;
+  renderPoolLine(role: string): void;
   buildBtn(name: string, arch: string | null, stopped: string | null, title: string): string;
   removeBtn(name: string): string;
   workerActs(w: unknown): string;
@@ -50,12 +55,12 @@ interface Drawn {
 }
 
 /** The served page's script, run once, with the page's button makers and the shell's log icon reachable. */
-async function drawn(): Promise<Drawn> {
-  const page = await get(`/user/${F.owner}`, "");
+async function drawn(login = F.owner): Promise<Drawn> {
+  const page = await get(`/user/${login}`, "");
   expect(page.status).toBe(200);
   return runScript(scriptOf(page.text), {
-    pathname: `/user/${F.owner}`,
-    functions: ["identity", "renderTop", "renderRegister", "buildBtn", "removeBtn", "workerActs", "withdrawBtn", "wtLog"],
+    pathname: `/user/${login}`,
+    functions: ["identity", "renderTop", "renderRegister", "renderPoolLine", "buildBtn", "removeBtn", "workerActs", "withdrawBtn", "wtLog"],
     variables: ["CAN", "WHO"],
   }) as Drawn;
 }
@@ -92,11 +97,10 @@ describe("a person's page draws every control for every viewer, grey with the se
     d = await drawn();
     w3 = (await get("/api/v1/factory?limit=10", "")).json.workers.find((w: any) => w.id === F.communityWorker);
     expect(w3.owner).toBe(F.owner);
-    // A worker alice registered and revoked: its row stays on her page, its buttons grey with the state's word for everyone.
-    const box = await call("POST", "/api/v1/factory/workers", "alice", { name: "box", arch: F.arch });
-    expect(box.status, box.text).toBe(201);
-    expect((await call("DELETE", `/api/v1/factory/workers/${box.json.worker}`, "alice")).status).toBe(200);
-    gone = { ...w3, id: box.json.worker, revoked_at: "2026-09-17T00:00:00Z" };
+    // A worker alice registered before #331 and revoked: its row stays on her page, its buttons grey with the state's word for everyone.
+    const box = await legacyWorker(env, "alice", "box", F.arch);
+    expect((await call("DELETE", `/api/v1/factory/workers/${box}`, "alice")).status).toBe(200);
+    gone = { ...w3, id: box, revoked_at: "2026-09-17T00:00:00Z" };
     // The one standing approval of the fixture: m2's, of the project's build of alice's package, on m2's page.
     approval = (await get(`/api/v1/users/${F.m2}`, "")).json.approvals.find((a: any) => a.task_id === F.projectTask);
     expect(approval.decision).toBe("approved");
@@ -111,7 +115,6 @@ describe("a person's page draws every control for every viewer, grey with the se
       Share: one(d.nodes["#share-btn"].innerHTML.split("</button>")[0] + "</button>"),
       Token: one(d.nodes["#share-btn"].innerHTML.split("</button>")[1] + "</button>"),
       "+ request one": one(d.nodes["#pk-request"].outerHTML),
-      "Register worker": controls(d.nodes["#worker-form"].innerHTML)[0],
       "Build all": one(d.buildBtn(F.factoryPkg, null, null, "every architecture the request names")),
       [`Build ${F.arch}`]: one(d.buildBtn(F.factoryPkg, F.arch, null, "this architecture only")),
       "Build all (a build in flight)": one(d.buildBtn(F.factoryPkg, null, "a build is in flight", "every architecture the request names")),
@@ -136,11 +139,6 @@ describe("a person's page draws every control for every viewer, grey with the se
     for (const [name, c] of Object.entries(e)) expect(c, name).toEqual(name === "Share" ? live : grey(name === "Build all (a build in flight)" ? "a build is in flight" : SIGN_IN));
     expect(d.nodes["#share-btn"].innerHTML).toBe('<button type="button" class="btn" id="share-open" title="the link to this page, to post anywhere">Share</button> <button type="button" class="btn ghost" id="token-open" disabled aria-disabled="true" title="sign in with GitHub">Token</button>');
     expect(d.nodes["#pk-request"].outerHTML).toBe('<a class="disabled more-link" id="pk-request" data-href="/factory#request" tabindex="-1" aria-disabled="true" title="sign in with GitHub">+ request one →</a>');
-    // The toggle before the register form is served live for everyone and never drawn again: it only shows the form, whose fields are the ones served grey.
-    const served = (await get(`/user/${F.owner}`, "")).text;
-    expect(served).toContain('<button type="button" class="more-link" id="w-toggle" title="the form: a name, an architecture, one command to run it">+ register one</button>');
-    expect(served).toContain('<input type="text" id="w-name" placeholder="laptop" required disabled aria-disabled="true" title="only alice registers a worker here">');
-    expect(d.nodes["#w-toggle"].outerHTML).toBe("");
   });
 
   it("bob, a contributor who owns nothing: the same controls, grey with whose they are — and, for what is his on his own page, where that is", async () => {
@@ -148,7 +146,6 @@ describe("a person's page draws every control for every viewer, grey with the se
       Share: live,
       Token: grey("only alice mints their token — yours is on /user/bob"),
       "+ request one": grey("only alice requests here — yours is on /user/bob"),
-      "Register worker": grey("only alice registers a worker here — yours is on /user/bob"),
       "Build all": grey("only alice builds here — yours is on /user/bob"),
       [`Build ${F.arch}`]: grey("only alice builds here — yours is on /user/bob"),
       "Build all (a build in flight)": grey("a build is in flight"),
@@ -167,7 +164,7 @@ describe("a person's page draws every control for every viewer, grey with the se
 
   it("alice, the owner: her workspace live — but Remove on an approved or published package is a maintainer's, Withdraw a maintainer's, and her revoked worker is gone", async () => {
     expect(await everything("alice")).toEqual({
-      Share: live, Token: live, "+ request one": live, "Register worker": live,
+      Share: live, Token: live, "+ request one": live,
       "Build all": live, [`Build ${F.arch}`]: live,
       "Build all (a build in flight)": grey("a build is in flight"),
       "Remove mine": grey("mine is approved: a maintainer removes it"),
@@ -187,7 +184,6 @@ describe("a person's page draws every control for every viewer, grey with the se
       Share: live,
       Token: grey("only alice mints their token — yours is on /user/m1"),
       "+ request one": grey("only alice requests here — yours is on /user/m1"),
-      "Register worker": grey("only alice registers a worker here — yours is on /user/m1"),
       "Build all": grey("only alice builds here — yours is on /user/m1"),
       [`Build ${F.arch}`]: grey("only alice builds here — yours is on /user/m1"),
       "Build all (a build in flight)": grey("a build is in flight"),
@@ -211,6 +207,57 @@ describe("a person's page draws every control for every viewer, grey with the se
       const [mode, revoke] = controls(d.workerActs(w1));
       expect(mode, `${as || "nobody"}: mode`).toEqual(grey(as ? NO_MODE : SIGN_IN));
       expect(revoke, `${as || "nobody"}: revoke`).toEqual(as === "m1" || as === "m2" ? live : grey(as ? "only m1 or a maintainer revokes a worker here" : SIGN_IN));
+    }
+  });
+});
+
+describe("the workers are the maintainers' (#331): \"Run a worker\" and the worker form are drawn for a maintainer only; everyone else reads that their packages build on the pool's hosts", () => {
+  const LINE = `Nothing to run here: ${POOL_HOSTS}, which the maintainers provide.`;
+
+  it("served: the line and the way to the packaging docs, for everyone — no form, no toggle, no \"Run a worker\" in the page itself", async () => {
+    for (const login of [F.owner, F.m1]) {
+      const served = (await get(`/user/${login}`, "")).text;
+      const html = served.replace(/<script\b[\s\S]*?<\/script>/g, "");
+      expect(html, login).toContain('<div id="w-own"><p class="sub" id="w-pool"');
+      expect(html, login).toContain(LINE);
+      expect(html, login).toContain('<a href="/docs/factory#contribute-a-package">How packaging works →</a>');
+      expect(html, login).toContain('<span id="w-slot"></span>');
+      for (const absent of ['id="worker-form"', 'id="w-toggle"', 'id="w-name"', 'href="/docs/workers">Run a worker']) expect(html, `${login}: ${absent}`).not.toContain(absent);
+    }
+  });
+
+  /** What the worker section holds once the page has drawn for `as` on `login`'s page: the slot beside the heading, the block under it, the form. */
+  async function section(as: Who, login = F.owner) {
+    const d = await drawn(login);
+    await asRole(d, as, login);
+    d.renderRegister();
+    return { slot: d.nodes["#w-slot"]?.innerHTML ?? "", own: d.nodes["#w-own"]?.innerHTML ?? "", form: d.nodes["#worker-form"]?.innerHTML ?? "" };
+  }
+
+  it("nobody, bob, alice (whose page it is): nothing drawn over the served line — no form, no toggle, no \"Run a worker\"", async () => {
+    for (const as of ["", "bob", "alice"] as Who[]) expect(await section(as), as || "nobody").toEqual({ slot: "", own: "", form: "" });
+    // alice on bob's page, and bob on his own: the same.
+    expect(await section("alice", F.contributor)).toEqual({ slot: "", own: "", form: "" });
+    expect(await section("bob", F.contributor)).toEqual({ slot: "", own: "", form: "" });
+  });
+
+  it("a maintainer: \"Run a worker\", the toggle and the form — live on their own page, and nothing drawn on anyone else's", async () => {
+    const own = await section("m1", F.m1);
+    expect(own.slot).toContain('id="w-toggle"');
+    expect(own.own).toContain('<a href="/docs/workers">Run a worker →</a>');
+    expect(own.own).toContain('<form id="worker-form"');
+    expect(own.own).toContain("Maintainers only");
+    expect(controls(own.form)).toEqual([expect.objectContaining({ text: "Register worker", grey: false })]);
+    // A contributor's page and another maintainer's: the served line stays, nothing is drawn over it — no form greyed with a reason that is not alice's.
+    expect(await section("m1", F.owner)).toEqual({ slot: "", own: "", form: "" });
+    expect(await section("m1", F.m2)).toEqual({ slot: "", own: "", form: "" });
+  });
+
+  it("the served line is hidden on a maintainer's page, whose section lists the hosts they provide, and kept on a contributor's", async () => {
+    for (const [role, hidden] of [["maintainer", true], ["contributor", false]] as const) {
+      const d = await drawn(role === "maintainer" ? F.m1 : F.owner);
+      d.renderPoolLine(role);
+      expect((d.nodes["#w-pool"] as unknown as { hidden: boolean }).hidden, role).toBe(hidden);
     }
   });
 });

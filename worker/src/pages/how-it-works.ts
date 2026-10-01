@@ -93,10 +93,10 @@ ${sourceRows()}
 
   <section id="never">
     <h2>What a build can never touch</h2>
-    <p class="sub">A build is somebody else's code — the recipe and the upstream's build system — and its log is public, on the API while it is in staging and on the record once it is staged. The rule, kept the same way on the project's host, a contributor's and a maintainer's: <b>the build sees nothing the log cannot show</b> — the public log is the proof, not the risk.</p>
+    <p class="sub">A build is somebody else's code — the recipe and the upstream's build system — and its log is public, on the API while it is in staging and on the record once it is staged. The rule, kept the same way on every host the maintainers provide: <b>the build sees nothing the log cannot show</b> — the public log is the proof, not the risk.</p>
     <div class="steps">
       <div class="step"><h3>The broker</h3><p>One process per host holds the credentials — the worker's token, the agent's key, a GitHub token — and only receives, processes and answers: the pool's calls for the one task it claimed, the agent, GitHub read-only. It runs no build. The project's review builds reach the agent the same way, through a proxy. <a href="/docs/workers#secrets">What the broker holds →</a></p></div>
-      <div class="step"><h3>The builder</h3><p>Born with nothing but the broker's address, builds one task and dies. Inside it the build user starts from an empty environment; a variable set on it by mistake is dropped at start and said so. <code>env</code> in a PKGBUILD prints <code>PATH</code> and <code>HOME</code>. <a href="/docs/workers">Run a worker →</a></p></div>
+      <div class="step"><h3>The builder</h3><p>Born with nothing but the broker's address, builds one task and dies. Inside it the build user starts from an empty environment; a variable set on it by mistake is dropped at start and said so. <code>env</code> in a PKGBUILD prints <code>PATH</code> and <code>HOME</code>. <a href="/docs/workers">Run a worker (maintainers only) →</a></p></div>
       <div class="step"><h3>The pool's check</h3><p>For the worker the pool does not run: every log, recipe and report uploaded is read for what looks like a secret — the pool's tokens, agents' keys, GitHub's, a private key, a credential in a URL — and refused at the door with the kind and the line, never the match. The record never receives one. <a href="/docs/security-model">the security model →</a></p></div>
       <div class="step"><h3>Two words on a worker, a tombstone on a record</h3><p>A worker becomes the project's on two maintainers' word, never its owner's alone; the Review page names the worker and host behind every build. A record is written once and can be withdrawn by a maintainer with a reason — a signed tombstone takes its place. The signing key itself lives inside the pool's Worker; no worker, runner or repository holds it. <a href="/workers">Workers →</a></p></div>
     </div>
@@ -107,9 +107,9 @@ ${sourceRows()}
     <div class="cando">
       <div><h4>for contributors</h4><ul class="yes">
         <li><b>Ask for a package, on the record.</b> A request is a signed record; the project's agent drafts a recipe from the project's sources.</li>
-        <li><b>Build it at home with the same tools.</b> The same signed worker image, the same conventions, <code>namcap</code>, the same build — on your machine, with your compute. Your build is <em>evidence</em>, never the product: nothing you built is served to anyone.</li>
+        <li><b>Built on the pool's hosts, nothing to run.</b> Your request builds on the workers the maintainers provide — the same signed image, the same conventions, <code>namcap</code>, a fresh container per build. That build is <em>evidence</em>, never the product: nothing it built is served to anyone.</li>
         <li><b>A second pair of eyes before a human's.</b> When your build is staged, the pool's agent audits the recipe, the log and the metadata and attaches a report beside it.</li>
-        <li><b>Watch it happen.</b> Your workspace, your packages, your workers and every step of every build on the <a href="/factory">Factory</a> and <a href="/review">Review</a> pages; the journal keeps the record.</li>
+        <li><b>Watch it happen.</b> Your workspace, your packages and every step of every build on the <a href="/factory">Factory</a> and <a href="/review">Review</a> pages; the journal keeps the record.</li>
       </ul></div>
       <div><h4>for maintainers</h4><ul class="yes">
         <li><b>The evidence in front of you.</b> The contributor's build, the gate's verdict, the audit, the log and the recipe on one row — and <em>Build by the project</em> one press away. What the gate checks and what the agents are told is one page: <a href="/docs/what-we-test">What we test</a>.</li>
@@ -186,7 +186,7 @@ Server = ${pool}/multilib/$arch
       <tr><td>Index</td><td>A D1 (SQLite) database: one row per package object with its manifest, dependency edges, sonames; releases and ring heads; every event the pipeline records.</td></tr>
       <tr><td>API + this site</td><td>One Cloudflare Worker serving <code>/api/v1</code> and these pages.</td></tr>
       <tr><td>Pipeline</td><td>Jobs the pool queues on its own clock and project workers pull: sync (every 3 h, one release per ring), the evidence and the promotion it earns (after every sync that changed edge; rc checked every 3 h), health, security (every 3 h), the trial of every review build, GC (weekly); a metrics snapshot every 30 min and the daily cost estimate by the pool itself. GitHub only releases the code, when a maintainer dispatches it.</td></tr>
-      <tr><td>Factory</td><td>The build queue lives in the index (requests, tasks, leases); workers are containers anywhere — a contributor's laptop for their own packages, machines the project trusts for what maintainers approved — that claim a task, build it in a fresh Arch container and report; the pool signs what a project worker publishes. A lease that expires goes back to the queue.</td></tr>
+      <tr><td>Factory</td><td>The build queue lives in the index (requests, tasks, leases); workers are containers on the maintainers' hosts — the only providers of the project's compute; contributors run none — that claim a task, build it in a fresh Arch container and report; the pool signs what a project worker publishes. A lease that expires goes back to the queue.</td></tr>
       <tr><td>Tools</td><td><code>pkg-repo</code> (the publisher: sync, promote, gate, trial, render, security, gc), <code>pkg-extract</code> (manifests), <code>pkg-check</code> (the ABI check), <code>omarchy-cli</code> (the thin client) — Rust, built for both architectures on every release.</td></tr>
     </tbody></table></div>
   </section>

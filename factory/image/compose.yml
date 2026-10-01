@@ -62,7 +62,7 @@ services:
     environment:
       OMARCHY_BROKER: http://broker:8790
       WORKER_LABELS: '{"where":"${WHERE:-my-machine}"}'
-      # 1 = also build other contributors' packages (donated compute); default: yours only.
+      # 1 = also build whatever is queued, anyone's packages; default: yours only. Workers are maintainers only (#331).
       # On, this machine runs strangers' recipes: give the broker no key you would mind losing.
       WORKER_SHARED: ${WORKER_SHARED:-0}
     networks: [worker]

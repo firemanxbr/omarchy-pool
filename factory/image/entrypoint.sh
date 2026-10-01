@@ -118,7 +118,7 @@ if [[ -n "${OMARCHY_BROKER:-}" ]]; then
   echo "omarchy-worker: $id — ${owner:-?}'s builder ($arch) behind the broker at $OMARCHY_BROKER; one task per container${WORKER_SHARED:+, shared}" >&2
   exec omarchy-build-worker --container
 fi
-: "${OMARCHY_WORKER_TOKEN:?OMARCHY_WORKER_TOKEN is required: register a worker on your page, /user/<login> (or OMARCHY_BROKER, the broker that holds it)}"
+: "${OMARCHY_WORKER_TOKEN:?OMARCHY_WORKER_TOKEN is required: register a worker on your page, /user/<login> (maintainers only) (or OMARCHY_BROKER, the broker that holds it)}"
 
 self="$(curl -sS --fail-with-body --max-time 30 "$OMARCHY_API/api/v1/factory/workers/self" -H "authorization: Bearer $OMARCHY_WORKER_TOKEN" 2>&1)" \
   || { echo "omarchy-worker: the pool did not accept this token: $self" >&2; exit 2; }

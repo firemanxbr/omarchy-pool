@@ -21,7 +21,7 @@ const BODY = String.raw`
   <div class="hero compact">
     <p class="eyebrow">Workers</p>
     <h1>Three kinds of worker, and whose they are</h1>
-    <p class="lede">The project's take the pool's jobs. The review ones — trusted on two maintainers' word, never the owner's alone — build again what a maintainer asked for, and write the audit. A contributor's build their own packages, or whatever is queued when shared. Every worker by its id, its state in one word, and what its machine uses. <a href="/docs/workers">Run one →</a></p>
+    <p class="lede">The project's take the pool's jobs. The review ones — trusted on two maintainers' word, never the owner's alone — build again what a maintainer asked for, and write the audit. The community ones, legacy sets until they retire, build their owner's packages, or whatever is queued when shared. All run on the maintainers' hosts — contributors run none. Every worker by its id, its state in one word, and what its machine uses. <a href="/docs/workers">Run one (maintainers only) →</a></p>
   </div>
 
   <div class="tiles four" id="tiles"></div>
@@ -39,11 +39,11 @@ const BODY = String.raw`
     ${workerPanels([
       { kind: "project", blurb: "the pool's own jobs — sync, render, promote, health, security, gc — on the host a maintainer keeps" },
       { kind: "review", blurb: "the maintainers' side: builds again, publishes, audits — the agent through a proxy that holds the key" },
-      { kind: "community", blurb: "their own machines: their packages, or whatever is queued when shared" },
+      { kind: "community", blurb: "legacy community sets, until they retire: their owner's packages, or whatever is queued when shared" },
     ])}
   </section>
 
-  <div class="gate"><div><h3>Run one of your own</h3><p>The signed image, Docker Desktop or Podman, a token from your <a href="/me">workspace</a>: it builds only your packages, with your agent, and your builds skip the queue. Share it, and it takes whatever is queued.</p></div><a class="btn ghost" href="/docs/workers">Run a worker →</a></div>
+  <div class="gate"><div><h3>Your packages build on the pool's hosts</h3><p>Contributors do not run workers: the project provides them for everyone, and its maintainers are their only providers. Request a package and it builds here. A maintainer adds a host with the signed image (<a href="/docs/workers">Run a worker</a>, maintainers only).</p></div><a class="btn ghost" href="/docs/factory#contribute-a-package">How packaging works →</a></div>
 `;
 
 const SCRIPT = String.raw`
@@ -72,7 +72,7 @@ __CHARTS__
   // The four tiles, from the shell's counts (workerCounts), the workers building now, the load and the week's minutes — one list, so the tiles over a listing that did not answer carry the same labels.
   function tilesOf(wc, bz, load, wm) {
     return [
-      ["Alive", num(wc.alive) + " / " + num(wc.registered), num(wc.byKind.project.alive) + " project · " + num(wc.byKind.review.alive) + " review · " + num(wc.byKind.community.alive) + " contributors", wc.alive ? "ok" : "warn"],
+      ["Alive", num(wc.alive) + " / " + num(wc.registered), num(wc.byKind.project.alive) + " project · " + num(wc.byKind.review.alive) + " review · " + num(wc.byKind.community.alive) + " community", wc.alive ? "ok" : "warn"],
       ["Building now", num(wc.building), wc.building ? bz.map(function (w) { return "#" + w.current_task; }).join(" · ") : "every worker idle"],
       ["Load · 24 h", load + "%", "of the last day with a lease, across the alive ones"],
       // The stats poll's, not the listing's: marked so, it keeps its number when the listing did not answer — the chart below draws the same series.
@@ -108,19 +108,19 @@ __CHARTS__
     $("#kinds").innerHTML =
       card("project", "Project", kinds.project, "The pool's own jobs, on the host a maintainer keeps.") +
       card("review", "Review", kinds.review, "Rebuilds, publishes and audits, on two maintainers' word.") +
-      card("community", "Contributors", kinds.community, "Their machines: their packages, or whatever is queued when shared.");
+      card("community", "Community", kinds.community, "Legacy community sets, until they retire: their owner's packages, or whatever is queued when shared.");
     // The load per worker, the busiest first: the name with the kind and the architecture, the bar in the kind's colour, and what it did in the tooltip.
     var ranked = d.workers.filter(function (w) { return w.alive || LOAD[w.id]; }).sort(function (a, b) { return busyOf(b) - busyOf(a); }).slice(0, 10);
     $("#c-perworker").innerHTML = ranked.length ? hrows(ranked.map(function (w) {
       var k = wtKind(w), l = LOAD[w.id] || { ms: 0, done: 0 };
       return [workerName(w), (k === "community" ? (w.mode === "shared" ? "shared" : "own") : k) + " · " + esc(w.arch), busyOf(w), COLOR[k], null,
         w.id + ": " + busyOf(w) + "% of the last day with a lease · " + num(l.done) + " task(s) finished, " + Math.round(l.ms / 60000) + " min" + (w.current_task ? " · building #" + w.current_task + " now" : "") + " · " + num(w.builds_done) + " done / " + num(w.builds_failed) + " failed all time"];
-    }), { w: 150, html: true }) + '<div class="legend"><span><i style="background:' + COLOR.project + '"></i>project</span><span><i style="background:' + COLOR.review + '"></i>review</span><span><i style="background:' + COLOR.community + '"></i>contributors</span></div>' : '<div class="empty">no worker alive, nothing leased in the last day</div>';
+    }), { w: 150, html: true }) + '<div class="legend"><span><i style="background:' + COLOR.project + '"></i>project</span><span><i style="background:' + COLOR.review + '"></i>review</span><span><i style="background:' + COLOR.community + '"></i>community</span></div>' : '<div class="empty">no worker alive, nothing leased in the last day</div>';
     // The three tables.
     var seen = function (ws) { return ws.filter(function (w) { return showAll || w.alive; }); };
     pager("#w-project", seen(kinds.project), function (w) { return workerRow(w, "project"); }, { empty: showAll ? "no project worker registered" : "no project worker alive — the host is off; pool jobs wait", text: wtText });
     pager("#w-review", seen(kinds.review), function (w) { return workerRow(w, "review"); }, { empty: showAll ? "no review worker registered" : "no review worker alive — the project's builds and the audits wait", text: wtText });
-    pager("#w-community", seen(kinds.community), function (w) { return workerRow(w, "community"); }, { empty: showAll ? "no contributor's worker registered yet" : "no contributor's worker alive right now", text: wtText });
+    pager("#w-community", seen(kinds.community), function (w) { return workerRow(w, "community"); }, { empty: showAll ? "no community worker registered" : "no community worker alive right now", text: wtText });
     endSkeleton();
   }
   // The builds an emulated worker sent back (params.needs_native, #281): how many wait for a native worker, per architecture, each linked. The live read lists every task in flight up to its limit; a full page says "at least".
@@ -132,7 +132,7 @@ __CHARTS__
     el.innerHTML = arches.map(function (a) {
       var n = by[a].length;
       return '<b>' + (ts.length >= LISTED ? "At least " : "") + num(n) + (n === 1 ? " build waits" : " builds wait") + ' for a native ' + esc(a) + ' worker.</b> ' + (n === 1 ? "It" : "They") + ' could not run emulated: ' + by[a].map(function (id) { return '<a href="/build/' + id + '">#' + id + '</a>'; }).join(", ") + '.';
-    }).join("<br>") + (arches.length ? ' <a href="/docs/workers">Run one →</a>' : "");
+    }).join("<br>") + (arches.length ? ' <a href="/docs/workers">Run one (maintainers only) →</a>' : "");
   }
   // Worker minutes per day, the shell's one sum over the jobs series (workerMinutes) — the tile above is its total.
   function renderMinutes(d) {
@@ -153,7 +153,7 @@ export function workersHtml(poolUrl: string, version: RunningVersion): string {
   return page({
     path: "/workers",
     title: "Workers · omarchy-pool",
-    description: "Every worker building for the pool, by kind — the project's, the review ones two maintainers vouched for, the contributors' — alive or gone, how busy, what it built.",
+    description: "Every worker building for the pool, by kind — the project's, the review ones two maintainers vouched for, the legacy community sets — alive or gone, how busy, what it built.",
     // The machines are the Factory's: they build what contributors ask for, and the footer no longer names them (#240).
     active: "factory",
     body: BODY,
@@ -176,7 +176,7 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
   {
     id: "workers.hero",
     page: "/workers",
-    anchor: ["<h1>Three kinds of worker, and whose they are</h1>", '<a href="/docs/workers">Run one →</a>'],
+    anchor: ["<h1>Three kinds of worker, and whose they are</h1>", "contributors run none", '<a href="/docs/workers">Run one (maintainers only) →</a>'],
     visible: EVERYONE,
   },
   {
@@ -283,9 +283,10 @@ export const WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     visible: EVERYONE,
   },
   {
+    // The workers are the maintainers' hosts (#331): the gate invites no one to run one, it says where a contributor's packages build and links the packaging docs; "Run a worker" is marked maintainers only.
     id: "workers.run-one-gate",
     page: "/workers",
-    anchor: ["<h3>Run one of your own</h3>", '<a href="/me">workspace</a>', '<a class="btn ghost" href="/docs/workers">Run a worker →</a>'],
+    anchor: ["<h3>Your packages build on the pool's hosts</h3>", "Contributors do not run workers", '(<a href="/docs/workers">Run a worker</a>, maintainers only)', '<a class="btn ghost" href="/docs/factory#contribute-a-package">How packaging works →</a>'],
     visible: EVERYONE,
   },
 ];

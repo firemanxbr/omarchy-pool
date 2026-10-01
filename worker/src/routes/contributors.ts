@@ -127,6 +127,15 @@ export function viaOf(request: Request): "web" | "token" | "agent" {
 /** The two reasons every door shares, here and on a build's decisions (routes/review.ts): nobody signed in, or somebody who is not a maintainer. */
 export const SIGN_IN = "sign in with GitHub";
 export const MAINTAINER_DECIDES = "a maintainer decides";
+/**
+ * Why a worker is registered by maintainers only (#331, design v2 §6.5): the
+ * project provides the workers for everyone and its maintainers are their
+ * only providers — a maintainer is vetted by a pull request to
+ * factory/MAINTAINERS.toml, and their host is trusted by that same act.
+ * POST /factory/workers refuses anyone else with it (403), and the person's
+ * page says it where a maintainer has the worker form.
+ */
+export const POOL_HOSTS = "your packages build on the pool's hosts";
 
 /** The acts on a person's page (pages/user.ts), each a control drawn for every viewer and grey with its reason where the viewer may not press it. Share is not here: the page is public and its link is anyone's to copy — no door, no gate. */
 export type Right = "request" | "register" | "token" | "build" | "dequeue" | "remove" | "revoke" | "withdraw" | "own_only" | "share_worker";
@@ -176,6 +185,8 @@ const noMode = (w: WorkerRow): Verdict | null => (w.trust !== "community" ? { ok
  * /factory/token mints the caller's token, whoever's page the button is
  * on), so the page offers them on nobody else's page, and the reason a
  * signed-in reader gets names where their own control is: their page.
+ * Register is also a maintainer's only (#331): on their own page every
+ * contributor reads POOL_HOSTS, before a block.
  * Build and the queue are the owner's: the project's builds are a
  * maintainer's to start from Review, never a contributor's registration to
  * build. Remove is the owner's while the registration is theirs to free —
@@ -234,7 +245,8 @@ export function workspace(c: Contributor | null, login: string, registrations: R
   }
   return {
     request: onlyOwner("requests here") ?? blocked ?? allow,
-    register: onlyOwner("registers a worker here") ?? blocked ?? allow,
+    // A worker is a maintainer's to register (#331): the role from the synced MAINTAINERS.toml, before a block, so every contributor reads the same sentence.
+    register: onlyOwner("registers a worker here") ?? (maintainer ? null : no(403, POOL_HOSTS)) ?? blocked ?? allow,
     token: onlyOwner("mints their token") ?? allow,
     // A registration is built by the one who brought it: for anyone else the name is not theirs to build (404, as a name not registered).
     build: onlyOwner("builds here", 404) ?? blocked ?? allow,
@@ -1027,7 +1039,7 @@ export async function handleDequeueBuild(c: Contributor, name: string, id: numbe
 }
 
 export async function handleRegisterWorker(c: Contributor, request: Request, env: Env): Promise<Response> {
-  // A worker is registered under the caller's own name (a blocked one is refused here, in the words the page greys the button with).
+  // A worker is registered under the caller's own name, by a maintainer only (#331): a contributor's packages build on the pool's hosts; a blocked maintainer is refused too — in the words the page greys the button with.
   const no = refused(workspace(c, c.login).register);
   if (no) return no;
   const b = (await request.json().catch(() => ({}))) as { name?: string; arch?: string; labels?: unknown };
