@@ -104,6 +104,21 @@ secret). Everything travels in the `Authorization` header over TLS only.
   *hold_secrets*, *as_builder*). Build caches are kept per trust on the host
   and per package inside: a build reads only what an earlier build of the
   same package, on the same side, wrote.
+- **On a maintainer host, one container per task, born with nothing
+  (#335).** The host's one service, the dispatcher (`pkg-repo dispatch`),
+  holds the host's worker token and each lease's job token, and starts every
+  task — a build, an audit, a trial's helper — in a container made by one
+  function: no socket, no token of any kind, no agent key, not the work root
+  nor another task's directory, `--cap-drop ALL` with the few capabilities
+  pacman and makepkg need, `no-new-privileges`, its share of CPUs, memory and
+  pids, the build image by digest, never `--rm`. No task container calls the
+  pool: the dispatcher stages its inputs (`/task/in`, read-only) and, after
+  it exits, uploads only the files its kind may upload, under a size cap; the
+  engine's out-of-memory kill is the engine's word, whatever the script said.
+  The dispatcher refuses to start with a package signing key in its
+  environment: the pool signs what is published. CI renders every kind's
+  container and fails on anything outside that spec (`dispatch/spec.rs`), and
+  runs the dispatcher on a real engine (`tests/dispatch-engine.sh`).
 - **A log that carries a secret is refused.** Text evidence uploaded to
   staging is read whole and checked for the shapes of the pool's tokens,
   agents' keys, GitHub's and the clouds' tokens, private keys, credentials

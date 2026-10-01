@@ -500,6 +500,22 @@ trials and audits. A Stop is per lease (`task` names it; several open at once, 3
 login), and `fail` takes `lost: true` (a host event: the attempt given back, twice per task at
 most) and `oom: true` (the engine's kill: the attempt spent, the reason kept).
 
+On the host, the dispatcher (`pkg-repo dispatch`, #335, design v2 §9) holds those leases and runs
+each in one task container it starts through one function (`crates/pkg-repo/src/dispatch/spec.rs`):
+
+```
+start      refuses a signing key in its environment; re-adopts: a task container with a lease file
+           (work/state/leases/<id>-<gen>.json, 0600) runs on or, exited, is completed from its exit code,
+           OOMKilled and outputs; one without goes; a lease whose container is gone fails `lost`; then /ready
+loop       per lease: heartbeat (409 stop: kill, fail as stopped), its own watchdog (last accepted heartbeat
+           + 35 min: kill, report nothing), its container's state; the disk watcher (work root below the
+           floor: the youngest build killed `lost`, want 0 until the space is back); then the claim
+in         /task/in (read-only): meta.sh, the evidence a recipe learns from, an audit's staged build, a trial's check
+out        /task/out: the kind's closed list under its caps (a build: packages, PKGBUILD, vet.json, tests.log,
+           resources.json, verdict.json), uploaded by the dispatcher with the job token; /task/log/task.log, ≤ 64 MiB
+exit 75    a restart order, or a loop without progress for 15 min: task containers run on, the next dispatcher re-adopts them
+```
+
 A claim is one `UPDATE … WHERE id = (SELECT … LIMIT 1) RETURNING *`; D1
 serialises writes, so two workers never receive the same task. Only the lease
 owner can heartbeat, complete or fail it (409 otherwise). The scheduler's cron
