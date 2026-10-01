@@ -7,7 +7,7 @@ import { cancelOrdersOf, ORDERS_COLUMNS, type OrdersRow } from "../orders";
 import { pullFromRings } from "./blocks";
 import { queuePosition } from "../queue";
 import { standsSql } from "./story";
-import { cookieOf } from "./auth";
+import { cookieOf, githubId } from "./auth";
 import { putRecord, recordKey, recordUrl, withdrawRecord } from "../record";
 import { version, RINGS, ringsSql, sortRings } from "../meta";
 import { isTextEvidence, reclaimStagingPackages, STAGING_DAYS, STAGING_QUOTA_BYTES } from "../staging";
@@ -332,13 +332,22 @@ export interface WorkerIdentity {
   orders?: OrdersRow;
 }
 
-/** The registered worker behind a `omw_…` token (not revoked), or null. */
+/**
+ * The registered worker behind a `omw_…` token (not revoked), or null. A
+ * host's registration (#321) also answers to the token its last rotation
+ * replaced, for ten minutes (hosts.prev_token_until): the dispatcher is
+ * recreated with the new one meanwhile, and nothing it runs notices. That
+ * second read happens only when the first finds nothing.
+ */
+export const WORKER_BY_TOKEN_SQL = `SELECT id, mode, mode_by, packages, arch, ${ORDERS_COLUMNS} FROM build_workers WHERE token_hash = ? AND revoked_at IS NULL`;
+export const WORKER_BY_PREV_TOKEN_SQL = `SELECT id, mode, mode_by, packages, arch, ${ORDERS_COLUMNS} FROM build_workers
+  WHERE id = (SELECT worker_id FROM hosts WHERE prev_token_hash = ? AND prev_token_until > strftime('%Y-%m-%dT%H:%M:%fZ', 'now') AND status = 'active') AND revoked_at IS NULL`;
 export async function workerOf(request: Request, env: Env): Promise<WorkerIdentity | null> {
   const token = bearer(request);
   if (!token.startsWith("omw_")) return null;
-  const row = await env.DB.prepare(`SELECT id, mode, mode_by, packages, arch, ${ORDERS_COLUMNS} FROM build_workers WHERE token_hash = ? AND revoked_at IS NULL`)
-    .bind(await sha256Hex(token))
-    .first<OrdersRow & { mode: string; mode_by: string | null; packages: string | null; arch: string }>();
+  type Row = OrdersRow & { mode: string; mode_by: string | null; packages: string | null; arch: string };
+  const hash = await sha256Hex(token);
+  const row = (await env.DB.prepare(WORKER_BY_TOKEN_SQL).bind(hash).first<Row>()) ?? (await env.DB.prepare(WORKER_BY_PREV_TOKEN_SQL).bind(hash).first<Row>());
   return row ? { id: row.id, owner: row.owner, mode: row.mode, mode_by: row.mode_by, packages: row.packages ? JSON.parse(row.packages) : [], arch: row.arch, trust: row.trust, orders: row } : null;
 }
 
@@ -352,9 +361,9 @@ export async function workerOf(request: Request, env: Env): Promise<WorkerIdenti
  */
 export const RESET_TOKEN_MARK = "reset:";
 /** Register, or register again: a new token replaces the login's — unless a reset of its passkeys revoked it (RESET_TOKEN_MARK), by the primary key. */
-export const REGISTER_SQL = `INSERT INTO contributors (login, name, avatar_url, token_hash, role) VALUES (?, ?, ?, ?, ?)
+export const REGISTER_SQL = `INSERT INTO contributors (login, name, avatar_url, token_hash, role, github_id) VALUES (?, ?, ?, ?, ?, ?)
      ON CONFLICT (login) DO UPDATE SET name = excluded.name, avatar_url = excluded.avatar_url, token_hash = excluded.token_hash,
-       role = excluded.role, last_seen = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+       role = excluded.role, github_id = COALESCE(excluded.github_id, contributors.github_id), last_seen = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
      WHERE substr(contributors.token_hash, 1, ${RESET_TOKEN_MARK.length}) != '${RESET_TOKEN_MARK}'`;
 
 export async function handleRegister(request: Request, env: Env): Promise<Response> {
@@ -365,11 +374,11 @@ export async function handleRegister(request: Request, env: Env): Promise<Respon
     headers: { authorization: `Bearer ${b.github_token}`, accept: "application/vnd.github+json", "user-agent": "omarchy-pool-factory" },
   });
   if (!res.ok) return json({ error: `GitHub did not accept that token (HTTP ${res.status})` }, 401);
-  const u = (await res.json()) as { login: string; name?: string; avatar_url?: string; type?: string };
+  const u = (await res.json()) as { login: string; id?: number; name?: string; avatar_url?: string; type?: string };
   if (!u.login || u.type === "Bot") return json({ error: "a user account is required" }, 400);
   const token = newToken("omc");
   const role = await roleFor(env, u.login);
-  const r = await env.DB.prepare(REGISTER_SQL).bind(u.login, u.name ?? null, u.avatar_url ?? null, await sha256Hex(token), role).run();
+  const r = await env.DB.prepare(REGISTER_SQL).bind(u.login, u.name ?? null, u.avatar_url ?? null, await sha256Hex(token), role, githubId(u.id)).run();
   if (!r.meta.changes) return json({ error: `${u.login}'s token was revoked with a reset of their passkeys: make a new one on your page (/user/${u.login}, Token) after signing in with GitHub, never with a GitHub token alone; nothing was made`, code: "token_reset" }, 403);
   return json({ login: u.login, role, token, note: "Keep this token; registering again replaces it. Use it as `Authorization: Bearer …` for /factory/packages and /factory/workers." }, 201);
 }

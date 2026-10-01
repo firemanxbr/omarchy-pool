@@ -110,3 +110,43 @@ turns the emulated pair on here regardless, for C-only packages (a
 toolchain or a library that cannot start there sends the build back to the
 queue for a native worker, from the community builder and the review
 worker alike: *Run a worker* in the docs, the runbook's *Studio host*).
+
+## Maintainer hosts
+
+The way the project's hosts join from P1 of the host agent (#307, #321):
+one command on the machine and one click on the site, no SSH and no file
+to copy.
+
+1. On your page (a maintainer's, signed in), **+ add a host**: a name and
+   where it runs. The pool checks you are in `factory/MAINTAINERS.toml`
+   again and answers one command with a one-time token (`ome_…`, valid 15
+   minutes, once), bound to your login and your GitHub user id:
+
+   ```
+   curl --proto '=https' --tlsv1.2 -fsSL https://github.com/firemanxbr/omarchy-pool/releases/download/vX.Y.Z/install.sh | OMARCHY_ENROLL=ome_… sh
+   ```
+
+   The token rides the environment of `sh`, never a command line, so `ps`
+   never shows it.
+2. On the machine, as the user the agent runs as: `install.sh` installs the
+   agent, which makes the host key (`host.ed25519`, mode 0600, never in a
+   container), checks the machine against the release's signed minimum (4
+   CPUs, 8 GB, 60 GB free on the work root, 40 GB on the engine's data
+   root) and enrolls with the token, its public key, a proof it holds the
+   key and its capacity report. It prints the key's fingerprint and waits.
+3. Your page shows the host with the same fingerprint and **Confirm**.
+   Compare the two, then confirm: the host gets its one worker registration
+   (`<login>-<name>-<4 base36>`, project trust from the maintainer list), the
+   journal and Status get an info line, and the other maintainers see a
+   notice. Nothing claims before that.
+4. The agent fetches the host worker token with a request signed by the host
+   key and writes it to `etc/dispatcher.env` (0600) for the dispatcher. It
+   rotates the token every 30 days; the one it replaces works ten more
+   minutes, so only the dispatcher is recreated and its tasks run on.
+
+The host's page, `/hosts/<id>`, shows its status, capacity and units, lanes,
+isolation level, the release it applied and its leases. Every later call of
+the host to the pool is signed with its key (`Omarchy-Host`); the pool
+refuses a replay, a changed body and a clock more than 120 s off
+([Security model](/docs/security-model#maintainer-hosts)).
+

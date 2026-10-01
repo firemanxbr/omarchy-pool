@@ -67,7 +67,14 @@ async function planOf(x: { sql: string; args: unknown[] }): Promise<string> {
 
 /** What 0036 added, taken off again, and what the migrations after it added (the package's maintainer in the pool, #244; the reviews table takes its changes column, #247, with it): the schema as production has it before the migration. */
 const REWIND = [
-  // What 0042 added (orders to workers, #277) comes off first, then 0041's (a package's ELF class, #275), then 0040's (passkeys for approve and block, #257), then 0039's (the MCP write tools, #252), so the migrations after 0036 run again in their order below.
+  // What 0043 added (maintainer hosts, #321) comes off first, then 0042's (orders to workers, #277), then 0041's (a package's ELF class, #275), then 0040's (passkeys for approve and block, #257), then 0039's (the MCP write tools, #252), so the migrations after 0036 run again in their order below.
+  "DROP INDEX idx_build_workers_host",
+  "ALTER TABLE build_workers DROP COLUMN kind",
+  "ALTER TABLE build_workers DROP COLUMN host_id",
+  "DROP TABLE host_nonces",
+  "DROP TABLE hosts",
+  "DROP TABLE host_enrollments",
+  "ALTER TABLE contributors DROP COLUMN github_id",
   "ALTER TABLE build_tasks DROP COLUMN stop_order",
   "DROP INDEX idx_build_workers_site",
   "DROP INDEX idx_build_workers_not_ready",
@@ -240,7 +247,7 @@ describe("migration 0036: one package per name, with a target per architecture",
     const m = env.TEST_MIGRATIONS.find((x) => x.name.startsWith("0036_"))!;
     expect(m, "migration 0036 is in the list").toBeTruthy();
     await env.DB.batch(m.queries.map((q) => env.DB.prepare(q)));
-    // The migrations after it run again too, in their order — what the rewind took off (the maintainers' table, #244; with the reviews table, its changes column, #247; 0039's tables and columns, #252; 0040's passkeys, #257; 0041's ELF class, #275; 0042's orders to workers, #277) comes back as D1 applies it.
+    // The migrations after it run again too, in their order — what the rewind took off (the maintainers' table, #244; with the reviews table, its changes column, #247; 0039's tables and columns, #252; 0040's passkeys, #257; 0041's ELF class, #275; 0042's orders to workers, #277; 0043's maintainer hosts, #321) comes back as D1 applies it.
     for (const later of env.TEST_MIGRATIONS.filter((x) => x.name > m.name)) await env.DB.batch(later.queries.map((q) => env.DB.prepare(q)));
 
     // The schema is what every other test file runs on, and nothing of the rows it had changed.

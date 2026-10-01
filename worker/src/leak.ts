@@ -14,7 +14,7 @@
  */
 
 const SHAPES: [string, RegExp][] = [
-  ["a pool token (omw_ / omc_ / oms_)", /\bom[wcs]_[A-Za-z0-9_-]{16,}/],
+  ["a pool token (omw_ / omc_ / oms_ / ome_)", /\bom[wcse]_[A-Za-z0-9_-]{16,}/],
   ["a pool job token (omj.)", /\bomj\.[A-Za-z0-9_-]{16,}/],
   ["an Anthropic key", /\bsk-ant-[A-Za-z0-9_-]{20,}/],
   ["an API key (sk-…)", /\bsk-[A-Za-z0-9_-]{40,}/],

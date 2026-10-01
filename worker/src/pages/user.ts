@@ -50,6 +50,15 @@ const WORKER_FORM = `<label>Name <input type="text" id="w-name" placeholder="lap
  */
 const poolHostsLine = () => `<p class="sub" id="w-pool" style="margin:0 0 10px;font-size:12.5px">Nothing to run here: ${POOL_HOSTS}, which the maintainers provide. Request a package and the pool builds it. <a href="/docs/factory#contribute-a-package">How packaging works →</a></p>`;
 const WORKER_OWN = `<p class="sub" style="margin:0 0 10px;font-size:12.5px">Maintainers only: the project's compute is its maintainers' hosts. Register one and run the signed image with the token it gives you, shown once; a new registration is listed as a community set until two maintainers trust it for the project. <a href="/docs/workers">Run a worker →</a></p><form id="worker-form" class="form" onsubmit="return false" hidden></form><div id="w-new" hidden><p class="sub">Your worker token, shown once. One command wherever the worker lives (docker or podman):</p><pre id="w-cmd"></pre></div>`;
+/**
+ * Add a host (#321, design v2 §6.1): a maintainer's, on their own page — a
+ * name and where it runs; the answer is one command to paste on the machine,
+ * with a one-time token in the environment of `sh`. The machine enrolls and
+ * the host waits here, with its fingerprint, for its owner's Confirm.
+ */
+const HOST_TOGGLE = `<button type="button" class="more-link" id="h-toggle" title="a name, where it runs, then one command to paste on the machine">+ add a host</button>`;
+const HOST_FORM = `<label>Name <input type="text" id="h-name" placeholder="vps-1" pattern="[a-z0-9][a-z0-9-]{0,30}[a-z0-9]?" required></label> <label>Where <input type="text" id="h-where" maxlength="80" placeholder="a VPS in Falkenstein" autocomplete="off"></label> <button type="submit" id="h-btn">Add a host</button>`;
+const HOST_OWN = `<p class="sub" style="margin:0 0 10px;font-size:12.5px">Maintainers only: a host runs the signed host bundle and one isolated container per task, as many as its capacity allows. Paste the command on the machine, as the user the agent runs as; it prints the host key's fingerprint, and this page shows it with <b>Confirm</b>. Nothing claims before that. <a href="/docs/worker-host#maintainer-hosts">How a host joins →</a></p><form id="host-form" class="form" onsubmit="return false" hidden></form><div id="h-new" hidden><p class="sub">One command, on the machine, within 15 minutes; the token works once and rides the environment, never the command line:</p><pre id="h-cmd"></pre></div>`;
 /** Add a passkey (#257): a name for it and the button that starts the browser's request — a maintainer's. */
 const PASSKEY_FORM = `<label>Name <input type="text" id="pk-label" maxlength="40" placeholder="this laptop" autocomplete="off"></label> <button type="submit" id="pk-add">Add a passkey</button>`;
 /** …and what stands in its place for someone who is not a maintainer but still holds a passkey (a maintainer once): the reason, visible, and their Remove below. */
@@ -117,6 +126,15 @@ const body = (login: string) => String.raw`
     <p class="sub" id="w-none" hidden style="margin:0">No worker registered under this name.</p>
   </section>
 
+  <section id="hosts" hidden>
+    <div class="h2row"><h2>Hosts</h2><span id="h-slot"></span></div>
+    <p class="sub">The machines this maintainer provides (#307): each enrolled by its owner, confirmed by fingerprint, and trusted by the same pull request that named them a maintainer.</p>
+    <div id="h-notices" hidden></div>
+    <div id="h-own"></div>
+    <div class="table-wrap"><table id="hosts-table"><thead><tr><th>Host</th><th>Status</th><th>Arches</th><th>Units</th><th>Release</th><th>Reported</th><th><span class="u-sr">Confirm</span></th></tr></thead><tbody></tbody></table></div>
+    <p class="sub" id="h-none" hidden style="margin:0">No host under this name.</p>
+  </section>
+
   <section id="agents" hidden>
     <div class="h2row"><h2>Agents</h2><a class="more-link" href="/agents#login">+ grant one →</a></div>
     <p class="sub">The agents you let act as you through omarchy-cli's tools (<code>omarchy-cli login</code>), and the decisions they drafted for you. Only you see this section: nothing an agent drafts is decided, or on the record, until you confirm it in the browser. <a href="/docs/omarchy-cli-mcp#write-tools">How it works →</a></p>
@@ -160,7 +178,8 @@ const SCRIPT = String.raw`
   // Revoke and the mode are answered per worker (a revoked one is gone, a project's has no mode: the state's word first, the door's own): the row's answer where the server gave one, the role's otherwise.
   function workerCan(w, right) { var x = CAN.workers[w.id]; return x ? { ok: x[right] === true, why: (x.why && x.why[right]) || "" } : { ok: may(right), why: reason(right) }; }
   var SHARE_BTN = ${JSON.stringify(SHARE_BTN)}, TOKEN_BTN = ${JSON.stringify(TOKEN_BTN)}, REQUEST_LINK = ${JSON.stringify(REQUEST_LINK)}, WORKER_FORM = ${JSON.stringify(WORKER_FORM)}, REGISTER_TOGGLE = ${JSON.stringify(REGISTER_TOGGLE)}, WORKER_OWN = ${JSON.stringify(WORKER_OWN)};
-  var DRAWN = false, WORKER_DRAWN = false;
+  var HOST_TOGGLE = ${JSON.stringify(HOST_TOGGLE)}, HOST_FORM = ${JSON.stringify(HOST_FORM)}, HOST_OWN = ${JSON.stringify(HOST_OWN)};
+  var DRAWN = false, WORKER_DRAWN = false, HOST_DRAWN = false, HOSTS = null, WAIT_UNTIL = 0;
   function loadCan() {
     return api("GET", "/api/v1/users/" + encodeURIComponent(login) + "/can").then(function (d) {
       if (d.__status !== 200 || !d.can) return;
@@ -204,6 +223,64 @@ const SCRIPT = String.raw`
     }
     $("#worker-form").innerHTML = gate(WORKER_FORM, may("register"), reason("register"));
   }
+  // Hosts (#321): the way in is a maintainer's, on their own page only — the toggle, the form and the command it answers; the hosts under this name for everyone, their details (the fingerprint, the capacity) for their owner and the maintainers, Confirm on a host that waits, live for its owner and grey with whose it is for anyone else.
+  function renderHostForm() {
+    if (!isMaintainer() || !isOwner(login) || HOST_DRAWN) return;
+    HOST_DRAWN = true;
+    $("#hosts").hidden = false;
+    $("#h-own").innerHTML = HOST_OWN; $("#h-slot").innerHTML = HOST_TOGGLE;
+    $("#host-form").innerHTML = HOST_FORM;
+    $("#h-toggle").onclick = function () { $("#host-form").hidden = !$("#host-form").hidden; };
+  }
+  function loadHosts() {
+    return api("GET", "/api/v1/hosts?owner=" + encodeURIComponent(login)).then(function (d) { if (d.__status === 200) { HOSTS = d; renderHosts(); } }).catch(function () {});
+  }
+  function hostCaps(h) { return h.capacity ? num(h.capacity.cpus) + " CPUs, " + num(h.capacity.mem_gb) + " GB, " + h.lanes.map(function (l) { return l.arch + " " + l.mode; }).join(", ") + ", isolation " + (h.isolation || "?") + (h.dedicated ? " (dedicated)" : "") : ""; }
+  function renderHosts() {
+    if (!HOSTS) return;
+    var hs = HOSTS.hosts || [];
+    if (hs.length) $("#hosts").hidden = false;
+    var pending = false;
+    var rows = hs.map(function (h) {
+      var p = h.status === "active" ? ["ok", "active"] : h.status === "pending-owner" ? ["warn", "waits for Confirm"] : ["na", h.status];
+      if (h.status === "pending-owner") pending = true;
+      var confirm = h.status === "pending-owner" ? gate('<button type="button" class="small-btn" data-host-confirm="' + esc(h.id) + '" data-name="' + esc(h.name) + '" title="the fingerprint matches what the machine printed: make it a pool host">Confirm</button>', isOwner(h.owner), "only " + h.owner + " confirms their host") : "";
+      var detail = h.fingerprint ? '<div class="muted" style="font-size:12px">' + esc((h.hostname || "") + (h.where ? " · " + h.where : "")) + (h.capacity ? " · " + esc(hostCaps(h)) : "") + '<br><span class="mono">' + esc(h.fingerprint) + '</span>' + (h.below_minimum ? '<br>' + esc(h.below_minimum) : '') + '</div>' : '';
+      return '<tr><td><a href="/hosts/' + esc(h.id) + '">' + esc(h.name) + '</a>' + detail + '</td><td>' + pillHtml(p[0], p[1]) + '</td><td>' + esc((h.arches || []).join(", ")) + '</td><td>' + (h.units === undefined || h.units === null ? '<span class="muted">—</span>' : num(h.units)) + '</td><td>' + esc(h.release_applied || "—") + '</td><td>' + (h.alive ? "yes" : '<span class="muted">no</span>') + '</td><td>' + confirm + '</td></tr>';
+    });
+    $("#hosts-table tbody").innerHTML = rows.join("");
+    $("#h-none").hidden = hs.length > 0;
+    // The other maintainers' new hosts (D40): a notice, no approval asked.
+    var notes = isOwner(login) ? (HOSTS.notices || []) : [];
+    $("#h-notices").hidden = !notes.length;
+    $("#h-notices").innerHTML = notes.map(function (n) { return '<p class="sub" style="margin:0 0 6px">' + pillHtml("ok", "new host") + ' <a href="/hosts/' + esc(n.host) + '">' + esc(n.line) + '</a> · ' + esc(ago(n.at)) + '</p>'; }).join("");
+    // While a host waits for its owner, or a token is out, the page asks every five seconds: the machine shows up here as it enrolls.
+    if (pending || Date.now() < WAIT_UNTIL) setTimeout(loadHosts, 5000);
+  }
+  document.addEventListener("submit", function (ev) { if (ev.target && ev.target.id === "host-form") { ev.preventDefault(); addHost(); } });
+  function addHost() {
+    $("#h-btn").disabled = true;
+    api("POST", "/api/v1/hosts/enrollments", { name: $("#h-name").value.trim(), where: $("#h-where").value.trim() || undefined }).then(function (d) {
+      $("#h-btn").disabled = false;
+      if (d.error) { toast(esc(d.error), "error"); return; }
+      $("#h-new").hidden = false;
+      $("#h-cmd").textContent = d.command + "\n\n# " + d.note;
+      $("#host-form").reset(); $("#host-form").hidden = true;
+      WAIT_UNTIL = Date.parse(d.expires_at) || Date.now() + 15 * 60000; loadHosts();
+    }).catch(function (e) { $("#h-btn").disabled = false; toast("failed: " + esc(errorText(e)), "error"); });
+  }
+  document.addEventListener("click", function (ev) {
+    var b = ev.target.closest ? ev.target.closest("button[data-host-confirm]") : null;
+    if (!b || b.disabled) return;
+    var id = b.getAttribute("data-host-confirm"), h = (HOSTS && HOSTS.hosts || []).filter(function (x) { return x.id === id; })[0];
+    ask({ title: "Confirm " + b.getAttribute("data-name"), text: "Compare the fingerprint with the one the machine printed. They must be the same: then this host gets its worker registration and claims from its next round." + (h && h.fingerprint ? '<br><code>' + esc(h.fingerprint) + '</code>' : ''), confirm: "Confirm" }).then(function (go) {
+      if (go === null) return;
+      api("POST", "/api/v1/hosts/" + encodeURIComponent(id) + "/confirm", {}).then(function (d) {
+        if (d.error) { toast(esc(d.error), "error"); return; }
+        toast(esc(d.line || "confirmed")); loadHosts(); loadWorkers();
+      }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
+    });
+  });
   // The served line tells a contributor their packages build on the pool's hosts: on a maintainer's page — whose section lists the hosts they provide — it is hidden for every reader (#331); on their own page renderRegister has drawn the maintainer's block over it already.
   function renderPoolLine(role) { var line = $("#w-pool"); if (line && role === "maintainer") line.hidden = true; }
   // The workers under this name, from the same listing the Workers page reads — the same rows, by kind, in the order that reads for a person: theirs, the review ones, the pool's.
@@ -546,11 +623,11 @@ const SCRIPT = String.raw`
   // Who is looking (the shell's whoami: one fetch of /auth/me per page) and what they may do, before the first draw — so the tables come with their buttons in the right state, drawn once.
   Promise.all([new Promise(function (r) { whoami(r); }), loadCan()]).then(function () {
     DRAWN = true;
-    renderTop(); renderRegister(); quota();
-    load(); loadWorkers();
+    renderTop(); renderRegister(); renderHostForm(); quota();
+    load(); loadWorkers(); loadHosts();
     // The page follows the work for whoever looks — a build queued, then building, then staged — no reload. A signed-in person's rights ride along once a minute (a block, an approval, a registration gone change what they may press — rarely, and each read is a D1 bill) and right after their own act; nobody's cannot change until they sign in, which is a new page.
     var tick = 0;
-    setInterval(function () { tick++; if (WHO.me && tick % 4 === 0) loadCan(); load(); loadWorkers(); }, 15000);
+    setInterval(function () { tick++; if (WHO.me && tick % 4 === 0) loadCan(); load(); loadWorkers(); if (tick % 4 === 0) loadHosts(); }, 15000);
   });
   // Buttons inside paged tables: one delegated handler survives re-renders. A grey button (gate) never gets here: disabled, it takes no click.
   document.addEventListener("click", function (ev) {
@@ -939,6 +1016,28 @@ export const USER_COMPONENTS = (F: Fixture): Component[] => {
       script: ["if (!isMaintainer() || !isOwner(login)) return;", 'function renderPoolLine(role) { var line = $("#w-pool"); if (line && role === "maintainer") line.hidden = true; }', "renderPoolLine(d.role);", "WORKER_OWN", "REGISTER_TOGGLE", '"#w-slot"', '"#w-toggle"', 'gate(WORKER_FORM, may("register"), reason("register"))', '"#worker-form"', '"#w-name"', '"#w-arch"', '"#w-btn"', 'api("POST", API + "/workers", body)', '\\"/docs/workers\\"'],
       acts: [{ method: "POST", path: "/api/v1/factory/workers", body: { name: "laptop", arch: F.arch }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 201 } }],
       visible: ["maintainer"],
+    },
+    {
+      // Hosts (#321): "Add a host", its form and the command it answers are a maintainer's on their own page; the door refuses everyone else server-side, and a session's write without the page's own Origin for every role.
+      id: "user.hosts-add",
+      page: `/user/${F.m2}`,
+      anchor: ['<section id="hosts" hidden>', 'id="h-slot"', 'id="h-own"', 'id="h-notices"'],
+      script: ["function renderHostForm()", "if (!isMaintainer() || !isOwner(login) || HOST_DRAWN) return;", "HOST_TOGGLE", "HOST_FORM", "HOST_OWN", '"#host-form"', '"#h-name"', '"#h-where"', '"#h-btn"', '"#h-cmd"', 'api("POST", "/api/v1/hosts/enrollments"', "d.command", "WAIT_UNTIL", '\\"/docs/worker-host#maintainer-hosts\\"'],
+      acts: [{ method: "POST", path: "/api/v1/hosts/enrollments", body: { name: "vps-1" }, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } }],
+      visible: ["maintainer"],
+    },
+    {
+      // The hosts under this name for everyone; the fingerprint and the capacity for their owner and the maintainers; Confirm on one that waits, its owner's; a maintainer's notices of the others' new hosts.
+      id: "user.hosts-table",
+      page: `/user/${F.m1}`,
+      anchor: ['id="hosts-table"', 'id="h-none"'],
+      script: ['"/api/v1/hosts?owner=" + encodeURIComponent(login)', "function renderHosts()", "h.fingerprint", "hostCaps(h)", "data-host-confirm", '"only " + h.owner + " confirms their host"', '"/api/v1/hosts/" + encodeURIComponent(id) + "/confirm"', "HOSTS.notices", "n.line", 'href="/hosts/'],
+      reads: [
+        { path: `/api/v1/hosts?owner=${F.m1}`, fields: ["hosts", "hosts.0.id", "hosts.0.name", "hosts.0.owner", "hosts.0.status", "hosts.0.arches", "hosts.0.release_applied", "hosts.0.alive", "notices", "minimum"] },
+        { path: `/api/v1/hosts?owner=${F.m1}`, as: "maintainer", fields: ["hosts.0.fingerprint", "hosts.0.capacity", "hosts.0.units", "hosts.0.lanes", "hosts.0.isolation", "hosts.0.hostname" ] },
+      ],
+      acts: [{ method: "POST", path: `/api/v1/hosts/${F.host}/confirm`, body: {}, expect: { anonymous: 401, contributor: 403, owner: 403, maintainer: 403 } }],
+      visible: EVERYONE,
     },
     {
       id: "user.worker-token-block",

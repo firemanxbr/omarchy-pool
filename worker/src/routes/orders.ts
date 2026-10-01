@@ -37,9 +37,10 @@ import { LEASE_MINUTES } from "../lease";
 const NO_STORE = { "cache-control": "no-store" };
 const MIN = 60000;
 
-/** The worker's row as the doors read it, by the primary key. */
+/** The worker's row as the doors read it, by the primary key — for a host's registration (#321), with its host's last report and the release its agent applied. */
+export const WORKER_ROW_SQL = `SELECT w.*, h.reported_at AS host_reported_at, h.release_applied AS host_release FROM build_workers w LEFT JOIN hosts h ON h.id = w.host_id WHERE w.id = ?`;
 async function workerRow(env: Env, id: string): Promise<(WorkerRow & OrderWorker & { id: string; current_task: number | null; site: string | null; agent_checked_at: string | null; arch: string }) | null> {
-  return env.DB.prepare("SELECT * FROM build_workers WHERE id = ?").bind(id).first();
+  return env.DB.prepare(WORKER_ROW_SQL).bind(id).first();
 }
 
 /** The task a worker holds, by its row's current_task (the primary key): what Stop its task decides on and says. */

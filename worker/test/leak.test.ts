@@ -11,7 +11,9 @@ describe("findLeak", () => {
 
   it("knows the pool's own tokens, the agents' keys, GitHub's, a private key, a URL credential, a bearer, an environment dump", () => {
     const cases: [string, string][] = [
-      ["omc_" + "a".repeat(32), "a pool token (omw_ / omc_ / oms_)"],
+      ["omc_" + "a".repeat(32), "a pool token (omw_ / omc_ / oms_ / ome_)"],
+      // A host's enrollment token (#321) is one too: a report or a log that carries it is refused.
+      ["ome_" + "a".repeat(48), "a pool token (omw_ / omc_ / oms_ / ome_)"],
       ["omj." + "a".repeat(32), "a pool job token (omj.)"],
       ["sk-ant-api03-" + "a".repeat(40), "an Anthropic key"],
       ["github_pat_" + "a".repeat(40), "a GitHub token"],
