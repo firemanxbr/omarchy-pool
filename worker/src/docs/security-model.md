@@ -293,6 +293,97 @@ columns back at every claim; the older one never writes them.
   legacy role container, until it retires) still builds from the tag, and
   says so once per process for each architecture.
 
+## Rollback statements
+
+A maintainer's host under the host agent never goes below its floor (the
+highest release it applied) on the pool's word: only on a rollback
+statement that `rollback.yml` signs on `main` (#314, design v2 §5.3). The
+pool relays statements and cannot forge one.
+
+**Written and stored.** `factory/bin/release-rollback`, which `rollback.yml`
+runs in the reviewed `pool` environment, writes the statement before
+anything moves and signs it keyless with the pinned cosign (`cosign
+sign-blob --bundle`, a Sigstore bundle v0.3). Once the Worker of the target
+release is deployed it stores the statement and its bundle in R2
+(`omarchy-packages`: `rollback/latest.json`, the last one stored, for the
+next `seq`, then `rollback/<to>.sigstore.json` and `rollback/<to>.json`).
+`GET /api/v1/factory/rollback/:to` relays the latest one for that target,
+public and cached for a minute, `404` while there is none. The relay exists
+only in releases from #314 on: a rollback to an older release stores its
+statement, but the Worker it deploys cannot hand it out (a host gets a
+`404` and stays where it is) until a newer release ships, which
+`min_release` covers once hosts run the agent.
+
+```json
+{"schema":1,"seq":7,"to":"v1.13.4","retracts_through":"v1.14.2","issued":"2026-10-20T14:00:00Z",
+ "agent_to":null,"run":"https://github.com/firemanxbr/omarchy-pool/actions/runs/…"}
+```
+
+- `seq` is one above the last statement stored (the first is 1).
+- `to` is the release to go back to.
+- `retracts_through` is the release rolled back from, or the last
+  statement's when that is higher, so the statement retracts every release
+  above `to` that an earlier rollback retracted too: a host that missed that
+  rollback is still covered. When the pool's release is not a release tag
+  above `to` (it cannot be read, or a re-run finds the pool already at
+  `to`), it is the highest release tag. Both inputs come from what the pool
+  can write (its `/version`, `rollback/latest.json`), so each is taken only
+  when it is a release tag of this repository, and a last statement that
+  names none moves nothing: `retracts_through` never names more than the
+  highest `v*` tag at signing, which the tag rulesets protect (#308). A run
+  to the highest release (nothing above it) writes no statement.
+- `issued` is the run's own time, for people; the agent goes by the log's.
+- `agent_to` is null: a rollback keeps the agent (D8). A later statement
+  that names an agent version is the only thing that moves the agent down.
+- `run` is the `rollback.yml` run that signed it.
+
+**What the agent accepts** (the P1 run loop implements this contract;
+`omarchy-agent verify --statement` does the first two today). A statement is
+taken when all of these hold, and otherwise ignored, the host staying where
+it is:
+
+1. Its bundle verifies offline against the embedded Sigstore root, and the
+   certificate is exactly
+   `https://github.com/firemanxbr/omarchy-pool/.github/workflows/rollback.yml@refs/heads/main`,
+   issuer `https://token.actions.githubusercontent.com`, event
+   `workflow_dispatch`, and the pinned repository and owner ids — a
+   `release.yml` signing, another ref, a fork or another repository is
+   refused.
+2. It parses strictly as schema 1 (an unknown field is refused; a newer
+   schema means "update the agent first"), with `to` below
+   `retracts_through`.
+3. `seq` is above the last statement the host accepted.
+4. `to < floor ≤ retracts_through`: the host is inside the retracted range.
+5. `to` is at or above the merged `min_release` and not in the merged
+   `revoked` list.
+6. **Depth bound (D25):** the signed `created` of `to`'s manifest is at most
+   14 days before the statement's Rekor integrated time — both signed
+   times, never the host's clock and never a count of releases. A deeper
+   rollback is a forward-fix release built from the old code (or, from P5, a
+   maintainer co-signature).
+7. `to`'s own host bundle verifies (`verify --bundle`).
+
+It then sets `floor = to`, preempts an in-flight rollout and skips soak and
+the brake. Going forward again needs nothing special.
+
+**What bounds it.** A statement is only as strong as the run that signed
+it: the `pool` environment admits `main` only and waits for a maintainer's
+approval (#308), and the daily token probe checks that no token the pool
+holds can dispatch `rollback.yml`. One wrongly approved dispatch can send
+hosts back at most 14 days, to a release that is neither revoked nor below
+`min_release`. A pool that withholds a statement keeps hosts where they are;
+one that serves an older one gains nothing a genuine statement did not
+already allow (its `retracts_through` was at most the highest release then,
+below a host's floor since), and a host that took a newer one refuses it
+(`seq` must rise). `seq` is read from `rollback/latest.json`, which the pool
+can write: a pool that rewinds it makes the next genuine statement repeat a
+`seq` hosts have passed, so they refuse it, which only withholds a rollback,
+as not relaying does. A run that signs and then fails before the store (the
+images or the deploy fail, and everything is put back) leaves a valid
+signature in Rekor over bytes anyone can rebuild; a pool could serve that
+statement although that rollback never took effect, but a maintainer
+approved that dispatch and every rule above still applies to it.
+
 ## After approval, the gates still hold
 
 A carelessly approved package still faces what every package faces: a real
