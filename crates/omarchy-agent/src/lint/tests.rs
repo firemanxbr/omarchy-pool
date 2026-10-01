@@ -1,6 +1,11 @@
 use std::path::{Path, PathBuf};
 
-use super::{lint_compose, references, Engine, Envelope, Reference, Violation};
+use std::collections::BTreeMap;
+
+use super::{
+    lint_compose, lint_set_toml, parse_set_toml, references, Engine, Envelope, Needs, Ready,
+    Reference, SetToml, Violation,
+};
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lint")
@@ -32,6 +37,21 @@ fn lint_set(
 }
 
 const HOST: &str = include_str!("../../tests/fixtures/lint/host/compose.yml");
+
+/// The real `factory/sets/host`, as release.yml and CI lint it: read at run time, so the
+/// crate builds without it.
+fn real_set(file: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../factory/sets/host")
+        .join(file);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// `from` replaced once by `to`, and it must be there.
+fn mutate(text: &str, from: &str, to: &str) -> String {
+    assert!(text.contains(from), "{from:?} is not in the template");
+    text.replacen(from, to, 1)
+}
 
 fn rules(result: Result<(), Vec<Violation>>) -> Vec<&'static str> {
     result
@@ -299,4 +319,146 @@ fn an_envelope_with_the_secrets_directory_inside_a_bound_directory_is_refused() 
     }
     let toml = "[set]\ndir = \"/srv/set\"\nwork_root = \"/srv/omarchy-pool/host\"\nsecrets_dir = \"/srv/omarchy-pool/host-secrets\"\n";
     Envelope::from_agent_toml(toml).unwrap();
+}
+
+// ---------------------------------------------------------------------------------------
+// The real host set (#310): factory/sets/host.
+
+#[test]
+fn the_real_host_set_passes_lint_set_under_the_reference_and_the_studio_envelopes() {
+    let template = real_set("compose.yml");
+    lint_compose(&template, None, &Envelope::reference(), Engine::Rootful).unwrap();
+    lint_compose(&template, None, &envelope("studio"), Engine::Rootful).unwrap();
+    lint_compose(&template, None, &Envelope::reference(), Engine::Rootless).unwrap();
+    lint_set_toml(&real_set("set.toml"), &template).unwrap();
+}
+
+#[test]
+fn the_real_host_set_is_refused_with_a_second_service_without_its_role_or_with_an_agent_key() {
+    let template = real_set("compose.yml");
+    let lint = |t: &str| lint_compose(t, None, &Envelope::reference(), Engine::Rootful);
+    let second = format!(
+        "{template}  helper:\n    image: ghcr.io/firemanxbr/omarchy-worker@RELEASE@\n    labels: {{ org.omarchy-pool.role: dispatcher }}\n"
+    );
+    refused_for(lint(&second), "services", "a second service");
+    let no_role = mutate(
+        &template,
+        "    labels: { org.omarchy-pool.role: dispatcher }\n",
+        "",
+    );
+    refused_for(lint(&no_role), "role", "no role label");
+    let other_role = mutate(
+        &template,
+        "org.omarchy-pool.role: dispatcher",
+        "org.omarchy-pool.role: pool",
+    );
+    refused_for(lint(&other_role), "role", "another role");
+    for key in [
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "GEMINI_API_KEY",
+        "XAI_API_KEY",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "GITHUB_TOKEN",
+    ] {
+        let keyed = mutate(
+            &template,
+            "${OMARCHY_TASK_SUBNETS:-10.231.0.0/16}",
+            &format!("${{{key}}}"),
+        );
+        refused_for(lint(&keyed), "secret_interpolation", key);
+    }
+}
+
+#[test]
+fn the_real_set_toml_is_schema_3_with_the_dispatchers_ready_check_and_its_needs() {
+    let set = parse_set_toml(&real_set("set.toml")).unwrap();
+    assert_eq!(
+        set,
+        SetToml {
+            schema: 3,
+            project_default: "omarchy-host".into(),
+            order: vec![],
+            guard_s: 90,
+            ready: BTreeMap::from([(
+                "dispatcher".into(),
+                Ready {
+                    http: "127.0.0.1:8791/ready".into(),
+                    wait_s: 120,
+                }
+            )]),
+            needs: Needs {
+                env_files: BTreeMap::from([(
+                    "dispatcher".into(),
+                    vec!["etc/dispatcher.env".into()]
+                )]),
+                host: BTreeMap::from([("emulated".into(), vec!["binfmt".into()])]),
+            },
+        }
+    );
+}
+
+/// Refused, every violation under `set_toml` (one mistake may break two of its checks).
+fn set_toml_refused(result: Result<(), Vec<Violation>>, case: &str) {
+    let got = rules(result);
+    assert!(
+        !got.is_empty() && got.iter().all(|r| *r == "set_toml"),
+        "{case}: {got:?}"
+    );
+}
+
+#[test]
+fn a_set_toml_that_breaks_schema_3_or_disagrees_with_the_template_is_refused() {
+    let template = real_set("compose.yml");
+    let good = real_set("set.toml");
+    for (from, to) in [
+        ("schema = 3", "schema = 2"),
+        ("schema = 3", "schema = 4"),
+        ("schema = 3", "schema = \"3\""),
+        ("guard_s = 90", "guard_s = 90\nunknown = 1"),
+        ("guard_s = 90", "guard_s = 0"),
+        ("order   = []", "order   = [\"dispatcher\", \"dispatcher\"]"),
+        ("order   = []", "order   = [\"pool-aarch64\"]"),
+        (
+            "project_default = \"omarchy-host\"",
+            "project_default = \"Omarchy Host\"",
+        ),
+        ("[ready.\"dispatcher\"]", "[ready.\"helper\"]"),
+        ("127.0.0.1:8791/ready", "0.0.0.0:8791/ready"),
+        ("127.0.0.1:8791/ready", "192.168.1.10:8791/ready"),
+        ("127.0.0.1:8791/ready", "127.0.0.1:0/ready"),
+        ("wait_s = 120", "wait_s = 0"),
+        ("wait_s = 120", "wait_s = 120\ntcp = \"127.0.0.1:8791\""),
+        ("[\"etc/dispatcher.env\"]", "[]"),
+        (
+            "[\"etc/dispatcher.env\"]",
+            "[\"etc/dispatcher.env\", \"etc/agent.env\"]",
+        ),
+        ("[\"etc/dispatcher.env\"]", "[\"../etc/dispatcher.env\"]"),
+        ("{ dispatcher = [", "{ helper = ["),
+        (
+            "emulated = [\"binfmt\"]",
+            "emulated = [\"binfmt\", \"modprobe\"]",
+        ),
+        ("emulated = [\"binfmt\"]", "native = [\"binfmt\"]"),
+    ] {
+        let bad = mutate(&good, from, to);
+        set_toml_refused(lint_set_toml(&bad, &template), to);
+    }
+    // A template whose dispatcher names no env file needs none listed; one listed is refused.
+    let no_env = mutate(&template, "    env_file: [etc/dispatcher.env]", "");
+    set_toml_refused(
+        lint_set_toml(&good, &no_env),
+        "env file compose does not name",
+    );
+    // `./etc/dispatcher.env` is the same file.
+    lint_set_toml(
+        &mutate(
+            &good,
+            "[\"etc/dispatcher.env\"]",
+            "[\"./etc/dispatcher.env\"]",
+        ),
+        &template,
+    )
+    .unwrap();
 }

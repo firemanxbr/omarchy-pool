@@ -4,6 +4,7 @@
 //! omarchy-agent verify --bundle <omarchy-host-vX.Y.Z.tar.gz> --sig <bundle.sigstore.json>
 //! omarchy-agent verify --statement <statement.json> --sig <bundle.sigstore.json>
 //! omarchy-agent lint-set <dir> [--override <compose.override.yml>] [--envelope <agent.toml>]
+//!     (<dir>/compose.yml and <dir>/set.toml)
 //! ```
 //!
 //! Exit status: 0 verified or clean, 1 refused, 2 usage or a file that cannot be read,
@@ -160,19 +161,24 @@ fn lint_cmd(args: &[String]) -> Result<u8, String> {
         None => Envelope::reference(),
     };
     let template = text(&Path::new(dir).join("compose.yml").to_string_lossy())?;
+    let set_toml = text(&Path::new(dir).join("set.toml").to_string_lossy())?;
     let over = get("--override").map(text).transpose()?;
     // The run loop (P1) passes the engine it detected; by hand and in CI, the strict case.
-    match lint::lint_compose(&template, over.as_deref(), &envelope, Engine::Rootful) {
-        Ok(()) => {
-            println!("lint-set: {dir}: clean");
-            Ok(0)
-        }
-        Err(violations) => {
-            for v in &violations {
-                eprintln!("lint-set: {v}");
-            }
-            eprintln!("lint-set: {dir}: {} violation(s)", violations.len());
-            Ok(REFUSED)
-        }
+    let mut violations = lint::lint_compose(&template, over.as_deref(), &envelope, Engine::Rootful)
+        .err()
+        .unwrap_or_default();
+    violations.extend(
+        lint::lint_set_toml(&set_toml, &template)
+            .err()
+            .unwrap_or_default(),
+    );
+    if violations.is_empty() {
+        println!("lint-set: {dir}: clean");
+        return Ok(0);
     }
+    for v in &violations {
+        eprintln!("lint-set: {v}");
+    }
+    eprintln!("lint-set: {dir}: {} violation(s)", violations.len());
+    Ok(REFUSED)
 }

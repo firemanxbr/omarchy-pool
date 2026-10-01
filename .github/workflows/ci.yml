@@ -28,6 +28,8 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - name: The host set passes lint-set, its set.toml is schema 3, and docker compose loads it with the placeholders filled
+        run: bash tests/host-set.sh
       - run: cargo build --release -p pkg-extract -p pkg-repo -p omarchy-cli
       - name: The Rust worker sends a build that died of emulation back for a native one, against a stubbed pool and podman
         run: bash tests/worker-needs-native.sh
@@ -184,6 +186,12 @@ jobs:
       - name: The Studio's host files — the updater in, the timer out, rollout.sh a wake-up — against stubs
         working-directory: .
         run: bash tests/host-setup.sh
+      - name: A new host's root-only steps — prep-root.sh does each, twice with no change, and nothing else — against stubs
+        working-directory: .
+        run: bash tests/prep-root.sh
+      - name: shellcheck of prep-root.sh
+        working-directory: .
+        run: shellcheck factory/host/prep-root.sh
       - name: The rollback — images and Worker back to a tag — against stubbed buildx and wrangler
         working-directory: .
         run: bash tests/rollback-workflow.sh
