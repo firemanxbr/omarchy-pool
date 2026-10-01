@@ -13,14 +13,17 @@ name: Release
 # #312), the worker image is pushed for both architectures — as
 # `:<arch>-vX.Y.Z` first, every role started from it on the runner
 # (tests/image-smoke.sh), and only once
-# both architectures' have started, `:<arch>` and `:latest` (#277: an image
-# that does not start stops here, before any host can pull it, on either
-# architecture) — then the signed host bundle every maintainer host takes
-# (#311: the omarchy-agent binaries, omarchy-host-vX.Y.Z.tar.gz signed
+# both architectures' have started, the version's own `:vX.Y.Z` (#277: an
+# image that does not start stops here, before any host can pull it, on
+# either architecture) — then the signed host bundle every maintainer host
+# takes (#311: the omarchy-agent binaries, omarchy-host-vX.Y.Z.tar.gz signed
 # keyless, install.sh) is verified with the agents the fleet runs and added
 # to the draft, the release is published (immutable from then on) once
-# every asset is on it, and the worker is deployed carrying that
-# version: every set's updater follows it within two minutes. Versions start
+# every asset is on it, only then do `:<arch>` and `:latest`, the tags every
+# set's updater pulls, move (#359: a release that stops before stays a
+# draft and leaves every host on the previous release's images), and the
+# worker is deployed carrying that version: every set's updater follows it
+# within two minutes. Versions start
 # at v0.0.1 and grow one step at a time. A merge alone changes nothing that
 # runs. Going back is rollback.yml.
 on:
@@ -58,8 +61,9 @@ jobs:
     # The gate every other job waits behind (#308): the release environment
     # admits main only and waits for a maintainer's approval, so a dispatch
     # from another branch is refused, and one from main waits, before
-    # anything is built, tagged, published or pushed. worker-image-manifest
-    # sits in it again, for its OIDC token.
+    # anything is built, tagged, published or pushed. worker-image-manifest,
+    # host-bundle and worker-image-tags sit in it again, for their OIDC
+    # tokens.
     needs: [ci, e2e]
     environment: release
     runs-on: ubuntu-latest
@@ -284,11 +288,13 @@ jobs:
     # published and tagged with its version. Pushed as the version's tag
     # only, then every role is started from it on this runner (#277): the
     # project worker through its entrypoint to its first claim, the broker
-    # answering, the builder's and the updater's self-tests. No tag a host
-    # follows moves here: the manifest job moves them all, once both
-    # architectures' smoke starts passed (tests/release-workflow.sh).
+    # answering, the builder's and the updater's self-tests. No other tag
+    # moves here: the manifest job moves the version's own, once both
+    # architectures' smoke starts passed, and worker-image-tags the ones a
+    # host follows, once the release is published (tests/release-workflow.sh).
     # It signs nothing, so it gets no OIDC token (no id-token: write) and no
-    # cosign: only worker-image-manifest signs, in the release environment.
+    # cosign: only worker-image-manifest and worker-image-tags sign images,
+    # in the release environment.
     # The release is still a draft here (#311), so the build takes the
     # binaries it publishes from this run's artifacts, served from the
     # runner (TOOLS_URL), as CI's local image build does. It still waits for
@@ -349,14 +355,13 @@ jobs:
   worker-image-manifest:
     name: Worker image (both architectures)
     # Only once both architectures' images started every role: one
-    # architecture's smoke start that fails moves no tag at all, not even
-    # the other architecture's (the Studio's builders, brokers and agent
-    # proxy follow :aarch64). First the version's own multi-arch tag, which
-    # says both smoke starts passed (rollback.yml goes back only to a
-    # release that has it); then :x86_64 and :aarch64, each a copy of its
-    # version's image; then :latest, which every set's updater follows.
-    # Each signed keyless, by one exact cosign against the public-good
-    # Fulcio and Rekor named on every call (#308; rollback.yml and
+    # architecture's smoke start that fails moves no tag at all. Only the
+    # version's own multi-arch tag, which says both smoke starts passed
+    # (rollback.yml goes back only to a release that has it) and whose
+    # index host-bundle signs into the bundle. The tags a host follows
+    # (:x86_64, :aarch64, :latest) move in worker-image-tags, once the
+    # release is published (#359). Signed keyless, by one exact cosign
+    # against the public-good Fulcio and Rekor named on every call (#308; rollback.yml and
     # factory/bin/release-rollback carry the same pins, tests/trust-pins.sh
     # holds them). The identity is this file on main:
     # https://github.com/firemanxbr/omarchy-pool/.github/workflows/release.yml@refs/heads/main.
@@ -383,7 +388,7 @@ jobs:
       - uses: docker/setup-buildx-action@v3
       - name: Log in to ghcr.io
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-      - name: Publish the version tag, move the architectures' tags and latest, sign them
+      - name: Publish the version tag, sign it
         id: tags
         run: |
           set -euo pipefail
@@ -391,12 +396,6 @@ jobs:
           docker buildx imagetools create -t "$IMAGE:$VERSION" "$IMAGE:x86_64-$VERSION" "$IMAGE:aarch64-$VERSION"
           sign "$IMAGE:$VERSION"
           echo "index=$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest.Digest}}' | tr -d '"')" >> "$GITHUB_OUTPUT"
-          for arch in x86_64 aarch64; do
-            docker buildx imagetools create --prefer-index=false -t "$IMAGE:$arch" "$IMAGE:$arch-$VERSION"
-            sign "$IMAGE:$arch"
-          done
-          docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:$VERSION"
-          sign "$IMAGE:latest"
 
   host-bundle:
     name: Host bundle (signed, verified with the fleet's agents)
@@ -577,9 +576,10 @@ jobs:
     # and is the bytes this run made (hashed here from the run's own
     # artifacts: a draft's asset can still be replaced by any token that
     # writes contents), then publishes it, which makes it immutable. A job
-    # that fails before leaves the release a draft, and the pool on the
+    # that fails before leaves the release a draft, the pool on the
     # previous release (deploy needs this job), so follow.latest never names
-    # a release whose bundle does not exist.
+    # a release whose bundle does not exist, and every host on the previous
+    # release's images (worker-image-tags needs this job too, #359).
     needs: [version, host-bundle-upload]
     permissions:
       contents: write
@@ -611,13 +611,55 @@ jobs:
           cat sums
       - run: factory/bin/publish-release "${{ needs.version.outputs.version }}" sums
 
+  worker-image-tags:
+    name: Worker image tags the hosts follow
+    # Only once the release is published (#359): :x86_64 and :aarch64, each a
+    # copy of its version's image, then :latest. Every set's updater pulls
+    # them at its next round, whatever release the pool runs, so they move
+    # last: moved with :vX.Y.Z in worker-image-manifest, v1.0.6's hosts ran
+    # its images before it was published, and a release that stopped at
+    # host-bundle, verify-agents or publish-release would have stayed a
+    # draft with every host on its images. A failure in any job before this
+    # one leaves them on the previous release (tests/release-workflow.sh).
+    # Signed as worker-image-manifest signs: the same exact cosign, Fulcio
+    # and Rekor, in the release environment. rollback.yml and
+    # factory/bin/release-rollback move the same three tags back.
+    needs: [version, worker-image-manifest, publish-release]
+    environment: release
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/omarchy-worker
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+        with:
+          cosign-release: v2.6.5
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to ghcr.io
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Move the architectures' tags and latest, sign them
+        run: |
+          set -euo pipefail
+          sign() { cosign sign --yes --fulcio-url=https://fulcio.sigstore.dev --rekor-url=https://rekor.sigstore.dev "$IMAGE@$(docker buildx imagetools inspect "$1" --format '{{json .Manifest.Digest}}' | tr -d '"')"; }
+          for arch in x86_64 aarch64; do
+            docker buildx imagetools create --prefer-index=false -t "$IMAGE:$arch" "$IMAGE:$arch-$VERSION"
+            sign "$IMAGE:$arch"
+          done
+          docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:$VERSION"
+          sign "$IMAGE:latest"
+
   deploy:
     name: Deploy worker
     # After the images: the Worker's deploy time starts the 45-minute grace after which
     # the pool refuses workers on the previous image (worker/src/update.ts) — the image
-    # they must pull has to exist first, on both architectures and under :latest.
-    # And last (#311): after the release is published with its host bundle.
-    needs: [version, worker-image-manifest, publish-release]
+    # they must pull has to exist first, on both architectures and under :latest
+    # (worker-image-tags). And last (#311): after the release is published with its
+    # host bundle.
+    needs: [version, worker-image-tags, publish-release]
     runs-on: ubuntu-latest
     environment:
       name: pool

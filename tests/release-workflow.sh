@@ -1,20 +1,28 @@
 #!/usr/bin/env bash
-# The release's order of the worker image's tags (#277, part 3), read from
-# .github/workflows/release.yml itself: no tag a host follows moves before
-# both architectures' images started every role.
+# The release's order of the worker image's tags (#277, part 3; #359), read
+# from .github/workflows/release.yml itself: no tag moves before both
+# architectures' images started every role, and no tag a host follows moves
+# before the release is published.
 #
 # - worker-image (a matrix leg per architecture) pushes the version's own
 #   `:<arch>-vX.Y.Z` only, then runs tests/image-smoke.sh on it; it moves,
 #   tags or signs nothing else. One leg's smoke start that fails moves no
 #   tag at all — not even the other architecture's, which the Studio's
 #   builders, brokers and agent proxy follow.
-# - worker-image-manifest needs both legs, and moves every tag a host
-#   follows: first the version's multi-arch `:vX.Y.Z` (the mark that both
-#   smoke starts passed, which rollback.yml requires), then `:x86_64` and
-#   `:aarch64` (a copy of each version's image), then `:latest`; each
-#   signed. No other job moves them.
-# - deploy needs worker-image-manifest: the pool moves to the release only
-#   once the images exist.
+# - worker-image-manifest needs both legs, and moves the version's
+#   multi-arch `:vX.Y.Z` only (the mark that both smoke starts passed, which
+#   rollback.yml requires, and the index host-bundle signs), signed.
+# - worker-image-tags (#359) needs publish-release, and moves every tag a
+#   host follows: `:x86_64` and `:aarch64` (a copy of each version's
+#   image), then `:latest`, each signed; the same three release-rollback
+#   moves back. No other job moves them. With release.yml's jobs and needs
+#   run as GitHub runs them (a job whose need failed or was skipped is
+#   skipped; no job overrides that with always(), failure() or
+#   cancelled()), a failure in host-bundle, verify-agents,
+#   host-bundle-upload or publish-release moves `:vX.Y.Z` and no tag a host
+#   follows.
+# - deploy needs worker-image-tags: the pool moves to the release only
+#   once the images exist under the tags the hosts pull.
 # - The signed host bundle (#311): the release is created as a draft;
 #   worker-image builds from the run's own binaries (a draft serves nothing);
 #   the agent job builds the three agent binaries with factory/bin/build-agent;
@@ -64,19 +72,70 @@ echo "ok: each architecture's leg pushes its version's image and starts every ro
 man="$(job worker-image-manifest)"
 [[ -n "$man" ]] || fail "release.yml has a worker-image-manifest job"
 grep -qE '^    needs: \[[^]]*\bworker-image\b[^]]*\]$' <<<"$man" || fail "the manifest job needs both legs: $(grep needs: <<<"$man")"
-version="$(line_of "$man" 'create -t "$IMAGE:$VERSION" "$IMAGE:x86_64-$VERSION" "$IMAGE:aarch64-$VERSION"')"
-arches="$(line_of "$man" 'create --prefer-index=false -t "$IMAGE:$arch" "$IMAGE:$arch-$VERSION"')"
-latest="$(line_of "$man" 'create -t "$IMAGE:latest" "$IMAGE:$VERSION"')"
-[[ -n "$version" && -n "$arches" && -n "$latest" ]] && (( version < arches && arches < latest )) \
-  || fail "the manifest job: the version's tag, then each architecture's (a copy of its version's image), then :latest: ${version:-never}, ${arches:-never}, ${latest:-never}"
-grep -qF 'for arch in x86_64 aarch64; do' <<<"$man" || fail "both architectures' tags move there"
-[[ "$(grep -cE '^ +sign "\$IMAGE:(\$VERSION|\$arch|latest)"$' <<<"$man")" == 3 ]] || fail "each one signed: $(grep sign <<<"$man")"
+grep -qF 'create -t "$IMAGE:$VERSION" "$IMAGE:x86_64-$VERSION" "$IMAGE:aarch64-$VERSION"' <<<"$man" || fail "the manifest job writes the version's multi-arch tag"
+[[ "$(grep -cF 'imagetools create' <<<"$man")" == 1 ]] || fail "the manifest job moves the version's tag and nothing else (#359): $(grep 'imagetools create' <<<"$man")"
+[[ "$(grep -cE '^ +sign "\$IMAGE:\$VERSION"$' <<<"$man")" == 1 && "$(grep -cE '^ +sign ' <<<"$man")" == 1 ]] || fail "the manifest job signs the version's tag, only: $(grep sign <<<"$man")"
+echo "ok: once both architectures started, the manifest job moves and signs the version's own tag, and no tag a host follows"
+
+tags="$(job worker-image-tags)"
+[[ -n "$tags" ]] || fail "release.yml has a worker-image-tags job (#359)"
+grep -qE '^    needs: \[[^]]*\bpublish-release\b[^]]*\]$' <<<"$tags" || fail "the tags a host follows wait for the published release: $(grep needs: <<<"$tags")"
+grep -qE '^    if:' <<<"$tags" && fail "worker-image-tags runs only when every job it needs succeeded: $(grep -E '^    if:' <<<"$tags")"
+grep -qE '^    environment: release$' <<<"$tags" || fail "worker-image-tags signs in the release environment"
+arches="$(line_of "$tags" 'create --prefer-index=false -t "$IMAGE:$arch" "$IMAGE:$arch-$VERSION"')"
+latest="$(line_of "$tags" 'create -t "$IMAGE:latest" "$IMAGE:$VERSION"')"
+[[ -n "$arches" && -n "$latest" ]] && (( arches < latest )) \
+  || fail "worker-image-tags: each architecture's tag (a copy of its version's image), then :latest: ${arches:-never}, ${latest:-never}"
+grep -qF 'for arch in x86_64 aarch64; do' <<<"$tags" || fail "both architectures' tags move there"
+[[ "$(grep -cE '^ +sign "\$IMAGE:(\$arch|latest)"$' <<<"$tags")" == 2 && "$(grep -cE '^ +sign ' <<<"$tags")" == 2 ]] || fail "each one signed: $(grep sign <<<"$tags")"
 # Nowhere else: the whole file moves :latest and the architectures' tags once, in that job.
 [[ "$(grep -cE -- '-t "\$IMAGE:(latest|\$arch|x86_64|aarch64)"' "$W")" == 2 ]] || fail "no other job moves :latest or an architecture's tag: $(grep -nE -- '-t "\$IMAGE:' "$W")"
-echo "ok: the tags a host follows move in one job, once both architectures started, the version's first and :latest last"
+# The same three tags rollback.yml (factory/bin/release-rollback) moves back.
+rolled="$(sed -n 's/^tags=(\([^)]*\)).*/\1/p' "$here/../factory/bin/release-rollback")"
+[[ "$rolled" == "x86_64 aarch64 latest" ]] || fail "release-rollback moves back the tags worker-image-tags moves (x86_64 aarch64 latest): ${rolled:-none}"
+echo "ok: the tags a host follows move in one job, after publish-release, each architecture's first and :latest last; release-rollback moves the same three back"
+
+# The run as GitHub runs it: each job's needs, read from the file; a job runs
+# when every job it needs ran and succeeded.
+grep -nE '^    if: .*\b(always|failure|cancelled)\(\)' "$W" && fail "no release.yml job runs after a job it needs failed"
+all_jobs="$(awk '/^jobs:$/ { on = 1; next } on && /^  [A-Za-z0-9_-]+:$/ { sub(/:$/, ""); sub(/^  /, ""); print }' "$W")"
+needs_list() { job "$1" | sed -nE 's/^    needs: \[?([^]]*)\]?$/\1/p' | tr -d ','; }
+ran_when_fails() { # job that fails → the jobs that run (it included)
+  local ran=" " changed=1 j n ok
+  while (( changed )); do
+    changed=0
+    for j in $all_jobs; do
+      [[ "$ran" == *" $j "* ]] && continue
+      ok=1; for n in $(needs_list "$j"); do [[ "$ran" == *" $n "* && "$n" != "$1" ]] || ok=0; done
+      (( ok )) && { ran+="$j "; changed=1; }
+    done
+  done
+  echo "$ran"
+}
+moves_floating() { grep -qE -- '-t "\$IMAGE:(latest|\$arch|x86_64|aarch64)"' <<<"$(job "$1")"; }
+moves_version() { grep -qF -- '-t "$IMAGE:$VERSION"' <<<"$(job "$1")"; }
+ran="$(ran_when_fails none)"
+for j in $all_jobs; do [[ "$ran" == *" $j "* ]] || fail "with no failure, $j runs: $ran"; done
+for failing in host-bundle verify-agents host-bundle-upload publish-release; do
+  [[ -n "$(job "$failing")" ]] || fail "release.yml has a $failing job"
+  ran="$(ran_when_fails "$failing")"
+  for j in $ran; do
+    [[ "$j" == "$failing" ]] && continue
+    moves_floating "$j" && fail "$failing failing still runs $j, which moves a tag a host follows"
+  done
+  moves_floating "$failing" && fail "$failing moves no tag a host follows"
+  [[ " $ran " == *" worker-image-manifest "* ]] || fail "$failing failing: the version's tag has moved (host-bundle reads its index)"
+  [[ " $ran " == *" deploy "* ]] && fail "$failing failing still deploys the pool"
+  echo "ok: $failing failing leaves every tag a host follows on the previous release, the pool too"
+done
+for j in $all_jobs; do
+  moves_version "$j" && [[ "$j" != worker-image-manifest ]] && fail "only the manifest job moves the version's tag: $j"
+done
+[[ " $(needs_list host-bundle) " == *" worker-image-manifest "* ]] || fail "the version's tag moves before host-bundle: $(needs_list host-bundle)"
+echo "ok: the version's tag moves before host-bundle; the tags a host follows only once the release is published"
 
 deploy="$(job deploy)"
-grep -qE '^    needs: \[[^]]*\bworker-image-manifest\b[^]]*\]$' <<<"$deploy" || fail "the deploy waits for the images: $(grep needs: <<<"$deploy")"
+grep -qE '^    needs: \[[^]]*\bworker-image-tags\b[^]]*\]$' <<<"$deploy" || fail "the deploy waits for the tags the hosts pull: $(grep needs: <<<"$deploy")"
 echo "ok: the pool is deployed once the images exist"
 pub="$(job publish)"
 [[ -n "$pub" ]] || fail "release.yml has a publish job"
