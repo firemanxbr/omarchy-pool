@@ -57,8 +57,8 @@ const WORKER_OWN = `<p class="sub" style="margin:0 0 10px;font-size:12.5px">Main
  * the host waits here, with its fingerprint, for its owner's Confirm.
  */
 const HOST_TOGGLE = `<button type="button" class="more-link" id="h-toggle" title="a name, where it runs, then one command to paste on the machine">+ add a host</button>`;
-const HOST_FORM = `<label>Name <input type="text" id="h-name" placeholder="vps-1" pattern="[a-z0-9][a-z0-9-]{0,30}[a-z0-9]?" required></label> <label>Where <input type="text" id="h-where" maxlength="80" placeholder="a VPS in Falkenstein" autocomplete="off"></label> <button type="submit" id="h-btn">Add a host</button>`;
-const HOST_OWN = `<p class="sub" style="margin:0 0 10px;font-size:12.5px">Maintainers only: a host runs the signed host bundle and one isolated container per task, as many as its capacity allows. Paste the command on the machine, as the user the agent runs as; it prints the host key's fingerprint, and this page shows it with <b>Confirm</b>. Nothing claims before that. <a href="/docs/worker-host#maintainer-hosts">How a host joins →</a></p><form id="host-form" class="form" onsubmit="return false" hidden></form><div id="h-new" hidden><p class="sub">One command, on the machine, within 15 minutes; the token works once and rides the environment, never the command line:</p><pre id="h-cmd"></pre></div>`;
+const HOST_FORM = `<label>Name <input type="text" id="h-name" placeholder="vps-1" pattern="[a-z0-9](?:[a-z0-9\\-]{0,30}[a-z0-9])?" title="lowercase letters, digits and dashes, 1 to 32, not ending in a dash" required></label> <label>Where <input type="text" id="h-where" maxlength="80" placeholder="a VPS in Falkenstein" autocomplete="off"></label> <button type="submit" id="h-btn">Add a host</button>`;
+const HOST_OWN = `<p class="sub" style="margin:0 0 10px;font-size:12.5px">Maintainers only: a host runs the signed host bundle and one isolated container per task, as many as its capacity allows. Paste the command on the machine, as the user the agent runs as; it prints the host key's fingerprint, and this page shows it with <b>Confirm</b>. Nothing claims before that. <a href="/docs/worker-host#maintainer-hosts">How a host joins →</a></p><form id="host-form" class="form" onsubmit="return false" hidden></form><div id="h-new" hidden><p class="sub">One command, on the machine, within 15 minutes; the token works once and rides the environment, never the command line:</p><pre><span class="copy" data-copy="host">copy</span><span id="h-cmd"></span></pre><p class="sub" id="h-note"></p></div>`;
 /** Add a passkey (#257): a name for it and the button that starts the browser's request — a maintainer's. */
 const PASSKEY_FORM = `<label>Name <input type="text" id="pk-label" maxlength="40" placeholder="this laptop" autocomplete="off"></label> <button type="submit" id="pk-add">Add a passkey</button>`;
 /** …and what stands in its place for someone who is not a maintainer but still holds a passkey (a maintainer once): the reason, visible, and their Remove below. */
@@ -81,6 +81,8 @@ const CSS = String.raw`
   #pk-reset > p#pk-reset-said.err { color: var(--text); border: 1px solid var(--red); padding: 10px 12px; font-size: 13.5px; }
   #pk-reset .form button.danger, #pk-reset .form button.danger:hover { border-color: var(--red); color: var(--red); }
   @media (max-width: 520px) { #pk-table th:nth-child(2), #pk-table td:nth-child(2) { display: none; } }
+  #h-new pre { position: relative; padding-right: 76px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  #hosts-table .h-detail { overflow-wrap: anywhere; min-width: 16ch; }
 `;
 
 const body = (login: string) => String.raw`
@@ -128,10 +130,10 @@ const body = (login: string) => String.raw`
 
   <section id="hosts" hidden>
     <div class="h2row"><h2>Hosts</h2><span id="h-slot"></span></div>
-    <p class="sub">The machines this maintainer provides (#307): each enrolled by its owner, confirmed by fingerprint, and trusted by the same pull request that named them a maintainer.</p>
+    <p class="sub">The machines this maintainer provides: each enrolled by its owner, confirmed by fingerprint, and trusted by the same pull request that named them a maintainer.</p>
     <div id="h-notices" hidden></div>
     <div id="h-own"></div>
-    <div class="table-wrap"><table id="hosts-table"><thead><tr><th>Host</th><th>Status</th><th>Arches</th><th>Units</th><th>Release</th><th>Reported</th><th><span class="u-sr">Confirm</span></th></tr></thead><tbody></tbody></table></div>
+    <div class="table-wrap"><table id="hosts-table"><thead><tr><th>Host</th><th>Status</th><th>Arches</th><th>Units</th><th>Release</th><th>Reported</th><th aria-label="Confirm"></th></tr></thead><tbody></tbody></table></div>
     <p class="sub" id="h-none" hidden style="margin:0">No host under this name.</p>
   </section>
 
@@ -179,7 +181,7 @@ const SCRIPT = String.raw`
   function workerCan(w, right) { var x = CAN.workers[w.id]; return x ? { ok: x[right] === true, why: (x.why && x.why[right]) || "" } : { ok: may(right), why: reason(right) }; }
   var SHARE_BTN = ${JSON.stringify(SHARE_BTN)}, TOKEN_BTN = ${JSON.stringify(TOKEN_BTN)}, REQUEST_LINK = ${JSON.stringify(REQUEST_LINK)}, WORKER_FORM = ${JSON.stringify(WORKER_FORM)}, REGISTER_TOGGLE = ${JSON.stringify(REGISTER_TOGGLE)}, WORKER_OWN = ${JSON.stringify(WORKER_OWN)};
   var HOST_TOGGLE = ${JSON.stringify(HOST_TOGGLE)}, HOST_FORM = ${JSON.stringify(HOST_FORM)}, HOST_OWN = ${JSON.stringify(HOST_OWN)};
-  var DRAWN = false, WORKER_DRAWN = false, HOST_DRAWN = false, HOSTS = null, WAIT_UNTIL = 0;
+  var DRAWN = false, WORKER_DRAWN = false, HOST_DRAWN = false, HOSTS = null, WAIT_UNTIL = 0, HOST_T = 0;
   function loadCan() {
     return api("GET", "/api/v1/users/" + encodeURIComponent(login) + "/can").then(function (d) {
       if (d.__status !== 200 || !d.can) return;
@@ -231,6 +233,7 @@ const SCRIPT = String.raw`
     $("#h-own").innerHTML = HOST_OWN; $("#h-slot").innerHTML = HOST_TOGGLE;
     $("#host-form").innerHTML = HOST_FORM;
     $("#h-toggle").onclick = function () { $("#host-form").hidden = !$("#host-form").hidden; };
+    copyChips({ host: "#h-cmd" });
   }
   function loadHosts() {
     return api("GET", "/api/v1/hosts?owner=" + encodeURIComponent(login)).then(function (d) { if (d.__status === 200) { HOSTS = d; renderHosts(); } }).catch(function () {});
@@ -245,7 +248,7 @@ const SCRIPT = String.raw`
       var p = h.status === "active" ? ["ok", "active"] : h.status === "pending-owner" ? ["warn", "waits for Confirm"] : ["na", h.status];
       if (h.status === "pending-owner") pending = true;
       var confirm = h.status === "pending-owner" ? gate('<button type="button" class="small-btn" data-host-confirm="' + esc(h.id) + '" data-name="' + esc(h.name) + '" title="the fingerprint matches what the machine printed: make it a pool host">Confirm</button>', isOwner(h.owner), "only " + h.owner + " confirms their host") : "";
-      var detail = h.fingerprint ? '<div class="muted" style="font-size:12px">' + esc((h.hostname || "") + (h.where ? " · " + h.where : "")) + (h.capacity ? " · " + esc(hostCaps(h)) : "") + '<br><span class="mono">' + esc(h.fingerprint) + '</span>' + (h.below_minimum ? '<br>' + esc(h.below_minimum) : '') + '</div>' : '';
+      var detail = h.fingerprint ? '<div class="muted h-detail" style="font-size:12px">' + esc((h.hostname || "") + (h.where ? " · " + h.where : "")) + (h.capacity ? " · " + esc(hostCaps(h)) : "") + '<br><span class="mono">' + esc(h.fingerprint) + '</span>' + (h.below_minimum ? '<br>' + esc(h.below_minimum) : '') + '</div>' : '';
       return '<tr><td><a href="/hosts/' + esc(h.id) + '">' + esc(h.name) + '</a>' + detail + '</td><td>' + pillHtml(p[0], p[1]) + '</td><td>' + esc((h.arches || []).join(", ")) + '</td><td>' + (h.units === undefined || h.units === null ? '<span class="muted">—</span>' : num(h.units)) + '</td><td>' + esc(h.release_applied || "—") + '</td><td>' + (h.alive ? "yes" : '<span class="muted">no</span>') + '</td><td>' + confirm + '</td></tr>';
     });
     $("#hosts-table tbody").innerHTML = rows.join("");
@@ -254,8 +257,9 @@ const SCRIPT = String.raw`
     var notes = isOwner(login) ? (HOSTS.notices || []) : [];
     $("#h-notices").hidden = !notes.length;
     $("#h-notices").innerHTML = notes.map(function (n) { return '<p class="sub" style="margin:0 0 6px">' + pillHtml("ok", "new host") + ' <a href="/hosts/' + esc(n.host) + '">' + esc(n.line) + '</a> · ' + esc(ago(n.at)) + '</p>'; }).join("");
-    // While a host waits for its owner, or a token is out, the page asks every five seconds: the machine shows up here as it enrolls.
-    if (pending || Date.now() < WAIT_UNTIL) setTimeout(loadHosts, 5000);
+    // While a host waits for its owner, or a token is out, the owner's page asks every five seconds: the machine shows up here as it enrolls. One timer, whoever called the draw; anyone else's page follows at the minute's tick.
+    clearTimeout(HOST_T); HOST_T = 0;
+    if (isOwner(login) && (pending || Date.now() < WAIT_UNTIL)) HOST_T = setTimeout(loadHosts, 5000);
   }
   document.addEventListener("submit", function (ev) { if (ev.target && ev.target.id === "host-form") { ev.preventDefault(); addHost(); } });
   function addHost() {
@@ -264,7 +268,7 @@ const SCRIPT = String.raw`
       $("#h-btn").disabled = false;
       if (d.error) { toast(esc(d.error), "error"); return; }
       $("#h-new").hidden = false;
-      $("#h-cmd").textContent = d.command + "\n\n# " + d.note;
+      $("#h-cmd").textContent = d.command; $("#h-note").textContent = d.note;
       $("#host-form").reset(); $("#host-form").hidden = true;
       WAIT_UNTIL = Date.parse(d.expires_at) || Date.now() + 15 * 60000; loadHosts();
     }).catch(function (e) { $("#h-btn").disabled = false; toast("failed: " + esc(errorText(e)), "error"); });
@@ -277,6 +281,8 @@ const SCRIPT = String.raw`
       if (go === null) return;
       api("POST", "/api/v1/hosts/" + encodeURIComponent(id) + "/confirm", {}).then(function (d) {
         if (d.error) { toast(esc(d.error), "error"); return; }
+        // The command is spent once its host is confirmed.
+        $("#h-new").hidden = true; WAIT_UNTIL = 0;
         toast(esc(d.line || "confirmed")); loadHosts(); loadWorkers();
       }).catch(function (e) { toast("failed: " + esc(errorText(e)), "error"); });
     });

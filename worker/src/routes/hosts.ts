@@ -27,7 +27,7 @@ import { roleFor } from "../governance";
 import { findLeak } from "../leak";
 import { machineOrigin, version, API_HOST } from "../meta";
 import { writeGate } from "./orders";
-import { sha256Hex, workspace, type Contributor } from "./contributors";
+import { sha256Hex, viaOf, workspace, type Contributor } from "./contributors";
 import { dashboardOrigin } from "./agents";
 import {
   belowMinimum, enrollMessage, fingerprint, hostLine, installCommand, newHostId, parseCapacity, parseHostHeader, publicKeyBytes, sha256HexOf, shortId, signedMessage,
@@ -180,8 +180,14 @@ export async function handleHostGet(c: Contributor | null, id: string, env: Env)
  * (`<login>-<host name>-<4 base36>`, kind host, project trust from
  * MAINTAINERS.toml, decision S2). Its token is minted when the agent asks for
  * it with a signed request (POST /hosts/self/token), never shown here.
+ *
+ * The browser session only, from the pool's own page (writeGate's Origin):
+ * Confirm gives project trust, so a bearer token — an omc_ CLI token, or a
+ * GitHub token turned into one — is refused (403 web_only). A passkey
+ * assertion, as approve's (#271), is the stronger seam, for a later issue.
  */
 export async function handleConfirmHost(c: Contributor, id: string, request: Request, env: Env, url: URL): Promise<Response> {
+  if (viaOf(request) !== "web") return json({ error: "a host is confirmed on its owner's page, signed in in the browser: a token does not confirm one", code: "web_only" }, 403, NO_STORE);
   const gate = writeGate(request, url, false);
   if (gate) return gate;
   const h = await env.DB.prepare("SELECT * FROM hosts WHERE id = ?").bind(id).first<HostRow>();
@@ -261,7 +267,7 @@ export async function handleEnroll(request: Request, env: Env, url: URL): Promis
   if ((await githubIdOf(env, e.login)) !== e.github_id) return json({ error: `${e.login} is no longer the GitHub account that asked for this token`, code: "owner_changed" }, 403);
   const below = belowMinimum(cap);
   if (below) return json({ error: `${below}; nothing was registered, and the token is still good until it expires`, code: "below_minimum" }, 422);
-  if (await env.DB.prepare("SELECT 1 FROM hosts WHERE pubkey = ?").bind(pubkey).first()) return json({ error: "this key is a host's already: a new install makes a new key", code: "key_taken" }, 409);
+  if (await env.DB.prepare("SELECT 1 FROM hosts WHERE pubkey = ?").bind(pubkey).first()) return json({ error: "this key is a host's already: an enrollment needs a key no host holds (the agent makes one whenever the machine has no host.json)", code: "key_taken" }, 409);
 
   const id = newHostId();
   const at = iso(now);
@@ -372,6 +378,8 @@ export async function handleHostReport(s: SignedHost, env: Env): Promise<Respons
   const cap = r.capacity === undefined ? null : parseCapacity(r.capacity);
   if (typeof cap === "string") return json({ error: cap }, 400, NO_STORE);
   const runtime = r.runtime && typeof r.runtime === "object" ? r.runtime : null;
+  // As the enrollment: whole or refused — a cut one would not parse on the hosts' pages.
+  if (runtime && JSON.stringify(runtime).length > 2048) return json({ error: "runtime: an object of at most 2 KiB" }, 400, NO_STORE);
   const isolation = runtime && ISOLATIONS.includes(runtime.isolation) ? (runtime.isolation as string) : h.isolation;
   const dedicated = runtime && typeof runtime.dedicated === "boolean" ? (runtime.dedicated ? 1 : 0) : h.dedicated;
   const round = r.round && typeof r.round === "object" ? r.round : null;
@@ -384,7 +392,7 @@ export async function handleHostReport(s: SignedHost, env: Env): Promise<Respons
   )
     .bind(
       text, at, at, str(r.agent?.version, /^\d{1,4}\.\d{1,4}\.\d{1,6}$/), str(r.release?.applied, tag), str(r.release?.target, tag), round?.outcome === "rolled-back" ? str(round.from, tag) : null,
-      isolation, dedicated, runtime ? JSON.stringify(runtime).slice(0, 2048) : null, str(r.agent?.provider, /^[a-z0-9-]{1,40}$/), str(r.agent?.model, /^[A-Za-z0-9._:-]{1,80}$/),
+      isolation, dedicated, runtime ? JSON.stringify(runtime) : null, str(r.agent?.provider, /^[a-z0-9-]{1,40}$/), str(r.agent?.model, /^[A-Za-z0-9._:-]{1,80}$/),
       cap ? JSON.stringify({ ...cap, below_minimum: belowMinimum(cap) }) : null, cap ? JSON.stringify(cap.lanes) : null, cap ? unitsOf(cap) : null, cap ? cap.agent_slots : null, cap ? JSON.stringify(cap.disk_free_gb) : null,
       h.id,
     )

@@ -35,12 +35,19 @@ impl Answer {
     }
     /// The pool's own words for a refusal (`error`, and `code` when it gives one).
     pub fn why(&self) -> String {
-        let e = self.json["error"].as_str().unwrap_or("no reason given");
+        let e = shown(self.json["error"].as_str().unwrap_or("no reason given"));
         match self.json["code"].as_str() {
-            Some(c) => format!("{e} ({c}, HTTP {})", self.status),
+            Some(c) => format!("{e} ({}, HTTP {})", shown(c), self.status),
             None => format!("{e} (HTTP {})", self.status),
         }
     }
+}
+
+/// A string the pool sent, as the terminal may print it: no control character, so no
+/// escape sequence of the pool's can move the cursor or rewrite a line the owner reads
+/// (the fingerprint above all).
+pub fn shown(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).collect()
 }
 
 /// Whether `origin` is one this agent may talk to: https, or http to a loopback address.
@@ -165,5 +172,17 @@ mod tests {
         ] {
             assert!(check_origin(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn the_pool_s_words_reach_the_terminal_without_escape_sequences() {
+        let a = Answer {
+            status: 409,
+            json: serde_json::json!({"error": "taken \u{1b}[2K\rhost key fingerprint: SHA256:x — no", "code": "c\u{9b}1A"}),
+        };
+        assert_eq!(
+            a.why(),
+            "taken [2Khost key fingerprint: SHA256:x — no (c1A, HTTP 409)"
+        );
     }
 }

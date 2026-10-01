@@ -62,7 +62,7 @@ for _ in $(seq 1 60); do curl -fs "$POOL/api/v1/version" >/dev/null 2>&1 && brea
 curl -fs "$POOL/api/v1/version" >/dev/null || fail "the local pool did not start"
 cd "$ROOT"
 
-step "Add a host: a contributor is refused, the maintainer gets the one command"
+step "Add a host: nobody signed in is refused, the maintainer gets the one command"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$POOL/api/v1/hosts/enrollments" -H 'content-type: application/json' -d '{"name":"vm"}')
 [[ $code == 401 ]] || fail "nobody signed in: $code"
 mint=$(curl -fs -X POST "$POOL/api/v1/hosts/enrollments" -H "cookie: $SESSION" -H "$ORIGIN_HDR" -H 'content-type: application/json' -d '{"name":"e2e-vm","where":"the CI runner"}')

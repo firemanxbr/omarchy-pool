@@ -253,11 +253,19 @@ describe("Confirm: POST /hosts/:id/confirm", () => {
     expect((await call("POST", `/hosts/${e.json.host}/confirm`, { body: {} })).status).toBe(401);
     const other = await call("POST", `/hosts/${e.json.host}/confirm`, { session: "m2", body: {} });
     expect([other.status, other.json.code]).toEqual([403, "not_owner"]);
+    // Project trust is the browser session's, never a bearer token's — not even the owner's own CLI token.
+    const cli = await call("POST", `/hosts/${e.json.host}/confirm`, { token: "omc_m1", body: {} });
+    expect([cli.status, cli.json.code]).toEqual([403, "web_only"]);
     const ok = await call("POST", `/hosts/${e.json.host}/confirm`, { session: "m1", body: {} });
     expect(ok.status, JSON.stringify(ok.json)).toBe(200);
     expect(ok.json.worker).toMatch(/^m1-confirmed-[0-9a-z]{4}$/);
     const w = await env.DB.prepare("SELECT owner, arch, kind, host_id, trust, trusted_by, token_hash, revoked_at FROM build_workers WHERE id = ?").bind(ok.json.worker).first();
     expect(w).toEqual({ owner: "m1", arch: "aarch64", kind: "host", host_id: e.json.host, trust: "project", trusted_by: "m1", token_hash: null, revoked_at: null });
+    // The per-worker trust door does not move a host's registration (its trust is MAINTAINERS.toml's).
+    for (const trust of ["community", "project"]) {
+      const t = await call("POST", `/factory/workers/${ok.json.worker}/trust`, { token: "omc_m2", body: { trust } });
+      expect([t.status, t.json.code]).toEqual([409, "host_trust"]);
+    }
     // Twice is refused; one registration per host.
     expect((await call("POST", `/hosts/${e.json.host}/confirm`, { session: "m1", body: {} })).status).toBe(409);
     expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM build_workers WHERE host_id = ?").bind(e.json.host).first("n")).toBe(1);
@@ -405,6 +413,11 @@ describe("the host report", () => {
     expect([secret.status, secret.json.code]).toEqual([422, "leak"]);
     const big = await signed(k, host, "POST", "/hosts/self/report", JSON.stringify({ x: "a".repeat(17 * 1024) }));
     expect(big.status).toBe(413);
+    // A runtime over 2 KiB is refused whole, as at enrollment: the hosts' pages keep reading.
+    const wide = await signed(k, host, "POST", "/hosts/self/report", JSON.stringify({ runtime: { driver: "x".repeat(3000) } }));
+    expect(wide.status).toBe(400);
+    expect((await call("GET", "/hosts", { session: "m2" })).status).toBe(200);
+    expect((await call("GET", `/hosts/${host}`, { session: "m2" })).json.host.runtime).toMatchObject({ driver: "compose/docker" });
   });
 });
 

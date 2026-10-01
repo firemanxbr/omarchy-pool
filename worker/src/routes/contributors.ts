@@ -1412,10 +1412,12 @@ export async function handleTrustWorker(c: Contributor, id: string, request: Req
   const b = await readJson<{ trust?: string }>(request);
   if (b instanceof Response) return b;
   const trust = b.trust === "project" ? "project" : "community";
-  const w = await env.DB.prepare("SELECT id, owner, trust, trusted_by, trust_proposed_by FROM build_workers WHERE id = ? AND revoked_at IS NULL")
+  const w = await env.DB.prepare("SELECT id, owner, trust, trusted_by, trust_proposed_by, kind FROM build_workers WHERE id = ? AND revoked_at IS NULL")
     .bind(id)
-    .first<{ id: string; owner: string | null; trust: string; trusted_by: string | null; trust_proposed_by: string | null }>();
+    .first<{ id: string; owner: string | null; trust: string; trusted_by: string | null; trust_proposed_by: string | null; kind: string | null }>();
   if (!w) return json({ error: "no such worker (or revoked)" }, 404);
+  // A host's registration is trusted by the pull request that named its owner a maintainer (#321, S2): no per-worker word moves it.
+  if (w.kind === "host") return json({ error: "a host's trust comes from factory/MAINTAINERS.toml, not from this door", code: "host_trust" }, 409);
   const now = new Date().toISOString();
   const event = (summary: string, payload: Record<string, unknown>) =>
     env.DB.prepare("INSERT INTO events (kind, ring, source, status, summary, payload) VALUES ('trust', NULL, 'factory', 'ok', ?, ?)").bind(summary, JSON.stringify(payload)).run();

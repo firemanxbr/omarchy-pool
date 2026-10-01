@@ -1,9 +1,10 @@
 //! The host's identity (#321, design v2 §6.1, decision D7): its Ed25519 key, the words it
 //! signs, and the files it keeps.
 //!
-//! - `host.ed25519` (PKCS#8, mode 0600) is made once, at the first enrollment, in the
-//!   agent's state directory, and never leaves it: no container mounts it, no report
-//!   carries it.
+//! - `host.ed25519` (PKCS#8, mode 0600) is made by the enrollment, in the agent's state
+//!   directory — anew each time the machine has no `host.json` yet, so an enrollment
+//!   whose answer was lost is redone with a new command — and never leaves it: no
+//!   container mounts it, no report carries it.
 //! - Every call of the host to the pool's `/api/v1/hosts/self/*` carries
 //!   `Omarchy-Host: <host>; ts=<unix>; nonce=<32 hex>; sig=<base64url>`, the key's
 //!   signature over [`signed_message`]; the pool refuses a replay, a changed body and a
@@ -64,6 +65,16 @@ impl HostKey {
             }
             Err(e) => Err(format!("{}: {e}", path.display())),
         }
+    }
+
+    /// A new key at `path`, replacing the one there (atomically, mode 0600): a machine
+    /// that has no identity yet enrolls with a key no host holds, so an enrollment whose
+    /// answer was lost is redone by pasting a new command, nothing to delete by hand.
+    pub fn create_fresh(path: &Path) -> Result<Self, String> {
+        let doc = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())
+            .map_err(|_| "the system could not make a key".to_owned())?;
+        replace(path, doc.as_ref())?;
+        Self::load_or_create(path)
     }
 
     /// The raw public key, base64url without padding, as the pool keeps it.

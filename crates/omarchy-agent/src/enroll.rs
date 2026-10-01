@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::host::{self, HostKey, Identity};
-use crate::pool::{Answer, Pool};
+use crate::pool::{shown, Answer, Pool};
 
 /// Where the agent keeps its files, under its data directory (install.sh's
 /// `${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-agent`).
@@ -82,11 +82,35 @@ impl From<&str> for Failure {
 
 /// A token as the site prints it: `ome_` and 48 hex digits.
 pub fn valid_token(t: &str) -> bool {
-    t.strip_prefix("ome_").is_some_and(|h| {
-        h.len() == 48
-            && h.bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    })
+    t.strip_prefix("ome_")
+        .is_some_and(|h| all_of(h, 48, 48, lower_hex))
+}
+
+/// Whether every byte of `s` is one `ok` takes, and it has `min..=max` of them.
+fn all_of(s: &str, min: usize, max: usize, ok: impl Fn(u8) -> bool) -> bool {
+    (min..=max).contains(&s.len()) && s.bytes().all(ok)
+}
+
+fn lower_hex(b: u8) -> bool {
+    b.is_ascii_digit() || (b'a'..=b'f').contains(&b)
+}
+
+/// A host id as the pool mints it: `h_` and 10 base36 characters. It goes into
+/// `host.json` and every signed request's header, so nothing else is taken.
+pub fn valid_host(h: &str) -> bool {
+    h.strip_prefix("h_")
+        .is_some_and(|r| all_of(r, 10, 10, |b| b.is_ascii_digit() || b.is_ascii_lowercase()))
+}
+
+/// A host worker token as the pool mints it: `omw_` and 48 hex digits.
+pub fn valid_worker_token(t: &str) -> bool {
+    t.strip_prefix("omw_")
+        .is_some_and(|h| all_of(h, 48, 48, lower_hex))
+}
+
+/// A registration's id (`<login>-<host name>-<4 base36>`): letters, digits and dashes.
+pub fn valid_worker_id(w: &str) -> bool {
+    all_of(w, 1, 120, |b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
 /// What the agent opens with: its key, which pool and which host — the identity this
@@ -106,7 +130,14 @@ fn open(o: &Options) -> Result<(HostKey, Option<Identity>, Pool), Failure> {
         (None, None) => crate::pool::DEFAULT_POOL.to_owned(),
     };
     let pool = Pool::new(&origin)?;
-    let key = HostKey::load_or_create(&o.paths.state.join(host::KEY_FILE))?;
+    let key_path = o.paths.state.join(host::KEY_FILE);
+    // No identity yet: this enrollment's own key. One kept from an enrollment whose
+    // answer never arrived may be a host's already (the pool's key_taken).
+    let key = if identity.is_some() {
+        HostKey::load_or_create(&key_path)?
+    } else {
+        HostKey::create_fresh(&key_path)?
+    };
     Ok((key, identity, pool))
 }
 
@@ -199,16 +230,19 @@ fn enroll(
     }
     let host = a.json["host"]
         .as_str()
-        .ok_or("the pool's answer names no host")?
+        .filter(|h| valid_host(h))
+        .ok_or("the pool's answer names no host id (h_ and 10 base36 characters)")?
         .to_owned();
     say(
         out,
         &format!(
             "enrolled as host {host} ({}) of {}, {} units; the pool says {}",
-            a.json["name"].as_str().unwrap_or("?"),
-            a.json["owner"].as_str().unwrap_or("?"),
-            a.json["units"],
-            a.json["fingerprint"].as_str().unwrap_or("?"),
+            shown(a.json["name"].as_str().unwrap_or("?")),
+            shown(a.json["owner"].as_str().unwrap_or("?")),
+            a.json["units"]
+                .as_u64()
+                .map_or("?".into(), |u| u.to_string()),
+            shown(a.json["fingerprint"].as_str().unwrap_or("?")),
         ),
     );
     if a.json["fingerprint"].as_str() != Some(key.fingerprint().as_str()) {
@@ -220,7 +254,10 @@ fn enroll(
     if let Some(url) = a.json["confirm"].as_str() {
         say(
             out,
-            &format!("confirm it at {url}, after comparing the fingerprint below"),
+            &format!(
+                "confirm it at {}, after comparing the fingerprint below",
+                shown(url)
+            ),
         );
     }
     Ok(Identity {
@@ -248,13 +285,15 @@ fn wait_for_confirm(
                             out,
                             &format!(
                                 "waiting for {} to confirm this host on the site",
-                                json["owner"].as_str().unwrap_or("its owner")
+                                shown(json["owner"].as_str().unwrap_or("its owner"))
                             ),
                         );
                         said = true;
                     }
                 }
-                Some(other) => return Err(Failure::Refused(format!("the host is {other}"))),
+                Some(other) => {
+                    return Err(Failure::Refused(format!("the host is {}", shown(other))))
+                }
                 None => {}
             },
             // The clock is the machine's to fix; nothing a retry changes.
@@ -291,13 +330,17 @@ pub fn fetch_token(
             a.why()
         )));
     }
+    // Both go into the dispatcher's env_file: anything but the pool's own shapes — a
+    // newline above all, which would add a variable of the pool's choosing to a
+    // container that holds the engine's socket — is refused, and nothing is written.
     let worker = a.json["worker"]
         .as_str()
-        .ok_or("the answer names no worker")?;
+        .filter(|w| valid_worker_id(w))
+        .ok_or("the answer names no registration (letters, digits and dashes)")?;
     let token = a.json["token"]
         .as_str()
-        .filter(|t| t.starts_with("omw_"))
-        .ok_or("the answer carries no worker token")?;
+        .filter(|t| valid_worker_token(t))
+        .ok_or("the answer carries no worker token (omw_ and 48 hex digits)")?;
     let env = o.paths.dispatcher_env();
     host::private_dir(env.parent().ok_or("no etc directory")?)?;
     host::replace(
@@ -313,7 +356,7 @@ pub fn fetch_token(
             "host {} is registration {worker}; its token is in {} (0600), next rotation after {}",
             id.host,
             env.display(),
-            a.json["rotate_after"].as_str().unwrap_or("?")
+            shown(a.json["rotate_after"].as_str().unwrap_or("?"))
         ),
     );
     Ok(())
@@ -350,6 +393,119 @@ mod tests {
         assert!(!valid_token(&format!("ome_{}", "A1".repeat(24))));
         assert!(!valid_token(&format!("omw_{}", "a1".repeat(24))));
         assert!(!valid_token("ome_short"));
+    }
+
+    #[test]
+    fn what_the_pool_answers_is_taken_in_its_own_shapes_only() {
+        let omw = format!("omw_{}", "0f".repeat(24));
+        assert!(valid_worker_token(&omw));
+        assert!(!valid_worker_token(&format!("{omw}\nBASH_ENV=/tmp/x")));
+        assert!(!valid_worker_token(&format!("omw_{}", "0F".repeat(24))));
+        assert!(!valid_worker_token("omw_x"));
+        assert!(valid_worker_id("m1-rack-0a9z"));
+        assert!(!valid_worker_id("m1-rack\nBASH_ENV=x"));
+        assert!(!valid_worker_id(""));
+        assert!(valid_host("h_0123456789"));
+        assert!(!valid_host("h_012345678"));
+        assert!(!valid_host("h_01234567\n9"));
+        assert!(!valid_host("../../x"));
+    }
+
+    /// A pool on loopback that gives every request the same answer.
+    fn pool_answering(body: String) -> String {
+        use std::io::{BufRead, BufReader, Read};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", l.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for c in l.incoming().flatten() {
+                let mut r = BufReader::new(c.try_clone().unwrap());
+                let mut len = 0;
+                loop {
+                    let mut line = String::new();
+                    if r.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        len = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                let _ = r.take(len).read_to_end(&mut Vec::new());
+                let _ = (&c).write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        origin
+    }
+
+    #[test]
+    fn a_token_or_registration_with_a_newline_is_refused_and_nothing_is_written() {
+        let omw = "0f".repeat(24);
+        for (answer, why) in [
+            (
+                format!(r#"{{"worker":"m1-rack-0a9z","token":"omw_{omw}\nBASH_ENV=/tmp/x"}}"#),
+                "no worker token",
+            ),
+            (
+                format!(r#"{{"worker":"m1\nBASH_ENV=/tmp/x","token":"omw_{omw}"}}"#),
+                "no registration",
+            ),
+        ] {
+            let d = std::env::temp_dir().join(format!(
+                "omarchy-agent-token-{}-{}",
+                std::process::id(),
+                why.len()
+            ));
+            let _ = std::fs::remove_dir_all(&d);
+            let o = Options {
+                pool: None,
+                paths: Paths::under(&d),
+                token: None,
+                wait: Duration::from_secs(0),
+                poll: Duration::from_millis(10),
+            };
+            host::private_dir(&o.paths.state).unwrap();
+            let key = HostKey::create_fresh(&o.paths.state.join(host::KEY_FILE)).unwrap();
+            let pool = Pool::new(&pool_answering(answer)).unwrap();
+            let id = Identity {
+                pool: pool.origin().to_owned(),
+                host: "h_0123456789".into(),
+            };
+            let e = fetch_token(&o, &key, &pool, &id, &mut Vec::new())
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains(why), "{e}");
+            assert!(!o.paths.dispatcher_env().exists());
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
+    #[test]
+    fn a_machine_with_no_identity_enrolls_with_a_new_key() {
+        let d = std::env::temp_dir().join(format!("omarchy-agent-fresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let o = Options {
+            pool: Some("http://127.0.0.1:9".into()),
+            paths: Paths::under(&d),
+            token: None,
+            wait: Duration::from_secs(0),
+            poll: Duration::from_millis(10),
+        };
+        let first = open(&o).unwrap().0.public_b64u();
+        assert_ne!(open(&o).unwrap().0.public_b64u(), first);
+        Identity {
+            pool: "http://127.0.0.1:9".into(),
+            host: "h_0123456789".into(),
+        }
+        .write(&o.paths.state)
+        .unwrap();
+        let kept = open(&o).unwrap().0.public_b64u();
+        assert_eq!(open(&o).unwrap().0.public_b64u(), kept);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

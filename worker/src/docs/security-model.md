@@ -406,9 +406,14 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   signs into every host bundle) is refused before anything is written.
 - **Confirm.** The machine prints its key's fingerprint; the owner's page
   shows the same, and only the owner's Confirm — while still a maintainer —
-  gives the host its worker registration. A token stolen before use enrolls
-  nothing the owner does not see and confirm. The journal and Status say it,
-  and the other maintainers see a notice; no approval is asked (D40).
+  gives the host its worker registration. Confirm is the browser session's
+  only, from the pool's own page: a bearer token (an `omc_` CLI token, or a
+  GitHub token turned into one) is refused, so one stolen token does not
+  make a project-trusted host. A token stolen before use enrolls nothing the
+  owner does not see and confirm. The journal and Status say it, and the
+  other maintainers see a notice; no approval is asked (D40). The per-worker
+  trust door does not move a host's registration: its trust is
+  `MAINTAINERS.toml`'s.
 - **Signed requests** (D7). Every later call carries `Omarchy-Host: <host>;
   ts; nonce; sig`, the key's signature over the method, the path, the body's
   SHA-256, the time and the nonce. The pool checks the key, `|ts − now| ≤
@@ -417,13 +422,17 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   state, fetches or rotates its worker token and reports; it cannot claim,
   change the maintainer list or widen anything.
 - **The host worker token** (`omw_…`) is the dispatcher's only, written
-  0600 to `etc/dispatcher.env`. It is a new one at every fetch; the agent
+  0600 to `etc/dispatcher.env`. The agent writes it, and the registration's
+  id, only in the shapes the pool mints (`omw_` and 48 hex digits; letters,
+  digits and dashes), so a pool cannot add a variable to the dispatcher's
+  environment; strings the pool sends reach the terminal without control
+  characters. It is a new one at every fetch; the agent
   rotates it every 30 days. The one it replaces works ten more minutes (kept
   on the host's row, never on the registration that older Workers list), so
   only the dispatcher is recreated, and a running task — whose job token does
   not depend on it — never notices.
-- **The host report** is at most 16 KiB and refused whole when it carries
-  what looks like a secret (`leak.ts`); the pool counts the host's units
+- **The host report** is at most 16 KiB (its `runtime` at most 2 KiB) and
+  refused whole when it carries what looks like a secret (`leak.ts`); the pool counts the host's units
   itself from the reported totals and the signed constants, never more than
   the host declared.
 
