@@ -19,7 +19,8 @@ fn envelope(name: &str) -> Envelope {
     Envelope::from_agent_toml(&read(&format!("envelope/{name}.toml"))).unwrap()
 }
 
-/// `<dir>/compose.yml` with `over` merged onto it, as `lint-set <dir> --override` reads them.
+/// `<dir>/compose.yml` with `over` merged onto it, and `<dir>/set.toml` against the
+/// template, as `lint-set <dir> --override` reads them.
 fn lint_set(
     dir: &Path,
     over: Option<&Path>,
@@ -27,13 +28,21 @@ fn lint_set(
     engine: Engine,
 ) -> Result<(), Vec<Violation>> {
     let read = |p: &Path| std::fs::read_to_string(p).unwrap();
+    let template = read(&dir.join("compose.yml"));
     let over = over.map(read);
-    lint_compose(
-        &read(&dir.join("compose.yml")),
-        over.as_deref(),
-        envelope,
-        engine,
-    )
+    let mut violations = lint_compose(&template, over.as_deref(), envelope, engine)
+        .err()
+        .unwrap_or_default();
+    violations.extend(
+        lint_set_toml(&read(&dir.join("set.toml")), &template)
+            .err()
+            .unwrap_or_default(),
+    );
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(violations)
+    }
 }
 
 const HOST: &str = include_str!("../../tests/fixtures/lint/host/compose.yml");

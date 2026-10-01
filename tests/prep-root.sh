@@ -17,8 +17,13 @@
 #   not restarted, both said under "needs a person" (exit 1).
 # - binfmt without the F flag: said (exit 1).
 # - --dry-run: nothing written, no command that changes the host.
+# - --dry-run on a truly fresh host (no docker, no jq yet): every step still
+#   said, and it ends "done (dry run…" with exit 0.
+# - A real run whose docker does not answer: said under "needs a person"
+#   (exit 1), not a silent stop.
 # - Usage (exit 2): an unknown runtime, no work root, a task subnet inside
-#   the address pool, root as the user.
+#   the address pool, root as the user, no --user (SUDO_USER is not taken),
+#   an address pool with host bits set, a work root that is a symlink.
 # - The firewall script, run against a stubbed iptables: its own chains
 #   flushed and rebuilt in order, the jumps added once.
 #
@@ -70,7 +75,7 @@ fresh() { # id arch fstype
 prep() { # args… → $status, $tmp/out; the log starts empty
   : > "$STUB_LOG"; : > "$STUB_LOG.read"
   set +e
-  PATH="$tmp/bin:$PATH" OMARCHY_PREP_FS="$tmp/fs" SUDO_USER=omarchy bash "$tmp/prep-root.sh" "$@" > "$tmp/out" 2>&1
+  PATH="${PREP_PATH:-$tmp/bin:$PATH}" OMARCHY_PREP_FS="$tmp/fs" SUDO_USER=omarchy bash "$tmp/prep-root.sh" "$@" > "$tmp/out" 2>&1
   status=$?
   set -e
 }
@@ -89,12 +94,12 @@ wr=/srv/omarchy-pool/host
 
 # --- Arch, rootful, aarch64, btrfs, a new daemon.
 fresh arch aarch64 btrfs
-prep --work-root "$wr" --task-subnets 10.231.0.0/16
+prep --user omarchy --work-root "$wr" --task-subnets 10.231.0.0/16
 [[ $status -eq 0 ]] || fail "arch rootful: exit $status"
 logged "pacman -S --needed --noconfirm qemu-user-static qemu-user-static-binfmt btrfs-progs jq docker"
 logged "systemctl enable --now docker.service"
 logged "usermod -aG docker omarchy"
-[[ "$(jq -cS . "$tmp/fs/etc/docker/daemon.json")" == '{"default-address-pools":[{"base":"172.17.0.0/12","size":24}],"userns-remap":"default"}' ]] \
+[[ "$(jq -cS . "$tmp/fs/etc/docker/daemon.json")" == '{"default-address-pools":[{"base":"172.16.0.0/12","size":24}],"userns-remap":"default"}' ]] \
   || fail "daemon.json: $(cat "$tmp/fs/etc/docker/daemon.json")"
 logged "systemctl restart docker.service"
 logged "btrfs subvolume create $tmp/fs$wr"
@@ -109,6 +114,7 @@ for rule in \
   "iptables -A OMARCHY-TASKS -s 10.231.0.0/16 -d 10.0.0.0/8 -j DROP" \
   "iptables -A OMARCHY-TASKS -s 10.231.0.0/16 -d 172.16.0.0/12 -j DROP" \
   "iptables -A OMARCHY-TASKS -s 10.231.0.0/16 -d 192.168.0.0/16 -j DROP" \
+  "iptables -A OMARCHY-TASKS -s 10.231.0.0/16 -d 100.64.0.0/10 -j DROP" \
   "iptables -A OMARCHY-TASKS -s 10.231.0.0/16 -d 169.254.0.0/16 -j DROP" \
   "iptables -A OMARCHY-TASKS-HOST -s 10.231.0.0/16 -j DROP"; do
   grep -qxF "$rule" "$fw" || fail "firewall: no $rule"
@@ -121,7 +127,7 @@ only pacman systemctl usermod btrfs chown chmod loginctl
 before="$(tree)"
 
 # --- Again: nothing changes.
-prep --work-root "$wr" --task-subnets 10.231.0.0/16
+prep --user omarchy --work-root "$wr" --task-subnets 10.231.0.0/16
 [[ $status -eq 0 ]] || fail "arch rootful, again: exit $status"
 [[ "$(tree)" == "$before" ]] || fail "a second run changed files"
 for c in usermod btrfs chown chmod loginctl "systemctl restart docker" "systemctl daemon-reload" "systemctl enable omarchy-task-firewall" "systemctl restart omarchy-task-firewall"; do not_logged "$c"; done
@@ -129,7 +135,7 @@ grep -q "in place" "$tmp/out" || fail "the firewall not said in place"
 
 # --- Ubuntu, rootless, x86_64, ext4.
 fresh ubuntu x86_64 ext4
-prep --work-root "$wr" --runtime rootless
+prep --user omarchy --work-root "$wr" --runtime rootless
 [[ $status -eq 0 ]] || fail "ubuntu rootless: exit $status"
 logged "apt-get update"
 logged "apt-get install -y --no-install-recommends qemu-user-static binfmt-support btrfs-progs jq podman uidmap"
@@ -142,16 +148,16 @@ logged "systemctl daemon-reload"
 [[ ! -s "$STUB_LOG.read" ]] || fail "rootless: docker asked: $(cat "$STUB_LOG.read")"
 only apt-get systemctl chown chmod loginctl
 before="$(tree)"
-prep --work-root "$wr" --runtime rootless
+prep --user omarchy --work-root "$wr" --runtime rootless
 [[ $status -eq 0 && "$(tree)" == "$before" ]] || fail "ubuntu rootless, again: exit $status or files changed"
 for c in "systemctl daemon-reload" chown chmod loginctl; do not_logged "$c"; done
 
 # --- A daemon that already holds containers.
 fresh arch aarch64 btrfs
 STUB_DOCKER_COUNTS="3 5" STUB_DOCKER_PS=$'abc\ndef\n'
-prep --work-root "$wr"
+prep --user omarchy --work-root "$wr"
 [[ $status -eq 1 ]] || fail "busy daemon: exit $status, want 1"
-[[ "$(jq -cS . "$tmp/fs/etc/docker/daemon.json")" == '{"default-address-pools":[{"base":"172.17.0.0/12","size":24}]}' ]] \
+[[ "$(jq -cS . "$tmp/fs/etc/docker/daemon.json")" == '{"default-address-pools":[{"base":"172.16.0.0/12","size":24}]}' ]] \
   || fail "busy daemon: daemon.json $(cat "$tmp/fs/etc/docker/daemon.json")"
 not_logged "systemctl restart docker"
 grep -q "needs a person" "$tmp/out" && grep -q "userns-remap: left off" "$tmp/out" && grep -q "restart docker.service when none does" "$tmp/out" \
@@ -160,32 +166,74 @@ grep -q "needs a person" "$tmp/out" && grep -q "userns-remap: left off" "$tmp/ou
 # --- binfmt without the F flag.
 fresh arch aarch64 btrfs
 printf 'enabled\ninterpreter /usr/bin/qemu-x86_64-static\nflags: POC\n' > "$tmp/fs/proc/sys/fs/binfmt_misc/qemu-x86_64"
-prep --work-root "$wr"
+prep --user omarchy --work-root "$wr"
 [[ $status -eq 1 ]] && grep -q "binfmt: qemu-x86_64 is not enabled with the F flag" "$tmp/out" || fail "binfmt without F: exit $status"
 logged "systemctl restart systemd-binfmt.service"
 
 # --- --dry-run: nothing written, nothing changed.
 fresh arch aarch64 btrfs
 before="$(tree)"
-prep --work-root "$wr" --dry-run
+prep --user omarchy --work-root "$wr" --dry-run
 [[ $status -eq 0 ]] || fail "dry run: exit $status"
 [[ "$(tree)" == "$before" ]] || fail "a dry run changed files"
 [[ ! -s "$STUB_LOG" ]] || fail "a dry run ran: $(cat "$STUB_LOG")"
 grep -q "would run: pacman" "$tmp/out" && grep -q "would write /etc/docker/daemon.json" "$tmp/out" || fail "a dry run did not say what it would do"
 
+# --- --dry-run on a truly fresh host: neither docker nor jq installed yet.
+# PATH: the stubs without docker, then the system's commands without docker and jq.
+mkdir -p "$tmp/fresh/bin" "$tmp/fresh/sys"
+for f in "$tmp"/bin/*; do [[ "$(basename "$f")" == docker ]] || ln -s "$f" "$tmp/fresh/bin/"; done
+ln -s "$(command -v bash)" "$tmp/fresh/sys/bash"
+for d in /usr/local/bin /usr/bin /bin; do
+  for f in "$d"/*; do
+    case "$(basename "$f")" in docker | jq) continue ;; esac
+    if [[ -x "$f" && ! -e "$tmp/fresh/sys/$(basename "$f")" ]]; then ln -s "$f" "$tmp/fresh/sys/"; fi
+  done
+done
+fresh arch aarch64 btrfs
+before="$(tree)"
+PREP_PATH="$tmp/fresh/bin:$tmp/fresh/sys" prep --user omarchy --work-root "$wr" --dry-run
+[[ $status -eq 0 ]] || fail "dry run, fresh host: exit $status"
+[[ "$(tree)" == "$before" && ! -s "$STUB_LOG" ]] || fail "dry run, fresh host: changed something"
+for said in "would write /etc/docker/daemon.json" "userns-remap if the daemon is new" "==> 6." "==> 7." "==> 9." "done (dry run"; do
+  grep -qF "$said" "$tmp/out" || fail "dry run, fresh host: not said: $said"
+done
+# With jq but still no docker: step 5 and the restart said, nothing for a person.
+mkdir -p "$tmp/fresh/jq"; ln -s "$(command -v jq)" "$tmp/fresh/jq/jq"
+PREP_PATH="$tmp/fresh/bin:$tmp/fresh/jq:$tmp/fresh/sys" prep --user omarchy --work-root "$wr" --dry-run
+[[ $status -eq 0 ]] && grep -qF "would turn on userns-remap if the daemon is new" "$tmp/out" && grep -qF "would run: systemctl restart docker.service" "$tmp/out" \
+  && grep -qF "done (dry run" "$tmp/out" || fail "dry run, no docker: exit $status"
+[[ "$(tree)" == "$before" && ! -s "$STUB_LOG" ]] || fail "dry run, no docker: changed something"
+
+# --- A real run whose docker does not answer: said, every step still run.
+fresh arch aarch64 btrfs
+PREP_PATH="$tmp/fresh/bin:$tmp/fresh/jq:$tmp/fresh/sys" prep --user omarchy --work-root "$wr"
+[[ $status -eq 1 ]] || fail "docker silent: exit $status, want 1"
+grep -q "the daemon did not answer" "$tmp/out" && grep -q "userns-remap: left off" "$tmp/out" && grep -q "==> 9." "$tmp/out" \
+  || fail "docker silent: not said"
+not_logged "systemctl restart docker"
+
 # --- Usage.
 fresh arch aarch64 btrfs
 for args in "--work-root $wr --runtime podman" "--runtime rootful" "--work-root relative/path" \
-  "--work-root $wr --task-subnets 172.20.0.0/16" "--work-root $wr --user root" "--work-root $wr --task-subnets 10.231.0.0"; do
+  "--work-root $wr --task-subnets 172.20.0.0/16" "--work-root $wr --user root" "--work-root $wr --task-subnets 10.231.0.0" \
+  "--work-root $wr --address-pool 172.17.0.0/12"; do
   # shellcheck disable=SC2086
-  prep $args
+  prep --user omarchy $args
   [[ $status -eq 2 ]] || fail "usage: $args: exit $status, want 2"
   [[ ! -s "$STUB_LOG" ]] || fail "usage: $args ran something"
 done
+# No --user: SUDO_USER (the person who ran sudo) is not taken in its place.
+prep --work-root "$wr"
+[[ $status -eq 2 && ! -s "$STUB_LOG" ]] || fail "usage: no --user: exit $status, want 2"
+# A work root that is a symlink: root would hand its target to the user.
+mkdir -p "$tmp/fs/etc/target" "$tmp/fs/srv/omarchy-pool" && ln -s /etc/target "$tmp/fs$wr.link"
+prep --user omarchy --work-root "$wr.link"
+[[ $status -eq 2 && ! -s "$STUB_LOG" ]] || fail "usage: a symlinked work root: exit $status, want 2"
 
 # --- The firewall script, against a stubbed iptables: rebuilt whole, jumps added once.
 fresh arch aarch64 btrfs
-prep --work-root "$wr" --task-subnets 10.231.0.0/16,10.232.0.0/16
+prep --user omarchy --work-root "$wr" --task-subnets 10.231.0.0/16,10.232.0.0/16
 [[ $status -eq 0 ]] || fail "two subnets: exit $status"
 mkdir -p "$tmp/ipt"
 printf '#!/usr/bin/env bash\necho "iptables $*" >> "%s/ipt/log"\ncase "$1" in -C) [[ -e "%s/ipt/jump-$2" ]] ;; -I) touch "%s/ipt/jump-$2" ;; esac\n' "$tmp" "$tmp" "$tmp" > "$tmp/ipt/iptables"

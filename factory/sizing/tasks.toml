@@ -19,7 +19,9 @@
 #   disk_gb  = 120           # the build's disk budget: 20 per size unit when not set
 #   network  = "direct"      # the per-package network exception: a normal bridge
 #                            # network instead of the task's internal one (still
-#                            # no LAN where prep-root.sh's DOCKER-USER rules are in)
+#                            # no IPv4 LAN, CGNAT or link-local where
+#                            # prep-root.sh's DOCKER-USER rules are in; the
+#                            # rules are IPv4 only, so IPv6 stays off on it)
 #   reason   = "…"           # why, required with `network`; shown on the package page
 schema = 1
 

@@ -328,7 +328,7 @@ container or image yet, `userns-remap`; makes the work root (a btrfs
 subvolume where it can); turns on linger; delegates cgroup v2 controllers to
 the user's systemd (rootless); and installs `DOCKER-USER` drop rules from
 the task subnets (`--task-subnets`, default `10.231.0.0/16`) to RFC 1918,
-link-local and the host, kept across reboots by
+CGNAT, link-local and the host (IPv4; task networks stay IPv4 only), kept across reboots by
 `omarchy-task-firewall.service` (rootful). A second run changes nothing;
 exit 1 lists what needs a person. The task subnets and the work root must be
 the ones the agent's install is given. The Studio does not run it: it keeps

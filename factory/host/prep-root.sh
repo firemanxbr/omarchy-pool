@@ -5,16 +5,19 @@
 # missing ("needs a person", set.toml [needs]). Arch Linux (and Arch Linux
 # ARM) or Ubuntu LTS, as root:
 #
-#   sudo factory/host/prep-root.sh --work-root /srv/omarchy-pool/host \
-#     [--user omarchy] [--runtime rootful|rootless] \
-#     [--task-subnets 10.231.0.0/16[,…]] [--address-pool 172.17.0.0/12] [--dry-run]
+#   sudo factory/host/prep-root.sh --user omarchy --work-root /srv/omarchy-pool/host \
+#     [--runtime rootful|rootless] \
+#     [--task-subnets 10.231.0.0/16[,…]] [--address-pool 172.16.0.0/12] [--dry-run]
 #
-#   --user          the Unix user the agent runs as (default: the one who ran sudo)
+#   --user          the Unix user the agent runs as, required: never root, and
+#                   best never a person's daily login (rootful puts it in the
+#                   docker group, root-equivalent; design v2 §19.1)
 #   --runtime       rootful: docker's system daemon (default); rootless: podman
 #                   as that user (a shared machine, design v2 §19.1, 2.)
 #   --task-subnets  what the agent's --task-subnets will be (default 10.231.0.0/16)
 #   --address-pool  the base of docker's default address pools, cut in /24s
-#                   (default 172.17.0.0/12); must not overlap the task subnets
+#                   (default 172.16.0.0/12); a network address (no host bits),
+#                   not overlapping the task subnets
 #   --dry-run       say what would change, change nothing
 #
 # Each step, idempotent (a second run changes nothing), and nothing else:
@@ -30,13 +33,16 @@
 #      root and strands what is there (the Studio's recorded exception,
 #      design v2 §19.1); docker restarted only when no container runs
 #   6. the work root: a btrfs subvolume when its parent is btrfs (outside the
-#      root's snapshots), a directory otherwise; owned by the user, 0750
+#      root's snapshots), a directory otherwise; owned by the user, 0750; a
+#      symlink is refused (root would hand its target to the user)
 #   7. linger for the user, so its systemd --user unit runs without a login
 #   8. rootless: cgroup v2 delegation (cpu, cpuset, io, memory, pids) to the
 #      user's systemd, so task limits hold
-#   9. rootful: DOCKER-USER drop rules from the task subnets to RFC 1918 and
-#      link-local addresses, and an INPUT drop from them to the host, kept
-#      across reboots by omarchy-task-firewall.service (design v2 §9.4)
+#   9. rootful: DOCKER-USER drop rules from the task subnets to RFC 1918,
+#      CGNAT (100.64.0.0/10, Tailscale's range) and link-local addresses, and
+#      an INPUT drop from them to the host, kept across reboots by
+#      omarchy-task-firewall.service (design v2 §9.4). IPv4 only: task
+#      networks are IPv4 (nothing here turns IPv6 on for them)
 #
 # Exit status: 0 done (or nothing to do), 1 done but something needs a person
 # (listed at the end), 2 usage, or not root.
@@ -47,17 +53,17 @@ fs="${OMARCHY_PREP_FS:-}"
 
 usage() {
   cat >&2 <<'EOF_USAGE'
-usage: prep-root.sh --work-root <path> [--user <name>] [--runtime rootful|rootless]
+usage: prep-root.sh --user <name> --work-root <path> [--runtime rootful|rootless]
                     [--task-subnets <cidr>[,<cidr>…]] [--address-pool <cidr>] [--dry-run]
 EOF_USAGE
   exit 2
 }
 
-user="${SUDO_USER:-}"
+user=""
 runtime=rootful
 work_root=""
 task_subnets="10.231.0.0/16"
-address_pool="172.17.0.0/12"
+address_pool="172.16.0.0/12"
 dry=0
 while (($#)); do
   case "$1" in
@@ -73,11 +79,12 @@ while (($#)); do
 done
 
 [[ $EUID -eq 0 ]] || { echo "prep-root.sh: run as root (sudo)" >&2; exit 2; }
-[[ -n "$user" && "$user" != root ]] || { echo "prep-root.sh: --user: the agent's own user, never root" >&2; exit 2; }
+[[ -n "$user" && "$user" != root ]] || { echo "prep-root.sh: --user: the agent's own user, required, never root" >&2; exit 2; }
 id -u "$user" >/dev/null 2>&1 || { echo "prep-root.sh: no user $user (create it first)" >&2; exit 2; }
 [[ "$runtime" == rootful || "$runtime" == rootless ]] || { echo "prep-root.sh: --runtime is rootful or rootless" >&2; exit 2; }
 [[ "$work_root" == /* && "$work_root" != */../* && "$work_root" != */.. && "$work_root" != / ]] \
   || { echo "prep-root.sh: --work-root: an absolute path" >&2; exit 2; }
+[[ ! -L "$fs$work_root" ]] || { echo "prep-root.sh: --work-root: $work_root is a symlink; give the real path" >&2; exit 2; }
 cidr='^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$'
 IFS=, read -r -a subnets <<<"$task_subnets"
 ((${#subnets[@]})) || { echo "prep-root.sh: --task-subnets: at least one" >&2; exit 2; }
@@ -90,6 +97,9 @@ overlaps() { # two CIDRs share an address
   ((${2#*/} < m)) && m="${2#*/}"
   (($(ip2int "$a") >> (32 - m) == $(ip2int "$b") >> (32 - m)))
 }
+pool_bits="${address_pool#*/}"
+((pool_bits <= 32 && ($(ip2int "${address_pool%/*}") & ((1 << (32 - pool_bits)) - 1)) == 0)) \
+  || { echo "prep-root.sh: --address-pool: $address_pool has host bits set (a network address, e.g. 172.16.0.0/12)" >&2; exit 2; }
 for s in "${subnets[@]}"; do
   if overlaps "$s" "$address_pool"; then
     echo "prep-root.sh: the task subnet $s overlaps docker's address pool $address_pool" >&2; exit 2
@@ -172,7 +182,15 @@ else
   attention+=("binfmt: qemu-$foreign is not enabled with the F flag ($handler); the $foreign lane stays off")
 fi
 
-if [[ "$runtime" == rootful ]]; then
+if [[ "$runtime" == rootful ]] && ! command -v jq >/dev/null; then
+  # A dry run before step 1 installed anything; a real run has jq from step 1.
+  echo "==> 4. docker's default address pools / 5. userns-remap (a new daemon only)"
+  if ((dry)); then
+    echo "    would write /etc/docker/daemon.json: $address_pool in /24s, and userns-remap if the daemon is new (jq comes with the packages above)"
+  else
+    attention+=("daemon.json: no jq (step 1 should have installed it); the address pools and userns-remap are not set")
+  fi
+elif [[ "$runtime" == rootful ]]; then
   daemon_json="/etc/docker/daemon.json"
   current="{}"
   [[ -s "$fs$daemon_json" ]] && current="$(cat "$fs$daemon_json")"
@@ -189,6 +207,8 @@ if [[ "$runtime" == rootful ]]; then
     if [[ "$counts" == "0 0" ]]; then
       want="$(jq -S '. + {"userns-remap": "default"}' <<<"$want")"
       changed "turned on: a container escape lands in an unprivileged subuid"
+    elif ((dry)) && [[ "$counts" == unknown ]]; then
+      echo "    would turn on userns-remap if the daemon is new (docker did not answer: not installed or not running yet)"
     else
       attention+=("userns-remap: left off, the daemon already holds containers or images ($counts), or did not answer; turning it on would strand them (design v2 §19.1: a recorded exception, or a new daemon)")
     fi
@@ -196,9 +216,12 @@ if [[ "$runtime" == rootful ]]; then
 
   if [[ "$(jq -S . <<<"$current")" != "$want" ]]; then
     put "$daemon_json" 0644 "$want" || true
-    running="$(docker ps -q 2>/dev/null | wc -l | tr -d ' ')"
-    if [[ "$running" == 0 ]]; then
+    # docker ps on its own (never in a pipe): a daemon that does not answer is said, not fatal.
+    if ids="$(docker ps -q 2>/dev/null)"; then running="$(grep -c . <<<"$ids" || true)"; else running=unknown; fi
+    if [[ "$running" == 0 ]] || { ((dry)) && [[ "$running" == unknown ]]; }; then
       run systemctl restart docker.service
+    elif [[ "$running" == unknown ]]; then
+      attention+=("docker: daemon.json changed and the daemon did not answer; restart docker.service once it does")
     else
       attention+=("docker: daemon.json changed while $running container(s) run; restart docker.service when none does")
     fi
@@ -254,7 +277,7 @@ fi
 if [[ "$runtime" == rootful ]]; then
   echo "==> 9. DOCKER-USER rules for the task subnets (${subnets[*]})"
   rules=("#!/bin/sh"
-    "# prep-root.sh (omarchy-pool): task subnets reach no private, link-local or host address (design v2 §9.4)."
+    "# prep-root.sh (omarchy-pool): task subnets reach no private, CGNAT, link-local or host address (design v2 §9.4)."
     "# Rebuilt whole on every start; the chains are this file's own."
     "set -e"
     "iptables -N OMARCHY-TASKS 2>/dev/null || true"
@@ -264,7 +287,7 @@ if [[ "$runtime" == rootful ]]; then
   for s in "${subnets[@]}"; do
     # A task's own network (its egress sidecar) is in the subnet; docker's isolation chains, after DOCKER-USER, keep tasks apart.
     rules+=("iptables -A OMARCHY-TASKS -s $s -d $s -j RETURN")
-    for d in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16; do
+    for d in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16; do
       rules+=("iptables -A OMARCHY-TASKS -s $s -d $d -j DROP")
     done
     # The host's own addresses are reached through INPUT, never FORWARD.
