@@ -14,7 +14,7 @@ import { version as running, RINGS, ringsSql, sortRings, REPO_ARCHES, WORKER_ALI
 import { parseTargets, settleTargets } from "../targets";
 import { LEASE_MINUTES, packageAfterFailure, requeueLease, stopError } from "../lease";
 import {
-  autoOf, breakerHolds, claimFacts, decideAuto, errorClass, instanceStep, issueOrder, NOTHING_CLASSES, openOrdersOf, outOf, poolFor, readSite, rolloutOf, rulesOn, rulesScale, setLine, setRollout, siblingsAnswering, siteVerdict, takeOrders,
+  autoOf, breakerHolds, claimFacts, decideAuto, errorClass, instanceStep, issueOrder, NOTHING_CLASSES, openOrdersOf, outOf, poolFor, readSite, rolloutOf, rulesOn, rulesScale, setLine, setRollout, siblingsAnswering, HOST_ROLLOUT, HOST_SET_LINE, siteVerdict, takeOrders,
   capRefusal, type AfterClaim, type AutoState, type ClaimFacts, type Decision, type InstanceStep, type OrderOut, type OrdersRow,
 } from "../orders";
 
@@ -1074,6 +1074,8 @@ export interface WorkerRow {
   instance_churn?: number | null; instance_finished?: string | null; crash_loop_since?: string | null; watchdog_exits?: string | null; started_at?: string | null; agent_via?: string | null; site?: string | null;
   restarts_left?: number | null; rollout?: string | null; agent_error?: string | null; agent_error_since?: string | null; agent_probed_at?: string | null; agent_error_class?: string | null;
   drained_at?: string | null; drained_by?: string | null; drain_reason?: string | null; auto_orders?: string | null;
+  // #321: a host's registration.
+  kind?: string | null; host_id?: string | null;
 }
 
 /**
@@ -1142,8 +1144,9 @@ export function workerView<W extends WorkerRow>(w: W, since: number, pool: Runni
     watchdog: watchdog && Date.now() - Date.parse(watchdog.since) < 24 * 3600e3 ? watchdog : null,
     agent_via: w.agent_via ?? null,
     // What rolls its set out (#277, part 3): one word, and the pool's line for it — the report itself stays the pool's.
-    set_rollout: setRollout(rolloutOf(w.rollout ?? null)),
-    set_line: setLine(rolloutOf(w.rollout ?? null), w.version ?? null, w.trust),
+    // A host's registration (#321) is rolled out by its host's agent: the `host` word.
+    set_rollout: w.kind === "host" ? HOST_ROLLOUT : setRollout(rolloutOf(w.rollout ?? null)),
+    set_line: w.kind === "host" ? HOST_SET_LINE : setLine(rolloutOf(w.rollout ?? null), w.version ?? null, w.trust),
     labels: w.labels ? JSON.parse(w.labels) : null,
     packages: w.packages ? JSON.parse(w.packages) : null,
     alive: Date.parse(w.last_seen) > since,
@@ -1208,9 +1211,11 @@ export async function handleFactory(env: Env, url?: URL): Promise<Response> {
  * Workers from before registration (no token of their own: the retired
  * shared secret's ephemeral runners and hosts) can never claim again; a day
  * after their last report they are forgotten. The journal keeps their builds.
+ * A host's registration (#321) has no token until its agent fetches one, and
+ * is never one of them.
  */
 export async function pruneWorkers(env: Env): Promise<number> {
-  const res = await env.DB.prepare("DELETE FROM build_workers WHERE token_hash IS NULL AND last_seen < ?")
+  const res = await env.DB.prepare("DELETE FROM build_workers WHERE token_hash IS NULL AND host_id IS NULL AND last_seen < ?")
     .bind(new Date(Date.now() - 86400000).toISOString())
     .run();
   return res.meta.changes ?? 0;

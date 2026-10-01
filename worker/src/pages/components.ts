@@ -43,6 +43,7 @@ import { PEOPLE_COMPONENTS } from "./people";
 import { AGENTS_COMPONENTS } from "./agents";
 import { WORKERS_COMPONENTS } from "./workers";
 import { WORKER_COMPONENTS } from "./worker";
+import { HOST_COMPONENTS } from "./host";
 import { STATUS_COMPONENTS } from "./status";
 import { DIFF_COMPONENTS } from "./diff";
 import { API_DOCS_COMPONENTS } from "./api-docs";
@@ -168,6 +169,8 @@ export interface Fixture {
   pulledPkg: string;
   /** The id of the one done pool job of each kind — sync, promote, rollback, render, health, gc, security, verify, relayout, enqueue, and the three on a build: audit, trial, publish (ours', run through the API) — its params as the brain queues them and its result as work.rs posts it: what the Pipeline's table words. */
   jobs: Record<string, number>;
+  /** m1's host (#321), enrolled from "rack-1" and waiting for m1's Confirm: the host page and the person's Hosts table. */
+  host: string;
   /** The browser's cookie value (`omc=<value>`) per role; the CLI token of a login is `omc_<login>`, its session `oms_<login>`. */
   sessions: Record<Exclude<Role, "anonymous">, string>;
 }
@@ -444,6 +447,7 @@ export function allComponents(F: Fixture): Component[] {
     ...PACKAGE_COMPONENTS(F),
     ...BUILD_COMPONENTS(F),
     ...USER_COMPONENTS(F),
+    ...HOST_COMPONENTS(F),
     ...PEOPLE_COMPONENTS(F),
     ...AGENTS_COMPONENTS(F),
     ...WORKERS_COMPONENTS(F),
