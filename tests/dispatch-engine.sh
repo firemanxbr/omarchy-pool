@@ -11,7 +11,8 @@
 #      inside; a build completes through staging, `verdict.json` read
 #   2. a build that fails reports its verdict; one killed by its memory limit
 #      fails `oom` although its script said `final`; an output outside the list
-#      is not uploaded and fails the task
+#      is not uploaded and fails the task; one that exited 0 without a verdict
+#      (a reboot, as podman shows it) fails `lost`
 #   3. a dispatcher replaced while its task runs: the new one adopts the
 #      container, which finishes and is completed; a task that ends while no
 #      dispatcher runs is completed from its exited container; one killed
@@ -79,6 +80,7 @@ case "$name" in
   oom) echo '{"status":4,"final":true,"needs_native":false,"error":"said final"}' > /task/out/verdict.json; x="$(head -c 3500000000 /dev/zero | tr '\0' x)"; echo "${#x}"; exit 0 ;;
   evil) echo 'pkgname=x' > /task/out/PKGBUILD; echo 'boom' > /task/out/evil.sh; echo '{"status":0}' > /task/out/verdict.json; exit 0 ;;
   slow) while [[ ! -e /task/in/finish ]]; do sleep 1; done; ok ;;
+  quiet) exit 0 ;;   # what podman shows of a task a reboot killed: exited, its stale exit code 0, no verdict
   fill) head -c 50000000 /dev/zero > /build/fill; while :; do sleep 1; done ;;
   *) echo "unknown stub task $name"; exit 2 ;;
 esac
@@ -178,12 +180,13 @@ done
 "$RT" inspect --format '{{json .Config.Env}}' "$c" | grep -qiE 'omj\.|omw_|token|_key|secret' && fail "a credential in the task container's environment"
 mounts="$("$RT" inspect --format '{{range .Mounts}}{{.Destination}} {{end}}' "$c" | tr ' ' '\n' | grep . | sort | tr '\n' ' ')"
 [[ "$mounts" == "/build /pool /task/in /task/log /task/out /var/cache/pacman/pkg " ]] || fail "the task container's mounts: $mounts"
-# Its flags: not privileged, not on the host's network, never removed by the engine, its pid limit, and only the spec's
-# capabilities (docker keeps CapDrop ["ALL"]; podman says what is left, EffectiveCaps).
+# Its flags: not privileged, not on the host's network, never removed by the engine, its pid limit, no engine-side log,
+# and only the spec's capabilities (docker keeps CapDrop ["ALL"]; podman says what is left, EffectiveCaps).
 "$RT" inspect "$c" | jq -e '.[0] as $c | ["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FOWNER","CAP_FSETID","CAP_SETUID","CAP_SETGID","CAP_KILL"] as $ok
   | $c.HostConfig.Privileged == false and $c.HostConfig.NetworkMode != "host" and $c.HostConfig.AutoRemove == false and $c.HostConfig.PidsLimit == 8192
+  and $c.HostConfig.LogConfig.Type == "none"
   and (if $c.EffectiveCaps then ($c.EffectiveCaps - $ok | length) == 0 else ($c.HostConfig.CapDrop | index("ALL")) != null end)' >/dev/null \
-  || fail "the task container's flags: $("$RT" inspect "$c" | jq -c '.[0] | {HostConfig: (.HostConfig | {Privileged, NetworkMode, AutoRemove, PidsLimit, CapDrop, CapAdd}), EffectiveCaps}')"
+  || fail "the task container's flags: $("$RT" inspect "$c" | jq -c '.[0] | {HostConfig: (.HostConfig | {Privileged, NetworkMode, AutoRemove, PidsLimit, LogConfig, CapDrop, CapAdd}), EffectiveCaps}')"
 log="$tmp/work/tasks/1-$(gen 1)/log/task.log"
 until_ 10 "the stub wrote what it was born with" grep -q '== meta' "$log"
 grep -q '== socket: ls: cannot access' "$log" || fail "a socket in the task container: $(grep '== socket' "$log")"
@@ -198,13 +201,14 @@ until_ 10 "task 1's container removed" gone 1
 echo "ok: a build staged in and out, completed with its job token, its container removed"
 
 # ---------- 2. a failure, an out-of-memory kill, an output outside the list ----------
-give 2 fails 2; give 3 oom 1; give 4 evil 2
-until_ 120 "tasks 2, 3 and 4 reported" all_failed 2 3 4
+give 2 fails 2; give 3 oom 1; give 4 evil 2; give 11 quiet 1
+until_ 120 "tasks 2, 3, 4 and 11 reported" all_failed 2 3 4 11
 jq -e '.final == true and .error == "the recipe failed"' <<<"$(report 2 fail)" >/dev/null || fail "task 2's report: $(report 2 fail)"
 jq -e '.oom == true and .final == false' <<<"$(report 3 fail)" >/dev/null || fail "task 3 was not failed oom: $(report 3 fail)"
 jq -e '.final == true and (.error | contains("evil.sh"))' <<<"$(report 4 fail)" >/dev/null || fail "task 4's report: $(report 4 fail)"
 jq -r 'select(.path | test("/factory/tasks/4/artifacts/")) | .path' "$tmp/requests.jsonl" | grep -q . && fail "task 4 uploaded something"
-echo "ok: a failure reports its verdict; the memory limit's kill fails oom although the script said final; an output outside the list is not uploaded and fails the task"
+jq -e '.lost == true and .final == false' <<<"$(report 11 fail)" >/dev/null || fail "task 11 was not failed lost: $(report 11 fail)"
+echo "ok: a failure reports its verdict; the memory limit's kill fails oom although the script said final; an output outside the list is not uploaded and fails the task; an exit without a verdict fails lost"
 
 # ---------- 3. restarts ----------
 give 5 slow 2; give 6 slow 2; give 7 slow 2

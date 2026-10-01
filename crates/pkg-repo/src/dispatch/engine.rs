@@ -94,6 +94,14 @@ struct RawState {
     oom_killed: bool,
 }
 
+/// Whether `inspect`'s error says the container does not exist — docker: "No such container: …"
+/// (or "No such object"), podman: "no such container" — and not that the engine did not answer
+/// ("dial unix …: connect: no such file or directory" is a socket that is not there).
+fn missing(stderr: &str) -> bool {
+    let e = stderr.to_ascii_lowercase();
+    e.contains("no such container") || e.contains("no such object")
+}
+
 /// `inspect --format '{{json .State}}'`, read.
 pub fn parse_state(json: &str) -> Option<State> {
     let raw: RawState = serde_json::from_str(json.trim()).ok()?;
@@ -130,8 +138,7 @@ impl Engine for Cli {
         ])?;
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr);
-            // docker: "Error: No such container: …"; podman: "no such container …".
-            if err.to_ascii_lowercase().contains("no such") {
+            if missing(&err) {
                 return Ok(None);
             }
             return Err(format!("{} inspect: {}", self.runtime, err.trim()));
@@ -208,5 +215,18 @@ mod tests {
         let s = parse_state(podman).unwrap();
         assert!(s.running() && !s.oom_killed);
         assert_eq!(parse_state("no such container"), None);
+    }
+
+    #[test]
+    fn a_missing_container_is_not_an_engine_that_does_not_answer() {
+        assert!(missing(
+            "Error: No such container: omarchy-task-7-g_0123456789abcdef"
+        ));
+        assert!(missing("Error response from daemon: No such object: x"));
+        assert!(missing("Error: no such container \"x\""));
+        assert!(!missing(
+            "Error: dial unix /run/podman/podman.sock: connect: no such file or directory"
+        ));
+        assert!(!missing("failed to connect to the docker API at unix:///var/run/docker.sock; check if the path is correct and if the daemon is running: dial unix /var/run/docker.sock: connect: no such file or directory"));
     }
 }

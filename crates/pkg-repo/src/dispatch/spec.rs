@@ -293,6 +293,9 @@ pub fn task_container(s: &Spec<'_>) -> Result<Vec<String>, String> {
             &PIDS_LIMIT.to_string(),
             "--cap-drop",
             "ALL",
+            // Its log is /task/log, capped by the script: nothing it writes to its stdout reaches the engine's disk.
+            "--log-driver",
+            "none",
         ]
         .map(str::to_owned),
     );
@@ -370,7 +373,7 @@ mod tests {
         }
     }
 
-    const FLAGS_WITH_VALUE: [&str; 11] = [
+    const FLAGS_WITH_VALUE: [&str; 12] = [
         "--name",
         "--label",
         "--platform",
@@ -381,6 +384,7 @@ mod tests {
         "--cap-drop",
         "--cap-add",
         "--security-opt",
+        "--log-driver",
         "-v",
     ];
 
@@ -391,7 +395,7 @@ mod tests {
         if it.next() != Some("run") || it.next() != Some("-d") {
             return Err("not `run -d`".into());
         }
-        let (mut caps_dropped, mut nnp, mut name) = (false, false, None);
+        let (mut caps_dropped, mut nnp, mut name, mut logs_off) = (false, false, None, false);
         let mut caps = Vec::new();
         let mut mounts = Vec::new();
         let mut labels = Vec::new();
@@ -424,11 +428,16 @@ mod tests {
                 "--platform" => return Err(format!("platform {v}")),
                 "--pids-limit" if v == "8192" => {}
                 "--pids-limit" => return Err(format!("pids limit {v}")),
+                "--log-driver" if v == "none" => logs_off = true,
+                "--log-driver" => return Err(format!("log driver {v}")),
                 _ => {}
             }
         }
         if !caps_dropped || !nnp {
             return Err("--cap-drop ALL and no-new-privileges are required".into());
+        }
+        if !logs_off {
+            return Err("--log-driver none is required: the task's log is /task/log".into());
         }
         for c in &caps {
             if !CAPS.contains(c) {
@@ -706,6 +715,7 @@ mod tests {
             with(&["--security-opt", "seccomp=unconfined"]),
             with(&["--user", "0"]),
             with(&["--label", "x=y"]),
+            with(&["--log-driver", "json-file"]),
         ];
         for a in forbidden {
             assert!(check(&a, &work).is_err(), "must be refused: {a:?}");
@@ -714,6 +724,13 @@ mod tests {
         let i = no_drop.iter().position(|x| x == "--cap-drop").unwrap();
         no_drop.drain(i..i + 2);
         assert!(check(&no_drop, &work).is_err());
+        let mut logged = good.clone();
+        let i = logged.iter().position(|x| x == "--log-driver").unwrap();
+        logged.drain(i..i + 2);
+        assert!(
+            check(&logged, &work).is_err(),
+            "the engine's log of a task is off"
+        );
         let mut tag = good.clone();
         tag[image_at] = "archlinux:base-devel".into();
         assert!(check(&tag, &work).is_err());

@@ -6,6 +6,8 @@
 //! trait, so the loop's tests run on a fake pool.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -58,14 +60,23 @@ pub trait Pool: Send + Sync {
 pub struct Http {
     pub api: String,
     pub worker_token: String,
+    /// SIGTERM: the call in flight ends as it would (its timeout), no retry and no next call is
+    /// sent — the dispatcher exits within its stop grace period, whatever the pool does.
+    pub stop: Option<Arc<AtomicBool>>,
 }
 
 impl Http {
+    fn stopping(&self, api: Api) -> Api {
+        match &self.stop {
+            Some(s) => api.stopping(Arc::clone(s)),
+            None => api,
+        }
+    }
     fn short(&self, token: &str) -> Result<Api, RepoError> {
-        Api::with_timeout(&self.api, token, CALL_TIMEOUT)
+        Api::with_timeout(&self.api, token, CALL_TIMEOUT).map(|a| self.stopping(a))
     }
     fn long(&self, token: &str) -> Result<Api, RepoError> {
-        Api::new(&self.api, token)
+        Api::new(&self.api, token).map(|a| self.stopping(a))
     }
 }
 

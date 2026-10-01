@@ -19,8 +19,9 @@
 //! list, uploaded with the job token, reported); then the disk watcher
 //! (free space on the work root, or the engine's, below the floor kills the
 //! youngest build, `lost`, and stops the claims until it is back; a build
-//! refused at start for its budget holds the claims until that budget plus
-//! the floor is free); then a claim — `want: 1` while units, memory, disk
+//! refused at start for its budget keeps builds out of the claims — trials
+//! and audits go on — until that budget plus the floor is free, for 30
+//! minutes at most); then a claim — `want: 1` while units, memory, disk
 //! and the lane's image allow, every 30 s with `want: 0` otherwise. A lease
 //! ends (its report, its lease file, its units) only once the engine says
 //! its container is gone. A tick spends at most a third of the stall on the
@@ -90,6 +91,11 @@ const RESTART_MIN_UPTIME: u64 = 120;
 const RETRY_AFTER: u64 = 60;
 /// After a claim that failed.
 const CLAIM_RETRY: u64 = 60;
+/// The longest a build refused at start for its disk budget keeps builds out of the claims:
+/// a budget this host can never fit does not strand it (the pool does not select by disk yet).
+pub const DISK_HOLD: u64 = 30 * 60;
+/// What a host claims while a disk hold keeps builds out.
+const KINDS_HELD: [&str; 2] = ["trial", "audit"];
 
 /// The environment variables that would put a package signing key in the dispatcher (S5).
 const SIGNING_VARS: [&str; 4] = [
@@ -263,8 +269,10 @@ pub struct Dispatcher {
     claim_id: Option<String>,
     next_claim: u64,
     disk_low: bool,
-    /// A build refused at start for its budget: no claim until this much is free on both disks.
+    /// A build refused at start for its budget: no build claimed until this much is free on both
+    /// disks, or until `hold_until` (trials and audits are claimed meanwhile).
     disk_hold: u64,
+    hold_until: u64,
     /// The capacity file's `at` when the watcher last killed on the engine's value: once per probe.
     engine_kill_at: Option<String>,
     /// This tick's heartbeats and reports wait for the next tick past this.
@@ -309,6 +317,7 @@ impl Dispatcher {
             next_claim: 0,
             disk_low: false,
             disk_hold: 0,
+            hold_until: 0,
             engine_kill_at: None,
             pool_until: Instant::now(),
             instance: orders::new_instance(),
@@ -428,13 +437,17 @@ impl Dispatcher {
         self.pool_until = Instant::now() + self.timing.stall / 3;
         let keys: Vec<(u64, String)> = self.leases.keys().cloned().collect();
         for key in keys {
+            // SIGTERM: no pool call more this tick (the lease files are current); the exit follows it.
+            if self.terminating.load(Ordering::SeqCst) {
+                self.pool_until = Instant::now();
+            }
             if let Some(live) = self.leases.remove(&key) {
                 if let Some(live) = self.step(live, now) {
                     self.leases.insert(key, live);
                 }
             }
         }
-        self.watch_disk();
+        self.watch_disk(now);
         if !self.terminating.load(Ordering::SeqCst) {
             self.claim(now);
         }
@@ -705,9 +718,12 @@ impl Dispatcher {
             let work = self.probes.work_free_gb();
             let engine = capacity::read(&self.capacity_file).map(|c| c.engine_free_gb);
             if work.is_some_and(|w| w < need) || engine.is_some_and(|e| e < need) {
-                // No claim until this budget fits again: the pool would hand the same build straight back.
-                self.disk_low = true;
+                // No build claimed until this budget fits again, or for DISK_HOLD at most: the pool
+                // would hand the same build straight back. Seam (#334): the pool selects a host's
+                // builds by its claim's disk_free_gb against disk_gb plus the floor; this hold is then
+                // only a backstop.
                 self.disk_hold = self.disk_hold.max(need);
+                self.hold_until = now + DISK_HOLD;
                 let why = format!(
                     "not started: {} GB free on the work root and {} on the engine's, below its budget of {} GB plus the floor of {}",
                     work.map_or("?".into(), |w| w.to_string()),
@@ -773,14 +789,27 @@ impl Dispatcher {
     /// The disk watcher (D53): free space below the floor, on the work root (measured now) or the
     /// engine's (the agent's last probe, acted on once per probe), kills the youngest running
     /// build, `lost`, one at a time, and stops the claims until it is back. A build refused at
-    /// start holds the claims until its budget plus the floor is free on both.
-    fn watch_disk(&mut self) {
+    /// start keeps builds out of the claims until its budget plus the floor is free on both, or
+    /// for [`DISK_HOLD`] at most.
+    fn watch_disk(&mut self, now: u64) {
         let work = self.probes.work_free_gb();
         let cap = capacity::read(&self.capacity_file);
         let engine = cap.as_ref().map(|c| c.engine_free_gb);
         let short = |v: Option<u64>, need: u64| v.is_some_and(|v| v < need);
-        let need = self.disk_hold.max(self.floor_gb);
         let show = |v: Option<u64>| v.map_or("?".into(), |v| v.to_string());
+        if self.disk_hold > 0
+            && (now >= self.hold_until
+                || (!short(work, self.disk_hold) && !short(engine, self.disk_hold)))
+        {
+            say(format!(
+                "{} GB free on the work root and {} on the engine's, a hold of {} GB: claiming builds again",
+                show(work),
+                show(engine),
+                self.disk_hold
+            ));
+            self.disk_hold = 0;
+        }
+        let need = self.floor_gb;
         if !short(work, need) && !short(engine, need) {
             if self.disk_low {
                 say(format!(
@@ -790,7 +819,6 @@ impl Dispatcher {
                 ));
             }
             self.disk_low = false;
-            self.disk_hold = 0;
             return;
         }
         if !self.disk_low {
@@ -868,7 +896,7 @@ impl Dispatcher {
             .collect();
         let mut body = json!({
             "arch": arch, "version": pkg_manifest::BUILD_VERSION, "hostname": crate::work::hostname(),
-            "kinds": KINDS, "labels": { "role": "dispatcher" }, "log": crate::work::log_chunk(),
+            "kinds": if self.disk_hold > 0 { &KINDS_HELD[..] } else { &KINDS[..] }, "labels": { "role": "dispatcher" }, "log": crate::work::log_chunk(),
             "orders": TAKES, "instance": self.instance, "started_at": iso(self.started),
             "claim_id": claim_id, "want": u8::from(want), "leases": leases,
         });
@@ -1257,14 +1285,15 @@ pub fn run(opts: &Options) -> Result<()> {
         .with_context(|| format!("creating {}", opts.work_root.display()))?;
     let engine = engine::Cli::find()
         .ok_or_else(|| anyhow!("no container engine answers (docker, or podman)"))?;
-    let pool: Arc<dyn Pool> = Arc::new(pool::Http {
-        api: opts.api.clone(),
-        worker_token: opts.worker_token.clone(),
-    });
     let terminating = Arc::new(AtomicBool::new(false));
     for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
         signal_hook::flag::register(sig, Arc::clone(&terminating)).context("signal handler")?;
     }
+    let pool: Arc<dyn Pool> = Arc::new(pool::Http {
+        api: opts.api.clone(),
+        worker_token: opts.worker_token.clone(),
+        stop: Some(Arc::clone(&terminating)),
+    });
     let snap = Arc::new(Mutex::new(Snapshot {
         ready: false,
         leases: json!([]),

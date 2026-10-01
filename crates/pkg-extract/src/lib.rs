@@ -105,6 +105,52 @@ pub fn open_archive(path: &Path) -> std::io::Result<Box<dyn Read>> {
     })
 }
 
+/// A GNU long name, long link or pax extension member above this is refused by
+/// [`check_archive`]: a real one is a path or a few attributes.
+pub const MAX_EXTENSION_BYTES: u64 = 64 << 10;
+
+/// Walks a package someone else built without reading its members' data, and
+/// refuses one the tar reader would buffer whole before handing back an entry:
+/// a GNU long name, long link or pax extension above [`MAX_EXTENSION_BYTES`]
+/// (a compressed run of zeros expands into memory there, whatever the
+/// package's size). A pax `size` (a member above 8 GiB) and a GNU sparse member
+/// are refused too: they are what would make this walk and the reader's
+/// disagree on where a member starts. Call it before [`extract_manifest`] on an
+/// archive an untrusted build wrote.
+pub fn check_archive(path: &Path) -> Result<(), ExtractError> {
+    let refused = |why: String| -> ExtractError {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, why).into()
+    };
+    let mut archive = tar::Archive::new(open_archive(path)?);
+    for entry in archive.entries()?.raw(true) {
+        let mut entry = entry?;
+        let kind = entry.header().entry_type();
+        if kind.is_gnu_sparse() {
+            return Err(refused("a GNU sparse member".into()));
+        }
+        let pax = kind.is_pax_local_extensions() || kind.is_pax_global_extensions();
+        if !(pax || kind.is_gnu_longname() || kind.is_gnu_longlink()) {
+            continue;
+        }
+        let size = entry.header().entry_size()?;
+        if size > MAX_EXTENSION_BYTES {
+            return Err(refused(format!(
+                "an extension member of {size} bytes, above {MAX_EXTENSION_BYTES}"
+            )));
+        }
+        if pax {
+            let mut b = Vec::new();
+            entry.read_to_end(&mut b)?;
+            for ext in tar::PaxExtensions::new(&b) {
+                if ext?.key_bytes() == b"size" {
+                    return Err(refused("a pax size (a member above 8 GiB)".into()));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Second pass: stream the archive → tar, collecting `.PKGINFO`, the file list
 /// and the ELF facts of every regular file that starts with the ELF magic.
 fn scan_archive(path: &Path) -> Result<ArchiveScan, ExtractError> {
@@ -431,6 +477,59 @@ mod tests {
         let err = extract_manifest(&path).unwrap_err();
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(err.to_string().contains("larger than"), "{err}");
+    }
+
+    #[test]
+    fn an_extension_member_above_its_bound_is_refused_before_the_reader_buffers_it() {
+        let info = "pkgname = x\npkgver = 1-1\narch = any\n";
+        let regular = |b: &mut tar::Builder<Vec<u8>>, path: &str, data: &[u8]| {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(data.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            b.append_data(&mut h, path, data).unwrap();
+        };
+        let raw = |b: &mut tar::Builder<Vec<u8>>, kind: EntryType, data: &[u8]| {
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(kind);
+            h.as_gnu_mut().unwrap().name[..13].copy_from_slice(b"././@LongLink");
+            h.set_size(data.len() as u64);
+            h.set_cksum();
+            b.append(&h, data).unwrap();
+        };
+        let dir = std::env::temp_dir().join(format!("pkg-extract-ext-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, b: tar::Builder<Vec<u8>>| {
+            let path = dir.join(name);
+            let tar = b.into_inner().unwrap();
+            std::fs::write(&path, zstd::encode_all(&tar[..], 3).unwrap()).unwrap();
+            path
+        };
+
+        // A real package: a long path (a small GNU long name) passes and still reads.
+        let mut b = tar::Builder::new(Vec::new());
+        regular(&mut b, ".PKGINFO", info.as_bytes());
+        regular(&mut b, &format!("usr/share/{}/x", "d".repeat(120)), b"x");
+        let ok = write("ok-1-1-any.pkg.tar.zst", b);
+        check_archive(&ok).unwrap();
+        assert_eq!(extract_manifest(&ok).unwrap().name, "x");
+
+        // A long name of 1 MiB of zeros: refused by its header, never read.
+        let mut b = tar::Builder::new(Vec::new());
+        regular(&mut b, ".PKGINFO", info.as_bytes());
+        raw(&mut b, EntryType::GNULongName, &vec![0; 1 << 20]);
+        regular(&mut b, "usr/x", b"x");
+        let err = check_archive(&write("bomb-1-1-any.pkg.tar.zst", b)).unwrap_err();
+        assert!(err.to_string().contains("extension member"), "{err}");
+
+        // A pax size: the reader and this walk would part ways there.
+        let mut b = tar::Builder::new(Vec::new());
+        regular(&mut b, ".PKGINFO", info.as_bytes());
+        raw(&mut b, EntryType::XHeader, b"12 size=999\n");
+        regular(&mut b, "usr/x", b"x");
+        let err = check_archive(&write("pax-1-1-any.pkg.tar.zst", b)).unwrap_err();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(err.to_string().contains("pax size"), "{err}");
     }
 
     #[test]

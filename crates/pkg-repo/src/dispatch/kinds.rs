@@ -107,6 +107,27 @@ fn retry_of(e: impl std::fmt::Display) -> Prep {
     Prep::Retry(clean_line(&e.to_string()))
 }
 
+/// A pool's answer during a preparation: refused for good (a 4xx other than 429 — the staged
+/// artifact reclaimed, the job not allowed) fails the task, not final, so the pool requeues it
+/// with its attempt counted; a pool that does not answer is tried again.
+fn pool_prep(e: &RepoError) -> Prep {
+    match e {
+        RepoError::Api { status, body } if (400..500).contains(status) && *status != 429 => {
+            Prep::Fail(fail_body(
+                &format!("the pool refused: {status} {}", clean_line(body)),
+                false,
+            ))
+        }
+        e => retry_of(e),
+    }
+}
+
+/// [`pool_prep`] for a call that wraps the pool's error (`publish`).
+fn pool_prep_any(e: &anyhow::Error) -> Prep {
+    e.downcast_ref::<RepoError>()
+        .map_or_else(|| retry_of(format!("{e:#}")), pool_prep)
+}
+
 /// Inside the container `localhost` is the container: a local pool (wrangler dev) is reached through the engine's host alias.
 fn from_container(u: &str) -> String {
     u.replace("://localhost", "://host.containers.internal")
@@ -141,6 +162,12 @@ pub fn prepare(ctx: &Ctx, l: &Lease, stop: &AtomicBool) -> Result<Value, Prep> {
     for sub in ["in", "out", "log", "build", "pkgcache"] {
         std::fs::create_dir_all(dir.join(sub)).map_err(retry_of)?;
     }
+    // Only the dispatcher walks into tasks/: what a task's root leaves in its mounts (a set-id
+    // file) is out of every other local user's reach. A mount needs no walk from inside.
+    for d in [dir.as_path(), dir.parent().unwrap_or(&dir)] {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700)).map_err(retry_of)?;
+    }
     let rel = ctx.release_dir(&l.release);
     ensure_checkout(&rel, &l.release).map_err(retry_of)?;
     let input = dir.join("in");
@@ -161,8 +188,12 @@ pub fn prepare(ctx: &Ctx, l: &Lease, stop: &AtomicBool) -> Result<Value, Prep> {
     Ok(notes)
 }
 
-/// `<work root>/releases/<release>`: the release's own checkout, cloned once at its tag
-/// (a dev build's at main), and never changed after (a tag does not move).
+/// `<work root>/releases/<release>`: the release's own checkout, fetched once at its tag —
+/// `refs/tags/<release>` only, never a branch of that name — (a dev build's at main), and
+/// never changed after (a tag does not move).
+///
+/// Seam: the trusted steps a trial stages from this checkout (tests/trial.sh, the keyrings)
+/// move into the dispatcher's own signed image once the release carries them there.
 fn ensure_checkout(dir: &Path, release: &str) -> anyhow::Result<()> {
     // Two leases prepared at once (a build and an audit) clone one release once, not into each other.
     static CLONING: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -178,24 +209,30 @@ fn ensure_checkout(dir: &Path, release: &str) -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let git_ref = if release.starts_with('v') {
-        release
+        format!("refs/tags/{release}")
     } else {
-        "main"
+        "refs/heads/main".to_owned()
     };
-    let ok = std::process::Command::new("git")
-        .args([
-            "clone",
+    std::fs::create_dir_all(&tmp)?;
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&tmp)
+            .args(args)
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    let ok = git(&["init", "-q"])
+        && git(&[
+            "fetch",
             "-q",
             "--depth",
             "1",
-            "--branch",
-            git_ref,
             crate::work::REPO_URL,
+            &git_ref,
         ])
-        .arg(&tmp)
-        .status()
-        .is_ok_and(|s| s.success());
-    anyhow::ensure!(ok, "could not clone {} at {git_ref}", crate::work::REPO_URL);
+        && git(&["checkout", "-q", "--detach", "FETCH_HEAD"]);
+    anyhow::ensure!(ok, "could not fetch {} at {git_ref}", crate::work::REPO_URL);
     let _ = std::fs::remove_dir_all(dir);
     std::fs::rename(&tmp, dir)?;
     Ok(())
@@ -225,7 +262,7 @@ fn fetch_artifacts(
         if ctx
             .pool
             .fetch(&l.token, of, n, &to.join(n))
-            .map_err(retry_of)?
+            .map_err(|e| pool_prep(&e))?
         {
             have.push((*n).to_owned());
         }
@@ -402,7 +439,14 @@ fn stage_trial(
         let dest = trusted.join(f);
         ctx.pool
             .fetch_private(&l.token, built, f, &dest)
-            .map_err(retry_of)?;
+            .map_err(|e| pool_prep(&e))?;
+        // A contributor's build wrote it: walked for what the reader would buffer before anything reads it.
+        if let Err(e) = pkg_extract::check_archive(&dest) {
+            return Err(Prep::Fail(fail_body(
+                &format!("trial: {f} is refused: {e}"),
+                true,
+            )));
+        }
         pkgs.push(dest);
     }
     pkgs.sort();
@@ -429,7 +473,7 @@ fn stage_trial(
             &pkgs,
             false,
         )
-        .map_err(retry_of)?;
+        .map_err(|e| pool_prep_any(&e))?;
     let _ = std::fs::remove_dir_all(&trusted);
     // The helper's inputs, as tests/trial.sh writes them: the include `--ring lab` hands a
     // machine (public), the pool's key and the projects' keyrings, the packages' names and
@@ -686,7 +730,10 @@ fn pkginfo_of(pkg: &Path) -> Option<Vec<u8>> {
 /// pool did not answer: the container and the lease stay, and the loop tries again.
 pub fn finish(ctx: &Ctx, l: &Lease, state: &State, now: u64) -> Result<String, Retry> {
     let dir = ctx.task_dir(l);
-    let out = dir.join("out");
+    // A dry run's outputs moved to where it is kept before its report: a restart in between finishes from there.
+    let out = dry_run_kept(ctx, l)
+        .filter(|k| !dir.join("out").is_dir() && k.is_dir())
+        .unwrap_or_else(|| dir.join("out"));
     // The log is read (its tail, an upload) only when it is the regular, capped file the entrypoint
     // writes: a link the task left there could point at anything the dispatcher sees.
     let written = dir.join("log").join("task.log");
@@ -719,11 +766,19 @@ pub fn finish(ctx: &Ctx, l: &Lease, state: &State, now: u64) -> Result<String, R
         Err(why) => return report_fail(ctx, l, fail_body(&why, true), took, &log),
     };
     let verdict = verdict_of(&files);
-    if state.exit_code != 0 && verdict.is_none() && matches!(state.exit_code, 137 | 143 | 255) {
+    // The script's first process writes verdict.json whatever its task did, then exits with its
+    // status. No verdict that reads means that process was killed from outside (podman leaves a
+    // rebooted container `exited` with its stale exit code, 0 included); a verdict of a SIGKILL or
+    // a SIGTERM means the task was (a host shutdown signals every process of the container, and
+    // only the first one survives it). Either is the host's, not the recipe's: `lost`.
+    let signalled = verdict
+        .as_ref()
+        .is_none_or(|v| matches!(v.status, 137 | 143));
+    if signalled {
         return report_fail(
             ctx,
             l,
-            json!({ "error": format!("its container was killed (exit {}) before it ended: a reboot, an engine restart or a kill from outside", state.exit_code), "lost": true, "final": false }),
+            json!({ "error": format!("its container was killed (exit {}{}) before it ended: a reboot, an engine restart or a kill from outside", state.exit_code, if verdict.is_some() { ", its task signalled" } else { ", no verdict" }), "lost": true, "final": false }),
             took,
             &log,
         );
@@ -740,6 +795,15 @@ pub fn finish(ctx: &Ctx, l: &Lease, state: &State, now: u64) -> Result<String, R
             &log,
         ),
     }
+}
+
+/// Where a dry run's outputs are kept on this host (#284).
+fn dry_run_kept(ctx: &Ctx, l: &Lease) -> Option<PathBuf> {
+    l.task.dry_run().then(|| {
+        ctx.work_root
+            .join("dry-run")
+            .join(format!("task-{}", l.task.id))
+    })
 }
 
 /// Where a build's evidence goes: the task's own staging, for a contributor's build and the project's review rebuild.
@@ -817,6 +881,18 @@ fn finish_build(
             log,
         );
     }
+    // The task wrote them: walked for what the archive reader would buffer before anything reads them.
+    for p in &pkgs {
+        if let Err(e) = pkg_extract::check_archive(p) {
+            return report_fail(
+                ctx,
+                l,
+                fail_body(&format!("the package does not read: {e}"), true),
+                took,
+                log,
+            );
+        }
+    }
     let main = pkgs
         .iter()
         .find(|p| {
@@ -889,13 +965,15 @@ fn finish_build(
         };
         return report_done(ctx, l, &summary, &result, took, log);
     }
-    if t.dry_run() {
+    if let Some(kept) = dry_run_kept(ctx, l) {
         // A dry run (#284): built and measured, kept on this host, never published nor rendered.
-        let kept = ctx.work_root.join("dry-run").join(format!("task-{}", t.id));
-        let _ = std::fs::remove_dir_all(&kept);
-        let _ = std::fs::create_dir_all(ctx.work_root.join("dry-run"));
-        if let Err(e) = std::fs::rename(ctx.task_dir(l).join("out"), &kept) {
-            return Err(Retry(format!("keeping the dry run: {e}")));
+        let out = ctx.task_dir(l).join("out");
+        if out.is_dir() {
+            let _ = std::fs::remove_dir_all(&kept);
+            let _ = std::fs::create_dir_all(ctx.work_root.join("dry-run"));
+            if let Err(e) = std::fs::rename(&out, &kept) {
+                return Err(Retry(format!("keeping the dry run: {e}")));
+            }
         }
         let mut result = result;
         result["dry_run"] = json!(true);
@@ -909,17 +987,22 @@ fn finish_build(
         return report_done(ctx, l, &summary, &result, took, log);
     }
     // The project's recipe on main: published into edge with the lease's pool:write (the pool signs), both arches rendered.
-    let rendered = ctx
-        .pool
-        .publish(
-            &l.token,
-            "edge",
-            &t.arch,
-            &format!("factory task {}: {} ({})", t.id, t.name, t.pkgbuild_ref),
-            &pkgs,
-            true,
-        )
-        .map_err(|e| Retry(format!("publishing: {}", clean_line(&format!("{e:#}")))))?;
+    let rendered = ctx.pool.publish(
+        &l.token,
+        "edge",
+        &t.arch,
+        &format!("factory task {}: {} ({})", t.id, t.name, t.pkgbuild_ref),
+        &pkgs,
+        true,
+    );
+    let rendered = match rendered {
+        Ok(r) => r,
+        // Refused for good (a closed lease after a restart, a package the pool will not take): reported, not retried.
+        Err(e) => match pool_prep_any(&e) {
+            Prep::Fail(body) => return report_fail(ctx, l, body, took, log),
+            Prep::Retry(why) => return Err(Retry(format!("publishing: {why}"))),
+        },
+    };
     let mut result = result;
     result["rendered"] = json!(rendered);
     let summary = format!(

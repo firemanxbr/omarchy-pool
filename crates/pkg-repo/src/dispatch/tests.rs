@@ -18,7 +18,7 @@ use super::kinds::Ctx;
 use super::lease::{Lease, Phase, Store};
 use super::pool::Pool;
 use super::spec::{self, HOST_LABEL};
-use super::{Dispatcher, Images, Probes, Timing};
+use super::{Dispatcher, Images, Probes, Timing, DISK_HOLD, KINDS};
 use crate::stop::Beat;
 use crate::RepoError;
 
@@ -806,6 +806,113 @@ fn a_reboot_mid_task_fails_it_lost_with_its_attempt_back() {
 }
 
 #[test]
+fn a_reboot_podman_shows_as_exit_0_or_a_shutdowns_sigterm_with_a_verdict_fails_lost() {
+    // Podman resets a container that ran at the reboot to `exited`, its exit code a stale 0, no verdict …
+    let h = H::new();
+    let mut d = h.dispatcher();
+    h.give(community(7, GEN));
+    h.ticks(&mut d, 3);
+    drop(d);
+    std::fs::write(h.tdir(7, GEN).join("log/task.log"), "half a build\n").unwrap();
+    h.engine.exit(7, GEN, 0, false);
+    let mut d = h.dispatcher();
+    h.ticks(&mut d, 1);
+    let f = h.pool.fails_of(7);
+    assert_eq!(f.len(), 1);
+    assert_eq!(
+        (f[0]["lost"].clone(), f[0]["final"].clone()),
+        (json!(true), json!(false)),
+        "{}",
+        f[0]
+    );
+    // … and a shutdown's SIGTERM kills the task under the script, which writes its status 143.
+    h.give(community(8, GEN2));
+    h.advance(31);
+    h.ticks(&mut d, 3);
+    h.leave(
+        8,
+        GEN2,
+        &[(
+            "verdict.json",
+            br#"{"status":143,"final":true,"needs_native":false,"error":"Terminated"}"#.to_vec(),
+        )],
+        "Terminated\n",
+    );
+    h.engine.exit(8, GEN2, 143, false);
+    h.ticks(&mut d, 2);
+    let f = h.pool.fails_of(8);
+    assert_eq!(f.len(), 1);
+    assert_eq!(
+        (f[0]["lost"].clone(), f[0]["final"].clone()),
+        (json!(true), json!(false)),
+        "{}",
+        f[0]
+    );
+}
+
+#[test]
+fn a_staged_input_the_pool_refuses_for_good_fails_the_task_instead_of_preparing_it_forever() {
+    let h = H::new();
+    std::fs::create_dir_all(h.checkout.join("tests")).unwrap();
+    std::fs::write(
+        h.checkout.join("tests/trial.sh"),
+        "#!/bin/bash\n# TRIAL_STAGE\n",
+    )
+    .unwrap();
+    let mut d = h.dispatcher();
+    // The staged package was reclaimed (its build superseded): the pool answers 404.
+    h.give(task(
+        11,
+        "trial",
+        "felix",
+        "",
+        "project",
+        json!({ "task": 5, "files": ["felix-1.0-1-aarch64.pkg.tar.zst"] }),
+        GEN,
+    ));
+    h.ticks(&mut d, 3);
+    let f = h.pool.fails_of(11);
+    assert_eq!(f.len(), 1, "failed once, not prepared again every minute");
+    assert_eq!(f[0]["final"], false);
+    assert!(f[0]["error"].as_str().unwrap().contains("404"), "{}", f[0]);
+    assert!(d.holds().is_empty() && h.engine.runs.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_package_whose_extension_member_would_expand_into_memory_is_refused_before_it_is_read() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    h.give(community(7, GEN));
+    h.ticks(&mut d, 3);
+    // The package's .PKGINFO, then a long name of 1 MiB of zeros (a compressed one expands without bound).
+    let info = b"pkgname = felix\npkgver = 1.0-1\narch = aarch64\n";
+    let mut b = tar::Builder::new(Vec::new());
+    let mut hd = tar::Header::new_gnu();
+    hd.set_size(info.len() as u64);
+    hd.set_mode(0o644);
+    hd.set_cksum();
+    b.append_data(&mut hd, ".PKGINFO", &info[..]).unwrap();
+    let mut hd = tar::Header::new_gnu();
+    hd.set_entry_type(tar::EntryType::GNULongName);
+    hd.as_gnu_mut().unwrap().name[..13].copy_from_slice(b"././@LongLink");
+    hd.set_size(1 << 20);
+    hd.set_cksum();
+    b.append(&hd, &vec![0u8; 1 << 20][..]).unwrap();
+    let mut files = built_ok();
+    files[0].1 = b.into_inner().unwrap();
+    h.leave(7, GEN, &files, "built\n");
+    h.engine.exit(7, GEN, 0, false);
+    h.ticks(&mut d, 2);
+    let f = &h.pool.fails_of(7)[0];
+    assert_eq!(f["final"], true);
+    assert!(
+        f["error"].as_str().unwrap().contains("extension member"),
+        "{f}"
+    );
+    assert!(h.pool.completes_of(7).is_empty());
+}
+
+#[test]
 fn an_oom_kill_fails_oom_even_when_the_script_reported_final() {
     let h = H::new();
     let mut d = h.dispatcher();
@@ -1108,11 +1215,14 @@ fn a_build_starts_only_with_its_budget_plus_the_floor_free() {
     let f = &h.pool.fails_of(7)[0];
     assert_eq!(f["lost"], true);
     assert!(f["error"].as_str().unwrap().contains("not started"));
-    // The pool would hand the same build straight back: no claim takes work until its budget fits.
+    // The pool would hand the same build straight back: the claims leave builds out until its
+    // budget fits; trials and audits are still claimed.
+    let held = json!(["trial", "audit"]);
     h.give(community(7, GEN2));
     h.advance(31);
     h.ticks(&mut d, 3);
-    assert_eq!(h.pool.last_claim()["want"], 0);
+    assert_eq!(h.pool.last_claim()["kinds"], held);
+    assert_eq!(h.pool.last_claim()["want"], 1);
     assert_eq!(
         h.pool.fails_of(7).len(),
         2,
@@ -1121,15 +1231,29 @@ fn a_build_starts_only_with_its_budget_plus_the_floor_free() {
     assert!(h.engine.runs.lock().unwrap().is_empty());
     h.advance(31);
     h.ticks(&mut d, 1);
-    assert_eq!(h.pool.last_claim()["want"], 0, "still short");
+    assert_eq!(h.pool.last_claim()["kinds"], held, "still short");
     *h.free.lock().unwrap() = Some(30);
     h.advance(31);
     h.ticks(&mut d, 1);
     assert_eq!(
-        h.pool.last_claim()["want"],
-        1,
+        h.pool.last_claim()["kinds"],
+        json!(KINDS),
         "its budget plus the floor is free again"
     );
+    // A budget this host never fits holds builds out for DISK_HOLD at most: the host is not stranded.
+    *h.free.lock().unwrap() = Some(25);
+    h.give(community(8, GEN));
+    h.advance(31);
+    h.ticks(&mut d, 3);
+    assert_eq!(h.pool.fails_of(8).len(), 1);
+    assert_eq!(h.pool.last_claim()["kinds"], held);
+    h.advance(DISK_HOLD - 60);
+    h.ticks(&mut d, 1);
+    assert_eq!(h.pool.last_claim()["kinds"], held);
+    h.advance(61);
+    h.ticks(&mut d, 1);
+    assert_eq!(h.pool.last_claim()["kinds"], json!(KINDS), "the hold ended");
+    assert_eq!(h.pool.last_claim()["want"], 1);
 }
 
 #[test]
@@ -1662,7 +1786,12 @@ fn a_trial_publishes_the_lab_then_its_helper_installs_from_it() {
         !h.engine.args(11, GEN).join(" ").contains("ANTHROPIC"),
         "the helper has no agent"
     );
-    h.leave(11, GEN, &[], "== pacman -Sy\nTRIAL=ok\n");
+    h.leave(
+        11,
+        GEN,
+        &[("verdict.json", br#"{"status":0}"#.to_vec())],
+        "== pacman -Sy\nTRIAL=ok\n",
+    );
     h.engine.exit(11, GEN, 0, false);
     h.ticks(&mut d, 2);
     assert_eq!(h.pool.staged_of(5), ["trial.log"]);
@@ -1707,6 +1836,23 @@ fn sigterm_stops_the_claims() {
     h.give(community(7, GEN));
     h.ticks(&mut d, 3);
     assert!(h.pool.claim_bodies.lock().unwrap().is_empty());
+}
+
+#[test]
+fn sigterm_sends_no_heartbeat_more_and_the_leases_run_on() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    h.give(community(7, GEN));
+    h.ticks(&mut d, 3);
+    h.pool.beat_tokens.lock().unwrap().clear();
+    h.advance(301);
+    d.terminating.store(true, Ordering::SeqCst);
+    d.tick();
+    assert!(
+        h.pool.beat_tokens.lock().unwrap().is_empty(),
+        "a pool that does not answer would hold the exit past the stop grace period"
+    );
+    assert!(h.engine.has(7, GEN) && h.leases().len() == 1);
 }
 
 #[test]

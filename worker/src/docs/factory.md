@@ -509,10 +509,14 @@ start      refuses a signing key in its environment; re-adopts: a task container
            OOMKilled and outputs; one without goes; a lease whose container is gone fails `lost`; then /ready
 loop       per lease: heartbeat (409 stop: kill, fail as stopped), its own watchdog (last accepted heartbeat
            + 35 min: kill, report nothing), its container's state; the disk watcher (work root below the
-           floor: the youngest build killed `lost`, want 0 until the space is back); then the claim
+           floor: the youngest build killed `lost`, want 0 until the space is back; a build refused at start
+           for its budget: builds left out of the claims, trials and audits not, until it fits, 30 min at most);
+           then the claim
 in         /task/in (read-only): meta.sh, the evidence a recipe learns from, an audit's staged build, a trial's check
 out        /task/out: the kind's closed list under its caps (a build: packages, PKGBUILD, vet.json, tests.log,
            resources.json, verdict.json), uploaded by the dispatcher with the job token; /task/log/task.log, ≤ 64 MiB
+           (the engine keeps no log of a task container); exited with no verdict.json, or a verdict of a
+           SIGTERM or SIGKILL, fails `lost` (a reboot, a shutdown): the attempt is given back
 exit 75    a restart order, or a loop without progress for 15 min: task containers run on, the next dispatcher re-adopts them
 ```
 
