@@ -337,8 +337,8 @@ statement, but the Worker it deploys cannot hand it out (a host gets a
   that names an agent version is the only thing that moves the agent down.
 - `run` is the `rollback.yml` run that signed it.
 
-**What the agent accepts** (the P1 run loop implements this contract;
-`omarchy-agent verify --statement` does the first two today). A statement is
+**What the agent accepts** (the run loop, #315, implements this contract;
+`omarchy-agent verify --statement` does the first two by hand). A statement is
 taken when all of these hold, and otherwise ignored, the host staying where
 it is:
 

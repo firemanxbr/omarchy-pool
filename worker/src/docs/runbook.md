@@ -597,6 +597,57 @@ days before it publishes anything. An earlier agent runs only once
 (a release that ships any other one stops, for a person to look), and in a
 job of its own that holds no signing identity and no token that writes.
 
+### The run loop
+
+`omarchy-agent run` (#315; design v2 §16) keeps the host on the pool's
+release. It ticks every few seconds and never blocks longer than one engine
+or HTTP call with a timeout; a watchdog thread ends a loop that made no
+progress for 15 minutes so the service manager starts it again. Everything
+lives under the data directory (`~/.local/share/omarchy-agent`, or `--data`):
+`agent.toml` (the owner's envelope, refused when others may write it),
+`state.json`, `journal.ndjson` (rotated at 10 MiB), the verified bundles it
+fetched, the pinned docker CLI and compose plugin (`tools/`, by the SHA-256
+the manifest names; no other docker or compose binary is ever run),
+`staging/host/` and `last-good/host/`.
+
+Each round goes `render → lint → plan → pull → replace → guard → commit`,
+or `revert`, each step written to `state.json` before it acts, so a restart
+anywhere resumes it. The pool's `follow` names the target (until P3's host
+state); the bundle must verify against `release.yml` on main, the pool's
+origin must be in its `pools`, and the target must be at or above the floor
+(the highest release applied), `min_release` and outside `revoked` (both
+merged from every verified manifest and never lowered) — or covered by a
+rollback statement (*Rollback statements* in the security model), which
+preempts a round in flight, as a newer release does, at any step before
+`commit`. The dispatcher alone is replaced: stopped (it saves its leases
+and exits within 60 s), created from the new files and waited for on
+`/ready`; task containers are never part of a plan and keep running. The
+guard then samples it for `guard_s`: a restart streak, two restarts that
+were not ordered, an exit other than 0 and 75 (#277's ordered restart) or a
+lost `/ready` revert to `last-good/` and quarantine the release for an hour
+(one retry, then until a newer release); an Update order on the host's
+worker lifts every quarantine and starts a round. A changed
+`compose.override.yml`, `etc/` file or `run/capacity.json` starts a round
+too, and the running set is compared with `last-good/` every 15 minutes.
+
+| The last round says | What it means |
+|---|---|
+| `ok`, `no-change` | the set runs the target |
+| `held` | the dispatcher waits for a file: `etc/dispatcher.env` until the owner confirms the host (#321), `run/capacity.json` until capacity detection writes it (#333); or the target is quarantined |
+| `rolled-back` | the guard (or the ready wait) failed; `from` names the release left, `detail` the step and why |
+| `refused` | with its reason: `below-floor`, `below-min-release`, `revoked`, `statement-seq`, `statement-range`, `statement-too-deep`, `pool-not-listed`, a `verify` reason (`signature`, `workflow`, ...), or `lint: ...` |
+| `pool-unreachable`, `unauthorized` | nothing changes and everything keeps running; polls back off to 10 minutes (no answer, 5xx, malformed) or go hourly (401/403), and the next answer recovers by itself |
+| `engine-unreachable`, `pull-failed` | nothing changes; the step or the next poll tries again |
+| `needs-newer-agent` | the release needs an agent this one is not (self-update is #316) |
+
+On the host: `omarchy-agent status` (from `state.json` and
+`run/capacity.json`, with the pool and the engine down), `omarchy-agent
+round` (a round now: SIGUSR1 to the running agent) and `omarchy-agent logs
+[-n N]`. Exit 78 means a local configuration error — `agent.toml`, the data
+directory, an unreadable `state.json` — that stops the loop until a person
+fixes it; no network answer ever does. `tests/agent-run-loop.sh` runs the
+loop against a real engine in CI (rootful docker and rootless podman).
+
 ## The Studio host
 
 The project's workers run on one machine — `omarchy-studio`, a Mac Studio
