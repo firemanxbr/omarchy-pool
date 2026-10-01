@@ -41,6 +41,24 @@ jobs:
       - run: sudo apt-get update -q && sudo apt-get install -y --no-install-recommends faketime
       - run: tests/e2e-worker.sh
 
+  host-enroll:
+    name: E2E host enrollment (the agent enrolls, the owner confirms, the host claims)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+      - run: npm ci
+        working-directory: worker
+      - run: tests/host-enroll-e2e.sh
+
   thin-client:
     name: E2E thin client (safe, blocked, upgrade)
     runs-on: ubuntu-latest
