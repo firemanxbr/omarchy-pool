@@ -7,6 +7,8 @@
 //!   leniently, `inner` strictly, into types nothing unverified can build.
 //! - [`lint`]: check the host set template (and the owner's override) against its
 //!   invariants, on variable references, before any interpolation.
+//! - [`capacity`]: detect the host's CPUs, memory, disks and limits and turn them, with the
+//!   owner's caps and the release's verified constants, into units (P1, #333).
 //!
 //! - [`capacity`]: detect the host's CPUs, memory, disks and limits and turn them, with the
 //!   owner's caps and the release's verified constants, into units (P1, #333).
