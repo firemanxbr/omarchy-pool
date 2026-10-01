@@ -11,6 +11,20 @@
 #    failed left `:<arch>-v1.0.2` pushed and no `:v1.0.2`, and is refused
 #    here) — and its Worker is checked out, installed (`npm ci`) and built
 #    (`wrangler deploy --dry-run`). A failure there moves nothing.
+#    Then the rollback statement (#314, design v2 §5.3) is written and
+#    signed, still before anything moves: a maintainer's host under the host
+#    agent goes below its floor only on a statement rollback.yml signs on
+#    main. `{schema: 1, seq, to, retracts_through, issued, agent_to: null,
+#    run}`: `seq` one above the last statement stored (1 for the first);
+#    `retracts_through` the release rolled back from — or the last
+#    statement's, when that is higher, so a host that missed that rollback
+#    is covered too (the agent takes `to < floor <= retracts_through`); the
+#    highest release tag when the pool's release cannot be read. Signed by
+#    `cosign sign-blob --bundle` (a Sigstore bundle v0.3, what
+#    `omarchy-agent verify --statement` reads). No statement when nothing
+#    above `to` is retracted (rollback.yml sent forward), and none with
+#    ROLLBACK_SIGN=0. The last statement is read from R2 first: an answer
+#    other than "there is none yet" moves nothing.
 # 1. The images: `:x86_64` and `:aarch64` re-pointed at that release's own
 #    (`:<arch>-v1.0.2`, a copy), then `:latest` at its `:v1.0.2` — each new
 #    digest signed, as a release signs its own. What each tag named before
@@ -21,7 +35,13 @@
 #    migration runs: they are forward-only and additive, and the database
 #    keeps the newer ones. A deploy that fails puts the three tags back
 #    where they were, so the fleet never follows images the pool refuses;
-#    re-running the rollback is safe. A Worker from before #277 (a tag
+#    re-running the rollback is safe. Once that Worker is deployed, the
+#    statement and its bundle go to R2 (omarchy-packages:
+#    rollback/<to>.json, rollback/<to>.sigstore.json, and
+#    rollback/latest.json for the next `seq`), where
+#    GET /api/v1/factory/rollback/<to> relays them; a store that fails
+#    fails the run once the rest is done, and re-running signs the next
+#    statement. A Worker from before #277 (a tag
 #    without worker/src/orders.ts) spreads a worker's whole row in its
 #    listing (GET /factory, GET /users/:login), so every column the Worker
 #    from #277 keeps to itself — a worker's site, its process
@@ -48,8 +68,9 @@
 # #277 at its own fifteen-minute round).
 #
 # Needs: IMAGE (ghcr.io/<owner>/omarchy-worker), OMARCHY_API (the pool's API,
-# to read what runs), CLOUDFLARE_API_TOKEN (the deploy's), docker with
-# buildx, git with the tags, node; cosign to sign (ROLLBACK_SIGN=0 skips it),
+# to read what runs), CLOUDFLARE_API_TOKEN (the deploy's, with Workers R2
+# Storage: Edit for the statement), docker with buildx, git with the tags,
+# node, jq; cosign to sign (ROLLBACK_SIGN=0 skips it, and the statement with it),
 # the exact cosign rollback.yml installs, against the public-good Fulcio and
 # Rekor named on the call as release.yml names them (#308).
 # A `to` that is not a release tag of this repository is refused before
@@ -64,6 +85,7 @@ git rev-parse -q --verify "refs/tags/$to^{commit}" >/dev/null || die "$to is not
 [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]] || die "CLOUDFLARE_API_TOKEN is not set: the Worker has to go back with the images, so nothing moved"
 : "${OMARCHY_API:=https://pkgs.omarchy-pool.org}"
 from="$(curl -fsS --max-time 30 "$OMARCHY_API/api/v1/version" 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true)"
+run_url="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-firemanxbr/omarchy-pool}/actions/runs/${GITHUB_RUN_ID:-0}"
 say "rolling the pool back to $to (from ${from:-an unknown release})"
 digest_of() { docker buildx imagetools inspect "$1" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"'; }
 
@@ -73,13 +95,58 @@ docker buildx imagetools inspect "$IMAGE:$to" >/dev/null 2>&1 \
 for arch in x86_64 aarch64; do
   docker buildx imagetools inspect "$IMAGE:$arch-$to" >/dev/null 2>&1 || die "$IMAGE:$arch-$to does not exist: that release's image was never pushed; nothing moved"
 done
-at="$(mktemp -d)"
-trap 'git worktree remove --force "$at" >/dev/null 2>&1 || rm -rf "$at"' EXIT
+at="$(mktemp -d)"; work="$(mktemp -d)"
+trap 'git worktree remove --force "$at" >/dev/null 2>&1 || rm -rf "$at"; rm -rf "$work"' EXIT
 git worktree add --detach "$at" "$to" >/dev/null 2>&1 || die "could not check out $to: nothing moved"
 commit="$(git rev-parse "$to^{commit}")"
 (cd "$at/worker" && npm ci) || die "$to's Worker did not install (npm ci): nothing moved"
 (cd "$at/worker" && npx wrangler deploy --dry-run --outdir "$at/dry-run" >/dev/null) || die "$to's Worker does not build (wrangler deploy --dry-run): nothing moved"
 pre277=0; git cat-file -e "$to:worker/src/orders.ts" 2>/dev/null || pre277=1
+
+# The rollback statement (#314): written and signed before anything moves, stored once the Worker of $to is deployed.
+# The R2 keys GET /api/v1/factory/rollback/:to relays (worker/src/routes/rollback.ts; worker/test/rollback-relay.test.ts
+# holds the two in step).
+R2_BUCKET=omarchy-packages
+statement_key="rollback/$to.json"; bundle_key="rollback/$to.sigstore.json"; last_key="rollback/latest.json"
+release_re='^v[0-9]+\.[0-9]+\.[0-9]+$'
+newest() { printf '%s\n' "$@" | { grep -E "$release_re" || true; } | sort -V | tail -n1; }  # the highest release named, or nothing
+statement=""
+if [[ "${ROLLBACK_SIGN:-1}" == 1 ]]; then
+  # The last statement stored, or none yet — wrangler's own words for a missing key; any other failure moves nothing.
+  if ! (cd "$at/worker" && npx wrangler r2 object get "$R2_BUCKET/$last_key" --remote --pipe) >"$work/last.json" 2>"$work/last.err"; then
+    grep -q "The specified key does not exist" "$work/last.err" || { cat "$work/last.err" >&2; die "could not read the last rollback statement ($R2_BUCKET/$last_key): nothing moved"; }
+    : > "$work/last.json"
+  fi
+  last_seq=0; last_through=""
+  if [[ -s "$work/last.json" ]]; then
+    last_seq="$(jq -r '.seq' "$work/last.json" 2>/dev/null || true)"
+    last_through="$(jq -r '.retracts_through' "$work/last.json" 2>/dev/null || true)"
+    [[ "$last_seq" =~ ^[1-9][0-9]{0,15}$ && "$last_through" =~ $release_re ]] || die "the last rollback statement ($R2_BUCKET/$last_key) is not one: nothing moved"
+  fi
+  through="$from"
+  [[ "$through" =~ $release_re ]] || through="$(newest $(git tag -l 'v*'))"
+  through="$(newest "$through" "$last_through")"
+  if [[ -n "$through" && "$(newest "$through" "$to")" == "$through" && "$through" != "$to" ]]; then
+    statement="$work/statement.json"
+    jq -nc --argjson seq "$((last_seq + 1))" --arg to "$to" --arg through "$through" --arg issued "$(date -u +%FT%TZ)" --arg run "$run_url" \
+      '{schema: 1, seq: $seq, to: $to, retracts_through: $through, issued: $issued, agent_to: null, run: $run}' > "$statement"
+    cosign sign-blob --yes --fulcio-url=https://fulcio.sigstore.dev --rekor-url=https://rekor.sigstore.dev --new-bundle-format --bundle "$work/statement.sigstore.json" "$statement" \
+      || die "the rollback statement was not signed: nothing moved"
+    say "rollback statement $((last_seq + 1)) signed: back to $to, retracting everything through $through"
+  else
+    say "no release above $to to retract: no rollback statement"
+  fi
+else
+  say "ROLLBACK_SIGN=0: no rollback statement"
+fi
+# Bundle first, the statement, then the last one: a host that reads between two puts verifies nothing new and asks again.
+store_statement() {
+  [[ -n "$statement" ]] || return 0
+  (cd "$at/worker" \
+    && npx wrangler r2 object put "$R2_BUCKET/$bundle_key" --remote --file "$work/statement.sigstore.json" --content-type application/json \
+    && npx wrangler r2 object put "$R2_BUCKET/$statement_key" --remote --file "$statement" --content-type application/json \
+    && npx wrangler r2 object put "$R2_BUCKET/$last_key" --remote --file "$statement" --content-type application/json) >/dev/null
+}
 
 # 1. The images: what each tag names now, then each architecture's tag, then :latest.
 tags=(x86_64 aarch64 latest); before=()
@@ -124,13 +191,16 @@ if ! (
     && npx wrangler deploy --var "POOL_VERSION:$to" --var "POOL_COMMIT:$commit" --var "POOL_DEPLOYED_AT:$deployed_at"
 ); then undo "the Worker of $to did not deploy"; fi
 say "the Worker of $to is deployed ($commit)"
+stored=1
+if store_statement; then [[ -z "$statement" ]] || say "the rollback statement is in R2: GET /api/v1/factory/rollback/$to relays it"
+else stored=0; echo "release-rollback: the rollback statement did not reach R2" >&2; fi
 if (( pre277 )); then
   (cd "$at/worker" && clear_277) || die "the Worker of $to is deployed, but #277's columns were not cleared after it: run the UPDATE of docs/security-model (A Worker rolled back past #277) by hand"
   echo "==> $to is from before #277: what its listing would serve of #277's columns (site, the process, the rules' state, the rollout report) is cleared, before and after its deploy"
 fi
 
 # 3. On the record, and what runs now.
-payload="$(jq -nc --arg v "$to" --arg from "${from:-}" --arg sha "$commit" --arg run "${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-firemanxbr/omarchy-pool}/actions/runs/${GITHUB_RUN_ID:-0}" \
+payload="$(jq -nc --arg v "$to" --arg from "${from:-}" --arg sha "$commit" --arg run "$run_url" \
   '{version: $v, rolled_back_from: $from, commit: $sha, bump: "rollback", run_url: $run}' | sed "s/'/''/g")"
 (cd "$at/worker" && npx wrangler d1 execute omarchy-repo --remote --command \
   "INSERT INTO events (kind, status, summary, payload) VALUES ('deploy', 'ok', 'omarchy-pool rolled back to $to (from ${from:-unknown})', '$payload')" >/dev/null)
@@ -141,6 +211,7 @@ for _ in $(seq 1 12); do
     if (( pre277 )); then
       (cd "$at/worker" && clear_277) || die "$to runs, but #277's columns were not cleared once it served: run the UPDATE of docs/security-model (A Worker rolled back past #277) by hand"
     fi
+    (( stored )) || die "running $to, but its rollback statement did not reach R2: hosts under the host agent stay at their floor until one does — re-running rollback.yml -f to=$to is safe (it signs the next statement)"
     say "running $running: every updater follows it within two minutes"; exit 0
   fi
   sleep 5
