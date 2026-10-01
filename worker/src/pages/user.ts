@@ -58,7 +58,7 @@ const WORKER_OWN = `<p class="sub" style="margin:0 0 10px;font-size:12.5px">Main
  */
 const HOST_TOGGLE = `<button type="button" class="more-link" id="h-toggle" title="a name, where it runs, then one command to paste on the machine">+ add a host</button>`;
 const HOST_FORM = `<label>Name <input type="text" id="h-name" placeholder="vps-1" pattern="[a-z0-9](?:[a-z0-9\\-]{0,30}[a-z0-9])?" title="lowercase letters, digits and dashes, 1 to 32, not ending in a dash" required></label> <label>Where <input type="text" id="h-where" maxlength="80" placeholder="a VPS in Falkenstein" autocomplete="off"></label> <button type="submit" id="h-btn">Add a host</button>`;
-const HOST_OWN = `<p class="sub" style="margin:0 0 10px;font-size:12.5px">Maintainers only: a host runs the signed host bundle and one isolated container per task, as many as its capacity allows. Paste the command on the machine, as the user the agent runs as; it prints the host key's fingerprint, and this page shows it with <b>Confirm</b>. Nothing claims before that. <a href="/docs/worker-host#maintainer-hosts">How a host joins →</a></p><form id="host-form" class="form" onsubmit="return false" hidden></form><div id="h-new" hidden><p class="sub">One command, on the machine, within 15 minutes; the token works once and rides the environment, never the command line:</p><pre><span class="copy" data-copy="host">copy</span><span id="h-cmd"></span></pre><p class="sub" id="h-note"></p></div>`;
+const HOST_OWN = `<p class="sub" style="margin:0 0 10px;font-size:12.5px">Maintainers only: a host runs the signed host bundle and one isolated container per task, as many as its capacity allows. Paste the command on the machine, as the user the agent runs as; it prints the host key's fingerprint, and this page shows it with <b>Confirm</b>. Nothing claims before that. <a href="/docs/worker-host#maintainer-hosts">How a host joins →</a></p><form id="host-form" class="form" onsubmit="return false" hidden></form><div id="h-new" hidden><p class="sub" style="font-size:12.5px">One command, on the machine, within 15 minutes; the token works once, and no process's arguments (<code>ps</code>) show it:</p><pre><span class="copy" data-copy="host">copy</span><span id="h-cmd"></span></pre></div>`;
 /** Add a passkey (#257): a name for it and the button that starts the browser's request — a maintainer's. */
 const PASSKEY_FORM = `<label>Name <input type="text" id="pk-label" maxlength="40" placeholder="this laptop" autocomplete="off"></label> <button type="submit" id="pk-add">Add a passkey</button>`;
 /** …and what stands in its place for someone who is not a maintainer but still holds a passkey (a maintainer once): the reason, visible, and their Remove below. */
@@ -81,6 +81,8 @@ const CSS = String.raw`
   #pk-reset > p#pk-reset-said.err { color: var(--text); border: 1px solid var(--red); padding: 10px 12px; font-size: 13.5px; }
   #pk-reset .form button.danger, #pk-reset .form button.danger:hover { border-color: var(--red); color: var(--red); }
   @media (max-width: 520px) { #pk-table th:nth-child(2), #pk-table td:nth-child(2) { display: none; } }
+  /* On a phone the hosts table keeps Host, Status, Units and Confirm in view: the arches are in the Host cell's detail, the release and the report on the host page. */
+  @media (max-width: 520px) { #hosts-table th:nth-child(3), #hosts-table td:nth-child(3), #hosts-table th:nth-child(5), #hosts-table td:nth-child(5), #hosts-table th:nth-child(6), #hosts-table td:nth-child(6) { display: none; } }
   #h-new pre { position: relative; padding-right: 76px; white-space: pre-wrap; overflow-wrap: anywhere; }
   #hosts-table .h-detail { overflow-wrap: anywhere; min-width: 16ch; }
 `;
@@ -131,10 +133,10 @@ const body = (login: string) => String.raw`
   <section id="hosts" hidden>
     <div class="h2row"><h2>Hosts</h2><span id="h-slot"></span></div>
     <p class="sub">The machines this maintainer provides: each enrolled by its owner, confirmed by fingerprint, and trusted by the same pull request that named them a maintainer.</p>
-    <div id="h-notices" hidden></div>
     <div id="h-own"></div>
     <div class="table-wrap"><table id="hosts-table"><thead><tr><th>Host</th><th>Status</th><th>Arches</th><th>Units</th><th>Release</th><th>Reported</th><th aria-label="Confirm"></th></tr></thead><tbody></tbody></table></div>
     <p class="sub" id="h-none" hidden style="margin:0">No host under this name.</p>
+    <div id="h-notices" hidden style="margin-top:10px"></div>
   </section>
 
   <section id="agents" hidden>
@@ -268,7 +270,7 @@ const SCRIPT = String.raw`
       $("#h-btn").disabled = false;
       if (d.error) { toast(esc(d.error), "error"); return; }
       $("#h-new").hidden = false;
-      $("#h-cmd").textContent = d.command; $("#h-note").textContent = d.note;
+      $("#h-cmd").textContent = d.command;
       $("#host-form").reset(); $("#host-form").hidden = true;
       WAIT_UNTIL = Date.parse(d.expires_at) || Date.now() + 15 * 60000; loadHosts();
     }).catch(function (e) { $("#h-btn").disabled = false; toast("failed: " + esc(errorText(e)), "error"); });

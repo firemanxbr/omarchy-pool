@@ -26,6 +26,7 @@ import { json, readJson, type Env } from "../index";
 import { roleFor } from "../governance";
 import { findLeak } from "../leak";
 import { machineOrigin, version, API_HOST } from "../meta";
+import { putRecord } from "../record";
 import { writeGate } from "./orders";
 import { sha256Hex, viaOf, workspace, type Contributor } from "./contributors";
 import { dashboardOrigin } from "./agents";
@@ -72,8 +73,14 @@ async function githubIdOf(env: Env, login: string): Promise<number | null> {
 
 // ---------- the person's side ----------
 
-/** POST /hosts/enrollments — a maintainer mints a one-time enrollment token (design v2 §6.1). */
+/**
+ * POST /hosts/enrollments — a maintainer mints a one-time enrollment token
+ * (design v2 §6.1). The browser session only, as Confirm: a bearer token (an
+ * omc_ CLI token) could otherwise leave hosts waiting on the owner's page,
+ * with a name and a "where" of its choosing, for a careless Confirm.
+ */
 export async function handleMintEnrollment(c: Contributor, request: Request, env: Env, url: URL): Promise<Response> {
+  if (viaOf(request) !== "web") return json({ error: "a host is added on its owner's page, signed in in the browser: a token does not add one", code: "web_only" }, 403, NO_STORE);
   const gate = writeGate(request, url, true);
   if (gate) return gate;
   // The page's own reason first (a contributor, a blocked maintainer), then the synced list itself, read again: the role on the row is the last sign-in's.
@@ -85,6 +92,9 @@ export async function handleMintEnrollment(c: Contributor, request: Request, env
   if (typeof b.name !== "string" || !HOST_NAME.test(b.name)) return json({ error: "name: lowercase letters, digits and dashes, 1 to 32 (\"studio\", \"vps-1\")" }, 400);
   const where = oneLine(b.where, 80);
   if (where === undefined) return json({ error: "where: one line of at most 80 characters, no secret" }, 400);
+  if (await env.DB.prepare("SELECT 1 FROM hosts WHERE owner_login = ? AND name = ? AND status != 'retired'").bind(c.login, b.name).first()) {
+    return json({ error: `you have a host named ${b.name} already: give this one another name`, code: "name_taken" }, 409, NO_STORE);
+  }
   const github = await githubIdOf(env, c.login);
   if (github === null) return json({ error: "the pool has no GitHub user id for you yet: sign in with GitHub again, then add the host", code: "github_id" }, 409, NO_STORE);
   const token = newToken("ome");
@@ -102,7 +112,7 @@ export async function handleMintEnrollment(c: Contributor, request: Request, env
       name: b.name,
       expires_at: expires,
       command: installCommand(version(env).version, token, pool === `https://${API_HOST}` ? null : pool),
-      note: `Paste the command on the machine, as the user the agent will run as, within ${ENROLL_TTL_MIN} minutes; the token works once. The machine prints its host key's fingerprint, and this page shows it with Confirm: compare the two, then confirm. Nothing claims before that.`,
+      note: `The token works once, for ${ENROLL_TTL_MIN} minutes.`,
     },
     201,
     NO_STORE,
@@ -185,6 +195,9 @@ export async function handleHostGet(c: Contributor | null, id: string, env: Env)
  * Confirm gives project trust, so a bearer token — an omc_ CLI token, or a
  * GitHub token turned into one — is refused (403 web_only). A passkey
  * assertion, as approve's (#271), is the stronger seam, for a later issue.
+ * The signed trust record the per-worker door writes is written here too
+ * (workers/<id>/trust-<time>.json), so who vouched for a machine that
+ * publishes stays readable.
  */
 export async function handleConfirmHost(c: Contributor, id: string, request: Request, env: Env, url: URL): Promise<Response> {
   if (viaOf(request) !== "web") return json({ error: "a host is confirmed on its owner's page, signed in in the browser: a token does not confirm one", code: "web_only" }, 403, NO_STORE);
@@ -210,6 +223,9 @@ export async function handleConfirmHost(c: Contributor, id: string, request: Req
       .bind(line, JSON.stringify({ host: id, worker, owner: h.owner_login, by: c.login }), id, worker),
   ]);
   if (!res.meta.changes) return json({ error: `${h.name} was not confirmed: it is no longer waiting, or ${h.owner_login} is no longer a maintainer`, code: "not_pending" }, 409, NO_STORE);
+  await putRecord(env, `workers/${worker}/trust-${at}.json`, {
+    schema: "omarchy-pool/worker-trust/1", worker, owner: h.owner_login, trust: "project", host: id, fingerprint: await fingerprint(publicKeyBytes(h.pubkey)!), confirmed_by: c.login, basis: "factory/MAINTAINERS.toml", at,
+  }).catch(() => null);
   return json({ host: id, status: "active", worker, line, note: "The agent fetches the host's worker token with its next signed request, writes it for the dispatcher, and the host claims from then on." }, 200, NO_STORE);
 }
 
@@ -377,6 +393,8 @@ export async function handleHostReport(s: SignedHost, env: Env): Promise<Respons
   const tag = /^v\d+\.\d+\.\d+$/;
   const cap = r.capacity === undefined ? null : parseCapacity(r.capacity);
   if (typeof cap === "string") return json({ error: cap }, 400, NO_STORE);
+  // As at enrollment: the native lane is the host's own architecture.
+  if (cap && !cap.lanes.some((l) => l.mode === "native" && l.arch === h.arch)) return json({ error: `capacity.lanes: the native lane is not ${h.arch}` }, 400, NO_STORE);
   const runtime = r.runtime && typeof r.runtime === "object" ? r.runtime : null;
   // As the enrollment: whole or refused — a cut one would not parse on the hosts' pages.
   if (runtime && JSON.stringify(runtime).length > 2048) return json({ error: "runtime: an object of at most 2 KiB" }, 400, NO_STORE);

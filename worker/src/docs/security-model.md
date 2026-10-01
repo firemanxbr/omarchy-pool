@@ -393,8 +393,10 @@ made them one: a pull request to `factory/MAINTAINERS.toml` another
 maintainer approved (decision S2). There is no per-host trust grant. The
 enrollment (#321, design v2 §6.1) binds a machine to that person:
 
-- **The token** (`ome_…`) is minted on the maintainer's own page, after the
-  pool reads the synced list again; it is bound to their login **and their
+- **The token** (`ome_…`) is minted on the maintainer's own page — the
+  browser session's only, as Confirm, so a stolen CLI token cannot leave
+  hosts waiting there for a careless Confirm — after the pool reads the
+  synced list again; it is bound to their login **and their
   GitHub user id** (recorded at every sign-in), lives 15 minutes and works
   once. A login renamed or taken by someone else is not its owner.
 - **Enrollment** carries the machine's new public key and a signature of
@@ -411,9 +413,14 @@ enrollment (#321, design v2 §6.1) binds a machine to that person:
   GitHub token turned into one) is refused, so one stolen token does not
   make a project-trusted host. A token stolen before use enrolls nothing the
   owner does not see and confirm. The journal and Status say it, and the
-  other maintainers see a notice; no approval is asked (D40). The per-worker
-  trust door does not move a host's registration: its trust is
-  `MAINTAINERS.toml`'s.
+  other maintainers see a notice; no approval is asked (D40), and the pool
+  writes the signed trust record the per-worker door writes
+  (`workers/<id>/trust-<time>.json`: the host, its fingerprint, who
+  confirmed). The per-worker trust door does not move a host's
+  registration: its trust is `MAINTAINERS.toml`'s. Confirm asks no passkey
+  yet: one stolen browser session of a maintainer could still mint, enroll
+  and confirm a machine of its own. A passkey assertion on Confirm, as
+  Approve's (#271), is the named seam for a later issue.
 - **Signed requests** (D7). Every later call carries `Omarchy-Host: <host>;
   ts; nonce; sig`, the key's signature over the method, the path, the body's
   SHA-256, the time and the nonce. The pool checks the key, `|ts − now| ≤

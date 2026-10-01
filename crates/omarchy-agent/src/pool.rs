@@ -84,6 +84,9 @@ impl Pool {
             .tls_config(tls)
             .timeout_global(Some(CALL_TIMEOUT))
             .http_status_as_error(false)
+            // One origin: a 3xx is an answer the caller sees, never a second origin a
+            // signed request (its Omarchy-Host header) would follow.
+            .max_redirects(0)
             .https_only(!origin.starts_with("http://"))
             .user_agent(format!("omarchy-agent/{}", crate::AGENT_VERSION))
             .build()

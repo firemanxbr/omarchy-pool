@@ -7,7 +7,10 @@
 //! the capacity detection that writes `run/capacity.json` — is #317's and #333's; the
 //! rotation every 30 days is called from the run loop (#315) through [`fetch_token`].
 //! Re-running it keeps the identity: a machine that enrolled goes straight to the wait
-//! or the token.
+//! or the token — and keeps the worker token it holds, since every fetch rotates it
+//! (the one it replaces works ten more minutes only, so two fetches in a row would cut
+//! off a running dispatcher). Rotation is `omarchy-agent token`, and the run loop's
+//! (#315).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -156,8 +159,28 @@ pub fn run(o: &Options, out: &mut impl Write) -> Result<(), Failure> {
         id
     };
     say(out, &format!("host key fingerprint: {}", key.fingerprint()));
-    wait_for_confirm(o, &key, &pool, &id, out)?;
+    let state = wait_for_confirm(o, &key, &pool, &id, out)?;
+    if !state["token"].is_null() && holds_token(&o.paths.dispatcher_env()) {
+        say(
+            out,
+            &format!(
+                "host {} keeps its worker token ({}); `omarchy-agent token` rotates it",
+                id.host,
+                o.paths.dispatcher_env().display()
+            ),
+        );
+        return Ok(());
+    }
     fetch_token(o, &key, &pool, &id, out)
+}
+
+/// Whether the dispatcher's env file holds a worker token already.
+fn holds_token(env: &Path) -> bool {
+    std::fs::read_to_string(env).is_ok_and(|s| {
+        s.lines()
+            .filter_map(|l| l.strip_prefix("OMARCHY_WORKER_TOKEN="))
+            .any(valid_worker_token)
+    })
 }
 
 /// The host worker token, fetched again (a rotation): only for a machine that enrolled.
@@ -272,13 +295,13 @@ fn wait_for_confirm(
     pool: &Pool,
     id: &Identity,
     out: &mut impl Write,
-) -> Result<(), Failure> {
+) -> Result<serde_json::Value, Failure> {
     let until = Instant::now() + o.wait;
     let mut said = false;
     loop {
         match pool.signed(key, &id.host, "GET", "/api/v1/hosts/self/state", None) {
             Ok(Answer { status: 200, json }) => match json["status"].as_str() {
-                Some("active") => return Ok(()),
+                Some("active") => return Ok(json),
                 Some("pending-owner") => {
                     if !said {
                         say(
@@ -505,6 +528,27 @@ mod tests {
         .unwrap();
         let kept = open(&o).unwrap().0.public_b64u();
         assert_eq!(open(&o).unwrap().0.public_b64u(), kept);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_worker_token_in_the_env_file_is_kept_and_anything_else_is_not() {
+        let d = std::env::temp_dir().join(format!("omarchy-agent-holds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let env = d.join("dispatcher.env");
+        assert!(!holds_token(&env));
+        std::fs::write(&env, "# worker: m1-rack-0a9z\nOMARCHY_WORKER_TOKEN=\n").unwrap();
+        assert!(!holds_token(&env));
+        std::fs::write(
+            &env,
+            format!(
+                "# worker: m1-rack-0a9z\nOMARCHY_WORKER_TOKEN=omw_{}\n",
+                "0f".repeat(24)
+            ),
+        )
+        .unwrap();
+        assert!(holds_token(&env));
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -144,12 +144,15 @@ describe("Add a host: POST /hosts/enrollments", () => {
     expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM host_enrollments WHERE token_hash = ? OR id = ?").bind(r.json.token, r.json.token).first("n")).toBe(0);
   });
 
-  it("anyone else is refused server-side: nobody (401), a contributor (403), a session from another site (403), a malformed name (400)", async () => {
+  it("anyone else is refused server-side: nobody (401), a contributor (403), a bearer token even a maintainer's (403), a session from another site (403), a malformed name (400)", async () => {
     expect((await call("POST", "/hosts/enrollments", { body: { name: "x" } })).status).toBe(401);
     const c = await mint("alice");
     expect([c.status, c.json.code]).toEqual([403, "maintainers_only"]);
-    const cli = await call("POST", "/hosts/enrollments", { token: "omc_alice", body: { name: "x" } });
-    expect([cli.status, cli.json.code]).toEqual([403, "maintainers_only"]);
+    // A host is added in the browser, as it is confirmed: a CLI token leaves nothing waiting on the owner's page.
+    for (const token of ["omc_alice", "omc_m1"]) {
+      const cli = await call("POST", "/hosts/enrollments", { token, body: { name: "x" } });
+      expect([cli.status, cli.json.code]).toEqual([403, "web_only"]);
+    }
     const foreign = await call("POST", "/hosts/enrollments", { body: { name: "x" }, headers: { cookie: "omc=oms_m1", origin: "https://evil.example" } });
     expect([foreign.status, foreign.json.code]).toEqual([403, "origin"]);
     expect((await mint("m1", "Not A Name")).status).toBe(400);
@@ -221,6 +224,19 @@ describe("POST /hosts/enroll", () => {
     await env.DB.prepare("UPDATE contributors SET github_id = 1002 WHERE login = 'm2'").run();
   });
 
+  it("refuses a key that is a host's already, and a name the maintainer already uses for a host", async () => {
+    const k = await newKey();
+    expect((await enroll((await mint("m1", "keyed")).json.token, k)).status).toBe(201);
+    const fresh = await mint("m1", "keyed-again");
+    const taken = await enroll(fresh.json.token, k);
+    expect([taken.status, taken.json.code]).toEqual([409, "key_taken"]);
+    // Refused before the burn: the token still enrolls a machine with a key of its own.
+    expect((await enroll(fresh.json.token, await newKey())).status).toBe(201);
+    const twice = await mint("m1", "keyed");
+    expect([twice.status, twice.json.code]).toEqual([409, "name_taken"]);
+    expect((await mint("m2", "keyed")).status).toBe(201); // another maintainer's names are theirs
+  });
+
   it("refuses a host below the signed minimum with its numbers, and keeps the token for the fixed machine", async () => {
     const m = await mint("m1", "small");
     const small = await enroll(m.json.token, await newKey(), { capacity: { ...STUDIO, cpus: 2, mem_gb: 6, units: 1 } });
@@ -261,6 +277,10 @@ describe("Confirm: POST /hosts/:id/confirm", () => {
     expect(ok.json.worker).toMatch(/^m1-confirmed-[0-9a-z]{4}$/);
     const w = await env.DB.prepare("SELECT owner, arch, kind, host_id, trust, trusted_by, token_hash, revoked_at FROM build_workers WHERE id = ?").bind(ok.json.worker).first();
     expect(w).toEqual({ owner: "m1", arch: "aarch64", kind: "host", host_id: e.json.host, trust: "project", trusted_by: "m1", token_hash: null, revoked_at: null });
+    // Who vouched for the machine that publishes, as the per-worker door's record says it.
+    const records = await env.PACKAGES.list({ prefix: `workers/${ok.json.worker}/trust-` });
+    expect(records.objects.filter((o) => o.key.endsWith(".json"))).toHaveLength(1);
+    expect(await (await env.PACKAGES.get(records.objects.find((o) => o.key.endsWith(".json"))!.key))!.json()).toMatchObject({ worker: ok.json.worker, trust: "project", host: e.json.host, confirmed_by: "m1", fingerprint: await fingerprint(k.raw) });
     // The per-worker trust door does not move a host's registration (its trust is MAINTAINERS.toml's).
     for (const trust of ["community", "project"]) {
       const t = await call("POST", `/factory/workers/${ok.json.worker}/trust`, { token: "omc_m2", body: { trust } });
@@ -416,6 +436,10 @@ describe("the host report", () => {
     // A runtime over 2 KiB is refused whole, as at enrollment: the hosts' pages keep reading.
     const wide = await signed(k, host, "POST", "/hosts/self/report", JSON.stringify({ runtime: { driver: "x".repeat(3000) } }));
     expect(wide.status).toBe(400);
+    // As at enrollment, the native lane is the host's own architecture.
+    const swapped = await signed(k, host, "POST", "/hosts/self/report", JSON.stringify({ capacity: { ...STUDIO, lanes: [{ arch: "x86_64", mode: "native" }] } }));
+    expect(swapped.status).toBe(400);
+    expect((await call("GET", `/hosts/${host}`, { session: "m1" })).json.host.arches).toEqual(["aarch64", "x86_64"]);
     expect((await call("GET", "/hosts", { session: "m2" })).status).toBe(200);
     expect((await call("GET", `/hosts/${host}`, { session: "m2" })).json.host.runtime).toMatchObject({ driver: "compose/docker" });
   });

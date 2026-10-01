@@ -10,7 +10,7 @@
 #   worker token with a host-key-signed request into etc/dispatcher.env (0600)
 #   → that token claims → a rotation gives a new one while the old one still
 #   claims → the journal has the new-host line → running it again keeps the
-#   identity.
+#   identity and the worker token.
 #
 # What stands in for the parts of P1 still to come: the capacity report is a
 # file this script writes (the detection is #333), and the claim is a curl
@@ -132,6 +132,9 @@ step "The journal, the notice's words, and a second run that keeps the identity"
 curl -fs "$POOL/api/v1/events?kind=host" | jq -e --arg h "$HOST" '.events[] | select(.payload.host == $h) | select(.summary | startswith("new host of e2e: 8 cores, 16 GB, '"$ARCH"' native, isolation root (dedicated)"))' >/dev/null || fail "no journal line"
 XDG_DATA_HOME="$DATA" "$AGENT" install > "$E2E/again.log" 2>&1 || { cat "$E2E/again.log"; fail "the second run"; }
 grep -q "this machine is host $HOST" "$E2E/again.log" || fail "the second run did not keep the identity"
+# ...and the worker token: a fetch rotates, so a second one would cut off the token a running dispatcher holds.
+grep -q "keeps its worker token" "$E2E/again.log" || fail "the second run fetched a token again"
+[[ $(sed -n 's/^OMARCHY_WORKER_TOKEN=//p' "$ENV_FILE") == "$NEW" ]] || fail "the second run replaced the worker token"
 [[ $(curl -fs "$POOL/api/v1/hosts?owner=e2e" -H "cookie: $SESSION" | jq '.hosts | length') == 1 ]] || fail "a second host"
 
 printf '\n\033[1;32mhost enrollment: ok\033[0m (%s, %s, %s)\n' "$HOST" "$WORKER" "$FP"

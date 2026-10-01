@@ -126,8 +126,10 @@ to copy.
    curl --proto '=https' --tlsv1.2 -fsSL https://github.com/firemanxbr/omarchy-pool/releases/download/vX.Y.Z/install.sh | OMARCHY_ENROLL=ome_… sh
    ```
 
-   The token rides the environment of `sh`, never a command line, so `ps`
-   never shows it.
+   The token rides the environment of `sh`, never a process's arguments, so
+   `ps` never shows it; the copy your shell's history keeps is spent once the
+   host enrolls, or 15 minutes after. A host is added in the browser only: a
+   CLI token does not mint one, and a name you already use is refused.
 2. On the machine, as the user the agent runs as: `install.sh` installs the
    agent, which makes the host key (`host.ed25519`, mode 0600, never in a
    container), checks the machine against the release's signed minimum (4
