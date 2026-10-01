@@ -14,11 +14,14 @@
 #
 # Arch Linux, both architectures, built by the release workflow from the
 # binaries it just published (the tag is the pool's release) and signed
-# keyless with cosign (GitHub OIDC):
+# keyless with cosign (GitHub OIDC) by release.yml on main, and nothing else:
 #   cosign verify ghcr.io/firemanxbr/omarchy-worker:latest \
-#     --certificate-identity-regexp 'github.com/firemanxbr/omarchy-pool' \
+#     --certificate-identity https://github.com/firemanxbr/omarchy-pool/.github/workflows/release.yml@refs/heads/main \
 #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
-ARG BASE=docker.io/library/archlinux:base-devel
+# (after a rollback the tags are signed by rollback.yml@refs/heads/main: the same command with that file).
+# The base image by digest (#308): the tag is kept for the reader, the digest is what pulls. release.yml passes
+# each architecture's, pinned the same way.
+ARG BASE=docker.io/library/archlinux:base-devel@sha256:51dd3d24f7fba779e7c471caeee7804c50e8c134ad948e19685a1c83a42facc3
 FROM ${BASE}
 ARG ARCH=x86_64
 ARG POOL_RELEASE
@@ -40,8 +43,11 @@ RUN set -eu; if pacman -S --noconfirm --needed shellcheck >/dev/null 2>&1; then 
       v=v0.11.0; case "${ARCH}" in x86_64) sum=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198 ;; aarch64) sum=12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588 ;; esac; \
       curl -fsSL -o /tmp/sc.tar.xz "https://github.com/koalaman/shellcheck/releases/download/$v/shellcheck-$v.linux.${ARCH}.tar.xz"; \
       echo "$sum  /tmp/sc.tar.xz" | sha256sum -c -; tar -xJf /tmp/sc.tar.xz -C /tmp; install -m755 "/tmp/shellcheck-$v/shellcheck" /usr/local/bin/shellcheck; rm -rf /tmp/sc.tar.xz "/tmp/shellcheck-$v"; fi
-# The docker CLI, static: it talks to whatever Docker-compatible socket is mounted at /var/run/docker.sock (project mode).
-RUN curl -fsSL "https://download.docker.com/linux/static/stable/${ARCH}/docker-${DOCKER_CLI}.tgz" | tar -xz --strip-components=1 -C /usr/local/bin docker/docker
+# The docker CLI, static, pinned by checksum (#308): it talks to whatever Docker-compatible socket is mounted at
+# /var/run/docker.sock (project mode). A new DOCKER_CLI needs both sums again.
+RUN set -eu; case "$ARCH" in x86_64) sum=4f798b3ee1e0140eab5bf30b0edc4e84f4cdb53255a429dc3bbae9524845d640 ;; aarch64) sum=e6b53725a73763ab3f988c73f8772eaed429754c1a579db5ff11f21990fd1817 ;; esac; \
+    curl -fsSL -o /tmp/docker.tgz "https://download.docker.com/linux/static/stable/${ARCH}/docker-${DOCKER_CLI}.tgz"; \
+    echo "$sum  /tmp/docker.tgz" | sha256sum -c -; tar -xzf /tmp/docker.tgz --strip-components=1 -C /usr/local/bin docker/docker; rm -f /tmp/docker.tgz
 # The compose plugin, pinned by checksum: the updater role (factory/bin/omarchy-rollout) recreates a compose
 # project's services from the new image through the same socket — every worker follows the latest image.
 ARG COMPOSE=v5.5.1

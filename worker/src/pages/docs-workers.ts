@@ -24,8 +24,9 @@ const BODY = String.raw`
     </tbody></table></div>
     <p class="sub">A maintainer who also contributes packages registers a second worker and leaves it untrusted: one registration per role of a machine. Tags: <code>latest</code> is a multi-architecture manifest (your machine pulls its own), <code>x86_64</code> and <code>aarch64</code> pin one, and every pool release is a tag (<code>v0.0.70</code>). Verify before trusting it:</p>
     <div class="steps"><div class="step"><pre>cosign verify ${IMG}:latest \
-  --certificate-identity-regexp 'github.com/firemanxbr/omarchy-pool' \
+  --certificate-identity https://github.com/firemanxbr/omarchy-pool/.github/workflows/release.yml@refs/heads/main \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com</pre></div></div>
+    <p class="sub">The identity is exact: the image was signed by <code>release.yml</code> on <code>main</code> of this repository, and nothing else passes. After a rollback the tags are signed by <code>rollback.yml@refs/heads/main</code>; the same command with that file checks them.</p>
   </section>
 
   <section id="roles">
@@ -270,7 +271,8 @@ export const DOCS_WORKERS_COMPONENTS = (F: Fixture): Component[] => [
     page: "/docs/workers",
     anchor: [
       "<code>latest</code> is a multi-architecture manifest", "<code>x86_64</code> and <code>aarch64</code> pin one",
-      `<pre>cosign verify ${IMG}:latest`, "--certificate-oidc-issuer https://token.actions.githubusercontent.com",
+      `<pre>cosign verify ${IMG}:latest`, "--certificate-identity https://github.com/firemanxbr/omarchy-pool/.github/workflows/release.yml@refs/heads/main",
+      "--certificate-oidc-issuer https://token.actions.githubusercontent.com", "<code>rollback.yml@refs/heads/main</code>",
     ],
     visible: EVERYONE,
   },

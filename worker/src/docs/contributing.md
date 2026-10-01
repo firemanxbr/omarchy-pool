@@ -10,8 +10,9 @@ Everything in the repository — code, documentation, commit messages — is in 
    must pass, and one maintainer other than the author approves — a push after
    the approval asks for it again. A maintainer merges what another opened.
    Keep [docs/TESTING.md](docs/TESTING.md) in step with what you change. A
-   change to `factory/MAINTAINERS.toml` or `CODEOWNERS` asks for a code
-   owner's review: every maintainer is one
+   change to `factory/MAINTAINERS.toml`, `CODEOWNERS`, `.github/workflows/`,
+   `crates/omarchy-agent/`, `crates/pkg-repo/src/dispatch*` or `factory/sets/`
+   asks for a code owner's review: every maintainer is one
    ([docs/GOVERNANCE.md](docs/GOVERNANCE.md)). The repository's admin can
    merge alone; GitHub records the bypass on the pull request. Packages are
    never pull requests: they are requested on the dashboard and built by the

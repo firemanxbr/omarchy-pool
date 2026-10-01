@@ -1,0 +1,22 @@
+{
+  "name": "v* tags: never moved or deleted, by anyone",
+  "target": "tag",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": [
+        "refs/tags/v*"
+      ],
+      "exclude": []
+    }
+  },
+  "bypass_actors": [],
+  "rules": [
+    {
+      "type": "update"
+    },
+    {
+      "type": "deletion"
+    }
+  ]
+}

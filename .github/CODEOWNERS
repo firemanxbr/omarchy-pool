@@ -1,7 +1,13 @@
 # Generated from factory/MAINTAINERS.toml by factory/bin/check-governance --write;
 # CI fails when the two disagree. Every maintainer owns the governance file,
-# this one and the sizing recipes. With main requiring a code-owner review,
+# this one, the sizing recipes and what the hosts' trust relies on (#308):
+# the workflows that sign, the host agent, the dispatcher that starts task
+# containers and the host sets. With main requiring a code-owner review,
 # a change here is a decision another maintainer approves.
-factory/MAINTAINERS.toml  @firemanxbr @maralcbr
-.github/CODEOWNERS        @firemanxbr @maralcbr
-factory/sizing/           @firemanxbr @maralcbr
+factory/MAINTAINERS.toml          @firemanxbr @maralcbr
+.github/CODEOWNERS                @firemanxbr @maralcbr
+factory/sizing/                   @firemanxbr @maralcbr
+.github/workflows/                @firemanxbr @maralcbr
+crates/omarchy-agent/             @firemanxbr @maralcbr
+crates/pkg-repo/src/dispatch*     @firemanxbr @maralcbr
+factory/sets/                     @firemanxbr @maralcbr
