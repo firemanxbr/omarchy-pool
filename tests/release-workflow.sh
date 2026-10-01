@@ -15,6 +15,9 @@
 #   signed. No other job moves them.
 # - deploy needs worker-image-manifest: the pool moves to the release only
 #   once the images exist.
+# - publish refuses a release that already exists (#351): the image is built
+#   from the release's tarballs, and anyone with write access can make a v*
+#   tag and a release, so a release this run did not make is never reused.
 # - build-images (#312) resolves each task build image to a digest with
 #   factory/bin/build-images, which fails when a tag does not resolve —
 #   checked here against a stubbed buildx — and publish needs it and attaches
@@ -57,6 +60,14 @@ echo "ok: the tags a host follows move in one job, once both architectures start
 deploy="$(job deploy)"
 grep -qE '^    needs: \[[^]]*\bworker-image-manifest\b[^]]*\]$' <<<"$deploy" || fail "the deploy waits for the images: $(grep needs: <<<"$deploy")"
 echo "ok: the pool is deployed once the images exist"
+pub="$(job publish)"
+[[ -n "$pub" ]] || fail "release.yml has a publish job"
+refuse="$(line_of "$pub" 'if gh release view "$VERSION" >/dev/null 2>&1; then')"
+create="$(line_of "$pub" 'gh release create "$VERSION"')"
+[[ -n "$refuse" && -n "$create" ]] && (( refuse < create )) || fail "publish checks for an existing release before it creates one: ${refuse:-never}, ${create:-never}"
+sed -n "$((refuse + 1))p" <<<"$pub" | grep -qE '; exit 1$' || fail "an existing release fails the run: $(sed -n "$((refuse + 1))p" <<<"$pub")"
+grep -qE 'exit 0|skipping' <<<"$pub" && fail "publish never skips to reuse a release it did not make: $(grep -nE 'exit 0|skipping' <<<"$pub")"
+echo "ok: publish refuses a release this run did not make, so the images carry only this run's binaries"
 
 images="$(job build-images)"
 [[ -n "$images" ]] || fail "release.yml has a build-images job"

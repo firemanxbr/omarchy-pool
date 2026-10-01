@@ -147,6 +147,12 @@ A release is `main` at the moment a maintainer dispatches one
 5. Every set follows: its updater sees the new release within two minutes
    (the Studio's too, since its one-time step, *The Studio host*).
 
+A run that stopped after the GitHub release was created resumes with **Re-run
+failed jobs** on that run. A new dispatch on the same commit stops at the
+publish step, because the release exists already, and so does a tag of that
+version pushed at another commit (#351). A draft release left by a failed
+upload has no tag: delete it (`gh release delete vX.Y.Z`) before re-running.
+
 The deploy step needs the `CLOUDFLARE_API_TOKEN` repository secret (Account →
 Workers Scripts: Edit, D1: Edit, Workers R2 Storage: Edit (the rollback
 statements, below), Account Settings: Read; Zone → Workers Routes:
@@ -212,16 +218,22 @@ admin can set it:
 |---|---|---|
 | `release` and `pool` environments: `main` only, a required reviewer (either maintainer, self-approval allowed until both approve dispatches in practice; then `prevent_self_review`, D18), no admin bypass | a dispatch from any other branch is refused before its job starts; one from `main` waits for a maintainer, so a holder of `actions: write` cannot sign or send every host back alone | `gh api …/environments`, `…/deployment-branch-policies` |
 | `CLOUDFLARE_API_TOKEN` an environment secret of `pool`, not a repository secret | only a run the `pool` environment admitted can deploy | `gh secret list` (repository and `--env pool`) |
-| A tag ruleset on `v*`, in two parts: creation refused to everyone but GitHub Actions (`.github/rulesets/tags.json`), update and deletion refused to everyone (`.github/rulesets/tags-locked.json`, no bypass; no workflow moves or deletes a git tag) | a `v*` tag is not created by hand, and never moved or deleted, not even by a workflow; with immutable releases, a published release cannot change either | `gh api …/rulesets` |
+| A tag ruleset on `v*`: update and deletion refused to everyone (`.github/rulesets/tags-locked.json`, no bypass; no workflow moves or deletes a git tag). Creation is not restricted: GitHub accepts GitHub Actions as a ruleset bypass actor only in an organization, and a creation rule without that bypass would refuse `release.yml`'s own tag (#351) | a `v*` tag is never moved or deleted, not even by a workflow or the admin. Creating one (and a release with it) stays open to every collaborator with write access (see *Check*), so `release.yml` refuses a release it did not make and builds the images from this run's binaries only; what hosts verify (`omarchy-agent verify`, `cosign verify`) is signed by `release.yml@refs/heads/main`, whatever tags exist. The CLI tarball on a GitHub release is not verified on download | `gh api …/rulesets` |
 | Immutable releases | a published release's assets and tag cannot change | `gh api …/immutable-releases` |
 | The main ruleset (`.github/rulesets/main.json`, already applied) requires a pull request review and a code owner's | a change to what signs, or to what a host runs, is a decision another maintainer approves — except that the admin keeps a pull-request bypass (repository role 5), accepted under D18 like self-approval, and removed when D18 moves to two-person approval | `gh api …/rulesets/<id>` |
 | No stored or automated token with `actions`, `contents: write` or `workflows` on this repository outside GitHub Actions — not the Worker's, a host's, a worker's, a deploy key or CI tooling's; a maintainer dispatches and approves as a person, in their own interactive session (`gh auth login`) or the web UI | no process can dispatch `release.yml` or `rollback.yml`, or push a workflow, on its own; what a maintainer dispatches still waits for the environment's reviewer | the daily token probe on Status (*The pool's own scheduler*; it detects `actions: write` only, `contents` and `workflows` are the manual review's); `gh api …/keys`; each maintainer's token pages |
 
-Until the admin applies them, the environment, tag, immutable-release and
-token criteria of #308 are not met, whatever the repository holds. Apply the
-environments (step 1) **before** #308 merges, or at the latest before the
-next release dispatch: a workflow that names an environment that does not
-exist makes GitHub create it, with no reviewer and no branch policy.
+Until the admin applies them, the repository alone meets none of these,
+whatever it holds. Applied today: the environments, immutable releases and
+`tags-locked.json`; `CLOUDFLARE_API_TOKEN` is still a repository secret
+(step 2 pending), and the token rule stays a manual review. Only `release.yml`
+should create a `v*` tag: a hand-made one can never be removed, and
+`release.yml` takes the highest as the base of the next version. #308's "a `v*` tag
+is not created by hand" is replaced by #351 (moves and deletions locked, the
+signature what hosts trust). On a new repository, apply the environments
+(step 1) before the first release dispatch: a workflow that names an
+environment that does not exist makes GitHub create it, with no reviewer and
+no branch policy.
 
 **Apply** (the repository's admin, once; user ids: firemanxbr 2116404,
 maralcbr 116872):
@@ -243,9 +255,9 @@ done
 # 2. The deploy token only where the pool environment admits the run.
 gh secret set CLOUDFLARE_API_TOKEN --env pool -R firemanxbr/omarchy-pool < cloudflare-token
 gh secret delete CLOUDFLARE_API_TOKEN -R firemanxbr/omarchy-pool
-# 3. The v* tag rulesets: creation (GitHub Actions, integration 15368, is its
-#    only bypass), then update and deletion (no bypass at all).
-gh api -X POST "$R/rulesets" --input .github/rulesets/tags.json
+# 3. The v* tag ruleset: update and deletion, no bypass at all. No creation
+#    rule: on a user-owned repository GitHub refuses GitHub Actions as a bypass
+#    actor (HTTP 422), so one would refuse release.yml's tag too (#351).
 gh api -X POST "$R/rulesets" --input .github/rulesets/tags-locked.json
 # 4. Immutable releases.
 gh api -X PUT "$R/immutable-releases"
@@ -270,7 +282,9 @@ gh api "$R/rulesets" --jq '.[] | { id, name, target, enforcement }'
 for id in $(gh api "$R/rulesets" --jq '.[] | select(.target == "tag") | .id'); do
   gh api "$R/rulesets/$id" --jq '{ name, include: .conditions.ref_name.include, rules: [.rules[].type], bypass: .bypass_actors }'
 done
-# include ["refs/tags/v*"] twice: rules [creation] with bypass [Integration 15368], and rules [update, deletion] with bypass []
+# one tag ruleset: include ["refs/tags/v*"], rules [update, deletion], bypass []
+gh api "$R/collaborators" --jq '[.[] | select(.permissions.push) | .login]'
+# who can create a v* tag: compare with GOVERNANCE.md's maintainers
 gh api "$R/rulesets/$(gh api "$R/rulesets" --jq '.[] | select(.target == "branch") | .id')" \
   --jq '.rules[] | select(.type == "pull_request") | .parameters | { required_approving_review_count, require_code_owner_review }'
 # 1 and true

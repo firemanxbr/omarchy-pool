@@ -671,7 +671,9 @@ nothing.
 architecture's leg pushes its `:<arch>-vX.Y.Z` and starts every role from it,
 and moves, tags or signs nothing else; the job that needs both legs moves
 every tag a host follows — `:vX.Y.Z`, then `:x86_64` and `:aarch64`, then
-`:latest`, each signed — and no other job does; the deploy needs it.
+`:latest`, each signed — and no other job does; the deploy needs it; and
+`publish` fails on a release that already exists (#351), never reusing assets
+this run did not build.
 `bash tests/trust-pins.sh` (CI) reads what the hosts' trust relies on in the
 repository (#308): `release.yml` and `rollback.yml` install one exact cosign
 through the installer pinned by commit, every `cosign sign` (there and in
@@ -681,8 +683,10 @@ rollback), `release.yml` writes nothing by default and every job that
 publishes waits behind `version`, which runs in `release`, the docs show the
 exact identity and no regexp, the base images are pinned by digest and the
 docker CLI by SHA-256, CODEOWNERS gives every maintainer the workflows, the
-host agent, the dispatcher and the host sets, and the two `v*` tag rulesets
-leave creating a tag to GitHub Actions and moving or deleting one to nobody.
+host agent, the dispatcher and the host sets, the one `v*` tag ruleset
+lets nobody move or delete a tag (no ruleset file restricts creation, which a
+user-owned repository cannot apply, #351); the host agent's pin on
+`release.yml@refs/heads/main`, never a tag, is its own cargo tests'.
 `bash tests/image-smoke.sh <image>` (the release, on each architecture's
 `:<arch>-vX.Y.Z` before any tag moves; CI, on a local build of the commit)
 starts every role from the image: the updater's `follows` label, the project
