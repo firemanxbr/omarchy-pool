@@ -497,6 +497,19 @@ broker.SPENT = broker.Spent()
 broker.SPENT.started -= 3601
 status, out = call("POST", "/v1/messages", {"model": "x", "max_tokens": 8, "messages": [{"role": "user", "content": "late"}]})
 assert status == 429 and "3600 s" in out["error"]["message"], out
+# One call cannot overshoot the token cap: the answer's max_tokens is clamped to what is left, and a
+# prompt larger than what is left is refused before it is sent.
+broker.agent.complete = real_complete
+os.environ["BROKER_AGENT_TOKENS"] = "100"
+broker.SPENT = broker.Spent()
+broker.SPENT.tokens = 90
+status, out = call("POST", "/v1/messages", {"model": "x", "max_tokens": 32000, "messages": [{"role": "user", "content": "short"}]})
+assert status == 200 and seen[-1]["max_tokens"] == 10, (status, seen[-1])
+broker.SPENT = broker.Spent()
+broker.SPENT.tokens = 90
+status, out = call("POST", "/v1/messages", {"model": "x", "max_tokens": 8, "messages": [{"role": "user", "content": "x" * 400}]})
+assert status == 429 and "more than this task's agent sidecar has left" in out["error"]["message"], out
+assert broker.SPENT.calls == 0, "a refused prompt is no call"
 # A provider that counts nothing: about four characters a token.
 broker.agent.complete = real_complete
 broker.SPENT = broker.Spent()

@@ -17,7 +17,10 @@
 //!
 //! Seams: the host's own public addresses reach `--deny` from the
 //! dispatcher's `OMARCHY_HOST_ADDRESSES`, which the install child issue
-//! (#317) writes; `DOCKER-USER` rules are prep-root.sh's (the P0 sets issue).
+//! (#317) writes; until it does, a task can CONNECT to them through this
+//! proxy, and prep-root.sh's INPUT drop does not stop that (it matches the
+//! task subnets, and this proxy's traffic comes from the `omarchy-egress`
+//! bridge). `DOCKER-USER` rules are prep-root.sh's (the P0 sets issue).
 
 use std::fmt::Write as _;
 use std::io::{self, Read as _, Write as _};

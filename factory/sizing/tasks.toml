@@ -23,7 +23,9 @@
 #                            # network instead of the task's internal one (still
 #                            # no IPv4 LAN, CGNAT or link-local where
 #                            # prep-root.sh's DOCKER-USER rules are in; the
-#                            # rules are IPv4 only, so IPv6 stays off on it)
+#                            # rules are IPv4 only, so IPv6 stays off on it);
+#                            # it covers every task of the package, a
+#                            # contributor's build or draft included
 #   reason   = "…"           # why, required with `network`; shown on the package page
 schema = 1
 

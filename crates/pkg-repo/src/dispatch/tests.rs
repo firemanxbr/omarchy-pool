@@ -60,6 +60,10 @@ struct FakeEngine {
     stuck: AtomicBool,
     /// The engine refuses to start the container whose name ends with this.
     refuse: Mutex<Option<String>>,
+    /// Each network's `--subnet`: a second network on a /28 still in use is refused, as the engines do.
+    subnets: Mutex<BTreeMap<String, String>>,
+    /// A lease's teardown leaves its network behind (a `network rm` past its deadline).
+    keep_network: AtomicBool,
 }
 
 fn label_of<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
@@ -183,6 +187,18 @@ impl Engine for FakeEngine {
                 if n.contains_key(*name) {
                     return Err(format!("network {name} already exists"));
                 }
+                let mut subnets = self.subnets.lock().unwrap();
+                if let Some(sub) = value_of(args, "--subnet") {
+                    if subnets
+                        .iter()
+                        .any(|(other, s)| s == sub && n.contains_key(other))
+                    {
+                        return Err(format!(
+                            "Pool overlaps with other one on this address space ({sub})"
+                        ));
+                    }
+                    subnets.insert((*name).to_owned(), sub.to_owned());
+                }
                 let host = label_of(args, HOST_LABEL).unwrap_or_default().to_owned();
                 n.insert((*name).to_owned(), (host, Vec::new()));
                 Ok(())
@@ -282,7 +298,8 @@ impl Engine for FakeEngine {
             }
         }
         let net = spec::container_name(task, gen);
-        if n.get(&net).is_some_and(|x| x.1.is_empty()) {
+        if n.get(&net).is_some_and(|x| x.1.is_empty()) && !self.keep_network.load(Ordering::SeqCst)
+        {
             n.remove(&net);
         }
         self.removed.lock().unwrap().push((task, gen.to_owned()));
@@ -2497,6 +2514,32 @@ fn orphan_sidecars_and_networks_of_this_host_go_at_start_and_nothing_else() {
         h.engine.has_network("omarchy-legacy_default"),
         "another project's network"
     );
+}
+
+#[test]
+fn a_network_its_teardown_left_does_not_cost_the_next_task_on_its_slot() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    h.give(community(7, GEN));
+    h.ticks(&mut d, 3);
+    assert_eq!(h.leases()[0].net_slot, Some(0));
+    // Its `network rm` does not take: the network stays on slot 0 after the lease is gone.
+    h.engine.keep_network.store(true, Ordering::SeqCst);
+    h.leave(7, GEN, &built_ok(), "log\n");
+    h.engine.exit(7, GEN, 0, false);
+    h.ticks(&mut d, 2);
+    assert_eq!(h.pool.completes_of(7).len(), 1);
+    assert!(h.leases().is_empty());
+    assert!(h.engine.has_network(&spec::container_name(7, GEN)));
+    h.engine.keep_network.store(false, Ordering::SeqCst);
+    // The next task gets slot 0 again; the stale network is swept before it, so its network is made.
+    h.give(community(8, GEN2));
+    h.advance(31);
+    h.ticks(&mut d, 3);
+    assert!(h.pool.fails_of(8).is_empty(), "{:?}", h.pool.fails_of(8));
+    assert!(h.engine.has(8, GEN2));
+    assert_eq!(h.leases()[0].net_slot, Some(0));
+    assert!(!h.engine.has_network(&spec::container_name(7, GEN)));
 }
 
 #[test]

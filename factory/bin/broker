@@ -91,18 +91,27 @@ class Spent:
     def on(self):
         return bool(self.file)
 
-    def take(self):
-        """None when one more completion may go — it is counted now — or why not."""
+    def take(self, prompt_tokens=0):
+        """None when one more completion may go — it is counted now — or why not. A prompt
+        larger than the tokens left is refused before it is sent: one call cannot overshoot
+        the cap by a context window."""
         with self.lock:
             if self.calls >= AGENT_CALLS:
                 return f"this task's agent sidecar answers at most {AGENT_CALLS} completions"
             if self.tokens_cap and self.tokens >= self.tokens_cap:
                 return f"this task's agent sidecar spent its {self.tokens_cap} tokens"
+            if self.tokens_cap and self.tokens + prompt_tokens > self.tokens_cap:
+                return f"this prompt (about {prompt_tokens} tokens) is more than this task's agent sidecar has left of its {self.tokens_cap} tokens"
             if self.wall and time.time() - self.started >= self.wall:
                 return f"this task's agent sidecar is past its {self.wall} s"
             self.calls += 1
         self.write()
         return None
+
+    def left(self, want):
+        """The answer's max_tokens, within what the cap leaves (the cap is per task, not per call)."""
+        with self.lock:
+            return max(1, min(want, self.tokens_cap - self.tokens)) if self.tokens_cap else want
 
     def add(self, tokens):
         with self.lock:
@@ -431,14 +440,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"type": "error", "error": {"type": "invalid_request_error", "message": "body is not JSON"}})
         if not agent.available():
             return self._json(503, {"type": "error", "error": {"type": "api_error", "message": "no agent key on the broker"}})
-        if SPENT.on():
-            refused = SPENT.take()
-            if refused:
-                return self._json(429, {"type": "error", "error": {"type": "rate_limit_error", "message": refused}})
-        elif HELD.current() is not None:
-            if HELD.agent_calls >= AGENT_CALLS:
-                return self._json(429, {"type": "error", "error": {"type": "rate_limit_error", "message": f"the broker answers at most {AGENT_CALLS} completions per task"}})
-            HELD.agent_calls += 1
         system = body.get("system") or ""
         if isinstance(system, list):  # the API also accepts a list of text blocks
             system = "\n".join(b.get("text", "") for b in system if isinstance(b, dict))
@@ -448,6 +449,16 @@ class Handler(BaseHTTPRequestHandler):
                 c = m.get("content")
                 user = c if isinstance(c, str) else "\n".join(b.get("text", "") for b in c if isinstance(b, dict))
         max_tokens = int(body.get("max_tokens") or 4000)
+        if SPENT.on():
+            # About four characters a token, as the count below assumes when the provider says nothing.
+            refused = SPENT.take((len(system) + len(user)) // 4)
+            if refused:
+                return self._json(429, {"type": "error", "error": {"type": "rate_limit_error", "message": refused}})
+            max_tokens = SPENT.left(max_tokens)
+        elif HELD.current() is not None:
+            if HELD.agent_calls >= AGENT_CALLS:
+                return self._json(429, {"type": "error", "error": {"type": "rate_limit_error", "message": f"the broker answers at most {AGENT_CALLS} completions per task"}})
+            HELD.agent_calls += 1
         with LOCK:
             agent.USAGE["tokens"] = 0
             try:

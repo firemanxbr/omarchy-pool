@@ -210,6 +210,8 @@ pub struct Net {
     /// `OMARCHY_SECRETS_DIR` on the host: its `agent.env` is mounted into agent sidecars, never read here.
     pub secrets_dir: Option<PathBuf>,
     pub caps: budget::Caps,
+    /// How the engine keeps a task network's gateway off the host: asked of the engine at start.
+    pub gateway: spec::Gateway,
 }
 
 impl Default for Net {
@@ -220,6 +222,7 @@ impl Default for Net {
             deny: Vec::new(),
             secrets_dir: None,
             caps: budget::Caps::default(),
+            gateway: spec::Gateway::Isolated,
         }
     }
 }
@@ -366,8 +369,8 @@ pub struct Dispatcher {
 struct Prober {
     last: Option<probe::Report>,
     job: Option<Job<probe::Report>>,
-    /// The /28 the running probe holds.
-    slot: Option<u32>,
+    /// The /28 and the generation the running probe holds.
+    holds: Option<(u32, String)>,
     failures: u32,
     next_at: u64,
     orders: Vec<(String, OrderKind)>,
@@ -457,10 +460,6 @@ impl Dispatcher {
     /// Re-adopts what a previous dispatcher left; `/ready` answers only after it.
     pub fn readopt(&mut self) -> Result<()> {
         let found = self.store.load().context("reading the lease files")?;
-        let names = self
-            .engine
-            .list(&self.host)
-            .map_err(|e| anyhow!("listing this host's task containers: {e}"))?;
         for p in &found.unreadable {
             say(format!("readopt-failed: {} does not read; its container goes, and the pool requeues the lease", p.display()));
             if let Some((id, gen)) = Store::named(p) {
@@ -469,36 +468,7 @@ impl Dispatcher {
             let _ = std::fs::remove_file(p);
         }
         let held: Vec<(u64, String)> = found.leases.iter().map(Lease::key).collect();
-        // Orphans of this host — task containers, their sidecars, a probe's, their networks — go; never
-        // anything another host or another compose project labelled (the legacy set has none of these labels).
-        for name in &names {
-            match spec::owner_of_name(name) {
-                Some(key) if held.contains(&key) => {}
-                Some(_) => {
-                    say(format!(
-                        "{name}: a container of this host without a lease file; removed"
-                    ));
-                    self.engine.remove_name(name);
-                }
-                None => {}
-            }
-        }
-        let networks = self
-            .engine
-            .networks(&self.host)
-            .map_err(|e| anyhow!("listing this host's task networks: {e}"))?;
-        for name in &networks {
-            match spec::owner_of_name(name) {
-                Some(key) if held.contains(&key) => {}
-                Some(_) => {
-                    say(format!(
-                        "{name}: a task network of this host without a lease file; removed"
-                    ));
-                    self.engine.remove_network(name);
-                }
-                None => {}
-            }
-        }
+        self.sweep(&held).map_err(|e| anyhow!(e))?;
         let now = self.probes.now();
         for lease in found.leases {
             let name = spec::container_name(lease.task.id, &lease.gen);
@@ -533,6 +503,39 @@ impl Dispatcher {
                 }
             }
             self.leases.insert(live.lease.key(), live);
+        }
+        Ok(())
+    }
+
+    /// Orphans of this host — task containers, their sidecars, a probe's, their networks — that no
+    /// lease (`held`) owns go; never anything another host or another compose project labelled (the
+    /// legacy set has none of these labels). At re-adoption, and before every /28 is chosen: a
+    /// teardown that failed once (an engine call past its deadline) leaves a network on its /28,
+    /// which the next `network create` there would overlap.
+    fn sweep(&self, held: &[(u64, String)]) -> Result<(), String> {
+        let names = self
+            .engine
+            .list(&self.host)
+            .map_err(|e| format!("listing this host's task containers: {e}"))?;
+        for name in &names {
+            if spec::owner_of_name(name).is_some_and(|k| !held.contains(&k)) {
+                say(format!(
+                    "{name}: a container of this host without a lease file; removed"
+                ));
+                self.engine.remove_name(name);
+            }
+        }
+        let networks = self
+            .engine
+            .networks(&self.host)
+            .map_err(|e| format!("listing this host's task networks: {e}"))?;
+        for name in &networks {
+            if spec::owner_of_name(name).is_some_and(|k| !held.contains(&k)) {
+                say(format!(
+                    "{name}: a task network of this host without a lease file; removed"
+                ));
+                self.engine.remove_network(name);
+            }
         }
         Ok(())
     }
@@ -573,7 +576,7 @@ impl Dispatcher {
         let Some(r) = poll(&mut self.probe.job) else {
             return;
         };
-        self.probe.slot = None;
+        self.probe.holds = None;
         self.probe.failures = if r.ok { 0 } else { self.probe.failures + 1 };
         self.probe.next_at = probe::next_after(now, self.probe.failures);
         let changed = self
@@ -605,13 +608,13 @@ impl Dispatcher {
             self.probe.next_at = now + probe::EVERY;
             return;
         };
-        self.probe.slot = Some(slot);
+        let gen = format!("g_{}", &orders::new_instance()[..16]);
+        self.probe.holds = Some((slot, gen.clone()));
         let (engine, host, net) = (
             Arc::clone(&self.engine),
             self.host.clone(),
             self.net.clone(),
         );
-        let gen = format!("g_{}", &orders::new_instance()[..16]);
         let work = move || {
             probe::ask(
                 &*engine,
@@ -621,6 +624,7 @@ impl Dispatcher {
                     worker_image: &net.worker_image,
                     subnets: net.subnets,
                     slot,
+                    gateway: net.gateway,
                     deny: &net.deny,
                     env_file: &env_file,
                 },
@@ -1001,6 +1005,7 @@ impl Dispatcher {
             subnets: self.net.subnets,
             slot,
             direct,
+            gateway: self.net.gateway,
             deny: &self.net.deny,
             agent: env_file.as_deref().map(|f| spec::Agent {
                 env_file: f,
@@ -1070,13 +1075,22 @@ impl Dispatcher {
         live
     }
 
-    /// The lowest /28 no lease and no probe holds.
+    /// The lowest /28 no lease and no probe holds, once what no lease or probe owns is swept.
     fn free_slot(&self) -> Option<u32> {
+        let held: Vec<(u64, String)> = self
+            .leases
+            .keys()
+            .cloned()
+            .chain(self.probe.holds.as_ref().map(|(_, g)| (0, g.clone())))
+            .collect();
+        if let Err(e) = self.sweep(&held) {
+            say(format!("the sweep before a task network: {e}"));
+        }
         let used: Vec<u32> = self
             .leases
             .values()
             .filter_map(|v| v.lease.net_slot)
-            .chain(self.probe.slot)
+            .chain(self.probe.holds.as_ref().map(|(s, _)| *s))
             .collect();
         (0..self.net.subnets.slots()).find(|i| !used.contains(i))
     }
@@ -1646,6 +1660,10 @@ pub fn run(opts: &Options) -> Result<()> {
         .with_context(|| format!("creating {}", opts.work_root.display()))?;
     let engine = engine::Cli::find()
         .ok_or_else(|| anyhow!("no container engine answers (docker, or podman)"))?;
+    let gateway = engine.gateway().map_err(|e| anyhow!("{e}"))?;
+    if gateway == spec::Gateway::Engine {
+        say("podman behind docker's API: a task network's gateway is the host's own address on its bridge; prep-root.sh's INPUT drop for the task subnets (rootful) is what keeps tasks off it");
+    }
     let terminating = Arc::new(AtomicBool::new(false));
     for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
         signal_hook::flag::register(sig, Arc::clone(&terminating)).context("signal handler")?;
@@ -1691,6 +1709,7 @@ pub fn run(opts: &Options) -> Result<()> {
     )?;
     d.terminating = Arc::clone(&terminating);
     d.net = opts.net.clone();
+    d.net.gateway = gateway;
     let progress = Arc::new(AtomicU64::new(epoch_now()));
     loop_watchdog(
         Arc::clone(&progress),

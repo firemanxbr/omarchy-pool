@@ -57,6 +57,29 @@ size="$(wc -c < "$t/log/task.log" | tr -d ' ')"
 grep -q 'the log was cut here at 1000000 bytes' "$t/log/task.log" || fail "no marker where the log was cut"
 echo "ok: the log is cut at its cap with a marker, and the task's status survives the cut"
 
+# A model kind's agent sidecar that binds late (a subscription's sidecar installs Claude Code first):
+# the task waits for its port, then goes on; one that never answers is waited for its bound only.
+late() { # wrapper-before-the-script [env…] — a trial, with the agent at 127.0.0.1:8790
+  local pre="$1"; shift
+  runs=$((runs + 1)); t="$tmp/t$runs"
+  mkdir -p "$t/in" "$t/out" "$t/log"
+  printf "staged=1\nkind='trial'\nname='felix'\narch='x86_64'\nkeyring='archlinux'\n" > "$t/in/meta.sh"
+  printf '%s\n' 'echo "TRIAL=ok"' > "$t/in/check.sh"
+  local e=() kv
+  for kv in ANTHROPIC_BASE_URL=http://127.0.0.1:8790 "$@"; do e+=(-e "$kv"); done
+  status=0
+  "$RT" run --rm --cap-drop ALL --security-opt no-new-privileges "${e[@]}" \
+    -v "$t/in:/task/in:ro" -v "$t/out:/task/out" -v "$t/log:/task/log" -v "$root:/pool:ro" \
+    "$STUB_IMAGE" bash -c "$pre exec bash /pool/factory/worker/omarchy-build-worker.sh --task" >/dev/null 2>&1 || status=$?
+}
+late '(sleep 4; exec perl -MIO::Socket::INET -e '"'"'my $s = IO::Socket::INET->new(LocalAddr => "127.0.0.1:8790", Listen => 5, ReuseAddr => 1) or die; while (my $c = $s->accept) { close $c }'"'"') &'
+[[ "$status" == 0 ]] || fail "a task whose agent binds late exited $status: $(cat "$t/log/task.log")"
+grep -q 'the agent sidecar at 127.0.0.1:8790 answers (after [1-9]' "$t/log/task.log" || fail "the wait for a late agent: $(cat "$t/log/task.log")"
+grep -qx 'TRIAL=ok' "$t/log/task.log" || fail "the task after the wait: $(cat "$t/log/task.log")"
+late '' AGENT_READY_S=2
+[[ "$status" == 0 ]] && grep -q 'did not answer in 2 s; going on' "$t/log/task.log" || fail "an agent that never answers: $status $(cat "$t/log/task.log")"
+echo "ok: a model task waits for its agent sidecar's port, bounded, before its first call"
+
 # A kind this release's script does not know.
 run nonsense 'true'
 [[ "$status" == 2 ]] || fail "an unknown kind exited $status"

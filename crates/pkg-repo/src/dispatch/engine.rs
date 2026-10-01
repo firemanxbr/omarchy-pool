@@ -100,6 +100,25 @@ impl Cli {
             })
     }
 
+    /// How this engine keeps a task network's gateway off the host ([`spec::Gateway`]): podman's own
+    /// CLI by `--disable-dns`; docker's by its isolated gateway mode, from Docker 28 (an older daemon
+    /// is refused, in its own words: it would make the network with the host's address on it); podman
+    /// behind docker's CLI (its API forces DNS on and drops docker's option) cannot be asked.
+    pub fn gateway(&self) -> Result<spec::Gateway, String> {
+        if self.runtime == "podman" {
+            return Ok(spec::Gateway::NoDns);
+        }
+        let out = self.call(&["version", "--format", "{{json .Server}}"])?;
+        if !out.status.success() {
+            return Err(format!(
+                "{} version: {}",
+                self.runtime,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        gateway_of(&String::from_utf8_lossy(&out.stdout))
+    }
+
     /// SIGKILL, then removed: podman's `rm -f` stops with SIGTERM and waits ten seconds first, and a
     /// sidecar's process, pid 1 without a handler, ignores SIGTERM.
     fn kill_rm(&self, name: &str) {
@@ -126,6 +145,39 @@ struct RawState {
     exit_code: i32,
     #[serde(rename = "OOMKilled", default)]
     oom_killed: bool,
+}
+
+/// `version --format '{{json .Server}}'` of docker's CLI, read: whose engine answers, and which Docker.
+pub fn gateway_of(json: &str) -> Result<spec::Gateway, String> {
+    #[derive(Deserialize)]
+    struct Component {
+        #[serde(rename = "Name", default)]
+        name: String,
+    }
+    #[derive(Deserialize)]
+    struct Server {
+        #[serde(rename = "Version", default)]
+        version: String,
+        #[serde(rename = "Components", default)]
+        components: Vec<Component>,
+    }
+    let s: Server = serde_json::from_str(json.trim())
+        .map_err(|_| format!("the engine's version does not read: {:?}", json.trim()))?;
+    if s.components.iter().any(|c| c.name.contains("Podman")) {
+        return Ok(spec::Gateway::Engine);
+    }
+    let major = s
+        .version
+        .split('.')
+        .next()
+        .and_then(|m| m.parse::<u32>().ok());
+    match major {
+        Some(m) if m >= 28 => Ok(spec::Gateway::Isolated),
+        _ => Err(format!(
+            "docker {:?} cannot keep a task network's gateway off the host (com.docker.network.bridge.gateway_mode_ipv4=isolated needs Docker 28 or newer); upgrade the engine",
+            s.version
+        )),
+    }
 }
 
 /// Whether `inspect`'s error says the container does not exist — docker: "No such container: …"
@@ -289,6 +341,17 @@ mod tests {
         let s = parse_state(podman).unwrap();
         assert!(s.running() && !s.oom_killed);
         assert_eq!(parse_state("no such container"), None);
+    }
+
+    #[test]
+    fn the_gateway_mode_by_the_engine_that_answers() {
+        let docker = r#"{"Platform":{"Name":"Docker Engine - Community"},"Components":[{"Name":"Engine","Version":"28.5.1"},{"Name":"containerd","Version":"v2.1.4"}],"Version":"28.5.1","ApiVersion":"1.51"}"#;
+        assert_eq!(gateway_of(docker), Ok(spec::Gateway::Isolated));
+        let old = r#"{"Components":[{"Name":"Engine","Version":"27.5.1"}],"Version":"27.5.1"}"#;
+        assert!(gateway_of(old).unwrap_err().contains("Docker 28"));
+        let podman = r#"{"Platform":{"Name":"linux/amd64/fedora-42"},"Components":[{"Name":"Podman Engine","Version":"5.6.1"},{"Name":"Conmon","Version":"2.1.13"}],"Version":"5.6.1","ApiVersion":"1.41"}"#;
+        assert_eq!(gateway_of(podman), Ok(spec::Gateway::Engine));
+        assert!(gateway_of("null").is_err() && gateway_of("").is_err());
     }
 
     #[test]

@@ -9,8 +9,13 @@
 #      egress sidecar (CONNECT and a plain GET); 169.254.169.254 is refused by
 #      the egress and unreachable directly; a public name that resolves to
 #      loopback is refused; a raw socket to a public address fails with
-#      "Network is unreachable"; the host's LAN address and its default
-#      gateway are unreachable; the other task's container, egress and agent
+#      "Network is unreachable"; the host's LAN address and its upstream
+#      router are unreachable; so is its own network's gateway (.1, where the
+#      engine puts the host's own address on the bridge) on a listener this
+#      test opens on 0.0.0.0, and on 22 and 53 — on docker (its isolated
+#      gateway mode) and podman's CLI (no DNS on the network); behind podman's
+#      docker API the engine cannot be asked, prep-root.sh's INPUT drop is the
+#      seam there and the test says so; the other task's container, egress and agent
 #      sidecar are unreachable directly and refused through the egress; the
 #      task's own agent sidecar answers
 #   2. the probe sidecar's word reaches the claim (`agent`): with a key the
@@ -34,10 +39,11 @@ RT="${RUNTIME:-$(command -v docker >/dev/null 2>&1 && echo docker || echo podman
 WORKER_IMAGE="${WORKER_IMAGE:-omarchy-worker:ci}"
 tmp="$(cd "$(mktemp -d)" && pwd -P)"
 host="h_net-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
-stub="" disp="" built=()
+stub="" disp="" gwl="" built=()
 cleanup() {
   [[ -z "$disp" ]] || kill -9 "$disp" 2>/dev/null || true
   [[ -z "$stub" ]] || kill "$stub" 2>/dev/null || true
+  [[ -z "$gwl" ]] || kill "$gwl" 2>/dev/null || true
   local c
   for c in $("$RT" ps -aq --filter "label=org.omarchy-pool.agent.host=$host" 2>/dev/null); do "$RT" kill "$c" >/dev/null 2>&1 || true; "$RT" rm -f "$c" >/dev/null 2>&1 || true; done
   for c in $("$RT" network ls -q --filter "label=org.omarchy-pool.agent.host=$host" 2>/dev/null); do "$RT" network rm "$c" >/dev/null 2>&1 || true; done
@@ -67,13 +73,22 @@ build_id="$("$RT" build -q -f "$tmp/build-image/Containerfile" "$tmp/build-image
 built+=("$build_id")
 subnets="10.$((200 + RANDOM % 50)).$(( (RANDOM % 16) * 16 )).0/20"
 
-# The host's LAN address and its default gateway, as this machine sees them (a container must reach neither).
+# The host's LAN address and its upstream router, as this machine sees them (a container must reach neither).
 if command -v ip >/dev/null 2>&1; then
   read -r router lan < <(ip -4 route get 1.1.1.1 | awk '{for (i = 1; i <= NF; i++) { if ($i == "via") r = $(i + 1); if ($i == "src") s = $(i + 1) } } END { print r, s }')
 else
   router="$(route -n get default 2>/dev/null | awk '/gateway:/ { print $2 }')"; lan="$(ipconfig getifaddr en0 2>/dev/null || true)"
 fi
 router="${router:-192.168.0.1}"; lan="${lan:-192.168.0.2}"
+
+# A service of the host on every address: a task must not reach it through its network's gateway.
+gw_port=$((22000 + RANDOM % 2000))
+python3 -c 'import socket, sys
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("0.0.0.0", int(sys.argv[1]))); s.listen(16)
+while True: s.accept()[0].close()' "$gw_port" & gwl=$!
+# Behind podman's docker API the gateway stays the host's (the engine forces DNS on and drops docker's option).
+gw_expected=closed
+if [[ "$(basename "$RT")" != podman ]] && "$RT" version --format '{{json .Server.Components}}' 2>/dev/null | grep -q Podman; then gw_expected=seam; fi
 
 # The release checkout: the probe task, and a sizing file that gives one package its exception.
 mkdir -p "$tmp/checkout/factory/worker" "$tmp/checkout/factory/sizing" "$tmp/work" "$tmp/secrets"
@@ -99,6 +114,7 @@ say meta_direct "$(curl -s --noproxy '*' --max-time 5 http://169.254.169.254/ >/
 say raw_public "$(raw_patient 1.1.1.1 443 | tr '\n' ' ')"
 say lan_direct "$(raw "$LAN" 22 | grep -c reached)"
 say router_direct "$(raw "$ROUTER" 80 | grep -c reached)"
+for p in $GW_PORT 22 53; do say "gw_direct_$p" "$(raw "$GATEWAY" "$p" | grep -c reached)"; done
 for t in $OTHER; do say "other_direct_$t" "$(raw "${t%:*}" "${t#*:}" | grep -c reached)"; done
 say other_agent_proxy "$(code "http://$OTHER_AGENT:8790/health")"
 if [[ -n "${ANTHROPIC_BASE_URL:-}" ]]; then say own_agent "$(code "$ANTHROPIC_BASE_URL/health")"; fi
@@ -164,6 +180,8 @@ give() { # id name ref — one task for the next claim
 until_() { local n="$1" what="$2"; shift 2; for _ in $(seq "$n"); do "$@" && return 0; sleep 1; done; fail "after ${n}s: $what"; }
 running() { [[ "$("$RT" inspect --format '{{.State.Status}}' "$1" 2>/dev/null)" == running ]]; }
 ip_on() { "$RT" inspect "$1" | jq -r --arg n "$2" '.[0].NetworkSettings.Networks[$n].IPAddress'; }
+# A network's .1, where the engine would put the host's own address: from its subnet (an isolated one lists no gateway).
+gateway_of() { "$RT" network inspect "$1" | jq -r '.[0] | (.IPAM.Config[0].Subnet // .subnets[0].subnet)' | awk -F'[./]' '{ print $1 "." $2 "." $3 "." $4 + 1 }'; }
 result() { sed -n "s/^$2=//p" "$tmp/work/tasks/$1-$(gen "$1")/log/net.txt"; }
 done_() { [[ -f "$tmp/work/tasks/$1-$(gen "$1")/log/net.done" ]]; }
 gone() { ! "$RT" inspect --type container "$1" >/dev/null 2>&1; }
@@ -184,7 +202,7 @@ running "$B-agent" && fail "a build without a model has an agent sidecar"
 targets() { # me other
   local o="$2"
   {
-    echo "LAN=$lan"; echo "ROUTER=$router"
+    echo "LAN=$lan"; echo "ROUTER=$router"; echo "GATEWAY=$(gateway_of "$1")"; echo "GW_PORT=$gw_port"
     echo "OTHER='$(ip_on "$o" "$o"):22 $(ip_on "$o-egress" "$o"):3128 $( [[ "$o" == "$A" ]] && echo "$(ip_on "$A-agent" "$A"):8790")'"
     echo "OTHER_AGENT=$(ip_on "$A-agent" "$A")"
   } > "$tmp/targets.tmp"
@@ -202,14 +220,21 @@ for t in 1 2; do
   [[ "$(result "$t" rebind_proxy)" == 403 ]] || fail "task $t: a public name resolving to loopback: $(result "$t" rebind_proxy)"
   [[ "$(result "$t" meta_direct)" == failed ]] || fail "task $t reached 169.254.169.254 directly"
   [[ "$(result "$t" raw_public)" == *"Network is unreachable"* ]] || fail "task $t: a raw socket: $(result "$t" raw_public)"
-  [[ "$(result "$t" lan_direct)" == 0 && "$(result "$t" router_direct)" == 0 ]] || fail "task $t reached the host's LAN address or its gateway"
+  [[ "$(result "$t" lan_direct)" == 0 && "$(result "$t" router_direct)" == 0 ]] || fail "task $t reached the host's LAN address or its upstream router"
+  for p in "$gw_port" 22 53; do
+    if [[ "$gw_expected" == closed ]]; then
+      [[ "$(result "$t" "gw_direct_$p")" == 0 ]] || fail "task $t reached the host through its network's gateway ($p)"
+    elif [[ "$(result "$t" "gw_direct_$p")" != 0 ]]; then
+      echo "note: task $t reached its network's gateway on $p — podman behind docker's API; prep-root.sh's INPUT drop (rootful) is what closes it"
+    fi
+  done
   for k in $(sed -n 's/^\(other_direct_[^=]*\)=.*/\1/p' "$tmp/work/tasks/$t-$(gen "$t")/log/net.txt"); do
     [[ "$(result "$t" "$k")" == 0 ]] || fail "task $t reached the other task: $k"
   done
 done
 [[ "$(result 2 other_agent_proxy)" == 403 ]] || fail "task B reached A's agent through its egress: $(result 2 other_agent_proxy)"
 [[ "$(result 1 own_agent)" =~ ^[2-5][0-9][0-9]$ ]] || fail "task A's own agent sidecar did not answer: $(result 1 own_agent)"
-echo "ok: a task reaches a public mirror through its egress only — not metadata, a name resolving to loopback, a raw socket ('Network is unreachable'), the host's LAN address or gateway, the other task's container, egress or agent; its own agent answers"
+echo "ok: a task reaches a public mirror through its egress only — not metadata, a name resolving to loopback, a raw socket ('Network is unreachable'), the host's LAN address or upstream router, its network's gateway ($gw_expected), the other task's container, egress or agent; its own agent answers"
 
 # ---------- 2. the probe sidecar ----------
 probe_said() { jq -c 'select(.path == "/api/v1/factory/claim") | .body.agent // empty' "$tmp/requests.jsonl" | tail -n1; }

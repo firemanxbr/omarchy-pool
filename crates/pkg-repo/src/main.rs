@@ -787,6 +787,8 @@ fn main() -> Result<()> {
                         minutes_per_task: agent_minutes_per_task.max(1),
                         calls_per_day: agent_calls_per_day,
                     },
+                    // Asked of the engine when the dispatcher starts.
+                    ..dispatch::Net::default()
                 },
             })
         }

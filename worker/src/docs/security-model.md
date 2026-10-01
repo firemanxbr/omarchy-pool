@@ -143,10 +143,16 @@ secret). Everything travels in the `Authorization` header over TLS only.
   and an audit's agent belongs to the audit, whose container runs no recipe.
   The audit quotes the build's output as data, has no tool with side
   effects, and its report is evidence for a maintainer, never a gate.
-  Stated plainly: an internal network's bridge address is the host itself,
-  on docker and on podman alike, so a service of the host listening on all
-  addresses is reachable from a task; the host's firewall
-  (`prep-root.sh`) must close it.
+  An internal network's bridge address is otherwise the host itself, so
+  the dispatcher asks the engine to leave it off: Docker's isolated gateway
+  mode (Docker 28 or newer; an older daemon is refused) or, on podman's own
+  CLI, a network without DNS. Stated plainly: podman behind docker's API
+  cannot be asked (it forces DNS on and drops docker's option), so there a
+  service of the host listening on all addresses is reachable from a task
+  unless the host's firewall (`prep-root.sh`'s INPUT drop for the task
+  subnets) closes it. A signed `factory/sizing` exception is per package:
+  it also covers a contributor's recipe of that package, so its reviewer
+  approves exactly that.
 - **A log that carries a secret is refused.** Text evidence uploaded to
   staging is read whole and checked for the shapes of the pool's tokens,
   agents' keys, GitHub's and the clouds' tokens, private keys, credentials

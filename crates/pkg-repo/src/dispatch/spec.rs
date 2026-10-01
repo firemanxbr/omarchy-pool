@@ -14,7 +14,9 @@
 //!
 //! **Its network** (#336, D38, D49) is its own: an `--internal` network
 //! `omarchy-task-<id>-<gen>` on a /28 of `OMARCHY_TASK_SUBNETS`, which no
-//! other task, the host, its LAN, the dispatcher or the pool is on. Its one
+//! other task, the host, its LAN, the dispatcher or the pool is on, with no
+//! address of the host as its gateway where the engine can be asked
+//! ([`Gateway`]). Its one
 //! way out is its **egress sidecar** (`<network>-egress`, the worker image's
 //! `egress` role: `pkg-repo egress`), which listens on its own address of
 //! that network and is also attached to the shared `omarchy-egress` bridge,
@@ -256,11 +258,6 @@ impl Subnets {
         (i < self.slots()).then(|| Slot(self.base + 16 * i))
     }
 
-    /// The slot whose /28 is `cidr`, if it is one of this range's.
-    pub fn slot_of(&self, cidr: &str) -> Option<u32> {
-        (0..self.slots()).find(|&i| self.slot(i).is_some_and(|s| s.cidr() == cidr))
-    }
-
     pub fn cidr(&self) -> String {
         format!("{}/{}", std::net::Ipv4Addr::from(self.base), self.prefix)
     }
@@ -276,6 +273,21 @@ impl Slot {
     pub fn agent_ip(self) -> String {
         std::net::Ipv4Addr::from(self.0 + 3).to_string()
     }
+}
+
+/// How the engine keeps a task network's gateway address off the host (design v2 §10.2 inv. 8):
+/// an internal network's `.1` is otherwise the host's own address on its bridge, and packets to
+/// it go through INPUT, which neither `--internal` nor `DOCKER-USER` filters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gateway {
+    /// Docker 28 or newer: `com.docker.network.bridge.gateway_mode_ipv4=isolated`, no address on the bridge.
+    Isolated,
+    /// podman's own CLI: `--disable-dns`, which leaves netavark's bridge without the gateway address.
+    NoDns,
+    /// podman behind docker's API, which forces DNS on and drops docker's option: the address stays.
+    /// Seam: prep-root.sh's INPUT drop for the task subnets (rootful), or the install child issue's
+    /// preflight probe (#317), is what keeps a task off it there.
+    Engine,
 }
 
 /// A model kind's agent sidecar: where its keys are, and its per-task caps (D45).
@@ -313,6 +325,8 @@ pub struct Spec<'a> {
     pub slot: u32,
     /// The package's signed network exception (`factory/sizing`): a bridge network, no egress sidecar.
     pub direct: bool,
+    /// How this engine keeps the internal network's gateway off the host.
+    pub gateway: Gateway,
     /// Addresses the egress refuses besides the built-in ranges and `subnets`: the host's own.
     pub deny: &'a [String],
     /// The agent sidecar of a model kind; `None` on a host with no agent key.
@@ -322,14 +336,6 @@ pub struct Spec<'a> {
 /// The container's name: `omarchy-task-<id>-<gen>`, its network's too.
 pub fn container_name(task: u64, gen: &str) -> String {
     format!("{NAME_PREFIX}{task}-{gen}")
-}
-
-/// The lease a container's name says it runs, when it is one of ours.
-pub fn lease_of_name(name: &str) -> Option<(u64, String)> {
-    let rest = name.trim_start_matches('/').strip_prefix(NAME_PREFIX)?;
-    let (id, gen) = rest.split_once('-')?;
-    let id: u64 = id.parse().ok().filter(|&i| i > 0)?;
-    gen_ok(gen).then(|| (id, gen.to_owned()))
 }
 
 /// The lease a container, a sidecar or a network of ours belongs to, by its name — task 0 is a probe's.
@@ -359,6 +365,7 @@ struct Side<'a> {
     subnets: Subnets,
     slot: Slot,
     direct: bool,
+    gateway: Gateway,
     deny: &'a [String],
 }
 
@@ -397,11 +404,19 @@ impl Side<'_> {
         ]
     }
 
-    /// `network create`: internal, unless the package has its signed exception.
+    /// `network create`: internal with no gateway address on the host, unless the package has its signed exception.
     fn network(&self) -> Vec<String> {
         let mut a: Vec<String> = vec!["network".into(), "create".into()];
         if !self.direct {
             a.push("--internal".into());
+            match self.gateway {
+                Gateway::Isolated => a.extend([
+                    "-o".into(),
+                    "com.docker.network.bridge.gateway_mode_ipv4=isolated".into(),
+                ]),
+                Gateway::NoDns => a.push("--disable-dns".into()),
+                Gateway::Engine => {}
+            }
         }
         a.extend(["--subnet".into(), self.slot.cidr()]);
         a.extend(self.labels(None));
@@ -611,6 +626,7 @@ fn side_of<'a>(s: &Spec<'a>) -> Result<Side<'a>, String> {
         subnets: s.subnets,
         slot,
         direct: s.direct,
+        gateway: s.gateway,
         deny: s.deny,
     })
 }
@@ -625,6 +641,7 @@ pub struct Probe<'a> {
     pub worker_image: &'a str,
     pub subnets: Subnets,
     pub slot: u32,
+    pub gateway: Gateway,
     pub deny: &'a [String],
     pub env_file: &'a Path,
 }
@@ -651,6 +668,7 @@ pub fn probe_plan(p: &Probe<'_>) -> Result<(Vec<Vec<String>>, Vec<String>), Stri
             .slot(p.slot)
             .ok_or_else(|| format!("slot {} is outside {}", p.slot, p.subnets.cidr()))?,
         direct: false,
+        gateway: p.gateway,
         deny: p.deny,
     };
     let mut setup = vec![side.network()];
@@ -827,6 +845,19 @@ mod tests {
         Subnets::parse("10.231.0.0/16").unwrap()
     }
 
+    /// The slot whose /28 is `cidr`, if it is one of this range's.
+    fn slot_of(range: Subnets, cidr: &str) -> Option<u32> {
+        (0..range.slots()).find(|&i| range.slot(i).is_some_and(|s| s.cidr() == cidr))
+    }
+
+    /// The lease a task container's name says it runs (never task 0, never a sidecar's).
+    fn lease_of_name(name: &str) -> Option<(u64, String)> {
+        let rest = name.trim_start_matches('/').strip_prefix(NAME_PREFIX)?;
+        let (id, gen) = rest.split_once('-')?;
+        let id: u64 = id.parse().ok().filter(|&i| i > 0)?;
+        gen_ok(gen).then(|| (id, gen.to_owned()))
+    }
+
     fn env_file() -> &'static Path {
         Path::new("/srv/omarchy/secrets/agent.env")
     }
@@ -849,6 +880,7 @@ mod tests {
             subnets: subnets(),
             slot: 3,
             direct: false,
+            gateway: Gateway::Isolated,
             deny: &[],
             agent: Some(Agent {
                 env_file: env_file(),
@@ -1244,11 +1276,18 @@ mod tests {
                     if net.is_some() {
                         return Err("a second network".into());
                     }
-                    let (mut internal, mut subnet, mut name) = (false, None, None);
+                    let (mut internal, mut isolated, mut subnet, mut name) =
+                        (false, false, None, None);
                     let mut it = rest.iter();
                     while let Some(w) = it.next() {
                         match *w {
                             "--internal" => internal = true,
+                            "-o" => match it.next() {
+                                Some(&"com.docker.network.bridge.gateway_mode_ipv4=isolated") => {
+                                    isolated = true;
+                                }
+                                o => return Err(format!("network option outside the spec: {o:?}")),
+                            },
                             "--subnet" => subnet = it.next().copied(),
                             "--label" => {
                                 let l = it.next().ok_or("--label without a value")?;
@@ -1264,12 +1303,18 @@ mod tests {
                     if internal == direct {
                         return Err(format!("the network is internal: {internal}, the package's exception: {direct}"));
                     }
+                    // Docker's plan (the CI engine): an internal network's gateway is no address of the host.
+                    if isolated != internal {
+                        return Err(format!(
+                            "the network is internal: {internal}, its gateway isolated: {isolated}"
+                        ));
+                    }
                     let name = name.ok_or("a network without a name")?;
                     owner_of_name(name)
                         .filter(|_| !name.ends_with("-egress") && !name.ends_with("-agent"))
                         .ok_or_else(|| format!("network name {name}"))?;
                     let slot = subnet
-                        .and_then(|s| range.slot_of(s))
+                        .and_then(|s| slot_of(range, s))
                         .and_then(|i| range.slot(i))
                         .ok_or_else(|| {
                             format!("subnet {subnet:?} is not a /28 of {}", range.cidr())
@@ -1385,6 +1430,8 @@ mod tests {
                 "network",
                 "create",
                 "--internal",
+                "-o",
+                "com.docker.network.bridge.gateway_mode_ipv4=isolated",
                 "--subnet",
                 "10.231.0.48/28",
                 "--label",
@@ -1507,7 +1554,9 @@ mod tests {
             agent_b[agent_b.iter().position(|x| x == "--network").unwrap() + 1],
             "omarchy-task-813-g_fedcba9876543210"
         );
-        let subnet = |p: &[Vec<String>]| p[0][4].clone();
+        let subnet = |p: &[Vec<String>]| {
+            p[0][p[0].iter().position(|x| x == "--subnet").unwrap() + 1].clone()
+        };
         assert_ne!(subnet(&pa), subnet(&pb));
     }
 
@@ -1660,7 +1709,7 @@ mod tests {
         assert_eq!(n.slot(17).unwrap().cidr(), "10.231.1.16/28");
         assert_eq!(n.slot(17).unwrap().egress_ip(), "10.231.1.18");
         assert_eq!(n.slot(17).unwrap().agent_ip(), "10.231.1.19");
-        assert_eq!(n.slot_of("10.231.1.16/28"), Some(17));
+        assert_eq!(slot_of(n, "10.231.1.16/28"), Some(17));
         assert_eq!(n.slot(4096), None);
         for bad in [
             "10.231.0.1/16",
@@ -1681,6 +1730,7 @@ mod tests {
             worker_image: WORKER,
             subnets: subnets(),
             slot: 9,
+            gateway: Gateway::Isolated,
             deny: &[],
             env_file: env_file(),
         };
@@ -1694,6 +1744,35 @@ mod tests {
         assert!(setup[0]
             .iter()
             .any(|x| x == "omarchy-task-0-g_0123456789abcdef"));
+    }
+
+    /// The internal network's gateway, per engine: docker's isolated mode, podman's CLI without DNS,
+    /// nothing podman's docker API would take (prep-root.sh's INPUT drop is the seam there); a
+    /// signed exception's bridge keeps its gateway, its way out.
+    #[test]
+    fn the_gateway_is_no_address_of_the_host_where_the_engine_can_say_so() {
+        let (tdir, rel, _) = dirs();
+        for (gateway, flags) in [
+            (
+                Gateway::Isolated,
+                &["-o", "com.docker.network.bridge.gateway_mode_ipv4=isolated"][..],
+            ),
+            (Gateway::NoDns, &["--disable-dns"][..]),
+            (Gateway::Engine, &[][..]),
+        ] {
+            let mut s = spec(Kind::Build, &tdir, &rel);
+            s.gateway = gateway;
+            let p = plan(&s).unwrap();
+            let sub = p[0].iter().position(|x| x == "--subnet").unwrap();
+            assert_eq!(p[0][2], "--internal");
+            assert_eq!(p[0][3..sub], *flags, "{gateway:?}");
+            s.direct = true;
+            let p = plan(&s).unwrap();
+            assert_eq!(
+                p[0][2], "--subnet",
+                "{gateway:?}: a bridge keeps its gateway"
+            );
+        }
     }
 
     /// The reader itself: each thing the spec forbids, added to a good plan, is refused.
@@ -1798,8 +1877,17 @@ mod tests {
         open[0].retain(|x| x != "--internal");
         forbidden.push(open);
         let mut wide = good.clone();
-        wide[0][4] = "10.0.0.0/8".into();
+        let sub = wide[0].iter().position(|x| x == "--subnet").unwrap() + 1;
+        wide[0][sub] = "10.0.0.0/8".into();
         forbidden.push(wide);
+        // An internal network whose gateway is the host's address, or with another option.
+        let mut host_gw = good.clone();
+        let o = host_gw[0].iter().position(|x| x == "-o").unwrap();
+        host_gw[0].drain(o..o + 2);
+        forbidden.push(host_gw);
+        let mut other_opt = good.clone();
+        other_opt[0][o + 1] = "com.docker.network.bridge.gateway_mode_ipv4=nat".into();
+        forbidden.push(other_opt);
         let mut second = good.clone();
         let agent = second[at(&second, "-agent")].clone();
         second.insert(1, agent);

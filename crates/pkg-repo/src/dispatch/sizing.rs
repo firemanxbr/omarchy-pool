@@ -5,6 +5,10 @@
 //! sidecar; nothing else is read here yet (sizes and disk budgets are P2's,
 //! the pool's to apply).
 //!
+//! An exception is the package's, whatever the task's trust or kind: a
+//! contributor's build or draft of a listed package runs on that bridge too,
+//! so whoever approves an entry approves that.
+//!
 //! The file ships in the signed release, and CODEOWNERS makes every
 //! maintainer an owner of `factory/sizing/`: an entry is a maintainer's
 //! decision another maintainer approved in a pull request. A file that does

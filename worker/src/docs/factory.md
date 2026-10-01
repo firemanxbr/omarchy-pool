@@ -518,11 +518,13 @@ out        /task/out: the kind's closed list under its caps (a build: packages, 
            (the engine keeps no log of a task container); exited with no verdict.json, or a verdict of a
            SIGTERM or SIGKILL, fails `lost` (a reboot, a shutdown): the attempt is given back
 exit 75    a restart order, or a loop without progress for 15 min: task containers run on, the next dispatcher re-adopts them
-network    per lease (#336): an --internal network omarchy-task-<id>-<gen> on a /28 of OMARCHY_TASK_SUBNETS; its egress
+network    per lease (#336): an --internal network omarchy-task-<id>-<gen> on a /28 of OMARCHY_TASK_SUBNETS, its gateway
+           off the host (docker ≥ 28: gateway_mode_ipv4=isolated; podman's CLI: --disable-dns); its egress
            sidecar <network>-egress (pkg-repo egress: CONNECT, GET, HEAD to public addresses only, judged by the
            resolved address) on the shared omarchy-egress bridge and on the task's network, the task's HTTP(S)_PROXY;
            a model kind's agent sidecar <network>-agent (the broker, agent.env read-only, its caps in BROKER_AGENT_*,
-           its usage in <task dir>/agent); all removed with the lease, orphans of this host swept at start;
+           its usage in <task dir>/agent); all removed with the lease, orphans of this host swept at start and
+           before each /28 is chosen;
            factory/sizing network = "direct" (with a reason): a bridge network of its own, no egress
 agent      the claim's agent: {provider, model, probe, error, checked_at} from a probe sidecar on a network of its own
            (at start, every 30 min, sooner after a failure, and for recheck-agent / restart-agent); the day's agent
