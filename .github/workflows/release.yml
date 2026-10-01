@@ -8,7 +8,8 @@ name: Release
 # last tag (patch by default; the head commit's pull request label
 # `release:minor` or `release:major`, or the bump given, moves the other
 # numbers), binaries are built for both architectures, a GitHub release is
-# published with notes from every pull request since the last tag, the worker
+# published with notes from every pull request since the last tag (carrying
+# build-images.json: the task build images, resolved to digests, #312), the worker
 # image is pushed for both architectures — as `:<arch>-vX.Y.Z` first, every
 # role started from it on the runner (tests/image-smoke.sh), and only once
 # both architectures' have started, `:<arch>` and `:latest` (#277: an image
@@ -135,9 +136,31 @@ jobs:
           path: dist/*.tar.gz*
           if-no-files-found: error
 
+  build-images:
+    name: Task build images by digest
+    # The image every task's build container starts from, one per
+    # architecture, resolved to the digest its tag names now (#312,
+    # factory/bin/build-images): a tag that does not resolve fails the
+    # release before anything is published. The release attaches
+    # build-images.json (the manifest's inner.images.build), uploaded with
+    # the release itself (immutable releases): what the host bundle renders
+    # into the host set's dispatcher as OMARCHY_BUILD_IMAGE_AARCH64 and
+    # OMARCHY_BUILD_IMAGE_X86_64. The job summary shows both digests. The
+    # runner's own buildx answers; no setup action joins this job.
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: mkdir -p dist && factory/bin/build-images dist/build-images.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-build-images
+          path: dist/build-images.json
+          if-no-files-found: error
+
   publish:
     name: GitHub release
-    needs: [version, build]
+    needs: [version, build, build-images]
     permissions:
       contents: write
     runs-on: ubuntu-latest

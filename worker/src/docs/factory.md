@@ -347,7 +347,8 @@ maintainer's host.
 Anything with `podman` or `docker` and `curl` is a project worker: a
 laptop, a VM, a Droplet. **Every task builds in a fresh Arch container**
 (`archlinux:base-devel` for x86_64, `menci/archlinuxarm:base-devel` for
-aarch64) that sees the PKGBUILD and the network and nothing else; the worker
+aarch64; on a host the agent runs, by the digest the release pinned: see
+[the security model](/docs/security-model)) that sees the PKGBUILD and the network and nothing else; the worker
 process on the host holds only its own token, publishes the result and the
 pool signs it — no key ever sits on a worker. A host builds its own
 architecture natively and the other one emulated (`--arch`).

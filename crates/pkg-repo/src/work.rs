@@ -13,6 +13,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -2620,6 +2621,163 @@ fn verify_job(opts: &WorkOptions, job: &Api, task: &Task) -> Result<Outcome> {
     })
 }
 
+/// One lane's build image (#312): the release pins it by digest
+/// (`build-images.json`, the manifest's `inner.images.build`;
+/// factory/bin/build-images), the host set hands it to the
+/// dispatcher as `var`, and a container the agent does not manage yet,
+/// without `var`, falls back to the tag — and says so once per process for
+/// each lane (a worker that builds both arches says it for each).
+struct BuildLane {
+    var: &'static str,
+    tag: &'static str,
+    platform: &'static str,
+    warned: AtomicBool,
+}
+
+const fn build_lanes() -> [BuildLane; 2] {
+    [
+        BuildLane {
+            var: "OMARCHY_BUILD_IMAGE_AARCH64",
+            tag: "docker.io/menci/archlinuxarm:base-devel",
+            platform: "linux/arm64",
+            warned: AtomicBool::new(false),
+        },
+        BuildLane {
+            var: "OMARCHY_BUILD_IMAGE_X86_64",
+            tag: "docker.io/library/archlinux:base-devel",
+            platform: "linux/amd64",
+            warned: AtomicBool::new(false),
+        },
+    ]
+}
+
+static BUILD_LANES: [BuildLane; 2] = build_lanes();
+
+/// The image and platform of `arch`'s build container: the variable the
+/// release rendered when it is set and not empty, else the tag. The third
+/// value is the warning to print, only the first time a lane falls back or
+/// is handed something that is not a digest (a hand-edited container; the
+/// host set's lint and the agent's manifest refuse one).
+fn build_image(
+    lanes: &[BuildLane; 2],
+    arch: &str,
+    var: impl Fn(&str) -> Option<String>,
+) -> (String, &'static str, Option<String>) {
+    let lane = if arch == "aarch64" {
+        &lanes[0]
+    } else {
+        &lanes[1]
+    };
+    if let Some(image) = var(lane.var)
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+    {
+        let warning = (!image.contains("@sha256:") && !lane.warned.swap(true, Ordering::Relaxed))
+            .then(|| {
+                format!(
+                    "warning: {} names {image}, not a digest; {arch} builds start from it, which no release pins (#312)",
+                    lane.var
+                )
+            });
+        return (image, lane.platform, warning);
+    }
+    let warning = (!lane.warned.swap(true, Ordering::Relaxed)).then(|| {
+        format!(
+            "warning: {} is not set; {arch} builds start from the tag {}, which no release pins (#312)",
+            lane.var, lane.tag
+        )
+    });
+    (lane.tag.to_owned(), lane.platform, warning)
+}
+
+/// [`build_image`] from this process's environment.
+fn task_build_image(arch: &str) -> (String, &'static str) {
+    let (image, platform, warning) = build_image(&BUILD_LANES, arch, |v| std::env::var(v).ok());
+    if let Some(w) = warning {
+        say(w);
+    }
+    (image, platform)
+}
+
+/// The build container a task runs in, from `image`: the release's build
+/// image for the task's lane ([`task_build_image`]).
+fn build_container(
+    runtime: &str,
+    image: &str,
+    platform: &str,
+    task: &Task,
+    dir: &Path,
+    repo: &Path,
+    labels: &serde_json::Value,
+) -> Result<Command> {
+    let mut cmd = Command::new(runtime);
+    // Named, and labelled with the task (#277): a stop removes the task's containers by that label — the build's container outlives a killed client.
+    cmd.args([
+        "run",
+        "--rm",
+        "--platform",
+        platform,
+        "--name",
+        &format!("omarchy-build-{}", task.id),
+        "--label",
+        &format!("{}={}", stop::TASK_LABEL, task.id),
+        "-v",
+    ])
+    .arg(format!("{}:/task", dir.display()));
+    // The release's own checkout — the drafter, the auditor's tooling, the
+    // prompts, the skills, the pool's key — rides into the plain Arch
+    // container read-only, so a build clones nothing: builds go on when
+    // GitHub does not answer (2026-09-17), and the script and its tooling
+    // are always the same release.
+    cmd.arg("-v")
+        .arg(format!("{}:/pool:ro", repo.display()))
+        .arg("-e")
+        .arg("OMARCHY_FACTORY_LIB=/pool/factory");
+    // What the operator hands every build container: the agent's address
+    // (OMARCHY_BUILD_ENV, comma-separated KEY=VALUE — the agent-proxy on the
+    // Studio, where Claude Code cannot run under qemu) and the network it
+    // is on (OMARCHY_BUILD_NETWORK). A review build needs an agent inside.
+    if let Ok(envs) = std::env::var("OMARCHY_BUILD_ENV") {
+        for kv in envs.split(',').map(str::trim).filter(|kv| kv.contains('=')) {
+            cmd.arg("-e").arg(kv);
+        }
+    }
+    // The worker's labels ride along: an emulated worker's build container
+    // probes the toolchains a recipe installs (omarchy-build-worker.sh,
+    // toolchains_start, libraries_start) and fails at once when one cannot
+    // start. The labels this worker claimed with (`--labels`, or
+    // WORKER_LABELS), not the environment's own: what the container
+    // probes, what this worker reports and what the pool heeds are one.
+    cmd.arg("-e").arg(format!("WORKER_LABELS={labels}"));
+    if let Ok(net) = std::env::var("OMARCHY_BUILD_NETWORK") {
+        if !net.is_empty() {
+            cmd.arg("--network").arg(net);
+        }
+    }
+    // No GITHUB_TOKEN in there: the drafter reads GitHub through the broker
+    // (GITHUB_API in OMARCHY_BUILD_ENV, factory/bin/broker) — the build
+    // container is born with nothing (/docs/security-model, *Isolation*).
+    // A package cache shared by every build container on this host
+    // (OMARCHY_PKG_CACHE, one directory per architecture): pacman downloads
+    // a dependency once, not once per build.
+    if let Some(cache) = pkg_cache_dir(&task.arch)? {
+        cmd.arg("-v")
+            .arg(format!("{}:/var/cache/pacman/pkg", cache.display()));
+    }
+    // Build caches that outlive the container (OMARCHY_BUILD_CACHE): cargo's
+    // registry, Go's module and build caches, ccache — a Rust or Go package
+    // rebuilds in minutes, not tens. Under `project/<arch>`: what the
+    // project's builds write, only the project's builds read — a community
+    // container on the same host mounts `community/<arch>` (factory/host/
+    // compose.yml) — and inside, the script keeps one directory per package.
+    if let Some(cache) = cache_dir("OMARCHY_BUILD_CACHE", &format!("project/{}", task.arch))? {
+        cmd.arg("-v")
+            .arg(format!("{}:/build/cache", cache.display()));
+    }
+    cmd.args([image, "bash", "/task/worker.sh", "--inside"]);
+    Ok(cmd)
+}
+
 /// A project build: the PKGBUILD (from the repository, a contributor's
 /// repository, a draft, or a staged build a maintainer approved) built in a
 /// fresh Arch container by the pipeline's own script, then signed,
@@ -2695,79 +2853,10 @@ fn build_job(opts: &WorkOptions, task: &Task, token: &Arc<Mutex<String>>) -> Res
         .iter()
         .find(|r| Command::new(r).arg("--version").output().is_ok())
         .ok_or_else(|| anyhow!("podman or docker is required"))?;
-    let (image, platform) = if task.arch == "aarch64" {
-        ("docker.io/menci/archlinuxarm:base-devel", "linux/arm64")
-    } else {
-        ("docker.io/library/archlinux:base-devel", "linux/amd64")
-    };
+    let (image, platform) = task_build_image(&task.arch);
     let log = std::fs::File::create(dir.join("build.log"))?;
-    let mut run = Command::new(runtime);
-    // Named, and labelled with the task (#277): a stop removes the task's containers by that label — the build's container outlives a killed client.
-    run.args([
-        "run",
-        "--rm",
-        "--platform",
-        platform,
-        "--name",
-        &format!("omarchy-build-{}", task.id),
-        "--label",
-        &format!("{}={}", stop::TASK_LABEL, task.id),
-        "-v",
-    ])
-    .arg(format!("{}:/task", dir.display()));
-    // The release's own checkout — the drafter, the auditor's tooling, the
-    // prompts, the skills, the pool's key — rides into the plain Arch
-    // container read-only, so a build clones nothing: builds go on when
-    // GitHub does not answer (2026-09-17), and the script and its tooling
-    // are always the same release.
-    run.arg("-v")
-        .arg(format!("{}:/pool:ro", repo.display()))
-        .arg("-e")
-        .arg("OMARCHY_FACTORY_LIB=/pool/factory");
-    // What the operator hands every build container: the agent's address
-    // (OMARCHY_BUILD_ENV, comma-separated KEY=VALUE — the agent-proxy on the
-    // Studio, where Claude Code cannot run under qemu) and the network it
-    // is on (OMARCHY_BUILD_NETWORK). A review build needs an agent inside.
-    if let Ok(envs) = std::env::var("OMARCHY_BUILD_ENV") {
-        for kv in envs.split(',').map(str::trim).filter(|kv| kv.contains('=')) {
-            run.arg("-e").arg(kv);
-        }
-    }
-    // The worker's labels ride along: an emulated worker's build container
-    // probes the toolchains a recipe installs (omarchy-build-worker.sh,
-    // toolchains_start, libraries_start) and fails at once when one cannot
-    // start. The labels this worker claimed with (`--labels`, or
-    // WORKER_LABELS), not the environment's own: what the container
-    // probes, what this worker reports and what the pool heeds are one.
-    run.arg("-e").arg(format!("WORKER_LABELS={}", opts.labels));
-    if let Ok(net) = std::env::var("OMARCHY_BUILD_NETWORK") {
-        if !net.is_empty() {
-            run.arg("--network").arg(net);
-        }
-    }
-    // No GITHUB_TOKEN in there: the drafter reads GitHub through the broker
-    // (GITHUB_API in OMARCHY_BUILD_ENV, factory/bin/broker) — the build
-    // container is born with nothing (/docs/security-model, *Isolation*).
-    // A package cache shared by every build container on this host
-    // (OMARCHY_PKG_CACHE, one directory per architecture): pacman downloads
-    // a dependency once, not once per build.
-    if let Some(cache) = pkg_cache_dir(&task.arch)? {
-        run.arg("-v")
-            .arg(format!("{}:/var/cache/pacman/pkg", cache.display()));
-    }
-    // Build caches that outlive the container (OMARCHY_BUILD_CACHE): cargo's
-    // registry, Go's module and build caches, ccache — a Rust or Go package
-    // rebuilds in minutes, not tens. Under `project/<arch>`: what the
-    // project's builds write, only the project's builds read — a community
-    // container on the same host mounts `community/<arch>` (factory/host/
-    // compose.yml) — and inside, the script keeps one directory per package.
-    if let Some(cache) = cache_dir("OMARCHY_BUILD_CACHE", &format!("project/{}", task.arch))? {
-        run.arg("-v")
-            .arg(format!("{}:/build/cache", cache.display()));
-    }
-    run.args([image, "bash", "/task/worker.sh", "--inside"])
-        .stdout(log.try_clone()?)
-        .stderr(log);
+    let mut run = build_container(runtime, &image, platform, task, &dir, &repo, &opts.labels)?;
+    run.stdout(log.try_clone()?).stderr(log);
     let status = stop::status(&mut run).context("running the build container")?;
     stop::check()?;
     // The pool is spoken to only now, with the token the heartbeat last
@@ -4934,5 +5023,112 @@ mod stop_tests {
             plain.post_json("/factory/x", &serde_json::json!({})),
             Err(RepoError::Stopped)
         ));
+    }
+}
+
+/// #312: the build container's image is the release's digest, not a tag.
+#[cfg(test)]
+mod build_image_tests {
+    use super::{build_container, build_image, build_lanes, Task};
+
+    const ARM: &str = "docker.io/menci/archlinuxarm@sha256:15fa2527d481a6b8ddce7d49c535bfd3a2a63a6d7d840ace551fd21c1827c08b";
+    const X86: &str = "docker.io/library/archlinux@sha256:64b24587e2ec8bb619b79542591e28f38515fbe9dcb546460c7fec193a15f157";
+
+    fn rendered(var: &str) -> Option<String> {
+        match var {
+            "OMARCHY_BUILD_IMAGE_AARCH64" => Some(ARM.into()),
+            "OMARCHY_BUILD_IMAGE_X86_64" => Some(X86.into()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn the_release_digest_is_used_for_both_arches_when_set() {
+        let lanes = build_lanes();
+        assert_eq!(
+            build_image(&lanes, "aarch64", rendered),
+            (ARM.to_owned(), "linux/arm64", None)
+        );
+        assert_eq!(
+            build_image(&lanes, "x86_64", rendered),
+            (X86.to_owned(), "linux/amd64", None)
+        );
+        // Nothing fell back, so the warning is still unspent: the first fallback prints it.
+        let (_, _, warning) = build_image(&lanes, "x86_64", |_| None);
+        assert!(warning.is_some());
+    }
+
+    #[test]
+    fn unset_or_empty_falls_back_to_the_tag_and_warns_once_per_lane() {
+        let lanes = build_lanes();
+        for (i, var) in [None, Some(String::new()), Some("  ".to_owned())]
+            .into_iter()
+            .enumerate()
+        {
+            let (image, platform, warning) = build_image(&lanes, "aarch64", |_| var.clone());
+            assert_eq!(
+                (image.as_str(), platform),
+                ("docker.io/menci/archlinuxarm:base-devel", "linux/arm64")
+            );
+            assert_eq!(warning.is_some(), i == 0, "{var:?}");
+            if let Some(w) = warning {
+                assert!(w.contains("OMARCHY_BUILD_IMAGE_AARCH64"), "{w}");
+            }
+        }
+        // The other lane warns on its own, once.
+        let (image, platform, warning) = build_image(&lanes, "x86_64", |_| None);
+        assert_eq!(
+            (image.as_str(), platform),
+            ("docker.io/library/archlinux:base-devel", "linux/amd64")
+        );
+        assert!(warning.unwrap().contains("OMARCHY_BUILD_IMAGE_X86_64"));
+        assert!(build_image(&lanes, "x86_64", |_| None).2.is_none());
+    }
+
+    #[test]
+    fn a_value_that_is_not_a_digest_is_used_but_warns_once() {
+        let lanes = build_lanes();
+        let tag = |_: &str| Some("docker.io/library/archlinux:base-devel".to_owned());
+        let (image, _, warning) = build_image(&lanes, "x86_64", tag);
+        assert_eq!(image, "docker.io/library/archlinux:base-devel");
+        assert!(warning.unwrap().contains("not a digest"));
+        assert!(build_image(&lanes, "x86_64", tag).2.is_none());
+    }
+
+    #[test]
+    fn the_run_argv_starts_the_container_from_the_chosen_image() {
+        let dir = tempfile::tempdir().unwrap();
+        for (arch, image, platform) in [
+            ("aarch64", ARM, "linux/arm64"),
+            ("x86_64", X86, "linux/amd64"),
+        ] {
+            let task: Task = serde_json::from_value(serde_json::json!({
+                "id": 9, "kind": "build", "name": "zlib", "arch": arch, "trust": "project",
+            }))
+            .unwrap();
+            let lanes = build_lanes();
+            let (img, plat, _) = build_image(&lanes, arch, rendered);
+            let cmd = build_container(
+                "docker",
+                &img,
+                plat,
+                &task,
+                dir.path(),
+                dir.path(),
+                &serde_json::json!({}),
+            )
+            .unwrap();
+            let argv: Vec<String> = cmd
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(cmd.get_program(), "docker");
+            assert_eq!(argv[..4], ["run", "--rm", "--platform", platform]);
+            assert_eq!(
+                argv[argv.len() - 4..],
+                [image, "bash", "/task/worker.sh", "--inside"]
+            );
+            assert!(!argv.iter().any(|a| a.contains(":base-devel")), "{argv:?}");
+        }
     }
 }
