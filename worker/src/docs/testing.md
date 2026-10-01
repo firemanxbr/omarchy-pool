@@ -670,8 +670,12 @@ nothing.
 `bash tests/release-workflow.sh` (CI) reads `release.yml` itself: each
 architecture's leg pushes its `:<arch>-vX.Y.Z` and starts every role from it,
 and moves, tags or signs nothing else; the job that needs both legs moves
-every tag a host follows — `:vX.Y.Z`, then `:x86_64` and `:aarch64`, then
-`:latest`, each signed — and no other job does; the deploy needs it; and
+`:vX.Y.Z` only, signed; `worker-image-tags`, which needs `publish-release`,
+moves every tag a host follows — `:x86_64` and `:aarch64`, then `:latest`,
+each signed, the three `release-rollback` moves back — and no other job
+does; with the jobs' needs run as GitHub runs them, a failure in
+`host-bundle`, `verify-agents`, `host-bundle-upload` or `publish-release`
+moves no tag a host follows (#359); the deploy needs `worker-image-tags`; and
 `publish` fails on a published release or on a `v*` tag of the version at
 another commit (#351), and makes a draft an earlier run left again (#311),
 never reusing assets this run did not build.
