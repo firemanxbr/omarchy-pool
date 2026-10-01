@@ -45,8 +45,28 @@ async function workerRow(env: Env, id: string): Promise<(WorkerRow & OrderWorker
 
 /** The task a worker holds, by its row's current_task (the primary key): what Stop its task decides on and says. */
 export const HELD_TASK_SQL = "SELECT id, kind, name, arch, version, owner, trust, status, lease_owner, lease_expires_at, stop_order, attempts, max_attempts, params FROM build_tasks WHERE id = ?";
-async function heldTask(env: Env, w: { current_task: number | null }): Promise<HeldTask | null> {
-  return w.current_task ? env.DB.prepare(HELD_TASK_SQL).bind(w.current_task).first<HeldTask>() : null;
+/** The tasks a host's registration holds (#334): its leases, by the lease index — a host has no current_task. */
+export const HELD_TASKS_SQL = "SELECT id, kind, name, arch, version, owner, trust, status, lease_owner, lease_expires_at, stop_order, attempts, max_attempts, params FROM build_tasks WHERE status = 'leased' AND lease_owner = ? ORDER BY id";
+export async function heldTasks(env: Env, w: { id: string; kind?: string | null; current_task: number | null }): Promise<HeldTask[]> {
+  if (w.kind === "host") return (await env.DB.prepare(HELD_TASKS_SQL).bind(w.id).all<HeldTask>()).results;
+  const t = w.current_task ? await env.DB.prepare(HELD_TASK_SQL).bind(w.current_task).first<HeldTask>() : null;
+  return t ? [t] : [];
+}
+/**
+ * The task Stop its task acts on: a legacy registration's one task; on a host, the task the stop names (the door then checks it is
+ * leased to the host now, and not stopped), or its one lease when it names none.
+ */
+async function heldTask(env: Env, w: { id: string; kind?: string | null; current_task: number | null }, named?: unknown): Promise<HeldTask | null> {
+  if (w.kind === "host") {
+    const id = Number(named);
+    // A task that does not exist is one it does not hold: the door says so by its number.
+    if (named !== undefined && named !== null && Number.isSafeInteger(id) && id > 0) {
+      return (await env.DB.prepare(HELD_TASK_SQL).bind(id).first<HeldTask>()) ?? { id, kind: "", name: "", arch: "", version: null, owner: null, trust: "", status: "gone", lease_owner: null, lease_expires_at: null, stop_order: null, attempts: 0, max_attempts: 0, params: null };
+    }
+    const all = await heldTasks(env, w);
+    return all.length === 1 ? all[0] : null;
+  }
+  return (await heldTasks(env, w))[0] ?? null;
 }
 
 /** A task as a stop's words name it: a build by its package, version, architecture and whose it is; a pool job by what it does. */
@@ -146,11 +166,12 @@ export async function handleIssueOrder(c: Contributor, id: string, request: Requ
   const w = await workerRow(env, id);
   if (!w) return json({ error: "no such worker" }, 404);
   const now = Date.now();
-  const [facts, held] = await Promise.all([orderFacts(env, w.id, c.login, now), kind === "stop-task" ? heldTask(env, w) : null]);
+  const host = w.kind === "host";
+  const [facts, held] = await Promise.all([orderFacts(env, w.id, c.login, now, host), kind === "stop-task" ? heldTask(env, w, b.task) : null]);
   facts.task = held;
   const verdict = orderVerdicts(c, w, facts)[RIGHT_OF[kind]];
   // The login's cap is journaled once per hour whichever check met it first: this one, or the INSERT's.
-  if (!verdict.ok && verdict.status === 409 && facts.loginHour >= MAX_ORDERS_PER_LOGIN_HOUR && verdict.why === loginCapWords(c.login, facts.loginFreeAt)) return json({ error: await capRefusal(env, { worker: w.id, kind, by: c.login, now }) }, 409);
+  if (!verdict.ok && verdict.status === 409 && facts.loginHour >= MAX_ORDERS_PER_LOGIN_HOUR && verdict.why === loginCapWords(c.login, facts.loginFreeAt)) return json({ error: await capRefusal(env, { worker: w.id, kind, by: c.login, now, host }) }, 409);
   if (!verdict.ok) return json({ error: verdict.why }, verdict.status);
   // The task the page saw: only a restriction — the stop is of the task the worker holds now, or of none.
   if (kind === "stop-task" && b.task !== undefined && b.task !== null && Number(b.task) !== held!.id) return json({ error: `it holds #${held!.id} now, not #${String(b.task).slice(0, 20)}` }, 409);
@@ -168,10 +189,12 @@ export async function handleIssueOrder(c: Contributor, id: string, request: Requ
   const issued = await issueOrder(env, {
     worker: w.id, owner: w.owner, kind, reason, by: c.login, via, rule: null, unless, site: w.site, baselineAtIssue: w.agent_checked_at, now,
     task: stop ? stop.task : null,
+    host,
     resumed: kind === "resume" ? { detail: `resumed by ${c.login}: it is handed work again from its next claim`, drain: `resumed by ${c.login} before its next claim` } : undefined,
     line: { status: kind === "drain" || kind === "stop-task" ? "warn" : "ok", summary },
   });
   if (!issued.ok) {
+    if (issued.why === "open" && kind === "stop-task" && host) return json({ error: `task #${stop!.task} is being stopped already: it goes back to the queue once this host's dispatcher has stopped it` }, 409);
     if (issued.why === "open") {
       const open = openOrdersOf((await env.DB.prepare("SELECT open_orders FROM build_workers WHERE id = ?").bind(w.id).first<{ open_orders: string | null }>())?.open_orders).find((o) => o.kind === kind);
       return json({ error: `${KIND_LABEL[kind].toLowerCase()} is waiting already${open ? ` (${open.id}, by ${open.by})` : ""}` }, 409);
@@ -182,14 +205,14 @@ export async function handleIssueOrder(c: Contributor, id: string, request: Requ
       const again = await workerRow(env, w.id);
       if (kind === "drain" && again?.drained_at) return json({ error: `drained already (${drainWords(again)}) — Resume ends it` }, 409);
       if (kind === "resume" && again && !again.drained_at) return json({ error: "it is not drained: there is nothing to resume" }, 409);
-      if (kind === "stop-task") {
+      if (kind === "stop-task" && !host) {
         const now2 = again ? await heldTask(env, again) : null;
         if (!now2 || now2.status !== "leased" || now2.lease_owner !== w.id) return json({ error: "idle: there is no task to stop" }, 409);
         if (now2.id !== stop!.task) return json({ error: `it holds #${now2.id} now, not #${stop!.task}` }, 409);
         if (now2.stop_order) return json({ error: `task #${now2.id} is being stopped already: it goes back to the queue once this worker has stopped it` }, 409);
       }
     }
-    return json({ error: await capRefusal(env, { worker: w.id, kind, by: c.login, now }) }, 409);
+    return json({ error: await capRefusal(env, { worker: w.id, kind, by: c.login, now, host }) }, 409);
   }
   const note = stop ? `${w.id} hears it at its next heartbeat: ${stopNote(stop)}. Nothing is cancelled.`
     : kind === "drain" ? `the pool hands it nothing from its next claim${w.current_task ? `; task #${w.current_task} runs to its end` : ""}. Builds asked for it by name go to the shared queue after ${FIRST_PICK_MINUTES} min. Resume ends it.`
@@ -350,7 +373,7 @@ export async function handleWorkerCan(c: Contributor | null, id: string, env: En
   const w = await workerRow(env, id);
   if (!w) return json({ error: "no such worker" }, 404, NO_STORE);
   const now = Date.now();
-  const [facts, held] = await Promise.all([orderFacts(env, w.id, c?.login ?? null, now), heldTask(env, w)]);
+  const [facts, held] = await Promise.all([orderFacts(env, w.id, c?.login ?? null, now, w.kind === "host"), heldTask(env, w)]);
   facts.task = held;
   const v = orderVerdicts(c, w, facts);
   const can: Record<string, boolean> = {};

@@ -26,7 +26,8 @@ import { fromB64url } from "./webauthn";
 
 interface Resources { cpus: number; mem_gb: number }
 export interface MinHost extends Resources { work_disk_gb: number; engine_disk_gb: number }
-interface SignedCapacity { min: MinHost; reserve: Resources; unit: Resources; units: { job_reserved: number } }
+interface TaskUnits { build_per_size: number; trial: number; audit: number; job: number; job_reserved: number }
+interface SignedCapacity { max_size: number; community_max_size: number; min: MinHost; reserve: Resources; unit: Resources; units: TaskUnits; disk: { build_gb_per_size: number } }
 
 const SIGNED = (parse(manifestToml) as unknown as { capacity: SignedCapacity }).capacity;
 /** The minimum a host must have to join (D30), as the release signs it. */
@@ -34,6 +35,11 @@ export const MIN_HOST: Readonly<MinHost> = Object.freeze({ ...SIGNED.min });
 /** What a host keeps for itself, and one capacity unit (design v2 §7.3). */
 export const RESERVE: Readonly<Resources> = Object.freeze({ ...SIGNED.reserve });
 export const UNIT: Readonly<Resources> = Object.freeze({ ...SIGNED.unit });
+/** The units a task takes, by kind, and the one kept for pool jobs (D30); a build's size is clamped to these (#334). */
+export const TASK_UNITS: Readonly<TaskUnits> = Object.freeze({ ...SIGNED.units });
+export const MAX_SIZE = SIGNED.max_size;
+export const COMMUNITY_MAX_SIZE = SIGNED.community_max_size;
+export const BUILD_GB_PER_SIZE = SIGNED.disk.build_gb_per_size;
 
 /** An enrollment token lives this long, and is spent once. */
 export const ENROLL_TTL_MIN = 15;

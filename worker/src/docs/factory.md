@@ -473,6 +473,30 @@ POST /factory/tasks/:id/artifacts/:name/multipart?action=create · part&part=N&u
                                                                    the project's review build included (bitwarden, 144 MB, 2026-09-17)
 ```
 
+A maintainer host's registration (#321, `kind = host`) claims as its dispatcher (#334, design v2 §8.1):
+
+```
+POST /factory/claim   {arch, version, hostname, kinds, agent: {provider, model, probe}, usage?,
+                       claim_id,            c_…, new per attempt: a retry after a lost answer reuses it and gets the same lease, a fresh token
+                       want,                1 to take a task, 0 to reconcile and take orders only (every 30 s while it is full)
+                       capacity,            {cpus, mem_gb, disk_free_gb: {work, engine}, units, job_reserved, agent_slots, lanes} (required with want 1)
+                       leases}              [{task, gen}]: every lease the dispatcher holds
+  400 a field missing or malformed: nothing is guessed
+```
+
+Each lease has a random generation (`build_tasks.lease_gen`, `g_<16 hex>`), carried in its job token
+(`g`): a heartbeat, a report or an upload is taken only from the token of that very lease, so a
+token of an earlier lease of the same task on the same host is refused (409, `stop: true`). The
+pool compares `leases` with its own: an unfenced lease two consecutive claims did not list goes
+back to the queue once it is 2 minutes old, its attempt given back; a fenced one (a Stop) ends
+when a claim no longer lists it, or at the lease's end. It leases only what fits, from its own
+leases: their units plus the task's within min(declared units, units recomputed from the totals
+with the signed constants, the pool's cap), one unit kept for pool jobs, model work within
+`agent_slots`, and in P1 one build (or trial) and one audit. A host takes builds of every trust,
+trials and audits. A Stop is per lease (`task` names it; several open at once, 30 an hour per
+login), and `fail` takes `lost: true` (a host event: the attempt given back, twice per task at
+most) and `oom: true` (the engine's kill: the attempt spent, the reason kept).
+
 A claim is one `UPDATE … WHERE id = (SELECT … LIMIT 1) RETURNING *`; D1
 serialises writes, so two workers never receive the same task. Only the lease
 owner can heartbeat, complete or fail it (409 otherwise). The scheduler's cron

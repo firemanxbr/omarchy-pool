@@ -66,6 +66,12 @@ export const POOL_KINDS: readonly OrderKind[] = ["drain", "resume", "stop-task"]
 
 /** The kinds that restart something: they share the per-worker hourly cap, the pool's hourly cap and the per-site pacing. */
 export const RESTART_GROUP: readonly OrderKind[] = ["restart", "restart-agent", "update", "stop-task"];
+/**
+ * A host's registration (#334, design v2 §8.6) holds several leases, and Stop is per lease: on a host, stop-task leaves the restart
+ * group and its per-worker cap — two Stops for two leases are open at once — and is capped per login instead, MAX_STOPS_PER_LOGIN_HOUR.
+ */
+export const HOST_RESTART_GROUP: readonly OrderKind[] = RESTART_GROUP.filter((k) => k !== "stop-task");
+export const MAX_STOPS_PER_LOGIN_HOUR = 30;
 const POOL_RESTARTS: readonly OrderKind[] = ["restart", "restart-agent"];
 
 /** The step machine's timings, in minutes; WORKER_RULES_SCALE divides these five in development only (rulesScale). */
@@ -807,8 +813,11 @@ export interface OrderWorker {
 /** The task a worker holds, as Stop its task reads it: by the worker row's current_task, the primary key. */
 export interface HeldTask { id: number; kind: string; name: string; arch: string; version: string | null; owner: string | null; trust: string; status: string; lease_owner: string | null; lease_expires_at: string | null; stop_order: string | null; attempts: number; max_attempts: number; params: string | null }
 
-/** What the counts say, read once for the door and /can: the worker's orders in the last hour by group — its drains too (#277, part 2) —, the caller's, and when the oldest of each leaves the window — and the task it holds (Stop its task), and the release the pool runs, which Update compares with (part 3). */
-export interface OrderFacts { now: number; restartsHour: number; rechecksHour: number; loginHour: number; restartsFreeAt: string | null; rechecksFreeAt: string | null; loginFreeAt: string | null; drainsHour?: number; drainsFreeAt?: string | null; task?: HeldTask | null; pool?: Pick<RunningVersion, "version" | "deployed_at"> }
+/** What the counts say, read once for the door and /can: the worker's orders in the last hour by group — its drains too (#277, part 2) —, the caller's, and when the oldest of each leaves the window — and the task it holds (Stop its task), and the release the pool runs, which Update compares with (part 3). On a host (#334), the caller's stops in the hour, and the task the stop names. */
+export interface OrderFacts { now: number; restartsHour: number; rechecksHour: number; loginHour: number; restartsFreeAt: string | null; rechecksFreeAt: string | null; loginFreeAt: string | null; drainsHour?: number; drainsFreeAt?: string | null; task?: HeldTask | null; pool?: Pick<RunningVersion, "version" | "deployed_at">; stopsHour?: number; stopsFreeAt?: string | null }
+
+/** A host's stops by one login in an hour (#334), the same words at the door and on /can. */
+export const stopCapWords = (login: string, freeAt: string | null | undefined) => `${login} stopped ${MAX_STOPS_PER_LOGIN_HOUR} host tasks in an hour; further stops refused until ${freeAt ? clock(freeAt) : "the hour ends"}`;
 
 /** The per-login cap's words, the same at the door, on /can and in the journal's one line. */
 export const loginCapWords = (login: string, freeAt: string | null) => `${login} reached ${MAX_ORDERS_PER_LOGIN_HOUR} orders in an hour; further orders refused until ${freeAt ? clock(freeAt) : "the hour ends"}`;
@@ -908,6 +917,13 @@ export function orderVerdicts(c: { login: string; role: string } | null, w: Orde
     }
     // Stop its task: the task it holds now, not stopped already.
     const t = f.task ?? null;
+    // A host's (#334): per lease — the task the stop names, leased to it now and not stopped already; several open at once, no
+    // per-worker cap, the login's stops capped instead.
+    if (w.kind === "host") {
+      if (!t || t.status !== "leased" || t.lease_owner !== w.id) return no(409, t ? `it does not hold #${t.id} now: there is nothing to stop` : "no task to stop: name one of the leases it holds now (task)");
+      if (t.stop_order) return no(409, `task #${t.id} is being stopped already: it goes back to the queue once this host's dispatcher has stopped it`);
+      return (f.stopsHour ?? 0) >= MAX_STOPS_PER_LOGIN_HOUR ? no(409, stopCapWords(c!.login, f.stopsFreeAt)) : allow;
+    }
     if (!w.current_task || !t || t.id !== w.current_task || t.status !== "leased" || t.lease_owner !== w.id) return no(409, "idle: there is no task to stop");
     if (t.stop_order) return no(409, `task #${t.id} is being stopped already: it goes back to the queue once this worker has stopped it`);
     return waiting(kind) ?? restartsCap ?? login ?? allow;
@@ -1042,6 +1058,8 @@ export const refreshOpen = (env: Env, worker: string) => env.DB.prepare(REFRESH_
 /** The caps' counts, each by the index its WHERE starts with (EXPLAIN QUERY PLAN pins them). */
 export const COUNT_WORKER_SQL = "SELECT COUNT(*) AS n, MIN(issued_at) AS oldest FROM worker_orders WHERE worker_id = ?1 AND kind IN (SELECT value FROM json_each(?2)) AND issued_at > ?3";
 export const COUNT_ISSUER_SQL = "SELECT COUNT(*) AS n, MIN(issued_at) AS oldest FROM worker_orders WHERE issued_by = ?1 AND kind != 'resume' AND issued_at > ?2";
+/** A login's stops in the hour (#334): a host's per-lease Stop is capped per login. */
+export const COUNT_LOGIN_STOPS_SQL = "SELECT COUNT(*) AS n, MIN(issued_at) AS oldest FROM worker_orders WHERE issued_by = ?1 AND kind = 'stop-task' AND issued_at > ?2";
 /** The pool's own orders since a time, both its identities, and those of one of them: its budget's and its hourly cap's counts, for the words a refusal says. */
 export const POOL_ORDERS_SQL = `SELECT COUNT(*) AS n, MIN(issued_at) AS oldest FROM worker_orders WHERE issued_by IN ${POOL_IN} AND issued_at > ?1`;
 export const POOL_RESTARTS_SQL = `SELECT COUNT(*) AS n FROM worker_orders WHERE issued_by IN ${POOL_IN} AND kind IN ('restart', 'restart-agent') AND issued_at > ?1`;
@@ -1063,7 +1081,9 @@ export const COMMUNITY_RESTARTS_SQL = `SELECT COUNT(*) AS n FROM worker_orders W
 export const ISSUE_SQL = `INSERT INTO worker_orders (id, worker_id, kind, reason, issued_by, via, rule, unless_agent_ok, task_id, site, issued_at, expires_at, baseline_at_issue, state, delivered_at, delivered_to, baseline)
 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17
  WHERE (?3 = 'resume' OR (SELECT COUNT(*) FROM worker_orders WHERE worker_id = ?2 AND kind IN (SELECT value FROM json_each(?18)) AND issued_at > ?19) < ?20)
-   AND (?5 IN ${POOL_IN} OR ?3 = 'resume' OR (SELECT COUNT(*) FROM worker_orders WHERE issued_by = ?5 AND kind != 'resume' AND issued_at > ?19) < ${MAX_ORDERS_PER_LOGIN_HOUR})
+   AND (?5 IN ${POOL_IN} OR ?3 = 'resume' OR CASE WHEN ?3 = 'stop-task' AND (SELECT kind FROM build_workers WHERE id = ?2) = 'host'
+     THEN (SELECT COUNT(*) FROM worker_orders WHERE issued_by = ?5 AND kind = 'stop-task' AND issued_at > ?19) < ${MAX_STOPS_PER_LOGIN_HOUR}
+     ELSE (SELECT COUNT(*) FROM worker_orders WHERE issued_by = ?5 AND kind != 'resume' AND issued_at > ?19) < ${MAX_ORDERS_PER_LOGIN_HOUR} END)
    AND (?5 NOT IN ${POOL_IN} OR ?3 NOT IN ('restart', 'restart-agent') OR (SELECT COUNT(*) FROM worker_orders WHERE issued_by IN ${POOL_IN} AND kind IN ('restart', 'restart-agent') AND issued_at > ?19) < ${MAX_POOL_RESTARTS_PER_HOUR})
    AND (?5 != '${POOL_COMMUNITY}' OR ?3 NOT IN ('restart', 'restart-agent') OR (SELECT COUNT(*) FROM worker_orders WHERE issued_by = '${POOL_COMMUNITY}' AND kind IN ('restart', 'restart-agent') AND issued_at > ?19) < ${MAX_POOL_COMMUNITY_RESTARTS_PER_HOUR})
    AND (?5 NOT IN ${POOL_IN} OR (SELECT COUNT(*) FROM worker_orders WHERE issued_by IN ${POOL_IN} AND issued_at > ?21) < ${MAX_POOL_ORDERS_PER_DAY})
@@ -1091,6 +1111,8 @@ export interface IssueAsk {
   deliverTo?: { instance: string; baseline: string | null };
   /** stop-task: the task it fences, which the worker must hold now. */
   task?: number | null;
+  /** #334: the worker is a host's registration — a stop-task is per lease, outside the restart group, capped per login. */
+  host?: boolean;
   /** resume: the pool's words for the resume's own close, and for the drain it ends when that one still waits for a claim. */
   resumed?: { detail: string; drain: string };
   now: number;
@@ -1129,7 +1151,8 @@ export async function issueOrder(env: Env, a: IssueAsk): Promise<IssueResult> {
   const at = iso(a.now);
   const ttl = a.kind === "update" ? TTL_UPDATE_MIN : isPool(a.by) ? TTL_POOL_MIN : TTL_PERSON_MIN;
   const expires = iso(a.now + ttl * MIN);
-  const group = RESTART_GROUP.includes(a.kind) ? RESTART_GROUP : [a.kind];
+  const hostStop = !!a.host && a.kind === "stop-task";
+  const group = hostStop ? [] : RESTART_GROUP.includes(a.kind) ? (a.host ? HOST_RESTART_GROUP : RESTART_GROUP) : [a.kind];
   const cap = a.kind === "recheck-agent" ? MAX_RECHECKS_PER_HOUR : MAX_RESTARTS_PER_HOUR;
   const exists = "EXISTS (SELECT 1 FROM worker_orders WHERE id = ?)";
   const d = a.deliverTo;
@@ -1174,25 +1197,28 @@ export async function issueOrder(env: Env, a: IssueAsk): Promise<IssueResult> {
   } catch (e) {
     const m = String(e);
     if (/UNIQUE constraint failed: worker_orders\.site/.test(m)) return { ok: false, why: "site" };
-    if (/UNIQUE constraint failed: worker_orders\.worker_id/.test(m)) return { ok: false, why: "open" };
+    // One open per kind per worker — per task for a stop (#334): the index has an expression, so SQLite names the index, not its columns.
+    if (/UNIQUE constraint failed: (worker_orders\.worker_id|index 'uq_worker_orders_open_kind')/.test(m)) return { ok: false, why: "open" };
     throw e;
   }
 }
 
 /** The counts behind the caps, for the door's words and /can's greys (the INSERT stays the authority). */
-export async function orderFacts(env: Env, worker: string, login: string | null, now: number): Promise<OrderFacts> {
+export async function orderFacts(env: Env, worker: string, login: string | null, now: number, host = false): Promise<OrderFacts> {
   const hourAgo = iso(now - HOUR);
   const freeAt = (oldest: string | null) => (oldest ? iso(Date.parse(oldest) + HOUR) : null);
-  const [r, c, d, l] = await Promise.all([
-    env.DB.prepare(COUNT_WORKER_SQL).bind(worker, JSON.stringify(RESTART_GROUP), hourAgo).first<{ n: number; oldest: string | null }>(),
+  const [r, c, d, l, st] = await Promise.all([
+    env.DB.prepare(COUNT_WORKER_SQL).bind(worker, JSON.stringify(host ? HOST_RESTART_GROUP : RESTART_GROUP), hourAgo).first<{ n: number; oldest: string | null }>(),
     env.DB.prepare(COUNT_WORKER_SQL).bind(worker, JSON.stringify(["recheck-agent"]), hourAgo).first<{ n: number; oldest: string | null }>(),
     env.DB.prepare(COUNT_WORKER_SQL).bind(worker, JSON.stringify(["drain"]), hourAgo).first<{ n: number; oldest: string | null }>(),
     login ? env.DB.prepare(COUNT_ISSUER_SQL).bind(login, hourAgo).first<{ n: number; oldest: string | null }>() : null,
+    host && login ? env.DB.prepare(COUNT_LOGIN_STOPS_SQL).bind(login, hourAgo).first<{ n: number; oldest: string | null }>() : null,
   ]);
   return {
     now, restartsHour: r?.n ?? 0, rechecksHour: c?.n ?? 0, loginHour: l?.n ?? 0, drainsHour: d?.n ?? 0,
     restartsFreeAt: freeAt(r?.oldest ?? null), rechecksFreeAt: freeAt(c?.oldest ?? null), loginFreeAt: freeAt(l?.oldest ?? null), drainsFreeAt: freeAt(d?.oldest ?? null),
     pool: running(env),
+    ...(host ? { stopsHour: st?.n ?? 0, stopsFreeAt: freeAt(st?.oldest ?? null) } : {}),
   };
 }
 
@@ -1203,10 +1229,12 @@ async function capLine(env: Env, key: string, status: "warn", summary: string, p
 }
 
 /** After an INSERT that the caps refused: which cap, in the words the door answers, journaled once per window when it is the login's or the pool's. */
-export async function capRefusal(env: Env, a: Pick<IssueAsk, "worker" | "kind" | "by" | "now">): Promise<string> {
+export async function capRefusal(env: Env, a: Pick<IssueAsk, "worker" | "kind" | "by" | "now" | "host">): Promise<string> {
   const hourAgo = iso(a.now - HOUR);
   const pool = isPool(a.by);
-  const f = await orderFacts(env, a.worker, pool ? null : a.by, a.now);
+  const f = await orderFacts(env, a.worker, pool ? null : a.by, a.now, !!a.host);
+  // A host's stop (#334): only the login's stops are capped; anything else is the lease that moved meanwhile.
+  if (a.host && a.kind === "stop-task") return (f.stopsHour ?? 0) >= MAX_STOPS_PER_LOGIN_HOUR ? stopCapWords(a.by, f.stopsFreeAt) : "the task's lease moved meanwhile: it is no longer this host's, or a stop fences it already";
   if (!pool && f.loginHour >= MAX_ORDERS_PER_LOGIN_HOUR) {
     const hour = iso(a.now).slice(0, 13);
     const why = loginCapWords(a.by, f.loginFreeAt);
@@ -1265,9 +1293,9 @@ interface OpenRow { id: string; kind: OrderKind; reason: string; issued_by: stri
 /** A worker's open orders, through uq_worker_orders_open_kind (the partial index on the open ones): at most one per kind. */
 export const OPEN_ORDERS_SQL = "SELECT id, kind, reason, issued_by, issued_at, expires_at, state, delivered_to, delivered_at, baseline, baseline_at_issue, unless_agent_ok, rule, via, task_id FROM worker_orders WHERE worker_id = ? AND state IN ('pending', 'delivered') ORDER BY kind";
 /** The task a Stop its task fences, by its primary key: what its requeue and its words need. */
-export const STOPPED_TASK_SQL = "SELECT id, name, arch, kind, trust, status, lease_owner, attempts, max_attempts, stop_order FROM build_tasks WHERE id = ?";
+export const STOPPED_TASK_SQL = "SELECT id, name, arch, kind, trust, status, lease_owner, attempts, max_attempts, stop_order, lease_gen FROM build_tasks WHERE id = ?";
 
-type StoppedTask = LeasedTask & { status: string; lease_owner: string | null; stop_order: string | null };
+type StoppedTask = LeasedTask & { status: string; lease_owner: string | null; stop_order: string | null; lease_gen: string | null };
 
 /**
  * A stop whose task is no longer fenced by it, in the pool's words: the
@@ -1296,6 +1324,8 @@ export interface AfterClaim {
   /** The probe after this claim. */
   status: string | null;
   checkedAt: string | null;
+  /** A host's claim (#334): the leases it lists, "<task>:<gen>" — a fenced lease it still lists keeps its fence. */
+  listed?: ReadonlySet<string>;
 }
 
 const DELIVERY_ORDER: Record<string, number> = { drain: 0, "recheck-agent": 1, "restart-agent": 2, restart: 3 };
@@ -1390,7 +1420,11 @@ export async function takeOrders(env: Env, x: AfterClaim, now: number): Promise<
   for (const r of stops) {
     const t = r.task_id ? await env.DB.prepare(STOPPED_TASK_SQL).bind(r.task_id).first<StoppedTask>() : null;
     const line = (state: string, detail: string) => finalLine(env, { id: r.id, worker: x.row.id, owner: x.row.owner, kind: r.kind, by: r.issued_by, state, detail, rule: r.rule, via: r.via, reason: r.reason, at });
-    if (t && t.status === "leased" && t.lease_owner === x.row.id && t.stop_order === r.id) {
+    const fenced = t && t.status === "leased" && t.lease_owner === x.row.id && t.stop_order === r.id;
+    // A host's claim (#334, D46) proves nothing of a lease it still lists: its dispatcher has not stopped that container yet. The fence
+    // holds — until a claim no longer lists it, or the lease's end.
+    if (fenced && x.listed && x.listed.has(`${t!.id}:${t!.lease_gen}`)) continue;
+    if (fenced && t) {
       const error = stopError(x.row.id, r.issued_by, r.reason, false);
       const mins = Math.max(0, Math.round((now - Date.parse(r.issued_at)) / MIN));
       const last = t.attempts >= t.max_attempts;
