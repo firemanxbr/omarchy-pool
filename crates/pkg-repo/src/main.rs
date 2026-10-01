@@ -393,6 +393,42 @@ enum Command {
         /// The disk floor in GB, instead of the signed one.
         #[arg(long, hide = true)]
         disk_floor_gb: Option<u64>,
+        /// The worker image by digest: every task's egress and agent sidecars run it.
+        #[arg(long, env = "OMARCHY_WORKER_IMAGE", default_value = "")]
+        worker_image: String,
+        /// The IPv4 range task networks are cut from, one /28 per task.
+        #[arg(long, env = "OMARCHY_TASK_SUBNETS", default_value = "10.231.0.0/16")]
+        task_subnets: String,
+        /// The host's own addresses, comma-separated, which the egress sidecars refuse besides the private ranges.
+        #[arg(long, env = "OMARCHY_HOST_ADDRESSES", value_delimiter = ',')]
+        host_addresses: Vec<String>,
+        /// The host directory whose agent.env agent sidecars mount read-only (never read by the dispatcher).
+        #[arg(long, env = "OMARCHY_SECRETS_DIR")]
+        secrets_dir: Option<PathBuf>,
+        /// Per-task caps of an agent sidecar, and the host's calls per day (UTC) (D45).
+        #[arg(long, env = "OMARCHY_AGENT_CALLS_PER_TASK", default_value_t = 200)]
+        agent_calls_per_task: u32,
+        #[arg(
+            long,
+            env = "OMARCHY_AGENT_TOKENS_PER_TASK",
+            default_value_t = 2_000_000
+        )]
+        agent_tokens_per_task: u64,
+        #[arg(long, env = "OMARCHY_AGENT_MINUTES_PER_TASK", default_value_t = 120)]
+        agent_minutes_per_task: u64,
+        #[arg(long, env = "OMARCHY_AGENT_CALLS_PER_DAY", default_value_t = 5000)]
+        agent_calls_per_day: u32,
+    },
+    /// A task's egress sidecar (#336, design v2 §9.4): a forward proxy that
+    /// allows CONNECT, GET and HEAD to public addresses only, judged by the
+    /// address a name resolves to (`OMARCHY_WORKER_ROLE=egress`).
+    Egress {
+        /// Where it listens: its own address on the task's network.
+        #[arg(long)]
+        listen: String,
+        /// A range refused besides the built-in ones (the task subnets, the host's addresses).
+        #[arg(long)]
+        deny: Vec<String>,
     },
     /// Deletes pool objects no recent release references (retention).
     Gc {
@@ -706,9 +742,19 @@ fn main() -> Result<()> {
             stall_s,
             idle_claim_s,
             disk_floor_gb,
+            worker_image,
+            task_subnets,
+            host_addresses,
+            secrets_dir,
+            agent_calls_per_task,
+            agent_tokens_per_task,
+            agent_minutes_per_task,
+            agent_calls_per_day,
         } => {
             use std::time::Duration;
             let lease = Duration::from_secs(lease_s);
+            let subnets =
+                dispatch::spec::Subnets::parse(&task_subnets).map_err(anyhow::Error::msg)?;
             dispatch::run(&dispatch::Options {
                 api,
                 pool,
@@ -726,8 +772,25 @@ fn main() -> Result<()> {
                     idle_claim: Duration::from_secs(idle_claim_s.max(1)),
                 },
                 disk_floor_gb,
+                net: dispatch::Net {
+                    worker_image: worker_image.trim().to_owned(),
+                    subnets,
+                    deny: host_addresses
+                        .into_iter()
+                        .map(|a| a.trim().to_owned())
+                        .filter(|a| !a.is_empty())
+                        .collect(),
+                    secrets_dir: secrets_dir.filter(|d| !d.as_os_str().is_empty()),
+                    caps: dispatch::budget::Caps {
+                        calls_per_task: agent_calls_per_task.max(1),
+                        tokens_per_task: agent_tokens_per_task.max(1),
+                        minutes_per_task: agent_minutes_per_task.max(1),
+                        calls_per_day: agent_calls_per_day,
+                    },
+                },
             })
         }
+        Command::Egress { listen, deny } => pkg_repo::egress::run(&listen, &deny),
         Command::Event {
             remote,
             kind,

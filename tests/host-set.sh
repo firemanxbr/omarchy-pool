@@ -9,7 +9,8 @@
 #   dispatcher, its role label, the worker image by digest, the env file, the
 #   socket, the work root at the same path inside and outside, capacity.json
 #   read-only, no port, and no variable left unset;
-# - factory/sizing/tasks.toml is schema 1 and empty (nothing reads it before P2).
+# - factory/sizing/tasks.toml is schema 1, and every network exception in it
+#   is "direct" with its reason (the dispatcher reads them, #336).
 #
 # Needs cargo, docker compose (or docker-compose) and python3 (3.11+). CI runs
 # it in the rust job; by hand: `bash tests/host-set.sh`.
@@ -85,9 +86,14 @@ echo "==> factory/sizing/tasks.toml"
 python3 - <<'EOF'
 import sys, tomllib
 t = tomllib.load(open("factory/sizing/tasks.toml", "rb"))
-if t != {"schema": 1, "package": {}}:
-    sys.exit(f"FAIL: factory/sizing/tasks.toml must be schema 1 and empty in P0, found {t}")
-print("    schema 1, empty")
+if t.get("schema") != 1 or set(t) - {"schema", "package"}:
+    sys.exit(f"FAIL: factory/sizing/tasks.toml must be schema 1, found {t}")
+for name, e in t.get("package", {}).items():
+    if set(e) - {"size", "disk_gb", "network", "reason"}:
+        sys.exit(f"FAIL: factory/sizing/tasks.toml: {name} has a key outside schema 1: {e}")
+    if "network" in e and (e["network"] != "direct" or not str(e.get("reason", "")).strip()):
+        sys.exit(f"FAIL: factory/sizing/tasks.toml: {name}'s network exception must be \"direct\" with a reason: {e}")
+print(f"    schema 1, {sum('network' in e for e in t.get('package', {}).values())} network exception(s)")
 EOF
 
-echo "host set: lint-set clean, compose loads it, sizing empty"
+echo "host set: lint-set clean, compose loads it, sizing schema 1"

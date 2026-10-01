@@ -20,10 +20,12 @@
 //!   as `trial.log`.
 //!
 //! Seam: a correction of a failed draft runs today inside the build's own
-//! container (the script's attempts). The agent sidecars child issue, which
-//! attaches the agent, moves it to a new container in the same lease, with
-//! the failed PKGBUILD and log as its input, so the agent never meets the
-//! container that ran the recipe.
+//! container (the script's attempts), with the build's own agent sidecar
+//! (#336), which serves that one task only. Moving the correction to a new
+//! container in the same lease, with the failed PKGBUILD and log as its
+//! input (design v2 §9.2), is left for the issue that splits the draft from
+//! its build: the build script's attempts loop would have to leave the
+//! container to do it.
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -159,7 +161,8 @@ fn s(v: &Value, key: &str) -> String {
 pub fn prepare(ctx: &Ctx, l: &Lease, stop: &AtomicBool) -> Result<Value, Prep> {
     let dir = ctx.task_dir(l);
     let _ = std::fs::remove_dir_all(&dir);
-    for sub in ["in", "out", "log", "build", "pkgcache"] {
+    // `agent`: the agent sidecar's usage file (#336), which the task container never mounts.
+    for sub in ["in", "out", "log", "build", "pkgcache", "agent"] {
         std::fs::create_dir_all(dir.join(sub)).map_err(retry_of)?;
     }
     // Only the dispatcher walks into tasks/: what a task's root leaves in its mounts (a set-id

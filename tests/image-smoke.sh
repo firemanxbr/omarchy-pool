@@ -18,16 +18,19 @@
 #   updater     the updater's entrypoint, `omarchy-rollout --self-test`, against this runner's socket and a compose project
 #   dispatcher  `pkg-repo dispatch` through its entrypoint (#335): refuses a signing key in its environment; without one it
 #               re-adopts nothing, answers /ready on loopback, claims with want 0 (no capacity file) and leaves on SIGTERM
+#   egress      `pkg-repo egress` through its entrypoint (#336): it listens, and refuses cloud metadata (403) and a POST (405)
 #
 # usage: tests/image-smoke.sh <image>      (docker; RUNTIME=podman for podman)
 set -euo pipefail
 image="${1:?usage: tests/image-smoke.sh <image>}"
 RT="${RUNTIME:-docker}"
-tmp="$(mktemp -d)"; broker=""; stub=""
-cleanup() { [[ -z "$broker" ]] || "$RT" rm -f "$broker" >/dev/null 2>&1 || true; [[ -z "$stub" ]] || kill "$stub" 2>/dev/null || true; rm -rf "$tmp"; }
+tmp="$(mktemp -d)"; broker=""; stub=""; egress=""
+cleanup() { for c in "$broker" "$egress"; do [[ -z "$c" ]] || "$RT" rm -f "$c" >/dev/null 2>&1 || true; done; [[ -z "$stub" ]] || kill "$stub" 2>/dev/null || true; rm -rf "$tmp"; }
 trap cleanup EXIT
 fail() { echo "image smoke: FAIL — $*" >&2; exit 1; }
 sock="${DOCKER_SOCKET:-/var/run/docker.sock}"
+# The image by its content id: the dispatcher's sidecars run it (OMARCHY_WORKER_IMAGE must be a digest).
+self_id="$("$RT" image inspect --format '{{.Id}}' "$image")"; self_id="sha256:${self_id#sha256:}"
 arch="$(uname -m)"; [[ "$arch" == arm64 ]] && arch=aarch64
 
 # The label.
@@ -111,12 +114,20 @@ grep -q 'never holds a package signing key' <<<"$out" || fail "the dispatcher's 
 : > "$tmp/claims"; mkdir -p "$tmp/work"
 out="$("$RT" run --rm --network host --security-opt label=disable -v "$sock:/var/run/docker.sock" -v "$tmp/work:$tmp/work" -e OMARCHY_WORKER_ROLE=dispatcher \
   -e OMARCHY_WORKER_TOKEN=omw_smoke -e OMARCHY_WORK_ROOT="$tmp/work" -e OMARCHY_API="http://127.0.0.1:$port" -e OMARCHY_POOL="http://127.0.0.1:$port" \
-  --entrypoint bash "$image" -c 'omarchy-worker --ready 127.0.0.1:18791 & p=$!; ok=""; for _ in $(seq 1 60); do curl -sf http://127.0.0.1:18791/ready >/dev/null && { ok=1; break; }; sleep 1; done; sleep 4; kill -TERM $p; wait $p; echo "ready=${ok:-no}"' 2>&1)" \
+  -e OMARCHY_WORKER_IMAGE="$self_id" --entrypoint bash "$image" -c 'omarchy-worker --ready 127.0.0.1:18791 & p=$!; ok=""; for _ in $(seq 1 60); do curl -sf http://127.0.0.1:18791/ready >/dev/null && { ok=1; break; }; sleep 1; done; sleep 4; kill -TERM $p; wait $p; echo "ready=${ok:-no}"' 2>&1)" \
   || fail "the dispatcher did not start: $out"
 grep -q '^ready=1$' <<<"$out" || fail "the dispatcher never answered /ready: $out"
 [[ -s "$tmp/claims" ]] || fail "the dispatcher sent no claim: $out"
 jq -e '.want == 0 and (.claim_id | startswith("c_")) and .leases == [] and (.orders | index("stop-task") != null)' <<<"$(head -n1 "$tmp/claims")" >/dev/null \
   || fail "the dispatcher's first claim: $(head -n1 "$tmp/claims")"
 echo "ok: the dispatcher (refuses a signing key; ready, claimed, stopped on SIGTERM)"
+
+# The egress sidecar's role: it listens, refuses cloud metadata and any method but CONNECT, GET and HEAD.
+egress="omarchy-smoke-egress-$$"
+"$RT" run -d --name "$egress" --network host --read-only --cap-drop ALL -e OMARCHY_WORKER_ROLE=egress "$image" --listen 127.0.0.1:18792 >/dev/null || fail "the egress did not start"
+code=""; for _ in $(seq 1 30); do code="$(curl -s -o /dev/null -w '%{http_code}' -x http://127.0.0.1:18792 http://169.254.169.254/latest/meta-data/ || true)"; [[ "$code" == 000 ]] || break; sleep 1; done
+[[ "$code" == 403 ]] || fail "the egress let cloud metadata through, or did not answer: $code ($("$RT" logs "$egress" 2>&1 | tail -n3))"
+[[ "$(curl -s -o /dev/null -w '%{http_code}' -x http://127.0.0.1:18792 -X POST http://example.org/)" == 405 ]] || fail "the egress took a POST"
+echo "ok: the egress (refuses cloud metadata and a POST)"
 
 echo "image smoke: every role of $image starts"

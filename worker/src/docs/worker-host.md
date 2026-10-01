@@ -146,6 +146,26 @@ to copy.
    rotates the token every 30 days; the one it replaces works ten more
    minutes, so only the dispatcher is recreated and its tasks run on.
 
+**Every task on a host is fenced in (#336).** Each task runs on its own
+internal network: it reaches public addresses only, through its own egress
+sidecar (cloud metadata, the host's LAN and every other private range are
+refused, judged by the address a name resolves to), never another task. A
+task that needs a model — a draft, a review rebuild, an audit — gets its own
+agent sidecar, which mounts `OMARCHY_SECRETS_DIR/agent.env` read-only; no two
+tasks share one, and the dispatcher itself never holds the key. Per task a
+sidecar makes at most `OMARCHY_AGENT_CALLS_PER_TASK` calls (200),
+`OMARCHY_AGENT_TOKENS_PER_TASK` tokens (2 000 000) and runs
+`OMARCHY_AGENT_MINUTES_PER_TASK` (120); the host makes at most
+`OMARCHY_AGENT_CALLS_PER_DAY` calls a day (5000, UTC), after which it takes
+no model work until the next day. Recommended: a **separate, spend-capped
+key for contributor drafts** (the provider's own spending limit), since a
+recipe that compromises its draft's sidecar can use that key until the caps
+stop it; and a `GITHUB_TOKEN` in `agent.env` with no write scope and no
+private-repository read (a fine-grained token, "public repositories,
+read-only"). A package that truly needs direct network access (raw sockets,
+its own name resolution) gets `network = "direct"` with a `reason` in
+`factory/sizing/tasks.toml`, in a pull request another maintainer approves.
+
 The host's page, `/hosts/<id>`, shows its status, capacity and units, lanes,
 isolation level, the release it applied and its leases. Every later call of
 the host to the pool is signed with its key (`Omarchy-Host`); the pool

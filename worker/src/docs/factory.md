@@ -504,7 +504,7 @@ On the host, the dispatcher (`pkg-repo dispatch`, #335, design v2 §9) holds tho
 each in one task container it starts through one function (`crates/pkg-repo/src/dispatch/spec.rs`):
 
 ```
-start      refuses a signing key in its environment; re-adopts: a task container with a lease file
+start      refuses a signing key, an agent key or a GitHub token in its environment; re-adopts: a task container with a lease file
            (work/state/leases/<id>-<gen>.json, 0600) runs on or, exited, is completed from its exit code,
            OOMKilled and outputs; one without goes; a lease whose container is gone fails `lost`; then /ready
 loop       per lease: heartbeat (409 stop: kill, fail as stopped), its own watchdog (last accepted heartbeat
@@ -518,6 +518,15 @@ out        /task/out: the kind's closed list under its caps (a build: packages, 
            (the engine keeps no log of a task container); exited with no verdict.json, or a verdict of a
            SIGTERM or SIGKILL, fails `lost` (a reboot, a shutdown): the attempt is given back
 exit 75    a restart order, or a loop without progress for 15 min: task containers run on, the next dispatcher re-adopts them
+network    per lease (#336): an --internal network omarchy-task-<id>-<gen> on a /28 of OMARCHY_TASK_SUBNETS; its egress
+           sidecar <network>-egress (pkg-repo egress: CONNECT, GET, HEAD to public addresses only, judged by the
+           resolved address) on the shared omarchy-egress bridge and on the task's network, the task's HTTP(S)_PROXY;
+           a model kind's agent sidecar <network>-agent (the broker, agent.env read-only, its caps in BROKER_AGENT_*,
+           its usage in <task dir>/agent); all removed with the lease, orphans of this host swept at start;
+           factory/sizing network = "direct" (with a reason): a bridge network of its own, no egress
+agent      the claim's agent: {provider, model, probe, error, checked_at} from a probe sidecar on a network of its own
+           (at start, every 30 min, sooner after a failure, and for recheck-agent / restart-agent); the day's agent
+           calls (OMARCHY_AGENT_CALLS_PER_DAY) spent: agent_slots 0 in the claim and no model task starts
 ```
 
 A claim is one `UPDATE … WHERE id = (SELECT … LIMIT 1) RETURNING *`; D1

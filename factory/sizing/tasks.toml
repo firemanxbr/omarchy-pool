@@ -1,8 +1,10 @@
 # Maintainer-set task sizes, disk budgets and network exceptions, per package
 # (design v2 §7.3, §7.4, §9.4; epic #307).
 #
-# Empty in P0: nothing reads this file before P2, when the pool and the
-# dispatcher take a package's size and budget from it. It ships in the signed
+# The dispatcher reads `network` from P1 (#336: crates/pkg-repo/src/dispatch/sizing.rs,
+# from the release's own checkout; a file that does not read, or an exception
+# without its reason, fails the task); the pool and the dispatcher take a
+# package's size and budget from it in P2. It ships in the signed
 # release like every file of the repository, and CODEOWNERS makes every
 # maintainer an owner of factory/sizing/, so an entry is a maintainer's
 # decision another maintainer approves in a pull request: that review and
@@ -11,7 +13,7 @@
 # The recipe directories beside this file (factory/sizing/<name>/PKGBUILD)
 # are the sizing recipes kept for dry runs; this file is about any package.
 #
-# Format, schema 1 (an unknown key is refused when P2 reads it):
+# Format, schema 1 (an unknown key is refused):
 #
 #   [package."<pkgbase>"]
 #   size     = 4             # units the task takes (D31): 1 when not listed;

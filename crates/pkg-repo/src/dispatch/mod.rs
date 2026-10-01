@@ -31,28 +31,37 @@
 //! next dispatcher re-adopts them. SIGTERM stops the claims and exits; the
 //! lease files are always current, so tasks run on.
 //!
-//! Seams: task containers run on the engine's default bridge until the task
-//! networks child issue gives each its own network; the model kinds'
-//! `http://agent:8790` answers once the agent sidecars child issue starts
-//! that sidecar (until then a review rebuild and an audit fail at their
-//! model call).
+//! **Networks and sidecars** (#336, design v2 §9.4, §9.5): every lease gets
+//! its own internal network on a /28 of `OMARCHY_TASK_SUBNETS`, an egress
+//! sidecar that reaches public addresses only and, for a model kind, its own
+//! agent sidecar with per-task caps; a package with a signed exception in
+//! `factory/sizing` gets a bridge network instead. All of it is made by
+//! [`spec::plan`] and removed with the lease. The per-day agent budget is
+//! kept here ([`budget`]); when it is spent, no model task starts and the
+//! claim offers no agent slot. The dispatcher never joins a task network.
+//! A probe sidecar ([`probe`]) says who this host's agent is with every
+//! claim (`agent`) and answers `recheck-agent` and `restart-agent`.
 //!
 //! **Orders** at host level: drain and resume are the pool's (it hands a
 //! drained host nothing), stop-task fences one lease (its heartbeat's 409),
-//! restart makes the dispatcher exit 75 (tasks survive). Seam: re-check and
-//! restart of the agent are answered by the probe sidecar the agent
-//! sidecars child issue adds; until then the dispatcher does not declare
-//! them, and the pool refuses them with its own words.
+//! restart makes the dispatcher exit 75 (tasks survive), recheck-agent and
+//! restart-agent run a fresh probe.
 //!
 //! Seams for #317 (install): the agent writes `etc/dispatcher.env` with the
-//! host's worker token (and could add the host id; the dispatcher keeps the
-//! registration's id it learned in `state/host`).
+//! host's worker token, the agent budget of the envelope
+//! (`OMARCHY_AGENT_CALLS_PER_TASK`, `…_TOKENS_PER_TASK`, `…_MINUTES_PER_TASK`,
+//! `…_CALLS_PER_DAY`) and the host's own addresses for the egress to refuse
+//! (`OMARCHY_HOST_ADDRESSES`); the dispatcher keeps the registration's id it
+//! learned in `state/host`.
 
+pub mod budget;
 pub mod capacity;
 pub mod engine;
 pub mod kinds;
 pub mod lease;
 pub mod pool;
+pub mod probe;
+pub mod sizing;
 pub mod spec;
 #[cfg(test)]
 mod tests;
@@ -81,8 +90,15 @@ use crate::RepoError;
 
 /// What a host claims in P1 (design v2 §8.2): builds of every trust, trials and audits.
 pub const KINDS: [&str; 3] = ["build", "trial", "audit"];
-/// The orders the dispatcher executes: drain (a notice), stop-task (the heartbeat's 409), restart (exit 75).
-pub const TAKES: [&str; 3] = ["drain", "restart", "stop-task"];
+/// The orders the dispatcher executes: drain (a notice), stop-task (the heartbeat's 409), restart (exit 75),
+/// recheck-agent and restart-agent (a fresh probe).
+pub const TAKES: [&str; 5] = [
+    "drain",
+    "recheck-agent",
+    "restart",
+    "restart-agent",
+    "stop-task",
+];
 /// The exit a restart, or a loop that stopped making progress, ends with: the restart policy starts the next dispatcher.
 pub const EXIT_RESTART: i32 = 75;
 /// A dispatcher younger than this refuses a restart: one this soon would loop.
@@ -115,6 +131,28 @@ pub fn refuse_signing_key(env: impl IntoIterator<Item = (String, String)>) -> Re
         }
         if v.contains("PRIVATE KEY BLOCK") || v.contains("BEGIN PGP PRIVATE") {
             anyhow::bail!("{k} holds a private key: the dispatcher never holds a package signing key — the pool signs what is published (design v2 §9.6)");
+        }
+    }
+    Ok(())
+}
+
+/// The variables that would put an agent key or a GitHub token in the dispatcher (invariant 5).
+const AGENT_VARS: [&str; 6] = [
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "XAI_API_KEY",
+    "GITHUB_TOKEN",
+];
+
+/// The dispatcher refuses to start with an agent key or a GitHub token in its environment
+/// (design v2 §10.2, invariant 5): they belong in `OMARCHY_SECRETS_DIR/agent.env`, which only a
+/// task's agent sidecar mounts.
+pub fn refuse_agent_key(env: impl IntoIterator<Item = (String, String)>) -> Result<()> {
+    for (k, v) in env {
+        if AGENT_VARS.contains(&k.as_str()) && !v.is_empty() {
+            anyhow::bail!("{k} is set: the dispatcher never holds an agent key or a GitHub token — they belong in OMARCHY_SECRETS_DIR/agent.env, which only a task's agent sidecar mounts (design v2 §10.2); remove it from etc/dispatcher.env");
         }
     }
     Ok(())
@@ -157,6 +195,39 @@ pub struct Options {
     pub ready: String,
     pub timing: Timing,
     pub disk_floor_gb: Option<u64>,
+    pub net: Net,
+}
+
+/// What the dispatcher needs for its tasks' networks and sidecars (#336).
+#[derive(Debug, Clone)]
+pub struct Net {
+    /// The worker image by digest (`OMARCHY_WORKER_IMAGE`): the sidecars run it.
+    pub worker_image: String,
+    /// `OMARCHY_TASK_SUBNETS`.
+    pub subnets: spec::Subnets,
+    /// The host's own addresses (`OMARCHY_HOST_ADDRESSES`): the egress refuses them too.
+    pub deny: Vec<String>,
+    /// `OMARCHY_SECRETS_DIR` on the host: its `agent.env` is mounted into agent sidecars, never read here.
+    pub secrets_dir: Option<PathBuf>,
+    pub caps: budget::Caps,
+}
+
+impl Default for Net {
+    fn default() -> Self {
+        Self {
+            worker_image: String::new(),
+            subnets: spec::Subnets::parse("10.231.0.0/16").expect("the default range"),
+            deny: Vec::new(),
+            secrets_dir: None,
+            caps: budget::Caps::default(),
+        }
+    }
+}
+
+impl Net {
+    fn env_file(&self) -> Option<PathBuf> {
+        self.secrets_dir.as_ref().map(|d| d.join("agent.env"))
+    }
 }
 
 /// What the loop reads of the host besides the engine and the pool: the clock, the work root's free disk, the free memory.
@@ -284,6 +355,22 @@ pub struct Dispatcher {
     pub terminating: Arc<AtomicBool>,
     /// An order asked the process to exit with this code.
     pub exit: Option<i32>,
+    /// Networks and sidecars (#336).
+    pub net: Net,
+    ledger: budget::Ledger,
+    probe: Prober,
+}
+
+/// The probe sidecar's standing: its last answer, the probe running now, when the next one is due, the orders waiting for it.
+#[derive(Default)]
+struct Prober {
+    last: Option<probe::Report>,
+    job: Option<Job<probe::Report>>,
+    /// The /28 the running probe holds.
+    slot: Option<u32>,
+    failures: u32,
+    next_at: u64,
+    orders: Vec<(String, OrderKind)>,
 }
 
 impl Dispatcher {
@@ -301,6 +388,7 @@ impl Dispatcher {
     ) -> Result<Self> {
         let store = Store::open(&ctx.work_root).context("the lease files' directory")?;
         let started = probes.now();
+        let ctx_work_root = ctx.work_root.clone();
         Ok(Self {
             floor_gb: floor_gb.unwrap_or(ctx.constants.floor_gb),
             ctx: Arc::new(ctx),
@@ -326,6 +414,9 @@ impl Dispatcher {
             brake: orders::Brake::default(),
             terminating: Arc::new(AtomicBool::new(false)),
             exit: None,
+            net: Net::default(),
+            ledger: budget::Ledger::new(&ctx_work_root),
+            probe: Prober::default(),
         })
     }
 
@@ -378,14 +469,32 @@ impl Dispatcher {
             let _ = std::fs::remove_file(p);
         }
         let held: Vec<(u64, String)> = found.leases.iter().map(Lease::key).collect();
+        // Orphans of this host — task containers, their sidecars, a probe's, their networks — go; never
+        // anything another host or another compose project labelled (the legacy set has none of these labels).
         for name in &names {
-            match spec::lease_of_name(name) {
+            match spec::owner_of_name(name) {
                 Some(key) if held.contains(&key) => {}
                 Some(_) => {
                     say(format!(
-                        "{name}: a task container of this host without a lease file; removed"
+                        "{name}: a container of this host without a lease file; removed"
                     ));
                     self.engine.remove_name(name);
+                }
+                None => {}
+            }
+        }
+        let networks = self
+            .engine
+            .networks(&self.host)
+            .map_err(|e| anyhow!("listing this host's task networks: {e}"))?;
+        for name in &networks {
+            match spec::owner_of_name(name) {
+                Some(key) if held.contains(&key) => {}
+                Some(_) => {
+                    say(format!(
+                        "{name}: a task network of this host without a lease file; removed"
+                    ));
+                    self.engine.remove_network(name);
                 }
                 None => {}
             }
@@ -449,7 +558,99 @@ impl Dispatcher {
         }
         self.watch_disk(now);
         if !self.terminating.load(Ordering::SeqCst) {
+            self.step_probe(now);
             self.claim(now);
+        }
+    }
+
+    // ---------- the probe sidecar (§9.5) ----------
+
+    /// Starts the next probe when one is due, and takes a finished probe's answer (answering the orders that waited for it).
+    fn step_probe(&mut self, now: u64) {
+        if self.probe.job.is_none() && now >= self.probe.next_at {
+            self.spawn_probe(now);
+        }
+        let Some(r) = poll(&mut self.probe.job) else {
+            return;
+        };
+        self.probe.slot = None;
+        self.probe.failures = if r.ok { 0 } else { self.probe.failures + 1 };
+        self.probe.next_at = probe::next_after(now, self.probe.failures);
+        let changed = self
+            .probe
+            .last
+            .as_ref()
+            .is_none_or(|l| l.ok != r.ok || l.error != r.error);
+        if changed {
+            say(format!("probe: {}", r.detail()));
+        }
+        for (id, kind) in std::mem::take(&mut self.probe.orders) {
+            let (outcome, code) = match (&kind, r.ok, r.ran) {
+                (OrderKind::RestartAgent, true, _) => ("done", "restarted"),
+                (OrderKind::RestartAgent, false, _) => ("failed", "not-answering"),
+                (_, _, true) => ("done", "probed"),
+                (_, _, false) => ("failed", "probe-failed"),
+            };
+            self.answer_order(&id, outcome, code, &r.detail());
+        }
+        self.probe.last = Some(r);
+    }
+
+    /// A probe on a /28 of its own, in a thread (inline in the loop's tests).
+    fn spawn_probe(&mut self, now: u64) {
+        let Some(env_file) = self.net.env_file() else {
+            return;
+        };
+        let Some(slot) = self.free_slot() else {
+            self.probe.next_at = now + probe::EVERY;
+            return;
+        };
+        self.probe.slot = Some(slot);
+        let (engine, host, net) = (
+            Arc::clone(&self.engine),
+            self.host.clone(),
+            self.net.clone(),
+        );
+        let gen = format!("g_{}", &orders::new_instance()[..16]);
+        let work = move || {
+            probe::ask(
+                &*engine,
+                &spec::Probe {
+                    gen: &gen,
+                    host: &host,
+                    worker_image: &net.worker_image,
+                    subnets: net.subnets,
+                    slot,
+                    deny: &net.deny,
+                    env_file: &env_file,
+                },
+                || iso(epoch_now()),
+            )
+        };
+        self.probe.job = Some(if self.inline {
+            Job::Done(work())
+        } else {
+            Job::Running(std::thread::spawn(work))
+        });
+    }
+
+    /// The claim's `agent`: the probe's last answer; on a host with no agent key, that it has none.
+    fn agent_field(&self) -> Option<Value> {
+        if self.net.secrets_dir.is_none() {
+            return Some(
+                json!({ "probe": "error", "error": "no agent key on this host (OMARCHY_SECRETS_DIR is not set)" }),
+            );
+        }
+        self.probe.last.as_ref().map(probe::Report::claim)
+    }
+
+    fn answer_order(&self, id: &str, outcome: &str, code: &str, detail: &str) {
+        let body = json!({ "instance": self.instance, "outcome": outcome, "code": code, "detail": detail });
+        if let Err(e) = self.pool().answer(id, &body) {
+            say(format!(
+                "order {id}: the answer did not reach the pool ({}); it closes the order by what it sees",
+                clean_line(&e.to_string())
+            ));
         }
     }
 
@@ -494,6 +695,11 @@ impl Dispatcher {
 
     fn cleanup(&mut self, l: &Lease) {
         self.engine.remove_lease(l.task.id, &l.gen);
+        // Its agent sidecar's calls, from the file the task container never mounted, into the day's.
+        if let Some(cap) = l.agent_calls {
+            self.ledger
+                .add(self.probes.now(), budget::used(&self.ctx.task_dir(l), cap));
+        }
         let _ = std::fs::remove_dir_all(self.ctx.task_dir(l));
         self.store.remove(l.task.id, &l.gen);
         self.prune_releases(l);
@@ -707,7 +913,8 @@ impl Dispatcher {
         }
     }
 
-    /// Starts a prepared lease's container: a build only with its disk budget plus the floor free (D53).
+    /// Starts a prepared lease's network, sidecars and container: a build only with its disk budget plus the floor free (D53).
+    #[allow(clippy::too_many_lines)] // the checks before the engine runs, then the plan, in order
     fn start(&mut self, mut live: Live, now: u64) -> Live {
         let Some(kind) = kinds::kind_of(&live.lease) else {
             self.begin_ending(&mut live, Ending::Lost("no container kind".into()));
@@ -739,7 +946,45 @@ impl Dispatcher {
         let image = self.images.of(&live.lease.task.arch).to_owned();
         let tdir = self.ctx.task_dir(&live.lease);
         let rdir = self.ctx.release_dir(&live.lease.release);
-        let args = spec::task_container(&spec::Spec {
+        let lost = |this: &Self, live: &mut Live, why: String| {
+            this.begin_ending(
+                live,
+                Ending::Lost(format!("failed before docker ran — {why}")),
+            );
+        };
+        // The package's signed network exception, from the release's own factory/sizing.
+        let direct = match sizing::direct(&rdir, &live.lease.task.name) {
+            Ok(d) => d,
+            Err(why) => {
+                lost(self, &mut live, why);
+                return live;
+            }
+        };
+        let Some(slot) = self.free_slot() else {
+            let why = format!(
+                "every task network of {} is in use",
+                self.net.subnets.cidr()
+            );
+            lost(self, &mut live, why);
+            return live;
+        };
+        // A model kind's sidecar may spend what the day has left once the running sidecars' caps are set aside (D45).
+        let agent_calls = if kind.model() {
+            let grant = budget::grant(&self.net.caps, self.ledger.spent(now), self.reserved());
+            if grant == 0 {
+                let why = format!(
+                    "this host's agent budget for today ({} calls) is spent; the claims offer no agent slot until tomorrow (UTC)",
+                    self.net.caps.calls_per_day
+                );
+                lost(self, &mut live, why);
+                return live;
+            }
+            Some(grant)
+        } else {
+            None
+        };
+        let env_file = self.net.env_file();
+        let plan = spec::plan(&spec::Spec {
             task: live.lease.task.id,
             gen: &live.lease.gen,
             host: &self.host,
@@ -752,38 +997,101 @@ impl Dispatcher {
             image: &image,
             task_dir: &tdir,
             release_dir: &rdir,
+            worker_image: &self.net.worker_image,
+            subnets: self.net.subnets,
+            slot,
+            direct,
+            deny: &self.net.deny,
+            agent: env_file.as_deref().map(|f| spec::Agent {
+                env_file: f,
+                calls: agent_calls.unwrap_or(1),
+                tokens: self.net.caps.tokens_per_task,
+                wall_s: self.net.caps.minutes_per_task * 60,
+            }),
         });
-        let args = match args {
-            Ok(a) => a,
+        let plan = match plan {
+            Ok(p) => p,
             Err(why) => {
                 // The task's own values (name, arch, generation, release) passed the grammar in
-                // take(): what fails here is this host's (its image, its id, its paths), never the task's.
-                self.begin_ending(
-                    &mut live,
-                    Ending::Lost(format!("failed before docker ran — {why}")),
-                );
+                // take(): what fails here is this host's (its images, its id, its paths, its keys), never the task's.
+                lost(self, &mut live, why);
                 return live;
             }
         };
         live.lease.phase = Phase::Running;
         live.lease.started_at = Some(now);
+        live.lease.net_slot = Some(slot);
+        live.lease.agent_calls = agent_calls;
         self.save(&live.lease);
-        if let Err(e) = self.engine.run(&args) {
-            // A `run` that did not answer may still have made the container: the ending removes it.
-            self.begin_ending(
-                &mut live,
-                Ending::Lost(format!(
-                    "the task container did not start: {}",
-                    clean_line(&e)
-                )),
-            );
+        // What an earlier start of this lease left (a dispatcher that restarted half-way) goes first.
+        self.engine
+            .remove_lease(live.lease.task.id, &live.lease.gen);
+        let bridge = if direct {
+            Ok(())
+        } else {
+            engine::ensure_bridge(&*self.engine, &self.host)
+        };
+        let agent_start = plan
+            .iter()
+            .position(|c| c[0] == "start" && c.get(1).is_some_and(|n| n.ends_with("-agent")));
+        let failed = bridge
+            .map_err(|e| (0, format!("the egress bridge: {e}")))
+            .and_then(|()| {
+                plan.iter().enumerate().try_for_each(|(i, c)| {
+                    self.engine
+                        .run(c)
+                        .map_err(|e| (i, format!("{} did not start: {}", what(c), clean_line(&e))))
+                })
+            });
+        if let Err((i, why)) = failed {
+            // A sidecar that never started spent nothing of the day.
+            if agent_start.is_none_or(|a| i <= a) {
+                live.lease.agent_calls = None;
+            }
+            // A `run` that did not answer may still have made the container: the ending removes it, its sidecars and network.
+            self.begin_ending(&mut live, Ending::Lost(why));
             return live;
         }
         say(format!(
-            "task {}: {} {} started ({cpus} CPUs, {mem_gb} GB)",
-            live.lease.task.id, live.lease.task.kind, live.lease.task.name
+            "task {}: {} {} started ({cpus} CPUs, {mem_gb} GB, {} network {}{})",
+            live.lease.task.id,
+            live.lease.task.kind,
+            live.lease.task.name,
+            if direct { "bridge" } else { "internal" },
+            self.net
+                .subnets
+                .slot(slot)
+                .map(spec::Slot::cidr)
+                .unwrap_or_default(),
+            agent_calls.map_or(String::new(), |c| format!(
+                ", an agent sidecar of {c} calls"
+            ))
         ));
         live
+    }
+
+    /// The lowest /28 no lease and no probe holds.
+    fn free_slot(&self) -> Option<u32> {
+        let used: Vec<u32> = self
+            .leases
+            .values()
+            .filter_map(|v| v.lease.net_slot)
+            .chain(self.probe.slot)
+            .collect();
+        (0..self.net.subnets.slots()).find(|i| !used.contains(i))
+    }
+
+    /// The calls the running agent sidecars may still make: set aside from the day's budget.
+    fn reserved(&self) -> u32 {
+        self.leases
+            .values()
+            .filter_map(|v| v.lease.agent_calls)
+            .sum()
+    }
+
+    /// Whether the day's budget leaves a new agent sidecar anything.
+    fn agent_day_left(&self, now: u64) -> bool {
+        budget::grant(&self.net.caps, self.ledger.spent(now), self.reserved()) > 0
     }
 
     /// The disk watcher (D53): free space below the floor, on the work root (measured now) or the
@@ -902,6 +1210,13 @@ impl Dispatcher {
         });
         if let Some(c) = &cap {
             body["capacity"] = c.claim.clone();
+            // The day's agent budget spent: no model work until tomorrow (the pool counts agent slots like units).
+            if !self.agent_day_left(now) {
+                body["capacity"]["agent_slots"] = json!(0);
+            }
+        }
+        if let Some(agent) = self.agent_field() {
+            body["agent"] = agent;
         }
         let idle = self.timing.idle_claim.as_secs();
         match self.pool().claim(&body) {
@@ -1053,6 +1368,8 @@ impl Dispatcher {
             phase: Phase::Preparing,
             ending: None,
             notes: Value::Null,
+            net_slot: None,
+            agent_calls: None,
         };
         self.save(&lease);
         let mut live = Live::new(lease);
@@ -1072,10 +1389,7 @@ impl Dispatcher {
             o.reason
         ));
         let answer = |this: &Self, outcome: &str, code: &str, detail: &str| {
-            let body = json!({ "instance": this.instance, "outcome": outcome, "code": code, "detail": detail });
-            if let Err(e) = this.pool().answer(&o.id, &body) {
-                say(format!("order {}: the answer did not reach the pool ({}); it closes the order by what it sees", o.id, clean_line(&e.to_string())));
-            }
+            this.answer_order(&o.id, outcome, code, detail);
         };
         match &o.kind {
             OrderKind::Drain => say(format!(
@@ -1093,6 +1407,26 @@ impl Dispatcher {
                     ),
                 );
             }
+            // No long-running agent on a host: a restart of the agent is a fresh probe sidecar, answered when it has spoken.
+            OrderKind::RecheckAgent | OrderKind::RestartAgent if self.net.secrets_dir.is_none() => {
+                let code = if o.kind == OrderKind::RecheckAgent {
+                    "probe-failed"
+                } else {
+                    "not-answering"
+                };
+                answer(
+                    self,
+                    "failed",
+                    code,
+                    "no agent key on this host (OMARCHY_SECRETS_DIR is not set)",
+                );
+            }
+            OrderKind::RecheckAgent | OrderKind::RestartAgent => {
+                self.probe.orders.push((o.id.clone(), o.kind.clone()));
+                if self.probe.job.is_none() {
+                    self.probe.next_at = now;
+                }
+            }
             OrderKind::Restart => {
                 answer(self, "accepted", "exiting", "exit 75; the restart policy starts the dispatcher again, and it re-adopts every task");
                 say(format!(
@@ -1101,12 +1435,8 @@ impl Dispatcher {
                 ));
                 self.exit = Some(EXIT_RESTART);
             }
-            other => {
-                let code = if matches!(other, OrderKind::Unknown(_)) {
-                    "unknown-kind"
-                } else {
-                    "other"
-                };
+            other @ OrderKind::Unknown(_) => {
+                let code = "unknown-kind";
                 answer(
                     self,
                     "refused",
@@ -1119,6 +1449,20 @@ impl Dispatcher {
                 );
             }
         }
+    }
+}
+
+/// What a spec call makes, for a message: `network omarchy-task-…`, `omarchy-task-…-egress`, the task container.
+fn what(c: &[String]) -> String {
+    match c.first().map(String::as_str) {
+        Some("network") => format!("network {}", c.last().map_or("", String::as_str)),
+        Some("start") => c.get(1).cloned().unwrap_or_default(),
+        _ => c
+            .iter()
+            .position(|x| x == "--name")
+            .and_then(|i| c.get(i + 1))
+            .cloned()
+            .unwrap_or_else(|| "the container".into()),
     }
 }
 
@@ -1269,6 +1613,7 @@ pub fn loop_watchdog(
 #[allow(clippy::too_many_lines)] // the start, in its order, then the loop
 pub fn run(opts: &Options) -> Result<()> {
     refuse_signing_key(std::env::vars())?;
+    refuse_agent_key(std::env::vars())?;
     anyhow::ensure!(
         spec::path_ok(&opts.work_root),
         "the work root {} must be an absolute path of letters, digits and / . _ - + (it is mounted into task containers as such)",
@@ -1280,6 +1625,22 @@ pub fn run(opts: &Options) -> Result<()> {
             "--checkout {} must be an absolute plain path",
             c.display()
         );
+    }
+    anyhow::ensure!(
+        spec::digest_ok(&opts.net.worker_image),
+        "OMARCHY_WORKER_IMAGE {:?} is not an image by digest: every task's egress and agent sidecars run it",
+        opts.net.worker_image
+    );
+    if let Some(d) = &opts.net.secrets_dir {
+        anyhow::ensure!(
+            spec::path_ok(d),
+            "OMARCHY_SECRETS_DIR {} must be an absolute plain path (its agent.env is mounted into agent sidecars)",
+            d.display()
+        );
+    }
+    for a in &opts.net.deny {
+        a.parse::<crate::egress::Cidr>()
+            .map_err(|e| anyhow!("OMARCHY_HOST_ADDRESSES: {e}"))?;
     }
     std::fs::create_dir_all(&opts.work_root)
         .with_context(|| format!("creating {}", opts.work_root.display()))?;
@@ -1329,6 +1690,7 @@ pub fn run(opts: &Options) -> Result<()> {
         false,
     )?;
     d.terminating = Arc::clone(&terminating);
+    d.net = opts.net.clone();
     let progress = Arc::new(AtomicU64::new(epoch_now()));
     loop_watchdog(
         Arc::clone(&progress),

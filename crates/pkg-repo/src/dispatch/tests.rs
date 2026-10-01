@@ -18,7 +18,7 @@ use super::kinds::Ctx;
 use super::lease::{Lease, Phase, Store};
 use super::pool::Pool;
 use super::spec::{self, HOST_LABEL};
-use super::{Dispatcher, Images, Probes, Timing, DISK_HOLD, KINDS};
+use super::{Dispatcher, Images, Net, Probes, Timing, DISK_HOLD, KINDS};
 use crate::stop::Beat;
 use crate::RepoError;
 
@@ -26,6 +26,16 @@ const GEN: &str = "g_00000000000000a1";
 const GEN2: &str = "g_00000000000000b2";
 const HOST: &str = "h_test";
 const IMAGE: &str = "docker.io/library/archlinux@sha256:51dd3d24f7fba779e7c471caeee7804c50e8c134ad948e19685a1c83a42facc3";
+const WORKER: &str = "ghcr.io/firemanxbr/omarchy-worker@sha256:2222222222222222222222222222222222222222222222222222222222222222";
+
+/// The networks and sidecars of a host with an agent key.
+fn net() -> Net {
+    Net {
+        worker_image: WORKER.into(),
+        secrets_dir: Some(PathBuf::from("/srv/omarchy/secrets")),
+        ..Net::default()
+    }
+}
 
 // ---------- the fake engine ----------
 
@@ -35,12 +45,32 @@ type Container = (State, String, Vec<String>);
 #[derive(Default)]
 struct FakeEngine {
     containers: Mutex<BTreeMap<String, Container>>,
+    /// Task containers started (`run -d`).
     runs: Mutex<Vec<Vec<String>>>,
+    /// Every call, in order.
+    calls: Mutex<Vec<Vec<String>>>,
+    /// Networks: name → (host label, the containers attached).
+    networks: Mutex<BTreeMap<String, (String, Vec<String>)>>,
     removed: Mutex<Vec<(u64, String)>>,
+    /// What the probe's one-shot agent prints; an answering agent when unset.
+    probe_says: Mutex<Option<String>>,
     /// `inspect` gets no answer (a busy daemon).
     deaf: AtomicBool,
     /// Kills and removals do not take (a daemon that does not answer them).
     stuck: AtomicBool,
+    /// The engine refuses to start the container whose name ends with this.
+    refuse: Mutex<Option<String>>,
+}
+
+fn label_of<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
+    args.iter().find_map(|a| a.strip_prefix(&format!("{key}=")))
+}
+
+fn value_of<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .map(String::as_str)
 }
 
 impl FakeEngine {
@@ -74,38 +104,128 @@ impl FakeEngine {
             .unwrap()
             .contains_key(&spec::container_name(id, gen))
     }
+    fn has_name(&self, name: &str) -> bool {
+        self.containers.lock().unwrap().contains_key(name)
+    }
+    fn has_network(&self, name: &str) -> bool {
+        self.networks.lock().unwrap().contains_key(name)
+    }
     fn args(&self, id: u64, gen: &str) -> Vec<String> {
         self.containers.lock().unwrap()[&spec::container_name(id, gen)]
             .2
             .clone()
     }
-}
-
-impl Engine for FakeEngine {
-    fn run(&self, args: &[String]) -> Result<(), String> {
-        let name = args[args.iter().position(|a| a == "--name").unwrap() + 1].clone();
-        let host = args
+    fn args_of(&self, name: &str) -> Vec<String> {
+        self.containers.lock().unwrap()[name].2.clone()
+    }
+    /// The networks a container is attached to.
+    fn attached(&self, name: &str) -> Vec<String> {
+        self.networks
+            .lock()
+            .unwrap()
             .iter()
-            .find_map(|a| a.strip_prefix(&format!("{HOST_LABEL}=")))
-            .unwrap_or_default()
-            .to_owned();
+            .filter(|(_, (_, on))| on.iter().any(|c| c == name))
+            .map(|(n, _)| n.clone())
+            .collect()
+    }
+    fn add(&self, args: &[String], status: &str) -> Result<(), String> {
+        let name = value_of(args, "--name").unwrap().to_owned();
+        if self
+            .refuse
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|r| name.ends_with(r.as_str()))
+        {
+            return Err(format!("the engine refused {name}"));
+        }
+        let host = label_of(args, HOST_LABEL).unwrap_or_default().to_owned();
         let mut c = self.containers.lock().unwrap();
         if c.contains_key(&name) {
             return Err(format!("the name {name} is in use"));
+        }
+        if let Some(net) = value_of(args, "--network") {
+            let mut n = self.networks.lock().unwrap();
+            let Some(on) = n.get_mut(net) else {
+                return Err(format!("network {net} not found"));
+            };
+            on.1.push(name.clone());
         }
         c.insert(
             name,
             (
                 State {
-                    status: "running".into(),
+                    status: status.into(),
                     ..State::default()
                 },
                 host,
                 args.to_vec(),
             ),
         );
-        self.runs.lock().unwrap().push(args.to_vec());
         Ok(())
+    }
+}
+
+impl Engine for FakeEngine {
+    fn run(&self, args: &[String]) -> Result<(), String> {
+        self.calls.lock().unwrap().push(args.to_vec());
+        let words: Vec<&str> = args.iter().map(String::as_str).collect();
+        match words.as_slice() {
+            ["network", "inspect", name] => {
+                if self.has_network(name) {
+                    Ok(())
+                } else {
+                    Err(format!("network {name} not found"))
+                }
+            }
+            ["network", "create", .., name] => {
+                let mut n = self.networks.lock().unwrap();
+                if n.contains_key(*name) {
+                    return Err(format!("network {name} already exists"));
+                }
+                let host = label_of(args, HOST_LABEL).unwrap_or_default().to_owned();
+                n.insert((*name).to_owned(), (host, Vec::new()));
+                Ok(())
+            }
+            ["network", "connect", "--ip", _, net, who] => {
+                if !self.has_name(who) {
+                    return Err(format!("no container {who}"));
+                }
+                let mut n = self.networks.lock().unwrap();
+                let on = n
+                    .get_mut(*net)
+                    .ok_or_else(|| format!("network {net} not found"))?;
+                on.1.push((*who).to_owned());
+                Ok(())
+            }
+            ["create", ..] => self.add(args, "created"),
+            ["start", who] => {
+                let mut c = self.containers.lock().unwrap();
+                let e = c
+                    .get_mut(*who)
+                    .ok_or_else(|| format!("no container {who}"))?;
+                e.0.status = "running".into();
+                Ok(())
+            }
+            ["run", "-d", ..] => {
+                self.add(args, "running")?;
+                self.runs.lock().unwrap().push(args.to_vec());
+                Ok(())
+            }
+            other => panic!("a call the fake engine does not know: {other:?}"),
+        }
+    }
+    fn output(&self, args: &[String]) -> Result<(String, String), String> {
+        self.calls.lock().unwrap().push(args.to_vec());
+        assert_eq!(args[..2], ["run", "--rm"], "the probe's one-shot agent");
+        let net = value_of(args, "--network").unwrap();
+        assert!(self.has_network(net), "the probe runs on its own network");
+        Ok((
+            self.probe_says.lock().unwrap().clone().unwrap_or_else(|| {
+                r#"{"ok": true, "provider": "anthropic", "model": "claude-sonnet-5", "agent": "anthropic/claude-sonnet-5", "ms": 40}"#.into()
+            }),
+            String::new(),
+        ))
     }
     fn inspect(&self, name: &str) -> Result<Option<State>, String> {
         if self.deaf.load(Ordering::SeqCst) {
@@ -128,15 +248,42 @@ impl Engine for FakeEngine {
             .map(|(n, _)| n.clone())
             .collect())
     }
+    fn networks(&self, host: &str) -> Result<Vec<String>, String> {
+        Ok(self
+            .networks
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, n)| n.0 == host)
+            .map(|(n, _)| n.clone())
+            .collect())
+    }
     fn remove_lease(&self, task: u64, gen: &str) {
         if self.stuck.load(Ordering::SeqCst) {
             return;
         }
-        // By its labels: a container this lease started (a stranger without them is not found this way).
-        let name = spec::container_name(task, gen);
+        // By its labels: the containers this lease started — its task container and its sidecars (a stranger
+        // without them is not found this way) — then its network.
+        let (t, g) = (task.to_string(), gen.to_owned());
         let mut c = self.containers.lock().unwrap();
-        if c.get(&name).is_some_and(|x| !x.2.is_empty()) {
-            c.remove(&name);
+        let gone: Vec<String> = c
+            .iter()
+            .filter(|(_, x)| {
+                label_of(&x.2, crate::stop::TASK_LABEL) == Some(t.as_str())
+                    && label_of(&x.2, spec::GEN_LABEL) == Some(g.as_str())
+            })
+            .map(|(n, _)| n.clone())
+            .collect();
+        let mut n = self.networks.lock().unwrap();
+        for name in &gone {
+            c.remove(name);
+            for on in n.values_mut() {
+                on.1.retain(|x| x != name);
+            }
+        }
+        let net = spec::container_name(task, gen);
+        if n.get(&net).is_some_and(|x| x.1.is_empty()) {
+            n.remove(&net);
         }
         self.removed.lock().unwrap().push((task, gen.to_owned()));
     }
@@ -145,6 +292,15 @@ impl Engine for FakeEngine {
             return;
         }
         self.containers.lock().unwrap().remove(name);
+        for on in self.networks.lock().unwrap().values_mut() {
+            on.1.retain(|x| x != name);
+        }
+    }
+    fn remove_network(&self, name: &str) {
+        let mut n = self.networks.lock().unwrap();
+        if n.get(name).is_some_and(|x| x.1.is_empty()) {
+            n.remove(name);
+        }
     }
 }
 
@@ -462,6 +618,7 @@ impl H {
             true,
         )
         .unwrap();
+        d.net = net();
         d.readopt().unwrap();
         d
     }
@@ -609,8 +766,8 @@ fn a_community_build_runs_staged_in_and_out_and_its_container_holds_nothing() {
         h.tdir(7, GEN).join("in").display()
     )));
     assert!(
-        all.contains("--cpus 2") && all.contains("--memory 4g"),
-        "its units' share: {all}"
+        all.contains("--cpus 1.900") && all.contains("--memory 4032m"),
+        "its units' share, less its egress sidecar's: {all}"
     );
     assert!(all.contains(&format!("{}:/pool:ro", h.checkout.display())));
     // What it was given: meta.sh, and no token, key or pool address in it.
@@ -668,7 +825,16 @@ fn the_claim_lists_the_leases_with_the_capacity_and_reuses_its_claim_id_after_a_
     assert_eq!(first["want"], 1);
     assert_eq!(first["capacity"]["units"], 11);
     assert_eq!(first["kinds"], json!(["build", "trial", "audit"]));
-    assert_eq!(first["orders"], json!(["drain", "restart", "stop-task"]));
+    assert_eq!(
+        first["orders"],
+        json!([
+            "drain",
+            "recheck-agent",
+            "restart",
+            "restart-agent",
+            "stop-task"
+        ])
+    );
     h.advance(61);
     h.give(community(7, GEN));
     d.tick();
@@ -1042,6 +1208,16 @@ fn a_pool_outage_longer_than_a_lease_kills_only_the_expired_leases_containers() 
     h.advance(31);
     h.ticks(&mut d, 3);
     assert!(h.engine.has(9, GEN2));
+    let removals_of_9 = || {
+        h.engine
+            .removed
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(t, _)| *t == 9)
+            .count()
+    };
+    let before = removals_of_9();
     // The pool stops answering anything.
     h.pool.down.store(true, Ordering::SeqCst);
     h.pool.answer(Answer::Down);
@@ -1058,16 +1234,7 @@ fn a_pool_outage_longer_than_a_lease_kills_only_the_expired_leases_containers() 
         "nothing reported for it"
     );
     assert_eq!(d.holds(), vec![(9, GEN2.to_owned())]);
-    assert_eq!(
-        h.engine
-            .removed
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(t, _)| *t == 9)
-            .count(),
-        0
-    );
+    assert_eq!(removals_of_9(), before, "the other lease is not touched");
 }
 
 #[test]
@@ -1484,8 +1651,8 @@ fn a_review_rebuild_learns_from_staged_evidence_and_stages_for_a_maintainer() {
     assert!(meta.contains("review_url='https://felix.example'"));
     let args = h.engine.args(7, GEN).join(" ");
     assert!(
-        args.contains("ANTHROPIC_BASE_URL=http://agent:8790"),
-        "a model kind talks to its agent sidecar"
+        args.contains("ANTHROPIC_BASE_URL=http://10.231.0.3:8790"),
+        "a model kind talks to its agent sidecar: {args}"
     );
     h.leave(7, GEN, &built_ok(), "log\n");
     h.engine.exit(7, GEN, 0, false);
@@ -1566,7 +1733,7 @@ fn an_audit_attaches_its_report_to_the_staged_build() {
         .engine
         .args(9, GEN)
         .join(" ")
-        .contains("--cpus 1 --memory 2g"));
+        .contains("--cpus 0.650 --memory 1728m"));
     h.leave(
         9,
         GEN,
@@ -1649,11 +1816,18 @@ fn orders_restart_exits_75_and_a_young_dispatcher_refuses() {
     h.give(order(&id2, "recheck-agent"));
     d.tick();
     assert_eq!(
-        h.pool.answers.lock().unwrap()[1].1["outcome"],
-        "refused",
-        "no probe sidecar before the agent sidecars issue"
+        h.pool.answers.lock().unwrap().len(),
+        1,
+        "answered once the probe has spoken"
     );
     h.advance(3);
+    d.tick();
+    let a = h.pool.answers.lock().unwrap()[1].clone();
+    assert_eq!(
+        (a.0.as_str(), &a.1["outcome"], &a.1["code"]),
+        (id2.as_str(), &json!("done"), &json!("probed"))
+    );
+    h.advance(60);
     h.give(order(&id3, "restart"));
     d.tick();
     assert_eq!(d.exit, Some(75));
@@ -1736,6 +1910,20 @@ fn the_dispatcher_refuses_a_signing_key() {
             .unwrap_err()
             .to_string();
         assert!(e.contains(k) && e.contains("signing key"), "{e}");
+    }
+    // Nor an agent key or a GitHub token (invariant 5): agent.env is the agent sidecars' alone.
+    assert!(super::refuse_agent_key(env("OMARCHY_SECRETS_DIR", "/srv/s")).is_ok());
+    assert!(super::refuse_agent_key(env("GITHUB_TOKEN", "")).is_ok());
+    for k in [
+        "ANTHROPIC_API_KEY",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "GEMINI_API_KEY",
+        "GITHUB_TOKEN",
+    ] {
+        let e = super::refuse_agent_key(env(k, "x"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains(k) && e.contains("agent.env"), "{e}");
     }
 }
 
@@ -1893,4 +2081,505 @@ fn a_log_that_is_a_link_is_never_read_even_when_the_engine_killed_the_task() {
     assert_eq!(f["oom"], true);
     assert!(!f.to_string().contains("secret-of-the-dispatcher"), "{f}");
     assert!(h.pool.staged_of(7).is_empty(), "the link is not uploaded");
+}
+
+// ---------- task networks and sidecars (#336) ----------
+
+/// Two staged builds an audit and a review rebuild can learn from.
+fn stage_evidence(h: &H, of: &[u64]) {
+    for id in of {
+        let mut a = h.pool.artifacts.lock().unwrap();
+        a.insert((*id, "PKGBUILD".into()), b"pkgname=felix".to_vec());
+        a.insert((*id, "build.log".into()), b"log".to_vec());
+    }
+}
+
+fn audit(id: u64, of: u64, gen: &str) -> Value {
+    task(
+        id,
+        "audit",
+        "felix",
+        "",
+        "community",
+        json!({ "task": of }),
+        gen,
+    )
+}
+
+fn review(id: u64, of: u64, gen: &str) -> Value {
+    task(
+        id,
+        "build",
+        "felix",
+        &format!("review:{of}"),
+        "project",
+        json!({ "review": of, "project": "https://felix.example" }),
+        gen,
+    )
+}
+
+fn sidecar(id: u64, gen: &str, role: &str) -> String {
+    format!("{}-{role}", spec::container_name(id, gen))
+}
+
+#[test]
+fn every_task_gets_its_own_internal_network_and_egress_sidecar() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    h.give(community(7, GEN));
+    h.ticks(&mut d, 3);
+    let net = spec::container_name(7, GEN);
+    let egress = sidecar(7, GEN, "egress");
+    assert!(h.engine.has_network(&net) && h.engine.has_name(&egress));
+    assert!(
+        !h.engine.has_name(&sidecar(7, GEN, "agent")),
+        "a build has no agent"
+    );
+    let create = h
+        .engine
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|c| c[..2] == ["network", "create"] && c.last() == Some(&net))
+        .cloned()
+        .unwrap();
+    assert!(create.contains(&"--internal".to_owned()), "{create:?}");
+    // The task is on its network only; its egress on that one and the shared bridge; the dispatcher on neither.
+    assert_eq!(h.engine.attached(&net), vec![net.clone()]);
+    let mut on = h.engine.attached(&egress);
+    on.sort();
+    assert_eq!(on, vec![spec::EGRESS_NETWORK.to_owned(), net.clone()]);
+    assert_eq!(
+        h.engine.containers.lock().unwrap()[&egress].0.status,
+        "running"
+    );
+    let lease = &h.leases()[0];
+    assert!(lease.net_slot.is_some());
+    // Its end removes its container, its sidecar and its network; the shared bridge stays.
+    h.leave(7, GEN, &built_ok(), "log\n");
+    h.engine.exit(7, GEN, 0, false);
+    h.ticks(&mut d, 2);
+    assert_eq!(h.pool.completes_of(7).len(), 1);
+    assert!(!h.engine.has(7, GEN) && !h.engine.has_name(&egress) && !h.engine.has_network(&net));
+    assert!(h.engine.has_network(spec::EGRESS_NETWORK));
+}
+
+#[test]
+fn two_model_tasks_each_get_their_own_agent_sidecar_and_stopping_one_removes_only_its_own() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    stage_evidence(&h, &[5, 6]);
+    h.give(audit(9, 5, GEN));
+    h.give(review(10, 6, GEN2));
+    h.ticks(&mut d, 4);
+    let (a9, a10) = (sidecar(9, GEN, "agent"), sidecar(10, GEN2, "agent"));
+    assert!(h.engine.has(9, GEN) && h.engine.has(10, GEN2));
+    assert!(
+        h.engine.has_name(&a9) && h.engine.has_name(&a10),
+        "one agent sidecar each"
+    );
+    let (n9, n10) = (spec::container_name(9, GEN), spec::container_name(10, GEN2));
+    assert_eq!(
+        h.engine.attached(&a9),
+        vec![n9.clone()],
+        "an agent sidecar is on its task's network only"
+    );
+    assert_eq!(h.engine.attached(&a10), vec![n10.clone()]);
+    // Each points at its own: the audit's container at the audit's agent, never the rebuild's.
+    let ip = |args: &[String], k: &str| {
+        args.iter()
+            .find_map(|a| a.strip_prefix(&format!("{k}=")))
+            .unwrap()
+            .to_owned()
+    };
+    let (t9, t10) = (h.engine.args(9, GEN), h.engine.args(10, GEN2));
+    assert_ne!(
+        ip(&t9, "ANTHROPIC_BASE_URL"),
+        ip(&t10, "ANTHROPIC_BASE_URL")
+    );
+    let agent_ip = |name: &str| {
+        value_of(&h.engine.args_of(name), "--ip")
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(
+        ip(&t9, "ANTHROPIC_BASE_URL"),
+        format!("http://{}:8790", agent_ip(&a9))
+    );
+    assert_eq!(
+        ip(&t10, "ANTHROPIC_BASE_URL"),
+        format!("http://{}:8790", agent_ip(&a10))
+    );
+    // The agent's keys reach the sidecar only, as a read-only file; no task container holds them.
+    let keys =
+        "type=bind,source=/srv/omarchy/secrets/agent.env,target=/run/omarchy/agent.env,readonly";
+    assert!(h.engine.args_of(&a9).iter().any(|a| a == keys));
+    assert!(
+        !t9.iter().any(|a| a.contains("agent.env")) && !t9.iter().any(|a| a.contains("/agent:"))
+    );
+    // The pool stops the audit: its container, its sidecars and its network go, nothing of the rebuild's.
+    h.pool
+        .beats
+        .lock()
+        .unwrap()
+        .insert(9, BeatMode::Stop("cancelled".into()));
+    h.advance(301);
+    h.ticks(&mut d, 2);
+    assert!(!h.engine.has(9, GEN) && !h.engine.has_name(&a9));
+    assert!(!h.engine.has_name(&sidecar(9, GEN, "egress")) && !h.engine.has_network(&n9));
+    assert!(h.engine.has(10, GEN2) && h.engine.has_name(&a10) && h.engine.has_network(&n10));
+    assert!(h.engine.has_name(&sidecar(10, GEN2, "egress")));
+    assert_eq!(d.holds(), vec![(10, GEN2.to_owned())]);
+}
+
+#[test]
+fn a_compromised_task_reaches_no_other_tasks_network_or_agent() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    stage_evidence(&h, &[5]);
+    h.give(community(7, GEN));
+    h.give(audit(9, 5, GEN2));
+    h.ticks(&mut d, 4);
+    // What a recipe in task 7 can address: the containers on the networks its container is on.
+    let reach = |id: u64, gen: &str| -> Vec<String> {
+        let mine = h.engine.attached(&spec::container_name(id, gen));
+        let nets = h.engine.networks.lock().unwrap();
+        mine.iter().flat_map(|n| nets[n].1.clone()).collect()
+    };
+    let from7 = reach(7, GEN);
+    assert_eq!(
+        {
+            let mut v = from7.clone();
+            v.sort();
+            v
+        },
+        vec![spec::container_name(7, GEN), sidecar(7, GEN, "egress")],
+        "task 7 sees its own egress, nothing of task 9's"
+    );
+    assert!(!from7.iter().any(|c| c.contains("-9-")));
+    // No task container and no agent sidecar is on the shared bridge; each egress is, and listens on nothing there.
+    let bridge = h.engine.networks.lock().unwrap()[spec::EGRESS_NETWORK]
+        .1
+        .clone();
+    assert!(bridge.iter().all(|c| c.ends_with("-egress")), "{bridge:?}");
+    // The subnets differ, and each egress refuses the whole task range.
+    let subnet = |id: u64, gen: &str| {
+        let net = spec::container_name(id, gen);
+        let calls = h.engine.calls.lock().unwrap();
+        let c = calls
+            .iter()
+            .find(|c| c[..2] == ["network", "create"] && c.last() == Some(&net))
+            .unwrap();
+        value_of(c, "--subnet").unwrap().to_owned()
+    };
+    assert_ne!(subnet(7, GEN), subnet(9, GEN2));
+    let e7 = h.engine.args_of(&sidecar(7, GEN, "egress"));
+    assert!(
+        e7.windows(2)
+            .any(|w| w[0] == "--deny" && w[1] == "10.231.0.0/16"),
+        "{e7:?}"
+    );
+    // Nothing on a task network holds the socket or a token.
+    for (name, c) in h.engine.containers.lock().unwrap().iter() {
+        let all = c.2.join(" ");
+        assert!(
+            !all.contains("docker.sock")
+                && !all.contains("omj.")
+                && !all.contains("omw_")
+                && !all.contains("OMARCHY_WORKER_TOKEN"),
+            "{name}: {all}"
+        );
+    }
+}
+
+#[test]
+fn per_task_caps_go_to_the_sidecar_and_the_per_day_budget_stops_new_model_tasks() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    d.net.caps = super::budget::Caps {
+        calls_per_task: 200,
+        tokens_per_task: 50_000,
+        minutes_per_task: 30,
+        calls_per_day: 250,
+    };
+    stage_evidence(&h, &[5, 6, 8]);
+    h.give(audit(9, 5, GEN));
+    h.ticks(&mut d, 3);
+    let caps = |name: &str| {
+        let a = h.engine.args_of(name);
+        [
+            "BROKER_AGENT_CALLS",
+            "BROKER_AGENT_TOKENS",
+            "BROKER_AGENT_WALL_SECONDS",
+        ]
+        .map(|k| {
+            a.iter()
+                .find_map(|x| x.strip_prefix(&format!("{k}=")))
+                .unwrap()
+                .to_owned()
+        })
+    };
+    assert_eq!(caps(&sidecar(9, GEN, "agent")), ["200", "50000", "1800"]);
+    // A second model task while the first runs: what the day has left once the first's cap is set aside.
+    h.give(review(10, 6, GEN2));
+    h.advance(31);
+    h.ticks(&mut d, 3);
+    assert_eq!(caps(&sidecar(10, GEN2, "agent"))[0], "50");
+    // The day is spoken for: the claims offer no agent slot, and a model task handed anyway does not start.
+    h.advance(31);
+    h.ticks(&mut d, 1);
+    assert_eq!(h.pool.last_claim()["capacity"]["agent_slots"], 0);
+    h.give(audit(11, 8, "g_00000000000000c3"));
+    h.advance(31);
+    h.ticks(&mut d, 3);
+    assert!(!h.engine.has(11, "g_00000000000000c3"));
+    let f = &h.pool.fails_of(11)[0];
+    assert!(
+        f["lost"] == true && f["error"].as_str().unwrap().contains("agent budget"),
+        "{f}"
+    );
+    // A build needs no agent and starts.
+    h.give(community(12, "g_00000000000000d4"));
+    h.advance(31);
+    h.ticks(&mut d, 3);
+    assert!(h.engine.has(12, "g_00000000000000d4"));
+    // The audit ends having made 17 calls (its sidecar's usage file): the day counts 17, and 33 are free again.
+    std::fs::write(
+        h.tdir(9, GEN).join("agent/usage.json"),
+        r#"{"calls":17,"tokens":4000}"#,
+    )
+    .unwrap();
+    h.leave(
+        9,
+        GEN,
+        &[
+            ("audit.json", br#"{"verdict":"ok"}"#.to_vec()),
+            ("audit.md", b"# ok".to_vec()),
+        ],
+        "log\n",
+    );
+    h.engine.exit(9, GEN, 0, false);
+    h.ticks(&mut d, 2);
+    assert!(!h.engine.has(9, GEN));
+    assert_eq!(
+        super::budget::Ledger::new(&h.work).spent(h.now.load(Ordering::SeqCst)),
+        17
+    );
+    h.advance(31);
+    h.ticks(&mut d, 1);
+    assert_ne!(
+        h.pool.last_claim()["capacity"]["agent_slots"],
+        0,
+        "the day has calls left again"
+    );
+    // A new day: the budget is whole.
+    h.advance(86_400);
+    assert_eq!(
+        super::budget::Ledger::new(&h.work).spent(h.now.load(Ordering::SeqCst)),
+        0
+    );
+}
+
+#[test]
+fn a_package_with_its_signed_exception_gets_a_bridge_network_and_no_egress() {
+    let h = H::new();
+    std::fs::create_dir_all(h.checkout.join("factory/sizing")).unwrap();
+    std::fs::write(
+        h.checkout.join("factory/sizing/tasks.toml"),
+        "schema = 1\n[package.\"felix\"]\nnetwork = \"direct\"\nreason = \"its tests open raw sockets\"\n",
+    )
+    .unwrap();
+    let mut d = h.dispatcher();
+    h.give(community(7, GEN));
+    h.ticks(&mut d, 3);
+    let net = spec::container_name(7, GEN);
+    assert!(h.engine.has(7, GEN) && h.engine.has_network(&net));
+    let create = h
+        .engine
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|c| c[..2] == ["network", "create"] && c.last() == Some(&net))
+        .cloned()
+        .unwrap();
+    assert!(
+        !create.contains(&"--internal".to_owned()),
+        "a bridge network: {create:?}"
+    );
+    assert!(!h.engine.has_name(&sidecar(7, GEN, "egress")));
+    assert!(!h
+        .engine
+        .args(7, GEN)
+        .join(" ")
+        .to_ascii_lowercase()
+        .contains("proxy"));
+    // Another package of the same release has none.
+    h.give(task(
+        8,
+        "build",
+        "other",
+        "https://github.com/o/o@v1:PKGBUILD",
+        "community",
+        json!({}),
+        GEN2,
+    ));
+    h.advance(31);
+    h.ticks(&mut d, 3);
+    assert!(h.engine.has_name(&sidecar(8, GEN2, "egress")));
+    // A sizing file a release broke fails the task before the engine runs, never widens it.
+    std::fs::write(
+        h.checkout.join("factory/sizing/tasks.toml"),
+        "schema = 1\n[package.\"felix\"]\nnetwork = \"direct\"\n",
+    )
+    .unwrap();
+    h.give(community(9, "g_00000000000000c3"));
+    h.advance(31);
+    h.ticks(&mut d, 3);
+    assert!(!h.engine.has(9, "g_00000000000000c3"));
+    assert!(h.pool.fails_of(9)[0]["error"]
+        .as_str()
+        .unwrap()
+        .contains("sizing"));
+}
+
+#[test]
+fn orphan_sidecars_and_networks_of_this_host_go_at_start_and_nothing_else() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    h.give(community(7, GEN));
+    h.ticks(&mut d, 3);
+    drop(d);
+    // A lease that left its sidecar and network behind, a probe's leftovers, and another host's.
+    let stale = "g_00000000000000e5";
+    for (name, host) in [
+        (sidecar(12, stale, "egress"), HOST),
+        (sidecar(12, stale, "agent"), HOST),
+        (sidecar(0, stale, "egress"), HOST),
+        (sidecar(13, stale, "egress"), "h_other"),
+    ] {
+        h.engine.put(&name, "running", host);
+    }
+    for (name, host) in [
+        (spec::container_name(12, stale), HOST),
+        (spec::container_name(0, stale), HOST),
+        (spec::container_name(13, stale), "h_other"),
+        ("omarchy-legacy_default".to_owned(), ""),
+    ] {
+        h.engine
+            .networks
+            .lock()
+            .unwrap()
+            .insert(name, (host.to_owned(), Vec::new()));
+    }
+    let _d = h.dispatcher();
+    assert!(
+        h.engine.has(7, GEN) && h.engine.has_name(&sidecar(7, GEN, "egress")),
+        "the held lease's are adopted"
+    );
+    assert!(h.engine.has_network(&spec::container_name(7, GEN)));
+    for gone in [
+        sidecar(12, stale, "egress"),
+        sidecar(12, stale, "agent"),
+        sidecar(0, stale, "egress"),
+    ] {
+        assert!(!h.engine.has_name(&gone), "{gone}");
+    }
+    assert!(!h.engine.has_network(&spec::container_name(12, stale)));
+    assert!(!h.engine.has_network(&spec::container_name(0, stale)));
+    assert!(
+        h.engine.has_name(&sidecar(13, stale, "egress")),
+        "another host's"
+    );
+    assert!(h.engine.has_network(&spec::container_name(13, stale)));
+    assert!(
+        h.engine.has_network("omarchy-legacy_default"),
+        "another project's network"
+    );
+}
+
+#[test]
+fn a_sidecar_that_does_not_start_loses_the_lease_and_leaves_nothing() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    stage_evidence(&h, &[5]);
+    *h.engine.refuse.lock().unwrap() = Some("-agent".into());
+    h.give(audit(9, 5, GEN));
+    h.ticks(&mut d, 4);
+    assert!(!h.engine.has(9, GEN), "no task container without its agent");
+    let f = &h.pool.fails_of(9)[0];
+    assert!(
+        f["lost"] == true
+            && f["error"]
+                .as_str()
+                .unwrap()
+                .contains("-agent did not start"),
+        "{f}"
+    );
+    assert!(
+        !h.engine.has_name(&sidecar(9, GEN, "egress"))
+            && !h.engine.has_network(&spec::container_name(9, GEN))
+    );
+    assert_eq!(
+        super::budget::Ledger::new(&h.work).spent(h.now.load(Ordering::SeqCst)),
+        0,
+        "nothing of the day spent"
+    );
+}
+
+#[test]
+fn the_claim_says_who_the_agent_is_from_the_probe_sidecar() {
+    let h = H::new();
+    let mut d = h.dispatcher();
+    d.tick();
+    let agent = h.pool.last_claim()["agent"].clone();
+    assert_eq!(agent["probe"], "ok");
+    assert_eq!(
+        (agent["provider"].as_str(), agent["model"].as_str()),
+        (Some("anthropic"), Some("claude-sonnet-5"))
+    );
+    // The probe ran on a network of its own, which is gone.
+    assert!(!h
+        .engine
+        .networks
+        .lock()
+        .unwrap()
+        .keys()
+        .any(|n| n.starts_with("omarchy-task-0-")));
+    assert!(!h
+        .engine
+        .containers
+        .lock()
+        .unwrap()
+        .keys()
+        .any(|n| n.starts_with("omarchy-task-0-")));
+    // An agent that stops answering: a restart-agent order is a fresh probe, answered by its outcome.
+    *h.engine.probe_says.lock().unwrap() = Some(
+        r#"{"ok": false, "provider": "anthropic", "error": "HTTP 401: invalid x-api-key"}"#.into(),
+    );
+    h.advance(121);
+    h.give(json!({ "task": null, "orders": [{ "id": format!("wo_{}", "4".repeat(32)), "kind": "restart-agent", "reason": "test", "issued_by": "maintainer" }] }));
+    h.ticks(&mut d, 2);
+    let a = h.pool.answers.lock().unwrap()[0].1.clone();
+    assert_eq!(
+        (&a["outcome"], &a["code"]),
+        (&json!("failed"), &json!("not-answering")),
+        "{a}"
+    );
+    h.advance(61);
+    h.ticks(&mut d, 1);
+    let agent = h.pool.last_claim()["agent"].clone();
+    assert_eq!(agent["probe"], "error");
+    assert!(agent["error"].as_str().unwrap().contains("401"));
+    // A host with no agent key says so, and takes no probe.
+    let h2 = H::new();
+    let mut d2 = h2.dispatcher();
+    d2.net.secrets_dir = None;
+    d2.tick();
+    assert_eq!(h2.pool.last_claim()["agent"]["probe"], "error");
+    assert!(h2.pool.last_claim()["agent"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("no agent key"));
 }

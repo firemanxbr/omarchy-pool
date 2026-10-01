@@ -49,6 +49,22 @@ KEYS = [p["key"] for p in PROVIDERS.values()]
 # (factory/bin/broker) speaking for another provider: "claude-code/…". The
 # probe reports it, so the Workers page names the agent that really runs.
 BEHIND = {"agent": ""}
+# The tokens the last completion spent, as the provider counted them (0 when
+# it said nothing): an agent sidecar's per-task cap reads it (factory/bin/broker).
+USAGE = {"tokens": 0}
+
+
+def _count(usage):
+    """Tokens in a provider's usage block: Anthropic's input/output, OpenAI's prompt/completion or total."""
+    if not isinstance(usage, dict):
+        return 0
+    if isinstance(usage.get("total_tokens"), int):
+        return usage["total_tokens"]
+    n = 0
+    for k in ("input_tokens", "output_tokens", "prompt_tokens", "completion_tokens"):
+        if isinstance(usage.get(k), int):
+            n += usage[k]
+    return n
 
 
 # The skills: what the pool checks on every package and what each group of
@@ -151,6 +167,7 @@ def complete(system, user, max_tokens=4000, timeout=300):
         with _open(req, timeout) as r:
             out = json.load(r)
         BEHIND["agent"] = out.get("agent") or ""
+        USAGE["tokens"] += _count(out.get("usage"))
         return "".join(c.get("text", "") for c in out.get("content", [])), out.get("model", model)
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     effort = os.environ.get("FACTORY_REASONING")
@@ -163,6 +180,7 @@ def complete(system, user, max_tokens=4000, timeout=300):
                                      headers={"authorization": "Bearer " + key, "content-type": "application/json"})
         with _open(req, timeout) as r:
             out = json.load(r)
+        USAGE["tokens"] += _count(out.get("usage"))
         choices = out.get("choices") or []
         text = (choices[0].get("message") or {}).get("content") if choices else None
         finish = choices[0].get("finish_reason") if choices else None
@@ -197,6 +215,7 @@ def claude_code(binary, model, system, user, timeout):
     except json.JSONDecodeError:
         raise SystemExit(f"claude-code: exit {run.returncode}, not a JSON result: {(run.stderr or run.stdout).strip()[:500]}")
     text = out.get("result") or ""
+    USAGE["tokens"] += _count(out.get("usage"))
     if out.get("is_error") or run.returncode != 0:
         raise SystemExit(f"claude-code: {text.strip()[:500] or run.stderr.strip()[:500] or f'exit {run.returncode}'}")
     # modelUsage lists every model the run touched — Claude Code keeps a

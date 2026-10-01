@@ -24,6 +24,12 @@
 #   5. the disk watcher: below the floor, the youngest build is killed `lost`
 #      and the claims say want 0
 #
+# Every task runs on its own internal network with its egress sidecar (#336);
+# here the worker image the sidecars run is a stand-in that only sleeps (the
+# egress proxy itself is tests/task-networks.sh's): the network is internal,
+# the task is on it alone, its egress on it and on omarchy-egress, and all of
+# it goes with the lease — a stopped one's, never the other lease's.
+#
 # Requires: cargo (or PKG_REPO=<a built pkg-repo>), python3, jq, docker or podman.
 #   STUB_IMAGE  an image with bash and coreutils for this machine's architecture
 #               (default docker.io/library/debian:stable-slim; pulled when absent)
@@ -41,11 +47,18 @@ cleanup() {
   # Only this run's containers: the ones labelled with its own host id.
   local c
   for c in $("$RT" ps -aq --filter "label=org.omarchy-pool.agent.host=$host" 2>/dev/null); do "$RT" rm -f "$c" >/dev/null 2>&1 || true; done
+  # Its networks (its tasks', and omarchy-egress when this run made it and nothing else is on it), and its stand-in image.
+  for c in $("$RT" network ls -q --filter "label=org.omarchy-pool.agent.host=$host" 2>/dev/null); do "$RT" network rm "$c" >/dev/null 2>&1 || true; done
+  [[ -z "${worker_id:-}" ]] || "$RT" rmi "$worker_id" >/dev/null 2>&1 || true
   # What the task containers wrote as root goes through one more container of this run's own image, on this run's directory only.
   rm -rf "$tmp" 2>/dev/null || { [[ -z "${image_id:-}" ]] || "$RT" run --rm -v "$tmp:$tmp" "$image_id" rm -rf "$tmp/work" >/dev/null 2>&1; rm -rf "$tmp" 2>/dev/null; } || true
 }
 trap cleanup EXIT
-fail() { echo "dispatch-engine: FAIL — $*" >&2; [[ -f "$tmp/dispatcher.log" ]] && tail -n 40 "$tmp/dispatcher.log" >&2; exit 1; }
+fail() {
+  echo "dispatch-engine: FAIL — $*" >&2; [[ -f "$tmp/dispatcher.log" ]] && tail -n 40 "$tmp/dispatcher.log" >&2
+  echo "this run's containers:" >&2; "$RT" ps -a --filter "label=org.omarchy-pool.agent.host=$host" --format '{{.Names}} {{.Status}}' >&2 || true
+  exit 1
+}
 
 if [[ -z "${PKG_REPO:-}" ]]; then
   (cd "$root" && cargo build -q -p pkg-repo)
@@ -54,6 +67,13 @@ fi
 arch="$(uname -m)"; [[ "$arch" == arm64 ]] && arch=aarch64
 "$RT" image inspect "$STUB_IMAGE" >/dev/null 2>&1 || "$RT" pull -q "$STUB_IMAGE" >/dev/null
 image_id="$("$RT" image inspect --format '{{.Id}}' "$STUB_IMAGE")"; image_id="sha256:${image_id#sha256:}"
+# The worker image the sidecars run: a stand-in of this run's own that sleeps whatever its role (by its content id, as a digest).
+mkdir -p "$tmp/worker-image"
+printf '#!/bin/sh\nexec sleep 100000\n' > "$tmp/worker-image/e"; chmod 755 "$tmp/worker-image/e"
+printf 'FROM %s\nCOPY e /e\nLABEL org.omarchy-pool.agent.host=%s\nENTRYPOINT ["/e"]\n' "$STUB_IMAGE" "$host" > "$tmp/worker-image/Containerfile"
+worker_id="$("$RT" build -q -f "$tmp/worker-image/Containerfile" "$tmp/worker-image" | tail -n1)"; worker_id="sha256:${worker_id#sha256:}"
+# Task networks from a range of this run's own, so nothing else on the engine is in the way.
+subnets="10.$((200 + RANDOM % 50)).$(( (RANDOM % 16) * 16 )).0/20"
 
 # The release checkout the task containers mount at /pool: a build script that plays the task by its name.
 mkdir -p "$tmp/checkout/factory/worker" "$tmp/checkout/fixtures" "$tmp/work"
@@ -146,7 +166,8 @@ give() { # id name units — one task for the next claim, a community build with
 gen() { printf 'g_%016x' "$1"; }
 name() { echo "omarchy-task-$1-$(gen "$1")"; }
 start() { # [extra flags…]: a dispatcher, in the background
-  env -u SIGNING_KEY OMARCHY_BUILD_IMAGE_AARCH64="$image_id" OMARCHY_BUILD_IMAGE_X86_64="$image_id" \
+  env -u SIGNING_KEY -u OMARCHY_SECRETS_DIR -u GITHUB_TOKEN -u ANTHROPIC_API_KEY -u CLAUDE_CODE_OAUTH_TOKEN -u OPENAI_API_KEY -u GEMINI_API_KEY -u XAI_API_KEY OMARCHY_BUILD_IMAGE_AARCH64="$image_id" OMARCHY_BUILD_IMAGE_X86_64="$image_id" \
+    OMARCHY_WORKER_IMAGE="$worker_id" OMARCHY_TASK_SUBNETS="$subnets" \
     "$PKG_REPO" dispatch --api "http://127.0.0.1:$port" --pool "http://127.0.0.1:$port" --worker-token omw_it \
       --work-root "$tmp/work" --capacity-file "$tmp/capacity.json" --checkout "$tmp/checkout" --ready "127.0.0.1:$ready_port" \
       --tick-s 1 --heartbeat-s 2 --idle-claim-s 1 "$@" >> "$tmp/dispatcher.log" 2>&1 & disp=$!
@@ -165,7 +186,10 @@ all_failed() { local i; for i; do reported "$i" fail || return 1; done; }
 all_running() { local i; for i; do running "$i" || return 1; done; }
 exited() { [[ "$("$RT" inspect --format '{{.State.Status}}' "$(name "$1")" 2>/dev/null)" == exited ]]; }
 running() { [[ "$("$RT" inspect --format '{{.State.Status}}' "$(name "$1")" 2>/dev/null)" == running ]]; }
-gone() { ! "$RT" inspect "$(name "$1")" >/dev/null 2>&1; }
+gone() { ! "$RT" inspect --type container "$(name "$1")" >/dev/null 2>&1; }
+side_gone() { ! "$RT" inspect --type container "$(name "$1")-egress" >/dev/null 2>&1 && ! "$RT" network inspect "$(name "$1")" >/dev/null 2>&1; }
+side_there() { [[ "$("$RT" inspect --format '{{.State.Status}}' "$(name "$1")-egress" 2>/dev/null)" == running ]] && "$RT" network inspect "$(name "$1")" >/dev/null 2>&1; }
+nets_of() { "$RT" inspect "$1" | jq -r '.[0].NetworkSettings.Networks | keys | sort | join(" ")'; }
 finish() { touch "$tmp/work/tasks/$1-$(gen "$1")/in/finish"; }
 
 # ---------- 1. born with nothing; a build through staging ----------
@@ -175,7 +199,7 @@ until_ 60 "task 1's container runs" running 1
 c="$(name 1)"
 env_names="$("$RT" inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$c" | cut -d= -f1 | sort -u | tr '\n' ' ')"
 for v in $env_names; do
-  case "$v" in MAKEFLAGS|NINJAFLAGS|CARGO_BUILD_JOBS|PATH|HOME|HOSTNAME|TERM|LANG|LC_ALL|container|"") ;; *) fail "a variable outside the allowlist in the task container: $v ($env_names)" ;; esac
+  case "$v" in MAKEFLAGS|NINJAFLAGS|CARGO_BUILD_JOBS|HTTP_PROXY|http_proxy|HTTPS_PROXY|https_proxy|NO_PROXY|no_proxy|PATH|HOME|HOSTNAME|TERM|LANG|LC_ALL|container|"") ;; *) fail "a variable outside the allowlist in the task container: $v ($env_names)" ;; esac
 done
 "$RT" inspect --format '{{json .Config.Env}}' "$c" | grep -qiE 'omj\.|omw_|token|_key|secret' && fail "a credential in the task container's environment"
 mounts="$("$RT" inspect --format '{{range .Mounts}}{{.Destination}} {{end}}' "$c" | tr ' ' '\n' | grep . | sort | tr '\n' ' ')"
@@ -192,13 +216,22 @@ until_ 10 "the stub wrote what it was born with" grep -q '== meta' "$log"
 grep -q '== socket: ls: cannot access' "$log" || fail "a socket in the task container: $(grep '== socket' "$log")"
 grep -qiE 'omj\.|omw_|OMARCHY_API|OMARCHY_WORKER_TOKEN' "$log" && fail "a token or the pool's API in the task container: $log"
 echo "ok: a task container holds no token, key or socket — environment, mounts and flags from the engine, and from inside"
+# Its network (#336): internal, its own; the task on it alone; its egress sidecar on it and on omarchy-egress, holding nothing.
+"$RT" network inspect "$c" | jq -e '.[0] | (.Internal == true or .internal == true)' >/dev/null || fail "task 1's network is not internal: $("$RT" network inspect "$c" | jq -c '.[0] | {Internal, internal}')"
+[[ "$(nets_of "$c")" == "$c" ]] || fail "task 1's container is on: $(nets_of "$c")"
+[[ "$(nets_of "$c-egress")" == "$(printf '%s\n' "$c" omarchy-egress | sort | tr '\n' ' ' | sed 's/ $//')" ]] || fail "task 1's egress is on: $(nets_of "$c-egress")"
+"$RT" inspect "$c-egress" | jq -e '.[0] | (.Mounts | length) == 0 and .HostConfig.Privileged == false and .HostConfig.ReadonlyRootfs == true' >/dev/null || fail "task 1's egress: $("$RT" inspect "$c-egress" | jq -c '.[0] | {Mounts, HostConfig: (.HostConfig | {Privileged, ReadonlyRootfs})}')"
+"$RT" inspect --format '{{json .Config.Env}}' "$c-egress" | grep -qiE 'omj\.|omw_|token|_key|secret' && fail "a credential in the egress sidecar's environment"
+"$RT" inspect --format '{{json .Config.Env}}' "$c" | grep -q "HTTPS_PROXY=http://" || fail "task 1 has no proxy: $("$RT" inspect --format '{{json .Config.Env}}' "$c")"
+echo "ok: the task's own internal network, the task alone on it, its egress sidecar on it and on omarchy-egress"
 finish 1
 until_ 30 "task 1 completed" reported 1 complete
 [[ "$(jq -r 'select(.path | test("/factory/tasks/1/artifacts/")) | .path' "$tmp/requests.jsonl" | sed 's#.*/##' | tr '\n' ' ')" == "PKGBUILD build.log PKGINFO slow-1.0-1-$arch.pkg.tar.zst " ]] \
   || fail "task 1's uploads: $(jq -r 'select(.path | test("/artifacts/")) | .path' "$tmp/requests.jsonl")"
 jq -e 'select(.path | test("/factory/tasks/1/")) | .auth == "Bearer omj.secret-of-1" or .auth == "Bearer omj.renewed-1"' "$tmp/requests.jsonl" | grep -qv true && fail "a call for task 1 without its own job token"
 until_ 10 "task 1's container removed" gone 1
-echo "ok: a build staged in and out, completed with its job token, its container removed"
+until_ 10 "task 1's sidecar and network removed" side_gone 1
+echo "ok: a build staged in and out, completed with its job token, its container, its sidecar and its network removed"
 
 # ---------- 2. a failure, an out-of-memory kill, an output outside the list ----------
 give 2 fails 2; give 3 oom 1; give 4 evil 2; give 11 quiet 1
@@ -218,15 +251,20 @@ finish 6                                 # … task 6 ends while none runs …
 until_ 30 "task 6's container exits" exited 6
 "$RT" kill "$(name 7)" >/dev/null        # … task 7's is killed as a reboot kills it …
 "$RT" run -d --name "omarchy-task-99-$(gen 99)" --label "com.omarchy.task=99" --label "org.omarchy-pool.agent.host=$host" "$image_id" sleep 600 >/dev/null
-start                                    # … and a container of this host without a lease file waits for the new one
+"$RT" run -d --name "omarchy-task-98-$(gen 98)-egress" --label "com.omarchy.task=98" --label "org.omarchy-pool.agent.host=$host" "$image_id" sleep 600 >/dev/null
+"$RT" network create --label "org.omarchy-pool.agent.host=$host" "omarchy-task-98-$(gen 98)" >/dev/null
+start                                    # … and a container, a sidecar and a network of this host without a lease file wait for the new one
 running 5 || fail "task 5's container did not survive the dispatcher's replacement"
 until_ 30 "task 6 completed from its exited container" reported 6 complete
 until_ 30 "task 7 failed lost" reported 7 fail
 jq -e '.lost == true' <<<"$(report 7 fail)" >/dev/null || fail "task 7: $(report 7 fail)"
 until_ 10 "the stranger removed" gone 99
+"$RT" inspect --type container "omarchy-task-98-$(gen 98)-egress" >/dev/null 2>&1 && fail "an orphan sidecar of this host survived the start"
+"$RT" network inspect "omarchy-task-98-$(gen 98)" >/dev/null 2>&1 && fail "an orphan network of this host survived the start"
+side_there 5 || fail "task 5's sidecar or network did not survive the dispatcher's replacement"
 finish 5
 until_ 30 "task 5 completed by the new dispatcher" reported 5 complete
-echo "ok: a replaced dispatcher's task finishes; one that ended meanwhile is completed from its container; one killed meanwhile fails lost; a stranger goes"
+echo "ok: a replaced dispatcher's task finishes; one that ended meanwhile is completed from its container; one killed meanwhile fails lost; a stranger, an orphan sidecar and an orphan network go"
 
 # ---------- 4. the pool stops hearing one lease; a stop ----------
 stop 15
@@ -236,12 +274,15 @@ until_ 60 "tasks 8 and 9 run" all_running 8 9
 echo down > "$tmp/beats/8"
 until_ 60 "task 8's watchdog kills its container" gone 8
 running 9 || fail "task 9 was touched by task 8's watchdog"
+until_ 10 "task 8's sidecar and network removed" side_gone 8
+side_there 9 || fail "task 9's sidecar or network was touched by task 8's end"
 reported 8 fail && fail "an expired lease was reported: $(report 8 fail)"
 reported 8 complete && fail "an expired lease was completed"
 echo stop > "$tmp/beats/9"
 until_ 30 "task 9 stopped" reported 9 fail
 jq -e '.error | contains("stopped by the pool (cancelled)")' <<<"$(report 9 fail)" >/dev/null || fail "task 9: $(report 9 fail)"
 gone 9 || fail "task 9's container survived its stop"
+until_ 10 "task 9's sidecar and network removed" side_gone 9
 echo "ok: an expired lease's container is killed by its own watchdog and nothing reported, the other runs on; a stop kills and fails as stopped"
 
 # ---------- 5. the disk watcher ----------

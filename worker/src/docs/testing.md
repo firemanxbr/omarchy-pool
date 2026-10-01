@@ -701,7 +701,15 @@ worker's entrypoint against a stub pool (its id written, `pkg-repo work
 --self-test`, then `pkg-repo work` itself up to its first claim — which
 process it is, what it takes, what rolls its set out — and out on the empty
 answer), the broker answering on `:8790`, the builder's and the updater's
-`--self-test`.
+`--self-test`, and the egress sidecar's role refusing cloud metadata and a
+POST. `bash tests/task-networks.sh` (CI, on that local build; #336) runs the
+dispatcher with the real egress and agent sidecars and two probe tasks at
+once: a public mirror answers through the egress only; cloud metadata, a
+public name resolving to loopback, a raw socket ("Network is unreachable"),
+the host's LAN address and gateway, and the other task's container, egress
+and agent are out of reach; the probe sidecar's word reaches the claim; a
+signed exception's task gets a bridge network; a stop removes only that
+task's container, sidecars and network.
 
 What the build sees is checked by hand in the worker image (SECURITY.md,
 *Isolation*): `hold_secrets` leaves a child with no secret, `as_builder`

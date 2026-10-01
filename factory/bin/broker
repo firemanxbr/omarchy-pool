@@ -29,6 +29,18 @@ is the only caller; nothing here is reachable from outside the host.
 
 One completion at a time, in order — the agent is one subscription; at most
 BROKER_AGENT_CALLS (60) per task, so a runaway recipe cannot spend it.
+
+On a maintainer host each task that needs a model gets its own copy of this
+process, its **agent sidecar** (#336, design v2 §9.5): no worker token, on
+the task's own network, its keys from a read-only file. BROKER_USAGE_FILE
+names where it writes what it spent ({"calls", "tokens"}, after every
+completion), a directory the task container does not mount, from which the
+dispatcher keeps the host's per-day budget. A sidecar serves one task for
+its whole life, so its caps are the process's: BROKER_AGENT_CALLS
+completions, BROKER_AGENT_TOKENS tokens (as the provider counts them, or
+about four characters each when it says nothing) and
+BROKER_AGENT_WALL_SECONDS from its start; past any of them every completion
+is a 429.
 """
 import calendar
 import json
@@ -57,6 +69,61 @@ LEASE_SECONDS = 30 * 60
 USER_AGENT = "omarchy-broker/1 (+https://github.com/firemanxbr/omarchy-pool)"
 AGENT_CALLS = int(os.environ.get("BROKER_AGENT_CALLS", "60"))
 UPSTREAM_TIMEOUT = int(os.environ.get("BROKER_UPSTREAM_TIMEOUT", "900"))
+
+
+class Spent:
+    """An agent sidecar's spend (#336): one task's, for the process's whole
+    life — its caps are BROKER_AGENT_CALLS, BROKER_AGENT_TOKENS and
+    BROKER_AGENT_WALL_SECONDS, and what it spent is written to
+    BROKER_USAGE_FILE after every completion (and at start, so a sidecar that
+    made no call says 0). Off without BROKER_USAGE_FILE: the shared agent
+    proxy and the broker keep their per-task count (Held)."""
+
+    def __init__(self):
+        self.file = os.environ.get("BROKER_USAGE_FILE", "")
+        self.tokens_cap = int(os.environ.get("BROKER_AGENT_TOKENS", "0") or 0)
+        self.wall = int(os.environ.get("BROKER_AGENT_WALL_SECONDS", "0") or 0)
+        self.started = time.time()
+        self.calls = 0
+        self.tokens = 0
+        self.lock = threading.Lock()
+
+    def on(self):
+        return bool(self.file)
+
+    def take(self):
+        """None when one more completion may go — it is counted now — or why not."""
+        with self.lock:
+            if self.calls >= AGENT_CALLS:
+                return f"this task's agent sidecar answers at most {AGENT_CALLS} completions"
+            if self.tokens_cap and self.tokens >= self.tokens_cap:
+                return f"this task's agent sidecar spent its {self.tokens_cap} tokens"
+            if self.wall and time.time() - self.started >= self.wall:
+                return f"this task's agent sidecar is past its {self.wall} s"
+            self.calls += 1
+        self.write()
+        return None
+
+    def add(self, tokens):
+        with self.lock:
+            self.tokens += max(0, int(tokens))
+        self.write()
+
+    def write(self):
+        if not self.file:
+            return
+        with self.lock:
+            body = json.dumps({"calls": self.calls, "tokens": self.tokens})
+        tmp = self.file + ".tmp"
+        try:
+            with open(tmp, "w") as f:
+                f.write(body)
+            os.replace(tmp, self.file)
+        except OSError as e:
+            sys.stderr.write(f"broker: the usage file {self.file} could not be written: {e}\n")
+
+
+SPENT = Spent()
 
 
 def worker_token():
@@ -364,7 +431,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"type": "error", "error": {"type": "invalid_request_error", "message": "body is not JSON"}})
         if not agent.available():
             return self._json(503, {"type": "error", "error": {"type": "api_error", "message": "no agent key on the broker"}})
-        if HELD.current() is not None:
+        if SPENT.on():
+            refused = SPENT.take()
+            if refused:
+                return self._json(429, {"type": "error", "error": {"type": "rate_limit_error", "message": refused}})
+        elif HELD.current() is not None:
             if HELD.agent_calls >= AGENT_CALLS:
                 return self._json(429, {"type": "error", "error": {"type": "rate_limit_error", "message": f"the broker answers at most {AGENT_CALLS} completions per task"}})
             HELD.agent_calls += 1
@@ -378,10 +449,14 @@ class Handler(BaseHTTPRequestHandler):
                 user = c if isinstance(c, str) else "\n".join(b.get("text", "") for b in c if isinstance(b, dict))
         max_tokens = int(body.get("max_tokens") or 4000)
         with LOCK:
+            agent.USAGE["tokens"] = 0
             try:
                 text, model = agent.complete(system, user, max_tokens=max_tokens, timeout=int(os.environ.get("AGENT_PROXY_TIMEOUT", "600")))
             except SystemExit as e:
+                SPENT.add(agent.USAGE["tokens"])
                 return self._json(502, {"type": "error", "error": {"type": "api_error", "message": str(e)[:1000]}})
+            # What the provider counted; about four characters a token when it said nothing.
+            SPENT.add(agent.USAGE["tokens"] or (len(system) + len(user) + len(text or "")) // 4)
         # `agent` is not the API's: it says who really answered, for the probe behind this broker.
         return self._json(200, {"id": "msg_broker", "type": "message", "role": "assistant", "model": model, "stop_reason": "end_turn",
                                 "agent": f"{agent.provider()[0]}/{model}",
@@ -538,11 +613,15 @@ def main():
     serves = []
     if worker_token():
         serves.append("the pool for one task at a time (/pool)")
-    if have_agent:
+    if have_agent and SPENT.on():
+        serves.append(f"the agent {have_agent[0]}/{agent.model_for(*have_agent)} for one task (/v1/messages, at most {AGENT_CALLS} completions, "
+                      f"{SPENT.tokens_cap or 'any number of'} tokens, {SPENT.wall or 'no limit of'} s)")
+    elif have_agent:
         serves.append(f"the agent {have_agent[0]}/{agent.model_for(*have_agent)} (/v1/messages, at most {AGENT_CALLS} per task)")
     serves.append("GitHub read-only (/github" + (", with a token)" if os.environ.get("GITHUB_TOKEN") else ", 60 requests an hour)"))
     if not worker_token() and not have_agent:
         print("broker: neither OMARCHY_WORKER_TOKEN nor an agent key in the environment; serving GitHub only", file=sys.stderr)
+    SPENT.write()
     print(f"broker: serving {'; '.join(serves)} on :{PORT}", file=sys.stderr)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 
