@@ -239,17 +239,33 @@ jobs:
           path: dist
           pattern: dist-*
           merge-multiple: true
-      - name: Create the release
+      - name: Refuse a release this run did not make
+        # Any collaborator with write access can make a v* tag and a release
+        # (#351: this user-owned repository cannot restrict creation). A
+        # published release is immutable and its host bundle names its images,
+        # which a second run would push again, so it is refused, never reused:
+        # a run that stopped after publishing resumes with "Re-run failed jobs"
+        # on that run, not with a new dispatch (tests/release-workflow.sh). A
+        # draft has no tag yet and nothing downloads from it; the next step
+        # makes it again, so the release carries only bytes this run built.
+        run: |
+          set -euo pipefail
+          if gh release view "$VERSION" >/dev/null 2>&1 && [[ "$(gh release view "$VERSION" --json isDraft --jq .isDraft)" != true ]]; then
+            echo "::error::release $VERSION is already published and cannot change; re-run the failed jobs of its run instead"; exit 1
+          fi
+          # A tag anyone with write access pushed at another commit would be taken
+          # over: gh release create ignores --target for an existing tag (#351).
+          at="$(gh api "repos/$GITHUB_REPOSITORY/commits/$VERSION" --jq .sha 2>/dev/null || true)"
+          if [[ -n "$at" && "$at" != "$GITHUB_SHA" ]]; then
+            echo "::error::tag $VERSION already points at $at, not at $GITHUB_SHA: this run does not take it over"; exit 1
+          fi
+      - name: Create the release (a draft)
         run: |
           set -euo pipefail
           if gh release view "$VERSION" >/dev/null 2>&1; then
-            if [[ "$(gh release view "$VERSION" --json isDraft --jq .isDraft)" != true ]]; then
-              # Published, so immutable: its host bundle names its images, which a
-              # second run would push again. Re-run the failed jobs of its own run.
-              echo "release $VERSION is already published and cannot change; re-run the failed jobs of its run instead"; exit 1
-            fi
-            # A draft an earlier run left (it stopped before publish-release): it may
-            # name another commit and carry that commit's assets, so it is made again.
+            # A draft an earlier run left (it stopped before publish-release), or
+            # one made by hand: it may name another commit and carry other assets,
+            # so it is made again. Deleting a draft removes no tag.
             echo "release $VERSION is a draft from an earlier run: making it again for $GITHUB_SHA"
             gh release delete "$VERSION" --yes
           fi

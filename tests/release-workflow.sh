@@ -27,6 +27,12 @@
 #   deploy needs publish-release. factory/bin/publish-release and
 #   factory/bin/verify-with-agents run here against a stubbed gh and stub
 #   agents.
+# - publish refuses a published release (#351, #311): it is immutable, and
+#   anyone with write access can make a v* tag and a release, so a release
+#   this run did not make is never reused; a draft an earlier run (or a
+#   person) left is made again, so the draft carries only this run's bytes;
+#   a v* tag of this version at another commit is refused before any draft
+#   is deleted or created.
 # - build-images (#312) resolves each task build image to a digest with
 #   factory/bin/build-images, which fails when a tag does not resolve —
 #   checked here against a stubbed buildx — and publish needs it and attaches
@@ -72,6 +78,20 @@ echo "ok: the tags a host follows move in one job, once both architectures start
 deploy="$(job deploy)"
 grep -qE '^    needs: \[[^]]*\bworker-image-manifest\b[^]]*\]$' <<<"$deploy" || fail "the deploy waits for the images: $(grep needs: <<<"$deploy")"
 echo "ok: the pool is deployed once the images exist"
+pub="$(job publish)"
+[[ -n "$pub" ]] || fail "release.yml has a publish job"
+refuse="$(line_of "$pub" 'if gh release view "$VERSION" >/dev/null 2>&1 && [[ "$(gh release view "$VERSION" --json isDraft --jq .isDraft)" != true ]]; then')"
+tagged="$(line_of "$pub" 'at="$(gh api "repos/$GITHUB_REPOSITORY/commits/$VERSION" --jq .sha')"
+remade="$(line_of "$pub" 'gh release delete "$VERSION" --yes')"
+create="$(line_of "$pub" 'gh release create "$VERSION"')"
+[[ -n "$refuse" && -n "$tagged" && -n "$remade" && -n "$create" ]] && (( refuse < tagged && tagged < remade && remade < create )) \
+  || fail "publish refuses a published release, then a tag at another commit, before it deletes a stale draft and creates its own: ${refuse:-never}, ${tagged:-never}, ${remade:-never}, ${create:-never}"
+sed -n "$((refuse + 1))p" <<<"$pub" | grep -qE '; exit 1$' || fail "a published release fails the run: $(sed -n "$((refuse + 1))p" <<<"$pub")"
+sed -n "$((tagged + 1)),$((tagged + 2))p" <<<"$pub" | grep -qF '[[ -n "$at" && "$at" != "$GITHUB_SHA" ]]' || fail "a tag at another commit is compared with the run's commit"
+sed -n "$((tagged + 2)),$((tagged + 3))p" <<<"$pub" | grep -qE '; exit 1$' || fail "a tag at another commit fails the run"
+grep -qF -- '--cleanup-tag' <<<"$pub" && fail "deleting a stale draft removes no tag"
+grep -qE 'exit 0|skipping' <<<"$pub" && fail "publish never skips to reuse a release it did not make: $(grep -nE 'exit 0|skipping' <<<"$pub")"
+echo "ok: publish refuses a published release or a tag at another commit, and makes a stale draft again, so the release carries only this run's bytes"
 
 # --- the signed host bundle (#311) -------------------------------------------------
 needs_of() { grep -E '^    needs: ' <<<"$1"; }
