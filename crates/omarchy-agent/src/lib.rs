@@ -8,16 +8,20 @@
 //! - [`lint`]: check the host set template (and the owner's override) against its
 //!   invariants, on variable references, before any interpolation.
 //!
-//! The run loop, drivers, install, capacity detection and self-update come in P1 and build
-//! on the types defined here.
+//! - [`run`]: the run loop (P1, #315): the host bundle rolled out by a state machine with
+//!   a guard, revert, quarantine and preemption, on the pinned compose driver.
+//!
+//! Install, capacity detection and self-update come in their own P1 issues and build on
+//! the types defined here.
 
 pub mod lint;
 pub mod manifest;
+pub mod run;
 pub mod statement;
 pub mod verify;
+pub mod version;
 
 mod archive;
-mod version;
 
 /// Entry points for the fuzz targets (`fuzz/`): each runs a parser on arbitrary bytes and
 /// drops the result.

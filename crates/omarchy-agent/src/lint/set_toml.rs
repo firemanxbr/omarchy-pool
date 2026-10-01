@@ -174,6 +174,12 @@ pub fn lint_set_toml(set_toml: &str, template: &str) -> Result<(), Vec<Violation
     }
 }
 
+/// The service names of a template, in file order; `None` when it has no services
+/// mapping (the run loop overlays its labels on each).
+pub fn service_names(template: &str) -> Option<Vec<String>> {
+    template_services(template).map(|s| s.into_iter().map(|(n, _)| n).collect())
+}
+
 fn template_services(template: &str) -> Option<Vec<(String, Node)>> {
     let Node::Map(top) = normalize(yaml::parse(template).ok()?) else {
         return None;

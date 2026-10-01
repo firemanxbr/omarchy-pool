@@ -135,7 +135,7 @@ jobs:
         run: cargo deny --locked check
       - name: cargo audit
         run: cargo audit
-      - name: The agent's core carries no async runtime, HTTP stack, Docker client or OpenSSL
+      - name: The agent carries no async runtime, HTTP stack but ureq, Docker client or OpenSSL
         run: bash tests/agent-deps.sh
 
   worker:

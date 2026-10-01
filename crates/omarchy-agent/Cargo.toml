@@ -1,9 +1,9 @@
 [package]
 name = "omarchy-agent"
-description = "The host agent's trust core: verify a signed host bundle or rollback statement, lint the host set"
+description = "The host agent: verify a signed host bundle or rollback statement, lint the host set, and roll it out"
 # The agent's own semver (design v2 D17), bumped only when its code changes; never the
 # release tag, so an unchanged agent keeps its hash from release to release.
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -33,6 +33,11 @@ yaml-rust2 = { version = "0.13", default-features = false }
 # is under cargo deny (deny.toml).
 sigstore-verify = { version = "=0.14.0", default-features = false }
 x509-cert = "0.2"
+# run/ only (#315): HTTPS to the pool and GitHub, with rustls on ring and the Mozilla
+# roots; no async runtime. tests/agent-deps.sh keeps hyper, reqwest and tokio out.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+# SIGUSR1 (`omarchy-agent round`) as a flag the loop reads, without unsafe code here.
+signal-hook = { version = "0.3", default-features = false }
 
 [dev-dependencies]
 rcgen = "0.14"

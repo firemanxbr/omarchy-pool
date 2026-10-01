@@ -1,4 +1,5 @@
-//! `omarchy-agent`: in P0, only the trust core that `release.yml` and every host share.
+//! `omarchy-agent`: the trust core that `release.yml` and every host share, and the run
+//! loop that rolls the host bundle out (P1, #315).
 //!
 //! ```text
 //! omarchy-agent verify --bundle <omarchy-host-vX.Y.Z.tar.gz> --sig <bundle.sigstore.json>
@@ -7,15 +8,21 @@
 //!     (<dir>/compose.yml and <dir>/set.toml)
 //! omarchy-agent install [options]
 //!     (what install.sh runs once the binary is in place; a stub until P1, #317)
+//! omarchy-agent run [--data <dir>]       the loop (systemd --user / launchd run it)
+//! omarchy-agent status [--data <dir>]    state.json and capacity.json; works with the pool down
+//! omarchy-agent round [--data <dir>]     a round now (SIGUSR1 to the running agent)
+//! omarchy-agent logs [--data <dir>] [-n <lines>]
 //! ```
 //!
 //! Exit status: 0 verified or clean, 1 refused, 2 usage or a file that cannot be read,
-//! 3 signed and pinned but "needs a newer agent".
+//! 3 signed and pinned but "needs a newer agent", 78 a local configuration error that
+//! stops `run` (systemd's `RestartPreventExitStatus=78`); no network answer ever does.
 
 use std::path::Path;
 use std::process::ExitCode;
 
 use omarchy_agent::lint::{self, Engine, Envelope};
+use omarchy_agent::run;
 use omarchy_agent::verify::{self, BundleOutcome, StatementOutcome};
 
 const USAGE: &str = "usage:
@@ -23,6 +30,10 @@ const USAGE: &str = "usage:
   omarchy-agent verify --statement <json> --sig <sigstore.json>
   omarchy-agent lint-set <dir> [--override <file>] [--envelope <agent.toml>]
   omarchy-agent install [options]
+  omarchy-agent run [--data <dir>]
+  omarchy-agent status [--data <dir>]
+  omarchy-agent round [--data <dir>]
+  omarchy-agent logs [--data <dir>] [-n <lines>]
   omarchy-agent --version";
 
 const REFUSED: u8 = 1;
@@ -34,9 +45,11 @@ fn main() -> ExitCode {
     let code = match args.first().map(String::as_str) {
         Some("verify") => verify_cmd(&args[1..]),
         Some("lint-set") => lint_cmd(&args[1..]),
+        Some(cmd @ ("run" | "status" | "round" | "logs")) => run_cmd(cmd, &args[1..]),
         Some("install") => {
-            // install.sh's last step (#311). The install with its preflight, the run loop
-            // and enrollment (OMARCHY_ENROLL, from the environment only) come in P1 (#317).
+            // install.sh's last step (#311). The install with its preflight and enrollment
+            // (OMARCHY_ENROLL, from the environment only) come in P1 (#317); the loop it
+            // starts is `run` (#315).
             println!(
                 "omarchy-agent {}: installed; the agent arrives in P1 (#317), nothing else was done",
                 omarchy_agent::AGENT_VERSION
@@ -152,6 +165,33 @@ fn verify_cmd(args: &[String]) -> Result<u8, String> {
             "give exactly one of --bundle and --statement\n{USAGE}"
         )),
     }
+}
+
+fn run_cmd(cmd: &str, args: &[String]) -> Result<u8, String> {
+    let mut rest = Vec::new();
+    let known: &[&'static str] = if cmd == "logs" {
+        &["--data", "-n"]
+    } else {
+        &["--data"]
+    };
+    let f = flags(args, known, &mut rest)?;
+    if !rest.is_empty() {
+        return Err(USAGE.to_owned());
+    }
+    let get = |name| f.iter().find(|(k, _)| *k == name).map(|(_, v)| *v);
+    let data = get("--data");
+    Ok(match cmd {
+        "run" => run::run(data),
+        "status" => run::status(data),
+        "round" => run::round(data),
+        _ => {
+            let n = get("-n").map_or(Ok(50), |n| {
+                n.parse::<usize>()
+                    .map_err(|_| format!("-n {n:?} is not a number\n{USAGE}"))
+            })?;
+            run::logs(data, n)
+        }
+    })
 }
 
 fn refused(r: &verify::Rejection) -> u8 {
